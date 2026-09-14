@@ -198,13 +198,10 @@ def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
                         "(another sweep job typed this pane; retry next sweep)" % loc)
             return logs
         from watchdog import ops_wait_recheck as _ops
-        _lr_kind, _lr_draft = watchdog._classify_boundary(captured)
-        _lr_busy, _lr_aged = _ops._busy_waiting_with_age(
-            captured, state, sid, now, _lr_kind)
-        if _lr_busy and not _lr_aged:
-            logs.append("lane-reconcile %s -> skip:busy-bg-agent "
-                        "(pane waiting on a background agent — retry next sweep)"
-                        % loc)
+        # #1023: idle-pane only — a busy Waiting pane always defers (aged override gone)
+        if _ops._pane_busy_waiting(captured):
+            logs.append("lane-reconcile %s -> hold:busy (waiting on background "
+                        "agents — retry next idle tick)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, CATEGORY, now):
             logs.append("lane-reconcile %s -> hold:floor (%s; retry next sweep)"

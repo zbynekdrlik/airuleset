@@ -281,76 +281,15 @@ def _pane_busy_waiting(captured):
     return bool(captured) and bool(watchdog._BG_AGENTS_WAIT_RX.search(captured))
 
 
-# #921 — the age bound for the busy-waiting override. When the "Waiting for N
-# background agents" state has persisted for this long AND the input box is a
-# bare free `❯` (kind=="input"), the keystroke is delivered anyway. CC queues a
-# submitted prompt and fires it when the agents-wait turn unblocks — the submit
-# is NOT lost, it is deferred by CC itself (accepted premise; the threshold is
-# conservative at 10 min to give transient Waiting states ample time to clear
-# naturally before the override kicks in).
-BUSY_WAITING_AGE_BOUND_S = 600   # 10 min
-
-
-def _busy_waiting_with_age(captured, state, sid, now, kind):
-    """#921 age-bounded busy-waiting check. Returns `(is_busy, aged_out)`:
-
-    - `(False, False)` — pane is NOT in the Waiting state (or empty/None).
-      ALSO resets the per-sid first-seen tracking (the Waiting state cleared).
-    - `(True, False)` — pane IS in the Waiting state, age < bound or
-      kind != "input" (a draft/busy/no-input-line pane should not be overridden).
-      The caller should DEFER (today's behavior, skip:busy).
-    - `(True, True)` — pane IS in the Waiting state, age >= BUSY_WAITING_AGE_BOUND_S
-      AND kind == "input" (bare `❯` prompt). The caller should DELIVER anyway.
-
-    Per-sid first-seen tracking is stored in `state["busy_first_seen"]` (a dict
-    keyed by sid → timestamp), following the existing `wrecs`/`lnpark` state dict
-    pattern. `state` is the run_once state dict passed through `goal_sweep` /
-    `goal_dark_watch` / `ops_wait_recheck.orchestrate_ops_wait_recheck`.
-
-    Fail-safe: age unknown (no `state`, corrupt/missing first-seen, `now` is
-    None) → `(True, False)` — keep deferring (today's behavior)."""
-    is_busy = _pane_busy_waiting(captured)
-    # #921 M2 review fix: a blank/None sid is treated as "age unknown" → fail-safe
-    # defer when busy, and never writes to the tracking dict (so it cannot become
-    # a shared key that false-ages every pane).
-    _sid = str(sid or "").strip() if sid is not None else ""
-    if not is_busy:
-        # Waiting state is NOT present — reset the first-seen tracking
-        if _sid and isinstance(state, dict) and isinstance(state.get("busy_first_seen"), dict):
-            state["busy_first_seen"].pop(_sid, None)
-        return (False, False)
-
-    # Waiting IS present. Track first-seen, check age.
-    if not _sid:
-        return (True, False)   # fail-safe: no sid → defer (never track None)
-    if not isinstance(state, dict):
-        return (True, False)   # fail-safe: no state → defer
-    bfs = state.setdefault("busy_first_seen", {})
-    if not isinstance(bfs, dict):
-        state["busy_first_seen"] = {}
-        bfs = state["busy_first_seen"]
-
-    if _sid not in bfs:
-        if now is not None:
-            bfs[_sid] = float(now)
-        return (True, False)   # first observation — defer
-
-    first_seen = bfs.get(_sid)
-    if not isinstance(first_seen, (int, float)) or isinstance(first_seen, bool):
-        return (True, False)   # corrupt first-seen → fail-safe defer
-    if now is None:
-        return (True, False)   # no clock → fail-safe defer
-
-    age = float(now) - float(first_seen)
-    if age < 0:
-        # Future-skewed first-seen (corrupt/clock-drift) — reset and defer
-        bfs[_sid] = float(now)
-        return (True, False)
-
-    if age >= BUSY_WAITING_AGE_BOUND_S and kind == "input":
-        return (True, True)    # aged out + bare prompt → DELIVER
-
-    return (True, False)       # still under the bound → defer
+# #1023 — the #921 aged busy-waiting OVERRIDE (`_busy_waiting_with_age` +
+# `BUSY_WAITING_AGE_BOUND_S` + the per-sid `state["busy_first_seen"]` tracking) is
+# DELETED. It typed a machine nudge into a pane that had been busy-waiting for a
+# long time, and under Claude Code's queued-prompt UI that landed as a queued
+# `❯ nudge:` re-rendered on every redraw for hours (the owner's 2026-09-14
+# regression). A machine nudge is now delivered ONLY into an IDLE pane: every
+# rider gates on `_pane_busy_waiting(captured)` alone (busy ⇒ `hold:busy`), and
+# `send_verified`'s own bare-box / strip-selector / queued-hint guards cover a
+# running turn / queued prompt / user draft.
 
 
 def _env_int(key, default_s):
@@ -1231,12 +1170,10 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
             logs.append("ops-wait-recheck %s -> skip:already-handled (another sweep "
                         "job typed this pane; retry next sweep)" % loc)
             return logs
-        _owr_kind, _owr_draft = watchdog._classify_boundary(captured)
-        _owr_busy, _owr_aged = _busy_waiting_with_age(
-            captured, state, sid, now, _owr_kind)
-        if _owr_busy and not _owr_aged:
-            logs.append("ops-wait-recheck %s -> skip:busy-bg-agent (pane waiting on a "
-                        "background agent — deferred, retry next sweep)" % loc)
+        # #1023: idle-pane only — a busy Waiting pane always defers (aged override gone)
+        if _pane_busy_waiting(captured):
+            logs.append("ops-wait-recheck %s -> hold:busy (waiting on background "
+                        "agents — deferred to next idle tick)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, "partition-audit", now):
             logs.append("ops-wait-recheck %s -> hold:floor (%s; retry next sweep, "

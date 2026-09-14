@@ -359,7 +359,7 @@ class TestOrchestrator(_OrchBase):
         cap = "Waiting for 2 background agents to finish\n❯ "
         logs = self._run(qrecs, lambda cwd: [1, 2], tmux, handled=set(),
                          captured=cap)
-        self.assertTrue(any("busy-bg-agent" in ln for ln in logs))
+        self.assertTrue(any("hold:busy" in ln for ln in logs))
         self.assertEqual(tmux.typed_texts(), [])
         self.assertEqual(qrecs[self.sid]["base"], [1])   # not advanced -> retry
 

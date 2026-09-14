@@ -775,12 +775,10 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
                         "typed this pane; retry next sweep)" % loc)
             return logs
         from watchdog import ops_wait_recheck as _owr
-        _rg_kind, _rg_draft = watchdog._classify_boundary(captured)
-        _rg_busy, _rg_aged = _owr._busy_waiting_with_age(
-            captured, state, sid, now, _rg_kind)
-        if _rg_busy and not _rg_aged:
-            logs.append("release-gap %s -> skip:busy-bg-agent (pane waiting on a "
-                        "background agent — deferred, retry next sweep)" % loc)
+        # #1023: idle-pane only — a busy Waiting pane always defers (aged override gone)
+        if _owr._pane_busy_waiting(captured):
+            logs.append("release-gap %s -> hold:busy (waiting on background "
+                        "agents — deferred to next idle tick)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, "release-gap", now):
             logs.append("release-gap %s -> hold:floor (%s; retry next sweep)"

@@ -185,54 +185,34 @@ class TestGoalSweepRecordsAttemptOnDelivery(unittest.TestCase):
         self.assertEqual(len(auth_attempts[sid]), 1)
 
 
-class TestRiderBusyWaitingAge(unittest.TestCase):
-    """The 4 secondary rider sites must use _busy_waiting_with_age,
-    not the unbounded _pane_busy_waiting."""
+class TestRidersIdleOnly1023(unittest.TestCase):
+    """#1023: the #921 aged busy-waiting OVERRIDE is REMOVED — every rider gates
+    on the plain `_pane_busy_waiting` (busy ⇒ defer), NEVER the age-bounded
+    `_busy_waiting_with_age` (which typed into a long-busy pane)."""
 
-    def test_lane_reconcile_uses_age_bounded(self):
-        """lane_reconcile.py must call _busy_waiting_with_age, not
-        _pane_busy_waiting (the unbounded version)."""
+    def _src(self, module_name, fn_name):
+        import importlib
         import inspect
-        from watchdog import lane_reconcile
-        src = inspect.getsource(lane_reconcile.goal_lane_reconcile_recheck)
-        self.assertIn("_busy_waiting_with_age", src,
-                      "lane_reconcile must use age-bounded busy-waiting")
-        self.assertNotIn("._pane_busy_waiting(", src,
-                         "lane_reconcile must NOT use unbounded "
-                         "_pane_busy_waiting")
+        mod = importlib.import_module("watchdog." + module_name)
+        return inspect.getsource(getattr(mod, fn_name))
 
-    def test_queue_arrival_uses_age_bounded(self):
-        import inspect
-        from watchdog import queue_arrival_recheck
-        src = inspect.getsource(
-            queue_arrival_recheck.goal_queue_arrival_recheck)
-        self.assertIn("_busy_waiting_with_age", src,
-                      "queue_arrival must use age-bounded busy-waiting")
-        self.assertNotIn("._pane_busy_waiting(", src,
-                         "queue_arrival must NOT use unbounded "
-                         "_pane_busy_waiting")
+    def test_riders_use_plain_pane_busy_waiting(self):
+        for module_name, fn_name in (
+                ("lane_reconcile", "goal_lane_reconcile_recheck"),
+                ("queue_arrival_recheck", "goal_queue_arrival_recheck"),
+                ("u_freshness", "goal_u_freshness_recheck"),
+                ("release_gap", "goal_release_gap_recheck"),
+                ("ops_wait_recheck", "goal_ops_wait_recheck")):
+            src = self._src(module_name, fn_name)
+            self.assertIn("_pane_busy_waiting(", src,
+                          "%s must gate on the plain _pane_busy_waiting" % module_name)
+            self.assertNotIn("_busy_waiting_with_age", src,
+                             "%s must NOT use the removed aged override" % module_name)
 
-    def test_u_freshness_uses_age_bounded(self):
-        import inspect
-        from watchdog import u_freshness
-        src = inspect.getsource(u_freshness.goal_u_freshness_recheck)
-        self.assertIn("_busy_waiting_with_age", src,
-                      "u_freshness must use age-bounded busy-waiting")
-        self.assertNotIn("._pane_busy_waiting(", src,
-                         "u_freshness must NOT use unbounded "
-                         "_pane_busy_waiting")
-
-    def test_release_gap_uses_age_bounded(self):
-        import inspect
-        from watchdog import release_gap
-        src = inspect.getsource(release_gap.goal_release_gap_recheck)
-        self.assertIn("_busy_waiting_with_age", src,
-                      "release_gap must use age-bounded busy-waiting")
-        # release_gap inlines the regex — check it doesn't use the raw
-        # _BG_AGENTS_WAIT_RX.search pattern for the busy gate
-        self.assertNotIn("_BG_AGENTS_WAIT_RX.search", src,
-                         "release_gap must NOT use raw regex for "
-                         "busy-waiting (use _busy_waiting_with_age)")
+    def test_aged_override_fully_removed(self):
+        from watchdog import ops_wait_recheck
+        self.assertFalse(hasattr(ops_wait_recheck, "_busy_waiting_with_age"))
+        self.assertFalse(hasattr(ops_wait_recheck, "BUSY_WAITING_AGE_BOUND_S"))
 
 
 class TestStashAbortLivelock(unittest.TestCase):

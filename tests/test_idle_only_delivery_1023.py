@@ -30,15 +30,14 @@ BUSY_CAP = "Waiting for 2 background agents to finish\n❯ "
 
 
 class TestBusyWaitingHasNoAgedOverride(unittest.TestCase):
-    def test_aged_out_returns_no_override(self):
-        # #921's aged override is gone: a busy pane observed 3 h ago still
-        # returns (True, False) — the caller defers, never types.
-        state = {"busy_first_seen": {"s": NOW - 3 * 3600}}
-        is_busy, aged = ow._busy_waiting_with_age(BUSY_CAP, state, "s", NOW, "input")
-        self.assertTrue(is_busy)
-        self.assertFalse(aged, "the aged override must be gone (always defer busy)")
+    def test_busy_state_still_detected(self):
+        # the plain busy-waiting reader stays — a Waiting pane reads busy.
+        self.assertTrue(ow._pane_busy_waiting(BUSY_CAP))
+        self.assertFalse(ow._pane_busy_waiting("❯ "))   # idle prompt
 
-    def test_age_bound_symbol_removed(self):
+    def test_aged_override_machinery_removed(self):
+        # #1023: the whole aged-override machinery is DELETED, not left as dead code.
+        self.assertFalse(hasattr(ow, "_busy_waiting_with_age"))
         self.assertFalse(hasattr(ow, "BUSY_WAITING_AGE_BOUND_S"))
 
 

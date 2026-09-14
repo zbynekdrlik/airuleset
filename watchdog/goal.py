@@ -1285,10 +1285,9 @@ def _goal_cap_drop(sid, cwd, text, origin, dl_fails, request_ts, run,
             # there would interrupt a live turn. _recovery_pane_ready already
             # ruled out copy-mode / recent-human / an open dialog.
             bkind, _bd = watchdog._classify_boundary(captured)
-            # #921: age-bounded busy-waiting override applies here too
-            _rc_busy, _rc_aged = _ops_wait_recheck._busy_waiting_with_age(
-                captured, state, sid, now, bkind)
-            if bkind != "input" or (_rc_busy and not _rc_aged):
+            # #1023: idle-pane only — a busy "Waiting for N agents" pane always
+            # defers (the #921 aged override is gone).
+            if bkind != "input" or _ops_wait_recheck._pane_busy_waiting(captured):
                 logs.append("attempt-cap: cleanup SKIP non-input-boundary (%s)"
                             % loc)
             else:
@@ -1702,20 +1701,14 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     # `_pane_busy_waiting`: a "Waiting for N background agents" pane reads
     # kind="input" (bare `❯`, spinner a row above) so a submit is swallowed and
     # the /goal parks orphaned -- defer, no keystroke (#720/#714 primitive).
-    # #921: age-bounded override — after >= 10 min of persistent Waiting with a
-    # bare `❯` prompt, deliver anyway (CC queues the prompt and fires on unblock).
+    # #1023: idle-pane only — a busy Waiting pane ALWAYS defers (the #921 aged
+    # override that typed into a long-busy pane is removed).
     if kind == "busy":
         _log_goal_sync("SKIP busy sid=%s cwd=%s" % (sid, cwd))
         return "skip:busy"
-    _bw_busy, _bw_aged = _ops_wait_recheck._busy_waiting_with_age(
-        captured, state, sid, now, kind)
-    if _bw_busy and not _bw_aged:
+    if _ops_wait_recheck._pane_busy_waiting(captured):
         _log_goal_sync("SKIP busy sid=%s cwd=%s" % (sid, cwd))
         return "skip:busy"
-    if _bw_busy and _bw_aged:
-        _log_goal_sync("DELIVER busy-aged-out sid=%s cwd=%s (Waiting "
-                       "persistent >= %ds, bare prompt — delivering anyway)"
-                       % (sid, cwd, _ops_wait_recheck.BUSY_WAITING_AGE_BOUND_S))
 
     if draft:
         # Mark provenance BEFORE the attempt (regardless of outcome) so
@@ -2753,10 +2746,8 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
     if kind == "busy":
         logs.append("goal-guard %s sid=%s -> skip:busy" % (loc, sid))
         return logs
-    # #921: age-bounded busy-waiting — same as deliver_goal
-    _gg_busy, _gg_aged = _ops_wait_recheck._busy_waiting_with_age(
-        captured, state, sid, now, kind)
-    if _gg_busy and not _gg_aged:
+    # #1023: idle-pane only — a busy Waiting pane defers (aged override gone)
+    if _ops_wait_recheck._pane_busy_waiting(captured):
         logs.append("goal-guard %s sid=%s -> skip:busy" % (loc, sid))
         return logs
     if draft:
@@ -3668,12 +3659,10 @@ def _deliver_goal_clear(pid, text, run, captured, state, now, sleep_fn, logs,
     # #720/#714 -- the disarm keystroke path shares the arm path's busy-Waiting
     # gap: never submit `/goal clear` into a "Waiting for N background agents"
     # pane (the submit is swallowed). Defer, retry next sweep.
-    # #921: age-bounded override — same as deliver_goal
+    # #1023: idle-pane only — a busy Waiting pane always defers (aged override gone)
     if kind == "busy":
         return "skip:busy"
-    _dc_busy, _dc_aged = _ops_wait_recheck._busy_waiting_with_age(
-        captured, state, sid, now, kind)
-    if _dc_busy and not _dc_aged:
+    if _ops_wait_recheck._pane_busy_waiting(captured):
         return "skip:busy"
     if draft:
         return "skip:draft"          # user is composing -- never disturb, retry next sweep
@@ -5496,10 +5485,9 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             from watchdog import compact as _compact_mod
             from watchdog import ops_wait_recheck as _owr_mod
             _b_compact = _compact_mod.pending_compact_hold(sid, now)
-            _b_kind, _ = watchdog._classify_boundary(captured)
-            _b_busy, _b_aged = _owr_mod._busy_waiting_with_age(
-                captured, state, sid, now, _b_kind)
-            if not _b_compact and not (_b_busy and not _b_aged):
+            # #1023: idle-pane only — a busy Waiting pane defers (aged override gone)
+            _b_busy = _owr_mod._pane_busy_waiting(captured)
+            if not _b_compact and not _b_busy:
                 # Pick up any goal-guard contribution from dark_watch.
                 _nb = state.get("nudge_batch", {}).get(sid, [])
                 _batch_collect = [entry for entry in _nb
@@ -5653,13 +5641,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         _prune_goal_lane_orphans(recs, visited_sids, now)
         _ops_wait_recheck._prune_ops_wait_orphans(wrecs, visited_sids, now)   # #547
         _release_gap._prune_release_gap_orphans(rrecs, visited_sids, now)     # #616
-        # #921 M1 review fix: prune busy_first_seen for gone sessions — mirrors
-        # the wrecs/lnpark/rrecs orphan prune pattern. A session that exits while
-        # Waiting leaves its key forever (no reset fires for a vanished pane).
-        bfs = state.get("busy_first_seen") if state is not None else None
-        if isinstance(bfs, dict):
-            for _dead_sid in [k for k in bfs if k not in visited_sids]:
-                bfs.pop(_dead_sid, None)
+        # #1023: the #921 `busy_first_seen` prune is gone with the aged override —
+        # no rider writes that state any more.
         _queue_arrival._prune_queue_arrival_orphans(qrecs, visited_sids, now)  # #733
         if u_fetch is not None:
             _u_freshness._prune_u_freshness_orphans(urecs, visited_sids, now)  # #797

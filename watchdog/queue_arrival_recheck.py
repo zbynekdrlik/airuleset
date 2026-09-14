@@ -476,12 +476,14 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                         "job typed this pane; retry next sweep, %d new)"
                         % (loc, len(arrivals)))
             return logs
-        _qa_kind, _qa_draft = watchdog._classify_boundary(captured)
-        _qa_busy, _qa_aged = _ops_wait_recheck._busy_waiting_with_age(
-            captured, state, sid, now, _qa_kind)
-        if _qa_busy and not _qa_aged:
-            logs.append("queue-arrival %s -> skip:busy-bg-agent (pane waiting on a "
-                        "background agent — deferred, retry next sweep, %d new)"
+        # #1023: idle-pane only — a busy "Waiting for N background agents" pane
+        # ALWAYS defers (the #921 aged override that typed into a long-busy pane
+        # is removed); send_verified's own bare-box/strip/queued-hint guards cover
+        # a running turn / queued prompt / user draft. The arrival set persists
+        # (base kept OLD) and delivers on the next idle tick.
+        if _ops_wait_recheck._pane_busy_waiting(captured):
+            logs.append("queue-arrival %s -> hold:busy (waiting on background "
+                        "agents — deferred to next idle tick, %d new)"
                         % (loc, len(arrivals)))
             return logs
         if not _nudge_gate.gate_ok(state, sid, "queue-arrival", now):

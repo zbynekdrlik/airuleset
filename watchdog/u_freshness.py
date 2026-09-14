@@ -313,12 +313,10 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
             logs.append("u-freshness %s -> skip:already-handled (another sweep job "
                         "typed this pane; retry next sweep)" % loc)
             return logs
-        _uf_kind, _uf_draft = watchdog._classify_boundary(captured)
-        _uf_busy, _uf_aged = _ops_wait_recheck._busy_waiting_with_age(
-            captured, state, sid, now, _uf_kind)
-        if _uf_busy and not _uf_aged:
-            logs.append("u-freshness %s -> skip:busy-bg-agent (pane waiting on a "
-                        "background agent — deferred, retry next sweep)" % loc)
+        # #1023: idle-pane only — a busy Waiting pane always defers (aged override gone)
+        if _ops_wait_recheck._pane_busy_waiting(captured):
+            logs.append("u-freshness %s -> hold:busy (waiting on background "
+                        "agents — deferred to next idle tick)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, CATEGORY, now):
             logs.append("u-freshness %s -> hold:floor (%s; retry next sweep)"
