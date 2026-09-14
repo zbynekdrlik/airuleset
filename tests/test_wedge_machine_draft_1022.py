@@ -83,6 +83,29 @@ def _mkrun():
     return run
 
 
+# A capture with NO locatable input box (running-turn spinner) -> the janitor
+# clear's re-capture reads None and `_janitor_clear_box` returns False fast
+# (no BSpace loop, no sleep) -> the clear PERSISTENTLY FAILS.
+UNCLEARABLE_CAPTURE = "✻ Baking... (2m · esc to interrupt)\n"
+
+
+def _mkrun_unclearable():
+    """Fake tmux `run` whose janitor-clear re-capture is unreadable, so every
+    clear attempt FAILS (returns False) and the record is never dropped."""
+    calls = []
+
+    def run(argv, timeout=8):
+        calls.append(list(argv))
+        j = " ".join(map(str, argv))
+        if "pane_in_mode" in j:
+            return "0"
+        if "capture-pane" in j:
+            return UNCLEARABLE_CAPTURE
+        return ""
+    run.calls = calls
+    return run
+
+
 def _enters(run):
     return [a for a in run.calls if a[:2] == ["tmux", "send-keys"] and a[-1] == "Enter"]
 
@@ -140,6 +163,36 @@ class TestMachineDraftJanitorCleared(unittest.TestCase):
                 os.environ["AIRULESET_TEST_IGNORE_DISABLE"] = old
         self.assertEqual(_enters(run), [], run.calls)
         self.assertTrue(any("janitor-clear" in ln for ln in logs), logs)
+
+    def test_persistently_unclearable_machine_draft_never_expires_to_submit(self):
+        # MAJOR-1 (review 2): a matched machine nudge whose janitor-clear keeps
+        # FAILING must have its record refreshed on every match, so it NEVER
+        # TTL-expires while still wedged. Otherwise at t + _NUDGE_TYPED_TTL_S the
+        # record lapses, `machine` recomputes True via the `nudge:` prefix, and
+        # the wedge SUBMITS it (Escape+Enter) under the kill switch = the exact
+        # #1022 back door, reopened after the TTL.
+        state = {}
+        t0 = time.time()
+        _seed(state, PID, NUDGE_TEXT, "queue-arrival", t0)
+        run = _mkrun_unclearable()
+        send = lambda *a, **k: "sent"  # noqa: E731
+        t = t0
+        # Sweep across well beyond the TTL (each pair = one 2-sweep act cycle),
+        # advancing the clock by a TTL-fraction each cycle so cumulative >> TTL.
+        step = wd._NUDGE_TYPED_TTL_S // 6
+        for _ in range(24):
+            wd.prompt_wedge_check(t, state, PID, MACHINE_PANE, t0, "zbynek",
+                                  "airuleset", send, run=run)
+            t += step
+            wd.prompt_wedge_check(t, state, PID, MACHINE_PANE, t0, "zbynek",
+                                  "airuleset", send, run=run)
+            t += 70
+        self.assertEqual(
+            _enters(run), [],
+            "a persistently-unclearable machine nudge must NEVER be submitted, "
+            "even past the record TTL (the back door must stay shut): %r" % run.calls)
+        self.assertIn(PID, state.get("nudge_typed", {}),
+                      "the record must be refreshed on each match, never expire while wedged")
 
     def test_user_authored_draft_still_submitted(self):
         state = {}
