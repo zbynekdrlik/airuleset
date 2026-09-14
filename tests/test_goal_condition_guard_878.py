@@ -143,7 +143,7 @@ class TestGoalGuardDeliver(unittest.TestCase):
             logs2 = goal._goal_guard_deliver(
                 self.sid, "pid1", self._bare_pane(), "/tmp/cwd",
                 state, 2000, "loc", lambda *a: "", None, False, "/tmp")
-        self.assertTrue(any("cadence-gate" in ln for ln in logs2), logs2)
+        self.assertTrue(any("hold:floor" in ln for ln in logs2), logs2)
         self.assertEqual(len(self.sent), 1)
 
     def test_8_recent_human_skips(self):

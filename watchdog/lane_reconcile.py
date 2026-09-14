@@ -207,8 +207,9 @@ def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
                         % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, CATEGORY, now):
-            logs.append("lane-reconcile %s -> hold:cadence-gate "
-                        "(shared family gap; retry next sweep)" % loc)
+            logs.append("lane-reconcile %s -> hold:floor (%s; retry next sweep)"
+                        % (loc, _nudge_gate.floor_hold_reason(
+                            state, sid, CATEGORY, now)))
             return logs
 
     # This compaction is now the one we ACT on. Fetch the returned lanes.

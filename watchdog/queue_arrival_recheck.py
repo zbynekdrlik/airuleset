@@ -33,17 +33,17 @@ and #616 (release-gap). Per repo it snapshots the gk queue UNION
 signal is a SET DELTA, not presence or cadence: the FIRST observation seeds a
 baseline (no nudge — we don't know what was already there); a LATER snapshot that
 ADDS a member (`cur − base ≠ ∅`) delivers ONE verified `stuck-check:` nudge
-naming the new arrival(s) — SUBJECT TO the per-sid NUDGE FLOOR (#780, see CADENCE
-below): a delta inside the floor window is HELD (no keystroke) and its members
-ACCUMULATE into the next post-floor nudge, so multiple waves within one window
-fold into a single nudge naming all of them. The baseline is advanced to `cur`
-(and last_nudge to `now`) only on a CONFIRMED delivery (a swallowed submit
-re-detects the same arrival and retries, bounded to MAX_SEND_FAILS then backs
-off). A member LEAVING / an unchanged snapshot silently advances the baseline — no
-nudge. So it fires at most ONCE per floor window, naming every wave accumulated in
-it — the fast wake the incident needed (the FIRST arrival after a seed fires at
-once), rate-limited — while the persistent-unprocessed-queue case stays covered by
-jobs 8/11.
+naming the new arrival(s) — SUBJECT TO the shared per-pane-per-KIND 60-min floor
+(#1023, `nudge_gate.gate_ok(state, sid, "queue-arrival", now)`): a delta inside
+the floor window is HELD (no keystroke, `hold:floor`) and its members ACCUMULATE
+into the next post-floor nudge, so multiple waves within one window fold into a
+single nudge naming all of them. The baseline is advanced to `cur` only on a
+CONFIRMED delivery (a swallowed submit re-detects the same arrival and retries,
+bounded to MAX_SEND_FAILS then backs off). A member LEAVING / an unchanged
+snapshot silently advances the baseline — no nudge. So it fires at most ONCE per
+floor window, naming every wave accumulated in it — the fast wake the incident
+needed (the FIRST arrival after a seed fires at once), rate-limited — while the
+persistent-unprocessed-queue case stays covered by jobs 8/11.
 
 FULL-authority gate (full-only, the SAME gate as `release_gap` (#616); the
 INVERSE of #618's WIDENED lane gate): only a gk/full box PROCESSES this
@@ -64,20 +64,21 @@ bounded-retry + orphan-reaper shapes. The verdict logic is a PURE
 `_queue_decision`; all I/O lives in `goal_queue_arrival_recheck` behind the same
 injectable seams the sibling jobs use, and `dry_run` mutates nothing.
 
-CADENCE (#780): arrival DETECTION is bounded by the FETCH cache TTL
+CADENCE (#1023): arrival DETECTION is bounded by the FETCH cache TTL
 (QUEUE_ARRIVAL_FETCH_TTL_S, ~5 min, env-tunable, floored at 60s), but the NUDGE
-KEYSTROKE now also carries a per-sid min-interval FLOOR (QUEUE_ARRIVAL_NUDGE_FLOOR_S,
-~30 min, env-tunable, floored at 5 min) — the sibling `_cadence` shape (ops_wait /
-release_gap). Originally this rider had NO floor: during an active gk batch every
-landing hand-off is a fresh set-delta, so "once per arrival wave" degenerated into
-a re-fire nearly every TTL for hours (measured 8 nudges in 2h on gk). The floor
-rate-limits DELIVERY while KEEPING the event-driven trigger: a delta inside the
-floor window is HELD and its new members ACCUMULATE into the next post-floor nudge
-(which names ALL of them), and the FIRST arrival after a seed (last_nudge unset)
-still fires at once (the fast-wake the incident needed). Bounded to at most 3 gh
-calls per repo per TTL (the ticket's proven 3-label union), never every sweep per
-pane. Residual: a queue label FLAPPING within one floor window is folded into the
-single post-floor nudge (an improvement over the pre-#780 one-nudge-per-flap).
+KEYSTROKE is bounded by the SHARED per-pane-per-KIND 60-min floor in `nudge_gate`
+(the #1023 owner rule "raz za hodinu"), consulted via `gate_ok` in the delivery
+branch. The pre-#1023 per-JOB 30-min floor (`QUEUE_ARRIVAL_NUDGE_FLOOR_S`) is
+DELETED — it sat below the owner's 1 h rule and is subsumed by the ONE shared
+floor, so the rule lives in exactly one place. The floor rate-limits DELIVERY
+while KEEPING the event-driven trigger: a delta inside the floor window is HELD
+(`hold:floor`, base kept OLD) and its new members ACCUMULATE into the next
+post-floor nudge (which names ALL of them), and the FIRST arrival after a seed
+(no prior confirmed delivery) still fires at once (the fast-wake the incident
+needed). Bounded to at most 3 gh calls per repo per TTL (the ticket's proven
+3-label union), never every sweep per pane. Residual: a queue label FLAPPING
+within one floor window is folded into the single post-floor nudge (an
+improvement over the pre-#780 one-nudge-per-flap).
 """
 import os
 
@@ -111,23 +112,14 @@ MAX_NAMED_ARRIVALS = 12
 # instead of typing every 60s sweep forever.
 MAX_SEND_FAILS = 3
 
-# #780 — a per-sid MIN-INTERVAL floor between DELIVERED nudges (env
-# AIRULESET_QUEUE_ARRIVAL_NUDGE_FLOOR_S). The sibling riders have one
-# (ops_wait_recheck ~22h/6h, release_gap ~1h/1h); this rider originally had NONE
-# — its rate was bounded only by the FETCH TTL (~5 min), so during an active gk
-# batch EVERY landing hand-off was a fresh set-delta = a re-fire nearly every TTL
-# window (measured 8 nudges in 2h on gk). The floor rate-limits the KEYSTROKE,
-# NOT arrival DETECTION: a delta inside the floor window is HELD and its new
-# members ACCUMULATE into the next post-floor nudge (which names ALL of them), so
-# the nudge stays delta-triggered — just bounded. 30 min: cuts the batch-window
-# storm to ~2/h while still surfacing every distinct wave within a floor. The
-# floor applies only to the 2nd+ nudge — the FIRST arrival after a seed
-# (last_nudge unset) still fires at once, preserving the #733 fast-wake.
-QUEUE_ARRIVAL_NUDGE_FLOOR_S = 30 * 60
-# floor for the env override (#504/#543 floor-clamp lesson the siblings follow): a
-# sub-5-min value would collapse the floor back toward a per-fetch re-nudge, so a
-# units error can never re-open the storm this fixes.
-QUEUE_ARRIVAL_NUDGE_FLOOR_MIN_S = 5 * 60
+# #1023 — the per-JOB 30-min nudge floor (`QUEUE_ARRIVAL_NUDGE_FLOOR_S`) is
+# DELETED: it sat BELOW the owner's 1 h rule and is subsumed by the ONE
+# per-pane-per-KIND 60-min floor in `nudge_gate` (consulted via
+# `gate_ok(state, sid, "queue-arrival", now)` below). Delta ACCUMULATION is
+# preserved without a per-job floor: `_queue_decision` returns "nudge" with `base`
+# kept OLD, and when `gate_ok` holds the keystroke the orchestrator returns before
+# advancing `base` — so members arriving inside the floor window keep growing
+# `cur - base` and the next post-floor nudge names ALL of them, exactly as before.
 
 
 def _env_int(key, default_s):
@@ -142,16 +134,6 @@ def _fetch_ttl():
     can't collapse it back to a per-sweep fetch."""
     return max(_env_int("AIRULESET_QUEUE_ARRIVAL_FETCH_TTL_S",
                         QUEUE_ARRIVAL_FETCH_TTL_S), QUEUE_ARRIVAL_FETCH_TTL_MIN_S)
-
-
-def _nudge_floor():
-    """#780 — the per-sid min interval between DELIVERED queue-arrival nudges, the
-    env override floored at QUEUE_ARRIVAL_NUDGE_FLOOR_MIN_S so a units error can't
-    collapse it back to a per-fetch re-nudge (the #504/#543 floor-clamp lesson the
-    sibling riders' `_cadence` follow)."""
-    return max(_env_int("AIRULESET_QUEUE_ARRIVAL_NUDGE_FLOOR_S",
-                        QUEUE_ARRIVAL_NUDGE_FLOOR_S),
-               QUEUE_ARRIVAL_NUDGE_FLOOR_MIN_S)
 
 
 def _cached_queue(cwd, fetch, state, now, ttl=None, fail_ttl=None):
@@ -181,35 +163,29 @@ def _cached_queue(cwd, fetch, state, now, ttl=None, fail_ttl=None):
 #              (we don't know what was already parked before we started watching);
 #   "track" -- baseline exists, no NEW member (unchanged, or a member resolved)
 #              -> advance base=cur, no nudge;
-#   "hold"  -- #780: baseline exists, `cur - base` is non-empty, BUT a delivered
-#              nudge is still inside the per-sid FLOOR window (last_nudge set and
-#              now - last_nudge < floor) -> keep base OLD (so the new members
-#              ACCUMULATE into the next post-floor nudge) and DO NOT nudge;
-#   "nudge" -- baseline exists, `cur - base` is non-empty, AND either no delivered
-#              nudge yet (last_nudge unset -> the #733 fast-wake) or the floor has
-#              elapsed -> the caller ATTEMPTS a verified send and advances base=cur
-#              + last_nudge=now only on a CONFIRMED submit (so a swallow re-detects
-#              the same arrival). `arrivals` is the sorted list of NEW numbers.
+#   "nudge" -- baseline exists, `cur - base` is non-empty -> the caller ATTEMPTS a
+#              verified send (subject to the shared per-kind floor `gate_ok`) and
+#              advances base=cur only on a CONFIRMED submit (so a swallow — or a
+#              floor hold — re-detects the same arrival). `arrivals` is the sorted
+#              list of NEW numbers.
 
-def _queue_decision(rec, cur, now, floor=0, classify_fn=None):
+def _queue_decision(rec, cur, now, classify_fn=None):
     """Pure verdict for ONE armed session's gk-queue snapshot. `rec` is the
     persisted per-sid dict (or None/malformed for a fresh session). `cur` is the
     fetched queue-union list, or None when UNDETERMINED (a gh error) — None fails
-    safe to `skip`. `floor` (#780) is the per-sid min interval between DELIVERED
-    nudges; the default 0 is the pre-#780 behavior (a delta always nudges), which
-    keeps the legacy 3-arg callers/tests unchanged.
+    safe to `skip`.
 
     The baseline (`rec["base"]`) is the set of queue members this session has
     already been told about. A NEW member (`cur - base`) is an arrival the parked
-    session is blind to. It fires a `nudge` UNLESS a delivered nudge is still
-    inside the floor window (`last_nudge` set and `now - last_nudge < floor`), in
-    which case it is HELD (`hold`) — the decider keeps the OLD base for BOTH
-    `nudge` and `hold`, so a swallowed send re-detects the arrival AND (the #780
-    accumulation) members arriving during the floor keep growing `cur - base`, so
-    the next post-floor nudge names ALL of them. `last_nudge` is preserved here
-    (an INTENT); the orchestrator sets base=cur AND last_nudge=now only on a
-    confirmed delivery. `first_seen` is preserved across the session's life (an
-    observability anchor, not a cadence gate — arrivals are event-driven)."""
+    session is blind to → a `nudge` verdict. #1023: the per-JOB 30-min floor is
+    gone; the decider keeps the OLD base for a `nudge`, and the ORCHESTRATOR's
+    shared per-kind `gate_ok` (60 min) holds the keystroke when the floor has not
+    elapsed — so a swallowed send re-detects the arrival AND members arriving
+    inside the floor window keep growing `cur - base`, so the next post-floor
+    nudge names ALL of them (accumulation preserved without a per-job floor). The
+    orchestrator sets base=cur only on a confirmed delivery. `first_seen` is
+    preserved across the session's life (an observability anchor, not a cadence
+    gate — arrivals are event-driven)."""
     if not isinstance(cur, list):
         return ("skip", rec, "undetermined", [])
     try:
@@ -219,29 +195,24 @@ def _queue_decision(rec, cur, now, floor=0, classify_fn=None):
     first_seen = rec.get("first_seen") if isinstance(rec, dict) else None
     if not isinstance(first_seen, (int, float)) or isinstance(first_seen, bool):
         first_seen = now
-    last_nudge = rec.get("last_nudge") if isinstance(rec, dict) else None
-    if not isinstance(last_nudge, (int, float)) or isinstance(last_nudge, bool):
-        last_nudge = None
     base = rec.get("base") if isinstance(rec, dict) else None
     if not isinstance(base, list):
         # First observation: seed the baseline, never nudge (we can't tell a
         # pre-existing member from a genuine arrival).
         return ("seed",
-                {"base": sorted(cur_set), "first_seen": now, "last_nudge": None},
+                {"base": sorted(cur_set), "first_seen": now},
                 "first-seen", [])
     base_set = set(base)
     arrivals = sorted(cur_set - base_set)
     if not arrivals:
         reason = "no-arrival" if cur_set == base_set else "resolved"
         return ("track",
-                {"base": sorted(cur_set), "first_seen": first_seen,
-                 "last_nudge": last_nudge},
+                {"base": sorted(cur_set), "first_seen": first_seen},
                 reason, [])
-    # A genuine arrival. Keep base OLD so a swallowed send retries AND so members
-    # arriving during a floor window ACCUMULATE; the caller promotes base=cur (and
-    # last_nudge=now) on a confirmed delivery.
-    new_rec = {"base": sorted(base_set), "first_seen": first_seen,
-               "last_nudge": last_nudge}
+    # A genuine arrival. Keep base OLD so a swallowed send / a floor hold retries
+    # AND so members arriving during a floor window ACCUMULATE; the caller
+    # promotes base=cur on a confirmed delivery.
+    new_rec = {"base": sorted(base_set), "first_seen": first_seen}
     # #993 item 4: DEPENDENCY AWARE. `classify_fn(number)` returns
     # "dispatchable" | "dep-wait" (the class-based infra branch was removed in
     # round 2b — infra serialisation is ROUTING, not a live-lane gate). A dep-wait
@@ -257,12 +228,6 @@ def _queue_decision(rec, cur, now, floor=0, classify_fn=None):
         if not dispatchable:
             return ("hold", new_rec, "dep-wait", arrivals)
         arrivals = dispatchable
-    # #780 FLOOR: a delivered nudge still inside the floor window -> HOLD the
-    # keystroke (the new members join the next post-floor nudge). The floor gates
-    # only the 2nd+ nudge: last_nudge is None until the first delivered nudge, so
-    # the first arrival after a seed still fires at once (the #733 fast-wake).
-    if last_nudge is not None and (now - last_nudge) < floor:
-        return ("hold", new_rec, "floor", arrivals)
     return ("nudge", new_rec, "arrival", arrivals)
 
 
@@ -394,7 +359,7 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
 
     Before any keystroke the nudge branch consults the #741 compact latch
     (`compact.pending_compact_hold(sid, now)`, #780/#848 bounded) — the FIRST defer-gate: a pending
-    /compact HOLDS the nudge (`hold:compact-pending`, no keystroke, base/last_nudge
+    /compact HOLDS the nudge (`hold:compact-pending`, no keystroke, base
     unadvanced) so a drained-boundary compact delivers in a quiet pane before any
     new hand-off is pushed in. Keystroke coordination then reuses the sibling
     machinery verbatim: `send_verified` (transcript-proof submit; a swallowed Enter
@@ -449,7 +414,6 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # (unwired / legacy tests) = every arrival dispatchable.
     classify_fn = classify_builder(cwd) if classify_builder is not None else None
     action, new_rec, reason, arrivals = _queue_decision(rec, cur, now,
-                                                        _nudge_floor(),
                                                         classify_fn=classify_fn)
 
     if action == "skip":
@@ -459,24 +423,15 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     if action in ("seed", "track", "hold"):
         if not dry_run:
             new_rec["lts"] = now
-            # carry any pending send_fails forward is unnecessary here — a
-            # seed/track means the wave (if any) is resolved/baseline-known, and
-            # a #780 `hold` follows a delivered nudge (send_fails already 0).
+            # seed/track means the wave (if any) is resolved/baseline-known; the
+            # only remaining `hold` is dep-wait (base kept OLD so they re-detect).
             qrecs[sid] = new_rec
-        if action == "hold" and reason == "dep-wait":
-            # #993 item 4: EVERY new arrival is non-dispatchable (dep-wait) ->
+        if action == "hold":  # #993 item 4: every arrival is dep-wait
             # HELD (base kept OLD so they re-detect once their deps close), no
             # keystroke this sweep.
             logs.append("queue-arrival %s -> hold:%s (%d new, all non-dispatchable; "
                         "keep waiting, %d in union)"
                         % (loc, reason, len(arrivals), len(cur)))
-        elif action == "hold":
-            # #780 FLOOR: a delivered nudge is still inside the floor window, so
-            # the new arrivals are HELD (base kept OLD) and ACCUMULATE into the
-            # next post-floor nudge — no keystroke this sweep.
-            logs.append("queue-arrival %s -> hold:floor (%d new accumulating; "
-                        "floor not elapsed, %d in union)"
-                        % (loc, len(arrivals), len(cur)))
         else:
             logs.append("queue-arrival %s -> %s (%s — %d in union, baseline %s)"
                         % (loc, action, reason, len(cur),
@@ -502,7 +457,7 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # arrival nudge — never push a new hand-off into the armed loop while a
     # drained-boundary compact waits for its quiet window. Same shape as the
     # goal-family writers (goal.py:1792) and the busy-pane gate below: defer
-    # WITHOUT a keystroke (base/last_nudge unadvanced, `handled` unclaimed) so it
+    # WITHOUT a keystroke (base unadvanced, `handled` unclaimed) so it
     # retries a later sweep once the compact delivers. First delivery gate (the
     # strongest constraint). Lazy import — a defensive choice (a top-level import
     # is also fine, goal.py:173 does it), kept local to avoid any dependence on the
@@ -530,8 +485,9 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                         % (loc, len(arrivals)))
             return logs
         if not _nudge_gate.gate_ok(state, sid, "queue-arrival", now):
-            logs.append("queue-arrival %s -> hold:cadence-gate (shared family gap; "
-                        "retry next sweep, %d new)" % (loc, len(arrivals)))
+            logs.append("queue-arrival %s -> hold:floor (%s; retry next sweep, "
+                        "%d new)" % (loc, _nudge_gate.floor_hold_reason(
+                            state, sid, "queue-arrival", now), len(arrivals)))
             return logs
     if dry_run:
         logs.append("queue-arrival %s -> WOULD-NUDGE (%d new: %s)"
@@ -545,7 +501,6 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                         _st=state, _p=pid, _cs=cur_sorted, _ar=arrivals):
             watchdog._janitor_clear_watch(_st, _p)
             _nr["base"] = _advanced_base(_nr["base"], _cs, _ar)  # #993 review 3
-            _nr["last_nudge"] = _n
             _nr["send_fails"] = 0
             _q[_s] = _nr
             if _h is not None:
@@ -573,7 +528,6 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
         return logs
     watchdog._janitor_clear_watch(state, pid)
     new_rec["base"] = _advanced_base(new_rec["base"], cur_sorted, arrivals)  # #993 review 3
-    new_rec["last_nudge"] = now   # #780 — start the floor window on a delivered nudge
     new_rec["send_fails"] = 0
     qrecs[sid] = new_rec
     _nudge_gate.mark_sent(state, sid, "queue-arrival", now)   # #797

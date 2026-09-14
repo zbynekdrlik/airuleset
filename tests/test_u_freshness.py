@@ -213,7 +213,7 @@ class TestOrchestrator(_OrchBase):
         logs = self._run(urecs, lambda cwd: (5, FRESH_TS), tmux, handled=set(),
                          state=state)
         self.assertEqual(tmux.typed_texts(), [])
-        self.assertTrue(any("cadence-gate" in ln for ln in logs))
+        self.assertTrue(any("hold:floor" in ln for ln in logs))
 
     def test_busy_pane_defers_no_keystroke(self):
         urecs = {self.sid: {"first_seen": NOW - DAY, "last_nudge": None}}

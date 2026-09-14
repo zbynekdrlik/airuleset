@@ -783,8 +783,9 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
                         "background agent — deferred, retry next sweep)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, "release-gap", now):
-            logs.append("release-gap %s -> hold:cadence-gate (shared family gap; "
-                        "retry next sweep)" % loc)
+            logs.append("release-gap %s -> hold:floor (%s; retry next sweep)"
+                        % (loc, _nudge_gate.floor_hold_reason(
+                            state, sid, "release-gap", now)))
             return logs
     if dry_run:
         logs.append("release-gap %s -> WOULD-NUDGE (ahead=%d, reason=%s)"

@@ -321,8 +321,9 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
                         "background agent — deferred, retry next sweep)" % loc)
             return logs
         if not _nudge_gate.gate_ok(state, sid, CATEGORY, now):
-            logs.append("u-freshness %s -> hold:cadence-gate (shared 1x/hour U strop "
-                        "or family gap; retry next sweep)" % loc)
+            logs.append("u-freshness %s -> hold:floor (%s; retry next sweep)"
+                        % (loc, _nudge_gate.floor_hold_reason(
+                            state, sid, CATEGORY, now)))
             return logs
     if dry_run:
         logs.append("u-freshness %s -> WOULD-NUDGE (U=%d)" % (loc, u_count))

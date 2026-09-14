@@ -2727,7 +2727,9 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
     # #923 BATCH MODE: gate_ok is handled once by the caller.
     if batch_collect is None:
         if not _nudge_gate.gate_ok(state, sid, "goal-guard", now):
-            logs.append("goal-guard %s sid=%s -> hold:cadence-gate" % (loc, sid))
+            logs.append("goal-guard %s sid=%s -> hold:floor (%s)"
+                        % (loc, sid,
+                           _nudge_gate.floor_hold_reason(state, sid, "goal-guard", now)))
             return logs
     if dry_run:
         logs.append("goal-guard %s sid=%s -> would-send (dry-run)"
@@ -5045,8 +5047,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # #923 BATCH MODE: gate_ok is handled once by the caller.
     if batch_collect is None:
         if not _nudge_gate.gate_ok(state, sid, "lane-occupancy", now):
-            logs.append("lane-occupancy %s -> hold:cadence-gate (shared family gap; "
-                        "retry next sweep)" % loc)
+            logs.append("lane-occupancy %s -> hold:floor (%s; retry next sweep)"
+                        % (loc, _nudge_gate.floor_hold_reason(
+                            state, sid, "lane-occupancy", now)))
             return logs, True
     if dry_run:
         logs.append("READY (lane-occupancy) %s workers=%d waiters=%d "
