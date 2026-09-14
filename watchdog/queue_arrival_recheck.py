@@ -512,15 +512,29 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                     % (loc, len(arrivals)))
         return logs
     # Mark janitor provenance BEFORE the send (mirrors the sibling jobs): a
-    # residual stuck send stays reclaimable, cleared only on a delivered submit.
+    # residual stuck/queued send stays reclaimable (the #372/#1022 janitor-undo
+    # path), cleared ONLY on a transcript-CONFIRMED submit.
     watchdog._janitor_mark_watch(state, pid, now)
-    # #594: a DELIVERED submit (confirmed OR box-bare-unconfirmed) advances the
-    # baseline; only a GENUINE swallow / abort retries next sweep.
+    # #1023: a delivery is booked ONLY on a transcript-CONFIRMED submit (the
+    # observed `❯ nudge:` user turn, `ok`). `delivered-unconfirmed` (box cleared
+    # but no confirmed turn — a queued submit, or a confirm race) is NO LONGER
+    # terminal: the janitor watch is LEFT SET so any queued/typed residue is
+    # undone, the baseline is NOT advanced, the floor is NOT stamped, and the next
+    # IDLE tick re-delivers and confirms. (Residual: a genuine confirm RACE — the
+    # submit landed but the transcript write lagged past send_verified's ~10s
+    # window — re-delivers once on the next sweep; idle-only delivery makes that
+    # rare, and mark_sent floors the kind for 60 min once a delivery IS confirmed.)
     send_out = {}
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
                                 logs=logs, out=send_out, nudge="queue-arrival")
-    delivered = ok or bool(send_out.get("delivered_unconfirmed"))
-    if not delivered:
+    if not ok:
+        if send_out.get("delivered_unconfirmed"):
+            # NOT terminal — leave base + floor untouched, janitor watch set for
+            # the undo path; the next idle tick re-delivers and confirms.
+            logs.append("queue-arrival %s -> delivered-unconfirmed (no confirmed "
+                        "nudge turn; baseline unchanged, undo via janitor, "
+                        "re-check next idle tick, %d new)" % (loc, len(arrivals)))
+            return logs
         # A genuine swallow leaves base unadvanced -> retries next sweep; bounded
         # so a persistently-swallowing NON-busy pane backs off after
         # MAX_SEND_FAILS (accept the wave). send_verified already backed our text
@@ -535,8 +549,6 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     _nudge_gate.mark_sent(state, sid, "queue-arrival", now)   # #797
     if handled is not None:
         handled.add(sid)
-    note = "" if ok else " (delivered-unconfirmed — submit raced confirmation)"
-    logs.append("queue-arrival nudge %s -> %d new (%s), baseline advanced to %d%s"
-                % (loc, len(arrivals), _fmt_arrivals(arrivals), len(cur_sorted),
-                   note))
+    logs.append("queue-arrival nudge %s -> %d new (%s), baseline advanced to %d"
+                % (loc, len(arrivals), _fmt_arrivals(arrivals), len(cur_sorted)))
     return logs
