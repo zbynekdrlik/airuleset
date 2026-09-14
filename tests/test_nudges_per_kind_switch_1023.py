@@ -157,5 +157,45 @@ class TestPrimitivePerKind(unittest.TestCase):
         self.assertEqual(rec2.sent_keys(), [])
 
 
+class TestRecoveryAlwaysOn(unittest.TestCase):
+    """#1023 addendum (owner, 2026-09-14): RECOVERY revivals (the api-error/401
+    OAuth resume + limit `continue` = `resume`; the /compact delivery = `compact`)
+    are NEVER suppressed by the kill switch — they revive a dead/blocked session,
+    not backlog pushes. They are NOT in the stageable set (badge/CLI/floor), so
+    the default all-OFF never mutes them.
+
+    RED against the pre-addendum tree: `resume`/`compact` are in MACHINE_NUDGE_KINDS
+    and default OFF, so `nudges_enabled("resume")` is False (the exact 401/limit
+    revival the owner reported never firing). GREEN once they are RECOVERY (always-on).
+    """
+    def setUp(self):
+        p = _no_bypass()
+        self.addCleanup(p.stop)
+
+    def test_recovery_kinds_always_on_even_when_all_off(self):
+        with TemporaryDirectory() as home:
+            self.assertTrue(wd.nudges_enabled("resume", home=home),
+                            "the api-error/limit resume must fire even with nudges OFF")
+            self.assertTrue(wd.nudges_enabled("compact", home=home),
+                            "the /compact delivery must fire even with nudges OFF")
+
+    def test_priority_kind_still_off_by_default(self):
+        with TemporaryDirectory() as home:
+            self.assertFalse(wd.nudges_enabled("queue-arrival", home=home))
+
+    def test_recovery_kind_is_not_stageable(self):
+        with TemporaryDirectory() as home:
+            wd.set_nudge_kind("resume", True, home=home)
+            # a recovery kind is always-on; it is never persisted into the staged set
+            self.assertNotIn("resume", wd.nudges_on_kinds(home=home))
+
+    def test_recovery_set_is_disjoint_from_stageable(self):
+        self.assertEqual(wd.RECOVERY_NUDGE_KINDS, frozenset({"resume", "compact"}))
+        self.assertTrue(wd.MACHINE_NUDGE_KINDS.isdisjoint(wd.RECOVERY_NUDGE_KINDS))
+        # ALL_NUDGE_KINDS is the union — every threaded identity is known
+        self.assertEqual(wd.ALL_NUDGE_KINDS,
+                         wd.MACHINE_NUDGE_KINDS | wd.RECOVERY_NUDGE_KINDS)
+
+
 if __name__ == "__main__":
     unittest.main()
