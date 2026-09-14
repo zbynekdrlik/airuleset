@@ -9157,6 +9157,11 @@ def _print_nudges_status(home=None):
         print("nudges: ON %d/%d — %s" % (len(on), len(kinds), ", ".join(sorted(on))))
     for k in kinds:
         print("  %s: %s" % (k, "on" if k in on else "off"))
+    # #1023 addendum: recovery revivals are always-on (never suppressed) and not
+    # stageable — listed separately so `nudges status` is honest about them.
+    recovery = sorted(_wd.RECOVERY_NUDGE_KINDS)
+    if recovery:
+        print("  %s: always-on (recovery)" % ", ".join(recovery))
 
 
 def _nudges_fleet(verb, runner=None):
@@ -9228,6 +9233,14 @@ def cmd_nudges(args):
     raw_kind = getattr(args, "kind", None)
     want_all = getattr(args, "all", False)
     kinds = [k.strip() for k in raw_kind.split(",")] if raw_kind else []
+    # #1023 addendum: a RECOVERY kind (resume/compact) is always-on and cannot be
+    # staged — reject it with a clear message, not the generic "unknown kind".
+    recovery = [k for k in kinds if k in _wd.RECOVERY_NUDGE_KINDS]
+    if recovery:
+        print("nudge kind(s) %s are always-on (recovery revivals) — they are never "
+              "suppressed by the switch and cannot be staged."
+              % ", ".join(recovery))
+        return 2
     unknown = [k for k in kinds if k not in _wd.MACHINE_NUDGE_KINDS]
     if unknown:
         print("unknown nudge kind(s): %s\navailable: %s"

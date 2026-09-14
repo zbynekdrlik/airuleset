@@ -95,11 +95,28 @@ MACHINE_NUDGE_KINDS = frozenset({
     # goal-family riders (into an armed /goal loop)
     "queue-arrival", "lane-occupancy", "release-gap", "lane-reconcile",
     "partition-audit", "u-freshness", "goal-guard",
-    # goal auto-arm / compact / dying-subagent stuck-check
-    "goal-sweep", "compact", "subagent-stuck",
-    # idle-pane backstops + resume/recovery deliveries (jobs 1/4/8/11 + cards)
-    "bounce", "gk-request", "card", "resume",
+    # goal auto-arm / dying-subagent stuck-check
+    "goal-sweep", "subagent-stuck",
+    # idle-pane backstops + report-owed card (jobs 8/11 + cards)
+    "bounce", "gk-request", "card",
 })
+
+# #1023 addendum (owner, 2026-09-14) — RECOVERY revivals: identities that REVIVE a
+# dead/blocked session, NEVER suppressed by the per-kind kill switch (default
+# all-OFF) and NOT stageable/floored — the owner needs them to fire when a
+# login/limit problem killed the session even though every PRIORITY nudge is off
+# ("aj ked claudy to prepne na funkcny agent je nefunkcny lebo mu neprride nudge
+# na ozivenie"). `resume` = the api-error/401-OAuth resume + the limit/usage-cap
+# `continue` after reset (`__init__.py` Jobs 1/1b/6); `compact` = the `/compact`
+# delivery (`compact.py`). They keep their OWN per-error dedup/attempt caps + the
+# recent-human veto; they are not subject to the nudge_gate 60-min per-kind floor
+# (a revival fires once per error event, not on a cadence). PRIORITY nudges (every
+# MACHINE_NUDGE_KINDS member) stay gated + floored + per-kind staged.
+RECOVERY_NUDGE_KINDS = frozenset({"resume", "compact"})
+
+# Every threaded nudge identity — the stageable PRIORITY set plus the always-on
+# RECOVERY set. A `nudge=` threaded by any delivery site is one of these.
+ALL_NUDGE_KINDS = MACHINE_NUDGE_KINDS | RECOVERY_NUDGE_KINDS
 
 
 def nudges_marker_path(home=None):
@@ -186,18 +203,23 @@ def set_nudge_kind(kind, enabled, home=None, by=None):
 
 def nudges_enabled(kind=None, home=None):
     """True iff a machine nudge of `kind` may be delivered (#1023 per-kind
-    staging). Default (state file absent / a kind not enabled) is OFF — the
-    owner enables kinds one at a time. `kind=None` (a gated keystroke fired with
-    NO nudge identity — a programming error the AST contract test catches) fails
-    safe to SUPPRESS (False): an un-threaded machine nudge is never delivered,
-    so enabling ONE kind can never re-activate an unrelated un-threaded delivery
-    (the #1023-review BLOCKER-2 leak). Honors `AIRULESET_TEST_IGNORE_DISABLE`
+    staging). PRIORITY kinds (every MACHINE_NUDGE_KINDS member) default OFF (state
+    file absent / a kind not enabled) — the owner enables them one at a time.
+    RECOVERY kinds (RECOVERY_NUDGE_KINDS = resume/compact, #1023 addendum) are
+    ALWAYS-ON: they revive a dead/blocked session (a 401/limit revival, /compact),
+    so the kill switch never suppresses them. `kind=None` (a gated keystroke fired
+    with NO nudge identity — a programming error the AST contract test catches)
+    fails safe to SUPPRESS (False): an un-threaded machine nudge is never
+    delivered, so enabling ONE kind can never re-activate an unrelated un-threaded
+    delivery (the #1023-review BLOCKER-2 leak). Honors `AIRULESET_TEST_IGNORE_DISABLE`
     exactly like the #994 predicate (and `_owner_disabled`, #400) so a real box's
     staged state never fails the suite / the pre-push gate."""
     if os.environ.get("AIRULESET_TEST_IGNORE_DISABLE"):
         return True
     if kind is None:
         return False             # fail-safe: no identity → suppress (never any-on)
+    if kind in RECOVERY_NUDGE_KINDS:
+        return True              # #1023 addendum: recovery revivals are always-on
     return kind in nudges_on_kinds(home)
 
 
@@ -240,12 +262,13 @@ def _keystroke_suppressed(kind, user_authored, nudge=None):
     (#1002). The owner's OWN reply (`user_authored`, granted solely by
     `discord_replies`) always passes. A RECOVERY_KINDS keystroke (not a machine
     nudge) always passes. Only a GATED (machine-nudge delivery) keystroke is
-    withheld, and only when the owner has NOT enabled that nudge's kind (#1023
-    per-kind staging): the delivery's `nudge` identity keys the per-kind switch.
-    A gated keystroke with NO `nudge` identity (a programming error the contract
-    test catches) falls back to the global `nudges_enabled()` (any-kind-on). Goes
-    through `watchdog.nudges_enabled()` (the package facade) so the monkeypatch
-    seam stays effective."""
+    withheld, and only when `nudges_enabled(nudge)` is False: a PRIORITY nudge the
+    owner has NOT staged on (#1023 per-kind staging) — a RECOVERY nudge identity
+    (RECOVERY_NUDGE_KINDS = resume/compact, #1023 addendum) is always-on and never
+    withheld. A gated keystroke with NO `nudge` identity (a programming error the
+    contract test catches) FAILS SAFE to SUPPRESS (`nudges_enabled(None)` is
+    False, BLOCKER-2) — never any-kind-on. Goes through `watchdog.nudges_enabled()`
+    (the package facade) so the monkeypatch seam stays effective."""
     if user_authored or kind not in GATED_KINDS:
         return False
     return not watchdog.nudges_enabled(nudge)
@@ -262,8 +285,10 @@ def keys(pane_id, *keystrokes, kind, nudge=None, user_authored=False, run=None,
 
     `kind` classifies the keystroke for the gate (see GATED_KINDS /
     RECOVERY_KINDS). `nudge` (#1023) is the machine-nudge IDENTITY (a member of
-    MACHINE_NUDGE_KINDS) the per-kind switch keys on -- every GATED machine-nudge
-    delivery threads it from its call site (the contract test enforces this).
+    ALL_NUDGE_KINDS — a stageable PRIORITY kind in MACHINE_NUDGE_KINDS or an
+    always-on RECOVERY kind in RECOVERY_NUDGE_KINDS) the per-kind switch keys on
+    -- every GATED machine-nudge delivery threads it from its call site (the
+    contract test enforces this).
     `user_authored` (the owner's OWN Discord reply, forwarded from
     `discord_replies`) BYPASSES the gate. `journal_text` overrides the
     suppression-journal snippet (a literal-type caller passes its full text so

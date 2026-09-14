@@ -506,6 +506,8 @@ from watchdog.tmux_io import (  # noqa: E402
     nudges_on_kinds as nudges_on_kinds,                   # #1023
     set_nudge_kind as set_nudge_kind,                     # #1023
     MACHINE_NUDGE_KINDS as MACHINE_NUDGE_KINDS,           # #1023
+    RECOVERY_NUDGE_KINDS as RECOVERY_NUDGE_KINDS,         # #1023 addendum
+    ALL_NUDGE_KINDS as ALL_NUDGE_KINDS,                   # #1023 addendum
     nudges_enabled as nudges_enabled,
     _suppress_nudge as _suppress_nudge,
     GATED_KINDS as GATED_KINDS,

@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 9387,
+    "airuleset.py": 9400,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2338,
     "cli_account_bootstrap.py": 285,
@@ -593,7 +593,7 @@
     "tests/test_worktree_scratchpad_namespacing.py": 227,
     "tests/test_worktree_write_guard.py": 598,
     "tests/test_wrapped_draft.py": 627,
-    "watchdog/__init__.py": 4775,
+    "watchdog/__init__.py": 4777,
     "watchdog/burn_jobs.py": 364,
     "watchdog/card_flags.py": 301,
     "watchdog/cards.py": 1044,
@@ -640,7 +640,7 @@
     "watchdog/session_status.py": 400,
     "watchdog/stash.py": 1598,
     "watchdog/sweep_jobs.py": 392,
-    "watchdog/tmux_io.py": 1381,
+    "watchdog/tmux_io.py": 1406,
     "watchdog/transcripts.py": 1652,
     "watchdog/u_freshness.py": 374,
     "watchdog/u_labels.py": 369,
