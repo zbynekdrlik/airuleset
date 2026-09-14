@@ -395,27 +395,46 @@ PYEOF
     # line carries the reason, so logging its first 120 chars makes the
     # audit readable from the arm side too, not only from the consume.
     NORM_CMD=$(printf '%s' "$BASH_CMD" | tr -s ' \t' ' ' | sed 's/^ //')
-    case "$NORM_CMD" in
-        touch\ *airuleset-main-exec-ok-*|touch\ *airuleset-fable-exec-ok-*|\
-        echo\ *airuleset-main-exec-ok-*|echo\ *airuleset-fable-exec-ok-*|\
-        printf\ *airuleset-main-exec-ok-*|printf\ *airuleset-fable-exec-ok-*|\
-        cat\ *airuleset-main-exec-ok-*|cat\ *airuleset-fable-exec-ok-*)
-            # #819: consumption is DEFERRED to PostToolUse via a pending flag
-            # (see the marker block below). A sibling-blocked call leaves a
-            # STALE pending behind; a re-echo (this arming command) then RUNS,
-            # so its OWN PostToolUse would consume the freshly-armed marker
-            # unless we clear that stale pending here first. The arming echo
-            # never reaches the marker block, so it never sets a pending of
-            # its own — clearing here only removes a stranded one.
-            rm -f "${_EXEC_STATE_DIR}/airuleset-main-exec-pending-${RAW_SID:-unknown}" \
-                2>/dev/null || true
-            ARM_SNIP=$(printf '%s' "$NORM_CMD" | jq -Rr '.[0:120]' 2>/dev/null \
-                || echo "")
-            { echo "$(date -Is) main-exec bypass-arm session=$RAW_SID cmd=$ARM_SNIP" \
-                >> "$BYPASS_LOG"; } 2>/dev/null || true
-            exit 0
-            ;;
-    esac
+    # #1017: the old `case "$NORM_CMD" in touch\ *…exec-ok-*|…` glob armed the
+    # exemption for a COMPOUND command too — its trailing `*` swallowed `&&`/`;`/
+    # `|` and the rest, so `echo <reason> > <marker> && <blocked-op>` armed the
+    # WHOLE compound and let the piggybacked op ride free. Use the SHARED
+    # quote-aware splitter (gates.shellcmd, ONE call) and arm ONLY a LONE arming
+    # command: exactly one top-level segment whose first word is touch/echo/
+    # printf/cat and which names a *-exec-ok-* marker. On any inability to run the
+    # parser the command is simply not treated as an arm (it still executes and
+    # writes its own marker; only the #819 stale-pending clear + arm-log are
+    # skipped) — never a wrong ALLOW of a compound. Accepted residual: a
+    # multi-line `cat > <marker> <<EOF … EOF` arm (an untested, unadvertised
+    # form — the block message advertises `echo … > <marker>`) now reads as >1
+    # segment and no longer arms; the single-line touch/echo/printf forms (every
+    # tested + documented shape) are unaffected.
+    _MI_HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    _MI_ARM=$(MI_ARM_CMD="$BASH_CMD" \
+        PYTHONPATH="$(dirname "$_MI_HOOK_DIR")${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -c 'import os, re
+from gates.shellcmd import split_top_level
+segs = [s.strip() for s in split_top_level(os.environ.get("MI_ARM_CMD", "")) if s.strip()]
+print("1" if (len(segs) == 1
+              and re.match(r"^(touch|echo|printf|cat)\s", segs[0])
+              and re.search(r"airuleset-(main|fable)-exec-ok-", segs[0])) else "")' \
+        2>/dev/null || echo "")
+    if [ "$_MI_ARM" = "1" ]; then
+        # #819: consumption is DEFERRED to PostToolUse via a pending flag
+        # (see the marker block below). A sibling-blocked call leaves a
+        # STALE pending behind; a re-echo (this arming command) then RUNS,
+        # so its OWN PostToolUse would consume the freshly-armed marker
+        # unless we clear that stale pending here first. The arming echo
+        # never reaches the marker block, so it never sets a pending of
+        # its own — clearing here only removes a stranded one.
+        rm -f "${_EXEC_STATE_DIR}/airuleset-main-exec-pending-${RAW_SID:-unknown}" \
+            2>/dev/null || true
+        ARM_SNIP=$(printf '%s' "$NORM_CMD" | jq -Rr '.[0:120]' 2>/dev/null \
+            || echo "")
+        { echo "$(date -Is) main-exec bypass-arm session=$RAW_SID cmd=$ARM_SNIP" \
+            >> "$BYPASS_LOG"; } 2>/dev/null || true
+        exit 0
+    fi
 else
     # #178: a /tmp scratchpad file or a ~/.claude/projects/*/memory/ note
     # is coordinator BOOKKEEPING, never implementation — exempt from the

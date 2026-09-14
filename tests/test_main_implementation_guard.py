@@ -1149,6 +1149,24 @@ class DeferredConsume819(unittest.TestCase):
                          "arming must clear a stale pending flag")
         self.assertTrue(m.exists(), "the freshly-armed marker must survive")
 
+    def test_compound_arming_does_not_arm_the_piggybacked_op_1017(self):
+        # #1017: `echo <reason> > <marker> && <blocked-op>` used to match the
+        # arming case-glob (the trailing `*` swallowed the `&&` and the rest),
+        # arming the exemption for the WHOLE compound so the piggybacked op rode
+        # free. It must NOT arm now: the shared quote-aware splitter sees >1
+        # top-level segment, so the blocked op is evaluated by the gate (a repo
+        # grep sweep is blocked while goal-armed).
+        sid = "t-mg-1017-" + uuid.uuid4().hex[:8]
+        cmd = "echo 'reason' > %s && grep -rn TODO ." % em.marker_ok(sid)
+        out = self._pre(sid, command=cmd)
+        self.assertEqual(out.returncode, 2, out.stderr)
+
+    def test_lone_arming_still_arms_1017(self):
+        # Control: the LONE arming command still arms (exit 0), unchanged.
+        sid = "t-mg-1017-lone-" + uuid.uuid4().hex[:8]
+        out = self._pre(sid, command="echo 'reason' > %s" % em.marker_ok(sid))
+        self.assertEqual(out.returncode, 0, out.stderr)
+
     def test_consumer_noop_without_pending(self):
         # a marker present but NO pending flag (nothing deferred) -> the
         # consumer must leave the marker alone.
