@@ -92,9 +92,13 @@ NUDGES_KINDS_STATE = "nudges-kinds.json"  # #1023 per-kind staging state file
 # `nudge=` into `keys`, and it names the per-kind switch state key AND the
 # `nudge_gate` cadence category. `nudges status` enumerates exactly this set.
 MACHINE_NUDGE_KINDS = frozenset({
+    # goal-family riders (into an armed /goal loop)
     "queue-arrival", "lane-occupancy", "release-gap", "lane-reconcile",
     "partition-audit", "u-freshness", "goal-guard",
+    # goal auto-arm / compact / dying-subagent stuck-check
     "goal-sweep", "compact", "subagent-stuck",
+    # idle-pane backstops + resume/recovery deliveries (jobs 1/4/8/11 + cards)
+    "bounce", "gk-request", "card", "resume",
 })
 
 
@@ -184,17 +188,17 @@ def nudges_enabled(kind=None, home=None):
     """True iff a machine nudge of `kind` may be delivered (#1023 per-kind
     staging). Default (state file absent / a kind not enabled) is OFF — the
     owner enables kinds one at a time. `kind=None` (a gated keystroke fired with
-    NO nudge identity — a programming error the contract test catches) fails safe
-    to "any kind on" so a legacy un-threaded call is never MORE permissive than
-    the per-kind state. Honors `AIRULESET_TEST_IGNORE_DISABLE` exactly like the
-    #994 predicate (and `_owner_disabled`, #400) so a real box's staged state
-    never fails the suite / the pre-push gate."""
+    NO nudge identity — a programming error the AST contract test catches) fails
+    safe to SUPPRESS (False): an un-threaded machine nudge is never delivered,
+    so enabling ONE kind can never re-activate an unrelated un-threaded delivery
+    (the #1023-review BLOCKER-2 leak). Honors `AIRULESET_TEST_IGNORE_DISABLE`
+    exactly like the #994 predicate (and `_owner_disabled`, #400) so a real box's
+    staged state never fails the suite / the pre-push gate."""
     if os.environ.get("AIRULESET_TEST_IGNORE_DISABLE"):
         return True
-    on = nudges_on_kinds(home)
     if kind is None:
-        return bool(on)          # defensive: no identity → allow only if ANY on
-    return kind in on
+        return False             # fail-safe: no identity → suppress (never any-on)
+    return kind in nudges_on_kinds(home)
 
 
 def _suppress_nudge(kind, text, logs):

@@ -1161,6 +1161,9 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     # any error (a blank sid / unreadable store -> writer proceeds as pre-#741).
     # #923 BATCH MODE: common delivery guards handled once by the caller.
     if batch_collect is None:
+        if not watchdog.nudges_enabled("partition-audit"):   # #1023 per-kind switch
+            logs.append("ops-wait-recheck %s -> skip:kind-off (partition-audit)" % loc)
+            return logs
         from watchdog import compact as _compact
         if _compact.pending_compact_hold(sid, now):   # #848 bounded
             logs.append("ops-wait-recheck %s -> hold:compact-pending (pending "

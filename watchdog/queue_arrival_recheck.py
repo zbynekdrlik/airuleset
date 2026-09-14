@@ -465,6 +465,10 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # as pre-#741).
     # #923 BATCH MODE: common delivery guards handled once by the caller.
     if batch_collect is None:
+        if not watchdog.nudges_enabled("queue-arrival"):   # #1023 per-kind switch
+            logs.append("queue-arrival %s -> skip:kind-off (queue-arrival, %d new)"
+                        % (loc, len(arrivals)))
+            return logs
         from watchdog import compact as _compact
         if _compact.pending_compact_hold(sid, now):   # #848 bounded
             logs.append("queue-arrival %s -> hold:compact-pending (pending /compact; "
@@ -515,25 +519,26 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # residual stuck/queued send stays reclaimable (the #372/#1022 janitor-undo
     # path), cleared ONLY on a transcript-CONFIRMED submit.
     watchdog._janitor_mark_watch(state, pid, now)
-    # #1023: a delivery is booked ONLY on a transcript-CONFIRMED submit (the
-    # observed `❯ nudge:` user turn, `ok`). `delivered-unconfirmed` (box cleared
-    # but no confirmed turn — a queued submit, or a confirm race) is NO LONGER
-    # terminal: the janitor watch is LEFT SET so any queued/typed residue is
-    # undone, the baseline is NOT advanced, the floor is NOT stamped, and the next
-    # IDLE tick re-delivers and confirms. (Residual: a genuine confirm RACE — the
-    # submit landed but the transcript write lagged past send_verified's ~10s
-    # window — re-delivers once on the next sweep; idle-only delivery makes that
-    # rare, and mark_sent floors the kind for 60 min once a delivery IS confirmed.)
+    # #1023: the BASELINE (arrival-set-done) advances ONLY on a transcript-
+    # CONFIRMED submit (`ok`). `delivered-unconfirmed` is NON-TERMINAL for the
+    # baseline (janitor watch LEFT SET, arrival re-nudges until confirmed) — BUT
+    # 🟡4: the per-kind FLOOR IS stamped (the text reached the pane, so the
+    # owner's "raz za hodinu" rule makes this a send), bounding the re-confirm to
+    # the first idle tick AFTER the hour. Only a GENUINE swallow (text backed out,
+    # nothing seen) skips the floor and backs off via _book_unverified_send below.
     send_out = {}
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
                                 logs=logs, out=send_out, nudge="queue-arrival")
     if not ok:
         if send_out.get("delivered_unconfirmed"):
-            # NOT terminal — leave base + floor untouched, janitor watch set for
-            # the undo path; the next idle tick re-delivers and confirms.
+            # NON-terminal for the baseline — leave base untouched + janitor
+            # watch SET for the undo path — but stamp the per-kind floor so the
+            # re-confirm defers a full hour (owner's 1/hour rule, 🟡4).
+            _nudge_gate.mark_sent(state, sid, "queue-arrival", now)   # #1023 🟡4
             logs.append("queue-arrival %s -> delivered-unconfirmed (no confirmed "
-                        "nudge turn; baseline unchanged, undo via janitor, "
-                        "re-check next idle tick, %d new)" % (loc, len(arrivals)))
+                        "nudge turn; baseline unchanged, floor stamped, undo via "
+                        "janitor, re-check after floor, %d new)"
+                        % (loc, len(arrivals)))
             return logs
         # A genuine swallow leaves base unadvanced -> retries next sweep; bounded
         # so a persistently-swallowing NON-busy pane backs off after

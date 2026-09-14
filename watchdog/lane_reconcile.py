@@ -187,6 +187,9 @@ def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
 
     # #923 BATCH MODE: common delivery guards handled once by the caller.
     if batch_collect is None:
+        if not watchdog.nudges_enabled(CATEGORY):   # #1023 per-kind switch
+            logs.append("lane-reconcile %s -> skip:kind-off (%s)" % (loc, CATEGORY))
+            return logs
         from watchdog import compact as _compact
         if _compact.pending_compact_hold(sid, now):   # #848 bounded
             logs.append("lane-reconcile %s -> hold:compact-pending "

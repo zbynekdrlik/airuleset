@@ -259,6 +259,37 @@ class TestNudgeIdentityContract1023(unittest.TestCase):
             "every GATED machine-nudge keys() call must thread a `nudge=` "
             "identity (the per-kind switch keys on it); missing: %r" % violations)
 
+    # #1023-review BLOCKER-2: the identity must also reach the DELIVERY HELPERS,
+    # not only the keys() primitive — an un-threaded helper call defaults
+    # nudge=None → the fail-safe SUPPRESSES it (never leaks any-kind-on), so a
+    # forgotten identity is a silent DEAD nudge. These helpers default nudge=None,
+    # so every call MUST pass `nudge=` (a machine nudge) or `user_authored=` (the
+    # owner's own reply). Helpers with a non-None default (submit_own_goal_verified,
+    # _send_goal_verified, _send_stuckcheck_verified) self-thread and are exempt.
+    NONE_DEFAULT_HELPERS = {"send_verified", "send_continue",
+                            "submit_own_draft_verified", "deliver_with_stash",
+                            "_try_stash_nudge", "_send_bare_nudge_verified"}
+
+    def test_every_delivery_helper_call_threads_identity(self):
+        violations = []
+        for path in sorted(WATCHDOG_DIR.glob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, "attr", getattr(node.func, "id", None))
+                if name not in self.NONE_DEFAULT_HELPERS:
+                    continue
+                kws = {kw.arg for kw in node.keywords}
+                if "nudge" not in kws and "user_authored" not in kws:
+                    violations.append("%s:%d %s()" % (path.name, node.lineno, name))
+        self.assertEqual(
+            violations, [],
+            "every None-default delivery-helper call must thread `nudge=` (a "
+            "machine-nudge identity) or `user_authored=` (owner reply) so the "
+            "per-kind switch gates it and it is never a silent dead nudge; "
+            "missing: %r" % violations)
+
 
 if __name__ == "__main__":
     unittest.main()

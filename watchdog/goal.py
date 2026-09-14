@@ -2721,6 +2721,10 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
     logs = []
     # #923 BATCH MODE: gate_ok is handled once by the caller.
     if batch_collect is None:
+        if not watchdog.nudges_enabled("goal-guard"):   # #1023 per-kind switch
+            logs.append("goal-guard %s sid=%s -> skip:kind-off (goal-guard)"
+                        % (loc, sid))
+            return logs
         if not _nudge_gate.gate_ok(state, sid, "goal-guard", now):
             logs.append("goal-guard %s sid=%s -> hold:floor (%s)"
                         % (loc, sid,
@@ -2763,7 +2767,7 @@ def _goal_guard_deliver(sid, pid, captured, cwd, state, now, loc, run,
         return logs
     ok = _send_goal_verified(pid, _GOAL_GUARD_TEXT, run,
                              captured=captured, sleep_fn=sleep_fn,
-                             verify_armed=False)
+                             verify_armed=False, nudge="goal-guard")
     if ok:
         _nudge_gate.mark_sent(state, sid, "goal-guard", now)
         logs.append("goal-guard %s sid=%s -> sent" % (loc, sid))
@@ -5037,6 +5041,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # never sends), so the gate sits before it.
     # #923 BATCH MODE: gate_ok is handled once by the caller.
     if batch_collect is None:
+        if not watchdog.nudges_enabled("lane-occupancy"):   # #1023 per-kind switch
+            logs.append("lane-occupancy %s -> skip:kind-off (lane-occupancy)" % loc)
+            return logs, True
         if not _nudge_gate.gate_ok(state, sid, "lane-occupancy", now):
             logs.append("lane-occupancy %s -> hold:floor (%s; retry next sweep)"
                         % (loc, _nudge_gate.floor_hold_reason(
@@ -5482,6 +5489,12 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         # individually. Eligible categories from goal_dark_watch (goal-guard)
         # are already in state["nudge_batch"][sid].
         _eligible = _nudge_gate.batch_eligible(state, sid, now)
+        # #1023-review BLOCKER-1: the batch composes MULTIPLE kinds into ONE
+        # keystroke on a SINGLE identity, so the primitive cannot per-kind-gate a
+        # mixed batch. Filter to ENABLED kinds HERE — a disabled kind never enters
+        # the batch (falls to its individual path, suppressed there): no leak, no
+        # drop. This IS the per-kind staging for the batch path.
+        _eligible = [c for c in _eligible if watchdog.nudges_enabled(c)]
         _batch_collect = None
         if _eligible and (handled is None or sid not in handled) and not dry_run:
             # R2 (#923 review): common delivery guards checked ONCE.
@@ -5574,15 +5587,25 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     nudge=(_incl[0] if _incl else None))
                 _bdeliv = _bok or bool(send_out.get("delivered_unconfirmed"))
                 if _bdeliv:
-                    watchdog._janitor_clear_watch(state, pid)
+                    _incl_set = set(_incl)
+                    # #1023 🔵6: queue-arrival's baseline advances ONLY on a
+                    # CONFIRMED submit — on a delivered-unconfirmed batch skip its
+                    # callback (baseline OLD, janitor watch LEFT SET) and re-confirm
+                    # later; other kinds keep terminal-on-unconfirmed. The FLOOR
+                    # (mark_batch_sent) stamps ALL included, bounding re-fire (🟡4).
+                    _qa_unconfirmed = (not _bok) and "queue-arrival" in _incl_set
+                    if not _qa_unconfirmed:
+                        watchdog._janitor_clear_watch(state, pid)
                     _nudge_gate.mark_batch_sent(state, sid, _incl, now)
                     if handled is not None:
                         handled.add(sid)
                     # Call per-rider post-delivery callbacks for included cats.
-                    _incl_set = set(_incl)
                     for _bc, _, _bfn in _batch_collect:
-                        if _bc in _incl_set and _bfn is not None:
-                            _bfn()
+                        if _bc not in _incl_set or _bfn is None:
+                            continue
+                        if _bc == "queue-arrival" and not _bok:
+                            continue   # #1023 🔵6: non-terminal on unconfirmed
+                        _bfn()
                     _bnote = ("" if _bok else
                               " (delivered-unconfirmed)")
                     logs.append("batch-nudge %s -> %d section(s): %s%s"

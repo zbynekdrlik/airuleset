@@ -765,6 +765,9 @@ def goal_release_gap_recheck(now, run, rrecs, sid, cwd, pid, tpath, loc,
     # any error (a blank sid / unreadable store -> writer proceeds as pre-#741).
     # #923 BATCH MODE: common delivery guards handled once by the caller.
     if batch_collect is None:
+        if not watchdog.nudges_enabled("release-gap"):   # #1023 per-kind switch
+            logs.append("release-gap %s -> skip:kind-off (release-gap)" % loc)
+            return logs
         from watchdog import compact as _compact
         if _compact.pending_compact_hold(sid, now):   # #848 bounded
             logs.append("release-gap %s -> hold:compact-pending (pending /compact; "

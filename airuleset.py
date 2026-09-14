@@ -2189,17 +2189,14 @@ def cmd_status(args):
     print("airuleset status")
     print("=" * 50)
 
-    # --- nudges kill switch (#994) ---
+    # --- nudges kill switch (#1023 per-kind staging) ---
     import watchdog as _wd_nudges
-    _nmk = _wd_nudges.read_nudges_marker()
-    if _nmk is None:
-        print("\nnudges: ON")
+    _on = _wd_nudges.nudges_on_kinds()
+    _total = len(_wd_nudges.MACHINE_NUDGE_KINDS)
+    if not _on:
+        print("\nnudges: OFF (all %d kinds off)" % _total)
     else:
-        _line = "nudges: OFF since %s by %s" % (
-            _nmk.get("since") or "?", _nmk.get("by") or "?")
-        if _nmk.get("reason"):
-            _line += " — %s" % _nmk["reason"]
-        print("\n" + _line)
+        print("\nnudges: ON %d/%d — %s" % (len(_on), _total, ", ".join(sorted(_on))))
 
     # --- CLAUDE.md ---
     print("\n~/.claude/CLAUDE.md:")

@@ -100,12 +100,12 @@ class TestGoalGuardDeliver(unittest.TestCase):
         self.sent = []
 
     def _fake_send(self, pid, text, run, captured=None, sleep_fn=None,
-                   logs=None, verify_armed=True):
+                   logs=None, verify_armed=True, nudge=None):
         self.sent.append(text)
         return True
 
     def _fake_send_fail(self, pid, text, run, captured=None, sleep_fn=None,
-                        logs=None, verify_armed=True):
+                        logs=None, verify_armed=True, nudge=None):
         self.sent.append(text)
         return False
 

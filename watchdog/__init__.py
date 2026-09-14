@@ -1654,7 +1654,8 @@ def _apierr_escalation_ping(send_fn, project, pid, run, key, err_hash, fs,
     return logs
 
 
-def _send_stuckcheck_verified(state, pid, text, run, tpath, now, sleep_fn, logs):
+def _send_stuckcheck_verified(state, pid, text, run, tpath, now, sleep_fn, logs,
+                              nudge="resume"):
     """#497 batch 3 — the shared janitor-marked transcript-proof send for the
     CHUNK-typed decide_working-family nudges (jobs 4 working, 4a textcall). The
     sibling of batch-1's `_send_bare_nudge_verified`, minus the tpath
@@ -1671,7 +1672,8 @@ def _send_stuckcheck_verified(state, pid, text, run, tpath, now, sleep_fn, logs)
     swallowed nudge, and its after-max_nudges escalation is correct on a repeated
     swallow), it only logs the delivery result honestly."""
     _janitor_mark_watch(state, pid, now)
-    if send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=logs):
+    if send_verified(pid, text, run, tpath, sleep_fn=sleep_fn, logs=logs,
+                     nudge=nudge):
         _janitor_clear_watch(state, pid)
         return True
     return False
@@ -3210,7 +3212,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                             ok = True
                             if not dry_run:
                                 ok = send_verified(pid, NUDGE_TEXT, run, tpath,
-                                                   sleep_fn=sleep_fn, logs=logs)
+                                                   sleep_fn=sleep_fn, logs=logs,
+                                                   nudge="resume")
                             if ok:
                                 attempts += 1
                                 s["attempts"] = attempts
@@ -3486,7 +3489,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         _logs_before = len(logs)
                         delivered = True if dry_run else deliver_with_stash(
                             pid, resume_text, run, captured=fresh, logs=logs,
-                            state=state)  # #852-review 🟡-5
+                            state=state, nudge="resume")  # #852-review 🟡-5
                         if not delivered:
                             # #176 F1: the shipped fix RELOCATED the silent unbounded
                             # skip from the busy branch to HERE instead of eliminating
@@ -3519,7 +3522,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None,
                         ok = True
                         if not dry_run:
                             ok = send_verified(pid, resume_text, run, tpath,
-                                               sleep_fn=sleep_fn, logs=logs)
+                                               sleep_fn=sleep_fn, logs=logs,
+                                               nudge="resume")
                         logs.append("nudge#%d %s [%s]%s"
                                     % (n, project, key,
                                        "" if ok else " (submit-unverified)"))

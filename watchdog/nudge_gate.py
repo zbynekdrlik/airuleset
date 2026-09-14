@@ -61,6 +61,12 @@ import os
 # deliberately OUT — a different lane (idle-pane queue backstops with their own
 # staged schedules), not footer/partition nudges into an armed loop.
 #
+# #1023-review 🔵8 — goal-sweep / compact / subagent-stuck are ALSO deliberately
+# OUT: recovery/arming/compact lanes, not the footer-nudge family, each with its
+# OWN bound (goal-sweep = 1-pending-request lifecycle + #731 cap; compact = 30-min
+# cooldown + #855 vetoes, and its #848 per-integration supersede would BREAK under
+# a 1h floor; subagent-stuck = decide_working interval + max_nudges cap + #491 ACK).
+#
 # #923 CLASSIFICATION — families split into two classes:
 #
 #   WORK_DRIVING — families whose nudge directly DRIVES new work output (spawning

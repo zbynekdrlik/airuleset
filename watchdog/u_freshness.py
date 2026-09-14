@@ -304,6 +304,9 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
     # #923 BATCH MODE: common delivery guards are handled once by the caller
     # (goal_lane_sweep). In individual mode, each guard is checked here.
     if batch_collect is None:
+        if not watchdog.nudges_enabled(CATEGORY):   # #1023 per-kind switch
+            logs.append("u-freshness %s -> skip:kind-off (%s)" % (loc, CATEGORY))
+            return logs
         from watchdog import compact as _compact
         if _compact.pending_compact_hold(sid, now):   # #848 bounded
             logs.append("u-freshness %s -> hold:compact-pending (pending /compact; "
