@@ -204,6 +204,8 @@ class TestMachineDraftJanitorCleared(unittest.TestCase):
                          "the owner's own reply must still be submitted: %r" % run.calls)
         self.assertFalse(any("janitor-clear" in ln for ln in logs),
                          "an owner-authored draft must NOT be cleared: %r" % logs)
+        self.assertTrue(any("wedge: user draft → submit" in ln for ln in logs),
+                        "the user-draft submit decision must journal its phrase: %r" % logs)
 
 
 class TestRecordLifecycle(unittest.TestCase):

@@ -167,10 +167,16 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
     # existing submit/ping paths. `nudge_kind` also counts as `machine` so a
     # stale machine draft bypasses the at-rest guard exactly like a prefix nudge.
     wedged_nudge = watchdog._wedged_machine_nudge(state, pid, head_txt, txt, now)
+    # #1022 -- the owner's OWN Discord reply (`_is_dreply_machine_text`) is
+    # user-authored: when it wedges it is SUBMITTED (recovery), and its journal
+    # reads `wedge: user draft → submit` (the ticket's decision phrase). A
+    # prefix-recognized cross-stream/own nudge (no local record) also submits
+    # as-today, keeping its historical `machine-nudge submit` phrase.
+    dreply = watchdog._is_dreply_machine_text(state, pid, head_txt, txt)
     machine = (wedged_nudge is not None
                or head_txt.startswith(watchdog.MACHINE_NUDGE_PREFIX)
                or watchdog._own_nudge_submit_prefix(head_txt) is not None
-               or watchdog._is_dreply_machine_text(state, pid, head_txt, txt))
+               or dreply)
     if not machine and ("esc to interrupt" in (captured or "")
                         or "Waiting for" in (captured or "")
                         or now - tmtime < watchdog.PWEDGE_MIN_IDLE_S):
@@ -277,7 +283,8 @@ def prompt_wedge_check(now, state, pid, captured, tmtime, owner, project,
                 watchdog.keys(pid, "Escape", kind="wedge", run=run)
             watchdog.keys(pid, "Enter", kind="wedge", run=run)
         state.pop(key, None)     # still stuck → re-tracks and retries in 2 sweeps
-        return ["machine-nudge submit %s (%s)%s" % (pid, project, unstick_note)]
+        label = "wedge: user draft → submit" if dreply else "machine-nudge submit"
+        return ["%s %s (%s)%s" % (label, pid, project, unstick_note)]
     # #238-review-style finding 🔴F3 (this ticket's own review): resolved
     # ONCE, before EITHER branch below — the `not waiting` backlog-ping used
     # to send unconditionally, completely bypassing this per-pane cooldown

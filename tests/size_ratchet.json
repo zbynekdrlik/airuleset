@@ -645,7 +645,7 @@
     "watchdog/u_freshness.py": 375,
     "watchdog/u_labels.py": 369,
     "watchdog/usage.py": 297,
-    "watchdog/wedge.py": 383,
+    "watchdog/wedge.py": 390,
     "watchdog/wip_ref_sweep.py": 347,
     "working_time.py": 78
   },
