@@ -23,11 +23,13 @@ import os
 import sys
 import time
 import unittest
+import unittest.mock as m
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import watchdog as wd  # noqa: E402
+from watchdog import stash as _stash  # noqa: E402
 
 PID = "%1"
 
@@ -186,6 +188,42 @@ class TestRecordLifecycle(unittest.TestCase):
         wd._janitor_clear_watch(state, PID)
         self.assertNotIn(PID, state.get("nudge_typed", {}),
                          "a confirmed submit must drop the machine-nudge record")
+
+    def test_two_phase_scroll_length_batched_nudge_is_recorded(self):
+        # #1022 adversarial-review MAJOR: a #923 batched `nudge:` machine nudge
+        # of >= GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD chars takes the two-phase
+        # type path, which types PARTIAL chunks. The FULL text must still be
+        # recorded ONCE (at the two-phase level), or such a common nudge shape
+        # stays submittable through the wedge back door under the kill switch.
+        long_text = "nudge: " + ("lane refill priorita backlog polozka cislo " * 40)
+        self.assertGreaterEqual(len(long_text),
+                                _stash.GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD,
+                                "test payload must exceed the two-phase threshold")
+        state = {}
+        run = _mkrun()
+        with m.patch.object(_stash, "_settle_type_verify",
+                            lambda *a, **k: _stash._TV_LANDED):
+            hc = wd._type_two_phase_head_checkpoint(
+                PID, run, long_text, None, kind="send", nudge="queue-arrival",
+                state=state)
+        self.assertEqual(hc, _stash._TV_LANDED)
+        rec = state.get("nudge_typed", {}).get(PID)
+        self.assertIsInstance(rec, dict, state)
+        self.assertEqual(rec.get("kind"), "queue-arrival")
+        self.assertTrue(long_text.endswith(rec.get("tail")))
+        self.assertTrue(long_text.startswith(rec.get("head")))
+
+    def test_two_phase_does_not_record_owner_authored(self):
+        long_text = "nudge: " + ("lane refill priorita backlog polozka cislo " * 40)
+        state = {}
+        run = _mkrun()
+        with m.patch.object(_stash, "_settle_type_verify",
+                            lambda *a, **k: _stash._TV_LANDED):
+            wd._type_two_phase_head_checkpoint(
+                PID, run, long_text, None, kind="send", nudge="queue-arrival",
+                user_authored=True, state=state)
+        self.assertNotIn(PID, state.get("nudge_typed", {}),
+                         "owner-authored two-phase text is never recorded")
 
 
 if __name__ == "__main__":

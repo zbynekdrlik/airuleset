@@ -198,11 +198,14 @@ def _type_literal(pid, run, text, sleep_fn=None, kind="type",
     # wedge (job 10) can recognize a stranded copy and janitor-CLEAR it rather
     # than submit it as a back-door nudge. Gated to a genuine machine nudge: the
     # owner's own reply (`user_authored`) is never recorded here, and the write
-    # itself skips any `nudge` not in `ALL_NUDGE_KINDS` and a `None` `state` --
-    # so a caller that does not thread `state` (the SCROLL-length two-phase
-    # path, every pre-#1022 caller/test) is a complete no-op, unchanged. Only
-    # after a SUCCESSFUL type (`keys` returned True: nothing suppressed, the
-    # text really reached the box).
+    # itself skips any `nudge` not in `MACHINE_NUDGE_KINDS` and a `None` `state`
+    # -- so a caller that does not thread `state` (every pre-#1022 caller/test)
+    # is a complete no-op, unchanged. Only after a SUCCESSFUL type (`keys`
+    # returned True: nothing suppressed, the text really reached the box). NOTE:
+    # a SCROLL-length payload does NOT reach this branch (it goes through
+    # `_type_two_phase_head_checkpoint`, which records the FULL text itself and
+    # threads `state` only to that outer level, never to its partial-chunk
+    # `_type_literal` calls).
     if len(text) < GOAL_TYPE_CHUNK_THRESHOLD:
         ok = watchdog.keys(pid, "-l", "--", text, kind=kind, nudge=nudge,
                            user_authored=user_authored, run=run, logs=logs,
@@ -366,7 +369,8 @@ def _settle_type_verify(pid, run, text, sleep_fn, allow_scrolled=False):
 
 
 def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
-                                    kind="type", user_authored=False, nudge=None):
+                                    kind="type", user_authored=False, nudge=None,
+                                    state=None):
     """#746/#747 -- the SHARED first-phase of a scroll-length two-phase type: type
     the short FIRST chunk (`GOAL_TYPE_CHECKPOINT_CHARS`) into the still-UNSCROLLED
     box and settle-verify head-is-prefix, then -- ONLY if that checkpoint LANDED
@@ -425,6 +429,16 @@ def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
     # type. Bailing here would STRAND the typed head chunk instead.
     _type_literal(pid, run, text[GOAL_TYPE_CHECKPOINT_CHARS:], sleep_fn,
                   kind=kind, user_authored=user_authored, nudge=nudge)
+    # #1022 -- the inner `_type_literal` calls above type PARTIAL chunks
+    # (head_chunk, then the rest), so state is NEVER threaded to them (a partial
+    # record is useless to the wedge). Record the FULL `text` ONCE here, after the
+    # whole scroll-length payload has been typed -- otherwise a #923 batched
+    # `nudge:` machine nudge (1000-1400c takes this two-phase path AND matches
+    # `_own_nudge_submit_prefix`) would go UNrecorded and the wedge would submit
+    # it through the back door under the kill switch (the exact #1022 gap). Gated
+    # to a machine nudge; owner replies (`user_authored`) never recorded.
+    if state is not None and not user_authored:
+        watchdog._record_machine_nudge(state, pid, text, nudge, time.time())
     return _TV_LANDED
 
 
@@ -484,7 +498,8 @@ def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
             # suppressed first chunk returns _TV_HOLD (no keystroke -> no undo).
             hc = _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
                                                  kind=kind, nudge=nudge,
-                                                 user_authored=user_authored)
+                                                 user_authored=user_authored,
+                                                 state=state)
             if hc == _TV_HOLD:
                 return False                     # unreadable / collapsed / suppressed -> NO keystrokes
             if hc == _TV_CORRUPT:                # head swallowed -> undo the chunk + retry
@@ -1217,7 +1232,8 @@ def deliver_with_stash(pid, text, run, captured=None, logs=None, sleep_fn=None,
     two_phase = len(text) >= GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD
     if two_phase:
         hc = watchdog._type_two_phase_head_checkpoint(
-            pid, run, text, sleep_fn, kind=nudge_kind, user_authored=user_authored, nudge=nudge)
+            pid, run, text, sleep_fn, kind=nudge_kind, user_authored=user_authored,
+            nudge=nudge, state=state)
         if hc != _TV_LANDED:
             _log("stash-abort: head-checkpoint-%s" % hc)
             if hc == _TV_CORRUPT:

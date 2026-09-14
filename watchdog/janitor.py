@@ -219,7 +219,7 @@ def _janitor_clear_watch(state, pid):
 # --------------------------------------------------------------------------- #
 # #1022 — the wedge machine-draft record. The keystroke primitive (`_type_literal`)
 # already knows what it typed, so it RECORDS every machine nudge (a `nudge=`
-# identity in `ALL_NUDGE_KINDS`, not `user_authored`) per-pane in
+# identity in `MACHINE_NUDGE_KINDS`, not `user_authored`) per-pane in
 # `state["nudge_typed"]`. Job 10 (the wedge) CONSULTS that record: a wedged draft
 # matching a recorded machine nudge is janitor-CLEARED, never submitted (a submit
 # would be a nudge through the back door under the #994/#1023 kill switch, even

@@ -638,7 +638,7 @@
     "watchdog/roster.py": 154,
     "watchdog/session_health_observe.py": 76,
     "watchdog/session_status.py": 400,
-    "watchdog/stash.py": 1617,
+    "watchdog/stash.py": 1633,
     "watchdog/sweep_jobs.py": 392,
     "watchdog/tmux_io.py": 1417,
     "watchdog/transcripts.py": 1652,
@@ -685,7 +685,7 @@
     "watchdog/ops_wait_recheck.py::goal_ops_wait_recheck": 280,
     "watchdog/queue_arrival_recheck.py::goal_queue_arrival_recheck": 230,
     "watchdog/release_gap.py::goal_release_gap_recheck": 231,
-    "watchdog/stash.py::deliver_with_stash": 298,
+    "watchdog/stash.py::deliver_with_stash": 299,
     "watchdog/wedge.py::prompt_wedge_check": 294
   },
   "rule_bytes": {
