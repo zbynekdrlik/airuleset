@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 9667,
+    "airuleset.py": 9676,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2338,
     "cli_account_bootstrap.py": 285,
@@ -87,7 +87,7 @@
     "gates/secrets.py": 355,
     "gates/shellcmd.py": 88,
     "gates/testskips.py": 214,
-    "goal_registry.py": 485,
+    "goal_registry.py": 502,
     "notify/__init__.py": 3332,
     "ratchet_counts.py": 264,
     "statusbar.py": 979,
