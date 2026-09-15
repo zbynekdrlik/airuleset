@@ -202,36 +202,73 @@ def _parse_worktree_records(stdout):
     return records
 
 
-def _resolve_base_branch(repo_root, records, run):
-    """The integration base a lane's merged-ness is judged against.
+def _pick_most_advanced_ref(repo_root, candidates, run):
+    """Among ``candidates`` (existing refs, in preference order) return the tip
+    that CONTAINS every other — the most advanced integration point. ``cand``
+    contains ``other`` when ``other`` is an ancestor of ``cand`` (``git
+    merge-base --is-ancestor other cand`` exits 0). When no single tip contains
+    all the others the candidates have genuinely DIVERGED (e.g. a fork's
+    ``origin/develop`` and the real ``upstream/develop`` that both moved on): log
+    it and return the newest by commit date (``log -1 --format=%ct``). A single
+    candidate is returned verbatim; an empty list yields ``None``. Fails toward
+    the first candidate, never raises."""
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
 
-    Resolve the default-branch NAME from ``git symbolic-ref --quiet
-    refs/remotes/origin/HEAD`` (``main`` here, ``develop`` on the odoo streams).
-    Then pick between the LOCAL branch and ``origin/<name>``:
-
-    * LOCAL ``<name>`` when it exists AND ``origin/<name>`` is an ancestor of it
-      (local is equal-to-or-AHEAD of origin — UNPUSHED integration). This is the
-      controller: integration merges a lane into local ``main`` and immediately
-      dispatches the next lane while a ~35-min ``push`` runs, so the just-merged
-      lane is in local ``main`` but not yet in ``origin/main`` — judging against
-      ``origin/main`` would count it live and block every next sequential
-      dispatch for the whole push window (the pre-#1031 code used local ``main``,
-      and this preserves that).
-    * ``origin/<name>`` otherwise — a stream box's LOCAL ``develop`` can be STALE
-      (behind origin), so it must not win; ``origin/<name>`` is the fresh base.
-
-    #1031: NEVER the main checkout's own branch when it is a FEATURE branch (a
-    stream box sits on ``david3/…`` — the second latent defect). When
-    ``origin/HEAD`` is unset (a symref clone sets but which can be pruned), probe
-    the standard integration branches before the feature-branch fallback. Fails
-    toward the fallback, never raises."""
-    def _rc0(cmd):
+    def _contains(cand, other):
         try:
-            r = run(cmd)
-        except Exception:  # noqa: BLE001 — any git error => "does not hold"
+            r = run(["git", "-C", repo_root, "merge-base", "--is-ancestor",
+                     other, cand])
+        except Exception:  # noqa: BLE001 — any git error => "does not contain"
             return False
         return getattr(r, "returncode", 1) == 0
 
+    for cand in candidates:
+        if all(_contains(cand, other) for other in candidates if other != cand):
+            return cand
+
+    print("lane-overlap: base candidates diverged (%s) — newest-commit-date pick"
+          % ", ".join(candidates), file=sys.stderr)
+
+    def _cdate(ref):
+        try:
+            r = run(["git", "-C", repo_root, "log", "-1", "--format=%ct", ref])
+            return int((r.stdout or "").strip())
+        except Exception:  # noqa: BLE001 — unparsable/missing date => oldest
+            return 0
+    return max(candidates, key=_cdate)
+
+
+def _resolve_base_branch(repo_root, records, run):
+    """The integration base a lane's merged-ness AND its touched-file diff are
+    judged against — the SINGLE source of truth for both (it feeds
+    ``_lane_is_merged`` and ``_lane_files`` inside ``gather_live_lanes``).
+
+    Two steps (#1031 fork follow-up):
+
+    1. NAME — ``develop`` when ANY remote or the local repo carries a
+       ``develop`` ref (the 3-branch odoo projects), detected with ``git
+       for-each-ref`` (deliberately NOT ``rev-parse`` — a shape the sibling test
+       fakes leave inert, so it can never false-positive off an over-permissive
+       ``rev-parse origin/*`` stub); else the name from ``git symbolic-ref
+       refs/remotes/origin/HEAD``; else a ``main``/``master`` probe.
+    2. TIP — among the candidates ``upstream/<name>``, ``origin/<name>`` and
+       local ``<name>`` that actually exist, the tip that CONTAINS the others
+       (``_pick_most_advanced_ref``). So a fork-no-merge stream (``origin`` = a
+       fork whose ``develop`` is STALE, ``upstream`` = the real repo its lanes
+       cut from and merge into) judges against ``upstream/develop``; gk
+       (``origin`` IS the real upstream) against ``origin/develop``; and the
+       controller against LOCAL ``main`` when it is ahead of ``origin/main`` — a
+       lane merged into local ``main`` but not yet pushed during the ~35-min
+       ``push`` window must not read as unmerged and block the next sequential
+       dispatch (the v0.1.293 unpushed-integration rule, now the SAME "most
+       advanced" rule generalised from two candidates to three).
+
+    NEVER the main checkout's own branch when it is a FEATURE branch (a stream
+    box sits on ``david3/…``). Fails toward the legacy probe / the first
+    worktree branch / ``main``, never raises."""
     def _verify(ref):
         try:
             r = run(["git", "-C", repo_root, "rev-parse", "--verify",
@@ -240,41 +277,61 @@ def _resolve_base_branch(repo_root, records, run):
             return False
         return getattr(r, "returncode", 1) == 0 and bool((r.stdout or "").strip())
 
+    def _develop_ref_exists():
+        # for-each-ref (NOT rev-parse) over local heads + every remote-tracking
+        # dir, so a fork whose origin/HEAD is unset still resolves the NAME to
+        # develop, and a fake that over-approves `rev-parse origin/*` cannot
+        # false-positive it.
+        try:
+            r = run(["git", "-C", repo_root, "for-each-ref", "--format=%(refname)",
+                     "refs/heads/develop", "refs/remotes/*/develop"])
+        except Exception:  # noqa: BLE001
+            return False
+        return getattr(r, "returncode", 1) == 0 and bool((r.stdout or "").strip())
+
+    # 1) NAME.
     name = None
-    try:
-        r = run(["git", "-C", repo_root, "symbolic-ref", "--quiet",
-                 "refs/remotes/origin/HEAD"])
-        if getattr(r, "returncode", 1) == 0:
-            ref = (r.stdout or "").strip()
-            if ref.startswith("refs/remotes/origin/"):
-                name = ref[len("refs/remotes/origin/"):]
-            elif ref.startswith("refs/remotes/"):
-                return ref[len("refs/remotes/"):]  # a non-origin remote HEAD
-            elif ref:
-                return ref
-    except Exception as e:
-        print("lane-overlap: origin/HEAD resolve failed (%s)" % e,
-              file=sys.stderr)
+    if _develop_ref_exists():
+        name = "develop"
+    if name is None:
+        try:
+            r = run(["git", "-C", repo_root, "symbolic-ref", "--quiet",
+                     "refs/remotes/origin/HEAD"])
+            if getattr(r, "returncode", 1) == 0:
+                ref = (r.stdout or "").strip()
+                if ref.startswith("refs/remotes/origin/"):
+                    name = ref[len("refs/remotes/origin/"):]
+                elif ref.startswith("refs/remotes/"):
+                    return ref[len("refs/remotes/"):]  # a non-origin remote HEAD
+                elif ref:
+                    return ref
+        except Exception as e:  # noqa: BLE001
+            print("lane-overlap: origin/HEAD resolve failed (%s)" % e,
+                  file=sys.stderr)
+    if name is None:
+        for cand in ("main", "master"):
+            if _verify("origin/" + cand) or _verify(cand):
+                name = cand
+                break
 
-    if name:
-        remote_ref = "origin/" + name
-        # prefer LOCAL <name> only when it is equal-to-or-AHEAD of origin
-        # (unpushed integration on the controller); else the fresh origin ref.
-        if _verify(name) and _rc0(["git", "-C", repo_root, "merge-base",
-                                   "--is-ancestor", remote_ref, name]):
-            return name
-        return remote_ref
+    if name is None:
+        # nothing resolved a name — the legacy origin/HEAD-unset probe, then the
+        # first worktree branch, then main (a bare/odd repo still gets a base).
+        for cand in ("origin/develop", "origin/main", "origin/master",
+                     "develop", "main"):
+            if _verify(cand):
+                return cand
+        if records and records[0].get("branch"):
+            return records[0]["branch"]
+        return "main"
 
-    # origin/HEAD unset — probe the standard integration branches (develop-first
-    # for the fork-no-merge streams whose main checkout IS a feature branch;
-    # airuleset has no `develop`, so it correctly lands on main).
-    for cand in ("origin/develop", "origin/main", "origin/master",
-                 "develop", "main"):
-        if _verify(cand):
-            return cand
-    if records and records[0].get("branch"):
-        return records[0]["branch"]
-    return "main"
+    # 2) TIP — the most advanced of the existing {upstream, origin, local}.
+    candidates = [c for c in ("upstream/" + name, "origin/" + name, name)
+                  if _verify(c)]
+    picked = _pick_most_advanced_ref(repo_root, candidates, run)
+    if picked:
+        return picked
+    return "origin/" + name  # name known but no candidate verified — conventional base
 
 
 def _is_lane_worktree(record):
