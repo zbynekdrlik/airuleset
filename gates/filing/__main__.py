@@ -162,6 +162,33 @@ def _write_log(log_path, results, has_block, sid):
         pass
 
 
+def _intake_reaction_block(crit_l, body, clean_title, parents_str, target_repo):
+    """#1027/#1033 -- a `user-request` ticket filed FROM a client Odoo Discuss
+    message (body QUOTES a mail.message / discuss.channel_<N> / msg <id> origin)
+    MUST cite the intake worker-reaction (an `Ack-reaction:` line): the owner's
+    visible 👷 "being worked on" signal goes on the client message the MOMENT it
+    is picked up, BEFORE the ticket is filed (skills/odoo-client-messaging/
+    ack-reaction.md). UNCONDITIONAL (attended or not) -- the intake reaction is a
+    fleet rule, not an owner-present gate, and it BLOCKS before the presence/
+    dedup/cap gates. A PreToolUse hook has no Odoo credentials, so it cannot post
+    the reaction itself ("or the gate posts it") -- it blocks and instructs the
+    stream to react + cite instead. Returns a BLOCK result tuple, or None.
+    """
+    if crit_l == "user-request" and body \
+            and CLIENT_MSG_ORIGIN_RE.search(body) \
+            and not ACK_REACTION_CITE_RE.search(body):
+        return ("BLOCK", clean_title,
+                "intake-no-worker-reaction (this user-request quotes "
+                "a client Odoo message -- react 👷 on that message "
+                "FIRST via message_reaction_guarded(msg_id,\"👷\",\"add\") "
+                "and cite it with an `Ack-reaction: msg <id> 👷` line "
+                "in the body, or `Ack-reaction: pending — <reason>` if "
+                "the guarded method is not yet on that instance; see "
+                "skills/odoo-client-messaging/ack-reaction.md)",
+                parents_str, target_repo, "")
+    return None
+
+
 def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
     """Run the per-segment classifier over `cmd` and return the list of result
     tuples (verdict, title, reason_or_crit, parents_str, target_repo, dedup).
@@ -320,29 +347,12 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
                                  "labeled rework tickets)",
                                  parents_str, target_repo, ""))
                 continue
-            # #1027/#1033 -- a `user-request` ticket filed FROM a client Odoo
-            # Discuss message (body QUOTES a mail.message / discuss.channel_<N> /
-            # msg <id> origin) MUST cite the intake worker-reaction (an
-            # `Ack-reaction:` line): the owner's visible 👷 "being worked on"
-            # signal goes on the client message the MOMENT it is picked up, BEFORE
-            # the ticket is filed (skills/odoo-client-messaging/ack-reaction.md).
-            # UNCONDITIONAL (attended or not) -- the intake reaction is a fleet
-            # rule, not an owner-present gate, and it BLOCKS before the presence/
-            # dedup/cap gates. A PreToolUse hook has no Odoo credentials, so it
-            # cannot post the reaction itself ("or the gate posts it") -- it blocks
-            # and instructs the stream to react + cite instead.
-            if crit_l == "user-request" and body \
-                    and CLIENT_MSG_ORIGIN_RE.search(body) \
-                    and not ACK_REACTION_CITE_RE.search(body):
-                results.append(("BLOCK", clean_title,
-                                 "intake-no-worker-reaction (this user-request quotes "
-                                 "a client Odoo message -- react 👷 on that message "
-                                 "FIRST via message_reaction_guarded(msg_id,\"👷\",\"add\") "
-                                 "and cite it with an `Ack-reaction: msg <id> 👷` line "
-                                 "in the body, or `Ack-reaction: pending — <reason>` if "
-                                 "the guarded method is not yet on that instance; see "
-                                 "skills/odoo-client-messaging/ack-reaction.md)",
-                                 parents_str, target_repo, ""))
+            # #1027/#1033 -- intake worker-reaction citation gate (fleet rule);
+            # BLOCKS before the presence/dedup/cap gates. See helper docstring.
+            intake_block = _intake_reaction_block(
+                crit_l, body, clean_title, parents_str, target_repo)
+            if intake_block is not None:
+                results.append(intake_block)
                 continue
             # #842 -- UNATTENDED gates (an ATTENDED / owner-present filing keeps the
             # pre-#842 flow untouched, so these never touch the owner). presence-gate
