@@ -937,7 +937,8 @@ def _await_typed_landed(pane_id, text, run, sleep_fn, want=True):
 
 
 def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
-                  out=None, user_authored=False, nudge=None, state=None):
+                  out=None, user_authored=False, nudge=None, state=None,
+                  skip_confirm=False):
     """Type `text` + Enter into a BARE input box and VERIFY the submit landed
     via the TRANSCRIPT (the #486 delivery bullet's structured proof), not the
     pane render: after the send, the session jsonl at `tpath` must gain a new
@@ -1069,10 +1070,17 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         return False
     watchdog.keys(pane_id, "Enter", kind="send", nudge=nudge,
                   user_authored=user_authored, run=run, logs=logs)
-    if _await_submit_confirmed(tpath, baseline, text, sleep_fn):
+    # #1023 timeout-race — `skip_confirm` (budget too low for the ~10-20s
+    # transcript confirm-wait) short-circuits BOTH the confirm poll AND the
+    # corrective Escape+Enter (which itself confirm-waits): the Enter already
+    # went in, so fall straight through to the ONE box read below — a bare box
+    # there is surfaced as `delivered_unconfirmed` (an accepted state that stamps
+    # the floor), so the caller delivers+marks fast instead of polling into the
+    # 2-min unit kill. The pre-Enter type-settle above keeps its real sleep.
+    if not skip_confirm and _await_submit_confirmed(tpath, baseline, text, sleep_fn):
         return True
     # Unconfirmed. Only act further when our text is PROVABLY still in the box.
-    if watchdog._typed_landed(text, watchdog._input_line_text(
+    if not skip_confirm and watchdog._typed_landed(text, watchdog._input_line_text(
             watchdog.capture_pane(pane_id, run, lines=40))):
         # A swallowed Enter (#36 class) — ONE corrective Escape+Enter (reached
         # only when ON: a suppressed type bailed above).
