@@ -14,8 +14,6 @@ Three units, one lane:
      open implementation lane.
 """
 
-import os
-import subprocess
 import sys
 from pathlib import Path
 from unittest import TestCase, main

@@ -176,6 +176,7 @@ and labels are untouched (the #547/#552/#570/#636 pattern).
 import os
 import re
 
+import ack_reaction                              # #1027/#1033 single ack-emoji source
 import watchdog
 from watchdog import nudge_gate as _nudge_gate   # #797 shared cadence gate
 
@@ -914,10 +915,14 @@ def _discuss_audit_scope(cwd):
 # is rotting with no closing note (montalu5). The watchdog cannot read Discuss
 # (#550), so the DUTY is named with the exact command; the session's own gh does
 # the read. Doctrine-only, no count change.
+# #1027/#1033: the ack emoji comes from the single `ack_reaction_emoji` source
+# (fleet default WORKER 👷). Kept length-neutral vs the old 👀 literal so the
+# NUDGE_MAX_CHARS greedy budget is unchanged (the #1026 headroom lesson).
 _DISCUSS_TRIGGER = (
     "DISCUSS-AUDIT (#695): zavri tikety bez `Discuss-closed:` -- "
     "`gh issue list -s closed -S \"discuss.channel_\" -L 30`; "
-    "nová klientska správa → 👀 reakciu (#978).")
+    "nová klientska správa → %s reakciu (#978)." %
+    ack_reaction.ACK_REACTION_EMOJI_DEFAULT)
 
 
 # #753 (b) -- the UNPARK-AUDIT clause (odoo-erp only, the SAME scope as
