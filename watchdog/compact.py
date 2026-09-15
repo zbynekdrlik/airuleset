@@ -1161,6 +1161,63 @@ def resolve_self_pane(run=None, projects_dir=None, pane_env=None):
     return pane_id, cwd, tpath.stem
 
 
+def resolve_declared_window_pane(cwd, run=None, projects_dir=None):
+    """#1038 follow-up — resolve the pane whose CURRENT PATH is `cwd`
+    (realpath equality — the `cli_concurrency.is_exact_declared_window`
+    semantics, never containment), for `airuleset.py status`'s goal row run
+    OUTSIDE a tmux pane (over ssh, no `$TMUX_PANE`, so `resolve_self_pane`
+    yields nothing). Uses the SAME `watchdog._reconcile_candidate_panes`
+    enumeration seam job 9's virgin scan uses (`tmux list-panes -a -F
+    '#{pane_id}\\t#{pane_current_command}\\t#{pane_current_path}'`).
+
+    Returns `(pane_id, cwd, sid)` — like `resolve_self_pane`, so the status
+    command can treat both resolvers uniformly. When several live panes share
+    the cwd, the one running `claude` (a live claude session) wins over a bare
+    node/bun; `("", "", "")` when no pane's current path equals `cwd` (no
+    claude session at that cwd, or the cwd is not a live pane at all — the
+    caller then reports the row `unmeasurable`, never a fabricated NOT-armed).
+
+    READ-ONLY: enumerates panes and reads the transcript for the sid; it
+    NEVER types (no keystroke primitive is reachable from here). A tmux read
+    failure yields `("", "", "")` — fail-safe toward "unmeasurable", never a
+    false verdict."""
+    run = run or watchdog._default_run
+    projects_dir = projects_dir or watchdog.PROJECTS_DIR
+    try:
+        cwd_real = os.path.realpath(cwd) if cwd else ""
+    except OSError:
+        cwd_real = cwd or ""
+    if not cwd_real:
+        return "", "", ""
+    try:
+        panes = watchdog._reconcile_candidate_panes(run)
+    except Exception:  # noqa: BLE001 — a tmux read failure -> no match (unmeasurable)
+        return "", "", ""
+    match = None                                   # (pane_id, pane_cwd)
+    for pid, pcwd, cmd in panes:
+        if not pcwd:
+            continue
+        try:
+            preal = os.path.realpath(pcwd)
+        except OSError:
+            preal = pcwd
+        if preal != cwd_real:
+            continue
+        if cmd == "claude":
+            match = (pid, pcwd)                     # a live claude session wins outright
+            break
+        if match is None:
+            match = (pid, pcwd)                     # a node/bun pane -> keep looking for claude
+    if match is None:
+        return "", "", ""
+    pid, pcwd = match
+    sid = ""
+    tinfo = watchdog.find_active_transcript(projects_dir, pcwd)
+    if tinfo:
+        sid = tinfo[0].stem
+    return pid, pcwd, sid
+
+
 # --------------------------------------------------------------------------- #
 # Submit verification (#375 part 2) — the compact counterpart of the
 # swallowed-submit recovery goal/stash already have.

@@ -214,24 +214,34 @@ def goal_variant_label(mode, role):
     return "%s/%s" % (role, mode) if role else "%s" % mode
 
 
-def goal_status_row(cwd, armed, pending=False, window_name=None, user=None,
-                    home=None, windows=None):
+def goal_status_row(cwd, armed, pending=False, pane_found=True,
+                    window_name=None, user=None, home=None, windows=None):
     """#1038 item (3) -- the ``airuleset.py status`` ``goal:`` row, next to
     ``concurrency:``. Reads the SAME truth the arm machinery uses: ``armed`` is
-    the tri-state ``watchdog.pane_goal_armed`` of the caller's own pane
+    the tri-state ``watchdog.pane_goal_armed`` of the RESOLVED pane
     (True/False/None), ``pending`` is whether a durable goal-arm request is
-    still in flight for this session. The variant (which /goal WOULD/DID arm) is
-    always resolvable from the cwd via `resolve_concurrency`, so the owner sees
-    it in every state:
+    still in flight for that session. The variant (which /goal WOULD/DID arm)
+    is always resolvable from the cwd via `resolve_concurrency`, so the owner
+    sees it in every state:
       * armed True                 -> ``goal: armed <variant>``
       * a pending request          -> ``goal: arming <variant> (request pending)``
-      * armed False / not-in-a-pane-> ``goal: NOT armed — type /autopilot (variant <variant>)``
-    A declared window that reads NOT armed is the exact post-reboot state #1038
-    fixes; the row tells the owner the one word (`/autopilot`) is the whole
-    procedure -- they never dig up a goal text again."""
+      * armed False (a real read)  -> ``goal: NOT armed — type /autopilot (variant <variant>)``
+      * no pane resolved           -> ``goal: unmeasurable outside a pane ...``
+    ``pane_found`` (#1038 follow-up) is the honesty gate: a ``NOT armed``
+    verdict is printed ONLY after a REAL pane read (self pane via
+    ``$TMUX_PANE``, or the declared window's pane resolved for this cwd when
+    ``status`` is run over ssh). When NO pane could be resolved, the row is
+    ``unmeasurable`` -- NEVER ``NOT armed`` asserted with no measurement (the
+    honesty defect the first #1038 lane's not-in-a-pane branch shipped: over
+    ssh it told the owner his armed windows were NOT armed). A declared window
+    that genuinely reads NOT armed is the post-reboot state #1038 fixes; the
+    row tells the owner the one word (`/autopilot`) is the whole procedure."""
     mode, role, _source = resolve_concurrency(cwd, window_name, user, home,
                                               windows)
     variant = goal_variant_label(mode, role)
+    if not pane_found:
+        return ("goal: unmeasurable outside a pane (variant %s) — run status "
+                "inside the claude pane or type /autopilot there" % variant)
     if armed is True:
         return "goal: armed %s" % variant
     if pending:
