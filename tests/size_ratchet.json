@@ -65,7 +65,7 @@
     "filedrop/__init__.py": 281,
     "filedrop/server.py": 217,
     "filedrop/share.py": 103,
-    "filedrop/show_server.py": 378,
+    "filedrop/show_server.py": 487,
     "filedrop/upload_server.py": 309,
     "filedrop/vault.py": 1071,
     "filedrop/vault_server.py": 580,
