@@ -125,11 +125,18 @@ CLI_BYPASS_LOGS = (
 # bypass. #732 relocates it via AIRULESET_MAIN_EXEC_LOG_DIR, but the default
 # /tmp location is what an audit run reads.
 _MAIN_EXEC_GLOB = "airuleset-main-exec-bypass-*.log"
-# `main-exec bypass refused ...` = a cleared no-reason marker (not honored);
-# `main-exec bypass-arm ...` = the PREPARATORY compound-command arm, not the
-# honored bypass event (the `main-exec bypass ... (allowed ...)` line is). Skip
-# both; count only the `(allowed ...)` lines (review 🟡).
-_MAIN_EXEC_SKIP = ("bypass refused", "bypass-arm")
+# The main-exec log has FOUR line shapes across TWO writers; count only the
+# honored-bypass event (the `(allowed ...)` line), skip the rest:
+#   block-main-implementation.sh:615  `(allowed, deferred consume pending post-exec)`  COUNT
+#   block-main-implementation.sh:619  `(allowed, pending-write FAILED, consumed in PreToolUse)`  COUNT
+#   block-main-implementation.sh:626  `bypass refused ... (no reason, cleared)`  SKIP
+#   block-main-implementation.sh:434  `bypass-arm ...` (preparatory)  SKIP
+#   post-consume-main-exec-marker.sh:135  `(consumed, post-exec)`  SKIP (the 2nd
+#     line of the deferred pair -- skipping it is what prevents a 2x double-count,
+#     review 🟡 #2). The marker is the EXACT `consumed, post-exec` phrase, NOT a
+#     broad `(consumed` -- line 619's `consumed in PreToolUse` is a genuine
+#     honored bypass and must stay counted.
+_MAIN_EXEC_SKIP = ("bypass refused", "bypass-arm", "consumed, post-exec")
 _MAIN_EXEC_UID_RE = re.compile(r"airuleset-main-exec-bypass-(\S+?)\.log$")
 
 _BYPASS_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")

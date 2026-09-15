@@ -119,6 +119,29 @@ class TestCliBypassReader(unittest.TestCase):
         c = audit.count_cli_bypasses(root=self.audits, tmp_dir=self.tmp)
         self.assertEqual(c["total"], 1)  # only the (allowed ...) line counts
 
+    def test_main_exec_deferred_pair_counts_once(self):
+        # review 🟡 #2 -- a normal deferred main-exec bypass writes TWO lines
+        # (the `(allowed, deferred ...)` from block-main-implementation.sh + the
+        # `(consumed, post-exec)` from post-consume-main-exec-marker.sh). Count once.
+        Path(self.tmp, "airuleset-main-exec-bypass-1000.log").write_text(
+            "%sT10:00:00+02:00 main-exec bypass session=s tool=Edit marker=main-exec-ok "
+            "(allowed, deferred consume pending post-exec) reason=policy\n"
+            "%sT10:00:01+02:00 main-exec bypass session=s (consumed, post-exec) reason=policy\n"
+            % (self.day, self.day))
+        c = audit.count_cli_bypasses(root=self.audits, tmp_dir=self.tmp)
+        self.assertEqual(c["total"], 1)
+
+    def test_main_exec_pending_write_failed_still_counted(self):
+        # the pending-write-FAILED path (line 619) carries `consumed in PreToolUse`
+        # -- a GENUINE honored bypass; the precise `consumed, post-exec` marker
+        # must NOT skip it.
+        Path(self.tmp, "airuleset-main-exec-bypass-1000.log").write_text(
+            "%sT10:00:00+02:00 main-exec bypass session=s tool=Edit marker=main-exec-ok "
+            "(allowed, pending-write FAILED, consumed in PreToolUse) reason=policy\n"
+            % self.day)
+        c = audit.count_cli_bypasses(root=self.audits, tmp_dir=self.tmp)
+        self.assertEqual(c["total"], 1)
+
     def test_tier0_inline_bypass_with_blocked_in_cmd_is_counted(self):
         # review 🔵 -- a genuine inline-bypass whose cmd text contains the word
         # "blocked" must NOT be false-skipped (the marker anchors on `  blocked  cmd=`).
