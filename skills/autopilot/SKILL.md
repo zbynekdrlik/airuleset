@@ -67,7 +67,7 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
   lanes or not) and the loop continues. (Worktree isolation unavailable, or a lane's candidates
   overlap too heavily to parallelize? Dispatch falls back to the documented single-worker serial
   shape — same mechanics, no `isolation:`, one unit at a time.)
-- **Bundling AND parallel fleet dispatch both cut cost — different axes.** CI is long here, so bundling
+- **Bundling AND parallel fleet dispatch both cut cost — different axes (fleet dispatch is PARALLEL mode only; a `sequential` pane runs ONE lane and pushes nothing — read the mode FIRST, Step 3.0/#1035).** CI is long here, so bundling
   spends ONE CI cycle on as many bundle-safe issues as the gate allows
   (`autonomous-batch-issue-development.md`) instead of one-PR-per-issue — this cuts CI cost per
   worker. Continuous fleet dispatch (several worktree-isolated worker lanes running concurrently)
@@ -447,7 +447,9 @@ the `/goal` line, the loop never starts.
 ## Step 3 — Per-issue cycle (the loop body — run BY the `/goal` loop each turn, NOT by the initial `/autopilot` call)
 
 > You reach this section only when a turn fires under the `/goal` loop the user pasted in Step 2.
-> The plain `/autopilot` invocation STOPS at Step 2 — it never runs Step 3 itself.
+> The plain `/autopilot` invocation STOPS at Step 2 — it never runs Step 3 itself. But a RESUMED /
+> UNARMED session told to continue ("pokračuj" after a restart) DOES run this cycle with NO armed
+> goal — exactly the #1035 defect — which is why Step 3.0 below is read FIRST every cycle, armed or NOT.
 
 ### Step 3.0 — Concurrency MODE gate (read FIRST every cycle — armed or NOT, #1035)
 
