@@ -104,10 +104,37 @@ class TestInfraBannerMarker(unittest.TestCase):
 
 class TestCoreQualsWiresBanner(unittest.TestCase):
     def test_core_quals_default_infra_path_prints_banner(self):
-        # source lock: the default (human list) path of cmd_core_quals prints the
-        # infra banner for role==infra (additive, before the workable rows).
+        # source lock: the --list path of cmd_core_quals prints the infra banner
+        # for role==infra (additive, before the workable rows).
         src = inspect.getsource(q.cmd_core_quals)
         self.assertIn("_infra_new_since_banner", src)
+
+    def test_core_quals_banner_goes_to_stderr_not_stdout(self):
+        # CHANNEL lock (review 1 F1 / review 2 F3): the banner must be printed to
+        # STDERR so it is never mistaken for a stdout TSV row by a future
+        # `--role infra --list` parser. A regression flipping it back to stdout
+        # (dropping `file=sys.stderr` from the banner print) must fail here. AST,
+        # not a substring: locate the `print(_banner, ...)` call and assert it
+        # carries `file=sys.stderr`.
+        import ast
+        tree = ast.parse(inspect.getsource(q.cmd_core_quals))
+        banner_prints = []
+        for node in ast.walk(tree):
+            if (isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Name)
+                    and node.func.id == "print"
+                    and any(isinstance(a, ast.Name) and a.id == "_banner"
+                            for a in node.args)):
+                banner_prints.append(node)
+        self.assertTrue(banner_prints, "no `print(_banner, ...)` call found")
+        for call in banner_prints:
+            kw = {k.arg: k.value for k in call.keywords}
+            self.assertIn("file", kw, "banner print must target a stream")
+            val = kw["file"]
+            self.assertTrue(
+                isinstance(val, ast.Attribute) and val.attr == "stderr"
+                and isinstance(val.value, ast.Name) and val.value.id == "sys",
+                "banner print must go to sys.stderr, not stdout")
 
 
 if __name__ == "__main__":

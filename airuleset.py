@@ -6027,13 +6027,22 @@ def _watchdog_queue_classify(cwd):
 INFRA_QUEUE_HUB = {"zbynekdrlik/odoo-erp": 6883}
 # a comment is an infra hand-off when its body carries a STOP:/GATEKEEPER-ACTION
 # (INFRA) tag — the exact markers the FLOW session posts (issue #1029).
+# The GATEKEEPER-ACTION (INFRA) arm matches the tag on any line that is NOT a
+# markdown QUOTE (`> …`) — a quoted reply echoes the tag but is not a fresh
+# hand-off, so it must not register as an arrival (review 2, #818 class). The
+# negative lookahead excludes quoted lines ONLY, never a genuine line-start or
+# inline marker, so no arrival is ever MISSED (safe direction). STOP: stays
+# line-anchored (already quote-safe: `>` is not `[ \t]`).
 _INFRA_STOP_TAG_RE = re.compile(
-    r"GATEKEEPER-ACTION \(INFRA\)|^[ \t]*STOP:", re.MULTILINE)
+    r"^(?![ \t]*>).*GATEKEEPER-ACTION \(INFRA\)|^[ \t]*STOP:", re.MULTILINE)
 # rolling window for the tagged-comment fetch: bounds the gh cost AND keeps the
 # set-delta STABLE (a `since=<last-run>` window would shrink each run and churn
 # the baseline; a fixed recent window means a new tagged comment appears and an
-# aged-out one simply leaves the baseline, never re-nudged — comments don't
-# reappear). Refines the design-of-record `since=<baseline-ts>` idea.
+# aged-out one simply leaves the baseline). Refines the design-of-record
+# `since=<baseline-ts>` idea. Caveat (review 2 finding 6): GitHub's `since`
+# filters on `updated_at`, so an EDITED old tag can re-enter the window and, if
+# it had aged out of the baseline, re-nudge once — an accepted mild re-nudge
+# (rate-limited by the per-kind floor), never a missed arrival.
 _INFRA_COMMENT_WINDOW_DAYS = 7
 # cap the tracked-ticket comment fan-out so a huge infra backlog can't blow the
 # 120s sweep budget (each tracked ticket = one bounded gh call per TTL).
@@ -6120,6 +6129,14 @@ def _watchdog_infra_queue_fetch(cwd, clock=None):
     if authority != "full":
         return None
     slug = _repo_slug(cwd=root)
+    if not slug:
+        # UNMEASURABLE (a transient `gh repo view` miss while the local
+        # authority read still succeeded): without a slug the hub cannot be
+        # identified (INFRA_QUEUE_HUB.get("") is None) so #6883 is never scanned
+        # — returning a measurable [] here would advance the baseline past a
+        # hidden STOP:. Fail safe to None (review 2 finding 1), mirroring the
+        # leaf guard in _infra_ticket_comments.
+        return None
     # 1. open infra-labelled tickets (id = number).
     try:
         r = subprocess.run(

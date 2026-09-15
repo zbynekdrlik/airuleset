@@ -390,8 +390,8 @@ def _nudge_text_infra(records, cur_count):
         "stuck-check: infra queue arrival — do infra fronty pribudlo: %s "
         "(spolu %d otvorených infra položiek), kým bola INFRA session slepá na "
         "hand-offy z FLOW session. Re-deriv svoj infra backlog "
-        "(`core-quals --role infra`) a spracuj STOP:/GATEKEEPER-ACTION (INFRA) "
-        "na infra hube a na infra tiketoch. Ak už na nich robíš, potvrď."
+        "(`core-quals --role infra --list`) a spracuj STOP:/GATEKEEPER-ACTION "
+        "(INFRA) na infra hube a na infra tiketoch. Ak už na nich robíš, potvrď."
         % (_fmt_infra_arrivals(records), cur_count))
     if len(text) <= NUDGE_MAX_CHARS:
         return text
