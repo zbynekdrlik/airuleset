@@ -488,12 +488,12 @@ def skill_sequential_drift(skill_text):
     """[] when SKILL.md's BODY carries the canonical sequential clause
     (`_SEQUENTIAL_SATURATION`) verbatim; else a one-item error list (#1035).
 
-    The skill body's SEQUENTIAL dispatch block (Step 3.0) must be RENDERED from
-    THIS source — the SAME clause the sequential `/goal` variant substitutes for
-    `saturation-core` — never hand-written, so an UNARMED session (which reads
-    only the body, not the goal line) can never disagree with the armed
-    sequential goal on whether anything pushes lane saturation. `goal-inventory
-    --check` calls this alongside `drift()`/`variant_check()`."""
+    The skill body's SEQUENTIAL dispatch block (Step 3.0) must carry THIS clause
+    VERBATIM — the SAME clause the sequential `/goal` variant uses. It is
+    hand-maintained in the body, NOT auto-rendered; `goal-inventory --check`
+    CHECK-LOCKS the two byte-identical via this function, so an UNARMED session
+    (body only, not the goal line) can never disagree with the armed sequential
+    goal on lane saturation. Called alongside `drift()`/`variant_check()`."""
     if _SEQUENTIAL_SATURATION not in (skill_text or ""):
         return ["SKILL.md body is missing the canonical sequential clause "
                 "(goal_registry._SEQUENTIAL_SATURATION) — the Step 3.0 "

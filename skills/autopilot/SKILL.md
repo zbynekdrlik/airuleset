@@ -456,7 +456,7 @@ the `/goal` line, the loop never starts.
 - **`concurrency: parallel …`** → follow the rest of Step 3 (**PARALLEL mode**, continuous-refill fleet dispatch) exactly as written — the DEFAULT for full-authority / gk boxes.
 - **`concurrency: sequential …`** → follow the **SEQUENTIAL block** immediately below and **IGNORE every refill / saturation / "keep N lanes live" / "sized to the box" sentence in the rest of this skill — they are PARALLEL mode only.** This holds **whether or not a `/goal` is armed**: the armed sequential `/goal` variant already carries the identical clause, but an UNARMED session ("po reštarte … bežím na tvoj pokračuj") reads ONLY this body — so the body itself must honour the mode. (The defect #1035 fixes: `david3@subdev`, resolving `sequential`, ran FIVE background lanes with no armed goal, 2026-09-15.)
 
-> **SEQUENTIAL dispatch block** — rendered from `goal_registry` (the SAME source the sequential `/goal` variant uses; `goal-inventory --check` locks the two byte-identical via `goal_registry.skill_sequential_drift`, so there is NO second hand-written doctrine that can drift):
+> **SEQUENTIAL dispatch block** — the canonical `goal_registry` clause carried VERBATIM (the SAME clause the sequential `/goal` variant uses; hand-maintained here, NOT auto-rendered — `goal-inventory --check` CHECK-LOCKS the two byte-identical via `goal_registry.skill_sequential_drift`, so the body can never drift from the armed goal line):
 >
 > SEQUENTIAL — ONE unit at a time: dispatch → main review → integrate → verify → next; no refill;
 >
