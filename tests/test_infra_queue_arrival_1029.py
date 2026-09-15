@@ -169,6 +169,20 @@ class TestInfraRiderPath(_InfraOrchBase):
         self.assertTrue(any("not-full-authority" in ln for ln in logs), logs)
         self.assertEqual(tmux.typed_texts(), [])
 
+    def test_unmeasurable_fetch_skips_and_keeps_baseline(self):
+        # CALLER fail-safe (#181 / #1029 review finding 3): the infra fetch
+        # returning None (UNMEASURABLE — a gh hiccup, propagated from
+        # _watchdog_infra_queue_fetch) must SKIP with the baseline UNCHANGED —
+        # never advance past a real arrival the gh failure hid, and never a
+        # keystroke.
+        base = [1, 2, 6883]
+        qrecs = {self.sid: {"base": list(base), "first_seen": NOW - DAY}}
+        tmux = self._tmux()
+        logs = self._run(qrecs, lambda cwd: None, tmux, handled=set(), state={})
+        self.assertTrue(any("skip" in ln for ln in logs), logs)
+        self.assertEqual(tmux.typed_texts(), [])            # no nudge
+        self.assertEqual(qrecs[self.sid]["base"], base)     # baseline UNCHANGED
+
     def test_infra_first_observation_seeds_no_keystroke(self):
         qrecs = {}
         tmux = self._tmux()
