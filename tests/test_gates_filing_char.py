@@ -45,7 +45,7 @@ def _empty_gh(tmpdir):
     return str(bin_dir)
 
 
-def _run(cmd, home, gh_bin, session_id="char-sid", agent_id=None):
+def _run(cmd, home, gh_bin, session_id="char-sid", agent_id=None, cwd=None):
     payload = {"tool_input": {"command": cmd}, "session_id": session_id}
     if agent_id is not None:
         payload["agent_id"] = agent_id
@@ -53,7 +53,8 @@ def _run(cmd, home, gh_bin, session_id="char-sid", agent_id=None):
     env["HOME"] = home
     env["PATH"] = gh_bin + os.pathsep + env.get("PATH", "")
     return subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
-                          capture_output=True, text=True, env=env, cwd=str(REPO))
+                          capture_output=True, text=True, env=env,
+                          cwd=cwd or str(REPO))
 
 
 def _first_stderr_line(r):
@@ -89,6 +90,22 @@ class TestFilingBlockCharacterization(TestCase):
         self.tmp = tempfile.mkdtemp(prefix="airuleset-filing-char-")
         self.home = tempfile.mkdtemp(prefix="airuleset-filing-char-home-")
         self.gh = _empty_gh(self.tmp)
+        # #1020 fix-forward (run 34920539429): every scenario relocates HOME to
+        # `self.home`, and the classifier resolves its FALLBACK target repo from
+        # the invoking cwd's `origin` via `git -C <repo> remote get-url origin`
+        # (gates.filing.caps.cwd_repo_of). Without a seeded `.gitconfig`, that
+        # git call dies `fatal: detected dubious ownership` whenever the checkout
+        # is owned by a DIFFERENT uid than the test process -- exactly the CI
+        # `python:3.12` container (uid 0) vs a runner-owned checkout, where
+        # cwd_repo_of then silently fell back to the basename `airuleset` (not
+        # `zbynekdrlik/airuleset`), the daily-cap seed lines went uncounted and
+        # test_daily_cap failed `0 != 2`. Seed the same two `safe.directory`
+        # entries CI sets (mirrors cli_remote._runner_shape_env / the #1012
+        # Pass-B test_env) so cwd_repo_of resolves the real slug in ANY ownership
+        # situation. Proven hermetic by running this class with
+        # GIT_CONFIG_GLOBAL=/dev/null (it stays green).
+        Path(self.home, ".gitconfig").write_text(
+            "[safe]\n\tdirectory = %s\n\tdirectory = %s\n" % (REPO, REPO / ".git"))
 
     def _away_sid(self):
         sid = "char-away-" + uuid.uuid4().hex[:8]
@@ -157,8 +174,13 @@ class TestFilingBlockCharacterization(TestCase):
         log.parent.mkdir(parents=True, exist_ok=True)
         today = time.strftime("%Y-%m-%d")
         # target repo is resolved from the cwd's origin remote (no -R here);
-        # the worktree's remote is zbynekdrlik/airuleset, so the seeded PASS
-        # lines must be logged under that exact repo to be counted.
+        # the checkout's remote is zbynekdrlik/airuleset, so the seeded PASS
+        # lines must be logged under that exact repo to be counted. This
+        # resolution needs git to TRUST the (relocated-HOME) checkout -- the
+        # setUp `.gitconfig` safe.directory seed is what makes cwd_repo_of
+        # return the real slug even in the CI uid-0 container (#1020 fix-forward,
+        # run 34920539429); without it the target silently degraded to the
+        # basename `airuleset`, the count stayed 0 and this assert failed.
         with log.open("w") as fh:
             for i in range(8):
                 fh.write("%sT10:00:00+02:00  verdict=PASS  repo=zbynekdrlik/airuleset  "
@@ -179,6 +201,45 @@ class TestFilingBlockCharacterization(TestCase):
         r = _run(_filing("t", "this test is flaky, skip", scope_gate="security-boundary"),
                  self.home, self.gh, session_id=self._away_sid())
         self._assert(r, _BLOCKED_HEADER, "dismissal-word")
+
+    # 12. #1020 fix-forward: cwd_repo_of's fail-OPEN is VISIBLE. When the
+    # invoking cwd's `git remote get-url origin` fails, the caps' target repo
+    # degrades to the cwd basename -- a fail-open for EVERY cap (a repo git
+    # cannot read never reaches its caps). That degradation used to be SILENT,
+    # so the exact CI failure (a wrong-repo resolution letting the daily cap
+    # slip) had no trace. This pins the honest behaviour: the filing still
+    # PASSES (count under the wrong basename repo is 0 -- fail-open, rc 0), but
+    # a journal line NOW names the unresolvable-cwd + basename fallback on
+    # stderr. Ownership cannot be faked locally, so this reproduces the SAME
+    # fallback deterministically via a fresh `git init` cwd with no `origin`.
+    def test_cwd_repo_unresolvable_emits_journal_line(self):
+        reddir = tempfile.mkdtemp(prefix="airuleset-filing-char-nogit-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(reddir, ignore_errors=True))
+        # A real git repo, but with NO `origin` remote -> `git remote get-url
+        # origin` exits non-zero ("No such remote 'origin'"), the fallback path.
+        subprocess.run(["git", "init", "-q", reddir], check=True,
+                       capture_output=True, text=True)
+        # Seed 8 PASS lines under the REAL slug, exactly like test_daily_cap:
+        # on CI (dubious-ownership fallback) the target became the basename, so
+        # these went uncounted and the cap silently did not fire -- this test
+        # makes that silent degradation observable.
+        log = Path(self.home) / ".claude" / "scope-gate.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        today = time.strftime("%Y-%m-%d")
+        with log.open("w") as fh:
+            for i in range(8):
+                fh.write("%sT10:00:00+02:00  verdict=PASS  repo=zbynekdrlik/airuleset  "
+                         "criterion=cross-cutting  session=s  parents=none  "
+                         'title="x%d"  dedup="d"\n' % (today, i))
+        r = _run(_filing("ninth-unresolvable-cwd", "prose", scope_gate="cross-cutting"),
+                 self.home, self.gh, cwd=reddir)
+        # Honest fail-open behaviour: the wrong (basename) repo has 0 counted
+        # PASS lines, so the filing is ALLOWED (rc 0), NOT blocked by the cap.
+        self.assertEqual(r.returncode, 0, r.stderr)
+        # ...but the degradation is no longer silent.
+        self.assertIn("filing: target repo unresolvable from cwd", r.stderr)
+        self.assertIn("basename fallback", r.stderr)
+        self.assertIn(os.path.basename(reddir), r.stderr)
 
 
 if __name__ == "__main__":

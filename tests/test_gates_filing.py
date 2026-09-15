@@ -195,5 +195,67 @@ class TestRender(unittest.TestCase):
         self.assertIn("followup_candidates", render.WORKER_MSG)
 
 
+class TestCwdRepoOf(unittest.TestCase):
+    """#1020 fix-forward: cwd_repo_of resolves the FALLBACK target repo from
+    the cwd's `origin`. When that git call fails, it falls back to the cwd
+    basename -- a fail-OPEN for every cap. This locks that the fail-open is
+    now VISIBLE (a stderr journal line) while its RETURN value is unchanged.
+    The exact CI failure (run 34920539429) was this fallback happening
+    SILENTLY under `dubious ownership`."""
+
+    class _FakeCompleted:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode = returncode
+            self.stdout = stdout
+            self.stderr = stderr
+
+    def _run_capture(self, cwd):
+        import io
+        from contextlib import redirect_stderr
+        from gates.filing import caps
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            result = caps.cwd_repo_of(cwd)
+        return result, buf.getvalue()
+
+    def test_git_nonzero_rc_logs_and_falls_back_to_basename(self):
+        from unittest import mock
+        from gates.filing import caps
+        fake = self._FakeCompleted(
+            128, stdout="",
+            stderr="fatal: detected dubious ownership in repository at '/x'\n")
+        with mock.patch.object(caps.subprocess, "run", return_value=fake):
+            result, err = self._run_capture("/some/where/myrepo")
+        # RETURN unchanged: the cwd basename fallback.
+        self.assertEqual(result, "myrepo")
+        # The fail-open is now VISIBLE, and names the first git-stderr line.
+        self.assertIn("filing: target repo unresolvable from cwd", err)
+        self.assertIn("basename fallback", err)
+        self.assertIn('"myrepo"', err)
+        self.assertIn("dubious ownership", err)
+
+    def test_git_exception_logs_and_falls_back_to_basename(self):
+        from unittest import mock
+        from gates.filing import caps
+        with mock.patch.object(caps.subprocess, "run",
+                               side_effect=OSError("git not found")):
+            result, err = self._run_capture("/some/where/other")
+        self.assertEqual(result, "other")
+        self.assertIn("filing: target repo unresolvable from cwd", err)
+        self.assertIn("basename fallback", err)
+        self.assertIn('"other"', err)
+
+    def test_git_success_resolves_slug_without_journal_line(self):
+        from unittest import mock
+        from gates.filing import caps
+        fake = self._FakeCompleted(
+            0, stdout="https://github.com/zbynekdrlik/airuleset.git\n", stderr="")
+        with mock.patch.object(caps.subprocess, "run", return_value=fake):
+            result, err = self._run_capture("/whatever")
+        # Resolved from origin; no fallback -> no journal line (unchanged).
+        self.assertEqual(result, "zbynekdrlik/airuleset")
+        self.assertEqual(err, "")
+
+
 if __name__ == "__main__":
     unittest.main()
