@@ -23,7 +23,7 @@
     "cli_fleet.py": 1130,
     "cli_handoff_template.py": 316,
     "cli_key_rotation.py": 711,
-    "cli_lane_overlap.py": 447,
+    "cli_lane_overlap.py": 507,
     "cli_mdreview_audit.py": 804,
     "cli_model_audit.py": 154,
     "cli_onboard.py": 1016,

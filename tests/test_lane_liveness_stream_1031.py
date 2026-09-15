@@ -15,6 +15,8 @@ default (`git symbolic-ref --quiet refs/remotes/origin/HEAD`), fallback to the
 first worktree's branch. Merged lanes stay EXCLUDED; a detached-HEAD worktree
 under the isolation dir counts as live (a lane mid-operation).
 """
+import contextlib
+import io
 import json
 import os
 import subprocess
@@ -228,6 +230,13 @@ class _AheadFake:
             self.calls.append((a, b))
             if a == origin_ref and b == self.default:
                 return _R(0) if self.local_ahead_of_origin else _R(1)
+            # the LOCAL default branch vs its origin remote: model REAL
+            # containment so a stale local (behind origin) reads as an ancestor
+            # of origin (origin CONTAINS it) — the gk/stale-develop shape must
+            # resolve via containment, not a zero-date divergence tie
+            # (#1031 review-1 NB3). Must precede the generic `b == origin_ref`.
+            if a == self.default and b == origin_ref:
+                return _R(0) if not self.local_ahead_of_origin else _R(1)
             if b == self.default:
                 return _R(0) if self.lane_ancestor_of_local else _R(1)
             if b == origin_ref:
@@ -296,6 +305,155 @@ class TestBaseBranchLocalVsOrigin(unittest.TestCase):
                       if a == "david3/7184-vyroba-dokoncenie"]
         self.assertEqual(lane_bases, ["origin/develop"],
                          "a stale local develop must not win over origin/develop")
+
+
+# --------------------------------------------------------------------------- #
+# #1031 FOLLOW-UP (fork base-branch resolution). On a FORK checkout (david3:
+# origin=kvaskodev/odoo-erp fork, upstream=the real repo) origin/HEAD is UNSET
+# and origin/develop is STALE, while lanes are cut from and merge UPSTREAM
+# develop. The old probe order picked origin/develop -> a 12-day merge-base ->
+# ~2,195 false "touched files" per lane and a lane merged UPSTREAM stayed live.
+# Fix: resolve the NAME (develop when any remote/local has one), then among
+# {upstream/<name>, origin/<name>, local <name>} pick the tip that CONTAINS the
+# others (most advanced); diverged -> newest commit date + a logged line.
+# --------------------------------------------------------------------------- #
+class _BaseResolveFake:
+    """Dependency-injected `run` modelling a box's git state for
+    `_resolve_base_branch`: which refs `rev-parse --verify` finds (``existing``),
+    the ancestor partial order (``ancestors`` = set of ``(child, parent)`` pairs
+    -> ``merge-base --is-ancestor child parent`` rc 0), whether ``origin/HEAD``
+    is set (``origin_head``), whether ``for-each-ref`` sees a develop ref
+    (``develop_seen``), and a per-lane merged state (a lane branch is merged iff
+    ``lane_merged`` AND the merged-check base == ``lane_base``). Records every
+    ``--is-ancestor`` call and every plain ``merge-base`` base (the diff base a
+    live lane's files are computed against) so the resolution is observable."""
+
+    def __init__(self, porcelain, *, existing, ancestors, origin_head=None,
+                 develop_seen=False, lane_base=None, lane_merged=False,
+                 commit_dates=None):
+        self.porcelain = porcelain
+        self.existing = set(existing)
+        self.ancestors = set(ancestors)
+        self.origin_head = origin_head
+        self.develop_seen = develop_seen
+        self.lane_base = lane_base
+        self.lane_merged = lane_merged
+        self.commit_dates = commit_dates or {}
+        self.calls = []        # (a, b) for every --is-ancestor
+        self.diff_bases = []   # base of every plain merge-base <base> <branch>
+
+    def __call__(self, cmd):
+        if "worktree" in cmd and "list" in cmd:
+            return _R(0, self.porcelain)
+        if "for-each-ref" in cmd:
+            return (_R(0, "refs/remotes/upstream/develop\n")
+                    if self.develop_seen else _R(0, ""))
+        if "symbolic-ref" in cmd:
+            return _R(0, self.origin_head + "\n") if self.origin_head else _R(1)
+        if "rev-parse" in cmd:
+            return _R(0, "sha\n") if cmd[-1] in self.existing else _R(1)
+        if "--is-ancestor" in cmd:
+            a, b = cmd[-2], cmd[-1]
+            self.calls.append((a, b))
+            if a.startswith(("david3/", "lane", "worktree-")):
+                return _R(0) if (self.lane_merged and b == self.lane_base) else _R(1)
+            return _R(0) if (a, b) in self.ancestors else _R(1)
+        if "merge-base" in cmd:              # plain merge-base <base> <branch>
+            self.diff_bases.append(cmd[-2])
+            return _R(0, "basesha\n")
+        if "log" in cmd:
+            return _R(0, str(self.commit_dates.get(cmd[-1], "0")) + "\n")
+        if "diff" in cmd:
+            return _R(0, "addons/x/models/y.py\n")
+        return _R(1)
+
+
+class TestForkBaseResolvesUpstream(unittest.TestCase):
+    # (a) fork shape: upstream/develop ahead of stale origin/develop and older
+    # local develop, origin/HEAD UNSET -> base upstream/develop.
+    def _fake(self, lane_merged=False):
+        return _BaseResolveFake(
+            STREAM_PORCELAIN,
+            existing={"upstream/develop", "origin/develop", "develop"},
+            ancestors={("origin/develop", "upstream/develop"),
+                       ("develop", "upstream/develop"),
+                       ("develop", "origin/develop")},
+            origin_head=None,          # a fork clone: origin/HEAD unset
+            develop_seen=True,         # for-each-ref finds a develop ref
+            lane_base="upstream/develop", lane_merged=lane_merged)
+
+    def test_base_is_upstream_develop(self):
+        fake = self._fake()
+        recs = lo._parse_worktree_records(STREAM_PORCELAIN)
+        self.assertEqual(lo._resolve_base_branch(D3, recs, fake),
+                         "upstream/develop")
+
+    def test_lane_merged_upstream_is_not_live(self):
+        # a lane whose tip is an ancestor of upstream/develop is FINISHED.
+        fake = self._fake(lane_merged=True)
+        self.assertEqual(lo.gather_live_lanes(D3, run=fake), [],
+                         "a lane merged UPSTREAM must not count live")
+
+    def test_lane_files_diff_against_upstream_develop(self):
+        fake = self._fake(lane_merged=False)
+        lanes = lo.gather_live_lanes(D3, run=fake)
+        self.assertEqual(len(lanes), 1)
+        self.assertIn("upstream/develop", fake.diff_bases,
+                      "_lane_files must diff against merge-base(upstream/develop, lane)")
+        lane_bases = {b for a, b in fake.calls
+                      if a == "david3/7184-vyroba-dokoncenie"}
+        self.assertEqual(lane_bases, {"upstream/develop"},
+                         "merged-ness must be judged against upstream/develop")
+
+
+class TestGkBaseResolvesOriginDevelop(unittest.TestCase):
+    # (b) gk shape: no `upstream` remote, origin/develop CONTAINS local develop
+    # -> base origin/develop (a regression guard — gk stays correct).
+    GK = "/home/gatekeeper/devel/odoo-erp"
+    PORC = (
+        "worktree %s\n"
+        "HEAD aaaa\n"
+        "branch refs/heads/develop\n"
+        "\n"
+        "worktree %s/.claude/worktrees/agent-gk\n"
+        "HEAD bbbb\n"
+        "branch refs/heads/worktree-agent-gk\n"
+    ) % (GK, GK)
+
+    def test_base_is_origin_develop_no_upstream(self):
+        fake = _BaseResolveFake(
+            self.PORC,
+            existing={"origin/develop", "develop"},        # NO upstream ref
+            ancestors={("develop", "origin/develop")},     # origin contains local
+            origin_head="refs/remotes/origin/develop",
+            develop_seen=True,
+            lane_base="origin/develop", lane_merged=False)
+        recs = lo._parse_worktree_records(self.PORC)
+        self.assertEqual(lo._resolve_base_branch(self.GK, recs, fake),
+                         "origin/develop")
+
+
+class TestDivergedBaseCandidates(unittest.TestCase):
+    # (d) diverged candidates: no single tip contains the others -> newest
+    # commit date wins AND a `base candidates diverged` line is logged.
+    def test_diverged_picks_newest_date_and_logs(self):
+        fake = _BaseResolveFake(
+            STREAM_PORCELAIN,
+            existing={"upstream/develop", "origin/develop", "develop"},
+            # local is an ancestor of both, but upstream and origin have
+            # diverged from each other (neither contains the other).
+            ancestors={("develop", "upstream/develop"),
+                       ("develop", "origin/develop")},
+            origin_head=None, develop_seen=True,
+            commit_dates={"upstream/develop": "1000",
+                          "origin/develop": "2000", "develop": "1"})
+        recs = lo._parse_worktree_records(STREAM_PORCELAIN)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            base = lo._resolve_base_branch(D3, recs, fake)
+        self.assertEqual(base, "origin/develop",
+                         "the newest-commit-date candidate wins on divergence")
+        self.assertIn("base candidates diverged", err.getvalue())
 
 
 _ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
