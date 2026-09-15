@@ -40,6 +40,7 @@ import cli_fleet  # noqa: E402
 from tests._goal_arm_helpers import (  # noqa: E402
     GOAL_IDLE_CAP,
     GOAL_ARMED_CAP,
+    GOAL_BUSY_CAP,
     DeliverGoalFakeTmux,
     _write_marker_transcript,
     _write_goal_marker,
@@ -429,6 +430,56 @@ class TestGoalRowOutsidePane1038(unittest.TestCase):
         self.assertIn("unmeasurable", row)
         self.assertNotIn("NOT armed", row)
         self.assertIn("review/parallel", row)
+
+    def test_resolved_pane_undeterminable_is_never_not_armed(self):
+        # #1038-review 🟡: a pane WAS resolved (pane_found=True) but its armed
+        # state could not be read (pane_goal_armed None -> busy/scrolled/empty).
+        # That is NOT a dark pane, so it must NEVER read NOT armed -- the same
+        # honesty class #1038 targets, just reached via a busy resolved pane.
+        with m.patch.object(cli_fleet, "box_windows", return_value=self._win()):
+            row = cli_concurrency.goal_status_row(
+                self.GK_REVIEW_CWD, armed=None, pending=False, pane_found=True)
+        self.assertIn("undeterminable", row)
+        self.assertNotIn("NOT armed", row)
+        self.assertIn("review/parallel", row)
+
+    def test_undeterminable_pending_still_reads_arming(self):
+        # a pending request wins over an undeterminable read (a request IS in
+        # flight, so "arming" is the honest state, not "undeterminable").
+        with m.patch.object(cli_fleet, "box_windows",
+                            return_value=self._win("infra", "sequential")):
+            row = cli_concurrency.goal_status_row(
+                self.GK_REVIEW_CWD, armed=None, pending=True, pane_found=True)
+        self.assertIn("arming", row)
+        self.assertNotIn("undeterminable", row)
+        self.assertNotIn("NOT armed", row)
+
+    def test_outside_pane_busy_window_is_undeterminable_not_not_armed(self):
+        # the probe end-to-end: outside a pane, the cwd resolves a live claude
+        # pane whose capture is BUSY (pane_goal_armed None) -> undeterminable,
+        # never NOT armed (the #1038-review residual over ssh).
+        import airuleset
+        tmux = DeliverGoalFakeTmux(
+            [("%9", "claude", self.GK_REVIEW_CWD, "90")], GOAL_BUSY_CAP)
+        with m.patch.object(cli_fleet, "box_windows", return_value=self._win()):
+            row = airuleset.goal_status_probe(self.GK_REVIEW_CWD, run=tmux,
+                                              pane_env="")
+        self.assertIn("undeterminable", row)
+        self.assertNotIn("NOT armed", row)
+        self.assertIn("review/parallel", row)
+
+    def test_pane_found_is_keyword_only(self):
+        # #1038-review 2 🔵: pane_found was inserted between `pending` and
+        # `window_name`, so a POSITIONAL 4th arg (a caller meaning window_name)
+        # would silently misbind to pane_found. Keyword-only closes the trap:
+        # a positional 4th arg must now raise TypeError.
+        with self.assertRaises(TypeError):
+            cli_concurrency.goal_status_row(self.GK_REVIEW_CWD, True, False, True)
+        # the keyword form still works.
+        with m.patch.object(cli_fleet, "box_windows", return_value=self._win()):
+            row = cli_concurrency.goal_status_row(
+                self.GK_REVIEW_CWD, armed=True, pending=False, pane_found=True)
+        self.assertIn("goal: armed", row)
 
 
 class TestStatusGoalRowIsReadOnly1038(unittest.TestCase):
