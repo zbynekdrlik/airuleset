@@ -71,7 +71,14 @@ can drift). Lessons for anyone touching this partition:
   just-added-label-cache-lag case → allow; `unmeasurable`/gh-error → allow). The U==0
   precondition is what makes it safe: a context `#N` reference only ever matters when
   the owner's court is otherwise empty. Label search over-approximates scope (no #654
-  exclusion) → biased to allow.
+  exclusion) → biased to allow. GOTCHA: a stop-hook that shells `gh` from the WORKTREE
+  cwd (`_default_u_runner`) fails on a non-existent cwd (`subprocess` FileNotFoundError
+  → None → unmeasurable → allow) — correct fail-open, but a test must pass an EXISTING
+  cwd or the gh path never exercises. RATCHET GOTCHA: `size_ratchet.py --update` also
+  ratchets-DOWN + registers a large pre-existing backlog of unregistered files fleet-
+  wide (scope creep for a focused ticket) — hand-raise the flagged ceilings and
+  register ONLY your own new files by editing `tests/size_ratchet.json` directly, don't
+  run a blanket `--update`.
 
 - **On-demand paths only for per-ticket gh/git reads.** `_slice_mine_and_handed` runs
   on the footer's hot 120s refresh — any per-candidate enrichment (the #589 timeline
