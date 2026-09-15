@@ -32,25 +32,58 @@ _MARKER_RE = re.compile(r"❓\s*\**\s*(ASKED|NEEDS\s+YOU)\s*\**\s*:", re.IGNOREC
 # A bare same-repo `#N` — NOT a cross-repo `owner/repo#N` (a preceding slug
 # char blocks the match, so `odoo-erp#6883` is excluded). 1-6 digits.
 _BARE_REF_RE = re.compile(r"(?<![A-Za-z0-9_./-])#(\d{1,6})\b")
+# A `#N` that is really a PULL REQUEST reference ("PR #5", "pull request #5") is
+# NOT a subject ticket — exclude it (it never carries an owner-court label).
+_PR_PREFIX_RE = re.compile(r"(?:\bPR|pull\s+request)\s*$", re.IGNORECASE)
 
 
 def _bare_refs(msg):
-    """Same-repo bare `#N` refs in `msg` (cross-repo `owner/repo#N` excluded)."""
-    return {int(m.group(1)) for m in _BARE_REF_RE.finditer(msg or "")}
+    """Same-repo bare `#N` refs in `msg` — cross-repo `owner/repo#N` and
+    `PR #N` / `pull request #N` references excluded."""
+    msg = msg or ""
+    out = set()
+    for m in _BARE_REF_RE.finditer(msg):
+        if _PR_PREFIX_RE.search(msg[max(0, m.start() - 16):m.start()]):
+            continue
+        out.add(int(m.group(1)))
+    return out
 
 
-def decide(payload, question_fn=None):
-    """Return ``(block: bool, reason: str)``. ``block`` is True ONLY when the
-    turn is a genuine ❓ question naming a same-repo ``#N`` AND none of those
-    tickets is in this box's U (verdict ``not_in_u``). Every other verdict —
-    including ``unmeasurable`` — allows (fail-open)."""
+def decide(payload, question_fn=None, u_count_fn=None):
+    """Return ``(block: bool, reason: str)``. ``block`` is True ONLY when ALL of:
+    (1) the turn is a genuine ❓ question, (2) it names a same-repo ``#N``,
+    (3) this box's owner-court ``U`` is EMPTY per a readable cache
+    (``user_waiting == 0`` — the exact reported symptom "U je 0"; None / >0 →
+    allow, so a box with any visible owner question, and a box with no cache at
+    all, are never gated), and (4) a live membership check confirms NONE of the
+    named tickets is actually in U (verdict ``not_in_u`` — the label genuinely
+    did not land). Every other state — U>0, no cache, ``in_u`` (the label DID
+    land, cache just stale), ``unmeasurable`` — allows (fail-open). The U==0
+    precondition is what keeps a legitimate question that merely REFERENCES a
+    closed / other / PR ``#N`` for context from being blocked whenever the owner
+    already has visible questions."""
     msg = gates.field_of(payload, "last_assistant_message", "")
     if not msg or not _MARKER_RE.search(msg):
         return False, ""                     # not a question turn
     refs = _bare_refs(msg)
     if not refs:
-        return False, ""                     # ticketless / cross-repo-only — not gated
+        return False, ""                     # ticketless / cross-repo / PR-only — not gated
     cwd = gates.field_of(payload, "cwd", "") or os.getcwd()
+    # (3) owner court EMPTY per the cache? Only then is a named #N's absence the
+    # reported "❓ but U 0" defect; U>0 (owner has clickable questions) or no
+    # cache (unmeasurable) → allow.
+    try:
+        if u_count_fn is None:
+            import statusbar
+            u_count = statusbar.obligation_partition(cwd)[1]  # user_waiting
+        else:
+            u_count = u_count_fn(cwd)
+    except Exception as e:  # noqa: BLE001 — a cache read failure never blocks
+        sys.stderr.write("questionscope: U-count read errored (%s) — allowing "
+                         "(fail-open)\n" % e)
+        return False, ""
+    if u_count != 0:                         # None (no cache) or >0 → allow
+        return False, ""
     if question_fn is None:
         import cli_quals
         question_fn = cli_quals.question_ticket_in_u

@@ -31,12 +31,47 @@ can drift). Lessons for anyone touching this partition:
   `_ticket_is_stream_labeled`, `_released_stream_numbers`) expands through this ONE
   primitive — follow the pattern for any new branch/label/identity match.
 
-- **`--role` filtering is ONE function (`_apply_role_filter`) applied to ALL THREE
-  partition sets, everywhere (#998/#1008).** The footer (`_role_filter_footer`,
-  fail-SAFE) and both CLI commands (fail-CLOSED on empty slug) each filter workable
-  AND waiting (U) AND ops_wait (W) — never just workable. role `None` returns rows
-  unchanged (no slug resolution) so it stays byte-identical off a role window. Resolve
-  the slug ONCE and pass it to all three calls. No per-segment special case.
+- **`--role` filtering (`_apply_role_filter`) narrows the WORKABLE `I` slice ONLY —
+  NEVER `waiting` (U) or `ops_wait` (W) (#1025, REVERSING #998/#1008).** The role
+  exclusion (review vs infra) is about who does the WORK — it partitions `I`. But `U`
+  (owner court: needs-answer/decision/owner-action) and `W` (ops-wait, third-party)
+  are PARKED states GLOBAL to the box, not role-owned work, so both roles show the
+  FULL set. #998/#1008 filtered all three, which hid an `infra`-labelled ticket's
+  needs-answer from the review (FLOW) window's U — the owner saw `U 0` with a live
+  `❓ ASKED` (odoo-erp#6883). The three sites — footer (`_role_filter_footer`,
+  fail-SAFE) + both CLI commands (fail-CLOSED on empty slug) — each apply the filter
+  to workable ONLY. role `None` returns rows unchanged (no slug resolution), byte-
+  identical off a role window. gk + gk-infra are TWO windows on the SAME box over the
+  SAME repo, so both footers show the SAME U/W (same N, not summed) — no double count;
+  `I` is the only role-partitioned bucket. Doctrine: statusline-vocabulary.md's `U`
+  bullet — "the role exclusion may narrow `I` only".
+
+- **#1025 stop-gate: a `❓ ASKED`/`❓ NEEDS YOU` turn naming a same-repo `#N` must point
+  at a ticket in THIS box's U.** `cli_quals.question_ticket_in_u(numbers, cwd)` decides
+  membership cache-FIRST (`statusbar.user_waiting_numbers`, the additive
+  `user_waiting_numbers` cache field written by `cmd_tickets_status` alongside
+  `user_waiting`, ONE derivation #367) with a SINGLE `gh issue list --search
+  label:needs-answer,needs-decision,needs-owner-action` fallback — NEVER the full
+  `--waiting` derivation (several gh searches, forbidden on a Stop hook). Returns
+  in_u / not_in_u / unmeasurable; the default runner returns None on any gh failure
+  (unlike `_gh_out`, which conflates error and empty) → `unmeasurable` → FAIL-OPEN.
+  `gates.questionscope` is the thin adapter (gate-family #1020) wired into
+  `stop-check-question-quality.sh` BEFORE the present-user bypass (the footer U is the
+  owner's only question surface since #795). **CRITICAL false-positive fix (found in
+  testing): plain "named #N absent from U → block" OVER-BLOCKS — the corpus proves
+  questions legitimately name a `#N` for CONTEXT (a closed/other ticket, a `PR #5`,
+  another repo) that is not in U, and 11 existing question-quality tests failed the
+  moment the gate fired on any such ref.** So the gate blocks ONLY when ALL of: (1) ❓
+  marker, (2) a bare same-repo `#N` (cross-repo `owner/repo#N` AND `PR #N`/`pull
+  request #N` excluded), (3) the box's `U` is EMPTY per a readable cache
+  (`obligation_partition(cwd)[1] == 0` — the EXACT reported symptom "U je 0"; None (no
+  cache) or >0 → allow, so a box with any visible owner question and a box with no
+  cache are NEVER gated — which is why the corpus passes), and (4) `question_ticket_in_u`
+  then confirms `not_in_u` (the label genuinely did not land; `in_u` catches the
+  just-added-label-cache-lag case → allow; `unmeasurable`/gh-error → allow). The U==0
+  precondition is what makes it safe: a context `#N` reference only ever matters when
+  the owner's court is otherwise empty. Label search over-approximates scope (no #654
+  exclusion) → biased to allow.
 
 - **On-demand paths only for per-ticket gh/git reads.** `_slice_mine_and_handed` runs
   on the footer's hot 120s refresh — any per-candidate enrichment (the #589 timeline

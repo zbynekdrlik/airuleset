@@ -164,27 +164,44 @@ ASKED_6883 = (
 
 
 class TestGateDecision(TestCase):
-    def test_names_ticket_absent_from_u_blocks(self):
+    def test_names_ticket_absent_from_empty_u_blocks(self):
         with m.patch.object(cli_quals, "question_ticket_in_u",
                             return_value="not_in_u"):
-            block, reason = qs.decide(_payload(ASKED_6883))
+            block, reason = qs.decide(_payload(ASKED_6883), u_count_fn=lambda c: 0)
         self.assertTrue(block)
         self.assertIn("6883", reason)
 
     def test_names_ticket_present_in_u_allows(self):
         with m.patch.object(cli_quals, "question_ticket_in_u",
                             return_value="in_u"):
-            block, reason = qs.decide(_payload(ASKED_6883))
+            block, reason = qs.decide(_payload(ASKED_6883), u_count_fn=lambda c: 0)
         self.assertFalse(block)
 
     def test_gh_error_unmeasurable_allows(self):
         with m.patch.object(cli_quals, "question_ticket_in_u",
                             return_value="unmeasurable"):
-            block, reason = qs.decide(_payload(ASKED_6883))
+            block, reason = qs.decide(_payload(ASKED_6883), u_count_fn=lambda c: 0)
         self.assertFalse(block)
 
+    def test_u_positive_allows_without_membership_check(self):
+        # U>0: the owner has clickable questions, so a #N reference (which may be
+        # context) is never gated — the membership fn must not even be consulted.
+        with m.patch.object(cli_quals, "question_ticket_in_u",
+                            return_value="not_in_u") as p:
+            block, reason = qs.decide(_payload(ASKED_6883), u_count_fn=lambda c: 3)
+        self.assertFalse(block)
+        p.assert_not_called()
+
+    def test_no_cache_u_none_allows(self):
+        with m.patch.object(cli_quals, "question_ticket_in_u",
+                            return_value="not_in_u") as p:
+            block, reason = qs.decide(_payload(ASKED_6883), u_count_fn=lambda c: None)
+        self.assertFalse(block)
+        p.assert_not_called()
+
     def test_no_marker_allows(self):
-        block, reason = qs.decide(_payload("Just a status update about #6883.\n✅ DONE"))
+        block, reason = qs.decide(_payload("Just a status update about #6883.\n✅ DONE"),
+                                  u_count_fn=lambda c: 0)
         self.assertFalse(block)
 
     def test_no_ticket_ref_allows(self):
@@ -192,7 +209,7 @@ class TestGateDecision(TestCase):
                "❓ NEEDS YOU: schváliš nasadenie na PROD?")
         with m.patch.object(cli_quals, "question_ticket_in_u",
                             return_value="not_in_u") as p:
-            block, reason = qs.decide(_payload(msg))
+            block, reason = qs.decide(_payload(msg), u_count_fn=lambda c: 0)
         self.assertFalse(block)
         p.assert_not_called()          # no #N → never consults U
 
@@ -201,9 +218,18 @@ class TestGateDecision(TestCase):
                "❓ NEEDS YOU: schváliš X?")
         with m.patch.object(cli_quals, "question_ticket_in_u",
                             return_value="not_in_u") as p:
-            block, reason = qs.decide(_payload(msg))
+            block, reason = qs.decide(_payload(msg), u_count_fn=lambda c: 0)
         self.assertFalse(block)
         p.assert_not_called()
+
+    def test_pr_reference_is_excluded(self):
+        msg = ("**Otázka — projekt airuleset:** PR #5 je zelené.\n\n"
+               "❓ NEEDS YOU: schváliš merge PR #5?")
+        with m.patch.object(cli_quals, "question_ticket_in_u",
+                            return_value="not_in_u") as p:
+            block, reason = qs.decide(_payload(msg), u_count_fn=lambda c: 0)
+        self.assertFalse(block)
+        p.assert_not_called()          # PR #5 is not a subject ticket
 
 
 class TestGateSubprocessExitCodes(TestCase):
@@ -316,20 +342,43 @@ class TestHookScopeGate(TestCase):
             r = self._run_hook(HOOK_ASKED, home, cwd)
         self.assertEqual(r.returncode, 0, r.stderr)
 
-    def test_absent_from_u_blocks_exit_2(self):
+    def test_absent_from_empty_u_blocks_exit_2(self):
         import tempfile
         with tempfile.TemporaryDirectory() as home:
             cwd = self._repo(home)
-            # No cache entry for #6883 + a fake gh returning [] → not_in_u.
+            # Owner court EMPTY per cache (user_waiting=0) + a fake gh returning
+            # [] → the named #6883 is provably not in U → block.
+            self._write_cache(home, cwd, user_waiting=0, user_waiting_numbers=[])
             fake = _fake_gh_dir(home, "empty")
             r = self._run_hook(HOOK_ASKED, home, cwd, path_prefix=fake)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("6883", r.stderr)
 
+    def test_u_positive_allows_exit_0(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as home:
+            cwd = self._repo(home)
+            # U>0 (some OTHER owner question visible) → a #6883 reference is not
+            # gated even though #6883 is absent from U. No gh needed.
+            self._write_cache(home, cwd, user_waiting=2,
+                              user_waiting_numbers=[500, 501])
+            fake = _fake_gh_dir(home, "empty")
+            r = self._run_hook(HOOK_ASKED, home, cwd, path_prefix=fake)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_no_cache_allows_exit_0(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as home:
+            cwd = self._repo(home)      # no cache written → U unmeasurable → allow
+            fake = _fake_gh_dir(home, "empty")
+            r = self._run_hook(HOOK_ASKED, home, cwd, path_prefix=fake)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_gh_error_exits_0_fail_open(self):
         import tempfile
         with tempfile.TemporaryDirectory() as home:
             cwd = self._repo(home)
+            self._write_cache(home, cwd, user_waiting=0, user_waiting_numbers=[])
             fake = _fake_gh_dir(home, "error")
             r = self._run_hook(HOOK_ASKED, home, cwd, path_prefix=fake)
         self.assertEqual(r.returncode, 0, r.stderr)
