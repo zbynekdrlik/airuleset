@@ -6020,6 +6020,149 @@ def _watchdog_queue_classify(cwd):
     return classify_fn
 
 
+# #1029 — the INFRA hub ticket per repo: always tracked for tagged comments even
+# were its `infra` label ever dropped (it is `infra`-labelled today, so the label
+# query already covers it — this is the belt-and-suspenders the design of record
+# calls out by naming #6883 explicitly alongside the labelled tickets).
+INFRA_QUEUE_HUB = {"zbynekdrlik/odoo-erp": 6883}
+# a comment is an infra hand-off when its body carries a STOP:/GATEKEEPER-ACTION
+# (INFRA) tag — the exact markers the FLOW session posts (issue #1029).
+_INFRA_STOP_TAG_RE = re.compile(
+    r"GATEKEEPER-ACTION \(INFRA\)|^[ \t]*STOP:", re.MULTILINE)
+# rolling window for the tagged-comment fetch: bounds the gh cost AND keeps the
+# set-delta STABLE (a `since=<last-run>` window would shrink each run and churn
+# the baseline; a fixed recent window means a new tagged comment appears and an
+# aged-out one simply leaves the baseline, never re-nudged — comments don't
+# reappear). Refines the design-of-record `since=<baseline-ts>` idea.
+_INFRA_COMMENT_WINDOW_DAYS = 7
+# cap the tracked-ticket comment fan-out so a huge infra backlog can't blow the
+# 120s sweep budget (each tracked ticket = one bounded gh call per TTL).
+_INFRA_COMMENT_TRACK_CAP = 25
+
+
+def _infra_ticket_comments(number, root, since_iso=None):
+    """The RAW comments on issue `number` in the repo at `root` (a list of
+    `{id, body, html_url}` dicts), bounded by `since_iso` when given. The
+    tag-FILTERING lives in `_watchdog_infra_queue_fetch` (its caller), so this
+    seam stays a plain fetch a test can inject.
+
+    Uses `gh api … --paginate -q '.[]'` — one compact JSON object per line — NOT
+    a bare `--paginate` + `json.loads` of the whole output: `--paginate`
+    CONCATENATES the array-per-page shape into INVALID JSON on a thread past one
+    page (>100 comments), which `json.loads` then rejects, silently dropping
+    EVERY comment on a busy hub — the exact #1021/#880 lesson
+    `cli_work_class._fetch_comments` already encodes. Returns None on any gh
+    FAILURE (rc != 0 / timeout — UNMEASURABLE, so the caller fails safe to skip
+    and never advances the baseline past a real arrival); [] only for a
+    genuinely empty (rc 0) result."""
+    import subprocess
+    slug = _repo_slug(cwd=root)
+    if not slug:
+        return None
+    path = "repos/%s/issues/%s/comments?per_page=100" % (slug, number)
+    if since_iso:
+        path += "&since=%s" % since_iso
+    try:
+        r = subprocess.run(["gh", "api", path, "--paginate", "-q", ".[]"],
+                           cwd=root, capture_output=True, text=True, timeout=20)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    rows = []
+    for line in (r.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            c = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(c, dict) and "id" in c:
+            rows.append({"id": c.get("id"), "body": c.get("body") or "",
+                         "html_url": c.get("html_url") or ""})
+    return rows
+
+
+def _watchdog_infra_queue_fetch(cwd):
+    """#1029 — the INFRA queue for an INFRA-role pane (gk-infra), as rich records
+    the role-aware queue-arrival rider diffs by int id and renders in its infra
+    nudge: `{id, kind, num, permalink, tag}`. The queue is the union of
+
+      * open `infra`-labelled tickets in the repo the window serves (id = number,
+        kind "ticket"), AND
+      * tagged STOP:/GATEKEEPER-ACTION (INFRA) comments (id = comment id, kind
+        "comment", num = the ticket they sit on) on the infra hub (#6883 on
+        odoo-erp) + each open infra ticket, within a rolling recent window.
+
+    FULL-authority ONLY (a reduced stream returns None; the rider also gates) —
+    the SAME gate as `_watchdog_queue_fetch`. Any query error → None (the #181
+    fail-safe: an auth/network hiccup must never read as 'no infra queue' and
+    silently advance the baseline past a real arrival). Wired HERE like every
+    other network seam so run_once's unit tests stay network-free."""
+    import subprocess
+    from datetime import datetime, timedelta, timezone
+    try:
+        root = _repo_root(cwd=cwd) or cwd
+        authority = resolve_authority(cwd=root)
+    except Exception:
+        return None
+    if authority != "full":
+        return None
+    slug = _repo_slug(cwd=root)
+    # 1. open infra-labelled tickets (id = number).
+    try:
+        r = subprocess.run(
+            ["gh", "issue", "list", "--state", "open", "--label", "infra",
+             "-L", "200", "--json", "number"],
+            cwd=cwd, capture_output=True, text=True, timeout=15)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    try:
+        ticket_nums = sorted({int(x["number"])
+                              for x in json.loads(r.stdout or "[]")})
+    except (ValueError, KeyError, TypeError):
+        return None
+    records = []
+    for n in ticket_nums:
+        permalink = ("https://github.com/%s/issues/%d" % (slug, n)
+                     if slug else "")
+        records.append({"id": n, "kind": "ticket", "num": n,
+                        "permalink": permalink, "tag": "infra"})
+    # 2. tagged comments on the hub + each infra ticket (rolling window).
+    # ORDER + cap so the HUB is ALWAYS scanned and the NEWEST tickets (where a
+    # fresh STOP: is most likely) win the cap — a plain `sorted()[:cap]` keeps
+    # the OLDEST/lowest-numbered and DROPS the hub #6883 + newest once >cap infra
+    # tickets are open, silently missing exactly the arrivals this exists for.
+    since_iso = (datetime.now(timezone.utc)
+                 - timedelta(days=_INFRA_COMMENT_WINDOW_DAYS)
+                 ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    hub = INFRA_QUEUE_HUB.get(slug)
+    ordered = ([hub] if hub is not None else []) + [
+        n for n in sorted(ticket_nums, reverse=True) if n != hub]
+    for n in ordered[:_INFRA_COMMENT_TRACK_CAP]:
+        comments = _infra_ticket_comments(n, root, since_iso)
+        if comments is None:
+            # UNMEASURABLE comment layer (a gh failure) — fail safe to skip the
+            # WHOLE queue (never advance the baseline on a partial read, #181).
+            return None
+        for c in comments:
+            body = c.get("body") or ""
+            if not _INFRA_STOP_TAG_RE.search(body):
+                continue
+            try:
+                cid = int(c["id"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            tag = ("GATEKEEPER-ACTION (INFRA)"
+                   if "GATEKEEPER-ACTION (INFRA)" in body else "STOP:")
+            records.append({"id": cid, "kind": "comment", "num": n,
+                            "permalink": c.get("html_url") or "", "tag": tag})
+    return records
+
+
 def _watchdog_u_fetch(cwd):
     """#797 — the footer `U` (user-waiting) count + cache write time for the repo
     at `cwd`, read from the SAME machine-local tickets-status cache the footer
@@ -6660,6 +6803,7 @@ def cmd_watchdog(args):
     shared_fleet_path = (SHARED_FLEET_DIR / "fleet.jsonl"
                          if _is_coordinator and SHARED_FLEET_DIR.is_dir()
                          else None)
+    import cli_concurrency  # #1029 — resolve_role for the role-aware queue rider
     logs = run_once(dry_run=getattr(args, "dry_run", False), usage_fetch=fetch_usage,
                     discord_fetch=fetch_channel_messages,
                     bounce_fetch=_watchdog_bounce_fetch,
@@ -6760,6 +6904,16 @@ def cmd_watchdog(args):
                     # repo per TTL (~5 min) inside the module, FULL-authority
                     # only. Wired on EVERY box; the rider self-gates authority.
                     queue_fetch=_watchdog_queue_fetch,
+                    # #1029 — the ROLE-AWARE half: on an INFRA-role pane
+                    # (gk-infra, role=infra) the rider reads the INFRA queue
+                    # (open infra tickets ∪ tagged STOP:/GATEKEEPER-ACTION
+                    # (INFRA) comments on #6883 + infra tickets) instead of the
+                    # review union, and the pane role is resolved via the ONE
+                    # cli_concurrency.resolve_role truth source. FULL-authority
+                    # only; both self-gate. Wired on EVERY box (only gk declares
+                    # role=infra, so it is inert elsewhere by construction).
+                    infra_queue_fetch=_watchdog_infra_queue_fetch,
+                    resolve_role_fn=cli_concurrency.resolve_role,
                     # #993 item 4 — the queue-arrival rider's per-arrival
                     # dispatch-class factory (Depends-on), so a dep-wait
                     # arrival is HELD, not nudged. FULL-authority only, lazy.
