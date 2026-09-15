@@ -22,7 +22,6 @@ from unittest import TestCase, main
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-import airuleset  # noqa: E402
 import cli_quals  # noqa: E402
 import statusbar  # noqa: E402
 
@@ -32,7 +31,7 @@ import statusbar  # noqa: E402
 # --------------------------------------------------------------------------- #
 class TestUserWaitingNumbersReader(TestCase):
     def _write_cache(self, tmp, cwd, **fields):
-        d = Path(tmp) / "tickets-status"
+        d = statusbar.cache_dir(tmp)
         d.mkdir(parents=True, exist_ok=True)
         entry = {"ts": int(time.time()), "root": cwd}
         entry.update(fields)
@@ -240,6 +239,166 @@ class TestGateSubprocessExitCodes(TestCase):
         with tempfile.TemporaryDirectory() as home:
             r = self._run(_payload("plain text\n✅ DONE", cwd="/repo"), home)
         self.assertEqual(r.returncode, 0)
+
+
+# --------------------------------------------------------------------------- #
+# hooks/stop-check-question-quality.sh — the thin-adapter wiring (#1025 item 2).
+# A ❓ ASKED naming a #N absent from U → exit 2; present → exit 0; gh error →
+# exit 0. Membership is forced via the HOME cache (present) or a fake `gh` on
+# PATH (absent / gh-error), so no network is touched.
+# --------------------------------------------------------------------------- #
+HOOK = REPO / "hooks" / "stop-check-question-quality.sh"
+
+# A well-formed ❓ ASKED block naming #6883 (passes the shape/bundle checks so
+# execution reaches the #1025 scope check).
+HOOK_ASKED = (
+    "**Otázka — projekt airuleset (Odoo/airuleset fleet):** V infra tickete "
+    "#6883 je otvorená otázka na teba, ktorú treba rozhodnúť.\n\n"
+    "• A (odporúčam) — dôsledok A\n• B — dôsledok B\n\n"
+    "❓ ASKED: rozhodni A alebo B pre #6883?"
+)
+
+
+def _fake_gh_dir(tmp, mode):
+    """A dir holding a fake `gh` script; prepend to PATH. mode:
+      'empty' → `gh issue list ... --json number` prints `[]` (not in U)
+      'error' → exits 1 (unmeasurable → fail-open)."""
+    import stat
+    d = Path(tmp) / "fakebin"
+    d.mkdir(parents=True, exist_ok=True)
+    if mode == "error":
+        body = "#!/usr/bin/env bash\nexit 1\n"
+    else:
+        body = "#!/usr/bin/env bash\necho '[]'\n"
+    gh = d / "gh"
+    gh.write_text(body)
+    gh.chmod(gh.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    return str(d)
+
+
+class TestHookScopeGate(TestCase):
+    def _run_hook(self, msg, home, cwd, path_prefix=None):
+        import os
+        sid = "qs1025-" + uuid.uuid4().hex[:10]
+        for f in ("/tmp/airuleset-question-quality-block-" + sid,
+                  "/tmp/claude-discord-lastq-" + sid,
+                  "/tmp/claude-user-active-" + sid,
+                  "/tmp/claude-lastq-refs-" + sid):
+            self.addCleanup(lambda p=f: Path(p).unlink(missing_ok=True))
+        env = dict(os.environ)
+        env["HOME"] = home
+        if path_prefix:
+            env["PATH"] = path_prefix + ":" + env.get("PATH", "")
+        return subprocess.run(
+            ["bash", str(HOOK)],
+            input=json.dumps({"last_assistant_message": msg,
+                              "session_id": sid, "cwd": cwd}),
+            capture_output=True, text=True, timeout=40, env=env)
+
+    def _repo(self, home):
+        r = Path(home) / "repo"
+        r.mkdir(parents=True, exist_ok=True)
+        return str(r)
+
+    def _write_cache(self, home, cwd, **fields):
+        d = Path(home) / ".claude" / "tickets-status"
+        d.mkdir(parents=True, exist_ok=True)
+        entry = {"ts": int(time.time()), "root": cwd}
+        entry.update(fields)
+        (d / (statusbar.cwd_key(cwd) + ".json")).write_text(json.dumps(entry))
+
+    def test_present_in_u_via_cache_exits_0(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as home:
+            cwd = self._repo(home)
+            self._write_cache(home, cwd, user_waiting=1,
+                              user_waiting_numbers=[6883])
+            r = self._run_hook(HOOK_ASKED, home, cwd)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_absent_from_u_blocks_exit_2(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as home:
+            cwd = self._repo(home)
+            # No cache entry for #6883 + a fake gh returning [] → not_in_u.
+            fake = _fake_gh_dir(home, "empty")
+            r = self._run_hook(HOOK_ASKED, home, cwd, path_prefix=fake)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("6883", r.stderr)
+
+    def test_gh_error_exits_0_fail_open(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as home:
+            cwd = self._repo(home)
+            fake = _fake_gh_dir(home, "error")
+            r = self._run_hook(HOOK_ASKED, home, cwd, path_prefix=fake)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_no_ticket_ref_exits_0(self):
+        import tempfile
+        msg = ("**Otázka — projekt airuleset (fleet):** všeobecná otázka bez "
+               "ticketu.\n\n• A (odporúčam) — X\n• B — Y\n\n"
+               "❓ ASKED: schváliš nasadenie na PROD?")
+        with tempfile.TemporaryDirectory() as home:
+            cwd = self._repo(home)
+            r = self._run_hook(msg, home, cwd)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+# --------------------------------------------------------------------------- #
+# cmd_tickets_status --refresh WRITES user_waiting_numbers (the cache field the
+# stop gate's fast-allow reads). Drives the full refresh as a subprocess with a
+# fake gh (mirrors test_question_slice_gap_948's harness).
+# --------------------------------------------------------------------------- #
+class TestCacheWritesUserWaitingNumbers(TestCase):
+    def _fake_gh(self, bindir):
+        import airuleset as _a
+        user = _a._current_user()
+        stream_label = "stream:%s" % user
+        rows = json.dumps([
+            {"number": 10, "title": "workable",
+             "createdAt": "2026-01-01T00:00:00Z",
+             "labels": [{"name": stream_label}]},
+            {"number": 77, "title": "asked",
+             "createdAt": "2026-01-02T00:00:00Z",
+             "labels": [{"name": stream_label}, {"name": "needs-answer"}]},
+        ])
+        gh = Path(bindir) / "gh"
+        gh.write_text(
+            "#!/usr/bin/env bash\n"
+            'case "$*" in\n'
+            '  *"repo view"*|repo*) echo "zbynekdrlik/odoo-erp";;\n'
+            '  *rate_limit*) echo \'{"resources":{"graphql":{"remaining":5000}}}\';;\n'
+            '  *"label:stream:"*autopilot-skip*) echo "[]";;\n'
+            "  *\"label:stream:\"*) echo '%s';;\n" % rows +
+            '  *) echo "[]";;\n'
+            'esac\n')
+        gh.chmod(0o755)
+
+    def test_refresh_writes_user_waiting_numbers(self):
+        import os
+        import subprocess as sp
+        import airuleset as _a
+        from tempfile import TemporaryDirectory
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir:
+            sp.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            self._fake_gh(bindir)
+            r = sp.run(
+                [sys.executable, str(_a.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": "%s:%s" % (bindir, os.environ["PATH"])})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads(
+                (statusbar.cache_dir(home)
+                 / (statusbar.cwd_key(repo) + ".json")).read_text())
+            self.assertIn("user_waiting_numbers", cache)
+            self.assertIn(77, cache["user_waiting_numbers"])
+            self.assertNotIn(10, cache["user_waiting_numbers"])  # workable, not U
 
 
 if __name__ == "__main__":

@@ -3706,6 +3706,7 @@ def cmd_tickets_status(args):
                 entry["open"] = None
                 entry["gk"] = None
                 entry["user_waiting"] = None
+                entry["user_waiting_numbers"] = None   # #1025
                 entry["ops_wait"] = None
             else:
                 # #510: partition ops-wait (external-event/evidence) tickets OUT
@@ -3735,6 +3736,13 @@ def cmd_tickets_status(args):
                 # so `--waiting` can list the same members (#367 invariant).
                 _qmap_extra = _question_map_u_supplement(rows, root, _out)
                 entry["user_waiting"] += len(_qmap_extra)
+                # #1025: the U member NUMBERS (label-partitioned waiting ∪ the
+                # question-map supplement) — the stop-hook question-in-U gate's
+                # fast-allow membership source (zero gh when this cache is fresh).
+                # ONE derivation with the count above (#367): same `waiting` +
+                # `_qmap_extra`, so the numbers can never drift from user_waiting.
+                entry["user_waiting_numbers"] = sorted(
+                    {int(n) for n in waiting} | {int(n) for n in _qmap_extra})
                 # #868: W-drain breach flag — consumed by statusbar._ops_wait_sfx
                 # for the red `· W N!` footer signal and by block-dispatch-over-
                 # wdrain.sh (which reads ops_wait directly, not this bool).
@@ -3800,6 +3808,7 @@ def cmd_tickets_status(args):
             if u_failed:
                 entry["open"] = None
                 entry["user_waiting"] = None
+                entry["user_waiting_numbers"] = None   # #1025
                 entry["ops_wait"] = None
             else:
                 # #510: ops-wait leaves the workable `I N` alongside #468's
@@ -3815,6 +3824,10 @@ def cmd_tickets_status(args):
                     workable, waiting, ops_wait, root, cwd)
                 entry["open"] = len(workable)
                 entry["user_waiting"] = len(waiting)
+                # #1025: the U member NUMBERS — the stop-hook question-in-U
+                # gate's fast-allow membership source (zero gh when fresh). ONE
+                # derivation with the count (#367): same `waiting` dict.
+                entry["user_waiting_numbers"] = sorted(int(n) for n in waiting)
                 entry["ops_wait"] = len(ops_wait)
                 # #868: W-drain breach flag (same as the slice path above).
                 entry["wdrain_over"] = len(ops_wait) > OPS_WAIT_WDRAIN_THRESHOLD
