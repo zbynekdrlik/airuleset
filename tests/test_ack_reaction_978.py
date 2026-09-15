@@ -175,7 +175,20 @@ MIVA1_RED_FIXTURE = (
 )
 
 # A turn that carries the Ack-reaction evidence line — must PASS.
+# #1027/#1033: the fleet default ack emoji is now the WORKER 👷 (U+1F477), so the
+# canonical green fixture uses it; the legacy 👀 stays selectable and is proven
+# to still pass by EYES_SELECTABLE_GREEN_FIXTURE below.
 MIVA1_GREEN_FIXTURE = (
+    "Precital som spravy od klienta Alena v Discuss vlakne "
+    "Zakaznicky portal 3. Klient napisal 4 pripomienky k portalu.\n\n"
+    "Ack-reaction: msg 1739648 👷\n\n"
+    "Pracujem na ich vyrieseni.\n\n"
+    "⏳ WORKING: riesim pripomienky klienta"
+)
+
+# #1027/#1033: the legacy eyes 👀 remains a selectable ack emoji (a per-owner
+# override), so a turn using it must STILL pass the evidence gate.
+EYES_SELECTABLE_GREEN_FIXTURE = (
     "Precital som spravy od klienta Alena v Discuss vlakne "
     "Zakaznicky portal 3. Klient napisal 4 pripomienky k portalu.\n\n"
     "Ack-reaction: msg 1739648 👀\n\n"
@@ -263,11 +276,18 @@ class TestAckReactionProseGate(TestCase):
                         "stderr=%s stdout=%s" % (p.stderr, p.stdout))
 
     def test_miva1_green_fixture_passes(self):
-        """The same turn WITH Ack-reaction: evidence must PASS."""
+        """The same turn WITH Ack-reaction: evidence (worker 👷) must PASS."""
         p = _run_prose(MIVA1_GREEN_FIXTURE)
         self.assertFalse(_blocked(p),
                          "turn with Ack-reaction: must pass; "
                          "stderr=%s" % p.stderr)
+
+    def test_eyes_still_selectable_passes(self):
+        """#1027/#1033: the legacy eyes 👀 stays a valid ack emoji — a turn
+        using it must STILL pass the evidence gate (per-owner override)."""
+        p = _run_prose(EYES_SELECTABLE_GREEN_FIXTURE)
+        self.assertFalse(_blocked(p),
+                         "legacy 👀 ack must still pass; stderr=%s" % p.stderr)
 
     def test_pending_ack_passes(self):
         """A turn with Ack-reaction: pending must PASS."""

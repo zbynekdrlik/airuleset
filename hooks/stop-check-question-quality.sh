@@ -438,6 +438,17 @@ fi
 # strong-token-only trigger, #1026 review 🟡1). Retry-capped like the sibling
 # checks (#292: a here-string, never a `printf | grep` that pipefail can flip).
 # All logic in the python module (gate-family #1020).
+#
+# --- #1027 (NO INTERIM WORKAROUND, owner directive miva1 2026-09-14): the SAME
+# gates.questionscope invocation ALSO enforces the no-interim-workaround rule
+# (NOT a new hook, NOT a fork). A ❓ proposing a client reply whose inline text
+# carries workaround phrasing (zatiaľ / medzitým / dovtedy / obísť / ručne /
+# workaround) while a referenced open-lane #N is still in flight (the ticket is
+# OPEN — the lane closes it when the fix is on PROD) is BLOCKED: the stream
+# replies ONCE, after the fix is on PROD and verified. Same cost discipline
+# (cache-first, ONE gh call at most, FAIL-OPEN), same retry cap. The rule needs
+# a #N (the open-lane ticket), so the `#[0-9]` pre-check below already routes it;
+# bypass `airuleset:client-reply-ok` for the sanctioned client yes/no exception.
 if [ "$RETRIES" -lt "$MAX_RETRIES" ] && grep -qiE '#[0-9]|deploy-prod|startup_failure|hotfix-main|release-fasttrack-exception' <<<"$MSG"; then
     _QS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
     _QS_REPO_ROOT="$(dirname "$_QS_DIR")"
