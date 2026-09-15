@@ -1,8 +1,19 @@
-"""gates.questionscope — the question-in-U + infra-routing Stop gate (#1025 /
-#1026, gate-family #1020).
+"""gates.questionscope — the question-in-U + infra-routing + no-interim-
+workaround Stop gate (#1025 / #1026 / #1027, gate-family #1020).
 
-A THIN ADAPTER over ``cli_quals.question_ticket_in_u``. When an assistant turn
-ends with a ``❓ ASKED`` / ``❓ NEEDS YOU`` marker it enforces TWO things:
+A THIN ADAPTER over ``cli_quals.question_ticket_in_u`` (plus a small local
+lane-state check for #1027). When an assistant turn ends with a ``❓ ASKED`` /
+``❓ NEEDS YOU`` marker it enforces THREE things:
+
+#1027 — NO INTERIM WORKAROUND (owner directive, miva1 2026-09-14): a ❓ proposing
+a client reply whose inline text carries workaround phrasing (``zatiaľ`` /
+``medzitým`` / ``dovtedy`` / ``obísť`` / ``ručne`` / ``workaround``) while a
+referenced same-repo ``#N`` still has an open implementation lane (the ticket is
+OPEN — the lane closes it when the fix is on PROD) is BLOCKED: the stream replies
+ONCE, after the fix is on PROD and verified. Bypass ``airuleset:client-reply-ok``
+for the sanctioned exception (a yes/no question the client explicitly asked that
+the fix does not answer). When workaround phrasing is present this branch owns
+the one-gh-call budget and the #1025 U-membership check is not additionally run.
 
 #1025 — when the turn names a same-repo ``#N``, at least one of those tickets
 must be in THIS box's ``U`` (owner-court) surface — the owner's ONLY question
@@ -35,8 +46,10 @@ gates.questionscope`` with the Stop payload on stdin; exit 2 (reason on stderr)
 = block, exit 0 = allow. The bash hook owns the per-session retry cap.
 Dry-run: echo '{"last_assistant_message":"... ❓ ASKED: #5?","cwd":"/repo"}' | python3 -m gates.questionscope
 """
+import json
 import os
 import re
+import subprocess
 import sys
 
 import gates
@@ -109,8 +122,147 @@ def _bare_refs(msg):
     return out
 
 
-def decide(payload, question_fn=None, u_count_fn=None):
-    """Return ``(block: bool, reason: str)``. ``block`` is True ONLY when ALL of:
+# #1027 — NO INTERIM WORKAROUND while a fix is in flight (owner directive, miva1
+# 2026-09-14). The six phrasing tokens the owner named: a client reply that
+# explains a manual/interim workaround. `\b` word anchors (Py3 `re` is unicode by
+# default, so ľ/ť/í/ý are word chars) so the tokens match as words, case-
+# insensitive. #1027-review 🟡3: the two verb/adjective tokens carry common
+# Slovak inflections (the doctrine text itself writes "obídete" and "ručnú"), so
+# `obísť` also matches `obíde…` (obídete/obídeme/obídeš) and `ručne` also matches
+# `ručn[eýáéúo]…` (ručný/ručná/ručnú/ručnou/ručnej/ručných) — the `[eýáéúo]`
+# class deliberately EXCLUDES `í` so an unrelated `ručník` (towel) never matches.
+_WORKAROUND_RE = re.compile(
+    r"\b(zatiaľ|medzitým|dovtedy|obísť|obíde\w*|ručn[eýáéúo]\w*|workaround)\b",
+    re.IGNORECASE)
+# Bypass — the ONE sanctioned exception the owner allowed: a yes/no question the
+# client EXPLICITLY asked that the fix does not answer. Mirrors the repo's
+# `airuleset:<x>-ok` bypass convention; the block reason names it.
+_WORKAROUND_BYPASS = "airuleset:client-reply-ok"
+_WORKAROUND_REASON = (
+    "❓ navrhuje klientovi INTERIM workaround (%(hit)s) kým je oprava %(refs)s "
+    "ešte v behu — ticket je OTVORENÝ, teda fix ešte NIE je na PROD. Owner "
+    "14.9.2026: kým beží fix lane, stream NEPOSIELA dočasnú náhradu ani návod "
+    "ako to obísť — odpovie klientovi RAZ, až keď je oprava na PROD a overená "
+    "(vtedy sa ticket zavrie). Nerob klientovi ručnú prácu, kým prichádza reálna "
+    "oprava. VÝNIMKA: ak sa klient EXPLICITNE spýtal áno/nie a oprava to nerieši, "
+    "pridaj `%(bypass)s` do správy. (#1027)"
+)
+
+
+# How fresh the tickets-status cache must be for its U numbers to be trusted as
+# a zero-gh in_flight fast-path (mirrors cli_quals._QUESTION_U_CACHE_FRESH_S).
+_LANE_CACHE_FRESH_S = 120
+
+
+def _default_lane_cache(cwd):
+    """The box's cached open owner-court (`U`) issue numbers, ONLY when the cache
+    is FRESH (#1027-review 🔵5 — a stale U cache is not proof of open-state). A
+    ref present in a fresh U set is open, so a lane could be in flight (zero gh).
+    Returns a set or None (no readable / fresh cache). Reads only, never spawns a
+    refresh."""
+    try:
+        import time as _t
+
+        import statusbar
+        nums, ts = statusbar.user_waiting_numbers(cwd)
+        if nums is None or ts is None or (_t.time() - ts) > _LANE_CACHE_FRESH_S:
+            return None
+        return nums
+    except Exception:  # noqa: BLE001 — a cache read failure just skips the fast path
+        return None
+
+
+def _default_lane_runner(argv, cwd):
+    """Run ONE gh command in `cwd`; stdout on success, None on any failure/
+    timeout — the fail-open signal `_client_report_lane_in_flight` needs (None =
+    could not measure, "" / "[]" = measured empty)."""
+    import airuleset
+    try:
+        r = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
+                           timeout=20, env=airuleset._gh_env())
+        return r.stdout if r.returncode == 0 else None
+    except Exception:  # noqa: BLE001 — any failure is "unmeasurable", never a block
+        return None
+
+
+def _client_report_lane_in_flight(numbers, cwd, *, runner=None, cache_fn=None):
+    """#1027 — is a fix/feature lane for the client's report still IN FLIGHT?
+    Operationalized as "a referenced same-repo `#N` is an OPEN issue": the lane
+    closes the ticket when the fix is on PROD and verified, so an OPEN ticket ==
+    the fix is not yet delivered == an interim workaround reply is banned, and a
+    CLOSED ticket == the fix shipped == the how-to reply is now allowed. A `wip:`
+    PR is a stronger form of the same in-flight state and is subsumed (it exists
+    only while the ticket is open). Returns:
+
+      "in_flight"    — at least one ref is an OPEN issue.
+      "shipped"      — the state is determinable and NO ref is open (all closed).
+      "unmeasurable" — a gh failure (FAIL-OPEN at the caller).
+
+    COST (cache-first, ONE gh call at most): a ref in the box's FRESH cached `U`
+    set is open (in_flight, ZERO gh). Otherwise ONE gh call: the common ONE-ref
+    case uses an EXACT `gh issue view <N> --json state` (no list cap to
+    under-match); multiple refs use a SINGLE `gh issue list --state open` and log
+    if the -L cap is hit. None → unmeasurable (mirrors
+    `cli_quals.question_ticket_in_u`'s one-gh fallback)."""
+    nums = set()
+    for n in (numbers or []):
+        try:
+            nums.add(int(str(n).strip().lstrip("#")))
+        except (TypeError, ValueError):
+            continue
+    if not nums:
+        return "shipped"                     # nothing to check against
+    cache_fn = cache_fn or _default_lane_cache
+    try:
+        cached = cache_fn(cwd)
+    except Exception:  # noqa: BLE001 — a cache miss just falls through to gh
+        cached = None
+    if cached and (nums & set(cached)):
+        return "in_flight"                   # a ref in a fresh U cache is open
+    run = runner or _default_lane_runner
+    if len(nums) == 1:
+        # #1027-review 🟡1: the common case is ONE ref — an EXACT `gh issue view`
+        # (one call, no list cap) instead of an unfiltered `-L` list that can
+        # under-match on a busy repo and silently false-allow.
+        one = next(iter(nums))
+        out = run(["gh", "issue", "view", str(one), "--json", "state"], cwd)
+        if out is None:
+            return "unmeasurable"
+        try:
+            state = (json.loads(out or "{}").get("state") or "").upper()
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return "unmeasurable"
+        if not state:
+            return "unmeasurable"
+        return "in_flight" if state == "OPEN" else "shipped"
+    # Multiple refs: ONE `gh issue list` (the one-gh ceiling). #1027-review 🟡1:
+    # log when the -L cap is hit so an under-match (a ref beyond the cap read as
+    # shipped → false-allow) is never SILENT.
+    out = run(["gh", "issue", "list", "--state", "open", "--json", "number",
+               "-L", "500"], cwd)
+    if out is None:
+        return "unmeasurable"
+    try:
+        data = json.loads(out or "[]")
+        open_nums = {int(x["number"]) for x in data
+                     if isinstance(x, dict) and "number" in x}
+    except (ValueError, TypeError, KeyError):
+        return "unmeasurable"
+    if len(open_nums) >= 500:
+        sys.stderr.write("questionscope: open-issue list hit the -L 500 cap — a "
+                         "ref beyond it reads as shipped, a possible false-allow "
+                         "(#1027)\n")
+    return "in_flight" if (nums & open_nums) else "shipped"
+
+
+def decide(payload, question_fn=None, u_count_fn=None, lane_fn=None):
+    """Return ``(block: bool, reason: str)``.
+
+    #1027 (no interim workaround) is checked FIRST after ref-extraction, on its
+    own gh budget (``lane_fn`` overridable for tests): when the turn carries
+    workaround phrasing and a referenced open-lane ``#N`` is in flight it blocks;
+    the #1025 path below is then not run. Otherwise the #1025 U-membership rule:
+    ``block`` is True ONLY when ALL of:
     (1) the turn is a genuine ❓ question, (2) it names a same-repo ``#N``,
     (3) this box's owner-court ``U`` is EMPTY per a readable cache
     (``user_waiting == 0`` — the exact reported symptom "U je 0"; None / >0 →
@@ -135,6 +287,27 @@ def decide(payload, question_fn=None, u_count_fn=None):
     if not refs:
         return False, ""                     # ticketless / cross-repo / PR-only — not gated
     cwd = gates.field_of(payload, "cwd", "") or os.getcwd()
+    # (#1027) NO INTERIM WORKAROUND: a ❓ proposing a client reply that explains a
+    # manual/interim workaround while a fix for a referenced open-lane #N is still
+    # in flight is blocked (the stream replies ONCE, after the fix is on PROD).
+    # Runs on its OWN gh budget: when workaround phrasing is present this branch
+    # OWNS the one-gh-call ceiling and returns — the #1025 U-membership gh call is
+    # NOT additionally made (skipping it here fails toward allow, the safe
+    # direction). Independent of U (fires regardless of the owner-court count).
+    wm = _WORKAROUND_RE.search(msg)
+    if wm:
+        if _WORKAROUND_BYPASS in msg:
+            return False, ""                 # sanctioned client yes/no exception
+        lane = (lane_fn or _client_report_lane_in_flight)(sorted(refs), cwd)
+        if lane == "in_flight":
+            hit = wm.group(1)                 # #1027-review 🔵7: reuse the match
+            listed = ", ".join("#%d" % n for n in sorted(refs))
+            return True, _WORKAROUND_REASON % {
+                "hit": hit, "refs": listed, "bypass": _WORKAROUND_BYPASS}
+        if lane == "unmeasurable":
+            sys.stderr.write("questionscope: workaround lane-state unmeasurable "
+                             "(gh error) — allowing (fail-open, #1027)\n")
+        return False, ""                     # shipped / unmeasurable → allow
     # (3) owner court EMPTY per the cache? Only then is a named #N's absence the
     # reported "❓ but U 0" defect; U>0 (owner has clickable questions) or no
     # cache (unmeasurable) → allow.

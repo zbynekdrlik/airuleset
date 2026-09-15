@@ -2107,8 +2107,8 @@ if [ "$_ACK_HAS_ODOO" = "1" ]; then
     fi
 fi
 if [ "$ACK_REACTION_MENTION" = "1" ]; then
-    echo "VIOLATION: Your message reports processing a NEW client message in a Discuss thread but carries no Ack-reaction: evidence line. The moment you read a new client message, add a 👀 reaction via message_reaction_add_guarded(message_id, \"👀\") — or, if the method is not yet released on this instance, record 'Ack-reaction: pending — <reason>'. Include the evidence line in your message. See skills/odoo-client-messaging/ack-reaction.md (#978)." >&2
-    add_hard "New client message processed without Ack-reaction: evidence line — add 👀 reaction or record pending (#978)"
+    echo "VIOLATION: Your message reports processing a NEW client message in a Discuss thread but carries no Ack-reaction: evidence line. The moment you read a new client message, add the fleet ack reaction — the WORKER 👷 by default (ack_reaction_emoji config key; the legacy 👀 stays selectable) — via message_reaction_guarded(message_id, \"👷\", \"add\") — or, if the method is not yet released on this instance, record 'Ack-reaction: pending — <reason>'. Include the evidence line (any configured ack emoji is accepted). See skills/odoo-client-messaging/ack-reaction.md (#978/#1027/#1033)." >&2
+    add_hard "New client message processed without Ack-reaction: evidence line — add 👷 reaction or record pending (#978/#1027)"
 fi
 
 # #194 — the global suppression that used to sit here is GONE. It asked "did ANY
