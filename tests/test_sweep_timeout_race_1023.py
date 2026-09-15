@@ -32,7 +32,6 @@ import airuleset  # noqa: E402,F401
 import watchdog as wd  # noqa: E402
 
 from watchdog import goal  # noqa: E402
-from watchdog import nudge_gate  # noqa: E402
 from watchdog import queue_arrival_recheck as qa  # noqa: E402
 from watchdog import session_status as ss  # noqa: E402
 
