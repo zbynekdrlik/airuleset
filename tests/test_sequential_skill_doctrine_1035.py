@@ -157,6 +157,14 @@ class TestParallelPushAnchorsAreModeScoped(TestCase):
             window(read(AUTOPILOT), "**Engine = a `/goal` loop",
                    "**Bundling AND parallel"))
 
+    def test_bundling_fleet_bullet_is_mode_scoped(self):
+        # #1035 review LOW-2: the "Bundling AND parallel fleet dispatch" bullet
+        # sits BEFORE Step 3.0, so the top-down global IGNORE line never reaches
+        # it — it needs its OWN qualifier like its sibling engine bullet above.
+        self._assert_mode_scoped(
+            window(read(AUTOPILOT), "**Bundling AND parallel fleet dispatch",
+                   "**Worker = in-session BACKGROUND"))
+
     def test_step3_parallel_doctrine_is_headed_parallel_mode(self):
         self._assert_mode_scoped(
             window(read(AUTOPILOT), "PARALLEL mode (default)",
