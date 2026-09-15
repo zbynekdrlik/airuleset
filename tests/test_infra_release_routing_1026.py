@@ -196,7 +196,8 @@ class TestInfraRoutingDecision(TestCase):
 
 
 class TestReleaseBlockShapeHelper(TestCase):
-    """`qs._is_release_block_shape` — the two-tier text trigger (#1026 🟡1/🔵2)."""
+    """`qs._is_release_block_shape` — the STRONG-tokens-only text trigger; bare
+    `fast-track` is not a trigger (#1026 review 🟡1/🔵2)."""
 
     def test_strong_token_alone_fires(self):
         for t in ("deploy-prod.yml failed", "startup_failure on main",
