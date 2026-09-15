@@ -649,7 +649,7 @@ class TestCliSurface(TestCase):
         # No action prints a stored value to the SESSION's stdout. `show`
         # (#580) is a value-DELIVERY action, NOT a value-PRINT one: it renders
         # the value to the OWNER's browser through a one-shot URL and the
-        # session never reads it (the server child reads it at GET), so it is
+        # session never reads it (the server child reads it on reveal), so it is
         # allowed here — but the word-ban still forbids any action whose name
         # implies printing the value to stdout.
         for banned in ("cat", "print", "get", "read", "reveal"):
@@ -659,7 +659,7 @@ class TestCliSurface(TestCase):
             ["exec", "forget", "list", "purge", "request", "show", "status"])
         # Teeth for `show`: the CLI PARENT never CALLS a value-reader — the
         # value-returning paths (read_value / read_show_file) are called only
-        # by filedrop/show_server.py at GET time — so `secret show` cannot
+        # by filedrop/show_server.py on the reveal POST — so `secret show` cannot
         # print the value into the transcript. Matched as the CALL shape
         # (`read_value(`), never the bare word, so a docstring/comment that
         # merely NAMES the reader (as this function's own does) is not a false

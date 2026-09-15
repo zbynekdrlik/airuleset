@@ -608,8 +608,8 @@ def read_value(name):
     One of only TWO value-returning functions in this package (the other is
     `read_show_file`, the `--file` source). Its callers are
     `airuleset.cmd_secret`'s `exec` action (passes it to a child process through
-    the environment or stdin) and `filedrop/show_server.py`'s GET handler
-    (writes it into the one-shot render response, at GET time only) — neither
+    the environment or stdin) and `filedrop/show_server.py`'s reveal-POST handler
+    (writes it into the one-shot render response, on the reveal POST only) — neither
     prints it to the session, and there is deliberately no formatting/rendering
     helper that could put a value on stdout by accident.
     """
@@ -964,7 +964,7 @@ def list_entries(now=None):
 # ONCE, then tears down — the reverse of `secret request`, which RECEIVES one.
 # The source is a vault NAME (read_value) or a `--file` durable path
 # (read_show_file). The SESSION never sees the value: the server child reads it
-# only at GET time; the CLI parent only ever passes the NAME or the validated
+# only on the reveal POST; the CLI parent only ever passes the NAME or the validated
 # PATH (neither is the value) to the child, and the token through the env.
 # --------------------------------------------------------------------------- #
 
@@ -1027,7 +1027,7 @@ def read_show_file(path):
     Re-validates with `validate_show_file` and opens O_NOFOLLOW, so a symlink
     swapped in at the path AFTER the CLI's validate check (TOCTOU) is refused
     rather than followed — the same discipline `store_value` applies to a
-    write. Called ONLY by filedrop/show_server.py at GET time (never by the
+    write. Called ONLY by filedrop/show_server.py on the reveal POST (never by the
     session/CLI parent), so the value is read only when it is actually being
     shown.
     """
