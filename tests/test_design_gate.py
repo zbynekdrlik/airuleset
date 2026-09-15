@@ -333,6 +333,22 @@ class TestIssueRefs(unittest.TestCase):
         # "C#7" -- '#' preceded by a word char, not start/space/paren.
         self.assertEqual(dg.issue_refs("uses C#7 syntax"), [])
 
+    def test_repo_prefixed_foreign_ref_is_not_a_ref(self):
+        # #1029 -- `repo#N` (GitHub's cross-repo short form, full `owner/repo#N`)
+        # is the SANCTIONED way to name a FOREIGN ticket in a commit/merge subject
+        # WITHOUT this repo's design gate / corpus audit treating it as a
+        # LOCAL issue: the repo-name char immediately before `#` is not a
+        # boundary in ISSUE_REF_RE, so the ref is deliberately not extracted
+        # (alongside the "issue N" prose form locked below). A bare `#6883`
+        # in a supervisor merge subject citing the odoo-erp hub was the
+        # push-gate Pass A false positive this locks against recurring.
+        self.assertEqual(dg.issue_refs("Merge into odoo-erp#6883 hub"), [])
+        self.assertEqual(dg.issue_refs("see odoo-erp#7100 for context"), [])
+        # ... and the SAME text with a leading separator before `#` IS a
+        # local ref (the boundary the sanctioned prefixed form deliberately
+        # avoids) -- proving the exemption is the prefix, not the number.
+        self.assertEqual(dg.issue_refs("see odoo-erp #7100 for context"), [7100])
+
     def test_none_text_is_empty(self):
         self.assertEqual(dg.issue_refs(None), [])
 

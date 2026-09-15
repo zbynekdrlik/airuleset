@@ -89,15 +89,30 @@ def _scratch_home(prefix):
     return home
 
 
-def real_commit_subjects(limit=None):
-    """Every distinct commit SUBJECT line across all branches of this repo's
-    own history (`git log --all --format=%s`) -- the real shapes the hook
-    must classify: `(#N)`, `Closes #N`, `#A/#B`, and plenty with no
-    reference at all. Deduplicated (the corpus has many near-identical
-    RED/GREEN pairs); order preserved. Bypass-tagged subjects are excluded
-    (see _replayable above)."""
-    r = subprocess.run(["git", "-C", str(ROOT), "log", "--all", "--format=%s"],
-                       capture_output=True, text=True, timeout=30)
+def _corpus_subjects(root):
+    """Every distinct commit SUBJECT line across all branches of `root`,
+    EXCLUDING merge commits, in first-seen order (`git log --all --no-merges
+    --format=%s`). Deduplicated (the corpus has many near-identical RED/GREEN
+    pairs); blank lines dropped.
+
+    #1029 (push-gate Pass A red): the design gate itself EXEMPTS merge commits
+    (`design_gate.is_merge_commit_context`, issue 1003), so a merge subject is
+    a message shape the gate NEVER processes -- replaying it through the hook,
+    or auditing `issue_refs()` over it, tests a path the gate never takes. A
+    supervisor merge subject that cites a FOREIGN hub ticket by bare `#N` (the
+    odoo-erp hub, `odoo-erp#6883` written as bare `#6883` in prose, > the
+    audit CEILING) then trips this repo's OWN moving-window corpus lock
+    retroactively. `--no-merges` makes the corpus mirror the gate's scope.
+
+    This is the SINGLE source of truth for "the corpus" -- both the two
+    false-positive/false-negative audit tests
+    (tests/test_replay_design_gate_commit_corpus.py) and the hook-replay
+    `real_commit_subjects()` below build on it, so they cannot drift on what
+    the corpus is. `root` is a parameter so the helper is unit-testable
+    against a throwaway repo."""
+    r = subprocess.run(
+        ["git", "-C", str(root), "log", "--all", "--no-merges", "--format=%s"],
+        capture_output=True, text=True, timeout=30)
     if r.returncode != 0:
         return []
     seen, out = set(), []
@@ -106,9 +121,18 @@ def real_commit_subjects(limit=None):
         if not line or line in seen:
             continue
         seen.add(line)
-        if not _replayable(line):
-            continue
         out.append(line)
+    return out
+
+
+def real_commit_subjects(limit=None):
+    """The corpus (`_corpus_subjects(ROOT)`, so merge subjects excluded) with
+    the ONE replay-specific exclusion layered on: bypass-tagged subjects (the
+    hook honors `[no-design]` BEFORE ref extraction, so their ON-arm
+    expectation is not derivable from issue_refs alone -- see _replayable).
+    The real shapes the hook must classify: `(#N)`, `Closes #N`, `#A/#B`, and
+    plenty with no reference at all. Order preserved."""
+    out = [s for s in _corpus_subjects(ROOT) if _replayable(s)]
     return out[:limit] if limit else out
 
 

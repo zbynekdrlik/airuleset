@@ -6,9 +6,11 @@ future regression in either `design_gate.issue_refs` or
 `hooks/block-commit-without-design.sh`'s scope check is caught by CI, not
 just by a one-off manual run."""
 import importlib.util
+import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from unittest import TestCase, main
 
@@ -141,21 +143,19 @@ class TestNoOutOfRangeOrMissedReferences(TestCase):
     same decision locked at the unit level."""
 
     def test_no_out_of_range_or_zero_refs_extracted(self):
-        r = subprocess.run(["git", "-C", str(ROOT), "log", "--all", "--format=%s"],
-                           capture_output=True, text=True, timeout=30)
         # a truthful ceiling for "plausible issue number in THIS repo's
         # history" -- generous headroom above the current max (#143 at
         # authoring time) so the lock never needs bumping for ordinary
         # future issue growth, while still catching a genuinely wrong match
         # (a port number, a percentage, an exit code).
+        # #1029: the corpus is `replay._corpus_subjects(ROOT)` -- `--no-merges`
+        # (the SINGLE source of truth shared with the hook-replay corpus), so a
+        # supervisor merge subject citing a foreign hub ticket by bare `#N`
+        # (odoo-erp#6883 written bare, > CEILING) no longer trips this lock: the
+        # design gate exempts merge commits, and this audit now mirrors that.
         CEILING = 5000
-        seen = set()
         bad = []
-        for line in r.stdout.splitlines():
-            line = line.strip()
-            if not line or line in seen:
-                continue
-            seen.add(line)
+        for line in replay._corpus_subjects(ROOT):
             for n in dg.issue_refs(line):
                 if n <= 0 or n > CEILING:
                     bad.append((n, line))
@@ -163,15 +163,9 @@ class TestNoOutOfRangeOrMissedReferences(TestCase):
 
     def test_no_missed_issue_shaped_mentions(self):
         import re
-        r = subprocess.run(["git", "-C", str(ROOT), "log", "--all", "--format=%s"],
-                           capture_output=True, text=True, timeout=30)
-        seen = set()
+        # #1029: same shared `--no-merges` corpus as the sibling test above.
         missed = []
-        for line in r.stdout.splitlines():
-            line = line.strip()
-            if not line or line in seen:
-                continue
-            seen.add(line)
+        for line in replay._corpus_subjects(ROOT):
             if dg.issue_refs(line):
                 continue
             # #122 -- only the SAME `#`-anchored family ISSUE_REF_RE itself
@@ -193,6 +187,72 @@ class TestNoOutOfRangeOrMissedReferences(TestCase):
             if re.search(r'#\d{1,5}\b', line):
                 missed.append(line)
         self.assertEqual(missed, [], "issue-shaped mention with zero extracted refs")
+
+
+class TestCorpusExcludesMergeCommits(TestCase):
+    """#1029 push-gate Pass A red: the corpus audit replayed EVERY subject of
+    `git log --all --format=%s`, MERGE commit subjects included -- but the
+    design gate itself EXEMPTS merge commits (design_gate.is_merge_commit_context,
+    issue 1003), so a merge subject is a message shape the gate never processes.
+    A supervisor merge subject that mentions a FOREIGN hub ticket by bare `#N`
+    (the odoo-erp hub, `#6883` > CEILING 5000) then tripped this repo's OWN
+    moving-window corpus lock retroactively. The corpus must mirror the gate's
+    scope (`--no-merges`), factored into ONE `_corpus_subjects(root)` helper so
+    the two false-positive/false-negative audit tests and the hook-replay
+    corpus (`real_commit_subjects`) cannot drift on what "the corpus" is.
+
+    This hermetic throwaway-repo test locks the helper's contract directly (a
+    MERGE subject is excluded, a NORMAL subject is kept), independent of this
+    repo's own moving history."""
+
+    def _git(self, repo, *args):
+        env = dict(os.environ)
+        env.update({
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
+        })
+        r = subprocess.run(
+            ["git", "-C", str(repo),
+             "-c", "init.defaultBranch=main",
+             "-c", "commit.gpgsign=false",
+             "-c", "core.hooksPath=" + os.devnull, *args],
+            capture_output=True, text=True, env=env, timeout=30)
+        self.assertEqual(r.returncode, 0, " ".join(args) + "\n" + r.stdout + r.stderr)
+        return r
+
+    def test_merge_subject_excluded_normal_subject_kept(self):
+        repo = Path(tempfile.mkdtemp(prefix="airuleset-corpus-merge-"))
+        try:
+            self._git(repo, "init", "-q")
+            (repo / "a.txt").write_text("1\n")
+            self._git(repo, "add", "a.txt")
+            self._git(repo, "commit", "-q", "-m", "feat: normal work #123")
+            self._git(repo, "checkout", "-q", "-b", "feature")
+            (repo / "b.txt").write_text("2\n")
+            self._git(repo, "add", "b.txt")
+            self._git(repo, "commit", "-q", "-m", "feat: side commit #456")
+            self._git(repo, "checkout", "-q", "-")
+            # A --no-ff merge whose SUBJECT carries a bare foreign-hub-style
+            # #N > CEILING -- exactly the #6883 shape that tripped the gate.
+            self._git(repo, "merge", "--no-ff", "-m",
+                      "Merge branch 'feature' the #9999 hub note", "feature")
+
+            subjects = replay._corpus_subjects(repo)
+
+            self.assertIn("feat: normal work #123", subjects,
+                          "a normal (non-merge) commit subject must be in the corpus")
+            self.assertIn("feat: side commit #456", subjects,
+                          "a non-merge subject on a merged branch is still corpus")
+            merge_leaks = [s for s in subjects if "#9999" in s]
+            self.assertEqual(
+                merge_leaks, [],
+                "MERGE commit subject leaked into the corpus -- the design gate "
+                "exempts merge commits, so the corpus must too (--no-merges); a "
+                "bare foreign #N > CEILING in a merge subject would retroactively "
+                "trip the audit lock (#1029 push-gate Pass A red)")
+        finally:
+            shutil.rmtree(repo, ignore_errors=True)
 
 
 if __name__ == "__main__":
