@@ -12,14 +12,14 @@ Usage:
     AIRULESET_VAULT_TOKEN=<token> \
         python3 show_server.py <port> <bind_ips_csv> <kind> <locator> <ttl_s>
 
-  kind = "name"  -> locator is a vault NAME, read via vault.read_value at GET
+  kind = "name"  -> locator is a vault NAME, read via vault.read_value on the reveal POST
   kind = "file"  -> locator is a validated PATH, read via vault.read_show_file
 
 The token arrives through the ENVIRONMENT, never argv: /proc/<pid>/cmdline is
 0444 and readable by every uid on the box, while /proc/<pid>/environ is 0400,
 owner only. The NAME / PATH in argv is NOT the value, so passing it there is
 fine — the SESSION that spawned this process only ever handled the name/path,
-and this process reads the value only at GET time.
+and this process reads the value only on the reveal POST.
 
   GET  /healthz    -> 204, no body. The CLI liveness probe — it never touches
                       the value, so probing it does NOT consume the one-shot.
@@ -115,7 +115,7 @@ def is_private(ip):
 if KIND not in ("name", "file"):
     sys.exit("show: kind must be 'name' or 'file' (got %r)" % KIND)
 # Fail fast BEFORE binding on a bad source — the same discipline vault_server.py
-# applies to an invalid name. The value itself is still read only at GET time.
+# applies to an invalid name. The value itself is still read only on the reveal POST.
 try:
     if KIND == "name":
         check_name(LOCATOR)
@@ -281,7 +281,7 @@ class BoundedServer(ThreadingHTTPServer):
 
 
 def _read_value():
-    """The value bytes, read only NOW (at GET). read_value/read_show_file are
+    """The value bytes, read only NOW (on the reveal POST). read_value/read_show_file are
     the only value-returning paths, and this is the one place the show endpoint
     calls them."""
     if KIND == "name":
@@ -418,6 +418,24 @@ class H(BaseHTTPRequestHandler):
         # POST; a prefetcher/unfurler never does (#1011). So the value read + the
         # one-shot latch live HERE, mirroring the #580 do_GET latch verbatim,
         # just moved onto the request that a preload cannot trigger.
+        #
+        # Drain the request body FIRST so an HTTP/1.1 keep-alive connection never
+        # desyncs on a POST that carries one (the reveal form sends an EMPTY body,
+        # but a stray body from any client must not shift the next request
+        # boundary). A small body is read+discarded; an oversized or unparseable
+        # Content-Length is NOT read (that would be a DoS) — the connection is
+        # simply closed after this response instead.
+        try:
+            _clen = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            _clen = -1
+        if _clen < 0 or _clen > 65536:
+            self.close_connection = True
+        elif _clen:
+            try:
+                self.rfile.read(_clen)
+            except OSError:
+                self.close_connection = True
         p = self._parts()
         if not (len(p) == 1 and self._is_token(p[0])):
             return self._txt(404, "not found")
