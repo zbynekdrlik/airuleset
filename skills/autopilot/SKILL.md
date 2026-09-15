@@ -9,8 +9,9 @@ disable-model-invocation: true
 # Autopilot — Hands-off Backlog Loop
 
 > Solves the **ENTIRE** open backlog with **CONTINUOUS REFILL** (#848, restoring #456's continuous
-> refill FOR autopilot, retiring #723's batch mode) — by DEFAULT PARALLEL
-> `isolation: "worktree"` workers (#317/#456) kept live (as many as the box and backlog bear, #991),
+> refill FOR autopilot, retiring #723's batch mode) — in **PARALLEL mode** (the default; a
+> `sequential` pane runs ONE lane at a time and pushes nothing — read the mode FIRST, Step 3.0/#1035)
+> via `isolation: "worktree"` workers (#317/#456) kept live (as many as the box and backlog bear, #991),
 > one per solo ticket or bundle-safe unit,
 > **each returned lane integrated SERIALLY and its slot refilled immediately** by the supervisor.
 > Each unit is handed to an **in-session background `autopilot-worker` subagent**
@@ -56,7 +57,8 @@ no "nothing is hands-off so I'm stopping". You answer the important questions; e
 - **Engine = a `/goal` loop you paste once.** Each turn the main agent keeps parallel bundle-safe
   UNITS live (each one bundle-safe issue, or several bundled into one PR — see Step 3.1) and
   dispatches ONE in-session BACKGROUND `autopilot-worker` PER unit, `isolation: "worktree"`, running
-  them IN PARALLEL with **continuous refill sized to what the box and backlog bear** (`run_in_background: true`, Step 3.2,
+  them IN PARALLEL — in **PARALLEL mode** only; a `sequential` pane runs ONE lane and pushes nothing
+  (read the mode FIRST, Step 3.0/#1035) — with **continuous refill sized to what the box and backlog bear** (`run_in_background: true`, Step 3.2,
   #317/#456/#848); every dispatch returns IMMEDIATELY so your main session stays FREE, and any worker
   finishing RE-INVOKES the loop. Each worker runs its cycle to a green LOCAL result on its own
   worktree branch; the main agent then integrates each returned branch SERIALLY under the integration
@@ -447,7 +449,20 @@ the `/goal` line, the loop never starts.
 > You reach this section only when a turn fires under the `/goal` loop the user pasted in Step 2.
 > The plain `/autopilot` invocation STOPS at Step 2 — it never runs Step 3 itself.
 
-Each loop turn works the backlog with **CONTINUOUS REFILL** (#848, retiring #723's batch mode): keep
+### Step 3.0 — Concurrency MODE gate (read FIRST every cycle — armed or NOT, #1035)
+
+**Before dispatching ANYTHING, read this pane's concurrency MODE — it decides whether the parallel/refill doctrine below applies at all.** Run `python3 ~/devel/airuleset/airuleset.py status` and read its `concurrency:` line (the ONE resolver, `cli_concurrency.resolve_concurrency` — the SAME source the lane cap, the #998 dispatch gate, the nudge riders, the footer, and the `/goal` renderer all read: a declared managed window like gk-infra or david3, else the project's `.claude/lane-resources.json` `mode`, else the default `parallel`).
+
+- **`concurrency: parallel …`** → follow the rest of Step 3 (**PARALLEL mode**, continuous-refill fleet dispatch) exactly as written — the DEFAULT for full-authority / gk boxes.
+- **`concurrency: sequential …`** → follow the **SEQUENTIAL block** immediately below and **IGNORE every refill / saturation / "keep N lanes live" / "sized to the box" sentence in the rest of this skill — they are PARALLEL mode only.** This holds **whether or not a `/goal` is armed**: the armed sequential `/goal` variant already carries the identical clause, but an UNARMED session ("po reštarte … bežím na tvoj pokračuj") reads ONLY this body — so the body itself must honour the mode. (The defect #1035 fixes: `david3@subdev`, resolving `sequential`, ran FIVE background lanes with no armed goal, 2026-09-15.)
+
+> **SEQUENTIAL dispatch block** — rendered from `goal_registry` (the SAME source the sequential `/goal` variant uses; `goal-inventory --check` locks the two byte-identical via `goal_registry.skill_sequential_drift`, so there is NO second hand-written doctrine that can drift):
+>
+> SEQUENTIAL — ONE unit at a time: dispatch → main review → integrate → verify → next; no refill;
+>
+> One `autopilot-worker` unit is dispatched, integrated (Step 4), and verified before the NEXT unit is chosen. This is **NOT a hard subagent count**: reviewers, `ticket-validator`, and hard-debug consult subagents stay FREE — more than one subagent is fine. What sequential mode bans is uncoordinated parallelism (two workers on similar things without knowing of each other — the gk-infra failure) and ANY rule / nudge / text that PUSHES the maximum lane count; a lower cadence that keeps moving forward is the point when tokens must be saved (owner ROZHODNUTÉ 2026-09-15, #1031/#1035). The #998 dispatch gate (`hooks/block-dispatch-over-wdrain.sh` → `block|sequential|N`) is the mechanical backstop that REFUSES the 2nd concurrent worker; this block removes the PUSH so the gate is no longer the only thing standing.
+
+**PARALLEL mode (default) — the rest of Step 3 below applies only when Step 3.0 above resolved `parallel`; a `sequential` pane followed the SEQUENTIAL block and skips it all (#1035).** Each loop turn works the backlog with **CONTINUOUS REFILL** (#848, retiring #723's batch mode): keep
 `isolation: "worktree"`-isolated `autopilot-worker` lanes live — one lane per solo ticket or
 bundle-safe unit — dispatched in PARALLEL, sizing the live lane set to what the box and backlog
 bear, and **refill a returned lane's slot immediately**;
@@ -1419,7 +1434,7 @@ thin across `--resume` — moved verbatim to `skills/autopilot/references/sessio
 
 ## Guardrails (hard — never relax)
 
-- **Serial INTEGRATION per repo, CONTINUOUS-REFILL parallel dispatch by default (#317/#456/#848, 2026-09-02).**
+- **Serial INTEGRATION per repo, CONTINUOUS-REFILL parallel dispatch by default — in PARALLEL mode; a `sequential` pane runs ONE lane and pushes nothing (read the mode first, Step 3.0/#1035) (#317/#456/#848, 2026-09-02).**
   Only the merge→gates→push INTEGRATION cycle is serialized — the integration mutex (Step 3.2)
   allows ONE integration in flight per repo at a time across ALL sessions, supervisor-owned, never
   simultaneous. DISPATCH, by contrast, is CONTINUOUS (#848, restoring #456's continuous refill FOR
