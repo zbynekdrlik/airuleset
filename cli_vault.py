@@ -431,7 +431,7 @@ def _secret_show_source(args, st):
     `--file` path. The CLI parent must never read the value — it only checks
     metadata (`state`) for a name, or the file's LOCATION + mode
     (`validate_show_file`) for a file, and hands the name/path to the server
-    child, which reads the value at GET. Fail-fast: exit 2 on a missing source
+    child, which reads the value on the reveal POST. Fail-fast: exit 2 on a missing source
     or a bad --file (an operator error), exit 1 on a name that is not stored.
     """
     file_arg = getattr(args, "file", None)
@@ -470,10 +470,10 @@ def _secret_show(args):
     Reuses `secret request`'s bind policy (`_secret_bindable`/`_secret_select_ips`,
     encrypted-default + `--allow-plain`), port pick, health probe and URL
     labelling. The value never reaches THIS process: the server child reads it
-    only at GET (`read_value`/`read_show_file`), and the token goes through the
+    only on the reveal POST (`read_value`/`read_show_file`), and the token goes through the
     env (0400), never argv. The NAME/PATH passed in argv is not the value. No
     vault entry is created or consumed — `show` neither stores nor forgets; the
-    endpoint self-terminates on first view or TTL.
+    endpoint stays up until its TTL, serving the value once (a 410 thereafter).
     """
     # Recover a NAME that argparse's REMAINDER swallowed after a LEADING flag
     # (`secret show --public NAME` parses to name=None, cmd=['NAME'] once
@@ -576,8 +576,8 @@ def _secret_show(args):
         print("(skipped %s — cleartext; --allow-plain offers them too)"
               % ", ".join(dropped))
     print("name=%s  endpoint-ttl=%ds  (jednorazové zobrazenie)" % (label, ttl))
-    print("Otvor URL v prehliadači — hodnota sa zobrazí RAZ a potom sa adresa "
-          "zavrie. Do chatu ju NEPÍŠ.")
+    print("Otvor URL v prehliadači a klikni na „Zobraziť hodnotu“ — zobrazí sa "
+          "RAZ. Do chatu ju NEPÍŠ.")
 
 
 def _secret_request_names(args):
