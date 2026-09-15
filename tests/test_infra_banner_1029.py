@@ -11,7 +11,6 @@ RED against the pre-implementation tree: `_infra_new_since_banner` /
 `_read_quals_last_run` don't exist, and cmd_core_quals never prints a banner.
 """
 import inspect
-import json
 import os
 import unittest
 import unittest.mock as m
