@@ -1408,6 +1408,15 @@ class ClassifierFaultFailsClosedTest(_Runner):
     def _path_with(self, stub_dir):
         return {"PATH": str(stub_dir) + os.pathsep + os.environ.get("PATH", "")}
 
+    def _broken_re_dir(self):
+        # a `re.py` that RAISES on import -- shadows the stdlib re via PYTHONPATH.
+        # python still STARTS (startup does not need re), so the classifier's own
+        # `import re` (now inside the try) is what faults -> exit 3.
+        d = self.root / "brokenre"
+        d.mkdir(exist_ok=True)
+        (d / "re.py").write_text('raise RuntimeError("broken re #1038 test")\n')
+        return d
+
     def test_python_classifier_exit2_on_direct_cargo_build_fails_closed(self):
         proj = self._mkproj()
         stub = self._stub_dir(python3_body="#!/bin/bash\nexit 2\n")
@@ -1485,6 +1494,28 @@ class ClassifierFaultFailsClosedTest(_Runner):
         stub = self._stub_dir(python3_body="#!/bin/bash\nexit 2\n")
         out = self.run_hook("ls -la /tmp", proj, extra_env=self._path_with(stub))
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_python_classifier_init_exception_fails_closed(self):
+        # #1038-review MAJOR-2: an INIT-time exception (import re / re.compile
+        # under OOM) must NOT default to exit 1 (= "deterministic not-heavy" = a
+        # fail-OPEN). The whole classifier body incl. `import re` is inside the
+        # try, so a broken `re` shadow -> exit 3 -> classifier fault -> block.
+        proj = self._mkproj()
+        env = {"PYTHONPATH": str(self._broken_re_dir()) + os.pathsep
+               + os.environ.get("PYTHONPATH", "")}
+        out = self.run_hook("cargo build --release", proj, extra_env=env)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("classifier unavailable", out.stderr)
+
+    def test_script_extractor_fault_fails_closed(self):
+        # #1038-review MAJOR-1: Shape-B -- a command invoking a .sh must fail
+        # CLOSED when the script-path EXTRACTOR (a separate python3) faults,
+        # else a cargo build hidden in the invoked script is silently allowed.
+        proj = self._mkproj()
+        stub = self._stub_dir(python3_body="#!/bin/bash\nexit 2\n")
+        out = self.run_hook("bash ./build.sh", proj, extra_env=self._path_with(stub))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("classifier unavailable", out.stderr)
 
     def test_jq_transient_failure_is_retried_and_command_still_blocks(self):
         # a transient jq spawn failure (fork pressure) must not silently blank
