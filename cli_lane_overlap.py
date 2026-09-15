@@ -30,6 +30,13 @@ import time
 # OVERLAP_TTL). 30 min, the same TTL the sibling wdrain receipt uses.
 RECEIPT_TTL_S = 1800
 
+# The Claude Code `isolation: worktree` directory — EVERY dispatched lane is a
+# checkout under `<repo>/.claude/worktrees/`, whatever its branch is named (the
+# same signal the #817 isolation self-check keys on). #1031: recognising a lane
+# by this PATH (not only a `worktree-` branch prefix) is what makes a
+# stream-named lane (`david3/<issue>-<slug>`, `lane5337`) count.
+_WORKTREES_SEGMENT = os.sep + os.path.join(".claude", "worktrees") + os.sep
+
 _STOPWORDS = {
     "the", "and", "for", "with", "into", "from", "this", "that", "area",
     "rework", "fix", "add", "issue", "ticket", "one", "pr", "lane",
@@ -152,15 +159,93 @@ def _lane_is_merged(repo_root, branch, base_branch, run):
     return r.returncode == 0
 
 
+def _parse_worktree_records(stdout):
+    """Parse ``git worktree list --porcelain`` into a list of record dicts —
+    ``{"path", "branch", "head", "detached"}`` — one per worktree, in listing
+    order (the FIRST is always the main checkout). A record ends at a blank line
+    OR the next ``worktree`` line, so a degenerate porcelain carrying only
+    ``branch`` lines (older callers' injected fakes) still yields one record per
+    branch. ``branch`` is the LOCAL name with ``refs/heads/`` stripped but
+    slashes KEPT — a stream branch (``david3/7184-…``) must stay resolvable as a
+    git ref (the old ``rsplit("/",1)[-1]`` mangled it to ``7184-…``, #1031)."""
+    records = []
+    cur = {}
+    for raw in (stdout or "").splitlines():
+        line = raw.strip()
+        if not line:
+            if cur:
+                records.append(cur)
+                cur = {}
+            continue
+        if line.startswith("worktree "):
+            if cur:
+                records.append(cur)
+                cur = {}
+            cur["path"] = line.split(" ", 1)[1].strip()
+        elif line.startswith("HEAD "):
+            cur["head"] = line.split(" ", 1)[1].strip()
+        elif line.startswith("branch "):
+            ref = line.split(" ", 1)[1].strip()
+            cur["branch"] = (ref[len("refs/heads/"):]
+                             if ref.startswith("refs/heads/") else ref)
+        elif line == "detached":
+            cur["detached"] = True
+    if cur:
+        records.append(cur)
+    return records
+
+
+def _resolve_base_branch(repo_root, records, run):
+    """The integration base a lane's merged-ness is judged against: the repo's
+    DEFAULT branch (``git symbolic-ref --quiet refs/remotes/origin/HEAD`` ->
+    ``origin/<default>`` — ``develop`` on the odoo streams, ``main`` here),
+    fallback to the FIRST worktree's branch (the main checkout), fallback
+    ``main``. #1031: NOT the main checkout's own branch when it is a FEATURE
+    branch — a stream box's main checkout sits on ``david3/…``, and judging
+    merged-ness against a random feature branch is the second latent defect.
+    Fails toward the fallback, never raises."""
+    try:
+        r = run(["git", "-C", repo_root, "symbolic-ref", "--quiet",
+                 "refs/remotes/origin/HEAD"])
+        if getattr(r, "returncode", 1) == 0:
+            ref = (r.stdout or "").strip()
+            if ref.startswith("refs/remotes/"):
+                return ref[len("refs/remotes/"):]  # -> origin/<default>
+            if ref:
+                return ref
+    except Exception as e:
+        print("lane-overlap: origin/HEAD resolve failed (%s)" % e,
+              file=sys.stderr)
+    if records and records[0].get("branch"):
+        return records[0]["branch"]
+    return "main"
+
+
+def _is_lane_worktree(record):
+    """True when a worktree record is a dispatched LANE (#1031): a Claude Code
+    ``isolation: worktree`` checkout under ``<repo>/.claude/worktrees/`` (PATH
+    match — name-agnostic, so a stream-named branch counts) OR a worktree whose
+    branch still carries the ``worktree-`` prefix (today's controller lanes).
+    The main checkout matches neither."""
+    path = record.get("path") or ""
+    if _WORKTREES_SEGMENT in (path + os.sep):
+        return True
+    branch = record.get("branch") or ""
+    return branch.rsplit("/", 1)[-1].startswith("worktree-")
+
+
 def gather_live_lanes(repo_root, run=None):
-    """Live worktree lanes: each live worktree branch (worktree-*) and its
-    touched files vs the repo base. A MERGED lane (tip is an ancestor of the
-    integration base — #998) is FINISHED, not live, and is EXCLUDED: liveness =
-    the agent still working, not "the worktree directory still exists" (8/8
-    remaining worktrees were merged lanes yet lane-overlap reported a false
-    overlap with one). Fails toward [] (logs, never raises) — the receipt is
-    still written; a missing lane list only means fewer known overlaps, and the
-    supervisor's own ``Independence:`` record is the durable authority."""
+    """Live worktree lanes: each lane worktree (a ``.claude/worktrees/``
+    isolation checkout OR a ``worktree-*`` branch — #1031) and its touched files
+    vs the repo base. A MERGED lane (tip is an ancestor of the integration base
+    — #998) is FINISHED, not live, and is EXCLUDED: liveness = the agent still
+    working, not "the worktree directory still exists" (8/8 remaining worktrees
+    were merged lanes yet lane-overlap reported a false overlap with one). A
+    DETACHED-HEAD worktree under the isolation dir is a lane mid-operation and
+    counts live (a mid-rebase sha's ancestry is unreliable, so no merged-check).
+    Fails toward [] (logs, never raises) — the receipt is still written; a
+    missing lane list only means fewer known overlaps, and the supervisor's own
+    ``Independence:`` record is the durable authority."""
     run = run or _run_default
     lanes = []
     try:
@@ -170,20 +255,20 @@ def gather_live_lanes(repo_root, run=None):
         return lanes
     if wt.returncode != 0:
         return lanes
-    branches = []
-    base_branch = None
-    for line in (wt.stdout or "").splitlines():
-        if line.startswith("branch "):
-            b = line.split(" ", 1)[1].strip().rsplit("/", 1)[-1]
-            # the FIRST worktree entry is the main checkout — its branch is the
-            # integration base (main/dev/master), never a lane (#993-review 🔵:
-            # never a hardcoded `main`).
-            if base_branch is None:
-                base_branch = b
-            if b.startswith("worktree-"):
-                branches.append(b)
-    base_branch = base_branch or "main"
-    for branch in branches:
+    records = _parse_worktree_records(wt.stdout)
+    base_branch = _resolve_base_branch(repo_root, records, run)
+    # records[0] is the main checkout = the integration base, never a lane.
+    for rec in records[1:]:
+        if not _is_lane_worktree(rec):
+            continue
+        if rec.get("detached"):
+            head = rec.get("head") or "detached"
+            lanes.append({"ref": head[:12], "files": [],
+                          "topic": "(detached lane)"})
+            continue
+        branch = rec.get("branch")
+        if not branch:
+            continue
         # #998 — a merged lane (tip is an ancestor of the base) is FINISHED, not
         # a live lane; overlap ignores it. Unmerged lanes stay live.
         if _lane_is_merged(repo_root, branch, base_branch, run):
