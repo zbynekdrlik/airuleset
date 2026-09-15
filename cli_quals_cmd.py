@@ -981,6 +981,108 @@ def _apply_role_filter(rows, root, role, slug=None):
     return out
 
 
+# --------------------------------------------------------------------------- #
+# #1029 item 2 — the `core-quals --role infra` NEW-since banner. A per-box
+# per-role durable marker of the last run's infra-queue id set; the human
+# `--role infra` display names what arrived since. Additive — NEVER changes the
+# counts (it prints ABOVE the workable rows and touches only its own marker).
+# --------------------------------------------------------------------------- #
+
+def _quals_last_run_path(role):
+    """The per-box per-role marker file (`~/.claude/quals-last-run/<role>.json`)."""
+    return os.path.join(os.path.expanduser("~"), ".claude", "quals-last-run",
+                        "%s.json" % role)
+
+
+def _read_quals_last_run(role):
+    """`(ids: set[int], ts: float|None)` from the marker — `(set(), None)` when
+    absent/malformed (a FIRST run: the caller seeds, never banners)."""
+    try:
+        with open(_quals_last_run_path(role), encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError, TypeError):
+        return set(), None
+    ids = data.get("ids") if isinstance(data, dict) else None
+    ts = data.get("ts") if isinstance(data, dict) else None
+    if not isinstance(ids, list):
+        return set(), ts if isinstance(ts, (int, float)) else None
+    out = set()
+    for x in ids:
+        try:
+            out.add(int(x))
+        except (TypeError, ValueError):
+            continue
+    return out, ts if isinstance(ts, (int, float)) else None
+
+
+def _write_quals_last_run(role, ids, ts):
+    """Persist the marker. A write failure is non-fatal — the banner simply
+    re-fires next run — so it is swallowed on purpose (best-effort durable
+    marker, the same posture as the queue-arrival cache write)."""
+    try:
+        p = _quals_last_run_path(role)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"ids": sorted(int(x) for x in ids), "ts": ts}, f)
+    except OSError:
+        # airuleset:script-ok best-effort marker write; a failure just
+        # re-banners next run (no state corruption, nothing to recover).
+        return
+
+
+def _infra_new_since_banner(root):
+    """#1029 item 2 — returns `(banner, new_ids, cur_ids)` for a `core-quals
+    --role infra` human display. `banner` is "" when nothing is new or the queue
+    is unmeasurable; the caller prints it and this function updates the marker.
+
+    Reuses `airuleset._watchdog_infra_queue_fetch` (the SAME infra-queue source
+    the role-aware rider diffs — tickets + tagged STOP:/GATEKEEPER-ACTION (INFRA)
+    comments), so the banner and the nudge never disagree. FULL-authority-gated
+    inside that fetch (a reduced box → None → no banner). Unmeasurable (None) →
+    the marker is NOT advanced (a real arrival is never silently lost)."""
+    import time
+    import airuleset
+    try:
+        records = airuleset._watchdog_infra_queue_fetch(root)
+    except Exception:  # noqa: BLE001 — any fault => no banner, marker untouched
+        records = None
+    if not isinstance(records, list):
+        return "", None, None
+    cur = {}
+    for r in records:
+        if not isinstance(r, dict) or "id" not in r:
+            continue
+        try:
+            cur[int(r["id"])] = r
+        except (TypeError, ValueError):
+            continue
+    cur_ids = set(cur)
+    last_ids, last_ts = _read_quals_last_run("infra")
+    if last_ts is None:
+        # FIRST run: seed the baseline, never banner (we can't tell a
+        # pre-existing member from a genuine arrival).
+        _write_quals_last_run("infra", cur_ids, time.time())
+        return "", set(), cur_ids
+    new_ids = cur_ids - last_ids
+    _write_quals_last_run("infra", cur_ids, time.time())
+    if not new_ids:
+        return "", set(), cur_ids
+    tickets = sorted(n for n in new_ids
+                     if cur[n].get("kind") != "comment")
+    comment_links = [cur[n].get("permalink") or ("#%d" % cur[n].get("num", n))
+                     for n in sorted(new_ids)
+                     if cur[n].get("kind") == "comment"]
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(last_ts))
+    lines = ["🆕 core-quals --role infra — NOVÉ v infra fronte od posledného "
+             "behu (%s):" % when]
+    if tickets:
+        lines.append("  tickety: " + " ".join("#%d" % n for n in tickets))
+    if comment_links:
+        lines.append("  STOP:/GATEKEEPER-ACTION (INFRA) komentáre: "
+                     + " ".join(comment_links))
+    return "\n".join(lines), new_ids, cur_ids
+
+
 def _dep_wait_map_for(rows, root):
     """`(dep_wait_map, slug, ok)` — on-demand `Depends-on:` resolution via ONE
     batched `gh issue list` (#993 review 2: not a per-row storm). `ok` is False
@@ -1278,6 +1380,19 @@ def cmd_core_quals(args):
         _dep_map, _slug, _ok = _dep_wait_map_for(workable, root)
         _print_audit_rows(workable, own_stream=None, dep_wait_map=_dep_map)
         return
+    # #1029 item 2 — the INFRA-role human display leads with a NEW-since banner
+    # (additive, ABOVE the rows, never changes the count). Only the --list path
+    # reaches here: the bare no-flag path returned early above (prints the qual
+    # search-strings), and the machine paths (--count/--waiting/--ops-wait/
+    # --audit/…) returned in their own branches — so their consumers + the
+    # durable marker are never touched. The banner goes to STDERR (review 1 F1,
+    # corrected by review 2 F4): it is a human/diagnostic line, still shown in a
+    # terminal, and keeping it OFF stdout means a future machine parser of the
+    # `--role infra --list` TSV is never corrupted.
+    if role == "infra":
+        _banner, _new, _cur = _infra_new_since_banner(root)
+        if _banner:
+            print(_banner, file=sys.stderr)
     # own_stream=None: a full-authority box owns no stream, so EVERY
     # stream-labelled row in its obligation set is action-only. #993 item 7:
     # dep-aware action column (--list).
