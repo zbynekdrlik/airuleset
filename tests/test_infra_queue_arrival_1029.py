@@ -169,6 +169,20 @@ class TestInfraRiderPath(_InfraOrchBase):
         self.assertTrue(any("not-full-authority" in ln for ln in logs), logs)
         self.assertEqual(tmux.typed_texts(), [])
 
+    def test_review_f3_nudge_text_not_hardcoded_to_one_hub(self):
+        # REVIEW 1 finding 3 (shared-benefit): the infra nudge must NOT hardcode
+        # the gk hub (#6883) or the gk window name — a SECOND box declaring a
+        # role=infra window would otherwise be pointed at the wrong hub. The
+        # SPECIFIC arrival is named dynamically; the standing instruction must be
+        # box-agnostic. It still points at the generic `core-quals --role infra`.
+        rec = {"id": 999321, "kind": "comment", "num": 9999,
+               "tag": "STOP:", "permalink": "x"}
+        text = qa._nudge_text_infra([rec], 1)
+        self.assertNotIn("6883", text)        # no hardcoded hub number
+        self.assertNotIn("gk-infra", text)    # no hardcoded window name
+        self.assertIn("9999", text)           # the dynamic arrival IS named
+        self.assertIn("--role infra", text)   # generic re-derivation pointer
+
     def test_unmeasurable_fetch_skips_and_keeps_baseline(self):
         # CALLER fail-safe (#181 / #1029 review finding 3): the infra fetch
         # returning None (UNMEASURABLE — a gh hiccup, propagated from
@@ -335,6 +349,33 @@ class TestInfraFetchAndWiring(unittest.TestCase):
                 m.patch("airuleset.resolve_authority",
                         return_value="fork-no-merge"):
             self.assertIsNone(airuleset._watchdog_infra_queue_fetch("/r"))
+
+    # --- REVIEW 1 finding 2 (correctness/perf): the comment fan-out has an
+    # aggregate wall-clock BUDGET so a run of slow-but-succeeding gh calls can't
+    # blow the 120s sweep budget (the count-cap alone bounds COUNT, not TIME).
+    # Once the budget is exceeded the fetch returns None (UNMEASURABLE -> safe
+    # skip, baseline never advanced), consistent with the finding-3 fail-safe.
+    def test_review_f2_comment_loop_aborts_to_none_on_budget(self):
+        ticks = iter([0.0, 1000.0])   # deadline calc, then already over budget
+
+        def clock():
+            return next(ticks)
+
+        def issue_list(*a, **k):
+            class R:
+                returncode = 0
+                stderr = ""
+                stdout = '[{"number": 7001}, {"number": 7002}]'
+            return R()
+
+        with m.patch("airuleset._repo_root", return_value="/r"), \
+                m.patch("airuleset._repo_slug",
+                        return_value="zbynekdrlik/odoo-erp"), \
+                m.patch("airuleset.resolve_authority", return_value="full"), \
+                m.patch("subprocess.run", side_effect=issue_list), \
+                m.patch("airuleset._infra_ticket_comments", return_value=[]):
+            self.assertIsNone(
+                airuleset._watchdog_infra_queue_fetch("/r", clock=clock))
 
     # --- REVIEW FIX 3a (#1029): a gh FAILURE in the comment fetch is
     # UNMEASURABLE -> None, NEVER [] (else the caller reads "no tagged comments"
