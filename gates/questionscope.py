@@ -1,13 +1,29 @@
-"""gates.questionscope — the #1025 question-in-U Stop gate (gate-family #1020).
+"""gates.questionscope — the question-in-U + infra-routing Stop gate (#1025 /
+#1026, gate-family #1020).
 
 A THIN ADAPTER over ``cli_quals.question_ticket_in_u``. When an assistant turn
-ends with a ``❓ ASKED`` / ``❓ NEEDS YOU`` marker AND names a same-repo ``#N``,
-this checks that at least one of those tickets is in THIS box's ``U`` (owner-
-court) surface — the owner's ONLY question surface since the #795 re-ask
-retirement. If none is (the ``needs-answer``/``needs-decision``/
-``needs-owner-action`` label never landed on ``#N``, or ``#N`` is out of this
-box's scope / closed), the owner sees ``U 0`` / ``U N`` without the ticket and
-has nowhere to click — the exact defect airuleset #1025 (odoo-erp#6883) fixes.
+ends with a ``❓ ASKED`` / ``❓ NEEDS YOU`` marker it enforces TWO things:
+
+#1025 — when the turn names a same-repo ``#N``, at least one of those tickets
+must be in THIS box's ``U`` (owner-court) surface — the owner's ONLY question
+surface since the #795 re-ask retirement. If none is (the ``needs-answer``/
+``needs-decision``/``needs-owner-action`` label never landed on ``#N``, or
+``#N`` is out of this box's scope / closed), the owner sees ``U 0`` / ``U N``
+without the ticket and has nowhere to click — the exact defect airuleset #1025
+(odoo-erp#6883) fixes.
+
+#1026 — an INFRA-caused release block is NEVER an owner question. Two triggers,
+both blocking with the infra-routing reason (open/update the infra ticket + tag
+``GATEKEEPER-ACTION (INFRA)`` on the hub; the #1029 rider wakes the INFRA
+session; the owner is only INFORMED): (a) a zero-gh, U-INDEPENDENT TEXT-shape
+trigger — the question text names a STRONG release-block token (``deploy-prod``
+/ ``startup_failure`` / ``hotfix-main`` / ``release-fasttrack-exception``); bare
+``fast-track`` prose is deliberately NOT a trigger (Item 1 — a non-infra
+fast-track stays the owner's; see ``_is_release_block_shape``); (b) a named
+same-repo ticket carrying the ``infra`` label (the ``infra`` verdict, folded
+into the #1025 single gh call — the ROBUST path for an infra fast-track).
+Owner ruling 14.9.2026 (odoo-erp gk FLOW, release 2.288): infra-caused blocks
+are resolved WITH the infra session, not the owner.
 
 FAIL-OPEN by construction: a ticketless ping, a cross-repo-only reference, an
 unmeasurable U set (no fresh cache + a gh error), or any parse failure all
@@ -35,6 +51,50 @@ _BARE_REF_RE = re.compile(r"(?<![A-Za-z0-9_./-])#(\d{1,6})\b")
 # A `#N` that is really a PULL REQUEST reference ("PR #5", "pull request #5") is
 # NOT a subject ticket — exclude it (it never carries an owner-court label).
 _PR_PREFIX_RE = re.compile(r"(?:\bPR|pull\s+request)\s*$", re.IGNORECASE)
+
+# #1026 — a release-block SHAPE in the question TEXT: an INFRA-caused release
+# block is NEVER an owner question. A zero-gh, U-independent trigger that catches
+# the actual incident (release 2.288, deploy-prod.yml startup_failure) with no gh
+# call. These are the STRONG tokens — ones that only ever name an infra/CI/
+# workflow-caused block: a `deploy-prod` dispatch failing on workflow/pool/gate
+# breakage, a startup failure, a hotfix-main dispatch, or the fast-track MARKER
+# artifact `release-fasttrack-exception`. Any one fires the infra route on its
+# own. `\b` anchors keep `deploy-production` / `breakfast track…` from matching
+# (#1026 review 🔵2).
+#
+# BARE `fast-track`/`fasttrack` PROSE is DELIBERATELY NOT a trigger (#1026 review
+# 🟡1, BOTH reviewers): a non-infra fast-track decision reads identically to an
+# infra one and Item 1 rules it stays the OWNER's, and a message-wide `infra`
+# co-signal false-blocks even an explicit DENIAL of an infra cause ("žiadny infra
+# problém … mám fast-track-núť?"). So a genuine infra-caused fast-track is caught
+# by the STRONG marker/CI tokens above OR — the ROBUST path — the `infra` LABEL
+# on the named ticket (the `infra` verdict below). The text heuristic is
+# best-effort by design; a ticketless infra block with no strong token reaches
+# the owner (the SAFE direction — asking is never harmful, mis-routing a real
+# owner decision to infra is).
+_RELEASE_BLOCK_STRONG_RE = re.compile(
+    r"\bdeploy-prod\b|\bstartup_failure\b|\bhotfix-main\b|"
+    r"\brelease-fasttrack-exception\b",
+    re.IGNORECASE,
+)
+
+
+def _is_release_block_shape(msg):
+    """True when the question text names an INFRA-caused release block via a
+    STRONG infra/CI/marker token. Bare `fast-track` prose is intentionally NOT a
+    trigger — see the block comment above (#1026 review 🟡1/🔵2, Item 1)."""
+    return bool(_RELEASE_BLOCK_STRONG_RE.search(msg))
+
+# The shared block reason for BOTH #1026 triggers (text-shape + infra label).
+# Owner ruling 14.9.2026: infra-caused blocks are resolved WITH the infra
+# session, not the owner — the owner is only INFORMED (✅/⏳), never ASKED.
+_INFRA_REASON = (
+    "Infra-vyvolaný release blok NIE JE otázka na ownera — otvor/aktualizuj "
+    "infra tiket a tagni `GATEKEEPER-ACTION (INFRA)` na hube (#1029 rider zobudí "
+    "INFRA session, ktorá vydá marker alebo opraví príčinu); ownera len INFORMUJ "
+    "(✅/⏳), nepýtaj sa ho. Ak je blok naozaj NON-infra fast-track, marker ostáva "
+    "ownerov — preformuluj otázku bez release-block shape / infra tiketu. (#1026)"
+)
 
 
 def _bare_refs(msg):
@@ -65,6 +125,12 @@ def decide(payload, question_fn=None, u_count_fn=None):
     msg = gates.field_of(payload, "last_assistant_message", "")
     if not msg or not _MARKER_RE.search(msg):
         return False, ""                     # not a question turn
+    # (#1026) TEXT-shape trigger: an infra-caused release block named in the
+    # question text is NEVER an owner question — block regardless of U, ZERO gh.
+    # Runs BEFORE the ref/U checks so it fires even on a ticketless / cross-repo
+    # release-block question (the FLOW session's own release-2.288 case).
+    if _is_release_block_shape(msg):
+        return True, _INFRA_REASON
     refs = _bare_refs(msg)
     if not refs:
         return False, ""                     # ticketless / cross-repo / PR-only — not gated
@@ -93,6 +159,8 @@ def decide(payload, question_fn=None, u_count_fn=None):
         sys.stderr.write("questionscope: membership check errored (%s) — "
                          "allowing (fail-open)\n" % e)
         return False, ""
+    if verdict == "infra":                   # #1026 — infra lane, not owner court
+        return True, _INFRA_REASON
     if verdict == "not_in_u":
         listed = ", ".join("#%d" % n for n in sorted(refs))
         reason = (

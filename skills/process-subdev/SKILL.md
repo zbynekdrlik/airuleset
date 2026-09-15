@@ -206,6 +206,13 @@ repo's own CLAUDE.md / playbook is what names the command.
   open) is FROZEN — only release-blocking fixes with a release-fix marker. A shadow/CI
   spec failure on staging = cherry-pick the fix onto staging, NEVER re-cut (each restart
   costs the whole tail). An infra-class shadow failure (rate limit, timeout) = rerun.
+  **An INFRA-caused STOP is an infra-lane matter, never an owner question (#1026):** when
+  a release block is caused by an infra change (a `deploy-prod` dispatch failing on
+  workflow/pool/gate breakage, a fast-track marker needed for an infra PR), the FLOW
+  session opens/updates the infra ticket + tags `GATEKEEPER-ACTION (INFRA)` on the hub
+  (the #1029 rider wakes the INFRA session, which issues the marker or fixes the cause);
+  the owner is only INFORMED (✅/⏳), never ASKED. A NON-infra fast-track marker stays the
+  owner's.
 
 ### 5. Verdict
 
