@@ -3524,11 +3524,19 @@ def _count_deploy_wait(ops_wait):
 
 def _role_filter_footer(workable, waiting, ops_wait, root, cwd):
     """#998 — apply the pane's RESOLVED role (a declared managed window → role)
-    to the footer partition so the two gk windows show DIFFERENT `I`: the review
-    window counts core MINUS infra/architecture-rework, the infra window ONLY
-    those. Role is resolved from `cwd` via the single resolver
+    to the footer's workable `I` so the two gk windows show DIFFERENT `I`: the
+    review window counts core MINUS infra/architecture-rework, the infra window
+    ONLY those. Role is resolved from `cwd` via the single resolver
     (`cli_concurrency.resolve_role`); when it is None (every box but the gk
     windows) all three are returned unchanged — byte-identical to today.
+
+    #1025 CORRECTION of #998: ONLY `workable` (I) is role-filtered. `waiting`
+    (owner-court U) and `ops_wait` (third-party W) are PARKED states global to
+    the box (U = "čo sa ťa Claude pýta", W = "odoslané, čaká tretia strana") —
+    not review-vs-infra WORK — so they are returned UNFILTERED for both roles.
+    #998 filtered all three, hiding an infra ticket's needs-answer from the
+    review window's U (footer `U 0` with a live `❓ ASKED`, odoo-erp#6883).
+
     Fail-SAFE: any resolver / slug error leaves all three UNFILTERED (the safe
     over-count direction, #589/#636) and is LOGGED, never a footer crash."""
     try:
@@ -3551,9 +3559,12 @@ def _role_filter_footer(workable, waiting, ops_wait, root, cwd):
             sys.stderr.write("tickets-status: role filter unavailable "
                              "(slug unresolved) — unfiltered\n")
             return workable, waiting, ops_wait
+        # #1025 CORRECTION of #1008/#998: filter ONLY the workable `I` bucket.
+        # `waiting` (owner-court U) and `ops_wait` (third-party W) are PARKED
+        # states global to the box, never role-owned work — filtering them hid
+        # an infra ticket's needs-answer from the review window's U (odoo-erp
+        # #6883). Doctrine: "the role exclusion may narrow `I` only".
         workable = cli_quals_cmd._apply_role_filter(workable, root, role, slug=slug)
-        waiting = cli_quals_cmd._apply_role_filter(waiting, root, role, slug=slug)
-        ops_wait = cli_quals_cmd._apply_role_filter(ops_wait, root, role, slug=slug)
     except SystemExit as e:
         # defensive: _apply_role_filter fail-CLOSES on an empty slug; we already
         # short-circuit that above, but never let it escape the footer.
@@ -3695,6 +3706,7 @@ def cmd_tickets_status(args):
                 entry["open"] = None
                 entry["gk"] = None
                 entry["user_waiting"] = None
+                entry["user_waiting_numbers"] = None   # #1025
                 entry["ops_wait"] = None
             else:
                 # #510: partition ops-wait (external-event/evidence) tickets OUT
@@ -3724,6 +3736,13 @@ def cmd_tickets_status(args):
                 # so `--waiting` can list the same members (#367 invariant).
                 _qmap_extra = _question_map_u_supplement(rows, root, _out)
                 entry["user_waiting"] += len(_qmap_extra)
+                # #1025: the U member NUMBERS (label-partitioned waiting ∪ the
+                # question-map supplement) — the stop-hook question-in-U gate's
+                # fast-allow membership source (zero gh when this cache is fresh).
+                # ONE derivation with the count above (#367): same `waiting` +
+                # `_qmap_extra`, so the numbers can never drift from user_waiting.
+                entry["user_waiting_numbers"] = sorted(
+                    {int(n) for n in waiting} | {int(n) for n in _qmap_extra})
                 # #868: W-drain breach flag — consumed by statusbar._ops_wait_sfx
                 # for the red `· W N!` footer signal and by block-dispatch-over-
                 # wdrain.sh (which reads ops_wait directly, not this bool).
@@ -3789,6 +3808,7 @@ def cmd_tickets_status(args):
             if u_failed:
                 entry["open"] = None
                 entry["user_waiting"] = None
+                entry["user_waiting_numbers"] = None   # #1025
                 entry["ops_wait"] = None
             else:
                 # #510: ops-wait leaves the workable `I N` alongside #468's
@@ -3804,6 +3824,10 @@ def cmd_tickets_status(args):
                     workable, waiting, ops_wait, root, cwd)
                 entry["open"] = len(workable)
                 entry["user_waiting"] = len(waiting)
+                # #1025: the U member NUMBERS — the stop-hook question-in-U
+                # gate's fast-allow membership source (zero gh when fresh). ONE
+                # derivation with the count (#367): same `waiting` dict.
+                entry["user_waiting_numbers"] = sorted(int(n) for n in waiting)
                 entry["ops_wait"] = len(ops_wait)
                 # #868: W-drain breach flag (same as the slice path above).
                 entry["wdrain_over"] = len(ops_wait) > OPS_WAIT_WDRAIN_THRESHOLD

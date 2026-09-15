@@ -838,6 +838,98 @@ def _partition_user_waiting(rows):
     return {**workable, **ops_wait}, waiting
 
 
+# #1025 — the owner-QUESTION subset of USER_WAITING_LABELS (a `❓ ASKED`/
+# `❓ NEEDS YOU` turn adds one of these). `needs-acceptance` is EXCLUDED — it is a
+# queued client-message approval, not a ❓ owner question. The gate's PURPOSE
+# is about these three; but the MEMBERSHIP question the gh fallback answers is "is
+# #N in the box's U SET", and U (the footer's `user_waiting`, cached in
+# `user_waiting_numbers`) is the FULL `USER_WAITING_LABELS` — needs-acceptance
+# included. The fallback therefore searches `USER_WAITING_LABELS` so it agrees
+# with the cache set (else a just-added needs-acceptance ticket named in a ❓ turn,
+# on a stale U==0 cache, would gh-search-MISS → false `not_in_u` → false block —
+# #1025 review 🟡2). Over-approximates scope (a needs-acceptance+ops-wait W member
+# also matches) → biased toward `in_u`/allow, the safe direction.
+QUESTION_U_LABELS = USER_WAITING_LABELS
+
+# How fresh the tickets-status cache must be for its `user_waiting_numbers` to be
+# trusted as a fast-allow (mirrors u_freshness's own cache-age gate, #797).
+_QUESTION_U_CACHE_FRESH_S = 120
+
+
+def _default_u_runner(argv, cwd):
+    """Run ONE gh command in `cwd`, returning stdout on success or None on any
+    failure/timeout — the fail-open signal `question_ticket_in_u` needs. Unlike
+    `airuleset._gh_out` (which returns "" for BOTH a gh error AND an empty
+    result, conflating fail-open with a genuine empty set), None here means
+    "could not measure" → the gate fails OPEN, "" / "[]" means "measured empty"
+    → a legitimate not-in-U."""
+    import airuleset
+    try:
+        r = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
+                           timeout=20, env=airuleset._gh_env())
+        return r.stdout if r.returncode == 0 else None
+    except Exception:  # noqa: BLE001 — any failure is "unmeasurable", never a block
+        return None
+
+
+def question_ticket_in_u(numbers, cwd, *, home=None, now=None, runner=None,
+                         cache_max_age_s=_QUESTION_U_CACHE_FRESH_S):
+    """#1025 — is at least one of `numbers` (a ❓ turn's named same-repo `#N`
+    refs) a ticket THIS box's `U` (owner-court) surface actually shows? Returns:
+
+      "in_u"        — at least one named ticket is in the box's U set (the owner
+                      CAN click it): the `❓ ASKED`/`❓ NEEDS YOU` is honest.
+      "not_in_u"    — the U set is determinable and NONE of `numbers` is in it
+                      (the needs-answer/decision/owner-action label never landed,
+                      or the ticket is closed): the owner sees U without it.
+      "unmeasurable"— the U set could not be determined (no fresh cache AND a gh
+                      failure): FAIL-OPEN, never block a question on a hiccup.
+
+    COST (#1025): the tickets-status cache (footer-refreshed, authority-correct
+    for this box) is consulted FIRST (zero gh); only when it does not already
+    confirm membership does it fall back to a SINGLE `gh issue list --search`
+    for this repo's open owner-court tickets — the "one gh call at most" ceiling.
+    The full `--waiting` derivation (several gh searches) is deliberately NOT run
+    from a Stop hook. The label search over-approximates scope (label-based, no
+    #654 stream-ownership exclusion), so it is biased toward `in_u`/allow: the
+    block fires only when the label is provably NOT on any named ticket."""
+    import statusbar
+    import time as _time
+    nums = set()
+    for n in (numbers or []):
+        try:
+            nums.add(int(str(n).strip().lstrip("#")))
+        except (TypeError, ValueError):
+            continue
+    if not nums:
+        return "in_u"                      # nothing checkable — never block
+    if now is None:
+        now = _time.time()
+    # Fast-allow: a FRESH cache that already lists a named ticket in U (zero gh).
+    try:
+        cached, ts = statusbar.user_waiting_numbers(cwd, home=home)
+    except Exception:  # noqa: BLE001 — a cache read failure just skips fast-allow
+        cached, ts = None, None
+    if (cached is not None and ts is not None
+            and 0 <= (now - ts) <= cache_max_age_s and (nums & cached)):
+        return "in_u"
+    # Fallback: ONE gh search for this repo's open owner-court tickets. Also
+    # covers the just-added-label lag a fresh cache can miss (a live label
+    # check). None → unmeasurable (fail-open).
+    run = runner or _default_u_runner
+    label_q = "label:" + ",".join(QUESTION_U_LABELS)
+    out = run(["gh", "issue", "list", "--state", "open", "--search", label_q,
+               "--json", "number", "-L", "200"], cwd)
+    if out is None:
+        return "unmeasurable"
+    try:
+        data = json.loads(out or "[]")
+        u_set = {int(x["number"]) for x in data if isinstance(x, dict)}
+    except (ValueError, TypeError, KeyError):
+        return "unmeasurable"
+    return "in_u" if (nums & u_set) else "not_in_u"
+
+
 # #948: hard cap on question-map supplement gh calls per refresh — the map is
 # TYPICALLY 0-3 entries, but a pathological accumulation must not burn the
 # shared #370 GraphQL budget. 10 is generous enough for any realistic box.

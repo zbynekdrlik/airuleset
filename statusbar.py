@@ -132,6 +132,31 @@ def obligation_partition(cwd, home=None):
             ts if isinstance(ts, (int, float)) else None)
 
 
+def user_waiting_numbers(cwd, home=None):
+    """#1025 — the SET of open owner-court (`U`) issue NUMBERS for `cwd`, off the
+    SAME per-cwd tickets-status cache `obligation_partition`/`obligation_count`
+    read (never a parallel derivation — the #367 lesson). Returns
+    `(numbers: set[int] | None, ts: float | None)`: the additive
+    `user_waiting_numbers` cache field as a set (or None when absent / a failed
+    refresh recorded it null / it is not a list), and the cache write time (or
+    None). All-None when the cache file is absent or unparseable. Reads only —
+    never spawns a refresh, never touches the network. The stop-hook
+    question-in-U gate (`cli_quals.question_ticket_in_u`) uses this as its
+    fast-allow membership source (zero gh when the cache is fresh)."""
+    if not cwd:
+        return None, None
+    cache = _load(cache_dir(home) / (cwd_key(cwd) + ".json"))
+    if not isinstance(cache, dict):
+        return None, None
+    raw = cache.get("user_waiting_numbers")
+    if not isinstance(raw, list):
+        nums = None
+    else:
+        nums = {n for n in raw if isinstance(n, int)}
+    ts = cache.get("ts")
+    return nums, (ts if isinstance(ts, (int, float)) else None)
+
+
 def _spawn_refresh(cwd, home=None):
     """Kick a DETACHED `tickets-status --refresh` for `cwd` — guarded by a marker
     mtime so a burst of statusline renders / watchdog sweeps (#618) spawns at most one per SPAWN_GUARD_S."""

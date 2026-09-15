@@ -421,6 +421,31 @@ if [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
     fi
 fi
 
+# --- #1025 (odoo-erp#6883): a ❓ ASKED/NEEDS YOU turn NAMING a same-repo #N must
+# point at a ticket THIS box's `U` (owner-court) surface actually shows — the
+# owner's ONLY question surface since the #795 re-ask retirement. If the
+# needs-answer/needs-decision/needs-owner-action label never landed on #N (or #N
+# is out of this box's scope / closed), the owner sees `U 0`/`U N` without it and
+# has nowhere to click. THIN ADAPTER over gates.questionscope (cache-first, ONE
+# gh call at most, FAIL-OPEN on any gh error). Runs BEFORE the present-user
+# bypass, like #740/#1006/#1007 — the footer U lies regardless of presence. The
+# gate module re-derives the marker + bare #N refs from the payload itself, so it
+# no-ops on a ticketless / cross-repo-only turn (the bash `#[0-9]` pre-check just
+# skips the subprocess when there is no digit ref at all). Retry-capped like the
+# sibling checks (#292: a here-string, never a `printf | grep` that pipefail can
+# flip). All logic in the python module (gate-family #1020).
+if [ "$RETRIES" -lt "$MAX_RETRIES" ] && grep -qE '#[0-9]' <<<"$MSG"; then
+    _QS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    _QS_REPO_ROOT="$(dirname "$_QS_DIR")"
+    _QS_RC=0
+    env PYTHONPATH="${_QS_REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -m gates.questionscope <<<"$INPUT" 1>&2 || _QS_RC=$?
+    if [ "$_QS_RC" -eq 2 ]; then
+        echo "$((RETRIES+1))" > "$RETRY_FILE"
+        exit 2
+    fi
+fi
+
 # PRESENT USER → no shape enforcement. The template exists for the AWAY
 # user's phone ping (zero context, cold read). When the user typed a REAL
 # prompt within the last 10 min they are AT the terminal, mid-conversation —
