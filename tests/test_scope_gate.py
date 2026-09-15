@@ -1484,24 +1484,33 @@ class TestStreamRoutingGateReviewFixes(TestCase):
         # the gate must degrade to "cannot verify a stream identity",
         # never block.
         #
-        # `cwd` is ALSO pointed at the isolated dir, not just `repo_dir`
-        # (via `hook_path`'s own directory) -- `python3 -` (reading its
-        # script from stdin) implicitly prepends "" (the process's OWN
-        # CURRENT WORKING DIRECTORY) to `sys.path`, so leaving `cwd` at
-        # this checkout's real root would let `import airuleset` silently
-        # succeed via THAT fallback regardless of what `repo_dir` says --
-        # verified live: the first draft of this test (cwd left at
-        # REPO_ROOT) reproduced exactly that false pass. In real
-        # production the hook's `cwd` is always the PROJECT being worked
-        # (never airuleset's own checkout), so this fallback never rescues
-        # it there -- only this test's OWN harness needed the extra
-        # isolation to reproduce the same absence.
+        # #1020 Part 2: the classifier now lives in the `gates/filing`
+        # package (run as `python3 -m gates.filing` with PYTHONPATH=REPO_ROOT),
+        # so isolating airuleset.py ALONE now means the isolated REPO_ROOT must
+        # still carry the `gates` package + `ratchet_counts.py` (both resolved
+        # via that same PYTHONPATH) -- ONLY `airuleset.py` is withheld. Without
+        # the gates symlink the whole module would fail to load and the adapter
+        # would fail-CLOSED (exit 2) -- a DIFFERENT path than the authority
+        # degrade this test targets. `caps` imports airuleset LAZILY (inside
+        # `_filer_authority_and_own_stream`), so the module loads fine and only
+        # the authority lookup raises -> (None, None) -> the gate skips.
+        #
+        # `cwd` is ALSO pointed at the isolated dir -- `python3 -m` prepends ""
+        # (the process CWD) to `sys.path`, so leaving `cwd` at this checkout's
+        # real root would let `import airuleset` silently succeed via THAT
+        # fallback regardless of PYTHONPATH -- verified live. In real production
+        # the hook's `cwd` is always the PROJECT being worked (never airuleset's
+        # own checkout), so this fallback never rescues it there.
         isolated_repo = Path(self.tmp) / "isolated-repo"
         isolated_hooks = isolated_repo / "hooks"
         isolated_hooks.mkdir(parents=True)
         isolated_hook = isolated_hooks / "block-ungated-issue-filing.sh"
         isolated_hook.write_text(HOOK.read_text())
         isolated_hook.chmod(0o755)
+        # gates/ + ratchet_counts.py reachable (real classifier), airuleset.py NOT.
+        os.symlink(REPO_ROOT / "gates", isolated_repo / "gates")
+        os.symlink(REPO_ROOT / "ratchet_counts.py",
+                   isolated_repo / "ratchet_counts.py")
         gh_bin = _fake_gh_stream(self.tmp, labels=["stream:david", "stream:david2"])
         r = run(body_cmd("isolated import failure", "no label at all",
                           scope_gate="cross-cutting"),
