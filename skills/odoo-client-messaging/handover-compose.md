@@ -209,24 +209,24 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   **STANDING template grant:** finálna pripomienka + closing nóta citujú
   `airuleset:owner-approved template:final-reminder` / `template:closing-note`;
   nesankcionovaný `template:<iný>` NEudelí — hook #628/#799.
-- **INTAKE reaction FIRST + STANDING ack-reaction grant (#978/#1027/#1033):**
-  the MOMENT you pick up a client message you will act on — before filing a
-  ticket or dispatching a lane — react 👷 on it (fleet ack emoji
-  `ack_reaction_emoji`, legacy 👀 selectable) via
+- **INTAKE reaction FIRST + STANDING ack grant (#978/#1027/#1033):** the MOMENT
+  you pick up a client message you will act on — before filing/dispatching —
+  react 👷 (`ack_reaction_emoji`, legacy 👀 selectable) via
   `message_reaction_guarded(msg_id,"👷","add")`. A bare reaction carries no text
-  → no owner text-approval (standing grant); a `user-request` ticket quoting
-  that message cites it with an `Ack-reaction:` line (filing-gate enforced). An
-  explicit owner instruction about HIS channel overrides the fleet default —
-  escalate to airuleset. Doctrine + recipe: `ack-reaction.md`.
+  → no owner text-approval (standing grant); a `user-request` ticket quoting it
+  cites
+  an `Ack-reaction:` line (filing-gate enforced). An explicit owner instruction
+  about HIS channel overrides the fleet default → escalate to airuleset. Recipe:
+  `ack-reaction.md`.
 - **No interim "how to work around it" reply while a fix is in flight (#1027,
-  owner 2026-09-14).** A client reports something and a fix lane is dispatched →
-  send NO interim manual-workaround message; reply ONCE, after the fix is on
-  PROD and verified. A workaround explanation is human work pushed onto the
-  client while the real fix is coming. Exception: a yes/no question the client
-  explicitly asked that the fix does not answer. Enforced by
-  `stop-check-question-quality.sh` / `gates.questionscope`: a `❓` approving a
-  client message with workaround phrasing (zatiaľ/medzitým/dovtedy/obísť/ručne/
-  workaround) while the cited `#N` has an open implementation lane is blocked.
+  owner 2026-09-14).** Client reports something + a fix lane is dispatched → send
+  NO interim manual-workaround message; reply ONCE, after the fix is on PROD and
+  verified (a workaround is human work pushed onto the client while the real fix
+  comes). Exception: a yes/no question the client explicitly asked that the fix
+  does not answer. Enforced by `stop-check-question-quality.sh` /
+  `gates.questionscope`: a `❓` approving a client message with workaround
+  phrasing (zatiaľ/medzitým/dovtedy/obísť/ručne/workaround) while the cited `#N`
+  has an open lane is blocked.
 
 - **Disposition po uzatváracej správe — SAMO-SCHOVANIE (TTL), nie archivácia
   (#788; #853 compliance).** Po #627 closing nóte ARMuj TTL self-hide (POVINNÝ

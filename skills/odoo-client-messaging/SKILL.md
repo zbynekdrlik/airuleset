@@ -6,54 +6,39 @@ user-invocable: false
 
 # Odoo Client Messaging — Channel-Agnostic Guidance
 
-**airuleset boundary (#891):** airuleset owns the STATE MACHINE + FORMAT;
-the project owns the CHANNEL + MECHANISM. This skill is the fleet-level
-compose and delivery doctrine — channel-agnostic, never prescribing
-Discuss vs task chatter vs any other channel.
+**airuleset boundary (#891):** airuleset owns the STATE MACHINE + FORMAT; the
+project owns the CHANNEL + MECHANISM. This skill is the fleet-level, channel-
+agnostic compose + delivery doctrine — never prescribing Discuss vs task chatter.
 
 ## Channel specifics — POINTER to the project
 
-For the actual channel, transport, and scripts:
-
 - **odoo-erp:** `.claude/rules/odoo-task-sync.md` — task chatter via
-  `scripts/odoo-task-sync.py`, `/json/2` bearer-key transport (odoo-erp
-  issues 6222, 3693). Discuss is for free conversation only (IT-support
-  sub-threads), NOT client acceptance.
-- **Other projects:** see the project's own `.claude/rules/` for its
-  client messaging channel.
+  `scripts/odoo-task-sync.py`, `/json/2` bearer-key transport (odoo-erp issues
+  6222, 3693). Discuss is free conversation only (IT-support sub-threads), NOT
+  client acceptance.
+- **Other projects:** the project's own `.claude/rules/`.
 
-## State machine — intake reaction FIRST (#1027/#1033)
+## Intake reaction FIRST (#1027/#1033)
 
-The FIRST transition when a stream picks up a client message it will act on:
-react 👷 (the fleet ack emoji `ack_reaction_emoji`; legacy 👀 selectable) on
-that message BEFORE filing a ticket or dispatching a lane — the owner's visible
-"being worked on" signal. Doctrine + recipe: `ack-reaction.md`. While a fix lane
-is in flight the stream sends NO interim workaround reply — it replies ONCE after
-the fix is on PROD and verified (full rule in `handover-compose.md`).
+First transition when a stream picks up a client message it will act on: react
+👷 (`ack_reaction_emoji`; legacy 👀 selectable) BEFORE filing a ticket or
+dispatching a lane — the owner's "being worked on" signal; recipe
+`ack-reaction.md`. While a fix lane is in flight: NO interim workaround reply —
+reply ONCE after the fix is on PROD (full rule in `handover-compose.md`).
 
-## Acceptance markers (fleet-level, channel-agnostic)
+## Acceptance markers (channel-agnostic)
 
-The close-time gate (`discuss_close_guard.py`) recognises:
+Recognised by the close gate (`discuss_close_guard.py`):
+- **Binding:** `Acceptance-thread: <ref>` (generic) / `Discuss-thread:
+  <channel-id>` / `discuss.channel_<N>` deep URL (both legacy, kept).
+- **Disposition:** `Acceptance-cited: msg <id> [task <id>|thread <id>]` /
+  `Acceptance-defer: <reason — siblings #A #B still open>` / legacy
+  `Discuss-closed:` / `Discuss-defer:`.
 
-**Binding** (ticket carries a client thread — either binds):
-- `Acceptance-thread: <free ref>` — the generic form
-- `Discuss-thread: <channel-id>` — legacy, kept forever
-- `discuss.channel_<N>` deep-URL token — legacy auto-bind
+## Companions
 
-**Disposition** (any satisfies the close gate):
-- `Acceptance-cited: msg <message-id> [task <id>|thread <id>]` — closed form
-- `Acceptance-defer: <reason — siblings #A #B still open>` — defer form
-- `Discuss-closed: <msg-id>` / `Discuss-defer: <reason>` — legacy, kept forever
-
-## Composing a client message — the fleet doctrine
-
-The cross-stream rules for COMPOSE (what a message must contain) and
-APPROVAL (every client message approved by the owner before posting) live
-in the companion `handover-compose.md` in this directory.
-
-## Client board tasks — project.task formatting
-
-The rules for HOW a stream writes to a client's Odoo project board
-(task name language, description format, Verifikácia notes, stage
-discipline, no assignee, no @mention) live in the companion
-`client-board-tasks.md` in this directory.
+- The cross-stream rules for COMPOSE + APPROVAL (what a message must contain;
+  owner-approved before posting): `handover-compose.md`.
+- Client board `project.task` formatting (name language, description,
+  Verifikácia notes, stage discipline, no assignee/@mention):
+  `client-board-tasks.md`.
