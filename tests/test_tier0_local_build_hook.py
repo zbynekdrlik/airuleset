@@ -39,6 +39,7 @@ would let the two drift apart with nothing to catch it.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -1372,6 +1373,143 @@ class HeredocInterpreterConsumerReviewFixTest(_Runner):
                "cat > /tmp/b <<'EOF'\ncargo compile prose two\nEOF\n"
                "echo done\n")
         out = self.run_hook(cmd, proj)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+
+class ClassifierFaultFailsClosedTest(_Runner):
+    """#1038: the heaviness classifier `_cargo_compiles` is a python3
+    subprocess whose EXIT CODE is the verdict (rc 0 = compiling cargo present,
+    rc 1 = none). The pre-fix caller mapped ANY non-zero rc -- including a
+    genuine FAULT (a python3 spawn / OOM-kill under fork pressure, an internal
+    error, or a hang) -- to "not heavy", SILENTLY ALLOWING a command that
+    textually contains cargo. That is the fail-OPEN that produced the Pass A
+    `bash <<'EOF' cargo build EOF` exit-0 under `pytest -n 2` (empty
+    stdout+stderr, rc 0), while the same test passed alone. The fix
+    distinguishes rc 0 (heavy) / rc 1 (deterministic not-heavy) / any OTHER rc
+    (CLASSIFIER FAULT) and fails CLOSED on a fault for a cargo-mentioning
+    command, while keeping every legitimate allow path (Tier-1/2 marker,
+    env/inline bypass, no-CLAUDE.md, non-cargo) byte-identical. Reproduced by
+    INJECTION -- a PATH-first python3 stub -- never by luck.
+    """
+
+    def _stub_dir(self, python3_body=None, jq_body=None):
+        d = self.root / "stubs"
+        d.mkdir(exist_ok=True)
+        if python3_body is not None:
+            p = d / "python3"
+            p.write_text(python3_body)
+            p.chmod(0o755)
+        if jq_body is not None:
+            p = d / "jq"
+            p.write_text(jq_body)
+            p.chmod(0o755)
+        return d
+
+    def _path_with(self, stub_dir):
+        return {"PATH": str(stub_dir) + os.pathsep + os.environ.get("PATH", "")}
+
+    def test_python_classifier_exit2_on_direct_cargo_build_fails_closed(self):
+        proj = self._mkproj()
+        stub = self._stub_dir(python3_body="#!/bin/bash\nexit 2\n")
+        out = self.run_hook("cargo build --release", proj,
+                            extra_env=self._path_with(stub))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("classifier unavailable", out.stderr)
+
+    def test_python_classifier_exit2_on_bash_heredoc_cargo_build_fails_closed(self):
+        # the EXACT Pass A incident shape.
+        proj = self._mkproj()
+        stub = self._stub_dir(python3_body="#!/bin/bash\nexit 2\n")
+        out = self.run_hook("bash <<'EOF'\ncargo build --release\nEOF\n", proj,
+                            extra_env=self._path_with(stub))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("BLOCKED", out.stderr)
+
+    def test_python_classifier_killed_137_fails_closed(self):
+        proj = self._mkproj()
+        stub = self._stub_dir(python3_body="#!/bin/bash\nkill -9 $$\n")
+        out = self.run_hook("cargo build --release", proj,
+                            extra_env=self._path_with(stub))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_python_classifier_hang_is_bounded_and_fails_closed(self):
+        # a python3 that hangs must not hang the whole Bash tool call: the
+        # timeout bound turns it into rc 124 (a fault) -> fail-closed. A short
+        # per-call timeout via the env seam keeps the test fast.
+        proj = self._mkproj()
+        stub = self._stub_dir(python3_body="#!/bin/bash\nsleep 30\n")
+        env = self._path_with(stub)
+        env["AIRULESET_TIER0_PY_TIMEOUT"] = "2"
+        out = self.run_hook("cargo build --release", proj, extra_env=env)
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_classifier_fault_still_exempts_tier1_project(self):
+        # a Tier-1 project deliberately allows local builds -> a classifier
+        # fault must NOT flip it to blocked (allow path byte-identical).
+        proj = self._mkproj(marker="allowed")
+        stub = self._stub_dir(python3_body="#!/bin/bash\nexit 2\n")
+        out = self.run_hook("cargo build --release", proj,
+                            extra_env=self._path_with(stub))
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_classifier_fault_still_honours_env_bypass(self):
+        proj = self._mkproj()
+        stub = self._stub_dir(python3_body="#!/bin/bash\nexit 2\n")
+        env = self._path_with(stub)
+        env["AIRULESET_ALLOW_LOCAL_BUILD"] = "1"
+        out = self.run_hook("cargo build --release", proj, extra_env=env)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_classifier_fault_still_honours_inline_bypass(self):
+        proj = self._mkproj()
+        stub = self._stub_dir(python3_body="#!/bin/bash\nexit 2\n")
+        out = self.run_hook("cargo build --release # airuleset:build-ok reason",
+                            proj, extra_env=self._path_with(stub))
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_classifier_fault_no_claude_md_still_allows(self):
+        # no CLAUDE.md anywhere -> not a managed project -> allow, even on a
+        # classifier fault (byte-identical "not managed" path preserved).
+        nomgmt = self.root / "nomgmt"
+        nomgmt.mkdir()
+        (nomgmt / ".git").mkdir()
+        stub = self._stub_dir(python3_body="#!/bin/bash\nexit 2\n")
+        out = self.run_hook("cargo build --release", nomgmt,
+                            extra_env=self._path_with(stub))
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_non_cargo_command_with_broken_python_is_unaffected(self):
+        # a command with NO cargo word never reaches the classifier, so a
+        # broken python3 must not fail it closed.
+        proj = self._mkproj()
+        stub = self._stub_dir(python3_body="#!/bin/bash\nexit 2\n")
+        out = self.run_hook("ls -la /tmp", proj, extra_env=self._path_with(stub))
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_jq_transient_failure_is_retried_and_command_still_blocks(self):
+        # a transient jq spawn failure (fork pressure) must not silently blank
+        # CMD -> the extraction is retried, so a real cargo build still blocks.
+        proj = self._mkproj()
+        counter = self.root / "jqcount"
+        real_jq = shutil.which("jq")
+        self.assertIsNotNone(real_jq, "jq must be installed for this test")
+        jq_body = ("#!/bin/bash\n"
+                   'c="%s"\n'
+                   'n=$(cat "$c" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$c"\n'
+                   'if [ "$n" -le 2 ]; then exit 2; fi\n'
+                   'exec "%s" "$@"\n') % (counter, real_jq)
+        stub = self._stub_dir(jq_body=jq_body)
+        out = self.run_hook("cargo build --release", proj,
+                            extra_env=self._path_with(stub))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_jq_total_failure_leaves_command_empty_and_allows(self):
+        # jq permanently unavailable -> the retries exhaust, CMD stays "" ->
+        # exit 0 (nothing to block), never a hang or a crash.
+        proj = self._mkproj()
+        stub = self._stub_dir(jq_body="#!/bin/bash\nexit 2\n")
+        out = self.run_hook("cargo build --release", proj,
+                            extra_env=self._path_with(stub))
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
 
