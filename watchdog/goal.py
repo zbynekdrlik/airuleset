@@ -5632,7 +5632,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 watchdog._janitor_mark_watch(state, pid, now)
                 send_out = {}
                 # #1023 timeout-race — SWEEP-RELATIVE confirm budget: when too
-                # little sweep budget remains for send_verified's ~10-20s
+                # little sweep budget remains for send_verified's ~10s
                 # transcript confirm-wait, skip it (the keystroke still lands;
                 # `delivered-unconfirmed` is an accepted state that stamps the
                 # floor). This stops the confirm-wait running the sweep into the

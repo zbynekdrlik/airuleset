@@ -1070,7 +1070,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         return False
     watchdog.keys(pane_id, "Enter", kind="send", nudge=nudge,
                   user_authored=user_authored, run=run, logs=logs)
-    # #1023 timeout-race — `skip_confirm` (budget too low for the ~10-20s
+    # #1023 timeout-race — `skip_confirm` (budget too low for the ~10s
     # transcript confirm-wait) short-circuits BOTH the confirm poll AND the
     # corrective Escape+Enter (which itself confirm-waits): the Enter already
     # went in, so fall straight through to the ONE box read below — a bare box
@@ -1101,7 +1101,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
             return False
     # #1023 timeout-race — on the skip_confirm path we did NO post-Enter poll, so
     # the box may not have render-cleared yet; ONE short settle before the read
-    # (far cheaper than the skipped ~10-20s confirm-wait) lets CC clear the box so
+    # (far cheaper than the skipped ~10s confirm-wait) lets CC clear the box so
     # the bare-box branch below correctly surfaces `delivered_unconfirmed` instead
     # of reading stale text as "unrecognized" and forcing a re-type next sweep
     # (which would re-open the 1/hour double-delivery this whole lane closes).

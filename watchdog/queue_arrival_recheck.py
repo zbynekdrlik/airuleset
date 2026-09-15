@@ -118,7 +118,7 @@ MAX_SEND_FAILS = 3
 # (a delivered keystroke's floor) it made — the next sweep re-types. The
 # queue-arrival network work is the biggest single-pane time sink: the #1029 infra
 # fetch may burn up to `_INFRA_COMMENT_BUDGET_S` (60s of gh calls, airuleset.py)
-# and the batch confirm-wait ~10-20s. So the rider consults the REMAINING sweep
+# and the batch confirm-wait ~10s (SEND_VERIFY_POLLS×SEND_VERIFY_S). So the rider consults the REMAINING sweep
 # budget (run_once's `sweep_deadline - time_fn()`, threaded as `budget_left_fn`)
 # and SKIPS the fetch (`hold:budget`, baseline UNTOUCHED, zero gh calls) when fewer
 # than FETCH_MIN seconds remain, and the batch caller skips the confirm-wait
@@ -127,7 +127,7 @@ MAX_SEND_FAILS = 3
 # WRITE-THROUGH (`persist`) that makes a delivered mark durable the instant it is
 # typed, regardless of a later kill.
 QUEUE_ARRIVAL_FETCH_MIN_BUDGET_S = 65      # >= the infra fetch's own 60s budget + margin
-QUEUE_ARRIVAL_CONFIRM_MIN_BUDGET_S = 25    # >= send_verified's ~20s confirm-wait + margin
+QUEUE_ARRIVAL_CONFIRM_MIN_BUDGET_S = 25    # >= send_verified's ~10s confirm-wait + generous margin
 
 
 def _budget_left(budget_left_fn):
@@ -744,9 +744,17 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # the first idle tick AFTER the hour. Only a GENUINE swallow (text backed out,
     # nothing seen) skips the floor and backs off via _book_unverified_send below.
     send_out = {}
+    # #1023 timeout-race — symmetric with the batch path (goal.py): when too little
+    # sweep budget remains for the confirm-wait, skip it (deliver-unconfirmed,
+    # marked below) rather than polling into the 2-min kill. Makes the direct
+    # send's kill-safety a DELIBERATE guard, not just the FETCH_MIN margin.
+    _skip_confirm = False
+    _left = _budget_left(budget_left_fn)
+    if _left is not None and _left < QUEUE_ARRIVAL_CONFIRM_MIN_BUDGET_S:
+        _skip_confirm = True
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
                                 logs=logs, out=send_out, nudge="queue-arrival",
-                                state=state)  # #1022: record for the wedge
+                                state=state, skip_confirm=_skip_confirm)  # #1022 wedge / #1023 budget
     if not ok:
         if send_out.get("delivered_unconfirmed"):
             # NON-terminal for the baseline — leave base untouched + janitor

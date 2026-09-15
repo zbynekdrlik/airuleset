@@ -656,7 +656,7 @@
     "watchdog/pane_text.py": 211,
     "watchdog/priority_policy.py": 567,
     "watchdog/questions.py": 580,
-    "watchdog/queue_arrival_recheck.py": 779,
+    "watchdog/queue_arrival_recheck.py": 787,
     "watchdog/reaper.py": 546,
     "watchdog/release_gap.py": 854,
     "watchdog/release_lane.py": 155,
@@ -713,7 +713,7 @@
     "watchdog/goal.py::goal_lane_sweep": 409,
     "watchdog/janitor.py::_janitor_recover": 204,
     "watchdog/ops_wait_recheck.py::goal_ops_wait_recheck": 280,
-    "watchdog/queue_arrival_recheck.py::goal_queue_arrival_recheck": 279,
+    "watchdog/queue_arrival_recheck.py::goal_queue_arrival_recheck": 287,
     "watchdog/release_gap.py::goal_release_gap_recheck": 231,
     "watchdog/stash.py::deliver_with_stash": 299,
     "watchdog/wedge.py::prompt_wedge_check": 294
