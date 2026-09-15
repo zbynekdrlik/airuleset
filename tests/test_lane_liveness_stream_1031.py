@@ -191,6 +191,113 @@ class TestReceiptSeesStreamLane(unittest.TestCase):
             "receipt must flag the stream lane by its full ref, not read CLEAR")
 
 
+class _AheadFake:
+    """Fake git modelling LOCAL <default> vs origin/<default> divergence, to
+    exercise `_resolve_base_branch`'s local-vs-origin choice. Scripts:
+    - symbolic-ref -> refs/remotes/origin/<default>
+    - rev-parse --verify <default>       -> ok iff local_exists
+    - is-ancestor origin/<default> <default> -> rc 0 iff local_ahead_of_origin
+    - is-ancestor <lane> <default>       -> rc 0 iff lane_ancestor_of_local
+    - is-ancestor <lane> origin/<default>-> rc 0 iff lane_ancestor_of_origin
+    """
+
+    def __init__(self, porcelain, default="main", local_exists=True,
+                 local_ahead_of_origin=True, lane_ancestor_of_local=True,
+                 lane_ancestor_of_origin=False):
+        self.porcelain = porcelain
+        self.default = default
+        self.local_exists = local_exists
+        self.local_ahead_of_origin = local_ahead_of_origin
+        self.lane_ancestor_of_local = lane_ancestor_of_local
+        self.lane_ancestor_of_origin = lane_ancestor_of_origin
+        self.calls = []  # (arg_a, base_b) for every --is-ancestor
+
+    def __call__(self, cmd):
+        origin_ref = "origin/" + self.default
+        if "worktree" in cmd and "list" in cmd:
+            return _R(0, self.porcelain)
+        if "symbolic-ref" in cmd:
+            return _R(0, "refs/remotes/origin/%s\n" % self.default)
+        if "rev-parse" in cmd:
+            target = cmd[-1]
+            ok = (target == self.default and self.local_exists) \
+                or target.startswith("origin/")
+            return _R(0, "sha\n") if ok else _R(1)
+        if "--is-ancestor" in cmd:
+            a, b = cmd[-2], cmd[-1]
+            self.calls.append((a, b))
+            if a == origin_ref and b == self.default:
+                return _R(0) if self.local_ahead_of_origin else _R(1)
+            if b == self.default:
+                return _R(0) if self.lane_ancestor_of_local else _R(1)
+            if b == origin_ref:
+                return _R(0) if self.lane_ancestor_of_origin else _R(1)
+            return _R(1)
+        if "merge-base" in cmd:
+            return _R(0, "basesha\n")
+        if "diff" in cmd:
+            return _R(0, "some/file.py\n")
+        if "log" in cmd:
+            return _R(0, "lane work\n")
+        return _R(1)
+
+
+class TestBaseBranchLocalVsOrigin(unittest.TestCase):
+    # Supervisor review of 19af4af6: on the CONTROLLER integration is LOCAL —
+    # a lane is merged into local `main`, then `push` (~35 min) runs while the
+    # NEXT lane dispatches. During that window local `main` is AHEAD of
+    # origin/main, so judging merged-ness against origin/main counts the
+    # just-merged lane LIVE and the sequential gate blocks every next dispatch.
+    CTRL = "/home/airuleset/devel/airuleset"
+    CTRL_PORC = (
+        "worktree /home/airuleset/devel/airuleset\n"
+        "HEAD aaaa\n"
+        "branch refs/heads/main\n"
+        "\n"
+        "worktree /home/airuleset/devel/airuleset/.claude/worktrees/agent-x\n"
+        "HEAD bbbb\n"
+        "branch refs/heads/worktree-agent-x\n"
+    )
+
+    def test_local_ahead_excludes_just_merged_unpushed_lane(self):
+        # lane is in LOCAL main (merged) but NOT yet in origin/main (unpushed).
+        fake = _AheadFake(self.CTRL_PORC, default="main", local_exists=True,
+                          local_ahead_of_origin=True,
+                          lane_ancestor_of_local=True,
+                          lane_ancestor_of_origin=False)
+        lanes = lo.gather_live_lanes(self.CTRL, run=fake)
+        self.assertEqual(
+            lanes, [],
+            "a lane merged into LOCAL main (unpushed) must not count live "
+            "during the push window")
+        # the lane was judged against LOCAL main, never origin/main.
+        lane_bases = [b for a, b in fake.calls if a == "worktree-agent-x"]
+        self.assertEqual(lane_bases, ["main"])
+
+    def test_stale_local_develop_falls_back_to_origin_develop(self):
+        # stream-box mirror: local develop exists but is BEHIND origin/develop
+        # (is-ancestor origin/develop develop rc 1) -> base must be origin/develop.
+        porc = (
+            "worktree %s\n"
+            "HEAD aaaa\n"
+            "branch refs/heads/david3/5235-pokladna-e1\n"
+            "\n"
+            "worktree %s/.claude/worktrees/agent-xyz\n"
+            "HEAD bbbb\n"
+            "branch refs/heads/david3/7184-vyroba-dokoncenie\n"
+        ) % (D3, D3)
+        fake = _AheadFake(porc, default="develop", local_exists=True,
+                          local_ahead_of_origin=False,  # stale local develop
+                          lane_ancestor_of_local=False,
+                          lane_ancestor_of_origin=False)
+        lanes = lo.gather_live_lanes(D3, run=fake)
+        self.assertEqual(len(lanes), 1)  # lane is live (unmerged vs origin)
+        lane_bases = [b for a, b in fake.calls
+                      if a == "david3/7184-vyroba-dokoncenie"]
+        self.assertEqual(lane_bases, ["origin/develop"],
+                         "a stale local develop must not win over origin/develop")
+
+
 _ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
 
