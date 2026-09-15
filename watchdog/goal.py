@@ -5345,7 +5345,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     queue_classify=None, dispatchable_fetch=None,
                     u_fetch=None, reconcile_fetch=None,
                     deploy_state_fetch=None, infra_queue_fetch=None,
-                    resolve_role_fn=None):
+                    resolve_role_fn=None, persist=None):
     """The lane-occupancy driver -- the second half of job 20's new body.
     For every candidate pane whose goal is genuinely ARMED right now, runs
     `goal_lane_occupancy_nudge`. Owns its own small per-sid state namespace
@@ -5372,6 +5372,13 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     projects_dir = projects_dir or watchdog.PROJECTS_DIR
     time_fn = time_fn or time.monotonic
     state = state if state is not None else {}
+    # #1023 timeout-race — the SWEEP-RELATIVE remaining wall-clock, for the
+    # queue-arrival rider's fetch/confirm budget guards (skip a fetch/confirm that
+    # would run the sweep into the unit's `TimeoutStartSec=2min` kill). None when
+    # the caller wired no `sweep_deadline` (legacy / a test) => the rider applies
+    # no budget guard. Same `time_fn`/`sweep_deadline` the pane loop already uses.
+    _budget_left_fn = ((lambda: sweep_deadline - time_fn())
+                       if sweep_deadline is not None else None)
     recs = state.setdefault("goal_lane", {})
     # Each job-20 rider rides this SAME armed-pane loop (ZERO new pane walk) with
     # its OWN per-sid state namespace, distinct from `goal_lane`: #547 ops-wait,
@@ -5504,7 +5511,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                         handled, queue_fetch=queue_fetch,
                         infra_queue_fetch=infra_queue_fetch,
                         resolve_role_fn=resolve_role_fn, state=state,
-                        sleep_fn=sleep_fn, captured=captured)
+                        sleep_fn=sleep_fn, captured=captured,
+                        persist=persist, budget_left_fn=_budget_left_fn)  # #1023 timeout-race
             continue
         # #804 -- this stream is CONFIRMED armed this sweep (the STRUCTURED
         # one-glance verdict, not a render guess): refresh its durable roster
@@ -5596,6 +5604,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 captured=captured, classify_builder=queue_classify,   # #993 item 4
                 infra_queue_fetch=infra_queue_fetch,   # #1029 role-aware
                 resolve_role_fn=resolve_role_fn,       # #1029 role-aware
+                persist=persist, budget_left_fn=_budget_left_fn,   # #1023 timeout-race
                 batch_collect=(_batch_collect if _batch_collect is not None
                                and "queue-arrival" in _eligible else None))
         # #797 -- U-freshness reconcile for this armed pane.
@@ -5622,11 +5631,23 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             if _bt and not dry_run:
                 watchdog._janitor_mark_watch(state, pid, now)
                 send_out = {}
+                # #1023 timeout-race — SWEEP-RELATIVE confirm budget: when too
+                # little sweep budget remains for send_verified's ~10s
+                # transcript confirm-wait, skip it (the keystroke still lands;
+                # `delivered-unconfirmed` is an accepted state that stamps the
+                # floor). This stops the confirm-wait running the sweep into the
+                # unit's TimeoutStartSec=2min kill AFTER a fetch already burned
+                # most of the budget. The pre-Enter type-settle keeps its real
+                # sleep (skipping IT could false-abort the delivery).
+                _b_left = _queue_arrival._budget_left(_budget_left_fn)
+                _b_skip_confirm = (
+                    _b_left is not None
+                    and _b_left < _queue_arrival.QUEUE_ARRIVAL_CONFIRM_MIN_BUDGET_S)
                 _bok = watchdog.send_verified(
                     pid, _bt, run, tpath, sleep_fn=sleep_fn,
                     logs=logs, out=send_out,
                     nudge=(_incl[0] if _incl else None),
-                    state=state)  # #1022: record for the wedge
+                    state=state, skip_confirm=_b_skip_confirm)  # #1022 wedge / #1023 budget
                 _bdeliv = _bok or bool(send_out.get("delivered_unconfirmed"))
                 if _bdeliv:
                     _incl_set = set(_incl)
@@ -5648,6 +5669,12 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                         if _bc == "queue-arrival" and not _bok:
                             continue   # #1023 🔵6: non-terminal on unconfirmed
                         _bfn()
+                    # #1023 timeout-race — WRITE-THROUGH: the batch floor mark +
+                    # every advanced baseline are now durable on disk, so a systemd
+                    # kill later this sweep can no longer un-record them (the exact
+                    # 08:50/08:52 re-delivery). Atomic via the existing save_state;
+                    # the end-of-sweep save stays as the backstop.
+                    _queue_arrival._persist(persist, logs)
                     _bnote = ("" if _bok else
                               " (delivered-unconfirmed)")
                     logs.append("batch-nudge %s -> %d section(s): %s%s"

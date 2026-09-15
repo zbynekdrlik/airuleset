@@ -112,6 +112,56 @@ MAX_NAMED_ARRIVALS = 12
 # instead of typing every 60s sweep forever.
 MAX_SEND_FAILS = 3
 
+# #1023 timeout-race (supervisor gk-journal find) — SWEEP-RELATIVE budget guards.
+# `api-watchdog.service` is `Type=oneshot TimeoutStartSec=2min`; run_once persists
+# state only at sweep END, so a sweep KILLED past 120s loses every in-memory mark
+# (a delivered keystroke's floor) it made — the next sweep re-types. The
+# queue-arrival network work is the biggest single-pane time sink: the #1029 infra
+# fetch may burn up to `_INFRA_COMMENT_BUDGET_S` (60s of gh calls, airuleset.py)
+# and the batch confirm-wait ~10s (SEND_VERIFY_POLLS×SEND_VERIFY_S). So the rider consults the REMAINING sweep
+# budget (run_once's `sweep_deadline - time_fn()`, threaded as `budget_left_fn`)
+# and SKIPS the fetch (`hold:budget`, baseline UNTOUCHED, zero gh calls) when fewer
+# than FETCH_MIN seconds remain, and the batch caller skips the confirm-wait
+# (delivering `delivered-unconfirmed`, an accepted state) below CONFIRM_MIN — so a
+# sweep can never run its queue-arrival work into the 2-min kill. Paired with the
+# WRITE-THROUGH (`persist`) that makes a delivered mark durable the instant it is
+# typed, regardless of a later kill.
+QUEUE_ARRIVAL_FETCH_MIN_BUDGET_S = 65      # >= the infra fetch's own 60s budget + margin
+QUEUE_ARRIVAL_CONFIRM_MIN_BUDGET_S = 25    # >= send_verified's ~10s confirm-wait + generous margin
+
+
+def _budget_left(budget_left_fn):
+    """The remaining sweep wall-clock in seconds (a float/int), or None when it
+    cannot be measured (unwired / a raising seam). None => the caller applies NO
+    budget guard (legacy behaviour), so an unmeasurable budget never wrongly
+    suppresses a nudge."""
+    if budget_left_fn is None:
+        return None
+    try:
+        v = budget_left_fn()
+    except Exception:  # noqa: BLE001 — an unmeasurable budget must not crash the sweep
+        return None
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
+def _persist(persist, logs=None):
+    """Write-through the shared state NOW (a delivered keystroke is irreversible,
+    so its floor mark must survive a mid-sweep systemd kill before run_once's
+    end-of-sweep save). `persist` is run_once's `lambda: save_state(state_path,
+    state)` (already atomic — temp write + os.replace). None (unwired / legacy /
+    dry_run callers) = no-op. A persist failure is LOGGED, never raised — the
+    end-of-sweep save is the backstop, so a mid-sweep write-through error must
+    not crash the sweep."""
+    if persist is None:
+        return
+    try:
+        persist()
+    except Exception as e:  # noqa: BLE001 — durability best-effort; end-of-sweep save backstops
+        if isinstance(logs, list):
+            logs.append("queue-arrival write-through persist failed "
+                        "(end-of-sweep save is the backstop): %r" % e)
+
+
 # #1023 — the per-JOB 30-min nudge floor (`QUEUE_ARRIVAL_NUDGE_FLOOR_S`) is
 # DELETED: it sat BELOW the owner's 1 h rule and is subsumed by the ONE
 # per-pane-per-KIND 60-min floor in `nudge_gate` (consulted via
@@ -452,7 +502,8 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                                dry_run, handled, queue_fetch, state,
                                sleep_fn=None, captured=None,
                                batch_collect=None, classify_builder=None,
-                               infra_queue_fetch=None, resolve_role_fn=None):
+                               infra_queue_fetch=None, resolve_role_fn=None,
+                               persist=None, budget_left_fn=None):
     """Audit ONE armed candidate pane's gk-queue snapshot and, on a NEW arrival,
     deliver ONE verified nudge into that session. Called from
     `goal.goal_lane_sweep`'s existing armed-pane loop with the already-resolved
@@ -533,6 +584,19 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
         if _seq_mode == "sequential":
             logs.append("queue-arrival %s -> skip:sequential-mode" % loc)
             return logs
+    # #1023 timeout-race — SWEEP-RELATIVE fetch budget: a cache-miss fetch (esp.
+    # the #1029 infra fetch, up to _INFRA_COMMENT_BUDGET_S=60s of gh calls) that
+    # STARTS with too little sweep budget left runs the sweep into the unit's
+    # `TimeoutStartSec=2min` kill (BEFORE run_once persists state). If fewer than
+    # FETCH_MIN seconds remain, SKIP with `hold:budget` and an UNTOUCHED baseline
+    # (zero gh calls, no state change) — the arrival is event-driven and
+    # re-detected on the next, less-loaded sweep. None (unwired) => no guard.
+    _left = _budget_left(budget_left_fn)
+    if _left is not None and _left < QUEUE_ARRIVAL_FETCH_MIN_BUDGET_S:
+        logs.append("queue-arrival %s -> hold:budget (%ds left, need >=%ds for a "
+                    "fetch; baseline untouched, retry next sweep)"
+                    % (loc, int(_left), QUEUE_ARRIVAL_FETCH_MIN_BUDGET_S))
+        return logs
     # CACHED per-repo, role-NAMESPACED: the fetch fires at most once per repo per
     # TTL. A cache/fetch error reads as None -> skip.
     try:
@@ -680,15 +744,24 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # the first idle tick AFTER the hour. Only a GENUINE swallow (text backed out,
     # nothing seen) skips the floor and backs off via _book_unverified_send below.
     send_out = {}
+    # #1023 timeout-race — symmetric with the batch path (goal.py): when too little
+    # sweep budget remains for the confirm-wait, skip it (deliver-unconfirmed,
+    # marked below) rather than polling into the 2-min kill. Makes the direct
+    # send's kill-safety a DELIBERATE guard, not just the FETCH_MIN margin.
+    _skip_confirm = False
+    _left = _budget_left(budget_left_fn)
+    if _left is not None and _left < QUEUE_ARRIVAL_CONFIRM_MIN_BUDGET_S:
+        _skip_confirm = True
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
                                 logs=logs, out=send_out, nudge="queue-arrival",
-                                state=state)  # #1022: record for the wedge
+                                state=state, skip_confirm=_skip_confirm)  # #1022 wedge / #1023 budget
     if not ok:
         if send_out.get("delivered_unconfirmed"):
             # NON-terminal for the baseline — leave base untouched + janitor
             # watch SET for the undo path — but stamp the per-kind floor so the
             # re-confirm defers a full hour (owner's 1/hour rule, 🟡4).
             _nudge_gate.mark_sent(state, sid, "queue-arrival", now)   # #1023 🟡4
+            _persist(persist, logs)   # #1023 timeout-race: durable before a kill
             logs.append("queue-arrival %s -> delivered-unconfirmed (no confirmed "
                         "nudge turn; baseline unchanged, floor stamped, undo via "
                         "janitor, re-check after floor, %d new)"
@@ -706,6 +779,7 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     new_rec["send_fails"] = 0
     qrecs[sid] = new_rec
     _nudge_gate.mark_sent(state, sid, "queue-arrival", now)   # #797
+    _persist(persist, logs)   # #1023 timeout-race: mark+baseline durable before a kill
     if handled is not None:
         handled.add(sid)
     logs.append("queue-arrival nudge %s -> %d new (%s), baseline advanced to %d"

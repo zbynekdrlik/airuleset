@@ -1722,6 +1722,15 @@ SWEEP_WALL_CLOCK_BUDGET_S = 90    # env AIRULESET_SWEEP_BUDGET_S
 # kill (90 + 20 = 110s, 10s of slack left for jobs 1-7/11 in between).
 TAIL_BUDGET_S = 20                # extra seconds for jobs 8/9 past sweep_deadline
 
+# #1023 timeout-race — the SOFT CAP for the standalone-job loop's budget log.
+# `api-watchdog.service` is `Type=oneshot TimeoutStartSec=2min` (120s): a sweep
+# that runs past ~100s is at real risk of the systemd kill, which (state is
+# persisted only at sweep END) loses every in-memory mark that sweep made. When a
+# job crosses this cap, run_once logs `sweep budget: <elapsed>s of <cap>s at
+# <job>` so the JOURNAL names the slow job instead of leaving a bare systemd
+# `Failed with result 'timeout'`. Well under 120s so the line lands BEFORE a kill.
+SWEEP_SOFT_CAP_S = 100
+
 
 def _owner_disabled(kind):
     """#400 owner kill-switch read: True when the owner's flag file for
@@ -4494,7 +4503,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             reconcile_fetch=reconcile_fetch,             # #844
             deploy_state_fetch=deploy_state_fetch,       # #944
             infra_queue_fetch=infra_queue_fetch,         # #1029 role-aware
-            resolve_role_fn=resolve_role_fn)             # #1029 role-aware
+            resolve_role_fn=resolve_role_fn,             # #1029 role-aware
+            persist=lambda: save_state(state_path, state))  # #1023 timeout-race write-through
     _add("goal_lane_sweep", lambda: goal_jobs_enabled and not _goal_jobs_disabled,
          _job_goal_lane_sweep, "goal-lane-sweep error")
 
@@ -4882,6 +4892,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with
     # the job's custom prefix or (None) swallows it. Accumulation is verbatim.
+    # #1023 timeout-race — sweep start (monotonic) for the SOFT-CAP budget log
+    # below. `sweep_deadline` == start + `sweep_budget_s`, so start is derivable.
+    _sweep_start = sweep_deadline - sweep_budget_s
+    _budget_logged = False
     for _label, _gate, _invoke, _err in _standalone_registry:
         if _gate():
             # #1032: ONE gate site — a PAUSED box suppresses every human-channel-
@@ -4896,6 +4910,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             except Exception as e:
                 if _err:
                     logs.append("%s: %r" % (_err, e))
+        # #1023 timeout-race — journal the FIRST job at which the sweep crosses
+        # the soft cap, so a subsequent systemd `TimeoutStartSec=2min` kill has a
+        # named cause in the journal instead of a bare `Failed with result
+        # 'timeout'`. Logged once per sweep (a latch); the unit timeout is 120s,
+        # this cap is well under it so the line lands before any kill.
+        if not _budget_logged:
+            _elapsed = time_fn() - _sweep_start
+            if _elapsed >= SWEEP_SOFT_CAP_S:
+                logs.append("sweep budget: %ds of %ds at %s"
+                            % (int(_elapsed), SWEEP_SOFT_CAP_S, _label))
+                _budget_logged = True
 
     save_state(state_path, state)
     return logs
