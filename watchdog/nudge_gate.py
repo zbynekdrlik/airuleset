@@ -153,7 +153,12 @@ NUDGE_TOTAL_GAP_MIN_S = 3600
 # imported so nudge_gate stays a LEAF module: several modules rely on
 # `from watchdog import nudge_gate` being import-safe, and tmux_io pulls in the
 # whole watchdog package.
-RECOVERY_NUDGE_KINDS = frozenset({"resume", "compact"})
+# #1038 — `goal-arm` (a DECLARED managed window's post-reboot arm) is a session
+# revival, so it joins the recovery set here in lockstep with tmux_io (the
+# drift-lock test asserts identity). It carries its OWN per-sid rate floor
+# (`state["goal_virgin_arm"]`), so exempting it from the cadence gate adds no
+# unbounded keystorm — exactly like the other recovery kinds keep their own bounds.
+RECOVERY_NUDGE_KINDS = frozenset({"resume", "compact", "goal-arm"})
 
 # orphan-reaper TTL for a per-sid cadence rec whose session is gone (mirrors the
 # #519/#531 per-sid-leak reaper): the `visited_sids` gate is PRIMARY (a live pane

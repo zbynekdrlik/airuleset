@@ -116,8 +116,11 @@ class TestRecoveryExempt(unittest.TestCase):
 
     def test_recovery_kinds_defined_and_mirror_tmux_io(self):
         # nudge_gate stays a leaf module (no watchdog import); a drift-lock keeps
-        # its recovery set identical to tmux_io's canonical one.
-        self.assertEqual(ng.RECOVERY_NUDGE_KINDS, frozenset({"resume", "compact"}))
+        # its recovery set identical to tmux_io's canonical one. #1038 adds
+        # `goal-arm` (a DECLARED managed window's post-reboot arm = a session
+        # revival, the same class as resume/compact).
+        self.assertEqual(ng.RECOVERY_NUDGE_KINDS,
+                         frozenset({"resume", "compact", "goal-arm"}))
         self.assertEqual(ng.RECOVERY_NUDGE_KINDS, tio.RECOVERY_NUDGE_KINDS)
 
     def test_recovery_does_not_count_for_the_total_cap(self):

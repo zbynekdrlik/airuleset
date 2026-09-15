@@ -23,7 +23,6 @@ RED against the pre-#1038 tree:
 GREEN once the virgin scan + the always-on `goal-arm` recovery nudge + the
 status surface land.
 """
-import os
 import sys
 import unittest
 import unittest.mock as m

@@ -190,7 +190,10 @@ class TestRecoveryAlwaysOn(unittest.TestCase):
             self.assertNotIn("resume", wd.nudges_on_kinds(home=home))
 
     def test_recovery_set_is_disjoint_from_stageable(self):
-        self.assertEqual(wd.RECOVERY_NUDGE_KINDS, frozenset({"resume", "compact"}))
+        # #1038 adds `goal-arm` (a DECLARED managed window's post-reboot arm) to
+        # the always-on recovery set — a session revival, never machine-staged.
+        self.assertEqual(wd.RECOVERY_NUDGE_KINDS,
+                         frozenset({"resume", "compact", "goal-arm"}))
         self.assertTrue(wd.MACHINE_NUDGE_KINDS.isdisjoint(wd.RECOVERY_NUDGE_KINDS))
         # ALL_NUDGE_KINDS is the union — every threaded identity is known
         self.assertEqual(wd.ALL_NUDGE_KINDS,

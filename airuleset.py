@@ -2284,6 +2284,28 @@ def cmd_status(args):
     except Exception as e:
         print(f"\nconcurrency: error ({e})", file=sys.stderr)
 
+    # --- /goal armed state (#1038) ---
+    # Read the SAME truth the arm machinery uses: the tri-state pane_goal_armed
+    # of THIS pane (resolved via $TMUX_PANE, the goal-arm --self mechanism) plus
+    # any durable pending goal-arm request. The variant is always resolvable
+    # from the cwd, so the row names it even when NOT armed -- the owner sees the
+    # one word (/autopilot) that arms it, never a goal text to dig up.
+    try:
+        import cli_concurrency
+        from watchdog import compact as _compact_mod
+        from watchdog import goal as _goal_mod
+        armed = None
+        pending = False
+        pid, _pcwd, sid = _compact_mod.resolve_self_pane()
+        if pid:
+            import watchdog as _wd
+            armed = _wd.pane_goal_armed(_wd.capture_pane(pid))
+        if sid:
+            pending = bool(_goal_mod.load_goal_requests().get(sid))
+        print("\n" + cli_concurrency.goal_status_row(os.getcwd(), armed, pending))
+    except Exception as e:
+        print(f"\ngoal: error ({e})", file=sys.stderr)
+
     # --- Conformance drift + paused (#1032): the SUPERVISOR-facing surface that
     # replaced the removed owner Discord ping. `conformance:` reads the persisted
     # daily-sweep snapshot (DRIFT with reasons / OK / not-yet-checked); `paused:`

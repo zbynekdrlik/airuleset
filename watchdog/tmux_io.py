@@ -115,7 +115,19 @@ MACHINE_NUDGE_KINDS = frozenset({
 # veto; NONE of them ever went through the nudge_gate 60-min per-kind floor, so
 # dropping the switch gate removed no rate bound. PRIORITY nudges (every
 # MACHINE_NUDGE_KINDS member) stay gated + floored + per-kind staged.
-RECOVERY_NUDGE_KINDS = frozenset({"resume", "compact"})
+#
+# #1038 (owner, 2026-09-15) — `goal-arm`: the arm keystroke into a DECLARED
+# managed window (gk review, gk-infra, d3, the controller's own). A declared
+# window that comes back DARK after a reboot is a dead/blocked session the
+# owner needs REVIVED with zero staging — semantically the same revival class
+# as `resume`/`compact` — so its arm rides an always-on recovery nudge and is
+# NEVER suppressed by the machine-nudge OFF switch. NON-declared boxes keep the
+# staged PRIORITY `goal-sweep` identity (unchanged). Delivery derives which of
+# the two identities to use from the pane's cwd (declared-window == source
+# "role" in `cli_concurrency.resolve_concurrency`); see `watchdog/goal.py`
+# `deliver_goal`. Its own recent-human + tri-state-armed + boundary + per-sid
+# rate-floor gates bound it, exactly as the other recovery nudges keep theirs.
+RECOVERY_NUDGE_KINDS = frozenset({"resume", "compact", "goal-arm"})
 
 # Every threaded nudge identity — the stageable PRIORITY set plus the always-on
 # RECOVERY set. A `nudge=` threaded by any delivery site is one of these.
