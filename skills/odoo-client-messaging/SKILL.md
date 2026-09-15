@@ -22,6 +22,15 @@ For the actual channel, transport, and scripts:
 - **Other projects:** see the project's own `.claude/rules/` for its
   client messaging channel.
 
+## State machine — intake reaction FIRST (#1027/#1033)
+
+The FIRST transition when a stream picks up a client message it will act on:
+react 👷 (the fleet ack emoji `ack_reaction_emoji`; legacy 👀 selectable) on
+that message BEFORE filing a ticket or dispatching a lane — the owner's visible
+"being worked on" signal. Doctrine + recipe: `ack-reaction.md`. While a fix lane
+is in flight the stream sends NO interim workaround reply — it replies ONCE after
+the fix is on PROD and verified (full rule in `handover-compose.md`).
+
 ## Acceptance markers (fleet-level, channel-agnostic)
 
 The close-time gate (`discuss_close_guard.py`) recognises:
