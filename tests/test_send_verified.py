@@ -281,6 +281,28 @@ class SendVerified(_Base):
         self.assertTrue(ok)
         self.assertFalse(out.get("delivered_unconfirmed"))
 
+    def test_skip_confirm_delivers_unconfirmed_without_the_confirm_wait(self):
+        # #1023 timeout-race: skip_confirm=True (budget too low for the confirm-
+        # wait) still DELIVERS — the Enter fires and a cleared box records
+        # delivered_unconfirmed — but WITHOUT the ~10-20s _await_submit_confirmed
+        # poll. Non-tautological: it does strictly FEWER sleeps than the default
+        # (confirm-waiting) path (only the pre-Enter type-settle + the ONE #1023
+        # post-Enter box-clear settle, never the SEND_VERIFY_POLLS confirm loop).
+        p = self._tpath()
+        skip_sleeps = []
+        out = {}
+        ok = wd.send_verified(PID, TEXT, self._fake(transcript_path=None), p,
+                              sleep_fn=lambda s: skip_sleeps.append(s),
+                              logs=[], out=out, skip_confirm=True)
+        self.assertFalse(ok)
+        self.assertTrue(out.get("delivered_unconfirmed"),
+                        "skip_confirm must still deliver (Enter fired, box bare)")
+        base_sleeps = []
+        wd.send_verified(PID, TEXT, self._fake(transcript_path=None), p,
+                         sleep_fn=lambda s: base_sleeps.append(s), logs=[], out={})
+        self.assertLess(len(skip_sleeps), len(base_sleeps),
+                        "skip_confirm must skip the confirm-wait polls")
+
 
 class TruncatedTypeUndone617(unittest.TestCase):
     def test_truncated_own_type_is_undone_never_left_in_box(self):

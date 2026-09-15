@@ -1099,6 +1099,14 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
                                             "send-verified swallowed",
                                             sleep_fn=sleep_fn)
             return False
+    # #1023 timeout-race — on the skip_confirm path we did NO post-Enter poll, so
+    # the box may not have render-cleared yet; ONE short settle before the read
+    # (far cheaper than the skipped ~10-20s confirm-wait) lets CC clear the box so
+    # the bare-box branch below correctly surfaces `delivered_unconfirmed` instead
+    # of reading stale text as "unrecognized" and forcing a re-type next sweep
+    # (which would re-open the 1/hour double-delivery this whole lane closes).
+    if skip_confirm:
+        sleep_fn(SEND_VERIFY_S)
     # Unconfirmed and NOT provably stuck. Read the box ONCE and log honestly —
     # never claim a state we did not read (#134/#360). Withhold keystrokes on
     # every branch (Escape could interrupt a turn that started #233; a blind
