@@ -230,6 +230,13 @@ class _AheadFake:
             self.calls.append((a, b))
             if a == origin_ref and b == self.default:
                 return _R(0) if self.local_ahead_of_origin else _R(1)
+            # the LOCAL default branch vs its origin remote: model REAL
+            # containment so a stale local (behind origin) reads as an ancestor
+            # of origin (origin CONTAINS it) — the gk/stale-develop shape must
+            # resolve via containment, not a zero-date divergence tie
+            # (#1031 review-1 NB3). Must precede the generic `b == origin_ref`.
+            if a == self.default and b == origin_ref:
+                return _R(0) if not self.local_ahead_of_origin else _R(1)
             if b == self.default:
                 return _R(0) if self.lane_ancestor_of_local else _R(1)
             if b == origin_ref:

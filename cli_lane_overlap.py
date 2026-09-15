@@ -289,7 +289,10 @@ def _resolve_base_branch(repo_root, records, run):
             return False
         return getattr(r, "returncode", 1) == 0 and bool((r.stdout or "").strip())
 
-    # 1) NAME.
+    # 1) NAME. A `develop` ref present anywhere ⇒ develop IS the integration
+    # base (the 3-branch odoo model); this deliberately overrides origin/HEAD.
+    # 2-branch projects integrate on `dev` (not `develop`), which the
+    # `refs/remotes/*/develop` pattern does not match, so they fall through.
     name = None
     if _develop_ref_exists():
         name = "develop"
