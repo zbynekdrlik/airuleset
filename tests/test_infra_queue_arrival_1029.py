@@ -17,6 +17,7 @@ owner-present infra pane. RED against the pre-implementation tree: the new
 `infra_queue_fetch` / `resolve_role_fn` kwargs do not exist, and a sequential
 infra pane returns `skip:sequential-mode` instead of nudging.
 """
+import json
 import os
 import unittest
 import unittest.mock as m
@@ -320,6 +321,98 @@ class TestInfraFetchAndWiring(unittest.TestCase):
                 m.patch("airuleset.resolve_authority",
                         return_value="fork-no-merge"):
             self.assertIsNone(airuleset._watchdog_infra_queue_fetch("/r"))
+
+    # --- REVIEW FIX 3a (#1029): a gh FAILURE in the comment fetch is
+    # UNMEASURABLE -> None, NEVER [] (else the caller reads "no tagged comments"
+    # and advances the baseline past a hidden STOP:). Patches BOTH the pre-fix
+    # `_gh_out` mechanism and the fixed `subprocess.run` mechanism so the test
+    # is red against the pre-fix tree and green against the fix, regardless of
+    # which fetch mechanism the function uses.
+    def test_review3a_infra_comments_none_on_gh_failure(self):
+        class Fail:
+            returncode = 1
+            stdout = ""
+            stderr = "boom"
+
+        with m.patch("airuleset._repo_slug",
+                     return_value="zbynekdrlik/odoo-erp"), \
+                m.patch("subprocess.run", return_value=Fail()), \
+                m.patch("airuleset._gh_out", return_value=""):
+            self.assertIsNone(airuleset._infra_ticket_comments(6883, "/r"))
+
+    def test_review3a_infra_comments_empty_list_on_ok_empty(self):
+        # A genuinely EMPTY (rc 0) result is [] — the measurable "no tagged
+        # comments" that is distinct from the None UNMEASURABLE case above.
+        class OK:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        with m.patch("airuleset._repo_slug",
+                     return_value="zbynekdrlik/odoo-erp"), \
+                m.patch("subprocess.run", return_value=OK()), \
+                m.patch("airuleset._gh_out", return_value=""):
+            self.assertEqual(airuleset._infra_ticket_comments(6883, "/r"), [])
+
+    # --- REVIEW FIX 3 (#1029): a None (UNMEASURABLE) comment layer fails the
+    # WHOLE queue to None — never a partial read that advances the baseline past
+    # a hidden STOP: on an un-read ticket (#181 fail-safe propagation).
+    def test_review3_unmeasurable_comment_layer_fails_whole_queue(self):
+        def issue_list(*a, **k):
+            class R:
+                returncode = 0
+                stderr = ""
+                stdout = '[{"number": 7001}]'
+            return R()
+
+        with m.patch("airuleset._repo_root", return_value="/r"), \
+                m.patch("airuleset._repo_slug",
+                        return_value="zbynekdrlik/odoo-erp"), \
+                m.patch("airuleset.resolve_authority", return_value="full"), \
+                m.patch("subprocess.run", side_effect=issue_list), \
+                m.patch("airuleset._infra_ticket_comments", return_value=None):
+            self.assertIsNone(airuleset._watchdog_infra_queue_fetch("/r"))
+
+    # --- REVIEW FIX 2 (#1029): >CAP open infra tickets, ALL numbered BELOW the
+    # hub #6883. A plain `sorted()[:cap]` keeps the OLDEST/lowest and DROPS the
+    # hub + the newest — silently missing a fresh STOP: on the hub. The fix
+    # scans the HUB first, then the NEWEST tickets, within the cap.
+    def test_review2_hub_always_scanned_and_newest_first_cap(self):
+        cap = airuleset._INFRA_COMMENT_TRACK_CAP
+        ticket_nums = list(range(1, cap + 6))   # all < 6883
+
+        def issue_list(*a, **k):
+            class R:
+                returncode = 0
+                stderr = ""
+                stdout = json.dumps([{"number": n} for n in ticket_nums])
+            return R()
+
+        scanned = []
+
+        def fake_comments(number, *a, **k):
+            scanned.append(number)
+            if number == 6883:
+                return [{"id": 999123, "body": "STOP: infra pool down",
+                         "html_url": "https://github.com/zbynekdrlik/odoo-erp/"
+                                     "issues/6883#issuecomment-999123"}]
+            return []
+
+        with m.patch("airuleset._repo_root", return_value="/r"), \
+                m.patch("airuleset._repo_slug",
+                        return_value="zbynekdrlik/odoo-erp"), \
+                m.patch("airuleset.resolve_authority", return_value="full"), \
+                m.patch("subprocess.run", side_effect=issue_list), \
+                m.patch("airuleset._infra_ticket_comments",
+                        side_effect=fake_comments):
+            out = airuleset._watchdog_infra_queue_fetch("/r")
+        ids = [r["id"] for r in out]
+        # the HUB is ALWAYS scanned -> its tagged STOP: comment is captured
+        self.assertIn(6883, scanned)
+        self.assertIn(999123, ids)
+        # the NEWEST ticket wins the cap; the OLDEST (#1) is dropped by it
+        self.assertIn(max(ticket_nums), scanned)
+        self.assertNotIn(1, scanned)
 
 
 if __name__ == "__main__":

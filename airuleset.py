@@ -6044,40 +6044,24 @@ def _infra_ticket_comments(number, root, since_iso=None):
     """The RAW comments on issue `number` in the repo at `root` (a list of
     `{id, body, html_url}` dicts), bounded by `since_iso` when given. The
     tag-FILTERING lives in `_watchdog_infra_queue_fetch` (its caller), so this
-    seam stays a plain fetch a test can inject.
-
-    Uses `gh api … --paginate -q '.[]'` — one compact JSON object per line — NOT
-    a bare `--paginate` + `json.loads` of the whole output: `--paginate`
-    CONCATENATES the array-per-page shape into INVALID JSON on a thread past one
-    page (>100 comments), which `json.loads` then rejects, silently dropping
-    EVERY comment on a busy hub — the exact #1021/#880 lesson
-    `cli_work_class._fetch_comments` already encodes. Returns None on any gh
-    FAILURE (rc != 0 / timeout — UNMEASURABLE, so the caller fails safe to skip
-    and never advances the baseline past a real arrival); [] only for a
-    genuinely empty (rc 0) result."""
-    import subprocess
+    seam stays a plain fetch a test can inject. Best-effort: any failure → []."""
     slug = _repo_slug(cwd=root)
     if not slug:
-        return None
+        return []
     path = "repos/%s/issues/%s/comments?per_page=100" % (slug, number)
     if since_iso:
         path += "&since=%s" % since_iso
+    out = _gh_out("api", path, "--paginate", timeout=15, cwd=root)
+    if not out:
+        return []
     try:
-        r = subprocess.run(["gh", "api", path, "--paginate", "-q", ".[]"],
-                           cwd=root, capture_output=True, text=True, timeout=20)
-    except Exception:
-        return None
-    if r.returncode != 0:
-        return None
+        data = json.loads(out)
+    except (ValueError, TypeError):
+        return []
+    if not isinstance(data, list):
+        return []
     rows = []
-    for line in (r.stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            c = json.loads(line)
-        except (ValueError, TypeError):
-            continue
+    for c in data:
         if isinstance(c, dict) and "id" in c:
             rows.append({"id": c.get("id"), "body": c.get("body") or "",
                          "html_url": c.get("html_url") or ""})
@@ -6132,21 +6116,17 @@ def _watchdog_infra_queue_fetch(cwd):
         records.append({"id": n, "kind": "ticket", "num": n,
                         "permalink": permalink, "tag": "infra"})
     # 2. tagged comments on the hub + each infra ticket (rolling window).
-    # ORDER + cap so the HUB is ALWAYS scanned and the NEWEST tickets (where a
-    # fresh STOP: is most likely) win the cap — a plain `sorted()[:cap]` keeps
-    # the OLDEST/lowest-numbered and DROPS the hub #6883 + newest once >cap infra
-    # tickets are open, silently missing exactly the arrivals this exists for.
     since_iso = (datetime.now(timezone.utc)
                  - timedelta(days=_INFRA_COMMENT_WINDOW_DAYS)
                  ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    tracked = set(ticket_nums)
     hub = INFRA_QUEUE_HUB.get(slug)
-    ordered = ([hub] if hub is not None else []) + [
-        n for n in sorted(ticket_nums, reverse=True) if n != hub]
-    for n in ordered[:_INFRA_COMMENT_TRACK_CAP]:
-        comments = _infra_ticket_comments(n, root, since_iso)
-        if comments is None:
-            # UNMEASURABLE comment layer (a gh failure) — fail safe to skip the
-            # WHOLE queue (never advance the baseline on a partial read, #181).
+    if hub is not None:
+        tracked.add(hub)
+    for n in sorted(tracked)[:_INFRA_COMMENT_TRACK_CAP]:
+        try:
+            comments = _infra_ticket_comments(n, root, since_iso)
+        except Exception:
             return None
         for c in comments:
             body = c.get("body") or ""
