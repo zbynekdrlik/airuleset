@@ -163,10 +163,25 @@ class TestInfraRoutingDecision(TestCase):
         self.assertFalse(block)          # owner decides a non-infra fast-track
         self.assertEqual(reason, "")
 
-    def test_fasttrack_with_infra_word_blocks(self):
-        # fast-track WITH an infra cause named → infra lane.
-        msg = ("**Otázka — projekt odoo-erp:** kvôli infra problému release "
-               "neprešiel.\n\n❓ NEEDS YOU: vydáš fast-track marker?")
+    def test_fasttrack_mentioning_infra_reaches_owner(self):
+        # #1026 review 🟡1 (af8fe8df): a bare fast-track question that merely
+        # MENTIONS infra (even to DENY an infra cause) must NOT be infra-routed —
+        # bare fast-track prose is not a trigger, only STRONG tokens / the infra
+        # LABEL are. A genuine infra-caused fast-track carries the infra label.
+        msg = ("**Otázka — projekt airuleset (fleet):** feature #500 hotová, "
+               "neblokuje ju žiadny infra problém.\n\n"
+               "❓ NEEDS YOU: mám ju fast-track-núť do najbližšieho release?")
+        with m.patch.object(cli_quals, "question_ticket_in_u",
+                            return_value="in_u"):
+            block, reason = qs.decide(_payload(msg), u_count_fn=lambda c: 0)
+        self.assertFalse(block)
+        self.assertEqual(reason, "")
+
+    def test_deploy_prod_yml_config_question_still_blocks(self):
+        # A deploy-prod token is a STRONG signal and fires standalone (accepted
+        # by design, #1026 review 🔵2 — a deploy-workflow decision is infra-domain).
+        msg = ("**Otázka — projekt odoo-erp:** treba upraviť deploy-prod.yml.\n\n"
+               "❓ NEEDS YOU: pridám cache step?")
         block, _ = qs.decide(_payload(msg), u_count_fn=lambda c: 0)
         self.assertTrue(block)
 
@@ -188,14 +203,19 @@ class TestReleaseBlockShapeHelper(TestCase):
                   "gatekeeper/hotfix-main-2288", "release-fasttrack-exception.json"):
             self.assertTrue(qs._is_release_block_shape(t), t)
 
-    def test_bare_fasttrack_alone_does_not_fire(self):
+    def test_bare_fasttrack_never_fires_even_with_infra_word(self):
+        # Bare fast-track is not a trigger — even alongside the word `infra`
+        # (which can DENY a cause), only a STRONG token is (#1026 🟡1).
         for t in ("mám fast-track-núť tento feature?", "fasttrack this PR?",
-                  "fast track the release of feature X"):
+                  "fast track the release of feature X",
+                  "infra blok — treba fast-track marker",
+                  "žiadny infra problém, fast-track?"):
             self.assertFalse(qs._is_release_block_shape(t), t)
 
-    def test_fasttrack_with_infra_cause_fires(self):
-        self.assertTrue(qs._is_release_block_shape("infra blok — treba fast-track marker"))
+    def test_fasttrack_with_strong_token_fires_via_strong(self):
+        # fast-track alongside a STRONG token fires — via the strong token.
         self.assertTrue(qs._is_release_block_shape("fast-track lebo deploy-prod padol"))
+        self.assertTrue(qs._is_release_block_shape("fast-track: release-fasttrack-exception.json"))
 
     def test_anchors_reject_substring_overmatch(self):
         for t in ("deploy-production rollout", "breakfast tracking app",
@@ -270,9 +290,7 @@ def _rule5_window(text):
     """The rule-5 bullet: from its numbered anchor up to the trailing
     'Applies to all rewordings' closer (rule 5 is the last rule)."""
     normed = _norm(text)
-    idx = normed.find("5.")
-    # find the LAST '5.' that starts a bold rule (avoid an incidental '5.' in
-    # earlier prose): search for '5. **'
+    # anchor on the bold rule start, not a bare '5.' that could match prose.
     idx = normed.find("5. **")
     if idx < 0:
         return ""

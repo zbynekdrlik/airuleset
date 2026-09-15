@@ -902,12 +902,16 @@ def question_ticket_in_u(numbers, cwd, *, home=None, now=None, runner=None,
     stream-ownership exclusion), so it is biased toward `in_u`/allow: a U block
     fires only when the label is provably NOT on any named ticket.
 
-    #1026 cache-path limitation (documented, accepted): the fresh-cache fast-
-    allow returns "in_u" without seeing labels, so a ticket that is BOTH in the
-    cached U set AND `infra`-labelled reads as "in_u" (allow), not "infra". This
-    is safe — such a ticket IS visible to the owner (no #1025 blindness) — and
-    the zero-gh TEXT-shape trigger in `gates.questionscope` is the strong,
-    U-independent guard for a genuine infra-caused release block."""
+    #1026 cache-path note: the fresh-cache fast-allow returns "in_u" without
+    seeing labels, so IN ISOLATION a ticket BOTH in the cached U set AND
+    `infra`-labelled would read "in_u" (allow), not "infra". This hole is MOOT
+    for the gate's only caller (`gates.questionscope.decide`): it invokes this
+    function ONLY when the box's U count is 0, i.e. the cached U set is empty/
+    None, so `nums & cached` never triggers the fast-path — the gh fallback
+    always runs and the infra label is always detected. It stays documented for
+    any future caller with a non-empty U; even there it is safe (such a ticket IS
+    visible to the owner — no #1025 blindness — and the zero-gh TEXT-shape
+    trigger is the strong, U-independent guard)."""
     import statusbar
     import time as _time
     nums = set()

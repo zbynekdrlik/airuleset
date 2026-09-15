@@ -431,13 +431,14 @@ fi
 # bypass, like #740/#1006/#1007 — the footer U lies regardless of presence. The
 # gate module re-derives the marker + bare #N refs from the payload itself, so it
 # no-ops on a ticketless / cross-repo-only turn (the bash pre-check just skips the
-# subprocess when there is neither a digit ref NOR a #1026 release-block shape
-# keyword — deploy-prod / startup_failure / fast-track / hotfix-main /
-# release-fasttrack-exception — so an infra-caused release block with no #N still
-# reaches the text-shape trigger). Retry-capped like the sibling checks (#292: a
-# here-string, never a `printf | grep` that pipefail can flip). All logic in the
-# python module (gate-family #1020).
-if [ "$RETRIES" -lt "$MAX_RETRIES" ] && grep -qiE '#[0-9]|deploy-prod|startup_failure|fast[-_ ]?track|hotfix-main|release-fasttrack-exception' <<<"$MSG"; then
+# subprocess when there is neither a digit ref NOR a #1026 STRONG release-block
+# token — deploy-prod / startup_failure / hotfix-main / release-fasttrack-exception
+# — so an infra-caused release block with no #N still reaches the text-shape
+# trigger; bare `fast-track` is intentionally NOT here, matching the python
+# strong-token-only trigger, #1026 review 🟡1). Retry-capped like the sibling
+# checks (#292: a here-string, never a `printf | grep` that pipefail can flip).
+# All logic in the python module (gate-family #1020).
+if [ "$RETRIES" -lt "$MAX_RETRIES" ] && grep -qiE '#[0-9]|deploy-prod|startup_failure|hotfix-main|release-fasttrack-exception' <<<"$MSG"; then
     _QS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
     _QS_REPO_ROOT="$(dirname "$_QS_DIR")"
     _QS_RC=0

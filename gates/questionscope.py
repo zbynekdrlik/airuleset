@@ -16,10 +16,12 @@ without the ticket and has nowhere to click — the exact defect airuleset #1025
 both blocking with the infra-routing reason (open/update the infra ticket + tag
 ``GATEKEEPER-ACTION (INFRA)`` on the hub; the #1029 rider wakes the INFRA
 session; the owner is only INFORMED): (a) a zero-gh, U-INDEPENDENT TEXT-shape
-trigger — the question text names a release-block shape (``deploy-prod`` /
-``startup_failure`` / ``fast-track`` / ``hotfix-main`` /
-``release-fasttrack-exception``); (b) a named same-repo ticket carrying the
-``infra`` label (the ``infra`` verdict, folded into the #1025 single gh call).
+trigger — the question text names a STRONG release-block token (``deploy-prod``
+/ ``startup_failure`` / ``hotfix-main`` / ``release-fasttrack-exception``); bare
+``fast-track`` prose is deliberately NOT a trigger (Item 1 — a non-infra
+fast-track stays the owner's; see ``_is_release_block_shape``); (b) a named
+same-repo ticket carrying the ``infra`` label (the ``infra`` verdict, folded
+into the #1025 single gh call — the ROBUST path for an infra fast-track).
 Owner ruling 14.9.2026 (odoo-erp gk FLOW, release 2.288): infra-caused blocks
 are resolved WITH the infra session, not the owner.
 
@@ -53,37 +55,35 @@ _PR_PREFIX_RE = re.compile(r"(?:\bPR|pull\s+request)\s*$", re.IGNORECASE)
 # #1026 — a release-block SHAPE in the question TEXT: an INFRA-caused release
 # block is NEVER an owner question. A zero-gh, U-independent trigger that catches
 # the actual incident (release 2.288, deploy-prod.yml startup_failure) with no gh
-# call. Two tiers so it does NOT swallow a legitimate NON-infra fast-track
-# decision (Item 1: a non-infra fast-track marker stays the OWNER's):
-#   STRONG — tokens that only ever name an infra/CI/workflow-caused block: a
-#     `deploy-prod` dispatch failing on workflow/pool/gate breakage, a startup
-#     failure, a hotfix-main dispatch, or the `release-fasttrack-exception`
-#     marker file. Any one fires the infra route on its own.
-#   fast-track — `\bfast[-_ ]?track` (covers fast-track/fast_track/fasttrack/
-#     fast-tracked) is AMBIGUOUS (a non-infra feature fast-track reads the same),
-#     so it fires ONLY when an infra CAUSE co-occurs — a STRONG token OR the bare
-#     word `infra`. A bare "mám fast-track-núť tento feature?" thus reaches the
-#     owner unchanged. `\b` anchors keep `deploy-production` / `breakfast track…`
-#     from matching (#1026 review 🔵2).
+# call. These are the STRONG tokens — ones that only ever name an infra/CI/
+# workflow-caused block: a `deploy-prod` dispatch failing on workflow/pool/gate
+# breakage, a startup failure, a hotfix-main dispatch, or the fast-track MARKER
+# artifact `release-fasttrack-exception`. Any one fires the infra route on its
+# own. `\b` anchors keep `deploy-production` / `breakfast track…` from matching
+# (#1026 review 🔵2).
+#
+# BARE `fast-track`/`fasttrack` PROSE is DELIBERATELY NOT a trigger (#1026 review
+# 🟡1, BOTH reviewers): a non-infra fast-track decision reads identically to an
+# infra one and Item 1 rules it stays the OWNER's, and a message-wide `infra`
+# co-signal false-blocks even an explicit DENIAL of an infra cause ("žiadny infra
+# problém … mám fast-track-núť?"). So a genuine infra-caused fast-track is caught
+# by the STRONG marker/CI tokens above OR — the ROBUST path — the `infra` LABEL
+# on the named ticket (the `infra` verdict below). The text heuristic is
+# best-effort by design; a ticketless infra block with no strong token reaches
+# the owner (the SAFE direction — asking is never harmful, mis-routing a real
+# owner decision to infra is).
 _RELEASE_BLOCK_STRONG_RE = re.compile(
     r"\bdeploy-prod\b|\bstartup_failure\b|\bhotfix-main\b|"
     r"\brelease-fasttrack-exception\b",
     re.IGNORECASE,
 )
-_FASTTRACK_RE = re.compile(r"\bfast[-_ ]?track", re.IGNORECASE)
-_INFRA_CAUSE_RE = re.compile(r"\binfra\b", re.IGNORECASE)
 
 
 def _is_release_block_shape(msg):
-    """True when the question text names an INFRA-caused release block: a STRONG
-    infra/CI token on its own, OR the ambiguous `fast-track` WITH an infra cause
-    (a STRONG token or the word `infra`) also present — never a bare non-infra
-    fast-track decision, which stays the owner's (Item 1, #1026 review 🟡1)."""
-    if _RELEASE_BLOCK_STRONG_RE.search(msg):
-        return True
-    if _FASTTRACK_RE.search(msg) and _INFRA_CAUSE_RE.search(msg):
-        return True
-    return False
+    """True when the question text names an INFRA-caused release block via a
+    STRONG infra/CI/marker token. Bare `fast-track` prose is intentionally NOT a
+    trigger — see the block comment above (#1026 review 🟡1/🔵2, Item 1)."""
+    return bool(_RELEASE_BLOCK_STRONG_RE.search(msg))
 
 # The shared block reason for BOTH #1026 triggers (text-shape + infra label).
 # Owner ruling 14.9.2026: infra-caused blocks are resolved WITH the infra
