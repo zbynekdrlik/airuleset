@@ -18,9 +18,8 @@ mechanically nudged the concrete next step.
 3. **An infra-class shadow failure (Hetzner rate limit, transient timeout) =
    rerun the shadow workflow.** Do NOT cherry-pick or re-cut for a transient.
 
-4. **The release train never idles.** When develop is ahead of main by ≥ 2 h and
-   no release is in flight, the next step is to open the cut PR. When a release
-   is in flight but stalled (RED CI, failed shadow), the next step is the
-   concrete fix — not waiting.
+4. **The release train never idles** (not a lane-count push, #1035). When develop is ahead of main by ≥ 2 h and
+   no release is in flight, open the cut PR next. When a release
+   is in flight but stalled (RED CI, failed shadow), the concrete fix is next — never waiting.
 
 Applies to all rewordings and semantic equivalents.
