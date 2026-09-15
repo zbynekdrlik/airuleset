@@ -259,13 +259,27 @@ _GOAL_FULFILLED_REARM_ORIGIN = "fulfilled-rearm"
 # so it shares the recovery-class relaxations (own rate state, compact-hold-exempt,
 # stale-cache-tolerant). Delivered by the SAME goal_sweep/deliver_goal channel.
 _GOAL_ANSWER_REARM_ORIGIN = "answer-rearm"
+# #1038 -- a watchdog-INITIATED VIRGIN arm of a DECLARED managed window (gk
+# review, gk-infra, d3 today — any box that declares `windows` in cli_fleet)
+# that came back FRESH after a
+# reboot: idle at its first prompt, DARK (never armed), no `Goal set:`/`cleared`
+# marker, no pending request. Unlike every OTHER re-arm origin (which needs a
+# PRIOR armed goal), this one bootstraps a NEVER-armed declared window so the
+# owner never digs up / pastes a goal text after a reboot. `_declared_virgin_
+# scan` (job 9) RECORDS it, `goal_sweep`'s per-request loop DELIVERS it the
+# SAME sweep, and `deliver_goal` types it via the ALWAYS-ON `goal-arm` recovery
+# nudge (a declared window is a session-revival surface, #1023). Honours the
+# recent-human gate + silent expiry (a present owner is never pinged; the scan
+# re-records next idle sweep). Rate-floored per sid (`state["goal_virgin_arm"]`).
+_GOAL_DECLARED_VIRGIN_ORIGIN = "declared-virgin"
 # The watchdog-INITIATED re-arm origins that honour deliver_goal's recent-human
 # gate (never type into a pane a human just touched) — as opposed to the user's
 # own `self-callback` arm, whose origin IS the user.
 _GOAL_WATCHDOG_REARM_ORIGINS = (_GOAL_REARM_ORIGIN, _GOAL_STALE_REARM_ORIGIN,
                                 _GOAL_AUTH_REARM_ORIGIN,
                                 _GOAL_FULFILLED_REARM_ORIGIN,
-                                _GOAL_ANSWER_REARM_ORIGIN)
+                                _GOAL_ANSWER_REARM_ORIGIN,
+                                _GOAL_DECLARED_VIRGIN_ORIGIN)
 # #890 -- RECOVERY-class origins: events that are PROVEN (not guessed) — an auth
 # clear is CC saying so, an answered-❓ is the transcript saying so. These are
 # EXEMPT from the dead-dark attempt cap (they have their OWN rate states) and from
@@ -406,7 +420,8 @@ def record_goal_request(session, cwd, text, authority, now=None, path=None,
     if prior is not None \
             and new_origin in (_GOAL_REARM_ORIGIN, _GOAL_FULFILLED_REARM_ORIGIN,
                                _GOAL_AUTH_REARM_ORIGIN,
-                               _GOAL_ANSWER_REARM_ORIGIN) \
+                               _GOAL_ANSWER_REARM_ORIGIN,
+                               _GOAL_DECLARED_VIRGIN_ORIGIN) \
             and prior_origin != new_origin:
         return True                              # pending arm stands, untouched
 
@@ -973,7 +988,7 @@ def _janitor_provenance(state, pid, now):
 
 
 def _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath, run, state,
-                              now, sleep_fn, logs):
+                              now, sleep_fn, logs, nudge="goal-sweep"):
     """#566 case (a) -- when the input box ALREADY holds our OWN swallowed
     COMPLETE `/goal <text>` (a prior attempt typed it but the Enter was
     swallowed/raced), COMPLETE the submit in place rather than routing it into
@@ -1004,7 +1019,8 @@ def _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath, run, state,
                        % (sid, cwd))
         return False
     return watchdog.submit_own_goal_verified(pid, text, run=run,
-                                             sleep_fn=sleep_fn, logs=logs)
+                                             sleep_fn=sleep_fn, logs=logs,
+                                             nudge=nudge)   # #1038 declared -> goal-arm
 
 
 # #617 -- a stranded truncated /goal type always FAR exceeds this (montalu1's
@@ -1441,6 +1457,30 @@ _GOAL_TERMINAL_WORDS = frozenset((
 ))
 
 
+def _declared_window_nudge(cwd):
+    """#1038 -- the keystroke NUDGE identity for arming `cwd`'s pane, derived from
+    WHETHER `cwd` is a DECLARED managed window (gk review, gk-infra, d3 today —
+    any box that declares `windows` in cli_fleet), NOT from the origin. A
+    declared window is a session-
+    revival surface, so ANY arm delivered into it (a fresh `declared-virgin`
+    bootstrap, a manual `self-callback`, or a `dark-rearm`) rides the ALWAYS-ON
+    `goal-arm` recovery nudge and is never suppressed by the #1023 machine-nudge
+    OFF switch -- the owner's declared windows come back armed after a reboot
+    with zero staging. Every OTHER (non-declared) box keeps the staged PRIORITY
+    `goal-sweep` identity, byte-identical to before. `source == "role"` is the
+    ONE declared-window signal (`_match_window` matched the pane cwd to a
+    box_windows entry). Fail-safe toward `goal-sweep` on any resolver error --
+    never a wrongly-always-on non-declared pane."""
+    try:
+        import cli_concurrency
+        source = cli_concurrency.resolve_concurrency(cwd)[2]
+    except Exception as e:  # noqa: BLE001 -- any resolver failure keeps the staged default
+        _log_goal_sync("declared-window-nudge resolve-error cwd=%s (%r) "
+                       "-> goal-sweep" % (cwd, e))
+        return "goal-sweep"
+    return "goal-arm" if source == "role" else "goal-sweep"
+
+
 def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                  now=None, state=None, request_ts=None, send_fn=None,
                  dry_run=False, sleep_fn=None, logs=None, origin=None, out=None):
@@ -1502,6 +1542,13 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     projects_dir = projects_dir or watchdog.PROJECTS_DIR
     sleep_fn = sleep_fn or time.sleep
 
+    # #1038 -- the keystroke NUDGE identity, derived from WHETHER this cwd is a
+    # DECLARED managed window (see `_declared_window_nudge`): a declared window
+    # rides the ALWAYS-ON `goal-arm` recovery nudge (never suppressed by the
+    # #1023 machine-nudge switch) regardless of origin; every other box keeps
+    # the staged PRIORITY `goal-sweep`, byte-identical to before.
+    _nudge = _declared_window_nudge(cwd)
+
     # Hard age cap -- checked first, no pane resolution needed. Unlike
     # compact, an expired goal-arm is not harmless: PING once (deduped on
     # session+request-ts, so a later fresh request gets its own chance).
@@ -1522,13 +1569,18 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
             # each expiry a FRESH request would give a FRESH goalarm-expired: key
             # -> a present owner pinged ~every 31 min up to the 12/day cap. Only
             # a dark-rearm (a genuinely DEAD autopilot) / normal origin pings.
-            # dark_watch re-detects the silenced origins next sweep. Still returns
-            # "expired" -> goal_sweep clears the request.
+            # #1038 declared-virgin is ALSO silent: a present owner deferring the
+            # virgin arm of their own declared window is not a dark autopilot, and
+            # `_declared_virgin_scan` re-records it next idle sweep -- a "re-run
+            # /autopilot" ping to the very owner sitting in the window is the same
+            # #675 banned shape. dark_watch/the virgin scan re-detect the silenced
+            # origins next sweep. Still returns "expired" -> goal_sweep clears it.
             if (send_fn is not None and not dry_run
                     and origin not in (_GOAL_STALE_REARM_ORIGIN,
                                        _GOAL_AUTH_REARM_ORIGIN,
                                        _GOAL_FULFILLED_REARM_ORIGIN,
-                                       _GOAL_ANSWER_REARM_ORIGIN)):
+                                       _GOAL_ANSWER_REARM_ORIGIN,
+                                       _GOAL_DECLARED_VIRGIN_ORIGIN)):
                 from notify import stream_redirect
                 pid_for_owner = _compact._find_pane_for_session(
                     sid, cwd, run=run, projects_dir=projects_dir)
@@ -1727,7 +1779,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         # against `text` + the recent-human gate -- so a foreign draft or a
         # truncated own type is NEVER submitted, and a human-active pane vetoes.
         if _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath,
-                                     run, state, now, sleep_fn, logs):
+                                     run, state, now, sleep_fn, logs,
+                                     nudge=_nudge):
             watchdog._janitor_clear_watch(state, pid)
             if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
                 _log_goal_sync("SKIP not-armed(stranded) sid=%s cwd=%s" % (sid, cwd))
@@ -1745,7 +1798,7 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         ok = watchdog.deliver_with_stash(pid, text, run, captured=captured,
                                          logs=logs, sleep_fn=sleep_fn,
                                          state=state, nudge_kind="goal",
-                                         nudge="goal-sweep")
+                                         nudge=_nudge)   # #1038 declared-window -> goal-arm
         if ok:
             watchdog._janitor_clear_watch(state, pid)
             if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
@@ -1768,7 +1821,9 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     # shared janitor (#372) can recover a stuck send for THIS pane.
     watchdog._janitor_mark_watch(state, pid, now)
     ok = _send_goal_verified(pid, text, run, captured=captured,
-                             sleep_fn=sleep_fn, logs=logs)
+                             sleep_fn=sleep_fn, logs=logs,
+                             nudge=_nudge)   # #1038 declared-window -> goal-arm
+
     if ok:
         watchdog._janitor_clear_watch(state, pid)
         _log_goal_sync("SEND typed sid=%s cwd=%s" % (sid, cwd))
@@ -1815,12 +1870,163 @@ def _goal_sync_attempt(sid, cwd, text, authority, origin, run=None,
     return word
 
 
+def _declared_virgin_scan(now, run=None, dry_run=False, projects_dir=None,
+                          requests_path=None, state=None, rearm_fn=None):
+    """#1038 -- job 9's post-reboot VIRGIN-arm pre-pass. For every live candidate
+    pane whose cwd resolves to a DECLARED managed window on THIS box
+    (`cli_concurrency.resolve_concurrency(cwd)` source=="role" == the pane cwd
+    matched a `box_windows` entry) that is at an idle prompt, DARK
+    (`pane_goal_armed` is False), NEVER-armed (NO `Goal set:`/`cleared` marker
+    anywhere in the transcript tail -- #170-safe: a user-cleared OR
+    armed-then-dark session carries a marker and is left to `deliver_goal`'s
+    cleared-guard / `goal_dark_watch`), with NO pending request, and past the
+    per-sid virgin rate floor, RECORD a `declared-virgin` goal-arm request with
+    the variant resolved by the SAME renderer (`_default_rearm_fn` ->
+    `goal_template_for` -> `render_goal_line`, never a hand-written text).
+    `goal_sweep`'s own per-request loop DELIVERS it the SAME sweep, via the
+    always-on `goal-arm` recovery nudge (`deliver_goal` derives that from the
+    declared cwd), so the owner's declared windows come back armed after a reboot
+    with zero staging.
+
+    Records ONLY -- NEVER types (the keystroke + every pane-safety gate, incl. the
+    recent-human hold, lives in `deliver_goal`). A dry-run logs would-arm lines
+    and mutates no state. `rearm_fn(cwd) -> (text, authority)` is the injected
+    variant source (default `_default_rearm_fn`, the SAME seam `goal_dark_watch`
+    uses)."""
+    logs = []
+    run = run or watchdog._default_run
+    projects_dir = projects_dir or watchdog.PROJECTS_DIR
+    rf = rearm_fn or _default_rearm_fn
+    try:
+        import cli_concurrency
+        import cli_fleet
+    except Exception:  # noqa: BLE001 -- resolver unimportable at the watchdog path
+        return logs
+    # #1038-review — resolve THIS box's declared windows ONCE (a cheap in-memory
+    # read over REMOTE_HOSTS) and EARLY-RETURN when there are none: every
+    # non-declared box (montalu/miva/...) then pays ZERO per-pane cost, and the
+    # per-pane declared-window CHECK below REUSES this list (never re-derived per
+    # pane). NOTE: the variant TEXT resolution (`rf` -> `goal_template_for` ->
+    # `resolve_concurrency`) does re-read box_windows, but ONLY for a pane
+    # actually being virgin-armed (rare) -- the hot path (the gate) is single-read.
+    try:
+        box_wins = cli_fleet.box_windows(cli_concurrency._current_user())
+    except Exception:  # noqa: BLE001 -- unresolvable user/table -> treat as no declared windows
+        box_wins = []
+    if not box_wins:
+        return logs
+    # per-sid virgin rate-floor state (min-gap + anti-keystorm strop). Reap dead
+    # entries by age: a sid that armed stops being scanned (armed/marker skip
+    # below), so its list would otherwise leak (the #519/#764 reaper pattern).
+    vstate = (state.setdefault("goal_virgin_arm", {})
+              if (state is not None and not dry_run) else {})
+    _day = 24 * 3600
+    for _vsid in [k for k, v in list(vstate.items())
+                  if not (isinstance(v, list)
+                          and any(isinstance(t, (int, float))
+                                  and 0 <= (now - t) <= _day for t in v))]:
+        vstate.pop(_vsid, None)
+    reqs = load_goal_requests(requests_path)
+    try:
+        panes = watchdog._reconcile_candidate_panes(run)
+    except Exception:  # noqa: BLE001 -- a tmux read failure yields no candidates
+        return logs
+    for pid, cwd, _cmd in panes:
+        if not cwd:
+            continue
+        # #1038-review — per-pane BODY guard. This scan runs FIRST in goal_sweep,
+        # so an unexpected error in ANY per-pane primitive must not abort the
+        # remaining panes NOR the per-request DELIVERY loop that follows: one bad
+        # pane is skipped + logged, never propagated (the goal_dark_watch per-pane
+        # discipline).
+        try:
+            # DECLARED-window gate. `resolve_concurrency` gives (mode, role) via
+            # the ONE resolver, but its match is by CONTAINMENT (a subdir inherits
+            # the window's mode). The virgin arm needs the STRICTER question — is
+            # this pane THE declared window itself, not a subdir of one — so it
+            # ALSO requires an EXACT cwd match (`is_exact_declared_window`,
+            # #1038-review): a human sub-pane cd'd into a subdirectory of the
+            # checkout (a worktree, an ad-hoc sub-session) is NEVER given an
+            # unsolicited /goal. Reuses the box's windows resolved once above.
+            mode, role, source = cli_concurrency.resolve_concurrency(
+                cwd, windows=box_wins)
+            if source != "role":
+                continue
+            if not cli_concurrency.is_exact_declared_window(cwd, windows=box_wins):
+                continue                      # a SUBDIR of a declared window -> never virgin-arm (only THE window's own pane)
+            tinfo = watchdog.find_active_transcript(projects_dir, cwd)
+            if not tinfo:
+                continue
+            tpath, _tmtime = tinfo
+            sid = tpath.stem
+            if sid in reqs:
+                continue                      # a request is already pending -> the per-request loop owns it
+            loc = watchdog._pane_location(pid, run) or cwd
+            if watchdog.pane_in_mode(pid, run):
+                continue                      # copy-mode -> unreadable, skip silently
+            captured = watchdog.capture_pane(pid, run, lines=40)
+            armed = watchdog.pane_goal_armed(captured)
+            if armed is not False:
+                continue                      # True = armed, None = undeterminable -> never virgin-arm on doubt
+            # #170-safe VIRGIN proof: PROVABLY never-armed only when
+            # `seed_goal_marker` read the WHOLE transcript (status "none-bof") and
+            # found NO marker. A marker present (armed-then-dark = dark-rearm's
+            # job, OR user-cleared = never re-arm, #170) is NOT virgin; and
+            # "unknown-past-cap" (a marker MAY sit deeper than the 32 MB seed cap)
+            # is UNDETERMINABLE, so it is skipped exactly like armed=None -- never
+            # virgin-arm on doubt (#1038-review: ignoring the seed status re-armed
+            # a user-cleared window whose clear had scrolled past the seed cap).
+            _soff, mark, _sst = watchdog.seed_goal_marker(tpath)
+            if mark is not None:
+                continue                      # a real marker -> armed-then-dark or user-cleared, not virgin
+            if _sst != "none-bof":
+                logs.append("SKIP (virgin-arm) %s sid=%s -> skip:marker-%s"
+                            % (loc, sid, _sst))
+                continue
+            # per-sid rate floor (min-gap + strop): bounds the cap-drop re-record
+            # livelock; the COMMON case never reaches it (armed/marker skip above).
+            ok, pruned, reason = _recovery_rearm_ok(
+                vstate.get(sid), now, GOAL_VIRGIN_REARM_MIN_GAP_S,
+                GOAL_VIRGIN_REARM_MAX_PER_DAY)
+            if not ok:
+                logs.append("HOLD (virgin-arm) %s sid=%s -> hold:rate-%s"
+                            % (loc, sid, reason))
+                continue
+            text, authority = rf(cwd)
+            if not text:
+                logs.append("SKIP (virgin-arm) %s sid=%s -> skip:no-template"
+                            % (loc, sid))
+                continue
+            variant = cli_concurrency.goal_variant_label(mode, role)
+            if dry_run:
+                logs.append("DRY-RUN virgin-arm %s sid=%s would record declared-virgin %s"
+                            % (loc, sid, variant))
+                continue
+            record_goal_request(sid, cwd, text, authority, now=now,
+                                path=requests_path,
+                                origin=_GOAL_DECLARED_VIRGIN_ORIGIN)
+            vstate[sid] = pruned + [now]
+            # #1038 item (2): the variant is NAMED here (journal) + in `status` --
+            # NOT typed into the pane (a 2nd line = a spurious conversation message)
+            # and NOT baked into render_goal_line (would break goal-inventory --check).
+            logs.append("RECORD (virgin-arm) %s sid=%s -> declared-virgin armed: %s"
+                        % (loc, sid, variant))
+        except Exception as e:  # noqa: BLE001 -- one bad pane never aborts the scan / the delivery loop
+            logs.append("SKIP (virgin-arm) %s -> skip:pane-error (%r)"
+                        % (watchdog.project_label(cwd), e))
+            continue
+    return logs
+
+
 def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
               requests_path=None, state=None, handled=None, send_fn=None,
-              sleep_fn=None):
+              sleep_fn=None, rearm_fn=None):
     """The periodic re-evaluation of every PENDING goal-arm request (job
     9's new body -- replaces the old arm-question viewport scan and virgin-
-    candidate heuristic entirely). Re-checks each still-pending request's
+    candidate heuristic entirely). #1038 -- a DECLARED-window VIRGIN-arm
+    pre-pass (`_declared_virgin_scan`) runs FIRST and RECORDS a request for a
+    fresh post-reboot declared window; the per-request loop below then DELIVERS
+    it the SAME sweep. Re-checks each still-pending request's
     SAME unmodified conditions every sweep. A request that keeps failing a
     condition sits until it clears (delivered next sweep) or the age cap
     discards it -- with ONE bound (#731): a request whose KEYSTROKE deliveries
@@ -1839,6 +2045,13 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
         logs.append("goal jobs DISABLED by owner flag "
                     "~/.claude/watchdog-disable-goal (rm to re-enable)")
         return logs
+    # #1038 -- VIRGIN-arm pre-pass FIRST: record a `declared-virgin` request for
+    # any fresh post-reboot DECLARED window, so the per-request loop below
+    # delivers it the SAME sweep. Records only; every keystroke/gate is below.
+    logs += _declared_virgin_scan(now, run=run, dry_run=dry_run,
+                                  projects_dir=projects_dir,
+                                  requests_path=requests_path, state=state,
+                                  rearm_fn=rearm_fn)
     reqs = load_goal_requests(requests_path)
     # #566 -- the per-sid consecutive `slot occupied` livelock counter. Reap any
     # sid no longer pending (an episode-end pop, not a rolling window): the store
@@ -2091,6 +2304,18 @@ GOAL_AUTH_REARM_MAX_PER_DAY = 12        # cap: max auth-rearms per sid / 24h
 # day; 6/day bounds a pathological ❓→answer→❓ ping-pong.
 GOAL_ANSWER_REARM_MIN_GAP_S = 600      # >= 10 min between answer-rearms / sid
 GOAL_ANSWER_REARM_MAX_PER_DAY = 6      # cap: max answer-rearms per sid / 24h
+# #1038 -- declared-window VIRGIN-arm rate floor. The COMMON case never touches
+# it (a virgin window arms once and its armed footer + marker then skip every
+# later scan); the floor bounds the ONE pathological loop -- a genuinely virgin
+# declared pane whose keystroke deliveries keep failing (the per-request
+# GOAL_DELIVERY_ATTEMPT_CAP drops the request, then the scan would re-record
+# next sweep). MIN_GAP = 10 min between virgin RE-records per sid. MAX_PER_DAY is
+# a HIGH anti-keystorm STROP, deliberately NOT a low cap: the owner's priority is
+# that a declared window ALWAYS arms without manual digging, so a low daily cap
+# that could leave a declared window dark for the rest of a day is wrong here --
+# the min-gap is the real bound, the strop is only the safety ceiling.
+GOAL_VIRGIN_REARM_MIN_GAP_S = 600      # >= 10 min between virgin re-records / sid
+GOAL_VIRGIN_REARM_MAX_PER_DAY = 100    # anti-keystorm strop (min-gap is the real bound)
 # #524-review: ~4 sweeps, not ~2.5 -- a single delayed/missed sweep (120s
 # TimeoutStartSec, #365 contention, a memory-pressure reap) between the record
 # sweep and job 9's first delivery must not false-drop an otherwise-fresh
