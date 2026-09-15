@@ -117,7 +117,8 @@ MACHINE_NUDGE_KINDS = frozenset({
 # MACHINE_NUDGE_KINDS member) stay gated + floored + per-kind staged.
 #
 # #1038 (owner, 2026-09-15) — `goal-arm`: the arm keystroke into a DECLARED
-# managed window (gk review, gk-infra, d3, the controller's own). A declared
+# managed window (gk review, gk-infra, d3 today — any box that declares
+# `windows` in cli_fleet). A declared
 # window that comes back DARK after a reboot is a dead/blocked session the
 # owner needs REVIVED with zero staging — semantically the same revival class
 # as `resume`/`compact` — so its arm rides an always-on recovery nudge and is

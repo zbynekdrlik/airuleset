@@ -98,7 +98,8 @@ class TestDeclaredVirginArm1038(unittest.TestCase):
                         "logs=%r sent=%r" % (logs, tmux.sent))
         # a "sent" request is cleared
         self.assertEqual(goal.load_goal_requests(reqp), {})
-        # SECOND sweep: the pane now reads armed → NO re-type (the floor).
+        # SECOND sweep: the pane now reads armed (footer glyph) → the scan's
+        # `armed is not False` skip fires → NO re-type (the request also cleared).
         tmux.sent.clear()
         with m.patch.object(cli_fleet, "box_windows",
                             return_value=_declared_windows(GK_REVIEW_CWD)), \
@@ -172,6 +173,31 @@ class TestDeclaredVirginArm1038(unittest.TestCase):
         self.assertEqual(goal.load_goal_requests(reqp), {})
         self.assertTrue(any("skip:marker-unknown-past-cap" in ln for ln in logs),
                         "expected an observability line for the undeterminable skip; logs=%r" % (logs,))
+
+    def test_f_subdir_of_declared_window_is_not_virgin_armed(self):
+        # #1038-review — a pane cd'd into a SUBDIRECTORY of a declared window
+        # (a worktree, a human ad-hoc sub-session) matches by CONTAINMENT
+        # (resolve_concurrency source=="role") but is NOT the window itself, so
+        # it must NEVER be given an unsolicited /goal — only THE window's own pane.
+        subdir = GK_REVIEW_CWD + "/addons/some_module"
+        proj = self._proj()
+        sid = "sess-subdir"
+        _write_marker_transcript(proj, subdir, sid)
+        reqp = self._reqp()
+        tmux = DeliverGoalFakeTmux([("%9", "claude", subdir, "111")],
+                                   GOAL_IDLE_CAP, model_type=True)
+        with m.patch.object(cli_fleet, "box_windows",
+                            return_value=_declared_windows(GK_REVIEW_CWD)), \
+             m.patch.object(goal, "_default_rearm_fn", side_effect=_short_rearm):
+            # sanity: containment DOES classify it as the declared window's mode
+            import cli_concurrency as _cc
+            self.assertEqual(_cc.resolve_concurrency(subdir)[2], "role")
+            self.assertFalse(_cc.is_exact_declared_window(subdir))
+            goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                            requests_path=reqp, state={}, sleep_fn=lambda s: None)
+        self.assertEqual(_typed_goal(tmux), [],
+                         "a subdir of a declared window must never be virgin-armed")
+        self.assertEqual(goal.load_goal_requests(reqp), {})
 
     def test_c_non_declared_pane_is_never_virgin_armed(self):
         proj = self._proj()

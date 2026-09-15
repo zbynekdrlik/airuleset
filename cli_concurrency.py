@@ -141,6 +141,33 @@ def resolve_role(cwd, window_name=None, user=None, home=None, windows=None):
     return resolve_concurrency(cwd, window_name, user, home, windows)[1]
 
 
+def is_exact_declared_window(cwd, windows=None, user=None, home=None):
+    """#1038 — True iff `cwd` is EXACTLY a declared window's own working directory
+    (realpath equality), NOT merely CONTAINED in one. `resolve_concurrency` matches
+    by containment on purpose (a pane cd'd into a subdirectory inherits the
+    window's MODE) — but the post-reboot VIRGIN-arm scan asks a stricter question:
+    "is this pane THE declared window itself?" A human sub-pane cd'd into a
+    SUBDIRECTORY of a declared checkout (a worktree, an ad-hoc sub-session) must
+    NEVER be given an unsolicited `/goal`; only the window's own pane is
+    bootstrapped. Fail-safe False on any resolver/expand error."""
+    if not cwd:
+        return False
+    if windows is None:
+        windows = cli_fleet.box_windows(user or _current_user())
+    try:
+        cwd_real = os.path.realpath(cwd)
+    except OSError:
+        cwd_real = cwd
+    for w in (windows or []):
+        try:
+            dreal = _expand(w.get("cwd"), home).rstrip("/")
+        except Exception:  # noqa: BLE001 -- a malformed window cwd is never a match
+            continue
+        if cwd_real == dreal:
+            return True
+    return False
+
+
 def dispatch_gate_line(cwd, repo_root=None, run=None, live_count=None):
     """One-line verdict for ``block-dispatch-over-wdrain.sh``'s #998
     sequential gate: ``"<verdict>|<mode>|<live>"`` (verdict ∈ allow/block).

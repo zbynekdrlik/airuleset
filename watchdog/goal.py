@@ -260,7 +260,8 @@ _GOAL_FULFILLED_REARM_ORIGIN = "fulfilled-rearm"
 # stale-cache-tolerant). Delivered by the SAME goal_sweep/deliver_goal channel.
 _GOAL_ANSWER_REARM_ORIGIN = "answer-rearm"
 # #1038 -- a watchdog-INITIATED VIRGIN arm of a DECLARED managed window (gk
-# review, gk-infra, d3, the controller's own) that came back FRESH after a
+# review, gk-infra, d3 today — any box that declares `windows` in cli_fleet)
+# that came back FRESH after a
 # reboot: idle at its first prompt, DARK (never armed), no `Goal set:`/`cleared`
 # marker, no pending request. Unlike every OTHER re-arm origin (which needs a
 # PRIOR armed goal), this one bootstraps a NEVER-armed declared window so the
@@ -1458,8 +1459,9 @@ _GOAL_TERMINAL_WORDS = frozenset((
 
 def _declared_window_nudge(cwd):
     """#1038 -- the keystroke NUDGE identity for arming `cwd`'s pane, derived from
-    WHETHER `cwd` is a DECLARED managed window (gk review, gk-infra, d3, the
-    controller's own), NOT from the origin. A declared window is a session-
+    WHETHER `cwd` is a DECLARED managed window (gk review, gk-infra, d3 today —
+    any box that declares `windows` in cli_fleet), NOT from the origin. A
+    declared window is a session-
     revival surface, so ANY arm delivered into it (a fresh `declared-virgin`
     bootstrap, a manual `self-callback`, or a `dark-rearm`) rides the ALWAYS-ON
     `goal-arm` recovery nudge and is never suppressed by the #1023 machine-nudge
@@ -1903,8 +1905,10 @@ def _declared_virgin_scan(now, run=None, dry_run=False, projects_dir=None,
     # #1038-review — resolve THIS box's declared windows ONCE (a cheap in-memory
     # read over REMOTE_HOSTS) and EARLY-RETURN when there are none: every
     # non-declared box (montalu/miva/...) then pays ZERO per-pane cost, and the
-    # per-pane gate below REUSES this list (the "single source" intent, never a
-    # re-derive per pane).
+    # per-pane declared-window CHECK below REUSES this list (never re-derived per
+    # pane). NOTE: the variant TEXT resolution (`rf` -> `goal_template_for` ->
+    # `resolve_concurrency`) does re-read box_windows, but ONLY for a pane
+    # actually being virgin-armed (rare) -- the hot path (the gate) is single-read.
     try:
         box_wins = cli_fleet.box_windows(cli_concurrency._current_user())
     except Exception:  # noqa: BLE001 -- unresolvable user/table -> treat as no declared windows
@@ -1936,13 +1940,20 @@ def _declared_virgin_scan(now, run=None, dry_run=False, projects_dir=None,
         # pane is skipped + logged, never propagated (the goal_dark_watch per-pane
         # discipline).
         try:
-            # DECLARED-window gate: source=="role" == the pane cwd matched a
-            # box_windows entry (containment) — reuse the box's windows resolved
-            # once above, never a per-pane re-derive.
+            # DECLARED-window gate. `resolve_concurrency` gives (mode, role) via
+            # the ONE resolver, but its match is by CONTAINMENT (a subdir inherits
+            # the window's mode). The virgin arm needs the STRICTER question — is
+            # this pane THE declared window itself, not a subdir of one — so it
+            # ALSO requires an EXACT cwd match (`is_exact_declared_window`,
+            # #1038-review): a human sub-pane cd'd into a subdirectory of the
+            # checkout (a worktree, an ad-hoc sub-session) is NEVER given an
+            # unsolicited /goal. Reuses the box's windows resolved once above.
             mode, role, source = cli_concurrency.resolve_concurrency(
                 cwd, windows=box_wins)
             if source != "role":
                 continue
+            if not cli_concurrency.is_exact_declared_window(cwd, windows=box_wins):
+                continue                      # a SUBDIR of a declared window -> never virgin-arm (only THE window's own pane)
             tinfo = watchdog.find_active_transcript(projects_dir, cwd)
             if not tinfo:
                 continue
