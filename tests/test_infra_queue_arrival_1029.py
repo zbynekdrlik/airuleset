@@ -169,6 +169,16 @@ class TestInfraRiderPath(_InfraOrchBase):
         self.assertTrue(any("not-full-authority" in ln for ln in logs), logs)
         self.assertEqual(tmux.typed_texts(), [])
 
+    def test_review2_nudge_points_at_the_list_command(self):
+        # REVIEW 2 (UX): bare `core-quals --role infra` prints only the qual
+        # search-strings and returns early — the NEW-since banner + the backlog
+        # rows need `--list`. The nudge must point at the command that actually
+        # surfaces them, else following it literally shows nothing.
+        rec = {"id": 5, "kind": "ticket", "num": 5, "tag": "infra",
+               "permalink": "x"}
+        text = qa._nudge_text_infra([rec], 1)
+        self.assertIn("core-quals --role infra --list", text)
+
     def test_review_f3_nudge_text_not_hardcoded_to_one_hub(self):
         # REVIEW 1 finding 3 (shared-benefit): the infra nudge must NOT hardcode
         # the gk hub (#6883) or the gk window name — a SECOND box declaring a
@@ -349,6 +359,60 @@ class TestInfraFetchAndWiring(unittest.TestCase):
                 m.patch("airuleset.resolve_authority",
                         return_value="fork-no-merge"):
             self.assertIsNone(airuleset._watchdog_infra_queue_fetch("/r"))
+
+    # --- REVIEW 2 (MAJOR, fail-safe): an EMPTY slug is UNMEASURABLE — the hub
+    # cannot be identified (INFRA_QUEUE_HUB.get("") is None) so #6883 is never
+    # scanned. With zero infra tickets the comment loop never runs, so the leaf
+    # slug-guard never fires and the fetch would return [] (measurable-empty ->
+    # baseline ADVANCES past a hidden STOP:). An empty slug must fail safe -> None.
+    def test_review2_empty_slug_fails_safe_to_none(self):
+        def issue_list(*a, **k):
+            class R:
+                returncode = 0
+                stderr = ""
+                stdout = "[]"      # zero infra tickets
+            return R()
+
+        with m.patch("airuleset._repo_root", return_value="/r"), \
+                m.patch("airuleset._repo_slug", return_value=""), \
+                m.patch("airuleset.resolve_authority", return_value="full"), \
+                m.patch("subprocess.run", side_effect=issue_list), \
+                m.patch("airuleset._infra_ticket_comments", return_value=[]):
+            self.assertIsNone(airuleset._watchdog_infra_queue_fetch("/r"))
+
+    # --- REVIEW 2 (#818 class): a markdown-QUOTED tag (`> GATEKEEPER-ACTION
+    # (INFRA)`) is a reply echo, not a fresh hand-off — it must NOT register as an
+    # arrival (spurious nudge). A genuine line-start / inline tag still does (the
+    # fix excludes only quoted lines, never introduces a MISS).
+    def test_review2_quoted_gk_action_tag_is_not_an_arrival(self):
+        def issue_list(*a, **k):
+            class R:
+                returncode = 0
+                stderr = ""
+                stdout = '[{"number": 7001}]'
+            return R()
+
+        def fake_comments(number, *a, **k):
+            if number == 6883:
+                return [{"id": 111,
+                         "body": "> GATEKEEPER-ACTION (INFRA): echoed reply",
+                         "html_url": "x"},
+                        {"id": 222,
+                         "body": "GATEKEEPER-ACTION (INFRA): real hand-off",
+                         "html_url": "y"}]
+            return []
+
+        with m.patch("airuleset._repo_root", return_value="/r"), \
+                m.patch("airuleset._repo_slug",
+                        return_value="zbynekdrlik/odoo-erp"), \
+                m.patch("airuleset.resolve_authority", return_value="full"), \
+                m.patch("subprocess.run", side_effect=issue_list), \
+                m.patch("airuleset._infra_ticket_comments",
+                        side_effect=fake_comments):
+            out = airuleset._watchdog_infra_queue_fetch("/r")
+        ids = [r["id"] for r in out]
+        self.assertNotIn(111, ids)   # quoted echo excluded
+        self.assertIn(222, ids)      # genuine hand-off kept
 
     # --- REVIEW 1 finding 2 (correctness/perf): the comment fan-out has an
     # aggregate wall-clock BUDGET so a run of slow-but-succeeding gh calls can't
