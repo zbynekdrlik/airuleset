@@ -141,6 +141,33 @@ def resolve_role(cwd, window_name=None, user=None, home=None, windows=None):
     return resolve_concurrency(cwd, window_name, user, home, windows)[1]
 
 
+def is_exact_declared_window(cwd, windows=None, user=None, home=None):
+    """#1038 — True iff `cwd` is EXACTLY a declared window's own working directory
+    (realpath equality), NOT merely CONTAINED in one. `resolve_concurrency` matches
+    by containment on purpose (a pane cd'd into a subdirectory inherits the
+    window's MODE) — but the post-reboot VIRGIN-arm scan asks a stricter question:
+    "is this pane THE declared window itself?" A human sub-pane cd'd into a
+    SUBDIRECTORY of a declared checkout (a worktree, an ad-hoc sub-session) must
+    NEVER be given an unsolicited `/goal`; only the window's own pane is
+    bootstrapped. Fail-safe False on any resolver/expand error."""
+    if not cwd:
+        return False
+    if windows is None:
+        windows = cli_fleet.box_windows(user or _current_user())
+    try:
+        cwd_real = os.path.realpath(cwd)
+    except OSError:
+        cwd_real = cwd
+    for w in (windows or []):
+        try:
+            dreal = _expand(w.get("cwd"), home).rstrip("/")
+        except Exception:  # noqa: BLE001 -- a malformed window cwd is never a match
+            continue
+        if cwd_real == dreal:
+            return True
+    return False
+
+
 def dispatch_gate_line(cwd, repo_root=None, run=None, live_count=None):
     """One-line verdict for ``block-dispatch-over-wdrain.sh``'s #998
     sequential gate: ``"<verdict>|<mode>|<live>"`` (verdict ∈ allow/block).
@@ -176,3 +203,37 @@ def concurrency_status_row(cwd, window_name=None, user=None, home=None,
                                              windows)
     role_sfx = " role=%s" % role if role else ""
     return "concurrency: %s (source: %s)%s" % (mode, source, role_sfx)
+
+
+def goal_variant_label(mode, role):
+    """#1038 -- the owner-facing name of a pane's `/goal` VARIANT: ``<role>/<mode>``
+    when a role is resolved (``review/parallel``, ``infra/sequential`` -- the
+    owner's own ticket examples), else just ``<mode>`` (``sequential`` for d3,
+    ``parallel`` for the default). ONE label shared by the watchdog virgin-arm
+    journal line AND the ``airuleset.py status`` goal row so the two never drift."""
+    return "%s/%s" % (role, mode) if role else "%s" % mode
+
+
+def goal_status_row(cwd, armed, pending=False, window_name=None, user=None,
+                    home=None, windows=None):
+    """#1038 item (3) -- the ``airuleset.py status`` ``goal:`` row, next to
+    ``concurrency:``. Reads the SAME truth the arm machinery uses: ``armed`` is
+    the tri-state ``watchdog.pane_goal_armed`` of the caller's own pane
+    (True/False/None), ``pending`` is whether a durable goal-arm request is
+    still in flight for this session. The variant (which /goal WOULD/DID arm) is
+    always resolvable from the cwd via `resolve_concurrency`, so the owner sees
+    it in every state:
+      * armed True                 -> ``goal: armed <variant>``
+      * a pending request          -> ``goal: arming <variant> (request pending)``
+      * armed False / not-in-a-pane-> ``goal: NOT armed — type /autopilot (variant <variant>)``
+    A declared window that reads NOT armed is the exact post-reboot state #1038
+    fixes; the row tells the owner the one word (`/autopilot`) is the whole
+    procedure -- they never dig up a goal text again."""
+    mode, role, _source = resolve_concurrency(cwd, window_name, user, home,
+                                              windows)
+    variant = goal_variant_label(mode, role)
+    if armed is True:
+        return "goal: armed %s" % variant
+    if pending:
+        return "goal: arming %s (request pending)" % variant
+    return "goal: NOT armed — type /autopilot (variant %s)" % variant
