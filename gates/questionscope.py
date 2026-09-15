@@ -126,9 +126,14 @@ def _bare_refs(msg):
 # 2026-09-14). The six phrasing tokens the owner named: a client reply that
 # explains a manual/interim workaround. `\b` word anchors (Py3 `re` is unicode by
 # default, so ľ/ť/í/ý are word chars) so the tokens match as words, case-
-# insensitive.
+# insensitive. #1027-review 🟡3: the two verb/adjective tokens carry common
+# Slovak inflections (the doctrine text itself writes "obídete" and "ručnú"), so
+# `obísť` also matches `obíde…` (obídete/obídeme/obídeš) and `ručne` also matches
+# `ručn[eýáéúo]…` (ručný/ručná/ručnú/ručnou/ručnej/ručných) — the `[eýáéúo]`
+# class deliberately EXCLUDES `í` so an unrelated `ručník` (towel) never matches.
 _WORKAROUND_RE = re.compile(
-    r"\b(zatiaľ|medzitým|dovtedy|obísť|ručne|workaround)\b", re.IGNORECASE)
+    r"\b(zatiaľ|medzitým|dovtedy|obísť|obíde\w*|ručn[eýáéúo]\w*|workaround)\b",
+    re.IGNORECASE)
 # Bypass — the ONE sanctioned exception the owner allowed: a yes/no question the
 # client EXPLICITLY asked that the fix does not answer. Mirrors the repo's
 # `airuleset:<x>-ok` bypass convention; the block reason names it.
@@ -144,13 +149,24 @@ _WORKAROUND_REASON = (
 )
 
 
+# How fresh the tickets-status cache must be for its U numbers to be trusted as
+# a zero-gh in_flight fast-path (mirrors cli_quals._QUESTION_U_CACHE_FRESH_S).
+_LANE_CACHE_FRESH_S = 120
+
+
 def _default_lane_cache(cwd):
-    """The box's cached open owner-court (`U`) issue numbers — a ref present here
-    is provably OPEN, so a lane could be in flight (zero gh). Returns a set or
-    None (no readable cache). Reads only, never spawns a refresh."""
+    """The box's cached open owner-court (`U`) issue numbers, ONLY when the cache
+    is FRESH (#1027-review 🔵5 — a stale U cache is not proof of open-state). A
+    ref present in a fresh U set is open, so a lane could be in flight (zero gh).
+    Returns a set or None (no readable / fresh cache). Reads only, never spawns a
+    refresh."""
     try:
+        import time as _t
+
         import statusbar
-        nums, _ts = statusbar.user_waiting_numbers(cwd)
+        nums, ts = statusbar.user_waiting_numbers(cwd)
+        if nums is None or ts is None or (_t.time() - ts) > _LANE_CACHE_FRESH_S:
+            return None
         return nums
     except Exception:  # noqa: BLE001 — a cache read failure just skips the fast path
         return None
@@ -182,10 +198,11 @@ def _client_report_lane_in_flight(numbers, cwd, *, runner=None, cache_fn=None):
       "shipped"      — the state is determinable and NO ref is open (all closed).
       "unmeasurable" — a gh failure (FAIL-OPEN at the caller).
 
-    COST (cache-first, ONE gh call at most): a ref in the box's cached `U` set is
-    provably open (in_flight, ZERO gh); otherwise a SINGLE `gh issue list
-    --state open` call, None → unmeasurable. No per-issue open-state cache exists,
-    so the single gh call is the general measurement (mirrors
+    COST (cache-first, ONE gh call at most): a ref in the box's FRESH cached `U`
+    set is open (in_flight, ZERO gh). Otherwise ONE gh call: the common ONE-ref
+    case uses an EXACT `gh issue view <N> --json state` (no list cap to
+    under-match); multiple refs use a SINGLE `gh issue list --state open` and log
+    if the -L cap is hit. None → unmeasurable (mirrors
     `cli_quals.question_ticket_in_u`'s one-gh fallback)."""
     nums = set()
     for n in (numbers or []):
@@ -201,8 +218,26 @@ def _client_report_lane_in_flight(numbers, cwd, *, runner=None, cache_fn=None):
     except Exception:  # noqa: BLE001 — a cache miss just falls through to gh
         cached = None
     if cached and (nums & set(cached)):
-        return "in_flight"                   # a ref in U is provably open (zero gh)
+        return "in_flight"                   # a ref in a fresh U cache is open
     run = runner or _default_lane_runner
+    if len(nums) == 1:
+        # #1027-review 🟡1: the common case is ONE ref — an EXACT `gh issue view`
+        # (one call, no list cap) instead of an unfiltered `-L` list that can
+        # under-match on a busy repo and silently false-allow.
+        one = next(iter(nums))
+        out = run(["gh", "issue", "view", str(one), "--json", "state"], cwd)
+        if out is None:
+            return "unmeasurable"
+        try:
+            state = (json.loads(out or "{}").get("state") or "").upper()
+        except (ValueError, TypeError, KeyError, AttributeError):
+            return "unmeasurable"
+        if not state:
+            return "unmeasurable"
+        return "in_flight" if state == "OPEN" else "shipped"
+    # Multiple refs: ONE `gh issue list` (the one-gh ceiling). #1027-review 🟡1:
+    # log when the -L cap is hit so an under-match (a ref beyond the cap read as
+    # shipped → false-allow) is never SILENT.
     out = run(["gh", "issue", "list", "--state", "open", "--json", "number",
                "-L", "500"], cwd)
     if out is None:
@@ -213,6 +248,10 @@ def _client_report_lane_in_flight(numbers, cwd, *, runner=None, cache_fn=None):
                      if isinstance(x, dict) and "number" in x}
     except (ValueError, TypeError, KeyError):
         return "unmeasurable"
+    if len(open_nums) >= 500:
+        sys.stderr.write("questionscope: open-issue list hit the -L 500 cap — a "
+                         "ref beyond it reads as shipped, a possible false-allow "
+                         "(#1027)\n")
     return "in_flight" if (nums & open_nums) else "shipped"
 
 
@@ -255,13 +294,13 @@ def decide(payload, question_fn=None, u_count_fn=None, lane_fn=None):
     # OWNS the one-gh-call ceiling and returns — the #1025 U-membership gh call is
     # NOT additionally made (skipping it here fails toward allow, the safe
     # direction). Independent of U (fires regardless of the owner-court count).
-    if _WORKAROUND_RE.search(msg):
+    wm = _WORKAROUND_RE.search(msg)
+    if wm:
         if _WORKAROUND_BYPASS in msg:
             return False, ""                 # sanctioned client yes/no exception
         lane = (lane_fn or _client_report_lane_in_flight)(sorted(refs), cwd)
         if lane == "in_flight":
-            hit_m = _WORKAROUND_RE.search(msg)
-            hit = hit_m.group(1) if hit_m else "workaround"
+            hit = wm.group(1)                 # #1027-review 🔵7: reuse the match
             listed = ", ".join("#%d" % n for n in sorted(refs))
             return True, _WORKAROUND_REASON % {
                 "hit": hit, "refs": listed, "bypass": _WORKAROUND_BYPASS}

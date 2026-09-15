@@ -60,8 +60,10 @@ AREA_RE = re.compile(r'(?m)^\s*Area:\s*(\S.*)$')
 # Odoo-specific tokens (`mail.message`, `discuss.channel_<N>`) plus a labelled
 # `msg <id>` with a 4+-digit id (real Odoo mail.message ids are large: 3122,
 # 1739648) so it never false-matches a generic "msg 12" or non-Odoo body.
+# #1027-review 🔵: `mail\.message` carries a leading `\b` so an unrelated
+# `email.message` (which contains "mail.message" as a substring) never matches.
 CLIENT_MSG_ORIGIN_RE = re.compile(
-    r'mail\.message|discuss\.channel_\d+|\bmsg\s+\d{4,}', re.IGNORECASE)
+    r'\bmail\.message|discuss\.channel_\d+|\bmsg\s+\d{4,}', re.IGNORECASE)
 # The citation: the same `Ack-reaction:` evidence line the prose Stop hook and
 # ack-reaction.md doctrine use (`Ack-reaction: msg <id> 👷` or
 # `Ack-reaction: pending — <reason>`).

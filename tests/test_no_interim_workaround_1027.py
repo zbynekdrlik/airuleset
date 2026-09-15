@@ -139,16 +139,45 @@ class TestWorkaroundGateDecision(TestCase):
 
 
 class TestLaneInFlightHelper(TestCase):
-    def test_gh_open_issue_is_in_flight(self):
-        out = json.dumps([{"number": 288}, {"number": 5}])
+    # #1027-review 🟡1: the common ONE-ref case uses an EXACT `gh issue view <N>
+    # --json state` (no list cap to under-match); multiple refs use a single
+    # `gh issue list`.
+    def test_single_ref_open_is_in_flight(self):
         v = qs._client_report_lane_in_flight(
-            [288], "/repo", runner=lambda argv, cwd: out, cache_fn=lambda c: None)
+            [288], "/repo",
+            runner=lambda argv, cwd: json.dumps({"state": "OPEN"}),
+            cache_fn=lambda c: None)
         self.assertEqual(v, "in_flight")
 
-    def test_gh_ref_not_open_is_shipped(self):
-        out = json.dumps([{"number": 999}])
+    def test_single_ref_closed_is_shipped(self):
         v = qs._client_report_lane_in_flight(
-            [288], "/repo", runner=lambda argv, cwd: out, cache_fn=lambda c: None)
+            [288], "/repo",
+            runner=lambda argv, cwd: json.dumps({"state": "CLOSED"}),
+            cache_fn=lambda c: None)
+        self.assertEqual(v, "shipped")
+
+    def test_single_ref_uses_issue_view_not_list(self):
+        seen = {}
+        qs._client_report_lane_in_flight(
+            [288], "/repo",
+            runner=lambda argv, cwd: seen.setdefault("argv", argv) and None
+            or json.dumps({"state": "OPEN"}),
+            cache_fn=lambda c: None)
+        self.assertEqual(seen["argv"][:3], ["gh", "issue", "view"])
+        self.assertIn("288", seen["argv"])
+
+    def test_multi_ref_open_via_list_is_in_flight(self):
+        out = json.dumps([{"number": 288}, {"number": 5}])
+        v = qs._client_report_lane_in_flight(
+            [288, 999], "/repo", runner=lambda argv, cwd: out,
+            cache_fn=lambda c: None)
+        self.assertEqual(v, "in_flight")
+
+    def test_multi_ref_none_open_via_list_is_shipped(self):
+        out = json.dumps([{"number": 5}])
+        v = qs._client_report_lane_in_flight(
+            [288, 999], "/repo", runner=lambda argv, cwd: out,
+            cache_fn=lambda c: None)
         self.assertEqual(v, "shipped")
 
     def test_gh_error_is_unmeasurable_fail_open(self):
@@ -163,7 +192,7 @@ class TestLaneInFlightHelper(TestCase):
         self.assertEqual(v, "unmeasurable")
 
     def test_cache_fast_path_in_u_is_in_flight_zero_gh(self):
-        # A ref in the box's cached U set is provably OPEN → in_flight, ZERO gh.
+        # A ref in the box's FRESH cached U set is open → in_flight, ZERO gh.
         called = []
         v = qs._client_report_lane_in_flight(
             [288], "/repo",
