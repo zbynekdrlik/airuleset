@@ -2286,16 +2286,21 @@ def goal_status_probe(cwd, run=None, pane_env=None, projects_dir=None):
 
     Resolution order:
       1. The SELF pane (``$TMUX_PANE``, via ``resolve_self_pane``) -- the fast
-         in-a-pane path, byte-identical to the first #1038 lane.
+         in-a-pane path (byte-identical to the first #1038 lane for the armed
+         True / dark False reads; the busy/None edge now reads
+         ``undeterminable`` in BOTH paths, per the #1038-review honesty fix).
       2. When no self pane resolves (``status`` run over ssh, no
          ``$TMUX_PANE``): the DECLARED window's pane whose current path IS this
          cwd (``resolve_declared_window_pane``, realpath equality).
 
     Only after a pane is resolved is its live ``pane_goal_armed`` state read
-    (``pane_found=True``); with no pane resolved the row is ``unmeasurable``,
-    never a ``NOT armed`` verdict asserted with no measurement (the honesty
-    defect the first lane's not-in-a-pane branch shipped -- over ssh it told
-    the owner his armed windows were NOT armed). READ-ONLY: no keystroke.
+    (``pane_found=True``); the ``goal_status_row`` formatter then reports
+    NOT armed ONLY on a determinate ``False`` read. With no pane resolved the
+    row is ``unmeasurable``; with a pane resolved but its state unreadable
+    (``pane_goal_armed`` None -- busy/scrolled/empty) it is ``undeterminable``.
+    Neither is ever a ``NOT armed`` verdict asserted with no real read (the
+    honesty defect + residual the first lane shipped -- over ssh it told the
+    owner his armed windows were NOT armed). READ-ONLY: no keystroke.
 
     ``run``/``pane_env``/``projects_dir`` are injected in tests; production
     calls it bare (real tmux env). Returns the formatted ``goal:`` row string.

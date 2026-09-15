@@ -214,7 +214,7 @@ def goal_variant_label(mode, role):
     return "%s/%s" % (role, mode) if role else "%s" % mode
 
 
-def goal_status_row(cwd, armed, pending=False, pane_found=True,
+def goal_status_row(cwd, armed, pending=False, *, pane_found=True,
                     window_name=None, user=None, home=None, windows=None):
     """#1038 item (3) -- the ``airuleset.py status`` ``goal:`` row, next to
     ``concurrency:``. Reads the SAME truth the arm machinery uses: ``armed`` is
@@ -225,17 +225,26 @@ def goal_status_row(cwd, armed, pending=False, pane_found=True,
     sees it in every state:
       * armed True                 -> ``goal: armed <variant>``
       * a pending request          -> ``goal: arming <variant> (request pending)``
+      * armed None (pane busy)     -> ``goal: armed state undeterminable (pane busy) ...``
       * armed False (a real read)  -> ``goal: NOT armed — type /autopilot (variant <variant>)``
       * no pane resolved           -> ``goal: unmeasurable outside a pane ...``
-    ``pane_found`` (#1038 follow-up) is the honesty gate: a ``NOT armed``
-    verdict is printed ONLY after a REAL pane read (self pane via
-    ``$TMUX_PANE``, or the declared window's pane resolved for this cwd when
-    ``status`` is run over ssh). When NO pane could be resolved, the row is
-    ``unmeasurable`` -- NEVER ``NOT armed`` asserted with no measurement (the
-    honesty defect the first #1038 lane's not-in-a-pane branch shipped: over
-    ssh it told the owner his armed windows were NOT armed). A declared window
-    that genuinely reads NOT armed is the post-reboot state #1038 fixes; the
-    row tells the owner the one word (`/autopilot`) is the whole procedure."""
+    ``pane_found`` (#1038 follow-up) plus the tri-state ``armed`` are the
+    honesty gate: a ``NOT armed`` verdict is printed ONLY after a REAL,
+    DETERMINATE ``False`` read of a resolved pane. Two states are NEVER reported
+    as NOT armed: no pane resolved -> ``unmeasurable outside a pane`` (the first
+    #1038 lane's honesty defect: over ssh it read no pane at all yet said NOT
+    armed); a pane resolved but ``pane_goal_armed`` returned ``None`` (a busy /
+    scrolled / empty capture -- undeterminable, not dark) -> ``armed state
+    undeterminable`` (the #1038-review residual). This matches the virgin scan's
+    own "None is doubt, never act" stance so the two tri-state consumers agree.
+    A declared window that genuinely reads ``False`` is the post-reboot state
+    #1038 fixes; the row then tells the owner the one word (`/autopilot`) is the
+    whole procedure.
+
+    ``pane_found`` and everything after it are KEYWORD-ONLY (#1038-review 2):
+    ``pane_found`` was inserted between ``pending`` and ``window_name``, so a
+    future caller passing ``window_name`` POSITIONALLY would silently misbind it
+    to ``pane_found``. The ``*`` closes that trap by construction."""
     mode, role, _source = resolve_concurrency(cwd, window_name, user, home,
                                               windows)
     variant = goal_variant_label(mode, role)
@@ -246,4 +255,13 @@ def goal_status_row(cwd, armed, pending=False, pane_found=True,
         return "goal: armed %s" % variant
     if pending:
         return "goal: arming %s (request pending)" % variant
+    if armed is None:
+        # A pane WAS resolved but its armed state could not be READ (a busy /
+        # scrolled / empty capture -> pane_goal_armed None). NOT a dark pane,
+        # so NEVER a NOT-armed verdict (the #1038-review residual): report the
+        # undeterminable state honestly and point the owner at an idle re-check.
+        # Matches the virgin scan's own "None is doubt, never act" stance so the
+        # two tri-state consumers agree.
+        return ("goal: armed state undeterminable (pane busy) — variant %s; "
+                "re-check when the pane is idle" % variant)
     return "goal: NOT armed — type /autopilot (variant %s)" % variant

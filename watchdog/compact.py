@@ -1180,7 +1180,17 @@ def resolve_declared_window_pane(cwd, run=None, projects_dir=None):
     READ-ONLY: enumerates panes and reads the transcript for the sid; it
     NEVER types (no keystroke primitive is reachable from here). A tmux read
     failure yields `("", "", "")` — fail-safe toward "unmeasurable", never a
-    false verdict."""
+    false verdict.
+
+    KNOWN GAP (#1038-review, fail-safe): `_reconcile_candidate_panes` only
+    matches panes whose foreground command is claude/node/bun, and a
+    sudo-hosted stream pane (the subdev `sudo su - <stream>` shape) reports the
+    sudo-root cwd, not the stream's checkout — so `status` run over ssh for such
+    a stream resolves NO pane and the row reads `unmeasurable` rather than the
+    real armed state. That is honest (never a false verdict), just a visibility
+    gap on the shared-stream boxes; widening the seam's command filter here
+    would make an unrelated node/bun pane look like a live claude session to
+    every OTHER consumer of it, so the filter is deliberately left narrow."""
     run = run or watchdog._default_run
     projects_dir = projects_dir or watchdog.PROJECTS_DIR
     try:
