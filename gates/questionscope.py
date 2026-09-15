@@ -51,17 +51,39 @@ _BARE_REF_RE = re.compile(r"(?<![A-Za-z0-9_./-])#(\d{1,6})\b")
 _PR_PREFIX_RE = re.compile(r"(?:\bPR|pull\s+request)\s*$", re.IGNORECASE)
 
 # #1026 — a release-block SHAPE in the question TEXT: an INFRA-caused release
-# block is NEVER an owner question. These tokens name the mechanism (a
-# `deploy-prod` dispatch failing on workflow/pool/gate breakage, a startup
-# failure, a hotfix-main dispatch, or the fast-track marker / exception the
-# `block-main-merge.sh` gate demands). A zero-gh, U-independent trigger — it
-# catches the actual incident (release 2.288, deploy-prod.yml startup_failure)
-# with no gh call. `fast[-_ ]?track` covers fast-track / fast_track / fasttrack.
-_RELEASE_BLOCK_RE = re.compile(
-    r"deploy-prod|startup_failure|fast[-_ ]?track|hotfix-main|"
-    r"release-fasttrack-exception",
+# block is NEVER an owner question. A zero-gh, U-independent trigger that catches
+# the actual incident (release 2.288, deploy-prod.yml startup_failure) with no gh
+# call. Two tiers so it does NOT swallow a legitimate NON-infra fast-track
+# decision (Item 1: a non-infra fast-track marker stays the OWNER's):
+#   STRONG — tokens that only ever name an infra/CI/workflow-caused block: a
+#     `deploy-prod` dispatch failing on workflow/pool/gate breakage, a startup
+#     failure, a hotfix-main dispatch, or the `release-fasttrack-exception`
+#     marker file. Any one fires the infra route on its own.
+#   fast-track — `\bfast[-_ ]?track` (covers fast-track/fast_track/fasttrack/
+#     fast-tracked) is AMBIGUOUS (a non-infra feature fast-track reads the same),
+#     so it fires ONLY when an infra CAUSE co-occurs — a STRONG token OR the bare
+#     word `infra`. A bare "mám fast-track-núť tento feature?" thus reaches the
+#     owner unchanged. `\b` anchors keep `deploy-production` / `breakfast track…`
+#     from matching (#1026 review 🔵2).
+_RELEASE_BLOCK_STRONG_RE = re.compile(
+    r"\bdeploy-prod\b|\bstartup_failure\b|\bhotfix-main\b|"
+    r"\brelease-fasttrack-exception\b",
     re.IGNORECASE,
 )
+_FASTTRACK_RE = re.compile(r"\bfast[-_ ]?track", re.IGNORECASE)
+_INFRA_CAUSE_RE = re.compile(r"\binfra\b", re.IGNORECASE)
+
+
+def _is_release_block_shape(msg):
+    """True when the question text names an INFRA-caused release block: a STRONG
+    infra/CI token on its own, OR the ambiguous `fast-track` WITH an infra cause
+    (a STRONG token or the word `infra`) also present — never a bare non-infra
+    fast-track decision, which stays the owner's (Item 1, #1026 review 🟡1)."""
+    if _RELEASE_BLOCK_STRONG_RE.search(msg):
+        return True
+    if _FASTTRACK_RE.search(msg) and _INFRA_CAUSE_RE.search(msg):
+        return True
+    return False
 
 # The shared block reason for BOTH #1026 triggers (text-shape + infra label).
 # Owner ruling 14.9.2026: infra-caused blocks are resolved WITH the infra
@@ -107,7 +129,7 @@ def decide(payload, question_fn=None, u_count_fn=None):
     # question text is NEVER an owner question — block regardless of U, ZERO gh.
     # Runs BEFORE the ref/U checks so it fires even on a ticketless / cross-repo
     # release-block question (the FLOW session's own release-2.288 case).
-    if _RELEASE_BLOCK_RE.search(msg):
+    if _is_release_block_shape(msg):
         return True, _INFRA_REASON
     refs = _bare_refs(msg)
     if not refs:

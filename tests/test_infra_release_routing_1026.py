@@ -150,6 +150,58 @@ class TestInfraRoutingDecision(TestCase):
         block, _ = qs.decide(_payload(msg), u_count_fn=lambda c: 0)
         self.assertFalse(block)
 
+    # #1026 review 🟡1 — a BARE non-infra fast-track decision stays the owner's
+    # (Item 1). The text-shape trigger must NOT fire on `fast-track` alone.
+    def test_bare_non_infra_fasttrack_reaches_owner(self):
+        msg = ("**Otázka — projekt airuleset (fleet):** feature v #500 je hotová.\n\n"
+               "• A (odporúčam) — fast-track-ni ju do najbližšieho release\n"
+               "• B — počkaj na normálny cyklus\n\n"
+               "❓ NEEDS YOU: mám fast-track-núť #500 do najbližšieho release?")
+        with m.patch.object(cli_quals, "question_ticket_in_u",
+                            return_value="in_u"):
+            block, reason = qs.decide(_payload(msg), u_count_fn=lambda c: 0)
+        self.assertFalse(block)          # owner decides a non-infra fast-track
+        self.assertEqual(reason, "")
+
+    def test_fasttrack_with_infra_word_blocks(self):
+        # fast-track WITH an infra cause named → infra lane.
+        msg = ("**Otázka — projekt odoo-erp:** kvôli infra problému release "
+               "neprešiel.\n\n❓ NEEDS YOU: vydáš fast-track marker?")
+        block, _ = qs.decide(_payload(msg), u_count_fn=lambda c: 0)
+        self.assertTrue(block)
+
+    def test_deploy_production_does_not_match_deploy_prod(self):
+        # #1026 review 🔵2 — `\b` anchor: "deploy-production" must NOT trigger.
+        msg = ("**Otázka — projekt airuleset:** nový deploy-production config v "
+               "#500.\n\n❓ ASKED: schváliš zmenu?")
+        with m.patch.object(cli_quals, "question_ticket_in_u",
+                            return_value="in_u"):
+            block, _ = qs.decide(_payload(msg), u_count_fn=lambda c: 0)
+        self.assertFalse(block)
+
+
+class TestReleaseBlockShapeHelper(TestCase):
+    """`qs._is_release_block_shape` — the two-tier text trigger (#1026 🟡1/🔵2)."""
+
+    def test_strong_token_alone_fires(self):
+        for t in ("deploy-prod.yml failed", "startup_failure on main",
+                  "gatekeeper/hotfix-main-2288", "release-fasttrack-exception.json"):
+            self.assertTrue(qs._is_release_block_shape(t), t)
+
+    def test_bare_fasttrack_alone_does_not_fire(self):
+        for t in ("mám fast-track-núť tento feature?", "fasttrack this PR?",
+                  "fast track the release of feature X"):
+            self.assertFalse(qs._is_release_block_shape(t), t)
+
+    def test_fasttrack_with_infra_cause_fires(self):
+        self.assertTrue(qs._is_release_block_shape("infra blok — treba fast-track marker"))
+        self.assertTrue(qs._is_release_block_shape("fast-track lebo deploy-prod padol"))
+
+    def test_anchors_reject_substring_overmatch(self):
+        for t in ("deploy-production rollout", "breakfast tracking app",
+                  "steadfast tracker widget"):
+            self.assertFalse(qs._is_release_block_shape(t), t)
+
 
 class TestQuestionTicketInfraVerdict(TestCase):
     """cli_quals.question_ticket_in_u gains an `infra` verdict from the SAME
@@ -287,10 +339,11 @@ class TestRule5DoctrineLock(TestCase):
         self.assertRegex(self.win.lower(), r"infra-caused|infra-vyvolan")
 
     def test_owner_informed_never_asked_negation(self):
-        # The operative negation: owner INFORMED, never ASKED.
+        # The operative negation, as ONE ordered phrase (#1026 review 🔵3 — a
+        # swap-inversion "asked, never informed" breaks the contiguous match,
+        # so the lock has teeth on the negation itself, not just the nouns).
         low = self.win.lower()
-        self.assertIn("informed", low)
-        self.assertRegex(low, r"never\s+asked|not\s+asked")
+        self.assertIn("informed (✅/⏳), never asked", low)
 
     def test_gatekeeper_action_hub_routing(self):
         self.assertIn("GATEKEEPER-ACTION", self.win)
