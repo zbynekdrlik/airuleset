@@ -2280,6 +2280,53 @@ def check_skill_parity(skills_dir=None, user=None):
     }
 
 
+def goal_status_probe(cwd, run=None, pane_env=None, projects_dir=None):
+    """#1038 item (3) + follow-up -- compose the ``airuleset.py status``
+    ``goal:`` row HONESTLY, inside OR outside a tmux pane.
+
+    Resolution order:
+      1. The SELF pane (``$TMUX_PANE``, via ``resolve_self_pane``) -- the fast
+         in-a-pane path (byte-identical to the first #1038 lane for the armed
+         True / dark False reads; the busy/None edge now reads
+         ``undeterminable`` in BOTH paths, per the #1038-review honesty fix).
+      2. When no self pane resolves (``status`` run over ssh, no
+         ``$TMUX_PANE``): the DECLARED window's pane whose current path IS this
+         cwd (``resolve_declared_window_pane``, realpath equality).
+
+    Only after a pane is resolved is its live ``pane_goal_armed`` state read
+    (``pane_found=True``); the ``goal_status_row`` formatter then reports
+    NOT armed ONLY on a determinate ``False`` read. With no pane resolved the
+    row is ``unmeasurable``; with a pane resolved but its state unreadable
+    (``pane_goal_armed`` None -- busy/scrolled/empty) it is ``undeterminable``.
+    Neither is ever a ``NOT armed`` verdict asserted with no real read (the
+    honesty defect + residual the first lane shipped -- over ssh it told the
+    owner his armed windows were NOT armed). READ-ONLY: no keystroke.
+
+    ``run``/``pane_env``/``projects_dir`` are injected in tests; production
+    calls it bare (real tmux env). Returns the formatted ``goal:`` row string.
+    """
+    import cli_concurrency
+    from watchdog import compact as _compact_mod
+    from watchdog import goal as _goal_mod
+    import watchdog as _wd
+    armed = None
+    pending = False
+    pane_found = False
+    pid, _pcwd, sid = _compact_mod.resolve_self_pane(run=run, pane_env=pane_env)
+    if not pid:
+        # Outside a tmux pane -- resolve the pane whose current path IS this cwd
+        # and read ITS armed state; never report NOT armed without a real read.
+        pid, _pcwd, sid = _compact_mod.resolve_declared_window_pane(
+            cwd, run=run, projects_dir=projects_dir)
+    if pid:
+        pane_found = True
+        armed = _wd.pane_goal_armed(_wd.capture_pane(pid, run))
+        if sid:
+            pending = bool(_goal_mod.load_goal_requests().get(sid))
+    return cli_concurrency.goal_status_row(cwd, armed, pending,
+                                           pane_found=pane_found)
+
+
 def cmd_status(args):
     """Show current managed config (imports, skills, hooks)."""
     # --skill-parity: compare installed vs expected and exit
@@ -2397,25 +2444,16 @@ def cmd_status(args):
     except Exception as e:
         print(f"\nconcurrency: error ({e})", file=sys.stderr)
 
-    # --- /goal armed state (#1038) ---
-    # Read the SAME truth the arm machinery uses: the tri-state pane_goal_armed
-    # of THIS pane (resolved via $TMUX_PANE, the goal-arm --self mechanism) plus
-    # any durable pending goal-arm request. The variant is always resolvable
-    # from the cwd, so the row names it even when NOT armed -- the owner sees the
-    # one word (/autopilot) that arms it, never a goal text to dig up.
+    # --- /goal armed state (#1038 + follow-up) ---
+    # goal_status_probe reads the SAME truth the arm machinery uses -- the
+    # tri-state pane_goal_armed of the RESOLVED pane -- inside a pane (via
+    # $TMUX_PANE) OR outside one (over ssh: the declared window's pane for this
+    # cwd). With no pane resolvable the row is `unmeasurable`, NEVER a NOT-armed
+    # verdict asserted with no pane read. The variant is always resolvable from
+    # the cwd, so the row names it in every state -- the owner sees the one word
+    # (/autopilot) that arms it, never a goal text to dig up.
     try:
-        import cli_concurrency
-        from watchdog import compact as _compact_mod
-        from watchdog import goal as _goal_mod
-        armed = None
-        pending = False
-        pid, _pcwd, sid = _compact_mod.resolve_self_pane()
-        if pid:
-            import watchdog as _wd
-            armed = _wd.pane_goal_armed(_wd.capture_pane(pid))
-        if sid:
-            pending = bool(_goal_mod.load_goal_requests().get(sid))
-        print("\n" + cli_concurrency.goal_status_row(os.getcwd(), armed, pending))
+        print("\n" + goal_status_probe(os.getcwd()))
     except Exception as e:
         print(f"\ngoal: error ({e})", file=sys.stderr)
 

@@ -66,9 +66,56 @@ set -euo pipefail
 #     already was.
 
 INPUT=$(cat)
-CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
-CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
+
+# #1038: extract payload fields ROBUSTLY. A single `printf | jq` can transiently
+# FAIL to fork under parallel-test / load pressure (the jq spawn returns
+# non-zero); the old `… 2>/dev/null || echo ""` then SILENTLY blanked the field,
+# so a REAL command was dropped to "" (exit 0 at the `[ -z "$CMD" ]` gate below,
+# no enforcement) or a REAL cwd lost (the CLAUDE.md walk then started at $PWD).
+# Retry a NON-zero jq exit a few times so a transient fork failure does not
+# silently skip the security decision; a genuinely malformed / command-less
+# payload still ends empty (the correct "nothing to block").
+_payload_field() {
+    local filter="$1" out attempt
+    for attempt in 1 2 3 4 5; do
+        if out=$(printf '%s' "$INPUT" | jq -r "$filter" 2>/dev/null); then
+            printf '%s' "$out"
+            return 0
+        fi
+    done
+    printf '%s' ""
+    return 0
+}
+CMD=$(_payload_field '.tool_input.command // empty')
+CWD=$(_payload_field '.cwd // empty')
 [ -z "$CMD" ] && exit 0
+
+# #1038: a coreutils `timeout` bound for every python3 subprocess this hook
+# spawns, so a HANGING python (a pathological interpreter / load) becomes a
+# FAULT (rc 124) that fails CLOSED instead of hanging the whole Bash tool call.
+# `timeout` is coreutils (present fleet-wide); if genuinely absent, run python
+# directly (a fault then surfaces as rc 127 -> still fail-closed). The bound is
+# tunable via AIRULESET_TIER0_PY_TIMEOUT (tests); a non-numeric or 0 value
+# (0 would DISABLE the timeout) falls back to the 10s default.
+_PY_TIMEOUT_SECS="${AIRULESET_TIER0_PY_TIMEOUT:-10}"
+case "$_PY_TIMEOUT_SECS" in ''|*[!0-9]*) _PY_TIMEOUT_SECS=10 ;; esac
+# reject 0 / 00 / 000... (all-digit but numerically 0 -> `timeout 0` DISABLES
+# the bound); arithmetic compare so any leading-zero form is caught (#1038-review).
+if [ "$_PY_TIMEOUT_SECS" -eq 0 ] 2>/dev/null; then _PY_TIMEOUT_SECS=10; fi
+if command -v timeout >/dev/null 2>&1; then
+    _PY_TIMEOUT=(timeout "$_PY_TIMEOUT_SECS")
+else
+    # `env` is a guaranteed no-op prefix (the hook's own shebang uses it), so
+    # the array is NEVER empty -- avoids the `"${arr[@]}"`-on-empty-array
+    # unbound edge under `set -u` on older bash, without a hang bound.
+    _PY_TIMEOUT=(env)
+fi
+
+# #1038: set to 1 when the cargo heaviness classifier could NOT reach a verdict
+# on a cargo-mentioning command (a python3 FAULT: spawn failure, OOM-kill,
+# timeout, internal error). The hook then fails CLOSED with a distinct reason,
+# never a silent allow.
+CLASSIFIER_FAULT=0
 
 AUDIT_LOG="${AIRULESET_TIER0_AUDIT_LOG:-$HOME/devel/airuleset/audits/tier0-build-bypasses.log}"
 
@@ -198,131 +245,152 @@ _is_camera_box_repo() {
 # see that function's own comment for why the ordering matters), so this
 # subcommand walk never sees heredoc DATA as command text at all.
 _cargo_compiles() {
-    python3 - "$1" 2>/dev/null <<'PYEOF'
-import re
+    # #1038: the python EXIT CODE is a THREE-way verdict:
+    #   rc 0 = a compiling cargo subcommand is present (heavy)
+    #   rc 1 = deterministic: none present (not heavy)
+    #   ANY OTHER rc (3 internal error, 124 timeout, 127 no python3, 137 OOM-
+    #     kill, ...) = CLASSIFIER FAULT -- the caller MUST fail CLOSED, never a
+    #     silent "not heavy" (the fork-pressure fail-OPEN behind the Pass A
+    #     `bash <<'EOF' cargo build EOF` exit-0 under `pytest -n 2`).
+    # `"${_PY_TIMEOUT[@]}"` bounds a hang into rc 124 (a fault).
+    local rc=0
+    "${_PY_TIMEOUT[@]}" python3 - "$1" 2>/dev/null <<'PYEOF' || rc=$?
 import sys
 
-cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+try:
+    import re
 
-# The ONLY cargo subcommands that do NOT compile the crate/dep tree. Everything
-# else (build/b/test/t/bench/run/r/check/c/clippy/doc/rustc/rustdoc/install/
-# publish/package/fix/expand/tarpaulin/miri/llvm-cov/nextest/mutants/... AND any
-# unknown subcommand) is compiling -> heavy on Tier-0.
-NONCOMPILING = {
-    "fmt", "clean", "metadata", "tree", "search", "update", "add", "remove",
-    "rm", "generate-lockfile", "locate-project", "pkgid", "verify-project",
-    "read-manifest", "login", "logout", "owner", "yank", "version", "help",
-    "config", "report", "new", "init", "vendor", "fetch", "uninstall",
-}
-# `cargo --version`/`-V`/`--help`/`-h`/`--list`/`--explain <code>` print info and
-# do not compile -> treated as non-compiling.
-INFO_FLAGS = {"--version", "-V", "--help", "-h", "--list", "--explain"}
-# a couple of global flags that take a VALUE -- skip the value so it is not
-# mis-read as the subcommand.
-VALUED_FLAGS = {"--color", "--config"}
-# wrapper commands that may PRECEDE `cargo` in command position; a segment whose
-# real command word is NONE of these AND not cargo is some OTHER command
-# (`grep cargo file`, `man cargo build`, `which cargo`) -> NOT a cargo compile.
-PREFIX_CMDS = {"sudo", "env", "time", "nice", "timeout", "nohup", "stdbuf",
-               "setsid", "ionice", "chrt", "command", "exec", "doas", "xargs"}
-# shell keywords / group openers that precede a command in a segment
-# (`do cargo run`, `then cargo build`, `{ cargo test`, `! cargo run`).
-SHELL_KW = {"do", "then", "else", "elif", "{", "!"}
-NUMVAL = re.compile(r"^\d+[smhd]?$")   # a timeout/nice numeric value (300, 5m)
-ASSIGN = re.compile(r"^\w+=")          # an env-assignment prefix (RUSTFLAGS=x)
-META = re.compile(r"[;&|()<>]")
+    cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+
+    # The ONLY cargo subcommands that do NOT compile the crate/dep tree. Everything
+    # else (build/b/test/t/bench/run/r/check/c/clippy/doc/rustc/rustdoc/install/
+    # publish/package/fix/expand/tarpaulin/miri/llvm-cov/nextest/mutants/... AND any
+    # unknown subcommand) is compiling -> heavy on Tier-0.
+    NONCOMPILING = {
+        "fmt", "clean", "metadata", "tree", "search", "update", "add", "remove",
+        "rm", "generate-lockfile", "locate-project", "pkgid", "verify-project",
+        "read-manifest", "login", "logout", "owner", "yank", "version", "help",
+        "config", "report", "new", "init", "vendor", "fetch", "uninstall",
+    }
+    # `cargo --version`/`-V`/`--help`/`-h`/`--list`/`--explain <code>` print info and
+    # do not compile -> treated as non-compiling.
+    INFO_FLAGS = {"--version", "-V", "--help", "-h", "--list", "--explain"}
+    # a couple of global flags that take a VALUE -- skip the value so it is not
+    # mis-read as the subcommand.
+    VALUED_FLAGS = {"--color", "--config"}
+    # wrapper commands that may PRECEDE `cargo` in command position; a segment whose
+    # real command word is NONE of these AND not cargo is some OTHER command
+    # (`grep cargo file`, `man cargo build`, `which cargo`) -> NOT a cargo compile.
+    PREFIX_CMDS = {"sudo", "env", "time", "nice", "timeout", "nohup", "stdbuf",
+                   "setsid", "ionice", "chrt", "command", "exec", "doas", "xargs"}
+    # shell keywords / group openers that precede a command in a segment
+    # (`do cargo run`, `then cargo build`, `{ cargo test`, `! cargo run`).
+    SHELL_KW = {"do", "then", "else", "elif", "{", "!"}
+    NUMVAL = re.compile(r"^\d+[smhd]?$")   # a timeout/nice numeric value (300, 5m)
+    ASSIGN = re.compile(r"^\w+=")          # an env-assignment prefix (RUSTFLAGS=x)
+    META = re.compile(r"[;&|()<>]")
 
 
-def split_top_level(text):
-    # QUOTE-AWARE top-level split on &&/||/;/&/|/newline (from
-    # block-ungated-issue-filing.sh; the input is already quote-stripped so the
-    # quote-awareness is belt-and-suspenders, but it also inherits the backslash
-    # handling). Scopes command-word detection to the actual command segment.
-    segs, buf, i, n, quote = [], [], 0, len(text), None
-    while i < n:
-        c = text[i]
-        if quote:
+    def split_top_level(text):
+        # QUOTE-AWARE top-level split on &&/||/;/&/|/newline (from
+        # block-ungated-issue-filing.sh; the input is already quote-stripped so the
+        # quote-awareness is belt-and-suspenders, but it also inherits the backslash
+        # handling). Scopes command-word detection to the actual command segment.
+        segs, buf, i, n, quote = [], [], 0, len(text), None
+        while i < n:
+            c = text[i]
+            if quote:
+                buf.append(c)
+                if c == quote:
+                    quote = None
+                i += 1
+                continue
+            if c in ("'", '"'):
+                quote = c
+                buf.append(c)
+                i += 1
+                continue
+            if c == "\\" and i + 1 < n:
+                buf.append(c)
+                buf.append(text[i + 1])
+                i += 2
+                continue
+            if text[i:i + 2] in ("&&", "||"):
+                segs.append("".join(buf))
+                buf = []
+                i += 2
+                continue
+            if c in (";", "&", "|", "(", ")", "\n"):   # incl. subshell / cmd-subst boundaries
+                segs.append("".join(buf))
+                buf = []
+                i += 1
+                continue
             buf.append(c)
-            if c == quote:
-                quote = None
             i += 1
-            continue
-        if c in ("'", '"'):
-            quote = c
-            buf.append(c)
-            i += 1
-            continue
-        if c == "\\" and i + 1 < n:
-            buf.append(c)
-            buf.append(text[i + 1])
-            i += 2
-            continue
-        if text[i:i + 2] in ("&&", "||"):
-            segs.append("".join(buf))
-            buf = []
-            i += 2
-            continue
-        if c in (";", "&", "|", "(", ")", "\n"):   # incl. subshell / cmd-subst boundaries
-            segs.append("".join(buf))
-            buf = []
-            i += 1
-            continue
-        buf.append(c)
-        i += 1
-    segs.append("".join(buf))
-    return segs
+        segs.append("".join(buf))
+        return segs
 
 
-def cargo_sub(seg):
-    # Return the effective cargo subcommand of `seg` IFF cargo is the command
-    # word (after env-assignments + wrapper prefixes), else None. "__INFO__" for a
-    # non-compiling info flag (`--version`/`--help`/`--list`/`--explain`).
-    toks = seg.split()
-    n = len(toks)
-    i = 0
-    while i < n:                       # walk the command prefix to the real cmd
-        t = toks[i]
-        if ASSIGN.match(t):            # RUSTFLAGS=x cargo ...
-            i += 1
-            continue
-        if t in SHELL_KW:              # do/then/else/{/! cargo ...
-            i += 1
-            continue
-        if t in PREFIX_CMDS:           # sudo/env/timeout/nice/... cargo ...
-            i += 1
-            while i < n and (toks[i].startswith("-") or NUMVAL.match(toks[i])):
-                i += 1                 # consume the wrapper's flags + numeric vals
-            continue
-        break
-    if i >= n or toks[i] != "cargo":
-        return None                    # some OTHER command, or no command word
-    k = i + 1
-    while k < n:                       # parse the cargo subcommand
-        t = toks[k]
-        if t.startswith("+"):          # +toolchain override
-            k += 1
-            continue
-        if t in INFO_FLAGS:
-            return "__INFO__"
-        if t in VALUED_FLAGS:          # skip the flag AND its value
-            k += 2
-            continue
-        if t.startswith("-"):          # any other leading global flag
-            k += 1
-            continue
-        return META.split(t, 1)[0]     # first non-flag token = subcommand
-    return None                        # bare `cargo` -> prints help, non-compiling
+    def cargo_sub(seg):
+        # Return the effective cargo subcommand of `seg` IFF cargo is the command
+        # word (after env-assignments + wrapper prefixes), else None. "__INFO__" for a
+        # non-compiling info flag (`--version`/`--help`/`--list`/`--explain`).
+        toks = seg.split()
+        n = len(toks)
+        i = 0
+        while i < n:                       # walk the command prefix to the real cmd
+            t = toks[i]
+            if ASSIGN.match(t):            # RUSTFLAGS=x cargo ...
+                i += 1
+                continue
+            if t in SHELL_KW:              # do/then/else/{/! cargo ...
+                i += 1
+                continue
+            if t in PREFIX_CMDS:           # sudo/env/timeout/nice/... cargo ...
+                i += 1
+                while i < n and (toks[i].startswith("-") or NUMVAL.match(toks[i])):
+                    i += 1                 # consume the wrapper's flags + numeric vals
+                continue
+            break
+        if i >= n or toks[i] != "cargo":
+            return None                    # some OTHER command, or no command word
+        k = i + 1
+        while k < n:                       # parse the cargo subcommand
+            t = toks[k]
+            if t.startswith("+"):          # +toolchain override
+                k += 1
+                continue
+            if t in INFO_FLAGS:
+                return "__INFO__"
+            if t in VALUED_FLAGS:          # skip the flag AND its value
+                k += 2
+                continue
+            if t.startswith("-"):          # any other leading global flag
+                k += 1
+                continue
+            return META.split(t, 1)[0]     # first non-flag token = subcommand
+        return None                        # bare `cargo` -> prints help, non-compiling
 
 
-for seg in split_top_level(cmd):
-    sub = cargo_sub(seg)
-    if not sub or sub == "__INFO__":
-        continue
-    if sub in NONCOMPILING:
-        continue
-    sys.exit(0)   # heavy: a compiling cargo subcommand in command position
-sys.exit(1)
+    for seg in split_top_level(cmd):
+        sub = cargo_sub(seg)
+        if not sub or sub == "__INFO__":
+            continue
+        if sub in NONCOMPILING:
+            continue
+        sys.exit(0)   # heavy: a compiling cargo subcommand in command position
+    sys.exit(1)       # deterministic: no compiling cargo subcommand present
+except SystemExit:
+    raise
+except BaseException:
+    # #1038: ANY error -- init-time (import re / re.compile under the same
+    # OOM/fork pressure) OR runtime -- is a FAULT, not a silent "not heavy".
+    # Exit non-{0,1} so the caller fails CLOSED (an uncaught init exception
+    # would otherwise default to exit 1 = "deterministic not-heavy" = a
+    # fail-OPEN).
+    sys.exit(3)
 PYEOF
+    return "$rc"
 }
 
 # Is it a HEAVY build?  Non-cargo heavy builds stay plain bash greps; ALL cargo
@@ -341,12 +409,25 @@ is_heavy() {
     # dev1 use (vendor/BUILD.md). The `cmake -S . -B` configure step is light
     # and is NOT matched -- only `--build` is heavy.
     printf '%s' "$c" | grep -qE '(^|[;&|([:space:]])cmake[[:space:]]+--build([[:space:]]|$|[;&|)(<>])' && return 0
-    # #557: ANY compiling `cargo` subcommand -> heavy (allowlist inversion). Cheap
-    # pre-filter: only spawn python for a command that actually mentions `cargo`
-    # as a word, so the hot path (every Bash command WITHOUT cargo) pays nothing
-    # beyond this one grep and never forks python.
-    if printf '%s' "$c" | grep -qwE 'cargo'; then
-        _cargo_compiles "$c" && return 0
+    # #557/#1038: ANY compiling `cargo` subcommand -> heavy (allowlist inversion).
+    # Cheap pre-filter: only spawn python for a command that mentions `cargo` as a
+    # word. This is a FORK-FREE bash regex (was `grep -qwE cargo`, itself a grep
+    # fork that could fail under fork pressure and silently skip the cargo
+    # classifier entirely -- a sibling of the #1038 fail-OPEN). The bash regex is
+    # word-boundary equivalent to `grep -w cargo` (a `_` is a word char).
+    if [[ "$c" =~ (^|[^[:alnum:]_])cargo([^[:alnum:]_]|$) ]]; then
+        local rc=0
+        _cargo_compiles "$c" || rc=$?
+        if [ "$rc" = 0 ]; then
+            return 0                 # compiling cargo subcommand present -> heavy
+        elif [ "$rc" != 1 ]; then
+            # #1038: rc not in {0,1} = CLASSIFIER FAULT -> fail CLOSED. The
+            # command textually contains cargo and we could NOT confirm it is
+            # non-compiling (deny-by-default posture, #557), so treat it as heavy
+            # and flag the fault so the block reason names it.
+            CLASSIFIER_FAULT=1
+            return 0
+        fi
     fi
     return 1
 }
@@ -421,7 +502,11 @@ is_heavy() {
 # (e.g. `wc <<'EOF'`) is fail-safe over-blocked rather than stripped -- widen
 # `SAFE_HEREDOC_CONSUMERS` if a real need appears.
 strip_heredocs() {
-    python3 - "$1" 2>/dev/null <<'PYEOF' || printf '%s' "$1"
+    # #1038: bound with `timeout` too -- a hanging python here would hang the
+    # whole hook. A timeout/kill/error falls back to the raw text (fail-SAFE:
+    # the heredoc body stays, so a real compile inside it is still detected and
+    # blocked; never a new false negative).
+    "${_PY_TIMEOUT[@]}" python3 - "$1" 2>/dev/null <<'PYEOF' || printf '%s' "$1"
 import re
 import sys
 
@@ -573,7 +658,8 @@ is_heavy "$STRIPPED" || CMD_IS_HEAVY=0
 # costs nothing beyond this one grep.
 HEAVY_SCRIPT=""
 if [ "$CMD_IS_HEAVY" = 0 ] && printf '%s' "$STRIPPED" | grep -qE '\.sh\b'; then
-    SCRIPT_PATHS=$(python3 - "$STRIPPED" <<'PYEOF' 2>/dev/null || true
+    _sp_rc=0
+    SCRIPT_PATHS=$("${_PY_TIMEOUT[@]}" python3 - "$STRIPPED" 2>/dev/null <<'PYEOF'
 import re, sys
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 paths = set()
@@ -593,8 +679,15 @@ for m in re.finditer(
 for p in sorted(paths):
     print(p)
 PYEOF
-    )
-    if [ -n "$SCRIPT_PATHS" ]; then
+    ) || _sp_rc=$?
+    if [ "$_sp_rc" != 0 ]; then
+        # #1038: the script-path EXTRACTOR faulted (fork/timeout/OOM) on a
+        # command that references a .sh -- we cannot determine which scripts it
+        # invokes, so fail CLOSED (treat as heavy) rather than skip the Shape-B
+        # scan and silently ALLOW a cargo build hidden inside an invoked script.
+        CLASSIFIER_FAULT=1
+        CMD_IS_HEAVY=1
+    elif [ -n "$SCRIPT_PATHS" ]; then
         BASE_DIR="${CWD:-$PWD}"
         while IFS= read -r sp; do
             [ -z "$sp" ] && continue
@@ -615,8 +708,8 @@ PYEOF
         done <<EOF_SCRIPTS
 $SCRIPT_PATHS
 EOF_SCRIPTS
+        [ -n "$HEAVY_SCRIPT" ] && CMD_IS_HEAVY=1
     fi
-    [ -n "$HEAVY_SCRIPT" ] && CMD_IS_HEAVY=1
 fi
 
 [ "$CMD_IS_HEAVY" = 0 ] && exit 0
@@ -661,13 +754,28 @@ while [ -n "$dir" ] && [ "$dir" != "/" ]; do
 done
 [ "$found" = 0 ] && exit 0
 
-_log_tier0_event "blocked" || true
+# #1038: a distinct audit tag + a reason suffix when this block is a classifier
+# FAULT fail-closed (rather than a confirmed heavy build), and a note when the
+# payload carried no cwd (the walk fell back to $PWD).
+FAULT_NOTE=""
+if [ "$CLASSIFIER_FAULT" = 1 ]; then
+    FAULT_NOTE=" — classifier unavailable, fail-closed (#1038): the cargo heaviness classifier could not reach a verdict on a command that textually contains cargo (python3 fault/timeout under load); blocking rather than silently allowing. Retry once the box is under less load, or use CI."
+fi
+if [ -z "${CWD:-}" ]; then
+    FAULT_NOTE="${FAULT_NOTE} — no cwd in the payload; walked \$PWD for a CLAUDE.md instead."
+fi
+
+if [ "$CLASSIFIER_FAULT" = 1 ]; then
+    _log_tier0_event "blocked-classifier-fault" || true
+else
+    _log_tier0_event "blocked" || true
+fi
 
 if [ "$CAMERA_BOX" = 1 ]; then
-    echo "BLOCKED: local cargo COMPILATION in the camera-box repo (no-local-builds.md, airuleset #477/#557). Tier-0 = ZERO local cargo compilation — EVERY compiling cargo shape (build/test/bench/run/check/clippy/doc/… , scoped or whole-workspace, --no-run or not) runs in CI ONLY. The '# airuleset:build-ok' marker and AIRULESET_ALLOW_LOCAL_BUILD are DISABLED for camera-box. Locally you may run only NON-compiling cargo (cargo fmt / metadata / tree / clean / update); let CI compile + test." >&2
+    echo "BLOCKED: local cargo COMPILATION in the camera-box repo (no-local-builds.md, airuleset #477/#557). Tier-0 = ZERO local cargo compilation — EVERY compiling cargo shape (build/test/bench/run/check/clippy/doc/… , scoped or whole-workspace, --no-run or not) runs in CI ONLY. The '# airuleset:build-ok' marker and AIRULESET_ALLOW_LOCAL_BUILD are DISABLED for camera-box. Locally you may run only NON-compiling cargo (cargo fmt / metadata / tree / clean / update); let CI compile + test.${FAULT_NOTE}" >&2
 elif [ -n "$HEAVY_SCRIPT" ]; then
-    echo "BLOCKED: local cargo COMPILATION hidden inside invoked script '$HEAVY_SCRIPT' in a Tier-0 project (no-local-builds.md, #557). Tier-0 = ZERO local cargo compilation — every compiling cargo shape (build/test/bench/run/check/clippy/doc/…) runs in CI. Locally run only NON-compiling cargo (fmt / metadata / tree / clean). To build locally on purpose: make the project Tier 1 ('<!-- airuleset:local-builds=allowed -->' in its CLAUDE.md) or Tier 2 ('/fast-iterate on'), or append '# airuleset:build-ok' to this one command." >&2
+    echo "BLOCKED: local cargo COMPILATION hidden inside invoked script '$HEAVY_SCRIPT' in a Tier-0 project (no-local-builds.md, #557). Tier-0 = ZERO local cargo compilation — every compiling cargo shape (build/test/bench/run/check/clippy/doc/…) runs in CI. Locally run only NON-compiling cargo (fmt / metadata / tree / clean). To build locally on purpose: make the project Tier 1 ('<!-- airuleset:local-builds=allowed -->' in its CLAUDE.md) or Tier 2 ('/fast-iterate on'), or append '# airuleset:build-ok' to this one command.${FAULT_NOTE}" >&2
 else
-    echo "BLOCKED: local cargo COMPILATION in a Tier-0 project (no-local-builds.md, #557). Tier-0 = ZERO local cargo compilation — EVERY compiling cargo shape (build/test/bench/run/check/clippy/doc/rustc/install/… , narrow AND whole-workspace, --no-run or not) runs in CI. Locally run only NON-compiling cargo (cargo fmt / metadata / tree / clean / update). To build locally on purpose: make the project Tier 1 ('<!-- airuleset:local-builds=allowed -->' in its CLAUDE.md) or Tier 2 ('/fast-iterate on'), or append '# airuleset:build-ok' to this one command." >&2
+    echo "BLOCKED: local cargo COMPILATION in a Tier-0 project (no-local-builds.md, #557). Tier-0 = ZERO local cargo compilation — EVERY compiling cargo shape (build/test/bench/run/check/clippy/doc/rustc/install/… , narrow AND whole-workspace, --no-run or not) runs in CI. Locally run only NON-compiling cargo (cargo fmt / metadata / tree / clean / update). To build locally on purpose: make the project Tier 1 ('<!-- airuleset:local-builds=allowed -->' in its CLAUDE.md) or Tier 2 ('/fast-iterate on'), or append '# airuleset:build-ok' to this one command.${FAULT_NOTE}" >&2
 fi
 exit 2
