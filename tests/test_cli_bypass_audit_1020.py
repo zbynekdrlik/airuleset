@@ -5,7 +5,6 @@ to (it counted merged commit messages only). A genuine honored bypass line
 counts; a mixed log's NON-bypass line (tier0 `blocked`, main-exec `refused`)
 does not.
 """
-import os
 import tempfile
 import unittest
 from datetime import datetime
@@ -87,6 +86,38 @@ class TestCliBypassReader(unittest.TestCase):
         import shutil
         shutil.rmtree(self.audits, ignore_errors=True)
         shutil.rmtree(self.tmp, ignore_errors=True)
+
+
+class TestBypassSourceColumn(unittest.TestCase):
+    """#1020 Part 2 item 3 -- the --bypasses table gains a `source` column
+    (commit|cli) merging both readers into ONE view."""
+
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
+        import audit_bounce_rule_updates as abr  # noqa: E402
+        self.abr = abr
+
+    def test_text_table_has_source_column(self):
+        import io
+        import contextlib
+        commit = {"per_day": {"2026-09-14": 2}, "per_kind": {"airuleset:test-skip-ok": 2}, "total": 2}
+        cli = {"per_day": {"2026-09-14": 3, "2026-09-15": 1},
+               "per_kind": {"airuleset:secret-ok": 1, "cli:secret-scan-bypasses": 3}, "total": 4}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.abr.print_bypasses_text(commit, cli)
+        out = buf.getvalue()
+        self.assertIn("day\tsource\tbypass_tokens", out)
+        self.assertIn("2026-09-14\tcommit\t2", out)
+        self.assertIn("2026-09-14\tcli\t3", out)
+        self.assertIn("2026-09-15\tcli\t1", out)
+        self.assertIn("total\tcommit\t2", out)
+        self.assertIn("total\tcli\t4", out)
+
+    def test_reader_wired_into_module(self):
+        # the script imports the gates.audit reader
+        self.assertTrue(hasattr(self.abr, "gates_audit"))
+        self.assertTrue(hasattr(self.abr.gates_audit, "count_cli_bypasses"))
 
 
 if __name__ == "__main__":
