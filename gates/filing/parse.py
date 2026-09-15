@@ -50,6 +50,24 @@ EXEMPT_FROM_CAP = {"planned-work", "user-request", "architecture-rework"}
 AREA_RE = re.compile(r'(?m)^\s*Area:\s*(\S.*)$')
 
 
+# #1027/#1033 -- a `Scope-gate: user-request` ticket filed FROM a client Odoo
+# Discuss message (its body QUOTES the origin: a `mail.message`, a
+# `discuss.channel_<N>` deep URL, or an explicit `msg <id>` reference) must cite
+# the intake worker-reaction (an `Ack-reaction:` line) -- the owner's visible
+# "being worked on" signal (👷) on the client message, added the MOMENT the
+# message is picked up, BEFORE the ticket is filed (skills/odoo-client-messaging/
+# ack-reaction.md + handover-compose.md). The origin regex uses the two
+# Odoo-specific tokens (`mail.message`, `discuss.channel_<N>`) plus a labelled
+# `msg <id>` with a 4+-digit id (real Odoo mail.message ids are large: 3122,
+# 1739648) so it never false-matches a generic "msg 12" or non-Odoo body.
+CLIENT_MSG_ORIGIN_RE = re.compile(
+    r'mail\.message|discuss\.channel_\d+|\bmsg\s+\d{4,}', re.IGNORECASE)
+# The citation: the same `Ack-reaction:` evidence line the prose Stop hook and
+# ack-reaction.md doctrine use (`Ack-reaction: msg <id> 👷` or
+# `Ack-reaction: pending — <reason>`).
+ACK_REACTION_CITE_RE = re.compile(r'(?m)^\s*Ack-reaction:\s*\S', re.IGNORECASE)
+
+
 # ---- pass 2: segment the skeleton exactly like block-gh-invalid-json-flag.sh
 # (same shape, deliberately reused rather than reinvented — see that hook's
 # #85 note).

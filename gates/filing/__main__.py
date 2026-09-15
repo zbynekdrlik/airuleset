@@ -21,7 +21,8 @@ import sys
 from gates import audit, command_of, field_of, read_payload
 from gates.filing import render
 from gates.filing.parse import (
-    ALLOWED, AREA_RE, CRITERION_RE, DEDUP_RE, EXEMPT_FROM_CAP, LOC_NUM_RE,
+    ACK_REACTION_CITE_RE, ALLOWED, AREA_RE, CLIENT_MSG_ORIGIN_RE, CRITERION_RE,
+    DEDUP_RE, EXEMPT_FROM_CAP, LOC_NUM_RE,
     extract_heredocs, flag_value, is_api_issues_post, is_issue_create,
     resolve_body, split_top_level, strip_prefix, tokens_of,
     _all_labels, _apply_cd, _chain_parent, _chain_parents, _clean_field,
@@ -317,6 +318,30 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
                                  "architecture-rework-missing-label (add "
                                  "`-l architecture-rework` -- the picker promotes only "
                                  "labeled rework tickets)",
+                                 parents_str, target_repo, ""))
+                continue
+            # #1027/#1033 -- a `user-request` ticket filed FROM a client Odoo
+            # Discuss message (body QUOTES a mail.message / discuss.channel_<N> /
+            # msg <id> origin) MUST cite the intake worker-reaction (an
+            # `Ack-reaction:` line): the owner's visible 👷 "being worked on"
+            # signal goes on the client message the MOMENT it is picked up, BEFORE
+            # the ticket is filed (skills/odoo-client-messaging/ack-reaction.md).
+            # UNCONDITIONAL (attended or not) -- the intake reaction is a fleet
+            # rule, not an owner-present gate, and it BLOCKS before the presence/
+            # dedup/cap gates. A PreToolUse hook has no Odoo credentials, so it
+            # cannot post the reaction itself ("or the gate posts it") -- it blocks
+            # and instructs the stream to react + cite instead.
+            if crit_l == "user-request" and body \
+                    and CLIENT_MSG_ORIGIN_RE.search(body) \
+                    and not ACK_REACTION_CITE_RE.search(body):
+                results.append(("BLOCK", clean_title,
+                                 "intake-no-worker-reaction (this user-request quotes "
+                                 "a client Odoo message -- react 👷 on that message "
+                                 "FIRST via message_reaction_guarded(msg_id,\"👷\",\"add\") "
+                                 "and cite it with an `Ack-reaction: msg <id> 👷` line "
+                                 "in the body, or `Ack-reaction: pending — <reason>` if "
+                                 "the guarded method is not yet on that instance; see "
+                                 "skills/odoo-client-messaging/ack-reaction.md)",
                                  parents_str, target_repo, ""))
                 continue
             # #842 -- UNATTENDED gates (an ATTENDED / owner-present filing keeps the
