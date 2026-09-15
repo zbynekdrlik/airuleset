@@ -1,0 +1,210 @@
+"""#1019 — the controller fleet-guard must ALSO watch the age of the feed claudy
+CONSUMES vs the producer `/var/lib/airuleset/fleet.jsonl`, and `cmd_install` must
+verify (one-time migration check) that claudy's home feed points at the shared
+feed. #971 moved the PRODUCER without any consumer check, so a frozen consumer
+(the manual symlink ops-fix undone / never applied) went unnoticed for 3.5 days.
+
+Unit (1) extends the EXISTING controller-only job 35
+(`watchdog/conformance_heartbeat.py`) — no new job/timer/store: a new pure
+decider `classify_feed_lag` + a feed-lag section in
+`run_conformance_heartbeat_check`, on its OWN hourly cadence, reusing the
+job's send_fn / persist / dedup / `_sweep_due` seams. A >2h producer→consumer
+gap = ONE deduped owner alarm; unmeasurable = LOGGED, never a false alarm.
+
+Unit (2) is a pure verdict `_classify_claudy_feed` + `_verify_claudy_feed_migration`
+called in `cmd_install` right after `_provision_shared_fleet_dir()`.
+"""
+import os
+import sys
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from watchdog import conformance_heartbeat as hb  # noqa: E402
+
+NOW = 1_700_000_000
+H = 3600
+
+
+class _Send:
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, msg, dedup_key=None, dry_run=False, owner=None):
+        self.calls.append({"msg": msg, "dedup_key": dedup_key, "dry_run": dry_run})
+        return "sent"
+
+    @property
+    def msgs(self):
+        return [c["msg"] for c in self.calls]
+
+
+def _run_feed(state, producer_mtime, consumer_mtime, send=None, now=NOW,
+              dry_run=False, persist=None, **kw):
+    """Drive job 35 with ONLY the feed-lag path live: empty fleet rows/hosts so
+    the dead-box scan pings nothing, an injected feed-mtimes seam, tight
+    deterministic thresholds."""
+    return hb.run_conformance_heartbeat_check(
+        now, state, send_fn=send, dry_run=dry_run,
+        fleet_rows_fn=lambda: [], hosts_fn=lambda: [],
+        persist=persist or (lambda: None),
+        interval=kw.get("interval", 6 * H), stale=kw.get("stale", 36 * H),
+        reping=kw.get("reping", 72 * H),
+        collection_stale=kw.get("collection_stale", 12 * H),
+        lookback=kw.get("lookback", 72 * H),
+        feed_mtimes_fn=lambda: (producer_mtime, consumer_mtime),
+        feed_lag_interval=kw.get("feed_lag_interval", 1 * H),
+        feed_lag_threshold=kw.get("feed_lag_threshold", 2 * H))
+
+
+# --------------------------------------------------------------------------- #
+# PURE DECIDER — classify_feed_lag
+# --------------------------------------------------------------------------- #
+
+class TestClassifyFeedLag(unittest.TestCase):
+    def test_lag_over_threshold_is_alarm(self):
+        name, ok, detail = hb.classify_feed_lag(NOW, NOW - 3 * H, NOW, 2 * H)
+        self.assertEqual(name, "feed")
+        self.assertIs(ok, False)
+        self.assertTrue(detail)
+
+    def test_lag_within_threshold_is_ok(self):
+        _, ok, _ = hb.classify_feed_lag(NOW, NOW - 1 * H, NOW, 2 * H)
+        self.assertIs(ok, True)
+
+    def test_consumer_newer_than_producer_is_ok(self):
+        # a consumer somehow AHEAD of producer is not a lag -> never an alarm
+        _, ok, _ = hb.classify_feed_lag(NOW - 1 * H, NOW, NOW, 2 * H)
+        self.assertIs(ok, True)
+
+    def test_producer_unreadable_is_undetermined(self):
+        _, ok, _ = hb.classify_feed_lag(None, NOW - 3 * H, NOW, 2 * H)
+        self.assertIsNone(ok)
+
+    def test_consumer_unreadable_is_undetermined(self):
+        _, ok, _ = hb.classify_feed_lag(NOW, None, NOW, 2 * H)
+        self.assertIsNone(ok)
+
+
+# --------------------------------------------------------------------------- #
+# ORCHESTRATOR — feed-lag section inside job 35
+# --------------------------------------------------------------------------- #
+
+class TestFeedLagOrchestrator(unittest.TestCase):
+    def test_producer_fresh_consumer_3h_older_pings_once(self):
+        send = _Send()
+        _run_feed({}, producer_mtime=NOW, consumer_mtime=NOW - 3 * H, send=send)
+        self.assertEqual(len(send.calls), 1)
+        # the alarm is about the consumed feed, not a dead box / collector
+        self.assertNotIn("dead-box", send.msgs[0])
+        self.assertRegex(send.msgs[0].lower(), r"feed|konzum|feede")
+
+    def test_consumer_within_2h_no_ping(self):
+        send = _Send()
+        _run_feed({}, producer_mtime=NOW, consumer_mtime=NOW - 1 * H, send=send)
+        self.assertEqual(send.calls, [])
+
+    def test_lag_not_repinged_within_episode(self):
+        send = _Send()
+        state = {}
+        _run_feed(state, NOW, NOW - 3 * H, send=send, now=NOW)
+        self.assertEqual(len(send.calls), 1)
+        # a later run (past the 1h feed cadence), producer advanced but consumer
+        # STILL frozen at the same instant -> same episode -> no second ping
+        _run_feed(state, NOW + 90 * 60, NOW - 3 * H, send=send, now=NOW + 90 * 60)
+        self.assertEqual(len(send.calls), 1)
+
+    def test_catches_up_then_new_lag_repings(self):
+        send = _Send()
+        state = {}
+        _run_feed(state, NOW, NOW - 3 * H, send=send, now=NOW)
+        self.assertEqual(len(send.calls), 1)
+        # consumer catches up (lag ~0) -> episode cleared, no ping
+        _run_feed(state, NOW + 2 * H, NOW + 2 * H, send=send, now=NOW + 2 * H)
+        self.assertEqual(len(send.calls), 1)
+        # a NEW lag episode (consumer frozen at a DIFFERENT instant) -> re-ping
+        _run_feed(state, NOW + 6 * H, NOW + 3 * H, send=send, now=NOW + 6 * H)
+        self.assertEqual(len(send.calls), 2)
+
+    def test_unreadable_consumer_logs_no_false_alarm(self):
+        send = _Send()
+        logs = _run_feed({}, producer_mtime=NOW, consumer_mtime=None, send=send)
+        self.assertEqual(send.calls, [])
+        self.assertTrue(any("feed" in ln.lower() for ln in logs))
+
+    def test_unreadable_producer_no_alarm(self):
+        send = _Send()
+        _run_feed({}, producer_mtime=None, consumer_mtime=NOW - 3 * H, send=send)
+        self.assertEqual(send.calls, [])
+
+    def test_dry_run_never_sends_or_persists_feed(self):
+        send = _Send()
+        persisted = []
+        state = {}
+        _run_feed(state, NOW, NOW - 3 * H, send=send, dry_run=True,
+                  persist=lambda: persisted.append(1))
+        self.assertEqual(send.calls, [])
+        self.assertEqual(persisted, [])
+        self.assertNotIn("feed_lag_last_check", state)
+
+    def test_feed_cadence_gate_skips_when_not_due(self):
+        send = _Send()
+        state = {"feed_lag_last_check": NOW - 10 * 60}  # ran 10 min ago
+        _run_feed(state, NOW, NOW - 3 * H, send=send, now=NOW,
+                  feed_lag_interval=1 * H)
+        self.assertEqual(send.calls, [])  # not due -> no feed work
+
+
+# --------------------------------------------------------------------------- #
+# UNIT (2) — install-time migration verdict
+# --------------------------------------------------------------------------- #
+
+import airuleset  # noqa: E402
+
+SHARED = "/var/lib/airuleset/fleet.jsonl"
+
+
+class TestClassifyClaudyFeed(unittest.TestCase):
+    def test_symlink_to_shared_is_ok(self):
+        ok, line = airuleset._classify_claudy_feed(SHARED, SHARED, None)
+        self.assertIs(ok, True)
+        self.assertTrue(line)
+
+    def test_plain_file_wrong_target_is_mismatch(self):
+        ok, line = airuleset._classify_claudy_feed(
+            "/home/claudy/.claude/burn-history/fleet.jsonl", SHARED, None)
+        self.assertIs(ok, False)
+        # a loud line naming the shared feed the operator must repoint to
+        self.assertIn(SHARED, line)
+
+    def test_claudy_fleet_env_pointing_at_shared_is_ok(self):
+        ok, line = airuleset._classify_claudy_feed(
+            "/home/claudy/.claude/burn-history/fleet.jsonl", SHARED,
+            claudy_fleet_env=SHARED)
+        self.assertIs(ok, True)
+
+    def test_unreadable_is_caveat_not_mismatch(self):
+        ok, line = airuleset._classify_claudy_feed(None, SHARED, None)
+        self.assertIsNone(ok)
+        self.assertTrue(line)
+
+
+class TestVerifyClaudyFeedMigration(unittest.TestCase):
+    def test_prints_and_never_raises(self):
+        # injected facts seam -> pure behaviour, no sudo / filesystem needed
+        out = airuleset._verify_claudy_feed_migration(
+            read_facts=lambda: (SHARED, None),
+            box_class="controller")
+        # returns the (ok, line) verdict; ok True for a shared symlink
+        self.assertIsInstance(out, tuple)
+        self.assertIs(out[0], True)
+
+    def test_non_controller_is_noop(self):
+        out = airuleset._verify_claudy_feed_migration(
+            read_facts=lambda: (_ for _ in ()).throw(AssertionError("read on non-controller")),
+            box_class="workstation")
+        self.assertIsNone(out)
+
+
+if __name__ == "__main__":
+    unittest.main()
