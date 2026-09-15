@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset  # noqa: E402
 import cli_quals  # noqa: E402
+from gates import audit as gates_audit  # noqa: E402  (#1020: CLI-token bypass reader)
 
 
 # ---------------------------------------------------------------------------
@@ -284,16 +285,25 @@ def count_bypass_tokens(commits):
     return {"per_day": per_day, "per_kind": per_kind, "total": total}
 
 
-def print_bypasses_text(counts):
-    """TSV: day  bypass_tokens, then a total row and a per-token breakdown."""
-    print("day\tbypass_tokens")
-    for day in sorted(counts["per_day"]):
-        print("%s\t%d" % (day, counts["per_day"][day]))
-    print("total\t%d" % counts["total"])
-    if counts["per_kind"]:
-        print("# by token (trend each to 0 by fixing its false-positive class):")
-        for kind in sorted(counts["per_kind"]):
-            print("#   %s\t%d" % (kind, counts["per_kind"][kind]))
+def print_bypasses_text(commit_counts, cli_counts):
+    """TSV with a `source` column (commit|cli): one row per (day, source), a
+    per-source total, then a per-token breakdown. #1020 Part 2 item 3 -- the
+    commit source is `count_bypass_tokens` (merged commit messages, per repo),
+    the cli source is `gates.audit.count_cli_bypasses` (the per-hook CLI-token
+    audit logs, per box), unified in ONE table so the daily count of BOTH can be
+    trended toward 0."""
+    print("day\tsource\tbypass_tokens")
+    for source, counts in (("commit", commit_counts), ("cli", cli_counts)):
+        for day in sorted(counts["per_day"]):
+            print("%s\t%s\t%d" % (day, source, counts["per_day"][day]))
+    for source, counts in (("commit", commit_counts), ("cli", cli_counts)):
+        print("total\t%s\t%d" % (source, counts["total"]))
+    for source, counts in (("commit", commit_counts), ("cli", cli_counts)):
+        if counts["per_kind"]:
+            print("# %s by token (trend each to 0 by fixing its false-positive class):"
+                  % source)
+            for kind in sorted(counts["per_kind"]):
+                print("#   %s\t%s\t%d" % (source, kind, counts["per_kind"][kind]))
 
 
 # ---------------------------------------------------------------------------
@@ -372,12 +382,17 @@ def main(argv=None):
 
     if args.bypasses:
         commits = fetch_bypass_commits(args.repo, window_days=args.window)
-        counts = count_bypass_tokens(commits)
+        commit_counts = count_bypass_tokens(commits)
+        # #1020 Part 2 item 3 -- ALSO the per-hook CLI-token audit logs (the
+        # bypasses commit messages never carry): the box-local audits/*.log
+        # bypass family + the /tmp main-exec log family, per day per box.
+        cli_counts = gates_audit.count_cli_bypasses(window_days=args.window)
         if args.json_out:
-            json.dump(counts, sys.stdout, indent=2)
+            json.dump({"commit": commit_counts, "cli": cli_counts},
+                      sys.stdout, indent=2)
             print()
         else:
-            print_bypasses_text(counts)
+            print_bypasses_text(commit_counts, cli_counts)
         return
 
     if not args.rounds:
