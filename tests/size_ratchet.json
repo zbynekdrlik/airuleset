@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 9808,
+    "airuleset.py": 9811,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2338,
     "cli_account_bootstrap.py": 285,
@@ -242,7 +242,7 @@
     "tests/test_filedrop.py": 1004,
     "tests/test_fleet_concurrency_doctrine.py": 273,
     "tests/test_fleet_coordinator_971.py": 310,
-    "tests/test_fleet_feed_lag_1019.py": 210,
+    "tests/test_fleet_feed_lag_1019.py": 277,
     "tests/test_fleet_hygiene.py": 1022,
     "tests/test_fleet_sweep_903.py": 236,
     "tests/test_footer_role_998.py": 87,
@@ -628,7 +628,7 @@
     "watchdog/cards.py": 1045,
     "watchdog/compact.py": 1899,
     "watchdog/conformance.py": 505,
-    "watchdog/conformance_heartbeat.py": 564,
+    "watchdog/conformance_heartbeat.py": 566,
     "watchdog/cross_stream.py": 2064,
     "watchdog/decide.py": 791,
     "watchdog/deploy_state.py": 452,

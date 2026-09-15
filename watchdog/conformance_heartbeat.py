@@ -1,4 +1,4 @@
-"""Central dead-box heartbeat-missing detector (#543) — watchdog job 35, dev1-only.
+"""Central dead-box heartbeat-missing detector (#543) — watchdog job 35, controller-only.
 
 The per-box conformance self-check (#535, ``watchdog/conformance.py``, job 34)
 has ONE structural gap it cannot cover: a DEAD box's self-check sends NOTHING.
@@ -7,9 +7,11 @@ systemd is broken), there is no per-box process left to notice or report it —
 silence looks like health. That is exactly the failure class #535 set out to
 make visible, deferred (by its own docstring) to this central follow-up.
 
-This job is the CENTRAL detector: dev1 (the always-on deploy source / fleet
-coordinator) knows which boxes SHOULD be reporting and LOUD-pings the owner when
-one goes silent past a threshold.
+This job is the CENTRAL detector: the controller (the always-on deploy source /
+fleet coordinator, #971 — was dev1) knows which boxes SHOULD be reporting and
+LOUD-pings the owner when one goes silent past a threshold. (The comments and
+operator-alarm strings below that still say "dev1" are pre-#971 cutover debt,
+tracked separately.)
 
 HEARTBEAT SOURCE (investigate-existing-first / #486 reuse — the ticket's own
 suggested carrier). Every managed box already writes an hourly burn snapshot
@@ -523,7 +525,7 @@ def run_conformance_heartbeat_check(now, state, send_fn=None, dry_run=False,
     dead = []          # (name, detail, sig) for the DEAD subset
     for h in hosts:
         name = h.get("name") if isinstance(h, dict) else None
-        if not name or name in (_COLLECTION_KEY, _ALLFLEET_KEY):
+        if not name or name in (_COLLECTION_KEY, _ALLFLEET_KEY, _FEEDLAG_KEY):
             continue          # skip a host colliding with a reserved dedup key
         lf = last_fresh.get(name)
         hname, ok, detail = classify_box(name, lf, name in present, now, stale)

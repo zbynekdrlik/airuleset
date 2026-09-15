@@ -1371,7 +1371,10 @@ def _read_claudy_feed_facts():
              "/home/claudy/.config/systemd"],
             capture_output=True, text=True, timeout=10)
         if r.returncode == 0 and r.stdout.strip():
-            # last wins (systemd override precedence); strip the KEY= + quotes
+            # last grep line wins — a HEURISTIC for the common single-definition
+            # case, NOT true systemd drop-in precedence (grep -r traversal order
+            # != systemd's lexical drop-in order). Harmless: CLAUDY_FLEET is
+            # currently unset and this verdict is advisory/non-fatal.
             last = r.stdout.strip().splitlines()[-1]
             claudy_fleet_env = last.split("=", 1)[1].strip().strip('"')
     except (OSError, subprocess.SubprocessError, IndexError):

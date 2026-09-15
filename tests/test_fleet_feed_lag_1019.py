@@ -206,5 +206,72 @@ class TestVerifyClaudyFeedMigration(unittest.TestCase):
         self.assertIsNone(out)
 
 
+class _R:
+    def __init__(self, rc, out=""):
+        self.returncode = rc
+        self.stdout = out
+
+
+class TestDefaultFeedMtimesSeam(unittest.TestCase):
+    """#1019 review 🟡: the SAFETY-CRITICAL `-L` symlink deref in the real I/O
+    seam is otherwise untested (the orchestrator tests always inject
+    feed_mtimes_fn). Without `-L`, a healthy symlink reports its CREATION time as
+    the consumer mtime → a permanent FALSE lag alarm (the opposite of intent)."""
+
+    def test_consumer_stat_dereferences_symlink_with_dash_L(self):
+        import unittest.mock as m
+        captured = []
+
+        def fake_run(argv, **kw):
+            captured.append(argv)          # only the consumer stat reaches here
+            return _R(0, "1700000000\n")   # producer is read via os.stat
+
+        with m.patch("subprocess.run", side_effect=fake_run):
+            _producer, consumer = hb._default_feed_mtimes()
+        self.assertTrue(captured, "no subprocess call captured")
+        argv = captured[-1]
+        self.assertIn("stat", argv)
+        self.assertIn("-L", argv)          # MUST dereference — the linchpin
+        self.assertIn("%Y", argv)
+        self.assertEqual(consumer, 1700000000.0)
+
+    def test_unreadable_consumer_returns_none(self):
+        import unittest.mock as m
+        with m.patch("subprocess.run", return_value=_R(1, "")):
+            _producer, consumer = hb._default_feed_mtimes()
+        self.assertIsNone(consumer)        # rc!=0 (broken symlink / no sudo)
+
+    def test_stat_exception_returns_none(self):
+        import unittest.mock as m
+        with m.patch("subprocess.run", side_effect=OSError("boom")):
+            _producer, consumer = hb._default_feed_mtimes()
+        self.assertIsNone(consumer)
+
+
+class TestReadClaudyFeedFactsSeam(unittest.TestCase):
+    def test_readlink_resolves_target_with_dash_f(self):
+        import unittest.mock as m
+        captured = []
+
+        def fake_run(argv, **kw):
+            captured.append(argv)
+            if "readlink" in argv:
+                return _R(0, SHARED + "\n")
+            return _R(1, "")               # grep: no CLAUDY_FLEET set
+        with m.patch("subprocess.run", side_effect=fake_run):
+            target, env = airuleset._read_claudy_feed_facts()
+        readlink_argv = [a for a in captured if "readlink" in a][0]
+        self.assertIn("-f", readlink_argv)
+        self.assertEqual(target, SHARED)
+        self.assertIsNone(env)
+
+    def test_all_reads_failing_returns_none_none(self):
+        import unittest.mock as m
+        with m.patch("subprocess.run", side_effect=OSError("boom")):
+            target, env = airuleset._read_claudy_feed_facts()
+        self.assertIsNone(target)
+        self.assertIsNone(env)
+
+
 if __name__ == "__main__":
     unittest.main()
