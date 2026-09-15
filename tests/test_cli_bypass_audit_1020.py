@@ -82,6 +82,53 @@ class TestCliBypassReader(unittest.TestCase):
         c = audit.count_cli_bypasses(root=self.audits, tmp_dir=self.tmp)
         self.assertEqual(c["total"], 1)
 
+    # review 🟡 -- the three logs that ALSO carry a #1003 AUTO-exemption line
+    # must count only the GENUINE human bypass, never the auto-exemption.
+    def test_no_design_merge_exempt_excluded_bypass_counted(self):
+        self._w("no-design-skips.log", [
+            "%sT10:00:00+02:00  merge-commit exempt from design gate: MERGE_HEAD (#1003)" % self.day,
+            "%sT10:01:00+02:00  session=s  [no-design: genuine bypass]" % self.day,
+        ])
+        c = audit.count_cli_bypasses(root=self.audits, tmp_dir=self.tmp)
+        self.assertEqual(c["total"], 1)
+
+    def test_no_test_red_order_exempt_excluded_bypass_counted(self):
+        self._w("no-test-skips.log", [
+            "%sT10:00:00+02:00  project=r  sha=abc  docs-only fix commit — exempt "
+            "from RED-order gate (#1003)" % self.day,
+            "%sT10:01:00+02:00  project=r  sha=def  [no-test: genuine]" % self.day,
+        ])
+        c = audit.count_cli_bypasses(root=self.audits, tmp_dir=self.tmp)
+        self.assertEqual(c["total"], 1)
+
+    def test_test_skip_mergein_exclusion_excluded_bypass_counted(self):
+        self._w("test-skip-bypasses.log", [
+            "%sT10:00:00+02:00  project=r  merge-in banned line(s) excluded from scan "
+            "(already on main) (#1003)" % self.day,
+            "%sT10:01:00+02:00  project=r  sha=abc  test-skip-ok genuine" % self.day,
+        ])
+        c = audit.count_cli_bypasses(root=self.audits, tmp_dir=self.tmp)
+        self.assertEqual(c["total"], 1)
+
+    def test_main_exec_arm_excluded_allowed_counted(self):
+        Path(self.tmp, "airuleset-main-exec-bypass-1000.log").write_text(
+            "%sT10:00:00+02:00 main-exec bypass-arm session=s cmd=cargo build\n"
+            "%sT10:01:00+02:00 main-exec bypass session=s tool=Edit marker=main-exec-ok "
+            "(allowed, deferred consume pending post-exec) reason=policy\n"
+            % (self.day, self.day))
+        c = audit.count_cli_bypasses(root=self.audits, tmp_dir=self.tmp)
+        self.assertEqual(c["total"], 1)  # only the (allowed ...) line counts
+
+    def test_tier0_inline_bypass_with_blocked_in_cmd_is_counted(self):
+        # review 🔵 -- a genuine inline-bypass whose cmd text contains the word
+        # "blocked" must NOT be false-skipped (the marker anchors on `  blocked  cmd=`).
+        self._w("tier0-build-bypasses.log", [
+            "%sT10:00:00+02:00  project=r  inline-bypass  cmd=echo blocked && cargo "
+            "build # airuleset:build-ok" % self.day,
+        ])
+        c = audit.count_cli_bypasses(root=self.audits, tmp_dir=self.tmp)
+        self.assertEqual(c["total"], 1)
+
     def tearDown(self):
         import shutil
         shutil.rmtree(self.audits, ignore_errors=True)

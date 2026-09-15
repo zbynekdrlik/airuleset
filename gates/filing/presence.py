@@ -21,11 +21,12 @@ def is_away(session_id):
     PRESENT) when the marker is absent/unreadable or session_id is empty --
     never manufacture an unattended verdict from an unmeasurable state
     (hooks/lib-presence.sh's documented bias)."""
+    # lib-presence.sh: `case "$_away_s" in ''|*[!0-9]*) _away_s=900` -- ANY
+    # non-digit-only value (incl. a negative like "-5") falls back to 900, NOT
+    # to disabled; match that exactly (a bare int() would read "-5" as -5 ->
+    # disabled, diverging from bash, review 🔵).
     raw = os.environ.get("AIRULESET_MAIN_GUARD_AWAY_S", "900")
-    try:
-        away_s = int(raw)
-    except (TypeError, ValueError):
-        away_s = 900
+    away_s = int(raw) if raw.isdigit() else 900
     if away_s <= 0 or not session_id:
         return False
     mark = "/tmp/claude-user-active-%s" % session_id

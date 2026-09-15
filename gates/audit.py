@@ -92,9 +92,17 @@ def append_line(log_name, line):
 # --------------------------------------------------------------------------- #
 CLI_BYPASS_LOGS = (
     ("secret-scan-bypasses.log", ()),
-    ("no-test-skips.log", ()),
-    ("test-skip-bypasses.log", ()),
-    ("no-design-skips.log", ()),
+    # no-test-skips.log ALSO carries the #1003 AUTO-exemption `docs-only fix
+    # commit — exempt from RED-order gate` (gates/pushtest.py) -- an automatic
+    # gate exemption, NOT a human bypass; skip it.
+    ("no-test-skips.log", ("from RED-order gate",)),
+    # test-skip-bypasses.log ALSO carries the #1003 merge-in AUTO-exclusion
+    # `merge-in banned line(s) excluded from scan` (gates/testskips.py); skip it.
+    ("test-skip-bypasses.log", ("merge-in banned line(s) excluded from scan",)),
+    # no-design-skips.log ALSO carries the #1003 AUTO-exemption `merge-commit
+    # exempt from design gate` (gates/commitdesign.py) -- fires on every
+    # dev->main merge with issue refs, NOT a human bypass; skip it.
+    ("no-design-skips.log", ("merge-commit exempt from design gate",)),
     ("history-rewrite-bypasses.log", ()),
     ("destructive-remote-bypasses.log", ()),
     ("manual-drain-bypasses.log", ()),
@@ -104,9 +112,11 @@ CLI_BYPASS_LOGS = (
     ("vault-store-reads.log", ()),
     ("script-check-bypasses.log", ()),
     # tier0 logs `blocked` (a real block) in the SAME file as `inline-bypass`/
-    # `env-bypass`; `  blocked  ` is only ever the tag FIELD (double-space
-    # delimited), never inside a cmd=..., so it precisely excludes the blocks.
-    ("tier0-build-bypasses.log", ("  blocked  ",)),
+    # `env-bypass`. The block tag is always immediately followed by the `cmd=`
+    # field (`  blocked  cmd=...`), so `  blocked  cmd=` precisely excludes the
+    # blocks WITHOUT false-skipping an inline-bypass whose OWN cmd= text happens
+    # to contain the word "blocked" (review 🔵).
+    ("tier0-build-bypasses.log", ("  blocked  cmd=",)),
 )
 
 # The /tmp per-uid main-exec bypass log family (block-main-implementation.sh).
@@ -115,7 +125,11 @@ CLI_BYPASS_LOGS = (
 # bypass. #732 relocates it via AIRULESET_MAIN_EXEC_LOG_DIR, but the default
 # /tmp location is what an audit run reads.
 _MAIN_EXEC_GLOB = "airuleset-main-exec-bypass-*.log"
-_MAIN_EXEC_SKIP = ("bypass refused",)
+# `main-exec bypass refused ...` = a cleared no-reason marker (not honored);
+# `main-exec bypass-arm ...` = the PREPARATORY compound-command arm, not the
+# honored bypass event (the `main-exec bypass ... (allowed ...)` line is). Skip
+# both; count only the `(allowed ...)` lines (review 🟡).
+_MAIN_EXEC_SKIP = ("bypass refused", "bypass-arm")
 _MAIN_EXEC_UID_RE = re.compile(r"airuleset-main-exec-bypass-(\S+?)\.log$")
 
 _BYPASS_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")

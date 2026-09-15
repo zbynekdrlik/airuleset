@@ -162,6 +162,26 @@ class TestPresence(unittest.TestCase):
         self.assertEqual(presence._dismissal_word("this is flaky"), "flaky")
         self.assertIsNone(presence._dismissal_word("a clean description"))
 
+    def test_is_away_garbage_env_falls_back_to_900_like_bash(self):
+        # lib-presence.sh maps any non-digit-only AIRULESET_MAIN_GUARD_AWAY_S
+        # (incl. a negative) to 900 (AWAY-enabled), NOT to disabled. A stale
+        # marker under a "-5" env must still read AWAY (review 🔵 parity).
+        sid = "unit-neg-%d" % os.getpid()
+        mark = Path("/tmp/claude-user-active-%s" % sid)
+        mark.write_text("")
+        old = time.time() - 1000
+        os.utime(mark, (old, old))
+        self.addCleanup(lambda: mark.unlink(missing_ok=True))
+        orig = os.environ.get("AIRULESET_MAIN_GUARD_AWAY_S")
+        os.environ["AIRULESET_MAIN_GUARD_AWAY_S"] = "-5"
+        try:
+            self.assertTrue(presence.is_away(sid))
+        finally:
+            if orig is None:
+                os.environ.pop("AIRULESET_MAIN_GUARD_AWAY_S", None)
+            else:
+                os.environ["AIRULESET_MAIN_GUARD_AWAY_S"] = orig
+
 
 class TestRender(unittest.TestCase):
     def test_render_block_shape(self):
