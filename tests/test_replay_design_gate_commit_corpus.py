@@ -143,21 +143,19 @@ class TestNoOutOfRangeOrMissedReferences(TestCase):
     same decision locked at the unit level."""
 
     def test_no_out_of_range_or_zero_refs_extracted(self):
-        r = subprocess.run(["git", "-C", str(ROOT), "log", "--all", "--format=%s"],
-                           capture_output=True, text=True, timeout=30)
         # a truthful ceiling for "plausible issue number in THIS repo's
         # history" -- generous headroom above the current max (#143 at
         # authoring time) so the lock never needs bumping for ordinary
         # future issue growth, while still catching a genuinely wrong match
         # (a port number, a percentage, an exit code).
+        # #1029: the corpus is `replay._corpus_subjects(ROOT)` -- `--no-merges`
+        # (the SINGLE source of truth shared with the hook-replay corpus), so a
+        # supervisor merge subject citing a foreign hub ticket by bare `#N`
+        # (odoo-erp#6883 written bare, > CEILING) no longer trips this lock: the
+        # design gate exempts merge commits, and this audit now mirrors that.
         CEILING = 5000
-        seen = set()
         bad = []
-        for line in r.stdout.splitlines():
-            line = line.strip()
-            if not line or line in seen:
-                continue
-            seen.add(line)
+        for line in replay._corpus_subjects(ROOT):
             for n in dg.issue_refs(line):
                 if n <= 0 or n > CEILING:
                     bad.append((n, line))
@@ -165,15 +163,9 @@ class TestNoOutOfRangeOrMissedReferences(TestCase):
 
     def test_no_missed_issue_shaped_mentions(self):
         import re
-        r = subprocess.run(["git", "-C", str(ROOT), "log", "--all", "--format=%s"],
-                           capture_output=True, text=True, timeout=30)
-        seen = set()
+        # #1029: same shared `--no-merges` corpus as the sibling test above.
         missed = []
-        for line in r.stdout.splitlines():
-            line = line.strip()
-            if not line or line in seen:
-                continue
-            seen.add(line)
+        for line in replay._corpus_subjects(ROOT):
             if dg.issue_refs(line):
                 continue
             # #122 -- only the SAME `#`-anchored family ISSUE_REF_RE itself
