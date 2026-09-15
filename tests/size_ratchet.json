@@ -647,7 +647,7 @@
     "watchdog/mdreview_cadence.py": 352,
     "watchdog/model_audit_job.py": 76,
     "watchdog/nice_check.py": 104,
-    "watchdog/nudge_gate.py": 474,
+    "watchdog/nudge_gate.py": 479,
     "watchdog/one_glance.py": 425,
     "watchdog/ops_wait_recheck.py": 1331,
     "watchdog/pane_classify.py": 553,

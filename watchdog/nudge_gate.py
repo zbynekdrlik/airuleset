@@ -24,8 +24,8 @@ Two problems this fixes, both reported by the owner:
 
      - PER-KIND FLOOR (#1023, owner 2026-09-14) — a per-pane-per-KIND 60-min
        floor (`NUDGE_MIN_INTERVAL_S`): a SECOND delivery of the SAME kind defers
-       until an hour after the last SEND (a keystroke DELIVERED to the pane —
-       transcript-confirmed OR delivered-unconfirmed; #1023 reopen).
+       until an hour after the last SEND (a DELIVERED keystroke, confirmed OR
+       delivered-unconfirmed; #1023 reopen).
      - CROSS-KIND TOTAL CAP (#913, owner 2026-09-06, verbatim: "nikdy viac ako
        raz za hodinu!!!! a ani iny nudge do promptu!!!") — at most ONE PRIORITY
        nudge per pane per hour in TOTAL, across ALL kinds (`NUDGE_TOTAL_GAP_S`).
@@ -68,10 +68,10 @@ The classification (WORK_DRIVING vs AUDIT) determines section ORDER within the b
 and the TRIM ORDER when the batch exceeds max_chars (audit trimmed first).
 
 `mark_sent` is written on any DELIVERED send — a keystroke that reached the pane,
-transcript-confirmed OR `delivered-unconfirmed` (#1023 reopen: the owner's "raz
-za hodinu" rule is about the nudge REACHING the pane, not the session's reaction).
-A genuine SWALLOW (text backed out, nothing delivered) never advances the clock —
-the #714 MAX_SEND_FAILS retry bound stays each rider's storm limiter, unchanged. `prune` is the standard #519/#531 orphan reaper shape
+confirmed OR `delivered-unconfirmed` (#1023 reopen: "raz za hodinu" is about the
+nudge REACHING the pane, not the session's reaction); a genuine SWALLOW (text
+backed out) never advances the clock (the #714 MAX_SEND_FAILS bound stays each
+rider's storm limiter). `prune` is the standard #519/#531 orphan reaper shape
 (visited_sids PRIMARY, a TTL SECONDARY). Fail-safe: a malformed/corrupt gate entry
 reads as "no prior nudge" → `gate_ok` ALLOWS (the safe direction — never SUPPRESS a
 legit nudge; u-freshness additionally has its own last_nudge backstop in the rider,
@@ -277,9 +277,9 @@ def gate_ok(state, sid, category, now):
     A RECOVERY kind (resume/compact) is ALWAYS allowed — a revival into a
     dead/blocked session is not a prompt interruption, exempt from both bounds.
     A PRIORITY kind is allowed iff BOTH hold:
-      - PER-KIND FLOOR (#1023): the last SEND of THIS kind (a keystroke DELIVERED
-        to the pane — confirmed OR delivered-unconfirmed) is at least
-        `_category_floor(category)` old (or absent);
+      - PER-KIND FLOOR (#1023): the last SEND of THIS kind (a DELIVERED keystroke,
+        confirmed OR delivered-unconfirmed) is at least `_category_floor(category)`
+        old (or absent);
       - CROSS-KIND TOTAL CAP (#913, restored): NO OTHER priority kind was
         delivered to this sid within `_total_gap()` (`_total_cap_block`).
     Used by individual riders; the batch path (`batch_eligible()`) is the sibling
@@ -301,13 +301,8 @@ def floor_hold_reason(state, sid, category, now):
     """The honest journal clause for a nudge the gate HELD — distinguishing the
     two bounds (#1023 + #913 fix-forward), matching `gate_ok`'s check order:
       - `"hold:floor (<kind>, <mm> min since last send)"` — THIS kind's own
-        per-kind floor. "since last SEND" (not "confirmed", #1023 reopen): the
-        mark is stamped whenever a keystroke was DELIVERED to the pane —
-        transcript-CONFIRMED *or* `delivered-unconfirmed` (box cleared, submit
-        not proven) — because the owner's "raz za hodinu" rule is about the
-        nudge REACHING the pane, never about the session's later reaction. A
-        clause that said "since last confirmed" while the mark also fires on an
-        unconfirmed send is a lie (it misled the reopen's own reconstruction);
+        per-kind floor. "last SEND" not "confirmed" (#1023 reopen): the mark
+        fires on any DELIVERED keystroke (confirmed OR delivered-unconfirmed);
       - `"hold:total-cap (<other-kind> delivered <mm> min ago)"` — a DIFFERENT
         priority kind delivered within the total gap.
     Riders render this verbatim (`-> %s`), so the journal token is the gate's, not
