@@ -477,11 +477,17 @@ class H(BaseHTTPRequestHandler):
         # NAME_RE, so it can never contain "VALUE_PLACEHOLDER").
         body = VALUE_PAGE.replace("NAME_PLACEHOLDER", repr(LABEL))
         body = body.replace("VALUE_PLACEHOLDER", _js(text)).encode()
+        # Record the value-free "shown" event BEFORE flushing the body: since
+        # #1011 the endpoint no longer os._exit's after serving, so the POST
+        # returns the instant the body is written — a log consumer reading right
+        # after the POST (the delivery-log test; the watchdog) must not race a
+        # line not yet on disk (the Pass A flake). Latch already flipped + value
+        # page already built, so the value-free event is safe to log first.
+        log_event("shown", LABEL)
         self.send_response(200)
         self._html_headers(len(body), form=False)
         self.end_headers()
         self.wfile.write(body)
-        log_event("shown", LABEL)
 
 
 _servers = []
