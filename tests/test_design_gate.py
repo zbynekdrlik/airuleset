@@ -334,8 +334,8 @@ class TestIssueRefs(unittest.TestCase):
         self.assertEqual(dg.issue_refs("uses C#7 syntax"), [])
 
     def test_repo_prefixed_foreign_ref_is_not_a_ref(self):
-        # #1029 -- `owner-repo#N` (GitHub's own cross-repo short form) is the
-        # SANCTIONED way to name a FOREIGN ticket in a commit/merge subject
+        # #1029 -- `repo#N` (GitHub's cross-repo short form, full `owner/repo#N`)
+        # is the SANCTIONED way to name a FOREIGN ticket in a commit/merge subject
         # WITHOUT this repo's design gate / corpus audit treating it as a
         # LOCAL issue: the repo-name char immediately before `#` is not a
         # boundary in ISSUE_REF_RE, so the ref is deliberately not extracted
