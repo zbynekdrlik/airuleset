@@ -9337,15 +9337,20 @@ def cmd_goal_inventory(args):
     if args.check:
         try:
             with open(path, encoding="utf-8") as fh:
-                d = gr.drift(fh.read())
+                skill_text = fh.read()
         except FileNotFoundError:
             print("goal-inventory: SKILL.md not found at %s" % path)
             sys.exit(1)
+        d = gr.drift(skill_text)
         # #998 — lock every (authority, role, mode) variant too, not just the
         # 3 shipped default lines: renders, under budget, NO turn cap, required
         # clauses present, sequential/infra clauses correct.
         variant_errs = gr.variant_check()
-        if d or variant_errs:
+        # #1035 — lock that the SKILL BODY's Step 3.0 SEQUENTIAL dispatch block
+        # carries the byte-identical registry clause, so an UNARMED session's
+        # body can never disagree with the armed sequential /goal line.
+        seq_errs = gr.skill_sequential_drift(skill_text)
+        if d or variant_errs or seq_errs:
             if d:
                 print("goal-inventory: DRIFT — SKILL.md /goal lines differ from "
                       "the registry (run: airuleset.py goal-inventory --write):")
@@ -9354,6 +9359,10 @@ def cmd_goal_inventory(args):
             if variant_errs:
                 print("goal-inventory: VARIANT check failed (#998):")
                 for e in variant_errs:
+                    print("  %s" % e)
+            if seq_errs:
+                print("goal-inventory: SEQUENTIAL skill-body check failed (#1035):")
+                for e in seq_errs:
                     print("  %s" % e)
             sys.exit(1)
         print("goal-inventory: SKILL.md matches the registry (%d profiles) + "

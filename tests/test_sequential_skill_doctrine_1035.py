@@ -174,10 +174,15 @@ class TestAlwaysOnLaneFillSurfacesModeScoped(TestCase):
     with mode != sequential."""
 
     def test_claude_code_tooling_parallel_lanes_is_mode_scoped(self):
-        w = window(read(TOOLING), "**Parallelism is the working model",
-                   "Dynamic Workflows")
-        self.assertIn("sequential", w.lower())
-        self.assertIn("1035", w)
+        # Line-based (robust to a markdown wrap / a nearby word trim) — the
+        # assertion is unchanged: the Parallelism lane-fill line carries the
+        # mode qualifier.
+        lines = [ln for ln in read(TOOLING).splitlines()
+                 if "Parallelism is the working model" in ln]
+        self.assertTrue(lines, "the Parallelism lane-fill line is missing")
+        line = lines[0]
+        self.assertIn("sequential", line.lower())
+        self.assertIn("1035", line)
 
 
 if __name__ == "__main__":
