@@ -1,9 +1,13 @@
 """#998 item 4 — the footer/quals apply the pane's resolved ROLE + status row.
 
-`airuleset._role_filter_footer` slices the workable/waiting/ops_wait partition
-by the pane's resolved role so the two gk windows show DIFFERENT `I` (review =
-core minus infra/architecture-rework, infra = only those). Fail-safe: role None
-= unchanged; an unresolvable slug degrades to unfiltered, never a crash.
+`airuleset._role_filter_footer` slices the workable (`I`) partition by the
+pane's resolved role so the two gk windows show DIFFERENT `I` (review = core
+minus infra/architecture-rework, infra = only those). #1025 CORRECTION: it
+filters ONLY `I` — the owner-court `U` (waiting) and third-party `W` (ops_wait)
+buckets are parked states global to the box and are NEVER role-filtered (the
+pre-#1025 U/W filtering hid an infra ticket's needs-answer from the review
+window's U — airuleset #1025). Fail-safe: role None = unchanged; an unresolvable
+slug degrades to unfiltered, never a crash.
 """
 import sys
 import unittest.mock as m
@@ -39,23 +43,23 @@ class TestRoleFilterFooter(TestCase):
         self.assertEqual(wa, self.waiting)
         self.assertEqual(o, self.ops)
 
-    def test_review_role_drops_infra_and_arch(self):
+    def test_review_role_drops_infra_and_arch_from_I_only(self):
         with m.patch.object(cli_concurrency, "resolve_role", return_value="review"), \
              m.patch.object(airuleset, "_repo_slug", return_value=ODOO):
             w, wa, o = airuleset._role_filter_footer(
                 self.workable, self.waiting, self.ops, "/root", "/cwd")
-        self.assertEqual(set(w), {"a"})
-        self.assertEqual(set(wa), {"e"})
-        self.assertEqual(set(o), set())
+        self.assertEqual(set(w), {"a"})               # I filtered
+        self.assertEqual(set(wa), {"d", "e"})         # #1025: U unfiltered
+        self.assertEqual(set(o), {"f"})               # #1025: W unfiltered
 
-    def test_infra_role_keeps_only_infra_class(self):
+    def test_infra_role_keeps_only_infra_class_in_I(self):
         with m.patch.object(cli_concurrency, "resolve_role", return_value="infra"), \
              m.patch.object(airuleset, "_repo_slug", return_value=ODOO):
             w, wa, o = airuleset._role_filter_footer(
                 self.workable, self.waiting, self.ops, "/root", "/cwd")
-        self.assertEqual(set(w), {"b", "c"})
-        self.assertEqual(set(wa), {"d"})
-        self.assertEqual(set(o), {"f"})
+        self.assertEqual(set(w), {"b", "c"})          # I filtered
+        self.assertEqual(set(wa), {"d", "e"})         # #1025: U unfiltered (same as review)
+        self.assertEqual(set(o), {"f"})               # #1025: W unfiltered (same as review)
 
     def test_unresolvable_slug_degrades_to_unfiltered(self):
         # _apply_role_filter sys.exit(1) on empty slug — footer must NOT crash.

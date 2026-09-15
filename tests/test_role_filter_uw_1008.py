@@ -1,15 +1,24 @@
-"""#1008 — the CLI `--waiting` (U) and `--ops-wait` (W) outputs must obey the
-window's `--role` partition, exactly like `--count`/`I` already does and like
-the footer already does (`_role_filter_footer`, #998).
+"""#1025 CORRECTION of #1008/#998 — the role filter narrows `I` (workable) ONLY.
 
-Before #1008: `cmd_core_quals`/`cmd_slice_quals` applied `_apply_role_filter`
-to the WORKABLE set only; `--waiting`/`--ops-wait` printed the UNDIVIDED U/W
-set, so a gk review window's `core-quals --ops-wait` showed infra-labelled
-members that belong to the infra window (the ticket's `W 8 of which 7 are
-infra`). The fix applies the ONE existing filter to waiting/ops_wait too.
+Owner court `U` (needs-answer/needs-decision/needs-owner-action) and the
+third-party wait `W` (ops-wait) are PARKED states, global to the box — they are
+not "work" that a review vs infra role does, so the `--role` partition must
+NEVER drop a member from them. #1008 (CLI) and #998 (footer) applied
+`_apply_role_filter` to the WHOLE partition (I/U/W); that made an infra-labelled
+ticket carrying `needs-answer` INVISIBLE in the gk review (FLOW) window's `U`
+(`core-quals --role review --waiting` = empty, footer `U 0`) even though the
+session had ended `❓ ASKED` — the owner had nowhere to click (odoo-erp #6883,
+`stream:core,infra`; airuleset #1025).
 
-The footer already filters all three (locked here so a regression that reverts
-`_role_filter_footer` to filtering only `I` is caught in the SAME suite).
+The fix (statusline-vocabulary.md doctrine "the role exclusion may narrow `I`
+only"): `_apply_role_filter` is applied ONLY to the workable slice; `--waiting`
+(U) and `--ops-wait` (W) keep every member regardless of the `infra` label, for
+BOTH roles. `--count`/`--list`/`I` stay role-filtered exactly as before #1008.
+
+This file REVERSES the assertions the pre-#1025 `test_role_filter_uw_1008.py`
+locked (U/W role-filtered) — that behaviour was the bug. `--role infra`'s
+questions stay visible (a needs-answer infra ticket is in the infra role's U
+too); the owner-court set is simply no longer partitioned away from either role.
 """
 import contextlib
 import io
@@ -28,12 +37,13 @@ ODOO = "zbynekdrlik/odoo-erp"
 # rows: number -> label-name list. infra rows carry the `infra` label; review
 # rows carry none of {infra, architecture-rework} so work_class == independent.
 CORE_ROWS = {
-    100: ["infra", "ops-wait"],        # infra   W
-    101: ["ops-wait"],                 # review  W
-    102: ["infra", "needs-answer"],    # infra   U
-    103: ["needs-decision"],           # review  U
-    104: ["infra"],                    # infra   I
-    105: [],                           # review  I
+    100: ["infra", "ops-wait"],          # infra   W
+    101: ["ops-wait"],                   # review  W
+    102: ["infra", "needs-answer"],      # infra   U (the #6883 shape)
+    103: ["needs-decision"],             # review  U
+    104: ["infra"],                      # infra   I
+    105: [],                             # review  I
+    106: ["infra", "needs-owner-action"],  # infra U (owner action, #601)
 }
 
 
@@ -68,7 +78,18 @@ def _numbers(out):
     return nums
 
 
-def _drive_core(rows=None, **flags):
+def _reasons(out):
+    """{number: reason} from a `--waiting` listing
+    (`number<TAB>createdAt<TAB>action<TAB>reason<TAB>title`)."""
+    d = {}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if parts and parts[0].strip().isdigit() and len(parts) >= 4:
+            d[int(parts[0].strip())] = parts[3].strip()
+    return d
+
+
+def _drive_core(rows=None, capture_reasons=False, **flags):
     rows = CORE_ROWS if rows is None else rows
     args = dict(count=False, list=False, waiting=False, ops_wait=False,
                 audit=False, dep_wait=False, count_dispatchable=False,
@@ -87,32 +108,44 @@ def _drive_core(rows=None, **flags):
          m.patch.object(airuleset, "_no_question_flagged", return_value=set()):
         with contextlib.redirect_stdout(buf):
             airuleset.cmd_core_quals(m.Mock(**args))
-    return _numbers(buf.getvalue())
+    return _reasons(buf.getvalue()) if capture_reasons else _numbers(buf.getvalue())
 
 
-class TestCoreQualsOpsWaitObeysRole(TestCase):
-    def test_ops_wait_review_role_drops_infra_members(self):
-        self.assertEqual(_drive_core(ops_wait=True, role="review"), {101})
+class TestCoreQualsOpsWaitKeepsInfra(TestCase):
+    """W (ops-wait) is a parked third-party state — NOT role-filtered (#1025 d)."""
 
-    def test_ops_wait_infra_role_keeps_only_infra_members(self):
-        self.assertEqual(_drive_core(ops_wait=True, role="infra"), {100})
+    def test_ops_wait_review_role_keeps_infra_members(self):
+        self.assertEqual(_drive_core(ops_wait=True, role="review"), {100, 101})
+
+    def test_ops_wait_infra_role_keeps_all_members(self):
+        self.assertEqual(_drive_core(ops_wait=True, role="infra"), {100, 101})
 
     def test_ops_wait_no_role_keeps_the_whole_W_set(self):
-        # role None = byte-identical to today (no partition).
         self.assertEqual(_drive_core(ops_wait=True, role=None), {100, 101})
 
 
-class TestCoreQualsWaitingObeysRole(TestCase):
-    def test_waiting_review_role_drops_infra_members(self):
-        self.assertEqual(_drive_core(waiting=True, role="review"), {103})
+class TestCoreQualsWaitingKeepsInfra(TestCase):
+    """U (owner court) is global — NOT role-filtered; the #1025 core fix."""
 
-    def test_waiting_infra_role_keeps_only_infra_members(self):
-        self.assertEqual(_drive_core(waiting=True, role="infra"), {102})
+    def test_waiting_review_role_keeps_infra_needs_answer(self):
+        # The exact bug: the infra needs-answer/owner-action tickets MUST show
+        # in the review (FLOW) window's U, alongside the review needs-decision.
+        self.assertEqual(_drive_core(waiting=True, role="review"), {102, 103, 106})
+
+    def test_waiting_infra_role_shows_all_owner_court(self):
+        # infra questions still visible (#1025 c "infra questions visible there
+        # too"); U is not partitioned, so it is the same full set for both roles.
+        self.assertEqual(_drive_core(waiting=True, role="infra"), {102, 103, 106})
+
+    def test_waiting_review_role_tags_the_infra_members_correctly(self):
+        reasons = _drive_core(waiting=True, role="review", capture_reasons=True)
+        self.assertEqual(reasons.get(102), "answer")     # infra + needs-answer
+        self.assertEqual(reasons.get(103), "decision")   # needs-decision
+        self.assertEqual(reasons.get(106), "action")     # infra + needs-owner-action
 
 
 class TestCoreQualsCountStillRoleFiltered(TestCase):
-    """The `I`/workable role filter already worked pre-#1008 — anchor it so
-    the U/W fix does not disturb it."""
+    """`I`/workable role filter is UNCHANGED — only I is narrowed by role."""
 
     def test_count_review_role(self):
         buf = io.StringIO()
@@ -127,6 +160,19 @@ class TestCoreQualsCountStillRoleFiltered(TestCase):
                 airuleset.cmd_core_quals(m.Mock(**args))
         self.assertEqual(buf.getvalue().strip(), "1")   # only 105 (review I)
 
+    def test_count_infra_role(self):
+        buf = io.StringIO()
+        args = dict(count=True, list=False, waiting=False, ops_wait=False,
+                    audit=False, dep_wait=False, count_dispatchable=False,
+                    extra=None, role="infra")
+        with m.patch.object(airuleset, "resolve_authority", return_value="full"), \
+             m.patch.object(airuleset, "_repo_slug", return_value=ODOO), \
+             m.patch.object(airuleset, "_repo_root", return_value="/root"), \
+             m.patch.object(airuleset, "_gh_out", side_effect=_core_gh(CORE_ROWS)):
+            with contextlib.redirect_stdout(buf):
+                airuleset.cmd_core_quals(m.Mock(**args))
+        self.assertEqual(buf.getvalue().strip(), "1")   # only 104 (infra I)
+
     def test_list_review_role_shows_only_review_workable(self):
         self.assertEqual(_drive_core(list=True, role="review"), {105})
 
@@ -135,7 +181,7 @@ class TestCoreQualsCountStillRoleFiltered(TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# slice-quals path — the reduced-authority CLI must role-filter U/W too.
+# slice-quals path — the reduced-authority CLI must ALSO keep U/W unfiltered.
 # --------------------------------------------------------------------------- #
 SLICE_ROWS = {
     200: {"number": 200, "title": "t200", "createdAt": "2026-09-01T00:00:00Z",
@@ -174,30 +220,33 @@ def _drive_slice(**flags):
     return _numbers(buf.getvalue())
 
 
-class TestSliceQualsUWObeyRole(TestCase):
+class TestSliceQualsUWKeepInfra(TestCase):
     def test_slice_ops_wait_review_role(self):
-        self.assertEqual(_drive_slice(ops_wait=True, role="review"), {201})
+        self.assertEqual(_drive_slice(ops_wait=True, role="review"), {200, 201})
 
     def test_slice_ops_wait_infra_role(self):
-        self.assertEqual(_drive_slice(ops_wait=True, role="infra"), {200})
+        self.assertEqual(_drive_slice(ops_wait=True, role="infra"), {200, 201})
 
     def test_slice_waiting_review_role(self):
-        self.assertEqual(_drive_slice(waiting=True, role="review"), {203})
+        self.assertEqual(_drive_slice(waiting=True, role="review"), {202, 203})
 
     def test_slice_waiting_infra_role(self):
-        self.assertEqual(_drive_slice(waiting=True, role="infra"), {202})
+        self.assertEqual(_drive_slice(waiting=True, role="infra"), {202, 203})
 
 
-class TestFooterStillFiltersAllThree(TestCase):
-    """Lock #998: the footer path filters workable AND waiting AND ops_wait by
-    role (a regression that reverts `_role_filter_footer` to only `I` fails)."""
+class TestFooterKeepsUWUnfiltered(TestCase):
+    """#1025: `_role_filter_footer` filters ONLY workable (I). A regression that
+    re-adds the #998/#1008 U/W filter fails here. No-double-count property: both
+    roles yield the SAME U/W (the full owner-court/third-party set), so a box
+    rendering one role shows the true count once, never a partition that hides a
+    member in the other role's window."""
 
     def _rows(self, *specs):
         return {k: {"createdAt": "2026-01-01T00:00:00Z", "title": k,
                     "labels": [{"name": n} for n in labels]}
                 for k, labels in specs}
 
-    def test_review_role_filters_u_and_w_not_just_i(self):
+    def test_review_role_filters_only_i(self):
         workable = self._rows(("a", []), ("b", ["infra"]))
         waiting = self._rows(("c", ["infra"]), ("d", []))
         ops = self._rows(("e", ["infra"]), ("f", []))
@@ -205,9 +254,30 @@ class TestFooterStillFiltersAllThree(TestCase):
              m.patch.object(airuleset, "_repo_slug", return_value=ODOO):
             w, wa, o = airuleset._role_filter_footer(
                 workable, waiting, ops, "/root", "/cwd")
-        self.assertEqual(set(w), {"a"})
-        self.assertEqual(set(wa), {"d"})   # U filtered, not just I
-        self.assertEqual(set(o), {"f"})    # W filtered, not just I
+        self.assertEqual(set(w), {"a"})          # I filtered
+        self.assertEqual(set(wa), {"c", "d"})    # U unfiltered
+        self.assertEqual(set(o), {"e", "f"})     # W unfiltered
+
+    def test_infra_role_filters_only_i(self):
+        workable = self._rows(("a", []), ("b", ["infra"]))
+        waiting = self._rows(("c", ["infra"]), ("d", []))
+        ops = self._rows(("e", ["infra"]), ("f", []))
+        with m.patch("cli_concurrency.resolve_role", return_value="infra"), \
+             m.patch.object(airuleset, "_repo_slug", return_value=ODOO):
+            w, wa, o = airuleset._role_filter_footer(
+                workable, waiting, ops, "/root", "/cwd")
+        self.assertEqual(set(w), {"b"})          # I filtered
+        self.assertEqual(set(wa), {"c", "d"})    # U unfiltered — same as review
+        self.assertEqual(set(o), {"e", "f"})     # W unfiltered — same as review
+
+    def test_role_none_returns_unchanged(self):
+        workable = self._rows(("a", []), ("b", ["infra"]))
+        waiting = self._rows(("c", ["infra"]))
+        ops = self._rows(("e", ["infra"]))
+        with m.patch("cli_concurrency.resolve_role", return_value=None):
+            w, wa, o = airuleset._role_filter_footer(
+                workable, waiting, ops, "/root", "/cwd")
+        self.assertEqual((w, wa, o), (workable, waiting, ops))
 
 
 if __name__ == "__main__":

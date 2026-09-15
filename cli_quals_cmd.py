@@ -810,19 +810,20 @@ def cmd_slice_quals(args):
         # below (#370). #654: own_stream=user keeps THIS box's OWN stream rows in U.
         workable_rows, waiting, ops_wait = airuleset._partition_workable(rows, own_stream=user)
     unhandled = {n: v for n, v in workable_rows.items() if not handed.get(n)}
-    # #1008: role-filter the WHOLE partition (I/U/W), not just the workable
-    # `unhandled` — `--waiting` (U) and `--ops-wait` (W) must obey the window
-    # role exactly like the footer's `_role_filter_footer` already does, so the
-    # gk review window's `slice-quals --ops-wait` stops showing infra members.
-    # ONE filter (`_apply_role_filter`), the `slug` already resolved above
-    # reused ×3 (#998 optimisation). role None = no-op (byte-identical to
-    # before, no slug touch); an empty slug fail-CLOSES on the first call (the
-    # #993 r2b stop-proof contract), never a silent mis-slice.
-    role = getattr(args, "role", None)  # #993 r2b / #1008
+    # #1025 CORRECTION of #1008: role-filter the workable `I` slice ONLY —
+    # NEVER the owner-court `U` (waiting) or third-party `W` (ops_wait). Those
+    # are PARKED states global to the box: `U` is "čo sa ťa Claude pýta / čo
+    # máš schváliť" and `W` is "odoslané, čaká tretia strana" — neither is
+    # review-vs-infra WORK, so the role exclusion (which narrows only who does
+    # the work) must never drop a member from them. #1008 filtered all three,
+    # which hid an infra ticket's needs-answer from the review (FLOW) window's
+    # U — the owner saw `U 0` with a live `❓ ASKED` (odoo-erp#6883). The
+    # doctrine (statusline-vocabulary.md): "the role exclusion may narrow `I`
+    # only". role None = no-op (byte-identical, no slug touch); an empty slug
+    # fail-CLOSES on the first call (the #993 r2b stop-proof contract).
+    role = getattr(args, "role", None)  # #993 r2b / #1025
     if role in ("review", "infra"):
         unhandled = _apply_role_filter(unhandled, root, role, slug=slug)
-        waiting = _apply_role_filter(waiting, root, role, slug=slug)
-        ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)
     if want_ops_wait:
         # #526: tag each W member `acceptance` (client thread sent) vs `ops-wait`
         # (external event/evidence) so they are distinguishable in the listing.
@@ -1270,18 +1271,20 @@ def cmd_core_quals(args):
         # approval, never dispatchable-now I). Pure label partition; the question
         # map is read only on the on-demand `--waiting` display path (#370).
         workable, waiting, ops_wait = airuleset._partition_workable(seen)
-    # #1008: role-filter the WHOLE partition (I/U/W), not just workable — so
-    # `--waiting` (U) and `--ops-wait` (W) obey the window role like the footer's
-    # `_role_filter_footer` already does (the gk review window's `core-quals
-    # --ops-wait` was showing infra members). ONE filter, ONE slug resolved once
-    # and reused ×3 (#998 optimisation). role None = no-op (byte-identical, no
-    # slug touch); an empty slug fail-CLOSES on the first call (#993 r2b).
-    role = getattr(args, "role", None)  # #993 r2b / #1008
+    # #1025 CORRECTION of #1008: role-filter the workable `I` slice ONLY —
+    # NEVER `--waiting` (U) or `--ops-wait` (W). The owner-court U and the
+    # third-party W are PARKED states global to the box, not review-vs-infra
+    # WORK, so the role exclusion (which narrows only who does the work) must
+    # never drop a member from them. #1008 filtered all three, hiding an infra
+    # ticket's needs-answer from the review (FLOW) window's U — the owner saw
+    # `U 0` with a live `❓ ASKED` (odoo-erp#6883). Doctrine
+    # (statusline-vocabulary.md): "the role exclusion may narrow `I` only".
+    # role None = no-op (byte-identical, no slug touch); an empty slug
+    # fail-CLOSES on the first call (#993 r2b).
+    role = getattr(args, "role", None)  # #993 r2b / #1025
     if role in ("review", "infra"):
-        slug = airuleset._repo_slug(cwd=root)   # resolved once, reused ×3
+        slug = airuleset._repo_slug(cwd=root)
         workable = _apply_role_filter(workable, root, role, slug=slug)
-        waiting = _apply_role_filter(waiting, root, role, slug=slug)
-        ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)
     if not seen:
         _refuse_unless_empty_is_trustworthy("core-quals", quals, cwd=root)
     if not seen and not extra:
