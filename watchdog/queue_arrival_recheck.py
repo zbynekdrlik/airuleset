@@ -136,20 +136,28 @@ def _fetch_ttl():
                         QUEUE_ARRIVAL_FETCH_TTL_S), QUEUE_ARRIVAL_FETCH_TTL_MIN_S)
 
 
-def _cached_queue(cwd, fetch, state, now, ttl=None, fail_ttl=None):
-    """A per-cwd TTL cache over the queue-union `fetch` (a `list` of ints or
-    None). Without it the fetch would spawn its 3-label gh union EVERY 60s sweep
-    for EVERY armed pane on the 120s-budgeted sweep's critical path — this bounds
-    it to at most one union per repo per TTL, shared across every armed pane.
+def _cached_queue(cwd, fetch, state, now, cache_key="queue_arrival_cache",
+                  ttl=None, fail_ttl=None):
+    """A per-cwd TTL cache over the queue `fetch` (a `list` — ints for the review
+    union, or rich `{id,kind,num,...}` dict records for the infra queue — or
+    None). Without it the fetch would spawn its gh union EVERY 60s sweep for
+    EVERY armed pane on the 120s-budgeted sweep's critical path — this bounds it
+    to at most one union per repo per TTL, shared across every armed pane.
+
+    `cache_key` (#1029) selects the cache NAMESPACE so the review union
+    (`queue_arrival_cache`, byte-identical default) and the infra queue
+    (`queue_arrival_infra_cache`) never share a snapshot — even were their cwds
+    to coincide, they fetch different things.
 
     REUSES `ops_wait_recheck._cached_member_fetch` (#486 net-LOC-down — that
-    helper is `cache_key`-parameterized precisely so ONE implementation serves
-    every list-shaped fetch consumer), with this module's OWN cache namespace +
-    ttl/fail_ttl. All its guarantees carry: `fetch is None` -> None with no cache
-    write, a fetch exception / non-list return -> None, a malformed `ts` reads as
-    expired (never raises), None cached only for `fail_ttl`."""
+    helper is `cache_key`-parameterized AND element-type-agnostic precisely so
+    ONE implementation serves every list-shaped fetch consumer, ints or dicts),
+    with this module's ttl/fail_ttl. All its guarantees carry: `fetch is None`
+    -> None with no cache write, a fetch exception / non-list return -> None, a
+    malformed `ts` reads as expired (never raises), None cached only for
+    `fail_ttl`."""
     return _ops_wait_recheck._cached_member_fetch(
-        cwd, fetch, state, now, "queue_arrival_cache",
+        cwd, fetch, state, now, cache_key,
         _fetch_ttl() if ttl is None else ttl,
         QUEUE_ARRIVAL_FETCH_FAIL_TTL_S if fail_ttl is None else fail_ttl)
 
@@ -278,6 +286,116 @@ def _nudge_text(arrivals, cur_count):
     return text[:NUDGE_MAX_CHARS - 1].rsplit(" ", 1)[0] + "…"
 
 
+# --- ROLE-AWARE (#1029) ----------------------------------------------------
+# The gk box declares TWO windows (cli_fleet, #998): gk (role=review, parallel,
+# ~/devel/odoo/odoo-erp) and gk-infra (role=infra, sequential,
+# ~/devel/odoo/odoo-erp-infra). The FLOW review session routes infra-caused
+# STOP:/GATEKEEPER-ACTION (INFRA) as comments on odoo-erp #6883 + infra tickets,
+# but nothing woke the INFRA session — the rider was blind to it (the #998
+# sequential skip + hardcoded review union). This rider is now ROLE-AWARE: the
+# review path is byte-identical; the infra path fetches the INFRA queue, uses an
+# infra nudge text, and bypasses the sequential skip (an arrival nudge is
+# AWARENESS, not a refill — the exact thing the owner-present infra session was
+# blind to). ONE keystroke primitive, ONE floor, ZERO new job/kind.
+
+def _role_queue_config(role, queue_fetch, infra_queue_fetch, classify_builder):
+    """Role-dependent `(fetch, cache_key, skip_sequential, classify_builder)`
+    for the rider. review = today's union (byte-identical: queue_fetch,
+    `queue_arrival_cache`, sequential-skip ON, the #993 dep classify); infra =
+    the INFRA queue (infra_queue_fetch, `queue_arrival_infra_cache`,
+    sequential-skip OFF — awareness not refill, and NO dep-wait classify). The
+    infra-unwired short-circuit stays in the caller (it must `return`)."""
+    if role == "infra":
+        return infra_queue_fetch, "queue_arrival_infra_cache", False, None
+    return queue_fetch, "queue_arrival_cache", True, classify_builder
+
+
+def _resolve_role(cwd, resolve_role_fn):
+    """The pane's role for the role-aware branch — "infra" when the injected
+    `resolve_role_fn(cwd)` (cli_concurrency.resolve_role in production) returns
+    "infra", else "review". resolve_role_fn None (unwired / legacy tests) →
+    "review" (the "wired = on" seam convention, so every pre-#1029 caller keeps
+    the byte-identical review path), and any resolver ERROR fails safe to
+    "review" (never a spurious infra branch)."""
+    if resolve_role_fn is None:
+        return "review"
+    try:
+        r = resolve_role_fn(cwd)
+    except Exception:  # noqa: BLE001 — any resolver fault => review (safe)
+        return "review"
+    return "infra" if r == "infra" else "review"
+
+
+def _infra_ids_and_map(cur):
+    """Normalise the infra fetch's rich records into `(ids, id_map)` for the
+    shared set-delta body: `ids` is the list of int identifiers `_queue_decision`
+    diffs (a ticket's number, a tagged comment's id), `id_map` maps each id to
+    its record for the nudge text. Malformed records (non-dict / no int `id`)
+    are dropped (never raises). `cur` None / not-a-list → `(None, {})` so the
+    decider sees the undetermined signal."""
+    if not isinstance(cur, list):
+        return None, {}
+    ids = []
+    id_map = {}
+    for r in cur:
+        if not isinstance(r, dict):
+            continue
+        try:
+            rid = int(r["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        ids.append(rid)
+        id_map[rid] = r
+    return ids, id_map
+
+
+def _fmt_infra_arrivals(records):
+    """Compact, human infra-arrival names for the nudge: tickets as `#N`, tagged
+    STOP:/GATEKEEPER-ACTION (INFRA) comments as the ticket they sit on. Bounded
+    by MAX_NAMED_ARRIVALS so a big wave never blows the char cap."""
+    shown = records[:MAX_NAMED_ARRIVALS]
+    tickets, comment_nums = [], []
+    for r in shown:
+        if not isinstance(r, dict):
+            continue
+        num = r.get("num", r.get("id"))
+        if r.get("kind") == "comment":
+            if num not in comment_nums:
+                comment_nums.append(num)
+        else:
+            tickets.append(num)
+    parts = []
+    if tickets:
+        parts.append("infra tickety " + " ".join("#%s" % n for n in tickets))
+    if comment_nums:
+        parts.append("nové STOP:/GATEKEEPER-ACTION (INFRA) komentáre na "
+                     + " ".join("#%s" % n for n in comment_nums))
+    extra = len(records) - len(shown)
+    txt = "; ".join(parts) if parts else "nové infra položky"
+    if extra > 0:
+        txt += " (+%d ďalších)" % extra
+    return txt
+
+
+def _nudge_text_infra(records, cur_count):
+    """The INFRA-role queue-arrival keystroke. Carries the shared `stuck-check: `
+    prefix (own-payload recognition + machine-prompt exclusion — see the module
+    docstring; NO new prefix registered). Names the NEW infra arrivals and points
+    at the infra queue (`core-quals --role infra` + the #6883 hub) without
+    hardcoding one pipeline. Hard-capped at NUDGE_MAX_CHARS (truncate on a word
+    boundary for a pathological wave)."""
+    text = (
+        "stuck-check: gk-infra queue arrival — do infra fronty pribudlo: %s "
+        "(spolu %d otvorených infra položiek), kým bola INFRA session slepá na "
+        "hand-offy z FLOW session. Re-deriv svoj infra backlog "
+        "(`core-quals --role infra`) a spracuj STOP:/GATEKEEPER-ACTION (INFRA) "
+        "na #6883 a na infra tiketoch. Ak už na nich robíš, potvrď."
+        % (_fmt_infra_arrivals(records), cur_count))
+    if len(text) <= NUDGE_MAX_CHARS:
+        return text
+    return text[:NUDGE_MAX_CHARS - 1].rsplit(" ", 1)[0] + "…"
+
+
 # --- BOUNDED RETRY ---------------------------------------------------------
 
 def _book_unverified_send(rec, new_rec, cur_sorted, loc, arrivals_n):
@@ -331,7 +449,8 @@ def _prune_queue_arrival_orphans(qrecs, visited_sids, now,
 def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                                dry_run, handled, queue_fetch, state,
                                sleep_fn=None, captured=None,
-                               batch_collect=None, classify_builder=None):
+                               batch_collect=None, classify_builder=None,
+                               infra_queue_fetch=None, resolve_role_fn=None):
     """Audit ONE armed candidate pane's gk-queue snapshot and, on a NEW arrival,
     deliver ONE verified nudge into that session. Called from
     `goal.goal_lane_sweep`'s existing armed-pane loop with the already-resolved
@@ -382,28 +501,54 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
         logs.append("queue-arrival %s -> skip:not-full-authority (%s)"
                     % (loc, authority))
         return logs
-    # #998 — a SEQUENTIAL-mode pane never gets a refill/queue-arrival nudge:
-    # ONE unit at a time, no refill (subagents/consults are NOT gated). Cheap,
-    # before any fetch. Fail-safe: a resolver error is treated as
-    # non-sequential (today's behaviour), and LOGGED (never a silent swallow).
-    try:
-        import cli_concurrency
-        _seq_mode = cli_concurrency.resolve_mode(cwd)
-    except Exception as e:  # noqa: BLE001
-        _seq_mode = None
-        logs.append("queue-arrival %s -> concurrency-resolve-error (%r) — "
-                    "treating as non-sequential" % (loc, e))
-    if _seq_mode == "sequential":
-        logs.append("queue-arrival %s -> skip:sequential-mode" % loc)
+    # #1029 — resolve the pane ROLE. review (default / unwired) = today's union,
+    # byte-identical; infra = the INFRA queue (open infra tickets ∪ tagged
+    # STOP:/GATEKEEPER-ACTION (INFRA) comments), an infra nudge text, the #998
+    # sequential skip BYPASSED, and no dep-wait classify (an arrival nudge is
+    # AWARENESS, not a refill/dispatch).
+    role = _resolve_role(cwd, resolve_role_fn)
+    _fetch, _cache_key, _skip_sequential, _classify_builder = _role_queue_config(
+        role, queue_fetch, infra_queue_fetch, classify_builder)
+    if role == "infra" and _fetch is None:
+        logs.append("queue-arrival %s -> skip:infra-unwired (role=infra but "
+                    "no infra_queue_fetch wired)" % loc)
         return logs
-    # CACHED per-repo: the union fires at most once per repo per TTL. A
-    # cache/fetch error reads as None -> skip.
+
+    # #998 — a SEQUENTIAL-mode REVIEW pane never gets a refill/queue-arrival
+    # nudge: ONE unit at a time, no refill (subagents/consults are NOT gated).
+    # The INFRA role is EXEMPT (#1029): the gk-infra window is ALWAYS sequential
+    # and its arrival nudge is an AWARENESS wake, not a refill. Cheap, before any
+    # fetch. Fail-safe: a resolver error is treated as non-sequential (today's
+    # behaviour), and LOGGED (never a silent swallow).
+    if _skip_sequential:
+        try:
+            import cli_concurrency
+            _seq_mode = cli_concurrency.resolve_mode(cwd)
+        except Exception as e:  # noqa: BLE001
+            _seq_mode = None
+            logs.append("queue-arrival %s -> concurrency-resolve-error (%r) — "
+                        "treating as non-sequential" % (loc, e))
+        if _seq_mode == "sequential":
+            logs.append("queue-arrival %s -> skip:sequential-mode" % loc)
+            return logs
+    # CACHED per-repo, role-NAMESPACED: the fetch fires at most once per repo per
+    # TTL. A cache/fetch error reads as None -> skip.
     try:
-        cur = _cached_queue(cwd, queue_fetch, state, now)
+        cur = _cached_queue(cwd, _fetch, state, now, cache_key=_cache_key)
     except Exception as e:
         logs.append("queue-arrival %s -> skip:fetch-error (%r) — undetermined, "
                     "no nudge" % (loc, e))
         return logs
+
+    # #1029 — the decider + baseline diff INT ids. The review union already IS a
+    # list of ints (`id_map` None); the infra fetch is rich records that
+    # normalise to `(ids, id_map)` — `id_map` maps an arrival id back to its
+    # record for the infra nudge text. `cur_ids` is what the whole shared body
+    # below counts / advances (never `cur`).
+    if role == "infra":
+        cur_ids, id_map = _infra_ids_and_map(cur)
+    else:
+        cur_ids, id_map = cur, None
 
     rec = qrecs.get(sid)
     if not isinstance(rec, dict):
@@ -411,9 +556,9 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # #993 item 4: build the DEPENDENCY classify_fn for this cwd (per-issue
     # Depends-on read). `classify_builder(cwd)` is the injected seam (network
     # kept out of run_once unit tests, exactly like `queue_fetch`); None
-    # (unwired / legacy tests) = every arrival dispatchable.
-    classify_fn = classify_builder(cwd) if classify_builder is not None else None
-    action, new_rec, reason, arrivals = _queue_decision(rec, cur, now,
+    # (unwired / infra role / legacy tests) = every arrival dispatchable.
+    classify_fn = _classify_builder(cwd) if _classify_builder is not None else None
+    action, new_rec, reason, arrivals = _queue_decision(rec, cur_ids, now,
                                                         classify_fn=classify_fn)
 
     if action == "skip":
@@ -431,16 +576,16 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
             # keystroke this sweep.
             logs.append("queue-arrival %s -> hold:%s (%d new, all non-dispatchable; "
                         "keep waiting, %d in union)"
-                        % (loc, reason, len(arrivals), len(cur)))
+                        % (loc, reason, len(arrivals), len(cur_ids)))
         else:
             logs.append("queue-arrival %s -> %s (%s — %d in union, baseline %s)"
-                        % (loc, action, reason, len(cur),
+                        % (loc, action, reason, len(cur_ids),
                            "seeded" if action == "seed" else "advanced"))
         return logs
 
     # action == "nudge": persist the seeded/refreshed rec (base OLD, first_seen,
     # lts age-anchor). base is advanced to cur only on a CONFIRMED send below.
-    cur_sorted = sorted({int(x) for x in cur})
+    cur_sorted = sorted({int(x) for x in cur_ids})
     if not dry_run:
         new_rec["lts"] = now
         # Carry the consecutive-swallow counter forward (#733 review 🔵): this
@@ -500,7 +645,13 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                     % (loc, len(arrivals), _fmt_arrivals(arrivals)))
         return logs
 
-    text = _nudge_text(arrivals, len(cur))
+    # #1029 — role-aware nudge text: the review union names issue numbers; the
+    # infra queue names its rich records (tickets / tagged-comment tickets).
+    if role == "infra":
+        text = _nudge_text_infra([id_map[a] for a in arrivals if a in id_map],
+                                 len(cur_ids))
+    else:
+        text = _nudge_text(arrivals, len(cur_ids))
     # #923 BATCH COLLECT: contribute text, defer delivery+state to caller.
     if batch_collect is not None:
         def _on_deliver(_nr=new_rec, _q=qrecs, _s=sid, _n=now, _h=handled,

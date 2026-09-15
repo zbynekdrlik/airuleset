@@ -302,7 +302,7 @@ class TestInfraFetchAndWiring(unittest.TestCase):
                         return_value="zbynekdrlik/odoo-erp"), \
                 m.patch("airuleset.resolve_authority", return_value="full"), \
                 m.patch("subprocess.run", side_effect=fake_issue_list), \
-                m.patch("airuleset._infra_tagged_comments",
+                m.patch("airuleset._infra_ticket_comments",
                         side_effect=fake_comments):
             out = airuleset._watchdog_infra_queue_fetch("/r")
         ids = sorted(r["id"] for r in out)

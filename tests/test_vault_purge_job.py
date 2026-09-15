@@ -323,12 +323,18 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # so the closing `):` moved off that line onto the new one; the
                # anchor grew a last line, the mutation target vault_purge=None
                # is untouched.
+               # #1029 re-pin: infra_queue_fetch=None, resolve_role_fn=None
+               # (the role-aware gk-infra queue-arrival seams) were appended on
+               # a NEW trailing line after deploy_state_fetch=None (before the
+               # health-probe line), so the closing `):` stays on the
+               # health_probes line; vault_purge=None is untouched.
                "             u_fetch=None, reconcile_fetch=None, "
                "disk_guard_enabled=False,\n"
                "             nice_check_enabled=False,\n"
                "             mdreview_cadence_enabled=False,\n"
                "             priority_policy_enabled=False,\n"
                "             deploy_state_fetch=None,\n"
+               "             infra_queue_fetch=None, resolve_role_fn=None,\n"
                "             health_probes=None, health_probe_fetch=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->

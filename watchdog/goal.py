@@ -5344,7 +5344,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     release_state_fetch=None, queue_fetch=None,
                     queue_classify=None, dispatchable_fetch=None,
                     u_fetch=None, reconcile_fetch=None,
-                    deploy_state_fetch=None):
+                    deploy_state_fetch=None, infra_queue_fetch=None,
+                    resolve_role_fn=None):
     """The lane-occupancy driver -- the second half of job 20's new body.
     For every candidate pane whose goal is genuinely ARMED right now, runs
     `goal_lane_occupancy_nudge`. Owns its own small per-sid state namespace
@@ -5377,7 +5378,11 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     # #616 release-gap, #733 gk queue-arrival.
     wrecs = state.setdefault("ops_wait_recheck", {}) if ops_wait_fetch else {}
     rrecs = state.setdefault("release_gap", {}) if release_state_fetch else {}
-    qrecs = state.setdefault("queue_arrival", {}) if queue_fetch else {}
+    # #1029 — the queue-arrival rider serves BOTH the review union (queue_fetch)
+    # and the infra queue (infra_queue_fetch), so its per-sid state exists when
+    # EITHER is wired.
+    qrecs = state.setdefault("queue_arrival", {}) \
+        if (queue_fetch or infra_queue_fetch) else {}
     # #797 -- U-freshness reconcile: a LOCAL tickets-status cache read (ZERO gh),
     # so unlike the gh-subprocess riders it is gated only on its seam being wired
     # (`u_fetch`, default the statusbar-backed reader in run_once).
@@ -5478,6 +5483,28 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 # rides until a definite clear or a mode-5 death while armed).
                 if _roster.drop(roster_reg, cwd):
                     roster_dirty = True
+            # #1029 GATE 1 -- an INFRA-role pane is owner-present with NO /goal
+            # BY DESIGN (cli_fleet role=infra, sequential), so the armed gate
+            # above would forever skip it and the infra session stays blind to
+            # FLOW hand-offs (the owner's „gk-infra o tom nevie"). Run ONLY the
+            # queue-arrival rider (its infra path) for a non-armed INFRA-role
+            # pane; every other armed-only rider stays gated (a non-armed
+            # review/other pane still just `continue`s, byte-identical). The
+            # role gate here keeps the review path untouched — a non-armed
+            # review pane must NOT get a review nudge (that is for parked-armed
+            # sessions only).
+            if infra_queue_fetch is not None and resolve_role_fn is not None:
+                try:
+                    _pane_role = resolve_role_fn(cwd)
+                except Exception:  # noqa: BLE001 — resolver fault => skip (safe)
+                    _pane_role = None
+                if _pane_role == "infra":
+                    logs += _queue_arrival.goal_queue_arrival_recheck(
+                        now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run,
+                        handled, queue_fetch=queue_fetch,
+                        infra_queue_fetch=infra_queue_fetch,
+                        resolve_role_fn=resolve_role_fn, state=state,
+                        sleep_fn=sleep_fn, captured=captured)
             continue
         # #804 -- this stream is CONFIRMED armed this sweep (the STRUCTURED
         # one-glance verdict, not a render guess): refresh its durable roster
@@ -5560,12 +5587,15 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 sleep_fn=sleep_fn, captured=captured,
                 batch_collect=(_batch_collect if _batch_collect is not None
                                and "release-gap" in _eligible else None))
-        # #733 -- gk queue-ARRIVAL watcher for this armed pane.
-        if queue_fetch is not None:
+        # #733 -- gk queue-ARRIVAL watcher for this armed pane (#1029: also an
+        # armed INFRA pane, when only infra_queue_fetch is wired).
+        if queue_fetch is not None or infra_queue_fetch is not None:
             logs += _queue_arrival.goal_queue_arrival_recheck(
                 now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
                 queue_fetch=queue_fetch, state=state, sleep_fn=sleep_fn,
                 captured=captured, classify_builder=queue_classify,   # #993 item 4
+                infra_queue_fetch=infra_queue_fetch,   # #1029 role-aware
+                resolve_role_fn=resolve_role_fn,       # #1029 role-aware
                 batch_collect=(_batch_collect if _batch_collect is not None
                                and "queue-arrival" in _eligible else None))
         # #797 -- U-freshness reconcile for this armed pane.
