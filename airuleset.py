@@ -6038,6 +6038,13 @@ _INFRA_COMMENT_WINDOW_DAYS = 7
 # cap the tracked-ticket comment fan-out so a huge infra backlog can't blow the
 # 120s sweep budget (each tracked ticket = one bounded gh call per TTL).
 _INFRA_COMMENT_TRACK_CAP = 25
+# the COUNT cap alone bounds the number of gh calls, not their TIME — a run of
+# slow-but-succeeding calls could still approach cap*per-call-timeout and blow
+# the 120s sweep budget (review 1 F2). This aggregate wall-clock budget aborts
+# the comment layer to None (UNMEASURABLE -> safe skip, baseline unadvanced) the
+# moment it is exceeded, bounding the worst case to ~budget + one per-call
+# timeout. 60s + the 20s per-call timeout keeps the whole fetch under 120s.
+_INFRA_COMMENT_BUDGET_S = 60
 
 
 def _infra_ticket_comments(number, root, since_iso=None):
@@ -6084,7 +6091,7 @@ def _infra_ticket_comments(number, root, since_iso=None):
     return rows
 
 
-def _watchdog_infra_queue_fetch(cwd):
+def _watchdog_infra_queue_fetch(cwd, clock=None):
     """#1029 — the INFRA queue for an INFRA-role pane (gk-infra), as rich records
     the role-aware queue-arrival rider diffs by int id and renders in its infra
     nudge: `{id, kind, num, permalink, tag}`. The queue is the union of
@@ -6101,7 +6108,10 @@ def _watchdog_infra_queue_fetch(cwd):
     silently advance the baseline past a real arrival). Wired HERE like every
     other network seam so run_once's unit tests stay network-free."""
     import subprocess
+    import time
     from datetime import datetime, timedelta, timezone
+    if clock is None:
+        clock = time.monotonic   # injectable seam so the budget is unit-testable
     try:
         root = _repo_root(cwd=cwd) or cwd
         authority = resolve_authority(cwd=root)
@@ -6115,7 +6125,7 @@ def _watchdog_infra_queue_fetch(cwd):
         r = subprocess.run(
             ["gh", "issue", "list", "--state", "open", "--label", "infra",
              "-L", "200", "--json", "number"],
-            cwd=cwd, capture_output=True, text=True, timeout=15)
+            cwd=root, capture_output=True, text=True, timeout=15)
     except Exception:
         return None
     if r.returncode != 0:
@@ -6142,7 +6152,14 @@ def _watchdog_infra_queue_fetch(cwd):
     hub = INFRA_QUEUE_HUB.get(slug)
     ordered = ([hub] if hub is not None else []) + [
         n for n in sorted(ticket_nums, reverse=True) if n != hub]
+    budget_deadline = clock() + _INFRA_COMMENT_BUDGET_S
     for n in ordered[:_INFRA_COMMENT_TRACK_CAP]:
+        if clock() > budget_deadline:
+            # OVER the aggregate wall-clock budget (review 1 F2) — the comment
+            # layer is now UNMEASURABLE within the sweep budget, so fail safe to
+            # skip the WHOLE queue (never a partial read that advances the
+            # baseline past a hidden STOP:, #181).
+            return None
         comments = _infra_ticket_comments(n, root, since_iso)
         if comments is None:
             # UNMEASURABLE comment layer (a gh failure) — fail safe to skip the

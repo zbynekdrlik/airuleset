@@ -1381,13 +1381,16 @@ def cmd_core_quals(args):
         _print_audit_rows(workable, own_stream=None, dep_wait_map=_dep_map)
         return
     # #1029 item 2 — the INFRA-role human display leads with a NEW-since banner
-    # (additive, ABOVE the rows, never changes the count). Default (list) path
-    # only — the machine paths (--count/--waiting/--ops-wait/--audit/…) returned
-    # above, so their consumers + the durable marker are never touched by them.
+    # (additive, ABOVE the rows, never changes the count). The machine paths
+    # (--count/--waiting/--ops-wait/--audit/…) returned above, so their consumers
+    # + the durable marker are never touched. The bare (no-flag) and --list paths
+    # DO reach here — so the banner goes to STDERR (review 1 F1): it is a human/
+    # diagnostic line, still shown in a terminal, and keeping it OFF stdout means
+    # a future machine parser of `--role infra --list` TSV is never corrupted.
     if role == "infra":
         _banner, _new, _cur = _infra_new_since_banner(root)
         if _banner:
-            print(_banner)
+            print(_banner, file=sys.stderr)
     # own_stream=None: a full-authority box owns no stream, so EVERY
     # stream-labelled row in its obligation set is action-only. #993 item 7:
     # dep-aware action column (--list).

@@ -380,16 +380,18 @@ def _fmt_infra_arrivals(records):
 def _nudge_text_infra(records, cur_count):
     """The INFRA-role queue-arrival keystroke. Carries the shared `stuck-check: `
     prefix (own-payload recognition + machine-prompt exclusion — see the module
-    docstring; NO new prefix registered). Names the NEW infra arrivals and points
-    at the infra queue (`core-quals --role infra` + the #6883 hub) without
-    hardcoding one pipeline. Hard-capped at NUDGE_MAX_CHARS (truncate on a word
-    boundary for a pathological wave)."""
+    docstring; NO new prefix registered). Names the NEW infra arrivals
+    dynamically (`_fmt_infra_arrivals` — the SPECIFIC ticket/hub each arrival sits
+    on) and points at the generic infra queue (`core-quals --role infra`). Box-
+    agnostic (review 1 F3): NO hub number or window name is baked in, so a second
+    box that declares a `role=infra` window inherits a correct nudge. Hard-capped
+    at NUDGE_MAX_CHARS (truncate on a word boundary for a pathological wave)."""
     text = (
-        "stuck-check: gk-infra queue arrival — do infra fronty pribudlo: %s "
+        "stuck-check: infra queue arrival — do infra fronty pribudlo: %s "
         "(spolu %d otvorených infra položiek), kým bola INFRA session slepá na "
         "hand-offy z FLOW session. Re-deriv svoj infra backlog "
         "(`core-quals --role infra`) a spracuj STOP:/GATEKEEPER-ACTION (INFRA) "
-        "na #6883 a na infra tiketoch. Ak už na nich robíš, potvrď."
+        "na infra hube a na infra tiketoch. Ak už na nich robíš, potvrď."
         % (_fmt_infra_arrivals(records), cur_count))
     if len(text) <= NUDGE_MAX_CHARS:
         return text
