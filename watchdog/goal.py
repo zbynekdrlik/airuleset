@@ -1897,7 +1897,19 @@ def _declared_virgin_scan(now, run=None, dry_run=False, projects_dir=None,
     rf = rearm_fn or _default_rearm_fn
     try:
         import cli_concurrency
+        import cli_fleet
     except Exception:  # noqa: BLE001 -- resolver unimportable at the watchdog path
+        return logs
+    # #1038-review — resolve THIS box's declared windows ONCE (a cheap in-memory
+    # read over REMOTE_HOSTS) and EARLY-RETURN when there are none: every
+    # non-declared box (montalu/miva/...) then pays ZERO per-pane cost, and the
+    # per-pane gate below REUSES this list (the "single source" intent, never a
+    # re-derive per pane).
+    try:
+        box_wins = cli_fleet.box_windows(cli_concurrency._current_user())
+    except Exception:  # noqa: BLE001 -- unresolvable user/table -> treat as no declared windows
+        box_wins = []
+    if not box_wins:
         return logs
     # per-sid virgin rate-floor state (min-gap + anti-keystorm strop). Reap dead
     # entries by age: a sid that armed stops being scanned (armed/marker skip
@@ -1918,66 +1930,80 @@ def _declared_virgin_scan(now, run=None, dry_run=False, projects_dir=None,
     for pid, cwd, _cmd in panes:
         if not cwd:
             continue
-        # DECLARED-window gate: source=="role" == the pane cwd matched a
-        # box_windows entry (containment). A resolver failure -> not declared
-        # (fail-safe: never virgin-arm a pane we cannot classify).
+        # #1038-review — per-pane BODY guard. This scan runs FIRST in goal_sweep,
+        # so an unexpected error in ANY per-pane primitive must not abort the
+        # remaining panes NOR the per-request DELIVERY loop that follows: one bad
+        # pane is skipped + logged, never propagated (the goal_dark_watch per-pane
+        # discipline).
         try:
-            mode, role, source = cli_concurrency.resolve_concurrency(cwd)
-        except Exception:  # noqa: BLE001
-            continue
-        if source != "role":
-            continue
-        tinfo = watchdog.find_active_transcript(projects_dir, cwd)
-        if not tinfo:
-            continue
-        tpath, _tmtime = tinfo
-        sid = tpath.stem
-        if sid in reqs:
-            continue                          # a request is already pending -> the per-request loop owns it
-        loc = watchdog._pane_location(pid, run) or cwd
-        if watchdog.pane_in_mode(pid, run):
-            continue                          # copy-mode -> unreadable, skip silently
-        captured = watchdog.capture_pane(pid, run, lines=40)
-        armed = watchdog.pane_goal_armed(captured)
-        if armed is not False:
-            continue                          # True = armed, None = undeterminable -> never virgin-arm on doubt
-        # #170-safe VIRGIN proof: NO `Goal set:`/`cleared` marker anywhere in the
-        # transcript tail (reverse-scan). A session armed once (dark-rearm's job)
-        # OR user-cleared (never re-arm, #170) carries a marker -> NOT virgin.
-        try:
+            # DECLARED-window gate: source=="role" == the pane cwd matched a
+            # box_windows entry (containment) — reuse the box's windows resolved
+            # once above, never a per-pane re-derive.
+            mode, role, source = cli_concurrency.resolve_concurrency(
+                cwd, windows=box_wins)
+            if source != "role":
+                continue
+            tinfo = watchdog.find_active_transcript(projects_dir, cwd)
+            if not tinfo:
+                continue
+            tpath, _tmtime = tinfo
+            sid = tpath.stem
+            if sid in reqs:
+                continue                      # a request is already pending -> the per-request loop owns it
+            loc = watchdog._pane_location(pid, run) or cwd
+            if watchdog.pane_in_mode(pid, run):
+                continue                      # copy-mode -> unreadable, skip silently
+            captured = watchdog.capture_pane(pid, run, lines=40)
+            armed = watchdog.pane_goal_armed(captured)
+            if armed is not False:
+                continue                      # True = armed, None = undeterminable -> never virgin-arm on doubt
+            # #170-safe VIRGIN proof: PROVABLY never-armed only when
+            # `seed_goal_marker` read the WHOLE transcript (status "none-bof") and
+            # found NO marker. A marker present (armed-then-dark = dark-rearm's
+            # job, OR user-cleared = never re-arm, #170) is NOT virgin; and
+            # "unknown-past-cap" (a marker MAY sit deeper than the 32 MB seed cap)
+            # is UNDETERMINABLE, so it is skipped exactly like armed=None -- never
+            # virgin-arm on doubt (#1038-review: ignoring the seed status re-armed
+            # a user-cleared window whose clear had scrolled past the seed cap).
             _soff, mark, _sst = watchdog.seed_goal_marker(tpath)
-        except Exception:  # noqa: BLE001 -- unreadable transcript -> refuse, never a blind arm
-            continue
-        if mark is not None:
-            continue
-        # per-sid rate floor (min-gap + strop): bounds the cap-drop re-record
-        # livelock; the COMMON case never reaches it (armed/marker skip above).
-        ok, pruned, reason = _recovery_rearm_ok(
-            vstate.get(sid), now, GOAL_VIRGIN_REARM_MIN_GAP_S,
-            GOAL_VIRGIN_REARM_MAX_PER_DAY)
-        if not ok:
-            logs.append("HOLD (virgin-arm) %s sid=%s -> hold:rate-%s"
-                        % (loc, sid, reason))
-            continue
-        text, authority = rf(cwd)
-        if not text:
-            logs.append("SKIP (virgin-arm) %s sid=%s -> skip:no-template"
-                        % (loc, sid))
-            continue
-        variant = cli_concurrency.goal_variant_label(mode, role)
-        if dry_run:
-            logs.append("DRY-RUN virgin-arm %s sid=%s would record declared-virgin %s"
+            if mark is not None:
+                continue                      # a real marker -> armed-then-dark or user-cleared, not virgin
+            if _sst != "none-bof":
+                logs.append("SKIP (virgin-arm) %s sid=%s -> skip:marker-%s"
+                            % (loc, sid, _sst))
+                continue
+            # per-sid rate floor (min-gap + strop): bounds the cap-drop re-record
+            # livelock; the COMMON case never reaches it (armed/marker skip above).
+            ok, pruned, reason = _recovery_rearm_ok(
+                vstate.get(sid), now, GOAL_VIRGIN_REARM_MIN_GAP_S,
+                GOAL_VIRGIN_REARM_MAX_PER_DAY)
+            if not ok:
+                logs.append("HOLD (virgin-arm) %s sid=%s -> hold:rate-%s"
+                            % (loc, sid, reason))
+                continue
+            text, authority = rf(cwd)
+            if not text:
+                logs.append("SKIP (virgin-arm) %s sid=%s -> skip:no-template"
+                            % (loc, sid))
+                continue
+            variant = cli_concurrency.goal_variant_label(mode, role)
+            if dry_run:
+                logs.append("DRY-RUN virgin-arm %s sid=%s would record declared-virgin %s"
+                            % (loc, sid, variant))
+                continue
+            record_goal_request(sid, cwd, text, authority, now=now,
+                                path=requests_path,
+                                origin=_GOAL_DECLARED_VIRGIN_ORIGIN)
+            vstate[sid] = pruned + [now]
+            # #1038 item (2): the variant is NAMED here (journal) + in `status` --
+            # NOT typed into the pane (a 2nd line = a spurious conversation message)
+            # and NOT baked into render_goal_line (would break goal-inventory --check).
+            logs.append("RECORD (virgin-arm) %s sid=%s -> declared-virgin armed: %s"
                         % (loc, sid, variant))
+        except Exception as e:  # noqa: BLE001 -- one bad pane never aborts the scan / the delivery loop
+            logs.append("SKIP (virgin-arm) %s -> skip:pane-error (%r)"
+                        % (watchdog.project_label(cwd), e))
             continue
-        record_goal_request(sid, cwd, text, authority, now=now,
-                            path=requests_path,
-                            origin=_GOAL_DECLARED_VIRGIN_ORIGIN)
-        vstate[sid] = pruned + [now]
-        # #1038 item (2): the variant is NAMED here (journal) + in `status` --
-        # NOT typed into the pane (a 2nd line = a spurious conversation message)
-        # and NOT baked into render_goal_line (would break goal-inventory --check).
-        logs.append("RECORD (virgin-arm) %s sid=%s -> declared-virgin armed: %s"
-                    % (loc, sid, variant))
     return logs
 
 

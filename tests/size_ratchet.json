@@ -638,7 +638,7 @@
     "watchdog/disk_guard_runner.py": 178,
     "watchdog/disk_guard_shared_stream.py": 218,
     "watchdog/disk_guard_worktrees.py": 296,
-    "watchdog/goal.py": 5936,
+    "watchdog/goal.py": 5962,
     "watchdog/goal_scan.py": 672,
     "watchdog/handoff_alarm.py": 235,
     "watchdog/healthz_probe.py": 209,

@@ -41,6 +41,7 @@ from tests._goal_arm_helpers import (  # noqa: E402
     GOAL_IDLE_CAP,
     DeliverGoalFakeTmux,
     _write_marker_transcript,
+    _write_goal_marker,
     _isolate_goal_state,
 )
 
@@ -128,6 +129,49 @@ class TestDeclaredVirginArm1038(unittest.TestCase):
                         "expected a recent-human hold line; logs=%r" % (logs,))
         # the request stays PENDING for a later idle sweep (never dropped).
         self.assertIn(sid, goal.load_goal_requests(reqp))
+
+    def test_d_user_cleared_declared_window_is_never_re_armed(self):
+        # #170 — a declared window the owner explicitly `/goal clear`ed carries a
+        # `Goal cleared:` marker; the virgin scan must NOT re-arm it.
+        proj = self._proj()
+        sid = "sess-cleared"
+        _write_marker_transcript(proj, GK_REVIEW_CWD, sid)
+        _write_goal_marker(proj, GK_REVIEW_CWD, sid, "Goal cleared: (user)")
+        reqp = self._reqp()
+        tmux = DeliverGoalFakeTmux([("%9", "claude", GK_REVIEW_CWD, "111")],
+                                   GOAL_IDLE_CAP, model_type=True)
+        with m.patch.object(cli_fleet, "box_windows",
+                            return_value=_declared_windows(GK_REVIEW_CWD)), \
+             m.patch.object(goal, "_default_rearm_fn", side_effect=_short_rearm):
+            goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                            requests_path=reqp, state={}, sleep_fn=lambda s: None)
+        self.assertEqual(_typed_goal(tmux), [],
+                         "a user-cleared declared window must never be re-armed (#170)")
+        self.assertEqual(goal.load_goal_requests(reqp), {})
+
+    def test_e_undeterminable_marker_past_cap_is_never_virgin_armed(self):
+        # #170/#1038-review — seed_goal_marker returns unknown-past-cap when a
+        # marker (arm OR clear) MAY sit deeper than the 32 MB seed cap: the scan
+        # must treat it as UNDETERMINABLE (skip), never a fabricated virgin arm.
+        proj = self._proj()
+        sid = "sess-pastcap"
+        _write_marker_transcript(proj, GK_REVIEW_CWD, sid)
+        reqp = self._reqp()
+        tmux = DeliverGoalFakeTmux([("%9", "claude", GK_REVIEW_CWD, "111")],
+                                   GOAL_IDLE_CAP, model_type=True)
+        with m.patch.object(cli_fleet, "box_windows",
+                            return_value=_declared_windows(GK_REVIEW_CWD)), \
+             m.patch.object(goal, "_default_rearm_fn", side_effect=_short_rearm), \
+             m.patch.object(wd, "seed_goal_marker",
+                            return_value=(0, None, "unknown-past-cap")):
+            logs = goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                                   requests_path=reqp, state={},
+                                   sleep_fn=lambda s: None)
+        self.assertEqual(_typed_goal(tmux), [],
+                         "an unknown-past-cap (undeterminable) marker must never be virgin-armed")
+        self.assertEqual(goal.load_goal_requests(reqp), {})
+        self.assertTrue(any("skip:marker-unknown-past-cap" in ln for ln in logs),
+                        "expected an observability line for the undeterminable skip; logs=%r" % (logs,))
 
     def test_c_non_declared_pane_is_never_virgin_armed(self):
         proj = self._proj()
