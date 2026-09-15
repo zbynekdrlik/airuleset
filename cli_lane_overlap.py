@@ -203,40 +203,74 @@ def _parse_worktree_records(stdout):
 
 
 def _resolve_base_branch(repo_root, records, run):
-    """The integration base a lane's merged-ness is judged against: the repo's
-    DEFAULT branch (``git symbolic-ref --quiet refs/remotes/origin/HEAD`` ->
-    ``origin/<default>`` — ``develop`` on the odoo streams, ``main`` here),
-    fallback to the FIRST worktree's branch (the main checkout), fallback
-    ``main``. #1031: NOT the main checkout's own branch when it is a FEATURE
-    branch — a stream box's main checkout sits on ``david3/…``, and judging
-    merged-ness against a random feature branch is the second latent defect.
-    When ``origin/HEAD`` is not locally set (a symref that clone sets but which
-    can be pruned), probe the standard integration branches BEFORE the
-    feature-branch fallback, so the defect is not re-introduced in that degraded
-    state (review finding 2). Fails toward the fallback, never raises."""
+    """The integration base a lane's merged-ness is judged against.
+
+    Resolve the default-branch NAME from ``git symbolic-ref --quiet
+    refs/remotes/origin/HEAD`` (``main`` here, ``develop`` on the odoo streams).
+    Then pick between the LOCAL branch and ``origin/<name>``:
+
+    * LOCAL ``<name>`` when it exists AND ``origin/<name>`` is an ancestor of it
+      (local is equal-to-or-AHEAD of origin — UNPUSHED integration). This is the
+      controller: integration merges a lane into local ``main`` and immediately
+      dispatches the next lane while a ~35-min ``push`` runs, so the just-merged
+      lane is in local ``main`` but not yet in ``origin/main`` — judging against
+      ``origin/main`` would count it live and block every next sequential
+      dispatch for the whole push window (the pre-#1031 code used local ``main``,
+      and this preserves that).
+    * ``origin/<name>`` otherwise — a stream box's LOCAL ``develop`` can be STALE
+      (behind origin), so it must not win; ``origin/<name>`` is the fresh base.
+
+    #1031: NEVER the main checkout's own branch when it is a FEATURE branch (a
+    stream box sits on ``david3/…`` — the second latent defect). When
+    ``origin/HEAD`` is unset (a symref clone sets but which can be pruned), probe
+    the standard integration branches before the feature-branch fallback. Fails
+    toward the fallback, never raises."""
+    def _rc0(cmd):
+        try:
+            r = run(cmd)
+        except Exception:  # noqa: BLE001 — any git error => "does not hold"
+            return False
+        return getattr(r, "returncode", 1) == 0
+
+    def _verify(ref):
+        try:
+            r = run(["git", "-C", repo_root, "rev-parse", "--verify",
+                     "--quiet", ref])
+        except Exception:  # noqa: BLE001
+            return False
+        return getattr(r, "returncode", 1) == 0 and bool((r.stdout or "").strip())
+
+    name = None
     try:
         r = run(["git", "-C", repo_root, "symbolic-ref", "--quiet",
                  "refs/remotes/origin/HEAD"])
         if getattr(r, "returncode", 1) == 0:
             ref = (r.stdout or "").strip()
-            if ref.startswith("refs/remotes/"):
-                return ref[len("refs/remotes/"):]  # -> origin/<default>
-            if ref:
+            if ref.startswith("refs/remotes/origin/"):
+                name = ref[len("refs/remotes/origin/"):]
+            elif ref.startswith("refs/remotes/"):
+                return ref[len("refs/remotes/"):]  # a non-origin remote HEAD
+            elif ref:
                 return ref
     except Exception as e:
         print("lane-overlap: origin/HEAD resolve failed (%s)" % e,
               file=sys.stderr)
+
+    if name:
+        remote_ref = "origin/" + name
+        # prefer LOCAL <name> only when it is equal-to-or-AHEAD of origin
+        # (unpushed integration on the controller); else the fresh origin ref.
+        if _verify(name) and _rc0(["git", "-C", repo_root, "merge-base",
+                                   "--is-ancestor", remote_ref, name]):
+            return name
+        return remote_ref
+
     # origin/HEAD unset — probe the standard integration branches (develop-first
     # for the fork-no-merge streams whose main checkout IS a feature branch;
     # airuleset has no `develop`, so it correctly lands on main).
     for cand in ("origin/develop", "origin/main", "origin/master",
                  "develop", "main"):
-        try:
-            r = run(["git", "-C", repo_root, "rev-parse", "--verify",
-                     "--quiet", cand])
-        except Exception:  # noqa: BLE001 — a probe error just skips this cand
-            continue
-        if getattr(r, "returncode", 1) == 0 and (r.stdout or "").strip():
+        if _verify(cand):
             return cand
     if records and records[0].get("branch"):
         return records[0]["branch"]
