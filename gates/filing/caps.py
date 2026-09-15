@@ -362,18 +362,45 @@ def _ratchet_should_block(target_repo, cwd):
     return True if blocks is None else blocks
 
 
+def _first_nonempty_line(text):
+    """First non-blank line of `text` (stripped), or "" -- used to name the
+    concrete git failure in cwd_repo_of's fail-open journal line (#1020)."""
+    for ln in (text or "").splitlines():
+        if ln.strip():
+            return ln.strip()
+    return ""
+
+
 def cwd_repo_of(cwd):
     """The owner/repo the invoking cwd's `origin` remote points at (the caps'
     FALLBACK target repo when a filing carries no explicit -R), or the cwd
-    basename on any failure. VERBATIM from the hook's pre-loop resolution."""
+    basename on any failure. VERBATIM from the hook's pre-loop resolution,
+    EXCEPT the fail-OPEN is no longer SILENT (#1020 fix-forward, run
+    34920539429): when `git remote get-url origin` FAILS -- a non-zero rc
+    (e.g. `fatal: detected dubious ownership` in a CI uid-mismatch container,
+    or `No such remote 'origin'`) or an exception (git missing / timeout) --
+    ONE journal line names the concrete failure and the basename fallback on
+    STDERR before degrading. A repo git cannot resolve never reaches its caps,
+    so that degradation (a fail-open for EVERY cap) must be VISIBLE; the RETURN
+    value is unchanged in every case (resolved slug on a clean match, basename
+    otherwise). An rc-0 URL that simply doesn't match stays a silent basename
+    fallback exactly as before -- only an actual git FAILURE is journaled."""
     cwd_repo = os.path.basename(cwd.rstrip("/"))
+    _fail = None
     try:
         _out = subprocess.run(["git", "-C", cwd, "remote", "get-url", "origin"],
                               capture_output=True, text=True, timeout=3)
-        _url = (_out.stdout or "").strip()
-        _m = re.search(r'[:/]([^/]+/[^/]+?)(\.git)?$', _url)
-        if _m:
-            cwd_repo = _m.group(1)
-    except Exception:
-        pass
+        if _out.returncode != 0:
+            _fail = _first_nonempty_line(_out.stderr) or ("git exited %d" % _out.returncode)
+        else:
+            _url = (_out.stdout or "").strip()
+            _m = re.search(r'[:/]([^/]+/[^/]+?)(\.git)?$', _url)
+            if _m:
+                cwd_repo = _m.group(1)
+    except Exception as _exc:
+        _fail = _first_nonempty_line(str(_exc)) or _exc.__class__.__name__
+    if _fail is not None:
+        sys.stderr.write(
+            'filing: target repo unresolvable from cwd (%s) — basename fallback "%s"\n'
+            % (_fail, cwd_repo))
     return cwd_repo
