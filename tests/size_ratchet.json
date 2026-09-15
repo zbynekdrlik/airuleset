@@ -541,7 +541,7 @@
     "tests/test_vault_multi.py": 550,
     "tests/test_vault_purge_job.py": 384,
     "tests/test_vault_read_guard.py": 1268,
-    "tests/test_vault_show.py": 504,
+    "tests/test_vault_show.py": 638,
     "tests/test_vault_templates.py": 322,
     "tests/test_view_image_urls_skill.py": 223,
     "tests/test_vystup_readback_skill_step4.py": 122,

@@ -189,10 +189,18 @@ class _ShowServerCase(_StoreCase):
         env = dict(os.environ)
         env.update(self._env)
         env["AIRULESET_VAULT_TOKEN"] = TOK
+        # stderr -> a per-port FILE (as the real CLI does, `show-endpoint-<port>.log`),
+        # so the endpoint log can be read WHILE the process is still alive — the
+        # post-#1011 endpoint stays up after serving (410 for a later view) instead
+        # of os._exit'ing, so `proc.communicate()` would block.
+        errpath = Path(self.tmp.name) / ("show-err-%d.log" % port)
+        errf = open(errpath, "w", encoding="utf-8")
+        self.addCleanup(errf.close)
         proc = subprocess.Popen(
             [sys.executable, str(SHOW_SERVER), str(port), ips, kind,
              locator, ttl],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True)
+            stdout=subprocess.DEVNULL, stderr=errf, env=env, text=True)
+        proc._errpath = str(errpath)
         self.addCleanup(self._kill, proc)
         return proc, port
 
@@ -202,6 +210,12 @@ class _ShowServerCase(_StoreCase):
             proc.kill()
             proc.wait(timeout=10)
 
+    def _errlog(self, proc):
+        try:
+            return Path(proc._errpath).read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
+
     def _serve(self, **kw):
         proc, port = self._spawn(**kw)
         health = "http://127.0.0.1:%d/healthz" % port
@@ -209,7 +223,7 @@ class _ShowServerCase(_StoreCase):
         while time.monotonic() < end:
             if proc.poll() is not None:
                 self.fail("show server exited rc=%s: %s"
-                          % (proc.returncode, proc.communicate(timeout=5)[1]))
+                          % (proc.returncode, self._errlog(proc)))
             try:
                 with urllib.request.urlopen(health, timeout=2) as r:
                     if r.status in (200, 204):
@@ -218,29 +232,42 @@ class _ShowServerCase(_StoreCase):
                 time.sleep(0.1)
         self.fail("show server never came up on %d" % port)
 
-    @staticmethod
-    def _get(url, timeout=10):
+    def _req(self, url, method="GET", headers=None, timeout=10):
+        data = b"" if method == "POST" else None
+        req = urllib.request.Request(url, data=data, method=method,
+                                     headers=headers or {})
         try:
-            with urllib.request.urlopen(url, timeout=timeout) as r:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.status, r.read(), dict(r.headers)
         except urllib.error.HTTPError as e:
             return e.code, e.read(), dict(e.headers)
+
+    def _get(self, url, headers=None, timeout=10):
+        return self._req(url, "GET", headers, timeout)
+
+    def _post(self, url, headers=None, timeout=10):
+        return self._req(url, "POST", headers, timeout)
+
+    def _url(self, port):
+        return "http://127.0.0.1:%d/%s/" % (port, TOK)
 
 
 class TestShowServerNamedSource(_ShowServerCase):
     def _store(self, name="DB_PASS", val=VAL):
         st.store_value(name, val.encode(), keep_s=600)
 
-    def test_a_named_value_is_shown_once_then_the_endpoint_tears_down(self):
+    def test_a_named_value_is_shown_once_via_post(self):
+        # #1011: a GET only ever serves the click-to-reveal page (no value); the
+        # value is revealed once by the same-origin POST a human's click sends.
         self._store()
         proc, port = self._serve(kind="name", locator="DB_PASS")
-        url = "http://127.0.0.1:%d/%s/" % (port, TOK)
-        code, body, _ = self._get(url)
-        self.assertEqual(code, 200)
-        self.assertIn(VAL.encode(), body)          # the value is in the page
-        proc.wait(timeout=15)                       # one-shot: it ends itself
-        with self.assertRaises(OSError):            # nothing listening now
-            self._get(url)
+        url = self._url(port)
+        gcode, gbody, _ = self._get(url)
+        self.assertEqual(gcode, 200)
+        self.assertNotIn(VAL.encode(), gbody)      # the reveal page has NO value
+        pcode, pbody, _ = self._post(url)
+        self.assertEqual(pcode, 200)
+        self.assertIn(VAL.encode(), pbody)         # the POST reveals the value
         # The value STAYS in the vault — show does not consume it.
         self.assertEqual(st.state("DB_PASS"), "ready")
 
@@ -252,16 +279,14 @@ class TestShowServerNamedSource(_ShowServerCase):
             code, _, _ = self._get(health)
             self.assertIn(code, (200, 204))
         self.assertIsNone(proc.poll())              # still alive
-        url = "http://127.0.0.1:%d/%s/" % (port, TOK)
-        code, body, _ = self._get(url)
+        code, body, _ = self._post(self._url(port))
         self.assertEqual(code, 200)
         self.assertIn(VAL.encode(), body)
 
-    def test_a_no_store_header_is_present(self):
+    def test_the_reveal_page_carries_a_no_store_header(self):
         self._store()
         proc, port = self._serve(kind="name", locator="DB_PASS")
-        url = "http://127.0.0.1:%d/%s/" % (port, TOK)
-        _, _, headers = self._get(url)
+        _, _, headers = self._get(self._url(port))
         cc = {k.lower(): v for k, v in headers.items()}.get("cache-control", "")
         self.assertIn("no-store", cc)
 
@@ -272,29 +297,32 @@ class TestShowServerNamedSource(_ShowServerCase):
         for bad in (base, base + "nope/", base + "favicon.ico"):
             code, _, _ = self._get(bad)
             self.assertEqual(code, 404, bad)
+            pcode, _, _ = self._post(bad)         # a POST on a bad token is 404 too
+            self.assertEqual(pcode, 404, bad)
         self.assertIsNone(proc.poll())              # a 404 must not tear it down
 
     def test_the_value_never_reaches_the_endpoints_own_output_or_log(self):
         self._store()
         proc, port = self._serve(kind="name", locator="DB_PASS")
-        url = "http://127.0.0.1:%d/%s/" % (port, TOK)
-        self._get(url)
-        out, err = proc.communicate(timeout=15)
-        blob = out + err
-        self.assertNotIn(VAL, blob)
-        self.assertNotIn(TOK, blob)                 # no HTTP request logging
+        self._post(self._url(port))                 # consume via POST
+        err = self._errlog(proc)
+        self.assertNotIn(VAL, err)                  # never the value on stderr
+        self.assertNotIn(TOK, err)                  # never the token on stderr
         self.assertNotIn(VAL, st.log_path().read_text(encoding="utf-8"))
         # ...but the delivery log DID record the show event, value-free.
         self.assertIn("shown", st.log_path().read_text(encoding="utf-8"))
 
-    def test_the_page_is_self_contained_no_favicon_route(self):
+    def test_both_pages_are_self_contained_no_favicon_route(self):
         self._store()
         proc, port = self._serve(kind="name", locator="DB_PASS")
-        url = "http://127.0.0.1:%d/%s/" % (port, TOK)
-        _, body, _ = self._get(url)
-        page = body.decode("utf-8")
-        self.assertNotIn("{{", page)                # the repo's brace trap
-        self.assertIn("rel=icon", page)             # inline data icon, no /favicon.ico
+        _, gbody, _ = self._get(self._url(port))    # reveal page
+        reveal = gbody.decode("utf-8")
+        self.assertNotIn("{{", reveal)              # the repo's brace trap
+        self.assertIn("rel=icon", reveal)           # inline data icon, no /favicon.ico
+        _, pbody, _ = self._post(self._url(port))   # value page
+        value = pbody.decode("utf-8")
+        self.assertNotIn("{{", value)
+        self.assertIn("rel=icon", value)
 
     def test_the_endpoint_self_expires(self):
         self._store()
@@ -304,21 +332,22 @@ class TestShowServerNamedSource(_ShowServerCase):
 
 
 class TestShowServerFileSource(_ShowServerCase):
-    def test_a_file_value_is_shown_once(self):
+    def test_a_file_value_is_shown_once_via_post(self):
         p = self._secret_file(mode=0o600)
         proc, port = self._serve(kind="file", locator=str(p))
-        url = "http://127.0.0.1:%d/%s/" % (port, TOK)
-        code, body, _ = self._get(url)
+        url = self._url(port)
+        _, gbody, _ = self._get(url)
+        self.assertNotIn(VAL.encode(), gbody)      # reveal page, no value
+        code, body, _ = self._post(url)
         self.assertEqual(code, 200)
         self.assertIn(VAL.encode(), body)
-        proc.wait(timeout=15)
 
     def test_a_public_bind_is_refused_before_binding(self):
         p = self._secret_file(mode=0o600)
         proc, _port = self._spawn(kind="file", locator=str(p), ips="8.8.8.8")
         proc.wait(timeout=20)
         self.assertNotEqual(proc.returncode, 0)
-        self.assertIn("private", (proc.communicate(timeout=5)[1] or "").lower())
+        self.assertIn("private", self._errlog(proc).lower())
 
     def test_a_bad_file_is_refused_before_binding(self):
         bad = self._secret_file(name="world_readable", mode=0o644)
@@ -333,27 +362,29 @@ class TestShowServerFileSource(_ShowServerCase):
 
 
 class TestShowServerHardening(_ShowServerCase):
-    """Review-fix coverage (#580): the one-shot consume-latch (MAJOR), the
-    placeholder-order integrity fix, and the non-ASCII token guard."""
+    """Review-fix coverage (#580) carried onto the #1011 POST-reveal flow: the
+    one-shot consume-latch (MAJOR) now lives on do_POST, the placeholder-order
+    integrity fix, and the non-ASCII token guard."""
 
     def _store(self, name="DB_PASS", val=VAL):
         st.store_value(name, val.encode(), keep_s=600)
 
-    def test_concurrent_views_serve_the_value_at_most_once(self):
-        # M1: without the process-global consume-latch, up to MAX_CONNECTIONS
-        # threads each read + serve the value before the first tears down. With
-        # it, the value is served EXACTLY once; every racer gets 410 (or a
-        # connection error once the winner has exited).
+    def test_concurrent_posts_serve_the_value_at_most_once(self):
+        # The value-revealing request is now the POST. Without the process-global
+        # consume-latch, up to MAX_CONNECTIONS threads each read + serve the value.
+        # The endpoint no longer os._exit's after serving (a later view gets 410),
+        # so EVERY racing POST completes — giving this behavioural test real teeth:
+        # latch off -> several 200s; latch on -> exactly one 200, the rest 410.
         self._store()
         proc, port = self._serve(kind="name", locator="DB_PASS")
-        url = "http://127.0.0.1:%d/%s/" % (port, TOK)
+        url = self._url(port)
         results = []
         barrier = threading.Barrier(8)
 
         def hit():
             barrier.wait()
             try:
-                code, body, _ = self._get(url, timeout=10)
+                code, body, _ = self._post(url, timeout=10)
                 results.append((code, VAL.encode() in body))
             except OSError:
                 results.append((None, False))
@@ -365,38 +396,41 @@ class TestShowServerHardening(_ShowServerCase):
             t.join(timeout=25)
         served = [r for r in results if r[0] == 200 and r[1]]
         self.assertEqual(len(served), 1, results)   # value served EXACTLY once
-        proc.wait(timeout=15)
+        self.assertTrue(all(c == 410 for c, _ in results if c != 200), results)
 
     def test_the_one_shot_latch_precedes_the_value_read(self):
-        # Deterministic teeth for M1: the consume-latch (claim _served under
-        # _serve_lock) MUST run BEFORE _read_value() in do_GET, or a racing
-        # thread reads + serves the value before the winner tears down. (The
-        # behavioural test above is a safe regression guard, but os._exit races
-        # the losers, so this source-order lock is what actually has teeth.)
+        # Deterministic teeth for the one-shot: the consume-latch (claim _served
+        # under _serve_lock) MUST run BEFORE _read_value() in do_POST — the request
+        # that reveals the value. do_GET no longer reads the value at all.
         src = SHOW_SERVER.read_text(encoding="utf-8")
-        do_get = src.split("def do_GET", 1)[1].split("\n\n\n", 1)[0]
-        self.assertIn("with _serve_lock:", do_get)
-        latch = do_get.find("_served = True")
-        read = do_get.find("_read_value(")
-        self.assertNotEqual(latch, -1, "consume-latch missing from do_GET")
-        self.assertNotEqual(read, -1, "_read_value call missing from do_GET")
+        do_post = src.split("def do_POST", 1)[1].split("\n\n\n", 1)[0]
+        self.assertIn("with _serve_lock:", do_post)
+        latch = do_post.find("_served = True")
+        read = do_post.find("_read_value(")
+        self.assertNotEqual(latch, -1, "consume-latch missing from do_POST")
+        self.assertNotEqual(read, -1, "_read_value call missing from do_POST")
         self.assertLess(latch, read,
                         "the consume-latch must be claimed BEFORE _read_value()")
 
+    def test_do_get_never_reads_the_value(self):
+        # #1011: a GET must NEVER reach the value — the reveal page carries none
+        # and the value read moved wholly onto do_POST.
+        src = SHOW_SERVER.read_text(encoding="utf-8")
+        do_get = src.split("def do_GET", 1)[1].split("\n    def ", 1)[0]
+        self.assertNotIn("_read_value(", do_get)
+
     def test_a_value_containing_the_placeholder_token_is_not_corrupted(self):
-        # m2: NAME is substituted first, VALUE last, so a value literally
-        # containing "NAME_PLACEHOLDER" survives intact.
+        # NAME is substituted first, VALUE last, so a value literally
+        # containing "NAME_PLACEHOLDER" survives intact — now on the POST page.
         tricky = "PART1-NAME_PLACEHOLDER-PART2-580"
         self._store(val=tricky)
         proc, port = self._serve(kind="name", locator="DB_PASS")
-        url = "http://127.0.0.1:%d/%s/" % (port, TOK)
-        code, body, _ = self._get(url)
+        code, body, _ = self._post(self._url(port))
         self.assertEqual(code, 200)
-        # The exact JSON-embedded value (placeholder substring and all) is present.
         self.assertIn(json.dumps(tricky).encode(), body)
 
     def test_a_raw_non_ascii_token_segment_is_404_not_a_crash(self):
-        # t3: a raw high byte in the request target -> Latin-1-decoded non-ASCII
+        # A raw high byte in the request target -> Latin-1-decoded non-ASCII
         # self.path -> hmac.compare_digest would raise TypeError; the guard
         # turns it into a plain 404 with no teardown and no traceback.
         self._store()
@@ -408,6 +442,106 @@ class TestShowServerHardening(_ShowServerCase):
         s.close()
         self.assertIn(b"404", resp.split(b"\r\n", 1)[0])
         self.assertIsNone(proc.poll())              # did not crash / tear down
+
+
+class TestShowServerRevealFlow1011(_ShowServerCase):
+    """#1011: a browser prefetch / hover-preload / chat unfurl must NOT burn the
+    one-shot before the owner's intentional click. GET serves a click-to-reveal
+    page (no value, no latch); the value + latch live only on the POST the button
+    sends; an announced prefetch GET is a no-latch 204."""
+
+    def _store(self, name="DB_PASS", val=VAL):
+        st.store_value(name, val.encode(), keep_s=600)
+
+    def test_a_get_serves_the_reveal_page_with_no_value_and_no_latch_flip(self):
+        # (a) a GET returns the reveal page with NO secret bytes AND does not flip
+        # the latch — a SECOND GET still serves the page, and the value is still
+        # revealable by POST afterwards.
+        self._store()
+        proc, port = self._serve(kind="name", locator="DB_PASS")
+        url = self._url(port)
+        for _ in range(2):
+            code, body, _ = self._get(url)
+            self.assertEqual(code, 200)
+            self.assertNotIn(VAL.encode(), body)
+        # the two GETs did NOT consume the one-shot: the POST still reveals it.
+        code, body, _ = self._post(url)
+        self.assertEqual(code, 200)
+        self.assertIn(VAL.encode(), body)
+
+    def test_the_post_reveals_the_value_exactly_once(self):
+        # (b) the POST reveals the value once; a second POST is 410, never a value.
+        self._store()
+        proc, port = self._serve(kind="name", locator="DB_PASS")
+        url = self._url(port)
+        code, body, _ = self._post(url)
+        self.assertEqual(code, 200)
+        self.assertIn(VAL.encode(), body)
+        code2, body2, _ = self._post(url)
+        self.assertEqual(code2, 410)
+        self.assertNotIn(VAL.encode(), body2)
+
+    def test_a_get_after_a_successful_post_is_410_never_the_value(self):
+        # (c) once revealed, EVERY subsequent request is 410 — a GET after the POST
+        # gets 410, never the value and never a fresh reveal page.
+        self._store()
+        proc, port = self._serve(kind="name", locator="DB_PASS")
+        url = self._url(port)
+        code, body, _ = self._post(url)
+        self.assertEqual(code, 200)
+        self.assertIn(VAL.encode(), body)
+        gcode, gbody, _ = self._get(url)
+        self.assertEqual(gcode, 410)
+        self.assertNotIn(VAL.encode(), gbody)
+
+    def test_a_sec_purpose_prefetch_get_is_204_and_does_not_latch(self):
+        # (d) an announced prefetch GET (Sec-Purpose: prefetch) is a bare 204 that
+        # touches nothing — no value, no latch, not even the reveal page HTML; the
+        # owner's later GET still gets the reveal page and the POST still reveals.
+        self._store()
+        proc, port = self._serve(kind="name", locator="DB_PASS")
+        url = self._url(port)
+        code, body, _ = self._get(url, headers={"Sec-Purpose": "prefetch"})
+        self.assertEqual(code, 204)
+        self.assertEqual(body, b"")
+        self.assertNotIn(VAL.encode(), body)
+        # the prefetch did NOT flip the latch:
+        gcode, gbody, _ = self._get(url)
+        self.assertEqual(gcode, 200)
+        self.assertNotIn(VAL.encode(), gbody)      # still the reveal page
+        pcode, pbody, _ = self._post(url)
+        self.assertEqual(pcode, 200)
+        self.assertIn(VAL.encode(), pbody)          # value still revealable
+
+    def test_the_consuming_request_method_and_ua_are_logged_never_the_value(self):
+        # (e) the consuming request's method + User-Agent are logged to the
+        # endpoint log (stderr, `show-endpoint-<port>.log`) for attribution —
+        # never the value, never the token.
+        self._store()
+        proc, port = self._serve(kind="name", locator="DB_PASS")
+        marker_ua = "owner-browser-repro-1011"
+        code, _, _ = self._post(self._url(port), headers={"User-Agent": marker_ua})
+        self.assertEqual(code, 200)
+        err = self._errlog(proc)
+        self.assertIn("POST", err)                  # the consuming method
+        self.assertIn(marker_ua, err)               # the consuming UA (attribution)
+        self.assertNotIn(VAL, err)                  # NEVER the value
+        self.assertNotIn(TOK, err)                  # NEVER the token
+
+    def test_the_reveal_page_carries_anti_cache_headers_and_no_token(self):
+        # (f) the reveal page (GET) carries the SAME anti-cache headers the value
+        # response carries, and no inline copy of the token beyond the form action.
+        self._store()
+        proc, port = self._serve(kind="name", locator="DB_PASS")
+        _, body, headers = self._get(self._url(port))
+        low = {k.lower(): v for k, v in headers.items()}
+        self.assertIn("no-store", low.get("cache-control", ""))
+        self.assertIn("no-referrer", low.get("referrer-policy", ""))
+        self.assertEqual(low.get("x-content-type-options", ""), "nosniff")
+        self.assertIn("default-src 'none'", low.get("content-security-policy", ""))
+        # No inline copy of the token: the form posts to the current URL (no
+        # action attribute), so the token never appears in the page body.
+        self.assertNotIn(TOK.encode(), body)
 
 
 # --------------------------------------------------------------------------- #
