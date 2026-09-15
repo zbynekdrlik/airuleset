@@ -419,6 +419,28 @@ class TestShowServerHardening(_ShowServerCase):
         do_get = src.split("def do_GET", 1)[1].split("\n    def ", 1)[0]
         self.assertNotIn("_read_value(", do_get)
 
+    def test_the_shown_log_precedes_the_body_write(self):
+        # #1011 fix-forward (Pass A log-order race): since #1011 stopped the
+        # endpoint os._exit'ing after serving, do_POST must write the value-free
+        # "shown" delivery-log event BEFORE it flushes the body to the client.
+        # Otherwise the client's POST returns before the log line lands, and any
+        # consumer reading the log right after the POST (the delivery-log test
+        # below; the watchdog reading the same log) races an empty log — the
+        # flake that made Pass A red. The one-shot latch is already flipped and
+        # the value page already built at this point, so the value-free "shown"
+        # event is safe to write first. Deterministic source-order teeth,
+        # mutation-verified by moving log_event("shown", ...) back after
+        # wfile.write (the pre-fix order) -> RED.
+        src = SHOW_SERVER.read_text(encoding="utf-8")
+        do_post = src.split("def do_POST", 1)[1].split("\n\n\n", 1)[0]
+        shown = do_post.find('log_event("shown"')
+        write = do_post.find("self.wfile.write(")
+        self.assertNotEqual(shown, -1, 'log_event("shown") missing from do_POST')
+        self.assertNotEqual(write, -1, "wfile.write missing from do_POST")
+        self.assertLess(shown, write,
+                        'the "shown" delivery-log event must be written BEFORE '
+                        "the body is flushed to the client (Pass A race)")
+
     def test_a_value_containing_the_placeholder_token_is_not_corrupted(self):
         # NAME is substituted first, VALUE last, so a value literally
         # containing "NAME_PLACEHOLDER" survives intact — now on the POST page.
