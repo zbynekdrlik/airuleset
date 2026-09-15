@@ -66,7 +66,10 @@ _SV_PATCHER = None
 
 
 def _typing_send_verified(pid, text, run=None, tpath=None, sleep_fn=None,
-                          logs=None, out=None, user_authored=False, nudge=None, state=None):
+                          logs=None, out=None, user_authored=False, nudge=None, state=None,
+                          skip_confirm=False):
+    # `skip_confirm=` mirrors the #1023 timeout-race kwarg the queue-arrival
+    # rider threads through; the stub always submits, so it is accepted and ignored.
     # `out=` mirrors the real send_verified signature (#594/#814) so the
     # lane-occupancy nudge's `out=send_out` call resolves; a confirmed True
     # submit leaves the dict untouched.
