@@ -23,7 +23,7 @@ Covers:
     on the operative negation, #799 style).
 """
 import json
-import re
+import subprocess
 import sys
 import time
 import unittest.mock as m
@@ -227,6 +227,51 @@ def _rule5_window(text):
     rest = normed[idx:]
     end = rest.find("Applies to all rewordings")
     return rest[:end] if end >= 0 else rest
+
+
+# --------------------------------------------------------------------------- #
+# hooks/stop-check-question-quality.sh wiring: the widened pre-check must run the
+# subprocess on a release-block SHAPE even with NO `#N`, so the text-shape
+# trigger fires; a plain no-ticket question still passes. (Membership needs no
+# gh here — the text path blocks before any ref/U check.)
+# --------------------------------------------------------------------------- #
+HOOK = REPO / "hooks" / "stop-check-question-quality.sh"
+
+
+class TestHookTextShapeWiring(TestCase):
+    def _run(self, msg, home, cwd):
+        import os
+        sid = "qs1026-" + uuid.uuid4().hex[:10]
+        for stem in ("airuleset-question-quality-block-", "claude-user-active-",
+                     "claude-discord-lastq-", "claude-lastq-refs-"):
+            self.addCleanup(lambda p="/tmp/" + stem + sid: Path(p).unlink(missing_ok=True))
+        env = dict(os.environ)
+        env["HOME"] = home
+        return subprocess.run(
+            ["bash", str(HOOK)],
+            input=json.dumps({"last_assistant_message": msg,
+                              "session_id": sid, "cwd": cwd}),
+            capture_output=True, text=True, timeout=40, env=env)
+
+    def test_release_block_text_no_ref_blocks_exit_2(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as home:
+            cwd = str(Path(home) / "repo")
+            Path(cwd).mkdir(parents=True, exist_ok=True)
+            r = self._run(RELEASE_BLOCK_TEXT, home, cwd)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("GATEKEEPER-ACTION", r.stderr)
+
+    def test_plain_no_ticket_question_exits_0(self):
+        import tempfile
+        msg = ("**Otázka — projekt airuleset (fleet):** všeobecná otázka bez "
+               "ticketu.\n\n• A (odporúčam) — X\n• B — Y\n\n"
+               "❓ ASKED: schváliš zmenu farby dashboardu?")
+        with tempfile.TemporaryDirectory() as home:
+            cwd = str(Path(home) / "repo")
+            Path(cwd).mkdir(parents=True, exist_ok=True)
+            r = self._run(msg, home, cwd)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 class TestRule5DoctrineLock(TestCase):

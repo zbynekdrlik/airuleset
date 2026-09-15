@@ -874,9 +874,15 @@ def _default_u_runner(argv, cwd):
 
 def question_ticket_in_u(numbers, cwd, *, home=None, now=None, runner=None,
                          cache_max_age_s=_QUESTION_U_CACHE_FRESH_S):
-    """#1025 — is at least one of `numbers` (a ❓ turn's named same-repo `#N`
-    refs) a ticket THIS box's `U` (owner-court) surface actually shows? Returns:
+    """#1025/#1026 — classify a ❓ turn's named same-repo `#N` refs against this
+    box's `U` (owner-court) surface AND the `infra` label. Returns:
 
+      "infra"       — (#1026) at least one named ticket carries the `infra`
+                      label: an infra-caused release block is NEVER an owner
+                      question — the FLOW session must route it to the infra
+                      lane (open/update the infra ticket + tag
+                      `GATEKEEPER-ACTION (INFRA)` on the hub), not ask the owner.
+                      Checked FIRST (highest priority).
       "in_u"        — at least one named ticket is in the box's U set (the owner
                       CAN click it): the `❓ ASKED`/`❓ NEEDS YOU` is honest.
       "not_in_u"    — the U set is determinable and NONE of `numbers` is in it
@@ -885,14 +891,23 @@ def question_ticket_in_u(numbers, cwd, *, home=None, now=None, runner=None,
       "unmeasurable"— the U set could not be determined (no fresh cache AND a gh
                       failure): FAIL-OPEN, never block a question on a hiccup.
 
-    COST (#1025): the tickets-status cache (footer-refreshed, authority-correct
-    for this box) is consulted FIRST (zero gh); only when it does not already
-    confirm membership does it fall back to a SINGLE `gh issue list --search`
-    for this repo's open owner-court tickets — the "one gh call at most" ceiling.
-    The full `--waiting` derivation (several gh searches) is deliberately NOT run
-    from a Stop hook. The label search over-approximates scope (label-based, no
-    #654 stream-ownership exclusion), so it is biased toward `in_u`/allow: the
-    block fires only when the label is provably NOT on any named ticket."""
+    COST (#1025/#1026): the tickets-status cache (footer-refreshed, authority-
+    correct for this box) is consulted FIRST (zero gh); only when it does not
+    already confirm membership does it fall back to a SINGLE `gh issue list
+    --search` — the "one gh call at most" ceiling. #1026 folds the `infra`
+    detection INTO that same single call (`label:infra` added to the U-label
+    search, `--json number,labels` read) so no second gh call is added. The full
+    `--waiting` derivation (several gh searches) is deliberately NOT run from a
+    Stop hook. The label search over-approximates scope (label-based, no #654
+    stream-ownership exclusion), so it is biased toward `in_u`/allow: a U block
+    fires only when the label is provably NOT on any named ticket.
+
+    #1026 cache-path limitation (documented, accepted): the fresh-cache fast-
+    allow returns "in_u" without seeing labels, so a ticket that is BOTH in the
+    cached U set AND `infra`-labelled reads as "in_u" (allow), not "infra". This
+    is safe — such a ticket IS visible to the owner (no #1025 blindness) — and
+    the zero-gh TEXT-shape trigger in `gates.questionscope` is the strong,
+    U-independent guard for a genuine infra-caused release block."""
     import statusbar
     import time as _time
     nums = set()
@@ -913,21 +928,32 @@ def question_ticket_in_u(numbers, cwd, *, home=None, now=None, runner=None,
     if (cached is not None and ts is not None
             and 0 <= (now - ts) <= cache_max_age_s and (nums & cached)):
         return "in_u"
-    # Fallback: ONE gh search for this repo's open owner-court tickets. Also
-    # covers the just-added-label lag a fresh cache can miss (a live label
-    # check). None → unmeasurable (fail-open).
+    # Fallback: ONE gh search for this repo's open owner-court tickets, with
+    # `label:infra` folded in (#1026) so the infra detection rides the SAME
+    # single call. Also covers the just-added-label lag a fresh cache can miss
+    # (a live label check). None → unmeasurable (fail-open).
     run = runner or _default_u_runner
-    label_q = "label:" + ",".join(QUESTION_U_LABELS)
+    label_q = "label:infra," + ",".join(QUESTION_U_LABELS)
     out = run(["gh", "issue", "list", "--state", "open", "--search", label_q,
-               "--json", "number", "-L", "200"], cwd)
+               "--json", "number,labels", "-L", "200"], cwd)
     if out is None:
         return "unmeasurable"
     try:
         data = json.loads(out or "[]")
-        u_set = {int(x["number"]) for x in data if isinstance(x, dict)}
+        by_num = {}
+        for x in data:
+            if isinstance(x, dict) and "number" in x:
+                by_num[int(x["number"])] = {
+                    (lb or {}).get("name") for lb in (x.get("labels") or [])}
     except (ValueError, TypeError, KeyError):
         return "unmeasurable"
-    return "in_u" if (nums & u_set) else "not_in_u"
+    # #1026: an `infra`-labelled named ticket wins — infra lane, not owner court.
+    if any("infra" in by_num.get(n, set()) for n in nums):
+        return "infra"
+    # #1025: a named ticket PRESENT in this label-search result matched a
+    # user-waiting label (it is not infra, and the search is `label:infra,<U>`),
+    # so presence ⇒ in U. A label-less runner stub (older tests) also lands here.
+    return "in_u" if any(n in by_num for n in nums) else "not_in_u"
 
 
 # #948: hard cap on question-map supplement gh calls per refresh — the map is
