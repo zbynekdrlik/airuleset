@@ -168,6 +168,29 @@ class TestDetachedLaneCounted(unittest.TestCase):
         self.assertEqual(len(lanes), 1, "a detached lane mid-operation is live")
 
 
+class TestReceiptSeesStreamLane(unittest.TestCase):
+    # Owner ROZHODNUTÉ (#1031, 2026-09-15): sequential mode is NOT a hard count
+    # — its goal is (a) "the right hand knows the left" (no two lanes on similar
+    # work unaware of each other) and (b) no nudge pushing max parallelism. The
+    # lane-overlap RECEIPT (compute_overlap over gather_live_lanes) is the (a)
+    # instrument and shares gather_live_lanes with the dispatch gate, so a new
+    # unit touching the same file as a STREAM-named live lane must report
+    # OVERLAP — before the fix gather_live_lanes returned 0 live lanes, so the
+    # receipt falsely read CLEAR against "0 live lane(s)".
+    def test_receipt_reports_overlap_against_stream_lane_same_file(self):
+        fake = _FakeGit(STREAM_PORCELAIN)  # the lane touches addons/x/models/y.py
+        lanes = lo.gather_live_lanes(D3, run=fake)
+        self.assertEqual(len(lanes), 1, "the stream lane must be seen at all")
+        verdict, overlaps = lo.compute_overlap(
+            paths=["addons/x/models/y.py"], topics=["vyroba dokoncenie"],
+            live_lanes=lanes, open_prs=[])
+        self.assertEqual(verdict, "overlap")
+        self.assertTrue(
+            any(o[0] == "lane" and o[1] == "david3/7184-vyroba-dokoncenie"
+                for o in overlaps),
+            "receipt must flag the stream lane by its full ref, not read CLEAR")
+
+
 _ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
 

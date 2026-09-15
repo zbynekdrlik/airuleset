@@ -162,12 +162,13 @@ def _lane_is_merged(repo_root, branch, base_branch, run):
 def _parse_worktree_records(stdout):
     """Parse ``git worktree list --porcelain`` into a list of record dicts —
     ``{"path", "branch", "head", "detached"}`` — one per worktree, in listing
-    order (the FIRST is always the main checkout). A record ends at a blank line
-    OR the next ``worktree`` line, so a degenerate porcelain carrying only
-    ``branch`` lines (older callers' injected fakes) still yields one record per
-    branch. ``branch`` is the LOCAL name with ``refs/heads/`` stripped but
-    slashes KEPT — a stream branch (``david3/7184-…``) must stay resolvable as a
-    git ref (the old ``rsplit("/",1)[-1]`` mangled it to ``7184-…``, #1031)."""
+    order (the FIRST is always the main checkout). A record ends at a blank line,
+    the next ``worktree`` line, OR a repeat ``branch`` line — so a degenerate
+    porcelain carrying only ``branch`` lines (older callers' injected fakes,
+    with or without blank-line separators) still yields one record per branch.
+    ``branch`` is the LOCAL name with ``refs/heads/`` stripped but slashes KEPT
+    — a stream branch (``david3/7184-…``) must stay resolvable as a git ref (the
+    old ``rsplit("/",1)[-1]`` mangled it to ``7184-…``, #1031)."""
     records = []
     cur = {}
     for raw in (stdout or "").splitlines():
@@ -185,6 +186,12 @@ def _parse_worktree_records(stdout):
         elif line.startswith("HEAD "):
             cur["head"] = line.split(" ", 1)[1].strip()
         elif line.startswith("branch "):
+            # a repeat branch with no intervening `worktree`/blank line starts a
+            # new record (review finding 1: a bare consecutive-branch porcelain
+            # must not last-wins-collapse into one record).
+            if "branch" in cur:
+                records.append(cur)
+                cur = {}
             ref = line.split(" ", 1)[1].strip()
             cur["branch"] = (ref[len("refs/heads/"):]
                              if ref.startswith("refs/heads/") else ref)
@@ -203,7 +210,10 @@ def _resolve_base_branch(repo_root, records, run):
     ``main``. #1031: NOT the main checkout's own branch when it is a FEATURE
     branch — a stream box's main checkout sits on ``david3/…``, and judging
     merged-ness against a random feature branch is the second latent defect.
-    Fails toward the fallback, never raises."""
+    When ``origin/HEAD`` is not locally set (a symref that clone sets but which
+    can be pruned), probe the standard integration branches BEFORE the
+    feature-branch fallback, so the defect is not re-introduced in that degraded
+    state (review finding 2). Fails toward the fallback, never raises."""
     try:
         r = run(["git", "-C", repo_root, "symbolic-ref", "--quiet",
                  "refs/remotes/origin/HEAD"])
@@ -216,6 +226,18 @@ def _resolve_base_branch(repo_root, records, run):
     except Exception as e:
         print("lane-overlap: origin/HEAD resolve failed (%s)" % e,
               file=sys.stderr)
+    # origin/HEAD unset — probe the standard integration branches (develop-first
+    # for the fork-no-merge streams whose main checkout IS a feature branch;
+    # airuleset has no `develop`, so it correctly lands on main).
+    for cand in ("origin/develop", "origin/main", "origin/master",
+                 "develop", "main"):
+        try:
+            r = run(["git", "-C", repo_root, "rev-parse", "--verify",
+                     "--quiet", cand])
+        except Exception:  # noqa: BLE001 — a probe error just skips this cand
+            continue
+        if getattr(r, "returncode", 1) == 0 and (r.stdout or "").strip():
+            return cand
     if records and records[0].get("branch"):
         return records[0]["branch"]
     return "main"
