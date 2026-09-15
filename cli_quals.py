@@ -840,9 +840,16 @@ def _partition_user_waiting(rows):
 
 # #1025 — the owner-QUESTION subset of USER_WAITING_LABELS (a `❓ ASKED`/
 # `❓ NEEDS YOU` turn adds one of these). `needs-acceptance` is EXCLUDED — it is a
-# queued client-message approval, not a ❓ owner question — so a bare acceptance
-# never trips the question-in-U stop gate.
-QUESTION_U_LABELS = ("needs-answer", "needs-decision", "needs-owner-action")
+# queued client-message approval, not a ❓ owner question. The gate's PURPOSE
+# is about these three; but the MEMBERSHIP question the gh fallback answers is "is
+# #N in the box's U SET", and U (the footer's `user_waiting`, cached in
+# `user_waiting_numbers`) is the FULL `USER_WAITING_LABELS` — needs-acceptance
+# included. The fallback therefore searches `USER_WAITING_LABELS` so it agrees
+# with the cache set (else a just-added needs-acceptance ticket named in a ❓ turn,
+# on a stale U==0 cache, would gh-search-MISS → false `not_in_u` → false block —
+# #1025 review 🟡2). Over-approximates scope (a needs-acceptance+ops-wait W member
+# also matches) → biased toward `in_u`/allow, the safe direction.
+QUESTION_U_LABELS = USER_WAITING_LABELS
 
 # How fresh the tickets-status cache must be for its `user_waiting_numbers` to be
 # trusted as a fast-allow (mirrors u_freshness's own cache-age gate, #797).

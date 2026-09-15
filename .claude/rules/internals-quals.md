@@ -70,8 +70,11 @@ can drift). Lessons for anyone touching this partition:
   then confirms `not_in_u` (the label genuinely did not land; `in_u` catches the
   just-added-label-cache-lag case → allow; `unmeasurable`/gh-error → allow). The U==0
   precondition is what makes it safe: a context `#N` reference only ever matters when
-  the owner's court is otherwise empty. Label search over-approximates scope (no #654
-  exclusion) → biased to allow. GOTCHA: a stop-hook that shells `gh` from the WORKTREE
+  the owner's court is otherwise empty. The gh fallback searches the FULL
+  `USER_WAITING_LABELS` (all 4, needs-acceptance incl.) so it agrees with the cache's
+  `user_waiting_numbers` set — else a just-added needs-acceptance ticket on a stale
+  U==0 cache gh-misses → false block (#1025 review 🟡2). Label search over-approximates
+  scope (no #654 exclusion) → biased to allow. GOTCHA: a stop-hook that shells `gh` from the WORKTREE
   cwd (`_default_u_runner`) fails on a non-existent cwd (`subprocess` FileNotFoundError
   → None → unmeasurable → allow) — correct fail-open, but a test must pass an EXISTING
   cwd or the gh path never exercises. RATCHET GOTCHA: `size_ratchet.py --update` also
