@@ -242,7 +242,7 @@
     "tests/test_filedrop.py": 1004,
     "tests/test_fleet_concurrency_doctrine.py": 273,
     "tests/test_fleet_coordinator_971.py": 310,
-    "tests/test_fleet_feed_lag_1019.py": 277,
+    "tests/test_fleet_feed_lag_1019.py": 353,
     "tests/test_fleet_hygiene.py": 1022,
     "tests/test_fleet_sweep_903.py": 236,
     "tests/test_footer_role_998.py": 87,

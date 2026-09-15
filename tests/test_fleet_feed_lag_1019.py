@@ -205,6 +205,82 @@ class TestVerifyClaudyFeedMigration(unittest.TestCase):
             box_class="workstation")
         self.assertIsNone(out)
 
+    def test_controller_raising_read_facts_returns_none_never_raises(self):
+        # #1019 review R2 🔵: on the controller a FAILING facts read must be
+        # caught -> None (never propagate -> never affect install rc).
+        def boom():
+            raise RuntimeError("sudo blew up")
+        out = airuleset._verify_claudy_feed_migration(
+            read_facts=boom, box_class="controller")
+        self.assertIsNone(out)
+
+
+class TestFeedLagFallbackBranches(unittest.TestCase):
+    """#1019 review R2 🔵: lock the fail-safe fallback branches the seams'
+    internal try/except otherwise hide."""
+
+    def test_feed_mtimes_seam_raising_logs_no_alarm(self):
+        # the section's OWN try/except (not the seam's internal one) must catch a
+        # raising seam -> LOG, never an alarm.
+        def boom():
+            raise RuntimeError("seam blew up")
+        send = _Send()
+        logs = hb.run_conformance_heartbeat_check(
+            NOW, {}, send_fn=send, fleet_rows_fn=lambda: [], hosts_fn=lambda: [],
+            interval=6 * H, stale=36 * H, reping=72 * H,
+            collection_stale=12 * H, lookback=72 * H,
+            feed_mtimes_fn=boom, feed_lag_interval=1 * H, feed_lag_threshold=2 * H)
+        self.assertEqual(send.calls, [])
+        self.assertTrue(any("feed" in ln.lower() for ln in logs))
+
+
+class TestWiringLocks(unittest.TestCase):
+    """#1019 review R2 🔵: a wiring drop is the #618/#623 'deployed != effective'
+    class — lock the two production wirings so a future edit can't silently drop
+    the install verdict print or the guard's real I/O seam with no red test."""
+
+    def test_install_calls_the_migration_verdict(self):
+        import inspect
+        src = inspect.getsource(airuleset)
+        self.assertIn("_verify_claudy_feed_migration()", src,
+                      "cmd_install must call the migration verdict")
+
+    def test_guard_defaults_to_the_real_feed_seam(self):
+        import inspect
+        src = inspect.getsource(hb)
+        self.assertIn("feed_mtimes_fn = _default_feed_mtimes", src,
+                      "run_conformance_heartbeat_check must default to the "
+                      "production feed-mtimes seam")
+
+
+class TestReservedKeyCollisionGuard(unittest.TestCase):
+    """#1019 review R2 🔵: a deployable host whose NAME collides with a reserved
+    dedup key (incl. the new _FEEDLAG_KEY) is skipped, never pinged."""
+
+    def test_host_named_like_reserved_key_is_skipped(self):
+        send = _Send()
+        rows = [_row_hb(NOW - 48 * H, {hb._FEEDLAG_KEY: {"total_usd": 1.0}}),
+                _row_hb(NOW - 1 * H, {hb._FEEDLAG_KEY: {"error": "dead"}})]
+        hb.run_conformance_heartbeat_check(
+            NOW, {}, send_fn=send, fleet_rows_fn=lambda: rows,
+            hosts_fn=lambda: [{"name": hb._FEEDLAG_KEY}],
+            interval=6 * H, stale=36 * H, reping=72 * H,
+            collection_stale=12 * H, lookback=72 * H,
+            feed_mtimes_fn=lambda: (None, None),
+            feed_lag_interval=1 * H, feed_lag_threshold=2 * H)
+        # the reserved-name host is skipped -> no dead-box ping despite being dead
+        self.assertEqual(send.calls, [])
+
+
+def _iso(epoch):
+    import datetime
+    return datetime.datetime.fromtimestamp(
+        epoch, datetime.timezone.utc).astimezone().isoformat()
+
+
+def _row_hb(epoch, per_host):
+    return {"ts": _iso(epoch), "per_host": dict(per_host)}
+
 
 class _R:
     def __init__(self, rc, out=""):
