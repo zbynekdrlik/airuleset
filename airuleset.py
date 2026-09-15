@@ -1301,6 +1301,109 @@ def _provision_shared_fleet_dir():
               file=sys.stderr)
 
 
+def _claudy_home_feed_path():
+    """#1019: the feed path claudy CONSUMES — ~claudy/.claude/burn-history/
+    fleet.jsonl by default. Env AIRULESET_CLAUDY_FEED_PATH overrides (a
+    non-default deployment / tests). CLAUDY_FLEET (a claudy-side systemd env) is
+    the claudy project's own override; it is not currently set, so this default
+    home feed is the authoritative consumer — the guard/install checks also
+    honour a CLAUDY_FLEET value if one is later added (see the seams below)."""
+    override = os.environ.get("AIRULESET_CLAUDY_FEED_PATH")
+    if override:
+        return Path(override)
+    try:
+        import pwd
+        home = pwd.getpwnam("claudy").pw_dir
+    except (KeyError, ImportError):
+        home = "/home/claudy"
+    return Path(home) / ".claude" / "burn-history" / "fleet.jsonl"
+
+
+def _classify_claudy_feed(consumer_target, shared_feed, claudy_fleet_env=None):
+    """#1019 one-time migration verdict: does claudy consume the shared feed?
+    Returns ``(ok, line)``:
+      * ok True  — the home feed is a symlink whose target IS the shared feed,
+                   OR CLAUDY_FLEET resolves to it (claudy reads fresh data);
+      * ok False — a plain file / wrong target (claudy reads STALE data) → a
+                   LOUD mismatch line naming the shared feed to repoint to;
+      * ok None  — could not determine (sudo unavailable / claudy home
+                   unreadable) → a caveat, never a false mismatch.
+    Pure; never raises. The caller never fails install on this verdict."""
+    shared = os.path.normpath(shared_feed)
+    if claudy_fleet_env and os.path.normpath(claudy_fleet_env) == shared:
+        return (True, "  Claudy feed: OK — CLAUDY_FLEET → %s" % shared)
+    if consumer_target is None:
+        return (None, "  Claudy feed: NEZISTENÉ — konzument nečitateľný "
+                      "(sudo -n / claudy home) — over manuálne, že "
+                      "~claudy/.claude/burn-history/fleet.jsonl je symlink na %s"
+                      % shared)
+    if os.path.normpath(consumer_target) == shared:
+        return (True, "  Claudy feed: OK — symlink → %s" % shared)
+    return (False,
+            "  Claudy feed: NESÚLAD — claudy konzumuje %s, NIE zdieľaný feed %s "
+            "→ claudy číta STARÉ fleet dáta (#971 migráciu konzumenta vynechal). "
+            "Oprav: ln -sfn %s ~claudy/.claude/burn-history/fleet.jsonl "
+            "(alebo nastav CLAUDY_FLEET)." % (consumer_target, shared, shared))
+
+
+def _read_claudy_feed_facts():
+    """#1019 I/O seam for the install migration check → ``(consumer_target,
+    claudy_fleet_env)``. consumer_target = ``sudo -n readlink -f <claudy home
+    feed>`` (a symlink → its resolved target; a plain file → its own path),
+    None on any failure. claudy_fleet_env = best-effort CLAUDY_FLEET value from
+    claudy's systemd drop-ins (None if unset/unreadable). Read-only; never
+    writes claudy's home. The guard already relies on ``sudo -n`` read-only on
+    the controller (disk-guard root leg, _provision_shared_fleet_dir)."""
+    import subprocess
+    consumer_target = None
+    try:
+        r = subprocess.run(
+            ["sudo", "-n", "readlink", "-f", str(_claudy_home_feed_path())],
+            capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            consumer_target = r.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        consumer_target = None
+    claudy_fleet_env = None
+    try:
+        r = subprocess.run(
+            ["sudo", "-n", "grep", "-rhoE", r"CLAUDY_FLEET=\S+",
+             "/home/claudy/.config/systemd"],
+            capture_output=True, text=True, timeout=10)
+        if r.returncode == 0 and r.stdout.strip():
+            # last wins (systemd override precedence); strip the KEY= + quotes
+            last = r.stdout.strip().splitlines()[-1]
+            claudy_fleet_env = last.split("=", 1)[1].strip().strip('"')
+    except (OSError, subprocess.SubprocessError, IndexError):
+        claudy_fleet_env = None
+    return (consumer_target, claudy_fleet_env)
+
+
+def _verify_claudy_feed_migration(read_facts=None, box_class=None):
+    """#1019 unit (2): after _provision_shared_fleet_dir(), verify the one-time
+    migration #971 skipped — that claudy consumes the shared feed — and PRINT
+    the verdict. Controller-only; best-effort; NEVER changes install's rc (a
+    foreign home may be unreadable). Returns ``(ok, line)`` or None (a
+    non-controller box, where nothing is checked)."""
+    if box_class is None:
+        from watchdog.reaper import default_box_class
+        box_class = default_box_class()
+    if box_class != "controller":
+        return None
+    read_facts = read_facts or _read_claudy_feed_facts
+    try:
+        consumer_target, claudy_fleet_env = read_facts()
+        ok, line = _classify_claudy_feed(
+            consumer_target, str(SHARED_FLEET_DIR / "fleet.jsonl"),
+            claudy_fleet_env)
+    except Exception as e:
+        print("  Claudy feed: verdikt zlyhal — %s (non-fatal)" % e,
+              file=sys.stderr)
+        return None
+    print(line)
+    return (ok, line)
+
+
 def cmd_install(args):
     """Deploy config: generate CLAUDE.md, symlink skills, merge hooks."""
     _check_worktree_repo_dir("install")
@@ -1323,6 +1426,13 @@ def cmd_install(args):
     # world-readable fleet.jsonl here so claudy can read it without home-dir
     # ACLs. Loud skip when sudo is unavailable or box-class is not controller.
     _provision_shared_fleet_dir()
+
+    # --- #1019: one-time migration check #971 skipped — after the shared dir
+    # exists, verify claudy actually CONSUMES the shared feed (its home feed is
+    # a symlink to it, or CLAUDY_FLEET points at it) and PRINT the verdict.
+    # Controller-only, best-effort, NEVER fails install (a foreign home may be
+    # unreadable). The guard (watchdog job 35) is the ongoing counterpart.
+    _verify_claudy_feed_migration()
 
     # --- 1. Generate ~/.claude/CLAUDE.md ---
     modules, global_rules = categorize_entries(parse_profile(UNIVERSAL_PROFILE))

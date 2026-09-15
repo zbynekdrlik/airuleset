@@ -135,7 +135,13 @@ def _run(state, rows, hosts, send=None, dry_run=False, persist=None, now=NOW,
         interval=kw.get("interval", 6 * H), stale=kw.get("stale", 36 * H),
         reping=kw.get("reping", 72 * H),
         collection_stale=kw.get("collection_stale", 12 * H),
-        lookback=kw.get("lookback", 72 * H))
+        lookback=kw.get("lookback", 72 * H),
+        # #1019: these DEAD-BOX tests must not exercise the new feed-lag path;
+        # inject an UNMEASURABLE (None, None) seam so the feed-lag section is a
+        # deterministic no-op here regardless of the real box's fleet files.
+        # (The feed-lag path has its own dedicated tests in
+        # tests/test_fleet_feed_lag_1019.py.)
+        feed_mtimes_fn=kw.get("feed_mtimes_fn", lambda: (None, None)))
 
 
 class TestOrchestratorDeadBox(unittest.TestCase):
@@ -395,7 +401,9 @@ class TestCollectionStaleFloor(unittest.TestCase):
                 NOW, {}, send_fn=send, dry_run=False,
                 fleet_rows_fn=lambda: rows, hosts_fn=_hosts("boxA", "boxB"),
                 interval=6 * H, stale=36 * H, reping=72 * H, lookback=72 * H,
-                collection_stale=None)   # None -> default resolution -> clamp
+                collection_stale=None,   # None -> default resolution -> clamp
+                # #1019: neutralise the new feed-lag path deterministically here.
+                feed_mtimes_fn=lambda: (None, None))
         # floored to >=1h -> the 1h-old row is FRESH -> per-box runs -> all alive
         # -> NO ping (a mutant that drops the floor makes this a collector ping).
         self.assertEqual(send.calls, [])

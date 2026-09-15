@@ -105,6 +105,28 @@ CONFORMANCE_HB_LOOKBACK_S = 4 * 24 * 3600  # how far back a host must APPEAR (fr
 _COLLECTION_KEY = "__collection__"          # reserved dedup key: collector-stalled ping
 _ALLFLEET_KEY = "__allfleet__"              # reserved dedup key: whole-fleet-down ping
                                             # (#543 review F1 aggregate — see below)
+_FEEDLAG_KEY = "__feedlag__"                # reserved dedup key: consumer-feed-lag ping
+                                            # (#1019 — the feed claudy CONSUMES is
+                                            # stale vs the producer)
+
+# --- #1019 CONSUMER-FEED-LAG constants -------------------------------------
+# #971 moved the fleet PRODUCER to /var/lib/airuleset/fleet.jsonl but added no
+# check that the file claudy actually READS advances with it; a frozen consumer
+# went unnoticed for 3.5 days. This guard section watches that gap on its OWN
+# hourly cadence (the ticket's "malo zaznieť do hodiny"), independent of the 6h
+# dead-box scan — no new job/timer, it rides the same job-35 send/persist/dedup
+# seams.
+FEED_LAG_CHECK_S = 3600                     # env AIRULESET_FLEET_LAG_CHECK_S — how
+                                            # often the feed-age check runs; hourly
+                                            # matches the producer's own hourly write
+FEED_LAG_CHECK_MIN_S = 300                  # floor for the env override (#504): a
+                                            # sub-5min value would run every sweep
+FEED_LAG_STALE_S = 2 * 3600                 # env AIRULESET_FLEET_LAG_STALE_S — the
+                                            # ticket's threshold: consumer more than
+                                            # this behind the producer = alarm
+FEED_LAG_STALE_MIN_S = 3600                # floor: a sub-1h threshold would alarm on
+                                            # ordinary hourly-write jitter (a healthy
+                                            # non-symlink hourly sync lags up to ~1h)
 
 
 def _env_int(key, default_s):
@@ -195,6 +217,116 @@ def classify_box(host, last_fresh_ts, present, now, stale_s):
             "box `%s` žije (posledný signál pred ~%dh)" % (host, round(age / 3600)))
 
 
+def classify_feed_lag(producer_mtime, consumer_mtime, now, lag_s):
+    """#1019 — is the fleet feed claudy CONSUMES fresh vs the PRODUCER? Both are
+    epoch-seconds mtimes (``None`` = the file was unreadable). ``now`` is unused
+    for the verdict itself (the lag is producer-vs-consumer, not vs wall-clock)
+    but kept in the signature for symmetry with the other deciders + future use.
+    Returns ``(name, ok, detail)`` with the same THREE-valued ``ok`` contract:
+
+      * ``True``  — consumer within ``lag_s`` of the producer (or AHEAD) → fresh;
+      * ``False`` — consumer more than ``lag_s`` behind the producer → ALARM;
+      * ``None``  — either mtime unreadable → UNMEASURABLE, LOGGED, never an alarm
+                    (the dispatch's hard constraint: an unreadable path must not
+                    false-alarm — a healthy symlink read via sudo, a missing
+                    producer on a fresh box, both land here safely).
+    """
+    if producer_mtime is None:
+        return ("feed", None,
+                "producentský feed /var/lib/airuleset/fleet.jsonl nečitateľný — "
+                "kontrola veku preskočená (žiaden alarm)")
+    if consumer_mtime is None:
+        return ("feed", None,
+                "konzumovaný feed (claudy) nečitateľný — nemerateľné, žiaden alarm")
+    lag = producer_mtime - consumer_mtime
+    if lag <= lag_s:
+        return ("feed", True,
+                "konzumovaný feed čerstvý (za producentom ~%dm)"
+                % round(max(lag, 0) / 60))
+    return ("feed", False,
+            "konzumovaný fleet feed (claudy) zaostáva za producentom o ~%dh — "
+            "claudy číta STARÉ fleet dáta (dashboard/detaily zamrznuté). Over "
+            "symlink ~claudy/.claude/burn-history/fleet.jsonl → "
+            "/var/lib/airuleset/fleet.jsonl (alebo CLAUDY_FLEET)." % round(lag / 3600))
+
+
+def _sig_for_feed(consumer_mtime):
+    """Dedup signature for a feed-lag episode. Keyed on the FROZEN consumer mtime:
+    while the consumer stays stuck the sig is stable (no re-ping until ``reping``);
+    when it advances and later freezes at a NEW instant that is a NEW episode
+    (re-ping immediately). Mirrors ``_sig_for_box``. ``None`` never reaches here
+    (an unreadable consumer is UNMEASURABLE, handled before the ping)."""
+    return "feedlag:%d" % int(consumer_mtime)
+
+
+def _default_feed_mtimes():
+    """Default I/O seam for the feed-lag check: ``(producer_mtime, consumer_mtime)``
+    in epoch seconds, each ``None`` on any read failure. PRODUCER
+    (/var/lib/airuleset/fleet.jsonl) is owned by this account → direct ``os.stat``.
+    CONSUMER (claudy's home feed) is under a foreign home not traversable by this
+    account, so it is read via ``sudo -n stat -L -c %Y`` — the ``-L`` DEREFERENCES
+    the symlink (GNU stat does NOT follow links by default; a bare ``stat`` returns
+    the LINK's own mtime = when the symlink was created, a false lag) → the mtime
+    of the DATA claudy actually reads (a healthy symlink to the producer gives the
+    SAME mtime → lag ~0 → no alarm; a broken symlink → stat fails → None →
+    UNMEASURABLE). ``os.stat`` on the producer likewise follows any symlink.
+    Read-only, best-effort: the guard already relies on ``sudo -n`` on the
+    controller (disk-guard root leg, ``_provision_shared_fleet_dir``); any
+    failure → ``None`` → UNMEASURABLE (never a false alarm)."""
+    import airuleset
+    import subprocess
+    producer = None
+    try:
+        producer = os.stat(airuleset.SHARED_FLEET_DIR / "fleet.jsonl").st_mtime
+    except OSError:
+        producer = None
+    consumer = None
+    try:
+        consumer_path = str(airuleset._claudy_home_feed_path())
+        r = subprocess.run(["sudo", "-n", "stat", "-L", "-c", "%Y", consumer_path],
+                           capture_output=True, text=True, timeout=10)
+        if r.returncode == 0:
+            consumer = float(r.stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        consumer = None
+    return (producer, consumer)
+
+
+def _check_feed_lag(now, state, seen, send_fn, dry_run, persist, logs,
+                    feed_mtimes_fn, interval, threshold, reping):
+    """#1019 — the consumer-feed-lag section of job 35, on its OWN hourly cadence
+    (``feed_lag_last_check``), placed BEFORE the 6h dead-box gate so a stale
+    consumer is caught within the hour rather than after up to 6h. Reuses the
+    job's ``seen`` dedup dict (key ``_FEEDLAG_KEY``), ``_ping``, ``send_fn`` and
+    ``persist`` — no new store. Best-effort; an unmeasurable read LOGS and never
+    alarms."""
+    if not watchdog._sweep_due(state, "feed_lag_last_check", now, interval):
+        return
+    if not dry_run:
+        # #172 kill-safety: stamp + persist the cadence marker BEFORE the read.
+        state["feed_lag_last_check"] = now
+        persist()
+    try:
+        producer_mtime, consumer_mtime = feed_mtimes_fn()
+    except Exception as e:
+        logs.append("conformance-hb [feed] mtime read zlyhal (%r) — preskočené"
+                    % (e,))
+        return
+    name, ok, detail = classify_feed_lag(producer_mtime, consumer_mtime, now,
+                                         threshold)
+    logs.append("conformance-hb [feed] %s -- %s"
+                % ({True: "OK", False: "LAG", None: "unknown"}[ok], detail))
+    if ok is None:
+        return                                    # unmeasurable — never an alarm
+    if ok is True:
+        if _FEEDLAG_KEY in seen and not dry_run:
+            seen.pop(_FEEDLAG_KEY, None)          # caught up — episode cleared
+        return
+    _ping(send_fn, seen, _FEEDLAG_KEY, _sig_for_feed(consumer_mtime), detail,
+          now, reping, dry_run, persist, logs, "feed",
+          "🔴 **fleet feed zastal (konzument)**")
+
+
 def _sig_for_box(last_fresh_ts):
     """Dedup signature for a dead-box episode. Keyed on the last-fresh instant:
     a box that recovers (fresh advances) then dies AGAIN gets a NEW sig, so the
@@ -275,14 +407,22 @@ def run_conformance_heartbeat_check(now, state, send_fn=None, dry_run=False,
                                     fleet_rows_fn=None, hosts_fn=None,
                                     interval=None, stale=None, reping=None,
                                     collection_stale=None, lookback=None,
-                                    persist=None):
-    """Job 35: the central dead-box sweep, dev1-only (gated in ``run_once`` on
-    ``conformance_hb_enabled``). Cadence-gated on its own state key
+                                    persist=None, feed_mtimes_fn=None,
+                                    feed_lag_interval=None,
+                                    feed_lag_threshold=None):
+    """Job 35: the central dead-box sweep, controller-only (gated in ``run_once``
+    on ``conformance_hb_enabled``). Cadence-gated on its own state key
     ``conformance_hb_last_check`` (``_sweep_due``); the marker is stamped +
     persisted BEFORE any read (#172 kill-safe). Best-effort — every verdict
     fails safe to UNDETERMINED, never a raise, never a false alarm. Returns a
     decision log line per box (#486). ``dry_run`` mutates no persistent state
-    and sends nothing (peek pattern)."""
+    and sends nothing (peek pattern).
+
+    #1019: ALSO runs a CONSUMER-FEED-LAG check (``_check_feed_lag``) on its OWN
+    hourly cadence (``feed_lag_last_check``), BEFORE the 6h dead-box gate, so a
+    frozen consumer feed is caught within the hour. ``feed_mtimes_fn`` is the
+    injectable I/O seam (default ``_default_feed_mtimes``); ``feed_lag_interval``
+    / ``feed_lag_threshold`` default from the env + floors below."""
     persist = persist or (lambda: None)
     if fleet_rows_fn is None:
         import burn
@@ -311,8 +451,27 @@ def run_conformance_heartbeat_check(now, state, send_fn=None, dry_run=False,
             CONFORMANCE_HB_COLLECTION_STALE_MIN_S)
     if lookback is None:
         lookback = CONFORMANCE_HB_LOOKBACK_S
+    if feed_mtimes_fn is None:
+        feed_mtimes_fn = _default_feed_mtimes
+    if feed_lag_interval is None:
+        feed_lag_interval = max(_env_int("AIRULESET_FLEET_LAG_CHECK_S",
+                                         FEED_LAG_CHECK_S), FEED_LAG_CHECK_MIN_S)
+    if feed_lag_threshold is None:
+        feed_lag_threshold = max(_env_int("AIRULESET_FLEET_LAG_STALE_S",
+                                          FEED_LAG_STALE_S), FEED_LAG_STALE_MIN_S)
 
     logs = []
+    # The dedup memory is SHARED by the feed-lag section (below) and the dead-box
+    # scan; load it ONCE here (moved earlier — #1019) so both use the same dict.
+    seen = dict(state.get("conformance_heartbeat") or {})
+    if not dry_run:
+        state["conformance_heartbeat"] = seen     # same dict from here on (#172-F3)
+
+    # --- #1019 consumer-feed-lag check: OWN hourly cadence, BEFORE the 6h gate ---
+    _check_feed_lag(now, state, seen, send_fn, dry_run, persist, logs,
+                    feed_mtimes_fn, feed_lag_interval, feed_lag_threshold, reping)
+
+    # --- dead-box scan: 6h cadence ---
     if not watchdog._sweep_due(state, "conformance_hb_last_check", now, interval):
         return logs
     if not dry_run:
@@ -331,10 +490,6 @@ def run_conformance_heartbeat_check(now, state, send_fn=None, dry_run=False,
         return logs
 
     latest_ts, last_fresh, present = _scan(rows, now, lookback)
-
-    seen = dict(state.get("conformance_heartbeat") or {})
-    if not dry_run:
-        state["conformance_heartbeat"] = seen     # same dict from here on (#172-F3)
 
     # --- collection health first (the fail-safe gate) ---
     cname, cok, cdetail = classify_collection(latest_ts, now, collection_stale)
