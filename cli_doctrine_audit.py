@@ -233,7 +233,7 @@ def is_owner_preference(path, fm):
     base = os.path.basename(path).lower()
     if base.startswith("feedback_") or base.startswith("feedback-"):
         return True
-    return (fm.get("type", "") or "").lower() in ("feedback", "user")
+    return (fm.get("type", "") or "").lower() == "user"
 
 
 def has_tenant_token(path, text):
