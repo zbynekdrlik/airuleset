@@ -262,8 +262,8 @@ def is_owner_preference(path, fm):
 def has_tenant_token(path, fm, body):
     """True when a known client/stream identity is the memory's SUBJECT -- it
     appears in the FILENAME or the frontmatter ``description:`` (fallback when
-    there is no description: the body's first heading, via ``first_heading``).
-    The BODY is never scanned.
+    there is no non-empty description -- absent, or empty/whitespace-only: the
+    body's first heading, via ``first_heading``). The BODY is never scanned.
 
     Subject-scoped on purpose (#1028 fix-forward-2, comment 5691229806): the
     HIGH -> MEDIUM tenant demotion protects a memory whose SUBJECT is a client,
