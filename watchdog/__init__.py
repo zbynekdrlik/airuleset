@@ -1749,6 +1749,19 @@ _BUDGET_MIN_GH_FETCH_S = 20       # a single gh timeline read (timeout ~15) + ma
 # lost mark. 25 = one repo (~15s) + margin; the batch's own per-repo write-through,
 # not this floor, bounds the multi-repo tail (#1041 review-1 F4).
 _BUDGET_MIN_GH_BATCH_S = 25
+# #1050 — Job 36 gk_orphan_marker_sweep. UNLIKE the repo-batched jobs above, its
+# cost is a per-candidate gh READ loop (up to 60 `gh issue view` + 2×20 handoff
+# views) with no cursor batching — so a bare GH_BATCH floor (25) let it START at
+# 25s of budget and then run the 60-view loop into the 120s kill (gk 2026-09-16
+# 09:14 + 15:15). The job now carries its OWN in-job wall-clock bound
+# (`_SweepBudget`, `_GKORPHAN_SWEEP_BUDGET_S`=20) + a single-overshoot guarantee,
+# so this floor = that bound + one in-flight read (`_GKORPHAN_GH_READ_S`=20, the
+# worst single gh read = the paginated `_gk_ever_labeled` @ 20s). A job that
+# STARTS with >= this floor of soft-cap budget completes within the bound, well
+# under the soft cap. Kept in sync with cross_stream's two constants by the #1050
+# value-lock test (min_budget == bound + one_read, and min_budget + bound +
+# one_read < SWEEP_SOFT_CAP_S).
+_BUDGET_MIN_GK_ORPHAN_S = 40     # == cross_stream._GKORPHAN_SWEEP_BUDGET_S (20) + _GKORPHAN_GH_READ_S (20)
 _BUDGET_MIN_SSH_FLEET_S = 65      # ssh fanout across fleet hosts (per-host ~60), hour-gated, coordinator-only
 _BUDGET_MIN_HTTP_PROBE_S = 15     # a single HTTP GET (usage timeout 12 / healthz 8) + margin
 _BUDGET_MIN_PS_REAPER_S = 10      # a ps read + targeted kill / a per-pane tmux round-trip (fast subprocess)
@@ -4826,6 +4839,14 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # `gkorphan_fetch` being wired (network-free tests for every other job,
     # exactly like jobs 8/11/31). Supervisor-box + cross-stream-repo only;
     # generous 6h internal cadence; best-effort, never a false accusation.
+    # #1050: min_budget raised to `_BUDGET_MIN_GK_ORPHAN_S` (the in-job
+    # `_SweepBudget` bound + one in-flight read) so it never starts the 60-view
+    # loop without enough soft-cap budget to finish it. gh_poll_hold=True: its
+    # dominant cost is the gh READ fetch (unlike gk_request_backstop, whose
+    # owner-facing WRITES must never be delayed — #1040 review-2), and its rare
+    # backstop write is non-urgent (6h cadence), so holding it out of a gh-rate
+    # throttle episode protects the scarce budget and composes with the #1050
+    # sweep bound.
     _add("gk_orphan_marker_sweep", lambda: gkorphan_fetch is not None,
          lambda: gk_orphan_marker_sweep(
              now, run, state, send_fn=send_fn, dry_run=dry_run,
@@ -4835,7 +4856,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              # ONLY the mutated pass (byte-identical to #551).
              handoff_fetch=gkorphan_handoff_fetch,
              persist=lambda: save_state(state_path, state)),
-         "gk-orphan-marker-sweep error", min_budget=_BUDGET_MIN_GH_BATCH_S)
+         "gk-orphan-marker-sweep error", min_budget=_BUDGET_MIN_GK_ORPHAN_S,
+         gh_poll_hold=True)  # #1050 heavy-read poller; rare backstop write is non-urgent
 
     # Job 37 (#776) — RUNAWAY SHADOW-UGREP OS-PROCESS REAPER (the FIRST
     # OS-process reaper in the watchdog). Runs on EVERY box (a runaway ugrep

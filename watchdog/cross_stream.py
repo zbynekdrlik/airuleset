@@ -1450,6 +1450,65 @@ def _comment_handoff_window_s():
         v = GK_COMMENT_HANDOFF_WINDOW_S
     return max(v, GK_COMMENT_HANDOFF_WINDOW_MIN_S)
 
+# --------------------------------------------------------------------------- #
+# #1050 — a TOTAL wall-clock budget for Job 36's per-item gh loops, the same
+# `time_fn`/`budget_s` idiom `watchdog/deploy_state.py::fetch_deploy_state` uses
+# (introduced by the #1041 review-2). Job 36's dominant cost is the per-candidate
+# `gh issue view` loop inside `_fetch_gk_orphan_candidates` (up to 60 sequential
+# reads at a 15s timeout, plus a paginated `_gk_ever_labeled` at 20s for the ~0
+# past the cheap gate) and inside `_fetch_gk_comment_handoffs` (per marker type:
+# a search + up to 20 views). A 25s registry start floor cannot protect the sweep
+# once that loop begins: gk 2026-09-16 09:14:33 / 15:15:42 both started Job 36 at
+# 50s / 30s of the 100s soft-cap budget left and ran the unit into the 120s
+# `TimeoutStartSec` kill. `_SweepBudget` bounds every gh op in the job by a shared
+# monotonic deadline, with a JOB-WIDE single-overshoot guarantee, so the sweep's
+# total gh wall clock is `bound + one in-flight read` regardless of gh latency.
+_GKORPHAN_SWEEP_BUDGET_S = 20      # the in-job bound (mirrors DEPLOY_STATE_FETCH_BUDGET_S=20;
+                                   # ~ the 15-20s per-item gh read timeouts)
+_GKORPHAN_GH_READ_S = 20          # one in-flight read overshoot: the WORST single gh read
+                                   # (the paginated `_gk_ever_labeled` at 20s; also >= the
+                                   # per-candidate `gh issue view` at 15s). A loop that checks
+                                   # the deadline before an item can still overshoot by ONE
+                                   # read that STARTED under budget — this is that ceiling,
+                                   # exactly like deploy_state's "budget + ~15s" note.
+                                   # `_BUDGET_MIN_GK_ORPHAN_S` (run_once) == the sum of these.
+
+
+class _SweepBudget:
+    """#1050 — a TOTAL wall-clock budget for Job 36's gh work, the same
+    `time_fn`/`budget_s` seam `fetch_deploy_state` uses. TWO checks:
+
+      * `may_start_op()` gates a gh op (a fetch's search/view/timeline read, or a
+        reconcile write) with a JOB-WIDE SINGLE-OVERSHOOT guarantee: the FIRST gh
+        op of the whole sweep always runs (so a sweep makes at least SOME
+        progress), and after that only an op that STARTS under the deadline runs —
+        so at most ONE in-flight read overshoots the deadline. Used inside the
+        fetches AND before every reconcile write.
+      * `spent()` is a plain deadline check for a caller that keeps its own
+        'process at least one item' guard.
+
+    A `budget_s` of None (unwired) never bounds — the fail-open 'wired = on'
+    convention this file uses everywhere, so every pre-#1050 caller (and every
+    network-free unit test) is byte-identical."""
+
+    def __init__(self, time_fn=None, budget_s=None):
+        self.time_fn = time_fn or time.monotonic
+        self.deadline = (self.time_fn() + budget_s) if budget_s is not None else None
+        self._first_op_done = False
+
+    def spent(self):
+        return self.deadline is not None and self.time_fn() >= self.deadline
+
+    def may_start_op(self):
+        if self.deadline is None:
+            return True
+        over = self.time_fn() >= self.deadline
+        if not self._first_op_done:
+            self._first_op_done = True     # bootstrap: the sweep's first op always runs
+            return True
+        return not over
+
+
 _GKORPHAN_EVIDENCE_TEMPLATE = (
     "gk hand-off backstop (airuleset#551): tento tiket nesie MUTOVANÝ "
     "`GATEKEEPER-ACTION` hand-off marker v komente, ktorý repo auto-label "
@@ -1526,7 +1585,7 @@ def _gk_orphan_decide(has_mutated, has_proper, currently_labeled, ga_title,
     return True, "orphaned-mutated-marker"
 
 
-def _fetch_gk_orphan_candidates(root, home=None):
+def _fetch_gk_orphan_candidates(root, home=None, budget=None, logs=None):
     """Live candidate facts for the orphan sweep at `root`, or None on ANY
     error (fail-safe — an auth/network hiccup must never look like a real
     orphan). Returns a list of dicts, each with the facts `_gk_orphan_decide`
@@ -1538,20 +1597,28 @@ def _fetch_gk_orphan_candidates(root, home=None):
     authoritative labels/title/comments — the search's own `-label` filter and
     `in:comments` match both LAG the index and TOKENIZE, so nothing the search
     says is trusted, it only bounds the set. Candidates are freshest-first
-    (updatedAt DESC — a live orphan is a fresh waiting hand-off). ALL fetched
-    (≤60) are classified — at the deliberately-generous 6h cadence, ~60 `gh
-    issue view` calls once every 6h is well inside the 120s sweep budget and
-    GitHub rate limits, and classifying only the freshest N would silently
-    blind ~35 candidates on this 60-candidate repo (adversarial review F3/F4;
-    no per-candidate verdict cache is needed at this cadence). The PAGINATED
-    timeline read (the `ever_labeled` fact) fires ONLY for a candidate already
-    past the cheap gate (mutated ∧ ¬proper ∧ ¬flow ∧ ¬labeled ∧ ¬ga_title) —
-    ≈0 per sweep on real data — so its cost is negligible. Honest residual: a
+    (updatedAt DESC — a live orphan is a fresh waiting hand-off).
+
+    #1050 — the per-candidate `gh issue view` loop is BOUNDED by `budget`
+    (a `_SweepBudget`, unwired None = no bound): before each candidate read the
+    budget is consulted, and once the shared sweep deadline is spent the loop
+    STOPS after the current in-flight read; the un-classified tail (the OLDEST
+    candidates, since freshest-first) is re-read next, less-loaded sweep — the
+    same fail-safe-fewer trade `fetch_deploy_state` makes. On a healthy box the
+    ~60 views finish inside the budget and every candidate is still classified;
+    the bound only ever truncates a saturated-box sweep that would otherwise run
+    the unit into the 120s kill. Honest residual (unchanged from #551): a
     LONG-parked orphan (frozen updatedAt) on a repo with >60 token-bearing open
-    tickets can sink past the search's own `-L 60` and be unseen; job 11's own
-    stale-handoff alarm is a separate backstop for a parked hand-off."""
+    tickets can sink past the search's own `-L 60`; job 11's own stale-handoff
+    alarm is a separate backstop. The PAGINATED timeline read (the `ever_labeled`
+    fact) fires ONLY for a candidate past the cheap gate (mutated ∧ ¬proper ∧
+    ¬flow ∧ ¬labeled ∧ ¬ga_title) AND under budget — ≈0 per sweep on real data;
+    when the budget skips it, `ever_labeled` stays None → `timeline-undeterminable`
+    → fail-safe not-orphan, re-decided next sweep."""
     import subprocess
     env = _gh_env(home)
+    if budget is not None and not budget.may_start_op():
+        return []                              # #1050 — budget spent before the search
     try:
         r = subprocess.run(
             ["gh", "issue", "list", "--state", "open", "--search",
@@ -1569,7 +1636,14 @@ def _fetch_gk_orphan_candidates(root, home=None):
             if not str(x.get("title", "")).startswith("GATEKEEPER-ACTION")]
     rows.sort(key=lambda x: str(x.get("updatedAt") or ""), reverse=True)
     out = []
-    for x in rows:
+    total = len(rows)
+    for i, x in enumerate(rows):
+        if budget is not None and not budget.may_start_op():
+            if logs is not None:
+                logs.append("gk-orphan-marker-sweep: budget spent after %d/%d items "
+                            "(mutated fetch %s) — rest re-read next sweep"
+                            % (i, total, os.path.basename(root.rstrip("/"))))
+            break
         num = x.get("number")
         try:
             v = subprocess.run(
@@ -1592,7 +1666,8 @@ def _fetch_gk_orphan_candidates(root, home=None):
         ga_title = title.startswith("GATEKEEPER-ACTION")
         ever_labeled = None
         if has_mutated and not has_proper and not handoff_flow \
-                and not currently_labeled and not ga_title:
+                and not currently_labeled and not ga_title \
+                and (budget is None or budget.may_start_op()):
             ever_labeled = _gk_ever_labeled(root, num, env)
         out.append({"number": num, "has_mutated": has_mutated,
                     "has_proper": has_proper, "handoff_flow": handoff_flow,
@@ -1681,7 +1756,7 @@ def _gk_comment_handoff_decide(marker_in_window, currently_labeled,
     return True, "orphaned-comment-handoff"
 
 
-def _fetch_gk_comment_handoffs(root, home, now, window_s):
+def _fetch_gk_comment_handoffs(root, home, now, window_s, budget=None, logs=None):
     """Live candidate facts for the comment-handoff backstop at `root`, or None
     on ANY error (fail-safe — an auth/network hiccup must never look like a real
     hand-off). Returns a list of dicts, each with what `_gk_comment_handoff_decide`
@@ -1699,7 +1774,14 @@ def _fetch_gk_comment_handoffs(root, home, now, window_s):
     PAGINATED timeline read (`ever_labeled` for the TARGET label) fires ONLY for
     a candidate already past the cheap gate (marker-in-window ∧ ¬labeled ∧
     ¬flow) — ≈0 per sweep on real data. `GK_COMMENT_HANDOFF_MAX_CANDIDATES`
-    caps the detail fetches per marker type."""
+    caps the detail fetches per marker type.
+
+    #1050 — `budget` (a `_SweepBudget`, unwired None = no bound) bounds the
+    per-marker search AND the per-candidate `gh issue view`/timeline reads by the
+    SAME shared sweep deadline the mutated fetch uses, with the same job-wide
+    single-overshoot guarantee: once spent the outer per-marker loop and the inner
+    per-candidate loop STOP after the current in-flight read; the tail is re-read
+    next, less-loaded sweep."""
     import subprocess
     env = _gh_env(home)
     from datetime import datetime, timezone
@@ -1707,6 +1789,12 @@ def _fetch_gk_comment_handoffs(root, home, now, window_s):
         max(0.0, now - window_s), tz=timezone.utc).strftime("%Y-%m-%d")
     out = []
     for marker_re, token, target_label, flow_labels in _GK_COMMENT_HANDOFF_MARKERS:
+        if budget is not None and not budget.may_start_op():
+            if logs is not None:
+                logs.append("gk-orphan-marker-sweep: budget spent (handoff fetch %s) "
+                            "— remaining marker types re-read next sweep"
+                            % os.path.basename(root.rstrip("/")))
+            break
         try:
             r = subprocess.run(
                 ["gh", "issue", "list", "--state", "open", "--search",
@@ -1722,7 +1810,14 @@ def _fetch_gk_comment_handoffs(root, home, now, window_s):
             return None
         # freshest first — a live hand-off is a recently-touched ticket.
         rows.sort(key=lambda x: str(x.get("updatedAt") or ""), reverse=True)
-        for x in rows[:GK_COMMENT_HANDOFF_MAX_CANDIDATES]:
+        for j, x in enumerate(rows[:GK_COMMENT_HANDOFF_MAX_CANDIDATES]):
+            if budget is not None and not budget.may_start_op():
+                if logs is not None:
+                    logs.append("gk-orphan-marker-sweep: budget spent after %d/%d items "
+                                "(handoff fetch %s/%s) — rest re-read next sweep"
+                                % (j, min(len(rows), GK_COMMENT_HANDOFF_MAX_CANDIDATES),
+                                   os.path.basename(root.rstrip("/")), target_label))
+                break
             num = x.get("number")
             try:
                 v = subprocess.run(
@@ -1742,7 +1837,8 @@ def _fetch_gk_comment_handoffs(root, home, now, window_s):
             currently_labeled = target_label in labels
             handoff_flow = bool(labels & flow_labels)
             ever_labeled = None
-            if marker_in_window and not currently_labeled and not handoff_flow:
+            if marker_in_window and not currently_labeled and not handoff_flow \
+                    and (budget is None or budget.may_start_op()):
                 ever_labeled = _gk_ever_labeled(root, num, env, label=target_label)
             out.append({"number": num, "target_label": target_label,
                         "marker_in_window": marker_in_window,
@@ -1837,7 +1933,7 @@ def _apply_gk_orphan_reconcile(root, num, home=None, dry_run=False):
 
 
 def _gk_comment_handoff_pass(root, name, now, dry_run, handoff_fetch,
-                             handoff_apply, send_fn, seen, persist):
+                             handoff_apply, send_fn, seen, persist, budget=None):
     """#570 — the PARALLEL comment-handoff pass for ONE root, run inside
     `gk_orphan_marker_sweep`'s per-root loop AFTER the mutated pass. Extracted
     module-level so the sweep function stays small (the #509/#511 capped-function
@@ -1847,12 +1943,19 @@ def _gk_comment_handoff_pass(root, name, now, dry_run, handoff_fetch,
     dedup sub-namespace in the SHARED `seen`, same kill-safe persist-before-
     mutate + tri-state + #516 dry-run-no-latch discipline as the mutated pass.
     Returns log lines. Never raises (the caller's per-job try/except is the
-    final net; this stays defensive so one bad root never kills the pass)."""
+    final net; this stays defensive so one bad root never kills the pass).
+
+    #1050 — `handoff_fetch` is called with the shared `budget` (a `_SweepBudget`,
+    unwired None = no bound) so its own per-marker/per-candidate reads are
+    bounded, and each reconcile WRITE is gated by `budget.may_start_op()` (the
+    job-wide single-overshoot guarantee); a reconcile deferred by a spent budget
+    keeps NO dedup and is retried next sweep (the orphan is not lost)."""
     logs = []
-    candidates = handoff_fetch(root)
+    candidates = handoff_fetch(root, budget=budget, logs=logs)
     if candidates is None:
         return logs                            # gh error → keep prior state
-    for c in candidates:
+    n_cand = len(candidates)
+    for i, c in enumerate(candidates):
         num = c.get("number")
         target_label = c.get("target_label")
         is_handoff, reason = _gk_comment_handoff_decide(
@@ -1868,6 +1971,13 @@ def _gk_comment_handoff_pass(root, name, now, dry_run, handoff_fetch,
         if dry_run:
             logs.append("gk-handoff-reconcile %s (dry-run)" % key)
             continue
+        if budget is not None and not budget.may_start_op():
+            # #1050 — budget spent before this reconcile write; defer (no dedup
+            # latched, so it retries next sweep) and stop the pass.
+            logs.append("gk-orphan-marker-sweep: budget spent after %d/%d items "
+                        "(handoff %s) — deferring reconcile of %s to next sweep"
+                        % (i, n_cand, name, key))
+            break
         seen[key] = int(now)                   # dedup BEFORE the mutation (#193)
         persist()
         result = handoff_apply(root, num, target_label)
@@ -1893,7 +2003,7 @@ def _gk_comment_handoff_pass(root, name, now, dry_run, handoff_fetch,
 def gk_orphan_marker_sweep(now, run, state, send_fn, home=None, dry_run=False,
                            gh_fetch=None, apply_fn=None, interval=None,
                            persist=None, user=None, handoff_fetch=None,
-                           handoff_apply=None):
+                           handoff_apply=None, time_fn=None, budget_s=None):
     """Job 36 (#551 + #570) — see the section comment. Runs ONLY on a supervisor
     (full-authority) box (`_gkreq_supervisor_root`), for cross-stream repos
     (`_repo_in_cross_stream_flow`); a reduced-stream box never reconciles (it
@@ -1911,7 +2021,20 @@ def gk_orphan_marker_sweep(now, run, state, send_fn, home=None, dry_run=False,
     `GATEKEEPER-ACTION:`/`READY-FOR-REVIEW:` marker COMMENT (created in the last
     ~48h) that never got its matching label — adding the label so the gk queue
     sees the hand-off. Its `handoff:` dedup sub-namespace lives in the SAME
-    `seen` dict."""
+    `seen` dict.
+
+    #1050 — a TOTAL wall-clock budget (`_SweepBudget(time_fn, budget_s)`, the
+    `fetch_deploy_state` idiom) bounds ALL gh work in the sweep: both fetches'
+    per-item read loops AND every reconcile write are gated by the SAME shared
+    monotonic deadline with a job-wide single-overshoot guarantee, so the sweep's
+    total gh wall clock is `budget_s + one in-flight read` regardless of gh
+    latency and it can never run the unit into the 120s `TimeoutStartSec` kill
+    (the gk 2026-09-16 incident). A deferred candidate/reconcile is re-read next,
+    less-loaded sweep (dedup marks stay persisted per PROCESSED item, so a
+    mid-loop kill loses nothing already handled). The registry raises Job 36's
+    `min_budget` to `_BUDGET_MIN_GK_ORPHAN_S` (= `_GKORPHAN_SWEEP_BUDGET_S` +
+    `_GKORPHAN_GH_READ_S`) so it only STARTS with enough soft-cap budget to
+    finish within the bound. `budget_s=None` defaults to `_GKORPHAN_SWEEP_BUDGET_S`."""
     interval = watchdog.GKORPHAN_INTERVAL if interval is None else interval
     if user is None:
         import getpass
@@ -1928,7 +2051,13 @@ def gk_orphan_marker_sweep(now, run, state, send_fn, home=None, dry_run=False,
     seen = dict(g.get("seen") or {})
     g["seen"] = seen
     state["gkorphan"] = g
-    fetch = gh_fetch or (lambda root: _fetch_gk_orphan_candidates(root, home))
+    # #1050 — ONE shared wall-clock budget for the whole sweep's gh work.
+    budget = _SweepBudget(
+        time_fn,
+        _GKORPHAN_SWEEP_BUDGET_S if budget_s is None else budget_s)
+    fetch = gh_fetch or (
+        lambda root, budget=None, logs=None: _fetch_gk_orphan_candidates(
+            root, home, budget=budget, logs=logs))
     apply_reconcile = apply_fn or (
         lambda root, num: _apply_gk_orphan_reconcile(root, num, home, dry_run))
     # #570 — the comment-handoff pass is wired = on. When `handoff_fetch` is not
@@ -1956,11 +2085,12 @@ def gk_orphan_marker_sweep(now, run, state, send_fn, home=None, dry_run=False,
         if handoff_fetch is not None:
             logs += _gk_comment_handoff_pass(
                 root, name, now, dry_run, handoff_fetch, happly, send_fn,
-                seen, persist)
-        candidates = fetch(root)
+                seen, persist, budget=budget)
+        candidates = fetch(root, budget=budget, logs=logs)
         if candidates is None:
             continue                           # gh error → keep prior state
-        for c in candidates:
+        n_cand = len(candidates)
+        for i, c in enumerate(candidates):
             num = c.get("number")
             is_orphan, reason = _gk_orphan_decide(
                 c.get("has_mutated"), c.get("has_proper"),
@@ -1978,6 +2108,14 @@ def gk_orphan_marker_sweep(now, run, state, send_fn, home=None, dry_run=False,
             if dry_run:
                 logs.append("gk-orphan-reconcile %s (dry-run)" % key)
                 continue
+            # #1050 — budget gate BEFORE the reconcile write (job-wide single-
+            # overshoot). Budget spent → defer this + the rest to next sweep; NO
+            # dedup latched so the orphan is retried (never lost).
+            if budget is not None and not budget.may_start_op():
+                logs.append("gk-orphan-marker-sweep: budget spent after %d/%d items "
+                            "(%s) — deferring reconcile of %s to next sweep"
+                            % (i, n_cand, name, key))
+                break
             seen[key] = int(now)               # dedup BEFORE the mutation (#193)
             persist()
             result = apply_reconcile(root, num)
