@@ -35,10 +35,13 @@ _TASK_URL_FMT = "%s/odoo/project/%s/tasks/%s"
 _STATUS_BASENAME = "status.json"
 _STATUS_DIRNAME = "task-hygiene"
 
-# per-task comment fetch cap — a board task never realistically has more.
-_MSG_LIMIT = 100
-# open-task fetch cap — a stream board is dozens of open tasks, not thousands.
-_TASK_LIMIT = 500
+# board-wide comment fetch cap for the ONE batched read (#1036 review 🟡): a
+# client board is dozens of open tasks with a handful of comments each, so a few
+# thousand is generous headroom; truncation beyond it under-counts (fail-safe:
+# fewer flags), never a hard failure.
+_MSG_LIMIT = 5000
+# open-task fetch cap — a stream board is dozens of open tasks, not hundreds.
+_TASK_LIMIT = 200
 # the nudge keystroke cap (the sibling rider cap, tmux_io/nudge_gate).
 _NUDGE_MAX_CHARS = 700
 
@@ -114,6 +117,20 @@ def _tracked_stage_ids(cfg):
             st.get("potrebuje_ujasnit")} - {None}
 
 
+def _closed_stage_ids(cfg):
+    """The stage ids that count as CLOSED (excluded from 'open tasks'): the
+    `hotovo` stage PLUS any ids the board lists in the optional
+    `closed_stage_ids` config (e.g. a folded 'Zrušené'/'Cancelled' stage that
+    is NOT archived via active=False, which a bare `!= hotovo` domain would
+    otherwise count as open — #1036 review 🟡). Defaults to just `hotovo`."""
+    st = cfg.get("stage_ids", {})
+    ids = {st.get("hotovo")}
+    extra = cfg.get("closed_stage_ids")
+    if isinstance(extra, list):
+        ids.update(x for x in extra if isinstance(x, int))
+    return {x for x in ids if x is not None}
+
+
 def compute_hygiene(call, cfg, now=None):
     """Compute the A/B/C violations. `call(model, method, **body)` is the Odoo
     read seam; `cfg` is a validated config dict. Returns a dict with `A`, `B`,
@@ -125,29 +142,44 @@ def compute_hygiene(call, cfg, now=None):
     stream_pids = set(cfg.get("stream_partner_ids", []))
     stages = cfg.get("stage_ids", {})
     verif = stages.get("verifikacia")
-    hotovo = stages.get("hotovo")
     tracked = _tracked_stage_ids(cfg)
+    closed = _closed_stage_ids(cfg)
     confirm_days = ro.client_confirm_days(cfg)
     project_ids = list(cfg.get("project_ids", []))
 
     domain = [["project_id", "in", project_ids]]
-    if hotovo is not None:
-        domain.append(["stage_id", "!=", hotovo])
+    if closed:
+        domain.append(["stage_id", "not in", sorted(closed)])
     tasks = call("project.task", "search_read", domain=domain,
                  fields=["id", "name", "stage_id"], order="id", limit=_TASK_LIMIT)
+    tasks = tasks or []
+
+    # BATCH the comment read (#1036 review 🟡): ONE search_read over EVERY open
+    # task's comments (`res_id in [...]`) instead of one call per task, then
+    # group by res_id in Python — turning an N+1 fan-out (which under a slow
+    # board could overrun the 120s watchdog timeout) into a single call. Each
+    # group stays newest-first via the `res_id, date desc` order.
+    by_res = {}
+    if tasks:
+        all_msgs = call(
+            "mail.message", "search_read",
+            domain=[["model", "=", "project.task"],
+                    ["res_id", "in", [t.get("id") for t in tasks]],
+                    ["message_type", "=", "comment"]],
+            fields=["id", "author_id", "date", "reaction_ids", "res_id"],
+            order="res_id, date desc, id desc", limit=_MSG_LIMIT)
+        for m in all_msgs or []:
+            rid, _ = _m2o(m.get("res_id"))
+            if rid is None and isinstance(m.get("res_id"), int):
+                rid = m["res_id"]
+            by_res.setdefault(rid, []).append(m)
 
     a_items, b_items, c_items = [], [], []
-    for t in tasks or []:
+    for t in tasks:
         tid = t.get("id")
         tname = t.get("name") or ""
         stage_id, stage_name = _m2o(t.get("stage_id"))
-        msgs = call(
-            "mail.message", "search_read",
-            domain=[["model", "=", "project.task"], ["res_id", "=", tid],
-                    ["message_type", "=", "comment"]],
-            fields=["id", "author_id", "date", "reaction_ids"],
-            order="date desc, id desc", limit=_MSG_LIMIT)
-        msgs = msgs or []
+        msgs = by_res.get(tid, [])
         last = msgs[0] if msgs else None
 
         base = {"task_id": tid, "task_name": tname, "stage": stage_name}
@@ -257,16 +289,19 @@ def persist_status(result, home=None, now=None):
     b = result.get("B", [])
     c = result.get("C", [])
     a_ts = [it["ts"] for it in a if isinstance(it.get("ts"), (int, float))]
-    b_verif = sum(1 for it in b if _is_verif_stage_name(it.get("stage")))
+    # b_items lists ONLY the Verifikácia B members (#1036 review 🔵) so the Stop
+    # hook's "Verifikácia bez správy streamu (b_verif): <b_items>" message shows
+    # exactly the b_verif tasks, never a Realizácia/Potrebuje-ujasniť member.
+    b_verif_items = [it for it in b if _is_verif_stage_name(it.get("stage"))]
     payload = {
         "ts": now,
         "a": len(a), "b": len(b), "c": len(c),
         "a_oldest_ts": (min(a_ts) if a_ts else None),
-        "b_verif": b_verif,
+        "b_verif": len(b_verif_items),
         "a_items": ["#%s %s" % (it["task_id"], _short(it.get("task_name"), 40))
                     for it in a[:10]],
         "b_items": ["#%s %s" % (it["task_id"], _short(it.get("task_name"), 40))
-                    for it in b[:10]],
+                    for it in b_verif_items[:10]],
     }
     path = status_path(home)
     os.makedirs(os.path.dirname(path), exist_ok=True)

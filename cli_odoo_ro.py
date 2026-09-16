@@ -270,9 +270,12 @@ def config_template():
     file carries only the PATH."""
     return (
         "# airuleset Odoo task-hygiene config (#1036). Fill in per stream.\n"
-        "# The API KEY itself lives in the ~/.secrets/<file> named by\n"
-        "# api_key_env_file below — NEVER put the key value in this file.\n"
-        "# The values below are the montalu EXAMPLE; replace them for your box.\n"
+        "# Configure this ONLY on a dedicated Odoo STREAM box: the footer I,\n"
+        "# the nudge, and the Stop gate are BOX-WIDE (they fire on every\n"
+        "# session on the box), so a box that also does non-Odoo work would\n"
+        "# see unrelated turns blocked/nudged. The API KEY itself lives in the\n"
+        "# ~/.secrets/<file> named by api_key_env_file below — NEVER put the\n"
+        "# key value in this file. The values below are the montalu EXAMPLE.\n"
         "{\n"
         '  "instance_url": "https://erp.montalu.cloud",\n'
         '  "api_key_env_file": "~/.secrets/odoo-montalu.env",\n'

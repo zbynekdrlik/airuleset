@@ -47,25 +47,31 @@ class FakeOdoo:
 
     def call(self, model, method, **body):
         if model == "project.task" and method == "search_read":
-            hotovo = None
+            closed = set()
             for cond in body.get("domain", []):
                 if cond[0] == "stage_id" and cond[1] == "!=":
-                    hotovo = cond[2]
-            rows = [t for t in self.tasks if t["stage_id"][0] != hotovo]
+                    closed.add(cond[2])
+                if cond[0] == "stage_id" and cond[1] == "not in":
+                    closed.update(cond[2])
+            rows = [t for t in self.tasks if t["stage_id"][0] not in closed]
             return rows
         if model == "mail.message" and method == "search_read":
-            res_id = None
+            # #1036: the BATCHED read — `res_id in [ids]`, grouped newest-first
+            # per res_id, each message tagged with its res_id.
+            res_ids = []
             for cond in body.get("domain", []):
-                if cond[0] == "res_id":
-                    res_id = cond[2]
-            msgs = list(self.messages.get(res_id, []))
-            order = body.get("order", "")
-            if "date desc" in order:
-                msgs = list(reversed(msgs))
+                if cond[0] == "res_id" and cond[1] == "in":
+                    res_ids = list(cond[2])
+                elif cond[0] == "res_id" and cond[1] == "=":
+                    res_ids = [cond[2]]
+            out = []
+            for rid in res_ids:
+                for m in reversed(self.messages.get(rid, [])):  # newest first
+                    out.append(dict(m, res_id=rid))
             limit = body.get("limit")
             if limit:
-                msgs = msgs[:limit]
-            return msgs
+                out = out[:limit]
+            return out
         if model == "mail.message" and method == "message_reactions_guarded":
             if self.guarded_unavailable:
                 import cli_odoo_ro as ro
@@ -175,6 +181,21 @@ class TestComputeB(unittest.TestCase):
         self.assertEqual(got, {671, 682})
 
 
+class TestClosedStages(unittest.TestCase):
+    def test_cancelled_stage_excluded_via_closed_stage_ids(self):
+        # a task in a configured closed stage (e.g. Zrušené 2999) is not "open"
+        cfg = dict(CFG, closed_stage_ids=[2999])
+        fake = FakeOdoo(
+            tasks=[{"id": 900, "name": "t", "stage_id": [2999, "Zrušené"]},
+                   {"id": 901, "name": "t", "stage_id": [2880, "Verifikácia"]}],
+            messages={901: []},
+        )
+        r = th.compute_hygiene(fake.call, cfg, now=NOW)
+        # 900 is closed -> never in B; 901 (verif, no stream msg) -> in B
+        self.assertNotIn(900, [x["task_id"] for x in r["B"]])
+        self.assertIn(901, [x["task_id"] for x in r["B"]])
+
+
 class TestComputeC(unittest.TestCase):
     def test_verif_old_stream_handover_no_client_reply_flagged(self):
         fake = FakeOdoo(
@@ -246,6 +267,19 @@ class TestStatusPersistence(unittest.TestCase):
     def test_read_absent_status_is_none(self):
         home = self._home()
         self.assertIsNone(th.read_status(home=home))
+
+    def test_b_items_only_lists_verifikacia_members(self):
+        # #1036 review 🔵: b_items shows only the Verifikácia B members so the
+        # Stop-hook message matches b_verif (never a Realizácia/Potrebuje row).
+        home = self._home()
+        result = {"A": [], "C": [], "B": [
+            {"task_id": 873, "task_name": "v", "stage": "Verifikácia"},
+            {"task_id": 671, "task_name": "r", "stage": "Realizácia"},
+        ]}
+        st = th.persist_status(result, home=home, now=1000.0)
+        self.assertEqual(st["b_verif"], 1)
+        self.assertEqual(len(st["b_items"]), 1)
+        self.assertIn("#873", st["b_items"][0])
 
 
 class TestNudgeText(unittest.TestCase):

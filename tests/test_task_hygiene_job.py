@@ -158,6 +158,34 @@ class TaskHygieneJob(unittest.TestCase):
         self.assertEqual(len(deps.persisted), 1)
         self.assertEqual(deps.delivered, [])
 
+    def test_nudges_off_skips_delivery_honestly(self):
+        # #1036 review 🔵: when the kind is not staged on, skip the delivery loop
+        # with an honest log line (never a misleading per-pane submit-unverified).
+        deps = _Deps(result=_result(a=1))
+        logs = th.task_hygiene_job(
+            NOW, {}, [("%1", "/home/x/devel/demo")], "/proj", cfg=CFG,
+            compute=deps.compute, persist=deps.persist, deliver=deps.deliver,
+            gate_ok=deps.gate_ok, mark_sent=deps.mark_sent,
+            find_transcript=deps.find_transcript, capture=deps.capture,
+            in_mode=deps.in_mode, at_idle=deps.at_idle,
+            recent_human=deps.recent_human,
+            nudges_enabled=lambda k: False)
+        self.assertEqual(len(deps.persisted), 1)   # status still persisted
+        self.assertEqual(deps.delivered, [])       # no per-pane send attempt
+        self.assertTrue(any("kind OFF" in ln for ln in logs))
+
+    def test_nudges_on_still_delivers(self):
+        deps = _Deps(result=_result(a=1))
+        th.task_hygiene_job(
+            NOW, {}, [("%1", "/home/x/devel/demo")], "/proj", cfg=CFG,
+            compute=deps.compute, persist=deps.persist, deliver=deps.deliver,
+            gate_ok=deps.gate_ok, mark_sent=deps.mark_sent,
+            find_transcript=deps.find_transcript, capture=deps.capture,
+            in_mode=deps.in_mode, at_idle=deps.at_idle,
+            recent_human=deps.recent_human,
+            nudges_enabled=lambda k: True)
+        self.assertEqual(len(deps.delivered), 1)
+
     def test_ambiguous_shared_cwd_skipped(self):
         # two panes share ONE cwd → one transcript/sid → never guess
         deps = _Deps(result=_result(a=1))

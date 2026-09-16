@@ -71,7 +71,8 @@ def _resolve_sids(panes, projects_dir, find_transcript):
 
 def task_hygiene_job(now, state, panes, projects_dir, *, cfg, compute, persist,
                      deliver, gate_ok, mark_sent, find_transcript, capture,
-                     in_mode, at_idle, recent_human, dry_run=False):
+                     in_mode, at_idle, recent_human, nudges_enabled=None,
+                     dry_run=False):
     """Return journal log lines for one task-hygiene sweep. NEVER pings the owner.
 
     Steps: compute A/B/C (via the injected `compute(cfg)` — the read-only Odoo
@@ -107,6 +108,17 @@ def task_hygiene_job(now, state, panes, projects_dir, *, cfg, compute, persist,
     # Nudge only while A ∪ B is non-empty (C alone is a soft reminder, not a
     # stop-the-session obligation).
     if not (a or b):
+        return out
+
+    # #1036 review 🔵 — an HONEST OFF-box skip: when the kind is not staged on
+    # (the default), skip the whole per-pane delivery loop rather than call
+    # send_verified into each pane (which suppresses silently at the keys layer
+    # with logs=None and misleadingly logs "submit-unverified"). The footer I +
+    # the Stop hook carry the obligation while the nudge is OFF.
+    if nudges_enabled is not None and not nudges_enabled(NUDGE_KIND):
+        out.append("task-hygiene: A=%d B=%d — nudge kind OFF (stage via "
+                   "`nudges on --kind task-hygiene`); footer/Stop carry it"
+                   % (len(a), len(b)))
         return out
 
     from cli_task_hygiene import compose_nudge
