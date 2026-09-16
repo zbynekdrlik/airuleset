@@ -32,9 +32,31 @@ def _rate_json(core_remaining, core_limit, gql_remaining, gql_limit,
     })
 
 
+def _gql_object_body_from_rest(rest_body):
+    """#1052: derive an AGREEING GraphQL `rateLimit` object body from a REST
+    rate_limit body's graphql resource, so a fake that answers BOTH calls makes
+    the object reading available and authoritative while every assertion on the
+    REST numbers still holds (lower-of-equal == same). Returns the REST body
+    unchanged if it cannot be parsed (fail-open, like the real probe)."""
+    import datetime as _dt
+    try:
+        g = json.loads(rest_body)["resources"]["graphql"]
+        reset_iso = _dt.datetime.fromtimestamp(
+            int(g["reset"]), _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return json.dumps({"data": {"rateLimit": {
+            "limit": g["limit"], "remaining": g["remaining"],
+            "resetAt": reset_iso, "used": g["limit"] - g["remaining"]}}})
+    except (ValueError, KeyError, TypeError, OSError, OverflowError):
+        return rest_body
+
+
 class _FakeRun:
-    """A subprocess.run stand-in returning a canned rate_limit body, counting
-    calls so cache-hit behaviour is observable."""
+    """A subprocess.run stand-in. It answers `gh api rate_limit` with the canned
+    REST body and (since #1052) `gh api graphql …` with an AGREEING GraphQL
+    rateLimit-object body derived from the same numbers — so read_status's two
+    reads both resolve and the object reading is authoritative, while every
+    assertion on the REST numbers still holds. Counts total calls so cache-hit
+    behaviour is observable (a refresh is now two calls, a cache hit zero)."""
 
     def __init__(self, body, returncode=0, stderr=""):
         self.body = body
@@ -50,8 +72,9 @@ class _FakeRun:
 
         r = _R()
         r.returncode = self.returncode
-        r.stdout = self.body
         r.stderr = self.stderr
+        r.stdout = (_gql_object_body_from_rest(self.body)
+                    if "graphql" in argv else self.body)
         return r
 
 
@@ -81,16 +104,21 @@ class TestFetchAndPct(unittest.TestCase):
         self.assertAlmostEqual(cli_gh_rate.remaining_pct("graphql", st), 10.0)
 
     def test_cache_within_ttl_does_not_refetch(self):
+        # #1052: a refresh now makes TWO gh calls — the REST `rate_limit` fetch
+        # PLUS the GraphQL `rateLimit` object probe (this argv-aware _FakeRun
+        # answers the graphql call with an agreeing object body). The value that
+        # matters here is unchanged: ZERO calls on a cache hit, exactly one
+        # refresh (two calls) per TTL window.
         run = _FakeRun(_rate_json(4000, 5000, 4000, 5000))
         cli_gh_rate.read_status(now=1000.0, run=run, real_gh="/usr/bin/gh")
-        self.assertEqual(run.calls, 1)
-        # A second read 30s later (< 60s TTL) must reuse the cache.
+        self.assertEqual(run.calls, 2)   # 1 REST + 1 GraphQL object probe
+        # A second read 30s later (< 60s TTL) must reuse the cache — no calls.
         cli_gh_rate.read_status(now=1030.0, run=run, real_gh="/usr/bin/gh")
-        self.assertEqual(run.calls, 1)
-        # After the TTL it refetches.
+        self.assertEqual(run.calls, 2)
+        # After the TTL it refetches — one more REST + one more object probe.
         cli_gh_rate.read_status(now=1000.0 + cli_gh_rate.CACHE_TTL_S + 1,
                                 run=run, real_gh="/usr/bin/gh")
-        self.assertEqual(run.calls, 2)
+        self.assertEqual(run.calls, 4)
 
     def test_gh_error_fails_open(self):
         run = _FakeRun("", returncode=1, stderr="boom")

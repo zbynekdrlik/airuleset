@@ -7,6 +7,8 @@ being wired, so every existing run_once test stays network-free.
 Harness mirrors tests/test_sweep_budget_attribution_1041.py (the fake clock
 drives remaining_budget_s directly).
 """
+import json
+import os
 import sys
 import unittest
 import unittest.mock as mock
@@ -168,6 +170,68 @@ class TestGhRateComposition(unittest.TestCase):
                          + "\n".join(logs))
         self.assertTrue(any("gh-rate: read error" in ln for ln in logs),
                         "the fail-open path must be journalled\n" + "\n".join(logs))
+
+
+class TestGraphqlObjectFlowsThroughReadStatus(unittest.TestCase):
+    """#1052 — the watchdog's real `gh_rate_fetch` IS `cli_gh_rate.read_status`,
+    so the GraphQL-object reading flows into the composition with NO wiring
+    change: the incident pair (REST graphql 5000/5000 vs GraphQL object 0/5000)
+    drives read_status -> graphql 0 % -> the poller is HELD end-to-end.
+    RED before #1052 (read_status ignored the object, stayed 100 % -> ran)."""
+
+    def test_incident_pair_via_read_status_holds_the_poller(self):
+        import cli_gh_rate
+
+        class _PairRun:
+            def __call__(self, argv, **kwargs):
+                is_gql = "graphql" in argv
+
+                class _R:
+                    pass
+
+                r = _R()
+                r.returncode = 0
+                r.stderr = ""
+                if is_gql:
+                    r.stdout = json.dumps({"data": {"rateLimit": {
+                        "limit": 5000, "remaining": 0,
+                        "resetAt": "2026-09-16T18:30:01Z", "used": 5000}}})
+                else:
+                    r.stdout = json.dumps({"resources": {
+                        "core": {"limit": 5000, "remaining": 4000, "reset": 0},
+                        "graphql": {"limit": 5000, "remaining": 5000, "reset": 0},
+                    }})
+                return r
+
+        holder = {"elapsed": 0}          # full sweep budget — only the rate is low
+        net_calls = []
+
+        def _net(*a, **k):
+            net_calls.append(1)
+            return ["net-drift::ran"]
+
+        with TemporaryDirectory() as gd:
+            orig_sp = cli_gh_rate.status_path
+            orig_gd = cli_gh_rate.gh_rate_dir
+            cli_gh_rate.gh_rate_dir = lambda: gd
+            cli_gh_rate.status_path = lambda: os.path.join(gd, "status.json")
+            try:
+                fetch = lambda: cli_gh_rate.read_status(   # noqa: E731
+                    now=1000.0, run=_PairRun(), real_gh="/usr/bin/gh", force=True)
+                with mock.patch.object(wd, "net_drift_alarm", _net):
+                    logs = _run(holder, issue_counts_fetch=lambda *a, **k: {},
+                                gh_rate_fetch=fetch)
+            finally:
+                cli_gh_rate.status_path = orig_sp
+                cli_gh_rate.gh_rate_dir = orig_gd
+
+        self.assertEqual(net_calls, [],
+                         "the GraphQL object's 0 % must hold the poller through "
+                         "read_status\n" + "\n".join(logs))
+        self.assertTrue(
+            any(ln.startswith("net_drift_alarm -> hold:budget")
+                and "gh-rate" in ln for ln in logs),
+            "the hold must journal a gh-rate backoff line\n" + "\n".join(logs))
 
 
 if __name__ == "__main__":
