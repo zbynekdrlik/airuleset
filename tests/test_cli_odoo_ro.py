@@ -83,6 +83,15 @@ class TestClientRequestShape(unittest.TestCase):
         # nothing was sent
         self.assertEqual(self.transport.calls, [])
 
+    def test_guarded_reaction_method_is_allowed(self):
+        # message_reactions_guarded is a READ-ONLY guarded server method (#784):
+        # it must dispatch (the raw mail.message.reaction model 403s by design).
+        c = self._client([[{"content": "👷", "partner_id": [17244, "Z"]}]])
+        out = c.call("mail.message", "message_reactions_guarded", ids=[5])
+        self.assertEqual(out, [{"content": "👷", "partner_id": [17244, "Z"]}])
+        self.assertTrue(self.transport.calls[0]["url"]
+                        .endswith("/mail.message/message_reactions_guarded"))
+
     def test_http_error_raises_structured(self):
         c = self._client([(500, b"boom")])
         with self.assertRaises(ro.OdooError):

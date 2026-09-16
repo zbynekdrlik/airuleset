@@ -32,7 +32,17 @@ DEFAULT_TIMEOUT_S = 20.0
 
 # The ONLY methods this client will dispatch. A write/unlink/create is refused
 # in `_call` before any request is built — read-only by construction.
-READ_METHODS = frozenset({"search_read", "search_count", "read"})
+#
+# GUARDED_READ_METHODS: custom server methods that are READ-ONLY by nature
+# (they RETURN data, mutate nothing) but need a dedicated ACL. The reactions
+# rule (#784 / odoo-erp #5577): the handover account gets a 403 on the RAW
+# `mail.message.reaction` model BY DESIGN, so reactions are read through the
+# guarded method `message_reactions_guarded` (montalu alias
+# `montalu_message_reactions`) on `mail.message`, never the raw model.
+GUARDED_READ_METHODS = frozenset({
+    "message_reactions_guarded", "montalu_message_reactions",
+})
+READ_METHODS = frozenset({"search_read", "search_count", "read"}) | GUARDED_READ_METHODS
 
 # The per-box config contract file.
 CONFIG_BASENAME = "odoo-task-tracking.json"
@@ -125,6 +135,12 @@ class OdooReadOnlyClient:
         except (ValueError, TypeError) as e:
             raise OdooError("Odoo %s/%s returned non-JSON: %s"
                             % (model, method, e))
+
+    def call(self, model, method, **body):
+        """Public dispatch for the A/B/C computation's injected `call` seam —
+        delegates to `_call` (same read-only allowlist enforcement). Used for
+        the guarded reaction read (`message_reactions_guarded`)."""
+        return self._call(model, method, **body)
 
     def search_read(self, model, domain, fields=None, limit=None, order=None):
         body = {"domain": domain}

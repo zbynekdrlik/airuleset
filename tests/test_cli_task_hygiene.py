@@ -4,7 +4,6 @@ Every test drives `compute_hygiene` through an injected FAKE `call(model,
 method, **body)` — NEVER a real Odoo network call (hard rule of this lane).
 """
 import datetime
-import json
 import os
 import sys
 import tempfile
@@ -28,10 +27,6 @@ CFG = {
     "own_author_names": ["ZbynekAI", "Marek Greňa"],
     "client_confirm_days": 3,
 }
-
-
-def _dt(s):
-    return s  # Odoo naive-UTC string, passed through to the fake
 
 
 class FakeOdoo:
@@ -321,6 +316,13 @@ class TestCLI(unittest.TestCase):
             rc = th.cmd_task_hygiene(self._args(check=True, path=p))
         self.assertEqual(rc, 0)
         self.assertIn("ok", buf.getvalue().lower())
+
+
+class TestRegistration(unittest.TestCase):
+    def test_subcommand_registered(self):
+        import airuleset
+        self.assertIn("task-hygiene", airuleset.SUBCOMMANDS)
+        self.assertIs(airuleset.SUBCOMMANDS["task-hygiene"], th.cmd_task_hygiene)
 
 
 if __name__ == "__main__":
