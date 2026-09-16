@@ -4319,6 +4319,120 @@ def _validate_self_review_table(table_text, lenses):
     return True, None
 
 
+def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
+    """#1044 pass-through: sign AND post a STREAM-authored, gate-compliant body
+    VERBATIM in one command.
+
+    The odoo-erp gate OWNS the body shape (it evolves across 10+ checks_*
+    modules and requires execution evidence the field-generator cannot
+    synthesise), so the composer must not re-generate or wrap it — it validates
+    only the minimal cross-repo invariants, VERIFIES (never rewrites) the
+    body's HEAD is the live branch tip, signs, and posts. Returns an int rc."""
+    import subprocess
+    import datetime
+    import hashlib
+    import time as _time
+
+    if not repo or not issue or not branch:
+        print("handoff: --repo, --issue, --branch required for --body-file")
+        return 1
+    try:
+        with open(body_file) as f:
+            body = f.read()
+    except OSError as e:
+        print("handoff BLOCK: cannot read --body-file: %s" % e)
+        return 1
+
+    self_login = _stream_self_login()
+    rnd = _bounce_round(int(issue), self_login, cwd=None, repo=repo)
+
+    import cli_handoff_template as _ht
+    err = _ht.validate_passthrough_body(body, bounce_round=rnd)
+    if err:
+        print(err)
+        return 1
+
+    def _run(argv):
+        try:
+            return subprocess.run(argv, capture_output=True, text=True,
+                                  timeout=15)
+        except Exception as e:
+            return subprocess.CompletedProcess(argv, 1, "", str(e))
+
+    # Anti-stale: the body's declared HEAD must be the live remote branch tip
+    # — a VERIFY (refuse on mismatch), never a rewrite (so fences and the
+    # single HEAD: line stay verbatim, #1044). Mirrors cmd_handoff's compose
+    # path stale-HEAD guard, reading from the body instead of stamping.
+    # {8,40} mirrors the gate's own HEAD_SHA_RE floor — reject a too-short
+    # declared HEAD here (fail-fast) rather than post a body the gate rejects.
+    m = re.search(
+        r'(?im)^[ \t]*[-*]?[ \t]*\**HEAD\**[ \t]*:[ \t]*\**[ \t]*'
+        r'`?([0-9a-fA-F]{8,40})`?', body)
+    if not m:
+        print("handoff BLOCK: --body-file body has no HEAD: <sha> line "
+              "(>= 8 hex)")
+        return 1
+    body_head = m.group(1).lower()  # git emits lowercase; normalise both sides
+    ls_r = _run(["git", "ls-remote", "origin", "refs/heads/" + branch])
+    if ls_r.returncode != 0:
+        print("handoff BLOCK: git ls-remote failed for branch '%s'" % branch)
+        return 1
+    remote_sha = ""
+    for line in (ls_r.stdout or "").strip().splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            remote_sha = parts[0].lower()
+            break
+    if not remote_sha:
+        print("handoff BLOCK: branch '%s' not found on remote" % branch)
+        return 1
+    # The remote tip is a full 40-hex; accept a short body HEAD (>= 8-hex, the
+    # gate's own floor) that prefixes it, or an exact match.
+    if not (remote_sha == body_head or remote_sha.startswith(body_head)):
+        print("handoff BLOCK: --body-file HEAD %s does not match remote "
+              "branch '%s' tip %s — push first / re-declare a fresh HEAD"
+              % (body_head[:12], branch, remote_sha[:12]))
+        return 1
+
+    # Write receipt BEFORE posting (the hook verifies the body hash).
+    gate_dir = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_DIR)
+    os.makedirs(gate_dir, exist_ok=True)
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
+    owner_repo = repo.replace("/", "-") if "/" in repo else repo
+    receipt_path = os.path.join(gate_dir, "%s-%s.json" % (owner_repo, issue))
+    receipt = json.dumps({"sha256": body_hash,
+                          "ts": _time.time(),
+                          "issue": int(issue),
+                          "branch": branch,
+                          "round": rnd,
+                          "body_file": True})
+    try:
+        with open(receipt_path, "w") as f:
+            f.write(receipt)
+    except OSError as e:
+        print("handoff WARNING: could not write receipt: %s" % e)
+    log_path = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_LOG)
+    now_utc = datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    try:
+        with open(log_path, "a") as f:
+            f.write("PASS body-file issue=%s repo=%s round=%d ts=%s\n"
+                    % (issue, repo, rnd, now_utc))
+    except OSError as e:
+        print("handoff: log write failed: %s" % e)  # non-fatal
+
+    R = ["-R", repo] if repo else []
+    r = _run(["gh", "issue", "comment", str(issue), "--body-file",
+              body_file] + R)
+    if r.returncode != 0:
+        print("handoff FAILED: gh issue comment failed: %s"
+              % (r.stderr or "").strip())
+        return 1
+    print("handoff: READY-FOR-REVIEW posted verbatim on #%s (round %d, "
+          "HEAD %s)" % (issue, rnd, body_head[:12]))
+    return 0
+
+
 def cmd_handoff(args):
     """Sub-dev hand-off composer (#843): compose and post a READY-FOR-REVIEW
     comment from validated inputs. The CLI stamps Verified-at-UTC + HEAD
@@ -4344,6 +4458,7 @@ def cmd_handoff(args):
     prevencia_read = getattr(args, "prevencia_read", None)
     self_review_model = getattr(args, "self_review_model", None)
     sign_only = getattr(args, "sign_only", None)
+    body_file = getattr(args, "body_file", None)
     # Extended template fields (#969).
     stack = getattr(args, "stack", None)
     harness = getattr(args, "harness", None)
@@ -4434,8 +4549,16 @@ def cmd_handoff(args):
               % (issue, body_hash[:12]))
         return 0
 
+    # --- body-file pass-through mode (#1044) -----------------------------
+    # Sign AND post a STREAM-authored, gate-compliant body VERBATIM in one
+    # command (extracted to _cmd_handoff_post_body_file to keep cmd_handoff
+    # from ballooning — architecture-first.md).
+    if body_file:
+        return _cmd_handoff_post_body_file(repo, issue, branch, body_file)
+
     if not repo or not issue or not branch or not self_review_file:
-        print("handoff: --repo, --issue, --branch, --self-review-file required")
+        print("handoff: --repo, --issue, --branch, and one of "
+              "--self-review-file / --sign-only / --body-file required")
         return 1
 
     # --self-review-model is REQUIRED and must be an EXACT model id (#991).
@@ -8991,8 +9114,10 @@ def main():
     p_ho.add_argument("--branch", required=True,
                       help="Branch name with the work")
     p_ho.add_argument("--self-review-file", dest="self_review_file",
-                      required=True,
-                      help="Path to the Self-review markdown table file")
+                      help="Path to the Self-review markdown table file "
+                           "(field-generated path). Exactly one of "
+                           "--self-review-file / --sign-only / --body-file is "
+                           "required.")
     p_ho.add_argument("--root-cause",
                       help="Root-cause-of-previous-bounce (required round >= 2)")
     p_ho.add_argument("--closes-finding", action="append",
@@ -9011,6 +9136,13 @@ def main():
                            "writes its own template-compliant body, calls "
                            "--sign-only to get the receipt, then posts with "
                            "gh issue comment --body-file.")
+    p_ho.add_argument("--body-file", dest="body_file",
+                      help="Pass-through mode (#1044): sign AND post a "
+                           "STREAM-authored, gate-compliant body VERBATIM in "
+                           "one command — fences and the single HEAD: line "
+                           "pass through untouched (no wrapping, no HEAD "
+                           "re-stamp). Use this for a rich hand-off whose "
+                           "evidence the field-generated path cannot carry.")
     # Extended template fields (#969).
     p_ho.add_argument("--stack",
                       help="Stack: ticket list (required for extended-template "

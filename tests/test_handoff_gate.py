@@ -775,5 +775,164 @@ class TestSignOnlyRequiresSelfReviewModel991(unittest.TestCase):
             self.assertEqual(0, rc)
 
 
+class TestBodyFilePassthrough1044(unittest.TestCase):
+    """#1044: --body-file signs AND posts a stream-authored, gate-compliant
+    body VERBATIM in one command, verifying (never rewriting) the body's HEAD
+    against the live branch tip."""
+
+    _HEAD = "abc1234def56"  # short sha; matches remote exactly in the mocks
+
+    def _body(self, **over):
+        head = over.get("head", self._HEAD)
+        model = over.get("model", "Self-review-model: claude-opus-4-8\n")
+        return (
+            "READY-FOR-REVIEW: branch worktree-x\n\n"
+            + model +
+            "**Self-review:**\n\n"
+            "| lens | verdict | evidence |\n|---|---|---|\n"
+            "| security | 0 R 0 Y 0 B | a.py:1 |\n\n"
+            "Branch: worktree-x\n"
+            "HEAD: " + head + "\n"
+            "Stack: #1\n"
+            "Verified-at-UTC: 2026-09-16T10:00:00Z\n"
+            "Harness: run-shadow-unit-tests.sh m = ok\n"
+            "```\nFAIL test_guard\n```\n"
+        )
+
+    def _make_args(self, body_file, **kw):
+        import argparse
+        defaults = dict(
+            repo="zbynekdrlik/odoo-erp", issue=1044, branch="worktree-x",
+            self_review_file=None, root_cause=None, closes_finding=None,
+            prevencia_read=None, self_review_model=None, sign_only=None,
+            body_file=body_file)
+        defaults.update(kw)
+        return argparse.Namespace(**defaults)
+
+    def _gate_patches(self, td):
+        import unittest.mock as m
+        gate_dir = os.path.join(td, "gate")
+        os.makedirs(gate_dir, exist_ok=True)
+        home = os.path.expanduser("~")
+        return (
+            gate_dir,
+            m.patch.object(airuleset, "HANDOFF_GATE_DIR",
+                           os.path.relpath(gate_dir, home)),
+            m.patch.object(airuleset, "HANDOFF_GATE_LOG",
+                           os.path.relpath(
+                               os.path.join(td, "gate.log"), home)),
+        )
+
+    def _subprocess_side_effect(self, remote_sha):
+        """git ls-remote -> a line with remote_sha; gh issue comment -> ok."""
+        import subprocess as sp
+
+        def run(argv, *a, **k):
+            if argv[:2] == ["git", "ls-remote"]:
+                out = "%s\trefs/heads/worktree-x\n" % remote_sha
+                return sp.CompletedProcess(argv, 0, out, "")
+            if argv[:3] == ["gh", "issue", "comment"]:
+                return sp.CompletedProcess(argv, 0, "posted", "")
+            return sp.CompletedProcess(argv, 0, "", "")
+        return run
+
+    def test_body_file_posts_verbatim_and_writes_receipt(self):
+        import io
+        import unittest.mock as m
+        body = self._body()
+        with tempfile.TemporaryDirectory() as td:
+            bp = os.path.join(td, "body.md")
+            with open(bp, "w") as f:
+                f.write(body)
+            gate_dir, p1, p2 = self._gate_patches(td)
+            with p1, p2, \
+                 m.patch("airuleset._stream_self_login", return_value="montalu"), \
+                 m.patch("airuleset._bounce_round", return_value=1), \
+                 m.patch("subprocess.run",
+                         side_effect=self._subprocess_side_effect(self._HEAD)), \
+                 m.patch("sys.stdout", new_callable=io.StringIO):
+                rc = airuleset.cmd_handoff(self._make_args(bp))
+            self.assertEqual(0, rc, "valid --body-file should post")
+            # Receipt sha256 == the RAW body (posted verbatim, no mutation).
+            expect = hashlib.sha256(body.encode()).hexdigest()
+            receipts = [fn for fn in os.listdir(gate_dir)
+                        if fn.endswith(".json")]
+            self.assertTrue(receipts, "no receipt written")
+            with open(os.path.join(gate_dir, receipts[0])) as f:
+                r = json.loads(f.read())
+            self.assertEqual(expect, r["sha256"])
+            self.assertTrue(r.get("body_file"))
+
+    def test_body_file_stale_head_blocked(self):
+        import io
+        import unittest.mock as m
+        body = self._body()
+        with tempfile.TemporaryDirectory() as td:
+            bp = os.path.join(td, "body.md")
+            with open(bp, "w") as f:
+                f.write(body)
+            gate_dir, p1, p2 = self._gate_patches(td)
+            buf = io.StringIO()
+            with p1, p2, \
+                 m.patch("airuleset._stream_self_login", return_value="montalu"), \
+                 m.patch("airuleset._bounce_round", return_value=1), \
+                 m.patch("subprocess.run",
+                         side_effect=self._subprocess_side_effect("def9999aaaa")), \
+                 m.patch("sys.stdout", buf):
+                rc = airuleset.cmd_handoff(self._make_args(bp))
+            self.assertEqual(1, rc, "stale HEAD must block")
+            self.assertIn("does not match remote", buf.getvalue())
+            # No comment posted, no receipt.
+            self.assertFalse([fn for fn in os.listdir(gate_dir)
+                              if fn.endswith(".json")])
+
+    def test_body_file_missing_self_review_model_blocked(self):
+        import io
+        import unittest.mock as m
+        body = self._body(model="")  # drop the Self-review-model line
+        with tempfile.TemporaryDirectory() as td:
+            bp = os.path.join(td, "body.md")
+            with open(bp, "w") as f:
+                f.write(body)
+            gate_dir, p1, p2 = self._gate_patches(td)
+            buf = io.StringIO()
+            with p1, p2, \
+                 m.patch("airuleset._stream_self_login", return_value="montalu"), \
+                 m.patch("airuleset._bounce_round", return_value=1), \
+                 m.patch("sys.stdout", buf):
+                rc = airuleset.cmd_handoff(self._make_args(bp))
+            self.assertEqual(1, rc)
+            self.assertIn("Self-review-model", buf.getvalue())
+
+    def test_body_file_no_head_line_blocked(self):
+        import io
+        import unittest.mock as m
+        body = ("READY-FOR-REVIEW: branch worktree-x\n\n"
+                "Self-review-model: claude-opus-4-8\n"
+                "Branch: worktree-x\nStack: #1\n")
+        with tempfile.TemporaryDirectory() as td:
+            bp = os.path.join(td, "body.md")
+            with open(bp, "w") as f:
+                f.write(body)
+            gate_dir, p1, p2 = self._gate_patches(td)
+            buf = io.StringIO()
+            with p1, p2, \
+                 m.patch("airuleset._stream_self_login", return_value="montalu"), \
+                 m.patch("airuleset._bounce_round", return_value=1), \
+                 m.patch("sys.stdout", buf):
+                rc = airuleset.cmd_handoff(self._make_args(bp))
+            self.assertEqual(1, rc)
+            self.assertIn("no HEAD:", buf.getvalue())
+
+    def test_body_file_argparse_present(self):
+        import subprocess as sp
+        r = sp.run([sys.executable, "airuleset.py", "handoff", "--help"],
+                   capture_output=True, text=True, timeout=10,
+                   cwd=os.path.dirname(os.path.dirname(
+                       os.path.abspath(__file__))))
+        self.assertIn("--body-file", r.stdout,
+                      "handoff --help must list --body-file")
+
+
 if __name__ == "__main__":
     unittest.main()
