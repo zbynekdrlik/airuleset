@@ -229,6 +229,7 @@
     "tests/test_disk_hygiene_513.py": 500,
     "tests/test_dispatch_floor.py": 601,
     "tests/test_dispatch_sequential_gate_998.py": 86,
+    "tests/test_doctrine_audit_1028.py": 1020,
     "tests/test_double_compact_855.py": 391,
     "tests/test_double_compact_recurrence_855.py": 438,
     "tests/test_draft_rescue.py": 441,

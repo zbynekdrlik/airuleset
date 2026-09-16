@@ -864,5 +864,157 @@ class TestTenantSubjectScope1028(unittest.TestCase):
                 ["client-message-worker-reaction-no-workarounds.md"])
 
 
+
+# --------------------------------------------------------------------------
+# #1028 FIX-FORWARD-3 (supervisor comment 5691780040): the three neighbouring-
+# doctrine miva1 memories produced NO row on v0.1.307 -- the greeting / explain-
+# the-concept / no-promises allowlist anchors were invented English heading
+# phrasings the live Slovak/English restatements never use, so best_allowlist_
+# match scored 0 hits and the 0.72 fuzzy path did not bridge the SK/EN gap.
+# Anchors re-derived from the VERBATIM live texts (quoted in the ticket comment;
+# the lane cannot ssh). Each restatement now classifies HIGH/rewrite against its
+# OWN entry (tenant token only in the body -> no demote, per fix-forward-2); the
+# --fix path archives byte-identical + writes a pointer; a per-entry one-anchor
+# generic negative stays below the HIGH threshold.
+# --------------------------------------------------------------------------
+class TestItem2AnchorDerivation1028(unittest.TestCase):
+    GREETING = """\
+---
+name: discuss-thread-greeting-etiquette
+description: "Pozdrav „Dobrý deň…" patrí len do PRVEJ správy Discuss vlákna — follow-upy v tom istom vlákne bez pozdravu"
+metadata:
+  type: feedback
+---
+
+Owner (2026-08-19): „trosku je blbe ze v tom istom vlaken pises dokolecka dobry den, No to je vhodne tak pri prvej sprave do vlakna." (miva vlákno 19 — správy 1185, 1194, 1207 všetky začínali „Dobrý deň, pani @Petrovičová").
+
+**Why:** opakovaný pozdrav v každej odpovedi toho istého vlákna pôsobí roboticky — vlákno je konverzácia, nie séria listov.
+
+**How to apply:** pozdrav + oslovenie s mention anchorom = len OTVÁRACIA správa vlákna. Každý follow-up v tom istom vlákne začína priamo obsahom („Ďakujeme…", „Ešte doplnenie…", „Nastavíme…"); mention anchor len keď dáva zmysel, `partner_ids` pre doručenie VŽDY. Nahlásené do airuleset ako issue #573 (úprava handover-compose.md). Súvisí: [[client-emails-explain-the-concept]], [[no-promises-on-users-behalf]].
+"""
+
+    EXPLAIN = """\
+---
+name: client-emails-explain-the-concept
+description: Client emails must explain WHAT each thing is and HOW it fits their daily reality — a link plus a feature list is not enough for a non-technical CEO
+metadata: 
+  node_type: memory
+  type: feedback
+  originSessionId: c8f67220-6e73-4723-b40f-b3f9025e8a8a
+  modified: 2026-08-08T13:58:42.761Z
+---
+
+MIVA CEO's reply to our first demo email (2026-08-08) was: *"WAU 😮, nerozumiem na čo je „kiosk", tam sa bude všetko zapisovať? To bude 1 tablet, alebo môžu byť aj viacej? … alebo si dochádzku môžu zamestnanci značiť vo svojich pracovných PC? Majitelia si to môžu potom sledovať kde?"* — i.e. the email named features and gave links, but never explained the CONCEPT or how it maps onto his company's everyday operation.
+
+**Why:** the recipient is a non-technical owner. Terms obvious to us ("kiosk", "check-in", "app") carry no meaning for him, and an unanswered "how would this actually work in my firm?" turns enthusiasm into a round of questions instead of a decision.
+
+**How to apply to every client-facing email:**
+- Explain each named thing in one plain sentence BEFORE linking it ("kiosk = spoločný tablet pri vchode, zamestnanec zadá svoj PIN a odpípne príchod").
+- Answer the operational questions before they're asked: how many devices, who uses what, what people without a PC do, where the owner sees the result.
+- Describe the daily flow per ROLE (výrobný robotník / kancelária / majiteľ), not per feature.
+- Never claim a screen or capability that hasn't been verified live in the demo first.
+
+Related: [[no-promises-on-users-behalf]], [[miva-demo-state]].
+"""
+
+    NOPROMISE = """\
+---
+name: no-promises-on-users-behalf
+description: "In client-facing drafts never promise the user will personally demo/explain things (he is not an Odoo expert), and don't offer video calls to non-technical clients"
+metadata: 
+  node_type: memory
+  type: feedback
+  originSessionId: c8f67220-6e73-4723-b40f-b3f9025e8a8a
+  modified: 2026-08-08T06:44:13.467Z
+---
+
+When drafting client-facing messages (emails to MIVA CEO etc.) on the user's behalf (2026-08-08):
+
+**Why:** the user is NOT an Odoo expert — Claude knows the system's details, he often doesn't ("ja to často neviem, ty to vieš, ja nie som odoo expert"). A draft promising "rád to prejdem osobne / cez videohovor" commits him to live-demonstrating things he can't show on demand, and a non-technical client (MIVA CEO) doesn't want video calls anyway.
+
+**How to apply:** closings stay neutral and async — "ak budeš mať otázky, napíš" — never promise personal walkthroughs, live demos, or video calls; never write anything that assumes the user can demonstrate Odoo features himself. Related: [[miva-sota-attendance-not-excel-copy]].
+"""
+
+    # Expected fleet heading per entry (unchanged by this lane -- only the
+    # anchors change). The pointer `See airuleset ...#<heading>` resolves to the
+    # matching handover-compose.md doctrine bullet.
+    EXPECT = {
+        "discuss-thread-greeting-etiquette.md":
+            ("The greeting belongs only in the first message", GREETING),
+        "client-emails-explain-the-concept.md":
+            ("Explain the concept to the client", EXPLAIN),
+        "no-promises-on-users-behalf.md":
+            ("No promises on the client's behalf", NOPROMISE),
+    }
+
+    def _home_with(self, files):
+        tmp = TemporaryDirectory()
+        home = Path(tmp.name)
+        mem = home / ".claude" / "projects" / "-home-miva1-proj" / "memory"
+        mem.mkdir(parents=True)
+        for fn, text in files.items():
+            (mem / fn).write_text(text, encoding="utf-8")
+        return tmp, home, mem
+
+    def test_each_restatement_is_high_rewrite_to_its_entry(self):
+        # RED before the anchor re-derivation: each of the three live texts is
+        # missed (no row); GREEN after: HIGH/rewrite against its OWN fleet entry,
+        # >= MIN_ANCHORS_HIGH anchor hits, tenant token in the body not demoting.
+        for fn, (head, text) in self.EXPECT.items():
+            with self.subTest(fn=fn):
+                tmp, home, _ = self._home_with({fn: text})
+                with tmp:
+                    m = _by_name(da.scan_home(str(home)))[fn]
+                    self.assertEqual(m.confidence, da.HIGH)
+                    self.assertEqual(m.action, da.ACTION_REWRITE)
+                    self.assertIn("handover-compose", m.fleet_source)
+                    self.assertEqual(m.heading, head)
+                    self.assertGreaterEqual(m.anchors_hit, da.MIN_ANCHORS_HIGH)
+
+    def test_all_three_fix_archives_byte_identical_and_pointers(self):
+        files = {fn: text for fn, (_h, text) in self.EXPECT.items()}
+        tmp, home, mem = self._home_with(files)
+        with tmp:
+            matches = da.scan_home(str(home))
+            res = da.apply_fixes(matches, str(home), today="2026-09-16")
+            self.assertEqual(
+                sorted(os.path.basename(p) for p in res["rewritten"]),
+                sorted(files))
+            for fn, text in files.items():
+                self.assertTrue((mem / fn).read_text(encoding="utf-8").startswith(
+                    da.POINTER_PREFIX))
+                arch = (home / ".claude" / "doctrine-archive" / "2026-09-16" /
+                        "projects" / "-home-miva1-proj" / "memory" / fn)
+                self.assertTrue(arch.exists())
+                self.assertEqual(arch.read_bytes(), text.encode("utf-8"))
+
+    def test_one_anchor_generic_negative_per_entry_is_not_high(self):
+        # A generic memory that mentions ONE anchor of an entry (and nothing
+        # else) must NOT reach HIGH -- guards the false-positive class the first
+        # lane's reviews hardened against.
+        negs = {
+            "greeting-one.md": "Pozdrav patri len do prvej spravy e-mailu; inak nic viac.",
+            "explain-one.md": "We should explain the concept to the client in the slide deck.",
+            "nopromise-one.md": "No promises on the client's behalf here, and that is all.",
+        }
+        tmp = TemporaryDirectory()
+        with tmp:
+            home = Path(tmp.name)
+            mem = home / ".claude" / "projects" / "-p" / "memory"
+            mem.mkdir(parents=True)
+            for fn, body in negs.items():
+                (mem / fn).write_text(
+                    "---\nname: n\nmetadata:\n  type: project\n---\n# n\n\n"
+                    + body + "\n", encoding="utf-8")
+            by = _by_name(da.scan_home(str(home)))
+            for fn in negs:
+                with self.subTest(fn=fn):
+                    m = by.get(fn)
+                    if m is not None:
+                        self.assertNotEqual(m.action, da.ACTION_REWRITE)
+                        self.assertLess(m.anchors_hit, da.MIN_ANCHORS_HIGH)
+
+
+
 if __name__ == "__main__":
     unittest.main()
