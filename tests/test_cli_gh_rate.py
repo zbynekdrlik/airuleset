@@ -263,6 +263,87 @@ class TestStatusRow(unittest.TestCase):
         self.assertIsNone(cli_gh_rate.status_row({"resources": {}}))
 
 
+class TestWrapperScript(unittest.TestCase):
+    def test_script_has_the_safety_guards(self):
+        s = cli_gh_rate.wrapper_script("/usr/bin/gh", "/usr/bin/python3",
+                                       "/repo/cli_gh_rate.py")
+        self.assertIn(cli_gh_rate.WRAPPER_SENTINEL, s)
+        self.assertIn("AIRULESET_GH_RATE_INTERNAL", s)  # refresh never recurses
+        self.assertIn("AIRULESET_GH_POLLER", s)         # only pollers throttle
+        self.assertIn("exec", s)                        # transparent delegation
+        self.assertIn("/usr/bin/gh", s)                 # baked real gh
+        self.assertIn("--wrapper-backoff", s)
+
+
+class TestEnsureWrapper(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bin = os.path.join(self.tmp, ".local", "bin")
+        os.makedirs(self.bin)
+        self._orig_shim = cli_gh_rate.shim_path
+        self._orig_up = cli_gh_rate.upstream_path
+        cli_gh_rate.shim_path = lambda: os.path.join(self.bin, "gh")
+        cli_gh_rate.upstream_path = lambda: os.path.join(self.bin, "gh-upstream")
+        self._orig_path = os.environ.get("PATH", "")
+
+    def tearDown(self):
+        cli_gh_rate.shim_path = self._orig_shim
+        cli_gh_rate.upstream_path = self._orig_up
+        os.environ["PATH"] = self._orig_path
+
+    def _make_real_gh(self, path, body="#!/bin/sh\necho REAL-GH \"$@\"\n"):
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        os.chmod(path, 0o755)
+
+    def test_wrap_real_gh_in_place(self):
+        # gh lives AT the shim path (this fleet's layout).
+        self._make_real_gh(cli_gh_rate.shim_path())
+        status = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                    verbose=False)
+        self.assertEqual(status, "wrapped-in-place")
+        # The shim now carries the sentinel; the real gh is at gh-upstream.
+        self.assertTrue(cli_gh_rate._is_our_wrapper(cli_gh_rate.shim_path()))
+        self.assertFalse(cli_gh_rate._is_our_wrapper(cli_gh_rate.upstream_path()))
+        with open(cli_gh_rate.upstream_path(), encoding="utf-8") as fh:
+            self.assertIn("REAL-GH", fh.read())
+        self.assertTrue(os.access(cli_gh_rate.upstream_path(), os.X_OK))
+
+    def test_idempotent_after_wrap(self):
+        self._make_real_gh(cli_gh_rate.shim_path())
+        cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py", verbose=False)
+        up_mtime = os.path.getmtime(cli_gh_rate.upstream_path())
+        status = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                    verbose=False)
+        self.assertEqual(status, "already installed (-> %s)"
+                         % cli_gh_rate.upstream_path())
+        # Upstream was NOT re-copied on the idempotent run.
+        self.assertEqual(up_mtime, os.path.getmtime(cli_gh_rate.upstream_path()))
+
+    def test_no_gh_anywhere_is_noop(self):
+        os.environ["PATH"] = self.bin      # empty bin, no gh, no shim
+        status = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                    verbose=False)
+        self.assertEqual(status, "skip: no gh on this box")
+        self.assertFalse(os.path.exists(cli_gh_rate.shim_path()))
+
+    def test_real_gh_path_prefers_upstream(self):
+        self._make_real_gh(cli_gh_rate.upstream_path())
+        self.assertEqual(cli_gh_rate.real_gh_path(), cli_gh_rate.upstream_path())
+
+    def test_real_gh_path_skips_our_shim(self):
+        # A shim at the shim path (our sentinel) plus a real gh elsewhere on PATH.
+        cli_gh_rate._write_wrapper_file(cli_gh_rate.shim_path(),
+                                        "/nonexistent/gh", "/usr/bin/python3",
+                                        "/repo/cli_gh_rate.py")
+        other = os.path.join(self.tmp, "otherbin")
+        os.makedirs(other)
+        self._make_real_gh(os.path.join(other, "gh"))
+        os.environ["PATH"] = self.bin + os.pathsep + other
+        resolved = cli_gh_rate.real_gh_path()
+        self.assertEqual(resolved, os.path.join(other, "gh"))
+
+
 class TestHoldComposition(unittest.TestCase):
     """The #1041 min_budget guard composes with the rate backoff: a gh-poller
     watchdog job is held (never run late) when the rate warrants a backoff."""

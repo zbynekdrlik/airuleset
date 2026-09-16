@@ -9578,6 +9578,18 @@ def main():
     p_goalinv.add_argument(
         "--json", action="store_true", help="Print the inventory as JSON")
 
+    # --- #1040: fleet gh rate-guard ---
+    p_ghrate = sub.add_parser(
+        "gh-rate",
+        help="Show this box's GitHub rate budget (core + graphql remaining %%, "
+             "reset, poll backoff) from a 60 s-cached `gh api rate_limit` read "
+             "(#1040); the managed gh shim throttles background pollers below 20 %%")
+    p_ghrate.add_argument(
+        "--json", action="store_true", help="Print the raw status as JSON")
+    p_ghrate.add_argument(
+        "--no-refresh", action="store_true",
+        help="Read the cache only; do not call gh api rate_limit")
+
     # --- #993: lane-overlap independence check ---
     p_lo = sub.add_parser(
         "lane-overlap",
@@ -9765,6 +9777,15 @@ def cmd_doctrine_audit(args):
             print("  %d MEDIUM match(es) left for human review (see table above)."
                   % len(results["skipped_medium"]))
     return 0
+
+
+def cmd_gh_rate(args):
+    """#1040 — print this box's GitHub rate budget (core + graphql), refreshing
+    the 60 s cache via the non-counting `gh api rate_limit` endpoint. Delegates
+    to cli_gh_rate (stdlib-only); records any once-per-episode exhaustion alert
+    as a side effect of the refresh (journal + status row, no owner ping)."""
+    import cli_gh_rate
+    return cli_gh_rate.cmd_gh_rate(args)
 
 
 def cmd_goal_inventory(args):
@@ -10126,6 +10147,7 @@ SUBCOMMANDS = {
     "autopilot-lock": cmd_autopilot_lock,
     "onboard-project": cmd_onboard_project,
     "goal-inventory": cmd_goal_inventory,
+    "gh-rate": cmd_gh_rate,
     "model-audit": cmd_model_audit,
     "model-tiers": cmd_model_tiers,
     "lane-overlap": cmd_lane_overlap,
