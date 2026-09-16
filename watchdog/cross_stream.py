@@ -1462,30 +1462,37 @@ def _comment_handoff_window_s():
 # 50s / 30s of the 100s soft-cap budget left and ran the unit into the 120s
 # `TimeoutStartSec` kill. `_SweepBudget` bounds every gh op in the job by a shared
 # monotonic deadline, with a JOB-WIDE single-overshoot guarantee, so the sweep's
-# total gh wall clock is `bound + one in-flight read` regardless of gh latency.
-_GKORPHAN_SWEEP_BUDGET_S = 20      # the in-job bound (mirrors DEPLOY_STATE_FETCH_BUDGET_S=20;
-                                   # ~ the 15-20s per-item gh read timeouts)
-_GKORPHAN_GH_READ_S = 20          # one in-flight read overshoot: the WORST single gh read
-                                   # (the paginated `_gk_ever_labeled` at 20s; also >= the
-                                   # per-candidate `gh issue view` at 15s). A loop that checks
-                                   # the deadline before an item can still overshoot by ONE
-                                   # read that STARTED under budget — this is that ceiling,
-                                   # exactly like deploy_state's "budget + ~15s" note.
-                                   # `_BUDGET_MIN_GK_ORPHAN_S` (run_once) == the sum of these.
+# total gh wall clock is `bound + one in-flight OP` regardless of gh latency.
+_GKORPHAN_SWEEP_BUDGET_S = 15      # the in-job bound — the DOMINANT per-item gh read timeout
+                                   # (`gh issue view`, fired for EVERY candidate, timeout 15s;
+                                   # the paginated `_gk_ever_labeled` at 20s fires ~0/sweep).
+# #1050 review (a736/a0408/a9f3/a24696): the WORST single gh OP behind ONE
+# `may_start_op()` check is NOT a single read — it is a RECONCILE WRITE
+# (`_apply_gk_orphan_reconcile` / `_apply_gk_comment_handoff_reconcile`), which is
+# TWO sequential gh calls (post evidence comment ~15s + add label ~15s = ~30s)
+# gated by a single check. A loop/gate that checks the deadline before an op can
+# still overshoot by ONE op that STARTED under budget — so this ceiling must cover
+# the 2-call reconcile, not just a 15-20s read. (Named `_OVERSHOOT_S`, not
+# `_GH_READ_S`, precisely so the constant is honest about what it bounds.)
+_GKORPHAN_OVERSHOOT_S = 30        # 2 × ~15s (reconcile comment + label); also >= any single
+                                   # read (view 15s, paginated timeline 20s).
+# `_BUDGET_MIN_GK_ORPHAN_S` (run_once) == _GKORPHAN_SWEEP_BUDGET_S + _GKORPHAN_OVERSHOOT_S,
+# so a job that STARTS at the latest permitted moment (remaining == the floor) finishes
+# at exactly the 100s soft cap in the worst case — bound + one 30s reconcile overshoot —
+# leaving a full 20s cushion to the 120s hard kill (#1050 value-lock test).
 
 
 class _SweepBudget:
     """#1050 — a TOTAL wall-clock budget for Job 36's gh work, the same
-    `time_fn`/`budget_s` seam `fetch_deploy_state` uses. TWO checks:
+    `time_fn`/`budget_s` seam `fetch_deploy_state` uses.
 
-      * `may_start_op()` gates a gh op (a fetch's search/view/timeline read, or a
-        reconcile write) with a JOB-WIDE SINGLE-OVERSHOOT guarantee: the FIRST gh
-        op of the whole sweep always runs (so a sweep makes at least SOME
-        progress), and after that only an op that STARTS under the deadline runs —
-        so at most ONE in-flight read overshoots the deadline. Used inside the
-        fetches AND before every reconcile write.
-      * `spent()` is a plain deadline check for a caller that keeps its own
-        'process at least one item' guard.
+    `may_start_op()` gates a gh op (a fetch's search/view/timeline read, or a
+    reconcile write) with a JOB-WIDE SINGLE-OVERSHOOT guarantee: the FIRST gh op
+    of the whole sweep always runs (so a sweep makes at least SOME progress), and
+    after that only an op that STARTS under the deadline runs — so at most ONE
+    in-flight op overshoots the deadline (its duration ≤ `_GKORPHAN_OVERSHOOT_S`,
+    the 2-call reconcile ceiling). Used inside both fetches AND before every
+    reconcile write.
 
     A `budget_s` of None (unwired) never bounds — the fail-open 'wired = on'
     convention this file uses everywhere, so every pre-#1050 caller (and every
@@ -1494,17 +1501,14 @@ class _SweepBudget:
     def __init__(self, time_fn=None, budget_s=None):
         self.time_fn = time_fn or time.monotonic
         self.deadline = (self.time_fn() + budget_s) if budget_s is not None else None
-        self._first_op_done = False
-
-    def spent(self):
-        return self.deadline is not None and self.time_fn() >= self.deadline
+        self._bootstrap_consumed = False
 
     def may_start_op(self):
         if self.deadline is None:
             return True
         over = self.time_fn() >= self.deadline
-        if not self._first_op_done:
-            self._first_op_done = True     # bootstrap: the sweep's first op always runs
+        if not self._bootstrap_consumed:
+            self._bootstrap_consumed = True   # the sweep's first op always runs
             return True
         return not over
 
@@ -1788,12 +1792,14 @@ def _fetch_gk_comment_handoffs(root, home, now, window_s, budget=None, logs=None
     since = datetime.fromtimestamp(
         max(0.0, now - window_s), tz=timezone.utc).strftime("%Y-%m-%d")
     out = []
-    for marker_re, token, target_label, flow_labels in _GK_COMMENT_HANDOFF_MARKERS:
+    n_markers = len(_GK_COMMENT_HANDOFF_MARKERS)
+    for mk_idx, (marker_re, token, target_label, flow_labels) in enumerate(
+            _GK_COMMENT_HANDOFF_MARKERS):
         if budget is not None and not budget.may_start_op():
             if logs is not None:
-                logs.append("gk-orphan-marker-sweep: budget spent (handoff fetch %s) "
-                            "— remaining marker types re-read next sweep"
-                            % os.path.basename(root.rstrip("/")))
+                logs.append("gk-orphan-marker-sweep: budget spent after %d/%d marker types "
+                            "(handoff fetch %s) — rest re-read next sweep"
+                            % (mk_idx, n_markers, os.path.basename(root.rstrip("/"))))
             break
         try:
             r = subprocess.run(
@@ -1974,8 +1980,8 @@ def _gk_comment_handoff_pass(root, name, now, dry_run, handoff_fetch,
         if budget is not None and not budget.may_start_op():
             # #1050 — budget spent before this reconcile write; defer (no dedup
             # latched, so it retries next sweep) and stop the pass.
-            logs.append("gk-orphan-marker-sweep: budget spent after %d/%d items "
-                        "(handoff %s) — deferring reconcile of %s to next sweep"
+            logs.append("gk-orphan-marker-sweep: budget spent after examining %d/%d "
+                        "candidates (handoff %s) — deferring reconcile of %s to next sweep"
                         % (i, n_cand, name, key))
             break
         seen[key] = int(now)                   # dedup BEFORE the mutation (#193)
@@ -2024,17 +2030,26 @@ def gk_orphan_marker_sweep(now, run, state, send_fn, home=None, dry_run=False,
     `seen` dict.
 
     #1050 — a TOTAL wall-clock budget (`_SweepBudget(time_fn, budget_s)`, the
-    `fetch_deploy_state` idiom) bounds ALL gh work in the sweep: both fetches'
+    `fetch_deploy_state` idiom) bounds ALL the sweep's GH work: both fetches'
     per-item read loops AND every reconcile write are gated by the SAME shared
     monotonic deadline with a job-wide single-overshoot guarantee, so the sweep's
-    total gh wall clock is `budget_s + one in-flight read` regardless of gh
-    latency and it can never run the unit into the 120s `TimeoutStartSec` kill
-    (the gk 2026-09-16 incident). A deferred candidate/reconcile is re-read next,
-    less-loaded sweep (dedup marks stay persisted per PROCESSED item, so a
-    mid-loop kill loses nothing already handled). The registry raises Job 36's
-    `min_budget` to `_BUDGET_MIN_GK_ORPHAN_S` (= `_GKORPHAN_SWEEP_BUDGET_S` +
-    `_GKORPHAN_GH_READ_S`) so it only STARTS with enough soft-cap budget to
-    finish within the bound. `budget_s=None` defaults to `_GKORPHAN_SWEEP_BUDGET_S`."""
+    total gh wall clock is `budget_s + one in-flight op` (≤ the 2-call reconcile
+    ceiling `_GKORPHAN_OVERSHOOT_S`) regardless of gh latency. This is what stops
+    the gk 2026-09-16 incident (the unbounded read loop running into the 120s
+    kill). NOTE: only the GH work is bounded here — the tiny local `list_claude_panes`
+    tmux prelude is a separate, pre-existing unbounded path, not this fix's target.
+    A deferred candidate/reconcile is re-read next, less-loaded sweep (dedup marks
+    stay persisted per PROCESSED item, so a mid-loop kill loses nothing already
+    handled). The registry raises Job 36's `min_budget` to `_BUDGET_MIN_GK_ORPHAN_S`
+    (= `_GKORPHAN_SWEEP_BUDGET_S` + `_GKORPHAN_OVERSHOOT_S`) so it only STARTS with
+    enough soft-cap budget that bound + one reconcile overshoot finishes by the
+    100s soft cap (20s cushion to the 120s hard kill). `budget_s=None` defaults to
+    `_GKORPHAN_SWEEP_BUDGET_S`. RESIDUAL (accepted, documented): the #570 handoff
+    pass runs BEFORE the #551 mutated pass and shares this budget, so under
+    SUSTAINED gh saturation the primary mutated pass can be deferred sweep after
+    sweep — no kill, no lost state, self-heals when load drops (strictly better
+    than the pre-#1050 kill-and-lose-all); job 11's stale-handoff alarm is a
+    separate backstop for a parked hand-off."""
     interval = watchdog.GKORPHAN_INTERVAL if interval is None else interval
     if user is None:
         import getpass
@@ -2112,8 +2127,8 @@ def gk_orphan_marker_sweep(now, run, state, send_fn, home=None, dry_run=False,
             # overshoot). Budget spent → defer this + the rest to next sweep; NO
             # dedup latched so the orphan is retried (never lost).
             if budget is not None and not budget.may_start_op():
-                logs.append("gk-orphan-marker-sweep: budget spent after %d/%d items "
-                            "(%s) — deferring reconcile of %s to next sweep"
+                logs.append("gk-orphan-marker-sweep: budget spent after examining %d/%d "
+                            "candidates (%s) — deferring reconcile of %s to next sweep"
                             % (i, n_cand, name, key))
                 break
             seen[key] = int(now)               # dedup BEFORE the mutation (#193)

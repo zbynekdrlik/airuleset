@@ -1754,14 +1754,16 @@ _BUDGET_MIN_GH_BATCH_S = 25
 # views) with no cursor batching — so a bare GH_BATCH floor (25) let it START at
 # 25s of budget and then run the 60-view loop into the 120s kill (gk 2026-09-16
 # 09:14 + 15:15). The job now carries its OWN in-job wall-clock bound
-# (`_SweepBudget`, `_GKORPHAN_SWEEP_BUDGET_S`=20) + a single-overshoot guarantee,
-# so this floor = that bound + one in-flight read (`_GKORPHAN_GH_READ_S`=20, the
-# worst single gh read = the paginated `_gk_ever_labeled` @ 20s). A job that
-# STARTS with >= this floor of soft-cap budget completes within the bound, well
-# under the soft cap. Kept in sync with cross_stream's two constants by the #1050
-# value-lock test (min_budget == bound + one_read, and min_budget + bound +
-# one_read < SWEEP_SOFT_CAP_S).
-_BUDGET_MIN_GK_ORPHAN_S = 40     # == cross_stream._GKORPHAN_SWEEP_BUDGET_S (20) + _GKORPHAN_GH_READ_S (20)
+# (`_SweepBudget`, `_GKORPHAN_SWEEP_BUDGET_S`=15 = the dominant per-item read
+# timeout) + a single-overshoot guarantee, so this floor = that bound + one
+# in-flight OP (`_GKORPHAN_OVERSHOOT_S`=30 — the WORST single op behind one gate
+# is a 2-call RECONCILE WRITE, comment ~15s + label ~15s, not a single read;
+# #1050 review). A job that STARTS with >= this floor of soft-cap budget finishes
+# bound + one 30s reconcile overshoot by the 100s soft cap in the worst case, a
+# full 20s cushion to the 120s hard kill. Kept in sync with cross_stream's two
+# constants by the #1050 value-lock test (min_budget == bound + overshoot; worst
+# finish (SOFT_CAP - min_budget) + bound + overshoot <= SOFT_CAP < 120).
+_BUDGET_MIN_GK_ORPHAN_S = 45     # == cross_stream._GKORPHAN_SWEEP_BUDGET_S (15) + _GKORPHAN_OVERSHOOT_S (30)
 _BUDGET_MIN_SSH_FLEET_S = 65      # ssh fanout across fleet hosts (per-host ~60), hour-gated, coordinator-only
 _BUDGET_MIN_HTTP_PROBE_S = 15     # a single HTTP GET (usage timeout 12 / healthz 8) + margin
 _BUDGET_MIN_PS_REAPER_S = 10      # a ps read + targeted kill / a per-pane tmux round-trip (fast subprocess)

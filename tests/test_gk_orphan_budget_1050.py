@@ -10,7 +10,7 @@ with a JOB-WIDE single-overshoot guarantee, PLUS the registry `min_budget`
 raised to `bound + one in-flight read` (`_BUDGET_MIN_GK_ORPHAN_S`).
 
 RED against the pre-fix tree:
-  * `_SweepBudget` / `_GKORPHAN_SWEEP_BUDGET_S` / `_GKORPHAN_GH_READ_S` /
+  * `_SweepBudget` / `_GKORPHAN_SWEEP_BUDGET_S` / `_GKORPHAN_OVERSHOOT_S` /
     `_BUDGET_MIN_GK_ORPHAN_S` do not exist yet (ImportError/AttributeError);
   * `gk_orphan_marker_sweep` / `_fetch_gk_orphan_candidates` take no
     `time_fn`/`budget_s`/`budget` param (TypeError);
@@ -52,48 +52,70 @@ class _Clock:
 # 1. The arithmetic value-lock: start-floor + bound + one in-flight read must
 #    stay under the 100s soft cap, and the floor must equal bound + one read.
 # --------------------------------------------------------------------------- #
+# A single gh subprocess timeout (`gh issue view` / comment / label all use 15s;
+# the paginated `_gk_ever_labeled` uses 20s). The WORST op behind ONE may_start_op
+# is a 2-call RECONCILE WRITE = 2 × this (#1050 review a736/a0408/a9f3/a24696).
+_SINGLE_GH_TIMEOUT_S = 15
+
+
 class TestBudgetValueLock(unittest.TestCase):
     def test_constants_exist_and_are_sane(self):
         self.assertIsInstance(cs._GKORPHAN_SWEEP_BUDGET_S, (int, float))
-        self.assertIsInstance(cs._GKORPHAN_GH_READ_S, (int, float))
+        self.assertIsInstance(cs._GKORPHAN_OVERSHOOT_S, (int, float))
         self.assertIsInstance(wd._BUDGET_MIN_GK_ORPHAN_S, (int, float))
         self.assertGreater(cs._GKORPHAN_SWEEP_BUDGET_S, 0)
-        self.assertGreater(cs._GKORPHAN_GH_READ_S, 0)
+        self.assertGreater(cs._GKORPHAN_OVERSHOOT_S, 0)
 
-    def test_min_budget_is_bound_plus_one_read(self):
+    def test_overshoot_covers_the_two_call_reconcile(self):
+        # #1050 review: the overshoot ceiling must cover the WORST single op behind
+        # one may_start_op — a reconcile WRITE is TWO gh calls (comment + label),
+        # NOT a single read. This is the whole point of naming it _OVERSHOOT_S,
+        # not _GH_READ_S; a future single-read assumption breaks here.
+        self.assertGreaterEqual(
+            cs._GKORPHAN_OVERSHOOT_S, 2 * _SINGLE_GH_TIMEOUT_S,
+            "overshoot must cover the 2-call reconcile write (comment + label)")
+
+    def test_min_budget_is_bound_plus_overshoot(self):
+        # A cross-module CONSISTENCY lock: both sides are hand-written literals
+        # (the run_once floor cannot import cross_stream at definition time), so
+        # this catches DRIFT if one is changed without the other.
         self.assertEqual(
             wd._BUDGET_MIN_GK_ORPHAN_S,
-            cs._GKORPHAN_SWEEP_BUDGET_S + cs._GKORPHAN_GH_READ_S,
-            "min_budget must equal the in-job bound + one in-flight read")
+            cs._GKORPHAN_SWEEP_BUDGET_S + cs._GKORPHAN_OVERSHOOT_S,
+            "min_budget must equal the in-job bound + one in-flight overshoot op")
 
     def test_value_lock_under_soft_cap(self):
-        # the ticket's literal lock: min_budget + bound + one read < 100
+        # the ticket's literal lock: min_budget + bound + one overshoot < 100
         total = (wd._BUDGET_MIN_GK_ORPHAN_S
                  + cs._GKORPHAN_SWEEP_BUDGET_S
-                 + cs._GKORPHAN_GH_READ_S)
-        self.assertLess(total, 100, "min_budget + bound + one read must be < 100s soft cap")
+                 + cs._GKORPHAN_OVERSHOOT_S)
+        self.assertLess(total, 100, "min_budget + bound + overshoot must be < 100s soft cap")
 
-    def test_worst_case_start_completes_under_the_hard_kill(self):
-        # A job that STARTS at the latest permitted moment (remaining == min_budget,
-        # i.e. elapsed == SOFT_CAP - min_budget) and runs its bound + one overshoot
-        # read must finish under BOTH the soft cap and the 120s hard kill.
+    def test_worst_case_start_finishes_by_soft_cap_and_under_the_hard_kill(self):
+        # A job STARTS only when remaining >= min_budget, i.e. at latest at
+        # elapsed == SOFT_CAP - min_budget. It then runs bound + ONE in-flight
+        # overshoot — and the worst overshoot is the 2-call RECONCILE (30s), NOT
+        # a single 20s read (the finding both reviews raised). Modelling the
+        # reconcile overshoot, the worst finish must still land BY the soft cap
+        # (full cushion to the hard kill), not just under 120.
         latest_start = wd.SWEEP_SOFT_CAP_S - wd._BUDGET_MIN_GK_ORPHAN_S
         worst_finish = (latest_start
                         + cs._GKORPHAN_SWEEP_BUDGET_S
-                        + cs._GKORPHAN_GH_READ_S)
-        self.assertLessEqual(worst_finish, wd.SWEEP_SOFT_CAP_S)
-        self.assertLess(worst_finish, 120)
+                        + cs._GKORPHAN_OVERSHOOT_S)   # the reconcile overshoot, not a read
+        self.assertLessEqual(worst_finish, wd.SWEEP_SOFT_CAP_S,
+                             "worst finish (incl. the 2-call reconcile overshoot) must land "
+                             "by the soft cap")
+        self.assertLess(worst_finish, 120, "and comfortably under the 120s hard kill")
 
 
 # --------------------------------------------------------------------------- #
-# 2. The `_SweepBudget` primitive — single-overshoot may_start_op + spent().
+# 2. The `_SweepBudget` primitive — job-wide single-overshoot may_start_op.
 # --------------------------------------------------------------------------- #
 class TestSweepBudgetPrimitive(unittest.TestCase):
-    def test_unbounded_never_spends_or_stops(self):
+    def test_unbounded_never_stops(self):
         b = cs._SweepBudget(time_fn=_Clock([0, 1, 2, 3, 4]), budget_s=None)
         for _ in range(10):
             self.assertTrue(b.may_start_op())
-            self.assertFalse(b.spent())
 
     def test_first_op_always_runs_then_deadline_gates(self):
         # deadline = 0 + 3. clock advances 1 per call after __init__.
@@ -103,11 +125,12 @@ class TestSweepBudgetPrimitive(unittest.TestCase):
         self.assertFalse(b.may_start_op())   # clock 3 >= 3 — spent
         self.assertFalse(b.may_start_op())   # clock 4 — stays spent (single overshoot)
 
-    def test_spent_is_a_plain_deadline_check(self):
-        b = cs._SweepBudget(time_fn=_Clock([0, 1, 2, 3]), budget_s=2)
-        self.assertFalse(b.spent())   # clock 1 < 2
-        self.assertTrue(b.spent())    # clock 2 >= 2
-        self.assertTrue(b.spent())    # clock 3 >= 2
+    def test_bootstrap_op_runs_even_when_deadline_already_past(self):
+        # the sweep-makes-progress guarantee: if the very first op is checked
+        # after the deadline, it STILL runs (once), then everything is gated.
+        b = cs._SweepBudget(time_fn=_Clock([0, 99, 99, 99]), budget_s=3)
+        self.assertTrue(b.may_start_op())    # bootstrap despite clock 99 >= 3
+        self.assertFalse(b.may_start_op())   # every subsequent op is gated off
 
 
 # --------------------------------------------------------------------------- #
@@ -176,8 +199,9 @@ class TestMutatedProcessingLoopBudget(unittest.TestCase):
         self.assertIn("odoo-erp#102", seen)
         self.assertNotIn("odoo-erp#103", seen)   # untouched — re-read next sweep
         self.assertNotIn("odoo-erp#104", seen)
-        self.assertTrue(any("budget spent after 3/5 items" in ln for ln in logs),
-                        "one budget-spent line naming N/M processed\n" + "\n".join(logs))
+        self.assertTrue(any("budget spent after examining 3/5 candidates" in ln
+                            for ln in logs),
+                        "one budget-spent line naming N/M examined\n" + "\n".join(logs))
         # per-item write-through: a persist per reconcile (+ the cadence stamp).
         self.assertGreaterEqual(len(persist_calls), len(rec.calls) + 1)
 
@@ -187,6 +211,60 @@ class TestMutatedProcessingLoopBudget(unittest.TestCase):
             cands, budget_s=10 ** 6, clock=_Clock([0, 1, 2, 3, 4, 5]))
         self.assertEqual([c[1] for c in rec.calls], [200, 201, 202])
         self.assertFalse(any("budget spent" in ln for ln in logs), logs)
+
+
+# --------------------------------------------------------------------------- #
+# 3b. The #570 comment-handoff pass reconcile loop ALSO defers under the budget
+#     (coverage gap flagged by the #1050 review — the handoff pass shares the
+#     SAME budget as the mutated pass and must stop the same way).
+# --------------------------------------------------------------------------- #
+class _HandoffRec:
+    def __init__(self, status="labeled"):
+        self.status = status
+        self.calls = []
+
+    def __call__(self, root, num, label):
+        self.calls.append((root, num, label))
+        return self.status
+
+
+def _handoff(n):
+    return {"number": n, "target_label": "needs-gatekeeper",
+            "marker_in_window": True, "currently_labeled": False,
+            "handoff_flow": False, "ever_labeled": False}
+
+
+class TestHandoffPassBudget(unittest.TestCase):
+    def test_handoff_reconcile_defers_at_the_bound(self):
+        rec = _HandoffRec()
+        persist_calls = []
+        st = {}
+
+        def persist():
+            persist_calls.append(1)
+
+        handoffs = [_handoff(n) for n in (400, 401, 402, 403)]
+        # clock: __init__ -> 0 (deadline 3); handoff reconcile #1 -> 1 (bootstrap),
+        # #2 -> 2 (<3), #3 -> 3 (>=3 -> stop). => 2 handoff reconciles.
+        with mock.patch.object(wd, "list_claude_panes", lambda *a, **k: []), \
+             mock.patch.object(cs, "_cache_repo_roots", lambda *a, **k: {ROOT: "odoo-erp"}):
+            logs = cs.gk_orphan_marker_sweep(
+                NOW, run=None, state=st, send_fn=_SendRec(), user="newlevel",
+                gh_fetch=lambda root, **kw: [],                 # no MUTATED candidates
+                handoff_fetch=lambda root, **kw: list(handoffs),
+                handoff_apply=rec, persist=persist,
+                time_fn=_Clock([0, 1, 2, 3, 4, 5]), budget_s=3)
+        self.assertEqual(rec.calls,
+                         [(ROOT, 400, "needs-gatekeeper"),
+                          (ROOT, 401, "needs-gatekeeper")],
+                         "handoff pass must reconcile only what fits the budget")
+        seen = st["gkorphan"]["seen"]
+        self.assertIn("handoff:odoo-erp#400", seen)
+        self.assertNotIn("handoff:odoo-erp#402", seen)   # deferred, retried next sweep
+        self.assertNotIn("handoff:odoo-erp#403", seen)
+        self.assertTrue(any("budget spent after examining 2/4 candidates" in ln
+                            and "handoff" in ln for ln in logs),
+                        "handoff pass must log the defer line\n" + "\n".join(logs))
 
 
 # --------------------------------------------------------------------------- #
