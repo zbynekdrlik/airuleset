@@ -2164,6 +2164,62 @@ if [ "$VERIF_REPORT" = "1" ]; then
     fi
 fi
 
+# #1042 — Startup Introduction link on a client-acceptance hand-off. Owner
+# directive (montalu6, 15.9.2026): every client handover delivers ONE startup
+# „Introduction / Začíname" page IN the product (the Návody section), and the
+# acceptance hand-off LINKS it. So a `❓` acceptance block, OR a needs-acceptance
+# labelling turn, whose text carries NO https:// link to a Návody/Introduction/
+# Začíname page is an incomplete handover. FIRE detectors read MSG_MENTION (a
+# backticked/quoted MENTION of the rule never fires — the #96 use-vs-mention
+# split, so a message DESCRIBING this rule or a code-fenced example is not gated);
+# the satisfier + bypass read the raw MSG (a link in a code span still counts).
+# FAIL-OPEN at the NET level like #1018: msg_has resolves an UNKNOWN grep to
+# MATCH(1), so a grep meltdown reads the satisfier as PRESENT → no block is
+# fabricated. Narrow on purpose (the acceptance/label shape, not any question).
+INTRO_FIRE=0
+# Trigger A — a ❓ acceptance block: a genuine question turn (❓ + ASKED/NEEDS
+# YOU) that PROPOSES a client acceptance message. #1042 review-1 🔴 + review-2 🔴:
+# `❓`/`NEEDS YOU` are in EVERY question, and an acceptance/client WORD ("odovzdať
+# súbor klientovi", "vygeneruje akceptačnú správu", a `needs-acceptance` label
+# discussion) can appear in an ordinary DESIGN question — so keying on words
+# false-blocks design questions. The discriminating signal is the ACT of
+# proposing a client message, which per handover-compose carries a STRUCTURAL
+# marker a design question never has: the mandatory stream identity SIGNATURE
+# (`ZbynekAI/MarekAI <N>`, the LAST line of every client message) OR the target
+# client thread DEEP URL (`discuss.channel_<N>`) alongside an acceptance cue.
+# These are read from the RAW `$MSG` (a real proposal may present the body in a
+# ``` fence or `>` quote — the signature/URL must survive stripping); the ❓
+# marker is read from MSG_MENTION so a fully-fenced EXAMPLE of the rule (with no
+# live status marker) never fires (#96 use-vs-mention). Bare feature-word
+# questions (no signature, no thread URL) no longer fire.
+INTRO_QMARK=$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qE '❓' && echo 1 || echo 0)
+INTRO_ASKED=$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE 'ASKED|NEEDS[[:space:]]+YOU' && echo 1 || echo 0)
+INTRO_SIG=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qE '(Zbynek|Marek)AI[[:space:]]*[0-9]' && echo 1 || echo 0)
+INTRO_THREAD=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qE 'discuss\.channel_[0-9]' && echo 1 || echo 0)
+INTRO_ACCCUE=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE 'needs-acceptance|akceptačn|acceptance|odovzd' && echo 1 || echo 0)
+# PROPOSAL = a proposed client message (signature) OR a targeted client thread
+# (deep URL) with acceptance context. A design question about a feature/label
+# carries neither.
+if [ "$INTRO_QMARK" = "1" ] && [ "$INTRO_ASKED" = "1" ] \
+   && { [ "$INTRO_SIG" = "1" ] || { [ "$INTRO_THREAD" = "1" ] && [ "$INTRO_ACCCUE" = "1" ]; }; }; then
+    INTRO_FIRE=1
+fi
+# Trigger B — a needs-acceptance labelling ACTION narrated in prose (a label
+# verb near the label, or the gh command); a backticked example is stripped by
+# MSG_MENTION and does not fire. #1042-review-1 🔵: the verb→label window is 120
+# (a deep URL can sit between "označil" and "needs-acceptance"); `.`-bounded.
+INTRO_LABEL=$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE '(--?add-label|add_label|pridal|ozna[čc]il|nastav|[šs]t[íi]tk|labell?ed).{0,120}needs-acceptance|needs-acceptance.{0,40}(--?add-label|add_label)|gh[[:space:]]+issue[[:space:]]+edit.{0,80}needs-acceptance' && echo 1 || echo 0)
+if [ "$INTRO_LABEL" = "1" ]; then INTRO_FIRE=1; fi
+if [ "$INTRO_FIRE" = "1" ]; then
+    INTRO_HAS_LINK=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qE 'https?://' && echo 1 || echo 0)
+    INTRO_HAS_KW=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE 'n[áa]vod|introduction|za[čc][íi]nam|zaciname' && echo 1 || echo 0)
+    INTRO_BYPASS=$(msg_has "$MSG" -qF 'airuleset:intro-link-ok' && echo 1 || echo 0)
+    if [ "$INTRO_BYPASS" = "0" ] && { [ "$INTRO_HAS_LINK" = "0" ] || [ "$INTRO_HAS_KW" = "0" ]; }; then
+        echo "VIOLATION: Odovzdávaš klientovi / označuješ needs-acceptance, ale správa nenesie https:// odkaz na štartovaciu Introduction / Začíname / Návody stránku v produkte. Per airuleset #1042 (owner 15.9.2026): každá odovzdávka funkčnej oblasti klientovi má JEDEN štartovací Introduction priamo v produkte (sekcia Návody: screenshoty reálnych obrazoviek, overené deep-linky, sekcia per zariadenie/cestu, kontakt na AI pomocníka + IT), z ktorého vie nová osoba bez kontextu rovno začať; akceptačné vlákno naň ODKAZUJE (deep-link), neopisuje kroky — needs-acceptance hand-off bez odkazu na Introduction = nekompletná odovzdávka. Pridaj do správy https:// odkaz na Návody/Introduction/Začíname stránku. Ak je to API-only funkcia bez produktovej stránky, pridaj marker: # airuleset:intro-link-ok <dôvod>. Pozri skills/odoo-client-messaging/handover-compose.md (#1042)." >&2
+        add_hard "client-acceptance hand-off with no https:// link to a Návody/Introduction/Začíname page (#1042)"
+    fi
+fi
+
 UNDET_NOTE=""
 if [ -n "$UNDET_FILE" ] && [ -s "$UNDET_FILE" ]; then
     UNDET_N=$(wc -l <"$UNDET_FILE" | tr -d ' ')
