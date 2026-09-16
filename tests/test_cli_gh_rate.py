@@ -485,6 +485,34 @@ class TestEnsureWrapper(unittest.TestCase):
         self.assertFalse(cli_gh_rate._is_our_wrapper(cli_gh_rate.shim_path()))
         self.assertFalse(os.path.exists(cli_gh_rate.upstream_path()))
 
+    def test_loop_baked_in_state_is_self_healed(self):
+        # #1051 review-1 MAJOR: a box already in the exec-loop state — our
+        # (#1040) shim at ~/.local/bin/gh + a COPY of the app-token shim at
+        # gh-upstream — must be UN-WRAPPED by the installer, not have the loop
+        # re-baked (Case 1 used to blindly refresh pointing at the foreign
+        # upstream). After the fix gh is the app shim again, our shim is gone,
+        # and gh-upstream is gone (moved back).
+        self._make_app_shim(cli_gh_rate.upstream_path())         # gh-upstream = app shim
+        cli_gh_rate._write_wrapper_file(cli_gh_rate.shim_path(),
+                                        cli_gh_rate.upstream_path(),
+                                        "/usr/bin/python3", "/repo/cli_gh_rate.py")
+        # sanity: this IS the loop-baked-in state before we run the installer.
+        self.assertTrue(cli_gh_rate._is_our_wrapper(cli_gh_rate.shim_path()))
+        self.assertEqual(cli_gh_rate._classify_local_gh(cli_gh_rate.upstream_path()),
+                         "foreign")
+        status = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                    verbose=False)
+        self.assertIn("unwrapped", status)
+        self.assertFalse(cli_gh_rate._is_our_wrapper(cli_gh_rate.shim_path()))
+        self.assertIn("gh-app-gh-shim.sh",
+                      open(cli_gh_rate.shim_path(), encoding="utf-8").read())
+        self.assertFalse(os.path.exists(cli_gh_rate.upstream_path()))
+        # idempotent: a SECOND run now sees the app shim at gh -> Case 2 skip.
+        s2 = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                verbose=False)
+        self.assertIn("skip", s2)
+        self.assertFalse(os.path.exists(cli_gh_rate.upstream_path()))
+
     def test_foreign_skip_prints_a_loud_line(self):
         # #1051: the skip must be LOUD so a push operator sees why the box is
         # unthrottled (fail-open: no throttle there is acceptable, a hang is not).

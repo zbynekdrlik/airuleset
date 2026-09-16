@@ -946,11 +946,24 @@ def _gh_chain_postcheck():
     guarantees it NEVER hangs, so the deploy loop's existing `rc != 0 ->
     failed.append` accounting catches a hanging (exec-looping) gh and the push
     exits non-zero — a future push can never SHIP a hanging gh (the #1040/#1051
-    incident, where every `gh` on 12 stream boxes hung until timeout)."""
+    incident, where every `gh` on 12 stream boxes hung until timeout).
+
+    #1051 review-1 CRITICAL: this runs in a NON-LOGIN ssh shell (`ssh host
+    "<cmd>"`) whose PATH does NOT carry ~/.local/bin (the interactive PATH
+    export is gated on an interactive+TTY shell — cli_bashrc_appliers.py /
+    cli_binary_installers._claude_cli_env). The whole fleet's gh (and the shim
+    that can loop) lives at ~/.local/bin/gh, so a BARE `gh` here would resolve
+    the WRONG binary: a false PASS on a box still looping at ~/.local/bin/gh (a
+    system gh on PATH answers instead), and a false FAILURE on a healthy box
+    whose gh is only at ~/.local/bin. So force ~/.local/bin to the FRONT of PATH
+    — exactly what a real interactive gh consumer resolves — before the probe.
+    `-k 2` hardens the bound against a SIGTERM-ignoring child."""
     return (
-        '{ timeout 5 gh --version >/dev/null 2>&1 || '
+        '{ PATH="$HOME/.local/bin:$PATH" timeout -k 2 5 gh --version '
+        '>/dev/null 2>&1 || '
         '{ echo "GH-CHAIN POSTCHECK FAILED: gh --version did not return through '
-        'the installed chain in 5s (possible shim loop — #1051)" >&2; exit 87; }; }'
+        'the installed ~/.local/bin/gh chain in 5s (exec-loop or missing gh — '
+        '#1051)" >&2; exit 87; }; }'
     )
 
 

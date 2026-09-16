@@ -771,8 +771,24 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
         shim_is_ours = shim_exists and _is_our_wrapper(shim)
         up_ok = os.path.isfile(upstream) and os.access(upstream, os.X_OK)
 
-        # Case 1: already wrapped, upstream present -> refresh text if changed.
+        # Case 1: our shim is installed and an upstream is present.
         if shim_is_ours and up_ok:
+            # #1051 review-1 SELF-HEAL: the 12 incident boxes were left (before
+            # the supervisor's manual hotfix) as our #1040 shim at gh + a COPY of
+            # the app-token shim at gh-upstream — the exec-loop baked in. On such
+            # a box this Case would blindly refresh our shim pointing REAL_GH at
+            # the FOREIGN upstream, RE-BAKING the loop (the runtime depth guard
+            # would then only downgrade the hang to a fast exit-89 — gh still
+            # broken). So if the upstream is itself a foreign wrapper, UN-WRAP:
+            # restore it as ~/.local/bin/gh (removing our shim) so gh WORKS
+            # again; the next install re-classifies it as foreign -> skip.
+            if _classify_local_gh(upstream) == "foreign":
+                os.replace(upstream, shim)   # app shim back to gh; drops our shim
+                if verbose:
+                    print("    gh-rate: un-wrapped a foreign upstream at %s — "
+                          "restored the app shim, removed our shim (#1051 loop "
+                          "self-heal)" % shim)
+                return "unwrapped-foreign-upstream"
             desired = wrapper_script(upstream, python_exe, module)
             try:
                 with open(shim, encoding="utf-8") as fh:
