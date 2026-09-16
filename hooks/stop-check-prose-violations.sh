@@ -2177,19 +2177,28 @@ fi
 # MATCH(1), so a grep meltdown reads the satisfier as PRESENT → no block is
 # fabricated. Narrow on purpose (the acceptance/label shape, not any question).
 INTRO_FIRE=0
-# Trigger A — a ❓ acceptance block: the marker + an acceptance cue + a
-# client/thread cue (a proposal of a client acceptance message to the owner).
+# Trigger A — a ❓ acceptance block: a genuine question turn (❓ + ASKED/NEEDS
+# YOU) that PROPOSES a client acceptance hand-off. #1042-review-1 🔴: `❓` and
+# `NEEDS YOU`/`ASKED` are the MANDATORY markers of EVERY question turn, so a
+# loose "acceptance-word + client-word" co-occurrence collapsed to "any question
+# mentioning acceptance + a client" and false-blocked ordinary design questions
+# ("Mám pridať acceptance testy pre klientský portál?"). So FIRE requires a
+# STRONG proposed-client-acceptance signal, not word co-occurrence: the
+# `needs-acceptance` LABEL token, a stream identity signature (ZbynekAI/MarekAI
+# <N> — a proposed client message per handover-compose), an "akceptačná správa"
+# phrase, or an "odovzdávam klientovi/zákazníkovi" hand-off phrase. `.`-bounded
+# gaps (not `\w*`) so Slovak diacritics never break the proximity (#1042-review-1).
 INTRO_QMARK=$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qE '❓' && echo 1 || echo 0)
 INTRO_ASKED=$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE 'ASKED|NEEDS[[:space:]]+YOU' && echo 1 || echo 0)
-INTRO_ACC=$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE 'needs-acceptance|akceptačn|acceptance' && echo 1 || echo 0)
-INTRO_CLIENT=$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE 'klient|client|vl[áa]kn|discuss|odovzd|handover' && echo 1 || echo 0)
-if [ "$INTRO_QMARK" = "1" ] && [ "$INTRO_ASKED" = "1" ] && [ "$INTRO_ACC" = "1" ] && [ "$INTRO_CLIENT" = "1" ]; then
+INTRO_STRONG=$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE 'needs-acceptance|(Zbynek|Marek)AI[[:space:]]*[0-9]|akceptačn.{0,4}spr[áa]v|odovzd.{0,12}(klient|z[áa]kazn)' && echo 1 || echo 0)
+if [ "$INTRO_QMARK" = "1" ] && [ "$INTRO_ASKED" = "1" ] && [ "$INTRO_STRONG" = "1" ]; then
     INTRO_FIRE=1
 fi
 # Trigger B — a needs-acceptance labelling ACTION narrated in prose (a label
-# verb adjacent to the label, or the gh command); a backticked example is
-# stripped by MSG_MENTION and does not fire.
-INTRO_LABEL=$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE '(--?add-label|add_label|pridal|ozna[čc]il|nastav|[šs]t[íi]tk)\w*.{0,40}needs-acceptance|needs-acceptance.{0,40}(--?add-label|add_label|label)|gh[[:space:]]+issue[[:space:]]+edit.{0,80}needs-acceptance' && echo 1 || echo 0)
+# verb near the label, or the gh command); a backticked example is stripped by
+# MSG_MENTION and does not fire. #1042-review-1 🔵: the verb→label window is 120
+# (a deep URL can sit between "označil" and "needs-acceptance"); `.`-bounded.
+INTRO_LABEL=$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE '(--?add-label|add_label|pridal|ozna[čc]il|nastav|[šs]t[íi]tk).{0,120}needs-acceptance|needs-acceptance.{0,40}(--?add-label|add_label|label)|gh[[:space:]]+issue[[:space:]]+edit.{0,80}needs-acceptance' && echo 1 || echo 0)
 if [ "$INTRO_LABEL" = "1" ]; then INTRO_FIRE=1; fi
 if [ "$INTRO_FIRE" = "1" ]; then
     INTRO_HAS_LINK=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qE 'https?://' && echo 1 || echo 0)

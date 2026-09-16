@@ -123,6 +123,29 @@ MENTION_ONLY = (
     "Bypass je `# airuleset:intro-link-ok`. ✅ DONE"
 )
 
+# #1042-review-1 🔴 — a legit NON-handover question that DOES carry acceptance +
+# client words but proposes no client message must NOT be blocked (the loose
+# co-occurrence over-fire the review reproduced). No strong signal (no
+# needs-acceptance label, no ZbynekAI/MarekAI signature, no „akceptačná správa",
+# no „odovzdávam klientovi"), so Trigger A must not fire.
+FB1_DESIGN_ACCEPTANCE_TESTS = (
+    "**Otázka — projekt montalu:** Mám pre klientský portál pridať acceptance "
+    "testy do CI?\n- (1) áno, Playwright\n- (2) nie\n"
+    "❓ NEEDS YOU: pridám acceptance testy?"
+)
+
+FB2_ENGLISH_ACCEPTANCE_DEMO = (
+    "**Otázka — projekt montalu:** Should I run the acceptance tests before the "
+    "client demo tomorrow?\n- (1) yes\n- (2) no\n"
+    "❓ NEEDS YOU: run the acceptance tests?"
+)
+
+FB3_EXPLICITLY_NOT_ACCEPTANCE = (
+    "**Otázka — projekt montalu:** Klientske vlákno „Dochádzka 1\" je vyriešené. "
+    "Mám ho archivovať? Toto NIE JE akceptačná odovzdávka, len upratovanie.\n"
+    "❓ NEEDS YOU: archivovať vlákno?"
+)
+
 
 class GateBlocksAcceptanceWithoutIntroLink(TestCase):
     def test_accept_block_without_intro_link_is_blocked(self):
@@ -150,6 +173,19 @@ class GateAllowsWhenLinkedOrBypassedOrIrrelevant(TestCase):
     def test_rule_mention_is_not_blocked(self):
         # A message merely DESCRIBING the rule (backticked mentions) is not gated.
         self.assertFalse(_blocked(_run(MENTION_ONLY)))
+
+    def test_design_question_with_acceptance_words_is_not_blocked(self):
+        # #1042-review-1 🔴 — the over-fire the review reproduced: a design
+        # question mentioning acceptance + client but proposing no client
+        # message must NOT be blocked.
+        self.assertFalse(_blocked(_run(FB1_DESIGN_ACCEPTANCE_TESTS)))
+
+    def test_english_acceptance_demo_question_is_not_blocked(self):
+        self.assertFalse(_blocked(_run(FB2_ENGLISH_ACCEPTANCE_DEMO)))
+
+    def test_explicitly_not_acceptance_question_is_not_blocked(self):
+        # An explicit „toto NIE JE akceptačná odovzdávka" question stays allowed.
+        self.assertFalse(_blocked(_run(FB3_EXPLICITLY_NOT_ACCEPTANCE)))
 
     def test_empty_message_is_allowed(self):
         # Fail-open on an unclassifiable / empty turn.

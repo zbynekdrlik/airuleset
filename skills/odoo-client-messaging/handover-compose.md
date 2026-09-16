@@ -107,8 +107,8 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   (`hooks/block-discuss-thread-name.sh`, airuleset #696): `message_post` s
   budúcim sľubom v tele je BLOKOVANÝ, kým obsah nenesie falsifikovateľnú značku
   `airuleset:artifact-verified <ref>` — referenciu na to, čo si z artefaktu
-  odčítal (model `airuleset:owner-approved`) — doktrína platí na KAŽDÉ
-  preformulovanie.
+  odčítal, kde a kedy (model `airuleset:owner-approved`) — doktrína platí na
+  KAŽDÉ preformulovanie.
 - **A client message NEVER tells the client what WE lack — it reports ONLY
   what is delivered and working (airuleset #742).** "Chýba nám X" / "nemáme
   prístup k Y" / "nevieme to overiť" / "nestihli sme Z". When something is missing on OUR side, two legal
