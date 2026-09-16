@@ -3660,6 +3660,55 @@ def _role_filter_footer(workable, waiting, ops_wait, root, cwd):
     return workable, waiting, ops_wait
 
 
+# #1053: how many verify-on-copy timelines to fetch per footer refresh — these
+# are the stream's OWN post-deploy hand-backs, normally 0-3, so the cap is a
+# safety belt against a pathological pile, never a routine limit (mirrors the
+# #589 `_HANDOFF_COMMENT_CHECK_LIMIT` bounded-per-candidate pattern).
+_VERIFY_ON_COPY_TIMELINE_CAP = 20
+
+
+def _write_verify_on_copy_status(rows, slug, root, now=None):
+    """#1053: from the reduced-authority footer slice `rows`, find every
+    `verify-on-copy` ticket, read its timeline ONCE to derive the label-add
+    anchor + any Verified-on-copy: comment, and persist the OVERDUE set (older
+    than 24 h with no verification) for the Stop hook (stop-check-untracked-
+    work.sh). ALWAYS writes (an empty overdue when none) so the status stays
+    FRESH — a resolved hand-back clears the gate rather than sitting stale-non-
+    empty until it ages out. Fully fail-safe: any gh/parse error skips that
+    candidate (never blocks the footer refresh)."""
+    try:
+        import cli_verify_on_copy as _voc
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write("verify-on-copy: module unavailable (%s)\n" % e)
+        return
+    voc_rows = []
+    for n_num, row in (rows or {}).items():
+        names = {(lb or {}).get("name") for lb in (row.get("labels") or [])
+                 if isinstance(lb, dict)}
+        if _voc.VERIFY_LABEL in names:
+            voc_rows.append((n_num, row))
+    items = []
+    for n_num, row in voc_rows[:_VERIFY_ON_COPY_TIMELINE_CAP]:
+        events = []
+        if slug:
+            raw = _gh_out("api",
+                          "repos/%s/issues/%d/timeline?per_page=100"
+                          % (slug, n_num), cwd=root, timeout=20)
+            try:
+                events = json.loads(raw)
+            except (ValueError, TypeError):
+                events = []
+            if not isinstance(events, list):
+                events = []
+        items.append((n_num, row.get("title") or "", events))
+    try:
+        overdue = _voc.compute_overdue(items, now if now is not None
+                                       else __import__("time").time())
+        _voc.persist_status(overdue, now=now, repo=slug or None)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write("verify-on-copy: status write skipped (%s)\n" % e)
+
+
 def cmd_tickets_status(args):
     """Statusline github-tickets segment. Default: PRINT the segment for --cwd
     (composed from local caches; may spawn a detached refresh). --refresh: the
@@ -3863,6 +3912,12 @@ def cmd_tickets_status(args):
                 except (ValueError, TypeError, KeyError):
                     sfailed = True   # gh error ≠ zero skips — keep skipped=None
             entry["skipped"] = None if sfailed else len(skipped)
+            # #1053: persist the verify-on-copy overdue set for the Stop hook —
+            # only a reduced-authority stream carries verify-on-copy hand-backs.
+            # Guarded to fail-safe (never break the footer refresh); skipped when
+            # the slice itself failed (no trustworthy rows to derive from).
+            if not failed:
+                _write_verify_on_copy_status(rows, slug, root)
         else:
             # Full-authority (core/gatekeeper) box: N = the LIVE OBLIGATION
             # set — the SAME `_obligation_quals()` union `core-quals --count`
