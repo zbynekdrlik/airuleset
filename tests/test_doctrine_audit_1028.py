@@ -569,5 +569,128 @@ class TestInstallStep(unittest.TestCase):
         self.assertIsInstance(lines, list)
 
 
+# --------------------------------------------------------------------------
+# #1028 FIX-FORWARD (supervisor comment 5690513755): a `type: feedback` memory
+# is NO LONGER blanket-exempt. The auto-memory convention files EVERY owner
+# correction as `type: feedback`, so on miva1 26 of 30 memory files carry it,
+# including the exact restatements this ticket exists to retire. With the old
+# blanket exemption the live audit was VACUOUS on precisely those files. Only
+# `type: user` frontmatter (identity/environment) and the `feedback_*` /
+# `feedback-*` FILENAME convention stay never-touch; a `type: feedback` file is
+# classified like any other.
+# --------------------------------------------------------------------------
+class TestFeedbackTypeIsClassified1028(unittest.TestCase):
+    def _home_with(self, fname, text):
+        tmp = TemporaryDirectory()
+        home = Path(tmp.name)
+        mem = home / ".claude" / "projects" / "-home-miva1-proj" / "memory"
+        mem.mkdir(parents=True)
+        (mem / fname).write_text(text, encoding="utf-8")
+        return tmp, home, mem
+
+    def test_a_feedback_type_no_tenant_is_high_rewrite(self):
+        # (a) type: feedback + 2 anchors, NO tenant token, non-`feedback_*`
+        # filename -> HIGH / rewrite. Today this file is KEPT via the blanket
+        # `type: feedback` exemption -- the exact defect this fix removes.
+        text = (
+            "---\nname: client-message-no-workarounds\n"
+            "metadata:\n  node_type: memory\n  type: feedback\n---\n"
+            "# Client message: no interim workaround\n\n"
+            "When a client message arrives, do not send an interim workaround "
+            "while a fix is in flight. And never push manual work onto the "
+            "client -- reply once, after the fix is on PROD.\n")
+        tmp, home, _ = self._home_with(
+            "client-message-no-workarounds.md", text)
+        with tmp:
+            m = _by_name(da.scan_home(str(home)))[
+                "client-message-no-workarounds.md"]
+            self.assertEqual(m.confidence, da.HIGH)
+            self.assertEqual(m.action, da.ACTION_REWRITE)
+            self.assertIn("odoo-client-messaging", m.fleet_source)
+
+    def test_b_feedback_type_with_tenant_is_medium(self):
+        # (b) type: feedback + anchors + a tenant token -> MEDIUM / list
+        # (a blanket rewrite would lose the client-specific part).
+        text = (
+            "---\nname: miva-client-message-no-workarounds\n"
+            "metadata:\n  node_type: memory\n  type: feedback\n---\n"
+            "# MIVA client message: no interim workaround\n\n"
+            "For the MIVA tenant: do not send an interim workaround while a fix "
+            "is in flight; never push manual work onto the client.\n")
+        tmp, home, _ = self._home_with(
+            "miva-client-message-no-workarounds.md", text)
+        with tmp:
+            m = _by_name(da.scan_home(str(home)))[
+                "miva-client-message-no-workarounds.md"]
+            self.assertEqual(m.confidence, da.MEDIUM)
+            self.assertEqual(m.action, da.ACTION_LIST)
+
+    def test_c_type_user_with_anchors_is_kept(self):
+        # (c) type: user + anchors -> KEEP (identity/environment memory,
+        # still never-touch).
+        text = (
+            "---\nname: user-client-context\n"
+            "metadata:\n  node_type: memory\n  type: user\n---\n"
+            "# User context\n\n"
+            "Do not send an interim workaround while a fix is in flight; never "
+            "push manual work onto the client.\n")
+        tmp, home, _ = self._home_with("user-client-context.md", text)
+        with tmp:
+            m = _by_name(da.scan_home(str(home)))["user-client-context.md"]
+            self.assertEqual(m.action, da.ACTION_KEEP)
+
+    def test_d_feedback_filename_with_anchors_is_kept(self):
+        # (d) `feedback_*` FILENAME (owner-preference convention) + anchors ->
+        # KEEP, INDEPENDENT of the frontmatter type (here type: project).
+        text = (
+            "---\nname: feedback-no-workarounds\n"
+            "metadata:\n  node_type: memory\n  type: project\n---\n"
+            "# Owner preference\n\n"
+            "Do not send an interim workaround while a fix is in flight; never "
+            "push manual work onto the client.\n")
+        tmp, home, _ = self._home_with("feedback_no_workarounds.md", text)
+        with tmp:
+            m = _by_name(da.scan_home(str(home)))["feedback_no_workarounds.md"]
+            self.assertEqual(m.action, da.ACTION_KEEP)
+
+    def test_feedback_type_install_step_rewrites(self):
+        # item 3: install step 15 needs NO logic change -- verify it picks up
+        # the new classification (a type: feedback restatement is reduced to a
+        # one-line pointer for its own user).
+        import airuleset
+        text = (
+            "---\nname: client-message-no-workarounds\n"
+            "metadata:\n  node_type: memory\n  type: feedback\n---\n"
+            "# Client message: no interim workaround\n\n"
+            "Do not send an interim workaround while a fix is in flight; never "
+            "push manual work onto the client.\n")
+        tmp, home, mem = self._home_with(
+            "client-message-no-workarounds.md", text)
+        with tmp:
+            airuleset._run_doctrine_audit_step(
+                home=str(home), repo_dir=None, today="2026-09-16")
+            body = (mem / "client-message-no-workarounds.md").read_text(
+                encoding="utf-8")
+            self.assertTrue(body.startswith("See airuleset "))
+
+    def test_feedback_type_conformance_counts_drift(self):
+        # item 3: the conformance doctrine-drift dimension needs NO logic
+        # change -- verify it picks up the new classification (a type: feedback
+        # restatement now counts as HIGH and surfaces as drift).
+        text = (
+            "---\nname: client-message-no-workarounds\n"
+            "metadata:\n  node_type: memory\n  type: feedback\n---\n"
+            "# Client message: no interim workaround\n\n"
+            "Do not send an interim workaround while a fix is in flight; never "
+            "push manual work onto the client.\n")
+        tmp, home, _ = self._home_with(
+            "client-message-no-workarounds.md", text)
+        with tmp:
+            counts = da.doctrine_counts(da.scan_home(str(home)))
+            self.assertEqual(counts["high"], 1)
+            _, ok, _ = conf.classify_doctrine_drift(counts)
+            self.assertIs(ok, False)
+
+
 if __name__ == "__main__":
     unittest.main()
