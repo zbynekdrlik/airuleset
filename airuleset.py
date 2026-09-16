@@ -9470,6 +9470,11 @@ def main():
     p_slice.add_argument("--extra", default=None,
                          help="Extra search qualifier ANDed onto every query "
                               "(e.g. label:prio:bounce)")
+    p_slice.add_argument(
+        "--task-hygiene", action="store_true", dest="task_hygiene",
+        help="Print the persisted task-hygiene A count (unanswered client "
+             "Odoo comments) from the LAST watchdog run — never a live Odoo "
+             "call (#1036)")
 
     p_core = sub.add_parser(
         "core-quals",
@@ -9501,6 +9506,11 @@ def main():
     p_core.add_argument("--extra", default=None,
                         help="Extra search qualifier ANDed onto every query "
                              "(e.g. label:prio:bounce for the bounce seed)")
+    p_core.add_argument(
+        "--task-hygiene", action="store_true", dest="task_hygiene",
+        help="Print the persisted task-hygiene A count (unanswered client "
+             "Odoo comments) from the LAST watchdog run — never a live Odoo "
+             "call (#1036)")
 
     p_lock = sub.add_parser(
         "autopilot-lock",

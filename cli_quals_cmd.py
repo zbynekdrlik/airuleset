@@ -717,6 +717,13 @@ def cmd_slice_quals(args):
     session cwd was a subdirectory, while the footer saw it, so the two
     consumers of "THE one definition" could disagree about which profile the
     box was even running."""
+    # #1036 — --task-hygiene short-circuits BEFORE the authority check: it prints
+    # the persisted A count (unanswered client Odoo comments) from the LAST
+    # watchdog run, never a live Odoo call, on ANY box (0 when unconfigured).
+    if getattr(args, "task_hygiene", False):
+        import cli_task_hygiene
+        print(cli_task_hygiene.a_count())
+        return
     import airuleset
     root = airuleset._repo_root() or None
     authority = airuleset.resolve_authority(cwd=root)
@@ -1195,6 +1202,12 @@ def cmd_core_quals(args):
     command never consulted the search-index guard at all, so a repo whose
     search index answers empty while its REST listing does not produced a
     clean stop-proof `0` with the whole backlog open)."""
+    # #1036 — --task-hygiene short-circuits BEFORE the authority check (see
+    # cmd_slice_quals): prints the persisted A count, never a live Odoo call.
+    if getattr(args, "task_hygiene", False):
+        import cli_task_hygiene
+        print(cli_task_hygiene.a_count())
+        return
     import airuleset
     root = airuleset._repo_root() or None
     authority = airuleset.resolve_authority(cwd=root)

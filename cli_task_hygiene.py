@@ -295,6 +295,17 @@ def read_status(home=None):
     return data if isinstance(data, dict) else None
 
 
+def a_count(home=None):
+    """The persisted A count (unanswered client comments) from the last
+    watchdog run, or 0 when absent/corrupt (never a live Odoo call). Used by
+    `slice-quals`/`core-quals --task-hygiene`."""
+    st = read_status(home)
+    if not isinstance(st, dict):
+        return 0
+    a = st.get("a")
+    return a if isinstance(a, int) and not isinstance(a, bool) else 0
+
+
 # --------------------------------------------------------------------------- #
 # CLI — airuleset.py task-hygiene [--init | --check | --json]
 # --------------------------------------------------------------------------- #
