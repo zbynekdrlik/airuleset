@@ -30,8 +30,16 @@ Module-import safety mirrors `nudge_gate.py`/`compact.py`: a top-level
 package); everything else is reached lazily inside the function body.
 """
 from watchdog import nudge_gate as _nudge_gate   # #797 shared cadence gate
+from watchdog.queue_arrival_recheck import _budget_left  # #1041 shared sweep-budget seam
 
 CATEGORY = "lane-reconcile"
+
+# #1041 — the reconcile_fetch (a `git`-heavy read of returned worktree lanes,
+# `_watchdog_reconcile_fetch`) self-bounds to BUDGET_S=40s / MAX_BRANCHES=6; skip it
+# with `hold:budget` + UNTOUCHED state when fewer than that + margin of sweep budget
+# remain, so it never runs the sweep into the unit's 120s TimeoutStartSec kill. The
+# rider fires only on an OBSERVED compaction (rare), so a budget skip re-runs harmlessly.
+RECONCILE_FETCH_MIN_BUDGET_S = 45
 
 # Only react to a compaction observed within this window — a first-sweep-after-
 # deploy read must not nudge for an ancient compaction, and a genuine post-compact
@@ -130,7 +138,7 @@ def _nudge_text(branches):
 def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
                                 dry_run, handled, reconcile_fetch, state,
                                 sleep_fn=None, captured=None,
-                                batch_collect=None):
+                                batch_collect=None, budget_left_fn=None):
     """Audit ONE armed candidate pane after a compaction and, on a NEW observed
     compaction with returned worktree lanes, deliver ONE reconcile nudge. Called
     from `goal.goal_lane_sweep`'s armed-pane loop with the resolved pane context
@@ -211,6 +219,18 @@ def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
                         % (loc, _nudge_gate.floor_hold_reason(
                             state, sid, CATEGORY, now)))
             return logs
+
+    # #1041 — SWEEP-BUDGET guard: the reconcile_fetch is a git-heavy read (its own
+    # 40s/6-branch budget); starting it with too little sweep budget left runs the
+    # sweep into the unit's TimeoutStartSec=2min kill. Skip with `hold:budget` +
+    # UNTOUCHED state (no fetch, no dedup advance) — the compaction is re-observed
+    # next, less-loaded sweep. None (unwired/legacy) => no guard.
+    _left = _budget_left(budget_left_fn)
+    if _left is not None and _left < RECONCILE_FETCH_MIN_BUDGET_S:
+        logs.append("lane-reconcile %s -> hold:budget (%ds left, need >=%ds; "
+                    "state untouched, retry next sweep)"
+                    % (loc, int(_left), RECONCILE_FETCH_MIN_BUDGET_S))
+        return logs
 
     # This compaction is now the one we ACT on. Fetch the returned lanes.
     try:
