@@ -42,10 +42,15 @@ import time
 CACHE_TTL_S = 60                 # per-box cache lifetime; matches the ~60 s poll cadence
 LOW_PCT = 20.0                   # below this remaining %, a poll backs off
 RESET_PCT = 50.0                 # above this, the once-alert latch re-arms
-BACKOFF_CAP_S = 60               # hard cap on a single backoff sleep (safe within the
-                                 # 100 s sweep soft-cap / goal-lane tail deadline; deep
-                                 # lows skip the watchdog poller entirely via the #1041
-                                 # composition, so this bounds only the few-call consumers)
+BACKOFF_CAP_S = 60               # hard cap on a single backoff SLEEP. Watchdog pure-read
+                                 # pollers are HELD (skipped), not slept, when low (the
+                                 # #1040/#1041 composition), so this sleep bounds only the
+                                 # few-call consumers (goal-lane riders, hooks, ad-hoc). A
+                                 # cold-cache shim call additionally pays up to
+                                 # _FETCH_TIMEOUT_S for the one-off refresh before the
+                                 # sleep (#1040 review-1 MINOR-5); in the watchdog the
+                                 # per-sweep gh_rate_fetch keeps the cache warm, so a
+                                 # rider's own call rarely refreshes.
 _FETCH_TIMEOUT_S = 15            # a single `gh api rate_limit` read
 _RESOURCES = ("core", "graphql")
 
@@ -211,14 +216,34 @@ def _save_cache(status):
     read simply refetches), so an unwritable ~/.claude is tolerated — but the
     failure is surfaced to the diagnostic journal, never silently swallowed."""
     d = gh_rate_dir()
+    # Never persist transient underscore keys (esp. `_pending_alerts`): a later
+    # fresh-cache read must NOT re-surface an already-fired alert (#1040
+    # review-1 MINOR-3, the once-per-episode guarantee). The alert LATCH itself
+    # (`alert`) IS persisted, so re-firing stays blocked until >50 %.
+    persist = {k: v for k, v in status.items() if not k.startswith("_")}
     try:
         os.makedirs(d, exist_ok=True)
         tmp = status_path() + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(status, fh)
+            json.dump(persist, fh)
         os.replace(tmp, status_path())
     except OSError as e:
         _diag("cache-write", e)
+
+
+_JOURNAL_MAX_BYTES = 512 * 1024
+
+
+def _cap_journal():
+    """Bound the journal (#1040 review-1 NIT-6): once it exceeds the cap, keep
+    ONE previous generation (.1) and start fresh — total stays ~2x the cap even
+    under a chronic write-permission DIAG loop. Best-effort, never raises."""
+    p = journal_path()
+    try:
+        if os.path.getsize(p) > _JOURNAL_MAX_BYTES:
+            os.replace(p, p + ".1")
+    except OSError:
+        return   # missing/unrotatable — nothing to cap
 
 
 def _diag(where, exc):
@@ -227,6 +252,7 @@ def _diag(where, exc):
     unavoidable — there is nowhere left to report to."""
     try:
         os.makedirs(gh_rate_dir(), exist_ok=True)
+        _cap_journal()
         with open(journal_path(), "a", encoding="utf-8") as fh:
             fh.write("%s\tDIAG\t%s\t%r\n" % (
                 time.strftime("%Y-%m-%dT%H:%M:%S%z"), where, exc))
@@ -371,6 +397,7 @@ def record_alerts(status):
         return []
     try:
         os.makedirs(gh_rate_dir(), exist_ok=True)
+        _cap_journal()
         with open(journal_path(), "a", encoding="utf-8") as fh:
             for name in fired:
                 fh.write("%s\t%s\n" % (
@@ -453,20 +480,33 @@ def classify_call(argv):
     if not words:
         return False, None
 
-    # `gh api` — only a GET (no mutating flag/method) that is not the free
-    # rate_limit endpoint counts as a poll.
+    # `gh api` — classify by endpoint + method/field. An explicit non-GET
+    # method is always a write (never throttled). The free `rate_limit`
+    # endpoint is never a poll.
     if words[0] == "api":
+        endpoint = words[1] if len(words) > 1 else ""
         for i, a in enumerate(toks):
-            if a in _API_WRITE_FLAGS:
-                return False, None
             if a in ("-X", "--method") and i + 1 < len(toks) \
                     and toks[i + 1].upper() in _API_WRITE_METHODS:
                 return False, None
-        endpoint = words[1] if len(words) > 1 else ""
         if "rate_limit" in endpoint:
             return False, None
-        resource = "graphql" if "graphql" in endpoint else "core"
-        return True, resource
+        # `api graphql`: a field flag (`-f query=…`) is the NORMAL read idiom
+        # here, NOT a write signal — a GraphQL operation is a write ONLY when it
+        # is a `mutation` (the keyword is mandatory for a mutation and never
+        # present in a read/query), so key on that. Fail-open: a read whose text
+        # merely contains "mutation" is classified as a write (never throttled),
+        # never the dangerous reverse (#1040 review-1 MAJOR-2).
+        if "graphql" in endpoint:
+            joined = " ".join(toks).lower()
+            if "mutation" in joined:
+                return False, None
+            return True, "graphql"
+        # REST `api`: a field flag implies a POST body -> a write, never a poll.
+        for a in toks:
+            if a in _API_WRITE_FLAGS:
+                return False, None
+        return True, "core"
 
     key2 = (words[0], words[1]) if len(words) > 1 else None
     key1 = (words[0],)
@@ -600,7 +640,9 @@ def _write_wrapper_file(shim, real_gh, python_exe, module):
     `real_gh`. chmod 755 on the temp BEFORE the replace so the shim is never
     momentarily present-but-non-executable."""
     text = wrapper_script(real_gh, python_exe, module)
-    tmp = shim + ".airuleset-tmp"
+    # pid-suffixed so two overlapping installs never race on the same temp path
+    # (the final os.replace is atomic either way — #1040 review-1 NIT-7).
+    tmp = "%s.airuleset-tmp.%d" % (shim, os.getpid())
     with open(tmp, "w", encoding="utf-8") as fh:
         fh.write(text)
     os.chmod(tmp, 0o755)

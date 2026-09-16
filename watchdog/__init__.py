@@ -4287,12 +4287,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # `err`: "<prefix> error" text logged on a raise, or None to swallow it.
     _standalone_registry = []
 
-    def _add(label, gate, invoke, err, min_budget=None):
+    def _add(label, gate, invoke, err, min_budget=None, gh_poll_hold=False):
         # #1041 — `min_budget` (seconds): a network/subprocess job carries its own
         # timeout-derived minimum; the registry loop below skips it with `hold:budget`
         # + UNTOUCHED state when `remaining_budget_s()` is under it. None = no guard
         # (a local/fast job — see the registry audit on issue 1041's design comment).
-        _standalone_registry.append((label, gate, invoke, err, min_budget))
+        # #1040 — `gh_poll_hold` (opt-in, DEFAULT FALSE = never held): mark ONLY a
+        # PURE-READ gh poller (no `gh` write anywhere in the job) so the loop may
+        # HOLD it when the shared GitHub budget is < 20 %. A job that performs ANY
+        # gh WRITE (comment/edit/reopen/label/create) is left UNmarked so it is NEVER
+        # held — its writes must never be delayed (its reads are still throttled per-
+        # call by the shim). Fail-safe by default: an unmarked/misjudged job simply
+        # runs (per-call shim throttle), never a delayed write (#1040 review-1 MAJOR).
+        _standalone_registry.append((label, gate, invoke, err, min_budget, gh_poll_hold))
 
     # --- (3) WEEKLY TOKEN-USAGE alert (only when a fetcher is wired) — rate-limited
     # to USAGE_INTERVAL inside check_usage so the 60s tmux cadence doesn't hammer
@@ -4377,7 +4384,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              gh_fetch=bounce_fetch, projects_dir=projects_dir,
              persist=lambda: save_state(state_path, state),
              time_fn=time_fn, sweep_deadline=tail_deadline, sleep_fn=sleep_fn),
-         "bounce-backstop error", min_budget=_BUDGET_MIN_GH_FETCH_S)
+         "bounce-backstop error", min_budget=_BUDGET_MIN_GH_FETCH_S,
+         gh_poll_hold=True)  # #1040 pure-read poller
 
     # Job 11 — gk-request backstop (#30): the stream→supervisor mirror of
     # job 8. Same gating: only when a fetch is wired; cadence-gated
@@ -4635,7 +4643,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                       owners_seen=owners_seen,            # #717
                                       account_owner=account_owner,        # #717
                                       project_by_sid=project_by_sid, authority=_box_authority()),  # #667
-         "delivery-stall error", min_budget=_BUDGET_MIN_GH_FETCH_S)
+         "delivery-stall error", min_budget=_BUDGET_MIN_GH_FETCH_S,
+         gh_poll_hold=True)  # #1040 pure-read poller
 
     # Job 25 — CARD RECONCILIATION (#134): the mirror of job 24, same
     # "wired = on" convention and the same confirm-then-announce contract.
@@ -4665,7 +4674,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                     owner_by_sid=owner_by_sid,
                                     projects_dir=projects_dir, sleep_fn=sleep_fn,
                                     owned_closed=_owned_scope),
-         "card-reconcile error", min_budget=_BUDGET_MIN_GH_BATCH_S)
+         "card-reconcile error", min_budget=_BUDGET_MIN_GH_BATCH_S,
+         gh_poll_hold=True)  # #1040 pure-read poller
 
     # Job 26 — COMPACT-STALL WATCH — REMOVED (#402, 2026-08-12). Used to
     # watch the shared /compact claim file for a stuck entry; that whole
@@ -4691,7 +4701,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                  owners_seen=owners_seen,            # #717
                                  account_owner=account_owner,        # #717
                                  persist=lambda: save_state(state_path, state)),
-         "net-drift error", min_budget=_BUDGET_MIN_GH_BATCH_S)
+         "net-drift error", min_budget=_BUDGET_MIN_GH_BATCH_S,
+         gh_poll_hold=True)  # #1040 pure-read poller
 
     # Job 28 — STUCK-MAIN SWEEP (#137): only when `repo_roots` is given —
     # the "wired = on" convention. Self-gated on an hourly cadence
@@ -4710,7 +4721,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                   owners_seen=owners_seen,            # #717
                                   account_owner=account_owner,        # #717
                                   persist=lambda: save_state(state_path, state)),
-         "stuck-main error", min_budget=_BUDGET_MIN_GH_BATCH_S)
+         "stuck-main error", min_budget=_BUDGET_MIN_GH_BATCH_S,
+         gh_poll_hold=True)  # #1040 pure-read poller
 
     # Job 22 — STALE EXEC-MARKER CLEANUP (#97): ALWAYS wired (no gating
     # param — same "always on" shape as jobs 9/15/17, since it depends on
@@ -4745,7 +4757,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
          lambda: sweep_orphaned_wip_refs(now, state, repo_roots=repo_roots,
                                          git_fetch=git_fetch, dry_run=dry_run,
                                          persist=lambda: save_state(state_path, state)),
-         "wip-ref-sweep error", min_budget=_BUDGET_MIN_GH_BATCH_S)
+         "wip-ref-sweep error", min_budget=_BUDGET_MIN_GH_BATCH_S,
+         gh_poll_hold=True)  # #1040 pure-read poller
 
     # Job 31 — GK SELF-SERVICE AUTO-BOUNCE (#516). Appended LAST (keeps the
     # kill-switch NOTICE pinned between job 11 and job 13). Only when a fetch is
@@ -4785,7 +4798,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              now, state, dry_run=dry_run,
              repo_root=conformance_root, is_target_check=conformance_is_target,
              persist=lambda: save_state(state_path, state)),
-         "conformance-check error", min_budget=_BUDGET_MIN_GH_BATCH_S)
+         "conformance-check error", min_budget=_BUDGET_MIN_GH_BATCH_S,
+         gh_poll_hold=True)  # #1040 pure-read poller
 
     # Job 35 (#543) — CENTRAL DEAD-BOX HEARTBEAT-MISSING DETECTOR,
     # controller-only (#971, was dev1). The per-box conformance check (job
@@ -5115,9 +5129,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
         except Exception as _e:  # noqa: BLE001 — fail-open, never break the sweep
             logs.append("gh-rate: read error (fail-open, no hold): %r" % _e)
             _gh_hold = False
-    _GH_POLL_MINS = (_BUDGET_MIN_GH_FETCH_S, _BUDGET_MIN_GH_BATCH_S)
 
-    for _label, _gate, _invoke, _err, _min_budget in _standalone_registry:
+    for _label, _gate, _invoke, _err, _min_budget, _gh_poll_hold in _standalone_registry:
         # #1041 — read the ONE budget primitive ONCE per iteration (one clock read);
         # the job-start elapsed anchor is derived from it (`elapsed == SOFT_CAP -
         # left`), so attribution and the budget guard below share that single read.
@@ -5151,9 +5164,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                 logs.append("%s -> hold:budget (%ds left, need >=%ds)"
                             % (_label, int(_left), _min_budget))
                 continue
-            # #1040 — gh-rate composition: hold a gh-poller job when the shared
-            # GitHub budget warrants a backoff (see the pre-loop comment).
-            if _gh_hold and _min_budget in _GH_POLL_MINS:
+            # #1040 — gh-rate composition: hold ONLY a PURE-READ gh-poller
+            # (opt-in `gh_poll_hold`) when the shared GitHub budget warrants a
+            # backoff. A write-performing job is never marked, so its writes are
+            # never delayed (see the pre-loop comment + _add's #1040 note).
+            if _gh_hold and _gh_poll_hold:
                 logs.append("%s -> hold:budget (gh-rate backoff %ds, resource < 20%%)"
                             % (_label, _gh_backoff))
                 continue

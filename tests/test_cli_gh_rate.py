@@ -177,6 +177,21 @@ class TestAlertLatch(unittest.TestCase):
         st3 = self._read(1200.0, 500)      # low again, only 1 consecutive
         self.assertEqual(cli_gh_rate.pending_alerts(st3), [])
 
+    def test_pending_alerts_not_persisted_to_cache(self):
+        # #1040 review-1 MINOR-3: a fresh-cache read must NOT re-surface an
+        # already-fired alert. The transient _pending_alerts is stripped before
+        # the cache is written.
+        self._read(1000.0, 500)
+        self._read(1100.0, 400)            # 2nd consecutive -> alert fired + persisted
+        import json
+        with open(cli_gh_rate.status_path(), encoding="utf-8") as fh:
+            persisted = json.load(fh)
+        self.assertNotIn("_pending_alerts", persisted)
+        # A cache-only read within TTL yields NO new pending alert.
+        cached = cli_gh_rate.read_status(now=1130.0, run=_FakeRun(_rate_json(
+            4000, 5000, 400, 5000)), real_gh="/usr/bin/gh")
+        self.assertEqual(cli_gh_rate.pending_alerts(cached), [])
+
 
 class TestClassifyCall(unittest.TestCase):
     def test_poll_shapes(self):
@@ -216,6 +231,34 @@ class TestClassifyCall(unittest.TestCase):
         self.assertEqual(res, "graphql")
         _, res = cli_gh_rate.classify_call(["run", "view", "1"])
         self.assertEqual(res, "core")
+
+    def test_api_graphql_read_with_field_is_a_poll(self):
+        # `-f query=...` is the NORMAL read idiom for `api graphql` (#1040
+        # review-1 MAJOR-2) — must be a graphql poll, not misread as a write.
+        for argv in (
+            ["api", "graphql", "-f", "query=query { viewer { login } }"],
+            ["api", "graphql", "-f", "query={ viewer { login } }"],
+            ["api", "graphql", "--paginate", "-f", "query=query Q { x }"],
+        ):
+            is_poll, res = cli_gh_rate.classify_call(argv)
+            self.assertTrue(is_poll, "%r is a graphql READ poll" % argv)
+            self.assertEqual(res, "graphql")
+
+    def test_api_graphql_mutation_is_never_a_poll(self):
+        for argv in (
+            ["api", "graphql", "-f", "query=mutation { addComment(x:1){id} }"],
+            ["api", "graphql", "-f", "query=mutation Foo { y }"],
+            ["api", "graphql", "-X", "POST", "-f", "query=mutation { z }"],
+        ):
+            is_poll, res = cli_gh_rate.classify_call(argv)
+            self.assertFalse(is_poll, "%r is a mutation (write) — never throttle" % argv)
+            self.assertIsNone(res)
+
+    def test_rest_api_field_is_a_write(self):
+        # A REST `api` with a field flag implies a POST body -> a write.
+        is_poll, _ = cli_gh_rate.classify_call(
+            ["api", "/repos/x/y/issues", "-f", "title=hi"])
+        self.assertFalse(is_poll)
 
 
 class TestWrapperBackoff(unittest.TestCase):
@@ -387,6 +430,41 @@ class TestHoldComposition(unittest.TestCase):
 
     def test_no_hold_when_healthy(self):
         self.assertFalse(cli_gh_rate.should_hold_gh_poller(backoff=0))
+
+
+class TestWiring(unittest.TestCase):
+    """#1040 review-1 MINOR-4: guard the three airuleset.py integration points +
+    the run_once param, so a future edit can't silently drop the wiring."""
+
+    def test_gh_rate_subcommand_registered(self):
+        import airuleset
+        self.assertIn("gh-rate", airuleset.SUBCOMMANDS)
+        self.assertIs(airuleset.SUBCOMMANDS["gh-rate"], airuleset.cmd_gh_rate)
+
+    def test_run_once_accepts_gh_rate_fetch(self):
+        import inspect
+        import watchdog
+        self.assertIn("gh_rate_fetch",
+                      inspect.signature(watchdog.run_once).parameters)
+
+    def test_cmd_install_calls_ensure_gh_rate_wrapper(self):
+        import inspect
+        import airuleset
+        src = inspect.getsource(airuleset.cmd_install)
+        self.assertIn("ensure_gh_rate_wrapper", src)
+
+    def test_cmd_watchdog_sets_poller_env(self):
+        import inspect
+        import airuleset
+        src = inspect.getsource(airuleset.cmd_watchdog)
+        self.assertIn("AIRULESET_GH_POLLER", src)
+        self.assertIn("gh_rate_fetch", src)
+
+    def test_cmd_status_prints_gh_rate_row(self):
+        import inspect
+        import airuleset
+        src = inspect.getsource(airuleset.cmd_status)
+        self.assertIn("status_row_cached", src)
 
 
 if __name__ == "__main__":
