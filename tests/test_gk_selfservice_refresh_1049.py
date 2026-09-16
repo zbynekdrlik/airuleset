@@ -352,16 +352,24 @@ class DoctrineLock(TestCase):
 # Audit CLI — the --selfservice-blocks view over the Prevencia log.
 # --------------------------------------------------------------------------- #
 class AuditCLI(TestCase):
-    def test_selfservice_blocks_flag_runs(self):
-        # the flag must parse + run (reads the box-local log; zero when absent).
+    def test_selfservice_blocks_flag_runs_without_repo(self):
+        # #1049-review-2 MINOR-4: the box-local view needs NO --repo.
         r = subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts"
                                  / "audit_bounce_rule_updates.py"),
-             "--selfservice-blocks", "--repo", "zbynekdrlik/airuleset"],
+             "--selfservice-blocks"],
             capture_output=True, text=True,
             env={**os.environ, "HOME": tempfile.mkdtemp(prefix="airuleset-ssr-cli-")})
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("stream\tselfservice_blocks", r.stdout)
+
+    def test_rounds_still_requires_repo(self):
+        r = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts"
+                                 / "audit_bounce_rule_updates.py"), "--rounds"],
+            capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--repo", r.stderr)
 
 
 # --------------------------------------------------------------------------- #
@@ -442,6 +450,104 @@ class ReviewFix_SlovakSurfaceAndOdooTighten(TestCase):
         # but a genuine CONTAINER-logs request stays exempt
         self.assertTrue(selfservice.references_gk_only_surface(
             "grep the odoo container logs on PROD"))
+
+
+# --------------------------------------------------------------------------- #
+# Adversarial-review-2 fixes.
+# --------------------------------------------------------------------------- #
+class ReviewFix2_WhitelistScopedToRequest(TestCase):
+    def test_naming_surface_in_rationale_does_not_exempt(self):
+        # MAJOR-1: "unrelated to the session store" in the rationale must NOT
+        # exempt a pure config_parameter read.
+        r = run('python3 ~/devel/airuleset/airuleset.py gk-request --issue 5 '
+                '--comment "read config_parameter on PROD for the 2026-09-14 '
+                '10:00 event. Self-service-checked: this is unrelated to the '
+                'session store; the copy predates the event."')
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("REFRESH-DEV-BOX-FROM-PROD", r.stderr)
+
+    def test_naming_secrets_in_rationale_does_not_exempt(self):
+        r = run('python3 ~/devel/airuleset/airuleset.py gk-request --issue 5 '
+                '--comment "read device_log on PROD for the 2026-09-14 10:00 '
+                'event. Self-service-checked: not the ~/.secrets file; copy '
+                'predates event."')
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_surface_in_request_still_exempts(self):
+        # the genuine gk-only read (surface in the REQUEST) still passes.
+        from gates import selfservice
+        self.assertFalse(selfservice.is_self_serviceable_prod_read(
+            "read /var/lib/odoo/sessions/ on PROD",
+            "read /var/lib/odoo/sessions/ on PROD. Self-service-checked: gk-only."))
+        # the rationale-only mention does NOT exempt.
+        self.assertTrue(selfservice.is_self_serviceable_prod_read(
+            "read config_parameter on PROD",
+            "read config_parameter on PROD. Self-service-checked: not the "
+            "session store, copy predates event."))
+
+
+class ReviewFix2_RefreshCitationParser(TestCase):
+    def test_natural_refresh_sentence_not_a_citation(self):
+        # MAJOR-2: "cache refresh completed at <ISO>" (id has no digit) must NOT
+        # be read as the refresh copy timestamp; the r1 citation (2020) wins.
+        from gates import selfservice
+        body = ("read state on PROD. Self-service-checked: refresh r1 at "
+                "2020-01-01T00:00:00Z. The prod cache refresh completed at "
+                "2026-09-25T10:00:00Z, read state after.")
+        rf = selfservice.refresh_timestamp(body)
+        self.assertIsNotNone(rf)
+        self.assertEqual(rf.year, 2020)
+        ev = selfservice.newest_event_timestamp(body)
+        self.assertIsNotNone(ev)
+        self.assertEqual((ev.year, ev.month, ev.day), (2026, 9, 25))
+        self.assertFalse(selfservice.refresh_is_newer(rf, ev))
+
+    def test_date_only_refresh_citation_accepted(self):
+        # MINOR-2: a date-only citation is a valid fresh-copy reference.
+        from gates import selfservice
+        dt = selfservice.refresh_timestamp(
+            "Self-service-checked: refresh run-9 at 2026-09-16 from a fresh copy")
+        self.assertIsNotNone(dt)
+        self.assertEqual((dt.year, dt.month, dt.day), (2026, 9, 16))
+
+    def test_date_only_refresh_passes_when_newer_than_event(self):
+        r = run('python3 ~/devel/airuleset/airuleset.py gk-request --issue 5 '
+                '--comment "read config_parameter on PROD for the 2026-09-14 '
+                '10:00 incident. Self-service-checked: refresh run-9 at '
+                '2026-09-16 from a fresh copy; already read it."')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_two_digit_tz_offset_parsed(self):
+        # MINOR-3: an hours-only offset (+02) must not be dropped.
+        from gates import selfservice
+        ev = selfservice.newest_event_timestamp(
+            "incident on PROD 2026-09-16 10:00+02")
+        self.assertIsNotNone(ev)
+        self.assertEqual((ev.hour, ev.minute), (8, 0))  # 10:00+02 == 08:00Z
+
+
+class ReviewFix2_NginxErrorLogAndDrop(TestCase):
+    def test_nginx_error_log_surface_passes(self):
+        # MINOR-1: a word between the surface and "log" (nginx ERROR log) must
+        # still be recognised as the gk-only container-logs surface.
+        r = run('python3 ~/devel/airuleset/airuleset.py gk-request --issue 5 '
+                '--comment "grep the nginx error log on PROD for the 2026-09-14 '
+                'event. Self-service-checked: that file is excluded from the '
+                'refresh rsync, live gk read needed."')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_drop_decrease_sense_no_longer_exempts(self):
+        # MAJOR-4: "sends drop sharply" is a diagnostic read, not an
+        # intervention — it must NOT fail-open a pure read.
+        from gates import selfservice
+        self.assertTrue(selfservice.is_self_serviceable_prod_read(
+            "read the outgoing mail queue on PROD; sends drop sharply after the "
+            "2026-09-14 event"))
+        r = run('python3 ~/devel/airuleset/airuleset.py gk-request --issue 5 '
+                '--comment "read the outgoing mail queue on PROD; sends drop '
+                'sharply after the 2026-09-14 10:00 event. Self-service-checked: '
+                'the copy predates the event."')
+        self.assertEqual(r.returncode, 2, r.stderr)
 
 
 if __name__ == "__main__":

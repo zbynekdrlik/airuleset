@@ -67,10 +67,14 @@ LIVE_INTERVENTION_RE = re.compile(
     r'deploy\w*|nasad\w*|resets?|resetting|kills?|killing|zabi\w*|grants?|'
     r'granting|udel\w*|revoke\w*|revoking|purg\w*|flush\w*|rotate\w*|'
     r'rotating|requeue\w*|re-?send\w*|resend\w*|preposl\w*|reprocess\w*|'
-    r'migrat\w*|clears?|clearing|deletes?|deleting|truncat\w*|drops?|'
-    r'dropping|enables?|enabling|disables?|disabling|prun\w*|rebuild\w*|'
+    r'migrat\w*|clears?|clearing|deletes?|deleting|truncat\w*|'
+    r'enables?|enabling|disables?|disabling|prun\w*|rebuild\w*|'
     r'starts?|starting|stops?|stopping|spusti\w*|zastav\w*|vypni\w*|'
     r'zapni\w*|zma[žz]\w*|vyma[žz]\w*)\b', re.IGNORECASE)
+# #1049-review-2 MAJOR-4: `drop`/`drops` REMOVED — "sends drop sharply" /
+# "the count drops" is a DECREASE-sense diagnostic READ word in the exact
+# mail-flow/queue domain this gate targets, and letting it fail-open lets a
+# pure read escape. DB-removal intent is still covered by delete/truncate.
 
 # The gk-ONLY PROD surfaces the refresh rsync deliberately EXCLUDES (odoo-erp
 # .claude/rules/prod-ro-clone-accounts.md). ONE constant, lock-tested. A request
@@ -83,21 +87,31 @@ LIVE_INTERVENTION_RE = re.compile(
 #   (logy/kontajner) are included so a Slovak stream is not false-blocked.
 GK_ONLY_SURFACES = (
     ("session-store", r'/var/lib/odoo/sessions|\bsessions?/|session\s+(?:store|file|id|hijack|cookie)|rel[áa]ci[ae]\s+(?:store|s[úu]bor)'),
-    ("container-logs", r'\b(?:container|docker|nginx|kontajner\w*)\s+(?:logs?|logy|logov)\b|\b(?:logs?|logy|logov)\s+(?:of|from|in|z|zo)\s+(?:the\s+)?(?:container|docker|nginx|kontajner\w*)'),
+    ("container-logs",
+     r'\b(?:container|docker|nginx|kontajner\w*)\b(?:\W+\w+){0,2}?\W+(?:logs?|logy|logov|stdout|stderr)\b'
+     r'|\b(?:logs?|logy|logov|stdout|stderr)\b(?:\W+\w+){0,2}?\W+(?:container|docker|nginx|kontajner\w*)\b'),
     ("root-secrets", r'(?:~|/root)/\.secrets|\.secrets\b'),
     ("runtime-state", r'\b(?:docker|nginx)\s+(?:runtime|state|config|container)\b'),
 )
 _GK_ONLY_SURFACE_RES = tuple(re.compile(p, re.IGNORECASE) for _lbl, p in GK_ONLY_SURFACES)
 
 # A refresh citation on the self-service line: `refresh <id> at <ISO-UTC>`.
+# #1049-review-2 MAJOR-2: the id token must contain a DIGIT (a run-id /
+# comment-id always does: run-456, 5705762958, issuecomment-123, r1). This
+# refuses a natural-prose over-match like "the cache refresh completed at
+# <ISO>" (id "completed" has no digit) that would otherwise be misread as the
+# refresh copy's timestamp AND stripped from event extraction. #1049-review-2
+# MINOR-2: a date-only citation (`refresh run-9 at 2026-09-16`) is accepted —
+# a REFRESH run is naturally cited by date. MINOR-3: an hours-only tz (`+02`)
+# is accepted.
 REFRESH_CITATION_RE = re.compile(
-    r'refresh\s+\S+\s+at\s+'
-    r'(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?\s*(?:Z|[+-]\d{2}:?\d{2})?)',
+    r'refresh\s+\S*\d\S*\s+at\s+'
+    r'(\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?\s*(?:Z|[+-]\d{2}(?::?\d{2})?)?)',
     re.IGNORECASE)
 
 # Timestamp shapes for EVENT extraction.
 _ISO_DT_RE = re.compile(
-    r'\b(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?\s*(Z|[+-]\d{2}:?\d{2})?')
+    r'\b(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?\s*(Z|[+-]\d{2}(?::?\d{2})?)?')
 _BARE_DATE_RE = re.compile(r'\b(\d{4})-(\d{2})-(\d{2})\b')
 _BARE_TIME_RE = re.compile(r'\b([01]?\d|2[0-3]):([0-5]\d)\b')
 # A bare HH:MM counts as an event only when a today-cue is adjacent (#1049
@@ -116,19 +130,35 @@ def references_gk_only_surface(text):
     return any(rx.search(t) for rx in _GK_ONLY_SURFACE_RES)
 
 
-def is_self_serviceable_prod_read(text):
+def is_self_serviceable_prod_read(text, full_text=None):
     """True when `text` reads as a PROD READ answerable from the stream's own
-    fresh refresh copy: a read-verb AND a PROD token, AND NOT a live
-    intervention, AND NOT a whitelisted gk-only surface. Fail-open by design --
-    anything not positively a self-serviceable pure read returns False."""
+    fresh refresh copy: a read-verb AND a PROD token, AND NOT a whitelisted
+    gk-only surface -- all scoped to `text` (the REQUEST clause). The
+    live-intervention check runs over `full_text` (defaults to `text`) because
+    the self-service template states the intervention in the RATIONALE, not the
+    request. Fail-open by design.
+
+    #1049-review-2 MAJOR-1: `text` is the REQUEST clause (before the
+    Self-service-checked line), NOT the whole body, so a stream cannot exempt a
+    pure read by merely NAMING a gk-only surface in its rationale ("this is
+    unrelated to the session store" no longer passes)."""
     t = text or ""
+    full = full_text if full_text is not None else t
     if not (PROD_TOKEN_RE.search(t) and PROD_READ_VERB_RE.search(t)):
         return False
-    if LIVE_INTERVENTION_RE.search(t):
+    if LIVE_INTERVENTION_RE.search(full):
         return False
     if references_gk_only_surface(t):
         return False
     return True
+
+
+def _read_clause(body):
+    """The REQUEST clause of a gk-request body: everything BEFORE the first
+    `Self-service-checked:` marker (the read target lives here; the rationale
+    after it is attacker-controlled and must not exempt the read)."""
+    m = SELFSERVICE_RE.search(body or "")
+    return body[:m.start()] if m else (body or "")
 
 
 def _to_utc(y, mo, d, h, mi, s, tz):
@@ -145,16 +175,25 @@ def _to_utc(y, mo, d, h, mi, s, tz):
 
 
 def _parse_iso(s):
-    """Parse one ISO datetime string to tz-aware UTC, or None on malformed
-    components (e.g. an impossible month) -- a skip, not a crash."""
-    m = _ISO_DT_RE.search(s or "")
-    if not m:
-        return None
-    y, mo, d, h, mi, sec, tz = m.groups()
-    try:
-        return _to_utc(int(y), int(mo), int(d), int(h), int(mi), sec, tz)
-    except (ValueError, IndexError):
-        return None
+    """Parse one ISO datetime (or a bare date -> 00:00 UTC, #1049-review-2
+    MINOR-2) to tz-aware UTC, or None on malformed components (e.g. an
+    impossible month) -- a skip, not a crash."""
+    s = s or ""
+    m = _ISO_DT_RE.search(s)
+    if m:
+        y, mo, d, h, mi, sec, tz = m.groups()
+        try:
+            return _to_utc(int(y), int(mo), int(d), int(h), int(mi), sec, tz)
+        except (ValueError, IndexError):
+            return None
+    dm = _BARE_DATE_RE.search(s)
+    if dm:
+        try:
+            return datetime(int(dm.group(1)), int(dm.group(2)),
+                            int(dm.group(3)), 0, 0, tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
 
 
 def refresh_timestamp(text):
@@ -439,7 +478,7 @@ def _ticket_of(tk, body):
 def _classify_prod_read(body):
     """Return (verdict, reason) for a line-present gk action request. Only the
     #1049 refresh check; the caller handles the no-line case."""
-    if not is_self_serviceable_prod_read(body):
+    if not is_self_serviceable_prod_read(_read_clause(body), body):
         return "PASS", "self-service-line-present"
     rf = refresh_timestamp(body)
     if rf is None:

@@ -388,8 +388,12 @@ def main(argv=None):
                         "reason from ~/.claude/selfservice-gate.log (a rising "
                         "per-stream count = a stream repeatedly escalating a "
                         "self-serviceable PROD read; trend to 0)")
-    p.add_argument("--repo", required=True,
-                   help="GitHub repo (owner/name)")
+    # #1049-review-2 MINOR-4: --repo is required only for the GitHub-querying
+    # views (--rounds / --bypasses); --selfservice-blocks reads a box-local log
+    # and needs no repo. Validated per-command below rather than at parse time.
+    p.add_argument("--repo", required=False, default=None,
+                   help="GitHub repo (owner/name) — required for "
+                        "--rounds / --bypasses")
     p.add_argument("--window", type=int, default=7,
                    help="Window size in days (default: 7)")
     output_fmt = p.add_mutually_exclusive_group()
@@ -400,6 +404,9 @@ def main(argv=None):
                             help="Print a compact markdown table with "
                                  "first-pass rate")
     args = p.parse_args(argv)
+
+    if (args.rounds or args.bypasses) and not args.repo:
+        p.error("--repo is required for --rounds / --bypasses")
 
     if args.bypasses:
         commits = fetch_bypass_commits(args.repo, window_days=args.window)
