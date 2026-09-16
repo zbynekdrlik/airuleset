@@ -3507,7 +3507,7 @@ def _comment_readiness_signal(body):
 # condition_589) asserts the two sets stay equal so a future third queue label
 # can't silently desync them. `prio:bounce` is deliberately NOT here (a bounce
 # is handled separately via `bounce_numbers`, not as a resolution).
-_HANDOFF_QUEUE_LABELS = ("ready-for-review", "needs-gatekeeper")
+_HANDOFF_QUEUE_LABELS = ("ready-for-review", "needs-gatekeeper", "gk-processing")
 
 
 def _timeline_handoff_signal(ev):

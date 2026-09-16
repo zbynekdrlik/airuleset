@@ -275,7 +275,29 @@ def _slice_quals(user, cwd=None):
 # `prio:bounce`. The sub-dev's own `slice-quals` still includes its own
 # `prio:bounce` tickets unaffected (they always also carry `stream:<user>`,
 # which `_slice_quals()` already queries) — the two sides stay complementary.
-MAINTAINER_ACTION_LABELS = ("needs-gatekeeper", "ready-for-review")
+#
+# #1053 (owner directive 2026-09-16): `gk-processing` is added. The gatekeeper's
+# pickup step swaps `ready-for-review` → `gk-processing` (so the sub-dev's `gk`
+# bucket does NOT fall to 0 while gk is actually working — the david1 report),
+# and while gk is processing the ticket is the gatekeeper box's OWN `I`
+# obligation exactly like a fresh hand-off. The POST-deploy return state
+# `verify-on-copy` is deliberately NOT here: it is the SUB-DEV's own action
+# (verify on a fresh PROD copy), not the maintainer's — see SUBDEV_ACTION_LABELS
+# and GATEKEEPER_PROCESSED_LABELS. Kept in lock-step with
+# `airuleset._HANDOFF_QUEUE_LABELS` (the #589 resolution-signal set), asserted by
+# test_gk_comment_end_condition_589.
+MAINTAINER_ACTION_LABELS = ("needs-gatekeeper", "ready-for-review",
+                            "gk-processing")
+
+# #1053: the SUB-DEV's own action-only labels — a state where only the reduced-
+# authority stream box can act, so (like a MAINTAINER_ACTION_LABELS hand-off in
+# the #943 ops-wait override) the label keeps the row in the sub-dev's workable
+# `I` even if a stale `ops-wait` is co-present, never hidden in `W`.
+# `verify-on-copy` = "verify the deployed change on your own fresh PROD copy".
+# Deliberately SEPARATE from MAINTAINER_ACTION_LABELS: it must NOT enter the gk
+# box's obligation UNION query (`_obligation_quals`) — the gatekeeper never
+# actions a verify-on-copy ticket, its owning stream does.
+SUBDEV_ACTION_LABELS = ("verify-on-copy",)
 
 
 def _obligation_quals():
@@ -500,7 +522,15 @@ NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS = (
 #
 # Streams without a needs-acceptance model simply never match — zero behaviour
 # change there.
-GATEKEEPER_PROCESSED_LABELS = ("needs-acceptance",)
+#
+# #1053: `verify-on-copy` (the post-deploy hand-back state) is the SECOND
+# gatekeeper-PROCESSED label — gk has reviewed + merged + deployed and RETURNED
+# the ticket to the sub-dev to verify on its own fresh PROD copy, so it is back
+# in the STREAM's court (`handed=False`, routes to the sub-dev's `I`). Excluding
+# it from the comment/timeline candidate walk means a stale READY-FOR-REVIEW
+# hand-off comment can never re-flip a verify-on-copy ticket back to parked-with-
+# gk, exactly the guarantee `needs-acceptance` gets.
+GATEKEEPER_PROCESSED_LABELS = ("needs-acceptance", "verify-on-copy")
 
 
 def _row_is_user_waiting(labels):
@@ -773,7 +803,11 @@ def _partition_workable(rows, own_stream=None):
             # (#601/#622).
             names = {(lb or {}).get("name") for lb in (labels or [])
                      if isinstance(lb, dict)}
-            if any(ml in names for ml in MAINTAINER_ACTION_LABELS):
+            # #1053: a SUBDEV_ACTION_LABELS label (`verify-on-copy`) overrides
+            # ops-wait the SAME way — only the owning stream can perform the
+            # post-deploy verify, so it stays action-only I, never hidden in W.
+            if any(ml in names for ml in
+                   (MAINTAINER_ACTION_LABELS + SUBDEV_ACTION_LABELS)):
                 workable[number] = row
             else:
                 ops_wait[number] = row
@@ -1818,7 +1852,9 @@ def _unpark_release_flagged(rows, authority=None, release_fetch=None):
 # belongs in gk N (stream) / the gk box's actionable I, NEVER in W. `ready-for-
 # review` is the repo-workflow hand-off, `needs-gatekeeper` is airuleset's own
 # gk-request lane (#191/#223 fold both into the same gk bucket).
-_GK_HANDOFF_LABELS = ("needs-gatekeeper", "ready-for-review")
+# #1053: `gk-processing` (gk's live-work state) is the third gk hand-off label,
+# so a W-parked row also carrying it is the same `gk-handoff!` contradiction.
+_GK_HANDOFF_LABELS = ("needs-gatekeeper", "ready-for-review", "gk-processing")
 
 # #636 review 🟡: a `prio:bounce` OVERRIDES a co-present gk hand-off label back to
 # "the STREAM's own court" (the #313 pt-2 override that `_slice_mine_and_handed`
@@ -2617,8 +2653,13 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
         # hand-off lane (cmd_gk_request), not just the repo-workflow's
         # ready-for-review — either equally means "out of my hands, waiting
         # on someone else" (#223 folded both into the same gk bucket).
+        # #1053: `gk-processing` (gk applied it at pickup, replacing
+        # `ready-for-review`) is ALSO a "parked with the gatekeeper" state — the
+        # count must NOT drop to 0 while gk is working. `verify-on-copy` is
+        # deliberately absent: it is the post-deploy RETURN to the sub-dev's own
+        # `I` (handled by GATEKEEPER_PROCESSED_LABELS, below).
         label_handed = ("ready-for-review" in labels) or \
-            ("needs-gatekeeper" in labels)
+            ("needs-gatekeeper" in labels) or ("gk-processing" in labels)
         # #313 pt 2 (F2/F3): `prio:bounce` is the gatekeeper's own "returned
         # to the sub-dev, not ready" verdict — it overrides a stale/lagged
         # hand-off LABEL so a bounced ticket reaches `unhandled` naturally;
