@@ -31,7 +31,6 @@ a reimplementation of its regexes.
 """
 
 import json
-import os
 import subprocess
 import uuid
 from pathlib import Path
@@ -39,6 +38,9 @@ from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "hooks" / "stop-check-question-quality.sh"
+import sys as _sys  # noqa: E402
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1028 hermetic HOME)
 
 HEAD = ("**Otázka — projekt airuleset (nástroj na správu Claude Code "
         "pravidiel):** Testujem ticket #735 pod POSIX locale prostredím. "
@@ -63,7 +65,7 @@ class _HookCase(TestCase):
             "/tmp/claude-user-active-" + sid,
         ):
             self.addCleanup(lambda p=f: Path(p).unlink(missing_ok=True))
-        env = os.environ.copy()
+        env = hermetic_hook_env(self)   # #1028: no live box state (U cache)
         if posix_locale:
             env["LC_ALL"] = "POSIX"
             env["LANG"] = "POSIX"

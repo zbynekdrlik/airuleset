@@ -162,3 +162,30 @@ def preserve_home(testcase):
             os.environ["HOME"] = orig
 
     testcase.addCleanup(_restore)
+
+
+def hermetic_hook_env(testcase, **extra):
+    """A subprocess ``env`` for a test that drives a REAL Stop/PreToolUse hook:
+    the caller's environment with ``HOME`` pointed at a fresh empty directory
+    (removed via ``testcase.addCleanup``), plus any ``extra`` overrides.
+
+    Why (#1028 integration, 2026-09-16): a hook run with the BOX's real HOME
+    reads the box's live state — the #1025 question-scope gate reads
+    ``~/.claude/tickets-status/<cwd-key>.json`` and, when this box's owner-court
+    ``U`` is 0 with a fresh cache, BLOCKS a fixture question that merely names a
+    same-repo ``#N`` (``not_in_u``). Nine hook-level tests across five files
+    went red on the controller the moment its ``U`` hit 0 — a latent flake that
+    depended on the box's ticket state, never on the code under test. A hermetic
+    HOME has no cache, so every box-state-reading branch takes its documented
+    fail-OPEN path, exactly like the push gate's clean-HOME Pass A. Tests that
+    deliberately exercise HOME-resident state (question maps, dedup files) keep
+    building their own ``env`` instead of calling this.
+    """
+    import tempfile
+    home = tempfile.mkdtemp(prefix="hermetic-hook-home-")
+    testcase.addCleanup(__import__("shutil").rmtree, home, True)
+    env = dict(os.environ)
+    env["HOME"] = home
+    env.update(extra)
+    return env
+

@@ -30,6 +30,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "hooks" / "stop-check-question-quality.sh"
+import sys as _sys  # noqa: E402
+_sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1028 hermetic HOME)
 
 _LQ = "„"  # „
 _RQ = "“"  # "
@@ -50,7 +53,8 @@ class _HookCase(unittest.TestCase):
         return subprocess.run(
             ["bash", str(HOOK)],
             input=json.dumps({"last_assistant_message": msg, "session_id": sid}),
-            capture_output=True, text=True, timeout=30)
+            capture_output=True, text=True, timeout=30,
+            env=hermetic_hook_env(self))   # #1028: no live box state (U cache)
 
     def _blocked(self, r):
         return '"block"' in r.stdout

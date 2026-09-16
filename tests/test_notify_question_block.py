@@ -30,7 +30,7 @@ from unittest import TestCase, main
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _hook_state_cleanup import new_hook_sid  # noqa: E402
+from _hook_state_cleanup import new_hook_sid, hermetic_hook_env  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 PENDING = ROOT / "hooks" / "notify-discord-pending.sh"
@@ -191,7 +191,8 @@ class TestStructuredLongQuestion(TestCase):
         payload = json.dumps({"last_assistant_message": LONG_STRUCTURED_MSG,
                               "session_id": sid})
         r = subprocess.run(["bash", str(GATE)], input=payload,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True,
+                           env=hermetic_hook_env(self))   # #1028: no live box state
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn('"block"', r.stdout, r.stdout)
 
