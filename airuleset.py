@@ -3587,12 +3587,14 @@ def _role_filter_footer(workable, waiting, ops_wait, root, cwd):
     (`cli_concurrency.resolve_role`); when it is None (every box but the gk
     windows) all three are returned unchanged — byte-identical to today.
 
-    #1025 CORRECTION of #998: ONLY `workable` (I) is role-filtered. `waiting`
-    (owner-court U) and `ops_wait` (third-party W) are PARKED states global to
-    the box (U = "čo sa ťa Claude pýta", W = "odoslané, čaká tretia strana") —
-    not review-vs-infra WORK — so they are returned UNFILTERED for both roles.
-    #998 filtered all three, hiding an infra ticket's needs-answer from the
-    review window's U (footer `U 0` with a live `❓ ASKED`, odoo-erp#6883).
+    #1045 CORRECTION of #1025: `workable` (I) AND `ops_wait` (W) are role-
+    filtered; only `waiting` (owner-court U) is returned UNFILTERED. #998/#1008
+    filtered all three; #1025 correctly exempted U (an infra ticket's needs-
+    answer must stay in the review window's U — footer `U 0` with a live
+    `❓ ASKED`, odoo-erp#6883) but ALSO stopped filtering W, so the FLOW window's
+    footer `W` counted infra members (owner 2026-09-16, airuleset#1045). W is
+    review-vs-infra work-window scope, so it narrows by role like I; only U is a
+    parked owner-court state global to the box ("čo sa ťa Claude pýta").
 
     Fail-SAFE: any resolver / slug error leaves all three UNFILTERED (the safe
     over-count direction, #589/#636) and is LOGGED, never a footer crash."""
@@ -3616,12 +3618,14 @@ def _role_filter_footer(workable, waiting, ops_wait, root, cwd):
             sys.stderr.write("tickets-status: role filter unavailable "
                              "(slug unresolved) — unfiltered\n")
             return workable, waiting, ops_wait
-        # #1025 CORRECTION of #1008/#998: filter ONLY the workable `I` bucket.
-        # `waiting` (owner-court U) and `ops_wait` (third-party W) are PARKED
-        # states global to the box, never role-owned work — filtering them hid
-        # an infra ticket's needs-answer from the review window's U (odoo-erp
-        # #6883). Doctrine: "the role exclusion may narrow `I` only".
+        # #1045 CORRECTION of #1025: filter the workable `I` bucket AND the
+        # third-party `W` (ops_wait). Only `waiting` (owner-court U) is left
+        # UNFILTERED — an infra ticket's needs-answer must stay in the review
+        # window's U (odoo-erp#6883). #1025 also removed the W filter, so the
+        # FLOW window's footer `W` counted infra members (airuleset#1045). W is
+        # review-vs-infra work-window scope → it narrows by role like I.
         workable = cli_quals_cmd._apply_role_filter(workable, root, role, slug=slug)
+        ops_wait = cli_quals_cmd._apply_role_filter(ops_wait, root, role, slug=slug)  # #1045
     except SystemExit as e:
         # defensive: _apply_role_filter fail-CLOSES on an empty slug; we already
         # short-circuit that above, but never let it escape the footer.

@@ -810,20 +810,24 @@ def cmd_slice_quals(args):
         # below (#370). #654: own_stream=user keeps THIS box's OWN stream rows in U.
         workable_rows, waiting, ops_wait = airuleset._partition_workable(rows, own_stream=user)
     unhandled = {n: v for n, v in workable_rows.items() if not handed.get(n)}
-    # #1025 CORRECTION of #1008: role-filter the workable `I` slice ONLY —
-    # NEVER the owner-court `U` (waiting) or third-party `W` (ops_wait). Those
-    # are PARKED states global to the box: `U` is "čo sa ťa Claude pýta / čo
-    # máš schváliť" and `W` is "odoslané, čaká tretia strana" — neither is
-    # review-vs-infra WORK, so the role exclusion (which narrows only who does
-    # the work) must never drop a member from them. #1008 filtered all three,
-    # which hid an infra ticket's needs-answer from the review (FLOW) window's
-    # U — the owner saw `U 0` with a live `❓ ASKED` (odoo-erp#6883). The
-    # doctrine (statusline-vocabulary.md): "the role exclusion may narrow `I`
-    # only". role None = no-op (byte-identical, no slug touch); an empty slug
-    # fail-CLOSES on the first call (the #993 r2b stop-proof contract).
-    role = getattr(args, "role", None)  # #993 r2b / #1025
+    # #1045 CORRECTION of #1025: role-filter the workable `I` slice AND the
+    # third-party `W` (ops_wait) — NEVER the owner-court `U` (waiting). #1008
+    # filtered all three; #1025 correctly exempted U (an owner question on an
+    # infra ticket must stay visible in the review (FLOW) window's U — the owner
+    # saw `U 0` with a live `❓ ASKED`, odoo-erp#6883) but ALSO removed the W
+    # filter, so `--role review --ops-wait` == `--role infra --ops-wait` (the
+    # FLOW window's W showed infra members — owner 2026-09-16: "chcem vidieť
+    # čísla týkajúce sa gk flow, nie mix kadečoho", airuleset#1045). W IS
+    # review-vs-infra work-window scope, so it narrows by role exactly like I;
+    # only U is a parked owner-court state global to the box ("čo sa ťa Claude
+    # pýta / čo máš schváliť"). ONE derivation: the filtered `ops_wait` feeds the
+    # `--ops-wait` rows AND the `# W-summary: total=` line below (#367). `slug`
+    # already resolved above, reused. role None = no-op (byte-identical, no slug
+    # touch); an empty slug fail-CLOSES on the first call (#993 r2b).
+    role = getattr(args, "role", None)  # #993 r2b / #1025 / #1045
     if role in ("review", "infra"):
         unhandled = _apply_role_filter(unhandled, root, role, slug=slug)
+        ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)  # #1045
     if want_ops_wait:
         # #526: tag each W member `acceptance` (client thread sent) vs `ops-wait`
         # (external event/evidence) so they are distinguishable in the listing.
@@ -1271,20 +1275,23 @@ def cmd_core_quals(args):
         # approval, never dispatchable-now I). Pure label partition; the question
         # map is read only on the on-demand `--waiting` display path (#370).
         workable, waiting, ops_wait = airuleset._partition_workable(seen)
-    # #1025 CORRECTION of #1008: role-filter the workable `I` slice ONLY —
-    # NEVER `--waiting` (U) or `--ops-wait` (W). The owner-court U and the
-    # third-party W are PARKED states global to the box, not review-vs-infra
-    # WORK, so the role exclusion (which narrows only who does the work) must
-    # never drop a member from them. #1008 filtered all three, hiding an infra
-    # ticket's needs-answer from the review (FLOW) window's U — the owner saw
-    # `U 0` with a live `❓ ASKED` (odoo-erp#6883). Doctrine
-    # (statusline-vocabulary.md): "the role exclusion may narrow `I` only".
-    # role None = no-op (byte-identical, no slug touch); an empty slug
-    # fail-CLOSES on the first call (#993 r2b).
-    role = getattr(args, "role", None)  # #993 r2b / #1025
+    # #1045 CORRECTION of #1025: role-filter the workable `I` slice AND
+    # `--ops-wait` (W) — NEVER `--waiting` (U). #1008 filtered all three; #1025
+    # correctly exempted U (an infra ticket's needs-answer must stay in the
+    # review (FLOW) window's U, else `U 0` with a live `❓ ASKED`, odoo-erp#6883)
+    # but ALSO removed the W filter, so `core-quals --role review --ops-wait` ==
+    # `--role infra --ops-wait` — the FLOW window's W showed infra members
+    # (owner 2026-09-16: "chcem vidieť čísla týkajúce sa gk flow, nie mix
+    # kadečoho", airuleset#1045). W is review-vs-infra work-window scope → it
+    # narrows by role like I; only U is the parked owner-court state global to
+    # the box. ONE derivation: the filtered `ops_wait` feeds the `--ops-wait`
+    # rows AND the `# W-summary: total=` line below (#367). role None = no-op
+    # (byte-identical, no slug touch); an empty slug fail-CLOSES (#993 r2b).
+    role = getattr(args, "role", None)  # #993 r2b / #1025 / #1045
     if role in ("review", "infra"):
         slug = airuleset._repo_slug(cwd=root)
         workable = _apply_role_filter(workable, root, role, slug=slug)
+        ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)  # #1045
     if not seen:
         _refuse_unless_empty_is_trustworthy("core-quals", quals, cwd=root)
     if not seen and not extra:

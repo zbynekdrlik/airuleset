@@ -1,24 +1,24 @@
-"""#1025 CORRECTION of #1008/#998 — the role filter narrows `I` (workable) ONLY.
+"""#1045 CORRECTION of #1025 — the role filter narrows `I` (workable) AND `W`
+(ops-wait); only owner-court `U` stays role-independent.
 
-Owner court `U` (needs-answer/needs-decision/needs-owner-action) and the
-third-party wait `W` (ops-wait) are PARKED states, global to the box — they are
-not "work" that a review vs infra role does, so the `--role` partition must
-NEVER drop a member from them. #1008 (CLI) and #998 (footer) applied
-`_apply_role_filter` to the WHOLE partition (I/U/W); that made an infra-labelled
-ticket carrying `needs-answer` INVISIBLE in the gk review (FLOW) window's `U`
-(`core-quals --role review --waiting` = empty, footer `U 0`) even though the
-session had ended `❓ ASKED` — the owner had nowhere to click (odoo-erp #6883,
-`stream:core,infra`; airuleset #1025).
+Owner ruling (issue #1045 body, 2026-09-16 06:3x): "Tu sme v gk flow a chcem
+vidieť čísla týkajúce sa gk flow, nie mix kadečoho." — the `--role` partition
+applies to `W` exactly as to `I`: a `--role review` W = only the FLOW window's
+ops-wait members (stream-dependent + gk-owned WITHOUT `infra`), a `--role infra`
+W = the infra ones. Only `U` (needs-answer/needs-decision/needs-owner-action)
+stays role-INDEPENDENT — the #1025 exception (an owner question on ANY ticket,
+infra included, is never dropped: odoo-erp #6883, footer `U 0` with a live
+`❓ ASKED`).
 
-The fix (statusline-vocabulary.md doctrine "the role exclusion may narrow `I`
-only"): `_apply_role_filter` is applied ONLY to the workable slice; `--waiting`
-(U) and `--ops-wait` (W) keep every member regardless of the `infra` label, for
-BOTH roles. `--count`/`--list`/`I` stay role-filtered exactly as before #1008.
+Background: #1008 (CLI) and #998 (footer) role-filtered the WHOLE partition
+(I/U/W). #1025 (`9be613e2`) correctly exempted `U` — but ALSO removed the filter
+from `W`, which reintroduced the exact #1008 over-count for W on the gk box
+(`core-quals --role review --ops-wait` == `--role infra --ops-wait`). #1045
+restores the `W` filter while KEEPING the #1025 `U` exemption.
 
-This file REVERSES the assertions the pre-#1025 `test_role_filter_uw_1008.py`
-locked (U/W role-filtered) — that behaviour was the bug. `--role infra`'s
-questions stay visible (a needs-answer infra ticket is in the infra role's U
-too); the owner-court set is simply no longer partitioned away from either role.
+The W-filter classes below were REWRITTEN from their #1025 'W keeps infra'
+assertions to the #1045 'W role-filtered' ruling; the U classes are unchanged
+(the #1025 lock).
 """
 import contextlib
 import io
@@ -111,14 +111,16 @@ def _drive_core(rows=None, capture_reasons=False, **flags):
     return _reasons(buf.getvalue()) if capture_reasons else _numbers(buf.getvalue())
 
 
-class TestCoreQualsOpsWaitKeepsInfra(TestCase):
-    """W (ops-wait) is a parked third-party state — NOT role-filtered (#1025 d)."""
+class TestCoreQualsOpsWaitRoleFiltered(TestCase):
+    """#1045: W (ops-wait) is role-filtered EXACTLY like I (owner ruling
+    2026-09-16 — the FLOW window must not show infra members in W)."""
 
-    def test_ops_wait_review_role_keeps_infra_members(self):
-        self.assertEqual(_drive_core(ops_wait=True, role="review"), {100, 101})
+    def test_ops_wait_review_role_drops_infra_members(self):
+        # 100 = infra W (dropped under review), 101 = independent W (kept).
+        self.assertEqual(_drive_core(ops_wait=True, role="review"), {101})
 
-    def test_ops_wait_infra_role_keeps_all_members(self):
-        self.assertEqual(_drive_core(ops_wait=True, role="infra"), {100, 101})
+    def test_ops_wait_infra_role_keeps_only_infra_members(self):
+        self.assertEqual(_drive_core(ops_wait=True, role="infra"), {100})
 
     def test_ops_wait_no_role_keeps_the_whole_W_set(self):
         self.assertEqual(_drive_core(ops_wait=True, role=None), {100, 101})
@@ -220,12 +222,13 @@ def _drive_slice(**flags):
     return _numbers(buf.getvalue())
 
 
-class TestSliceQualsUWKeepInfra(TestCase):
+class TestSliceQualsUKeptWRoleFiltered(TestCase):
     def test_slice_ops_wait_review_role(self):
-        self.assertEqual(_drive_slice(ops_wait=True, role="review"), {200, 201})
+        # #1045: W role-filtered — 200 = infra W (dropped), 201 = independent W.
+        self.assertEqual(_drive_slice(ops_wait=True, role="review"), {201})
 
     def test_slice_ops_wait_infra_role(self):
-        self.assertEqual(_drive_slice(ops_wait=True, role="infra"), {200, 201})
+        self.assertEqual(_drive_slice(ops_wait=True, role="infra"), {200})
 
     def test_slice_waiting_review_role(self):
         self.assertEqual(_drive_slice(waiting=True, role="review"), {202, 203})
@@ -234,12 +237,11 @@ class TestSliceQualsUWKeepInfra(TestCase):
         self.assertEqual(_drive_slice(waiting=True, role="infra"), {202, 203})
 
 
-class TestFooterKeepsUWUnfiltered(TestCase):
-    """#1025: `_role_filter_footer` filters ONLY workable (I). A regression that
-    re-adds the #998/#1008 U/W filter fails here. No-double-count property: both
-    roles yield the SAME U/W (the full owner-court/third-party set), so a box
-    rendering one role shows the true count once, never a partition that hides a
-    member in the other role's window."""
+class TestFooterUUnfilteredWRoleFiltered(TestCase):
+    """#1045: `_role_filter_footer` filters workable (I) AND ops-wait (W); only
+    owner-court U stays role-independent. A regression that re-removes the W
+    filter (the #1025 over-reach) fails here. U keeps the no-double-count
+    property (both roles yield the same U); W is role-partitioned like I."""
 
     def _rows(self, *specs):
         return {k: {"createdAt": "2026-01-01T00:00:00Z", "title": k,
@@ -255,8 +257,8 @@ class TestFooterKeepsUWUnfiltered(TestCase):
             w, wa, o = airuleset._role_filter_footer(
                 workable, waiting, ops, "/root", "/cwd")
         self.assertEqual(set(w), {"a"})          # I filtered
-        self.assertEqual(set(wa), {"c", "d"})    # U unfiltered
-        self.assertEqual(set(o), {"e", "f"})     # W unfiltered
+        self.assertEqual(set(wa), {"c", "d"})    # U unfiltered (#1025 lock)
+        self.assertEqual(set(o), {"f"})          # W filtered — infra dropped (#1045)
 
     def test_infra_role_filters_only_i(self):
         workable = self._rows(("a", []), ("b", ["infra"]))
@@ -267,8 +269,8 @@ class TestFooterKeepsUWUnfiltered(TestCase):
             w, wa, o = airuleset._role_filter_footer(
                 workable, waiting, ops, "/root", "/cwd")
         self.assertEqual(set(w), {"b"})          # I filtered
-        self.assertEqual(set(wa), {"c", "d"})    # U unfiltered — same as review
-        self.assertEqual(set(o), {"e", "f"})     # W unfiltered — same as review
+        self.assertEqual(set(wa), {"c", "d"})    # U unfiltered — same as review (#1025)
+        self.assertEqual(set(o), {"e"})          # W filtered — only infra kept (#1045)
 
     def test_role_none_returns_unchanged(self):
         workable = self._rows(("a", []), ("b", ["infra"]))
