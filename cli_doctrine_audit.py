@@ -29,11 +29,15 @@ Confidence / action:
            its MIVA-specific part. An INCIDENTAL body mention (a sibling
            wiki-link, a per-tenant handover account) is NOT a keep signal. OR an
            anchor match whose SUBJECT carries NO client-messaging cue at all
-           (`has_client_message_subject`) — an unrelated internal memory
+           (`has_client_message_subject`) — usually an unrelated internal memory
            (onboarding / QA / a design doc) that merely reuses two of a
-           doctrine's phrases in its BODY (#1028 fix-forward-3, review-2). OR a
-           fuzzy title/description match against an airuleset module/skill
-           heading. action = LIST (human review). NEVER auto-rewritten.
+           doctrine's phrases in its BODY (#1028 fix-forward-3, review-2). A
+           GENUINE restatement whose subject happens to carry no cue is also
+           listed here, surfaced for human review rather than auto-fixed — the
+           safe direction, the deliberate recall trade-off for closing the
+           destructive false-positive (review-3). OR a fuzzy title/description
+           match against an airuleset module/skill heading. action = LIST (human
+           review). NEVER auto-rewritten.
   keep   → an owner-PREFERENCE / user-context memory (a `feedback_*`/`feedback-`
            FILENAME, or a `type: user` frontmatter node) OR a fleet-installed
            file (a symlink / a file under the airuleset repo dir). Never touched.
@@ -304,11 +308,18 @@ def has_tenant_token(path, fm, body):
 
 # #1028 fix-forward-3 (review-2 MAJOR): every ALLOWLIST entry is a CLIENT-
 # MESSAGING doctrine, so a genuine restatement is a memory ABOUT client
-# messaging and says so in its SUBJECT. An UNRELATED internal memory
+# messaging and USUALLY says so in its SUBJECT. An UNRELATED internal memory
 # (onboarding, QA, a design doc) that merely happens to carry two of an entry's
-# anchor phrases in its BODY does NOT -- "offer video calls to non-technical
-# clients" + "never promise personal walkthroughs" fired on an onboarding-policy
-# memory. Cue words are the client/stream vocabulary; a bare
+# anchor phrases in its BODY usually does not -- "offer video calls to
+# non-technical clients" + "never promise personal walkthroughs" fired on an
+# onboarding-policy memory whose subject had no cue.
+#
+# HONEST LIMIT (review-3 MINOR-1): this gate NARROWS the false-positive class,
+# it does not ELIMINATE it -- an unrelated memory that ALSO carries an
+# incidental client cue in its subject (e.g. `customer-crm-qa.md`) can still
+# reach HIGH. The >= 2 distinctive multi-word anchor bar (not this cue) carries
+# the precision weight, and the rewrite stays reversible via the archive, so the
+# residual is low-risk. Cue words are the client/stream vocabulary; a bare
 # "email"/"message"/"vlákno"/"thread" is DELIBERATELY excluded (internal notes
 # use those), and "discuss" is included because the fleet's client channels are
 # the Odoo *Discuss* threads (the greeting restatement's subject is "Discuss
