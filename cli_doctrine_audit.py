@@ -137,18 +137,20 @@ ALLOWLIST = [
         "fleet_source": "skills/odoo-client-messaging/handover-compose.md",
         "heading": "The greeting belongs only in the first message",
         "fleet_since": FLEET_SINCE,
-        # DISTINCTIVE multi-word phrases only — a bare "greeting" / "oslovenie" /
-        # "no greeting" is far too generic (#1028 review-1 🟡: a UI memory saying
-        # "shows no greeting banner" or "show it in the first message only"
-        # false-matched HIGH). Each anchor must be specific to the client-message
-        # greeting-etiquette rule.
+        # #1028 fix-forward-3: anchors RE-DERIVED from the LIVE miva1 restatement
+        # (`discuss-thread-greeting-etiquette.md`) — the SK description/body
+        # phrases it actually uses — plus two distinctive EN forms for a future
+        # English restatement. Still DISTINCTIVE multi-word only (a bare
+        # "greeting"/"oslovenie"/"no greeting" is too generic, #1028 review-1 🟡);
+        # NO quote characters, so the curly „ " in the live text never break a
+        # match (SK diacritics survive .lower()).
         "anchors": [
+            "patrí len do prvej správy",
+            "follow-upy v tom istom vlákne bez pozdravu",
+            "len otváracia správa vlákna",
+            "každý follow-up v tom istom vlákne",
             "greeting belongs only in the first message",
-            "oslovenie patrí len do prvej správy",
-            "continuing message carries no greeting",
-            "continuation message carries no greeting",
             "no greeting in a continuing message",
-            "greeting only in the first client message",
         ],
     },
     {
@@ -156,14 +158,18 @@ ALLOWLIST = [
         "fleet_source": "skills/odoo-client-messaging/handover-compose.md",
         "heading": "Explain the concept to the client",
         "fleet_since": FLEET_SINCE,
-        # Client-message-scoped only — a bare "explain the concept, not the
-        # implementation" is generic engineering advice (#1028 review-2 🟡).
+        # #1028 fix-forward-3: anchors RE-DERIVED from the LIVE miva1 restatement
+        # (`client-emails-explain-the-concept.md`, EN) — the description/body
+        # phrases it actually uses — plus the canonical fleet-heading phrase for
+        # forward compatibility. Client-message-scoped only: a bare "explain the
+        # concept, not the implementation" is generic engineering advice (#1028
+        # review-2 🟡).
         "anchors": [
+            "explain what each thing is and how it fits",
+            "explain each named thing in one plain sentence",
+            "never explained the concept",
+            "a link plus a feature list is not enough",
             "explain the concept to the client",
-            "vysvetli klientovi koncept",
-            "explain the feature to the client",
-            "vysvetli klientovi ako to funguje",
-            "explain the concept to the client, not the implementation",
         ],
     },
     {
@@ -171,15 +177,17 @@ ALLOWLIST = [
         "fleet_source": "skills/odoo-client-messaging/handover-compose.md",
         "heading": "No promises on the client's behalf",
         "fleet_since": FLEET_SINCE,
-        # "no promises on the user's behalf" ⊃ "no promises" — the substring
-        # dedup in _anchor_hits already collapses them, but keep only the
-        # distinctive full phrases so a bare "no promises" cannot corroborate.
+        # #1028 fix-forward-3: anchors RE-DERIVED from the LIVE miva1 restatement
+        # (`no-promises-on-users-behalf.md`, EN) — the description/body phrases it
+        # actually uses — plus the canonical fleet-heading phrase for forward
+        # compatibility. Distinctive full phrases only, so a bare "no promises"
+        # cannot corroborate (the _anchor_hits substring dedup collapses overlaps).
         "anchors": [
-            "no promises on the user's behalf",
+            "never promise the user will personally",
+            "never promise personal walkthroughs",
+            "offer video calls to non-technical clients",
+            "assumes the user can demonstrate odoo features",
             "no promises on the client's behalf",
-            "never promise on the client's behalf",
-            "nesľubuj klientovi v mene",
-            "žiadne sľuby v mene klienta",
         ],
     },
     {
