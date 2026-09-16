@@ -159,8 +159,8 @@ def _run(handoffs, rec=None, send=None, roots=None, state=None, now=NOW,
         logs = cs.gk_orphan_marker_sweep(
             now, run=None, state=st, send_fn=send, user="newlevel",
             dry_run=dry_run,
-            gh_fetch=lambda root: [],                 # no MUTATED candidates
-            handoff_fetch=lambda root: handoffs,
+            gh_fetch=lambda root, **kw: [],           # no MUTATED candidates
+            handoff_fetch=lambda root, **kw: handoffs,
             handoff_apply=rec)
     return logs, st, rec, send
 
@@ -229,7 +229,7 @@ class SweepBehaviour(unittest.TestCase):
                                lambda *a, **k: True):
             logs = cs.gk_orphan_marker_sweep(
                 NOW, run=None, state=st, send_fn=_Send(), user="newlevel",
-                gh_fetch=lambda root: [])
+                gh_fetch=lambda root, **kw: [])
         self.assertFalse(any("gk-handoff" in ln for ln in logs), logs)
 
 
