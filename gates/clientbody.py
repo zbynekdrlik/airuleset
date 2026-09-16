@@ -73,28 +73,32 @@ _ALLOWLIST_REF_RE = re.compile(
 # GitHubu", #1018) — broader than a bare github.com URL.
 _GITHUB_WORD_RE = re.compile(r"github", re.IGNORECASE)
 
-# A bare `#NNNN` is BLOCKED ONLY when corroborated by a github-issue SIGNAL in
-# the SAME body (#1018 review-1 F1, the headline false block): in the gate's own
-# Odoo domain `#1058` far more often means an ORDER / INVOICE / product / SO
-# record (or an all-digit hex colour `#003366`, a quantity `#500`) than a GitHub
-# issue — blocking every `#NNNN` false-blocks legitimate client messages, the
-# owner's WORST outcome. A github-word body is already blocked above; this arm
-# adds the `issue #7110` / `ticket #7110` shape that carries no literal
-# „github". The literal #1018(a) „bare #NNNN" ask is deliberately narrowed to
-# honour the higher-priority no-false-block directive (recorded in the review +
-# the LANE-RETURN).
+# A bare `#NNNN` is BLOCKED ONLY when corroborated by a github SIGNAL in the SAME
+# body (#1018 review-1 F1, the headline false block): in the gate's own Odoo
+# domain `#1058` far more often means an ORDER / INVOICE / product / SO record
+# (or an all-digit hex colour `#003366`, a quantity `#500`) than a GitHub issue
+# — blocking every `#NNNN` false-blocks legitimate client messages, the owner's
+# WORST outcome. A github-word body is already blocked above; this arm adds the
+# `issue #7110` / `pull request #7110` shape that carries no literal „github".
+# `ticket` is deliberately NOT a signal (#1018 review-2 F-3): „Ticket" is a
+# first-class Odoo Helpdesk object, so „váš helpdesk ticket #1058" is a
+# legitimate client message. `issue` stays (Slovak client bodies say „problém",
+# not „issue", so it is safe today; a future English board's collision is an
+# accepted residual the github-word check + doctrine still cover). The literal
+# #1018(a) „bare #NNNN" ask is deliberately narrowed to honour the
+# higher-priority no-false-block directive (recorded in the review + LANE-RETURN).
 _BARE_ISSUE_RE = re.compile(r"#\d{3,}")
-_GITHUB_SIGNAL_RE = re.compile(r"\bissues?\b|\bticket\b|pull\s+request", re.IGNORECASE)
+_GITHUB_SIGNAL_RE = re.compile(r"\bissues?\b|pull\s+request", re.IGNORECASE)
 
-# UNAMBIGUOUS developer tokens only. Dropped from the standalone list (#1018
-# review-1 F2/F3): PR (public relations / „PR oddelenie"), CI (corporate
-# identity / firemná identita), merge + branch (Odoo's own „Merge duplicates"
-# button; „branch" = pobočka) — all proven to false-block ordinary business
-# Slovak. The full jargon set stays DISCOURAGED in the doctrine prose (rule 7);
-# the mechanical gate only blocks what is unambiguous, and github.com + a
-# github-context #NNNN already catch the real „developer pasted a GitHub ref"
-# incident.
-_JARGON_ACRONYM_RE = re.compile(r"\b(?:RFR|gk)\b")  # case-SENSITIVE (rare acronyms)
+# UNAMBIGUOUS developer tokens only. Dropped from the standalone list: PR (public
+# relations / „PR oddelenie"), CI (corporate identity), merge + branch (Odoo's
+# own „Merge duplicates" button; „branch" = pobočka) — #1018 review-1 F2/F3; and
+# `gk` — #1018 review-2 F-2: a 2-letter token that false-blocks a MANDATED
+# handover URL whose host contains it (`https://gk-erp.klient.sk/...`, rule 3).
+# The full jargon set stays DISCOURAGED in the doctrine prose (rule 7); the
+# mechanical gate only blocks what is unambiguous, and github.com + a
+# github-context #NNNN already catch the real „developer pasted a GitHub ref".
+_JARGON_ACRONYM_RE = re.compile(r"\bRFR\b")  # case-SENSITIVE (rare, unambiguous)
 _JARGON_WORD_RE = re.compile(
     r"\b(?:commit|worktree|hand-?off|hand off)\b", re.IGNORECASE)
 
@@ -103,9 +107,16 @@ _JARGON_WORD_RE = re.compile(
 # the odoo-task-sync post-message positional. Non-greedy + DOTALL: an HTML body
 # spans newlines; the common case (delimiter quote not repeated raw inside) is
 # what streams actually emit.
+#
+# The `body` KEY carries a non-word LOOKBEHIND `(?<![A-Za-z0-9_])` (#1018 review-2
+# F-1, the headline over-extraction): without it `somebody=` / `nobody=` /
+# `log_body=` / `email_body=` / `message_body=` all matched, so a posting script
+# whose INTERNAL variable (e.g. `log_body = "...github.com..."`) carried jargon
+# false-blocked the clean client body next to it — violating this module's own
+# „scan only the extracted client body, never the surrounding code" invariant.
 _BODY_PATTERNS = [
-    re.compile(r"""["']?body["']?\s*[:=]\s*(?P<q>\"\"\"|''')(?P<v>.*?)(?P=q)""", re.DOTALL),
-    re.compile(r"""["']?body["']?\s*[:=]\s*(?P<q>["'])(?P<v>.*?)(?P=q)""", re.DOTALL),
+    re.compile(r"""(?<![A-Za-z0-9_])["']?body["']?\s*[:=]\s*(?P<q>\"\"\"|''')(?P<v>.*?)(?P=q)""", re.DOTALL),
+    re.compile(r"""(?<![A-Za-z0-9_])["']?body["']?\s*[:=]\s*(?P<q>["'])(?P<v>.*?)(?P=q)""", re.DOTALL),
     re.compile(r"""--body(?:\s+|=)(?P<q>["'])(?P<v>.*?)(?P=q)""", re.DOTALL),
     re.compile(r"""post-message\s+\S+\s+(?P<q>["'])(?P<v>.*?)(?P=q)""", re.DOTALL),
 ]

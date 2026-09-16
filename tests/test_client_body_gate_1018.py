@@ -105,6 +105,28 @@ class TestClientBodyJargonGate(TestCase):
         blocked, reason = self._blocked(c)
         self.assertFalse(blocked, reason)
 
+    # F-1 regression (#1018 review-2, headline): jargon in an INTERNAL *_body
+    # variable must NOT be extracted — only the actual client body is scanned.
+    def test_internal_body_variable_not_extracted(self):
+        c = ("log_body = \"posting failed once, retry per github.com/x/issues\"\n"
+             "task.message_post(body=\"<p>Dobrý deň, hotovo. stačí 👍</p>\", body_is_html=True)")
+        blocked, reason = self._blocked(c)
+        self.assertFalse(blocked, reason)
+
+    # F-2 regression: a mandated handover URL whose host contains "gk" is allowed.
+    def test_gk_host_in_handover_url_allowed(self):
+        c = ("channel.message_post(body='<p>Kde: https://gk-erp.klient.sk/odoo/action-1/2</p>', "
+             "body_is_html=True)")
+        blocked, reason = self._blocked(c)
+        self.assertFalse(blocked, reason)
+
+    # F-3 regression: Odoo Helpdesk "Ticket" object is a legitimate business term.
+    def test_odoo_helpdesk_ticket_allowed(self):
+        c = ("scripts/odoo-task-sync.py post-message 42 "
+             "\"<p>Dobrý deň, váš helpdesk ticket #1058 bol vyriešený.</p>\"")
+        blocked, reason = self._blocked(c)
+        self.assertFalse(blocked, reason)
+
     def test_bypass_marker_allowed(self):
         c = ("scripts/odoo-task-sync.py post-message 42 \"<p>detaily v #7110</p>\"  "
              "# airuleset:client-body-ok legacy migration note")

@@ -31,10 +31,17 @@ ujasniť** (montalu / miva); slovnormal has no dedicated question stage, so a
 question stays in **V práci** with the chatter question of rule 4.
 
 Adding a new board = adding a profile row here (and its GitHub `needs-answer`
-mirror if a client answer is pending). The montalu column-vocabulary convergence
-to native Odoo 19 stage names, and the shared `odoo_post.py` posting template,
-are owned by **odoo-erp#7101** — this file's montalu row is updated from there,
-never invented locally.
+mirror if a client answer is pending). The stage names above are the CURRENT
+(transitional) PROD vocabulary; the column-vocabulary convergence to the native
+Odoo 19 stage set — **Nové → Požadujú sa zmeny → V riešení → Čaká → Hotové →
+Zrušené** (with **Čaká** as the awaiting-verification stage), opt-in per
+`board_standard_managed` — and the shared `odoo_post.py` posting template are
+owned by **odoo-erp#7101**; this file's profile rows are updated from there,
+never invented locally. **COUPLING:** when that convergence lands on a managed
+board, rule 3's Verifikácia Stop-hook stage names (`VERIF_STAGE_RX` in
+`hooks/stop-check-prose-violations.sh`) MUST be updated together with the profile
+rows (add `Čaká`), or the shape check silently stops firing on the renamed
+stage — this belongs to the odoo-erp#7101 rollout, tracked as a follow-up.
 
 ---
 
