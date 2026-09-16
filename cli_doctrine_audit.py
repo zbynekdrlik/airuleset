@@ -22,11 +22,14 @@ Confidence / action:
            client-specific "keep" token AND is not an owner-preference memory.
            action = REWRITE (archive the original, replace body with a one-line
            pointer). Auto-fixable.
-  MEDIUM → an anchor match that ALSO carries a client-specific token (a blanket
-           rewrite would lose real content — e.g. `miva-zero-manual-attendance-
-           work.md` keeps its MIVA-specific part), OR a fuzzy title/description
-           match against an airuleset module/skill heading. action = LIST (human
-           review). NEVER auto-rewritten.
+  MEDIUM → an anchor match whose SUBJECT (filename / frontmatter description /
+           first heading — never the body, #1028 fix-forward-2, comment
+           5691229806) carries a client-specific token: a blanket rewrite would
+           lose real content — e.g. `miva-zero-manual-attendance-work.md` keeps
+           its MIVA-specific part. An INCIDENTAL body mention (a sibling
+           wiki-link, a per-tenant handover account) is NOT a keep signal. OR a
+           fuzzy title/description match against an airuleset module/skill
+           heading. action = LIST (human review). NEVER auto-rewritten.
   keep   → an owner-PREFERENCE / user-context memory (a `feedback_*`/`feedback-`
            FILENAME, or a `type: user` frontmatter node) OR a fleet-installed
            file (a symlink / a file under the airuleset repo dir). Never touched.
@@ -71,11 +74,12 @@ FUZZY_RATIO_THRESHOLD = 0.72
 
 POINTER_PREFIX = "See airuleset "
 
-# Client / stream identities. A tenant token present alongside an anchor match
-# DOWNGRADES HIGH → MEDIUM (the file mixes graduated doctrine with client-
-# specific content, so a blanket rewrite would lose the client part). It NEVER
-# creates a match on its own, so a false positive only ever errs SAFE (listed,
-# not auto-fixed). Matched at a word boundary, case-insensitively.
+# Client / stream identities. A tenant token in a match's SUBJECT (filename /
+# frontmatter description / first heading — never the body, #1028 fix-forward-2,
+# comment 5691229806) DOWNGRADES HIGH → MEDIUM (the file's subject is a client,
+# so a blanket rewrite would lose the client part). It NEVER creates a match on
+# its own, so a false positive only ever errs SAFE (listed, not auto-fixed).
+# Matched at a word boundary, case-insensitively.
 TENANT_TOKENS = ["miva", "montalu", "david", "simap", "dominika", "marek", "gk"]
 _TENANT_RE = re.compile(r"\b(?:%s)\w*" % "|".join(TENANT_TOKENS), re.IGNORECASE)
 
@@ -255,11 +259,24 @@ def is_owner_preference(path, fm):
     return (fm.get("type", "") or "").lower() == "user"
 
 
-def has_tenant_token(path, text):
-    """True when a known client/stream identity appears in the filename or body
-    (a client-specific "keep" signal)."""
-    return bool(_TENANT_RE.search(os.path.basename(path))
-                or _TENANT_RE.search(text))
+def has_tenant_token(path, fm, body):
+    """True when a known client/stream identity is the memory's SUBJECT -- it
+    appears in the FILENAME or the frontmatter ``description:`` (fallback when
+    there is no non-empty description -- absent, or empty/whitespace-only: the
+    body's first heading, via ``first_heading``). The BODY is never scanned.
+
+    Subject-scoped on purpose (#1028 fix-forward-2, comment 5691229806): the
+    HIGH -> MEDIUM tenant demotion protects a memory whose SUBJECT is a client,
+    so its client-specific content is never blanket-rewritten. An INCIDENTAL
+    body mention is not a subject signal -- a wiki-link to a sibling memory
+    (``[[miva-...]]``) or a per-tenant handover service account
+    (``claude-handover@miva.local``) once demoted a graduated-rule RESTATEMENT
+    (the real item-1 file) to MEDIUM and left it never-rewritten, defeating the
+    audit. The archive keeps the full original, so a subject-scoped rewrite
+    stays reversible."""
+    desc = ((fm.get("description") if fm else "") or "").strip()
+    subject = os.path.basename(path) + "\n" + (desc or first_heading(body))
+    return bool(_TENANT_RE.search(subject))
 
 
 def is_already_pointer(text):
@@ -362,7 +379,7 @@ def classify_file(path, text, module_headings=None):
         src, head, since = entry["fleet_source"], entry["heading"], entry["fleet_since"]
         if owner_pref:
             return DoctrineMatch(path, src, head, since, HIGH, ACTION_KEEP, hits)
-        if has_tenant_token(path, text):
+        if has_tenant_token(path, fm, body):
             return DoctrineMatch(path, src, head, since, MEDIUM, ACTION_LIST, hits)
         return DoctrineMatch(path, src, head, since, HIGH, ACTION_REWRITE, hits)
 

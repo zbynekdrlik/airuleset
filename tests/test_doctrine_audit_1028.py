@@ -613,19 +613,25 @@ class TestFeedbackTypeIsClassified1028(unittest.TestCase):
             self.assertIn("odoo-client-messaging", m.fleet_source)
 
     def test_b_feedback_type_with_tenant_is_medium(self):
-        # (b) type: feedback + anchors + a tenant token -> MEDIUM / list
-        # (a blanket rewrite would lose the client-specific part).
+        # (b) type: feedback + anchors + a tenant token in the DESCRIPTION ->
+        # MEDIUM / list (a blanket rewrite would lose the client-specific part).
+        # #1028 fix-forward-2 (comment 5691229806): the tenant signal is now
+        # SUBJECT-scoped (filename / description / first heading), never the
+        # body -- so the token lives in `description:` here (was the filename +
+        # body) to exercise the actual demotion path.
         text = (
-            "---\nname: miva-client-message-no-workarounds\n"
+            "---\nname: client-message-no-workarounds\n"
+            'description: "MIVA client-message handling -- no interim '
+            'workaround"\n'
             "metadata:\n  node_type: memory\n  type: feedback\n---\n"
-            "# MIVA client message: no interim workaround\n\n"
-            "For the MIVA tenant: do not send an interim workaround while a fix "
-            "is in flight; never push manual work onto the client.\n")
+            "# Client message: no interim workaround\n\n"
+            "Do not send an interim workaround while a fix is in flight; never "
+            "push manual work onto the client.\n")
         tmp, home, _ = self._home_with(
-            "miva-client-message-no-workarounds.md", text)
+            "client-message-no-workarounds-desc-tenant.md", text)
         with tmp:
             m = _by_name(da.scan_home(str(home)))[
-                "miva-client-message-no-workarounds.md"]
+                "client-message-no-workarounds-desc-tenant.md"]
             self.assertEqual(m.confidence, da.MEDIUM)
             self.assertEqual(m.action, da.ACTION_LIST)
 
@@ -720,6 +726,142 @@ class TestFeedbackTypeIsClassified1028(unittest.TestCase):
             self.assertEqual(counts["high"], 1)
             _, ok, _ = conf.classify_doctrine_drift(counts)
             self.assertIs(ok, False)
+
+
+# --------------------------------------------------------------------------
+# #1028 FIX-FORWARD-2 (supervisor comment 5691229806): the tenant demotion is
+# about the memory's SUBJECT, not incidental body mentions. has_tenant_token()
+# now scans ONLY the filename + frontmatter `description:` (fallback: the body's
+# first heading), NEVER the body. A graduated-rule RESTATEMENT that merely links
+# a sibling memory ([[miva-...]]) or names a per-tenant handover account
+# (claude-handover@miva.local) in its body is HIGH/rewrite; a memory whose
+# SUBJECT is a client (token in filename/description/heading) stays MEDIUM/list.
+# --------------------------------------------------------------------------
+class TestTenantSubjectScope1028(unittest.TestCase):
+    def _home_with(self, fname, text):
+        tmp = TemporaryDirectory()
+        home = Path(tmp.name)
+        mem = home / ".claude" / "projects" / "-home-miva1-proj" / "memory"
+        mem.mkdir(parents=True)
+        (mem / fname).write_text(text, encoding="utf-8")
+        return tmp, home, mem
+
+    # (1) the REAL item-1 shape: type: feedback, GENERIC description (no tenant
+    # token), 2+ anchors, and the tenant token present ONLY in the body (a
+    # sibling wiki-link + the per-tenant handover account). TODAY this is
+    # MEDIUM (the body scan fires on the incidental mentions); after the
+    # subject-scope fix it is HIGH/rewrite -- the audit's whole point.
+    REAL_ITEM1 = (
+        "---\nname: client-message-worker-reaction-no-workarounds\n"
+        'description: "React worker on a client message; never send an interim '
+        'workaround"\n'
+        "metadata:\n  node_type: memory\n  type: feedback\n---\n"
+        "# Client message: react worker, no workarounds\n\n"
+        "React the worker on the client message. Do not send an interim "
+        "workaround while a fix is in flight -- no interim workaround; never "
+        "push manual work onto the client. See "
+        "[[miva-zero-manual-attendance-work]] for the MIVA-specific part; "
+        "handover via claude-handover@miva.local.\n")
+
+    def test_1_real_item1_body_only_token_is_high_rewrite(self):
+        tmp, home, _ = self._home_with(
+            "client-message-worker-reaction-no-workarounds.md", self.REAL_ITEM1)
+        with tmp:
+            m = _by_name(da.scan_home(str(home)))[
+                "client-message-worker-reaction-no-workarounds.md"]
+            self.assertEqual(m.confidence, da.HIGH)
+            self.assertEqual(m.action, da.ACTION_REWRITE)
+            self.assertIn("handover-compose", m.fleet_source)
+
+    def test_2_tenant_token_in_description_only_is_medium(self):
+        # token in `description:` only -- not in the filename, not in the body.
+        text = (
+            "---\nname: no-workaround-client-note\n"
+            'description: "Montalu client-message handling -- no interim '
+            'workaround"\n'
+            "metadata:\n  node_type: memory\n  type: feedback\n---\n"
+            "# Client message: no interim workaround\n\n"
+            "Do not send an interim workaround while a fix is in flight; never "
+            "push manual work onto the client.\n")
+        tmp, home, _ = self._home_with("no-workaround-client-note.md", text)
+        with tmp:
+            m = _by_name(da.scan_home(str(home)))["no-workaround-client-note.md"]
+            self.assertEqual(m.confidence, da.MEDIUM)
+            self.assertEqual(m.action, da.ACTION_LIST)
+
+    def test_3_tenant_token_in_filename_only_is_medium(self):
+        # token in the FILENAME only -- generic description, no token in body.
+        text = (
+            "---\nname: no-workaround-rule\n"
+            'description: "Client-message handling -- no interim workaround"\n'
+            "metadata:\n  node_type: memory\n  type: feedback\n---\n"
+            "# Client message: no interim workaround\n\n"
+            "Do not send an interim workaround while a fix is in flight; never "
+            "push manual work onto the client.\n")
+        tmp, home, _ = self._home_with("miva-no-workaround-rule.md", text)
+        with tmp:
+            m = _by_name(da.scan_home(str(home)))["miva-no-workaround-rule.md"]
+            self.assertEqual(m.confidence, da.MEDIUM)
+            self.assertEqual(m.action, da.ACTION_LIST)
+
+    def test_4_miva_zero_manual_shape_is_medium_not_rewrite(self):
+        # the `miva-zero-manual-attendance-work.md` shape: token in filename AND
+        # description, generic manual-work body with anchors -> MEDIUM/list,
+        # never a rewrite (its client-specific content is kept for human review).
+        text = (
+            "---\nname: miva-zero-manual-attendance-work\n"
+            'description: "MIVA owner goal -- zero manual attendance work"\n'
+            "metadata:\n  node_type: memory\n  type: feedback\n---\n"
+            "# MIVA -- zero manual attendance work\n\n"
+            "Client-specific: for the MIVA tenant the attendance import must be "
+            "fully automatic. Generic clause: never push manual work onto the "
+            "client -- no interim workaround while the fix is in flight.\n")
+        tmp, home, _ = self._home_with(
+            "miva-zero-manual-attendance-work.md", text)
+        with tmp:
+            m = _by_name(da.scan_home(str(home))).get(
+                "miva-zero-manual-attendance-work.md")
+            self.assertIsNotNone(m)
+            self.assertNotEqual(m.action, da.ACTION_REWRITE)
+            self.assertEqual(m.confidence, da.MEDIUM)
+            self.assertEqual(m.action, da.ACTION_LIST)
+
+    def test_5_no_description_heading_token_is_medium(self):
+        # no `description:` -> fallback to the body's FIRST HEADING; token there
+        # -> MEDIUM (the subject is still a client).
+        text = (
+            "---\nname: attendance-rule\n"
+            "metadata:\n  node_type: memory\n  type: feedback\n---\n"
+            "# MIVA attendance rule\n\n"
+            "Do not send an interim workaround while a fix is in flight; never "
+            "push manual work onto the client.\n")
+        tmp, home, _ = self._home_with("attendance-rule.md", text)
+        with tmp:
+            m = _by_name(da.scan_home(str(home)))["attendance-rule.md"]
+            self.assertEqual(m.confidence, da.MEDIUM)
+            self.assertEqual(m.action, da.ACTION_LIST)
+
+    def test_6_fix_on_real_item1_archives_byte_identical_and_pointers(self):
+        # the --fix rewrite path on the real item-1 shape: the archive copy is
+        # byte-identical to the original, and the rewritten file starts with the
+        # fleet pointer prefix.
+        tmp, home, mem = self._home_with(
+            "client-message-worker-reaction-no-workarounds.md", self.REAL_ITEM1)
+        with tmp:
+            matches = da.scan_home(str(home))
+            res = da.apply_fixes(matches, str(home), today="2026-09-16")
+            target = mem / "client-message-worker-reaction-no-workarounds.md"
+            self.assertTrue(target.read_text(encoding="utf-8").startswith(
+                da.POINTER_PREFIX))
+            arch = (home / ".claude" / "doctrine-archive" / "2026-09-16" /
+                    "projects" / "-home-miva1-proj" / "memory" /
+                    "client-message-worker-reaction-no-workarounds.md")
+            self.assertTrue(arch.exists())
+            self.assertEqual(arch.read_bytes(),
+                             self.REAL_ITEM1.encode("utf-8"))
+            self.assertEqual(
+                [os.path.basename(p) for p in res["rewritten"]],
+                ["client-message-worker-reaction-no-workarounds.md"])
 
 
 if __name__ == "__main__":
