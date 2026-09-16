@@ -159,37 +159,37 @@ def _classify_local_gh(path):
 # must resolve the REAL gh, never re-entering the shim.
 # --------------------------------------------------------------------------- #
 def real_gh_path(env=None):
-    """Absolute path of the REAL ``gh`` binary. Resolution order:
-      1. the relocated ``upstream_path`` (the wrapped-in-place case), if present;
-      2. ``gh`` on PATH, SKIPPING our own shim (sentinel-detected) so a refresh
-         can never re-enter the wrapper.
-    None if only the shim resolves — the caller then fails open (no throttle)."""
-    import shutil
+    """Absolute path of the REAL ``gh`` BINARY. Resolution order:
+      1. the relocated ``upstream_path`` (the wrapped-in-place case), if present
+         AND it is a real binary (not itself a foreign wrapper);
+      2. the first ``gh`` on PATH classified as a real BINARY — SKIPPING both our
+         own shim (sentinel) AND any FOREIGN wrapper script (the issue-888
+         app-token shim, or any other #!-wrapper).
+    None if only shims resolve — the caller then fails open (no throttle).
+
+    #1051 review-2 (finding #1): this MUST skip a FOREIGN wrapper, not only our
+    own. Cases 3/4 of ``ensure_gh_rate_wrapper`` bake our shim's REAL_GH at
+    whatever this returns; if it returned the app-token shim, our shim would exec
+    the app shim, which resolves the first non-self gh on PATH back to our shim →
+    the exact our↔app exec-loop. Returning ONLY a real binary here makes that
+    impossible by construction (the box stays un-throttled — fail-open — when no
+    real binary is directly resolvable, never looped)."""
     up = upstream_path()
-    if os.path.isfile(up) and os.access(up, os.X_OK):
+    if (os.path.isfile(up) and os.access(up, os.X_OK)
+            and _classify_local_gh(up) == "binary"):
         return up
     e = env if env is not None else os.environ
     path = e.get("PATH", "") or ""
-    cand = shutil.which("gh", path=path)
-    if cand and not _is_our_wrapper(cand):
-        return cand
-    if cand:
-        # `cand` is our shim — search the remaining PATH dirs for a real gh.
-        shim_dir = os.path.realpath(os.path.dirname(cand))
-        entries = []
-        for p in path.split(os.pathsep):
-            if not p:
-                continue
-            try:
-                same = os.path.realpath(p) == shim_dir
-            except OSError:
-                same = False   # unreadable PATH entry: keep it as a candidate
-            if same:
-                continue
-            entries.append(p)
-        alt = shutil.which("gh", path=os.pathsep.join(entries))
-        if alt and not _is_our_wrapper(alt):
-            return alt
+    # Walk PATH in order; return the FIRST `gh` that is a real binary. `gh` files
+    # that are our shim or a foreign wrapper are skipped so resolution can never
+    # re-enter (or wrap onto) a shim.
+    for p in path.split(os.pathsep):
+        if not p:
+            continue
+        cand = os.path.join(p, "gh")
+        if (os.path.isfile(cand) and os.access(cand, os.X_OK)
+                and _classify_local_gh(cand) == "binary"):
+            return cand
     return None
 
 

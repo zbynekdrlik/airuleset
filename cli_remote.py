@@ -957,13 +957,20 @@ def _gh_chain_postcheck():
     system gh on PATH answers instead), and a false FAILURE on a healthy box
     whose gh is only at ~/.local/bin. So force ~/.local/bin to the FRONT of PATH
     — exactly what a real interactive gh consumer resolves — before the probe.
-    `-k 2` hardens the bound against a SIGTERM-ignoring child."""
+    `-k 2` hardens the bound against a SIGTERM-ignoring child.
+
+    #1051 review-2 (finding #2): a target that legitimately has NO gh (install
+    returned "skip: no gh on this box") must NOT be failed — there is nothing to
+    verify. So resolve gh through the forced PATH first; if it does not resolve
+    at all, SKIP the probe (exit 0). Only a gh that DOES resolve is probed, so a
+    hanging / exec-looping gh (which resolves as a file) is still caught."""
     return (
-        '{ PATH="$HOME/.local/bin:$PATH" timeout -k 2 5 gh --version '
-        '>/dev/null 2>&1 || '
+        '{ export PATH="$HOME/.local/bin:$PATH"; '
+        'command -v gh >/dev/null 2>&1 || exit 0; '
+        'timeout -k 2 5 gh --version >/dev/null 2>&1 || '
         '{ echo "GH-CHAIN POSTCHECK FAILED: gh --version did not return through '
-        'the installed ~/.local/bin/gh chain in 5s (exec-loop or missing gh — '
-        '#1051)" >&2; exit 87; }; }'
+        'the installed ~/.local/bin/gh chain in 5s (exec-loop — #1051)" >&2; '
+        'exit 87; }; }'
     )
 
 

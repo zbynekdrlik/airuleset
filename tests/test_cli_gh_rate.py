@@ -563,6 +563,40 @@ class TestEnsureWrapper(unittest.TestCase):
         self._make_real_gh(cli_gh_rate.upstream_path())
         self.assertEqual(cli_gh_rate.real_gh_path(), cli_gh_rate.upstream_path())
 
+    def test_real_gh_path_skips_a_foreign_wrapper(self):
+        # #1051 review-2 (finding #1): an app-token shim on PATH must NOT be
+        # returned as the "real gh" — only a real binary is (else Cases 3/4 bake
+        # our shim's REAL_GH at the app shim -> the our<->app exec-loop).
+        appdir = os.path.join(self.tmp, "appbin")
+        realdir = os.path.join(self.tmp, "realbin")
+        os.makedirs(appdir)
+        os.makedirs(realdir)
+        self._make_app_shim(os.path.join(appdir, "gh"))    # foreign shim, FIRST on PATH
+        self._make_real_gh(os.path.join(realdir, "gh"))    # real binary, later
+        os.environ["PATH"] = appdir + os.pathsep + realdir
+        self.assertEqual(cli_gh_rate.real_gh_path(),
+                         os.path.join(realdir, "gh"))
+
+    def test_case4_never_wraps_onto_a_foreign_shim(self):
+        # #1051 review-2 (finding #1): with ~/.local/bin/gh absent and an app
+        # shim earlier on PATH than a real gh, the installer must NOT bake our
+        # shim's REAL_GH at the app shim (that re-creates the loop). It points at
+        # the real binary (ELF), never the app shim.
+        appdir = os.path.join(self.tmp, "appbin2")
+        realdir = os.path.join(self.tmp, "realbin2")
+        os.makedirs(appdir)
+        os.makedirs(realdir)
+        self._make_app_shim(os.path.join(appdir, "gh"))       # foreign, first on PATH
+        self._make_real_gh(os.path.join(realdir, "gh"))       # real ELF binary, later
+        # ~/.local/bin (self.bin) is empty -> Case 4.
+        os.environ["PATH"] = self.bin + os.pathsep + appdir + os.pathsep + realdir
+        status = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                    verbose=False)
+        self.assertEqual(status, "installed")
+        shim_text = open(cli_gh_rate.shim_path(), encoding="utf-8").read()
+        self.assertIn(os.path.join(realdir, "gh"), shim_text)      # points at REAL gh
+        self.assertNotIn(os.path.join(appdir, "gh"), shim_text)    # NEVER the app shim
+
     def test_real_gh_path_skips_our_shim(self):
         # A shim at the shim path (our sentinel) plus a real gh elsewhere on PATH.
         cli_gh_rate._write_wrapper_file(cli_gh_rate.shim_path(),
@@ -688,6 +722,35 @@ class TestChainTermination(unittest.TestCase):
         elapsed = time.monotonic() - start
         self.assertLess(elapsed, 1.5, "depth guard must abort fast, not spin")
         self.assertNotEqual(r.returncode, 0, "a looping chain must exit non-zero")
+        self.assertIn("depth", r.stderr.lower())
+
+    def test_depth_guard_fires_across_a_foreign_app_shim(self):
+        # #1051 review-2 (finding #4): the REAL incident loop is
+        # our-shim -> FOREIGN app shim -> (app shim resolves first non-self gh
+        # on PATH = our shim) -> our-shim ... The depth guard's EXPORTED env var
+        # must survive the app shim's own exec so it accumulates and aborts at
+        # depth 3 (exit 89), never hanging. (test_loop_baked_in_state_is_self_
+        # healed removes the loop before it runs, so this is the only test that
+        # exercises the guard firing THROUGH a foreign shim.)
+        appdir = os.path.join(self.tmp, "appdir")
+        os.makedirs(appdir)
+        self._make_app_shim(os.path.join(appdir, "gh"))
+        # our shim at ~/.local/bin/gh, baked REAL_GH = the app shim.
+        cli_gh_rate._write_wrapper_file(cli_gh_rate.shim_path(),
+                                        os.path.join(appdir, "gh"),
+                                        "/usr/bin/python3", "/repo/cli_gh_rate.py")
+        import time
+        start = time.monotonic()
+        try:
+            # PATH = our shim's dir only, so the app shim's "first non-self gh"
+            # scan finds our shim -> the mutual loop.
+            r = self._run_gh(cli_gh_rate.shim_path(), env={"PATH": self.bin},
+                             timeout=6)
+        except Exception as e:  # noqa: BLE001 — TimeoutExpired == it hung (guard failed)
+            self.fail("depth guard did NOT fire across the app shim — it hung: %r"
+                      % e)
+        self.assertLess(time.monotonic() - start, 2.0)
+        self.assertNotEqual(r.returncode, 0)
         self.assertIn("depth", r.stderr.lower())
 
     def test_foreign_layout_chain_terminates_after_install(self):

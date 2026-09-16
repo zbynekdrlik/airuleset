@@ -89,6 +89,21 @@ class TestGhChainPostCheck(unittest.TestCase):
         r = _run_fragment(home, os.environ.get("PATH", ""))
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_gh_less_target_is_not_failed(self):
+        # review-2 (finding #2): a target that legitimately has NO gh (install
+        # returned "skip: no gh on this box") must PASS — nothing to verify — not
+        # be false-failed. gh resolves nowhere -> the probe is skipped (exit 0).
+        import shutil as _sh
+        home = tempfile.mkdtemp()                       # no ~/.local/bin/gh
+        minbin = tempfile.mkdtemp()                     # bash+timeout, but NO gh
+        for tool in ("bash", "timeout"):
+            src = _sh.which(tool)
+            if src:
+                os.symlink(src, os.path.join(minbin, tool))
+        r = _run_fragment(home, minbin)
+        self.assertEqual(r.returncode, 0,
+                         "a gh-less target must not be failed by the post-check")
+
     def test_deploy_loop_appends_the_postcheck_to_the_remote_command(self):
         # source-lock: the deploy loop's per-target remote command must run the
         # post-check after `airuleset.py install`, so an ssh rc!=0 (the existing
