@@ -36,12 +36,12 @@ def _run(msg, home, sid=None):
     return r
 
 
-def _seed(home, overdue, ts=None):
+def _seed(home, overdue, ts=None, key="status"):
     d = Path(home) / ".claude" / "verify-on-copy"
     d.mkdir(parents=True, exist_ok=True)
     payload = {"ts": ts if ts is not None else time.time(),
                "overdue": overdue, "repo": "zbynekdrlik/odoo-erp"}
-    (d / "status.json").write_text(json.dumps(payload))
+    (d / (key + ".json")).write_text(json.dumps(payload))
 
 
 @unittest.skipUnless(shutil.which("jq"), "jq required by the hook")
@@ -92,6 +92,17 @@ class VerifyOnCopyStopGate(unittest.TestCase):
         _seed(self.home, [{"number": 6300, "title": "x", "age_h": 30}])
         r = _run("❓ NEEDS YOU: otázka", self.home)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_multi_repo_aggregate_no_clobber(self):
+        """#1053 review 🟡: repo A overdue + repo B empty (distinct per-cwd
+        files). The gate must still block on repo A's #6400 — the single-global-
+        file clobber must NOT let repo B's empty refresh defeat it."""
+        _seed(self.home, [{"number": 6400, "title": "A", "age_h": 30}],
+              key="repoA")
+        _seed(self.home, [], key="repoB")
+        r = _run("✅ DONE: hotovo", self.home)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("6400", r.stderr)
 
 
 if __name__ == "__main__":

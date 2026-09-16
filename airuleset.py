@@ -3702,9 +3702,13 @@ def _write_verify_on_copy_status(rows, slug, root, now=None):
                 events = []
         items.append((n_num, row.get("title") or "", events))
     try:
+        import statusbar
+        key = statusbar.cwd_key(root or (slug or ""))
         overdue = _voc.compute_overdue(items, now if now is not None
                                        else __import__("time").time())
-        _voc.persist_status(overdue, now=now, repo=slug or None)
+        # #1053 review 🟡: per-repo key so a multi-repo reduced-authority account
+        # never clobbers one repo's overdue set with another's empty refresh.
+        _voc.persist_status(overdue, now=now, repo=slug or None, key=key)
     except Exception as e:  # noqa: BLE001
         sys.stderr.write("verify-on-copy: status write skipped (%s)\n" % e)
 

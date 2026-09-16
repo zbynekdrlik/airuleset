@@ -96,41 +96,51 @@ fi
 # writer), the SAME class as the #1036 task-hygiene gate. Dry-runnable per #963
 # (reads only $MSG + the status file, no side effects).
 if echo "$MSG" | grep -qE '✅ DONE|⏳ WORKING'; then
-    VOC_STATUS="${HOME}/.claude/verify-on-copy/status.json"
+    VOC_DIR="${HOME}/.claude/verify-on-copy"
     VOC_RETRY="/tmp/airuleset-verify-on-copy-block-${SESSION_ID}"
     VOC_RETRIES=$(cat "$VOC_RETRY" 2>/dev/null || echo 0)
     VOC_MAX=3
     # python ALWAYS exits 0 (prints the reason lines when it should block, empty
     # otherwise) so `set -euo pipefail` never aborts on a non-zero substitution
-    # (#979); `|| true` is a second belt.
-    VOC_REASON=$(python3 - "$VOC_STATUS" <<'PY' || true
+    # (#979); `|| true` is a second belt. Aggregates the FRESH overdue set across
+    # EVERY per-cwd status file (#1053 review 🟡 — a single global file was
+    # clobbered across repos on a multi-repo account, silently defeating the
+    # gate); a stale/absent dir fails OPEN.
+    VOC_REASON=$(python3 - "$VOC_DIR" <<'PY' || true
+import glob
 import json
+import os
 import sys
 import time
 
 STALE = 3 * 3600
-try:
-    with open(sys.argv[1], encoding="utf-8") as h:
-        st = json.load(h)
-except (OSError, ValueError):
-    sys.exit(0)                     # absent/corrupt → fail open
-if not isinstance(st, dict):
-    sys.exit(0)
-ts = st.get("ts")
 now = time.time()
-if not isinstance(ts, (int, float)) or (now - ts) > STALE:
-    sys.exit(0)                     # dead writer → fail open
-overdue = st.get("overdue") or []
-if not isinstance(overdue, list) or not overdue:
+seen = {}
+try:
+    files = sorted(glob.glob(os.path.join(sys.argv[1], "*.json")))
+except OSError:
+    sys.exit(0)                     # unreadable dir → fail open
+for path in files:
+    try:
+        with open(path, encoding="utf-8") as h:
+            st = json.load(h)
+    except (OSError, ValueError):
+        continue
+    if not isinstance(st, dict):
+        continue
+    ts = st.get("ts")
+    if not isinstance(ts, (int, float)) or (now - ts) > STALE:
+        continue                    # dead writer / stale repo → skip
+    for r in (st.get("overdue") or []):
+        if isinstance(r, dict) and r.get("number") is not None:
+            seen[r["number"]] = r
+if not seen:
     sys.exit(0)
-items = []
-for r in overdue[:8]:
-    if isinstance(r, dict):
-        items.append("#%s %s (%sh)" % (r.get("number"),
-                     (r.get("title") or "")[:40], r.get("age_h")))
-if items:
-    print("verify-on-copy > 24 h bez Verified-on-copy: (%d): %s"
-          % (len(overdue), ", ".join(items)))
+overdue = [seen[n] for n in sorted(seen)]
+items = ["#%s %s (%sh)" % (r.get("number"), (r.get("title") or "")[:40],
+                           r.get("age_h")) for r in overdue[:8]]
+print("verify-on-copy > 24 h bez Verified-on-copy: (%d): %s"
+      % (len(overdue), ", ".join(items)))
 sys.exit(0)
 PY
 )

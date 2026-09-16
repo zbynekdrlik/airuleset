@@ -128,24 +128,57 @@ class PersistRead(unittest.TestCase):
 
     def test_persist_and_read(self):
         overdue = [{"number": 7, "title": "t7", "age_h": 30}]
-        voc.persist_status(overdue, home=self.home, now=123.0, repo="o/r")
-        st = voc.read_status(home=self.home)
+        voc.persist_status(overdue, home=self.home, now=123.0, repo="o/r",
+                           key="k1")
+        st = voc.read_status(home=self.home, key="k1")
         self.assertEqual(st["overdue"], overdue)
         self.assertEqual(st["ts"], 123.0)
         self.assertEqual(st["repo"], "o/r")
 
     def test_read_absent_is_none(self):
-        self.assertIsNone(voc.read_status(home=self.home))
+        self.assertIsNone(voc.read_status(home=self.home, key="nope"))
 
     def test_read_corrupt_is_none(self):
-        p = voc.status_path(self.home)
+        p = voc.status_path(self.home, key="k1")
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("{not json")
-        self.assertIsNone(voc.read_status(home=self.home))
+        self.assertIsNone(voc.read_status(home=self.home, key="k1"))
 
     def test_status_path_shape(self):
-        p = voc.status_path(self.home)
-        self.assertTrue(str(p).endswith(".claude/verify-on-copy/status.json"))
+        p = voc.status_path(self.home, key="abc123")
+        self.assertTrue(str(p).endswith(".claude/verify-on-copy/abc123.json"))
+
+    def test_per_cwd_isolation_no_clobber(self):
+        """#1053 review 🟡: two repos write distinct files; a repo with an EMPTY
+        overdue must NOT clobber the other repo's overdue set — the exact
+        multi-repo clobber the single global file caused."""
+        now = time.time()
+        voc.persist_status([{"number": 5, "title": "A", "age_h": 30}],
+                           home=self.home, now=now, repo="o/A", key="ka")
+        voc.persist_status([], home=self.home, now=now, repo="o/B", key="kb")
+        agg = voc.overdue_across(home=self.home, now=now)
+        self.assertEqual([r["number"] for r in agg], [5],
+                         "repo B's empty refresh must not hide repo A's #5")
+
+    def test_overdue_across_skips_stale(self):
+        now = time.time()
+        voc.persist_status([{"number": 9, "title": "old", "age_h": 40}],
+                           home=self.home, now=now - 99999, repo="o/C",
+                           key="kc")
+        self.assertEqual(voc.overdue_across(home=self.home, now=now), [],
+                         "a stale file must be ignored (fail open)")
+
+    def test_overdue_across_dedups(self):
+        now = time.time()
+        voc.persist_status([{"number": 5, "title": "A", "age_h": 30}],
+                           home=self.home, now=now, key="ka")
+        voc.persist_status([{"number": 5, "title": "A", "age_h": 31}],
+                           home=self.home, now=now, key="kb")
+        agg = voc.overdue_across(home=self.home, now=now)
+        self.assertEqual([r["number"] for r in agg], [5])
+
+    def test_overdue_across_absent_dir(self):
+        self.assertEqual(voc.overdue_across(home=self.home, now=time.time()), [])
 
 
 class WriterWiring(unittest.TestCase):
@@ -192,8 +225,8 @@ class WriterWiring(unittest.TestCase):
         with m.patch.object(airuleset, "_gh_out", side_effect=gh):
             airuleset._write_verify_on_copy_status(
                 rows, "zbynekdrlik/odoo-erp", "/tmp/x", now=now)
-        st = voc.read_status(home=self.home)
-        self.assertEqual([r["number"] for r in st["overdue"]], [10])
+        agg = voc.overdue_across(home=self.home, now=now)
+        self.assertEqual([r["number"] for r in agg], [10])
 
     def test_verified_not_persisted_and_status_is_fresh(self):
         import json as _json
@@ -211,23 +244,26 @@ class WriterWiring(unittest.TestCase):
                                                "Verified-on-copy: ok")])
             return "[]"
 
+        import statusbar
         with m.patch.object(airuleset, "_gh_out", side_effect=gh):
             airuleset._write_verify_on_copy_status(
                 rows, "zbynekdrlik/odoo-erp", "/tmp/x", now=now)
-        st = voc.read_status(home=self.home)
+        st = voc.read_status(home=self.home, key=statusbar.cwd_key("/tmp/x"))
         self.assertEqual(st["overdue"], [])  # verified → not overdue
         self.assertEqual(st["ts"], now)      # written fresh
+        self.assertEqual(voc.overdue_across(home=self.home, now=now), [])
 
     def test_no_voc_rows_writes_empty_fresh(self):
         from unittest import mock as m
         import airuleset
 
+        import statusbar
         now = time.time()
         rows = {13: self._row(13, ["stream:montalu", "ready-for-review"])}
         with m.patch.object(airuleset, "_gh_out", return_value="[]"):
             airuleset._write_verify_on_copy_status(
                 rows, "zbynekdrlik/odoo-erp", "/tmp/x", now=now)
-        st = voc.read_status(home=self.home)
+        st = voc.read_status(home=self.home, key=statusbar.cwd_key("/tmp/x"))
         self.assertEqual(st["overdue"], [])
         self.assertEqual(st["ts"], now)
 

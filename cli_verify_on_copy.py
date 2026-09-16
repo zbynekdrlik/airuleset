@@ -38,9 +38,20 @@ _VERIFIED_MARKER_RE = re.compile(
     r"(?mi)^[ \t*#-]*\**[ \t]*Verified-on-copy\**[ \t]*:")
 
 
-def status_path(home=None):
+def status_dir(home=None):
     home = home or os.path.expanduser("~")
-    return Path(home) / ".claude" / _STATUS_DIRNAME / _STATUS_BASENAME
+    return Path(home) / ".claude" / _STATUS_DIRNAME
+
+
+def status_path(home=None, key=None):
+    """The per-cwd status file. `key` is a `statusbar.cwd_key(cwd)` hash so a
+    multi-repo reduced-authority account (repo A + repo B) never CLOBBERS one
+    repo's overdue set with another's — the SAME per-cwd-key isolation the
+    `tickets-status/<cwd-key>.json` cache uses (#1053 review 🟡: a single global
+    file let repo B's empty refresh silently defeat the gate on repo A). A None
+    key falls back to the legacy single-file name (used only by unit tests)."""
+    base = _STATUS_BASENAME if not key else (str(key) + ".json")
+    return status_dir(home) / base
 
 
 def has_verified_marker(body):
@@ -134,11 +145,12 @@ def compute_overdue(items, now):
     return out
 
 
-def persist_status(overdue, home=None, now=None, repo=None):
-    """Write `{ts, overdue, repo}` for the Stop hook (never raises — a footer
-    refresh must never break on this; logs to stderr on failure)."""
+def persist_status(overdue, home=None, now=None, repo=None, key=None):
+    """Write `{ts, overdue, repo}` to the per-cwd (`key`) status file for the
+    Stop hook (never raises — a footer refresh must never break on this; logs to
+    stderr on failure)."""
     now = now if now is not None else time.time()
-    path = status_path(home)
+    path = status_path(home, key)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {"ts": now, "overdue": overdue, "repo": repo}
@@ -150,12 +162,42 @@ def persist_status(overdue, home=None, now=None, repo=None):
         sys.stderr.write("verify-on-copy: could not persist status (%s)\n" % e)
 
 
-def read_status(home=None):
-    """The persisted status dict, or None (absent/corrupt → the hook fails
-    open)."""
+def read_status(home=None, key=None):
+    """The persisted status dict for one `key`, or None (absent/corrupt → the
+    hook fails open)."""
     try:
-        with open(status_path(home), encoding="utf-8") as h:
+        with open(status_path(home, key), encoding="utf-8") as h:
             st = json.load(h)
     except (OSError, ValueError):
         return None
     return st if isinstance(st, dict) else None
+
+
+def overdue_across(home=None, now=None, stale_seconds=None):
+    """Aggregate the FRESH overdue set across EVERY per-cwd status file (the
+    Stop hook's read). Globs `~/.claude/verify-on-copy/*.json`, includes a
+    file's overdue members ONLY when its `ts` is within `stale_seconds` (a dead
+    writer / a repo the account stopped working ages out and is ignored). Dedups
+    by ticket number. Returns a list of `{number, title, age_h}`; never raises."""
+    now = now if now is not None else time.time()
+    stale_seconds = STALE_SECONDS if stale_seconds is None else stale_seconds
+    seen = {}
+    try:
+        files = sorted(status_dir(home).glob("*.json"))
+    except OSError:
+        return []
+    for path in files:
+        try:
+            with open(path, encoding="utf-8") as h:
+                st = json.load(h)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(st, dict):
+            continue
+        ts = st.get("ts")
+        if not isinstance(ts, (int, float)) or (now - ts) > stale_seconds:
+            continue
+        for rec in (st.get("overdue") or []):
+            if isinstance(rec, dict) and rec.get("number") is not None:
+                seen[rec["number"]] = rec
+    return [seen[n] for n in sorted(seen)]
