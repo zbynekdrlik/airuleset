@@ -27,10 +27,20 @@ Confidence / action:
            work.md` keeps its MIVA-specific part), OR a fuzzy title/description
            match against an airuleset module/skill heading. action = LIST (human
            review). NEVER auto-rewritten.
-  keep   → an owner-PREFERENCE memory (`feedback_*` filename or `type: feedback`
-           frontmatter) OR a fleet-installed file (a symlink / a file under the
-           airuleset repo dir). Never touched. action = KEEP (symlinks/repo files
-           are skipped silently before classification and produce no row).
+  keep   → an owner-PREFERENCE / user-context memory (a `feedback_*`/`feedback-`
+           FILENAME, or a `type: user` frontmatter node) OR a fleet-installed
+           file (a symlink / a file under the airuleset repo dir). Never touched.
+           action = KEEP (symlinks/repo files are skipped silently before
+           classification and produce no row).
+
+NOTE on the never-touch set (#1028 fix-forward, comment 5690513755): a
+`type: feedback` frontmatter tag is NOT a never-touch signal. The auto-memory
+convention files EVERY owner correction as `type: feedback` (on the live fleet
+26 of 30 miva1 memory files carry it, including the graduated-rule restatements
+this module exists to retire), so blanket-exempting it made the audit vacuous on
+exactly those files. A `type: feedback` memory is therefore classified like any
+other file; only `type: user` and the `feedback_*` filename convention stay
+never-touch.
 """
 
 import datetime
@@ -226,10 +236,19 @@ def first_heading(body):
 
 def is_owner_preference(path, fm):
     """An owner/user-context memory (NEVER-touch): a ``feedback_*`` /
-    ``feedback-*`` filename, or a ``type: feedback`` / ``type: user`` frontmatter
-    node. Both record the owner's PREFERENCE or the user's own environment, not a
-    copy of a graduated fleet RULE (a rule copy is a plain / ``type: project``
-    memory), so neither is ever rewritten."""
+    ``feedback-*`` FILENAME (the controller's own owner-preference naming
+    convention), or a ``type: user`` frontmatter node (the user's own
+    identity/environment). Neither is ever rewritten.
+
+    #1028 fix-forward (comment 5690513755): ``type: feedback`` is DELIBERATELY
+    NOT in this set. The premise it once relied on -- "a rule copy is a plain /
+    ``type: project`` memory" -- is false on the live fleet: the auto-memory
+    writer stamps ``type: feedback`` on EVERY owner correction, so a graduated-
+    rule restatement is overwhelmingly ``type: feedback`` too (26/30 miva1 memory
+    files). Blanket-exempting it made the audit vacuous on precisely the files it
+    exists to retire, so a ``type: feedback`` memory is now classified like any
+    other file (a matching restatement is archived + rewritten to a pointer,
+    which is reversible)."""
     base = os.path.basename(path).lower()
     if base.startswith("feedback_") or base.startswith("feedback-"):
         return True

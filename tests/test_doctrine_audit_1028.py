@@ -153,8 +153,12 @@ class TestMatcher(unittest.TestCase):
             self.assertEqual(m.action, da.ACTION_LIST)
 
     def test_owner_preference_feedback_is_kept(self):
-        # A feedback memory recording an OWNER preference is NEVER touched, even
-        # when it anchor-matches the graduated rule.
+        # An owner-preference memory is NEVER touched even when it anchor-matches
+        # the graduated rule. #1028 fix-forward (comment 5690513755): this
+        # fixture uses the `feedback_*` FILENAME convention, which is now the
+        # exemption source -- the `type: feedback` frontmatter it also carries is
+        # no longer a never-touch signal on its own (see
+        # TestFeedbackTypeIsClassified1028).
         tmp, home = _make_fake_home()
         with tmp:
             matches = da.scan_home(str(home))
