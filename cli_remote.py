@@ -939,6 +939,21 @@ def _print_deploy_leg_diagnostics(remote, identity, hostkey_opts,
               file=sys.stderr)
 
 
+def _gh_chain_postcheck():
+    """#1051: a remote shell fragment run AFTER `airuleset.py install` on every
+    target — bound `gh --version` through the freshly-installed chain to 5 s and
+    FAIL the target (distinct rc 87) if it does not return cleanly. `timeout`
+    guarantees it NEVER hangs, so the deploy loop's existing `rc != 0 ->
+    failed.append` accounting catches a hanging (exec-looping) gh and the push
+    exits non-zero — a future push can never SHIP a hanging gh (the #1040/#1051
+    incident, where every `gh` on 12 stream boxes hung until timeout)."""
+    return (
+        '{ timeout 5 gh --version >/dev/null 2>&1 || '
+        '{ echo "GH-CHAIN POSTCHECK FAILED: gh --version did not return through '
+        'the installed chain in 5s (possible shim loop — #1051)" >&2; exit 87; }; }'
+    )
+
+
 def _deploy_to_all_remotes(failed, auth_failed):
     """Deploy this push to every managed remote (step 3 + 3b of cmd_push).
 
@@ -1005,7 +1020,9 @@ def _deploy_to_all_remotes(failed, auth_failed):
             # logged in (live: simap1@subdev, push v0.1.134). setup-git is idempotent.
             remote_cmd = (
                 f"cd {remote['repo_path']} && (gh auth setup-git >/dev/null 2>&1 || true) "
-                f"&& git pull --ff-only && {owner_vps_env}python3 airuleset.py install"
+                f"&& git pull --ff-only && {owner_vps_env}python3 airuleset.py install "
+                # #1051: prove the freshly-installed gh chain does not hang.
+                f"&& {_gh_chain_postcheck()}"
             )
             # #347 adversarial-review CRITICAL finding: `audited_hosts` must
             # NOT be marked here (before the ssh call even runs) — a first

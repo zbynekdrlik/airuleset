@@ -121,6 +121,39 @@ def _is_our_wrapper(path):
         return False
 
 
+def _classify_local_gh(path):
+    """#1051: classify whatever sits at ``~/.local/bin/gh`` BEFORE the installer
+    touches it, so a FOREIGN wrapper SCRIPT is never copy-and-wrapped into an
+    exec-loop. Returns one of:
+
+      * ``"absent"``  — nothing at ``path``;
+      * ``"ours"``    — our managed rate-guard shim (WRAPPER_SENTINEL);
+      * ``"foreign"`` — a ``#!``-script that is NOT ours (the odoo-erp issue-888
+        app-token shim ``gh-app-gh-shim.sh``, or any other text wrapper). Both
+        it and our shim resolve "the first non-self gh on PATH", so wrapping our
+        shim over it and copying it to ``gh-upstream`` makes each resolve to the
+        other → the #1051 infinite exec-loop. Such a script is CHAINED by its
+        owner (odoo-erp issue 3281), never copy-and-wrapped by us;
+      * ``"binary"``  — a real gh executable (ELF / not a ``#!``-script): safe to
+        wrap in place.
+
+    Fails toward NOT-wrapping-a-script (a hang is worse than no throttle): our
+    sentinel is checked first, then a ``#!`` prefix ⇒ foreign, else binary."""
+    if not os.path.exists(path):
+        return "absent"
+    if _is_our_wrapper(path):
+        return "ours"
+    try:
+        with open(path, "rb") as fh:
+            head = fh.read(2)
+    except OSError:
+        # Unreadable: treat as foreign so we never copy-and-wrap it (fail-safe).
+        return "foreign"
+    if head[:2] == b"#!":
+        return "foreign"
+    return "binary"
+
+
 # --------------------------------------------------------------------------- #
 # Real-gh resolution — the shim shadows `gh` on PATH, so the module's refresh
 # must resolve the REAL gh, never re-entering the shim.
@@ -620,6 +653,16 @@ def wrapper_script(real_gh, python_exe, module_path):
 # MANAGED by airuleset (cli_gh_rate.ensure_gh_rate_wrapper) — do not edit.
 # Makes background pollers gh-budget-aware; a human/interactive call and every
 # write action pass straight through with zero delay. Fail-open always.
+# #1051 depth guard: count our own exec hops and ABORT (never loop) if a
+# mis-chain (e.g. a foreign shim resolving back to us) bounces through this
+# shim more than twice. Runs FIRST, on every hop, and is exported so it
+# survives each exec — a real chain reaches the true gh in 1 hop.
+AIRULESET_GH_SHIM_DEPTH=$(( ${{AIRULESET_GH_SHIM_DEPTH:-0}} + 1 ))
+export AIRULESET_GH_SHIM_DEPTH
+if [ "${{AIRULESET_GH_SHIM_DEPTH}}" -gt 2 ]; then
+  echo "gh: airuleset rate-guard shim aborting — exec depth ${{AIRULESET_GH_SHIM_DEPTH}} > 2 (shim loop detected; check the ~/.local/bin/gh chain — odoo-erp issue 3281)" >&2
+  exit 89
+fi
 REAL_GH={real_gh}
 if [ ! -x "$REAL_GH" ]; then
   # Baked path gone — prefer the relocated upstream, else re-resolve gh on PATH
@@ -699,9 +742,14 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
     Cases (self-healing across gh reinstalls):
       * shim already ours + a usable upstream → refresh the shim text only if
         changed (no relocation, no 30 MB copy);
-      * shim is the REAL gh (this fleet: gh lives at ~/.local/bin/gh) → relocate
-        it to ``upstream`` (copy-then-atomic-replace, so gh is never broken mid-
-        way) and install the shim in its place;
+      * a FOREIGN wrapper SCRIPT at ~/.local/bin/gh (the odoo-erp issue-888
+        app-token shim, or any #!-script that is not ours) → SKIP loudly and
+        leave it in place (#1051): copy-and-wrapping it makes our shim and the
+        app shim each resolve to the other → an infinite exec-loop. The box
+        stays on its own gh chain (working, just unthrottled — fail-open);
+      * shim is the REAL gh BINARY (this fleet: gh lives at ~/.local/bin/gh) →
+        relocate it to ``upstream`` (copy-then-atomic-replace, so gh is never
+        broken mid-way) and install the shim in its place;
       * no shim yet but a real gh resolves elsewhere (e.g. /usr/bin/gh) → install
         the shim pointing at it (no relocation);
       * no gh anywhere → no-op.
@@ -737,9 +785,23 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
             _say("shim refreshed (-> %s)" % upstream)
             return "refreshed"
 
-        # Case 2: shim is the REAL gh (wrap it in place). Copy FIRST (gh stays
-        # intact if anything fails), verify, then atomically swap in the shim.
+        # Case 2: something that is NOT our shim sits at ~/.local/bin/gh.
+        # #1051: classify it FIRST. A FOREIGN wrapper SCRIPT (the issue-888
+        # app-token shim, or any #!-script) must NEVER be copy-and-wrapped —
+        # that is the exec-loop. SKIP it loudly and leave it in place; the box
+        # stays on its own gh chain (working, just unthrottled — fail-open: no
+        # throttle there is acceptable, a hang is not). Only a real gh BINARY
+        # (ELF) is wrapped in place.
         if shim_exists and not shim_is_ours:
+            kind = _classify_local_gh(shim)
+            if kind == "foreign":
+                # LOUD line so a push operator sees why the box is unthrottled.
+                if verbose:
+                    print("    gh-rate: shim install skipped — foreign wrapper "
+                          "at %s (chain it via odoo-erp issue 3281)" % shim)
+                return "skip: foreign wrapper at ~/.local/bin/gh"
+            # kind == "binary": wrap the real gh in place. Copy FIRST (gh stays
+            # intact if anything fails), verify, then atomically swap in the shim.
             shutil.copy2(shim, upstream)
             os.chmod(upstream, 0o755)
             if not (os.path.isfile(upstream) and os.access(upstream, os.X_OK)):
