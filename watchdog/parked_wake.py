@@ -45,7 +45,8 @@ WAKE_PARKED_NUDGE = "wake-parked"
 
 
 def deliver_wake(pid, tpath, *, run, sleep_fn=None, logs=None,
-                 keys_fn=None, send_verified_fn=None, dry_run=False):
+                 keys_fn=None, send_verified_fn=None,
+                 capture_fn=None, at_idle_fn=None, dry_run=False):
     """Wake a parked pane: send ONE `Escape` (cancel the auto-continue wait /
     the "automatic-continue setting no longer ends this wait" state) then submit
     `continue`, transcript-VERIFIED. Returns True on a verified submit, False
@@ -57,21 +58,40 @@ def deliver_wake(pid, tpath, *, run, sleep_fn=None, logs=None,
     DRAFT (it draft-rescues and returns False — the safe fallback: cancel the
     wait, never clobber the user's own text), and only submits into a bare box.
 
-    Dependency-injected (`keys_fn`/`send_verified_fn`) for a tmux-free unit test;
-    the defaults are the real `watchdog.keys` / `watchdog.send_verified`. `dry_run`
-    sends NOTHING and returns True (so a dry sweep still logs the intended wake),
-    mirroring job 6's own `ok = True` dry-run shape."""
+    #1034 review-2 🟡-1 — the leading Escape must NOT fire on the JOB's stale
+    top-of-loop capture: a human draft (or a self-resumed turn) can race into the
+    composer in the ~100-300 ms since. So deliver_wake takes its OWN FRESH capture
+    right before the Escape and re-checks `at_idle` (a bare `❯`), the exact
+    fresh-recapture discipline `send_verified` uses before its own strip-Escape —
+    if the pane is no longer bare-idle, ABORT (return False, retry next sweep),
+    never Escape into a draft/running turn (#35/#233).
+
+    Dependency-injected (`keys_fn`/`send_verified_fn`/`capture_fn`/`at_idle_fn`)
+    for a tmux-free unit test; the defaults are the real `watchdog.keys` /
+    `watchdog.send_verified` / `watchdog.capture_pane` / `watchdog.pane_at_idle_prompt`.
+    `dry_run` sends NOTHING and returns True (so a dry sweep still logs the
+    intended wake), mirroring job 6's own `ok = True` dry-run shape."""
     if dry_run:
         return True
     import watchdog
     kf = keys_fn if keys_fn is not None else watchdog.keys
     svf = send_verified_fn if send_verified_fn is not None else watchdog.send_verified
+    cf = capture_fn if capture_fn is not None else (lambda: watchdog.capture_pane(pid, run))
+    idle_fn = at_idle_fn if at_idle_fn is not None else watchdog.pane_at_idle_prompt
+    # FRESH re-capture + bare-idle re-check IMMEDIATELY before the Escape (close
+    # the JOB-gate TOCTOU): a draft racing into the box, or a turn that started
+    # since the top-of-loop capture, means the pane is no longer a bare `❯` — do
+    # NOT Escape it. Retry next sweep.
+    if not idle_fn(cf()):
+        if isinstance(logs, list):
+            logs.append("wake-parked: %s abort — not bare-idle at Escape time" % pid)
+        return False
     # Cancel the parked auto-continue wait. kind="continue" is GATED but
     # nudge=WAKE_PARKED_NUDGE is RECOVERY (always-on), so it is never suppressed
     # by the #1023 staging switch. A SINGLE Escape only — a rapid double-Escape
-    # into a pane holding a draft permanently deletes it (#35); send_verified's
-    # own bare-check refuses to type over a draft, so no second Escape lands on
-    # one.
+    # into a pane holding a draft permanently deletes it (#35); the fresh
+    # re-check above proved the box bare, and send_verified's own bare-check is a
+    # second belt, so no Escape ever lands on a draft.
     kf(pid, "Escape", kind="continue", nudge=WAKE_PARKED_NUDGE, run=run, logs=logs)
     # Submit `continue`, transcript-verified (a swallowed continue must NOT be
     # booked as a wake — the #497 discipline job 6's resume path uses).
@@ -102,6 +122,14 @@ def parked_wake_job(now, state, panes, projects_dir, *,
     switched account as the baseline, so the wake never fires for that episode
     (it degrades to the status quo — no harm — matching the montalu1 ~11-min
     switch-lag window); the fast 60 s sweep makes that window small.
+
+    This is an ALWAYS-ON keystroke job (registry gate `lambda: True`, like Job 41
+    model_float_audit), so a `run_once`-driving test that supplies REAL tmux would
+    read live panes (the #1012 class). It is SAFE by construction: it only fires a
+    keystroke on a REAL parked banner + a REAL account change + a bare idle prompt
+    (triple-gated), and `dry_run` fires nothing — so a test must stub `run` empty
+    (as the characterization suite does) or deliberately construct a
+    parked+switched+idle pane (which then injects fakes) for it to ever act.
 
     Injected deps (production wiring in run_once passes the real primitives):
       account_email()                 -> str   current box oauthAccount.emailAddress ("" unreadable)
@@ -213,6 +241,11 @@ def parked_wake_job(now, state, panes, projects_dir, *,
                        "retry next sweep" % (pid, old, email))
 
     # Prune state for panes that no longer exist this sweep (bounded state).
+    # Keyed on `seen` (transcript-resolved sids), so a one-sweep transient
+    # `find_transcript`→None blip drops the baseline; if a switch coincides with
+    # that single blip the next sweep re-seeds the NEW email and the switch is
+    # missed — vanishingly unlikely (60 s sweeps vs an ~11-min switch lag) and it
+    # degrades to the status quo, so it is accepted rather than special-cased.
     for dead in [s for s in parked if s not in seen]:
         del parked[dead]
     # Persist without leaving an empty key behind.

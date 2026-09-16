@@ -358,18 +358,23 @@ def pane_session_limited(captured):
 #   "Continuing automatically when your limit resets"
 #   "Usage limit reached again after you continued. The automatic-continue
 #    setting no longer ends this wait."  (the owner's comment-2 hard state)
-# The distinctive signals of the PARKED auto-continue state — anchored on the
-# banner STRUCTURE, NOT a bare headline. A bare "usage limit reached" / bare
-# "continuing automatically" false-matches ordinary prose ("the usage limit
+# The distinctive signals of the PARKED-FOR-HOURS auto-continue state — anchored
+# on the banner STRUCTURE, NOT a bare headline. A bare "usage limit reached" /
+# bare "continuing automatically" false-matches ordinary prose ("the usage limit
 # reached 80% last week", "continuing automatically with the next step") — the
 # #1034 adversarial-review finding — so require the specific parked phrasings:
-#   • "continuing automatically at <time>"  (the auto-continue countdown)
-#   • "continuing automatically when your limit resets"
+#   • "continuing automatically at <time>"  (the auto-continue countdown to the
+#      ORIGINAL reset — the montalu1 parked-for-hours case this job exists for)
+#   • "continuing automatically when [your limit / it] resets"
 #   • "usage limit reached again"           (the "reached again after you
-#      continued" retry state) / "no longer ends this wait" (its companion).
-# These cover every real Claude Code 2.1.268 parked form (verified read-only
-# against the installed binary) while a running turn's own output / plain prose
-# does not match. Bottom-scoped EXACTLY like `pane_session_limited` (reusing
+#      continued" retry state) / "no longer ends this wait" (its companion, the
+#      hard state that cancels only on esc, not on typing).
+# DELIBERATELY EXCLUDED (verified against the real CC 2.1.268 binary strings, not
+# a false-negative): the transient "continuing shortly · esc to cancel" form
+# (auto-fire is IMMINENT — it will resume on whatever account is on disk within
+# seconds, so no early-wake is needed) and the stale "usage limit has reset ·
+# press enter to continue" form (a RESET state job 6 / the existing continue
+# nudge own). Bottom-scoped EXACTLY like `pane_session_limited` (reusing
 # `_above_input_box`, no new pane parser) so a stale banner echo scrolled high
 # above fresh work never counts — the freshest-thing-on-screen discipline
 # (gk 2026-07-24).

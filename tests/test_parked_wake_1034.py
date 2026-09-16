@@ -33,7 +33,12 @@ from watchdog.parked_wake import (  # noqa: E402
 
 # --- fixtures -------------------------------------------------------------- #
 
-# Real Claude Code 2.1.268 banner forms (grepped live from the installed CLI).
+# The parked-banner TEXT is the real Claude Code 2.1.268 wording (grepped live
+# from the installed CLI); the input-box glyph here is an ASCII `> ` STAND-IN,
+# NOT the real bare `❯` — these fixtures drive the detector (which reads the
+# banner text) and the JOB (which injects a fake `at_idle`), never the real
+# `pane_at_idle_prompt`. The integration test below builds a real bare `❯` box so
+# the REAL `pane_at_idle_prompt` is exercised end-to-end.
 BANNER_AUTOCONTINUE = (
     "* Working on it...\n"
     "------------------------------------------\n"
@@ -249,7 +254,8 @@ class TestDeliverWake(TestCase):
             return True
 
         ok = deliver_wake("%1", "/t/repo.jsonl", run=None, sleep_fn=None, logs=[],
-                          keys_fn=keys_fn, send_verified_fn=sv_fn)
+                          keys_fn=keys_fn, send_verified_fn=sv_fn,
+                          capture_fn=lambda: "❯", at_idle_fn=lambda cap: True)
         self.assertTrue(ok)
         # Escape FIRST (cancel the auto-continue wait), then the continue submit
         self.assertEqual(calls[0][0], "keys")
@@ -259,11 +265,24 @@ class TestDeliverWake(TestCase):
         self.assertEqual(calls[1][2], watchdog.NUDGE_TEXT)  # "continue"
         self.assertEqual(calls[1][3], WAKE_PARKED_NUDGE)
 
+    def test_aborts_escape_when_no_longer_bare_idle(self):
+        # #1034 review-2 🟡-1: a draft/turn that raced into the box since the
+        # job's top-of-loop capture → the fresh re-check aborts BEFORE the Escape.
+        calls = []
+        ok = deliver_wake("%1", "/t/repo.jsonl", run=None, logs=[],
+                          keys_fn=lambda *a, **k: calls.append("keys") or True,
+                          send_verified_fn=lambda *a, **k: calls.append("sv") or True,
+                          capture_fn=lambda: "❯ a half-typed draft",
+                          at_idle_fn=lambda cap: False)   # no longer bare-idle
+        self.assertFalse(ok)
+        self.assertEqual(calls, [])                       # NO Escape, NO continue
+
     def test_dry_run_sends_nothing_returns_true(self):
         calls = []
         ok = deliver_wake("%1", "/t/r.jsonl", run=None, logs=[],
                           keys_fn=lambda *a, **k: calls.append(a) or True,
                           send_verified_fn=lambda *a, **k: calls.append(a) or True,
+                          capture_fn=lambda: "❯", at_idle_fn=lambda cap: True,
                           dry_run=True)
         self.assertTrue(ok)
         self.assertEqual(calls, [])
