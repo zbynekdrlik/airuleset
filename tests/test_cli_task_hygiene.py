@@ -318,6 +318,61 @@ class TestCLI(unittest.TestCase):
         self.assertIn("ok", buf.getvalue().lower())
 
 
+class TestQualsTaskHygieneFlag(unittest.TestCase):
+    """#1036 — slice-quals/core-quals --task-hygiene prints the persisted A count
+    (never a live Odoo call), short-circuiting BEFORE the authority check."""
+
+    def setUp(self):
+        self._old_home = os.environ.get("HOME")
+        d = tempfile.mkdtemp(prefix="i1036-quals-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, True))
+        os.environ["HOME"] = d
+        self.addCleanup(self._restore_home)
+        self.home = d
+
+    def _restore_home(self):
+        if self._old_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = self._old_home
+
+    def _args(self):
+        class A:
+            pass
+        a = A()
+        for f in ("count", "list", "waiting", "ops_wait", "audit", "bounces",
+                  "dep_wait", "count_dispatchable"):
+            setattr(a, f, False)
+        a.extra = None
+        a.task_hygiene = True
+        return a
+
+    def _run(self, fn):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            fn(self._args())
+        return buf.getvalue().strip()
+
+    def test_slice_quals_prints_a_count(self):
+        th.persist_status({"A": [{"task_id": 1, "ts": 1.0},
+                                 {"task_id": 2, "ts": 2.0}], "B": [], "C": []},
+                          home=self.home, now=1000.0)
+        import cli_quals_cmd
+        self.assertEqual(self._run(cli_quals_cmd.cmd_slice_quals), "2")
+
+    def test_core_quals_prints_a_count(self):
+        th.persist_status({"A": [{"task_id": 9, "ts": 1.0}], "B": [], "C": []},
+                          home=self.home, now=1000.0)
+        import cli_quals_cmd
+        self.assertEqual(self._run(cli_quals_cmd.cmd_core_quals), "1")
+
+    def test_no_status_prints_zero(self):
+        import cli_quals_cmd
+        self.assertEqual(self._run(cli_quals_cmd.cmd_slice_quals), "0")
+
+
 class TestRegistration(unittest.TestCase):
     def test_subcommand_registered(self):
         import airuleset
