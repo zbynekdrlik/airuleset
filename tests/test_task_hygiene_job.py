@@ -190,10 +190,17 @@ class NudgeKindRegistered(unittest.TestCase):
         self.assertIn("task-hygiene", wd.MACHINE_NUDGE_KINDS)
 
     def test_off_by_default(self):
+        import os
         import tempfile
+        import unittest.mock as m
         import watchdog as wd
-        with tempfile.TemporaryDirectory() as home:
-            self.assertFalse(wd.nudges_enabled("task-hygiene", home=home))
+        # the suite sets AIRULESET_TEST_IGNORE_DISABLE (conftest autouse) so a
+        # real box's staged state never fails the suite; pop it to exercise the
+        # real per-kind predicate (the #1023 _no_bypass pattern).
+        with m.patch.dict(os.environ):
+            os.environ.pop("AIRULESET_TEST_IGNORE_DISABLE", None)
+            with tempfile.TemporaryDirectory() as home:
+                self.assertFalse(wd.nudges_enabled("task-hygiene", home=home))
 
 
 if __name__ == "__main__":

@@ -7433,6 +7433,12 @@ def cmd_watchdog(args):
                     # existing owner-routed send() path (#710 unchanged).
                     health_probes=box_health_probes(_current_user()),
                     health_probe_fetch=_watchdog_health_probe_fetch,
+                    # #1036 — Job 49 Odoo task-hygiene overseer runs on EVERY
+                    # managed box; it self-gates internally on a present+valid
+                    # ~/.claude/odoo-task-tracking.json config + a ~2h cadence,
+                    # so an unconfigured box costs one config-file read per
+                    # sweep and never touches the network.
+                    task_hygiene_enabled=True,
                     # #1032 — resolve THIS box's paused flag ONCE per sweep (the
                     # I/O boundary, like health_probes above). On a PAUSED box
                     # (an owner-frozen stream, #851) run_once suppresses every
