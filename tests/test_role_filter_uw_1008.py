@@ -222,7 +222,7 @@ def _drive_slice(**flags):
     return _numbers(buf.getvalue())
 
 
-class TestSliceQualsUWKeepInfra(TestCase):
+class TestSliceQualsUKeptWRoleFiltered(TestCase):
     def test_slice_ops_wait_review_role(self):
         # #1045: W role-filtered — 200 = infra W (dropped), 201 = independent W.
         self.assertEqual(_drive_slice(ops_wait=True, role="review"), {201})
@@ -237,7 +237,7 @@ class TestSliceQualsUWKeepInfra(TestCase):
         self.assertEqual(_drive_slice(waiting=True, role="infra"), {202, 203})
 
 
-class TestFooterKeepsUWUnfiltered(TestCase):
+class TestFooterUUnfilteredWRoleFiltered(TestCase):
     """#1045: `_role_filter_footer` filters workable (I) AND ops-wait (W); only
     owner-court U stays role-independent. A regression that re-removes the W
     filter (the #1025 over-reach) fails here. U keeps the no-double-count

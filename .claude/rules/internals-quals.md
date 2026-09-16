@@ -31,20 +31,28 @@ can drift). Lessons for anyone touching this partition:
   `_ticket_is_stream_labeled`, `_released_stream_numbers`) expands through this ONE
   primitive — follow the pattern for any new branch/label/identity match.
 
-- **`--role` filtering (`_apply_role_filter`) narrows the WORKABLE `I` slice ONLY —
-  NEVER `waiting` (U) or `ops_wait` (W) (#1025, REVERSING #998/#1008).** The role
-  exclusion (review vs infra) is about who does the WORK — it partitions `I`. But `U`
-  (owner court: needs-answer/decision/owner-action) and `W` (ops-wait, third-party)
-  are PARKED states GLOBAL to the box, not role-owned work, so both roles show the
-  FULL set. #998/#1008 filtered all three, which hid an `infra`-labelled ticket's
-  needs-answer from the review (FLOW) window's U — the owner saw `U 0` with a live
-  `❓ ASKED` (odoo-erp#6883). The three sites — footer (`_role_filter_footer`,
-  fail-SAFE) + both CLI commands (fail-CLOSED on empty slug) — each apply the filter
-  to workable ONLY. role `None` returns rows unchanged (no slug resolution), byte-
-  identical off a role window. gk + gk-infra are TWO windows on the SAME box over the
-  SAME repo, so both footers show the SAME U/W (same N, not summed) — no double count;
-  `I` is the only role-partitioned bucket. Doctrine: statusline-vocabulary.md's `U`
-  bullet — "the role exclusion may narrow `I` only".
+- **`--role` filtering (`_apply_role_filter`) narrows the WORKABLE `I` slice AND the
+  third-party `W` (ops_wait) — NEVER `waiting` (U) (#1045, refining #1025).** The role
+  exclusion (review vs infra) scopes the WORK WINDOW: `I` and `W` both narrow to that
+  window (a `--role review` W = the FLOW window's ops-wait members — stream-dependent +
+  gk-owned WITHOUT `infra`; `--role infra` W = the infra ones). Only `U` (owner court:
+  needs-answer/decision/owner-action) is a PARKED state GLOBAL to the box, shown FULL
+  for both roles — an owner question on ANY ticket (infra included) is never role-
+  dropped. HISTORY: #998/#1008 filtered all three (I/U/W); #1025 correctly exempted U
+  (the exemption fixed an `infra` ticket's needs-answer hidden from the review (FLOW)
+  window's U — owner saw `U 0` with a live `❓ ASKED`, odoo-erp#6883) but ALSO stopped
+  filtering W, so the FLOW window's W showed infra members (`core-quals --role review
+  --ops-wait` == `--role infra --ops-wait`, owner 2026-09-16: "chcem vidieť čísla
+  týkajúce sa gk flow, nie mix kadečoho"); #1045 restored the W filter, keeping U
+  exempt. The three sites — footer (`_role_filter_footer`, fail-SAFE) + both CLI
+  commands (fail-CLOSED on empty slug) — each apply the filter to `I` AND `W`. ONE
+  derivation: the filtered `ops_wait` feeds the `--ops-wait` rows, the `# W-summary:
+  total=` line, and the statusline `entry["ops_wait"]` (#367). role `None` returns rows
+  unchanged (no slug resolution), byte-identical off a role window. gk + gk-infra are
+  TWO windows on the SAME box over the SAME repo, so both footers show the SAME U
+  (global), but DIFFERENT disjoint W and I (role-partitioned) — no double count.
+  Doctrine: statusline-vocabulary.md's `U` bullet — "the role slice narrows `I` and
+  `W`; only `U` is global".
 
 - **#1025 stop-gate: a `❓ ASKED`/`❓ NEEDS YOU` turn naming a same-repo `#N` must point
   at a ticket in THIS box's U.** `cli_quals.question_ticket_in_u(numbers, cwd)` decides
