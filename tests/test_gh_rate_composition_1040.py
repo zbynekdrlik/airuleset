@@ -110,6 +110,44 @@ class TestGhRateComposition(unittest.TestCase):
                          + "\n".join(logs))
         self.assertFalse(any("gh-rate" in ln for ln in logs))
 
+    def test_write_job_never_held_when_budget_low(self):
+        # #1040 review-2 MAJOR-2: a WRITE-performing job (gk_request_backstop,
+        # NOT gh_poll_hold-marked) must STILL run under a low budget — its
+        # owner-facing writes must never be delayed.
+        holder = {"elapsed": 0}
+        calls = []
+
+        def _gkr(*a, **k):
+            calls.append(1)
+            return ["gkreq::ran"]
+
+        with mock.patch.object(wd, "gk_request_backstop", _gkr):
+            logs = _run(holder, gkreq_fetch=lambda *a, **k: [],
+                        gh_rate_fetch=_low_graphql)
+
+        self.assertEqual(calls, [1],
+                         "a WRITE job must never be held on a low budget\n"
+                         + "\n".join(logs))
+
+    def test_no_gh_job_never_held_when_budget_low(self):
+        # #1040 review-2 MAJOR-1: a job that makes NO gh call (stuck_main_sweep,
+        # pure local git) is not gh_poll_hold-marked and must keep running under
+        # a low budget — holding it would stall detection for zero benefit.
+        holder = {"elapsed": 0}
+        calls = []
+
+        def _stuck(*a, **k):
+            calls.append(1)
+            return ["stuck::ran"]
+
+        with mock.patch.object(wd, "stuck_main_sweep", _stuck):
+            logs = _run(holder, repo_roots=lambda: [], git_fetch=lambda *a, **k: True,
+                        gh_rate_fetch=_low_graphql)
+
+        self.assertEqual(calls, [1],
+                         "a no-gh local job must never be held on a low budget\n"
+                         + "\n".join(logs))
+
     def test_fetch_error_fails_open(self):
         holder = {"elapsed": 0}
         net_calls = []

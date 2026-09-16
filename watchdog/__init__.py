@@ -4721,8 +4721,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                   owners_seen=owners_seen,            # #717
                                   account_owner=account_owner,        # #717
                                   persist=lambda: save_state(state_path, state)),
-         "stuck-main error", min_budget=_BUDGET_MIN_GH_BATCH_S,
-         gh_poll_hold=True)  # #1040 pure-read poller
+         "stuck-main error", min_budget=_BUDGET_MIN_GH_BATCH_S)
+    # (#1040 review-2 MAJOR-1: stuck_main_sweep is purely local git — no gh call
+    # at all — so it consumes NO GitHub budget and is NOT gh_poll_hold-marked;
+    # holding it on a rate shortage would only stall detection for no benefit.)
 
     # Job 22 — STALE EXEC-MARKER CLEANUP (#97): ALWAYS wired (no gating
     # param — same "always on" shape as jobs 9/15/17, since it depends on
@@ -4757,8 +4759,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
          lambda: sweep_orphaned_wip_refs(now, state, repo_roots=repo_roots,
                                          git_fetch=git_fetch, dry_run=dry_run,
                                          persist=lambda: save_state(state_path, state)),
-         "wip-ref-sweep error", min_budget=_BUDGET_MIN_GH_BATCH_S,
-         gh_poll_hold=True)  # #1040 pure-read poller
+         "wip-ref-sweep error", min_budget=_BUDGET_MIN_GH_BATCH_S)
+    # (#1040 review-2 MAJOR-1: wip_ref_sweep is pure local git ref cleanup — no
+    # gh call — so NOT gh_poll_hold-marked.)
 
     # Job 31 — GK SELF-SERVICE AUTO-BOUNCE (#516). Appended LAST (keeps the
     # kill-switch NOTICE pinned between job 11 and job 13). Only when a fetch is
@@ -4798,8 +4801,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              now, state, dry_run=dry_run,
              repo_root=conformance_root, is_target_check=conformance_is_target,
              persist=lambda: save_state(state_path, state)),
-         "conformance-check error", min_budget=_BUDGET_MIN_GH_BATCH_S,
-         gh_poll_hold=True)  # #1040 pure-read poller
+         "conformance-check error", min_budget=_BUDGET_MIN_GH_BATCH_S)
+    # (#1040 review-2 MAJOR-1: conformance_check reads only local git/systemd
+    # dimensions — no gh call — so NOT gh_poll_hold-marked.)
 
     # Job 35 (#543) — CENTRAL DEAD-BOX HEARTBEAT-MISSING DETECTOR,
     # controller-only (#971, was dev1). The per-box conformance check (job

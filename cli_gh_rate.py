@@ -174,9 +174,14 @@ def _fetch_rate_limit(run, real_gh, now):
     try:
         r = run([real_gh, "api", "rate_limit"], capture_output=True, text=True,
                 timeout=_FETCH_TIMEOUT_S, env=env)
-    except Exception:
+    except Exception as e:
+        _diag("fetch-rate-limit", e)   # never logs stdout/stderr (no token)
         return None
     if getattr(r, "returncode", 1) != 0:
+        # A persistently-failing fetch (e.g. broken auth) leaves the feature
+        # silently inert — record the rc ONLY (never stdout/stderr) so an
+        # operator has a trail (#1040 review-2 MINOR-5).
+        _diag("fetch-rate-limit", RuntimeError("rc=%s" % getattr(r, "returncode", "?")))
         return None
     try:
         data = json.loads(r.stdout or "{}")
@@ -461,8 +466,31 @@ _API_WRITE_FLAGS = {"-X", "--method", "-f", "-F", "--field", "--raw-field",
 _API_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
 
-def _first_nonflag_tokens(argv, n):
-    return [a for a in argv if not a.startswith("-")][:n]
+def _subcommand_words(argv, n):
+    """The first `n` COMMAND words, skipping any leading global flags — notably
+    `-R`/`--repo` and ITS value, so `gh -R o/r issue view 5` still resolves to
+    ("issue", "view") (#1040 review-2 MINOR-4). A lone unrecognized `-flag` is
+    treated as valueless (best-effort; a misparse only ever fails open to
+    "not a poll" = pass-through, never a wrongly-throttled call)."""
+    out = []
+    i = 0
+    while i < len(argv) and len(out) < n:
+        t = argv[i]
+        if t in ("-R", "--repo"):
+            i += 2                       # skip the flag AND its value token
+            continue
+        if t.startswith("-R") and len(t) > 2:      # glued `-Ro/r`
+            i += 1
+            continue
+        if t.startswith("--repo="):
+            i += 1
+            continue
+        if t.startswith("-"):
+            i += 1                       # a lone flag before the subcommand
+            continue
+        out.append(t)
+        i += 1
+    return out
 
 
 def classify_call(argv):
@@ -476,7 +504,7 @@ def classify_call(argv):
     toks = [a for a in argv if a]
     if not toks:
         return False, None
-    words = _first_nonflag_tokens(toks, 2)
+    words = _subcommand_words(toks, 2)
     if not words:
         return False, None
 
@@ -498,6 +526,13 @@ def classify_call(argv):
         # merely contains "mutation" is classified as a write (never throttled),
         # never the dangerous reverse (#1040 review-1 MAJOR-2).
         if "graphql" in endpoint:
+            # A query loaded from a FILE (`-F query=@file`) hides its text from
+            # argv, so we cannot tell a mutation from a read — fail SAFE: treat
+            # it as a write (never throttle), never the dangerous reverse of
+            # delaying a hidden mutation (#1040 review-2 MINOR-3).
+            for a in toks:
+                if a.startswith("@") or "=@" in a:
+                    return False, None
             joined = " ".join(toks).lower()
             if "mutation" in joined:
                 return False, None
@@ -598,7 +633,11 @@ if [ ! -x "$REAL_GH" ]; then
     for _d in "${{_parts[@]}}"; do
       [ -z "$_d" ] && continue
       [ "$_d" = "$_shimdir" ] && continue
-      if [ -x "$_d/gh" ]; then _p="$_d/gh"; break; fi
+      # skip a duplicate copy of THIS shim in another PATH dir (parity with the
+      # Python real_gh_path's _is_our_wrapper guard — never exec into ourselves).
+      if [ -x "$_d/gh" ] && ! grep -q {sentinel_q} "$_d/gh" 2>/dev/null; then
+        _p="$_d/gh"; break
+      fi
     done
     REAL_GH="$_p"
   fi
@@ -620,6 +659,7 @@ if [ "$_bo" -gt 0 ] 2>/dev/null; then sleep "$_bo"; fi
 exec "$REAL_GH" "$@"
 """.format(
         sentinel=WRAPPER_SENTINEL,
+        sentinel_q=_shq(WRAPPER_SENTINEL),
         real_gh=_shq(real_gh or ""),
         upstream=_shq(upstream_path()),
         marker=_shq(throttle_marker_path()),

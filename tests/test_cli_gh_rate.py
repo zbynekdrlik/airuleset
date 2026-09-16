@@ -260,6 +260,29 @@ class TestClassifyCall(unittest.TestCase):
             ["api", "/repos/x/y/issues", "-f", "title=hi"])
         self.assertFalse(is_poll)
 
+    def test_leading_repo_flag_before_subcommand_still_a_poll(self):
+        # `gh -R o/r issue view 5` — the -R value must not be mistaken for the
+        # subcommand (#1040 review-2 MINOR-4).
+        for argv in (
+            ["-R", "owner/repo", "issue", "view", "5", "--json", "labels"],
+            ["--repo", "owner/repo", "issue", "list"],
+            ["-Rowner/repo", "pr", "checks", "5"],
+            ["--repo=owner/repo", "run", "list"],
+        ):
+            is_poll, _ = cli_gh_rate.classify_call(argv)
+            self.assertTrue(is_poll, "%r should still classify as a poll" % argv)
+
+    def test_graphql_query_from_file_is_never_throttled(self):
+        # A file-loaded query hides its text — could be a mutation, so fail SAFE
+        # to a write / no-throttle (#1040 review-2 MINOR-3).
+        for argv in (
+            ["api", "graphql", "-F", "query=@q.graphql"],
+            ["api", "graphql", "-F", "query=@mutation.graphql"],
+        ):
+            is_poll, res = cli_gh_rate.classify_call(argv)
+            self.assertFalse(is_poll, "%r hides its query -> never throttle" % argv)
+            self.assertIsNone(res)
+
 
 class TestWrapperBackoff(unittest.TestCase):
     def _st(self, gql_remaining, core_remaining=5000):
