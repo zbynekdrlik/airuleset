@@ -241,9 +241,19 @@ repo's own CLAUDE.md / playbook is what names the command.
      owner membership).
      THEN post the review verdict + merge evidence, DROP whichever hand-off label was
      applied (`ready-for-review` and/or `needs-gatekeeper` — a carve-out stream's
-     hand-off carries `needs-gatekeeper`, not `ready-for-review`), and HAND THE TICKET
-     BACK to the delivering stream. **The delivering STREAM closes its OWN ticket after
-     review** (and after client confirmation for a `needs-acceptance` ticket, citing
+     hand-off carries `needs-gatekeeper`, not `ready-for-review`) by SWAPPING it for
+     `verify-on-copy` and posting ONE comment naming the deployed version + the exact
+     `REFRESH-DEV-BOX-FROM-PROD: <stream>` the stream must run (airuleset #1053; ensure
+     the label exists once via `airuleset.py labels --ensure --repo <owner/name>`), and
+     HAND THE TICKET
+     BACK to the delivering stream for verification on its own fresh PROD copy. **The
+     delivering STREAM closes its OWN ticket after
+     review** — AFTER it verifies the deployed change on that fresh copy (never asking
+     gk to read prod, `autonomous-verification.md`) and posts `Verified-on-copy: refresh
+     <id> at <ISO-UTC> — <what was checked>` (the close/`needs-acceptance` precondition;
+     a `verify-on-copy` ticket older than 24 h without it is the stream's Stop-hook
+     obligation, `hooks/stop-check-untracked-work.sh`) — (and after client confirmation
+     for a `needs-acceptance` ticket, citing
      it) — NOT the gatekeeper; the gatekeeper no longer closes stream tickets
      (odoo-erp#5378), its own `gh issue close` is reserved for its OWN `stream:core`
      tickets. This is artifact-enforced and account-agnostic: the gatekeeper's

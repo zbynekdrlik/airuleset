@@ -3507,7 +3507,7 @@ def _comment_readiness_signal(body):
 # condition_589) asserts the two sets stay equal so a future third queue label
 # can't silently desync them. `prio:bounce` is deliberately NOT here (a bounce
 # is handled separately via `bounce_numbers`, not as a resolution).
-_HANDOFF_QUEUE_LABELS = ("ready-for-review", "needs-gatekeeper")
+_HANDOFF_QUEUE_LABELS = ("ready-for-review", "needs-gatekeeper", "gk-processing")
 
 
 def _timeline_handoff_signal(ev):
@@ -3658,6 +3658,59 @@ def _role_filter_footer(workable, waiting, ops_wait, root, cwd):
     except Exception as e:  # noqa: BLE001
         sys.stderr.write("tickets-status: role filter skipped (%s)\n" % e)
     return workable, waiting, ops_wait
+
+
+# #1053: how many verify-on-copy timelines to fetch per footer refresh — these
+# are the stream's OWN post-deploy hand-backs, normally 0-3, so the cap is a
+# safety belt against a pathological pile, never a routine limit (mirrors the
+# #589 `_HANDOFF_COMMENT_CHECK_LIMIT` bounded-per-candidate pattern).
+_VERIFY_ON_COPY_TIMELINE_CAP = 20
+
+
+def _write_verify_on_copy_status(rows, slug, root, now=None):
+    """#1053: from the reduced-authority footer slice `rows`, find every
+    `verify-on-copy` ticket, read its timeline ONCE to derive the label-add
+    anchor + any Verified-on-copy: comment, and persist the OVERDUE set (older
+    than 24 h with no verification) for the Stop hook (stop-check-untracked-
+    work.sh). ALWAYS writes (an empty overdue when none) so the status stays
+    FRESH — a resolved hand-back clears the gate rather than sitting stale-non-
+    empty until it ages out. Fully fail-safe: any gh/parse error skips that
+    candidate (never blocks the footer refresh)."""
+    try:
+        import cli_verify_on_copy as _voc
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write("verify-on-copy: module unavailable (%s)\n" % e)
+        return
+    voc_rows = []
+    for n_num, row in (rows or {}).items():
+        names = {(lb or {}).get("name") for lb in (row.get("labels") or [])
+                 if isinstance(lb, dict)}
+        if _voc.VERIFY_LABEL in names:
+            voc_rows.append((n_num, row))
+    items = []
+    for n_num, row in voc_rows[:_VERIFY_ON_COPY_TIMELINE_CAP]:
+        events = []
+        if slug:
+            raw = _gh_out("api",
+                          "repos/%s/issues/%d/timeline?per_page=100"
+                          % (slug, n_num), cwd=root, timeout=20)
+            try:
+                events = json.loads(raw)
+            except (ValueError, TypeError):
+                events = []
+            if not isinstance(events, list):
+                events = []
+        items.append((n_num, row.get("title") or "", events))
+    try:
+        import statusbar
+        key = statusbar.cwd_key(root or (slug or ""))
+        overdue = _voc.compute_overdue(items, now if now is not None
+                                       else __import__("time").time())
+        # #1053 review 🟡: per-repo key so a multi-repo reduced-authority account
+        # never clobbers one repo's overdue set with another's empty refresh.
+        _voc.persist_status(overdue, now=now, repo=slug or None, key=key)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write("verify-on-copy: status write skipped (%s)\n" % e)
 
 
 def cmd_tickets_status(args):
@@ -3863,6 +3916,12 @@ def cmd_tickets_status(args):
                 except (ValueError, TypeError, KeyError):
                     sfailed = True   # gh error ≠ zero skips — keep skipped=None
             entry["skipped"] = None if sfailed else len(skipped)
+            # #1053: persist the verify-on-copy overdue set for the Stop hook —
+            # only a reduced-authority stream carries verify-on-copy hand-backs.
+            # Guarded to fail-safe (never break the footer refresh); skipped when
+            # the slice itself failed (no trustworthy rows to derive from).
+            if not failed:
+                _write_verify_on_copy_status(rows, slug, root)
         else:
             # Full-authority (core/gatekeeper) box: N = the LIVE OBLIGATION
             # set — the SAME `_obligation_quals()` union `core-quals --count`
@@ -8689,6 +8748,9 @@ from cli_onboard import (  # noqa: E402
 # --- #993: lane-overlap independence-check CLI leaf ---
 from cli_lane_overlap import cmd_lane_overlap as cmd_lane_overlap  # noqa: E402, F401
 
+# --- #1053: gk state-machine label-ensure CLI leaf ---
+from cli_labels import cmd_labels as cmd_labels  # noqa: E402, F401
+
 # --- #857: context-baseline + skill-usage CLI leaves ---
 from cli_context_baseline import (  # noqa: E402, F401
     cmd_context_baseline as cmd_context_baseline,
@@ -9712,6 +9774,18 @@ def main():
     p_ab.add_argument("--render", metavar="ACCOUNT",
                       help="Account name to render bootstrap for")
 
+    # --- #1053: gk state-machine label-ensure ---
+    p_lbl = sub.add_parser(
+        "labels",
+        help="Ensure the #1053 gk state-machine labels (gk-processing / "
+             "verify-on-copy) exist on a repo — idempotent check-then-create "
+             "(never --force). The gatekeeper runs this once; a reduced-"
+             "authority stream must not run it against a foreign repo.")
+    p_lbl.add_argument("--ensure", action="store_true",
+                       help="Create the labels if missing")
+    p_lbl.add_argument("--repo", default=None,
+                       help="Target repo owner/name (default: resolve cwd)")
+
     # --- #1036: Odoo task-hygiene overseer ---
     p_th = sub.add_parser(
         "task-hygiene",
@@ -10203,6 +10277,7 @@ SUBCOMMANDS = {
     "nudges": cmd_nudges,
     "volume": cmd_volume,
     "task-hygiene": cmd_task_hygiene,
+    "labels": cmd_labels,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

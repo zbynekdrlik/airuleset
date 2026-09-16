@@ -86,6 +86,78 @@ PY
     [ -z "$TH_REASON" ] && rm -f "$TH_RETRY"
 fi
 
+# --- #1053 verify-on-copy Stop gate (exit-2 + stderr, the deny-stderr contract) ---
+# A turn ending ✅ DONE / ⏳ WORKING with a FRESH ~/.claude/verify-on-copy/
+# status.json (written by the footer refresh) carrying overdue tickets — a
+# verify-on-copy hand-back older than 24 h with NO Verified-on-copy: comment — is
+# blocked: the gatekeeper deployed and returned the ticket for verification on a
+# fresh PROD copy, and the stream must run REFRESH-DEV-BOX-FROM-PROD, verify, and
+# post the evidence. Fail-OPEN when the status file is absent/stale (a dead
+# writer), the SAME class as the #1036 task-hygiene gate. Dry-runnable per #963
+# (reads only $MSG + the status file, no side effects).
+if echo "$MSG" | grep -qE '✅ DONE|⏳ WORKING'; then
+    VOC_DIR="${HOME}/.claude/verify-on-copy"
+    VOC_RETRY="/tmp/airuleset-verify-on-copy-block-${SESSION_ID}"
+    VOC_RETRIES=$(cat "$VOC_RETRY" 2>/dev/null || echo 0)
+    VOC_MAX=3
+    # python ALWAYS exits 0 (prints the reason lines when it should block, empty
+    # otherwise) so `set -euo pipefail` never aborts on a non-zero substitution
+    # (#979); `|| true` is a second belt. Aggregates the FRESH overdue set across
+    # EVERY per-cwd status file (#1053 review 🟡 — a single global file was
+    # clobbered across repos on a multi-repo account, silently defeating the
+    # gate); a stale/absent dir fails OPEN.
+    VOC_REASON=$(python3 - "$VOC_DIR" <<'PY' || true
+import glob
+import json
+import os
+import sys
+import time
+
+STALE = 3 * 3600
+now = time.time()
+seen = {}
+try:
+    files = sorted(glob.glob(os.path.join(sys.argv[1], "*.json")))
+except OSError:
+    sys.exit(0)                     # unreadable dir → fail open
+for path in files:
+    try:
+        with open(path, encoding="utf-8") as h:
+            st = json.load(h)
+    except (OSError, ValueError):
+        continue
+    if not isinstance(st, dict):
+        continue
+    ts = st.get("ts")
+    if not isinstance(ts, (int, float)) or (now - ts) > STALE:
+        continue                    # dead writer / stale repo → skip
+    for r in (st.get("overdue") or []):
+        if isinstance(r, dict) and r.get("number") is not None:
+            seen[r["number"]] = r
+if not seen:
+    sys.exit(0)
+overdue = [seen[n] for n in sorted(seen)]
+items = ["#%s %s (%sh)" % (r.get("number"), (r.get("title") or "")[:40],
+                           r.get("age_h")) for r in overdue[:8]]
+print("verify-on-copy > 24 h bez Verified-on-copy: (%d): %s"
+      % (len(overdue), ", ".join(items)))
+sys.exit(0)
+PY
+)
+    if [ -n "$VOC_REASON" ] && [ "$VOC_RETRIES" -lt "$VOC_MAX" ]; then
+        echo "$((VOC_RETRIES + 1))" > "$VOC_RETRY"
+        {
+            echo "🚫 BLOCKED (verify-on-copy #1053): gk nasadil zmenu — over ju na čerstvej kópii PROD."
+            echo "$VOC_REASON"
+            echo "Akcia: REFRESH-DEV-BOX-FROM-PROD: <stream>, over feature na kópii, "
+            echo "potom komentár: Verified-on-copy: refresh <id> at <ISO-UTC> — <čo si overil>."
+        } >&2
+        exit 2
+    fi
+    # clean (no overdue obligation) → reset the retry counter for next time
+    [ -z "$VOC_REASON" ] && rm -f "$VOC_RETRY"
+fi
+
 RETRY_FILE="/tmp/airuleset-untracked-work-block-${SESSION_ID}"
 RETRIES=$(cat "$RETRY_FILE" 2>/dev/null || echo 0)
 MAX_RETRIES=3
