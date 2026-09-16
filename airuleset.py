@@ -4369,7 +4369,7 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     if not m:
         print("handoff BLOCK: --body-file body has no HEAD: <sha> line")
         return 1
-    body_head = m.group(1)
+    body_head = m.group(1).lower()  # git emits lowercase; normalise both sides
     ls_r = _run(["git", "ls-remote", "origin", "refs/heads/" + branch])
     if ls_r.returncode != 0:
         print("handoff BLOCK: git ls-remote failed for branch '%s'" % branch)
@@ -4378,16 +4378,14 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     for line in (ls_r.stdout or "").strip().splitlines():
         parts = line.split()
         if len(parts) >= 2:
-            remote_sha = parts[0]
+            remote_sha = parts[0].lower()
             break
     if not remote_sha:
         print("handoff BLOCK: branch '%s' not found on remote" % branch)
         return 1
-    # Accept a short body HEAD that prefixes the full remote sha (and vice
-    # versa) — the gate accepts a >= 7-hex HEAD, so a stream may declare short.
-    if not (remote_sha == body_head
-            or remote_sha.startswith(body_head)
-            or body_head.startswith(remote_sha)):
+    # The remote tip is a full 40-hex; accept a short body HEAD (>= 7-hex, the
+    # gate's own floor) that prefixes it, or an exact match.
+    if not (remote_sha == body_head or remote_sha.startswith(body_head)):
         print("handoff BLOCK: --body-file HEAD %s does not match remote "
               "branch '%s' tip %s — push first / re-declare a fresh HEAD"
               % (body_head[:12], branch, remote_sha[:12]))

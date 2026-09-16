@@ -81,6 +81,15 @@ _STREAM_BODY = (
     "```\n"
 )
 
+# A gate-correct ROUND-3 body: the gate's OWN labels — Root-cause naming a lens
+# + `Prevencia (stream):` (NOT airuleset's `Prevencia-read:`). This is the path
+# the contract test was previously blind to (#1044 review 🟡).
+_STREAM_BODY_R3 = (
+    _STREAM_BODY.rstrip("\n")
+    + "\nRoot-cause-of-previous-bounce: the `process` lens missed the bump\n"
+    "Prevencia (stream): re-check version strictly-greater before hand-off\n"
+)
+
 # What a stream WRONGLY passes as --self-review-file today (no evidence channel):
 # a full body, with its OWN evidence HEAD, that the composer then wraps.
 _FULL_BODY_AS_TABLE = (
@@ -216,13 +225,41 @@ class TestPassthroughBody(unittest.TestCase):
         self.assertIsNotNone(
             err, "must reject a body missing the Self-review-model line")
 
-    def test_passthrough_round2_requires_bounce_fields(self):
+    def test_passthrough_round2_no_bounce_fields_ok(self):
+        # The gate requires bounce escalation only at round >= 3, so a round-2
+        # body without those fields must NOT be blocked (no over-enforcement).
         vpb = getattr(ht, "validate_passthrough_body", None)
         self.assertIsNotNone(vpb, "validate_passthrough_body missing")
-        err = vpb(_STREAM_BODY, bounce_round=2)
-        self.assertIsNotNone(
-            err, "round>=2 must require Root-cause-of-previous-bounce/"
-                 "Prevencia-read")
+        self.assertIsNone(vpb(_STREAM_BODY, bounce_round=2))
+        self.assertEqual(gate.self_review_violations(_STREAM_BODY, 2), [])
+
+    def test_passthrough_round3_gate_correct_body_passes(self):
+        # The #1044 review 🟡 fix: a round-3 body with the GATE's labels
+        # (Root-cause naming a lens + `Prevencia (stream):`) passes BOTH the
+        # composer's pass-through validator AND the real gate at round 3 — the
+        # contract the earlier test was blind to.
+        vpb = getattr(ht, "validate_passthrough_body", None)
+        self.assertIsNotNone(vpb, "validate_passthrough_body missing")
+        self.assertIsNone(vpb(_STREAM_BODY_R3, bounce_round=3),
+                          "gate-correct round-3 body wrongly rejected")
+        self.assertEqual(
+            gate.self_review_violations(_STREAM_BODY_R3, 3), [],
+            "gate-correct round-3 body must pass the real gate at round 3")
+
+    def test_passthrough_round3_missing_prevencia_blocked(self):
+        # A round-3 body missing Prevencia FAILS the real gate — and the
+        # pass-through validator fail-fasts on it before posting.
+        vpb = getattr(ht, "validate_passthrough_body", None)
+        self.assertIsNotNone(vpb, "validate_passthrough_body missing")
+        no_prev = _STREAM_BODY_R3.replace(
+            "Prevencia (stream): re-check version strictly-greater "
+            "before hand-off\n", "")
+        self.assertIsNotNone(vpb(no_prev, bounce_round=3),
+                             "round-3 missing Prevencia must be blocked")
+        self.assertTrue(
+            any("Prevencia" in v
+                for v in gate.self_review_violations(no_prev, 3)),
+            "the real gate must also flag the missing round-3 Prevencia")
 
 
 if __name__ == "__main__":

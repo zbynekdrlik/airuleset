@@ -37,8 +37,17 @@ _SELF_REVIEW_MODEL_LINE_RE = re.compile(
     r'(?im)^[ \t]*[-*]?[ \t]*\**Self-review-model\**[ \t]*:')
 _ROOTCAUSE_LINE_RE = re.compile(
     r'(?im)^[ \t]*[-*]?[ \t]*\**Root-cause-of-previous-bounce\**[ \t]*:')
-_PREVENCIA_LINE_RE = re.compile(
+# Prevencia: the GATE's round>=3 check wants `Prevencia (stream):`, while
+# airuleset's own composer/sign-only convention emits `Prevencia-read:`. For a
+# pass-through body (the STREAM authors it to pass the GATE, which OWNS the
+# shape), accept EITHER label so a gate-correct body is never blocked (#1044
+# review 🟡 — enforcing only `Prevencia-read:` here would reject the exact
+# `Prevencia (stream):` line the gate requires). The lingering compose/sign-only
+# label divergence is pre-existing and tracked separately.
+_PREVENCIA_READ_RE = re.compile(
     r'(?im)^[ \t]*[-*]?[ \t]*\**Prevencia-read\**[ \t]*:')
+_PREVENCIA_STREAM_RE = re.compile(
+    r'(?im)^[ \t]*[-*]?[ \t]*\**Prevencia \(stream\)\**[ \t]*:')
 # Line-anchored template field labels (bullet/bold tolerant, mirroring the
 # gate's own FIELD_PATTERNS) — used to detect a FULL body wrongly passed as
 # the Self-review table.
@@ -84,11 +93,13 @@ def validate_passthrough_body(
 
     Returns an error message, or None when the body may be posted. The body
     shape itself (Branch/HEAD/Stack/… + the Self-review table + evidence
-    fences) is the REPO gate's authority — this only enforces what the
-    composer already enforces for ``--sign-only``: the RFR marker, the
-    ``Self-review-model:`` line, and (round >= 2) the bounce escalation
-    fields. It does NOT rewrite the body — fences and the single ``HEAD:``
-    line pass through untouched."""
+    fences) is the REPO gate's authority — this only fail-fasts on the minimal
+    invariants: the RFR marker (the hook/gate trigger), the
+    ``Self-review-model:`` line, and — GATE-FAITHFULLY at round >= 3 (the gate's
+    own bounce-escalation threshold) — the ``Root-cause-of-previous-bounce:``
+    line plus a Prevencia line under EITHER label the gate/composer use. It
+    does NOT rewrite the body — fences and the single ``HEAD:`` line pass
+    through untouched, and it never imposes a label the gate would reject."""
     if not (body or "").strip():
         return "handoff BLOCK: --body-file body is empty"
     if not _has_rfr_marker(body):
@@ -97,13 +108,17 @@ def validate_passthrough_body(
     if not _SELF_REVIEW_MODEL_LINE_RE.search(body):
         return ("handoff BLOCK: --body-file body missing Self-review-model: "
                 "line (required on every readiness comment)")
-    if bounce_round >= 2:
+    # Bounce escalation is the GATE's domain — mirror its round >= 3 threshold
+    # (never over-enforce at round 2, which the gate accepts) and accept either
+    # Prevencia label so a gate-correct body passes (#1044 review 🟡).
+    if bounce_round >= 3:
         if not _ROOTCAUSE_LINE_RE.search(body):
             return ("handoff BLOCK: round %d --body-file body missing "
                     "Root-cause-of-previous-bounce:" % bounce_round)
-        if not _PREVENCIA_LINE_RE.search(body):
+        if not (_PREVENCIA_STREAM_RE.search(body)
+                or _PREVENCIA_READ_RE.search(body)):
             return ("handoff BLOCK: round %d --body-file body missing "
-                    "Prevencia-read:" % bounce_round)
+                    "Prevencia (stream): / Prevencia-read:" % bounce_round)
     return None
 
 
