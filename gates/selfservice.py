@@ -56,22 +56,34 @@ PROD_READ_VERB_RE = re.compile(
     r'config_parameter|counts?|checks?|checking)\b', re.IGNORECASE)
 
 # A LIVE intervention (EN + SK) -- the request is not a pure read, so it fails
-# OPEN (a genuine gk action). Deliberately focused action verbs; bare
-# start/stop are omitted (too common, would fail-open on ordinary prose).
+# OPEN (a genuine gk action). #1049-review MAJOR-1: the list must be BROAD so a
+# genuine intervention request that ALSO reads state is never false-blocked as a
+# pure read (the owner's friction tolerance is low, #957/#963); the cost is a
+# pure read that coincidentally contains one of these words failing OPEN, which
+# is the DOCUMENTED safe direction for this falsifiable-claim gate.
 LIVE_INTERVENTION_RE = re.compile(
-    r'\b(restarts?|restarting|reboot\w*|re[šs]tart\w*|installs?|installing|'
-    r'in[šs]tal\w*|nain[šs]tal\w*|doin[šs]tal\w*|deploy\w*|nasad\w*|resets?|'
-    r'resetting|kills?|killing|zabi\w*|grants?|granting|udel\w*|revoke\w*|'
-    r'purg\w*|flush\w*|rotate\w*|requeue\w*|re-?send\w*|resend\w*|'
-    r'preposl\w*|reprocess\w*|migrat\w*)\b', re.IGNORECASE)
+    r'\b(restarts?|restarting|reboot\w*|re[šs]tart\w*|reloads?|reloading|'
+    r'installs?|installing|in[šs]tal\w*|nain[šs]tal\w*|doin[šs]tal\w*|'
+    r'deploy\w*|nasad\w*|resets?|resetting|kills?|killing|zabi\w*|grants?|'
+    r'granting|udel\w*|revoke\w*|revoking|purg\w*|flush\w*|rotate\w*|'
+    r'rotating|requeue\w*|re-?send\w*|resend\w*|preposl\w*|reprocess\w*|'
+    r'migrat\w*|clears?|clearing|deletes?|deleting|truncat\w*|drops?|'
+    r'dropping|enables?|enabling|disables?|disabling|prun\w*|rebuild\w*|'
+    r'starts?|starting|stops?|stopping|spusti\w*|zastav\w*|vypni\w*|'
+    r'zapni\w*|zma[žz]\w*|vyma[žz]\w*)\b', re.IGNORECASE)
 
 # The gk-ONLY PROD surfaces the refresh rsync deliberately EXCLUDES (odoo-erp
 # .claude/rules/prod-ro-clone-accounts.md). ONE constant, lock-tested. A request
 # naming any of these is genuinely NOT self-serviceable from the refresh copy,
 # so it passes on its own words (no refresh citation required).
+#   #1049-review MINOR: bare "odoo" is dropped from container-logs (the DB
+#   ir.logging table IS in the refresh copy, so "read the odoo logs" is
+#   self-serviceable — only the CONTAINER stdout logs are gk-only); a genuine
+#   gk-only request still matches via "container logs". Slovak surface terms
+#   (logy/kontajner) are included so a Slovak stream is not false-blocked.
 GK_ONLY_SURFACES = (
-    ("session-store", r'/var/lib/odoo/sessions|\bsessions?/|session\s+(?:store|file|id|hijack|cookie)'),
-    ("container-logs", r'\b(?:container|docker|nginx|odoo)\s+logs?\b|\blogs?\s+(?:of|from|in)\s+(?:the\s+)?(?:container|docker|nginx)'),
+    ("session-store", r'/var/lib/odoo/sessions|\bsessions?/|session\s+(?:store|file|id|hijack|cookie)|rel[áa]ci[ae]\s+(?:store|s[úu]bor)'),
+    ("container-logs", r'\b(?:container|docker|nginx|kontajner\w*)\s+(?:logs?|logy|logov)\b|\b(?:logs?|logy|logov)\s+(?:of|from|in|z|zo)\s+(?:the\s+)?(?:container|docker|nginx|kontajner\w*)'),
     ("root-secrets", r'(?:~|/root)/\.secrets|\.secrets\b'),
     ("runtime-state", r'\b(?:docker|nginx)\s+(?:runtime|state|config|container)\b'),
 )
@@ -88,6 +100,9 @@ _ISO_DT_RE = re.compile(
     r'\b(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?\s*(Z|[+-]\d{2}:?\d{2})?')
 _BARE_DATE_RE = re.compile(r'\b(\d{4})-(\d{2})-(\d{2})\b')
 _BARE_TIME_RE = re.compile(r'\b([01]?\d|2[0-3]):([0-5]\d)\b')
+# A bare HH:MM counts as an event only when a today-cue is adjacent (#1049
+# review MAJOR-2). "daily" deliberately does NOT match \btoday\b.
+_TODAY_CUE_RE = re.compile(r'\btoday\b|\bdnes\w*', re.IGNORECASE)
 
 
 # --------------------------------------------------------------------------- #
@@ -188,9 +203,17 @@ def newest_event_timestamp(text, now=None):
         return " "
     t = _BARE_DATE_RE.sub(_date_sub, t)
 
-    # 3. bare HH:MM -> today (UTC).
+    # 3. bare HH:MM -> today (UTC), but ONLY when "today"/"dnes" sits adjacent to
+    # it (#1049-review MAJOR-2: an unqualified bare HH:MM in ordinary prose — a
+    # cron schedule "runs daily at 15:00", "as of 11:00", "since 08:30" — was
+    # wrongly read as a today-event and false-blocked a compliant refresh. The
+    # dispatch itself scoped this to "a bare HH:MM TODAY in the text", so the
+    # today-cue is the faithful, low-false-positive interpretation).
     today = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).date()
     for m in _BARE_TIME_RE.finditer(t):
+        window = t[max(0, m.start() - 18):m.end() + 18]
+        if not _TODAY_CUE_RE.search(window):
+            continue
         h, mi = int(m.group(1)), int(m.group(2))
         stamps.append(datetime(today.year, today.month, today.day, h, mi,
                                tzinfo=timezone.utc))
@@ -428,12 +451,16 @@ def _classify_prod_read(body):
                     else "refresh-cited-no-event")
 
 
-def classify_command(cmd):
+def classify_command(cmd, cwd=None):
     """Classify a whole command into a list of (verdict, kind, reason, ticket).
-    Empty list = not a gated escalation at all."""
+    Empty list = not a gated escalation at all. `cwd` is the command's base cwd
+    for relative `-F` body resolution (#1049-review NIT: the SAME cwd the
+    authority gate resolves against, so the two never diverge); defaults to the
+    process cwd, matching the #516 hook's `$(pwd)`."""
+    base_cwd = cwd or os.getcwd()
     file_bodies, direct_bodies, skeleton = _capture_heredocs(cmd)
     results = []
-    effective_cwd = os.getcwd()
+    effective_cwd = base_cwd
     for seg in split_top_level(skeleton):
         if not seg.strip():
             continue
@@ -555,7 +582,7 @@ def main():
     if not reduced:
         sys.exit(0)
 
-    results = classify_command(cmd)
+    results = classify_command(cmd, cwd)
     if not results:
         sys.exit(0)
 

@@ -364,5 +364,85 @@ class AuditCLI(TestCase):
         self.assertIn("stream\tselfservice_blocks", r.stdout)
 
 
+# --------------------------------------------------------------------------- #
+# Adversarial-review-1 fixes (#1049 review): the fail-open promise must hold for
+# a broad set of live-intervention verbs, and a bare HH:MM in ordinary prose
+# must NOT be read as a today-event.
+# --------------------------------------------------------------------------- #
+class ReviewFix_LiveInterventionBreadth(TestCase):
+    def test_reload_intervention_passes(self):
+        r = run('python3 ~/devel/airuleset/airuleset.py gk-request --issue 5 '
+                '--comment "read the config on PROD then reload nginx. '
+                'Self-service-checked: read the state from the fresh copy; the '
+                'live intervention I need is a reload of nginx."')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_stop_queue_intervention_passes(self):
+        r = run('python3 ~/devel/airuleset/airuleset.py gk-request --issue 5 '
+                '--comment "list the stuck jobs on PROD then stop the outgoing '
+                'queue. Self-service-checked: read 40 stuck from the fresh copy; '
+                'the live intervention I need is stopping the queue."')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_delete_intervention_passes(self):
+        r = run('python3 ~/devel/airuleset/airuleset.py gk-request --issue 5 '
+                '--comment "read the orphan rows on PROD then delete them. '
+                'Self-service-checked: found 12 orphans in the fresh copy; the '
+                'live intervention I need is deleting them on PROD."')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_unit_intervention_verbs_are_not_pure_reads(self):
+        from gates import selfservice
+        for verb in ("reload nginx", "stop the queue", "delete the rows",
+                     "enable the cron", "disable the job", "clear the cache",
+                     "truncate the table", "rebuild the index"):
+            self.assertFalse(
+                selfservice.is_self_serviceable_prod_read(
+                    "read the state on PROD then " + verb), verb)
+
+
+class ReviewFix_BareTimeNeedsTodayCue(TestCase):
+    def test_cron_schedule_time_is_not_an_event(self):
+        # "runs daily at 15:00" is a schedule, not an event -> the fresh refresh
+        # (older than 15:00 today) must still PASS.
+        r = run('python3 ~/devel/airuleset/airuleset.py gk-request --issue 5 '
+                '--comment "read config_parameter on PROD. The report job runs '
+                'daily at 15:00. Self-service-checked: refresh run-9 at '
+                '2026-09-15T09:00:00Z from a fresh copy; already read it."')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_unit_bare_time_without_today_is_ignored(self):
+        from gates import selfservice
+        self.assertIsNone(selfservice.newest_event_timestamp(
+            "read on PROD, the job runs daily at 15:00"))
+        self.assertIsNone(selfservice.newest_event_timestamp(
+            "as of 11:00 the count was 40 on PROD"))
+
+    def test_unit_bare_time_with_today_still_counts(self):
+        from gates import selfservice
+        ev = selfservice.newest_event_timestamp("the outage at 14:30 today on PROD")
+        self.assertIsNotNone(ev)
+        self.assertEqual((ev.hour, ev.minute), (14, 30))
+
+
+class ReviewFix_SlovakSurfaceAndOdooTighten(TestCase):
+    def test_slovak_container_logs_surface_passes(self):
+        r = run('python3 ~/devel/airuleset/airuleset.py gk-request --issue 5 '
+                '--comment "grep logy odoo kontajnera na PRODe pre 2026-09-14 '
+                'chybu. Self-service-checked: container logy nie su v refresh '
+                'kopii, treba zivy gk read."')
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_bare_odoo_logs_is_not_auto_exempt(self):
+        # tightened teeth: "the odoo logs" (DB ir.logging, self-serviceable) is
+        # NOT a gk-only surface, so it still needs a refresh.
+        from gates import selfservice
+        self.assertFalse(selfservice.references_gk_only_surface(
+            "read the odoo logs on PROD"))
+        # but a genuine CONTAINER-logs request stays exempt
+        self.assertTrue(selfservice.references_gk_only_surface(
+            "grep the odoo container logs on PROD"))
+
+
 if __name__ == "__main__":
     main()
