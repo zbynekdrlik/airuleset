@@ -2124,6 +2124,40 @@ fi
 # but never the model. The note therefore travels on the block REASON, which
 # does — so a listed violation resting on a check the hook could not evaluate is
 # visible to the agent that has to act on it.
+# #1018 — Verifikácia handover-note SHAPE check. When the assistant's message
+# REPORTS moving a client task to the "awaiting client verification" stage
+# (Verifikácia / Na overenie) and posting the handover note, that note MUST carry
+# the four sections Čo / Kde / Čo skúsiť / stačí 👍 (client-board-tasks.md rule 3).
+# Same information space as the #916/#978 self-report checks (last_assistant_message
+# only): it fires ONLY on a self-reported Verifikácia post and requires the
+# distinctive section markers (Kde + Čo skúsiť + stačí 👍) to be evidenced in the
+# message, or an UNVERIFIED: escape. NARROW on purpose: an Odoo/task anchor AND a
+# past-tense move/post verb within 60 chars of the stage name — a message that
+# merely MENTIONS the stage (e.g. "next I'll move it to Verifikácia") is never
+# gated. Fail-safe like its siblings: an unknown SECTION check resolves to
+# "present" (msg_has UNKNOWN->0), so a grep meltdown never fabricates a violation.
+VERIF_STAGE_RX='(Verifik[áa]ci|[Nn]a overeni)'
+# PAST-TENSE only: a future-tense mention ("presuniem ... do Verifikácia" = "I
+# WILL move it") must NOT be gated — so the SK stems are the past-participle
+# forms (presunul/posunul/…), never the bare present/future stem.
+VERIF_VERB_RX='\b(posted|moved|sent)\b|(presunul|posunul|odoslal|postol|nap[ií]sal|pridal)\w*'
+VERIF_REPORT=0
+if [ "$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "${ODOO_ANCHOR_RX}|project\.task|[úu]loh" && echo 1 || echo 0)" = "1" ]; then
+    if [ "$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE "(${VERIF_VERB_RX}).{0,60}${VERIF_STAGE_RX}|${VERIF_STAGE_RX}.{0,60}(${VERIF_VERB_RX})" && echo 1 || echo 0)" = "1" ]; then
+        VERIF_REPORT=1
+    fi
+fi
+if [ "$VERIF_REPORT" = "1" ]; then
+    VERIF_UNVERIFIED=$(msg_has "$MSG" -qE 'UNVERIFIED:' && echo 1 || echo 0)
+    VERIF_KDE=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE '\bKde\b' && echo 1 || echo 0)
+    VERIF_SKUSIT=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE '[Čč]o sk[úu]si' && echo 1 || echo 0)
+    VERIF_STACI=$(msg_has "$MSG" -qE '👍' && echo 1 || echo 0)
+    if [ "$VERIF_UNVERIFIED" = "0" ] && { [ "$VERIF_KDE" = "0" ] || [ "$VERIF_SKUSIT" = "0" ] || [ "$VERIF_STACI" = "0" ]; }; then
+        echo "VIOLATION: Your message reports moving a client task to Verifikácia / Na overenie and posting the handover note, but the note is missing the mandatory sections. A Verifikácia handover note MUST carry all four, in order: 'Čo' (what was delivered), 'Kde' (menu path + a functional https:// deep link, verified 200), 'Čo skúsiť' (what to try), and the literal closing line 'stačí 👍'. Include the note's four sections in your message (or write 'UNVERIFIED: <why>'). See skills/odoo-client-messaging/client-board-tasks.md rule 3 (#1018)." >&2
+        add_hard "Verifikácia handover note reported without the Čo/Kde/Čo skúsiť/stačí 👍 sections (#1018)"
+    fi
+fi
+
 UNDET_NOTE=""
 if [ -n "$UNDET_FILE" ] && [ -s "$UNDET_FILE" ]; then
     UNDET_N=$(wc -l <"$UNDET_FILE" | tr -d ' ')
