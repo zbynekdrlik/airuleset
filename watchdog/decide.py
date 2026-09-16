@@ -348,6 +348,44 @@ def pane_session_limited(captured):
     return bool(_SESSION_LIMIT_RX.search("\n".join(lines[-10:])))
 
 
+# --- PARKED AUTO-CONTINUE banner (#1034) --------------------------------------
+# The DISTINCT `autoContinueAtUsageLimit: true` state that job 6's session-limit
+# detector does NOT key on: a limit-hit pane that PARKS on the auto-continue
+# wait and waits for the ORIGINAL account's reset clock. Verified live against
+# the installed Claude Code 2.1.268 binary (read-only grep) — the shipped forms:
+#   "Usage limit reached  continuing automatically at 9:50am  esc or type to cancel"
+#   "Continuing automatically at 9:50am  esc to cancel"
+#   "Continuing automatically when your limit resets"
+#   "Usage limit reached again after you continued. The automatic-continue
+#    setting no longer ends this wait."  (the owner's comment-2 hard state)
+# The two robust signals across every form are "continuing automatically" (the
+# auto-continue wait) and "Usage limit reached" (the headline that survives even
+# in the "no longer ends this wait" state). Bottom-scoped EXACTLY like
+# `pane_session_limited` (reusing `_above_input_box`, no new pane parser) so a
+# stale banner echo scrolled high above fresh work never counts — the same
+# freshest-thing-on-screen discipline (gk 2026-07-24).
+_AUTO_CONTINUE_PARKED_RX = re.compile(
+    r"continuing\s+automatically|usage\s+limit\s+reached", re.I)
+
+
+def pane_auto_continue_parked(captured):
+    """True if the pane's BOTTOM shows Claude Code's PARKED usage-limit
+    auto-continue banner (`Usage limit reached · continuing automatically at
+    <time>` / `Continuing automatically at <time>` / the `… no longer ends this
+    wait` state). Bottom-scoped to the last 10 lines above the input box
+    (falling back to the raw last 10 when no `❯` boundary is located), the same
+    scope + fallback as `pane_session_limited` — a banner that is no longer the
+    freshest content on screen means the session already resumed and is not
+    parked. Never raises; empty/None → False."""
+    if not captured:
+        return False
+    region = watchdog._above_input_box(captured)
+    lines = [ln for ln in region.splitlines() if ln.strip()]
+    if not lines:
+        lines = [ln for ln in captured.splitlines() if ln.strip()]
+    return bool(_AUTO_CONTINUE_PARKED_RX.search("\n".join(lines[-10:])))
+
+
 def parse_reset_epoch(captured, now):
     """Parse 'resets <clock>' (optionally 'resets <Month> <day>, <clock>')
     from the banner. The BARE-CLOCK form (a 5-hour session-limit reset)

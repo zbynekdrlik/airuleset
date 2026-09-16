@@ -120,7 +120,7 @@ class TestParkedWakeJob(TestCase):
         self.assertEqual(delivered, [("%1", "/t/repo.jsonl")], out)
         self.assertTrue(any("wake-parked: %1 old@x.bid -> new@y.bid" in ln for ln in out), out)
         # parked mark cleared after a successful wake
-        self.assertNotIn("repo", state["parked_wake"])
+        self.assertNotIn("repo", state.get("parked_wake", {}))
 
     def test_same_email_sends_nothing_no_log(self):
         panes = [("%1", "/repo")]
@@ -138,7 +138,7 @@ class TestParkedWakeJob(TestCase):
         state = {"parked_wake": {"repo": {"email": "old@x.bid", "first_seen": 1}}}
         out, state, delivered = _job(panes, cur_email="new@y.bid", caps=caps, state=state)
         self.assertEqual(delivered, [])
-        self.assertNotIn("repo", state["parked_wake"])
+        self.assertNotIn("repo", state.get("parked_wake", {}))
 
     def test_recent_human_holds_no_send(self):
         panes = [("%1", "/repo")]
@@ -178,7 +178,7 @@ class TestParkedWakeJob(TestCase):
         state = {"parked_wake": {"repo": {"email": "a@x.bid", "first_seen": 1},
                                  "gonesid": {"email": "z@x.bid", "first_seen": 1}}}
         out, state, delivered = _job(panes, cur_email="a@x.bid", caps=caps, state=state)
-        self.assertNotIn("gonesid", state["parked_wake"])
+        self.assertNotIn("gonesid", state.get("parked_wake", {}))
 
     def test_unreadable_email_does_nothing(self):
         # account_email "" (unreadable ~/.claude.json) → never fabricate a switch
@@ -227,6 +227,139 @@ class TestDeliverWake(TestCase):
         self.assertIn(WAKE_PARKED_NUDGE, ng.RECOVERY_NUDGE_KINDS)
         # and the always-on predicate agrees
         self.assertTrue(watchdog.nudges_enabled(WAKE_PARKED_NUDGE))
+
+
+class TestParkedWakeRunOnceIntegration(TestCase):
+    """End-to-end through the REAL run_once wiring (find_active_transcript,
+    _account_email, pane_auto_continue_parked, _recovery_recent_human,
+    deliver_wake) — the piece the injected-fake job test above cannot prove."""
+
+    def _write(self, path, text):
+        import os
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(text)
+
+    def test_run_once_wakes_parked_pane_after_account_switch(self):
+        import json
+        import os
+        import tempfile
+        from unittest import mock
+
+        tmp = tempfile.mkdtemp()
+        projects = os.path.join(tmp, "projects")
+        os.makedirs(projects)
+        state_path = os.path.join(tmp, "state.json")
+        cwd = "/devel/repo1034"
+        sid = "5e55abc0-51d0-4a5e-9f1e-0000000abcde"
+        pid = "%9"
+
+        # A real transcript with NO human prompt → _recovery_recent_human quiet.
+        enc = watchdog.encode_project_dir(cwd)
+        tpath = os.path.join(projects, enc, sid + ".jsonl")
+        self._write(tpath, json.dumps({
+            "type": "assistant", "isApiErrorMessage": False,
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": "working"}]}}) + "\n")
+
+        # Pre-seed the parked mark with the OLD account (a prior sweep observed it).
+        self._write(state_path, json.dumps(
+            {"parked_wake": {sid: {"email": "old@x.bid", "first_seen": 1}}}))
+
+        # The box's CURRENT account (claudy already switched it to a free one).
+        cj = os.path.join(tmp, ".claude.json")
+        self._write(cj, json.dumps({"oauthAccount": {"emailAddress": "new@y.bid"}}))
+
+        banner = ("Usage limit reached  continuing automatically at 9:50am  "
+                  "esc or type to cancel\n> \n")
+        sent = []
+
+        def fake_run(argv, timeout=8):
+            if argv[:2] == ["tmux", "list-panes"]:
+                return "%s\tclaude\t%s\t12345\n" % (pid, cwd)
+            if argv[:2] == ["tmux", "capture-pane"]:
+                return banner
+            if argv[:2] == ["tmux", "send-keys"]:
+                sent.append(argv)
+                return ""
+            return ""
+
+        def _typing_send_verified(p, text, run=None, tpath=None, sleep_fn=None,
+                                  logs=None, user_authored=False, nudge=None,
+                                  state=None, **kw):
+            # transcript-confirm is faked green; fire the same keystrokes it would
+            run(["tmux", "send-keys", "-t", p, "-l", "--", text])
+            run(["tmux", "send-keys", "-t", p, "Enter"])
+            return True
+
+        with mock.patch.object(watchdog.usage, "_CLAUDE_JSON_PATH", cj), \
+                mock.patch.object(watchdog, "send_verified", _typing_send_verified):
+            logs = watchdog.run_once(
+                now=1000.0, run=fake_run, send_fn=lambda *a, **k: "sent",
+                projects_dir=projects, state_path=state_path)
+
+        # the token-free wake line fired with the exact old -> new emails
+        self.assertTrue(any("wake-parked: %s old@x.bid -> new@y.bid" % pid in ln
+                            for ln in logs), logs)
+        # an Escape (cancel the wait) AND a literal `continue` reached the pane
+        self.assertTrue(any(a[:2] == ["tmux", "send-keys"] and "Escape" in a
+                            and pid in a for a in sent), sent)
+        self.assertTrue(any("-l" in a and "continue" in a and pid in a
+                            for a in sent), sent)
+        # parked mark cleared after the successful wake
+        st = json.load(open(state_path))
+        self.assertNotIn(sid, st.get("parked_wake", {}))
+
+    def test_run_once_same_account_does_not_wake(self):
+        import json
+        import os
+        import tempfile
+        from unittest import mock
+
+        tmp = tempfile.mkdtemp()
+        projects = os.path.join(tmp, "projects")
+        os.makedirs(projects)
+        state_path = os.path.join(tmp, "state.json")
+        cwd = "/devel/repo1034b"
+        sid = "5e55abc0-51d0-4a5e-9f1e-0000000abcdf"
+        pid = "%7"
+        enc = watchdog.encode_project_dir(cwd)
+        tpath = os.path.join(projects, enc, sid + ".jsonl")
+        self._write(tpath, json.dumps({
+            "type": "assistant", "isApiErrorMessage": False,
+            "message": {"role": "assistant",
+                        "content": [{"type": "text", "text": "working"}]}}) + "\n")
+        # parked mark records the SAME account the box currently has → no switch
+        self._write(state_path, json.dumps(
+            {"parked_wake": {sid: {"email": "same@x.bid", "first_seen": 1}}}))
+        cj = os.path.join(tmp, ".claude.json")
+        self._write(cj, json.dumps({"oauthAccount": {"emailAddress": "same@x.bid"}}))
+        banner = ("Usage limit reached  continuing automatically at 9:50am  "
+                  "esc or type to cancel\n> \n")
+        sent = []
+
+        def fake_run(argv, timeout=8):
+            if argv[:2] == ["tmux", "list-panes"]:
+                return "%s\tclaude\t%s\t12345\n" % (pid, cwd)
+            if argv[:2] == ["tmux", "capture-pane"]:
+                return banner
+            if argv[:2] == ["tmux", "send-keys"]:
+                sent.append(argv)
+                return ""
+            return ""
+
+        with mock.patch.object(watchdog.usage, "_CLAUDE_JSON_PATH", cj):
+            logs = watchdog.run_once(
+                now=1000.0, run=fake_run, send_fn=lambda *a, **k: "sent",
+                projects_dir=projects, state_path=state_path)
+
+        self.assertFalse(any(" -> " in ln for ln in logs
+                             if "wake-parked" in ln), logs)
+        # no `continue` keystroke fired for this pane
+        self.assertFalse(any("-l" in a and "continue" in a for a in sent), sent)
+        # mark preserved (still parked, still same account)
+        st = json.load(open(state_path))
+        self.assertIn(sid, st.get("parked_wake", {}))
 
 
 if __name__ == "__main__":

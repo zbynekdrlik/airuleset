@@ -321,6 +321,7 @@ from watchdog.decide import (  # noqa: E402
     SESSLIMIT_MAX_TRIES as SESSLIMIT_MAX_TRIES,
     DATED_RESET_STALE_GRACE_S as DATED_RESET_STALE_GRACE_S,
     pane_session_limited as pane_session_limited,
+    pane_auto_continue_parked as pane_auto_continue_parked,   # #1034 Job 48
     parse_reset_epoch as parse_reset_epoch,
     _reset_epoch_from_scanned_text as _reset_epoch_from_scanned_text,
     parse_reset_epoch_from_error_text as parse_reset_epoch_from_error_text,
@@ -1998,6 +1999,12 @@ from watchdog import priority_policy as priority_policy  # noqa: E402,F401
 # GET is an injected seam so run_once unit tests stay offline).
 from watchdog import healthz_probe as healthz_probe  # noqa: E402,F401
 
+# #1034 — Job 48, PARKED-WAKE: wake a session parked on the usage-limit
+# auto-continue banner after a claudy account switch (stdlib-only at top level
+# + a lazy `import watchdog` inside `deliver_wake` for its keystroke defaults →
+# no cycle; imports NO notify — machine-channel journal only, lock-tested).
+from watchdog import parked_wake as parked_wake  # noqa: E402,F401
+
 
 # #535 — job 34, per-box cross-target conformance check. Extracted to
 # `watchdog/conformance.py`; re-exported here so `run_once`'s job-34 dispatch and
@@ -2197,7 +2204,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              deploy_state_fetch=None,
              infra_queue_fetch=None, resolve_role_fn=None,
              health_probes=None, health_probe_fetch=None):
-    """Scan every `claude` pane once. 47 numbered jobs per poll — 41 LIVE and 6
+    """Scan every `claude` pane once. 48 numbered jobs per poll — 42 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -2959,6 +2966,32 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           the only managed box reaching both presenter prods (STEP-0 2026-09-14),
           so today it carries the declaration; another monitor is one more entry,
           no code change. `watchdog/healthz_probe.py`'s docstring is the SSOT.
+      (48) PARKED-WAKE after a claudy ACCOUNT SWITCH (#1034) — ALWAYS wired
+          (local `~/.claude.json` + pane reads, no external fetch), runs EVERY
+          sweep. With `autoContinueAtUsageLimit: true` a limit-hit pane PARKS on
+          the auto-continue banner (`Usage limit reached · continuing
+          automatically at <čas>` / `Continuing automatically at <čas>` / the
+          `… the automatic-continue setting no longer ends this wait` state) and
+          waits for the ORIGINAL account's reset clock. When claudy switches the
+          box's on-disk account (`oauthAccount.emailAddress`) to a free one,
+          NEITHER existing recovery path re-fires `continue`: job 1 stays dormant
+          for a usage cap, job 6 waits for the original reset — so the box sat
+          idle ~3.5 h in the montalu1 incident (2026-09-15). This job wakes it
+          EARLY: per live pane it detects the parked banner
+          (`pane_auto_continue_parked`, bottom-scoped like `pane_session_limited`),
+          reads the box email, remembers (persisted `state["parked_wake"][<sid>]`)
+          the email seen when the banner was FIRST observed, and — ONLY when the
+          email CHANGED since then — delivers `Escape` (cancel the wait) then
+          `continue`+Enter via the existing verified keystroke primitive
+          (`deliver_wake` → `keys` + `send_verified`, RECOVERY nudge
+          `wake-parked` = always-on), logs a token-free
+          `wake-parked: <pane> <old> -> <new>` line, and clears the mark. No
+          account change → nothing (an esc/continue before the reset just
+          re-hits the limit). Gated by the SAME in-mode / recent-human vetoes the
+          `resume` recovery kind honours; a FRESH per-pane capture means a
+          same-sweep job-6 resume is seen as already-woken (no double-fire).
+          MACHINE-CHANNEL only (never pings the owner); complementary to job 6.
+          `watchdog/parked_wake.py`'s docstring is the SSOT.
 
     PAUSED BOX (#851/#1032): when `box_paused` is True — the box's OWN fleet entry
     carries `paused` (a stream the owner froze), resolved once in `cmd_watchdog`
@@ -4930,6 +4963,46 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                  healthz_probe.HEALTHZ_PROBE_INTERVAL_S)),
          _job_healthz_probe, "healthz-probe error",
          min_budget=_BUDGET_MIN_HTTP_PROBE_S)
+
+    # Job 48 (#1034) — PARKED-WAKE. ALWAYS wired (local `~/.claude.json` + pane
+    # reads, no external fetch), runs EVERY sweep (a claudy account switch can
+    # land anytime; the wake must be fast). Reuses the SAME materialized `panes`
+    # list the pane loop already built (no second `list_claude_panes`), the
+    # Job-41 template. Wakes a session parked on the usage-limit auto-continue
+    # banner ONLY when the box's account email CHANGED since the pane first
+    # parked (a claudy switch), via the existing verified keystroke primitive
+    # (esc-cancel + `send_verified` continue, RECOVERY nudge `wake-parked` →
+    # always-on) subject to the same in-mode / recent-human gates the `resume`
+    # recovery kind honours. MACHINE-CHANNEL only (never pings the owner). A
+    # FRESH per-pane capture is taken so a same-sweep job-6 resume is seen as
+    # already-woken (banner gone → no double-fire). `min_budget` = the ps/pane
+    # read class so a budget-tight sweep holds it rather than run into the 120s
+    # kill.
+    def _job_parked_wake():
+        _jl = []
+
+        def _deliver(pid, tpath):
+            return parked_wake.deliver_wake(
+                pid, tpath, run=run, sleep_fn=sleep_fn, logs=_jl, dry_run=dry_run)
+
+        def _recent_human(sid, cwd, tpath, pid):
+            from watchdog import goal as _goal_mod   # deferred: avoid import cycle
+            return _goal_mod._recovery_recent_human(
+                sid, cwd, tpath, now, pid=pid, run=run)
+
+        lines = parked_wake.parked_wake_job(
+            now, state, panes, projects_dir,
+            account_email=_account_email,
+            find_transcript=find_active_transcript,
+            capture=lambda pid: capture_pane(pid, run),
+            is_parked=pane_auto_continue_parked,
+            in_mode=lambda pid: pane_in_mode(pid, run),
+            recent_human=_recent_human,
+            deliver=_deliver,
+            dry_run=dry_run)
+        return lines + _jl
+    _add("parked_wake_job", lambda: True, _job_parked_wake, "parked-wake error",
+         min_budget=_BUDGET_MIN_PS_REAPER_S)
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with

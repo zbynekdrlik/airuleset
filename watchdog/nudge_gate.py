@@ -161,7 +161,7 @@ NUDGE_TOTAL_GAP_MIN_S = 3600
 # into a declared window (self-callback / dark-/stale-/auth-/fulfilled-rearm)
 # keeps its OWN bound — the per-request `GOAL_DELIVERY_ATTEMPT_CAP` plus each
 # rearm origin's `*_attempts` rate state — exactly like the other recovery kinds.
-RECOVERY_NUDGE_KINDS = frozenset({"resume", "compact", "goal-arm"})
+RECOVERY_NUDGE_KINDS = frozenset({"resume", "compact", "goal-arm", "wake-parked"})
 
 # orphan-reaper TTL for a per-sid cadence rec whose session is gone (mirrors the
 # #519/#531 per-sid-leak reaper): the `visited_sids` gate is PRIMARY (a live pane

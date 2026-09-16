@@ -128,7 +128,7 @@ MACHINE_NUDGE_KINDS = frozenset({
 # "role" in `cli_concurrency.resolve_concurrency`); see `watchdog/goal.py`
 # `deliver_goal`. Its own recent-human + tri-state-armed + boundary + per-sid
 # rate-floor gates bound it, exactly as the other recovery nudges keep theirs.
-RECOVERY_NUDGE_KINDS = frozenset({"resume", "compact", "goal-arm"})
+RECOVERY_NUDGE_KINDS = frozenset({"resume", "compact", "goal-arm", "wake-parked"})
 
 # Every threaded nudge identity — the stageable PRIORITY set plus the always-on
 # RECOVERY set. A `nudge=` threaded by any delivery site is one of these.
