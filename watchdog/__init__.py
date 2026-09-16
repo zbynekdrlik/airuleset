@@ -1731,6 +1731,30 @@ TAIL_BUDGET_S = 20                # extra seconds for jobs 8/9 past sweep_deadli
 # `Failed with result 'timeout'`. Well under 120s so the line lands BEFORE a kill.
 SWEEP_SOFT_CAP_S = 100
 
+# #1041 timeout-race follow-up — per-job SWEEP-BUDGET minimums. `remaining_budget_s()`
+# (defined in run_once, seconds to SWEEP_SOFT_CAP_S from the SAME time_fn/_sweep_start
+# seam #1023 added) is the ONE primitive; a standalone registry job carrying a
+# `min_budget` skips with `<label> -> hold:budget (<left>s left, need >=<min>s)` +
+# UNTOUCHED state when fewer than its own minimum remain, so a network/subprocess job
+# started this late in the sweep cannot run the unit into the 120s TimeoutStartSec kill
+# (state is persisted only at sweep END). Each minimum is derived from THAT job's own
+# dominant fetch/subprocess timeout — NEVER a fixed 60s copied from the queue-arrival
+# fetch (the #1023 anti-pattern the ticket calls out). A skipped job re-runs next sweep.
+_BUDGET_MIN_GH_FETCH_S = 20       # a single gh timeline read (timeout ~15) + margin
+# a repo-batched gh/git loop (net_drift/stuck_main/wip_ref/…): sized for STARTING
+# safely + making one repo's progress, NOT the whole REPO_SWEEP_BATCH_MAX (3) batch
+# (~45s) — those jobs persist a cadence/dedup mark THROUGH each repo (#172), so a
+# mid-batch kill is survivable and costs at most the repos not yet reached, never a
+# lost mark. 25 = one repo (~15s) + margin; the batch's own per-repo write-through,
+# not this floor, bounds the multi-repo tail (#1041 review-1 F4).
+_BUDGET_MIN_GH_BATCH_S = 25
+_BUDGET_MIN_SSH_FLEET_S = 65      # ssh fanout across fleet hosts (per-host ~60), hour-gated, coordinator-only
+_BUDGET_MIN_HTTP_PROBE_S = 15     # a single HTTP GET (usage timeout 12 / healthz 8) + margin
+_BUDGET_MIN_PS_REAPER_S = 10      # a ps read + targeted kill / a per-pane tmux round-trip (fast subprocess)
+_BUDGET_MIN_DISK_DRAIN_S = 30     # the du-heavy disk-guard drain ladder, cadence-gated (10 min)
+_BUDGET_MIN_MDREVIEW_S = 30       # the mdreview-audit subprocess + gh reopen, daily
+_BUDGET_MIN_LOCAL_SEND_S = 15     # a local fleet.jsonl read + a bounded Discord send (conformance heartbeat)
+
 
 def _owner_disabled(kind):
     """#400 owner kill-switch read: True when the owner's flag file for
@@ -2983,6 +3007,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     if sweep_budget_s <= 0:
         sweep_budget_s = SWEEP_WALL_CLOCK_BUDGET_S
     sweep_deadline = time_fn() + sweep_budget_s
+    # #1041 timeout-race follow-up — the ONE sweep-budget primitive, from the SAME
+    # time_fn/sweep seam #1023 added. `_sweep_start` == run_once start (sweep_deadline
+    # is start + sweep_budget_s). `remaining_budget_s()` = seconds until SWEEP_SOFT_CAP_S
+    # (100s, well under the unit's 120s TimeoutStartSec kill). Every budget-aware
+    # standalone job (the registry loop below) skips with `hold:budget` when fewer than
+    # its own minimum remain; job 20's goal-lane riders reuse their own #1023
+    # `_budget_left_fn` (tail-deadline) seam, so the seam is extended, never forked.
+    _sweep_start = sweep_deadline - sweep_budget_s
+
+    def remaining_budget_s():
+        return SWEEP_SOFT_CAP_S - (time_fn() - _sweep_start)
     from notify import compose_api_error_alert, stream_redirect
     if send_fn is None:
         from notify import send as send_fn
@@ -4195,8 +4230,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # `err`: "<prefix> error" text logged on a raise, or None to swallow it.
     _standalone_registry = []
 
-    def _add(label, gate, invoke, err):
-        _standalone_registry.append((label, gate, invoke, err))
+    def _add(label, gate, invoke, err, min_budget=None):
+        # #1041 — `min_budget` (seconds): a network/subprocess job carries its own
+        # timeout-derived minimum; the registry loop below skips it with `hold:budget`
+        # + UNTOUCHED state when `remaining_budget_s()` is under it. None = no guard
+        # (a local/fast job — see the registry audit on issue 1041's design comment).
+        _standalone_registry.append((label, gate, invoke, err, min_budget))
 
     # --- (3) WEEKLY TOKEN-USAGE alert (only when a fetcher is wired) — rate-limited
     # to USAGE_INTERVAL inside check_usage so the 60s tmux cadence doesn't hammer
@@ -4205,7 +4244,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
         line = check_usage(now, state, send_fn, fetch=usage_fetch,
                            owner=account_owner or None, dry_run=dry_run)
         return [line] if line else []
-    _add("check_usage", lambda: usage_fetch is not None, _job_check_usage, None)
+    _add("check_usage", lambda: usage_fetch is not None, _job_check_usage, None,
+         min_budget=_BUDGET_MIN_HTTP_PROBE_S)
 
     # --- (5) DELIVER PENDING ✅ — backstop for the unreliable idle_prompt event.
     # Best-effort: a bad pending file must never break the tmux jobs.
@@ -4280,7 +4320,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              gh_fetch=bounce_fetch, projects_dir=projects_dir,
              persist=lambda: save_state(state_path, state),
              time_fn=time_fn, sweep_deadline=tail_deadline, sleep_fn=sleep_fn),
-         "bounce-backstop error")
+         "bounce-backstop error", min_budget=_BUDGET_MIN_GH_FETCH_S)
 
     # Job 11 — gk-request backstop (#30): the stream→supervisor mirror of
     # job 8. Same gating: only when a fetch is wired; cadence-gated
@@ -4290,7 +4330,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              now, run, state, send_fn, dry_run=dry_run,
              gh_fetch=gkreq_fetch, projects_dir=projects_dir,
              persist=lambda: save_state(state_path, state), sleep_fn=sleep_fn),
-         "gkreq-backstop error")
+         "gkreq-backstop error", min_budget=_BUDGET_MIN_GH_FETCH_S)
 
     # OWNER KILL-SWITCH (2026-08-12, direct order: "vypni compact watcher a aj
     # goal watcher lebo stale si ich neopravil zato mi stale promptuju kde
@@ -4394,7 +4434,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                 fetch=fleet_fetch, fleet_path=fleet_path,
                                 shared_fleet_path=shared_fleet_path,
                                 owner=account_owner or None, dry_run=dry_run),
-         "fleet-burn error")
+         "fleet-burn error", min_budget=_BUDGET_MIN_SSH_FLEET_S)
 
     # Job 19 — HOURLY BURN ALERT (#81): only when `burn_alert_enabled` is
     # truthy (cmd_watchdog computes it the SAME controller-only way it
@@ -4538,7 +4578,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                       owners_seen=owners_seen,            # #717
                                       account_owner=account_owner,        # #717
                                       project_by_sid=project_by_sid, authority=_box_authority()),  # #667
-         "delivery-stall error")
+         "delivery-stall error", min_budget=_BUDGET_MIN_GH_FETCH_S)
 
     # Job 25 — CARD RECONCILIATION (#134): the mirror of job 24, same
     # "wired = on" convention and the same confirm-then-announce contract.
@@ -4568,7 +4608,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                     owner_by_sid=owner_by_sid,
                                     projects_dir=projects_dir, sleep_fn=sleep_fn,
                                     owned_closed=_owned_scope),
-         "card-reconcile error")
+         "card-reconcile error", min_budget=_BUDGET_MIN_GH_BATCH_S)
 
     # Job 26 — COMPACT-STALL WATCH — REMOVED (#402, 2026-08-12). Used to
     # watch the shared /compact claim file for a stuck entry; that whole
@@ -4594,7 +4634,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                  owners_seen=owners_seen,            # #717
                                  account_owner=account_owner,        # #717
                                  persist=lambda: save_state(state_path, state)),
-         "net-drift error")
+         "net-drift error", min_budget=_BUDGET_MIN_GH_BATCH_S)
 
     # Job 28 — STUCK-MAIN SWEEP (#137): only when `repo_roots` is given —
     # the "wired = on" convention. Self-gated on an hourly cadence
@@ -4613,7 +4653,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                   owners_seen=owners_seen,            # #717
                                   account_owner=account_owner,        # #717
                                   persist=lambda: save_state(state_path, state)),
-         "stuck-main error")
+         "stuck-main error", min_budget=_BUDGET_MIN_GH_BATCH_S)
 
     # Job 22 — STALE EXEC-MARKER CLEANUP (#97): ALWAYS wired (no gating
     # param — same "always on" shape as jobs 9/15/17, since it depends on
@@ -4648,7 +4688,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
          lambda: sweep_orphaned_wip_refs(now, state, repo_roots=repo_roots,
                                          git_fetch=git_fetch, dry_run=dry_run,
                                          persist=lambda: save_state(state_path, state)),
-         "wip-ref-sweep error")
+         "wip-ref-sweep error", min_budget=_BUDGET_MIN_GH_BATCH_S)
 
     # Job 31 — GK SELF-SERVICE AUTO-BOUNCE (#516). Appended LAST (keeps the
     # kill-switch NOTICE pinned between job 11 and job 13). Only when a fetch is
@@ -4663,7 +4703,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              now, run, state, dry_run=dry_run,
              gh_fetch=gk_selfservice_fetch,
              persist=lambda: save_state(state_path, state)),
-         "gk-selfservice-bounce error")
+         "gk-selfservice-bounce error", min_budget=_BUDGET_MIN_GH_FETCH_S)
 
     # Job 32 (#515) — mechanical U-label lifecycle: clear a needs-answer /
     # needs-decision label whose question the owner already ANSWERED on Discord
@@ -4675,7 +4715,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              now, state, dry_run=dry_run, projects_dir=projects_dir,
              clear_fn=u_reconcile_clear,
              persist=lambda: save_state(state_path, state)),
-         "u-label-reconcile error")
+         "u-label-reconcile error", min_budget=_BUDGET_MIN_GH_FETCH_S)
 
     # Job 34 (#535) — PER-BOX CONFORMANCE CHECK. Appended LAST (keeps the
     # kill-switch NOTICE pinned between job 11 and job 13). Gated on
@@ -4688,7 +4728,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              now, state, dry_run=dry_run,
              repo_root=conformance_root, is_target_check=conformance_is_target,
              persist=lambda: save_state(state_path, state)),
-         "conformance-check error")
+         "conformance-check error", min_budget=_BUDGET_MIN_GH_BATCH_S)
 
     # Job 35 (#543) — CENTRAL DEAD-BOX HEARTBEAT-MISSING DETECTOR,
     # controller-only (#971, was dev1). The per-box conformance check (job
@@ -4705,7 +4745,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
          lambda: run_conformance_heartbeat_check(
              now, state, send_fn=send_fn, dry_run=dry_run,
              persist=lambda: save_state(state_path, state)),
-         "conformance-heartbeat error")
+         "conformance-heartbeat error", min_budget=_BUDGET_MIN_LOCAL_SEND_S)
 
     # Job 36 (#551) — orphaned gk hand-off marker backstop. Gated on
     # `gkorphan_fetch` being wired (network-free tests for every other job,
@@ -4720,7 +4760,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              # ONLY the mutated pass (byte-identical to #551).
              handoff_fetch=gkorphan_handoff_fetch,
              persist=lambda: save_state(state_path, state)),
-         "gk-orphan-marker-sweep error")
+         "gk-orphan-marker-sweep error", min_budget=_BUDGET_MIN_GH_BATCH_S)
 
     # Job 37 (#776) — RUNAWAY SHADOW-UGREP OS-PROCESS REAPER (the FIRST
     # OS-process reaper in the watchdog). Runs on EVERY box (a runaway ugrep
@@ -4735,7 +4775,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
          lambda: shadow_ugrep_reaper(
              ps_fetch=reaper_ps_fetch, kill_fn=reaper_kill_fn,
              dry_run=dry_run),
-         "shadow-ugrep-reaper error")
+         "shadow-ugrep-reaper error", min_budget=_BUDGET_MIN_PS_REAPER_S)
 
     # Job 38 (#778) — HEAVY-BUILD-TOOLCHAIN OS-PROCESS REAPER, SHARED-STREAM
     # BOX ONLY. A SIBLING of Job 37 (opposite gating: kill-on-sight, no age/CPU
@@ -4750,7 +4790,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
          lambda: heavy_build_reaper(
              ps_fetch=reaper_ps_fetch, kill_fn=reaper_kill_fn,
              dry_run=dry_run),
-         "heavy-build-reaper error")
+         "heavy-build-reaper error", min_budget=_BUDGET_MIN_PS_REAPER_S)
 
     # Job 39 (#775) — VERIFY-ONLY shared-stream resource-guard check. Gated on
     # `resource_guard_gk_request` being wired (the "wired = on" convention,
@@ -4763,7 +4803,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     _add("resource_guard_verify", lambda: resource_guard_gk_request is not None,
          lambda: resource_guard_verify(
              gk_request_fn=resource_guard_gk_request, dry_run=dry_run),
-         "resource-guard-verify error")
+         "resource-guard-verify error", min_budget=_BUDGET_MIN_GH_FETCH_S)
 
     # Job 40 (#834) — PER-BOX DISK-PRESSURE GUARD. Gated on `disk_guard_enabled`
     # (cmd_watchdog passes True → it runs EVERY real poll on every box; left
@@ -4777,7 +4817,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # /tmp, /var/log, system journal, apt, logrotate/fail2ban) are #841.
     _add("disk_guard", lambda: disk_guard_enabled,
          lambda: disk_guard.run_disk_guard(now, dry_run=dry_run),
-         "disk-guard error")
+         "disk-guard error", min_budget=_BUDGET_MIN_DISK_DRAIN_S)
 
     # Job 41 — MODEL-FLOAT AUDIT (#871). ALWAYS wired (reads local transcripts
     # + the pane list, no external fetch), self-gated to hourly via the GATE
@@ -4818,7 +4858,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     _add("mdreview_cadence", lambda: mdreview_cadence_enabled,
          lambda: mdreview_cadence.mdreview_cadence_job(
              now, dry_run=dry_run),
-         "mdreview-cadence error")
+         "mdreview-cadence error", min_budget=_BUDGET_MIN_MDREVIEW_S)
 
     # Job 44 (#885) — PRIORITY POLICY ENFORCER. Gated on
     # `priority_policy_enabled` (cmd_watchdog passes True; left False in
@@ -4829,7 +4869,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     _add("priority_policy", lambda: priority_policy_enabled,
          lambda: priority_policy.priority_policy_job(
              ps_fetch=reaper_ps_fetch, dry_run=dry_run),
-         "priority-policy error")
+         "priority-policy error", min_budget=_BUDGET_MIN_PS_REAPER_S)
 
     # Job 45 (#885) — ORPHAN BG-POLL-LOOP REAPER. Gated on
     # `reaper_ps_fetch is not None` (same as Jobs 37/38 — wired =
@@ -4841,7 +4881,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
          lambda: priority_policy.orphan_poll_reaper(
              ps_fetch=reaper_ps_fetch, kill_fn=reaper_kill_fn,
              dry_run=dry_run),
-         "orphan-poll-reaper error")
+         "orphan-poll-reaper error", min_budget=_BUDGET_MIN_PS_REAPER_S)
 
     # Job 46 (#947, REVERSED 2026-09-10) — SESSION-HEALTH-OBSERVATION.
     # Passive journal-only health measurement. NEVER types into a pane.
@@ -4867,7 +4907,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                 sho_logs.append(line)
         return sho_logs
     _add("session_health_observe", lambda: True,
-         _job_session_health_observe, "session-health-observe error")
+         _job_session_health_observe, "session-health-observe error",
+         min_budget=_BUDGET_MIN_PS_REAPER_S)
 
     # Job 47 (#1005) — presenter /healthz.ai EXTERNAL health-check. Gated on a
     # FLEET DECLARATION: `health_probes` non-empty (the box declared probes via
@@ -4887,16 +4928,32 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
          lambda: (bool(health_probes) and health_probe_fetch is not None
                   and _sweep_due(state, "healthz_probe_last_ts", now,
                                  healthz_probe.HEALTHZ_PROBE_INTERVAL_S)),
-         _job_healthz_probe, "healthz-probe error")
+         _job_healthz_probe, "healthz-probe error",
+         min_budget=_BUDGET_MIN_HTTP_PROBE_S)
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with
     # the job's custom prefix or (None) swallows it. Accumulation is verbatim.
-    # #1023 timeout-race — sweep start (monotonic) for the SOFT-CAP budget log
-    # below. `sweep_deadline` == start + `sweep_budget_s`, so start is derivable.
-    _sweep_start = sweep_deadline - sweep_budget_s
+    # `_sweep_start` / `remaining_budget_s()` are defined once at run_once start
+    # (the #1041 primitive over the #1023 seam); the SOFT-CAP budget log below
+    # reuses `_sweep_start`.
     _budget_logged = False
-    for _label, _gate, _invoke, _err in _standalone_registry:
+    for _label, _gate, _invoke, _err, _min_budget in _standalone_registry:
+        # #1041 — read the ONE budget primitive ONCE per iteration (one clock read);
+        # the job-start elapsed anchor is derived from it (`elapsed == SOFT_CAP -
+        # left`), so attribution and the budget guard below share that single read.
+        _left = remaining_budget_s()
+        # ATTRIBUTION: journal the job ABOUT to run, flushed IMMEDIATELY by the
+        # existing `_FlushList(log_fn)` (cmd_watchdog wires log_fn to a flushing
+        # print), so a systemd `TimeoutStartSec=2min` kill DURING a job leaves that
+        # job's name as the LAST `job start:` line in the journal — the culprit,
+        # instead of a bare `Failed with result 'timeout'`. One line per registered
+        # job (the gk 15:13:32 kill printed nothing about which job hung); the per-
+        # sweep volume (~one line/job) is absorbed by the box's journald SystemMaxUse
+        # cap (#841). Measured against SWEEP_SOFT_CAP_S (the registry reference frame;
+        # job 20's goal-lane riders measure against tail_deadline (110), ~10s more
+        # permissive — see their own `_budget_left_fn`).
+        logs.append("job start: %s at %ds" % (_label, int(SWEEP_SOFT_CAP_S - _left)))
         if _gate():
             # #1032: ONE gate site — a PAUSED box suppresses every human-channel-
             # alerting job (a frozen stream's drift/leftover is expected; nobody
@@ -4904,6 +4961,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             # hygiene jobs run on.
             if box_paused and _label in PAUSED_SUPPRESSED_JOBS:
                 logs.append("%s -> skip:paused-box (#851)" % _label)
+                continue
+            # #1041 — SWEEP-BUDGET guard: a network/subprocess job that would START
+            # with fewer than its own timeout-derived minimum left skips (UNTOUCHED
+            # state, zero external calls), so it cannot run the unit into the 120s
+            # kill; it re-runs next sweep. `_min_budget` None => no guard (a local
+            # /fast job, per issue 1041's registry audit). `_left` is the same
+            # `remaining_budget_s()` read used for the job-start anchor above.
+            if _min_budget is not None and _left < _min_budget:
+                logs.append("%s -> hold:budget (%ds left, need >=%ds)"
+                            % (_label, int(_left), _min_budget))
                 continue
             try:
                 logs += _invoke()
@@ -4914,7 +4981,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
         # the soft cap, so a subsequent systemd `TimeoutStartSec=2min` kill has a
         # named cause in the journal instead of a bare `Failed with result
         # 'timeout'`. Logged once per sweep (a latch); the unit timeout is 120s,
-        # this cap is well under it so the line lands before any kill.
+        # this cap is well under it so the line lands before any kill. Measured
+        # AFTER the job ran (names the job that CROSSED the cap), distinct from the
+        # job-start anchor above (measured before the job runs).
         if not _budget_logged:
             _elapsed = time_fn() - _sweep_start
             if _elapsed >= SWEEP_SOFT_CAP_S:
