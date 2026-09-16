@@ -2978,5 +2978,51 @@ class StaleCarryForward952(unittest.TestCase):
                           "cold cache must stay None on failure")
 
 
+def _seed_task_hygiene(home, a, ts=None):
+    d = statusbar._claude_dir(home) / "task-hygiene"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "status.json").write_text(json.dumps(
+        {"a": a, "b": 0, "c": 0, "ts": int(time.time() if ts is None else ts)}))
+
+
+class TaskHygieneInISegment(unittest.TestCase):
+    """#1036 — the persisted task-hygiene A count is added to the footer I."""
+
+    def setUp(self):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = tmp.name
+        self.cwd = "/home/x/devel/demo"
+
+    def _seg(self, now=None):
+        return statusbar.tickets_segment(self.cwd, now=now, home=self.home,
+                                         spawn=False)
+
+    def test_fresh_a_count_is_added_to_I(self):
+        _seed_cache(self.home, self.cwd, open_n=5, name="demo")
+        _seed_task_hygiene(self.home, a=2)
+        self.assertIn("I 7", self._seg())
+
+    def test_no_status_leaves_I_unchanged(self):
+        _seed_cache(self.home, self.cwd, open_n=5, name="demo")
+        self.assertIn("I 5", self._seg())
+
+    def test_stale_status_is_not_counted(self):
+        _seed_cache(self.home, self.cwd, open_n=5, name="demo")
+        _seed_task_hygiene(self.home, a=2, ts=time.time() - 99999)
+        self.assertIn("I 5", self._seg())
+
+    def test_zero_a_leaves_I_unchanged(self):
+        _seed_cache(self.home, self.cwd, open_n=5, name="demo")
+        _seed_task_hygiene(self.home, a=0)
+        self.assertIn("I 5", self._seg())
+
+    def test_a_count_helper_reads_persisted(self):
+        _seed_task_hygiene(self.home, a=3)
+        self.assertEqual(statusbar.task_hygiene_a_count(home=self.home), 3)
+        self.assertEqual(statusbar.task_hygiene_a_count(
+            home=self.home, now=time.time() + 99999), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
