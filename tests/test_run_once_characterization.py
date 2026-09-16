@@ -226,6 +226,13 @@ CANONICAL_SWEEP = [
     # order/gate/isolation assertions. Job 47's gate additionally requires the
     # `health_probes` fleet declaration to be non-empty — never true in this
     # test's kwargs — so it stays fully inert here.
+    # Job 48 (#1034 parked_wake_job) is also not pinned here, but for a DIFFERENT
+    # reason: its registry gate is `lambda: True` (ALWAYS on, no kwarg to leave
+    # closed), so it DOES run in `_drive`. It is harmless to these assertions
+    # anyway — its seam (`wd.parked_wake.parked_wake_job`) is not patched by
+    # `_drive`, so it records nothing into `labels`; and with `list_claude_panes`
+    # stubbed "empty" its per-pane loop never executes, so it is a clean no-op.
+    # Its full-set presence is locked by test_run_once_registry_labels.py.
 ]
 
 EXPECTED_FULL_ORDER = [s.label for s in CANONICAL_SWEEP]

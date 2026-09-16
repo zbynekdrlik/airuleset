@@ -485,7 +485,7 @@
     "tests/test_run_card_content_validation.py": 474,
     "tests/test_run_card_enforcement.py": 2265,
     "tests/test_run_card_missing_repo_590.py": 229,
-    "tests/test_run_once_characterization.py": 499,
+    "tests/test_run_once_characterization.py": 506,
     "tests/test_run_once_registry_labels.py": 186,
     "tests/test_runtime_deps.py": 254,
     "tests/test_schedule_wakeup_loop_only.py": 68,
