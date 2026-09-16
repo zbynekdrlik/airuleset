@@ -192,8 +192,10 @@ class TestRecoveryAlwaysOn(unittest.TestCase):
     def test_recovery_set_is_disjoint_from_stageable(self):
         # #1038 adds `goal-arm` (a DECLARED managed window's post-reboot arm) to
         # the always-on recovery set — a session revival, never machine-staged.
+        # #1034 adds `wake-parked` (waking a session parked on the usage-limit
+        # auto-continue banner after a claudy account switch) — same class.
         self.assertEqual(wd.RECOVERY_NUDGE_KINDS,
-                         frozenset({"resume", "compact", "goal-arm"}))
+                         frozenset({"resume", "compact", "goal-arm", "wake-parked"}))
         self.assertTrue(wd.MACHINE_NUDGE_KINDS.isdisjoint(wd.RECOVERY_NUDGE_KINDS))
         # ALL_NUDGE_KINDS is the union — every threaded identity is known
         self.assertEqual(wd.ALL_NUDGE_KINDS,
