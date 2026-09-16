@@ -123,7 +123,7 @@
     "tests/test_authority_handoff_cards.py": 477,
     "tests/test_authority_marker_cap_828.py": 173,
     "tests/test_authority_profiles.py": 412,
-    "tests/test_authority_run_card.py": 538,
+    "tests/test_authority_run_card.py": 541,
     "tests/test_authority_slice_quals.py": 914,
     "tests/test_autopilot_ci_resilience.py": 74,
     "tests/test_autopilot_dialog_default.py": 144,

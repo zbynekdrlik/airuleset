@@ -245,10 +245,13 @@ class TestRunCardRemainingScopedToStream(TestCase):
 
         union_calls = [a for a in seen_argvs
                       if len(a) > 1 and a[0] == "issue" and a[1] == "list"]
+        # #1053: MAINTAINER_ACTION_LABELS gained gk-processing (a picked-up
+        # hand-off stays a gk obligation), so the union is 4 per-qual queries.
         self.assertEqual(
-            len(union_calls), 3,
-            "expected exactly 3 per-qual union queries (core, "
-            "needs-gatekeeper, ready-for-review) -- got %r" % (union_calls,))
+            len(union_calls), 4,
+            "expected exactly 4 per-qual union queries (core, "
+            "needs-gatekeeper, ready-for-review, gk-processing) -- got %r"
+            % (union_calls,))
         for a in union_calls:
             self.assertIn(
                 "-R", a,
