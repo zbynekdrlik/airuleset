@@ -237,6 +237,13 @@ OPS_WAIT_FETCH_TTL_MIN_S = 5 * 60
 # mirrors BACKLOG_CHECK_FAILURE_TTL_S.
 OPS_WAIT_FETCH_FAIL_TTL_S = 60
 
+# #1041 — the ops-wait re-check does a gh union fetch (`_cached_ops_wait`) AND, when
+# a deploy-parked W member exists, a per-instance git/HTTP deploy-state fetch
+# (`deploy_state_fetch`, git 5/10 + HTTP 15 per instance). Both are cached, so the
+# guard is CACHE-AWARE (skips only when a fetch would actually MISS + fire); the
+# minimum covers the deploy-state per-instance bound, well under the 120s kill.
+OPS_WAIT_FETCH_MIN_BUDGET_S = 20
+
 # #714 — the nudge is a TRIGGER, not a textbook. Hard cap on the keystroke so it
 # never grows into the multi-KB wall the incident produced (full doctrine + a
 # named list of 53 W tickets), which (a) collapses into a `[Pasted text …]`
@@ -356,6 +363,27 @@ def _cached_member_fetch(cwd, fetch, state, now, cache_key, ttl=None,
         members = None
     cache[cwd] = {"ts": now, "members": members}
     return members
+
+
+def _cache_would_miss(cwd, state, now, cache_key, ttl=None, fail_ttl=None):
+    """#1041 — would a `_cached_member_fetch(cwd, ..., cache_key, ...)` MISS the
+    cache right now and therefore fire its (possibly slow) fetch? Mirrors the
+    freshness check above EXACTLY (same ttl/fail_ttl fallbacks, same malformed-ts
+    handling) so a caller can decide — BEFORE calling — whether a budget guard
+    should skip the fetch. True = a fetch WOULD fire (stale/absent/malformed);
+    False = a fresh cache hit (microseconds, budget-irrelevant). No side effects."""
+    ttl = _fetch_ttl() if ttl is None else ttl
+    fail_ttl = OPS_WAIT_FETCH_FAIL_TTL_S if fail_ttl is None else fail_ttl
+    entry = (state.get(cache_key) or {}).get(cwd)
+    if not isinstance(entry, dict):
+        return True
+    try:
+        age = now - float(entry.get("ts", 0))
+    except (TypeError, ValueError):
+        return True
+    members = entry.get("members")
+    entry_ttl = ttl if isinstance(members, list) else fail_ttl
+    return age >= entry_ttl
 
 
 def _cached_ops_wait(cwd, ops_wait_fetch, state, now, ttl=None, fail_ttl=None):
@@ -1058,7 +1086,8 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
                           dry_run, handled, ops_wait_fetch, state,
                           sleep_fn=None, cadence=None, i_count=None,
                           release_state_fetch=None, captured=None,
-                          batch_collect=None, deploy_state_fetch=None):
+                          batch_collect=None, deploy_state_fetch=None,
+                          budget_left_fn=None):
     """Audit ONE armed candidate pane's partition (I→W/U + W→I) and, on cadence,
     deliver ONE verified re-audit nudge into that session. Called from
     `goal.goal_lane_sweep`'s existing armed-pane loop with the already-resolved
@@ -1113,6 +1142,25 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     evidence)."""
     logs = []
     cadence = cadence or _cadence()
+    # #1041 — SWEEP-BUDGET guard, CACHE-AWARE: this rider's gh union fetch and its
+    # (optional) per-instance deploy-state fetch are cached; if EITHER would MISS the
+    # cache AND fewer than OPS_WAIT_FETCH_MIN_BUDGET_S of sweep budget remain, SKIP
+    # with `hold:budget` (no fetch, no state change) rather than run the sweep into
+    # the unit's 120s TimeoutStartSec kill. Cache HITS proceed regardless. None
+    # (unwired/legacy) => no guard. Lazy import (queue_arrival imports THIS module).
+    from watchdog.queue_arrival_recheck import _budget_left as _bl
+    _left = _bl(budget_left_fn)
+    if _left is not None and _left < OPS_WAIT_FETCH_MIN_BUDGET_S:
+        _would_fetch = _cache_would_miss(cwd, state, now, "ops_wait_cache") or (
+            deploy_state_fetch is not None
+            and _cache_would_miss(cwd, state, now, "deploy_state_cache",
+                                  ttl=OPS_WAIT_FETCH_TTL_S,
+                                  fail_ttl=OPS_WAIT_FETCH_FAIL_TTL_S))
+        if _would_fetch:
+            logs.append("ops-wait-recheck %s -> hold:budget (%ds left, need >=%ds; "
+                        "state untouched, retry next sweep)"
+                        % (loc, int(_left), OPS_WAIT_FETCH_MIN_BUDGET_S))
+            return logs
     # CACHED per-repo (#547 review): the fetch fires at most once per repo per
     # OPS_WAIT_FETCH_TTL_S, NOT every sweep per pane — the sibling of
     # `_cached_backlog_count`. A cache/fetch error reads as None -> skip.
