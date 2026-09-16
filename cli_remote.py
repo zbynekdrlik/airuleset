@@ -939,6 +939,41 @@ def _print_deploy_leg_diagnostics(remote, identity, hostkey_opts,
               file=sys.stderr)
 
 
+def _gh_chain_postcheck():
+    """#1051: a remote shell fragment run AFTER `airuleset.py install` on every
+    target — bound `gh --version` through the freshly-installed chain to 5 s and
+    FAIL the target (distinct rc 87) if it does not return cleanly. `timeout`
+    guarantees it NEVER hangs, so the deploy loop's existing `rc != 0 ->
+    failed.append` accounting catches a hanging (exec-looping) gh and the push
+    exits non-zero — a future push can never SHIP a hanging gh (the #1040/#1051
+    incident, where every `gh` on 12 stream boxes hung until timeout).
+
+    #1051 review-1 CRITICAL: this runs in a NON-LOGIN ssh shell (`ssh host
+    "<cmd>"`) whose PATH does NOT carry ~/.local/bin (the interactive PATH
+    export is gated on an interactive+TTY shell — cli_bashrc_appliers.py /
+    cli_binary_installers._claude_cli_env). The whole fleet's gh (and the shim
+    that can loop) lives at ~/.local/bin/gh, so a BARE `gh` here would resolve
+    the WRONG binary: a false PASS on a box still looping at ~/.local/bin/gh (a
+    system gh on PATH answers instead), and a false FAILURE on a healthy box
+    whose gh is only at ~/.local/bin. So force ~/.local/bin to the FRONT of PATH
+    — exactly what a real interactive gh consumer resolves — before the probe.
+    `-k 2` hardens the bound against a SIGTERM-ignoring child.
+
+    #1051 review-2 (finding #2): a target that legitimately has NO gh (install
+    returned "skip: no gh on this box") must NOT be failed — there is nothing to
+    verify. So resolve gh through the forced PATH first; if it does not resolve
+    at all, SKIP the probe (exit 0). Only a gh that DOES resolve is probed, so a
+    hanging / exec-looping gh (which resolves as a file) is still caught."""
+    return (
+        '{ export PATH="$HOME/.local/bin:$PATH"; '
+        'command -v gh >/dev/null 2>&1 || exit 0; '
+        'timeout -k 2 5 gh --version >/dev/null 2>&1 || '
+        '{ echo "GH-CHAIN POSTCHECK FAILED: gh --version did not return through '
+        'the installed ~/.local/bin/gh chain in 5s (exec-loop — #1051)" >&2; '
+        'exit 87; }; }'
+    )
+
+
 def _deploy_to_all_remotes(failed, auth_failed):
     """Deploy this push to every managed remote (step 3 + 3b of cmd_push).
 
@@ -1005,7 +1040,9 @@ def _deploy_to_all_remotes(failed, auth_failed):
             # logged in (live: simap1@subdev, push v0.1.134). setup-git is idempotent.
             remote_cmd = (
                 f"cd {remote['repo_path']} && (gh auth setup-git >/dev/null 2>&1 || true) "
-                f"&& git pull --ff-only && {owner_vps_env}python3 airuleset.py install"
+                f"&& git pull --ff-only && {owner_vps_env}python3 airuleset.py install "
+                # #1051: prove the freshly-installed gh chain does not hang.
+                f"&& {_gh_chain_postcheck()}"
             )
             # #347 adversarial-review CRITICAL finding: `audited_hosts` must
             # NOT be marked here (before the ssh call even runs) — a first

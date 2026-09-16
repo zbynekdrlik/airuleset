@@ -390,10 +390,143 @@ class TestEnsureWrapper(unittest.TestCase):
         cli_gh_rate.upstream_path = self._orig_up
         os.environ["PATH"] = self._orig_path
 
-    def _make_real_gh(self, path, body="#!/bin/sh\necho REAL-GH \"$@\"\n"):
+    def _make_real_gh(self, path, marker="REAL-GH"):
+        # #1051: a REAL gh is an ELF binary, NOT a #!-script. The installer's
+        # #1051 classifier keys on exactly that (ELF magic -> wrap in place;
+        # a #!-wrapper script -> foreign, skip), so the fixture for the
+        # "real gh binary" layout must carry the ELF magic bytes (all < 0x80,
+        # so a later utf-8 text read still finds `marker`).
+        with open(path, "wb") as fh:
+            fh.write(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 8
+                     + b"\n" + marker.encode("ascii") + b"\n")
+        os.chmod(path, 0o755)
+
+    def _make_app_shim(self, path):
+        # #1051: replay the odoo-erp issue-888 APP-TOKEN shim `gh-app-gh-shim.sh`
+        # — it mints the App token then execs the FIRST `gh` on PATH whose
+        # realpath is not its OWN file. It does NOT skip our rate-guard marker
+        # (that fix is odoo-erp issue 3281), so wrapping OUR shim over it and
+        # copying it to gh-upstream is the exact #1051 exec-loop.
+        body = (
+            "#!/usr/bin/env bash\n"
+            "# gh-app-gh-shim.sh  (odoo-erp issue 888 app-token shim)\n"
+            '_self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"\n'
+            '[ -n "$HOPFILE" ] && echo appshim >> "$HOPFILE"\n'
+            'IFS=":" read -ra _parts <<< "$PATH"\n'
+            'for _d in "${_parts[@]}"; do\n'
+            '  [ -z "$_d" ] && continue\n'
+            '  _cand="$_d/gh"\n'
+            '  if [ -x "$_cand" ]; then\n'
+            '    _rc="$(cd "$(dirname "$_cand")" && pwd)/$(basename "$_cand")"\n'
+            '    [ "$_rc" = "$_self" ] && continue\n'
+            '    exec "$_cand" "$@"\n'
+            "  fi\n"
+            "done\n"
+            'echo "gh: no real gh found" >&2; exit 127\n'
+        )
         with open(path, "w", encoding="utf-8") as fh:
             fh.write(body)
         os.chmod(path, 0o755)
+
+    def _make_sys_gh(self, path):
+        # An executable stand-in for the real system gh (echoes a version).
+        body = ('#!/usr/bin/env bash\n'
+                '[ -n "$HOPFILE" ] && echo sysgh >> "$HOPFILE"\n'
+                'echo "gh version 2.40.0 (test)"\n')
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        os.chmod(path, 0o755)
+
+    def test_classify_local_gh_four_layouts(self):
+        # #1051: the installer must classify ~/.local/bin/gh BEFORE touching it.
+        gh = cli_gh_rate.shim_path()
+        # (a) our own wrapper -> 'ours'
+        cli_gh_rate._write_wrapper_file(gh, "/nonexistent/gh", "/usr/bin/python3",
+                                        "/repo/cli_gh_rate.py")
+        self.assertEqual(cli_gh_rate._classify_local_gh(gh), "ours")
+        # (b) a real gh ELF binary -> 'binary'
+        os.remove(gh)
+        self._make_real_gh(gh)
+        self.assertEqual(cli_gh_rate._classify_local_gh(gh), "binary")
+        # (c) the issue-888 app-token shim (a #!-script that is not ours) -> 'foreign'
+        os.remove(gh)
+        self._make_app_shim(gh)
+        self.assertEqual(cli_gh_rate._classify_local_gh(gh), "foreign")
+        # (d) nothing there -> 'absent'
+        os.remove(gh)
+        self.assertEqual(cli_gh_rate._classify_local_gh(gh), "absent")
+
+    def test_foreign_app_shim_is_skipped_not_wrapped(self):
+        # #1051 RED: the app-token shim at ~/.local/bin/gh must NEVER be
+        # copy-and-wrapped (that is the exec-loop). The installer SKIPS it.
+        self._make_app_shim(cli_gh_rate.shim_path())
+        before = open(cli_gh_rate.shim_path(), encoding="utf-8").read()
+        status = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                    verbose=False)
+        self.assertIn("skip", status)
+        self.assertIn("foreign", status)
+        # gh is STILL the app shim, untouched — never our wrapper.
+        self.assertFalse(cli_gh_rate._is_our_wrapper(cli_gh_rate.shim_path()))
+        self.assertEqual(open(cli_gh_rate.shim_path(), encoding="utf-8").read(),
+                         before)
+        # and NO gh-upstream copy of the app shim was made (the loop's other leg).
+        self.assertFalse(os.path.exists(cli_gh_rate.upstream_path()))
+
+    def test_foreign_app_shim_install_is_idempotent(self):
+        # #1051 item 4: running the installer twice on the foreign layout both
+        # skips and never mutates gh / creates gh-upstream.
+        self._make_app_shim(cli_gh_rate.shim_path())
+        s1 = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                verbose=False)
+        s2 = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                verbose=False)
+        self.assertIn("skip", s1)
+        self.assertEqual(s1, s2)
+        self.assertFalse(cli_gh_rate._is_our_wrapper(cli_gh_rate.shim_path()))
+        self.assertFalse(os.path.exists(cli_gh_rate.upstream_path()))
+
+    def test_loop_baked_in_state_is_self_healed(self):
+        # #1051 review-1 MAJOR: a box already in the exec-loop state — our
+        # (#1040) shim at ~/.local/bin/gh + a COPY of the app-token shim at
+        # gh-upstream — must be UN-WRAPPED by the installer, not have the loop
+        # re-baked (Case 1 used to blindly refresh pointing at the foreign
+        # upstream). After the fix gh is the app shim again, our shim is gone,
+        # and gh-upstream is gone (moved back).
+        self._make_app_shim(cli_gh_rate.upstream_path())         # gh-upstream = app shim
+        cli_gh_rate._write_wrapper_file(cli_gh_rate.shim_path(),
+                                        cli_gh_rate.upstream_path(),
+                                        "/usr/bin/python3", "/repo/cli_gh_rate.py")
+        # sanity: this IS the loop-baked-in state before we run the installer.
+        self.assertTrue(cli_gh_rate._is_our_wrapper(cli_gh_rate.shim_path()))
+        self.assertEqual(cli_gh_rate._classify_local_gh(cli_gh_rate.upstream_path()),
+                         "foreign")
+        status = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                    verbose=False)
+        self.assertIn("unwrapped", status)
+        self.assertFalse(cli_gh_rate._is_our_wrapper(cli_gh_rate.shim_path()))
+        self.assertIn("gh-app-gh-shim.sh",
+                      open(cli_gh_rate.shim_path(), encoding="utf-8").read())
+        self.assertFalse(os.path.exists(cli_gh_rate.upstream_path()))
+        # idempotent: a SECOND run now sees the app shim at gh -> Case 2 skip.
+        s2 = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                verbose=False)
+        self.assertIn("skip", s2)
+        self.assertFalse(os.path.exists(cli_gh_rate.upstream_path()))
+
+    def test_foreign_skip_prints_a_loud_line(self):
+        # #1051: the skip must be LOUD so a push operator sees why the box is
+        # unthrottled (fail-open: no throttle there is acceptable, a hang is not).
+        import contextlib
+        import io
+        self._make_app_shim(cli_gh_rate.shim_path())
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                               verbose=True)
+        out = buf.getvalue()
+        self.assertIn("shim install skipped", out)
+        self.assertIn("foreign wrapper", out)
+        self.assertIn("odoo-erp issue 3281", out)
 
     def test_wrap_real_gh_in_place(self):
         # gh lives AT the shim path (this fleet's layout).
@@ -429,6 +562,40 @@ class TestEnsureWrapper(unittest.TestCase):
     def test_real_gh_path_prefers_upstream(self):
         self._make_real_gh(cli_gh_rate.upstream_path())
         self.assertEqual(cli_gh_rate.real_gh_path(), cli_gh_rate.upstream_path())
+
+    def test_real_gh_path_skips_a_foreign_wrapper(self):
+        # #1051 review-2 (finding #1): an app-token shim on PATH must NOT be
+        # returned as the "real gh" — only a real binary is (else Cases 3/4 bake
+        # our shim's REAL_GH at the app shim -> the our<->app exec-loop).
+        appdir = os.path.join(self.tmp, "appbin")
+        realdir = os.path.join(self.tmp, "realbin")
+        os.makedirs(appdir)
+        os.makedirs(realdir)
+        self._make_app_shim(os.path.join(appdir, "gh"))    # foreign shim, FIRST on PATH
+        self._make_real_gh(os.path.join(realdir, "gh"))    # real binary, later
+        os.environ["PATH"] = appdir + os.pathsep + realdir
+        self.assertEqual(cli_gh_rate.real_gh_path(),
+                         os.path.join(realdir, "gh"))
+
+    def test_case4_never_wraps_onto_a_foreign_shim(self):
+        # #1051 review-2 (finding #1): with ~/.local/bin/gh absent and an app
+        # shim earlier on PATH than a real gh, the installer must NOT bake our
+        # shim's REAL_GH at the app shim (that re-creates the loop). It points at
+        # the real binary (ELF), never the app shim.
+        appdir = os.path.join(self.tmp, "appbin2")
+        realdir = os.path.join(self.tmp, "realbin2")
+        os.makedirs(appdir)
+        os.makedirs(realdir)
+        self._make_app_shim(os.path.join(appdir, "gh"))       # foreign, first on PATH
+        self._make_real_gh(os.path.join(realdir, "gh"))       # real ELF binary, later
+        # ~/.local/bin (self.bin) is empty -> Case 4.
+        os.environ["PATH"] = self.bin + os.pathsep + appdir + os.pathsep + realdir
+        status = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                    verbose=False)
+        self.assertEqual(status, "installed")
+        shim_text = open(cli_gh_rate.shim_path(), encoding="utf-8").read()
+        self.assertIn(os.path.join(realdir, "gh"), shim_text)      # points at REAL gh
+        self.assertNotIn(os.path.join(appdir, "gh"), shim_text)    # NEVER the app shim
 
     def test_real_gh_path_skips_our_shim(self):
         # A shim at the shim path (our sentinel) plus a real gh elsewhere on PATH.
@@ -488,6 +655,143 @@ class TestWiring(unittest.TestCase):
         import airuleset
         src = inspect.getsource(airuleset.cmd_status)
         self.assertIn("status_row_cached", src)
+
+
+class TestChainTermination(unittest.TestCase):
+    """#1051: prove the runtime gh chain TERMINATES (never the exec-loop) for
+    every layout, and that OUR shim carries a depth guard that aborts a
+    self-referencing chain rather than looping."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bin = os.path.join(self.tmp, ".local", "bin")
+        self.sys = os.path.join(self.tmp, "usrbin")
+        os.makedirs(self.bin)
+        os.makedirs(self.sys)
+        self._orig_shim = cli_gh_rate.shim_path
+        self._orig_up = cli_gh_rate.upstream_path
+        cli_gh_rate.shim_path = lambda: os.path.join(self.bin, "gh")
+        cli_gh_rate.upstream_path = lambda: os.path.join(self.bin, "gh-upstream")
+        self._orig_path = os.environ.get("PATH", "")
+
+    def tearDown(self):
+        cli_gh_rate.shim_path = self._orig_shim
+        cli_gh_rate.upstream_path = self._orig_up
+        os.environ["PATH"] = self._orig_path
+
+    # -- reuse the fixture builders from TestEnsureWrapper --------------------
+    _make_app_shim = TestEnsureWrapper._make_app_shim
+    _make_sys_gh = TestEnsureWrapper._make_sys_gh
+    _make_real_gh = TestEnsureWrapper._make_real_gh
+
+    def _run_gh(self, gh_path, env, hopfile=None, timeout=10):
+        import subprocess
+        run_env = {**os.environ, **env}
+        # The controlled dirs come FIRST (so the scripts resolve `gh` to the
+        # fixtures, taking the fake system gh before any real /usr/bin/gh), and
+        # the real system PATH is appended so `bash` itself stays findable.
+        if "PATH" in env:
+            run_env["PATH"] = env["PATH"] + os.pathsep + self._orig_path
+        if hopfile:
+            run_env["HOPFILE"] = hopfile
+        return subprocess.run([gh_path, "--version"],
+                              capture_output=True, text=True,
+                              timeout=timeout, env=run_env)
+
+    def test_script_has_depth_guard(self):
+        # #1051 item 2: the shim increments+exports AIRULESET_GH_SHIM_DEPTH and
+        # aborts (not loops) at depth > 2.
+        s = cli_gh_rate.wrapper_script("/usr/bin/gh", "/usr/bin/python3",
+                                       "/repo/cli_gh_rate.py")
+        self.assertIn("AIRULESET_GH_SHIM_DEPTH", s)
+        self.assertRegex(s, r"AIRULESET_GH_SHIM_DEPTH.*>\s*2")
+
+    def test_depth_guard_aborts_a_self_referencing_chain(self):
+        # #1051 item 2: a shim whose REAL_GH points back at ITSELF must abort
+        # via the depth guard within 1 s, never loop forever.
+        import time
+        shim = cli_gh_rate.shim_path()
+        # bake REAL_GH = the shim itself -> a deliberate self-loop.
+        cli_gh_rate._write_wrapper_file(shim, shim, "/usr/bin/python3",
+                                        "/repo/cli_gh_rate.py")
+        start = time.monotonic()
+        try:
+            r = self._run_gh(shim, env={}, timeout=5)
+        except Exception as e:  # noqa: BLE001 — a TimeoutExpired == it looped
+            self.fail("depth guard did not abort — the shim looped: %r" % e)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 1.5, "depth guard must abort fast, not spin")
+        self.assertNotEqual(r.returncode, 0, "a looping chain must exit non-zero")
+        self.assertIn("depth", r.stderr.lower())
+
+    def test_depth_guard_fires_across_a_foreign_app_shim(self):
+        # #1051 review-2 (finding #4): the REAL incident loop is
+        # our-shim -> FOREIGN app shim -> (app shim resolves first non-self gh
+        # on PATH = our shim) -> our-shim ... The depth guard's EXPORTED env var
+        # must survive the app shim's own exec so it accumulates and aborts at
+        # depth 3 (exit 89), never hanging. (test_loop_baked_in_state_is_self_
+        # healed removes the loop before it runs, so this is the only test that
+        # exercises the guard firing THROUGH a foreign shim.)
+        appdir = os.path.join(self.tmp, "appdir")
+        os.makedirs(appdir)
+        self._make_app_shim(os.path.join(appdir, "gh"))
+        # our shim at ~/.local/bin/gh, baked REAL_GH = the app shim.
+        cli_gh_rate._write_wrapper_file(cli_gh_rate.shim_path(),
+                                        os.path.join(appdir, "gh"),
+                                        "/usr/bin/python3", "/repo/cli_gh_rate.py")
+        import time
+        start = time.monotonic()
+        try:
+            # PATH = our shim's dir only, so the app shim's "first non-self gh"
+            # scan finds our shim -> the mutual loop.
+            r = self._run_gh(cli_gh_rate.shim_path(), env={"PATH": self.bin},
+                             timeout=6)
+        except Exception as e:  # noqa: BLE001 — TimeoutExpired == it hung (guard failed)
+            self.fail("depth guard did NOT fire across the app shim — it hung: %r"
+                      % e)
+        self.assertLess(time.monotonic() - start, 2.0)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("depth", r.stderr.lower())
+
+    def test_foreign_layout_chain_terminates_after_install(self):
+        # #1051 item 1: on the stream-box layout (app-token shim at
+        # ~/.local/bin/gh, system gh elsewhere) the installer SKIPS, so the live
+        # chain is app-shim -> system-gh: it terminates in <= 3 exec hops and
+        # NEVER loops back through our shim.
+        self._make_app_shim(cli_gh_rate.shim_path())
+        self._make_sys_gh(os.path.join(self.sys, "gh"))
+        cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                           verbose=False)
+        hopfile = os.path.join(self.tmp, "hops")
+        env = {"PATH": self.bin + os.pathsep + self.sys}
+        try:
+            r = self._run_gh(cli_gh_rate.shim_path(), env=env, hopfile=hopfile,
+                             timeout=10)
+        except Exception as e:  # noqa: BLE001 — TimeoutExpired == the exec-loop
+            self.fail("gh chain did NOT terminate on the foreign layout "
+                      "(exec-loop): %r" % e)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("gh version", r.stdout)
+        hops = open(hopfile).read().split() if os.path.exists(hopfile) else []
+        self.assertLessEqual(len(hops), 3, "chain took > 3 hops: %r" % hops)
+        self.assertIn("sysgh", hops, "the real system gh must be reached")
+
+    def test_wrap_in_place_chain_terminates(self):
+        # #1051 item 1: the wrap-in-place layout (a plain box with a real gh)
+        # runs our shim -> the real gh and terminates (2 hops), no loop.
+        sysgh = os.path.join(self.sys, "gh")
+        self._make_sys_gh(sysgh)
+        # our shim baked to point straight at the real gh.
+        cli_gh_rate._write_wrapper_file(cli_gh_rate.shim_path(), sysgh,
+                                        "/usr/bin/python3", "/repo/cli_gh_rate.py")
+        try:
+            r = self._run_gh(cli_gh_rate.shim_path(),
+                             env={"PATH": self.bin + os.pathsep + self.sys},
+                             timeout=10)
+        except Exception as e:  # noqa: BLE001
+            self.fail("wrap-in-place chain did not terminate: %r" % e)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("gh version", r.stdout)
 
 
 if __name__ == "__main__":
