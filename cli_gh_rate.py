@@ -238,7 +238,7 @@ def _fetch_rate_limit(run, real_gh, now):
                     "reset": int(block.get("reset") or 0),
                     # #1052: tag the reading's SOURCE so a row can name it. The
                     # REST bucket is "rest"; the graphql bucket may later be
-                    # overridden to "graphql-object" by _merge_graphql_object.
+                    # overridden to "graphql-object" by _ghql.merge_graphql_object.
                     "source": "rest",
                 }
             except (ValueError, TypeError):
@@ -415,12 +415,14 @@ def _update_alert_latch(status):
         pct = remaining_pct(name, status)
         if pct is None:
             continue
-        # #1052 review MAJOR-1: a graphql reading that fell back to REST because
-        # the object probe was transiently unavailable is NOT trustworthy (REST
-        # lies HIGH during a real exhaustion) — HOLD the prior latch state so it
-        # can neither CLEAR an already-fired alert nor advance one; an
-        # authoritative object reading next refresh resumes normal updates.
-        if name == "graphql" and not gql_authoritative:
+        # #1052 review MAJOR-1/MINOR-1: a graphql reading that fell back to REST
+        # (object probe unavailable) lies only HIGH during a real exhaustion
+        # (REST over-reports remaining), never low. So HOLD the latch on a
+        # non-authoritative NOT-low reading — an untrustworthy "recovery" that
+        # would otherwise CLEAR an already-fired alert — but let a genuinely LOW
+        # REST reading still advance/fire (a low REST reading is a trustworthy
+        # floor, so graphql alerting is not lost while the object stays down).
+        if name == "graphql" and not gql_authoritative and pct >= LOW_PCT:
             continue
         a = alert.setdefault(name, {"consecutive_low": 0, "alerted": False})
         if pct < LOW_PCT:

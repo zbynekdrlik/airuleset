@@ -105,10 +105,10 @@ class TestFetchAndPct(unittest.TestCase):
 
     def test_cache_within_ttl_does_not_refetch(self):
         # #1052: a refresh now makes TWO gh calls — the REST `rate_limit` fetch
-        # PLUS the GraphQL `rateLimit` object probe (this _FakeRun answers both
-        # with the REST body, so the object parse fails-open and the REST
-        # reading stands). The value that matters here is unchanged: ZERO calls
-        # on a cache hit, exactly one refresh (two calls) per TTL window.
+        # PLUS the GraphQL `rateLimit` object probe (this argv-aware _FakeRun
+        # answers the graphql call with an agreeing object body). The value that
+        # matters here is unchanged: ZERO calls on a cache hit, exactly one
+        # refresh (two calls) per TTL window.
         run = _FakeRun(_rate_json(4000, 5000, 4000, 5000))
         cli_gh_rate.read_status(now=1000.0, run=run, real_gh="/usr/bin/gh")
         self.assertEqual(run.calls, 2)   # 1 REST + 1 GraphQL object probe

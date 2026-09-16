@@ -71,13 +71,16 @@ def fetch_graphql_object(run, real_gh, *, timeout, internal_env, diag):
         return None
     try:
         data = json.loads(r.stdout or "{}")
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(data, dict):
+    except (ValueError, TypeError) as e:
+        # #1052 review NIT-3: a persistently malformed graphql body must leave a
+        # trail (never the stdout itself — no token can leak), matching rc!=0.
+        diag("fetch-graphql-object", ValueError("unparseable body: %r" % e))
         return None
     rl = (data.get("data") or {}).get("rateLimit") \
-        if isinstance(data.get("data"), dict) else None
+        if isinstance(data, dict) and isinstance(data.get("data"), dict) else None
     if not isinstance(rl, dict) or "remaining" not in rl or "limit" not in rl:
+        diag("fetch-graphql-object",
+             ValueError("no rateLimit object in graphql response"))
         return None
     try:
         return {
@@ -85,7 +88,8 @@ def fetch_graphql_object(run, real_gh, *, timeout, internal_env, diag):
             "limit": int(rl["limit"]),
             "reset": iso_to_epoch(rl.get("resetAt")),
         }
-    except (ValueError, TypeError):
+    except (ValueError, TypeError) as e:
+        diag("fetch-graphql-object", ValueError("bad rateLimit numbers: %r" % e))
         return None
 
 

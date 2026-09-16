@@ -180,6 +180,18 @@ class TestAlertLatchNoFlapOnObjectError(_GhRateTmpCase):
         self.assertEqual(cli_gh_rate.pending_alerts(st4), [],
                          "the latch must not re-fire after an object-error blip")
 
+    def test_low_rest_reading_still_fires_while_object_is_down(self):
+        # #1052 review MINOR-1: when the object probe is permanently unavailable
+        # AND the REST bucket itself reports graphql genuinely LOW (a trustworthy
+        # floor — REST over-reports remaining, never under-reports), graphql
+        # alerting must NOT be lost: two consecutive low REST reads still fire.
+        self._read(_PairRun(_rest_body(4000, 200), _gql_body(0), gql_rc=1),
+                   now=1000.0)                          # 4% low, 1st (debounce)
+        st2 = self._read(_PairRun(_rest_body(4000, 200), _gql_body(0), gql_rc=1),
+                         now=1100.0)                    # 4% low, 2nd -> ALERT
+        self.assertEqual(st2["resources"]["graphql"].get("source"), "rest")
+        self.assertIn("graphql", cli_gh_rate.pending_alerts(st2))
+
 
 class TestSymmetryRestLower(_GhRateTmpCase):
     def test_rest_lower_keeps_rest_pct_object_reset_wins(self):
