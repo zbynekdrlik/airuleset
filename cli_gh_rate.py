@@ -688,6 +688,13 @@ def cmd_gh_rate(args):
     return 0
 
 
+def status_row_cached():
+    """The ``gh-rate: …`` status row from the CACHED reading ONLY (no gh call),
+    for a status display that must never spend budget. None when nothing is
+    cached yet."""
+    return status_row(_load_cache())
+
+
 def _cache_is_fresh(now=None):
     if now is None:
         now = time.time()

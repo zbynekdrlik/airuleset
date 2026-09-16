@@ -2205,7 +2205,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              deploy_state_fetch=None,
              infra_queue_fetch=None, resolve_role_fn=None,
              health_probes=None, health_probe_fetch=None,
-             task_hygiene_enabled=False):
+             task_hygiene_enabled=False, gh_rate_fetch=None):
     """Scan every `claude` pane once. 49 numbered jobs per poll — 43 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
@@ -5089,6 +5089,34 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # (the #1041 primitive over the #1023 seam); the SOFT-CAP budget log below
     # reuses `_sweep_start`.
     _budget_logged = False
+
+    # #1040 — ONE shared gh-rate reading per sweep drives the poller HOLD +
+    # the once-per-episode alert. Gated on `gh_rate_fetch` being wired (network-
+    # free for every existing run_once test, the repo's own pattern). The
+    # composition with the #1041 sweep-budget guard: a gh-poller registry job
+    # (min_budget in the two gh classes) is HELD (`hold:budget`) whenever the
+    # rate warrants a backoff — watchdog jobs loop over many gh calls, so a
+    # per-call shim sleep would multiply and run the sweep into the unit kill;
+    # skipping the whole job when the budget is low is the kill-safe form
+    # ("never run late"). Fail-open: any error → no hold. The shim's per-call
+    # sleep remains the fleet-wide guard for the few-call consumers (hooks,
+    # ad-hoc scripts, goal-lane riders) not in this registry.
+    _gh_hold = False
+    _gh_backoff = 0
+    if gh_rate_fetch is not None:
+        try:
+            import cli_gh_rate as _ghr
+            _gh_status = gh_rate_fetch()
+            if _gh_status:
+                for _r in _ghr.record_alerts(_gh_status):
+                    logs.append("gh-rate ALERT: %s" % _ghr.alert_line(_r, _gh_status))
+                _gh_backoff = _ghr.current_gh_backoff(status=_gh_status)
+                _gh_hold = _ghr.should_hold_gh_poller(_gh_backoff)
+        except Exception as _e:  # noqa: BLE001 — fail-open, never break the sweep
+            logs.append("gh-rate: read error (fail-open, no hold): %r" % _e)
+            _gh_hold = False
+    _GH_POLL_MINS = (_BUDGET_MIN_GH_FETCH_S, _BUDGET_MIN_GH_BATCH_S)
+
     for _label, _gate, _invoke, _err, _min_budget in _standalone_registry:
         # #1041 — read the ONE budget primitive ONCE per iteration (one clock read);
         # the job-start elapsed anchor is derived from it (`elapsed == SOFT_CAP -
@@ -5122,6 +5150,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             if _min_budget is not None and _left < _min_budget:
                 logs.append("%s -> hold:budget (%ds left, need >=%ds)"
                             % (_label, int(_left), _min_budget))
+                continue
+            # #1040 — gh-rate composition: hold a gh-poller job when the shared
+            # GitHub budget warrants a backoff (see the pre-loop comment).
+            if _gh_hold and _min_budget in _GH_POLL_MINS:
+                logs.append("%s -> hold:budget (gh-rate backoff %ds, resource < 20%%)"
+                            % (_label, _gh_backoff))
                 continue
             try:
                 logs += _invoke()

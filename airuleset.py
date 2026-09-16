@@ -1924,6 +1924,19 @@ def cmd_install(args):
     except Exception as e:
         print(f"  ffmpeg static install error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 3f-ter. gh rate-guard shim: fleet-wide, best-effort, no sudo needed
+    # (#1040). Wraps the real gh in place so background pollers become
+    # gh-budget-aware while a human/interactive call and every write action
+    # pass straight through with zero delay. No-op wherever the box has no gh;
+    # fail-open (leaves gh untouched) on any error. Same shape as the two
+    # ensure_* steps above.
+    try:
+        import cli_gh_rate
+        cli_gh_rate.ensure_gh_rate_wrapper()
+    except Exception as e:
+        print(f"  gh rate-guard shim install error (non-fatal): {e}",
+              file=sys.stderr)
+
     # --- 3g. subdev stream dev-env bootstrap: tmux session + claude launched
     # (#263), ssh auto-attach (#264), human-gap report (#263). The tmux
     # session/window-name/gap-report legs are true no-ops on every non-stream
@@ -2528,6 +2541,17 @@ def cmd_status(args):
             print("paused: %s" % _paused)
     except Exception as e:
         print(f"\nconformance: error ({e})", file=sys.stderr)
+
+    # --- gh rate budget (#1040): the SAME supervisor-facing, report-only surface
+    # — the last CACHED `gh api rate_limit` reading (never a fresh gh call from a
+    # status display). Shown only when a reading is cached. ---
+    try:
+        import cli_gh_rate
+        _gh_row = cli_gh_rate.status_row_cached()
+        if _gh_row:
+            print("\n" + _gh_row)
+    except Exception as e:
+        print(f"\ngh-rate: error ({e})", file=sys.stderr)
 
     # --- Break-glass (#982/#985): ignoreip + key + sshd password + DNS ---
     try:
@@ -7195,6 +7219,14 @@ def cmd_watchdog(args):
     from watchdog import run_once, fetch_usage, fetch_channel_messages
     from watchdog import compact as _compact_mod
     from watchdog import goal as _goal_mod
+    # #1040 — mark EVERY gh call this watchdog process makes as a background
+    # POLL. The managed gh shim throttles a poll ONLY when this env is set AND
+    # the call is a read-only poll shape below 20 % budget; the same jobs'
+    # WRITE actions (comment/edit/reopen/merge) pass straight through (the
+    # shim's read/write allowlist), and a human/hook gh call — a SEPARATE
+    # process without this env — is never affected. Set once here (the single
+    # wiring point for all enumerated watchdog pollers) rather than per-call.
+    os.environ["AIRULESET_GH_POLLER"] = "1"
     # Job 16 (#55) is coordinator-only: every OTHER managed box already writes
     # its own local hourly row via job 13, so only the controller fans out
     # over ssh to merge them. #971: gated on box-class `controller` (was
@@ -7439,6 +7471,12 @@ def cmd_watchdog(args):
                     # so an unconfigured box costs one config-file read per
                     # sweep and never touches the network.
                     task_hygiene_enabled=True,
+                    # #1040 — one shared gh-rate reading per sweep: refreshes the
+                    # 60s-cached `gh api rate_limit` (the FREE, non-counting
+                    # endpoint), records the once-per-episode exhaustion alert,
+                    # and drives the gh-poller HOLD. Wired here (never in tests →
+                    # zero network in the suite); fail-open inside run_once.
+                    gh_rate_fetch=lambda: __import__("cli_gh_rate").read_status(),
                     # #1032 — resolve THIS box's paused flag ONCE per sweep (the
                     # I/O boundary, like health_probes above). On a PAUSED box
                     # (an owner-frozen stream, #851) run_once suppresses every
