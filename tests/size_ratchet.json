@@ -168,7 +168,7 @@
     "tests/test_cli_filedrop_watchdog_split.py": 185,
     "tests/test_cli_push_gate_extraction_630.py": 105,
     "tests/test_client_attachment_doctrine_709.py": 370,
-    "tests/test_client_board_tasks_949.py": 84,
+    "tests/test_client_board_tasks_949.py": 139,
     "tests/test_close_flow_disposition_788_799.py": 151,
     "tests/test_cloudflare_api_tokens_skill.py": 138,
     "tests/test_cloudflare_dns_983.py": 406,
