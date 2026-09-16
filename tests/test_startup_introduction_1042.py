@@ -146,6 +146,40 @@ FB3_EXPLICITLY_NOT_ACCEPTANCE = (
     "❓ NEEDS YOU: archivovať vlákno?"
 )
 
+# #1042-review-2 🔴 — DESIGN questions that CONTAIN a strong token as a FEATURE /
+# label-mechanism word (not the act of proposing a client message) must NOT be
+# blocked. None carries a stream signature or a discuss.channel_<N> deep URL, so
+# Trigger A's PROPOSAL condition must not fire.
+FP1_FEATURE_HANDOVER = (
+    "**Otázka — projekt montalu:** Robím funkciu, aby používateľ mohol odovzdať "
+    "súbor klientovi cez portál. Ktorú cestu zvolím?\n- (1) presigned URL\n- (2) proxy\n"
+    "❓ NEEDS YOU: ktorú cestu?"
+)
+
+FP2_FEATURE_ACCEPTANCE_MSG = (
+    "**Otázka — projekt montalu:** Mám pridať tlačidlo, ktoré vygeneruje "
+    "akceptačnú správu automaticky?\n- (1) áno\n- (2) nie\n"
+    "❓ NEEDS YOU: pridám tlačidlo?"
+)
+
+FP3_LABEL_MECHANISM = (
+    "**Otázka — projekt airuleset:** Mám pre needs-acceptance label pridať "
+    "automatiku do CI, ktorá ho po merge odstráni?\n- (1) áno\n- (2) nie\n"
+    "❓ NEEDS YOU: pridám automatiku?"
+)
+
+# TRUE POSITIVE via the thread+acc path (no ZbynekAI signature): a genuine
+# acceptance proposal that names the target client thread deep URL + an
+# acceptance cue, with NO intro link -> must block.
+ACCEPT_THREAD_NO_SIG_NO_LINK = (
+    "**Otázka — projekt odoo-erp (montalu):** Chcem odoslať akceptačnú správu do "
+    "vlákna „Dochádzka 1\" — "
+    "https://erp.montalu.cloud/odoo/discuss?active_id=discuss.channel_288 a "
+    "označiť Odoo task https://erp.montalu.cloud/odoo/project/4/tasks/503 ako "
+    "needs-acceptance.\n"
+    "❓ NEEDS YOU: schváliš text akceptačnej správy klientovi?"
+)
+
 
 class GateBlocksAcceptanceWithoutIntroLink(TestCase):
     def test_accept_block_without_intro_link_is_blocked(self):
@@ -157,6 +191,12 @@ class GateBlocksAcceptanceWithoutIntroLink(TestCase):
         # RED on base; GREEN after — a needs-acceptance labelling turn with no
         # intro link is blocked (the label is narrated in prose, not a code span).
         self.assertTrue(_blocked(_run(LABEL_TURN_NO_LINK)))
+
+    def test_acceptance_proposal_via_thread_and_cue_without_link_is_blocked(self):
+        # Locks the thread+acceptance-cue PROPOSAL path (no ZbynekAI signature):
+        # a ❓ naming the client thread deep URL + a needs-acceptance cue, no
+        # intro link -> blocked (#1042-review-2).
+        self.assertTrue(_blocked(_run(ACCEPT_THREAD_NO_SIG_NO_LINK)))
 
 
 class GateAllowsWhenLinkedOrBypassedOrIrrelevant(TestCase):
@@ -186,6 +226,16 @@ class GateAllowsWhenLinkedOrBypassedOrIrrelevant(TestCase):
     def test_explicitly_not_acceptance_question_is_not_blocked(self):
         # An explicit „toto NIE JE akceptačná odovzdávka" question stays allowed.
         self.assertFalse(_blocked(_run(FB3_EXPLICITLY_NOT_ACCEPTANCE)))
+
+    def test_feature_word_design_questions_are_not_blocked(self):
+        # #1042-review-2 🔴 — a strong token used as a FEATURE / label-mechanism
+        # word in a design question (no signature, no discuss.channel URL) must
+        # NOT block. These go RED against the round-1 word-keyed detector.
+        for name, msg in [("FP1", FP1_FEATURE_HANDOVER),
+                          ("FP2", FP2_FEATURE_ACCEPTANCE_MSG),
+                          ("FP3", FP3_LABEL_MECHANISM)]:
+            with self.subTest(case=name):
+                self.assertFalse(_blocked(_run(msg)))
 
     def test_empty_message_is_allowed(self):
         # Fail-open on an unclassifiable / empty turn.
