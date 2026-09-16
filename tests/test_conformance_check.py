@@ -112,6 +112,9 @@ def _run(state, tmp, dry_run=False, git=None, timer=None,
         # never reads the developer's REAL ~/.claude here (its own dimension is
         # covered by tests/test_conformance_symlinks_972.py).
         symlink_scan=lambda: [],
+        # #1028: same hermetic injection for the doctrine-drift dimension — its
+        # own behaviour is covered by tests/test_doctrine_audit_1028.py.
+        doctrine_scan=lambda: {"high": 0, "medium": 0},
         persist=lambda: None)
 
 

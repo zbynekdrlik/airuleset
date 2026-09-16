@@ -54,8 +54,25 @@ metadata:
 Client-specific: for the MIVA tenant the attendance import must be fully
 automatic — never ask the MIVA client to key attendance rows by hand.
 
-Generic clause (graduated): never push manual work onto the client. Zatiaľ
-kým beží fix, neposielaj klientovi žiadny workaround.
+Generic clause (graduated): never push manual work onto the client — no interim
+workaround while the fix is in flight; reply once, after the fix is on PROD.
+"""
+
+# A user-CONTEXT memory that merely MENTIONS a workaround (for the USER, not a
+# client) must NOT match — the #1028 live-smoke false positive
+# (`user_terminal_environment.md`). `type: user` is owner/user context, kept.
+USER_TERMINAL_NOTE = """\
+---
+name: user-terminal-environment
+description: "The user's terminal — only claude panes; never offer a CLI workaround"
+metadata:
+  node_type: memory
+  type: user
+---
+# User terminal environment
+
+Interim workaround for the user = only what he can do from a claude pane. Never
+offer a shell workaround; it just annoys him.
 """
 
 OWNER_PREF_FEEDBACK = """\
@@ -92,6 +109,8 @@ def _make_fake_home():
         MIVA_ZERO_MANUAL, encoding="utf-8")
     (mem / "feedback_ack_emoji_owner_preference.md").write_text(
         OWNER_PREF_FEEDBACK, encoding="utf-8")
+    (mem / "user_terminal_environment.md").write_text(
+        USER_TERMINAL_NOTE, encoding="utf-8")
     # A fleet-installed file: a real file elsewhere + a SYMLINK into the memory
     # dir (the shape a managed install produces). The scan must SKIP symlinks.
     fleet_real = home / ".claude" / "skills-src" / "ack-reaction.md"
@@ -147,6 +166,29 @@ class TestMatcher(unittest.TestCase):
             matches = da.scan_home(str(home))
             pref = _by_name(matches)["feedback_ack_emoji_owner_preference.md"]
             self.assertNotIn(pref.action, (da.ACTION_REWRITE, da.ACTION_LIST))
+
+    def test_generic_workaround_mention_is_not_matched(self):
+        # A user-context note that merely mentions a workaround (for the USER,
+        # not a client) must not anchor-match — the #1028 live-smoke false
+        # positive. `type: user` is owner/user context → never a rewrite.
+        tmp, home = _make_fake_home()
+        with tmp:
+            matches = da.scan_home(str(home))
+            by = _by_name(matches)
+            m = by.get("user_terminal_environment.md")
+            # Either no row at all, or (if it anchor-matched) action=keep — never
+            # a rewrite/list.
+            if m is not None:
+                self.assertEqual(m.action, da.ACTION_KEEP)
+
+    def test_type_user_memory_is_kept_not_rewritten(self):
+        tmp, home = _make_fake_home()
+        with tmp:
+            da.apply_fixes(da.scan_home(str(home)), str(home), today="2026-09-16")
+            note = home / (".claude/projects/-home-miva1-proj/memory/"
+                           "user_terminal_environment.md")
+            self.assertFalse(note.read_text(encoding="utf-8").startswith(
+                "See airuleset "))
 
     def test_fleet_installed_symlink_is_skipped(self):
         tmp, home = _make_fake_home()
@@ -326,6 +368,21 @@ class TestClassifyDoctrineDrift(unittest.TestCase):
 NOW = 1_000_000.0
 
 
+def _clean_git(args, cwd, timeout=None):
+    """A ``git_run(args, cwd) -> (rc, stdout)`` seam with every other dimension
+    conformant: HEAD == origin (not behind), clean tree, fetch ok."""
+    sub = args[0]
+    if sub == "rev-parse":
+        return (0, "aaaa1111\n")
+    if sub == "fetch":
+        return (0, "")
+    if sub == "merge-base":
+        return (0, "")          # HEAD is ancestor of origin (== origin) → not behind
+    if sub == "status":
+        return (0, "")          # clean
+    return (0, "")
+
+
 def _run_with_doctrine(doctrine_counts):
     """Drive run_conformance_check with all other dimensions conformant/clean
     and an injected doctrine scan returning `doctrine_counts`."""
@@ -338,7 +395,7 @@ def _run_with_doctrine(doctrine_counts):
         return conf.run_conformance_check(
             NOW, state, repo_root=os.getcwd(), claude_md_path=cmd,
             baseline_path=os.path.join(d, "baseline.json"),
-            git_run=lambda *a, **k: (0, "aaaa1111\n", ""),
+            git_run=_clean_git,
             timer_check=lambda *a, **k: "active",
             is_target_check=lambda: False,
             symlink_scan=lambda: [],

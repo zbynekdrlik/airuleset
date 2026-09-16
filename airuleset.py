@@ -916,6 +916,48 @@ def _record_conformance_baseline_step(claude_md_content, record_fn=None):
     return record_fn(claude_md_content, REPO_DIR, dest)
 
 
+_DOCTRINE_STEP_UNSET = object()
+
+
+def _run_doctrine_audit_step(home=None, repo_dir=_DOCTRINE_STEP_UNSET, today=None):
+    """cmd_install step 15 (#1028): reduce THIS user's graduated-fleet-rule
+    leftovers to one-line pointers. A rule that graduated to an airuleset
+    module/skill keeps living in per-stream ``~/.claude/projects/*/memory/*.md``
+    restatements; this runs ``cli_doctrine_audit.audit(..., fix=True)`` for the
+    CURRENT user's OWN home ONLY (the managed-writer path — a worker never edits
+    another user's home). HIGH-confidence allowlisted matches are archived +
+    rewritten to a fleet pointer; MEDIUM (client-mixed / fuzzy) and owner-
+    preference ``keep`` files are left untouched.
+
+    Extracted with injectable ``home``/``repo_dir``/``today`` (the #410-F2 idiom)
+    so it is unit-testable without a real install. Returns a list of loud lines
+    for cmd_install to print. Best-effort: an unexpected error is caught here and
+    returned as a non-fatal line, so it can never fail the install. ``repo_dir``
+    defaults to this repo (skip fleet-source files + load the fuzzy corpus); pass
+    ``None`` explicitly to disable both (tests)."""
+    import cli_doctrine_audit as _da
+    home = home or str(Path.home())
+    if repo_dir is _DOCTRINE_STEP_UNSET:
+        repo_dir = str(REPO_DIR)
+    try:
+        _matches, results = _da.audit(home, repo_dir=repo_dir, fix=True, today=today)
+    except Exception as e:                      # never fail install
+        return ["  doctrine-audit step error (non-fatal): %s" % e]
+    lines = []
+    for p in results.get("rewritten", []):
+        lines.append("  doctrine-drift: reduced %s to a fleet pointer "
+                     "(original archived under ~/.claude/doctrine-archive)"
+                     % os.path.basename(p))
+    for p, err in results.get("failed", []):
+        lines.append("  doctrine-drift: FAILED to rewrite %s (%s)"
+                     % (os.path.basename(p), err))
+    med = results.get("skipped_medium", [])
+    if med:
+        lines.append("  doctrine-drift: %d MEDIUM match(es) need human review "
+                     "(run: python3 airuleset.py doctrine-audit)" % len(med))
+    return lines
+
+
 def _configure_ratchet_merge_driver(repo_dir=REPO_DIR, run=None):
     """cmd_install step 1c (#553): idempotently register the ``ratchet-union``
     git merge driver in the repo-local (worktree-shared) ``.git/config`` so
@@ -2253,6 +2295,21 @@ def cmd_install(args):
                   f"(log: {AUTOPILOT_LOCK_LITTER_LOG_PATH})")
     except Exception as e:
         print(f"  autopilot-lock-litter sweep error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 15. Doctrine-drift audit (#1028): reduce THIS user's graduated-fleet-
+    # rule leftovers (per-stream memory restatements of rules that graduated to
+    # airuleset modules/skills) to one-line pointers. Runs the audit with
+    # fix=True for the CURRENT user's OWN ~/.claude only (the managed-writer
+    # path — a worker never edits another user's home). HIGH allowlisted matches
+    # are archived + rewritten to a fleet pointer; MEDIUM / owner-preference kept
+    # untouched. One loud line per rewrite. Non-fatal — a failure never fails the
+    # install (the whole body is factored into _run_doctrine_audit_step for
+    # direct testability, #410-F2 idiom).
+    try:
+        for _doctrine_ln in _run_doctrine_audit_step():
+            print(_doctrine_ln)
+    except Exception as e:
+        print(f"  doctrine-audit sweep error (non-fatal): {e}", file=sys.stderr)
 
     print()
     if install_failed:
@@ -9428,6 +9485,19 @@ def main():
     p_ma.add_argument("--json", dest="json_output", action="store_true",
                       help="JSON output")
 
+    # --- #1028: doctrine-drift audit + anti-drift guard ---
+    p_da = sub.add_parser(
+        "doctrine-audit",
+        help="Audit this user's ~/.claude memories/rules for graduated-fleet-rule "
+             "leftovers; --fix reduces HIGH matches to a one-line pointer (#1028)")
+    p_da.add_argument("--fix", action="store_true",
+                      help="Archive + rewrite HIGH-confidence matches to a fleet "
+                           "pointer (MEDIUM/keep are always listed only)")
+    p_da.add_argument("--project-root", dest="project_root", action="append",
+                      default=[],
+                      help="Also scan a project's .claude/rules + .claude/skills "
+                           "(repeatable, read-only — never auto-fixed)")
+
     p_ab = sub.add_parser(
         "account-bootstrap",
         help="Render idempotent root bootstrap script for a service account")
@@ -9492,6 +9562,35 @@ def main():
     # exit 0, so a scripted go-live can see the failure). None / 0 → exit 0.
     if isinstance(rc, int) and rc != 0:
         sys.exit(rc)
+
+
+def cmd_doctrine_audit(args):
+    """#1028: audit THIS user's ~/.claude auto-memory (and, with --project-root,
+    a project's rules/skills) for per-stream restatements of GRADUATED fleet
+    doctrine, and optionally reduce the HIGH-confidence ones to a one-line fleet
+    pointer. Read-only by default; --fix archives + rewrites HIGH matches only
+    (MEDIUM/keep are always listed, never rewritten). The supervisor runs the
+    read-only form on each stream box and posts the per-box table on the ticket."""
+    import cli_doctrine_audit as da
+    home = str(Path.home())
+    project_roots = list(getattr(args, "project_root", []) or [])
+    matches, results = da.audit(home, repo_dir=str(REPO_DIR),
+                                fix=getattr(args, "fix", False),
+                                extra_project_roots=project_roots)
+    print(da.format_table(matches))
+    counts = da.doctrine_counts(matches)
+    print()
+    print("Summary: %d HIGH (auto-fixable), %d MEDIUM (human review); "
+          "owner-preference/keep excluded." % (counts["high"], counts["medium"]))
+    if getattr(args, "fix", False):
+        for p in results.get("rewritten", []):
+            print("  rewritten → fleet pointer: %s" % p)
+        for p, err in results.get("failed", []):
+            print("  FAILED: %s (%s)" % (p, err))
+        if results.get("skipped_medium"):
+            print("  %d MEDIUM match(es) left for human review (see table above)."
+                  % len(results["skipped_medium"]))
+    return 0
 
 
 def cmd_goal_inventory(args):
@@ -9861,6 +9960,7 @@ SUBCOMMANDS = {
     "wdrain-pass": cmd_wdrain_pass,
     "key-rotation": cmd_key_rotation,
     "mdreview-audit": cmd_mdreview_audit,
+    "doctrine-audit": cmd_doctrine_audit,
     "account-bootstrap": cmd_account_bootstrap,
     "nudges": cmd_nudges,
     "volume": cmd_volume,
