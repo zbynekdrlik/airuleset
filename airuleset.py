@@ -4363,11 +4363,14 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     # — a VERIFY (refuse on mismatch), never a rewrite (so fences and the
     # single HEAD: line stay verbatim, #1044). Mirrors cmd_handoff's compose
     # path stale-HEAD guard, reading from the body instead of stamping.
+    # {8,40} mirrors the gate's own HEAD_SHA_RE floor — reject a too-short
+    # declared HEAD here (fail-fast) rather than post a body the gate rejects.
     m = re.search(
         r'(?im)^[ \t]*[-*]?[ \t]*\**HEAD\**[ \t]*:[ \t]*\**[ \t]*'
-        r'`?([0-9a-fA-F]{7,40})`?', body)
+        r'`?([0-9a-fA-F]{8,40})`?', body)
     if not m:
-        print("handoff BLOCK: --body-file body has no HEAD: <sha> line")
+        print("handoff BLOCK: --body-file body has no HEAD: <sha> line "
+              "(>= 8 hex)")
         return 1
     body_head = m.group(1).lower()  # git emits lowercase; normalise both sides
     ls_r = _run(["git", "ls-remote", "origin", "refs/heads/" + branch])
@@ -4383,7 +4386,7 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     if not remote_sha:
         print("handoff BLOCK: branch '%s' not found on remote" % branch)
         return 1
-    # The remote tip is a full 40-hex; accept a short body HEAD (>= 7-hex, the
+    # The remote tip is a full 40-hex; accept a short body HEAD (>= 8-hex, the
     # gate's own floor) that prefixes it, or an exact match.
     if not (remote_sha == body_head or remote_sha.startswith(body_head)):
         print("handoff BLOCK: --body-file HEAD %s does not match remote "

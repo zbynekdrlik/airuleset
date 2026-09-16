@@ -110,7 +110,10 @@ def validate_passthrough_body(
                 "line (required on every readiness comment)")
     # Bounce escalation is the GATE's domain — mirror its round >= 3 threshold
     # (never over-enforce at round 2, which the gate accepts) and accept either
-    # Prevencia label so a gate-correct body passes (#1044 review 🟡).
+    # Prevencia label so a gate-correct body passes (#1044 review 🟡). This is
+    # a PRESENCE-only fail-fast: the gate remains the authority on deep content
+    # (Root-cause must NAME a lens id, Prevencia must be non-empty) — we do not
+    # mirror those here, to avoid coupling to the gate's evolving round>=3 rules.
     if bounce_round >= 3:
         if not _ROOTCAUSE_LINE_RE.search(body):
             return ("handoff BLOCK: round %d --body-file body missing "
