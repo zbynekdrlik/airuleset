@@ -83,9 +83,20 @@ ALLOWLIST = [
         "fleet_source": "skills/odoo-client-messaging/ack-reaction.md",
         "heading": "Acknowledging a client message — worker reaction",
         "fleet_since": FLEET_SINCE,
+        # DESCRIPTIVE rule phrases, not bare identifiers. `ack_reaction_emoji`
+        # (a config key) and 👷 (an emoji) appear in TRACKING / meta notes that
+        # merely REFERENCE the rule's implementation (a plan-of-record surfaced
+        # HIGH in the #1028 smoke, saved from auto-rewrite only by luck of a
+        # tenant token) — so the identifier is kept but needs a DESCRIPTIVE
+        # anchor to corroborate before a HIGH (>= 2) verdict.
         "anchors": [
-            "ack_reaction_emoji", "\U0001F477", "worker \U0001F477",
-            "ack reaction", "worker reaction", "evidujeme, pracujeme",
+            "add the ack reaction",
+            "ack reaction before replying",
+            "ack reaction before composing",
+            "react with the worker",
+            "worker reaction on the client",
+            "ack_reaction_emoji",
+            "evidujeme, pracujeme na tom",
         ],
     },
     {
@@ -112,9 +123,18 @@ ALLOWLIST = [
         "fleet_source": "skills/odoo-client-messaging/handover-compose.md",
         "heading": "The greeting belongs only in the first message",
         "fleet_since": FLEET_SINCE,
+        # DISTINCTIVE multi-word phrases only — a bare "greeting" / "oslovenie" /
+        # "no greeting" is far too generic (#1028 review-1 🟡: a UI memory saying
+        # "shows no greeting banner" or "show it in the first message only"
+        # false-matched HIGH). Each anchor must be specific to the client-message
+        # greeting-etiquette rule.
         "anchors": [
-            "greeting", "oslovenie", "dobrý deň", "first message only",
-            "len prvá správa", "no greeting",
+            "greeting belongs only in the first message",
+            "oslovenie patrí len do prvej správy",
+            "continuing message carries no greeting",
+            "continuation message carries no greeting",
+            "no greeting in a continuing message",
+            "greeting only in the first client message",
         ],
     },
     {
@@ -123,8 +143,11 @@ ALLOWLIST = [
         "heading": "Explain the concept to the client",
         "fleet_since": FLEET_SINCE,
         "anchors": [
-            "explain the concept", "vysvetli koncept", "vysvetli klientovi",
-            "explain the feature", "explain to the client",
+            "explain the concept to the client",
+            "vysvetli klientovi koncept",
+            "explain the feature to the client",
+            "explain the concept, not the implementation",
+            "vysvetli klientovi ako to funguje",
         ],
     },
     {
@@ -132,10 +155,15 @@ ALLOWLIST = [
         "fleet_source": "skills/odoo-client-messaging/handover-compose.md",
         "heading": "No promises on the client's behalf",
         "fleet_since": FLEET_SINCE,
+        # "no promises on the user's behalf" ⊃ "no promises" — the substring
+        # dedup in _anchor_hits already collapses them, but keep only the
+        # distinctive full phrases so a bare "no promises" cannot corroborate.
         "anchors": [
-            "no promises", "no promises on the user's behalf",
-            "no promises on the client", "žiadne sľuby", "nesľubuj",
-            "promises on the user's behalf",
+            "no promises on the user's behalf",
+            "no promises on the client's behalf",
+            "never promise on the client's behalf",
+            "nesľubuj klientovi v mene",
+            "žiadne sľuby v mene klienta",
         ],
     },
     {
@@ -144,9 +172,12 @@ ALLOWLIST = [
         "heading": "Every client message carries a functional URL",
         "fleet_since": FLEET_SINCE,
         "anchors": [
-            "functional url", "direct deep-link", "deep-link url",
-            "verified live before sending", "never a prose menu path",
-            "funkčná url", "priamy odkaz",
+            "functional url in every client message",
+            "direct deep-link url",
+            "verified live before sending",
+            "never a prose menu path",
+            "funkčná url v každej klientskej správe",
+            "priamy odkaz na živú funkciu",
         ],
     },
 ]
@@ -211,7 +242,15 @@ def is_already_pointer(text):
 
 
 def _anchor_hits(text_low, anchors):
-    return sum(1 for a in anchors if a and a.lower() in text_low)
+    """Count DISTINCT, non-overlapping anchor phrases present in ``text_low``.
+    A matched anchor that is a substring of another matched anchor is dropped
+    (they cannot independently corroborate — e.g. ``"greeting"`` inside
+    ``"no greeting"`` must count once, the #1028 review-1 🟡). So a single phrase
+    can never satisfy two overlapping anchors and inflate the HIGH threshold."""
+    matched = sorted({a.lower() for a in anchors if a and a.lower() in text_low})
+    maximal = [a for a in matched
+               if not any(a != b and a in b for b in matched)]
+    return len(maximal)
 
 
 def best_allowlist_match(text):
@@ -319,24 +358,31 @@ def scan_home(home, repo_dir=None, extra_project_roots=None, module_headings=Non
     """Scan ``home``'s auto-memory (``~/.claude/projects/*/memory/*.md``) — and,
     when ``extra_project_roots`` is given, each root's ``.claude/rules/*.md`` +
     ``.claude/skills/*/SKILL.md`` — for graduated-rule restatements. SKIPS
-    symlinks (fleet-installed) and any file whose realpath is under ``repo_dir``
-    (the fleet SOURCE). Returns a list of ``DoctrineMatch``. Pure over the FS —
-    reads only, never writes."""
+    symlinks (fleet-installed), any file whose realpath is under ``repo_dir``
+    (the fleet SOURCE), and the ``MEMORY.md`` index (never a rule copy). A match
+    from ``extra_project_roots`` is FORCED to ``ACTION_LIST`` (read-only — a
+    project's committed ``.claude/`` is never auto-rewritten, #1028 review-1 🔵).
+    Returns a list of ``DoctrineMatch``. Pure over the FS — reads only, never
+    writes."""
     home = os.path.abspath(os.path.expanduser(home))
     if module_headings is None and repo_dir:
         module_headings = load_module_headings(repo_dir)
     module_headings = module_headings or []
     repo_real = os.path.realpath(repo_dir) if repo_dir else None
 
-    files = []
+    files = []          # (path, from_project_root)
     for mem in sorted(glob.glob(os.path.join(home, ".claude", "projects", "*", "memory"))):
-        files.extend(sorted(glob.glob(os.path.join(mem, "*.md"))))
+        files.extend((f, False) for f in sorted(glob.glob(os.path.join(mem, "*.md"))))
     for pr in (extra_project_roots or []):
-        files.extend(sorted(glob.glob(os.path.join(pr, ".claude", "rules", "*.md"))))
-        files.extend(sorted(glob.glob(os.path.join(pr, ".claude", "skills", "*", "SKILL.md"))))
+        files.extend((f, True) for f in
+                     sorted(glob.glob(os.path.join(pr, ".claude", "rules", "*.md"))))
+        files.extend((f, True) for f in
+                     sorted(glob.glob(os.path.join(pr, ".claude", "skills", "*", "SKILL.md"))))
 
     out = []
-    for f in files:
+    for f, from_project in files:
+        if os.path.basename(f) == "MEMORY.md":
+            continue                              # the memory index, never a copy
         if os.path.islink(f):
             continue                              # fleet-installed → never touch
         if repo_real and os.path.realpath(f).startswith(repo_real + os.sep):
@@ -346,8 +392,13 @@ def scan_home(home, repo_dir=None, extra_project_roots=None, module_headings=Non
         except OSError:
             continue
         m = classify_file(f, text, module_headings=module_headings)
-        if m is not None:
-            out.append(m)
+        if m is None:
+            continue
+        # A project-root match is READ-ONLY: never auto-rewritten (only the
+        # per-user memory store is fixable). Downgrade a rewrite to a listing.
+        if from_project and m.action == ACTION_REWRITE:
+            m = m._replace(action=ACTION_LIST)
+        out.append(m)
     return out
 
 

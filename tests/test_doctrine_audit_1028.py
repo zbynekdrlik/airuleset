@@ -37,8 +37,9 @@ metadata:
 # Client message: react worker, no workarounds
 
 When a client message arrives, add the ack reaction (the worker 👷,
-`ack_reaction_emoji`) BEFORE composing any reply. Do not send an interim
-workaround while the fix is in flight — reply once, after the fix is on PROD.
+`ack_reaction_emoji`) — the ack reaction before composing any reply. Do not send
+an interim workaround while the fix is in flight — reply once, after the fix is
+on PROD.
 """
 
 MIVA_ZERO_MANUAL = """\
@@ -85,8 +86,9 @@ metadata:
 ---
 # Owner preference — ack reaction emoji
 
-The owner wants the worker 👷 (`ack_reaction_emoji`) on his client channel;
-this note records HIS standing preference, not a copy of the fleet rule.
+The owner wants us to add the ack reaction (the worker 👷, `ack_reaction_emoji`)
+before replying on his client channel; this note records HIS standing
+preference, not a copy of the fleet rule.
 """
 
 FLEET_INSTALLED = """\
@@ -228,6 +230,90 @@ class TestMatcher(unittest.TestCase):
             by = _by_name(matches)
             self.assertIn("device-notifs.md", by)
             self.assertEqual(by["device-notifs.md"].confidence, da.MEDIUM)
+
+    def test_overlapping_anchor_phrase_counts_once(self):
+        # #1028 review-1 🟡: a single phrase must not satisfy two overlapping
+        # anchors. "no greeting banner" (a UI memory) must NOT reach HIGH.
+        tmp = TemporaryDirectory()
+        with tmp:
+            home = Path(tmp.name)
+            mem = home / ".claude" / "projects" / "-p" / "memory"
+            mem.mkdir(parents=True)
+            (mem / "ui-banner.md").write_text(
+                "---\nname: ui-banner\nmetadata:\n  type: project\n---\n"
+                "# UI banner\n\nThe dashboard shows no greeting banner; the "
+                "toast appears in the first message only.\n",
+                encoding="utf-8")
+            matches = da.scan_home(str(home))
+            by = _by_name(matches)
+            m = by.get("ui-banner.md")
+            if m is not None:
+                self.assertNotEqual(m.action, da.ACTION_REWRITE)
+
+    def test_tracking_note_mentioning_config_key_is_not_high(self):
+        # #1028 smoke: a plan-of-record / tracking note that merely REFERENCES
+        # the rule's config key + emoji (no descriptive rule language) must NOT
+        # reach HIGH auto-rewrite — even without a tenant token to downgrade it.
+        tmp = TemporaryDirectory()
+        with tmp:
+            home = Path(tmp.name)
+            mem = home / ".claude" / "projects" / "-p" / "memory"
+            mem.mkdir(parents=True)
+            (mem / "plan-of-record.md").write_text(
+                "---\nname: plan-of-record\nmetadata:\n  type: project\n---\n"
+                "# Plan of record\n\n1. Ship #1027: `ack_reaction_emoji` config "
+                "key, 👷 default; merge → push → verify.\n2. Next item.\n",
+                encoding="utf-8")
+            matches = da.scan_home(str(home))
+            by = _by_name(matches)
+            m = by.get("plan-of-record.md")
+            if m is not None:
+                self.assertNotEqual(m.action, da.ACTION_REWRITE)
+
+    def test_anchor_hits_dedupes_substring_anchors(self):
+        # Direct unit check: "no promises" ⊂ "no promises on the user's behalf".
+        text = "we make no promises on the user's behalf here"
+        n = da._anchor_hits(text.lower(),
+                            ["no promises", "no promises on the user's behalf"])
+        self.assertEqual(n, 1)
+
+    def test_memory_index_is_excluded(self):
+        tmp = TemporaryDirectory()
+        with tmp:
+            home = Path(tmp.name)
+            mem = home / ".claude" / "projects" / "-p" / "memory"
+            mem.mkdir(parents=True)
+            (mem / "MEMORY.md").write_text(
+                "# Project Memory\n\nadd the ack reaction (worker 👷, "
+                "`ack_reaction_emoji`); worker reaction fleet-wide.\n",
+                encoding="utf-8")
+            matches = da.scan_home(str(home))
+            self.assertEqual(matches, [], "MEMORY.md index must be excluded")
+
+    def test_project_root_match_is_list_only_never_rewrite(self):
+        # #1028 review-1 🔵: a project's committed .claude/rules/*.md is scanned
+        # (read-only) but NEVER auto-rewritten — its HIGH content is listed.
+        tmp = TemporaryDirectory()
+        with tmp:
+            home = Path(tmp.name)
+            (home / ".claude" / "projects" / "-p" / "memory").mkdir(parents=True)
+            proj = Path(tmp.name) / "proj"
+            rules = proj / ".claude" / "rules"
+            rules.mkdir(parents=True)
+            (rules / "client-msg.md").write_text(
+                "# client messaging\n\nadd the ack reaction (worker 👷, "
+                "`ack_reaction_emoji`); worker reaction before replying.\n",
+                encoding="utf-8")
+            matches = da.scan_home(str(home), extra_project_roots=[str(proj)])
+            by = _by_name(matches)
+            m = by["client-msg.md"]
+            self.assertEqual(m.action, da.ACTION_LIST)
+            # and apply_fixes never rewrites it (no scary FAILED)
+            res = da.apply_fixes(matches, str(home), today="2026-09-16")
+            self.assertEqual(res["rewritten"], [])
+            self.assertEqual(res["failed"], [])
+            self.assertFalse((rules / "client-msg.md").read_text(
+                encoding="utf-8").startswith("See airuleset "))
 
     def test_already_pointer_is_not_rematched(self):
         tmp = TemporaryDirectory()
