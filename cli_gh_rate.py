@@ -67,6 +67,31 @@ def journal_path():
     return os.path.join(gh_rate_dir(), "gh-rate.log")
 
 
+def throttle_marker_path():
+    """A tiny presence marker: exists iff throttling is currently active (some
+    resource < 20 %). The shim tests it with a single cheap ``[ -e ]`` so the
+    HEALTHY common case never spawns python at all — python (the precise
+    write-vs-poll classify + backoff) runs only during an actual low-budget
+    episode. Correctness never depends on it: a stale-present marker just makes
+    the shim run python, which returns the correct 0; a stale-absent marker
+    fails open (no throttle)."""
+    return os.path.join(gh_rate_dir(), "throttle-active")
+
+
+def _set_throttle_marker(active):
+    """Create/remove the throttle marker (best-effort, never raises)."""
+    path = throttle_marker_path()
+    try:
+        if active:
+            os.makedirs(gh_rate_dir(), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("1\n")
+        elif os.path.exists(path):
+            os.remove(path)
+    except OSError as e:
+        _diag("throttle-marker", e)
+
+
 def shim_path():
     """The managed gh shim's install location. On this fleet gh itself lives at
     ~/.local/bin/gh, so the shim WRAPS IT IN PLACE there (the real gh is
@@ -247,6 +272,11 @@ def read_status(now=None, run=None, real_gh="__auto__", force=False):
     }
     _update_alert_latch(status)
     _save_cache(status)
+    # Keep the shim's cheap fast-path marker in sync with the fresh reading:
+    # present iff throttling is currently warranted (some resource < 20 %).
+    _set_throttle_marker(
+        max(backoff_seconds("core", status),
+            backoff_seconds("graphql", status)) > 0)
     return status
 
 
@@ -538,7 +568,12 @@ fi
 if [ "${{{internal_env}:-}}" = "1" ] || [ "${{{poller_env}:-}}" != "1" ]; then
   exec "$REAL_GH" "$@"
 fi
-# Poller: ask for the backoff (0 for a write/non-poll/healthy/error), sleep it.
+# Fast path: no throttle marker => budget healthy => never spend python. The
+# marker is kept in sync by the per-sweep rate read; a stale marker only ever
+# triggers the (correct) python path below.
+[ -e {marker} ] || exec "$REAL_GH" "$@"
+# Poller during a low-budget episode: ask for the backoff (0 for a write/
+# non-poll/healthy/error), sleep it.
 _bo="$({internal_env}=1 {python_exe} {module_path} --wrapper-backoff -- "$@" 2>/dev/null || echo 0)"
 case "$_bo" in ''|*[!0-9]*) _bo=0;; esac
 if [ "$_bo" -gt 0 ] 2>/dev/null; then sleep "$_bo"; fi
@@ -547,6 +582,7 @@ exec "$REAL_GH" "$@"
         sentinel=WRAPPER_SENTINEL,
         real_gh=_shq(real_gh or ""),
         upstream=_shq(upstream_path()),
+        marker=_shq(throttle_marker_path()),
         internal_env=INTERNAL_ENV,
         poller_env=POLLER_ENV,
         python_exe=_shq(python_exe),

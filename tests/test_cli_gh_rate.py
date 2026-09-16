@@ -59,10 +59,13 @@ class TestFetchAndPct(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self._orig = cli_gh_rate.status_path
+        self._orig_gd = cli_gh_rate.gh_rate_dir
+        cli_gh_rate.gh_rate_dir = lambda: self.tmp
         cli_gh_rate.status_path = lambda: os.path.join(self.tmp, "status.json")
 
     def tearDown(self):
         cli_gh_rate.status_path = self._orig
+        cli_gh_rate.gh_rate_dir = self._orig_gd
 
     def test_fetch_parses_both_resources(self):
         run = _FakeRun(_rate_json(4000, 5000, 500, 5000))
@@ -137,10 +140,13 @@ class TestAlertLatch(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self._orig = cli_gh_rate.status_path
+        self._orig_gd = cli_gh_rate.gh_rate_dir
+        cli_gh_rate.gh_rate_dir = lambda: self.tmp
         cli_gh_rate.status_path = lambda: os.path.join(self.tmp, "status.json")
 
     def tearDown(self):
         cli_gh_rate.status_path = self._orig
+        cli_gh_rate.gh_rate_dir = self._orig_gd
 
     def _read(self, now, gql_remaining):
         run = _FakeRun(_rate_json(4000, 5000, gql_remaining, 5000))
@@ -273,6 +279,33 @@ class TestWrapperScript(unittest.TestCase):
         self.assertIn("exec", s)                        # transparent delegation
         self.assertIn("/usr/bin/gh", s)                 # baked real gh
         self.assertIn("--wrapper-backoff", s)
+        self.assertIn("throttle-active", s)             # cheap healthy fast-path
+
+
+class TestThrottleMarker(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._orig_sp = cli_gh_rate.status_path
+        self._orig_gd = cli_gh_rate.gh_rate_dir
+        cli_gh_rate.gh_rate_dir = lambda: self.tmp
+        cli_gh_rate.status_path = lambda: os.path.join(self.tmp, "status.json")
+
+    def tearDown(self):
+        cli_gh_rate.status_path = self._orig_sp
+        cli_gh_rate.gh_rate_dir = self._orig_gd
+
+    def test_marker_present_when_low_absent_when_healthy(self):
+        marker = cli_gh_rate.throttle_marker_path()
+        # low graphql -> marker created
+        low = _FakeRun(_rate_json(4000, 5000, 200, 5000))
+        cli_gh_rate.read_status(now=1000.0, run=low, real_gh="/usr/bin/gh",
+                                force=True)
+        self.assertTrue(os.path.exists(marker))
+        # healthy reading -> marker removed
+        ok = _FakeRun(_rate_json(4000, 5000, 4000, 5000))
+        cli_gh_rate.read_status(now=2000.0, run=ok, real_gh="/usr/bin/gh",
+                                force=True)
+        self.assertFalse(os.path.exists(marker))
 
 
 class TestEnsureWrapper(unittest.TestCase):
