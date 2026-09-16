@@ -613,19 +613,25 @@ class TestFeedbackTypeIsClassified1028(unittest.TestCase):
             self.assertIn("odoo-client-messaging", m.fleet_source)
 
     def test_b_feedback_type_with_tenant_is_medium(self):
-        # (b) type: feedback + anchors + a tenant token -> MEDIUM / list
-        # (a blanket rewrite would lose the client-specific part).
+        # (b) type: feedback + anchors + a tenant token in the DESCRIPTION ->
+        # MEDIUM / list (a blanket rewrite would lose the client-specific part).
+        # #1028 fix-forward-2 (comment 5691229806): the tenant signal is now
+        # SUBJECT-scoped (filename / description / first heading), never the
+        # body -- so the token lives in `description:` here (was the filename +
+        # body) to exercise the actual demotion path.
         text = (
-            "---\nname: miva-client-message-no-workarounds\n"
+            "---\nname: client-message-no-workarounds\n"
+            'description: "MIVA client-message handling -- no interim '
+            'workaround"\n'
             "metadata:\n  node_type: memory\n  type: feedback\n---\n"
-            "# MIVA client message: no interim workaround\n\n"
-            "For the MIVA tenant: do not send an interim workaround while a fix "
-            "is in flight; never push manual work onto the client.\n")
+            "# Client message: no interim workaround\n\n"
+            "Do not send an interim workaround while a fix is in flight; never "
+            "push manual work onto the client.\n")
         tmp, home, _ = self._home_with(
-            "miva-client-message-no-workarounds.md", text)
+            "client-message-no-workarounds-desc-tenant.md", text)
         with tmp:
             m = _by_name(da.scan_home(str(home)))[
-                "miva-client-message-no-workarounds.md"]
+                "client-message-no-workarounds-desc-tenant.md"]
             self.assertEqual(m.confidence, da.MEDIUM)
             self.assertEqual(m.action, da.ACTION_LIST)
 
