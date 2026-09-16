@@ -127,7 +127,8 @@ def _closed_stage_ids(cfg):
     ids = {st.get("hotovo")}
     extra = cfg.get("closed_stage_ids")
     if isinstance(extra, list):
-        ids.update(x for x in extra if isinstance(x, int))
+        ids.update(x for x in extra if isinstance(x, int)
+                   and not isinstance(x, bool))
     return {x for x in ids if x is not None}
 
 
@@ -153,6 +154,11 @@ def compute_hygiene(call, cfg, now=None):
     tasks = call("project.task", "search_read", domain=domain,
                  fields=["id", "name", "stage_id"], order="id", limit=_TASK_LIMIT)
     tasks = tasks or []
+    # #1036 review 🟡 CORRECTNESS-1: `order="id"` keeps the OLDEST tasks (the
+    # A>24h Stop-gate targets) but a board with > _TASK_LIMIT open tasks silently
+    # drops the newest — an A/C UNDER-count (the safe direction: a miss, never a
+    # false flag). Surface it so the limit can be raised rather than fail silent.
+    tasks_truncated = len(tasks) >= _TASK_LIMIT
 
     # BATCH the comment read (#1036 review 🟡): ONE search_read over EVERY open
     # task's comments (`res_id in [...]`) instead of one call per task, then
@@ -160,6 +166,7 @@ def compute_hygiene(call, cfg, now=None):
     # board could overrun the 120s watchdog timeout) into a single call. Each
     # group stays newest-first via the `res_id, date desc` order.
     by_res = {}
+    msgs_truncated = False
     if tasks:
         all_msgs = call(
             "mail.message", "search_read",
@@ -167,8 +174,15 @@ def compute_hygiene(call, cfg, now=None):
                     ["res_id", "in", [t.get("id") for t in tasks]],
                     ["message_type", "=", "comment"]],
             fields=["id", "author_id", "date", "reaction_ids", "res_id"],
-            order="res_id, date desc, id desc", limit=_MSG_LIMIT)
-        for m in all_msgs or []:
+            order="res_id, date desc, id desc", limit=_MSG_LIMIT) or []
+        # #1036 review 🟡 CORRECTNESS-2: if the batched read hit the cap it is
+        # INCOMPLETE (ordered res_id ASC, so the highest-res_id tasks lose their
+        # messages). A task with NO messages in a TRUNCATED batch is then
+        # INDETERMINATE for B (`no stream message` could be truncation, not a
+        # real gap) — B is SKIPPED for it below, so truncation can never produce
+        # a FALSE B / false Stop-block. A/C read `msgs[0]` and only under-count.
+        msgs_truncated = len(all_msgs) >= _MSG_LIMIT
+        for m in all_msgs:
             rid, _ = _m2o(m.get("res_id"))
             if rid is None and isinstance(m.get("res_id"), int):
                 rid = m["res_id"]
@@ -194,8 +208,9 @@ def compute_hygiene(call, cfg, now=None):
                                     date=last.get("date"),
                                     ts=(dt.timestamp() if dt else None)))
 
-        # B — tracked-stage task with NO stream message at all.
-        if stage_id in tracked:
+        # B — tracked-stage task with NO stream message at all. On a TRUNCATED
+        # batch a zero-message task is indeterminate → skip (never false-flag).
+        if stage_id in tracked and not (msgs_truncated and not msgs):
             has_stream = any(
                 _is_stream_author(m.get("author_id"), own_names, stream_pids)
                 for m in msgs)
@@ -214,7 +229,10 @@ def compute_hygiene(call, cfg, now=None):
 
     summary = "task-hygiene: A=%d B=%d C=%d" % (
         len(a_items), len(b_items), len(c_items))
-    return {"A": a_items, "B": b_items, "C": c_items, "summary": summary}
+    if tasks_truncated or msgs_truncated:
+        summary += " (truncated: raise _TASK_LIMIT/_MSG_LIMIT — result under-counts)"
+    return {"A": a_items, "B": b_items, "C": c_items, "summary": summary,
+            "truncated": bool(tasks_truncated or msgs_truncated)}
 
 
 def task_url(cfg, item):

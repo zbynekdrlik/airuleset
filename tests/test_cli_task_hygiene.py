@@ -29,6 +29,22 @@ CFG = {
 }
 
 
+def _apply_order(rows, order):
+    """Faithfully model Odoo's `order` string (e.g. "res_id, date desc, id desc")
+    via stable multi-pass sort, LAST field first so the FIRST field is primary.
+    An empty value sorts as "" for a stable position."""
+    if not order:
+        return
+    fields = [f.strip() for f in order.split(",") if f.strip()]
+    for field in reversed(fields):
+        parts = field.split()
+        name = parts[0]
+        desc = len(parts) > 1 and parts[1].lower() == "desc"
+        # test rows always carry res_id/date/id, so the raw value is a
+        # homogeneous, comparable type per field.
+        rows.sort(key=lambda m, n=name: m.get(n), reverse=desc)
+
+
 class FakeOdoo:
     """A minimal in-memory Odoo the `call(model, method, **body)` interface
     talks to. `tasks` = [{id,name,stage_id}]; `messages` = {res_id: [msg,...]}
@@ -56,22 +72,30 @@ class FakeOdoo:
             rows = [t for t in self.tasks if t["stage_id"][0] not in closed]
             return rows
         if model == "mail.message" and method == "search_read":
-            # #1036: the BATCHED read — `res_id in [ids]`, grouped newest-first
-            # per res_id, each message tagged with its res_id.
+            # #1036: the BATCHED read — `res_id in [ids]`. This fake FAITHFULLY
+            # honours the `order` string (#1036 review 🟡 test-integrity) rather
+            # than hardcoding a reversal, so the production order
+            # "res_id, date desc, id desc" — the newest-first-per-task contract A
+            # and C depend on — is genuinely exercised (a regression to `date
+            # asc` would break these tests, not pass green).
             res_ids = []
             for cond in body.get("domain", []):
                 if cond[0] == "res_id" and cond[1] == "in":
                     res_ids = list(cond[2])
                 elif cond[0] == "res_id" and cond[1] == "=":
                     res_ids = [cond[2]]
-            out = []
-            for rid in res_ids:
-                for m in reversed(self.messages.get(rid, [])):  # newest first
-                    out.append(dict(m, res_id=rid))
+            rid_set = set(res_ids)
+            rows = []
+            for rid, msgs in self.messages.items():
+                if rid not in rid_set:
+                    continue
+                for m in msgs:
+                    rows.append(dict(m, res_id=rid))
+            _apply_order(rows, body.get("order", ""))
             limit = body.get("limit")
             if limit:
-                out = out[:limit]
-            return out
+                rows = rows[:limit]
+            return rows
         if model == "mail.message" and method == "message_reactions_guarded":
             if self.guarded_unavailable:
                 import cli_odoo_ro as ro
@@ -142,6 +166,40 @@ class TestComputeA(unittest.TestCase):
         )
         r = th.compute_hygiene(fake.call, CFG, now=NOW)
         self.assertNotIn(702, [x["task_id"] for x in r["A"]])
+
+
+class TestOrderContract(unittest.TestCase):
+    def test_a_uses_the_newest_comment_per_the_order_string(self):
+        # date-desc vs date-asc pick DIFFERENT last comments: the stream comment
+        # is OLDER, the client comment NEWER. With the production
+        # "res_id, date desc" order, msgs[0] is the client comment → A flags.
+        # (This has teeth only because the fake honours the order string.)
+        fake = FakeOdoo(
+            tasks=[{"id": 300, "name": "t", "stage_id": [2879, "Realizácia"]}],
+            messages={300: [_msg(1, 17244, "ZbynekAI", "2026-09-01 10:00:00"),
+                            _msg(2, 999, "Patrik", "2026-09-10 10:00:00")]},
+        )
+        r = th.compute_hygiene(fake.call, CFG, now=NOW)
+        self.assertIn(300, [x["task_id"] for x in r["A"]])
+
+
+class TestTruncationSafety(unittest.TestCase):
+    def test_b_indeterminate_on_truncated_batch_not_flagged(self):
+        # with a tiny message cap, the batch truncates; a zero-message verif task
+        # must NOT be B-flagged (indeterminate → never a false Stop-block).
+        orig = th._MSG_LIMIT
+        th._MSG_LIMIT = 1
+        self.addCleanup(lambda: setattr(th, "_MSG_LIMIT", orig))
+        fake = FakeOdoo(
+            tasks=[{"id": 401, "name": "t", "stage_id": [2880, "Verifikácia"]},
+                   {"id": 402, "name": "t", "stage_id": [2880, "Verifikácia"]}],
+            messages={401: [_msg(1, 999, "Patrik", "2026-09-01 10:00:00")],
+                      402: []},
+        )
+        r = th.compute_hygiene(fake.call, CFG, now=NOW)
+        # batch truncated to 1 msg → task 402 (zero msgs) is indeterminate, NOT B
+        self.assertNotIn(402, [x["task_id"] for x in r["B"]])
+        self.assertTrue(r["truncated"])
 
 
 class TestComputeB(unittest.TestCase):

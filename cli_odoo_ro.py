@@ -52,7 +52,10 @@ REQUIRED_TOP_KEYS = (
     "instance_url", "api_key_env_file", "project_ids", "stage_ids",
     "stream_partner_ids", "own_author_names",
 )
-REQUIRED_STAGE_KEYS = ("verifikacia", "realizacia", "potrebuje_ujasnit")
+# `hotovo` is REQUIRED (#1036 review 🟡): it defines the closed-stage exclusion
+# in `_closed_stage_ids`; a config omitting it would count Done tasks as "open"
+# and false-flag them (footer inflation / false Stop-block).
+REQUIRED_STAGE_KEYS = ("verifikacia", "realizacia", "potrebuje_ujasnit", "hotovo")
 
 DEFAULT_CLIENT_CONFIRM_DAYS = 3
 DEFAULT_API_KEY_VAR = "ODOO_API_KEY"
