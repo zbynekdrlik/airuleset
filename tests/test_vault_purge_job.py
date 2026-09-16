@@ -335,7 +335,13 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                "             priority_policy_enabled=False,\n"
                "             deploy_state_fetch=None,\n"
                "             infra_queue_fetch=None, resolve_role_fn=None,\n"
-               "             health_probes=None, health_probe_fetch=None):")
+               # #1036 re-pin: task_hygiene_enabled=False (job 49's Odoo
+               # task-hygiene overseer gate) was appended on a NEW trailing
+               # line after health_probe_fetch=None, so the closing `):` moved
+               # off that line onto the new one; the anchor grew a last line,
+               # the mutation target vault_purge=None is untouched.
+               "             health_probes=None, health_probe_fetch=None,\n"
+               "             task_hygiene_enabled=False):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a

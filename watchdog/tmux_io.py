@@ -99,6 +99,10 @@ MACHINE_NUDGE_KINDS = frozenset({
     "goal-sweep", "subagent-stuck",
     # idle-pane backstops + report-owed card (jobs 8/11 + cards)
     "bounce", "gk-request", "card",
+    # #1036 Job 49 — Odoo task-hygiene overseer nudge (per-kind staged, OFF by
+    # default; NOT a nudge_gate GATED_CATEGORY — its cadence is decided by
+    # gate_ok("task-hygiene") directly, like bounce/card/goal-sweep).
+    "task-hygiene",
 })
 
 # #1023 addendum (owner, 2026-09-14) — RECOVERY revivals: identities that REVIVE a

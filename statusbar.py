@@ -493,14 +493,44 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     skip_sfx = (" \033[38;5;245m· skip %d\033[0m" % skipped
                 if isinstance(skipped, int) and skipped > 0 else "")
 
+    # #1036: a configured box's persisted task-hygiene A count (unanswered
+    # client comments) is added to I so the footer can't read 0 while a client
+    # is waiting — 0 when unconfigured/stale (never a live Odoo call here).
+    shown_open = cache["open"] + task_hygiene_a_count(home, now)
+
     return "\033[38;5;75mI %d%s\033[0m%s%s%s%s" % (
-        cache["open"], _drift_marker(cache),
+        shown_open, _drift_marker(cache),
         _user_waiting_sfx(cache, ping_count), _ops_wait_sfx(cache),
         _stream_split_sfx(cache), skip_sfx)
 
 
 DISK_SEGMENT_RED_PCT = 95           # shown (red) at/above this, HIDDEN below (#925; was 90 per #854)
 DISK_SEGMENT_STALE_S = 600          # cache older than this → hide (dead watchdog)
+
+# #1036 — the task-hygiene status.json (watchdog Job 49) runs on a ~2h cadence,
+# so its freshness window is far longer than the disk badge's 10 min; older than
+# this = the watchdog is dead, so the A count is dropped from the I segment.
+TASK_HYGIENE_STALE_S = 3 * 3600
+
+
+def task_hygiene_a_count(home=None, now=None):
+    """The persisted task-hygiene A count (unanswered client comments) added to
+    the footer `I` when this box is configured (#1036). Reads ONLY the machine-
+    local `~/.claude/task-hygiene/status.json` the watchdog Job 49 writes;
+    returns 0 when absent (not configured / never run), corrupt, or stale
+    (> TASK_HYGIENE_STALE_S — a dead watchdog). Never blocks, never touches the
+    network."""
+    now = time.time() if now is None else now
+    cache = _load(_claude_dir(home) / "task-hygiene" / "status.json")
+    if not isinstance(cache, dict):
+        return 0
+    a = cache.get("a")
+    ts = cache.get("ts")
+    if not isinstance(a, int) or isinstance(a, bool):
+        return 0
+    if not isinstance(ts, (int, float)) or (now - ts) > TASK_HYGIENE_STALE_S:
+        return 0
+    return a
 
 RELEASE_IDLE_BREACH_H = 3           # #846: show `rel <Nh>` only at >= 3h deploy age
 RELEASE_IDLE_STALE_S = 3600         # cache older than this → hide (dead watchdog)

@@ -134,6 +134,18 @@ class TestClientBoardTasksDoctrine949(TestCase):
         self.assertIn("OWNER-ORDERED cleanup", self.normed)
         self.assertIn("logged", self.normed)
 
+    # Rule 14 (#1036): the event -> phase table + immediate-ACK invariant
+    def test_event_to_phase_table_present(self):
+        self.assertIn("Udalosť → fáza", self.body)
+        # the immediate 👷 ACK + phase move, client text waits for owner (#606)
+        self.assertIn("OKAMŽITÉ", self.body)
+        self.assertIn("#606 U flow", self.body)
+
+    def test_objection_routes_to_realizacia_plus_bounce(self):
+        # a client objection on a delivered task goes back to Realizácia + a ticket
+        self.assertIn("Výhrada k dodanému", self.body)
+        self.assertIn("Realizácia + ticket (bounce)", self.body)
+
 
 if __name__ == "__main__":
     main()

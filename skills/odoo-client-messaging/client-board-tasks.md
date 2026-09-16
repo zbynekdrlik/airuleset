@@ -128,19 +128,15 @@ rewrite of the stream's own message — carries ZERO developer jargon: no
 `github.com` links, no `#`-number issue refs, no PR / commit / branch / RFR / gk
 / hand-off / CI / merge / worktree tokens (owner: „preco do commentarov do odoo
 taskov vypisujes technicke veci o githube!!", #1018). The client reads plain
-business Slovak about what changed for THEM — that is the DOCTRINE (all of the
-above is discouraged). The MECHANICAL gate (`gates/clientbody.py`, PreToolUse) is
-deliberately CONSERVATIVE so it never false-blocks a legitimate client message
-(the owner's worst outcome): it blocks a GitHub mention (`github.com` / the word
-„GitHub"), a github-context issue number (`issue #NNNN` / `ticket #NNNN`), and
-the unambiguous dev tokens `commit` / `worktree` / `hand-off` / `RFR`. It
-does NOT mechanically block a bare number with no GitHub context (`objednávka
-#1058`, a hex colour `#003366`) nor ambiguous business terms (`PR` = public
-relations, `CI` = corporate identity, `merge`, `branch`) — those stay
-discouraged by this doctrine but are left to review, because blocking them
-false-blocks ordinary business Slovak. The ONE sanctioned exception the gate
-allowlists is the internal `GitHub ticket: #N` marker note (and the
-`(GitHub #N)` description trailer) the odoo-task-sync tooling depends on. A
+business Slovak. The MECHANICAL gate
+(`gates/clientbody.py`, PreToolUse) is deliberately CONSERVATIVE (never
+false-blocks a legit client message): it blocks a `github.com` / „GitHub"
+mention, a github-context issue number (`issue #NNNN` / `ticket #NNNN`), and the
+dev tokens `commit` / `worktree` / `hand-off` / `RFR`. It does NOT block a bare
+number (`objednávka #1058`, hex `#003366`) nor ambiguous business terms (`PR`,
+`CI`, `merge`, `branch`) — those stay discouraged, left to review. The ONE
+allowlisted exception is the internal `GitHub ticket: #N` marker note (and the
+`(GitHub #N)` description trailer) the odoo-task-sync tooling depends on; a
 genuine edge case bypasses with `# airuleset:client-body-ok REASON` (logged).
 
 ### 8. Client answers arrive ONLY in the Odoo task / owner chat — GitHub is a mirror
@@ -204,3 +200,13 @@ OWNER-ORDERED cleanup of the stream's OWN messages (e.g. „zmaž ten technický
 z komentárov", #1018) — a `mail.message.write` on own-author messages only, never
 another author's, recorded on the relevant GitHub ticket so the edit is logged.
 Absent an explicit owner order, a posted message stands.
+
+### 14. Udalosť → fáza (#1036)
+
+👷 ACK + presun fázy = OKAMŽITÉ na každý komentár klienta; text pre klienta čaká na schválenie ownera (#606 U flow).
+
+| Udalosť klienta | Fáza + akcia |
+|---|---|
+| Výhrada k dodanému | Realizácia + ticket (bounce) |
+| Otázka | Potrebuje ujasniť (rule 4) |
+| Dodané na PROD | Verifikácia so správou + návrat späť (rule 3) |
