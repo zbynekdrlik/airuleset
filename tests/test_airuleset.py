@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import airuleset
 import cli_remote  # noqa: E402  (#433 L-E seam re-target)
-from _hook_state_cleanup import sweep_session_files  # noqa: E402
+from _hook_state_cleanup import sweep_session_files, hermetic_hook_env  # noqa: E402
 
 
 def _path_without_python3():
@@ -2163,7 +2163,8 @@ class TestQuestionQualityGate(TestCase):
         sid = sid or self._sid()
         payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
         return subprocess.run(["bash", str(self.HOOK)], input=payload,
-                              text=True, capture_output=True), sid
+                              text=True, capture_output=True,
+                              env=hermetic_hook_env(self)), sid   # #1028/#1046: no live box state
 
     def _blocked(self, r):
         return r.returncode == 0 and '"block"' in r.stdout
