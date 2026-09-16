@@ -250,6 +250,27 @@ class TestMatcher(unittest.TestCase):
             if m is not None:
                 self.assertNotEqual(m.action, da.ACTION_REWRITE)
 
+    def test_generic_url_hygiene_memory_is_not_high(self):
+        # #1028 review-2 🟡: a general deliverable-URL memory (the separate
+        # deliver-files-as-urls doctrine) must NOT match the client-message
+        # functional-url rule — its anchors are now client-message-scoped.
+        tmp = TemporaryDirectory()
+        with tmp:
+            home = Path(tmp.name)
+            mem = home / ".claude" / "projects" / "-p" / "memory"
+            mem.mkdir(parents=True)
+            (mem / "url-hygiene.md").write_text(
+                "---\nname: url-hygiene\nmetadata:\n  type: project\n---\n"
+                "# URL hygiene\n\nHand the user a direct deep-link url, verified "
+                "live before sending; never a prose menu path, never a bare /tmp "
+                "path.\n",
+                encoding="utf-8")
+            matches = da.scan_home(str(home))
+            by = _by_name(matches)
+            m = by.get("url-hygiene.md")
+            if m is not None:
+                self.assertNotEqual(m.action, da.ACTION_REWRITE)
+
     def test_tracking_note_mentioning_config_key_is_not_high(self):
         # #1028 smoke: a plan-of-record / tracking note that merely REFERENCES
         # the rule's config key + emoji (no descriptive rule language) must NOT

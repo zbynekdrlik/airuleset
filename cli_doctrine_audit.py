@@ -142,12 +142,14 @@ ALLOWLIST = [
         "fleet_source": "skills/odoo-client-messaging/handover-compose.md",
         "heading": "Explain the concept to the client",
         "fleet_since": FLEET_SINCE,
+        # Client-message-scoped only — a bare "explain the concept, not the
+        # implementation" is generic engineering advice (#1028 review-2 🟡).
         "anchors": [
             "explain the concept to the client",
             "vysvetli klientovi koncept",
             "explain the feature to the client",
-            "explain the concept, not the implementation",
             "vysvetli klientovi ako to funguje",
+            "explain the concept to the client, not the implementation",
         ],
     },
     {
@@ -171,13 +173,18 @@ ALLOWLIST = [
         "fleet_source": "skills/odoo-client-messaging/handover-compose.md",
         "heading": "Every client message carries a functional URL",
         "fleet_since": FLEET_SINCE,
+        # Client-message-scoped only. A bare "direct deep-link url" /
+        # "verified live before sending" / "never a prose menu path" ALSO belongs
+        # to the separate `deliver-files-as-urls` doctrine and would misdirect a
+        # general URL-hygiene memory to this source (#1028 review-2 🟡). Every
+        # anchor must tie the URL to a CLIENT MESSAGE.
         "anchors": [
             "functional url in every client message",
-            "direct deep-link url",
-            "verified live before sending",
-            "never a prose menu path",
+            "client message carries a functional url",
+            "message body must carry a direct deep-link",
+            "deep-link url to the live feature in the client message",
             "funkčná url v každej klientskej správe",
-            "priamy odkaz na živú funkciu",
+            "každá klientska správa nesie priamy odkaz",
         ],
     },
 ]
@@ -476,12 +483,15 @@ def audit(home, repo_dir=None, fix=False, extra_project_roots=None,
 
 
 def format_table(matches):
-    """A ``file | matched fleet source | confidence | action`` table."""
+    """A ``file | matched fleet source | confidence | action | anchors`` table.
+    The ``anchors`` column surfaces ``anchors_hit`` (0 for a fuzzy-only match) so
+    a reviewer can gauge each match's strength (#1028 review-2 🔵)."""
     if not matches:
         return "doctrine-audit: no graduated-rule local copies found."
-    rows = ["file | matched fleet source | confidence | action",
-            "---- | -------------------- | ---------- | ------"]
+    rows = ["file | matched fleet source | confidence | action | anchors",
+            "---- | -------------------- | ---------- | ------ | -------"]
     for m in sorted(matches, key=lambda x: x.path):
-        rows.append("%s | %s | %s | %s" % (
-            os.path.basename(m.path), m.fleet_source, m.confidence, m.action))
+        rows.append("%s | %s | %s | %s | %d" % (
+            os.path.basename(m.path), m.fleet_source, m.confidence, m.action,
+            m.anchors_hit))
     return "\n".join(rows)
