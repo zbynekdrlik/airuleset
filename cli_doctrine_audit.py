@@ -220,6 +220,30 @@ ALLOWLIST = [
             "každá klientska správa nesie priamy odkaz",
         ],
     },
+    {
+        "id": "client-board-tasks",
+        "fleet_source": "skills/odoo-client-messaging/client-board-tasks.md",
+        "heading": "Client Board Tasks — project.task Formatting Doctrine",
+        "fleet_since": "0.1.311",  # the #1014/#1018/#1024 fleet-unification merge
+        # DISTINCTIVE, multi-word phrases DERIVED from the rewritten doctrine
+        # (#1028 lesson): a per-stream restatement of the client-board doctrine
+        # says these; a bare "board"/"task"/"chatter" is far too generic and is
+        # NOT an anchor. The >= 2-anchor bar + the client-messaging subject cue
+        # (has_client_message_subject) carry the precision; a tenant-named board
+        # memory downgrades to MEDIUM/LIST (never a silent rewrite of its
+        # client-specific part). Mostly EN (the doctrine's own phrasing) + one
+        # SK atomic-tasks pointer phrase; a NEW SK-only restatement is caught at
+        # WRITE time by classify_memory_write (gates/clientbody.py), this audit
+        # is the retrospective net for already-drifted memories.
+        "anchors": [
+            "one task = one topic",
+            "chat-of-everything",
+            "per-board profile",
+            "tracking mirror",
+            "awaiting client verification",
+            "téma pokračuje v úlohe",
+        ],
+    },
 ]
 
 
