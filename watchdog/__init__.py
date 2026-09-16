@@ -1741,7 +1741,13 @@ SWEEP_SOFT_CAP_S = 100
 # dominant fetch/subprocess timeout — NEVER a fixed 60s copied from the queue-arrival
 # fetch (the #1023 anti-pattern the ticket calls out). A skipped job re-runs next sweep.
 _BUDGET_MIN_GH_FETCH_S = 20       # a single gh timeline read (timeout ~15) + margin
-_BUDGET_MIN_GH_BATCH_S = 25       # a repo-batched gh/git loop (REPO_SWEEP_BATCH_MAX + persist-through per repo)
+# a repo-batched gh/git loop (net_drift/stuck_main/wip_ref/…): sized for STARTING
+# safely + making one repo's progress, NOT the whole REPO_SWEEP_BATCH_MAX (3) batch
+# (~45s) — those jobs persist a cadence/dedup mark THROUGH each repo (#172), so a
+# mid-batch kill is survivable and costs at most the repos not yet reached, never a
+# lost mark. 25 = one repo (~15s) + margin; the batch's own per-repo write-through,
+# not this floor, bounds the multi-repo tail (#1041 review-1 F4).
+_BUDGET_MIN_GH_BATCH_S = 25
 _BUDGET_MIN_SSH_FLEET_S = 65      # ssh fanout across fleet hosts (per-host ~60), hour-gated, coordinator-only
 _BUDGET_MIN_HTTP_PROBE_S = 15     # a single HTTP GET (usage timeout 12 / healthz 8) + margin
 _BUDGET_MIN_PS_REAPER_S = 10      # a ps read + targeted kill / a per-pane tmux round-trip (fast subprocess)
@@ -4933,14 +4939,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # reuses `_sweep_start`.
     _budget_logged = False
     for _label, _gate, _invoke, _err, _min_budget in _standalone_registry:
-        # #1041 — ATTRIBUTION: journal the job ABOUT to run, flushed IMMEDIATELY by
-        # the existing `_FlushList(log_fn)` (cmd_watchdog wires log_fn to a flushing
+        # #1041 — read the ONE budget primitive ONCE per iteration (one clock read);
+        # the job-start elapsed anchor is derived from it (`elapsed == SOFT_CAP -
+        # left`), so attribution and the budget guard below share that single read.
+        _left = remaining_budget_s()
+        # ATTRIBUTION: journal the job ABOUT to run, flushed IMMEDIATELY by the
+        # existing `_FlushList(log_fn)` (cmd_watchdog wires log_fn to a flushing
         # print), so a systemd `TimeoutStartSec=2min` kill DURING a job leaves that
         # job's name as the LAST `job start:` line in the journal — the culprit,
         # instead of a bare `Failed with result 'timeout'`. One line per registered
-        # job (the gk 15:13:32 kill printed nothing about which job hung).
-        _elapsed_start = time_fn() - _sweep_start
-        logs.append("job start: %s at %ds" % (_label, int(_elapsed_start)))
+        # job (the gk 15:13:32 kill printed nothing about which job hung); the per-
+        # sweep volume (~one line/job) is absorbed by the box's journald SystemMaxUse
+        # cap (#841). Measured against SWEEP_SOFT_CAP_S (the registry reference frame;
+        # job 20's goal-lane riders measure against tail_deadline (110), ~10s more
+        # permissive — see their own `_budget_left_fn`).
+        logs.append("job start: %s at %ds" % (_label, int(SWEEP_SOFT_CAP_S - _left)))
         if _gate():
             # #1032: ONE gate site — a PAUSED box suppresses every human-channel-
             # alerting job (a frozen stream's drift/leftover is expected; nobody
@@ -4953,14 +4966,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             # with fewer than its own timeout-derived minimum left skips (UNTOUCHED
             # state, zero external calls), so it cannot run the unit into the 120s
             # kill; it re-runs next sweep. `_min_budget` None => no guard (a local
-            # /fast job, per issue 1041's registry audit). Reuse `_elapsed_start`
-            # (the job-start anchor) so both derive from ONE clock read.
-            if _min_budget is not None:
-                _left = SWEEP_SOFT_CAP_S - _elapsed_start
-                if _left < _min_budget:
-                    logs.append("%s -> hold:budget (%ds left, need >=%ds)"
-                                % (_label, int(_left), _min_budget))
-                    continue
+            # /fast job, per issue 1041's registry audit). `_left` is the same
+            # `remaining_budget_s()` read used for the job-start anchor above.
+            if _min_budget is not None and _left < _min_budget:
+                logs.append("%s -> hold:budget (%ds left, need >=%ds)"
+                            % (_label, int(_left), _min_budget))
+                continue
             try:
                 logs += _invoke()
             except Exception as e:

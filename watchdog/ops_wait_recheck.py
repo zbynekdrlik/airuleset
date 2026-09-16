@@ -237,12 +237,16 @@ OPS_WAIT_FETCH_TTL_MIN_S = 5 * 60
 # mirrors BACKLOG_CHECK_FAILURE_TTL_S.
 OPS_WAIT_FETCH_FAIL_TTL_S = 60
 
-# #1041 — the ops-wait re-check does a gh union fetch (`_cached_ops_wait`) AND, when
-# a deploy-parked W member exists, a per-instance git/HTTP deploy-state fetch
-# (`deploy_state_fetch`, git 5/10 + HTTP 15 per instance). Both are cached, so the
-# guard is CACHE-AWARE (skips only when a fetch would actually MISS + fire); the
-# minimum covers the deploy-state per-instance bound, well under the 120s kill.
-OPS_WAIT_FETCH_MIN_BUDGET_S = 20
+# #1041 — the ops-wait re-check does TWO sequential fetches on a double cache-miss:
+# a gh union fetch (`_cached_ops_wait`, ~15s) THEN, when a deploy-parked W member
+# exists, a per-instance git/HTTP deploy-state fetch (`deploy_state_fetch`, git 5/10
+# + HTTP 15 ≈ 30s for one instance). Worst combined ≈ 45s, so the minimum must cover
+# BOTH, not just the gh-union alone (the #1041-review-1 F1 finding: min=20 covered
+# only the union and permitted a ~90s start against the rider's tail_deadline (110)
+# reference → 90+45 = 135s, past the 120s kill). Both caches share the 30-min TTL so
+# a double-miss is routine; the guard is CACHE-AWARE (skips only when a fetch would
+# actually MISS + fire). 50 = 45s combined + margin, still well under the kill.
+OPS_WAIT_FETCH_MIN_BUDGET_S = 50
 
 # #714 — the nudge is a TRIGGER, not a textbook. Hard cap on the keystroke so it
 # never grows into the multi-KB wall the incident produced (full doctrine + a
@@ -322,6 +326,24 @@ def _fetch_ttl():
                OPS_WAIT_FETCH_TTL_MIN_S)
 
 
+def _entry_is_fresh(entry, now, ttl, fail_ttl):
+    """#1041 — is `entry` a within-TTL cache dict? The SINGLE freshness predicate
+    both `_cached_member_fetch` (to serve a hit) and `_cache_would_miss` (to predict
+    a miss) consult, so the two can NEVER drift (the review-1 F3 DRY finding — a
+    future freshness change is made in ONE place). A non-dict / malformed-ts /
+    expired entry is NOT fresh. `entry_ttl` = `ttl` for a list `members`, else
+    `fail_ttl` (an unmeasurable None re-checks sooner)."""
+    if not isinstance(entry, dict):
+        return False
+    try:
+        age = now - float(entry.get("ts", 0))
+    except (TypeError, ValueError):
+        return False
+    members = entry.get("members")
+    entry_ttl = ttl if isinstance(members, list) else fail_ttl
+    return age < entry_ttl
+
+
 def _cached_member_fetch(cwd, fetch, state, now, cache_key, ttl=None,
                          fail_ttl=None):
     """A per-cwd TTL cache over a member-list `fetch` — the faithful sibling of
@@ -345,16 +367,9 @@ def _cached_member_fetch(cwd, fetch, state, now, cache_key, ttl=None,
     fail_ttl = OPS_WAIT_FETCH_FAIL_TTL_S if fail_ttl is None else fail_ttl
     cache = state.setdefault(cache_key, {})
     entry = cache.get(cwd)
-    if isinstance(entry, dict):
-        try:
-            age = now - float(entry.get("ts", 0))
-        except (TypeError, ValueError):
-            age = None
-        if age is not None:
-            members = entry.get("members")
-            entry_ttl = ttl if isinstance(members, list) else fail_ttl
-            if age < entry_ttl:
-                return members if isinstance(members, list) else None
+    if _entry_is_fresh(entry, now, ttl, fail_ttl):
+        members = entry.get("members")
+        return members if isinstance(members, list) else None
     try:
         members = fetch(cwd)
     except Exception:
@@ -367,23 +382,15 @@ def _cached_member_fetch(cwd, fetch, state, now, cache_key, ttl=None,
 
 def _cache_would_miss(cwd, state, now, cache_key, ttl=None, fail_ttl=None):
     """#1041 — would a `_cached_member_fetch(cwd, ..., cache_key, ...)` MISS the
-    cache right now and therefore fire its (possibly slow) fetch? Mirrors the
-    freshness check above EXACTLY (same ttl/fail_ttl fallbacks, same malformed-ts
-    handling) so a caller can decide — BEFORE calling — whether a budget guard
-    should skip the fetch. True = a fetch WOULD fire (stale/absent/malformed);
+    cache right now and therefore fire its (possibly slow) fetch? Consults the SAME
+    `_entry_is_fresh` predicate `_cached_member_fetch` uses (no parallel copy — the
+    review-1 F3 fix), so a caller can decide — BEFORE calling — whether a budget
+    guard should skip the fetch. True = a fetch WOULD fire (stale/absent/malformed);
     False = a fresh cache hit (microseconds, budget-irrelevant). No side effects."""
     ttl = _fetch_ttl() if ttl is None else ttl
     fail_ttl = OPS_WAIT_FETCH_FAIL_TTL_S if fail_ttl is None else fail_ttl
     entry = (state.get(cache_key) or {}).get(cwd)
-    if not isinstance(entry, dict):
-        return True
-    try:
-        age = now - float(entry.get("ts", 0))
-    except (TypeError, ValueError):
-        return True
-    members = entry.get("members")
-    entry_ttl = ttl if isinstance(members, list) else fail_ttl
-    return age >= entry_ttl
+    return not _entry_is_fresh(entry, now, ttl, fail_ttl)
 
 
 def _cached_ops_wait(cwd, ops_wait_fetch, state, now, ttl=None, fail_ttl=None):
