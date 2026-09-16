@@ -358,25 +358,39 @@ def pane_session_limited(captured):
 #   "Continuing automatically when your limit resets"
 #   "Usage limit reached again after you continued. The automatic-continue
 #    setting no longer ends this wait."  (the owner's comment-2 hard state)
-# The two robust signals across every form are "continuing automatically" (the
-# auto-continue wait) and "Usage limit reached" (the headline that survives even
-# in the "no longer ends this wait" state). Bottom-scoped EXACTLY like
-# `pane_session_limited` (reusing `_above_input_box`, no new pane parser) so a
-# stale banner echo scrolled high above fresh work never counts — the same
-# freshest-thing-on-screen discipline (gk 2026-07-24).
+# The distinctive signals of the PARKED auto-continue state — anchored on the
+# banner STRUCTURE, NOT a bare headline. A bare "usage limit reached" / bare
+# "continuing automatically" false-matches ordinary prose ("the usage limit
+# reached 80% last week", "continuing automatically with the next step") — the
+# #1034 adversarial-review finding — so require the specific parked phrasings:
+#   • "continuing automatically at <time>"  (the auto-continue countdown)
+#   • "continuing automatically when your limit resets"
+#   • "usage limit reached again"           (the "reached again after you
+#      continued" retry state) / "no longer ends this wait" (its companion).
+# These cover every real Claude Code 2.1.268 parked form (verified read-only
+# against the installed binary) while a running turn's own output / plain prose
+# does not match. Bottom-scoped EXACTLY like `pane_session_limited` (reusing
+# `_above_input_box`, no new pane parser) so a stale banner echo scrolled high
+# above fresh work never counts — the freshest-thing-on-screen discipline
+# (gk 2026-07-24).
 _AUTO_CONTINUE_PARKED_RX = re.compile(
-    r"continuing\s+automatically|usage\s+limit\s+reached", re.I)
+    r"continuing\s+automatically\s+(?:at\b|when)"
+    r"|no\s+longer\s+ends\s+this\s+wait"
+    r"|usage\s+limit\s+reached\s+again", re.I)
 
 
 def pane_auto_continue_parked(captured):
     """True if the pane's BOTTOM shows Claude Code's PARKED usage-limit
-    auto-continue banner (`Usage limit reached · continuing automatically at
-    <time>` / `Continuing automatically at <time>` / the `… no longer ends this
-    wait` state). Bottom-scoped to the last 10 lines above the input box
-    (falling back to the raw last 10 when no `❯` boundary is located), the same
-    scope + fallback as `pane_session_limited` — a banner that is no longer the
-    freshest content on screen means the session already resumed and is not
-    parked. Never raises; empty/None → False."""
+    auto-continue banner — matched on the banner STRUCTURE, not a bare headline:
+    `… continuing automatically at <time>` / `Continuing automatically when your
+    limit resets` / the `Usage limit reached again … no longer ends this wait`
+    retry state. Bottom-scoped to the last 10 lines above the input box (falling
+    back to the raw last 10 when no `❯` boundary is located), the same scope +
+    fallback as `pane_session_limited` — a banner that is no longer the freshest
+    content on screen means the session already resumed and is not parked. The
+    structural anchoring (never the bare `usage limit reached` / bare
+    `continuing automatically`) is what keeps ordinary prose / a running turn's
+    own output from false-matching. Never raises; empty/None → False."""
     if not captured:
         return False
     region = watchdog._above_input_box(captured)

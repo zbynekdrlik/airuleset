@@ -63,7 +63,8 @@ def _find(cwd_to_tpath):
 
 
 def _job(panes, *, cur_email, caps, state=None, tpaths=None,
-         in_mode=False, recent_human=False, dry_run=False, deliver_ok=True):
+         in_mode=False, at_idle=True, recent_human=False, dry_run=False,
+         deliver_ok=True):
     """Run parked_wake_job with fakes; return (out, state, delivered) where
     `delivered` is the list of (pid, tpath) the injected deliver was called with."""
     state = {} if state is None else state
@@ -81,6 +82,7 @@ def _job(panes, *, cur_email, caps, state=None, tpaths=None,
         capture=lambda pid: caps.get(pid, ""),
         is_parked=pane_auto_continue_parked,
         in_mode=lambda pid: in_mode,
+        at_idle=lambda cap: at_idle,
         recent_human=lambda sid, cwd, tpath, pid: recent_human,
         deliver=deliver,
         dry_run=dry_run,
@@ -101,6 +103,16 @@ class TestParkedBannerDetector(TestCase):
     def test_ignores_stale_echo_scrolled_high(self):
         # bottom-scoped: a banner echo far above fresh work is not "still parked"
         self.assertFalse(pane_auto_continue_parked(STALE_ECHO_HIGH))
+
+    def test_no_false_positive_on_prose_or_running_turn(self):
+        # #1034 review 🟡-3: the detector is anchored on the banner STRUCTURE, so
+        # ordinary prose about limits and a running turn's own output must NOT match.
+        self.assertFalse(pane_auto_continue_parked(
+            "The usage limit reached about 80% last week.\n> "))
+        self.assertFalse(pane_auto_continue_parked(
+            "continuing automatically with the next step now\n esc to interrupt"))
+        self.assertFalse(pane_auto_continue_parked(
+            "* discussing the usage limit reached headline\n> "))
 
 
 class TestParkedWakeJob(TestCase):
@@ -159,6 +171,41 @@ class TestParkedWakeJob(TestCase):
                                      state=state, in_mode=True)
         self.assertEqual(delivered, [])
         self.assertIn("repo", state["parked_wake"])
+
+    def test_busy_pane_not_at_idle_holds_no_send(self):
+        # #1034 review 🟡-4: a running turn (self-resumed while the banner tail
+        # lingers, or a false-positive) is NOT at a bare `❯` — never Escape it (#233).
+        panes = [("%1", "/repo")]
+        caps = {"%1": BANNER_AUTOCONTINUE}
+        state = {"parked_wake": {"repo": {"email": "old@x.bid", "first_seen": 1}}}
+        out, state, delivered = _job(panes, cur_email="new@y.bid", caps=caps,
+                                     state=state, at_idle=False)
+        self.assertEqual(delivered, [], out)
+        self.assertIn("repo", state["parked_wake"])   # kept → retry when idle
+        self.assertTrue(any("busy-pane" in ln for ln in out), out)
+
+    def test_dry_run_wakes_but_keeps_mark(self):
+        # #1034 review 🟡-2: a --dry-run must NOT clear a real parked baseline
+        # (deliver returns True without sending; run_once save_state runs anyway).
+        panes = [("%1", "/repo")]
+        caps = {"%1": BANNER_AUTOCONTINUE}
+        state = {"parked_wake": {"repo": {"email": "old@x.bid", "first_seen": 1}}}
+        out, state, delivered = _job(panes, cur_email="new@y.bid", caps=caps,
+                                     state=state, dry_run=True)
+        self.assertTrue(any("wake-parked: %1 old@x.bid -> new@y.bid" in ln for ln in out), out)
+        # mark PRESERVED so the next REAL sweep actually wakes it
+        self.assertIn("repo", state["parked_wake"])
+
+    def test_shared_cwd_panes_are_skipped_not_churned(self):
+        # #1034 review 🟡-1: two panes in one cwd resolve to the SAME cwd-keyed
+        # sid; a non-parked sibling must not delete the parked pane's baseline.
+        panes = [("%1", "/repo"), ("%2", "/repo")]        # same cwd → same sid
+        caps = {"%1": BANNER_AUTOCONTINUE, "%2": NOT_PARKED}
+        state = {"parked_wake": {"repo": {"email": "old@x.bid", "first_seen": 1}}}
+        out, state, delivered = _job(panes, cur_email="new@y.bid", caps=caps, state=state)
+        self.assertEqual(delivered, [], out)                # never guess which pane
+        self.assertIn("repo", state["parked_wake"])          # baseline NOT churned
+        self.assertTrue(any("skip ambiguous" in ln for ln in out), out)
 
     def test_failed_deliver_keeps_mark_for_retry(self):
         panes = [("%1", "/repo")]
@@ -271,7 +318,7 @@ class TestParkedWakeRunOnceIntegration(TestCase):
         self._write(cj, json.dumps({"oauthAccount": {"emailAddress": "new@y.bid"}}))
 
         banner = ("Usage limit reached  continuing automatically at 9:50am  "
-                  "esc or type to cancel\n> \n")
+                  "esc or type to cancel\n❯")
         sent = []
 
         def fake_run(argv, timeout=8):
@@ -335,7 +382,7 @@ class TestParkedWakeRunOnceIntegration(TestCase):
         cj = os.path.join(tmp, ".claude.json")
         self._write(cj, json.dumps({"oauthAccount": {"emailAddress": "same@x.bid"}}))
         banner = ("Usage limit reached  continuing automatically at 9:50am  "
-                  "esc or type to cancel\n> \n")
+                  "esc or type to cancel\n❯")
         sent = []
 
         def fake_run(argv, timeout=8):

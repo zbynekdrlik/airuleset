@@ -35,7 +35,7 @@ Two problems this fixes, both reported by the owner:
        shared batch delivers later in the hour). So the cap is RESTORED, under a
        NEW name (the old `NUDGE_FAMILY_GAP_S`/`_family_gap` stay deleted).
 
-   RECOVERY identities (`RECOVERY_NUDGE_KINDS` = resume/compact) are EXEMPT from
+   RECOVERY identities (`RECOVERY_NUDGE_KINDS` = resume/compact/goal-arm/wake-parked) are EXEMPT from
    BOTH bounds and never count as "another kind delivered" for the cap — a
    revival into a dead/blocked session is not a prompt interruption.
 

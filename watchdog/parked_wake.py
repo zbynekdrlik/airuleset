@@ -81,7 +81,7 @@ def deliver_wake(pid, tpath, *, run, sleep_fn=None, logs=None,
 
 def parked_wake_job(now, state, panes, projects_dir, *,
                     account_email, find_transcript, capture,
-                    is_parked, in_mode, recent_human, deliver,
+                    is_parked, in_mode, at_idle, recent_human, deliver,
                     dry_run=False):
     """Return journal log lines for the parked-wake sweep. NEVER pings the owner.
 
@@ -90,12 +90,28 @@ def parked_wake_job(now, state, panes, projects_dir, *,
     state lives under `state["parked_wake"]` (sid -> {email, first_seen}),
     persisted by run_once's own `save_state`; dead-pane entries are pruned.
 
+    AMBIGUOUS panes are skipped (never churned): two `claude` panes in ONE repo
+    cwd resolve to the SAME cwd-keyed transcript/sid (the #645 shared-cwd shape),
+    so acting per-pane would (a) let a non-parked sibling delete a parked pane's
+    baseline every sweep, and (b) cross-verify a `continue` typed into pane A
+    against a transcript shared with pane B. The whole per-pane loop already
+    SKIPS a transcript owned by >1 pane (`skip ambiguous`); this job mirrors that
+    — a missed wake on a shared-cwd config is the safe direction.
+
+    An account switch BEFORE the first post-park sweep records the ALREADY-
+    switched account as the baseline, so the wake never fires for that episode
+    (it degrades to the status quo — no harm — matching the montalu1 ~11-min
+    switch-lag window); the fast 60 s sweep makes that window small.
+
     Injected deps (production wiring in run_once passes the real primitives):
       account_email()                 -> str   current box oauthAccount.emailAddress ("" unreadable)
       find_transcript(projects_dir, cwd) -> (tpath, mtime) | None
       capture(pid)                    -> str   FRESH pane capture ("" on failure)
       is_parked(captured)             -> bool  parked auto-continue banner present
       in_mode(pid)                    -> bool  copy-mode/scroll → skip this sweep
+      at_idle(captured)               -> bool  pane is at a BARE idle `❯` prompt (not a
+                                               running turn, no user draft) — the #233
+                                               guard the `resume` kind uses before it types
       recent_human(sid, cwd, tpath, pid) -> bool  VETO: a human is active in this pane
       deliver(pid, tpath)            -> bool  esc+continue verified submit (handles dry_run)
     """
@@ -108,7 +124,10 @@ def parked_wake_job(now, state, panes, projects_dir, *,
     if not isinstance(parked, dict):
         parked = {}
     email = account_email() or ""
-    seen = set()
+
+    # Resolve every pane to its sid FIRST, so an AMBIGUOUS sid (>1 pane sharing
+    # one cwd-keyed transcript) can be detected and skipped rather than churned.
+    per_sid = {}                     # sid -> [(pid, cwd, tpath)]
     for pid, cwd in panes:
         tinfo = find_transcript(projects_dir, cwd)
         if not tinfo:
@@ -119,7 +138,18 @@ def parked_wake_job(now, state, panes, projects_dir, *,
         sid = os.path.basename(str(tpath))
         if sid.endswith(".jsonl"):
             sid = sid[:-len(".jsonl")]
-        seen.add(sid)
+        per_sid.setdefault(sid, []).append((pid, cwd, tpath))
+
+    seen = set(per_sid)              # every LIVE sid this sweep (incl. ambiguous)
+    for sid, owners in per_sid.items():
+        if len(owners) > 1:
+            # Ambiguous (shared cwd) — never guess which pane the banner is on,
+            # never churn the mark. The live panes keep the sid in `seen` so its
+            # baseline is not pruned as dead.
+            out.append("wake-parked: skip ambiguous (%d panes -> %s)"
+                       % (len(owners), sid))
+            continue
+        pid, cwd, tpath = owners[0]
 
         captured = capture(pid)
         if not is_parked(captured):
@@ -155,6 +185,14 @@ def parked_wake_job(now, state, panes, projects_dir, *,
             out.append("wake-parked: %s skip in-mode (switch %s -> %s)"
                        % (pid, old, email))
             continue
+        if not at_idle(captured):
+            # A running turn (a session that already self-resumed while its
+            # banner tail lingers, or a detector false-positive) is NOT at a
+            # bare `❯` — the leading Escape would INTERRUPT the live turn (#233).
+            # Skip WITHOUT clearing the mark; retry once it is genuinely idle.
+            out.append("wake-parked: %s skip busy-pane (switch %s -> %s)"
+                       % (pid, old, email))
+            continue
         if recent_human(sid, cwd, tpath, pid):
             out.append("wake-parked: %s skip recent-human (switch %s -> %s)"
                        % (pid, old, email))
@@ -162,7 +200,11 @@ def parked_wake_job(now, state, panes, projects_dir, *,
 
         if deliver(pid, tpath):
             out.append("wake-parked: %s %s -> %s" % (pid, old, email))
-            del parked[sid]                         # woken; drop the mark
+            # Woken → drop the mark. Under dry_run `deliver` sends NOTHING but
+            # returns True, so KEEP the mark (never let a `--dry-run` clear a
+            # real parked baseline and sabotage the next real sweep's wake).
+            if not dry_run:
+                del parked[sid]
         else:
             # A swallowed/aborted submit is NOT a wake: keep the OLD-email mark so
             # the next sweep retries the switch. send_verified never types over a

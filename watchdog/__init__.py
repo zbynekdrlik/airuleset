@@ -4997,6 +4997,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             capture=lambda pid: capture_pane(pid, run),
             is_parked=pane_auto_continue_parked,
             in_mode=lambda pid: pane_in_mode(pid, run),
+            at_idle=pane_at_idle_prompt,
             recent_human=_recent_human,
             deliver=_deliver,
             dry_run=dry_run)
