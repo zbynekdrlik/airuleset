@@ -244,7 +244,7 @@ def _run(candidates, rec=None, send=None, roots=None, state=None, now=10 ** 9,
          mock.patch.object(cs, "_cache_repo_roots", lambda *a, **k: roots):
         logs = cs.gk_orphan_marker_sweep(
             now, run=None, state=st, send_fn=send, user="newlevel",
-            dry_run=dry_run, gh_fetch=lambda root: candidates, apply_fn=rec)
+            dry_run=dry_run, gh_fetch=lambda root, **kw: candidates, apply_fn=rec)
     return logs, st, rec, send
 
 

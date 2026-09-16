@@ -5713,27 +5713,31 @@ def _watchdog_gk_selfservice_fetch(root):
     return _fetch_gk_action_requests(root)
 
 
-def _watchdog_gkorphan_fetch(root):
+def _watchdog_gkorphan_fetch(root, budget=None, logs=None):
     """Job 36's real gh fetch (#551) — the orphaned gk-hand-off-marker
     candidate facts (an `in:comments` search narrowed by per-candidate
     comment/label/timeline reads). Same network-free-tests wiring as jobs
-    8/11/31."""
+    8/11/31. #1050: forwards the sweep's `_SweepBudget` so the per-candidate
+    read loop is wall-clock-bounded (unwired None = no bound)."""
     from watchdog import _fetch_gk_orphan_candidates
-    return _fetch_gk_orphan_candidates(root)
+    return _fetch_gk_orphan_candidates(root, budget=budget, logs=logs)
 
 
-def _watchdog_gkorphan_handoff_fetch(root):
+def _watchdog_gkorphan_handoff_fetch(root, budget=None, logs=None):
     """Job 36's #570 comment-handoff real gh fetch — the PROPER
     `GATEKEEPER-ACTION:`/`READY-FOR-REVIEW:` marker-comment-in-window candidate
     facts (window-bounded `in:comments` searches narrowed by per-candidate
     comment/label/timeline reads). Computes its own `now` (a ms skew across a
     48h window is irrelevant) and uses the default gh env (home=None), exactly
     like `_watchdog_gkorphan_fetch`. Same network-free-tests wiring as jobs
-    8/11/31: run_once gates the whole handoff pass on THIS being wired."""
+    8/11/31: run_once gates the whole handoff pass on THIS being wired. #1050:
+    forwards the sweep's `_SweepBudget` so the per-marker/per-candidate read
+    loops are wall-clock-bounded (unwired None = no bound)."""
     import time as _t
     from watchdog import _comment_handoff_window_s, _fetch_gk_comment_handoffs
     return _fetch_gk_comment_handoffs(root, None, _t.time(),
-                                      _comment_handoff_window_s())
+                                      _comment_handoff_window_s(),
+                                      budget=budget, logs=logs)
 
 
 def _watchdog_reaper_ps_fetch():
