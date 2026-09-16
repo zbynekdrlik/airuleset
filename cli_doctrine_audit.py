@@ -244,6 +244,29 @@ ALLOWLIST = [
             "téma pokračuje v úlohe",
         ],
     },
+    {
+        "id": "startup-introduction",
+        "fleet_source": "skills/odoo-client-messaging/handover-compose.md",
+        "heading": "Štartovací Introduction v produkte",
+        "fleet_since": "0.1.315",  # the #1042 startup-introduction standard
+        # DISTINCTIVE, client-scoped, multi-word phrases DERIVED from the real
+        # #1042 section prose. The four SK anchors are verbatim in the fleet
+        # section; the two EN forms are forward-compat for a future English
+        # restatement (the greeting / explain / no-promises entries above use the
+        # same pattern). A bare "introduction" / "screenshot" / "návod" is far too
+        # generic and is NOT an anchor; every anchor ties the page to a CLIENT
+        # HANDOVER, so any >= 2-hit match includes a client-scoped anchor (the
+        # #1028 precision bar). A tenant-named restatement still downgrades to
+        # MEDIUM/LIST via the shared has_tenant_token / subject-cue gates.
+        "anchors": [
+            "štartovací introduction v produkte",
+            "nová osoba bez kontextu rovno začať",
+            "nikdy externý dokument, nikdy školiace vlákno",
+            "akceptačné vlákno klientovi odkazuje na introduction",
+            "startup introduction page in the product",
+            "a new person with zero context can start",
+        ],
+    },
 ]
 
 
