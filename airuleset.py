@@ -8689,6 +8689,9 @@ from cli_onboard import (  # noqa: E402
 # --- #993: lane-overlap independence-check CLI leaf ---
 from cli_lane_overlap import cmd_lane_overlap as cmd_lane_overlap  # noqa: E402, F401
 
+# --- #1053: gk state-machine label-ensure CLI leaf ---
+from cli_labels import cmd_labels as cmd_labels  # noqa: E402, F401
+
 # --- #857: context-baseline + skill-usage CLI leaves ---
 from cli_context_baseline import (  # noqa: E402, F401
     cmd_context_baseline as cmd_context_baseline,
@@ -9712,6 +9715,18 @@ def main():
     p_ab.add_argument("--render", metavar="ACCOUNT",
                       help="Account name to render bootstrap for")
 
+    # --- #1053: gk state-machine label-ensure ---
+    p_lbl = sub.add_parser(
+        "labels",
+        help="Ensure the #1053 gk state-machine labels (gk-processing / "
+             "verify-on-copy) exist on a repo — idempotent check-then-create "
+             "(never --force). The gatekeeper runs this once; a reduced-"
+             "authority stream must not run it against a foreign repo.")
+    p_lbl.add_argument("--ensure", action="store_true",
+                       help="Create the labels if missing")
+    p_lbl.add_argument("--repo", default=None,
+                       help="Target repo owner/name (default: resolve cwd)")
+
     # --- #1036: Odoo task-hygiene overseer ---
     p_th = sub.add_parser(
         "task-hygiene",
@@ -10203,6 +10218,7 @@ SUBCOMMANDS = {
     "nudges": cmd_nudges,
     "volume": cmd_volume,
     "task-hygiene": cmd_task_hygiene,
+    "labels": cmd_labels,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS
