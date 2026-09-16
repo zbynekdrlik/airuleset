@@ -26,6 +26,14 @@ import watchdog as wd                       # noqa: E402
 import watchdog.goal as goal                # noqa: E402
 from watchdog import lane_reconcile         # noqa: E402
 from watchdog import ops_wait_recheck as owr  # noqa: E402
+from watchdog import deploy_state as ds     # noqa: E402
+
+# The riders measure sweep budget against job 20's tail_deadline (110s); the unit's
+# systemd kill is at 120s (TimeoutStartSec=2min). A start permitted at the min
+# boundary + that rider's worst bounded fetch must finish before the kill.
+_RIDER_REF_S = 110
+_KILL_S = 120
+_GH_FETCH_S = 15   # a single gh timeline read (the rider's own union fetch)
 
 
 def _iso(epoch):
@@ -153,6 +161,81 @@ class TestOpsWaitBudget(unittest.TestCase):
         self.assertEqual(ow_calls, [self.CWD],
                          "an ample budget must run the ops-wait fetch\n"
                          + "\n".join(logs))
+
+    def test_boundary_just_below_min_holds_just_above_runs(self):
+        # #1041 review-2 🟡-2 — lock the ACTUAL threshold value: a revert of the min
+        # would flip one of these. Budget is measured against the 110 ref, but the
+        # rider is handed `budget_left_fn` directly here, so pass the remaining value.
+        below = owr.OPS_WAIT_FETCH_MIN_BUDGET_S - 1
+        above = owr.OPS_WAIT_FETCH_MIN_BUDGET_S + 1
+        ow_below, _ = self._run(below, [], [])[0], None
+        self.assertTrue(any("hold:budget" in ln for ln in ow_below),
+                        "budget just BELOW the min must hold: %r" % ow_below)
+        ow_calls = []
+        logs, _state = self._run(above, ow_calls, [])
+        self.assertEqual(ow_calls, [self.CWD],
+                         "budget just ABOVE the min must run the fetch: %r" % logs)
+
+
+class TestDeployFetchWallClockBound(unittest.TestCase):
+    """#1041 review-2 🟡-1 — fetch_deploy_state's per-instance loop must STOP at its
+    total wall-clock budget so a multi-instance repo (odoo-erp: 3) cannot sum
+    unbounded network into the sweep."""
+
+    def test_multi_instance_loop_stops_near_budget(self):
+        clock = {"t": 0.0}
+        calls = []
+
+        def _slow_read(vs, timeout=15):
+            calls.append(vs)
+            clock["t"] += 15.0     # each per-instance HTTP GET "takes" 15s
+            return "1.0.0"
+
+        reg_project = {"deploy_state": {
+            "main_version_file": "v",
+            "instances": [{"name": str(i), "version_source": "u%d" % i}
+                          for i in range(5)]}}
+        with m.patch.object(ds, "_load_registry", return_value=[reg_project]), \
+                m.patch.object(ds, "_find_project", return_value=reg_project), \
+                m.patch.object(ds, "read_main_version", return_value="1.0.0"), \
+                m.patch.object(ds, "read_prod_version", _slow_read):
+            res = ds.fetch_deploy_state(
+                "/x", time_fn=(lambda: clock["t"]),
+                budget_s=ds.DEPLOY_STATE_FETCH_BUDGET_S)
+        self.assertGreaterEqual(len(calls), 1, "at least one instance is always read")
+        self.assertLess(len(calls), 5,
+                        "the loop must STOP at the budget, not read all 5 instances")
+        self.assertEqual(len(res), len(calls), "results match the instances reached")
+
+
+class TestBudgetValueLocks(unittest.TestCase):
+    """#1041 review-2 🟡-2 — regression-lock each rider min VALUE against its own
+    worst bounded fetch, so a revert (e.g. ops_wait min 55→20) or a deploy-budget bump
+    fails LOUDLY here rather than silently passing the 5/200-budget behaviour tests."""
+
+    def test_ops_wait_min_covers_union_plus_bounded_deploy(self):
+        # deploy fetch worst ≈ read_main(git 10) + loop(budget + one 15s overshoot)
+        deploy_worst = 10 + ds.DEPLOY_STATE_FETCH_BUDGET_S + _GH_FETCH_S
+        combined = _GH_FETCH_S + deploy_worst           # union THEN deploy
+        start_at = _RIDER_REF_S - owr.OPS_WAIT_FETCH_MIN_BUDGET_S
+        self.assertLessEqual(
+            start_at + combined, _KILL_S,
+            "ops_wait min=%d too low: a start at elapsed %d + %ds worst fetch = %ds "
+            "> the %ds kill (review-2 🟡-1/🟡-2)"
+            % (owr.OPS_WAIT_FETCH_MIN_BUDGET_S, start_at, combined,
+               start_at + combined, _KILL_S))
+
+    def test_reconcile_min_covers_its_git_budget(self):
+        reconcile_worst = 40                            # its own BUDGET_S
+        start_at = _RIDER_REF_S - lane_reconcile.RECONCILE_FETCH_MIN_BUDGET_S
+        self.assertLessEqual(start_at + reconcile_worst, _KILL_S,
+                             "reconcile min too low vs its 40s git budget")
+
+    def test_dispatchable_min_covers_the_count_subprocess(self):
+        dispatchable_worst = 90                          # _DISPATCHABLE_COUNT_TIMEOUT_S
+        start_at = _RIDER_REF_S - goal.DISPATCHABLE_FETCH_MIN_BUDGET_S
+        self.assertLessEqual(start_at + dispatchable_worst, _KILL_S,
+                             "dispatchable min too low vs the 90s --count subprocess")
 
 
 if __name__ == "__main__":

@@ -239,14 +239,18 @@ OPS_WAIT_FETCH_FAIL_TTL_S = 60
 
 # #1041 — the ops-wait re-check does TWO sequential fetches on a double cache-miss:
 # a gh union fetch (`_cached_ops_wait`, ~15s) THEN, when a deploy-parked W member
-# exists, a per-instance git/HTTP deploy-state fetch (`deploy_state_fetch`, git 5/10
-# + HTTP 15 ≈ 30s for one instance). Worst combined ≈ 45s, so the minimum must cover
-# BOTH, not just the gh-union alone (the #1041-review-1 F1 finding: min=20 covered
-# only the union and permitted a ~90s start against the rider's tail_deadline (110)
-# reference → 90+45 = 135s, past the 120s kill). Both caches share the 30-min TTL so
-# a double-miss is routine; the guard is CACHE-AWARE (skips only when a fetch would
-# actually MISS + fire). 50 = 45s combined + margin, still well under the kill.
-OPS_WAIT_FETCH_MIN_BUDGET_S = 50
+# exists, the deploy-state fetch (`deploy_state_fetch`). That deploy fetch is now
+# TOTAL-wall-clock-bounded to ~`deploy_state.DEPLOY_STATE_FETCH_BUDGET_S`(20) + one
+# in-flight ~15s HTTP overshoot + one `read_main_version` git 10s ≈ 45s regardless of
+# instance count (the #1041-review-2 🟡-1 fix — odoo-erp declares 3 instances; an
+# UNBOUNDED per-instance loop summed to ~55s+). Worst combined ≈ union 15 + deploy 45
+# = 60s. Against the rider's tail_deadline (110) reference, min=55 permits a start only
+# at elapsed ≤ 55 → 55 + 60 = 115s, under the 120s kill (5s margin). `test_rider_budget
+# _1041.TestBudgetValueLocks` regression-locks this arithmetic. (#1041-review-1 F1 first
+# raised it 20→50 for the one-instance case; the review-2 deploy bound + this 55 make it
+# hold for the multi-instance primary consumer.) Both caches share the 30-min TTL so a
+# double-miss is routine; the guard is CACHE-AWARE (skips only when a fetch would MISS).
+OPS_WAIT_FETCH_MIN_BUDGET_S = 55
 
 # #714 — the nudge is a TRIGGER, not a textbook. Hard cap on the keystroke so it
 # never grows into the multi-KB wall the incident produced (full doctrine + a
@@ -1154,7 +1158,11 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     # cache AND fewer than OPS_WAIT_FETCH_MIN_BUDGET_S of sweep budget remain, SKIP
     # with `hold:budget` (no fetch, no state change) rather than run the sweep into
     # the unit's 120s TimeoutStartSec kill. Cache HITS proceed regardless. None
-    # (unwired/legacy) => no guard. Lazy import (queue_arrival imports THIS module).
+    # (unwired/legacy) => no guard. NOTE (review-2 🔵-3): the deploy-state fetch only
+    # actually fires when a deploy-target W member exists (unknown until the union
+    # fetch runs), so treating a deploy-cache miss as "would fetch" can OVER-defer by
+    # one sweep when no such member exists — the SAFE direction (a backstop nudge, not
+    # a kill). Lazy import (queue_arrival imports THIS module → a top-level import cycles).
     from watchdog.queue_arrival_recheck import _budget_left as _bl
     _left = _bl(budget_left_fn)
     if _left is not None and _left < OPS_WAIT_FETCH_MIN_BUDGET_S:

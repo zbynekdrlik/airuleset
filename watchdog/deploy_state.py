@@ -32,6 +32,20 @@ log = logging.getLogger(__name__)
 
 _REGISTRY_FILENAME = "projects-registry.json"
 
+# #1041 review-2 (🟡-1) — a TOTAL wall-clock budget for the per-instance loop below.
+# `read_prod_version` is a per-instance HTTP GET (timeout 15s); a multi-instance repo
+# (odoo-erp declares 3) could otherwise sum to ~45s+ of network on the 120s-budgeted
+# sweep's critical path, and the ops_wait rider's per-start budget guard cannot bound
+# a fetch that overruns AFTER it starts. So the loop STOPS once this budget is spent
+# (the classifier fails safe with fewer instances, exactly like reconcile_fetch's own
+# BUDGET_S/MAX_BRANCHES cap) — one instance not reached is re-read next sweep. The
+# ops_wait min (OPS_WAIT_FETCH_MIN_BUDGET_S=55) is sized against THIS bound + the gh
+# union, so start + fetch stays under the systemd kill regardless of instance count.
+# NOTE the loop can overshoot this budget by up to ONE in-flight read (a read that
+# STARTED under budget runs its full ~15s HTTP timeout), so the real loop ceiling is
+# ~budget + 15s — that overshoot is exactly what the ops_wait min accounts for.
+DEPLOY_STATE_FETCH_BUDGET_S = 20
+
 
 def _load_registry(registry_path):
     """Load and return the projects-registry list, or [] on any error."""
@@ -376,7 +390,8 @@ def clear_stale_dedup(repo_slug, main_version, home=None):
 # PRODUCER -- the public API
 # ---------------------------------------------------------------------------
 
-def fetch_deploy_state(cwd, registry_path=None, home=None, now_dt=None):
+def fetch_deploy_state(cwd, registry_path=None, home=None, now_dt=None,
+                       time_fn=None, budget_s=None):
     """The deploy-state producer: reads the registry, fetches versions and
     windows, returns a list of per-instance dicts for ``_deploy_watch_classify``.
 
@@ -409,10 +424,21 @@ def fetch_deploy_state(cwd, registry_path=None, home=None, now_dt=None):
     version_file = ds_decl.get("main_version_file")
     main_ver = read_main_version(cwd, version_file)
 
+    # #1041 review-2 (🟡-1) — bound the per-instance network loop's TOTAL wall-clock
+    # so a multi-instance repo cannot run the sweep into the systemd kill; an instance
+    # not reached is re-read next sweep (fail-safe fewer-instances, like reconcile).
+    time_fn = time_fn or time.monotonic
+    budget_s = DEPLOY_STATE_FETCH_BUDGET_S if budget_s is None else budget_s
+    _started = time_fn()
+
     results = []
     for inst in instances:
         if not isinstance(inst, dict):
             continue
+        if results and time_fn() - _started >= budget_s:
+            # budget spent — stop after at least one instance; the rest re-read
+            # next, less-loaded sweep (the classifier fails safe with fewer).
+            break
         name = inst.get("name", "unknown")
         vs = inst.get("version_source")
         prod_ver = read_prod_version(vs) if vs else None

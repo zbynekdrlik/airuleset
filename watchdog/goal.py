@@ -4935,7 +4935,11 @@ def _cached_dispatchable(cwd, dispatchable_fetch, state, now):
 # is derived from THAT timeout. The guard is CACHE-AWARE (skips only when the 5-min
 # `dispatchable_cache` would MISS), so a normal cache-HIT sweep never defers the
 # refill nudge — only a genuine cache-miss that would run the 90s subprocess into the
-# unit's 120s kill is held.
+# unit's 120s kill is held. Trade-off (review-2 🔵-4): against the rider's tail_deadline
+# (110) ref this permits a cold-cache fetch only at elapsed ≤ 20, so on a CHRONICALLY
+# slow box whose sweep always reaches goal_lane_sweep past elapsed 20 with a COLD
+# cache the count never warms — a pathological starvation, acceptable vs the certain
+# kill an unbounded 90s subprocess would cause; a warm cache (steady state) is fine.
 DISPATCHABLE_FETCH_MIN_BUDGET_S = 90
 
 
