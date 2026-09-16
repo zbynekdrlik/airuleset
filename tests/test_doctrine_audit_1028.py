@@ -1014,6 +1014,41 @@ When drafting client-facing messages (emails to MIVA CEO etc.) on the user's beh
                         self.assertNotEqual(m.action, da.ACTION_REWRITE)
                         self.assertLess(m.anchors_hit, da.MIN_ANCHORS_HIGH)
 
+    def test_two_client_agnostic_anchors_do_not_false_match(self):
+        # #1028 ff3 review-1 MAJOR: the explain/no-promises anchors must be
+        # client-scoped enough that TWO co-occurring generic phrases on an
+        # UNRELATED memory (a design doc, a QA plan, an internal staff-promises
+        # note) never reach HIGH -- the matcher AUTO-REWRITES a HIGH file, so a
+        # false positive silently archives real content. This is the class the
+        # one-anchor negative above does NOT exercise (that only hits the
+        # MIN_ANCHORS_HIGH guard). Each entry carries at most ONE mildly-generic
+        # anchor, so a >= 2-hit match always includes a client-scoped anchor.
+        negs = {
+            "design-doc.md": ("Our design docs should explain each named thing "
+                              "in one plain sentence; if a section never explained "
+                              "the concept, send it back."),
+            "qa-plan.md": ("The test plan should explain each named thing in one "
+                           "plain sentence and a feature list is not enough for "
+                           "QA sign-off."),
+            "staff-promises.md": ("We never promise personal walkthroughs to the "
+                                  "team and never promise the roadmap will slip."),
+        }
+        tmp = TemporaryDirectory()
+        with tmp:
+            home = Path(tmp.name)
+            mem = home / ".claude" / "projects" / "-p" / "memory"
+            mem.mkdir(parents=True)
+            for fn, body in negs.items():
+                (mem / fn).write_text(
+                    "---\nname: n\nmetadata:\n  type: project\n---\n# n\n\n"
+                    + body + "\n", encoding="utf-8")
+            by = _by_name(da.scan_home(str(home)))
+            for fn in negs:
+                with self.subTest(fn=fn):
+                    m = by.get(fn)
+                    if m is not None:
+                        self.assertNotEqual(m.action, da.ACTION_REWRITE)
+
 
 
 if __name__ == "__main__":

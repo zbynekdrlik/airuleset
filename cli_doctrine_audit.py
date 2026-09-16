@@ -159,16 +159,17 @@ ALLOWLIST = [
         "heading": "Explain the concept to the client",
         "fleet_since": FLEET_SINCE,
         # #1028 fix-forward-3: anchors RE-DERIVED from the LIVE miva1 restatement
-        # (`client-emails-explain-the-concept.md`, EN) — the description/body
-        # phrases it actually uses — plus the canonical fleet-heading phrase for
-        # forward compatibility. Client-message-scoped only: a bare "explain the
-        # concept, not the implementation" is generic engineering advice (#1028
-        # review-2 🟡).
+        # (`client-emails-explain-the-concept.md`, EN) — the CLIENT-scoped
+        # description/body phrases it uses — plus the canonical fleet-heading
+        # phrase for forward compat. At most ONE mildly-generic anchor ("explain
+        # each named thing in one plain sentence"), so any >= 2-hit match includes
+        # a client-scoped anchor and an unrelated design/QA memory cannot
+        # false-match (#1028 ff3 review-1 MAJOR; a bare "explain the concept, not
+        # the implementation" is generic engineering advice, #1028 review-2 🟡).
         "anchors": [
-            "explain what each thing is and how it fits",
+            "client emails must explain what each thing is",
+            "how to apply to every client-facing email",
             "explain each named thing in one plain sentence",
-            "never explained the concept",
-            "a link plus a feature list is not enough",
             "explain the concept to the client",
         ],
     },
@@ -178,15 +179,17 @@ ALLOWLIST = [
         "heading": "No promises on the client's behalf",
         "fleet_since": FLEET_SINCE,
         # #1028 fix-forward-3: anchors RE-DERIVED from the LIVE miva1 restatement
-        # (`no-promises-on-users-behalf.md`, EN) — the description/body phrases it
-        # actually uses — plus the canonical fleet-heading phrase for forward
-        # compatibility. Distinctive full phrases only, so a bare "no promises"
-        # cannot corroborate (the _anchor_hits substring dedup collapses overlaps).
+        # (`no-promises-on-users-behalf.md`, EN) — the CLIENT-scoped description
+        # phrases it uses — plus the canonical fleet-heading phrase for forward
+        # compat. At most ONE mildly-generic anchor ("never promise personal
+        # walkthroughs"), so any >= 2-hit match includes a client-scoped anchor and
+        # an internal staff/roadmap-promises memory cannot false-match (#1028 ff3
+        # review-1 MAJOR). A bare "no promises" cannot corroborate (the substring
+        # dedup in _anchor_hits collapses overlaps).
         "anchors": [
-            "never promise the user will personally",
-            "never promise personal walkthroughs",
+            "in client-facing drafts never promise the user",
             "offer video calls to non-technical clients",
-            "assumes the user can demonstrate odoo features",
+            "never promise personal walkthroughs",
             "no promises on the client's behalf",
         ],
     },
