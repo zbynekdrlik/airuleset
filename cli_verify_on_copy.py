@@ -37,6 +37,23 @@ _STATUS_BASENAME = "status.json"
 _VERIFIED_MARKER_RE = re.compile(
     r"(?mi)^[ \t*#-]*\**[ \t]*Verified-on-copy\**[ \t]*:")
 
+# #1053 review 🟡: the GATEKEEPER's post-deploy comment names the deploy version
+# AND the `REFRESH-DEV-BOX-FROM-PROD: <stream>` the stream must run, and it may
+# QUOTE the `Verified-on-copy: …` reply template when instructing the stream — so
+# the gk's own comment could satisfy `_VERIFIED_MARKER_RE` and PERMANENTLY clear
+# the gate even though the stream never verified. The gk deploy/instruction
+# comment ALWAYS carries a line-anchored `REFRESH-DEV-BOX-FROM-PROD:` (the
+# deploy fingerprint); a genuine stream verification (`Verified-on-copy: refresh
+# <id> at <ISO> — <what>`) uses "refresh <id>", NOT that command literal. So a
+# comment carrying the fingerprint is the gk comment (or a quote of it) and does
+# NOT count as the stream's verification — the over-block safe direction (a
+# stream that gratuitously quotes the command simply re-posts a clean line). The
+# gk comment writes the command inline / in a code span (`Run
+# `REFRESH-DEV-BOX-FROM-PROD: montalu``), so the fingerprint matches the distinct
+# `REFRESH-DEV-BOX-FROM-PROD:` literal ANYWHERE in the body, not only line-start.
+_REFRESH_FINGERPRINT_RE = re.compile(
+    r"(?i)REFRESH-DEV-BOX-FROM-PROD[ \t]*:")
+
 
 def status_dir(home=None):
     home = home or os.path.expanduser("~")
@@ -55,10 +72,15 @@ def status_path(home=None, key=None):
 
 
 def has_verified_marker(body):
-    """True iff `body` carries a genuine `Verified-on-copy:` line."""
+    """True iff `body` carries a genuine STREAM `Verified-on-copy:` line — a
+    `Verified-on-copy:` marker WITHOUT the gatekeeper's `REFRESH-DEV-BOX-FROM-
+    PROD:` deploy fingerprint (#1053 review 🟡: the gk's own deploy comment, which
+    may quote the reply template, must not self-clear the gate)."""
     if not isinstance(body, str) or not body:
         return False
-    return bool(_VERIFIED_MARKER_RE.search(body))
+    if not _VERIFIED_MARKER_RE.search(body):
+        return False
+    return not _REFRESH_FINGERPRINT_RE.search(body)
 
 
 def _iso_to_epoch(s):

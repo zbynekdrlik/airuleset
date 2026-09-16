@@ -126,6 +126,55 @@ class SubdevGkBucketStateMachine1053(unittest.TestCase):
         self.assertEqual(r["gk"], 0)
 
 
+class SharedAccountRecovery1053(unittest.TestCase):
+    """#1053 review 🟡 (Finding 2): on a shared-account box (single
+    `label:stream:<user>` qual) a gk-processing ticket that LOST its stream label
+    must still be recovered by the #191 Part B ownership-relabel query — the
+    recovery candidate query must include `gk-processing`, or the ticket vanishes
+    from I/gk/U/W the moment gk swaps ready-for-review → gk-processing."""
+
+    def test_gk_processing_recovered_on_shared_account(self):
+        SHARED_QUALS = ["label:stream:montalu"]  # len==1 → recovery path
+        candidate = {"number": 200, "title": "t200",
+                     "createdAt": "2026-09-01T00:00:00Z",
+                     "labels": [{"name": "gk-processing"}]}  # no stream label
+
+        def gh(*args, **kw):
+            a = [str(x) for x in args]
+            if a[:2] == ["issue", "list"]:
+                search = ""
+                if "--search" in a:
+                    search = a[a.index("--search") + 1]
+                # the recovery candidate query carries the gk queue labels
+                if "gk-processing" in search:
+                    return json.dumps([candidate])
+                return "[]"          # the stream-label slice is empty (relabelled)
+            if a[:2] == ["pr", "list"]:
+                return "[]"
+            if a and a[0] == "api" and "/timeline" in a[1]:
+                return json.dumps([])
+            return "[]"
+
+        def fake_run(cmd, *a, **k):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+        with m.patch.object(airuleset, "_gh_out", side_effect=gh), \
+             m.patch.object(airuleset, "_current_user", return_value="montalu"), \
+             m.patch.object(cli_quals, "_last_origin_owner",
+                            return_value={200: "montalu"}), \
+             m.patch("subprocess.run", side_effect=fake_run):
+            rows, handed, failed = airuleset._slice_mine_and_handed(
+                SHARED_QUALS, "/tmp/x", SLUG)
+        self.assertFalse(failed)
+        self.assertIn(200, rows, "a gk-processing ticket that lost its stream "
+                      "label must be RECOVERED, not vanish")
+        self.assertTrue(handed.get(200), "recovered gk-processing → gk bucket")
+
+    def test_recovery_query_includes_all_maintainer_labels(self):
+        # lock the query never desyncs from MAINTAINER_ACTION_LABELS
+        self.assertIn("gk-processing", cli_quals.MAINTAINER_ACTION_LABELS)
+
+
 class VerifyOnCopyPartition1053(unittest.TestCase):
     """`verify-on-copy` routes to workable (I) even when it carries ops-wait —
     action-only, like the #943 precedence, but for the SUB-DEV's own action."""

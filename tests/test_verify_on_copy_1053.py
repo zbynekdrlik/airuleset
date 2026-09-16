@@ -42,15 +42,34 @@ class VerifiedMarker(unittest.TestCase):
             "I still need to post the Verified-on-copy: line later."))
 
     def test_quoted_is_not_a_marker(self):
+        # a leading '>' quote is excluded from the prefix class, so a quoted old
+        # verification does NOT clear; a plain non-anchored mention is rejected too
         self.assertFalse(voc.has_verified_marker(
             "> Verified-on-copy: from an old deploy"))
-        # a quoted '>' line IS allowed by the prefix class; ensure a plain
-        # non-anchored mention is rejected
         self.assertFalse(voc.has_verified_marker("see Verified-on-copy note"))
 
     def test_empty(self):
         self.assertFalse(voc.has_verified_marker(""))
         self.assertFalse(voc.has_verified_marker(None))
+
+    def test_gk_deploy_comment_does_not_clear(self):
+        """#1053 review 🟡: the gatekeeper's deploy comment names REFRESH-DEV-BOX-
+        FROM-PROD and may QUOTE the Verified-on-copy: template — it must NOT count
+        as the stream's verification (else the gk self-clears the gate)."""
+        gk_comment = (
+            "Deployed v1.2.3. Run `REFRESH-DEV-BOX-FROM-PROD: montalu`, verify, "
+            "then reply:\nVerified-on-copy: refresh <id> at <ISO> — <what>")
+        self.assertFalse(voc.has_verified_marker(gk_comment),
+                         "gk deploy comment (with REFRESH fingerprint) must not "
+                         "clear the gate")
+
+    def test_gk_fingerprint_line_anchored(self):
+        # a genuine stream verification has NO line-anchored REFRESH command
+        self.assertTrue(voc.has_verified_marker(
+            "Verified-on-copy: refresh r7 at 2026-09-16T10:00:00Z — checked X"))
+        # even one mentioning "refresh" in prose (not the command literal) clears
+        self.assertTrue(voc.has_verified_marker(
+            "Verified-on-copy: refreshed the box, prices render correctly"))
 
 
 class LabelAnchor(unittest.TestCase):
@@ -102,6 +121,19 @@ class Overdue(unittest.TestCase):
         rec = voc.timeline_overdue(42, "t42", events, now)
         self.assertIsNotNone(rec, "an old verification must not clear the new "
                              "hand-back")
+
+    def test_gk_deploy_comment_after_anchor_does_not_clear(self):
+        """#1053 review 🟡: a gk deploy comment (REFRESH fingerprint) posted AFTER
+        the label anchor must NOT clear the hand-back — the ticket stays overdue
+        until the STREAM actually verifies."""
+        now = time.time()
+        events = [_labeled(_iso(now - 2 * DAY)),
+                  _commented(_iso(now - 2 * DAY + 5),
+                             "Deployed v1.2.3. Run "
+                             "`REFRESH-DEV-BOX-FROM-PROD: montalu`, then reply:\n"
+                             "Verified-on-copy: refresh <id> at <ISO> — <what>")]
+        rec = voc.timeline_overdue(42, "t42", events, now)
+        self.assertIsNotNone(rec, "the gk deploy comment must not self-clear")
 
     def test_no_anchor_never_overdue(self):
         now = time.time()

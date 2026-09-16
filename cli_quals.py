@@ -2707,9 +2707,13 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
     # orphaned open ticket, simultaneously — not chased.
     if not failed and len(quals) == 1 and quals[0].startswith("label:stream:"):
         user = airuleset._current_user()
+        # #1053: derive the candidate query from MAINTAINER_ACTION_LABELS so
+        # `gk-processing` is included and the two never desync — a gk-processing
+        # ticket that lost its `stream:<user>` label (shared-account relabel)
+        # must still be recovered, else it vanishes from I/gk/U/W entirely.
         raw = airuleset._gh_out("issue", "list", "--state", "open", "--search",
                       AUTOPILOT_SKIP_EXCL +
-                      " label:needs-gatekeeper,ready-for-review",
+                      " label:" + ",".join(MAINTAINER_ACTION_LABELS),
                       "-L", "200", "--json", "number,labels,title,createdAt",
                       cwd=root, timeout=20)
         try:
