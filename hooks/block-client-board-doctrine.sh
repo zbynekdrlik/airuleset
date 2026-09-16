@@ -41,5 +41,15 @@ command -v python3 &>/dev/null || exit 0
 RC=0
 env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \
     python3 -m gates.clientbody <<<"$PAYLOAD" || RC=$?
-[ "$RC" -eq 2 ] && exit 2
+if [ "$RC" -eq 2 ]; then
+    # gates.emit_block already printed the Slovak reason to stdout AND stderr;
+    # this trailer keeps the deny visibly on stderr (hook stderr contract, #1018).
+    echo "🚫 BLOCKED: client-board doctrine (gates.clientbody) — reason above." >&2
+    exit 2
+fi
+if [ "$RC" -ne 0 ]; then
+    # Fail-OPEN by design (a gate that cannot classify never blocks a client
+    # message) — but say so, never silently.
+    echo "client-board-doctrine hook: classifier exited $RC — allowing (fail-open)." >&2
+fi
 exit 0
