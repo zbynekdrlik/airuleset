@@ -32,9 +32,31 @@ def _rate_json(core_remaining, core_limit, gql_remaining, gql_limit,
     })
 
 
+def _gql_object_body_from_rest(rest_body):
+    """#1052: derive an AGREEING GraphQL `rateLimit` object body from a REST
+    rate_limit body's graphql resource, so a fake that answers BOTH calls makes
+    the object reading available and authoritative while every assertion on the
+    REST numbers still holds (lower-of-equal == same). Returns the REST body
+    unchanged if it cannot be parsed (fail-open, like the real probe)."""
+    import datetime as _dt
+    try:
+        g = json.loads(rest_body)["resources"]["graphql"]
+        reset_iso = _dt.datetime.fromtimestamp(
+            int(g["reset"]), _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return json.dumps({"data": {"rateLimit": {
+            "limit": g["limit"], "remaining": g["remaining"],
+            "resetAt": reset_iso, "used": g["limit"] - g["remaining"]}}})
+    except (ValueError, KeyError, TypeError, OSError, OverflowError):
+        return rest_body
+
+
 class _FakeRun:
-    """A subprocess.run stand-in returning a canned rate_limit body, counting
-    calls so cache-hit behaviour is observable."""
+    """A subprocess.run stand-in. It answers `gh api rate_limit` with the canned
+    REST body and (since #1052) `gh api graphql …` with an AGREEING GraphQL
+    rateLimit-object body derived from the same numbers — so read_status's two
+    reads both resolve and the object reading is authoritative, while every
+    assertion on the REST numbers still holds. Counts total calls so cache-hit
+    behaviour is observable (a refresh is now two calls, a cache hit zero)."""
 
     def __init__(self, body, returncode=0, stderr=""):
         self.body = body
@@ -50,8 +72,9 @@ class _FakeRun:
 
         r = _R()
         r.returncode = self.returncode
-        r.stdout = self.body
         r.stderr = self.stderr
+        r.stdout = (_gql_object_body_from_rest(self.body)
+                    if "graphql" in argv else self.body)
         return r
 
 

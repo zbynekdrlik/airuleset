@@ -155,6 +155,32 @@ class TestObjectProbeError(_GhRateTmpCase):
         self.assertEqual(st["resources"]["graphql"].get("source"), "rest")
 
 
+class TestAlertLatchNoFlapOnObjectError(_GhRateTmpCase):
+    """#1052 review MAJOR-1: a transient object-probe error during a real
+    exhaustion makes the graphql reading fall back to the REST bucket, which
+    LIES HIGH — that must NOT clear the once-per-episode alert latch and re-fire
+    it once the object recovers. RED against the first-cut #1052 code (which let
+    the REST-fallback 100 %% reading clear the latch)."""
+
+    def test_object_error_does_not_clear_the_latch_or_reflap(self):
+        # 1) Two consecutive authoritative object-low reads -> the alert fires ONCE.
+        low = _PairRun(_rest_body(4000, 5000), _gql_body(0))
+        self._read(low, now=1000.0)
+        st2 = self._read(_PairRun(_rest_body(4000, 5000), _gql_body(0)), now=1100.0)
+        self.assertIn("graphql", cli_gh_rate.pending_alerts(st2))
+        # 2) The object probe errors while REST reports a (misleading) healthy
+        #    100 %% — the latch must HOLD, not clear.
+        st3 = self._read(
+            _PairRun(_rest_body(4000, 5000), _gql_body(0), gql_rc=1), now=1200.0)
+        self.assertEqual(st3["resources"]["graphql"].get("source"), "rest")
+        self.assertTrue(st3["alert"]["graphql"]["alerted"],
+                        "a REST-fallback high reading must NOT clear the latch")
+        # 3) The object recovers (still exhausted) — NO new alert (still latched).
+        st4 = self._read(_PairRun(_rest_body(4000, 5000), _gql_body(0)), now=1300.0)
+        self.assertEqual(cli_gh_rate.pending_alerts(st4), [],
+                         "the latch must not re-fire after an object-error blip")
+
+
 class TestSymmetryRestLower(_GhRateTmpCase):
     def test_rest_lower_keeps_rest_pct_object_reset_wins(self):
         # The reverse of the incident: REST low (2 %), object high (100 %).

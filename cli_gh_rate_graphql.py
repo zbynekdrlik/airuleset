@@ -87,3 +87,67 @@ def fetch_graphql_object(run, real_gh, *, timeout, internal_env, diag):
         }
     except (ValueError, TypeError):
         return None
+
+
+def _block_pct(block):
+    """remaining/limit as a percent, or None when unknown (mirrors
+    cli_gh_rate.remaining_pct's own guards, for the merge decision below)."""
+    try:
+        limit = int(block["limit"])
+        remaining = int(block["remaining"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None if limit <= 0 else 100.0 * remaining / limit
+
+
+def merge_graphql_object(resources, obj):
+    """Compose the REST graphql bucket with the authoritative GraphQL rateLimit
+    OBJECT reading (#1052), mutating ``resources`` in place. The LOWER
+    remaining_pct wins for pct/backoff/the alert latch (a tie goes to the
+    authoritative object); the object's resetAt ALWAYS wins the reset column.
+    ``core`` is never touched. ``obj`` is None on any probe error (fail-open —
+    the REST graphql reading, already tagged "rest", simply stands).
+
+    Also tags the merged graphql block with ``object_seen`` (#1052 review
+    MAJOR-1): True when the authoritative object reading was available this
+    refresh, False when a transient probe error left only the REST reading. The
+    once-per-episode alert latch reads it so a REST-fallback reading — which
+    lies HIGH during a real exhaustion — can never CLEAR an already-fired
+    graphql alert (only an authoritative object reading confirms recovery)."""
+    rest = resources.get("graphql")
+    if obj is None:
+        # Fail-open: the REST graphql reading stands, but it is NOT authoritative
+        # (the object was unavailable) — flag it so the latch never clears on it.
+        if isinstance(rest, dict):
+            rest["object_seen"] = False
+        return
+    obj_pct = _block_pct(obj)
+    if isinstance(rest, dict):
+        rest_pct = _block_pct(rest)
+        if obj_pct is not None and (rest_pct is None or obj_pct <= rest_pct):
+            chosen = {"remaining": obj["remaining"], "limit": obj["limit"],
+                      "source": "graphql-object"}
+        else:
+            chosen = {"remaining": rest["remaining"], "limit": rest["limit"],
+                      "source": "rest"}
+        rest_reset = rest.get("reset") or 0
+    else:
+        # REST had no graphql bucket at all — the object is the only reading.
+        chosen = {"remaining": obj["remaining"], "limit": obj["limit"],
+                  "source": "graphql-object"}
+        rest_reset = 0
+    # The object's resetAt wins the reset column whenever it parsed; else keep
+    # whatever REST reported.
+    chosen["reset"] = obj.get("reset") or rest_reset
+    chosen["object_seen"] = True                  # the object read this refresh
+    resources["graphql"] = chosen
+
+
+def graphql_reading_authoritative(status):
+    """#1052 review MAJOR-1: is the graphql reading in ``status`` backed by the
+    AUTHORITATIVE GraphQL object THIS refresh? The REST bucket lies HIGH during
+    an exhaustion, so a REST-fallback reading (object probe transiently
+    unavailable) must not move the once-per-episode alert latch. Absent tag =>
+    authoritative (a manually-built status keeps the pre-#1052 behaviour)."""
+    block = (status or {}).get("resources", {}).get("graphql") or {}
+    return bool(block.get("object_seen", True))

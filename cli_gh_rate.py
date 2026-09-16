@@ -49,11 +49,13 @@ BACKOFF_CAP_S = 60               # hard cap on a single backoff SLEEP. Watchdog 
                                  # #1040/#1041 composition), so this sleep bounds only the
                                  # few-call consumers (goal-lane riders, hooks, ad-hoc). A
                                  # cold-cache shim call additionally pays up to
-                                 # _FETCH_TIMEOUT_S for the one-off refresh before the
-                                 # sleep (#1040 review-1 MINOR-5); in the watchdog the
-                                 # per-sweep gh_rate_fetch keeps the cache warm, so a
-                                 # rider's own call rarely refreshes.
-_FETCH_TIMEOUT_S = 15            # a single `gh api rate_limit` read
+                                 # 2 * _FETCH_TIMEOUT_S for the one-off refresh before
+                                 # the sleep (#1040 review-1 MINOR-5; #1052 added the
+                                 # GraphQL-object probe, a second read on the SAME
+                                 # refresh path); in the watchdog the per-sweep
+                                 # gh_rate_fetch keeps the cache warm, so a rider's own
+                                 # call rarely refreshes.
+_FETCH_TIMEOUT_S = 15            # a single `gh api rate_limit` / `graphql rateLimit` read
 _RESOURCES = ("core", "graphql")
 
 # Env markers.
@@ -246,48 +248,6 @@ def _fetch_rate_limit(run, real_gh, now):
     return out
 
 
-def _block_pct(block):
-    """remaining/limit as a percent, or None when unknown (mirrors
-    remaining_pct's own guards, for the merge decision below)."""
-    try:
-        limit = int(block["limit"])
-        remaining = int(block["remaining"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    return None if limit <= 0 else 100.0 * remaining / limit
-
-
-def _merge_graphql_object(resources, obj):
-    """Compose the REST graphql bucket with the authoritative GraphQL rateLimit
-    OBJECT reading (#1052), mutating ``resources`` in place. The LOWER
-    remaining_pct wins for pct/backoff/the alert latch (a tie goes to the
-    authoritative object); the object's resetAt ALWAYS wins the reset column.
-    ``core`` is never touched. ``obj`` is None on any probe error (fail-open —
-    the REST graphql reading, already tagged "rest", simply stands)."""
-    if obj is None:
-        return
-    rest = resources.get("graphql")
-    obj_pct = _block_pct(obj)
-    if isinstance(rest, dict):
-        rest_pct = _block_pct(rest)
-        if obj_pct is not None and (rest_pct is None or obj_pct <= rest_pct):
-            chosen = {"remaining": obj["remaining"], "limit": obj["limit"],
-                      "source": "graphql-object"}
-        else:
-            chosen = {"remaining": rest["remaining"], "limit": rest["limit"],
-                      "source": "rest"}
-        rest_reset = rest.get("reset") or 0
-    else:
-        # REST had no graphql bucket at all — the object is the only reading.
-        chosen = {"remaining": obj["remaining"], "limit": obj["limit"],
-                  "source": "graphql-object"}
-        rest_reset = 0
-    # The object's resetAt wins the reset column whenever it parsed; else keep
-    # whatever REST reported.
-    chosen["reset"] = obj.get("reset") or rest_reset
-    resources["graphql"] = chosen
-
-
 def _load_cache():
     try:
         with open(status_path(), encoding="utf-8") as fh:
@@ -381,7 +341,7 @@ def read_status(now=None, run=None, real_gh="__auto__", force=False):
     # GraphQL exhaustion, so ALSO read the authoritative GraphQL rateLimit
     # object and take the LOWER of the two graphql readings. ONE extra call,
     # only on this refresh path (never on a cache hit), fail-open on error.
-    _merge_graphql_object(resources, _ghql.fetch_graphql_object(
+    _ghql.merge_graphql_object(resources, _ghql.fetch_graphql_object(
         run, real_gh, timeout=_FETCH_TIMEOUT_S, internal_env=INTERNAL_ENV,
         diag=_diag))
 
@@ -450,9 +410,17 @@ def _update_alert_latch(status):
     next episode). A single transient low never alerts (debounce)."""
     alert = status.setdefault("alert", {})
     pending = []
+    gql_authoritative = _ghql.graphql_reading_authoritative(status)
     for name in _RESOURCES:
         pct = remaining_pct(name, status)
         if pct is None:
+            continue
+        # #1052 review MAJOR-1: a graphql reading that fell back to REST because
+        # the object probe was transiently unavailable is NOT trustworthy (REST
+        # lies HIGH during a real exhaustion) — HOLD the prior latch state so it
+        # can neither CLEAR an already-fired alert nor advance one; an
+        # authoritative object reading next refresh resumes normal updates.
+        if name == "graphql" and not gql_authoritative:
             continue
         a = alert.setdefault(name, {"consecutive_low": 0, "alerted": False})
         if pct < LOW_PCT:
