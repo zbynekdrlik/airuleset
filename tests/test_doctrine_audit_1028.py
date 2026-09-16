@@ -677,6 +677,32 @@ class TestFeedbackTypeIsClassified1028(unittest.TestCase):
                 encoding="utf-8")
             self.assertTrue(body.startswith("See airuleset "))
 
+    def test_named_item1_file_real_shape_is_declassified(self):
+        # review-1 🟡: prove the EXACT ticket item-1 file, in its REAL live
+        # shape (the miva1 file is `type: feedback`, NOT `feedback_*`-named and
+        # NOT `type: project`), is now HIGH/rewrite -- i.e. the audit is no
+        # longer vacuous on the file the ticket exists to retire. The retained
+        # `feedback_*` filename exemption does NOT re-exempt it because the
+        # named targets (client-message-worker-reaction-no-workarounds.md,
+        # discuss-thread-greeting-etiquette.md, client-emails-explain-the-
+        # concept.md, no-promises-on-users-behalf.md) are all non-`feedback_*`.
+        text = (
+            "---\nname: client-message-worker-reaction-no-workarounds\n"
+            "metadata:\n  node_type: memory\n  type: feedback\n---\n"
+            "# Client message: react worker, no workarounds\n\n"
+            "React the worker on the client message. Do not send an interim "
+            "workaround while a fix is in flight -- no interim workaround; never "
+            "push manual work onto the client. Reply once, after the fix is on "
+            "PROD.\n")
+        tmp, home, _ = self._home_with(
+            "client-message-worker-reaction-no-workarounds.md", text)
+        with tmp:
+            m = _by_name(da.scan_home(str(home)))[
+                "client-message-worker-reaction-no-workarounds.md"]
+            self.assertEqual(m.confidence, da.HIGH)
+            self.assertEqual(m.action, da.ACTION_REWRITE)
+            self.assertIn("handover-compose", m.fleet_source)
+
     def test_feedback_type_conformance_counts_drift(self):
         # item 3: the conformance doctrine-drift dimension needs NO logic
         # change -- verify it picks up the new classification (a type: feedback
