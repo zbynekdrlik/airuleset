@@ -54,6 +54,19 @@ can drift). Lessons for anyone touching this partition:
   Doctrine: statusline-vocabulary.md's `U` bullet — "the role slice narrows `I` and
   `W`; only `U` is global".
 
+- **GOTCHA — the role-filter SCOPE has oscillated twice; change all FIVE surfaces
+  together or it re-regresses.** Which of `I`/`U`/`W` the `--role` filter narrows has
+  flipped: #998/#1008 = all three → #1025 = `I` only → #1045 = `I`+`W`, `U` global.
+  The #1045 regression happened because #1025 updated CODE but a prior lane once
+  updated only code COMMENTS and left the doctrine saying the old rule — a later
+  session then "restores doctrine" and re-regresses. The invariant surfaces that MUST
+  move in lockstep for ANY future scope change: (1) `_apply_role_filter` call in
+  `cmd_slice_quals`, (2) in `cmd_core_quals`, (3) in `airuleset._role_filter_footer`,
+  (4) this bullet, (5) `modules/core/statusline-vocabulary.md`'s `U` bullet — plus the
+  RED locks in `test_w_role_filter_1045.py` / `test_role_filter_uw_1008.py` /
+  `test_footer_role_998.py`. A lane touching role scope that leaves any of the five
+  stale is an incomplete fix.
+
 - **#1025 stop-gate: a `❓ ASKED`/`❓ NEEDS YOU` turn naming a same-repo `#N` must point
   at a ticket in THIS box's U.** `cli_quals.question_ticket_in_u(numbers, cwd)` decides
   membership cache-FIRST (`statusbar.user_waiting_numbers`, the additive
