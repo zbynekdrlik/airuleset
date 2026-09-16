@@ -1,10 +1,8 @@
 # Composing the client handover proposal
 
 **This is the SINGLE canonical handover-proposal rule for EVERY sub-dev stream.**
-Streams composed client messages differently until the owner tired of re-teaching
-(montalu5 2026-08-16); keep no private per-stream notes. SEND mechanics live in the
-PROJECT's own rules — for odoo-erp see `.claude/rules/odoo-task-sync.md`; the
-sibling `SKILL.md` here is the channel-agnostic pointer (airuleset issue 891).
+Keep no private per-stream notes (montalu5 2026-08-16). SEND mechanics live in the PROJECT's own rules (odoo-erp: `.claude/rules/odoo-task-sync.md`);
+`SKILL.md` is the channel-agnostic pointer (airuleset issue 891).
 THIS file is the COMPOSE — what a message must contain — and EVERY message, opening
 AND follow-up, is presented to the OWNER for approval BEFORE posting.
 
@@ -34,8 +32,8 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   channel number and NEVER only wrapped in prose:
   `Vlákno: „Tabula objednavok 1" (pod IT-support, montalu PROD)`; (2) the FULL
   message body verbatim; (3) the member list. NEVER "the text is on the ticket" —
-  the owner does not read tickets. Naming the target only by its internal number
-  forced „do akého vlákna to má ísť?" (airuleset #632: „vlákno 250"). Every thread
+  the owner does not read tickets (naming it only by its internal number forced
+  the owner to ask which thread — airuleset #632: „vlákno 250"). Every thread
   mention carries its deep URL, never a bare channel number (airuleset #657/#650):
   `Vlákno: „Tabula objednavok 1" — https://erp.montalu.cloud/odoo/discuss?active_id=discuss.channel_288`
   — confirm it loads before pasting (Check 6 #650 + `stop-check-prose-violations.sh` #657).
@@ -46,15 +44,11 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   stream name (montalu2..8 → 2..8, david2..4 → 2..4, miva1 → 1). For an
   UNNUMBERED base stream (montalu, marek, david, simap) the suffix is "1" — the
   first stream of its client family — CONFIRMED by the owner on airuleset #532
-  (2026-08-18): unnumbered base streams are being renamed to <name>1 (airuleset
-  #537: montalu→montalu1, david→david1, simap→simap1; marek stays unnumbered,
-  unused, no client handovers), so every active handover stream ends with its
-  number. **The name is at most ~30 CHARACTERS including that trailing number**
+  (2026-08-18; base streams renamed <name>1 per airuleset #537), so every active
+  handover stream ends with its number. **The name is at most ~30 CHARACTERS including that trailing number**
   (airuleset #597): a longer name is truncated behind the Discuss sidebar's
-  first page and the number disappears. Good: „Oprava filtra rozmerov 2" (24).
-  Too long: „Viditeľnosť leadov pre obchodníkov 2" (36) — shorten to e.g.
-  „Viditeľnosť leadov 2" (20). The proposal you present must ALREADY carry a
-  name satisfying both conditions — never a long or un-numbered draft the owner
+  first page. The proposal you present must ALREADY carry a name satisfying
+  both conditions — never a long or un-numbered draft the owner
   has to fix. Both are HOOK-ENFORCED at create time
   (`hooks/block-discuss-thread-name.sh`, airuleset #596/#597): a create whose
   name breaks either condition is BLOCKED before it reaches PROD (a rename is
@@ -70,19 +64,18 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   the SAME stream number as the thread-name suffix — the trailing digits of the
   unix user, or "1" for an UNNUMBERED base stream (montalu, david, simap):
   montaluN → N, davidN → N (base david → 1), simapN → N, miva1 → 1 (montalu4
-  signs MarekAI 4). It REUSES the project's existing stream number, NEVER a
-  second derivation — for a NUMBERED stream it matches
-  `cli_aliases.short_target_alias`'s family regexes and the #532 thread-name
-  suffix; the base → 1 case is the #532/#537 convention's own mapping, NOT
+  signs MarekAI 4). It REUSES the existing stream number, NEVER a second
+  derivation — NUMBERED matches `cli_aliases.short_target_alias` + the #532
+  thread-name suffix; base → 1 is the #532/#537 convention's own mapping, NOT
   derived from those `\d+` regexes. On any single client Odoo instance only ONE
   stream family posts, so the bare number is unambiguous. The signature stays on
-  EVERY message — never dropped the way the greeting is. It is a POISTKA even
-  while streams SHARE one Odoo account; if accounts are renamed per stream
-  (airuleset #598 → odoo-erp #4624) the layer stays uncontradicted. HOOK-ENFORCED
+  EVERY message — never dropped the way the greeting is (a POISTKA while streams
+  share one Odoo account; renaming per stream, airuleset #598 → odoo-erp #4624,
+  keeps the layer uncontradicted). HOOK-ENFORCED
   (`hooks/block-discuss-thread-name.sh`, airuleset #609): a `message_post` with
   no valid identity signature (`ZbynekAI <N>` / `MarekAI <N>`, or the WRONG
-  identity, #641) is BLOCKED before PROD, regardless of which skill you loaded.
-  Bypass a genuine internal/legacy post: `airuleset:discuss-sig-ok` in the content.
+  identity, #641) is BLOCKED before PROD, regardless of the loaded skill.
+  Bypass a genuine internal/legacy post: `airuleset:discuss-sig-ok`.
 - **Chatter = helper only; `body_is_html=True` is MANDATORY on every
   `message_post` with HTML tags.** Without it Odoo escapes the HTML and clients
   see raw `<p>` tags. HOOK-ENFORCED (`hooks/block-odoo-message-post-without-html.sh`,
@@ -93,9 +86,8 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   it, never a menu path ("Predaj → Objednávky → …") and never the bare homepage.
   Open it and confirm it loads before putting it in the proposal. **This applies
   to EVERY openable reference in the message, not only the handed-over feature:**
-  a record, screen, action, report or dashboard — each gets its OWN direct
-  functional URL, verified live before sending, never a prose menu path (airuleset
-  #595: msg 1723308, rejected). This generalizes completion-report.md's 🌐-line
+  each such reference gets its OWN functional URL, verified live before sending,
+  never a prose menu path (airuleset #595: msg 1723308, rejected). This generalizes completion-report.md's 🌐-line
   rule to Discuss messages.
 - **State the owner's thread membership EXPLICITLY in the proposal.** The recipe
   already puts the owner on `partner_ids` (control ping) — but the PROPOSAL text
@@ -105,20 +97,18 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   merged-but-undeployed or scheduled feature — the client must act the moment they
   read. Confirm it is live on their PROD first.
 - **Len minulé, overené udalosti — klientska správa sa NIKDY neodvoláva na to,
-  čo sa LEN STANE (airuleset #696, owner ruling 2026-08-25).** Incident (vlákno
-  263): stream sľúbil „od zajtrajšieho ranného e-mailu" digest kým ešte
-  neexistoval. Keď je viditeľný
-  výstup funkcie plánovaný ARTEFAKT (digest e-mail, report, cron
-  výsledok), máš dve legálne cesty — obe končia správou v MINULOM ČASE: (1)
-  spusti artefakt TERAZ (vlastnou právomocou, alebo `GATEKEEPER-ACTION:`) a
-  OVER, že odišiel S prisľúbeným obsahom (read-back z čerstvej prod-kópie,
-  nikdy len „odoslané"); alebo (2) počkaj na najbližší plánovaný beh, over ho, a
-  až potom píš — v minulom čase. HOOK-ENFORCED
+  čo sa LEN STANE (airuleset #696, owner ruling 2026-08-25).** Incident: stream sľúbil „od zajtrajšieho ranného e-mailu" digest kým ešte
+  neexistoval. Keď je viditeľný výstup funkcie plánovaný ARTEFAKT (digest
+  e-mail, report, cron), máš dve cesty — obe končia správou v MINULOM ČASE: (1)
+  spusti artefakt TERAZ (vlastnou právomocou / `GATEKEEPER-ACTION:`) a OVER, že
+  odišiel S prisľúbeným obsahom (read-back z čerstvej prod-kópie, nikdy len
+  „odoslané"); alebo (2) počkaj na najbližší plánovaný beh, over ho, potom píš
+  — v minulom čase. HOOK-ENFORCED
   (`hooks/block-discuss-thread-name.sh`, airuleset #696): `message_post` s
   budúcim sľubom v tele je BLOKOVANÝ, kým obsah nenesie falsifikovateľnú značku
-  `airuleset:artifact-verified <ref>` — referenciu na to, ČO si z reálneho
-  artefaktu odčítal, kde a kedy (model `airuleset:owner-approved`) — doktrína
-  platí na KAŽDÉ preformulovanie.
+  `airuleset:artifact-verified <ref>` — referenciu na to, čo si z artefaktu
+  odčítal, kde a kedy (model `airuleset:owner-approved`) — doktrína platí na
+  KAŽDÉ preformulovanie.
 - **A client message NEVER tells the client what WE lack — it reports ONLY
   what is delivered and working (airuleset #742).** "Chýba nám X" / "nemáme
   prístup k Y" / "nevieme to overiť" / "nestihli sme Z". When something is missing on OUR side, two legal
@@ -129,29 +119,26 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   — wait until there is something real to report. The one legitimate exception
   is a genuine REQUEST for something FROM the client — a normal ask phrased as a concrete request,
   never as a complaint about what is missing: "Potrebovali by sme od vás X…" —
-  never "Nemáme od vás X". This is a JUDGMENT call on
-  message CONTENT a phrase-matching hook cannot gate without false-positive
-  risk, so it rides the per-message owner-approval gate.
+  never "Nemáme od vás X". A JUDGMENT call on message CONTENT (a hook cannot gate it without false-positive
+  risk), so it rides the per-message owner-approval gate.
 - **Každý adresát je REÁLNE označený — mention anchor v tele je POVINNÝ popri
   `partner_ids`, na KAŽDEJ správe (airuleset #702, owner ruling 2026-08-25).**
   `partner_ids` správu DORUČÍ (inbox/e-mail + owner control ping); MENTION
-  notifikáciu (klient s „len zmienky") spúšťa až mention ANCHOR v HTML tele. Tri
-  schválené správy (montalu PROD 262/287) odišli len s `partner_ids` bez pingu —
-  opravené unlink+repost (msg 1742837/1742838). Anchor pre KAŽDÉHO adresáta
-  (atribúty podľa `SKILL.md` proti reálnemu 19.0 composeru):
+  notifikáciu (klient s „len zmienky") spúšťa až mention ANCHOR v HTML tele
+  (incident: msg 1742837/1742838 odišli bez pingu → repost). Anchor pre KAŽDÉHO adresáta
+  (atribúty podľa `SKILL.md`, 19.0 composer):
   `<a href="/odoo/res.partner/<id>" class="o_mail_redirect" data-oe-id="<id>" data-oe-model="res.partner">@Meno</a>`.
   HOOK-ENFORCED (`hooks/block-discuss-thread-name.sh`, airuleset #702): stream
   `message_post` na `discuss.channel`, ktorého content menuje `partner_ids`, ale
-  nenesie žiadny mention anchor, je BLOKOVANÝ — hook skenuje samotný tool-call
-  payload, takže platí bez ohľadu na to, ktorý skill si načítal. Bypass (interný
+  nenesie žiadny mention anchor, je BLOKOVANÝ — platí bez ohľadu na načítaný
+  skill. Bypass (interný
   post bez adresátov): `airuleset:discuss-mention-ok` v contente (logged).
 - **The greeting (oslovenie — „Dobrý deň…" / „Ahoj…") belongs ONLY in the FIRST
   (opening) message of a thread.** A follow-up reply in an existing thread
   carries NO greeting — it continues directly with the content (a REAL
   `@`-mention anchor for EVERY addressee — #702 above — and `partner_ids` for
   delivery ALWAYS, on every message). Repeating „Dobrý deň…" on every follow-up
-  reads as machine-sent (miva „Augustová dochádzka" had three same-day
-  reopenings, airuleset #573). Greet once, at the top of the thread; after that,
+  reads as machine-sent (airuleset #573). Greet once, at the top of the thread; after that,
   just the message.
 - **Explain the concept to the client, not just a link + feature list.** For a
   non-technical client, explain in one plain sentence WHAT each named thing is and
@@ -164,8 +151,8 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   question into an EXISTING client thread, check the client's last unreflected
   answer and OPEN by briefly reacting to it; only THEN ask the next thing. This
   applies to a follow-up into an existing thread, not just to opening one — a
-  reply that reflects nothing reads as machine-sent (montalu1, „Etapy zákaziek vo
-  výrobe 1", airuleset #625).
+  reply that reflects nothing reads as machine-sent („Etapy zákaziek vo výrobe
+  1", airuleset #625).
 - **Address register PER PERSON — vykanie only for the CEO, tykanie for the other
   named contacts, VYKANIE by default for anyone not yet listed.** Before every
   `message_post`, check the register below and use the right register for that
@@ -220,9 +207,7 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   `ack-reaction.md`.
 - **No interim "how to work around it" reply while a fix is in flight (#1027,
   owner 2026-09-14).** Client reports something + a fix lane is dispatched → send
-  NO interim manual-workaround message; reply ONCE, after the fix is on PROD and
-  verified (a workaround is human work pushed onto the client while the real fix
-  comes). Exception: a yes/no question the client explicitly asked that the fix
+  NO interim manual-workaround message; reply ONCE, after the fix is on PROD and verified. Exception: a yes/no question the client explicitly asked that the fix
   does not answer. Enforced by `stop-check-question-quality.sh` /
   `gates.questionscope`: a `❓` approving a client message with workaround
   phrasing (zatiaľ/medzitým/dovtedy/obísť/ručne/workaround) while the cited `#N`
@@ -236,10 +221,9 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   `active=False` BLOKOVANÝ na `shared-stream` boxoch (bypass
   `# airuleset:discuss-archive-ok <reason>`). **Arm (odoo-erp 5946):** stream si
   hide armne SÁM cez `/json/2` — `schedule_close_hide_guarded(channel_id,
-  hours=None)` (guard: internal user + member/creator + sub-thread); kým release
-  nie je na PROD, `GATEKEEPER-ACTION:` ostáva arm path. Mechanizmus (#5630):
-  `_company_base_schedule_close_hide()` + ICP `mail.closed_thread_hide_hours`
-  (10h) poháňa `unpin_dt`, NIKDY `active=False`. **Disarm-on-reply:** klientska
+  hours=None)`; kým release nie je na PROD, `GATEKEEPER-ACTION:` ostáva arm path.
+  Mechanizmus (#5630): `_company_base_schedule_close_hide()` + ICP
+  `mail.closed_thread_hide_hours` (10h) poháňa `unpin_dt`, NIKDY `active=False`. **Disarm-on-reply:** klientska
   odpoveď DISARMuje hide — zlož marker EXPLICITNE (nikdy `last_interest_dt`
   race); re-arm až po uzavretí. **Per-stream sweep:** hotová téma s nótou → arm;
   bez nóty → nóta + arm; živá → nechať.
@@ -249,9 +233,8 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   the sub-dev's (airuleset #627, owner directive 2026-08-22).** When you open or
   first post into a client thread, record the binding `Discuss-thread: <channel-id>`
   (the id cited as "vlákno N") — a durable group key, orthogonal to `stream:`.
-  Before close, whoever CURRENTLY owns the thread posts a closing note ("Dobrý
-  deň / Ahoj `<mená>`, všetko z tejto témy je vyriešené, vlákno uzatváram —
-  ďakujeme"; still `partner_ids` incl. the owner, still the `ZbynekAI <N>`
+  Before close, whoever CURRENTLY owns the thread posts a closing note ("Dobrý deň / Ahoj `<mená>`, téma vyriešená, vlákno
+  uzatváram"; still `partner_ids` incl. the owner + the `ZbynekAI <N>`
   signature) and records `Discuss-closed: msg <message-id>`. **N tickets, one
   thread:** the note goes ONCE at the LAST ticket; a non-last ticket closes with
   `Discuss-defer: siblings #<A> #<B> still open — note goes at the last close`
@@ -272,8 +255,7 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   je dôkaz pre VŠETKY tickety rodiny. „One thread = one topic" platí — téma je
   CAPABILITY, nie ticket. **Spätná citácia + same-cycle close:** keď akceptácia
   landne, session ju v **TOM ISTOM cykle** cituje na VŠETKÝCH ticketoch a zavrie
-  — NIKDY nečaká na per-ticket udalosť (montalu3: dôkaz ležal vo vlákne
-  necitovaný). Každý close nesie **`Acceptance-cited: vlákno „<meno>"
+  — NIKDY nečaká na per-ticket udalosť. Každý close nesie **`Acceptance-cited: vlákno „<meno>"
   (discuss.channel_<N>) / msg <id>`**; **`Acceptance-cited:` je DÔKAZ aj
   dispozícia (#891 channel-agnostic reversal)** — channel-agnostic close marker
   (nahrádza `Discuss-closed:` pre task-chatter). Rodina STÁLE nesie citáciu na
@@ -284,14 +266,10 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   (airuleset #728, owner directive 2026-08-26).** Verbatim: „treba vlakna
   drzat maximalne atomicke a ak sa otvori nejaka nova tema vo vlakne tak
   radsej vytvorit nove vlakno/ticket a spravu ktora temu vyvolala
-  prekopirovat, presunut do toho noveho vlakna". The pre-#728 rule below
-  ("one thread = one topic, a sub-thread under the channel the owner named")
-  covered only ADDRESSING at creation — it now covers the thread's ENTIRE
-  lifecycle: every follow-up, reminder and reply posted into an EXISTING
-  thread must still belong to that thread's OWN topic, never a different one
-  it merely happens to sit in. Incident: „Etapy zákaziek vo výrobe 1"
-  (discuss.channel_257) grew to 36 messages across ~6 topics + a CEO new-topic —
-  owner had to review + close by hand.
+  prekopirovat, presunut do toho noveho vlakna". It now covers the thread's ENTIRE lifecycle: every follow-up, reminder and reply
+  posted into an EXISTING thread must still belong to that thread's OWN topic,
+  never a different one it merely happens to sit in. Incident: „Etapy zákaziek vo výrobe 1"
+  (discuss.channel_257) grew to 36 messages across ~6 topics — owner had to close by hand.
 - **A NEW topic a participant (client / CEO / anyone) opens in an EXISTING
   client thread is NEVER developed there.** The stream creates a NEW ticket
   immediately — and, once it reaches client communication, a NEW thread once the
@@ -307,8 +285,7 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   message (#625), a brief APPROVED acknowledgement in the EXISTING thread — pointing
   to the new ticket/thread, never developing the new topic itself there — satisfies
   #625; it needs the SAME owner approval as any other. Precedent: odoo-erp #5319
-  (triggering msg 1724252/1724253 copied across), closure of thread 257 via msg
-  1743448.
+  (triggering msg 1724252/1724253 copied across; thread 257 closed via msg 1743448).
 - **Atomicity also applies at CREATION, not only to organic growth
   (airuleset #742).** #728 above covers a topic that emerges INSIDE an
   already-open thread; this closes the other half — when a brand-new proposal
@@ -324,6 +301,23 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   project (origin: thread + deep URL + msg id, summary, dev ref). Stages +
   Hotovo authority per `client-board-tasks.md`; lag=violation. Discuss is NEVER
   the source of truth; the task is.
+
+- **Štartovací Introduction v produkte — každá odovzdávka funkčnej oblasti
+  klientovi má štartovaciu stránku V PRODUKTE, nie školiace vlákno (airuleset
+  #1042, owner 15.9.2026).** Odovzdávka NIE JE krok-za-krokom školenie v Discuss
+  vlákne (to zlyhalo, odoo-erp 4650/7307). Dodaj JEDEN štartovací „Introduction /
+  Začíname" PRIAMO v produkte (sekcia Návody; ref. odoo-erp 7169/7307/7170), z
+  ktorého vie NOVÁ osoba bez kontextu rovno začať — nikdy externý dokument, nikdy
+  školiace vlákno. Povinné: screenshoty reálnych obrazoviek (bez klientskych dát),
+  overené deep-linky, odkazy na návody + FAQ, sekcia per zariadenie/cestu (kiosk
+  tablet + Fully Kiosk; vlastný PC/telefón cez OTP), „čo skontrolovať" pre AI,
+  kontakt na AI pomocníka + IT. Findability proof (step 2) beží NAD Introduction.
+  Akceptačné vlákno klientovi ODKAZUJE na Introduction (deep-link), nikdy
+  neopisuje kroky. **`needs-acceptance` hand-off BEZ `https://` odkazu na
+  Introduction = nekompletná odovzdávka** — HOOK-ENFORCED
+  (`hooks/stop-check-prose-violations.sh`, #1042): `❓` akceptačný blok /
+  `needs-acceptance` labelling turn bez odkazu na Návody/Introduction/Začíname je
+  BLOKOVANÝ; bypass (API-only): `# airuleset:intro-link-ok <dôvod>`.
 
 Every thread this file governs follows the project's own channel placement
 rule — for odoo-erp see `.claude/rules/odoo-task-sync.md` (task chatter for
