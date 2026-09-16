@@ -103,6 +103,10 @@ class TestClientBodyJargonGate(TestCase):
 class TestClientBoardMemoryGuard(TestCase):
 
     MEM = "/home/u/.claude/projects/-home-u-x/memory/feedback_odoo_chatter.md"
+    # An unrelated memory must use an unrelated FILENAME too — the filename is a
+    # SUBJECT signal (#1028), so a memory literally named ..._odoo_chatter.md IS
+    # about odoo chatter and is correctly blocked regardless of its body.
+    MEM_UNRELATED = "/home/u/.claude/projects/-home-u-x/memory/feedback_dev2_build_box.md"
     NOTMEM = "/home/u/devel/x/notes.md"
 
     def test_client_board_memory_blocked(self):
@@ -116,7 +120,7 @@ class TestClientBoardMemoryGuard(TestCase):
     def test_unrelated_memory_allowed(self):
         content = ("---\ntype: feedback\ndescription: dev2 build box for Android "
                    "gradle heavy jobs\n---\n# note\nbody")
-        blocked, reason = clientbody.classify_memory_write(self.MEM, content)
+        blocked, reason = clientbody.classify_memory_write(self.MEM_UNRELATED, content)
         self.assertFalse(blocked, reason)
 
     def test_non_memory_path_allowed(self):
