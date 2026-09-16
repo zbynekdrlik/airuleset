@@ -294,6 +294,32 @@ def classify_symlinks(drift_entries):
             "`python3 airuleset.py install` z HLAVNÉHO checkoutu" % (n, sample))
 
 
+def classify_doctrine_drift(counts):
+    """#1028: per-stream restatements of GRADUATED fleet doctrine (a rule that
+    became an airuleset module/skill but whose local memory/rule copy was never
+    retired). ``counts`` is ``{"high": N, "medium": M}`` from the injected
+    ``cli_doctrine_audit`` scan (HIGH = an auto-fixable rewrite still present —
+    normally 0 after ``cmd_install``'s fix step, > 0 means the fix FAILED;
+    MEDIUM = a human-review listing), or ``None`` when the scan errored. Same
+    pure contract as the other deciders: True conformant / False drift / None
+    undetermined (never alarmed). #1032: report-only — the caller SURFACES to the
+    journal + snapshot, never an owner ping."""
+    if counts is None:
+        return ("doctrine-drift", None, "doctrine audit preskočený (scan zlyhal)")
+    high = int(counts.get("high", 0) or 0)
+    med = int(counts.get("medium", 0) or 0)
+    if high == 0 and med == 0:
+        return ("doctrine-drift", True, "žiadne graduated-rule lokálne kópie")
+    parts = []
+    if high:
+        parts.append("%d HIGH (install auto-fix zlyhal)" % high)
+    if med:
+        parts.append("%d MEDIUM (human review)" % med)
+    return ("doctrine-drift", False,
+            "graduated-rule lokálne zvyšky: %s — pozri `python3 airuleset.py "
+            "doctrine-audit`" % ", ".join(parts))
+
+
 def _sig_for(dim, facts):
     """Compact dedup signature per dimension from its raw facts — a CHANGED sig
     re-surfaces immediately (the drift is materially different); an unchanged sig
@@ -312,6 +338,10 @@ def _sig_for(dim, facts):
         entries = facts.get("drift") or []
         return "symlinks:%s" % _md5_hex(
             "|".join(sorted("%s:%s" % (n, r) for n, r, _t in entries)))[:12]
+    if dim == "doctrine-drift":
+        c = facts.get("counts") or {}
+        return "doctrine:%d:%d" % (int(c.get("high", 0) or 0),
+                                   int(c.get("medium", 0) or 0))
     return dim
 
 
@@ -319,7 +349,7 @@ def run_conformance_check(now, state, dry_run=False,
                           repo_root=None, claude_md_path=None, baseline_path=None,
                           git_run=None, timer_check=None, is_target_check=None,
                           interval=None, reping=None, persist=None,
-                          symlink_scan=None):
+                          symlink_scan=None, doctrine_scan=None):
     """Job 34: the daily per-box conformance sweep. Cadence-gated on its OWN state
     key ``conformance_last_check`` (``_sweep_due``); the cadence marker is stamped +
     persisted BEFORE any network op (#172 kill-safe). Best-effort — every dimension
@@ -431,6 +461,20 @@ def run_conformance_check(now, state, dry_run=False,
         drift_entries = None      # scan failure → UNDETERMINED, never an alarm
     symlink_facts = {"drift": drift_entries}
 
+    # #1028 doctrine-drift: per-stream restatements of graduated fleet doctrine.
+    # Default scan reuses cli_doctrine_audit (same watchdog-leaf import idiom the
+    # symlink scan above uses); tests inject a controlled counts dict.
+    if doctrine_scan is None:
+        def doctrine_scan():
+            import cli_doctrine_audit as _da
+            return _da.doctrine_counts(
+                _da.scan_home(os.path.expanduser("~"), repo_dir=repo_root))
+    try:
+        doctrine_counts = doctrine_scan()
+    except Exception:
+        doctrine_counts = None    # scan failure → UNDETERMINED, never an alarm
+    doctrine_facts = {"counts": doctrine_counts}
+
     # --- decide (pure) ---
     decisions = [
         (classify_head(local, origin, behind), head_facts),
@@ -438,6 +482,7 @@ def run_conformance_check(now, state, dry_run=False,
         (classify_md5(on_disk_md5, recorded_md5, recorded_head, local), md5_facts),
         (classify_timer(status), timer_facts),
         (classify_symlinks(drift_entries), symlink_facts),
+        (classify_doctrine_drift(doctrine_counts), doctrine_facts),
     ]
 
     seen = dict(state.get("conformance") or {})
