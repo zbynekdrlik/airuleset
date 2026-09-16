@@ -27,7 +27,11 @@ Confidence / action:
            5691229806) carries a client-specific token: a blanket rewrite would
            lose real content — e.g. `miva-zero-manual-attendance-work.md` keeps
            its MIVA-specific part. An INCIDENTAL body mention (a sibling
-           wiki-link, a per-tenant handover account) is NOT a keep signal. OR a
+           wiki-link, a per-tenant handover account) is NOT a keep signal. OR an
+           anchor match whose SUBJECT carries NO client-messaging cue at all
+           (`has_client_message_subject`) — an unrelated internal memory
+           (onboarding / QA / a design doc) that merely reuses two of a
+           doctrine's phrases in its BODY (#1028 fix-forward-3, review-2). OR a
            fuzzy title/description match against an airuleset module/skill
            heading. action = LIST (human review). NEVER auto-rewritten.
   keep   → an owner-PREFERENCE / user-context memory (a `feedback_*`/`feedback-`
@@ -270,6 +274,16 @@ def is_owner_preference(path, fm):
     return (fm.get("type", "") or "").lower() == "user"
 
 
+def _subject_text(path, fm, body):
+    """The memory's SUBJECT -- filename + frontmatter ``description:`` (or, when
+    there is no non-empty description, the body's first heading). The BODY is
+    never included. Shared by ``has_tenant_token`` and
+    ``has_client_message_subject`` so the two can never drift on what a file's
+    subject is."""
+    desc = ((fm.get("description") if fm else "") or "").strip()
+    return os.path.basename(path) + "\n" + (desc or first_heading(body))
+
+
 def has_tenant_token(path, fm, body):
     """True when a known client/stream identity is the memory's SUBJECT -- it
     appears in the FILENAME or the frontmatter ``description:`` (fallback when
@@ -285,9 +299,34 @@ def has_tenant_token(path, fm, body):
     (the real item-1 file) to MEDIUM and left it never-rewritten, defeating the
     audit. The archive keeps the full original, so a subject-scoped rewrite
     stays reversible."""
-    desc = ((fm.get("description") if fm else "") or "").strip()
-    subject = os.path.basename(path) + "\n" + (desc or first_heading(body))
-    return bool(_TENANT_RE.search(subject))
+    return bool(_TENANT_RE.search(_subject_text(path, fm, body)))
+
+
+# #1028 fix-forward-3 (review-2 MAJOR): every ALLOWLIST entry is a CLIENT-
+# MESSAGING doctrine, so a genuine restatement is a memory ABOUT client
+# messaging and says so in its SUBJECT. An UNRELATED internal memory
+# (onboarding, QA, a design doc) that merely happens to carry two of an entry's
+# anchor phrases in its BODY does NOT -- "offer video calls to non-technical
+# clients" + "never promise personal walkthroughs" fired on an onboarding-policy
+# memory. Cue words are the client/stream vocabulary; a bare
+# "email"/"message"/"vlákno"/"thread" is DELIBERATELY excluded (internal notes
+# use those), and "discuss" is included because the fleet's client channels are
+# the Odoo *Discuss* threads (the greeting restatement's subject is "Discuss
+# vlákna", carrying no bare "client" word).
+_CLIENT_MSG_SUBJECT_RE = re.compile(
+    r"\bclient\w*|\bklient\w*|z[áa]kazn[íi]k\w*|\bcustomer\w*|\bdiscuss\w*",
+    re.IGNORECASE,
+)
+
+
+def has_client_message_subject(path, fm, body):
+    """True when the memory's SUBJECT (filename / description / first heading,
+    via ``_subject_text``) carries a client-messaging cue. Gates HIGH auto-
+    rewrite: a client-messaging-doctrine anchor match on a file whose subject is
+    NOT recognizably about client messaging is demoted to MEDIUM/LIST (human
+    review) rather than silently archived + rewritten (#1028 ff3 review-2
+    MAJOR)."""
+    return bool(_CLIENT_MSG_SUBJECT_RE.search(_subject_text(path, fm, body)))
 
 
 def is_already_pointer(text):
@@ -391,6 +430,12 @@ def classify_file(path, text, module_headings=None):
         if owner_pref:
             return DoctrineMatch(path, src, head, since, HIGH, ACTION_KEEP, hits)
         if has_tenant_token(path, fm, body):
+            return DoctrineMatch(path, src, head, since, MEDIUM, ACTION_LIST, hits)
+        if not has_client_message_subject(path, fm, body):
+            # Anchors matched, but the SUBJECT is not recognizably about client
+            # messaging -> an unrelated internal memory that merely reuses two of
+            # the doctrine's phrases. Human review, never a silent auto-rewrite
+            # (#1028 ff3 review-2 MAJOR).
             return DoctrineMatch(path, src, head, since, MEDIUM, ACTION_LIST, hits)
         return DoctrineMatch(path, src, head, since, HIGH, ACTION_REWRITE, hits)
 

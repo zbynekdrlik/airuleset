@@ -1014,24 +1014,29 @@ When drafting client-facing messages (emails to MIVA CEO etc.) on the user's beh
                         self.assertNotEqual(m.action, da.ACTION_REWRITE)
                         self.assertLess(m.anchors_hit, da.MIN_ANCHORS_HIGH)
 
-    def test_two_client_agnostic_anchors_do_not_false_match(self):
-        # #1028 ff3 review-1 MAJOR: the explain/no-promises anchors must be
-        # client-scoped enough that TWO co-occurring generic phrases on an
-        # UNRELATED memory (a design doc, a QA plan, an internal staff-promises
-        # note) never reach HIGH -- the matcher AUTO-REWRITES a HIGH file, so a
-        # false positive silently archives real content. This is the class the
-        # one-anchor negative above does NOT exercise (that only hits the
-        # MIN_ANCHORS_HIGH guard). Each entry carries at most ONE mildly-generic
-        # anchor, so a >= 2-hit match always includes a client-scoped anchor.
+    def test_unrelated_memory_with_two_anchors_is_listed_not_rewritten(self):
+        # #1028 ff3 review-2 MAJOR (correctness + test-integrity): an UNRELATED
+        # internal memory that reuses TWO of a doctrine's anchor phrases in its
+        # BODY but whose SUBJECT is NOT recognizably about client messaging must
+        # be LISTED (human review), never silently HIGH auto-rewritten (the
+        # matcher archives + replaces a HIGH file). TEETH: each fixture DOES
+        # match >= 2 anchors, so `_by_name(...)[fn]` yields a real row (KeyError
+        # if the gate wrongly dropped it) and the asserts fire — a regression to
+        # HIGH/rewrite fails here. (The prior review-1 test was vacuous: its
+        # one-anchor fixtures returned None and skipped every assert.)
         negs = {
-            "design-doc.md": ("Our design docs should explain each named thing "
-                              "in one plain sentence; if a section never explained "
-                              "the concept, send it back."),
-            "qa-plan.md": ("The test plan should explain each named thing in one "
-                           "plain sentence and a feature list is not enough for "
-                           "QA sign-off."),
-            "staff-promises.md": ("We never promise personal walkthroughs to the "
-                                  "team and never promise the roadmap will slip."),
+            # 2 no-promises anchors, subject "onboarding-policy" (no client cue)
+            "onboarding-policy.md": ("During onboarding we never promise personal "
+                "walkthroughs to new hires, and we do not offer video calls to "
+                "non-technical clients until sign-off. Track it in the CRM."),
+            # 2 explain anchors, subject "kickoff-deck" (no client cue)
+            "kickoff-deck.md": ("Our kickoff deck should explain each named thing "
+                "in one plain sentence; the lead must explain the concept to the "
+                "client review board without a call."),
+            # 2 greeting anchors, subject "team-thread" (no client/discuss cue)
+            "team-thread.md": ("For our internal team thread the greeting belongs "
+                "only in the first message and there is no greeting in a "
+                "continuing message."),
         }
         tmp = TemporaryDirectory()
         with tmp:
@@ -1045,9 +1050,32 @@ When drafting client-facing messages (emails to MIVA CEO etc.) on the user's beh
             by = _by_name(da.scan_home(str(home)))
             for fn in negs:
                 with self.subTest(fn=fn):
-                    m = by.get(fn)
-                    if m is not None:
-                        self.assertNotEqual(m.action, da.ACTION_REWRITE)
+                    m = by[fn]  # >= 2 anchors -> a real row (else KeyError)
+                    self.assertGreaterEqual(m.anchors_hit, da.MIN_ANCHORS_HIGH)
+                    self.assertEqual(m.action, da.ACTION_LIST)
+                    self.assertEqual(m.confidence, da.MEDIUM)
+
+    def test_client_subject_cue_keeps_two_anchor_match_high(self):
+        # Positive control for the subject-cue gate: the SAME two-anchor body
+        # WITH a client-messaging subject cue stays HIGH/rewrite, so the gate
+        # demotes only unrelated memories, never a genuine client-message
+        # restatement (#1028 ff3 review-2).
+        text = ("---\nname: client-msg-promises\n"
+                "description: \"Client-facing drafts: promise discipline\"\n"
+                "metadata:\n  node_type: memory\n  type: project\n---\n"
+                "# Client message promises\n\n"
+                "In client-facing drafts never promise personal walkthroughs; do "
+                "not offer video calls to non-technical clients.\n")
+        tmp = TemporaryDirectory()
+        with tmp:
+            home = Path(tmp.name)
+            mem = home / ".claude" / "projects" / "-p" / "memory"
+            mem.mkdir(parents=True)
+            (mem / "client-msg-promises.md").write_text(text, encoding="utf-8")
+            m = _by_name(da.scan_home(str(home)))["client-msg-promises.md"]
+            self.assertGreaterEqual(m.anchors_hit, da.MIN_ANCHORS_HIGH)
+            self.assertEqual(m.confidence, da.HIGH)
+            self.assertEqual(m.action, da.ACTION_REWRITE)
 
 
 
