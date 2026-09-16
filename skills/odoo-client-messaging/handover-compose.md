@@ -121,23 +121,17 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   platí na KAŽDÉ preformulovanie.
 - **A client message NEVER tells the client what WE lack — it reports ONLY
   what is delivered and working (airuleset #742).** "Chýba nám X" / "nemáme
-  prístup k Y" / "nevieme to overiť" / "nestihli sme Z" — any framing that
-  surfaces OUR internal gap into a client-facing message is unprofessional and
-  leaves the client nothing actionable. When
-  something is missing on OUR side, two legal
+  prístup k Y" / "nevieme to overiť" / "nestihli sme Z". When something is missing on OUR side, two legal
   paths (mirroring #696 above): (1) FIX it first —
   get the access/data from the owner, self-service verify it
   (`autonomous-verification.md`'s "What's on PROD?" tree), finish the step —
   THEN message the client about the COMPLETED result; or (2) DON'T message yet
   — wait until there is something real to report. The one legitimate exception
-  is a genuine REQUEST for something FROM the client (an input, a decision, an
-  access grant only they can give) — a normal ask phrased as a concrete request,
+  is a genuine REQUEST for something FROM the client — a normal ask phrased as a concrete request,
   never as a complaint about what is missing: "Potrebovali by sme od vás X…" —
-  never "Nemáme od vás X". (#823: closing no longer carries a mandatory
-  self-blame line — see the closing bullet below.) This is a JUDGMENT call on
+  never "Nemáme od vás X". This is a JUDGMENT call on
   message CONTENT a phrase-matching hook cannot gate without false-positive
-  risk, so it rides the per-message owner-approval gate — the owner reviewing
-  the text is the backstop.
+  risk, so it rides the per-message owner-approval gate.
 - **Každý adresát je REÁLNE označený — mention anchor v tele je POVINNÝ popri
   `partner_ids`, na KAŽDEJ správe (airuleset #702, owner ruling 2026-08-25).**
   `partner_ids` správu DORUČÍ (inbox/e-mail + owner control ping); MENTION
@@ -159,6 +153,12 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   reads as machine-sent (miva „Augustová dochádzka" had three same-day
   reopenings, airuleset #573). Greet once, at the top of the thread; after that,
   just the message.
+- **Explain the concept to the client, not just a link + feature list.** For a
+  non-technical client, explain in one plain sentence WHAT each named thing is and
+  HOW it fits their day before any link (#1028).
+- **No promises on the client's behalf.** Keep closings neutral and async — never
+  promise the user will personally demo/explain, never offer live demos or video
+  calls to a non-technical client (#1028).
 - **React to the client's previous answer FIRST — never drop a new question into
   a thread that ignores what the client last said.** Before posting a new
   question into an EXISTING client thread, check the client's last unreflected

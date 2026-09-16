@@ -27,9 +27,17 @@ Confidence / action:
            5691229806) carries a client-specific token: a blanket rewrite would
            lose real content — e.g. `miva-zero-manual-attendance-work.md` keeps
            its MIVA-specific part. An INCIDENTAL body mention (a sibling
-           wiki-link, a per-tenant handover account) is NOT a keep signal. OR a
-           fuzzy title/description match against an airuleset module/skill
-           heading. action = LIST (human review). NEVER auto-rewritten.
+           wiki-link, a per-tenant handover account) is NOT a keep signal. OR an
+           anchor match whose SUBJECT carries NO client-messaging cue at all
+           (`has_client_message_subject`) — usually an unrelated internal memory
+           (onboarding / QA / a design doc) that merely reuses two of a
+           doctrine's phrases in its BODY (#1028 fix-forward-3, review-2). A
+           GENUINE restatement whose subject happens to carry no cue is also
+           listed here, surfaced for human review rather than auto-fixed — the
+           safe direction, the deliberate recall trade-off for closing the
+           destructive false-positive (review-3). OR a fuzzy title/description
+           match against an airuleset module/skill heading. action = LIST (human
+           review). NEVER auto-rewritten.
   keep   → an owner-PREFERENCE / user-context memory (a `feedback_*`/`feedback-`
            FILENAME, or a `type: user` frontmatter node) OR a fleet-installed
            file (a symlink / a file under the airuleset repo dir). Never touched.
@@ -137,18 +145,20 @@ ALLOWLIST = [
         "fleet_source": "skills/odoo-client-messaging/handover-compose.md",
         "heading": "The greeting belongs only in the first message",
         "fleet_since": FLEET_SINCE,
-        # DISTINCTIVE multi-word phrases only — a bare "greeting" / "oslovenie" /
-        # "no greeting" is far too generic (#1028 review-1 🟡: a UI memory saying
-        # "shows no greeting banner" or "show it in the first message only"
-        # false-matched HIGH). Each anchor must be specific to the client-message
-        # greeting-etiquette rule.
+        # #1028 fix-forward-3: anchors RE-DERIVED from the LIVE miva1 restatement
+        # (`discuss-thread-greeting-etiquette.md`) — the SK description/body
+        # phrases it actually uses — plus two distinctive EN forms for a future
+        # English restatement. Still DISTINCTIVE multi-word only (a bare
+        # "greeting"/"oslovenie"/"no greeting" is too generic, #1028 review-1 🟡);
+        # NO quote characters, so the curly „ " in the live text never break a
+        # match (SK diacritics survive .lower()).
         "anchors": [
+            "patrí len do prvej správy",
+            "follow-upy v tom istom vlákne bez pozdravu",
+            "len otváracia správa vlákna",
+            "každý follow-up v tom istom vlákne",
             "greeting belongs only in the first message",
-            "oslovenie patrí len do prvej správy",
-            "continuing message carries no greeting",
-            "continuation message carries no greeting",
             "no greeting in a continuing message",
-            "greeting only in the first client message",
         ],
     },
     {
@@ -156,14 +166,19 @@ ALLOWLIST = [
         "fleet_source": "skills/odoo-client-messaging/handover-compose.md",
         "heading": "Explain the concept to the client",
         "fleet_since": FLEET_SINCE,
-        # Client-message-scoped only — a bare "explain the concept, not the
-        # implementation" is generic engineering advice (#1028 review-2 🟡).
+        # #1028 fix-forward-3: anchors RE-DERIVED from the LIVE miva1 restatement
+        # (`client-emails-explain-the-concept.md`, EN) — the CLIENT-scoped
+        # description/body phrases it uses — plus the canonical fleet-heading
+        # phrase for forward compat. At most ONE mildly-generic anchor ("explain
+        # each named thing in one plain sentence"), so any >= 2-hit match includes
+        # a client-scoped anchor and an unrelated design/QA memory cannot
+        # false-match (#1028 ff3 review-1 MAJOR; a bare "explain the concept, not
+        # the implementation" is generic engineering advice, #1028 review-2 🟡).
         "anchors": [
+            "client emails must explain what each thing is",
+            "how to apply to every client-facing email",
+            "explain each named thing in one plain sentence",
             "explain the concept to the client",
-            "vysvetli klientovi koncept",
-            "explain the feature to the client",
-            "vysvetli klientovi ako to funguje",
-            "explain the concept to the client, not the implementation",
         ],
     },
     {
@@ -171,15 +186,19 @@ ALLOWLIST = [
         "fleet_source": "skills/odoo-client-messaging/handover-compose.md",
         "heading": "No promises on the client's behalf",
         "fleet_since": FLEET_SINCE,
-        # "no promises on the user's behalf" ⊃ "no promises" — the substring
-        # dedup in _anchor_hits already collapses them, but keep only the
-        # distinctive full phrases so a bare "no promises" cannot corroborate.
+        # #1028 fix-forward-3: anchors RE-DERIVED from the LIVE miva1 restatement
+        # (`no-promises-on-users-behalf.md`, EN) — the CLIENT-scoped description
+        # phrases it uses — plus the canonical fleet-heading phrase for forward
+        # compat. At most ONE mildly-generic anchor ("never promise personal
+        # walkthroughs"), so any >= 2-hit match includes a client-scoped anchor and
+        # an internal staff/roadmap-promises memory cannot false-match (#1028 ff3
+        # review-1 MAJOR). A bare "no promises" cannot corroborate (the substring
+        # dedup in _anchor_hits collapses overlaps).
         "anchors": [
-            "no promises on the user's behalf",
+            "in client-facing drafts never promise the user",
+            "offer video calls to non-technical clients",
+            "never promise personal walkthroughs",
             "no promises on the client's behalf",
-            "never promise on the client's behalf",
-            "nesľubuj klientovi v mene",
-            "žiadne sľuby v mene klienta",
         ],
     },
     {
@@ -259,6 +278,16 @@ def is_owner_preference(path, fm):
     return (fm.get("type", "") or "").lower() == "user"
 
 
+def _subject_text(path, fm, body):
+    """The memory's SUBJECT -- filename + frontmatter ``description:`` (or, when
+    there is no non-empty description, the body's first heading). The BODY is
+    never included. Shared by ``has_tenant_token`` and
+    ``has_client_message_subject`` so the two can never drift on what a file's
+    subject is."""
+    desc = ((fm.get("description") if fm else "") or "").strip()
+    return os.path.basename(path) + "\n" + (desc or first_heading(body))
+
+
 def has_tenant_token(path, fm, body):
     """True when a known client/stream identity is the memory's SUBJECT -- it
     appears in the FILENAME or the frontmatter ``description:`` (fallback when
@@ -274,9 +303,41 @@ def has_tenant_token(path, fm, body):
     (the real item-1 file) to MEDIUM and left it never-rewritten, defeating the
     audit. The archive keeps the full original, so a subject-scoped rewrite
     stays reversible."""
-    desc = ((fm.get("description") if fm else "") or "").strip()
-    subject = os.path.basename(path) + "\n" + (desc or first_heading(body))
-    return bool(_TENANT_RE.search(subject))
+    return bool(_TENANT_RE.search(_subject_text(path, fm, body)))
+
+
+# #1028 fix-forward-3 (review-2 MAJOR): every ALLOWLIST entry is a CLIENT-
+# MESSAGING doctrine, so a genuine restatement is a memory ABOUT client
+# messaging and USUALLY says so in its SUBJECT. An UNRELATED internal memory
+# (onboarding, QA, a design doc) that merely happens to carry two of an entry's
+# anchor phrases in its BODY usually does not -- "offer video calls to
+# non-technical clients" + "never promise personal walkthroughs" fired on an
+# onboarding-policy memory whose subject had no cue.
+#
+# HONEST LIMIT (review-3 MINOR-1): this gate NARROWS the false-positive class,
+# it does not ELIMINATE it -- an unrelated memory that ALSO carries an
+# incidental client cue in its subject (e.g. `customer-crm-qa.md`) can still
+# reach HIGH. The >= 2 distinctive multi-word anchor bar (not this cue) carries
+# the precision weight, and the rewrite stays reversible via the archive, so the
+# residual is low-risk. Cue words are the client/stream vocabulary; a bare
+# "email"/"message"/"vlákno"/"thread" is DELIBERATELY excluded (internal notes
+# use those), and "discuss" is included because the fleet's client channels are
+# the Odoo *Discuss* threads (the greeting restatement's subject is "Discuss
+# vlákna", carrying no bare "client" word).
+_CLIENT_MSG_SUBJECT_RE = re.compile(
+    r"\bclient\w*|\bklient\w*|z[áa]kazn[íi]k\w*|\bcustomer\w*|\bdiscuss\w*",
+    re.IGNORECASE,
+)
+
+
+def has_client_message_subject(path, fm, body):
+    """True when the memory's SUBJECT (filename / description / first heading,
+    via ``_subject_text``) carries a client-messaging cue. Gates HIGH auto-
+    rewrite: a client-messaging-doctrine anchor match on a file whose subject is
+    NOT recognizably about client messaging is demoted to MEDIUM/LIST (human
+    review) rather than silently archived + rewritten (#1028 ff3 review-2
+    MAJOR)."""
+    return bool(_CLIENT_MSG_SUBJECT_RE.search(_subject_text(path, fm, body)))
 
 
 def is_already_pointer(text):
@@ -380,6 +441,12 @@ def classify_file(path, text, module_headings=None):
         if owner_pref:
             return DoctrineMatch(path, src, head, since, HIGH, ACTION_KEEP, hits)
         if has_tenant_token(path, fm, body):
+            return DoctrineMatch(path, src, head, since, MEDIUM, ACTION_LIST, hits)
+        if not has_client_message_subject(path, fm, body):
+            # Anchors matched, but the SUBJECT is not recognizably about client
+            # messaging -> an unrelated internal memory that merely reuses two of
+            # the doctrine's phrases. Human review, never a silent auto-rewrite
+            # (#1028 ff3 review-2 MAJOR).
             return DoctrineMatch(path, src, head, since, MEDIUM, ACTION_LIST, hits)
         return DoctrineMatch(path, src, head, since, HIGH, ACTION_REWRITE, hits)
 
