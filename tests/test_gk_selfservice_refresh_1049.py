@@ -308,5 +308,61 @@ class AuditReader(TestCase):
         self.assertEqual(res["total"], 0)
 
 
+# --------------------------------------------------------------------------- #
+# Whitelist constant lock — the ONE constant is the four gk-only surface
+# families the refresh rsync excludes (prod-ro-clone-accounts.md).
+# --------------------------------------------------------------------------- #
+class WhitelistConstantLock(TestCase):
+    def test_gk_only_surfaces_are_the_four_families(self):
+        from gates import selfservice
+        labels = [lbl for lbl, _p in selfservice.GK_ONLY_SURFACES]
+        self.assertEqual(
+            set(labels),
+            {"session-store", "container-logs", "root-secrets", "runtime-state"},
+            "the gk-only surface whitelist must stay exactly the four families "
+            "prod-ro-clone-accounts.md says the refresh excludes")
+
+    def test_each_family_matches_its_surface(self):
+        from gates import selfservice
+        for probe in ("/var/lib/odoo/sessions/", "odoo container logs",
+                      "~/.secrets", "nginx runtime state"):
+            self.assertTrue(selfservice.references_gk_only_surface(probe), probe)
+
+
+# --------------------------------------------------------------------------- #
+# Doctrine lock — the #1049 line lives in the DEEP companion (the always-on
+# module has no byte headroom).
+# --------------------------------------------------------------------------- #
+class DoctrineLock(TestCase):
+    def test_deep_carries_refresh_doctrine(self):
+        deep = (REPO_ROOT / "skills" / "autonomous-verification-deep"
+                / "DEEP.md").read_text(encoding="utf-8")
+        self.assertIn(
+            "A copy older than the event is a reason to REFRESH, never a reason "
+            "to escalate.", deep)
+
+    def test_always_on_module_untouched_for_byte_headroom(self):
+        # the doctrine must NOT be in the always-on module (2 B headroom).
+        mod = (REPO_ROOT / "modules" / "core"
+               / "autonomous-verification.md").read_text(encoding="utf-8")
+        self.assertNotIn("reason to REFRESH, never a reason to escalate", mod)
+
+
+# --------------------------------------------------------------------------- #
+# Audit CLI — the --selfservice-blocks view over the Prevencia log.
+# --------------------------------------------------------------------------- #
+class AuditCLI(TestCase):
+    def test_selfservice_blocks_flag_runs(self):
+        # the flag must parse + run (reads the box-local log; zero when absent).
+        r = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts"
+                                 / "audit_bounce_rule_updates.py"),
+             "--selfservice-blocks", "--repo", "zbynekdrlik/airuleset"],
+            capture_output=True, text=True,
+            env={**os.environ, "HOME": tempfile.mkdtemp(prefix="airuleset-ssr-cli-")})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("stream\tselfservice_blocks", r.stdout)
+
+
 if __name__ == "__main__":
     main()
