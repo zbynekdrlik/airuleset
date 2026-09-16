@@ -81,16 +81,21 @@ class TestFetchAndPct(unittest.TestCase):
         self.assertAlmostEqual(cli_gh_rate.remaining_pct("graphql", st), 10.0)
 
     def test_cache_within_ttl_does_not_refetch(self):
+        # #1052: a refresh now makes TWO gh calls — the REST `rate_limit` fetch
+        # PLUS the GraphQL `rateLimit` object probe (this _FakeRun answers both
+        # with the REST body, so the object parse fails-open and the REST
+        # reading stands). The value that matters here is unchanged: ZERO calls
+        # on a cache hit, exactly one refresh (two calls) per TTL window.
         run = _FakeRun(_rate_json(4000, 5000, 4000, 5000))
         cli_gh_rate.read_status(now=1000.0, run=run, real_gh="/usr/bin/gh")
-        self.assertEqual(run.calls, 1)
-        # A second read 30s later (< 60s TTL) must reuse the cache.
+        self.assertEqual(run.calls, 2)   # 1 REST + 1 GraphQL object probe
+        # A second read 30s later (< 60s TTL) must reuse the cache — no calls.
         cli_gh_rate.read_status(now=1030.0, run=run, real_gh="/usr/bin/gh")
-        self.assertEqual(run.calls, 1)
-        # After the TTL it refetches.
+        self.assertEqual(run.calls, 2)
+        # After the TTL it refetches — one more REST + one more object probe.
         cli_gh_rate.read_status(now=1000.0 + cli_gh_rate.CACHE_TTL_S + 1,
                                 run=run, real_gh="/usr/bin/gh")
-        self.assertEqual(run.calls, 2)
+        self.assertEqual(run.calls, 4)
 
     def test_gh_error_fails_open(self):
         run = _FakeRun("", returncode=1, stderr="boom")

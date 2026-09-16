@@ -36,6 +36,8 @@ import subprocess
 import sys
 import time
 
+import cli_gh_rate_graphql as _ghql   # #1052: the GraphQL rateLimit object read
+
 # --------------------------------------------------------------------------- #
 # Tunables (module constants so tests reference them, not magic numbers).
 # --------------------------------------------------------------------------- #
@@ -232,12 +234,58 @@ def _fetch_rate_limit(run, real_gh, now):
                     "remaining": int(block["remaining"]),
                     "limit": int(block["limit"]),
                     "reset": int(block.get("reset") or 0),
+                    # #1052: tag the reading's SOURCE so a row can name it. The
+                    # REST bucket is "rest"; the graphql bucket may later be
+                    # overridden to "graphql-object" by _merge_graphql_object.
+                    "source": "rest",
                 }
             except (ValueError, TypeError):
                 continue
     if not out:
         return None
     return out
+
+
+def _block_pct(block):
+    """remaining/limit as a percent, or None when unknown (mirrors
+    remaining_pct's own guards, for the merge decision below)."""
+    try:
+        limit = int(block["limit"])
+        remaining = int(block["remaining"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return None if limit <= 0 else 100.0 * remaining / limit
+
+
+def _merge_graphql_object(resources, obj):
+    """Compose the REST graphql bucket with the authoritative GraphQL rateLimit
+    OBJECT reading (#1052), mutating ``resources`` in place. The LOWER
+    remaining_pct wins for pct/backoff/the alert latch (a tie goes to the
+    authoritative object); the object's resetAt ALWAYS wins the reset column.
+    ``core`` is never touched. ``obj`` is None on any probe error (fail-open —
+    the REST graphql reading, already tagged "rest", simply stands)."""
+    if obj is None:
+        return
+    rest = resources.get("graphql")
+    obj_pct = _block_pct(obj)
+    if isinstance(rest, dict):
+        rest_pct = _block_pct(rest)
+        if obj_pct is not None and (rest_pct is None or obj_pct <= rest_pct):
+            chosen = {"remaining": obj["remaining"], "limit": obj["limit"],
+                      "source": "graphql-object"}
+        else:
+            chosen = {"remaining": rest["remaining"], "limit": rest["limit"],
+                      "source": "rest"}
+        rest_reset = rest.get("reset") or 0
+    else:
+        # REST had no graphql bucket at all — the object is the only reading.
+        chosen = {"remaining": obj["remaining"], "limit": obj["limit"],
+                  "source": "graphql-object"}
+        rest_reset = 0
+    # The object's resetAt wins the reset column whenever it parsed; else keep
+    # whatever REST reported.
+    chosen["reset"] = obj.get("reset") or rest_reset
+    resources["graphql"] = chosen
 
 
 def _load_cache():
@@ -328,6 +376,14 @@ def read_status(now=None, run=None, real_gh="__auto__", force=False):
         # on first run => an empty-resources status (fail-open).
         cache.setdefault("resources", {})
         return cache
+
+    # #1052: the REST rate_limit `graphql` bucket lags/mis-reports during a
+    # GraphQL exhaustion, so ALSO read the authoritative GraphQL rateLimit
+    # object and take the LOWER of the two graphql readings. ONE extra call,
+    # only on this refresh path (never on a cache hit), fail-open on error.
+    _merge_graphql_object(resources, _ghql.fetch_graphql_object(
+        run, real_gh, timeout=_FETCH_TIMEOUT_S, internal_env=INTERNAL_ENV,
+        diag=_diag))
 
     status = {
         "fetched_at": now,
@@ -873,11 +929,14 @@ def cmd_gh_rate(args):
     for name in _RESOURCES:
         pct = remaining_pct(name, status)
         block = (status.get("resources") or {}).get(name, {})
-        print("%-8s remaining %s (%s/%s) reset %s backoff %ds" % (
+        # #1052: name the reading's SOURCE so an operator sees whether graphql
+        # came from the authoritative GraphQL object or the REST bucket.
+        src = block.get("source", "rest")
+        print("%-8s remaining %s (%s/%s) reset %s backoff %ds (%s)" % (
             name, _fmt_pct(pct),
             block.get("remaining", "?"), block.get("limit", "?"),
             _fmt_reset(block.get("reset")),
-            backoff_seconds(name, status)))
+            backoff_seconds(name, status), src))
     row = status_row(status)
     if row:
         print(row)
