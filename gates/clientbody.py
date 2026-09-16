@@ -175,7 +175,7 @@ def classify_client_body(content):
                 "obycajnou biznis slovencinou o tom, co sa pre NEHO zmenilo -- "
                 "NIKDY zmienka o GitHube / github.com, cislo GitHub tiketu "
                 "(`issue #NNNN` / `ticket #NNNN`), ani commit / worktree / "
-                "hand-off / RFR / gk. Klient odpoveda iba v Odoo ulohe alebo "
+                "hand-off / RFR. Klient odpoveda iba v Odoo ulohe alebo "
                 "majitelovi v chate; GitHub needs-answer tiket je len zrkadlo "
                 "(client-board-tasks.md, pravidla 7 + 8). Cislo bez GitHub "
                 "kontextu (napr. objednavka #1058, farba #003366) sa NEblokuje.\n\n"

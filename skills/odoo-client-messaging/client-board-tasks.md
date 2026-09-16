@@ -133,7 +133,7 @@ above is discouraged). The MECHANICAL gate (`gates/clientbody.py`, PreToolUse) i
 deliberately CONSERVATIVE so it never false-blocks a legitimate client message
 (the owner's worst outcome): it blocks a GitHub mention (`github.com` / the word
 „GitHub"), a github-context issue number (`issue #NNNN` / `ticket #NNNN`), and
-the unambiguous dev tokens `commit` / `worktree` / `hand-off` / `RFR` / `gk`. It
+the unambiguous dev tokens `commit` / `worktree` / `hand-off` / `RFR`. It
 does NOT mechanically block a bare number with no GitHub context (`objednávka
 #1058`, a hex colour `#003366`) nor ambiguous business terms (`PR` = public
 relations, `CI` = corporate identity, `merge`, `branch`) — those stay
