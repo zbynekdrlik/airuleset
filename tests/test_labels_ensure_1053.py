@@ -129,3 +129,17 @@ class CmdLabels1053(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLabelDescriptionLimit(unittest.TestCase):
+    """GitHub rejects a label description over 100 characters (HTTP 422,
+    'description is too long') — the first live `labels --ensure` run on
+    zbynekdrlik/odoo-erp (2026-09-17 00:08 CEST) failed on both #1053 labels.
+    Lock every shipped description under the limit."""
+
+    def test_descriptions_fit_github_limit(self):
+        for name, (_color, desc) in cli_labels.LABELS_1053.items():
+            self.assertLessEqual(
+                len(desc), cli_labels.GITHUB_LABEL_DESC_MAX,
+                "%s description is %d chars (> %d)" % (name, len(desc), cli_labels.GITHUB_LABEL_DESC_MAX))
+
