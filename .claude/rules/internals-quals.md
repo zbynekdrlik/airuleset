@@ -140,3 +140,16 @@ can drift). Lessons for anyone touching this partition:
   (`meta read failed`), not gh's raw stderr line. Pre-existing gap NOT closed here:
   `-L 1000` silently drops the oldest on a repo with >1000 OPEN issues whose
   bodies-only batch SUCCEEDS (#1021 fixes only the truncation-FAILURE mode).
+
+- **#1036 — a NEW `store_true` flag on `cmd_slice_quals`/`cmd_core_quals` read
+  via `getattr(args, "flag", False)` (truthy) BREAKS every existing quals test.**
+  Those tests build args as `m.Mock(**flags)`, whose UNSET attributes are
+  auto-created TRUTHY Mock objects — so a plain truthy `getattr` fires the new
+  flag's branch for every test that omits it (62 failures in one sweep when
+  `--task-hygiene` was added). Fix = guard with `is True` (argparse `store_true`
+  always yields a real bool, and a Mock attr is never `is True`), NOT a test-wide
+  churn adding `flag=False` to dozens of `Mock(**flags)` dicts. Same class as the
+  disk_guard getattr trap. Also: `--task-hygiene` short-circuits BEFORE the
+  authority check (it reads the persisted `~/.claude/task-hygiene/status.json` A
+  count via `cli_task_hygiene.a_count`, never a live Odoo call), so it prints on
+  ANY box regardless of resolve_authority.
