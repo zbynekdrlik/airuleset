@@ -17,8 +17,94 @@ Exposed API:
 """
 from __future__ import annotations
 
+import re
 import subprocess
 from typing import Optional
+
+# --- #1044: pass-through markers -------------------------------------------
+# The composer OWNS none of the odoo-erp gate's body shape (it evolves across
+# 10+ checks_* modules and requires execution evidence the composer cannot
+# synthesise). For a rich hand-off the STREAM authors the full gate-compliant
+# body and the composer SIGNS + POSTS it verbatim (the `--body-file` path in
+# cmd_handoff). These regexes validate only the minimal cross-repo invariants
+# the composer is responsible for — the SAME ones cmd_handoff's --sign-only
+# path already checks — never the full gate shape (the repo gate is the
+# authority on that).
+_RFR_MARKER_RE = re.compile(r'^\s*([#*_-]+\s*)?READY-FOR-REVIEW', re.MULTILINE)
+_CFR_MARKER_RE = re.compile(
+    r'Ready for gatekeeper cross-fork review[.!]?\s*$', re.MULTILINE)
+_SELF_REVIEW_MODEL_LINE_RE = re.compile(
+    r'(?im)^[ \t]*[-*]?[ \t]*\**Self-review-model\**[ \t]*:')
+_ROOTCAUSE_LINE_RE = re.compile(
+    r'(?im)^[ \t]*[-*]?[ \t]*\**Root-cause-of-previous-bounce\**[ \t]*:')
+_PREVENCIA_LINE_RE = re.compile(
+    r'(?im)^[ \t]*[-*]?[ \t]*\**Prevencia-read\**[ \t]*:')
+# Line-anchored template field labels (bullet/bold tolerant, mirroring the
+# gate's own FIELD_PATTERNS) — used to detect a FULL body wrongly passed as
+# the Self-review table.
+_FULL_BODY_FIELD_LABEL_RES = tuple(
+    re.compile(r'(?im)^[ \t]*[-*]?[ \t]*\**' + lbl + r'\**[ \t]*:')
+    for lbl in ("Branch", "HEAD", "Stack", "Verified-at-UTC", "Harness")
+)
+
+
+def _has_rfr_marker(text: str) -> bool:
+    """True if ``text`` carries the READY-FOR-REVIEW / cross-fork trigger."""
+    return bool(_RFR_MARKER_RE.search(text) or _CFR_MARKER_RE.search(text))
+
+
+def is_full_body(table_text: str) -> bool:
+    """True if ``table_text`` looks like a FULL readiness body rather than a
+    bare Self-review table (#1044).
+
+    A legitimate ``--self-review-file`` is only the markdown lens table (every
+    row starts with ``|``); a stream with evidence to carry has no clean channel
+    and wrongly pastes its whole gate-compliant body here, which the field
+    renderer would then WRAP inside the Self-review block and emit a SECOND,
+    duplicate ``HEAD:`` line the gate parses instead of the composer's fresh
+    one. Detect that misuse so compose_body can refuse it and point at the
+    verbatim ``--body-file`` path.
+
+    Signal: a READY-FOR-REVIEW marker, OR >= 2 line-anchored template field
+    labels (a real table has zero — its cells live on ``|``-delimited lines)."""
+    if not table_text:
+        return False
+    if _has_rfr_marker(table_text):
+        return True
+    hits = sum(1 for rx in _FULL_BODY_FIELD_LABEL_RES if rx.search(table_text))
+    return hits >= 2
+
+
+def validate_passthrough_body(
+    body: str, *, bounce_round: int = 1
+) -> Optional[str]:
+    """Validate a STREAM-authored, gate-compliant body for the minimal
+    cross-repo invariants the composer is responsible for, before it is signed
+    and posted VERBATIM via the ``--body-file`` path (#1044).
+
+    Returns an error message, or None when the body may be posted. The body
+    shape itself (Branch/HEAD/Stack/… + the Self-review table + evidence
+    fences) is the REPO gate's authority — this only enforces what the
+    composer already enforces for ``--sign-only``: the RFR marker, the
+    ``Self-review-model:`` line, and (round >= 2) the bounce escalation
+    fields. It does NOT rewrite the body — fences and the single ``HEAD:``
+    line pass through untouched."""
+    if not (body or "").strip():
+        return "handoff BLOCK: --body-file body is empty"
+    if not _has_rfr_marker(body):
+        return ("handoff BLOCK: --body-file body has no READY-FOR-REVIEW "
+                "marker")
+    if not _SELF_REVIEW_MODEL_LINE_RE.search(body):
+        return ("handoff BLOCK: --body-file body missing Self-review-model: "
+                "line (required on every readiness comment)")
+    if bounce_round >= 2:
+        if not _ROOTCAUSE_LINE_RE.search(body):
+            return ("handoff BLOCK: round %d --body-file body missing "
+                    "Root-cause-of-previous-bounce:" % bounce_round)
+        if not _PREVENCIA_LINE_RE.search(body):
+            return ("handoff BLOCK: round %d --body-file body missing "
+                    "Prevencia-read:" % bounce_round)
+    return None
 
 
 def _run(argv: list[str], timeout: int = 15) -> subprocess.CompletedProcess:
@@ -280,6 +366,20 @@ def compose_body(
     Returns ``(body, error)``. On error, ``body`` is empty and ``error``
     is the message to print; on success, ``error`` is None.
     """
+    # #1044: refuse a FULL readiness body wrongly passed as the Self-review
+    # table. Wrapping it inside the Self-review block emits a SECOND, duplicate
+    # HEAD: line that the gate parses instead of the composer's fresh one (the
+    # mangling defect). A rich hand-off body belongs on the verbatim
+    # --body-file path, which signs + posts it 1:1 with fences and HEAD intact.
+    if is_full_body(self_review_table):
+        return ("", "handoff BLOCK: --self-review-file looks like a FULL "
+                "readiness body (it carries a READY-FOR-REVIEW marker or "
+                "template field labels), not a bare Self-review table. The "
+                "composer would wrap it and emit a duplicate HEAD: line the "
+                "gate then parses. Author the complete gate-compliant body and "
+                "post it verbatim with `airuleset.py handoff --body-file "
+                "<body.md>` instead.")
+
     # Y1 review finding (#969): when any extended flag is explicitly supplied,
     # treat the intent as "extended" even if the probe fails — silently
     # falling back to generic would post a body the gate rejects.
