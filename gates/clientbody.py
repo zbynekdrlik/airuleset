@@ -56,24 +56,47 @@ _BYPASS_BODY = "airuleset:client-body-ok"
 _BYPASS_MEMORY = "airuleset:client-board-memory-ok"
 
 # Sanctioned GitHub reference forms (odoo-task-sync depends on them) -- stripped
-# from a body BEFORE the bare-issue-ref check so the linking marker + the
-# description trailer are never mistaken for jargon.
+# from a body BEFORE the github / bare-issue-ref checks so the linking marker +
+# the description trailer are never mistaken for jargon. `[\s-]*` (not `?`) so a
+# double-space `GitHub  ticket:` is still recognised (#1018 review-1 F8).
 _ALLOWLIST_REF_RE = re.compile(
-    r"GitHub[\s-]?ticket:\s*#\d+"
-    r"|Discuss[\s-]?ticket:\s*#\d+"
+    r"GitHub[\s-]*ticket:\s*#\d+"
+    r"|Discuss[\s-]*ticket:\s*#\d+"
     r"|\(\s*GitHub\s+#\d+\s*\)"
     r"|\(\s*#\d+\s*\)",
     re.IGNORECASE,
 )
 
-_GITHUB_URL_RE = re.compile(r"github\.com", re.IGNORECASE)
-_BARE_ISSUE_RE = re.compile(r"#\d{3,}")
+# A GitHub MENTION (the URL, or the bare word „GitHubu"/"GitHub #N") — checked
+# AFTER the allowlist strip, so the sanctioned `GitHub ticket: #N` marker never
+# trips it. This is the owner's actual complaint („odpoved sem alebo do
+# GitHubu", #1018) — broader than a bare github.com URL.
+_GITHUB_WORD_RE = re.compile(r"github", re.IGNORECASE)
 
-# Case-SENSITIVE acronyms (a case-insensitive \bci\b/\bpr\b would false-match
-# ordinary lowercase text); case-INSENSITIVE English words.
-_JARGON_ACRONYM_RE = re.compile(r"\b(?:PR|CI|RFR|gk)\b")
+# A bare `#NNNN` is BLOCKED ONLY when corroborated by a github-issue SIGNAL in
+# the SAME body (#1018 review-1 F1, the headline false block): in the gate's own
+# Odoo domain `#1058` far more often means an ORDER / INVOICE / product / SO
+# record (or an all-digit hex colour `#003366`, a quantity `#500`) than a GitHub
+# issue — blocking every `#NNNN` false-blocks legitimate client messages, the
+# owner's WORST outcome. A github-word body is already blocked above; this arm
+# adds the `issue #7110` / `ticket #7110` shape that carries no literal
+# „github". The literal #1018(a) „bare #NNNN" ask is deliberately narrowed to
+# honour the higher-priority no-false-block directive (recorded in the review +
+# the LANE-RETURN).
+_BARE_ISSUE_RE = re.compile(r"#\d{3,}")
+_GITHUB_SIGNAL_RE = re.compile(r"\bissues?\b|\bticket\b|pull\s+request", re.IGNORECASE)
+
+# UNAMBIGUOUS developer tokens only. Dropped from the standalone list (#1018
+# review-1 F2/F3): PR (public relations / „PR oddelenie"), CI (corporate
+# identity / firemná identita), merge + branch (Odoo's own „Merge duplicates"
+# button; „branch" = pobočka) — all proven to false-block ordinary business
+# Slovak. The full jargon set stays DISCOURAGED in the doctrine prose (rule 7);
+# the mechanical gate only blocks what is unambiguous, and github.com + a
+# github-context #NNNN already catch the real „developer pasted a GitHub ref"
+# incident.
+_JARGON_ACRONYM_RE = re.compile(r"\b(?:RFR|gk)\b")  # case-SENSITIVE (rare acronyms)
 _JARGON_WORD_RE = re.compile(
-    r"\b(?:commit|branch|merge|worktree|hand-?off|hand off)\b", re.IGNORECASE)
+    r"\b(?:commit|worktree|hand-?off|hand off)\b", re.IGNORECASE)
 
 # Body extraction. Triple-quoted first (so the inner single/double form does not
 # truncate it), then key form (body=, 'body':, "body":), the --body flag, and
@@ -102,16 +125,17 @@ def extract_bodies(content):
 
 def _scan_body(body):
     """The first banned token found in a single body, or None. The sanctioned
-    GitHub reference forms are stripped before the bare-issue-ref check."""
-    if _GITHUB_URL_RE.search(body):
-        return "odkaz na github.com"
-    without_refs = _ALLOWLIST_REF_RE.sub(" ", body)
-    if _BARE_ISSUE_RE.search(without_refs):
-        return "cislo GitHub tiketu (#NNNN)"
-    m = _JARGON_ACRONYM_RE.search(body)
+    GitHub reference forms are stripped FIRST, so every subsequent check runs
+    against a body with the linking marker / trailer removed."""
+    stripped = _ALLOWLIST_REF_RE.sub(" ", body)
+    if _GITHUB_WORD_RE.search(stripped):
+        return "zmienka o GitHube / github.com odkaz"
+    if _BARE_ISSUE_RE.search(stripped) and _GITHUB_SIGNAL_RE.search(stripped):
+        return "cislo GitHub tiketu (issue/ticket #NNNN)"
+    m = _JARGON_ACRONYM_RE.search(stripped)
     if m:
         return "vyvojarsky zargon (%s)" % m.group(0)
-    m = _JARGON_WORD_RE.search(body)
+    m = _JARGON_WORD_RE.search(stripped)
     if m:
         return "vyvojarsky zargon (%s)" % m.group(0)
     return None
@@ -133,16 +157,17 @@ def classify_client_body(content):
         hit = _scan_body(body)
         if hit:
             reason = (
-                "\nBLOKOVANE: klientska sprava obsahuje vyvojarsky zargon / "
-                "odkaz na GitHub (airuleset #1018).\n\n"
+                "\nBLOKOVANE: klientska sprava obsahuje odkaz na GitHub / "
+                "vyvojarsky zargon (airuleset #1018).\n\n"
                 "Najdene v tele spravy: %s.\n\n"
                 "Klientovi (chatter na project.task alebo Discuss) sa pise iba "
                 "obycajnou biznis slovencinou o tom, co sa pre NEHO zmenilo -- "
-                "NIKDY github.com odkazy, cisla GitHub tiketov (#NNNN), ani "
-                "PR / commit / branch / RFR / gk / hand-off / CI / merge / "
-                "worktree. Klient odpoveda iba v Odoo ulohe alebo majitelovi v "
-                "chate; GitHub needs-answer tiket je len zrkadlo "
-                "(client-board-tasks.md, pravidla 7 + 8).\n\n"
+                "NIKDY zmienka o GitHube / github.com, cislo GitHub tiketu "
+                "(`issue #NNNN` / `ticket #NNNN`), ani commit / worktree / "
+                "hand-off / RFR / gk. Klient odpoveda iba v Odoo ulohe alebo "
+                "majitelovi v chate; GitHub needs-answer tiket je len zrkadlo "
+                "(client-board-tasks.md, pravidla 7 + 8). Cislo bez GitHub "
+                "kontextu (napr. objednavka #1058, farba #003366) sa NEblokuje.\n\n"
                 "Vynimka: sankcionovany linkovaci marker `GitHub ticket: #N` "
                 "(a popisovy chvost `(GitHub #N)`), na ktorom stoji odoo-task-sync, "
                 "je povoleny. Pre skutocny okrajovy pripad pouzi (loguje sa): "
@@ -162,9 +187,20 @@ _MEMORY_PATH_RE = re.compile(r"/\.claude/projects/[^/]+/memory/.+\.md$")
 # (#1028 fix-forward-2: filename / frontmatter description / first heading,
 # never the body -- so an unrelated memory that merely mentions "Odoo" deep in
 # its body is not caught). `board` is word-boundaried so keyboard/dashboard/
-# onboarding never match.
-_MEMORY_KEYWORD_RE = re.compile(
-    r"\bOdoo\b|chatter|koment[aá]r|\bboard\b|\bHotovo\b|client task", re.IGNORECASE)
+# onboarding never match. A memory must hit at least TWO DISTINCT keywords to be
+# guarded (#1018 review-1 F5): a SINGLE generic word over-blocks unrelated
+# memories a stream legitimately keeps -- "Odoo /json/2 transport", an "Odoo
+# deploy box", an internal Trello "board", a "# Hotovo ked CI zelene" checklist
+# all carry exactly one keyword and are NOT client-board doctrine.
+_MEMORY_KEYWORD_RES = [
+    re.compile(r"\bOdoo\b", re.IGNORECASE),
+    re.compile(r"chatter", re.IGNORECASE),
+    re.compile(r"koment[aá]r", re.IGNORECASE),
+    re.compile(r"\bboard\b", re.IGNORECASE),
+    re.compile(r"\bHotovo\b", re.IGNORECASE),
+    re.compile(r"client task", re.IGNORECASE),
+]
+_MEMORY_MIN_KEYWORDS = 2
 
 _FM_DESC_RE = re.compile(r"(?m)^\s*description\s*:\s*(?P<v>.+?)\s*$", re.IGNORECASE)
 _FIRST_HEADING_RE = re.compile(r"(?m)^\s*#{1,6}\s*(?P<v>.+?)\s*$")
@@ -194,7 +230,8 @@ def classify_memory_write(file_path, content):
     if not _MEMORY_PATH_RE.search(path):
         return False, ""
     subject = _memory_subject(path, text)
-    if not _MEMORY_KEYWORD_RE.search(subject):
+    hits = sum(1 for rx in _MEMORY_KEYWORD_RES if rx.search(subject))
+    if hits < _MEMORY_MIN_KEYWORDS:
         return False, ""
     reason = (
         "\nBLOKOVANE: nova per-stream memory o Odoo klientskom boarde "

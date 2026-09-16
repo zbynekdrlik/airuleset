@@ -50,7 +50,9 @@ defeats the board's purpose.
 ### 2. Description — 2–4 sentences for the employee
 
 The description (`project.task.description`) carries **2–4 plain sentences
-telling the employee what was done**, followed by `Je nasadené. (#N)`.
+telling the employee what was done**, followed by `Je nasadené. (GitHub #N)`
+(the canonical description trailer odoo-task-sync uses; the older `(#N)` form is
+also accepted).
 
 **BANNED in the description** (all rewordings): Discuss thread names / channel
 ids, `PROD` / environment names, version numbers, PR / commit refs, internal
@@ -119,11 +121,20 @@ rewrite of the stream's own message — carries ZERO developer jargon: no
 `github.com` links, no `#`-number issue refs, no PR / commit / branch / RFR / gk
 / hand-off / CI / merge / worktree tokens (owner: „preco do commentarov do odoo
 taskov vypisujes technicke veci o githube!!", #1018). The client reads plain
-business Slovak about what changed for THEM. This is ENFORCED by a PreToolUse
-body gate (`gates/clientbody.py`); the ONE sanctioned exception is the internal
-`GitHub ticket: #N` marker note the odoo-task-sync tooling depends on (it is
-allowlisted). A genuine edge case bypasses with `# airuleset:client-body-ok
-REASON` (logged).
+business Slovak about what changed for THEM — that is the DOCTRINE (all of the
+above is discouraged). The MECHANICAL gate (`gates/clientbody.py`, PreToolUse) is
+deliberately CONSERVATIVE so it never false-blocks a legitimate client message
+(the owner's worst outcome): it blocks a GitHub mention (`github.com` / the word
+„GitHub"), a github-context issue number (`issue #NNNN` / `ticket #NNNN`), and
+the unambiguous dev tokens `commit` / `worktree` / `hand-off` / `RFR` / `gk`. It
+does NOT mechanically block a bare number with no GitHub context (`objednávka
+#1058`, a hex colour `#003366`) nor ambiguous business terms (`PR` = public
+relations, `CI` = corporate identity, `merge`, `branch`) — those stay
+discouraged by this doctrine but are left to review, because blocking them
+false-blocks ordinary business Slovak. The ONE sanctioned exception the gate
+allowlists is the internal `GitHub ticket: #N` marker note (and the
+`(GitHub #N)` description trailer) the odoo-task-sync tooling depends on. A
+genuine edge case bypasses with `# airuleset:client-body-ok REASON` (logged).
 
 ### 8. Client answers arrive ONLY in the Odoo task / owner chat — GitHub is a mirror
 

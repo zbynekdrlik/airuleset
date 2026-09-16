@@ -2136,14 +2136,20 @@ fi
 # merely MENTIONS the stage (e.g. "next I'll move it to Verifikácia") is never
 # gated. Fail-safe like its siblings: an unknown SECTION check resolves to
 # "present" (msg_has UNKNOWN->0), so a grep meltdown never fabricates a violation.
-VERIF_STAGE_RX='(Verifik[áa]ci|[Nn]a overeni)'
+# CAPITALIZED proper stage name only (#1018 review-1 F4): the board STAGE is the
+# proper noun "Verifikácia" / "Na overenie" — a lowercase "na overenie" is the
+# ordinary Slovak phrase "for checking" ("poslal na overenie správnosti"), which
+# must NOT be gated. So the stage match is CASE-SENSITIVE (requires the capital),
+# and the verbs carry explicit-case classes so the proximity check can run
+# case-sensitively without missing a sentence-initial or lowercase verb.
+VERIF_STAGE_RX='(Verifik[áa]ci|Na overeni)'
 # PAST-TENSE only: a future-tense mention ("presuniem ... do Verifikácia" = "I
 # WILL move it") must NOT be gated — so the SK stems are the past-participle
 # forms (presunul/posunul/…), never the bare present/future stem.
-VERIF_VERB_RX='\b(posted|moved|sent)\b|(presunul|posunul|odoslal|postol|nap[ií]sal|pridal)\w*'
+VERIF_VERB_RX='\b([Pp]osted|[Mm]oved|[Ss]ent)\b|([Pp]resunul|[Pp]osunul|[Oo]doslal|[Pp]ostol|[Nn]ap[ií]sal|[Pp]ridal)\w*'
 VERIF_REPORT=0
 if [ "$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE "${ODOO_ANCHOR_RX}|project\.task|[úu]loh" && echo 1 || echo 0)" = "1" ]; then
-    if [ "$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE "(${VERIF_VERB_RX}).{0,60}${VERIF_STAGE_RX}|${VERIF_STAGE_RX}.{0,60}(${VERIF_VERB_RX})" && echo 1 || echo 0)" = "1" ]; then
+    if [ "$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qE "(${VERIF_VERB_RX}).{0,60}${VERIF_STAGE_RX}|${VERIF_STAGE_RX}.{0,60}(${VERIF_VERB_RX})" && echo 1 || echo 0)" = "1" ]; then
         VERIF_REPORT=1
     fi
 fi

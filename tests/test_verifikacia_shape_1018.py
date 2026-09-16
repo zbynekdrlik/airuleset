@@ -84,6 +84,19 @@ SK_NON_ODOO = (
     "pipeline and posted the result to the build log."
 )
 
+# F4 regression (#1018 review-1): "na overenie" LOWERCASE is the ordinary Slovak
+# phrase "for checking", NOT the board stage "Na overenie" — must NOT be gated,
+# even next to a past-tense posting verb + an Odoo anchor.
+SK_HOTOVO_LOWERCASE_NA_OVERENIE = (
+    "Presunul som úlohu na project.task boarde do stavu Hotovo a poslal som ju "
+    "účtovníčke na overenie. Read-back: 0 escaped."
+)
+
+SK_EXPORT_FOR_CHECKING = (
+    "V rámci úlohy na project.task som odoslal klientovi export faktúr na overenie "
+    "správnosti údajov. Read-back: 0 escaped."
+)
+
 
 class TestVerifikaciaShapeGate(TestCase):
 
@@ -106,6 +119,12 @@ class TestVerifikaciaShapeGate(TestCase):
 
     def test_non_odoo_verification_not_gated(self):
         self.assertFalse(_blocked(_run(SK_NON_ODOO)))
+
+    def test_lowercase_na_overenie_not_gated(self):
+        self.assertFalse(_blocked(_run(SK_HOTOVO_LOWERCASE_NA_OVERENIE)))
+
+    def test_export_for_checking_not_gated(self):
+        self.assertFalse(_blocked(_run(SK_EXPORT_FOR_CHECKING)))
 
 
 if __name__ == "__main__":

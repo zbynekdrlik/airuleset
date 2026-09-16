@@ -29,18 +29,20 @@ class TestClientBodyJargonGate(TestCase):
         blocked, reason = self._blocked(c)
         self.assertTrue(blocked, reason)
 
-    def test_bare_issue_ref_in_body_blocked(self):
-        c = "scripts/odoo-task-sync.py post-message 42 \"<p>Opravené, detaily v #7110 (importer retry)</p>\""
+    def test_github_issue_ref_in_body_blocked(self):
+        # a #NNNN CORROBORATED by a github-issue signal ("issue") is a real
+        # GitHub ref → blocked (the #1018 incident shape)
+        c = "scripts/odoo-task-sync.py post-message 42 \"<p>Opravené, detaily v issue #7110</p>\""
         blocked, reason = self._blocked(c)
         self.assertTrue(blocked, reason)
 
     def test_commit_jargon_in_body_blocked(self):
-        c = "odoo_post.py --task-id 42 --body \"<p>Nasadené v commit abc123 na branch dev</p>\""
+        c = "odoo_post.py --task-id 42 --body \"<p>Nasadené v commit abc123 na dev</p>\""
         blocked, reason = self._blocked(c)
         self.assertTrue(blocked, reason)
 
-    def test_pr_jargon_in_body_blocked(self):
-        c = "channel.message_post(body='<p>Hotové v PR #12, po merge to nasadíme</p>', body_is_html=True)"
+    def test_worktree_jargon_in_body_blocked(self):
+        c = "channel.message_post(body='<p>Otestoval som to v hand-off worktree</p>', body_is_html=True)"
         blocked, reason = self._blocked(c)
         self.assertTrue(blocked, reason)
 
@@ -72,6 +74,34 @@ class TestClientBodyJargonGate(TestCase):
     def test_clean_discuss_reply_allowed(self):
         c = ("channel.message_post(body='<p>Dobrý deň, zoznam zákazníkov je teraz vpravo "
              "s vyhľadávaním. Skúste a dajte 👍. ZbynekAI 3</p>', body_is_html=True)")
+        blocked, reason = self._blocked(c)
+        self.assertFalse(blocked, reason)
+
+    # F1 regression (#1018 review-1): a bare #NNNN with NO github context is an
+    # Odoo record / hex colour / quantity, NOT a GitHub ref — must be allowed.
+    def test_odoo_order_number_allowed(self):
+        c = ("scripts/odoo-task-sync.py post-message 42 "
+             "\"<p>Dobrý deň, objednávku #1058 sme už vyexpedovali.</p>\"")
+        blocked, reason = self._blocked(c)
+        self.assertFalse(blocked, reason)
+
+    def test_hex_colour_number_allowed(self):
+        c = ("channel.message_post(body='<p>Použite firemnú modrú #003366 na tlačidlách.</p>', "
+             "body_is_html=True)")
+        blocked, reason = self._blocked(c)
+        self.assertFalse(blocked, reason)
+
+    # F2/F3 regression: PR / CI / merge / branch are ordinary business Slovak
+    # (public relations, corporate identity, Odoo's Merge button, pobočka).
+    def test_pr_ci_business_terms_allowed(self):
+        c = ("channel.message_post(body='<p>Pridali sme pole pre PR oddelenie a nové CI "
+             "do hlavičiek dokladov.</p>', body_is_html=True)")
+        blocked, reason = self._blocked(c)
+        self.assertFalse(blocked, reason)
+
+    def test_merge_business_term_allowed(self):
+        c = ("scripts/odoo-task-sync.py post-message 42 "
+             "\"<p>Duplicitné kontakty teraz viete zlúčiť (merge) jedným klikom.</p>\"")
         blocked, reason = self._blocked(c)
         self.assertFalse(blocked, reason)
 
@@ -126,6 +156,16 @@ class TestClientBoardMemoryGuard(TestCase):
     def test_non_memory_path_allowed(self):
         content = "Odoo chatter komentár board Hotovo client task"
         blocked, reason = clientbody.classify_memory_write(self.NOTMEM, content)
+        self.assertFalse(blocked, reason)
+
+    # F5 regression (#1018 review-1): a memory with a SINGLE generic keyword is
+    # an unrelated memory a stream legitimately keeps → must be allowed.
+    SINGLE_KW = "/home/u/.claude/projects/-home-u-x/memory/feedback_odoo_json2_transport.md"
+
+    def test_single_keyword_memory_allowed(self):
+        content = ("---\ntype: feedback\ndescription: Odoo /json/2 bearer transport "
+                   "gotchas\n---\n# note\nbody")
+        blocked, reason = clientbody.classify_memory_write(self.SINGLE_KW, content)
         self.assertFalse(blocked, reason)
 
     def test_memory_guard_bypass_allowed(self):
