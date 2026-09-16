@@ -36,6 +36,8 @@ import subprocess
 import sys
 import time
 
+import cli_gh_rate_graphql as _ghql   # #1052: the GraphQL rateLimit object read
+
 # --------------------------------------------------------------------------- #
 # Tunables (module constants so tests reference them, not magic numbers).
 # --------------------------------------------------------------------------- #
@@ -47,11 +49,13 @@ BACKOFF_CAP_S = 60               # hard cap on a single backoff SLEEP. Watchdog 
                                  # #1040/#1041 composition), so this sleep bounds only the
                                  # few-call consumers (goal-lane riders, hooks, ad-hoc). A
                                  # cold-cache shim call additionally pays up to
-                                 # _FETCH_TIMEOUT_S for the one-off refresh before the
-                                 # sleep (#1040 review-1 MINOR-5); in the watchdog the
-                                 # per-sweep gh_rate_fetch keeps the cache warm, so a
-                                 # rider's own call rarely refreshes.
-_FETCH_TIMEOUT_S = 15            # a single `gh api rate_limit` read
+                                 # 2 * _FETCH_TIMEOUT_S for the one-off refresh before
+                                 # the sleep (#1040 review-1 MINOR-5; #1052 added the
+                                 # GraphQL-object probe, a second read on the SAME
+                                 # refresh path); in the watchdog the per-sweep
+                                 # gh_rate_fetch keeps the cache warm, so a rider's own
+                                 # call rarely refreshes.
+_FETCH_TIMEOUT_S = 15            # a single `gh api rate_limit` / `graphql rateLimit` read
 _RESOURCES = ("core", "graphql")
 
 # Env markers.
@@ -232,6 +236,10 @@ def _fetch_rate_limit(run, real_gh, now):
                     "remaining": int(block["remaining"]),
                     "limit": int(block["limit"]),
                     "reset": int(block.get("reset") or 0),
+                    # #1052: tag the reading's SOURCE so a row can name it. The
+                    # REST bucket is "rest"; the graphql bucket may later be
+                    # overridden to "graphql-object" by _ghql.merge_graphql_object.
+                    "source": "rest",
                 }
             except (ValueError, TypeError):
                 continue
@@ -329,6 +337,14 @@ def read_status(now=None, run=None, real_gh="__auto__", force=False):
         cache.setdefault("resources", {})
         return cache
 
+    # #1052: the REST rate_limit `graphql` bucket lags/mis-reports during a
+    # GraphQL exhaustion, so ALSO read the authoritative GraphQL rateLimit
+    # object and take the LOWER of the two graphql readings. ONE extra call,
+    # only on this refresh path (never on a cache hit), fail-open on error.
+    _ghql.merge_graphql_object(resources, _ghql.fetch_graphql_object(
+        run, real_gh, timeout=_FETCH_TIMEOUT_S, internal_env=INTERNAL_ENV,
+        diag=_diag))
+
     status = {
         "fetched_at": now,
         "resources": resources,
@@ -394,9 +410,19 @@ def _update_alert_latch(status):
     next episode). A single transient low never alerts (debounce)."""
     alert = status.setdefault("alert", {})
     pending = []
+    gql_authoritative = _ghql.graphql_reading_authoritative(status)
     for name in _RESOURCES:
         pct = remaining_pct(name, status)
         if pct is None:
+            continue
+        # #1052 review MAJOR-1/MINOR-1: a graphql reading that fell back to REST
+        # (object probe unavailable) lies only HIGH during a real exhaustion
+        # (REST over-reports remaining), never low. So HOLD the latch on a
+        # non-authoritative NOT-low reading — an untrustworthy "recovery" that
+        # would otherwise CLEAR an already-fired alert — but let a genuinely LOW
+        # REST reading still advance/fire (a low REST reading is a trustworthy
+        # floor, so graphql alerting is not lost while the object stays down).
+        if name == "graphql" and not gql_authoritative and pct >= LOW_PCT:
             continue
         a = alert.setdefault(name, {"consecutive_low": 0, "alerted": False})
         if pct < LOW_PCT:
@@ -873,11 +899,14 @@ def cmd_gh_rate(args):
     for name in _RESOURCES:
         pct = remaining_pct(name, status)
         block = (status.get("resources") or {}).get(name, {})
-        print("%-8s remaining %s (%s/%s) reset %s backoff %ds" % (
+        # #1052: name the reading's SOURCE so an operator sees whether graphql
+        # came from the authoritative GraphQL object or the REST bucket.
+        src = block.get("source", "rest")
+        print("%-8s remaining %s (%s/%s) reset %s backoff %ds (%s)" % (
             name, _fmt_pct(pct),
             block.get("remaining", "?"), block.get("limit", "?"),
             _fmt_reset(block.get("reset")),
-            backoff_seconds(name, status)))
+            backoff_seconds(name, status), src))
     row = status_row(status)
     if row:
         print(row)

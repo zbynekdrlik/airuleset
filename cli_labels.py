@@ -21,17 +21,20 @@ import subprocess
 # name -> (color hex, description). Colours picked to sit alongside the repo's
 # existing hand-off palette without colliding: gk-processing = amber (in
 # progress), verify-on-copy = green (deployed, awaiting stream verification).
+# GitHub rejects a label description over 100 characters (HTTP 422
+# "description is too long") — the 2026-09-17 00:08 live run failed on both.
+GITHUB_LABEL_DESC_MAX = 100
+
 LABELS_1053 = {
     "gk-processing": (
         "fbca04",
-        "Gatekeeper is reviewing / merging / deploying this hand-off "
-        "(airuleset#1053) — counts in the sub-dev footer's gk",
+        "gk is reviewing/merging/deploying this hand-off "
+        "(airuleset 1053); counts in the sub-dev gk footer",
     ),
     "verify-on-copy": (
         "0e8a16",
-        "Deployed by the gatekeeper — sub-dev must verify on its own fresh "
-        "PROD copy (REFRESH-DEV-BOX-FROM-PROD) then post Verified-on-copy: "
-        "(airuleset#1053)",
+        "Deployed by gk; sub-dev verifies on a fresh PROD copy and posts "
+        "Verified-on-copy (airuleset 1053)",
     ),
 }
 
