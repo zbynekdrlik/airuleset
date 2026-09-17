@@ -1759,7 +1759,9 @@ SWEEP_SOFT_CAP_S = 100
 # resume — always) + the RECOVERY CLASS (the `calm_ok=True` registry jobs) and
 # SKIPS every other registry job, removing ~4 of 5 gh/git-heavy sweeps on an idle
 # box. A FULL sweep is forced by `sweep_urgent()` (an active recovery state entry,
-# a pending /compact, or transcript activity) OR when the last full sweep is
+# a SERVABLE pending /compact (#1055 fix-forward: a request the owner disable flag
+# or a >6h age has wedged is NOT servable and never forces full), or transcript
+# activity) OR when the last full sweep is
 # >= SWEEP_CALM_S old. So on a truly idle box the heavy jobs still run once every
 # SWEEP_CALM_S; every minute-scale recovery keeps its <=60s reaction (the pane
 # loop + the calm_ok recovery jobs run on EVERY sweep).
@@ -2248,8 +2250,11 @@ def sweep_urgent(state, pane_stamps, stored_stamps, *, compact_pending=False):
     short-circuits on the first hit; issues NO subprocess of its own.
 
     Forces a FULL sweep on the ACTIVE signals only:
-      * ``compact_pending`` — a pending /compact request exists (the caller reads
-        the requests file and passes a bool, so this function stays pure).
+      * ``compact_pending`` — a SERVABLE pending /compact request exists (#1055
+        fix-forward: the caller reads the requests file, filters it through
+        ``compact.actionable_compact_requests`` — dropping requests the owner
+        disable flag or a >6h/unmeasurable ``ts`` make dead — and passes a bool,
+        so this function stays pure and a wedged request never forces full).
       * ``state["parked_wake"]`` non-empty — a session is parked on the
         account-switch banner (a recovery situation).
       * a goal-lane STALL — any ``state["goal_lane"][sid]["soa"] > 0`` (the
@@ -3194,7 +3199,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     `AIRULESET_SWEEP_BUDGET_S`) is spent, rather than being SIGTERM-killed by
     systemd mid-loop. Every session not reached this tick keeps its existing
     episode state (added to `stalled`) exactly like a session skipped by a
-    busy-pane/copy-mode gate — never wiped by the cleanup pass below."""
+    busy-pane/copy-mode gate — never wiped by the cleanup pass below.
+
+    `sweep_cadence` (#1055 P3, cross-cutting — not a numbered job): each sweep is
+    FULL (every registry job runs) or CALM (only the pane loop + the `calm_ok`
+    recovery class run), decided in `state["sweep_cadence"]` by `sweep_urgent`
+    (an active stall/park/goal-lane state entry, transcript activity, or a
+    SERVABLE pending /compact) OR a `last_full` older than `SWEEP_CALM_S`. #1055
+    fix-forward: a pending /compact is an urgency ONLY when SERVABLE — a request
+    the owner disable flag or a >6h/unmeasurable `ts` has wedged is filtered out
+    (`compact.actionable_compact_requests`), journaled once per full-by-cadence
+    sweep as `sweep-cadence: compact-pending ignored (…)`, and never forces
+    full."""
     now = time.time() if now is None else now
     run = run or _default_run
     time_fn = time_fn or time.monotonic
@@ -5354,10 +5370,28 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     _stored_stamps = _cadence.get("pane_stamps") if isinstance(_cadence.get("pane_stamps"), dict) else {}
     _last_full = _cadence.get("last_full")
     _compact_pending = False
+    _compact_ignored = None   # #1055 fix-forward: reason a request exists but is not servable
     if compact_requests_path:
         try:
             from watchdog import compact as _compact_mod
-            _compact_pending = bool(_compact_mod.load_compact_requests(compact_requests_path))
+            # #1055 P3 fix-forward — a pending /compact forces a FULL sweep ONLY
+            # when it is SERVABLE. `actionable_compact_requests` drops requests the
+            # owner disable flag (compact_sweep returns early, never consuming/
+            # GC'ing them) or a >6h / unmeasurable `ts` make dead. Before this fix
+            # a dead request (gk's 2026-09-07 self-callback + the disable flag)
+            # read as "pending" forever and forced a full sweep every minute.
+            _compact_raw = _compact_mod.load_compact_requests(compact_requests_path)
+            _compact_actionable = _compact_mod.actionable_compact_requests(
+                _compact_raw, now=now, jobs_disabled=_compact_jobs_disabled)
+            _compact_pending = bool(_compact_actionable)
+            if _compact_raw and not _compact_actionable:
+                # A request exists but NONE is servable — remember WHY so ONE
+                # decision line can be journaled below on a full-by-cadence sweep
+                # (not every minute; #486 explicit decision log, no silent
+                # suppression). The reason predicate is a PURE helper next to the
+                # filter (unit-tested, keeps run_once small).
+                _compact_ignored = _compact_mod.compact_ignore_reason(
+                    _compact_raw, now=now, jobs_disabled=_compact_jobs_disabled)
         except Exception as _e:  # noqa: BLE001 — fail toward FULL, never break the sweep
             logs.append("sweep-cadence: compact-pending read error (=> full): %r" % _e)
             _compact_pending = True
@@ -5383,6 +5417,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
         else:
             logs.append("sweep: full (%s)"
                         % ("cadence" if _elapsed_since_full >= 0 else "clock-skew"))
+    # #1055 P3 fix-forward — a pending compact request that is NOT servable does
+    # not force a full sweep (computed above). When such a dead request exists,
+    # journal ONE explicit decision line naming WHY — but only on a full-by-cadence
+    # sweep (bootstrap or the SWEEP_CALM_S timer: not urgent, not calm), so it
+    # appears at most once per SWEEP_CALM_S rather than every minute, on the sweep
+    # it actually influences (#486 explicit decision log, no silent suppression).
+    if _compact_ignored and not _urgent and not _calm:
+        logs.append("sweep-cadence: compact-pending ignored (%s) — calm allowed"
+                    % _compact_ignored)
     # #1055 P3 (b) — deliver_discord_replies is `calm_ok=True` and runs on EVERY
     # calm sweep (it is the reply-routing recovery path — a ❓ answer, a
     # completion-card reply #298, or a remembered #449 channel must be picked up
