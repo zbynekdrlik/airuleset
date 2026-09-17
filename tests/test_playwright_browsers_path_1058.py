@@ -448,5 +448,320 @@ class TestConfigEnvResolver1058(unittest.TestCase):
         self.assertNotIn("PLAYWRIGHT_BROWSERS_PATH", out.get("env", {}))
 
 
+# --------------------------------------------------------------------------- #
+# #1058 rework-2 — the account-side reap (design items 2, 4b-e)
+# --------------------------------------------------------------------------- #
+class TestLiveEnvPointsAt1058(unittest.TestCase):
+    """#1058 rework-2 item 4(e): `_live_env_points_at` scans /proc/*/environ of
+    the current user's processes for `PLAYWRIGHT_BROWSERS_PATH=<path>`, skipping
+    unreadable/foreign pids (never fatal), matching the path EXACTLY (never a
+    prefix). This is the idle-MCP-server case the fd/cwd `_target_in_live_use`
+    scan misses (a server that will launch chromium later has the env but no open
+    fd inside the cache yet)."""
+
+    def _proc(self, table):
+        """A fake /proc tree. `table` maps pid(str) -> environ bytes|None
+        (None => an unreadable environ, e.g. a foreign-uid pid)."""
+        proc = Path(tempfile.mkdtemp()) / "proc"
+        proc.mkdir()
+        for pid, environ in table.items():
+            d = proc / pid
+            d.mkdir()
+            if environ is not None:
+                (d / "environ").write_bytes(environ)
+        # a non-digit entry must be ignored
+        (proc / "self").mkdir()
+        return proc
+
+    def _env(self, *pairs):
+        return b"\x00".join(k.encode() + b"=" + v.encode() for k, v in pairs) + b"\x00"
+
+    def test_matches_a_pid_pointing_at_the_exact_path(self):
+        per_user = "/home/u/.cache/ms-playwright"
+        proc = self._proc({
+            "100": self._env(("PLAYWRIGHT_BROWSERS_PATH", per_user), ("X", "y")),
+            "200": self._env(("HOME", "/home/u")),
+        })
+        self.assertEqual(p._live_env_points_at(per_user, proc_dir=proc), [100])
+
+    def test_exact_path_only_never_a_prefix(self):
+        per_user = "/home/u/.cache/ms-playwright"
+        proc = self._proc({
+            # a DIFFERENT path that merely has per_user as a prefix must NOT match
+            "300": self._env(("PLAYWRIGHT_BROWSERS_PATH", per_user + "-old")),
+        })
+        self.assertEqual(p._live_env_points_at(per_user, proc_dir=proc), [])
+
+    def test_skips_an_unreadable_pid_never_fatal(self):
+        per_user = "/home/u/.cache/ms-playwright"
+        proc = self._proc({
+            "400": None,  # unreadable environ (foreign uid) — skipped, not fatal
+            "500": self._env(("PLAYWRIGHT_BROWSERS_PATH", per_user)),
+        })
+        self.assertEqual(p._live_env_points_at(per_user, proc_dir=proc), [500])
+
+    def test_total_proc_failure_is_never_fatal(self):
+        # a missing /proc returns [] (the reap's live_check gate is the fail-safe)
+        missing = Path(tempfile.mkdtemp()) / "no-such-proc"
+        self.assertEqual(p._live_env_points_at("/home/u/.cache/ms-playwright",
+                                               proc_dir=missing), [])
+
+
+class TestReadBrowsersPathMarker1058(unittest.TestCase):
+    """#1058 rework-2: `_read_browsers_path_marker` returns the marker's Path, or
+    None on absent/empty/unreadable/corrupt — never fatal (review A 🟡-1 / B 🟡-5)."""
+
+    def _with_marker(self, contents):
+        """Run the reader with the marker constant pointed at a temp file whose
+        bytes are `contents` (None = no file at all)."""
+        marker = Path(tempfile.mkdtemp()) / ".claude" / "airuleset-playwright-browsers-path"
+        marker.parent.mkdir(parents=True)
+        if contents is not None:
+            marker.write_bytes(contents)
+        with mock.patch.object(p, "PLAYWRIGHT_BROWSERS_PATH_MARKER", marker):
+            return p._read_browsers_path_marker()
+
+    def test_reads_the_path(self):
+        self.assertEqual(self._with_marker(b"/opt/ms-playwright\n"),
+                         Path("/opt/ms-playwright"))
+
+    def test_absent_marker_is_none(self):
+        self.assertIsNone(self._with_marker(None))
+
+    def test_empty_marker_is_none(self):
+        self.assertIsNone(self._with_marker(b"   \n"))
+
+    def test_non_utf8_marker_is_none_never_fatal(self):
+        # a corrupt (non-UTF-8) marker must degrade to None, not raise
+        # UnicodeDecodeError out of the reader (review A 🟡-1).
+        self.assertIsNone(self._with_marker(b"\xff\xfe/opt"))
+
+
+class TestPerUserReapRework2_1058(unittest.TestCase):
+    """#1058 rework-2 item 2/4: the ACCOUNT reaps its own per-user chromium pair
+    ONLY when (i) the marker ALREADY pointed at /opt before this install, (S) /opt
+    genuinely holds the complete pinned build (survivor guard), (ii) no live
+    process of this user carries PLAYWRIGHT_BROWSERS_PATH=<per-user> in its
+    environ, and (iii) the fd/cwd liveness check is clear. Removes ONLY the
+    chromium pair (chromium-* / chromium_headless_shell-*), never ffmpeg, never
+    /opt, never a symlink.
+
+    setUp patches `_opt_has_pinned_build` -> True by default (the survivor guard
+    (S) must PASS for the other gates to be exercised hermetically — a test box
+    has no real /opt); the survivor-guard test overrides it to False."""
+
+    def setUp(self):
+        patcher = mock.patch.object(p, "_opt_has_pinned_build", return_value=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _per_user_cache(self, *dirs):
+        d = Path(tempfile.mkdtemp()) / ".cache" / "ms-playwright"
+        d.mkdir(parents=True)
+        for name in dirs:
+            (d / name).mkdir()
+        return d
+
+    def _names(self, d):
+        return sorted(x.name for x in d.iterdir())
+
+    def test_reaps_the_chromium_pair_when_all_gates_clear(self):
+        # marker already /opt + no live env + not in use -> reap ONLY the chromium
+        # pair, leave ffmpeg + unrelated families alone.
+        cache = self._per_user_cache(
+            "chromium-1244", "chromium_headless_shell-1244",
+            "ffmpeg-1011", "firefox-1400")
+        reaped = p._reap_per_user_copy_if_safe(
+            cache, previous_marker=p.OPT_MS_PLAYWRIGHT,
+            live_env=lambda path: [], live_check=lambda d: False)
+        self.assertTrue(reaped)
+        names = self._names(cache)
+        self.assertNotIn("chromium-1244", names)
+        self.assertNotIn("chromium_headless_shell-1244", names)
+        self.assertIn("ffmpeg-1011", names, "ffmpeg is never reaped here (B 🟡-2)")
+        self.assertIn("firefox-1400", names, "unrelated families are left alone")
+
+    def test_refuses_when_a_live_server_env_points_at_the_per_user_cache(self):
+        # (ii): an IDLE MCP server whose environ still points at the per-user path
+        # (the david3/david4 case fuser/fd scans miss) blocks the reap.
+        cache = self._per_user_cache("chromium-1244", "chromium_headless_shell-1244")
+        reaped = p._reap_per_user_copy_if_safe(
+            cache, previous_marker=p.OPT_MS_PLAYWRIGHT,
+            live_env=lambda path: [2188677], live_check=lambda d: False)
+        self.assertFalse(reaped)
+        self.assertIn("chromium-1244", self._names(cache),
+                      "a live env pid must block the reap")
+
+    def test_refuses_on_the_first_marker_flip(self):
+        # (i): the marker was still per-user before this install (the first push
+        # that flips it to /opt) -> keep, so every env surface has been /opt for at
+        # least one full cycle before we delete the copy they might still use.
+        cache = self._per_user_cache("chromium-1244", "chromium_headless_shell-1244")
+        prev = cache  # previous marker == the per-user cache, NOT /opt
+        reaped = p._reap_per_user_copy_if_safe(
+            cache, previous_marker=prev,
+            live_env=lambda path: [], live_check=lambda d: False)
+        self.assertFalse(reaped)
+        self.assertIn("chromium-1244", self._names(cache),
+                      "the reap must wait one cycle after the marker flips to /opt")
+
+    def test_refuses_when_the_fd_cwd_liveness_check_is_dirty(self):
+        # (iii): a process with an open fd / cwd inside the cache blocks the reap.
+        cache = self._per_user_cache("chromium-1244", "chromium_headless_shell-1244")
+        reaped = p._reap_per_user_copy_if_safe(
+            cache, previous_marker=p.OPT_MS_PLAYWRIGHT,
+            live_env=lambda path: [], live_check=lambda d: True)
+        self.assertFalse(reaped)
+        self.assertIn("chromium-1244", self._names(cache))
+
+    def test_never_touches_the_root_owned_opt(self):
+        # Toothed for the `_is_per_user_cache` guard SPECIFICALLY (review B 🟡-3):
+        # a /opt-shaped dir that EXISTS with a chromium pair, so `_is_per_user_
+        # cache` is the ONLY thing preventing a reap (with the survivor guard
+        # forced True via setUp, a mutation deleting `_is_per_user_cache` would
+        # fall through and delete the pair -> RED). An env-independent proof, never
+        # the real /opt.
+        opt = Path(tempfile.mkdtemp()) / "opt" / "ms-playwright"
+        opt.mkdir(parents=True)
+        (opt / "chromium-1244").mkdir()
+        (opt / "chromium_headless_shell-1244").mkdir()
+        reaped = p._reap_per_user_copy_if_safe(
+            opt, previous_marker=p.OPT_MS_PLAYWRIGHT,
+            live_env=lambda path: [], live_check=lambda d: False)
+        self.assertFalse(reaped, "/opt-shaped path is root's — never reaped")
+        self.assertIn("chromium-1244", self._names(opt),
+                      "the _is_per_user_cache guard must block the reap")
+
+    def test_refuses_when_opt_lacks_the_complete_pinned_build(self):
+        # Survivor guard (S), parity with _cleanup_old_builds (review A 🟡-3): even
+        # with marker=/opt + no live env + not in use, if /opt does NOT hold the
+        # complete pinned build the reap KEEPS the per-user pair (the only chromium
+        # then) — a caller reaching here without a complete /opt can never leave
+        # the box browserless.
+        cache = self._per_user_cache("chromium-1244", "chromium_headless_shell-1244")
+        with mock.patch.object(p, "_opt_has_pinned_build", return_value=False):
+            reaped = p._reap_per_user_copy_if_safe(
+                cache, previous_marker=p.OPT_MS_PLAYWRIGHT,
+                live_env=lambda path: [], live_check=lambda d: False)
+        self.assertFalse(reaped)
+        self.assertIn("chromium-1244", self._names(cache),
+                      "an incomplete /opt must block the reap (survivor guard)")
+
+    def test_never_removes_a_symlink(self):
+        cache = self._per_user_cache("chromium_headless_shell-1244")
+        # a chromium-<pinned> that is actually a SYMLINK must be left untouched
+        target = Path(tempfile.mkdtemp())
+        (cache / "chromium-1244").symlink_to(target)
+        # Toothed (review B 🟡-4): spy on shutil.rmtree and assert it is NEVER
+        # CALLED with the symlink path — proving the symlink is EXCLUDED from the
+        # reap set, not merely that rmtree happened to refuse it.
+        real_rmtree = p.shutil.rmtree
+        calls = []
+
+        def spy(path, *a, **k):
+            calls.append(Path(path))
+            return real_rmtree(path, *a, **k)
+
+        with mock.patch.object(p.shutil, "rmtree", side_effect=spy):
+            reaped = p._reap_per_user_copy_if_safe(
+                cache, previous_marker=p.OPT_MS_PLAYWRIGHT,
+                live_env=lambda path: [], live_check=lambda d: False)
+        # the real headless-shell dir is reaped; the symlink stays + its target
+        # is never followed/removed, and rmtree was never even ATTEMPTED on it
+        self.assertTrue(reaped, "the real (non-symlink) dir is still reaped")
+        self.assertNotIn(cache / "chromium-1244", calls,
+                         "rmtree must never be attempted on the symlink")
+        self.assertIn(cache / "chromium_headless_shell-1244", calls,
+                      "the real dir is reaped")
+        self.assertTrue((cache / "chromium-1244").is_symlink(),
+                        "a symlink is never removed")
+        self.assertTrue(target.is_dir(), "a symlink target is never followed")
+
+    def test_idempotent_no_pair_present(self):
+        cache = self._per_user_cache("ffmpeg-1011")
+        reaped = p._reap_per_user_copy_if_safe(
+            cache, previous_marker=p.OPT_MS_PLAYWRIGHT,
+            live_env=lambda path: [], live_check=lambda d: False)
+        self.assertFalse(reaped, "nothing to reap -> False, no crash")
+
+    def test_keeps_on_previous_marker_none(self):
+        # gate (i): an absent/unreadable marker reads as None -> None != /opt ->
+        # KEEP (the conservative direction — a marker problem never reaps).
+        cache = self._per_user_cache("chromium-1244", "chromium_headless_shell-1244")
+        reaped = p._reap_per_user_copy_if_safe(
+            cache, previous_marker=None,
+            live_env=lambda path: [], live_check=lambda d: False)
+        self.assertFalse(reaped)
+        self.assertIn("chromium-1244", self._names(cache))
+
+    def test_rmtree_failure_is_non_fatal(self):
+        # best-effort: a rmtree OSError on one dir is logged, never raised; the
+        # other dir is still reaped.
+        cache = self._per_user_cache("chromium-1244", "chromium_headless_shell-1244")
+        real_rmtree = p.shutil.rmtree
+
+        def flaky(path, *a, **k):
+            if Path(path).name == "chromium-1244":
+                raise OSError("boom")
+            return real_rmtree(path, *a, **k)
+
+        with mock.patch.object(p.shutil, "rmtree", side_effect=flaky):
+            reaped = p._reap_per_user_copy_if_safe(
+                cache, previous_marker=p.OPT_MS_PLAYWRIGHT,
+                live_env=lambda path: [], live_check=lambda d: False)
+        names = self._names(cache)
+        self.assertTrue(reaped, "the dir that could be removed was reaped")
+        self.assertIn("chromium-1244", names, "the failed dir remains, no crash")
+        self.assertNotIn("chromium_headless_shell-1244", names)
+
+    def test_provision_reaps_after_reconcile_when_resolved_is_opt(self):
+        # End-to-end wiring: provision reads the PREVIOUS marker (/opt), resolves
+        # to /opt, and reaps the per-user copy after writing the new marker/env.
+        home = Path(tempfile.mkdtemp())
+        cache = home / ".cache" / "ms-playwright"
+        cache.mkdir(parents=True)
+        (cache / "chromium-1244").mkdir()
+        (cache / "chromium_headless_shell-1244").mkdir()
+        marker = home / ".claude" / "airuleset-playwright-browsers-path"
+        marker.parent.mkdir(parents=True)
+        marker.write_text(str(p.OPT_MS_PLAYWRIGHT) + "\n")  # previous marker = /opt
+        with mock.patch.object(p, "PLAYWRIGHT_BROWSER_CACHE", cache), \
+             mock.patch.object(p, "PLAYWRIGHT_BROWSERS_PATH_MARKER", marker), \
+             mock.patch.object(p, "ensure_playwright_browsers"), \
+             mock.patch.object(p, "resolved_browsers_path", return_value=p.OPT_MS_PLAYWRIGHT), \
+             mock.patch("cli_playwright_mcp._target_in_live_use", return_value=False), \
+             mock.patch.object(p, "_live_env_points_at", return_value=[]), \
+             mock.patch.object(p, "reconcile_playwright_mcp_file", return_value=True) as rec:
+            ok = p.provision_playwright_mcp(box_class="shared-stream")
+        self.assertTrue(ok)
+        rec.assert_called_once()
+        names = sorted(x.name for x in cache.iterdir())
+        self.assertNotIn("chromium-1244", names,
+                         "provision must reap the per-user copy once /opt is in use")
+        self.assertNotIn("chromium_headless_shell-1244", names)
+
+    def test_provision_does_not_reap_when_resolved_is_per_user(self):
+        # /opt is NOT the resolved path (e.g. /opt still incomplete) -> no reap,
+        # the account keeps its own copy (the resolver chose it).
+        home = Path(tempfile.mkdtemp())
+        cache = home / ".cache" / "ms-playwright"
+        cache.mkdir(parents=True)
+        (cache / "chromium-1244").mkdir()
+        (cache / "chromium_headless_shell-1244").mkdir()
+        marker = home / ".claude" / "airuleset-playwright-browsers-path"
+        marker.parent.mkdir(parents=True)
+        marker.write_text(str(cache) + "\n")
+        with mock.patch.object(p, "PLAYWRIGHT_BROWSER_CACHE", cache), \
+             mock.patch.object(p, "PLAYWRIGHT_BROWSERS_PATH_MARKER", marker), \
+             mock.patch.object(p, "ensure_playwright_browsers"), \
+             mock.patch.object(p, "resolved_browsers_path", return_value=cache), \
+             mock.patch.object(p, "reconcile_playwright_mcp_file", return_value=True):
+            ok = p.provision_playwright_mcp(box_class="shared-stream")
+        self.assertTrue(ok)
+        names = sorted(x.name for x in cache.iterdir())
+        self.assertIn("chromium-1244", names,
+                      "no reap when the resolver still chose the per-user cache")
+
+
 if __name__ == "__main__":
     unittest.main()
