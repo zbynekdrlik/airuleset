@@ -282,6 +282,27 @@ _BUILD_DIR_RE = re.compile(r"^(.+)-(\d+)$")
 _PINNED_EXACT_FAMILIES = ("chromium", "chromium_headless_shell")
 
 
+def _iter_chromium_pair_builds(listing):
+    """#1058 rework-2 review (A 🟡-3 / B): the ONE place the chromium-pair build
+    filter lives — yields `(entry, revision)` for every NON-symlink build dir in
+    `listing` whose family is a pinned chromium family (`chromium` /
+    `chromium_headless_shell`). Shared by `_cleanup_old_builds` (keeps the pinned
+    rev, removes the rest) and `_reap_per_user_copy_if_safe` (removes the whole
+    pair once /opt is in use), so the symlink guard + `_BUILD_DIR_RE` parse +
+    family filter are never duplicated (#993 no-patchwork). `listing` is the
+    caller's already-sorted `base.iterdir()` — the caller owns the scan + its
+    error handling, so a scan failure stays the caller's concern (both guard it)."""
+    for entry in listing:
+        # `is_symlink` FIRST: a symlink is never followed nor removed (matches the
+        # disk-guard #892 stance); `is_dir()` follows links, so order matters.
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        m = _BUILD_DIR_RE.match(entry.name)
+        if m is None or m.group(1) not in _PINNED_EXACT_FAMILIES:
+            continue
+        yield entry, m.group(2)
+
+
 def _cleanup_old_builds(browsers_path, *, live_check=None):
     """#1058 (item 2): reap SUPERSEDED chromium build dirs from the PER-USER
     cache so it stops accreting ~650 MB on every pin bump (the shared-box disk
@@ -333,17 +354,9 @@ def _cleanup_old_builds(browsers_path, *, live_check=None):
         print("    ⚠ Playwright cleanup: could not scan %s (%s)" % (base, e),
               file=sys.stderr)
         return
-    for entry in listing:
-        # `is_symlink` FIRST: a symlink is never followed nor removed (matches the
-        # disk-guard #892 stance); `is_dir()` follows links, so order matters.
-        if entry.is_symlink() or not entry.is_dir():
-            continue
-        m = _BUILD_DIR_RE.match(entry.name)
-        if m is None:
-            continue
-        family, rev = m.group(1), m.group(2)
-        # Only the chromium pair, and only a NON-pinned build of it, is superseded.
-        if family not in _PINNED_EXACT_FAMILIES or rev == pinned:
+    for entry, rev in _iter_chromium_pair_builds(listing):
+        # Only a NON-pinned build of the pair is superseded — keep the pinned one.
+        if rev == pinned:
             continue
         if live_check(entry):
             print("    Playwright cleanup: kept %s — a live process is using it"
@@ -357,17 +370,20 @@ def _cleanup_old_builds(browsers_path, *, live_check=None):
                   % (entry.name, e), file=sys.stderr)
 
 
-def _read_browsers_path_marker() -> Path:
+def _read_browsers_path_marker() -> "Path | None":
     """#1058 rework-2: the PREVIOUS resolved browsers path recorded in the marker
     (`PLAYWRIGHT_BROWSERS_PATH_MARKER`) BEFORE this install overwrites it, or None
     when the marker is absent/unreadable/empty. `provision_playwright_mcp` reads
     it before `reconcile_playwright_mcp_file` rewrites the marker, so the reap can
     tell a FIRST flip to /opt (previous marker != /opt → keep one more cycle) from
     a settled /opt (previous marker == /opt → the per-user copy is now redundant).
-    Never fatal — a read failure returns None (the reap then keeps, the safe way)."""
+    Never fatal — a read failure returns None (the reap then keeps, the safe way).
+    Catches `ValueError` too (a non-UTF-8 marker raises `UnicodeDecodeError`), so
+    the "never fatal → None" contract holds for a corrupt marker, not just an
+    absent one (#1058 rework-2 review A 🟡-1)."""
     try:
         txt = PLAYWRIGHT_BROWSERS_PATH_MARKER.read_text(encoding="utf-8").strip()
-    except OSError:
+    except (OSError, ValueError):
         return None
     return Path(txt) if txt else None
 
@@ -421,14 +437,26 @@ def _reap_per_user_copy_if_safe(per_user, *, previous_marker,
     from the PER-USER cache, so a subdev account collapses back onto the #950
     one-shared-copy instead of keeping its own ~650 MB duplicate.
 
-    Reaps ONLY when ALL three gates are clear — otherwise it KEEPS and journals
-    the reason (one line per decision):
+    Reaps ONLY when ALL gates are clear — otherwise it KEEPS and journals the
+    reason (one line per decision):
       (i)   `previous_marker == OPT_MS_PLAYWRIGHT` — the marker ALREADY pointed at
-            /opt BEFORE this install, so every env surface (marker, MCP env,
-            settings env, bashrc) has resolved to /opt for at least one full
-            install cycle. On the FIRST flip (previous marker was per-user) we
-            keep, so nothing that might still hold the per-user path is deleted
-            out from under it;
+            /opt BEFORE this install. The marker + the ~/.claude.json MCP env are
+            written together by `reconcile_playwright_mcp_file`, so this proves at
+            least THOSE surfaces resolved to /opt for a full cycle; the settings/
+            bashrc appliers are separate, but the reap is still safe because /opt
+            is monotonically complete from the flip onward and EVERY surface is
+            rewritten to /opt on THIS reaping push (the caller only reaps when
+            `resolved_browsers_path == /opt`). On the FIRST flip (previous marker
+            was per-user) we keep, so nothing that might still hold the per-user
+            path is deleted out from under it;
+      (S)   survivor guard `_opt_has_pinned_build()` — /opt genuinely holds the
+            COMPLETE pinned build right now. Defense-in-depth PARITY with
+            `_cleanup_old_builds`'s survivor guard (review A 🟡-3): the reap
+            deletes the per-user pinned pair — the ONLY chromium if /opt is
+            incomplete — so a caller that ever reaches here without a complete
+            /opt can never leave the box browserless. The sole call site already
+            guards on `resolved == /opt` (⇔ this predicate); this is the belt to
+            that braces;
       (ii)  `live_env(per_user)` is EMPTY — no live process of this user carries
             PLAYWRIGHT_BROWSERS_PATH=<per-user> in its environ (the idle-MCP-
             server case the fd/cwd scan misses);
@@ -436,8 +464,16 @@ def _reap_per_user_copy_if_safe(per_user, *, previous_marker,
             `_target_in_live_use` /proc fd/cwd scan (fail-safe True on any /proc
             read failure), checked per build dir exactly as `_cleanup_old_builds`.
     NEVER the root-owned /opt (guarded by `_is_per_user_cache`), NEVER a symlink
-    (left untouched, never followed). Best-effort: a scan/rmtree failure is logged
-    and skipped, never fatal. Returns True iff it reaped at least one dir."""
+    (left untouched, never followed — `_iter_chromium_pair_builds`). Best-effort:
+    a scan/rmtree failure is logged and skipped, never fatal. Returns True iff it
+    reaped at least one dir.
+
+    Residual (accepted, #950 one-shared-copy): after the reap the per-user cache
+    holds no chromium, so an UNMANAGED playwright run with PLAYWRIGHT_BROWSERS_PATH
+    unset would default to it and find nothing — but every airuleset-managed
+    surface (MCP env, marker, bashrc export, settings.json env, push post-check)
+    sets the var explicitly to /opt, so only a third-party consumer (none known on
+    subdev) is affected."""
     if live_env is None:
         live_env = _live_env_points_at
     if live_check is None:
@@ -451,6 +487,12 @@ def _reap_per_user_copy_if_safe(per_user, *, previous_marker,
     # Never /opt (root's), and only a real per-user cache dir.
     if not _is_per_user_cache(base) or not base.is_dir():
         return False
+    # (S) survivor guard: /opt must actually hold the complete pinned build before
+    # we delete the per-user pair (defense-in-depth, parity with cleanup).
+    if not _opt_has_pinned_build():
+        print("    Playwright cleanup: kept per-user copy — /opt lacks the complete "
+              "pinned build (survivor guard)")
+        return False
     try:
         listing = sorted(base.iterdir())
     except OSError as e:
@@ -458,14 +500,7 @@ def _reap_per_user_copy_if_safe(per_user, *, previous_marker,
               file=sys.stderr)
         return False
     # The chromium-pair dirs (never ffmpeg, never other families, never symlinks).
-    pair = []
-    for entry in listing:
-        if entry.is_symlink() or not entry.is_dir():
-            continue
-        m = _BUILD_DIR_RE.match(entry.name)
-        if m is None or m.group(1) not in _PINNED_EXACT_FAMILIES:
-            continue
-        pair.append(entry)
+    pair = [entry for entry, _rev in _iter_chromium_pair_builds(listing)]
     if not pair:
         return False  # nothing to reap — idempotent
     # (ii) no live server env still points at the per-user cache.
