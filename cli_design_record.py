@@ -214,6 +214,17 @@ def cmd_design_record(args):
             print("  - %s" % r)
         print("Fix the design body and re-run; nothing was posted.")
         return 1
+    # #1061 fix-forward: refuse the unknown-model stamp on BOTH the real post
+    # AND the --dry-run preview (post_and_record also guards the real path),
+    # so a dry-run never previews a `Design-by: <role> unknown` the dispatch
+    # gate would reject.
+    if cli_authorship.session_model(cwd) == cli_authorship.UNKNOWN_MODEL:
+        print("design-record BLOCK: the session model read as 'unknown' "
+              "(a busy parallel-tool turn or an api-error tail) -- refusing to "
+              "stamp 'Design-by: <role> unknown', which the dispatch gate would "
+              "reject. Retry once the session has emitted a real assistant "
+              "turn; nothing was posted.")
+        return 1
     if dry_run:
         body = compose_body(raw, cwd)
         stamp = cli_authorship.stamp_line(DESIGN_STEM, cwd)

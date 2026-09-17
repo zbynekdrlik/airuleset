@@ -71,7 +71,9 @@ _TAIL_WINDOW_START = 262144            # first window: 256 KB
 _TAIL_WINDOW_CAP = 16 * 1024 * 1024    # ceiling: 16 MB, then return what exists
 
 # Per-sweep memo: (str(path), st_size, st_mtime_ns, max_lines) -> parsed entries
-# (each value <= max_lines <= 500 dicts). Populated on a real `_iter_jsonl_tail`
+# (each value <= max_lines dicts; the watchdog sweep readers use <= 500, the
+# #1061 authorship reader `transcript_newest_assistant_model` uses 1000, all
+# bounded by the 16 MB window cap). Populated on a real `_iter_jsonl_tail`
 # read, CLEARED at the top of `run_once` via `reset_transcript_cache()`. A
 # changed file yields a NEW key (size or mtime differs), so a stale key is never
 # served; the memo is bounded by the sweep's distinct-key set and dropped each
