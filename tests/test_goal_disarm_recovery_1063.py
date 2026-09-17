@@ -43,6 +43,22 @@ from _goal_arm_helpers import (  # noqa: E402
 from test_goal_question_repoke import _repoke_entries, _write_entries  # noqa: E402
 
 
+def _redirect_home(testcase):
+    """Redirect `~` to a fresh empty temp HOME for the duration of the test, so
+    every `~/.claude` read/write in the code under test (the #1023 nudges-kinds
+    state, `_owner_disabled`'s watchdog-disable-goal flag, any log) is hermetic
+    and never touches — or reads — the real box (#1028 lane guidance: an earlier
+    lane wrote into the real design-by-gate.log). Returns the temp home path."""
+    d = TemporaryDirectory()
+    testcase.addCleanup(d.cleanup)
+    home = d.name
+    exp = m.patch("os.path.expanduser",
+                  side_effect=lambda p: p.replace("~", home, 1))
+    exp.start()
+    testcase.addCleanup(exp.stop)
+    return home
+
+
 # --------------------------------------------------------------------------- #
 # Item 1/2 — the disarm is a RECOVERY nudge and delivers with every machine
 # kind OFF (the REAL per-kind predicate live, total cap closed).
@@ -59,13 +75,7 @@ class TestDisarmDeliversWithMachineKindsOff(unittest.TestCase):
         all-OFF default. Redirect `~` there and POP the conftest bypass so the
         REAL per-kind predicate runs (mirrors test_nudges_per_kind_switch_1023's
         expanduser+_no_bypass pattern; hermetic per the #1028 lane guidance)."""
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        home = d.name
-        exp = m.patch("os.path.expanduser",
-                      side_effect=lambda p: p.replace("~", home, 1))
-        exp.start()
-        self.addCleanup(exp.stop)
+        home = _redirect_home(self)
         envp = m.patch.dict(os.environ)
         envp.start()
         self.addCleanup(envp.stop)
@@ -128,11 +138,16 @@ class TestDisarmDeliversWithMachineKindsOff(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# Item 3 — static guard: every RECOVERY-path delivery threads a `nudge=` that
-# resolves to a RECOVERY_NUDGE_KINDS member, so a future recovery action cannot
-# be silently staged off again (the exact bug: relying on the machine default).
+# Item 3 — static guard: each PINNED recovery-path delivery threads a `nudge=`
+# that resolves to a RECOVERY_NUDGE_KINDS member, so a future recovery action
+# cannot be silently staged off again (the exact bug: relying on the machine
+# default). KNOWN LIMITATION (both #1063 reviewers): this is a CURATED allowlist,
+# not an exhaustive scan — the AST cannot infer "this function is a recovery
+# delivery", so a NEW recovery helper that relies on a machine default is caught
+# ONLY once it is added below. Pin every new recovery-delivery helper here at
+# creation. Renaming/removing a pinned function is still caught (assertIsNotNone).
 # --------------------------------------------------------------------------- #
-# The pinned recovery-delivery call-site list (design item 3): file -> the
+# The PINNED recovery-delivery call-site list (design item 3): file -> the
 # functions whose keystroke/send delivery is a session revival, never a prompt.
 RECOVERY_DELIVERY_SITES = {
     "watchdog/goal.py": ["_deliver_goal_clear"],
@@ -250,6 +265,10 @@ class TestDisarmJournalHonesty(unittest.TestCase):
 
     def setUp(self):
         _isolate_goal_state(self)
+        # Hermetic HOME so `_owner_disabled`'s ~/.claude/watchdog-disable-goal
+        # read can never disable the job from the real box's state, and nothing
+        # in the sweep touches the real ~/.claude (#1028 lane guidance).
+        _redirect_home(self)
 
     def _armed_tmux(self, tpath):
         return DeliverGoalFakeTmux(
