@@ -512,5 +512,40 @@ class TestSharedPlaywrightPin1058(unittest.TestCase):
                          "no bare (unpinned) `playwright install` — it resolves to @latest")
 
 
+class TestRootApplyNoSweep_1058(unittest.TestCase):
+    """#1058 rework-2 (item 1): the root #950-B apply block must INSTALL into /opt
+    ONLY — it must NEVER sweep any account's per-user ~/.cache/ms-playwright. The
+    v0.1.332 incident: the class-agnostic resolver made the sweep's precondition
+    (a complete pinned /opt) true for the first time, the root block then deleted
+    exactly the per-user build every account's marker/MCP-env/settings-env pointed
+    at, and every subdev account lost its chromium for ~5 minutes with the push
+    still reporting 0 failed. Root installs; the ACCOUNT reaps its own copy when
+    provably safe (design item 2). So the rendered root block carries NO removal
+    of user state at all."""
+
+    def test_root_block_never_sweeps_a_per_user_cache(self):
+        block = g._render_playwright_shared_block()
+        self.assertNotIn("rm -rf", block,
+                         "the root block must never delete anything (root never "
+                         "mutates user state — #1058 rework-2 item 1)")
+        self.assertNotIn("/home/*", block,
+                         "the root block must never iterate account homes")
+        self.assertNotIn("fuser", block,
+                         "the fuser open-fd sweep guard goes with the sweep — the "
+                         "account-side reap owns liveness now")
+        self.assertNotIn(".cache/ms-playwright", block,
+                         "the root block must never touch a per-user cache path")
+
+    def test_root_block_still_installs_the_pinned_shared_copy(self):
+        # The install side is UNCHANGED: mkdir + chmod + pinned install + a+rX.
+        import cli_playwright_mcp
+        block = g._render_playwright_shared_block()
+        self.assertIn(
+            "playwright@" + cli_playwright_mcp.PLAYWRIGHT_PW_VERSION + " install chromium",
+            block, "the pinned /opt install must remain")
+        self.assertIn("chmod -R a+rX", block,
+                      "the world-readable chmod must remain so accounts can READ /opt")
+
+
 if __name__ == "__main__":
     unittest.main()
