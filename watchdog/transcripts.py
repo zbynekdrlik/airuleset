@@ -71,7 +71,9 @@ _TAIL_WINDOW_START = 262144            # first window: 256 KB
 _TAIL_WINDOW_CAP = 16 * 1024 * 1024    # ceiling: 16 MB, then return what exists
 
 # Per-sweep memo: (str(path), st_size, st_mtime_ns, max_lines) -> parsed entries
-# (each value <= max_lines <= 500 dicts). Populated on a real `_iter_jsonl_tail`
+# (each value <= max_lines dicts; the watchdog sweep readers use <= 500, the
+# #1061 authorship reader `transcript_newest_assistant_model` uses 1000, all
+# bounded by the 16 MB window cap). Populated on a real `_iter_jsonl_tail`
 # read, CLEARED at the top of `run_once` via `reset_transcript_cache()`. A
 # changed file yields a NEW key (size or mtime differs), so a stale key is never
 # served; the memo is bounded by the sweep's distinct-key set and dropped each
@@ -621,6 +623,50 @@ def transcript_last_assistant_model(path):
         model = msg.get("model")
         if isinstance(model, str) and model.strip():
             return model.strip()
+    return ""
+
+
+# #1061 -- the placeholder model id CC writes for a synthetic / bookkeeping
+# assistant record (observed live -- see the float-audit note above). It is NOT
+# a real served model, so the authorship reader skips it exactly as it skips an
+# api-error entry, never stamping `Design-by: main <synthetic>`.
+_SYNTHETIC_MODEL = "<synthetic>"
+
+
+def transcript_newest_assistant_model(path, max_lines=1000):
+    """The `message.model` id of the session's NEWEST assistant message that
+    carries a real served model -- REGARDLESS of its text content (a tool-only /
+    empty-text turn still counts) -- or `''` when the window holds no such entry.
+
+    The AUTHORSHIP reader (#1061 fix-forward), DISTINCT from
+    `transcript_last_assistant_model` (the model-float audit's "last REAL served
+    model", which SKIPS an empty/tool-only turn and ABORTS on an api-error).
+    That distinction is the live defect this reader fixes: a busy main session's
+    default 60-entry tail can be entirely tool-result / progress entries, so
+    `transcript_last_assistant_model` returns `''`, `cli_authorship.session_model`
+    then reads `unknown`, `airuleset.py design-record` stamps
+    `Design-by: main unknown`, and the dispatch gate refuses a legitimately
+    main-authored design. This reader (1) scans a WIDER window (`max_lines`
+    default 1000, still bounded by the P1 `_iter_jsonl_tail` byte-tail reader),
+    (2) SKIPS an `isApiErrorMessage` entry instead of aborting on it (an error
+    turn is not the running model -- keep walking back), (3) SKIPS the synthetic
+    placeholder model, and (4) takes the newest remaining assistant
+    `message.model` WHATEVER its text. Returns `''` only when no assistant entry
+    with a usable model exists in the window (empty / absent / unreadable
+    transcript). The returned tail list is shared via the memo -- READ-ONLY."""
+    for entry in reversed(_iter_jsonl_tail(path, max_lines=max_lines)):
+        if not isinstance(entry, dict) or entry.get("type") != "assistant":
+            continue
+        if entry.get("isApiErrorMessage") is True:
+            continue
+        msg = entry.get("message")
+        if not isinstance(msg, dict):
+            continue
+        model = msg.get("model")
+        if isinstance(model, str):
+            model = model.strip()
+            if model and model != _SYNTHETIC_MODEL:
+                return model
     return ""
 
 
