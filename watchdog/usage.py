@@ -56,6 +56,17 @@ def _read_oauth_token():
         return None
 
 
+def _model_backend_active():
+    """#1062 L2: True when THIS box carries the model-backend marker (it talks to
+    the gateway, not Anthropic OAuth). Never raises — a read failure means no
+    marker, so the OAuth usage poll runs as before."""
+    try:
+        from cli_model_backend import load_marker
+        return load_marker() is not None
+    except Exception:
+        return False
+
+
 # --------------------------------------------------------------------------- #
 # Box/account IDENTITY for the usage alert body (#212) — resolved at CALL
 # TIME from module-global paths (the `_USAGE_CACHE_PATH` convention: a
@@ -270,6 +281,14 @@ def check_usage(now, state, send_fn, fetch=None, owner=None, dry_run=False,
         return ""
     u["last_check"] = int(now)
     state["usage"] = u
+    # #1062 L2: a box flipped onto the model gateway authenticates with a token
+    # (apiKeyHelper), not the Max OAuth login — so the oauth/usage endpoint read
+    # would fail / be meaningless. SKIP it and record `backend=gateway` instead
+    # of logging an error every interval (the gateway's own spend log is the
+    # cost/usage source for a pilot box — cli_model_gateway spend). Off a marker
+    # box this is a no-op and the OAuth poll runs exactly as before.
+    if _model_backend_active():
+        return "backend=gateway"
     data = fetch()
     if not data:
         return ""                          # 429 / error → try again next interval

@@ -1752,6 +1752,17 @@ def cmd_install(args):
     except Exception as e:
         print(f"  model-gateway install error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 3b-quinque-quater-pre1b. Per-box model backend (#1062 L2): when THIS
+    # box carries the model-backend marker, materialize the managed apiKeyHelper
+    # script (0755) that prints the gateway key file; when it does not, remove a
+    # stale one (self-heal of a cleared box). A LOUD one-liner either way;
+    # non-fatal. The settings.json env + model + apiKeyHelper reference are
+    # written by apply_managed_settings_defaults (marker-conditional). ---
+    try:
+        print(maybe_setup_model_backend())
+    except Exception as e:
+        print(f"  model-backend install error (non-fatal): {e}", file=sys.stderr)
+
     # --- 3b-quinque-quater. Managed swap (#992/#993): every managed box with
     # NO swap gets a /swapfile sized = RAM (clamped [2,8] GB). Idempotent,
     # sudo-`-n`-gated, LOCAL, non-fatal — the #992 controller-OOM fix as a
@@ -9182,6 +9193,10 @@ from cli_model_gateway import (  # noqa: E402, F401
     cmd_model_gateway as cmd_model_gateway,
     maybe_setup_model_gateway as maybe_setup_model_gateway,
 )
+from cli_model_backend import (  # noqa: E402, F401  #1062 L2
+    cmd_model_backend as cmd_model_backend,
+    maybe_setup_model_backend as maybe_setup_model_backend,
+)
 
 # --- #857: context-baseline + skill-usage CLI leaves ---
 from cli_context_baseline import (  # noqa: E402, F401
@@ -10316,6 +10331,38 @@ def main():
     p_mg.add_argument("--since", default=None,
                       help="`spend`: ISO8601 lower bound (e.g. 2026-09-01)")
 
+    # --- #1062 L2: per-box model-backend switch (controller-side registry) ---
+    p_mb = sub.add_parser(
+        "model-backend",
+        help="#1062 L2: flip a box's Claude Code onto the controller model "
+             "gateway — status | set <user@host> [--main A --sub B --fast C "
+             "--base-url URL --key-file PATH] | clear <user@host>. `set`/`clear` "
+             "maintain the controller registry; the NEXT push ships/removes the "
+             "per-box marker + gateway key.")
+    p_mb.add_argument("mb_action", nargs="?", default="status",
+                      choices=["status", "set", "clear"],
+                      help="status (default) = show the registry + this box's "
+                           "marker; set <user@host> = register a box; clear "
+                           "<user@host> = deregister + remove the marker on it")
+    p_mb.add_argument("mb_args", nargs="*",
+                      help="for set/clear: the <user@host> target (e.g. miva1@subdev)")
+    p_mb.add_argument("--main", default=None,
+                      help="set: the main-tier alias (default pilot-main)")
+    p_mb.add_argument("--sub", default=None,
+                      help="set: the sub/subagent-tier alias (default pilot-sub)")
+    p_mb.add_argument("--fast", default=None,
+                      help="set: the fast/haiku-tier alias (default pilot-fast)")
+    p_mb.add_argument("--base-url", dest="base_url", default=None,
+                      help="set: the gateway base URL (default the controller "
+                           "tailscale gateway)")
+    p_mb.add_argument("--key-file", dest="key_file", default=None,
+                      help="set: the on-target token file (default "
+                           "~/.secrets/model-gateway.key)")
+    p_mb.add_argument("--registry-only", dest="registry_only",
+                      action="store_true",
+                      help="clear: only drop the registry entry; do NOT ssh a "
+                           "removal to the target (the next push reconciles)")
+
     # #999: the EXPLICIT operator command for the managed volume step. install
     # NEVER relocates (idempotent config only); this is the only path that
     # mounts + relocates. --plan (default) is a dry-run; --apply executes.
@@ -10782,6 +10829,7 @@ SUBCOMMANDS = {
     "account-bootstrap": cmd_account_bootstrap,
     "nudges": cmd_nudges,
     "model-gateway": cmd_model_gateway,
+    "model-backend": cmd_model_backend,
     "volume": cmd_volume,
     "task-hygiene": cmd_task_hygiene,
     "labels": cmd_labels,

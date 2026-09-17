@@ -274,6 +274,117 @@ def provision_subdev_soniox_key(hosts=None, run=None, source: Path = None,
     return failed
 
 
+def provision_model_backend_markers(hosts=None, run=None, skip_names=None,
+                                    control_opts=None, registry_path=None,
+                                    master_key_source=None):
+    """#1062 L2: ship the per-box model-backend marker + the gateway master key
+    to every deployable target named in the controller-side registry
+    (~/.claude/airuleset-model-backends.json). A TRUE no-op when the registry is
+    empty (the common push touches nothing — the source is never read). For each
+    registered target: the SAME gateway master key (0600 → ~/.secrets/
+    model-gateway.key) then that target's OWN marker (0600 → ~/.claude/
+    airuleset-model-backend.json). LOUD on a missing master key (every target
+    reported failed) — never a silent skip (the gk Discord `.env` lesson).
+
+    The master key is an OWNER SECRET, so its delivery REQUIRES a pinned ssh
+    identity (`require_identity=True`) — a registered box without one is refused,
+    never flipped over the fleet-shared password; its marker leg is then skipped
+    too (no keyless half-flip). `skip_names` (the deploy loop's `auth_failed`),
+    `control_opts` (connection reuse) mirror provision_subdev_soniox_key.
+    Returns [(name, reason)] failures.
+
+    Removal for a target dropped from the registry is done by
+    `remove_model_backend_markers` (invoked by `model-backend clear`), never by
+    this shipper (which only ever ADDS to registered targets)."""
+    import subprocess
+    run = run or subprocess.run
+    control_opts = list(control_opts or [])
+    import cli_model_backend as mbk
+    reg = mbk.load_registry(path=registry_path)
+    if not reg:
+        return []  # no box flipped → true no-op (never reads ~/.secrets)
+    members = [h for h in _deployable_hosts(hosts) if h["name"] in reg]
+    if not members:
+        return []
+
+    failed = []
+    skip = set(skip_names or ())
+    deliverable = []
+    for h in members:
+        if h["name"] in skip:
+            print("  ⚠ model-backend delivery to %s SKIPPED — its deploy leg "
+                  "already failed auth this run (see the FAILED line above); "
+                  "not opening a second ssh connection against a known-"
+                  "unprovisioned/unreachable account." % h["name"],
+                  file=sys.stderr)
+            failed.append((h["name"], "skipped-known-auth-failure"))
+        else:
+            deliverable.append(h)
+    if not deliverable:
+        return failed
+
+    key = mbk.read_gateway_master_key(source=master_key_source)
+    if not key:
+        src = master_key_source or "~/.secrets/model-gateway.master"
+        print("  ⚠ MODEL-GATEWAY MASTER KEY MISSING (%s) — cannot flip %d "
+              "box(es) onto the gateway. Run the L1 gateway install on the "
+              "controller first (`airuleset.py install` after "
+              "`model-gateway set …`)." % (src, len(deliverable)),
+              file=sys.stderr)
+        return failed + [(h["name"], "model-gateway-master-key-missing")
+                         for h in deliverable]
+
+    # 1. the master key (owner secret → pinned identity required) to every target.
+    failed.extend(_deliver_secret_to_hosts(
+        deliverable, key,
+        "umask 077; mkdir -p ~/.secrets; cat > ~/.secrets/model-gateway.key "
+        "&& chmod 600 ~/.secrets/model-gateway.key",
+        "model-gateway key", run, control_opts=control_opts,
+        require_identity=True))
+
+    # 2. each target's OWN marker — only onto a box whose key leg SUCCEEDED
+    #    (never a keyless half-flip).
+    key_failed = {name for name, _reason in failed}
+    for h in deliverable:
+        if h["name"] in key_failed:
+            continue
+        try:
+            marker_value = mbk.marker_json(reg[h["name"]])
+        except mbk.ModelBackendError as e:
+            print("  ⚠ model-backend: registry entry for %s is malformed (%s) "
+                  "— skipping its marker." % (h["name"], e), file=sys.stderr)
+            failed.append((h["name"], "registry-entry-malformed"))
+            continue
+        failed.extend(_deliver_secret_to_hosts(
+            [h], marker_value,
+            "umask 077; mkdir -p ~/.claude; cat > "
+            "~/.claude/airuleset-model-backend.json && chmod 600 "
+            "~/.claude/airuleset-model-backend.json",
+            "model-backend marker", run, control_opts=control_opts,
+            require_identity=True))
+    return failed
+
+
+def remove_model_backend_markers(targets, run=None, control_opts=None):
+    """#1062 L2: ship an idempotent removal (`rm -f` the marker + the key) to
+    each host entry in `targets` — the on-target half of `model-backend clear`
+    ("clear removes both"). The marker-derived settings env + the apiKeyHelper
+    script self-heal on the target's NEXT install (apply_managed_settings_defaults
+    pops the keys with no marker; maybe_setup_model_backend removes the stale
+    script). Returns [(name, reason)] failures. `rm -f` ignores the piped stdin
+    and is a harmless no-op on a box that never had a marker."""
+    import subprocess
+    run = run or subprocess.run
+    if not targets:
+        return []
+    return _deliver_secret_to_hosts(
+        targets, "",
+        "rm -f ~/.claude/airuleset-model-backend.json "
+        "~/.secrets/model-gateway.key ~/.claude/airuleset-model-gateway-apikey.sh",
+        "model-backend removal", run, control_opts=list(control_opts or []),
+        require_identity=True)
+
+
 # FORWARD-TRIGGER (#659 review): the Pattern-B secret-delivery surface
 # (_deliver_secret_to_hosts + the two provision_* callers + their source-read
 # helpers) is cohesive with this module's deploy loop and stays here for now
@@ -1346,6 +1457,16 @@ def _deploy_to_all_remotes(failed, auth_failed):
         print("Delivering Soniox key to subdev stream accounts...")
         failed.extend(provision_subdev_soniox_key(skip_names=auth_failed,
                                                     control_opts=control_opts))
+
+        # 3b-bis. #1062 L2: ship the per-box model-backend marker + gateway
+        # master key to every target in the controller-side registry. A TRUE
+        # no-op when no box is flipped (empty registry → nothing read, nothing
+        # shipped). Shares this run's control_opts (connection reuse) and the
+        # deploy loop's auth_failed set, exactly like the Soniox phase.
+        print(f"\n{'=' * 50}")
+        print("Delivering model-backend markers to flipped boxes (if any)...")
+        failed.extend(provision_model_backend_markers(skip_names=auth_failed,
+                                                       control_opts=control_opts))
 
         # #659/#669: the "3c. deliver headless OAuth token to owner_vps targets"
         # phase that once stood here was REMOVED -- login/auth ON a target is
