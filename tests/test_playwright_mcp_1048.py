@@ -194,6 +194,26 @@ class TestReconcileMcpFile1048(unittest.TestCase):
         self._run()
         self.assertEqual(first, self.claude_json.read_text())
 
+    def test_idempotent_against_a_claude_formatted_file(self):
+        # F1/F2 (review finding 1+4): a real ~/.claude.json (2-space indent,
+        # LITERAL non-ASCII, the managed server already present identical) must
+        # be left BYTE-UNCHANGED — the old formatted-string / ascii-escaped
+        # compare rewrote it on EVERY push, re-encoding the user's UTF-8 and
+        # re-opening the concurrent-write window each time.
+        browsers_path = p.resolved_browsers_path("shared-stream")
+        seeded = {
+            "noticeLine": "cache · živé",   # literal non-ASCII (middot + accents)
+            "mcpServers": {"playwright": p.render_playwright_mcp_server(browsers_path)},
+        }
+        original = json.dumps(seeded, indent=2, ensure_ascii=False) + "\n"
+        self.claude_json.write_text(original, encoding="utf-8")
+        before = self.claude_json.read_bytes()
+        ok = self._run()
+        self.assertTrue(ok)
+        self.assertEqual(
+            before, self.claude_json.read_bytes(),
+            "an already-correct Claude-formatted ~/.claude.json must not be rewritten")
+
     def test_creates_claude_json_when_absent(self):
         # no ~/.claude.json yet -> the managed server is still written.
         self.assertFalse(self.claude_json.exists())
@@ -259,10 +279,21 @@ class TestChromiumPostcheck1048(unittest.TestCase):
 
     def test_fragment_skips_when_npx_absent_and_forces_path(self):
         f = self._frag()
-        self.assertIn('command -v npx >/dev/null 2>&1 || exit 0', f)
+        # no npx -> SKIP (exit 0) with a VISIBLE skip line (finding 3)
+        self.assertIn('command -v npx >/dev/null 2>&1 ||', f)
+        self.assertIn("SKIPPED: no npx", f)
+        self.assertIn("exit 0", f)
         self.assertIn('export PATH="$HOME/.local/bin:$PATH"', f)
         # reads the resolved browsers path the install wrote
         self.assertIn("airuleset-playwright-browsers-path", f)
+
+    def test_fragment_skips_when_marker_absent(self):
+        # F1: a box with no marker (PLAYWRIGHT_MANAGED opt-out / provision did
+        # not run) has nothing to verify -> SKIP (visible line), never a false
+        # failure.
+        f = self._frag()
+        self.assertIn('[ -n "$BP" ] ||', f)
+        self.assertIn("SKIPPED: managed Playwright not provisioned", f)
 
     def test_postcheck_is_wired_into_the_deploy_loop(self):
         import inspect

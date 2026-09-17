@@ -990,7 +990,9 @@ def _playwright_chromium_postcheck():
     resolved browsers path is read from the marker the install just wrote
     (cli_caveman_plugins.PLAYWRIGHT_BROWSERS_PATH_MARKER = ~/.claude/airuleset-
     playwright-browsers-path) so the probe exercises the EXACT chromium the
-    managed MCP server will. `about:blank` proves the browser LAUNCHES with no
+    managed MCP server will; a box with NO marker (managed Playwright opted out
+    via PLAYWRIGHT_MANAGED=False) also SKIPS — nothing to verify, never a false
+    failure. `about:blank` proves the browser LAUNCHES with no
     network/display dependency — the failure mode is a missing/mismatched
     browser binary, not a page. `-k 5` hardens the bound against a
     SIGTERM-ignoring child, and the probe cleans its own /tmp screenshot
@@ -998,9 +1000,17 @@ def _playwright_chromium_postcheck():
     import airuleset
     return (
         '{ export PATH="$HOME/.local/bin:$PATH"; '
-        'command -v npx >/dev/null 2>&1 || exit 0; '
+        # A visible SKIP line (to stderr) so a skip is never indistinguishable
+        # from a PASS in the deploy output (#1048 review finding 3).
+        'command -v npx >/dev/null 2>&1 || '
+        '{ echo "PLAYWRIGHT-POSTCHECK SKIPPED: no npx on this box" >&2; exit 0; }; '
         'BP="$(cat "$HOME/.claude/airuleset-playwright-browsers-path" 2>/dev/null)"; '
-        '[ -n "$BP" ] && export PLAYWRIGHT_BROWSERS_PATH="$BP"; '
+        # No marker => managed Playwright is not provisioned on this box
+        # (PLAYWRIGHT_MANAGED opt-out) => nothing to verify, SKIP (like the
+        # gh-chain skips when gh is absent). A managed box always has the marker.
+        '[ -n "$BP" ] || '
+        '{ echo "PLAYWRIGHT-POSTCHECK SKIPPED: managed Playwright not provisioned here" >&2; exit 0; }; '
+        'export PLAYWRIGHT_BROWSERS_PATH="$BP"; '
         'PROBE="$(mktemp /tmp/airuleset-pw-probe.XXXXXX.png)"; '
         'timeout -k 5 30 npx -y playwright@%s screenshot --browser chromium '
         'about:blank "$PROBE" >/dev/null 2>&1 || '

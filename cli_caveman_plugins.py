@@ -179,6 +179,8 @@ MANAGED_DISABLED_PLUGINS = (
     "playwright@claude-plugins-official",
 )
 
+# Retained ONLY for the export contract + as the disabled-list reference value
+# (#1048 moved the old ensure_playwright_browsers guard to PLAYWRIGHT_MANAGED).
 PLAYWRIGHT_PLUGIN_KEY = "playwright@claude-plugins-official"
 PLAYWRIGHT_BROWSER_CACHE = Path.home() / ".cache" / "ms-playwright"
 
@@ -200,6 +202,17 @@ PLAYWRIGHT_MANAGED = True
 #   playwright@1.64.0-alpha-2026-09-14  `install chromium`  ->  chromium build 1244
 # so the MCP server, the browser we install, and the /opt build-match probe all
 # agree by construction. Bump ALL THREE together (the lock test refuses `latest`).
+#   #1048 review finding 2 (fidelity residual): the push health-check launches
+#   chromium via `playwright@PW_VERSION` (the standalone pkg), NOT the production
+#   `@playwright/mcp@MCP_VERSION` server. They share the SAME chromium build only
+#   BECAUSE @playwright/mcp@0.0.81 depends on playwright@1.64.0-alpha-2026-09-14
+#   above — so the probe exercises the correct browser TODAY, but a future bump
+#   that moves the two out of lockstep would leave the probe green while the MCP
+#   server is dead. This offline trio-lock cannot resolve the live npm dep edge;
+#   the backstop is the first-push LIVE check (`claude mcp get playwright`
+#   Connected + a real browser_navigate screenshot). Followup: a dep-edge lock
+#   (install/probe via `npx --package @playwright/mcp@MCP_VERSION`, once its
+#   transitive-bin behaviour is verified, or a CI job resolving the dependency).
 PLAYWRIGHT_MCP_VERSION = "0.0.81"
 PLAYWRIGHT_PW_VERSION = "1.64.0-alpha-2026-09-14"
 PLAYWRIGHT_CHROMIUM_BUILD = "1244"
@@ -820,9 +833,18 @@ def reconcile_playwright_mcp_file(claude_json_path: Path = None, box_class: str 
         print("    ⚠ ~/.claude.json is not a JSON object — skipped the playwright MCP server",
               file=sys.stderr)
         return False
-    new_str = json.dumps(reconcile_playwright_mcp_server(data, browsers_path), indent=2) + "\n"
-    if new_str.strip() == raw.strip():
+    # Compare PARSED dicts, not formatted strings: ~/.claude.json is owned by
+    # Claude Code, whose own formatting may differ from json.dumps(indent=2) — a
+    # string compare would then rewrite it on EVERY push (needless churn + a
+    # concurrent-write window each time). A dict compare is idempotent whenever
+    # the managed server is already present and identical, regardless of layout.
+    new_data = reconcile_playwright_mcp_server(data, browsers_path)
+    if new_data == data:
         return ok
+    # ensure_ascii=False: ~/.claude.json is written by Claude Code with LITERAL
+    # UTF-8 (prompt/history/cache text) — the default \uXXXX escaping would
+    # re-encode all of it on our write, fighting Claude Code's own writer.
+    new_str = json.dumps(new_data, indent=2, ensure_ascii=False) + "\n"
     tmp = None
     try:
         fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")

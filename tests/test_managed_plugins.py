@@ -662,15 +662,13 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
 
     def test_already_built_plugins_never_call_marketplace_add(self):
         d = Path(tempfile.mkdtemp())
-        # #542: every MANAGED_PLUGINS plugin (incl. playwright) must be
-        # registry-built for the no-marketplace-add fast path.
+        # every MANAGED_PLUGINS plugin already registry-built => the
+        # no-marketplace-add fast path (setup_managed_plugins no longer touches
+        # Playwright — that moved to provision_playwright_mcp, #1048).
         _write_plugin_registry(d, airuleset.MANAGED_PLUGINS)
         settings_path = d / "settings.json"
-        playwright_cache = Path(tempfile.mkdtemp())
-        (playwright_cache / "chromium-1234").mkdir()
         with m.patch.object(airuleset, "CLAUDE_DIR", d), \
                 m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
-                m.patch.object(cli_caveman_plugins, "PLAYWRIGHT_BROWSER_CACHE", playwright_cache), \
                 m.patch("subprocess.run") as run:
             ok = airuleset.setup_managed_plugins()
         self.assertTrue(ok)
@@ -790,8 +788,8 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
             set(airuleset.MANAGED_PLUGINS),
             "a settings-enabled + registry-absent plugin must trigger a "
             "real install, even with a stale cache on disk and settings."
-            "json already saying enabled (#542: playwright is a baseline "
-            "plugin again)")
+            "json already saying enabled (superpowers is the sole managed "
+            "baseline plugin after #1048)")
 
 
 def _write_plugin_registry_with_paths(claude_dir: Path, key_path_map: dict):
