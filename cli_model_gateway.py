@@ -194,8 +194,18 @@ def render_gateway_env(config, read_secret, master_key_file=None):
         "# Rendered from ~/.secrets/*.key at install; regenerated on every install.",
         f"LITELLM_MASTER_KEY={read_secret(str(mk))}",
     ]
+    # Two providers that slugify to the SAME env var (e.g. `vertex-ai` and
+    # `vertex.ai` -> VERTEX_AI_KEY) would emit duplicate lines; systemd keeps the
+    # last, silently giving one provider the other's key. Refuse it loudly — the
+    # yaml/env `os.environ/<VAR>` agreement (constraint 3) depends on uniqueness.
+    seen = {}
     for provider in sorted(_referenced_providers(config)):
         var = _provider_env_var(provider)
+        if var in seen:
+            raise ModelGatewayError(
+                f"providers {seen[var]!r} and {provider!r} both map to env var "
+                f"{var} — rename one so each provider has a distinct key var")
+        seen[var] = provider
         kf = _expand(_key_file_for(config, provider))
         lines.append(f"{var}={read_secret(str(kf))}")
     return "\n".join(lines) + "\n"
@@ -233,23 +243,41 @@ def _write_alias_map(config, path):
     p.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _validate_target(target):
+    """A target is `provider/model` with a NON-empty provider AND a non-empty
+    model, and no whitespace — a bare `provider/` (empty model → a dead route)
+    or `/model` (empty provider → a `""` provider entry) is rejected. Returns
+    (provider, model) or raises."""
+    if not target or "/" not in target or any(c.isspace() for c in target):
+        raise ModelGatewayError(
+            f"target must be `provider/model` (e.g. openrouter/deepseek/"
+            f"deepseek-v4.1-flash), got {target!r}")
+    provider, model = target.split("/", 1)
+    if not provider or not model:
+        raise ModelGatewayError(
+            f"target must have a non-empty provider AND model, got {target!r}")
+    return provider, model
+
+
 def set_alias(alias, target, path=None, yaml_path=None, reload_fn=None):
     """Point `alias` at `target` (`provider/model`): rewrite the map + the yaml,
     then reload the service. Seeds the map from `default_alias_map()` when it is
     absent (so a fresh controller gets a complete 3-tier map). Ensures the
     target's provider has a `providers` entry (conventional key file if new).
-    Returns (config, added_provider_or_None). Never reads `~/.secrets`."""
+    Returns (config, added_provider_or_None). Never reads `~/.secrets`.
+
+    A NEW provider's key is not in the EnvironmentFile until `install` renders
+    it, so restarting the service into that yaml would auth-fail (possibly
+    crash-loop) — so when a new provider is added we DELIBERATELY skip the
+    reload: the map+yaml are written, the caller prints the paste-key/install
+    note, and the running service is left untouched until install."""
     if not alias:
         raise ModelGatewayError("usage: model-gateway set <alias> <provider/model>")
-    if "/" not in (target or ""):
-        raise ModelGatewayError(
-            f"target must be `provider/model` (e.g. openrouter/deepseek/"
-            f"deepseek-v4.1-flash), got {target!r}")
+    provider, _model = _validate_target(target)
     p = _expand(path or ALIAS_MAP_PATH)
     config = load_alias_map(p)
     if config is None:
         config = default_alias_map()
-    provider = _provider_of(target)
     added_provider = None
     if provider not in config["providers"]:
         config["providers"][provider] = {"key_file": _conventional_key_file(provider)}
@@ -259,7 +287,10 @@ def set_alias(alias, target, path=None, yaml_path=None, reload_fn=None):
     yp = _expand(yaml_path or YAML_PATH)
     yp.parent.mkdir(parents=True, exist_ok=True)
     yp.write_text(render_gateway_yaml(config), encoding="utf-8")
-    (reload_fn or _reload_service)()
+    # Only reload for an EXISTING provider (its key is already in the env file);
+    # a new provider waits for `install` to render its key (see docstring).
+    if added_provider is None:
+        (reload_fn or _reload_service)()
     return config, added_provider
 
 
@@ -390,8 +421,11 @@ def maybe_setup_model_gateway(box_class=None, alias_map_path=None, setup_fn=None
               f"(create one with `airuleset.py model-gateway set "
               f"<alias> <provider/model>`)")
         return False
-    (setup_fn or setup_model_gateway_service)(alias_map_path=amp)
-    return True
+    ok = bool((setup_fn or setup_model_gateway_service)(alias_map_path=amp))
+    # Honest aggregate verdict — never claim success the setup did not observe.
+    print("  model-gateway: install OK" if ok
+          else "  model-gateway: install FAILED — see the lines above")
+    return ok
 
 
 def _read_secret_file(path):
@@ -423,11 +457,40 @@ def _generate_master_key():
     return "sk-" + _secrets.token_urlsafe(32)
 
 
+def _write_if_changed(path, text, mode=None):
+    """Write `text` to `path` ONLY when the content differs; returns True iff it
+    wrote. Keeps `install` idempotent — a re-run whose rendered content is
+    unchanged touches nothing and triggers no restart (a controller `install`
+    re-runs on every push)."""
+    p = _expand(path)
+    try:
+        if p.exists() and p.read_text(encoding="utf-8") == text:
+            if mode is not None:
+                os.chmod(str(p), mode)  # re-assert perms even on a no-op
+            return False
+    except OSError as e:
+        # unreadable existing file — report and proceed to (re)write it fresh
+        print(f"  model-gateway: could not read {p} to compare ({e}); rewriting",
+              file=sys.stderr)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if mode is not None:
+        fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, mode)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.chmod(str(p), mode)
+    else:
+        p.write_text(text, encoding="utf-8")
+    return True
+
+
 def setup_model_gateway_service(alias_map_path=None):
     """Install + start the model-gateway systemd --user service on the
     controller. LOUD on every failure with a manual-command fallback; never
-    claims success it did not observe. UNVERIFIED by the authoring lane — the
-    supervisor runs this via `airuleset.py install` after the key is pasted."""
+    claims success it did not observe. IDEMPOTENT: a re-run with unchanged
+    rendered content writes nothing, does NOT restart the running service, and
+    skips the paid `/v1/messages` echo (only the unauthenticated liveliness
+    probe always runs). UNVERIFIED by the authoring lane — the supervisor runs
+    this via `airuleset.py install` after the key is pasted."""
     print("  Installing model-gateway (LiteLLM) systemd --user service")
     amp = _expand(alias_map_path or ALIAS_MAP_PATH)
     config = load_alias_map(amp)
@@ -437,8 +500,10 @@ def setup_model_gateway_service(alias_map_path=None):
         return False
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    was_active = _service_state() == "active"
+    changed = False
 
-    # 1. master key (generated once, 0600, in the durable secret tree).
+    # 1. master key (generated once, 0600). Re-assert 0600 on a pre-existing one.
     mk = _expand(MASTER_KEY_FILE)
     if not mk.exists():
         try:
@@ -446,14 +511,22 @@ def setup_model_gateway_service(alias_map_path=None):
             fd = os.open(str(mk), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 fh.write(_generate_master_key() + "\n")
+            os.chmod(str(mk), 0o600)
             print(f"  Generated master key: {mk}")
+            changed = True
         except OSError as e:
             print(f"  model-gateway: could NOT create master key {mk}: {e}",
                   file=sys.stderr)
             return False
+    else:
+        try:
+            os.chmod(str(mk), 0o600)  # re-tighten if it drifted
+        except OSError as e:
+            print(f"  model-gateway: could not re-tighten master key perms: {e}",
+                  file=sys.stderr)
 
     # 2. render config.yaml (no secrets) + the EnvironmentFile (real reader).
-    YAML_PATH.write_text(render_gateway_yaml(config), encoding="utf-8")
+    changed |= _write_if_changed(YAML_PATH, render_gateway_yaml(config))
     try:
         env_text = render_gateway_env(config, _read_secret_file, master_key_file=mk)
     except OSError as e:
@@ -461,24 +534,22 @@ def setup_model_gateway_service(alias_map_path=None):
               f"({e}); paste it with `airuleset.py secret request` then re-run "
               f"install", file=sys.stderr)
         return False
-    fd = os.open(str(ENV_PATH), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(env_text)
-    os.chmod(str(ENV_PATH), 0o600)
-    print(f"  Wrote {YAML_PATH} + {ENV_PATH} (0600)")
+    changed |= _write_if_changed(ENV_PATH, env_text, mode=0o600)
 
     # 3. spend-logger callback module (importable via the unit's PYTHONPATH).
     if SPEND_LOGGER_TEMPLATE.exists():
-        SPEND_LOGGER_DEST.write_text(
-            SPEND_LOGGER_TEMPLATE.read_text(encoding="utf-8"), encoding="utf-8")
+        changed |= _write_if_changed(
+            SPEND_LOGGER_DEST, SPEND_LOGGER_TEMPLATE.read_text(encoding="utf-8"))
     else:
         print(f"  model-gateway: spend-logger template missing "
               f"({SPEND_LOGGER_TEMPLATE}) — spend tracking will be inert",
               file=sys.stderr)
 
-    # 4. venv + pinned litellm[proxy].
-    if not _ensure_venv():
+    # 4. venv + pinned litellm[proxy] (idempotent: skips when already at the pin).
+    ok, installed = _ensure_venv()
+    if not ok:
         return False
+    changed |= installed
 
     # 5. render + write the unit, enable, health-check.
     try:
@@ -487,27 +558,55 @@ def setup_model_gateway_service(alias_map_path=None):
         print(f"  model-gateway: {e}", file=sys.stderr)
         return False
     SERVICE_DEST.parent.mkdir(parents=True, exist_ok=True)
-    SERVICE_DEST.write_text(render_gateway_unit(host_ip), encoding="utf-8")
-    print(f"  Wrote unit: {SERVICE_DEST} (bind {host_ip}:{GATEWAY_PORT})")
-    if not _enable_service():
+    changed |= _write_if_changed(SERVICE_DEST, render_gateway_unit(host_ip))
+    print(f"  model-gateway: config {'CHANGED' if changed else 'unchanged'} "
+          f"(bind {host_ip}:{GATEWAY_PORT})")
+    if not _enable_service(restart=changed):
         return False
-    return _health_check(host_ip)
+    # Deep probe (paid /v1/messages echo) only when something changed or the
+    # service was not already up — a clean no-op push stays cheap.
+    return _health_check(host_ip, deep=changed or not was_active)
+
+
+def _venv_litellm_version():
+    """The litellm version installed in the venv, or None (bin absent / read
+    fails). Used to skip a redundant pip round-trip when already at the pin."""
+    py = VENV_DIR / "bin" / "python"
+    if not py.exists():
+        return None
+    try:
+        r = subprocess.run(
+            [str(py), "-c", "import importlib.metadata as m;"
+             "print(m.version('litellm'))"],
+            capture_output=True, text=True, timeout=30)
+    except Exception as e:
+        print(f"  model-gateway: could not read venv litellm version ({e})",
+              file=sys.stderr)
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
 
 
 def _ensure_venv():
-    """Create the venv + `pip install litellm[proxy]==<pin>`. LOUD on failure."""
+    """Create the venv + `pip install litellm[proxy]==<pin>`. Returns
+    (ok, installed): `installed` is True only when pip actually ran (so a no-op
+    re-install does not count as a change). Skips the pip round-trip entirely
+    when the venv already carries the pinned litellm — so a controller push does
+    NOT hit PyPI every time (and a transient PyPI blip cannot fail a healthy,
+    already-installed gateway)."""
     litellm_bin = VENV_DIR / "bin" / "litellm"
     try:
-        if not litellm_bin.exists():
+        if litellm_bin.exists() and _venv_litellm_version() == LITELLM_PIN:
+            return True, False  # already at the pin — nothing to do
+        if not (VENV_DIR / "bin" / "python").exists():
             VENV_DIR.parent.mkdir(parents=True, exist_ok=True)
-            print(f"  Creating venv {VENV_DIR} + installing "
-                  f"litellm[proxy]=={LITELLM_PIN} (one-time, slow)")
+            print(f"  Creating venv {VENV_DIR}")
             r = subprocess.run([sys.executable, "-m", "venv", str(VENV_DIR)],
                                capture_output=True, text=True, timeout=180)
             if r.returncode != 0:
                 print(f"  model-gateway: venv create FAILED: {r.stderr.strip()}",
                       file=sys.stderr)
-                return False
+                return False, False
+        print(f"  Installing litellm[proxy]=={LITELLM_PIN} (one-time, slow)")
         pip = VENV_DIR / "bin" / "pip"
         r = subprocess.run([str(pip), "install", "--no-input",
                            f"litellm[proxy]=={LITELLM_PIN}"],
@@ -515,14 +614,17 @@ def _ensure_venv():
         if r.returncode != 0:
             print(f"  model-gateway: pip install litellm FAILED: "
                   f"{r.stderr.strip()[-500:]}", file=sys.stderr)
-            return False
+            return False, False
     except Exception as e:
         print(f"  model-gateway: venv/pip step FAILED: {e}", file=sys.stderr)
-        return False
-    return True
+        return False, False
+    return True, True
 
 
-def _enable_service():
+def _enable_service(restart=True):
+    """daemon-reload + enable --now (idempotent). `restart` only when the config
+    actually changed — a no-op re-install must not interrupt in-flight
+    requests."""
     manual = (f"    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user "
               f"daemon-reload\n    XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl "
               f"--user enable --now {SERVICE_NAME}")
@@ -541,21 +643,27 @@ def _enable_service():
         print(f"  model-gateway: enable --now FAILED (rc={rc}): {err.strip()}\n"
               f"  Run manually:\n{manual}", file=sys.stderr)
         return False
-    _run_systemctl(["restart", SERVICE_NAME])
+    if restart:
+        _run_systemctl(["restart", SERVICE_NAME])
     return True
 
 
-def _health_check(host_ip):
-    """Liveliness probe (GET /health/liveliness) + one /v1/messages echo through
-    `pilot-fast`. LOUD on failure. docs.litellm.ai/docs/proxy/health +
-    /docs/anthropic_unified."""
+def _health_check(host_ip, deep=True):
+    """Liveliness probe (GET /health/liveliness), always; plus one `/v1/messages`
+    echo through `pilot-fast` when `deep` (a paid upstream call — only run it
+    when the config changed or the service was down). LOUD on failure.
+    docs.litellm.ai/docs/proxy/health + /docs/anthropic_unified. The 120 s
+    liveliness budget is an INITIAL sizing for litellm's cold start on the
+    constrained cx23 controller (tokenizers + cost map + uvicorn import) — the
+    supervisor tunes it from the real observed cold-start, per no-timeout-band-
+    aids (there is no prior working value being loosened here)."""
     import time
     import urllib.request
     base = f"http://{host_ip}:{GATEWAY_PORT}"
     live = f"{base}/health/liveliness"
     ok = False
     last_err = None
-    for _ in range(20):
+    for _ in range(60):
         try:
             with urllib.request.urlopen(live, timeout=3) as resp:
                 if resp.status == 200:
@@ -563,13 +671,17 @@ def _health_check(host_ip):
                     break
         except Exception as e:
             last_err = e
-        time.sleep(1)
+        time.sleep(2)
     if not ok:
         print(f"  model-gateway: {live} did NOT answer 200 (last error: "
               f"{last_err}) — check `systemctl --user status {SERVICE_NAME}`",
               file=sys.stderr)
         return False
     print(f"  model-gateway: live at {base} (GET /health/liveliness 200)")
+    if not deep:
+        print("  model-gateway: config unchanged — skipping the paid "
+              "/v1/messages echo")
+        return True
     if not _probe_messages(base):
         print("  model-gateway: the /v1/messages echo through pilot-fast did "
               "NOT succeed — the model is up but a request failed; check the "
@@ -636,13 +748,18 @@ def _cmd_set(args):
     if len(parts) != 2:
         raise ModelGatewayError("usage: model-gateway set <alias> <provider/model>")
     alias, target = parts
+    if _current_box_class() != "controller":
+        print("  model-gateway: WARNING — this box is not the controller; the "
+              "gateway service lives on the controller, so run `set` there "
+              "(this only rewrites a local map/yaml)", file=sys.stderr)
     _config, added = set_alias(alias, target, path=getattr(args, "map_path", None))
     print(f"model-gateway: {alias} -> {target}")
     if added:
         print(f"  NOTE: new provider `{added}` added with key file "
-              f"{_conventional_key_file(added)}. Paste the key with "
-              f"`airuleset.py secret request` and run `airuleset.py install` on "
-              f"the controller so the gateway can use it.")
+              f"{_conventional_key_file(added)}. The running service was NOT "
+              f"restarted (its key is not in the env file yet). Paste the key "
+              f"with `airuleset.py secret request` and run `airuleset.py install` "
+              f"on the controller so the gateway can use it.")
     return 0
 
 

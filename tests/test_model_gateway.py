@@ -109,6 +109,26 @@ class TestRenderEnv(unittest.TestCase):
         self.assertIn("DEEPSEEK_KEY=", env)
         self.assertNotIn("OPENROUTER_KEY=", env)
 
+    def test_multi_provider_no_duplicate_var_lines(self):
+        # Two DISTINCT providers -> two distinct VAR= lines, no duplicates.
+        cfg = {"aliases": {"a": "openrouter/x", "b": "deepseek/y"},
+               "providers": {}}
+        env = mg.render_gateway_env(cfg, lambda p: "v")
+        var_lines = [ln for ln in env.splitlines()
+                     if "=" in ln and not ln.startswith("#")]
+        names = [ln.split("=", 1)[0] for ln in var_lines]
+        self.assertEqual(len(names), len(set(names)), names)
+        self.assertIn("OPENROUTER_KEY", names)
+        self.assertIn("DEEPSEEK_KEY", names)
+
+    def test_colliding_provider_var_names_refused(self):
+        # A2: two providers slugifying to the SAME var must raise, not silently
+        # emit a duplicate line (systemd keeps the last -> wrong key).
+        cfg = {"aliases": {"a": "vertex-ai/m", "b": "vertex.ai/n"},
+               "providers": {}}
+        with self.assertRaises(mg.ModelGatewayError):
+            mg.render_gateway_env(cfg, lambda p: "v")
+
 
 class TestRenderUnit(unittest.TestCase):
     def test_template_fields_present(self):
@@ -148,7 +168,8 @@ class TestSetAlias(unittest.TestCase):
             self.assertEqual(cfg["aliases"]["pilot-fast"], "deepseek/deepseek-chat")
             self.assertEqual(added, "deepseek")  # new provider registered
             self.assertIn("deepseek", cfg["providers"])
-            self.assertEqual(calls, [1])  # reload fired once
+            # a NEW provider is NOT reloaded (its key isn't in the env yet, B5)
+            self.assertEqual(calls, [])
             # map + yaml really written
             written = json.loads(Path(mp).read_text())
             self.assertEqual(written["aliases"]["pilot-fast"], "deepseek/deepseek-chat")
@@ -170,11 +191,61 @@ class TestSetAlias(unittest.TestCase):
     def test_bad_target_rejected(self):
         with tempfile.TemporaryDirectory() as d:
             mp, yp = self._paths(d)
-            with self.assertRaises(mg.ModelGatewayError):
-                mg.set_alias("pilot-main", "no-slash-here", path=mp, yaml_path=yp,
-                             reload_fn=lambda: None)
+            for bad in ("no-slash-here", "provider/", "/model", "prov/ mod",
+                        "openrouter/", "/"):
+                with self.assertRaises(mg.ModelGatewayError, msg=bad):
+                    mg.set_alias("pilot-main", bad, path=mp, yaml_path=yp,
+                                 reload_fn=lambda: None)
             with self.assertRaises(mg.ModelGatewayError):
                 mg.set_alias("", TARGET, path=mp, yaml_path=yp, reload_fn=lambda: None)
+
+    def test_new_provider_skips_reload(self):
+        # B5: adding a NEW provider must NOT restart the live service (its key is
+        # not in the env file yet). Repointing an EXISTING provider DOES reload.
+        with tempfile.TemporaryDirectory() as d:
+            mp, yp = self._paths(d)
+            reloads = []
+            _cfg, added = mg.set_alias("pilot-fast", "newprov/model",
+                                       path=mp, yaml_path=yp,
+                                       reload_fn=lambda: reloads.append(1))
+            self.assertEqual(added, "newprov")
+            self.assertEqual(reloads, [])  # NOT reloaded
+            # repoint an existing provider (openrouter seeded by default) -> reload
+            _cfg, added2 = mg.set_alias("pilot-main", "openrouter/qwen/qwen-3",
+                                        path=mp, yaml_path=yp,
+                                        reload_fn=lambda: reloads.append(1))
+            self.assertIsNone(added2)
+            self.assertEqual(reloads, [1])
+
+
+class TestWriteIfChanged(unittest.TestCase):
+    def test_writes_then_noops_and_reasserts_mode(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "sub" / "f.txt"
+            self.assertTrue(mg._write_if_changed(str(p), "hello\n", mode=0o600))
+            self.assertEqual(p.read_text(), "hello\n")
+            self.assertEqual(p.stat().st_mode & 0o777, 0o600)
+            # identical content -> no write
+            self.assertFalse(mg._write_if_changed(str(p), "hello\n", mode=0o600))
+            # a drifted mode is re-asserted even on a no-op
+            import os as _os
+            _os.chmod(str(p), 0o644)
+            self.assertFalse(mg._write_if_changed(str(p), "hello\n", mode=0o600))
+            self.assertEqual(p.stat().st_mode & 0o777, 0o600)
+            # changed content -> write
+            self.assertTrue(mg._write_if_changed(str(p), "world\n"))
+            self.assertEqual(p.read_text(), "world\n")
+
+    def test_venv_version_none_when_absent(self):
+        # _venv_litellm_version returns None when the venv python is absent
+        # (drives the _ensure_venv skip decision) — no real venv touched.
+        saved = mg.VENV_DIR
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                mg.VENV_DIR = Path(d) / "no-venv"
+                self.assertIsNone(mg._venv_litellm_version())
+        finally:
+            mg.VENV_DIR = saved
 
 
 class TestSpend(unittest.TestCase):
@@ -264,14 +335,29 @@ class TestInstallGate(unittest.TestCase):
 
     def test_maybe_setup_runs_on_controller_with_map(self):
         called = []
+
+        def fake_setup(**k):
+            called.append(k)
+            return True  # a real setup returns its observed success
+
         with tempfile.TemporaryDirectory() as d:
             present = Path(d) / "map.json"
             present.write_text("{}", encoding="utf-8")
             r = mg.maybe_setup_model_gateway(
                 box_class="controller", alias_map_path=str(present),
-                setup_fn=lambda **k: called.append(k))
+                setup_fn=fake_setup)
         self.assertTrue(r)
         self.assertEqual(len(called), 1)  # exactly the injected setup, once
+
+    def test_maybe_setup_returns_false_when_setup_fails(self):
+        # B4: the honest boolean — a failed setup must NOT report success.
+        with tempfile.TemporaryDirectory() as d:
+            present = Path(d) / "map.json"
+            present.write_text("{}", encoding="utf-8")
+            r = mg.maybe_setup_model_gateway(
+                box_class="controller", alias_map_path=str(present),
+                setup_fn=lambda **k: False)
+        self.assertFalse(r)
 
 
 class TestCliDispatch(unittest.TestCase):

@@ -47,9 +47,13 @@ class _ModelGatewaySpendLogger(CustomLogger):
     def _record(self, kwargs, end_time):
         try:
             slo = kwargs.get("standard_logging_object") or {}
+            # `model_group` is the requested model_name (the alias) per the
+            # StandardLoggingPayload spec (docs.litellm.ai/docs/proxy/logging_spec);
+            # fall back to the payload `model`, then the raw kwarg, so a spend row
+            # is always labelled even if the payload shape shifts.
             rec = {
                 "ts": self._ts(end_time),
-                "alias": (slo.get("model_group")
+                "alias": (slo.get("model_group") or slo.get("model")
                           or kwargs.get("model") or "?"),
                 "cost_usd": _num(slo.get("response_cost",
                                          kwargs.get("response_cost")), float, 0.0),

@@ -34,10 +34,17 @@ RestartSec=5
 # --- Hardening (defense in depth; a tailscale-internal proxy) ---
 # NOTE: ProtectHome is deliberately NOT read-only — the proxy WRITES the JSONL
 # spend log under ~/.config/airuleset and READS the venv under ~/.local/share.
+# ProtectSystem=strict makes / read-only; ReadWritePaths re-opens ONLY the config
+# dir the spend log lives in (the venv under ~/.local/share stays readable).
 NoNewPrivileges=yes
 PrivateTmp=yes
-# TCP sockets only (HTTP proxy + upstream HTTPS).
-RestrictAddressFamilies=AF_INET AF_INET6
+ProtectSystem=strict
+ReadWritePaths=%h/.config/airuleset
+# AF_UNIX is REQUIRED: litellm runs on uvicorn/asyncio, and asyncio's selector
+# event loop creates its wakeup socket via socket.socketpair() (AF_UNIX) — omit
+# it and the proxy fails to start with EAFNOSUPPORT. AF_INET/AF_INET6 for the
+# HTTP proxy socket + upstream HTTPS.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 MemoryMax=1G
 TasksMax=256
 
