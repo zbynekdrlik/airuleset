@@ -404,6 +404,21 @@ def print_selfservice_blocks_text(counts):
             print("#   %s\t%d" % (reason, counts["per_reason"][reason]))
 
 
+def print_label_flips_text(counts):
+    """TSV of blind label flips per stream (#1056 L2): a returned bounce
+    re-flagged with no real response — from the L1 gate's BLOCK lines + the
+    gk-side revert automat's notes. Target 0 per stream; a rising count is a
+    stream still re-flagging returned bounces."""
+    print("stream\tlabel_flips")
+    for stream in sorted(counts["per_stream"]):
+        print("%s\t%d" % (stream, counts["per_stream"][stream]))
+    print("total\t%d" % counts["total"])
+    if counts["per_source"]:
+        print("# by source:")
+        for source in sorted(counts["per_source"]):
+            print("#   %s\t%d" % (source, counts["per_source"][source]))
+
+
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
@@ -475,6 +490,11 @@ def main(argv=None):
                    help="List OPEN issues whose newest Design-by comment is NOT "
                         "'Design-by: main <Fable id>' (#1061; target 0). "
                         "Restrict to comments since --since <YYYY-MM-DD>.")
+    p.add_argument("--label-flips", dest="label_flips", action="store_true",
+                   help="Count blind label flips per stream + day (#1056 L2): "
+                        "the L1 blind-label-flip gate log (BLOCK lines) UNION "
+                        "the gk-side revert automat's notes. Box-local logs, no "
+                        "--repo needed. Target 0.")
     p.add_argument("--since", default=None,
                    help="YYYY-MM-DD cutoff for --design-by (only design comments "
                         "on/after this date count)")
@@ -531,6 +551,17 @@ def main(argv=None):
             print()
         else:
             print_selfservice_blocks_text(counts)
+        return
+
+    if args.label_flips:
+        # #1056 L2 (i) -- blind label flips per stream + day (box-local
+        # ~/.claude/labeledit-gate.log BLOCK lines + audits/labeledit-reverts.log).
+        counts = gates_audit.count_label_flips(window_days=args.window)
+        if args.json_out:
+            json.dump(counts, sys.stdout, indent=2)
+            print()
+        else:
+            print_label_flips_text(counts)
         return
 
     if not args.rounds:

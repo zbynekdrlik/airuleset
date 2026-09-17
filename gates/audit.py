@@ -267,3 +267,76 @@ def count_selfservice_blocks(path=None, window_days=7, now=None):
         total += 1
     return {"per_stream": per_stream, "per_reason": per_reason,
             "per_day": per_day, "total": total}
+
+
+# --------------------------------------------------------------------------- #
+# #1056 L2 (i) -- the --label-flips reader: blind label flips per stream per
+# day, target 0. Two sources, both "a returned bounce was re-flagged with no
+# real response": (1) the L1 blind-label-flip GATE log
+# (~/.claude/labeledit-gate.log, written by gates.labeledit._write_log as
+# "<ISO> <stream> <verdict> <reason> <ticket>" -- a BLOCK = a flip attempt
+# blocked at the stream box), and (2) the (h) gk-side REVERT automat's notes
+# (audits/labeledit-reverts.log, written by cross_stream._apply_bounce_flip_
+# revert as "<ISO> stream=<s> repo=<r> ticket=<N> verdict=<id> ids=<...>" -- a
+# flip that got through and was reverted). A rising per-stream count = a stream
+# still re-flagging returned bounces; trend it to 0 (the #957 discipline).
+# --------------------------------------------------------------------------- #
+def labeledit_gate_log_path():
+    """The blind-label-flip gate log (~/.claude/labeledit-gate.log) -- the same
+    path gates.labeledit._log_path writes to."""
+    return os.path.join(os.path.expanduser("~"), ".claude", "labeledit-gate.log")
+
+
+def _read_lines(path):
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read().splitlines()
+    except OSError:
+        return []
+
+
+def count_label_flips(gate_log_path=None, revert_log_path=None, window_days=7,
+                      now=None):
+    """Count blind label flips per stream, day and source within the last
+    `window_days` LOCAL days. Returns ``{"per_stream": {...}, "per_day": {...},
+    "per_source": {"gate-block": n, "revert": n}, "total": n}`` -- zero-hit keys
+    absent. Never raises (observability view, never a gate): a missing/
+    unreadable log is simply zero. `gate_log_path` defaults to the box-local
+    blind-label-flip gate log; `revert_log_path` to the fleet audits dir's
+    revert-notes log."""
+    gate_log_path = gate_log_path or labeledit_gate_log_path()
+    revert_log_path = revert_log_path or audit_log_path(
+        "labeledit-reverts.log")
+    _now = now or datetime.datetime.now().astimezone()
+    since_day = (_now - datetime.timedelta(days=window_days)).strftime(
+        "%Y-%m-%d")
+    per_stream, per_day, per_source, total = {}, {}, {}, 0
+
+    def _tally(day, stream, source):
+        per_stream[stream] = per_stream.get(stream, 0) + 1
+        per_day[day] = per_day.get(day, 0) + 1
+        per_source[source] = per_source.get(source, 0) + 1
+
+    # Source 1: gate BLOCK lines (space-separated fields, no `key=` form).
+    for line in _read_lines(gate_log_path):
+        dm = _BYPASS_DATE_RE.match(line)
+        if not dm or dm.group(1) < since_day:
+            continue
+        parts = line.split()
+        # <ISO> <stream> <verdict> <reason> <ticket>
+        if len(parts) < 3 or parts[2] != "BLOCK":
+            continue
+        _tally(dm.group(1), parts[1] or "unknown", "gate-block")
+        total += 1
+
+    # Source 2: revert-note lines (`stream=<s>` field).
+    for line in _read_lines(revert_log_path):
+        dm = _BYPASS_DATE_RE.match(line)
+        if not dm or dm.group(1) < since_day:
+            continue
+        sm = _SS_STREAM_RE.search(line)
+        _tally(dm.group(1), sm.group(1) if sm else "unknown", "revert")
+        total += 1
+
+    return {"per_stream": per_stream, "per_day": per_day,
+            "per_source": per_source, "total": total}
