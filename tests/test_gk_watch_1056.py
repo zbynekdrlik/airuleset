@@ -147,5 +147,68 @@ class WatchIssueStates(unittest.TestCase):
         self.assertEqual(r["head_ts"], 42.0)
 
 
+class GkWatchIssueWrapper(unittest.TestCase):
+    """airuleset.gk_watch_issue wiring — an injected fetch bypasses slug
+    resolution + the rate guard (the CLI dry-run seam)."""
+
+    def test_injected_fetch_bounce_unanswered(self):
+        import airuleset
+        rows = [
+            _row(1, STREAM, RFR_BODY, "2026-09-17T10:00:00Z"),
+            _row(2, GK, BOUNCE_BODY, "2026-09-17T11:00:00Z"),
+        ]
+        r = airuleset.gk_watch_issue(
+            5, gk_login=GK, self_login=STREAM,
+            fetch_fn=lambda _i: rows, head_ts_fn=lambda _i: None,
+            now=gw._parse_iso("2026-09-17T13:00:00Z"))
+        self.assertEqual(r["state"], "bounce-unanswered")
+
+    def test_default_gk_login_is_maintainer(self):
+        import airuleset
+        rows = [_row(2, airuleset.MAINTAINER_GH_LOGIN, BOUNCE_BODY,
+                     "2026-09-17T11:00:00Z")]
+        r = airuleset.gk_watch_issue(
+            5, self_login=STREAM, fetch_fn=lambda _i: rows,
+            head_ts_fn=lambda _i: None,
+            now=gw._parse_iso("2026-09-17T13:00:00Z"))
+        self.assertEqual(r["state"], "bounce-unanswered")
+
+
+class CmdGkWatchJson(unittest.TestCase):
+    def test_cli_json_dry_run_against_fake_fetch(self):
+        import argparse
+        import io
+        import json as _json
+        from contextlib import redirect_stdout
+        import airuleset
+
+        rows = {
+            "5": [_row(2, GK, BOUNCE_BODY, "2026-09-17T11:00:00Z")],
+            "6": [_row(9, STREAM, "hi", "2026-09-17T10:00:00Z")],
+        }
+        orig = airuleset.gk_watch_issue
+
+        def fake(issue, **kw):
+            return orig(issue, gk_login=GK, self_login=STREAM,
+                        fetch_fn=lambda _i: rows.get(str(issue)),
+                        head_ts_fn=lambda _i: None,
+                        now=gw._parse_iso("2026-09-17T13:00:00Z"))
+
+        airuleset.gk_watch_issue = fake
+        try:
+            args = argparse.Namespace(issues=["5", "6"], repo=None,
+                                      gk_login=None, json=True)
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                rc = airuleset.cmd_gk_watch(args)
+        finally:
+            airuleset.gk_watch_issue = orig
+        self.assertEqual(rc, 0)
+        out = _json.loads(buf.getvalue())
+        by = {r["issue"]: r["state"] for r in out}
+        self.assertEqual(by[5], "bounce-unanswered")
+        self.assertEqual(by[6], "no-gk-comment")
+
+
 if __name__ == "__main__":
     unittest.main()
