@@ -159,7 +159,10 @@ def _card_reopen_flow(repo, issue, remark_text, gh_fn=None):
     automated meaning at all (job 8's `bounce_backstop` only ever queries
     enrolled repos, per its own established discipline against reading a
     bare `prio:bounce` on an unrelated repo as a protocol artifact) — it is
-    just a normal, human-visible priority tag here."""
+    just a normal, human-visible priority tag here. Enrolment is by repo
+    SLUG (`repo_identity` — the GitHub repo name from the tickets-status
+    cache / git remote), never the checkout directory basename, so a
+    client-named odoo-erp checkout still counts as enrolled (#1068)."""
     call = gh_fn or watchdog._gh_call
     call(["gh", "issue", "reopen", str(issue), "-R", repo])
     ok, _out = call(["gh", "issue", "comment", str(issue), "-R", repo, "-F", "-"],
