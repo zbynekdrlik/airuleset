@@ -3871,6 +3871,7 @@ def cmd_tickets_status(args):
             if failed:
                 entry["open"] = None
                 entry["gk"] = None
+                entry["bounce"] = None                 # #1056 L1
                 entry["user_waiting"] = None
                 entry["user_waiting_numbers"] = None   # #1025
                 entry["ops_wait"] = None
@@ -3895,6 +3896,11 @@ def cmd_tickets_status(args):
                 gk = sum(1 for n_num in workable_rows if handed.get(n_num))
                 entry["open"] = len(workable_rows) - gk
                 entry["gk"] = gk
+                # #1056 L1: `· bounce K` — open prio:bounce tickets in this
+                # box's slice, from the SAME workable rows (a subset of the
+                # WORKABLE slice = open ∪ gk, never a second query; #367
+                # one-derivation).
+                entry["bounce"] = _count_bounce(workable_rows)
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)
                 # #948: question-map-aware U supplement — see the full
@@ -6552,7 +6558,7 @@ _INFRA_COMMENT_TRACK_CAP = 25
 _INFRA_COMMENT_BUDGET_S = 60
 
 
-def _infra_ticket_comments(number, root, since_iso=None):
+def _infra_ticket_comments(number, root, since_iso=None, slug=None):
     """The RAW comments on issue `number` in the repo at `root` (a list of
     `{id, body, html_url}` dicts), bounded by `since_iso` when given. The
     tag-FILTERING lives in `_watchdog_infra_queue_fetch` (its caller), so this
@@ -6568,7 +6574,7 @@ def _infra_ticket_comments(number, root, since_iso=None):
     and never advances the baseline past a real arrival); [] only for a
     genuinely empty (rc 0) result."""
     import subprocess
-    slug = _repo_slug(cwd=root)
+    slug = slug or _repo_slug(cwd=root)
     if not slug:
         return None
     path = "repos/%s/issues/%s/comments?per_page=100" % (slug, number)
@@ -6591,9 +6597,136 @@ def _infra_ticket_comments(number, root, since_iso=None):
         except (ValueError, TypeError):
             continue
         if isinstance(c, dict) and "id" in c:
+            # #1056 L1: `login` (REST user.login) + `created_at` added to the
+            # projection so this ONE paginated reader also feeds cli_gk_watch
+            # (the gk hand-off state primitive) — additive keys, so the existing
+            # infra-queue caller is unaffected.
             rows.append({"id": c.get("id"), "body": c.get("body") or "",
-                         "html_url": c.get("html_url") or ""})
+                         "html_url": c.get("html_url") or "",
+                         "login": (c.get("user") or {}).get("login") or "",
+                         "created_at": c.get("created_at") or ""})
     return rows
+
+
+def _pr_head_commit_ts(issue, slug, root=None):
+    """Epoch of the newest commit on the PR branch linked to `issue`, or None
+    when unresolvable (#1056 L1). Best-effort — None makes the blind-label-flip
+    gate treat it as 'no commit since the verdict' (the safe block direction).
+    Picks the PR whose body carries an exact `#<issue>` reference; a single
+    matching PR with no exact ref is accepted as the sole candidate."""
+    import cli_gk_watch
+    raw = _gh_out("pr", "list", "--repo", slug, "--search", str(issue),
+                  "--state", "all", "--json", "number,headRefOid,body",
+                  "-L", "20", cwd=root)
+    if not raw:
+        return None
+    try:
+        prs = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(prs, list) or not prs:
+        return None
+    # #1056 review R1: require a CLOSING reference (Closes/Fixes/Resolves #N),
+    # not a bare `#N` mention (a PR that merely "supersedes #N" is the wrong
+    # PR), and NO single-PR fallback — when the closing PR cannot be pinned,
+    # return None so the gate treats it as 'no commit since the verdict' (blocks,
+    # the safe direction), never a wrong ALLOW off a misidentified PR.
+    close_ref = re.compile(
+        r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#%d\b" % int(issue),
+        re.IGNORECASE)
+    cand = None
+    for pr in prs:
+        if isinstance(pr, dict) and close_ref.search(pr.get("body") or ""):
+            cand = pr
+            break
+    if not isinstance(cand, dict):
+        return None
+    oid = cand.get("headRefOid")
+    if not oid:
+        return None
+    # author.date (not committer.date) resists a rebase that bumps committer
+    # dates with no new work from falsely reading as a fresh fix (#1056 review R1).
+    d = _gh_out("api", "repos/%s/commits/%s" % (slug, oid),
+                "-q", ".commit.author.date", cwd=root)
+    return cli_gk_watch._parse_iso(d) if d else None
+
+
+def gk_watch_issue(issue, *, cwd=None, repo_slug=None, gk_login=None,
+                   self_login=None, fetch_fn=None, head_ts_fn=None,
+                   now=None, rate_guard=True):
+    """The gk hand-off state for ticket `issue` (#1056 L1), wiring the real
+    fetch + login/slug/head resolution into `cli_gk_watch.watch_issue`. Returns
+    the state dict; `state == "unknown"` on any gh error / an unresolvable slug
+    / a low gh budget (when `rate_guard`). Shared by the CLI, Job 8, and the
+    blind-label-flip gate.
+
+    Every gh read goes through the existing helpers (`_repo_slug`, `_gh_out`,
+    `_infra_ticket_comments`), honouring the gh-rate guard: when `rate_guard`
+    and the shared core budget is below the poll floor, the fetch is skipped
+    (→ unknown, fail-open, never a wrong state). A caller that injects its own
+    `fetch_fn` (tests, the CLI dry-run) bypasses both slug resolution and the
+    rate guard."""
+    import cli_gk_watch
+    unknown = {"issue": issue, "state": "unknown", "gk_login": gk_login,
+               "gk_latest": None, "rfr": None, "head_ts": None,
+               "age_seconds": None, "undispositioned_ids": []}
+    slug = repo_slug
+    if fetch_fn is None:
+        slug = slug or _repo_slug(cwd=cwd)
+        if not slug:
+            return unknown
+        if rate_guard:
+            try:
+                import cli_gh_rate
+                if cli_gh_rate.backoff_seconds(
+                        "core", cli_gh_rate.read_status()) > 0:
+                    return unknown       # low budget -> skip (fail-open)
+            except Exception as _e:
+                # airuleset:script-ok fail-open: the rate guard is a pure-additive
+                # optimisation (the _graphql_budget_ok contract); a guard error
+                # must never turn a resolvable state into `unknown`.
+                sys.stderr.write("gk-watch: rate-guard skipped (%s)\n" % _e)
+    gk_login = gk_login or MAINTAINER_GH_LOGIN
+    if self_login is None:
+        self_login = _stream_self_login()
+    fetch = fetch_fn or (lambda iss: _infra_ticket_comments(iss, cwd, slug=slug))
+    if head_ts_fn is None and fetch_fn is None:
+        head_ts_fn = lambda iss: _pr_head_commit_ts(iss, slug, root=cwd)  # noqa: E731
+    from cli_quals import _is_own_login
+    return cli_gk_watch.watch_issue(
+        issue, fetch=fetch, gk_login=gk_login, self_login=self_login,
+        head_ts_fn=head_ts_fn, now=now, is_own_login=_is_own_login)
+
+
+def cmd_gk_watch(args):
+    """`airuleset.py gk-watch --issues N [N...] [--repo owner/name]
+    [--gk-login X] [--json]` (#1056 L1 / #1057 items 1, 2) — per ticket, the gk
+    hand-off state (bounce-unanswered / needs-disposition / rfr-current /
+    no-gk-comment / unknown), so streams never hand-roll `since=` watchers."""
+    slug = getattr(args, "repo", None) or None
+    gk_login = getattr(args, "gk_login", None) or None
+    as_json = getattr(args, "json", False)
+    results = []
+    for n in args.issues:
+        # rate_guard=False: an explicit user CLI invocation always runs.
+        results.append(gk_watch_issue(int(n), repo_slug=slug,
+                                      gk_login=gk_login, rate_guard=False))
+    if as_json:
+        print(json.dumps(results, default=str, indent=2))
+        return 0
+    for r in results:
+        line = "#%s: %s" % (r["issue"], r["state"])
+        gl = r.get("gk_latest") or {}
+        if r["state"] == "bounce-unanswered":
+            hrs = (r.get("age_seconds") or 0) / 3600.0
+            ids = ",".join(r.get("undispositioned_ids") or []) or "-"
+            line += "  gk-comment=%s  unanswered=%.1fh  ids=%s" % (
+                gl.get("id"), hrs, ids)
+        elif r["state"] == "needs-disposition":
+            ids = ",".join(r.get("undispositioned_ids") or []) or "-"
+            line += "  ids=%s" % ids
+        print(line)
+    return 0
 
 
 def _watchdog_infra_queue_fetch(cwd, clock=None):
@@ -8477,6 +8610,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _row_is_ops_wait as _row_is_ops_wait,
     _ops_wait_reason as _ops_wait_reason,
     _partition_workable as _partition_workable,
+    _count_bounce as _count_bounce,
     _acceptance_present_set as _acceptance_present_set,
     _question_map_u_supplement as _question_map_u_supplement,
     _comment_carries_question as _comment_carries_question,
@@ -9241,6 +9375,18 @@ def main():
                        help="New ticket body from a file (backtick-safe)")
     p_gkr.add_argument("--comment",
                        help="Request text for --issue mode (Slovak, plain)")
+
+    p_gkw = sub.add_parser(
+        "gk-watch",
+        help="Per-ticket gk hand-off state (#1056 L1): bounce-unanswered / "
+             "needs-disposition / rfr-current / no-gk-comment / unknown")
+    p_gkw.add_argument("--issues", nargs="+", required=True, metavar="N",
+                       help="Issue number(s) to classify")
+    p_gkw.add_argument("--repo", help="owner/name (default: current repo)")
+    p_gkw.add_argument("--gk-login", dest="gk_login",
+                       help="Gatekeeper login override (default: the maintainer)")
+    p_gkw.add_argument("--json", action="store_true",
+                       help="Emit the full structured state as JSON")
 
     p_ho = sub.add_parser(
         "handoff",
@@ -10287,6 +10433,7 @@ SUBCOMMANDS = {
     "secret": cmd_secret,
     "tickets-status": cmd_tickets_status,
     "gk-request": cmd_gk_request,
+    "gk-watch": cmd_gk_watch,
     "handoff": cmd_handoff,
     "autopilot-lock": cmd_autopilot_lock,
     "onboard-project": cmd_onboard_project,

@@ -422,6 +422,14 @@ was cut back; `tests/test_goal_backlog_proof.py` now locks the cap):
   tokenizes quoted phrases (the 2026-07-24 `in:title` false match), so it over-matches, and
   over-counting the obligation set is the never-stops failure again. A hand-off whose label the
   repo's `subdev-handoff-label.yml` workflow failed to add is the known residual.
+  **#1056 L1 — the hand-off labels are BOT/composer-owned, never hand-flipped by a reduced-authority
+  stream:** a worker does NOT add `ready-for-review` or remove `prio:bounce` itself (the
+  READY-FOR-REVIEW composer clears the bounce only when it posts a valid, advisory-dispositioned
+  RFR), and `hooks/block-blind-label-flip.sh` BLOCKS a manual `--remove-label prio:bounce` /
+  `--add-label ready-for-review` while a gk BOUNCE verdict is newer than the last RFR with no commit
+  since — so a hand-off label reflects a real composer RFR, not a blind flip (the odoo-erp
+  #5613/#6890 incident, 16.–17.9.2026). A stream reads its bounce state with
+  `airuleset.py gk-watch --issues N…` (surfaced as the footer `· bounce K` + the Job-8 nudge).
 - **`✅ DONE:` never satisfies (B)** because it is the per-ticket CONTINUE terminator. camera-box
   stopped on exactly that with 129 issues open (2026-07-28), in a turn that had itself just filed
   another one.

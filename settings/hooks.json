@@ -73,6 +73,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-blind-label-flip.sh",
+            "timeout": 15
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-handoff-without-composer.sh",
             "timeout": 10
           },

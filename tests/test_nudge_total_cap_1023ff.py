@@ -38,36 +38,43 @@ MIN = 60
 
 
 class TestTotalGapConstant(unittest.TestCase):
-    def test_total_gap_default_is_one_hour(self):
-        self.assertEqual(ng.NUDGE_TOTAL_GAP_S, HOUR)
-        self.assertEqual(ng.NUDGE_TOTAL_GAP_MIN_S, HOUR)
+    def test_total_gap_default_is_three_hours(self):
+        # Owner decision 2026-09-17 07:1x CEST ("3" on #1023): the cross-kind
+        # total cap is 3 h per pane EVERYWHERE (gk has two Fable panes, so the
+        # former 1 h read as two interruptions an hour). The hard floor moves
+        # with it: env can only RAISE above 3 h.
+        self.assertEqual(ng.NUDGE_TOTAL_GAP_S, 3 * HOUR)
+        self.assertEqual(ng.NUDGE_TOTAL_GAP_MIN_S, 3 * HOUR)
 
     def test_total_gap_env_can_only_raise(self):
         # #504/#543 floor-clamp: the env override can RAISE but never lower the
-        # owner's hard 1 h total cap.
+        # owner's hard 3 h total cap (2026-09-17).
         with m.patch.dict(os.environ, {"AIRULESET_NUDGE_TOTAL_GAP_S": "5"}):
-            self.assertEqual(ng._total_gap(), HOUR)
-        with m.patch.dict(os.environ,
-                          {"AIRULESET_NUDGE_TOTAL_GAP_S": str(3 * HOUR)}):
             self.assertEqual(ng._total_gap(), 3 * HOUR)
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_NUDGE_TOTAL_GAP_S": str(4 * HOUR)}):
+            self.assertEqual(ng._total_gap(), 4 * HOUR)
 
     def test_total_gap_garbage_env_falls_back(self):
         with m.patch.dict(os.environ,
                           {"AIRULESET_NUDGE_TOTAL_GAP_S": "not-a-number"}):
-            self.assertEqual(ng._total_gap(), HOUR)
+            self.assertEqual(ng._total_gap(), 3 * HOUR)
 
 
 class TestGateOkTotalCap(unittest.TestCase):
     """Dispatch RED cases (1)/(2)/(4)."""
 
     def test_case1_other_kind_held_by_total_cap_then_allowed(self):
-        # (1) kind A at t, kind B eligible at t+45m -> held; at t+61m -> allowed.
+        # (1) kind A at t, kind B eligible at t+45m -> held; at t+61m -> STILL
+        # held (the owner's 3 h total cap, 2026-09-17); at t+181m -> allowed.
         st = {}
         ng.mark_sent(st, "s", "queue-arrival", NOW)          # kind A
         self.assertFalse(ng.gate_ok(st, "s", "release-gap", NOW + 45 * MIN),
                          "a DIFFERENT kind within the total cap must be HELD")
-        self.assertTrue(ng.gate_ok(st, "s", "release-gap", NOW + 61 * MIN),
-                        "past the total gap the other kind is allowed")
+        self.assertFalse(ng.gate_ok(st, "s", "release-gap", NOW + 61 * MIN),
+                         "1 h is inside the 3 h total cap — still HELD")
+        self.assertTrue(ng.gate_ok(st, "s", "release-gap", NOW + 181 * MIN),
+                        "past the 3 h total gap the other kind is allowed")
 
     def test_case2_same_kind_is_floor_not_total_cap(self):
         # (2) kind A at t, kind A at t+45m -> held by the per-kind FLOOR
@@ -86,15 +93,16 @@ class TestGateOkTotalCap(unittest.TestCase):
         ng.mark_sent(st, "s", "queue-arrival", NOW)
         with m.patch.dict(os.environ, {"AIRULESET_NUDGE_TOTAL_GAP_S": "5"}):
             self.assertFalse(ng.gate_ok(st, "s", "release-gap", NOW + 45 * MIN),
-                             "env cannot lower the total cap below 1 h")
+                             "env cannot lower the total cap below 3 h")
 
     def test_env_raise_extends_the_total_cap(self):
         st = {}
         ng.mark_sent(st, "s", "queue-arrival", NOW)
         with m.patch.dict(os.environ,
-                          {"AIRULESET_NUDGE_TOTAL_GAP_S": str(2 * HOUR)}):
-            self.assertFalse(ng.gate_ok(st, "s", "release-gap", NOW + 90 * MIN))
-            self.assertTrue(ng.gate_ok(st, "s", "release-gap", NOW + 2 * HOUR))
+                          {"AIRULESET_NUDGE_TOTAL_GAP_S": str(4 * HOUR)}):
+            self.assertFalse(ng.gate_ok(st, "s", "release-gap",
+                                        NOW + 3 * HOUR + 30 * MIN))
+            self.assertTrue(ng.gate_ok(st, "s", "release-gap", NOW + 4 * HOUR))
 
     def test_empty_state_allows(self):
         self.assertTrue(ng.gate_ok({}, "s", "release-gap", NOW))
@@ -176,9 +184,10 @@ class TestBatchEligibleTotalCap(unittest.TestCase):
     def test_batch_opens_when_total_cap_expires(self):
         st = {}
         ng.mark_sent(st, "s", "queue-arrival", NOW)
-        result = ng.batch_eligible(st, "s", NOW + HOUR)
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + HOUR), [])   # 3 h cap
+        result = ng.batch_eligible(st, "s", NOW + 3 * HOUR)
         self.assertGreater(len(result), 0)
-        self.assertIn("queue-arrival", result)   # its own floor just expired too
+        self.assertIn("queue-arrival", result)   # its own floor expired long ago
         self.assertIn("partition-audit", result)
 
     def test_empty_state_all_eligible(self):
