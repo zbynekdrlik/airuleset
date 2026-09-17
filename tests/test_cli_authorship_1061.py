@@ -118,6 +118,13 @@ class TestStampLine(unittest.TestCase):
         line = cli_authorship.stamp_line("Design", cwd, projects_dir=str(self.pd))
         self.assertEqual(line, "Design-by: main unknown")
 
+    def test_authorship_value_is_role_and_model(self):
+        cwd = "/home/airuleset/devel/airuleset"
+        _write_transcript(self.pd / encode_project_dir(cwd), "claude-fable-5-1")
+        self.assertEqual(
+            cli_authorship.authorship_value(cwd, projects_dir=str(self.pd)),
+            "main claude-fable-5-1")
+
 
 if __name__ == "__main__":
     unittest.main()
