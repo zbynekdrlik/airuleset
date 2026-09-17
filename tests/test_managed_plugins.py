@@ -30,6 +30,7 @@ import airuleset
 # Plain READS of `airuleset.MANAGED_PLUGINS` etc. still work via the facade
 # re-export and stay unchanged.
 import cli_caveman_plugins
+import cli_playwright_mcp  # #1058: Playwright provisioning split into its own leaf
 
 
 def _write_plugin_registry(claude_dir: Path, keys):
@@ -384,7 +385,7 @@ class TestPlaywrightBrowsers(TestCase):
         # INSTALLATION_COMPLETE marker files (the incident: a half download left
         # chromium-<b> ONLY and the predicate false-positived it as done).
         d = Path(tempfile.mkdtemp())
-        b = cli_caveman_plugins.PLAYWRIGHT_CHROMIUM_BUILD
+        b = cli_playwright_mcp.PLAYWRIGHT_CHROMIUM_BUILD
         for name in ("chromium-" + b, "chromium_headless_shell-" + b):
             sub = d / name
             sub.mkdir()
@@ -395,7 +396,7 @@ class TestPlaywrightBrowsers(TestCase):
         # the montalu3-6 live half state: chromium-<b> (complete) but NO
         # chromium_headless_shell-<b> — must NOT count as installed.
         d = Path(tempfile.mkdtemp())
-        b = cli_caveman_plugins.PLAYWRIGHT_CHROMIUM_BUILD
+        b = cli_playwright_mcp.PLAYWRIGHT_CHROMIUM_BUILD
         sub = d / ("chromium-" + b)
         sub.mkdir()
         (sub / "INSTALLATION_COMPLETE").touch()
@@ -423,7 +424,7 @@ class TestPlaywrightBrowsers(TestCase):
     def test_no_op_when_playwright_not_managed(self):
         # #1048: the guard now keys on PLAYWRIGHT_MANAGED — a genuine no-op
         # needs the managed Playwright turned off (the one-flag opt-out).
-        with m.patch.object(cli_caveman_plugins, "PLAYWRIGHT_MANAGED", False), \
+        with m.patch.object(cli_playwright_mcp, "PLAYWRIGHT_MANAGED", False), \
                 m.patch("subprocess.run") as run:
             airuleset.ensure_playwright_browsers(self._empty_dir())
         run.assert_not_called()
@@ -462,7 +463,7 @@ class TestPlaywrightBrowsers(TestCase):
             airuleset.ensure_playwright_browsers(self._populated_dir())
         run.assert_called_once()
         argv = run.call_args[0][0]
-        self.assertEqual(argv[2], "playwright@" + cli_caveman_plugins.PLAYWRIGHT_PW_VERSION)
+        self.assertEqual(argv[2], "playwright@" + cli_playwright_mcp.PLAYWRIGHT_PW_VERSION)
 
     def test_installs_the_pinned_playwright_into_the_resolved_path(self):
         # #1048: the version is PINNED (never @latest) and the target dir is
@@ -475,7 +476,7 @@ class TestPlaywrightBrowsers(TestCase):
         run.assert_called_once()
         argv = run.call_args[0][0]
         self.assertEqual(argv, ["npx", "--yes",
-                                "playwright@" + cli_caveman_plugins.PLAYWRIGHT_PW_VERSION,
+                                "playwright@" + cli_playwright_mcp.PLAYWRIGHT_PW_VERSION,
                                 "install", "chromium"])
         self.assertNotIn("@latest", argv[2])
         env = run.call_args.kwargs["env"]
@@ -626,7 +627,7 @@ class TestPlaywrightBrowsers(TestCase):
 
     def _complete_per_user_cache(self):
         d = self._per_user_cache_dir()
-        b = cli_caveman_plugins.PLAYWRIGHT_CHROMIUM_BUILD
+        b = cli_playwright_mcp.PLAYWRIGHT_CHROMIUM_BUILD
         for name in ("chromium-" + b, "chromium_headless_shell-" + b):
             sub = d / name
             sub.mkdir()
@@ -976,7 +977,7 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
         out = StringIO()
         with m.patch.object(airuleset, "CLAUDE_DIR", d), \
                 m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
-                m.patch.object(cli_caveman_plugins, "PLAYWRIGHT_BROWSER_CACHE", playwright_cache), \
+                m.patch.object(cli_playwright_mcp, "PLAYWRIGHT_BROWSER_CACHE", playwright_cache), \
                 m.patch("subprocess.run") as run, \
                 m.patch("sys.stderr", out):
             ok = airuleset.setup_managed_plugins()
@@ -1103,7 +1104,7 @@ class TestStaleInstallPathHealing(TestCase):
         (playwright_cache / "chromium-1234").mkdir()
         with m.patch.object(airuleset, "CLAUDE_DIR", d), \
                 m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
-                m.patch.object(cli_caveman_plugins, "PLAYWRIGHT_BROWSER_CACHE",
+                m.patch.object(cli_playwright_mcp, "PLAYWRIGHT_BROWSER_CACHE",
                                playwright_cache), \
                 m.patch("subprocess.run") as run:
             ok = airuleset.setup_managed_plugins()
@@ -1127,7 +1128,7 @@ class TestStaleInstallPathHealing(TestCase):
         (playwright_cache / "chromium-1234").mkdir()
         with m.patch.object(airuleset, "CLAUDE_DIR", d), \
                 m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
-                m.patch.object(cli_caveman_plugins, "PLAYWRIGHT_BROWSER_CACHE",
+                m.patch.object(cli_playwright_mcp, "PLAYWRIGHT_BROWSER_CACHE",
                                playwright_cache), \
                 m.patch("subprocess.run") as run:
             ok = airuleset.setup_managed_plugins()

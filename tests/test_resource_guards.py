@@ -491,5 +491,26 @@ class TestSwapPolicy925C(unittest.TestCase):
         self.assertIn("/swapfile none swap sw 0 0", s)
 
 
+class TestSharedPlaywrightPin1058(unittest.TestCase):
+    """#1058: the #950-B root apply-script that installs the shared /opt copy MUST
+    install the PINNED playwright, not an unpinned `playwright install` (which
+    resolves to @latest and produces exactly the mismatched /opt the #1058
+    class-agnostic resolver then ignores — so the #950 shared copy never
+    activates + item 7's runbook and this apply script would disagree)."""
+
+    def test_shared_block_pins_the_playwright_version(self):
+        import cli_playwright_mcp
+        block = g._render_playwright_shared_block()
+        self.assertIn(
+            "playwright@" + cli_playwright_mcp.PLAYWRIGHT_PW_VERSION + " install chromium",
+            block,
+            "the shared /opt install must be PINNED to PLAYWRIGHT_PW_VERSION")
+
+    def test_shared_block_has_no_bare_unpinned_install(self):
+        block = g._render_playwright_shared_block()
+        self.assertNotIn("npx -y playwright install chromium", block,
+                         "no bare (unpinned) `playwright install` — it resolves to @latest")
+
+
 if __name__ == "__main__":
     unittest.main()

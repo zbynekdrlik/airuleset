@@ -110,6 +110,13 @@ jobs:
         # step above) or the FULL-authority-gated subset stays RED.
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          # #1058 item 5: unlock the dep-edge lock (test_playwright_browsers_path_1058:
+          # @playwright/mcp@<MCP> must depend on the pinned playwright@<PW>). It is
+          # skipUnless(AIRULESET_NET_TESTS=="1") so it stays SKIPPED for local/
+          # hermetic runs. UNDER the var a registry/network error FAILS the gate
+          # (never skips — a skip-in-disguise would silently remove the lock while
+          # the gate stays green); one CI rerun is the sanctioned transient check.
+          AIRULESET_NET_TESTS: "1"
         run: |
           # Write args to a file FIRST so a failing generator fails the step
           # (a `mapfile < <(...)` process substitution swallows the child's

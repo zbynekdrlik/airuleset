@@ -114,7 +114,16 @@ class TestDeferredBackRefsReadAiruleset(TestCase):
 
 
 class TestMovedConstantsAreLeafLocal(TestCase):
-    """The repoint mandate: patch the LEAF, not the facade. Proven with teeth."""
+    """The repoint mandate: patch the LEAF, not the facade. Proven with teeth.
+
+    #1058: the Playwright names (PLAYWRIGHT_BROWSER_CACHE +
+    _playwright_browsers_installed etc.) moved on to their OWN leaf
+    (cli_playwright_mcp.py), so their leaf-local BITE proof now lives in
+    tests/test_cli_playwright_mcp_split.py. cli_caveman_plugins STILL re-exports
+    those names (the facade identity above), so they stay in REEXPORTED — only
+    the "patch cli_caveman_plugins and it bites the reader" claim moved with the
+    reader. The MANAGED_PLUGINS proof below stays here (its reader,
+    reconcile_managed_plugins, stayed in cli_caveman_plugins)."""
 
     def test_MANAGED_PLUGINS_leaf_patch_bites_facade_patch_is_noop(self):
         # leaf patch BITES
@@ -127,21 +136,6 @@ class TestMovedConstantsAreLeafLocal(TestCase):
             out = leaf.reconcile_managed_plugins({})
         self.assertNotIn("facade@mkt", out["enabledPlugins"],
                          "an airuleset.MANAGED_PLUGINS patch must NOT reach the leaf")
-
-    def test_PLAYWRIGHT_BROWSER_CACHE_leaf_patch_bites_facade_patch_is_noop(self):
-        populated = Path(tempfile.mkdtemp())
-        (populated / "chromium-1").mkdir()
-        empty = Path(tempfile.mkdtemp())
-        # leaf patch BITES (default cache_dir=None -> leaf PLAYWRIGHT_BROWSER_CACHE)
-        with m.patch.object(leaf, "PLAYWRIGHT_BROWSER_CACHE", populated):
-            self.assertTrue(leaf._playwright_browsers_installed())
-        with m.patch.object(leaf, "PLAYWRIGHT_BROWSER_CACHE", empty):
-            self.assertFalse(leaf._playwright_browsers_installed())
-        # facade patch is a NO-OP: leaf still reads its own real (empty) cache
-        with m.patch.object(airuleset, "PLAYWRIGHT_BROWSER_CACHE", populated), \
-                m.patch.object(leaf, "PLAYWRIGHT_BROWSER_CACHE", empty):
-            self.assertFalse(leaf._playwright_browsers_installed(),
-                             "an airuleset.PLAYWRIGHT_BROWSER_CACHE patch must NOT reach the leaf")
 
 
 if __name__ == "__main__":
