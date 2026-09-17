@@ -64,8 +64,15 @@ def _default_git_run(argv, timeout=10):
     Genuinely shared: NOT compact-owned, even though it used to sit inside
     the (now-deleted, #402) compact block purely by physical proximity to
     `compact_boundary_substantial`'s own `_git_commit_count_since` helper,
-    which WAS compact-only and is gone with it."""
+    which WAS compact-only and is gone with it.
+
+    #1055 P2 (a): every git call here is timed + recorded in the per-sweep
+    subprocess counter (label `git`), so the journal `subprocess:` line counts
+    the card/delivery git spend too, not just tmux/gh/ps."""
     import subprocess
+    import time
+    from watchdog.subprocess_budget import record_subprocess
+    _t0 = time.monotonic()
     try:
         r = subprocess.run(argv, capture_output=True, text=True,
                             timeout=timeout)
@@ -74,6 +81,8 @@ def _default_git_run(argv, timeout=10):
         return r.stdout
     except Exception:
         return None
+    finally:
+        record_subprocess("git", time.monotonic() - _t0)
 
 
 # #1055 P2 (c) -- how often `card_reconcile` runs its `reopen_fetch`
@@ -104,11 +113,22 @@ def _reopen_fetch_due(state, root, now, ttl=REOPEN_FETCH_TTL_S):
 
 def _git_first_line(cwd, argv, git_run=None):
     """One `git -C <cwd> …` call, stripped. None on any failure OR empty
-    output — never a partial guess."""
-    out = (git_run or _default_git_run)(["git", "-C", str(cwd)] + list(argv))
-    if out is None:
-        return None
-    return out.strip() or None
+    output — never a partial guess.
+
+    #1055 P2 (b): memoized per `(cwd, argv)` within a sweep, so the repeated
+    per-SID `rev-parse --show-toplevel` / `_git_base_ref` reads in
+    `card_reconcile` (and any other same-sweep repeat of the SAME git query)
+    collapse to ONE git call per distinct (cwd, argv). Outside a sweep (memo
+    inactive) every call runs fresh -- direct/test behaviour is unchanged."""
+    from watchdog.subprocess_budget import memoized
+
+    def _compute():
+        out = (git_run or _default_git_run)(["git", "-C", str(cwd)] + list(argv))
+        if out is None:
+            return None
+        return out.strip() or None
+
+    return memoized(("gitline", str(cwd), tuple(argv)), _compute)
 
 
 def _git_base_ref(cwd, git_run=None):

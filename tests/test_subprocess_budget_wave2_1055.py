@@ -131,6 +131,87 @@ class TestReopenFetchTTL(unittest.TestCase):
         self.assertEqual(len(calls), 2, "reopen_fetch fires again past 900s")
 
 
+class TestGitFetchSharedMemo(unittest.TestCase):
+    """(b) card_probe + delivery_probe share ONE git fetch per (root, base)."""
+
+    def tearDown(self):
+        wd.end_sweep_memo()
+
+    def test_shared_git_fetch_runs_once_per_root_within_sweep(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(list(argv))
+            return None
+
+        wd.begin_sweep_memo()
+        a = airuleset._watchdog_shared_git_fetch("/repo", "origin/main", run=run)
+        b = airuleset._watchdog_shared_git_fetch("/repo", "origin/main", run=run)
+        wd.end_sweep_memo()
+        self.assertIsNone(a)
+        self.assertIsNone(b)
+        self.assertEqual(len(calls), 1, "the two probes share ONE fetch per sweep")
+        self.assertEqual(calls[0][:5],
+                         ["git", "-C", "/repo", "fetch", "--quiet"])
+
+    def test_shared_git_fetch_error_is_returned_and_memoized(self):
+        calls = []
+
+        def boom(argv, **kw):
+            calls.append(1)
+            raise RuntimeError("timeout")
+
+        wd.begin_sweep_memo()
+        a = airuleset._watchdog_shared_git_fetch("/repo", "origin/main", run=boom)
+        b = airuleset._watchdog_shared_git_fetch("/repo", "origin/main", run=boom)
+        wd.end_sweep_memo()
+        self.assertIn("fetch_error", a)
+        self.assertEqual(a, b)
+        self.assertEqual(len(calls), 1)
+
+    def test_not_shared_outside_sweep(self):
+        calls = []
+        airuleset._watchdog_shared_git_fetch(
+            "/repo", "origin/main", run=lambda a, **k: calls.append(1))
+        airuleset._watchdog_shared_git_fetch(
+            "/repo", "origin/main", run=lambda a, **k: calls.append(1))
+        self.assertEqual(len(calls), 2)
+
+
+class TestGitFirstLineMemo(unittest.TestCase):
+    """(b) `_git_first_line` collapses repeated same-(cwd,argv) git reads."""
+
+    def tearDown(self):
+        wd.end_sweep_memo()
+
+    def test_memoized_within_sweep(self):
+        calls = []
+
+        def git_run(argv, timeout=10):
+            calls.append(list(argv))
+            return "/repo\n"
+
+        wd.begin_sweep_memo()
+        a = cards._git_first_line("/repo", ["rev-parse", "--show-toplevel"],
+                                  git_run=git_run)
+        b = cards._git_first_line("/repo", ["rev-parse", "--show-toplevel"],
+                                  git_run=git_run)
+        wd.end_sweep_memo()
+        self.assertEqual((a, b), ("/repo", "/repo"))
+        self.assertEqual(len(calls), 1, "one git call per distinct (cwd, argv)")
+
+    def test_fresh_outside_sweep(self):
+        calls = []
+
+        def git_run(argv, timeout=10):
+            calls.append(1)
+            return "/repo\n"
+
+        cards._git_first_line("/repo", ["rev-parse", "--show-toplevel"], git_run=git_run)
+        cards._git_first_line("/repo", ["rev-parse", "--show-toplevel"], git_run=git_run)
+        self.assertEqual(len(calls), 2)
+
+
 class TestSubprocessBudgetHold(unittest.TestCase):
     """(e) a registry job with `max_subprocess` set is HELD once the sweep's
     subprocess count has reached the cap; the default None never holds."""

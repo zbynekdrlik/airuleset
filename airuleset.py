@@ -6101,20 +6101,41 @@ def _watchdog_card_probe(root, base):
     in every sweep — one hung fetch here used to still eat 90s of the 120s
     `TimeoutStartSec` unit budget on its own, leaving jobs 27/28 no chance
     to run at all even after their OWN timeouts were bounded.
+
+    #1055 P2 (b): the git fetch itself is delegated to
+    `_watchdog_shared_git_fetch`, memoized per (root, base) so job 24's
+    delivery_probe and job 25's card_probe share ONE fetch per repo per sweep.
     """
-    import subprocess
+    # Degrade to the local-only read rather than going quiet: an unreported
+    # ticket the user never hears about is the failure this job exists to
+    # prevent, and the worst case of a stale base ref is that the ping arrives
+    # a sweep later (a fetch error is returned so the caller degrades).
+    return _watchdog_shared_git_fetch(root, base)
+
+
+def _watchdog_shared_git_fetch(root, base, run=None):
+    """#1055 P2 (b) — the `git fetch --quiet --no-tags <remote> <branch>` that
+    BOTH job 24 (`_watchdog_delivery_probe`) and job 25 (`_watchdog_card_probe`)
+    perform for the SAME (root, base). Memoized per sweep so it runs ONCE per
+    repo instead of twice. Returns None on success, `{"fetch_error": <repr>}`
+    on a timeout / missing-git exception (a non-zero rc is NOT an error here —
+    the exact pre-#1055 behaviour, where only an EXCEPTION degraded the probe).
+    `run` is injectable for tests (default = a counted subprocess.run, label
+    `git`)."""
+    from watchdog.subprocess_budget import memoized, run_counted
     remote, _, branch = (base or "origin/main").partition("/")
-    try:
-        subprocess.run(["git", "-C", root, "fetch", "--quiet", "--no-tags",
-                        remote or "origin", branch or "main"],
-                       capture_output=True, timeout=15)
-    except Exception as e:
-        # Degrade to the local-only read rather than going quiet: an
-        # unreported ticket the user never hears about is the failure this
-        # job exists to prevent, and the worst case of a stale base ref is
-        # that the ping arrives a sweep later.
-        return {"fetch_error": repr(e)}
-    return None
+
+    def _compute():
+        try:
+            (run or run_counted)(
+                ["git", "-C", root, "fetch", "--quiet", "--no-tags",
+                 remote or "origin", branch or "main"],
+                label="git", capture_output=True, timeout=15)
+        except Exception as e:
+            return {"fetch_error": repr(e)}
+        return None
+
+    return memoized(("gitfetch", root, base), _compute)
 
 
 # #230: the fallback used to run `gh issue list --state closed`, which
@@ -6229,15 +6250,19 @@ def _watchdog_reopened_fetch(root, numbers):
     `numbers` (never per-issue), same cost shape as `_watchdog_closed_fetch`.
     `root` is a local checkout path — `gh` resolves owner/repo from its
     `origin` remote via `cwd=root`, no `-R` needed. Any failure degrades to
-    an EMPTY set: never guess a ticket reopened."""
-    import subprocess
+    an EMPTY set: never guess a ticket reopened.
+
+    #1055 P2 (a): counted in the per-sweep subprocess budget (label `gh`);
+    #1055 P2 (c): its call site in `card_reconcile` is 900s-TTL-gated so this
+    runs at most once per repo per 15 min, not every sweep."""
+    from watchdog.subprocess_budget import run_counted
     if not numbers:
         return set()
     try:
-        r = subprocess.run(
+        r = run_counted(
             ["gh", "issue", "list", "--state", "open",
              "--json", "number", "-L", "1000"],
-            cwd=root, capture_output=True, text=True, timeout=10)
+            label="gh", cwd=root, capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             return set()
         rows = json.loads(r.stdout or "[]")
@@ -6271,24 +6296,21 @@ def _watchdog_delivery_probe(root, base):
     sweep — one hung fetch or gh call here used to still eat most of the
     120s `TimeoutStartSec` unit budget on its own.
     """
-    import subprocess
-    remote, _, branch = (base or "origin/main").partition("/")
+    from watchdog.subprocess_budget import run_counted
+    # #1055 P2 (b): No fetch means no confirmation: job 24 then re-reads the
+    # SAME local refs, so its verdict simply stands and the job degrades to the
+    # local-only heuristic rather than going quiet. Deliberate — a MISSED
+    # delivery stall is the failure this job exists to prevent, and the price of
+    # the alternative is at most one extra ping a day. The fetch is shared with
+    # job 25's card_probe via `_watchdog_shared_git_fetch` (one per repo/sweep).
+    err = _watchdog_shared_git_fetch(root, base)
+    if err is not None:
+        return err
     try:
-        subprocess.run(["git", "-C", root, "fetch", "--quiet", "--no-tags",
-                        remote or "origin", branch or "main"],
-                       capture_output=True, timeout=15)
-    except Exception as e:
-        # No fetch means no confirmation: job 24 then re-reads the SAME local
-        # refs, so its verdict simply stands and the job degrades to the
-        # local-only heuristic rather than going quiet. Deliberate — a MISSED
-        # delivery stall is the failure this job exists to prevent, and the
-        # price of the alternative is at most one extra ping a day.
-        return {"fetch_error": repr(e)}
-    try:
-        r = subprocess.run(
+        r = run_counted(
             ["gh", "pr", "list", "--state", "open", "--limit", "5", "--json",
              "number,mergeStateStatus,statusCheckRollup"],
-            cwd=root, capture_output=True, text=True, timeout=10)
+            label="gh", cwd=root, capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             return None
         for pr in json.loads(r.stdout or "[]"):
@@ -7526,10 +7548,13 @@ def _watchdog_git_fetch(root):
     #172: timeout cut 90s -> 15s. One hung `git fetch` must never eat most
     of the 120s `TimeoutStartSec` unit budget — the repo-batch cap
     (`_repo_sweep_batch`, `AIRULESET_REPO_SWEEP_BATCH`) bounds how many
-    repos this costs per sweep; this bounds what ONE of them can cost."""
-    import subprocess
-    subprocess.run(["git", "-C", root, "fetch", "--quiet", "--no-tags",
-                    "origin"], capture_output=True, timeout=15, check=True)
+    repos this costs per sweep; this bounds what ONE of them can cost.
+
+    #1055 P2 (a): counted in the per-sweep subprocess budget (label `git`)."""
+    from watchdog.subprocess_budget import run_counted
+    run_counted(["git", "-C", root, "fetch", "--quiet", "--no-tags",
+                 "origin"], label="git", capture_output=True, timeout=15,
+                check=True)
 
 
 def _watchdog_issue_counts_fetch(repo_label, window_s):
