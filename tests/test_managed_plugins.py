@@ -624,6 +624,65 @@ class TestPlaywrightBrowsers(TestCase):
                 d, sleep=lambda s: None, sudo_ok=lambda: True, probe_rc=probe)
         probe.assert_not_called()
 
+    def _complete_per_user_cache(self):
+        d = self._per_user_cache_dir()
+        b = cli_caveman_plugins.PLAYWRIGHT_CHROMIUM_BUILD
+        for name in ("chromium-" + b, "chromium_headless_shell-" + b):
+            sub = d / name
+            sub.mkdir()
+            (sub / "INSTALLATION_COMPLETE").touch()
+        return d
+
+    def test_heals_an_already_installed_but_unlaunchable_per_user_cache(self):
+        # #1048 review-3 (MAJOR): a COMPLETE pinned cache whose headless shell
+        # exits 127 (spinbike-vps, complete since v0.1.321) MUST still be healed
+        # on a re-push. The old "already installed" early-return skipped the probe
+        # + install-deps, so the box stayed broken and the post-check failed 127
+        # forever. No re-install (build is complete) but install-deps runs once.
+        d = self._complete_per_user_cache()
+        calls = []
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+            return m.Mock(returncode=0, stderr="", stdout="")
+        with m.patch("shutil.which", return_value="/usr/bin/npx"), \
+                m.patch("subprocess.run", side_effect=fake_run):
+            airuleset.ensure_playwright_browsers(
+                d, sleep=lambda s: None, sudo_ok=lambda: True,
+                probe_rc=m.Mock(side_effect=[127, 0]))
+        install_calls = [a for a in calls
+                         if "install" in a and "install-deps" not in a]
+        deps_calls = [a for a in calls if "install-deps" in a]
+        self.assertEqual([], install_calls, "must NOT re-install a complete build")
+        self.assertEqual(1, len(deps_calls),
+                         "must heal an already-installed 127 cache via install-deps once")
+
+    def test_already_installed_healthy_per_user_cache_no_install_deps(self):
+        # #1048 review-3 guard: a complete cache whose headless shell launches
+        # (probe rc 0) needs no install-deps and no re-install.
+        d = self._complete_per_user_cache()
+        calls = []
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+            return m.Mock(returncode=0, stderr="", stdout="")
+        with m.patch("shutil.which", return_value="/usr/bin/npx"), \
+                m.patch("subprocess.run", side_effect=fake_run):
+            airuleset.ensure_playwright_browsers(
+                d, sleep=lambda s: None, sudo_ok=lambda: True, probe_rc=lambda p: 0)
+        self.assertFalse(any("install-deps" in a for a in calls))
+        self.assertFalse(any("install" in a and "install-deps" not in a for a in calls))
+
+    def test_already_installed_non_per_user_cache_is_not_probed(self):
+        # #1048 review-3: /opt (non per-user) complete build is never probed or
+        # healed even when already installed (root owns its libs).
+        d = self._pinned_build_dir()   # plain tmpdir, both halves + markers
+        probe = m.Mock(return_value=127)
+        with m.patch("shutil.which", return_value="/usr/bin/npx"), \
+                m.patch("subprocess.run") as run:
+            airuleset.ensure_playwright_browsers(
+                d, sleep=lambda s: None, sudo_ok=lambda: True, probe_rc=probe)
+        probe.assert_not_called()
+        run.assert_not_called()
+
 
 class TestMarketplaceSources(TestCase):
     """#273: a fresh account (montalu2/montalu3/montalu4) has NO marketplaces
