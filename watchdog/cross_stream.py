@@ -73,16 +73,80 @@ from pathlib import Path
 import watchdog
 
 
-def _repo_in_cross_stream_flow(root, cross_stream_repos=None):
+_GITHUB_REMOTE_RE = re.compile(
+    r"github\.com[:/]+[^/\s]+/([^/\s]+?)(?:\.git)?/?\s*$")
+
+
+def _parse_github_repo_name(url):
+    """The GitHub repo NAME (the last path segment, matching the tickets-status
+    cache convention `_repo_slug().rstrip('/').split('/')[-1]`) parsed from a
+    `remote.origin.url`, or None when the URL is not a github.com owner/repo
+    remote. Accepts both the SSH (`git@github.com:owner/repo.git`) and HTTPS
+    (`https://github.com/owner/repo`) shapes."""
+    m = _GITHUB_REMOTE_RE.search(str(url or "").strip())
+    return m.group(1) if m else None
+
+
+def repo_identity(root, cache_roots=None, *, git_remote=None, logs=None):
+    """The GitHub repo NAME for the checkout at `root` -- the identity every
+    cross-stream predicate keys on -- resolved WITHOUT trusting the checkout
+    directory's basename (#1068: montalu1's odoo-erp checkout is the
+    client-named `odoo-slovnormal`, so its basename is never `odoo-erp`).
+
+    Cache first: the tickets-status `{root: name}` map `_cache_repo_roots`
+    already builds (the box's own `gh repo view` result -- no subprocess). Else
+    the git remote (`git -C <root> config --get remote.origin.url`), as ONE
+    counted + per-sweep-memoized subprocess parsed to the repo name. Returns
+    None on any failure, so callers fail toward "not in flow"; when `logs` is a
+    list an unresolved identity records `repo-identity: unknown for <root>`
+    once per sweep (the memoized compute runs once per root per sweep).
+
+    `git_remote` (optional) is a `subprocess.run`-compatible runner for the git
+    read (`run(argv, **kwargs) -> CompletedProcess`), injected in tests; None
+    uses the real `subprocess.run` through `subprocess_budget.run_counted`, so
+    the read is counted in the sweep's `subprocess:` line."""
+    from watchdog.subprocess_budget import run_counted, memoized
+    root = str(root or "").rstrip("/")
+    if not root:
+        return None
+    if cache_roots:
+        cached = cache_roots.get(root)
+        if cached:
+            return str(cached).rstrip("/").split("/")[-1] or None
+
+    def _compute():
+        try:
+            r = run_counted(
+                ["git", "-C", root, "config", "--get", "remote.origin.url"],
+                label="git", run=git_remote,
+                capture_output=True, text=True, timeout=8)
+        except Exception:
+            slug = None
+        else:
+            slug = (_parse_github_repo_name(getattr(r, "stdout", ""))
+                    if getattr(r, "returncode", 1) == 0 else None)
+        if slug is None and isinstance(logs, list):
+            logs.append("repo-identity: unknown for %s" % root)
+        return slug
+
+    return memoized(("repo-identity", root), _compute)
+
+
+def _repo_in_cross_stream_flow(root, cross_stream_repos=None, *, slug=None):
     """Does the repo at `root` actually participate in the gatekeeper<->
-    sub-dev cross-stream flow? `cross_stream_repos=None` resolves to the
-    real registry above (the DI convention every other bounce_backstop
-    input already follows: `gh_fetch=None` -> the real fetcher,
-    `projects_dir=None` -> the real PROJECTS_DIR) -- pass an explicit set
-    only to override it (e.g. in a test)."""
+    sub-dev cross-stream flow? Membership is decided by the repo SLUG
+    (`slug=repo_identity(root, cache_roots)`), NEVER the checkout directory's
+    basename (#1068). `slug=None` -- an unresolvable identity -- is "not in
+    flow" (the fail-safe direction: never query/nudge a repo whose identity the
+    box cannot prove). `cross_stream_repos=None` resolves to the real registry
+    above (the DI convention every other bounce_backstop input already follows:
+    `gh_fetch=None` -> the real fetcher, `projects_dir=None` -> the real
+    PROJECTS_DIR) -- pass an explicit set only to override it (e.g. in a
+    test)."""
+    if slug is None:
+        return False
     repos = watchdog._CROSS_STREAM_REPOS if cross_stream_repos is None else cross_stream_repos
-    name = os.path.basename(str(root or "").rstrip("/"))
-    return name in repos
+    return slug in repos
 
 
 def _bounce_quals(cwd):
@@ -505,7 +569,8 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                 return True
         return False
 
-    for root, name in _cache_repo_roots(home).items():
+    cache_roots = _cache_repo_roots(home)      # #1068: {root: slug}, shared
+    for root, name in cache_roots.items():
         if not _covered_by_pane(root):
             targets.setdefault(root, (name, None))
 
@@ -521,12 +586,16 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
             break
         if not _bounce_quals(root):
             continue                           # gatekeeper: never bounce-nudged
-        if not _repo_in_cross_stream_flow(root, cross_stream_repos):
+        slug = repo_identity(root, cache_roots, logs=logs)   # #1068
+        if not _repo_in_cross_stream_flow(root, cross_stream_repos, slug=slug):
             # #89: prio:bounce has no protocol meaning outside a repo that
             # actually participates in the gatekeeper<->sub-dev flow — never
             # even ask GitHub, let alone nudge (the restreamer #337 false
             # nudge: a bare label used as a generic priority marker).
-            logs.append("bounce-skip-not-cross-stream %s" % name)
+            # #1068: keyed on the repo SLUG (odoo-erp), never the client-named
+            # checkout dir; the line names both so a mismatch stays visible.
+            logs.append("bounce-skip-not-cross-stream %s (dir %s)"
+                        % (slug or "unknown", os.path.basename(root.rstrip("/"))))
             continue
         tickets = fetch(root)
         if tickets is None:
@@ -1329,13 +1398,15 @@ def gk_selfservice_bounce(now, run, state, home=None, dry_run=False,
     # cached roots), so the bounce only touches repos this box actually
     # supervises. We act on GitHub directly, so a pane id is not needed.
     panes = watchdog.list_claude_panes(run, logs=logs, dry_run=dry_run)
+    cache_roots = _cache_repo_roots(home, max_age_s=watchdog.GKREQ_CACHE_MAX_AGE_S)  # #1068
     roots = {c for _p, c in panes}
-    roots.update(_cache_repo_roots(home, max_age_s=watchdog.GKREQ_CACHE_MAX_AGE_S))
+    roots.update(cache_roots)
 
     for root in sorted(roots):
         if not _gkreq_supervisor_root(root):
             continue                           # requester homes never bounce
-        if not _repo_in_cross_stream_flow(root):
+        if not _repo_in_cross_stream_flow(
+                root, slug=repo_identity(root, cache_roots, logs=logs)):  # #1068
             continue                           # not a gatekeeper<->sub-dev repo
         name = os.path.basename(root.rstrip("/"))
         candidates = fetch(root)
@@ -2142,13 +2213,15 @@ def gk_orphan_marker_sweep(now, run, state, send_fn, home=None, dry_run=False,
     logs = []
 
     panes = watchdog.list_claude_panes(run, logs=logs, dry_run=dry_run)
+    cache_roots = _cache_repo_roots(home, max_age_s=watchdog.GKREQ_CACHE_MAX_AGE_S)  # #1068
     roots = {c for _p, c in panes}
-    roots.update(_cache_repo_roots(home, max_age_s=watchdog.GKREQ_CACHE_MAX_AGE_S))
+    roots.update(cache_roots)
 
     for root in sorted(roots):
         if not _gkreq_supervisor_root(root):
             continue                           # requester homes never reconcile
-        if not _repo_in_cross_stream_flow(root):
+        if not _repo_in_cross_stream_flow(
+                root, slug=repo_identity(root, cache_roots, logs=logs)):  # #1068
             continue                           # not a gatekeeper<->sub-dev repo
         name = os.path.basename(root.rstrip("/"))
         # #570 — the PARALLEL comment-handoff pass (proper marker in window). A
@@ -2560,13 +2633,15 @@ def bounce_flip_revert(now, run, state, send_fn, home=None, dry_run=False,
     import airuleset
     gk_login = airuleset.MAINTAINER_GH_LOGIN
     panes = watchdog.list_claude_panes(run, logs=logs, dry_run=dry_run)
+    cache_roots = _cache_repo_roots(home, max_age_s=watchdog.GKREQ_CACHE_MAX_AGE_S)  # #1068
     roots = {c for _p, c in panes}
-    roots.update(_cache_repo_roots(home, max_age_s=watchdog.GKREQ_CACHE_MAX_AGE_S))
+    roots.update(cache_roots)
 
     for root in sorted(roots):
         if not _gkreq_supervisor_root(root):
             continue                           # requester homes never reconcile
-        if not _repo_in_cross_stream_flow(root):
+        if not _repo_in_cross_stream_flow(
+                root, slug=repo_identity(root, cache_roots, logs=logs)):  # #1068
             continue                           # not a gatekeeper<->sub-dev repo
         name = os.path.basename(root.rstrip("/"))
         candidates = fetch(root, budget=budget, logs=logs)

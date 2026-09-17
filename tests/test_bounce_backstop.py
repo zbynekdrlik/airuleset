@@ -473,16 +473,25 @@ class TestCrossStreamRepoScope(unittest.TestCase):
     nudge, a repo that isn't one of them."""
 
     def test_repo_in_cross_stream_flow_helper(self):
+        # #1068: membership is decided by the repo SLUG, never the checkout
+        # directory basename — the client-named checkout is IN flow by slug,
+        # and a resolvable non-cross-stream slug is out.
         self.assertTrue(wd._repo_in_cross_stream_flow(
-            "/home/newlevel/devel/odoo-erp"))
+            "/home/montalu1/devel/odoo/odoo-slovnormal", slug="odoo-erp"))
         self.assertFalse(wd._repo_in_cross_stream_flow(
-            "/home/newlevel/devel/restreamer"))
+            "/home/newlevel/devel/restreamer", slug="restreamer"))
+        # basename fallback REMOVED: an unresolvable identity (slug=None) is
+        # never in flow, even when the dir is literally named odoo-erp.
+        self.assertFalse(wd._repo_in_cross_stream_flow(
+            "/home/newlevel/devel/odoo-erp"))
 
     def test_helper_respects_explicit_override(self):
         self.assertTrue(wd._repo_in_cross_stream_flow(
-            "/home/newlevel/devel/demo", cross_stream_repos={"demo"}))
+            "/home/newlevel/devel/whatever", cross_stream_repos={"demo"},
+            slug="demo"))
         self.assertFalse(wd._repo_in_cross_stream_flow(
-            "/home/newlevel/devel/odoo-erp", cross_stream_repos={"demo"}))
+            "/home/newlevel/devel/odoo-erp", cross_stream_repos={"demo"},
+            slug="odoo-erp"))
 
     def test_non_cross_stream_repo_is_never_nudged(self):
         # the exact restreamer #337 shape: a genuine open ticket carrying
