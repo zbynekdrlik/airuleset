@@ -8932,6 +8932,10 @@ from cli_skill_usage import (  # noqa: E402, F401
     cmd_skill_usage as cmd_skill_usage,
     scan_usage as scan_usage,
 )
+# --- #1061: main-authored design comment poster (Design-by: main <model>) ---
+from cli_design_record import (  # noqa: E402, F401
+    cmd_design_record as cmd_design_record,
+)
 from cli_mdreview_audit import (  # noqa: E402, F401
     cmd_mdreview_audit as cmd_mdreview_audit,
 )
@@ -9942,6 +9946,24 @@ def main():
                       help="Also scan a project's .claude/rules + .claude/skills "
                            "(repeatable, read-only — never auto-fixed)")
 
+    # --- #1061: main-authored design comment poster ---
+    p_dr = sub.add_parser(
+        "design-record",
+        help="Post a ticket's design comment stamped Design-by: main/worker "
+             "<model> (model read from the session's OWN transcript, never "
+             "self-declared); the dispatch gate requires Design-by: main "
+             "<Fable id> before an autopilot-worker is dispatched (#1061)")
+    p_dr.add_argument("--issue", type=int, required=False,
+                      help="Issue number to comment on")
+    p_dr.add_argument("--repo", default=None,
+                      help="owner/name (default: the cwd repo)")
+    p_dr.add_argument("--body-file", dest="body_file", default=None,
+                      help="File with the design body (root cause + approach + "
+                           "rejected alternative + Triage: + Architektúra: + "
+                           "Shared-benefit:)")
+    p_dr.add_argument("--dry-run", dest="dry_run", action="store_true",
+                      help="Print the stamped body without posting")
+
     p_ab = sub.add_parser(
         "account-bootstrap",
         help="Render idempotent root bootstrap script for a service account")
@@ -10448,6 +10470,7 @@ SUBCOMMANDS = {
     "key-rotation": cmd_key_rotation,
     "mdreview-audit": cmd_mdreview_audit,
     "doctrine-audit": cmd_doctrine_audit,
+    "design-record": cmd_design_record,
     "account-bootstrap": cmd_account_bootstrap,
     "nudges": cmd_nudges,
     "volume": cmd_volume,
