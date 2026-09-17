@@ -4775,6 +4775,16 @@ def cmd_handoff(args):
               "tip %s — push first" % (head_sha[:12], branch, remote_sha[:12]))
         return 1
 
+    # #1061: the review-of-record authorship stamp (transcript-derived, the SAME
+    # way design-record stamps Design-by:) — a FACT recording WHO reviewed
+    # (owner's #871 rule: review by the Fable main). Run from the main checkout
+    # it reads the Fable id; from a lane worktree, the worker's.
+    try:
+        import cli_authorship as _auth
+        reviewed_by = _auth.authorship_value(os.getcwd())
+    except Exception:
+        reviewed_by = None
+
     # Compose the comment body — template-aware (#969).
     import cli_handoff_template as _ht
     body, err = _ht.compose_body(
@@ -4787,6 +4797,7 @@ def cmd_handoff(args):
         prevencia_read=prevencia_read,
         closes_finding=closes_finding,
         self_review_model=self_review_model,
+        reviewed_by=reviewed_by,
     )
     if err:
         print(err)

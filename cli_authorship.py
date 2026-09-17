@@ -127,12 +127,21 @@ def session_model(cwd, projects_dir=None, home=None):
     return model if model else UNKNOWN_MODEL
 
 
+def authorship_value(cwd, projects_dir=None, home=None):
+    """The `"<role> <model>"` VALUE of an authorship stamp, e.g.
+    `"main claude-fable-5-1"` / `"worker claude-opus-4-8"` / `"main unknown"`.
+    The half a `<kind>-by:` label is prefixed to (see `stamp_line`); a caller
+    that emits its own `Reviewed-by:` field wants just this value."""
+    role = authorship_role(cwd)
+    model = session_model(cwd, projects_dir=projects_dir, home=home)
+    return "%s %s" % (role, model)
+
+
 def stamp_line(kind, cwd, projects_dir=None, home=None):
     """A truthful authorship stamp line for `kind` ("Design" / "Reviewed"):
     `"<kind>-by: <role> <model>"`, e.g. `"Design-by: main claude-fable-5-1"`,
     `"Reviewed-by: worker claude-opus-4-8"`, or `"Design-by: main unknown"`
     when the model is unreadable. Role is always labelled even when the model
     is unknown."""
-    role = authorship_role(cwd)
-    model = session_model(cwd, projects_dir=projects_dir, home=home)
-    return "%s-by: %s %s" % (kind, role, model)
+    return "%s-by: %s" % (kind, authorship_value(cwd, projects_dir=projects_dir,
+                                                  home=home))
