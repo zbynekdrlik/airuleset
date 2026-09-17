@@ -5388,19 +5388,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                 # A request exists but NONE is servable — remember WHY so ONE
                 # decision line can be journaled below on a full-by-cadence sweep
                 # (not every minute; #486 explicit decision log, no silent
-                # suppression). `_compact_jobs_disabled` is already computed above.
-                if _compact_jobs_disabled:
-                    _compact_ignored = "owner-flag"
-                else:
-                    _stale_h = 0
-                    for _cr in _compact_raw.values():
-                        if isinstance(_cr, dict):
-                            try:
-                                _stale_h = max(_stale_h,
-                                               int((now - float(_cr["ts"])) // 3600))
-                            except (KeyError, TypeError, ValueError):
-                                continue
-                    _compact_ignored = ("stale %dh" % _stale_h) if _stale_h else "stale (bad ts)"
+                # suppression). The reason predicate is a PURE helper next to the
+                # filter (unit-tested, keeps run_once small).
+                _compact_ignored = _compact_mod.compact_ignore_reason(
+                    _compact_raw, now=now, jobs_disabled=_compact_jobs_disabled)
         except Exception as _e:  # noqa: BLE001 — fail toward FULL, never break the sweep
             logs.append("sweep-cadence: compact-pending read error (=> full): %r" % _e)
             _compact_pending = True

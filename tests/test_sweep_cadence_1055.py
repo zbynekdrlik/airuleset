@@ -552,6 +552,54 @@ class TestActionableCompactRequests(unittest.TestCase):
         self.assertEqual(reqs, snapshot)
 
 
+class TestCompactIgnoreReason(unittest.TestCase):
+    """(item 2 helper) the PURE reason predicate for the journal ignore line."""
+
+    NOW = 1_000_000.0
+
+    def _req(self, **kw):
+        e = {"cwd": "/repo", "origin": "self-callback"}
+        e.update(kw)
+        return e
+
+    def test_none_when_a_request_is_actionable(self):
+        reqs = {"s1": self._req(ts=self.NOW - 60)}
+        self.assertIsNone(wd_compact.compact_ignore_reason(
+            reqs, now=self.NOW, jobs_disabled=False))
+
+    def test_none_when_empty(self):
+        self.assertIsNone(wd_compact.compact_ignore_reason(
+            {}, now=self.NOW, jobs_disabled=False))
+        self.assertIsNone(wd_compact.compact_ignore_reason(
+            None, now=self.NOW, jobs_disabled=False))
+
+    def test_owner_flag_reason(self):
+        reqs = {"s1": self._req(ts=self.NOW - 60)}   # fresh, but flag disables
+        self.assertEqual(wd_compact.compact_ignore_reason(
+            reqs, now=self.NOW, jobs_disabled=True), "owner-flag")
+
+    def test_stale_hours_reason(self):
+        reqs = {"s1": self._req(ts=self.NOW - 7 * 3600)}
+        self.assertEqual(wd_compact.compact_ignore_reason(
+            reqs, now=self.NOW, jobs_disabled=False), "stale 7h")
+
+    def test_stale_hours_reports_the_oldest(self):
+        reqs = {"s1": self._req(ts=self.NOW - 7 * 3600),
+                "s2": self._req(ts=self.NOW - 9 * 3600)}
+        self.assertEqual(wd_compact.compact_ignore_reason(
+            reqs, now=self.NOW, jobs_disabled=False), "stale 9h")
+
+    def test_bad_ts_reason(self):
+        reqs = {"s1": self._req(ts="not-a-number")}
+        self.assertEqual(wd_compact.compact_ignore_reason(
+            reqs, now=self.NOW, jobs_disabled=False), "stale (bad ts)")
+
+    def test_bad_ts_reason_with_non_dict_entry(self):
+        reqs = {"s1": "corrupt"}
+        self.assertEqual(wd_compact.compact_ignore_reason(
+            reqs, now=self.NOW, jobs_disabled=False), "stale (bad ts)")
+
+
 class TestCompactPendingActionableOnly(unittest.TestCase):
     """(items 2+4) run_once uses ACTIONABLE requests, journals the ignore reason
     once per full-by-cadence sweep."""
@@ -573,8 +621,11 @@ class TestCompactPendingActionableOnly(unittest.TestCase):
     # (a) owner flag set + a fresh request -> not urgent; on the 2nd sweep CALM
     def test_owner_flag_dead_request_allows_calm(self):
         creqp = self._creq()
-        wd_compact.record_compact_request("sid-dead", "/repo", now=995,
-                                          path=str(creqp), origin="self-callback")
+        # write the request DIRECTLY (not via record_compact_request) so the
+        # fixture never depends on the real _owner_disabled at record time — the
+        # owner flag is modelled purely by the patch below (#1055 review NIT-3).
+        creqp.write_text(json.dumps({"sid-dead": {
+            "cwd": "/repo", "ts": 995, "origin": "self-callback"}}))
         with mock.patch.object(wd, "_owner_disabled", lambda kind: kind == "compact"):
             _run(1000.0, self.state_path, compact_requests_path=str(creqp))
             logs = _run(1060.0, self.state_path, compact_requests_path=str(creqp))
@@ -585,8 +636,10 @@ class TestCompactPendingActionableOnly(unittest.TestCase):
 
     def test_owner_flag_journals_ignore_reason_on_full_sweep(self):
         creqp = self._creq()
-        wd_compact.record_compact_request("sid-dead", "/repo", now=995,
-                                          path=str(creqp), origin="self-callback")
+        # seed hermetically (#1055 review NIT-3): the owner flag is modelled by
+        # the patch, not by the real ~/.claude/watchdog-disable-compact.
+        creqp.write_text(json.dumps({"sid-dead": {
+            "cwd": "/repo", "ts": 995, "origin": "self-callback"}}))
         with mock.patch.object(wd, "_owner_disabled", lambda kind: kind == "compact"):
             logs = _run(1000.0, self.state_path, compact_requests_path=str(creqp))
         line = self._sweep_line(logs)
@@ -644,6 +697,21 @@ class TestCompactPendingActionableOnly(unittest.TestCase):
         line = self._sweep_line(logs)
         self.assertTrue(line and line.startswith("sweep: calm"),
                         "a malformed-ts request must not force full: %r" % logs)
+
+    def test_bad_ts_journals_stale_bad_ts_on_full_sweep(self):
+        # #1055 review NIT-1 (both reviewers): exercise the run_once
+        # "stale (bad ts)" journal branch on a full-by-cadence (bootstrap) sweep.
+        creqp = self._creq()
+        creqp.write_text(json.dumps({"sid-bad": {
+            "cwd": "/repo", "ts": "not-a-number", "origin": "self-callback"}}))
+        with mock.patch.object(wd, "_owner_disabled", lambda kind: False):
+            logs = _run(100000.0, self.state_path, compact_requests_path=str(creqp))
+        line = self._sweep_line(logs)
+        self.assertTrue(line and line.startswith("sweep: full"), line)
+        self.assertNotIn("urgent: compact", line)
+        self.assertTrue(
+            any("compact-pending ignored (stale (bad ts))" in ln for ln in logs),
+            "must journal the bad-ts ignore reason: %r" % logs)
 
     # (e) the ignore line appears once per full-by-cadence sweep, not every minute
     def test_ignore_line_at_most_once_per_cadence(self):

@@ -360,11 +360,13 @@ def actionable_compact_requests(requests, *, now, jobs_disabled):
         file is dead, not pending (the gk defect: a 2026-09-07 self-callback
         request read as "pending" forever and forced a full sweep every minute).
       * `{}` when `requests` is not a dict (a corrupt/empty store).
-      * otherwise drops every entry whose `ts` is missing / non-numeric (an
-        unmeasurable age can't be trusted) or older than `COMPACT_REQUEST_STALE_S`
-        (a request unserved >6h is wedged, not actionable). A NON-dict entry is
-        dropped too. A FUTURE-skewed `ts` (age < 0) is KEPT — fail toward FULL,
-        never silently calm past a request whose age can't be trusted downward."""
+      * otherwise drops every entry whose `ts` is missing or unparseable as a
+        float (`_safe_age` → None; an unmeasurable age can't be trusted — note a
+        numeric STRING like "1788749964" IS parseable and kept) or older than
+        `COMPACT_REQUEST_STALE_S` (a request unserved >6h is wedged, not
+        actionable). A NON-dict entry is dropped too. A FUTURE-skewed `ts`
+        (age < 0) is KEPT — fail toward FULL, never silently calm past a request
+        whose age can't be trusted downward."""
     if jobs_disabled or not isinstance(requests, dict):
         return {}
     out = {}
@@ -375,6 +377,37 @@ def actionable_compact_requests(requests, *, now, jobs_disabled):
             continue
         out[sid] = entry
     return out
+
+
+def compact_ignore_reason(requests, *, now, jobs_disabled):
+    """#1055 P3 fix-forward — WHY a non-empty `requests` yielded NO servable
+    request, i.e. the reason token for the journal line `sweep-cadence:
+    compact-pending ignored (<reason>)`; None when at least one request IS
+    actionable (nothing was ignored) or `requests` is empty.
+
+    PURE (no I/O, no clock). Mirrors `actionable_compact_requests`'s own predicate
+    so the two never drift:
+      * None                — some request is actionable, or `requests` is empty.
+      * "owner-flag"        — `jobs_disabled` (the owner disable flag makes every
+                              request unservable, regardless of age).
+      * "stale <N>h"        — every request is >6h stale; N = the OLDEST measurable
+                              request's age in whole hours (always >= 6 here — a
+                              younger request would have been actionable).
+      * "stale (bad ts)"    — no request has a measurable `ts` at all."""
+    if not isinstance(requests, dict) or not requests:
+        return None
+    if actionable_compact_requests(requests, now=now, jobs_disabled=jobs_disabled):
+        return None
+    if jobs_disabled:
+        return "owner-flag"
+    oldest_h = None
+    for entry in requests.values():
+        if isinstance(entry, dict):
+            age = _safe_age(now, entry.get("ts"))
+            if age is not None:
+                h = int(age // 3600)
+                oldest_h = h if oldest_h is None else max(oldest_h, h)
+    return ("stale %dh" % oldest_h) if oldest_h is not None else "stale (bad ts)"
 
 
 def pending_compact_hold(sid, now=None, hold_s=None, path=None):
