@@ -40,6 +40,8 @@ MOVED_NAMES = [
     "encode_project_dir",
     "find_active_transcript",
     "_iter_jsonl_tail",
+    "reset_transcript_cache",   # #1055 per-sweep bounded-tail memo reset
+    "transcript_read_stats",    # #1055 journal-summary counters
     "_entry_text",
     "transcript_last_error",
     "transcript_current_context",

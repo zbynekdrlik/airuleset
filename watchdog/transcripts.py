@@ -18,6 +18,7 @@ banned ``from watchdog import <function-below-its-position>`` shape.
 
 import hashlib
 import json
+import os
 import re
 import stat as _stat
 import sys
@@ -55,18 +56,122 @@ def find_active_transcript(projects_dir, cwd):
     return (newest, newest_m) if newest else None
 
 
+# --------------------------------------------------------------------------- #
+# #1055 P1 — BOUNDED transcript tail reads + per-sweep memo. `_iter_jsonl_tail`
+# used to `f.read()` the WHOLE transcript then `bytes.splitlines()`, called 17×
+# per sweep across 12 sites on the same few multi-hundred-MB Fable transcripts
+# on gk: 22.4 s cumulative + 1.36 GB MAXRSS every 60 s sweep (supervisor
+# cProfile, issue #1055). Now every tail read seeks from the END of the file
+# and reads only a bounded window; the line reader grows the window until it
+# holds `max_lines` complete lines; and a per-sweep memo collapses the 17 calls
+# to one read per (transcript, max_lines). This GENERALIZES the seek-from-end
+# technique the module already shipped in `_read_jsonl_byte_tail` (670 MB: 1.17 s
+# whole-read vs 0.005 s seek) — both readers now share one primitive.
+_TAIL_WINDOW_START = 262144            # first window: 256 KB
+_TAIL_WINDOW_CAP = 16 * 1024 * 1024    # ceiling: 16 MB, then return what exists
+
+# Per-sweep memo: (str(path), st_size, st_mtime_ns, max_lines) -> parsed entries
+# (each value <= max_lines <= 500 dicts). Populated on a real `_iter_jsonl_tail`
+# read, CLEARED at the top of `run_once` via `reset_transcript_cache()`. A
+# changed file yields a NEW key (size or mtime differs), so a stale key is never
+# served; the memo is bounded by the sweep's distinct-key set and dropped each
+# sweep. Returned lists are treated READ-ONLY by every caller (they only
+# iterate / reverse / slice), so sharing the reference is safe.
+_TRANSCRIPT_TAIL_CACHE = {}
+
+# Per-sweep counters for the `run_once` journal summary (#1055 deliverable 4).
+# Count ONLY the memoized line reader (`_iter_jsonl_tail`) so all three numbers
+# describe one reader: `files` = real bounded reads, `bytes` = disk bytes pulled
+# (summed across window-growth re-reads), `hits` = memo hits. The byte-tail
+# reader is not counted here (see `_read_jsonl_byte_tail`).
+_TRANSCRIPT_TAIL_STATS = {"files": 0, "bytes": 0, "hits": 0}
+
+
+def reset_transcript_cache():
+    """Clear the per-sweep bounded-tail memo + counters. Called ONCE at the top
+    of `run_once` so every sweep starts fresh; also exposed for tests."""
+    _TRANSCRIPT_TAIL_CACHE.clear()
+    _TRANSCRIPT_TAIL_STATS.update(files=0, bytes=0, hits=0)
+
+
+def transcript_read_stats():
+    """Snapshot of the per-sweep `_iter_jsonl_tail` counters for the `run_once`
+    journal summary: {'files': <real bounded reads>, 'bytes': <disk bytes
+    pulled>, 'hits': <memo hits>}. Scoped to the memoized line reader so the
+    three numbers stay coherent about one reader."""
+    return dict(_TRANSCRIPT_TAIL_STATS)
+
+
+def _read_tail_window(path, window_bytes):
+    """Seek `window_bytes` from the END of `path` and return
+    `(lines, at_bof, nbytes)`: the raw trailing byte-lines (`splitlines()`, the
+    partial first line NOT dropped — each caller decides), whether the window
+    reached the start of the file, and how many bytes were actually read. NEVER
+    `f.read()`s the whole file for a large transcript. Raises are the caller's
+    to catch."""
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        start = size - window_bytes if window_bytes < size else 0
+        f.seek(start)
+        raw = f.read()
+    return raw.splitlines(), start == 0, len(raw)
+
+
 def _iter_jsonl_tail(path, max_lines=60):
+    """Parsed JSONL entries for the LAST `max_lines` complete lines of a
+    transcript (oldest -> newest), via a BOUNDED byte-tail read: grow the
+    window (256 KB -> 16 MB cap) until it holds `max_lines` complete lines,
+    reaches the start of the file, or hits the cap — never a whole-file
+    `f.read()` (#1055). Memoized per sweep on (path, st_size, st_mtime_ns,
+    max_lines). `[]` on OSError. Contract: `max_lines` >= 1 (every caller
+    passes a positive line budget; a non-positive value returns only the
+    first window's suffix, not the whole file as the historical reader's
+    `[-0:]` accidentally did).
+
+    Behaviour lock: for a transcript smaller than the first window the entries
+    are byte-identical to the historical whole-file reader; for a large one the
+    last `max_lines` complete lines equal a whole-file read's last `max_lines`
+    lines (the partial first line after a mid-file seek is dropped) PROVIDED
+    those last `max_lines` lines fit within the 16 MB cap — beyond the cap the
+    newest contiguous suffix that fits is returned (and a single line larger
+    than the cap yields `[]`). Real transcript entries are well under the cap
+    (the corpus max is ~7 MB), so live behaviour is identical; the cap is a
+    hard memory bound, never a whole-file read. Callers treat the returned list
+    as READ-ONLY — it is shared via the memo."""
     try:
-        with open(path, "rb") as f:
-            raw = f.read()
+        st = os.stat(path)
+    except OSError:
+        return []
+    key = (str(path), st.st_size, st.st_mtime_ns, max_lines)
+    cached = _TRANSCRIPT_TAIL_CACHE.get(key)
+    if cached is not None:
+        _TRANSCRIPT_TAIL_STATS["hits"] += 1
+        return cached
+    window = _TAIL_WINDOW_START
+    complete = []
+    nbytes_total = 0                    # actual bytes pulled from disk (incl. re-reads)
+    try:
+        while True:
+            lines, at_bof, nbytes = _read_tail_window(path, window)
+            nbytes_total += nbytes
+            # after a mid-file seek the first line is a fragment of an earlier
+            # line — drop it so `complete` is exactly the file's trailing lines.
+            complete = lines if at_bof else lines[1:]
+            if at_bof or len(complete) >= max_lines or window >= _TAIL_WINDOW_CAP:
+                break
+            window *= 2
     except OSError:
         return []
     out = []
-    for ln in raw.splitlines()[-max_lines:]:
+    for ln in complete[-max_lines:]:
         try:
             out.append(json.loads(ln))
         except Exception:
             continue
+    _TRANSCRIPT_TAIL_CACHE[key] = out
+    _TRANSCRIPT_TAIL_STATS["files"] += 1
+    _TRANSCRIPT_TAIL_STATS["bytes"] += nbytes_total
     return out
 
 
@@ -74,22 +179,22 @@ def _read_jsonl_byte_tail(path, tail_bytes, max_entries):
     """Parsed JSONL entries from the last `tail_bytes` of a transcript via a
     BOUNDED SEEK (never a whole-file `f.read()`) — take up to the newest
     `max_entries`. The partial first line after a mid-file seek fails
-    `json.loads` and is dropped. `[]` on any read failure. Mirrors
-    `question_repoke_streak`'s own bounded read: the compact / bg-bash readers
-    run against real supervisor transcripts that reach hundreds of MB (cambox's
-    is 670 MB — a full `_iter_jsonl_tail` read of it measured 1.17 s vs 0.005 s
-    for this seek), so the tail MUST be bounded by bytes, not read whole."""
+    `json.loads` and is dropped. `[]` on any read failure. Shares the
+    seek-from-end primitive with `_iter_jsonl_tail` (#1055). The compact /
+    bg-bash readers run against real supervisor transcripts that reach hundreds
+    of MB (cambox's is 670 MB — a full whole-file read of it measured 1.17 s vs
+    0.005 s for this seek), so the tail MUST be bounded by bytes, not read
+    whole. Byte-bounded and single-shot, so it is NOT memoized (its key would
+    be tail_bytes/max_entries, not max_lines) and it is deliberately NOT counted
+    in `transcript_read_stats` / the run_once journal summary — that line reports
+    the memoized line-reader (`_iter_jsonl_tail`), so its files/bytes/hits stay
+    coherent about one reader instead of mixing in these never-memoized reads."""
     try:
-        with open(path, "rb") as f:
-            try:
-                f.seek(-int(tail_bytes), 2)
-            except OSError:
-                f.seek(0)
-            raw = f.read()
+        lines, _at_bof, _nbytes = _read_tail_window(path, int(tail_bytes))
     except (OSError, ValueError, TypeError):
         return []
     out = []
-    for ln in raw.splitlines()[-max_entries:]:
+    for ln in lines[-max_entries:]:
         try:
             out.append(json.loads(ln))
         except Exception:
