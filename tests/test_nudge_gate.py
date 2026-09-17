@@ -115,12 +115,15 @@ class TestGateOk(unittest.TestCase):
     def test_different_kind_deferred_by_total_cap_1023ff(self):
         # #1023 fix-forward: a DIFFERENT kind IS held by the restored cross-kind
         # TOTAL cap while another priority kind was delivered within the hour
-        # (the #913 rule the #1023 lane wrongly dropped). Past the hour: allowed.
+        # (the #913 rule the #1023 lane wrongly dropped). Owner 2026-09-17 ("3"):
+        # the total cap is 3 h per pane everywhere — still held at 1 h, allowed
+        # only past 3 h.
         st = {}
         ng.mark_sent(st, "sess-a", "lane-occupancy", NOW)
         self.assertFalse(ng.gate_ok(st, "sess-a", "release-gap", NOW + 60))
         self.assertFalse(ng.gate_ok(st, "sess-a", "release-gap", NOW + 59 * 60))
-        self.assertTrue(ng.gate_ok(st, "sess-a", "release-gap", NOW + HOUR))
+        self.assertFalse(ng.gate_ok(st, "sess-a", "release-gap", NOW + HOUR))
+        self.assertTrue(ng.gate_ok(st, "sess-a", "release-gap", NOW + 3 * HOUR))
 
     def test_same_kind_deferred_within_the_hour_1023(self):
         """#1023: the SAME kind is floored — a second delivery of the SAME kind
@@ -229,9 +232,10 @@ class TestBatchEligible923(unittest.TestCase):
         st = {}
         ng.mark_sent(st, "s", "u-freshness", NOW)
         # At NOW+HOUR-1: total cap still closed -> no batch at all.
-        self.assertEqual(ng.batch_eligible(st, "s", NOW + HOUR - 1), [])
-        # At NOW+HOUR: cap open + own floor expired -> included.
-        result = ng.batch_eligible(st, "s", NOW + HOUR)
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + 3 * HOUR - 1), [])
+        # At NOW+3h (the owner's 2026-09-17 total cap): cap open + own floor
+        # expired -> included.
+        result = ng.batch_eligible(st, "s", NOW + 3 * HOUR)
         self.assertIn("u-freshness", result)
         self.assertIn("partition-audit", result)
 
@@ -241,8 +245,8 @@ class TestBatchEligible923(unittest.TestCase):
         st = {}
         ng.mark_sent(st, "s", "lane-occupancy", NOW - 2 * HOUR)
         ng.mark_sent(st, "s", "partition-audit", NOW)
-        # After 1h from the latest mark_sent: gap opens
-        result = ng.batch_eligible(st, "s", NOW + HOUR)
+        # After 3 h from the latest mark_sent (the total cap): gap opens
+        result = ng.batch_eligible(st, "s", NOW + 3 * HOUR)
         self.assertIn("lane-occupancy", result)
         self.assertIn("partition-audit", result)
 
@@ -258,8 +262,9 @@ class TestBatchEligible923(unittest.TestCase):
         # Within the hour: the total cap closes the batch entirely (no unmarked
         # kind leaks a second interruption).
         self.assertEqual(ng.batch_eligible(st, "s", NOW + 30 * 60), [])
-        # Past the hour every kind is eligible again.
-        self.assertEqual(len(ng.batch_eligible(st, "s", NOW + HOUR)),
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + HOUR), [])
+        # Past the 3 h total cap every kind is eligible again.
+        self.assertEqual(len(ng.batch_eligible(st, "s", NOW + 3 * HOUR)),
                          len(ng.GATED_CATEGORIES))
 
     def test_ordering_work_driving_first(self):
