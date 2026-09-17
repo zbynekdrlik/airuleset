@@ -28,7 +28,9 @@ Two problems this fixes, both reported by the owner:
        delivered-unconfirmed; #1023 reopen).
      - CROSS-KIND TOTAL CAP (#913, owner 2026-09-06, verbatim: "nikdy viac ako
        raz za hodinu!!!! a ani iny nudge do promptu!!!") — at most ONE PRIORITY
-       nudge per pane per hour in TOTAL, across ALL kinds (`NUDGE_TOTAL_GAP_S`).
+       nudge per pane per `NUDGE_TOTAL_GAP_S` in TOTAL, across ALL kinds — 1 h
+       until 2026-09-17, then 3 h (owner "3" on #1023: two gk panes made the
+       hourly cap read as two interruptions an hour).
        The #1023 lane DELETED this on the inference "per-kind staging bounds the
        total" — but that is not the owner's word: with two kinds staged on, two
        nudges per hour reach one pane (a kind whose condition isn't met at the
@@ -54,7 +56,7 @@ OR BOTH bounds hold (checked via the shared `_total_cap_block` predicate that
   floor keep their LONGER intent via `max()`.
 
   CROSS-KIND TOTAL CAP (#913, restored) — no OTHER priority kind delivered to
-  this sid within `_total_gap()` (>= 1 h). Recovery kinds are excluded from the
+  this sid within `_total_gap()` (>= 3 h). Recovery kinds are excluded from the
   scan. The batch path (`batch_eligible`) is the SIBLING gate: it returns [] while
   the cap is closed, so a second batch never leaks a second interruption; when the
   cap is open it composes every floor-eligible kind into ONE keystroke — batching
@@ -139,10 +141,14 @@ NUDGE_MIN_INTERVAL_MIN_S = 3600
 # shared batch delivers later in the hour, via the batch path). So the cap is
 # RESTORED, under a NEW name (the old `NUDGE_FAMILY_GAP_S`/`_family_gap` stay
 # deleted). Env AIRULESET_NUDGE_TOTAL_GAP_S can only RAISE it (floor-clamped at
-# NUDGE_TOTAL_GAP_MIN_S == the owner's hard 1 h strop, the #504/#543 lesson):
-# a units-error / accidental sub-hour value must never re-open the burst.
-NUDGE_TOTAL_GAP_S = 3600
-NUDGE_TOTAL_GAP_MIN_S = 3600
+# NUDGE_TOTAL_GAP_MIN_S == the owner's hard strop, the #504/#543 lesson): a
+# units-error / accidental low value must never re-open the burst.
+# Owner decision 2026-09-17 07:1x CEST ("3" on #1023): 1 h -> 3 h per pane
+# EVERYWHERE — gk runs two Fable panes, so the 1 h per-pane cap read as ~2
+# interruptions an hour (14 batch-nudges / 24 h measured); the hard floor moves
+# with the default so env can still only RAISE.
+NUDGE_TOTAL_GAP_S = 3 * 3600
+NUDGE_TOTAL_GAP_MIN_S = 3 * 3600
 
 # #1023 addendum (owner, 2026-09-14) — RECOVERY revival identities: a nudge that
 # REVIVES a dead/blocked session (401/limit resume, /compact) is NOT a prompt
@@ -195,8 +201,8 @@ def _min_interval():
 
 def _total_gap():
     """The effective cross-kind TOTAL cap gap (#1023 fix-forward / #913), the env
-    override floored at NUDGE_TOTAL_GAP_MIN_S (the owner's hard 1 h strop) so a
-    units error can't lower it below one hour (#504/#543). Env can only RAISE."""
+    override floored at NUDGE_TOTAL_GAP_MIN_S (the owner's hard strop — 3 h since
+    2026-09-17) so a units error can't lower it (#504/#543). Env can only RAISE."""
     return max(_env_int("AIRULESET_NUDGE_TOTAL_GAP_S", NUDGE_TOTAL_GAP_S),
                NUDGE_TOTAL_GAP_MIN_S)
 

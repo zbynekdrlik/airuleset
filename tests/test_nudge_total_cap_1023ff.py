@@ -184,9 +184,10 @@ class TestBatchEligibleTotalCap(unittest.TestCase):
     def test_batch_opens_when_total_cap_expires(self):
         st = {}
         ng.mark_sent(st, "s", "queue-arrival", NOW)
-        result = ng.batch_eligible(st, "s", NOW + HOUR)
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + HOUR), [])   # 3 h cap
+        result = ng.batch_eligible(st, "s", NOW + 3 * HOUR)
         self.assertGreater(len(result), 0)
-        self.assertIn("queue-arrival", result)   # its own floor just expired too
+        self.assertIn("queue-arrival", result)   # its own floor expired long ago
         self.assertIn("partition-audit", result)
 
     def test_empty_state_all_eligible(self):

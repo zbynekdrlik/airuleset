@@ -56,12 +56,14 @@ class TestPerKindFloor(unittest.TestCase):
     def test_different_kind_at_45min_is_suppressed_by_total_cap(self):
         # #1023 fix-forward: a DIFFERENT kind at 45 min IS suppressed by the
         # restored cross-kind TOTAL cap (a queue-arrival delivery holds a
-        # lane-occupancy nudge for the total gap); at 61 min it is allowed.
+        # lane-occupancy nudge for the total gap); at 61 min it is STILL held
+        # (the owner's 3 h total cap, 2026-09-17), at 181 min it is allowed.
         st = {}
         ng.mark_sent(st, "sess-a", "queue-arrival", NOW)
         self.assertFalse(ng.gate_ok(st, "sess-a", "lane-occupancy", NOW + MIN45),
                          "a DIFFERENT kind IS held by the cross-kind total cap")
-        self.assertTrue(ng.gate_ok(st, "sess-a", "lane-occupancy", NOW + 61 * 60))
+        self.assertFalse(ng.gate_ok(st, "sess-a", "lane-occupancy", NOW + 61 * 60))
+        self.assertTrue(ng.gate_ok(st, "sess-a", "lane-occupancy", NOW + 181 * 60))
 
     def test_old_family_gap_symbols_stay_removed(self):
         # the fix-forward uses a NEW name (NUDGE_TOTAL_GAP_S); the pre-#1023

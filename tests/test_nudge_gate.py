@@ -218,8 +218,10 @@ class TestBatchEligible923(unittest.TestCase):
     def test_gap_open_returns_all_eligible(self):
         st = {}
         ng.mark_sent(st, "s", "lane-occupancy", NOW)
-        # After 1h: lane-occupancy's floor has expired → all eligible again
-        result = ng.batch_eligible(st, "s", NOW + HOUR)
+        # After 3 h (the owner's 2026-09-17 total cap; lane-occupancy's own 1 h
+        # floor expired long before): all eligible again
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + HOUR), [])
+        result = ng.batch_eligible(st, "s", NOW + 3 * HOUR)
         self.assertGreater(len(result), 0)
         self.assertIn("lane-occupancy", result)
         self.assertIn("partition-audit", result)
