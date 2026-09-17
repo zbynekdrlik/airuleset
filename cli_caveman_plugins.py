@@ -974,6 +974,19 @@ def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None, *,
     # build (BOTH halves + markers), not mere cache non-emptiness — a #542-era
     # OLD build, or a half download (chromium-<b> only), must re-install.
     if _playwright_pinned_build_installed(browsers_path):
+        # #1048 review-3 (MAJOR): a build being PRESENT does not mean it LAUNCHES.
+        # spinbike-vps has the complete pinned cache from v0.1.321 but its headless
+        # shell exits 127 (missing system libs) — a plain early-return would never
+        # heal it and the post-check would fail 127 on every re-push. So on the
+        # per-user cache, probe + heal even when already installed (one bounded
+        # `chrome-headless-shell --version` launch per push; a no-op on rc 0 /
+        # None). install-deps needs npx, so skip the heal when npx is absent —
+        # exactly as the post-check SKIPs a no-npx box; there is nothing else to
+        # do for an already-complete build.
+        if _is_per_user_cache(browsers_path) and shutil.which("npx") is not None:
+            env = dict(_claude_cli_env())
+            env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_path)
+            _heal_system_libs(browsers_path, env, sudo_ok=sudo_ok, probe_rc=probe_rc)
         return
     if shutil.which("npx") is None:
         print("    ⚠ Playwright browsers missing and npx is absent — cannot "
