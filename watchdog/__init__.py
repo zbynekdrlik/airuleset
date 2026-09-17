@@ -465,6 +465,25 @@ from watchdog.transcripts import (  # noqa: E402
     _GENERIC_DIRS as _GENERIC_DIRS,
 )
 
+# #1055 P2 -- the per-sweep subprocess COUNTER + MEMO namespace, re-exported
+# through this facade (same seam as transcripts). The counter is fed by every
+# runner (`_default_run`, `_gh_out`, `run_counted`, `_default_git_run`,
+# `default_ps_fetch`); run_once resets it + begins the memo at its top and
+# journals the `subprocess:` summary at its bottom, next to P1's `transcript
+# reads:` line. `subprocess_budget` imports nothing from the package, so this is
+# import-safe.
+from watchdog.subprocess_budget import (  # noqa: E402
+    reset_subprocess_stats as reset_subprocess_stats,
+    record_subprocess as record_subprocess,
+    subprocess_stats as subprocess_stats,
+    run_counted as run_counted,
+    begin_sweep_memo as begin_sweep_memo,
+    end_sweep_memo as end_sweep_memo,
+    sweep_memo_active as sweep_memo_active,
+    sweep_memo as sweep_memo,
+    memoized as memoized,
+)
+
 
 # #433 item G step 4 -- the usage-cap / session-limit / reset-epoch-parse /
 # `decide` / `decide_working` / `load_state` / `save_state` cluster that used to
@@ -1751,6 +1770,18 @@ _BUDGET_MIN_GH_FETCH_S = 20       # a single gh timeline read (timeout ~15) + ma
 # lost mark. 25 = one repo (~15s) + margin; the batch's own per-repo write-through,
 # not this floor, bounds the multi-repo tail (#1041 review-1 F4).
 _BUDGET_MIN_GH_BATCH_S = 25
+# #1055 P2 (e) — a per-sweep SUBPROCESS budget (a COUNT, not seconds), the
+# sibling of the min_budget wall-clock guard above. A registry job carrying
+# `max_subprocess=N` is HELD (`hold:budget (subprocess…)`, UNTOUCHED state,
+# re-runs next sweep) once the sweep has already spent >= N subprocesses BEFORE
+# it starts — a late, heavy, NON-URGENT gh job then can't pile onto an already
+# runaway sweep and run it into the 120s unit kill. Set GENEROUSLY: after the
+# P2 memos + collapses a typical sweep is well under 30 subprocesses (the
+# ticket's target), so this ceiling never holds a job in a HEALTHY sweep — it
+# only bites a pathological one. Default None on every other job = unbounded
+# (no behaviour change). Applied to card_reconcile (the heaviest non-urgent
+# gh-batch READ poller; a held card just arrives one sweep later).
+_MAX_SUBPROCESS_GH_BATCH = 90
 # #1050 — Job 36 gk_orphan_marker_sweep. UNLIKE the repo-batched jobs above, its
 # cost is a per-candidate gh READ loop (up to 60 `gh issue view` + 2×20 handoff
 # views) with no cursor batching — so a bare GH_BATCH floor (25) let it START at
@@ -3140,6 +3171,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # #1055 P1 — clear the bounded-tail memo + counters ONCE per sweep so this
     # sweep re-reads fresh; the summary line below reports what it saved.
     reset_transcript_cache()
+    # #1055 P2 — zero the subprocess counter and ACTIVATE the per-sweep memo at
+    # the SAME seam, so identical gh/git/tmux/ps calls collapse within this sweep
+    # and the `subprocess:` summary line below reports the real per-sweep spend.
+    reset_subprocess_stats()
+    begin_sweep_memo()
     stalled = set()
     owner_by_sid = {}                   # session id -> tmux owner, for job 5's ✅ @mention
     owner_by_cwd = {}                   # pane cwd -> tmux owner, job 5's recovery path
@@ -4346,7 +4382,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # `err`: "<prefix> error" text logged on a raise, or None to swallow it.
     _standalone_registry = []
 
-    def _add(label, gate, invoke, err, min_budget=None, gh_poll_hold=False):
+    def _add(label, gate, invoke, err, min_budget=None, gh_poll_hold=False,
+             max_subprocess=None):
+        # #1055 P2 (e) — `max_subprocess` (a COUNT, default None = unbounded): the
+        # loop HOLDS this job (`hold:budget (subprocess…)`, UNTOUCHED state) when
+        # the sweep has already spent >= this many subprocesses before it starts,
+        # so a late heavy non-urgent gh job can't run a runaway sweep into the
+        # 120s kill. Sibling of `min_budget` (the wall-clock guard).
         # #1041 — `min_budget` (seconds): a network/subprocess job carries its own
         # timeout-derived minimum; the registry loop below skips it with `hold:budget`
         # + UNTOUCHED state when `remaining_budget_s()` is under it. None = no guard
@@ -4358,7 +4400,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
         # held — its writes must never be delayed (its reads are still throttled per-
         # call by the shim). Fail-safe by default: an unmarked/misjudged job simply
         # runs (per-call shim throttle), never a delayed write (#1040 review-1 MAJOR).
-        _standalone_registry.append((label, gate, invoke, err, min_budget, gh_poll_hold))
+        _standalone_registry.append((label, gate, invoke, err, min_budget,
+                                     gh_poll_hold, max_subprocess))
 
     # --- (3) WEEKLY TOKEN-USAGE alert (only when a fetcher is wired) — rate-limited
     # to USAGE_INTERVAL inside check_usage so the 60s tmux cadence doesn't hammer
@@ -4734,7 +4777,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                     projects_dir=projects_dir, sleep_fn=sleep_fn,
                                     owned_closed=_owned_scope),
          "card-reconcile error", min_budget=_BUDGET_MIN_GH_BATCH_S,
-         gh_poll_hold=True)  # #1040 pure-read poller
+         gh_poll_hold=True,          # #1040 pure-read poller
+         max_subprocess=_MAX_SUBPROCESS_GH_BATCH)  # #1055 P2 (e) late/non-urgent
 
     # Job 26 — COMPACT-STALL WATCH — REMOVED (#402, 2026-08-12). Used to
     # watch the shared /compact claim file for a stuck entry; that whole
@@ -5217,7 +5261,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             logs.append("gh-rate: read error (fail-open, no hold): %r" % _e)
             _gh_hold = False
 
-    for _label, _gate, _invoke, _err, _min_budget, _gh_poll_hold in _standalone_registry:
+    for (_label, _gate, _invoke, _err, _min_budget, _gh_poll_hold,
+         _max_subprocess) in _standalone_registry:
         # #1041 — read the ONE budget primitive ONCE per iteration (one clock read);
         # the job-start elapsed anchor is derived from it (`elapsed == SOFT_CAP -
         # left`), so attribution and the budget guard below share that single read.
@@ -5259,6 +5304,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                 logs.append("%s -> hold:budget (gh-rate backoff %ds, resource < 20%%)"
                             % (_label, _gh_backoff))
                 continue
+            # #1055 P2 (e) — SUBPROCESS-budget guard: a job carrying
+            # `max_subprocess` skips (UNTOUCHED state, re-runs next sweep) once the
+            # sweep's subprocess count has already met its cap, so a late heavy
+            # non-urgent gh job can't push a runaway sweep into the 120s kill.
+            # None = unbounded (every other job). Read once for the log + the test.
+            if _max_subprocess is not None:
+                _sp_n = subprocess_stats()["n"]
+                if _sp_n >= _max_subprocess:
+                    logs.append("%s -> hold:budget (subprocess: %d used >= %d)"
+                                % (_label, _sp_n, _max_subprocess))
+                    continue
             try:
                 logs += _invoke()
             except Exception as e:
@@ -5284,6 +5340,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     _tr = transcript_read_stats()
     logs.append("transcript reads: %d files, %d bytes read, %d memo hits"
                 % (_tr["files"], _tr["bytes"], _tr["hits"]))
+
+    # #1055 P2 — one per-sweep summary of the subprocess spend, next to P1's
+    # transcript line, so the gh/git/tmux/ps budget (and any regression) is
+    # readable from `journalctl` on gk alongside the owner's `Consumed … CPU`
+    # metric. `top:` = the 5 heaviest command classes by count. Then DEACTIVATE
+    # the memo so a later direct call in the same process is never served a
+    # stale sweep value.
+    _sp = subprocess_stats()
+    _top = ", ".join("%s:%d" % (lbl, n) for lbl, n in _sp["top"][:5]) or "-"
+    logs.append("subprocess: %d calls, %.1fs, top: %s"
+                % (_sp["n"], _sp["wall"], _top))
+    end_sweep_memo()
 
     save_state(state_path, state)
     return logs

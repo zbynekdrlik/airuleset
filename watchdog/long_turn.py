@@ -77,17 +77,22 @@ def _reconcile_candidate_panes(run):
     would be visited twice per sweep (harmless — the consuming job's own
     per-session dedup sees the first visit's claim — but wasteful and noisy
     in the logs). Job 20 (goal re-arm) is the only consumer since #132
-    removed jobs 12/18/23."""
-    run = run or watchdog._default_run
-    out = run(["tmux", "list-panes", "-a", "-F",
-               "#{pane_id}\t#{pane_current_command}\t#{pane_current_path}"])
+    removed jobs 12/18/23.
+
+    #1055 P2: the raw `tmux list-panes -a` read is delegated to
+    `tmux_io._pane_inventory_raw`, which memoizes it per sweep in the 4-field
+    superset format so THIS reader and `list_claude_panes` share ONE query.
+    This reader consumes only the first three fields (pane_id / command / path);
+    the 4th (pane_pid) that `list_claude_panes` needs is ignored here."""
+    from watchdog.tmux_io import _pane_inventory_raw
+    out = _pane_inventory_raw(run)
     seen = set()
     res = []
     for line in (out or "").splitlines():
         parts = line.split("\t")
-        if len(parts) != 3:
+        if len(parts) < 3:
             continue
-        pid, cmd, cwd = parts
+        pid, cmd, cwd = parts[0], parts[1], parts[2]
         if not pid or pid in seen:
             continue
         if cmd not in ("claude", "node", "bun"):

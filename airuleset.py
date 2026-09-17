@@ -3213,14 +3213,23 @@ def _gh_out(*gh_args, timeout=8, cwd=None):
 
     `cwd` runs gh inside a specific checkout (gh resolves the repo from the
     git remote there), so a caller that resolved the repo ROOT does not
-    depend on the process cwd happening to be it (#181 I-5)."""
+    depend on the process cwd happening to be it (#181 I-5).
+
+    #1055 P2: every `gh` invocation through this helper is timed + recorded in
+    the per-sweep subprocess counter (label `gh`), so the journal `subprocess:`
+    line reflects the real gh spend."""
     import subprocess
+    import time
+    from watchdog.subprocess_budget import record_subprocess
+    _t0 = time.monotonic()
     try:
         r = subprocess.run(["gh", *gh_args], capture_output=True, text=True,
                            timeout=timeout, cwd=cwd, env=_gh_env())
         return (r.stdout or "").strip() if r.returncode == 0 else ""
     except Exception:
         return ""
+    finally:
+        record_subprocess("gh", time.monotonic() - _t0)
 
 
 # #370: the whole fleet shares ONE GitHub account → ONE 5000/h GraphQL bucket,
@@ -6092,20 +6101,41 @@ def _watchdog_card_probe(root, base):
     in every sweep — one hung fetch here used to still eat 90s of the 120s
     `TimeoutStartSec` unit budget on its own, leaving jobs 27/28 no chance
     to run at all even after their OWN timeouts were bounded.
+
+    #1055 P2 (b): the git fetch itself is delegated to
+    `_watchdog_shared_git_fetch`, memoized per (root, base) so job 24's
+    delivery_probe and job 25's card_probe share ONE fetch per repo per sweep.
     """
-    import subprocess
+    # Degrade to the local-only read rather than going quiet: an unreported
+    # ticket the user never hears about is the failure this job exists to
+    # prevent, and the worst case of a stale base ref is that the ping arrives
+    # a sweep later (a fetch error is returned so the caller degrades).
+    return _watchdog_shared_git_fetch(root, base)
+
+
+def _watchdog_shared_git_fetch(root, base, run=None):
+    """#1055 P2 (b) — the `git fetch --quiet --no-tags <remote> <branch>` that
+    BOTH job 24 (`_watchdog_delivery_probe`) and job 25 (`_watchdog_card_probe`)
+    perform for the SAME (root, base). Memoized per sweep so it runs ONCE per
+    repo instead of twice. Returns None on success, `{"fetch_error": <repr>}`
+    on a timeout / missing-git exception (a non-zero rc is NOT an error here —
+    the exact pre-#1055 behaviour, where only an EXCEPTION degraded the probe).
+    `run` is injectable for tests (default = a counted subprocess.run, label
+    `git`)."""
+    from watchdog.subprocess_budget import memoized, run_counted
     remote, _, branch = (base or "origin/main").partition("/")
-    try:
-        subprocess.run(["git", "-C", root, "fetch", "--quiet", "--no-tags",
-                        remote or "origin", branch or "main"],
-                       capture_output=True, timeout=15)
-    except Exception as e:
-        # Degrade to the local-only read rather than going quiet: an
-        # unreported ticket the user never hears about is the failure this
-        # job exists to prevent, and the worst case of a stale base ref is
-        # that the ping arrives a sweep later.
-        return {"fetch_error": repr(e)}
-    return None
+
+    def _compute():
+        try:
+            (run or run_counted)(
+                ["git", "-C", root, "fetch", "--quiet", "--no-tags",
+                 remote or "origin", branch or "main"],
+                label="git", capture_output=True, timeout=15)
+        except Exception as e:
+            return {"fetch_error": repr(e)}
+        return None
+
+    return memoized(("gitfetch", root, base), _compute)
 
 
 # #230: the fallback used to run `gh issue list --state closed`, which
@@ -6220,15 +6250,19 @@ def _watchdog_reopened_fetch(root, numbers):
     `numbers` (never per-issue), same cost shape as `_watchdog_closed_fetch`.
     `root` is a local checkout path — `gh` resolves owner/repo from its
     `origin` remote via `cwd=root`, no `-R` needed. Any failure degrades to
-    an EMPTY set: never guess a ticket reopened."""
-    import subprocess
+    an EMPTY set: never guess a ticket reopened.
+
+    #1055 P2 (a): counted in the per-sweep subprocess budget (label `gh`);
+    #1055 P2 (c): its call site in `card_reconcile` is 900s-TTL-gated so this
+    runs at most once per repo per 15 min, not every sweep."""
+    from watchdog.subprocess_budget import run_counted
     if not numbers:
         return set()
     try:
-        r = subprocess.run(
+        r = run_counted(
             ["gh", "issue", "list", "--state", "open",
              "--json", "number", "-L", "1000"],
-            cwd=root, capture_output=True, text=True, timeout=10)
+            label="gh", cwd=root, capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             return set()
         rows = json.loads(r.stdout or "[]")
@@ -6262,24 +6296,21 @@ def _watchdog_delivery_probe(root, base):
     sweep — one hung fetch or gh call here used to still eat most of the
     120s `TimeoutStartSec` unit budget on its own.
     """
-    import subprocess
-    remote, _, branch = (base or "origin/main").partition("/")
+    from watchdog.subprocess_budget import run_counted
+    # #1055 P2 (b): No fetch means no confirmation: job 24 then re-reads the
+    # SAME local refs, so its verdict simply stands and the job degrades to the
+    # local-only heuristic rather than going quiet. Deliberate — a MISSED
+    # delivery stall is the failure this job exists to prevent, and the price of
+    # the alternative is at most one extra ping a day. The fetch is shared with
+    # job 25's card_probe via `_watchdog_shared_git_fetch` (one per repo/sweep).
+    err = _watchdog_shared_git_fetch(root, base)
+    if err is not None:
+        return err
     try:
-        subprocess.run(["git", "-C", root, "fetch", "--quiet", "--no-tags",
-                        remote or "origin", branch or "main"],
-                       capture_output=True, timeout=15)
-    except Exception as e:
-        # No fetch means no confirmation: job 24 then re-reads the SAME local
-        # refs, so its verdict simply stands and the job degrades to the
-        # local-only heuristic rather than going quiet. Deliberate — a MISSED
-        # delivery stall is the failure this job exists to prevent, and the
-        # price of the alternative is at most one extra ping a day.
-        return {"fetch_error": repr(e)}
-    try:
-        r = subprocess.run(
+        r = run_counted(
             ["gh", "pr", "list", "--state", "open", "--limit", "5", "--json",
              "number,mergeStateStatus,statusCheckRollup"],
-            cwd=root, capture_output=True, text=True, timeout=10)
+            label="gh", cwd=root, capture_output=True, text=True, timeout=10)
         if r.returncode != 0:
             return None
         for pr in json.loads(r.stdout or "[]"):
@@ -6619,7 +6650,7 @@ def _watchdog_ops_wait_fetch(cwd):
     return members
 
 
-def _watchdog_queue_fetch(cwd):
+def _watchdog_queue_fetch(cwd, gh_out=None):
     """#733 — the gk QUEUE UNION (`ready-for-review ∪ needs-gatekeeper ∪
     prio:bounce`) open issue numbers for the repo at `cwd`, or None on any
     failure/refusal. The job-20 queue-arrival rider reads this to detect a NEW
@@ -6631,13 +6662,29 @@ def _watchdog_queue_fetch(cwd):
     session's own pane would resolve — a non-full box returns None (the rider
     also gates, so this is belt-and-suspenders).
 
-    Uses the ticket's OWN proven shape: THREE exact-match `--label` queries
+    #1055 P2 (d): ONE `gh issue list --json number,labels -L 500` filtered
+    LOCALLY for the three labels, replacing the former THREE per-label queries
     (never a `label:a,b,c` search string — `prio:bounce` carries a colon that a
-    search qualifier mis-parses), unioned + deduped + sorted. Any query error →
-    None (the #181 fail-safe: an auth/network hiccup must never look like 'no
-    queue'). Wired HERE, like every other network call in this file, so
-    run_once's unit tests stay network-free."""
-    import subprocess
+    search qualifier mis-parses; a local set-membership filter has no such
+    problem). Same sorted union, one subprocess instead of three.
+
+    WINDOW CAVEAT (adversarial-review F1, honesty-bar): this ONE `-L 500` window
+    is the newest-CREATED 500 open issues, then locally filtered — NOT the same
+    as the old THREE `-L 200`-PER-LABEL windows. Queue labels
+    (ready-for-review/needs-gatekeeper/prio:bounce) are low-cardinality transient
+    work-queue labels applied to tickets under ACTIVE review, so in practice they
+    sit well inside the newest window and the union is equivalent. The ONE case
+    it is NOT: on a repo with > 500 open issues, a queue label freshly applied to
+    an OLD (low-created-date) ticket falls outside the window and its arrival is
+    not detected until the ticket re-enters the newest 500 — a delayed/missed
+    NUDGE (the rider only wakes an already-parked full-authority pane, which is
+    waiting anyway), never a lost ticket or a wrong keystroke. Accepted as the
+    2-subprocess-saving trade for this lane; `-L 500` (up from the design's 300)
+    widens the headroom. Any query error → None (the #181 fail-safe: an
+    auth/network hiccup must never look like 'no queue'). Wired HERE, like every
+    other network call in this file, so run_once's unit tests stay network-free.
+    `gh_out(cwd)` (injectable for tests) returns the raw stdout string, or None
+    on a gh failure (so an error stays distinguishable from an empty queue)."""
     try:
         root = _repo_root(cwd=cwd) or cwd
         authority = resolve_authority(cwd=root)
@@ -6645,27 +6692,42 @@ def _watchdog_queue_fetch(cwd):
         return None
     if authority != "full":
         return None
+    raw = (gh_out or _watchdog_queue_gh)(cwd)
+    if raw is None:                      # #181 fail-safe: gh error, not 'no queue'
+        return None
+    try:
+        rows = json.loads(raw or "[]")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    want = {"ready-for-review", "needs-gatekeeper", "prio:bounce"}
     nums = set()
-    for label in ("ready-for-review", "needs-gatekeeper", "prio:bounce"):
-        try:
-            # `-L 200` is a per-label truncation window (#616 LIMIT-TRUNCATION
-            # class), but the failure direction here is MILD: a new arrival sorts
-            # into the newest window, and a long-tail member (>200 open of ONE
-            # label) that falls out then re-enters reads as a spurious re-arrival
-            # — a redundant nudge, never a wrong keystroke or a missed arrival.
-            r = subprocess.run(
-                ["gh", "issue", "list", "--state", "open", "--label", label,
-                 "-L", "200", "--json", "number"],
-                cwd=cwd, capture_output=True, text=True, timeout=15)
-        except Exception:
-            return None
-        if r.returncode != 0:
-            return None
-        try:
-            nums.update(int(x["number"]) for x in json.loads(r.stdout or "[]"))
-        except (ValueError, KeyError, TypeError):
-            return None
+    try:
+        for row in rows:
+            labels = {lbl.get("name") for lbl in (row.get("labels") or [])
+                      if isinstance(lbl, dict)}
+            if labels & want:
+                nums.add(int(row["number"]))
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
     return sorted(nums)
+
+
+def _watchdog_queue_gh(cwd):
+    """The default gh runner for `_watchdog_queue_fetch` (#1055 P2): ONE
+    `gh issue list --json number,labels`, counted in the per-sweep subprocess
+    budget. Returns stdout on success, None on any failure/timeout — so the
+    caller keeps the #181 error-vs-empty distinction."""
+    from watchdog.subprocess_budget import run_counted
+    try:
+        r = run_counted(
+            ["gh", "issue", "list", "--state", "open",
+             "--json", "number,labels", "-L", "500"],
+            label="gh", cwd=cwd, capture_output=True, text=True, timeout=15)
+    except Exception:
+        return None
+    return r.stdout if r.returncode == 0 else None
 
 
 def _watchdog_queue_classify(cwd):
@@ -7496,10 +7558,13 @@ def _watchdog_git_fetch(root):
     #172: timeout cut 90s -> 15s. One hung `git fetch` must never eat most
     of the 120s `TimeoutStartSec` unit budget — the repo-batch cap
     (`_repo_sweep_batch`, `AIRULESET_REPO_SWEEP_BATCH`) bounds how many
-    repos this costs per sweep; this bounds what ONE of them can cost."""
-    import subprocess
-    subprocess.run(["git", "-C", root, "fetch", "--quiet", "--no-tags",
-                    "origin"], capture_output=True, timeout=15, check=True)
+    repos this costs per sweep; this bounds what ONE of them can cost.
+
+    #1055 P2 (a): counted in the per-sweep subprocess budget (label `git`)."""
+    from watchdog.subprocess_budget import run_counted
+    run_counted(["git", "-C", root, "fetch", "--quiet", "--no-tags",
+                 "origin"], label="git", capture_output=True, timeout=15,
+                check=True)
 
 
 def _watchdog_issue_counts_fetch(repo_label, window_s):

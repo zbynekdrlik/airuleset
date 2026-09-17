@@ -148,12 +148,16 @@ class TestInfraRiderPath(_InfraOrchBase):
         self._run(qrecs, lambda cwd: [_rec(1), _rec(2)], tmux1, handled=set(),
                   state=state)
         self.assertIn("#2", "".join(tmux1.typed_texts()))
-        # a second arrival a few minutes later, still inside the floor
+        # A second arrival still inside the 60-min NUDGE floor. #1055 P2 (c)
+        # raised QUEUE_ARRIVAL_FETCH_TTL_S 300->600, so the second call must be
+        # PAST the 600s fetch TTL (else the union read is a cache HIT and #3 is
+        # never seen) yet WELL WITHIN the 3600s nudge floor -> NOW+700 exercises
+        # exactly the floor-hold this design-of-record lock targets.
         tmux2 = self._tmux()
         with m.patch("airuleset.resolve_authority", return_value="full"), \
                 m.patch("cli_concurrency.resolve_mode", return_value="sequential"):
             logs = qa.goal_queue_arrival_recheck(
-                NOW + 300, tmux2, qrecs, self.sid, self.CWD, "%9", self.tpath,
+                NOW + 700, tmux2, qrecs, self.sid, self.CWD, "%9", self.tpath,
                 "gk-infra:0", False, set(), queue_fetch=None, state=state,
                 sleep_fn=lambda *a, **k: None,
                 infra_queue_fetch=lambda cwd: [_rec(1), _rec(2), _rec(3)],

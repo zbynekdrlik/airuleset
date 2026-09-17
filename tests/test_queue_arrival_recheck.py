@@ -540,8 +540,15 @@ class TestRunOnceWiring(unittest.TestCase):
         self.assertIn("queue_fetch=_watchdog_queue_fetch", src)
 
     def test_real_fetch_unions_the_three_labels(self):
-        # `_watchdog_queue_fetch` runs 3 label queries and unions the numbers.
-        seen = {}
+        # #1055 P2 (d): ONE `gh issue list --json number,labels` filtered
+        # LOCALLY for the three labels, unioned + deduped + sorted.
+        seen = {"n": 0}
+        fixture = (
+            '[{"number": 5177, "labels": [{"name": "ready-for-review"},'
+            ' {"name": "prio:bounce"}]},'
+            ' {"number": 5310, "labels": [{"name": "needs-gatekeeper"}]},'
+            ' {"number": 3073, "labels": [{"name": "prio:bounce"}]},'
+            ' {"number": 99, "labels": [{"name": "unrelated"}]}]')
 
         class R:
             def __init__(self, out):
@@ -550,21 +557,15 @@ class TestRunOnceWiring(unittest.TestCase):
                 self.stderr = ""
 
         def fake_run(cmd, **kw):
-            # find the --label value
-            lbl = cmd[cmd.index("--label") + 1]
-            seen[lbl] = seen.get(lbl, 0) + 1
-            data = {"ready-for-review": '[{"number": 5177}]',
-                    "needs-gatekeeper": '[{"number": 5310}]',
-                    "prio:bounce": '[{"number": 3073}, {"number": 5177}]'}
-            return R(data.get(lbl, "[]"))
+            seen["n"] += 1
+            return R(fixture)
 
         with m.patch("airuleset._repo_root", return_value="/r"), \
                 m.patch("airuleset.resolve_authority", return_value="full"), \
                 m.patch("subprocess.run", side_effect=fake_run):
             out = airuleset._watchdog_queue_fetch("/r")
         self.assertEqual(out, [3073, 5177, 5310])   # sorted union, deduped
-        self.assertEqual(set(seen), {"ready-for-review", "needs-gatekeeper",
-                                     "prio:bounce"})
+        self.assertEqual(seen["n"], 1)              # ONE call, not three
 
     def test_real_fetch_non_full_authority_returns_none(self):
         with m.patch("airuleset._repo_root", return_value="/r"), \

@@ -338,12 +338,26 @@ def keys(pane_id, *keystrokes, kind, nudge=None, user_authored=False, run=None,
 
 
 def _default_run(argv, timeout=8):
+    # #1055 P2 -- the watchdog's default subprocess runner (tmux calls, plus any
+    # caller that threads `run=_default_run`). Time + record every invocation in
+    # the per-sweep counter (label = command basename, e.g. `tmux`); a memoized
+    # caller that short-circuits BEFORE reaching here never records, so the
+    # counter reflects the real per-sweep subprocess spend.
     import subprocess
+    import time
+    from watchdog.subprocess_budget import record_subprocess
+    t0 = time.monotonic()
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
         return r.stdout if r.returncode == 0 else ""
     except Exception:
         return ""
+    finally:
+        try:
+            _lbl = os.path.basename(str(argv[0])) if argv else "?"
+        except Exception:
+            _lbl = "?"
+        record_subprocess(_lbl, time.monotonic() - t0)
 
 
 def _proc_read(path):
@@ -543,6 +557,69 @@ def _tmux_socket_recover(pid, run=None):
     run(["kill", "-USR1", str(pid)])
 
 
+# #1055 P2 -- the 4-field SUPERSET `list-panes` format. `list_claude_panes`
+# needs pane_pid (the 4th field, for the sudo/su-hosted stream shape);
+# `_reconcile_candidate_panes` reads only the first three -- so ONE query in this
+# format feeds BOTH readers, shared per sweep via the memo below.
+_PANE_INVENTORY_QUERY = [
+    "tmux", "list-panes", "-a", "-F",
+    "#{pane_id}\t#{pane_current_command}\t#{pane_current_path}\t#{pane_pid}",
+]
+
+
+def _pane_inventory_raw(run=None, logs=None, dry_run=False):
+    """Raw `tmux list-panes -a` output (the 4-field superset format), SHARED
+    across a sweep via the per-sweep memo so `list_claude_panes` and
+    `_reconcile_candidate_panes` issue ONE query between them (#1055 P2). Carries
+    `list_claude_panes`'s socket-orphan recovery (#318) verbatim, so a cached
+    inventory is a RECOVERED one whichever reader runs first. OUTSIDE a sweep
+    (memo inactive) every call runs its own query + recovery -- behaviour is
+    byte-identical to the pre-#1055 inline read for every direct caller.
+
+    ORDERING INVARIANT (adversarial-review F4): the recovery's real SIGUSR1 fires
+    ONLY on the FIRST computing caller (a memo MISS). In run_once,
+    `list_claude_panes(run, dry_run=dry_run)` runs in the top pane loop BEFORE
+    any job-20 rider, so it ALWAYS seeds the memo (threading dry_run correctly)
+    and `_reconcile_candidate_panes` — which passes `dry_run=False` by default —
+    only ever hits the cache, never triggering a live SIGUSR1 in a `--dry-run`
+    sweep. If a future caller could compute the inventory FIRST during a dry-run
+    sweep, thread `dry_run` to it (the param is here for that)."""
+    from watchdog.subprocess_budget import memoized
+    run = run or watchdog._default_run
+
+    def _compute():
+        out = run(_PANE_INVENTORY_QUERY)
+        if not (out or "").strip() and _tmux_socket_missing():
+            # `_tmux_socket_missing()` is a cheap stat -- checked BEFORE the
+            # `ps -e` process-table scan below (MINOR-1, #318 review) so a box
+            # whose socket is intact never pays that cost, even when
+            # list-panes came back empty for some other, unrelated reason.
+            pids = _tmux_server_pids(run)
+            if pids and dry_run:
+                if logs is not None:
+                    logs.append("tmux-socket-orphaned server-pid=%d -- "
+                                "would recover via SIGUSR1 (dry-run)" % pids[0])
+            elif pids:
+                recovered = False
+                for pid in pids:
+                    if logs is not None:
+                        logs.append("tmux-socket-orphaned server-pid=%d -- "
+                                    "recovering via SIGUSR1" % pid)
+                    _tmux_socket_recover(pid, run)
+                    out = run(_PANE_INVENTORY_QUERY)
+                    if (out or "").strip():
+                        if logs is not None:
+                            logs.append("tmux-socket-recovered")
+                        recovered = True
+                        break
+                if not recovered and logs is not None:
+                    logs.append("tmux-socket-recovery-failed server-pids=%s"
+                                % ",".join(str(p) for p in pids))
+        return out or ""
+
+    return memoized(("panes_raw",), _compute)
+
+
 def list_claude_panes(run=None, logs=None, dry_run=False):
     """[(pane_id, cwd)] for every tmux pane running `claude` — directly, or
     hosted under sudo/su (the montalu-in-newlevel-tmux stream shape) — deduped
@@ -562,38 +639,12 @@ def list_claude_panes(run=None, logs=None, dry_run=False):
     callers that don't care about it (nearly all of them) just omit it.
     `dry_run=True` (adversarial-review finding) logs what WOULD be tried
     but never sends the real SIGUSR1, so a `watchdog --once --dry-run` stays
-    genuinely side-effect-free through every caller that threads it here."""
-    run = run or watchdog._default_run
-    query = ["tmux", "list-panes", "-a", "-F",
-             "#{pane_id}\t#{pane_current_command}\t#{pane_current_path}"
-             "\t#{pane_pid}"]
-    out = run(query)
-    if not (out or "").strip() and _tmux_socket_missing():
-        # `_tmux_socket_missing()` is a cheap stat -- checked BEFORE the
-        # `ps -e` process-table scan below (MINOR-1, #318 review) so a box
-        # whose socket is intact never pays that cost, even when
-        # list-panes came back empty for some other, unrelated reason.
-        pids = _tmux_server_pids(run)
-        if pids and dry_run:
-            if logs is not None:
-                logs.append("tmux-socket-orphaned server-pid=%d -- "
-                            "would recover via SIGUSR1 (dry-run)" % pids[0])
-        elif pids:
-            recovered = False
-            for pid in pids:
-                if logs is not None:
-                    logs.append("tmux-socket-orphaned server-pid=%d -- "
-                                "recovering via SIGUSR1" % pid)
-                _tmux_socket_recover(pid, run)
-                out = run(query)
-                if (out or "").strip():
-                    if logs is not None:
-                        logs.append("tmux-socket-recovered")
-                    recovered = True
-                    break
-            if not recovered and logs is not None:
-                logs.append("tmux-socket-recovery-failed server-pids=%s"
-                            % ",".join(str(p) for p in pids))
+    genuinely side-effect-free through every caller that threads it here.
+
+    #1055 P2: the raw `tmux list-panes -a` read (with the socket-orphan
+    recovery) is delegated to `_pane_inventory_raw`, which memoizes it per
+    sweep so this reader and `_reconcile_candidate_panes` share ONE query."""
+    out = _pane_inventory_raw(run, logs=logs, dry_run=dry_run)
     seen, res = set(), []
     for line in (out or "").splitlines():
         parts = line.split("\t")
@@ -628,7 +679,16 @@ def pane_in_mode(pane_id, run=None):
 def capture_pane(pane_id, run=None, lines=40):
     """Last `lines` of the pane's visible content. Used ONLY for the ping-only
     waiting-on-user detector — never for the api-error action trigger (that is
-    flag-only, after the pane-text-fallback incident)."""
+    flag-only, after the pane-text-fallback incident).
+
+    #1055 P2: deliberately NOT memoized. Every same-pane recapture in the
+    codebase is an intentional FRESH read -- the top-of-sweep baseline is
+    re-verified before every keystroke send against a fresh capture (#176-F3),
+    the goal riders poll a render-settling box (`_await_typed`/`_await_goal_
+    armed`, #720), and parked-wake re-reads to detect a same-sweep resume;
+    memoizing the CONTENT would defeat those race/liveness checks (the #233
+    keystroke-into-a-moved-pane scar). Only the pane's OWNER (`pane_owner`,
+    which cannot change mid-sweep) and the pane-list inventory are memoized."""
     run = run or watchdog._default_run
     return run(["tmux", "capture-pane", "-p", "-t", pane_id, "-S", "-%d" % lines])
 
@@ -638,14 +698,23 @@ def pane_owner(pane_id, run=None):
     that pane @mentions the right person — the watchdog runs headless (systemd
     --user) with NO tmux context of its own, so it must resolve the owner from the
     waiting/stalled pane, not from itself. Matches notify.resolve_owner's
-    normalization ('marek-12' → 'marek')."""
+    normalization ('marek-12' → 'marek').
+
+    #1055 P2: memoized per pane within a sweep -- the owner of a pane cannot
+    change mid-sweep, so the main loop and the goal riders share ONE
+    `display-message` per pane."""
+    from watchdog.subprocess_budget import memoized
     run = run or watchdog._default_run
-    for fmt in ("#{session_group}", "#S"):
-        out = (run(["tmux", "display-message", "-p", "-t", pane_id, fmt]) or "").strip()
-        if out:
-            out = re.sub(r"-\d+$", "", out)
-            return re.sub(r"[^a-z0-9]", "", out.lower())
-    return ""
+
+    def _compute():
+        for fmt in ("#{session_group}", "#S"):
+            out = (run(["tmux", "display-message", "-p", "-t", pane_id, fmt]) or "").strip()
+            if out:
+                stripped = re.sub(r"-\d+$", "", out)
+                return re.sub(r"[^a-z0-9]", "", stripped.lower())
+        return ""
+
+    return memoized(("owner", pane_id), _compute)
 
 
 def _strip_selected(captured):

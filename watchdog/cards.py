@@ -64,8 +64,15 @@ def _default_git_run(argv, timeout=10):
     Genuinely shared: NOT compact-owned, even though it used to sit inside
     the (now-deleted, #402) compact block purely by physical proximity to
     `compact_boundary_substantial`'s own `_git_commit_count_since` helper,
-    which WAS compact-only and is gone with it."""
+    which WAS compact-only and is gone with it.
+
+    #1055 P2 (a): every git call here is timed + recorded in the per-sweep
+    subprocess counter (label `git`), so the journal `subprocess:` line counts
+    the card/delivery git spend too, not just tmux/gh/ps."""
     import subprocess
+    import time
+    from watchdog.subprocess_budget import record_subprocess
+    _t0 = time.monotonic()
     try:
         r = subprocess.run(argv, capture_output=True, text=True,
                             timeout=timeout)
@@ -74,15 +81,61 @@ def _default_git_run(argv, timeout=10):
         return r.stdout
     except Exception:
         return None
+    finally:
+        record_subprocess("git", time.monotonic() - _t0)
+
+
+# #1055 P2 (c) -- how often `card_reconcile` runs its `reopen_fetch`
+# (`gh issue list --state open` per repo). A ticket REOPEN is a rare, manual
+# event, so re-checking every 60s sweep spends a `gh` call for a near-never
+# change; gating it to once per 15 min per repo removes ~1 gh call/sweep from
+# every card-bearing repo. Worst case: a marker for a just-reopened ticket is
+# cleared up to 15 min late, costing at most ONE delayed card.
+REOPEN_FETCH_TTL_S = 15 * 60
+
+
+def _reopen_fetch_due(state, root, now, ttl=REOPEN_FETCH_TTL_S):
+    """True if `reopen_fetch` should run for `root` this sweep -- at most once
+    per `ttl`. Records the timestamp in `state['card_reopen'][root]['ts']`
+    (created lazily) when it returns True. An unparseable stored ts reads as
+    due (fail toward doing the rare-but-correct clear, never toward silence).
+
+    Note (adversarial-review F5): the ts is stamped on the ATTEMPT, not on a
+    successful fetch, so a transient `reopen_fetch` failure/empty result also
+    consumes the window -- i.e. a failed clear retries in <= `ttl`, not next
+    sweep. That is WITHIN the design's accepted 15-min marker-clear lateness (a
+    reopen is a rare manual event; the cost is at most one delayed card), so it
+    is deliberately not given a shorter fail-TTL."""
+    slot = state.setdefault("card_reopen", {})
+    ent = slot.get(root)
+    ts = ent.get("ts") if isinstance(ent, dict) else None
+    try:
+        due = (ts is None) or (float(now) - float(ts) >= ttl)
+    except (TypeError, ValueError):
+        due = True
+    if due:
+        slot[root] = {"ts": now}
+    return due
 
 
 def _git_first_line(cwd, argv, git_run=None):
     """One `git -C <cwd> …` call, stripped. None on any failure OR empty
-    output — never a partial guess."""
-    out = (git_run or _default_git_run)(["git", "-C", str(cwd)] + list(argv))
-    if out is None:
-        return None
-    return out.strip() or None
+    output — never a partial guess.
+
+    #1055 P2 (b): memoized per `(cwd, argv)` within a sweep, so the repeated
+    per-SID `rev-parse --show-toplevel` / `_git_base_ref` reads in
+    `card_reconcile` (and any other same-sweep repeat of the SAME git query)
+    collapse to ONE git call per distinct (cwd, argv). Outside a sweep (memo
+    inactive) every call runs fresh -- direct/test behaviour is unchanged."""
+    from watchdog.subprocess_budget import memoized
+
+    def _compute():
+        out = (git_run or _default_git_run)(["git", "-C", str(cwd)] + list(argv))
+        if out is None:
+            return None
+        return out.strip() or None
+
+    return memoized(("gitline", str(cwd), tuple(argv)), _compute)
 
 
 def _git_base_ref(cwd, git_run=None):
@@ -431,7 +484,10 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         # behavior change at all. An existing marker predates THIS sweep's
         # window entirely, which is exactly why this cannot depend on
         # `closed` being non-empty.
-        if name and reopen_fetch is not None:
+        # #1055 P2 (c): the reopen check is TTL-gated per repo (`reopen_fetch`
+        # is a `gh issue list` and a reopen is rare) -- at most once per 15 min,
+        # so a card-bearing repo no longer spends a gh call here every sweep.
+        if name and reopen_fetch is not None and _reopen_fetch_due(state, root, now):
             try:
                 from notify import card_marker_numbers, forget_marker
             except ImportError:
