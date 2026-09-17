@@ -104,10 +104,17 @@ def session_model(cwd, projects_dir=None, home=None):
     string (#1061). A MAIN session -> `<projects>/<enc-cwd>/*.jsonl`
     (`find_active_transcript`). A worktree lane -> its nested subagent transcript
     (`_worktree_subagent_transcript`). Any failure -> `UNKNOWN_MODEL` (honest;
-    the dispatch gate then refuses, the fail-closed direction)."""
+    the dispatch gate then refuses, the fail-closed direction).
+
+    Uses `transcript_newest_assistant_model` (the wide-window AUTHORSHIP reader),
+    NOT `transcript_last_assistant_model` (the model-float audit's "last REAL
+    served model"): the fix-forward for the deploy defect where a busy main
+    turn's 60-entry tail (all tool-result entries) or an api-error tail made the
+    float reader return `''` -> `unknown` -> a refused legitimate design (#1061,
+    'Live defect after deploy'). The float reader keeps its own callers untouched."""
     try:
         from watchdog.transcripts import (find_active_transcript,
-                                          transcript_last_assistant_model)
+                                          transcript_newest_assistant_model)
     except Exception:
         return UNKNOWN_MODEL
     if projects_dir is None:
@@ -123,7 +130,7 @@ def session_model(cwd, projects_dir=None, home=None):
         return UNKNOWN_MODEL
     path = found[0]
     try:
-        model = transcript_last_assistant_model(path)
+        model = transcript_newest_assistant_model(path)
     except Exception:
         return UNKNOWN_MODEL
     model = (model or "").strip()
