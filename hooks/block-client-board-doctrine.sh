@@ -40,7 +40,7 @@ PAYLOAD=$(cat 2>/dev/null || echo "")
 command -v python3 &>/dev/null || exit 0
 RC=0
 env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \
-    python3 -m gates.clientbody <<<"$PAYLOAD" || RC=$?
+    python3 -P -m gates.clientbody <<<"$PAYLOAD" || RC=$?
 if [ "$RC" -eq 2 ]; then
     # gates.emit_block already printed the Slovak reason to stdout AND stderr;
     # this trailer keeps the deny visibly on stderr (hook stderr contract, #1018).

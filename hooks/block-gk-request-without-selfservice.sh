@@ -27,7 +27,7 @@ PAYLOAD=$(cat 2>/dev/null || echo "")
 [ -z "$PAYLOAD" ] && PAYLOAD="${TOOL_INPUT:-}"
 RC=0
 env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \
-    python3 -m gates.selfservice <<<"$PAYLOAD" 1>&2 || RC=$?
+    python3 -P -m gates.selfservice <<<"$PAYLOAD" 1>&2 || RC=$?
 if [ "$RC" -ne 0 ] && [ "$RC" -ne 2 ]; then
     echo "🚫 BLOCKED (fail-closed): block-gk-request-without-selfservice internal" >&2
     echo "  error — the gate exited $RC instead of running the check. This is a" >&2
