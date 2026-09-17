@@ -574,7 +574,16 @@ def _pane_inventory_raw(run=None, logs=None, dry_run=False):
     `list_claude_panes`'s socket-orphan recovery (#318) verbatim, so a cached
     inventory is a RECOVERED one whichever reader runs first. OUTSIDE a sweep
     (memo inactive) every call runs its own query + recovery -- behaviour is
-    byte-identical to the pre-#1055 inline read for every direct caller."""
+    byte-identical to the pre-#1055 inline read for every direct caller.
+
+    ORDERING INVARIANT (adversarial-review F4): the recovery's real SIGUSR1 fires
+    ONLY on the FIRST computing caller (a memo MISS). In run_once,
+    `list_claude_panes(run, dry_run=dry_run)` runs in the top pane loop BEFORE
+    any job-20 rider, so it ALWAYS seeds the memo (threading dry_run correctly)
+    and `_reconcile_candidate_panes` — which passes `dry_run=False` by default —
+    only ever hits the cache, never triggering a live SIGUSR1 in a `--dry-run`
+    sweep. If a future caller could compute the inventory FIRST during a dry-run
+    sweep, thread `dry_run` to it (the param is here for that)."""
     from watchdog.subprocess_budget import memoized
     run = run or watchdog._default_run
 

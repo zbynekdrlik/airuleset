@@ -98,7 +98,14 @@ def _reopen_fetch_due(state, root, now, ttl=REOPEN_FETCH_TTL_S):
     """True if `reopen_fetch` should run for `root` this sweep -- at most once
     per `ttl`. Records the timestamp in `state['card_reopen'][root]['ts']`
     (created lazily) when it returns True. An unparseable stored ts reads as
-    due (fail toward doing the rare-but-correct clear, never toward silence)."""
+    due (fail toward doing the rare-but-correct clear, never toward silence).
+
+    Note (adversarial-review F5): the ts is stamped on the ATTEMPT, not on a
+    successful fetch, so a transient `reopen_fetch` failure/empty result also
+    consumes the window -- i.e. a failed clear retries in <= `ttl`, not next
+    sweep. That is WITHIN the design's accepted 15-min marker-clear lateness (a
+    reopen is a rare manual event; the cost is at most one delayed card), so it
+    is deliberately not given a shorter fail-TTL."""
     slot = state.setdefault("card_reopen", {})
     ent = slot.get(root)
     ts = ent.get("ts") if isinstance(ent, dict) else None

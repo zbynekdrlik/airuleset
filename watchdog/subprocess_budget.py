@@ -3,13 +3,25 @@ subprocess runners, plus a per-sweep MEMO namespace for identical calls.
 
 Counter (design (a)): the watchdog fires ~130 gh/git/tmux/ps subprocesses per
 60s sweep (measured on gk after the P1 transcript-read fix). This module counts
-them in ONE place so a regression is visible in the journal (`subprocess: N
-calls, Ws, top: label:n, ...`) next to P1's `transcript reads:` line, and so the
-(e) registry budget can HOLD a job that would push a sweep over its subprocess
-budget. `record_subprocess` is called from every runner (`_default_run`,
-`_gh_out`, `run_counted`, `_default_git_run`, `default_ps_fetch`); a memo HIT
-never records (it issues no child), so the counter shows exactly the saving the
-(b) memos and (c)/(d) collapses buy.
+the calls that flow through the watchdog's SHARED RUNNERS so a regression is
+visible in the journal (`subprocess: N calls, Ws, top: label:n, ...`) next to
+P1's `transcript reads:` line, and so the (e) registry budget can HOLD a job that
+would push a sweep over its subprocess budget. `record_subprocess` is reached
+from `_default_run` (tmux), `_gh_out` (gh), `run_counted` (the collapsed/raw
+fetches), `_default_git_run` (cards git) and `default_ps_fetch` (ps) — the
+dominant per-sweep families the P2 memos + collapses target.
+
+NOT A TOTAL (adversarial-review F2, honesty-bar): some sweep-path children run
+their OWN bare `subprocess.run` outside these runners — the cross-stream
+bounce/gk-orphan gh backstops (`watchdog/cross_stream.py`, cadence-gated, not
+every sweep), a few pane-loop probes, and `cli_gh_rate`'s own un-metered
+`gh api rate_limit`. So the `subprocess:` line is a LOWER BOUND / TREND over the
+instrumented families, not an exhaustive process count (measured 25 of 28 on the
+controller). A memo HIT never records (it issues no child), so the counter still
+reflects the saving the (b) memos and (c)/(d) collapses buy on those families.
+Consequence for (e): the budget reads this (partial) count, so its cap triggers
+conservatively (LATE, never spuriously) — the fail-safe direction; a held job
+also still carries its own wall-clock `min_budget`.
 
 Sweep memo (design (b)): identical subprocess calls within ONE sweep -- the same
 `tmux list-panes -a`, the same per-pane `capture-pane`/`display-message`, one
@@ -94,7 +106,17 @@ _ACTIVE = [False]
 
 def begin_sweep_memo():
     """Activate + clear the per-sweep memo (run_once top). Only between this and
-    `end_sweep_memo()` do the memoized readers collapse identical calls."""
+    `end_sweep_memo()` do the memoized readers collapse identical calls.
+
+    SELF-HEAL (adversarial-review F3): `end_sweep_memo()` at run_once's tail is
+    the normal deactivation, but it is NOT in a try/finally, so an uncaught raise
+    mid-sweep could leave `_ACTIVE` True. This is production-safe (systemd runs
+    one sweep per FRESH process) and pytest-safe for the next sweep because THIS
+    function `.clear()`s + is called at the top of every run_once BEFORE any
+    memoized reader runs — so a leaked-active state from a prior raised sweep is
+    always wiped here. The only residual is a DIRECT memoized-helper call between
+    a raised run_once and the next one (a test path); the test classes here
+    `end_sweep_memo()` in tearDown to close it."""
     _MEMO.clear()
     _ACTIVE[0] = True
 

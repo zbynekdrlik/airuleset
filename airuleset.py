@@ -6662,17 +6662,27 @@ def _watchdog_queue_fetch(cwd, gh_out=None):
     session's own pane would resolve — a non-full box returns None (the rider
     also gates, so this is belt-and-suspenders).
 
-    #1055 P2 (d): ONE `gh issue list --json number,labels -L 300` filtered
+    #1055 P2 (d): ONE `gh issue list --json number,labels -L 500` filtered
     LOCALLY for the three labels, replacing the former THREE per-label queries
     (never a `label:a,b,c` search string — `prio:bounce` carries a colon that a
     search qualifier mis-parses; a local set-membership filter has no such
-    problem). Same sorted union, one subprocess instead of three. Any query
-    error → None (the #181 fail-safe: an auth/network hiccup must never look
-    like 'no queue'). `-L 300` widens the former per-label 200 window into ONE
-    combined window — the failure direction stays MILD (a long-tail member that
-    falls out then re-enters reads as a spurious re-arrival, a redundant nudge,
-    never a wrong keystroke or a missed arrival). Wired HERE, like every other
-    network call in this file, so run_once's unit tests stay network-free.
+    problem). Same sorted union, one subprocess instead of three.
+
+    WINDOW CAVEAT (adversarial-review F1, honesty-bar): this ONE `-L 500` window
+    is the newest-CREATED 500 open issues, then locally filtered — NOT the same
+    as the old THREE `-L 200`-PER-LABEL windows. Queue labels
+    (ready-for-review/needs-gatekeeper/prio:bounce) are low-cardinality transient
+    work-queue labels applied to tickets under ACTIVE review, so in practice they
+    sit well inside the newest window and the union is equivalent. The ONE case
+    it is NOT: on a repo with > 500 open issues, a queue label freshly applied to
+    an OLD (low-created-date) ticket falls outside the window and its arrival is
+    not detected until the ticket re-enters the newest 500 — a delayed/missed
+    NUDGE (the rider only wakes an already-parked full-authority pane, which is
+    waiting anyway), never a lost ticket or a wrong keystroke. Accepted as the
+    2-subprocess-saving trade for this lane; `-L 500` (up from the design's 300)
+    widens the headroom. Any query error → None (the #181 fail-safe: an
+    auth/network hiccup must never look like 'no queue'). Wired HERE, like every
+    other network call in this file, so run_once's unit tests stay network-free.
     `gh_out(cwd)` (injectable for tests) returns the raw stdout string, or None
     on a gh failure (so an error stays distinguishable from an empty queue)."""
     try:
@@ -6713,7 +6723,7 @@ def _watchdog_queue_gh(cwd):
     try:
         r = run_counted(
             ["gh", "issue", "list", "--state", "open",
-             "--json", "number,labels", "-L", "300"],
+             "--json", "number,labels", "-L", "500"],
             label="gh", cwd=cwd, capture_output=True, text=True, timeout=15)
     except Exception:
         return None
