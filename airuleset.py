@@ -3896,11 +3896,18 @@ def cmd_tickets_status(args):
                 gk = sum(1 for n_num in workable_rows if handed.get(n_num))
                 entry["open"] = len(workable_rows) - gk
                 entry["gk"] = gk
-                # #1056 L1: `· bounce K` — open prio:bounce tickets in this
-                # box's slice, from the SAME workable rows (a subset of the
-                # WORKABLE slice = open ∪ gk, never a second query; #367
-                # one-derivation).
-                entry["bounce"] = _count_bounce(workable_rows)
+                # #1056 L1/L2 (i0): `· bounce K` — EVERY open prio:bounce ticket
+                # in this box's slice, across the FULL role-filtered partition
+                # (workable ∪ user-waiting ∪ ops-wait), from the SAME already-
+                # partitioned rows (never a second query; #367 one-derivation).
+                # L2 counts the union, not just `workable`, so a returned bounce
+                # parked on an owner-answer (needs-answer + prio:bounce → U) is
+                # still counted — the montalu1 "bounce 1 of 5" false read. The
+                # partition already pulls a prio:bounce+ops-wait row into
+                # `workable`, so the common case lands in I; the union catches
+                # the rarer U-parked bounce too.
+                entry["bounce"] = _count_bounce_all(workable_rows, waiting,
+                                                    ops_wait)
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)
                 # #948: question-map-aware U supplement — see the full
@@ -8622,6 +8629,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _ops_wait_reason as _ops_wait_reason,
     _partition_workable as _partition_workable,
     _count_bounce as _count_bounce,
+    count_bounce_all as _count_bounce_all,
     _acceptance_present_set as _acceptance_present_set,
     _question_map_u_supplement as _question_map_u_supplement,
     _comment_carries_question as _comment_carries_question,

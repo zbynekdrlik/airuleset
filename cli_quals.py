@@ -299,6 +299,18 @@ MAINTAINER_ACTION_LABELS = ("needs-gatekeeper", "ready-for-review",
 # actions a verify-on-copy ticket, its owning stream does.
 SUBDEV_ACTION_LABELS = ("verify-on-copy",)
 
+# #1056 L2 (i0): a returned bounce is the STREAM's own rework, never "waiting on
+# a third party". `_partition_workable` pulls a `prio:bounce` row OUT of the
+# ops-wait/W bucket into `workable`, extending the #507
+# NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS precedence (which already keeps such a row
+# out of U) into the W branch. A pure LABEL override (the safe over-count
+# direction) — the precise gk-verdict-vs-RFR classification lives in Job 8's
+# `_bounce_nudge_message` and gk-watch, keeping this partition network-free.
+# The literal mirrors `_GK_HANDOFF_BOUNCE_OVERRIDE` (defined later, next to
+# `_count_bounce`); kept as its own name here so the override reads at the
+# partition site without a forward reference.
+_PARTITION_BOUNCE_LABEL = "prio:bounce"
+
 
 def _obligation_quals():
     """The per-qual search fragments whose UNION is a full-authority box's
@@ -806,8 +818,17 @@ def _partition_workable(rows, own_stream=None):
             # #1053: a SUBDEV_ACTION_LABELS label (`verify-on-copy`) overrides
             # ops-wait the SAME way — only the owning stream can perform the
             # post-deploy verify, so it stays action-only I, never hidden in W.
-            if any(ml in names for ml in
-                   (MAINTAINER_ACTION_LABELS + SUBDEV_ACTION_LABELS)):
+            # #1056 L2 (i0): a `prio:bounce` label ALSO overrides ops-wait →
+            # workable. A returned bounce is the stream's own rework (the #313
+            # bounce override / #507 precedence extended into the W branch), so
+            # it is never "waiting on a third party" — the montalu1 read where
+            # three bounces sat in W (`prio:bounce`+`needs-acceptance`+
+            # `ops-wait`) as a false third-party wait. Label-only (the safe
+            # over-count direction); the precise verdict-vs-RFR classification
+            # is Job 8's / gk-watch's job, keeping this partition network-free.
+            if (_PARTITION_BOUNCE_LABEL in names
+                    or any(ml in names for ml in
+                           (MAINTAINER_ACTION_LABELS + SUBDEV_ACTION_LABELS))):
                 workable[number] = row
             else:
                 ops_wait[number] = row
@@ -1868,15 +1889,16 @@ _GK_HANDOFF_BOUNCE_OVERRIDE = "prio:bounce"
 
 def _count_bounce(rows):
     """Count of rows carrying the `prio:bounce` label (#1056 L1 (b)) — the
-    footer's `· bounce K`. `rows` is the `{number: {"labels": [...]}}` dict the
-    footer already partitioned (the WORKABLE slice = open ∪ gk), so bounce is a
-    subset of WORKABLE and derives from the SAME rows as gk/open (#367
-    one-derivation, never a second query). A bounce row that also carries a
-    stale hand-off label is counted in `gk` (excluded from the displayed `I N`)
-    yet still counted here — a returned bounce is urgent regardless of a stale
-    label, so `· bounce K` counts WORKABLE-bounce, not strictly I-bounce. A
-    missing/unreadable/malformed labels value counts as no-bounce (the safe
-    direction — never crash the footer refresh, #1056 review R2)."""
+    primitive behind the footer's `· bounce K`. `rows` is a
+    `{number: {"labels": [...]}}` dict; the count is over EXACTLY the rows
+    passed. The footer feeds it the FULL role-filtered partition (workable ∪
+    user-waiting ∪ ops-wait) via `count_bounce_all` (#1056 L2 (i0)), so a
+    returned bounce is counted regardless of which parking bucket it sits in.
+    A bounce row that also carries a stale hand-off label is counted in `gk`
+    (excluded from the displayed `I N`) yet still counted here — a returned
+    bounce is urgent regardless of a stale label. A missing/unreadable/malformed
+    labels value counts as no-bounce (the safe direction — never crash the
+    footer refresh, #1056 review R2)."""
     n = 0
     for row in (rows or {}).values():
         labels = row.get("labels") if isinstance(row, dict) else None
@@ -1885,6 +1907,29 @@ def _count_bounce(rows):
         if _GK_HANDOFF_BOUNCE_OVERRIDE in names:
             n += 1
     return n
+
+
+def count_bounce_all(workable, waiting, ops_wait):
+    """Count EVERY open `prio:bounce` across the FULL footer partition — the
+    union of `workable`, `waiting` (U) and `ops_wait` (W) (#1056 L2 (i0)).
+
+    `_partition_workable` already pulls a `prio:bounce`+ops-wait row into
+    `workable`, so the common returned-bounce lands in the I bucket; this union
+    ALSO catches the rarer bounce parked on a genuine OWNER answer
+    (`needs-answer`/`needs-decision` + `prio:bounce`), which deliberately STAYS
+    in U (you cannot rework without the answer) yet is still an open, urgent
+    returned bounce the footer's `· bounce K` must count. "Count EVERY open
+    prio:bounce in the slice regardless of W/U parking" — the montalu1 read the
+    supervisor cited (footer `bounce 1` while five bounces were open).
+
+    Pure, network-free — a bucket-merge over already-fetched rows (the #367
+    one-derivation invariant: the SAME partitioned rows the footer's I/U/W
+    counts come from). None/empty buckets are treated as {}."""
+    merged = {}
+    merged.update(ops_wait or {})
+    merged.update(waiting or {})
+    merged.update(workable or {})     # workable last: a row can appear once
+    return _count_bounce(merged)
 
 
 def _gk_handoff_ops_wait_flagged(rows):
