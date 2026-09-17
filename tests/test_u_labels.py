@@ -356,6 +356,19 @@ class DeliveredCaptureIntegration(unittest.TestCase):
 
 
 class RunOnceWiring(unittest.TestCase):
+    def setUp(self):
+        # #1055 P3: isolate the run_once state file per test. run_once now
+        # persists state["sweep_cadence"], so a call without an explicit
+        # state_path pollutes (and reads) the box's REAL watchdog state — a
+        # sibling test's persisted `last_full` would then make now=1.0 read as a
+        # calm sweep and skip job 32 (the #1012 "drive run_once under the harness
+        # seams" discipline).
+        import tempfile
+        self._td = tempfile.TemporaryDirectory()
+        self.addCleanup(self._td.cleanup)
+        from pathlib import Path
+        self.state_path = str(Path(self._td.name) / "state.json")
+
     def test_job32_registered_and_gated_on_clear_fn(self):
         # with u_reconcile_clear wired, the job runs; without it, it is skipped.
         seen = {}
@@ -367,6 +380,7 @@ class RunOnceWiring(unittest.TestCase):
         with m.patch.object(wd, "reconcile_u_labels", fake_reconcile):
             with m.patch.object(wd, "list_claude_panes", lambda run=None, **k: []):
                 wd.run_once(now=1.0, dry_run=True, run=lambda *a, **k: "",
+                            state_path=self.state_path,
                             u_reconcile_clear=lambda c, n: [])
         self.assertTrue(seen.get("called"), "job 32 must run when clear_fn wired")
 
@@ -379,7 +393,8 @@ class RunOnceWiring(unittest.TestCase):
 
         with m.patch.object(wd, "reconcile_u_labels", fake_reconcile):
             with m.patch.object(wd, "list_claude_panes", lambda run=None, **k: []):
-                wd.run_once(now=1.0, dry_run=True, run=lambda *a, **k: "")
+                wd.run_once(now=1.0, dry_run=True, run=lambda *a, **k: "",
+                            state_path=self.state_path)
         self.assertNotIn("called", seen)
 
 

@@ -173,6 +173,17 @@ class TestCalmVsFullSweep(unittest.TestCase):
         self.assertEqual(fulls, 2, "one bootstrap + one 5-min cadence full")
         self.assertGreaterEqual(calms, 4, "≥4 calm sweeps per 5 min on an idle box")
 
+    def test_future_skewed_last_full_is_not_calm(self):
+        # a stored last_full AHEAD of `now` (a backward clock jump, or a synthetic
+        # now against a persisted real-epoch stamp) must FAIL TOWARD FULL, never
+        # silently calm-skip the heavy jobs.
+        self.state_path.write_text(json.dumps({
+            "sweep_cadence": {"last_full": 5000.0, "pane_stamps": {}}}))
+        logs = _run(1.0, self.state_path)   # now << last_full -> negative elapsed
+        line = self._sweep_line(logs)
+        self.assertTrue(line and line.startswith("sweep: full"), "%r" % logs)
+        self.assertIn("clock-skew", line)
+
     def test_pending_compact_forces_full(self):
         _run(1000.0, self.state_path)                 # bootstrap
         creqp = Path(self._td.name) / "compact-requests.json"

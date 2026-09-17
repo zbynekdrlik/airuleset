@@ -5365,11 +5365,23 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     _calm = False
     if _urgent:
         logs.append("sweep: full (urgent: %s)" % _urgent)
-    elif isinstance(_last_full, (int, float)) and (now - _last_full) < SWEEP_CALM_S:
-        _calm = True
+    elif not isinstance(_last_full, (int, float)):
+        logs.append("sweep: full (bootstrap)")   # first sweep — no cadence stamp yet
     else:
-        logs.append("sweep: full (%s)"
-                    % ("cadence" if isinstance(_last_full, (int, float)) else "bootstrap"))
+        # #1055 P3 — a CALM sweep needs a NON-NEGATIVE elapsed under the cap. The
+        # `0 <=` guard is the future-skew belt (mirrors compact.py's
+        # `pending_compact_hold` age<0 fail-open): a stored `last_full` that is
+        # AHEAD of `now` (a backward clock jump, or a synthetic-time test driving
+        # run_once with a tiny `now` against a persisted real-epoch stamp) must
+        # NOT silently calm-skip the heavy jobs — fail toward FULL. In production
+        # `now` is the monotonic-ish wall clock so elapsed is always >= 0; this
+        # guard changes nothing there.
+        _elapsed_since_full = now - _last_full
+        if 0 <= _elapsed_since_full < SWEEP_CALM_S:
+            _calm = True
+        else:
+            logs.append("sweep: full (%s)"
+                        % ("cadence" if _elapsed_since_full >= 0 else "clock-skew"))
     # #1055 P3 (b) — deliver_discord_replies is the ONE external poll; on a CALM
     # sweep it runs ONLY while a ❓ is pending (else there is nothing to route).
     # The questions map is a local JSON read; load it lazily, ONLY when a calm
