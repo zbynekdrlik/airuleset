@@ -82,7 +82,14 @@ from validated inputs, stamping `Verified-at-UTC` + `HEAD:` at compose time (liv
 `  [--closes-finding "<id> — <evidence>"]`
 `  [--prevencia-read "<path to the Prevencia rule file>"]`
 Round ≥ 2 REQUIRES `--root-cause` and `--prevencia-read`; the CLI refuses
-without them. `--closes-finding` is repeatable (one per id from the newest gk verdict). The hook
+without them. `--closes-finding` is repeatable (one per id from the newest gk verdict).
+**BEFORE you compose the hand-off (#1056 L1), run `python3 ~/devel/airuleset/airuleset.py gk-watch
+--issues <N>` and READ EVERY gk comment since your last RFR; disposition each finding id in the RFR
+body (one `--closes-finding` / disposition row per id — an undispositioned id newer than your last
+RFR is a guaranteed bounce). NEVER add `ready-for-review` or remove `prio:bounce` yourself — the
+composer/bot owns those labels; `hooks/block-blind-label-flip.sh` BLOCKS a hand-manual flip while a
+gk BOUNCE verdict is newer than your last RFR with no commit since (bypass only
+`# airuleset:labeledit-ok <reason>`).** The hook
 `block-handoff-without-composer.sh` blocks a raw `READY-FOR-REVIEW` comment post on a reduced-
 authority box unless the body's sha256 matches a fresh receipt from the CLI. **Your OWN self-authored sub-findings**
 (tickets YOU filed while working) you MAY close, with evidence in the closing comment — that is
@@ -92,10 +99,11 @@ per-ticket evaluation the user reads on their phone — the merge-shaped card ne
 stream, so you MUST use `--handoff`):
 `python3 ~/devel/airuleset/airuleset.py notify --run-card --handoff --repo <owner/name> --issue <N> --goal "<plain Slovak>" --achieved "<plain Slovak: čo je hotové + lokálne overené>" [--url "<kde to vidno=…>"]`
 (no `--version`/`--pr` — nothing merged/deployed/released; the card shows a 🔎 "odovzdané na
-review" status). At the hand-off also clear the bounce lane best-effort: `gh issue edit <N>
---remove-label prio:bounce 2>/dev/null || true` (silently accept a 403 at read role — the
-maintainer clears it at review otherwise). Reduced-authority streams work ONLY issues assigned to
-them.
+review" status). At the hand-off do NOT clear `prio:bounce` or add `ready-for-review` yourself
+(#1056 L1 — REVERSES the former unconditional clear): the composer/bot owns those labels — the
+READY-FOR-REVIEW composer clears `prio:bounce` only when it posts a valid, advisory-dispositioned
+RFR, and the maintainer clears it at review otherwise. Reduced-authority streams work ONLY issues
+assigned to them.
 
 **Batch = ONE PR closing every member** (`autonomous-batch-issue-development.md` — load the `batch-issue-development` skill for the full gate): all members land
 on the same `dev` branch, in ONE push, ONE CI run, ONE PR whose body has a `Closes #<n>` line for
