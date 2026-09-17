@@ -87,8 +87,11 @@ PLAYWRIGHT_CHROMIUM_BUILD = "1244"
 # The user-scope MCP server name written into ~/.claude.json (mcpServers.<name>).
 PLAYWRIGHT_MCP_SERVER_NAME = "playwright"
 
-# The root-owned shared browser copy (#950). Used ONLY when it holds the pinned
-# chromium build (workstation boxes) — never on a no-sudo shared-stream box.
+# The root-owned shared browser copy (#950). #1058 made the resolver
+# class-agnostic: reused by EVERY box class (shared-stream included) WHEN it holds
+# the complete pinned chromium build, else the per-user cache — a no-sudo box
+# cannot WRITE /opt but can READ a build-matched one (the #950 one-shared-copy,
+# restored by an owner-present root refresh; see internals-archive #1058).
 OPT_MS_PLAYWRIGHT = Path("/opt/ms-playwright")
 
 # The remote install writes the RESOLVED browsers path here so the push-time
@@ -273,16 +276,14 @@ def _is_per_user_cache(browsers_path) -> bool:
 # #1058 (item 2): a `<family>-<revision>` build-dir name (same shape the disk-guard
 # #892 sweep parses: family = everything before the LAST `-<digits>`).
 _BUILD_DIR_RE = re.compile(r"^(.+)-(\d+)$")
-# Families whose SURVIVOR is the EXACT pinned build (PLAYWRIGHT_CHROMIUM_BUILD) —
-# the managed MCP server + the push post-check both need exactly this build.
+# The ONLY families cleanup reaps: keep EXACTLY the pinned build
+# (PLAYWRIGHT_CHROMIUM_BUILD) — the managed MCP server + the push post-check both
+# need exactly this build. ffmpeg is deliberately NOT reaped here (see below).
 _PINNED_EXACT_FAMILIES = ("chromium", "chromium_headless_shell")
-# Families cleanup manages at all (ffmpeg keeps its OWN release-tied revision,
-# unrelated to the chromium build number, so it is handled keep-highest below).
-_CLEANUP_FAMILIES = ("chromium", "chromium_headless_shell", "ffmpeg")
 
 
 def _cleanup_old_builds(browsers_path, *, live_check=None):
-    """#1058 (item 2): reap SUPERSEDED playwright build dirs from the PER-USER
+    """#1058 (item 2): reap SUPERSEDED chromium build dirs from the PER-USER
     cache so it stops accreting ~650 MB on every pin bump (the shared-box disk
     doctrine #925 + the #950 one-shared-copy rationale). Called by
     ensure_playwright_browsers after a pinned install AND when the pinned build is
@@ -293,18 +294,25 @@ def _cleanup_old_builds(browsers_path, *, live_check=None):
     Scoped HARD:
       * ONLY the per-user cache (`_is_per_user_cache`) — NEVER the root-owned
         `/opt/ms-playwright` (that is root's, shared read-only #950);
+      * a survivor guard FIRST: only reap when the COMPLETE pinned build is
+        actually present (`_has_pinned_chromium_build`) — #1058 review (A 🟡-3),
+        so a call in a state where the pinned build is absent can never delete
+        every chromium dir and leave the box browserless (both call sites already
+        guarantee it present; this is defence-in-depth on a destructive rmtree,
+        matching the `_target_in_live_use` fail-safe posture);
       * `chromium` / `chromium_headless_shell`: keep EXACTLY the pinned build
-        (`PLAYWRIGHT_CHROMIUM_BUILD`), remove every other build of those families
-        — after a pinned install the pinned build is guaranteed present, so this
-        leaves exactly it;
-      * `ffmpeg`: keep the HIGHEST revision present (the one the pinned install
-        wrote), remove strictly-lower ones (playwright bundles its own ffmpeg
-        revision per release, numbered independently of the chromium build);
+        (`PLAYWRIGHT_CHROMIUM_BUILD`), remove every other build of those families;
+      * ffmpeg is NOT reaped here (#1058 review B 🟡-2): airuleset pins no ffmpeg
+        revision, so a "keep-highest" rule would DELETE the ffmpeg the current
+        pinned install wrote on a playwright ROLLBACK (an older release bundles a
+        lower ffmpeg rev) and the idempotency guard (chromium-halves only) would
+        never re-install it — a non-self-healing hazard for a ~MB saving. The
+        age-gated disk-guard #892 timer already reaps stale ffmpeg safely;
       * NEVER a dir a live process has a cwd / open fd inside (the #315/#1030
         `_target_in_live_use` /proc scan — injectable as `live_check` for tests),
-        and NEVER a symlink (left untouched, never followed).
-      * other browser families (firefox / webkit an unrelated project installed)
-        are left alone — this manages only the families airuleset pins.
+        and NEVER a symlink (left untouched, never followed);
+      * every other family (firefox / webkit an unrelated project installed) is
+        left alone — this manages only the chromium pair airuleset pins.
 
     Idempotent (a second call finds nothing to remove) and best-effort: a scan or
     rmtree failure is logged and skipped, never fatal — the install must never
@@ -314,9 +322,11 @@ def _cleanup_old_builds(browsers_path, *, live_check=None):
     base = Path(browsers_path)
     if not _is_per_user_cache(base) or not base.is_dir():
         return
+    # Survivor guard (#1058 review A 🟡-3): never reap unless the pinned build we
+    # would keep is genuinely present + complete.
+    if not _has_pinned_chromium_build(base):
+        return
     pinned = PLAYWRIGHT_CHROMIUM_BUILD
-    entries = []          # (family, revision_str, path)
-    ffmpeg_revs = []
     try:
         listing = sorted(base.iterdir())
     except OSError as e:
@@ -332,18 +342,8 @@ def _cleanup_old_builds(browsers_path, *, live_check=None):
         if m is None:
             continue
         family, rev = m.group(1), m.group(2)
-        if family not in _CLEANUP_FAMILIES:
-            continue
-        entries.append((family, rev, entry))
-        if family == "ffmpeg":
-            ffmpeg_revs.append(int(rev))
-    ffmpeg_keep = max(ffmpeg_revs) if ffmpeg_revs else None
-    for family, rev, entry in entries:
-        if family in _PINNED_EXACT_FAMILIES:
-            superseded = rev != pinned
-        else:  # ffmpeg — keep the highest revision present
-            superseded = ffmpeg_keep is not None and int(rev) < ffmpeg_keep
-        if not superseded:
+        # Only the chromium pair, and only a NON-pinned build of it, is superseded.
+        if family not in _PINNED_EXACT_FAMILIES or rev == pinned:
             continue
         if live_check(entry):
             print("    Playwright cleanup: kept %s — a live process is using it"
@@ -468,8 +468,9 @@ def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None, *,
     ran this by hand. #1048: the version is now PINNED (`playwright@
     PLAYWRIGHT_PW_VERSION`, never `@latest`) so the installed chromium build
     (1244) matches the pinned managed MCP server, and the target dir is the
-    RESOLVED browsers path (per-user `~/.cache/ms-playwright` on a no-sudo
-    shared-stream box, never the root-owned /opt with its mismatched build).
+    RESOLVED browsers path (#1058 class-agnostic: the shared /opt/ms-playwright
+    when it holds the complete pinned build, else the per-user
+    `~/.cache/ms-playwright` — never a mismatched/absent /opt).
 
     A no-op when `PLAYWRIGHT_MANAGED` is False, or the resolved cache already
     holds the COMPLETE pinned build (idempotent — once per user, never per

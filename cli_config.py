@@ -403,22 +403,23 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     # judgment, and REMOVING this one key turns the whole default off. No _FORCE
     # variant — this is a DEFAULT, not an override.
     result["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] = airuleset.MODEL_TIERS["opus"]
-    # #950: shared Playwright browsers — set PLAYWRIGHT_BROWSERS_PATH on
-    # shared-stream boxes so Playwright (and its MCP plugin) uses the
-    # root-owned /opt/ms-playwright instead of per-user ~/.cache/ms-playwright.
-    # On non-shared-stream boxes the key is ABSENT (not set to empty — that
-    # would override a working default). The box-class marker is read ONCE.
+    # #950/#1058: set PLAYWRIGHT_BROWSERS_PATH in the settings.json env (inherited
+    # by interactive `playwright` and every Claude-Code-spawned tool) on
+    # shared-stream boxes. #1058 (area review of #1048) routes this through the ONE
+    # class-agnostic resolver so it AGREES with the browsers-path marker, the
+    # bashrc export and the @playwright/mcp server env — never a 5th surface that
+    # diverges. The resolver returns the shared root-owned /opt/ms-playwright ONLY
+    # when /opt holds the COMPLETE PINNED build (NOT merely `isdir` — the #2420
+    # mismatched-present-/opt condition the pre-#1058 `os.path.isdir` check got
+    # wrong), else the per-user ~/.cache/ms-playwright. On non-shared-stream boxes
+    # the key is ABSENT (not set to empty — that would override a working default).
+    # The box-class marker is read ONCE.
     try:
         from watchdog.reaper import default_box_class
         if default_box_class() == "shared-stream":
-            from cli_resource_guards import PLAYWRIGHT_SHARED_PATH
-            if os.path.isdir(PLAYWRIGHT_SHARED_PATH):
-                result["env"]["PLAYWRIGHT_BROWSERS_PATH"] = PLAYWRIGHT_SHARED_PATH
-            else:
-                # #950 Y2: if the shared dir is absent, REMOVE the key so a stale
-                # settings.json doesn't point at nothing (Playwright would fail to
-                # fall back to the per-user cache).
-                result["env"].pop("PLAYWRIGHT_BROWSERS_PATH", None)
+            from cli_playwright_mcp import resolved_browsers_path
+            result["env"]["PLAYWRIGHT_BROWSERS_PATH"] = str(
+                resolved_browsers_path("shared-stream"))
     except Exception as e:  # noqa: BLE001 — best-effort, never break install
         import sys
         print("  ⚠ playwright env: box-class read failed: %r" % e, file=sys.stderr)

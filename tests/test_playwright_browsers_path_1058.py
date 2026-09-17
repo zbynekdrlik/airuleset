@@ -64,11 +64,22 @@ class TestResolverClassAgnostic1058(unittest.TestCase):
 # Item 2 — old-build cleanup in the per-user cache
 # --------------------------------------------------------------------------- #
 class TestOldBuildCleanup1058(unittest.TestCase):
-    def _per_user_cache(self, *dirs):
+    def _per_user_cache(self, *extra_dirs, pinned_complete=True):
+        """A fake per-user cache. By default the COMPLETE pinned chromium pair
+        (both halves + INSTALLATION_COMPLETE) is created so the survivor guard
+        (#1058 review A 🟡-3) lets cleanup run; pass pinned_complete=False to test
+        the guard. `extra_dirs` are the OLD/other build dirs to seed."""
+        b = p.PLAYWRIGHT_CHROMIUM_BUILD
         d = Path(tempfile.mkdtemp()) / ".cache" / "ms-playwright"
         d.mkdir(parents=True)
-        for name in dirs:
-            (d / name).mkdir()
+        if pinned_complete:
+            for half in ("chromium-" + b, "chromium_headless_shell-" + b):
+                (d / half).mkdir()
+                (d / half / "INSTALLATION_COMPLETE").write_text("")
+        for name in extra_dirs:
+            e = d / name
+            if not e.exists():
+                e.mkdir()
         return d
 
     def _names(self, d):
@@ -76,9 +87,7 @@ class TestOldBuildCleanup1058(unittest.TestCase):
 
     def test_removes_superseded_chromium_pair_keeps_the_pinned_pair(self):
         b = p.PLAYWRIGHT_CHROMIUM_BUILD
-        cache = self._per_user_cache(
-            "chromium-1234", "chromium_headless_shell-1234",
-            "chromium-" + b, "chromium_headless_shell-" + b)
+        cache = self._per_user_cache("chromium-1234", "chromium_headless_shell-1234")
         p._cleanup_old_builds(cache, live_check=lambda d: False)
         names = self._names(cache)
         self.assertIn("chromium-" + b, names)
@@ -87,51 +96,83 @@ class TestOldBuildCleanup1058(unittest.TestCase):
         self.assertNotIn("chromium_headless_shell-1234", names)
 
     def test_keeps_a_build_a_live_process_is_using(self):
-        b = p.PLAYWRIGHT_CHROMIUM_BUILD
-        cache = self._per_user_cache("chromium-1234", "chromium-" + b)
+        cache = self._per_user_cache("chromium-1234")
         p._cleanup_old_builds(cache, live_check=lambda d: d.name == "chromium-1234")
         self.assertIn("chromium-1234", self._names(cache),
                       "a build in live use must never be removed (#1030 liveness)")
 
-    def test_ffmpeg_keeps_highest_revision_removes_lower(self):
-        b = p.PLAYWRIGHT_CHROMIUM_BUILD
-        cache = self._per_user_cache(
-            "ffmpeg-1010", "ffmpeg-1011",
-            "chromium-" + b, "chromium_headless_shell-" + b)
+    def test_ffmpeg_is_left_alone(self):
+        # #1058 review B 🟡-2: cleanup never touches ffmpeg (airuleset pins no
+        # ffmpeg revision; a keep-highest rule is a rollback hazard). The age-gated
+        # disk-guard #892 timer reaps stale ffmpeg instead.
+        cache = self._per_user_cache("ffmpeg-1010", "ffmpeg-1011")
         p._cleanup_old_builds(cache, live_check=lambda d: False)
         names = self._names(cache)
+        self.assertIn("ffmpeg-1010", names)
         self.assertIn("ffmpeg-1011", names)
-        self.assertNotIn("ffmpeg-1010", names)
+
+    def test_no_removal_when_pinned_build_absent(self):
+        # #1058 review A 🟡-3 survivor guard: with no pinned build present, cleanup
+        # must NOT reap (a destructive rmtree can never leave the box browserless).
+        cache = self._per_user_cache("chromium-1234", pinned_complete=False)
+        p._cleanup_old_builds(cache, live_check=lambda d: False)
+        self.assertIn("chromium-1234", self._names(cache),
+                      "cleanup must not reap when the pinned build is absent")
+
+    def test_no_removal_when_pinned_build_incomplete(self):
+        # pinned chromium half present + complete, but the headless-shell half
+        # absent -> _has_pinned_chromium_build False -> survivor guard blocks reap.
+        b = p.PLAYWRIGHT_CHROMIUM_BUILD
+        cache = self._per_user_cache("chromium-1234", pinned_complete=False)
+        (cache / ("chromium-" + b)).mkdir()
+        (cache / ("chromium-" + b) / "INSTALLATION_COMPLETE").write_text("")
+        p._cleanup_old_builds(cache, live_check=lambda d: False)
+        self.assertIn("chromium-1234", self._names(cache),
+                      "an incomplete pinned build must block the reap")
 
     def test_never_touches_the_root_owned_opt(self):
-        # /opt/ms-playwright is NOT a per-user cache -> cleanup is a no-op there.
+        # /opt/ms-playwright is NOT a per-user cache -> cleanup is a no-op there
+        # (the guard keys on the _is_per_user_cache shape, before the survivor
+        # guard is even reached).
         opt = Path(tempfile.mkdtemp()) / "ms-playwright"
         opt.mkdir(parents=True)
         (opt / "chromium-1234").mkdir()
-        with mock.patch.object(p, "OPT_MS_PLAYWRIGHT", opt):
-            p._cleanup_old_builds(opt, live_check=lambda d: False)
+        p._cleanup_old_builds(opt, live_check=lambda d: False)
         self.assertIn("chromium-1234", self._names(opt),
                       "cleanup must never delete inside /opt")
 
-    def test_skips_a_symlink_never_follows_it(self):
-        b = p.PLAYWRIGHT_CHROMIUM_BUILD
-        cache = self._per_user_cache("chromium-" + b)
-        (cache / "chromium-1234").symlink_to(cache / ("chromium-" + b))
-        p._cleanup_old_builds(cache, live_check=lambda d: False)
-        # the symlink is left untouched (never followed) and the target survives
-        self.assertTrue((cache / ("chromium-" + b)).is_dir())
+    def test_skips_a_symlink_never_attempts_to_remove_it(self):
+        # #1058 review B 🟡-1 (teeth): a symlink named like an old build must be
+        # SKIPPED — never followed, never rmtree'd. Without the is_symlink() guard,
+        # shutil.rmtree(<symlink>) raises and logs "could not remove chromium-1235"
+        # to stderr, so asserting that name is ABSENT from stderr is the teeth; the
+        # real superseded dir being removed is the discriminator that cleanup ran.
+        import io
+        external = Path(tempfile.mkdtemp()) / "external-chromium"
+        external.mkdir()
+        (external / "payload").write_text("keep me")
+        cache = self._per_user_cache("chromium-1234")
+        (cache / "chromium-1235").symlink_to(external)
+        err = io.StringIO()
+        with mock.patch("sys.stderr", err), mock.patch("sys.stdout", io.StringIO()):
+            p._cleanup_old_builds(cache, live_check=lambda d: False)
+        names = self._names(cache)
+        self.assertNotIn("chromium-1234", names)          # real superseded removed
+        self.assertIn("chromium-1235", names)             # symlink left in place
+        self.assertNotIn("chromium-1235", err.getvalue(),
+                         "cleanup must not even ATTEMPT to remove the symlink")
+        self.assertTrue((external / "payload").exists(),  # never followed
+                        "the symlink target must be untouched")
 
     def test_leaves_unrelated_families_alone(self):
-        b = p.PLAYWRIGHT_CHROMIUM_BUILD
-        cache = self._per_user_cache("firefox-1400", "webkit-2000", "chromium-" + b)
+        cache = self._per_user_cache("firefox-1400", "webkit-2000")
         p._cleanup_old_builds(cache, live_check=lambda d: False)
         names = self._names(cache)
         self.assertIn("firefox-1400", names)
         self.assertIn("webkit-2000", names)
 
     def test_idempotent(self):
-        b = p.PLAYWRIGHT_CHROMIUM_BUILD
-        cache = self._per_user_cache("chromium-1234", "chromium-" + b)
+        cache = self._per_user_cache("chromium-1234")
         p._cleanup_old_builds(cache, live_check=lambda d: False)
         p._cleanup_old_builds(cache, live_check=lambda d: False)  # must not raise
         self.assertNotIn("chromium-1234", self._names(cache))
@@ -312,6 +353,37 @@ class TestDepEdgeLock1058(unittest.TestCase):
             deps.get("playwright"), p.PLAYWRIGHT_PW_VERSION,
             "@playwright/mcp@%s depends on playwright %r but the pin is %r — the trio drifted"
             % (p.PLAYWRIGHT_MCP_VERSION, deps.get("playwright"), p.PLAYWRIGHT_PW_VERSION))
+
+
+# --------------------------------------------------------------------------- #
+# Item 1 / review A 🟡-1 — the settings.json env (cli_config) is the 5th surface
+# and must follow the SAME class-agnostic resolver, never hardcode /opt on a
+# merely-present (mismatched) /opt.
+# --------------------------------------------------------------------------- #
+class TestConfigEnvResolver1058(unittest.TestCase):
+    def _apply(self):
+        import airuleset
+        return airuleset.apply_managed_settings_defaults({})
+
+    def test_shared_stream_env_is_opt_when_opt_holds_the_pinned_build(self):
+        with mock.patch("watchdog.reaper.default_box_class", return_value="shared-stream"), \
+                mock.patch.object(p, "_opt_has_pinned_build", return_value=True):
+            out = self._apply()
+        self.assertEqual(out["env"]["PLAYWRIGHT_BROWSERS_PATH"], str(p.OPT_MS_PLAYWRIGHT))
+
+    def test_shared_stream_env_is_per_user_when_opt_mismatched(self):
+        # the #2420 condition: /opt present but NOT the pinned build -> per-user,
+        # exactly what the marker/bashrc/server resolve to (no 5th-surface drift).
+        with mock.patch("watchdog.reaper.default_box_class", return_value="shared-stream"), \
+                mock.patch.object(p, "_opt_has_pinned_build", return_value=False):
+            out = self._apply()
+        self.assertEqual(out["env"]["PLAYWRIGHT_BROWSERS_PATH"],
+                         str(Path.home() / ".cache" / "ms-playwright"))
+
+    def test_non_shared_stream_leaves_the_key_absent(self):
+        with mock.patch("watchdog.reaper.default_box_class", return_value="workstation"):
+            out = self._apply()
+        self.assertNotIn("PLAYWRIGHT_BROWSERS_PATH", out.get("env", {}))
 
 
 if __name__ == "__main__":

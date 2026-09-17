@@ -988,7 +988,7 @@ def _playwright_chromium_postcheck():
     PATH does NOT carry ~/.local/bin, so force ~/.local/bin to the FRONT before
     resolving npx; a target with NO npx (nothing to verify) SKIPS (exit 0). The
     resolved browsers path is read from the marker the install just wrote
-    (cli_caveman_plugins.PLAYWRIGHT_BROWSERS_PATH_MARKER = ~/.claude/airuleset-
+    (cli_playwright_mcp.PLAYWRIGHT_BROWSERS_PATH_MARKER = ~/.claude/airuleset-
     playwright-browsers-path) so the probe exercises the EXACT chromium the
     managed MCP server will; a box with NO marker (managed Playwright opted out
     via PLAYWRIGHT_MANAGED=False) also SKIPS — nothing to verify, never a false
@@ -1003,7 +1003,7 @@ def _playwright_chromium_postcheck():
     "Executable doesn't exist", spinbike exit 127 — was previously discarded to
     /dev/null); exit 127 is named explicitly as missing system shared libraries
     with the `install-deps` remedy. (d) a per-box opt-out marker
-    `~/.claude/airuleset-playwright-optout` (cli_caveman_plugins.PLAYWRIGHT_OPTOUT_
+    `~/.claude/airuleset-playwright-optout` (cli_playwright_mcp.PLAYWRIGHT_OPTOUT_
     MARKER, content = the reason) SKIPs LOUDLY — a box that structurally cannot
     run chromium never fails the push; the fleet-wide PLAYWRIGHT_MANAGED=False
     opt-out still SKIPs via the absent browsers-path marker."""
