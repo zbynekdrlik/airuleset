@@ -378,7 +378,7 @@
     "tests/test_notify_repo_resolution.py": 108,
     "tests/test_nudge_dep_wait_993.py": 113,
     "tests/test_nudge_family_gap.py": 207,
-    "tests/test_nudge_gate.py": 409,
+    "tests/test_nudge_gate.py": 416,
     "tests/test_nudges_kill_switch_994.py": 716,
     "tests/test_oauth_revoked_resume_602.py": 229,
     "tests/test_oauth_stuck_alert_662.py": 510,
