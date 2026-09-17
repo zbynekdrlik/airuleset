@@ -857,9 +857,17 @@ def _sudo_n_available() -> bool:
 def _headless_shell_binary(browsers_path) -> Path:
     """The installed headless-shell executable under `browsers_path` for the
     pinned build — the exact binary the `--headless` MCP server + the push
-    post-check need (its absence is the montalu3-6 half-cache failure)."""
-    return (Path(browsers_path) / ("chromium_headless_shell-" + PLAYWRIGHT_CHROMIUM_BUILD)
-            / "chrome-headless-shell-linux64" / "chrome-headless-shell")
+    post-check need (its absence is the montalu3-6 half-cache failure).
+
+    Arch-agnostic (#1048 review-2): globs the platform subdir
+    (`chrome-headless-shell-linux64` on x64, `chrome-headless-shell-linux-arm64`
+    on ARM) rather than hardcoding linux64 — a hardcode would make the exit-127
+    heal (b) silently no-op on a non-x64 box, exactly the no-root VPS class it
+    targets. Falls back to the linux64 path (which then simply won't exist → the
+    probe returns None → heal skipped) when nothing matches."""
+    base = Path(browsers_path) / ("chromium_headless_shell-" + PLAYWRIGHT_CHROMIUM_BUILD)
+    matches = sorted(base.glob("chrome-headless-shell-*/chrome-headless-shell"))
+    return matches[0] if matches else base / "chrome-headless-shell-linux64" / "chrome-headless-shell"
 
 
 def _probe_headless_shell_rc(browsers_path):
@@ -897,6 +905,11 @@ def _heal_system_libs(browsers_path, env, *, sudo_ok, probe_rc):
               "npx -y playwright@%s install-deps chromium" % PLAYWRIGHT_PW_VERSION,
               file=sys.stderr)
         return
+    # No explicit `sudo` prefix: `playwright install-deps` self-prepends sudo
+    # when euid != 0 (its documented behaviour), and we only reach here after
+    # `sudo -n true` proved passwordless sudo works — so the vendor's own sudo
+    # call succeeds non-interactively. Running it under an explicit `sudo -n`
+    # would instead re-root npm's HOME/cache; we rely on the vendor path.
     try:
         dr = subprocess.run(
             ["npx", "-y", "playwright@" + PLAYWRIGHT_PW_VERSION, "install-deps", "chromium"],
@@ -977,7 +990,6 @@ def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None, *,
               % (browsers_path, e), file=sys.stderr)
         return
     argv = ["npx", "--yes", "playwright@" + PLAYWRIGHT_PW_VERSION, "install", "chromium"]
-    installed = False
     for attempt in (1, 2):
         try:
             r = subprocess.run(argv, capture_output=True, text=True, timeout=300, env=env)
@@ -996,7 +1008,6 @@ def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None, *,
                   file=sys.stderr)
             return
         if r.returncode == 0:
-            installed = True
             print("    Playwright browsers: installed chromium %s into %s "
                   "(pinned playwright@%s)"
                   % (PLAYWRIGHT_CHROMIUM_BUILD, browsers_path, PLAYWRIGHT_PW_VERSION))
@@ -1016,13 +1027,37 @@ def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None, *,
               % (r.returncode, tail, browsers_path, PLAYWRIGHT_PW_VERSION),
               file=sys.stderr)
         return
-    if not installed:
-        return
+    # Reached ONLY via the rc==0 `break` above (every rc!=0 / exception path
+    # returns inside the loop), so the install succeeded here.
     # #1048 fix-forward (b): heal missing system libraries on the per-user cache
     # (the spinbike-vps exit-127 case). Skipped on /opt (root already provisioned
     # its libs; a no-sudo box cannot write /opt anyway).
     if _is_per_user_cache(browsers_path):
         _heal_system_libs(browsers_path, env, sudo_ok=sudo_ok, probe_rc=probe_rc)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Atomically replace `path` with `text` (mkstemp in the same dir → full
+    write → os.replace). Uses `os.fdopen(...).write`, whose buffered writer
+    writes ALL bytes or raises, so a POSIX short write can never truncate the
+    target — the byte-count the raw `os.write` idiom ignored (#1048 review-2:
+    ~/.claude.json holds multi-MB history/cache; a truncated atomic replace is
+    silent corruption). Raises OSError on failure; the caller owns the non-fatal
+    handling + its own message (each call site's error text differs). The tmp is
+    cleaned on any failure."""
+    import tempfile
+    fd, tmp = tempfile.mkstemp(dir=str(Path(path).parent), suffix=".tmp")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(text.encode())
+        os.replace(tmp, str(path))
+        tmp = None
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:  # airuleset:script-ok best-effort orphan cleanup
+                pass
 
 
 def reconcile_playwright_mcp_file(claude_json_path: Path = None, box_class: str = None) -> bool:
@@ -1040,7 +1075,6 @@ def reconcile_playwright_mcp_file(claude_json_path: Path = None, box_class: str 
     PLAYWRIGHT_MANAGED is False."""
     if not PLAYWRIGHT_MANAGED:
         return True
-    import tempfile
     path = claude_json_path or (Path.home() / ".claude.json")
     browsers_path = resolved_browsers_path(box_class)
     ok = True
@@ -1082,23 +1116,13 @@ def reconcile_playwright_mcp_file(claude_json_path: Path = None, box_class: str 
     # UTF-8 (prompt/history/cache text) — the default \uXXXX escaping would
     # re-encode all of it on our write, fighting Claude Code's own writer.
     new_str = json.dumps(new_data, indent=2, ensure_ascii=False) + "\n"
-    tmp = None
     try:
-        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-        os.write(fd, new_str.encode())
-        os.close(fd)
-        os.replace(tmp, str(path))
-        tmp = None
+        _atomic_write_text(path, new_str)
         print("    playwright MCP server: pinned @playwright/mcp@%s --browser "
               "chromium --headless (%s)" % (PLAYWRIGHT_MCP_VERSION, browsers_path))
     except OSError as e:
         print("    ⚠ could not write the playwright MCP server to ~/.claude.json (%s)"
               % e, file=sys.stderr)
-        if tmp:
-            try:
-                os.unlink(tmp)
-            except OSError:  # airuleset:script-ok best-effort orphan cleanup
-                pass
         ok = False
     return ok
 
@@ -1111,8 +1135,10 @@ def unprovision_playwright_mcp_file(claude_json_path: Path = None) -> None:
     `--headless chromium` MCP server every session; and the absent marker makes
     the push post-check SKIP. Best-effort + non-fatal + idempotent (a no-op when
     neither is present), like every reconcile step here — a write failure only
-    loses the teardown for this run and self-heals on the next push."""
-    import tempfile
+    loses the teardown for this run and self-heals on the next push. (If
+    ~/.claude.json is unreadable/locked at opt-out time, the server entry removal
+    is skipped and the push still goes GREEN on the marker's presence — the dead
+    server self-heals on the next successful push; an accepted best-effort residual.)"""
     # 1. the browsers-path marker (best-effort).
     try:
         PLAYWRIGHT_BROWSERS_PATH_MARKER.unlink(missing_ok=True)
@@ -1141,22 +1167,12 @@ def unprovision_playwright_mcp_file(claude_json_path: Path = None) -> None:
     if new_data == data:
         return
     new_str = json.dumps(new_data, indent=2, ensure_ascii=False) + "\n"
-    tmp = None
     try:
-        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
-        os.write(fd, new_str.encode())
-        os.close(fd)
-        os.replace(tmp, str(path))
-        tmp = None
+        _atomic_write_text(path, new_str)
         print("    playwright MCP server: removed (opted out on this box)")
     except OSError as e:
         print("    ⚠ could not remove the playwright MCP server from ~/.claude.json (%s)"
               % e, file=sys.stderr)
-        if tmp:
-            try:
-                os.unlink(tmp)
-            except OSError:  # airuleset:script-ok best-effort orphan cleanup
-                pass
 
 
 def _reconcile_settings_file():

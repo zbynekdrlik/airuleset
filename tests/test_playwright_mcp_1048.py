@@ -539,9 +539,14 @@ class TestChromiumPostcheckExec1048(unittest.TestCase):
         import glob
         self._marker()
         self._fake_npx("exit 0")
+        # snapshot-diff (not "/tmp is empty"): a concurrent probe/deploy on the
+        # same box must not false-fail this — assert only that THIS run added no
+        # lingering probe temp of its own.
+        before = set(glob.glob("/tmp/airuleset-pw-probe.*"))
         r = self._run()
         self.assertEqual(r.returncode, 0)
-        self.assertEqual([], glob.glob("/tmp/airuleset-pw-probe.*"),
+        after = set(glob.glob("/tmp/airuleset-pw-probe.*"))
+        self.assertEqual(set(), after - before,
                          "the probe must clean its own temp files")
 
 
