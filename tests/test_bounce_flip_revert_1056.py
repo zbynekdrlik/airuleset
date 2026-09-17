@@ -15,7 +15,6 @@ RED-first: `_bounce_flip_decide` and `bounce_flip_revert` do not exist yet.
 import sys
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
 from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
