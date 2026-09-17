@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 import urllib.request
 from pathlib import Path
 from unittest import mock
@@ -353,6 +354,31 @@ class TestDepEdgeLock1058(unittest.TestCase):
             deps.get("playwright"), p.PLAYWRIGHT_PW_VERSION,
             "@playwright/mcp@%s depends on playwright %r but the pin is %r — the trio drifted"
             % (p.PLAYWRIGHT_MCP_VERSION, deps.get("playwright"), p.PLAYWRIGHT_PW_VERSION))
+
+    def test_network_error_fails_under_the_var_never_skips(self):
+        # HERMETIC (no var needed): a registry outage must FAIL the lock, not skip
+        # it — otherwise a CI registry outage silently removes the lock while the
+        # gate stays green. Inject a raising fetcher; the lock must raise.
+        def boom(url, timeout=20):
+            raise urllib.error.URLError("simulated npm registry outage")
+        with self.assertRaises(AssertionError):
+            _dep_edge_check(self, p.PLAYWRIGHT_MCP_VERSION, p.PLAYWRIGHT_PW_VERSION,
+                            fetch=boom)
+
+    def test_dep_drift_fails(self):
+        # HERMETIC: a WRONG resolved dependency must FAIL the lock.
+        def wrong(url, timeout=20):
+            return {"dependencies": {"playwright": "9.9.9-wrong"}}
+        with self.assertRaises(AssertionError):
+            _dep_edge_check(self, p.PLAYWRIGHT_MCP_VERSION, p.PLAYWRIGHT_PW_VERSION,
+                            fetch=wrong)
+
+    def test_dep_match_passes(self):
+        # HERMETIC: the correct resolved dependency passes.
+        def ok(url, timeout=20):
+            return {"dependencies": {"playwright": p.PLAYWRIGHT_PW_VERSION}}
+        _dep_edge_check(self, p.PLAYWRIGHT_MCP_VERSION, p.PLAYWRIGHT_PW_VERSION,
+                        fetch=ok)
 
 
 # --------------------------------------------------------------------------- #
