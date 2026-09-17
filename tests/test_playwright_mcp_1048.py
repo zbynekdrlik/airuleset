@@ -140,14 +140,20 @@ class TestBoxClass1048(unittest.TestCase):
 class TestBrowsersPathResolver1048(unittest.TestCase):
     """The ONE resolver, verified for BOTH box classes (dispatch item 2)."""
 
-    def test_shared_stream_always_per_user_cache_never_opt(self):
-        # A no-sudo box can never write /opt, and /opt holds a mismatched build
-        # — so it must ALWAYS resolve to the per-user cache, regardless of the
-        # /opt build-match state (this is what makes the #2420 class impossible).
+    def test_shared_stream_reuses_opt_when_pinned_else_per_user(self):
+        # #1058: the resolver is now CLASS-AGNOSTIC. A shared-stream box reuses
+        # the root-owned /opt copy WHEN it holds the pinned build (the #950
+        # one-shared-copy architecture, restored once root refreshes /opt), and
+        # falls back to the per-user cache when /opt is mismatched/absent — which
+        # is what keeps the #2420 class impossible (a mismatched /opt is never
+        # used), while a build-matched /opt is safely shared read-only.
         home = Path("/home/montalu1")
-        for opt_match in (True, False):
-            got = p.resolve_playwright_browsers_path("shared-stream", opt_match, home=home)
-            self.assertEqual(got, home / ".cache" / "ms-playwright")
+        self.assertEqual(
+            p.resolve_playwright_browsers_path("shared-stream", True, home=home),
+            p.OPT_MS_PLAYWRIGHT)
+        self.assertEqual(
+            p.resolve_playwright_browsers_path("shared-stream", False, home=home),
+            home / ".cache" / "ms-playwright")
 
     def test_workstation_uses_opt_only_when_build_matches(self):
         home = Path("/home/newlevel")
@@ -554,22 +560,30 @@ class TestStream2420(unittest.TestCase):
     """Dispatch item 4: re-verify the odoo-erp#2420 class cannot recur on every
     stream box class (montalu / david / miva are all shared-stream; simap is
     PAUSED, #851, so it is not provisioned). The #2420 failure was a no-sudo box
-    resolving to the root-owned /opt copy (chrome-not-found / build drift); the
-    proof it cannot recur is that every such account resolves to the per-user
-    cache with a chromium-selecting pinned server."""
+    resolving to a MISMATCHED root-owned /opt copy (chrome-not-found / build
+    drift). #1058 made the resolver class-agnostic: the proof it cannot recur is
+    that a MISMATCHED/absent /opt always falls back to the per-user cache, and a
+    /opt is reused ONLY when it holds the exact pinned build (a read-only shared
+    copy that CANNOT drift) — and the rendered server always selects chromium."""
 
     STREAM_ACCOUNTS = ("montalu1", "david1", "david2", "david3", "david4", "miva1")
     PAUSED_ACCOUNTS = ("simap1",)
 
-    def test_every_stream_account_resolves_to_per_user_cache(self):
+    def test_stream_account_falls_back_to_per_user_on_mismatched_opt(self):
+        # The #2420 safety: a mismatched/absent /opt is NEVER used -> per-user.
         for acct in self.STREAM_ACCOUNTS:
             home = Path("/home") / acct
-            # a stream account is shared-stream -> per-user cache, even if /opt
-            # happens to hold the pinned build (it cannot write it anyway).
-            for opt_match in (True, False):
-                got = p.resolve_playwright_browsers_path("shared-stream", opt_match, home=home)
-                self.assertEqual(got, home / ".cache" / "ms-playwright",
-                                 "%s must never use the root-owned /opt copy" % acct)
+            got = p.resolve_playwright_browsers_path("shared-stream", False, home=home)
+            self.assertEqual(got, home / ".cache" / "ms-playwright",
+                             "%s must fall back to per-user on a mismatched /opt" % acct)
+
+    def test_stream_account_reuses_a_pinned_opt(self):
+        # #1058/#950: a build-matched /opt is safely shared read-only.
+        for acct in self.STREAM_ACCOUNTS:
+            home = Path("/home") / acct
+            got = p.resolve_playwright_browsers_path("shared-stream", True, home=home)
+            self.assertEqual(got, p.OPT_MS_PLAYWRIGHT,
+                             "%s must reuse a pinned /opt (the #950 shared copy)" % acct)
 
     def test_managed_server_selects_chromium_for_a_stream_account(self):
         # The rendered server for a stream account's per-user cache never
