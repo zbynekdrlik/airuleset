@@ -571,9 +571,21 @@ def _render_playwright_shared_block() -> str:
     """#950-B: shared Playwright browser install bash snippet.
 
     Root installs chromium to /opt/ms-playwright so all stream accounts share
-    ONE copy. Per-user ~/.cache/ms-playwright is swept ONLY when the shared
-    install succeeds. Renderer returning the bash snippet — deterministic output;
-    reads the pin via a lazy import (#1058, below), no other side effects.
+    ONE copy — and INSTALLS ONLY: it NEVER touches any account's per-user
+    ~/.cache/ms-playwright. #1058 rework-2 (item 1) removed the per-user sweep
+    loop that used to run here: root mutating user state was the v0.1.332
+    incident — the #1058 class-agnostic resolver made the sweep's precondition (a
+    complete pinned /opt) true for the first time, root then deleted exactly the
+    per-user build every account's marker/MCP-env/settings-env still pointed at
+    (the account install and this root apply run CONCURRENTLY inside one push, so
+    at install time /opt was still incomplete and the accounts resolved
+    per-user), and every subdev account lost its chromium for ~5 minutes with the
+    push still reporting 0 failed. The ownership boundary is now clean: /opt is
+    root's (install only), the per-user cache is the ACCOUNT's — the account
+    reaps its OWN per-user copy when provably safe (cli_playwright_mcp.
+    _reap_per_user_copy_if_safe, design item 2). Renderer returning the bash
+    snippet — deterministic output; reads the pin via a lazy import (#1058,
+    below), no other side effects.
 
     #1058: the install is PINNED to `playwright@<PLAYWRIGHT_PW_VERSION>` (read
     from cli_playwright_mcp, the pin's canonical home — a lazy import keeps this
@@ -593,32 +605,11 @@ def _render_playwright_shared_block() -> str:
         '        # Y1: ensure read+exec for all users (root umask may restrict)\n'
         '        chmod -R a+rX "$pw_shared" 2>/dev/null || true\n'
         '        echo "  playwright: shared browsers installed at $pw_shared"\n'
-        '        # Sweep per-user caches (only entries that exist in the shared path)\n'
-        '        for home in /home/*; do\n'
-        '            [ -d "$home" ] || continue\n'
-        '            u=$(basename "$home")\n'
-        '            bcf="$home/.claude/airuleset-box-class"\n'
-        '            grep -q "shared-stream" "$bcf" 2>/dev/null || continue\n'
-        '            user_pw="$home/.cache/ms-playwright"\n'
-        '            [ -d "$user_pw" ] || continue\n'
-        '            # Only remove dirs whose name also exists in the shared path\n'
-        '            for d in "$user_pw"/*/; do\n'
-        '                [ -d "$d" ] || continue\n'
-        '                bn=$(basename "$d")\n'
-        '                if [ -d "$pw_shared/$bn" ] && [ -f "$pw_shared/$bn/INSTALLATION_COMPLETE" ]; then\n'
-        '                    # Check not in live use (open fd)\n'
-        '                    if ! fuser -s "$d" 2>/dev/null; then\n'
-        '                        rm -rf --one-file-system -- "$d" 2>/dev/null \\\n'
-        '                            && echo "  playwright: swept $d (shared at $pw_shared/$bn)" \\\n'
-        '                            || echo "  ⚠ playwright: failed to sweep $d"\n'
-        '                    else\n'
-        '                        echo "  playwright: SKIP $d — in live use"\n'
-        '                    fi\n'
-        '                fi\n'
-        '            done\n'
-        '        done\n'
+        '        # #1058 rework-2 (item 1): NO per-user sweep here — root installs\n'
+        '        # ONLY, never mutates account state. Each account reaps its own\n'
+        '        # per-user copy when provably safe (cli_playwright_mcp).\n'
         '    else\n'
-        '        echo "  ⚠ playwright: shared install failed — per-user caches kept" >&2\n'
+        '        echo "  ⚠ playwright: shared install failed" >&2\n'
         '    fi\n'
         'else\n'
         '    echo "  ⚠ playwright: npx not found — shared install skipped" >&2\n'

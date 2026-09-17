@@ -590,6 +590,7 @@ class TestPerUserReapRework2_1058(unittest.TestCase):
             live_env=lambda path: [], live_check=lambda d: False)
         # the real headless-shell dir is reaped; the symlink stays + its target
         # is never followed/removed
+        self.assertTrue(reaped, "the real (non-symlink) dir is still reaped")
         self.assertTrue((cache / "chromium-1244").is_symlink(),
                         "a symlink is never removed")
         self.assertTrue(target.is_dir(), "a symlink target is never followed")
@@ -612,7 +613,6 @@ class TestPerUserReapRework2_1058(unittest.TestCase):
         marker = home / ".claude" / "airuleset-playwright-browsers-path"
         marker.parent.mkdir(parents=True)
         marker.write_text(str(p.OPT_MS_PLAYWRIGHT) + "\n")  # previous marker = /opt
-        claude_json = home / ".claude.json"
         with mock.patch.object(p, "PLAYWRIGHT_BROWSER_CACHE", cache), \
              mock.patch.object(p, "PLAYWRIGHT_BROWSERS_PATH_MARKER", marker), \
              mock.patch.object(p, "ensure_playwright_browsers"), \

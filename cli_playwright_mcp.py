@@ -357,6 +357,141 @@ def _cleanup_old_builds(browsers_path, *, live_check=None):
                   % (entry.name, e), file=sys.stderr)
 
 
+def _read_browsers_path_marker() -> Path:
+    """#1058 rework-2: the PREVIOUS resolved browsers path recorded in the marker
+    (`PLAYWRIGHT_BROWSERS_PATH_MARKER`) BEFORE this install overwrites it, or None
+    when the marker is absent/unreadable/empty. `provision_playwright_mcp` reads
+    it before `reconcile_playwright_mcp_file` rewrites the marker, so the reap can
+    tell a FIRST flip to /opt (previous marker != /opt → keep one more cycle) from
+    a settled /opt (previous marker == /opt → the per-user copy is now redundant).
+    Never fatal — a read failure returns None (the reap then keeps, the safe way)."""
+    try:
+        txt = PLAYWRIGHT_BROWSERS_PATH_MARKER.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return Path(txt) if txt else None
+
+
+def _live_env_points_at(path, proc_dir=None) -> list:
+    """#1058 rework-2 (item 2): the pids of the CURRENT user's live processes
+    whose `/proc/<pid>/environ` carries `PLAYWRIGHT_BROWSERS_PATH=<path>` EXACTLY.
+
+    This is the case the fd/cwd `_target_in_live_use` scan structurally MISSES: an
+    IDLE managed MCP server that will `npx playwright` a chromium LATER holds the
+    per-user path in its ENVIRON but has no open fd / cwd inside the build dir yet
+    (the david3/david4 servers the v0.1.332 incident measured — a stale env after
+    the markers flipped to /opt). So the reap must ALSO refuse when such a server
+    is alive, or it would delete a build that a live server is about to launch.
+
+    Matched EXACTLY (a full `KEY=VALUE` environ entry), never a prefix, so a
+    sibling `…ms-playwright-old` never counts. Reads only the current user's
+    processes — a foreign-uid `/proc/<pid>/environ` is unreadable (EACCES) and is
+    SKIPPED per-pid, never fatal (the same accepted residual as `_target_in_
+    live_use`). A TOTAL /proc failure returns [] (never fatal); the reap's
+    `live_check` gate — `_target_in_live_use`, fail-safe True on a total /proc
+    failure — is the backstop that still refuses the reap in that case, so this
+    predicate never has to fail-safe on its own. `proc_dir` is injectable for a
+    hermetic fake /proc tree."""
+    needle = b"PLAYWRIGHT_BROWSERS_PATH=" + os.fsencode(str(path))
+    proc = Path(proc_dir) if proc_dir is not None else Path("/proc")
+    hits = []
+    try:
+        entries = os.listdir(proc)
+    except OSError:
+        return hits
+    for name in entries:
+        if not name.isdigit():
+            continue
+        try:
+            raw = (proc / name / "environ").read_bytes()
+        except OSError:
+            continue  # unreadable (foreign uid) or gone — skip, never fatal
+        if needle in raw.split(b"\x00"):
+            hits.append(int(name))
+    return sorted(hits)
+
+
+def _reap_per_user_copy_if_safe(per_user, *, previous_marker,
+                                live_env=None, live_check=None) -> bool:
+    """#1058 rework-2 (item 2): the ACCOUNT reaps its OWN per-user chromium pair
+    once the shared /opt has taken over — the SAFE replacement for the root sweep
+    that caused the v0.1.332 incident (root never mutates user state; ownership is
+    now clean). Removes the `chromium-*` / `chromium_headless_shell-*` dirs (and
+    NOTHING else — never ffmpeg, per #1058 review B 🟡-2; never any other family)
+    from the PER-USER cache, so a subdev account collapses back onto the #950
+    one-shared-copy instead of keeping its own ~650 MB duplicate.
+
+    Reaps ONLY when ALL three gates are clear — otherwise it KEEPS and journals
+    the reason (one line per decision):
+      (i)   `previous_marker == OPT_MS_PLAYWRIGHT` — the marker ALREADY pointed at
+            /opt BEFORE this install, so every env surface (marker, MCP env,
+            settings env, bashrc) has resolved to /opt for at least one full
+            install cycle. On the FIRST flip (previous marker was per-user) we
+            keep, so nothing that might still hold the per-user path is deleted
+            out from under it;
+      (ii)  `live_env(per_user)` is EMPTY — no live process of this user carries
+            PLAYWRIGHT_BROWSERS_PATH=<per-user> in its environ (the idle-MCP-
+            server case the fd/cwd scan misses);
+      (iii) `live_check(entry)` is clear for the dir — the #315/#1030
+            `_target_in_live_use` /proc fd/cwd scan (fail-safe True on any /proc
+            read failure), checked per build dir exactly as `_cleanup_old_builds`.
+    NEVER the root-owned /opt (guarded by `_is_per_user_cache`), NEVER a symlink
+    (left untouched, never followed). Best-effort: a scan/rmtree failure is logged
+    and skipped, never fatal. Returns True iff it reaped at least one dir."""
+    if live_env is None:
+        live_env = _live_env_points_at
+    if live_check is None:
+        live_check = _target_in_live_use
+    base = Path(per_user)
+    # (i) the marker must ALREADY have pointed at /opt before this install.
+    if previous_marker != OPT_MS_PLAYWRIGHT:
+        print("    Playwright cleanup: kept per-user copy — marker flipped to /opt "
+              "this install (one more cycle before reap)")
+        return False
+    # Never /opt (root's), and only a real per-user cache dir.
+    if not _is_per_user_cache(base) or not base.is_dir():
+        return False
+    try:
+        listing = sorted(base.iterdir())
+    except OSError as e:
+        print("    ⚠ Playwright cleanup: could not scan %s (%s)" % (base, e),
+              file=sys.stderr)
+        return False
+    # The chromium-pair dirs (never ffmpeg, never other families, never symlinks).
+    pair = []
+    for entry in listing:
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        m = _BUILD_DIR_RE.match(entry.name)
+        if m is None or m.group(1) not in _PINNED_EXACT_FAMILIES:
+            continue
+        pair.append(entry)
+    if not pair:
+        return False  # nothing to reap — idempotent
+    # (ii) no live server env still points at the per-user cache.
+    pids = live_env(base)
+    if pids:
+        print("    Playwright cleanup: kept per-user copy — live server pid %d "
+              "still points at it (env)" % pids[0])
+        return False
+    reaped_any = False
+    for entry in pair:
+        # (iii) per-dir fd/cwd liveness (fail-safe True on any /proc failure).
+        if live_check(entry):
+            print("    Playwright cleanup: kept %s — a live process is using it"
+                  % entry.name)
+            continue
+        try:
+            shutil.rmtree(entry)
+            print("    Playwright cleanup: reaped per-user copy (shared /opt in "
+                  "use): %s" % entry.name)
+            reaped_any = True
+        except OSError as e:
+            print("    ⚠ Playwright cleanup: could not remove %s (%s)"
+                  % (entry.name, e), file=sys.stderr)
+    return reaped_any
+
+
 def _stderr_tail(text, n: int = 8) -> str:
     """The LAST `n` lines of a subprocess's output. The REAL playwright download
     error lives at the END of the output (its generic 'running npx playwright
@@ -762,5 +897,18 @@ def provision_playwright_mcp(box_class: str = None) -> bool:
         print("    playwright MCP: opted out on this box (%s) — skipping browser "
               "install + server write" % (reason or "no reason given"))
         return True
+    # #1058 rework-2: capture the PREVIOUS marker value BEFORE reconcile
+    # overwrites it — the reap needs to know whether the marker ALREADY pointed at
+    # /opt on a prior install (item 2 gate (i)).
+    previous_marker = _read_browsers_path_marker()
     ensure_playwright_browsers(box_class=box_class)
-    return reconcile_playwright_mcp_file(box_class=box_class)
+    ok = reconcile_playwright_mcp_file(box_class=box_class)
+    # #1058 rework-2 (item 2): once the shared /opt is the resolved path, the
+    # account reaps its OWN redundant per-user chromium copy — ONLY when provably
+    # safe (marker already /opt, no live server env on the per-user path, no live
+    # fd/cwd). Runs AFTER the marker/MCP env are written, so a reap can never
+    # outrun the surfaces that point readers at /opt. Never on /opt itself.
+    if resolved_browsers_path(box_class) == OPT_MS_PLAYWRIGHT:
+        _reap_per_user_copy_if_safe(
+            PLAYWRIGHT_BROWSER_CACHE, previous_marker=previous_marker)
+    return ok

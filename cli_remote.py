@@ -998,6 +998,13 @@ def _playwright_chromium_postcheck():
     SIGTERM-ignoring child, and the probe cleans its own /tmp screenshot AND its
     stderr temp (shared-box disk doctrine).
 
+    #1058 rework-2: this probe is now RACE-FREE against the shared /opt install.
+    The v0.1.332 incident was the root #950-B apply block SWEEPING the per-user
+    build the marker pointed at while this per-account probe ran concurrently and
+    PASSED on it; that sweep is GONE (root installs /opt only, the account reaps
+    its OWN per-user copy when provably safe — cli_playwright_mcp), so no other
+    actor deletes the build this probe reads between the read and the launch.
+
     #1048 fix-forward: (c) the probe's stderr is captured to a temp file and its
     LAST 3 lines are surfaced in the FAILED message (the real error — montalu3-6
     "Executable doesn't exist", spinbike exit 127 — was previously discarded to
