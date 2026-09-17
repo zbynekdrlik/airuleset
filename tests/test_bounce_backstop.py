@@ -521,6 +521,46 @@ class TestCrossStreamRepoScope(unittest.TestCase):
                             "still nudge with no override")
             self.assertTrue(any("bounce-nudge" in ln for ln in logs), logs)
 
+    def test_client_named_odoo_erp_checkout_is_in_flow(self):
+        # #1068 REGRESSION (montalu1 96/96 sweeps 2026-09-17): the stream
+        # boxes' odoo-erp checkout is CLIENT-named (`odoo-<client>`), so its
+        # basename is never literally `odoo-erp`. Job 8 must decide membership
+        # by the repo SLUG the tickets-status cache already knows (`name`),
+        # NOT by the directory basename. Before the fix this pane was skipped
+        # with `bounce-skip-not-cross-stream odoo-erp` and never nudged.
+        with TemporaryDirectory() as home:
+            root = str(Path(home) / "devel" / "odoo" / "odoo-slovnormal")
+            Path(root).mkdir(parents=True)
+            seed_repo_cache(home, root, "odoo-erp")   # slug = odoo-erp
+            self.assertNotEqual(Path(root).name, "odoo-erp")   # client-named
+            fetch_calls = []
+            tmux = FakeTmux([("%1", root)], IDLE)
+            logs = wd.bounce_backstop(
+                time.time(), tmux, {}, lambda b, **kw: None, home=home,
+                gh_fetch=lambda r: fetch_calls.append(r) or [1705])
+            self.assertEqual(fetch_calls, [root],
+                             "the client-named odoo-erp checkout must be "
+                             "queried, not skipped as not-cross-stream")
+            self.assertTrue(tmux.typed(), "the idle pane must be nudged")
+            self.assertIn("#1705", tmux.typed()[0])
+            self.assertFalse(
+                any("skip-not-cross-stream" in ln for ln in logs), logs)
+
+    def test_skip_line_names_slug_and_dir(self):
+        # #1068 item 3: the skip journal line must carry the resolved slug AND
+        # the directory basename, so the next path-vs-slug mismatch is visible
+        # at a glance (`<slug> (dir <basename>)`), never a bare contradiction.
+        with TemporaryDirectory() as home:
+            root = str(Path(home) / "devel" / "restreamer")
+            Path(root).mkdir(parents=True)
+            seed_repo_cache(home, root, "restreamer")
+            logs = wd.bounce_backstop(
+                time.time(), FakeTmux([("%1", root)], IDLE), {},
+                lambda b, **kw: None, home=home, gh_fetch=lambda r: [337])
+            self.assertTrue(
+                any("bounce-skip-not-cross-stream restreamer (dir restreamer)"
+                    == ln for ln in logs), logs)
+
 
 class TestGhEnvTokenFallback(unittest.TestCase):
     def test_bashrc_export_is_picked_up(self):
