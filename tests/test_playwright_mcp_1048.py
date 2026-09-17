@@ -168,28 +168,47 @@ class TestBrowsersPathResolver1048(unittest.TestCase):
                 p.resolve_playwright_browsers_path(bc, False, home=home),
                 home / ".cache" / "ms-playwright")
 
-    def test_opt_has_pinned_build_checks_the_pinned_build_dir(self):
+    @staticmethod
+    def _mk(*builds, marker=True):
+        """A temp browsers dir holding each named build subdir, each WITH
+        (marker=True) or WITHOUT an INSTALLATION_COMPLETE file."""
         import tempfile
-        opt = Path(tempfile.mkdtemp())
-        self.assertFalse(p._opt_has_pinned_build(opt))
-        (opt / ("chromium-" + p.PLAYWRIGHT_CHROMIUM_BUILD)).mkdir()
-        self.assertTrue(p._opt_has_pinned_build(opt))
-        # a DIFFERENT (mismatched) build present is not a match (the #2420 drift)
-        opt2 = Path(tempfile.mkdtemp())
-        (opt2 / "chromium-1243").mkdir()
-        self.assertFalse(p._opt_has_pinned_build(opt2))
+        d = Path(tempfile.mkdtemp())
+        for name in builds:
+            sub = d / name
+            sub.mkdir()
+            if marker:
+                (sub / "INSTALLATION_COMPLETE").touch()
+        return d
 
-    def test_pinned_build_installed_requires_the_exact_build(self):
-        # F1 (review-2 finding 1): a WRONG/old build in the cache is NOT "done".
-        import tempfile
-        empty = Path(tempfile.mkdtemp())
-        self.assertFalse(p._playwright_pinned_build_installed(empty))
-        wrong = Path(tempfile.mkdtemp())
-        (wrong / "chromium-1234").mkdir()
-        self.assertFalse(p._playwright_pinned_build_installed(wrong))
-        right = Path(tempfile.mkdtemp())
-        (right / ("chromium-" + p.PLAYWRIGHT_CHROMIUM_BUILD)).mkdir()
-        self.assertTrue(p._playwright_pinned_build_installed(right))
+    def _both(self):
+        b = p.PLAYWRIGHT_CHROMIUM_BUILD
+        return "chromium-" + b, "chromium_headless_shell-" + b
+
+    def test_opt_has_pinned_build_requires_both_halves(self):
+        # #1048 fix-forward (a): the /opt reuse check now needs BOTH chromium-<b>
+        # AND chromium_headless_shell-<b> (each with INSTALLATION_COMPLETE).
+        chromium, headless = self._both()
+        self.assertFalse(p._opt_has_pinned_build(self._mk()))            # empty
+        self.assertFalse(p._opt_has_pinned_build(self._mk(chromium)))    # half only
+        self.assertTrue(p._opt_has_pinned_build(self._mk(chromium, headless)))
+        # a DIFFERENT (mismatched) build present is not a match (the #2420 drift)
+        self.assertFalse(p._opt_has_pinned_build(self._mk("chromium-1243")))
+
+    def test_pinned_build_installed_requires_BOTH_halves_and_markers(self):
+        # #1048 fix-forward (a) — THE headline montalu3-6 defect: a half cache
+        # (chromium-<b> ONLY, no headless shell) must NOT count as installed.
+        chromium, headless = self._both()
+        self.assertFalse(p._playwright_pinned_build_installed(self._mk()))  # empty
+        # wrong/old build (review-2 finding 1) still not installed
+        self.assertFalse(p._playwright_pinned_build_installed(self._mk("chromium-1234")))
+        # the montalu3-6 half state: chromium-<b> complete, headless shell absent
+        self.assertFalse(p._playwright_pinned_build_installed(self._mk(chromium)))
+        # chromium present but WITHOUT its marker (interrupted) is not installed
+        self.assertFalse(
+            p._playwright_pinned_build_installed(self._mk(chromium, headless, marker=False)))
+        # both halves + both markers => installed
+        self.assertTrue(p._playwright_pinned_build_installed(self._mk(chromium, headless)))
 
 
 class TestReconcileMcpFile1048(unittest.TestCase):
@@ -328,6 +347,25 @@ class TestChromiumPostcheck1048(unittest.TestCase):
         f = self._frag()
         self.assertIn('[ -n "$BP" ] ||', f)
         self.assertIn("SKIPPED: managed Playwright not provisioned", f)
+
+    def test_fragment_keeps_probe_stderr_and_names_exit_127(self):
+        # #1048 fix-forward (c): the probe's stderr must be captured (not
+        # discarded to /dev/null) and its last lines surfaced in the FAILED
+        # message, and exit 127 named explicitly as missing system libraries.
+        f = self._frag()
+        self.assertIn("tail -n 3", f)                    # keep the last stderr lines
+        self.assertIn("stderr tail", f)                  # surfaced in the message
+        self.assertIn("127", f)                          # names the exit code
+        self.assertIn("missing system shared libraries", f)
+        self.assertIn("install-deps", f)                 # the named remedy
+        self.assertIn('2>"$ERR"', f)                     # probe stderr -> temp file, not discarded
+
+    def test_fragment_skips_loudly_when_opted_out(self):
+        # #1048 fix-forward (d): a per-box opt-out marker makes the post-check
+        # SKIP loudly with the reason, never a false failure.
+        f = self._frag()
+        self.assertIn("airuleset-playwright-optout", f)
+        self.assertIn("opted out on this box", f)
 
     def test_postcheck_is_wired_into_the_deploy_loop(self):
         import inspect
