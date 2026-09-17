@@ -72,7 +72,7 @@
     "filedrop/vault.py": 1071,
     "filedrop/vault_server.py": 580,
     "gates/__init__.py": 107,
-    "gates/audit.py": 213,
+    "gates/audit.py": 269,
     "gates/commitdesign.py": 178,
     "gates/design/__init__.py": 21,
     "gates/design/classifiers.py": 527,

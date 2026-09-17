@@ -306,6 +306,21 @@ def print_bypasses_text(commit_counts, cli_counts):
                 print("#   %s\t%s\t%d" % (source, kind, counts["per_kind"][kind]))
 
 
+def print_selfservice_blocks_text(counts):
+    """TSV of self-service-gate BLOCK recurrences (#1049): per stream (a rising
+    count is a stream repeatedly escalating a self-serviceable PROD read),
+    per reason-code, and a total. Trend each stream toward 0 -- the #957 24h
+    recurrence discipline for this gate."""
+    print("stream\tselfservice_blocks")
+    for stream in sorted(counts["per_stream"]):
+        print("%s\t%d" % (stream, counts["per_stream"][stream]))
+    print("total\t%d" % counts["total"])
+    if counts["per_reason"]:
+        print("# by reason-code:")
+        for reason in sorted(counts["per_reason"]):
+            print("#   %s\t%d" % (reason, counts["per_reason"][reason]))
+
+
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
@@ -367,8 +382,18 @@ def main(argv=None):
     p.add_argument("--bypasses", action="store_true",
                    help="Count airuleset bypass tokens (airuleset:...-ok) in "
                         "merged commit messages, per day (must trend to 0)")
-    p.add_argument("--repo", required=True,
-                   help="GitHub repo (owner/name)")
+    p.add_argument("--selfservice-blocks", dest="selfservice_blocks",
+                   action="store_true",
+                   help="Count self-service-gate BLOCKs (#1049) per stream + "
+                        "reason from ~/.claude/selfservice-gate.log (a rising "
+                        "per-stream count = a stream repeatedly escalating a "
+                        "self-serviceable PROD read; trend to 0)")
+    # #1049-review-2 MINOR-4: --repo is required only for the GitHub-querying
+    # views (--rounds / --bypasses); --selfservice-blocks reads a box-local log
+    # and needs no repo. Validated per-command below rather than at parse time.
+    p.add_argument("--repo", required=False, default=None,
+                   help="GitHub repo (owner/name) — required for "
+                        "--rounds / --bypasses")
     p.add_argument("--window", type=int, default=7,
                    help="Window size in days (default: 7)")
     output_fmt = p.add_mutually_exclusive_group()
@@ -379,6 +404,9 @@ def main(argv=None):
                             help="Print a compact markdown table with "
                                  "first-pass rate")
     args = p.parse_args(argv)
+
+    if (args.rounds or args.bypasses) and not args.repo:
+        p.error("--repo is required for --rounds / --bypasses")
 
     if args.bypasses:
         commits = fetch_bypass_commits(args.repo, window_days=args.window)
@@ -393,6 +421,17 @@ def main(argv=None):
             print()
         else:
             print_bypasses_text(commit_counts, cli_counts)
+        return
+
+    if args.selfservice_blocks:
+        # #1049 -- self-service-gate BLOCK recurrences per stream (box-local
+        # ~/.claude/selfservice-gate.log, written by gates.selfservice).
+        counts = gates_audit.count_selfservice_blocks(window_days=args.window)
+        if args.json_out:
+            json.dump(counts, sys.stdout, indent=2)
+            print()
+        else:
+            print_selfservice_blocks_text(counts)
         return
 
     if not args.rounds:

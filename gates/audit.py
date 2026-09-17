@@ -211,3 +211,59 @@ def count_cli_bypasses(root=None, tmp_dir="/tmp", window_days=7, now=None):
             total += 1
     return {"per_day": per_day, "per_kind": per_kind, "per_box": per_box,
             "total": total}
+
+
+# --------------------------------------------------------------------------- #
+# #1049 -- the self-service-gate BLOCK reader. Sibling of count_cli_bypasses,
+# but over the block-recurrence Prevencia log (~/.claude/selfservice-gate.log,
+# written by gates.selfservice) rather than the honored-bypass audit logs.
+# scripts/audit_bounce_rule_updates.py exposes it as `--selfservice-blocks` so a
+# stream that keeps escalating a self-serviceable PROD read is counted per
+# stream, per reason-code, per day (the #957 24h-recurrence discipline). A PASS/
+# NOTFILED line is NOT a recurrence and is skipped; only genuine BLOCKs count.
+# --------------------------------------------------------------------------- #
+_SS_STREAM_RE = re.compile(r"\bstream=(\S+)")
+_SS_REASON_RE = re.compile(r"\breason=(\S+)")
+
+
+def selfservice_log_path():
+    """The Prevencia log location (~/.claude/selfservice-gate.log) -- the same
+    path gates.selfservice._log_path writes to."""
+    return os.path.join(os.path.expanduser("~"), ".claude", "selfservice-gate.log")
+
+
+def count_selfservice_blocks(path=None, window_days=7, now=None):
+    """Count self-service-gate BLOCKs per stream, reason-code and day within the
+    last `window_days` LOCAL days. Returns ``{"per_stream": {...}, "per_reason":
+    {...}, "per_day": {...}, "total": n}`` -- zero-hit keys absent. Never raises
+    (observability view, never a gate): a missing/unreadable log is simply zero.
+    Only `verdict=BLOCK` lines count; PASS/NOTFILED are not recurrences."""
+    path = path or selfservice_log_path()
+    _now = now or datetime.datetime.now().astimezone()
+    since_day = (_now - datetime.timedelta(days=window_days)).strftime("%Y-%m-%d")
+    per_stream, per_reason, per_day, total = {}, {}, {}, 0
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        # no log yet -> zero recurrences
+        return {"per_stream": {}, "per_reason": {}, "per_day": {}, "total": 0}
+    for line in lines:
+        dm = _BYPASS_DATE_RE.match(line)
+        if not dm:
+            continue
+        day = dm.group(1)
+        if day < since_day:
+            continue
+        if "verdict=BLOCK" not in line:
+            continue
+        sm = _SS_STREAM_RE.search(line)
+        rm = _SS_REASON_RE.search(line)
+        stream = sm.group(1) if sm else "unknown"
+        reason = rm.group(1) if rm else "unknown"
+        per_stream[stream] = per_stream.get(stream, 0) + 1
+        per_reason[reason] = per_reason.get(reason, 0) + 1
+        per_day[day] = per_day.get(day, 0) + 1
+        total += 1
+    return {"per_stream": per_stream, "per_reason": per_reason,
+            "per_day": per_day, "total": total}
