@@ -1742,6 +1742,16 @@ def cmd_install(args):
     except Exception as e:
         print(f"  volume status error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 3b-quinque-quater-pre2. Managed model gateway (#1062 L1):
+    # controller-only, and only when an alias map exists. venv + pinned
+    # litellm[proxy] + systemd --user unit + health probe. A LOUD no-op on
+    # every other box class and when no map has been configured yet. Non-fatal
+    # (its own LOUD failure lines carry the detail). ---
+    try:
+        maybe_setup_model_gateway()
+    except Exception as e:
+        print(f"  model-gateway install error (non-fatal): {e}", file=sys.stderr)
+
     # --- 3b-quinque-quater. Managed swap (#992/#993): every managed box with
     # NO swap gets a /swapfile sized = RAM (clamped [2,8] GB). Idempotent,
     # sudo-`-n`-gated, LOCAL, non-fatal — the #992 controller-OOM fix as a
@@ -9167,6 +9177,12 @@ from cli_lane_overlap import cmd_lane_overlap as cmd_lane_overlap  # noqa: E402,
 # --- #1053: gk state-machine label-ensure CLI leaf ---
 from cli_labels import cmd_labels as cmd_labels  # noqa: E402, F401
 
+# --- #1062 L1: managed LiteLLM model gateway CLI leaf ---
+from cli_model_gateway import (  # noqa: E402, F401
+    cmd_model_gateway as cmd_model_gateway,
+    maybe_setup_model_gateway as maybe_setup_model_gateway,
+)
+
 # --- #857: context-baseline + skill-usage CLI leaves ---
 from cli_context_baseline import (  # noqa: E402, F401
     cmd_context_baseline as cmd_context_baseline,
@@ -10281,6 +10297,25 @@ def main():
     p_nudges.add_argument("--fleet", action="store_true",
                           help="Run the verb on every non-paused box via ssh")
 
+    # --- #1062 L1: managed LiteLLM model gateway (controller) ---
+    p_mg = sub.add_parser(
+        "model-gateway",
+        help="#1062 L1: the managed LiteLLM model gateway on the controller — "
+             "status | set <alias> <provider/model> | spend [--since ISO]. "
+             "`set` rewrites the central alias map + yaml and reloads the "
+             "service (no box visit); `spend` reads the file-based spend log.")
+    p_mg.add_argument("mg_action", nargs="?", default="status",
+                      choices=["status", "set", "spend"],
+                      help="status (default) = show the alias map + service "
+                           "state; set <alias> <provider/model> = point a tier "
+                           "alias at a model; spend = $ per alias per day")
+    p_mg.add_argument("mg_args", nargs="*",
+                      help="for `set`: the <alias> and the <provider/model> "
+                           "target (e.g. pilot-main openrouter/deepseek/"
+                           "deepseek-v4.1-flash)")
+    p_mg.add_argument("--since", default=None,
+                      help="`spend`: ISO8601 lower bound (e.g. 2026-09-01)")
+
     # #999: the EXPLICIT operator command for the managed volume step. install
     # NEVER relocates (idempotent config only); this is the only path that
     # mounts + relocates. --plan (default) is a dry-run; --apply executes.
@@ -10746,6 +10781,7 @@ SUBCOMMANDS = {
     "design-record": cmd_design_record,
     "account-bootstrap": cmd_account_bootstrap,
     "nudges": cmd_nudges,
+    "model-gateway": cmd_model_gateway,
     "volume": cmd_volume,
     "task-hygiene": cmd_task_hygiene,
     "labels": cmd_labels,
