@@ -348,8 +348,11 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # gh_rate_fetch=None, so the closing `):` moved off that line onto
                # the new one; the anchor grew a last line, the mutation target
                # vault_purge=None is untouched.
+               # #1055 P3 re-pin: questions_fetch=None (the calm-sweep ❓-pending
+               # read seam for deliver_discord_replies) was appended on the SAME
+               # last line after bounceflip_fetch=None, so `):` moved with it.
                "             task_hygiene_enabled=False, gh_rate_fetch=None,\n"
-               "             bounceflip_fetch=None):")
+               "             bounceflip_fetch=None, questions_fetch=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a

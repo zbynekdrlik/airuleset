@@ -1753,6 +1753,18 @@ TAIL_BUDGET_S = 20                # extra seconds for jobs 8/9 past sweep_deadli
 # `Failed with result 'timeout'`. Well under 120s so the line lands BEFORE a kill.
 SWEEP_SOFT_CAP_S = 100
 
+# #1055 P3 — ADAPTIVE CADENCE ("calm sweep"). The --user timer still fires every
+# 60s, but run_once decides per tick whether the sweep is FULL (today's whole
+# behaviour) or CALM. A CALM sweep runs the cheap local pane loop (jobs 1/1b/6
+# resume — always) + the RECOVERY CLASS (the `calm_ok=True` registry jobs) and
+# SKIPS every other registry job, removing ~4 of 5 gh/git-heavy sweeps on an idle
+# box. A FULL sweep is forced by `sweep_urgent()` (an active recovery state entry,
+# a pending /compact, or transcript activity) OR when the last full sweep is
+# >= SWEEP_CALM_S old. So on a truly idle box the heavy jobs still run once every
+# SWEEP_CALM_S; every minute-scale recovery keeps its <=60s reaction (the pane
+# loop + the calm_ok recovery jobs run on EVERY sweep).
+SWEEP_CALM_S = 300
+
 # #1041 timeout-race follow-up — per-job SWEEP-BUDGET minimums. `remaining_budget_s()`
 # (defined in run_once, seconds to SWEEP_SOFT_CAP_S from the SAME time_fn/_sweep_start
 # seam #1023 added) is the ONE primitive; a standalone registry job carrying a
@@ -2230,6 +2242,60 @@ PAUSED_SUPPRESSED_JOBS = frozenset({
 })
 
 
+def sweep_urgent(state, pane_stamps, stored_stamps, *, compact_pending=False):
+    """#1055 P3 (a) — return a short REASON string (=> this sweep MUST be FULL)
+    or "" (=> the sweep MAY be calm). Pure + all-local, cheapest checks first,
+    short-circuits on the first hit; issues NO subprocess of its own.
+
+    Forces a FULL sweep on the ACTIVE signals only:
+      * ``compact_pending`` — a pending /compact request exists (the caller reads
+        the requests file and passes a bool, so this function stays pure).
+      * ``state["parked_wake"]`` non-empty — a session is parked on the
+        account-switch banner (a recovery situation).
+      * a goal-lane STALL — any ``state["goal_lane"][sid]["soa"] > 0`` (the
+        structural stuck-verdict streak); goal_lane_sweep (a heavy, non-calm_ok
+        job) must run to nudge/recover it.
+      * an active session-limit episode — a ``sesslimit:<sid>`` key.
+      * an active api-error episode — a bare-UUID key (``_SESSION_KEY_RX``) whose
+        value is a dict carrying a ``hash`` (the ``decide()`` episode shape).
+      * transcript ACTIVITY — a current pane stamp ``[mtime_ns, size]`` that is
+        NEW or DIFFERS from the stored one = a session wrote / appeared.
+
+    NOTE (see the ticket's Anchors-confirmed comment for the full reconciliation):
+    the ✅-pending glob and an unanswered ❓ are DELIBERATELY NOT urgency signals
+    here. The (f) lock tests require the ✅-pending file to be DELIVERED ON A CALM
+    sweep (``deliver_pending_done``, which deletes it on delivery) and the ❓ to
+    KEEP ``deliver_discord_replies`` RUNNING ON A CALM sweep — so a box idling on
+    a finished ✅ or a waiting ❓ stays calm (the CPU-saving whole point; a ❓ can
+    wait hours). Both are handled by their ``calm_ok`` recovery jobs, which run on
+    the calm sweep. The semantic asymmetry vs a pending /compact (which DOES force
+    full) is real: a /compact means an ACTIVE session at a boundary, while a
+    ✅-pending / waiting-❓ means a FINISHED or IDLE session.
+
+    ``state`` should be the state as loaded at the TOP of the sweep (a
+    pre-pane-loop snapshot), so a FRESH stall detected THIS sweep is handled by
+    the pane-loop resume and does not itself force full (a PERSISTENT stall from a
+    prior sweep does — it re-runs the heavy goal/recovery jobs)."""
+    if compact_pending:
+        return "compact"
+    if state.get("parked_wake"):
+        return "parked"
+    gl = state.get("goal_lane")
+    if isinstance(gl, dict):
+        for rec in gl.values():
+            if isinstance(rec, dict) and rec.get("soa", 0) > 0:
+                return "goal-lane"
+    for k, v in state.items():
+        if k.startswith("sesslimit:"):
+            return "sesslimit"
+        if isinstance(v, dict) and v.get("hash") and _SESSION_KEY_RX.fullmatch(k):
+            return "api-error"
+    for sid, stamp in pane_stamps.items():
+        if stored_stamps.get(sid) != stamp:
+            return "activity"
+    return ""
+
+
 def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              projects_dir=PROJECTS_DIR, state_path=STATE_PATH,
              grace=GRACE_SECONDS, interval=RETRY_INTERVAL_SECONDS,
@@ -2269,7 +2335,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              infra_queue_fetch=None, resolve_role_fn=None,
              health_probes=None, health_probe_fetch=None,
              task_hygiene_enabled=False, gh_rate_fetch=None,
-             bounceflip_fetch=None):
+             bounceflip_fetch=None, questions_fetch=None):
     """Scan every `claude` pane once. 50 numbered jobs per poll — 44 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
@@ -3167,6 +3233,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
         from notify import send as send_fn
 
     state = load_state(state_path)
+    # #1055 P3 (a) — snapshot the urgency-relevant state entries BEFORE the pane
+    # loop mutates `state`. `sweep_urgent` reads this snapshot so a stall/park/
+    # goal-lane entry a PRIOR sweep left forces a full sweep, while a FRESH stall
+    # this pane loop detects+resumes does NOT itself force full (the resume runs
+    # in the pane loop regardless — see (f)-T1). Shallow copy: only key existence
+    # + stable subfields (`hash`/`soa`/`parked_wake`) are read, never mutated.
+    _urgent_state_snapshot = dict(state)
     logs = _FlushList(log_fn)
     # #1055 P1 — clear the bounded-tail memo + counters ONCE per sweep so this
     # sweep re-reads fresh; the summary line below reports what it saved.
@@ -3177,6 +3250,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     reset_subprocess_stats()
     begin_sweep_memo()
     stalled = set()
+    # #1055 P3 (b) — the current per-session transcript stamp {sid: [mtime_ns,
+    # size]}, recorded in the pane loop below. Compared against the stored stamp
+    # from the prior sweep to decide "transcript activity" (a full-sweep signal),
+    # and persisted into state["sweep_cadence"] at the end of the sweep.
+    cur_pane_stamps = {}
     owner_by_sid = {}                   # session id -> tmux owner, for job 5's ✅ @mention
     owner_by_cwd = {}                   # pane cwd -> tmux owner, job 5's recovery path
     owners_seen = set()                 # every owner with a pane here — >1 = multi-owner box
@@ -3232,6 +3310,20 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                         "handled this tick, rest retried next"
                         % (idx, len(by_transcript)))
             break
+        # #1055 P3 (b) — record this transcript's stamp for the cadence activity
+        # check, for EVERY transcript reached (incl. an ambiguous multi-pane one
+        # that `continue`s below), so a stable session is not mis-read as "new"
+        # next sweep. A local os.stat (no subprocess); best-effort.
+        try:
+            _tp = Path(tkey)
+            _st = _tp.stat()
+            cur_pane_stamps[_tp.stem] = [_st.st_mtime_ns, _st.st_size]
+        except OSError:
+            # airuleset:script-ok a transcript that vanished mid-sweep simply has
+            # no stamp this sweep — a missing stamp reads as "new" next sweep
+            # (fail toward a full sweep, the safe direction); nothing to log per
+            # micro-race, the cadence line below reports the net decision.
+            pass
         try:
             if len(owners) > 1:
                 logs.append("skip ambiguous (%d panes → %s)" % (len(owners), Path(tkey).stem))
@@ -4383,7 +4475,14 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     _standalone_registry = []
 
     def _add(label, gate, invoke, err, min_budget=None, gh_poll_hold=False,
-             max_subprocess=None):
+             max_subprocess=None, calm_ok=False):
+        # #1055 P3 (c) — `calm_ok` (DEFAULT FALSE = skipped on a CALM sweep): the
+        # ≤60s RECOVERY CLASS is marked True so it runs on EVERY sweep (calm or
+        # full); every other registry job runs on a FULL sweep only. The set is
+        # pinned by tests/test_sweep_cadence_1055.py::TestCalmOkRegistrySet
+        # (compact_sweep / parked_wake_job = the RECOVERY_NUDGE_KINDS producers
+        # among registry jobs; the two file-driven deliveries; the two local
+        # hygiene/notice jobs — see run_once's own P3 calm-gate below).
         # #1055 P2 (e) — `max_subprocess` (a COUNT, default None = unbounded): the
         # loop HOLDS this job (`hold:budget (subprocess…)`, UNTOUCHED state) when
         # the sweep has already spent >= this many subprocesses before it starts,
@@ -4401,7 +4500,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
         # call by the shim). Fail-safe by default: an unmarked/misjudged job simply
         # runs (per-call shim throttle), never a delayed write (#1040 review-1 MAJOR).
         _standalone_registry.append((label, gate, invoke, err, min_budget,
-                                     gh_poll_hold, max_subprocess))
+                                     gh_poll_hold, max_subprocess, calm_ok))
 
     # --- (3) WEEKLY TOKEN-USAGE alert (only when a fetcher is wired) — rate-limited
     # to USAGE_INTERVAL inside check_usage so the 60s tmux cadence doesn't hammer
@@ -4421,7 +4520,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                       dry_run=dry_run, done_grace=done_grace,
                                       pending_prefix=pending_prefix,
                                       owner_by_cwd=owner_by_cwd, owners_seen=owners_seen),
-         None)
+         None, calm_ok=True)   # #1055 P3: delivers a ✅-pending file on a calm sweep
 
     # --- (7) ROUTE DISCORD REPLIES → the asking session, a ❓/❔ REACTION on a
     # tracked bot message (#297), and a REPLY on a completion card (#298) —
@@ -4437,7 +4536,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                          projects_dir=projects_dir,
                                          persist=lambda: save_state(state_path, state),
                                          sleep_fn=sleep_fn),
-         "discord-reply error")
+         "discord-reply error", calm_ok=True)   # #1055 P3: the ONE external poll;
+    # on a CALM sweep run_once's calm-gate additionally requires a ❓ pending
+    # (nothing to route otherwise); on a FULL sweep it runs normally.
 
     # Terminal-answered ❓ cleanup — a question answered by a HUMAN prompt in
     # the asking session leaves the map NOW, not on some later timer (it
@@ -4526,7 +4627,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             _n.append("compact jobs DISABLED by owner flag "
                       "~/.claude/watchdog-disable-compact (rm to re-enable)")
         return _n
-    _add("_owner_kill_switch_notice", lambda: True, _kill_switch_notice, None)
+    _add("_owner_kill_switch_notice", lambda: True, _kill_switch_notice, None,
+         calm_ok=True)   # #1055 P3: local journal-only notice, always runs
 
     # Job 9's own real body (goal.goal_sweep) is dispatched further down,
     # alongside job 20 -- both now need `compact_handled_this_sweep`
@@ -4584,7 +4686,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                       state=state,
                                       handled=compact_handled_this_sweep)
     _add("compact_sweep", lambda: compact_requests_path and not _compact_jobs_disabled,
-         _job_compact_sweep, "compact-request error")
+         _job_compact_sweep, "compact-request error",
+         calm_ok=True)   # #1055 P3: file-driven /compact delivery, ≤60s reaction
 
     # Job 15 — REMOVED (#102, 2026-07-27). Used to fire /compact off context
     # size + idle duration alone; see run_once's own docstring paragraph
@@ -4838,7 +4941,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
          lambda: cleanup_stale_exec_markers(now, run=run,
                                             projects_dir=projects_dir,
                                             dry_run=dry_run),
-         "exec-marker-cleanup error")
+         "exec-marker-cleanup error",
+         calm_ok=True)   # #1055 P3: local /tmp hygiene reusing the pane list
 
     # Job 29 — HOURLY CREDENTIAL-STORE SWEEP (#144) + DURABLE-PERSISTENCE
     # BACKSTOP (#529): only when `vault_purge` is given (cmd_watchdog passes
@@ -5172,7 +5276,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             dry_run=dry_run)
         return lines + _jl
     _add("parked_wake_job", lambda: True, _job_parked_wake, "parked-wake error",
-         min_budget=_BUDGET_MIN_PS_REAPER_S)
+         min_budget=_BUDGET_MIN_PS_REAPER_S,
+         calm_ok=True)   # #1055 P3: wake-parked recovery, ≤60s reaction
 
     # Job 49 (#1036) — ODOO TASK-HYGIENE OVERSEER. Gated on the enable flag +
     # a present config + the ~2h cadence, so run_once unit tests (flag False)
@@ -5235,6 +5340,55 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # reuses `_sweep_start`.
     _budget_logged = False
 
+    # #1055 P3 (b) — decide CALM vs FULL for THIS sweep, now that the pane loop
+    # has run (recovery jobs 1/1b/6 already fired) and cur_pane_stamps is built.
+    # FULL when `sweep_urgent` finds an ACTIVE signal (a prior-sweep stall/park/
+    # goal-lane entry via the pre-loop snapshot, a pending /compact, or transcript
+    # activity) OR when the last full sweep is >= SWEEP_CALM_S old (or never — the
+    # bootstrap sweep). On a CALM sweep the registry loop below skips every job
+    # that is not `calm_ok`. A pending /compact is a local file read (no
+    # subprocess); it is passed to sweep_urgent as a bool to keep the predicate
+    # pure.
+    _cadence = state.get("sweep_cadence") if isinstance(state.get("sweep_cadence"), dict) else {}
+    _stored_stamps = _cadence.get("pane_stamps") if isinstance(_cadence.get("pane_stamps"), dict) else {}
+    _last_full = _cadence.get("last_full")
+    _compact_pending = False
+    if compact_requests_path:
+        try:
+            from watchdog import compact as _compact_mod
+            _compact_pending = bool(_compact_mod.load_compact_requests(compact_requests_path))
+        except Exception as _e:  # noqa: BLE001 — fail toward FULL, never break the sweep
+            logs.append("sweep-cadence: compact-pending read error (=> full): %r" % _e)
+            _compact_pending = True
+    _urgent = sweep_urgent(_urgent_state_snapshot, cur_pane_stamps, _stored_stamps,
+                           compact_pending=_compact_pending)
+    _calm = False
+    if _urgent:
+        logs.append("sweep: full (urgent: %s)" % _urgent)
+    elif isinstance(_last_full, (int, float)) and (now - _last_full) < SWEEP_CALM_S:
+        _calm = True
+    else:
+        logs.append("sweep: full (%s)"
+                    % ("cadence" if isinstance(_last_full, (int, float)) else "bootstrap"))
+    # #1055 P3 (b) — deliver_discord_replies is the ONE external poll; on a CALM
+    # sweep it runs ONLY while a ❓ is pending (else there is nothing to route).
+    # The questions map is a local JSON read; load it lazily, ONLY when a calm
+    # sweep could actually reach deliver_discord_replies (its own gate needs
+    # discord_fetch wired), so a normal FULL-sweep test never touches the file.
+    _questions_pending = False
+    if _calm and discord_fetch is not None:
+        try:
+            if questions_fetch is not None:
+                _q = questions_fetch()
+            else:
+                from notify import load_questions as _load_questions
+                _q = _load_questions()
+            _questions_pending = bool(_q)
+        except Exception as _e:  # noqa: BLE001 — fail toward NOT polling, never break the sweep
+            logs.append("sweep-cadence: questions read error (=> no discord poll): %r" % _e)
+            _questions_pending = False
+    _calm_skipped = 0
+
     # #1040 — ONE shared gh-rate reading per sweep drives the poller HOLD +
     # the once-per-episode alert. Gated on `gh_rate_fetch` being wired (network-
     # free for every existing run_once test, the repo's own pattern). The
@@ -5262,7 +5416,23 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             _gh_hold = False
 
     for (_label, _gate, _invoke, _err, _min_budget, _gh_poll_hold,
-         _max_subprocess) in _standalone_registry:
+         _max_subprocess, _calm_ok) in _standalone_registry:
+        # #1055 P3 (c) — CALM-sweep gate: skip every non-recovery job, SILENTLY
+        # (no per-job journal line — the ONE `sweep: calm (N jobs skipped …)`
+        # summary below covers them, keeping a calm sweep's journal tiny). This is
+        # checked BEFORE the job-start attribution line, so a skipped job costs
+        # nothing (not even a clock read). On a FULL sweep `_calm` is False, so
+        # this block is inert and behaviour is byte-identical to pre-P3.
+        if _calm:
+            _run_on_calm = _calm_ok
+            if _run_on_calm and _label == "deliver_discord_replies":
+                # the ONE external poll — on a calm sweep run it only to route a
+                # reply to a waiting ❓ (a pending ❓ never forces a full sweep, so
+                # this is what keeps the reply-poll at ≤60s while heavy jobs skip).
+                _run_on_calm = _questions_pending
+            if not _run_on_calm:
+                _calm_skipped += 1
+                continue
         # #1041 — read the ONE budget primitive ONCE per iteration (one clock read);
         # the job-start elapsed anchor is derived from it (`elapsed == SOFT_CAP -
         # left`), so attribution and the budget guard below share that single read.
@@ -5333,6 +5503,27 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                 logs.append("sweep budget: %ds of %ds at %s"
                             % (int(_elapsed), SWEEP_SOFT_CAP_S, _label))
                 _budget_logged = True
+
+    # #1055 P3 (b) — one journal line naming the calm sweep + how many jobs it
+    # skipped + when the next full sweep is due, so the cadence is readable from
+    # `journalctl`. A FULL sweep already logged its own `sweep: full (...)` line
+    # above (urgent reason / cadence / bootstrap).
+    if _calm:
+        _next_full_in = max(0, int(SWEEP_CALM_S - (now - _last_full)))
+        logs.append("sweep: calm (%d jobs skipped, next full in %ds)"
+                    % (_calm_skipped, _next_full_in))
+    # #1055 P3 (b) — persist the cadence stamp: `last_full` advances ONLY on a
+    # full sweep (so the SWEEP_CALM_S clock keeps ticking toward the next full
+    # across calm sweeps); `pane_stamps` refreshes EVERY sweep (on a calm sweep it
+    # equals the stored stamps — no activity — so this is a no-op there, and on a
+    # full sweep it captures the new state for the next activity check). A named
+    # store: the flat-key cleanup pass above never touches it.
+    _cad = state.setdefault("sweep_cadence", {})
+    if not isinstance(_cad, dict):
+        _cad = state["sweep_cadence"] = {}
+    if not _calm:
+        _cad["last_full"] = now
+    _cad["pane_stamps"] = cur_pane_stamps
 
     # #1055 P1 — one per-sweep summary of the bounded transcript tail reads, so
     # the CPU/RSS win is readable from `journalctl` on gk alongside the owner's

@@ -347,7 +347,7 @@ def _calm_ok_labels():
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
                 and node.func.id == "_add" and node.args):
             first = node.args[0]
-            label = getattr(first, "value", getattr(first, "s", None))
+            label = first.value if isinstance(first, ast.Constant) else None
             if not isinstance(label, str):
                 continue
             for kw in node.keywords:

@@ -9,8 +9,16 @@ Description=Run airuleset api-watchdog every minute (auto-resume API-error stall
 
 [Timer]
 # Start a couple minutes after boot, then poll every 60s while the machine is up.
+# #1055 P3 (e): RandomizedDelaySec spreads the fire time by up to 20s so the ~16
+# per-user timers on a shared box (subdev) do NOT all fire in the same seconds
+# (they used to, blowing a synchronized CPU/RSS spike every minute). The 60s
+# cadence and 10s accuracy are unchanged — the P3 "calm sweep" logic lives in
+# run_once, which decides FULL vs CALM per tick; the timer stays at 60s so the
+# api-error / compact / wake / discord-reply recovery paths keep their ≤60s
+# reaction. AccuracySec (coalescing window) sits alongside the randomized delay.
 OnBootSec=2min
 OnUnitActiveSec=60s
+RandomizedDelaySec=20s
 AccuracySec=10s
 Persistent=false
 Unit=api-watchdog.service
