@@ -238,10 +238,20 @@ class TestQuotaSegment(unittest.TestCase):
 class TestStreamEnvBashrcBlock(unittest.TestCase):
     """#950-B: shared-stream env marker block."""
 
-    def test_stream_env_block_has_playwright_path(self):
+    def test_stream_env_block_exports_the_per_user_playwright_cache(self):
+        # #1048 REVERSES #950's /opt export: a no-sudo shared-stream box exports
+        # the per-user cache (the location airuleset installs the pinned chromium
+        # into), NEVER the root-owned /opt copy with its mismatched build. Assert
+        # on the ACTIVE `export` lines (a /opt mention in a comment is fine).
         from cli_bashrc_appliers import STREAM_ENV_BASHRC_BLOCK
         self.assertIn("PLAYWRIGHT_BROWSERS_PATH", STREAM_ENV_BASHRC_BLOCK)
-        self.assertIn("/opt/ms-playwright", STREAM_ENV_BASHRC_BLOCK)
+        exports = [ln for ln in STREAM_ENV_BASHRC_BLOCK.splitlines()
+                   if ln.strip().startswith("export")
+                   and "PLAYWRIGHT_BROWSERS_PATH" in ln]
+        self.assertTrue(exports)
+        for ln in exports:
+            self.assertIn(".cache/ms-playwright", ln)
+            self.assertNotIn("/opt/ms-playwright", ln)
 
     def test_stream_env_markers(self):
         from cli_bashrc_appliers import (STREAM_ENV_MARK_START,

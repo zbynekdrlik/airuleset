@@ -974,6 +974,53 @@ def _gh_chain_postcheck():
     )
 
 
+def _playwright_chromium_postcheck():
+    """#1048: a remote shell fragment run AFTER `airuleset.py install` on every
+    target — prove the managed Playwright MCP's chromium actually LAUNCHES
+    headless, bounded to 30 s, and FAIL the target (distinct rc 88) when it does
+    not render. This is the push-time health check the owner escalated for
+    (montalu1, 16.9.): a chrome-channel / browsers-path drift regression can
+    never SHIP again silently — a non-rendering (or hanging) chromium is caught
+    by the deploy loop's existing `rc != 0 -> failed.append` accounting, so the
+    push exits non-zero, never a "workaround".
+
+    Mirrors `_gh_chain_postcheck` (#1051): it runs in a NON-LOGIN ssh shell whose
+    PATH does NOT carry ~/.local/bin, so force ~/.local/bin to the FRONT before
+    resolving npx; a target with NO npx (nothing to verify) SKIPS (exit 0). The
+    resolved browsers path is read from the marker the install just wrote
+    (cli_caveman_plugins.PLAYWRIGHT_BROWSERS_PATH_MARKER = ~/.claude/airuleset-
+    playwright-browsers-path) so the probe exercises the EXACT chromium the
+    managed MCP server will; a box with NO marker (managed Playwright opted out
+    via PLAYWRIGHT_MANAGED=False) also SKIPS — nothing to verify, never a false
+    failure. `about:blank` proves the browser LAUNCHES with no
+    network/display dependency — the failure mode is a missing/mismatched
+    browser binary, not a page. `-k 5` hardens the bound against a
+    SIGTERM-ignoring child, and the probe cleans its own /tmp screenshot
+    (shared-box disk doctrine)."""
+    import airuleset
+    return (
+        '{ export PATH="$HOME/.local/bin:$PATH"; '
+        # A visible SKIP line (to stderr) so a skip is never indistinguishable
+        # from a PASS in the deploy output (#1048 review finding 3).
+        'command -v npx >/dev/null 2>&1 || '
+        '{ echo "PLAYWRIGHT-POSTCHECK SKIPPED: no npx on this box" >&2; exit 0; }; '
+        'BP="$(cat "$HOME/.claude/airuleset-playwright-browsers-path" 2>/dev/null)"; '
+        # No marker => managed Playwright is not provisioned on this box
+        # (PLAYWRIGHT_MANAGED opt-out) => nothing to verify, SKIP (like the
+        # gh-chain skips when gh is absent). A managed box always has the marker.
+        '[ -n "$BP" ] || '
+        '{ echo "PLAYWRIGHT-POSTCHECK SKIPPED: managed Playwright not provisioned here" >&2; exit 0; }; '
+        'export PLAYWRIGHT_BROWSERS_PATH="$BP"; '
+        'PROBE="$(mktemp /tmp/airuleset-pw-probe.XXXXXX.png)"; '
+        'timeout -k 5 30 npx -y playwright@%s screenshot --browser chromium '
+        'about:blank "$PROBE" >/dev/null 2>&1 || '
+        '{ rm -f "$PROBE"; echo "PLAYWRIGHT-POSTCHECK FAILED: headless chromium '
+        '(--browser chromium) did not render in 30s — chrome-channel / version '
+        'drift (#1048)" >&2; exit 88; }; '
+        'rm -f "$PROBE"; }'
+    ) % airuleset.PLAYWRIGHT_PW_VERSION
+
+
 def _deploy_to_all_remotes(failed, auth_failed):
     """Deploy this push to every managed remote (step 3 + 3b of cmd_push).
 
@@ -1043,6 +1090,10 @@ def _deploy_to_all_remotes(failed, auth_failed):
                 f"&& git pull --ff-only && {owner_vps_env}python3 airuleset.py install "
                 # #1051: prove the freshly-installed gh chain does not hang.
                 f"&& {_gh_chain_postcheck()}"
+                # #1048: prove the managed Playwright MCP chromium actually
+                # launches headless — a chrome-channel/drift regression fails the
+                # target, never ships silently.
+                f" && {_playwright_chromium_postcheck()}"
             )
             # #347 adversarial-review CRITICAL finding: `audited_hosts` must
             # NOT be marked here (before the ssh call even runs) — a first

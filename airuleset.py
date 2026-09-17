@@ -451,6 +451,22 @@ from cli_caveman_plugins import (  # noqa: E402, F401
     MANAGED_DISABLED_PLUGINS,
     PLAYWRIGHT_PLUGIN_KEY,
     PLAYWRIGHT_BROWSER_CACHE,
+    # #1048 -- managed Playwright MCP server + browsers-path resolver.
+    PLAYWRIGHT_MANAGED,
+    PLAYWRIGHT_MCP_VERSION,
+    PLAYWRIGHT_PW_VERSION,
+    PLAYWRIGHT_CHROMIUM_BUILD,
+    PLAYWRIGHT_MCP_SERVER_NAME,
+    PLAYWRIGHT_BROWSERS_PATH_MARKER,
+    OPT_MS_PLAYWRIGHT,
+    _opt_has_pinned_build,
+    resolve_playwright_browsers_path,
+    resolved_browsers_path,
+    _current_box_class,
+    render_playwright_mcp_server,
+    reconcile_playwright_mcp_server,
+    reconcile_playwright_mcp_file,
+    provision_playwright_mcp,
 )
 CAVEMAN_SHIM_DEST = CLAUDE_DIR / "airuleset-caveman-statusline.sh"
 CAVEMAN_MODE_FILE = CLAUDE_DIR / ".caveman-active"
@@ -2098,6 +2114,18 @@ def cmd_install(args):
             install_failed = True
     except Exception as e:
         print(f"  managed plugins setup error (non-fatal): {e}", file=sys.stderr)
+
+    # --- 6b-2. managed Playwright MCP (#1048): the pinned chromium + the
+    # managed --browser chromium server that replaces the dead chrome-channel
+    # plugin. Its own step (not folded into setup_managed_plugins) so the
+    # plugin path stays free of ~/.claude.json / browser-cache writes. A genuine
+    # server-reconcile failure latches install_failed → loud non-zero exit. An
+    # unexpected exception in OUR code stays non-fatal (the outer try/except).
+    try:
+        if not provision_playwright_mcp():
+            install_failed = True
+    except Exception as e:
+        print(f"  playwright MCP provisioning error (non-fatal): {e}", file=sys.stderr)
 
     # --- 6c. subagent status line: model+effort in the agent strip (#538) ---
     # Native subagentStatusLine (CC v2.1.205+): surfaces each inline

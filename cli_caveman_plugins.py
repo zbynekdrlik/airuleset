@@ -146,8 +146,19 @@ VALID_CAVEMAN_MODES = {
 # true->false). This also dissolves the whole per-project opt-in list (#452's
 # writes into 11 repos) and the incomplete #453 "which more projects need it"
 # follow-up — every project now has it.
-MANAGED_PLUGINS = ("superpowers@claude-plugins-official",
-                    "playwright@claude-plugins-official")
+# #1048 (2026-09-16, owner escalation montalu1): playwright is REMOVED from the
+# force-enabled baseline above and force-DISABLED below. The whole #158/#542
+# rationale (browser verification available on EVERY box) is PRESERVED — but the
+# plugin was the wrong MECHANISM: its own `.mcp.json` is `npx @playwright/mcp@
+# latest` with NO `--browser`, so it defaults to the `chrome` channel (Google
+# Chrome under /opt/google/chrome, apt/root) and is DEAD on every no-sudo stream
+# box (the odoo-erp#2420 class). airuleset cannot override a plugin server's
+# args, and the dispatch requires a PINNED @playwright/mcp (never @latest), so the
+# plugin's server is replaced by a managed, version-pinned user-scope `playwright`
+# MCP server (`--browser chromium --headless`, reconcile_playwright_mcp_server
+# below) that actually works on a no-sudo box. #542's availability invariant is
+# unchanged; only the delivery mechanism moves from the plugin to a managed server.
+MANAGED_PLUGINS = ("superpowers@claude-plugins-official",)
 # Plugins explicitly DISABLED by managed policy (#39 item 3, 2026-07-25
 # /doctor findings): rust-analyzer-lsp + claude-md-management had 0 lifetime
 # uses on dev2 and `/doctor` disabled them directly in settings.json
@@ -162,10 +173,170 @@ MANAGED_PLUGINS = ("superpowers@claude-plugins-official",
 MANAGED_DISABLED_PLUGINS = (
     "rust-analyzer-lsp@claude-plugins-official",
     "claude-md-management@claude-plugins-official",
+    # #1048: force-DISABLE the playwright plugin's broken chrome-channel server;
+    # it is replaced by the managed pinned MCP server below. See the note above
+    # MANAGED_PLUGINS.
+    "playwright@claude-plugins-official",
 )
 
+# Retained ONLY for the export contract + as the disabled-list reference value
+# (#1048 moved the old ensure_playwright_browsers guard to PLAYWRIGHT_MANAGED).
 PLAYWRIGHT_PLUGIN_KEY = "playwright@claude-plugins-official"
 PLAYWRIGHT_BROWSER_CACHE = Path.home() / ".cache" / "ms-playwright"
+
+# --------------------------------------------------------------------------- #
+# #1048 -- managed Playwright MCP server (chromium + headless, PINNED) + a
+# browsers-path resolver that keeps the installed chromium build in lockstep
+# with the pinned server across box classes.
+# --------------------------------------------------------------------------- #
+
+# `True` = airuleset manages a working Playwright MCP server on this box (the
+# post-#1048 replacement for "playwright in MANAGED_PLUGINS"). Flip to False to
+# opt a box out of a managed browser entirely (the one-flag opt-out #542 valued).
+PLAYWRIGHT_MANAGED = True
+
+# THE pin (never `@latest`, #1048). A MATCHED TRIO, verified against the npm
+# registry on 2026-09-17 and lock-tested (test_playwright_mcp_pin_1048):
+#   @playwright/mcp@0.0.81  depends on  playwright@1.64.0-alpha-2026-09-14
+#                                 and  playwright-core@1.64.0-alpha-2026-09-14
+#   playwright@1.64.0-alpha-2026-09-14  `install chromium`  ->  chromium build 1244
+# so the MCP server, the browser we install, and the /opt build-match probe all
+# agree by construction. Bump ALL THREE together (the lock test refuses `latest`).
+#   #1048 review finding 2 (fidelity residual): the push health-check launches
+#   chromium via `playwright@PW_VERSION` (the standalone pkg), NOT the production
+#   `@playwright/mcp@MCP_VERSION` server. They share the SAME chromium build only
+#   BECAUSE @playwright/mcp@0.0.81 depends on playwright@1.64.0-alpha-2026-09-14
+#   above — so the probe exercises the correct browser TODAY, but a future bump
+#   that moves the two out of lockstep would leave the probe green while the MCP
+#   server is dead. This offline trio-lock cannot resolve the live npm dep edge;
+#   the backstop is the first-push LIVE check (`claude mcp get playwright`
+#   Connected + a real browser_navigate screenshot). Followup: a dep-edge lock
+#   (install/probe via `npx --package @playwright/mcp@MCP_VERSION`, once its
+#   transitive-bin behaviour is verified, or a CI job resolving the dependency).
+PLAYWRIGHT_MCP_VERSION = "0.0.81"
+PLAYWRIGHT_PW_VERSION = "1.64.0-alpha-2026-09-14"
+PLAYWRIGHT_CHROMIUM_BUILD = "1244"
+
+# The user-scope MCP server name written into ~/.claude.json (mcpServers.<name>).
+PLAYWRIGHT_MCP_SERVER_NAME = "playwright"
+
+# The root-owned shared browser copy (#950). Used ONLY when it holds the pinned
+# chromium build (workstation boxes) — never on a no-sudo shared-stream box.
+OPT_MS_PLAYWRIGHT = Path("/opt/ms-playwright")
+
+# The remote install writes the RESOLVED browsers path here so the push-time
+# health-check shell fragment (cli_remote._playwright_chromium_postcheck) can
+# read it without re-implementing the resolver in shell (#1048).
+PLAYWRIGHT_BROWSERS_PATH_MARKER = Path.home() / ".claude" / "airuleset-playwright-browsers-path"
+
+
+def _has_pinned_chromium_build(browsers_dir: Path) -> bool:
+    """True iff `browsers_dir` holds the PINNED chromium build
+    (`chromium-<PLAYWRIGHT_CHROMIUM_BUILD>`) — the ONE build-match predicate,
+    shared by the /opt reuse check AND the install idempotency guard so they can
+    never diverge on what 'the right browser is present' means."""
+    return (browsers_dir / ("chromium-" + PLAYWRIGHT_CHROMIUM_BUILD)).is_dir()
+
+
+def _opt_has_pinned_build(opt_dir: Path = None) -> bool:
+    """True iff the root-owned /opt/ms-playwright already holds the PINNED
+    chromium build (`chromium-<PLAYWRIGHT_CHROMIUM_BUILD>`). The #1048 incident
+    was exactly this being FALSE (it held chromium-1243 while the MCP needed
+    1244), so a workstation only reuses /opt when the build matches; otherwise
+    the per-user cache (always installable to the pinned build) is used."""
+    return _has_pinned_chromium_build(opt_dir or OPT_MS_PLAYWRIGHT)
+
+
+def _playwright_pinned_build_installed(cache_dir: Path = None) -> bool:
+    """True iff the browsers cache holds the PINNED chromium build — NOT merely
+    that the dir is non-empty (#1048 review-2 finding 1). #542 ran an UNPINNED
+    `npx playwright install chromium` fleet-wide, so most stream boxes ALREADY
+    have a populated `~/.cache/ms-playwright` holding a PRE-1244 build; a mere
+    non-emptiness guard (`_playwright_browsers_installed`) would SKIP the pinned
+    install on exactly those boxes, leaving the managed MCP server dead (the
+    #2420 class the fix exists for) and the push post-check red. Gating on the
+    pinned build re-installs the correct browser whenever the cache holds a
+    wrong/old one."""
+    d = cache_dir or PLAYWRIGHT_BROWSER_CACHE
+    return _has_pinned_chromium_build(d)
+
+
+def resolve_playwright_browsers_path(box_class, opt_has_pinned_build, home: Path = None) -> Path:
+    """The single source of truth for WHERE the managed chromium lives, per box
+    class (#1048). ONE resolver used by the browser install, the MCP server env,
+    the bashrc export, and the push post-check, so the four can never diverge.
+
+    - shared-stream (a no-sudo stream box): ALWAYS the per-user
+      `~/.cache/ms-playwright` — it cannot write /opt, and /opt holds a
+      mismatched, root-owned build (the drift the incident is about).
+    - workstation / controller / gk: the shared `/opt/ms-playwright` ONLY when
+      it already holds the pinned chromium build, else the per-user cache (which
+      we can always install the pinned build into) — so the build always matches
+      the pinned MCP server, on every box class.
+    """
+    home = home or Path.home()
+    per_user = home / ".cache" / "ms-playwright"
+    if box_class == "shared-stream":
+        return per_user
+    return OPT_MS_PLAYWRIGHT if opt_has_pinned_build else per_user
+
+
+def _current_box_class() -> str:
+    """This box's class marker, degrading to `workstation` when it cannot be
+    resolved (the same fail-safe direction as the marker writer)."""
+    try:
+        from watchdog.reaper import default_box_class
+        # #1048 review-2 finding 3: default_box_class() returns None on a
+        # missing/unreadable marker (no exception) — coerce to "workstation" so
+        # the docstring's promise holds and a None never slips into the resolver.
+        return default_box_class() or "workstation"
+    except Exception:
+        return "workstation"
+
+
+def resolved_browsers_path(box_class=None, home: Path = None) -> Path:
+    """Convenience: resolve the browsers path for THIS box (or an injected
+    box_class/home for tests), reading the live /opt build-match state."""
+    bc = box_class or _current_box_class()
+    return resolve_playwright_browsers_path(bc, _opt_has_pinned_build(), home=home)
+
+
+def render_playwright_mcp_server(browsers_path) -> dict:
+    """The managed user-scope MCP server entry (#1048): a PINNED
+    `@playwright/mcp` on the `chromium` browser, headless, pointed at the
+    resolved browsers path. `PLAYWRIGHT_MCP_BROWSER`/`PLAYWRIGHT_MCP_HEADLESS`
+    are set in `env` as belt-and-suspenders alongside the authoritative CLI
+    flags, so the server still selects chromium even if a future @playwright/mcp
+    changes its flag parsing."""
+    return {
+        "command": "npx",
+        "args": ["-y", "@playwright/mcp@" + PLAYWRIGHT_MCP_VERSION,
+                 "--browser", "chromium", "--headless"],
+        "env": {
+            "PLAYWRIGHT_BROWSERS_PATH": str(browsers_path),
+            "PLAYWRIGHT_MCP_BROWSER": "chromium",
+            "PLAYWRIGHT_MCP_HEADLESS": "true",
+        },
+    }
+
+
+def reconcile_playwright_mcp_server(claude_json: dict, browsers_path) -> dict:
+    """Pure: return a NEW ~/.claude.json dict with the managed `playwright`
+    user-scope MCP server set (when PLAYWRIGHT_MANAGED), every other top-level
+    key and every other MCP server preserved untouched. Idempotent."""
+    result = dict(claude_json)
+    # #1048 review-2 finding 2: coerce a non-dict `mcpServers` (a live
+    # ~/.claude.json with `"mcpServers": null` or a stray string) to {} rather
+    # than letting `dict(...)` raise — the raise propagated OUTSIDE the caller's
+    # try/except into cmd_install's "(non-fatal)" swallow, leaving the box
+    # unprovisioned SILENTLY while the already-written marker let the postcheck
+    # false-pass on the browser alone.
+    raw_servers = result.get("mcpServers")
+    servers = dict(raw_servers) if isinstance(raw_servers, dict) else {}
+    if PLAYWRIGHT_MANAGED:
+        servers[PLAYWRIGHT_MCP_SERVER_NAME] = render_playwright_mcp_server(browsers_path)
+    result["mcpServers"] = servers
+    return result
 
 
 def caveman_mode_or_default(existing) -> str:
@@ -326,11 +497,11 @@ def reconcile_managed_plugins(settings: dict) -> dict:
     marketplace registered at all otherwise; see MARKETPLACE_SOURCES). Every
     other key preserved untouched; idempotent.
 
-    #542: playwright is force-ENABLED here (it is back in MANAGED_PLUGINS),
-    which actively FLIPS the stale user-scope `false` every #415-pushed box
-    carries back to true on the next push — making the availability
-    restoration take effect fleet-wide, not only on a fresh box (symmetric to
-    how #415's force-disable flipped the stale true off)."""
+    #1048 (reverses the #542 line that used to be here): playwright is now
+    force-DISABLED (it is in MANAGED_DISABLED_PLUGINS, not MANAGED_PLUGINS),
+    which actively FLIPS the stale user-scope `true` every #542-pushed box
+    carries back to false on the next push — so the broken chrome-channel plugin
+    server stops loading fleet-wide, replaced by the managed pinned MCP server."""
     import airuleset
     result = dict(settings)
     enabled = dict(result.get("enabledPlugins", {}))
@@ -597,38 +768,136 @@ def _playwright_browsers_installed(cache_dir: Path = None) -> bool:
     d = cache_dir or PLAYWRIGHT_BROWSER_CACHE
     return d.is_dir() and any(d.iterdir())
 
-def ensure_playwright_browsers(cache_dir: Path = None):
-    """Best-effort, time-boxed, non-fatal `npx playwright install chromium`
-    (#158 review finding): enabling the plugin alone does NOT pull the
-    actual browser binaries — measured live, three fleet accounts had node
-    and the plugin enabled but an EMPTY browser cache, so every real browser
-    call would fail with "Executable doesn't exist" until someone ran this
-    by hand. No sudo needed (a per-user cache under $HOME), so this runs
-    even on the sudo-less subdev stream accounts. A no-op when the baseline
-    does not include Playwright, or the cache is already populated. #542:
-    keyed on MANAGED_PLUGINS — Playwright is a force-enabled baseline plugin,
-    so its browser cache must be provisioned on every box (a plugin that is
-    enabled but has no browser binaries fails every browser call with
-    "Executable doesn't exist")."""
+def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None):
+    """Best-effort, time-boxed, non-fatal install of the PINNED chromium
+    (#158/#1048): enabling a browser MCP alone does NOT pull the browser
+    binaries — measured live, fleet accounts had node + the server but an EMPTY
+    cache, so every browser call failed "Executable doesn't exist" until someone
+    ran this by hand. #1048: the version is now PINNED (`playwright@
+    PLAYWRIGHT_PW_VERSION`, never `@latest`) so the installed chromium build
+    (1244) matches the pinned managed MCP server, and the target dir is the
+    RESOLVED browsers path (per-user `~/.cache/ms-playwright` on a no-sudo
+    shared-stream box, never the root-owned /opt with its mismatched build).
+
+    A no-op when `PLAYWRIGHT_MANAGED` is False, or the resolved cache already
+    holds the PINNED build (idempotent — once per user, never per session,
+    respecting the shared-box disk doctrine; a cache holding a WRONG/old build
+    re-installs the pinned one, #1048 review-2 finding 1). Skips LOUDLY when
+    `npx` is absent (nothing to install with) rather than failing the install."""
     import subprocess
-    if PLAYWRIGHT_PLUGIN_KEY not in MANAGED_PLUGINS:
+    if not PLAYWRIGHT_MANAGED:
         return
-    if _playwright_browsers_installed(cache_dir):
+    browsers_path = cache_dir or resolved_browsers_path(box_class)
+    # #1048 review-2 finding 1: gate on the PINNED build, not mere cache
+    # non-emptiness — a #542-era cache holding an OLD build must re-install 1244.
+    if _playwright_pinned_build_installed(browsers_path):
         return
+    if shutil.which("npx") is None:
+        print("    ⚠ Playwright browsers missing and npx is absent — cannot "
+              "install chromium; once npx exists run: PLAYWRIGHT_BROWSERS_PATH=%s "
+              "npx -y playwright@%s install chromium"
+              % (browsers_path, PLAYWRIGHT_PW_VERSION), file=sys.stderr)
+        return
+    env = dict(_claude_cli_env())
+    env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_path)
     try:
+        Path(browsers_path).mkdir(parents=True, exist_ok=True)
         r = subprocess.run(
-            ["npx", "--yes", "playwright", "install", "chromium"],
-            capture_output=True, text=True, timeout=300, env=_claude_cli_env())
+            ["npx", "--yes", "playwright@" + PLAYWRIGHT_PW_VERSION, "install", "chromium"],
+            capture_output=True, text=True, timeout=300, env=env)
         if r.returncode == 0:
-            print("    Playwright browsers: installed chromium (npx playwright install)")
+            print("    Playwright browsers: installed chromium %s into %s "
+                  "(pinned playwright@%s)"
+                  % (PLAYWRIGHT_CHROMIUM_BUILD, browsers_path, PLAYWRIGHT_PW_VERSION))
         else:
             print("    ⚠ Playwright browsers missing and auto-install failed "
-                  "(rc=%d): %s\n    Run manually: npx playwright install chromium"
-                  % (r.returncode, (r.stderr or r.stdout).strip()[:200]),
-                  file=sys.stderr)
+                  "(rc=%d): %s\n    Run manually: PLAYWRIGHT_BROWSERS_PATH=%s "
+                  "npx -y playwright@%s install chromium"
+                  % (r.returncode, (r.stderr or r.stdout).strip()[:200],
+                     browsers_path, PLAYWRIGHT_PW_VERSION), file=sys.stderr)
     except Exception as e:
         print("    ⚠ Playwright browsers missing and auto-install skipped (%s) — "
-              "run manually: npx playwright install chromium" % e, file=sys.stderr)
+              "run manually: PLAYWRIGHT_BROWSERS_PATH=%s npx -y playwright@%s "
+              "install chromium" % (e, browsers_path, PLAYWRIGHT_PW_VERSION),
+              file=sys.stderr)
+
+
+def reconcile_playwright_mcp_file(claude_json_path: Path = None, box_class: str = None) -> bool:
+    """#1048: idempotently write the managed `playwright` MCP server into
+    ~/.claude.json (top-level `mcpServers`, the user scope Claude Code reads at
+    session start) AND record the resolved browsers path in the marker file the
+    push post-check reads (`cli_remote._playwright_chromium_postcheck`).
+
+    Best-effort + non-fatal, like every other reconcile step here: a write
+    failure only loses the managed server for this run and MUST NEVER crash the
+    install (returns False, the caller latches it into a non-zero exit; a
+    concurrent Claude Code write to ~/.claude.json can at worst be a lost update
+    that self-heals on the next push — the atomic replace prevents corruption).
+    Returns True when nothing failed. A no-op returning True when
+    PLAYWRIGHT_MANAGED is False."""
+    if not PLAYWRIGHT_MANAGED:
+        return True
+    import tempfile
+    path = claude_json_path or (Path.home() / ".claude.json")
+    browsers_path = resolved_browsers_path(box_class)
+    ok = True
+
+    # 1. marker file for the push post-check (best-effort, does not gate).
+    try:
+        PLAYWRIGHT_BROWSERS_PATH_MARKER.parent.mkdir(parents=True, exist_ok=True)
+        PLAYWRIGHT_BROWSERS_PATH_MARKER.write_text(str(browsers_path) + "\n", encoding="utf-8")
+    except OSError as e:
+        print("    ⚠ could not write playwright browsers-path marker (%s)" % e,
+              file=sys.stderr)
+
+    # 2. ~/.claude.json managed server (atomic write, only when changed).
+    try:
+        raw = path.read_text(encoding="utf-8") if path.exists() else ""
+    except OSError as e:
+        print("    ⚠ could not read ~/.claude.json for the playwright MCP server (%s)"
+              % e, file=sys.stderr)
+        return False
+    try:
+        data = json.loads(raw) if raw.strip() else {}
+    except json.JSONDecodeError:
+        print("    ⚠ ~/.claude.json is invalid JSON — skipped the playwright MCP server",
+              file=sys.stderr)
+        return False
+    if not isinstance(data, dict):
+        print("    ⚠ ~/.claude.json is not a JSON object — skipped the playwright MCP server",
+              file=sys.stderr)
+        return False
+    # Compare PARSED dicts, not formatted strings: ~/.claude.json is owned by
+    # Claude Code, whose own formatting may differ from json.dumps(indent=2) — a
+    # string compare would then rewrite it on EVERY push (needless churn + a
+    # concurrent-write window each time). A dict compare is idempotent whenever
+    # the managed server is already present and identical, regardless of layout.
+    new_data = reconcile_playwright_mcp_server(data, browsers_path)
+    if new_data == data:
+        return ok
+    # ensure_ascii=False: ~/.claude.json is written by Claude Code with LITERAL
+    # UTF-8 (prompt/history/cache text) — the default \uXXXX escaping would
+    # re-encode all of it on our write, fighting Claude Code's own writer.
+    new_str = json.dumps(new_data, indent=2, ensure_ascii=False) + "\n"
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        os.write(fd, new_str.encode())
+        os.close(fd)
+        os.replace(tmp, str(path))
+        tmp = None
+        print("    playwright MCP server: pinned @playwright/mcp@%s --browser "
+              "chromium --headless (%s)" % (PLAYWRIGHT_MCP_VERSION, browsers_path))
+    except OSError as e:
+        print("    ⚠ could not write the playwright MCP server to ~/.claude.json (%s)"
+              % e, file=sys.stderr)
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:  # airuleset:script-ok best-effort orphan cleanup
+                pass
+        ok = False
+    return ok
 
 def _reconcile_settings_file():
     """Read SETTINGS_JSON, apply reconcile_managed_plugins(), write back only
@@ -668,10 +937,10 @@ def setup_managed_plugins() -> bool:
        marketplace only reproduces the "not found in marketplace" failure,
        so a failed registration skips that plugin's install attempt
        entirely rather than trying anyway.
-    (#542: playwright is a force-ENABLED baseline plugin again, so a `claude
-    plugin install` that re-enables it is the DESIRED end state — the pre-#542
-    second reconcile that flipped an install-re-enabled OPTIONAL key back OFF
-    is gone with the OPTIONAL tier it existed to protect.)
+    (#1048: playwright is NO LONGER a baseline plugin — it is force-DISABLED
+    (MANAGED_DISABLED_PLUGINS) and replaced by the managed pinned MCP server
+    provisioned separately by provision_playwright_mcp(); this function installs
+    only the remaining MANAGED_PLUGINS baseline (superpowers).)
     Returns True iff nothing REQUIRED failed (marketplace registration and
     install, for every plugin whose registry entry was missing) — a still-failing
     plugin install after correct marketplace registration is a genuine
@@ -744,5 +1013,26 @@ def setup_managed_plugins() -> bool:
                   f"claude plugin install {key}", file=sys.stderr)
             ok = False
 
-    ensure_playwright_browsers()
+    # #1048: the managed Playwright MCP provisioning (browser install +
+    # ~/.claude.json server + marker) is its OWN cmd_install step
+    # (provision_playwright_mcp), deliberately NOT folded in here — so the
+    # plugin-install path stays free of ~/.claude.json / browser-cache side
+    # effects (test hygiene: this function's tests must not write the real home).
     return ok
+
+
+def provision_playwright_mcp(box_class: str = None) -> bool:
+    """#1048: provision the managed Playwright MCP end-to-end on this box — the
+    #542-availability invariant delivered by a working, version-PINNED server
+    instead of the dead chrome-channel plugin. Two steps: (1) install the pinned
+    chromium into the resolved browsers path (best-effort/non-fatal, as before);
+    (2) write the managed pinned `playwright` MCP server + the browsers-path
+    marker into ~/.claude.json. A genuine server-reconcile failure returns False
+    → the caller (cmd_install) latches a non-zero exit (script-failure-policy),
+    so a box that never got the working server is a LOUD failure, never a silent
+    "Install complete.". A no-op returning True when PLAYWRIGHT_MANAGED is
+    False."""
+    if not PLAYWRIGHT_MANAGED:
+        return True
+    ensure_playwright_browsers(box_class=box_class)
+    return reconcile_playwright_mcp_file(box_class=box_class)

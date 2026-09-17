@@ -56,41 +56,37 @@ class TestReconcileManagedPlugins(TestCase):
         self.assertIn("superpowers@claude-plugins-official",
                       airuleset.MANAGED_PLUGINS)
 
-    def test_playwright_is_in_the_baseline(self):
-        # #542 REVERTS #415's default-off: Playwright is a force-enabled
-        # baseline plugin again. Force-disabling it fleet-wide made streams
-        # report "nemám playwright" and skip the UNTOUCHABLE browser
-        # verification (autonomous-verification.md). The resident-Chrome cost
-        # #415 cited is empirically LAZY (measured live on dev1: 6 running
-        # @playwright/mcp node servers but only 1 Chrome tree — Chrome spawns
-        # only on the first browser call, only in the session that makes it),
-        # so enabling everywhere restores availability with NO resident
-        # browser in browser-free projects, only the cheap node MCP server.
-        # The old `test_playwright_is_optional_not_baseline` asserted the
-        # opposite; this is a deliberate policy inversion, justified here.
-        self.assertIn("playwright@claude-plugins-official",
-                      airuleset.MANAGED_PLUGINS)
+    def test_playwright_replaced_by_managed_mcp_server_not_baseline_plugin(self):
+        # #1048 REVERSES the #542 mechanism (not its intent): the plugin's OWN
+        # .mcp.json defaults to the dead `chrome` channel (root-only Google
+        # Chrome), so it is DEAD on every no-sudo stream box. It is no longer a
+        # force-enabled baseline plugin — it is force-DISABLED and REPLACED by a
+        # managed, version-pinned user-scope `playwright` MCP server (--browser
+        # chromium). #542's availability invariant is preserved by that managed
+        # server (which, unlike the plugin, works on a no-sudo box); only the
+        # delivery MECHANISM moved off the plugin.
+        pw = "playwright@claude-plugins-official"
+        self.assertNotIn(pw, airuleset.MANAGED_PLUGINS)
+        self.assertIn(pw, airuleset.MANAGED_DISABLED_PLUGINS)
+        self.assertIs(airuleset.PLAYWRIGHT_MANAGED, True)
 
-    def test_playwright_is_force_enabled_in_user_scope(self):
-        # #542: reconcile writes playwright True (force-enabled fleet-wide),
-        # so a fresh session in ANY managed project has the browser MCP
-        # available with no per-project opt-in step.
+    def test_playwright_plugin_force_disabled_in_user_scope(self):
+        # #1048: reconcile writes the broken chrome-channel plugin FALSE so its
+        # dead server never loads alongside the managed pinned MCP server.
         out = airuleset.reconcile_managed_plugins({})
         pw = "playwright@claude-plugins-official"
-        # assertIs(..., True), not assertTrue (mirrors the #415 F5 rationale):
-        # the value must be the JSON literal true, not any truthy stand-in.
-        self.assertIs(out["enabledPlugins"][pw], True)
+        # assertIs(..., False), not assertFalse: the value must be the JSON
+        # literal false, not any falsy stand-in.
+        self.assertIs(out["enabledPlugins"][pw], False)
 
-    def test_reconcile_flips_a_stale_disabled_false(self):
-        # #542 headline acceptance (symmetric to #415's own flip test): every
-        # box pushed under #415 carries a stale `playwright: false`. reconcile
-        # must actively FLIP it back to True, not merely leave it — otherwise
-        # the restoration never takes effect on the exact fleet it exists to
-        # fix (live-confirmed on dev1: ~/.claude/settings.json had playwright
-        # => False before this change).
+    def test_reconcile_flips_a_stale_enabled_true_to_false(self):
+        # #1048 (inverse of #542's own flip test): a box pushed under #542
+        # carries a stale `playwright: true`. reconcile must actively FLIP it to
+        # False, so the broken chrome-channel server stops loading on the exact
+        # fleet the fix exists for.
         pw = "playwright@claude-plugins-official"
-        out = airuleset.reconcile_managed_plugins({"enabledPlugins": {pw: False}})
-        self.assertIs(out["enabledPlugins"][pw], True)
+        out = airuleset.reconcile_managed_plugins({"enabledPlugins": {pw: True}})
+        self.assertIs(out["enabledPlugins"][pw], False)
 
     def test_preserves_unrelated_keys_and_plugins(self):
         settings = {"model": "sonnet",
@@ -349,9 +345,21 @@ class TestInstallWiresManagedPlugins(TestCase):
             if "plugin" in src and "install" in src:
                 self.assertIn("env=_claude_cli_env()", src, fn.__name__)
 
-    def test_setup_managed_plugins_calls_ensure_playwright_browsers(self):
+    def test_provision_playwright_mcp_calls_ensure_playwright_browsers(self):
+        # #1048: the browser install moved OUT of setup_managed_plugins (which
+        # must stay free of ~/.claude.json / browser-cache side effects) into
+        # its own provision_playwright_mcp step; it still runs on every install.
+        src = inspect.getsource(airuleset.provision_playwright_mcp)
+        self.assertIn("ensure_playwright_browsers(", src)
+        self.assertIn("reconcile_playwright_mcp_file(", src)
+
+    def test_setup_managed_plugins_has_no_playwright_fs_side_effects(self):
+        # #1048 hygiene: setup_managed_plugins must NOT write ~/.claude.json or
+        # provision the browser cache (that is provision_playwright_mcp's job) —
+        # otherwise every plugin test that calls it mutates the real home.
         src = inspect.getsource(airuleset.setup_managed_plugins)
-        self.assertIn("ensure_playwright_browsers()", src)
+        self.assertNotIn("reconcile_playwright_mcp_file(", src)
+        self.assertNotIn("ensure_playwright_browsers(", src)
 
 
 class TestPlaywrightBrowsers(TestCase):
@@ -365,8 +373,14 @@ class TestPlaywrightBrowsers(TestCase):
         return Path(tempfile.mkdtemp())
 
     def _populated_dir(self):
+        # populated but with a WRONG/old build (the #542-era drift case)
         d = Path(tempfile.mkdtemp())
         (d / "chromium-1234").mkdir()
+        return d
+
+    def _pinned_build_dir(self):
+        d = Path(tempfile.mkdtemp())
+        (d / ("chromium-" + cli_caveman_plugins.PLAYWRIGHT_CHROMIUM_BUILD)).mkdir()
         return d
 
     def test_absent_cache_is_not_installed(self):
@@ -381,51 +395,83 @@ class TestPlaywrightBrowsers(TestCase):
     def test_populated_cache_dir_is_installed(self):
         self.assertTrue(airuleset._playwright_browsers_installed(self._populated_dir()))
 
-    def test_no_op_when_playwright_not_in_the_baseline(self):
-        # #542: the guard keys on MANAGED_PLUGINS — a genuine no-op needs
-        # playwright absent from the baseline.
-        with m.patch.object(cli_caveman_plugins, "MANAGED_PLUGINS", ("superpowers@claude-plugins-official",)), \
+    def test_no_op_when_playwright_not_managed(self):
+        # #1048: the guard now keys on PLAYWRIGHT_MANAGED — a genuine no-op
+        # needs the managed Playwright turned off (the one-flag opt-out).
+        with m.patch.object(cli_caveman_plugins, "PLAYWRIGHT_MANAGED", False), \
                 m.patch("subprocess.run") as run:
             airuleset.ensure_playwright_browsers(self._empty_dir())
         run.assert_not_called()
 
-    def test_installs_when_playwright_in_the_baseline(self):
-        # #542: playwright is a force-enabled baseline plugin — its browser
-        # cache must be provisioned on every box.
-        with m.patch.object(cli_caveman_plugins, "MANAGED_PLUGINS",
-                            ("superpowers@claude-plugins-official",
-                             "playwright@claude-plugins-official")), \
+    def test_installs_when_managed(self):
+        # #1048: managed Playwright provisions the pinned chromium on every box.
+        with m.patch("shutil.which", return_value="/usr/bin/npx"), \
                 m.patch("subprocess.run", return_value=m.Mock(returncode=0)) as run:
             airuleset.ensure_playwright_browsers(self._empty_dir())
         run.assert_called_once()
 
-    def test_no_op_when_already_populated(self):
+    def test_skips_loudly_when_npx_absent(self):
+        # #1048: a box with NO npx cannot install chromium — skip LOUDLY, never
+        # call subprocess and never fail the install.
+        out = StringIO()
+        with m.patch("shutil.which", return_value=None), \
+                m.patch("subprocess.run") as run, \
+                m.patch("sys.stderr", out):
+            airuleset.ensure_playwright_browsers(self._empty_dir())   # must not raise
+        run.assert_not_called()
+        self.assertIn("npx is absent", out.getvalue())
+
+    def test_no_op_when_pinned_build_present(self):
+        # #1048 review-2 finding 1: a no-op requires the PINNED build present,
+        # not mere cache non-emptiness.
         with m.patch("subprocess.run") as run:
-            airuleset.ensure_playwright_browsers(self._populated_dir())
+            airuleset.ensure_playwright_browsers(self._pinned_build_dir())
         run.assert_not_called()
 
-    def test_installs_when_cache_is_missing(self):
-        with m.patch("subprocess.run", return_value=m.Mock(returncode=0)) as run:
-            airuleset.ensure_playwright_browsers(self._empty_dir())
+    def test_reinstalls_when_cache_has_a_wrong_build(self):
+        # #1048 review-2 finding 1 (the headline bug): a #542-era cache holding
+        # an OLD build (chromium-1234) must NOT be treated as "done" — it must
+        # re-install the pinned build, or the managed MCP server stays dead.
+        with m.patch("shutil.which", return_value="/usr/bin/npx"), \
+                m.patch("subprocess.run", return_value=m.Mock(returncode=0)) as run:
+            airuleset.ensure_playwright_browsers(self._populated_dir())
         run.assert_called_once()
         argv = run.call_args[0][0]
-        self.assertEqual(argv, ["npx", "--yes", "playwright", "install", "chromium"])
-        self.assertIn("env", run.call_args.kwargs)
+        self.assertEqual(argv[2], "playwright@" + cli_caveman_plugins.PLAYWRIGHT_PW_VERSION)
+
+    def test_installs_the_pinned_playwright_into_the_resolved_path(self):
+        # #1048: the version is PINNED (never @latest) and the target dir is
+        # exported via PLAYWRIGHT_BROWSERS_PATH so the installed chromium build
+        # matches the pinned managed MCP server.
+        d = self._empty_dir()
+        with m.patch("shutil.which", return_value="/usr/bin/npx"), \
+                m.patch("subprocess.run", return_value=m.Mock(returncode=0)) as run:
+            airuleset.ensure_playwright_browsers(d)
+        run.assert_called_once()
+        argv = run.call_args[0][0]
+        self.assertEqual(argv, ["npx", "--yes",
+                                "playwright@" + cli_caveman_plugins.PLAYWRIGHT_PW_VERSION,
+                                "install", "chromium"])
+        self.assertNotIn("@latest", argv[2])
+        env = run.call_args.kwargs["env"]
+        self.assertEqual(env["PLAYWRIGHT_BROWSERS_PATH"], str(d))
 
     def test_install_failure_is_loud_but_non_fatal(self):
         out = StringIO()
-        with m.patch("subprocess.run",
-                     return_value=m.Mock(returncode=1, stderr="boom", stdout="")), \
+        with m.patch("shutil.which", return_value="/usr/bin/npx"), \
+                m.patch("subprocess.run",
+                        return_value=m.Mock(returncode=1, stderr="boom", stdout="")), \
                 m.patch("sys.stderr", out):
             airuleset.ensure_playwright_browsers(self._empty_dir())   # must not raise
-        self.assertIn("playwright install chromium", out.getvalue())
+        self.assertIn("install chromium", out.getvalue())
 
     def test_install_exception_is_non_fatal(self):
         out = StringIO()
-        with m.patch("subprocess.run", side_effect=FileNotFoundError("npx")), \
+        with m.patch("shutil.which", return_value="/usr/bin/npx"), \
+                m.patch("subprocess.run", side_effect=FileNotFoundError("npx")), \
                 m.patch("sys.stderr", out):
             airuleset.ensure_playwright_browsers(self._empty_dir())   # must not raise
-        self.assertIn("playwright install chromium", out.getvalue())
+        self.assertIn("install chromium", out.getvalue())
 
 
 class TestMarketplaceSources(TestCase):
@@ -561,9 +607,10 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
         self.assertLess(calls.index(add_calls[0]), calls.index(install_calls[0]),
                          "marketplace add must run BEFORE the first install attempt")
 
-    def test_playwright_is_installed(self):
-        # #542: playwright is a force-enabled baseline plugin — a fresh box
-        # with no registry installs it (so the browser MCP works everywhere).
+    def test_playwright_plugin_is_not_installed(self):
+        # #1048: the broken chrome-channel plugin is force-DISABLED, so
+        # setup_managed_plugins must NEVER `claude plugin install` it (the
+        # working browser MCP is the managed pinned server, not the plugin).
         calls = []
 
         def fake_run(argv, **kwargs):
@@ -577,15 +624,15 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
                 m.patch("subprocess.run", side_effect=fake_run):
             airuleset.setup_managed_plugins()
         installed = {c[3] for c in calls if c[:3] == ["claude", "plugin", "install"]}
-        self.assertIn("playwright@claude-plugins-official", installed)
+        self.assertNotIn("playwright@claude-plugins-official", installed)
+        # superpowers (the still-managed baseline) IS installed.
+        self.assertIn("superpowers@claude-plugins-official", installed)
 
-    def test_a_fresh_install_keeps_playwright_enabled_after_plugin_install(self):
-        # #542: playwright is force-ENABLED (back in MANAGED_PLUGINS), so a
-        # real `claude plugin install <key>` writing enabledPlugins[<key>]=true
-        # is now the DESIRED end state — there is no second reconcile to flip
-        # it back off (the #415 OPTIONAL tier that needed it is gone). This
-        # simulates the install side effect and asserts playwright ends
-        # ENABLED, alongside superpowers, through the whole sequence.
+    def test_a_fresh_install_disables_the_playwright_plugin(self):
+        # #1048 (inverse of #542): the broken chrome-channel plugin must end
+        # force-DISABLED in settings.json so its dead server never loads
+        # alongside the managed pinned MCP server, while superpowers stays
+        # enabled through the same sequence.
         d = self._empty_claude_dir()
         settings_path = d / "settings.json"
         pw = "playwright@claude-plugins-official"
@@ -604,9 +651,9 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
                 m.patch("subprocess.run", side_effect=fake_run):
             airuleset.setup_managed_plugins()
         final = json.loads(settings_path.read_text())
-        # playwright must end ENABLED (force-enabled baseline; no re-disable).
-        self.assertIs(final["enabledPlugins"][pw], True)
-        # superpowers is meant to stay enabled through the same sequence.
+        # playwright must end DISABLED (force-disabled; the reconcile runs last).
+        self.assertIs(final["enabledPlugins"][pw], False)
+        # superpowers stays enabled through the same sequence.
         self.assertIs(final["enabledPlugins"]["superpowers@claude-plugins-official"], True)
 
     def test_a_failed_marketplace_registration_skips_the_install_and_fails(self):
@@ -634,15 +681,13 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
 
     def test_already_built_plugins_never_call_marketplace_add(self):
         d = Path(tempfile.mkdtemp())
-        # #542: every MANAGED_PLUGINS plugin (incl. playwright) must be
-        # registry-built for the no-marketplace-add fast path.
+        # every MANAGED_PLUGINS plugin already registry-built => the
+        # no-marketplace-add fast path (setup_managed_plugins no longer touches
+        # Playwright — that moved to provision_playwright_mcp, #1048).
         _write_plugin_registry(d, airuleset.MANAGED_PLUGINS)
         settings_path = d / "settings.json"
-        playwright_cache = Path(tempfile.mkdtemp())
-        (playwright_cache / "chromium-1234").mkdir()
         with m.patch.object(airuleset, "CLAUDE_DIR", d), \
                 m.patch.object(airuleset, "SETTINGS_JSON", settings_path), \
-                m.patch.object(cli_caveman_plugins, "PLAYWRIGHT_BROWSER_CACHE", playwright_cache), \
                 m.patch("subprocess.run") as run:
             ok = airuleset.setup_managed_plugins()
         self.assertTrue(ok)
@@ -762,8 +807,8 @@ class TestSetupManagedPluginsRegistersBeforeInstall(TestCase):
             set(airuleset.MANAGED_PLUGINS),
             "a settings-enabled + registry-absent plugin must trigger a "
             "real install, even with a stale cache on disk and settings."
-            "json already saying enabled (#542: playwright is a baseline "
-            "plugin again)")
+            "json already saying enabled (superpowers is the sole managed "
+            "baseline plugin after #1048)")
 
 
 def _write_plugin_registry_with_paths(claude_dir: Path, key_path_map: dict):

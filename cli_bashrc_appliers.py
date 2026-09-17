@@ -856,20 +856,25 @@ def apply_owner_vps_ssh_attach(bashrc_path: Path = None, user: str = None,
 # --- #950: shared-stream managed env vars ------------------------------------
 # Separate marker block from ultracode (whose invariant is "thin functions, no
 # literals" — cli_bashrc_appliers.py:80-81). This block carries env vars that
-# apply ONLY to shared-stream boxes (subdev). The guard inside checks for the
-# /opt/ms-playwright directory so the export is a no-op when the shared install
-# hasn't been provisioned.
+# apply ONLY to shared-stream boxes (subdev). #1048 reversed the original #950
+# `/opt`-if-exists guard: the block now unconditionally exports the per-user
+# cache (the no-sudo box cannot write /opt and /opt held a mismatched build).
 STREAM_ENV_MARK_START = "# >>> airuleset: shared-stream env >>>"
 STREAM_ENV_MARK_END = "# <<< airuleset: shared-stream env <<<"
 
 STREAM_ENV_BASHRC_BLOCK = (
     f"{STREAM_ENV_MARK_START}\n"
-    '# #950: shared Playwright browsers — one root-owned read-only copy.\n'
-    '# PLAYWRIGHT_BROWSERS_PATH tells Playwright (and its MCP plugin) to\n'
-    '# use /opt/ms-playwright instead of per-user ~/.cache/ms-playwright.\n'
-    'if [ -d /opt/ms-playwright ]; then\n'
-    '    export PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright\n'
-    'fi\n'
+    '# #1048: a shared-stream box has NO sudo, and the root-owned '
+    '/opt/ms-playwright\n'
+    '# holds a MISMATCHED chromium build (1243 vs the pinned 1244), so an\n'
+    '# interactive `playwright` and any @playwright/mcp instance must use the\n'
+    '# per-user cache that airuleset installs the PINNED chromium into. (#950\n'
+    "# pointed this at /opt — the drift the incident is about.)\n"
+    '# PLAYWRIGHT_MCP_BROWSER pins any @playwright/mcp to chromium so the dead\n'
+    '# `chrome` channel is never required.\n'
+    'export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"\n'
+    'export PLAYWRIGHT_MCP_BROWSER=chromium\n'
+    'export PLAYWRIGHT_MCP_HEADLESS=true\n'
     f"{STREAM_ENV_MARK_END}"
 )
 
