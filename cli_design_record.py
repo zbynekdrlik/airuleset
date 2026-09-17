@@ -31,6 +31,25 @@ import cli_authorship
 DESIGN_STEM = "Design"
 
 
+def _log_stamp(stamp, cwd, issue, url):
+    """Append every design-record post to ~/.claude/design-by-gate.log (the same
+    log the gates use) — cwd + stamp + url. Auditability for the cwd-spoof
+    residual (#1061 review): design-record derives role/model from os.getcwd(),
+    so a worker that `cd`s into the main checkout could stamp `Design-by: main`;
+    the dispatch gate stays the AUTHORITY, but this log lets a reconcile see
+    WHERE each Design-by: main was actually posted from. Never raises."""
+    try:
+        path = os.path.join(os.path.expanduser("~"), ".claude",
+                            "design-by-gate.log")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("%s\tDESIGN-RECORD\t%s\t#%s\t%s\t%s\n" % (
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                cwd or "", issue, stamp, url or "-"))
+    except OSError:
+        return
+
+
 def _log_marker_error(repo_key, issue, exc):
     """Best-effort diagnostic for a marker-write failure (the post already
     landed; the local marker is only a convenience for the worker's commit
@@ -69,7 +88,7 @@ def validate_body(raw_body):
     line, an `Architektúra:` section (only when non-trivial, #428), and a
     `Shared-benefit:` line (#877, unconditional). Returns every failing reason
     so the caller surfaces them all at once, never a multi-round discovery."""
-    import design_gate as dg
+    from gates import design as dg
     reasons = []
     ok_design, r_design = dg.classify_design_comment(raw_body)
     if not ok_design:
@@ -142,10 +161,11 @@ def post_and_record(issue, repo, raw_body, cwd, runner=None, projects_dir=None,
     if rc != 0:
         return False, "gh issue comment failed: %s" % (err or out or "rc=%d" % rc), None
     url = out.strip()
+    _log_stamp(stamp, cwd, issue, url)
     repo_key = _repo_key(repo, cwd)
     if repo_key:
         try:
-            import design_gate as dg
+            from gates import design as dg
             dg.write_marker(repo_key, issue, url, "design-record", kind="design")
         except Exception as exc:
             _log_marker_error(repo_key, issue, exc)

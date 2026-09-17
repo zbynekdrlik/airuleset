@@ -23,10 +23,17 @@ from gates import read_payload, command_of, field_of, emit_block_stderr, allow
 
 DESIGN_BY_LOG = "design-by-gate.log"
 
-# The `gh issue comment` invocation prefilter -- the SAME shape
-# post-record-design-comment.sh uses (optional -R/--repo between gh and issue).
+# A comment-POST invocation prefilter. TWO shapes (#1061 review):
+#   1. `gh issue comment` (optional -R/--repo, the post-record-design-comment.sh
+#      shape).
+#   2. `gh api …issues/<N>/comments` — the REST POST the dispatch gate itself
+#      READS from (gates.designdispatch._fetch_comment_bodies), so a spoof there
+#      is directly trusted; it MUST be gated too. A bare GET on that path carries
+#      no `Design-by: main` body, so the body-signature check below never fires
+#      for a read.
 _GH_COMMENT_RE = re.compile(
-    r"\bgh\s+(?:(?:-R[=\s]*|--repo[=\s]+)\S+\s+)?issue\s+comment\b")
+    r"\bgh\s+(?:(?:-R[=\s]*|--repo[=\s]+)\S+\s+)?issue\s+comment\b"
+    r"|\bgh\s+api\b[^\n]*?/issues/[0-9]+/comments\b")
 
 # `Design-by: main` (bold/bullet tolerant), the spoof signature. Deliberately
 # does NOT match `Design-by: worker` (an honest worker stamp is fine).
@@ -35,9 +42,10 @@ _DESIGN_BY_MAIN_RE = re.compile(
 
 _BYPASS_RE = re.compile(r"airuleset:design-by-ok\s*(?P<reason>.*)", re.IGNORECASE)
 
-# `-F <path>` / `--body-file <path>` (glued or separated), the file whose content
-# is the comment body. `-` (stdin) is not a file and is skipped.
-_BODY_FILE_RE = re.compile(r"(?:-F|--body-file)[=\s]+(?P<path>[^\s'\"|;&]+)")
+# `-F <path>` / `--body-file <path>`, the file whose content is the comment body.
+# `[=\s]*` (not `[=\s]+`) so the GLUED short-flag form `-F<path>` (valid gh/cobra
+# syntax) is caught too (#1061 review). `-` (stdin) is not a file and is skipped.
+_BODY_FILE_RE = re.compile(r"(?:-F|--body-file)[=\s]*(?P<path>[^\s'\"|;&]+)")
 
 
 def _log(kind, cwd, extra=""):
@@ -82,7 +90,7 @@ def _body_texts(cmd, cwd):
 def evaluate(cmd, cwd):
     """('allow'|'block', reason). Pure of process exit for tests."""
     if not cmd or not _GH_COMMENT_RE.search(cmd):
-        return "allow", "not a gh issue comment"
+        return "allow", "not a comment post (gh issue comment / gh api …/comments)"
     if _BYPASS_RE.search(cmd):
         _log("BYPASS", cwd, _BYPASS_RE.search(cmd).group("reason").strip())
         return "allow", "design-by-ok bypass (logged)"
@@ -90,7 +98,7 @@ def evaluate(cmd, cwd):
         return "allow", "not a lane worktree cwd (main may stamp Design-by: main)"
     for text in _body_texts(cmd, cwd):
         if _DESIGN_BY_MAIN_RE.search(text):
-            return "block", "a lane worker's gh issue comment carries `Design-by: main`"
+            return "block", "a lane worker's comment post carries `Design-by: main`"
     return "allow", "no Design-by: main in a worker comment"
 
 

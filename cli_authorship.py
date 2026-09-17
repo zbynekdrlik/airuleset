@@ -41,8 +41,11 @@ def authorship_role(cwd):
     except Exception:
         resolved = raw
     for candidate in (raw, resolved):
-        # Trailing "/" so a cwd that ENDS at "…/.claude/worktrees" (no lane
-        # segment yet) is not misread as a lane.
+        # Append "/" before the substring test so the bare `…/.claude/worktrees`
+        # directory itself also matches WORKTREE_MARKER -> classified "worker".
+        # This errs SAFE: a stray `Design-by: main` posted from that dir is
+        # treated as a worker's and blocked (the fail-closed direction), which
+        # is what we want; a genuine main never runs from inside .claude/worktrees.
         if WORKTREE_MARKER in (candidate.rstrip("/") + "/"):
             return "worker"
     return "main"

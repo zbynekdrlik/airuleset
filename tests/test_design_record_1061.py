@@ -14,7 +14,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 import cli_design_record as dr  # noqa: E402
-import design_gate as dg  # noqa: E402
+from gates import design as dg  # noqa: E402
 from watchdog.transcripts import encode_project_dir  # noqa: E402
 
 
@@ -132,6 +132,22 @@ class TestPostAndRecord(unittest.TestCase):
         self.assertNotIn("called", posted,
                          "must not post an invalid design")
         self.assertFalse(dg.marker_exists("airuleset", 10, "design"))
+
+    def test_post_failure_does_not_write_marker(self):
+        # #1061 review MUT3: the marker must be written ONLY after a SUCCESSFUL
+        # post — a gh failure (rc != 0) must leave no marker (else a worker's
+        # commit gate would pass on a design that never actually landed).
+        def failing_runner(argv, body):
+            return (1, "", "boom: gh failed")
+
+        ok, reason, stamp = dr.post_and_record(
+            issue=12, repo="zbynekdrlik/airuleset", raw_body=VALID_DESIGN,
+            cwd=self.cwd, runner=failing_runner, projects_dir=str(self.pd),
+            home=self.home)
+        self.assertFalse(ok)
+        self.assertIsNone(stamp)
+        self.assertFalse(dg.marker_exists("airuleset", 12, "design"),
+                         "no marker may be written when the post failed")
 
     def test_worker_cwd_stamps_worker_not_main(self):
         wt = self.cwd + "/.claude/worktrees/agent-zzz"

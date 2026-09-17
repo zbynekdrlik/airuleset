@@ -99,12 +99,19 @@ def _gh_env():
         return None
 
 
-def _resolve_slug(cwd):
+def _resolve_slug(cwd, timeout=6):
+    # NOTE: the repo is resolved from the dispatch cwd (the target repo's
+    # checkout), NOT the prompt's `in <repo>` name — autopilot is single-repo
+    # per run, so the cwd is authoritative and needs no prompt parsing.
+    # Timeout kept WELL under the hook's own timeout (settings/hooks.json) so the
+    # gate's own timeout->None->block path runs BEFORE CC kills the hook (a
+    # killed PreToolUse hook fail-OPENs — the exact inverse of this gate's
+    # fail-closed contract; #1061 review).
     try:
         r = subprocess.run(
             ["gh", "repo", "view", "--json", "nameWithOwner",
              "-q", ".nameWithOwner"],
-            cwd=cwd or None, capture_output=True, text=True, timeout=15,
+            cwd=cwd or None, capture_output=True, text=True, timeout=timeout,
             env=_gh_env())
     except Exception:
         return None
@@ -114,7 +121,7 @@ def _resolve_slug(cwd):
     return slug or None
 
 
-def _fetch_comment_bodies(slug, number, cwd, timeout=20):
+def _fetch_comment_bodies(slug, number, cwd, timeout=8):
     """Comment bodies for `<slug>#<number>` in CREATION order via the paginated
     REST reader (`gh api …/comments --paginate -q '.[]'`, the SAME shape
     cli_work_class._fetch_comments uses so a recent design comment past the
