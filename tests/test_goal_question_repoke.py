@@ -240,7 +240,7 @@ class TestQuestionRepokeDisarm(_Base):
         state = {"goal_qdisarm_attempts": {sid: [now - 100, now - 50]}}
         logs = self._run_watch(proj, tmux, state, now=now)
         self.assertNotIn("/goal clear", tmux.typed_texts())
-        self.assertTrue(any("ATTEMPT-CAP" in ln for ln in logs))
+        self.assertTrue(any("disarm attempt cap reached" in ln for ln in logs))
 
     def test_verify_fail_consumes_slot_and_caps_at_two(self):
         # #1063 addendum: a GENUINE skip:verify-failed disarm (a keystroke that
