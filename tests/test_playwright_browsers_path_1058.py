@@ -337,23 +337,46 @@ class TestPostcheckNpmRetry1058(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# Item 5 — dep-edge lock (CI-only, network)
+# Item 5 — dep-edge lock (CI-only, network) — injectable fetcher so the FAIL
+# branch is exercised offline (supervisor review: a registry error under the var
+# must FAIL the lock, not skip it — a skip-in-disguise silently removes the lock).
 # --------------------------------------------------------------------------- #
+def _fetch_registry(url, timeout=20):
+    """The REAL registry fetch (used under AIRULESET_NET_TESTS). Returns the
+    parsed JSON dict or raises (a network/HTTP error)."""
+    with urllib.request.urlopen(url, timeout=timeout) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _dep_edge_check(testcase, mcp_version, pinned, *, fetch):
+    """Resolve @playwright/mcp@<mcp_version>'s `playwright` dependency via `fetch`
+    (a url->dict callable) and assert it equals `pinned`. A network/HTTP error is
+    a FAILURE, never a skip: under AIRULESET_NET_TESTS the lock must catch a
+    registry outage loudly (rerun once for a transient), never silently pass. A
+    drift (wrong resolved dep) FAILS with the trio detail."""
+    url = "https://registry.npmjs.org/@playwright/mcp/" + mcp_version
+    try:
+        data = fetch(url)
+    except Exception as e:   # noqa: BLE001 — any fetch error FAILS (never skip)
+        testcase.fail(
+            "dep-edge lock: npm registry unreachable at %s: %s — under "
+            "AIRULESET_NET_TESTS a registry error FAILS the gate (rerun once to "
+            "rule out a transient); it must NEVER silently skip the lock" % (url, e))
+    dep = (data.get("dependencies") or {}).get("playwright")
+    testcase.assertEqual(
+        dep, pinned,
+        "@playwright/mcp@%s depends on playwright %r but the pin is %r — the trio drifted"
+        % (mcp_version, dep, pinned))
+
+
 class TestDepEdgeLock1058(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("AIRULESET_NET_TESTS") == "1",
                          "network test — set AIRULESET_NET_TESTS=1 (CI sets it)")
     def test_mcp_pkg_depends_on_the_pinned_playwright(self):
-        url = "https://registry.npmjs.org/@playwright/mcp/" + p.PLAYWRIGHT_MCP_VERSION
-        try:
-            with urllib.request.urlopen(url, timeout=20) as resp:
-                data = json.loads(resp.read().decode())
-        except Exception as e:   # network/registry hiccup is not a drift — skip honestly
-            self.skipTest("npm registry unreachable: %s" % e)
-        deps = data.get("dependencies", {})
-        self.assertEqual(
-            deps.get("playwright"), p.PLAYWRIGHT_PW_VERSION,
-            "@playwright/mcp@%s depends on playwright %r but the pin is %r — the trio drifted"
-            % (p.PLAYWRIGHT_MCP_VERSION, deps.get("playwright"), p.PLAYWRIGHT_PW_VERSION))
+        # under the var, the REAL registry resolve; a network/HTTP error FAILS
+        # (supervisor review: skipping under the var is a skip-in-disguise).
+        _dep_edge_check(self, p.PLAYWRIGHT_MCP_VERSION, p.PLAYWRIGHT_PW_VERSION,
+                        fetch=_fetch_registry)
 
     def test_network_error_fails_under_the_var_never_skips(self):
         # HERMETIC (no var needed): a registry outage must FAIL the lock, not skip

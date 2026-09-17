@@ -572,14 +572,23 @@ def _render_playwright_shared_block() -> str:
 
     Root installs chromium to /opt/ms-playwright so all stream accounts share
     ONE copy. Per-user ~/.cache/ms-playwright is swept ONLY when the shared
-    install succeeds. Pure renderer returning the bash snippet."""
+    install succeeds. Pure renderer returning the bash snippet.
+
+    #1058: the install is PINNED to `playwright@<PLAYWRIGHT_PW_VERSION>` (read
+    from cli_playwright_mcp, the pin's canonical home — a lazy import keeps this
+    module's MODULE-LEVEL imports stdlib-only). An UNPINNED `playwright install`
+    resolves to @latest and produces exactly the mismatched /opt the #1058
+    class-agnostic resolver then IGNORES (so the #950 shared copy would never
+    activate), and it would disagree with item 7's owner-present root refresh
+    runbook — both must install the same pinned build."""
+    from cli_playwright_mcp import PLAYWRIGHT_PW_VERSION
     return (
-        '# --- #950-B: shared Playwright browsers ---\n'
+        '# --- #950-B: shared Playwright browsers (PINNED #1058) ---\n'
         'pw_shared=%s\n'
         'if command -v npx >/dev/null 2>&1; then\n'
         '    mkdir -p "$pw_shared"\n'
         '    chmod 0755 "$pw_shared"\n'
-        '    if PLAYWRIGHT_BROWSERS_PATH="$pw_shared" npx -y playwright install chromium >/dev/null 2>&1; then\n'
+        '    if PLAYWRIGHT_BROWSERS_PATH="$pw_shared" npx -y playwright@%s install chromium >/dev/null 2>&1; then\n'
         '        # Y1: ensure read+exec for all users (root umask may restrict)\n'
         '        chmod -R a+rX "$pw_shared" 2>/dev/null || true\n'
         '        echo "  playwright: shared browsers installed at $pw_shared"\n'
@@ -613,7 +622,7 @@ def _render_playwright_shared_block() -> str:
         'else\n'
         '    echo "  ⚠ playwright: npx not found — shared install skipped" >&2\n'
         'fi'
-        % shlex.quote(PLAYWRIGHT_SHARED_PATH)
+        % (shlex.quote(PLAYWRIGHT_SHARED_PATH), PLAYWRIGHT_PW_VERSION)
     )
 
 
