@@ -1,0 +1,52 @@
+# airuleset model gateway — systemd --user unit (managed by airuleset, #1062).
+#
+# Installed ONLY on the controller (box-class `controller`) by
+# `airuleset.py install` via cli_model_gateway.setup_model_gateway_service(),
+# and ONLY when an alias map (~/.claude/airuleset-model-gateway.json) exists.
+# The {{HOST_IP}} placeholder is substituted at install with the box's tailscale
+# IPv4 (`tailscale ip -4`), so the proxy binds ONLY the tailscale interface —
+# never LAN or public. Do not edit the installed copy in ~/.config/systemd/user/
+# by hand — edit this template and re-run `python3 airuleset.py install`.
+
+[Unit]
+Description=airuleset model gateway (LiteLLM) — Anthropic-compatible proxy for the pilot backend
+Documentation=https://github.com/zbynekdrlik/airuleset
+After=network-online.target
+Wants=network-online.target
+# Restart loop guard: more than StartLimitBurst restarts in the interval = stop.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# The provider keys + the LiteLLM master key reach the process ONLY through this
+# EnvironmentFile (0600, rendered at install from ~/.secrets/*.key). The yaml
+# references them by `os.environ/<VAR>`; no secret is ever in the yaml or here in
+# the unit. PYTHONPATH lets litellm import the JSONL spend-logger callback that
+# lives next to the config.
+EnvironmentFile=%h/.config/airuleset/model-gateway.env
+Environment=PYTHONPATH=%h/.config/airuleset
+# Bound to the tailscale address ONLY (baked in at install — see {{HOST_IP}}).
+ExecStart=%h/.local/share/airuleset/model-gateway-venv/bin/litellm --config %h/.config/airuleset/model-gateway.yaml --host {{HOST_IP}} --port 4000
+Restart=on-failure
+RestartSec=5
+
+# --- Hardening (defense in depth; a tailscale-internal proxy) ---
+# NOTE: ProtectHome is deliberately NOT read-only — the proxy WRITES the JSONL
+# spend log under ~/.config/airuleset and READS the venv under ~/.local/share.
+# ProtectSystem=strict makes / read-only; ReadWritePaths re-opens ONLY the config
+# dir the spend log lives in (the venv under ~/.local/share stays readable).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.config/airuleset
+# AF_UNIX is REQUIRED: litellm runs on uvicorn/asyncio, and asyncio's selector
+# event loop creates its wakeup socket via socket.socketpair() (AF_UNIX) — omit
+# it and the proxy fails to start with EAFNOSUPPORT. AF_INET/AF_INET6 for the
+# HTTP proxy socket + upstream HTTPS.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=1G
+TasksMax=256
+
+[Install]
+WantedBy=default.target
