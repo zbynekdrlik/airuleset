@@ -85,7 +85,7 @@ def is_full_body(table_text: str) -> bool:
 
 
 def validate_passthrough_body(
-    body: str, *, bounce_round: int = 1
+    body: str, *, bounce_round: int = 1, required_disposition_ids=None
 ) -> Optional[str]:
     """Validate a STREAM-authored, gate-compliant body for the minimal
     cross-repo invariants the composer is responsible for, before it is signed
@@ -99,7 +99,14 @@ def validate_passthrough_body(
     own bounce-escalation threshold) — the ``Root-cause-of-previous-bounce:``
     line plus a Prevencia line under EITHER label the gate/composer use. It
     does NOT rewrite the body — fences and the single ``HEAD:`` line pass
-    through untouched, and it never imposes a label the gate would reject."""
+    through untouched, and it never imposes a label the gate would reject.
+
+    ``required_disposition_ids`` (#1056 L2 (f)): the gk finding ids the body
+    MUST disposition (from the gk-watch pre-flight). When given, mirrors the
+    composer pre-flight's disposition SHAPE check via the ONE primitive
+    ``cli_gk_watch.missing_dispositions`` — an RFR that does not address every
+    open gk finding id is refused with ``needs-disposition <ids>``. None/[]
+    skips the check (the pre-#1056 behaviour)."""
     if not (body or "").strip():
         return "handoff BLOCK: --body-file body is empty"
     if not _has_rfr_marker(body):
@@ -122,6 +129,15 @@ def validate_passthrough_body(
                 or _PREVENCIA_READ_RE.search(body)):
             return ("handoff BLOCK: round %d --body-file body missing "
                     "Prevencia (stream): / Prevencia-read:" % bounce_round)
+    # #1056 L2 (f): the disposition-shape mirror. Reuses the ONE primitive so
+    # the pass-through path and the composer pre-flight agree by construction.
+    if required_disposition_ids:
+        import cli_gk_watch
+        missing = cli_gk_watch.missing_dispositions(body, required_disposition_ids)
+        if missing:
+            return ("handoff BLOCK: needs-disposition %s — the RFR body must "
+                    "disposition each open gk finding id (Closes-finding: or a "
+                    "disposition row per id)" % ",".join(missing))
     return None
 
 
