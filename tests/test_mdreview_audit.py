@@ -298,8 +298,8 @@ class TestRunOnceJob43(unittest.TestCase):
     def test_docstring_counts_49_jobs(self):
         from watchdog import run_once
         doc = run_once.__doc__
-        self.assertIn("49 numbered", doc)  # #1034 Job 48 (parked-wake), #1036 Job 49 (task-hygiene)
-        self.assertIn("43 LIVE", doc)
+        self.assertIn("50 numbered", doc)  # #1034 Job 48, #1036 Job 49, #1056 L2 Job 50 (bounce-flip-revert)
+        self.assertIn("44 LIVE", doc)
 
     def test_docstring_mentions_job_43(self):
         from watchdog import run_once

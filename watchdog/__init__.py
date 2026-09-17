@@ -2092,6 +2092,12 @@ from watchdog.cross_stream import (  # noqa: E402
     _gk_comment_handoff_decide as _gk_comment_handoff_decide,
     _fetch_gk_comment_handoffs as _fetch_gk_comment_handoffs,
     _apply_gk_comment_handoff_reconcile as _apply_gk_comment_handoff_reconcile,
+    BOUNCEFLIP_INTERVAL as BOUNCEFLIP_INTERVAL,
+    _bounce_flip_decide as _bounce_flip_decide,
+    _bounce_flip_label_events as _bounce_flip_label_events,
+    _fetch_bounce_flip_candidates as _fetch_bounce_flip_candidates,
+    _apply_bounce_flip_revert as _apply_bounce_flip_revert,
+    bounce_flip_revert as bounce_flip_revert,
     _cached_backlog_open as _cached_backlog_open,
     _cached_backlog_count as _cached_backlog_count,
 )
@@ -2222,8 +2228,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              deploy_state_fetch=None,
              infra_queue_fetch=None, resolve_role_fn=None,
              health_probes=None, health_probe_fetch=None,
-             task_hygiene_enabled=False, gh_rate_fetch=None):
-    """Scan every `claude` pane once. 49 numbered jobs per poll — 43 LIVE and 6
+             task_hygiene_enabled=False, gh_rate_fetch=None,
+             bounceflip_fetch=None):
+    """Scan every `claude` pane once. 50 numbered jobs per poll — 44 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
@@ -3037,6 +3044,25 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           nudge_gate's per-kind floor + cross-kind total cap). MACHINE-CHANNEL
           only (never pings the owner). `min_budget` = the HTTP-probe class.
           `watchdog/task_hygiene.py`'s docstring is the SSOT.
+      (50) BLIND-LABEL-FLIP REVERT (#1056 L2 (h)) — gated on `bounceflip_fetch`
+          being wired (network-free tests for every other job) AND, inside the
+          job, the FULL-authority supervisor gate (`_gkreq_supervisor_root` +
+          `_repo_in_cross_stream_flow`), so a reduced sub-dev box never runs it.
+          The gatekeeper-side backstop to the composer pre-flight (f) + the
+          labeler guard (g): for each open cross-stream ticket where gk-watch
+          reports `bounce-unanswered` (a gk BOUNCE newer than the last stream
+          RFR) with no commit since it AND a POSITIVELY-identified non-gk actor
+          re-added `ready-for-review` / removed `prio:bounce` AFTER that verdict,
+          it REVERTS the labels (re-adds `prio:bounce`, removes
+          `ready-for-review`) and posts ONE note listing the verdict id + its
+          missing finding ids — dedup per ticket+verdict (`<name>#<num>:<gk_id>`,
+          so a re-flip after a NEWER verdict is reverted again). `gh_poll_hold`
+          (heavy-read poller; the rare revert write is non-urgent, 6h cadence),
+          `min_budget` = the gh-fetch class, `_SweepBudget`-bounded. Biased to
+          SILENCE (never a false accusation: an unknown actor / a commit since
+          the verdict / the gk's own action is never reverted). MACHINE-CHANNEL
+          only (a note on the ticket; a ping only when a label edit fails).
+          `watchdog/cross_stream.py`'s `bounce_flip_revert` is the SSOT.
 
     PAUSED BOX (#851/#1032): when `box_paused` is True — the box's OWN fleet entry
     carries `paused` (a stream the owner froze), resolved once in `cmd_watchdog`
@@ -4869,6 +4895,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              persist=lambda: save_state(state_path, state)),
          "gk-orphan-marker-sweep error", min_budget=_BUDGET_MIN_GK_ORPHAN_S,
          gh_poll_hold=True)  # #1050 heavy-read poller; rare backstop write is non-urgent
+
+    # Job 50 (#1056 L2 (h)) — BLIND-LABEL-FLIP REVERT, the gatekeeper-side
+    # backstop to the composer pre-flight (f) + labeler guard (g). A SIBLING of
+    # Job 36: same full-authority supervisor gate (inside the job), same
+    # network-free-tests wiring (gated on `bounceflip_fetch` being wired), same
+    # `_SweepBudget` + persist-before-mutate + dedup discipline. gh_poll_hold=True
+    # for the same reason as Job 36: the dominant cost is the gh READ fetch, and
+    # its rare revert write is non-urgent (6h cadence).
+    _add("bounce_flip_revert", lambda: bounceflip_fetch is not None,
+         lambda: bounce_flip_revert(
+             now, run, state, send_fn=send_fn, dry_run=dry_run,
+             flip_fetch=bounceflip_fetch,
+             persist=lambda: save_state(state_path, state)),
+         "bounce-flip-revert error", min_budget=_BUDGET_MIN_GH_FETCH_S,
+         gh_poll_hold=True)  # heavy-read poller; rare revert write is non-urgent
 
     # Job 37 (#776) — RUNAWAY SHADOW-UGREP OS-PROCESS REAPER (the FIRST
     # OS-process reaper in the watchdog). Runs on EVERY box (a runaway ugrep

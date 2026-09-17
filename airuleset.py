@@ -5969,6 +5969,16 @@ def _watchdog_gkorphan_handoff_fetch(root, budget=None, logs=None):
                                       budget=budget, logs=logs)
 
 
+def _watchdog_bounceflip_fetch(root, budget=None, logs=None):
+    """Job 50's real gh fetch (#1056 L2 (h)) — the blind-label-flip candidate
+    facts (open `ready-for-review` tickets narrowed by per-candidate gk-watch +
+    label-event reads). Same network-free-tests wiring as jobs 8/11/31/36;
+    forwards the sweep's `_SweepBudget` so the per-candidate read loop is
+    wall-clock-bounded (unwired None = no bound)."""
+    from watchdog import _fetch_bounce_flip_candidates
+    return _fetch_bounce_flip_candidates(root, budget=budget, logs=logs)
+
+
 def _watchdog_reaper_ps_fetch():
     """Job 37's real process-table read (#776) — every process as
     (pid, etimes, args). Wired here (not inside run_once) so every OTHER
@@ -7772,6 +7782,10 @@ def cmd_watchdog(args):
                     # window that never got its label) — wired = on, same
                     # network-free-tests convention.
                     gkorphan_handoff_fetch=_watchdog_gkorphan_handoff_fetch,
+                    # Job 50 (#1056 L2 (h)) — blind-label-flip revert automat.
+                    # Wired = on, full-authority gate inside the job; same
+                    # network-free-tests convention as jobs 8/11/31/36.
+                    bounceflip_fetch=_watchdog_bounceflip_fetch,
                     # Job 37 (#776) — runaway shadow-ugrep OS-process reaper.
                     # Runs on EVERY box every cycle (a runaway ugrep can orphan
                     # anywhere — subdev #774). Gated on these seams being wired
