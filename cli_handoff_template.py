@@ -229,6 +229,12 @@ def render_extended_body(
     # self-review evidence line. Validated to an exact MODEL_TIERS id by the
     # CLI (cmd_handoff); required there, so it is always present in practice.
     self_review_model: Optional[str] = None,
+    # #1061: the review-of-record authorship VALUE ("<role> <model>",
+    # transcript-derived by cli_authorship) — a FACT recording WHO reviewed
+    # (the owner's #871 rule: review by the Fable main). Optional/pass-through:
+    # emitted as a `Reviewed-by:` line only when the CLI supplies it, so no
+    # existing caller/test changes shape.
+    reviewed_by: Optional[str] = None,
 ) -> str:
     """Compose a full READY-FOR-REVIEW comment body for a repo with the
     extended template (odoo-erp shape).
@@ -260,6 +266,8 @@ def render_extended_body(
     parts.append("Stack: %s" % stack)
     parts.append("Verified-at-UTC: %s" % verified_at_utc)
     parts.append("Harness: %s" % harness)
+    if reviewed_by:
+        parts.append("Reviewed-by: %s" % reviewed_by)
 
     # Optional template fields — emit when given.
     if tested_tree:
@@ -303,6 +311,7 @@ def render_generic_body(
     prevencia_read: Optional[str] = None,
     closes_finding: Optional[list[str]] = None,
     self_review_model: Optional[str] = None,
+    reviewed_by: Optional[str] = None,
 ) -> str:
     """Compose the original generic READY-FOR-REVIEW comment body.
 
@@ -321,6 +330,8 @@ def render_generic_body(
     parts.append("")
     parts.append("Verified-at-UTC: %s" % verified_at_utc)
     parts.append("HEAD: %s" % head_sha)
+    if reviewed_by:
+        parts.append("Reviewed-by: %s" % reviewed_by)
 
     if bounce_round >= 2:
         if root_cause:
@@ -378,6 +389,7 @@ def compose_body(
     prevencia_read: Optional[str] = None,
     closes_finding: Optional[list[str]] = None,
     self_review_model: Optional[str] = None,
+    reviewed_by: Optional[str] = None,
 ) -> tuple[str, Optional[str]]:
     """Compose the comment body, choosing extended or generic shape.
 
@@ -421,6 +433,7 @@ def compose_body(
             prevencia_read=prevencia_read,
             closes_finding=closes_finding,
             self_review_model=self_review_model,
+            reviewed_by=reviewed_by,
         )
     else:
         body = render_generic_body(
@@ -430,5 +443,6 @@ def compose_body(
             root_cause=root_cause, prevencia_read=prevencia_read,
             closes_finding=closes_finding,
             self_review_model=self_review_model,
+            reviewed_by=reviewed_by,
         )
     return (body, None)

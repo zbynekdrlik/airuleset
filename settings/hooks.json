@@ -177,6 +177,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-design-by-spoof.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-worker-close-trigger.sh",
             "timeout": 10
           },
@@ -262,6 +267,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-dispatch-over-wdrain.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-dispatch-without-main-design.sh",
+            "timeout": 60
           },
           {
             "type": "command",
@@ -374,6 +384,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-dispatch-over-wdrain.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-dispatch-without-main-design.sh",
+            "timeout": 60
           }
         ]
       },

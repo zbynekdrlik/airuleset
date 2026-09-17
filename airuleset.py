@@ -4775,6 +4775,16 @@ def cmd_handoff(args):
               "tip %s — push first" % (head_sha[:12], branch, remote_sha[:12]))
         return 1
 
+    # #1061: the review-of-record authorship stamp (transcript-derived, the SAME
+    # way design-record stamps Design-by:) — a FACT recording WHO reviewed
+    # (owner's #871 rule: review by the Fable main). Run from the main checkout
+    # it reads the Fable id; from a lane worktree, the worker's.
+    try:
+        import cli_authorship as _auth
+        reviewed_by = _auth.authorship_value(os.getcwd())
+    except Exception:
+        reviewed_by = None
+
     # Compose the comment body — template-aware (#969).
     import cli_handoff_template as _ht
     body, err = _ht.compose_body(
@@ -4787,6 +4797,7 @@ def cmd_handoff(args):
         prevencia_read=prevencia_read,
         closes_finding=closes_finding,
         self_review_model=self_review_model,
+        reviewed_by=reviewed_by,
     )
     if err:
         print(err)
@@ -8932,6 +8943,10 @@ from cli_skill_usage import (  # noqa: E402, F401
     cmd_skill_usage as cmd_skill_usage,
     scan_usage as scan_usage,
 )
+# --- #1061: main-authored design comment poster (Design-by: main <model>) ---
+from cli_design_record import (  # noqa: E402, F401
+    cmd_design_record as cmd_design_record,
+)
 from cli_mdreview_audit import (  # noqa: E402, F401
     cmd_mdreview_audit as cmd_mdreview_audit,
 )
@@ -9941,6 +9956,29 @@ def main():
                       default=[],
                       help="Also scan a project's .claude/rules + .claude/skills "
                            "(repeatable, read-only — never auto-fixed)")
+    p_da.add_argument("--worker-design", dest="worker_design",
+                      action="store_true",
+                      help="Scan airuleset's own agents/skills for text that "
+                           "instructs a WORKER to author a design (#871/#1061; "
+                           "read-only, exit 1 if any found)")
+
+    # --- #1061: main-authored design comment poster ---
+    p_dr = sub.add_parser(
+        "design-record",
+        help="Post a ticket's design comment stamped Design-by: main/worker "
+             "<model> (model read from the session's OWN transcript, never "
+             "self-declared); the dispatch gate requires Design-by: main "
+             "<Fable id> before an autopilot-worker is dispatched (#1061)")
+    p_dr.add_argument("--issue", type=int, required=False,
+                      help="Issue number to comment on")
+    p_dr.add_argument("--repo", default=None,
+                      help="owner/name (default: the cwd repo)")
+    p_dr.add_argument("--body-file", dest="body_file", default=None,
+                      help="File with the design body (root cause + approach + "
+                           "rejected alternative + Triage: + Architektúra: + "
+                           "Shared-benefit:)")
+    p_dr.add_argument("--dry-run", dest="dry_run", action="store_true",
+                      help="Print the stamped body without posting")
 
     p_ab = sub.add_parser(
         "account-bootstrap",
@@ -10048,6 +10086,20 @@ def cmd_doctrine_audit(args):
     (MEDIUM/keep are always listed, never rewritten). The supervisor runs the
     read-only form on each stream box and posts the per-box table on the ticket."""
     import cli_doctrine_audit as da
+    # #1061 — worker-authors-design scan (read-only, airuleset repo's own
+    # agents/skills). Flags any agent/skill text that instructs a WORKER to
+    # author a design (owner #871: design by the Fable main); target 0.
+    if getattr(args, "worker_design", False):
+        findings = da.scan_worker_design_authoring(str(REPO_DIR))
+        if not findings:
+            print("doctrine-audit --worker-design: 0 findings — no agent/skill "
+                  "text instructs a worker to author a design (#1061).")
+            return 0
+        print("doctrine-audit --worker-design: %d finding(s) — a WORKER must "
+              "NOT author a design (#871/#1061):" % len(findings))
+        for f in findings:
+            print("  %s:%d: %s" % (f["path"], f["line"], f["text"][:120]))
+        return 1
     home = str(Path.home())
     project_roots = list(getattr(args, "project_root", []) or [])
     matches, results = da.audit(home, repo_dir=str(REPO_DIR),
@@ -10448,6 +10500,7 @@ SUBCOMMANDS = {
     "key-rotation": cmd_key_rotation,
     "mdreview-audit": cmd_mdreview_audit,
     "doctrine-audit": cmd_doctrine_audit,
+    "design-record": cmd_design_record,
     "account-bootstrap": cmd_account_bootstrap,
     "nudges": cmd_nudges,
     "volume": cmd_volume,

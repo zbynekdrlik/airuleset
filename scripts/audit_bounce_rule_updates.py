@@ -100,6 +100,89 @@ def fetch_bounce_issues(repo, runner=None):
     return issues
 
 
+def fetch_open_issues(repo, runner=None):
+    """Open issues in `repo` as [{number, title}] (up to 500), or []."""
+    run = runner or airuleset._gh_out
+    raw = run("issue", "list", "-R", repo, "--state", "open", "-L", "500",
+              "--json", "number,title", timeout=30)
+    if not raw:
+        return []
+    try:
+        rows = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return [{"number": r.get("number"), "title": r.get("title", "")}
+            for r in rows if isinstance(r, dict) and r.get("number")]
+
+
+def fetch_issue_comments(repo, number, runner=None):
+    """[{body, created_at}] for `repo#number` in creation order (paginated),
+    or []. Uses `gh api …/comments --paginate -q '.[]'` (the full thread, so a
+    recent design comment is never truncated)."""
+    run = runner or airuleset._gh_out
+    raw = run("api", "repos/%s/issues/%s/comments" % (repo, number),
+              "--paginate", "-q", ".[]", timeout=30)
+    out = []
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("body"), str):
+            out.append({"body": obj["body"],
+                        "created_at": obj.get("created_at", "")})
+    return out
+
+
+def audit_design_by(repo, since=None, issues_runner=None, comments_runner=None):
+    """List OPEN issues whose NEWEST `Design-by:` comment is NOT
+    `Design-by: main <Fable id>` (#1061). `since` (YYYY-MM-DD) restricts to
+    design comments created on/after that date, so pre-fix tickets never count.
+    An issue with NO `Design-by:` comment (or none since `since`) is not a
+    violation (no design-authorship signal). Reuses the single-source
+    gates.designdispatch regex + Fable-id match. Returns a list of dicts."""
+    from gates import designdispatch as dd
+    fable = dd._fable_id()
+    violations = []
+    for iss in fetch_open_issues(repo, runner=issues_runner):
+        comments = fetch_issue_comments(repo, iss["number"],
+                                        runner=comments_runner)
+        newest = None
+        for c in comments:
+            m = dd._DESIGN_BY_RE.search(c.get("body") or "")
+            if m:
+                newest = (m.group("role").lower(),
+                          (m.group("model") or "").strip(),
+                          c.get("created_at", ""))
+        if newest is None:
+            continue
+        role, model, ts = newest
+        if since and ts and ts < since:
+            continue  # design comment predates the fix date
+        if role == "main" and dd._norm_model(model) == dd._norm_model(fable):
+            continue  # compliant
+        violations.append({
+            "number": iss["number"], "title": iss["title"],
+            "design_by": "%s %s" % (role, model or "?"), "created_at": ts})
+    return violations
+
+
+def print_design_by_text(violations, since):
+    scope = " since %s" % since if since else ""
+    if not violations:
+        print("design-by audit: 0 violations%s -- every open ticket's newest "
+              "design comment is Design-by: main <Fable id>." % scope)
+        return
+    print("design-by audit: %d violation(s)%s -- the design must be authored "
+          "by the Fable MAIN (#871/#1061):" % (len(violations), scope))
+    for v in violations:
+        print("  #%s  Design-by: %s  (%s)  %s" % (
+            v["number"], v["design_by"], v.get("created_at", "?"), v["title"]))
+
+
 def fetch_bounce_events_for_issue(number, repo, runner=None):
     """Fetch prio:bounce label-add event timestamps for one issue.
 
@@ -388,6 +471,13 @@ def main(argv=None):
                         "reason from ~/.claude/selfservice-gate.log (a rising "
                         "per-stream count = a stream repeatedly escalating a "
                         "self-serviceable PROD read; trend to 0)")
+    p.add_argument("--design-by", dest="design_by", action="store_true",
+                   help="List OPEN issues whose newest Design-by comment is NOT "
+                        "'Design-by: main <Fable id>' (#1061; target 0). "
+                        "Restrict to comments since --since <YYYY-MM-DD>.")
+    p.add_argument("--since", default=None,
+                   help="YYYY-MM-DD cutoff for --design-by (only design comments "
+                        "on/after this date count)")
     # #1049-review-2 MINOR-4: --repo is required only for the GitHub-querying
     # views (--rounds / --bypasses); --selfservice-blocks reads a box-local log
     # and needs no repo. Validated per-command below rather than at parse time.
@@ -405,8 +495,17 @@ def main(argv=None):
                                  "first-pass rate")
     args = p.parse_args(argv)
 
-    if (args.rounds or args.bypasses) and not args.repo:
-        p.error("--repo is required for --rounds / --bypasses")
+    if (args.rounds or args.bypasses or args.design_by) and not args.repo:
+        p.error("--repo is required for --rounds / --bypasses / --design-by")
+
+    if args.design_by:
+        violations = audit_design_by(args.repo, since=args.since)
+        if args.json_out:
+            json.dump(violations, sys.stdout, indent=2)
+            print()
+        else:
+            print_design_by_text(violations, args.since)
+        return
 
     if args.bypasses:
         commits = fetch_bypass_commits(args.repo, window_days=args.window)

@@ -764,22 +764,29 @@ gap in either.
    own design-depth (design-heavy) criteria (architectural / cross-cutting / ambiguous-design / a prior worker
    already failed on it) PLUS the ONE framework-first trigger `architecture-first.md` names (a NEW
    service, CLI, daemon, or long-lived component) — extending that single taxonomy, never
-   inventing a second, parallel one. TRIVIAL members skip this sub-step entirely — no
-   design consult, no extra cost, same one-paragraph design comment as today. For each
-   DESIGN-HEAVY member: dispatch ONE read-only design consult per member (a `general-purpose`
-   dispatch inheriting the native subagent-model default; never a `model` param naming a banned
-   model), OR hold the design synthesis in the main session itself when you prefer — your call,
-   sized to the box and backlog. The design consult asks
-   for 2-3 candidate architectural approaches with trade-offs and a recommendation, grounded in a
-   WHOLE-REPO view. Post the consult's synthesis to the ticket via `gh issue comment <N>`
-   IMMEDIATELY (`durable-decisions-to-tickets.md` — a design living only in this session dies at the
-   next compaction), and embed a tight summary of it in that member's worker dispatch prompt as
-   grounding. The worker's own CYCLE step 2 design comment (`agents/autopilot-worker.md`) still
-   writes the final `Triage:` line + `Architektúra:` section + (for non-trivial) the 2-3 approaches
-   itself — now grounded in the supervisor's synthesis instead of inventing the architecture solo
-   mid-implementation. A genuine design FORK the synthesis cannot settle goes to the user as a
-   `❓ ASKED` ask-and-continue question the moment it surfaces — never a silent pick, in either
-   direction.
+   inventing a second, parallel one. **YOU (the Fable MAIN) AUTHOR the design comment yourself and
+   post it BEFORE dispatch — for EVERY member, trivial or design-heavy (#871/#1061, owner escalation
+   2026-09-17: design + architecture are done by the Fable main, the weaker worker only implements a
+   decided design).** For a DESIGN-HEAVY member, do the deeper thinking first — dispatch ONE
+   read-only design consult (a `general-purpose` dispatch inheriting the native subagent-model
+   default; never a `model` param naming a banned model), OR hold the synthesis in the main session
+   when you prefer — for 2-3 candidate architectural approaches with trade-offs + a recommendation,
+   grounded in a WHOLE-REPO view. A TRIVIAL member needs no consult, just one honest paragraph.
+   Then, for EVERY member, write the FULL design (root cause traced in code + chosen approach +
+   rejected alternative + `Triage:` + `Architektúra:` + `Shared-benefit:`) to a body file and POST
+   it with **`python3 ~/devel/airuleset/airuleset.py design-record --repo <owner/name> --issue <N>
+   --body-file <design.md>`** — it stamps `Design-by: main <model>` read from YOUR OWN transcript
+   (the Fable id, never a self-declared string), validates the design shape before posting, and
+   writes the local design marker the worker's commit gate needs. The dispatch precondition
+   (`gates.designdispatch`) then REFUSES to dispatch a worker for any member whose newest design
+   comment is not `Design-by: main <Fable id>` — so a member without your design comment simply
+   cannot be dispatched (bypass `airuleset:design-by-ok <reason>` in the prompt, logged). Embed a
+   tight summary of the design in that member's worker dispatch prompt as grounding. The worker's
+   CYCLE step 2 (`agents/autopilot-worker.md`) then READS your `Design-by: main` comment, confirms
+   the code anchors, and IMPLEMENTS it — it NEVER authors the design, and `gates.designbypost`
+   blocks a worker that tries to post a `Design-by: main` line itself. A genuine design FORK you
+   cannot settle goes to the user as a `❓ ASKED` ask-and-continue question the moment it surfaces —
+   never a silent pick, in either direction.
 2. **Dispatch the ROUND — one in-session BACKGROUND `autopilot-worker` PER assembled batch, each
    `isolation: "worktree"`, all fired in the SAME message (multiple Agent tool_use blocks — this
    is what makes them run concurrently rather than one-after-another).** (Vocabulary note, #723: this
@@ -1060,7 +1067,10 @@ gap in either.
    >    the top-level dir the diff touches) and judge it OK or REWORK — is the area a considered
    >    concept with ONE source of truth, or layers of reactions to requests (patchwork:
    >    duplicated sources of truth, shim/compat layers, hook-on-hook, incident-driven exceptions,
-   >    prose replacing a native function)? **Every integration records the verdict in the report's
+   >    prose replacing a native function)? **This review IS the review of record, done by the
+   >    Fable MAIN (#871/#1061) — the worker's two adversarial reviews are only a pre-filter; record
+   >    `Reviewed-by: main <model>` on the integration/merge note (same transcript-derived stamp as
+   >    `Design-by:`).** **Every integration records the verdict in the report's
    >    `🏛 Architektúra: <oblasť> — OK|REWORK #N` line** (`completion-report.md`, hook-enforced). A
    >    `REWORK` verdict → the supervisor files an `architecture-rework` ticket THAT TURN
    >    (`durable-decisions-to-tickets`; label `architecture-rework`, body: area + files + concrete

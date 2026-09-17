@@ -443,42 +443,38 @@ round-scope dispatch lock) — and releases it the moment that cycle's push has 
    already bumped and some members are partially done, CONTINUE from there — do NOT re-bump or redo
    version-bump→RED, and do NOT re-do an already-committed member. Only on a truly fresh start do you
    **version bump FIRST** (`version-bumping.md`) before any feature code.
-2. **DESIGN THE APPROACH BEFORE ANY CODE — UNCONDITIONAL, once per issue.** Before the first line
-   of code for a member, the approach must exist as a deliberate decision, never as whatever the
-   first edit happened to be. Establish, in your own words: **the root cause** (for a bug: WHY it
-   happens, traced in the code — not the symptom restated), **the approach you chose**, and **the
-   alternative you rejected and why**. Then post it to the issue with
-   `gh issue comment <N>` **BEFORE the first code commit** for that member — that comment is the
-   step's durable artifact and the proof it happened, readable forever from `gh issue view` and
-   provably earlier than the code in `git log`.
-   **The step is unconditional; its DEPTH scales with the problem — and #414 makes that scaling
-   MECHANICAL, not just prose.** Open with a `Triage:` line naming the class. **TRIVIAL** (a scoped
-   fix with one obvious cause) stays exactly what it always was: one honest paragraph — that is
-   complete, not a shortcut. **NON-TRIVIAL** (a new service/CLI/daemon/long-lived component,
-   several valid approaches with different consequences, an unclear root cause, a cross-cutting
-   change) requires the fuller depth #414 restored: **2-3 considered approaches with their
-   trade-offs**, not one, PLUS an `Architektúra:` section (structure/topology + the framework used,
-   OR an evidenced why-none-fits from an actually-read source — `architecture-first.md`'s
-   framework-first rule). **Every design comment ALSO carries a `Shared-benefit:` line (#877) —
-   UNCONDITIONAL (trivial tickets included): disposition of whether the change benefits beyond the
-   requesting client/stream ("shared — mechanism/data to company_base" / "single-client — MIVA
-   report format" / "n/a — single-file typo, reason"). Bare `n/a` without a reason is rejected.
-   Origin: SK holidays implemented as MIVA-only seed, celostatne data (odoo-erp issue 6252).**
-   `hooks/block-commit-without-design.sh` mechanically checks ALL THREE
-   (`design_gate.classify_triage_and_approaches`/`classify_architecture_section`/
-   `classify_shared_benefit`) before your first
-   commit for that member goes through, and tells you exactly what's missing if it doesn't. For a
-   genuinely NON-TRIVIAL member, go deeper BEFORE coding: dispatch your own design/hard-debug
-   consult (a fresh-context `general-purpose` dispatch inheriting the native model default) to
-   work out the 2-3 candidate
-   approaches, or — when the fork is the USER's call, not yours (`ask-before-assuming.md`) — **ask
-   them via the `❓` marker (ask-and-continue): a genuine design fork is NEVER a silent pick, in
-   either direction.** What is banned is skipping straight to edits and discovering the design
-   through a stream of corrections; the user's report of that failure is exactly what this step
-   exists to prevent ("len sa strieľa ako príde, náhodné riešenie, následne milión opráv", #104;
-   restated even more directly on #414: "od vtedy čo som to odovzdal vôbec nemám pocit že prebieha
-   tá špeciálna precízna dizajnová časť"). Never satisfy this step by naming a skill — a skill
-   body does NOT reach a dispatched worker (probes, 2026-07-27); the thinking has to be yours.
+2. **READ THE MAIN'S DESIGN — DO NOT AUTHOR IT (UNCONDITIONAL, once per issue; #1061).** The
+   DESIGN and ARCHITECTURE of every ticket are authored by the Fable MAIN session, NEVER by you —
+   the owner's standing rule (#871, owner escalation 2026-09-17: "návrh implementácie robí slabý
+   model!!" is a hard violation). Before you were dispatched, the main posted the ticket's design
+   comment — **root cause** traced in the code + **the chosen approach** + **the rejected
+   alternative** + a `Triage:` line + an `Architektúra:` section + a `Shared-benefit:` line —
+   stamped `Design-by: main <model>`; the dispatch precondition (`gates.designdispatch`) already
+   REFUSED to dispatch you without it, so it EXISTS. Your first act for each member, before the
+   first line of code:
+   - **`gh issue view <N>` and READ the `Design-by: main` comment.** That is the DECIDED design.
+     You IMPLEMENT it faithfully — you do NOT re-open, re-decide, or quietly substitute a different
+     approach (silently picking your own is the EXACT violation #1061 fixes).
+   - **CONFIRM the design's code anchors with grep** — the files / functions / symbols it names are
+     really there and mean what the design says.
+   - **If every anchor holds → post a short `Anchors-confirmed:` comment** with
+     `gh issue comment <N>` naming what you verified, then implement. (The design MARKER the commit
+     gate needs was already written when the main posted the design — you do NOT author a design
+     comment, and you do NOT write a `Triage:` / `Architektúra:` / approaches section yourself.)
+   - **If an anchor is WRONG / missing, or the design cannot be implemented as written → post a
+     `Design-question:` comment** stating exactly what does not hold and **STOP** — the main
+     re-authors or clarifies the design; never silently pick a different approach. Escalate a
+     genuine design FORK to the main (via the `Design-question:` comment, and the `❓` marker if it
+     needs the user), never decide it in the worker.
+   **NEVER author the design** and **NEVER post a `Design-by: main` line yourself** —
+   `gates.designbypost` blocks a lane worker's `Design-by: main` comment (bypass
+   `# airuleset:design-by-ok <reason>`, logged). Your job is the faithful IMPLEMENTATION of the
+   main's decided design. (Historical: the worker USED to author the design here; #1061 reversed
+   that after the owner tied the recurring low quality + client complaints to design being done by
+   the Opus worker instead of the Fable main. The design-first discipline is unchanged — it just
+   lives with the main now, where the stronger model does the precise thinking.) Never satisfy this
+   step by naming a skill — a skill body does NOT reach a dispatched worker (probes, 2026-07-27);
+   read the actual `Design-by: main` comment and grep the actual code.
 3. Implement **the named issue(s) ONLY** — the whole batch, nothing beyond the named set, no scope
    creep. Do each member in sequence on the SAME `dev` branch. Per-issue calibrated TDD
    (`tdd-workflow.md`): each bug → its RED test commit BEFORE its GREEN fix commit
@@ -677,7 +673,7 @@ them all):
 issues: #<A> <title>, #<B> <title>, … (one PR closes all)
 plan: <per issue, N/N acceptance-criteria items from the issue body fulfilled — your own self-audit in plain words vs what the ticket asked for. This is what the supervisor's `✅ /plan-check: N/N fulfilled` line relays — it is NOT independently re-run by the supervisor, so an honest self-audit here is the only thing backing that line.>
 validated: <per issue: how you proved each is still real: repro/test/MCP/curl, ALSO posted as its own `gh issue comment <N>` per STEP 0 above — a durable artifact, checked by the extended #136/#213 gate | "OBSOLETE — closed: <what>">
-approach: <per issue, the design-step artifact: the `gh issue comment` URL/id carrying root cause + chosen approach + rejected alternative, AND proof it predates that member's first code commit (comment timestamp vs first commit SHA). NEVER "n/a" — CYCLE step 2 is unconditional.>
+approach: <per issue, the MAIN's decided design you implemented: the `Design-by: main` comment URL/id (root cause + chosen approach + rejected alternative + Triage: + Architektúra:, authored by the Fable main), AND your own `Anchors-confirmed:` comment URL/id confirming the code anchors before your first commit. NEVER "n/a" — you read + confirm the main's design, you never author it (CYCLE step 2, #1061).>
 review: <per issue: `/review` + `/requesting-code-review` result (0 🔴 0 🟡 0 🔵 or N findings fixed in <sha>), ALSO posted as its own `gh issue comment <N>` per CYCLE step 6 — checked by the SAME extended #214 gate.>
 achieved: <per issue, ONE Slovak line of what actually LANDED — used verbatim as the Discord card's "Dosiahnuté" (#A: …; #B: …)>
 pr: #<M> <url>  (body Closes #A #B …)
@@ -700,7 +696,7 @@ OPEN):
 issues: #<A> <title>, #<B> <title>, …
 plan: <per issue, N/N acceptance-criteria items from the issue body fulfilled — self-audit vs what the ticket asked for>
 validated: <per issue: how you proved each is still real, ALSO posted as its own `gh issue comment <N>` | "OBSOLETE — commented, left OPEN: <what>">
-approach: <per issue, the design-step artifact: the `gh issue comment` URL/id carrying root cause + chosen approach + rejected alternative, posted BEFORE that member's first code commit. NEVER "n/a" — CYCLE step 2 is unconditional.>
+approach: <per issue, the MAIN's decided design you implemented: the `Design-by: main` comment URL/id (root cause + chosen approach + rejected alternative + Triage: + Architektúra:, authored by the Fable main), AND your own `Anchors-confirmed:` comment URL/id confirming the code anchors before your first commit. NEVER "n/a" — you read + confirm the main's design, you never author it (CYCLE step 2, #1061).>
 review: <per issue: local `/review` + `/requesting-code-review` result before hand-off, ALSO posted as its own `gh issue comment <N>`>
 achieved: <per issue, ONE Slovak line of what LANDED locally — verbatim into each --handoff card's Dosiahnuté>
 branch: <your fork branch name — the EXACT name, pushed after your FIRST commit (#503), never a vague "my branch">
@@ -723,7 +719,7 @@ variant exists to prevent):
 issues: #<A> <title>, #<B> <title>, …
 plan: <per issue, N/N acceptance-criteria items from the issue body fulfilled — self-audit vs what the ticket asked for>
 validated: <per issue: how you proved each is still real, ALSO posted as its own `gh issue comment <N>` | "OBSOLETE — commented, left OPEN: <what>">
-approach: <per issue, the design-step artifact: the `gh issue comment` URL/id carrying root cause + chosen approach + rejected alternative, posted BEFORE that member's first code commit. NEVER "n/a" — CYCLE step 2 is unconditional.>
+approach: <per issue, the MAIN's decided design you implemented: the `Design-by: main` comment URL/id (root cause + chosen approach + rejected alternative + Triage: + Architektúra:, authored by the Fable main), AND your own `Anchors-confirmed:` comment URL/id confirming the code anchors before your first commit. NEVER "n/a" — you read + confirm the main's design, you never author it (CYCLE step 2, #1061).>
 review: <per issue: `/review` + `/requesting-code-review` result before hand-off, ALSO posted as its own `gh issue comment <N>`>
 achieved: <per issue, ONE Slovak line of what LANDED on the integration branch — verbatim into each --handoff card's Dosiahnuté>
 pr: #<M> <url>  (dev → <integration branch>, body Closes #A #B … — GitHub does NOT auto-close from this branch, see below)
@@ -747,7 +743,7 @@ those, one integration cycle at a time under the #8 integration mutex, as each b
 issues: #<A> <title>, #<B> <title>, … (one PR closes all — opened by the SUPERVISOR when your branch is integrated)
 plan: <per issue, N/N acceptance-criteria items fulfilled — your own self-audit>
 validated: <per issue: how you proved each is still real, ALSO posted as its own `gh issue comment <N>` | "OBSOLETE — closed: <what>">
-approach: <per issue, the design-step artifact: the `gh issue comment` URL/id carrying root cause + chosen approach + rejected alternative, posted BEFORE that member's first code commit. NEVER "n/a".>
+approach: <per issue, the MAIN's decided design you implemented: the `Design-by: main` comment URL/id (root cause + chosen approach + rejected alternative + Triage: + Architektúra:, authored by the Fable main), AND your own `Anchors-confirmed:` comment URL/id confirming the code anchors before your first commit. NEVER "n/a" — you read + confirm the main's design, you never author it (CYCLE step 2, #1061).>
 review: <per issue: LOCAL `/review` + `/requesting-code-review` result (0 🔴 0 🟡 0 🔵 or N findings fixed in <sha>), ALSO posted as its own `gh issue comment <N>`>
 achieved: <per issue, ONE Slovak line of what LANDED on your branch — the supervisor relays this verbatim into your ticket's own run-card at its integration cycle>
 worktree: <your worktree's absolute path>

@@ -6,7 +6,7 @@ set -euo pipefail
 # The Scope-gate / Dedup / chain-depth+width / daily-cap / stream-routing /
 # presence / dismissal-word / net-drain classifier (#137/#329/#390/#842/#962/
 # #993) now lives in the importable, testable `gates/filing` package, run as
-# `python3 -m gates.filing`. It reads the JSON payload on STDIN (current CC
+# `python3 -P -m gates.filing`. It reads the JSON payload on STDIN (current CC
 # contract), does the #842 worker (subagent) hard-block, the pre-filter, the
 # `airuleset:scope-gate-ok` bypass, the presence read, all classification + git
 # + logging, prints the block reason to STDERR, and exits 0 (allow) / 2 (block).
@@ -25,7 +25,7 @@ PAYLOAD=$(cat 2>/dev/null || echo "")
 
 RC=0
 env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \
-    python3 -m gates.filing <<<"$PAYLOAD" || RC=$?
+    python3 -P -m gates.filing <<<"$PAYLOAD" || RC=$?
 if [ "$RC" -ne 0 ] && [ "$RC" -ne 2 ]; then
     echo "🚫 BLOCKED (fail-closed): block-ungated-issue-filing internal error — the gate" >&2
     echo "  exited $RC instead of running the check. This is a HOOK MALFUNCTION," >&2

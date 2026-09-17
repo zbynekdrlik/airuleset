@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Hook: PreToolUse (Bash matcher) -- THIN ADAPTER (#1020 gate-family rework).
 #
-# All logic lives in gates/secrets.py (run as `python3 -m gates.secrets`):
+# All logic lives in gates/secrets.py (run as `python3 -P -m gates.secrets`):
 #   * Gate 1 -- blocks `git add` of a sensitive FILENAME (TARGETS.md, .env*,
 #     *.pem/*.key/*.p12/..., *credential*/*secret*).
 #   * Gate 2 (#4) -- blocks `git add`/`git commit` when the STAGED CONTENT
@@ -30,7 +30,7 @@ PAYLOAD=$(cat 2>/dev/null || echo "")
 [ -z "$PAYLOAD" ] && PAYLOAD="${TOOL_INPUT:-}"
 RC=0
 env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \
-    python3 -m gates.secrets <<<"$PAYLOAD" || RC=$?
+    python3 -P -m gates.secrets <<<"$PAYLOAD" || RC=$?
 if [ "$RC" -ne 0 ] && [ "$RC" -ne 2 ]; then
     echo "🚫 BLOCKED (fail-closed): block-sensitive-staging internal error — the gate" >&2
     echo "  exited $RC instead of running the check. This is a HOOK MALFUNCTION," >&2

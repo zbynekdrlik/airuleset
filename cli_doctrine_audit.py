@@ -645,3 +645,60 @@ def format_table(matches):
             os.path.basename(m.path), m.fleet_source, m.confidence, m.action,
             m.anchors_hit))
     return "\n".join(rows)
+
+
+# --------------------------------------------------------------------------- #
+# #1061 -- worker-authors-design scan. Flags any agent/skill text that
+# instructs a WORKER to AUTHOR a design (the owner's #871 rule: design +
+# architecture by the Fable MAIN, the worker only implements). After #1061 the
+# worker template READS the main's design and never authors it, so this reads 0.
+# --------------------------------------------------------------------------- #
+
+_WD_AUTHOR_RE = re.compile(
+    r"(?:post|write|author|compose|creat\w*|draft)", re.IGNORECASE)
+_WD_DESIGN_RE = re.compile(
+    r"(?:design\s+(?:comment|approach)|\bTriage:|Architekt[uú]ra|"
+    r"2-3\s+(?:considered\s+)?approaches)", re.IGNORECASE)
+# A negation immediately before an authoring verb ("never author",
+# "do not write") EXEMPTS the line -- it forbids authoring, the correct shape.
+_WD_NEG_BEFORE_RE = re.compile(
+    r"(?:never|not|n't|\bno\b)\s+(?:\w+\s+){0,3}"
+    r"(?:post|write|author|compose|creat\w*|draft)", re.IGNORECASE)
+# Context cues that make an authoring imperative legitimate (the MAIN authors /
+# the worker READS / a historical/reversal note).
+_WD_CTX_EXEMPT_RE = re.compile(
+    r"read\b|confirm|the main\b|main's|main-authored|Design-by:\s*main|"
+    r"Anchors-confirmed|by the (?:Fable )?main|the supervisor|"
+    r"YOU \(the Fable MAIN\)|MAIN\)? AUTHOR|Historical|#1061|reversed|"
+    r"used to|the worker only implements|weaker (?:model|worker)", re.IGNORECASE)
+
+
+def scan_worker_design_authoring(repo_dir):
+    """Findings [{path, line, text}] for agent/skill text that instructs a
+    WORKER to AUTHOR a design. A worker-context file (``agents/*.md`` -- the
+    reader IS the worker) flags any non-exempt line carrying an authoring verb +
+    a design object; a skill file flags only a non-exempt line that ALSO names
+    the ``worker`` as the author (the supervisor authoring a design is correct).
+    Line-scoped (a documented limitation: an authoring imperative whose design
+    object sits on a different line is not caught)."""
+    import glob
+    findings = []
+    agents = sorted(glob.glob(os.path.join(repo_dir, "agents", "*.md")))
+    skills = sorted(glob.glob(os.path.join(repo_dir, "skills", "*", "*.md")))
+    for path in agents + skills:
+        worker_ctx = os.sep + "agents" + os.sep in path
+        try:
+            with open(path, encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except OSError:
+            continue
+        for i, line in enumerate(lines, 1):
+            if not (_WD_AUTHOR_RE.search(line) and _WD_DESIGN_RE.search(line)):
+                continue
+            if _WD_NEG_BEFORE_RE.search(line) or _WD_CTX_EXEMPT_RE.search(line):
+                continue
+            if not worker_ctx and not re.search(r"\bworker\b", line, re.IGNORECASE):
+                continue
+            rel = os.path.relpath(path, repo_dir)
+            findings.append({"path": rel, "line": i, "text": line.strip()})
+    return findings

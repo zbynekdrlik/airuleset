@@ -21,7 +21,7 @@ PAYLOAD=$(cat 2>/dev/null || echo "")
 [ -z "$PAYLOAD" ] && PAYLOAD="${TOOL_INPUT:-}"
 RC=0
 env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \
-    python3 -m gates.pushtest <<<"$PAYLOAD" 1>&2 || RC=$?
+    python3 -P -m gates.pushtest <<<"$PAYLOAD" 1>&2 || RC=$?
 if [ "$RC" -ne 0 ] && [ "$RC" -ne 2 ]; then
     echo "🚫 BLOCKED (fail-closed): pre-push-test-check internal error — the gate" >&2
     echo "  exited $RC instead of running the check. This is a HOOK MALFUNCTION," >&2

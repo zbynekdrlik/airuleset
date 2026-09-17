@@ -25,6 +25,6 @@ RC=0
 # deny channel, #682); the redirect routes any stray stdout there too and keeps
 # the stderr-emit contract (test_hook_deny_stderr) satisfied for this exit-2 hook.
 env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \
-    python3 -m gates.commitdesign <<<"$PAYLOAD" 1>&2 || RC=$?
+    python3 -P -m gates.commitdesign <<<"$PAYLOAD" 1>&2 || RC=$?
 [ "$RC" -eq 2 ] && exit 2
 exit 0

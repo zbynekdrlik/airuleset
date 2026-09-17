@@ -454,7 +454,7 @@ if [ "$RETRIES" -lt "$MAX_RETRIES" ] && grep -qiE '#[0-9]|deploy-prod|startup_fa
     _QS_REPO_ROOT="$(dirname "$_QS_DIR")"
     _QS_RC=0
     env PYTHONPATH="${_QS_REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \
-        python3 -m gates.questionscope <<<"$INPUT" 1>&2 || _QS_RC=$?
+        python3 -P -m gates.questionscope <<<"$INPUT" 1>&2 || _QS_RC=$?
     if [ "$_QS_RC" -eq 2 ]; then
         echo "$((RETRIES+1))" > "$RETRY_FILE"
         exit 2
