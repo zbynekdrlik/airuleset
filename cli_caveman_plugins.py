@@ -372,6 +372,25 @@ def reconcile_playwright_mcp_server(claude_json: dict, browsers_path) -> dict:
     return result
 
 
+def unreconcile_playwright_mcp_server(claude_json: dict) -> dict:
+    """Pure: return a NEW ~/.claude.json dict with the managed `playwright`
+    user-scope MCP server REMOVED (the per-box opt-out, #1048 fix-forward d),
+    every other top-level key and every other MCP server preserved untouched.
+    Idempotent (a no-op when the managed server is already absent). Needed
+    because an opted-out box may have been provisioned by an EARLIER push
+    (v0.1.321 wrote the server) — merely SKIPPING the write would leave that dead
+    `@playwright/mcp --headless chromium` server in place and Claude Code would
+    try to launch it (with an absent/broken browser) every session."""
+    result = dict(claude_json)
+    raw_servers = result.get("mcpServers")
+    if not isinstance(raw_servers, dict) or PLAYWRIGHT_MCP_SERVER_NAME not in raw_servers:
+        return result
+    servers = dict(raw_servers)
+    del servers[PLAYWRIGHT_MCP_SERVER_NAME]
+    result["mcpServers"] = servers
+    return result
+
+
 def caveman_mode_or_default(existing) -> str:
     """Pure: keep the user's current caveman mode if it's valid, else fall back
     to the managed default. Never clobbers a valid `/caveman` pick; only repairs
@@ -1083,6 +1102,63 @@ def reconcile_playwright_mcp_file(claude_json_path: Path = None, box_class: str 
         ok = False
     return ok
 
+
+def unprovision_playwright_mcp_file(claude_json_path: Path = None) -> None:
+    """#1048 fix-forward (d): on a per-box opt-out, TEAR DOWN any prior managed
+    Playwright provisioning — remove BOTH the browsers-path marker AND the
+    managed `playwright` MCP server entry from ~/.claude.json. A box provisioned
+    by an EARLIER push (v0.1.321 wrote the server) must not keep launching a dead
+    `--headless chromium` MCP server every session; and the absent marker makes
+    the push post-check SKIP. Best-effort + non-fatal + idempotent (a no-op when
+    neither is present), like every reconcile step here — a write failure only
+    loses the teardown for this run and self-heals on the next push."""
+    import tempfile
+    # 1. the browsers-path marker (best-effort).
+    try:
+        PLAYWRIGHT_BROWSERS_PATH_MARKER.unlink(missing_ok=True)
+    except OSError as e:
+        print("    ⚠ could not remove the stale playwright browsers-path marker (%s)"
+              % e, file=sys.stderr)
+    # 2. the managed server entry in ~/.claude.json (atomic, only when present).
+    path = claude_json_path or (Path.home() / ".claude.json")
+    try:
+        raw = path.read_text(encoding="utf-8") if path.exists() else ""
+    except OSError as e:
+        print("    ⚠ could not read ~/.claude.json to remove the playwright MCP "
+              "server (%s)" % e, file=sys.stderr)
+        return
+    if not raw.strip():
+        return
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        print("    ⚠ ~/.claude.json is invalid JSON — left the playwright MCP "
+              "server entry as-is", file=sys.stderr)
+        return
+    if not isinstance(data, dict):
+        return
+    new_data = unreconcile_playwright_mcp_server(data)
+    if new_data == data:
+        return
+    new_str = json.dumps(new_data, indent=2, ensure_ascii=False) + "\n"
+    tmp = None
+    try:
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+        os.write(fd, new_str.encode())
+        os.close(fd)
+        os.replace(tmp, str(path))
+        tmp = None
+        print("    playwright MCP server: removed (opted out on this box)")
+    except OSError as e:
+        print("    ⚠ could not remove the playwright MCP server from ~/.claude.json (%s)"
+              % e, file=sys.stderr)
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:  # airuleset:script-ok best-effort orphan cleanup
+                pass
+
+
 def _reconcile_settings_file():
     """Read SETTINGS_JSON, apply reconcile_managed_plugins(), write back only
     when it changed (backing up first). Returns "invalid" (unparseable JSON,
@@ -1226,17 +1302,19 @@ def provision_playwright_mcp(box_class: str = None) -> bool:
     if not PLAYWRIGHT_MANAGED:
         return True
     if PLAYWRIGHT_OPTOUT_MARKER.exists():
+        # errors="replace": a non-UTF-8 reason line must never raise
+        # (UnicodeDecodeError) out of the opt-out branch — that would defeat the
+        # whole "keep the push green on a box that cannot run chromium" purpose.
         try:
-            reason = PLAYWRIGHT_OPTOUT_MARKER.read_text(encoding="utf-8").strip()
+            reason = PLAYWRIGHT_OPTOUT_MARKER.read_text(
+                encoding="utf-8", errors="replace").strip()
         except OSError:
             reason = ""
-        # remove a stale browsers-path marker so the post-check SKIPs (not
-        # false-passes) — best-effort, never fatal.
-        try:
-            PLAYWRIGHT_BROWSERS_PATH_MARKER.unlink(missing_ok=True)
-        except OSError as e:
-            print("    ⚠ could not remove the stale playwright browsers-path "
-                  "marker (%s)" % e, file=sys.stderr)
+        # Tear DOWN any prior provisioning: remove the browsers-path marker AND
+        # the managed server entry (v0.1.321 may have written a server that now
+        # points at an absent/broken browser) — so the post-check SKIPs and
+        # Claude Code never launches a dead --headless chromium here.
+        unprovision_playwright_mcp_file()
         print("    playwright MCP: opted out on this box (%s) — skipping browser "
               "install + server write" % (reason or "no reason given"))
         return True

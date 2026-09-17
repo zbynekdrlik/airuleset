@@ -299,31 +299,80 @@ class TestProvisionPlaywrightMcp1048(unittest.TestCase):
         self.d = Path(tempfile.mkdtemp())
         self.optout = self.d / "airuleset-playwright-optout"
         self.bp_marker = self.d / "airuleset-playwright-browsers-path"
+        self.claude_json = self.d / ".claude.json"
         for name, val in (("PLAYWRIGHT_OPTOUT_MARKER", self.optout),
                           ("PLAYWRIGHT_BROWSERS_PATH_MARKER", self.bp_marker)):
             pt = mock.patch.object(p, name, val)
             pt.start()
             self.addCleanup(pt.stop)
 
-    def test_provision_opt_out_skips_install_server_and_removes_stale_marker(self):
+    def test_provision_opt_out_skips_install_server_and_tears_down(self):
         # (d): the per-box opt-out marker present => no browser install, no
-        # server write, the stale browsers-path marker removed, one honest line
-        # with the reason, returns True (a deliberate opt-out is a success).
+        # server write; instead TEAR DOWN prior provisioning (marker + server),
+        # print one honest line with the reason, return True (opt-out = success).
         import io
         self.optout.write_text(
             "spinbike-vps: no root, chromium system libs unavailable\n")
-        self.bp_marker.write_text("/home/x/.cache/ms-playwright\n")  # stale
         out = io.StringIO()
         with mock.patch.object(p, "ensure_playwright_browsers") as eb, \
                 mock.patch.object(p, "reconcile_playwright_mcp_file") as rc, \
+                mock.patch.object(p, "unprovision_playwright_mcp_file") as un, \
                 mock.patch("sys.stdout", out):
             ok = p.provision_playwright_mcp(box_class="shared-stream")
         self.assertTrue(ok)
         eb.assert_not_called()
         rc.assert_not_called()
-        self.assertFalse(self.bp_marker.exists())
+        un.assert_called_once()                    # prior provisioning torn down
         self.assertIn("opted out on this box", out.getvalue())
         self.assertIn("spinbike-vps", out.getvalue())
+
+    def test_provision_opt_out_survives_a_non_utf8_reason(self):
+        # (d) review-1 finding: a non-UTF-8 reason line must NOT crash provision.
+        self.optout.write_bytes(b"\xff\xfe not utf-8 reason\n")
+        with mock.patch.object(p, "unprovision_playwright_mcp_file"), \
+                mock.patch("sys.stdout", __import__("io").StringIO()):
+            ok = p.provision_playwright_mcp(box_class="shared-stream")  # must not raise
+        self.assertTrue(ok)
+
+    def test_unprovision_removes_managed_server_and_marker_keeps_others(self):
+        # (d) review-1 MAJOR: an opted-out box provisioned by an earlier push
+        # (v0.1.321 wrote the server) must have the DEAD server removed, not
+        # merely skipped — else Claude Code keeps launching a broken browser.
+        self.bp_marker.write_text("/home/x/.cache/ms-playwright\n")
+        seeded = {
+            "topLevel": 1,
+            "mcpServers": {
+                "playwright": p.render_playwright_mcp_server("/c"),
+                "other": {"command": "keepme"},
+            },
+        }
+        self.claude_json.write_text(json.dumps(seeded), encoding="utf-8")
+        p.unprovision_playwright_mcp_file(self.claude_json)
+        data = json.loads(self.claude_json.read_text())
+        self.assertNotIn("playwright", data["mcpServers"])   # dead server removed
+        self.assertIn("other", data["mcpServers"])           # other server kept
+        self.assertEqual(data["topLevel"], 1)                # other keys kept
+        self.assertFalse(self.bp_marker.exists())            # marker removed
+
+    def test_unprovision_is_idempotent_when_server_absent(self):
+        seeded = {"mcpServers": {"other": {"command": "x"}}}
+        self.claude_json.write_text(json.dumps(seeded), encoding="utf-8")
+        before = self.claude_json.read_bytes()
+        p.unprovision_playwright_mcp_file(self.claude_json)   # no managed server
+        self.assertEqual(before, self.claude_json.read_bytes())
+
+    def test_unprovision_non_fatal_on_missing_and_invalid_json(self):
+        # no ~/.claude.json at all -> no raise, marker still removed
+        self.bp_marker.write_text("x\n")
+        self.assertFalse(self.claude_json.exists())
+        p.unprovision_playwright_mcp_file(self.claude_json)   # must not raise
+        self.assertFalse(self.bp_marker.exists())
+        # invalid JSON -> non-fatal, left as-is
+        self.claude_json.write_text("{ not json")
+        import io
+        with mock.patch("sys.stderr", io.StringIO()):
+            p.unprovision_playwright_mcp_file(self.claude_json)  # must not raise
+        self.assertEqual("{ not json", self.claude_json.read_text())
 
     def test_provision_no_opt_out_proceeds_normally(self):
         # (d): with NO opt-out marker, provisioning proceeds (install + server).
@@ -416,6 +465,84 @@ class TestChromiumPostcheck1048(unittest.TestCase):
         import cli_remote
         src = inspect.getsource(cli_remote._deploy_to_all_remotes)
         self.assertIn("_playwright_chromium_postcheck()", src)
+
+
+class TestChromiumPostcheckExec1048(unittest.TestCase):
+    """#1048 fix-forward review-1: the substring tests above cannot catch a shell
+    syntax / quoting / command-substitution regression in this increasingly
+    complex fragment. Execute it in a real bash with a controlled HOME + a fake
+    npx (no real browser) and assert each branch's rc + operator message."""
+
+    def setUp(self):
+        import cli_remote
+        import tempfile
+        self.frag = cli_remote._playwright_chromium_postcheck()
+        self.home = Path(tempfile.mkdtemp())
+        (self.home / ".claude").mkdir()
+        (self.home / ".local" / "bin").mkdir(parents=True)
+
+    def _fake_npx(self, script):
+        binp = self.home / ".local" / "bin" / "npx"
+        binp.write_text("#!/bin/sh\n" + script + "\n")
+        binp.chmod(0o755)
+
+    def _marker(self):
+        (self.home / ".claude" / "airuleset-playwright-browsers-path").write_text("/tmp/bp\n")
+
+    def _run(self):
+        import os
+        import subprocess
+        env = dict(os.environ)
+        env["HOME"] = str(self.home)
+        env["PATH"] = str(self.home / ".local" / "bin") + os.pathsep + env.get("PATH", "")
+        return subprocess.run(["bash", "-c", self.frag],
+                              capture_output=True, text=True, timeout=60, env=env)
+
+    def test_fragment_is_valid_bash(self):
+        import subprocess
+        r = subprocess.run(["bash", "-n", "-c", self.frag],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_opt_out_skips_cleanly_with_reason(self):
+        (self.home / ".claude" / "airuleset-playwright-optout").write_text("spinbike: no root\n")
+        r = self._run()
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("SKIPPED: managed Playwright opted out", r.stderr)
+        self.assertIn("spinbike: no root", r.stderr)
+
+    def test_missing_marker_skips_cleanly(self):
+        self._fake_npx("exit 0")
+        r = self._run()
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("SKIPPED: managed Playwright not provisioned", r.stderr)
+
+    def test_exit_127_fails_88_with_named_diagnosis(self):
+        self._marker()
+        self._fake_npx('echo "error while loading shared libraries: libatk" >&2; exit 127')
+        r = self._run()
+        self.assertEqual(r.returncode, 88)
+        self.assertIn("exited 127", r.stderr)
+        self.assertIn("missing system shared libraries", r.stderr)
+        self.assertIn("install-deps", r.stderr)
+        self.assertIn("stderr tail", r.stderr)
+
+    def test_generic_failure_fails_88_with_stderr_tail(self):
+        self._marker()
+        self._fake_npx('echo "Executable doesnt exist at chromium_headless_shell" >&2; exit 1')
+        r = self._run()
+        self.assertEqual(r.returncode, 88)
+        self.assertIn("did not render in 30s", r.stderr)
+        self.assertIn("Executable doesnt exist", r.stderr)   # real error surfaced
+
+    def test_success_exits_zero_and_leaves_no_probe_temp(self):
+        import glob
+        self._marker()
+        self._fake_npx("exit 0")
+        r = self._run()
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual([], glob.glob("/tmp/airuleset-pw-probe.*"),
+                         "the probe must clean its own temp files")
 
 
 class TestStream2420(unittest.TestCase):

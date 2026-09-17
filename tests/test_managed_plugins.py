@@ -483,9 +483,12 @@ class TestPlaywrightBrowsers(TestCase):
 
     def test_install_failure_is_loud_but_non_fatal(self):
         out = StringIO()
+        # #1048 fix-forward (b): rc=1 now retries once — patch time.sleep so the
+        # retry pause does not really block the suite for 10 s.
         with m.patch("shutil.which", return_value="/usr/bin/npx"), \
                 m.patch("subprocess.run",
                         return_value=m.Mock(returncode=1, stderr="boom", stdout="")), \
+                m.patch("time.sleep"), \
                 m.patch("sys.stderr", out):
             airuleset.ensure_playwright_browsers(self._empty_dir())   # must not raise
         self.assertIn("install chromium", out.getvalue())
