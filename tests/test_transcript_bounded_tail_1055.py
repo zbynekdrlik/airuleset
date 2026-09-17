@@ -10,16 +10,21 @@ seek primitive; memoize per sweep on `(path, st_size, st_mtime_ns, max_lines)`
 cleared at the top of `run_once`; and journal one summary line per sweep.
 
 RED (fails on base main):
-  * the 300 MB measurement test — base reads the whole file (seconds, >300 MB
-    peak) so the < 300 ms / < 50 ms / < 32 MB bounds all fail;
+  * BoundedReadIsCheap (always-run) — base pulls the WHOLE file (bytes-read ==
+    size, peak >= size) and lacks `transcript_read_stats`;
   * the memo / reset / stats tests — `reset_transcript_cache` /
     `transcript_read_stats` do not exist on base;
-  * the `run_once` journal-summary test — base emits no `transcript reads:` line.
+  * the `run_once` journal-summary test — base emits no `transcript reads:` line;
+  * the 300 MB Measurement — the definitive perf+memory proof, kept but
+    env-gated behind AIRULESET_PERF_TESTS (review F2: a 300 MB write on every
+    full-suite run churns disk on the pressured fleet this ticket optimizes).
 
 GREEN-and-base behaviour locks (pass on BOTH): the bounded reader returns the
 SAME entries as a reference whole-file read (small file identical; large file
-last-N identical), and the folded `_read_jsonl_byte_tail` stays byte-identical
-to its historical seek reader.
+last-N identical WITHIN the 16 MB window cap — beyond the cap the newest suffix
+that fits is returned, and a single line > cap yields []; real entries are well
+under the cap so live behaviour is identical), and the folded
+`_read_jsonl_byte_tail` stays byte-identical to its historical seek reader.
 """
 import json
 import os
@@ -252,8 +257,18 @@ class MemoSemantics(unittest.TestCase):
                             "capped read must be far smaller than the file")
 
 
+@unittest.skipUnless(
+    os.environ.get("AIRULESET_PERF_TESTS"),
+    "heavy 300 MB perf/memory measurement — set AIRULESET_PERF_TESTS=1 to run "
+    "(env-gated per #1055 review F2: writing 300 MB on every full-suite run "
+    "churns disk on the CPU/disk-pressured fleet this ticket optimizes; the "
+    "always-run BoundedReadIsCheap proof covers the mechanism in CI, and the "
+    "before/after cProfile on the controller's real 550 MB transcript is the "
+    "live evidence).")
 class Measurement(unittest.TestCase):
-    """RED on base — the whole-file read is slow + memory-heavy on 300 MB."""
+    """RED on base (opt-in) — the whole-file read is slow + memory-heavy on
+    300 MB (first read ~2.3 s + >300 MB peak on base main vs < 300 ms / < 32 MB
+    bounded); the definitive perf+memory proof, kept but env-gated."""
 
     @classmethod
     def setUpClass(cls):
@@ -294,6 +309,45 @@ class Measurement(unittest.TestCase):
         dt = time.perf_counter() - t0
         self.assertEqual(len(entries), 200)
         self.assertLess(dt, 0.050, "second (memoized) read took %.3fs" % dt)
+
+
+class BoundedReadIsCheap(unittest.TestCase):
+    """Always-run mechanism proof (RED on base: `transcript_read_stats` is new;
+    and on base the whole-file read pulls the ENTIRE file so bytes-read == size).
+    A ~6 MB transcript read with max_lines=200 must pull only a bounded window,
+    far less than the file — this is the cheap CI-safe stand-in for the env-gated
+    300 MB Measurement (review F2), while staying decisive against base main."""
+
+    def test_bounded_read_pulls_far_fewer_bytes_than_the_file(self):
+        with TemporaryDirectory() as d:
+            p = str(Path(d) / "mid.jsonl")
+            _write_lines(p, [_line(i, pad=2000) for i in range(3000)])   # ~6 MB
+            size = os.path.getsize(p)
+            self.assertGreater(size, 5 * 1024 * 1024)
+            transcripts.reset_transcript_cache()
+            entries = transcripts._iter_jsonl_tail(p, 200)
+            self.assertEqual(len(entries), 200)
+            self.assertEqual([e["i"] for e in entries[-3:]], [2997, 2998, 2999])
+            read = transcripts.transcript_read_stats()["bytes"]
+            self.assertGreater(read, 0)
+            self.assertLess(read, size // 4,
+                            "bounded read pulled %d of %d bytes — not bounded" % (read, size))
+
+    def test_bounded_read_peak_memory_is_a_fraction_of_the_file(self):
+        # A cheap tracemalloc bound: reading the tail of a ~6 MB file must peak
+        # well under the file size (base main's whole-file read peaks >= the
+        # file). Generous bound (2 MB) vs a 6 MB file keeps it non-flaky.
+        with TemporaryDirectory() as d:
+            p = str(Path(d) / "mem.jsonl")
+            _write_lines(p, [_line(i, pad=2000) for i in range(3000)])   # ~6 MB
+            _reset()
+            tracemalloc.start()
+            entries = transcripts._iter_jsonl_tail(p, 200)
+            _cur, peak = tracemalloc.get_traced_memory()
+            tracemalloc.stop()
+            self.assertEqual(len(entries), 200)
+            self.assertLess(peak, 2 * 1024 * 1024,
+                            "peak %d bytes reading the tail of a 6 MB file" % peak)
 
 
 class RunOnceJournalSummary(unittest.TestCase):

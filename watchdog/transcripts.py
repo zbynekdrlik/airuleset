@@ -80,6 +80,10 @@ _TAIL_WINDOW_CAP = 16 * 1024 * 1024    # ceiling: 16 MB, then return what exists
 _TRANSCRIPT_TAIL_CACHE = {}
 
 # Per-sweep counters for the `run_once` journal summary (#1055 deliverable 4).
+# Count ONLY the memoized line reader (`_iter_jsonl_tail`) so all three numbers
+# describe one reader: `files` = real bounded reads, `bytes` = disk bytes pulled
+# (summed across window-growth re-reads), `hits` = memo hits. The byte-tail
+# reader is not counted here (see `_read_jsonl_byte_tail`).
 _TRANSCRIPT_TAIL_STATS = {"files": 0, "bytes": 0, "hits": 0}
 
 
@@ -91,9 +95,10 @@ def reset_transcript_cache():
 
 
 def transcript_read_stats():
-    """Snapshot of the per-sweep bounded-tail counters for the `run_once`
-    journal summary: {'files': <real reads>, 'bytes': <bytes read>,
-    'hits': <memo hits>}."""
+    """Snapshot of the per-sweep `_iter_jsonl_tail` counters for the `run_once`
+    journal summary: {'files': <real bounded reads>, 'bytes': <disk bytes
+    pulled>, 'hits': <memo hits>}. Scoped to the memoized line reader so the
+    three numbers stay coherent about one reader."""
     return dict(_TRANSCRIPT_TAIL_STATS)
 
 
@@ -119,13 +124,21 @@ def _iter_jsonl_tail(path, max_lines=60):
     window (256 KB -> 16 MB cap) until it holds `max_lines` complete lines,
     reaches the start of the file, or hits the cap — never a whole-file
     `f.read()` (#1055). Memoized per sweep on (path, st_size, st_mtime_ns,
-    max_lines). `[]` on OSError.
+    max_lines). `[]` on OSError. Contract: `max_lines` >= 1 (every caller
+    passes a positive line budget; a non-positive value returns only the
+    first window's suffix, not the whole file as the historical reader's
+    `[-0:]` accidentally did).
 
     Behaviour lock: for a transcript smaller than the first window the entries
     are byte-identical to the historical whole-file reader; for a large one the
     last `max_lines` complete lines equal a whole-file read's last `max_lines`
-    lines (the partial first line after a mid-file seek is dropped). Callers
-    treat the returned list as READ-ONLY — it is shared via the memo."""
+    lines (the partial first line after a mid-file seek is dropped) PROVIDED
+    those last `max_lines` lines fit within the 16 MB cap — beyond the cap the
+    newest contiguous suffix that fits is returned (and a single line larger
+    than the cap yields `[]`). Real transcript entries are well under the cap
+    (the corpus max is ~7 MB), so live behaviour is identical; the cap is a
+    hard memory bound, never a whole-file read. Callers treat the returned list
+    as READ-ONLY — it is shared via the memo."""
     try:
         st = os.stat(path)
     except OSError:
@@ -137,10 +150,11 @@ def _iter_jsonl_tail(path, max_lines=60):
         return cached
     window = _TAIL_WINDOW_START
     complete = []
-    nbytes = 0
+    nbytes_total = 0                    # actual bytes pulled from disk (incl. re-reads)
     try:
         while True:
             lines, at_bof, nbytes = _read_tail_window(path, window)
+            nbytes_total += nbytes
             # after a mid-file seek the first line is a fragment of an earlier
             # line — drop it so `complete` is exactly the file's trailing lines.
             complete = lines if at_bof else lines[1:]
@@ -157,7 +171,7 @@ def _iter_jsonl_tail(path, max_lines=60):
             continue
     _TRANSCRIPT_TAIL_CACHE[key] = out
     _TRANSCRIPT_TAIL_STATS["files"] += 1
-    _TRANSCRIPT_TAIL_STATS["bytes"] += nbytes
+    _TRANSCRIPT_TAIL_STATS["bytes"] += nbytes_total
     return out
 
 
@@ -171,9 +185,12 @@ def _read_jsonl_byte_tail(path, tail_bytes, max_entries):
     of MB (cambox's is 670 MB — a full whole-file read of it measured 1.17 s vs
     0.005 s for this seek), so the tail MUST be bounded by bytes, not read
     whole. Byte-bounded and single-shot, so it is NOT memoized (its key would
-    be tail_bytes/max_entries, not max_lines)."""
+    be tail_bytes/max_entries, not max_lines) and it is deliberately NOT counted
+    in `transcript_read_stats` / the run_once journal summary — that line reports
+    the memoized line-reader (`_iter_jsonl_tail`), so its files/bytes/hits stay
+    coherent about one reader instead of mixing in these never-memoized reads."""
     try:
-        lines, _at_bof, nbytes = _read_tail_window(path, int(tail_bytes))
+        lines, _at_bof, _nbytes = _read_tail_window(path, int(tail_bytes))
     except (OSError, ValueError, TypeError):
         return []
     out = []
@@ -182,8 +199,6 @@ def _read_jsonl_byte_tail(path, tail_bytes, max_entries):
             out.append(json.loads(ln))
         except Exception:
             continue
-    _TRANSCRIPT_TAIL_STATS["files"] += 1
-    _TRANSCRIPT_TAIL_STATS["bytes"] += nbytes
     return out
 
 
