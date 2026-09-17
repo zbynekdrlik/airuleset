@@ -333,6 +333,50 @@ def has_pending_request(sid, path=None):
 COMPACT_PENDING_HOLD_S = 120      # #1055 P3: seconds-based, cadence-independent bound
 
 
+# #1055 P3 fix-forward: a pending /compact request forces a FULL sweep only when
+# it could ACTUALLY be served THIS sweep. A request that has sat unserved beyond
+# this bound is wedged, not "pending work the sweep must react to". 6h is well
+# beyond the ~120s COMPACT_PENDING_HOLD_S delivery window and the 30-min
+# deliver_compact age cap, so a genuine live request is never called stale — while
+# a dead request (gk's 2026-09-07 self-callback, which the owner disable flag
+# keeps compact_sweep from EVER consuming or GC'ing) stops forcing a full sweep
+# every minute.
+COMPACT_REQUEST_STALE_S = 6 * 3600
+
+
+def actionable_compact_requests(requests, *, now, jobs_disabled):
+    """#1055 P3 fix-forward — the subset of `requests` that could ACTUALLY be
+    served by `compact_sweep` this sweep, i.e. the ONLY requests that justify
+    `sweep_urgent(compact_pending=True)` forcing a FULL sweep.
+
+    PURE: no I/O, no clock read. The caller passes the already-loaded `requests`
+    dict (from `load_compact_requests`), the sweep's `now`, and whether the owner
+    disable flag is set (`_owner_disabled("compact")`, computed once in run_once).
+    Returns a NEW dict of the surviving `{sid: entry}`; never mutates `requests`.
+
+      * `{}` when `jobs_disabled` — the owner flag `~/.claude/watchdog-disable-
+        compact` makes `compact_sweep` return early BEFORE it would ever consume
+        or GC a request, so NO pending request is servable; a request left in the
+        file is dead, not pending (the gk defect: a 2026-09-07 self-callback
+        request read as "pending" forever and forced a full sweep every minute).
+      * `{}` when `requests` is not a dict (a corrupt/empty store).
+      * otherwise drops every entry whose `ts` is missing / non-numeric (an
+        unmeasurable age can't be trusted) or older than `COMPACT_REQUEST_STALE_S`
+        (a request unserved >6h is wedged, not actionable). A NON-dict entry is
+        dropped too. A FUTURE-skewed `ts` (age < 0) is KEPT — fail toward FULL,
+        never silently calm past a request whose age can't be trusted downward."""
+    if jobs_disabled or not isinstance(requests, dict):
+        return {}
+    out = {}
+    for sid, entry in requests.items():
+        ts = entry.get("ts") if isinstance(entry, dict) else None
+        age = _safe_age(now, ts)
+        if age is None or age > COMPACT_REQUEST_STALE_S:
+            continue
+        out[sid] = entry
+    return out
+
+
 def pending_compact_hold(sid, now=None, hold_s=None, path=None):
     """#848 BOUNDED writer-side latch: True iff `sid` has a pending `/compact`
     request AND that request is YOUNGER than `hold_s` seconds (measured from its
