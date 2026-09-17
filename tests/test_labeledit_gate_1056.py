@@ -135,6 +135,16 @@ class HookLevel(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_full_authority_never_gated(self):
+        # #1056 review R1: a marker can only LOWER authority, so a full box can't
+        # be forced hermetically via a marker; a reduced ambient box would
+        # legitimately BLOCK. Guard: only exercise the full-authority bypass when
+        # the ambient box actually resolves to full (the fleet integrates on such
+        # a box), else skip rather than false-fail.
+        import tempfile as _tf
+        probe = _tf.mkdtemp(prefix="labeledit-authprobe-")
+        self.addCleanup(shutil.rmtree, probe, True)
+        if airuleset.resolve_authority(probe) != "full":
+            self.skipTest("ambient box is reduced-authority; full path unexercisable here")
         r = self._run("gh issue edit 5613 --remove-label prio:bounce",
                       fixture={"5613": _bounce()}, authority=None)
         self.assertEqual(r.returncode, 0, r.stderr)

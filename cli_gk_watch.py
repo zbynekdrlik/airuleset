@@ -41,6 +41,20 @@ _ADVISORY_COUNTS_RE = re.compile(r"Po[čc]ty\s*\(otvoren", re.IGNORECASE)
 _BOUNCE_RE = re.compile(r"\bBOUNCE\b")
 _ACCEPT_RE = re.compile(r"\bACCEPT\b")
 
+# An emoji-prefixed finding row (🔴/🟡/🔵 followed by an id digit) — the
+# ADVISORY signal, alongside the counts header. Deliberately NOT the loose
+# `_parse_gk_findings` id presence: its `[A-Z]\d+`/`F\d+` arms match ordinary
+# tokens ("PR2"→"R2", "H1"), which would misclassify a casual gk comment as an
+# ADVISORY verdict (#1056 review R1).
+_EMOJI_FINDING_RE = re.compile(r"(?:🔴|🟡|🔵)\s*\d")
+
+# A disposition ANCHOR — a line that dispositions a finding carries one of
+# these (a Closes-finding:/Disposition: keyword, the word "finding", a
+# wontfix, or a finding emoji). Used by `_cites_id` so a casual "fixed 2
+# typos" never false-dispositions finding 2 (#1056 review R1).
+_DISPOSITION_CONTEXT_RE = re.compile(
+    r"closes-finding|disposition|finding|wontfix|🔴|🟡|🔵", re.IGNORECASE)
+
 # A stream hand-off comment -- the same line-anchored contract
 # `airuleset._READINESS_LINE_RE` / `subdev-handoff-match.sh` enforce (optional
 # markdown emphasis/header/list prefix, then READY-FOR-REVIEW at line start).
@@ -95,22 +109,41 @@ def classify_gk_comment(body):
         verdict = "BOUNCE"
     elif _ACCEPT_RE.search(text):
         verdict = "ACCEPT"
-    elif _ADVISORY_COUNTS_RE.search(text) or ids:
+    elif _ADVISORY_COUNTS_RE.search(text) or _EMOJI_FINDING_RE.search(text):
         verdict = "ADVISORY"
     else:
         verdict = None
-    sm = _SHA_RE.search(text)
-    sha = sm.group(1) if sm else None
+    # #1056 review R1: prefer the sha the `gk-state:` marker stamped (its own
+    # line), else the first `@<hexsha>` anywhere.
+    sha = None
+    if mm:
+        nl = text.find("\n", mm.start())
+        marker_line = text[mm.start():nl if nl != -1 else len(text)]
+        ms = _SHA_RE.search(marker_line)
+        if ms:
+            sha = ms.group(1)
+    if sha is None:
+        sm = _SHA_RE.search(text)
+        sha = sm.group(1) if sm else None
     return verdict, sha, ids
 
 
 def _cites_id(body, fid):
-    """True if `body` cites finding id `fid` as a STANDALONE token (so id "1"
-    never matches "10"/"11"). Exact-id match, the dispatch's contract."""
+    """True if `body` DISPOSITIONS finding id `fid`: the id as a STANDALONE
+    token (so "1" never matches "10"/"11") on a line that ALSO carries a
+    disposition anchor (a Closes-finding:/Disposition:/finding keyword, a
+    finding emoji, or a leading `#<id>`) — so a casual "fixed 2 typos" never
+    false-dispositions finding 2 (#1056 review R1, tightening the exact-id
+    contract)."""
     if not body or not fid:
         return False
-    return re.search(r"(?<![0-9A-Za-z])%s(?![0-9A-Za-z])" % re.escape(fid),
-                     body) is not None
+    tok = re.compile(r"(?<![0-9A-Za-z])%s(?![0-9A-Za-z])" % re.escape(fid))
+    for line in body.splitlines():
+        if not tok.search(line):
+            continue
+        if _DISPOSITION_CONTEXT_RE.search(line) or ("#" + fid) in line:
+            return True
+    return False
 
 
 def _exact_match(a, b):
@@ -161,6 +194,17 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
     if rows is None:
         base["state"] = "unknown"
         return base
+    if not self_login:
+        # #1056 review R1: without a resolvable stream identity we cannot detect
+        # the stream's RFRs, so an unanswered-BOUNCE read would over-report —
+        # return unknown (the gate then fails OPEN, never a false accusation,
+        # #539). A gh hiccup that nulled self_login is exactly this case.
+        base["state"] = "unknown"
+        return base
+
+    def _snapshot(g):
+        return {"id": g["id"], "verdict": g["verdict"], "created_at": g["ts"],
+                "sha": g["sha"], "ids": list(g["ids"])}
 
     gk_comments = []          # {ts, id, verdict, sha, ids}
     stream_comments = []      # {ts, body}
@@ -173,15 +217,19 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
         login = c.get("login") or ""
         body = c.get("body") or ""
         cid = c.get("id")
-        is_rfr_line = bool(_RFR_RE.search(body))
-        if match(login, gk_login) and not is_rfr_line:
+        # #1056 review R1: the RFR-line signal is SELF-authored only, so a gk
+        # BOUNCE that QUOTES the stream's `READY-FOR-REVIEW` line is never
+        # dropped from gk_comments; on a shared-gh-identity box the RFR line
+        # still discriminates a hand-off from a verdict.
+        is_rfr = match(login, self_login) and bool(_RFR_RE.search(body))
+        if match(login, gk_login) and not is_rfr:
             verdict, sha, ids = classify_gk_comment(body)
             if verdict is not None and ts is not None:
                 gk_comments.append({"ts": ts, "id": cid, "verdict": verdict,
                                     "sha": sha, "ids": ids})
         if match(login, self_login):
             stream_comments.append({"ts": ts, "body": body})
-            if is_rfr_line and ts is not None and (rfr_ts is None or ts > rfr_ts):
+            if is_rfr and ts is not None and (rfr_ts is None or ts > rfr_ts):
                 rfr_ts, rfr_id = ts, cid
 
     if rfr_ts is not None:
@@ -191,10 +239,8 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
         base["state"] = "no-gk-comment"
         return base
 
-    gk_latest = max(gk_comments, key=lambda g: g["ts"])
-    base["gk_latest"] = {"id": gk_latest["id"], "verdict": gk_latest["verdict"],
-                         "created_at": gk_latest["ts"], "sha": gk_latest["sha"],
-                         "ids": list(gk_latest["ids"])}
+    gk_latest_overall = max(gk_comments, key=lambda g: g["ts"])
+    rfr_eff = rfr_ts if rfr_ts is not None else 0.0
 
     # Resolve the PR branch head commit time (best-effort; None → the gate
     # treats it as "no commit since the verdict", the safe block direction).
@@ -204,13 +250,21 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
         except Exception:
             base["head_ts"] = None
 
-    rfr_eff = rfr_ts if rfr_ts is not None else 0.0
-
-    if gk_latest["verdict"] == "BOUNCE" and gk_latest["ts"] > rfr_eff:
+    # #1056 review R1: bounce-unanswered fires on the newest BOUNCE comment
+    # newer than the last RFR, INDEPENDENT of whether an even-newer non-BOUNCE
+    # gk comment (a delta advisory) exists — else a follow-up advisory would
+    # mask an unanswered BOUNCE from the label gate. gk_latest then reflects
+    # that BOUNCE so the gate cites/times the right verdict.
+    bounces = [g for g in gk_comments if g["verdict"] == "BOUNCE"]
+    newest_bounce = max(bounces, key=lambda g: g["ts"]) if bounces else None
+    if newest_bounce is not None and newest_bounce["ts"] > rfr_eff:
+        base["gk_latest"] = _snapshot(newest_bounce)
         base["state"] = "bounce-unanswered"
-        base["age_seconds"] = max(0.0, now - gk_latest["ts"])
-        base["undispositioned_ids"] = list(gk_latest["ids"])
+        base["age_seconds"] = max(0.0, now - newest_bounce["ts"])
+        base["undispositioned_ids"] = list(newest_bounce["ids"])
         return base
+
+    base["gk_latest"] = _snapshot(gk_latest_overall)
 
     # needs-disposition: finding ids raised by gk comments NEWER than the last
     # RFR that no LATER stream comment cites by exact id.

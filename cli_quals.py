@@ -1869,13 +1869,19 @@ _GK_HANDOFF_BOUNCE_OVERRIDE = "prio:bounce"
 def _count_bounce(rows):
     """Count of rows carrying the `prio:bounce` label (#1056 L1 (b)) — the
     footer's `· bounce K`. `rows` is the `{number: {"labels": [...]}}` dict the
-    footer already partitioned (the WORKABLE slice), so bounce is a subset of
-    `I N` and can never drift from the gk/open counts (#367 one-derivation). A
-    missing/unreadable labels value counts as no-bounce (the safe direction)."""
+    footer already partitioned (the WORKABLE slice = open ∪ gk), so bounce is a
+    subset of WORKABLE and derives from the SAME rows as gk/open (#367
+    one-derivation, never a second query). A bounce row that also carries a
+    stale hand-off label is counted in `gk` (excluded from the displayed `I N`)
+    yet still counted here — a returned bounce is urgent regardless of a stale
+    label, so `· bounce K` counts WORKABLE-bounce, not strictly I-bounce. A
+    missing/unreadable/malformed labels value counts as no-bounce (the safe
+    direction — never crash the footer refresh, #1056 review R2)."""
     n = 0
     for row in (rows or {}).values():
         labels = row.get("labels") if isinstance(row, dict) else None
-        names = {(lb or {}).get("name") for lb in (labels or [])}
+        names = {(lb or {}).get("name") for lb in (labels or [])
+                 if isinstance(lb, dict)}
         if _GK_HANDOFF_BOUNCE_OVERRIDE in names:
             n += 1
     return n

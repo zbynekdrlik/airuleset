@@ -203,17 +203,24 @@ def _bounce_nudge_message(tickets, name, root, now, watch_fn=None):
     """The session bounce nudge text (#1056 L1 (c) / #1057 item 1). When
     gk-watch resolves a BOUNCE verdict for a ticket, emit a per-ticket
     `BOUNCE #N (gk HH:MM) unanswered Xh — dispatch a lane now` line; fall back
-    VERBATIM to today's `watchdog.BOUNCE_NUDGE` text when nothing resolves (a gh
-    error / low budget / no verdict → unknown). Cadence/dedup/persist are the
-    caller's; this only shapes the message. `watch_fn(issue, root)` is
-    injectable for tests (default: `airuleset.gk_watch_issue`, which is
-    rate-guarded + fail-safe to unknown)."""
+    VERBATIM to today's `watchdog.BOUNCE_NUDGE` text when NOTHING resolves (a gh
+    error / low budget / no verdict → unknown). On PARTIAL enrichment (some
+    tickets resolve, others return unknown) the resolved tickets get rich lines
+    AND the unresolved ones are still named as bare `#N` so a returned bounce is
+    never silently dropped from the operator nudge (#1056 review R2).
+    Cadence/dedup/persist are the caller's; this only shapes the message.
+    `watch_fn(issue, root)` is injectable for tests (default:
+    `airuleset.gk_watch_issue`, rate-guarded + fail-safe to unknown; the nudge
+    never needs the PR head, so head resolution is skipped, and the sweep's
+    `now` governs the age)."""
     wf = watch_fn
     if wf is None:
         import airuleset
-        wf = lambda iss, r: airuleset.gk_watch_issue(iss, cwd=r)  # noqa: E731
+        wf = lambda iss, r: airuleset.gk_watch_issue(  # noqa: E731
+            iss, cwd=r, now=now, head_ts_fn=lambda _i: None)
     import datetime
     lines = []
+    unresolved = []
     for n in tickets:
         try:
             st = wf(n, root)
@@ -228,8 +235,14 @@ def _bounce_nudge_message(tickets, name, root, now, watch_fn=None):
                 when = datetime.datetime.fromtimestamp(ts).strftime("%H:%M")
             lines.append("BOUNCE #%d (gk %s) unanswered %.0fh — dispatch a "
                          "lane now" % (n, when, hrs))
+        else:
+            unresolved.append(n)
     if lines:
-        return "bounce-backstop [%s]: %s" % (name, "; ".join(lines))
+        msg = "bounce-backstop [%s]: %s" % (name, "; ".join(lines))
+        if unresolved:
+            msg += "; also open prio:bounce %s" % " ".join(
+                "#%d" % n for n in unresolved)
+        return msg
     tick_str = " ".join("#%d" % n for n in tickets)
     return watchdog.BOUNCE_NUDGE % (tick_str, name)
 
@@ -527,12 +540,6 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
         if same and fresh:
             continue                           # already nudged/pinged this set
         tick_str = " ".join("#%d" % n for n in tickets)
-        # #1056 L1 (c): the session nudge gains the gk verdict time + unanswered
-        # age via gk-watch (kind/cadence/dedup unchanged); falls back to today's
-        # text when nothing resolves. Computed here so the gh fetch happens only
-        # once a nudge is actually being delivered (past the dedup check above).
-        nudge_msg = _bounce_nudge_message(tickets, name, root, now,
-                                          watch_fn=watch_fn)
         if pid:
             captured = watchdog.capture_pane(pid, run)
             if watchdog.pane_in_mode(pid, run) \
@@ -540,6 +547,14 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                 # working / armed-loop / already-nudged pane gets NOTHING —
                 # the label alone is the insertion (never interrupt mid-work).
                 continue
+            # #1056 L1 (c): the session nudge gains the gk verdict time +
+            # unanswered age via gk-watch (kind/cadence/dedup unchanged); falls
+            # back to today's text when nothing resolves. Computed HERE — past
+            # the busy/skip gates — so the gk-watch gh fetch runs ONLY when a
+            # nudge is actually being delivered to an idle pane (#1056 review R2),
+            # never on the no-pane Discord branch or a skipped working pane.
+            nudge_msg = _bounce_nudge_message(tickets, name, root, now,
+                                              watch_fn=watch_fn)
             if not watchdog.pane_at_idle_prompt(captured):
                 # not bare-idle but past every live-work guard above — an
                 # idle-with-a-FOREIGN-draft pane, not a running turn. Stash

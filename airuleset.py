@@ -3897,8 +3897,9 @@ def cmd_tickets_status(args):
                 entry["open"] = len(workable_rows) - gk
                 entry["gk"] = gk
                 # #1056 L1: `· bounce K` — open prio:bounce tickets in this
-                # box's slice, from the SAME workable rows (a subset of I N,
-                # never a second query; #367 one-derivation).
+                # box's slice, from the SAME workable rows (a subset of the
+                # WORKABLE slice = open ∪ gk, never a second query; #367
+                # one-derivation).
                 entry["bounce"] = _count_bounce(workable_rows)
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)
@@ -6625,21 +6626,28 @@ def _pr_head_commit_ts(issue, slug, root=None):
         return None
     if not isinstance(prs, list) or not prs:
         return None
-    ref = re.compile(r"#%d\b" % int(issue))
+    # #1056 review R1: require a CLOSING reference (Closes/Fixes/Resolves #N),
+    # not a bare `#N` mention (a PR that merely "supersedes #N" is the wrong
+    # PR), and NO single-PR fallback — when the closing PR cannot be pinned,
+    # return None so the gate treats it as 'no commit since the verdict' (blocks,
+    # the safe direction), never a wrong ALLOW off a misidentified PR.
+    close_ref = re.compile(
+        r"(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#%d\b" % int(issue),
+        re.IGNORECASE)
     cand = None
     for pr in prs:
-        if isinstance(pr, dict) and ref.search(pr.get("body") or ""):
+        if isinstance(pr, dict) and close_ref.search(pr.get("body") or ""):
             cand = pr
             break
-    if cand is None and len(prs) == 1 and isinstance(prs[0], dict):
-        cand = prs[0]
     if not isinstance(cand, dict):
         return None
     oid = cand.get("headRefOid")
     if not oid:
         return None
+    # author.date (not committer.date) resists a rebase that bumps committer
+    # dates with no new work from falsely reading as a fresh fix (#1056 review R1).
     d = _gh_out("api", "repos/%s/commits/%s" % (slug, oid),
-                "-q", ".commit.committer.date", cwd=root)
+                "-q", ".commit.author.date", cwd=root)
     return cli_gk_watch._parse_iso(d) if d else None
 
 

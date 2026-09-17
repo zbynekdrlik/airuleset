@@ -43,6 +43,11 @@ class CountBounce(unittest.TestCase):
         self.assertEqual(cli_quals._count_bounce({}), 0)
         self.assertEqual(cli_quals._count_bounce(None), 0)
         self.assertEqual(cli_quals._count_bounce({9: {"labels": None}}), 0)
+        # #1056 review R2: a non-dict label element must not crash the refresh.
+        self.assertEqual(
+            cli_quals._count_bounce({9: {"labels": ["prio:bounce", None]}}), 0)
+        self.assertEqual(cli_quals._count_bounce({9: {}}), 0)
+        self.assertEqual(cli_quals._count_bounce({9: "not-a-dict"}), 0)
 
 
 class BounceSegmentRender(unittest.TestCase):

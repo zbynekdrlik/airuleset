@@ -21,6 +21,7 @@ only; the shell/token parsing is REUSED from gates.selfservice (the #1020
 "one implementation of each migrated concern" intent) rather than re-copied.
 """
 import os
+import re
 import sys
 from datetime import datetime
 
@@ -33,6 +34,23 @@ from gates.shellcmd import split_top_level
 
 _BOUNCE_LABEL = "prio:bounce"
 _RFR_LABEL = "ready-for-review"
+
+# #1056 review R1: `gh issue edit <github-url>` is a form gh accepts; extract the
+# issue number from a `…/issues/N` URL so a URL-form blind flip is still gated.
+_ISSUE_URL_RE = re.compile(r"/issues/(\d+)")
+
+
+def _resolve_ticket(tk):
+    """The issue number for a `gh issue edit …` command — the numeric positional
+    (`_ticket_of`), else a `…/issues/N` URL positional. '-' when none."""
+    t = _ticket_of(tk, "")
+    if t and t.isdigit():
+        return t
+    for tok in tk:
+        m = _ISSUE_URL_RE.search(tok)
+        if m:
+            return m.group(1)
+    return t
 
 
 # --------------------------------------------------------------------------- #
@@ -116,7 +134,7 @@ def classify_command(cmd, cwd=None, watch_fn=None):
         risky = (_BOUNCE_LABEL in rem) or (_RFR_LABEL in add)
         if not risky:
             continue
-        ticket = _ticket_of(tk, "")
+        ticket = _resolve_ticket(tk)
         if not (ticket and ticket.isdigit()):
             results.append({"verdict": "PASS", "reason": "no-ticket",
                             "ticket": ticket, "gk_latest": None})
@@ -170,9 +188,13 @@ def _block_message(blocks):
 
 
 def _reduced_authority(cwd):
-    """True only for a resolvable REDUCED sub-dev stream; None/False otherwise
-    (degrade-to-allow — a box whose authority we cannot resolve is never
-    gated)."""
+    """True for a REDUCED sub-dev stream (any resolved profile != "full"), False
+    for a full box, None only on an exception. NB (#1056 review R1):
+    `resolve_authority` never returns None — an UNMAPPED box resolves to the
+    fail-safe `fork-no-merge` (reduced), so the gate DOES engage on it (the safe
+    over-gate direction; gk-watch then fail-opens to unknown → allow). A full box
+    (maintainer / gatekeeper / ci-runner) resolves to "full" and is never
+    gated."""
     try:
         import airuleset
         profile = airuleset.resolve_authority(cwd)
