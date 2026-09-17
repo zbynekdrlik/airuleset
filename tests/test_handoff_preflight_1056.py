@@ -74,6 +74,15 @@ class PreflightBlocks(unittest.TestCase):
         self.assertIn("no new commit since BOUNCE", msg)
         self.assertIn("C1", msg)
 
+    def test_bounce_unanswered_commit_exactly_at_verdict_blocks(self):
+        # #1056 review-A boundary: head_ts == gk_ts is NOT "a new commit since"
+        # the BOUNCE (strict >), so the pre-flight must BLOCK.
+        w = _watch("bounce-unanswered", ids=["1"], gk_ts=1000.0, head_ts=1000.0)
+        msg = self._pf("READY-FOR-REVIEW: x\nCloses-finding: 1 — fixed in abc1234",
+                       w)
+        self.assertIsNotNone(msg)
+        self.assertIn("no new commit since BOUNCE", msg)
+
     def test_bounce_unanswered_new_commit_but_undispositioned_blocks(self):
         # a commit landed since the BOUNCE, but the body dispositions none of
         # the BOUNCE's finding ids.

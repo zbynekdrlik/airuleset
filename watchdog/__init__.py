@@ -1766,6 +1766,15 @@ _BUDGET_MIN_GH_BATCH_S = 25
 # constants by the #1050 value-lock test (min_budget == bound + overshoot; worst
 # finish (SOFT_CAP - min_budget) + bound + overshoot <= SOFT_CAP < 120).
 _BUDGET_MIN_GK_ORPHAN_S = 45     # == cross_stream._GKORPHAN_SWEEP_BUDGET_S (15) + _GKORPHAN_OVERSHOOT_S (30)
+# #1056 L2 (h) review-B 🔴 — Job 50 bounce_flip_revert: SAME value-lock as Job
+# 36. Its in-job bound is `_BOUNCEFLIP_BUDGET_S`=15 (dominant per-item read
+# timeout) and its worst single op behind one gate is a 2-call reconcile WRITE
+# (note ~15s + ONE combined label edit ~15s = `_BOUNCEFLIP_OVERSHOOT_S`=30), so
+# a bare GH_FETCH floor (20) would let it start at 20s and run the reconcile
+# into the 120s kill. This floor = bound + one 30s overshoot, so worst finish
+# (SOFT_CAP - min) + bound + overshoot = (100-45)+15+30 = 100 <= the 100s soft
+# cap. Kept in sync with cross_stream's two constants by the value-lock test.
+_BUDGET_MIN_BOUNCEFLIP_S = 45    # == cross_stream._BOUNCEFLIP_BUDGET_S (15) + _BOUNCEFLIP_OVERSHOOT_S (30)
 _BUDGET_MIN_SSH_FLEET_S = 65      # ssh fanout across fleet hosts (per-host ~60), hour-gated, coordinator-only
 _BUDGET_MIN_HTTP_PROBE_S = 15     # a single HTTP GET (usage timeout 12 / healthz 8) + margin
 _BUDGET_MIN_PS_REAPER_S = 10      # a ps read + targeted kill / a per-pane tmux round-trip (fast subprocess)
@@ -4908,7 +4917,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              now, run, state, send_fn=send_fn, dry_run=dry_run,
              flip_fetch=bounceflip_fetch,
              persist=lambda: save_state(state_path, state)),
-         "bounce-flip-revert error", min_budget=_BUDGET_MIN_GH_FETCH_S,
+         "bounce-flip-revert error", min_budget=_BUDGET_MIN_BOUNCEFLIP_S,
          gh_poll_hold=True)  # heavy-read poller; rare revert write is non-urgent
 
     # Job 37 (#776) — RUNAWAY SHADOW-UGREP OS-PROCESS REAPER (the FIRST

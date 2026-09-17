@@ -2230,6 +2230,14 @@ def gk_orphan_marker_sweep(now, run, state, send_fn, home=None, dry_run=False,
 # =========================================================================== #
 BOUNCEFLIP_INTERVAL = 6 * 3600     # rare event; heavy per-item gh reads (6h, like gk_orphan)
 _BOUNCEFLIP_BUDGET_S = 15          # the in-job _SweepBudget bound (dominant per-item read timeout)
+# #1056 review-B 🔴: the value-lock overshoot. `_apply_bounce_flip_revert` makes
+# TWO sequential ~15 s gh writes (the note + ONE combined label edit), so the
+# job's single-op overshoot is ~30 s; the registry's min_budget must be
+# `bound + overshoot` (= 45) so worst-finish stays <= the 100 s soft cap (well
+# under the 120 s hard kill) — the SAME value-lock discipline as Job 36's
+# `_GKORPHAN_OVERSHOOT_S`. (Combining the two label edits into one gh call keeps
+# this at a 2-write profile rather than 3.)
+_BOUNCEFLIP_OVERSHOOT_S = 30
 _BOUNCEFLIP_REVERT_LOG = "labeledit-reverts.log"   # the (i) metric's revert-notes source
 
 _BOUNCEFLIP_NOTE_TEMPLATE = (
@@ -2242,6 +2250,17 @@ _BOUNCEFLIP_NOTE_TEMPLATE = (
     "Stream: read the BOUNCE, fix + disposition every id, then hand off via "
     "`airuleset.py handoff` (its pre-flight clears `prio:bounce` on a valid "
     "RFR). If this is a mistake, the gatekeeper re-labels.")
+
+# #1056 review-B 🟡: a DEDICATED ping for the label-failed branch — the note
+# posted (durable record) but the label revert did NOT land, so the human must
+# re-label by hand. NEVER reuse _BOUNCEFLIP_NOTE_TEMPLATE here (it claims the
+# revert succeeded). Mirrors Job 36's own `_GKORPHAN_PING_TEMPLATE` split.
+_BOUNCEFLIP_PING_TEMPLATE = (
+    "⚠️ **%(name)s: blind-label-flip revert needs a manual re-label #%(num)d**\n"
+    "> A gk BOUNCE verdict (comment %(gk_id)s, ids: %(ids)s) stands with no "
+    "commit since it, and `ready-for-review` was re-added / `prio:bounce` "
+    "cleared blindly. I posted the revert note on #%(num)d but the label edit "
+    "FAILED — re-add `prio:bounce` + remove `ready-for-review` by hand.")
 
 
 def _bounce_flip_decide(facts, gk_login):
@@ -2265,7 +2284,17 @@ def _bounce_flip_decide(facts, gk_login):
     if not isinstance(gk_ts, (int, float)):
         return (False, "no-verdict-ts", [])
     head_ts = facts.get("head_ts")
-    if isinstance(head_ts, (int, float)) and head_ts > gk_ts:
+    # #1056 review-B 🟡: an UNRESOLVABLE head_ts (None — no PR, ambiguous
+    # multi-PR, exact-#ref mismatch, or a gh error; `_pr_head_commit_ts`
+    # returns None for all of these) must NEVER be read as "no commit → revert".
+    # For the L1 gate/composer None→block is the safe direction, but this
+    # automat REVERTS labels + posts a public accusation, so None→act is a
+    # false-accusation vector. Require a resolvable head to ever flag a flip
+    # (bias to SILENCE — a fork stream with no upstream PR head is left to the
+    # stream-side guards, never reverted here).
+    if not isinstance(head_ts, (int, float)):
+        return (False, "head-unresolvable", [])
+    if head_ts > gk_ts:
         return (False, "commit-since-verdict", [])
 
     def _nongk_after(actor, at):
@@ -2342,11 +2371,22 @@ def _fetch_bounce_flip_candidates(root, home=None, budget=None, logs=None):
 
     Candidates = OPEN tickets carrying `ready-for-review` (the flip's observable
     label). Per candidate, gathers the gk-watch hand-off state + the newest
-    ready-for-review-add / prio:bounce-unlabel events (actor + time). Returns a
-    list of fact dicts for `_bounce_flip_decide`, or None on any gh error
-    (fail-safe — an auth/network hiccup must never look like 'no flips'). Each
-    per-item read is `_SweepBudget`-gated (unwired None = no bound); a spent
-    budget truncates the candidate list (the rest are re-read next sweep)."""
+    ready-for-review-add / prio:bounce-unlabel events (actor + time) + the owning
+    `stream:<x>` label. Returns a list of fact dicts for `_bounce_flip_decide`,
+    or None on any gh error (fail-safe — an auth/network hiccup must never look
+    like 'no flips'). Each per-item read is `_SweepBudget`-gated (unwired None =
+    no bound); a spent budget truncates the candidate list (the rest are re-read
+    next sweep).
+
+    #1056 review-B 🔵 (scope): candidates are narrowed to `ready-for-review`-
+    PRESENT tickets, so `_bounce_flip_decide`'s `bounce-removed` branch (a
+    `prio:bounce` cleared with NO `ready-for-review` present) is reachable here
+    only when ready-for-review is ALSO still on the ticket. A pure clear-only
+    blind flip (prio:bounce dropped, no ready-for-review) is out of scope for
+    this automat — it is already prevented upstream by the labeler guard (g,
+    which now gates the clear) and the stream-side blind-label-flip hook (L1 d),
+    and a returned bounce dropped from the queue still surfaces in the footer's
+    `· bounce K` (i0)."""
     import subprocess
     import airuleset
     slug = airuleset._repo_slug(cwd=root)
@@ -2400,9 +2440,16 @@ def _fetch_bounce_flip_candidates(root, home=None, budget=None, logs=None):
         (rfr_by, rfr_at), (bounce_by, bounce_at) = _bounce_flip_label_events(
             events_raw, gk_login)
         names = _current_issue_labels(root, n, env)
+        # #1056 review-B 🟡: the OWNING stream (the `stream:<x>` label), for the
+        # revert-audit's per-stream tally — None when unlabelled/unreadable.
+        stream = None
+        for nm in (names or set()):
+            if isinstance(nm, str) and nm.startswith("stream:"):
+                stream = nm.split("stream:", 1)[1] or None
+                break
         gl = st.get("gk_latest") or {}
         out.append({
-            "number": n, "state": st.get("state"),
+            "number": n, "state": st.get("state"), "stream": stream,
             "gk_id": gl.get("id"), "gk_created_at": gl.get("created_at"),
             "gk_sha": gl.get("sha"), "gk_ids": list(gl.get("ids") or []),
             "head_ts": st.get("head_ts"),
@@ -2416,15 +2463,24 @@ def _fetch_bounce_flip_candidates(root, home=None, budget=None, logs=None):
     return out
 
 
-def _apply_bounce_flip_revert(root, num, gk_id, missing_ids, home=None,
-                              dry_run=False):
-    """Revert ONE blind flip: post the note (durable record FIRST), then re-add
-    `prio:bounce` + remove `ready-for-review`, and append a revert-audit line
-    for the (i) `--label-flips` metric. Returns a TRI-STATE (never raises):
-      "reverted"       — note + both label edits landed;
+def _apply_bounce_flip_revert(root, num, gk_id, missing_ids, stream=None,
+                              home=None, dry_run=False):
+    """Revert ONE blind flip: post the note (durable record FIRST), then a
+    SINGLE combined label edit (re-add `prio:bounce` + remove `ready-for-review`
+    in one gh call), and append a revert-audit line for the (i) `--label-flips`
+    metric. Returns a TRI-STATE (never raises):
+      "reverted"       — note + the label edit landed;
       "comment-failed" — nothing posted; caller undoes the dedup + retries;
-      "label-failed"   — the note posted but a label edit did not (caller KEEPS
-                         the dedup, never re-posts, and pings once)."""
+      "label-failed"   — the note posted but the label edit did not (caller
+                         KEEPS the dedup, never re-posts, and pings once).
+
+    #1056 review-B 🔴: the two label edits are ONE `gh issue edit --add-label …
+    --remove-label …` call (gh applies both in a single PATCH), so the write is
+    a 2-op profile (note + edit), keeping the sweep's single-op overshoot at
+    ~30 s (the value-locked `_BOUNCEFLIP_OVERSHOOT_S`), not the 45 s of three
+    sequential edits. #1056 review-B 🟡: the audit line records the OWNING
+    STREAM (`stream:<x>` label, passed by the fetch), not the repo basename, so
+    the `--label-flips` metric's per-stream tally is genuinely per stream."""
     if dry_run:
         return "reverted"
     import subprocess
@@ -2442,10 +2498,9 @@ def _apply_bounce_flip_revert(root, num, gk_id, missing_ids, home=None,
     c = _gh("issue", "comment", str(num), "--body", body)
     if c is None or c.returncode != 0:
         return "comment-failed"
-    add = _gh("issue", "edit", str(num), "--add-label", "prio:bounce")
-    rem = _gh("issue", "edit", str(num), "--remove-label", "ready-for-review")
-    ok = (add is not None and add.returncode == 0
-          and rem is not None and rem.returncode == 0)
+    edit = _gh("issue", "edit", str(num), "--add-label", "prio:bounce",
+               "--remove-label", "ready-for-review")
+    ok = edit is not None and edit.returncode == 0
     # Record the revert for the --label-flips metric (best-effort, non-fatal:
     # the audit line is observability, never a gate on the revert decision).
     try:
@@ -2453,7 +2508,7 @@ def _apply_bounce_flip_revert(root, num, gk_id, missing_ids, home=None,
         _audit.append_line(
             _BOUNCEFLIP_REVERT_LOG,
             "%s stream=%s repo=%s ticket=%s verdict=%s ids=%s"
-            % (_audit.iso_now(), _audit.project_of(root),
+            % (_audit.iso_now(), stream or "unknown",
                os.path.basename(root.rstrip("/")), num, gk_id, ids_str))
     except Exception as _e:                     # log-and-continue, never fail the revert
         import sys as _sys
@@ -2496,8 +2551,8 @@ def bounce_flip_revert(now, run, state, send_fn, home=None, dry_run=False,
         lambda root, budget=None, logs=None: _fetch_bounce_flip_candidates(
             root, home, budget=budget, logs=logs))
     apply_revert = apply_fn or (
-        lambda root, num, gk_id, missing: _apply_bounce_flip_revert(
-            root, num, gk_id, missing, home, dry_run))
+        lambda root, num, gk_id, missing, stream: _apply_bounce_flip_revert(
+            root, num, gk_id, missing, stream, home, dry_run))
     persist = persist or (lambda: None)
     persist()                                  # cadence stamp survives a kill
     logs = []
@@ -2539,13 +2594,16 @@ def bounce_flip_revert(now, run, state, send_fn, home=None, dry_run=False,
                 break
             seen[key] = int(now)               # dedup BEFORE the mutation (#193)
             persist()
-            result = apply_revert(root, num, gk_id, missing)
+            result = apply_revert(root, num, gk_id, missing, c.get("stream"))
             if result == "reverted":
                 logs.append("bounce-flip-revert %s (labels reverted + note; "
                             "%s)" % (key, reason))
             elif result == "label-failed":
-                send_fn(_BOUNCEFLIP_NOTE_TEMPLATE
-                        % {"gk_id": gk_id,
+                # #1056 review-B 🟡: the DEDICATED label-failed ping (never the
+                # success-claiming note template) — the note posted but the
+                # label revert did NOT land, so a human must re-label.
+                send_fn(_BOUNCEFLIP_PING_TEMPLATE
+                        % {"name": name, "num": num, "gk_id": gk_id,
                            "ids": ",".join(missing) if missing else "-"},
                         dedup_key="bounceflip:%s:%d" % (key, int(now)),
                         dry_run=dry_run, project=name)

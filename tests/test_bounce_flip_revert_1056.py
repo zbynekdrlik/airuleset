@@ -31,7 +31,7 @@ def _facts(**over):
     """A blind-flip fact dict: bounce-unanswered, no commit since the BOUNCE,
     the labeler bot re-added ready-for-review AFTER the verdict."""
     base = {
-        "number": 5613, "state": "bounce-unanswered",
+        "number": 5613, "state": "bounce-unanswered", "stream": "montalu1",
         "gk_id": "C99", "gk_created_at": 1000.0, "gk_sha": "deadbee",
         "gk_ids": ["1", "2"], "head_ts": 500.0,          # commit OLDER than gk
         "rfr_present": True, "rfr_added_by": _BOT, "rfr_added_at": 1100.0,
@@ -85,13 +85,27 @@ class Decider(unittest.TestCase):
         is_flip, _, _ = self._d(rfr_added_by=None)
         self.assertFalse(is_flip)
 
+    def test_unresolvable_head_ts_is_never_a_flip(self):
+        # #1056 review-B: head_ts None (no PR / ambiguous / gh error) must NOT
+        # be read as "no commit → revert" — bias to silence.
+        is_flip, reason, _ = self._d(head_ts=None)
+        self.assertFalse(is_flip)
+        self.assertEqual(reason, "head-unresolvable")
+
+    def test_commit_exactly_at_verdict_is_not_a_commit_since(self):
+        # #1056 review-A boundary: head_ts == gk_ts is NOT "since" the verdict,
+        # so a flip with an equal-time head still reverts.
+        is_flip, reason, _ = self._d(head_ts=1000.0)   # == gk_created_at
+        self.assertTrue(is_flip)
+        self.assertEqual(reason, "rfr-added")
+
 
 class _Recorder:
     def __init__(self, status="reverted"):
         self.status = status
         self.calls = []
 
-    def __call__(self, root, num, gk_id, missing_ids):
+    def __call__(self, root, num, gk_id, missing_ids, stream):
         self.calls.append((root, num, gk_id, tuple(missing_ids)))
         return self.status
 
@@ -156,6 +170,68 @@ class JobBehaviour(unittest.TestCase):
         logs, _, rec, _ = _run(
             [_facts()], roots={"/home/montalu1/devel/odoo-erp": "odoo-erp"})
         self.assertEqual(rec.calls, [])
+
+    def test_label_failed_pings_with_a_dedicated_template(self):
+        # #1056 review-B: the label-failed ping must NOT claim the revert
+        # succeeded — a dedicated "needs a manual re-label" template.
+        rec = _Recorder(status="label-failed")
+        logs, _, _, send = _run([_facts()], rec=rec)
+        self.assertEqual(len(send.calls), 1)
+        msg = send.calls[0][0]
+        self.assertIn("manual re-label", msg)
+        self.assertNotIn("I reverted the labels", msg)
+
+
+class BudgetValueLock(unittest.TestCase):
+    """#1056 review-B 🔴 — Job 50 must carry the same #1050 value-lock as Job
+    36: min_budget == bound + one in-flight overshoot, and the worst-case start
+    finishes by the soft cap (under the 120 s hard kill)."""
+
+    def test_constants_sane(self):
+        self.assertGreater(cs._BOUNCEFLIP_BUDGET_S, 0)
+        self.assertGreater(cs._BOUNCEFLIP_OVERSHOOT_S, 0)
+        self.assertGreater(watchdog._BUDGET_MIN_BOUNCEFLIP_S, 0)
+
+    def test_min_budget_is_bound_plus_overshoot(self):
+        self.assertEqual(
+            watchdog._BUDGET_MIN_BOUNCEFLIP_S,
+            cs._BOUNCEFLIP_BUDGET_S + cs._BOUNCEFLIP_OVERSHOOT_S)
+
+    def test_worst_case_finishes_by_soft_cap(self):
+        latest_start = watchdog.SWEEP_SOFT_CAP_S - watchdog._BUDGET_MIN_BOUNCEFLIP_S
+        worst_finish = (latest_start + cs._BOUNCEFLIP_BUDGET_S
+                        + cs._BOUNCEFLIP_OVERSHOOT_S)
+        self.assertLessEqual(worst_finish, watchdog.SWEEP_SOFT_CAP_S)
+        self.assertLess(worst_finish, 120)
+
+
+class RevertWriterEmitsStream(unittest.TestCase):
+    """#1056 review-B 🟡 — the revert-audit line records the OWNING STREAM (the
+    stream:<x> label), not the repo basename, so --label-flips is per stream."""
+
+    def test_audit_line_carries_the_stream_not_the_repo(self):
+        import tempfile
+        from unittest import mock as _m
+        audits = tempfile.mkdtemp(prefix="bflip-audit-")
+
+        def fake_run(argv, **kw):
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+            return R()
+
+        with _m.patch.object(cs, "_gh_env", lambda *a, **k: {}), \
+             _m.patch("subprocess.run", fake_run), \
+             _m.patch("gates.audit.audits_dir", lambda: audits):
+            res = cs._apply_bounce_flip_revert(
+                "/home/gatekeeper/devel/odoo-erp", 5613, "C99", ["1", "2"],
+                stream="montalu1", dry_run=False)
+        self.assertEqual(res, "reverted")
+        log = Path(audits, "labeledit-reverts.log").read_text()
+        self.assertIn("stream=montalu1", log)
+        self.assertIn("repo=odoo-erp", log)       # repo still recorded separately
+        self.assertNotIn("stream=odoo-erp", log)  # never the repo as the stream
 
 
 if __name__ == "__main__":
