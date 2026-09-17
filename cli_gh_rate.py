@@ -41,7 +41,12 @@ import cli_gh_rate_graphql as _ghql   # #1052: the GraphQL rateLimit object read
 # --------------------------------------------------------------------------- #
 # Tunables (module constants so tests reference them, not magic numbers).
 # --------------------------------------------------------------------------- #
-CACHE_TTL_S = 60                 # per-box cache lifetime; matches the ~60 s poll cadence
+CACHE_TTL_S = 180                # #1055 P2: 60->180. The rate bucket is HOURLY, so a
+#                                # per-sweep (60 s) refresh over-samples it 3x for no gain
+#                                # -- one `gh api rate_limit` read every 3 sweeps is ample
+#                                # to catch a low-budget episode (the alert latch tolerates a
+#                                # 2-min-late read), and it removes ~1 subprocess/sweep from
+#                                # every box's budget. (`gh api rate_limit` is itself un-metered.)
 LOW_PCT = 20.0                   # below this remaining %, a poll backs off
 RESET_PCT = 50.0                 # above this, the once-alert latch re-arms
 BACKOFF_CAP_S = 60               # hard cap on a single backoff SLEEP. Watchdog pure-read

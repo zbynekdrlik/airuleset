@@ -76,6 +76,32 @@ def _default_git_run(argv, timeout=10):
         return None
 
 
+# #1055 P2 (c) -- how often `card_reconcile` runs its `reopen_fetch`
+# (`gh issue list --state open` per repo). A ticket REOPEN is a rare, manual
+# event, so re-checking every 60s sweep spends a `gh` call for a near-never
+# change; gating it to once per 15 min per repo removes ~1 gh call/sweep from
+# every card-bearing repo. Worst case: a marker for a just-reopened ticket is
+# cleared up to 15 min late, costing at most ONE delayed card.
+REOPEN_FETCH_TTL_S = 15 * 60
+
+
+def _reopen_fetch_due(state, root, now, ttl=REOPEN_FETCH_TTL_S):
+    """True if `reopen_fetch` should run for `root` this sweep -- at most once
+    per `ttl`. Records the timestamp in `state['card_reopen'][root]['ts']`
+    (created lazily) when it returns True. An unparseable stored ts reads as
+    due (fail toward doing the rare-but-correct clear, never toward silence)."""
+    slot = state.setdefault("card_reopen", {})
+    ent = slot.get(root)
+    ts = ent.get("ts") if isinstance(ent, dict) else None
+    try:
+        due = (ts is None) or (float(now) - float(ts) >= ttl)
+    except (TypeError, ValueError):
+        due = True
+    if due:
+        slot[root] = {"ts": now}
+    return due
+
+
 def _git_first_line(cwd, argv, git_run=None):
     """One `git -C <cwd> …` call, stripped. None on any failure OR empty
     output — never a partial guess."""
@@ -431,7 +457,10 @@ def card_reconcile(now, run, state, cwd_by_sid, send_fn=None, dry_run=False,
         # behavior change at all. An existing marker predates THIS sweep's
         # window entirely, which is exactly why this cannot depend on
         # `closed` being non-empty.
-        if name and reopen_fetch is not None:
+        # #1055 P2 (c): the reopen check is TTL-gated per repo (`reopen_fetch`
+        # is a `gh issue list` and a reopen is rare) -- at most once per 15 min,
+        # so a card-bearing repo no longer spends a gh call here every sweep.
+        if name and reopen_fetch is not None and _reopen_fetch_due(state, root, now):
             try:
                 from notify import card_marker_numbers, forget_marker
             except ImportError:

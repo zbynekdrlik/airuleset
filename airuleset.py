@@ -6628,7 +6628,7 @@ def _watchdog_ops_wait_fetch(cwd):
     return members
 
 
-def _watchdog_queue_fetch(cwd):
+def _watchdog_queue_fetch(cwd, gh_out=None):
     """#733 — the gk QUEUE UNION (`ready-for-review ∪ needs-gatekeeper ∪
     prio:bounce`) open issue numbers for the repo at `cwd`, or None on any
     failure/refusal. The job-20 queue-arrival rider reads this to detect a NEW
@@ -6640,13 +6640,19 @@ def _watchdog_queue_fetch(cwd):
     session's own pane would resolve — a non-full box returns None (the rider
     also gates, so this is belt-and-suspenders).
 
-    Uses the ticket's OWN proven shape: THREE exact-match `--label` queries
+    #1055 P2 (d): ONE `gh issue list --json number,labels -L 300` filtered
+    LOCALLY for the three labels, replacing the former THREE per-label queries
     (never a `label:a,b,c` search string — `prio:bounce` carries a colon that a
-    search qualifier mis-parses), unioned + deduped + sorted. Any query error →
-    None (the #181 fail-safe: an auth/network hiccup must never look like 'no
-    queue'). Wired HERE, like every other network call in this file, so
-    run_once's unit tests stay network-free."""
-    import subprocess
+    search qualifier mis-parses; a local set-membership filter has no such
+    problem). Same sorted union, one subprocess instead of three. Any query
+    error → None (the #181 fail-safe: an auth/network hiccup must never look
+    like 'no queue'). `-L 300` widens the former per-label 200 window into ONE
+    combined window — the failure direction stays MILD (a long-tail member that
+    falls out then re-enters reads as a spurious re-arrival, a redundant nudge,
+    never a wrong keystroke or a missed arrival). Wired HERE, like every other
+    network call in this file, so run_once's unit tests stay network-free.
+    `gh_out(cwd)` (injectable for tests) returns the raw stdout string, or None
+    on a gh failure (so an error stays distinguishable from an empty queue)."""
     try:
         root = _repo_root(cwd=cwd) or cwd
         authority = resolve_authority(cwd=root)
@@ -6654,27 +6660,42 @@ def _watchdog_queue_fetch(cwd):
         return None
     if authority != "full":
         return None
+    raw = (gh_out or _watchdog_queue_gh)(cwd)
+    if raw is None:                      # #181 fail-safe: gh error, not 'no queue'
+        return None
+    try:
+        rows = json.loads(raw or "[]")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(rows, list):
+        return None
+    want = {"ready-for-review", "needs-gatekeeper", "prio:bounce"}
     nums = set()
-    for label in ("ready-for-review", "needs-gatekeeper", "prio:bounce"):
-        try:
-            # `-L 200` is a per-label truncation window (#616 LIMIT-TRUNCATION
-            # class), but the failure direction here is MILD: a new arrival sorts
-            # into the newest window, and a long-tail member (>200 open of ONE
-            # label) that falls out then re-enters reads as a spurious re-arrival
-            # — a redundant nudge, never a wrong keystroke or a missed arrival.
-            r = subprocess.run(
-                ["gh", "issue", "list", "--state", "open", "--label", label,
-                 "-L", "200", "--json", "number"],
-                cwd=cwd, capture_output=True, text=True, timeout=15)
-        except Exception:
-            return None
-        if r.returncode != 0:
-            return None
-        try:
-            nums.update(int(x["number"]) for x in json.loads(r.stdout or "[]"))
-        except (ValueError, KeyError, TypeError):
-            return None
+    try:
+        for row in rows:
+            labels = {lbl.get("name") for lbl in (row.get("labels") or [])
+                      if isinstance(lbl, dict)}
+            if labels & want:
+                nums.add(int(row["number"]))
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
     return sorted(nums)
+
+
+def _watchdog_queue_gh(cwd):
+    """The default gh runner for `_watchdog_queue_fetch` (#1055 P2): ONE
+    `gh issue list --json number,labels`, counted in the per-sweep subprocess
+    budget. Returns stdout on success, None on any failure/timeout — so the
+    caller keeps the #181 error-vs-empty distinction."""
+    from watchdog.subprocess_budget import run_counted
+    try:
+        r = run_counted(
+            ["gh", "issue", "list", "--state", "open",
+             "--json", "number,labels", "-L", "300"],
+            label="gh", cwd=cwd, capture_output=True, text=True, timeout=15)
+    except Exception:
+        return None
+    return r.stdout if r.returncode == 0 else None
 
 
 def _watchdog_queue_classify(cwd):

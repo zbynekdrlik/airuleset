@@ -87,11 +87,13 @@ from watchdog import ops_wait_recheck as _ops_wait_recheck
 from watchdog import nudge_gate as _nudge_gate   # #797 shared cadence gate
 
 # env AIRULESET_QUEUE_ARRIVAL_FETCH_TTL_S — how long a queue-union snapshot is
-# CACHED per repo (`state["queue_arrival_cache"]`, keyed by cwd). ~5 min: the
-# ticket's own proven watcher used a 300s loop, and it doubles as the arrival-
-# detection latency. Floored so an env units error can't collapse it to a
-# per-sweep gh call.
-QUEUE_ARRIVAL_FETCH_TTL_S = 5 * 60
+# CACHED per repo (`state["queue_arrival_cache"]`, keyed by cwd). #1055 P2:
+# 300->600. A gk hand-off is a LABEL event humans file minutes apart, and this
+# rider only nudges an already-PARKED full-authority pane -- a 10-min arrival
+# latency there is invisible (the pane is waiting anyway), while halving the
+# queue-union gh spend on the sweep's critical path. Floored so an env units
+# error can't collapse it to a per-sweep gh call.
+QUEUE_ARRIVAL_FETCH_TTL_S = 10 * 60
 QUEUE_ARRIVAL_FETCH_TTL_MIN_S = 60
 # a FAILED/unmeasurable fetch (None) is cached only briefly so a transient gh
 # hiccup re-checks soon rather than suppressing arrival detection for a whole TTL.
