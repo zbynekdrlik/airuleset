@@ -265,6 +265,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-dispatch-without-main-design.sh",
+            "timeout": 15
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/inject-situational-rule.sh"
           }
         ]
@@ -374,6 +379,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-dispatch-over-wdrain.sh",
             "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-dispatch-without-main-design.sh",
+            "timeout": 15
           }
         ]
       },
