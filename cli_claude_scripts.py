@@ -236,9 +236,20 @@ esac
 def render_claude_launch_script():
     """The launch-script content with the managed model substituted in — the
     write site MUST use this, never the raw constant (same discipline as
-    render_caveman_shim())."""
+    render_caveman_shim()).
+
+    #1062 L2: on a box carrying the model-backend marker, the launcher `--model`
+    is the marker's `main` alias (so a manual `claude`/`claude-continue` on the
+    pilot box launches on the gateway's main model, matching settings.json's
+    ANTHROPIC_MODEL). Off a marker box it is airuleset.MANAGED_MODEL, exactly as
+    before (launcher_model falls back to the passed default)."""
     import airuleset
-    return CLAUDE_LAUNCH_SCRIPT_CONTENT.replace("{{MANAGED_MODEL}}", airuleset.MANAGED_MODEL)
+    try:
+        import cli_model_backend as _mb
+        model = _mb.launcher_model(airuleset.MANAGED_MODEL)
+    except Exception:
+        model = airuleset.MANAGED_MODEL
+    return CLAUDE_LAUNCH_SCRIPT_CONTENT.replace("{{MANAGED_MODEL}}", model)
 
 
 def encode_project_dir(cwd):
