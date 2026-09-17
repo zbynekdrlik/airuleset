@@ -559,6 +559,68 @@ class TestPlaywrightBrowsers(TestCase):
         self.assertIn("install timed out after 300 s", out.getvalue())
         self.assertNotIn("auto-install skipped", out.getvalue())
 
+    def test_install_deps_runs_on_exit_127_with_sudo(self):
+        # (b): per-user cache + headless shell launch exits 127 + passwordless
+        # sudo => heal the missing system libraries via `install-deps` ONCE.
+        d = self._per_user_cache_dir()
+        calls = []
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+            return m.Mock(returncode=0, stderr="", stdout="")
+        with m.patch("shutil.which", return_value="/usr/bin/npx"), \
+                m.patch("subprocess.run", side_effect=fake_run):
+            airuleset.ensure_playwright_browsers(
+                d, sleep=lambda s: None, sudo_ok=lambda: True,
+                probe_rc=m.Mock(side_effect=[127, 0]))
+        self.assertTrue(any("install-deps" in argv for argv in calls),
+                        "install-deps must run when the headless shell exits 127")
+
+    def test_install_deps_skipped_without_sudo_prints_root_command(self):
+        # (b): no passwordless sudo => print the exact root command, run nothing,
+        # continue non-fatally.
+        d = self._per_user_cache_dir()
+        out = StringIO()
+        calls = []
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+            return m.Mock(returncode=0, stderr="", stdout="")
+        with m.patch("shutil.which", return_value="/usr/bin/npx"), \
+                m.patch("subprocess.run", side_effect=fake_run), \
+                m.patch("sys.stderr", out):
+            airuleset.ensure_playwright_browsers(
+                d, sleep=lambda s: None, sudo_ok=lambda: False,
+                probe_rc=lambda path: 127)
+        self.assertFalse(any("install-deps" in argv for argv in calls))
+        self.assertIn("install-deps chromium", out.getvalue())
+        self.assertIn("as root", out.getvalue())
+
+    def test_install_deps_not_run_when_headless_shell_healthy(self):
+        # (b): a healthy launch (rc 0) never triggers install-deps.
+        d = self._per_user_cache_dir()
+        calls = []
+        def fake_run(argv, **kw):
+            calls.append(list(argv))
+            return m.Mock(returncode=0, stderr="", stdout="")
+        with m.patch("shutil.which", return_value="/usr/bin/npx"), \
+                m.patch("subprocess.run", side_effect=fake_run):
+            airuleset.ensure_playwright_browsers(
+                d, sleep=lambda s: None, sudo_ok=lambda: True,
+                probe_rc=lambda path: 0)
+        self.assertFalse(any("install-deps" in argv for argv in calls))
+
+    def test_install_deps_not_probed_on_opt_shared_path(self):
+        # (b): the root-owned /opt path (non per-user) is never probed or
+        # heal-installed — root already provisioned its libs, a no-sudo box
+        # cannot write it anyway.
+        d = Path(tempfile.mkdtemp())   # not <home>/.cache/ms-playwright
+        probe = m.Mock(return_value=127)
+        with m.patch("shutil.which", return_value="/usr/bin/npx"), \
+                m.patch("subprocess.run",
+                        return_value=m.Mock(returncode=0, stderr="", stdout="")):
+            airuleset.ensure_playwright_browsers(
+                d, sleep=lambda s: None, sudo_ok=lambda: True, probe_rc=probe)
+        probe.assert_not_called()
+
 
 class TestMarketplaceSources(TestCase):
     """#273: a fresh account (montalu2/montalu3/montalu4) has NO marketplaces

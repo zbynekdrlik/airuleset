@@ -292,6 +292,50 @@ class TestReconcileMcpFile1048(unittest.TestCase):
 
 
 class TestProvisionPlaywrightMcp1048(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        # #1048 fix-forward (d): isolate from the box's REAL opt-out marker so
+        # these tests are deterministic regardless of the host filesystem.
+        self.d = Path(tempfile.mkdtemp())
+        self.optout = self.d / "airuleset-playwright-optout"
+        self.bp_marker = self.d / "airuleset-playwright-browsers-path"
+        for name, val in (("PLAYWRIGHT_OPTOUT_MARKER", self.optout),
+                          ("PLAYWRIGHT_BROWSERS_PATH_MARKER", self.bp_marker)):
+            pt = mock.patch.object(p, name, val)
+            pt.start()
+            self.addCleanup(pt.stop)
+
+    def test_provision_opt_out_skips_install_server_and_removes_stale_marker(self):
+        # (d): the per-box opt-out marker present => no browser install, no
+        # server write, the stale browsers-path marker removed, one honest line
+        # with the reason, returns True (a deliberate opt-out is a success).
+        import io
+        self.optout.write_text(
+            "spinbike-vps: no root, chromium system libs unavailable\n")
+        self.bp_marker.write_text("/home/x/.cache/ms-playwright\n")  # stale
+        out = io.StringIO()
+        with mock.patch.object(p, "ensure_playwright_browsers") as eb, \
+                mock.patch.object(p, "reconcile_playwright_mcp_file") as rc, \
+                mock.patch("sys.stdout", out):
+            ok = p.provision_playwright_mcp(box_class="shared-stream")
+        self.assertTrue(ok)
+        eb.assert_not_called()
+        rc.assert_not_called()
+        self.assertFalse(self.bp_marker.exists())
+        self.assertIn("opted out on this box", out.getvalue())
+        self.assertIn("spinbike-vps", out.getvalue())
+
+    def test_provision_no_opt_out_proceeds_normally(self):
+        # (d): with NO opt-out marker, provisioning proceeds (install + server).
+        self.assertFalse(self.optout.exists())
+        with mock.patch.object(p, "ensure_playwright_browsers") as eb, \
+                mock.patch.object(p, "reconcile_playwright_mcp_file",
+                                  return_value=True) as rc:
+            ok = p.provision_playwright_mcp(box_class="shared-stream")
+        self.assertTrue(ok)
+        eb.assert_called_once()
+        rc.assert_called_once()
+
     def test_provision_calls_browser_install_then_server_reconcile(self):
         with mock.patch.object(p, "ensure_playwright_browsers") as eb, \
                 mock.patch.object(p, "reconcile_playwright_mcp_file",

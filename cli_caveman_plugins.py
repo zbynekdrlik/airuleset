@@ -192,7 +192,19 @@ PLAYWRIGHT_BROWSER_CACHE = Path.home() / ".cache" / "ms-playwright"
 
 # `True` = airuleset manages a working Playwright MCP server on this box (the
 # post-#1048 replacement for "playwright in MANAGED_PLUGINS"). Flip to False to
-# opt a box out of a managed browser entirely (the one-flag opt-out #542 valued).
+# opt the WHOLE FLEET out of a managed browser (the one-flag opt-out #542 valued).
+#
+# PER-BOX opt-out (#1048 fix-forward d): a marker file
+# `~/.claude/airuleset-playwright-optout` (PLAYWRIGHT_OPTOUT_MARKER below; its
+# CONTENT is the human reason line, e.g. "spinbike-vps: no root, chromium system
+# libs unavailable") opts THIS ONE box out without touching the fleet flag —
+# supervisor-set, owner-informed. When it exists: provision_playwright_mcp()
+# skips the browser install AND the ~/.claude.json server write, removes any
+# stale browsers-path marker, and prints one honest line; the push post-check
+# (cli_remote._playwright_chromium_postcheck) SKIPs LOUDLY with the reason
+# instead of failing the target. For a box that structurally cannot run chromium
+# (missing system libs + no root, spinbike-vps), this keeps the push green
+# without shipping a dead browser or a permanent false-red.
 PLAYWRIGHT_MANAGED = True
 
 # THE pin (never `@latest`, #1048). A MATCHED TRIO, verified against the npm
@@ -229,13 +241,34 @@ OPT_MS_PLAYWRIGHT = Path("/opt/ms-playwright")
 # read it without re-implementing the resolver in shell (#1048).
 PLAYWRIGHT_BROWSERS_PATH_MARKER = Path.home() / ".claude" / "airuleset-playwright-browsers-path"
 
+# #1048 fix-forward (d): the per-box opt-out marker. Its CONTENT is the reason
+# line surfaced by the install + the post-check. See PLAYWRIGHT_MANAGED above.
+PLAYWRIGHT_OPTOUT_MARKER = Path.home() / ".claude" / "airuleset-playwright-optout"
+
 
 def _has_pinned_chromium_build(browsers_dir: Path) -> bool:
-    """True iff `browsers_dir` holds the PINNED chromium build
-    (`chromium-<PLAYWRIGHT_CHROMIUM_BUILD>`) — the ONE build-match predicate,
-    shared by the /opt reuse check AND the install idempotency guard so they can
-    never diverge on what 'the right browser is present' means."""
-    return (browsers_dir / ("chromium-" + PLAYWRIGHT_CHROMIUM_BUILD)).is_dir()
+    """True iff `browsers_dir` holds a COMPLETE pinned chromium install — BOTH
+    `chromium-<b>` AND `chromium_headless_shell-<b>` present, each carrying its
+    own `INSTALLATION_COMPLETE` marker file (#1048 fix-forward a). The ONE
+    build-match predicate, shared by the /opt reuse check AND the install
+    idempotency guard, so they can never diverge on what 'the right browser is
+    present' means.
+
+    Why BOTH halves + markers (the montalu3-6 incident): `playwright install
+    chromium` writes `chromium-<b>/INSTALLATION_COMPLETE` FIRST and
+    `chromium_headless_shell-<b>/INSTALLATION_COMPLETE` SECOND (then ffmpeg), so a
+    download that dies between the two leaves `chromium-<b>` ONLY — the live half
+    state the OLD `chromium-<b>.is_dir()` predicate false-positived as
+    "installed", so the next push never re-installed and the `--headless` MCP
+    server + the push post-check stayed dead forever (both need the headless-shell
+    binary under `chromium_headless_shell-<b>`). The `INSTALLATION_COMPLETE`
+    marker is playwright's own completion sentinel — a bare directory from an
+    interrupted extraction does not carry it."""
+    b = PLAYWRIGHT_CHROMIUM_BUILD
+    for name in ("chromium-" + b, "chromium_headless_shell-" + b):
+        if not (browsers_dir / name / "INSTALLATION_COMPLETE").is_file():
+            return False
+    return True
 
 
 def _opt_has_pinned_build(opt_dir: Path = None) -> bool:
@@ -768,7 +801,109 @@ def _playwright_browsers_installed(cache_dir: Path = None) -> bool:
     d = cache_dir or PLAYWRIGHT_BROWSER_CACHE
     return d.is_dir() and any(d.iterdir())
 
-def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None):
+def _is_per_user_cache(browsers_path) -> bool:
+    """True iff `browsers_path` is a per-user cache (`<home>/.cache/ms-playwright`)
+    rather than the root-owned shared `/opt/ms-playwright`. The install-deps
+    system-library heal (#1048 fix-forward b) runs ONLY on the per-user cache — a
+    workstation reusing /opt already had root-installed libs, and a no-sudo box
+    cannot write /opt anyway (so `install-deps` there is both wrong and
+    impossible). Compared by shape (name + parent name), so it needs no `home`
+    argument and cannot confuse `.../.cache/ms-playwright` with `/opt/ms-playwright`."""
+    bp = Path(browsers_path)
+    return bp.name == "ms-playwright" and bp.parent.name == ".cache"
+
+
+def _stderr_tail(text, n: int = 8) -> str:
+    """The LAST `n` lines of a subprocess's output. The REAL playwright download
+    error lives at the END of the output (its generic 'running npx playwright
+    install without dependencies' WARNING box is at the HEAD), so the old
+    `[:200]` head slice threw the actual error away on montalu3-6 (#1048
+    fix-forward b) — a tail keeps it."""
+    lines = (text or "").rstrip("\n").splitlines()
+    return "\n".join(lines[-n:])
+
+
+def _sudo_n_available() -> bool:
+    """True iff passwordless sudo works here (`sudo -n true` exits 0), bounded.
+    Injectable into `ensure_playwright_browsers` so the install-deps decision is
+    unit-testable without real sudo."""
+    import subprocess
+    try:
+        return subprocess.run(["sudo", "-n", "true"],
+                              capture_output=True, timeout=10).returncode == 0
+    except Exception:
+        return False
+
+
+def _headless_shell_binary(browsers_path) -> Path:
+    """The installed headless-shell executable under `browsers_path` for the
+    pinned build — the exact binary the `--headless` MCP server + the push
+    post-check need (its absence is the montalu3-6 half-cache failure)."""
+    return (Path(browsers_path) / ("chromium_headless_shell-" + PLAYWRIGHT_CHROMIUM_BUILD)
+            / "chrome-headless-shell-linux64" / "chrome-headless-shell")
+
+
+def _probe_headless_shell_rc(browsers_path):
+    """Bounded launch probe of the installed headless shell → its exit code
+    (127 == missing system shared libraries: the ELF loader fails BEFORE the
+    binary runs, the spinbike-vps failure), or None when the binary is absent
+    (nothing to probe). Injectable into `ensure_playwright_browsers` so the
+    install-deps decision is unit-testable with no real browser."""
+    import subprocess
+    binp = _headless_shell_binary(browsers_path)
+    if not binp.exists():
+        return None
+    try:
+        return subprocess.run([str(binp), "--version"],
+                              capture_output=True, timeout=30).returncode
+    except Exception:
+        return None
+
+
+def _heal_system_libs(browsers_path, env, *, sudo_ok, probe_rc):
+    """#1048 fix-forward (b): after a successful pinned install into the per-user
+    cache, if the installed headless shell fails to LAUNCH with exit 127 (missing
+    system shared libraries — spinbike-vps), heal it ONCE with the vendor
+    `playwright install-deps chromium` when passwordless sudo is available, then
+    re-probe; without sudo, print the exact root command and continue
+    non-fatally. A no-op on any other probe result (0 = healthy, None = binary
+    absent, other = a non-lib failure not fixable by install-deps)."""
+    import subprocess
+    rc = probe_rc(browsers_path)
+    if rc != 127:
+        return
+    if not sudo_ok():
+        print("    ⚠ headless chromium is missing system shared libraries (exit "
+              "127) and passwordless sudo is unavailable — run as root: "
+              "npx -y playwright@%s install-deps chromium" % PLAYWRIGHT_PW_VERSION,
+              file=sys.stderr)
+        return
+    try:
+        dr = subprocess.run(
+            ["npx", "-y", "playwright@" + PLAYWRIGHT_PW_VERSION, "install-deps", "chromium"],
+            capture_output=True, text=True, timeout=300, env=env)
+    except subprocess.TimeoutExpired:
+        print("    ⚠ playwright install-deps chromium timed out after 300 s",
+              file=sys.stderr)
+        return
+    except Exception as e:
+        print("    ⚠ playwright install-deps chromium skipped (%s)" % e,
+              file=sys.stderr)
+        return
+    if dr.returncode != 0:
+        print("    ⚠ playwright install-deps chromium failed (rc=%d). stderr tail:\n%s"
+              % (dr.returncode, _stderr_tail(dr.stderr or dr.stdout)), file=sys.stderr)
+        return
+    if probe_rc(browsers_path) == 127:
+        print("    ⚠ headless chromium still missing system shared libraries "
+              "after install-deps (exit 127)", file=sys.stderr)
+    else:
+        print("    Playwright browsers: healed system libraries via "
+              "install-deps chromium (headless shell now launches)")
+
+
+def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None, *,
+                               sleep=None, sudo_ok=None, probe_rc=None):
     """Best-effort, time-boxed, non-fatal install of the PINNED chromium
     (#158/#1048): enabling a browser MCP alone does NOT pull the browser
     binaries — measured live, fleet accounts had node + the server but an EMPTY
@@ -780,16 +915,32 @@ def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None):
     shared-stream box, never the root-owned /opt with its mismatched build).
 
     A no-op when `PLAYWRIGHT_MANAGED` is False, or the resolved cache already
-    holds the PINNED build (idempotent — once per user, never per session,
-    respecting the shared-box disk doctrine; a cache holding a WRONG/old build
-    re-installs the pinned one, #1048 review-2 finding 1). Skips LOUDLY when
-    `npx` is absent (nothing to install with) rather than failing the install."""
+    holds the COMPLETE pinned build (idempotent — once per user, never per
+    session, respecting the shared-box disk doctrine; a cache holding a WRONG/old
+    build OR only the chromium HALF re-installs the pinned pair, #1048 review-2
+    finding 1 + fix-forward a). Skips LOUDLY when `npx` is absent.
+
+    #1048 fix-forward (b): on a failed install prints the stderr TAIL (never a
+    head slice), retries ONCE after a pause, an honest line on a 300 s timeout,
+    and — on the per-user cache — heals missing system libraries via
+    `install-deps` when the launched headless shell exits 127. `sleep`/`sudo_ok`/
+    `probe_rc` are injectable seams (default to the real time.sleep / sudo probe /
+    launch probe) so the whole path is unit-testable with no network, sudo, or
+    real browser."""
     import subprocess
+    import time
     if not PLAYWRIGHT_MANAGED:
         return
+    if sleep is None:
+        sleep = time.sleep
+    if sudo_ok is None:
+        sudo_ok = _sudo_n_available
+    if probe_rc is None:
+        probe_rc = _probe_headless_shell_rc
     browsers_path = cache_dir or resolved_browsers_path(box_class)
-    # #1048 review-2 finding 1: gate on the PINNED build, not mere cache
-    # non-emptiness — a #542-era cache holding an OLD build must re-install 1244.
+    # #1048 review-2 finding 1 + fix-forward (a): gate on the COMPLETE pinned
+    # build (BOTH halves + markers), not mere cache non-emptiness — a #542-era
+    # OLD build, or a half download (chromium-<b> only), must re-install.
     if _playwright_pinned_build_installed(browsers_path):
         return
     if shutil.which("npx") is None:
@@ -802,24 +953,57 @@ def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None):
     env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_path)
     try:
         Path(browsers_path).mkdir(parents=True, exist_ok=True)
-        r = subprocess.run(
-            ["npx", "--yes", "playwright@" + PLAYWRIGHT_PW_VERSION, "install", "chromium"],
-            capture_output=True, text=True, timeout=300, env=env)
+    except OSError as e:
+        print("    ⚠ could not create the Playwright browsers cache %s (%s)"
+              % (browsers_path, e), file=sys.stderr)
+        return
+    argv = ["npx", "--yes", "playwright@" + PLAYWRIGHT_PW_VERSION, "install", "chromium"]
+    installed = False
+    for attempt in (1, 2):
+        try:
+            r = subprocess.run(argv, capture_output=True, text=True, timeout=300, env=env)
+        except subprocess.TimeoutExpired:
+            # #1048 fix-forward (b): an honest, distinct line — never the opaque
+            # generic "auto-install skipped (<exc repr>)".
+            print("    ⚠ Playwright browsers install timed out after 300 s — run "
+                  "manually: PLAYWRIGHT_BROWSERS_PATH=%s npx -y playwright@%s "
+                  "install chromium" % (browsers_path, PLAYWRIGHT_PW_VERSION),
+                  file=sys.stderr)
+            return
+        except Exception as e:
+            print("    ⚠ Playwright browsers missing and auto-install skipped (%s) "
+                  "— run manually: PLAYWRIGHT_BROWSERS_PATH=%s npx -y playwright@%s "
+                  "install chromium" % (e, browsers_path, PLAYWRIGHT_PW_VERSION),
+                  file=sys.stderr)
+            return
         if r.returncode == 0:
+            installed = True
             print("    Playwright browsers: installed chromium %s into %s "
                   "(pinned playwright@%s)"
                   % (PLAYWRIGHT_CHROMIUM_BUILD, browsers_path, PLAYWRIGHT_PW_VERSION))
-        else:
-            print("    ⚠ Playwright browsers missing and auto-install failed "
-                  "(rc=%d): %s\n    Run manually: PLAYWRIGHT_BROWSERS_PATH=%s "
-                  "npx -y playwright@%s install chromium"
-                  % (r.returncode, (r.stderr or r.stdout).strip()[:200],
-                     browsers_path, PLAYWRIGHT_PW_VERSION), file=sys.stderr)
-    except Exception as e:
-        print("    ⚠ Playwright browsers missing and auto-install skipped (%s) — "
-              "run manually: PLAYWRIGHT_BROWSERS_PATH=%s npx -y playwright@%s "
-              "install chromium" % (e, browsers_path, PLAYWRIGHT_PW_VERSION),
+            break
+        tail = _stderr_tail(r.stderr or r.stdout)
+        if attempt == 1:
+            # #1048 fix-forward (b): retry ONCE after a pause (many montalu
+            # accounts hit a transient CDN throttle / cacache rename race).
+            print("    ⚠ Playwright browsers install failed (rc=%d) — retrying "
+                  "once in 10 s. stderr tail:\n%s" % (r.returncode, tail),
+                  file=sys.stderr)
+            sleep(10)
+            continue
+        print("    ⚠ Playwright browsers install failed again (rc=%d). stderr "
+              "tail:\n%s\n    Run manually: PLAYWRIGHT_BROWSERS_PATH=%s npx -y "
+              "playwright@%s install chromium"
+              % (r.returncode, tail, browsers_path, PLAYWRIGHT_PW_VERSION),
               file=sys.stderr)
+        return
+    if not installed:
+        return
+    # #1048 fix-forward (b): heal missing system libraries on the per-user cache
+    # (the spinbike-vps exit-127 case). Skipped on /opt (root already provisioned
+    # its libs; a no-sudo box cannot write /opt anyway).
+    if _is_per_user_cache(browsers_path):
+        _heal_system_libs(browsers_path, env, sudo_ok=sudo_ok, probe_rc=probe_rc)
 
 
 def reconcile_playwright_mcp_file(claude_json_path: Path = None, box_class: str = None) -> bool:
@@ -1031,8 +1215,30 @@ def provision_playwright_mcp(box_class: str = None) -> bool:
     → the caller (cmd_install) latches a non-zero exit (script-failure-policy),
     so a box that never got the working server is a LOUD failure, never a silent
     "Install complete.". A no-op returning True when PLAYWRIGHT_MANAGED is
-    False."""
+    False.
+
+    #1048 fix-forward (d): a per-box opt-out — when PLAYWRIGHT_OPTOUT_MARKER
+    exists, skip BOTH steps (no browser install, no ~/.claude.json server write),
+    REMOVE any stale browsers-path marker (so the push post-check SKIPs on the
+    absent marker as well as on the opt-out file itself, never false-passes on a
+    browser that is no longer being maintained), print ONE honest line with the
+    reason, and return True (a deliberate opt-out is a success, not a failure)."""
     if not PLAYWRIGHT_MANAGED:
+        return True
+    if PLAYWRIGHT_OPTOUT_MARKER.exists():
+        try:
+            reason = PLAYWRIGHT_OPTOUT_MARKER.read_text(encoding="utf-8").strip()
+        except OSError:
+            reason = ""
+        # remove a stale browsers-path marker so the post-check SKIPs (not
+        # false-passes) — best-effort, never fatal.
+        try:
+            PLAYWRIGHT_BROWSERS_PATH_MARKER.unlink(missing_ok=True)
+        except OSError as e:
+            print("    ⚠ could not remove the stale playwright browsers-path "
+                  "marker (%s)" % e, file=sys.stderr)
+        print("    playwright MCP: opted out on this box (%s) — skipping browser "
+              "install + server write" % (reason or "no reason given"))
         return True
     ensure_playwright_browsers(box_class=box_class)
     return reconcile_playwright_mcp_file(box_class=box_class)
