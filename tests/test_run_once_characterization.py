@@ -217,15 +217,17 @@ CANONICAL_SWEEP = [
     JobSpec("nice_check", "wd.nice_check", "nice_check_job",
             "nice_check_enabled", True, "list", "nice-check error"),
     # Jobs 43-46 (mdreview_cadence / priority_policy / orphan_poll_reaper /
-    # session_health_observe) and 47 (#1005 healthz_probe) are DELIBERATELY not
+    # session_health_observe), 47 (#1005 healthz_probe), 49 (#1036
+    # task_hygiene_job) and 50 (#1056 L2 bounce_flip_revert) are DELIBERATELY not
     # pinned in this order/gate/isolation spec — this file locks the SUBSET
-    # through job 42; the FULL registry-label set (incl. 43-47) is locked by
-    # test_run_once_registry_labels.py's EXPECTED_STANDALONE. Each is gated OFF
-    # by default here (its gate kwarg / declaration is not in `_all_open_kwargs`,
-    # so run_once never invokes it), so its presence cannot perturb these
-    # order/gate/isolation assertions. Job 47's gate additionally requires the
-    # `health_probes` fleet declaration to be non-empty — never true in this
-    # test's kwargs — so it stays fully inert here.
+    # through job 42; the FULL registry-label set (incl. 43-47, 49-50) is locked
+    # by test_run_once_registry_labels.py's EXPECTED_STANDALONE. Each is gated
+    # OFF by default here (its gate kwarg / declaration is not in
+    # `_all_open_kwargs`, so run_once never invokes it — Job 50's `bounceflip_fetch`
+    # is unset, exactly like Job 36's `gkorphan_fetch`), so its presence cannot
+    # perturb these order/gate/isolation assertions. Job 47's gate additionally
+    # requires the `health_probes` fleet declaration to be non-empty — never true
+    # in this test's kwargs — so it stays fully inert here.
     # Job 48 (#1034 parked_wake_job) is also not pinned here, but for a DIFFERENT
     # reason: its registry gate is `lambda: True` (ALWAYS on, no kwarg to leave
     # closed), so it DOES run in `_drive`. It is harmless to these assertions

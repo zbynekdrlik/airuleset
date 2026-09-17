@@ -34,6 +34,16 @@ def run(body, mode=None):
     return r.returncode, r.stdout.strip(), r.stderr.strip()
 
 
+def run_guard(rfr_ts, gk_bounce_ts, commit_ts):
+    """Drive the #1056 L2 (g) `bounce-clear-guard` mode: is it safe to clear
+    prio:bounce given the RFR / newest-gk-BOUNCE / newest-commit timestamps."""
+    r = subprocess.run(
+        ["bash", str(MATCHER), "bounce-clear-guard", rfr_ts, gk_bounce_ts,
+         commit_ts],
+        input="", capture_output=True, text=True, timeout=30)
+    return r.returncode, r.stdout.strip(), r.stderr.strip()
+
+
 class TestSigpipeRaceFix(TestCase):
     """The #331 core bug: a canonical, line-1 READY-FOR-REVIEW: marker in a
     large body must be detected deterministically, not lost to a
@@ -181,6 +191,59 @@ class TestBounceResolvedMode(TestCase):
                           "Ready for gatekeeper cross-fork review.",
                           mode="bounce-resolved")
         self.assertEqual(rc, 1)
+
+
+class TestBounceClearGuardMode(TestCase):
+    """#1056 L2 (g) — clear prio:bounce ONLY when the RFR is newer than the
+    newest gatekeeper BOUNCE AND a commit landed since that BOUNCE. Timestamps
+    are compared directly (the design's 'max(comment created_at)' replay guard,
+    never now-2h). Exit 0 = safe to clear; exit 1 = blind re-flag, do NOT clear.
+    """
+
+    def test_no_bounce_is_safe_to_clear(self):
+        # No gk BOUNCE stands -> nothing to guard.
+        rc, out, _ = run_guard("2026-09-17T10:00:00Z", "", "")
+        self.assertEqual(rc, 0, out)
+
+    def test_rfr_and_commit_both_newer_clears(self):
+        rc, out, _ = run_guard("2026-09-17T12:00:00Z",   # RFR
+                               "2026-09-17T10:00:00Z",   # gk BOUNCE
+                               "2026-09-17T11:30:00Z")   # commit
+        self.assertEqual(rc, 0, out)
+
+    def test_rfr_newer_but_no_new_commit_does_not_clear(self):
+        # The montalu incident: RFR re-posted 5 min after the verdict with the
+        # PR head unchanged since before it.
+        rc, out, _ = run_guard("2026-09-17T10:05:00Z",   # RFR (newer than gk)
+                               "2026-09-17T10:00:00Z",   # gk BOUNCE
+                               "2026-09-17T09:00:00Z")   # commit (OLDER)
+        self.assertEqual(rc, 1, out)
+
+    def test_rfr_older_than_bounce_does_not_clear(self):
+        rc, out, _ = run_guard("2026-09-17T09:00:00Z",   # RFR (older)
+                               "2026-09-17T10:00:00Z",   # gk BOUNCE
+                               "2026-09-17T11:00:00Z")   # commit
+        self.assertEqual(rc, 1, out)
+
+    def test_unresolvable_commit_with_a_bounce_does_not_clear(self):
+        # A BOUNCE stands but the commit could not be resolved -> cannot prove a
+        # fix landed -> conservative, do NOT clear.
+        rc, out, _ = run_guard("2026-09-17T12:00:00Z",
+                               "2026-09-17T10:00:00Z",
+                               "")
+        self.assertEqual(rc, 1, out)
+
+    def test_unparseable_bounce_timestamp_does_not_clear(self):
+        rc, out, _ = run_guard("2026-09-17T12:00:00Z", "not-a-date",
+                               "2026-09-17T11:00:00Z")
+        self.assertEqual(rc, 1, out)
+
+    def test_commit_exactly_at_bounce_is_not_newer(self):
+        # boundary: a commit whose time equals the BOUNCE is NOT "since" it.
+        rc, out, _ = run_guard("2026-09-17T12:00:00Z",
+                               "2026-09-17T10:00:00Z",
+                               "2026-09-17T10:00:00Z")
+        self.assertEqual(rc, 1, out)
 
 
 class TestUnknownMode(TestCase):
