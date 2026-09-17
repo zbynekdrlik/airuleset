@@ -381,12 +381,25 @@ class TestDepEdgeLock1058(unittest.TestCase):
     def test_network_error_fails_under_the_var_never_skips(self):
         # HERMETIC (no var needed): a registry outage must FAIL the lock, not skip
         # it — otherwise a CI registry outage silently removes the lock while the
-        # gate stays green. Inject a raising fetcher; the lock must raise.
+        # gate stays green. Inject a raising fetcher; the lock must raise an
+        # AssertionError (fail), NEVER a SkipTest. A plain
+        # assertRaises(AssertionError) does NOT catch unittest.SkipTest, so a
+        # fail->skip regression (the exact skip-in-disguise this locks against)
+        # would degrade THIS test to a silent SKIP (green in CI) — review F1. So
+        # catch SkipTest explicitly and fail on it.
         def boom(url, timeout=20):
             raise urllib.error.URLError("simulated npm registry outage")
-        with self.assertRaises(AssertionError):
+        failed_loudly = False
+        try:
             _dep_edge_check(self, p.PLAYWRIGHT_MCP_VERSION, p.PLAYWRIGHT_PW_VERSION,
                             fetch=boom)
+        except unittest.SkipTest:
+            self.fail("regressed to a skip-in-disguise — a fetch error must FAIL, not skip")
+        except AssertionError:
+            failed_loudly = True  # correct: the lock FAILED loudly on the fetch error
+        self.assertTrue(
+            failed_loudly,
+            "expected the dep-edge lock to FAIL (AssertionError) on a fetch error")
 
     def test_dep_drift_fails(self):
         # HERMETIC: a WRONG resolved dependency must FAIL the lock.

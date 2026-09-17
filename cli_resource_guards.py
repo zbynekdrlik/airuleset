@@ -572,7 +572,8 @@ def _render_playwright_shared_block() -> str:
 
     Root installs chromium to /opt/ms-playwright so all stream accounts share
     ONE copy. Per-user ~/.cache/ms-playwright is swept ONLY when the shared
-    install succeeds. Pure renderer returning the bash snippet.
+    install succeeds. Renderer returning the bash snippet — deterministic output;
+    reads the pin via a lazy import (#1058, below), no other side effects.
 
     #1058: the install is PINNED to `playwright@<PLAYWRIGHT_PW_VERSION>` (read
     from cli_playwright_mcp, the pin's canonical home — a lazy import keeps this
@@ -622,7 +623,11 @@ def _render_playwright_shared_block() -> str:
         'else\n'
         '    echo "  ⚠ playwright: npx not found — shared install skipped" >&2\n'
         'fi'
-        % (shlex.quote(PLAYWRIGHT_SHARED_PATH), PLAYWRIGHT_PW_VERSION)
+        # shlex.quote BOTH interpolations for symmetry + defence-in-depth (#1058
+        # review F2): the pinned version is a controlled constant with no shell
+        # metachars today, so quote() is a no-op on it, but quoting keeps a future
+        # pin that ever contained one shell-safe by construction.
+        % (shlex.quote(PLAYWRIGHT_SHARED_PATH), shlex.quote(PLAYWRIGHT_PW_VERSION))
     )
 
 

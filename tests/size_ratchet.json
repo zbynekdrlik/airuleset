@@ -39,7 +39,7 @@
     "cli_quals.py": 3030,
     "cli_quals_cmd.py": 1429,
     "cli_remote.py": 1798,
-    "cli_resource_guards.py": 885,
+    "cli_resource_guards.py": 890,
     "cli_scratch_sweep.py": 1854,
     "cli_skill_usage.py": 337,
     "cli_target_purge.py": 892,
