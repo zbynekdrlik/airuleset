@@ -570,6 +570,35 @@ class TestCrossStreamRepoScope(unittest.TestCase):
                 any("bounce-skip-not-cross-stream restreamer (dir restreamer)"
                     == ln for ln in logs), logs)
 
+    def test_client_named_checkout_dedup_survives_pane_drop(self):
+        # #1068 review F1: the `seen`/notify dedup key must be the resolved
+        # SLUG, not the pane-vs-cache-divergent basename. On a client-named
+        # checkout the pane branch used to key on the dir basename
+        # (odoo-slovnormal) while the no-pane Discord fallback keys on the
+        # cache slug (odoo-erp) — so a pane appear→disappear within the
+        # renudge window double-notifies the SAME ticket set. #1068 (making
+        # the client-named checkout reach the nudge path) activated this.
+        with TemporaryDirectory() as home:
+            root = str(Path(home) / "devel" / "odoo" / "odoo-slovnormal")
+            Path(root).mkdir(parents=True)
+            seed_repo_cache(home, root, "odoo-erp")
+            state = {}
+            # sweep 1: a live IDLE pane at the client-named checkout → nudge
+            tmux = FakeTmux([("%1", root)], IDLE)
+            wd.bounce_backstop(time.time(), tmux, state, lambda b, **kw: None,
+                               home=home, gh_fetch=lambda r: [1705])
+            self.assertTrue(tmux.typed(), "sweep 1 must nudge the idle pane")
+            # sweep 2: the pane is gone (Discord fallback). The SAME ticket set
+            # inside the renudge window must NOT re-ping — the dedup key is the
+            # stable slug, identical across the pane→no-pane transition.
+            state["bounce"]["last_check"] = 0     # re-open the cadence gate
+            pings = []
+            wd.bounce_backstop(time.time(), FakeTmux([]), state,
+                               lambda b, **kw: pings.append(b), home=home,
+                               gh_fetch=lambda r: [1705])
+            self.assertFalse(pings, "same ticket set after a pane drop must "
+                             "dedup on the slug, not double-notify: %s" % pings)
+
 
 class TestGhEnvTokenFallback(unittest.TestCase):
     def test_bashrc_export_is_picked_up(self):

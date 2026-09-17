@@ -597,6 +597,13 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
             logs.append("bounce-skip-not-cross-stream %s (dir %s)"
                         % (slug or "unknown", os.path.basename(root.rstrip("/"))))
             continue
+        # #1068 F1: key the `seen` dedup + Discord routing/message on the
+        # resolved SLUG, not the pane-vs-cache-divergent basename `name` (a
+        # live pane set it from `os.path.basename(cwd)`, the cache fallback
+        # from the slug). On a client-named checkout those differ, so a pane
+        # appear->disappear within the renudge window otherwise double-notifies
+        # the SAME ticket set. `slug` is guaranteed non-None past the predicate.
+        name = slug
         tickets = fetch(root)
         if tickets is None:
             continue                           # gh error → keep prior state
