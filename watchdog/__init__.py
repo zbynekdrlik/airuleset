@@ -998,9 +998,12 @@ BOUNCE_NUDGE = ("bounce-backstop: open prio:bounce tickets %s in %s — "
 # signal (the false ticket had a real, unrelated comment too, so "has a
 # comment" doesn't discriminate) -- the discriminator is the REPO: job 8 may
 # only ever query/nudge repos that actually PARTICIPATE in the protocol. Add
-# a repo's basename here the day it onboards a gatekeeper<->sub-dev flow;
-# everything else is structurally exempt, by construction, from job 8 ever
-# even asking GitHub about it.
+# a repo's SLUG (the GitHub repo name, `repo_identity`'s output) here the day
+# it onboards a gatekeeper<->sub-dev flow -- NOT its checkout directory
+# basename (#1068: stream boxes check odoo-erp out under client-named dirs
+# like `odoo-slovnormal`, so membership is keyed on the slug the tickets-status
+# cache / git remote resolve, never the path). Everything else is structurally
+# exempt, by construction, from job 8 ever even asking GitHub about it.
 _CROSS_STREAM_REPOS = frozenset({"odoo-erp"})
 
 
@@ -2120,6 +2123,7 @@ from watchdog.conformance_heartbeat import (  # noqa: E402
 # top-level `import watchdog` (call-time attribute access, no cycle).
 from watchdog.cross_stream import (  # noqa: E402
     _repo_in_cross_stream_flow as _repo_in_cross_stream_flow,
+    repo_identity as repo_identity,
     _bounce_quals as _bounce_quals,
     _gh_env as _gh_env,
     _fetch_bounce_tickets as _fetch_bounce_tickets,
