@@ -39,58 +39,72 @@ def read(rel):
     return (ROOT / rel).read_text(encoding="utf-8")
 
 
-class TestWorkerCycleHasDesignStep(TestCase):
-    """The worker's CYCLE must design the approach BEFORE it implements."""
+class TestWorkerCycleReadsMainDesign(TestCase):
+    """#1061 (owner escalation 2026-09-17) REVERSED #104's worker-authors-design:
+    the DESIGN is authored by the Fable MAIN, the worker READS + CONFIRMS it and
+    NEVER authors it. The design-first discipline is preserved -- it just lives
+    with the main now. These lock the worker's read-not-author step."""
 
-    def test_cycle_carries_a_design_step(self):
-        self.assertIn("DESIGN THE APPROACH BEFORE ANY CODE", read(WORKER))
+    HEADER = "READ THE MAIN'S DESIGN"
 
-    def test_design_step_comes_before_the_implement_step(self):
+    def _step(self):
         w = read(WORKER)
-        design = w.index("DESIGN THE APPROACH BEFORE ANY CODE")
+        step = w[w.index(self.HEADER):]
+        return step[:step.index("\n3. ")]
+
+    def test_cycle_carries_a_read_the_main_design_step(self):
+        self.assertIn(self.HEADER, read(WORKER))
+
+    def test_read_step_comes_before_the_implement_step(self):
+        w = read(WORKER)
+        design = w.index(self.HEADER)
         implement = w.index("Implement **the named issue(s) ONLY**")
         self.assertLess(
             design, implement,
-            "the design step must precede implementation in the CYCLE")
+            "the read-the-main's-design step must precede implementation")
 
-    def test_design_step_content_is_inline_not_a_skill_pointer(self):
+    def test_step_content_is_inline_not_a_skill_pointer(self):
         """A skill body never reaches a dispatched worker (probes 2026-07-27),
         so the step must carry its own instruction, not delegate to a skill."""
-        w = read(WORKER)
-        step = w[w.index("DESIGN THE APPROACH BEFORE ANY CODE"):]
-        step = step[:step.index("\n3. ")]
-        # the actual method must be spelled out in the step itself
+        step = self._step()
+        # the worker READS the main's design (which carries these) and greps code
         self.assertIn("root cause", step.lower())
         self.assertIn("alternative", step.lower())
-        # and it must not be satisfiable by merely naming a skill
+        self.assertIn("Design-by: main", step)
+        self.assertIn("grep", step.lower())
         self.assertNotIn("load the `batch-issue-development` skill", step)
 
-    def test_design_step_is_unconditional(self):
-        """A self-assessed "if non-trivial" hedge is no condition at all --
-        the same agent that wants to skip the step would evaluate it."""
-        w = read(WORKER)
-        step = w[w.index("DESIGN THE APPROACH BEFORE ANY CODE"):]
-        step = step[:step.index("\n3. ")]
+    def test_worker_must_not_author_the_design(self):
+        """The core of #1061: the worker never authors the design."""
+        step = self._step()
+        self.assertIn("NEVER author the design", step)
+        self.assertIn("Anchors-confirmed", step)
+        # it must NOT tell the worker to write the design shape itself
+        self.assertNotIn("post it to the issue with", step)
+
+    def test_step_is_unconditional(self):
+        """A self-assessed "if non-trivial" hedge is no condition at all."""
+        step = self._step()
         self.assertIn("UNCONDITIONAL", step)
         for hedge in ("if non-trivial", "if it is non-trivial",
                       "when non-trivial", "if multi-step"):
             self.assertNotIn(hedge, step.lower(),
                              f"banned self-assessed hedge: {hedge}")
 
-    def test_design_step_output_lands_on_the_ticket_before_code(self):
-        """Makes the acceptance criterion checkable from primary sources
-        (gh issue view + git log), not just from a run transcript."""
-        w = read(WORKER)
-        step = w[w.index("DESIGN THE APPROACH BEFORE ANY CODE"):]
-        step = step[:step.index("\n3. ")]
+    def test_step_output_lands_on_the_ticket(self):
+        """The worker's confirmation/question is a durable ticket comment,
+        checkable from primary sources."""
+        step = self._step()
         self.assertIn("gh issue comment", step)
-        self.assertIn("BEFORE the first code commit", step)
+        self.assertIn("Design-question:", step)
 
     def test_evidence_block_reports_the_approach(self):
-        """The supervisor already re-verifies every evidence-block line, so the
-        approach line is the enforcement -- no new hook needed."""
+        """The supervisor re-verifies every evidence-block line; the approach
+        line now points at the MAIN's Design-by comment + the worker's
+        Anchors-confirmed comment."""
         w = read(WORKER)
         self.assertIn("approach:", w)
+        self.assertIn("Anchors-confirmed", w)
 
 
 class TestAmbientDesignFirstClause(TestCase):
