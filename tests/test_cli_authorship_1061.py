@@ -3,7 +3,6 @@ its transcript (never a self-declared string) + its main/worker role from the
 cwd, for truthful `Design-by:`/`Reviewed-by:` stamps.
 """
 import json
-import os
 import shutil
 import sys
 import tempfile

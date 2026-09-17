@@ -21,7 +21,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 import time
 
 from gates import read_payload, field_of, emit_block_stderr, allow
