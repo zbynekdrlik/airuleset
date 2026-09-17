@@ -1,6 +1,6 @@
 {
   "files": {
-    "airuleset.py": 10842,
+    "airuleset.py": 10867,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2338,
     "cli_account_bootstrap.py": 285,
@@ -38,7 +38,7 @@
     "cli_push_gate.py": 218,
     "cli_quals.py": 3030,
     "cli_quals_cmd.py": 1429,
-    "cli_remote.py": 1926,
+    "cli_remote.py": 1950,
     "cli_resource_guards.py": 881,
     "cli_scratch_sweep.py": 1854,
     "cli_skill_usage.py": 337,
@@ -715,7 +715,7 @@
     "airuleset.py::_notify_run_card": 288,
     "airuleset.py::_watchdog_release_state_fetch": 215,
     "airuleset.py::cmd_gk_request": 209,
-    "airuleset.py::cmd_handoff": 321,
+    "airuleset.py::cmd_handoff": 323,
     "airuleset.py::cmd_install": 915,
     "airuleset.py::cmd_notify": 352,
     "airuleset.py::cmd_tickets_status": 318,

@@ -355,13 +355,36 @@ def provision_model_backend_markers(hosts=None, run=None, skip_names=None,
                   "— skipping its marker." % (h["name"], e), file=sys.stderr)
             failed.append((h["name"], "registry-entry-malformed"))
             continue
-        failed.extend(_deliver_secret_to_hosts(
+        marker_fails = _deliver_secret_to_hosts(
             [h], marker_value,
             "umask 077; mkdir -p ~/.claude; cat > "
             "~/.claude/airuleset-model-backend.json && chmod 600 "
             "~/.claude/airuleset-model-backend.json",
             "model-backend marker", run, control_opts=control_opts,
-            require_identity=True))
+            require_identity=True)
+        failed.extend(marker_fails)
+        if marker_fails:
+            continue
+        # #1062 L2 review B-MAJOR1 (one-push flip): the per-host `install` in the
+        # deploy loop ran BEFORE this delivery, so without this the box would
+        # flip only on the NEXT push. Re-run install on the just-flipped target
+        # NOW (marker present → apply_managed_settings_defaults writes the gateway
+        # env + apiKeyHelper, maybe_setup_model_backend materializes the helper
+        # script) so ONE push flips it. BEST-EFFORT: an install-flip failure is a
+        # WARN, never a delivery `failed` entry — the marker IS delivered, so a
+        # slow/failed re-run just defers the flip to the box's next install (the
+        # SAFE direction). Long timeout: a full install is far slower than a
+        # secret write.
+        repo_path = h.get("repo_path", "~/devel/airuleset")
+        flip_fails = _deliver_secret_to_hosts(
+            [h], "",
+            "cd %s && python3 airuleset.py install" % repo_path,
+            "model-backend install-flip", run, control_opts=control_opts,
+            require_identity=True, timeout=600)
+        for name, reason in flip_fails:
+            print("  ⚠ model-backend: install-flip on %s did not complete (%s) "
+                  "— the marker is delivered; the box flips on its next install."
+                  % (name, reason), file=sys.stderr)
     return failed
 
 
@@ -392,7 +415,8 @@ def remove_model_backend_markers(targets, run=None, control_opts=None):
 # THIRD secret-delivery caller ever lands, extract this whole surface into a
 # `cli_secret_delivery.py` leaf (facade re-export from airuleset.py) FIRST.
 def _deliver_secret_to_hosts(targets, value, remote_write_cmd, noun, run,
-                             control_opts=None, require_identity=False):
+                             control_opts=None, require_identity=False,
+                             timeout=20):
     """Shared per-host secret DELIVERY loop (#659 extraction) -- the surviving
     caller is `provision_subdev_soniox_key` (the Soniox key), a generic,
     reviewed facility kept for any future owner-secret delivery. (The #659
@@ -454,7 +478,7 @@ def _deliver_secret_to_hosts(targets, value, remote_write_cmd, noun, run,
             exc = None
             try:
                 r = run(argv, input=value + "\n", capture_output=True,
-                        text=True, timeout=20)
+                        text=True, timeout=timeout)
             except Exception as e:
                 exc = e
                 break

@@ -33,6 +33,7 @@ crash CLI mode, #433 L-E). Consumed by:
 
 import json
 import os
+import re
 import shlex
 from pathlib import Path
 
@@ -88,6 +89,15 @@ BACKEND_ENV_KEYS = (
 # The five string fields a valid marker MUST carry.
 _MARKER_FIELDS = ("base_url", "key_file", "main", "sub", "fast")
 
+# #1062 L2 review A-M1 (security hardening): a marker field flows into a shell
+# context — the `main` alias into the launcher's `--model '{{MANAGED_MODEL}}'`
+# (single-quoted), the key_file/base_url into settings.json + the apiKeyHelper
+# script — so a quote/backtick/whitespace/metachar in ANY field could break out
+# of the quoting or inject a command. Reject those chars in every field. This is
+# deliberately permissive for real values (a base_url has `:/.`, a key_file has
+# `/~.-`, an alias/model id has `/._:@-`); it bans only the shell-dangerous set.
+_MARKER_UNSAFE_RE = re.compile(r"""['"`\s;|&$\\<>(){}]""")
+
 
 def _expand(p):
     return Path(os.path.expanduser(str(p)))
@@ -95,24 +105,42 @@ def _expand(p):
 
 def default_base_url():
     """The controller gateway's base URL (`http://<tailscale-ip>:<GATEWAY_PORT>`).
-    Reads L1's `GATEWAY_PORT` lazily so the two lanes share one port constant."""
+    Reads L1's `GATEWAY_PORT` AND — since `set` runs ON the controller (where the
+    L1 gateway binds) — L1's live `_tailscale_ip()` so the marker points at the
+    address the gateway is ACTUALLY bound to, never a hard-coded IP that could
+    drift (review B-MINOR). Falls back to the pinned CONTROLLER_TAILSCALE_IP on
+    any failure (off-controller, no tailscale, an unexpected error)."""
     try:
         from cli_model_gateway import GATEWAY_PORT
         port = int(GATEWAY_PORT)
     except Exception:
         port = 4000
-    return "http://%s:%d" % (CONTROLLER_TAILSCALE_IP, port)
+    try:
+        from cli_model_gateway import _tailscale_ip
+        live = (_tailscale_ip() or "").strip()
+        ip = live or CONTROLLER_TAILSCALE_IP
+    except Exception:
+        # off-controller / no tailscale / error → the pinned fallback (the
+        # expected path anywhere but the controller; not a real failure).
+        ip = CONTROLLER_TAILSCALE_IP
+    return "http://%s:%d" % (ip, port)
 
 
 # --------------------------------------------------------------------------- #
 # The per-box marker
 # --------------------------------------------------------------------------- #
 def _valid_marker(d):
-    """True iff `d` is a complete marker — every field a non-empty string. An
-    INCOMPLETE marker is treated as absent (fail to today's behaviour) rather
-    than half-flipping the box."""
-    return isinstance(d, dict) and all(
-        isinstance(d.get(k), str) and d.get(k) for k in _MARKER_FIELDS)
+    """True iff `d` is a complete marker — every field a non-empty string with no
+    shell-dangerous character (review A-M1). An INCOMPLETE or unsafe marker is
+    treated as absent (fail to today's behaviour) rather than half-flipping the
+    box or injecting into the launcher/apiKeyHelper/settings."""
+    if not isinstance(d, dict):
+        return False
+    for k in _MARKER_FIELDS:
+        v = d.get(k)
+        if not (isinstance(v, str) and v) or _MARKER_UNSAFE_RE.search(v):
+            return False
+    return True
 
 
 def marker_path(home=None):
@@ -317,8 +345,10 @@ def read_gateway_master_key(source=None):
 
 
 def marker_json(entry):
-    """The exact JSON text written to a target's marker file (deploy stdin)."""
-    return json.dumps(marker_from_entry(entry), indent=2, sort_keys=True) + "\n"
+    """The exact JSON text written to a target's marker file (deploy stdin). No
+    trailing newline — the deploy helper appends one (`value + "\\n"`), so this
+    avoids a double newline in the shipped file (review A-M4)."""
+    return json.dumps(marker_from_entry(entry), indent=2, sort_keys=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -365,7 +395,10 @@ def _cmd_set(args):
     print("model-backend: %s → main=%s sub=%s fast=%s base_url=%s"
           % (target, entry["main"], entry["sub"], entry["fast"], entry["base_url"]))
     print("  Written to the registry. The NEXT `airuleset.py push` ships the "
-          "marker + the gateway master key (0600) to the target.")
+          "marker + the gateway master key (0600) to the target BEFORE its "
+          "install runs, so that install flips the box onto the gateway in the "
+          "same push (a best-effort install re-run also fires right after "
+          "delivery). Verify with `claude -p 'reply OK'` on the target.")
     return 0
 
 
@@ -380,8 +413,15 @@ def _cmd_clear(args):
         return 0
     print("model-backend: %s dropped from the registry." % target)
     if getattr(args, "registry_only", False):
-        print("  --registry-only: not shipping a removal now; the next "
-              "`airuleset.py push` reconciles the target.")
+        # HONEST (review B-MAJOR3): the push shipper only ADDS to registered
+        # targets — it does NOT reconcile removals — so the marker on the target
+        # is NOT removed by a later push. --registry-only is for an UNREACHABLE
+        # target: the registry is cleaned, but the marker must be removed by a
+        # reachable `clear` (no --registry-only) or by hand.
+        print("  --registry-only: the registry entry is dropped, but the marker "
+              "+ key on %s are NOT removed (a push never reconciles a removal). "
+              "Run `airuleset.py model-backend clear %s` (reachable) to remove "
+              "them, or remove them on the target by hand." % (target, target))
         return 0
     # Ship the on-target removal (rm marker + key + apiKeyHelper script) now —
     # "clear removes both". Deferred imports keep this leaf standalone-importable.
@@ -405,8 +445,10 @@ def _cmd_clear(args):
               % (target, ", ".join("%s:%s" % f for f in fails)),
               file=__import__("sys").stderr)
         return 2
-    print("  model-backend: marker + key removed on %s; its settings self-heal "
-          "to the Anthropic backend on the next install." % target)
+    print("  model-backend: marker + key + apiKeyHelper removed on %s. Its "
+          "settings.json still points at the gateway until the target's NEXT "
+          "install reverts it (no marker → the backend env + apiKeyHelper are "
+          "popped) — run `airuleset.py push` to revert it now." % target)
     return 0
 
 

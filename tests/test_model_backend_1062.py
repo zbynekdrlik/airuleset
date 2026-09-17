@@ -472,9 +472,15 @@ class TestDeployShipping(unittest.TestCase):
                              master_key_source=self._master_key(d))
             self.assertEqual(fails, [], "clean shipping must report no failures")
             cmds = [c["argv"][-1] for c in fr.calls]
-            self.assertEqual(len(fr.calls), 2, "one key leg + one marker leg")
+            # #1062 L2 review B-MAJOR1: key leg + marker leg + a one-push
+            # install-flip re-run on the just-flipped target.
+            self.assertEqual(len(fr.calls), 3,
+                             "key leg + marker leg + install-flip re-run")
             self.assertTrue(any("model-gateway.key" in c for c in cmds))
             self.assertTrue(any("airuleset-model-backend.json" in c for c in cmds))
+            self.assertTrue(any("airuleset.py install" in c for c in cmds),
+                            "the box must be flipped in ONE push via an "
+                            "install re-run after delivery")
             # the key value + the marker JSON are piped via stdin, never argv
             inputs = "".join((c["input"] or "") for c in fr.calls)
             self.assertIn("sk-test-master-key", inputs)
@@ -569,6 +575,99 @@ class TestCliDispatch(unittest.TestCase):
         with m.patch("sys.stderr", io.StringIO()):
             rc = mb.cmd_model_backend(self._Args(mb_action="bogus"))
         self.assertEqual(rc, 2)
+
+
+class TestReviewFixes1062(unittest.TestCase):
+    """Locks for the two-adversarial-review findings, fixed in-branch."""
+
+    # --- A-M1: marker fields reject shell-dangerous chars (injection into the
+    #     launcher `--model '<main>'` / apiKeyHelper / settings) ---
+    def test_valid_marker_rejects_injection_alias(self):
+        bad = {**MARKER, "main": "pilot' ; rm -rf /"}
+        self.assertFalse(mb._valid_marker(bad))
+        for ch in ("a b", "a`b", 'a"b', "a;b", "a|b", "a$b", "a\\b", "a\nb"):
+            self.assertFalse(mb._valid_marker({**MARKER, "sub": ch}),
+                             "unsafe char %r must be rejected" % ch)
+
+    def test_valid_marker_accepts_real_values(self):
+        # a real gateway alias / provider-model target / url / path all pass
+        self.assertTrue(mb._valid_marker({
+            "base_url": "http://100.101.214.103:4000",
+            "key_file": "~/.secrets/model-gateway.key",
+            "main": "openrouter/deepseek/deepseek-v4.1-flash",
+            "sub": "pilot-sub", "fast": "pilot-fast"}))
+
+    def test_set_target_refuses_unsafe_alias(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(mb.ModelBackendError):
+                mb.set_target("miva1@subdev", main="x'; rm -rf /",
+                              path=str(Path(d) / "reg.json"))
+
+    # --- B-MINOR: default_base_url derives the controller IP from L1 at call
+    #     time, falling back to the pinned constant ---
+    def test_default_base_url_uses_live_tailscale_ip(self):
+        with m.patch("cli_model_gateway._tailscale_ip", return_value="100.9.9.9"):
+            self.assertEqual(mb.default_base_url(), "http://100.9.9.9:4000")
+
+    def test_default_base_url_falls_back_on_failure(self):
+        with m.patch("cli_model_gateway._tailscale_ip",
+                     side_effect=RuntimeError("no tailscale")):
+            self.assertEqual(mb.default_base_url(),
+                             "http://%s:4000" % mb.CONTROLLER_TAILSCALE_IP)
+
+    # --- A-M4: marker_json has no trailing newline (the deploy helper adds one) ---
+    def test_marker_json_no_trailing_newline(self):
+        self.assertFalse(mb.marker_json(MARKER).endswith("\n"))
+        self.assertEqual(json.loads(mb.marker_json(MARKER)), MARKER)
+
+    # --- B-MAJOR2: cmd_handoff accepts the pilot alias ONLY when the marker
+    #     exists (a flipped branch-merge stream can hand off) ---
+    def test_handoff_pilot_alias_accepted_with_marker(self):
+        import airuleset
+        with m.patch("cli_model_backend.load_marker", return_value=MARKER):
+            self.assertEqual(
+                airuleset._pilot_alias_self_review_model("pilot-main"), "pilot-main")
+            self.assertEqual(
+                airuleset._pilot_alias_self_review_model("pilot-sub"), "pilot-sub")
+            self.assertEqual(
+                airuleset._pilot_alias_self_review_model("pilot-fast"), "pilot-fast")
+            self.assertIsNone(
+                airuleset._pilot_alias_self_review_model("claude-opus-4-8"))
+
+    def test_handoff_pilot_alias_rejected_without_marker(self):
+        import airuleset
+        with m.patch("cli_model_backend.load_marker", return_value=None):
+            self.assertIsNone(airuleset._pilot_alias_self_review_model("pilot-main"))
+
+    # --- B-MAJOR1: the install-flip re-run failure is a WARN, never a delivery
+    #     failure (the marker IS delivered) ---
+    def test_install_flip_failure_is_warn_not_delivery_failure(self):
+        from cli_remote import provision_model_backend_markers as prov
+        with tempfile.TemporaryDirectory() as d:
+            reg = Path(d) / "reg.json"
+            mb.set_target("miva1@subdev", path=str(reg))
+            k = Path(d) / "master.key"
+            k.write_text("sk-x\n")
+
+            # a fake runner that fails ONLY the install-flip leg (the others 0)
+            class _FlipFails:
+                def __init__(self):
+                    self.calls = []
+
+                def __call__(self, argv, input=None, capture_output=None,
+                             text=None, timeout=None):
+                    self.calls.append(argv[-1])
+                    rc = 255 if "airuleset.py install" in argv[-1] else 0
+                    return subprocess.CompletedProcess(argv, rc, stdout="",
+                                                       stderr="boom")
+            fr = _FlipFails()
+            with m.patch("sys.stdout", io.StringIO()), \
+                    m.patch("sys.stderr", io.StringIO()):
+                fails = prov(run=fr, registry_path=str(reg),
+                             master_key_source=str(k))
+            self.assertEqual(fails, [], "a failed install-flip is a WARN, not a "
+                             "delivery failure — the marker IS delivered")
+            self.assertTrue(any("airuleset.py install" in c for c in fr.calls))
 
 
 if __name__ == "__main__":

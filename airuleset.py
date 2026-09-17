@@ -4859,6 +4859,8 @@ def cmd_handoff(args):
         return 1
     canonical_srm = _canonical_self_review_model(self_review_model)
     if canonical_srm is None:
+        canonical_srm = _pilot_alias_self_review_model(self_review_model)
+    if canonical_srm is None:
         allowed = ", ".join(sorted(MODEL_TIERS.values()))
         print("handoff BLOCK: --self-review-model %r is not an allowed exact "
               "model id — use one of: %s" % (self_review_model, allowed))
@@ -5062,6 +5064,29 @@ def _canonical_self_review_model(value):
     for canonical in MODEL_TIERS.values():
         if _normalize_model(canonical) == norm:
             return canonical
+    return None
+
+
+def _pilot_alias_self_review_model(value):
+    """#1062 L2 (review B-MAJOR2): on a box flipped onto the model gateway, the
+    self-review was performed by the pilot ALIAS (pilot-main/sub/fast — not a
+    MODEL_TIERS id), so `_canonical_self_review_model` returns None and the
+    `handoff` gate would block a flipped reduced-authority stream (miva1 is
+    branch-merge → it runs `cmd_handoff`). Accept `value` as the truthful
+    Self-review-model ONLY when THIS box carries the marker AND `value` matches a
+    configured alias — the SAME tolerance gates/designdispatch applies to the
+    design model. Off a marker box (no marker) this is None, so every other box
+    still requires an exact MODEL_TIERS id. Never raises."""
+    v = (value or "").strip()
+    if not v:
+        return None
+    try:
+        import cli_model_backend as _mb
+        marker = _mb.load_marker()
+    except Exception:
+        marker = None
+    if marker and v in (marker.get("main"), marker.get("sub"), marker.get("fast")):
+        return v
     return None
 
 
