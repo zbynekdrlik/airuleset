@@ -465,6 +465,25 @@ from watchdog.transcripts import (  # noqa: E402
     _GENERIC_DIRS as _GENERIC_DIRS,
 )
 
+# #1055 P2 -- the per-sweep subprocess COUNTER + MEMO namespace, re-exported
+# through this facade (same seam as transcripts). The counter is fed by every
+# runner (`_default_run`, `_gh_out`, `run_counted`, `_default_git_run`,
+# `default_ps_fetch`); run_once resets it + begins the memo at its top and
+# journals the `subprocess:` summary at its bottom, next to P1's `transcript
+# reads:` line. `subprocess_budget` imports nothing from the package, so this is
+# import-safe.
+from watchdog.subprocess_budget import (  # noqa: E402
+    reset_subprocess_stats as reset_subprocess_stats,
+    record_subprocess as record_subprocess,
+    subprocess_stats as subprocess_stats,
+    run_counted as run_counted,
+    begin_sweep_memo as begin_sweep_memo,
+    end_sweep_memo as end_sweep_memo,
+    sweep_memo_active as sweep_memo_active,
+    sweep_memo as sweep_memo,
+    memoized as memoized,
+)
+
 
 # #433 item G step 4 -- the usage-cap / session-limit / reset-epoch-parse /
 # `decide` / `decide_working` / `load_state` / `save_state` cluster that used to
@@ -3140,6 +3159,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # #1055 P1 — clear the bounded-tail memo + counters ONCE per sweep so this
     # sweep re-reads fresh; the summary line below reports what it saved.
     reset_transcript_cache()
+    # #1055 P2 — zero the subprocess counter and ACTIVATE the per-sweep memo at
+    # the SAME seam, so identical gh/git/tmux/ps calls collapse within this sweep
+    # and the `subprocess:` summary line below reports the real per-sweep spend.
+    reset_subprocess_stats()
+    begin_sweep_memo()
     stalled = set()
     owner_by_sid = {}                   # session id -> tmux owner, for job 5's ✅ @mention
     owner_by_cwd = {}                   # pane cwd -> tmux owner, job 5's recovery path
@@ -5284,6 +5308,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     _tr = transcript_read_stats()
     logs.append("transcript reads: %d files, %d bytes read, %d memo hits"
                 % (_tr["files"], _tr["bytes"], _tr["hits"]))
+
+    # #1055 P2 — one per-sweep summary of the subprocess spend, next to P1's
+    # transcript line, so the gh/git/tmux/ps budget (and any regression) is
+    # readable from `journalctl` on gk alongside the owner's `Consumed … CPU`
+    # metric. `top:` = the 5 heaviest command classes by count. Then DEACTIVATE
+    # the memo so a later direct call in the same process is never served a
+    # stale sweep value.
+    _sp = subprocess_stats()
+    _top = ", ".join("%s:%d" % (lbl, n) for lbl, n in _sp["top"][:5]) or "-"
+    logs.append("subprocess: %d calls, %.1fs, top: %s"
+                % (_sp["n"], _sp["wall"], _top))
+    end_sweep_memo()
 
     save_state(state_path, state)
     return logs

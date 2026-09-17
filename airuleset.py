@@ -3213,14 +3213,23 @@ def _gh_out(*gh_args, timeout=8, cwd=None):
 
     `cwd` runs gh inside a specific checkout (gh resolves the repo from the
     git remote there), so a caller that resolved the repo ROOT does not
-    depend on the process cwd happening to be it (#181 I-5)."""
+    depend on the process cwd happening to be it (#181 I-5).
+
+    #1055 P2: every `gh` invocation through this helper is timed + recorded in
+    the per-sweep subprocess counter (label `gh`), so the journal `subprocess:`
+    line reflects the real gh spend."""
     import subprocess
+    import time
+    from watchdog.subprocess_budget import record_subprocess
+    _t0 = time.monotonic()
     try:
         r = subprocess.run(["gh", *gh_args], capture_output=True, text=True,
                            timeout=timeout, cwd=cwd, env=_gh_env())
         return (r.stdout or "").strip() if r.returncode == 0 else ""
     except Exception:
         return ""
+    finally:
+        record_subprocess("gh", time.monotonic() - _t0)
 
 
 # #370: the whole fleet shares ONE GitHub account → ONE 5000/h GraphQL bucket,

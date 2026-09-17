@@ -183,7 +183,20 @@ def default_ps_fetch():
     cycle). `ps -o etimes=`/`cputimes=` give whole SECONDS directly, so no
     clock arithmetic is needed. Scoped to `-u <uid>` — you can only SIGKILL
     your own processes, and scoping avoids a permanent permission-error log for
-    another user's runaway on a shared box."""
+    another user's runaway on a shared box.
+
+    #1055 P2: the 4 reaper jobs that read the process table (shadow_ugrep,
+    heavy_build, priority_policy, orphan_poll) share ONE `ps -u` snapshot per
+    sweep via the memo -- the process table cannot change meaningfully within a
+    sweep for their purposes. Outside a sweep every call reads fresh."""
+    from watchdog.subprocess_budget import memoized
+    return memoized(("ps_snapshot",), _default_ps_fetch_uncached)
+
+
+def _default_ps_fetch_uncached():
+    from watchdog.subprocess_budget import record_subprocess
+    import time as _time
+    _t0 = _time.monotonic()
     try:
         out = subprocess.run(
             ["ps", "-o", "pid=,etimes=,cputimes=,args=", "-u", str(os.getuid())],
@@ -191,6 +204,8 @@ def default_ps_fetch():
         )
     except Exception:
         return None
+    finally:
+        record_subprocess("ps", _time.monotonic() - _t0)
     if out.returncode != 0:
         return None
     rows = []

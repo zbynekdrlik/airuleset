@@ -184,28 +184,11 @@ class TestPaneInventoryMemo(unittest.TestCase):
         self.assertEqual(len(listp), 2, "direct calls (no sweep) each run their own query")
 
 
-class TestPaneCaptureMemo(unittest.TestCase):
+class TestPaneOwnerMemo(unittest.TestCase):
     def tearDown(self):
         wd.end_sweep_memo()
 
-    def test_capture_pane_memoized_per_pane_and_lines(self):
-        rec = []
-
-        def run(argv):
-            rec.append(list(argv))
-            return "CONTENT"
-
-        wd.begin_sweep_memo()
-        a = wd.capture_pane("%1", run)
-        b = wd.capture_pane("%1", run)             # same pane, same lines -> memo hit
-        c = wd.capture_pane("%1", run, lines=30)   # different lines -> its own read
-        wd.end_sweep_memo()
-
-        self.assertEqual((a, b, c), ("CONTENT", "CONTENT", "CONTENT"))
-        caps = [x for x in rec if len(x) > 1 and x[1] == "capture-pane"]
-        self.assertEqual(len(caps), 2, "one per (pane, lines); the repeat is a hit")
-
-    def test_pane_owner_memoized(self):
+    def test_pane_owner_memoized_within_sweep(self):
         rec = []
 
         def run(argv):
@@ -218,19 +201,28 @@ class TestPaneCaptureMemo(unittest.TestCase):
         wd.end_sweep_memo()
         self.assertEqual((a, b), ("zbynek", "zbynek"))
         dm = [x for x in rec if len(x) > 1 and x[1] == "display-message"]
-        self.assertEqual(len(dm), 1)
+        self.assertEqual(len(dm), 1, "owner is static mid-sweep -> one display-message")
 
-    def test_capture_pane_not_memoized_outside_sweep(self):
+    def test_capture_pane_stays_FRESH_even_within_a_sweep(self):
+        # #1055 P2: capture_pane is deliberately NOT memoized -- every same-pane
+        # recapture in the code is an intentional fresh read (race re-verify /
+        # render-settle / parked-wake liveness), so a within-sweep repeat MUST
+        # issue a new capture-pane. This is the freshness contract the (b) memo
+        # deliberately excludes.
         rec = []
+        seq = iter(["FIRST", "SECOND"])
 
         def run(argv):
             rec.append(list(argv))
-            return "X"
+            return next(seq)
 
-        wd.capture_pane("%1", run)
-        wd.capture_pane("%1", run)
+        wd.begin_sweep_memo()
+        a = wd.capture_pane("%1", run)
+        b = wd.capture_pane("%1", run)
+        wd.end_sweep_memo()
+        self.assertEqual((a, b), ("FIRST", "SECOND"))
         caps = [x for x in rec if len(x) > 1 and x[1] == "capture-pane"]
-        self.assertEqual(len(caps), 2)
+        self.assertEqual(len(caps), 2, "capture must stay fresh, never memoized")
 
 
 class TestPsSnapshotMemo(unittest.TestCase):
