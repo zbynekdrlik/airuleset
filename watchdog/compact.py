@@ -322,23 +322,32 @@ def has_pending_request(sid, path=None):
     return isinstance(load_compact_requests(path).get(sid), dict)
 
 
-# The nominal watchdog sweep cadence (seconds). `pending_compact_hold`'s bound is
-# expressed in sweeps so it self-scales with the timer; the constant just names
-# the ~60s cadence the systemd `--user` timer runs at.
-COMPACT_SWEEP_INTERVAL_S = 60
-COMPACT_PENDING_HOLD_SWEEPS = 2   # #848: bound the rider hold to this many sweeps
+# #1055 P3 (d): the rider hold is bounded in SECONDS, not sweeps. Before P3 the
+# bound was `COMPACT_PENDING_HOLD_SWEEPS (2) × COMPACT_SWEEP_INTERVAL_S (60)` =
+# 120s, which silently assumed a fixed 60s sweep cadence. With the adaptive
+# "calm sweep" cadence a calm sweep is 300s apart, so "2 sweeps" would balloon
+# the hold to 600s. Expressing the bound directly in wall-clock seconds keeps it
+# cadence-INDEPENDENT: the ~120s hold is identical whether the box is sweeping
+# every 60s or every 300s. Both former constants are gone (the sweep-count one
+# had no other consumer; the nominal-interval one only ever fed this bound).
+COMPACT_PENDING_HOLD_S = 120      # #1055 P3: seconds-based, cadence-independent bound
 
 
-def pending_compact_hold(sid, now=None, sweeps=None, path=None):
+def pending_compact_hold(sid, now=None, hold_s=None, path=None):
     """#848 BOUNDED writer-side latch: True iff `sid` has a pending `/compact`
-    request AND that request is YOUNGER than `sweeps` sweep intervals (measured
-    from its `bts`, fallback `ts`). Every work-pushing watchdog rider that used
-    `has_pending_request` as its `hold:compact-pending` gate now uses THIS, so the
-    hold is bounded: with the #848 veto removed a boundary compact delivers within
-    ~1 sweep, so a request still pending after `sweeps` sweeps is wedged on
-    recent-human / busy (whose own keystroke gates already protect the pane) — the
-    rider stops freezing and retries. The in-sweep `compact_sweep(handled=...)` set
-    still prevents a same-sweep keystroke collision, independent of this bound.
+    request AND that request is YOUNGER than `hold_s` seconds (measured from its
+    `bts`, fallback `ts`; default `COMPACT_PENDING_HOLD_S` = 120s). Every
+    work-pushing watchdog rider that used `has_pending_request` as its
+    `hold:compact-pending` gate now uses THIS, so the hold is bounded: with the
+    #848 veto removed a boundary compact delivers within ~1 sweep, so a request
+    still pending after `hold_s` is wedged on recent-human / busy (whose own
+    keystroke gates already protect the pane) — the rider stops freezing and
+    retries. The in-sweep `compact_sweep(handled=...)` set still prevents a
+    same-sweep keystroke collision, independent of this bound.
+
+    #1055 P3 (d): the bound is SECONDS, not sweeps, so the adaptive calm-sweep
+    cadence (a calm sweep is 300s apart) cannot stretch the hold — the ~120s
+    window is identical at any cadence.
 
     #921: returns False unconditionally when `_owner_disabled("compact")` is True —
     a disabled compact delivery can never clear the hold, so the hold must never
@@ -365,9 +374,9 @@ def pending_compact_hold(sid, now=None, sweeps=None, path=None):
     age = _safe_age(now, anchor)
     if age is None or age < 0:
         return False   # unmeasurable / future-skewed anchor -> fail-open (no hold)
-    if sweeps is None:
-        sweeps = COMPACT_PENDING_HOLD_SWEEPS
-    return age < sweeps * COMPACT_SWEEP_INTERVAL_S
+    if hold_s is None:
+        hold_s = COMPACT_PENDING_HOLD_S
+    return age < hold_s
 
 
 def _touch_compact_request_ts(sid, now, path=None):

@@ -257,7 +257,9 @@ class TestPendingCompactHoldBound848(_LatchBase):
 
     def test_stale_request_past_the_bound_does_not_hold(self):
         self._seed(1000)
-        # 2 sweeps * 60s = 120s; age 200s > bound -> no hold.
+        # #1055 P3 (d): the bound is COMPACT_PENDING_HOLD_S = 120s (cadence-
+        # independent seconds, replacing the old 2 sweeps × 60s); age 200s > 120s
+        # -> no hold. Behaviour is byte-identical at the default.
         self.assertFalse(wd_compact.pending_compact_hold(self.SID, 1200,
                                                          path=self.creqp))
 

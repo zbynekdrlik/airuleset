@@ -9350,9 +9350,15 @@ class TestApiWatchdog(TestCase):
         due) and unconditionally stamps that key, independent of session
         recovery/copy-mode. It is machine-channel-only and orthogonal to the
         session-tracking state these tests actually assert on, so strip it
-        before comparing against the session-only expectation."""
+        before comparing against the session-only expectation.
+
+        #1055 P3: `run_once` now ALSO stamps `state["sweep_cadence"]`
+        ({last_full, pane_stamps}) on every sweep — machine-cadence
+        bookkeeping, likewise orthogonal to the session-tracking these tests
+        assert on. Strip it for the same reason."""
         state = dict(self.w.load_state(self.state))
         state.pop("model_audit_last_ts", None)
+        state.pop("sweep_cadence", None)
         return state
 
     # real CC session ids are UUIDs (transcript stems) — the state cleanup
