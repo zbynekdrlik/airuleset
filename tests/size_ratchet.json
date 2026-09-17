@@ -328,7 +328,7 @@
     "tests/test_hosted_reply_delivery.py": 295,
     "tests/test_infra_banner_1029.py": 141,
     "tests/test_infra_footer_fold_1029.py": 80,
-    "tests/test_infra_queue_arrival_1029.py": 538,
+    "tests/test_infra_queue_arrival_1029.py": 542,
     "tests/test_infra_review_read_993.py": 123,
     "tests/test_infra_serial_removed_993.py": 91,
     "tests/test_install_worktree_guard.py": 312,
