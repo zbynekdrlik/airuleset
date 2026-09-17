@@ -373,8 +373,14 @@ class TestPlaywrightBrowsers(TestCase):
         return Path(tempfile.mkdtemp())
 
     def _populated_dir(self):
+        # populated but with a WRONG/old build (the #542-era drift case)
         d = Path(tempfile.mkdtemp())
         (d / "chromium-1234").mkdir()
+        return d
+
+    def _pinned_build_dir(self):
+        d = Path(tempfile.mkdtemp())
+        (d / ("chromium-" + cli_caveman_plugins.PLAYWRIGHT_CHROMIUM_BUILD)).mkdir()
         return d
 
     def test_absent_cache_is_not_installed(self):
@@ -415,10 +421,23 @@ class TestPlaywrightBrowsers(TestCase):
         run.assert_not_called()
         self.assertIn("npx is absent", out.getvalue())
 
-    def test_no_op_when_already_populated(self):
+    def test_no_op_when_pinned_build_present(self):
+        # #1048 review-2 finding 1: a no-op requires the PINNED build present,
+        # not mere cache non-emptiness.
         with m.patch("subprocess.run") as run:
-            airuleset.ensure_playwright_browsers(self._populated_dir())
+            airuleset.ensure_playwright_browsers(self._pinned_build_dir())
         run.assert_not_called()
+
+    def test_reinstalls_when_cache_has_a_wrong_build(self):
+        # #1048 review-2 finding 1 (the headline bug): a #542-era cache holding
+        # an OLD build (chromium-1234) must NOT be treated as "done" — it must
+        # re-install the pinned build, or the managed MCP server stays dead.
+        with m.patch("shutil.which", return_value="/usr/bin/npx"), \
+                m.patch("subprocess.run", return_value=m.Mock(returncode=0)) as run:
+            airuleset.ensure_playwright_browsers(self._populated_dir())
+        run.assert_called_once()
+        argv = run.call_args[0][0]
+        self.assertEqual(argv[2], "playwright@" + cli_caveman_plugins.PLAYWRIGHT_PW_VERSION)
 
     def test_installs_the_pinned_playwright_into_the_resolved_path(self):
         # #1048: the version is PINNED (never @latest) and the target dir is

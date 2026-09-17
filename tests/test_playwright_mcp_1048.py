@@ -114,6 +114,28 @@ class TestRenderMcpServer1048(unittest.TestCase):
             after = p.reconcile_playwright_mcp_server({"mcpServers": {}}, "/c")
         self.assertNotIn("playwright", after["mcpServers"])
 
+    def test_reconcile_coerces_a_non_dict_mcpservers(self):
+        # F2 (review-2 finding 2): a live ~/.claude.json with `"mcpServers":
+        # null` or a stray non-dict must not crash (the raise was swallowed as
+        # non-fatal, leaving the box unprovisioned) — coerce to {} and add ours.
+        for bad in (None, "oops", 5, []):
+            after = p.reconcile_playwright_mcp_server({"mcpServers": bad}, "/c")
+            self.assertIn("playwright", after["mcpServers"])
+
+
+class TestBoxClass1048(unittest.TestCase):
+    def test_current_box_class_degrades_to_workstation_on_none(self):
+        # F3 (review-2 finding 3): default_box_class() returns None on a
+        # missing/unreadable marker — _current_box_class must degrade to
+        # "workstation", never leak None into the resolver.
+        with mock.patch("watchdog.reaper.default_box_class", return_value=None):
+            self.assertEqual(p._current_box_class(), "workstation")
+
+    def test_current_box_class_degrades_on_exception(self):
+        with mock.patch("watchdog.reaper.default_box_class",
+                        side_effect=RuntimeError("boom")):
+            self.assertEqual(p._current_box_class(), "workstation")
+
 
 class TestBrowsersPathResolver1048(unittest.TestCase):
     """The ONE resolver, verified for BOTH box classes (dispatch item 2)."""
@@ -156,6 +178,18 @@ class TestBrowsersPathResolver1048(unittest.TestCase):
         opt2 = Path(tempfile.mkdtemp())
         (opt2 / "chromium-1243").mkdir()
         self.assertFalse(p._opt_has_pinned_build(opt2))
+
+    def test_pinned_build_installed_requires_the_exact_build(self):
+        # F1 (review-2 finding 1): a WRONG/old build in the cache is NOT "done".
+        import tempfile
+        empty = Path(tempfile.mkdtemp())
+        self.assertFalse(p._playwright_pinned_build_installed(empty))
+        wrong = Path(tempfile.mkdtemp())
+        (wrong / "chromium-1234").mkdir()
+        self.assertFalse(p._playwright_pinned_build_installed(wrong))
+        right = Path(tempfile.mkdtemp())
+        (right / ("chromium-" + p.PLAYWRIGHT_CHROMIUM_BUILD)).mkdir()
+        self.assertTrue(p._playwright_pinned_build_installed(right))
 
 
 class TestReconcileMcpFile1048(unittest.TestCase):

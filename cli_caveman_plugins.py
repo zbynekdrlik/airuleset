@@ -230,14 +230,35 @@ OPT_MS_PLAYWRIGHT = Path("/opt/ms-playwright")
 PLAYWRIGHT_BROWSERS_PATH_MARKER = Path.home() / ".claude" / "airuleset-playwright-browsers-path"
 
 
+def _has_pinned_chromium_build(browsers_dir: Path) -> bool:
+    """True iff `browsers_dir` holds the PINNED chromium build
+    (`chromium-<PLAYWRIGHT_CHROMIUM_BUILD>`) — the ONE build-match predicate,
+    shared by the /opt reuse check AND the install idempotency guard so they can
+    never diverge on what 'the right browser is present' means."""
+    return (browsers_dir / ("chromium-" + PLAYWRIGHT_CHROMIUM_BUILD)).is_dir()
+
+
 def _opt_has_pinned_build(opt_dir: Path = None) -> bool:
     """True iff the root-owned /opt/ms-playwright already holds the PINNED
     chromium build (`chromium-<PLAYWRIGHT_CHROMIUM_BUILD>`). The #1048 incident
     was exactly this being FALSE (it held chromium-1243 while the MCP needed
     1244), so a workstation only reuses /opt when the build matches; otherwise
     the per-user cache (always installable to the pinned build) is used."""
-    d = opt_dir or OPT_MS_PLAYWRIGHT
-    return (d / ("chromium-" + PLAYWRIGHT_CHROMIUM_BUILD)).is_dir()
+    return _has_pinned_chromium_build(opt_dir or OPT_MS_PLAYWRIGHT)
+
+
+def _playwright_pinned_build_installed(cache_dir: Path = None) -> bool:
+    """True iff the browsers cache holds the PINNED chromium build — NOT merely
+    that the dir is non-empty (#1048 review-2 finding 1). #542 ran an UNPINNED
+    `npx playwright install chromium` fleet-wide, so most stream boxes ALREADY
+    have a populated `~/.cache/ms-playwright` holding a PRE-1244 build; a mere
+    non-emptiness guard (`_playwright_browsers_installed`) would SKIP the pinned
+    install on exactly those boxes, leaving the managed MCP server dead (the
+    #2420 class the fix exists for) and the push post-check red. Gating on the
+    pinned build re-installs the correct browser whenever the cache holds a
+    wrong/old one."""
+    d = cache_dir or PLAYWRIGHT_BROWSER_CACHE
+    return _has_pinned_chromium_build(d)
 
 
 def resolve_playwright_browsers_path(box_class, opt_has_pinned_build, home: Path = None) -> Path:
@@ -265,7 +286,10 @@ def _current_box_class() -> str:
     resolved (the same fail-safe direction as the marker writer)."""
     try:
         from watchdog.reaper import default_box_class
-        return default_box_class()
+        # #1048 review-2 finding 3: default_box_class() returns None on a
+        # missing/unreadable marker (no exception) — coerce to "workstation" so
+        # the docstring's promise holds and a None never slips into the resolver.
+        return default_box_class() or "workstation"
     except Exception:
         return "workstation"
 
@@ -301,7 +325,14 @@ def reconcile_playwright_mcp_server(claude_json: dict, browsers_path) -> dict:
     user-scope MCP server set (when PLAYWRIGHT_MANAGED), every other top-level
     key and every other MCP server preserved untouched. Idempotent."""
     result = dict(claude_json)
-    servers = dict(result.get("mcpServers", {}))
+    # #1048 review-2 finding 2: coerce a non-dict `mcpServers` (a live
+    # ~/.claude.json with `"mcpServers": null` or a stray string) to {} rather
+    # than letting `dict(...)` raise — the raise propagated OUTSIDE the caller's
+    # try/except into cmd_install's "(non-fatal)" swallow, leaving the box
+    # unprovisioned SILENTLY while the already-written marker let the postcheck
+    # false-pass on the browser alone.
+    raw_servers = result.get("mcpServers")
+    servers = dict(raw_servers) if isinstance(raw_servers, dict) else {}
     if PLAYWRIGHT_MANAGED:
         servers[PLAYWRIGHT_MCP_SERVER_NAME] = render_playwright_mcp_server(browsers_path)
     result["mcpServers"] = servers
@@ -466,11 +497,11 @@ def reconcile_managed_plugins(settings: dict) -> dict:
     marketplace registered at all otherwise; see MARKETPLACE_SOURCES). Every
     other key preserved untouched; idempotent.
 
-    #542: playwright is force-ENABLED here (it is back in MANAGED_PLUGINS),
-    which actively FLIPS the stale user-scope `false` every #415-pushed box
-    carries back to true on the next push — making the availability
-    restoration take effect fleet-wide, not only on a fresh box (symmetric to
-    how #415's force-disable flipped the stale true off)."""
+    #1048 (reverses the #542 line that used to be here): playwright is now
+    force-DISABLED (it is in MANAGED_DISABLED_PLUGINS, not MANAGED_PLUGINS),
+    which actively FLIPS the stale user-scope `true` every #542-pushed box
+    carries back to false on the next push — so the broken chrome-channel plugin
+    server stops loading fleet-wide, replaced by the managed pinned MCP server."""
     import airuleset
     result = dict(settings)
     enabled = dict(result.get("enabledPlugins", {}))
@@ -748,15 +779,18 @@ def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None):
     RESOLVED browsers path (per-user `~/.cache/ms-playwright` on a no-sudo
     shared-stream box, never the root-owned /opt with its mismatched build).
 
-    A no-op when `PLAYWRIGHT_MANAGED` is False, or the resolved cache is already
-    populated (idempotent — once per user, never per session, respecting the
-    shared-box disk doctrine). Skips LOUDLY when `npx` is absent (nothing to
-    install with) rather than failing the install."""
+    A no-op when `PLAYWRIGHT_MANAGED` is False, or the resolved cache already
+    holds the PINNED build (idempotent — once per user, never per session,
+    respecting the shared-box disk doctrine; a cache holding a WRONG/old build
+    re-installs the pinned one, #1048 review-2 finding 1). Skips LOUDLY when
+    `npx` is absent (nothing to install with) rather than failing the install."""
     import subprocess
     if not PLAYWRIGHT_MANAGED:
         return
     browsers_path = cache_dir or resolved_browsers_path(box_class)
-    if _playwright_browsers_installed(browsers_path):
+    # #1048 review-2 finding 1: gate on the PINNED build, not mere cache
+    # non-emptiness — a #542-era cache holding an OLD build must re-install 1244.
+    if _playwright_pinned_build_installed(browsers_path):
         return
     if shutil.which("npx") is None:
         print("    ⚠ Playwright browsers missing and npx is absent — cannot "
@@ -903,10 +937,10 @@ def setup_managed_plugins() -> bool:
        marketplace only reproduces the "not found in marketplace" failure,
        so a failed registration skips that plugin's install attempt
        entirely rather than trying anyway.
-    (#542: playwright is a force-ENABLED baseline plugin again, so a `claude
-    plugin install` that re-enables it is the DESIRED end state — the pre-#542
-    second reconcile that flipped an install-re-enabled OPTIONAL key back OFF
-    is gone with the OPTIONAL tier it existed to protect.)
+    (#1048: playwright is NO LONGER a baseline plugin — it is force-DISABLED
+    (MANAGED_DISABLED_PLUGINS) and replaced by the managed pinned MCP server
+    provisioned separately by provision_playwright_mcp(); this function installs
+    only the remaining MANAGED_PLUGINS baseline (superpowers).)
     Returns True iff nothing REQUIRED failed (marketplace registration and
     install, for every plugin whose registry entry was missing) — a still-failing
     plugin install after correct marketplace registration is a genuine

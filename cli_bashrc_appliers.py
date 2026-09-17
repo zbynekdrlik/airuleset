@@ -856,9 +856,9 @@ def apply_owner_vps_ssh_attach(bashrc_path: Path = None, user: str = None,
 # --- #950: shared-stream managed env vars ------------------------------------
 # Separate marker block from ultracode (whose invariant is "thin functions, no
 # literals" — cli_bashrc_appliers.py:80-81). This block carries env vars that
-# apply ONLY to shared-stream boxes (subdev). The guard inside checks for the
-# /opt/ms-playwright directory so the export is a no-op when the shared install
-# hasn't been provisioned.
+# apply ONLY to shared-stream boxes (subdev). #1048 reversed the original #950
+# `/opt`-if-exists guard: the block now unconditionally exports the per-user
+# cache (the no-sudo box cannot write /opt and /opt held a mismatched build).
 STREAM_ENV_MARK_START = "# >>> airuleset: shared-stream env >>>"
 STREAM_ENV_MARK_END = "# <<< airuleset: shared-stream env <<<"
 
