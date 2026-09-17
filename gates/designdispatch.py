@@ -27,11 +27,23 @@ from gates import read_payload, field_of, emit_block_stderr, allow
 
 DESIGN_BY_LOG = "design-by-gate.log"
 
-# The issue-line shape the autopilot dispatch prompt uses -- the SAME extractor
-# block-dispatch-over-wdrain.sh uses (the whole "issue(s) #…" line, so a
-# comma/"and"-separated batch is fully covered).
-_ISSUE_LINE_RE = re.compile(r"(?:work\s+)?issues?\s+#[0-9].*", re.IGNORECASE)
-_ISSUE_NUM_RE = re.compile(r"#([0-9]+)")
+# Ticket references in a dispatch prompt. The fleet's real prompts on this
+# controller write the ticket WITHOUT `#` ("Work airuleset issue 1061 …") because
+# the lane-overlap dispatch hook refuses `#N` mentions outside its receipt, so a
+# `#N`-only extractor was VACUOUS — every real dispatch parsed to [] and the gate
+# fail-opened (the #1028 vacuous-classifier class; #1061 supervisor review-3).
+# Now parse `#N` AND bare `issue N` / `issues N, M` / `issue #N` / `issue-N` /
+# `issue: N`. Require the `issue`/`#` PREFIX + 2-6 digits so a version string
+# (0.1.326), a date (2026-09-17), a git sha, or an "items 1, 2, 3" run is NEVER
+# mistaken for a ticket. Scoped to the FIRST ticket-bearing LINE (the dispatch's
+# lead), mirroring the sibling block-dispatch-over-wdrain gate, so a folded /
+# related "issue N" on a LATER body line ("5b. folded from issue 1046") never
+# triggers a false precondition check on a ticket the worker is not working.
+_TICKET_ANY_RE = re.compile(r"(?:issues?\s*[#:-]?\s*|#)\d{2,6}\b", re.IGNORECASE)
+_HASH_RE = re.compile(r"#(\d{2,6})\b")
+_TICKET_RUN_RE = re.compile(
+    r"issues?\s*[#:-]?\s*(\d{2,6}(?:\s*(?:,|and)\s*#?\d{2,6})*)", re.IGNORECASE)
+_NUM_RE = re.compile(r"\d{2,6}")
 
 _BYPASS_RE = re.compile(r"airuleset:design-by-ok\s*(?P<reason>.*)", re.IGNORECASE)
 
@@ -55,12 +67,30 @@ def _log(line):
 
 
 def issue_numbers(prompt):
-    """Every issue number on the prompt's `issue(s) #…` line, in order.
-    Empty when the prompt names no issue."""
-    m = _ISSUE_LINE_RE.search(prompt or "")
-    if not m:
+    """Ticket numbers named in the dispatch's LEAD line (`#N` and bare `issue N`),
+    de-duped, first-seen order. Empty when no line names a ticket."""
+    text = prompt or ""
+    lead = None
+    for line in text.splitlines():
+        if _TICKET_ANY_RE.search(line):
+            lead = line
+            break
+    if lead is None:
         return []
-    return [int(n) for n in _ISSUE_NUM_RE.findall(m.group(0))]
+    found = []  # (position, number) so #N and issue-N keep left-to-right order
+    for m in _HASH_RE.finditer(lead):
+        found.append((m.start(), int(m.group(1))))
+    for m in _TICKET_RUN_RE.finditer(lead):
+        base = m.start(1)
+        for nm in _NUM_RE.finditer(m.group(1)):
+            found.append((base + nm.start(), int(nm.group())))
+    found.sort(key=lambda t: t[0])
+    out, seen = [], set()
+    for _, n in found:
+        if n not in seen:
+            seen.add(n)
+            out.append(n)
+    return out
 
 
 def _norm_model(m):
@@ -204,7 +234,12 @@ def evaluate(payload, fetch=None, resolve_slug=None, fable_id=None):
 
     issues = issue_numbers(prompt)
     if not issues:
-        return "allow", "no parseable issue in prompt (cannot verify -- allow)"
+        # FAIL-CLOSED (#1061 review-3, owner's rule): an autopilot-worker ALWAYS
+        # works a ticket, so a dispatch that names none is refused — name it as
+        # `issue N` (or `#N`). The bypass stays `airuleset:design-by-ok`.
+        return "block", ("this autopilot-worker dispatch names no ticket — name "
+                         "the ticket as `issue N` (or `#N`) in the prompt so its "
+                         "Design-by: main comment can be verified")
 
     slug = None
     resolver = resolve_slug or _resolve_slug
