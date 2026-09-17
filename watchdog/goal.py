@@ -2348,6 +2348,14 @@ GOAL_QUESTION_REPOKE_MIN = 5            # consecutive ❓ NEEDS YOU re-pokes to 
 GOAL_QDISARM_MAX_PER_DAY = 2           # attempt cap: max /goal-clear auto-types per sid / 24h
 GOAL_QDISARM_STATE_TTL_S = 24 * 3600   # reap a disarm veto / attempts entry untouched this long
 GOAL_CLEAR_TEXT = "/goal clear"        # CC writes a `Goal cleared:` marker for this
+# #1063 — the `/goal clear` disarm is a RECOVERY nudge (a damage-control action
+# that must fire even when every machine-nudge kind is staged OFF). Before #1063
+# it rode `_send_goal_verified`'s DEFAULT machine kind `goal-sweep`, which the
+# #1023 per-kind staging has OFF on every box, so the #522 backstop was silently
+# disabled fleet-wide. As a member of `RECOVERY_NUDGE_KINDS` this identity is
+# exempt from the kill switch, the per-kind floor and the total cap; the backstop
+# keeps its OWN bounds (a proven 5-streak, recent-human, the 24h/2 attempt cap).
+GOAL_DISARM_NUDGE = "goal-disarm"
 
 
 def _qdisarm_attempt_ok(attempts, now):
@@ -3900,8 +3908,13 @@ def _deliver_goal_clear(pid, text, run, captured, state, now, sleep_fn, logs,
     watchdog._janitor_mark_watch(state, pid, now)
     # verify_armed=False -- a `/goal clear` DISARMS, so the #720 arm-confirm must
     # NOT run (a successful disarm leaves pane_goal_armed False, not a failure).
+    # nudge=GOAL_DISARM_NUDGE (#1063) -- a RECOVERY kind, so the #1002 kill switch
+    # never suppresses the disarm even when every machine nudge is staged OFF. The
+    # pre-#1063 DEFAULT `goal-sweep` (a MACHINE kind) silently disabled the #522
+    # backstop fleet-wide.
     ok = _send_goal_verified(pid, text, run, captured=captured,
-                             sleep_fn=sleep_fn, logs=logs, verify_armed=False)
+                             sleep_fn=sleep_fn, logs=logs, verify_armed=False,
+                             nudge=GOAL_DISARM_NUDGE)
     if ok:
         watchdog._janitor_clear_watch(state, pid)
         return "sent"
@@ -4054,6 +4067,14 @@ def goal_question_repoke_watch(now, run=None, state=None, send_fn=None,
                         "(%d re-pokes, attempt=%d/%d)"
                         % (loc, sid, streak, len(attempts[sid]),
                            GOAL_QDISARM_MAX_PER_DAY))
+        elif not watchdog.nudges_enabled(GOAL_DISARM_NUDGE):
+            # #1063 journal honesty: a disarm SUPPRESSED by the kill switch reads
+            # as the kill switch, not the misleading generic `skip:verify-failed`.
+            # After #1063 goal-disarm is a RECOVERY kind (always-on), so this is a
+            # DEFENSIVE diagnostic — it only fires if a future edit re-stages the
+            # disarm off (the exact regression the static guard forbids).
+            logs.append("qrepoke %s sid=%s -> disarm suppressed: nudges OFF for "
+                        "kind %s" % (loc, sid, GOAL_DISARM_NUDGE))
         else:
             logs.append("qrepoke %s sid=%s -> disarm delivery FAILED (%s)"
                         % (loc, sid, word))
