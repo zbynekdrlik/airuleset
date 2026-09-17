@@ -9956,6 +9956,11 @@ def main():
                       default=[],
                       help="Also scan a project's .claude/rules + .claude/skills "
                            "(repeatable, read-only — never auto-fixed)")
+    p_da.add_argument("--worker-design", dest="worker_design",
+                      action="store_true",
+                      help="Scan airuleset's own agents/skills for text that "
+                           "instructs a WORKER to author a design (#871/#1061; "
+                           "read-only, exit 1 if any found)")
 
     # --- #1061: main-authored design comment poster ---
     p_dr = sub.add_parser(
@@ -10081,6 +10086,20 @@ def cmd_doctrine_audit(args):
     (MEDIUM/keep are always listed, never rewritten). The supervisor runs the
     read-only form on each stream box and posts the per-box table on the ticket."""
     import cli_doctrine_audit as da
+    # #1061 — worker-authors-design scan (read-only, airuleset repo's own
+    # agents/skills). Flags any agent/skill text that instructs a WORKER to
+    # author a design (owner #871: design by the Fable main); target 0.
+    if getattr(args, "worker_design", False):
+        findings = da.scan_worker_design_authoring(str(REPO_DIR))
+        if not findings:
+            print("doctrine-audit --worker-design: 0 findings — no agent/skill "
+                  "text instructs a worker to author a design (#1061).")
+            return 0
+        print("doctrine-audit --worker-design: %d finding(s) — a WORKER must "
+              "NOT author a design (#871/#1061):" % len(findings))
+        for f in findings:
+            print("  %s:%d: %s" % (f["path"], f["line"], f["text"][:120]))
+        return 1
     home = str(Path.home())
     project_roots = list(getattr(args, "project_root", []) or [])
     matches, results = da.audit(home, repo_dir=str(REPO_DIR),
