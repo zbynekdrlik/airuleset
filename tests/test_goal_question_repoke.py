@@ -240,7 +240,42 @@ class TestQuestionRepokeDisarm(_Base):
         state = {"goal_qdisarm_attempts": {sid: [now - 100, now - 50]}}
         logs = self._run_watch(proj, tmux, state, now=now)
         self.assertNotIn("/goal clear", tmux.typed_texts())
-        self.assertTrue(any("ATTEMPT-CAP" in ln for ln in logs))
+        self.assertTrue(any("disarm attempt cap reached" in ln for ln in logs))
+
+    def test_verify_fail_consumes_slot_and_caps_at_two(self):
+        # #1063 addendum: a GENUINE skip:verify-failed disarm (a keystroke that
+        # never lands) must consume an attempt-cap slot, so a persistently
+        # unverifiable pane sees at most GOAL_QDISARM_MAX_PER_DAY attempts / 24h
+        # instead of a ~60 s re-type storm. RED against the pre-fix tree: today a
+        # verify-failed attempt records NO slot, so _deliver_goal_clear is called
+        # every sweep uncapped.
+        proj = self._dir()
+        sid = "sess-verify-fail-cap"
+        tpath = _write_entries(proj, self.CWD, sid, _repoke_entries(6))
+        tmux = self._armed_tmux(tpath)
+        state = {}
+        now = 100000.0
+        deliver = m.MagicMock(return_value="skip:verify-failed")
+        with m.patch.object(goal, "_deliver_goal_clear", deliver):
+            self._run_watch(proj, tmux, state, now=now)
+            self._run_watch(proj, tmux, state, now=now)
+            logs3 = self._run_watch(proj, tmux, state, now=now)
+        self.assertEqual(goal.GOAL_QDISARM_MAX_PER_DAY, 2)
+        self.assertEqual(
+            deliver.call_count, 2,
+            "a verify-failing disarm must be attempted at most "
+            "GOAL_QDISARM_MAX_PER_DAY times / 24h, not every ~60 s sweep")
+        self.assertEqual(
+            len(state["goal_qdisarm_attempts"][sid]), 2,
+            "each genuine verify-failed attempt consumes an attempt-cap slot")
+        self.assertNotIn(
+            sid, state.get("goal_disarmed_q", {}),
+            "a verify-failed disarm never writes the re-entry veto (the goal "
+            "was not actually cleared)")
+        self.assertTrue(
+            any("disarm attempt cap reached" in ln for ln in logs3),
+            "the exhausted cap must journal 'disarm attempt cap reached'; "
+            "logs=%r" % logs3)
 
     def test_dry_run_types_nothing(self):
         proj = self._dir()

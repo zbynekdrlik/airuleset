@@ -149,6 +149,20 @@ def post_and_record(issue, repo, raw_body, cwd, runner=None, projects_dir=None,
     ok, reasons = validate_body(raw_body)
     if not ok:
         return False, "invalid design: " + "; ".join(reasons), None
+    # #1061 fix-forward: never post a `Design-by: <role> unknown` stamp -- the
+    # dispatch gate (gates.designdispatch) would then REFUSE a legitimately
+    # main-authored design (the deploy defect). An unreadable model is a
+    # transient read (a busy parallel-tool turn / an api-error tail), so refuse
+    # and let the caller retry once the session has emitted a real assistant turn.
+    model = cli_authorship.session_model(cwd, projects_dir=projects_dir,
+                                         home=home)
+    if model == cli_authorship.UNKNOWN_MODEL:
+        return (False,
+                "authorship model unknown: the session transcript has no "
+                "readable assistant model right now (a busy parallel-tool turn "
+                "or an api-error tail) -- refusing to post 'Design-by: <role> "
+                "unknown', which the dispatch gate would reject; retry once the "
+                "session has emitted a real assistant turn", None)
     body = compose_body(raw_body, cwd, projects_dir=projects_dir, home=home)
     stamp = cli_authorship.stamp_line(DESIGN_STEM, cwd, projects_dir=projects_dir,
                                       home=home)
@@ -199,6 +213,17 @@ def cmd_design_record(args):
         for r in reasons:
             print("  - %s" % r)
         print("Fix the design body and re-run; nothing was posted.")
+        return 1
+    # #1061 fix-forward: refuse the unknown-model stamp on BOTH the real post
+    # AND the --dry-run preview (post_and_record also guards the real path),
+    # so a dry-run never previews a `Design-by: <role> unknown` the dispatch
+    # gate would reject.
+    if cli_authorship.session_model(cwd) == cli_authorship.UNKNOWN_MODEL:
+        print("design-record BLOCK: the session model read as 'unknown' "
+              "(a busy parallel-tool turn or an api-error tail) -- refusing to "
+              "stamp 'Design-by: <role> unknown', which the dispatch gate would "
+              "reject. Retry once the session has emitted a real assistant "
+              "turn; nothing was posted.")
         return 1
     if dry_run:
         body = compose_body(raw, cwd)

@@ -8,21 +8,52 @@ fires, and auth-rearm is permanently skipped even after the blocker clears.
 
 The invariant: an *_attempts entry is written ONLY when deliver_goal returns
 "sent" — never at decision time when the request is merely RECORDED.
+
+#1063 addendum EXCEPTION (the QDISARM cap only): a GENUINE `skip:verify-failed`
+disarm (a keystroke typed but not verified) ALSO consumes a slot, so a
+persistently unverifiable pane stops after GOAL_QDISARM_MAX_PER_DAY instead of a
+~60 s re-type storm — see TestQdisarmAttemptOnSentOrVerifyFail. The
+"record only on sent" invariant above still holds for the auth-rearm / goal-sweep
+caps (a kill-switch SUPPRESSION, which types nothing, is never counted).
 """
 
+import json
 import unittest
+import unittest.mock as m
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import watchdog as wd                                    # noqa: E402
 from watchdog import goal                                # noqa: E402
 
 from _goal_arm_helpers import (  # noqa: E402
     _isolate_goal_state,
     _write_marker_transcript,
+    DeliverGoalFakeTmux,
+    GOAL_ARMED_CAP,
+    _encode,
 )
+
+_QREPOKE_Q = "❓ NEEDS YOU: schváliš prístup A alebo B?"
+
+
+def _write_repoke_transcript(pd, cwd, sid, n=6):
+    """`n` assistant `❓ NEEDS YOU` turns with a machine `continue` re-poke
+    between each (the real stuck-`/goal` loop shape)."""
+    d = Path(pd) / _encode(cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    entries = []
+    for _ in range(n):
+        entries.append({"type": "user", "message": {"content": "continue"}})
+        entries.append({"type": "assistant",
+                        "message": {"content": "Work.\n\n" + _QREPOKE_Q}})
+    p = d / (sid + ".jsonl")
+    p.write_text("\n".join(json.dumps(e) for e in entries) + "\n",
+                 encoding="utf-8")
+    return p
 
 # The autopilot goal condition must start with this signature to pass the
 # foreign-goal guard in _auth_rearm_decide / _classify_armed_condition.
@@ -110,37 +141,71 @@ class TestAuthRearmAttemptOnlyOnDelivery(unittest.TestCase):
                       "undelivered attempts filled the cap permanently)")
 
 
-class TestQdisarmAttemptOnlyOnSent(unittest.TestCase):
-    """goal_qdisarm_attempts must be recorded only when word == "sent",
-    not on a failed delivery."""
+class TestQdisarmAttemptOnSentOrVerifyFail(unittest.TestCase):
+    """#1063 addendum: the QDISARM attempt-cap counts EVERY attempted keystroke
+    -- a landed `sent` AND a GENUINE `skip:verify-failed` (a keystroke typed but
+    not verified) -- so a persistently unverifiable pane stops after
+    GOAL_QDISARM_MAX_PER_DAY instead of re-typing `/goal clear` every ~60 s.
+    A kill-switch SUPPRESSION types NOTHING and is NOT counted (defensive:
+    goal-disarm is a RECOVERY kind, never staged off). This REVERSES the #921
+    'record only on sent' narrowing FOR THE QDISARM CAP; the auth-rearm /
+    goal-sweep caps keep the sent-only invariant (the sibling classes above)."""
 
-    def test_failed_delivery_does_not_consume_slot(self):
-        """A qdisarm delivery returning a non-sent, non-transient word
-        must NOT consume an attempt slot. Content-lock: assert the
-        recording is inside the 'if word == "sent":' branch."""
-        import inspect
-        src = inspect.getsource(goal.goal_question_repoke_watch)
-        # Find the qdisarm attempt recording line
-        lines = src.split("\n")
-        recording_line_idx = None
-        sent_block_idx = None
-        for i, ln in enumerate(lines):
-            stripped = ln.lstrip()
-            if "attempts[sid] = pruned + [now]" in stripped:
-                recording_line_idx = i
-            if stripped.startswith("if word == \"sent\""):
-                sent_block_idx = i
+    CWD = "/home/newlevel/devel/qdisarm921"
 
-        self.assertIsNotNone(recording_line_idx,
-                             "attempts[sid] = pruned + [now] must exist")
-        self.assertIsNotNone(sent_block_idx,
-                             'if word == "sent": block must exist')
-        # The recording line must be AFTER the sent check (inside its block),
-        # i.e., at a higher line index. On the current code it's BEFORE.
-        self.assertGreater(recording_line_idx, sent_block_idx,
-                           "attempts recording must be INSIDE the "
-                           "'if word == \"sent\":' block, not before it "
-                           "(only record on verified delivery)")
+    def setUp(self):
+        self.reqp, self.syncp = _isolate_goal_state(self)
+
+    def _armed_tmux(self, tpath):
+        return DeliverGoalFakeTmux(
+            [("%9", "claude", self.CWD, "111")], GOAL_ARMED_CAP,
+            model_type=True, transcript_path=str(tpath))
+
+    def _run(self, proj, tmux, state, now=100000.0):
+        return goal.goal_question_repoke_watch(
+            now, run=tmux, state=state, projects_dir=proj,
+            sleep_fn=lambda s: None, human_ts_fn=lambda tp: None)
+
+    def test_genuine_verify_fail_consumes_a_slot(self):
+        td = TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        proj = Path(td.name)
+        sid = "sess-vf"
+        tpath = _write_repoke_transcript(proj, self.CWD, sid)
+        tmux = self._armed_tmux(tpath)
+        state = {}
+        # nudges_enabled(goal-disarm) is True (recovery kind) -> the genuine
+        # verify-fail branch, which records a slot but writes NO veto.
+        with m.patch.object(goal, "_deliver_goal_clear",
+                            return_value="skip:verify-failed"):
+            logs = self._run(proj, tmux, state)
+        self.assertEqual(
+            len(state["goal_qdisarm_attempts"][sid]), 1,
+            "a genuine verify-failed disarm must consume an attempt-cap slot")
+        self.assertNotIn(
+            sid, state.get("goal_disarmed_q", {}),
+            "a verify-failed disarm writes no re-entry veto (goal not cleared)")
+        self.assertTrue(any("disarm delivery FAILED" in ln for ln in logs))
+
+    def test_kill_switch_suppression_consumes_no_slot(self):
+        td = TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        proj = Path(td.name)
+        sid = "sess-suppressed"
+        tpath = _write_repoke_transcript(proj, self.CWD, sid)
+        tmux = self._armed_tmux(tpath)
+        state = {}
+        # A hypothetical future re-staging turns goal-disarm OFF: keys() types
+        # nothing, so no attempt slot is consumed and the suppression is flagged.
+        with m.patch.object(wd, "nudges_enabled",
+                            side_effect=lambda kind=None, home=None: False):
+            logs = self._run(proj, tmux, state)
+        self.assertNotIn("/goal clear", tmux.typed_texts())
+        self.assertNotIn(
+            sid, state.get("goal_qdisarm_attempts", {}),
+            "a kill-switch-suppressed disarm consumes no attempt-cap slot")
+        self.assertTrue(
+            any("disarm suppressed: nudges OFF" in ln for ln in logs))
 
 
 class TestGoalSweepRecordsAttemptOnDelivery(unittest.TestCase):

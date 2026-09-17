@@ -68,6 +68,28 @@ class TestSessionModel(unittest.TestCase):
                                          projects_dir=str(self.pd)),
             cli_authorship.UNKNOWN_MODEL)
 
+    def test_reads_newest_model_past_a_busy_tool_result_tail(self):
+        # #1061 fix-forward: a busy main turn whose transcript tail is a burst of
+        # tool-result entries after one Fable turn must still resolve the Fable
+        # model (not `unknown`) -- the authorship reader scans a wide window.
+        cwd = "/home/airuleset/devel/airuleset"
+        d = self.pd / encode_project_dir(cwd)
+        d.mkdir(parents=True, exist_ok=True)
+        entries = [{"type": "assistant",
+                    "message": {"role": "assistant", "model": "claude-fable-5-1",
+                                "content": [{"type": "text", "text": "the turn"}]}}]
+        for i in range(200):
+            entries.append({"type": "user",
+                            "message": {"role": "user",
+                                        "content": [{"type": "tool_result",
+                                                     "tool_use_id": "t%d" % i,
+                                                     "content": "out %d" % i}]}})
+        (d / "sess.jsonl").write_text(
+            "\n".join(json.dumps(x) for x in entries) + "\n")
+        self.assertEqual(
+            cli_authorship.session_model(cwd, projects_dir=str(self.pd)),
+            "claude-fable-5-1")
+
     def test_worktree_cwd_reads_nested_subagent_transcript(self):
         # A worktree cwd has no top-level project dir; its transcript is nested
         # under the SUPERVISOR's session dir at

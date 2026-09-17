@@ -3890,8 +3890,15 @@ def _deliver_goal_clear(pid, text, run, captured, state, now, sleep_fn, logs,
     Returns 'sent' | 'skip:busy' | 'skip:no-input-line' | 'skip:draft' |
     'skip:verify-failed'. The three transient skips (busy / no-input-line / draft)
     mean NO keystroke was attempted (retry next sweep, free -- see
-    `_QDISARM_TRANSIENT_SKIPS`); 'sent'/'skip:verify-failed' mean a type was
-    attempted (consumes an attempt-cap slot -- the #524 fail-safe)."""
+    `_QDISARM_TRANSIENT_SKIPS`). 'sent' and a GENUINE 'skip:verify-failed' (a
+    keystroke typed but not verified) EACH consume an attempt-cap slot -- the
+    #524 fail-safe the caller (`goal_question_repoke_watch`) records, so a
+    persistently unverifiable pane stops after GOAL_QDISARM_MAX_PER_DAY (#1063
+    addendum; #921 had narrowed the record to sent-only). A 'skip:verify-failed'
+    returned only because the #1002 kill switch SUPPRESSED the keystroke typed
+    NOTHING, so the caller does NOT count that toward the cap -- it keeps
+    flagging the suppression instead (defensive: goal-disarm is a RECOVERY kind,
+    never staged off)."""
     kind, draft = watchdog._classify_boundary(captured)
     if kind == "no-input-line":
         return "skip:no-input-line"
@@ -4036,9 +4043,8 @@ def goal_question_repoke_watch(now, run=None, state=None, send_fn=None,
         # top-of-sweep reaper drops fully-aged ones).
         ok_cap, pruned = _qdisarm_attempt_ok(attempts.get(sid), now)
         if not ok_cap:
-            logs.append("qrepoke %s sid=%s -> CONFIRMED stuck but ATTEMPT-CAP "
-                        "(%d/24h) -- ping-free skip" % (loc, sid,
-                                                        GOAL_QDISARM_MAX_PER_DAY))
+            logs.append("qrepoke %s sid=%s -> disarm attempt cap reached "
+                        "(%d/24h)" % (loc, sid, GOAL_QDISARM_MAX_PER_DAY))
             continue
         # #741 WRITER-SIDE LATCH: a pending /compact for this session HOLDS the
         # `/goal clear` disarm keystroke -- keep the pane pristine so job 14 can
@@ -4059,8 +4065,8 @@ def goal_question_repoke_watch(now, run=None, state=None, send_fn=None,
                         "sweep" % (loc, sid, word))
             continue
         if word == "sent":
-            # #921 residual: record the attempt ONLY on verified delivery,
-            # not on a failed keystroke that never landed.
+            # A landed disarm records an attempt-cap slot AND writes the re-entry
+            # veto (the goal is actually cleared).
             attempts[sid] = pruned + [now]
             qveto[sid] = {"disarmed_ts": now, "streak": streak}
             logs.append("qrepoke %s sid=%s -> DISARMED: /goal clear typed "
@@ -4068,14 +4074,25 @@ def goal_question_repoke_watch(now, run=None, state=None, send_fn=None,
                         % (loc, sid, streak, len(attempts[sid]),
                            GOAL_QDISARM_MAX_PER_DAY))
         elif not watchdog.nudges_enabled(GOAL_DISARM_NUDGE):
-            # #1063 journal honesty: a disarm SUPPRESSED by the kill switch reads
-            # as the kill switch, not the misleading generic `skip:verify-failed`.
-            # After #1063 goal-disarm is a RECOVERY kind (always-on), so this is a
-            # DEFENSIVE diagnostic — it only fires if a future edit re-stages the
-            # disarm off (the exact regression the static guard forbids).
+            # #1063 journal honesty: a disarm SUPPRESSED by the kill switch typed
+            # NOTHING (keys() bailed before the send), so it is NOT an attempt and
+            # consumes NO cap slot -- keep flagging the suppression every sweep so
+            # a future re-staging is never silent, and read as the kill switch,
+            # not the misleading generic `skip:verify-failed`. Defensive:
+            # goal-disarm is a RECOVERY kind (always-on), so this is dead in
+            # production -- it only fires if a future edit re-stages the disarm
+            # off (the exact regression the static guard forbids).
             logs.append("qrepoke %s sid=%s -> disarm suppressed: nudges OFF for "
                         "kind %s" % (loc, sid, GOAL_DISARM_NUDGE))
         else:
+            # #1063 addendum: a GENUINE `skip:verify-failed` DID attempt a
+            # keystroke that never landed -- consume an attempt-cap slot (the
+            # #524 fail-safe the `_deliver_goal_clear` / `_qdisarm_attempt_ok`
+            # docstrings describe, that #921 had narrowed to sent-only). NO veto:
+            # the goal was not cleared. After GOAL_QDISARM_MAX_PER_DAY such
+            # failures the cap gate above stops the ~60 s re-type storm on an
+            # unverifiable pane.
+            attempts[sid] = pruned + [now]
             logs.append("qrepoke %s sid=%s -> disarm delivery FAILED (%s)"
                         % (loc, sid, word))
     return logs

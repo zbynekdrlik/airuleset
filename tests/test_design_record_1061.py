@@ -149,6 +149,28 @@ class TestPostAndRecord(unittest.TestCase):
         self.assertFalse(dg.marker_exists("airuleset", 12, "design"),
                          "no marker may be written when the post failed")
 
+    def test_unknown_model_refuses_and_does_not_post(self):
+        # #1061 fix-forward deliverable 4: never post a `Design-by: <role>
+        # unknown` stamp (the dispatch gate would then reject a legitimate
+        # design). A cwd with no readable transcript resolves to UNKNOWN_MODEL.
+        posted = {}
+
+        def fake_runner(argv, body):
+            posted["called"] = True
+            return (0, "url", "")
+
+        ok, reason, stamp = dr.post_and_record(
+            issue=14, repo="zbynekdrlik/airuleset", raw_body=VALID_DESIGN,
+            cwd="/home/airuleset/no-transcript-here", runner=fake_runner,
+            projects_dir=str(self.pd), home=self.home)
+        self.assertFalse(ok)
+        self.assertIsNone(stamp)
+        self.assertIn("unknown", reason.lower())
+        self.assertNotIn("called", posted,
+                         "must not post a Design-by stamp whose model is unknown")
+        self.assertFalse(dg.marker_exists("airuleset", 14, "design"),
+                         "no marker may be written when the model is unknown")
+
     def test_worker_cwd_stamps_worker_not_main(self):
         wt = self.cwd + "/.claude/worktrees/agent-zzz"
         sub = (self.pd / encode_project_dir(self.cwd) / "sess" / "subagents")
