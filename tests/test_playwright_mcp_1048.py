@@ -22,7 +22,7 @@ from pathlib import Path
 from unittest import mock
 
 import airuleset
-import cli_caveman_plugins as p
+import cli_playwright_mcp as p  # #1058: Playwright provisioning moved to its own leaf
 
 PW_PLUGIN = "playwright@claude-plugins-official"
 
