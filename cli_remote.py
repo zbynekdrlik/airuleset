@@ -995,11 +995,29 @@ def _playwright_chromium_postcheck():
     failure. `about:blank` proves the browser LAUNCHES with no
     network/display dependency — the failure mode is a missing/mismatched
     browser binary, not a page. `-k 5` hardens the bound against a
-    SIGTERM-ignoring child, and the probe cleans its own /tmp screenshot
-    (shared-box disk doctrine)."""
+    SIGTERM-ignoring child, and the probe cleans its own /tmp screenshot AND its
+    stderr temp (shared-box disk doctrine).
+
+    #1048 fix-forward: (c) the probe's stderr is captured to a temp file and its
+    LAST 3 lines are surfaced in the FAILED message (the real error — montalu3-6
+    "Executable doesn't exist", spinbike exit 127 — was previously discarded to
+    /dev/null); exit 127 is named explicitly as missing system shared libraries
+    with the `install-deps` remedy. (d) a per-box opt-out marker
+    `~/.claude/airuleset-playwright-optout` (cli_caveman_plugins.PLAYWRIGHT_OPTOUT_
+    MARKER, content = the reason) SKIPs LOUDLY — a box that structurally cannot
+    run chromium never fails the push; the fleet-wide PLAYWRIGHT_MANAGED=False
+    opt-out still SKIPs via the absent browsers-path marker."""
     import airuleset
     return (
         '{ export PATH="$HOME/.local/bin:$PATH"; '
+        # #1048 fix-forward (d): a per-box opt-out marker (supervisor-set,
+        # content = the reason) SKIPs LOUDLY with that reason — a box that
+        # structurally cannot run chromium (no root, missing system libs) never
+        # fails the push. Checked FIRST: an opted-out box needs no npx/marker.
+        'OPTOUT="$HOME/.claude/airuleset-playwright-optout"; '
+        'if [ -f "$OPTOUT" ]; then '
+        'echo "PLAYWRIGHT-POSTCHECK SKIPPED: managed Playwright opted out on this '
+        'box: $(head -c 200 "$OPTOUT" 2>/dev/null)" >&2; exit 0; fi; '
         # A visible SKIP line (to stderr) so a skip is never indistinguishable
         # from a PASS in the deploy output (#1048 review finding 3).
         'command -v npx >/dev/null 2>&1 || '
@@ -1012,12 +1030,24 @@ def _playwright_chromium_postcheck():
         '{ echo "PLAYWRIGHT-POSTCHECK SKIPPED: managed Playwright not provisioned here" >&2; exit 0; }; '
         'export PLAYWRIGHT_BROWSERS_PATH="$BP"; '
         'PROBE="$(mktemp /tmp/airuleset-pw-probe.XXXXXX.png)"; '
-        'timeout -k 5 30 npx -y playwright@%s screenshot --browser chromium '
-        'about:blank "$PROBE" >/dev/null 2>&1 || '
-        '{ rm -f "$PROBE"; echo "PLAYWRIGHT-POSTCHECK FAILED: headless chromium '
-        '(--browser chromium) did not render in 30s — chrome-channel / version '
-        'drift (#1048)" >&2; exit 88; }; '
-        'rm -f "$PROBE"; }'
+        # #1048 fix-forward (c): capture the probe stderr to a temp file so the
+        # FAILED message carries the REAL error (montalu3-6: "Executable doesn't
+        # exist"; spinbike: exit 127 missing libs) instead of one opaque "did not
+        # render" covering three different failures.
+        'ERR="$(mktemp /tmp/airuleset-pw-probe.XXXXXX.err)"; '
+        'if timeout -k 5 30 npx -y playwright@%s screenshot --browser chromium '
+        'about:blank "$PROBE" >/dev/null 2>"$ERR"; then rm -f "$PROBE" "$ERR"; '
+        'else rc=$?; TAIL="$(tail -n 3 "$ERR" 2>/dev/null)"; rm -f "$PROBE" "$ERR"; '
+        # exit 127 = the ELF loader could not find shared libraries; name it and
+        # the exact remedy (install-deps as root), distinct from a render/drift
+        # failure. Both keep rc 88 so the deploy loop fails the target.
+        'if [ "$rc" = 127 ]; then '
+        'echo "PLAYWRIGHT-POSTCHECK FAILED: headless chromium exited 127 — missing '
+        'system shared libraries — run npx playwright install-deps chromium as root '
+        '(#1048); stderr tail: $TAIL" >&2; '
+        'else echo "PLAYWRIGHT-POSTCHECK FAILED: headless chromium (--browser '
+        'chromium) did not render in 30s (rc=$rc) — chrome-channel / version drift '
+        '(#1048); stderr tail: $TAIL" >&2; fi; exit 88; fi; }'
     ) % airuleset.PLAYWRIGHT_PW_VERSION
 
 
