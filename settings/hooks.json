@@ -177,6 +177,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-design-by-spoof.sh",
+            "timeout": 10
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-worker-close-trigger.sh",
             "timeout": 10
           },
