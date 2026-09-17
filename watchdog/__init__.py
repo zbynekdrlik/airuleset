@@ -2335,7 +2335,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              infra_queue_fetch=None, resolve_role_fn=None,
              health_probes=None, health_probe_fetch=None,
              task_hygiene_enabled=False, gh_rate_fetch=None,
-             bounceflip_fetch=None, questions_fetch=None):
+             bounceflip_fetch=None):
     """Scan every `claude` pane once. 50 numbered jobs per poll — 44 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
@@ -4536,9 +4536,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                          projects_dir=projects_dir,
                                          persist=lambda: save_state(state_path, state),
                                          sleep_fn=sleep_fn),
-         "discord-reply error", calm_ok=True)   # #1055 P3: the ONE external poll;
-    # on a CALM sweep run_once's calm-gate additionally requires a ❓ pending
-    # (nothing to route otherwise); on a FULL sweep it runs normally.
+         "discord-reply error", calm_ok=True)   # #1055 P3: reply-routing recovery;
+    # runs every calm sweep and self-limits (local reads, early-return before any
+    # network fetch when nothing is pending — #298 cards + #449 channel-memory
+    # included, not just the ❓ map; review-B finding 1).
 
     # Terminal-answered ❓ cleanup — a question answered by a HUMAN prompt in
     # the asking session leaves the map NOW, not on some later timer (it
@@ -5382,23 +5383,17 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
         else:
             logs.append("sweep: full (%s)"
                         % ("cadence" if _elapsed_since_full >= 0 else "clock-skew"))
-    # #1055 P3 (b) — deliver_discord_replies is the ONE external poll; on a CALM
-    # sweep it runs ONLY while a ❓ is pending (else there is nothing to route).
-    # The questions map is a local JSON read; load it lazily, ONLY when a calm
-    # sweep could actually reach deliver_discord_replies (its own gate needs
-    # discord_fetch wired), so a normal FULL-sweep test never touches the file.
-    _questions_pending = False
-    if _calm and discord_fetch is not None:
-        try:
-            if questions_fetch is not None:
-                _q = questions_fetch()
-            else:
-                from notify import load_questions as _load_questions
-                _q = _load_questions()
-            _questions_pending = bool(_q)
-        except Exception as _e:  # noqa: BLE001 — fail toward NOT polling, never break the sweep
-            logs.append("sweep-cadence: questions read error (=> no discord poll): %r" % _e)
-            _questions_pending = False
+    # #1055 P3 (b) — deliver_discord_replies is `calm_ok=True` and runs on EVERY
+    # calm sweep (it is the reply-routing recovery path — a ❓ answer, a
+    # completion-card reply #298, or a remembered #449 channel must be picked up
+    # within ≤60s). It SELF-LIMITS: its own early-return (watchdog/discord_replies
+    # .py) does two LOCAL JSON reads (questions map + cards map) and a state peek,
+    # and returns BEFORE any Discord network fetch when qmap AND cardmap AND
+    # dreply_pointer AND dreply_channels are all empty — so a truly idle calm
+    # sweep issues NO external poll. An earlier P3 draft gated this on the ❓ map
+    # alone; that dropped card-replies + the #449 channel-memory on idle boxes
+    # (review-B finding 1), so the gate is removed and the function's own guard is
+    # the single source of truth (no drift).
     _calm_skipped = 0
 
     # #1040 — ONE shared gh-rate reading per sweep drives the poller HOLD +
@@ -5435,16 +5430,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
         # checked BEFORE the job-start attribution line, so a skipped job costs
         # nothing (not even a clock read). On a FULL sweep `_calm` is False, so
         # this block is inert and behaviour is byte-identical to pre-P3.
-        if _calm:
-            _run_on_calm = _calm_ok
-            if _run_on_calm and _label == "deliver_discord_replies":
-                # the ONE external poll — on a calm sweep run it only to route a
-                # reply to a waiting ❓ (a pending ❓ never forces a full sweep, so
-                # this is what keeps the reply-poll at ≤60s while heavy jobs skip).
-                _run_on_calm = _questions_pending
-            if not _run_on_calm:
-                _calm_skipped += 1
-                continue
+        if _calm and not _calm_ok:
+            _calm_skipped += 1
+            continue
         # #1041 — read the ONE budget primitive ONCE per iteration (one clock read);
         # the job-start elapsed anchor is derived from it (`elapsed == SOFT_CAP -
         # left`), so attribution and the budget guard below share that single read.

@@ -328,10 +328,8 @@ def has_pending_request(sid, path=None):
 # "calm sweep" cadence a calm sweep is 300s apart, so "2 sweeps" would balloon
 # the hold to 600s. Expressing the bound directly in wall-clock seconds keeps it
 # cadence-INDEPENDENT: the ~120s hold is identical whether the box is sweeping
-# every 60s or every 300s. COMPACT_SWEEP_INTERVAL_S is retained only as the
-# documented nominal timer cadence (referenced by callers/docs), no longer a
-# factor in the bound.
-COMPACT_SWEEP_INTERVAL_S = 60     # nominal --user timer cadence (informational)
+# every 60s or every 300s. Both former constants are gone (the sweep-count one
+# had no other consumer; the nominal-interval one only ever fed this bound).
 COMPACT_PENDING_HOLD_S = 120      # #1055 P3: seconds-based, cadence-independent bound
 
 

@@ -118,7 +118,6 @@ def _idle_run(argv, timeout=8):
 
 def _run(now, state_path, run=_idle_run, **kw):
     with TemporaryDirectory() as d:
-        kw.setdefault("questions_fetch", lambda: {})
         return list(wd.run_once(
             now=now, dry_run=True, run=run,
             send_fn=lambda *a, **k: None,
@@ -216,7 +215,12 @@ class TestCalmVsFullSweep(unittest.TestCase):
         self.assertEqual(heavy, [], "card_reconcile must be skipped on a calm sweep")
         self.assertEqual(recovery, [1], "deliver_pending_done must run on a calm sweep")
 
-    def test_discord_replies_runs_on_calm_only_while_question_pending(self):
+    def test_discord_replies_runs_on_every_calm_sweep_and_self_limits(self):
+        # #1055 P3 review-B finding 1: deliver_discord_replies is calm_ok and runs
+        # on EVERY calm sweep when discord_fetch is wired (it routes ❓ answers,
+        # #298 completion-card replies, and #449 remembered channels — not just
+        # the ❓ map), relying on its OWN early-return to self-limit. run_once must
+        # NOT re-gate it on the ❓ map (that dropped card-replies on idle boxes).
         _run(1000.0, self.state_path)
         ran = []
 
@@ -224,15 +228,16 @@ class TestCalmVsFullSweep(unittest.TestCase):
             ran.append(1)
             return []
 
-        # a ❓ pending -> deliver_discord_replies runs on the calm sweep
+        # NO ❓ map given, but discord_fetch wired -> it STILL runs on the calm
+        # sweep (its own guard decides whether to actually poll the network).
         with mock.patch.object(wd, "deliver_discord_replies", _ddr):
-            logs = _run(1060.0, self.state_path,
-                        discord_fetch=lambda *a, **k: [],
-                        questions_fetch=lambda: {"m1": {"session": "s"}})
+            logs = _run(1060.0, self.state_path, discord_fetch=lambda *a, **k: [])
         self.assertTrue(any(ln.startswith("sweep: calm") for ln in logs), logs)
-        self.assertEqual(ran, [1], "deliver_discord_replies must run on calm while a ❓ waits")
+        self.assertEqual(ran, [1],
+                         "deliver_discord_replies must run on a calm sweep whenever "
+                         "discord_fetch is wired (it self-limits internally)")
 
-        # no ❓ -> deliver_discord_replies does NOT run on the calm sweep
+        # without discord_fetch its own gate keeps it off (calm or full).
         ran2 = []
 
         def _ddr2(*a, **k):
@@ -240,30 +245,39 @@ class TestCalmVsFullSweep(unittest.TestCase):
             return []
 
         with mock.patch.object(wd, "deliver_discord_replies", _ddr2):
-            logs = _run(1120.0, self.state_path,
-                        discord_fetch=lambda *a, **k: [],
-                        questions_fetch=lambda: {})
+            logs = _run(1120.0, self.state_path)
         self.assertTrue(any(ln.startswith("sweep: calm") for ln in logs), logs)
-        self.assertEqual(ran2, [], "deliver_discord_replies must NOT poll on a calm "
-                                   "sweep with no ❓ pending")
+        self.assertEqual(ran2, [], "deliver_discord_replies is gated off without discord_fetch")
 
-    def test_calm_idle_sweep_is_under_five_runner_calls(self):
-        # (f) the P2 subprocess counter shows ≤5 calls on a calm sweep. In this
-        # hermetic test the tmux fan-out goes through the injected `run` (the
-        # same runner family the P2 counter instruments in production), so we
-        # count its invocations on a calm idle sweep.
-        _run(1000.0, self.state_path)                 # bootstrap
-        calls = []
+    def test_calm_sweep_runs_far_fewer_jobs_and_under_five_runner_calls(self):
+        # (f) two teeth: (1) a calm sweep runs STRICTLY FEWER registry jobs than a
+        # full sweep — the heavy jobs are skipped (a "job start:" line is emitted
+        # per job that is NOT calm-skipped, so this count IS the executed-job set;
+        # a calm mode that skipped zero jobs would make the counts equal → RED);
+        # (2) on a byte-identical idle box a calm sweep issues ≤5 runner calls (the
+        # design's headline bound — the injected `run` is the tmux family the P2
+        # subprocess counter instruments in production; the gh/git-heavy families
+        # live in the skipped registry jobs, which (1) proves are gone).
+        full_calls = []
+        logs_full = _run(1000.0, self.state_path,
+                         run=lambda *a, **k: (full_calls.append(1), "")[1])
+        self.assertTrue(any(ln.startswith("sweep: full") for ln in logs_full), logs_full)
+        full_jobs = [ln for ln in logs_full if ln.startswith("job start:")]
 
-        def counting_run(argv, timeout=8):
-            calls.append(list(argv))
-            return ""
+        calm_calls = []
+        logs_calm = _run(1060.0, self.state_path,
+                         run=lambda *a, **k: (calm_calls.append(1), "")[1])
+        self.assertTrue(any(ln.startswith("sweep: calm") for ln in logs_calm), logs_calm)
+        calm_jobs = [ln for ln in logs_calm if ln.startswith("job start:")]
 
-        logs = _run(1060.0, self.state_path, run=counting_run)
-        self.assertTrue(any(ln.startswith("sweep: calm") for ln in logs), logs)
-        self.assertLessEqual(len(calls), 5,
-                             "a calm idle sweep must issue ≤5 runner calls, got %d: %r"
-                             % (len(calls), calls))
+        self.assertLess(len(calm_jobs), len(full_jobs),
+                        "a calm sweep must run strictly fewer registry jobs than a "
+                        "full sweep (calm=%d full=%d)" % (len(calm_jobs), len(full_jobs)))
+        self.assertLessEqual(len(calm_jobs), 6,
+                             "only the <=6 calm_ok recovery jobs may run on a calm sweep")
+        self.assertLessEqual(len(calm_calls), 5,
+                             "a calm idle sweep must issue <=5 runner calls, got %d: %r"
+                             % (len(calm_calls), calm_calls))
 
 
 # --------------------------------------------------------------------------- #
@@ -337,7 +351,6 @@ class TestResumeStillFiresOnCalmSweep(unittest.TestCase):
                 now=now, dry_run=False, run=fake_run, send_fn=lambda *a, **k: None,
                 projects_dir=proj, state_path=state_path,
                 pending_prefix=str(Path(d) / "pending-"),
-                questions_fetch=lambda: {},
                 grace=300, interval=300, max_nudges=3))
 
         self.assertTrue(any(ln.startswith("sweep: calm") for ln in logs),
@@ -407,6 +420,10 @@ class TestCompactPendingHoldSeconds(unittest.TestCase):
     def test_sweeps_count_constant_is_gone(self):
         self.assertFalse(hasattr(wd_compact, "COMPACT_PENDING_HOLD_SWEEPS"),
                          "the sweep-count bound must be replaced by seconds (#1055 P3 d)")
+        # the nominal-interval constant only ever fed the old sweep-count bound;
+        # it has no other consumer, so it is removed too (mvp-philosophy).
+        self.assertFalse(hasattr(wd_compact, "COMPACT_SWEEP_INTERVAL_S"),
+                         "the dead nominal-interval constant must be removed (#1055 P3 d)")
 
     def test_hold_behaviour_preserved_at_120s(self):
         with TemporaryDirectory() as d:
