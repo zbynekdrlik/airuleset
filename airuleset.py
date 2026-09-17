@@ -3871,6 +3871,7 @@ def cmd_tickets_status(args):
             if failed:
                 entry["open"] = None
                 entry["gk"] = None
+                entry["bounce"] = None                 # #1056 L1
                 entry["user_waiting"] = None
                 entry["user_waiting_numbers"] = None   # #1025
                 entry["ops_wait"] = None
@@ -3895,6 +3896,10 @@ def cmd_tickets_status(args):
                 gk = sum(1 for n_num in workable_rows if handed.get(n_num))
                 entry["open"] = len(workable_rows) - gk
                 entry["gk"] = gk
+                # #1056 L1: `· bounce K` — open prio:bounce tickets in this
+                # box's slice, from the SAME workable rows (a subset of I N,
+                # never a second query; #367 one-derivation).
+                entry["bounce"] = _count_bounce(workable_rows)
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)
                 # #948: question-map-aware U supplement — see the full
@@ -8597,6 +8602,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _row_is_ops_wait as _row_is_ops_wait,
     _ops_wait_reason as _ops_wait_reason,
     _partition_workable as _partition_workable,
+    _count_bounce as _count_bounce,
     _acceptance_present_set as _acceptance_present_set,
     _question_map_u_supplement as _question_map_u_supplement,
     _comment_carries_question as _comment_carries_question,

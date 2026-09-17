@@ -239,7 +239,7 @@ def sweep_stale_cache(home=None, now=None, max_age_s=STALE_CACHE_MAX_AGE_S):
 # Keys carried forward from a previous good cache when a transient gh failure
 # prevents a fresh read — the "serve stale" doctrine (#952).
 _CARRY_FORWARD_KEYS = (
-    "open", "gk", "user_waiting", "ops_wait", "skipped", "wdrain_over",
+    "open", "gk", "bounce", "user_waiting", "ops_wait", "skipped", "wdrain_over",
     "created_today", "closed_today", "name",
 )
 
@@ -389,6 +389,20 @@ def _ops_wait_sfx(cache):
     return ""
 
 
+def _bounce_sfx(cache):
+    """The '· bounce K' suffix — sub-dev (scope=mine) boxes only: open
+    `prio:bounce` tickets in the box's slice, a SUBSET of `I N` (#1056 L1 /
+    #1057 item 1). Rendered RED (196 — a returned gk BOUNCE verdict is urgent
+    and, per the 16.-17.9. incident, sat invisible for 9-19 h), positioned
+    immediately after `I N` and before `U`/`W`/`gk`, hidden at 0. A full
+    (core) cache carries no `bounce` key → never rendered. Schema-compatible: a
+    legacy cache without `bounce` → `.get(...)` None → hidden (never a crash)."""
+    bounce = cache.get("bounce")
+    if isinstance(bounce, int) and bounce > 0:
+        return " \033[38;5;196m· bounce %d\033[0m" % bounce
+    return ""
+
+
 def _drift_marker(cache):
     """The `▲` net-drain drift marker appended to `I N` (#842) when this repo
     created strictly MORE issues than it closed today — the black-hole shape the
@@ -498,8 +512,9 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     # is waiting — 0 when unconfigured/stale (never a live Odoo call here).
     shown_open = cache["open"] + task_hygiene_a_count(home, now)
 
-    return "\033[38;5;75mI %d%s\033[0m%s%s%s%s" % (
+    return "\033[38;5;75mI %d%s\033[0m%s%s%s%s%s" % (
         shown_open, _drift_marker(cache),
+        _bounce_sfx(cache),
         _user_waiting_sfx(cache, ping_count), _ops_wait_sfx(cache),
         _stream_split_sfx(cache), skip_sfx)
 
