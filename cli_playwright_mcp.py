@@ -21,11 +21,17 @@ unchanged.
 
 import json
 import os
+import re
 import shutil
 import sys
 from pathlib import Path
 
 from cli_binary_installers import _claude_cli_env
+# #1058 (item 2): the #315/#1030 "is any live process using this dir" /proc scan,
+# reused for the per-user old-build cleanup. cli_target_purge is a stdlib-only
+# leaf (no `import airuleset`), so a module-level import keeps THIS leaf
+# airuleset-free (the split test asserts that).
+from cli_target_purge import _target_in_live_use
 
 
 # Retained ONLY for the export contract + as the disabled-list reference value
@@ -144,22 +150,27 @@ def _playwright_pinned_build_installed(cache_dir: Path = None) -> bool:
 
 
 def resolve_playwright_browsers_path(box_class, opt_has_pinned_build, home: Path = None) -> Path:
-    """The single source of truth for WHERE the managed chromium lives, per box
-    class (#1048). ONE resolver used by the browser install, the MCP server env,
-    the bashrc export, and the push post-check, so the four can never diverge.
+    """The single source of truth for WHERE the managed chromium lives (#1048,
+    made CLASS-AGNOSTIC in #1058). ONE resolver used by the browser install, the
+    MCP server env, the bashrc export, and the push post-check, so the four can
+    never diverge.
 
-    - shared-stream (a no-sudo stream box): ALWAYS the per-user
-      `~/.cache/ms-playwright` — it cannot write /opt, and /opt holds a
-      mismatched, root-owned build (the drift the incident is about).
-    - workstation / controller / gk: the shared `/opt/ms-playwright` ONLY when
-      it already holds the pinned chromium build, else the per-user cache (which
-      we can always install the pinned build into) — so the build always matches
-      the pinned MCP server, on every box class.
-    """
+    The decision is now the SAME for EVERY box class: reuse the root-owned shared
+    `/opt/ms-playwright` when it holds the COMPLETE pinned chromium build, else
+    the per-user `~/.cache/ms-playwright`. `opt_has_pinned_build` is the exact
+    build-match predicate (`_has_pinned_chromium_build`), so a MISMATCHED or
+    absent /opt is NEVER used — that is what keeps the odoo-erp#2420 class
+    impossible (the failure was a no-sudo box resolving to a mismatched /opt).
+
+    #1058 dropped the shared-stream special-case that #1048 added (which forced
+    the per-user cache even when /opt matched): a no-sudo box cannot WRITE /opt,
+    but it can READ a build-matched /opt, so once the owner-present root refresh
+    lands the pinned build there, all 14 subdev accounts collapse back onto the
+    #950 one-shared-copy instead of each keeping their own ~650 MB copy. `box_class`
+    is retained in the signature for API stability (every caller passes it and a
+    future per-class rule could return) but no longer changes the result."""
     home = home or Path.home()
     per_user = home / ".cache" / "ms-playwright"
-    if box_class == "shared-stream":
-        return per_user
     return OPT_MS_PLAYWRIGHT if opt_has_pinned_build else per_user
 
 
@@ -257,6 +268,93 @@ def _is_per_user_cache(browsers_path) -> bool:
     argument and cannot confuse `.../.cache/ms-playwright` with `/opt/ms-playwright`."""
     bp = Path(browsers_path)
     return bp.name == "ms-playwright" and bp.parent.name == ".cache"
+
+
+# #1058 (item 2): a `<family>-<revision>` build-dir name (same shape the disk-guard
+# #892 sweep parses: family = everything before the LAST `-<digits>`).
+_BUILD_DIR_RE = re.compile(r"^(.+)-(\d+)$")
+# Families whose SURVIVOR is the EXACT pinned build (PLAYWRIGHT_CHROMIUM_BUILD) —
+# the managed MCP server + the push post-check both need exactly this build.
+_PINNED_EXACT_FAMILIES = ("chromium", "chromium_headless_shell")
+# Families cleanup manages at all (ffmpeg keeps its OWN release-tied revision,
+# unrelated to the chromium build number, so it is handled keep-highest below).
+_CLEANUP_FAMILIES = ("chromium", "chromium_headless_shell", "ffmpeg")
+
+
+def _cleanup_old_builds(browsers_path, *, live_check=None):
+    """#1058 (item 2): reap SUPERSEDED playwright build dirs from the PER-USER
+    cache so it stops accreting ~650 MB on every pin bump (the shared-box disk
+    doctrine #925 + the #950 one-shared-copy rationale). Called by
+    ensure_playwright_browsers after a pinned install AND when the pinned build is
+    already present (so today's stale siblings on gk/spinbike — where playwright's
+    own installer GC never ran because our guard skipped the install — go away on
+    the next push).
+
+    Scoped HARD:
+      * ONLY the per-user cache (`_is_per_user_cache`) — NEVER the root-owned
+        `/opt/ms-playwright` (that is root's, shared read-only #950);
+      * `chromium` / `chromium_headless_shell`: keep EXACTLY the pinned build
+        (`PLAYWRIGHT_CHROMIUM_BUILD`), remove every other build of those families
+        — after a pinned install the pinned build is guaranteed present, so this
+        leaves exactly it;
+      * `ffmpeg`: keep the HIGHEST revision present (the one the pinned install
+        wrote), remove strictly-lower ones (playwright bundles its own ffmpeg
+        revision per release, numbered independently of the chromium build);
+      * NEVER a dir a live process has a cwd / open fd inside (the #315/#1030
+        `_target_in_live_use` /proc scan — injectable as `live_check` for tests),
+        and NEVER a symlink (left untouched, never followed).
+      * other browser families (firefox / webkit an unrelated project installed)
+        are left alone — this manages only the families airuleset pins.
+
+    Idempotent (a second call finds nothing to remove) and best-effort: a scan or
+    rmtree failure is logged and skipped, never fatal — the install must never
+    crash on a cleanup problem. One journal line per removal / kept-live dir."""
+    if live_check is None:
+        live_check = _target_in_live_use
+    base = Path(browsers_path)
+    if not _is_per_user_cache(base) or not base.is_dir():
+        return
+    pinned = PLAYWRIGHT_CHROMIUM_BUILD
+    entries = []          # (family, revision_str, path)
+    ffmpeg_revs = []
+    try:
+        listing = sorted(base.iterdir())
+    except OSError as e:
+        print("    ⚠ Playwright cleanup: could not scan %s (%s)" % (base, e),
+              file=sys.stderr)
+        return
+    for entry in listing:
+        # `is_symlink` FIRST: a symlink is never followed nor removed (matches the
+        # disk-guard #892 stance); `is_dir()` follows links, so order matters.
+        if entry.is_symlink() or not entry.is_dir():
+            continue
+        m = _BUILD_DIR_RE.match(entry.name)
+        if m is None:
+            continue
+        family, rev = m.group(1), m.group(2)
+        if family not in _CLEANUP_FAMILIES:
+            continue
+        entries.append((family, rev, entry))
+        if family == "ffmpeg":
+            ffmpeg_revs.append(int(rev))
+    ffmpeg_keep = max(ffmpeg_revs) if ffmpeg_revs else None
+    for family, rev, entry in entries:
+        if family in _PINNED_EXACT_FAMILIES:
+            superseded = rev != pinned
+        else:  # ffmpeg — keep the highest revision present
+            superseded = ffmpeg_keep is not None and int(rev) < ffmpeg_keep
+        if not superseded:
+            continue
+        if live_check(entry):
+            print("    Playwright cleanup: kept %s — a live process is using it"
+                  % entry.name)
+            continue
+        try:
+            shutil.rmtree(entry)
+            print("    Playwright cleanup: removed superseded build %s" % entry.name)
+        except OSError as e:
+            print("    ⚠ Playwright cleanup: could not remove %s (%s)"
+                  % (entry.name, e), file=sys.stderr)
 
 
 def _stderr_tail(text, n: int = 8) -> str:
@@ -414,6 +512,12 @@ def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None, *,
             env = dict(_claude_cli_env())
             env["PLAYWRIGHT_BROWSERS_PATH"] = str(browsers_path)
             _heal_system_libs(browsers_path, env, sudo_ok=sudo_ok, probe_rc=probe_rc)
+        # #1058 (item 2): even when the install is SKIPPED (pinned build already
+        # present), playwright's own installer GC did NOT run, so a stale sibling
+        # build left over from an earlier pin (gk/spinbike keep 1234 next to 1244)
+        # would sit there forever. Reap it now. Self-guards to the per-user cache
+        # (never /opt) and needs no npx (pure filesystem).
+        _cleanup_old_builds(browsers_path)
         return
     if shutil.which("npx") is None:
         print("    ⚠ Playwright browsers missing and npx is absent — cannot "
@@ -474,6 +578,11 @@ def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None, *,
     # its libs; a no-sudo box cannot write /opt anyway).
     if _is_per_user_cache(browsers_path):
         _heal_system_libs(browsers_path, env, sudo_ok=sudo_ok, probe_rc=probe_rc)
+    # #1058 (item 2): remove the superseded build this install just replaced
+    # (playwright's GC usually does this when the install RUNS, but do it
+    # ourselves too so a partial GC never leaves a stale sibling). Self-guards to
+    # the per-user cache.
+    _cleanup_old_builds(browsers_path)
 
 
 def _atomic_write_text(path: Path, text: str) -> None:

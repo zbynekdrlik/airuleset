@@ -1029,25 +1029,43 @@ def _playwright_chromium_postcheck():
         '[ -n "$BP" ] || '
         '{ echo "PLAYWRIGHT-POSTCHECK SKIPPED: managed Playwright not provisioned here" >&2; exit 0; }; '
         'export PLAYWRIGHT_BROWSERS_PATH="$BP"; '
+        # #1048 fix-forward (c): a probe FUNCTION so the retry (#1058, below) runs
+        # it twice without duplicating the npx line. Captures the probe stderr to a
+        # temp file so the FAILED message carries the REAL error (montalu3-6:
+        # "Executable doesn't exist"; spinbike: exit 127 missing libs) instead of
+        # one opaque "did not render" covering three failures. On failure it sets
+        # RC (the probe's exit code), TAIL (last 3 stderr lines) and NPM (1 iff the
+        # stderr carries an `npm error`) for the caller, then returns RC.
+        '_pw_probe() { '
         'PROBE="$(mktemp /tmp/airuleset-pw-probe.XXXXXX.png)"; '
-        # #1048 fix-forward (c): capture the probe stderr to a temp file so the
-        # FAILED message carries the REAL error (montalu3-6: "Executable doesn't
-        # exist"; spinbike: exit 127 missing libs) instead of one opaque "did not
-        # render" covering three different failures.
         'ERR="$(mktemp /tmp/airuleset-pw-probe.XXXXXX.err)"; '
         'if timeout -k 5 30 npx -y playwright@%s screenshot --browser chromium '
-        'about:blank "$PROBE" >/dev/null 2>"$ERR"; then rm -f "$PROBE" "$ERR"; '
-        'else rc=$?; TAIL="$(tail -n 3 "$ERR" 2>/dev/null)"; rm -f "$PROBE" "$ERR"; '
+        'about:blank "$PROBE" >/dev/null 2>"$ERR"; then rm -f "$PROBE" "$ERR"; return 0; '
+        'else RC=$?; TAIL="$(tail -n 3 "$ERR" 2>/dev/null)"; NPM=0; '
+        'grep -qi "npm error" "$ERR" 2>/dev/null && NPM=1; rm -f "$PROBE" "$ERR"; '
+        'return "$RC"; fi; }; '
         # exit 127 = the ELF loader could not find shared libraries; name it and
         # the exact remedy (install-deps as root), distinct from a render/drift
         # failure. Both keep rc 88 so the deploy loop fails the target.
-        'if [ "$rc" = 127 ]; then '
+        '_pw_fail() { '
+        'if [ "$RC" = 127 ]; then '
         'echo "PLAYWRIGHT-POSTCHECK FAILED: headless chromium exited 127 — missing '
         'system shared libraries — run npx playwright install-deps chromium as root '
         '(#1048); stderr tail: $TAIL" >&2; '
         'else echo "PLAYWRIGHT-POSTCHECK FAILED: headless chromium (--browser '
-        'chromium) did not render in 30s (rc=$rc) — chrome-channel / version drift '
-        '(#1048); stderr tail: $TAIL" >&2; fi; exit 88; fi; }'
+        'chromium) did not render in 30s (rc=$RC) — chrome-channel / version drift '
+        '(#1048); stderr tail: $TAIL" >&2; fi; exit 88; }; '
+        'if _pw_probe; then exit 0; fi; '
+        # #1058 (item 4): an npm cache race (rc 1 + `npm error` — david4: a live
+        # `@playwright/mcp` npx run racing the probe's own npx cache with "Remove
+        # the existing file and try again") is transient, not a browser fault —
+        # retry ONCE after a short pause (AIRULESET_PW_POSTCHECK_RETRY_SLEEP for
+        # tests, 5 s in prod). exit 127 and every non-npm failure FAIL immediately;
+        # a SECOND failure FAILs.
+        'if [ "$RC" = 1 ] && [ "$NPM" = 1 ]; then '
+        'sleep "${AIRULESET_PW_POSTCHECK_RETRY_SLEEP:-5}"; '
+        'if _pw_probe; then exit 0; fi; _pw_fail; fi; '
+        '_pw_fail; }'
     ) % airuleset.PLAYWRIGHT_PW_VERSION
 
 

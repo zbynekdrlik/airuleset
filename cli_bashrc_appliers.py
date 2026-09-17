@@ -864,15 +864,18 @@ STREAM_ENV_MARK_END = "# <<< airuleset: shared-stream env <<<"
 
 STREAM_ENV_BASHRC_BLOCK = (
     f"{STREAM_ENV_MARK_START}\n"
-    '# #1048: a shared-stream box has NO sudo, and the root-owned '
-    '/opt/ms-playwright\n'
-    '# holds a MISMATCHED chromium build (1243 vs the pinned 1244), so an\n'
-    '# interactive `playwright` and any @playwright/mcp instance must use the\n'
-    '# per-user cache that airuleset installs the PINNED chromium into. (#950\n'
-    "# pointed this at /opt — the drift the incident is about.)\n"
+    '# #1058: FOLLOW the resolver marker airuleset writes at install time\n'
+    '# (~/.claude/airuleset-playwright-browsers-path) so the interactive shell\n'
+    '# uses the SAME browsers path as the managed @playwright/mcp server: the\n'
+    '# shared /opt/ms-playwright once root has refreshed it to the pinned build\n'
+    '# (the #950 one-shared-copy), else the per-user cache airuleset installs the\n'
+    '# pinned chromium into. (#1048 hardcoded the per-user cache after #950 had\n'
+    '# wrongly pointed at a mismatched /opt; #1058 made the resolver class-\n'
+    '# agnostic and this shell now follows its marker, with the per-user cache as\n'
+    '# the fallback for a box not yet provisioned.)\n'
     '# PLAYWRIGHT_MCP_BROWSER pins any @playwright/mcp to chromium so the dead\n'
     '# `chrome` channel is never required.\n'
-    'export PLAYWRIGHT_BROWSERS_PATH="$HOME/.cache/ms-playwright"\n'
+    'export PLAYWRIGHT_BROWSERS_PATH="$(cat "$HOME/.claude/airuleset-playwright-browsers-path" 2>/dev/null || echo "$HOME/.cache/ms-playwright")"\n'
     'export PLAYWRIGHT_MCP_BROWSER=chromium\n'
     'export PLAYWRIGHT_MCP_HEADLESS=true\n'
     f"{STREAM_ENV_MARK_END}"

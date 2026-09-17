@@ -44,11 +44,14 @@ class TestPlaywrightMcpConfig1048(unittest.TestCase):
             "the broken chrome-channel playwright plugin must be force-disabled")
 
     def test_stream_env_points_playwright_at_per_user_cache_not_opt(self):
-        # #1048: the shared-stream ~/.bashrc must export the per-user cache (the
-        # location airuleset installs the pinned chromium into), NEVER the
-        # root-owned /opt/ms-playwright with its mismatched build (the #950
-        # drift the incident is about). Assert on the ACTIVE `export` lines
-        # only (a /opt mention in an explanatory comment is fine).
+        # #1048/#1058: the shared-stream ~/.bashrc export must never HARDCODE the
+        # root-owned /opt copy and must keep the per-user cache as its fallback
+        # (the location airuleset installs the pinned chromium into). #1058 made
+        # the export FOLLOW the resolver marker, so at RUNTIME it can resolve to a
+        # build-matched /opt — but the STATIC line hardcodes no /opt and retains
+        # `$HOME/.cache/ms-playwright` as the no-marker fallback. Assert on the
+        # ACTIVE `export` lines only (a /opt mention in an explanatory comment is
+        # fine; the marker-follow behaviour is covered in test_playwright_browsers_path_1058).
         from cli_bashrc_appliers import STREAM_ENV_BASHRC_BLOCK
         export_lines = [ln for ln in STREAM_ENV_BASHRC_BLOCK.splitlines()
                         if ln.strip().startswith("export")
