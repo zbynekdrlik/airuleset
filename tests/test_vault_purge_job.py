@@ -343,7 +343,13 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                "             health_probes=None, health_probe_fetch=None,\n"
                # #1040 re-pin: gh_rate_fetch=None (the per-sweep gh rate-guard
                # reading seam) joined task_hygiene_enabled on the LAST line.
-               "             task_hygiene_enabled=False, gh_rate_fetch=None):")
+               # #1056 L2 re-pin: bounceflip_fetch=None (Job 50's blind-label-flip
+               # revert fetch seam) was appended on a NEW trailing line after
+               # gh_rate_fetch=None, so the closing `):` moved off that line onto
+               # the new one; the anchor grew a last line, the mutation target
+               # vault_purge=None is untouched.
+               "             task_hygiene_enabled=False, gh_rate_fetch=None,\n"
+               "             bounceflip_fetch=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a

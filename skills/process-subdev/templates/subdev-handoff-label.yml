@@ -80,6 +80,11 @@ jobs:
           REPO: ${{ github.repository }}
           # Body via env, never shell-interpolated — comment text is untrusted input.
           BODY: ${{ github.event.comment.body }}
+          # #1056 L2 (g): the RFR comment's own timestamp + the gatekeeper login
+          # for the bounce-clear guard below. GATEKEEPER_LOGIN is a repo variable
+          # (Settings ▸ Variables); it defaults to the fleet gatekeeper identity.
+          RFR_TS: ${{ github.event.comment.created_at }}
+          GK_LOGIN: ${{ vars.GATEKEEPER_LOGIN || 'zbynekdrlik' }}
         run: |
           set -euo pipefail
           if ! printf '%s\n' "$BODY" | bash scripts/subdev-handoff-match.sh; then
@@ -94,7 +99,45 @@ jobs:
           # Re-ready after a bounce = the bounce is resolved. A read-role
           # sub-dev CANNOT remove labels, so the repo automation clears the
           # lane here (airuleset #21; the 2026-07-19 stale-label incident).
-          gh issue edit "$NUM" --repo "$REPO" --remove-label prio:bounce 2>/dev/null || true
+          #
+          # #1056 L2 (g): clear prio:bounce ONLY when THIS RFR genuinely answers
+          # the newest gk BOUNCE — the RFR is newer than that verdict AND a
+          # commit landed since it. The blind re-flag class (montalu, odoo-erp
+          # #5613/#6890): RFR re-posted minutes after a BOUNCE with the PR head
+          # unchanged → clearing hands a still-broken ticket back as "ready".
+          # gh api reads HERE (author = the gk login var); the pure decision is
+          # scripts/subdev-handoff-match.sh bounce-clear-guard, which compares
+          # the actual comment/commit timestamps (the replay guard = the
+          # processed comments' own created_at, never a now-2h window).
+          # #1056 L2 (g) review-B: the comments read FAILING (gh rc != 0) is
+          # distinguished from a genuinely-empty result — a READ FAILURE
+          # fail-CLOSES (skip the clear, leave the label to a human / the next
+          # RFR / Job 50), so a transient gh flake never blind-clears a standing
+          # bounce; only an rc-0 empty result means "no BOUNCE → safe to clear".
+          GK_RC=0
+          GK_RAW="$(gh api "repos/$REPO/issues/$NUM/comments" --paginate \
+            -q '.[] | select(.user.login == env.GK_LOGIN)
+                    | select(.body | test("(?im)^\\s*([#*_-]+\\s*)?READY-FOR-REVIEW") | not)
+                    | select(.body | test("gk-state:\\s*BOUNCE|\\bBOUNCE\\b"; "i"))
+                    | .created_at' 2>/dev/null)" || GK_RC=$?
+          if [ "$GK_RC" -ne 0 ]; then
+            echo "prio:bounce NOT cleared (#1056 L2): could not read gk comments (gh rc=$GK_RC) — leaving the label for the next RFR / the gk-side automat."
+          else
+            GK_TS="$(printf '%s\n' "$GK_RAW" | sort | tail -1)"
+            COMMIT_TS=""
+            PR_OID="$(gh pr list --repo "$REPO" --search "$NUM" --state all \
+              --json number,headRefOid,body -L 20 2>/dev/null \
+              | jq -r '.[] | select(.body | test("(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#"+env.NUM+"\\b")) | .headRefOid' \
+              | head -1 || true)"
+            if [ -n "$PR_OID" ]; then
+              COMMIT_TS="$(gh api "repos/$REPO/commits/$PR_OID" -q '.commit.author.date' 2>/dev/null || true)"
+            fi
+            if bash scripts/subdev-handoff-match.sh bounce-clear-guard "$RFR_TS" "$GK_TS" "$COMMIT_TS"; then
+              gh issue edit "$NUM" --repo "$REPO" --remove-label prio:bounce 2>/dev/null || true
+            else
+              echo "prio:bounce NOT cleared (#1056 L2): this RFR does not answer the newest gk BOUNCE with a new commit — the gk queue keeps the bounce until a real fix."
+            fi
+          fi
       - name: Add needs-gatekeeper label (#331)
         # Only real issues (not PR comments), only sub-dev authors, only the
         # GATEKEEPER-ACTION: request marker — never disturbs the
@@ -139,15 +182,47 @@ jobs:
           REPO: ${{ github.repository }}
           # Body via env, never shell-interpolated — comment text is untrusted input.
           BODY: ${{ github.event.comment.body }}
+          # #1056 L2 (g): same bounce-clear guard as the ready-for-review step.
+          RFR_TS: ${{ github.event.comment.created_at }}
+          GK_LOGIN: ${{ vars.GATEKEEPER_LOGIN || 'zbynekdrlik' }}
         run: |
           set -euo pipefail
           if ! printf '%s\n' "$BODY" | bash scripts/subdev-handoff-match.sh bounce-resolved; then
             echo "Marker mentioned but not a genuine bounce-resolved notice (#331) — leaving labels unchanged."
             exit 0
           fi
-          # Best-effort: a ticket that never carried prio:bounce (or a
-          # read-role token hiccup) must not fail this job.
-          gh issue edit "$NUM" --repo "$REPO" --remove-label prio:bounce 2>/dev/null || true
-          echo "BOUNCE-RESOLVED on #$NUM — prio:bounce removed (or was already absent)."
+          # #1056 L2 (g): gate the clear exactly like the ready-for-review step.
+          # A dedicated tracking issue usually carries NO gk BOUNCE of its own
+          # (the fix + the verdict live on another issue), so GK_TS resolves
+          # empty here → the guard clears (backward-compatible). It engages only
+          # when the gk bounced THIS tracking issue itself and no response
+          # landed. review-B: a comments-read FAILURE (gh rc != 0) fail-CLOSES
+          # (skip the clear); only an rc-0 empty result clears.
+          GK_RC=0
+          GK_RAW="$(gh api "repos/$REPO/issues/$NUM/comments" --paginate \
+            -q '.[] | select(.user.login == env.GK_LOGIN)
+                    | select(.body | test("(?im)^\\s*([#*_-]+\\s*)?READY-FOR-REVIEW") | not)
+                    | select(.body | test("gk-state:\\s*BOUNCE|\\bBOUNCE\\b"; "i"))
+                    | .created_at' 2>/dev/null)" || GK_RC=$?
+          if [ "$GK_RC" -ne 0 ]; then
+            echo "BOUNCE-RESOLVED on #$NUM — prio:bounce NOT cleared (#1056 L2): could not read gk comments (gh rc=$GK_RC) — leaving the label."
+          else
+            GK_TS="$(printf '%s\n' "$GK_RAW" | sort | tail -1)"
+            COMMIT_TS=""
+            PR_OID="$(gh pr list --repo "$REPO" --search "$NUM" --state all \
+              --json number,headRefOid,body -L 20 2>/dev/null \
+              | jq -r '.[] | select(.body | test("(?i)(close[sd]?|fix(e[sd])?|resolve[sd]?)\\s+#"+env.NUM+"\\b")) | .headRefOid' \
+              | head -1 || true)"
+            if [ -n "$PR_OID" ]; then
+              COMMIT_TS="$(gh api "repos/$REPO/commits/$PR_OID" -q '.commit.author.date' 2>/dev/null || true)"
+            fi
+            # Best-effort: a ticket that never carried prio:bounce must not fail this job.
+            if bash scripts/subdev-handoff-match.sh bounce-clear-guard "$RFR_TS" "$GK_TS" "$COMMIT_TS"; then
+              gh issue edit "$NUM" --repo "$REPO" --remove-label prio:bounce 2>/dev/null || true
+              echo "BOUNCE-RESOLVED on #$NUM — prio:bounce removed (or was already absent)."
+            else
+              echo "BOUNCE-RESOLVED on #$NUM — prio:bounce NOT cleared (#1056 L2): a newer gk BOUNCE stands on this issue with no verified fix since."
+            fi
+          fi
       - name: No-op marker (job never skips)
         run: echo "handoff-label evaluated"

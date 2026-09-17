@@ -81,6 +81,59 @@ set -euo pipefail
 
 MODE="${1:-ready-for-review}"
 
+# =============================================================================
+# #1056 L2 (g) — bounce-clear-guard: is it SAFE to clear prio:bounce?
+#
+# A stream signals a resolved bounce by re-posting READY-FOR-REVIEW / a
+# BOUNCE-RESOLVED marker, and this workflow clears prio:bounce on that comment.
+# The blind re-flag class (montalu, odoo-erp #5613/#6890, 16.-17.9.2026): the
+# RFR is re-posted minutes AFTER a gk BOUNCE verdict with the PR head UNCHANGED
+# since before it, so clearing prio:bounce hands a still-broken ticket back as
+# "ready". This mode gates the clear: clear ONLY when the RFR comment is NEWER
+# than the newest gk BOUNCE comment AND a commit on the PR branch is NEWER than
+# that BOUNCE. Timestamps are compared DIRECTLY (the design's replay guard =
+# "max(comment created_at) of the processed set", never a now-2h wall-clock
+# window). The workflow does the gh api reads (author = the gk login variable)
+# and passes the three ISO timestamps here; this mode is a pure comparison so
+# the test suite drives it hermetically.
+#
+# ARGS: $2 = RFR comment created_at (ISO), $3 = newest gk BOUNCE created_at
+#       (ISO, empty when no BOUNCE stands), $4 = newest PR-branch commit date
+#       (ISO, empty when unresolvable).
+# EXIT: 0 = safe to clear prio:bounce, 1 = blind re-flag / unverifiable → do NOT
+#       clear. Handled BEFORE reading stdin (this mode takes no body).
+# =============================================================================
+if [ "$MODE" = "bounce-clear-guard" ]; then
+  RFR_TS="${2:-}"
+  GK_TS="${3:-}"
+  COMMIT_TS="${4:-}"
+  # No gk BOUNCE stands → nothing to guard; clearing is safe.
+  if [ -z "$GK_TS" ]; then
+    echo "bounce-clear-guard: no gk BOUNCE verdict — safe to clear"
+    exit 0
+  fi
+  gk_epoch="$(date -u -d "$GK_TS" +%s 2>/dev/null || echo "")"
+  rfr_epoch="$(date -u -d "$RFR_TS" +%s 2>/dev/null || echo "")"
+  commit_epoch="$(date -u -d "$COMMIT_TS" +%s 2>/dev/null || echo "")"
+  # An unparseable BOUNCE timestamp cannot be compared → conservative (a real
+  # BOUNCE we cannot time is never proven answered) → do NOT clear.
+  if [ -z "$gk_epoch" ]; then
+    echo "bounce-clear-guard: unparseable gk BOUNCE timestamp — not clearing"
+    exit 1
+  fi
+  # Clear ONLY when a genuine response landed: the RFR AND a commit are both
+  # STRICTLY newer than the BOUNCE. A missing/unparseable RFR or commit cannot
+  # prove a fix → do NOT clear (the safe-against-blind-flip direction).
+  if [ -n "$rfr_epoch" ] && [ -n "$commit_epoch" ] \
+       && [ "$rfr_epoch" -gt "$gk_epoch" ] \
+       && [ "$commit_epoch" -gt "$gk_epoch" ]; then
+    echo "bounce-clear-guard: RFR and a commit are both newer than the newest gk BOUNCE — safe to clear"
+    exit 0
+  fi
+  echo "bounce-clear-guard: RFR/commit not newer than the newest gk BOUNCE (blind re-flag / unverifiable) — NOT clearing prio:bounce"
+  exit 1
+fi
+
 BODY="$(cat)"
 
 # NO `printf "$BODY" | grep -q` pipelines here — see the #331 header note

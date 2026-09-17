@@ -146,6 +146,20 @@ def _cites_id(body, fid):
     return False
 
 
+def missing_dispositions(body, ids):
+    """The subset of `ids` that `body` does NOT disposition (#1056 L2 (f)).
+
+    The ONE disposition-shape primitive — reused by the composer hand-off
+    pre-flight (`airuleset._handoff_gk_preflight`) and by
+    `cli_handoff_template.validate_passthrough_body` (the pass-through mirror),
+    so "does this RFR body address finding id X" has a single source of truth.
+    An id is dispositioned per `_cites_id` (an exact-id token on a line that
+    also carries a disposition anchor — a `Closes-finding:`/`Disposition:`/
+    finding keyword, a finding emoji, or a leading `#<id>`). Returns the missing
+    ids in the order given; a falsy `ids` yields []."""
+    return [fid for fid in (ids or []) if not _cites_id(body, fid)]
+
+
 def _exact_match(a, b):
     """Default login matcher (exact). Callers inject the app-aware
     `airuleset._is_own_login` for App-token boxes where the ISSUE vs COMMENT

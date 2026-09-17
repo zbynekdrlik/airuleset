@@ -3896,11 +3896,18 @@ def cmd_tickets_status(args):
                 gk = sum(1 for n_num in workable_rows if handed.get(n_num))
                 entry["open"] = len(workable_rows) - gk
                 entry["gk"] = gk
-                # #1056 L1: `· bounce K` — open prio:bounce tickets in this
-                # box's slice, from the SAME workable rows (a subset of the
-                # WORKABLE slice = open ∪ gk, never a second query; #367
-                # one-derivation).
-                entry["bounce"] = _count_bounce(workable_rows)
+                # #1056 L1/L2 (i0): `· bounce K` — EVERY open prio:bounce ticket
+                # in this box's slice, across the FULL role-filtered partition
+                # (workable ∪ user-waiting ∪ ops-wait), from the SAME already-
+                # partitioned rows (never a second query; #367 one-derivation).
+                # L2 counts the union, not just `workable`, so a returned bounce
+                # parked on an owner-answer (needs-answer + prio:bounce → U) is
+                # still counted — the montalu1 "bounce 1 of 5" false read. The
+                # partition already pulls a prio:bounce+ops-wait row into
+                # `workable`, so the common case lands in I; the union catches
+                # the rarer U-parked bounce too.
+                entry["bounce"] = _count_bounce_all(workable_rows, waiting,
+                                                    ops_wait)
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)
                 # #948: question-map-aware U supplement — see the full
@@ -4436,6 +4443,117 @@ def _validate_self_review_table(table_text, lenses):
     return True, None
 
 
+def _handoff_gk_preflight(issue, repo, body, *, cwd=None, watch_result=None):
+    """The composer hand-off gk-watch pre-flight (#1056 L2 (f)).
+
+    Reads the ticket's gk hand-off state (via `gk_watch_issue`, or the injected
+    `watch_result` for tests / a single upstream read) and returns a
+    `handoff BLOCK: …` reason string, or None when the RFR may be posted. Both
+    `cmd_handoff` (compose path) and `_cmd_handoff_post_body_file` (pass-through)
+    call it BEFORE posting.
+
+    Two REFUSE reasons, from the design:
+      * the newest gk comment is a BOUNCE and no commit landed since it
+        (`head_ts` not newer than the BOUNCE) — the blind re-flag class
+        (odoo-erp #6890/#6824, 16.-17.9.2026): `no new commit since BOUNCE
+        <comment-id> @<sha>`;
+      * gk finding ids newer than the previous RFR that the body does not
+        disposition (`cli_gk_watch.missing_dispositions`, the ONE primitive):
+        `needs-disposition <ids>`.
+
+    FAIL-OPEN: `unknown` (gh error / low budget / unresolvable slug / no
+    resolvable stream identity) prints a notice to stderr and returns None —
+    never a wrong block (the #539 never-false-accuse direction). `rfr-current`
+    / `no-gk-comment` pass. There is ONE bypass shape for the whole hand-off
+    gate: post the RAW comment with `# airuleset:handoff-ok <reason>` (the
+    `block-handoff-without-composer.sh` hook honours it) — the composer itself
+    stays strict, so a false-positive block escapes via that documented raw
+    path, never a second in-composer flag."""
+    import cli_gk_watch
+    st = watch_result
+    if st is None:
+        try:
+            st = gk_watch_issue(int(issue), cwd=cwd, repo_slug=repo)
+        except Exception as e:            # a gk-watch crash must never block
+            sys.stderr.write("handoff: gk-watch pre-flight skipped (%s) — "
+                             "fail-open\n" % e)
+            return None
+    state = st.get("state") if isinstance(st, dict) else None
+    if state is None or state == "unknown":
+        sys.stderr.write("handoff: gk-watch state unknown (gh read failed / low "
+                         "budget) — pre-flight skipped (fail-open)\n")
+        return None
+    gl = st.get("gk_latest") or {}
+    # (1) bounce-unanswered with no new commit since the verdict.
+    if state == "bounce-unanswered":
+        gk_ts = gl.get("created_at")
+        head_ts = st.get("head_ts")
+        if not (isinstance(head_ts, (int, float))
+                and isinstance(gk_ts, (int, float)) and head_ts > gk_ts):
+            return ("handoff BLOCK: no new commit since BOUNCE %s @%s — push a "
+                    "fix first / re-declare a fresh HEAD (bypass a false block "
+                    "by posting the raw comment with `# airuleset:handoff-ok "
+                    "<reason>`)" % (gl.get("id"), gl.get("sha") or "?"))
+    # (2) undispositioned finding ids (both bounce-unanswered and
+    # needs-disposition carry them). #1056 review-A 🔵 (degraded case): when the
+    # gk comment carries NO `_parse_gk_findings`-shaped id, `undis` is [] and
+    # this arm is a no-op — the gate then rests on check-1's "a commit landed
+    # since the BOUNCE" alone (and `head_ts` is the PR head's `author.date`,
+    # which a rebase can backdate). That is the inherent floor of a finding-id
+    # contract; a marker-less advisory simply cannot be disposition-checked.
+    undis = st.get("undispositioned_ids") or []
+    missing = cli_gk_watch.missing_dispositions(body, undis)
+    if missing:
+        return ("handoff BLOCK: needs-disposition %s — the RFR body must "
+                "disposition each finding id from the newest gk comment %s "
+                "(Closes-finding: or a disposition row per id; bypass a false "
+                "block by posting the raw comment with `# airuleset:handoff-ok "
+                "<reason>`)" % (",".join(missing), gl.get("id")))
+    return None
+
+
+def _handoff_clear_bounce(repo, issue, gk_state):
+    """Clear `prio:bounce` after a SUCCESSFUL RFR post — the ONE sanctioned
+    composer clear (#1056 L2 (f)).
+
+    #1056 L2 review-A 🟡: clear ONLY when the pre-flight resolved state
+    `bounce-unanswered` — the case where a standing gk BOUNCE was VERIFIABLY
+    answered by THIS hand-off (the pre-flight already confirmed a commit landed
+    since the verdict AND every finding id is dispositioned, else it would have
+    BLOCKED). In EVERY other state the composer does NOT clear:
+      * `unknown` (gh error / low budget — the pre-flight failed OPEN): clearing
+        here would strip `prio:bounce` with NO commit-since-bounce check, the
+        exact blind re-flag this lane fixes, AND the freshly-posted RFR flips
+        gk-watch to `rfr-current` so the gk-side revert automat (Job 50) never
+        fires either — both guards bypassed;
+      * `rfr-current` / `needs-disposition` / `no-gk-comment`: no standing
+        unanswered bounce THIS hand-off resolves — a lingering `prio:bounce` is
+        left to the guarded labeler workflow (its own gh reads) / the gk.
+
+    Best-effort: a read-role collaborator's 403 (david) or any gh hiccup is
+    swallowed (the labeler workflow is the fallback clear for a fork stream).
+    Runs as a subprocess of `airuleset.py handoff`, so it is NOT seen by the
+    `block-blind-label-flip.sh` Bash hook (which pre-filters the top-level
+    command for `issue`+`edit`) — the sanctioned clear needs no bypass. Returns
+    True iff the label was removed."""
+    if not repo:
+        return False
+    state = gk_state.get("state") if isinstance(gk_state, dict) else None
+    if state != "bounce-unanswered":
+        # No verified standing-bounce answer → leave the label to the guarded
+        # labeler / the gk (never a blind clear on a fail-open or stale state).
+        return False
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["gh", "issue", "edit", str(issue), "--remove-label",
+             "prio:bounce", "-R", repo],
+            capture_output=True, text=True, timeout=15)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     """#1044 pass-through: sign AND post a STREAM-authored, gate-compliant body
     VERBATIM in one command.
@@ -4463,8 +4581,25 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     self_login = _stream_self_login()
     rnd = _bounce_round(int(issue), self_login, cwd=None, repo=repo)
 
+    # #1056 L2 (f): the gk-watch pre-flight. ONE upstream read, shared by the
+    # bounce/head refusal AND the disposition-shape mirror below, so a single
+    # gh fetch serves both checks. `unknown` fails OPEN inside the helper.
+    _gk_state = None
+    try:
+        _gk_state = gk_watch_issue(int(issue), repo_slug=repo)
+    except Exception as _e:
+        sys.stderr.write("handoff: gk-watch pre-flight skipped (%s) — "
+                         "fail-open\n" % _e)
+    _blk = _handoff_gk_preflight(int(issue), repo, body, watch_result=_gk_state)
+    if _blk:
+        print(_blk)
+        return 1
+    _undis = (_gk_state or {}).get("undispositioned_ids") or [] \
+        if isinstance(_gk_state, dict) else []
+
     import cli_handoff_template as _ht
-    err = _ht.validate_passthrough_body(body, bounce_round=rnd)
+    err = _ht.validate_passthrough_body(body, bounce_round=rnd,
+                                        required_disposition_ids=_undis)
     if err:
         print(err)
         return 1
@@ -4545,6 +4680,12 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
         print("handoff FAILED: gh issue comment failed: %s"
               % (r.stderr or "").strip())
         return 1
+    # #1056 L2 (f): the ONE sanctioned prio:bounce clear — only AFTER a
+    # successful RFR post (the worker doctrine forbids workers touching it),
+    # and (review-A 🟡) only when the pre-flight VERIFIED a standing bounce was
+    # answered (state bounce-unanswered), never on a fail-open/stale state.
+    if _handoff_clear_bounce(repo, issue, _gk_state):
+        print("handoff: prio:bounce cleared on #%s" % issue)
     print("handoff: READY-FOR-REVIEW posted verbatim on #%s (round %d, "
           "HEAD %s)" % (issue, rnd, body_head[:12]))
     return 0
@@ -4803,6 +4944,22 @@ def cmd_handoff(args):
         print(err)
         return 1
 
+    # #1056 L2 (f): the gk-watch pre-flight on the COMPOSED body — the
+    # `--closes-finding` args are already rendered as `Closes-finding:` lines,
+    # so the disposition check sees them. ONE gk-watch read, shared by the
+    # pre-flight AND the state-gated clear below (review-A 🟡). `unknown` fails
+    # OPEN in the helper.
+    try:
+        _gk_state = gk_watch_issue(int(issue), repo_slug=repo)
+    except Exception as _e:
+        sys.stderr.write("handoff: gk-watch pre-flight skipped (%s) — "
+                         "fail-open\n" % _e)
+        _gk_state = None
+    _blk = _handoff_gk_preflight(int(issue), repo, body, watch_result=_gk_state)
+    if _blk:
+        print(_blk)
+        return 1
+
     # Write receipt BEFORE posting (the hook checks the receipt).
     gate_dir = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_DIR)
     os.makedirs(gate_dir, exist_ok=True)
@@ -4846,6 +5003,12 @@ def cmd_handoff(args):
               % (r.stderr or "").strip())
         return 1
 
+    # #1056 L2 (f): the ONE sanctioned prio:bounce clear — only AFTER a
+    # successful RFR post, and only when the pre-flight VERIFIED a standing
+    # bounce was answered (state bounce-unanswered), never a fail-open/stale
+    # clear (review-A 🟡).
+    if _handoff_clear_bounce(repo, issue, _gk_state):
+        print("handoff: prio:bounce cleared on #%s" % issue)
     print("handoff: READY-FOR-REVIEW posted on #%s (round %d, HEAD %s)"
           % (issue, rnd, head_sha[:12]))
     return 0
@@ -5842,6 +6005,16 @@ def _watchdog_gkorphan_handoff_fetch(root, budget=None, logs=None):
     return _fetch_gk_comment_handoffs(root, None, _t.time(),
                                       _comment_handoff_window_s(),
                                       budget=budget, logs=logs)
+
+
+def _watchdog_bounceflip_fetch(root, budget=None, logs=None):
+    """Job 50's real gh fetch (#1056 L2 (h)) — the blind-label-flip candidate
+    facts (open `ready-for-review` tickets narrowed by per-candidate gk-watch +
+    label-event reads). Same network-free-tests wiring as jobs 8/11/31/36;
+    forwards the sweep's `_SweepBudget` so the per-candidate read loop is
+    wall-clock-bounded (unwired None = no bound)."""
+    from watchdog import _fetch_bounce_flip_candidates
+    return _fetch_bounce_flip_candidates(root, budget=budget, logs=logs)
 
 
 def _watchdog_reaper_ps_fetch():
@@ -7647,6 +7820,10 @@ def cmd_watchdog(args):
                     # window that never got its label) — wired = on, same
                     # network-free-tests convention.
                     gkorphan_handoff_fetch=_watchdog_gkorphan_handoff_fetch,
+                    # Job 50 (#1056 L2 (h)) — blind-label-flip revert automat.
+                    # Wired = on, full-authority gate inside the job; same
+                    # network-free-tests convention as jobs 8/11/31/36.
+                    bounceflip_fetch=_watchdog_bounceflip_fetch,
                     # Job 37 (#776) — runaway shadow-ugrep OS-process reaper.
                     # Runs on EVERY box every cycle (a runaway ugrep can orphan
                     # anywhere — subdev #774). Gated on these seams being wired
@@ -8622,6 +8799,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _ops_wait_reason as _ops_wait_reason,
     _partition_workable as _partition_workable,
     _count_bounce as _count_bounce,
+    count_bounce_all as _count_bounce_all,
     _acceptance_present_set as _acceptance_present_set,
     _question_map_u_supplement as _question_map_u_supplement,
     _comment_carries_question as _comment_carries_question,

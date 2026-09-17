@@ -75,6 +75,7 @@ EXPECTED_STANDALONE = [
     "conformance_check",                # (34) — #535 per-box conformance check
     "conformance_heartbeat_check",      # (35) — #543 central dead-box detector
     "gk_orphan_marker_sweep",           # (36) — #551 orphaned gk hand-off marker
+    "bounce_flip_revert",               # (50) — #1056 L2 (h) blind-label-flip revert (sibling of 36)
     "shadow_ugrep_reaper",              # (37) — #776 runaway shadow-ugrep reaper
     "heavy_build_reaper",               # (38) — #778 heavy-build-toolchain reaper
     "resource_guard_verify",            # (39) — #775 shared-stream resource-guard verify
