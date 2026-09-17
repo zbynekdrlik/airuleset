@@ -128,9 +128,13 @@ class TestRecoveryExempt(unittest.TestCase):
         # `goal-arm` (a DECLARED managed window's post-reboot arm = a session
         # revival, the same class as resume/compact). #1034 adds `wake-parked`
         # (waking a session parked on the usage-limit auto-continue banner after
-        # a claudy account switch — the same session-revival class).
-        self.assertEqual(ng.RECOVERY_NUDGE_KINDS,
-                         frozenset({"resume", "compact", "goal-arm", "wake-parked"}))
+        # a claudy account switch — the same session-revival class). #1063 adds
+        # `goal-disarm` (the `/goal clear` #522 question-repoke backstop — a
+        # damage-control action exempt from the switch/floor/total cap).
+        self.assertEqual(
+            ng.RECOVERY_NUDGE_KINDS,
+            frozenset({"resume", "compact", "goal-arm", "wake-parked",
+                       "goal-disarm"}))
         self.assertEqual(ng.RECOVERY_NUDGE_KINDS, tio.RECOVERY_NUDGE_KINDS)
 
     def test_recovery_does_not_count_for_the_total_cap(self):

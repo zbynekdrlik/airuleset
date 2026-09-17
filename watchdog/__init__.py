@@ -2753,10 +2753,14 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           byte-identical re-pokes with NO genuine human answer between them, then
           — only on an ARMED pane, recent-human-gated and 24h/2 capped — types
           `/goal clear` (the symmetric inverse of the arm keystroke, via the same
-          verified-delivery primitives). A landed disarm writes a
-          `goal_disarmed_q` veto that job 20's `goal_dark_watch` honours (no
-          disarm<->re-arm ping-pong) until a genuine human answer lands after it.
-          See `goal_question_repoke_watch` in `watchdog/goal.py`.
+          verified-delivery primitives). The disarm rides the `goal-disarm`
+          RECOVERY nudge (#1063) — a damage-control action exempt from the #1023
+          per-kind kill switch / floor / total cap, so it fires even when every
+          machine nudge is staged OFF (before #1063 it rode the machine kind
+          `goal-sweep` and was silently disabled fleet-wide). A landed disarm
+          writes a `goal_disarmed_q` veto that job 20's `goal_dark_watch` honours
+          (no disarm<->re-arm ping-pong) until a genuine human answer lands after
+          it. See `goal_question_repoke_watch` in `watchdog/goal.py`.
       (34) (only when `conformance_root` is given) PER-BOX CONFORMANCE CHECK
           (#535) — a DAILY self-check that this box's airuleset config/repo has
           not drifted from the fleet, across four PURE deciders (True conformant /

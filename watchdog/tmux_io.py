@@ -132,7 +132,19 @@ MACHINE_NUDGE_KINDS = frozenset({
 # "role" in `cli_concurrency.resolve_concurrency`); see `watchdog/goal.py`
 # `deliver_goal`. Its own recent-human + tri-state-armed + boundary + per-sid
 # rate-floor gates bound it, exactly as the other recovery nudges keep theirs.
-RECOVERY_NUDGE_KINDS = frozenset({"resume", "compact", "goal-arm", "wake-parked"})
+#
+# #1063 (owner incident, 2026-09-17) — `goal-disarm`: the `/goal clear` disarm
+# keystroke the #522 question-repoke backstop (Job 33) types into a `/goal` loop
+# STUCK re-poking an unanswered `❓ NEEDS YOU`. It is a session RECOVERY / damage-
+# control action, NOT a prompt interruption — it must fire even when every owner
+# cadence control is off. Before #1063 it rode `_send_goal_verified`'s DEFAULT
+# machine nudge `goal-sweep`, which the per-kind staging has OFF on every box, so
+# the backstop was silently disabled fleet-wide and a re-poke storm ran 2h45m.
+# As a recovery kind it is now exempt from the kill switch, the per-kind floor
+# and the total cap; its OWN bounds stay (a proven 5-streak, the recent-human
+# veto, and the 24h/2 attempt cap in `goal_question_repoke_watch`).
+RECOVERY_NUDGE_KINDS = frozenset(
+    {"resume", "compact", "goal-arm", "wake-parked", "goal-disarm"})
 
 # Every threaded nudge identity — the stageable PRIORITY set plus the always-on
 # RECOVERY set. A `nudge=` threaded by any delivery site is one of these.
@@ -225,7 +237,7 @@ def nudges_enabled(kind=None, home=None):
     """True iff a machine nudge of `kind` may be delivered (#1023 per-kind
     staging). PRIORITY kinds (every MACHINE_NUDGE_KINDS member) default OFF (state
     file absent / a kind not enabled) — the owner enables them one at a time.
-    RECOVERY kinds (RECOVERY_NUDGE_KINDS = resume/compact/goal-arm/wake-parked) are
+    RECOVERY kinds (RECOVERY_NUDGE_KINDS = resume/compact/goal-arm/wake-parked/goal-disarm) are
     ALWAYS-ON: they revive a dead/blocked session (a 401/limit revival, /compact),
     so the kill switch never suppresses them. `kind=None` (a gated keystroke fired
     with NO nudge identity — a programming error the AST contract test catches)
@@ -284,7 +296,7 @@ def _keystroke_suppressed(kind, user_authored, nudge=None):
     nudge) always passes. Only a GATED (machine-nudge delivery) keystroke is
     withheld, and only when `nudges_enabled(nudge)` is False: a PRIORITY nudge the
     owner has NOT staged on (#1023 per-kind staging) — a RECOVERY nudge identity
-    (RECOVERY_NUDGE_KINDS = resume/compact/goal-arm/wake-parked) is always-on and never
+    (RECOVERY_NUDGE_KINDS = resume/compact/goal-arm/wake-parked/goal-disarm) is always-on and never
     withheld. A gated keystroke with NO `nudge` identity (a programming error the
     contract test catches) FAILS SAFE to SUPPRESS (`nudges_enabled(None)` is
     False, BLOCKER-2) — never any-kind-on. Goes through `watchdog.nudges_enabled()`

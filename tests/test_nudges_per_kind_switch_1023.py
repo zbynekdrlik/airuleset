@@ -194,8 +194,13 @@ class TestRecoveryAlwaysOn(unittest.TestCase):
         # the always-on recovery set — a session revival, never machine-staged.
         # #1034 adds `wake-parked` (waking a session parked on the usage-limit
         # auto-continue banner after a claudy account switch) — same class.
-        self.assertEqual(wd.RECOVERY_NUDGE_KINDS,
-                         frozenset({"resume", "compact", "goal-arm", "wake-parked"}))
+        # #1063 adds `goal-disarm` (the `/goal clear` #522 question-repoke
+        # backstop) — a damage-control action that must fire with machine kinds
+        # OFF; before #1063 it rode the machine kind `goal-sweep` and was dead.
+        self.assertEqual(
+            wd.RECOVERY_NUDGE_KINDS,
+            frozenset({"resume", "compact", "goal-arm", "wake-parked",
+                       "goal-disarm"}))
         self.assertTrue(wd.MACHINE_NUDGE_KINDS.isdisjoint(wd.RECOVERY_NUDGE_KINDS))
         # ALL_NUDGE_KINDS is the union — every threaded identity is known
         self.assertEqual(wd.ALL_NUDGE_KINDS,
