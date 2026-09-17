@@ -418,6 +418,8 @@ from watchdog.transcripts import (  # noqa: E402
     encode_project_dir as encode_project_dir,
     find_active_transcript as find_active_transcript,
     _iter_jsonl_tail as _iter_jsonl_tail,
+    reset_transcript_cache as reset_transcript_cache,       # #1055 per-sweep memo reset
+    transcript_read_stats as transcript_read_stats,         # #1055 journal summary source
     _entry_text as _entry_text,
     transcript_last_error as transcript_last_error,
     _submit_confirmed as _submit_confirmed,
@@ -3096,6 +3098,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
 
     state = load_state(state_path)
     logs = _FlushList(log_fn)
+    # #1055 P1 — clear the bounded-tail memo + counters ONCE per sweep so this
+    # sweep re-reads fresh; the summary line below reports what it saved.
+    reset_transcript_cache()
     stalled = set()
     owner_by_sid = {}                   # session id -> tmux owner, for job 5's ✅ @mention
     owner_by_cwd = {}                   # pane cwd -> tmux owner, job 5's recovery path
@@ -5218,6 +5223,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                 logs.append("sweep budget: %ds of %ds at %s"
                             % (int(_elapsed), SWEEP_SOFT_CAP_S, _label))
                 _budget_logged = True
+
+    # #1055 P1 — one per-sweep summary of the bounded transcript tail reads, so
+    # the CPU/RSS win is readable from `journalctl` on gk alongside the owner's
+    # `Consumed … CPU time` + RSS metric (the mechanism-level companion to it).
+    _tr = transcript_read_stats()
+    logs.append("transcript reads: %d files, %d bytes read, %d memo hits"
+                % (_tr["files"], _tr["bytes"], _tr["hits"]))
 
     save_state(state_path, state)
     return logs
