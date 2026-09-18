@@ -70,7 +70,7 @@ jobs:
           jq --version
 
       - name: Install Python test tooling
-        run: pip install --no-input pytest==8.3.2 ruff==0.16.2
+        run: pip install --no-input pytest==8.3.2 pytest-xdist==3.8.0 ruff==0.16.2
 
       - name: Ruff lint
         run: ruff check .
@@ -126,7 +126,15 @@ jobs:
           python3 scripts/ci_pytest_args.py .github/box-bound-tests.txt > pytest-selection.args
           mapfile -t ARGS < pytest-selection.args
           printf 'pytest selection arg: %s\n' "${ARGS[@]}"
+          # #874: the 16k-test gate lived at the 20-min cap serially and then
+          # crossed it. Run it across the runner's 4 vCPUs with pytest-xdist.
+          # --dist loadfile keeps every test of one module on ONE worker, so a
+          # file's shared per-module state never races across workers (the
+          # suite's conftest already isolates HOME/TMPDIR per worker + per test).
+          # timeout-minutes stays 20 — the parallelism gives headroom, it is not
+          # a band-aid (no-timeout-band-aids.md).
           python3 -m pytest tests/ "${ARGS[@]}" \
+            -n 4 --dist loadfile \
             -p no:cacheprovider -o addopts="" -q --junitxml=junit.xml
 
       - name: Collected-count guard (a no-op test job is banned)

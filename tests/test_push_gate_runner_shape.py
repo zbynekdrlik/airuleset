@@ -40,17 +40,19 @@ def _ci_pytest_args():
 
 class TestPassAArgvMatchesCI(unittest.TestCase):
     """Pass A's subprocess argv must be the EXACT CI argv: python3 -m pytest
-    tests/ <deny-list args> -n auto -p no:cacheprovider -o addopts= -q.
+    tests/ <deny-list args> -n 4 --dist loadfile -p no:cacheprovider -o addopts= -q.
     Drift-proof: compared against scripts/ci_pytest_args.py run on the real
-    deny-list. Switched from serial to -n auto after measuring 45+ min serial
-    on a loaded dev1 (integration cycle 5, #875)."""
+    deny-list. Switched serial -> -n auto (integration cycle 5, #875) -> -n 4
+    --dist loadfile (#874) to mirror the CI gate exactly, so a parallel-only red
+    (a cross-worker file collision) is caught locally, not first on main."""
 
     def test_pass_a_argv_matches_ci(self):
         ci_args = _ci_pytest_args()
         expected_argv = [
             sys.executable, "-m", "pytest", "tests/",
             *ci_args,
-            "-n", "auto",
+            "-n", "4",
+            "--dist", "loadfile",
             "-p", "no:cacheprovider",
             "-o", "addopts=",
             "-q",

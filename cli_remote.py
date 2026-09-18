@@ -1682,7 +1682,12 @@ def _run_pass_a(repo_dir):
         argv = [
             sys.executable, "-m", "pytest", "tests/",
             *deny_args,
-            "-n", "auto",
+            # #874: mirror the CI gate EXACTLY (-n 4 --dist loadfile) so a
+            # parallel-only red (a cross-worker file collision) is caught in the
+            # local push gate, not first on main. loadfile keeps a module's
+            # tests on one worker.
+            "-n", "4",
+            "--dist", "loadfile",
             "-p", "no:cacheprovider",
             "-o", "addopts=",
             "-q",
