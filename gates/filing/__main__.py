@@ -35,29 +35,62 @@ from gates.filing.caps import (
 )
 from gates.filing.presence import is_away, _dismissal_word, _has_recent_owner_quote
 
-# #842 worker (subagent) create-shape detection -- a per-LINE match, mirroring
-# the bash hook's `grep -qE` (grep scans line by line; re.MULTILINE gives `^`/`$`
-# the same line-boundary meaning). Horizontal-space classes ([ \t]) match
-# `[[:space:]]` within a single line (grep never sees a newline inside a line).
-_WORKER_CREATE_RE = re.compile(r"gh[ \t]+issue[ \t]+create")
-_WORKER_API_RE = re.compile(r"gh[ \t]+api")
-_WORKER_POST_RE = re.compile(
-    r"(-X[ \t]*POST|--method[ \t]+POST|-XPOST|(^|\s)-f(\s|$)|(^|\s)-F(\s|$)|"
-    r"--field|--raw-field|--input)", re.MULTILINE)
+# #842 worker (subagent) create-shape detection. #1070 item 3: match ONLY
+# genuine issue-CREATE shapes -- `gh issue create`, a `gh api graphql …
+# createIssue` mutation, or a POST/field write to the `/repos/<o>/<r>/issues`
+# COLLECTION (terminal `issues`). A REST comment POST (`gh api …/issues/<N>/
+# comments`) or a label/edit PATCH (`gh api …/issues/<N>`) is NOT a filing --
+# the #1080 FP: a gk advisory lane's only path to post a PR comment under the
+# hourly GraphQL exhaustion is REST, and the pre-#1070 broad `issues` +
+# field-flag match killed it. Scanned per top-level segment so a compound
+# command's field flag can never leak across `&&`/`;`/`|` onto an unrelated
+# `/issues` mention (the whole-string regex hazard the old shape had).
+_API_ISSUES_COLLECTION_RE = re.compile(
+    r"^(?:https?://api\.github\.com/)?/?repos/[^/\s]+/[^/\s]+/issues(?:\?.*)?$")
+_API_FIELD_FLAGS = frozenset({"-f", "-F", "--field", "--raw-field", "--input"})
+
+
+def _api_field_or_post(tk):
+    """True when a `gh api` segment carries a POST/field write signal -- gh
+    implicitly POSTs when any field flag (-f/-F/--field/--raw-field/--input) is
+    present, or when POST is explicit (-X POST / --method POST / -XPOST)."""
+    for i, t in enumerate(tk):
+        if t in _API_FIELD_FLAGS or t.startswith(
+                ("--field=", "--raw-field=", "--input=")):
+            return True
+        if t in ("-X", "--method") and i + 1 < len(tk) \
+                and tk[i + 1].upper() == "POST":
+            return True
+        if re.match(r"^-X\s*POST$", t, re.I) or t.upper() == "-XPOST":
+            return True
+    return False
+
+
+def _api_targets_issues_collection(tk):
+    """True when a `gh api` segment's PATH arg is the /repos/<o>/<r>/issues
+    COLLECTION (terminal `issues`), not a `/issues/<N>[/...]` sub-resource
+    (a comment POST / a label PATCH)."""
+    return any(_API_ISSUES_COLLECTION_RE.match(t) for t in tk)
 
 
 def _is_worker_filing(cmd):
-    """True when `cmd` is a genuine issue-CREATE shape (gh issue create / a
-    `gh api …/issues` WRITE / a `gh api graphql … createIssue` mutation) --
-    VERBATIM logic from the bash #842 worker block. A bare GET read has none of
-    the POST signals and returns False."""
-    if _WORKER_CREATE_RE.search(cmd):
-        return True
-    if _WORKER_API_RE.search(cmd):
-        if "createIssue" in cmd:
+    """True when `cmd` is a genuine issue-CREATE shape: `gh issue create`, a
+    `gh api graphql … createIssue` mutation, or a POST/field write to the
+    `/repos/<o>/<r>/issues` COLLECTION. #1070 item 3: a REST comment POST
+    (`gh api …/issues/<N>/comments`) and a label/edit PATCH (`gh api
+    …/issues/<N>`) return False -- they are not filings. A bare GET read has no
+    field/POST signal and also returns False."""
+    for seg in split_top_level(cmd):
+        tk = strip_prefix(tokens_of(seg))
+        if not tk:
+            continue
+        if is_issue_create(tk):
             return True
-        if "issues" in cmd and _WORKER_POST_RE.search(cmd):
-            return True
+        if tk[0] == "gh" and "api" in tk[:2]:
+            if "createIssue" in seg:
+                return True
+            if _api_targets_issues_collection(tk) and _api_field_or_post(tk):
+                return True
     return False
 
 
