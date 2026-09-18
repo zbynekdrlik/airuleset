@@ -82,7 +82,8 @@ set -euo pipefail
 MODE="${1:-ready-for-review}"
 
 # _iso_epoch <iso-ts> -> the ISO timestamp as a Unix epoch, or "" when the
-# value is EMPTY or a string GNU `date -d` rejects. This exists because
+# value is EMPTY, WHITESPACE-ONLY, or a string GNU `date -d` rejects. This
+# exists because
 # `date -u -d "" +%s` does NOT fail — GNU date treats an empty -d value as
 # TODAY 00:00 UTC (rc 0). Calling `date` directly on the workflow's
 # documented empty ("unresolvable") RFR/commit value therefore produced a
