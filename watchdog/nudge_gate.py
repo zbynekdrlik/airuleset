@@ -61,7 +61,8 @@ OR BOTH bounds hold (checked via the shared `_total_cap_block` predicate that
   dominated by one kind (gk-infra, `queue-arrival`) was otherwise bounded only by
   the 60-min per-kind floor and delivered up to once an hour — the owner's word is
   "in TOTAL, across ALL kinds" (ROZHODNUTÉ "3", 2026-09-17), so self-repeats count.
-  Recovery kinds are excluded from the scan. The batch path (`batch_eligible`) is the SIBLING gate: it returns [] while
+  Recovery kinds are excluded from the scan. The batch path (`batch_eligible`)
+  is the SIBLING gate: it returns [] while
   the cap is closed, so a second batch never leaks a second interruption; when the
   cap is open it composes every floor-eligible kind into ONE keystroke — batching
   is how multiple due kinds SHARE the single hourly interruption.
@@ -335,8 +336,10 @@ def floor_hold_reason(state, sid, category, now):
       - `"hold:floor (<kind>, <mm> min since last send)"` — THIS kind's own
         per-kind floor. "last SEND" not "confirmed" (#1023 reopen): the mark
         fires on any DELIVERED keystroke (confirmed OR delivered-unconfirmed);
-      - `"hold:total-cap (<other-kind> delivered <mm> min ago)"` — a DIFFERENT
-        priority kind delivered within the total gap.
+      - `"hold:total-cap (<kind> delivered <mm> min ago)"` — the MOST-RECENT
+        priority kind delivered within the total gap; since fix-forward 2 this
+        MAY be THIS kind's OWN last send (a same-kind repeat in the 60-179 min
+        band the floor has already elapsed for), not only a DIFFERENT kind.
     Riders render this verbatim (`-> %s`), so the journal token is the gate's, not
     a hardcoded one. Fail-safe `"hold:floor (<kind>, floor not elapsed)"` when no
     ts is readable (never claim a number we cannot compute). A recovery kind is

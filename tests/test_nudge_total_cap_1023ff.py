@@ -269,9 +269,10 @@ class TestSameKindCountsInTotalCap(unittest.TestCase):
         self.assertTrue(ng.gate_ok(st, "s", "resume", NOW + 150 * MIN))
 
     def test_batch_same_kind_only_still_blocked_by_the_cap(self):
-        # the batch path already passed exclude_category=None (never holed), but
-        # lock that a lone queue-arrival delivery keeps a NEW batch closed for the
-        # full 3 h, not just the 60-min floor.
+        # the batch path already counted every kind (it never excluded the
+        # deciding kind), so it was never holed — but lock that a lone
+        # queue-arrival delivery keeps a NEW batch closed for the full 3 h, not
+        # just the 60-min floor.
         st = {}
         ng.mark_sent(st, "s", "queue-arrival", NOW)
         self.assertEqual(ng.batch_eligible(st, "s", NOW + 150 * MIN), [])
