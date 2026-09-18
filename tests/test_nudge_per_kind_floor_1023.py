@@ -50,8 +50,12 @@ class TestPerKindFloor(unittest.TestCase):
         ng.mark_sent(st, "sess-a", "queue-arrival", NOW)
         self.assertFalse(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + MIN45),
                          "a SAME-kind nudge within 60 min must be suppressed")
-        # past the hour it is allowed again
-        self.assertTrue(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + HOUR))
+        # #1023 fix-forward 2 (owner "3", 2026-09-17): the 3 h total cap now
+        # counts the SAME kind too, so past the 60-min floor the repeat is STILL
+        # held (by the total cap) — allowed only past the 3 h total gap.
+        self.assertFalse(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + HOUR),
+                         "at 1 h the same kind is held by the 3 h total cap")
+        self.assertTrue(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + 181 * 60))
 
     def test_different_kind_at_45min_is_suppressed_by_total_cap(self):
         # #1023 fix-forward: a DIFFERENT kind at 45 min IS suppressed by the

@@ -100,17 +100,26 @@ class TestGateOk(unittest.TestCase):
         st = {}
         ng.mark_sent(st, "sess-a", "u-freshness", NOW)
         self.assertFalse(ng.gate_ok(st, "sess-a", "u-freshness", NOW + 1800))
-        self.assertTrue(ng.gate_ok(st, "sess-a", "u-freshness", NOW + HOUR))
+        # #1023 fix-forward 2 (owner "3"): the 3 h total cap counts the SAME kind
+        # too, so u-freshness is STILL held at 1 h (its own 1 h floor elapsed but
+        # the total cap has not) — allowed only past the 3 h total gap.
+        self.assertFalse(ng.gate_ok(st, "sess-a", "u-freshness", NOW + HOUR))
+        self.assertTrue(ng.gate_ok(st, "sess-a", "u-freshness", NOW + 181 * 60))
 
     def test_u_freshness_env_raise_extends_the_block(self):
+        # #1023 fix-forward 2: the u-freshness cadence floor still extends via env
+        # (max() semantics preserved) — but the extension is only OBSERVABLE ABOVE
+        # the 3 h total cap: at/below 3 h the total cap dominates. env = 4 h -> the
+        # per-kind floor is 4 h, so it is held at 3.5 h (past the total cap, by the
+        # floor) and allowed only at 4 h.
         st = {}
         with m.patch.dict(os.environ,
-                          {"AIRULESET_U_RECONCILE_CADENCE_S": str(2 * HOUR)}):
+                          {"AIRULESET_U_RECONCILE_CADENCE_S": str(4 * HOUR)}):
             ng.mark_sent(st, "sess-a", "u-freshness", NOW)
             self.assertFalse(ng.gate_ok(st, "sess-a", "u-freshness",
-                                        NOW + HOUR + 60))
+                                        NOW + 3 * HOUR + 1800))
             self.assertTrue(ng.gate_ok(st, "sess-a", "u-freshness",
-                                       NOW + 2 * HOUR))
+                                       NOW + 4 * HOUR))
 
     def test_different_kind_deferred_by_total_cap_1023ff(self):
         # #1023 fix-forward: a DIFFERENT kind IS held by the restored cross-kind
@@ -126,14 +135,17 @@ class TestGateOk(unittest.TestCase):
         self.assertTrue(ng.gate_ok(st, "sess-a", "release-gap", NOW + 3 * HOUR))
 
     def test_same_kind_deferred_within_the_hour_1023(self):
-        """#1023: the SAME kind is floored — a second delivery of the SAME kind
-        within 60 min of the last confirmed one is suppressed (the burst fix)."""
+        """#1023: the SAME kind is floored within 60 min (the burst fix). #1023
+        fix-forward 2 (owner "3"): the 3 h total cap now counts the SAME kind too,
+        so past the 60-min floor the repeat is STILL held (by the total cap) —
+        allowed only past the 3 h total gap."""
         st = {}
         ng.mark_sent(st, "sess-a", "queue-arrival", NOW)
         self.assertFalse(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + 45 * 60))
         self.assertFalse(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + 59 * 60))
-        # at exactly 1 h it passes
-        self.assertTrue(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + HOUR))
+        # at 1 h the per-kind floor has elapsed but the 3 h total cap still holds
+        self.assertFalse(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + HOUR))
+        self.assertTrue(ng.gate_ok(st, "sess-a", "queue-arrival", NOW + 181 * 60))
 
     def test_floor_is_per_session(self):
         st = {}

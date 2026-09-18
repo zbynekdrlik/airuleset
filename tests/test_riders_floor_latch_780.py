@@ -109,11 +109,13 @@ class _QAOrch(unittest.TestCase):
         self.assertEqual(qrecs[self.sid]["base"], [1])   # accumulate — not advanced
 
     def test_delta_after_floor_nudges_accumulated_members(self):
-        # floor elapsed (last confirmed > 60 min ago); two members accumulated ->
-        # ONE nudge naming both, base promoted to the full union on delivery.
+        # #1023 fix-forward 2 (owner "3"): the 3 h total cap now counts the SAME
+        # kind, so the accumulated nudge fires only once the last queue-arrival
+        # send is past the 3 h total gap (not merely past the 60-min floor); two
+        # members accumulated -> ONE nudge naming both, base promoted on delivery.
         qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}
         state = {}
-        ng.mark_sent(state, self.sid, "queue-arrival", NOW - FLOOR - 100)
+        ng.mark_sent(state, self.sid, "queue-arrival", NOW - 3 * FLOOR - 100)
         tmux = self._tmux()
         logs = self._run(NOW, qrecs, lambda cwd: [1, 2, 3], tmux,
                          handled=set(), state=state)
@@ -126,9 +128,11 @@ class _QAOrch(unittest.TestCase):
         self.assertEqual(state["nudge_cadence"][self.sid]["queue-arrival"], NOW)
 
     def test_accumulation_across_the_floor_end_to_end(self):
-        # #1023 acceptance: deliver at t0 (no prior floor), a new arrival at
-        # t0+45min is HELD (hold:floor, base kept), and at t0+61min the single
-        # post-floor nudge names the accumulated member.
+        # #1023 acceptance, updated for fix-forward 2 (owner "3"): deliver at t0
+        # (no prior floor); a new arrival at t0+45min is HELD (hold:floor, base
+        # kept); at t0+61min it is STILL held — now by the 3 h total cap, which
+        # counts the SAME kind (hold:total-cap, base kept); only past the 3 h
+        # total gap does the single accumulated nudge name the member.
         qrecs = {self.sid: {"base": [1], "first_seen": NOW - DAY}}
         state = {}
         # t0: first arrival delivers (fast-wake) and stamps the floor.
@@ -140,10 +144,16 @@ class _QAOrch(unittest.TestCase):
                          self._tmux(), handled=set(), state=state)
         self.assertTrue(any("hold:floor" in ln for ln in logs), logs)
         self.assertEqual(qrecs[self.sid]["base"], [1, 2])   # accumulating
-        # t0+61min: floor elapsed -> the post-floor nudge names #3.
-        tmux = self._tmux()
+        # t0+61min: the per-kind floor has elapsed but the 3 h total cap holds
+        # this SAME-kind repeat (hold:total-cap), base still kept.
         logs = self._run(NOW + 61 * 60, qrecs, lambda cwd: [1, 2, 3],
-                         tmux, handled=set(), state=state)
+                         self._tmux(), handled=set(), state=state)
+        self.assertTrue(any("hold:total-cap" in ln for ln in logs), logs)
+        self.assertEqual(qrecs[self.sid]["base"], [1, 2])   # still accumulating
+        # t0+181min: past the 3 h total cap -> the post-floor nudge names #3.
+        tmux = self._tmux()
+        self._run(NOW + 181 * 60, qrecs, lambda cwd: [1, 2, 3],
+                  tmux, handled=set(), state=state)
         self.assertIn("#3", "".join(tmux.typed_texts()))
         self.assertEqual(qrecs[self.sid]["base"], [1, 2, 3])
 

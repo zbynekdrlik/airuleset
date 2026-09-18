@@ -55,9 +55,14 @@ OR BOTH bounds hold (checked via the shared `_total_cap_block` predicate that
   (>= 1 h); `u-freshness` the owner's `_u_cadence()` strop and `goal-guard` a 24 h
   floor keep their LONGER intent via `max()`.
 
-  CROSS-KIND TOTAL CAP (#913, restored) — no OTHER priority kind delivered to
-  this sid within `_total_gap()` (>= 3 h). Recovery kinds are excluded from the
-  scan. The batch path (`batch_eligible`) is the SIBLING gate: it returns [] while
+  CROSS-KIND TOTAL CAP (#913, restored; #1023 fix-forward 2) — NO priority kind
+  of ANY identity, INCLUDING the deciding kind's own last send, delivered to this
+  sid within `_total_gap()` (>= 3 h). The cap counts the SAME kind too: a pane
+  dominated by one kind (gk-infra, `queue-arrival`) was otherwise bounded only by
+  the 60-min per-kind floor and delivered up to once an hour — the owner's word is
+  "in TOTAL, across ALL kinds" (ROZHODNUTÉ "3", 2026-09-17), so self-repeats count.
+  Recovery kinds are excluded from the scan. The batch path (`batch_eligible`)
+  is the SIBLING gate: it returns [] while
   the cap is closed, so a second batch never leaks a second interruption; when the
   cap is open it composes every floor-eligible kind into ONE keystroke — batching
   is how multiple due kinds SHARE the single hourly interruption.
@@ -270,12 +275,17 @@ def _gate_ts(v, now):
     return None if ts is None or ts > now else ts
 
 
-def _total_cap_block(sess, exclude_category, now):
-    """The cross-kind TOTAL cap (#913, restored #1023 fix-forward): return the
-    `(category, ts)` of the MOST-RECENT OTHER priority kind delivered to this
-    session within `_total_gap()`, or None when the cap is open. `exclude_category`
-    (the kind being decided, or None for the batch path) is skipped so a kind
-    never blocks itself via the cap — its OWN repeat is the per-kind floor's job.
+def _total_cap_block(sess, now):
+    """The cross-kind TOTAL cap (#913, restored #1023 fix-forward; counts the
+    SAME kind since fix-forward 2): return the `(category, ts)` of the MOST-RECENT
+    priority kind delivered to this session within `_total_gap()`, or None when
+    the cap is open. Every priority kind counts, INCLUDING the kind being decided
+    — the owner's ruling is "at most ONE priority nudge per pane per 3 h in TOTAL,
+    across ALL kinds" (ROZHODNUTÉ "3", 2026-09-17). The former `exclude_category`
+    skip (a kind never blocked itself) was a hole once the total gap became 3 h
+    while the per-kind floor stayed 1 h: a pane dominated by one kind delivered
+    hourly. `gate_ok` still checks the per-kind floor FIRST, so a sub-60-min
+    same-kind repeat is reported as `hold:floor`, not `hold:total-cap`.
     RECOVERY kinds are skipped: a revival is not a prompt interruption and never
     counts toward the cap (they never call `mark_sent` in production either, so
     this is a defensive belt on top of that). A FUTURE-skewed / non-numeric ts is
@@ -284,7 +294,7 @@ def _total_cap_block(sess, exclude_category, now):
     gap = _total_gap()
     blocker = None
     for cat, raw in sess.items():
-        if cat == exclude_category or cat in RECOVERY_NUDGE_KINDS:
+        if cat in RECOVERY_NUDGE_KINDS:
             continue
         ts = _gate_ts(raw, now)
         if ts is not None and now - ts < gap and (blocker is None or ts > blocker[1]):
@@ -300,8 +310,11 @@ def gate_ok(state, sid, category, now):
       - PER-KIND FLOOR (#1023): the last SEND of THIS kind (a DELIVERED keystroke,
         confirmed OR delivered-unconfirmed) is at least `_category_floor(category)`
         old (or absent);
-      - CROSS-KIND TOTAL CAP (#913, restored): NO OTHER priority kind was
-        delivered to this sid within `_total_gap()` (`_total_cap_block`).
+      - CROSS-KIND TOTAL CAP (#913, restored; counts the SAME kind since fix-
+        forward 2): NO priority kind of ANY identity — including this kind's own
+        last send — was delivered to this sid within `_total_gap()`
+        (`_total_cap_block`). The per-kind floor is checked FIRST, so a sub-60-min
+        same-kind repeat is `hold:floor`; the cap catches the 60-179 min band.
     Used by individual riders; the batch path (`batch_eligible()`) is the sibling
     gate that applies the SAME total cap. Fail-safe ALLOWS on any malformed state
     (never suppress a legit nudge) — including a FUTURE-skewed / corrupt-huge
@@ -312,7 +325,7 @@ def gate_ok(state, sid, category, now):
     last_cat = _gate_ts(sess.get(category), now)
     if last_cat is not None and now - last_cat < _category_floor(category):
         return False                              # per-kind floor
-    if _total_cap_block(sess, category, now) is not None:
+    if _total_cap_block(sess, now) is not None:
         return False                              # cross-kind total cap
     return True
 
@@ -323,8 +336,10 @@ def floor_hold_reason(state, sid, category, now):
       - `"hold:floor (<kind>, <mm> min since last send)"` — THIS kind's own
         per-kind floor. "last SEND" not "confirmed" (#1023 reopen): the mark
         fires on any DELIVERED keystroke (confirmed OR delivered-unconfirmed);
-      - `"hold:total-cap (<other-kind> delivered <mm> min ago)"` — a DIFFERENT
-        priority kind delivered within the total gap.
+      - `"hold:total-cap (<kind> delivered <mm> min ago)"` — the MOST-RECENT
+        priority kind delivered within the total gap; since fix-forward 2 this
+        MAY be THIS kind's OWN last send (a same-kind repeat in the 60-179 min
+        band the floor has already elapsed for), not only a DIFFERENT kind.
     Riders render this verbatim (`-> %s`), so the journal token is the gate's, not
     a hardcoded one. Fail-safe `"hold:floor (<kind>, floor not elapsed)"` when no
     ts is readable (never claim a number we cannot compute). A recovery kind is
@@ -334,7 +349,7 @@ def floor_hold_reason(state, sid, category, now):
     if last is not None and now - last < _category_floor(category):
         return "hold:floor (%s, %d min since last send)" % (
             category, int((now - last) // 60))
-    blocker = _total_cap_block(sess, category, now)
+    blocker = _total_cap_block(sess, now)
     if blocker is not None:
         bcat, bts = blocker
         return "hold:total-cap (%s delivered %d min ago)" % (
@@ -403,7 +418,7 @@ def batch_eligible(state, sid, now):
     batch, the individual riders' own gates still work)."""
     sess = _session(state, sid)
     # Cross-kind total cap: a recent priority delivery blocks the WHOLE batch.
-    if _total_cap_block(sess, None, now) is not None:
+    if _total_cap_block(sess, now) is not None:
         return []
     # Collect categories whose per-kind floor has expired.
     eligible = []
