@@ -17,14 +17,16 @@ leaves, no watchdog/notify), well under the PreToolUse budget.
 Bypass: `# airuleset:command-shadow-ok <reason>` anywhere in the written
 content -- allowed and logged to ~/.claude/command-shadow-gate.log.
 
-Exit 2 = block, reason on STDERR (the model-visible deny channel) AND stdout
-(a terminal run reads stdout). STDLIB ONLY at import.
+Exit 2 = block, reason on STDERR only (the model-visible deny channel); the
+adapter runs this module with ``1>&2`` (the emit_block_stderr sibling shape used
+by testskips/pushtest), so a stdout write too would double-render. STDLIB ONLY
+at import.
 """
 import os
 import re
 import time
 
-from gates import allow, emit_block, read_payload
+from gates import allow, emit_block_stderr, read_payload
 
 _COMMAND_RE = re.compile(r"(?:^|/)\.claude/commands/([^/]+)\.md$")
 _SKILL_RE = re.compile(r"(?:^|/)\.claude/skills/([^/]+)/SKILL\.md$")
@@ -52,13 +54,27 @@ def _builtins_lower():
         from cli_mdreview_audit import CLAUDE_CODE_BUILTIN_COMMANDS
         return {c.lower() for c in CLAUDE_CODE_BUILTIN_COMMANDS}
     except Exception:
+        # Fallback kept in sync with cli_mdreview_audit.CLAUDE_CODE_BUILTIN_COMMANDS
+        # (the SSOT). Extracted from the CC 2.1.268 bundle command registry —
+        # names + aliases, user-facing set. If the SSOT import ever breaks, this
+        # keeps the mechanical block alive.
         return {
-            "resume", "clear", "compact", "help", "model", "status", "login",
-            "logout", "config", "memory", "review", "cost", "doctor", "init",
-            "bug", "agents", "mcp", "vim", "terminal-setup", "permissions",
-            "hooks", "plugins", "export", "rewind", "tasks", "workflows",
-            "effort", "fast", "goal", "loop", "list-agents", "add-dir",
-            "context", "usage", "stats",
+            "add-dir", "advisor", "agents", "allowed-tools", "android", "app",
+            "artifacts", "background", "bashes", "bg", "branch",
+            "break-reminder", "breaks", "bug", "checkpoint", "clear",
+            "compact", "config", "context", "continue", "copy", "cost",
+            "desktop", "diff", "downtime", "effort", "exit", "export", "fast",
+            "feedback", "focus", "fork", "goal", "help", "hooks", "ide",
+            "import", "init", "insights", "install", "ios", "keybindings",
+            "list-agents", "login", "logout", "loops", "marketplace", "mcp",
+            "memory", "memory-pause", "mobile", "model", "name", "pause-memory",
+            "peers", "permissions", "plan", "plugin", "plugins",
+            "privacy-settings", "quit", "rc", "recap", "remote",
+            "remote-control", "rename", "restart", "resume", "review",
+            "rewind", "session", "settings", "share", "skill-doctor", "skills",
+            "stats", "status", "stop", "tasks", "teleport", "terminal-setup",
+            "theme", "toggle-memory", "undo", "update", "upgrade", "usage",
+            "version", "voice", "wellbeing", "workflows",
         }
 
 
@@ -125,7 +141,10 @@ def main():
     blocked, reason = classify(file_path, content)
     if blocked:
         _log(f"BLOCK path={file_path}")
-        emit_block(reason)
+        # stderr-only: the adapter runs this module with `1>&2`, so writing to
+        # stdout too would double-render the reason on the model channel (#874
+        # review — the emit_block_stderr sibling shape used by testskips/pushtest).
+        emit_block_stderr(reason)
     allow()
 
 

@@ -73,6 +73,34 @@ class TestBuiltinConstant(unittest.TestCase):
         self.assertEqual(a.CLASS_UNREVIEWED, "UNREVIEWED")
         self.assertEqual(a.CLASS_RULE_SHAPE, "RULE-SHAPE")
 
+    def test_continue_is_a_builtin_vim_is_not(self):
+        # #874 review B: `continue` (resume's alias) MUST be present; `vim`
+        # (not a real slash command) MUST be absent.
+        import cli_mdreview_audit as a
+        low = {c.lower() for c in a.CLAUDE_CODE_BUILTIN_COMMANDS}
+        self.assertIn("continue", low)
+        self.assertNotIn("vim", low)
+
+    def test_gate_fallback_in_sync_with_ssot(self):
+        # The gate ships a fallback list for when the SSOT import breaks; it
+        # must stay identical to cli_mdreview_audit.CLAUDE_CODE_BUILTIN_COMMANDS.
+        import builtins
+        import cli_mdreview_audit as a
+        from gates import commandshadow
+        # Force the fallback branch by making the SSOT import fail.
+        real_import = builtins.__import__
+
+        def boom(name, *args, **kwargs):
+            if name == "cli_mdreview_audit":
+                raise ImportError("forced")
+            return real_import(name, *args, **kwargs)
+
+        with mock.patch("builtins.__import__", side_effect=boom):
+            fallback = commandshadow._builtins_lower()
+        ssot = {c.lower() for c in a.CLAUDE_CODE_BUILTIN_COMMANDS}
+        self.assertEqual(fallback, ssot,
+                         "gate fallback list drifted from the SSOT")
+
 
 # ---------------------------------------------------------------------------
 # target_governance() — inventory with provenance + classification
@@ -182,6 +210,51 @@ class TestTargetGovernanceInventory(unittest.TestCase):
             self.assertEqual(len(rules), 1)
             self.assertNotIn(a.CLASS_RULE_SHAPE, rules[0]["classes"])
             self.assertTrue(rules[0]["detail"]["has_paths"])
+
+    def test_rule_named_like_managed_rule_is_managed_duplicate(self):
+        import cli_mdreview_audit as a
+        managed = sorted(p.name for p in (REPO / "rules").glob("*.md"))
+        self.assertTrue(managed, "repo must ship at least one managed rule")
+        dup = managed[0]
+        with TemporaryDirectory() as tmp:
+            pd = _mk_project(tmp, "proj")
+            (pd / ".claude" / "rules" / dup).write_text(
+                "---\npaths:\n  - 'x/**'\n---\nbody\n", encoding="utf-8")
+            rules = self._items(pd, "rule")
+            self.assertEqual(len(rules), 1)
+            self.assertIn(a.CLASS_MANAGED_DUPLICATE, rules[0]["classes"])
+
+    def test_frontmatter_horizontal_rule_not_flagged(self):
+        import cli_mdreview_audit as a
+        with TemporaryDirectory() as tmp:
+            pd = _mk_project(tmp, "proj")
+            # a doc that OPENS with a `---` markdown horizontal rule (no YAML
+            # key) is NOT frontmatter → must NOT be RULE-SHAPE (#874 review A)
+            (pd / ".claude" / "rules" / "hr.md").write_text(
+                "---\n\nSome prose after a horizontal rule.\n", encoding="utf-8")
+            rules = self._items(pd, "rule")
+            self.assertEqual(len(rules), 1)
+            self.assertNotIn(a.CLASS_RULE_SHAPE, rules[0]["classes"])
+
+    def test_settings_hook_airuleset_fork_not_treated_as_managed(self):
+        # a naive `"devel/airuleset" in cmd` substring wrongly treats a sibling
+        # `~/devel/airuleset-fork/...` as managed and hides it (#874 review A2).
+        with TemporaryDirectory() as tmp:
+            pd = _mk_project(tmp, "proj")
+            settings = {"hooks": {"PreToolUse": [
+                {"matcher": "Bash", "hooks": [
+                    {"type": "command",
+                     "command": "bash ~/devel/airuleset-fork/hooks/x.sh"},
+                ]},
+            ]}}
+            (pd / ".claude" / "settings.json").write_text(
+                json.dumps(settings), encoding="utf-8")
+            import cli_mdreview_audit as a
+            tg = a.target_governance(pd, git_fn=FAKE_GIT)
+            cmds = [it["detail"]["command"]
+                    for it in tg["items"] if it["kind"] == "settings-hook"]
+            self.assertTrue(any("airuleset-fork" in c for c in cmds),
+                            f"a fork path must NOT be hidden as managed: {cmds}")
 
     def test_project_hook_files_inventoried(self):
         with TemporaryDirectory() as tmp:
@@ -373,9 +446,25 @@ class TestCommandShadowGate(unittest.TestCase):
         self.assertFalse(blocked)
 
     def test_bypass_token_allows(self):
+        from gates import commandshadow
+        # mock _log so the bypass path never writes the real ~/.claude log
+        with mock.patch.object(commandshadow, "_log"):
+            blocked, _ = self._classify(
+                "/home/u/devel/proj/.claude/commands/resume.md",
+                "# airuleset:command-shadow-ok legacy alias kept\n# r\n")
+        self.assertFalse(blocked)
+
+    def test_continue_alias_blocked(self):
+        # `continue` is an ALIAS of the built-in `resume` — the SAME incident
+        # class the guard exists for. It MUST be caught (#874 review B).
+        blocked, reason = self._classify(
+            "/home/u/devel/odoo-erp/.claude/commands/continue.md", "x")
+        self.assertTrue(blocked, reason)
+
+    def test_vim_not_blocked_false_positive_removed(self):
+        # `vim` is NOT a real 2.1.268 slash command — must not false-block.
         blocked, _ = self._classify(
-            "/home/u/devel/proj/.claude/commands/resume.md",
-            "# airuleset:command-shadow-ok legacy alias kept\n# r\n")
+            "/home/u/devel/proj/.claude/commands/vim.md", "x")
         self.assertFalse(blocked)
 
     def test_reason_names_rename_convention(self):
@@ -393,15 +482,25 @@ HOOK = REPO / "hooks" / "block-builtin-command-shadow.sh"
 
 class TestHookStdinContract(unittest.TestCase):
 
+    def setUp(self):
+        # Redirect the subprocess hook's audit log into a throwaway HOME so the
+        # test never appends to the real ~/.claude/command-shadow-gate.log
+        # (#874 review — hermeticity). Subprocess-local env only; no in-process
+        # HOME mutation (avoids the #732-class leak into sibling modules).
+        self._tmp_home = TemporaryDirectory()
+        self.addCleanup(self._tmp_home.cleanup)
+
     def _run(self, file_path, content=""):
         payload = json.dumps({
             "tool_name": "Write",
             "cwd": "/home/u/devel/proj",
             "tool_input": {"file_path": file_path, "content": content},
         })
+        env = dict(os.environ)
+        env["HOME"] = self._tmp_home.name
         return subprocess.run(
             ["bash", str(HOOK)], input=payload,
-            capture_output=True, text=True, timeout=20)
+            capture_output=True, text=True, timeout=20, env=env)
 
     def test_hook_exists_and_executable(self):
         self.assertTrue(HOOK.exists(), f"missing hook: {HOOK}")

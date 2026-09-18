@@ -27,18 +27,32 @@ ARTIFACT_DIR = CLAUDE_DIR / "mdreview-audit"
 # odoo-erp `/resume` incident, 67 days invisible). Pinned + SOURCED so a future
 # /mdreview pass re-verifies the list against the live `claude --help`/docs.
 CLAUDE_CODE_BUILTIN_COMMANDS_SOURCE = (
-    "Claude Code v2.1.268 — verified against the installed `claude --help` CLI "
-    "subcommands (agents/doctor/mcp/config/install/update/setup-token) + the "
-    "documented in-session slash-command set; recorded 2026-09-18 (#874). "
-    "Re-verify against the live `claude --help`/docs each /mdreview pass."
+    "Claude Code v2.1.268 — EXTRACTED from the installed bundle's slash-command "
+    "registry (every `type:\"local\"|\"local-jsx\"|\"prompt\"` command descriptor "
+    "under ~/.local/share/claude/versions/2.1.268), NAMES + ALIASES (e.g. "
+    "`continue` is an alias of `resume` — the exact incident class the guard must "
+    "catch), curated to the user-facing set (internal/setup/telemetry descriptors "
+    "such as heapdump/daemon/setup-bedrock excluded). `claude --help` alone lists "
+    "CLI SUBcommands, not slash commands, so it is NOT the source. Re-extract from "
+    "the live bundle each /mdreview pass; recorded 2026-09-18 (#874)."
 )
 CLAUDE_CODE_BUILTIN_COMMANDS = frozenset({
-    "resume", "clear", "compact", "help", "model", "status", "login",
-    "logout", "config", "memory", "review", "cost", "doctor", "init",
-    "bug", "agents", "mcp", "vim", "terminal-setup", "permissions",
-    "hooks", "plugins", "export", "rewind", "tasks", "workflows",
-    "effort", "fast", "goal", "loop", "list-agents", "add-dir",
-    "context", "usage", "stats",
+    "add-dir", "advisor", "agents", "allowed-tools", "android", "app",
+    "artifacts", "background", "bashes", "bg", "branch", "break-reminder",
+    "breaks", "bug", "checkpoint", "clear", "compact", "config",
+    "context", "continue", "copy", "cost", "desktop", "diff",
+    "downtime", "effort", "exit", "export", "fast", "feedback",
+    "focus", "fork", "goal", "help", "hooks", "ide",
+    "import", "init", "insights", "install", "ios", "keybindings",
+    "list-agents", "login", "logout", "loops", "marketplace", "mcp",
+    "memory", "memory-pause", "mobile", "model", "name", "pause-memory",
+    "peers", "permissions", "plan", "plugin", "plugins", "privacy-settings",
+    "quit", "rc", "recap", "remote", "remote-control", "rename",
+    "restart", "resume", "review", "rewind", "session", "settings",
+    "share", "skill-doctor", "skills", "stats", "status", "stop",
+    "tasks", "teleport", "terminal-setup", "theme", "toggle-memory", "undo",
+    "update", "upgrade", "usage", "version", "voice", "wellbeing",
+    "workflows",
 })
 _BUILTINS_LOWER = frozenset(c.lower() for c in CLAUDE_CODE_BUILTIN_COMMANDS)
 
@@ -117,26 +131,49 @@ def _sentence_hashes(text):
 
 # -- Target governance inventory (#874) -----------------------------------
 
-def _default_git_fn(project_dir, rel_path):
-    """First-commit (sha, date, author) for a file in a git repo, or
-    ('', '', '') on any failure. Injected as ``git_fn`` in tests so the
-    inventory stays hermetic (no real git in the unit suite)."""
+def _provenance_map_default(project_dir):
+    """First-commit (sha, date, author) for EVERY file added under `.claude/`,
+    in ONE git pass — walked newest→oldest so the OLDEST add wins (the true
+    first-commit). Returns {rel_path: (sha, date, author)}; {} on any failure.
+
+    #874 review-3 cost fix: this replaces N per-file `git log --follow` calls
+    (15 s timeout EACH) with ONE bounded call, so a project with many governed
+    files never blows `run_fleet`'s 60 s per-host SSH budget. Full `%H` sha
+    (not abbreviated `%h`) so a repo growing its abbrev length never flips a
+    spurious "changed" delta. Repo-relative output paths are made relative to
+    ``project_dir`` via the git prefix, so a sub-directory checkout still keys
+    correctly (best-effort: an unresolved path just yields empty provenance)."""
     import subprocess
-    try:
-        r = subprocess.run(
-            ["git", "-C", str(project_dir), "log", "--diff-filter=A",
-             "--follow", "--format=%h|%ad|%an", "--date=short",
-             "--", rel_path],
-            capture_output=True, text=True, timeout=15)
-    except (OSError, subprocess.SubprocessError):
-        return ("", "", "")
-    if r.returncode != 0:
-        return ("", "", "")
-    lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
-    if not lines:
-        return ("", "", "")
-    parts = (lines[-1].split("|", 2) + ["", "", ""])[:3]
-    return (parts[0], parts[1], parts[2])
+
+    def _run(args):
+        try:
+            return subprocess.run(
+                ["git", "-C", str(project_dir)] + args,
+                capture_output=True, text=True, timeout=20)
+        except (OSError, subprocess.SubprocessError):
+            return None
+
+    pref = _run(["rev-parse", "--show-prefix"])
+    prefix = pref.stdout.strip() if (pref and pref.returncode == 0) else ""
+    r = _run(["log", "--diff-filter=A", "--name-only",
+              "--format=%x00%H%x00%ad%x00%an", "--date=short",
+              "--", ".claude"])
+    if not r or r.returncode != 0:
+        return {}
+    result = {}
+    sha = date = author = ""
+    for line in r.stdout.splitlines():
+        if line.startswith("\x00"):
+            parts = line.split("\x00")
+            sha = parts[1] if len(parts) > 1 else ""
+            date = parts[2] if len(parts) > 2 else ""
+            author = parts[3] if len(parts) > 3 else ""
+        elif line.strip():
+            path = line.strip()
+            if prefix and path.startswith(prefix):
+                path = path[len(prefix):]
+            result[path] = (sha, date, author)  # newest→oldest: oldest wins
+    return result
 
 
 def _first_heading(path):
@@ -180,6 +217,36 @@ def _cmd_basename(cmd):
     return toks[-1] if toks else cmd
 
 
+def _cmd_script_token(cmd):
+    """The script-path token from a hook command string (the first token that
+    looks like a path / .sh), or ''. e.g. `bash ~/x/hooks/y.sh --flag` → the
+    `~/x/hooks/y.sh` token."""
+    for tok in cmd.split():
+        if tok.endswith(".sh") or "/" in tok:
+            return tok
+    return ""
+
+
+def _cmd_is_airuleset_managed(cmd, project_dir, airuleset_root):
+    """True when a settings-hook command invokes an airuleset-managed hook —
+    the script token RESOLVES under ~/devel/airuleset (#874 review-2 fix:
+    a naive ``"devel/airuleset" in cmd`` substring wrongly treats a sibling
+    like ~/devel/airuleset-fork/hooks/x.sh as managed and hides it). A path
+    is resolved against the project dir when relative, and ~ is expanded."""
+    tok = _cmd_script_token(cmd)
+    if not tok:
+        return False
+    tok = tok.strip('"').strip("'")
+    try:
+        p = Path(tok).expanduser()
+        if not p.is_absolute():
+            p = (Path(project_dir) / p)
+        resolved = p.resolve()
+    except (OSError, ValueError):
+        return False
+    return _is_under(resolved, airuleset_root)
+
+
 def _is_under(path, root):
     """True if ``path`` resolves inside ``root``."""
     try:
@@ -190,20 +257,33 @@ def _is_under(path, root):
 
 
 def _bad_frontmatter(path):
-    """True if the file OPENS a `---` frontmatter fence but never closes it
-    (malformed rule frontmatter → RULE-SHAPE). A file with NO frontmatter
-    fence at all is NOT flagged — a plain always-on rule is legitimate."""
+    """True if the file OPENS a YAML frontmatter block but never closes it
+    (malformed rule frontmatter → RULE-SHAPE). To avoid a false positive on a
+    file that merely STARTS with a `---` markdown horizontal rule (#874
+    review-1), it is treated as frontmatter ONLY when the FIRST physical line
+    is exactly `---` AND the SECOND line looks like a YAML `key:` — then a
+    missing closing `---` is the RULE-SHAPE defect."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
-    if not text.lstrip().startswith("---"):
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
         return False
-    return len(text.lstrip().split("---", 2)) < 3
+    # second non-empty line must look like a YAML key to be frontmatter
+    second = ""
+    for ln in lines[1:]:
+        if ln.strip():
+            second = ln
+            break
+    if not re.match(r"^[A-Za-z0-9_-]+\s*:", second.strip()):
+        return False
+    # it IS frontmatter — flagged only when the closing fence is missing
+    return not any(ln.strip() == "---" for ln in lines[1:])
 
 
-def _prov(git_fn, pd, rel):
-    sha, date, author = git_fn(pd, rel)
+def _prov_dict(triple):
+    sha, date, author = (list(triple) + ["", "", ""])[:3]
     return {"sha": sha, "date": date, "author": author}
 
 
@@ -223,11 +303,24 @@ def target_governance(project_dir, git_fn=None):
     tests; defaults to a real timeout-bounded, error-swallowing git call.
     """
     pd = Path(project_dir)
-    gfn = git_fn or _default_git_fn
     repo = pd.name
     claude = pd / ".claude"
     items = []
     managed_skills = _managed_skill_names()
+    managed_rules = _managed_rule_names()
+
+    # Provenance resolver. Tests inject a per-file ``git_fn(pd, rel)``; prod
+    # builds the whole-.claude map in ONE git pass (the #874 review-3 cost fix).
+    if git_fn is not None:
+        def prov(rel):
+            return _prov_dict(git_fn(pd, rel))
+    else:
+        _pmap = _provenance_map_default(pd)
+
+        def prov(rel):
+            return _prov_dict(_pmap.get(rel, ("", "", "")))
+
+    airuleset_root = (Path.home() / "devel" / "airuleset").resolve()
 
     # slash commands
     cdir = claude / "commands"
@@ -244,7 +337,7 @@ def target_governance(project_dir, git_fn=None):
             items.append({
                 "repo": repo, "kind": "command", "name": name,
                 "classes": classes,
-                "provenance": _prov(gfn, pd, f".claude/commands/{f.name}"),
+                "provenance": prov(f".claude/commands/{f.name}"),
                 "detail": {"mtime": mtime, "first_heading": _first_heading(f)},
             })
 
@@ -263,7 +356,7 @@ def target_governance(project_dir, git_fn=None):
             items.append({
                 "repo": repo, "kind": "skill", "name": name,
                 "classes": classes,
-                "provenance": _prov(gfn, pd, f".claude/skills/{name}/SKILL.md"),
+                "provenance": prov(f".claude/skills/{name}/SKILL.md"),
                 "detail": {},
             })
 
@@ -276,7 +369,7 @@ def target_governance(project_dir, git_fn=None):
             items.append({
                 "repo": repo, "kind": "hook", "name": f.name,
                 "classes": [],
-                "provenance": _prov(gfn, pd, f".claude/hooks/{f.name}"),
+                "provenance": prov(f".claude/hooks/{f.name}"),
                 "detail": {},
             })
 
@@ -305,13 +398,14 @@ def target_governance(project_dir, git_fn=None):
                     if not isinstance(h, dict):
                         continue
                     cmd = h.get("command", "") or ""
-                    if not cmd or "devel/airuleset" in cmd:
+                    if not cmd or _cmd_is_airuleset_managed(cmd, pd,
+                                                            airuleset_root):
                         continue  # empty or airuleset-managed — skip
                     items.append({
                         "repo": repo, "kind": "settings-hook",
                         "name": f"{sname}:{event}:{matcher}:{_cmd_basename(cmd)}",
                         "classes": [],
-                        "provenance": _prov(gfn, pd, f".claude/{sname}"),
+                        "provenance": prov(f".claude/{sname}"),
                         "detail": {"command": cmd, "event": event,
                                    "matcher": matcher, "file": sname},
                     })
@@ -324,6 +418,8 @@ def target_governance(project_dir, git_fn=None):
             has_paths = cli_context_baseline._has_paths_frontmatter(f)
             if _bad_frontmatter(f):
                 classes.append(CLASS_RULE_SHAPE)
+            if f.name in managed_rules:
+                classes.append(CLASS_MANAGED_DUPLICATE)
             try:
                 sz = f.stat().st_size
             except OSError:
@@ -331,14 +427,13 @@ def target_governance(project_dir, git_fn=None):
             items.append({
                 "repo": repo, "kind": "rule", "name": f.name,
                 "classes": classes,
-                "provenance": _prov(gfn, pd, f".claude/rules/{f.name}"),
+                "provenance": prov(f".claude/rules/{f.name}"),
                 "detail": {"has_paths": has_paths, "bytes": sz},
             })
 
     # CLAUDE.md @imports outside ~/devel/airuleset
     claude_md = pd / "CLAUDE.md"
     if claude_md.exists():
-        airuleset_root = (Path.home() / "devel" / "airuleset").resolve()
         try:
             text = claude_md.read_text(encoding="utf-8", errors="replace")
         except OSError:
@@ -424,6 +519,7 @@ def governance_snapshot(gmap):
 
 
 _MAX_DELTA_LINES = 300
+_MAX_DELTA_BYTES = 60000   # GitHub's comment limit is ~65 536 chars; stay under
 
 
 def _delta_line(item):
@@ -465,11 +561,19 @@ def target_governance_delta(current_map, previous_snapshot, date_str):
 
     header = (f"Target-governance delta {date_str}: {len(changed)} new/changed, "
               f"{collisions} collision{'' if collisions == 1 else 's'}")
-    lines = [_delta_line(it) for it in changed]
-    if len(lines) > _MAX_DELTA_LINES:
-        extra = len(lines) - _MAX_DELTA_LINES
-        lines = lines[:_MAX_DELTA_LINES] + [
-            f"- … and {extra} more (see the full artifact)"]
+    all_lines = [_delta_line(it) for it in changed]
+    # Cap by BOTH line count and byte size (a first-run "full snapshot" across
+    # many projects, or long import/settings-hook names, must never exceed
+    # GitHub's ~65 KB comment limit — #874 review).
+    lines = []
+    used = len(header) + 2
+    for i, ln in enumerate(all_lines):
+        if i >= _MAX_DELTA_LINES or used + len(ln) + 1 > _MAX_DELTA_BYTES:
+            lines.append(f"- … and {len(all_lines) - i} more "
+                         "(see the full artifact)")
+            break
+        lines.append(ln)
+        used += len(ln) + 1
     comment = header + "\n\n" + "\n".join(lines)
     return {"count": len(changed), "collisions": collisions, "comment": comment}
 

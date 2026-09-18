@@ -48,11 +48,14 @@ BOOTSTRAP_BODY_LINES = [
     "Scope-gate: planned-work",
     "Dedup-checked: pinned recurring mdreview ticket — reopened, never re-filed",
     "",
-    "This ticket is REOPENED by the watchdog mdreview-cadence job (Job 43) when:",
+    "This ticket is the PERMANENT recurring mdreview ticket — kept OPEN from now",
+    "on (owner escalation 2026-09-18, #874). The watchdog mdreview-cadence job",
+    "(Job 43) posts a DAILY target-governance delta here, and REOPENs it as a",
+    "safety net when:",
     "- 30 days have passed since the last close, OR",
     "- the MODEL_TIERS lineup changed (model-generation trigger).",
     "",
-    "Close it after completing the /mdreview session.",
+    "Do NOT close it after a /mdreview session — it stays open permanently.",
 ]
 
 

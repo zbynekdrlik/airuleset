@@ -11,6 +11,11 @@ set -euo pipefail
 # convention (`<name>-<scope>`). Bypass: `# airuleset:command-shadow-ok <reason>`
 # in the written content (logged to ~/.claude/command-shadow-gate.log).
 #
+# SCOPE: fires on Write | Edit only. A rename via a shell `mv` (a Bash op) into
+# a `.claude/commands/<builtin>.md` path is NOT caught here — the daily
+# target-governance delta (Job 43) is the backstop that surfaces such a
+# collision within a day.
+#
 # Exit 2 = block; the reason is on STDERR (the model-visible deny channel) --
 # gates.emit_block also prints it to stdout for a terminal run. A python
 # MALFUNCTION (the gate cannot run at all) fails OPEN -- a hook bug must not
