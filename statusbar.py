@@ -521,6 +521,7 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
 
 DISK_SEGMENT_RED_PCT = 95           # shown (red) at/above this, HIDDEN below (#925; was 90 per #854)
 DISK_SEGMENT_STALE_S = 600          # cache older than this → hide (dead watchdog)
+AUTH_BADGE_TTL_S = 3 * 3600         # #1075: `auth!` self-expiry — DELIBERATELY longer than DISK_SEGMENT_STALE_S (600s); see auth_segment
 
 # #1036 — the task-hygiene status.json (watchdog Job 49) runs on a ~2h cadence,
 # so its freshness window is far longer than the disk badge's 10 min; older than
@@ -624,6 +625,39 @@ def quota_segment(home=None, now=None):
     if qpct < 90:
         return ""
     return "\033[38;5;196mquota %d%%\033[0m" % int(qpct)
+
+
+def auth_segment(home=None, now=None):
+    """#1075: the `auth!` footer badge (RED) — this box has a Claude session dead
+    on a REVOKED OAuth token (STALE credential, or a FRESH credential the running
+    process still can't re-read). Shown while the watchdog's credential-dead cache
+    is younger than AUTH_BADGE_TTL_S, HIDDEN otherwise. Job 1 writes the cache on
+    every credential-dead sweep (stale OR fresh-persistent) and refreshes it each
+    sweep while the session stays dead, so the badge holds through a multi-hour
+    outage (the miva1 30 h case) and SELF-EXPIRES once the watchdog stops
+    refreshing (a resolved episode, a restarted session, or a dead watchdog).
+
+    The window is DELIBERATELY 3 h, NOT the `disk_segment` 600 s: unlike a
+    per-sweep disk read, a credential-dead episode can be written by ANY of a
+    box's sessions (all share one `~/.claude/.credentials.json` and one badge
+    cache), and the sweep cadence varies (#1055 calm sweeps) — a generous window
+    never flickers the badge off mid-outage, and a resolved episode lingering as a
+    'recently-dead' reminder for up to 3 h is a benign, owner-reversible trade-off
+    (the multi-session case rules out an explicit clear-on-recovery, which would
+    hide the badge while a sibling session is still dead). Reads ONLY the
+    machine-local cache; never blocks / touches the network; renders as no segment
+    on any error."""
+    import time as _time
+    now = _time.time() if now is None else now
+    cache = _load(_claude_dir(home) / "auth-guard" / "status.json")
+    if not isinstance(cache, dict):
+        return ""
+    ts = cache.get("ts")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return ""
+    if (now - ts) > AUTH_BADGE_TTL_S:
+        return ""
+    return "\033[38;5;196mauth!\033[0m"
 
 
 def release_idle_segment(cwd=None, home=None, now=None):

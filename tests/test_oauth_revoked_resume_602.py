@@ -193,10 +193,18 @@ class Job1OAuthRevokedResume(unittest.TestCase):
                 return ""
             return ""
 
+        # #1075: the 401-revoked class is now owned by job 1's credential-dead
+        # branch, which reads `~/.claude/.credentials.json` mtime vs the first
+        # 401. #602's scenario is a NORMAL rotation ("the fresh token is on disk
+        # < 1s after the revoke" — this module's own docstring), i.e. a FRESH
+        # credential, so inject a fresh mtime (newer than the first 401) — the
+        # FRESH branch then delivers the ONE enriched OAUTH_REVOKED_NUDGE_TEXT
+        # continue this test asserts. A hermetic fake; never the real ~/.claude.
         wd.run_once(now=now, dry_run=False, run=fake_run, send_fn=lambda *a, **k: None,
                     projects_dir=proj, state_path=state_path,
                     pending_prefix=str(Path(tmp.name) / "pending-"),
-                    grace=300, interval=300, max_nudges=3)
+                    grace=300, interval=300, max_nudges=3,
+                    cred_mtime_fn=lambda: now - 1)
         return keys
 
     def _typed_text(self, keys):

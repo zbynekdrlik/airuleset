@@ -333,6 +333,12 @@ try:
     qta = statusbar.quota_segment()
     if qta:
         segs.append(qta)
+    # #1075: `auth!` — this box has a Claude session dead on a REVOKED OAuth
+    # token (job 1's credential-dead branch); a critical box-down signal, shown
+    # for the life of the outage + 3h, hidden otherwise.
+    au = statusbar.auth_segment()
+    if au:
+        segs.append(au)
     rel = statusbar.release_idle_segment(cwd=cwd)
     if rel:
         segs.append(rel)
