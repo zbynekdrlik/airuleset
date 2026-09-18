@@ -471,15 +471,22 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
                             reason = "near-duplicate:#%s" % near_dup
                         results.append(("BLOCK", clean_title, reason, parents_str,
                                          target_repo, dedup_claim))
-                    elif (unattended and crit_l not in EXEMPT_FROM_CAP
+                    elif (crit_l not in EXEMPT_FROM_CAP
                           and _ratchet_should_block(target_repo, cwd)):
                         # #842 req 2 -- net-drain ratchet, checked LAST (the only gate
                         # costing a gh call, so it is never paid for a filing already
-                        # blocked more cheaply). An UNATTENDED non-exempt discovery
-                        # filing is allowed ONLY while the repo is strictly draining
-                        # today (created_today < closed_today); otherwise BLOCK. A gh
-                        # error -> BLOCK (fail-safe). user-request / planned-work are
-                        # exempt (already presence-gated above).
+                        # blocked more cheaply). #1070 item 7 (owner ruling
+                        # 2026-09-18): the brake applies to EVERY filing session, no
+                        # longer only the UNATTENDED path -- gk files under the owner
+                        # identity with the owner present at the box and so never met
+                        # the pre-#1070 `unattended` guard, letting the two sources of
+                        # a day's filings sail past the brake the controller already
+                        # saw. A non-exempt discovery filing is allowed ONLY while the
+                        # repo is strictly draining today (created_today <
+                        # closed_today); otherwise BLOCK. A gh error -> BLOCK
+                        # (fail-safe). user-request / planned-work / architecture-rework
+                        # are exempt (user-request is presence-gated above via
+                        # _has_recent_owner_quote).
                         results.append((
                             "BLOCK", clean_title,
                             "net-drain (created_today >= closed_today on this repo "
