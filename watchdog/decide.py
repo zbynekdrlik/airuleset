@@ -256,6 +256,43 @@ def is_oauth_revoked(text):
     return bool(text) and bool(_OAUTH_REVOKED_RX.search(text))
 
 
+# --- #1075 CREDENTIAL-DEAD: is the on-disk OAuth credential fresh or stale? ------
+# One owner ping this long after the session's first 401 while the credential
+# file is still STALE (the box's claudy has not refreshed the token). A revoked
+# rotation normally writes a fresh token within ~1s (is_oauth_revoked's own
+# doctrine), so 30 min of a STILL-stale file is well past any normal rotation and
+# means a genuinely stuck credential a human must fix — the miva1 outage sat 27 h.
+AUTH_STALE_OWNER_S = 30 * 60
+
+
+def credential_state(first_401_ts, cred_mtime, now):
+    """PURE (#1075): is `~/.claude/.credentials.json` FRESH (refreshed AFTER the
+    session's first 401) or STALE (still the revoked token the running process
+    already holds)? Returns "fresh" | "stale".
+
+    A revoked OAuth token is dead IN the running Claude Code process — a
+    `continue` cannot make it re-read the file — so job 1 must NEVER nudge a
+    session whose credential file is STALE (older than, or equal to, its first
+    401): the file still holds the revoked token, so the box's claudy has not
+    refreshed it yet. Only once the file is FRESH (strictly newer than the first
+    401) is recovery even possible, and then only via a session RESTART, never a
+    `continue`.
+
+    Fail-safe toward "stale" — never relaunch on unprovable freshness: a
+    None/unreadable/non-numeric `cred_mtime`, a missing/non-numeric
+    `first_401_ts`, or a `cred_mtime` in the FUTURE relative to `now` (clock
+    skew / a bad stat is not a trustworthy refresh) ALL read "stale". Never
+    raises. (`now` is used only for the future-mtime clamp; the core verdict is
+    the cred_mtime-vs-first_401 comparison.)"""
+    if not isinstance(first_401_ts, (int, float)) or isinstance(first_401_ts, bool):
+        return "stale"
+    if not isinstance(cred_mtime, (int, float)) or isinstance(cred_mtime, bool):
+        return "stale"
+    if isinstance(now, (int, float)) and not isinstance(now, bool) and cred_mtime > now:
+        return "stale"                     # a future mtime is not a genuine refresh
+    return "fresh" if cred_mtime > first_401_ts else "stale"
+
+
 # --- 5-HOUR SESSION LIMIT (a distinct, TIME-BASED cap) --------------------------
 # Claude Code's session-limit banner shows in the PANE, e.g.
 #   "You've hit your session limit · resets 6:10pm (Europe/Prague)"

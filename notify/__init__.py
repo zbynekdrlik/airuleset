@@ -3068,6 +3068,16 @@ SUPPRESSED_ALERT_PREFIXES = (
     # journal + the `suppressed` delivery-log line). The watchdog's job stays
     # the silent auto-resume (#675 owns the work-resume half).
     ("oauthblock", "oauth-revoke (#676)"),  # watchdog job 1 escalation (#662 alarm — owner-ruled spam)
+    # #1075 — `credential-dead:` is DELIBERATELY NOT in this table (a
+    # boundary-matched sibling of `oauthblock:` above, but the OPPOSITE ruling).
+    # #676 suppressed `oauthblock:` because a transient revoke-and-resume is
+    # NORMAL subscription-switching. `credential-dead:` is the DIFFERENT case job
+    # 1's credential-dead branch surfaces: a STALE `~/.claude/.credentials.json`
+    # (older than the session's first 401) that the box's claudy has NOT refreshed
+    # for 30 min+ — the miva1 30h dead-stream incident, a genuinely stuck login a
+    # human must fix (/login or a restart), the `acctblock:`-class "needs a human,
+    # no auto-reset" signal that stays un-suppressed. It fires at most ONCE per
+    # episode (job 1 latches `pinged`). Never add `credential-dead` here.
     # #688 (2026-08-25 owner ruling): #662's `stuckalert:` frozen-goal alarm
     # (goal_lane_sweep -> _lane_stuck_owner_alert) is SPAM too — the structural
     # `stuck` verdict (armed /goal + 0 workers + backlog + idle over threshold)

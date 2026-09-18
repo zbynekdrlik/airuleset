@@ -337,6 +337,39 @@ def keys(pane_id, *keystrokes, kind, nudge=None, user_authored=False, run=None,
     return True
 
 
+def relaunch_pane(pane_id, run=None, launcher="claude-continue"):
+    """#1075 CREDENTIAL-DEAD recovery primitive: KILL the pane's current
+    foreground process (a claude session stuck on a REVOKED OAuth token it can
+    never re-read) and respawn the managed launcher in the SAME pane —
+    `tmux respawn-pane -k -t <pane> <launcher>`. Returns True iff the respawn
+    command was issued without raising.
+
+    Distinct from the two existing relaunch shapes on purpose:
+      * `keys` sends into a LIVE Claude Code input box (a `continue` nudge) — a
+        stuck process would just 401 the nudge, which is the whole miva1 bug;
+      * `resurrect.relaunch` types a launch command into a pane that ALREADY
+        dropped to a BARE SHELL (the session exited) — here the process is still
+        RUNNING and occupying the pane, so nothing can be typed; `respawn-pane
+        -k` replaces it.
+
+    `respawn-pane` is a tmux MANAGEMENT command, not a CC keystroke, so it is
+    outside the `keys` per-kind kill-switch gate — it is a `resume`-class RECOVERY
+    action, which #1023 keeps ALWAYS-ON precisely for a login/limit death like
+    this (a nudges-OFF box must still come back from a dead credential). The
+    CALLER owns every safety gate (the recent-human veto + the bare-shell /
+    stopped-session check + a once-per-episode latch). Like `resurrect.relaunch`,
+    the send is `delivered_unconfirmed`: the STRUCTURAL confirmation is the NEXT
+    sweep (the session comes back live → its 401 episode clears). Never raises."""
+    run = run or watchdog._default_run
+    if not pane_id or not launcher:
+        return False
+    try:
+        run(["tmux", "respawn-pane", "-k", "-t", str(pane_id), launcher])
+        return True
+    except Exception:
+        return False
+
+
 def _default_run(argv, timeout=8):
     # #1055 P2 -- the watchdog's default subprocess runner (tmux calls, plus any
     # caller that threads `run=_default_run`). Time + record every invocation in
