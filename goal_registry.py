@@ -214,6 +214,26 @@ _SEQUENTIAL_SATURATION = (
     "SEQUENTIAL — ONE unit at a time: dispatch → main review → integrate → "
     "verify → next; no refill;")
 
+# #1060 L3b — the DUAL dispatch-CHANNEL clause. This is ORTHOGONAL to the
+# parallel/sequential MODE: it swaps HOW a unit is dispatched (a cross-session
+# SendMessage to the persistent implementer window, not an in-session
+# autopilot-worker Agent), not the loop's stop conditions or refill discipline —
+# so the armed `/goal` line is UNCHANGED and `drift()` stays green. Selected by
+# the model-backend marker (`~/.claude/airuleset-model-backend.json`). The SKILL
+# body carries this string VERBATIM (`skill_dual_drift` check-locks it, exactly
+# as `skill_sequential_drift` locks the sequential clause), so an unarmed session
+# reading only the body can never diverge from this canonical dispatch contract.
+_DUAL_DISPATCH = (
+    "DUAL dispatch (model-backend marker present) — dispatch each unit to the "
+    "IMPLEMENTER window, NEVER an in-session Agent(autopilot-worker): "
+    "ListAgents → SendMessage(to the impl session) the SAME per-ticket prompt; "
+    "the wait = the implementer's return message OR a ticket poll for "
+    "LANE-RETURN (the Approach-3 fallback); everything after the return (Fable "
+    "review, integrate, run-card) is UNCHANGED; no impl session → journal "
+    "`dual: implementer session missing — dispatch left on the ticket` and "
+    "continue other work — NEVER fall back to an in-session Opus autopilot-worker "
+    "on a dual box (that breaks the pilot's per-alias measurement).")
+
 # The infra-role clause, APPENDED after `saturation-delivery` when role==infra.
 _INFRA_ROLE = (
     "INFRA ROLE — only tickets labelled `infra`; no stream hand-offs / release "
@@ -498,5 +518,24 @@ def skill_sequential_drift(skill_text):
         return ["SKILL.md body is missing the canonical sequential clause "
                 "(goal_registry._SEQUENTIAL_SATURATION) — the Step 3.0 "
                 "SEQUENTIAL dispatch block must carry it verbatim (#1035)"]
+    return []
+
+
+def skill_dual_drift(skill_text):
+    """[] when SKILL.md's BODY carries the canonical dual dispatch-channel clause
+    (`_DUAL_DISPATCH`) verbatim; else a one-item error list (#1060 L3b).
+
+    The skill body's DUAL dispatch section must carry THIS clause VERBATIM — the
+    dispatch-channel contract for a model-backend marker box (SendMessage to the
+    implementer window, ticket-poll fallback, journal-and-continue when no impl
+    session, never an in-session Opus worker). Hand-maintained in the body, NOT
+    auto-rendered; `goal-inventory --check` CHECK-LOCKS it byte-identical here
+    (alongside `drift()`/`variant_check()`/`skill_sequential_drift()`), so an
+    UNARMED dual-box session reading only the body can never diverge from the
+    canonical dispatch contract."""
+    if _DUAL_DISPATCH not in (skill_text or ""):
+        return ["SKILL.md body is missing the canonical dual dispatch clause "
+                "(goal_registry._DUAL_DISPATCH) — the Step 3.0 DUAL dispatch "
+                "block must carry it verbatim (#1060 L3b)"]
     return []
 

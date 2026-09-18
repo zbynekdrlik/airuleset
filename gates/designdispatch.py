@@ -21,6 +21,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 
 from gates import read_payload, field_of, emit_block_stderr, allow
@@ -281,7 +282,59 @@ def _block_message(reason):
         "  `airuleset:design-by-ok <reason>` in the prompt (logged)." % reason)
 
 
+def _run_issue_cli(argv, fetch=None, fable_id=None, resolve_slug=None):
+    """#1060 L3b — the RECEIVING-SIDE design gate the IMPLEMENTER runs before any
+    work. `python3 gates/designdispatch.py --issue N [--slug owner/repo] [--cwd D]`
+    exits 2 unless `#N`'s newest design comment is role-main + the Fable id (the
+    SAME `check_issue` the dispatch hook uses), else 0 — fail-closed on an
+    unreadable thread / unresolvable repo, exactly like the hook path.
+
+    The dispatch hook (`main` below, no argv) trusts the design comment on the
+    SENDER side; on the two independent-session `dual` box the implementer is
+    reached by `SendMessage`, not an `Agent` dispatch, so the same precondition
+    must be re-checked HERE, on the receiver, before it touches the ticket.
+
+    `fetch` / `fable_id` / `resolve_slug` are injected in tests; production uses
+    the module defaults. Returns the exit code (never calls sys.exit)."""
+    import argparse
+    p = argparse.ArgumentParser(prog="designdispatch",
+                                description="receiving-side design gate (#1060)")
+    p.add_argument("--issue", type=int, required=True,
+                   help="the ticket number to verify")
+    p.add_argument("--slug", default=None,
+                   help="owner/repo (default: resolved from --cwd via gh)")
+    p.add_argument("--cwd", default=None,
+                   help="repo checkout dir (default: the process cwd)")
+    ns = p.parse_args(argv)
+    cwd = ns.cwd or os.getcwd()
+    resolver = resolve_slug or _resolve_slug
+    slug = ns.slug or resolver(cwd)
+    if not slug:
+        sys.stderr.write(
+            "DESIGN-GATE BLOCK (#1060): could not resolve the repo (pass "
+            "--slug owner/repo, or run inside the checkout) — refusing to "
+            "implement an unverifiable design (fail-closed)\n")
+        return 2
+    ok, reason = check_issue(ns.issue, slug, cwd, fetch=fetch, fable_id=fable_id)
+    if not ok:
+        sys.stderr.write(
+            "DESIGN-GATE BLOCK (#1060) — %s\n\n"
+            "  The IMPLEMENTER only implements a design the Fable MAIN authored "
+            "(#871/#1061).\n  Post a `Design-question:` comment on #%d and STOP; "
+            "the main re-authors\n  or clarifies the design, then dispatches "
+            "again.\n" % (reason, ns.issue))
+        return 2
+    sys.stdout.write("design-gate ok (#1060): #%d has a Design-by: main "
+                     "<Fable id> comment — safe to implement\n" % ns.issue)
+    return 0
+
+
 def main():
+    argv = sys.argv[1:]
+    if "--issue" in argv or any(a.startswith("--issue=") for a in argv):
+        # #1060 L3b — receiving-side CLI mode (the implementer runs this before
+        # any work); distinct from the stdin PreToolUse hook path below.
+        sys.exit(_run_issue_cli(argv))
     payload = read_payload()
     if not payload:
         allow()
