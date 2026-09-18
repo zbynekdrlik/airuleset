@@ -9,6 +9,8 @@ Items covered here:
   2. designdispatch skips a PR `#N` (resolved via the injected is_pr seam).
   5. design-record `--help` prints the section template (+ collect-all pin).
   7. the filing net-drain ratchet applies to ATTENDED filings too.
+  8. the ATTENDED filing classifier (classify_command) shares the item-3
+     CREATE-shape helpers, so a REST comment POST / label PATCH is not a filing.
 """
 import sys
 import unittest
@@ -17,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import gates.designdispatch as dd
+from gates.filing.__main__ import classify_command
 
 
 def _payload(prompt, cwd="/repo", tool="Agent", subagent="autopilot-worker"):
@@ -138,6 +141,42 @@ class Item5DesignRecordHelp(unittest.TestCase):
         ok, reasons = d.validate_body("nothing useful here at all")
         self.assertFalse(ok)
         self.assertGreaterEqual(len(reasons), 4)
+
+
+class Item8AttendedFilingCreateOnly(unittest.TestCase):
+    """#1070 item 8 -- classify_command (the ATTENDED/main path) shares the
+    item-3 CREATE-shape helpers with _is_worker_filing, so a REST comment POST
+    or a label/edit PATCH is NOT a filing while a genuine collection create
+    still is. Subprocess-free: drives classify_command directly (the
+    end-to-end oracle is test_scope_gate.AttendedFilingCreateOnly1070). Present
+    (unattended=False), cwd /tmp -- the target-repo journal line is harmless."""
+
+    def _blocks(self, cmd):
+        res = classify_command(cmd, "sid", "/tmp", "/tmp", "/tmp/x.log", False)
+        return any(r[0] == "BLOCK" for r in res)
+
+    def test_rest_comment_post_is_not_a_filing(self):
+        self.assertFalse(self._blocks(
+            "gh api repos/o/r/issues/123/comments -X POST -f body=x"))
+
+    def test_rest_issue_patch_is_not_a_filing(self):
+        self.assertFalse(self._blocks(
+            "gh api repos/o/r/issues/42 -X PATCH -f state=closed"))
+
+    def test_collection_implicit_post_create_is_a_filing(self):
+        self.assertTrue(self._blocks(
+            "gh api repos/o/r/issues -f title=x -f body=y"))
+
+    def test_collection_explicit_post_create_is_a_filing(self):
+        self.assertTrue(self._blocks(
+            "gh api repos/o/r/issues -X POST -f title=x -f body=y"))
+
+    def test_gh_issue_create_is_a_filing(self):
+        self.assertTrue(self._blocks("gh issue create -t x -b y -R o/r"))
+
+    def test_explicit_get_read_is_not_a_filing(self):
+        self.assertFalse(self._blocks(
+            "gh api repos/o/r/issues -X GET -f state=open"))
 
 
 if __name__ == "__main__":

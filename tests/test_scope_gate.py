@@ -2169,5 +2169,53 @@ class WorkerFilingCreateOnly1070(TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+class AttendedFilingCreateOnly1070(TestCase):
+    """#1070 item 8 -- the ATTENDED/main classifier (classify_command) must
+    match only issue-CREATE shapes, SHARING _api_targets_issues_collection +
+    _api_field_or_post with the worker path (WorkerFilingCreateOnly1070 above).
+    A REST comment POST (`gh api …/issues/<N>/comments -X POST`) and a
+    label/edit PATCH (`gh api …/issues/<N>`) are NOT filings -- the same #1080
+    FP item 3 fixed for the worker path, which classify_command's pre-existing
+    broad `is_api_issues_post` still tripped on the attended path (the #1070
+    integration follow-up, comment 5737275705). A genuine collection create is
+    still gated. Driven WITHOUT a `sub-worker` agent_id, so the #842 worker
+    hard-block never fires and classify_command's follow-up gate is exercised."""
+
+    def test_rest_pr_comment_explicit_post_is_allowed_attended(self):
+        # THE attended FP: an explicit-POST REST comment (a gk advisory lane's
+        # only path to comment on a PR under GraphQL exhaustion) blocked on main.
+        r = run("gh api repos/o/r/issues/123/comments -X POST -f body=x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_rest_pr_comment_implicit_post_is_allowed_attended(self):
+        r = run("gh api repos/o/r/issues/7625/comments -F body=@/tmp/x")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_rest_issue_patch_is_allowed_attended(self):
+        r = run("gh api repos/o/r/issues/42 -X PATCH -f state=closed")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_gh_issue_create_without_scope_gate_is_still_blocked_attended(self):
+        r = run("gh issue create -t x -b y -R o/r")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_api_issues_collection_explicit_post_is_still_blocked_attended(self):
+        r = run("gh api repos/o/r/issues -X POST -f title=x -f body=y")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_api_issues_collection_implicit_post_is_now_blocked_attended(self):
+        # #1070 item 8 -- sharing _api_field_or_post ALSO closes the attended
+        # false NEGATIVE: an IMPLICIT-POST collection create (`-f title=` with no
+        # `-X POST`) slipped the pre-existing is_api_issues_post entirely. It is
+        # a real create and must now be gated, parity with the worker path.
+        r = run("gh api repos/o/r/issues -f title=x -f body=y")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_explicit_get_list_read_is_allowed_attended(self):
+        # an explicit GET with fields is a list/read, never a create.
+        r = run("gh api repos/o/r/issues -X GET -f state=open")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 if __name__ == "__main__":
     main()
