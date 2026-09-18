@@ -545,7 +545,7 @@
     "tests/test_subagent_stop_check_design.py": 327,
     "tests/test_subagent_stop_check_lane_return_844.py": 148,
     "tests/test_subdev_cross_stream_validation.py": 125,
-    "tests/test_subdev_handoff_match.py": 372,
+    "tests/test_subdev_handoff_match.py": 403,
     "tests/test_sudo_hosted_pane.py": 91,
     "tests/test_swap_provision_993.py": 123,
     "tests/test_sweep_cadence_1055.py": 734,
