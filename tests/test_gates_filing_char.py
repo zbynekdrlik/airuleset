@@ -39,6 +39,15 @@ def _empty_gh(tmpdir):
         "import sys, json\n"
         "a = sys.argv[1:]\n"
         "if len(a) >= 2 and a[0] == 'issue' and a[1] == 'list':\n"
+        # #1070 item 7 -- the net-drain ratchet now runs on attended filings too;
+        # answer the day-count queries DRAINING (created 0 < closed 9) so the
+        # ratchet allows and each characterization scenario keeps exercising its
+        # own concern (near-dup is inert with the empty [] below).
+        "    j = ' '.join(a)\n"
+        "    if 'created:' in j:\n"
+        "        print('0'); sys.exit(0)\n"
+        "    if 'closed:' in j:\n"
+        "        print('9'); sys.exit(0)\n"
         "    print(json.dumps([])); sys.exit(0)\n"
         "sys.exit(1)\n")
     gh.chmod(0o755)

@@ -25,6 +25,7 @@ import sys
 import time
 
 from gates import read_payload, field_of, emit_block_stderr, allow
+from gates import ghread
 
 DESIGN_BY_LOG = "design-by-gate.log"
 
@@ -138,6 +139,14 @@ def _resolve_slug(cwd, timeout=6):
     # gate's own timeout->None->block path runs BEFORE CC kills the hook (a
     # killed PreToolUse hook fail-OPENs — the exact inverse of this gate's
     # fail-closed contract; #1061 review).
+    # #1070 item 1 -- resolve the slug from the LOCAL git remote FIRST (never an
+    # API call, so it survives the owner identity's hourly GraphQL exhaustion);
+    # `gh repo view` (GraphQL) is only the fallback. Without this, slug
+    # resolution itself would fail under GraphQL exhaustion and block a
+    # legitimate dispatch on an unresolvable repo.
+    git_slug = ghread.resolve_slug(cwd)
+    if git_slug:
+        return git_slug
     try:
         r = subprocess.run(
             ["gh", "repo", "view", "--json", "nameWithOwner",
@@ -153,32 +162,14 @@ def _resolve_slug(cwd, timeout=6):
 
 
 def _fetch_comment_bodies(slug, number, cwd, timeout=8):
-    """Comment bodies for `<slug>#<number>` in CREATION order via the paginated
-    REST reader (`gh api …/comments --paginate -q '.[]'`, the SAME shape
-    cli_work_class._fetch_comments uses so a recent design comment past the
-    `gh issue view` window is never missed), or None on ANY gh failure."""
-    try:
-        r = subprocess.run(
-            ["gh", "api", "repos/%s/issues/%d/comments" % (slug, number),
-             "--paginate", "-q", ".[]"],
-            cwd=cwd or None, capture_output=True, text=True, timeout=timeout,
-            env=_gh_env())
-    except Exception:
-        return None
-    if r.returncode != 0:
-        return None
-    bodies = []
-    for line in (r.stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(obj, dict) and isinstance(obj.get("body"), str):
-            bodies.append(obj["body"])
-    return bodies
+    """(bodies, err) for `<slug>#<number>` via gates.ghread -- REST-first
+    (`gh api …/comments`, a core-budget call that survives the owner
+    identity's hourly GraphQL exhaustion) with a `gh issue view` GraphQL
+    fallback. `err` is a `gate-unavailable:<reason>` string when BOTH paths
+    fail (quota/transport), so check_issue blocks fail-closed with an HONEST
+    reason -- never the words "missing design" (#1070 item 1). Bodies are in
+    CREATION order on success."""
+    return ghread.read_comment_bodies(number, slug, cwd=cwd, timeout=timeout)
 
 
 def check_issue(number, slug, cwd, fetch=None, fable_id=None):
@@ -191,7 +182,21 @@ def check_issue(number, slug, cwd, fetch=None, fable_id=None):
     fetch = fetch or _fetch_comment_bodies
     fable_id = fable_id or _fable_id()
     accepted = {_norm_model(fable_id)}
-    bodies = fetch(slug, number, cwd)
+    res = fetch(slug, number, cwd)
+    # #1070 item 1 -- the fetch may return the new `(bodies, err)` tuple (a
+    # ghread read: `err` a `gate-unavailable:<reason>` when BOTH REST and
+    # GraphQL failed) OR, for the pre-#1070 injected-test contract, a bare
+    # list / None. Normalise both.
+    if isinstance(res, tuple):
+        bodies, err = res
+    else:
+        bodies, err = res, None
+    if err:
+        # a READ failure (quota/transport) -- block fail-closed but with an
+        # HONEST reason; NEVER "no design" (a genuinely-present main design must
+        # not read as missing just because the owner identity's GraphQL budget
+        # is exhausted). #1070.
+        return False, err
     if bodies is None:
         return False, ("could not read #%d's comments (gh error / no network) "
                        "-- refusing (fail-closed)" % number)
@@ -212,7 +217,14 @@ def check_issue(number, slug, cwd, fetch=None, fable_id=None):
     return True, "ok"
 
 
-def evaluate(payload, fetch=None, resolve_slug=None, fable_id=None):
+def _is_pull_request(number, slug, cwd):
+    """(is_pr, err) via a single REST `GET /issues/<N>` (GitHub's issues
+    endpoint returns a PR too, carrying a `pull_request` key). REST survives the
+    hourly GraphQL exhaustion. `is_pr` is None (UNKNOWN) when the read fails."""
+    return ghread.is_pull_request(number, slug, cwd=cwd)
+
+
+def evaluate(payload, fetch=None, resolve_slug=None, fable_id=None, is_pr=None):
     """('allow', reason) or ('block', reason). Pure of process exit so tests can
     assert the verdict directly; `main()` maps it to allow()/emit_block_stderr()."""
     tool = field_of(payload, "tool_name", "")
@@ -254,9 +266,29 @@ def evaluate(payload, fetch=None, resolve_slug=None, fable_id=None):
                          "refusing an autopilot-worker dispatch that cannot be "
                          "design-by verified (fail-closed)")
 
+    # #1070 item 2 -- a dispatch prompt legitimately names an open PR it rides
+    # ("this batch rides PR #201, do not gh pr create"); a PR carries no design
+    # comment, so demanding `Design-by:` for it is a false block (#1079). Resolve
+    # each `#N` as PR vs issue via one REST `GET /issues/<N>` (a PR carries
+    # `pull_request`) and SKIP the PRs; an UNKNOWN read (gate-unavailable) is
+    # kept as an issue so its own comment read produces the honest verdict.
+    is_pr_fn = is_pr or _is_pull_request
+    checkable = []
+    for n in issues:
+        pr, _perr = is_pr_fn(n, slug, cwd)
+        if pr is True:
+            _log("%s\tSKIP-PR\t%s\t#%d" % (
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), cwd, n))
+            continue
+        checkable.append(n)
+    if not checkable:
+        # every named ref resolved to a PR -> there is no issue to design-check
+        # (a PR cannot carry a design comment); nothing to refuse.
+        return "allow", "every named ref is a PR -- no issue to design-check"
+
     # #1060 L3a: the Fable id is the only accepted design model on every box (the
     # #1062 L2 pilot-alias acceptance is removed -- the main always designs).
-    for n in issues:
+    for n in checkable:
         ok, reason = check_issue(n, slug, cwd, fetch=fetch, fable_id=fable_id)
         if not ok:
             return "block", reason

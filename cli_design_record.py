@@ -31,6 +31,42 @@ import cli_authorship
 DESIGN_STEM = "Design"
 
 
+def design_record_help_template():
+    """#1070 item 5 -- the full design-body SECTION TEMPLATE, printed as the
+    `design-record --help` epilog so the required sections are discoverable in
+    ONE place instead of by three failed `design-record` attempts (#1079). The
+    section headings here match what `validate_body` (and the design_gate
+    classifiers) require; fill the placeholders with real content (e.g. the
+    `Architektúra:` value must name the actual structure/topology + framework)
+    and the body passes the gate -- the template shows WHICH sections are
+    mandatory, it is not itself a gate-valid body."""
+    return (
+        "Design body template (the gate requires every section below):\n"
+        "\n"
+        "  Triage: trivial | non-trivial\n"
+        "      (a TRIVIAL scoped fix needs one honest paragraph; a NON-TRIVIAL\n"
+        "       ticket needs the numbered Approaches + Trade-off comparison\n"
+        "       + Architektúra section below.)\n"
+        "\n"
+        "  ## Root cause\n"
+        "      <the cause traced in the CODE, not the symptom restated>\n"
+        "\n"
+        "  ## Approaches   (non-trivial only)\n"
+        "      Approach 1 (chosen) — <what + why>\n"
+        "      Approach 2 — <the rejected alternative> — Rejected: <why>\n"
+        "      Approach 3 — <optional third> — Rejected: <why>\n"
+        "      Trade-off comparison: <cost/benefit of 1 vs 2 (vs 3)>\n"
+        "\n"
+        "  Architektúra: <structure/topology> + <framework used, OR an\n"
+        "      evidenced why-none-fits from an actually-read source>\n"
+        "\n"
+        "  Shared-benefit: <who beyond the requester this helps, or an\n"
+        "      explicit single-client disposition>\n"
+        "\n"
+        "  Design-by: main <model>   (appended AUTOMATICALLY from the session's\n"
+        "      own transcript — do NOT hand-type it; a worktree stamps worker)\n")
+
+
 def _log_stamp(stamp, cwd, issue, url):
     """Append every design-record post to ~/.claude/design-by-gate.log (the same
     log the gates use) — cwd + stamp + url. Auditability for the cwd-spoof
