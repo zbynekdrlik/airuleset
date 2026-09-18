@@ -54,10 +54,12 @@ from pathlib import Path
 from cli_claude_scripts import (
     CLAUDE_LAUNCH_SCRIPT_DEST,
     CLAUDE_IMPL_LAUNCH_SCRIPT_DEST,
+    CLAUDE_IMPLEMENTER_PROMPT_DEST,
     CLAUDE_HISTORY_SCRIPT_DEST,
     CLAUDE_HISTORY_POPUP_SCRIPT_DEST,
     render_claude_launch_script,
     render_claude_impl_launch_script,
+    render_claude_implementer_prompt,
     render_claude_history_script,
     render_claude_history_popup_script,
 )
@@ -100,7 +102,8 @@ ULTRACODE_BASHRC_BLOCK = (
 def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
                               history_script_path: Path = None,
                               popup_script_path: Path = None,
-                              impl_script_path: Path = None) -> bool:
+                              impl_script_path: Path = None,
+                              impl_prompt_path: Path = None) -> bool:
     """Install/refresh the managed claude launcher (#77) AND the
     claude-history companion (#267 -- same mechanism, same self-heal
     discipline, deliberately extended in place rather than given its own
@@ -137,6 +140,7 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     hpath = history_script_path or CLAUDE_HISTORY_SCRIPT_DEST
     ppath = popup_script_path or CLAUDE_HISTORY_POPUP_SCRIPT_DEST
     ipath = impl_script_path or CLAUDE_IMPL_LAUNCH_SCRIPT_DEST
+    ippath = impl_prompt_path or CLAUDE_IMPLEMENTER_PROMPT_DEST
 
     spath.parent.mkdir(parents=True, exist_ok=True)
     spath.write_text(render_claude_launch_script())
@@ -153,6 +157,16 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     os.chmod(str(ipath), 0o755)
     if not ipath.exists():
         raise RuntimeError(f"claude-impl launcher script missing right after write: {ipath}")
+
+    # #1060 L3b: the IMPLEMENTER system prompt (agents/implementer.md), rendered
+    # verbatim to ~/.claude/airuleset-implementer.md — the file the impl launcher
+    # loads with --append-system-prompt-file. Written UNCONDITIONALLY (same
+    # self-heal discipline as the launchers); inert off a marker box (only the
+    # impl window loads it), so a non-implementer box carries a harmless copy.
+    ippath.parent.mkdir(parents=True, exist_ok=True)
+    ippath.write_text(render_claude_implementer_prompt())
+    if not ippath.exists():
+        raise RuntimeError(f"implementer prompt missing right after write: {ippath}")
 
     hpath.parent.mkdir(parents=True, exist_ok=True)
     hpath.write_text(render_claude_history_script())
