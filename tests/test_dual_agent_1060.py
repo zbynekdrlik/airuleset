@@ -260,5 +260,157 @@ class TestDualDispatchClauseLock(unittest.TestCase):
             self.assertNotEqual(gr.skill_dual_drift(stripped), [])
 
 
+# --------------------------------------------------------------------------- #
+# Item 8 — the watchdog impl-window presence line + relaunch (fake tmux run)
+# --------------------------------------------------------------------------- #
+class _FakeTmux:
+    """A fake `run(argv)` for the watchdog: returns canned `list-windows`
+    output and records every OTHER tmux argv it is handed."""
+    def __init__(self, windows_output=""):
+        self.windows_output = windows_output
+        self.calls = []
+
+    def __call__(self, argv):
+        self.calls.append(list(argv))
+        if argv[:2] == ["tmux", "list-windows"]:
+            return self.windows_output
+        return ""
+
+    def new_window_calls(self):
+        return [c for c in self.calls if c[:2] == ["tmux", "new-window"]]
+
+
+class TestWatchdogImplWindowPresence(unittest.TestCase):
+    def setUp(self):
+        import watchdog.tmux_io as tmux_io
+        self.tmux_io = tmux_io
+        self.marker = {"base_url": "http://gw", "key_file": "~/.secrets/k",
+                       "main": "impl-main", "sub": "impl-sub", "fast": "impl-fast",
+                       "cwd": "/home/miva1/devel/odoo/odoo-erp"}
+
+    def test_no_marker_is_a_noop_no_line(self):
+        fake = _FakeTmux("miva1\t0\tmiva1\n")
+        logs = []
+        rc = self.tmux_io.impl_window_presence(None, run=fake, logs=logs)
+        self.assertIsNone(rc)
+        self.assertEqual(fake.new_window_calls(), [])
+        self.assertEqual(logs, [])
+
+    def test_impl_window_present_no_relaunch(self):
+        fake = _FakeTmux("miva1\t0\tmiva1\nmiva1\t1\timpl\n")
+        logs = []
+        rc = self.tmux_io.impl_window_presence(self.marker, run=fake, logs=logs)
+        self.assertEqual(rc, "present")
+        self.assertEqual(fake.new_window_calls(), [])
+        self.assertTrue(any("impl window present" in x for x in logs))
+
+    def test_impl_window_missing_relaunched(self):
+        fake = _FakeTmux("miva1\t0\tmiva1\n")
+        logs = []
+        rc = self.tmux_io.impl_window_presence(self.marker, run=fake, logs=logs)
+        self.assertEqual(rc, "relaunched")
+        nw = fake.new_window_calls()
+        self.assertEqual(len(nw), 1)
+        argv = nw[0]
+        self.assertIn("-n", argv)
+        self.assertEqual(argv[argv.index("-n") + 1], "impl")
+        self.assertIn("-t", argv)
+        self.assertEqual(argv[argv.index("-t") + 1], "miva1")
+        # opens in the marker cwd (it exists nowhere on this box -> may be
+        # omitted; assert the DECISION line regardless)
+        self.assertTrue(any("impl window missing — relaunched" in x for x in logs))
+        # keeps the pane visible on a refusal
+        self.assertTrue(any(c[:2] == ["tmux", "set-window-option"] and
+                            "remain-on-exit" in c for c in fake.calls))
+
+    def test_relaunch_uses_marker_cwd_when_it_exists(self):
+        with tempfile.TemporaryDirectory() as td:
+            m = dict(self.marker, cwd=td)
+            fake = _FakeTmux("miva1\t0\tmiva1\n")
+            self.tmux_io.impl_window_presence(m, run=fake)
+            argv = fake.new_window_calls()[0]
+            self.assertIn("-c", argv)
+            self.assertEqual(argv[argv.index("-c") + 1], td)
+
+    def test_no_session_never_creates_one(self):
+        fake = _FakeTmux("")  # no tmux session on the box
+        logs = []
+        rc = self.tmux_io.impl_window_presence(self.marker, run=fake, logs=logs)
+        self.assertEqual(rc, "no-session")
+        self.assertEqual(fake.new_window_calls(), [])
+
+    def test_dry_run_never_relaunches(self):
+        fake = _FakeTmux("miva1\t0\tmiva1\n")
+        logs = []
+        rc = self.tmux_io.impl_window_presence(self.marker, run=fake, logs=logs,
+                                               dry_run=True)
+        self.assertEqual(rc, "would-relaunch")
+        self.assertEqual(fake.new_window_calls(), [])
+
+    def test_reexported_on_watchdog(self):
+        import watchdog
+        self.assertIs(watchdog.impl_window_presence,
+                      self.tmux_io.impl_window_presence)
+
+
+# --------------------------------------------------------------------------- #
+# Item 8a — the webterm session-created hook creates the marker box's impl window
+# --------------------------------------------------------------------------- #
+class TestSessionCreatedHookImplWindow(unittest.TestCase):
+    def setUp(self):
+        import cli_tmux_provisioning as ctp
+        self.ctp = ctp
+        self.marker = {"base_url": "http://gw", "key_file": "~/.secrets/k",
+                       "main": "impl-main", "sub": "impl-sub", "fast": "impl-fast",
+                       "cwd": "/home/miva1/devel/odoo/odoo-erp"}
+
+    def test_non_marker_box_byte_identical(self):
+        # marker=None -> byte-identical to today's bare rename-window hook.
+        v = self.ctp._session_created_hook_value("miva1", [], marker=None)
+        self.assertEqual(v, "rename-window miva1")
+
+    def test_marker_box_extends_hook_with_impl_create(self):
+        v = self.ctp._session_created_hook_value("miva1", [], marker=self.marker)
+        self.assertIn("rename-window miva1", v)
+        self.assertIn("run-shell 'S=#{session_name}; ", v)
+        self.assertIn("new-window -d -t \"$S\" -n impl", v)
+        # marker-gated at shell time + dedup by window name + cwd baked + visible
+        self.assertIn("airuleset-model-backend.json", v)
+        self.assertIn("##{window_name}", v)   # doubled for the outer run-shell
+        self.assertIn("/home/miva1/devel/odoo/odoo-erp", v)
+        self.assertIn("remain-on-exit on", v)
+
+    def test_marker_box_still_creates_declared_windows_too(self):
+        # a marker box that ALSO declares a non-primary window keeps both.
+        windows = [{"name": "miva1", "cwd": "~/devel/x"},
+                   {"name": "miva1-infra", "cwd": "devel/x-infra"}]
+        v = self.ctp._session_created_hook_value("miva1", windows,
+                                                 marker=self.marker)
+        self.assertIn("-n miva1-infra", v)   # declared window body present
+        self.assertIn("-n impl", v)          # impl window present too
+
+    def test_marker_uses_single_quote_safe_body(self):
+        # the whole run-shell body is wrapped in single quotes -> it must carry
+        # NO single quote of its own (the _managed_windows_create_body contract).
+        v = self.ctp._session_created_hook_value("miva1", [], marker=self.marker)
+        body = v.split("run-shell '", 1)[1]
+        body = body.rsplit("'", 1)[0]
+        self.assertNotIn("'", body)
+
+
+class TestAttachBlockImplDedup(unittest.TestCase):
+    def test_attach_block_dedups_impl_window(self):
+        # An interactive-ssh new-session -d also fires the -g session-created
+        # hook, which may already have created impl; the attach block must NOT
+        # create a second one -> it guards on a list-windows dedup check.
+        import cli_bashrc_appliers as cba
+        block = cba.render_tmux_attach_block("miva1")
+        # the impl creation is guarded by a window-name dedup check
+        self.assertIn("list-windows", block)
+        self.assertIn("impl", block)
+        # the dedup uses grep -Fxq impl (skip if it already exists)
+        self.assertIn("grep -Fxq impl", block)
+
+
 if __name__ == "__main__":
     unittest.main()
