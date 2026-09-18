@@ -783,13 +783,20 @@ class TestStateFileAliasing(unittest.TestCase):
 
     def test_cadence_job_never_spawns_subprocess_with_audit_fn(self):
         """#874 fix-forward (CI GATE): with an injected ``audit_fn`` (and a fake
-        ``gh_runner``) the cadence job must NOT spawn ANY real subprocess. The
-        daily fleet audit (``run_fleet`` -> real ``inventory_box`` scan + a real
-        ssh to every host, ~68 s in CI) is the only subprocess path in the job,
-        so ``audit_fn`` must fully replace it. RED before the seam exists:
-        ``audit_fn`` is not yet a parameter (TypeError); once wired, a job that
-        still reached ``run_fleet`` would trip the patched ``subprocess.run``.
-        This is the hermeticity lock for the 68 s
+        ``gh_runner``) the cadence job must run the injected audit and spawn NO
+        real subprocess. The daily fleet audit (``run_fleet`` -> real
+        ``inventory_box`` scan + ssh to every host, ~68 s in CI) is the only
+        subprocess path in the job, so ``audit_fn`` must fully replace it.
+
+        RED before the seam exists: ``audit_fn`` is not yet a parameter
+        (TypeError). GREEN teeth are TWO independent assertions: (a) the injected
+        ``audit_fn`` was called exactly once (the seam is actually used); (b) the
+        job completed the daily target-governance delta. If a regression made the
+        job ignore ``audit_fn`` and call ``run_fleet`` again, ``subprocess.run``
+        is patched to raise -- the job's own ``except Exception`` swallows that
+        and early-returns, so the target-governance log never appears and (b)
+        fails; ``audit_fn`` also would not be called, so (a) fails too. This is
+        the hermeticity lock for the 68 s
         ``test_create_fires_at_most_once_across_two_polls`` culprit."""
         from watchdog.mdreview_cadence import mdreview_cadence_job
         import cli_mdreview_audit
@@ -809,7 +816,10 @@ class TestStateFileAliasing(unittest.TestCase):
                     return json.dumps({"state": "open", "closedAt": ""}), 0
                 return "", 0
 
+            audit_calls = []
+
             def fake_audit(fleet=True):
+                audit_calls.append(fleet)
                 return {"schema": 1, "date": "2026-09-18",
                         "boxes": [], "failed": [], "skipped": []}
 
@@ -822,7 +832,12 @@ class TestStateFileAliasing(unittest.TestCase):
                             now, {}, state_path=str(sp),
                             gh_runner=fake_gh, audit_fn=fake_audit)
 
-            # No AssertionError propagated => no subprocess.run was reached.
+            # (a) the seam was actually used (exactly once, for the fleet audit).
+            self.assertEqual(len(audit_calls), 1,
+                             f"audit_fn must be the single audit path: {audit_calls}")
+            # (b) the job reached + logged the daily delta => no real subprocess
+            # short-circuited it (a reverted job's caught AssertionError would
+            # early-return before this line).
             self.assertTrue(any("target-governance" in ln for ln in logs),
                             f"audit_fn path must still run the daily delta: {logs}")
 

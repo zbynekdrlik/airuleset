@@ -361,7 +361,7 @@
     "tests/test_managed_plugins.py": 1377,
     "tests/test_managed_repo_sweeps.py": 1069,
     "tests/test_marek_decommission_882.py": 86,
-    "tests/test_mdreview_audit.py": 1066,
+    "tests/test_mdreview_audit.py": 1081,
     "tests/test_mdreview_content_axes.py": 124,
     "tests/test_mdreview_skill_doctor_893.py": 107,
     "tests/test_mdreview_slimming.py": 438,
