@@ -75,38 +75,33 @@ class TestDesignGateReceivingCLI(unittest.TestCase):
             fable_id=FABLE, resolve_slug=lambda cwd: None)
         self.assertEqual(rc, 2)
 
-    def test_main_routes_issue_argv_to_cli_subprocess(self):
-        # End-to-end wiring: `python3 gates/designdispatch.py --issue N --slug`
-        # routes to the CLI and exits with the gate's code, using a fake `gh`.
+    def _run_gate_subprocess(self, comment_body):
+        # End-to-end wiring: `python3 -m gates.designdispatch --issue N --slug`
+        # (the canonical module invocation the implementer.md documents) routes
+        # to the CLI and exits with the gate's code, using a fake `gh`.
         with tempfile.TemporaryDirectory() as td:
             gh = Path(td) / "gh"
-            # a WORKER design comment -> the gate must block (exit 2).
+            body = comment_body.replace("'", "'\\''")
             gh.write_text(
                 '#!/usr/bin/env bash\n'
-                'echo \'{"body":"Design-by: worker claude-opus-4-8"}\'\n')
+                "echo '{\"body\":\"%s\"}'\n" % body)
             gh.chmod(0o755)
             env = dict(os.environ)
             env["PATH"] = str(td) + os.pathsep + env["PATH"]
+            env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
             r = subprocess.run(
-                [sys.executable, str(REPO / "gates" / "designdispatch.py"),
+                [sys.executable, "-P", "-m", "gates.designdispatch",
                  "--issue", "1060", "--slug", "owner/repo"],
-                capture_output=True, text=True, env=env)
-            self.assertEqual(r.returncode, 2, r.stderr)
+                capture_output=True, text=True, env=env, cwd=str(REPO))
+            return r
+
+    def test_main_routes_issue_argv_to_cli_subprocess(self):
+        r = self._run_gate_subprocess("Design-by: worker claude-opus-4-8")
+        self.assertEqual(r.returncode, 2, r.stderr)
 
     def test_main_routes_issue_argv_ok_subprocess(self):
-        with tempfile.TemporaryDirectory() as td:
-            gh = Path(td) / "gh"
-            gh.write_text(
-                '#!/usr/bin/env bash\n'
-                'echo \'{"body":"Design-by: main %s"}\'\n' % FABLE)
-            gh.chmod(0o755)
-            env = dict(os.environ)
-            env["PATH"] = str(td) + os.pathsep + env["PATH"]
-            r = subprocess.run(
-                [sys.executable, str(REPO / "gates" / "designdispatch.py"),
-                 "--issue", "1060", "--slug", "owner/repo"],
-                capture_output=True, text=True, env=env)
-            self.assertEqual(r.returncode, 0, r.stderr)
+        r = self._run_gate_subprocess("Design-by: main %s" % FABLE)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 # --------------------------------------------------------------------------- #
