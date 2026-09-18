@@ -212,7 +212,10 @@ class Preflight1070(unittest.TestCase):
         # head -> still blocks (branch scoping does not weaken the real gate).
         w = _watch("bounce-unanswered", ids=["1"], gk_ts=2000.0, head_ts=1000.0,
                    sha="cafe123", branch="b")
-        msg = self._pf("READY-FOR-REVIEW: x\n🔴 1 fixed", w, branch="b")
+        # commits_since=None (git can't answer) -> head_ts fallback: 1000 < 2000
+        # -> no new commit -> parseable head -> block (hermetic, no real git).
+        msg = self._pf("READY-FOR-REVIEW: x\n🔴 1 fixed", w, branch="b",
+                       commits_since=lambda br, ts, cwd: None)
         self.assertIsNotNone(msg)
         self.assertIn("no new commit since BOUNCE", msg)
 

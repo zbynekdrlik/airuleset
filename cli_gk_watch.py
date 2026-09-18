@@ -26,6 +26,12 @@ import re
 _GK_STATE_MARKER_RE = re.compile(
     r"gk-state:\s*(BOUNCE|ACCEPT|ADVISORY)\b", re.IGNORECASE)
 
+# #1070 item 6 -- a `Branch:` line a gk verdict may carry, so the hand-off
+# preflight can scope a BOUNCE to the readiness branch (a bounce for a
+# different, already-merged phase's branch is not this readiness's). Bold/leading
+# markdown tolerant, first value token.
+_BRANCH_RE = re.compile(r"(?im)^[ \t>*#-]*\**[ \t]*Branch\**[ \t]*:[ \t]*\**[ \t]*(\S+)")
+
 # A git sha attached with `@` (7-40 hex chars), allowing the optional space the
 # gk `**Počty (otvorené @ <sha>)**` header uses as well as the marker's
 # space-less `@<sha>`. The literal `@ sha` placeholder in an unfilled template
@@ -218,7 +224,8 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
 
     def _snapshot(g):
         return {"id": g["id"], "verdict": g["verdict"], "created_at": g["ts"],
-                "sha": g["sha"], "ids": list(g["ids"])}
+                "sha": g["sha"], "ids": list(g["ids"]),
+                "branch": g.get("branch")}
 
     gk_comments = []          # {ts, id, verdict, sha, ids}
     stream_comments = []      # {ts, body}
@@ -239,8 +246,10 @@ def watch_issue(issue, *, fetch, gk_login, self_login,
         if match(login, gk_login) and not is_rfr:
             verdict, sha, ids = classify_gk_comment(body)
             if verdict is not None and ts is not None:
+                bm = _BRANCH_RE.search(body)
                 gk_comments.append({"ts": ts, "id": cid, "verdict": verdict,
-                                    "sha": sha, "ids": ids})
+                                    "sha": sha, "ids": ids,
+                                    "branch": bm.group(1) if bm else None})
         if match(login, self_login):
             stream_comments.append({"ts": ts, "body": body})
             if is_rfr and ts is not None and (rfr_ts is None or ts > rfr_ts):
