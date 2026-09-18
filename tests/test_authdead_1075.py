@@ -291,7 +291,10 @@ class Job1CredentialFresh(unittest.TestCase):
         pre = {self._authdead_key(): {"first_401_ts": now - 3600, "pinged": False,
                                       "continued": True, "continued_ts": now - 60,
                                       "relaunched": False, "last_seen": now - 60}}
-        with unittest.mock.patch("watchdog.goal._recovery_recent_human", return_value=False), \
+        # the destructive respawn keystroke is opt-in (AIRULESET_AUTHDEAD_ACTION,
+        # the resurrect.py precedent) — ON here to prove it fires once.
+        with unittest.mock.patch.dict(os.environ, {"AIRULESET_AUTHDEAD_ACTION": "1"}), \
+             unittest.mock.patch("watchdog.goal._recovery_recent_human", return_value=False), \
              unittest.mock.patch("watchdog.resurrect.pane_is_bare_idle", return_value=False):
             logs, keys, _ = self._harness(now, cred_mtime=now - 1800, preseed=pre)
         resp = self._respawned(keys)
@@ -312,7 +315,8 @@ class Job1CredentialFresh(unittest.TestCase):
         pre = {self._authdead_key(): {"first_401_ts": now - 3600, "pinged": False,
                                       "continued": True, "continued_ts": now - 60,
                                       "relaunched": False, "last_seen": now - 60}}
-        with unittest.mock.patch("watchdog.goal._recovery_recent_human", return_value=True), \
+        with unittest.mock.patch.dict(os.environ, {"AIRULESET_AUTHDEAD_ACTION": "1"}), \
+             unittest.mock.patch("watchdog.goal._recovery_recent_human", return_value=True), \
              unittest.mock.patch("watchdog.resurrect.pane_is_bare_idle", return_value=False):
             logs, keys, _ = self._harness(now, cred_mtime=now - 1800, preseed=pre)
         self.assertEqual(self._respawned(keys), [],
@@ -325,7 +329,8 @@ class Job1CredentialFresh(unittest.TestCase):
         pre = {self._authdead_key(): {"first_401_ts": now - 3600, "pinged": False,
                                       "continued": True, "continued_ts": now - 60,
                                       "relaunched": False, "last_seen": now - 60}}
-        with unittest.mock.patch("watchdog.goal._recovery_recent_human", return_value=False), \
+        with unittest.mock.patch.dict(os.environ, {"AIRULESET_AUTHDEAD_ACTION": "1"}), \
+             unittest.mock.patch("watchdog.goal._recovery_recent_human", return_value=False), \
              unittest.mock.patch("watchdog.resurrect.pane_is_bare_idle", return_value=True):
             logs, keys, _ = self._harness(now, cred_mtime=now - 1800, preseed=pre)
         self.assertEqual(self._respawned(keys), [],
@@ -333,6 +338,25 @@ class Job1CredentialFresh(unittest.TestCase):
                          "NEVER relaunched: %r" % keys)
         self.assertTrue(any("bare shell" in ln or "bare-shell" in ln for ln in logs),
                         "the stopped-session skip must be journalled: %r" % logs)
+
+    def test_relaunch_disabled_by_default_journals_intent(self):
+        # AIRULESET_AUTHDEAD_ACTION unset (default OFF) → the decision is
+        # journalled but NO respawn keystroke fires (the #947 / resurrect.py
+        # opt-in-until-verified discipline).
+        now = 1_800_000_000.0
+        pre = {self._authdead_key(): {"first_401_ts": now - 3600, "pinged": False,
+                                      "continued": True, "continued_ts": now - 60,
+                                      "relaunched": False, "last_seen": now - 60}}
+        env = dict(os.environ)
+        env.pop("AIRULESET_AUTHDEAD_ACTION", None)
+        with unittest.mock.patch.dict(os.environ, env, clear=True), \
+             unittest.mock.patch("watchdog.goal._recovery_recent_human", return_value=False), \
+             unittest.mock.patch("watchdog.resurrect.pane_is_bare_idle", return_value=False):
+            logs, keys, _ = self._harness(now, cred_mtime=now - 1800, preseed=pre)
+        self.assertEqual(self._respawned(keys), [],
+                         "with the flag OFF the respawn keystroke must NOT fire: %r" % keys)
+        self.assertTrue(any("would relaunch" in ln and "disabled" in ln for ln in logs),
+                        "the OFF decision must be journalled (observable): %r" % logs)
 
 
 # --------------------------------------------------------------------------- #
