@@ -636,6 +636,7 @@ from watchdog.transcripts import (  # noqa: E402
     _entry_text as _entry_text,
     transcript_last_error as transcript_last_error,
     transcript_first_error_ts as transcript_first_error_ts,      # #1075
+    transcript_last_error_ts as transcript_last_error_ts,        # #1075 fix-forward
     _submit_confirmed as _submit_confirmed,
     count_live_workers as count_live_workers,   # #486 G2 -> consumed by G3
     lane_has_live_evidence as lane_has_live_evidence,   # #571 -> lane working-no-tasks
@@ -4067,8 +4068,19 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     # is historical → journal one decision line, drop any episode
                     # state, `continue` (no nudge, no badge, no ping). A genuine
                     # episode (process start <= first 401) is byte-identical.
+                    #
+                    # Anchor the predicate on the LATEST 401 in the trailing run,
+                    # NOT `first_401_seed` (the earliest): a session RESTARTED but
+                    # still revoked merges its OLD + NEW 401s into ONE contiguous
+                    # run (a resume nudge is a plain `user` turn that does not end
+                    # it), so the earliest-401 anchor would mask the genuinely
+                    # dead new process forever (#1075 fix-forward review A#-c). The
+                    # EPISODE seed stays `first_401_seed` (the rotation time).
+                    last_401 = transcript_last_error_ts(tpath)
+                    if last_401 is None:
+                        last_401 = first_401_seed
                     proc_start = proc_start_fn(pid, run)
-                    if authdead_is_historical(first_401_seed, proc_start):
+                    if authdead_is_historical(last_401, proc_start):
                         logs.append(
                             "auth: 401 record (%s) predates the running process "
                             "(started %s) — historical, no action [%s]"

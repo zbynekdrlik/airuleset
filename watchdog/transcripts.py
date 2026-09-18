@@ -465,6 +465,48 @@ def transcript_first_error_ts(path):
     return first
 
 
+def transcript_last_error_ts(path):
+    """#1075 fix-forward — epoch of the MOST RECENT `isApiErrorMessage` in the
+    transcript's CURRENT trailing stall run (the NEWEST 401 the running process
+    has produced), or None. SAME trailing-run walk as `transcript_first_error_ts`
+    (STOP at the first genuine-progress entry), but returns the LATEST 401 epoch
+    (the first one hit in the newest→oldest scan) instead of the earliest.
+
+    The historical-401 guard (#1075 fix-forward) compares THIS against the
+    running process's start epoch: a process is HISTORICAL (inherited a leftover
+    401 it did not produce) ONLY when even its NEWEST trailing 401 predates its
+    start. Anchoring the guard on `transcript_first_error_ts` (the earliest 401)
+    instead would MASK a session RESTARTED-but-still-revoked whose OLD and NEW
+    401s merge into ONE contiguous run (a resume nudge is a plain-text `user`
+    turn that does not end the run) — the old first-401 would stay the anchor and
+    a genuinely dead new process would be skipped forever (no badge, no ping),
+    reintroducing the #1075 silent-death class. The EPISODE seed stays
+    `transcript_first_error_ts` (the rotation time, for the "since HH:MM" surface
+    and the AUTH_STALE_OWNER_S timer, #1075 review A#3) — this helper is used ONLY
+    for the historical predicate, never for the seed."""
+    for entry in reversed(_iter_jsonl_tail(path, max_lines=200)):
+        if not isinstance(entry, dict):
+            continue
+        t = entry.get("type")
+        if t == "user":
+            if _entry_has_tool_result(entry):
+                break            # tool_result → genuine progress → end of the run
+            continue             # plain-text user (a resume nudge) → keep scanning
+        if t != "assistant":
+            continue             # system / bookkeeping → skip
+        if entry.get("isApiErrorMessage") is True:
+            ep = _jsonl_entry_epoch(json.dumps(entry))
+            if ep is not None:
+                return ep        # reversed = newest→oldest, FIRST found = latest
+            continue             # a 401 with no parseable ts → keep scanning
+        if _entry_has_tool_use(entry):
+            break                # recovery activity → end of the run
+        if (_entry_text(entry) or "").strip() in _SENTINELS:
+            continue             # synthetic / tool-only text → skip
+        break                    # a real non-error reply → end of the run
+    return None
+
+
 def _submit_confirmed(tpath, baseline_size, text):
     """True iff the transcript at `tpath` GREW past `baseline_size` bytes with
     a NEW top-level `user` turn whose text carries `text` — the STRUCTURED

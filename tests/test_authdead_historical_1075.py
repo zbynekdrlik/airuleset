@@ -132,15 +132,24 @@ class Job1HistoricalGuard(unittest.TestCase):
     SID = "12340000-5678-4abc-9def-000011112222"
 
     def _harness(self, now, first_401, cred_mtime, proc_start, capture=IDLE_PROMPT_CAP,
-                 preseed=None):
+                 preseed=None, dry_run=False, later_401=None):
         tmp = TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         proj = Path(tmp.name) / "projects"
         enc = wd.encode_project_dir(self.CWD)
         (proj / enc).mkdir(parents=True)
         tpath = proj / enc / (self.SID + ".jsonl")
-        # the 401 carries its OWN timestamp → transcript_first_error_ts pins it
-        _write_jsonl(tpath, [_assistant_api_error(REVOKED_BANNER, ts=_iso(first_401))])
+        # the 401 carries its OWN timestamp → transcript_first_error_ts pins it.
+        # `later_401` appends a SECOND, newer 401 in the SAME contiguous trailing
+        # run (separated by a plain-text resume nudge that does NOT end the run) —
+        # the restart-but-still-revoked shape: first_error_ts stays `first_401`,
+        # last_error_ts becomes `later_401`.
+        entries = [_assistant_api_error(REVOKED_BANNER, ts=_iso(first_401))]
+        if later_401 is not None:
+            entries.append({"type": "user", "message": {"role": "user",
+                            "content": [{"type": "text", "text": "continue"}]}})
+            entries.append(_assistant_api_error(REVOKED_BANNER, ts=_iso(later_401)))
+        _write_jsonl(tpath, entries)
         os.utime(tpath, (now - 700, now - 700))
         state_path = Path(tmp.name) / "state.json"
         if preseed is not None:
@@ -167,7 +176,7 @@ class Job1HistoricalGuard(unittest.TestCase):
         def fake_send(body, **kw):
             pings.append((body, kw))
 
-        logs = wd.run_once(now=now, dry_run=False, run=fake_run, send_fn=fake_send,
+        logs = wd.run_once(now=now, dry_run=dry_run, run=fake_run, send_fn=fake_send,
                            projects_dir=proj, state_path=state_path,
                            pending_prefix=str(Path(tmp.name) / "pending-"),
                            grace=300, interval=300, max_nudges=3,
@@ -215,9 +224,14 @@ class Job1HistoricalGuard(unittest.TestCase):
 
     def test_historical_401_drops_existing_episode_state(self):
         now = 1_800_000_000.0
+        # `last_seen` RECENT (< wait_clear=90) so the end-of-sweep age cleanup
+        # (which prunes an aged apierr-authdead: key regardless) does NOT fire —
+        # this isolates the DROP to the historical guard's own state.pop, not the
+        # cleanup (a now-300 last_seen would be pruned by the cleanup and prove
+        # nothing about the guard).
         pre = {self._ad_key(): {"first_401_ts": now - 3600, "pinged": True,
                                 "continued": True, "relaunched": False,
-                                "last_seen": now - 300}}
+                                "last_seen": now - 30}}
         logs, keys, pings, state_path = self._harness(
             now, first_401=now - 3600, cred_mtime=now - 60, proc_start=now - 40,
             preseed=pre)
@@ -239,6 +253,60 @@ class Job1HistoricalGuard(unittest.TestCase):
                          "gets exactly one enriched continue: %r" % keys)
         self.assertFalse(any("historical, no action" in ln for ln in logs),
                          "a genuine episode must NOT log the historical line: %r" % logs)
+
+    def test_restarted_but_still_revoked_is_NOT_masked(self):
+        # review should-fix (correctness): a session RESTARTED into a still-dead
+        # credential 401s AGAIN after restart. Its OLD (pre-restart) and NEW
+        # (post-restart) 401s merge into ONE contiguous trailing run, so
+        # `first_401` stays the pre-restart time — but the NEWEST 401 was produced
+        # BY the running process. The guard must anchor on the LATEST 401 → NOT
+        # historical → the credential-dead handler runs (badge + owner ping),
+        # never a silent skip (the #1075 silent-death class). Anchoring on the
+        # EARLIEST 401 (the pre-fix bug) would classify this historical and mask
+        # it forever.
+        now = 1_800_000_000.0
+        old_401 = now - 7200            # Thursday's revoke (pre-restart)
+        new_401 = now - 60             # the restarted process's OWN 401
+        logs, keys, pings, state_path = self._harness(
+            now, first_401=old_401, later_401=new_401,
+            cred_mtime=now - 100_000,   # credential STILL stale (not re-logged)
+            proc_start=now - 3600)      # restarted BETWEEN old_401 and new_401
+        self.assertFalse(any("historical, no action" in ln for ln in logs),
+                         "a restarted-but-still-revoked session (its OWN newest "
+                         "401 postdates its start) must NOT be classified "
+                         "historical: %r" % logs)
+        self.assertTrue(any("auth:" in ln and "stale" in ln for ln in logs),
+                        "the credential-dead STALE handler must run for the "
+                        "genuinely dead restarted process: %r" % logs)
+        cache = state_path.parent / "auth-guard" / "status.json"
+        self.assertTrue(cache.exists(),
+                        "the dead restarted session must still surface the auth! "
+                        "badge — never a silent skip")
+
+    def test_dry_run_historical_does_not_drop_episode_state(self):
+        # review should-fix (architecture): the `if not dry_run: state.pop(...)`
+        # branch is load-bearing — run_once's closing save_state is unconditional,
+        # so an UNGUARDED pop would persist during a `--dry-run` sweep and delete a
+        # real credential-dead episode's state. A dry-run historical sweep must
+        # leave the pre-seeded episode key intact.
+        now = 1_800_000_000.0
+        # `last_seen` RECENT (< wait_clear=90) so the age cleanup does not prune
+        # it — the ONLY thing that could drop it is the guard's state.pop, which
+        # must be skipped in dry-run.
+        pre = {self._ad_key(): {"first_401_ts": now - 3600, "pinged": True,
+                                "continued": True, "relaunched": False,
+                                "last_seen": now - 30}}
+        logs, keys, pings, state_path = self._harness(
+            now, first_401=now - 3600, cred_mtime=now - 60, proc_start=now - 40,
+            preseed=pre, dry_run=True)
+        self.assertTrue(any("historical, no action" in ln for ln in logs),
+                        "the historical guard must still fire (journal) in "
+                        "dry-run: %r" % logs)
+        saved = json.loads(state_path.read_text())
+        self.assertIn(self._ad_key(), saved,
+                      "a --dry-run historical sweep must NOT drop the "
+                      "apierr-authdead: episode state (dry-run persists nothing): "
+                      "%r" % saved)
 
 
 if __name__ == "__main__":
