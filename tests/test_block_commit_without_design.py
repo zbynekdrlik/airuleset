@@ -63,6 +63,14 @@ class _Base(TestCase):
         broken_gh.write_text("#!/usr/bin/env bash\nexit 1\n")
         broken_gh.chmod(0o755)
         self._closed = {}   # repo-name -> {issue-number-str, ...}
+        # #1070 item 1 -- the commit gate now does a REST-first live design-
+        # presence read (gates.ghread) for a still-unmarked ref. The stub serves
+        # `gh api …/issues/<n>/comments` (default EMPTY -> no design -> the
+        # normal block); `set_design(n)` seeds a live design so the FP fix
+        # (present design, absent marker -> pass) is proven; `rate_limit()`
+        # makes every gh call fail with a rate-limit body (-> gate-unavailable).
+        self._designs = {}  # repo-name -> {issue-number-str: [body, ...]}
+        self._rate_limit = False
         self._write_fake_gh()
 
     def _write_fake_gh(self):
@@ -82,25 +90,60 @@ class _Base(TestCase):
         # last-path-segment way `notify.repo_name_for()` does.
         fake_gh = self.bindir / "gh"
         closed_by_repo = {r: sorted(n) for r, n in self._closed.items()}
+        designs_by_repo = {r: dict(d) for r, d in self._designs.items()}
         fake_gh.write_text(
             "#!/usr/bin/env python3\n"
-            "import subprocess, sys\n"
+            "import subprocess, sys, json\n"
             "CLOSED = %r\n"
-            "if len(sys.argv) >= 4 and sys.argv[1:3] == ['issue', 'view']:\n"
-            "    n = sys.argv[3]\n"
+            "DESIGNS = %r\n"
+            "RATE_LIMIT = %r\n"
+            "def _repo():\n"
             "    out = subprocess.run(['git', 'remote', 'get-url', 'origin'],\n"
             "                         capture_output=True, text=True)\n"
             "    url = out.stdout.strip().rstrip('/')\n"
             "    if url.endswith('.git'):\n"
             "        url = url[:-4]\n"
-            "    repo = url.replace(':', '/').split('/')[-1]\n"
+            "    return url.replace(':', '/').split('/')[-1]\n"
+            "if RATE_LIMIT:\n"
+            "    sys.stderr.write('API rate limit exceeded (RATE_LIMITED)\\n')\n"
+            "    sys.exit(1)\n"
+            "# #1070 item 1 -- REST comment read: gh api repos/o/r/issues/<n>/comments\n"
+            "if len(sys.argv) >= 3 and sys.argv[1] == 'api':\n"
+            "    path = sys.argv[2].rstrip('/')\n"
+            "    if 'issues' in path and path.endswith('comments'):\n"
+            "        parts = path.split('/')\n"
+            "        try:\n"
+            "            n = parts[parts.index('issues') + 1]\n"
+            "        except (ValueError, IndexError):\n"
+            "            n = ''\n"
+            "        for body in DESIGNS.get(_repo(), {}).get(n, []):\n"
+            "            print(json.dumps({'body': body}))\n"
+            "        sys.exit(0)\n"
+            "    sys.exit(1)\n"
+            "if len(sys.argv) >= 4 and sys.argv[1:3] == ['issue', 'view']:\n"
+            "    n = sys.argv[3]\n"
+            "    repo = _repo()\n"
             "    if n in CLOSED.get(repo, []):\n"
             "        print('CLOSED')\n"
             "    else:\n"
             "        print('OPEN')\n"
             "    sys.exit(0)\n"
-            "sys.exit(1)\n" % closed_by_repo)
+            "sys.exit(1)\n" % (closed_by_repo, designs_by_repo, self._rate_limit))
         fake_gh.chmod(0o755)
+
+    _LIVE_DESIGN_BODY = (
+        "## Root cause\nThe live-read fallback: root cause traced in the code. "
+        "The chosen approach is a REST-first read; the rejected alternative was "
+        "a GraphQL-only read. This body is comfortably over the classifier's "
+        "minimum length so it registers as a genuine design comment.")
+
+    def set_design(self, issue, repo="airuleset", body=None):
+        self._designs.setdefault(repo, {})[str(issue)] = [body or self._LIVE_DESIGN_BODY]
+        self._write_fake_gh()
+
+    def rate_limit(self, on=True):
+        self._rate_limit = on
+        self._write_fake_gh()
 
     def closed_issues(self, *nums, repo="airuleset"):
         self._closed.setdefault(repo, set())
@@ -764,6 +807,46 @@ class TestMergeCommitExempt1003(_Base):
         r = self.run_hook(
             'git merge --abort && git commit -m "fix: back out (#123)"')
         self.assertEqual(r.returncode, 2, r.stderr)
+
+
+class TestLiveDesignFallback1070(_Base):
+    """#1070 item 1 -- a ref with NO local marker but a design LIVE on the
+    ticket must PASS (the marker just was not written, typically because
+    post-record-design-comment.sh's GraphQL re-read hit the owner identity's
+    hourly exhaustion). A read FAILURE (quota) must block with an HONEST
+    gate-unavailable reason, never the words 'no design' / 'missing design'."""
+
+    def test_live_design_present_but_marker_absent_passes(self):
+        # no marker for #41, but the ticket carries a real design comment ->
+        # the REST-first live read finds it -> the commit goes through.
+        self.set_design(41)
+        r = self.run_hook(COMMIT_41)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_no_marker_and_no_live_design_still_blocks_normally(self):
+        # empty comments (the default stub) -> no design -> the ordinary block.
+        r = self.run_hook(COMMIT_41)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("41", r.stderr)
+        self.assertIn("design", r.stderr.lower())
+
+    def test_quota_read_failure_blocks_with_gate_unavailable_not_no_design(self):
+        # both REST and GraphQL fail with a rate-limit body -> gate-unavailable,
+        # NEVER "no design" / "missing design" (the FP this item exists for).
+        self.rate_limit()
+        r = self.run_hook(COMMIT_41)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("41", r.stderr)
+        self.assertIn("gate-unavailable", r.stderr)
+        self.assertNotIn("missing design", r.stderr.lower())
+
+    def test_marked_ref_never_triggers_a_live_read(self):
+        # the happy path (design-record wrote the marker) must pay NO gh call:
+        # even in rate-limit mode a MARKED ref passes without a live read.
+        self.mark(41)
+        self.rate_limit()
+        r = self.run_hook(COMMIT_41)
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 if __name__ == "__main__":

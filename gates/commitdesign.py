@@ -17,6 +17,7 @@ import time
 from gates import command_of, field_of, read_payload
 from gates import audit
 from gates import design as dg
+from gates import ghread
 
 _AUDIT_LOG = "no-design-skips.log"
 
@@ -61,6 +62,24 @@ this commit will go through.
 
 Bypass (rare, logged): add [no-design: <reason>] to this commit's message
 — never for a real feature/fix with a genuine design decision behind it.
+"""
+
+
+# #1070 item 1 -- a READ failure (BOTH the REST and the GraphQL live read of
+# the ticket's comments failed, typically the owner identity's hourly GraphQL
+# exhaustion) is NOT a missing design. Fail-closed (still exit 2) but with an
+# HONEST reason, never the words "no design" / "missing design".
+_GATE_UNAVAILABLE_TEMPLATE = """
+🚫 BLOCKED (gate-unavailable): could not read the design comment(s) for {list} (repo {repo}).
+  {reason}
+
+This is a READ FAILURE, not an ABSENT design — BOTH the REST and the GraphQL
+read of the ticket's comments failed (typically the owner identity's hourly
+GraphQL 5000/h exhaustion, or a transport error). The design may well be
+present on the ticket. Retry once GitHub reads recover; the design-before-code
+gate stays fail-closed rather than trust an unreadable thread.
+
+Bypass (rare, logged): add [no-design: <reason>] to this commit's message.
 """
 
 
@@ -129,6 +148,40 @@ def main():
     missing = [n for n in refs if not dg.marker_exists(repo_key, n)]
     # #206 -- drop any still-unmarked ref already CLOSED on GitHub.
     missing = dg.required_refs(missing, work_cwd)
+    if not missing:
+        sys.exit(0)
+
+    # #1070 item 1 -- a ref with no LOCAL marker may still have a design LIVE on
+    # the ticket: the marker is normally written by post-record-design-comment.sh
+    # from a `gh issue view` (GraphQL) re-read, which comes back EMPTY under the
+    # owner identity's hourly GraphQL 5000/h exhaustion, leaving a genuinely-
+    # present main design markerless and hard-blocking the worker's FIRST commit
+    # (odoo-erp #7120/#7293). Do a REST-first live design-presence read
+    # (gates.ghread) for each still-missing ref: design found live -> drop it
+    # (and write the marker so later commits skip the read); read
+    # gate-unavailable (BOTH REST and GraphQL failed) -> the ticket is
+    # UNVERIFIABLE, block with an HONEST reason, never "no design". Only fires
+    # when a marker is MISSING; the common design-record path already wrote it,
+    # so the happy path pays no gh call.
+    slug = ghread.resolve_slug(work_cwd)
+    unavailable = []
+    if slug:
+        still = []
+        for n in missing:
+            bodies, err = ghread.read_comment_bodies(n, slug, cwd=work_cwd)
+            if err:
+                unavailable.append((n, err))
+                continue
+            if bodies and any(dg.classify_design_comment(b)[0] for b in bodies):
+                dg.write_marker(repo_key, n, "-", "live-ghread", kind="design")
+                continue
+            still.append(n)
+        missing = still
+    if unavailable:
+        lst = " ".join("#%d" % n for n, _ in unavailable)
+        _stderr(_GATE_UNAVAILABLE_TEMPLATE.format(
+            list=lst, reason=unavailable[0][1], repo=repo_key))
+        sys.exit(2)
     if not missing:
         sys.exit(0)
 

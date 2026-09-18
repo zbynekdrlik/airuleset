@@ -25,6 +25,7 @@ import sys
 import time
 
 from gates import read_payload, field_of, emit_block_stderr, allow
+from gates import ghread
 
 DESIGN_BY_LOG = "design-by-gate.log"
 
@@ -138,6 +139,14 @@ def _resolve_slug(cwd, timeout=6):
     # gate's own timeout->None->block path runs BEFORE CC kills the hook (a
     # killed PreToolUse hook fail-OPENs — the exact inverse of this gate's
     # fail-closed contract; #1061 review).
+    # #1070 item 1 -- resolve the slug from the LOCAL git remote FIRST (never an
+    # API call, so it survives the owner identity's hourly GraphQL exhaustion);
+    # `gh repo view` (GraphQL) is only the fallback. Without this, slug
+    # resolution itself would fail under GraphQL exhaustion and block a
+    # legitimate dispatch on an unresolvable repo.
+    git_slug = ghread.resolve_slug(cwd)
+    if git_slug:
+        return git_slug
     try:
         r = subprocess.run(
             ["gh", "repo", "view", "--json", "nameWithOwner",
@@ -153,32 +162,14 @@ def _resolve_slug(cwd, timeout=6):
 
 
 def _fetch_comment_bodies(slug, number, cwd, timeout=8):
-    """Comment bodies for `<slug>#<number>` in CREATION order via the paginated
-    REST reader (`gh api …/comments --paginate -q '.[]'`, the SAME shape
-    cli_work_class._fetch_comments uses so a recent design comment past the
-    `gh issue view` window is never missed), or None on ANY gh failure."""
-    try:
-        r = subprocess.run(
-            ["gh", "api", "repos/%s/issues/%d/comments" % (slug, number),
-             "--paginate", "-q", ".[]"],
-            cwd=cwd or None, capture_output=True, text=True, timeout=timeout,
-            env=_gh_env())
-    except Exception:
-        return None
-    if r.returncode != 0:
-        return None
-    bodies = []
-    for line in (r.stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except Exception:
-            continue
-        if isinstance(obj, dict) and isinstance(obj.get("body"), str):
-            bodies.append(obj["body"])
-    return bodies
+    """(bodies, err) for `<slug>#<number>` via gates.ghread -- REST-first
+    (`gh api …/comments`, a core-budget call that survives the owner
+    identity's hourly GraphQL exhaustion) with a `gh issue view` GraphQL
+    fallback. `err` is a `gate-unavailable:<reason>` string when BOTH paths
+    fail (quota/transport), so check_issue blocks fail-closed with an HONEST
+    reason -- never the words "missing design" (#1070 item 1). Bodies are in
+    CREATION order on success."""
+    return ghread.read_comment_bodies(number, slug, cwd=cwd, timeout=timeout)
 
 
 def check_issue(number, slug, cwd, fetch=None, fable_id=None):
@@ -191,7 +182,21 @@ def check_issue(number, slug, cwd, fetch=None, fable_id=None):
     fetch = fetch or _fetch_comment_bodies
     fable_id = fable_id or _fable_id()
     accepted = {_norm_model(fable_id)}
-    bodies = fetch(slug, number, cwd)
+    res = fetch(slug, number, cwd)
+    # #1070 item 1 -- the fetch may return the new `(bodies, err)` tuple (a
+    # ghread read: `err` a `gate-unavailable:<reason>` when BOTH REST and
+    # GraphQL failed) OR, for the pre-#1070 injected-test contract, a bare
+    # list / None. Normalise both.
+    if isinstance(res, tuple):
+        bodies, err = res
+    else:
+        bodies, err = res, None
+    if err:
+        # a READ failure (quota/transport) -- block fail-closed but with an
+        # HONEST reason; NEVER "no design" (a genuinely-present main design must
+        # not read as missing just because the owner identity's GraphQL budget
+        # is exhausted). #1070.
+        return False, err
     if bodies is None:
         return False, ("could not read #%d's comments (gh error / no network) "
                        "-- refusing (fail-closed)" % number)
