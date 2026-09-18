@@ -79,7 +79,12 @@ class TestGoalLaneOneGlance(unittest.TestCase):
                         age_s=age_s, now=now)
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")], captured)
         logs = goal.goal_lane_sweep(now, run=tmux, projects_dir=proj,
-                                    backlog_fetch=lambda cwd: backlog)
+                                    backlog_fetch=lambda cwd: backlog,
+                                    # #874: no-op sleep — the bounded render-settle
+                                    # polls still run every iteration (verdict
+                                    # unchanged); only the real wall-clock wait is
+                                    # removed (23.5s -> <1s).
+                                    sleep_fn=lambda *_a: None)
         return logs, tmux
 
     def _one_glance_lines(self, logs):

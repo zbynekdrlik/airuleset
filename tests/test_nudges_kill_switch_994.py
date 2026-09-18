@@ -598,7 +598,10 @@ class TestNoStrayKeystrokeAtOff(unittest.TestCase):
                     m.patch.object(wd, "_strip_selected", lambda *a, **k: True), \
                     self._off():
                 wd.send_verified(PID, "owner reply", rec, tpath=tp, logs=logs,
-                                 user_authored=True)
+                                 user_authored=True,
+                                 # #874: no-op sleep — bounded polls unchanged,
+                                 # only the real wall-clock wait removed (21s -> <1s).
+                                 sleep_fn=lambda *_a: None)
         # user_authored bypass -> the strip-Escape DOES fire (delivery proceeds).
         self.assertTrue(any(a[-1] == "Escape" for a in rec.sent_keys()),
                         "owner reply must still deselect the strip at OFF: %r"
