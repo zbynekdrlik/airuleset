@@ -92,7 +92,12 @@ MODE="${1:-ready-for-review}"
 # emptiness/unparseability HERE, before any comparison, so "unresolvable"
 # stays "" and is never mistaken for a timestamp.
 _iso_epoch() {
-  [ -n "$1" ] || { echo ""; return; }
+  # EMPTY *or whitespace-only* is "unresolvable": GNU `date -d "   "` (like
+  # `date -d ""`) also succeeds and returns TODAY 00:00 UTC, so a blank-ish
+  # value must be rejected BEFORE any date call, exactly like exact-empty --
+  # otherwise the identical #1057 wall-clock bug survives one input-category
+  # over. `${1//[[:space:]]/}` strips all whitespace; empty result = blank.
+  [ -n "${1//[[:space:]]/}" ] || { echo ""; return; }
   date -u -d "$1" +%s 2>/dev/null || echo ""
 }
 

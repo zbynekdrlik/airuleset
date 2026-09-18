@@ -264,6 +264,21 @@ class TestBounceClearGuardMode(TestCase):
                                "not-a-date")
         self.assertEqual(rc, 1, out)
 
+    def test_whitespace_only_timestamp_is_unresolvable_and_does_not_clear(self):
+        # #1057 review finding: `[ -n "$1" ]` alone caught only the exactly-empty
+        # string, but GNU `date -d "   "` ALSO succeeds and yields TODAY 00:00 UTC,
+        # so a whitespace-only (blank-ish) commit/RFR reinstated the exact same
+        # wall-clock bug one input-category over. Blank-ish must be "unresolvable"
+        # → rc 1 on EVERY day. Far-past bounce keeps this date-independent forever.
+        rc, out, _ = run_guard("2020-01-01T12:00:00Z",   # RFR
+                               "2020-01-01T10:00:00Z",   # gk BOUNCE (far past)
+                               "   ")                      # commit: whitespace-only
+        self.assertEqual(rc, 1, out)
+        rc, out, _ = run_guard("  ",                      # RFR: whitespace-only
+                               "2020-01-01T10:00:00Z",
+                               "2020-01-01T12:00:00Z")
+        self.assertEqual(rc, 1, out)
+
     def test_unparseable_bounce_timestamp_does_not_clear(self):
         rc, out, _ = run_guard("2026-09-17T12:00:00Z", "not-a-date",
                                "2026-09-17T11:00:00Z")
