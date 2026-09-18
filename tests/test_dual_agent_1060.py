@@ -155,5 +155,60 @@ class TestImplementerAuthorship(unittest.TestCase):
             "Implemented-by: implementer impl-main")
 
 
+# --------------------------------------------------------------------------- #
+# Item 6 — the implementer.md system prompt: exists, disciplined, install-copied
+# --------------------------------------------------------------------------- #
+class TestImplementerPrompt(unittest.TestCase):
+    def setUp(self):
+        self.src = REPO / "agents" / "implementer.md"
+
+    def test_implementer_md_exists(self):
+        self.assertTrue(self.src.is_file(), "agents/implementer.md must exist")
+
+    def test_implementer_md_carries_the_discipline(self):
+        text = self.src.read_text(encoding="utf-8")
+        # the receiving-side design gate the implementer runs BEFORE any work
+        self.assertIn("gates.designdispatch", text)
+        self.assertIn("--issue", text)
+        self.assertIn("Design-question:", text)
+        # the cross-session channel + the hand-off shape
+        self.assertIn("cross-session-message", text)
+        self.assertIn("LANE-RETURN", text)
+        self.assertIn("SendMessage", text)
+        # the negative discipline (never handoff / merge / design)
+        low = text.lower()
+        self.assertIn("never author", low)
+        self.assertIn("never merge", low)
+        self.assertIn("airuleset.py handoff", text)
+        # worktree durability
+        self.assertIn("refs/autopilot-wip/", text)
+
+    def test_render_returns_source_verbatim(self):
+        import cli_claude_scripts as ccs
+        self.assertEqual(ccs.render_claude_implementer_prompt(),
+                         self.src.read_text(encoding="utf-8"))
+
+    def test_install_copies_implementer_prompt(self):
+        import cli_bashrc_appliers as cba
+        with tempfile.TemporaryDirectory() as td:
+            home = Path(td)
+            claude = home / ".claude"
+            claude.mkdir()
+            bashrc = home / ".bashrc"
+            bashrc.write_text("")
+            impl_prompt = claude / "airuleset-implementer.md"
+            cba.apply_ultracode_launcher(
+                bashrc_path=bashrc,
+                script_path=claude / "airuleset-claude-launch.sh",
+                history_script_path=claude / "airuleset-claude-history.py",
+                popup_script_path=claude / "airuleset-claude-history-popup.sh",
+                impl_script_path=claude / "airuleset-claude-impl.sh",
+                impl_prompt_path=impl_prompt)
+            self.assertTrue(impl_prompt.is_file())
+            self.assertEqual(
+                impl_prompt.read_text(encoding="utf-8"),
+                (REPO / "agents" / "implementer.md").read_text(encoding="utf-8"))
+
+
 if __name__ == "__main__":
     unittest.main()
