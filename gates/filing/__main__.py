@@ -53,10 +53,25 @@ _API_FIELD_FLAGS = frozenset({"-f", "-F", "--field", "--raw-field", "--input"})
 def _api_field_or_post(tk):
     """True when a `gh api` segment carries a POST/field write signal -- gh
     implicitly POSTs when any field flag (-f/-F/--field/--raw-field/--input) is
-    present, or when POST is explicit (-X POST / --method POST / -XPOST)."""
+    present, or when POST is explicit (-X POST / --method POST / -XPOST).
+    #1070 review 🟡: gh ALSO accepts the GLUED short form `-ftitle=x` / `-Fbody=y`
+    (verified live), which an exact-token check misses -- so a real issue-CREATE
+    `gh api …/issues -ftitle=x` would escape the worker block. Also #1070 review
+    🔵: an EXPLICIT GET method (`-X GET`) with fields is a list/read (fields ->
+    query params), never a create -- do NOT flag it."""
+    for i, t in enumerate(tk):
+        # an explicit non-write method: this is a read, never a create.
+        if t in ("-X", "--method") and i + 1 < len(tk) \
+                and tk[i + 1].upper() in ("GET", "HEAD"):
+            return False
+        if re.match(r"^-X(GET|HEAD)$", t, re.I):
+            return False
     for i, t in enumerate(tk):
         if t in _API_FIELD_FLAGS or t.startswith(
                 ("--field=", "--raw-field=", "--input=")):
+            return True
+        # glued short form: -ftitle=x / -Fbody=@f (gh accepts it).
+        if len(t) > 2 and t[:2] in ("-f", "-F"):
             return True
         if t in ("-X", "--method") and i + 1 < len(tk) \
                 and tk[i + 1].upper() == "POST":
@@ -492,7 +507,8 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
                             "net-drain (created_today >= closed_today on this repo "
                             "-- fix it in-lane now, or fold it as a comment onto the "
                             "existing ticket it belongs to; this repo must drain "
-                            "today before an unattended loop files more)",
+                            "today before this session files more -- #1070: the "
+                            "brake applies to every filing session, attended too)",
                             parents_str, target_repo, dedup_claim))
                     else:
                         results.append(("PASS", clean_title, crit, parents_str,

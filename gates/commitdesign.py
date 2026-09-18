@@ -163,6 +163,20 @@ def main():
     # UNVERIFIABLE, block with an HONEST reason, never "no design". Only fires
     # when a marker is MISSING; the common design-record path already wrote it,
     # so the happy path pays no gh call.
+    # #1070 review 🟡 — the live-read presence bar is the FULL design bar
+    # (cli_design_record.validate_body: design shape + Triage + Architektúra +
+    # Shared-benefit), NOT the looser classify_design_comment alone. A real
+    # main design (posted via design-record) passes validate_body, so it is
+    # still found; a worker's minimal self-posted cause/approach stub does NOT,
+    # so the commit-boundary fallback can't be used to self-unblock (the #871
+    # main-authors-design invariant, whose primary enforcement is the dispatch
+    # gate's `Design-by: main` check). validate_body reuses the SAME dg
+    # classifiers, so no new gate logic.
+    try:
+        import cli_design_record as _cdr
+        _is_full_design = lambda b: _cdr.validate_body(b)[0]  # noqa: E731
+    except Exception:
+        _is_full_design = lambda b: dg.classify_design_comment(b)[0]  # noqa: E731
     slug = ghread.resolve_slug(work_cwd)
     unavailable = []
     if slug:
@@ -172,7 +186,7 @@ def main():
             if err:
                 unavailable.append((n, err))
                 continue
-            if bodies and any(dg.classify_design_comment(b)[0] for b in bodies):
+            if bodies and any(_is_full_design(b) for b in bodies):
                 dg.write_marker(repo_key, n, "-", "live-ghread", kind="design")
                 continue
             still.append(n)

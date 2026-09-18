@@ -131,11 +131,19 @@ class _Base(TestCase):
             "sys.exit(1)\n" % (closed_by_repo, designs_by_repo, self._rate_limit))
         fake_gh.chmod(0o755)
 
+    # #1070 review 🟡: the live-read bar is now the FULL validate_body (design
+    # shape + Triage + Shared-benefit), so a legitimate main design must carry
+    # all of them (a Triage: trivial body is exempt from the Architektúra
+    # section). This mirrors what a real `design-record`-posted main design has.
     _LIVE_DESIGN_BODY = (
-        "## Root cause\nThe live-read fallback: root cause traced in the code. "
-        "The chosen approach is a REST-first read; the rejected alternative was "
-        "a GraphQL-only read. This body is comfortably over the classifier's "
-        "minimum length so it registers as a genuine design comment.")
+        "## Root cause\nThe live-read fallback: the root cause is traced in the "
+        "code (the marker was never written under GraphQL exhaustion). The "
+        "chosen approach is a REST-first live read; the rejected alternative was "
+        "trusting the empty marker. This body is comfortably over the "
+        "classifier's minimum length.\n"
+        "Triage: trivial\n"
+        "Shared-benefit: every design gate on every box benefits from the "
+        "REST-first read surviving the hourly GraphQL exhaustion.")
 
     def set_design(self, issue, repo="airuleset", body=None):
         self._designs.setdefault(repo, {})[str(issue)] = [body or self._LIVE_DESIGN_BODY]

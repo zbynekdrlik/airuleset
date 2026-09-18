@@ -4473,8 +4473,14 @@ def _handoff_commits_since(branch, since_ts, cwd):
         return None
     import subprocess
     from datetime import datetime, timezone
+    # #1070 review 🔴 — the trailing `Z` is LOAD-BEARING: `git log --since=<str>`
+    # parses a tz-NAIVE timestamp in the BOX's local time, not UTC, so on a
+    # non-UTC box (the fleet runs CEST +2) a bare UTC string mis-counts commits
+    # in the tz-offset window around the verdict → a fail-OPEN of the "no new
+    # commit since BOUNCE" block. The `Z` pins it to UTC (matches the file's
+    # other `--since` uses). since_ts is a POSIX epoch (cli_gk_watch._parse_iso).
     iso = datetime.fromtimestamp(since_ts, tz=timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%S")
+        "%Y-%m-%dT%H:%M:%SZ")
     try:
         r = subprocess.run(
             ["git", "log", "origin/%s" % branch, "--since=%s" % iso,

@@ -1810,9 +1810,10 @@ def _fake_gh_netdrain(tmpdir, created, closed, open_issues=(), labels=None):
 
 class TestNetDrainHarness842(TestCase):
     """#842 — the worker hard-block, presence-gated user-request/planned-work,
-    dismissal-word block, and the per-repo net-drain ratchet. All the new gates
-    engage ONLY on the UNATTENDED path (a stale presence marker) or the SUBAGENT
-    path (agent_id); the ATTENDED path is unchanged."""
+    dismissal-word block, and the per-repo net-drain ratchet. The presence-gate
+    and dismissal-word gates engage ONLY on the UNATTENDED path (a stale
+    presence marker) or the SUBAGENT path (agent_id); the net-drain ratchet,
+    since #1070 item 7, applies to EVERY filing session (attended included)."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="airuleset-netdrain-test-")
@@ -2152,6 +2153,20 @@ class WorkerFilingCreateOnly1070(TestCase):
         r = run("gh api graphql -f query=mutation_createIssue_x",
                 gh_bin=_default_gh_stub(), agent_id="sub-worker-c6")
         self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_glued_short_field_flag_collection_create_is_blocked(self):
+        # #1070 review 🟡: gh accepts a GLUED short flag -ftitle=x — a real
+        # issue-CREATE that must NOT escape the worker block.
+        r = run("gh api repos/o/r/issues -ftitle=x -fbody=y",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c7")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_explicit_get_list_read_is_allowed_for_a_worker(self):
+        # #1070 review 🔵: an explicit GET with fields is a list/read (fields ->
+        # query params), never a create — a worker may run it.
+        r = run("gh api repos/o/r/issues -X GET -f state=open",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c8")
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 if __name__ == "__main__":

@@ -35,9 +35,11 @@ def design_record_help_template():
     """#1070 item 5 -- the full design-body SECTION TEMPLATE, printed as the
     `design-record --help` epilog so the required sections are discoverable in
     ONE place instead of by three failed `design-record` attempts (#1079). The
-    tokens here match exactly what `validate_body` (and the design_gate
-    classifiers) require, so a body built from this template passes the gate on
-    the first try."""
+    section headings here match what `validate_body` (and the design_gate
+    classifiers) require; fill the placeholders with real content (e.g. the
+    `Architektúra:` value must name the actual structure/topology + framework)
+    and the body passes the gate -- the template shows WHICH sections are
+    mandatory, it is not itself a gate-valid body."""
     return (
         "Design body template (the gate requires every section below):\n"
         "\n"

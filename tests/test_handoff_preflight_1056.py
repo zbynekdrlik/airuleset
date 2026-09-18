@@ -158,6 +158,74 @@ class PassthroughMirror(unittest.TestCase):
             ht.validate_passthrough_body(self._BODY, bounce_round=1))
 
 
+class CommitsSinceReal1070(unittest.TestCase):
+    """#1070 review 🔴 — exercise the REAL `_handoff_commits_since` against a
+    git repo with a known-UTC commit under a forced NON-UTC $TZ, so the tz-less
+    `--since` fail-open (git parsing the string in local time) is caught."""
+
+    def _repo_with_commit(self, committer_utc):
+        import os
+        import subprocess
+        import tempfile
+        d = tempfile.mkdtemp(prefix="airuleset-cs-1070-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        env = dict(os.environ)
+        env.update({
+            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x.invalid",
+            "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x.invalid",
+            "GIT_AUTHOR_DATE": committer_utc, "GIT_COMMITTER_DATE": committer_utc,
+            "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull})
+        run = lambda *a: subprocess.run(["git", "-C", d, *a], check=True,  # noqa: E731
+                                        capture_output=True, text=True, env=env)
+        run("init", "-q", "-b", "main")
+        (Path(d) / "f.txt").write_text("x")
+        run("add", "f.txt")
+        run("commit", "-q", "-m", "the commit")
+        sha = run("rev-parse", "HEAD").stdout.strip()
+        # make an origin/main ref (the helper reads origin/<branch>) with no remote
+        subprocess.run(["git", "-C", d, "update-ref", "refs/remotes/origin/main",
+                        sha], check=True, capture_output=True, text=True, env=env)
+        return d, sha
+
+    def _count_under_tz(self, repo, branch, since_ts, tz):
+        import os
+        import time
+        old = os.environ.get("TZ")
+        os.environ["TZ"] = tz
+        if hasattr(time, "tzset"):
+            time.tzset()
+        try:
+            return airuleset._handoff_commits_since(branch, since_ts, repo)
+        finally:
+            if old is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old
+            if hasattr(time, "tzset"):
+                time.tzset()
+
+    def test_utc_since_after_commit_counts_zero_on_a_plus_tz_box(self):
+        # commit at 12:00:00Z; since = 12:01Z -> the commit is BEFORE -> 0.
+        # On a +05:30 box, a tz-less --since string would be read as local
+        # (06:31Z) and wrongly count the 12:00Z commit as "after" -> 1.
+        repo, _ = self._repo_with_commit("2026-09-19T12:00:00+0000")
+        import calendar
+        since = calendar.timegm((2026, 9, 19, 12, 1, 0, 0, 0, 0))
+        self.assertEqual(
+            self._count_under_tz(repo, "main", since, "Asia/Kolkata"), 0)
+
+    def test_since_before_commit_counts_one(self):
+        repo, _ = self._repo_with_commit("2026-09-19T12:00:00+0000")
+        import calendar
+        since = calendar.timegm((2026, 9, 19, 11, 59, 0, 0, 0, 0))
+        self.assertEqual(
+            self._count_under_tz(repo, "main", since, "Asia/Kolkata"), 1)
+
+    def test_no_branch_or_bad_ts_returns_none(self):
+        self.assertIsNone(airuleset._handoff_commits_since(None, 1000.0, "/x"))
+        self.assertIsNone(airuleset._handoff_commits_since("main", None, "/x"))
+
+
 class Preflight1070(unittest.TestCase):
     """#1070 item 6 — the bounce pre-flight (a) counts only a BOUNCE whose
     Branch matches the readiness, (b) treats an unparseable head (@?) as an
