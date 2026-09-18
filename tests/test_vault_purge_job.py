@@ -348,8 +348,12 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # gh_rate_fetch=None, so the closing `):` moved off that line onto
                # the new one; the anchor grew a last line, the mutation target
                # vault_purge=None is untouched.
+               # #1075 re-pin: cred_mtime_fn=None (job 1's credential-dead branch
+               # injectable ~/.claude/.credentials.json mtime reader) was appended
+               # after bounceflip_fetch=None on the LAST line; the anchor's last
+               # line grew, the mutation target vault_purge=None is untouched.
                "             task_hygiene_enabled=False, gh_rate_fetch=None,\n"
-               "             bounceflip_fetch=None):")
+               "             bounceflip_fetch=None, cred_mtime_fn=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a

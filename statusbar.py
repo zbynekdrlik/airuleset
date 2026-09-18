@@ -521,6 +521,7 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
 
 DISK_SEGMENT_RED_PCT = 95           # shown (red) at/above this, HIDDEN below (#925; was 90 per #854)
 DISK_SEGMENT_STALE_S = 600          # cache older than this → hide (dead watchdog)
+AUTH_BADGE_TTL_S = 3 * 3600         # #1075: `auth!` shown while the credential-dead cache is < 3h old
 
 # #1036 — the task-hygiene status.json (watchdog Job 49) runs on a ~2h cadence,
 # so its freshness window is far longer than the disk badge's 10 min; older than
@@ -624,6 +625,30 @@ def quota_segment(home=None, now=None):
     if qpct < 90:
         return ""
     return "\033[38;5;196mquota %d%%\033[0m" % int(qpct)
+
+
+def auth_segment(home=None, now=None):
+    """#1075: the `auth!` footer badge (RED) — this box has a Claude session dead
+    on a REVOKED OAuth token that the box's claudy has not refreshed. Shown while
+    the watchdog's credential-dead cache is younger than AUTH_BADGE_TTL_S (3 h),
+    HIDDEN otherwise. The watchdog (job 1) writes the cache only on a STALE
+    credential-dead sweep and refreshes it every ~60 s while the session stays
+    dead, so the badge holds through a multi-hour outage (the miva1 30 h case) and
+    SELF-EXPIRES 3 h after the last refresh — a resolved episode, a restarted
+    session, or a dead watchdog all stop painting `auth!` on their own (the
+    `disk_segment` stale-cache pattern). Reads ONLY the machine-local cache; never
+    blocks / touches the network; renders as no segment on any error."""
+    import time as _time
+    now = _time.time() if now is None else now
+    cache = _load(_claude_dir(home) / "auth-guard" / "status.json")
+    if not isinstance(cache, dict):
+        return ""
+    ts = cache.get("ts")
+    if not isinstance(ts, (int, float)) or isinstance(ts, bool):
+        return ""
+    if (now - ts) > AUTH_BADGE_TTL_S:
+        return ""
+    return "\033[38;5;196mauth!\033[0m"
 
 
 def release_idle_segment(cwd=None, home=None, now=None):

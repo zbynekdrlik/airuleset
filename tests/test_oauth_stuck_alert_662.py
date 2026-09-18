@@ -217,18 +217,25 @@ class ComposeHelpers(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# SILENCE A fix — job 1 escalation fires the oauthblock valve for a revoke only
+# SILENCE A fix — job 1 escalation fires the oauthblock valve for a persistent
+# interactive-/login block. #1075 SUPERSEDE: the 401-REVOKED sub-class is now
+# owned by the credential-dead branch (credential-dead: ping, never oauthblock);
+# the oauthblock valve remains for the bare login-expired class only.
 # --------------------------------------------------------------------------- #
 class Job1OAuthEscapeValve(unittest.TestCase):
     CWD = "/home/newlevel/devel/camera-box"
     PANE = "%7"
     SID = "9a8b7c6d-0000-4000-8000-000000000662"
 
-    def _spy_run_to_escalation(self, err_text, offsets=None):
+    def _spy_run_to_escalation(self, err_text, offsets=None, cred_mtime=None):
         """Drive run_once through max_nudges+1 sweeps (reused state) so the
         escalation transition fires, capturing every send_fn(dedup_key).
         `offsets` overrides the per-sweep `now` offsets (e.g. [0] for a single
-        pre-escalation sweep)."""
+        pre-escalation sweep). `cred_mtime` (#1075) is the injected
+        `~/.claude/.credentials.json` mtime the credential-dead branch reads;
+        default STALE (older than the first 401) so a REVOKED episode is handled
+        by that branch, never the real ~/.claude. Non-revoked classes (529 /
+        login-expired) never call it, so it is inert for them."""
         tmp = TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         proj = Path(tmp.name) / "projects"
@@ -263,12 +270,14 @@ class Job1OAuthEscapeValve(unittest.TestCase):
         # every sweep re-detects the stall.
         base = 1_800_000_000.0
         os.utime(tpath, (base - 700, base - 700))
+        stale_cred = base - 100_000 if cred_mtime is None else cred_mtime  # #1075
         offsets = offsets if offsets is not None else [0, 300, 600, 1200, 1300]
         for off in offsets:
             wd.run_once(now=base + off, dry_run=False, run=fake_run,
                         send_fn=spy_send, projects_dir=proj, state_path=state_path,
                         pending_prefix=str(Path(tmp.name) / "pending-"),
-                        grace=300, interval=300, max_nudges=3)
+                        grace=300, interval=300, max_nudges=3,
+                        cred_mtime_fn=lambda: stale_cred)
         return sends
 
     def _spy_run_one_sweep(self, err_text):
@@ -277,14 +286,24 @@ class Job1OAuthEscapeValve(unittest.TestCase):
         #602 does, never fires it)."""
         return self._spy_run_to_escalation(err_text, offsets=[0])
 
-    def test_revoked_fires_oauthblock_alert_at_escalation(self):
-        # both the /login banner AND the agent-death variant (no /login prefix).
+    def test_revoked_is_now_handled_by_credential_dead_not_oauthblock(self):
+        # #1075 SUPERSEDE: the 401-REVOKED class is intercepted by job 1's
+        # credential-dead branch BEFORE the nudge escalation, so it NO LONGER
+        # reaches the `oauthblock:` valve — it is never nudged-to-escalation at
+        # all. Instead, a STALE credential (the injected default) surfaces via
+        # the NEW un-suppressed `credential-dead:` owner ping after 30 min. Both
+        # the /login banner AND the agent-death variant (no /login prefix).
         for err in (REVOKED_BANNER, AGENT_DEATH):
             sends = self._spy_run_to_escalation(err)
             oauth = [k for _b, k in sends if k and k.startswith("oauthblock:")]
-            self.assertTrue(oauth,
-                            "a persistent revoke (%r) that survived max_nudges "
-                            "must fire an un-suppressed oauthblock alert: %r"
+            self.assertEqual(oauth, [],
+                             "the revoked class is now handled by credential-dead "
+                             "(#1075), never the oauthblock valve: %r" % sends)
+            cred = [k for _b, k in sends
+                    if k and k.startswith("credential-dead:")]
+            self.assertTrue(cred,
+                            "a persistent STALE-credential revoke (%r) must fire "
+                            "the un-suppressed credential-dead owner ping: %r"
                             % (err[:30], sends))
 
     def test_login_expired_fires_oauthblock_at_escalation(self):
