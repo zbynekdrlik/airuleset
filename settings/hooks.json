@@ -299,6 +299,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-builtin-command-shadow.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-discuss-thread-name.sh",
             "timeout": 10
           },
@@ -334,6 +339,11 @@
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-builtin-command-shadow.sh",
             "timeout": 5
           },
           {

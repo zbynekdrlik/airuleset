@@ -16,6 +16,22 @@ from pathlib import Path
 import cli_context_baseline
 import cli_fleet
 
+# -- Target governance (#874) -> split to cli_target_governance.py (#993).
+# Re-exported so every existing import path (incl. the gate's SSOT ref
+# `from cli_mdreview_audit import CLAUDE_CODE_BUILTIN_COMMANDS`) is unchanged.
+from cli_target_governance import (  # noqa: F401
+    CLAUDE_CODE_BUILTIN_COMMANDS,
+    CLAUDE_CODE_BUILTIN_COMMANDS_SOURCE,
+    CLASS_BUILTIN_COLLISION,
+    CLASS_MANAGED_DUPLICATE,
+    CLASS_RULE_SHAPE,
+    CLASS_UNREVIEWED,
+    collect_target_governance,
+    governance_snapshot,
+    target_governance,
+    target_governance_delta,
+)
+
 REPO_DIR = Path(__file__).resolve().parent
 CLAUDE_DIR = Path.home() / ".claude"
 ARTIFACT_DIR = CLAUDE_DIR / "mdreview-audit"
@@ -89,7 +105,7 @@ def _sentence_hashes(text):
 
 # -- inventory_box ---------------------------------------------------------
 
-def inventory_box(project_dirs=None):
+def inventory_box(project_dirs=None, git_fn=None):
     """Inventory always-on context for this box.
 
     Returns dict with:
@@ -157,12 +173,19 @@ def inventory_box(project_dirs=None):
                 "rules_bytes": ao_bytes,
             })
 
+    # Target governance (#874) — what each project adds to its OWN .claude/.
+    target_gov = []
+    if project_dirs:
+        for pd in project_dirs:
+            target_gov.append(target_governance(pd, git_fn=git_fn))
+
     return {
         "global_modules": {k: v for k, v in sorted(global_files.items())},
         "global_missing": global_missing,
         "skills": skills,
         "rules": rules,
         "projects": projects,
+        "target_governance": target_gov,
     }
 
 
