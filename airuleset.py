@@ -10346,6 +10346,10 @@ def main():
     p_mb.add_argument("--key-file", dest="key_file", default=None,
                       help="set: the on-target token file (default "
                            "~/.secrets/model-gateway.key)")
+    p_mb.add_argument("--cwd", dest="cwd", default=None,
+                      help="set: REQUIRED — the implementer window's PROJECT dir "
+                           "on the target (absolute, e.g. "
+                           "/home/miva1/devel/odoo/odoo-erp)")
     p_mb.add_argument("--registry-only", dest="registry_only",
                       action="store_true",
                       help="clear: only drop the registry entry; do NOT ssh a "

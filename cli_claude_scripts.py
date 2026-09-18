@@ -293,7 +293,7 @@ except Exception:
     sys.exit(0)
 if not isinstance(d, dict):
     sys.exit(0)
-for k in ("base_url", "key_file", "main", "sub", "fast"):
+for k in ("base_url", "key_file", "main", "sub", "fast", "cwd"):
     v = d.get(k)
     if isinstance(v, str) and v:
         print("_mb_%s=%s" % (k, shlex.quote(v)))
@@ -301,7 +301,8 @@ PY
 )"
 
 if [ -z "${_mb_base_url:-}" ] || [ -z "${_mb_key_file:-}" ] || \
-   [ -z "${_mb_main:-}" ] || [ -z "${_mb_sub:-}" ] || [ -z "${_mb_fast:-}" ]; then
+   [ -z "${_mb_main:-}" ] || [ -z "${_mb_sub:-}" ] || [ -z "${_mb_fast:-}" ] || \
+   [ -z "${_mb_cwd:-}" ]; then
   echo "claude-impl: model-backend marker is incomplete or unreadable ($_marker) — refusing to start." >&2
   exit 1
 fi
@@ -317,6 +318,16 @@ if [ -z "$_token" ]; then
   echo "claude-impl: gateway key file is empty ($_key_path) — refusing to start." >&2
   exit 1
 fi
+
+# The implementer runs in the stream's PROJECT dir (the marker's `cwd`), NEVER the
+# shell's inherited cwd — otherwise it would open in the wrong project AND its
+# session transcript would land under the wrong project dir. cd BEFORE computing
+# the session/project path below. Refuse LOUDLY if the dir is gone.
+if [ ! -d "$_mb_cwd" ]; then
+  echo "claude-impl: marker cwd ($_mb_cwd) does not exist — refusing to start." >&2
+  exit 1
+fi
+cd "$_mb_cwd"
 
 # Scope the gateway backend to THIS process ONLY (never settings.json — shared by
 # the main window). Adaptive thinking off (a cheap third-party model 400s on it);
@@ -343,11 +354,29 @@ else
   echo "claude-impl: WARNING — implementer system prompt $_impl_prompt is missing (L3b not deployed yet); starting without it." >&2
 fi
 
+# The implementer owns its OWN session identity — NEVER `-c`/`--continue`, which
+# resumes the MOST RECENT conversation in this project dir, i.e. the MAIN window's
+# transcript (the main's history + /goal state is never the implementer's). Persist
+# a uuid4 in ~/.claude/airuleset-implementer-session (0600, minted on first start);
+# resume it with `-r <id>` when its transcript already exists under the project
+# dir, else start fresh with `--session-id <id>` (the id later restarts resume).
+_sid_file="$HOME/.claude/airuleset-implementer-session"
+_sid=""
+if [ -f "$_sid_file" ]; then
+  _sid="$(tr -d '[:space:]' < "$_sid_file" 2>/dev/null || true)"
+fi
+case "$_sid" in
+  # a uuid shape (8-4-4-4-12); anything else (empty/truncated/hand-garbled) is re-minted
+  ????????-????-????-????-????????????) ;;
+  *) _sid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+     ( umask 077; printf '%s\n' "$_sid" > "$_sid_file" ) ;;
+esac
+
 _ccdir="${PWD//\//-}"; _ccdir="${_ccdir//./-}"; _ccdir="${_ccdir//_/-}"
-if compgen -G "$HOME/.claude/projects/$_ccdir/*.jsonl" >/dev/null 2>&1; then
-  exec claude --dangerously-skip-permissions -c "${_extra[@]}" "$@"
+if [ -f "$HOME/.claude/projects/$_ccdir/$_sid.jsonl" ]; then
+  exec claude --dangerously-skip-permissions -r "$_sid" "${_extra[@]}" "$@"
 else
-  exec claude --dangerously-skip-permissions "${_extra[@]}" "$@"
+  exec claude --dangerously-skip-permissions --session-id "$_sid" "${_extra[@]}" "$@"
 fi
 """
 

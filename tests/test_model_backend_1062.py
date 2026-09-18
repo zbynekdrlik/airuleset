@@ -21,6 +21,7 @@ UNVERIFIED by this lane).
 import io
 import json
 import os
+import stat
 import subprocess
 import sys
 import tempfile
@@ -39,6 +40,7 @@ MARKER = {
     "main": "impl-main",
     "sub": "impl-sub",
     "fast": "impl-fast",
+    "cwd": "/home/miva1/devel/odoo/odoo-erp",
 }
 
 
@@ -117,10 +119,12 @@ class TestRegistry(unittest.TestCase):
     def test_set_defaults_and_clear_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
             reg = Path(d) / "reg.json"
-            entry = mb.set_target("miva1@subdev", path=str(reg))
+            entry = mb.set_target("miva1@subdev", cwd="/home/miva1/devel/odoo",
+                                  path=str(reg))
             self.assertEqual(entry["main"], "impl-main")
             self.assertEqual(entry["sub"], "impl-sub")
             self.assertEqual(entry["fast"], "impl-fast")
+            self.assertEqual(entry["cwd"], "/home/miva1/devel/odoo")
             self.assertEqual(entry["key_file"], mb.TARGET_KEY_FILE)
             self.assertTrue(entry["base_url"].endswith(":4000"))
             self.assertIn("miva1@subdev", mb.load_registry(path=str(reg)))
@@ -134,7 +138,7 @@ class TestRegistry(unittest.TestCase):
             entry = mb.set_target("miva1@subdev", base_url="http://x:4000",
                                   main="deepseek-main", sub="deepseek-sub",
                                   fast="deepseek-fast", key_file="~/.k",
-                                  path=str(reg))
+                                  cwd="/proj", path=str(reg))
             self.assertEqual(entry["main"], "deepseek-main")
             self.assertEqual(entry["base_url"], "http://x:4000")
             self.assertEqual(entry["key_file"], "~/.k")
@@ -142,7 +146,14 @@ class TestRegistry(unittest.TestCase):
     def test_set_rejects_bad_target(self):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(mb.ModelBackendError):
-                mb.set_target("miva1", path=str(Path(d) / "reg.json"))
+                mb.set_target("miva1", cwd="/proj",
+                              path=str(Path(d) / "reg.json"))
+
+    def test_set_requires_cwd(self):
+        # #1060 L3a review: --cwd is REQUIRED (the implementer's project dir).
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(mb.ModelBackendError):
+                mb.set_target("miva1@subdev", path=str(Path(d) / "reg.json"))
 
     def test_marker_from_entry_and_json(self):
         j = mb.marker_json(MARKER)
@@ -257,27 +268,52 @@ _IMPL_ENV_KEYS = (
 )
 
 
+def _enc_project(path):
+    """Claude Code's transcript-dir name for a cwd (encode_project_dir)."""
+    return "".join("-" if c in "/._" else c for c in str(path))
+
+
 def _run_impl_launcher(home, with_marker=True, key_content="tok-XYZ-123",
-                       with_prompt=False):
+                       with_prompt=False, cwd_exists=True, session_id=None,
+                       transcript_exists=False, extra_project_transcript=None):
     """Exec the rendered claude-impl launcher against a fake `claude` that dumps
-    the backend env. Returns (rc, stdout, stderr). Fully hermetic."""
+    the backend env, PWD and ARGS. Returns (rc, stdout, stderr). Fully hermetic.
+    The marker's `cwd` = <home>/project (created iff cwd_exists). session_id →
+    pre-write the impl session-id file; transcript_exists → pre-create that id's
+    transcript under the project dir; extra_project_transcript → pre-create a
+    FOREIGN (e.g. main-window) transcript in the project dir (must never be
+    picked)."""
     import cli_claude_scripts as cs
     home = Path(home)
     (home / ".claude").mkdir(parents=True, exist_ok=True)
     secrets = home / ".secrets"
     secrets.mkdir(parents=True, exist_ok=True)
+    project = home / "project"
+    if cwd_exists:
+        project.mkdir(parents=True, exist_ok=True)
     if with_marker:
         marker = dict(MARKER)
         marker["key_file"] = str(secrets / "model-gateway.key")
+        marker["cwd"] = str(project)
         (home / ".claude" / "airuleset-model-backend.json").write_text(
             json.dumps(marker))
         (secrets / "model-gateway.key").write_text(key_content)
     if with_prompt:
         (home / ".claude" / "airuleset-implementer.md").write_text("# impl\n")
+    if session_id is not None:
+        (home / ".claude" / "airuleset-implementer-session").write_text(
+            session_id + "\n")
+    pdir = home / ".claude" / "projects" / _enc_project(project)
+    if transcript_exists and session_id is not None:
+        pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / (session_id + ".jsonl")).write_text("{}\n")
+    if extra_project_transcript is not None:
+        pdir.mkdir(parents=True, exist_ok=True)
+        (pdir / (extra_project_transcript + ".jsonl")).write_text("{}\n")
     script = home / ".claude" / "airuleset-claude-impl.sh"
     script.write_text(cs.render_claude_impl_launch_script())
     os.chmod(str(script), 0o755)
-    # A fake `claude` that prints the backend env the launcher exported.
+    # A fake `claude` that prints the backend env, PWD and ARGS.
     binp = home / "bin"
     binp.mkdir()
     fake = binp / "claude"
@@ -285,13 +321,15 @@ def _run_impl_launcher(home, with_marker=True, key_content="tok-XYZ-123",
                     "for v in " + " ".join(_IMPL_ENV_KEYS) + " AIRULESET_ROLE; do\n"
                     '  printf "%s=%s\\n" "$v" "${!v:-}"\n'
                     "done\n"
+                    'printf "PWD=%s\\n" "$PWD"\n'
                     'printf "ARGS=%s\\n" "$*"\n')
     os.chmod(str(fake), 0o755)
     env = dict(os.environ)
     env["HOME"] = str(home)
     env["PATH"] = str(binp) + os.pathsep + env.get("PATH", "")
-    r = subprocess.run(["bash", str(script)], env=env, capture_output=True,
-                       text=True, timeout=30)
+    # Run from a NEUTRAL cwd (home) so the launcher's OWN cd is what sets PWD.
+    r = subprocess.run(["bash", str(script)], env=env, cwd=str(home),
+                       capture_output=True, text=True, timeout=30)
     return r.returncode, r.stdout, r.stderr
 
 
@@ -309,6 +347,21 @@ class TestImplLauncher(unittest.TestCase):
         self.assertIn("airuleset-implementer.md", s)
         # the token is READ from the key file, never a literal in the script
         self.assertNotIn("sk-", s)
+        # #1060 L3a review: OWN session identity — the exec NEVER uses
+        # `-c`/--continue (which resumes the MAIN window's transcript); it uses
+        # `-r <id>` or `--session-id <id>`. Scope the -c/--continue ban to the
+        # actual exec lines (the explanatory comment legitimately names them).
+        exec_lines = [ln for ln in s.splitlines() if "exec claude" in ln]
+        self.assertTrue(exec_lines)
+        for ln in exec_lines:
+            self.assertNotIn(" -c ", ln)
+            self.assertNotIn("--continue", ln)
+        self.assertTrue(any("--session-id " in ln for ln in exec_lines))
+        self.assertTrue(any('-r "$_sid"' in ln for ln in exec_lines))
+        self.assertIn("airuleset-implementer-session", s)
+        # #1060 L3a review: cd into the marker's PROJECT dir before running.
+        self.assertIn('cd "$_mb_cwd"', s)
+        self.assertIn("does not exist", s)  # the cwd refusal
 
     def test_refuses_without_marker(self):
         with tempfile.TemporaryDirectory() as d:
@@ -321,8 +374,11 @@ class TestImplLauncher(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             home = Path(d)
             (home / ".claude").mkdir(parents=True)
+            project = home / "project"
+            project.mkdir()
             marker = dict(MARKER)
             marker["key_file"] = str(home / ".secrets" / "absent.key")
+            marker["cwd"] = str(project)  # a valid cwd so the KEY check is reached
             (home / ".claude" / "airuleset-model-backend.json").write_text(
                 json.dumps(marker))
             import cli_claude_scripts as cs
@@ -335,6 +391,15 @@ class TestImplLauncher(unittest.TestCase):
                                capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 1)
         self.assertIn("key file", r.stderr)
+
+    def test_refuses_without_cwd_dir(self):
+        # #1060 L3a review: the marker cwd must exist — refuse LOUDLY otherwise
+        # (a misprovisioned project dir must not silently open in the wrong place).
+        with tempfile.TemporaryDirectory() as d:
+            rc, out, err = _run_impl_launcher(d, cwd_exists=False)
+        self.assertEqual(rc, 1, "must refuse (exit 1) when the marker cwd is gone")
+        self.assertIn("does not exist", err)
+        self.assertNotIn("AIRULESET_ROLE=implementer", out)
 
     def test_exports_backend_env(self):
         with tempfile.TemporaryDirectory() as d:
@@ -362,6 +427,60 @@ class TestImplLauncher(unittest.TestCase):
         self.assertIn("implementer system prompt", err)
         kv = dict(ln.split("=", 1) for ln in out.splitlines() if "=" in ln)
         self.assertEqual(kv["AIRULESET_ROLE"], "implementer")
+
+    def test_runs_in_marker_cwd(self):
+        # #1060 L3a review: the impl session runs in the marker's PROJECT dir, not
+        # the shell's inherited cwd — so its transcript lands under the right dir.
+        with tempfile.TemporaryDirectory() as d:
+            rc, out, err = _run_impl_launcher(d)
+        self.assertEqual(rc, 0, err)
+        kv = dict(ln.split("=", 1) for ln in out.splitlines() if "=" in ln)
+        self.assertEqual(kv["PWD"], str(Path(d) / "project"))
+
+    def test_starts_fresh_session_id_never_continue(self):
+        # #1060 L3a MAJOR: no impl session id yet → a NEW uuid via --session-id
+        # (NEVER -c, which would resume the main window's transcript); the id file
+        # is written 0600.
+        with tempfile.TemporaryDirectory() as d:
+            rc, out, err = _run_impl_launcher(d)
+            self.assertEqual(rc, 0, err)
+            args = [ln for ln in out.splitlines() if ln.startswith("ARGS=")][0]
+            self.assertIn("--session-id", args)
+            self.assertNotIn(" -c ", " " + args + " ")
+            self.assertNotIn(" -r ", " " + args + " ")
+            # the id file checks MUST run inside the with (the tmp dir is deleted
+            # on exit).
+            sid_file = Path(d) / ".claude" / "airuleset-implementer-session"
+            self.assertTrue(sid_file.exists(),
+                            "the impl session id file must be written")
+            self.assertEqual(stat.S_IMODE(sid_file.stat().st_mode), 0o600)
+            # the id in ARGS matches the persisted id
+            sid = sid_file.read_text().strip()
+            self.assertIn(sid, args)
+
+    def test_resumes_own_session_id(self):
+        # An impl id whose transcript ALREADY exists under the project dir → -r.
+        sid = "12345678-1234-1234-1234-123456789abc"
+        with tempfile.TemporaryDirectory() as d:
+            rc, out, err = _run_impl_launcher(d, session_id=sid,
+                                              transcript_exists=True)
+        self.assertEqual(rc, 0, err)
+        args = [ln for ln in out.splitlines() if ln.startswith("ARGS=")][0]
+        self.assertIn("-r " + sid, args)
+        self.assertNotIn("--session-id", args)
+        self.assertNotIn(" -c ", " " + args + " ")
+
+    def test_never_picks_the_main_transcript(self):
+        # A FOREIGN (main-window) transcript sits in the project dir but the impl
+        # id's does NOT → fresh --session-id, NEVER -c (which would resume it).
+        with tempfile.TemporaryDirectory() as d:
+            rc, out, err = _run_impl_launcher(
+                d, extra_project_transcript="ffffffff-0000-0000-0000-000000000000")
+        self.assertEqual(rc, 0, err)
+        args = [ln for ln in out.splitlines() if ln.startswith("ARGS=")][0]
+        self.assertIn("--session-id", args)
+        self.assertNotIn(" -c ", " " + args + " ")
+        self.assertNotIn("ffffffff-0000", args)
 
 
 class TestMainLauncherAlwaysManagedModel(unittest.TestCase):
@@ -429,8 +548,17 @@ class TestTmuxImplWindow(unittest.TestCase):
     def _home_with_marker(self, td):
         c = Path(td) / ".claude"
         c.mkdir(parents=True, exist_ok=True)
-        (c / "airuleset-model-backend.json").write_text(json.dumps(MARKER))
+        project = Path(td) / "project"
+        project.mkdir(parents=True, exist_ok=True)  # a real cwd so `-c` fires
+        marker = dict(MARKER)
+        marker["cwd"] = str(project)
+        (c / "airuleset-model-backend.json").write_text(json.dumps(marker))
         return td
+
+    def test_block_string_lock_carries_c_flag(self):
+        # #1060 L3a review: the rendered attach block passes the project cwd to
+        # the impl window via `-c "$_impl_cwd"`.
+        self.assertIn('-n impl -c "$_impl_cwd"', self.block)
 
     def test_no_marker_single_window(self):
         with tempfile.TemporaryDirectory() as td:
@@ -451,6 +579,9 @@ class TestTmuxImplWindow(unittest.TestCase):
         self.assertEqual(len(impl_lines), 1, "exactly ONE impl window: %r" % rec)
         self.assertIn("-n impl", impl_lines[0])
         self.assertIn("airuleset-claude-impl.sh", impl_lines[0])
+        # the project cwd is passed to the impl window (a real dir → the -c branch)
+        self.assertIn("-c ", impl_lines[0])
+        self.assertIn(str(Path(td) / "project"), impl_lines[0])
 
     def test_marker_existing_session_no_new_window(self):
         # Attaching to an EXISTING session adds nothing (never keystrokes, never
@@ -659,7 +790,8 @@ class _FakeRun:
 class TestDeployShipping(unittest.TestCase):
     def _reg_with_miva1(self, d):
         reg = Path(d) / "reg.json"
-        mb.set_target("miva1@subdev", path=str(reg))
+        mb.set_target("miva1@subdev", cwd="/home/miva1/devel/odoo",
+                      path=str(reg))
         return str(reg)
 
     def _master_key(self, d):
@@ -784,6 +916,7 @@ class TestCliDispatch(unittest.TestCase):
             self.mb_args = []
             self.main = self.sub = self.fast = None
             self.base_url = self.key_file = None
+            self.cwd = "/home/miva1/devel/odoo/odoo-erp"
             self.registry_only = False
             for k, v in kw.items():
                 setattr(self, k, v)
@@ -823,7 +956,8 @@ class TestCliDispatch(unittest.TestCase):
                 m.patch("cli_model_backend.REGISTRY_PATH",
                         Path(d) / "reg.json"), \
                 m.patch("sys.stdout", io.StringIO()):
-            mb.set_target("miva1@subdev", path=str(Path(d) / "reg.json"))
+            mb.set_target("miva1@subdev", cwd="/proj",
+                          path=str(Path(d) / "reg.json"))
             rc = mb.cmd_model_backend(
                 self._Args(mb_action="clear", mb_args=["miva1@subdev"],
                            registry_only=True))
@@ -852,13 +986,14 @@ class TestReviewFixes1062(unittest.TestCase):
             "base_url": "http://100.101.214.103:4000",
             "key_file": "~/.secrets/model-gateway.key",
             "main": "openrouter/deepseek/deepseek-v4.1-flash",
-            "sub": "impl-sub", "fast": "impl-fast"}))
+            "sub": "impl-sub", "fast": "impl-fast",
+            "cwd": "/home/miva1/devel/odoo/odoo-erp"}))
 
     def test_set_target_refuses_unsafe_alias(self):
         with tempfile.TemporaryDirectory() as d:
             with self.assertRaises(mb.ModelBackendError):
                 mb.set_target("miva1@subdev", main="x'; rm -rf /",
-                              path=str(Path(d) / "reg.json"))
+                              cwd="/proj", path=str(Path(d) / "reg.json"))
 
     def test_default_base_url_uses_live_tailscale_ip(self):
         with m.patch("cli_model_gateway._tailscale_ip", return_value="100.9.9.9"):
@@ -888,7 +1023,8 @@ class TestReviewFixes1062(unittest.TestCase):
         from cli_remote import provision_model_backend_markers as prov
         with tempfile.TemporaryDirectory() as d:
             reg = Path(d) / "reg.json"
-            mb.set_target("miva1@subdev", path=str(reg))
+            mb.set_target("miva1@subdev", cwd="/home/miva1/devel/odoo",
+                          path=str(reg))
             k = Path(d) / "master.key"
             k.write_text("sk-x\n")
 

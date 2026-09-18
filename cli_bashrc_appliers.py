@@ -256,11 +256,22 @@ def render_tmux_attach_block(default_session: str) -> str:
         '      local _s="$1"',
         '      if [ -f "$HOME/.claude/airuleset-model-backend.json" ] && '
         '! command tmux has-session -t "$_s" 2>/dev/null; then',
+        # L3a review: the impl window must open in the stream's PROJECT dir, not
+        # the shell's inherited cwd (else it opens the wrong project + its session
+        # transcript lands under the wrong project dir). Read the marker's `cwd` at
+        # shell time (same python-parse pattern as the launcher, quoted).
+        '        local _impl_cwd',
+        r'''        _impl_cwd="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("cwd") or "")' "$HOME/.claude/airuleset-model-backend.json" 2>/dev/null || true)"''',
         '        command tmux new-session -d -s "$_s"',
-        ('        command tmux new-window -d -t "$_s" -n impl "%s"'
+        '        if [ -n "$_impl_cwd" ] && [ -d "$_impl_cwd" ]; then',
+        ('          command tmux new-window -d -t "$_s" -n impl -c "$_impl_cwd" "%s"'
          % impl_launcher),
+        "        else",
+        ('          command tmux new-window -d -t "$_s" -n impl "%s"'
+         % impl_launcher),
+        "        fi",
         # L3a review A 🔵: keep the impl pane visible if the launcher REFUSES
-        # (exit 1, e.g. a misprovisioned key) so its LOUD stderr is readable
+        # (exit 1, e.g. a misprovisioned key/cwd) so its LOUD stderr is readable
         # instead of the pane silently vanishing at the owner-present cutover.
         '        command tmux set-window-option -t "$_s:impl" remain-on-exit on '
         '2>/dev/null || true',

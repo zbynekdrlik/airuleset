@@ -19,10 +19,13 @@ rule (#1061). L3a removes the settings.json wiring entirely; the marker is now
 consumed by ONLY TWO surfaces, both scoped to the implementer WINDOW:
 
   * ``cli_claude_scripts`` renders the ``claude-impl`` launcher, which reads the
-    marker at SHELL time and exports the gateway backend env
-    (``ANTHROPIC_BASE_URL`` / ``ANTHROPIC_AUTH_TOKEN`` read from ``key_file`` /
-    ``ANTHROPIC_MODEL`` etc + ``AIRULESET_ROLE=implementer``) for THAT process
-    only — the main window keeps ``MANAGED_MODEL`` + the OAuth login untouched.
+    marker at SHELL time, ``cd``s into the marker's ``cwd`` (the stream PROJECT
+    dir), exports the gateway backend env (``ANTHROPIC_BASE_URL`` /
+    ``ANTHROPIC_AUTH_TOKEN`` read from ``key_file`` / ``ANTHROPIC_MODEL`` etc +
+    ``AIRULESET_ROLE=implementer``) for THAT process only, and runs claude under
+    its OWN persisted session id (never ``-c``, which would resume the MAIN
+    window's transcript) — the main window keeps ``MANAGED_MODEL`` + the OAuth
+    login untouched.
   * ``statusbar.account_email_segment`` shows ``impl:<main>`` in the implementer
     window (gated on ``AIRULESET_ROLE``).
 
@@ -53,7 +56,7 @@ class ModelBackendError(Exception):
 CLAUDE_DIR = Path.home() / ".claude"
 # The per-box marker — the ONLY per-box state (design item 5).
 MARKER_PATH = CLAUDE_DIR / "airuleset-model-backend.json"
-# The controller-side registry: {"<user>@<host>": {base_url, key_file, main, sub, fast}}.
+# The controller-side registry: {"<user>@<host>": {base_url, key_file, main, sub, fast, cwd}}.
 REGISTRY_PATH = CLAUDE_DIR / "airuleset-model-backends.json"
 # The token file ON the target box (the gateway master key, shipped 0600). The
 # marker's default `key_file`; the claude-impl launcher cats it at shell time.
@@ -68,8 +71,10 @@ DEFAULT_FAST = "impl-fast"
 # MagicDNS `airuleset`); the gateway binds it (cli_model_gateway._tailscale_ip).
 CONTROLLER_TAILSCALE_IP = "100.101.214.103"
 
-# The five string fields a valid marker MUST carry.
-_MARKER_FIELDS = ("base_url", "key_file", "main", "sub", "fast")
+# The string fields a valid marker MUST carry. `cwd` (#1060 L3a review) = the
+# stream's PROJECT dir the implementer window starts in (so its session transcript
+# lands under the RIGHT project dir, never the main window's).
+_MARKER_FIELDS = ("base_url", "key_file", "main", "sub", "fast", "cwd")
 
 # #1062 L2 review A-M1 (security hardening, kept for #1060 L3a): a marker field
 # flows into a shell context — the claude-impl launcher exports each field into
@@ -150,7 +155,7 @@ def load_marker(path=None, home=None):
 
 # --------------------------------------------------------------------------- #
 # The controller-side registry: {"<user>@<host>": {base_url, key_file, main,
-# sub, fast}}. `set`/`clear` maintain it; the deploy step ships each entry as
+# sub, fast, cwd}}. `set`/`clear` maintain it; the deploy step ships each entry as
 # the target's marker (cli_remote.provision_model_backend_markers).
 # --------------------------------------------------------------------------- #
 def registry_path(home=None):
@@ -189,14 +194,21 @@ def marker_from_entry(entry):
 
 
 def set_target(target, base_url=None, main=None, sub=None, fast=None,
-               key_file=None, path=None, home=None):
+               key_file=None, cwd=None, path=None, home=None):
     """Add/replace `target`'s registry entry. Defaults: base_url →
     default_base_url(); main/sub/fast → the impl(ementer) tier aliases; key_file →
-    TARGET_KEY_FILE. Returns the written entry. Does NOT ship anything — the
-    next push's deploy step ships the marker (design item 5)."""
+    TARGET_KEY_FILE. `cwd` is REQUIRED (#1060 L3a) — the stream's PROJECT dir the
+    implementer window starts in (an absolute path, e.g.
+    /home/miva1/devel/odoo/odoo-erp) — there is no sane default. Returns the
+    written entry. Does NOT ship anything — the next push's deploy step ships the
+    marker (design item 5)."""
     if not target or "@" not in target:
         raise ModelBackendError(
             "target must be `<user>@<host>` (e.g. miva1@subdev), got %r" % target)
+    if not (cwd or "").strip():
+        raise ModelBackendError(
+            "--cwd is required — the implementer's PROJECT dir on the target "
+            "(an absolute path, e.g. /home/<user>/devel/odoo/odoo-erp)")
     reg = load_registry(path=path, home=home)
     reg[target] = {
         "base_url": base_url or default_base_url(),
@@ -204,8 +216,11 @@ def set_target(target, base_url=None, main=None, sub=None, fast=None,
         "main": main or DEFAULT_MAIN,
         "sub": sub or DEFAULT_SUB,
         "fast": fast or DEFAULT_FAST,
+        "cwd": cwd,
     }
-    # Fail fast on a malformed hand-built entry before it is persisted.
+    # Fail fast on a malformed hand-built entry before it is persisted (this ALSO
+    # rejects a cwd carrying a shell-dangerous char — it flows into the launcher
+    # `cd`/`tmux -c`).
     marker_from_entry(reg[target])
     _write_registry(reg, path=path, home=home)
     return reg[target]
@@ -270,9 +285,9 @@ def _cmd_status(args):
     print("model-backend registry (%d target(s)):" % len(reg))
     for tgt in sorted(reg):
         e = reg[tgt]
-        print("  %-20s main=%s sub=%s fast=%s base_url=%s key_file=%s"
+        print("  %-20s main=%s sub=%s fast=%s cwd=%s base_url=%s key_file=%s"
               % (tgt, e.get("main"), e.get("sub"), e.get("fast"),
-                 e.get("base_url"), e.get("key_file")))
+                 e.get("cwd"), e.get("base_url"), e.get("key_file")))
     mb = load_marker()
     print("  this box: %s" % ("marker present (main=%s)" % mb["main"] if mb
                               else "no marker (Anthropic backend)"))
@@ -283,8 +298,8 @@ def _cmd_set(args):
     a = list(getattr(args, "mb_args", []) or [])
     if not a:
         raise ModelBackendError(
-            "usage: model-backend set <user@host> [--main A --sub B --fast C "
-            "--base-url URL --key-file PATH]")
+            "usage: model-backend set <user@host> --cwd <project-dir> [--main A "
+            "--sub B --fast C --base-url URL --key-file PATH]")
     target = a[0]
     entry = set_target(
         target,
@@ -292,9 +307,11 @@ def _cmd_set(args):
         main=getattr(args, "main", None),
         sub=getattr(args, "sub", None),
         fast=getattr(args, "fast", None),
-        key_file=getattr(args, "key_file", None))
-    print("model-backend: %s → main=%s sub=%s fast=%s base_url=%s"
-          % (target, entry["main"], entry["sub"], entry["fast"], entry["base_url"]))
+        key_file=getattr(args, "key_file", None),
+        cwd=getattr(args, "cwd", None))
+    print("model-backend: %s → main=%s sub=%s fast=%s cwd=%s base_url=%s"
+          % (target, entry["main"], entry["sub"], entry["fast"], entry["cwd"],
+             entry["base_url"]))
     print("  Written to the registry. The NEXT `airuleset.py push` ships the "
           "marker + the gateway master key (0600) to the target BEFORE its "
           "install runs, so that install flips the box onto the gateway in the "
