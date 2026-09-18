@@ -367,14 +367,15 @@ def provision_model_backend_markers(hosts=None, run=None, skip_names=None,
             continue
         # #1062 L2 review B-MAJOR1 (one-push flip): the per-host `install` in the
         # deploy loop ran BEFORE this delivery, so without this the box would
-        # flip only on the NEXT push. Re-run install on the just-flipped target
-        # NOW (marker present → apply_managed_settings_defaults writes the gateway
-        # env + apiKeyHelper, maybe_setup_model_backend materializes the helper
-        # script) so ONE push flips it. BEST-EFFORT: an install-flip failure is a
-        # WARN, never a delivery `failed` entry — the marker IS delivered, so a
-        # slow/failed re-run just defers the flip to the box's next install (the
-        # SAFE direction). Long timeout: a full install is far slower than a
-        # secret write.
+        # pick up the new marker + launcher only on the NEXT push. Re-run install
+        # on the just-flipped target NOW (#1060 L3a: install re-renders the
+        # ~/.bashrc impl-window block + the claude-impl launcher; settings.json
+        # is NOT changed by the marker anymore — the main window stays OAuth/Fable)
+        # so ONE push readies it; the impl window then appears at the next session
+        # (re)start. BEST-EFFORT: an install-flip failure is a WARN, never a
+        # delivery `failed` entry — the marker IS delivered, so a slow/failed
+        # re-run just defers to the box's next install (the SAFE direction). Long
+        # timeout: a full install is far slower than a secret write.
         repo_path = h.get("repo_path", "~/devel/airuleset")
         flip_fails = _deliver_secret_to_hosts(
             [h], "",
@@ -385,27 +386,46 @@ def provision_model_backend_markers(hosts=None, run=None, skip_names=None,
             print("  ⚠ model-backend: install-flip on %s did not complete (%s) "
                   "— the marker is delivered; the box flips on its next install."
                   % (name, reason), file=sys.stderr)
+    # #1060 L3a addendum: after delivery, report (read-only) any live claude
+    # session on each target that predates this flip — it keeps its OLD
+    # backend/model until restarted (never killed here).
+    report_live_claude_processes(deliverable, run=run, control_opts=control_opts)
     return failed
 
 
 def remove_model_backend_markers(targets, run=None, control_opts=None):
-    """#1062 L2: ship an idempotent removal (`rm -f` the marker + the key) to
-    each host entry in `targets` — the on-target half of `model-backend clear`
-    ("clear removes both"). The marker-derived settings env + the apiKeyHelper
-    script self-heal on the target's NEXT install (apply_managed_settings_defaults
-    pops the keys with no marker; maybe_setup_model_backend removes the stale
-    script). Returns [(name, reason)] failures. `rm -f` ignores the piped stdin
-    and is a harmless no-op on a box that never had a marker."""
+    """#1062 L2 (kept for #1060 L3a): ship an idempotent removal (`rm -f` the
+    marker + the key + any STALE apiKeyHelper script from the old L2) to each
+    host entry in `targets` — the on-target half of `model-backend clear`
+    ("clear removes both"). #1060 L3a: the marker no longer WRITES settings.json,
+    but a box flipped under the old L2 still carries the L2-era ANTHROPIC_* env +
+    managed apiKeyHelper there — those are self-healed on the box's NEXT install
+    (apply_managed_settings_defaults pops them UNCONDITIONALLY); the impl launcher
+    + statusline just stop consuming a now-absent marker at the next session
+    start. The stale `airuleset-model-gateway-apikey.sh` `rm` cleans up the L2
+    helper SCRIPT file itself (a no-op on a never-flipped box). Returns
+    [(name, reason)]
+    failures. `rm -f` ignores the piped stdin and is a no-op on a never-markered
+    box. After the removal, reports (read-only) any live claude session that
+    predates the clear — it keeps its OLD credential until restarted (the
+    incident this addendum exists for). `require_identity=True`: never ride an
+    owner-secret box over the shared password."""
     import subprocess
     run = run or subprocess.run
     if not targets:
         return []
-    return _deliver_secret_to_hosts(
+    control_opts = list(control_opts or [])
+    fails = _deliver_secret_to_hosts(
         targets, "",
         "rm -f ~/.claude/airuleset-model-backend.json "
         "~/.secrets/model-gateway.key ~/.claude/airuleset-model-gateway-apikey.sh",
-        "model-backend removal", run, control_opts=list(control_opts or []),
+        "model-backend removal", run, control_opts=control_opts,
         require_identity=True)
+    # #1060 L3a addendum: LOUD read-only report of live claude sessions that keep
+    # the old backend until restarted (incident: a clear removed the key under a
+    # running `--model` session, which then 400'd every turn). Never kills.
+    report_live_claude_processes(targets, run=run, control_opts=control_opts)
+    return fails
 
 
 # FORWARD-TRIGGER (#659 review): the Pattern-B secret-delivery surface
@@ -414,6 +434,75 @@ def remove_model_backend_markers(targets, run=None, control_opts=None):
 # (the size_ratchet, not the ~1000-line nudge, is the real cap; #545). If a
 # THIRD secret-delivery caller ever lands, extract this whole surface into a
 # `cli_secret_delivery.py` leaf (facade re-export from airuleset.py) FIRST.
+def _ssh_prefix(remote, require_identity):
+    """The ssh/sshpass argv PREFIX (up to but NOT including `user@host` + the
+    remote command) for `remote`, or `(None, reason)` when an owner-secret
+    target lacks a pinned identity. Extracted (#1060 L3a) so the secret-delivery
+    loop AND the read-only live-process report (report_live_claude_processes)
+    build the ssh invocation identically — the #669 host-key pin, the #341
+    BatchMode / one-password-prompt hardening. Behaviour is byte-identical to the
+    former inline builder in _deliver_secret_to_hosts."""
+    identity = remote.get("identity")
+    # #669: pin the host key on a raw-public-IP owner_vps target; every other
+    # host keeps its unchanged StrictHostKeyChecking=no posture.
+    hostkey_opts = host_key_check_opts(remote)
+    if identity:
+        # #341: BatchMode=yes -- a failed pubkey attempt (an unprovisioned/
+        # misconfigured account) must fail IMMEDIATELY rather than falling
+        # through to an interactive password/keyboard-interactive attempt,
+        # which is what turned a single "Permission denied" connection into
+        # several distinct auth-failure log lines against subdev.
+        return (["ssh", "-i", os.path.expanduser(identity), *hostkey_opts,
+                 "-o", "BatchMode=yes"], None)
+    if require_identity:
+        # #659: never ride an owner-secret box over the fleet-shared password.
+        return (None, "refused-no-identity")
+    # #341: NumberOfPasswordPrompts=1 -- caps a wrong/unprovisioned password
+    # attempt to ONE try (openssh's own default is 3, and sshpass happily
+    # re-supplies the same password for every re-prompt), so a single sshpass
+    # call can burn at most one fail2ban-countable strike instead of up to three.
+    return (["sshpass", "-p", "newlevel", "ssh", *hostkey_opts,
+             "-o", "NumberOfPasswordPrompts=1"], None)
+
+
+def report_live_claude_processes(targets, run=None, control_opts=None,
+                                 require_identity=True):
+    """#1060 L3a (supervisor addendum): after a `model-backend set`/`clear`
+    delivery, REPORT (READ-ONLY, never kill, never keystroke) the live `claude`
+    processes on each target that were started BEFORE this change — they keep
+    their old backend/model + credential until restarted. Incident (2026-09-18):
+    a `clear miva1@subdev` removed the gateway key underneath a running
+    `claude --model pilot-main` session, which then failed EVERY turn with
+    `API Error: 400 No connected db` (a non-refreshable credential) until the
+    owner restarted it. Best-effort: a target we cannot reach / cannot check is
+    silent; a box without a pinned identity is skipped (never ridden over the
+    shared password for a read either). Returns [(name, count)] for tests."""
+    import subprocess
+    run = run or subprocess.run
+    control_opts = list(control_opts or [])
+    results = []
+    for remote in targets or []:
+        ssh_prefix, _reason = _ssh_prefix(remote, require_identity)
+        if ssh_prefix is None:
+            continue
+        argv = ssh_prefix + control_opts + [
+            f"{remote['user']}@{remote['host']}",
+            "pgrep -u $(id -u) -af '^claude '"]
+        try:
+            r = run(argv, input="", capture_output=True, text=True, timeout=20)
+        except Exception:
+            continue  # unreachable / timeout — can't determine, stay quiet
+        lines = [ln for ln in (r.stdout or "").splitlines() if ln.strip()]
+        if lines:
+            print("  model-backend: %s has %d live claude process(es) started "
+                  "before this change — they keep their old backend/model until "
+                  "restarted:" % (remote["name"], len(lines)))
+            for ln in lines:
+                print("    %s" % ln)
+        results.append((remote["name"], len(lines)))
+    return results
+
+
 def _deliver_secret_to_hosts(targets, value, remote_write_cmd, noun, run,
                              control_opts=None, require_identity=False,
                              timeout=20):
@@ -437,35 +526,14 @@ def _deliver_secret_to_hosts(targets, value, remote_write_cmd, noun, run,
     control_opts = list(control_opts or [])
     failed = []
     for remote in targets:
-        identity = remote.get("identity")
-        # #669: pin the host key on a raw-public-IP owner_vps target; every
-        # other host keeps its unchanged StrictHostKeyChecking=no posture.
-        hostkey_opts = host_key_check_opts(remote)
-        if identity:
-            # #341: BatchMode=yes -- a failed pubkey attempt (an unprovisioned/
-            # misconfigured account) must fail IMMEDIATELY rather than falling
-            # through to an interactive password/keyboard-interactive attempt,
-            # which is what turned a single "Permission denied" connection into
-            # several distinct auth-failure log lines against subdev.
-            ssh_prefix = ["ssh", "-i", os.path.expanduser(identity),
-                          *hostkey_opts,
-                          "-o", "BatchMode=yes"]
-        elif require_identity:
+        ssh_prefix, prefix_reason = _ssh_prefix(remote, require_identity)
+        if ssh_prefix is None:
             # #659: never ship an owner secret over the fleet-shared password.
             print("  ⚠ %s delivery to %s REFUSED: an owner secret requires a "
                   "pinned ssh identity, never the fleet-shared password."
                   % (noun, remote["name"]), file=sys.stderr)
-            failed.append((remote["name"], "refused-no-identity"))
+            failed.append((remote["name"], prefix_reason))
             continue
-        else:
-            # #341: NumberOfPasswordPrompts=1 -- caps a wrong/unprovisioned
-            # password attempt to ONE try (openssh's own default is 3, and
-            # sshpass happily re-supplies the same password for every re-prompt),
-            # so a single sshpass call can burn at most one fail2ban-countable
-            # strike instead of up to three.
-            ssh_prefix = ["sshpass", "-p", "newlevel", "ssh",
-                          *hostkey_opts,
-                          "-o", "NumberOfPasswordPrompts=1"]
         argv = ssh_prefix + control_opts + [
             f"{remote['user']}@{remote['host']}", remote_write_cmd]
         # #358: only a genuine ssh connection-establishment failure (never an

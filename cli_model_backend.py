@@ -1,40 +1,49 @@
-"""cli_model_backend — Lane L2 of #1062: the per-box MODEL BACKEND switch.
+"""cli_model_backend — the IMPLEMENTER-window model backend registry + marker.
 
-A single per-box marker (``~/.claude/airuleset-model-backend.json``) flips ONE
-box's Claude Code onto the controller's LiteLLM model gateway (Lane L1,
-``cli_model_gateway``) with tier ALIASES + an ``apiKeyHelper`` token. The marker
-is the ONLY per-box state; without it a box is byte-identical to today. The
-marker is written from the controller through the normal push/install path out
-of a controller-side REGISTRY (``~/.claude/airuleset-model-backends.json``,
+#1060 Lane L3a re-scopes #1062 Lane L2. A single per-box marker
+(``~/.claude/airuleset-model-backend.json``) names the controller LiteLLM model
+gateway (Lane L1, ``cli_model_gateway``) + the tier ALIASES (``impl-main`` /
+``impl-sub`` / ``impl-fast``) + the key file for ONE box's IMPLEMENTER window.
+The marker is the ONLY per-box state; without it a box is byte-identical to
+today. It is written from the controller through the normal push/install path
+out of a controller-side REGISTRY (``~/.claude/airuleset-model-backends.json``,
 ``{"<user>@<host>": {...}}``) maintained by ``airuleset.py model-backend
 set|clear <target> …``; the per-target deploy step (cli_remote) ships the marker
 plus the gateway master key (copied 0600 into the target's
 ``~/.secrets/model-gateway.key``).
 
+The 2026-09-18 miva1 incident (#1062 correction): the marker used to feed
+``settings.json`` env (shared by EVERY Claude the user runs), so it flipped the
+stream's MAIN Claude onto the gateway/DeepSeek — violating the "design by Fable"
+rule (#1061). L3a removes the settings.json wiring entirely; the marker is now
+consumed by ONLY TWO surfaces, both scoped to the implementer WINDOW:
+
+  * ``cli_claude_scripts`` renders the ``claude-impl`` launcher, which reads the
+    marker at SHELL time, ``cd``s into the marker's ``cwd`` (the stream PROJECT
+    dir), exports the gateway backend env (``ANTHROPIC_BASE_URL`` /
+    ``ANTHROPIC_AUTH_TOKEN`` read from ``key_file`` / ``ANTHROPIC_MODEL`` etc +
+    ``AIRULESET_ROLE=implementer``) for THAT process only, and runs claude under
+    its OWN persisted session id (never ``-c``, which would resume the MAIN
+    window's transcript) — the main window keeps ``MANAGED_MODEL`` + the OAuth
+    login untouched.
+  * ``statusbar.account_email_segment`` shows ``impl:<main>`` in the implementer
+    window (gated on ``AIRULESET_ROLE``).
+
+The controller-side deploy shipper (``cli_remote.provision_model_backend_markers``
+/ ``remove_model_backend_markers``) + ``model-backend set|clear|status`` are
+unchanged; the design gate (``gates.designdispatch``) + ``airuleset.py handoff``
+are Fable-only again (the main authors the design + hands off).
+
 This leaf is STDLIB ONLY and carries NO module-level ``import airuleset`` (same
 leaf discipline as cli_config / cli_model_gateway — a module-level import would
-crash CLI mode, #433 L-E). Consumed by:
+crash CLI mode, #433 L-E).
 
-  * ``cli_config.apply_managed_settings_defaults`` — settings.json env + model +
-    apiKeyHelper on a marker box; the marker-derived env is popped on a
-    no-marker box (self-heal after ``clear``).
-  * ``cli_claude_scripts.render_claude_launch_script`` — the launcher ``--model``
-    on a marker box = the marker's ``main`` alias.
-  * ``gates.designdispatch`` — the box's configured ``main`` alias is accepted as
-    the design model WHEN the marker exists (every other box still requires the
-    Fable id).
-  * ``watchdog.usage.check_usage`` — a marker box skips the OAuth usage read and
-    records ``backend=gateway`` instead of logging an error.
-  * ``statusbar.account_email_segment`` — a marker box shows ``gw:<main>``.
-  * ``cli_remote.provision_model_backend_markers`` — the per-target deploy shipper.
-
-#1062 Lane L2. Design comment: airuleset#1062 (the Fable main).
+#1060 Lane L3a (re-scopes #1062 L2). Design comment: airuleset#1060 (the Fable main).
 """
 
 import json
 import os
 import re
-import shlex
 from pathlib import Path
 
 
@@ -47,55 +56,36 @@ class ModelBackendError(Exception):
 CLAUDE_DIR = Path.home() / ".claude"
 # The per-box marker — the ONLY per-box state (design item 5).
 MARKER_PATH = CLAUDE_DIR / "airuleset-model-backend.json"
-# The controller-side registry: {"<user>@<host>": {base_url, key_file, main, sub, fast}}.
+# The controller-side registry: {"<user>@<host>": {base_url, key_file, main, sub, fast, cwd}}.
 REGISTRY_PATH = CLAUDE_DIR / "airuleset-model-backends.json"
-# The managed apiKeyHelper script: prints the marker's key_file to stdout so the
-# token itself never lands in settings.json (design item 6).
-APIKEY_HELPER_PATH = CLAUDE_DIR / "airuleset-model-gateway-apikey.sh"
-
 # The token file ON the target box (the gateway master key, shipped 0600). The
-# marker's default `key_file`; the apiKeyHelper script cats it.
+# marker's default `key_file`; the claude-impl launcher cats it at shell time.
 TARGET_KEY_FILE = "~/.secrets/model-gateway.key"
 
 # Default tier aliases — MUST agree with cli_model_gateway.default_alias_map().
-DEFAULT_MAIN = "pilot-main"
-DEFAULT_SUB = "pilot-sub"
-DEFAULT_FAST = "pilot-fast"
+DEFAULT_MAIN = "impl-main"
+DEFAULT_SUB = "impl-sub"
+DEFAULT_FAST = "impl-fast"
 
 # The controller's tailscale IPv4 (machine-identities: ar.newlevel.media /
 # MagicDNS `airuleset`); the gateway binds it (cli_model_gateway._tailscale_ip).
 CONTROLLER_TAILSCALE_IP = "100.101.214.103"
 
-# API_TIMEOUT_MS on a gateway box (design item 6): 900_000 (Claude Code default
-# is 600_000) — a cheap third-party model routed through the proxy can be slower
-# to first byte than Anthropic first-party.
-API_TIMEOUT_MS = "900000"
+# The string fields a valid marker MUST carry. `cwd` (#1060 L3a review) = the
+# stream's PROJECT dir the implementer window starts in (so its session transcript
+# lands under the RIGHT project dir, never the main window's).
+_MARKER_FIELDS = ("base_url", "key_file", "main", "sub", "fast", "cwd")
 
-# The env keys the marker OWNS: present when the marker exists, popped when it is
-# absent (self-heal of a cleared box; a never-markered box never had them, so the
-# pop is a no-op and the no-marker path stays byte-identical to today). NB
-# CLAUDE_CODE_SUBAGENT_MODEL is set fleet-wide today (opus tier) and only
-# OVERRIDDEN (never removed) by a marker, so it is deliberately NOT in this set.
-BACKEND_ENV_KEYS = (
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
-    "API_TIMEOUT_MS",
-)
-
-# The five string fields a valid marker MUST carry.
-_MARKER_FIELDS = ("base_url", "key_file", "main", "sub", "fast")
-
-# #1062 L2 review A-M1 (security hardening): a marker field flows into a shell
-# context — the `main` alias into the launcher's `--model '{{MANAGED_MODEL}}'`
-# (single-quoted), the key_file/base_url into settings.json + the apiKeyHelper
-# script — so a quote/backtick/whitespace/metachar in ANY field could break out
-# of the quoting or inject a command. Reject those chars in every field. This is
-# deliberately permissive for real values (a base_url has `:/.`, a key_file has
-# `/~.-`, an alias/model id has `/._:@-`); it bans only the shell-dangerous set.
+# #1062 L2 review A-M1 (security hardening, kept for #1060 L3a): a marker field
+# flows into a shell context — the claude-impl launcher exports each field into
+# the child env (`export ANTHROPIC_BASE_URL="$_mb_base_url"` etc, read at shell
+# time), and the key_file path is cat'd — so a quote/backtick/whitespace/metachar
+# in ANY field could break out of the quoting or inject a command. Reject those
+# chars in every field. This is deliberately permissive for real values (a
+# base_url has `:/.`, a key_file has `/~.-`, an alias/model id has `/._:@-`); it
+# bans only the shell-dangerous set. The launcher ADDITIONALLY parses the marker
+# with python3 + shlex.quote (defence in depth), but this write-time gate keeps a
+# malformed hand-edit out of the marker in the first place.
 _MARKER_UNSAFE_RE = re.compile(r"""['"`\s;|&$\\<>(){}]""")
 
 
@@ -133,7 +123,7 @@ def _valid_marker(d):
     """True iff `d` is a complete marker — every field a non-empty string with no
     shell-dangerous character (review A-M1). An INCOMPLETE or unsafe marker is
     treated as absent (fail to today's behaviour) rather than half-flipping the
-    box or injecting into the launcher/apiKeyHelper/settings."""
+    box or injecting into the claude-impl launcher's shell exports."""
     if not isinstance(d, dict):
         return False
     for k in _MARKER_FIELDS:
@@ -163,93 +153,9 @@ def load_marker(path=None, home=None):
     return d if _valid_marker(d) else None
 
 
-def backend_env(marker):
-    """The env vars a marker box adds to settings.json (PURE). Keys are exactly
-    BACKEND_ENV_KEYS; every value is a string. CLAUDE_CODE_SUBAGENT_MODEL and
-    apiKeyHelper are applied by the caller (they override/are top-level keys)."""
-    return {
-        "ANTHROPIC_BASE_URL": marker["base_url"],
-        "ANTHROPIC_MODEL": marker["main"],
-        "ANTHROPIC_DEFAULT_OPUS_MODEL": marker["main"],
-        "ANTHROPIC_DEFAULT_SONNET_MODEL": marker["sub"],
-        "ANTHROPIC_DEFAULT_HAIKU_MODEL": marker["fast"],
-        "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
-        "API_TIMEOUT_MS": API_TIMEOUT_MS,
-    }
-
-
-def launcher_model(default, home=None):
-    """The launcher `--model` for THIS box: the marker's `main` alias when a
-    marker exists, else `default` (the caller passes airuleset.MANAGED_MODEL)."""
-    mb = load_marker(home=home)
-    return mb["main"] if mb else default
-
-
-# --------------------------------------------------------------------------- #
-# The apiKeyHelper managed script (prints the token; the token never lands in
-# settings.json — design item 6)
-# --------------------------------------------------------------------------- #
-def apikey_helper_path(home=None):
-    if home is not None:
-        return Path(home) / ".claude" / "airuleset-model-gateway-apikey.sh"
-    return _expand(APIKEY_HELPER_PATH)
-
-
-def apikey_helper_script(key_file):
-    """The managed apiKeyHelper script body (PURE). Prints the gateway key file
-    to stdout so Claude Code authenticates to the controller LiteLLM gateway
-    with a Bearer token instead of the Max OAuth login. The key-file's ABSOLUTE
-    path is baked in at render time (Claude Code execs the helper via a shell
-    that may not expand `~`), shell-quoted; the token itself is never stored in
-    settings.json."""
-    kf = shlex.quote(os.path.expanduser(str(key_file)))
-    return (
-        "#!/bin/sh\n"
-        "# Managed by airuleset (cli_model_backend, #1062 L2). Prints the\n"
-        "# model-gateway master key so Claude Code authenticates to the\n"
-        "# controller LiteLLM gateway (ANTHROPIC_BASE_URL). The key file is\n"
-        "# 0600; the token is never stored in settings.json. Do not edit — a\n"
-        "# push regenerates this file.\n"
-        "umask 077\n"
-        "exec cat -- %s\n" % kf
-    )
-
-
-def maybe_setup_model_backend(home=None, marker=None):
-    """cmd_install entry point (runs on EVERY box's local install). When the
-    per-box marker exists → materialize the managed apiKeyHelper script (0755)
-    that prints the marker's `key_file`. When it does NOT exist → remove a stale
-    managed script (self-heal of a cleared box). Returns a short status line.
-    Never raises (the caller wraps it non-fatally). Writes NO marker and NO
-    secret — only the apiKeyHelper script (which contains a `cat <path>`, never a
-    token value)."""
-    mb = marker if marker is not None else load_marker(home=home)
-    dest = apikey_helper_path(home=home)
-    if not mb:
-        try:
-            if dest.exists():
-                dest.unlink()
-                return ("  model-backend: no marker — removed stale apiKeyHelper "
-                        "script %s" % dest)
-        except OSError as e:
-            return "  model-backend: could not remove stale apiKeyHelper (%s)" % e
-        return "  model-backend: no marker (no-op)"
-    try:
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        # 0755: the helper must be executable; it contains no secret.
-        fd = os.open(str(dest), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o755)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(apikey_helper_script(mb["key_file"]))
-        os.chmod(str(dest), 0o755)
-    except OSError as e:
-        return "  model-backend: could NOT write apiKeyHelper %s: %s" % (dest, e)
-    return "  model-backend: apiKeyHelper script installed (%s), main=%s" % (
-        dest, mb["main"])
-
-
 # --------------------------------------------------------------------------- #
 # The controller-side registry: {"<user>@<host>": {base_url, key_file, main,
-# sub, fast}}. `set`/`clear` maintain it; the deploy step ships each entry as
+# sub, fast, cwd}}. `set`/`clear` maintain it; the deploy step ships each entry as
 # the target's marker (cli_remote.provision_model_backend_markers).
 # --------------------------------------------------------------------------- #
 def registry_path(home=None):
@@ -288,14 +194,21 @@ def marker_from_entry(entry):
 
 
 def set_target(target, base_url=None, main=None, sub=None, fast=None,
-               key_file=None, path=None, home=None):
+               key_file=None, cwd=None, path=None, home=None):
     """Add/replace `target`'s registry entry. Defaults: base_url →
-    default_base_url(); main/sub/fast → the pilot aliases; key_file →
-    TARGET_KEY_FILE. Returns the written entry. Does NOT ship anything — the
-    next push's deploy step ships the marker (design item 5)."""
+    default_base_url(); main/sub/fast → the impl(ementer) tier aliases; key_file →
+    TARGET_KEY_FILE. `cwd` is REQUIRED (#1060 L3a) — the stream's PROJECT dir the
+    implementer window starts in (an absolute path, e.g.
+    /home/miva1/devel/odoo/odoo-erp) — there is no sane default. Returns the
+    written entry. Does NOT ship anything — the next push's deploy step ships the
+    marker (design item 5)."""
     if not target or "@" not in target:
         raise ModelBackendError(
             "target must be `<user>@<host>` (e.g. miva1@subdev), got %r" % target)
+    if not (cwd or "").strip():
+        raise ModelBackendError(
+            "--cwd is required — the implementer's PROJECT dir on the target "
+            "(an absolute path, e.g. /home/<user>/devel/odoo/odoo-erp)")
     reg = load_registry(path=path, home=home)
     reg[target] = {
         "base_url": base_url or default_base_url(),
@@ -303,8 +216,11 @@ def set_target(target, base_url=None, main=None, sub=None, fast=None,
         "main": main or DEFAULT_MAIN,
         "sub": sub or DEFAULT_SUB,
         "fast": fast or DEFAULT_FAST,
+        "cwd": cwd,
     }
-    # Fail fast on a malformed hand-built entry before it is persisted.
+    # Fail fast on a malformed hand-built entry before it is persisted (this ALSO
+    # rejects a cwd carrying a shell-dangerous char — it flows into the launcher
+    # `cd`/`tmux -c`).
     marker_from_entry(reg[target])
     _write_registry(reg, path=path, home=home)
     return reg[target]
@@ -359,7 +275,7 @@ def _cmd_status(args):
     if not reg:
         print("model-backend: no registry — no box is flipped to the gateway")
         print("  (flip one with: airuleset.py model-backend set <user@host> "
-              "[--main pilot-main --sub pilot-sub --fast pilot-fast])")
+              "[--main impl-main --sub impl-sub --fast impl-fast])")
         # Also report THIS box's own marker state.
         mb = load_marker()
         print("  this box: %s" % ("marker present (main=%s, base_url=%s)"
@@ -369,9 +285,9 @@ def _cmd_status(args):
     print("model-backend registry (%d target(s)):" % len(reg))
     for tgt in sorted(reg):
         e = reg[tgt]
-        print("  %-20s main=%s sub=%s fast=%s base_url=%s key_file=%s"
+        print("  %-20s main=%s sub=%s fast=%s cwd=%s base_url=%s key_file=%s"
               % (tgt, e.get("main"), e.get("sub"), e.get("fast"),
-                 e.get("base_url"), e.get("key_file")))
+                 e.get("cwd"), e.get("base_url"), e.get("key_file")))
     mb = load_marker()
     print("  this box: %s" % ("marker present (main=%s)" % mb["main"] if mb
                               else "no marker (Anthropic backend)"))
@@ -382,8 +298,8 @@ def _cmd_set(args):
     a = list(getattr(args, "mb_args", []) or [])
     if not a:
         raise ModelBackendError(
-            "usage: model-backend set <user@host> [--main A --sub B --fast C "
-            "--base-url URL --key-file PATH]")
+            "usage: model-backend set <user@host> --cwd <project-dir> [--main A "
+            "--sub B --fast C --base-url URL --key-file PATH]")
     target = a[0]
     entry = set_target(
         target,
@@ -391,9 +307,11 @@ def _cmd_set(args):
         main=getattr(args, "main", None),
         sub=getattr(args, "sub", None),
         fast=getattr(args, "fast", None),
-        key_file=getattr(args, "key_file", None))
-    print("model-backend: %s → main=%s sub=%s fast=%s base_url=%s"
-          % (target, entry["main"], entry["sub"], entry["fast"], entry["base_url"]))
+        key_file=getattr(args, "key_file", None),
+        cwd=getattr(args, "cwd", None))
+    print("model-backend: %s → main=%s sub=%s fast=%s cwd=%s base_url=%s"
+          % (target, entry["main"], entry["sub"], entry["fast"], entry["cwd"],
+             entry["base_url"]))
     print("  Written to the registry. The NEXT `airuleset.py push` ships the "
           "marker + the gateway master key (0600) to the target BEFORE its "
           "install runs, so that install flips the box onto the gateway in the "
@@ -423,8 +341,9 @@ def _cmd_clear(args):
               "Run `airuleset.py model-backend clear %s` (reachable) to remove "
               "them, or remove them on the target by hand." % (target, target))
         return 0
-    # Ship the on-target removal (rm marker + key + apiKeyHelper script) now —
-    # "clear removes both". Deferred imports keep this leaf standalone-importable.
+    # Ship the on-target removal (rm marker + key + any stale apiKeyHelper script
+    # from the old L2) now — "clear removes both". Deferred imports keep this leaf
+    # standalone-importable.
     try:
         import cli_remote  # noqa: E402 — CLI runtime only
         entries = [h for h in cli_remote._deployable_hosts()
@@ -445,10 +364,12 @@ def _cmd_clear(args):
               % (target, ", ".join("%s:%s" % f for f in fails)),
               file=__import__("sys").stderr)
         return 2
-    print("  model-backend: marker + key + apiKeyHelper removed on %s. Its "
-          "settings.json still points at the gateway until the target's NEXT "
-          "install reverts it (no marker → the backend env + apiKeyHelper are "
-          "popped) — run `airuleset.py push` to revert it now." % target)
+    print("  model-backend: marker + key + stale apiKeyHelper removed on %s. If "
+          "the box was flipped under the old L2, its shared settings.json still "
+          "carries the L2-era ANTHROPIC_* env until the target's NEXT install "
+          "self-heals it (apply_managed_settings_defaults pops the L2-era env + "
+          "the managed apiKeyHelper UNCONDITIONALLY, #1060 L3a) — run "
+          "`airuleset.py push` to revert it now." % target)
     return 0
 
 

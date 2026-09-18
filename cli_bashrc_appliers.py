@@ -53,9 +53,11 @@ from pathlib import Path
 
 from cli_claude_scripts import (
     CLAUDE_LAUNCH_SCRIPT_DEST,
+    CLAUDE_IMPL_LAUNCH_SCRIPT_DEST,
     CLAUDE_HISTORY_SCRIPT_DEST,
     CLAUDE_HISTORY_POPUP_SCRIPT_DEST,
     render_claude_launch_script,
+    render_claude_impl_launch_script,
     render_claude_history_script,
     render_claude_history_popup_script,
 )
@@ -86,6 +88,10 @@ ULTRACODE_BASHRC_BLOCK = (
     f'claude-ultracode() {{ "$HOME/.claude/{CLAUDE_LAUNCH_SCRIPT_DEST.name}" ultracode "$@"; }}\n'
     f'claude-plain() {{ "$HOME/.claude/{CLAUDE_LAUNCH_SCRIPT_DEST.name}" plain "$@"; }}\n'
     f'claude-fullscreen() {{ "$HOME/.claude/{CLAUDE_LAUNCH_SCRIPT_DEST.name}" fullscreen "$@"; }}\n'
+    # #1060 L3a: the IMPLEMENTER-window launcher (its OWN script — a separate
+    # process env from the main window). tmux window 1 runs it by absolute path;
+    # this wrapper is for interactive use. It refuses off a marker box.
+    f'claude-impl() {{ "$HOME/.claude/{CLAUDE_IMPL_LAUNCH_SCRIPT_DEST.name}" "$@"; }}\n'
     f'claude-history() {{ python3 "$HOME/.claude/{CLAUDE_HISTORY_SCRIPT_DEST.name}" "$@"; }}\n'
     f"{ULTRACODE_MARK_END}"
 )
@@ -93,7 +99,8 @@ ULTRACODE_BASHRC_BLOCK = (
 
 def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
                               history_script_path: Path = None,
-                              popup_script_path: Path = None) -> bool:
+                              popup_script_path: Path = None,
+                              impl_script_path: Path = None) -> bool:
     """Install/refresh the managed claude launcher (#77) AND the
     claude-history companion (#267 -- same mechanism, same self-heal
     discipline, deliberately extended in place rather than given its own
@@ -129,12 +136,23 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     spath = script_path or CLAUDE_LAUNCH_SCRIPT_DEST
     hpath = history_script_path or CLAUDE_HISTORY_SCRIPT_DEST
     ppath = popup_script_path or CLAUDE_HISTORY_POPUP_SCRIPT_DEST
+    ipath = impl_script_path or CLAUDE_IMPL_LAUNCH_SCRIPT_DEST
 
     spath.parent.mkdir(parents=True, exist_ok=True)
     spath.write_text(render_claude_launch_script())
     os.chmod(str(spath), 0o755)
     if not spath.exists():
         raise RuntimeError(f"claude launcher script missing right after write: {spath}")
+
+    # #1060 L3a: the claude-impl launcher — written UNCONDITIONALLY on every box
+    # (same self-heal discipline as the main launcher). It is inert off a
+    # marker box (it refuses at runtime), so a non-implementer box carries a
+    # harmless, never-run script; the impl tmux window + the marker gate its use.
+    ipath.parent.mkdir(parents=True, exist_ok=True)
+    ipath.write_text(render_claude_impl_launch_script())
+    os.chmod(str(ipath), 0o755)
+    if not ipath.exists():
+        raise RuntimeError(f"claude-impl launcher script missing right after write: {ipath}")
 
     hpath.parent.mkdir(parents=True, exist_ok=True)
     hpath.write_text(render_claude_history_script())
@@ -217,6 +235,7 @@ def render_tmux_attach_block(default_session: str) -> str:
         raise ValueError(
             "unsafe tmux default session name for #651 block: %r"
             % (default_session,))
+    impl_launcher = "$HOME/.claude/%s" % CLAUDE_IMPL_LAUNCH_SCRIPT_DEST.name
     lines = [
         TMUX_ATTACH_MARK_START,
         "# #651: `tmux new -t <name>` is the GROUP-target form -- it always",
@@ -228,13 +247,44 @@ def render_tmux_attach_block(default_session: str) -> str:
         "# never sees these functions, so nothing automated can be rewritten.",
         "case $- in",
         "  *i*)",
-        ('    t() { command tmux new-session -A -s "${1:-%s}"; }'
+        "    # #1060 L3a: attach-or-create, plus window 1 `impl` on a",
+        "    # model-backend MARKER box when the session is NEWLY created (never",
+        "    # on attach to an existing session, never keystrokes into a pane).",
+        "    # One block serves every box: the marker + has-session checks run",
+        "    # here at shell time, so a non-marker box gets exactly window 0.",
+        "    _airuleset_tmux_attach() {",
+        '      local _s="$1"',
+        '      if [ -f "$HOME/.claude/airuleset-model-backend.json" ] && '
+        '! command tmux has-session -t "$_s" 2>/dev/null; then',
+        # L3a review: the impl window must open in the stream's PROJECT dir, not
+        # the shell's inherited cwd (else it opens the wrong project + its session
+        # transcript lands under the wrong project dir). Read the marker's `cwd` at
+        # shell time (same python-parse pattern as the launcher, quoted).
+        '        local _impl_cwd',
+        r'''        _impl_cwd="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("cwd") or "")' "$HOME/.claude/airuleset-model-backend.json" 2>/dev/null || true)"''',
+        '        command tmux new-session -d -s "$_s"',
+        '        if [ -n "$_impl_cwd" ] && [ -d "$_impl_cwd" ]; then',
+        ('          command tmux new-window -d -t "$_s" -n impl -c "$_impl_cwd" "%s"'
+         % impl_launcher),
+        "        else",
+        ('          command tmux new-window -d -t "$_s" -n impl "%s"'
+         % impl_launcher),
+        "        fi",
+        # L3a review A 🔵: keep the impl pane visible if the launcher REFUSES
+        # (exit 1, e.g. a misprovisioned key/cwd) so its LOUD stderr is readable
+        # instead of the pane silently vanishing at the owner-present cutover.
+        '        command tmux set-window-option -t "$_s:impl" remain-on-exit on '
+        '2>/dev/null || true',
+        "      fi",
+        '      command tmux new-session -A -s "$_s"',
+        "    }",
+        ('    t() { _airuleset_tmux_attach "${1:-%s}"; }'
          % default_session),
         "    tmux() {",
         '      if [ "$#" -eq 3 ] && [ "$2" = "-t" ]; then',
         '        case "$1" in',
         "          new|new-session|a|attach|attach-session)",
-        '            command tmux new-session -A -s "$3"; return ;;',
+        '            _airuleset_tmux_attach "$3"; return ;;',
         "        esac",
         "      fi",
         '      command tmux "$@"',

@@ -24,6 +24,26 @@ from pathlib import Path
 # in the same repo dir), not test-patched -> safe to duplicate (L-B precedent).
 REPO_DIR = Path(__file__).resolve().parent
 
+# #1060 L3a self-heal (review B 🔴): the env keys + managed apiKeyHelper the
+# DELETED #1062 L2 branch used to write into a flipped box's settings.json.
+# apply_managed_settings_defaults now pops these UNCONDITIONALLY so a box that
+# was flipped under L2 (its shared settings.json still carrying them) is healed
+# back to the Anthropic OAuth main on its next install — otherwise the fix would
+# not fix its own incident. A never-flipped box has none of these keys, so the
+# pop is a no-op (byte-identical to today). These are a frozen MIGRATION list —
+# the values match the old cli_model_backend.BACKEND_ENV_KEYS + APIKEY_HELPER_PATH.
+_L2_STALE_ENV_KEYS = (
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
+    "API_TIMEOUT_MS",
+)
+_L2_MANAGED_APIKEY_HELPER = str(Path.home() / ".claude"
+                               / "airuleset-model-gateway-apikey.sh")
+
 
 def parse_profile(profile_path: Path) -> list[str]:
     """Parse a .profile file and return list of module/rule paths (relative to repo)."""
@@ -423,40 +443,36 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     except Exception as e:  # noqa: BLE001 — best-effort, never break install
         import sys
         print("  ⚠ playwright env: box-class read failed: %r" % e, file=sys.stderr)
-    # #1062 L2: the per-box MODEL BACKEND switch. When the marker
-    # (~/.claude/airuleset-model-backend.json) exists on THIS box, flip Claude
-    # Code onto the controller's LiteLLM gateway (Lane L1): the tier alias env
-    # vars (ANTHROPIC_BASE_URL + the per-tier model names), a longer API timeout,
-    # adaptive-thinking off (a cheap third-party model 400s on `thinking:
-    # adaptive`), the subagent tier → the marker's `sub`, the launcher/main model
-    # → the marker's `main`, and an apiKeyHelper that prints the gateway key file
-    # (the token never lands in settings.json — cli_model_backend materializes the
-    # script in the install step). Without the marker this is byte-identical to
-    # today: the marker-derived keys are only ever POPPED (a no-op on a box that
-    # never had them; the self-heal of a box after `model-backend clear`), and
-    # apiKeyHelper is popped ONLY when it points at OUR managed script (never a
-    # user's own). No new hook, no new watchdog job — the existing marker-file
-    # pattern (airuleset-box-class / airuleset-playwright-optout) consumed by this
-    # settings renderer. See cli_model_backend + airuleset#1062.
-    try:
-        import cli_model_backend as _mb
-        marker = _mb.load_marker()
-        helper_path = str(_mb.apikey_helper_path())
-        if marker:
-            result["env"].update(_mb.backend_env(marker))
-            # Override the fleet opus subagent default (set above) with <sub> on
-            # this box only; override the main/launcher model with <main>.
-            result["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] = marker["sub"]
-            result["model"] = marker["main"]
-            result["apiKeyHelper"] = helper_path
-        else:
-            for _k in _mb.BACKEND_ENV_KEYS:
-                result["env"].pop(_k, None)
-            if result.get("apiKeyHelper") == helper_path:
-                result.pop("apiKeyHelper", None)
-    except Exception as e:  # noqa: BLE001 — best-effort, never break install
-        import sys
-        print("  ⚠ model-backend env: marker read failed: %r" % e, file=sys.stderr)
+    # #1060 L3a: the per-box model-backend marker NO LONGER touches settings.json.
+    # settings.json is shared by EVERY Claude the user runs, so writing the gateway
+    # backend env here flipped the stream's MAIN Claude onto DeepSeek — the
+    # 2026-09-18 miva1 incident (#1062 correction). The gateway backend is now
+    # scoped to the IMPLEMENTER window ONLY, by the `claude-impl` launcher
+    # (cli_claude_scripts) which reads the marker at shell time and exports the env
+    # for THAT process; the main window keeps MANAGED_MODEL + OAuth.
+    #
+    # SELF-HEAL (L3a review B 🔴): #1062 L2 shipped these ANTHROPIC_* keys +
+    # apiKeyHelper INTO the shared settings.json of a flipped box, and this
+    # renderer MERGES onto the existing settings (`result = dict(settings)` above
+    # PRESERVES every existing key). Deleting the L2 write branch without a pop
+    # would leave a previously-flipped box's MAIN window still on the gateway
+    # (ANTHROPIC_MODEL env overriding the healed `model:`), i.e. the fix would not
+    # fix its own incident. So POP the L2-era keys UNCONDITIONALLY (a no-op on a
+    # never-flipped box — popping an absent key is byte-identical), and pop the
+    # apiKeyHelper ONLY when it points at the L2 managed script (never a user's
+    # own). CLAUDE_CODE_SUBAGENT_MODEL self-heals for free: the fleet default set
+    # above already re-sets it to the opus tier. This keeps the marker byte-
+    # identity (both marker/no-marker paths pop the same keys → identical).
+    for _k in _L2_STALE_ENV_KEYS:
+        result["env"].pop(_k, None)
+    if result.get("apiKeyHelper") == _L2_MANAGED_APIKEY_HELPER:
+        result.pop("apiKeyHelper", None)
+    # #1060 L3a: BOTH managed sessions (main window 0 + impl window 1) accept
+    # cross-session SendMessage so the L3b dispatch channel (main -> impl wake-up)
+    # works. Unconditional (per-user setting), so it never breaks the marker
+    # byte-identity above. See Claude Code cross-session-messaging docs
+    # (crossSessionInbound: accept|hold|refuse) + airuleset#1060.
+    result["crossSessionInbound"] = "accept"
     result["cleanupPeriodDays"] = airuleset.MANAGED_CLEANUP_PERIOD_DAYS
     return result
 

@@ -121,20 +121,6 @@ def _fable_id():
         return "claude-fable-5-1"
 
 
-def _pilot_main_alias():
-    """#1062 L2: the box's configured model-backend `main` alias when the pilot
-    marker exists on THIS box, else None. On a pilot box the design is authored
-    BY the pilot main model (the test), so its `Design-by: main <alias>` stamp
-    must be accepted alongside the Fable id; every other box (no marker) still
-    requires the Fable id. Never raises — a read failure means no marker."""
-    try:
-        from cli_model_backend import load_marker
-        mb = load_marker()
-        return mb["main"] if mb else None
-    except Exception:
-        return None
-
-
 def _gh_env():
     try:
         import airuleset
@@ -194,19 +180,16 @@ def _fetch_comment_bodies(slug, number, cwd, timeout=8):
     return bodies
 
 
-def check_issue(number, slug, cwd, fetch=None, fable_id=None, allowed_alias=None):
+def check_issue(number, slug, cwd, fetch=None, fable_id=None):
     """(ok, reason) -- is `#number`'s newest design comment authored by the Fable
     main? FAIL-CLOSED: an unreadable thread returns (False, ...). `fetch(slug,
-    number, cwd)` -> [bodies]|None is injected in tests. `allowed_alias` (#1062
-    L2): an ADDITIONAL accepted design model id -- the box's configured pilot
-    `main` alias when the model-backend marker exists -- so a pilot box's
-    `Design-by: main <alias>` passes alongside the Fable id (every other box, no
-    alias, still requires the Fable id)."""
+    number, cwd)` -> [bodies]|None is injected in tests. #1060 L3a: the design is
+    ALWAYS authored by the Fable main (the implementer never designs), so the
+    Fable id is the ONLY accepted design model on every box -- the #1062 L2
+    pilot-alias acceptance is removed."""
     fetch = fetch or _fetch_comment_bodies
     fable_id = fable_id or _fable_id()
     accepted = {_norm_model(fable_id)}
-    if allowed_alias:
-        accepted.add(_norm_model(allowed_alias))
     bodies = fetch(slug, number, cwd)
     if bodies is None:
         return False, ("could not read #%d's comments (gh error / no network) "
@@ -222,16 +205,13 @@ def check_issue(number, slug, cwd, fetch=None, fable_id=None, allowed_alias=None
                        "design must be authored by the MAIN session, not the "
                        "worker (#871/#1061)" % (number, role, model or "?"))
     if _norm_model(model) not in accepted:
-        expected = fable_id + (" or the pilot alias %s" % allowed_alias
-                               if allowed_alias else "")
         return False, ("#%d's newest design comment is `Design-by: main %s` -- "
                        "expected %s; the design must be authored by the Fable "
-                       "main" % (number, model or "?", expected))
+                       "main" % (number, model or "?", fable_id))
     return True, "ok"
 
 
-def evaluate(payload, fetch=None, resolve_slug=None, fable_id=None,
-             pilot_main=None):
+def evaluate(payload, fetch=None, resolve_slug=None, fable_id=None):
     """('allow', reason) or ('block', reason). Pure of process exit so tests can
     assert the verdict directly; `main()` maps it to allow()/emit_block_stderr()."""
     tool = field_of(payload, "tool_name", "")
@@ -273,13 +253,10 @@ def evaluate(payload, fetch=None, resolve_slug=None, fable_id=None,
                          "refusing an autopilot-worker dispatch that cannot be "
                          "design-by verified (fail-closed)")
 
-    # #1062 L2: the box's pilot `main` alias (None off a pilot box) is accepted
-    # as a design model in addition to the Fable id. Injectable for tests.
-    if pilot_main is None:
-        pilot_main = _pilot_main_alias()
+    # #1060 L3a: the Fable id is the only accepted design model on every box (the
+    # #1062 L2 pilot-alias acceptance is removed -- the main always designs).
     for n in issues:
-        ok, reason = check_issue(n, slug, cwd, fetch=fetch, fable_id=fable_id,
-                                 allowed_alias=pilot_main)
+        ok, reason = check_issue(n, slug, cwd, fetch=fetch, fable_id=fable_id)
         if not ok:
             return "block", reason
     return "allow", "every issue has a Design-by: main <Fable id> comment"
