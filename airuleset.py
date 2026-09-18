@@ -4462,7 +4462,62 @@ def _validate_self_review_table(table_text, lenses):
     return True, None
 
 
-def _handoff_gk_preflight(issue, repo, body, *, cwd=None, watch_result=None):
+def _handoff_commits_since(branch, since_ts, cwd):
+    """#1070 item 6 — the number of commits on `origin/<branch>` strictly AFTER
+    `since_ts` (a POSIX timestamp, the gk verdict's created_at), via
+    `git log origin/<branch> --since=<iso>`. None when it cannot be determined
+    (no branch, a non-numeric ts, git error) so the caller falls back to the
+    head_ts heuristic. Robust to a rebased/backdated PR head, which the raw
+    `head_ts > gk_ts` compare (the #1071 FP) was not. Never raises."""
+    if not branch or not isinstance(since_ts, (int, float)):
+        return None
+    import subprocess
+    from datetime import datetime, timezone
+    # #1070 review 🔴 — the trailing `Z` is LOAD-BEARING: `git log --since=<str>`
+    # parses a tz-NAIVE timestamp in the BOX's local time, not UTC, so on a
+    # non-UTC box (the fleet runs CEST +2) a bare UTC string mis-counts commits
+    # in the tz-offset window around the verdict → a fail-OPEN of the "no new
+    # commit since BOUNCE" block. The `Z` pins it to UTC (matches the file's
+    # other `--since` uses). since_ts is a POSIX epoch (cli_gk_watch._parse_iso).
+    iso = datetime.fromtimestamp(since_ts, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%SZ")
+    try:
+        r = subprocess.run(
+            ["git", "log", "origin/%s" % branch, "--since=%s" % iso,
+             "--pretty=%H"], cwd=cwd or None, capture_output=True, text=True,
+            timeout=8)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    return len([ln for ln in (r.stdout or "").splitlines() if ln.strip()])
+
+
+def _pf_journal(repo, issue, gl, decision, journal=None):
+    """#1070 item 6 (d) — journal which verdict/branch/sha the pre-flight used,
+    so a bounce decision is auditable. `journal(**kw)` is injected in tests;
+    production appends one line to ~/.claude/handoff-gate.log, best-effort."""
+    rec = {"repo": repo, "issue": issue, "gk_id": (gl or {}).get("id"),
+           "branch": (gl or {}).get("branch"), "sha": (gl or {}).get("sha"),
+           "decision": decision}
+    if journal is not None:
+        journal(**rec)
+        return
+    import time
+    try:
+        path = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_LOG)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("%s\thandoff-preflight\t%s#%s\tgk=%s branch=%s sha=%s\t%s\n"
+                     % (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        repo, issue, rec["gk_id"], rec["branch"], rec["sha"],
+                        decision))
+    except OSError:
+        return
+
+
+def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
+                          watch_result=None, commits_since=None, journal=None):
     """The composer hand-off gk-watch pre-flight (#1056 L2 (f)).
 
     Reads the ticket's gk hand-off state (via `gk_watch_issue`, or the injected
@@ -4503,16 +4558,58 @@ def _handoff_gk_preflight(issue, repo, body, *, cwd=None, watch_result=None):
                          "budget) — pre-flight skipped (fail-open)\n")
         return None
     gl = st.get("gk_latest") or {}
-    # (1) bounce-unanswered with no new commit since the verdict.
+    # (1) #1070 item 6 -- bounce-unanswered with no new commit since the verdict,
+    # branch-scoped, unparseable-head-advisory, git-log-since-counted, journaled.
     if state == "bounce-unanswered":
         gk_ts = gl.get("created_at")
-        head_ts = st.get("head_ts")
-        if not (isinstance(head_ts, (int, float))
-                and isinstance(gk_ts, (int, float)) and head_ts > gk_ts):
-            return ("handoff BLOCK: no new commit since BOUNCE %s @%s — push a "
-                    "fix first / re-declare a fresh HEAD (bypass a false block "
-                    "by posting the raw comment with `# airuleset:handoff-ok "
-                    "<reason>`)" % (gl.get("id"), gl.get("sha") or "?"))
+        gk_id = gl.get("id")
+        gk_sha = gl.get("sha")
+        verdict_branch = gl.get("branch")
+        # (a) a BOUNCE for a DIFFERENT branch/phase is not this readiness's --
+        # advisory, never a block (the #1071 other-phase FP); its finding ids
+        # belong to that phase, so skip the disposition check too.
+        if branch and verdict_branch and verdict_branch != branch:
+            _pf_journal(repo, issue, gl,
+                        "advisory: BOUNCE for branch %r != readiness %r"
+                        % (verdict_branch, branch), journal=journal)
+            sys.stderr.write("handoff: newest BOUNCE %s is for branch '%s', not "
+                             "the readiness branch '%s' — advisory (not "
+                             "counted)\n" % (gk_id, verdict_branch, branch))
+            return None
+        # (c) count commits since the verdict via `git log --since` (robust to a
+        # rebased/backdated PR head, which the raw head_ts > gk_ts compare, the
+        # #1071 FP, was not); fall back to the head_ts heuristic when git cannot
+        # answer (no branch / injected test / git error).
+        since_fn = commits_since or _handoff_commits_since
+        n_since = since_fn(branch, gk_ts, cwd)
+        if n_since is None:
+            head_ts = st.get("head_ts")
+            new_commit = (isinstance(head_ts, (int, float))
+                          and isinstance(gk_ts, (int, float)) and head_ts > gk_ts)
+        else:
+            new_commit = n_since > 0
+        if not new_commit:
+            if not gk_sha or gk_sha == "?":
+                # (b) an unparseable head cannot be counted -> advisory, not the
+                # #1071 `@?` FP; the finding ids still apply, so fall through.
+                _pf_journal(repo, issue, gl,
+                            "advisory: no new commit but unparseable head @?",
+                            journal=journal)
+                sys.stderr.write("handoff: no new commit since BOUNCE %s but its "
+                                 "head is unparseable (@?) — advisory (not "
+                                 "blocking)\n" % gk_id)
+            else:
+                _pf_journal(repo, issue, gl,
+                            "block: no new commit since BOUNCE @%s" % gk_sha,
+                            journal=journal)
+                return ("handoff BLOCK: no new commit since BOUNCE %s @%s — push "
+                        "a fix first / re-declare a fresh HEAD (bypass a false "
+                        "block by posting the raw comment with "
+                        "`# airuleset:handoff-ok <reason>`)" % (gk_id, gk_sha))
+        else:
+            _pf_journal(repo, issue, gl, "ok: new commit since BOUNCE (n=%s)"
+                        % (n_since if n_since is not None else "head_ts"),
+                        journal=journal)
     # (2) undispositioned finding ids (both bounce-unanswered and
     # needs-disposition carry them). #1056 review-A 🔵 (degraded case): when the
     # gk comment carries NO `_parse_gk_findings`-shaped id, `undis` is [] and
@@ -4609,7 +4706,8 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     except Exception as _e:
         sys.stderr.write("handoff: gk-watch pre-flight skipped (%s) — "
                          "fail-open\n" % _e)
-    _blk = _handoff_gk_preflight(int(issue), repo, body, watch_result=_gk_state)
+    _blk = _handoff_gk_preflight(int(issue), repo, body, branch=branch,
+                                 watch_result=_gk_state)
     if _blk:
         print(_blk)
         return 1
@@ -4974,7 +5072,8 @@ def cmd_handoff(args):
         sys.stderr.write("handoff: gk-watch pre-flight skipped (%s) — "
                          "fail-open\n" % _e)
         _gk_state = None
-    _blk = _handoff_gk_preflight(int(issue), repo, body, watch_result=_gk_state)
+    _blk = _handoff_gk_preflight(int(issue), repo, body, branch=branch,
+                                 watch_result=_gk_state)
     if _blk:
         print(_blk)
         return 1
@@ -9208,6 +9307,7 @@ from cli_skill_usage import (  # noqa: E402, F401
 # --- #1061: main-authored design comment poster (Design-by: main <model>) ---
 from cli_design_record import (  # noqa: E402, F401
     cmd_design_record as cmd_design_record,
+    design_record_help_template as design_record_help_template,
 )
 from cli_mdreview_audit import (  # noqa: E402, F401
     cmd_mdreview_audit as cmd_mdreview_audit,
@@ -10230,7 +10330,11 @@ def main():
         help="Post a ticket's design comment stamped Design-by: main/worker "
              "<model> (model read from the session's OWN transcript, never "
              "self-declared); the dispatch gate requires Design-by: main "
-             "<Fable id> before an autopilot-worker is dispatched (#1061)")
+             "<Fable id> before an autopilot-worker is dispatched (#1061)",
+        # #1070 item 5: --help prints the full section template so the required
+        # sections are discoverable in one place (not by failed attempts, #1079).
+        epilog=design_record_help_template(),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_dr.add_argument("--issue", type=int, required=False,
                       help="Issue number to comment on")
     p_dr.add_argument("--repo", default=None,

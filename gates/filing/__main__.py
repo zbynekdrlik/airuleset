@@ -35,29 +35,77 @@ from gates.filing.caps import (
 )
 from gates.filing.presence import is_away, _dismissal_word, _has_recent_owner_quote
 
-# #842 worker (subagent) create-shape detection -- a per-LINE match, mirroring
-# the bash hook's `grep -qE` (grep scans line by line; re.MULTILINE gives `^`/`$`
-# the same line-boundary meaning). Horizontal-space classes ([ \t]) match
-# `[[:space:]]` within a single line (grep never sees a newline inside a line).
-_WORKER_CREATE_RE = re.compile(r"gh[ \t]+issue[ \t]+create")
-_WORKER_API_RE = re.compile(r"gh[ \t]+api")
-_WORKER_POST_RE = re.compile(
-    r"(-X[ \t]*POST|--method[ \t]+POST|-XPOST|(^|\s)-f(\s|$)|(^|\s)-F(\s|$)|"
-    r"--field|--raw-field|--input)", re.MULTILINE)
+# #842 worker (subagent) create-shape detection. #1070 item 3: match ONLY
+# genuine issue-CREATE shapes -- `gh issue create`, a `gh api graphql …
+# createIssue` mutation, or a POST/field write to the `/repos/<o>/<r>/issues`
+# COLLECTION (terminal `issues`). A REST comment POST (`gh api …/issues/<N>/
+# comments`) or a label/edit PATCH (`gh api …/issues/<N>`) is NOT a filing --
+# the #1080 FP: a gk advisory lane's only path to post a PR comment under the
+# hourly GraphQL exhaustion is REST, and the pre-#1070 broad `issues` +
+# field-flag match killed it. Scanned per top-level segment so a compound
+# command's field flag can never leak across `&&`/`;`/`|` onto an unrelated
+# `/issues` mention (the whole-string regex hazard the old shape had).
+_API_ISSUES_COLLECTION_RE = re.compile(
+    r"^(?:https?://api\.github\.com/)?/?repos/[^/\s]+/[^/\s]+/issues(?:\?.*)?$")
+_API_FIELD_FLAGS = frozenset({"-f", "-F", "--field", "--raw-field", "--input"})
+
+
+def _api_field_or_post(tk):
+    """True when a `gh api` segment carries a POST/field write signal -- gh
+    implicitly POSTs when any field flag (-f/-F/--field/--raw-field/--input) is
+    present, or when POST is explicit (-X POST / --method POST / -XPOST).
+    #1070 review 🟡: gh ALSO accepts the GLUED short form `-ftitle=x` / `-Fbody=y`
+    (verified live), which an exact-token check misses -- so a real issue-CREATE
+    `gh api …/issues -ftitle=x` would escape the worker block. Also #1070 review
+    🔵: an EXPLICIT GET method (`-X GET`) with fields is a list/read (fields ->
+    query params), never a create -- do NOT flag it."""
+    for i, t in enumerate(tk):
+        # an explicit non-write method: this is a read, never a create.
+        if t in ("-X", "--method") and i + 1 < len(tk) \
+                and tk[i + 1].upper() in ("GET", "HEAD"):
+            return False
+        if re.match(r"^-X(GET|HEAD)$", t, re.I):
+            return False
+    for i, t in enumerate(tk):
+        if t in _API_FIELD_FLAGS or t.startswith(
+                ("--field=", "--raw-field=", "--input=")):
+            return True
+        # glued short form: -ftitle=x / -Fbody=@f (gh accepts it).
+        if len(t) > 2 and t[:2] in ("-f", "-F"):
+            return True
+        if t in ("-X", "--method") and i + 1 < len(tk) \
+                and tk[i + 1].upper() == "POST":
+            return True
+        if re.match(r"^-X\s*POST$", t, re.I) or t.upper() == "-XPOST":
+            return True
+    return False
+
+
+def _api_targets_issues_collection(tk):
+    """True when a `gh api` segment's PATH arg is the /repos/<o>/<r>/issues
+    COLLECTION (terminal `issues`), not a `/issues/<N>[/...]` sub-resource
+    (a comment POST / a label PATCH)."""
+    return any(_API_ISSUES_COLLECTION_RE.match(t) for t in tk)
 
 
 def _is_worker_filing(cmd):
-    """True when `cmd` is a genuine issue-CREATE shape (gh issue create / a
-    `gh api …/issues` WRITE / a `gh api graphql … createIssue` mutation) --
-    VERBATIM logic from the bash #842 worker block. A bare GET read has none of
-    the POST signals and returns False."""
-    if _WORKER_CREATE_RE.search(cmd):
-        return True
-    if _WORKER_API_RE.search(cmd):
-        if "createIssue" in cmd:
+    """True when `cmd` is a genuine issue-CREATE shape: `gh issue create`, a
+    `gh api graphql … createIssue` mutation, or a POST/field write to the
+    `/repos/<o>/<r>/issues` COLLECTION. #1070 item 3: a REST comment POST
+    (`gh api …/issues/<N>/comments`) and a label/edit PATCH (`gh api
+    …/issues/<N>`) return False -- they are not filings. A bare GET read has no
+    field/POST signal and also returns False."""
+    for seg in split_top_level(cmd):
+        tk = strip_prefix(tokens_of(seg))
+        if not tk:
+            continue
+        if is_issue_create(tk):
             return True
-        if "issues" in cmd and _WORKER_POST_RE.search(cmd):
-            return True
+        if tk[0] == "gh" and "api" in tk[:2]:
+            if "createIssue" in seg:
+                return True
+            if _api_targets_issues_collection(tk) and _api_field_or_post(tk):
+                return True
     return False
 
 
@@ -438,21 +486,29 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
                             reason = "near-duplicate:#%s" % near_dup
                         results.append(("BLOCK", clean_title, reason, parents_str,
                                          target_repo, dedup_claim))
-                    elif (unattended and crit_l not in EXEMPT_FROM_CAP
+                    elif (crit_l not in EXEMPT_FROM_CAP
                           and _ratchet_should_block(target_repo, cwd)):
                         # #842 req 2 -- net-drain ratchet, checked LAST (the only gate
                         # costing a gh call, so it is never paid for a filing already
-                        # blocked more cheaply). An UNATTENDED non-exempt discovery
-                        # filing is allowed ONLY while the repo is strictly draining
-                        # today (created_today < closed_today); otherwise BLOCK. A gh
-                        # error -> BLOCK (fail-safe). user-request / planned-work are
-                        # exempt (already presence-gated above).
+                        # blocked more cheaply). #1070 item 7 (owner ruling
+                        # 2026-09-18): the brake applies to EVERY filing session, no
+                        # longer only the UNATTENDED path -- gk files under the owner
+                        # identity with the owner present at the box and so never met
+                        # the pre-#1070 `unattended` guard, letting the two sources of
+                        # a day's filings sail past the brake the controller already
+                        # saw. A non-exempt discovery filing is allowed ONLY while the
+                        # repo is strictly draining today (created_today <
+                        # closed_today); otherwise BLOCK. A gh error -> BLOCK
+                        # (fail-safe). user-request / planned-work / architecture-rework
+                        # are exempt (user-request is presence-gated above via
+                        # _has_recent_owner_quote).
                         results.append((
                             "BLOCK", clean_title,
                             "net-drain (created_today >= closed_today on this repo "
                             "-- fix it in-lane now, or fold it as a comment onto the "
                             "existing ticket it belongs to; this repo must drain "
-                            "today before an unattended loop files more)",
+                            "today before this session files more -- #1070: the "
+                            "brake applies to every filing session, attended too)",
                             parents_str, target_repo, dedup_claim))
                     else:
                         results.append(("PASS", clean_title, crit, parents_str,

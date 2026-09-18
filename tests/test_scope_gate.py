@@ -156,6 +156,17 @@ def _fake_gh(tmpdir, responses, require_repo=None):
         "argv = sys.argv[1:]\n"
         "responses = %r\n"
         "require_repo = %r\n"
+        # #1070 item 7 -- the net-drain ratchet now runs on attended filings too;
+        # answer the day-count queries DRAINING (created 0 < closed 9) so the
+        # ratchet allows and each chain/depth test exercises its own concern.
+        # Repo-independent (the require_repo teeth below are for `issue view`).
+        # A non-count `issue list` (near-dup) is still unserved (exits 1 below).
+        "if len(argv) >= 2 and argv[0] == 'issue' and argv[1] == 'list':\n"
+        "    joined = ' '.join(argv)\n"
+        "    if 'created:' in joined:\n"
+        "        print('0'); sys.exit(0)\n"
+        "    if 'closed:' in joined:\n"
+        "        print('9'); sys.exit(0)\n"
         "if require_repo is not None:\n"
         "    repo = None\n"
         "    for i, a in enumerate(argv):\n"
@@ -191,6 +202,16 @@ def _fake_gh_list(tmpdir, issues):
         "argv = sys.argv[1:]\n"
         "issues = %r\n"
         "if len(argv) >= 2 and argv[0] == 'issue' and argv[1] == 'list':\n"
+        "    joined = ' '.join(argv)\n"
+        # #1070 item 7 -- the net-drain ratchet now runs on ATTENDED filings too,
+        # so the default stub must answer the day-count queries. Default DRAINING
+        # (created 0 < closed 9) so the ratchet ALLOWS by default and every test
+        # that is NOT about the ratchet keeps exercising its real concern; a test
+        # that wants a BLOCK uses _fake_gh_netdrain with explicit counts.
+        "    if 'created:' in joined:\n"
+        "        print('0'); sys.exit(0)\n"
+        "    if 'closed:' in joined:\n"
+        "        print('9'); sys.exit(0)\n"
         "    if issues is None:\n"
         "        sys.exit(1)\n"
         "    print(json.dumps(issues))\n"
@@ -236,6 +257,15 @@ def _fake_gh_stream(tmpdir, labels, issues=(), call_log=None):
         "    print(json.dumps(label_rows))\n"
         "    sys.exit(0)\n"
         "if len(argv) >= 2 and argv[0] == 'issue' and argv[1] == 'list':\n"
+        # #1070 item 7 -- the net-drain ratchet now runs on attended filings too
+        # (the reduced-stream / full-authority filers these stream tests model),
+        # so answer the day-count queries DRAINING (created 0 < closed 9) so the
+        # ratchet allows and each test exercises its stream-routing concern.
+        "    joined = ' '.join(argv)\n"
+        "    if 'created:' in joined:\n"
+        "        print('0'); sys.exit(0)\n"
+        "    if 'closed:' in joined:\n"
+        "        print('9'); sys.exit(0)\n"
         "    print(json.dumps(list(issues)))\n"
         "    sys.exit(0)\n"
         "sys.exit(1)\n" % (call_log, label_rows, issues)
@@ -1780,9 +1810,10 @@ def _fake_gh_netdrain(tmpdir, created, closed, open_issues=(), labels=None):
 
 class TestNetDrainHarness842(TestCase):
     """#842 — the worker hard-block, presence-gated user-request/planned-work,
-    dismissal-word block, and the per-repo net-drain ratchet. All the new gates
-    engage ONLY on the UNATTENDED path (a stale presence marker) or the SUBAGENT
-    path (agent_id); the ATTENDED path is unchanged."""
+    dismissal-word block, and the per-repo net-drain ratchet. The presence-gate
+    and dismissal-word gates engage ONLY on the UNATTENDED path (a stale
+    presence marker) or the SUBAGENT path (agent_id); the net-drain ratchet,
+    since #1070 item 7, applies to EVERY filing session (attended included)."""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="airuleset-netdrain-test-")
@@ -1887,10 +1918,14 @@ class TestNetDrainHarness842(TestCase):
 
     def test_attended_flaky_body_word_is_not_blocked_by_this_gate(self):
         # The dismissal-word gate engages only on the UNATTENDED path.
+        # #1070 item 7: the net-drain brake now engages attended too, so a
+        # DRAINING stub is used to isolate this test's concern (the
+        # dismissal-word gate) from the ratchet -- returncode 0 then proves the
+        # attended dismissal-word mention did not block.
         r = run(body_cmd("flaky note", "mentions the word flaky in prose",
                           scope_gate="security-boundary"),
-                gh_bin=_default_gh_stub(),
-                session_id="t-nd-present-" + uuid.uuid4().hex[:6])
+                gh_bin=_fake_gh_netdrain(self.tmp, created=0, closed=9),
+                session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
         self.assertEqual(r.returncode, 0, r.stderr)
 
     # ---- req 2: net-drain ratchet ----
@@ -1927,10 +1962,35 @@ class TestNetDrainHarness842(TestCase):
                 session_id=self._away_sid(), home=self.home)
         self.assertEqual(r.returncode, 2, r.stderr)
 
-    def test_attended_discovery_never_ratchet_blocked(self):
-        # PRESENT session -> the ratchet never engages, even when NOT draining.
-        r = run(body_cmd("attended ok", "a broad security-boundary change across the auth layer",
+    def test_attended_discovery_now_ratchet_blocked_when_not_draining(self):
+        # #1070 item 7 (owner ruling 2026-09-18): the net-drain brake applies to
+        # EVERY filing session, ATTENDED included -- a present gk session filing
+        # under the owner identity on a non-draining repo is now refused too
+        # (REVERSES the pre-#1070 attended-exempt behaviour).
+        r = run(body_cmd("attended not draining",
+                          "a broad security-boundary change across the auth layer",
                           scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=99, closed=0),
+                session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("drain", r.stderr.lower())
+
+    def test_attended_discovery_passes_when_draining(self):
+        # #1070 item 7: an ATTENDED non-exempt filing still PASSES while the repo
+        # is strictly draining (created < closed) -- the brake only bites a
+        # non-draining repo.
+        r = run(body_cmd("attended draining",
+                          "a broad security-boundary change across the auth layer",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=2, closed=9),
+                session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_attended_exempt_still_passes_on_a_non_draining_repo(self):
+        # #1070 item 7: the exemptions are UNCHANGED -- planned-work never meets
+        # the ratchet, even attended on a non-draining repo.
+        r = run(body_cmd("plan step attended", "converged-plan decomposition",
+                          scope_gate="planned-work"),
                 gh_bin=_fake_gh_netdrain(self.tmp, created=99, closed=0),
                 session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -2054,6 +2114,59 @@ class TestScopePreferAccepted1003(TestCase):
         # NOT satisfy the gate on its own.
         r = run(body_cmd("prose sneaks", "Scope-gate: maybe-300-ish? probably not"))
         self.assertEqual(r.returncode, 2, r.stderr)
+
+
+class WorkerFilingCreateOnly1070(TestCase):
+    """#1070 item 3 -- the worker (#842) hard-block must match only issue-CREATE
+    shapes. A PR/issue COMMENT via REST (`gh api …/issues/<N>/comments`) and a
+    label/edit PATCH (`gh api …/issues/<N>`) are NOT filings and must be ALLOWED
+    for a worker -- the #1080 FP (a gk advisory lane's only path to post a PR
+    comment under GraphQL exhaustion was REST, and the worker block killed it)."""
+
+    def test_rest_pr_comment_is_allowed_for_a_worker(self):
+        r = run("gh api repos/o/r/issues/7625/comments -F body=@/tmp/x",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_rest_issue_patch_is_allowed_for_a_worker(self):
+        r = run("gh api repos/o/r/issues/42 -X PATCH -f state=closed",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_gh_issue_create_is_still_blocked(self):
+        r = run("gh issue create -t x -b y -R o/r",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c3")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_api_issues_collection_post_is_still_blocked(self):
+        # POST to the /issues COLLECTION (implicit POST via -f fields) = a create.
+        r = run("gh api repos/o/r/issues -f title=x -f body=y",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c4")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_api_issues_collection_explicit_post_is_still_blocked(self):
+        r = run("gh api repos/o/r/issues -X POST -f title=x",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c5")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_graphql_create_issue_is_still_blocked(self):
+        r = run("gh api graphql -f query=mutation_createIssue_x",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c6")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_glued_short_field_flag_collection_create_is_blocked(self):
+        # #1070 review 🟡: gh accepts a GLUED short flag -ftitle=x — a real
+        # issue-CREATE that must NOT escape the worker block.
+        r = run("gh api repos/o/r/issues -ftitle=x -fbody=y",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c7")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_explicit_get_list_read_is_allowed_for_a_worker(self):
+        # #1070 review 🔵: an explicit GET with fields is a list/read (fields ->
+        # query params), never a create — a worker may run it.
+        r = run("gh api repos/o/r/issues -X GET -f state=open",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c8")
+        self.assertEqual(r.returncode, 0, r.stderr)
 
 
 if __name__ == "__main__":

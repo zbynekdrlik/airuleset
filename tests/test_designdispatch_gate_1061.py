@@ -30,8 +30,11 @@ def _ev(prompt, comments, **kw):
         if isinstance(comments, dict):
             return comments.get(number)
         return comments
+    # #1070 review 🔵: inject is_pr so evaluate() stays network-free — the real
+    # _is_pull_request would otherwise shell out to `gh api …/issues/<N>` here.
     return dd.evaluate(_payload(prompt, **kw), fetch=fetch,
-                       resolve_slug=lambda cwd: "owner/repo", fable_id=FABLE)
+                       resolve_slug=lambda cwd: "owner/repo",
+                       is_pr=lambda n, slug, cwd: (False, None), fable_id=FABLE)
 
 
 class TestNewestDesignBy(unittest.TestCase):

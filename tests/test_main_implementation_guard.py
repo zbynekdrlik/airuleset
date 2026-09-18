@@ -2905,5 +2905,51 @@ class NarrowReadonly953(unittest.TestCase):
         self.assertEqual(out.returncode, 2, out.stderr)
 
 
+class RulesMarkdownExempt1070(unittest.TestCase):
+    """#1070 item 4 — governance RULES markdown (`.claude/rules/**.md` and
+    `.claude/rules-reference/**.md`) is coordinator bookkeeping the main is
+    MEANT to write; a main writing a rules lesson while AWAY (or Fable/goal-
+    armed) must NOT be capped by AIRULESET_FABLE_EDIT_MAX. The design gate for
+    governance text stays; only the SIZE cap is lifted (same size-capped,
+    traversal-guarded branch as memory/work-products). A `.py` under a rules dir
+    is NOT exempt (governance markdown only), and traversal never exempts."""
+
+    def _write(self, file_path, content=MID_1200, model="claude-fable-5-1",
+               presence_age=None):
+        helper = MainImplementationGuard()
+        return helper._run(tool="Write", content=content, file_path=file_path,
+                           transcript_text=transcript(model),
+                           presence_age=presence_age)
+
+    def test_rules_md_over_edit_max_allowed(self):
+        out = self._write("/home/x/airuleset/.claude/rules/internals-hooks.md")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_rules_reference_md_over_edit_max_allowed(self):
+        out = self._write(
+            "/home/x/airuleset/.claude/rules-reference/internals-archive.md")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_rules_md_over_edit_max_allowed_when_user_away(self):
+        # the reported case: a main authoring rules markdown while UNATTENDED.
+        out = self._write("/home/x/airuleset/.claude/rules/internals-tests.md",
+                          model="claude-opus-4-8", presence_age=3600)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_rules_py_is_not_exempt(self):
+        # governance MARKDOWN only — a `.py` under a rules dir keeps the cap.
+        out = self._write("/home/x/airuleset/.claude/rules/evil.py")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_rules_md_over_the_cap_is_blocked(self):
+        out = self._write("/home/x/airuleset/.claude/rules/big.md",
+                          content="n" * (131072 + 1))
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+    def test_rules_md_with_traversal_is_never_exempt(self):
+        out = self._write("/home/x/airuleset/.claude/rules/../../../app.py")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
