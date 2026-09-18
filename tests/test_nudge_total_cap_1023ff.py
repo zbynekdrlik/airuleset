@@ -205,5 +205,78 @@ class TestBatchEligibleTotalCap(unittest.TestCase):
                          len(ng.GATED_CATEGORIES))
 
 
+class TestSameKindCountsInTotalCap(unittest.TestCase):
+    """#1023 fix-forward 2 (owner "3", 2026-09-17; live evidence gk-infra pane
+    `zbynek:1.0`, 2026-09-18): the 3 h total cap must count the SAME kind too.
+
+    Before this fix `_total_cap_block` skipped the deciding kind, so the cap only
+    fired ACROSS different kinds. A pane on which ONE kind dominates (gk-infra:
+    `queue-arrival` is the only kind whose condition keeps re-arising) was bounded
+    solely by the 60-min per-kind floor and delivered up to once an hour —
+    contradicting the owner's ruling ("at most ONE priority nudge per pane per
+    3 h in TOTAL, across ALL kinds"). Live proof: `stuck-check: infra queue
+    arrival` records at 09:48 / 16:03 / 18:36 / 21:35 CEST (gaps 2 h 33 min and
+    2 h 59 min) plus a 20:34 attempt — three interruptions in 5.5 h.
+
+    Now the deciding kind's OWN last send closes the cap; recovery kinds stay
+    exempt. The per-kind floor still fires FIRST for the sub-60-min band (the
+    honest `hold:floor` message), so the total cap only relabels the 60-179 min
+    band as `hold:total-cap`.
+    """
+
+    def test_same_kind_held_by_total_cap_at_150min(self):
+        # RED against the merged tree: 150 min > the 60-min floor, so the floor
+        # passes; the total cap USED to skip queue-arrival -> gate_ok True. It
+        # must now be HELD, with the existing hold:total-cap string naming itself.
+        st = {}
+        ng.mark_sent(st, "s", "queue-arrival", NOW)
+        self.assertFalse(ng.gate_ok(st, "s", "queue-arrival", NOW + 150 * MIN),
+                         "same kind within the 3 h total cap must be HELD")
+        reason = ng.floor_hold_reason(st, "s", "queue-arrival", NOW + 150 * MIN)
+        self.assertEqual(
+            reason, "hold:total-cap (queue-arrival delivered 150 min ago)")
+
+    def test_same_kind_allowed_past_the_total_cap_at_181min(self):
+        st = {}
+        ng.mark_sent(st, "s", "queue-arrival", NOW)
+        self.assertTrue(ng.gate_ok(st, "s", "queue-arrival", NOW + 181 * MIN),
+                        "past the 3 h total cap the same kind is allowed again")
+
+    def test_same_kind_boundary_179_held_180_allowed(self):
+        # RED: 179 min was allowed under the old skip; it must now be held. 180 min
+        # is exactly the gap (now - ts < gap is False) -> allowed on both sides.
+        st = {}
+        ng.mark_sent(st, "s", "queue-arrival", NOW)
+        self.assertFalse(ng.gate_ok(st, "s", "queue-arrival", NOW + 179 * MIN))
+        self.assertTrue(ng.gate_ok(st, "s", "queue-arrival", NOW + 180 * MIN))
+
+    def test_same_kind_within_floor_still_reads_as_floor(self):
+        # the per-kind floor still fires FIRST for the sub-60-min window, so the
+        # journal keeps the honest 'hold:floor (<kind>, N min since last send)'
+        # for a same-kind repeat inside the hour (the total cap only relabels the
+        # 60-179 min band).
+        st = {}
+        ng.mark_sent(st, "s", "queue-arrival", NOW)
+        reason = ng.floor_hold_reason(st, "s", "queue-arrival", NOW + 45 * MIN)
+        self.assertIn("hold:floor", reason)
+        self.assertNotIn("hold:total-cap", reason)
+
+    def test_recovery_same_kind_still_exempt_from_the_total_cap(self):
+        # a recovery kind is never held by the cap, even its own repeat at 150 min
+        # (a revival is not a prompt interruption).
+        st = {}
+        ng.mark_sent(st, "s", "resume", NOW)
+        self.assertTrue(ng.gate_ok(st, "s", "resume", NOW + 150 * MIN))
+
+    def test_batch_same_kind_only_still_blocked_by_the_cap(self):
+        # the batch path already passed exclude_category=None (never holed), but
+        # lock that a lone queue-arrival delivery keeps a NEW batch closed for the
+        # full 3 h, not just the 60-min floor.
+        st = {}
+        ng.mark_sent(st, "s", "queue-arrival", NOW)
+        self.assertEqual(ng.batch_eligible(st, "s", NOW + 150 * MIN), [])
+        self.assertGreater(len(ng.batch_eligible(st, "s", NOW + 181 * MIN)), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
