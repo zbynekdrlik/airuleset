@@ -201,9 +201,49 @@ class TestApplyManagedSettings(unittest.TestCase):
         self.assertEqual(out.get("crossSessionInbound"), "accept")
 
     def test_preserves_foreign_apikeyhelper(self):
-        # We never touch apiKeyHelper anymore, so a user's own is preserved.
+        # A user's OWN apiKeyHelper (not the managed L2 path) is preserved — the
+        # self-heal pops ONLY the managed script path.
         out = self._apply({"apiKeyHelper": "/usr/bin/user-own"})
         self.assertEqual(out["apiKeyHelper"], "/usr/bin/user-own")
+
+    def test_self_heals_l2_contaminated_settings(self):
+        # #1060 L3a review B 🔴: a box flipped under #1062 L2 still carries the
+        # gateway env + managed apiKeyHelper in its SHARED settings.json; the
+        # renderer MERGES (result = dict(settings) preserves existing keys), so
+        # without an unconditional pop the MAIN window would keep authenticating
+        # to the gateway (ANTHROPIC_MODEL env overriding the healed model:). Feed a
+        # pre-contaminated settings dict → assert the L2 keys + the managed
+        # apiKeyHelper are healed away and the main is MANAGED_MODEL/opus again,
+        # while a user's own env key survives.
+        import airuleset
+        import cli_config
+        contaminated = {
+            "env": {
+                "ANTHROPIC_BASE_URL": "http://100.101.214.103:4000",
+                "ANTHROPIC_MODEL": "impl-main",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "impl-main",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "impl-sub",
+                "ANTHROPIC_DEFAULT_HAIKU_MODEL": "impl-fast",
+                "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING": "1",
+                "API_TIMEOUT_MS": "900000",
+                "CLAUDE_CODE_SUBAGENT_MODEL": "impl-sub",
+                "USER_OWN_KEY": "keep-me",
+            },
+            "apiKeyHelper": cli_config._L2_MANAGED_APIKEY_HELPER,
+        }
+        out = self._apply(contaminated)
+        for k in ("ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+                  "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+                  "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+                  "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "API_TIMEOUT_MS"):
+            self.assertNotIn(k, out["env"], "%s must be self-healed away" % k)
+        self.assertNotIn("apiKeyHelper", out,
+                         "the managed L2 apiKeyHelper must be healed away")
+        self.assertEqual(out["model"], airuleset.MANAGED_MODEL)
+        self.assertEqual(out["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
+                         airuleset.MODEL_TIERS["opus"])
+        self.assertEqual(out["env"].get("USER_OWN_KEY"), "keep-me",
+                         "a user's own env key must survive the self-heal")
 
 
 # --------------------------------------------------------------------------- #

@@ -259,6 +259,11 @@ def render_tmux_attach_block(default_session: str) -> str:
         '        command tmux new-session -d -s "$_s"',
         ('        command tmux new-window -d -t "$_s" -n impl "%s"'
          % impl_launcher),
+        # L3a review A 🔵: keep the impl pane visible if the launcher REFUSES
+        # (exit 1, e.g. a misprovisioned key) so its LOUD stderr is readable
+        # instead of the pane silently vanishing at the owner-present cutover.
+        '        command tmux set-window-option -t "$_s:impl" remain-on-exit on '
+        '2>/dev/null || true',
         "      fi",
         '      command tmux new-session -A -s "$_s"',
         "    }",

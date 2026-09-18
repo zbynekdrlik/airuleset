@@ -191,7 +191,7 @@ def marker_from_entry(entry):
 def set_target(target, base_url=None, main=None, sub=None, fast=None,
                key_file=None, path=None, home=None):
     """Add/replace `target`'s registry entry. Defaults: base_url →
-    default_base_url(); main/sub/fast → the pilot aliases; key_file →
+    default_base_url(); main/sub/fast → the impl(ementer) tier aliases; key_file →
     TARGET_KEY_FILE. Returns the written entry. Does NOT ship anything — the
     next push's deploy step ships the marker (design item 5)."""
     if not target or "@" not in target:
@@ -347,10 +347,12 @@ def _cmd_clear(args):
               % (target, ", ".join("%s:%s" % f for f in fails)),
               file=__import__("sys").stderr)
         return 2
-    print("  model-backend: marker + key + apiKeyHelper removed on %s. Its "
-          "settings.json still points at the gateway until the target's NEXT "
-          "install reverts it (no marker → the backend env + apiKeyHelper are "
-          "popped) — run `airuleset.py push` to revert it now." % target)
+    print("  model-backend: marker + key + stale apiKeyHelper removed on %s. If "
+          "the box was flipped under the old L2, its shared settings.json still "
+          "carries the L2-era ANTHROPIC_* env until the target's NEXT install "
+          "self-heals it (apply_managed_settings_defaults pops the L2-era env + "
+          "the managed apiKeyHelper UNCONDITIONALLY, #1060 L3a) — run "
+          "`airuleset.py push` to revert it now." % target)
     return 0
 
 

@@ -397,11 +397,14 @@ def remove_model_backend_markers(targets, run=None, control_opts=None):
     """#1062 L2 (kept for #1060 L3a): ship an idempotent removal (`rm -f` the
     marker + the key + any STALE apiKeyHelper script from the old L2) to each
     host entry in `targets` — the on-target half of `model-backend clear`
-    ("clear removes both"). #1060 L3a: the marker no longer touches settings.json,
-    so nothing there needs to self-heal; the impl launcher + statusline simply
-    stop consuming a now-absent marker at the box's next session start. The stale
-    `airuleset-model-gateway-apikey.sh` `rm` stays as a harmless cleanup for a box
-    flipped under the old L2 (a no-op elsewhere). Returns [(name, reason)]
+    ("clear removes both"). #1060 L3a: the marker no longer WRITES settings.json,
+    but a box flipped under the old L2 still carries the L2-era ANTHROPIC_* env +
+    managed apiKeyHelper there — those are self-healed on the box's NEXT install
+    (apply_managed_settings_defaults pops them UNCONDITIONALLY); the impl launcher
+    + statusline just stop consuming a now-absent marker at the next session
+    start. The stale `airuleset-model-gateway-apikey.sh` `rm` cleans up the L2
+    helper SCRIPT file itself (a no-op on a never-flipped box). Returns
+    [(name, reason)]
     failures. `rm -f` ignores the piped stdin and is a no-op on a never-markered
     box. After the removal, reports (read-only) any live claude session that
     predates the clear — it keeps its OLD credential until restarted (the
