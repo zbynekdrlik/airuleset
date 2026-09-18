@@ -479,9 +479,19 @@ else
         # path string-matches `/tmp/*` but resolves outside it, so it falls
         # straight through to the ordinary threshold below, fail-closed.
         *..*) : ;;
-        /tmp/*|*/.claude/projects/*/memory/*|"$HOME"/.claude/work-products/*)
+        /tmp/*|*/.claude/projects/*/memory/*|"$HOME"/.claude/work-products/*|*/.claude/rules/*.md|*/.claude/rules-reference/*.md)
             # size-capped, not unlimited (#178 review) — a non-numeric LEN
             # gets no exemption either, fail-closed to the ordinary check.
+            # #1070 item 4: `.claude/rules/**.md` + `.claude/rules-reference/**.md`
+            # are GOVERNANCE MARKDOWN the main is MEANT to author (a playbook
+            # lesson), so a rules write while AWAY (or Fable/goal-armed) is not
+            # capped by AIRULESET_FABLE_EDIT_MAX. UNLIKE the #640 work-products
+            # arm this is deliberately UNanchored (matches a repo's own
+            # `<repo>/.claude/rules/`, which is exactly where rules live) — safe
+            # because the `.md` suffix means implementation `.py` can never take
+            # the exemption, and `.claude/rules/` is a governance dir by
+            # definition. The design gate for the change still applies; only the
+            # SIZE cap is lifted.
             [ "$LEN" -le "$BOOKKEEPING_READ_MAX" ] 2>/dev/null && exit 0
             ;;
     esac
