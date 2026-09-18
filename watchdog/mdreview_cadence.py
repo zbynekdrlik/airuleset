@@ -327,9 +327,22 @@ def _target_governance_step(ticket, cad_state, audit_data, gh_runner=None):
     return logs, new_snapshot
 
 
+def _run_fleet_audit(fleet=True, fleet_runner=None):
+    """Default ``audit_fn`` for :func:`mdreview_cadence_job` — the REAL daily
+    fleet audit, run IN-PROCESS (not a subprocess): ``cli_mdreview_audit.
+    run_fleet`` scans the local box's ``inventory_box`` and ssh's to every
+    deployable host. Tests inject a fake ``audit_fn`` returning a small
+    artifact dict instead, so the CI gate never spawns the real fleet audit
+    (#874 fix-forward — the 68 s ``test_create_fires_at_most_once`` culprit).
+    ``fleet`` is accepted for the seam signature; ``run_fleet`` always audits
+    the whole fleet."""
+    import cli_mdreview_audit
+    return cli_mdreview_audit.run_fleet(fleet_runner=fleet_runner)
+
+
 def mdreview_cadence_job(now, _state=None, dry_run=False,
                          state_path=None, gh_runner=None,
-                         fleet_runner=None):
+                         fleet_runner=None, audit_fn=None):
     """Job 43 entry point. Called from run_once.
 
     Uses its OWN durable state file (resolved via ``state_path`` override >
@@ -339,6 +352,12 @@ def mdreview_cadence_job(now, _state=None, dry_run=False,
     The ``state_path`` param is an explicit override for tests that pre-seed
     their own state file; production uses the env seam (set in conftest.py +
     cmd_push test_env).
+    The ``audit_fn`` param (#874) is the injectable daily-audit seam:
+    ``audit_fn(fleet: bool) -> dict`` returns the audit artifact; the
+    default runs the REAL in-process fleet audit (``_run_fleet_audit`` ->
+    ``run_fleet``), and tests inject a fake so the CI gate never spawns
+    ssh-to-every-host. ``fleet_runner`` remains the lower-level per-host
+    seam threaded into the default audit_fn.
     Returns log lines.
     """
     logs = []
@@ -394,7 +413,14 @@ def mdreview_cadence_job(now, _state=None, dry_run=False,
     # the reopen. A failure advances the daily TTL but NOT the model hash.
     try:
         import cli_mdreview_audit
-        data = cli_mdreview_audit.run_fleet(fleet_runner=fleet_runner)
+        # #874: the audit runs through the injectable ``audit_fn`` seam
+        # (default = the real in-process fleet audit). Tests inject a
+        # fake so the CI gate never spawns ssh-to-every-host (~68 s).
+        run_audit = audit_fn
+        if run_audit is None:
+            def run_audit(fleet=True, _fr=fleet_runner):
+                return _run_fleet_audit(fleet=fleet, fleet_runner=_fr)
+        data = run_audit(fleet=True)
         artifact_path = cli_mdreview_audit.save_artifact(data)
         logs.append(f"mdreview-cadence: artifact {artifact_path}")
     except Exception as e:

@@ -512,12 +512,15 @@ class TestCadenceJob(unittest.TestCase):
                     return json.dumps({"state": "closed",
                                        "closedAt": closed_old}), 0
                 return "", 0
-            with mock.patch("socket.gethostname", return_value="dev1"):
-                with mock.patch("cli_mdreview_audit._fleet_hosts_for_audit",
-                                return_value=[]):
-                    logs = mdreview_cadence_job(
-                        now, {}, state_path=str(sp),
-                        gh_runner=fake_gh, fleet_runner=lambda h: ("{}",0))
+            def fake_audit(fleet=True):
+                return {"schema": 1, "date": "2026-09-18",
+                        "boxes": [], "failed": [], "skipped": []}
+            with mock.patch("socket.gethostname", return_value="dev1"), \
+                    mock.patch("cli_mdreview_audit.save_artifact",
+                               return_value="/x/2026-09-18.json"):
+                logs = mdreview_cadence_job(
+                    now, {}, state_path=str(sp),
+                    gh_runner=fake_gh, audit_fn=fake_audit)
             state_after = json.loads(sp.read_text())
             self.assertEqual(state_after["last_eval_ts"], now,
                              "state must be advanced after due")
@@ -566,14 +569,12 @@ class TestCadenceJob(unittest.TestCase):
                     return json.dumps({"state": "closed",
                                        "closedAt": "2026-01-01T00:00:00Z"}), 0
                 return "", 0
+            def boom_audit(fleet=True):
+                raise RuntimeError("audit boom")
             with mock.patch("socket.gethostname", return_value="dev1"):
-                with mock.patch("cli_mdreview_audit._fleet_hosts_for_audit",
-                                return_value=[]):
-                    with mock.patch("cli_mdreview_audit.run_fleet",
-                                    side_effect=RuntimeError("audit boom")):
-                        mdreview_cadence_job(
-                            now, {}, state_path=str(sp),
-                            gh_runner=fake_gh)
+                mdreview_cadence_job(
+                    now, {}, state_path=str(sp),
+                    gh_runner=fake_gh, audit_fn=boom_audit)
             state_after = json.loads(sp.read_text())
             self.assertNotEqual(state_after.get("model_tiers_hash"),
                                 self._tiers_hash(),
@@ -764,11 +765,16 @@ class TestStateFileAliasing(unittest.TestCase):
                     all_create_calls.append(argv)
                 return "https://github.com/zbynekdrlik/airuleset/issues/900\n", 0
 
-            with mock.patch("socket.gethostname", return_value="dev1"):
+            def fake_audit(fleet=True):
+                return {"schema": 1, "date": "2026-09-18",
+                        "boxes": [], "failed": [], "skipped": []}
+            with mock.patch("socket.gethostname", return_value="dev1"), \
+                    mock.patch("cli_mdreview_audit.save_artifact",
+                               return_value="/x/2026-09-18.json"):
                 mdreview_cadence_job(now, {}, state_path=str(sp),
-                                    gh_runner=fake_gh)
+                                    gh_runner=fake_gh, audit_fn=fake_audit)
                 mdreview_cadence_job(now + 86400 + 1, {}, state_path=str(sp),
-                                    gh_runner=fake_gh)
+                                    gh_runner=fake_gh, audit_fn=fake_audit)
 
             self.assertLessEqual(len(all_create_calls), 1,
                                  f"gh issue create must fire AT MOST ONCE across "
