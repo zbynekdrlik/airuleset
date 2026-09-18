@@ -127,14 +127,19 @@ jobs:
           mapfile -t ARGS < pytest-selection.args
           printf 'pytest selection arg: %s\n' "${ARGS[@]}"
           # #874: the 16k-test gate lived at the 20-min cap serially and then
-          # crossed it. Run it across the runner's 4 vCPUs with pytest-xdist.
-          # --dist loadfile keeps every test of one module on ONE worker, so a
-          # file's shared per-module state never races across workers (the
-          # suite's conftest already isolates HOME/TMPDIR per worker + per test).
-          # timeout-minutes stays 20 — the parallelism gives headroom, it is not
-          # a band-aid (no-timeout-band-aids.md).
+          # crossed it. Run it across the runner's vCPUs with pytest-xdist.
+          # `-n auto` (one worker per core) with the DEFAULT `load` distribution
+          # is the EXACT flag set the local push gate (cli_remote._run_pass_a
+          # Pass A) has run green on the full suite since #875 — the proven-safe
+          # config. (`--dist loadfile` was measured to FAIL: grouping whole files
+          # per worker deterministically pairs a cross-file test-isolation leak
+          # ahead of test_goal_arm, 23 spurious fails; `load` scatters individual
+          # tests and does not — #874 lane verification, both distributions run
+          # on the controller.) The suite's conftest isolates HOME/TMPDIR per
+          # worker + per test. timeout-minutes stays 20 — the parallelism gives
+          # headroom, it is not a band-aid (no-timeout-band-aids.md).
           python3 -m pytest tests/ "${ARGS[@]}" \
-            -n 4 --dist loadfile \
+            -n auto \
             -p no:cacheprovider -o addopts="" -q --junitxml=junit.xml
 
       - name: Collected-count guard (a no-op test job is banned)
