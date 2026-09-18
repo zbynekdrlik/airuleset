@@ -233,6 +233,52 @@ class TestBounceClearGuardMode(TestCase):
                                "")
         self.assertEqual(rc, 1, out)
 
+    def test_unresolvable_rfr_with_a_bounce_does_not_clear(self):
+        # #1057: the identical empty-timestamp hole on the RFR side. GNU
+        # `date -d ""` yields TODAY 00:00 UTC (not an error), so an empty RFR
+        # must be normalised to "unresolvable" BEFORE any date parse and never
+        # be treated as a real, day-dependent timestamp.
+        rc, out, _ = run_guard("",
+                               "2026-09-17T10:00:00Z",
+                               "2026-09-17T11:30:00Z")
+        self.assertEqual(rc, 1, out)
+
+    def test_far_past_bounce_with_empty_commit_is_date_independent(self):
+        # #1057 root cause: an empty commit ("") once resolved to `date -d ""`
+        # = TODAY 00:00 UTC, which is NEWER than any past BOUNCE from the day
+        # after the bounce onward -> the guard cleared prio:bounce with no
+        # proven fix. A BOUNCE far in the past + an empty commit must give rc 1
+        # on EVERY wall-clock day, so this stays RED-capable forever with the
+        # pre-fix code (it is the exact shape the daily gate flipped on).
+        rc, out, _ = run_guard("2020-01-01T12:00:00Z",   # RFR (newer than gk)
+                               "2020-01-01T10:00:00Z",   # gk BOUNCE (far past)
+                               "")                        # commit unresolvable
+        self.assertEqual(rc, 1, out)
+
+    def test_not_a_date_commit_with_a_bounce_does_not_clear(self):
+        # #1057: a commit value GNU `date -d` rejects is "unresolvable" too and
+        # must not clear (mirrors test_unparseable_bounce_timestamp_does_not_clear
+        # for the commit slot).
+        rc, out, _ = run_guard("2026-09-17T12:00:00Z",
+                               "2026-09-17T10:00:00Z",
+                               "not-a-date")
+        self.assertEqual(rc, 1, out)
+
+    def test_whitespace_only_timestamp_is_unresolvable_and_does_not_clear(self):
+        # #1057 review finding: `[ -n "$1" ]` alone caught only the exactly-empty
+        # string, but GNU `date -d "   "` ALSO succeeds and yields TODAY 00:00 UTC,
+        # so a whitespace-only (blank-ish) commit/RFR reinstated the exact same
+        # wall-clock bug one input-category over. Blank-ish must be "unresolvable"
+        # → rc 1 on EVERY day. Far-past bounce keeps this date-independent forever.
+        rc, out, _ = run_guard("2020-01-01T12:00:00Z",   # RFR
+                               "2020-01-01T10:00:00Z",   # gk BOUNCE (far past)
+                               "   ")                      # commit: whitespace-only
+        self.assertEqual(rc, 1, out)
+        rc, out, _ = run_guard("  ",                      # RFR: whitespace-only
+                               "2020-01-01T10:00:00Z",
+                               "2020-01-01T12:00:00Z")
+        self.assertEqual(rc, 1, out)
+
     def test_unparseable_bounce_timestamp_does_not_clear(self):
         rc, out, _ = run_guard("2026-09-17T12:00:00Z", "not-a-date",
                                "2026-09-17T11:00:00Z")

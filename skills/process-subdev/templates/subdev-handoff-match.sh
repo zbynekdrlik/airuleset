@@ -81,6 +81,27 @@ set -euo pipefail
 
 MODE="${1:-ready-for-review}"
 
+# _iso_epoch <iso-ts> -> the ISO timestamp as a Unix epoch, or "" when the
+# value is EMPTY, WHITESPACE-ONLY, or a string GNU `date -d` rejects. This
+# exists because
+# `date -u -d "" +%s` does NOT fail — GNU date treats an empty -d value as
+# TODAY 00:00 UTC (rc 0). Calling `date` directly on the workflow's
+# documented empty ("unresolvable") RFR/commit value therefore produced a
+# real, WALL-CLOCK-DEPENDENT midnight epoch, which the bounce-clear-guard
+# below then compared against the BOUNCE — clearing prio:bounce with no
+# proven fix from the day after the bounce onward (#1057). Normalise the
+# emptiness/unparseability HERE, before any comparison, so "unresolvable"
+# stays "" and is never mistaken for a timestamp.
+_iso_epoch() {
+  # EMPTY *or whitespace-only* is "unresolvable": GNU `date -d "   "` (like
+  # `date -d ""`) also succeeds and returns TODAY 00:00 UTC, so a blank-ish
+  # value must be rejected BEFORE any date call, exactly like exact-empty --
+  # otherwise the identical #1057 wall-clock bug survives one input-category
+  # over. `${1//[[:space:]]/}` strips all whitespace; empty result = blank.
+  [ -n "${1//[[:space:]]/}" ] || { echo ""; return; }
+  date -u -d "$1" +%s 2>/dev/null || echo ""
+}
+
 # =============================================================================
 # #1056 L2 (g) — bounce-clear-guard: is it SAFE to clear prio:bounce?
 #
@@ -112,9 +133,9 @@ if [ "$MODE" = "bounce-clear-guard" ]; then
     echo "bounce-clear-guard: no gk BOUNCE verdict — safe to clear"
     exit 0
   fi
-  gk_epoch="$(date -u -d "$GK_TS" +%s 2>/dev/null || echo "")"
-  rfr_epoch="$(date -u -d "$RFR_TS" +%s 2>/dev/null || echo "")"
-  commit_epoch="$(date -u -d "$COMMIT_TS" +%s 2>/dev/null || echo "")"
+  gk_epoch="$(_iso_epoch "$GK_TS")"
+  rfr_epoch="$(_iso_epoch "$RFR_TS")"
+  commit_epoch="$(_iso_epoch "$COMMIT_TS")"
   # An unparseable BOUNCE timestamp cannot be compared → conservative (a real
   # BOUNCE we cannot time is never proven answered) → do NOT clear.
   if [ -z "$gk_epoch" ]; then
