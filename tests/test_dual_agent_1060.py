@@ -11,7 +11,6 @@ Covers design items 6–9 (the L3b lane):
       stamps literally; the watchdog impl-window presence line + relaunch.
 - (8a) the webterm session-created hook creates the marker box's impl window.
 """
-import json
 import os
 import subprocess
 import sys
@@ -254,11 +253,9 @@ class TestDualDispatchClauseLock(unittest.TestCase):
     def test_goal_inventory_check_catches_a_missing_dual_clause(self):
         # A SKILL.md stripped of the dual clause must FAIL --check.
         import goal_registry as gr
-        with tempfile.TemporaryDirectory() as td:
-            fake_skill = Path(td) / "SKILL.md"
-            stripped = self.skill.replace(gr._DUAL_DISPATCH, "")
-            self.assertNotIn(gr._DUAL_DISPATCH, stripped)
-            self.assertNotEqual(gr.skill_dual_drift(stripped), [])
+        stripped = self.skill.replace(gr._DUAL_DISPATCH, "")
+        self.assertNotIn(gr._DUAL_DISPATCH, stripped)
+        self.assertNotEqual(gr.skill_dual_drift(stripped), [])
 
 
 # --------------------------------------------------------------------------- #
