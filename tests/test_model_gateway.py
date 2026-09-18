@@ -22,7 +22,7 @@ import cli_model_gateway as mg  # noqa: E402
 TARGET = "openrouter/deepseek/deepseek-v4.1-flash"
 
 BASE_CONFIG = {
-    "aliases": {"pilot-main": TARGET, "pilot-sub": TARGET, "pilot-fast": TARGET},
+    "aliases": {"impl-main": TARGET, "impl-sub": TARGET, "impl-fast": TARGET},
     "providers": {"openrouter": {"key_file": "~/.secrets/openrouter.key"}},
 }
 
@@ -45,7 +45,7 @@ class TestRenderYaml(unittest.TestCase):
         y = mg.render_gateway_yaml(BASE_CONFIG)
         # LiteLLM proxy config keys (docs.litellm.ai)
         self.assertIn("model_list:", y)
-        self.assertIn('model_name: "pilot-main"', y)
+        self.assertIn('model_name: "impl-main"', y)
         self.assertIn(f'model: "{TARGET}"', y)
         self.assertIn('api_key: "os.environ/OPENROUTER_KEY"', y)
         self.assertIn('master_key: "os.environ/LITELLM_MASTER_KEY"', y)
@@ -61,7 +61,7 @@ class TestRenderYaml(unittest.TestCase):
         self.assertNotIn(".secrets/openrouter.key", y)  # the file path never leaks
 
     def test_api_key_var_matches_target_provider(self):
-        cfg = {"aliases": {"pilot-fast": "deepseek/deepseek-chat"},
+        cfg = {"aliases": {"impl-fast": "deepseek/deepseek-chat"},
                "providers": {"deepseek": {"key_file": "~/.secrets/deepseek.key"}}}
         y = mg.render_gateway_yaml(cfg)
         self.assertIn('model: "deepseek/deepseek-chat"', y)
@@ -102,7 +102,7 @@ class TestRenderEnv(unittest.TestCase):
 
     def test_only_referenced_providers_emitted(self):
         # An unused provider entry must NOT force its key into the env file.
-        cfg = {"aliases": {"pilot-main": "deepseek/deepseek-chat"},
+        cfg = {"aliases": {"impl-main": "deepseek/deepseek-chat"},
                "providers": {"openrouter": {"key_file": "~/.secrets/openrouter.key"},
                              "deepseek": {"key_file": "~/.secrets/deepseek.key"}}}
         env = mg.render_gateway_env(cfg, lambda p: "v")
@@ -160,32 +160,32 @@ class TestSetAlias(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             mp, yp = self._paths(d)
             calls = []
-            cfg, added = mg.set_alias("pilot-fast", "deepseek/deepseek-chat",
+            cfg, added = mg.set_alias("impl-fast", "deepseek/deepseek-chat",
                                       path=mp, yaml_path=yp,
                                       reload_fn=lambda: calls.append(1))
             # seeded default's three tiers survive; the set one is overridden
-            self.assertEqual(cfg["aliases"]["pilot-main"], TARGET)
-            self.assertEqual(cfg["aliases"]["pilot-fast"], "deepseek/deepseek-chat")
+            self.assertEqual(cfg["aliases"]["impl-main"], TARGET)
+            self.assertEqual(cfg["aliases"]["impl-fast"], "deepseek/deepseek-chat")
             self.assertEqual(added, "deepseek")  # new provider registered
             self.assertIn("deepseek", cfg["providers"])
             # a NEW provider is NOT reloaded (its key isn't in the env yet, B5)
             self.assertEqual(calls, [])
             # map + yaml really written
             written = json.loads(Path(mp).read_text())
-            self.assertEqual(written["aliases"]["pilot-fast"], "deepseek/deepseek-chat")
+            self.assertEqual(written["aliases"]["impl-fast"], "deepseek/deepseek-chat")
             self.assertIn('model: "deepseek/deepseek-chat"', Path(yp).read_text())
 
     def test_roundtrip_updates_existing(self):
         with tempfile.TemporaryDirectory() as d:
             mp, yp = self._paths(d)
-            mg.set_alias("pilot-main", TARGET, path=mp, yaml_path=yp,
+            mg.set_alias("impl-main", TARGET, path=mp, yaml_path=yp,
                          reload_fn=lambda: None)
             new = "openrouter/qwen/qwen-3"
-            cfg, added = mg.set_alias("pilot-main", new, path=mp, yaml_path=yp,
+            cfg, added = mg.set_alias("impl-main", new, path=mp, yaml_path=yp,
                                       reload_fn=lambda: None)
             self.assertIsNone(added)  # openrouter already present
-            self.assertEqual(cfg["aliases"]["pilot-main"], new)
-            self.assertEqual(json.loads(Path(mp).read_text())["aliases"]["pilot-main"],
+            self.assertEqual(cfg["aliases"]["impl-main"], new)
+            self.assertEqual(json.loads(Path(mp).read_text())["aliases"]["impl-main"],
                              new)
 
     def test_bad_target_rejected(self):
@@ -194,7 +194,7 @@ class TestSetAlias(unittest.TestCase):
             for bad in ("no-slash-here", "provider/", "/model", "prov/ mod",
                         "openrouter/", "/"):
                 with self.assertRaises(mg.ModelGatewayError, msg=bad):
-                    mg.set_alias("pilot-main", bad, path=mp, yaml_path=yp,
+                    mg.set_alias("impl-main", bad, path=mp, yaml_path=yp,
                                  reload_fn=lambda: None)
             with self.assertRaises(mg.ModelGatewayError):
                 mg.set_alias("", TARGET, path=mp, yaml_path=yp, reload_fn=lambda: None)
@@ -205,13 +205,13 @@ class TestSetAlias(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             mp, yp = self._paths(d)
             reloads = []
-            _cfg, added = mg.set_alias("pilot-fast", "newprov/model",
+            _cfg, added = mg.set_alias("impl-fast", "newprov/model",
                                        path=mp, yaml_path=yp,
                                        reload_fn=lambda: reloads.append(1))
             self.assertEqual(added, "newprov")
             self.assertEqual(reloads, [])  # NOT reloaded
             # repoint an existing provider (openrouter seeded by default) -> reload
-            _cfg, added2 = mg.set_alias("pilot-main", "openrouter/qwen/qwen-3",
+            _cfg, added2 = mg.set_alias("impl-main", "openrouter/qwen/qwen-3",
                                         path=mp, yaml_path=yp,
                                         reload_fn=lambda: reloads.append(1))
             self.assertIsNone(added2)
@@ -250,18 +250,18 @@ class TestWriteIfChanged(unittest.TestCase):
 
 class TestSpend(unittest.TestCase):
     RECORDS = [
-        {"ts": "2026-09-16T10:00:00+00:00", "alias": "pilot-fast",
+        {"ts": "2026-09-16T10:00:00+00:00", "alias": "impl-fast",
          "cost_usd": 0.001, "total_tokens": 100},
-        {"ts": "2026-09-16T12:00:00+00:00", "alias": "pilot-fast",
+        {"ts": "2026-09-16T12:00:00+00:00", "alias": "impl-fast",
          "cost_usd": 0.002, "total_tokens": 200},
-        {"ts": "2026-09-17T09:00:00+00:00", "alias": "pilot-main",
+        {"ts": "2026-09-17T09:00:00+00:00", "alias": "impl-main",
          "cost_usd": 0.010, "total_tokens": 500},
     ]
 
     def test_aggregate_by_day_and_alias(self):
         rows = mg.aggregate_spend(self.RECORDS)
         self.assertEqual(len(rows), 2)
-        fast = next(r for r in rows if r["alias"] == "pilot-fast")
+        fast = next(r for r in rows if r["alias"] == "impl-fast")
         self.assertEqual(fast["day"], "2026-09-16")
         self.assertEqual(fast["requests"], 2)
         self.assertAlmostEqual(fast["cost_usd"], 0.003)
@@ -269,7 +269,7 @@ class TestSpend(unittest.TestCase):
 
     def test_since_filter(self):
         rows = mg.aggregate_spend(self.RECORDS, since="2026-09-17")
-        self.assertEqual([r["alias"] for r in rows], ["pilot-main"])
+        self.assertEqual([r["alias"] for r in rows], ["impl-main"])
 
     def test_malformed_field_degrades_not_crashes(self):
         rows = mg.aggregate_spend([
