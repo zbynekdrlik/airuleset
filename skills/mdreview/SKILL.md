@@ -123,6 +123,27 @@ python3 ~/devel/airuleset/airuleset.py context-baseline --check
 # Record as "AFTER" — ties to the #857 down-only ceiling
 ```
 
+## Step 5d — Target governance (#874)
+
+**What each TARGET project adds to its OWN `.claude/` is now inventoried and reviewed — not just airuleset's own modules.** A target can drop a slash command, skill, hook, rule, settings hook, or CLAUDE.md `@import` that shadows a Claude Code built-in, duplicates an airuleset skill/rule, or contradicts a module — and it stays invisible until a human hits it (the odoo-erp `.claude/commands/resume.md` shadowed `/resume` for 67 days). Job 43 now posts a **daily `Target-governance delta …` comment** on the pinned ticket for new/changed items; the artifact carries the full snapshot in `boxes[].inventory.target_governance` (one entry per project, each with `items[]`).
+
+Each item is `{repo, kind, name, classes, provenance:{sha,date,author}, detail}`, `kind ∈ {command, skill, hook, settings-hook, rule, import}`. The classifier:
+- **`BUILTIN-COLLISION`** — the command/skill name is a Claude Code built-in (`cli_mdreview_audit.CLAUDE_CODE_BUILTIN_COMMANDS`, pinned + sourced). Already blocked at write time by `hooks/block-builtin-command-shadow.sh`, but a checkout added BEFORE the hook shipped still carries it — surface + fix.
+- **`MANAGED-DUPLICATE`** — the name matches an airuleset-shipped skill/rule → the project is re-implementing managed knowledge.
+- **`UNREVIEWED`** — new/changed since the last cadence run (added to the delta lines).
+- **`RULE-SHAPE`** — malformed rule frontmatter.
+
+Read the delta lines (and the full snapshot for context). Decide per item, and RECORD the decision on the pinned ticket + relay it to the project's Claude via its hub ticket (never edit the project's code from here):
+
+| Decision | When |
+|---|---|
+| **keep** | A legit per-project workflow (camera-box `drift-guard`, voiceagent `call-review`, odoo-erp `process-subdev`) — the owner's ask is REVIEW + control, not a ban |
+| **rename** | `BUILTIN-COLLISION` — hand off a rename to `<name>-<scope>` (→ `/<name>-<scope>`) |
+| **fold** | `MANAGED-DUPLICATE` — the airuleset module/skill owns it; the project drops its copy |
+| **remove** | A contradiction of a managed module |
+
+**The pinned mdreview ticket is kept OPEN permanently (owner escalation 2026-09-18) — never close it after this pass.** The cadence reopen stays as the safety net.
+
 ## Step 6 — Live web research (AXIS 1–3, extends the artifact)
 
 WebSearch + WebFetch, queries built from the live model:
