@@ -2056,5 +2056,44 @@ class TestScopePreferAccepted1003(TestCase):
         self.assertEqual(r.returncode, 2, r.stderr)
 
 
+class WorkerFilingCreateOnly1070(TestCase):
+    """#1070 item 3 -- the worker (#842) hard-block must match only issue-CREATE
+    shapes. A PR/issue COMMENT via REST (`gh api …/issues/<N>/comments`) and a
+    label/edit PATCH (`gh api …/issues/<N>`) are NOT filings and must be ALLOWED
+    for a worker -- the #1080 FP (a gk advisory lane's only path to post a PR
+    comment under GraphQL exhaustion was REST, and the worker block killed it)."""
+
+    def test_rest_pr_comment_is_allowed_for_a_worker(self):
+        r = run("gh api repos/o/r/issues/7625/comments -F body=@/tmp/x",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c1")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_rest_issue_patch_is_allowed_for_a_worker(self):
+        r = run("gh api repos/o/r/issues/42 -X PATCH -f state=closed",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_gh_issue_create_is_still_blocked(self):
+        r = run("gh issue create -t x -b y -R o/r",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c3")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_api_issues_collection_post_is_still_blocked(self):
+        # POST to the /issues COLLECTION (implicit POST via -f fields) = a create.
+        r = run("gh api repos/o/r/issues -f title=x -f body=y",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c4")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_api_issues_collection_explicit_post_is_still_blocked(self):
+        r = run("gh api repos/o/r/issues -X POST -f title=x",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c5")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_graphql_create_issue_is_still_blocked(self):
+        r = run("gh api graphql -f query=mutation_createIssue_x",
+                gh_bin=_default_gh_stub(), agent_id="sub-worker-c6")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+
 if __name__ == "__main__":
     main()
