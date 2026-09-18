@@ -282,6 +282,13 @@ def render_tmux_attach_block(default_session: str) -> str:
         # window too (and the watchdog is a third creator) — so create it here
         # ONLY when no impl window exists yet, so an interactive-ssh session
         # never gets two. (Non-run-shell context -> a single `#{window_name}`.)
+        # Residual (review 🔵): the `-g` hook's create runs in an async
+        # `run-shell`, so this synchronous check-then-create can in principle
+        # race it and both create. Harmless on the phase-1 path (miva1 is
+        # webterm-only: its session comes up via the ForceCommand `new-session
+        # -A` = a SINGLE creator, this bashrc block never runs there), the gk
+        # declared-windows precedent uses the same shape with no observed
+        # double, and the watchdog reconciler dedups on its next sweep.
         '        if ! command tmux list-windows -t "$_s" '
         "-F '#{window_name}' 2>/dev/null | grep -Fxq impl; then",
         '          if [ -n "$_impl_cwd" ] && [ -d "$_impl_cwd" ]; then',

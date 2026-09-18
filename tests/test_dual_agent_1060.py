@@ -462,10 +462,10 @@ class TestRunOnceImplWindowWiring(unittest.TestCase):
         self.assertTrue(calls[0]["dry_run"])
 
     def test_impl_marker_helper_never_raises(self):
-        # the default marker loader is a no-op-safe file read on any box
+        # the default marker loader is a no-op-safe file read on any box: it
+        # returns a dict (marker box) or None (every other box), never raises.
         import watchdog as wd
-        self.assertIn(wd._impl_marker(), (None,) if wd._impl_marker() is None
-                      else (wd._impl_marker(),))
+        self.assertIsInstance(wd._impl_marker(), (dict, type(None)))
 
 
 if __name__ == "__main__":

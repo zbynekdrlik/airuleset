@@ -419,9 +419,13 @@ def impl_window_presence(marker, run=None, logs=None, dry_run=False):
     if not sessions:
         return "no-session"
     # The session-created hook renames window 0 to the box name (== session
-    # name), so ``window_name == session_name`` uniquely identifies the managed
-    # session and, for grouped siblings (which SHARE windows), deterministically
-    # resolves to the base session — never a foreign one, never a double-create.
+    # name), so ``window_name == session_name`` identifies the managed session
+    # (its box-renamed primary window). On a single-session marker box (phase 1:
+    # miva1) this is unambiguous; for grouped siblings (which SHARE windows) it
+    # resolves to the base session, never a double-create. It picks the FIRST
+    # match, so a USER-created session whose window happens to be renamed to its
+    # own name could in principle be chosen — harmless on the single-session
+    # marker box this runs on today.
     target = None
     for sess, names in sessions.items():
         if sess in names:
