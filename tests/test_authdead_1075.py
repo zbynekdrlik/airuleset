@@ -64,9 +64,17 @@ def tearDownModule():
         _SV_PATCHER.stop()
 
 
-def _assistant_api_error(text):
-    return {"type": "assistant", "isApiErrorMessage": True,
-            "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+def _assistant_api_error(text, ts=None):
+    e = {"type": "assistant", "isApiErrorMessage": True,
+         "message": {"role": "assistant", "content": [{"type": "text", "text": text}]}}
+    if ts is not None:
+        e["timestamp"] = ts
+    return e
+
+
+def _iso(epoch):
+    import datetime as _dt
+    return _dt.datetime.fromtimestamp(epoch, _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
 
 def _write_jsonl(path, entries):
@@ -412,6 +420,186 @@ class AuthSegmentRender(unittest.TestCase):
         from statusbar import auth_segment
         with TemporaryDirectory() as td:
             self.assertEqual(auth_segment(home=td, now=1_800_000_000.0), "")
+
+
+# --------------------------------------------------------------------------- #
+# review fixes (#1075 adversarial review) — surfacing regardless of the relaunch
+# flag, the dry-run side-effect-free contract, the first-401 seeding, and the
+# two-sweep exactly-one-continue-then-relaunch integration.
+# --------------------------------------------------------------------------- #
+class Job1CredentialDeadReviewFixes(unittest.TestCase):
+    CWD = "/home/newlevel/devel/miva1"
+    PANE = "%9"
+    SID = "cccc4444-5555-4666-8777-888899990000"
+
+    def _harness(self, now, cred_mtime, entries, age_s=700, capture=IDLE_PROMPT_CAP,
+                 preseed=None, dry_run=False):
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+        enc = wd.encode_project_dir(self.CWD)
+        (proj / enc).mkdir(parents=True)
+        tpath = proj / enc / (self.SID + ".jsonl")
+        _write_jsonl(tpath, entries)
+        os.utime(tpath, (now - age_s, now - age_s))
+        state_path = Path(tmp.name) / "state.json"
+        if preseed is not None:
+            state_path.write_text(json.dumps(preseed))
+        keys, pings = [], []
+
+        def fake_run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%s\tclaude\t%s\n" % (self.PANE, self.CWD)
+            if "display-message" in j:
+                if "pane_in_mode" in j:
+                    return "0"
+                if "session_group" in j or argv[-1] == "#S":
+                    return "zbynek"
+                return ""
+            if "capture-pane" in j:
+                return capture
+            if "send-keys" in j or "respawn-pane" in j:
+                keys.append(argv)
+                return ""
+            return ""
+
+        def fake_send(body, **kw):
+            pings.append((body, kw))
+
+        logs = wd.run_once(now=now, dry_run=dry_run, run=fake_run, send_fn=fake_send,
+                           projects_dir=proj, state_path=state_path,
+                           pending_prefix=str(Path(tmp.name) / "pending-"),
+                           grace=300, interval=300, max_nudges=3,
+                           cred_mtime_fn=lambda: cred_mtime)
+        return logs, keys, pings, state_path
+
+    def _ad_key(self):
+        return "apierr-authdead:" + self.SID
+
+    def _cred_dead_pings(self, pings):
+        return [p for p in pings
+                if str(p[1].get("dedup_key", "")).startswith("credential-dead:")]
+
+    def _respawned(self, keys):
+        return [a for a in keys if "respawn-pane" in " ".join(a)]
+
+    def _typed(self, keys):
+        for a in keys:
+            if "send-keys" in " ".join(a) and "-l" in a:
+                return a[-1]
+        return None
+
+    def test_fresh_persisting_401_pings_and_badges_with_flag_OFF(self):
+        # #1075 review A#1/B#1: the FRESH-persistent case (continue delivered, 401
+        # still there) must surface to the owner EVEN with the relaunch flag OFF —
+        # the ticket's whole point is "nobody knew". Badge + ONE credential-dead
+        # ping, no respawn (flag off).
+        now = 1_800_000_000.0
+        pre = {self._ad_key(): {"first_401_ts": now - 3600, "pinged": False,
+                                "continued": True, "continued_ts": now - 60,
+                                "relaunched": False, "last_seen": now - 60}}
+        env = dict(os.environ)
+        env.pop("AIRULESET_AUTHDEAD_ACTION", None)
+        with unittest.mock.patch.dict(os.environ, env, clear=True), \
+             unittest.mock.patch("watchdog.goal._recovery_recent_human", return_value=False), \
+             unittest.mock.patch("watchdog.resurrect.pane_is_bare_idle", return_value=False):
+            logs, keys, pings, sp = self._harness(
+                now, cred_mtime=now - 1800,
+                entries=[_assistant_api_error(REVOKED_BANNER)], preseed=pre)
+        self.assertEqual(len(self._cred_dead_pings(pings)), 1,
+                         "fresh-persistent 401 must ping the owner even flag-OFF: %r" % pings)
+        self.assertEqual(self._respawned(keys), [],
+                         "flag OFF → no respawn: %r" % keys)
+        self.assertTrue((sp.parent / "auth-guard" / "status.json").exists(),
+                        "fresh-persistent 401 must write the auth! badge cache")
+
+    def test_dry_run_persists_nothing_and_writes_no_badge(self):
+        # #1075 review A#2: a --dry-run sweep must be side-effect-free — no typed
+        # continue, no persisted `continued`, no badge file — so it can never
+        # suppress the real recovery around a live outage.
+        now = 1_800_000_000.0
+        logs, keys, pings, sp = self._harness(
+            now, cred_mtime=now - 60,
+            entries=[_assistant_api_error(REVOKED_BANNER)], dry_run=True)
+        self.assertIsNone(self._typed(keys), "dry-run must type nothing: %r" % keys)
+        self.assertFalse((sp.parent / "auth-guard" / "status.json").exists(),
+                         "dry-run must not write the badge cache")
+        if sp.exists():
+            st = json.loads(sp.read_text())
+            ad = st.get(self._ad_key())
+            self.assertFalse(isinstance(ad, dict) and ad.get("continued"),
+                             "dry-run must not persist continued=True: %r" % ad)
+
+    def test_first_401_seeded_from_entry_timestamp_not_mtime(self):
+        # #1075 review A#3: a normal rotation (fresh cred ~1s after the 401) must
+        # classify FRESH → get its one #602 continue. The 401 entry's own
+        # timestamp is the rotation time; the transcript mtime drifts forward with
+        # CC retries. cred_mtime sits BETWEEN the entry ts and the mtime, so only
+        # entry-timestamp seeding yields FRESH; mtime seeding would read STALE.
+        now = 1_800_000_000.0
+        t401 = now - 3600                       # the rotation / first-401 entry time
+        with unittest.mock.patch("watchdog.goal._recovery_recent_human", return_value=False):
+            logs, keys, pings, sp = self._harness(
+                now, cred_mtime=now - 1800,     # refreshed AFTER t401, BEFORE mtime
+                entries=[_assistant_api_error(REVOKED_BANNER, ts=_iso(t401))],
+                age_s=100)                       # transcript mtime = now-100 (drifted)
+        self.assertEqual(self._typed(keys), wd.OAUTH_REVOKED_NUDGE_TEXT,
+                         "entry-timestamp seeding must classify a normal rotation "
+                         "FRESH and deliver the one continue (not the STALE "
+                         "no-nudge that mtime seeding would give): %r" % keys)
+
+    def test_two_sweeps_exactly_one_continue_then_relaunch(self):
+        # #1075 review (A test-integrity gap): the real two-sweep flow — sweep 1
+        # delivers ONE continue, sweep 2 (401 persisted) relaunches, never a 2nd
+        # continue. Shares one state_path across both run_once calls.
+        now = 1_800_000_000.0
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+        enc = wd.encode_project_dir(self.CWD)
+        (proj / enc).mkdir(parents=True)
+        tpath = proj / enc / (self.SID + ".jsonl")
+        _write_jsonl(tpath, [_assistant_api_error(REVOKED_BANNER, ts=_iso(now - 60))])
+        state_path = Path(tmp.name) / "state.json"
+        allkeys = []
+
+        def fake_run(argv, timeout=8):
+            j = " ".join(argv)
+            if "list-panes" in j:
+                return "%s\tclaude\t%s\n" % (self.PANE, self.CWD)
+            if "display-message" in j:
+                return "0" if "pane_in_mode" in j else ("zbynek" if ("session_group" in j or argv[-1] == "#S") else "")
+            if "capture-pane" in j:
+                return IDLE_PROMPT_CAP
+            if "send-keys" in j or "respawn-pane" in j:
+                allkeys.append(("s%d" % self._sweep, argv))
+                return ""
+            return ""
+
+        def _run(t):
+            os.utime(tpath, (t - 90, t - 90))
+            return wd.run_once(now=t, dry_run=False, run=fake_run, send_fn=lambda *a, **k: None,
+                               projects_dir=proj, state_path=state_path,
+                               pending_prefix=str(Path(tmp.name) / "pending-"),
+                               grace=300, interval=300, max_nudges=3,
+                               cred_mtime_fn=lambda: t - 30)  # cred always fresh vs the ~t-90 first-401
+
+        with unittest.mock.patch.dict(os.environ, {"AIRULESET_AUTHDEAD_ACTION": "1"}), \
+             unittest.mock.patch("watchdog.goal._recovery_recent_human", return_value=False), \
+             unittest.mock.patch("watchdog.resurrect.pane_is_bare_idle", return_value=False):
+            self._sweep = 1
+            _run(now)
+            self._sweep = 2
+            _run(now + 60)
+
+        continues = [a for s, a in allkeys if "send-keys" in " ".join(a) and "-l" in a
+                     and a[-1] == wd.OAUTH_REVOKED_NUDGE_TEXT]
+        respawns = [a for s, a in allkeys if "respawn-pane" in " ".join(a)]
+        self.assertEqual(len(continues), 1,
+                         "exactly ONE continue across both sweeps: %r" % allkeys)
+        self.assertEqual(len(respawns), 1,
+                         "exactly ONE relaunch on sweep 2: %r" % allkeys)
 
 
 if __name__ == "__main__":

@@ -416,14 +416,17 @@ def _default_cred_mtime():
 
 def _write_auth_badge_cache(state_path, first_401_ts, now):
     """Write the `auth!` footer badge cache (#1075) — the statusline's
-    `auth_segment` reads it. Only a STALE credential-dead sweep writes it, so a
-    self-healing FRESH transient never flashes the badge; the cache self-expires
-    3 h after the last write (AUTH_BADGE_TTL_S), so a resolved episode or a dead
-    watchdog stops painting `auth!` on its own (the disk-guard stale-cache
-    pattern). Written next to the watchdog state (`<state_dir>/auth-guard/
-    status.json`), which in production is `~/.claude/` — the SAME dir
-    `statusbar._claude_dir(home)` reads. Atomic replace; best-effort (a footer
-    cache write must never break a sweep). Never raises."""
+    `auth_segment` reads it. Written on every credential-dead sweep that has
+    SURFACED (a STALE credential, or a FRESH credential whose 401 PERSISTED
+    through the one continue — never a self-healing FRESH transient that resumed
+    on the continue). The cache self-expires AUTH_BADGE_TTL_S (3 h) after the last
+    write, so a resolved episode / restarted session / dead watchdog stops
+    painting `auth!` on its own (a longer window than the 600 s disk badge — see
+    `statusbar.auth_segment` for why). Written next to the watchdog state
+    (`<state_dir>/auth-guard/status.json`), which in production is `~/.claude/` —
+    the SAME dir `statusbar._claude_dir(home)` reads. Callers must skip this under
+    dry_run (the #1075 A#2 side-effect-free contract). Atomic replace; best-effort
+    (a footer cache write must never break a sweep). Never raises."""
     import json as _json
     try:
         d = Path(state_path).parent / "auth-guard"
@@ -457,69 +460,95 @@ def _authdead_action_enabled():
 
 def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
                              cwd, tpath, captured, draft_pending, run, send_fn,
-                             owner, sleep_fn, dry_run, logs, state_path):
+                             owner, sleep_fn, dry_run, logs, state_path,
+                             first_401_seed):
     """#1075 CREDENTIAL-DEAD handler for job 1's oauth-revoked class (extracted
     from run_once to keep it under the function-line budget). The caller has
-    already confirmed `is_oauth_revoked(err_text)` and `continue`s
-    unconditionally after this returns — this OWNS the episode (own
-    `apierr-authdead:<key>` state), so it is never nudged by the generic chain.
+    already confirmed `is_oauth_revoked(err_text)` and `continue`s unconditionally
+    after this returns — this OWNS the episode (own `apierr-authdead:<key>`
+    state), so it is never nudged by the generic chain.
 
     A REVOKED OAuth token is dead IN the running process — a `continue` can never
-    re-read a rotated token (the miva1 30h outage). Read the credentials-file
-    mtime (mtime ONLY, injectable) vs the episode's first-401 time:
-      STALE (file older/equal) → NEVER nudge; journal, write the `auth!` footer
-        badge, ONE owner ping after AUTH_STALE_OWNER_S.
-      FRESH (file newer) → exactly ONE enriched continue; on a persisting 401 a
-        VERIFIED RELAUNCH (opt-in `AIRULESET_AUTHDEAD_ACTION`, recent-human +
-        bare-shell gated, once per episode)."""
+    re-read a rotated token (the miva1 30h outage). `first_401_seed` is the
+    episode's ROTATION time (the earliest 401 entry's own timestamp — NOT the
+    transcript mtime, which drifts forward with CC's retries). Read the
+    credentials-file mtime (mtime ONLY, injectable) vs that first-401 time:
+      STALE (file older/equal) → NEVER nudge; journal, `auth!` badge, ONE owner
+        ping after AUTH_STALE_OWNER_S.
+      FRESH (file newer) → exactly ONE enriched continue; on a PERSISTING 401,
+        SURFACE it (badge + the SAME owner ping — the owner must learn of a dead
+        session even when the destructive relaunch stays gated OFF) AND, opt-in
+        behind AIRULESET_AUTHDEAD_ACTION, a VERIFIED RELAUNCH (recent-human +
+        bare-shell gated, once per episode).
+
+    dry-run contract (#1075 review A#2): a `--dry-run` sweep persists NOTHING and
+    writes no badge — every mutation lands on a COPY that is stored back into
+    `state` ONLY when `not dry_run`, and the badge write / send are guarded, so a
+    dry-run around a live outage can never suppress the real continue/ping."""
     ad_key = "apierr-authdead:" + key
-    ad = state.get(ad_key)
-    if not isinstance(ad, dict):
-        ad = {"first_401_ts": int(now - idle), "pinged": False,
-              "continued": False, "relaunched": False}
+    ad_src = state.get(ad_key)
+    ad = dict(ad_src) if isinstance(ad_src, dict) else {
+        "first_401_ts": int(first_401_seed), "pinged": False,
+        "continued": False, "relaunched": False}
     ad["last_seen"] = int(now)
     first_401 = ad["first_401_ts"]
     cstate = credential_state(first_401, cred_mtime_fn(), now)
     _hhmm = time.strftime("%H:%M", time.localtime(first_401))
+
+    def _persist():
+        if not dry_run:
+            state[ad_key] = ad
+
+    def _surface(msg):
+        # The owner-facing surface for a dead-on-401 session, SHARED by the STALE
+        # case and the FRESH-persistent case (#1075 review A#1/B#1): the `auth!`
+        # footer badge + ONE owner ping past AUTH_STALE_OWNER_S. The ping is
+        # `credential-dead:` (un-suppressed) and latched once per episode.
+        if not dry_run:
+            _write_auth_badge_cache(state_path, first_401, now)
+        if not ad.get("pinged") and (now - first_401) >= AUTH_STALE_OWNER_S:
+            send_fn(msg, owner=owner,
+                    dedup_key="credential-dead:%s:%s" % (key, int(first_401)),
+                    dry_run=dry_run)
+            ad["pinged"] = True
+
     if cstate == "stale":
         # The credential file is older than the first 401 — the box's claudy has
         # not refreshed the token, so it is STILL revoked. NEVER nudge; surface it.
-        _write_auth_badge_cache(state_path, first_401, now)
         _cm = cred_mtime_fn()
         logs.append("auth: 401-revoked since %s, credentials stale (mtime %s) — "
                     "waiting for the box's claudy [%s]"
                     % (_hhmm, ("?" if _cm is None
                                else time.strftime("%H:%M", time.localtime(_cm))),
                        project or key))
-        if not ad.get("pinged") and (now - first_401) >= AUTH_STALE_OWNER_S:
-            ad["pinged"] = True
-            _hrs = int((now - first_401) // 3600)
-            send_fn("🔴 **%s** — OAuth token je odvolaný od %s (~%dh) a "
-                    "~/.claude/.credentials.json sa odvtedy neobnovil — session je "
-                    "mŕtva na 401 a `continue` to nevylieči. Predpoklad: claudy na "
-                    "boxe token ešte neobnovil → treba /login alebo reštart session."
-                    % (project or key, _hhmm, _hrs),
-                    owner=owner,
-                    dedup_key="credential-dead:%s:%s" % (key, int(first_401)),
-                    dry_run=dry_run)
-        state[ad_key] = ad
+        _hrs = int((now - first_401) // 3600)
+        _surface("🔴 **%s** — OAuth token je odvolaný od %s (~%dh) a "
+                 "~/.claude/.credentials.json sa odvtedy neobnovil — session je "
+                 "mŕtva na 401 a `continue` to nevylieči. Predpoklad: claudy na "
+                 "boxe token ešte neobnovil → treba /login alebo reštart session."
+                 % (project or key, _hhmm, _hrs))
+        _persist()
         return
     # FRESH — the credential was refreshed AFTER the first 401.
     if not ad.get("continued"):
         # Exactly ONE continue (the #602 enriched-resume path). Only into a
         # genuinely idle bare pane; a foreign draft or a busy pane DEFERS (retry
         # next sweep) — never type over a draft, never mark continued without a
-        # verified submit.
+        # verified submit. Re-capture right before the idle check (#1075 review
+        # A#7 — the #176 F3 race; the top-of-sweep `captured` can be stale).
+        fresh = capture_pane(pid, run) if not dry_run else captured
         if draft_pending:
             logs.append("auth: fresh credentials — pane holds a draft, defer "
                         "continue [%s]" % (project or key))
-        elif not pane_at_idle_prompt(captured):
+        elif not pane_at_idle_prompt(fresh):
             logs.append("auth: fresh credentials — pane busy, defer continue [%s]"
                         % (project or key))
+        elif dry_run:
+            logs.append("auth: fresh credentials — would continue (401-revoked) "
+                        "-- dry-run [%s]" % (project or key))
         else:
-            ok = True if dry_run else send_verified(
-                pid, OAUTH_REVOKED_NUDGE_TEXT, run, tpath,
-                sleep_fn=sleep_fn, logs=logs, nudge="resume")
+            ok = send_verified(pid, OAUTH_REVOKED_NUDGE_TEXT, run, tpath,
+                               sleep_fn=sleep_fn, logs=logs, nudge="resume")
             if ok:
                 ad["continued"] = True
                 ad["continued_ts"] = int(now)
@@ -528,11 +557,19 @@ def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
             else:
                 logs.append("auth: fresh credentials — continue submit-unverified, "
                             "retry next sweep [%s]" % (project or key))
-        state[ad_key] = ad
+        _persist()
         return
     # already continued once and the 401 PERSISTED (still revoked this sweep) — a
-    # `continue` cannot heal a process that cached the dead token; VERIFIED
-    # RELAUNCH of the pane (once per episode).
+    # `continue` cannot heal a process that cached the dead token. SURFACE it
+    # regardless of the relaunch flag (the owner must know a session is dead), then
+    # attempt the VERIFIED RELAUNCH (once per episode, opt-in).
+    logs.append("auth: fresh credentials — 401 persisted through the continue [%s]"
+                % (project or key))
+    _hrs = int((now - first_401) // 3600)
+    _surface("🔴 **%s** — OAuth session je mŕtva na 401: token bol odvolaný od %s "
+             "(~%dh), ~/.claude/.credentials.json je už čerstvý, ale `continue` to "
+             "nevylieči (proces drží starý token) — treba reštart session na boxe."
+             % (project or key, _hhmm, _hrs))
     if not ad.get("relaunched"):
         from watchdog import goal as _goal_mod
         from watchdog import resurrect as _resurrect
@@ -551,7 +588,8 @@ def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
                         % (pid, project or key))
         elif not _authdead_action_enabled():
             # the destructive respawn keystroke is opt-in (#947 / resurrect.py
-            # precedent): journal the decision, do not fire.
+            # precedent): journal the decision, do not fire. (The badge + owner
+            # ping above already surfaced the dead session regardless of the flag.)
             logs.append("auth: would relaunch %s (%s) after fresh credentials "
                         "(401 persisted through continue) -- disabled "
                         "(AIRULESET_AUTHDEAD_ACTION off) [%s]"
@@ -570,7 +608,7 @@ def _handle_authdead_episode(state, key, cred_mtime_fn, now, idle, project, pid,
         else:
             logs.append("auth: relaunch send FAILED for %s, retry next sweep [%s]"
                         % (pid, project or key))
-    state[ad_key] = ad
+    _persist()
 
 # Synthetic assistant entries Claude Code appends that are NOT a real reply — when
 # scanning back for "the last real assistant message" these are skipped so a
@@ -596,6 +634,7 @@ from watchdog.transcripts import (  # noqa: E402
     transcript_read_stats as transcript_read_stats,         # #1055 journal summary source
     _entry_text as _entry_text,
     transcript_last_error as transcript_last_error,
+    transcript_first_error_ts as transcript_first_error_ts,      # #1075
     _submit_confirmed as _submit_confirmed,
     count_live_workers as count_live_workers,   # #486 G2 -> consumed by G3
     lane_has_live_evidence as lane_has_live_evidence,   # #571 -> lane working-no-tasks
@@ -3970,10 +4009,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     # #1075 CREDENTIAL-DEAD: a revoked OAuth token is dead in the
                     # running process — handled entirely off the generic nudge chain
                     # (own apierr-authdead: state). See _handle_authdead_episode.
+                    # Seed the episode's first-401 time from the earliest 401
+                    # ENTRY's own timestamp (the rotation time), not the transcript
+                    # mtime `now - idle` (which drifts forward with CC's retries and
+                    # would misclassify a fresh rotation STALE — #1075 review A#3);
+                    # fall back to `now - idle` when no 401 carries a timestamp.
+                    first_401_seed = transcript_first_error_ts(tpath)
+                    if first_401_seed is None:
+                        first_401_seed = int(now - idle)
                     _handle_authdead_episode(
                         state, key, cred_mtime_fn, now, idle, project, pid, cwd,
                         tpath, captured, draft_pending, run, send_fn, owner,
-                        sleep_fn, dry_run, logs, state_path)
+                        sleep_fn, dry_run, logs, state_path, first_401_seed)
                     continue
                 if action == "nudge" and is_usage_cap(err_text):
                     # quota USAGE cap — time-based, `continue` can't fix it. Ping ONCE,

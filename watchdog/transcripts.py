@@ -425,6 +425,46 @@ def transcript_last_error(path):
     return ""
 
 
+def transcript_first_error_ts(path):
+    """#1075 — epoch of the FIRST `isApiErrorMessage` in the transcript's CURRENT
+    trailing stall run (the true "first 401" time), or None. Scans back from the
+    newest entry mirroring `transcript_last_error`'s walk: collect every
+    contiguous api-error timestamp, STOP at the first genuine-progress entry (a
+    `tool_result` user turn, a real `tool_use`, or a real non-error assistant
+    reply), and return the EARLIEST 401 epoch in that trailing run (`None` when
+    the last real entry is not an api-error, or no 401 carries a parseable
+    `timestamp`).
+
+    This anchors `decide.credential_state` on the ROTATION time, not on the
+    transcript's last-write mtime (`now - idle`): CC's own 401 retries keep
+    touching the transcript, so an mtime seed drifts forward PAST a fresh
+    credential's mtime → a normal ~1s rotation would misclassify STALE and the
+    #602 one-continue recovery would be skipped. Seeded ONCE at episode creation
+    and kept, so a long outage never drifts it."""
+    first = None
+    for entry in reversed(_iter_jsonl_tail(path, max_lines=200)):
+        if not isinstance(entry, dict):
+            continue
+        t = entry.get("type")
+        if t == "user":
+            if _entry_has_tool_result(entry):
+                break            # tool_result → genuine progress → end of the run
+            continue             # plain-text user (a resume nudge) → keep scanning
+        if t != "assistant":
+            continue             # system / bookkeeping → skip
+        if entry.get("isApiErrorMessage") is True:
+            ep = _jsonl_entry_epoch(json.dumps(entry))
+            if ep is not None:
+                first = ep       # reversed = newest→oldest, so the LAST set wins = earliest
+            continue
+        if _entry_has_tool_use(entry):
+            break                # recovery activity → end of the run
+        if (_entry_text(entry) or "").strip() in _SENTINELS:
+            continue             # synthetic / tool-only text → skip
+        break                    # a real non-error reply → end of the run
+    return first
+
+
 def _submit_confirmed(tpath, baseline_size, text):
     """True iff the transcript at `tpath` GREW past `baseline_size` bytes with
     a NEW top-level `user` turn whose text carries `text` — the STRUCTURED
