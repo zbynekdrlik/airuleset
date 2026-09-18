@@ -1927,10 +1927,35 @@ class TestNetDrainHarness842(TestCase):
                 session_id=self._away_sid(), home=self.home)
         self.assertEqual(r.returncode, 2, r.stderr)
 
-    def test_attended_discovery_never_ratchet_blocked(self):
-        # PRESENT session -> the ratchet never engages, even when NOT draining.
-        r = run(body_cmd("attended ok", "a broad security-boundary change across the auth layer",
+    def test_attended_discovery_now_ratchet_blocked_when_not_draining(self):
+        # #1070 item 7 (owner ruling 2026-09-18): the net-drain brake applies to
+        # EVERY filing session, ATTENDED included -- a present gk session filing
+        # under the owner identity on a non-draining repo is now refused too
+        # (REVERSES the pre-#1070 attended-exempt behaviour).
+        r = run(body_cmd("attended not draining",
+                          "a broad security-boundary change across the auth layer",
                           scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=99, closed=0),
+                session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("drain", r.stderr.lower())
+
+    def test_attended_discovery_passes_when_draining(self):
+        # #1070 item 7: an ATTENDED non-exempt filing still PASSES while the repo
+        # is strictly draining (created < closed) -- the brake only bites a
+        # non-draining repo.
+        r = run(body_cmd("attended draining",
+                          "a broad security-boundary change across the auth layer",
+                          scope_gate="security-boundary"),
+                gh_bin=_fake_gh_netdrain(self.tmp, created=2, closed=9),
+                session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_attended_exempt_still_passes_on_a_non_draining_repo(self):
+        # #1070 item 7: the exemptions are UNCHANGED -- planned-work never meets
+        # the ratchet, even attended on a non-draining repo.
+        r = run(body_cmd("plan step attended", "converged-plan decomposition",
+                          scope_gate="planned-work"),
                 gh_bin=_fake_gh_netdrain(self.tmp, created=99, closed=0),
                 session_id="t-nd-present-" + uuid.uuid4().hex[:6], home=self.home)
         self.assertEqual(r.returncode, 0, r.stderr)
