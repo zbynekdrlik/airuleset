@@ -3555,15 +3555,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # characterization suite pins "pane loop runs before EVERY standalone job,
     # list_claude_panes never fires twice" (test_run_once_characterization.py).
     panes = list(list_claude_panes(run, dry_run=dry_run))
-    # #1060 L3b item 8 — dual-agent IMPLEMENTER window presence (marker-gated,
-    # folded into the sweep body, NOT a new numbered job). On a model-backend
-    # MARKER box the managed session must carry window 1 `impl` (the claude-impl
-    # gateway session); a session running since BEFORE the marker shipped, or
-    # whose impl window crashed/closed, has no impl window and no session-created
-    # event to bring it back — the webterm/attach creators only fire at session
-    # start. Once per sweep this re-creates it through the tmux template (a
-    # management command, never a keystroke), idempotent (window-name dedup).
-    # A non-marker box is a single cheap file read (`_impl_marker()` -> None).
+    # #1060 L3b item 8 — dual-agent IMPLEMENTER window presence, marker-gated,
+    # folded into the sweep body (NOT a new numbered job). See
+    # `impl_window_presence` / `_impl_marker` for the full rationale; a non-marker
+    # box is a single cheap file read (None) with no tmux call.
     _impl_mk = _impl_marker()
     if _impl_mk:
         impl_window_presence(_impl_mk, run=run, logs=logs, dry_run=dry_run)
