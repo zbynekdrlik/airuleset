@@ -27,7 +27,8 @@ from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 
-FAKE_GIT = lambda pd, rel: ("abc1234", "2026-07-13", "some.dev")
+def FAKE_GIT(pd, rel):
+    return ("abc1234", "2026-07-13", "some.dev")
 
 
 def _mk_project(root, name):

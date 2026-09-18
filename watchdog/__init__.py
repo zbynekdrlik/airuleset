@@ -3058,11 +3058,15 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           field 19; journals any non-zero nice (machine-channel only — never
           an owner ping). Read-only: never calls renice or mutates scheduling.
           `watchdog/nice_check.py`'s docstring is the SSOT.
-      (43) MDREVIEW CADENCE (#858), gated on `mdreview_cadence_enabled` (True
-          in cmd_watchdog, left False in unit tests). Dev1-only (full authority
-          + airuleset checkout). Daily TTL; due on 30d since pinned-ticket
-          CLOSE or MODEL_TIERS hash change → runs mdreview-audit --fleet,
-          REOPENs the pinned ticket + posts summary. Imports NO notify.
+      (43) MDREVIEW CADENCE (#858, #874), gated on `mdreview_cadence_enabled`
+          (True in cmd_watchdog, left False in unit tests). Dev1-only (full
+          authority + airuleset checkout). Daily TTL; each daily fire runs ONE
+          mdreview-audit --fleet and posts the DAILY target-governance delta
+          (#874: what each target adds to its OWN .claude/ — commands/skills/
+          hooks/rules/imports with provenance + a name classifier) on the
+          pinned ticket, journal-only when nothing changed. When ALSO due (30d
+          since pinned-ticket CLOSE or MODEL_TIERS hash change) it REOPENs the
+          ticket + posts a summary, reusing the same audit. Imports NO notify.
           `watchdog/mdreview_cadence.py`'s docstring is the SSOT.
       (44) PRIORITY POLICY ENFORCER (#885), gated on
           `priority_policy_enabled` (True in cmd_watchdog, left False in
@@ -5178,10 +5182,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
          lambda: nice_check.nice_check_job(dry_run=dry_run),
          "nice-check error")
 
-    # Job 43 (#858) — MDREVIEW CADENCE. Dev1-gated, daily TTL, imports NO
-    # notify. On due: runs mdreview-audit → REOPENs the pinned ticket.
-    # Uses its OWN durable state file (env seam AIRULESET_MDREVIEW_STATE_PATH),
-    # never run_once's state_path — #858 re-review state-file aliasing fix.
+    # Job 43 (#858, #874) — MDREVIEW CADENCE. Dev1-gated, daily TTL, imports NO
+    # notify. Each daily fire runs ONE mdreview-audit → posts the daily
+    # target-governance delta (#874) on the pinned ticket, and REOPENs it when
+    # also due. Uses its OWN durable state file (env seam
+    # AIRULESET_MDREVIEW_STATE_PATH), never run_once's state_path — #858
+    # re-review state-file aliasing fix.
     _add("mdreview_cadence", lambda: mdreview_cadence_enabled,
          lambda: mdreview_cadence.mdreview_cadence_job(
              now, dry_run=dry_run),

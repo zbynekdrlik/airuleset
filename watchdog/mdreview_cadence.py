@@ -12,6 +12,18 @@ DUE when:
 On due: run mdreview-audit --fleet --json -> artifact -> REOPEN ticket + comment.
 Failure -> journal line, hash NOT advanced (daily TTL IS advanced per finding 7).
 
+DAILY target-governance delta (#874): every daily TTL fire (once a ticket
+exists, not dry-run) runs ONE fleet audit, diffs each project's
+``target_governance`` (what a target adds to its OWN .claude/ — commands,
+skills, hooks, rules, settings hooks, CLAUDE.md @imports, each with git
+provenance + a name classifier) against the previous snapshot stored in THIS
+job's own durable state file, and posts a `Target-governance delta …` comment
+on the pinned ticket for the new/changed items (journal-only when nothing
+changed). The same audit data drives the reopen when due, so the fleet is
+swept ONCE per day. This is why the run_once budget already anticipates a daily
+mdreview-audit subprocess. Blocks the built-in-shadow class BEFORE it lands via
+hooks/block-builtin-command-shadow.sh (gates.commandshadow).
+
 Imports NO notify — the lock-test in test_mdreview_audit.py verifies this.
 """
 
@@ -262,6 +274,56 @@ def bootstrap_ticket(gh_runner=None):
     return None
 
 
+def _today():
+    import datetime
+    return datetime.date.today().isoformat()
+
+
+def _post_comment(ticket, body, gh_runner=None):
+    """Post a comment on the pinned ticket. Returns True on success."""
+    argv = ["gh", "issue", "comment", str(ticket), "-R", _REPO_SLUG,
+            "--body", body]
+    if gh_runner:
+        _out, rc = gh_runner(argv)
+        return rc == 0
+    import subprocess
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    return r.returncode == 0
+
+
+def _target_governance_step(ticket, cad_state, audit_data, gh_runner=None):
+    """Daily target-governance delta on the pinned ticket (#874).
+
+    Diffs the audit's flattened ``target_governance`` against the previous
+    snapshot stored in this job's OWN durable state, posts a comment for the
+    new/changed items (journal-only when nothing changed), and returns
+    ``(log_lines, new_snapshot)``. On a comment-post FAILURE the OLD snapshot
+    is returned so the delta is re-attempted next run (never silently dropped).
+    """
+    import cli_mdreview_audit
+    logs = []
+    gmap = cli_mdreview_audit.collect_target_governance(audit_data)
+    prev = cad_state.get("target_governance", {}) or {}
+    date_str = audit_data.get("date") or _today()
+    delta = cli_mdreview_audit.target_governance_delta(gmap, prev, date_str)
+    new_snapshot = cli_mdreview_audit.governance_snapshot(gmap)
+
+    if delta["comment"]:
+        ok = _post_comment(ticket, delta["comment"], gh_runner=gh_runner)
+        if ok:
+            logs.append(
+                f"mdreview-cadence: target-governance {delta['count']} new, "
+                f"{delta['collisions']} collisions (posted)")
+        else:
+            logs.append(
+                f"mdreview-cadence: target-governance {delta['count']} new "
+                "(comment failed — snapshot held for retry)")
+            return logs, prev
+    else:
+        logs.append("mdreview-cadence: target-governance 0 new, 0 collisions")
+    return logs, new_snapshot
+
+
 def mdreview_cadence_job(now, _state=None, dry_run=False,
                          state_path=None, gh_runner=None,
                          fleet_runner=None):
@@ -311,21 +373,22 @@ def mdreview_cadence_job(now, _state=None, dry_run=False,
         cad_state["model_tiers_hash"] = _model_tiers_hash()
         _save_state(cad_state, state_path)
 
+    # Reopen due-trigger (read-only gh view). Evaluated first so the dry-run
+    # summary is honest AND the daily audit is shared with the reopen.
     result = evaluate_cadence(cad_state, now, gh_runner=gh_runner)
-
-    if not result["due"]:
-        logs.append(f"mdreview-cadence: not-due ({result['reason']})")
-        cad_state["last_eval_ts"] = now
-        _save_state(cad_state, state_path)
-        return logs
-
+    due = result["due"]
     reason = result["reason"]
-    logs.append(f"mdreview-cadence: due({reason})")
 
     if dry_run:
-        logs.append(f"mdreview-cadence: would reopen #{ticket} (dry-run)")
+        logs.append("mdreview-cadence: would run daily audit + "
+                    "target-governance delta (dry-run)")
+        if due:
+            logs.append(
+                f"mdreview-cadence: would reopen #{ticket} ({reason}) (dry-run)")
         return logs
 
+    # Daily fleet audit — ONE run, shared by the target-governance delta AND
+    # the reopen. A failure advances the daily TTL but NOT the model hash.
     try:
         import cli_mdreview_audit
         data = cli_mdreview_audit.run_fleet(fleet_runner=fleet_runner)
@@ -337,16 +400,25 @@ def mdreview_cadence_job(now, _state=None, dry_run=False,
         _save_state(cad_state, state_path)
         return logs
 
-    ok = act_on_due(ticket, reason, data, gh_runner=gh_runner)
-    if ok:
-        logs.append(f"mdreview-cadence: reopened #{ticket}")
-        cad_state["model_tiers_hash"] = _model_tiers_hash()
-        cad_state["last_eval_ts"] = now
-        _save_state(cad_state, state_path)
-        logs.append("mdreview-cadence: state advanced")
-    else:
-        logs.append("mdreview-cadence: reopen failed")
-        cad_state["last_eval_ts"] = now
-        _save_state(cad_state, state_path)
+    # Daily target-governance delta on the pinned ticket (#874).
+    tg_logs, new_snapshot = _target_governance_step(
+        ticket, cad_state, data, gh_runner=gh_runner)
+    logs.extend(tg_logs)
+    cad_state["target_governance"] = new_snapshot
 
+    # Reopen when due (reuse the audit data already computed).
+    if due:
+        logs.append(f"mdreview-cadence: due({reason})")
+        ok = act_on_due(ticket, reason, data, gh_runner=gh_runner)
+        if ok:
+            logs.append(f"mdreview-cadence: reopened #{ticket}")
+            cad_state["model_tiers_hash"] = _model_tiers_hash()
+            logs.append("mdreview-cadence: state advanced")
+        else:
+            logs.append("mdreview-cadence: reopen failed")
+    else:
+        logs.append(f"mdreview-cadence: not-due ({reason})")
+
+    cad_state["last_eval_ts"] = now
+    _save_state(cad_state, state_path)
     return logs

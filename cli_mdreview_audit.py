@@ -20,6 +20,34 @@ REPO_DIR = Path(__file__).resolve().parent
 CLAUDE_DIR = Path.home() / ".claude"
 ARTIFACT_DIR = CLAUDE_DIR / "mdreview-audit"
 
+# -- Target governance (#874) ---------------------------------------------
+# Claude Code built-in slash commands. A target project's
+# `.claude/commands/<name>.md` or `.claude/skills/<name>/SKILL.md` that reuses
+# one of these names silently SHADOWS the built-in on every checkout (the
+# odoo-erp `/resume` incident, 67 days invisible). Pinned + SOURCED so a future
+# /mdreview pass re-verifies the list against the live `claude --help`/docs.
+CLAUDE_CODE_BUILTIN_COMMANDS_SOURCE = (
+    "Claude Code v2.1.268 — verified against the installed `claude --help` CLI "
+    "subcommands (agents/doctor/mcp/config/install/update/setup-token) + the "
+    "documented in-session slash-command set; recorded 2026-09-18 (#874). "
+    "Re-verify against the live `claude --help`/docs each /mdreview pass."
+)
+CLAUDE_CODE_BUILTIN_COMMANDS = frozenset({
+    "resume", "clear", "compact", "help", "model", "status", "login",
+    "logout", "config", "memory", "review", "cost", "doctor", "init",
+    "bug", "agents", "mcp", "vim", "terminal-setup", "permissions",
+    "hooks", "plugins", "export", "rewind", "tasks", "workflows",
+    "effort", "fast", "goal", "loop", "list-agents", "add-dir",
+    "context", "usage", "stats",
+})
+_BUILTINS_LOWER = frozenset(c.lower() for c in CLAUDE_CODE_BUILTIN_COMMANDS)
+
+# Governance classifier constants (#874).
+CLASS_BUILTIN_COLLISION = "BUILTIN-COLLISION"   # name == a Claude Code built-in
+CLASS_MANAGED_DUPLICATE = "MANAGED-DUPLICATE"   # name == an airuleset skill/rule
+CLASS_UNREVIEWED = "UNREVIEWED"                 # new/changed since the last run
+CLASS_RULE_SHAPE = "RULE-SHAPE"                 # malformed rule frontmatter
+
 # Doctrine vocab for R (rule/procedure) classification in memory
 _DOCTRINE_RE = re.compile(
     r"\b(always|never|nikdy|vždy|musí|must|ban|zakáz|povinn"
@@ -87,9 +115,368 @@ def _sentence_hashes(text):
     return result
 
 
+# -- Target governance inventory (#874) -----------------------------------
+
+def _default_git_fn(project_dir, rel_path):
+    """First-commit (sha, date, author) for a file in a git repo, or
+    ('', '', '') on any failure. Injected as ``git_fn`` in tests so the
+    inventory stays hermetic (no real git in the unit suite)."""
+    import subprocess
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(project_dir), "log", "--diff-filter=A",
+             "--follow", "--format=%h|%ad|%an", "--date=short",
+             "--", rel_path],
+            capture_output=True, text=True, timeout=15)
+    except (OSError, subprocess.SubprocessError):
+        return ("", "", "")
+    if r.returncode != 0:
+        return ("", "", "")
+    lines = [ln for ln in r.stdout.splitlines() if ln.strip()]
+    if not lines:
+        return ("", "", "")
+    parts = (lines[-1].split("|", 2) + ["", "", ""])[:3]
+    return (parts[0], parts[1], parts[2])
+
+
+def _first_heading(path):
+    """First markdown heading text in a file, or ''."""
+    try:
+        for line in path.read_text(
+                encoding="utf-8", errors="replace").splitlines():
+            s = line.strip()
+            if s.startswith("#"):
+                return s.lstrip("#").strip()[:120]
+    except OSError:
+        return ""
+    return ""
+
+
+def _managed_skill_names():
+    """Skill names airuleset itself ships (REPO_DIR/skills/*/SKILL.md)."""
+    names = set()
+    sd = REPO_DIR / "skills"
+    if sd.is_dir():
+        for e in sd.iterdir():
+            if (e / "SKILL.md").exists():
+                names.add(e.name)
+    return names
+
+
+def _managed_rule_names():
+    """Rule file names airuleset itself ships (REPO_DIR/rules/*.md)."""
+    rd = REPO_DIR / "rules"
+    if rd.is_dir():
+        return {e.name for e in rd.glob("*.md")}
+    return set()
+
+
+def _cmd_basename(cmd):
+    """A stable short id for a settings-hook command (its script basename)."""
+    for tok in cmd.split():
+        if tok.endswith(".sh") or "/" in tok:
+            return tok.rsplit("/", 1)[-1]
+    toks = cmd.split()
+    return toks[-1] if toks else cmd
+
+
+def _is_under(path, root):
+    """True if ``path`` resolves inside ``root``."""
+    try:
+        Path(path).resolve().relative_to(Path(root))
+        return True
+    except (ValueError, OSError):
+        return False
+
+
+def _bad_frontmatter(path):
+    """True if the file OPENS a `---` frontmatter fence but never closes it
+    (malformed rule frontmatter → RULE-SHAPE). A file with NO frontmatter
+    fence at all is NOT flagged — a plain always-on rule is legitimate."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    if not text.lstrip().startswith("---"):
+        return False
+    return len(text.lstrip().split("---", 2)) < 3
+
+
+def _prov(git_fn, pd, rel):
+    sha, date, author = git_fn(pd, rel)
+    return {"sha": sha, "date": date, "author": author}
+
+
+def target_governance(project_dir, git_fn=None):
+    """Inventory what a TARGET project adds to its OWN `.claude/` (#874).
+
+    Returns ``{dir, repo, items}`` where each item is
+    ``{repo, kind, name, classes:[...], provenance:{sha,date,author}, detail}``
+    and ``kind`` ∈ {command, skill, hook, settings-hook, rule, import}.
+
+    Classifier (stored at inventory time; UNREVIEWED is added later at delta
+    time): BUILTIN-COLLISION (name == a Claude Code built-in), MANAGED-DUPLICATE
+    (name == an airuleset-shipped skill/rule), RULE-SHAPE (malformed rule
+    frontmatter).
+
+    ``git_fn(project_dir, rel_path) -> (sha, date, author)`` is injected in
+    tests; defaults to a real timeout-bounded, error-swallowing git call.
+    """
+    pd = Path(project_dir)
+    gfn = git_fn or _default_git_fn
+    repo = pd.name
+    claude = pd / ".claude"
+    items = []
+    managed_skills = _managed_skill_names()
+
+    # slash commands
+    cdir = claude / "commands"
+    if cdir.is_dir():
+        for f in sorted(cdir.glob("*.md")):
+            name = f.stem
+            classes = []
+            if name.lower() in _BUILTINS_LOWER:
+                classes.append(CLASS_BUILTIN_COLLISION)
+            try:
+                mtime = f.stat().st_mtime
+            except OSError:
+                mtime = 0
+            items.append({
+                "repo": repo, "kind": "command", "name": name,
+                "classes": classes,
+                "provenance": _prov(gfn, pd, f".claude/commands/{f.name}"),
+                "detail": {"mtime": mtime, "first_heading": _first_heading(f)},
+            })
+
+    # skills
+    sdir = claude / "skills"
+    if sdir.is_dir():
+        for e in sorted(sdir.iterdir()):
+            if not (e / "SKILL.md").exists():
+                continue
+            name = e.name
+            classes = []
+            if name.lower() in _BUILTINS_LOWER:
+                classes.append(CLASS_BUILTIN_COLLISION)
+            if name in managed_skills:
+                classes.append(CLASS_MANAGED_DUPLICATE)
+            items.append({
+                "repo": repo, "kind": "skill", "name": name,
+                "classes": classes,
+                "provenance": _prov(gfn, pd, f".claude/skills/{name}/SKILL.md"),
+                "detail": {},
+            })
+
+    # project-owned hook files
+    hdir = claude / "hooks"
+    if hdir.is_dir():
+        for f in sorted(hdir.iterdir()):
+            if not f.is_file():
+                continue
+            items.append({
+                "repo": repo, "kind": "hook", "name": f.name,
+                "classes": [],
+                "provenance": _prov(gfn, pd, f".claude/hooks/{f.name}"),
+                "detail": {},
+            })
+
+    # settings*.json hook entries NOT managed by airuleset
+    for sname in ("settings.json", "settings.local.json"):
+        sfile = claude / sname
+        if not sfile.exists():
+            continue
+        try:
+            cfg = json.loads(sfile.read_text(encoding="utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(cfg, dict):
+            continue
+        hooks_cfg = cfg.get("hooks")
+        if not isinstance(hooks_cfg, dict):
+            continue
+        for event, blocks in sorted(hooks_cfg.items()):
+            if not isinstance(blocks, list):
+                continue
+            for block in blocks:
+                if not isinstance(block, dict):
+                    continue
+                matcher = block.get("matcher", "")
+                for h in block.get("hooks", []) or []:
+                    if not isinstance(h, dict):
+                        continue
+                    cmd = h.get("command", "") or ""
+                    if not cmd or "devel/airuleset" in cmd:
+                        continue  # empty or airuleset-managed — skip
+                    items.append({
+                        "repo": repo, "kind": "settings-hook",
+                        "name": f"{sname}:{event}:{matcher}:{_cmd_basename(cmd)}",
+                        "classes": [],
+                        "provenance": _prov(gfn, pd, f".claude/{sname}"),
+                        "detail": {"command": cmd, "event": event,
+                                   "matcher": matcher, "file": sname},
+                    })
+
+    # path-scoped / always-on rules
+    rdir = claude / "rules"
+    if rdir.is_dir():
+        for f in sorted(rdir.glob("*.md")):
+            classes = []
+            has_paths = cli_context_baseline._has_paths_frontmatter(f)
+            if _bad_frontmatter(f):
+                classes.append(CLASS_RULE_SHAPE)
+            try:
+                sz = f.stat().st_size
+            except OSError:
+                sz = 0
+            items.append({
+                "repo": repo, "kind": "rule", "name": f.name,
+                "classes": classes,
+                "provenance": _prov(gfn, pd, f".claude/rules/{f.name}"),
+                "detail": {"has_paths": has_paths, "bytes": sz},
+            })
+
+    # CLAUDE.md @imports outside ~/devel/airuleset
+    claude_md = pd / "CLAUDE.md"
+    if claude_md.exists():
+        airuleset_root = (Path.home() / "devel" / "airuleset").resolve()
+        try:
+            text = claude_md.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            text = ""
+        for line in text.splitlines():
+            imp = cli_context_baseline._resolve_import_path(
+                line, claude_md.parent)
+            if imp is None:
+                continue
+            try:
+                resolved = imp.resolve()
+            except OSError:
+                resolved = imp
+            if _is_under(resolved, airuleset_root):
+                continue
+            ref = line.strip()[1:].strip()  # strip leading '@'
+            items.append({
+                "repo": repo, "kind": "import", "name": ref,
+                "classes": [],
+                "provenance": {"sha": "", "date": "", "author": ""},
+                "detail": {"ref": ref, "resolved": str(resolved)},
+            })
+
+    return {"dir": str(pd), "repo": repo, "items": items}
+
+
+# -- Target governance delta (#874) ---------------------------------------
+
+def _tg_key(repo, kind, name):
+    return "\x1f".join((repo, kind, name))
+
+
+def collect_target_governance(audit_data):
+    """Flatten target_governance items across every box of an audit artifact
+    into ``{key: item}``, deduped by (repo, kind, name). Handles BOTH the
+    fleet (``{boxes:[...]}``) and single-box (``{inventory:...}``) shapes.
+    When the same item appears on several boxes (a repo checked out on N
+    boxes), classes are unioned and the provenance carrying a sha wins."""
+    result = {}
+
+    def _ingest(inv):
+        if not isinstance(inv, dict):
+            return
+        for proj in inv.get("target_governance", []) or []:
+            for it in (proj or {}).get("items", []) or []:
+                key = _tg_key(it.get("repo", ""), it.get("kind", ""),
+                              it.get("name", ""))
+                cur = result.get(key)
+                if cur is None:
+                    result[key] = {
+                        "repo": it.get("repo", ""),
+                        "kind": it.get("kind", ""),
+                        "name": it.get("name", ""),
+                        "classes": sorted(set(it.get("classes", []))),
+                        "provenance": dict(it.get("provenance", {})),
+                        "detail": dict(it.get("detail", {})),
+                    }
+                else:
+                    cur["classes"] = sorted(
+                        set(cur["classes"]) | set(it.get("classes", [])))
+                    if not cur["provenance"].get("sha") and \
+                            it.get("provenance", {}).get("sha"):
+                        cur["provenance"] = dict(it["provenance"])
+
+    boxes = audit_data.get("boxes")
+    if isinstance(boxes, list):
+        for box in boxes:
+            _ingest((box or {}).get("inventory", {}))
+    else:
+        _ingest(audit_data.get("inventory", {}))
+    return result
+
+
+def governance_snapshot(gmap):
+    """Durable snapshot form for the cadence state file: ``{key: {classes, sha}}``.
+    Host-set is deliberately excluded so a box pulling a fix (fewer checkouts
+    carrying an item) never reads as a 'change'."""
+    return {
+        k: {"classes": sorted(v.get("classes", [])),
+            "sha": v.get("provenance", {}).get("sha", "")}
+        for k, v in gmap.items()
+    }
+
+
+_MAX_DELTA_LINES = 300
+
+
+def _delta_line(item):
+    classes = item.get("classes") or [CLASS_UNREVIEWED]
+    prov = item.get("provenance", {})
+    sha = prov.get("sha") or "?"
+    date = prov.get("date") or "?"
+    author = prov.get("author") or "?"
+    return (f"- {item['repo']} {item['kind']} {item['name']} "
+            f"[{', '.join(classes)}] (added {sha} {date} by {author})")
+
+
+def target_governance_delta(current_map, previous_snapshot, date_str):
+    """Diff the current governance map against the previous snapshot.
+
+    Returns ``{count, collisions, comment}``. An item is new/changed when its
+    key is absent from the snapshot, or its sha/classes differ. ``collisions``
+    counts new/changed items carrying BUILTIN-COLLISION or MANAGED-DUPLICATE.
+    ``comment`` is None when nothing changed (journal-only day)."""
+    prev = previous_snapshot or {}
+    changed = []
+    for key, item in sorted(current_map.items()):
+        old = prev.get(key)
+        cur_classes = sorted(item.get("classes", []))
+        cur_sha = item.get("provenance", {}).get("sha", "")
+        if old is None:
+            changed.append(item)
+        elif sorted(old.get("classes", [])) != cur_classes or \
+                old.get("sha", "") != cur_sha:
+            changed.append(item)
+
+    collisions = sum(
+        1 for it in changed
+        if set(it.get("classes", [])) &
+        {CLASS_BUILTIN_COLLISION, CLASS_MANAGED_DUPLICATE})
+
+    if not changed:
+        return {"count": 0, "collisions": 0, "comment": None}
+
+    header = (f"Target-governance delta {date_str}: {len(changed)} new/changed, "
+              f"{collisions} collision{'' if collisions == 1 else 's'}")
+    lines = [_delta_line(it) for it in changed]
+    if len(lines) > _MAX_DELTA_LINES:
+        extra = len(lines) - _MAX_DELTA_LINES
+        lines = lines[:_MAX_DELTA_LINES] + [
+            f"- … and {extra} more (see the full artifact)"]
+    comment = header + "\n\n" + "\n".join(lines)
+    return {"count": len(changed), "collisions": collisions, "comment": comment}
+
+
 # -- inventory_box ---------------------------------------------------------
 
-def inventory_box(project_dirs=None):
+def inventory_box(project_dirs=None, git_fn=None):
     """Inventory always-on context for this box.
 
     Returns dict with:
@@ -157,12 +544,19 @@ def inventory_box(project_dirs=None):
                 "rules_bytes": ao_bytes,
             })
 
+    # Target governance (#874) — what each project adds to its OWN .claude/.
+    target_gov = []
+    if project_dirs:
+        for pd in project_dirs:
+            target_gov.append(target_governance(pd, git_fn=git_fn))
+
     return {
         "global_modules": {k: v for k, v in sorted(global_files.items())},
         "global_missing": global_missing,
         "skills": skills,
         "rules": rules,
         "projects": projects,
+        "target_governance": target_gov,
     }
 
 
