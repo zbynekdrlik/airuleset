@@ -45,6 +45,9 @@ from pathlib import Path
 from cli_tmux_provisioning import TMUX_HISTORY_LIMIT
 
 CLAUDE_DIR = Path.home() / ".claude"
+# This module lives at the repo root (alongside airuleset.py), so its parent IS
+# the repo — the single source for repo-relative assets (agents/implementer.md).
+REPO_DIR = Path(__file__).resolve().parent
 
 
 # The managed claude launcher (#77, 2026-07-26): a shell FUNCTION in ~/.bashrc
@@ -72,6 +75,12 @@ CLAUDE_LAUNCH_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-launch.sh"
 # never touch the main window. tmux window 1 `impl` runs it by absolute path; a
 # `claude-impl` bashrc wrapper (cli_bashrc_appliers) runs it for interactive use.
 CLAUDE_IMPL_LAUNCH_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-impl.sh"
+# #1060 L3b: the IMPLEMENTER system prompt. The impl launcher loads it with
+# `--append-system-prompt-file`; install renders it (a COPY of agents/
+# implementer.md, the single source) here. It is NOT symlinked into
+# ~/.claude/agents/ — it is a SESSION prompt, never a dispatchable subagent.
+CLAUDE_IMPLEMENTER_PROMPT_SRC = REPO_DIR / "agents" / "implementer.md"
+CLAUDE_IMPLEMENTER_PROMPT_DEST = CLAUDE_DIR / "airuleset-implementer.md"
 # --- the script content itself -----------------------------------------------
 # Ultracode is NO LONGER a managed launch flag (owner directive 2026-08-30 --
 # "Chcel by som este aby sa claude v targetoch nespustali s zapnutym ultracode
@@ -387,6 +396,16 @@ def render_claude_impl_launch_script():
     value is read from the per-box marker at shell time, so ONE rendered script
     serves every box (it refuses LOUDLY off a marker box)."""
     return CLAUDE_IMPL_LAUNCH_SCRIPT_CONTENT
+
+
+def render_claude_implementer_prompt():
+    """#1060 L3b: the IMPLEMENTER system prompt content — a verbatim read of the
+    single source `agents/implementer.md`. Install writes it to
+    CLAUDE_IMPLEMENTER_PROMPT_DEST (`~/.claude/airuleset-implementer.md`), which
+    the impl launcher loads via `--append-system-prompt-file`. Rendered (not
+    symlinked into ~/.claude/agents/) because it is a SESSION prompt, never a
+    dispatchable subagent definition."""
+    return CLAUDE_IMPLEMENTER_PROMPT_SRC.read_text(encoding="utf-8")
 
 
 def encode_project_dir(cwd):

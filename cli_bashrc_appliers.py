@@ -54,10 +54,12 @@ from pathlib import Path
 from cli_claude_scripts import (
     CLAUDE_LAUNCH_SCRIPT_DEST,
     CLAUDE_IMPL_LAUNCH_SCRIPT_DEST,
+    CLAUDE_IMPLEMENTER_PROMPT_DEST,
     CLAUDE_HISTORY_SCRIPT_DEST,
     CLAUDE_HISTORY_POPUP_SCRIPT_DEST,
     render_claude_launch_script,
     render_claude_impl_launch_script,
+    render_claude_implementer_prompt,
     render_claude_history_script,
     render_claude_history_popup_script,
 )
@@ -100,7 +102,8 @@ ULTRACODE_BASHRC_BLOCK = (
 def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
                               history_script_path: Path = None,
                               popup_script_path: Path = None,
-                              impl_script_path: Path = None) -> bool:
+                              impl_script_path: Path = None,
+                              impl_prompt_path: Path = None) -> bool:
     """Install/refresh the managed claude launcher (#77) AND the
     claude-history companion (#267 -- same mechanism, same self-heal
     discipline, deliberately extended in place rather than given its own
@@ -137,6 +140,7 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     hpath = history_script_path or CLAUDE_HISTORY_SCRIPT_DEST
     ppath = popup_script_path or CLAUDE_HISTORY_POPUP_SCRIPT_DEST
     ipath = impl_script_path or CLAUDE_IMPL_LAUNCH_SCRIPT_DEST
+    ippath = impl_prompt_path or CLAUDE_IMPLEMENTER_PROMPT_DEST
 
     spath.parent.mkdir(parents=True, exist_ok=True)
     spath.write_text(render_claude_launch_script())
@@ -153,6 +157,16 @@ def apply_ultracode_launcher(bashrc_path: Path = None, script_path: Path = None,
     os.chmod(str(ipath), 0o755)
     if not ipath.exists():
         raise RuntimeError(f"claude-impl launcher script missing right after write: {ipath}")
+
+    # #1060 L3b: the IMPLEMENTER system prompt (agents/implementer.md), rendered
+    # verbatim to ~/.claude/airuleset-implementer.md — the file the impl launcher
+    # loads with --append-system-prompt-file. Written UNCONDITIONALLY (same
+    # self-heal discipline as the launchers); inert off a marker box (only the
+    # impl window loads it), so a non-implementer box carries a harmless copy.
+    ippath.parent.mkdir(parents=True, exist_ok=True)
+    ippath.write_text(render_claude_implementer_prompt())
+    if not ippath.exists():
+        raise RuntimeError(f"implementer prompt missing right after write: {ippath}")
 
     hpath.parent.mkdir(parents=True, exist_ok=True)
     hpath.write_text(render_claude_history_script())
@@ -263,18 +277,33 @@ def render_tmux_attach_block(default_session: str) -> str:
         '        local _impl_cwd',
         r'''        _impl_cwd="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("cwd") or "")' "$HOME/.claude/airuleset-model-backend.json" 2>/dev/null || true)"''',
         '        command tmux new-session -d -s "$_s"',
-        '        if [ -n "$_impl_cwd" ] && [ -d "$_impl_cwd" ]; then',
-        ('          command tmux new-window -d -t "$_s" -n impl -c "$_impl_cwd" "%s"'
+        # #1060 L3b DEDUP: `new-session -d` above ALSO fires the `-g
+        # session-created` hook, which on a marker box now creates the impl
+        # window too (and the watchdog is a third creator) — so create it here
+        # ONLY when no impl window exists yet, so an interactive-ssh session
+        # never gets two. (Non-run-shell context -> a single `#{window_name}`.)
+        # Residual (review 🔵): the `-g` hook's create runs in an async
+        # `run-shell`, so this synchronous check-then-create can in principle
+        # race it and both create. Harmless on the phase-1 path (miva1 is
+        # webterm-only: its session comes up via the ForceCommand `new-session
+        # -A` = a SINGLE creator, this bashrc block never runs there), the gk
+        # declared-windows precedent uses the same shape with no observed
+        # double, and the watchdog reconciler dedups on its next sweep.
+        '        if ! command tmux list-windows -t "$_s" '
+        "-F '#{window_name}' 2>/dev/null | grep -Fxq impl; then",
+        '          if [ -n "$_impl_cwd" ] && [ -d "$_impl_cwd" ]; then',
+        ('            command tmux new-window -d -t "$_s" -n impl -c "$_impl_cwd" "%s"'
          % impl_launcher),
-        "        else",
-        ('          command tmux new-window -d -t "$_s" -n impl "%s"'
+        "          else",
+        ('            command tmux new-window -d -t "$_s" -n impl "%s"'
          % impl_launcher),
-        "        fi",
+        "          fi",
         # L3a review A 🔵: keep the impl pane visible if the launcher REFUSES
         # (exit 1, e.g. a misprovisioned key/cwd) so its LOUD stderr is readable
         # instead of the pane silently vanishing at the owner-present cutover.
-        '        command tmux set-window-option -t "$_s:impl" remain-on-exit on '
+        '          command tmux set-window-option -t "$_s:impl" remain-on-exit on '
         '2>/dev/null || true',
+        "        fi",
         "      fi",
         '      command tmux new-session -A -s "$_s"',
         "    }",

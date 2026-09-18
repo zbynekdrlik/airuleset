@@ -1196,7 +1196,54 @@ def render_stream_tmux_window_block(name, windows=None):
     )
 
 
-def _session_created_hook_value(name, windows):
+_HOOK_MARKER_UNSET = object()
+
+
+def _hook_marker():
+    """The model-backend marker dict for THIS box (or None), read at RENDER time
+    (install runs ON the box, so a marker box's marker file exists). Never
+    raises (`load_marker` returns None on any error). Isolated so tests can
+    inject a marker without a real file (#1060 L3b)."""
+    try:
+        import cli_model_backend
+        return cli_model_backend.load_marker()
+    except Exception:
+        return None
+
+
+def _impl_window_create_snippet(marker):
+    """#1060 L3b: the POSIX-sh create-if-missing snippet for the marker box's
+    persistent ``impl`` window, rendered INTO the session-created run-shell body
+    (so `$S` is the created session). Shell-time RE-checks the marker file (a
+    session created after the marker is removed never re-creates impl), DEDUPs by
+    window name (the ``-g`` hook also fires on the attach block's ``new-session
+    -d``, and the watchdog relaunch is a third creator — all three converge on
+    one impl window), opens in the marker's cwd baked LITERALLY at render time
+    (no shell-time parse -> no single quote, so the outer run-shell single-quote
+    wrapping holds), and keeps the pane visible on a launcher refusal. The inner
+    ``##{window_name}`` is DOUBLED (matches ``_managed_windows_create_body``) so
+    the outer run-shell format-expansion hands the inner ``list-windows`` a
+    literal ``#{window_name}``."""
+    from cli_claude_scripts import CLAUDE_IMPL_LAUNCH_SCRIPT_DEST
+    launcher = '"$HOME/.claude/%s"' % CLAUDE_IMPL_LAUNCH_SCRIPT_DEST.name
+    marker_file = '"$HOME/.claude/airuleset-model-backend.json"'
+    cwd = (marker.get("cwd") or "").strip() if isinstance(marker, dict) else ""
+    # cwd is already validated shell-safe by cli_model_backend._MARKER_UNSAFE_RE;
+    # defense-in-depth at the shell boundary — bake it only when it passes the
+    # stricter token check (same predicate _managed_windows_create_body uses).
+    cwd_clause = ""
+    if cwd and _SHELL_TOKEN_SAFE_RE.match(cwd):
+        cwd_clause = '-c "%s" ' % cwd
+    return (
+        'if [ -f %s ] && ! tmux list-windows -t "$S" -F "##{window_name}" | '
+        'grep -Fxq impl; then '
+        'tmux new-window -d -t "$S" -n impl %s%s; '
+        'tmux set-window-option -t "$S:impl" remain-on-exit on 2>/dev/null || '
+        'true; fi'
+        % (marker_file, cwd_clause, launcher))
+
+
+def _session_created_hook_value(name, windows, marker=_HOOK_MARKER_UNSET):
     """#998: the RAW ``session-created`` hook command tmux stores — the SINGLE
     source consumed by BOTH the ~/.tmux.conf line (``_render_session_created_
     hook_line``, which wraps + escapes it for the conf's double-quoted value)
@@ -1208,21 +1255,33 @@ def _session_created_hook_value(name, windows):
     carried the extended create-if-missing hook, so a re-created ``zbynek``
     session before a reboot would not create ``gk-infra``).
 
-    Undeclared / ≤1 declared window -> exactly today's ``rename-window <name>``
-    (byte-identical). A box with NON-primary declared windows (gk) extends the
-    SAME hook: rename window 0 FIRST (today's behaviour — a run-shell exec
-    failure can never affect it), THEN a single ``run-shell`` of the reusable
-    create-if-missing snippet, combined via tmux's core ``;`` command separator
-    (no ``-ga`` dependency). The run-shell arg is single-quoted; ``#{session_
-    name}`` binds the created session at fire time (kept a single ``#`` so
-    run-shell expands it), while the snippet's inner ``##{...}`` formats survive
-    to the inner ``list-windows``. The value carries UNescaped double-quotes —
-    the conf wrapper escapes them for its own double-quoted context; the live
-    argv path stores them as-is (tmux stores the argv verbatim)."""
+    Undeclared / ≤1 declared window on a NON-marker box -> exactly today's
+    ``rename-window <name>`` (byte-identical). A box with NON-primary declared
+    windows (gk) extends the SAME hook: rename window 0 FIRST (today's behaviour
+    — a run-shell exec failure can never affect it), THEN a single ``run-shell``
+    of the reusable create-if-missing snippet, combined via tmux's core ``;``
+    command separator (no ``-ga`` dependency).
+
+    #1060 L3b: on a model-backend MARKER box (`marker` present) the SAME
+    run-shell ALSO creates the persistent ``impl`` window — the webterm-only
+    boxes (miva1) create their session via the ForceCommand ``exec tmux
+    new-session -A -s``, NOT the bashrc attach block, so this hook is the only
+    session-creation point that fires there. `marker` defaults to the box's own
+    marker (`_hook_marker()`); a non-marker box stays byte-identical.
+
+    The run-shell arg is single-quoted; ``#{session_name}`` binds the created
+    session at fire time (kept a single ``#`` so run-shell expands it), while the
+    snippet's inner ``##{...}`` formats survive to the inner ``list-windows``.
+    The value carries UNescaped double-quotes — the conf wrapper escapes them for
+    its own double-quoted context; the live argv path stores them as-is."""
+    if marker is _HOOK_MARKER_UNSET:
+        marker = _hook_marker()
     body = _managed_windows_create_body(windows)
-    if not body:
+    impl = _impl_window_create_snippet(marker) if marker else ""
+    combined = "; ".join(x for x in (body, impl) if x)
+    if not combined:
         return "rename-window %s" % name
-    return "rename-window %s ; run-shell 'S=#{session_name}; %s'" % (name, body)
+    return "rename-window %s ; run-shell 'S=#{session_name}; %s'" % (name, combined)
 
 
 def _render_session_created_hook_line(name, windows):

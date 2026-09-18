@@ -1,15 +1,17 @@
 """gates.designbypost -- the `Design-by: main` anti-spoof block (#1061 item 1).
 Entry for hooks/block-design-by-spoof.sh.
 
-A lane WORKER must not pass off its own design as the Fable main's. The truthful
+A lane AUTHOR (a dispatched WORKER, or the #1060 L3b dual-agent IMPLEMENTER
+session) must not pass off its own design as the Fable main's. The truthful
 stamp is written by `airuleset.py design-record` (which reads the model from the
 session's OWN transcript and, from a worktree cwd, stamps `Design-by: worker`).
 This gate BLOCKS a RAW `gh issue comment` whose body carries `Design-by: main`
-when the cwd is a lane worktree -- the exact spoof the dispatch precondition
+when the author is a lane worker (worktree cwd) OR the implementer
+(`AIRULESET_ROLE=implementer`) -- the exact spoof the dispatch precondition
 (gates.designdispatch, which trusts a `Design-by: main` comment) must not be
-fooled by. FAIL-CLOSED for the spoof (a worker cwd + `Design-by: main` -> block);
-everything else (a non-comment command, a main cwd, a `Design-by: worker`
-comment, design-record's own stdin post) is ALLOWED. Bypass:
+fooled by. FAIL-CLOSED for the spoof (a lane author + `Design-by: main` ->
+block); everything else (a non-comment command, a main cwd, a `Design-by:
+worker` comment, design-record's own stdin post) is ALLOWED. Bypass:
 `# airuleset:design-by-ok <reason>` in the command (logged to
 ~/.claude/design-by-gate.log).
 
@@ -61,12 +63,21 @@ def _log(kind, cwd, extra=""):
 
 
 def _is_lane_worker(cwd):
+    # "lane author" = ANY non-main author who must not pass a design off as the
+    # Fable main's: a dispatched WORKER (worktree cwd) OR the #1060 L3b dual-agent
+    # IMPLEMENTER session (AIRULESET_ROLE=implementer, set by the claude-impl
+    # launcher). authorship_role() returns "implementer" for the latter, so the
+    # gate must block BOTH (keying on `== "worker"` alone let an implementer spoof
+    # `Design-by: main` straight through — the L3b review 🔴).
     try:
         import cli_authorship
-        return cli_authorship.authorship_role(cwd) == "worker"
+        return cli_authorship.authorship_role(cwd) in ("worker", "implementer")
     except Exception:
-        # cli_authorship unavailable -> fall back to the same substring predicate.
-        return "/.claude/worktrees/" in ((cwd or "").rstrip("/") + "/")
+        # cli_authorship unavailable -> fall back to the same substring predicate
+        # PLUS the env role (the implementer works in a worktree, so the path
+        # check usually catches it too, but the env is the authoritative signal).
+        return ("/.claude/worktrees/" in ((cwd or "").rstrip("/") + "/")
+                or os.environ.get("AIRULESET_ROLE") == "implementer")
 
 
 def _body_texts(cmd, cwd):
@@ -98,23 +109,27 @@ def evaluate(cmd, cwd):
         return "allow", "not a lane worktree cwd (main may stamp Design-by: main)"
     for text in _body_texts(cmd, cwd):
         if _DESIGN_BY_MAIN_RE.search(text):
-            return "block", "a lane worker's comment post carries `Design-by: main`"
-    return "allow", "no Design-by: main in a worker comment"
+            return "block", ("a lane author (worker/implementer) comment post "
+                             "carries `Design-by: main`")
+    return "allow", "no Design-by: main in a lane-author comment"
 
 
 def _block_message():
     return (
-        "BLOCKED: a lane WORKER may not post `Design-by: main` (#1061).\n"
+        "BLOCKED: a lane author (worker/implementer) may not post "
+        "`Design-by: main` (#1061 / #1060 L3b).\n"
         "\n"
         "  The truthful authorship stamp is written by the MAIN session via\n"
         "  `airuleset.py design-record` (it reads the model from the session's\n"
         "  OWN transcript; from a worktree it stamps `Design-by: worker`). A\n"
-        "  worker hand-typing `Design-by: main` is exactly the spoof the dispatch\n"
-        "  precondition must not trust.\n"
+        "  worker OR the dual-agent implementer session hand-typing\n"
+        "  `Design-by: main` is exactly the spoof the dispatch precondition\n"
+        "  (gates.designdispatch, which trusts a `Design-by: main` comment) must\n"
+        "  not be fooled by.\n"
         "\n"
         "  - If you ARE the main: run design-record from the main checkout, not a\n"
         "    worktree.\n"
-        "  - If you are the worker: post your `Anchors-confirmed:` /\n"
+        "  - If you are the worker/implementer: post your `Anchors-confirmed:` /\n"
         "    `Design-question:` comment WITHOUT a `Design-by: main` line.\n"
         "\n"
         "  Bypass (rare, logged): add `# airuleset:design-by-ok <reason>` to the\n"

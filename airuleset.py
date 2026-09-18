@@ -10500,7 +10500,10 @@ def cmd_goal_inventory(args):
         # carries the byte-identical registry clause, so an UNARMED session's
         # body can never disagree with the armed sequential /goal line.
         seq_errs = gr.skill_sequential_drift(skill_text)
-        if d or variant_errs or seq_errs:
+        # #1060 L3b — lock the SKILL BODY's DUAL dispatch clause (SendMessage to
+        # the implementer window; ticket-poll fallback), same discipline.
+        dual_errs = gr.skill_dual_drift(skill_text)
+        if d or variant_errs or seq_errs or dual_errs:
             if d:
                 print("goal-inventory: DRIFT — SKILL.md /goal lines differ from "
                       "the registry (run: airuleset.py goal-inventory --write):")
@@ -10513,6 +10516,10 @@ def cmd_goal_inventory(args):
             if seq_errs:
                 print("goal-inventory: SEQUENTIAL skill-body check failed (#1035):")
                 for e in seq_errs:
+                    print("  %s" % e)
+            if dual_errs:
+                print("goal-inventory: DUAL skill-body check failed (#1060 L3b):")
+                for e in dual_errs:
                     print("  %s" % e)
             sys.exit(1)
         print("goal-inventory: SKILL.md matches the registry (%d profiles) + "

@@ -72,9 +72,19 @@ class TestAgentNames(TestCase):
                          ["autopilot-worker", "ticket-validator"])
 
     def test_agent_files_on_disk_match(self):
+        # agents/ holds the dispatchable subagent definitions (AGENT_NAMES,
+        # symlinked into ~/.claude/agents/) PLUS one NON-dispatchable file:
+        # implementer.md is a SESSION `--append-system-prompt-file` template
+        # (#1060 L3b), rendered to ~/.claude/airuleset-implementer.md by install,
+        # NEVER symlinked into agents/ and deliberately NOT in AGENT_NAMES. So
+        # the dispatchable set (on_disk minus the known templates) must equal
+        # AGENT_NAMES, and each template must really exist on disk.
+        import cli_claude_scripts
         adir = os.path.join(REPO, "agents")
         on_disk = {f[:-3] for f in os.listdir(adir) if f.endswith(".md")}
-        self.assertEqual(on_disk, set(airuleset.AGENT_NAMES))
+        templates = {cli_claude_scripts.CLAUDE_IMPLEMENTER_PROMPT_SRC.stem}
+        self.assertEqual(on_disk - templates, set(airuleset.AGENT_NAMES))
+        self.assertTrue(templates <= on_disk)
 
 
 class TestSubagentModelDefault(TestCase):

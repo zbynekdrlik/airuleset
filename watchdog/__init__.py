@@ -750,6 +750,7 @@ from watchdog.tmux_io import (  # noqa: E402
     _keystroke_suppressed as _keystroke_suppressed,
     keys as keys,
     relaunch_pane as relaunch_pane,                       # #1075 credential-dead
+    impl_window_presence as impl_window_presence,         # #1060 L3b dual-agent
     send_continue as send_continue,
     send_verified as send_verified,
     submit_own_draft_verified as submit_own_draft_verified,
@@ -2519,6 +2520,19 @@ def sweep_urgent(state, pane_stamps, stored_stamps, *, compact_pending=False):
     return ""
 
 
+def _impl_marker():
+    """#1060 L3b item 8 — THIS box's model-backend marker dict (or None), read
+    once per sweep for the dual-agent impl-window presence check. A non-marker
+    box (the overwhelming majority) gets None here — a cheap file read, no tmux
+    call. Never raises (`load_marker` returns None on any read/parse error).
+    A module-level seam so run_once tests can force a marker without a file."""
+    try:
+        from cli_model_backend import load_marker
+        return load_marker()
+    except Exception:
+        return None
+
+
 def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              projects_dir=PROJECTS_DIR, state_path=STATE_PATH,
              grace=GRACE_SECONDS, interval=RETRY_INTERVAL_SECONDS,
@@ -3541,6 +3555,13 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # characterization suite pins "pane loop runs before EVERY standalone job,
     # list_claude_panes never fires twice" (test_run_once_characterization.py).
     panes = list(list_claude_panes(run, dry_run=dry_run))
+    # #1060 L3b item 8 — dual-agent IMPLEMENTER window presence, marker-gated,
+    # folded into the sweep body (NOT a new numbered job). See
+    # `impl_window_presence` / `_impl_marker` for the full rationale; a non-marker
+    # box is a single cheap file read (None) with no tmux call.
+    _impl_mk = _impl_marker()
+    if _impl_mk:
+        impl_window_presence(_impl_mk, run=run, logs=logs, dry_run=dry_run)
     for pid, cwd in panes:
         live_pane_ids.add(pid)
         tinfo = find_active_transcript(projects_dir, cwd)

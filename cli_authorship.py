@@ -25,7 +25,20 @@ UNKNOWN_MODEL = "unknown"
 
 
 def authorship_role(cwd):
-    """"worker" iff `cwd` is inside an isolated lane worktree, else "main".
+    """"implementer" iff this process is the dual-agent implementer window
+    (`AIRULESET_ROLE=implementer`, set by the managed `claude-impl` launcher);
+    else "worker" iff `cwd` is inside an isolated lane worktree, else "main".
+
+    #1060 L3b: the implementer runs its OWN Claude Code SESSION on the gateway
+    backend (window 1 `impl`), NOT a dispatched subagent, and its work lands in
+    a worktree — so the worktree test would otherwise stamp it "worker". The
+    env role is checked FIRST so an implementer session stamps
+    `Implemented-by: implementer <alias>` truthfully; the design-by gate keeps
+    demanding the Fable id from `main`, so an implementer that mistakenly posted
+    a `Design-by:` line stamps role `implementer` (!= main) and is refused.
+    The env is set by the MANAGED launcher (never a self-declared string a
+    weaker model types), and `Implemented-by:` is not the design-gate anti-spoof
+    surface (that only trusts `Design-by: main`), so keying on it is safe.
 
     Uses the raw cwd string AND its realpath (a symlinked worktree still
     resolves under `.claude/worktrees/`), matching the substring predicate the
@@ -33,6 +46,8 @@ def authorship_role(cwd):
     degenerate payload -- defaults to "main" (the safe direction: a raw comment
     that then carries `Design-by: main` from a genuine lane is caught by
     `gates.designbypost`; the dispatch gate is the real authority)."""
+    if os.environ.get("AIRULESET_ROLE") == "implementer":
+        return "implementer"
     if not cwd:
         return "main"
     raw = str(cwd)
@@ -111,7 +126,20 @@ def session_model(cwd, projects_dir=None, home=None):
     served model"): the fix-forward for the deploy defect where a busy main
     turn's 60-entry tail (all tool-result entries) or an api-error tail made the
     float reader return `''` -> `unknown` -> a refused legitimate design (#1061,
-    'Live defect after deploy'). The float reader keeps its own callers untouched."""
+    'Live defect after deploy'). The float reader keeps its own callers untouched.
+
+    #1060 L3b: for the dual-agent IMPLEMENTER window (`AIRULESET_ROLE=
+    implementer`), the model is the gateway ALIAS the managed launcher exported
+    as `ANTHROPIC_MODEL` (== the marker's `main`, e.g. `impl-main`), NOT the
+    transcript's resolved backend model — the alias stamps LITERALLY, mirroring
+    `statusbar.account_email_segment`'s `impl:<alias>` render. The launcher sets
+    the env (never a self-declared string), and the implementer stamp is not a
+    design-gate anti-spoof surface, so keying on it is safe. Falls through to the
+    transcript reader only when the env alias is unset (a bare `claude-impl`)."""
+    if os.environ.get("AIRULESET_ROLE") == "implementer":
+        alias = (os.environ.get("ANTHROPIC_MODEL") or "").strip()
+        if alias:
+            return alias
     try:
         from watchdog.transcripts import (find_active_transcript,
                                           transcript_newest_assistant_model)
