@@ -314,6 +314,7 @@ from watchdog.decide import (  # noqa: E402
     is_account_dispatch_block as is_account_dispatch_block,
     is_oauth_revoked as is_oauth_revoked,
     credential_state as credential_state,               # #1075
+    authdead_is_historical as authdead_is_historical,    # #1075 fix-forward
     AUTH_STALE_OWNER_S as AUTH_STALE_OWNER_S,            # #1075
     _SESSION_LIMIT_RX as _SESSION_LIMIT_RX,
     _RESET_TIME_RX as _RESET_TIME_RX,
@@ -635,6 +636,7 @@ from watchdog.transcripts import (  # noqa: E402
     _entry_text as _entry_text,
     transcript_last_error as transcript_last_error,
     transcript_first_error_ts as transcript_first_error_ts,      # #1075
+    transcript_last_error_ts as transcript_last_error_ts,        # #1075 fix-forward
     _submit_confirmed as _submit_confirmed,
     count_live_workers as count_live_workers,   # #486 G2 -> consumed by G3
     lane_has_live_evidence as lane_has_live_evidence,   # #571 -> lane working-no-tasks
@@ -2572,7 +2574,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              infra_queue_fetch=None, resolve_role_fn=None,
              health_probes=None, health_probe_fetch=None,
              task_hygiene_enabled=False, gh_rate_fetch=None,
-             bounceflip_fetch=None, cred_mtime_fn=None):
+             bounceflip_fetch=None, cred_mtime_fn=None, proc_start_fn=None):
     """Scan every `claude` pane once. 50 numbered jobs per poll — 44 LIVE and 6
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
     numbers are kept addressable so historical log lines and code comments
@@ -2627,7 +2629,14 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           the recent-human veto + the bare-shell (stopped-session) check + a
           once-per-episode latch, the destructive keystroke opt-in behind
           `AIRULESET_AUTHDEAD_ACTION` (default OFF, journalled when off — the #947
-          / resurrect.py precedent);
+          / resurrect.py precedent). #1075 fix-forward: BEFORE that episode a
+          HISTORICAL-401 guard (`authdead_is_historical` vs the running process's
+          start epoch, `proc_start_fn` → `_pane_claude_start_epoch`) intercepts a
+          401 that PREDATES the running process — a session restarted after an
+          OAuth rotation whose transcript still ends in the old 401: journal
+          `auth: 401 record … predates the running process … historical, no
+          action`, drop the episode state, `continue` (no phantom `oauth-resume`
+          into the owner's brand-new session);
       (2) a session WAITING ON THE USER (AskUserQuestion / permission dialog) →
           PING ONLY, never act (a design decision needs the human);
       (3) (only when `usage_fetch` is given) a rate-limited WEEKLY-TOKEN-USAGE poll
@@ -3467,6 +3476,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     run = run or _default_run
     time_fn = time_fn or time.monotonic
     cred_mtime_fn = cred_mtime_fn or _default_cred_mtime   # #1075 credential-dead
+    # #1075 fix-forward: the running claude process's start epoch, from the PANE
+    # id we hold (`pid` in the pane loop IS a tmux pane id, not an OS pid) via
+    # the /proc<stat>+btime helper. Injected like cred_mtime_fn; fail-safe None.
+    proc_start_fn = proc_start_fn or _pane_claude_start_epoch
     if sweep_budget_s is None:
         try:
             sweep_budget_s = int(os.environ.get("AIRULESET_SWEEP_BUDGET_S",
@@ -4042,6 +4055,41 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                     first_401_seed = transcript_first_error_ts(tpath)
                     if first_401_seed is None:
                         first_401_seed = int(now - idle)
+                    # #1075 fix-forward: a HISTORICAL 401 — one produced by a
+                    # process that has SINCE been restarted (owner restart /
+                    # watchdog relaunch / webterm re-create) — must NEVER reach
+                    # the credential-dead handler: the fresh process read a valid
+                    # token at launch, but the transcript still ENDS in the old
+                    # 401 (no successful turn yet), so the FRESH branch would type
+                    # a phantom `oauth-resume … continue` into the owner's
+                    # brand-new session (miva1 2026-09-18 19:44/19:58). The
+                    # restart IS the fix. Compare the 401 time with the RUNNING
+                    # process's start epoch; when the 401 predates the process it
+                    # is historical → journal one decision line, drop any episode
+                    # state, `continue` (no nudge, no badge, no ping). A genuine
+                    # episode (process start <= first 401) is byte-identical.
+                    #
+                    # Anchor the predicate on the LATEST 401 in the trailing run,
+                    # NOT `first_401_seed` (the earliest): a session RESTARTED but
+                    # still revoked merges its OLD + NEW 401s into ONE contiguous
+                    # run (a resume nudge is a plain `user` turn that does not end
+                    # it), so the earliest-401 anchor would mask the genuinely
+                    # dead new process forever (#1075 fix-forward review A#-c). The
+                    # EPISODE seed stays `first_401_seed` (the rotation time).
+                    last_401 = transcript_last_error_ts(tpath)
+                    if last_401 is None:
+                        last_401 = first_401_seed
+                    proc_start = proc_start_fn(pid, run)
+                    if authdead_is_historical(last_401, proc_start):
+                        logs.append(
+                            "auth: 401 record (%s) predates the running process "
+                            "(started %s) — historical, no action [%s]"
+                            % (time.strftime("%H:%M", time.localtime(first_401_seed)),
+                               time.strftime("%H:%M", time.localtime(proc_start)),
+                               project or key))
+                        if not dry_run:
+                            state.pop("apierr-authdead:" + key, None)
+                        continue
                     _handle_authdead_episode(
                         state, key, cred_mtime_fn, now, idle, project, pid, cwd,
                         tpath, captured, draft_pending, run, send_fn, owner,

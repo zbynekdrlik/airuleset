@@ -293,6 +293,34 @@ def credential_state(first_401_ts, cred_mtime, now):
     return "fresh" if cred_mtime > first_401_ts else "stale"
 
 
+def authdead_is_historical(first_401_ts, proc_start_ts):
+    """PURE (#1075 fix-forward): did the running Claude process START AFTER the
+    session's first 401? A revoked-token 401 is dead-in-process ONLY for the
+    process that RECEIVED it; a process started LATER read
+    ~/.claude/.credentials.json at launch and holds whatever token was on disk
+    then — the restart IS the fix job 1's credential-dead branch tries to
+    provoke. But after a restart the transcript still ENDS in the old 401 until
+    the first new turn (no successful reply yet), so the credential-dead FRESH
+    branch would re-fire and type a phantom `oauth-resume … continue` into the
+    owner's brand-new session (miva1 2026-09-18 19:44/19:58). This predicate
+    lets job 1 skip the episode for exactly that historical case.
+
+    True  → `proc_start_ts` is STRICTLY after `first_401_ts` (the 401 predates
+            this process → historical → job 1 takes no action).
+    False → `proc_start_ts <= first_401_ts` (the process was already running when
+            the 401 arrived → a GENUINE episode → today's credential-dead
+            behaviour is unchanged), OR either input is missing / unreadable /
+            non-numeric — FAIL-SAFE to today's behaviour (never SKIP the episode
+            on an unprovable process start; a None proc start = an unreadable
+            /proc = treated as not-historical). Never raises. `bool` is rejected
+            (an int subclass must never be read as an epoch)."""
+    if not isinstance(first_401_ts, (int, float)) or isinstance(first_401_ts, bool):
+        return False
+    if not isinstance(proc_start_ts, (int, float)) or isinstance(proc_start_ts, bool):
+        return False
+    return proc_start_ts > first_401_ts
+
+
 # --- 5-HOUR SESSION LIMIT (a distinct, TIME-BASED cap) --------------------------
 # Claude Code's session-limit banner shows in the PANE, e.g.
 #   "You've hit your session limit · resets 6:10pm (Europe/Prague)"
