@@ -4,9 +4,9 @@ The pilot (owner decision 2026-09-17, issue 1062) keeps Claude Code as the agent
 CLI but points ONE box's backend at an Anthropic-compatible gateway instead of
 Anthropic, so the model can be switched per test (e.g. DeepSeek 4.1 via
 OpenRouter). This leaf is the GATEWAY half (Lane L1) — a LiteLLM proxy service on
-the controller that maps tier ALIASES (`pilot-main`/`pilot-sub`/`pilot-fast`) to
+the controller that maps tier ALIASES (`impl-main`/`impl-sub`/`impl-fast`) to
 any provider model, so the owner flips the model by editing one central alias map
-(or `airuleset.py model-gateway set pilot-main openrouter/deepseek/...`) with no
+(or `airuleset.py model-gateway set impl-main openrouter/deepseek/...`) with no
 box visit. The per-box backend switch (Lane L2) is a later lane.
 
 Design: issue 1062, `Design-by: main claude-fable-5-1` comment (items 1–4).
@@ -109,15 +109,17 @@ def _yaml_str(s):
 
 
 def default_alias_map():
-    """The design's default (issue 1062): three pilot tiers on OpenRouter's
-    DeepSeek 4.1 Flash, one configured provider. `set` seeds from this when no
-    map exists yet, so a fresh controller gets a complete 3-tier map."""
+    """The design's default (#1060 L3a, re-scopes #1062): three IMPLEMENTER tiers
+    on OpenRouter's DeepSeek 4.1 Flash, one configured provider. `set` seeds from
+    this when no map exists yet, so a fresh controller gets a complete 3-tier
+    map. The aliases (`impl-main`/`impl-sub`/`impl-fast`) match
+    cli_model_backend.DEFAULT_MAIN/SUB/FAST."""
     target = "openrouter/deepseek/deepseek-v4.1-flash"
     return {
         "aliases": {
-            "pilot-main": target,
-            "pilot-sub": target,
-            "pilot-fast": target,
+            "impl-main": target,
+            "impl-sub": target,
+            "impl-fast": target,
         },
         "providers": {
             "openrouter": {"key_file": _conventional_key_file("openrouter")},
@@ -650,7 +652,7 @@ def _enable_service(restart=True):
 
 def _health_check(host_ip, deep=True):
     """Liveliness probe (GET /health/liveliness), always; plus one `/v1/messages`
-    echo through `pilot-fast` when `deep` (a paid upstream call — only run it
+    echo through `impl-fast` when `deep` (a paid upstream call — only run it
     when the config changed or the service was down). LOUD on failure.
     docs.litellm.ai/docs/proxy/health + /docs/anthropic_unified. The 120 s
     liveliness budget is an INITIAL sizing for litellm's cold start on the
@@ -683,11 +685,11 @@ def _health_check(host_ip, deep=True):
               "/v1/messages echo")
         return True
     if not _probe_messages(base):
-        print("  model-gateway: the /v1/messages echo through pilot-fast did "
+        print("  model-gateway: the /v1/messages echo through impl-fast did "
               "NOT succeed — the model is up but a request failed; check the "
               "key + the alias target", file=sys.stderr)
         return False
-    print("  model-gateway: /v1/messages echo through pilot-fast OK")
+    print("  model-gateway: /v1/messages echo through impl-fast OK")
     return True
 
 
@@ -700,7 +702,7 @@ def _probe_messages(base):
               file=sys.stderr)
         return False
     body = json.dumps({
-        "model": "pilot-fast",
+        "model": "impl-fast",
         "max_tokens": 8,
         "messages": [{"role": "user", "content": "reply OK"}],
     }).encode("utf-8")

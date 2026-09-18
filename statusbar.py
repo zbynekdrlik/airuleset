@@ -955,17 +955,25 @@ def account_email_segment(home=None):
     info, not shouting" intent while staying legible. Fails SILENTLY on any
     missing/malformed input."""
     try:
-        # #1062 L2: a box flipped onto the model gateway has no meaningful OAuth
-        # email (it authenticates with a token), and the ACTIONABLE identity is
-        # WHICH model it is piloting — show `gw:<main alias>` instead. Off a
-        # marker box this is a no-op and the OAuth email renders as before.
-        try:
-            from cli_model_backend import load_marker
-            mb = load_marker(home=home)
-        except Exception:
-            mb = None
-        if mb:
-            return "\033[38;5;250mgw:%s\033[0m" % mb["main"]
+        # #1060 L3a: the IMPLEMENTER window (started by the claude-impl launcher,
+        # AIRULESET_ROLE=implementer) authenticates to the gateway with a token,
+        # so its OAuth email is meaningless — the ACTIONABLE identity is WHICH
+        # model it is piloting: show `impl:<main alias>` instead. Every OTHER
+        # window (the main window 0, no role) shows the OAuth email as before —
+        # the marker alone never changes the render (the main window stays OAuth
+        # even on a marker box). The alias is the marker's `main`, falling back to
+        # the ANTHROPIC_MODEL the launcher exported.
+        if os.environ.get("AIRULESET_ROLE") == "implementer":
+            alias = ""
+            try:
+                from cli_model_backend import load_marker
+                mb = load_marker(home=home)
+                alias = mb["main"] if mb else ""
+            except Exception:
+                alias = ""
+            if not alias:
+                alias = os.environ.get("ANTHROPIC_MODEL") or "?"
+            return "\033[38;5;250mimpl:%s\033[0m" % alias
         d = _claude_json(home)
         if not isinstance(d, dict):
             return ""

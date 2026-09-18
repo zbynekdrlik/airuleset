@@ -1752,17 +1752,6 @@ def cmd_install(args):
     except Exception as e:
         print(f"  model-gateway install error (non-fatal): {e}", file=sys.stderr)
 
-    # --- 3b-quinque-quater-pre1b. Per-box model backend (#1062 L2): when THIS
-    # box carries the model-backend marker, materialize the managed apiKeyHelper
-    # script (0755) that prints the gateway key file; when it does not, remove a
-    # stale one (self-heal of a cleared box). A LOUD one-liner either way;
-    # non-fatal. The settings.json env + model + apiKeyHelper reference are
-    # written by apply_managed_settings_defaults (marker-conditional). ---
-    try:
-        print(maybe_setup_model_backend())
-    except Exception as e:
-        print(f"  model-backend install error (non-fatal): {e}", file=sys.stderr)
-
     # --- 3b-quinque-quater. Managed swap (#992/#993): every managed box with
     # NO swap gets a /swapfile sized = RAM (clamped [2,8] GB). Idempotent,
     # sudo-`-n`-gated, LOCAL, non-fatal — the #992 controller-OOM fix as a
@@ -4859,8 +4848,6 @@ def cmd_handoff(args):
         return 1
     canonical_srm = _canonical_self_review_model(self_review_model)
     if canonical_srm is None:
-        canonical_srm = _pilot_alias_self_review_model(self_review_model)
-    if canonical_srm is None:
         allowed = ", ".join(sorted(MODEL_TIERS.values()))
         print("handoff BLOCK: --self-review-model %r is not an allowed exact "
               "model id — use one of: %s" % (self_review_model, allowed))
@@ -5064,29 +5051,6 @@ def _canonical_self_review_model(value):
     for canonical in MODEL_TIERS.values():
         if _normalize_model(canonical) == norm:
             return canonical
-    return None
-
-
-def _pilot_alias_self_review_model(value):
-    """#1062 L2 (review B-MAJOR2): on a box flipped onto the model gateway, the
-    self-review was performed by the pilot ALIAS (pilot-main/sub/fast — not a
-    MODEL_TIERS id), so `_canonical_self_review_model` returns None and the
-    `handoff` gate would block a flipped reduced-authority stream (miva1 is
-    branch-merge → it runs `cmd_handoff`). Accept `value` as the truthful
-    Self-review-model ONLY when THIS box carries the marker AND `value` matches a
-    configured alias — the SAME tolerance gates/designdispatch applies to the
-    design model. Off a marker box (no marker) this is None, so every other box
-    still requires an exact MODEL_TIERS id. Never raises."""
-    v = (value or "").strip()
-    if not v:
-        return None
-    try:
-        import cli_model_backend as _mb
-        marker = _mb.load_marker()
-    except Exception:
-        marker = None
-    if marker and v in (marker.get("main"), marker.get("sub"), marker.get("fast")):
-        return v
     return None
 
 
@@ -9218,9 +9182,8 @@ from cli_model_gateway import (  # noqa: E402, F401
     cmd_model_gateway as cmd_model_gateway,
     maybe_setup_model_gateway as maybe_setup_model_gateway,
 )
-from cli_model_backend import (  # noqa: E402, F401  #1062 L2
+from cli_model_backend import (  # noqa: E402, F401  #1060 L3a (re-scopes #1062 L2)
     cmd_model_backend as cmd_model_backend,
-    maybe_setup_model_backend as maybe_setup_model_backend,
 )
 
 # --- #857: context-baseline + skill-usage CLI leaves ---
@@ -10351,7 +10314,7 @@ def main():
                            "alias at a model; spend = $ per alias per day")
     p_mg.add_argument("mg_args", nargs="*",
                       help="for `set`: the <alias> and the <provider/model> "
-                           "target (e.g. pilot-main openrouter/deepseek/"
+                           "target (e.g. impl-main openrouter/deepseek/"
                            "deepseek-v4.1-flash)")
     p_mg.add_argument("--since", default=None,
                       help="`spend`: ISO8601 lower bound (e.g. 2026-09-01)")
@@ -10359,7 +10322,7 @@ def main():
     # --- #1062 L2: per-box model-backend switch (controller-side registry) ---
     p_mb = sub.add_parser(
         "model-backend",
-        help="#1062 L2: flip a box's Claude Code onto the controller model "
+        help="#1060 L3a: register a box's IMPLEMENTER window on the controller model "
              "gateway — status | set <user@host> [--main A --sub B --fast C "
              "--base-url URL --key-file PATH] | clear <user@host>. `set`/`clear` "
              "maintain the controller registry; the NEXT push ships/removes the "
@@ -10372,17 +10335,21 @@ def main():
     p_mb.add_argument("mb_args", nargs="*",
                       help="for set/clear: the <user@host> target (e.g. miva1@subdev)")
     p_mb.add_argument("--main", default=None,
-                      help="set: the main-tier alias (default pilot-main)")
+                      help="set: the main-tier alias (default impl-main)")
     p_mb.add_argument("--sub", default=None,
-                      help="set: the sub/subagent-tier alias (default pilot-sub)")
+                      help="set: the sub/subagent-tier alias (default impl-sub)")
     p_mb.add_argument("--fast", default=None,
-                      help="set: the fast/haiku-tier alias (default pilot-fast)")
+                      help="set: the fast/haiku-tier alias (default impl-fast)")
     p_mb.add_argument("--base-url", dest="base_url", default=None,
                       help="set: the gateway base URL (default the controller "
                            "tailscale gateway)")
     p_mb.add_argument("--key-file", dest="key_file", default=None,
                       help="set: the on-target token file (default "
                            "~/.secrets/model-gateway.key)")
+    p_mb.add_argument("--cwd", dest="cwd", default=None,
+                      help="set: REQUIRED — the implementer window's PROJECT dir "
+                           "on the target (absolute, e.g. "
+                           "/home/miva1/devel/odoo/odoo-erp)")
     p_mb.add_argument("--registry-only", dest="registry_only",
                       action="store_true",
                       help="clear: only drop the registry entry; do NOT ssh a "

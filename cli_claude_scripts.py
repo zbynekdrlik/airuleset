@@ -67,6 +67,11 @@ CLAUDE_DIR = Path.home() / ".claude"
 # relaunch, no restart. Same shape as the caveman stable statusline shim
 # (render_caveman_shim() below) -- read that first before changing this.
 CLAUDE_LAUNCH_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-launch.sh"
+# #1060 L3a: the IMPLEMENTER-window launcher. A SEPARATE script (not a mode of the
+# main launcher) so its gateway-backend env is scoped to its OWN process and can
+# never touch the main window. tmux window 1 `impl` runs it by absolute path; a
+# `claude-impl` bashrc wrapper (cli_bashrc_appliers) runs it for interactive use.
+CLAUDE_IMPL_LAUNCH_SCRIPT_DEST = CLAUDE_DIR / "airuleset-claude-impl.sh"
 # --- the script content itself -----------------------------------------------
 # Ultracode is NO LONGER a managed launch flag (owner directive 2026-08-30 --
 # "Chcel by som este aby sa claude v targetoch nespustali s zapnutym ultracode
@@ -238,18 +243,150 @@ def render_claude_launch_script():
     write site MUST use this, never the raw constant (same discipline as
     render_caveman_shim()).
 
-    #1062 L2: on a box carrying the model-backend marker, the launcher `--model`
-    is the marker's `main` alias (so a manual `claude`/`claude-continue` on the
-    pilot box launches on the gateway's main model, matching settings.json's
-    ANTHROPIC_MODEL). Off a marker box it is airuleset.MANAGED_MODEL, exactly as
-    before (launcher_model falls back to the passed default)."""
+    #1060 L3a: the MAIN launcher `--model` is ALWAYS airuleset.MANAGED_MODEL,
+    even on a model-backend marker box. The #1062 L2 alias flip (the marker's
+    `main`) is REMOVED — settings.json is shared, so the main window must stay
+    Fable + OAuth; the gateway backend lives ONLY in the separate `claude-impl`
+    launcher (render_claude_impl_launch_script), scoped to the implementer
+    window's own process."""
     import airuleset
-    try:
-        import cli_model_backend as _mb
-        model = _mb.launcher_model(airuleset.MANAGED_MODEL)
-    except Exception:
-        model = airuleset.MANAGED_MODEL
-    return CLAUDE_LAUNCH_SCRIPT_CONTENT.replace("{{MANAGED_MODEL}}", model)
+    return CLAUDE_LAUNCH_SCRIPT_CONTENT.replace("{{MANAGED_MODEL}}",
+                                                airuleset.MANAGED_MODEL)
+
+
+# --------------------------------------------------------------------------- #
+# #1060 L3a: the claude-impl launcher — the IMPLEMENTER window.
+# --------------------------------------------------------------------------- #
+# Started as tmux window 1 `impl` on a model-backend MARKER box (and typeable via
+# the `claude-impl` bashrc wrapper). Scopes the controller LiteLLM gateway backend
+# to THIS process only: it reads the marker at SHELL time, exports the backend env
+# for its child, and execs `claude` continue-or-new. The main window 0 is NEVER
+# touched (it keeps MANAGED_MODEL + the OAuth login). Read FRESH from disk on
+# every invocation (a `push` changes it immediately). Refuses LOUDLY (exit 1)
+# without the marker or a readable key. The token (ANTHROPIC_AUTH_TOKEN) is read
+# from the marker's key_file INSIDE the launcher and NEVER printed. No
+# {{...}} substitution — every value is read from the marker at shell time.
+CLAUDE_IMPL_LAUNCH_SCRIPT_CONTENT = r"""#!/usr/bin/env bash
+# airuleset-managed (do NOT edit) — the IMPLEMENTER window launcher (#1060 L3a).
+# Scopes the controller LiteLLM model gateway to THIS process only; the main
+# window stays on the Anthropic OAuth login + Fable. Requires bash >= 4.4.
+set -euo pipefail
+
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac
+# Same managed default as the main launcher (#460): keep a bg-shell waiter alive.
+export CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1
+
+_marker="$HOME/.claude/airuleset-model-backend.json"
+if [ ! -f "$_marker" ]; then
+  echo "claude-impl: no model-backend marker ($_marker) — this box is not an implementer box; refusing to start." >&2
+  exit 1
+fi
+
+# Parse the marker with python3 (guaranteed present on a managed box; jq may not
+# be). shlex.quote on the Python side makes the eval injection-safe; the marker
+# fields are ALSO validated shell-safe at write time (cli_model_backend).
+eval "$(python3 - "$_marker" <<'PY'
+import json, shlex, sys
+try:
+    d = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+if not isinstance(d, dict):
+    sys.exit(0)
+for k in ("base_url", "key_file", "main", "sub", "fast", "cwd"):
+    v = d.get(k)
+    if isinstance(v, str) and v:
+        print("_mb_%s=%s" % (k, shlex.quote(v)))
+PY
+)"
+
+if [ -z "${_mb_base_url:-}" ] || [ -z "${_mb_key_file:-}" ] || \
+   [ -z "${_mb_main:-}" ] || [ -z "${_mb_sub:-}" ] || [ -z "${_mb_fast:-}" ] || \
+   [ -z "${_mb_cwd:-}" ]; then
+  echo "claude-impl: model-backend marker is incomplete or unreadable ($_marker) — refusing to start." >&2
+  exit 1
+fi
+
+# Expand a leading ~ in the key_file path; the token itself is NEVER printed.
+_key_path="${_mb_key_file/#\~/$HOME}"
+if [ ! -r "$_key_path" ]; then
+  echo "claude-impl: gateway key file not readable ($_key_path) — refusing to start." >&2
+  exit 1
+fi
+_token="$(cat "$_key_path")"
+if [ -z "$_token" ]; then
+  echo "claude-impl: gateway key file is empty ($_key_path) — refusing to start." >&2
+  exit 1
+fi
+
+# The implementer runs in the stream's PROJECT dir (the marker's `cwd`), NEVER the
+# shell's inherited cwd — otherwise it would open in the wrong project AND its
+# session transcript would land under the wrong project dir. cd BEFORE computing
+# the session/project path below. Refuse LOUDLY if the dir is gone.
+if [ ! -d "$_mb_cwd" ]; then
+  echo "claude-impl: marker cwd ($_mb_cwd) does not exist — refusing to start." >&2
+  exit 1
+fi
+cd "$_mb_cwd"
+
+# Scope the gateway backend to THIS process ONLY (never settings.json — shared by
+# the main window). Adaptive thinking off (a cheap third-party model 400s on it);
+# a longer timeout (proxy first-byte latency). AIRULESET_ROLE marks the window for
+# the statusline (impl:<alias>) and the L3b authorship stamp.
+export ANTHROPIC_BASE_URL="$_mb_base_url"
+export ANTHROPIC_AUTH_TOKEN="$_token"
+export ANTHROPIC_MODEL="$_mb_main"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$_mb_main"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$_mb_sub"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$_mb_fast"
+export CLAUDE_CODE_SUBAGENT_MODEL="$_mb_sub"
+export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1
+export API_TIMEOUT_MS=900000
+export AIRULESET_ROLE=implementer
+
+# The implementer system prompt (L3b ships the file). Tolerate its absence with a
+# LOUD warning — the launcher still starts (the file is the NEXT lane).
+_impl_prompt="$HOME/.claude/airuleset-implementer.md"
+_extra=()
+if [ -f "$_impl_prompt" ]; then
+  _extra+=(--append-system-prompt-file "$_impl_prompt")
+else
+  echo "claude-impl: WARNING — implementer system prompt $_impl_prompt is missing (L3b not deployed yet); starting without it." >&2
+fi
+
+# The implementer owns its OWN session identity — NEVER `-c`/`--continue`, which
+# resumes the MOST RECENT conversation in this project dir, i.e. the MAIN window's
+# transcript (the main's history + /goal state is never the implementer's). Persist
+# a uuid4 in ~/.claude/airuleset-implementer-session (0600, minted on first start);
+# resume it with `-r <id>` when its transcript already exists under the project
+# dir, else start fresh with `--session-id <id>` (the id later restarts resume).
+_sid_file="$HOME/.claude/airuleset-implementer-session"
+_sid=""
+if [ -f "$_sid_file" ]; then
+  _sid="$(tr -d '[:space:]' < "$_sid_file" 2>/dev/null || true)"
+fi
+case "$_sid" in
+  # a uuid shape (8-4-4-4-12); anything else (empty/truncated/hand-garbled) is re-minted
+  ????????-????-????-????-????????????) ;;
+  *) _sid="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+     ( umask 077; printf '%s\n' "$_sid" > "$_sid_file" ) ;;
+esac
+
+_ccdir="${PWD//\//-}"; _ccdir="${_ccdir//./-}"; _ccdir="${_ccdir//_/-}"
+if [ -f "$HOME/.claude/projects/$_ccdir/$_sid.jsonl" ]; then
+  exec claude --dangerously-skip-permissions -r "$_sid" "${_extra[@]}" "$@"
+else
+  exec claude --dangerously-skip-permissions --session-id "$_sid" "${_extra[@]}" "$@"
+fi
+"""
+
+
+def render_claude_impl_launch_script():
+    """The claude-impl launcher content. The write site MUST use this (same
+    discipline as render_claude_launch_script). No substitution — every backend
+    value is read from the per-box marker at shell time, so ONE rendered script
+    serves every box (it refuses LOUDLY off a marker box)."""
+    return CLAUDE_IMPL_LAUNCH_SCRIPT_CONTENT
 
 
 def encode_project_dir(cwd):
