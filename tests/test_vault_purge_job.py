@@ -352,8 +352,13 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # injectable ~/.claude/.credentials.json mtime reader) was appended
                # after bounceflip_fetch=None on the LAST line; the anchor's last
                # line grew, the mutation target vault_purge=None is untouched.
+               # #1075 fix-forward re-pin: proc_start_fn=None (the historical-401
+               # guard's injectable process-start reader) was appended after
+               # cred_mtime_fn=None on the SAME last line; the anchor grew again,
+               # the mutation target vault_purge=None is still untouched.
                "             task_hygiene_enabled=False, gh_rate_fetch=None,\n"
-               "             bounceflip_fetch=None, cred_mtime_fn=None):")
+               "             bounceflip_fetch=None, cred_mtime_fn=None, "
+               "proc_start_fn=None):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a
