@@ -23,7 +23,7 @@ from gates.filing import render
 from gates.filing.parse import (
     ACK_REACTION_CITE_RE, ALLOWED, AREA_RE, CLIENT_MSG_ORIGIN_RE, CRITERION_RE,
     DEDUP_RE, EXEMPT_FROM_CAP, LOC_NUM_RE,
-    extract_heredocs, flag_value, is_api_issues_post, is_issue_create,
+    extract_heredocs, flag_value, is_issue_create,
     resolve_body, split_top_level, strip_prefix, tokens_of,
     _all_labels, _apply_cd, _chain_parent, _chain_parents, _clean_field,
     _no_field_decoy, _target_repo_for_segment,
@@ -88,24 +88,37 @@ def _api_targets_issues_collection(tk):
     return any(_API_ISSUES_COLLECTION_RE.match(t) for t in tk)
 
 
+def _api_creates_issue(tk):
+    """True when a `gh api` segment is a genuine issue-CREATE: a POST/field
+    write to the `/repos/<o>/<r>/issues` COLLECTION (terminal `issues`).
+    #1070 item 8 -- the SINGLE create-shape predicate SHARED by the worker
+    (#842) hard-block (`_is_worker_filing`) and the attended/main classifier
+    (`classify_command`), so a REST comment POST (`gh api …/issues/<N>/
+    comments`) or a label/edit PATCH (`gh api …/issues/<N>`) is a filing on
+    NEITHER path (the #1080 FP). The graphql `createIssue` mutation carries no
+    `/issues` path token, so it stays a separate `seg`-string check in
+    `_is_worker_filing` (the worker path only)."""
+    return (bool(tk) and tk[0] == "gh" and "api" in tk[:2]
+            and _api_targets_issues_collection(tk) and _api_field_or_post(tk))
+
+
 def _is_worker_filing(cmd):
     """True when `cmd` is a genuine issue-CREATE shape: `gh issue create`, a
     `gh api graphql … createIssue` mutation, or a POST/field write to the
-    `/repos/<o>/<r>/issues` COLLECTION. #1070 item 3: a REST comment POST
-    (`gh api …/issues/<N>/comments`) and a label/edit PATCH (`gh api
-    …/issues/<N>`) return False -- they are not filings. A bare GET read has no
-    field/POST signal and also returns False."""
+    `/repos/<o>/<r>/issues` COLLECTION (`_api_creates_issue`). #1070 item 3: a
+    REST comment POST (`gh api …/issues/<N>/comments`) and a label/edit PATCH
+    (`gh api …/issues/<N>`) return False -- they are not filings. A bare GET
+    read has no field/POST signal and also returns False."""
     for seg in split_top_level(cmd):
         tk = strip_prefix(tokens_of(seg))
         if not tk:
             continue
         if is_issue_create(tk):
             return True
-        if tk[0] == "gh" and "api" in tk[:2]:
-            if "createIssue" in seg:
-                return True
-            if _api_targets_issues_collection(tk) and _api_field_or_post(tk):
-                return True
+        if tk[0] == "gh" and "api" in tk[:2] and "createIssue" in seg:
+            return True
+        if _api_creates_issue(tk):
+            return True
     return False
 
 
@@ -268,7 +281,7 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
         if tk and tk[0] == "cd":
             effective_cwd = _apply_cd(effective_cwd, tk)
             continue
-        api_call = is_api_issues_post(tk)
+        api_call = _api_creates_issue(tk)  # #1070 item 8: shared CREATE predicate (was broad is_api_issues_post -> #1080 FP)
         if not (is_issue_create(tk) or api_call):
             continue
         title = flag_value(tk, ("-t", "--title"))
