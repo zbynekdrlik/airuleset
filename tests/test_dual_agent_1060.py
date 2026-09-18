@@ -18,6 +18,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -410,6 +411,64 @@ class TestAttachBlockImplDedup(unittest.TestCase):
         self.assertIn("impl", block)
         # the dedup uses grep -Fxq impl (skip if it already exists)
         self.assertIn("grep -Fxq impl", block)
+
+
+# --------------------------------------------------------------------------- #
+# Item 8 wiring — run_once drives impl_window_presence ONCE per sweep, marker-
+# gated (a non-marker box never calls it), dry_run threaded through, never a
+# keystroke (impl_window_presence itself only issues tmux management commands).
+# --------------------------------------------------------------------------- #
+class TestRunOnceImplWindowWiring(unittest.TestCase):
+    MARKER = {"base_url": "http://gw", "key_file": "~/.secrets/k",
+              "main": "impl-main", "sub": "impl-sub", "fast": "impl-fast",
+              "cwd": "/home/miva1/devel/odoo/odoo-erp"}
+
+    def _run_once(self, marker, dry_run=False):
+        import watchdog as wd
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        proj = Path(tmp.name) / "projects"
+        proj.mkdir()
+        calls = []
+
+        def spy(mk, run=None, logs=None, dry_run=False):
+            calls.append({"marker": mk, "run": run, "dry_run": dry_run,
+                          "logs_is_list": isinstance(logs, list)})
+            if isinstance(logs, list):
+                logs.append("dual: impl window present on spy")
+            return "present"
+
+        with mock.patch.object(wd, "_impl_marker", lambda: marker), \
+                mock.patch.object(wd, "impl_window_presence", spy):
+            wd.run_once(
+                now=1_000_000.0, run=lambda argv, timeout=8: "",
+                send_fn=lambda *a, **k: None, projects_dir=proj,
+                state_path=str(Path(tmp.name) / "state.json"),
+                pending_prefix=str(Path(tmp.name) / "pending-"),
+                dry_run=dry_run)
+        return calls
+
+    def test_marker_box_drives_impl_window_presence_once(self):
+        calls = self._run_once(self.MARKER)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["marker"], self.MARKER)
+        # threads the sweep's `run` + `logs` (so the decision line is journalled)
+        self.assertIsNotNone(calls[0]["run"])
+        self.assertTrue(calls[0]["logs_is_list"])
+
+    def test_non_marker_box_never_calls(self):
+        self.assertEqual(self._run_once(None), [])
+
+    def test_dry_run_threaded_through(self):
+        calls = self._run_once(self.MARKER, dry_run=True)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0]["dry_run"])
+
+    def test_impl_marker_helper_never_raises(self):
+        # the default marker loader is a no-op-safe file read on any box
+        import watchdog as wd
+        self.assertIn(wd._impl_marker(), (None,) if wd._impl_marker() is None
+                      else (wd._impl_marker(),))
 
 
 if __name__ == "__main__":
