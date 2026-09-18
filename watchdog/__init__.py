@@ -2520,6 +2520,19 @@ def sweep_urgent(state, pane_stamps, stored_stamps, *, compact_pending=False):
     return ""
 
 
+def _impl_marker():
+    """#1060 L3b item 8 — THIS box's model-backend marker dict (or None), read
+    once per sweep for the dual-agent impl-window presence check. A non-marker
+    box (the overwhelming majority) gets None here — a cheap file read, no tmux
+    call. Never raises (`load_marker` returns None on any read/parse error).
+    A module-level seam so run_once tests can force a marker without a file."""
+    try:
+        from cli_model_backend import load_marker
+        return load_marker()
+    except Exception:
+        return None
+
+
 def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              projects_dir=PROJECTS_DIR, state_path=STATE_PATH,
              grace=GRACE_SECONDS, interval=RETRY_INTERVAL_SECONDS,
@@ -3542,6 +3555,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # characterization suite pins "pane loop runs before EVERY standalone job,
     # list_claude_panes never fires twice" (test_run_once_characterization.py).
     panes = list(list_claude_panes(run, dry_run=dry_run))
+    # #1060 L3b item 8 — dual-agent IMPLEMENTER window presence (marker-gated,
+    # folded into the sweep body, NOT a new numbered job). On a model-backend
+    # MARKER box the managed session must carry window 1 `impl` (the claude-impl
+    # gateway session); a session running since BEFORE the marker shipped, or
+    # whose impl window crashed/closed, has no impl window and no session-created
+    # event to bring it back — the webterm/attach creators only fire at session
+    # start. Once per sweep this re-creates it through the tmux template (a
+    # management command, never a keystroke), idempotent (window-name dedup).
+    # A non-marker box is a single cheap file read (`_impl_marker()` -> None).
+    _impl_mk = _impl_marker()
+    if _impl_mk:
+        impl_window_presence(_impl_mk, run=run, logs=logs, dry_run=dry_run)
     for pid, cwd in panes:
         live_pane_ids.add(pid)
         tinfo = find_active_transcript(projects_dir, cwd)
