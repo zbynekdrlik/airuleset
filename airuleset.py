@@ -9208,6 +9208,7 @@ from cli_skill_usage import (  # noqa: E402, F401
 # --- #1061: main-authored design comment poster (Design-by: main <model>) ---
 from cli_design_record import (  # noqa: E402, F401
     cmd_design_record as cmd_design_record,
+    design_record_help_template as design_record_help_template,
 )
 from cli_mdreview_audit import (  # noqa: E402, F401
     cmd_mdreview_audit as cmd_mdreview_audit,
@@ -10230,7 +10231,11 @@ def main():
         help="Post a ticket's design comment stamped Design-by: main/worker "
              "<model> (model read from the session's OWN transcript, never "
              "self-declared); the dispatch gate requires Design-by: main "
-             "<Fable id> before an autopilot-worker is dispatched (#1061)")
+             "<Fable id> before an autopilot-worker is dispatched (#1061)",
+        # #1070 item 5: --help prints the full section template so the required
+        # sections are discoverable in one place (not by failed attempts, #1079).
+        epilog=design_record_help_template(),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     p_dr.add_argument("--issue", type=int, required=False,
                       help="Issue number to comment on")
     p_dr.add_argument("--repo", default=None,
