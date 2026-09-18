@@ -512,12 +512,15 @@ class TestCadenceJob(unittest.TestCase):
                     return json.dumps({"state": "closed",
                                        "closedAt": closed_old}), 0
                 return "", 0
-            with mock.patch("socket.gethostname", return_value="dev1"):
-                with mock.patch("cli_mdreview_audit._fleet_hosts_for_audit",
-                                return_value=[]):
-                    logs = mdreview_cadence_job(
-                        now, {}, state_path=str(sp),
-                        gh_runner=fake_gh, fleet_runner=lambda h: ("{}",0))
+            def fake_audit(fleet=True):
+                return {"schema": 1, "date": "2026-09-18",
+                        "boxes": [], "failed": [], "skipped": []}
+            with mock.patch("socket.gethostname", return_value="dev1"), \
+                    mock.patch("cli_mdreview_audit.save_artifact",
+                               return_value="/x/2026-09-18.json"):
+                logs = mdreview_cadence_job(
+                    now, {}, state_path=str(sp),
+                    gh_runner=fake_gh, audit_fn=fake_audit)
             state_after = json.loads(sp.read_text())
             self.assertEqual(state_after["last_eval_ts"], now,
                              "state must be advanced after due")
@@ -566,14 +569,12 @@ class TestCadenceJob(unittest.TestCase):
                     return json.dumps({"state": "closed",
                                        "closedAt": "2026-01-01T00:00:00Z"}), 0
                 return "", 0
+            def boom_audit(fleet=True):
+                raise RuntimeError("audit boom")
             with mock.patch("socket.gethostname", return_value="dev1"):
-                with mock.patch("cli_mdreview_audit._fleet_hosts_for_audit",
-                                return_value=[]):
-                    with mock.patch("cli_mdreview_audit.run_fleet",
-                                    side_effect=RuntimeError("audit boom")):
-                        mdreview_cadence_job(
-                            now, {}, state_path=str(sp),
-                            gh_runner=fake_gh)
+                mdreview_cadence_job(
+                    now, {}, state_path=str(sp),
+                    gh_runner=fake_gh, audit_fn=boom_audit)
             state_after = json.loads(sp.read_text())
             self.assertNotEqual(state_after.get("model_tiers_hash"),
                                 self._tiers_hash(),
@@ -764,16 +765,81 @@ class TestStateFileAliasing(unittest.TestCase):
                     all_create_calls.append(argv)
                 return "https://github.com/zbynekdrlik/airuleset/issues/900\n", 0
 
-            with mock.patch("socket.gethostname", return_value="dev1"):
+            def fake_audit(fleet=True):
+                return {"schema": 1, "date": "2026-09-18",
+                        "boxes": [], "failed": [], "skipped": []}
+            with mock.patch("socket.gethostname", return_value="dev1"), \
+                    mock.patch("cli_mdreview_audit.save_artifact",
+                               return_value="/x/2026-09-18.json"):
                 mdreview_cadence_job(now, {}, state_path=str(sp),
-                                    gh_runner=fake_gh)
+                                    gh_runner=fake_gh, audit_fn=fake_audit)
                 mdreview_cadence_job(now + 86400 + 1, {}, state_path=str(sp),
-                                    gh_runner=fake_gh)
+                                    gh_runner=fake_gh, audit_fn=fake_audit)
 
             self.assertLessEqual(len(all_create_calls), 1,
                                  f"gh issue create must fire AT MOST ONCE across "
                                  f"two polls, got {len(all_create_calls)}: "
                                  f"{all_create_calls}")
+
+    def test_cadence_job_never_spawns_subprocess_with_audit_fn(self):
+        """#874 fix-forward (CI GATE): with an injected ``audit_fn`` (and a fake
+        ``gh_runner``) the cadence job must run the injected audit and spawn NO
+        real subprocess. The daily fleet audit (``run_fleet`` -> real
+        ``inventory_box`` scan + ssh to every host, ~68 s in CI) is the only
+        subprocess path in the job, so ``audit_fn`` must fully replace it.
+
+        RED before the seam exists: ``audit_fn`` is not yet a parameter
+        (TypeError). GREEN teeth are TWO independent assertions: (a) the injected
+        ``audit_fn`` was called exactly once (the seam is actually used); (b) the
+        job completed the daily target-governance delta. If a regression made the
+        job ignore ``audit_fn`` and call ``run_fleet`` again, ``subprocess.run``
+        is patched to raise -- the job's own ``except Exception`` swallows that
+        and early-returns, so the target-governance log never appears and (b)
+        fails; ``audit_fn`` also would not be called, so (a) fails too. This is
+        the hermeticity lock for the 68 s
+        ``test_create_fires_at_most_once_across_two_polls`` culprit."""
+        from watchdog.mdreview_cadence import mdreview_cadence_job
+        import cli_mdreview_audit
+        now = time.time()
+        with tempfile.TemporaryDirectory() as tmp:
+            sp = Path(tmp) / "state.json"
+            sp.write_text(json.dumps({
+                "schema": 1, "ticket": 874,
+                "model_tiers_hash": self._tiers_hash(),
+                "last_eval_ts": now - 86400 * 2,
+                "target_governance": {},
+            }), encoding="utf-8")
+
+            def fake_gh(argv):
+                # OPEN -> reopen not-due; the daily audit + delta still run.
+                if "view" in str(argv):
+                    return json.dumps({"state": "open", "closedAt": ""}), 0
+                return "", 0
+
+            audit_calls = []
+
+            def fake_audit(fleet=True):
+                audit_calls.append(fleet)
+                return {"schema": 1, "date": "2026-09-18",
+                        "boxes": [], "failed": [], "skipped": []}
+
+            with mock.patch("socket.gethostname", return_value="dev1"):
+                with mock.patch("subprocess.run", side_effect=AssertionError(
+                        "cadence job spawned a real subprocess despite audit_fn")):
+                    with mock.patch.object(cli_mdreview_audit, "save_artifact",
+                                           return_value="/x/2026-09-18.json"):
+                        logs = mdreview_cadence_job(
+                            now, {}, state_path=str(sp),
+                            gh_runner=fake_gh, audit_fn=fake_audit)
+
+            # (a) the seam was actually used (exactly once, for the fleet audit).
+            self.assertEqual(len(audit_calls), 1,
+                             f"audit_fn must be the single audit path: {audit_calls}")
+            # (b) the job reached + logged the daily delta => no real subprocess
+            # short-circuited it (a reverted job's caught AssertionError would
+            # early-return before this line).
+            self.assertTrue(any("target-governance" in ln for ln in logs),
+                            f"audit_fn path must still run the daily delta: {logs}")
 
 
 # ---------------------------------------------------------------------------
