@@ -112,19 +112,6 @@ def is_issue_create(tk):
     return len(tk) >= 3 and tk[0] == "gh" and tk[1] == "issue" and tk[2] == "create"
 
 
-def is_api_issues_post(tk):
-    if not tk or tk[0] != "gh" or "api" not in tk[:2]:
-        return False
-    has_issues = any("issues" in t for t in tk)
-    has_post = False
-    for idx, t in enumerate(tk):
-        if t in ("-X", "--method") and idx + 1 < len(tk) and tk[idx + 1].upper() == "POST":
-            has_post = True
-        if re.match(r'^-X\s*POST$', t, re.I) or t.upper() in ("-XPOST",):
-            has_post = True
-    return has_issues and has_post
-
-
 def _cd_target(tk):
     """The directory a leading `cd` segment changes into, or None when the
     target cannot be known statically (#483) -- no argument (bare `cd` ->

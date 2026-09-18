@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from gates import shellcmd                       # noqa: E402
 from gates.filing import parse, presence, render  # noqa: E402
+from gates.filing.__main__ import _api_creates_issue  # noqa: E402
 
 
 class TestUnificationLock(unittest.TestCase):
@@ -41,11 +42,27 @@ class TestTokenising(unittest.TestCase):
         self.assertTrue(parse.is_issue_create(["gh", "issue", "create"]))
         self.assertFalse(parse.is_issue_create(["gh", "issue", "edit"]))
 
-    def test_is_api_issues_post(self):
-        self.assertTrue(parse.is_api_issues_post(
-            ["gh", "api", "repos/o/r/issues", "-X", "POST"]))
-        self.assertFalse(parse.is_api_issues_post(
-            ["gh", "api", "repos/o/r/issues/5/comments"]))
+    def test_api_creates_issue_matches_only_create_shapes(self):
+        # #1070 item 8 -- the shared CREATE-shape predicate (replaces the retired
+        # broad parse.is_api_issues_post; consumed by _is_worker_filing AND
+        # classify_command). A POST/field write to the /issues COLLECTION is a
+        # create; a comment POST / label PATCH sub-resource, a list read, and a
+        # non-`gh api` command are NOT.
+        for tk in (
+            ["gh", "api", "repos/o/r/issues", "-X", "POST"],
+            ["gh", "api", "repos/o/r/issues", "-f", "title=x"],   # implicit POST
+            ["gh", "api", "repos/o/r/issues", "-ftitle=x"],       # glued short flag
+        ):
+            self.assertTrue(_api_creates_issue(tk), tk)
+        for tk in (
+            ["gh", "api", "repos/o/r/issues/5/comments", "-X", "POST"],  # comment
+            ["gh", "api", "repos/o/r/issues/5/comments"],               # comment, no signal
+            ["gh", "api", "repos/o/r/issues/5", "-X", "PATCH", "-f", "state=closed"],
+            ["gh", "api", "repos/o/r/issues", "-X", "GET", "-f", "state=open"],
+            ["curl", "repos/o/r/issues", "-X", "POST", "-f", "x"],       # not gh api
+            [],
+        ):
+            self.assertFalse(_api_creates_issue(tk), tk)
 
 
 class TestCdResolution(unittest.TestCase):
