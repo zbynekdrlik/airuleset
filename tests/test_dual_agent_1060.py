@@ -210,5 +210,55 @@ class TestImplementerPrompt(unittest.TestCase):
                 (REPO / "agents" / "implementer.md").read_text(encoding="utf-8"))
 
 
+# --------------------------------------------------------------------------- #
+# Item 7 — the autopilot SKILL `dual` dispatch section, check-locked verbatim
+# --------------------------------------------------------------------------- #
+class TestDualDispatchClauseLock(unittest.TestCase):
+    def setUp(self):
+        import goal_registry
+        self.gr = goal_registry
+        self.skill = (REPO / "skills" / "autopilot" / "SKILL.md").read_text(
+            encoding="utf-8")
+
+    def test_goal_registry_exposes_the_dual_lock(self):
+        self.assertTrue(hasattr(self.gr, "skill_dual_drift"))
+        self.assertTrue(hasattr(self.gr, "_DUAL_DISPATCH"))
+
+    def test_skill_carries_the_dual_clause_verbatim(self):
+        self.assertIn(self.gr._DUAL_DISPATCH, self.skill)
+        self.assertEqual(self.gr.skill_dual_drift(self.skill), [])
+
+    def test_dual_drift_flags_a_missing_clause(self):
+        self.assertNotEqual(self.gr.skill_dual_drift("no dual clause here"), [])
+
+    def test_dual_clause_names_the_channel_and_fallback(self):
+        c = self.gr._DUAL_DISPATCH
+        self.assertIn("SendMessage", c)
+        self.assertIn("ListAgents", c)
+        self.assertIn("LANE-RETURN", c)
+        self.assertIn("dual: implementer session missing", c)
+
+    def test_skill_default_goal_lines_still_match_registry(self):
+        # The dual section must NOT alter the shipped `/goal` lines (they stay
+        # byte-identical to render(profile)) — drift() must stay empty.
+        self.assertEqual(self.gr.drift(self.skill), [])
+
+    def test_goal_inventory_check_passes(self):
+        r = subprocess.run(
+            [sys.executable, str(REPO / "airuleset.py"),
+             "goal-inventory", "--check"],
+            capture_output=True, text=True, cwd=str(REPO))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_goal_inventory_check_catches_a_missing_dual_clause(self):
+        # A SKILL.md stripped of the dual clause must FAIL --check.
+        import goal_registry as gr
+        with tempfile.TemporaryDirectory() as td:
+            fake_skill = Path(td) / "SKILL.md"
+            stripped = self.skill.replace(gr._DUAL_DISPATCH, "")
+            self.assertNotIn(gr._DUAL_DISPATCH, stripped)
+            self.assertNotEqual(gr.skill_dual_drift(stripped), [])
+
+
 if __name__ == "__main__":
     unittest.main()
