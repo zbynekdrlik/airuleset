@@ -750,6 +750,7 @@ from watchdog.tmux_io import (  # noqa: E402
     _keystroke_suppressed as _keystroke_suppressed,
     keys as keys,
     relaunch_pane as relaunch_pane,                       # #1075 credential-dead
+    impl_window_presence as impl_window_presence,         # #1060 L3b dual-agent
     send_continue as send_continue,
     send_verified as send_verified,
     submit_own_draft_verified as submit_own_draft_verified,

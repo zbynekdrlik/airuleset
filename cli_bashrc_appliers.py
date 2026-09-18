@@ -277,18 +277,26 @@ def render_tmux_attach_block(default_session: str) -> str:
         '        local _impl_cwd',
         r'''        _impl_cwd="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("cwd") or "")' "$HOME/.claude/airuleset-model-backend.json" 2>/dev/null || true)"''',
         '        command tmux new-session -d -s "$_s"',
-        '        if [ -n "$_impl_cwd" ] && [ -d "$_impl_cwd" ]; then',
-        ('          command tmux new-window -d -t "$_s" -n impl -c "$_impl_cwd" "%s"'
+        # #1060 L3b DEDUP: `new-session -d` above ALSO fires the `-g
+        # session-created` hook, which on a marker box now creates the impl
+        # window too (and the watchdog is a third creator) — so create it here
+        # ONLY when no impl window exists yet, so an interactive-ssh session
+        # never gets two. (Non-run-shell context -> a single `#{window_name}`.)
+        '        if ! command tmux list-windows -t "$_s" '
+        "-F '#{window_name}' 2>/dev/null | grep -Fxq impl; then",
+        '          if [ -n "$_impl_cwd" ] && [ -d "$_impl_cwd" ]; then',
+        ('            command tmux new-window -d -t "$_s" -n impl -c "$_impl_cwd" "%s"'
          % impl_launcher),
-        "        else",
-        ('          command tmux new-window -d -t "$_s" -n impl "%s"'
+        "          else",
+        ('            command tmux new-window -d -t "$_s" -n impl "%s"'
          % impl_launcher),
-        "        fi",
+        "          fi",
         # L3a review A 🔵: keep the impl pane visible if the launcher REFUSES
         # (exit 1, e.g. a misprovisioned key/cwd) so its LOUD stderr is readable
         # instead of the pane silently vanishing at the owner-present cutover.
-        '        command tmux set-window-option -t "$_s:impl" remain-on-exit on '
+        '          command tmux set-window-option -t "$_s:impl" remain-on-exit on '
         '2>/dev/null || true',
+        "        fi",
         "      fi",
         '      command tmux new-session -A -s "$_s"',
         "    }",

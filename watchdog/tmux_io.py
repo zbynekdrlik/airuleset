@@ -370,6 +370,96 @@ def relaunch_pane(pane_id, run=None, launcher="claude-continue"):
         return False
 
 
+def impl_window_presence(marker, run=None, logs=None, dry_run=False):
+    """#1060 L3b item 8 — keep the dual-agent IMPLEMENTER window alive.
+
+    On a model-backend MARKER box the managed tmux session carries window 0
+    ``<box>`` (the main/Fable session) and window 1 ``impl`` (the ``claude-impl``
+    gateway session). The webterm-only boxes create that impl window from the
+    ``-g session-created`` hook (`cli_tmux_provisioning._session_created_hook_
+    value`) / the bashrc attach block (`cli_bashrc_appliers.render_tmux_attach_
+    block`). But a session running since BEFORE the marker shipped — or whose
+    impl window was closed / crashed out — has no impl window and no creation
+    event to bring it back. This helper is the watchdog's CONVERGENCE path:
+    once per sweep, on a marker box, it re-creates window 1 through the SAME
+    ``tmux new-window … -n impl [-c <cwd>] <launcher>`` + ``remain-on-exit on``
+    shape those two creators use — a tmux MANAGEMENT command, never a keystroke
+    into a live pane (the `relaunch_pane`/`respawn-pane` precedent), marker-gated,
+    and idempotent (DEDUP by window name — the same three-creator guard the
+    attach block carries).
+
+    ``marker`` is the box's model-backend marker dict, or None -> a no-op on a
+    non-marker box (the caller passes ``cli_model_backend.load_marker()``).
+    Returns exactly one of:
+      * ``None``               — no marker (non-marker box; nothing logged);
+      * ``"no-session"``       — no tmux server running;
+      * ``"no-managed-session"``— a tmux server with NO box-named session (a
+                                  window renamed to its own session name) to
+                                  attach the window to — never guesses a foreign
+                                  session;
+      * ``"present"``          — the impl window already exists;
+      * ``"relaunched"``       — it was missing and got created;
+      * ``"would-relaunch"``   — missing, but ``dry_run`` so nothing was created.
+    ``logs``, if a list, gets ONE decision line. Never raises."""
+    if logs is None:
+        logs = []
+    if not marker:
+        return None
+    run = run or watchdog._default_run
+    out = run(["tmux", "list-windows", "-a", "-F",
+               "#{session_name}\t#{window_index}\t#{window_name}"]) or ""
+    sessions = {}
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        sess, name = parts[0].strip(), parts[2].strip()
+        if sess:
+            sessions.setdefault(sess, []).append(name)
+    if not sessions:
+        return "no-session"
+    # The session-created hook renames window 0 to the box name (== session
+    # name), so ``window_name == session_name`` uniquely identifies the managed
+    # session and, for grouped siblings (which SHARE windows), deterministically
+    # resolves to the base session — never a foreign one, never a double-create.
+    target = None
+    for sess, names in sessions.items():
+        if sess in names:
+            target = sess
+            break
+    if target is None:
+        return "no-managed-session"
+    if "impl" in sessions[target]:
+        logs.append("dual: impl window present on %s" % target)
+        return "present"
+    if dry_run:
+        logs.append("dual: impl window missing on %s — would relaunch (dry-run)"
+                    % target)
+        return "would-relaunch"
+    # The SAME launcher script the attach block / session-created hook run
+    # (a script path, not the interactive `claude-impl` shell function).
+    try:
+        from cli_claude_scripts import CLAUDE_IMPL_LAUNCH_SCRIPT_DEST
+        launcher = os.path.expanduser("~/.claude/%s"
+                                      % CLAUDE_IMPL_LAUNCH_SCRIPT_DEST.name)
+    except Exception:
+        launcher = os.path.expanduser("~/.claude/airuleset-claude-impl.sh")
+    argv = ["tmux", "new-window", "-d", "-t", target, "-n", "impl"]
+    cwd = (marker.get("cwd") or "").strip() if isinstance(marker, dict) else ""
+    if cwd:
+        ecwd = os.path.expanduser(cwd)
+        if os.path.isdir(ecwd):
+            argv += ["-c", ecwd]
+    argv.append(launcher)
+    run(argv)
+    # Keep the pane visible if `claude-impl` REFUSES (exit 1 on a misprovisioned
+    # key/cwd) so its LOUD stderr is readable — matching the attach block.
+    run(["tmux", "set-window-option", "-t", "%s:impl" % target,
+         "remain-on-exit", "on"])
+    logs.append("dual: impl window missing — relaunched on %s" % target)
+    return "relaunched"
+
+
 def _default_run(argv, timeout=8):
     # #1055 P2 -- the watchdog's default subprocess runner (tmux calls, plus any
     # caller that threads `run=_default_run`). Time + record every invocation in
