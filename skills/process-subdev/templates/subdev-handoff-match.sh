@@ -81,6 +81,21 @@ set -euo pipefail
 
 MODE="${1:-ready-for-review}"
 
+# _iso_epoch <iso-ts> -> the ISO timestamp as a Unix epoch, or "" when the
+# value is EMPTY or a string GNU `date -d` rejects. This exists because
+# `date -u -d "" +%s` does NOT fail — GNU date treats an empty -d value as
+# TODAY 00:00 UTC (rc 0). Calling `date` directly on the workflow's
+# documented empty ("unresolvable") RFR/commit value therefore produced a
+# real, WALL-CLOCK-DEPENDENT midnight epoch, which the bounce-clear-guard
+# below then compared against the BOUNCE — clearing prio:bounce with no
+# proven fix from the day after the bounce onward (#1057). Normalise the
+# emptiness/unparseability HERE, before any comparison, so "unresolvable"
+# stays "" and is never mistaken for a timestamp.
+_iso_epoch() {
+  [ -n "$1" ] || { echo ""; return; }
+  date -u -d "$1" +%s 2>/dev/null || echo ""
+}
+
 # =============================================================================
 # #1056 L2 (g) — bounce-clear-guard: is it SAFE to clear prio:bounce?
 #
@@ -112,9 +127,9 @@ if [ "$MODE" = "bounce-clear-guard" ]; then
     echo "bounce-clear-guard: no gk BOUNCE verdict — safe to clear"
     exit 0
   fi
-  gk_epoch="$(date -u -d "$GK_TS" +%s 2>/dev/null || echo "")"
-  rfr_epoch="$(date -u -d "$RFR_TS" +%s 2>/dev/null || echo "")"
-  commit_epoch="$(date -u -d "$COMMIT_TS" +%s 2>/dev/null || echo "")"
+  gk_epoch="$(_iso_epoch "$GK_TS")"
+  rfr_epoch="$(_iso_epoch "$RFR_TS")"
+  commit_epoch="$(_iso_epoch "$COMMIT_TS")"
   # An unparseable BOUNCE timestamp cannot be compared → conservative (a real
   # BOUNCE we cannot time is never proven answered) → do NOT clear.
   if [ -z "$gk_epoch" ]; then
