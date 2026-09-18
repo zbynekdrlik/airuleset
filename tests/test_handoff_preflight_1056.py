@@ -27,11 +27,12 @@ import cli_gk_watch
 import cli_handoff_template as ht
 
 
-def _watch(state, *, ids=None, gk_ts=None, head_ts=None, gk_id="C1", sha="deadbee"):
+def _watch(state, *, ids=None, gk_ts=None, head_ts=None, gk_id="C1", sha="deadbee",
+           branch=None):
     return {
         "issue": 1, "state": state, "gk_login": "zbynekdrlik",
         "gk_latest": {"id": gk_id, "verdict": "BOUNCE", "created_at": gk_ts,
-                      "sha": sha, "ids": list(ids or [])},
+                      "sha": sha, "ids": list(ids or []), "branch": branch},
         "rfr": None, "head_ts": head_ts, "age_seconds": 0.0,
         "undispositioned_ids": list(ids or []),
     }
@@ -155,6 +156,65 @@ class PassthroughMirror(unittest.TestCase):
         # Backward-compatible: no required ids → the pre-#1056 shape check only.
         self.assertIsNone(
             ht.validate_passthrough_body(self._BODY, bounce_round=1))
+
+
+class Preflight1070(unittest.TestCase):
+    """#1070 item 6 — the bounce pre-flight (a) counts only a BOUNCE whose
+    Branch matches the readiness, (b) treats an unparseable head (@?) as an
+    advisory not a block, (c) counts commits via `git log --since=<verdict>`
+    (head_ts heuristic as fallback), and (d) journals the verdict/branch/sha."""
+
+    def _pf(self, body, watch_result, **kw):
+        return airuleset._handoff_gk_preflight(
+            1, "owner/repo", body, watch_result=watch_result, **kw)
+
+    def test_bounce_for_a_different_branch_is_advisory_not_block(self):
+        # the newest BOUNCE is for another phase's branch -> not this readiness.
+        w = _watch("bounce-unanswered", ids=["1"], gk_ts=2000.0, head_ts=1000.0,
+                   branch="worktree-phase-A")
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            msg = self._pf("READY-FOR-REVIEW: fresh phase B\n🔴 1 fixed",
+                           w, branch="worktree-phase-B")
+        self.assertIsNone(msg, "a bounce for another branch must not block")
+        self.assertIn("advisory", buf.getvalue().lower())
+
+    def test_unparseable_head_no_new_commit_is_advisory_not_block(self):
+        # head is @? and no commit is countable -> advisory, not the #1071 FP.
+        w = _watch("bounce-unanswered", ids=[], gk_ts=2000.0, head_ts=1000.0,
+                   sha=None)
+        buf = io.StringIO()
+        with redirect_stderr(buf):
+            msg = self._pf("READY-FOR-REVIEW: x", w)
+        self.assertIsNone(msg)
+        self.assertIn("advisory", buf.getvalue().lower())
+
+    def test_git_log_since_counts_a_new_commit_and_passes(self):
+        # commits_since reports 2 commits after the verdict -> a new commit
+        # landed -> with dispositions, PASS (no head_ts needed).
+        w = _watch("bounce-unanswered", ids=["1"], gk_ts=1000.0, head_ts=None,
+                   branch="b")
+        body = "READY-FOR-REVIEW: reworked\nCloses-finding: 1 — fixed in abc1234\n"
+        msg = self._pf(body, w, branch="b", commits_since=lambda br, ts, cwd: 2)
+        self.assertIsNone(msg, "a commit landed since the BOUNCE -> pass")
+
+    def test_git_log_since_zero_and_parseable_head_blocks(self):
+        # no commit since the verdict AND a parseable head -> the real block.
+        w = _watch("bounce-unanswered", ids=["1"], gk_ts=1000.0, head_ts=None,
+                   sha="deadbee", branch="b")
+        msg = self._pf("READY-FOR-REVIEW: nothing new\n🔴 1 fixed", w,
+                       branch="b", commits_since=lambda br, ts, cwd: 0)
+        self.assertIsNotNone(msg)
+        self.assertIn("no new commit since BOUNCE", msg)
+
+    def test_matching_branch_still_blocks_when_not_draining(self):
+        # a bounce whose branch MATCHES the readiness, no new commit, parseable
+        # head -> still blocks (branch scoping does not weaken the real gate).
+        w = _watch("bounce-unanswered", ids=["1"], gk_ts=2000.0, head_ts=1000.0,
+                   sha="cafe123", branch="b")
+        msg = self._pf("READY-FOR-REVIEW: x\n🔴 1 fixed", w, branch="b")
+        self.assertIsNotNone(msg)
+        self.assertIn("no new commit since BOUNCE", msg)
 
 
 if __name__ == "__main__":
