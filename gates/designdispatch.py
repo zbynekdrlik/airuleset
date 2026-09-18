@@ -217,7 +217,14 @@ def check_issue(number, slug, cwd, fetch=None, fable_id=None):
     return True, "ok"
 
 
-def evaluate(payload, fetch=None, resolve_slug=None, fable_id=None):
+def _is_pull_request(number, slug, cwd):
+    """(is_pr, err) via a single REST `GET /issues/<N>` (GitHub's issues
+    endpoint returns a PR too, carrying a `pull_request` key). REST survives the
+    hourly GraphQL exhaustion. `is_pr` is None (UNKNOWN) when the read fails."""
+    return ghread.is_pull_request(number, slug, cwd=cwd)
+
+
+def evaluate(payload, fetch=None, resolve_slug=None, fable_id=None, is_pr=None):
     """('allow', reason) or ('block', reason). Pure of process exit so tests can
     assert the verdict directly; `main()` maps it to allow()/emit_block_stderr()."""
     tool = field_of(payload, "tool_name", "")
@@ -259,9 +266,29 @@ def evaluate(payload, fetch=None, resolve_slug=None, fable_id=None):
                          "refusing an autopilot-worker dispatch that cannot be "
                          "design-by verified (fail-closed)")
 
+    # #1070 item 2 -- a dispatch prompt legitimately names an open PR it rides
+    # ("this batch rides PR #201, do not gh pr create"); a PR carries no design
+    # comment, so demanding `Design-by:` for it is a false block (#1079). Resolve
+    # each `#N` as PR vs issue via one REST `GET /issues/<N>` (a PR carries
+    # `pull_request`) and SKIP the PRs; an UNKNOWN read (gate-unavailable) is
+    # kept as an issue so its own comment read produces the honest verdict.
+    is_pr_fn = is_pr or _is_pull_request
+    checkable = []
+    for n in issues:
+        pr, _perr = is_pr_fn(n, slug, cwd)
+        if pr is True:
+            _log("%s\tSKIP-PR\t%s\t#%d" % (
+                time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), cwd, n))
+            continue
+        checkable.append(n)
+    if not checkable:
+        # every named ref resolved to a PR -> there is no issue to design-check
+        # (a PR cannot carry a design comment); nothing to refuse.
+        return "allow", "every named ref is a PR -- no issue to design-check"
+
     # #1060 L3a: the Fable id is the only accepted design model on every box (the
     # #1062 L2 pilot-alias acceptance is removed -- the main always designs).
-    for n in issues:
+    for n in checkable:
         ok, reason = check_issue(n, slug, cwd, fetch=fetch, fable_id=fable_id)
         if not ok:
             return "block", reason
