@@ -9,7 +9,9 @@ confirmed.
 submit — the text DID reach the pane, so the owner's "raz za hodinu" rule makes
 the NEXT attempt of this kind defer a full hour. That is what bounds the re-fire
 to <= 1/hour; the confirm therefore lands on the first idle tick AFTER the floor,
-never the very next sweep.
+never the very next sweep. #1023 fix-forward 2 (owner ROZHODNUTÉ "3"): the 3 h
+TOTAL cap counts the SAME kind too, so the re-confirm now lands after 3 h — the
+delivered-unconfirmed text was a prompt interruption and counts toward the cap.
 
 RED against the pre-#1023 tree: `delivered = ok OR delivered_unconfirmed` advances
 the BASELINE on an unconfirmed submit, so a second idle tick never re-delivers.
@@ -107,8 +109,19 @@ class TestUnconfirmedNotTerminal(unittest.TestCase):
         self.assertEqual(sv2.n, 0, logs2)               # never re-typed inside the hour
         self.assertEqual(qrecs[self.sid]["base"], [1])
         self.assertTrue(any("hold:floor" in ln for ln in logs2), logs2)
-        # tick 3 (past the floor): the send confirms -> baseline advances + floor re-stamped
-        after = NOW + 3600 + 60
+        # tick 2b (NOW+61 min: past the 1h floor, inside the 3h TOTAL cap): still
+        # HELD — #1023 fix-forward 2 counts the SAME kind in the total cap (owner
+        # ROZHODNUTÉ "3", 2026-09-17), so the unconfirmed-but-delivered text at
+        # tick 1 blocks a re-type for the full 3 h, not just the hour.
+        sv2b = _SV(result=True, unconfirmed=False)
+        with m.patch.object(wd, "send_verified", sv2b):
+            logs2b = self._run(qrecs, state, now=NOW + 3600 + 60)
+        self.assertEqual(sv2b.n, 0, logs2b)
+        self.assertEqual(qrecs[self.sid]["base"], [1])
+        self.assertTrue(any("hold:total-cap" in ln for ln in logs2b), logs2b)
+        # tick 3 (past the 3h total cap): the send confirms -> baseline advances +
+        # cadence re-stamped
+        after = NOW + 3 * 3600 + 60
         with m.patch.object(wd, "send_verified", _SV(result=True, unconfirmed=False)):
             self._run(qrecs, state, now=after)
         self.assertEqual(qrecs[self.sid]["base"], [1, 2])
