@@ -338,12 +338,12 @@ class TestJob37Wiring(unittest.TestCase):
 
     def test_wired_reaper_runs_and_decides_within_one_cycle(self):
         kill = _Recorder()
+        # REAL verify_fn (/proc read): the fake pid sits above Linux's pid_max
+        # (2**22) so it NEVER exists — 4242 was live on a parallel CI runner (#874).
+        never_pid = 2**22 + 4242
         logs = self._run(
-            reaper_ps_fetch=_procs([(4242, OLD, BUSY, RUNAWAY_CMD)]),
+            reaper_ps_fetch=_procs([(never_pid, OLD, BUSY, RUNAWAY_CMD)]),
             reaper_kill_fn=kill)
-        # run_once wires the real verify_fn (/proc read); pid 4242 does not
-        # exist, so the TOCTOU re-verify correctly declines to kill it — which
-        # is itself the fail-safe. Assert the reaper RAN and made a decision.
         reaped = [ln for ln in logs if "shadow-ugrep-reaper" in ln]
         self.assertEqual(len(reaped), 1)
         self.assertEqual(kill.killed, [])
