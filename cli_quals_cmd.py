@@ -753,9 +753,10 @@ def cmd_slice_quals(args):
     want_bounces = getattr(args, "bounces", False) is True   # #843
     want_dep_wait = getattr(args, "dep_wait", False)   # #993 item 7
     want_count_dispatchable = getattr(args, "count_dispatchable", False)  # #993 item 3
+    want_list_dispatchable = getattr(args, "list_dispatchable", False) is True  # #1078 item 1 (#1036 Mock-truthy guard)
     if not (want_count or want_list or want_waiting or want_ops_wait
             or want_audit or want_bounces or want_dep_wait
-            or want_count_dispatchable):
+            or want_count_dispatchable or want_list_dispatchable):
         for q in quals:
             print(q)
         return
@@ -906,6 +907,11 @@ def cmd_slice_quals(args):
         # rows STAY in --count/I, only their dispatchability differs). The lane
         # nudge shells this (cached).
         _emit_count_dispatchable(unhandled, root)
+        return
+    if want_list_dispatchable:
+        # #1078 item 1: the dispatchable members as `number<TAB>title` lines
+        # (the lane-fill Stop gate's ONE quals call — count + names, no skew).
+        _emit_list_dispatchable(unhandled, root)
         return
     if want_dep_wait:
         _emit_dep_wait(unhandled, user, root)
@@ -1143,6 +1149,32 @@ def _emit_count_dispatchable(rows, root):
         print("reason:" + reason)
 
 
+def _emit_list_dispatchable(rows, root):
+    """`--list-dispatchable` (#1078 item 1): one `number<TAB>title` line per
+    DISPATCHABLE member (workable ∧ ¬dep-wait — the SAME `dispatchable_numbers`
+    set `--count-dispatchable` counts), OLDEST first. The lane-fill Stop gate
+    (`gates.lanefill`) shells THIS so ONE quals call yields both the count (the
+    line count, consistent with `--count-dispatchable` by construction) AND the
+    ticket names for its block message — no count/name skew. UNMEASURABLE dep
+    read → `unmeasurable:meta read failed` (the SAME fail-safe head as
+    `--count-dispatchable`, so the shell fails toward not-enforcing)."""
+    import airuleset
+    dep_map, slug, ok = _dep_wait_map_for(rows, root)
+    if not ok:
+        print("unmeasurable:meta read failed")
+        return
+    dispatchable_set, _reason = airuleset.dispatchable_numbers(rows, slug, dep_map)
+
+    def _key(n):
+        row = rows.get(n) or {}
+        return (row.get("createdAt") or "", n)
+
+    for n in sorted(dispatchable_set, key=_key):
+        row = rows.get(n) or {}
+        title = row.get("title", "") if isinstance(row, dict) else ""
+        print("%d\t%s" % (n, title))
+
+
 def _emit_dep_wait(rows, own_stream, root):
     """`--dep-wait`: ONLY the dep-wait rows, each with its blocking refs in the
     action column (#993 item 7)."""
@@ -1238,8 +1270,9 @@ def cmd_core_quals(args):
     want_audit = getattr(args, "audit", False)   # #578
     want_dep_wait = getattr(args, "dep_wait", False)   # #993 item 7
     want_count_dispatchable = getattr(args, "count_dispatchable", False)  # #993 item 3
+    want_list_dispatchable = getattr(args, "list_dispatchable", False) is True  # #1078 item 1 (#1036 Mock-truthy guard)
     if not (want_count or want_list or want_waiting or want_ops_wait or want_audit
-            or want_dep_wait or want_count_dispatchable):
+            or want_dep_wait or want_count_dispatchable or want_list_dispatchable):
         for q in quals:
             print(q)
         return
@@ -1397,6 +1430,11 @@ def cmd_core_quals(args):
         # #993 item 3: the dispatchable-candidate count (NOT --count: dep-wait
         # rows STAY in --count/I). The lane nudge shells it.
         _emit_count_dispatchable(workable, root)
+        return
+    if want_list_dispatchable:
+        # #1078 item 1: dispatchable members as `number<TAB>title` (the lane-fill
+        # Stop gate's ONE quals call — count + names, no skew).
+        _emit_list_dispatchable(workable, root)
         return
     if want_dep_wait:
         _emit_dep_wait(workable, None, root)

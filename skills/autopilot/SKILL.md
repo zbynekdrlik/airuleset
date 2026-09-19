@@ -572,6 +572,8 @@ caps — a project with ONE shared test box declares `"box": 1`. Absent file = t
 to `max_lanes`. The watchdog nudge counts live lanes per resource by reading `.lane-needs` files
 in live worktrees (see Step 3.2 below) and prints per-resource occupancy.
 
+**Box serialisation (one PROD copy per shared box) applies to the TAIL only — PROD-copy test, E2E, hand-off; implementation lanes run in parallel up to the lane cap.** The `"box": 1` cap serialises ONLY the lanes that actually need the shared PROD copy (their `.lane-needs` carries `box`); every other implementation lane (code, CI, RFR, review, docs) runs concurrently up to `max_lanes`. "One PROD copy" is NOT "one lane at a time" — a session that ends a turn with one lane while dispatchable, box-free tickets sit without lanes and slots are free is under-filled (the Stop-time lane-fill gate `gates.lanefill` flags exactly this on parallel boxes, #1078).
+
 **Dispatch marker — `.lane-needs`.** At dispatch, when a ticket needs a declared resource
 (e.g. its shadow/E2E test needs the erp-test box), the supervisor writes a `lane-needs` marker
 file into the lane worktree's PRIVATE gitdir (not the working tree — a working-tree file would

@@ -36,14 +36,39 @@ class TestComputeOverlap(TestCase):
         self.assertEqual(verdict, "overlap")
         self.assertTrue(any(o[0] == "lane" for o in overlaps))
 
-    def test_path_overlap_with_an_open_pr_is_reported(self):
+    def test_pr_only_overlap_is_clear_with_resync(self):
+        # #1078 item 2: an overlap whose ONLY hits are open PRs (no live lane)
+        # is finished work awaiting review/merge — the next lane RESYNCs after it
+        # lands, it does NOT idle. Distinct verdict `clear-with-resync`.
         verdict, overlaps = lo.compute_overlap(
             paths=["watchdog/goal.py"], topics=["x"],
             live_lanes=[],
             open_prs=[{"number": 42, "files": ["watchdog/goal.py"],
                        "title": "goal fix"}])
-        self.assertEqual(verdict, "overlap")
+        self.assertEqual(verdict, "clear-with-resync")
         self.assertTrue(any(o[0] == "pr" for o in overlaps))
+
+    def test_live_lane_overlap_alongside_a_pr_stays_overlap(self):
+        # #1078 item 2: a LIVE-lane hit stays WAIT even when a PR also overlaps —
+        # only PR-ONLY overlaps downgrade to clear-with-resync.
+        verdict, overlaps = lo.compute_overlap(
+            paths=["watchdog/goal.py"], topics=["x"],
+            live_lanes=[{"ref": "worktree-agent-9",
+                         "files": ["watchdog/goal.py"], "topic": "z"}],
+            open_prs=[{"number": 42, "files": ["watchdog/goal.py"],
+                       "title": "goal fix"}])
+        self.assertEqual(verdict, "overlap")
+        self.assertTrue(any(o[0] == "lane" for o in overlaps))
+        self.assertTrue(any(o[0] == "pr" for o in overlaps))
+
+    def test_live_lane_topic_overlap_stays_overlap_even_with_a_pr(self):
+        # #1078 item 2: a lane-TOPIC hit is a live-lane hit too — still WAIT.
+        verdict, overlaps = lo.compute_overlap(
+            paths=["a.py"], topics=["autopilot orchestration rework"],
+            live_lanes=[{"ref": "w1", "files": ["b.py"],
+                         "topic": "autopilot orchestration"}],
+            open_prs=[{"number": 7, "files": ["a.py"], "title": "x"}])
+        self.assertEqual(verdict, "overlap")
 
     def test_disjoint_paths_and_topics_are_clear(self):
         verdict, overlaps = lo.compute_overlap(
@@ -61,6 +86,53 @@ class TestComputeOverlap(TestCase):
             open_prs=[])
         self.assertEqual(verdict, "overlap")
         self.assertTrue(any("topic" in o[0] for o in overlaps))
+
+
+class TestCmdVerdictOutput(TestCase):
+    """#1078 item 2: cmd_lane_overlap prints CLEAR-WITH-RESYNC (not OVERLAP/WAIT)
+    for a PR-only overlap, naming the PR + files + the mandatory Resync directive,
+    still exit 0; a live-lane overlap still prints the WAIT verdict."""
+
+    def _run(self, live_lanes, open_prs):
+        import argparse
+        import contextlib
+        import io
+        import unittest.mock as m
+        home = tempfile.mkdtemp(prefix="lo-cmdhome-")
+        args = argparse.Namespace(paths="watchdog/goal.py", topics="x",
+                                  issue=["1078"])
+        buf = io.StringIO()
+        with m.patch.object(lo, "gather_live_lanes", return_value=live_lanes), \
+             m.patch.object(lo, "gather_open_prs", return_value=open_prs), \
+             m.patch.object(lo, "gather_issue_deps", return_value="satisfied"), \
+             m.patch.dict(os.environ, {"HOME": home}), \
+             contextlib.redirect_stdout(buf):
+            rc = lo.cmd_lane_overlap(args)
+        return rc, buf.getvalue(), home
+
+    def test_pr_only_prints_clear_with_resync_and_exits_0(self):
+        rc, out, home = self._run(
+            live_lanes=[],
+            open_prs=[{"number": 42, "files": ["watchdog/goal.py"],
+                       "title": "goal fix"}])
+        self.assertEqual(rc, 0)
+        self.assertIn("CLEAR-WITH-RESYNC", out)
+        self.assertIn("#42", out)
+        self.assertIn("Resync:", out)
+        self.assertNotIn("WAITS", out)
+        # receipt records the distinct verdict
+        rp = Path(home) / ".claude" / "lane-overlap" / (lo._cwd_key(os.getcwd()) + ".json")
+        self.assertEqual(json.loads(rp.read_text())["verdict"], "clear-with-resync")
+
+    def test_live_lane_overlap_still_prints_wait(self):
+        rc, out, _home = self._run(
+            live_lanes=[{"ref": "worktree-agent-9",
+                         "files": ["watchdog/goal.py"], "topic": "z"}],
+            open_prs=[])
+        self.assertEqual(rc, 0)
+        self.assertIn("OVERLAP", out)
+        self.assertIn("WAITS", out)
+        self.assertNotIn("CLEAR-WITH-RESYNC", out)
 
 
 class TestReceipt(TestCase):
