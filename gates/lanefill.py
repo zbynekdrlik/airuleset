@@ -42,12 +42,6 @@ import gates
 # The mode that enforces (a sequential pane runs one lane at a time; exempt).
 _MODE_PARALLEL = "parallel"
 
-# Lane-occupancy freshness window — the SAME 15 min the compact live-worker
-# reader uses (watchdog.compact.COMPACT_LIVE_WORKER_FRESHNESS_S): a live worker
-# in a long foreground CI-wait writes nothing to its transcript for up to ~9 min,
-# so a shorter window would misread it as dead.
-_FRESHNESS_S = 15 * 60
-
 # A justification line makes an under-filled turn INTENTIONAL — the escape the
 # block message names. `Dependency: #N …` (a real blocking ref) or
 # `Lane-fill: <reason>` (e.g. "all remaining tickets wait on gk review",
@@ -119,8 +113,9 @@ def decide(dispatchable, live, cap, mode, goal_armed, last_marker,
 _REASON = (
     "Zapíš do poslednej správy dôvod, ak je to zámer:\n"
     "  • `Dependency: #N — <čo blokuje>`  (ticket čaká na iný lane / merge)\n"
-    "  • `Lane-fill: <dôvod>`  (napr. \"všetky ostatné čakajú na gk review\", "
-    "\"bounce lane drží box\")\n"
+    "  • `Lane-fill: <dôvod>`  (napr. \"práve som dispatchol lane tento ťah\" "
+    "[živé lane sa ešte nemusia rátať z disku — nedispatchuj znova], \"všetky "
+    "ostatné čakajú na gk review\", \"bounce lane drží box\")\n"
     "Inak dispatchni ďalšie `isolation:\"worktree\"` autopilot-worker lane "
     "(continuous refill, SKILL.md Step 3.2)."
 )
@@ -150,15 +145,30 @@ def _compose(count, live, cap, tickets):
 # _Unreadable → the caller journals + fail-opens.
 # --------------------------------------------------------------------------- #
 def _goal_armed(payload):
-    """True iff the newest `/goal` marker in the session transcript is `set`
-    (the canonical watchdog.goal_scan reader — the SAME marker the other Stop
-    hooks read). A missing / unreadable transcript → not armed → allow (never
-    a false enforce). Lazy import keeps gates package import cheap + stdlib-only."""
+    """True iff the newest `/goal` marker in the session transcript is `set`.
+
+    Uses `seed_goal_marker` (BACKWARD block scan to `GOAL_MARK_SEED_CAP_BYTES`,
+    #517), NOT `scan_goal_markers(off=None)` (which reads only the last
+    `GOAL_MARK_TAIL_BYTES` = 4 MB). This gate TARGETS long-grinding autopilot
+    sessions ("I 19 a len jeden subagent"), whose `/goal` arm marker may have
+    scrolled >4 MB back with no newer marker — a tail-only read would return
+    None → not-armed → the gate silently never fires on exactly those sessions
+    (the deep-arm regression `seed_goal_marker` exists to prevent; the sibling
+    Stop gate `block-main-implementation.sh` full-scans the transcript for the
+    same reason — no other Stop hook uses `scan_goal_markers(off=None)`).
+
+    `found` + `state=='set'` → armed; `found`+cleared / `none-bof` → not armed
+    (allow, silent — genuinely not armed); `unknown-past-cap` (an arm possibly
+    deeper than the cap) → `_Unreadable` → journal + allow, NEVER a silent
+    not-armed and NEVER a fabricated armed=True. A missing transcript → not
+    armed → allow. Lazy import keeps the gates package cheap + stdlib-only."""
     tp = gates.field_of(payload, "transcript_path", "")
     if not tp:
         return False
     import watchdog.goal_scan as goal_scan
-    _off, mark = goal_scan.scan_goal_markers(tp)
+    _off, mark, status = goal_scan.seed_goal_marker(tp)
+    if status == "unknown-past-cap":
+        raise _Unreadable("goal-armed unknown-past-cap")
     return bool(mark) and mark.get("state") == "set"
 
 
@@ -181,11 +191,20 @@ def _cap(cwd):
 
 def _live(payload, cwd):
     """This session's live worker-lane count (`watchdog.count_live_workers`,
-    disk state only — no tmux, no ps)."""
+    disk state only — no tmux, no ps). The freshness window is imported from the
+    single source (`watchdog.compact.COMPACT_LIVE_WORKER_FRESHNESS_S` = 15 min,
+    wide enough that a live worker in a long foreground CI-wait — which writes
+    nothing for up to ~9 min — is not misread as dead) rather than re-declared,
+    so it can never drift. KNOWN RACE (accepted, mitigated in the block message):
+    a worker dispatched in THIS turn whose subagent transcript has not yet landed
+    on disk is under-counted — the block's escape names `Lane-fill: práve som
+    dispatchol` for that instant, and a false block is fail-open (the session
+    continues, never a wrong write)."""
     import watchdog
+    from watchdog.compact import COMPACT_LIVE_WORKER_FRESHNESS_S
     sid = gates.field_of(payload, "session_id", "") or "unknown"
     count, _ev = watchdog.count_live_workers(
-        watchdog.PROJECTS_DIR, cwd, sid, time.time(), _FRESHNESS_S)
+        watchdog.PROJECTS_DIR, cwd, sid, time.time(), COMPACT_LIVE_WORKER_FRESHNESS_S)
     return int(count)
 
 
@@ -252,6 +271,13 @@ def _dispatchable(payload, cwd):
     return _parse_quals_lines(r.stdout)
 
 
+def _exc_desc(e):
+    """A journal-safe exception description: an `_Unreadable`'s OWN (already
+    sanitized) message, else just the type name — a raw exception's str/repr can
+    embed a filesystem path / argv into the stderr journal (#826 leak class)."""
+    return str(e) if isinstance(e, _Unreadable) else type(e).__name__
+
+
 def _journal(why):
     """The fail-open journal line (the gate's stderr channel, like
     questionscope's fail-open writes)."""
@@ -265,6 +291,8 @@ def run(payload, *, goal_fn=None, mode_fn=None, cap_fn=None, live_fn=None,
     fire only on an armed, parallel, ⏳/✅, unjustified turn. Any read error
     journals + allows (fail-open). Never raises."""
     msg = gates.field_of(payload, "last_assistant_message", "")
+    if not isinstance(msg, str):
+        msg = ""                              # a malformed payload never raises
     marker = _last_marker(msg)
     if marker not in ("working", "done"):
         return                                # not a ⏳/✅ turn — allow, no reads
@@ -273,7 +301,7 @@ def run(payload, *, goal_fn=None, mode_fn=None, cap_fn=None, live_fn=None,
     try:
         armed = (goal_fn or _goal_armed)(payload)
     except Exception as e:  # noqa: BLE001
-        _journal("unreadable (goal-armed: %s)" % e)
+        _journal("unreadable (goal-armed: %s)" % _exc_desc(e))
         return
     if not armed:
         return
@@ -281,7 +309,7 @@ def run(payload, *, goal_fn=None, mode_fn=None, cap_fn=None, live_fn=None,
     try:
         mode = (mode_fn or _mode)(cwd)
     except Exception as e:  # noqa: BLE001
-        _journal("unreadable (mode: %s)" % e)
+        _journal("unreadable (mode: %s)" % _exc_desc(e))
         return
     if mode != _MODE_PARALLEL:
         return                                # sequential exempt
@@ -290,7 +318,7 @@ def run(payload, *, goal_fn=None, mode_fn=None, cap_fn=None, live_fn=None,
         live = (live_fn or _live)(payload, cwd)
         count, tickets = (quals_fn or _dispatchable)(payload, cwd)
     except Exception as e:  # noqa: BLE001
-        _journal("unreadable (%s)" % e)
+        _journal("unreadable (%s)" % _exc_desc(e))
         return
     block, _reason = decide(count, live, cap, mode, armed, marker, False)
     if not block:

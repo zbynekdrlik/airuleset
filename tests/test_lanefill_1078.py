@@ -378,5 +378,155 @@ class TestHookAdapter(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
 
 
+class TestGoalArmedDeepScan(unittest.TestCase):
+    """#1078 review (both reviewers, 🟡): `_goal_armed` must use `seed_goal_marker`
+    (BACKWARD block scan to 32 MB), NOT `scan_goal_markers(off=None)` (last-4 MB
+    tail only) — a long autopilot session whose `/goal` arm marker scrolled >4 MB
+    back with no newer marker would otherwise read as not-armed and the gate would
+    silently never fire on exactly the long-grinding sessions it targets."""
+
+    def _transcript(self, tmp, arm_line, pad_bytes):
+        p = os.path.join(tmp, "t.jsonl")
+        pad = json.dumps({"type": "user",
+                          "message": {"content": "x" * 200}}) + "\n"
+        with open(p, "w") as f:
+            f.write(arm_line + "\n")
+            written = 0
+            while written < pad_bytes:
+                f.write(pad)
+                written += len(pad)
+        return p
+
+    def _armset(self):
+        return json.dumps({"type": "user", "message": {"content":
+                          "<local-command-stdout>Goal set: work the backlog"
+                          "</local-command-stdout>"},
+                          "timestamp": "2026-09-19T09:00:00Z"})
+
+    def test_deep_arm_past_4mb_tail_still_reads_armed(self):
+        import tempfile
+        import watchdog.goal_scan as gs
+        with tempfile.TemporaryDirectory() as tmp:
+            # arm at the TOP, then >4 MB of non-marker padding after it.
+            p = self._transcript(tmp, self._armset(), pad_bytes=5 * 1024 * 1024)
+            payload = json.dumps({"transcript_path": p})
+            # the OLD tail-only reader misses it (proves the bug the fix closes):
+            _off, tail_mark = gs.scan_goal_markers(p)
+            self.assertIsNone(tail_mark)
+            # the fix reads it as armed:
+            self.assertTrue(lf._goal_armed(payload))
+
+    def test_cleared_deep_marker_reads_not_armed(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            cleared = json.dumps({"type": "user", "message": {"content":
+                                 "<local-command-stdout>Goal cleared: done"
+                                 "</local-command-stdout>"},
+                                 "timestamp": "2026-09-19T09:00:00Z"})
+            p = self._transcript(tmp, cleared, pad_bytes=5 * 1024 * 1024)
+            self.assertFalse(lf._goal_armed(json.dumps({"transcript_path": p})))
+
+    def test_unknown_past_cap_raises_unreadable_for_journal(self):
+        import unittest.mock as m
+        with m.patch.object(lf, "_goal_armed",
+                            side_effect=lf._Unreadable("goal-armed unknown-past-cap")):
+            buf = io.StringIO()
+            code = None
+            with contextlib.redirect_stderr(buf):
+                try:
+                    lf.run(_payload(WORKING), goal_fn=lf._goal_armed,
+                           mode_fn=lambda c: "parallel", cap_fn=lambda c: 4,
+                           live_fn=lambda p, c: 1, quals_fn=lambda p, c: (6, []))
+                except SystemExit as e:
+                    code = e.code
+            self.assertIsNone(code)                      # fail-open (allow)
+            self.assertIn("not enforced", buf.getvalue())
+            self.assertIn("unknown-past-cap", buf.getvalue())
+
+    def test_missing_transcript_reads_not_armed(self):
+        self.assertFalse(lf._goal_armed(json.dumps({})))
+
+
+class TestListDispatchableEmitter(unittest.TestCase):
+    """#1078 review (both reviewers, 🟡): the real `_emit_list_dispatchable`
+    path is only exercised via the env seam in the lanefill tests; lock its
+    shape / oldest-first ordering / dep-wait exclusion / unmeasurable head, and
+    the load-bearing NO-SKEW invariant (line count == `--count-dispatchable`)."""
+
+    def setUp(self):
+        import cli_quals_cmd
+        self.cqc = cli_quals_cmd
+        self.rows = {5: {"title": "alpha", "createdAt": "2026-01-02"},
+                     3: {"title": "beta", "createdAt": "2026-01-01"},
+                     9: {"title": "gamma", "createdAt": "2026-01-03"}}
+
+    def _emit(self, fn, dep_map, disp):
+        import unittest.mock as m
+        import airuleset
+        buf = io.StringIO()
+        with m.patch.object(self.cqc, "_dep_wait_map_for",
+                            return_value=(dep_map, "montalu", True)), \
+             m.patch.object(airuleset, "dispatchable_numbers",
+                            return_value=(disp, None)), \
+             contextlib.redirect_stdout(buf):
+            fn(self.rows, "/repo")
+        return buf.getvalue()
+
+    def test_list_is_number_tab_title_oldest_first(self):
+        out = self._emit(self.cqc._emit_list_dispatchable, {}, {3, 5, 9})
+        self.assertEqual(out, "3\tbeta\n5\talpha\n9\tgamma\n")
+
+    def test_dep_wait_member_is_excluded(self):
+        # 5 is dep-wait (in dep_map) -> not dispatchable -> not listed.
+        out = self._emit(self.cqc._emit_list_dispatchable, {5: ["#1"]}, {3, 9})
+        self.assertEqual(out, "3\tbeta\n9\tgamma\n")
+
+    def test_no_skew_line_count_equals_count_dispatchable(self):
+        # The whole gate rests on: len(--list-dispatchable lines) == --count.
+        disp = {3, 9}
+        list_out = self._emit(self.cqc._emit_list_dispatchable, {5: ["#1"]}, disp)
+        count_out = self._emit(self.cqc._emit_count_dispatchable, {5: ["#1"]}, disp)
+        n_lines = len([ln for ln in list_out.splitlines() if ln.strip()])
+        self.assertEqual(str(n_lines), count_out.splitlines()[0])
+
+    def test_unmeasurable_head_passthrough(self):
+        import unittest.mock as m
+        buf = io.StringIO()
+        with m.patch.object(self.cqc, "_dep_wait_map_for",
+                            return_value=({}, None, False)), \
+             contextlib.redirect_stdout(buf):
+            self.cqc._emit_list_dispatchable(self.rows, "/repo")
+        self.assertEqual(buf.getvalue().strip(), "unmeasurable:meta read failed")
+
+
+class TestListDispatchableIsTrueGuard(unittest.TestCase):
+    """#1078 review (reviewer A, 🟡): the #1036 Mock-truthy `is True` guard —
+    a `--list` invocation (Mock args with no `list_dispatchable`) must NOT fire
+    `_emit_list_dispatchable`; it must print the ordinary `--list` rows."""
+
+    def _gh(self, *a, **k):
+        args = [str(x) for x in a]
+        if args and args[0] == "label":
+            return '[{"name": "stream:montalu"}]'
+        if "--search" in args:
+            return json.dumps([{"number": 7, "title": "mine",
+                                "createdAt": "2026-07-01T00:00:00Z",
+                                "labels": [{"name": "stream:montalu"}]}])
+        return "[]"
+
+    def test_plain_list_does_not_fire_list_dispatchable(self):
+        import airuleset
+        from authority_testlib import _drive
+        out, _err, _exc = _drive(airuleset.cmd_slice_quals, self._gh,
+                                 authority="branch-merge", user="montalu1",
+                                 login="zbynekdrlik", count=False, list=True)
+        row = [ln for ln in out.splitlines() if ln.startswith("7\t")]
+        self.assertTrue(row, out)
+        # --list emits number<TAB>createdAt<TAB>action<TAB>title (>=3 tabs);
+        # --list-dispatchable would emit number<TAB>title (1 tab). The guard
+        # keeps the former (the #1036 trap would produce the latter).
+        self.assertGreaterEqual(row[0].count("\t"), 3)
+
+
 if __name__ == "__main__":
     unittest.main()
