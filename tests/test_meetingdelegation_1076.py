@@ -190,6 +190,37 @@ class TestCoordinatorTightening(unittest.TestCase):
         self.assertEqual(v, "allow")
 
 
+class TestSkillNameNotOverBlocked(unittest.TestCase):
+    """#1076 delta review: the skill's own directory is literally
+    `skills/meeting-analysis`, so an English `meeting-analysis` phrase-alone arm
+    would block every dev/grep/review/worker dispatch that merely NAMES the skill
+    — including the autopilot-worker dispatch for this very ticket. Those carry
+    NO artifact + NO interpretation verb, so they MUST stay allowed; a real
+    English interpretation ("do the meeting analysis from transcript.txt") still
+    blocks via the artifact + the `anal[yý][sz]` stem."""
+
+    def test_typo_fix_in_skill_dir_allows(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"prompt": "fix a typo in skills/meeting-analysis/SKILL.md"}})
+        self.assertEqual(v, "allow")
+
+    def test_autopilot_worker_dispatch_for_this_ticket_allows(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"subagent_type": "autopilot-worker",
+                                   "prompt": "Work issue #1076: meeting-analysis interpretation gate in airuleset"}})
+        self.assertEqual(v, "allow")
+
+    def test_grep_for_skill_name_allows(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"prompt": "grep -r 'meeting-analysis' the skills dir and list matches"}})
+        self.assertEqual(v, "allow")
+
+    def test_real_english_analysis_with_artifact_still_blocks(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"prompt": "do the meeting analysis from transcript.txt"}})
+        self.assertEqual(v, "block")
+
+
 class TestOverBlockFix(unittest.TestCase):
     """#1076 review F2 (both reviewers): the gate must NOT wedge non-interpretation
     dispatches that merely NAME the meeting-analysis vocabulary."""
