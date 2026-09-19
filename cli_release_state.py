@@ -60,10 +60,18 @@ _SQUASH_PR_RE = re.compile(r"\(#(\d+)\)\s*$")
 # TITLE issue refs (#1083 REWORK) — on the target 3-branch repo (odoo-erp) the
 # implemented ticket number(s) live in the PR TITLE, not the body, and carry NO
 # closing keyword: `#7644 (M1): …`, the multi-ticket `#7631 #7632 …`, and the
-# conventional-commit scope `docs(#7421): …`. So EVERY `#N` in the TITLE is an
+# conventional-commit scope `docs(#7421): …`. So a `#N` in the TITLE is an
 # implemented ticket (the PR's own number is excluded by the caller); a bare
-# number with no `#` ("úloha 980") never matches.
-_TITLE_REF_RE = re.compile(r"#(\d+)")
+# number with no `#` ("úloha 980") never matches. The negative lookbehind
+# `(?<![\w/])` rejects a cross-repo `owner/repo#N` reference while still matching
+# `#7644`, `docs(#7421)` and both of `#7631 #7632` (delta review #1083).
+_TITLE_REF_RE = re.compile(r"(?<![\w/])#(\d+)")
+
+# A revert PR title is `Revert "<original title>"`; the original carries the
+# ticket, but a revert UNDOES the fix, so the reverted (still-open) ticket must
+# STAY in `I`, never be dropped into `M` — the never-falsely-done contract (delta
+# review #1083). A revert title carries NO implemented ticket.
+_REVERT_TITLE_RE = re.compile(r'^\s*Revert\s+"')
 
 # BODY issue refs — GitHub's OWN auto-close semantics ONLY: a CLOSING KEYWORD
 # (close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved) OR a
@@ -229,7 +237,11 @@ def _issue_refs(title, body, exclude_pr):
         the multi-ticket `#7631 #7632` form);
       * BODY — ONLY GitHub closing-keyword refs + `Issue: #N` lines; a bare body
         `#N` is a cross-reference and deliberately NOT counted (see `_CLOSE_KW_RE`)."""
-    refs = {int(m) for m in _TITLE_REF_RE.findall(title or "")}
+    title_text = title or ""
+    # A revert title carries no implemented ticket (its quoted original would
+    # otherwise drop the reverted still-open ticket into M — delta review #1083).
+    refs = set() if _REVERT_TITLE_RE.match(title_text) else {
+        int(m) for m in _TITLE_REF_RE.findall(title_text)}
     body_text = body or ""
     refs |= {int(m.group(1)) for m in _CLOSE_KW_RE.finditer(body_text)}
     refs |= {int(m.group(1)) for m in _ISSUE_LINE_RE.finditer(body_text)}
