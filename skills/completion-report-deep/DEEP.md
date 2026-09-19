@@ -85,26 +85,14 @@ The whole report fits in ~7 lines (audit-summary + Vystup + optional regression 
 
 The Stop hook (`stop-check-prose-violations.sh`) BLOCKS completion reports missing required structure (Goal / What changed / plan-check / review lines, a missing or value-free `✅ Výstup:` line — including a bare `n/a` with no reason and an `n/a` alongside a 🌐/📱 surface —, wrong order, missing 🌐 for multi-env deploys, banned shortcut menus) and HARD-blocks a `🌐` or `📱` line pointing at localhost/127.0.0.1/0.0.0.0. When blocked, fix the report and resend in the same turn. The hook covers all detectable violations; trust it to catch your slips, but write the full template the first time so blocking is rare. It cannot mechanically check whether a client-app project's `🌐 Demo:`/`📱 <platform>:` lines are actually PRESENT — that obligation is yours to apply from the rule above.
 
-#### Compact at your own boundary — DISABLED (#911, owner experiment 2026-09-06)
+#### Compaction — REMOVED (#1084, owner ROZHODNUTÉ 2026-09-19)
 
-**The callback compact mechanism (`compact-request --self`) is DISABLED fleet-wide by the owner flag `~/.claude/watchdog-disable-compact`.** Native Claude Code threshold autocompact is in force instead. Sessions no longer call `compact-request --self` at completion boundaries. `rm ~/.claude/watchdog-disable-compact` re-enables the callback mechanism.
-
-<details><summary>Historical mechanics (kept for re-enable — the flag is a reversible experiment)</summary>
-
-A genuinely-complete `## ✅ Work Complete` report is your own task boundary too — exactly like the autopilot-worker's per-ticket completion (`skills/autopilot/SKILL.md` already teaches the `/goal` loop to call this at each ticket's own boundary). This applies to a served, interactive session — one NOT running an armed `/goal` autopilot loop, which already knows this — because the mechanism itself needed no widening for it: `airuleset.py compact-request --self` (`#225`) is already agent-type-agnostic, resolving the calling pane from `$TMUX_PANE` and that pane's own active transcript regardless of who calls it. What was missing was only the teaching for a served session to reach for it at its own natural boundary.
-
-**Call `compact-request --self` FIRST, as its own tool call, BEFORE writing the report text — never after.** The moment you have internally confirmed the task is genuinely done (about to send `## ✅ Work Complete`, not `⏳`/`❓`), run `python3 ~/devel/airuleset/airuleset.py compact-request --self` — it returns PROMPTLY (a single bounded wait of a couple of seconds at most, never a multi-second hold; if the pane is not safe to type into right now, the request is simply left pending for the periodic sweep — see `watchdog/compact.py`'s own module docstring, #402) — THEN write the report as your turn's actual final content. Calling it AFTER the report would risk the report no longer being your last assistant message, which is what the phone ping and the report-structure gate both key on — putting the call first avoids that question entirely. A non-zero exit just means this session isn't in a recognized tmux pane; ignore it and write the report as normal.
-
-There is no passive fallback — `notify-compact-request.sh` is a PERMANENT NO-OP (#400); make the `--self` call proactively. The Stop hook (`stop-check-prose-violations.sh`) fires a backstop `compact-request --record` when a well-formed report clears its checks (#411), but `--self` FIRST is still the primary mechanism. Only the FULL `## ✅ Work Complete` heading counts as this trigger — never a bare `✅ DONE:` line (`--self` records under the proven-boundary origin, which deliberately SKIPS the #99 no-work and #48 substantiality gates — restricting the trigger to the full heading is what keeps that exemption safe). Under an ARMED `/goal`, when `compact-request --self` prints a boundary-hold command, launch `sleep 45 && echo boundary-hold` via `run_in_background: true` and end the turn `⏳ WORKING: boundary hold` (full mechanism: `skills/autopilot/SKILL.md` Step 5). A served, non-`/goal` session needs none of this — a bare `--self` suffices.
-
-**NEVER right after just answering a question** (the reply is a RESUMPTION point, not a completion boundary — #228). **NEVER mid-work** when the only record lives in this conversation — write it down first (`durable-decisions-to-tickets.md`), then compact. History + rationale — compact-at-boundary mechanics (#822/#855/#411/#400/#228): `.claude/rules-reference/completion-report-history.md` (#859).
-
-</details>
+**Machine-triggered compacts are gone for good** ("už tie compacty vôbec nechcem … samotné deploye na targety by to mali zabezpečiť"). There is no callback mechanism, no request to record, no boundary-hold — no session ever types `/compact`. Claude Code's own threshold autocompact is the only compaction left, and a completed `## ✅ Work Complete` report is simply a natural safe point for it. Write the report and end the turn as normal; there is nothing compact-related to do. History + rationale — the removed compact-at-boundary machinery (#911/#822/#855/#411/#400/#228): `.claude/rules-reference/completion-report-history.md` (#859).
 
 #### Rules summary
 
 - Report at the END of your message, not the beginning.
-- Callback compact (`compact-request --self`) is DISABLED by owner flag (#911) — native autocompact in force; no manual call needed.
+- Compaction is native-autocompact only (#1084) — machine compacts are REMOVED; no manual call, no `/compact` ever typed.
 - Use the FULL template; no prose substitutes.
 - Audits at TOP, Goal / URLs / PR / Question at BOTTOM.
 - Most important content goes LAST (terminal scrolls).

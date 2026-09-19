@@ -209,11 +209,10 @@ class TestRecurrenceConsumesDuplicate(unittest.TestCase):
         logs = compact.compact_sweep(now, run=run, projects_dir=proj,
                                      requests_path=self.reqp,
                                      delivered_path=self.delp)
-        self.assertEqual(run.typed(), [],
-                         "NO 2nd /compact onto an already-compacted boundary")
-        self.assertNotIn(SID, compact.load_compact_requests(self.reqp),
-                         "the duplicate record must be CLEARED, not left pending")
-        self.assertTrue(any("already-compacted" in ln for ln in logs), logs)
+        # #1084: compact_sweep is REMOVED — it never delivers or consumes; the
+        # scenario is moot (no machine compact ever types a 2nd /compact).
+        self.assertEqual(run.typed(), [], "NO /compact ever (#1084)")
+        self.assertTrue(any("machine compacts removed" in ln for ln in logs), logs)
 
     def test_genuine_new_boundary_after_compaction_is_not_consumed(self):
         # Gate safety: a report NEWER than the last compaction is a fresh boundary
@@ -235,10 +234,9 @@ class TestRecurrenceConsumesDuplicate(unittest.TestCase):
         self.assertIn(SID, compact.load_compact_requests(self.reqp),
                       "a genuine new boundary must stay pending (defer), not clear")
 
-    def test_genuine_boundary_past_veto_delivers(self):
-        # Past the 120 s veto, a genuine new boundary (report NEWER than the last
-        # compaction) with an older compaction present must DELIVER — the transcript
-        # gate must not over-consume a real boundary once the floor lifts.
+    def test_genuine_boundary_never_delivers_1084(self):
+        # #1084: compact_sweep is REMOVED — even a genuine new boundary past the
+        # veto is never delivered; native autocompact only.
         proj = self._dir()
         now = 3_000_000.0
         _transcript(proj, CWD, SID,
@@ -250,9 +248,8 @@ class TestRecurrenceConsumesDuplicate(unittest.TestCase):
         logs = compact.compact_sweep(now, run=run, projects_dir=proj,
                                      requests_path=self.reqp,
                                      delivered_path=self.delp)
-        self.assertEqual(run.typed(), ["/compact"],
-                         "a genuine boundary past the veto must be delivered")
-        self.assertTrue(any("-> sent" in ln for ln in logs), logs)
+        self.assertEqual(run.typed(), [], "no /compact ever (#1084)")
+        self.assertTrue(any("machine compacts removed" in ln for ln in logs), logs)
 
 
 class TestSelfSyncAttemptSafety(unittest.TestCase):
@@ -323,21 +320,21 @@ class TestLockNoStaleDuplicateSurvives(unittest.TestCase):
         self.addCleanup(d.cleanup)
         return Path(d.name)
 
-    def test_record_bts_le_delivered_is_cleared_no_send(self):
+    def test_sweep_never_sends_1084(self):
+        # #1084: compact_sweep is REMOVED — it never types /compact regardless of
+        # the record's timestamps (the stale-duplicate scenario is moot).
         proj = self._dir()
         now = 4_000_000.0
-        # a minimal transcript (no compaction observed) isolates the TIMESTAMP belt.
         _transcript(proj, CWD, SID, [_report(now - 40)])
         compact.mark_compact_delivery_ts(SID, now=now - 30, path=self.delp)
-        # a duplicate record whose boundary predates the delivery.
         compact.record_compact_request(SID, CWD, now=now - 40, path=self.reqp,
                                        origin="self-callback")
         run = _StaticRun(CWD, CB_IDLE)
-        compact.compact_sweep(now, run=run, projects_dir=proj,
-                              requests_path=self.reqp, delivered_path=self.delp)
-        self.assertEqual(run.typed(), [], "no 2nd /compact for a stale duplicate")
-        self.assertNotIn(SID, compact.load_compact_requests(self.reqp),
-                         "a record with bts <= delivered ts must not survive")
+        logs = compact.compact_sweep(now, run=run, projects_dir=proj,
+                                     requests_path=self.reqp,
+                                     delivered_path=self.delp)
+        self.assertEqual(run.typed(), [], "no /compact ever (#1084)")
+        self.assertTrue(any("machine compacts removed" in ln for ln in logs), logs)
 
 
 class TestDefensiveClearsQueued(unittest.TestCase):
@@ -391,47 +388,24 @@ class TestLadderRace910(unittest.TestCase):
         self.addCleanup(d.cleanup)
         return Path(d.name)
 
-    def test_late_recheck_catches_race(self):
-        """When the early check misses the compaction (it completed mid-ladder),
-        the LATE re-check at cooldown-supersede must catch it and consume the
-        duplicate — no 2nd /compact typed."""
+    def test_sweep_never_sends_so_the_mid_ladder_race_is_moot(self):
+        """#1084: compact_sweep is REMOVED — it early-returns and never runs the
+        delivery ladder, so the #910 mid-ladder race cannot happen (no 2nd
+        /compact is ever typed, whatever the transcript race)."""
         proj = self._dir()
         now = 6_000_000.0
-        # Transcript with report but NO compaction yet (simulates in-progress).
         _transcript(proj, CWD, SID, [_report(now - 50)])
-        # First delivery 200s ago (past the 120s recently-compacted veto).
         compact.mark_compact_delivery_ts(SID, now=now - 200, path=self.delp)
-        # Backstop record with bts NEWER than delivery (signal (a) fails).
         compact.record_compact_request(SID, CWD, now=now - 190, path=self.reqp,
                                        origin="self-callback")
-        # Mock _compact_boundary_already_compacted to simulate the race:
-        # First call (EARLY check): False — compaction not yet in transcript.
-        # Second call (LATE re-check, if it exists): True — compaction completed.
-        call_count = [0]
-
-        def _racing_compacted(cwd, sid, projects_dir=None):
-            call_count[0] += 1
-            if call_count[0] <= 1:
-                return False   # early check: compaction not visible yet
-            return True        # late check: compaction now visible
-
         with m.patch.object(compact, "_compact_boundary_already_compacted",
-                            side_effect=_racing_compacted):
+                            side_effect=AssertionError("ladder must not run #1084")):
             run = _StaticRun(CWD, CB_IDLE)
             logs = compact.compact_sweep(now, run=run, projects_dir=proj,
                                          requests_path=self.reqp,
                                          delivered_path=self.delp)
-        self.assertEqual(run.typed(), [],
-                         "#910: a compaction that completes mid-ladder must be "
-                         "caught by a LATE re-check — no 2nd /compact typed")
-        self.assertNotIn(SID, compact.load_compact_requests(self.reqp),
-                         "the duplicate must be CLEARED, not left pending")
-        self.assertTrue(any("already-compacted" in ln for ln in logs),
-                        "expected 'already-compacted' consume log: %s" % logs)
-        # O1: verify the LATE re-check site fired (not the early one).
-        sync_lines = self.syncp.read_text().splitlines() if self.syncp.exists() else []
-        self.assertTrue(any("late-recheck" in ln for ln in sync_lines),
-                        "expected 'late-recheck' in sync log: %s" % sync_lines)
+        self.assertEqual(run.typed(), [], "no /compact ever (#1084)")
+        self.assertTrue(any("machine compacts removed" in ln for ln in logs), logs)
 
 
 if __name__ == "__main__":

@@ -75,12 +75,13 @@ class TestRegistryClausesAreContinuous(TestCase):
         self.assertNotIn("NO refill while a batch runs", core)
         self.assertNotIn("IMMEDIATELY while backlog remains", core)
 
-    def test_compact_boundary_is_disabled_911(self):
-        # #911: callback compact DISABLED by owner flag.
+    def test_compact_boundary_is_removed_1084(self):
+        # #1084: machine compacts are REMOVED for good (was #911 DISABLED).
         for p in gr.PROFILES:
             cb = self._clause("compact-boundary", p)
-            self.assertIn("DISABLED", cb)
-            self.assertIn("#911", cb)
+            self.assertIn("REMOVED", cb)
+            self.assertIn("#1084", cb)
+            self.assertNotIn("compact-request", cb)
             # the retired batch/mid-fleet framing must stay gone
             self.assertNotIn("WHOLE batch has returned", cb)
             self.assertNotIn("ZERO live tasks", cb)
@@ -96,7 +97,7 @@ class TestRegistryClausesAreContinuous(TestCase):
         for p in gr.PROFILES:
             line = gr.render(p)
             self.assertIn("CONTINUOUS REFILL", line)
-            self.assertIn("DISABLED", line)
+            self.assertIn("REMOVED", line)   # #1084 machine compacts removed
             self.assertNotIn("BATCH MODE", line)
             self.assertNotIn("ZERO live tasks", line)
 
@@ -113,10 +114,12 @@ class TestSkillContinuousDoctrine(TestCase):
         self.assertIn("refill a returned lane's slot", body)
         self.assertNotIn("no new lane is dispatched while the batch is open", body)
 
-    def test_compact_at_every_integration_cycle(self):
+    def test_machine_compacts_removed_from_the_skill(self):
+        # #1084: the "compact at EVERY integration cycle" doctrine is GONE —
+        # machine compacts are removed; the SKILL says so and never types /compact.
         body = read(SKILL)
-        self.assertIn("compact at EVERY integration cycle", body)
-        self.assertIn("live lanes or not", body)
+        self.assertNotIn("compact at EVERY integration cycle", body)
+        self.assertIn("machine compacts are REMOVED", body)
         self.assertNotIn("DRAINED BATCH BOUNDARY", body)
 
     def test_the_lane_count_is_sized_to_box_and_backlog(self):
@@ -136,14 +139,16 @@ class TestSkillContinuousDoctrine(TestCase):
 
 
 class TestSkillBakesInTheResearchFacts(TestCase):
-    """The STEP-0 experiment fact must be in the doctrine so a future editor
-    cannot re-introduce the batch veto premise."""
+    """#1084: machine compacts are REMOVED, so the STEP-0 "compact over live
+    lanes is safe" experiment premise is OBSOLETE and must be GONE from the
+    doctrine — only the still-true "a native autocompact preserves the armed
+    /goal" fact remains."""
 
-    def test_compact_over_live_lanes_is_safe(self):
+    def test_the_step0_compact_over_live_lanes_premise_is_gone(self):
         body = read(SKILL)
-        self.assertIn("STEP-0", body)
-        self.assertIn("task registry", body)
-        # the old affirmative "NEVER break task handles" veto claim is gone
+        # #1084: there is no machine compact over live lanes to justify anymore.
+        self.assertNotIn("STEP-0", body)
+        self.assertNotIn("compact over live lanes", body)
         self.assertNotIn("NEVER break task handles", body)
 
     def test_goal_survives_a_normal_compaction_is_documented(self):
@@ -151,10 +156,10 @@ class TestSkillBakesInTheResearchFacts(TestCase):
         self.assertIn("PRESERVES the armed `/goal`", body)
         self.assertIn("goal.md", body)
 
-    def test_cc_version_of_the_experiment_is_cited(self):
-        # the STEP-0 experiment ran on this CC build; the doctrine cites it so a
-        # future re-check knows the baseline the "safe" claim was proven at.
-        self.assertIn("CC 2.1.258", read(SKILL))
+    def test_the_cc_step0_experiment_citation_is_gone(self):
+        # #1084: the STEP-0 experiment citation is obsolete — machine compacts
+        # are removed, so the "safe over live lanes" baseline is not cited anymore.
+        self.assertNotIn("CC 2.1.258", read(SKILL))
 
 
 class TestNoBatchReversion(TestCase):

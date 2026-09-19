@@ -1942,111 +1942,21 @@ def _compact_sync_attempt(sid, cwd, origin, run=None, projects_dir=None,
 def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
                   requests_path=None, delivered_path=None, state=None,
                   handled=None):
-    """The periodic re-evaluation of every PENDING request (the thinned
-    replacement for the old job 14) — wired at the SAME `run_once()` slot.
-    Re-checks each still-pending request's SAME unmodified conditions
-    every sweep; nothing here overrides a hard DELIVERY condition, but the
-    #741 hold branch below DOES refresh the request's `ts` on any
-    hold-extend word. Otherwise a request that keeps failing a condition sits
-    until it clears (delivered) or the age cap (condition e) discards it — "no
-    infinite waiting" is the cap's job, bounded per `_COMPACT_HOLD_EXTEND_WORDS`.
+    """REMOVED (#1084, 2026-09-19, owner ROZHODNUTE): machine-triggered compacts
+    are gone for good -- "uz tie compacty vobec nechcem ... samotne deploye na
+    targety by to mali zabezpecit". No pending request is ever delivered, no
+    owner flag is read, no enable path exists; Claude Code's own threshold
+    autocompact is the ONLY compaction left. The job-14 slot stays addressable
+    and journals ONE removed line each sweep, so `journalctl` proves the
+    fleet-wide guarantee on every box with no per-box marker to miss (the
+    forestshop-dev slip that filed this ticket).
 
-    `handled` (optional, a `set()`): every sid this sweep actually SENT to
-    is added — job 20 (goal re-arm) reads this so it never types a
-    keystroke burst into a pane that just received `/compact` this same
-    sweep."""
-    logs = []
-    if watchdog._owner_disabled("compact"):
-        logs.append("compact jobs DISABLED by owner flag "
-                    "~/.claude/watchdog-disable-compact (rm to re-enable)")
-        return logs
-    reqs = load_compact_requests(requests_path)
-    for sid, entry in list(reqs.items()):
-        if not isinstance(entry, dict):
-            # #741 -- a corrupt NON-dict entry can never be delivered or expired
-            # (the age cap reads `entry.get("ts")` inside the dict branch), so a
-            # silent `continue` would leave it pending FOREVER -- and since #741
-            # the writer-side latch would then HOLD every goal writer for that sid
-            # forever while `--status`/`has_pending_request` (both dict-guarded)
-            # read NONE. DROP it loudly + clear, the goal_sweep #624 precedent, so
-            # writers and session agree the store is empty for that sid.
-            if not dry_run:
-                clear_compact_request(sid, path=requests_path)
-            logs.append("DROP (compact-sweep) sid=%s -> drop:non-dict-entry" % sid)
-            continue
-        cwd = entry.get("cwd", "")
-        origin = entry.get("origin") or None
-        if dry_run:
-            # #848 -- the #844 live-hold cap is retired; a boundary compact
-            # delivers over live lanes, so there is no force to surface.
-            held = _safe_age(now, entry.get("bts"))
-            held_s = "?" if held is None else "%d" % int(held)
-            logs.append("DRY-RUN compact-sweep would evaluate sid=%s "
-                        "(boundary held=%ss)" % (sid, held_s))
-            continue
-        # `request_ts` is the entry's own `ts` anchor -- REQUIRED here so
-        # condition (e), the hard age cap, is actually enforced by the sweep
-        # (passing None would silently disable expiry for every request only
-        # ever evaluated by the periodic sweep). `ts` is REFRESHABLE (#599
-        # supersede + #727 hold-extend); the sweep re-reads it each call, so the
-        # hold branch below advances it. The #238 too-young floor derived from
-        # the SAME value is a no-op at ~60s sweep cadence.
-        word = deliver_compact(sid, cwd, origin=origin, run=run,
-                               projects_dir=projects_dir,
-                               delivered_path=delivered_path, now=now,
-                               state=state, request_ts=entry.get("ts"),
-                               request_bts=entry.get("bts"), from_sweep=True)
-        if word in _COMPACT_TERMINAL_WORDS:
-            clear_compact_request(sid, path=requests_path)
-        if word == "sent":
-            logs.append("OK (compact-sweep) sid=%s -> sent" % sid)
-            if handled is not None:
-                handled.add(sid)
-        elif word == "queued":
-            # #855: DEAD by construction — `deliver_compact` no longer returns
-            # `queued` (a residual-race queued outcome is treated as a real send,
-            # so it returns "sent" and is handled by the branch above). Kept as a
-            # DEFENSIVE branch: if a `queued` ever leaked, a real keystroke landed
-            # this sweep so job 20 must avoid a burst into the pane (handled), and
-            # the request is TERMINAL (`_COMPACT_TERMINAL_WORDS`).
-            logs.append("OK (compact-sweep) sid=%s -> queued "
-                        "(#855 defensive — deliver_compact no longer returns "
-                        "queued)" % sid)
-            if handled is not None:
-                handled.add(sid)
-        elif word == "already-compacted":
-            # #855-recurrence: a DUPLICATE self-callback record for an
-            # already-compacted boundary — CONSUMED (cleared above), NO keystroke.
-            # An explicit #486 decision log so the forensic trail names WHY the
-            # duplicate was dropped rather than delivered.
-            logs.append("CONSUMED (compact-sweep) sid=%s -> already-compacted "
-                        "(#855 duplicate of an already-compacted boundary)" % sid)
-        elif word == "expired":
-            # #523: name the ORIGIN on the LAPSE journal line too (the
-            # `deliver_compact` sync-log record above already does). Post-#610
-            # the sole producer is `self-callback`; a lapse now means a
-            # gone-quiet session (no new boundary in 30 min, #599), not a
-            # failure — the origin is what lets triage tell the two apart.
-            logs.append("LAPSE (compact-sweep) sid=%s origin=%s "
-                        "(age > cap, discarded)" % (sid, origin or "-"))
-        elif word in _COMPACT_HOLD_EXTEND_WORDS:
-            # #741 hold-extend: an actively-held-boundary veto (recent-human /
-            # busy — the #741 hold turn) PROVES the boundary is being HELD ->
-            # REFRESH `ts` so the 30-min cap never expires a still-held boundary
-            # out from under it (#848 removed the #727 live-own-task hold words).
-            # `bts` (the ORIGINAL boundary) is untouched, so the line reports
-            # how long the boundary has been held; a refresh WRITE failure (or a
-            # vanished entry) logs HOLD-FAIL and behaves as an ordinary SKIP --
-            # the next sweep re-tries the refresh.
-            held = _safe_age(now, entry.get("bts"))
-            held_s = "?" if held is None else "%d" % int(held)
-            if _touch_compact_request_ts(sid, now, path=requests_path):
-                logs.append("HOLD (compact-sweep) sid=%s -> %s "
-                            "(ts refreshed, boundary held %ss)"
-                            % (sid, word, held_s))
-            else:
-                logs.append("HOLD-FAIL (compact-sweep) sid=%s -> %s "
-                            "(ts NOT refreshed)" % (sid, word))
-        else:
-            logs.append("SKIP (compact-sweep) sid=%s -> %s" % (sid, word))
-    return logs
+    `run` / `dry_run` / `requests_path` / `delivered_path` / `state` / `handled`
+    are kept in the signature so the run_once call site (`_job_compact_sweep`)
+    and any test caller need no change; none is read any more. L2 (a later lane)
+    deletes `deliver_compact` and the request store this early return orphans --
+    the compaction OBSERVATION helpers (`_pane_compacting`, `COMPACTING_MARKER`,
+    the transcript compaction records lane-reconcile / the goal jobs read) stay.
+    """
+    return ["compact: machine compacts removed (owner 2026-09-19, #1084) "
+            "— native autocompact only"]

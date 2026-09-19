@@ -417,7 +417,11 @@ class TestOwnerKillSwitchGates(unittest.TestCase):
     `and not ...` conjunct goes RED here."""
 
     def test_owner_disabled_suppresses_only_the_compound_gated_jobs(self):
-        suppressed = {"compact_sweep", "goal_sweep",
+        # #1084: compact_sweep is NO LONGER gated by the owner kill-switch — the
+        # compact disable flag is gone (machine compacts removed in code), so the
+        # slot always runs and just journals the removed line. Only the goal jobs
+        # remain kill-switch-gated.
+        suppressed = {"goal_sweep",
                       "goal_dark_watch", "goal_question_repoke_watch",
                       "goal_lane_sweep"}
         # Drive with both "goal" and "compact" reporting owner-disabled.

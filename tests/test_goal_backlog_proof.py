@@ -673,18 +673,18 @@ class TestBatchDispatchMandate(TestCase):
                          "master /goal template still carries the retired DRAIN WINDOW")
 
     def test_the_master_template_reminder_is_continuous_not_batch(self):
-        # #911: callback compact DISABLED by owner flag; the COMPACT clause
-        # must name the disabled state + #911, and must NOT re-introduce the
-        # drained-batch / zero-live-tasks framing or a fixed 3-5 cap.
+        # #1084: machine compacts are REMOVED; the COMPACT clause must name the
+        # removed state + #1084, and must NOT re-introduce the drained-batch /
+        # zero-live-tasks framing or a fixed 3-5 cap.
         full = master_goal_lines()[0]
         start = full.index("COMPACT:")
         after = full[start + len("COMPACT:"):]
         m = re.search(r"LANE 4", after)
         clause = (after[:m.start()] if m else after).lower()
-        self.assertIn("disabled", clause,
-                      "master COMPACT clause must name the disabled state (#911)")
-        self.assertIn("#911", clause,
-                      "master COMPACT clause must cite #911")
+        self.assertIn("removed", clause,
+                      "master COMPACT clause must name the removed state (#1084)")
+        self.assertIn("#1084", clause,
+                      "master COMPACT clause must cite #1084")
         self.assertIn("native autocompact", clause,
                       "master COMPACT clause must name the native autocompact replacement")
         self.assertNotIn("zero live", clause,
@@ -749,14 +749,14 @@ class TestFullAuthorityTemplateCallsTheSelfCallback(TestCase):
     form already lives in the skill body's own Step 3.1) — never any
     enforcement-bearing text."""
 
-    def test_every_template_names_compact_disabled(self):
-        # #911: callback compact DISABLED by owner flag; every /goal template
-        # must name the disabled state and the native autocompact replacement.
+    def test_every_template_names_compact_removed(self):
+        # #1084: machine compacts are REMOVED; every /goal template must name the
+        # removed state and #1084.
         for line in goal_lines():
             lower = line.lower()
-            self.assertIn("disabled", lower,
-                          "goal template must name the disabled state (#911)")
-            self.assertIn("#911", lower)
+            self.assertIn("removed", lower,
+                          "goal template must name the removed state (#1084)")
+            self.assertIn("#1084", lower)
 
     def test_every_template_bans_retired_batch_framing(self):
         # #848 CONTINUOUS REFILL retired #723's drained-batch gating; #911

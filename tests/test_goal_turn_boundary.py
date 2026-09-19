@@ -46,15 +46,11 @@ class TestGoalTemplatesEndTurnBeforeNextTicket(TestCase):
             self.assertNotIn("immediately pick the next assigned issue.", line)
 
     def test_every_template_ends_the_turn_before_the_next_ticket(self):
-        # #848 CONTINUOUS REFILL retires the #723 drained-batch-boundary tail: the
-        # compact fires at EVERY integration cycle, live lanes or not. #741's
-        # HOLD-until-delivered ordering half survives (the armed goal does NOT
-        # dispatch a new lane before the compact runs).
+        # #1084: machine compacts are REMOVED — no HOLD tail, no compact command.
+        # Every template ends the turn with the report and carries the REMOVED note.
         for line in goal_lines():
             self.assertIn("END the turn", line)
-            # #911: callback compact disabled — the HOLD tail is retired;
-            # every template must carry the DISABLED note instead.
-            self.assertIn("Callback compact is DISABLED by owner flag (#911", line)
+            self.assertIn("Machine compacts are REMOVED (#1084)", line)
             self.assertIn("✅ DONE:", line)
             # the retired batch-boundary tail must be gone
             self.assertNotIn("WHOLE batch has returned", line)
@@ -62,13 +58,12 @@ class TestGoalTemplatesEndTurnBeforeNextTicket(TestCase):
             self.assertNotIn("do NOT integrate a SECOND branch this turn", line)
             self.assertNotIn("do NOT hand off a SECOND branch this turn", line)
 
-    def test_every_template_holds_before_a_new_lane(self):
-        # #848: the tail HOLDS each later goal turn until the compact runs,
-        # dispatching no NEW LANE first (continuous refill; was "no next batch").
+    def test_every_template_has_no_compact_hold(self):
+        # #1084: machine compacts are REMOVED — the templates say never a compact
+        # HOLD and never a compact command; the old HOLD ordering is gone.
         for line in goal_lines():
-            # #911: the HOLD/no-new-lane-first compact ordering is retired with
-            # the callback compact itself; templates must say NOT to hold.
-            self.assertIn("do NOT HOLD for a compact", line)
+            self.assertIn("never a compact HOLD", line)
+            self.assertNotIn("do NOT HOLD for a compact", line)
             self.assertNotIn("no new lane first", line)
             self.assertNotIn("no next batch first", line)
             self.assertNotIn("compacting then dispatching the next batch", line)

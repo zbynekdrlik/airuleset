@@ -65,7 +65,7 @@ MINIMAL_MODULES = (
 
 # Hooks disabled in BOTH conditions: they reach the real user's phone or the
 # real compaction bookkeeping.  Nothing about them is under measurement.
-NEUTRALISED_HOOKS = ("notify-discord", "notify-api-error", "notify-compact-request")
+NEUTRALISED_HOOKS = ("notify-discord", "notify-api-error")  # notify-compact-request removed #1084
 
 # Hook disabled in the MINIMAL condition ONLY: its sole function is to inject
 # rule bodies, so leaving it on would make "minimal" not minimal.  It blocks

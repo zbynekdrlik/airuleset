@@ -1,37 +1,19 @@
-"""#411 -- a served/stream session's own genuine `## ✅ Work Complete` report
-is the ONLY durable proof (per `message-status-marker.md`'s "Compact at your
-own boundary" contract) that a `/compact` boundary genuinely happened for a
-NON-worker session. After #400 removed the passive text-sniffing Stop-hook
-fallback entirely (a permanent no-op), `compact-request --self` is the ONLY
-mechanism left that records this boundary -- but nothing MECHANICAL ever
-calls it. `completion-report.md` only tells the SESSION to call it as its own
-last tool call BEFORE the report text; a sonnet-tier stream session (the live
-david@subdev incident this ticket was filed from) reliably skips that step.
+"""#1084 -- machine-triggered compacts are REMOVED for good (owner ROZHODNUTÉ
+2026-09-19). The Stop hook `hooks/stop-check-prose-violations.sh` USED to fire a
+best-effort `airuleset.py compact-request --record --origin self-callback` call
+once a served/stream session's `## ✅ Work Complete` report cleared every
+hard-violation check (#411 -- it was the SOLE mechanical `/compact` recorder
+after #610 retired the SubagentStop channel and #400 retired the passive
+fallback). That block is DELETED: nothing mechanical records or delivers a
+`/compact` any more -- Claude Code's own threshold autocompact is the only
+compaction left.
 
-THE FIX (this `--record --origin self-callback` path is now the SOLE mechanical
-`/compact` recorder -- #610 RETIRED the SubagentStop worker-boundary channel
-that used to do the identical thing): `hooks/stop-check-prose-violations.sh` already computes
-`IS_COMPLETION_HEADING` -- the SAME canonical `^## ✅ Work Complete|^✅ Work
-Complete` classifier `watchdog/compact.py`'s own `_COMPACT_COMPLETION_
-HEADING_RX` anchors on -- as part of validating the report's own structure.
-Once a turn reaches the "no hard violations" tail (the report is genuinely
-well-formed), a completion-heading turn is by construction a real boundary,
-so the hook fires ONE best-effort `airuleset.py compact-request --record
---session <sid> --cwd <cwd> --origin self-callback` call -- the SAME CLI
-entry point + the SAME `self-callback` proven-boundary origin `--self`
-already uses, so it flows through the exact same delivery path (post-#599:
-the `⏳`-marker veto and its self-callback-only #425 exemption were removed,
-so the origin now only affects the #188 unresumed-api-error gate). Never
-`--self` itself: that resolves the pane via `$TMUX_PANE`, which is correct
-for a session calling it as ITS OWN mid-turn tool call, but a HOOK process
-has no reliable `$TMUX_PANE` of its own -- `--record` takes the payload's own
-`session_id`/`cwd` directly (as the SubagentStop channel did before #610).
-
-These tests fake `python3` on PATH (the hook resolves `airuleset.py` via
-`BASH_SOURCE`-relative path, then shells out to it) so no real request state
-is ever touched, and assert on the FAKE'S OWN INVOCATION LOG -- never on
-`~/.claude/compact-requests.json`, which stays completely untouched by this
-test file regardless of how the fake behaves.
+This file is now the INVERTED lock: a genuine `## ✅ Work Complete` report (and
+every other message) must fire NO compact-request call at all. The harness is
+unchanged -- it fakes `python3` on PATH (the hook resolves `airuleset.py` via a
+`BASH_SOURCE`-relative path, then shells out to it) and asserts on the fake's own
+invocation log, never on `~/.claude/compact-requests.json`, which this test file
+never touches.
 """
 
 import json
@@ -149,29 +131,24 @@ class _HookCase(unittest.TestCase):
         return [ln for ln in self._calls() if "compact-request" in ln]
 
 
-class TestCompactRequestFiresOnGenuineCompletion(_HookCase):
-    """The core positive case -- #411's own reported gap."""
+class TestNoCompactRequestOnGenuineCompletion(_HookCase):
+    """#1084 -- the core INVERTED case: a genuine clean `## ✅ Work Complete`
+    report must fire NO compact-request call (it used to fire exactly one)."""
 
-    def test_clean_completion_report_triggers_a_compact_request_call(self):
+    def test_clean_completion_report_fires_no_compact_request_call(self):
         r = self._run(CLEAN_COMPLETION_REPORT, session_id="pcb-clean-1",
                       cwd="/home/x/devel/some-repo")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNotIn('"decision"', r.stdout, "a clean report must never block")
-        calls = self._compact_request_calls()
         self.assertEqual(
-            len(calls), 1,
-            "expected exactly one compact-request call, got: %r" % calls)
-        self.assertIn("--record", calls[0])
-        self.assertIn("--session pcb-clean-1", calls[0])
-        self.assertIn("--cwd /home/x/devel/some-repo", calls[0])
-        self.assertIn("--origin self-callback", calls[0])
+            self._compact_request_calls(), [],
+            "machine compacts are removed (#1084): no compact-request call may fire")
 
-    def test_the_call_never_reaches_stdout_or_blocks(self):
-        """Best-effort: the hook's own decision output must be completely
-        unaffected by whatever the compact-request call prints/returns."""
+    def test_a_clean_report_still_passes_without_blocking(self):
+        """The removal must not disturb the hook's own decision output -- a clean
+        report still ends cleanly, it just records no boundary."""
         r = self._run(CLEAN_COMPLETION_REPORT)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertNotIn("sent", r.stdout)
         self.assertNotIn('"decision"', r.stdout)
 
 

@@ -28,7 +28,6 @@ boundaries, not off a low `autoCompactWindow`).
 
 import json
 import os
-import re
 import sys
 import time
 import types
@@ -1926,382 +1925,64 @@ class TestResolveSelfPane(unittest.TestCase):
         self.assertEqual(pid, "%404")
         self.assertEqual(cwd, "")
         self.assertEqual(sid, "")
-
-
 # --------------------------------------------------------------------------- #
-# 6. compact_sweep — the periodic re-evaluation loop.
+# 6. compact_sweep + hold-extend — REMOVED (#1084). Machine compacts are gone in
+#    code: compact_sweep returns at its top with the removed journal line and
+#    never delivers, holds, or re-evaluates. Canonical L1 lock lives in
+#    tests/test_compact_removed_1084.py; these are the in-file inverted locks.
+#    (deliver_compact / the request store stay defined — L2 deletes them.)
 # --------------------------------------------------------------------------- #
 
 class TestCompactSweep(unittest.TestCase):
     CWD = "/home/newlevel/devel/sweeptest"
+    REMOVED_LINE = 'compact: machine compacts removed (owner 2026-09-19, #1084) — native autocompact only'
 
     def setUp(self):
         self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
 
-    def _dir(self):
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        return d.name
-
-    def test_sends_and_clears_a_pending_request(self):
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, "sess-a")
+    def test_journals_removed_line_and_never_delivers(self):
         now = time.time()
         compact.record_compact_request("sess-a", self.CWD, now=now,
-                                       path=self.reqp, origin="subagent-stop")
-        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
-        handled = set()
-        # +5s: the periodic sweep runs SOME time after the record -- a
-        # same-instant evaluation would (correctly) trip the #238 too-young
-        # floor, exactly like a real synchronous attempt right after record.
-        logs = compact.compact_sweep(now + 5, run=tmux, projects_dir=proj,
-                                     requests_path=self.reqp, delivered_path=self.delp,
-                                     handled=handled)
-        self.assertIn("sess-a", handled)
-        self.assertIn("/compact", tmux.typed_texts())
-        self.assertNotIn("sess-a", compact.load_compact_requests(self.reqp))
-        self.assertTrue(any("sent" in ln for ln in logs))
-
-    def test_leaves_a_blocked_request_pending(self):
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, "sess-b")
-        compact.record_compact_request("sess-b", self.CWD, now=time.time(),
-                                       path=self.reqp, origin="subagent-stop")
-        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_DRAFT_CAP)
-        compact.compact_sweep(time.time(), run=tmux, projects_dir=proj,
-                              requests_path=self.reqp, delivered_path=self.delp)
-        self.assertIn("sess-b", compact.load_compact_requests(self.reqp))
-
-    def test_805_self_callback_supersedes_cooldown_via_the_sweep(self):
-        # #805-review 🟡: the #805 supersede must work through the PRODUCTION
-        # `compact_sweep` origin-threading path, not only a direct deliver_compact
-        # call. Mutating compact_sweep's `origin=origin` to `origin=None` would
-        # leave the two direct #805 tests green while the owner's reported
-        # second-batch-boundary scenario regresses -- this test pins it: a
-        # self-callback request behind an in-window cooldown is DELIVERED by the
-        # sweep, logging BOUNDARY-PRIORITY.
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, "sess-sc")
-        now = time.time()
-        compact.mark_compact_delivery_ts("sess-sc", now=now - 300, path=self.delp)  # #855: >120s, clears the recently-compacted veto
-        compact.record_compact_request("sess-sc", self.CWD, now=now,
                                        path=self.reqp, origin="self-callback")
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
-        handled = set()
-        compact.compact_sweep(now + 5, run=tmux, projects_dir=proj,
-                              requests_path=self.reqp,
-                              delivered_path=self.delp, handled=handled)
-        self.assertIn("/compact", tmux.typed_texts())
-        self.assertNotIn("sess-sc", compact.load_compact_requests(self.reqp))
-        self.assertIn("BOUNDARY-PRIORITY", self.syncp.read_text())
-
-    def test_expired_request_is_discarded_not_retried(self):
-        proj = self._dir()
-        now = time.time()
-        compact.record_compact_request("sess-c", self.CWD,
-                                       now=now - compact.COMPACT_REQUEST_MAX_AGE_S - 1,
-                                       path=self.reqp, origin="subagent-stop")
-        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
-        compact.compact_sweep(now, run=tmux, projects_dir=proj,
-                              requests_path=self.reqp, delivered_path=self.delp)
-        self.assertNotIn("sess-c", compact.load_compact_requests(self.reqp))
+        with m.patch.object(compact, "deliver_compact",
+                            side_effect=AssertionError("must not deliver #1084")):
+            logs = compact.compact_sweep(now + 5, run=tmux, projects_dir=None,
+                                         requests_path=self.reqp,
+                                         delivered_path=self.delp)
         self.assertEqual(tmux.sent, [])
+        self.assertEqual(logs, [self.REMOVED_LINE])
+        # the request is never read or consumed by the sweep any more
+        self.assertIn("sess-a", compact.load_compact_requests(self.reqp))
 
-    def test_expired_lapse_log_names_the_origin(self):
-        # #523: the journal LAPSE line for a discarded request must name its
-        # origin, so a lapsed subagent-stop request (the by-design #425
-        # outcome on a saturated `⏳` supervisor) is a 30-second triage read
-        # rather than a re-investigation. #486 explicit-decision-log guardrail.
-        proj = self._dir()
-        now = time.time()
-        compact.record_compact_request("sess-lapse", self.CWD,
-                                       now=now - compact.COMPACT_REQUEST_MAX_AGE_S - 1,
-                                       path=self.reqp, origin="subagent-stop")
-        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
-        logs = compact.compact_sweep(now, run=tmux, projects_dir=proj,
-                                     requests_path=self.reqp, delivered_path=self.delp)
-        self.assertTrue(any("LAPSE" in ln and "origin=subagent-stop" in ln
-                            for ln in logs),
-                        "LAPSE line must name the request origin: %r" % logs)
-
-    def test_dry_run_sends_nothing(self):
-        proj = self._dir()
+    def test_dry_run_also_delivers_nothing(self):
         compact.record_compact_request("sess-d", self.CWD, now=time.time(),
-                                       path=self.reqp, origin="subagent-stop")
+                                       path=self.reqp, origin="self-callback")
         tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
-        compact.compact_sweep(time.time(), run=tmux, dry_run=True, projects_dir=proj,
-                              requests_path=self.reqp, delivered_path=self.delp)
+        logs = compact.compact_sweep(time.time(), run=tmux, dry_run=True,
+                                     requests_path=self.reqp)
         self.assertEqual(tmux.sent, [])
-        self.assertIn("sess-d", compact.load_compact_requests(self.reqp))
+        self.assertEqual(logs, [self.REMOVED_LINE])
 
-    def test_owner_disabled_skips_the_whole_sweep(self):
-        proj = self._dir()
-        compact.record_compact_request("sess-e", self.CWD, now=time.time(),
-                                       path=self.reqp, origin="subagent-stop")
-        tmux = DeliverCompactFakeTmux([("%9", "claude", self.CWD, "111")], CB_IDLE_CAP)
-        with m.patch.object(wd, "_owner_disabled", return_value=True):
-            logs = compact.compact_sweep(time.time(), run=tmux, projects_dir=proj,
-                                         requests_path=self.reqp, delivered_path=self.delp)
-        self.assertEqual(tmux.sent, [])
-        self.assertTrue(any("DISABLED" in ln for ln in logs))
-
-
-# --------------------------------------------------------------------------- #
-# 6b. #727 hold-extend — a structured live-own-task veto during the periodic
-#     sweep REFRESHES the pending request's `ts` (never `bts`/`cwd`/`origin`),
-#     so the 30-min age cap measures "time since the claim was last JUSTIFIED";
-#     a >30-min batch never loses its boundary compact, while a wedged (stale)
-#     lane stops the veto -> stops the refresh -> the cap resumes.
-# --------------------------------------------------------------------------- #
 
 class TestCompactHoldExtend727(unittest.TestCase):
-    CWD = "/home/newlevel/devel/holdextend727"
-    SID = "sess-hold-727"
+    """#727/#741 hold-extend was a compact_sweep behaviour — REMOVED with the
+    sweep's delivery loop (#1084). The sweep never refreshes a request's ts."""
 
     def setUp(self):
         self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
 
-    def _dir(self):
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        return d.name
-
-    def _sweep(self, proj, now, cap=CB_IDLE_CAP, cap_seq=()):
-        tmux = DeliverCompactFakeTmux(
-            [("%9", "claude", self.CWD, "111")], cap, cap_seq=cap_seq)
-        logs = compact.compact_sweep(
-            now, run=tmux, projects_dir=proj, requests_path=self.reqp,
-            delivered_path=self.delp)
-        return logs, tmux
-
-    def test_848_a_live_lane_delivers_immediately_no_hold(self):
-        # #848 FLIP (was test_727_live_tasks_hold_carries_claim_across_a_long_batch):
-        # the live-tasks veto is REMOVED, so a fresh live worker lane no longer
-        # HOLDS the boundary claim — the very first sweep DELIVERS the /compact
-        # over the live lane (the batch no longer waits to drain).
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, self.SID)
-        real_now = time.time()
-        T = 1_000_000.0
-        compact.record_compact_request(self.SID, self.CWD, now=T,
-                                       path=self.reqp, origin="self-callback")
-        # A FRESH live worker lane (mtime = real now) — no longer a veto.
-        _write_subagent_transcript(proj, self.CWD, self.SID,
-                                   mtime=real_now, agent_id="ghost848")
-        logs, tmux = self._sweep(proj, T + 29 * 60)
-        self.assertIn("/compact", tmux.typed_texts(),
-                      "a live lane must deliver immediately (#848): %r" % logs)
-        self.assertTrue(any("-> sent" in ln for ln in logs),
-                        "the sweep must log a SEND: %r" % logs)
-        self.assertFalse(any("skip:live-tasks" in ln for ln in logs),
-                         "the live-tasks veto is gone: %r" % logs)
-        self.assertNotIn(self.SID, compact.load_compact_requests(self.reqp))
-
-    def test_727_stale_lanes_do_not_extend_the_hold(self):
-        # The wedge-bound: a wedged worker's transcript STOPS growing -> its lane
-        # goes stale -> the live-tasks veto stops firing -> `ts` stops refreshing
-        # -> the age cap resumes. Here the lane is stale at T+29min, so the sweep
-        # PASSES the live-tasks check (no veto = the returned word is NOT a
-        # hold-extend word) and only skips for a raced re-capture. `ts` is NOT
-        # refreshed, so at T+31min the claim EXPIRES (age > cap) -- exactly what
-        # keeps a genuinely-wedged batch from holding a claim forever.
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, self.SID)
-        real_now = time.time()
-        T = 1_000_000.0
-        compact.record_compact_request(self.SID, self.CWD, now=T,
-                                       path=self.reqp, origin="self-callback")
-        # STALE lane (mtime past the 15-min freshness window) -> reads NOT live.
-        _write_subagent_transcript(proj, self.CWD, self.SID,
-                                   mtime=real_now - 20 * 60, agent_id="stale727")
-        # First capture idle passes every early gate + the (non-vetoing) stale
-        # live-tasks check; the re-capture is busy -> skip:raced (NOT a hold
-        # word, so `ts` is not refreshed).
-        logs1, _ = self._sweep(proj, T + 29 * 60,
-                               cap_seq=(CB_IDLE_CAP, CB_BUSY_CAP))
-        self.assertTrue(any("skip:raced" in ln for ln in logs1),
-                        "stale lane must pass live-tasks, skip on the race: %r"
-                        % logs1)
-        self.assertFalse(any("skip:live-tasks" in ln for ln in logs1),
-                         "a stale lane must NOT veto on live-tasks: %r" % logs1)
-        self.assertFalse(any("HOLD" in ln for ln in logs1),
-                         "a non-hold word must not refresh: %r" % logs1)
-        self.assertEqual(compact.load_compact_requests(self.reqp)[self.SID]["ts"],
-                         int(T), "ts must NOT be refreshed by a stale lane")
-        # T+31min: age (from the un-refreshed T) > 30-min cap -> expired.
-        logs2, tmux2 = self._sweep(proj, T + 31 * 60)
-        self.assertTrue(any("LAPSE" in ln for ln in logs2),
-                        "the un-held claim must expire: %r" % logs2)
-        self.assertNotIn(self.SID, compact.load_compact_requests(self.reqp))
-        self.assertNotIn("/compact", tmux2.typed_texts())
-
-    def test_741_hold_preserves_cwd_origin_and_bts(self):
-        # A #741 hold-extend refresh (a busy pane holding the boundary) advances
-        # ONLY `ts`; `cwd`/`origin`/`bts` are the record's own values (bts = the
-        # ORIGINAL boundary, for the HOLD log). #848/#855: the hold is now driven
-        # by a busy pane (skip:turn-running), not a live lane (that veto is gone).
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, self.SID)
-        T = 1_000_000.0
-        compact.record_compact_request(self.SID, self.CWD, now=T,
-                                       path=self.reqp, origin="self-callback")
-        self._sweep(proj, T + 29 * 60, cap=CB_BUSY_CAP)
-        entry = compact.load_compact_requests(self.reqp)[self.SID]
-        self.assertEqual(entry["ts"], int(T + 29 * 60), "ts refreshed to now")
-        self.assertEqual(entry["bts"], int(T), "bts (original boundary) unchanged")
-        self.assertEqual(entry["cwd"], self.CWD)
-        self.assertEqual(entry["origin"], "self-callback")
-
-    def test_741_busy_word_now_refreshes_the_hold(self):
-        # #741 REVERSES #727's "NEVER on skip:busy": under the hold-turn doctrine
-        # a pending compact makes every goal-fired turn a cheap HOLD turn, so a
-        # transiently-busy pane is the boundary being HELD (waiting for its idle
-        # window), NOT a superseding new turn. #855 RENAMED the busy word to
-        # `skip:turn-running` -> it is a hold-extend word so the sweep REFRESHES
-        # `ts` so an actively-held boundary never ages out. (Mutation target:
-        # removing "skip:turn-running" from _COMPACT_HOLD_EXTEND_WORDS fails this.)
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, self.SID)
-        T = 1_000_000.0
-        compact.record_compact_request(self.SID, self.CWD, now=T,
-                                       path=self.reqp, origin="self-callback")
-        logs, _ = self._sweep(proj, T + 5 * 60, cap=CB_BUSY_CAP)
-        self.assertTrue(any("skip:turn-running" in ln for ln in logs), logs)
-        self.assertTrue(
-            any("HOLD" in ln and "skip:turn-running" in ln for ln in logs), logs)
-        self.assertEqual(compact.load_compact_requests(self.reqp)[self.SID]["ts"],
-                         int(T + 5 * 60),
-                         "skip:turn-running must NOW refresh ts (#741/#855)")
-
-    def test_741_recent_human_now_refreshes_the_hold(self):
-        # #741: recent-human is nearly always true in an interactive session
-        # while the owner watches, so a `skip:recent-human` boundary must be a
-        # DEFERRAL (hold), not a discard -- the sweep REFRESHES `ts` so the
-        # held boundary delivers once the human goes quiet, never ages out.
-        proj = self._dir()
+    def test_sweep_never_refreshes_or_holds(self):
         now = time.time()
-        compact.record_compact_request(self.SID, self.CWD, now=now - 100,
+        compact.record_compact_request("sess-h", "/x", now=now - 100,
                                        path=self.reqp, origin="self-callback")
-        _write_human_transcript(proj, self.CWD, self.SID, now - 5)
-        logs, _ = self._sweep(proj, now)
-        self.assertTrue(any("skip:recent-human" in ln for ln in logs), logs)
-        self.assertTrue(
-            any("HOLD" in ln and "skip:recent-human" in ln for ln in logs), logs)
-        self.assertEqual(compact.load_compact_requests(self.reqp)[self.SID]["ts"],
-                         int(now), "skip:recent-human must refresh ts (#741)")
+        before = compact.load_compact_requests(self.reqp)["sess-h"]["ts"]
+        logs = compact.compact_sweep(now, requests_path=self.reqp)
+        after = compact.load_compact_requests(self.reqp)["sess-h"]["ts"]
+        self.assertEqual(before, after, "sweep must not refresh ts (#1084)")
+        self.assertTrue(any("machine compacts removed" in ln for ln in logs))
 
-    def test_741_not_a_boundary_does_not_extend_the_hold(self):
-        # THE #741 ESCAPE BOUND: a ❓-blocked session's `skip:not-a-boundary` is
-        # deliberately NOT a hold-extend word (a blocked question is a legitimate
-        # END of the boundary, so the request must age out there, never hold
-        # forever). Mutation target: adding "skip:not-a-boundary" to
-        # _COMPACT_HOLD_EXTEND_WORDS makes this test fail.
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, self.SID,
-                                 "❓ NEEDS YOU: schváliš reštart?")
-        T = 1_000_000.0
-        compact.record_compact_request(self.SID, self.CWD, now=T,
-                                       path=self.reqp, origin="self-callback")
-        logs1, _ = self._sweep(proj, T + 5 * 60)
-        self.assertTrue(any("not-a-boundary" in ln for ln in logs1), logs1)
-        self.assertFalse(any("HOLD" in ln for ln in logs1),
-                         "a ❓ boundary must NOT hold-extend: %r" % logs1)
-        self.assertEqual(compact.load_compact_requests(self.reqp)[self.SID]["ts"],
-                         int(T), "not-a-boundary must NOT refresh ts")
-        # T+31min: the un-held claim ages out at the 30-min cap.
-        logs2, tmux2 = self._sweep(proj, T + 31 * 60)
-        self.assertTrue(any("LAPSE" in ln for ln in logs2),
-                        "the un-held ❓ claim must expire: %r" % logs2)
-        self.assertNotIn(self.SID, compact.load_compact_requests(self.reqp))
-        self.assertNotIn("/compact", tmux2.typed_texts())
 
-    def test_741_corrupt_non_dict_entry_is_dropped_loudly_not_latched(self):
-        # #741 review: a corrupt NON-dict entry can never be delivered/expired, so
-        # compact_sweep must DROP it loudly (not silently `continue` forever) and
-        # has_pending_request must read it as absent -- else it would latch every
-        # goal writer for that sid forever while --status reads NONE.
-        Path(self.reqp).write_text(json.dumps({"sess-nd": "not-a-dict"}))
-        self.assertFalse(compact.has_pending_request("sess-nd"))
-        proj = self._dir()
-        logs, _ = self._sweep(proj, 1000)
-        self.assertTrue(any("non-dict" in ln for ln in logs), logs)
-        self.assertEqual(compact.load_compact_requests(self.reqp), {},
-                         "the corrupt entry is cleared, never re-skipped forever")
-
-    def test_741_hold_log_line_carries_boundary_held(self):
-        # The HOLD decision line names the word AND how long the boundary has
-        # been held (now - bts), so triage reads the hold from the journal.
-        # #848/#855: driven by a busy pane (skip:turn-running), not the removed
-        # live-tasks veto.
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, self.SID)
-        T = 1_000_000.0
-        compact.record_compact_request(self.SID, self.CWD, now=T,
-                                       path=self.reqp, origin="self-callback")
-        logs, _ = self._sweep(proj, T + 29 * 60, cap=CB_BUSY_CAP)
-        self.assertTrue(
-            any("HOLD" in ln and "skip:turn-running" in ln
-                and "boundary held %ds" % (29 * 60) in ln for ln in logs),
-            "HOLD line must carry the word + boundary-held seconds: %r" % logs)
-
-    def test_727_record_sets_the_bts_anchor(self):
-        compact.record_compact_request("sess-bts", "/x", now=1000,
-                                       path=self.reqp, origin="self-callback")
-        entry = compact.load_compact_requests(self.reqp)["sess-bts"]
-        self.assertEqual(entry["bts"], 1000)
-        self.assertEqual(entry["ts"], 1000)
-
-    def test_727_touch_ts_refreshes_only_ts_and_is_a_noop_when_gone(self):
-        compact.record_compact_request("sess-t", "/cwd", now=1000,
-                                       path=self.reqp, origin="self-callback")
-        self.assertTrue(compact._touch_compact_request_ts("sess-t", 1500,
-                                                          path=self.reqp))
-        entry = compact.load_compact_requests(self.reqp)["sess-t"]
-        self.assertEqual(entry["ts"], 1500)
-        self.assertEqual(entry["bts"], 1000)      # untouched
-        self.assertEqual(entry["cwd"], "/cwd")     # untouched
-        self.assertEqual(entry["origin"], "self-callback")  # untouched
-        # A vanished/absent entry is a fail-safe no-op, never a new entry.
-        self.assertFalse(compact._touch_compact_request_ts("no-such-sid", 2000,
-                                                           path=self.reqp))
-        self.assertNotIn("no-such-sid", compact.load_compact_requests(self.reqp))
-
-    def test_741_legacy_entry_without_bts_holds_with_a_question_mark(self):
-        # A request recorded by PRE-#727 code has no `bts`; the sweep must still
-        # HOLD (refresh ts) and report "boundary held ?s" -- never crash on the
-        # missing key (`_safe_age(now, None)` -> None -> "?"). #848: the hold is
-        # driven by a busy pane, not the removed live-tasks veto.
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, self.SID)
-        T = 1_000_000.0
-        # Seed a legacy entry directly on disk (NO `bts` key).
-        self.reqp.write_text(json.dumps({self.SID: {
-            "cwd": self.CWD, "ts": int(T), "origin": "self-callback"}}))
-        logs, _ = self._sweep(proj, T + 29 * 60, cap=CB_BUSY_CAP)
-        self.assertTrue(any("HOLD" in ln and "boundary held ?s" in ln
-                            for ln in logs),
-                        "a bts-less entry must HOLD with ?s: %r" % logs)
-        self.assertEqual(compact.load_compact_requests(self.reqp)[self.SID]["ts"],
-                         int(T + 29 * 60), "ts still refreshed for a legacy entry")
-
-    def test_741_hold_fail_leaves_the_claim_pending_without_refresh(self):
-        # If the ts-refresh WRITE fails (or the entry vanished mid-sweep),
-        # `_touch_compact_request_ts` returns False -> the sweep logs HOLD-FAIL,
-        # does NOT refresh `ts`, and LEAVES the request pending for the next sweep.
-        # #848: the hold is driven by a busy pane, not the removed live-tasks veto.
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, self.SID)
-        T = 1_000_000.0
-        compact.record_compact_request(self.SID, self.CWD, now=T,
-                                       path=self.reqp, origin="self-callback")
-        with m.patch.object(compact, "_touch_compact_request_ts",
-                            return_value=False):
-            logs, _ = self._sweep(proj, T + 29 * 60, cap=CB_BUSY_CAP)
-        self.assertTrue(any("HOLD-FAIL" in ln for ln in logs),
-                        "a failed refresh must log HOLD-FAIL: %r" % logs)
-        entry = compact.load_compact_requests(self.reqp)[self.SID]
-        self.assertIn(self.SID, compact.load_compact_requests(self.reqp))
-        self.assertEqual(entry["ts"], int(T), "HOLD-FAIL must not refresh ts")
 
 
 # --------------------------------------------------------------------------- #
@@ -2361,212 +2042,40 @@ def _args(**kw):
     kw.setdefault("origin", "")
     return types.SimpleNamespace(**kw)
 
-
 class TestCompactRequestCli(unittest.TestCase):
-    def setUp(self):
-        self.reqp, self.delp, self.syncp = _isolate_compact_state(self)
-        # `cmd_compact_request` now goes through `_compact_sync_attempt`,
-        # which sleeps a small BOUNDED margin (~2.1s) on a genuinely fresh
-        # record (#402-review MAJOR-1's own fix) -- these tests don't care
-        # about the wait's real wall-clock duration, only the disposition,
-        # so patch it away module-wide (mirrors the established
-        # `test_goal_autoarm.py`/`test_goal_rearm.py` pattern).
-        sp = m.patch("time.sleep", lambda s: None)
-        sp.start()
-        self.addCleanup(sp.stop)
+    """#1084 — cmd_compact_request is a REMOVED stub: any flags print the removed
+    line and exit 0 (never a non-zero exit), so a stale caller can never break a
+    turn. Canonical L1 lock: tests/test_compact_removed_1084.py."""
 
-    def test_record_with_no_session_prints_skip(self):
+    def _run(self, args):
         buf = []
         with m.patch("sys.stdout") as out:
             out.write = lambda s: buf.append(s)
-            airuleset.cmd_compact_request(_args(record=True, session="",
-                                                cwd="/x", origin="subagent-stop"))
-        self.assertEqual("".join(buf), "skip:no-session")
+            rc = airuleset.cmd_compact_request(args)
+        return rc, "".join(buf)
 
-    def test_record_recognises_delivery_disposition(self):
-        # no live pane -> deliver_compact returns skip:no-pane -> printed verbatim
-        buf = []
-        with m.patch("sys.stdout") as out:
-            out.write = lambda s: buf.append(s)
-            airuleset.cmd_compact_request(_args(
-                record=True, session="sess-x", cwd="/nowhere",
-                origin="subagent-stop"))
-        self.assertEqual("".join(buf), "skip:no-pane")
-        # the request stays recorded for the next periodic sweep
-        self.assertIn("sess-x", compact.load_compact_requests(self.reqp))
+    def test_self_is_a_noop_stub(self):
+        rc, txt = self._run(_args(self=True))
+        self.assertIn("machine compacts removed", txt)
+        self.assertIn(rc, (None, 0))
 
-    def test_self_with_no_tmux_pane_exits_nonzero(self):
-        with m.patch.object(compact, "resolve_self_pane", return_value=("", "", "")):
-            with self.assertRaises(SystemExit) as cm:
-                airuleset.cmd_compact_request(_args(self=True))
-        self.assertNotEqual(cm.exception.code, 0)
+    def test_record_is_a_noop_stub(self):
+        rc, txt = self._run(_args(record=True, session="s", cwd="/x",
+                                  origin="self-callback"))
+        self.assertIn("machine compacts removed", txt)
+        self.assertIn(rc, (None, 0))
 
-    def test_self_records_under_self_callback_origin(self):
-        with m.patch.object(compact, "resolve_self_pane",
-                            return_value=("%3", "/somewhere", "sess-y")):
-            with m.patch.object(compact, "deliver_compact", return_value="skip:draft") as dc:
-                buf = []
-                with m.patch("sys.stdout") as out:
-                    out.write = lambda s: buf.append(s)
-                    airuleset.cmd_compact_request(_args(self=True))
-        self.assertEqual(dc.call_args.kwargs.get("origin"), compact._COMPACT_SELF_CALLBACK_ORIGIN)
-        self.assertEqual("".join(buf), "skip:draft")
-        entry = compact.load_compact_requests(self.reqp).get("sess-y")
-        self.assertIsNotNone(entry)
-        self.assertEqual(entry["origin"], "self-callback")
+    def test_status_is_a_noop_stub(self):
+        rc, txt = self._run(_args(status=True, session="s"))
+        self.assertIn("machine compacts removed", txt)
+        self.assertIn(rc, (None, 0))
 
-    def test_self_on_a_genuinely_idle_pane_actually_sends_end_to_end(self):
-        # #402-review MAJOR-1's own live reproduction: "a perfectly idle
-        # pane, zero live tasks -- word = skip:too-young, zero keystrokes."
-        # `deliver_compact` is NOT mocked here -- a real call, through the
-        # REAL `_compact_sync_attempt`, against a real (fake-tmux) idle
-        # pane, is the only thing that actually proves the fix: a fresh
-        # `--self` call must be able to send, not just always defer.
-        proj = TemporaryDirectory()
-        self.addCleanup(proj.cleanup)
-        cwd = "/home/newlevel/devel/synctest-cli"
-        sid = "sess-cli-sync"
-        _write_marker_transcript(proj.name, cwd, sid)
-        tmux = DeliverCompactFakeTmux([("%9", "claude", cwd, "111")], CB_IDLE_CAP)
-        with m.patch("time.sleep", _REAL_SLEEP):    # a REAL, short sleep here
-            with m.patch.object(compact, "resolve_self_pane",
-                                return_value=("%9", cwd, sid)):
-                with m.patch.object(compact.watchdog, "_default_run", tmux):
-                    with m.patch.object(compact.watchdog, "PROJECTS_DIR", proj.name):
-                        buf = []
-                        with m.patch("sys.stdout") as out:
-                            out.write = lambda s: buf.append(s)
-                            airuleset.cmd_compact_request(_args(self=True))
-        self.assertEqual("".join(buf), "sent")
-        self.assertIn("/compact", tmux.typed_texts())
+    def test_no_flags_is_a_noop_stub(self):
+        rc, txt = self._run(_args())
+        self.assertIn("machine compacts removed", txt)
+        self.assertIn(rc, (None, 0))
 
-    def test_terminal_word_clears_the_request(self):
-        with m.patch.object(compact, "resolve_self_pane",
-                            return_value=("%3", "/somewhere", "sess-z")):
-            with m.patch.object(compact, "deliver_compact", return_value="sent"):
-                with m.patch("sys.stdout"):
-                    airuleset.cmd_compact_request(_args(self=True))
-        self.assertNotIn("sess-z", compact.load_compact_requests(self.reqp))
 
-    def test_no_flags_prints_usage_and_exits(self):
-        with m.patch("sys.stderr"):
-            with self.assertRaises(SystemExit) as cm:
-                airuleset.cmd_compact_request(_args())
-        self.assertNotEqual(cm.exception.code, 0)
-
-    # -- #741 read-only HOLD probe -------------------------------------- #
-
-    def test_status_prints_none_when_no_pending_request(self):
-        buf = []
-        with m.patch("sys.stdout") as out:
-            out.write = lambda s: buf.append(s)
-            airuleset.cmd_compact_request(_args(status=True, session="no-such"))
-        self.assertEqual("".join(buf).strip(), "NONE")
-
-    def test_status_prints_pending_with_sid_and_numeric_age(self):
-        compact.record_compact_request("sess-st", "/cwd", now=time.time() - 12,
-                                       path=self.reqp, origin="self-callback")
-        buf = []
-        with m.patch("sys.stdout") as out:
-            out.write = lambda s: buf.append(s)
-            airuleset.cmd_compact_request(_args(status=True, session="sess-st"))
-        line = "".join(buf).strip()
-        # exact shape: PENDING sid=<sid> age=<int>s -- the age must be NUMERIC
-        # (a `?` fallback would slip past a bare startswith/endswith check).
-        mobj = re.fullmatch(r"PENDING sid=sess-st age=(\d+)s", line)
-        self.assertIsNotNone(mobj, line)
-        self.assertGreaterEqual(int(mobj.group(1)), 10)
-
-    def test_status_resolves_self_pane_when_no_session_given(self):
-        compact.record_compact_request("sess-self-st", "/cwd", now=time.time(),
-                                       path=self.reqp, origin="self-callback")
-        with m.patch.object(compact, "resolve_self_pane",
-                            return_value=("%3", "/cwd", "sess-self-st")):
-            buf = []
-            with m.patch("sys.stdout") as out:
-                out.write = lambda s: buf.append(s)
-                airuleset.cmd_compact_request(_args(status=True))
-        self.assertTrue("".join(buf).startswith("PENDING sid=sess-self-st"), buf)
-
-    def test_status_records_and_types_nothing(self):
-        # a read-only probe must NEVER record a request or touch a pane.
-        with m.patch.object(compact, "resolve_self_pane",
-                            return_value=("%3", "/cwd", "sess-probe")):
-            with m.patch.object(compact, "record_compact_request") as rec:
-                with m.patch("sys.stdout"):
-                    airuleset.cmd_compact_request(_args(status=True))
-        rec.assert_not_called()
-        self.assertEqual(compact.load_compact_requests(self.reqp), {})
-
-    # -- #822 (e): --status reports QUEUED while a queued /compact sits in the
-    #    pane (deliver_compact returned the TERMINAL `queued`, clearing the
-    #    request, yet the typed /compact has not drained under the armed /goal).
-    def test_status_reports_queued_when_pane_shows_queued_compact(self):
-        # No pending request in the store, but a queued `❯ /compact` row still
-        # sits unexecuted in the pane (the (b) detector fixture) -> --status must
-        # report QUEUED (not NONE) so the /goal HOLD doctrine drains it via a
-        # boundary-hold turn instead of dispatching the next batch.
-        compact.mark_compact_queued_ts("sess-q", now=time.time() - 20)
-        with m.patch.object(compact, "resolve_self_pane",
-                            return_value=("%9", "/cwd", "sess-q")):
-            with m.patch.object(compact.watchdog, "capture_pane",
-                                return_value=_FIXTURE_822_TRIPLE_QUEUED):
-                buf = []
-                with m.patch("sys.stdout") as out:
-                    out.write = lambda s: buf.append(s)
-                    airuleset.cmd_compact_request(_args(status=True))
-        line = "".join(buf).strip()
-        mobj = re.fullmatch(r"QUEUED sid=sess-q since=(\d+)s", line)
-        self.assertIsNotNone(mobj, line)
-        self.assertGreaterEqual(int(mobj.group(1)), 10)
-
-    def test_status_reports_queued_since_question_when_store_is_empty(self):
-        # #822 (e) fail-safe: a queued `❯ /compact` row is LIVE in the pane but the
-        # queued-since store has NO entry (never marked, or a corrupt/non-numeric
-        # value) -> --status still reports QUEUED (the pane is the source of truth
-        # for the HOLD decision) with `since=?s`, never a false NONE that would
-        # dispatch the next batch over the undrained compact.
-        with m.patch.object(compact, "resolve_self_pane",
-                            return_value=("%9", "/cwd", "sess-noqts")):
-            with m.patch.object(compact.watchdog, "capture_pane",
-                                return_value=_FIXTURE_822_TRIPLE_QUEUED):
-                buf = []
-                with m.patch("sys.stdout") as out:
-                    out.write = lambda s: buf.append(s)
-                    airuleset.cmd_compact_request(_args(status=True))
-        self.assertEqual("".join(buf).strip(), "QUEUED sid=sess-noqts since=?s")
-
-    def test_status_reports_none_when_pane_has_no_queued_row(self):
-        # A stale queued record must NOT be reported once the pane no longer
-        # shows a queued /compact (it drained): the LIVE pane gates the report,
-        # so QUEUED vs NONE turns ONLY on the pane, never on the stale record.
-        compact.mark_compact_queued_ts("sess-drained", now=time.time() - 5)
-        with m.patch.object(compact, "resolve_self_pane",
-                            return_value=("%9", "/cwd", "sess-drained")):
-            with m.patch.object(compact.watchdog, "capture_pane",
-                                return_value="● práca hotová.\n❯ \n  ctx caveman\n"):
-                buf = []
-                with m.patch("sys.stdout") as out:
-                    out.write = lambda s: buf.append(s)
-                    airuleset.cmd_compact_request(_args(status=True))
-        self.assertEqual("".join(buf).strip(), "NONE")
-
-    def test_status_pending_wins_over_a_queued_row_in_the_pane(self):
-        # A genuinely PENDING request (not yet delivered) is reported PENDING even
-        # if an older queued row lingers in the pane -- PENDING precedes the
-        # #822 QUEUED check.
-        compact.record_compact_request("sess-pw", "/cwd", now=time.time() - 3,
-                                       path=self.reqp, origin="self-callback")
-        compact.mark_compact_queued_ts("sess-pw", now=time.time() - 3)
-        with m.patch.object(compact, "resolve_self_pane",
-                            return_value=("%9", "/cwd", "sess-pw")):
-            with m.patch.object(compact.watchdog, "capture_pane",
-                                return_value=_FIXTURE_822_TRIPLE_QUEUED):
-                buf = []
-                with m.patch("sys.stdout") as out:
-                    out.write = lambda s: buf.append(s)
-                    airuleset.cmd_compact_request(_args(status=True))
-        self.assertTrue("".join(buf).startswith("PENDING sid=sess-pw"), buf)
 
 
 # --------------------------------------------------------------------------- #

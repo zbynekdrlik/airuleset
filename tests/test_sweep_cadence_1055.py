@@ -183,15 +183,19 @@ class TestCalmVsFullSweep(unittest.TestCase):
         self.assertTrue(line and line.startswith("sweep: full"), "%r" % logs)
         self.assertIn("clock-skew", line)
 
-    def test_pending_compact_forces_full(self):
-        _run(1000.0, self.state_path)                 # bootstrap
+    def test_pending_compact_never_forces_full(self):
+        # #1084: machine compacts are REMOVED in code, so a pending /compact
+        # request no longer forces a full sweep (it once did — the #1055 P3
+        # contract). run_once now pins sweep_urgent(compact_pending=False).
+        _run(1000.0, self.state_path)                 # bootstrap (full)
         creqp = Path(self._td.name) / "compact-requests.json"
         wd_compact.record_compact_request("sid-x", "/repo", now=1055,
                                            path=str(creqp), origin="self-callback")
         logs = _run(1060.0, self.state_path, compact_requests_path=str(creqp))
         line = self._sweep_line(logs)
-        self.assertTrue(line and line.startswith("sweep: full"), "%r" % logs)
-        self.assertIn("compact", line)
+        self.assertTrue(line and line.startswith("sweep: calm"),
+                        "a pending /compact must NOT force full (#1084): %r" % logs)
+        self.assertNotIn("urgent: compact", line or "")
 
     def test_calm_skips_heavy_jobs_runs_recovery(self):
         # card_reconcile (heavy, not calm_ok) must be HELD skip:calm; a recovery
@@ -600,9 +604,13 @@ class TestCompactIgnoreReason(unittest.TestCase):
             reqs, now=self.NOW, jobs_disabled=False), "stale (bad ts)")
 
 
-class TestCompactPendingActionableOnly(unittest.TestCase):
-    """(items 2+4) run_once uses ACTIONABLE requests, journals the ignore reason
-    once per full-by-cadence sweep."""
+class TestCompactPendingNeverForcesFull(unittest.TestCase):
+    """#1084 — machine compacts are REMOVED in code, so a pending /compact
+    request never forces a full sweep and never journals a compact-cadence line,
+    whatever its ts / owner-flag state. This inverts the #1055 P3 "actionable
+    request forces full + journals an ignore reason" contract, which is gone with
+    the delivery machinery (run_once now pins sweep_urgent(compact_pending=False)
+    and no longer reads the requests file for the cadence decision)."""
 
     def setUp(self):
         self._td = TemporaryDirectory()
@@ -618,116 +626,37 @@ class TestCompactPendingActionableOnly(unittest.TestCase):
     def _creq(self):
         return Path(self._td.name) / "compact-requests.json"
 
-    # (a) owner flag set + a fresh request -> not urgent; on the 2nd sweep CALM
-    def test_owner_flag_dead_request_allows_calm(self):
+    def _second_sweep(self, entry, now0=100000.0):
         creqp = self._creq()
-        # write the request DIRECTLY (not via record_compact_request) so the
-        # fixture never depends on the real _owner_disabled at record time — the
-        # owner flag is modelled purely by the patch below (#1055 review NIT-3).
-        creqp.write_text(json.dumps({"sid-dead": {
-            "cwd": "/repo", "ts": 995, "origin": "self-callback"}}))
-        with mock.patch.object(wd, "_owner_disabled", lambda kind: kind == "compact"):
-            _run(1000.0, self.state_path, compact_requests_path=str(creqp))
-            logs = _run(1060.0, self.state_path, compact_requests_path=str(creqp))
-        line = self._sweep_line(logs)
+        creqp.write_text(json.dumps({"sid-x": entry}))
+        _run(now0, self.state_path, compact_requests_path=str(creqp))   # bootstrap full
+        return self._sweep_line(
+            _run(now0 + 60, self.state_path, compact_requests_path=str(creqp)))
+
+    def test_fresh_request_does_not_force_full(self):
+        # a 5-min-old request once forced full (the #1055 P3 contract) — no more.
+        line = self._second_sweep({"cwd": "/repo", "ts": 100060 - 300,
+                                   "origin": "self-callback"})
         self.assertTrue(line and line.startswith("sweep: calm"),
-                        "a dead request under the owner flag must allow calm: %r"
-                        % logs)
+                        "a fresh /compact must NOT force full (#1084): %r" % line)
+        self.assertNotIn("urgent: compact", line or "")
 
-    def test_owner_flag_journals_ignore_reason_on_full_sweep(self):
-        creqp = self._creq()
-        # seed hermetically (#1055 review NIT-3): the owner flag is modelled by
-        # the patch, not by the real ~/.claude/watchdog-disable-compact.
-        creqp.write_text(json.dumps({"sid-dead": {
-            "cwd": "/repo", "ts": 995, "origin": "self-callback"}}))
-        with mock.patch.object(wd, "_owner_disabled", lambda kind: kind == "compact"):
-            logs = _run(1000.0, self.state_path, compact_requests_path=str(creqp))
-        line = self._sweep_line(logs)
-        self.assertTrue(line and line.startswith("sweep: full"), line)
-        self.assertNotIn("urgent: compact", line)   # compact did NOT force it
-        self.assertTrue(
-            any("compact-pending ignored (owner-flag)" in ln for ln in logs),
-            "must journal the owner-flag ignore reason: %r" % logs)
-
-    # (b) no flag + a >6h request -> not urgent; on the 2nd sweep CALM
-    def test_stale_request_over_6h_allows_calm(self):
-        creqp = self._creq()
-        creqp.write_text(json.dumps({"sid-old": {
-            "cwd": "/repo", "ts": 100000 - 7 * 3600, "origin": "self-callback"}}))
-        with mock.patch.object(wd, "_owner_disabled", lambda kind: False):
-            _run(100000.0, self.state_path, compact_requests_path=str(creqp))
-            logs = _run(100060.0, self.state_path, compact_requests_path=str(creqp))
-        line = self._sweep_line(logs)
+    def test_stale_request_does_not_force_full(self):
+        line = self._second_sweep({"cwd": "/repo", "ts": 100000 - 7 * 3600,
+                                   "origin": "self-callback"})
         self.assertTrue(line and line.startswith("sweep: calm"),
-                        "a >6h stale request must allow calm: %r" % logs)
+                        "a stale /compact must NOT force full (#1084): %r" % line)
 
-    def test_stale_request_journals_stale_hours(self):
+    def test_no_compact_cadence_line_is_ever_journaled(self):
         creqp = self._creq()
-        creqp.write_text(json.dumps({"sid-old": {
-            "cwd": "/repo", "ts": 100000 - 7 * 3600, "origin": "self-callback"}}))
-        with mock.patch.object(wd, "_owner_disabled", lambda kind: False):
-            logs = _run(100000.0, self.state_path, compact_requests_path=str(creqp))
-        line = self._sweep_line(logs)
-        self.assertTrue(line and line.startswith("sweep: full"), line)
-        self.assertNotIn("urgent: compact", line)
-        self.assertTrue(
-            any("compact-pending ignored (stale 7h)" in ln for ln in logs),
-            "must journal the stale-hours ignore reason: %r" % logs)
-
-    # (c) no flag + a 5-min request -> STILL urgent (the P3 contract preserved)
-    def test_fresh_request_still_forces_full(self):
-        _run(100000.0, self.state_path)                       # bootstrap
-        creqp = self._creq()
-        creqp.write_text(json.dumps({"sid-fresh": {
-            "cwd": "/repo", "ts": 100060 - 300, "origin": "self-callback"}}))
-        with mock.patch.object(wd, "_owner_disabled", lambda kind: False):
-            logs = _run(100060.0, self.state_path, compact_requests_path=str(creqp))
-        line = self._sweep_line(logs)
-        self.assertTrue(line and line.startswith("sweep: full"), line)
-        self.assertIn("urgent: compact", line)
-
-    # (d) malformed ts -> not urgent (2nd sweep CALM)
-    def test_malformed_ts_does_not_force_full(self):
-        _run(100000.0, self.state_path)                       # bootstrap
-        creqp = self._creq()
-        creqp.write_text(json.dumps({"sid-bad": {
-            "cwd": "/repo", "ts": "not-a-number", "origin": "self-callback"}}))
-        with mock.patch.object(wd, "_owner_disabled", lambda kind: False):
-            logs = _run(100060.0, self.state_path, compact_requests_path=str(creqp))
-        line = self._sweep_line(logs)
-        self.assertTrue(line and line.startswith("sweep: calm"),
-                        "a malformed-ts request must not force full: %r" % logs)
-
-    def test_bad_ts_journals_stale_bad_ts_on_full_sweep(self):
-        # #1055 review NIT-1 (both reviewers): exercise the run_once
-        # "stale (bad ts)" journal branch on a full-by-cadence (bootstrap) sweep.
-        creqp = self._creq()
-        creqp.write_text(json.dumps({"sid-bad": {
-            "cwd": "/repo", "ts": "not-a-number", "origin": "self-callback"}}))
-        with mock.patch.object(wd, "_owner_disabled", lambda kind: False):
-            logs = _run(100000.0, self.state_path, compact_requests_path=str(creqp))
-        line = self._sweep_line(logs)
-        self.assertTrue(line and line.startswith("sweep: full"), line)
-        self.assertNotIn("urgent: compact", line)
-        self.assertTrue(
-            any("compact-pending ignored (stale (bad ts))" in ln for ln in logs),
-            "must journal the bad-ts ignore reason: %r" % logs)
-
-    # (e) the ignore line appears once per full-by-cadence sweep, not every minute
-    def test_ignore_line_at_most_once_per_cadence(self):
-        creqp = self._creq()
-        creqp.write_text(json.dumps({"sid-old": {
-            "cwd": "/repo", "ts": 100000 - 7 * 3600, "origin": "self-callback"}}))
-        count = 0
-        with mock.patch.object(wd, "_owner_disabled", lambda kind: False):
-            for i in range(6):        # t=0 bootstrap full, 60..240 calm, 300 cadence full
-                logs = _run(100000.0 + i * 60, self.state_path,
-                            compact_requests_path=str(creqp))
-                count += sum(1 for ln in logs if "compact-pending ignored" in ln)
-        self.assertEqual(count, 2,
-                         "ignore line fires once per full-by-cadence sweep "
-                         "(bootstrap + the 5-min cadence full), never on the "
-                         "calm sweeps in between")
+        creqp.write_text(json.dumps({"sid-x": {"cwd": "/repo",
+                                               "ts": 100000 - 7 * 3600,
+                                               "origin": "self-callback"}}))
+        logs = _run(100000.0, self.state_path,           # bootstrap full sweep
+                    compact_requests_path=str(creqp))
+        self.assertFalse(any("compact-pending ignored" in ln for ln in logs),
+                         "the compact-pending ignore line is gone (#1084): %r" % logs)
+        self.assertFalse(any("urgent: compact" in ln for ln in logs), logs)
 
 
 if __name__ == "__main__":
