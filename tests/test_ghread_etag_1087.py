@@ -40,7 +40,7 @@ def _issue(n, labels=None, title=None, assignee=None, author=None, pr=False,
            created="2026-09-01T00:00:00Z", updated="2026-09-02T00:00:00Z"):
     it = {"number": n, "title": title or ("issue %d" % n),
           "created_at": created, "updated_at": updated,
-          "labels": [{"name": l} for l in (labels or [])],
+          "labels": [{"name": nm} for nm in (labels or [])],
           "assignees": [{"login": a} for a in (assignee or [])],
           "user": {"login": author or "someone"}}
     if pr:

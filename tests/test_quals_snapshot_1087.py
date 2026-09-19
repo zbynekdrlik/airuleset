@@ -41,7 +41,7 @@ def _snap(n, labels=None, title=None, assignee=None, author=None):
     return ghread._normalize_issue({
         "number": n, "title": title or ("t%d" % n),
         "created_at": "2026-09-01T00:00:00Z", "updated_at": "2026-09-02T00:00:00Z",
-        "labels": [{"name": l} for l in (labels or [])],
+        "labels": [{"name": nm} for nm in (labels or [])],
         "assignees": [{"login": a} for a in (assignee or [])],
         "user": {"login": author or "someone"}})
 
