@@ -63,17 +63,47 @@ def _deep_arm_transcript(tmp, arm_line, pad_bytes):
     return p
 
 
-def _state_file(tmp, sid, mark_state, tmtime, off=0):
+def _state_file(tmp, sid, mark_state, tmtime, off=0, mark_ts=None):
     """Write an `api-watchdog-state.json` carrying the dark-watch per-sid record
-    exactly as `goal_dark_watch` persists it: state["goal_mark"][sid]."""
+    exactly as `goal_dark_watch` persists it: state["goal_mark"][sid].
+
+    `mark_ts` (a POSIX float, the same `ts` `_newest_marker` stamps onto a mark)
+    lets a test set the record mark's timestamp so the #1089-forward 🟡-1
+    tail-scan `newer` comparison (`_tail_overrides_cleared`) can be exercised on
+    its timestamp branch; omitted → the record mark carries no `ts`, the shape a
+    real dark-watch record with an un-timestamped marker leaves."""
     p = os.path.join(tmp, "api-watchdog-state.json")
     rec = {"off": off, "tmtime": tmtime, "pv": 2}
     if mark_state is not None:
         rec["mark"] = {"state": mark_state, "payload": "work the backlog"}
+        if mark_ts is not None:
+            rec["mark"]["ts"] = mark_ts
     else:
         rec["mark"] = None
     with open(p, "w") as f:
         json.dump({"goal_mark": {sid: rec}}, f)
+    return p
+
+
+def _arm_then_clear_transcript(tmp, pad_bytes, clear_ts="2026-09-19T10:00:00Z"):
+    """`Goal set:` at the TOP, then `pad_bytes` of padding, then a LATER
+    `Goal cleared:` near EOF — so a cheap tail-only `scan_goal_markers` finds the
+    CLEAR as the newest marker (the exact #1089-forward 🟡-1 race shape: the
+    watchdog dark-watch recorded `set`, a `/goal` clear landed since, the record
+    lags by up to one sweep)."""
+    p = os.path.join(tmp, "t.jsonl")
+    pad = json.dumps({"type": "user", "message": {"content": "x" * 200}}) + "\n"
+    cleared = json.dumps({"type": "user", "message": {"content":
+                         "<local-command-stdout>Goal cleared: done"
+                         "</local-command-stdout>"},
+                         "timestamp": clear_ts}) + "\n"
+    with open(p, "w") as f:
+        f.write(_armset_line() + "\n")
+        written = 0
+        while written < pad_bytes:
+            f.write(pad)
+            written += len(pad)
+        f.write(cleared)
     return p
 
 
@@ -160,6 +190,59 @@ class TestGoalArmedReadsWatchdogFirst(unittest.TestCase):
             armed = lf._goal_armed(self._payload(tp), state_path=sp, out=out)
             self.assertFalse(armed)
             self.assertEqual(out.get("src"), "watchdog")
+
+    # ---- #1089 fix-forward — Review B 🟡-1: the watchdog record LAGS the
+    # transcript by up to one sweep, so a fresh `set` short-circuit that trusts
+    # the record blindly spuriously ARMS (→ over-blocks) a session that CLEARED
+    # its goal in the lag window. The fresh-`set` path must ALSO run the cheap
+    # tail-only scan (last 4 MB) and let a NEWER tail `cleared` win.
+    def test_fresh_set_but_newer_tail_clear_is_not_armed(self):
+        # record says `set` (ts OLD), the transcript tail carries a LATER
+        # `Goal cleared:` — the tail truth is newer → NOT armed.
+        with tempfile.TemporaryDirectory() as tmp:
+            tp = _arm_then_clear_transcript(tmp, pad_bytes=1000)
+            sp = _state_file(tmp, "sid-A", "set", os.path.getmtime(tp),
+                             mark_ts=1000.0)          # 1970 — older than the clear
+            out = {}
+            armed = lf._goal_armed(self._payload(tp), state_path=sp, out=out)
+            self.assertFalse(armed)                   # the newer tail clear wins
+            self.assertIn("tail", out.get("src", ""))
+
+    def test_fresh_set_no_ts_record_newer_tail_clear_is_not_armed(self):
+        # a record whose mark carries no `ts` (older dark-watch shape): the tail
+        # scan returns the NEWEST marker in the recent window, so a tail
+        # `cleared` there is authoritative → NOT armed.
+        with tempfile.TemporaryDirectory() as tmp:
+            tp = _arm_then_clear_transcript(tmp, pad_bytes=1000)
+            sp = _state_file(tmp, "sid-A", "set", os.path.getmtime(tp))  # no ts
+            out = {}
+            armed = lf._goal_armed(self._payload(tp), state_path=sp, out=out)
+            self.assertFalse(armed)
+            self.assertIn("tail", out.get("src", ""))
+
+    def test_fresh_set_still_does_cheap_tail_scan(self):
+        # the fresh-`set` path must do the CHEAP tail scan (never the deep seed
+        # scan); with no newer clear in the tail the `set` stands (armed).
+        with tempfile.TemporaryDirectory() as tmp:
+            tp = _deep_arm_transcript(tmp, _armset_line(), pad_bytes=1000)
+            sp = _state_file(tmp, "sid-A", "set", os.path.getmtime(tp))
+            called = {"seed": False, "scan": False}
+            _seed = gs.seed_goal_marker
+            _scan = gs.scan_goal_markers
+
+            def _seed_spy(*a, **k):
+                called["seed"] = True
+                return _seed(*a, **k)
+
+            def _scan_spy(*a, **k):
+                called["scan"] = True
+                return _scan(*a, **k)
+            with mock.patch.object(gs, "seed_goal_marker", _seed_spy), \
+                 mock.patch.object(gs, "scan_goal_markers", _scan_spy):
+                armed = lf._goal_armed(self._payload(tp), state_path=sp)
+            self.assertTrue(armed)                    # no newer clear → set stands
+            self.assertFalse(called["seed"])          # no DEEP seed rescan
+            self.assertTrue(called["scan"])           # but the CHEAP tail scan ran
 
     def test_missing_record_falls_back_to_seed(self):
         # no watchdog record → the seed scan governs (arm within default cap).
