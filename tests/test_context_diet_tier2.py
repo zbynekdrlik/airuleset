@@ -104,7 +104,8 @@ class TestStatuslineVocabularyConversion(TestCase):
 
     # --- core stays ---
     def test_five_segments_stay(self):
-        self.assertIn("5 segments", self.module)
+        # #1083: the canonical legend is now SIX segments (M added).
+        self.assertIn("6 segments", self.module)
 
     def test_i_segment_stays(self):
         self.assertIn("I N", self.module)

@@ -15545,10 +15545,12 @@ class TestStatuslineVocabularyModule(TestCase):
         # must name the CURRENT rendered forms, not just the spoken/historical
         # ones the test above already locks. #367 dropped `run N/T`/
         # `run D/T` (the active-run ratio) and `· gkq N` (duplicate
-        # needs-gatekeeper decoration) entirely -- `I N`/`· gk N`/`· skip K`/
-        # `Q N` are the ONLY rendered forms left.
+        # needs-gatekeeper decoration) entirely. #1083: `· M N` is a NEW
+        # rendered form, and the retired `Q N` moved to the history file (it
+        # no longer renders) -- `I N`/`· M N`/`· gk N`/`· skip K` are the
+        # rendered forms left.
         t = self.MODULE.read_text(encoding="utf-8")
-        for phrase in ("`I N`", "`· gk N`", "`· skip K`", "`Q N`"):
+        for phrase in ("`I N`", "`· M N`", "`· gk N`", "`· skip K`"):
             self.assertIn(phrase, t, phrase)
         # #928: sub <D.M.> is removed from the live rendering; the module
         # still documents the removal so the phrase exists, but it is no

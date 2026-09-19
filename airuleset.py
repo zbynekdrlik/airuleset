@@ -3650,6 +3650,21 @@ def _count_deploy_wait(ops_wait):
     return dw
 
 
+def _merged_unreleased_set(root, slug):
+    """#1083 — the git-derived set of open-ticket numbers whose fix PR is merged
+    into develop/staging but NOT yet in main (`M`). Fully fail-safe EMPTY (a
+    two-branch repo with no origin/develop, a git/REST error, an import failure)
+    — the never-falsely-done direction, so a ticket whose merge state cannot be
+    derived simply stays in `I`. Logged, never raises: the footer refresh must
+    never break over this."""
+    try:
+        import cli_release_state
+        return cli_release_state.merged_unreleased_issues(root, slug=slug)
+    except Exception as e:  # noqa: BLE001
+        sys.stderr.write("tickets-status: merged-unreleased skipped (%s)\n" % e)
+        return frozenset()
+
+
 def _role_filter_footer(workable, waiting, ops_wait, root, cwd):
     """#998 — apply the pane's RESOLVED role (a declared managed window → role)
     to the footer's workable `I` so the two gk windows show DIFFERENT `I`: the
@@ -3657,6 +3672,11 @@ def _role_filter_footer(workable, waiting, ops_wait, root, cwd):
     ONLY those. Role is resolved from `cwd` via the single resolver
     (`cli_concurrency.resolve_role`); when it is None (every box but the gk
     windows) all three are returned unchanged — byte-identical to today.
+
+    #1083 note: the `M` (merged-unreleased) bucket is role-scoped by the CALLER
+    splitting it out of the ALREADY-role-filtered `workable`/`ops_wait` AFTER
+    this returns (`_split_merged_unreleased`), so M narrows by role for free
+    without widening this function's contract.
 
     #1045 CORRECTION of #1025: `workable` (I) AND `ops_wait` (W) are role-
     filtered; only `waiting` (owner-court U) is returned UNFILTERED. #998/#1008
@@ -3823,6 +3843,11 @@ def cmd_tickets_status(args):
         slug = _out(["gh", "repo", "view", "--json", "nameWithOwner",
                      "-q", ".nameWithOwner"], root)
         entry["name"] = slug.rstrip("/").split("/")[-1] if slug else ""
+        # #1083: the git-derived merged-unreleased set (fix in develop/staging,
+        # not yet main). Computed ONCE and threaded through BOTH the slice and
+        # core partitions below so `I`/dispatchable exclude `M` consistently.
+        # Fail-safe empty (two-branch repo, git/REST error) — see the helper.
+        merged_set = _merged_unreleased_set(root, slug)
         # #842 -- record the per-repo net-drain counters (created_today /
         # closed_today) into the cwd cache entry so statusbar.tickets_segment can
         # render `I N▲` when the repo is net-inflating, at ZERO extra gh cost per
@@ -3891,6 +3916,8 @@ def cmd_tickets_status(args):
                 entry["open"] = None
                 entry["gk"] = None
                 entry["bounce"] = None                 # #1056 L1
+                entry["merged_unreleased"] = None      # #1083
+                entry["merged_unreleased_numbers"] = None
                 entry["user_waiting"] = None
                 entry["user_waiting_numbers"] = None   # #1025
                 entry["ops_wait"] = None
@@ -3913,9 +3940,20 @@ def cmd_tickets_status(args):
                 # #998: slice by the pane's resolved role (no-op off a role window).
                 workable_rows, waiting, ops_wait = _role_filter_footer(
                     workable_rows, waiting, ops_wait, root, cwd)
+                # #1083: pull merged-to-develop-not-main tickets OUT of the
+                # (already role-filtered) I/W buckets into M — so a stream sees
+                # its merged tickets leave I without pretending they are done, and
+                # M is role-scoped by construction. BEFORE the gk/handed count so
+                # M rows never count as gk either.
+                workable_rows, ops_wait, merged_rows = _split_merged_unreleased(
+                    workable_rows, ops_wait, merged_set)
                 gk = sum(1 for n_num in workable_rows if handed.get(n_num))
                 entry["open"] = len(workable_rows) - gk
                 entry["gk"] = gk
+                # #1083: the M bucket count + numbers (release-readiness).
+                entry["merged_unreleased"] = len(merged_rows)
+                entry["merged_unreleased_numbers"] = sorted(
+                    int(n) for n in merged_rows)
                 # #1056 L1/L2 (i0): `· bounce K` — EVERY open prio:bounce ticket
                 # in this box's slice, across the FULL role-filtered partition
                 # (workable ∪ user-waiting ∪ ops-wait), from the SAME already-
@@ -4023,6 +4061,8 @@ def cmd_tickets_status(args):
             # parallel query that could drift (#367 lesson).
             if u_failed:
                 entry["open"] = None
+                entry["merged_unreleased"] = None      # #1083
+                entry["merged_unreleased_numbers"] = None
                 entry["user_waiting"] = None
                 entry["user_waiting_numbers"] = None   # #1025
                 entry["ops_wait"] = None
@@ -4039,7 +4079,17 @@ def cmd_tickets_status(args):
                 # (review vs infra) show DIFFERENT I (no-op off a role window).
                 workable, waiting, ops_wait = _role_filter_footer(
                     workable, waiting, ops_wait, root, cwd)
+                # #1083: pull merged-to-develop-not-main tickets OUT of the
+                # (already role-filtered) I/W buckets into M (release readiness:
+                # `I` = still to act, `M` = ready for the cut; M role-scoped by
+                # construction).
+                workable, ops_wait, merged_rows = _split_merged_unreleased(
+                    workable, ops_wait, merged_set)
                 entry["open"] = len(workable)
+                # #1083: the M bucket count + numbers (release-readiness).
+                entry["merged_unreleased"] = len(merged_rows)
+                entry["merged_unreleased_numbers"] = sorted(
+                    int(n) for n in merged_rows)
                 entry["user_waiting"] = len(waiting)
                 # #1025: the U member NUMBERS — the stop-hook question-in-U
                 # gate's fast-allow membership source (zero gh when fresh). ONE
@@ -9031,6 +9081,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _row_is_ops_wait as _row_is_ops_wait,
     _ops_wait_reason as _ops_wait_reason,
     _partition_workable as _partition_workable,
+    _split_merged_unreleased as _split_merged_unreleased,
     _count_bounce as _count_bounce,
     count_bounce_all as _count_bounce_all,
     _acceptance_present_set as _acceptance_present_set,

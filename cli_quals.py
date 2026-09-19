@@ -837,6 +837,47 @@ def _partition_workable(rows, own_stream=None):
     return workable, user_waiting, ops_wait
 
 
+def _split_merged_unreleased(workable, ops_wait, merged_numbers):
+    """#1083 — the MERGED-UNRELEASED extension of `_partition_workable`: pull the
+    open tickets whose fix PR is already merged into develop/staging but NOT yet
+    in main (`merged_numbers`, derived from GIT by `cli_release_state`) OUT of the
+    workable `I` and third-party `W` buckets into a distinct `M` bucket. There is
+    nothing for the box to ACT on such a ticket until the release cut, so it must
+    leave `I` (and, being merged, `gk`/handed logic too — those rows never reach
+    this function as workable once they are in `M`).
+
+    Runs on the SAME already-partitioned buckets `_partition_workable` produced —
+    ONE derivation, never a second query (#367) — and is kept a SEPARATE additive
+    function (the #601/#622 additive-partition-extension pattern) so
+    `_partition_workable`'s widely behaviour-locked 3-tuple contract is unchanged.
+
+    PRECEDENCE (design item 2): a merged ticket LEAVES into `M` regardless of its
+    lifecycle label — UNLESS it carries a `U`-class label (`needs-answer` /
+    `needs-decision` / `needs-acceptance`: the owner's court beats "waiting for
+    the cut", so it keeps its existing U/W bucket) or `prio:bounce` (gk returned
+    it for rework: it stays in `I`). A U-class row is never even in `workable`
+    (it is in `user_waiting`); the check still guards `ops_wait`, where a
+    `needs-acceptance`+`ops-wait` row (→ W by #526) must STAY in W, not be pulled
+    into `M`. Returns `(workable, ops_wait, merged)` — all three fresh dicts;
+    `user_waiting` is never touched (owner-court rows are out of scope here)."""
+    merged_set = {int(n) for n in (merged_numbers or [])}
+    if not merged_set:
+        return dict(workable), dict(ops_wait), {}
+    merged, new_workable, new_ops_wait = {}, {}, {}
+    for bucket, keep in ((workable, new_workable), (ops_wait, new_ops_wait)):
+        for number, row in bucket.items():
+            labels = row.get("labels") if isinstance(row, dict) else None
+            names = {(lb or {}).get("name") for lb in (labels or [])
+                     if isinstance(lb, dict)}
+            if (int(number) in merged_set
+                    and not _row_is_user_waiting(labels)
+                    and _PARTITION_BOUNCE_LABEL not in names):
+                merged[number] = row
+            else:
+                keep[number] = row
+    return new_workable, new_ops_wait, merged
+
+
 def _acceptance_present_set(rows, cwd=None, home=None):
     """The set of BARE `needs-acceptance` issue numbers in `rows` whose
     acceptance DRAFT has been DELIVERED — a question-map ping references `#N`, the

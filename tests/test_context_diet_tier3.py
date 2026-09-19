@@ -67,7 +67,8 @@ class TestStatuslineRetieringAnchors(unittest.TestCase):
 
     def test_stub_keeps_5_segment_legend(self):
         t = _read("modules/core/statusline-vocabulary.md")
-        self.assertIn("I \u00b7 U \u00b7 W \u00b7 gk \u00b7 skip", t)
+        # #1083: the legend gained the M segment (I \u00b7 M \u00b7 U \u00b7 W \u00b7 gk \u00b7 skip).
+        self.assertIn("I \u00b7 M \u00b7 U \u00b7 W \u00b7 gk \u00b7 skip", t)
 
     def test_stub_keeps_cache_path(self):
         t = _read("modules/core/statusline-vocabulary.md")
