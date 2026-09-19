@@ -24,6 +24,8 @@ sys.path.insert(0, _HERE)                         # tests/ (shared test helpers)
 import cli_gh_rate  # noqa: E402
 from test_cli_gh_rate import _FakeRun, _rate_json, TestEnsureWrapper  # noqa: E402,F401
 
+_shq = cli_gh_rate._shq   # the wrapper's shell-escape helper (reused by fixtures)
+
 
 class _AppShimBox(unittest.TestCase):
     """#1087 L1b: a fake HOME whose gh chain is the App-shim chain (our wrapper
@@ -283,6 +285,90 @@ class TestObserveDepthChain(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("gh version", r.stdout)
 
+
+
+class TestObserveRunCapture(unittest.TestCase):
+    """#1087 L1b: prove the OBSERVE run-and-capture path end-to-end in a real
+    shell — it re-emits stderr unchanged, propagates the upstream's exit code,
+    and fires the --observe-exhausted recorder ONLY on an exhaustion line."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.bin = os.path.join(self.tmp, ".local", "bin")
+        os.makedirs(self.bin)
+        self._orig_shim = cli_gh_rate.shim_path
+        self._orig_up = cli_gh_rate.upstream_path
+        self._orig_app = cli_gh_rate.app_shim_path
+        cli_gh_rate.shim_path = lambda: os.path.join(self.bin, "gh")
+        cli_gh_rate.upstream_path = lambda: os.path.join(self.bin, "gh-upstream")
+        cli_gh_rate.app_shim_path = lambda: os.path.join(self.bin, "gh-app-shim")
+
+    def tearDown(self):
+        cli_gh_rate.shim_path = self._orig_shim
+        cli_gh_rate.upstream_path = self._orig_up
+        cli_gh_rate.app_shim_path = self._orig_app
+
+    def _fake_upstream(self, stderr_text, rc):
+        # a fake "gh" (real gh binary stand-in) that writes stdout + a given
+        # stderr and exits with rc — the wrapper's observe path runs THIS.
+        p = os.path.join(self.bin, "gh-upstream")
+        body = ("#!/usr/bin/env bash\n"
+                'echo "gh version 2.40.0 (test)"\n'
+                "printf '%s\\n' " + _shq(stderr_text) + " >&2\n"
+                "exit " + str(rc) + "\n")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        os.chmod(p, 0o755)
+        return p
+
+    def _fake_recorder_module(self):
+        # a stand-in cli_gh_rate module: --observe-exhausted touches a sentinel
+        # so the test can prove the wrapper detected the exhaustion + fired it,
+        # without depending on the real status cache / HOME.
+        mod = os.path.join(self.tmp, "recorder.py")
+        sentinel = os.path.join(self.tmp, "observed")
+        with open(mod, "w", encoding="utf-8") as fh:
+            fh.write("import sys, pathlib\n"
+                     "if len(sys.argv) > 1 and sys.argv[1] == '--observe-exhausted':\n"
+                     "    pathlib.Path(%r).write_text('1')\n" % sentinel)
+        return mod, sentinel
+
+    def _run(self, argv_stderr, rc):
+        up = self._fake_upstream(argv_stderr, rc)
+        mod, sentinel = self._fake_recorder_module()
+        shim = cli_gh_rate.shim_path()
+        cli_gh_rate._write_wrapper_file(shim, up, sys.executable, mod,
+                                        upstream=up, observe=True)
+        import subprocess
+        r = subprocess.run([shim, "issue", "list"], capture_output=True,
+                           text=True, timeout=10)
+        # the recorder is backgrounded — give it a bounded moment to land.
+        for _ in range(50):
+            if os.path.exists(sentinel):
+                break
+            time.sleep(0.05)
+        return r, os.path.exists(sentinel)
+
+    def test_403_stderr_fires_the_recorder_and_propagates_rc(self):
+        r, observed = self._run(
+            "API rate limit exceeded for installation ID 152232225 (HTTP 403)", 1)
+        self.assertEqual(r.returncode, 1, "the upstream's exit code must survive")
+        self.assertIn("rate limit exceeded", r.stderr)     # re-emitted unchanged
+        self.assertIn("gh version", r.stdout)              # stdout passes through
+        self.assertTrue(observed, "a 403 line must fire --observe-exhausted")
+
+    def test_clean_call_does_not_fire_the_recorder(self):
+        r, observed = self._run("", 0)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("gh version", r.stdout)
+        self.assertFalse(observed, "a clean call must NOT fire --observe-exhausted")
+
+    def test_nonzero_without_ratelimit_does_not_fire(self):
+        # a plain failure (not a budget exhaustion) propagates rc but records
+        # nothing — no false remaining=0.
+        r, observed = self._run("error: some unrelated failure", 2)
+        self.assertEqual(r.returncode, 2)
+        self.assertFalse(observed)
 
 
 if __name__ == "__main__":

@@ -1217,13 +1217,19 @@ def _write_wrapper_file(shim, real_gh, python_exe, module, upstream=None,
 
 def _chain_over_app_shim(shim, python_exe, module, verbose=True):
     """#1087 L1b: CHAIN our wrapper over the odoo-erp App-token shim currently at
-    `shim` (~/.local/bin/gh) — never wrap it in place (#1051 exec-loop). Move the
-    App shim to ``app_shim_path()`` (only if that target is absent OR
+    `shim` (~/.local/bin/gh) — never wrap it in place (#1051 exec-loop). Place the
+    App shim at ``app_shim_path()`` (only when that target is absent OR already
     byte-identical — never clobber an unexpected file), then install our wrapper
-    at `shim` with the moved shim baked as its upstream and ``observe=True``. The
-    resulting live chain is ``gh -> gh-app-shim -> real gh``, loop-free (the
-    App shim's basename is no longer a ``gh`` on PATH). Idempotent + LOUD;
-    fail-open (a conflict leaves the App shim at gh, working but unthrottled)."""
+    at `shim` with that shim baked as its upstream and ``observe=True``. The
+    resulting live chain is ``gh -> gh-app-shim -> real gh``, loop-free (the App
+    shim's basename is no longer a ``gh`` on PATH). Idempotent + LOUD; fail-open
+    (a conflict leaves the App shim at gh, working but unthrottled).
+
+    Ordering (no missing-gh window — same discipline as the wrap-in-place case):
+    COPY the App shim to ``dest`` FIRST (gh stays intact and executable the whole
+    time), verify it, then ATOMICALLY overwrite gh with our wrapper. gh is never
+    momentarily absent, even if a step fails midway."""
+    import shutil
     dest = app_shim_path()
     try:
         if os.path.exists(dest):
@@ -1238,8 +1244,16 @@ def _chain_over_app_shim(shim, python_exe, module, verbose=True):
             # byte-identical: gh-app-shim already holds the App shim (odoo-erp
             # re-installed the identical shim at gh) — just re-assert our wrapper.
         else:
-            os.replace(shim, dest)          # move the App shim aside (atomic)
-        os.chmod(dest, 0o755)
+            # Copy (not move) so ~/.local/bin/gh is never missing mid-install; a
+            # crash before the final atomic write leaves the working App shim at
+            # gh untouched.
+            shutil.copy2(shim, dest)
+            os.chmod(dest, 0o755)
+            if not (os.path.isfile(dest) and os.access(dest, os.X_OK)):
+                if verbose:
+                    print("    gh rate-guard: ⚠ chain aborted — could not stage "
+                          "the App shim at %s (App shim left at gh)" % dest)
+                return "error: could not stage app shim"
         _write_wrapper_file(shim, dest, python_exe, module, upstream=dest,
                             observe=True)
         real = real_gh_path() or "/usr/bin/gh"

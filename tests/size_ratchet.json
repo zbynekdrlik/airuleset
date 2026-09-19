@@ -23,7 +23,7 @@
     "cli_drop_gateway.py": 869,
     "cli_filedrop_watchdog.py": 578,
     "cli_fleet.py": 1130,
-    "cli_gh_rate.py": 1572,
+    "cli_gh_rate.py": 1586,
     "cli_handoff_template.py": 464,
     "cli_key_rotation.py": 711,
     "cli_lane_overlap.py": 533,
