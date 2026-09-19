@@ -196,7 +196,7 @@
     "tests/test_compact_live_hold_844.py": 153,
     "tests/test_compact_queued_hint_833.py": 140,
     "tests/test_compact_reconcile_844.py": 188,
-    "tests/test_compact_removed_1084.py": 428,
+    "tests/test_compact_removed_1084.py": 449,
     "tests/test_compact_subagent_retire_610.py": 158,
     "tests/test_concurrency_998.py": 328,
     "tests/test_conformance_check.py": 498,

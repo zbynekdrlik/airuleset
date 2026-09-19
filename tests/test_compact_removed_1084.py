@@ -279,6 +279,27 @@ class TestCompactLinePrintsBeforeGatingPostChecks(unittest.TestCase):
             i_compact, i_pw,
             "the compact report line must run BEFORE the Playwright group (#1084 L1b)")
 
+    def test_install_through_the_gates_is_and_chained_never_seq_or_or(self):
+        # #1084 L1b review F2: the order lock alone would still pass if a future
+        # edit swapped a `&&` joiner for `;` or `||` between install and the
+        # gates — which would let a gate FAILURE (rc 87/88) NOT abort the target
+        # (`;`) or be masked (`||`). Lock the joiners too: from `airuleset.py
+        # install` through the Playwright call the (comment-stripped) source must
+        # carry no `;` and no `||`. The `|| true` in `(gh auth setup-git…)` sits
+        # BEFORE install, so the install-onward span excludes it.
+        src = self._deploy_src()
+        i_install = src.index("python3 airuleset.py install")
+        i_pw_end = (src.index("_playwright_chromium_postcheck()", i_install)
+                    + len("_playwright_chromium_postcheck()"))
+        span = "\n".join(ln for ln in src[i_install:i_pw_end].splitlines()
+                         if not ln.strip().startswith("#"))
+        self.assertNotIn(";", span,
+                         "install→gates must be &&-chained, never `;` "
+                         "(a `;` would stop a gate rc 87/88 from aborting the target)")
+        self.assertNotIn("||", span,
+                         "install→gates must be &&-chained, never `||` "
+                         "(an `||` would mask a gate failure)")
+
     # (b) execution test --------------------------------------------------- #
     def _ordered_postcheck_fragments(self):
         """The three post-check fragment strings, ordered as

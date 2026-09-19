@@ -1372,9 +1372,9 @@ def _deploy_to_all_remotes(failed, auth_failed):
                 f"&& git pull --ff-only && {owner_vps_env}python3 airuleset.py install "
                 # #1084 L1b: the compact hard-off report line (informational,
                 # never fails the target) runs BEFORE the gating groups below.
-                # Those are `{ … }` command GROUPS whose success/SKIP paths end in
-                # `exit 0`, which terminates the whole remote `sh -c` — so a
-                # trailing `&& echo` after them was unreachable (0× on v0.1.351).
+                # Those `{ … }` groups (not subshells) `exit` on their SKIP paths
+                # (Playwright on its success path too) — and `exit` in a group ends
+                # the whole remote `sh -c`, so a trailing `&& echo` was unreachable.
                 f"&& {_compact_hardoff_postcheck()}"
                 # #1051: prove the freshly-installed gh chain does not hang.
                 f" && {_gh_chain_postcheck()}"
