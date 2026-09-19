@@ -539,6 +539,42 @@ def seed_goal_marker(path, tail_bytes=None, cap_bytes=None, block=None):
     return (new_off, None, "none-bof" if reached_bof else "unknown-past-cap")
 
 
+def persisted_goal_mark(sid, state_path=None):
+    """#1089 -- the watchdog's persisted per-session `/goal` mark record for
+    `sid`, or None. This is `state["goal_mark"][sid]` -- the
+    `{"off", "mark", "tmtime", "pv"}` dict `goal_dark_watch` maintains
+    INCREMENTALLY (#517 seed-once-then-resume) and PERSISTS in
+    `watchdog.STATE_PATH` (`~/.claude/api-watchdog-state.json`). `mark` is exactly
+    what `_parse_goal_marker`/`_newest_marker` produce
+    (`{"state": "set"|"cleared", ...}` or None).
+
+    THE SINGLE SOURCE both the dark-watch WRITER and a reader consume (#486): the
+    lane-fill Stop gate (`gates.lanefill._goal_armed`) reads THIS instead of
+    re-scanning a 650-730 MB transcript on every Stop -- the #1078 fail-open where
+    the arm marker had scrolled past the 32 MB seed cap (`unknown-past-cap`). The
+    watchdog's own consumer of the same record is `one_glance.resolve_goal_armed`;
+    both key on `mark.state`, so a helper here keeps the two from drifting.
+
+    `state_path` defaults to `watchdog.STATE_PATH`; a test passes a fixture path.
+    Fail-safe: an empty `sid`, a missing/corrupt state file, an absent `goal_mark`
+    map, or an absent/malformed sid entry all return None (the caller falls back to
+    the seed scan). Never raises. Lazy `watchdog.decide.load_state` reuse keeps the
+    JSON read identical to every other state consumer (no second reader)."""
+    if not sid:
+        return None
+    if state_path is None:
+        state_path = watchdog.STATE_PATH
+    from watchdog.decide import load_state
+    state = load_state(state_path)
+    if not isinstance(state, dict):
+        return None
+    gmarks = state.get("goal_mark")
+    if not isinstance(gmarks, dict):
+        return None
+    rec = gmarks.get(sid)
+    return rec if isinstance(rec, dict) else None
+
+
 def pane_goal_armed(captured):
     """`True` / `False` / `None` — is CC's `◎ /goal` footer indicator lit?
 

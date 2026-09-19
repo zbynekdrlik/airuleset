@@ -72,6 +72,19 @@ _CACHE_TTL_S = 120
 # small (< the Stop hook's settings.json timeout) so it fails-open gracefully.
 _FALLBACK_TIMEOUT_S = 8
 
+# #1089 — the watchdog goal_mark record is trusted as-is only while its snapshot
+# of the transcript is within this window of the transcript's CURRENT mtime; a
+# record older than the transcript by > this many seconds is STALE (the session
+# wrote turns the dark-watch has not swept yet) → fall back to the seed scan.
+_REC_STALE_S = 600
+
+# #1089 — the per-Stop decision journal (observability: "does the gate work?" is a
+# file read, not a guess). ENV seam so a test / the push gate isolates it off the
+# real box; default `~/.claude/lanefill/decisions.log`, capped like gh-rate.log.
+_LANEFILL_DIR_ENV = "AIRULESET_LANEFILL_DIR"
+_DECISIONS_LOG = "decisions.log"
+_DECISIONS_MAX_BYTES = 512 * 1024        # mirrors cli_gh_rate._JOURNAL_MAX_BYTES
+
 
 class _Unreadable(Exception):
     """A seam could not be read — the caller journals + fail-opens."""
@@ -154,31 +167,128 @@ def _compose(count, live, cap, tickets):
 # Each resolver is injectable (tests) with a real default. A read error raises
 # _Unreadable → the caller journals + fail-opens.
 # --------------------------------------------------------------------------- #
-def _goal_armed(payload):
-    """True iff the newest `/goal` marker in the session transcript is `set`.
+def _rec_mark_state(rec):
+    """`"set"` / `"cleared"` / None from a persisted goal_mark record's `mark`."""
+    if not isinstance(rec, dict):
+        return None
+    mark = rec.get("mark")
+    if not isinstance(mark, dict):
+        return None
+    st = mark.get("state")
+    return st if st in ("set", "cleared") else None
 
-    Uses `seed_goal_marker` (BACKWARD block scan to `GOAL_MARK_SEED_CAP_BYTES`,
-    #517), NOT `scan_goal_markers(off=None)` (which reads only the last
-    `GOAL_MARK_TAIL_BYTES` = 4 MB). This gate TARGETS long-grinding autopilot
-    sessions ("I 19 a len jeden subagent"), whose `/goal` arm marker may have
-    scrolled >4 MB back with no newer marker — a tail-only read would return
-    None → not-armed → the gate silently never fires on exactly those sessions
-    (the deep-arm regression `seed_goal_marker` exists to prevent; the sibling
-    Stop gate `block-main-implementation.sh` full-scans the transcript for the
-    same reason — no other Stop hook uses `scan_goal_markers(off=None)`).
 
-    `found` + `state=='set'` → armed; `found`+cleared / `none-bof` → not armed
-    (allow, silent — genuinely not armed); `unknown-past-cap` (an arm possibly
-    deeper than the cap) → `_Unreadable` → journal + allow, NEVER a silent
-    not-armed and NEVER a fabricated armed=True. A missing transcript → not
-    armed → allow. Lazy import keeps the gates package cheap + stdlib-only."""
+def _rec_fresh_for(rec, tp):
+    """True iff the watchdog record's snapshot (`rec["tmtime"]`) is within
+    `_REC_STALE_S` of the transcript's CURRENT mtime — i.e. the dark-watch has
+    swept this session recently, so its verdict is authoritative. A record whose
+    `tmtime` is NEWER than the transcript (clock skew) is fresh (the safe side).
+    Missing/non-numeric `tmtime` or an unreadable transcript → not fresh."""
+    if not isinstance(rec, dict):
+        return False
+    rt = rec.get("tmtime")
+    if not isinstance(rt, (int, float)) or isinstance(rt, bool):
+        return False
+    try:
+        tm = os.path.getmtime(tp)
+    except OSError:
+        return False
+    return (tm - rt) <= _REC_STALE_S
+
+
+def _tail_overrides_cleared(tail_mark, rec):
+    """True iff the cheap tail scan (`scan_goal_markers`, last 4 MB) found a
+    NEWER `cleared` marker that must override a (possibly-stale) watchdog `set`
+    record — Review B 🟡-1 (#1089 fix-forward).
+
+    The dark-watch record lags the transcript by up to one sweep, so a `/goal`
+    CLEARED written since the last pass is not yet in `rec`. `scan_goal_markers`
+    returns the NEWEST marker in the recent window, so a tail `cleared` there is
+    the most-recent state change in that window — honour it over the record.
+
+    `newer` is decided by timestamp when BOTH the tail marker and the record's
+    own mark carry a `ts` (a clock-rewound transcript then keeps the record — the
+    ts guard); when either `ts` is absent, the tail scan's newest-in-window
+    marker is authoritative (the record lags by design), so a tail `cleared`
+    wins. A non-`cleared` tail marker (or none) never overrides."""
+    if not isinstance(tail_mark, dict) or tail_mark.get("state") != "cleared":
+        return False
+    rec_mark = rec.get("mark") if isinstance(rec, dict) else None
+    rec_ts = rec_mark.get("ts") if isinstance(rec_mark, dict) else None
+    tail_ts = tail_mark.get("ts")
+    if isinstance(tail_ts, (int, float)) and not isinstance(tail_ts, bool) \
+            and isinstance(rec_ts, (int, float)) and not isinstance(rec_ts, bool):
+        return tail_ts > rec_ts
+    return True
+
+
+def _goal_armed(payload, *, state_path=None, out=None):
+    """True iff this session's `/goal` loop is armed — reading the WATCHDOG's
+    persisted marker FIRST, the seed scan only as a fallback (#1089).
+
+    The dark-watch (`watchdog/goal.py::goal_dark_watch`) maintains each session's
+    newest `/goal` marker INCREMENTALLY and persists it at
+    `state["goal_mark"][sid]` in `~/.claude/api-watchdog-state.json`
+    (`goal_scan.persisted_goal_mark`, the single source #486). This gate reads
+    THAT instead of re-scanning the transcript, because the sessions it targets
+    are the 650-730 MB autopilot supervisors whose `/goal` arm marker sits deeper
+    than the 32 MB seed cap → `seed_goal_marker` returns `unknown-past-cap` → the
+    #1078 gate fail-opened on 100 % of the sessions it was built for.
+
+    Precedence (keys on the same `mark.state` as `one_glance.resolve_goal_armed`,
+    but adds a `_REC_STALE_S` freshness gate and the 🟡-1 tail-scan override that
+    `resolve_goal_armed` has neither of):
+      * a FRESH watchdog record (its transcript-mtime snapshot within
+        `_REC_STALE_S`) with `mark.state == "set"` → the deep seed scan is
+        SKIPPED, but the CHEAP tail-only `scan_goal_markers` (last 4 MB) still
+        runs: a NEWER tail `cleared` overrides the (lagging) record → not armed
+        (`src=watchdog+tail`, Review B 🟡-1 #1089); no newer clear → armed
+        (`src=watchdog`). A fresh `"cleared"` → not armed (`src=watchdog`).
+      * MISSING / STALE / no-mark record → the seed scan governs: `found`+`set` →
+        armed (`src=seed`); `found`+cleared / `none-bof` → not armed;
+        `unknown-past-cap` → if a (stale) watchdog record still says `set` the
+        seed cannot disprove it, so honour it (armed, `src=watchdog`) — else
+        `_Unreadable` → journal + fail-open, EXACTLY as #1078 (the genuinely
+        absent case is unchanged).
+      * a missing transcript → not armed.
+
+    `state_path` (test seam) defaults to `watchdog.STATE_PATH`. `out` (test seam,
+    like `send_verified`'s) receives `out["src"]` for the decision journal."""
+    def _src(s):
+        if isinstance(out, dict):
+            out["src"] = s
     tp = gates.field_of(payload, "transcript_path", "")
     if not tp:
+        _src("no-transcript")
         return False
+    sid = gates.field_of(payload, "session_id", "") or ""
     import watchdog.goal_scan as goal_scan
+    rec = goal_scan.persisted_goal_mark(sid, state_path=state_path) if sid else None
+    rec_state = _rec_mark_state(rec)
+    if _rec_fresh_for(rec, tp):
+        if rec_state == "set":
+            # Review B 🟡-1 (#1089 fix-forward): the record lags the transcript
+            # by up to one sweep, so a `/goal` cleared since the last dark-watch
+            # pass is not in `rec`. Do the CHEAP tail-only scan (last 4 MB —
+            # cheap even on a 700 MB transcript, never the deep seed) and let a
+            # NEWER tail `cleared` win before trusting the record's `set`.
+            _tail_off, tail_mark = goal_scan.scan_goal_markers(tp)
+            if _tail_overrides_cleared(tail_mark, rec):
+                _src("watchdog+tail")
+                return False
+            _src("watchdog")
+            return True
+        if rec_state == "cleared":
+            _src("watchdog")
+            return False
     _off, mark, status = goal_scan.seed_goal_marker(tp)
     if status == "unknown-past-cap":
+        if rec_state == "set":
+            _src("watchdog")           # stale record set + seed can't disprove
+            return True
+        _src("seed")
         raise _Unreadable("goal-armed unknown-past-cap")
+    _src("seed")
     return bool(mark) and mark.get("state") == "set"
 
 
@@ -199,7 +309,7 @@ def _cap(cwd):
     return int(caps.get("total", lr.GOAL_LANE_SATURATION_WORKERS))
 
 
-def _live(payload, cwd):
+def _live(payload, cwd, out=None):
     """This session's live worker-lane count (`watchdog.count_live_workers`,
     disk state only — no tmux, no ps). The freshness window is imported from the
     single source (`watchdog.compact.COMPACT_LIVE_WORKER_FRESHNESS_S` = 15 min,
@@ -209,12 +319,19 @@ def _live(payload, cwd):
     a worker dispatched in THIS turn whose subagent transcript has not yet landed
     on disk is under-counted — the block's escape names `Lane-fill: práve som
     dispatchol` for that instant, and a false block is fail-open (the session
-    continues, never a wrong write)."""
+    continues, never a wrong write).
+
+    `out` (test/journal seam) receives `out["evidence"]` — the `[WorkerLane, …]`
+    list `count_live_workers` returns — so the #1089 decision journal can break
+    the count down by state (finished / stale / wedged); the RETURN stays the int
+    `count` so the `live_fn` decide seam is unchanged."""
     import watchdog
     from watchdog.compact import COMPACT_LIVE_WORKER_FRESHNESS_S
     sid = gates.field_of(payload, "session_id", "") or "unknown"
-    count, _ev = watchdog.count_live_workers(
+    count, ev = watchdog.count_live_workers(
         watchdog.PROJECTS_DIR, cwd, sid, time.time(), COMPACT_LIVE_WORKER_FRESHNESS_S)
+    if isinstance(out, dict):
+        out["evidence"] = ev
     return int(count)
 
 
@@ -274,7 +391,7 @@ def _cached_dispatchable(cwd):
     return len(tickets), tickets
 
 
-def _dispatchable(payload, cwd):
+def _dispatchable(payload, cwd, out=None):
     """`(count, tickets)` of DISPATCHABLE candidates — CACHE-FIRST.
 
     Order: (1) the `_FAKE_QUALS_ENV` test seam (canned lines, no gh);
@@ -283,9 +400,15 @@ def _dispatchable(payload, cwd):
     --list-dispatchable` fallback capped at `_FALLBACK_TIMEOUT_S` (8s, small — a
     stale-cache turn; the footer refresh warms the cache for the next turn) → on
     timeout / rc≠0 → `_Unreadable` → fail-open. The count is the line count,
-    consistent with `--count-dispatchable` by construction."""
+    consistent with `--count-dispatchable` by construction.
+
+    `out` (journal seam) receives `out["src"]` = `fake` / `cache` / `live`."""
+    def _src(s):
+        if isinstance(out, dict):
+            out["src"] = s
     fake = os.environ.get(_FAKE_QUALS_ENV)
     if fake is not None:
+        _src("fake")
         if fake.startswith("@"):
             try:
                 with open(fake[1:]) as f:
@@ -295,7 +418,9 @@ def _dispatchable(payload, cwd):
         return _parse_quals_lines(fake)
     cached = _cached_dispatchable(cwd)
     if cached is not None:
+        _src("cache")
         return cached
+    _src("live")
     import subprocess
     import cli_quals
     try:
@@ -347,12 +472,88 @@ def _journal(why):
     sys.stderr.write("lane-fill: %s — not enforced\n" % why)
 
 
+def _lanefill_dir():
+    """The lane-fill state dir — `AIRULESET_LANEFILL_DIR` (a test / the push-gate
+    seam) else `~/.claude/lanefill` resolved at CALL time (so a HOME-override
+    subprocess reads its own home, like `goal_scan.goal_templates_path`)."""
+    from pathlib import Path
+    d = os.environ.get(_LANEFILL_DIR_ENV)
+    return d if d else os.path.join(str(Path.home()), ".claude", "lanefill")
+
+
+def _fmt_live(live, evidence):
+    """`live` for the journal: an int with the count_live_workers breakdown when
+    evidence is present (`N(f=<finished> s=<stale> w=<wedged>)`), a plain int
+    when not, `-` when unknown. NOTE (#1089): the design named the middle bucket
+    "settling" — but `count_live_workers` folds a settling lane into `live` (within
+    the FINISH_SETTLE_S grace) or `finished` (past it), so it is not a standalone
+    evidence STATE; `s` here is `stale` (aged-out), the third real non-live
+    exclusion reason the owner needs to see next to finished/wedged."""
+    if live == "-" or live is None:
+        return "-"
+    if not evidence:
+        return str(live)
+    f = sum(1 for lane in evidence if getattr(lane, "state", None) == "finished")
+    s = sum(1 for lane in evidence if getattr(lane, "state", None) == "stale")
+    w = sum(1 for lane in evidence if getattr(lane, "state", None) == "wedged")
+    # #1089 F-7: surface the `unreadable` exclusion too when present, so
+    # live + f + s + w + u accounts for every evidence lane (an unreadable
+    # transcript is a real non-live reason the owner needs to see).
+    u = sum(1 for lane in evidence if getattr(lane, "state", None) == "unreadable")
+    tail = " u=%d" % u if u else ""
+    return "%s(f=%d s=%d w=%d%s)" % (live, f, s, w, tail)
+
+
+def _cap_decisions_log(p):
+    """Bound the journal like cli_gh_rate._cap_journal: rotate to `.1` once over
+    the cap (total ~2× the cap). Best-effort, never raises."""
+    try:
+        if os.path.getsize(p) > _DECISIONS_MAX_BYTES:
+            os.replace(p, p + ".1")
+    except OSError:
+        return                                # missing/unrotatable — nothing to cap
+
+
+def _decision_journal(*, armed="?", mode="-", cap="-", live="-", evidence=None,
+                      dispatchable="-", disp_src="-", verdict="-"):
+    """#1089 — append ONE per-Stop decision line to
+    `~/.claude/lanefill/decisions.log` (token-free, capped): the gate's verdict
+    is a file read, not a guess. `-` for a fact an early / fail-open return never
+    resolved. Best-effort; never raises, never blocks the gate (observability
+    only) — a write failure leaves the verdict unaffected."""
+    try:
+        # #1089 F-6: build the line INSIDE the try too — a malformed `evidence`
+        # (not the count_live_workers list) would raise in `_fmt_live` and, built
+        # outside, propagate past run()'s "never raises" contract.
+        line = ("%s armed=%s mode=%s cap=%s live=%s dispatchable=%s/%s verdict=%s\n"
+                % (time.strftime("%Y-%m-%dT%H:%M:%S%z"), armed, mode, cap,
+                   _fmt_live(live, evidence), dispatchable, disp_src, verdict))
+        d = _lanefill_dir()
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, _DECISIONS_LOG)
+        _cap_decisions_log(p)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(line)
+    except Exception:
+        # A decision-journal write is the last-resort observability sink; a
+        # failure (I/O OR a malformed input) has nowhere left to be logged and
+        # must never disturb the gate's verdict (mirrors cli_gh_rate._diag /
+        # count_live_workers._warn_stderr).
+        return  # airuleset:script-ok observability sink — a failed journal write cannot itself be logged
+
+
 def run(payload, *, goal_fn=None, mode_fn=None, cap_fn=None, live_fn=None,
-        quals_fn=None):
+        quals_fn=None, state_path=None):
     """The I/O shell: resolve inputs, call decide, emit. CHEAP checks first
     (marker / justification, no reads) so the expensive quals/transcript reads
     fire only on an armed, parallel, ⏳/✅, unjustified turn. Any read error
-    journals + allows (fail-open). Never raises."""
+    journals + allows (fail-open). Never raises.
+
+    #1089: EVERY turn that reaches the goal-armed check (past the two cheap
+    early returns — a non-⏳/✅ turn and a justified turn are not gate
+    evaluations and do not journal) writes ONE `decisions.log` line, so "does
+    the gate work?" is a file read. The goal-armed / live / dispatchable SOURCES
+    are threaded into that line via each resolver's `out` seam."""
     msg = gates.field_of(payload, "last_assistant_message", "")
     if not isinstance(msg, str):
         msg = ""                              # a malformed payload never raises
@@ -361,29 +562,58 @@ def run(payload, *, goal_fn=None, mode_fn=None, cap_fn=None, live_fn=None,
         return                                # not a ⏳/✅ turn — allow, no reads
     if has_justification(msg):
         return                                # intentional under-fill — allow
+    # --- goal armed (watchdog-first) ---
+    armed_out = {}
     try:
-        armed = (goal_fn or _goal_armed)(payload)
+        if goal_fn is not None:
+            armed = goal_fn(payload)
+            armed_src = "fn"
+        else:
+            armed = _goal_armed(payload, state_path=state_path, out=armed_out)
+            armed_src = armed_out.get("src", "seed")
     except Exception as e:  # noqa: BLE001
         _journal("unreadable (goal-armed: %s)" % _exc_desc(e))
+        _decision_journal(armed="?/unreadable",
+                          verdict="unreadable:goal-armed:%s" % _exc_desc(e))
         return
     if not armed:
+        _decision_journal(armed="false/%s" % armed_src, verdict="allow:not-armed")
         return
     cwd = gates.field_of(payload, "cwd", "") or os.getcwd()
     try:
         mode = (mode_fn or _mode)(cwd)
     except Exception as e:  # noqa: BLE001
         _journal("unreadable (mode: %s)" % _exc_desc(e))
+        _decision_journal(armed="true/%s" % armed_src,
+                          verdict="unreadable:mode:%s" % _exc_desc(e))
         return
     if mode != _MODE_PARALLEL:
-        return                                # sequential exempt
+        _decision_journal(armed="true/%s" % armed_src, mode=mode,
+                          verdict="allow:sequential")   # sequential exempt
+        return
+    live_out = {}
+    disp_out = {}
     try:
         cap = (cap_fn or _cap)(cwd)
-        live = (live_fn or _live)(payload, cwd)
-        count, tickets = (quals_fn or _dispatchable)(payload, cwd)
+        if live_fn is not None:
+            live = live_fn(payload, cwd)
+        else:
+            live = _live(payload, cwd, out=live_out)
+        if quals_fn is not None:
+            count, tickets = quals_fn(payload, cwd)
+            disp_src = "fn"
+        else:
+            count, tickets = _dispatchable(payload, cwd, out=disp_out)
+            disp_src = disp_out.get("src", "?")
     except Exception as e:  # noqa: BLE001
         _journal("unreadable (%s)" % _exc_desc(e))
+        _decision_journal(armed="true/%s" % armed_src, mode=mode,
+                          verdict="unreadable:%s" % _exc_desc(e))
         return
     block, _reason = decide(count, live, cap, mode, armed, marker, False)
+    _decision_journal(armed="true/%s" % armed_src, mode=mode, cap=cap, live=live,
+                      evidence=live_out.get("evidence"), dispatchable=count,
+                      disp_src=disp_src, verdict="block" if block else "allow")
     if not block:
         return
     gates.emit_block_stderr(_compose(count, live, cap, tickets))

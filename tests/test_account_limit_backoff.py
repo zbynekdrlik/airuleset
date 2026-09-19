@@ -249,7 +249,11 @@ class TestAccountLimitBackoff(unittest.TestCase):
         rec = {"alim": {"first_seen": now - 60, "resets_at": None}}
         logs, owns, tmux, _ = self._call(now, tmtime, "", rec=rec)   # recovered
         self.assertNotIn("alim", rec)                                # cleared
-        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)  # nudged
+        # #1089: the account-limit episode still CLEARS on recovery (that logic is
+        # unchanged), but the lane-occupancy keystroke delivery is RETIRED — the
+        # refill decision is reached without typing (the lane-fill Stop gate is the
+        # lever now).
+        self.assertEqual(tmux.sent, [], tmux.sent)
 
     def test_back_off_elapsed_reprobes_once_and_rearms(self):
         now = 100000
@@ -257,7 +261,10 @@ class TestAccountLimitBackoff(unittest.TestCase):
         # first_seen 7h ago -> release (<=6h cap) already elapsed
         rec = {"alim": {"first_seen": now - 7 * 3600, "resets_at": None}}
         logs, owns, tmux, _ = self._call(now, tmtime, WEEKLY, rec=rec)
-        self.assertTrue(any("-l" in a for a in tmux.sent), tmux.sent)  # re-probed
+        # #1089: the release-cap re-arm still fires (that logic is unchanged), but
+        # the lane-occupancy keystroke delivery is RETIRED — no keystroke on the
+        # re-probe (the lane-fill Stop gate is the refill lever now).
+        self.assertEqual(tmux.sent, [], tmux.sent)                    # not typed
         self.assertEqual(rec["alim"]["first_seen"], now)              # re-armed
 
 
