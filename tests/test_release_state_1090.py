@@ -177,6 +177,31 @@ class RangeCap(unittest.TestCase):
         self.assertIn("3900", buf.getvalue())
         self.assertIn("M hidden", buf.getvalue())
 
+    def test_giant_range_via_1083_era_signature_makes_zero_calls(self):
+        # review #1090: a BEHAVIOURAL RED that proves the runaway is closed
+        # WITHOUT the new seams — the exact #1083-era call shape (no remote_fn,
+        # no ref_exists_fn). On the base tree this made 3 900 REST calls; the
+        # cap now makes ZERO. slug set + no remote_fn -> the real local origin
+        # read on the fake root fails -> origin prefix -> cap fires.
+        rows = [("oid%d" % n, "Merge pull request #%d from s/%d" % (n, n))
+                for n in range(1, 3901)]
+        git = _recording_git_fn(
+            {"origin/main..origin/develop": rows,
+             "origin/main..origin/staging": []}, [])
+        calls = []
+
+        def pr_meta(pr):
+            calls.append(pr)
+            return ("t", "Closes #%d" % (100000 + pr))
+
+        got = rs.merged_unreleased_issues(
+            "/repo", git_fn=git, pr_meta_fn=pr_meta, cache_path=self.cache,
+            slug="o/r")
+        self.assertEqual(set(got), set())
+        self.assertEqual(calls, [],
+                         "the cap must bound the sweep on the #1083-era "
+                         "signature too — ZERO REST for a 3 900-PR range")
+
     def test_at_cap_still_processes(self):
         # exactly MERGED_UNRELEASED_MAX_PRS is NOT over the cap.
         n_at = rs.MERGED_UNRELEASED_MAX_PRS

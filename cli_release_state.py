@@ -233,9 +233,12 @@ def _default_ref_date(root, ref):
     return (r.stdout or "").strip() or None
 
 
-def _canonical_ref_prefix(root, slug, remote_fn, ref_exists_fn):
+def _canonical_ref_prefix(root, slug, origin_slug, remote_fn, ref_exists_fn):
     """(a) The branch prefix (`origin` / `upstream`) whose `main..develop` range
-    IS the canonical release train, fork-aware. Returns `(prefix, reason)`:
+    IS the canonical release train, fork-aware. `origin_slug` is the local
+    `origin` remote's slug, read ONCE by the caller and passed in (so the hot
+    footer path never re-spawns `git remote get-url origin` — review #1090).
+    Returns `(prefix, reason)`:
 
       * `("origin", None)` — the normal/canonical clone (or the canonical slug
         is unknown / the local origin remote is unreadable): keep origin,
@@ -248,7 +251,6 @@ def _canonical_ref_prefix(root, slug, remote_fn, ref_exists_fn):
         is HIDDEN, the caller journals `reason` and makes ZERO REST calls."""
     if not slug:
         return ("origin", None)   # canonical unknown -> origin (unchanged)
-    origin_slug = remote_fn(root, "origin")
     if not origin_slug or origin_slug == slug:
         # unreadable local remote -> keep origin (the cap still protects it);
         # or origin IS the canonical slug -> a normal clone.
@@ -395,15 +397,20 @@ def _compute_merged_unreleased(root, git_fn, pr_meta_fn, cache_path, slug,
         remote_fn = _default_remote_slug
     if ref_exists_fn is None:
         ref_exists_fn = _default_ref_exists
+    # Read the LOCAL `origin` remote ONCE (no network) and reuse it for BOTH the
+    # slug resolution and the fork check (review #1090 — avoids a redundant
+    # `git remote get-url origin` on the hot footer path).
+    origin_slug = remote_fn(root, "origin")
     # Resolve the canonical slug FIRST — from an explicit slug, a caller
-    # resolver, or the LOCAL `origin` remote (no network). Cheap on every path,
-    # and (#1090) needed BEFORE the range so a fork clone reads the canonical
-    # branches, not its own stale `origin/*`.
+    # resolver, or that origin read. Cheap on every path, and (#1090) needed
+    # BEFORE the range so a fork clone reads the canonical branches, not its own
+    # stale `origin/*`.
     if slug is None:
-        slug = _resolve_slug(root, None, slug_fn, remote_fn)
+        slug = (slug_fn() if slug_fn is not None else None) or origin_slug
     # (a) Fork-aware range prefix. A fork clone whose canonical refs are absent
     # hides `M` here with a journal reason and makes ZERO REST calls.
-    prefix, reason = _canonical_ref_prefix(root, slug, remote_fn, ref_exists_fn)
+    prefix, reason = _canonical_ref_prefix(
+        root, slug, origin_slug, remote_fn, ref_exists_fn)
     if prefix is None:
         sys.stderr.write(reason + "\n")
         return frozenset()
@@ -465,10 +472,12 @@ def merged_unreleased_issues(root, git_fn=None, pr_meta_fn=None,
                              cache_path=None, now=None, slug=None, slug_fn=None,
                              remote_fn=None, ref_exists_fn=None):
     """The set of issue numbers whose fix PR is merged into develop/staging but
-    NOT yet in main (`M`). `slug` names the `owner/repo` for the PR-meta REST
-    read + the cache filename; pass `slug_fn` instead to resolve it LAZILY (only
-    when the git range is non-empty), so a two-branch / no-merge `--count`
-    refresh pays zero gh. `now` is accepted for signature stability (the cache is
+    NOT yet in main (`M`). `slug` names the canonical `owner/repo` for the
+    PR-meta REST read + the cache filename; `slug_fn` is an alternative resolver.
+    When neither is given the slug is resolved EAGERLY from the LOCAL `origin`
+    remote — a no-network read (#1090 resolves it before the git range, so a fork
+    clone can select the canonical branches; the hot `--count`/footer path still
+    pays zero gh). `now` is accepted for signature stability (the cache is
     append-only; a merged PR never changes). `remote_fn`/`ref_exists_fn` (#1090)
     are the fork-aware range seams (default = local git reads; injected in
     tests). Memoised per process, BYPASSED when any seam is injected (tests)."""
