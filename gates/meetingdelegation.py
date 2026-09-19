@@ -10,14 +10,19 @@ of every screen, correlation, synthesis, per-task supplements, and the questions
 (phases 4-6) run in main, whole. See Hard Rule 0 in
 skills/meeting-analysis/SKILL.md.
 
-This gate REFUSES an Agent/Workflow dispatch whose prompt/script carries a
-meeting-analysis SIGNAL unless it is explicitly marked `MECHANICAL-ONLY:
-extract|asr|dedup` on its FIRST line AND (for a marked prompt) does not also ask
-for interpretation (a "read the screen" / "summarise" / "requirements" /
-"precitaj" / "zhrn" / "co klient" verb). A signal-bearing dispatch is blocked by
-default -- the fail-CLOSED direction (a partially-malformed / unmarked meeting
-delegation never slips through). A dispatch with NO detectable meeting signal
-passes untouched.
+This gate REFUSES an Agent/Workflow dispatch that carries INTERPRETATION intent
+for a meeting (#1076 integration review):
+  - a PHRASE that NAMES the interpretation act (`analýza meetingu` / `meeting
+    analysis` / `doplnok z meetingu`, diacritic + both-order robust) blocks on
+    its own -- the owner's literal "Sprav analýzu meetingu…" / "spracuj … meeting"
+    must block;
+  - a FILE-ARTIFACT signal (`transcript.txt` / `speaker_turns.json` /
+    `frames_kept` / `screen_inventory` / `_verbatim.md` / `VIDEO-NOTES`) blocks
+    ONLY when an interpretation-intent STEM is also present (analy[yý][sz] /
+    spracuj / vyhodno / summari / interpret / read-the-screen / reader fan-out /
+    write-a-deliverable / prečítaj / zhrň / čo klient) -- so a grep, a code
+    review, or a bug fix that merely NAMES an artifact stays ALLOWED.
+A dispatch with no meeting signal at all passes untouched.
 
 Bypass: `airuleset:meeting-delegation-ok <reason>` in the prompt/script --
 allowed and logged to ~/.claude/meeting-delegation-gate.log.
@@ -33,21 +38,31 @@ from gates import read_payload, field_of, emit_block_stderr, allow
 
 DELEGATION_LOG = "meeting-delegation-gate.log"
 
-# Meeting-analysis material signals -- the artifacts + phrases a meeting-analysis
-# dispatch carries. Substring match, case-insensitive. These are the exact
-# signals the #1076 design enumerates.
-_SIGNALS = (
+# ARTIFACT signals -- the FILE artifacts a meeting-analysis dispatch names. These
+# are a SIGNAL but NOT intent: a dispatch that only names one (a grep, a code
+# review, a bug fix on the skill's own code) is ALLOWED unless it ALSO carries an
+# interpretation-intent token (#1076 integration review). Substring, case-insensitive.
+_ARTIFACT_SIGNALS = (
     "transcript.txt",
     "speaker_turns.json",
     "frames_kept",
     "screen_inventory",
     "_verbatim.md",
     "video-notes",
-    "analyza meetingu",       # Slovak, diacritic-stripped form
-    "analýza meetingu",  # Slovak with diacritics (analýza)
-    "meeting analysis",
-    "doplnok z meetingu",
 )
+
+# PHRASE-INTENT signals -- phrases that NAME the interpretation act itself, so
+# they are BOTH a signal AND intent (a dispatch carrying one BLOCKS on its own,
+# no separate verb needed -- #1076 integration review: the owner's literal
+# "Sprav analýzu meetingu …" / "spracuj ten meeting" must block). Diacritic-
+# robust (`anal[yý][sz]` catches analýza/analýzu/analyza/analysis) and both word
+# orders (`analýza meetingu` Slovak, `meeting analysis` English). `\w*\s+` is
+# ReDoS-safe (disjoint classes either side of the gap).
+_PHRASE_INTENT_RE = re.compile(
+    r"anal[yý][sz]\w*\s+meeting"       # analýza/analýzu/analyza meetingu
+    r"|meeting[\s-]+anal[yý][sz]"       # meeting analysis / meeting-analysis
+    r"|doplnok\s+z\s+meeting",              # doplnok z meetingu
+    re.IGNORECASE)
 
 # The FIRST line must be `MECHANICAL-ONLY:` naming at least one real mechanical
 # phase (extract / asr / dedup). A first line marking a fake phase (or no phase)
@@ -63,20 +78,27 @@ _MARKER_RE = re.compile(r"^\s*MECHANICAL-ONLY:\s*.*\b(extract|asr|dedup)\b",
 # fixed tokens with `\s+` gaps and a BOUNDED `[\w ]{0,20}` before a fixed suffix
 # (no `\w*` directly before an unbounded proximity gap -- the repo's #577 class).
 # Slovak variants carry diacritic-stripped alternates.
+# #1076 integration review: intent = STEMS, not conjugations, so a plain Slovak
+# dispatch ("Sprav analýzu…", "spracuj ten meeting", "vyhodnoť…") is caught. Each
+# stem is a bare substring (`re.search` finds it anywhere); the `\s+`-gapped arms
+# keep disjoint classes either side → ReDoS-safe (#577).
 _INTERP_RE = re.compile(
     r"read\s+the\s+screen"
     r"|reads?\s+(?:the\s+|every\s+|each\s+)?(?:screen|frame|jpg|obrazovk)"
     r"|readers?\s+over"                 # "parallel readers over transcript segments"
     r"|parallel\s+readers?"
-    r"|summari[sz]e"
-    r"|analy[sz](?:e|ing)|interpret"
+    r"|summari[sz]|sumariz"             # summarise/summarize/summary, sumarizuj
+    r"|anal[yý][sz]"                    # analyse/analyze/analysis, analýza/analýzu/analyzuj
+    r"|interpret"
+    r"|vyhodno[tť]"                     # vyhodnoť/vyhodnotiť/vyhodnotenie
+    r"|spracuj|spracova[tť]|spracovan"  # spracuj/spracovať/spracovanie ten meeting
     r"|inspects?\s+(?:the\s+|each\s+|its\s+)?(?:screen|frame)"
     r"|what\s+did\s+the\s+client"
     r"|(?:list|extract|identify|gather|capture)\w*\s+(?:the\s+)?requirement"
     r"|(?:write|writes|writing|record|records|recording)\s+[\w ]{0,20}"
     r"(?:notes|mapping|screen_inventory|inventory|deliverable|tickets?|summary)"
     r"|map\s+(?:it\s+|them\s+)?to\s+(?:tickets?|requirement)"
-    r"|prečítaj|precitaj|zhrň|zhrn|vyhodno"       # prečítaj/zhrň/vyhodnoť
+    r"|prečítaj|precitaj|zhr[nň]"       # prečítaj / zhrň / zhrnutie
     r"|napíš\s+(?:poznámky|zhrnutie|shrnut)"
     r"|čo\s+klient|co\s+klient",                       # čo klient
     re.IGNORECASE)
@@ -121,9 +143,9 @@ def _dispatch_text(tin):
     return primary, full
 
 
-def _first_signal(text):
+def _first_artifact(text):
     low = text.lower()
-    for sig in _SIGNALS:
+    for sig in _ARTIFACT_SIGNALS:
         if sig in low:
             return sig
     return None
@@ -144,8 +166,9 @@ def evaluate(payload):
         return "allow", "no tool_input"
 
     primary, full = _dispatch_text(tin)
-    signal = _first_signal(full)
-    if not signal:
+    phrase = _PHRASE_INTENT_RE.search(full)     # names the interpretation act
+    artifact = _first_artifact(full)            # names a file artifact
+    if not (phrase or artifact):
         return "allow", "no meeting-analysis signal in the dispatch"
 
     mb = _BYPASS_RE.search(full)
@@ -155,27 +178,27 @@ def evaluate(payload):
             mb.group("reason").strip()))
         return "allow", "meeting-delegation-ok bypass (logged)"
 
-    # BLOCK only a dispatch that actually delegates INTERPRETATION (an interp
-    # verb / a reader fan-out / writing a deliverable). A dispatch that merely
-    # NAMES a meeting artifact without interpretation intent — a bug fix on the
-    # skill's own code, a review, a grep — is ALLOWED (#1076 review, both
-    # reviewers: the old "signal alone blocks" wedged airuleset's own dev + code
-    # reviews + greps that name the artifact vocabulary). The `Analysed-by:`
-    # stamp + Stop gate are the backstop for a paraphrased fan-out that dodges
-    # the verb list (a documented residual of any keyword heuristic).
+    # BLOCK a dispatch with INTERPRETATION intent: a PHRASE signal names the
+    # interpretation act itself (blocks on its own -- #1076 integration review:
+    # "Sprav analýzu meetingu…" / "spracuj ten meeting" must block), OR an
+    # interp-verb/stem is present. A dispatch that only NAMES a file ARTIFACT
+    # (a grep, a code review, a bug fix on the skill's own code) with NO intent
+    # is ALLOWED. Escape a legit interpretation-adjacent dispatch (e.g. a review
+    # of THIS gate) with `airuleset:meeting-delegation-ok <reason>` (logged).
     mi = _INTERP_RE.search(full)
-    if not mi:
+    if not (phrase or mi):
         return "allow", ("names meeting artifact `%s` but asks no interpretation "
-                         "(a mechanical / code / review / search dispatch)" % signal)
+                         "(a mechanical / code / review / search dispatch)" % artifact)
 
-    verb = mi.group(0).strip()
+    signal = phrase.group(0).strip() if phrase else artifact
+    intent = phrase.group(0).strip() if phrase else mi.group(0).strip()
     first_line = primary.split("\n", 1)[0] if primary else ""
     if _MARKER_RE.search(first_line):
         return "block", ("signal `%s`; the dispatch is marked MECHANICAL-ONLY but "
-                         "also asks for interpretation (`%s`)" % (signal, verb))
+                         "also asks for interpretation (`%s`)" % (signal, intent))
     return "block", ("signal `%s`; the dispatch delegates meeting interpretation "
                      "(`%s`) — that runs in the MAIN session (Hard Rule 0)"
-                     % (signal, verb))
+                     % (signal, intent))
 
 
 def _block_message(reason):
@@ -198,9 +221,15 @@ def _block_message(reason):
         "dedup)\n"
         "  with NO interpretation verb; mark the prompt's FIRST line "
         "`MECHANICAL-ONLY:\n"
-        "  extract|asr|dedup` for clarity. Interpretation runs in main. Bypass "
-        "(rare,\n"
-        "  logged): `airuleset:meeting-delegation-ok <reason>`." % reason)
+        "  extract|asr|dedup` for clarity. Interpretation runs in main.\n"
+        "\n"
+        "  If this dispatch is NOT a meeting interpretation (e.g. a code review "
+        "of, or\n"
+        "  a bug fix on, the meeting-analysis gate/skill itself that legitimately "
+        "names\n"
+        "  the vocabulary), add `airuleset:meeting-delegation-ok <reason>` to the "
+        "prompt\n"
+        "  to bypass (rare, logged)." % reason)
 
 
 def main():
