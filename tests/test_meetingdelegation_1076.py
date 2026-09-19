@@ -138,6 +138,58 @@ class TestSignals(unittest.TestCase):
         self.assertEqual(v, "allow")
 
 
+class TestCoordinatorTightening(unittest.TestCase):
+    """#1076 integration review: the owner's literal plain-Slovak scenario MUST
+    block — intent = STEMS (not conjugations), and the interpretation-act PHRASE
+    signals (analýza meetingu / meeting analysis / doplnok z meetingu) are intent
+    by themselves; artifact-path signals still require an intent token."""
+
+    def test_sprav_analyzu_meetingu_blocks(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"prompt": "Sprav analýzu meetingu z nahrávky (transcript.txt, frames_kept)"}})
+        self.assertEqual(v, "block")
+
+    def test_spracuj_nahravku_meetingu_blocks(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"prompt": "spracuj nahrávku meetingu, transcript.txt v ~/work"}})
+        self.assertEqual(v, "block")
+
+    def test_english_meeting_analysis_phrase_blocks(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"prompt": "do the meeting analysis from transcript.txt"}})
+        self.assertEqual(v, "block")
+
+    def test_doplnok_z_meetingu_phrase_blocks(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"prompt": "priprav doplnok z meetingu"}})
+        self.assertEqual(v, "block")
+
+    def test_vyhodnot_stem_with_artifact_blocks(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"prompt": "vyhodnoť frames_kept a speaker_turns.json"}})
+        self.assertEqual(v, "block")
+
+    def test_find_where_transcript_written_allows(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"prompt": "find where transcript.txt is written in the repo"}})
+        self.assertEqual(v, "allow")
+
+    def test_mechanical_write_transcript_allows(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"prompt": "MECHANICAL-ONLY: asr — run Soniox on audio.wav, write transcript.txt"}})
+        self.assertEqual(v, "allow")
+
+    def test_review_of_the_gate_itself_blocks_without_bypass(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"prompt": "review the meeting-analysis gate that reads screen_inventory"}})
+        self.assertEqual(v, "block")
+
+    def test_review_of_the_gate_itself_allows_with_bypass(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"prompt": "review the meeting-analysis gate that reads screen_inventory  airuleset:meeting-delegation-ok reviewing the gate itself"}})
+        self.assertEqual(v, "allow")
+
+
 class TestOverBlockFix(unittest.TestCase):
     """#1076 review F2 (both reviewers): the gate must NOT wedge non-interpretation
     dispatches that merely NAME the meeting-analysis vocabulary."""
