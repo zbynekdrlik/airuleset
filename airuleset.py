@@ -9031,6 +9031,7 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _row_is_ops_wait as _row_is_ops_wait,
     _ops_wait_reason as _ops_wait_reason,
     _partition_workable as _partition_workable,
+    _split_merged_unreleased as _split_merged_unreleased,
     _count_bounce as _count_bounce,
     count_bounce_all as _count_bounce_all,
     _acceptance_present_set as _acceptance_present_set,
