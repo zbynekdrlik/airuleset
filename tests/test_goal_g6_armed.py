@@ -101,22 +101,21 @@ class TestG6StructuredArmedGate(unittest.TestCase):
                                         backlog_fetch=lambda cwd: backlog)
         return logs, tmux
 
-    def test_obscured_footer_with_structured_arm_delivers_the_nudge(self):
+    def test_obscured_footer_with_structured_arm_reaches_the_refill_decision(self):
         # THE #486 G6 CASE (RED against pre-G6): footer obscured
         # (pane_goal_armed -> None), heartbeat reads NOT-armed (the 4 MB-tail
         # lie), but dark_watch's tail-proof goal_mark says the /goal IS armed.
-        # The structured gate MUST let the empty-lane nudge through, and the
-        # pre-send race re-check (which re-captures the SAME obscured footer)
-        # must NOT re-veto on the unreadable None.
+        # The structured gate MUST let the empty-lane nudge REACH its refill
+        # decision. #1089: the keystroke delivery is RETIRED (the lane-fill Stop
+        # gate is the lever now), so "reaches the decision" is the DELIVERY
+        # RETIRED observability line, never a keystroke.
         self.assertIsNone(wd.pane_goal_armed(OBSCURED_IDLE_CAP))
         logs, tmux = self._run_sweep(goal_mark_state="set", hb_goal_armed=False,
                                      backlog=5, cap=OBSCURED_IDLE_CAP)
-        self.assertTrue(any("lane-occupancy" in ln and ("nudge" in ln or "batch" in ln)
-                            for ln in logs),
-                        "structured-armed obscured pane must deliver a nudge: %r"
-                        % logs)
-        self.assertTrue(any("-l" in a for a in tmux.sent),
-                        "expected real keystrokes typed: %r" % tmux.sent)
+        self.assertTrue(any("DELIVERY RETIRED" in ln for ln in logs),
+                        "structured-armed obscured pane must reach the refill "
+                        "decision: %r" % logs)
+        self.assertEqual(tmux.sent, [], "delivery retired -- no keystroke")
         # the pre-G6 render gate must be GONE -- no armed-undeterminable skip
         self.assertFalse(any("armed-undeterminable" in ln for ln in logs), logs)
 
@@ -154,18 +153,19 @@ class TestG6StructuredArmedGate(unittest.TestCase):
         self.assertTrue(any(ln.startswith("one-glance ") and "armed=?" in ln
                             for ln in logs), logs)
 
-    def test_presend_readable_not_armed_footer_still_vetoes(self):
-        # 1867 defense-in-depth: the structured gate armed this pane (goal_mark
-        # set), but the FRESH pre-send capture reads the footer READABLE with NO
-        # glyph (GOAL_IDLE_CAP -> pane_goal_armed False = a genuine clear THIS
-        # sweep, the freshest truth). The `is False` veto must STILL fire -- G6
-        # removed only the None-suppression, never the genuine race guard.
+    def test_presend_readable_not_armed_footer_never_types(self):
+        # #1089: the pre-send race re-capture veto ("skip raced -- goal cleared")
+        # is RETIRED together with the keystroke delivery -- lane-occupancy never
+        # types now, so a footer that reads NOT-armed at pre-send time (a genuine
+        # clear THIS sweep) is harmless BY CONSTRUCTION. The structured gate armed
+        # this pane (goal_mark set) so it reaches the refill decision, but NO
+        # keystroke is ever sent. The genuine-clear safety the old race guard
+        # protected is subsumed by "the kind never types"
+        # (test_lanefill_enforce_1089.test_kind_never_calls_a_delivery_primitive).
         self.assertIs(wd.pane_goal_armed(READABLE_NOT_ARMED_CAP), False)
         logs, tmux = self._run_sweep(goal_mark_state="set", hb_goal_armed=True,
                                      backlog=5, cap=READABLE_NOT_ARMED_CAP)
-        self.assertEqual(tmux.sent, [], "readable not-armed footer must veto")
-        self.assertTrue(any("skip raced" in ln and "goal cleared" in ln
-                            for ln in logs), logs)
+        self.assertEqual(tmux.sent, [], "delivery retired -- never types")
 
 
 if __name__ == "__main__":

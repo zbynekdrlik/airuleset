@@ -5194,13 +5194,14 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         return logs, False
     # #848 CONTINUOUS REFILL: ROOM to refill when live_workers < floor.
     # floor = min(effective_cap, backlog); backlog >= 1 (guard above).
-    # #970 fix-forward: per-resource caps (lane_resource_caps) + usage.
+    # #970 fix-forward: per-resource caps (lane_resource_caps).
     caps, cap_reason = lane_resource_caps(cwd)
     effective_cap = caps["total"]
     if cap_reason:
         logs.append("lane-resources %s INVALID %s -> default %d"
                     % (loc, cap_reason, effective_cap))
-    resource_usage = count_resource_usage(cwd, _wnt_ev)
+    # #1089: the per-resource USAGE read (count_resource_usage) fed only the
+    # retired nudge TEXT; the saturation FLOOR below uses effective_cap directly.
     floor = min(effective_cap, backlog_n)
     if live_workers >= floor:
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d "
@@ -5357,160 +5358,21 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     "backlog=%d idle=%dm" % (loc, live_workers, waiters,
                                              backlog_n, idle // 60))
         return logs, True
-    fresh = watchdog.capture_pane(pid, run, lines=40)
-    ok, kind, fresh_draft = _lane_boundary_ok(fresh)
-    raced, rlog = _lane_pre_send_race(ok, watchdog.pane_goal_armed(fresh), loc)
-    logs += rlog
-    if raced:
-        return logs, True
-    if fresh_draft != draft:
-        # #442-review F1: the box CONTENT changed between the sweep-top
-        # capture and this pre-send one -- someone is COMPOSING right
-        # now. Un-submitted typing stamps NEITHER recent-activity signal
-        # (the presence marker only ever gets stamped on a prompt
-        # SUBMIT), so this two-capture diff is the one direct evidence
-        # of live composition this function can get -- refuse while it
-        # is still free to refuse, consume nothing, retry next sweep.
-        logs.append("SKIP-TRANSIENT (lane-occupancy) %s -> draft changed "
-                    "between captures -- human composing right now" % loc)
-        return logs, True
-    # #848/#970: the refill nudge reaches here for ANY live_workers < floor --
-    # only a SATURATED box (>= floor lanes) returned at the saturated skip above.
-    # #970 fix-forward: resource-aware nudge text with per-resource usage.
-    text = _lane_nudge_text(backlog_n, waiters, caps,
-                            usage=resource_usage, live_workers=live_workers,
-                            candidate_n=candidate_n)   # #993 item 3
-    # #923 BATCH COLLECT: contribute text, defer delivery+state to caller.
-    if batch_collect is not None:
-        def _on_deliver(_rec=rec, _lw=live_workers, _bn=backlog_n, _n_=n, _now=now):
-            _lane_record_nudge(_rec, _lw, _bn, _n_, _now)
-        batch_collect.append(("lane-occupancy", text, _on_deliver))
-        logs.append("lane-occupancy %s -> batch-collected (workers=%d backlog=%d)"
-                    % (loc, live_workers, backlog_n))
-        return logs, True
-    if fresh_draft:
-        # #442 -- deliver INTO the held draft via the stash protocol (the
-        # primitive re-verifies idle-with-draft itself and undoes its own
-        # keystrokes on any failed verify). Provenance is marked BEFORE
-        # the attempt so the shared janitor can recover a stuck stash send
-        # for THIS pane, and cleared only on success -- the same shape
-        # `deliver_goal`'s own draft branch uses.
-        watchdog._janitor_mark_watch(state, pid, now)
-        # #501 -- recognize the held draft as our OWN previously-swallowed
-        # nudge (a pre-#490 blind Enter stranded it) and FINISH it by
-        # SUBMITTING the existing draft in place, transcript-verified, instead
-        # of stashing around it and retyping a fresh copy -- which aborts
-        # forever against the persistent swallow that stranded it (the live
-        # cam-box zbynek-4:0.0 incident: stash-abort 1/5 -> ... -> give-up,
-        # nudge never delivered). ONLY the UNAMBIGUOUS machine-diagnostic
-        # prefixes (`_own_nudge_submit_prefix`: lane-check/bounce/gkreq -- a
-        # human PROVABLY never types them) are submitted on content alone; a
-        # FOREIGN draft (and the human-typeable `/goal `/`/compact`) stays on
-        # today's `deliver_with_stash` path BYTE-FOR-BYTE (HARD CONSTRAINT a --
-        # the foreign-draft protection is never weakened). Recognition reads the
-        # box HEAD row (`_input_box_head_text`), NOT `fresh_draft` (which is the
-        # TAIL for a WRAPPED box): every real own nudge is 289-720 chars and
-        # WRAPS, so its prefix is on the head and never the tail -- keying on
-        # `fresh_draft` made this branch DEAD against exactly the wrapped drafts
-        # the incident is about (#501 adversarial review).
-        own_head = watchdog._input_box_head_text(fresh)
-        if watchdog._own_nudge_submit_prefix(own_head):
-            if not watchdog.submit_own_draft_verified(pid, own_head, run,
-                                                      tpath, sleep_fn=sleep_fn,
-                                                      logs=logs,
-                                                      nudge="lane-occupancy"):
-                # A recognized own draft that will not submit-verify is a
-                # genuinely wedged pane -- advance the SAME consecutive-abort
-                # streak + backoff park the foreign stash-abort uses, so it
-                # still reaches the give-up record (#693: classified verdict)
-                # instead of retrying silently forever (#442-review F2). The
-                # own draft is NEVER backspaced/retyped -- it is left in place.
-                rec["lna"] = rec.get("lna", 0) + 1
-                back = _lane_stash_abort_backoff(rec["lna"])
-                rec["lnpark"] = now + back
-                logs.append("lane-occupancy %s own-draft submit-unverified "
-                            "(%d/%d) -> backoff %ds, park until %d"
-                            % (loc, rec["lna"], GOAL_LANE_MAX_STASH_ABORTS,
-                               back, int(rec["lnpark"])))
-                return logs, True
-            watchdog._janitor_clear_watch(state, pid)
-            mode = "own-submit"
-        # #488: thread `state` (same as deliver_goal's draft branch) so
-        # deliver_with_stash durably records a park it definitively creates and
-        # clears it on its own verified success.
-        elif not watchdog.deliver_with_stash(pid, text, run, captured=fresh,
-                                             logs=logs, sleep_fn=sleep_fn,
-                                             state=state, nudge="lane-occupancy"):
-            # The abort typed nothing (or provably undid itself) --
-            # transient, retried next sweep, and it must NOT consume the
-            # ln/llast budget (a refused attempt is not a nudge). It DOES
-            # advance the consecutive-abort streak, so a permanently-
-            # aborting lane eventually reaches the give-up record above
-            # (#442-review F2) instead of retrying silently forever.
-            rec["lna"] = rec.get("lna", 0) + 1
-            # #479 -- park the NEXT attempt for a widening window instead of
-            # re-typing + re-rescuing this same live draft every ~60s sweep.
-            back = _lane_stash_abort_backoff(rec["lna"])
-            rec["lnpark"] = now + back
-            logs.append("lane-occupancy %s stash-abort (%d/%d) -> backoff %ds, "
-                        "park until %d"
-                        % (loc, rec["lna"], GOAL_LANE_MAX_STASH_ABORTS,
-                           back, int(rec["lnpark"])))
-            return logs, True
-        else:
-            watchdog._janitor_clear_watch(state, pid)
-            mode = "stash"
-    else:
-        # #490 -- verified transcript-proof send (the piece the raw
-        # `send_continue` never had): a swallowed Enter must NOT be booked as
-        # delivered, and its text must be restored off the user's box. Mark
-        # janitor provenance BEFORE the send (like the stash branch above) so
-        # a residual stuck send is reclaimable, cleared only on success -- the
-        # bare branch never did this, a second reason the live incident sat.
-        watchdog._janitor_mark_watch(state, pid, now)
-        # #814 -- #594 delivered_unconfirmed wiring (the last job-20 rider that
-        # lacked it): send_verified returns False on a transcript-confirm RACE
-        # but sets out["delivered_unconfirmed"]=True when Enter genuinely
-        # submitted and only the confirm read lost the race. Reading that (the
-        # exact sibling shape in u_freshness/release_gap/queue_arrival/ops_wait)
-        # stops a successful-but-unconfirmed submit being misread as failure ->
-        # backoff -> IDENTICAL re-type -> duplicate nudge (live gk 2026-09-01).
-        send_out = {}
-        ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                    logs=logs, out=send_out, nudge="lane-occupancy",
-                                    state=state)  # #1022: record for the wedge
-        if not (ok or bool(send_out.get("delivered_unconfirmed"))):
-            # GENUINE swallow -- transient, retried next sweep, and it must
-            # NOT consume the ln/llast budget (a refused attempt is not a
-            # nudge). It DOES advance the consecutive-abort streak, so a
-            # permanently-unverified lane still reaches the give-up record above
-            # -- the SAME escalation shape the stash-abort branch uses
-            # (#442-review F2).
-            rec["lna"] = rec.get("lna", 0) + 1
-            back = _lane_stash_abort_backoff(rec["lna"])
-            rec["lnpark"] = now + back
-            logs.append("lane-occupancy %s submit-unverified (%d/%d) -> backoff "
-                        "%ds, park until %d"
-                        % (loc, rec["lna"], GOAL_LANE_MAX_STASH_ABORTS,
-                           back, int(rec["lnpark"])))
-            return logs, True
-        watchdog._janitor_clear_watch(state, pid)
-        mode = "typed"
-    # #479/#670 -- commit the LANDED nudge; see _lane_record_nudge. #848: the
-    # refill nudge delivers for ANY live_workers < floor, so live_workers (0..4)
-    # is stamped as part of the #670 dedup signature (not always 0).
-    _lane_record_nudge(rec, live_workers, backlog_n, n, now)
-    # #797/#1023 -- stamp the cadence clock on a DELIVERED lane nudge: a sibling
-    # priority kind then defers via the cross-kind TOTAL cap, a repeat via its floor.
-    _nudge_gate.mark_sent(state, sid, "lane-occupancy", now)
-    # #442 THIRD GAP: the give-up counter bounds this 0-worker empty-lane branch,
-    # so it logs "(n/MAX)". #726 removed the under-saturated "(fill)" variant + the
-    # MemAvailable suffix (both were the retired fill nudge's).
-    prog = "%d/%d" % (n + 1, GOAL_LANE_MAX_NUDGES)
-    logs.append("lane-occupancy nudge (%s) %s workers=%d floor=%d waiters=%d "
-                "backlog=%d idle=%dm (%s)" % (mode, loc, live_workers, floor,
-                                              waiters, backlog_n,
-                                              idle // 60, prog))
+    # #1089 -- DELIVERY RETIRED. The lane-fill Stop gate (gates/lanefill.py)
+    # is the refill lever now: it BLOCKS the turn end on an under-filled
+    # parallel box WITHOUT typing into the pane, so this nudge no longer
+    # delivers a keystroke. It typed 0x in 24h on gk (starved by the #1023
+    # 3h cross-kind cap) -- pure journal noise (926 skip:sequential + 874
+    # hold:total-cap lines/day) and no refill. The DECISION line stays
+    # (observability: the SAME workers/backlog facts the owner reads), but
+    # every keystroke-delivery primitive (send_verified / deliver_with_stash
+    # / submit_own_draft_verified / _try_stash_nudge) AND the batch-collect
+    # contribution are removed -- the AST lock test_lanefill_enforce_1089
+    # .test_kind_never_calls_a_delivery_primitive enforces it. Recorded on
+    # #1023 as the kinds-rollout decision for lane-occupancy.
+    logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                "would-refill; DELIVERY RETIRED (#1089 -- Stop gate enforces)"
+                % (loc, live_workers, waiters, backlog_n))
     return logs, True
 
 

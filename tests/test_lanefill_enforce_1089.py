@@ -350,7 +350,7 @@ class TestLiveCountClassification(unittest.TestCase):
                  "input": {"command": "gh run view"}}]}}])
         count, ev = self._count(tmp, cwd, sid)
         self.assertEqual(count, 1)
-        self.assertEqual([l.state for l in ev], ["live"])
+        self.assertEqual([lane.state for lane in ev], ["live"])
 
     def test_final_text_end_turn_is_finished(self):
         tmp, cwd, sid = self._one_worker([
@@ -359,7 +359,7 @@ class TestLiveCountClassification(unittest.TestCase):
                 {"type": "text", "text": "All done."}]}}])
         count, ev = self._count(tmp, cwd, sid)
         self.assertEqual(count, 0)
-        self.assertEqual([l.state for l in ev], ["finished"])
+        self.assertEqual([lane.state for lane in ev], ["finished"])
 
     def test_api_error_is_wedged(self):
         tmp, cwd, sid = self._one_worker([
@@ -368,7 +368,7 @@ class TestLiveCountClassification(unittest.TestCase):
              "isApiErrorMessage": True}])
         count, ev = self._count(tmp, cwd, sid)
         self.assertEqual(count, 0)
-        self.assertEqual([l.state for l in ev], ["wedged"])
+        self.assertEqual([lane.state for lane in ev], ["wedged"])
 
 
 # --------------------------------------------------------------------------- #

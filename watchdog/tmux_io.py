@@ -92,7 +92,14 @@ NUDGES_KINDS_STATE = "nudges-kinds.json"  # #1023 per-kind staging state file
 # `nudge=` into `keys`, and it names the per-kind switch state key AND the
 # `nudge_gate` cadence category. `nudges status` enumerates exactly this set.
 MACHINE_NUDGE_KINDS = frozenset({
-    # goal-family riders (into an armed /goal loop)
+    # goal-family riders (into an armed /goal loop).
+    # #1089 -- `lane-occupancy` DELIVERY is RETIRED: the lane-fill Stop gate
+    # (gates/lanefill.py) is the refill lever now (it blocks the turn end WITHOUT
+    # typing into the pane), so `goal_lane_occupancy_nudge` no longer calls any
+    # keystroke-delivery primitive. The identity STAYS here as a recognized
+    # observability/journal category (the "would-refill; DELIVERY RETIRED"
+    # decision line + the nudge_gate cadence bucket) -- staging it ON can no
+    # longer produce a keystroke. Do NOT touch the other kinds.
     "queue-arrival", "lane-occupancy", "release-gap", "lane-reconcile",
     "partition-audit", "u-freshness", "goal-guard",
     # goal auto-arm / dying-subagent stuck-check
