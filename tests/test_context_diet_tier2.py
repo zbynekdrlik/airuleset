@@ -187,12 +187,12 @@ class TestCompletionReportConversion(TestCase):
         self.assertIn("#940", self.module)
         self.assertIn("compact template", self.module)
 
-    def test_boundary_trigger_skips_gates_not_applies(self):
-        # Y1 fix: --self deliberately SKIPS the #99/#48 gates, never "applies"
-        # #859 batch 4b: deep content moved to companion
+    def test_boundary_trigger_doctrine_removed(self):
+        # #1084: --self trigger REMOVED — no Y1 "deliberately SKIPS", no "gates apply"
         combined = self.module + "\n" + _read("skills/completion-report-deep/DEEP.md")
-        self.assertIn("deliberately SKIPS", combined)
+        self.assertNotIn("deliberately SKIPS", combined)
         self.assertNotIn("gates apply", combined)
+        self.assertIn("REMOVED (#1084", combined)
 
     def test_pointer_exists(self):
         self.assertIn("completion-report-history.md", self.module)
