@@ -196,6 +196,30 @@ class RealOdooTitleMapping(unittest.TestCase):
         self.assertEqual(set(got), set(),
                          "a title with no #N + only bare body cross-refs = no M")
 
+    def test_revert_title_carries_no_ticket(self):
+        # a Revert UNDOES the fix, so the reverted (still-open) ticket must STAY
+        # in I, never be dropped into M (fail-safe direction; delta review #1083).
+        self.assertEqual(
+            rs._issue_refs('Revert "docs(#7421): gk Prevencia batch 15"', "",
+                           7999), set())
+
+    def test_cross_repo_title_ref_excluded(self):
+        # a cross-repo `owner/repo#N` in a title is a reference, not an
+        # implemented ticket (delta review #1083).
+        self.assertEqual(
+            rs._issue_refs("#7644 sync odoo/odoo#7421 upstream fix", "", 7660),
+            {7644})
+
+    def test_squash_trailing_text_subject_is_skipped(self):
+        # a `(#N)` NOT at the end is not the PR number → the commit is skipped
+        # (over-count I, never mis-parse; the end-anchor's fail-safe value).
+        commits = rs._pr_introducing_commits(
+            "/repo", _git_fn_factory({
+                "origin/main..origin/develop": [
+                    ("a", "Title (#7662) rebased onto develop")],
+                "origin/main..origin/staging": []}))
+        self.assertEqual(commits, {})
+
 
 class MergedReleasedStillOpen(unittest.TestCase):
     def setUp(self):
