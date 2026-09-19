@@ -168,6 +168,21 @@ class ListOpenIssuesCached(_EtagTmp):
         self.assertEqual(r1["labels"], [{"name": "needs-gatekeeper"}])
         self.assertEqual(r1["createdAt"], "2026-09-01T00:00:00Z")
 
+    def test_max_pages_exhausted_with_full_last_page_returns_none(self):
+        # #1087 review 🟡: hitting max_pages with a STILL-FULL last page must be
+        # treated as an error (None) — a truncated set read as complete would
+        # silently reclassify rows (#1021), exactly what the docstring forbids.
+        full = [_issue(i, labels=["needs-gatekeeper"]) for i in range(1, 101)]
+
+        def runner(argv):   # every page returns exactly per_page items
+            return 0, _include_response(200, etag='W/"p"',
+                                        body=json.dumps(full)), ""
+
+        rows, err = ghread.list_open_issues_cached("o/r", runner=runner,
+                                                   per_page=100, max_pages=3)
+        self.assertIsNone(rows)
+        self.assertTrue(err.startswith(ghread.GATE_UNAVAILABLE_PREFIX))
+
     def test_page_failure_returns_none_never_partial(self):
         page1 = [_issue(i) for i in range(1, 101)]
 

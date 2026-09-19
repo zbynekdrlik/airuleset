@@ -93,6 +93,30 @@ class RecordCall(_Tmp):
         # must not raise, must not delay
         cli_gh_rate.record_call(["issue", "view", "5"], env={}, now=_NOW)
 
+    def test_api_key_strips_query_and_never_captures_flag_values(self):
+        # #1087 B-review 🟡1: the lane's OWN ETag reads are `gh api --include
+        # -H "If-None-Match: <etag>" repos/o/r/issues?state=open&page=1`. The key
+        # must be `api repos/o/r/issues` (query stripped, no per-etag/page
+        # fragmentation), NOT `api If-None-Match: W/"..."`.
+        cli_gh_rate.record_call(
+            ["api", "--include", "-H", 'If-None-Match: W/"abc123"',
+             "repos/o/r/issues?state=open&per_page=100&page=1"],
+            env={cli_gh_rate.POLLER_ENV: "1"}, now=_NOW)
+        data = cli_gh_rate.load_calls(now=_NOW)["14"]
+        self.assertEqual(list(data), ["api repos/o/r/issues|poller"])
+
+    def test_api_never_persists_a_token_to_the_counter_file(self):
+        # #1087 B-review 🟡1: token-free invariant — a Authorization header value
+        # must NEVER land in the counter file.
+        cli_gh_rate.record_call(
+            ["api", "-H", "Authorization: token ghp_SUPERSECRET_TOKEN_VALUE",
+             "repos/o/r/x"], env={}, now=_NOW)
+        raw = open(cli_gh_rate.calls_path(now=_NOW), encoding="utf-8").read()
+        self.assertNotIn("ghp_SUPERSECRET_TOKEN_VALUE", raw)
+        self.assertNotIn("Authorization", raw)
+        # a plain `gh api <path>` GET (no -X/-f write flag) is a READ -> human
+        self.assertIn("api repos/o/r/x|human", raw)
+
 
 class TopAndTotals(_Tmp):
     def _seed(self):

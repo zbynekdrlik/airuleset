@@ -96,5 +96,30 @@ class SharedEtagCacheAcrossFetches(unittest.TestCase):
         self.assertEqual(paid["n"], 1)                     # only ONE paid fetch
 
 
+class ClientSideGuardFailSafe(unittest.TestCase):
+    """#1087 review 🟡: the cross_stream fetches filter the snapshot client-side
+    with NO GraphQL fallback, so if a qual/base ever carries a token the
+    client-side matcher can't represent, they must FAIL-SAFE to None ('no
+    bounces'/'no requests' would be fail-UNSAFE), never silently drop rows."""
+
+    def test_bounce_returns_none_on_non_client_side_qual(self):
+        snap = [ghread._normalize_issue(_row(1, labels=("prio:bounce",)))]
+        with m.patch("watchdog.cross_stream._bounce_quals",
+                     return_value=['"FREE TEXT" in:title']), \
+             m.patch("watchdog.cross_stream._open_issue_snapshot",
+                     return_value=snap):
+            got = wd._fetch_bounce_tickets("/tmp/x")
+        self.assertIsNone(got)   # not [] — a non-representable qual is fail-safe
+
+    def test_gkreq_base_non_client_side_returns_none(self):
+        snap = [ghread._normalize_issue(_row(5, labels=("needs-gatekeeper",)))]
+        with m.patch("watchdog.AUTOPILOT_SKIP_EXCL", '"junk" in:title'), \
+             m.patch("watchdog.cross_stream._open_issue_snapshot",
+                     return_value=snap):
+            got = wd._fetch_gkreq_tickets("/tmp/x")
+        self.assertIsNone(got)
+
+
 if __name__ == "__main__":
     unittest.main()
+

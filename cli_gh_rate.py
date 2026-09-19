@@ -547,24 +547,35 @@ _API_WRITE_FLAGS = {"-X", "--method", "-f", "-F", "--field", "--raw-field",
                     "--input"}
 _API_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
+# gh flags that TAKE A VALUE in the NEXT token. `_subcommand_words` must skip the
+# value too, or the value is misread as a COMMAND word — and for `gh api` that
+# means a header value (`-H "If-None-Match: <etag>"`, `-H "Authorization: token
+# X"`) or a `-q`/`-f` value would be persisted into the call-accounting key
+# (#1087 B-review 🟡1: key-space pollution + a token-free-invariant leak on the
+# lane's OWN ETag reads). `-R`/`--repo` was already handled specially below.
+_VALUE_FLAGS = {"-H", "--header", "-f", "-F", "--field", "--raw-field",
+                "-X", "--method", "-q", "--jq", "--input"}
+
 
 def _subcommand_words(argv, n):
-    """The first `n` COMMAND words, skipping any leading global flags — notably
-    `-R`/`--repo` and ITS value, so `gh -R o/r issue view 5` still resolves to
-    ("issue", "view") (#1040 review-2 MINOR-4). A lone unrecognized `-flag` is
-    treated as valueless (best-effort; a misparse only ever fails open to
+    """The first `n` COMMAND words, skipping any leading flags — notably
+    `-R`/`--repo` and every `_VALUE_FLAGS` flag AND ITS value token, so
+    `gh -R o/r issue view 5` -> ("issue", "view") and
+    `gh api -H "If-None-Match: X" repos/o/r/issues` -> ("api",
+    "repos/o/r/issues") (never the header value). A lone unrecognized `-flag`
+    is treated as valueless (best-effort; a misparse only ever fails open to
     "not a poll" = pass-through, never a wrongly-throttled call)."""
     out = []
     i = 0
     while i < len(argv) and len(out) < n:
         t = argv[i]
-        if t in ("-R", "--repo"):
+        if t in ("-R", "--repo") or t in _VALUE_FLAGS:
             i += 2                       # skip the flag AND its value token
             continue
         if t.startswith("-R") and len(t) > 2:      # glued `-Ro/r`
             i += 1
             continue
-        if t.startswith("--repo="):
+        if "=" in t and t.startswith("-"):         # `--repo=o/r`, `--header=X`
             i += 1
             continue
         if t.startswith("-"):
@@ -672,6 +683,11 @@ def calls_path(now=None):
 
 def _call_key(argv, kind):
     words = _subcommand_words([a for a in argv if a], 2)
+    # #1087 B-review 🟡1: for `gh api <path>` strip the query string so the key
+    # is the ENDPOINT (`api repos/o/r/issues`), never fragmented per page / per
+    # etag / per state qualifier — the accounting counts endpoints, not URLs.
+    if len(words) == 2 and words[0] == "api":
+        words = [words[0], words[1].split("?", 1)[0]]
     label = " ".join(words) if words else "?"
     return "%s|%s" % (label, kind)
 
@@ -695,7 +711,16 @@ def record_call(argv, env=None, now=None):
         fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
-            raw = os.read(fd, 1 << 20).decode("utf-8", "replace")
+            # Read the WHOLE file (#1087 review 🔵: a fixed 1 MB cap would
+            # truncate an oversized day file -> json parse fail -> the day's
+            # counters reset). Loop until EOF so no size assumption is made.
+            chunks = []
+            while True:
+                chunk = os.read(fd, 1 << 20)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            raw = b"".join(chunks).decode("utf-8", "replace")
             try:
                 data = json.loads(raw) if raw.strip() else {}
                 if not isinstance(data, dict):
@@ -1192,11 +1217,15 @@ def _zero_budget_main(argv):
 
 
 if __name__ == "__main__":
-    if "--wrapper-backoff" in sys.argv:
+    # #1087 review 🔵: dispatch on the FIRST arg only (equality), never
+    # membership — a gh arg literally equal to a sentinel (e.g. `gh issue
+    # comment 5 --body "--record"`, passed after `--`) must not mis-dispatch.
+    _mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    if _mode == "--wrapper-backoff":
         sys.exit(_wrapper_backoff_main(sys.argv[1:]))
-    if "--record" in sys.argv:
+    if _mode == "--record":
         sys.exit(_record_main(sys.argv[1:]))
-    if "--zero-budget-line" in sys.argv:
+    if _mode == "--zero-budget-line":
         sys.exit(_zero_budget_main(sys.argv[1:]))
 
     # A bare run prints the rows (handy for a box operator).

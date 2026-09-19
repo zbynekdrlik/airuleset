@@ -256,8 +256,13 @@ def _open_issue_snapshot(root, home=None):
         slug = ghread.resolve_slug(cwd=root)
         if not slug:
             return None
+        # #1087 review 🔵: max_age lets the SECOND fetch of a sweep (gkreq after
+        # bounce, same repo) serve the just-written cache with ZERO gh calls —
+        # not even a 304 round-trip. 90 s > the 60 s sweep, < the 30 min
+        # bounce/gkreq cadence, so a genuinely new hand-off is still seen within
+        # one cadence window.
         rows, err = ghread.list_open_issues_cached(
-            slug, cwd=root, env=_gh_env(home), timeout=8)
+            slug, cwd=root, env=_gh_env(home), timeout=8, max_age=90)
         return None if err else rows
     except Exception:
         return None
@@ -283,6 +288,13 @@ def _fetch_bounce_tickets(root, home=None):
     for qual in quals:
         search = (watchdog.AUTOPILOT_SKIP_EXCL + " label:prio:bounce "
                   + qual).strip()
+        # #1087 review 🟡: FAIL-SAFE if a future qual/base ever carries a token
+        # the client-side matcher can't represent (free text, @me, in:title) —
+        # issue_matches_search would silently drop the positive case ('no
+        # bounces' = fail-UNSAFE). None routes to the caller's fail-safe error
+        # path, exactly like a snapshot read failure.
+        if not ghread.search_client_side_ok(search):
+            return None
         for r in snapshot:
             if ghread.issue_matches_search(r, search):
                 nums.add(r["number"])
@@ -819,6 +831,10 @@ def _fetch_gkreq_tickets(root, home=None):
         return None
     from gates import ghread
     base = watchdog.AUTOPILOT_SKIP_EXCL
+    # #1087 review 🟡: FAIL-SAFE if the base filter ever carries a non-client-
+    # side token — never silently drop every row ('no requests' = fail-UNSAFE).
+    if not ghread.search_client_side_ok(base):
+        return None
     nums, handoffs = set(), {}
     for r in snapshot:
         if not ghread.issue_matches_search(r, base):

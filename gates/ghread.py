@@ -357,6 +357,7 @@ def list_open_issues_cached(slug, cwd=None, runner=None, timeout=8, env=None,
     the caller falls back to its GraphQL path on None rather than trust a
     truncated set."""
     rows = []
+    complete = False
     for page in range(1, max_pages + 1):
         params = {"state": "open", "per_page": per_page, "page": page}
         obj, err = rest_get_cached("repos/%s/issues" % slug, params, cwd=cwd,
@@ -370,7 +371,15 @@ def list_open_issues_cached(slug, cwd=None, runner=None, timeout=8, env=None,
                 continue                     # skip PR rows (issues endpoint mixes them)
             rows.append(_normalize_issue(it))
         if len(obj) < per_page:
-            break                            # short page -> last page
+            complete = True
+            break                            # short page -> provably the last page
+    if not complete:
+        # #1087 review: max_pages exhausted with a STILL-FULL last page -> the
+        # set is TRUNCATED. A partial listing read as complete would silently
+        # reclassify rows (#1021, the very failure this fn's docstring cites),
+        # so fail-safe to None and let the caller fall back to GraphQL.
+        return None, ("%s more than %d open issues (paging truncated)"
+                      % (GATE_UNAVAILABLE_PREFIX, max_pages * per_page))
     return rows, None
 
 
