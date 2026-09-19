@@ -48,23 +48,31 @@ from pathlib import Path
 _UNRELEASED_BRANCHES = ("develop", "staging")
 
 # A PR-introducing commit subject: a merge-commit merge ("Merge pull request #N
-# from …") or a squash/rebase merge ("Subject (#N)"). We read PR numbers ONLY
-# from these two shapes, never a bare `#N` in an arbitrary commit subject.
+# from …") or a squash/rebase merge whose subject ENDS with the PR number as a
+# trailing `(#N)`. We read the PR NUMBER ONLY from these two shapes.
 _MERGE_PR_RE = re.compile(r"Merge pull request #(\d+)\b")
-# GitHub appends the squash/rebase PR number as a trailing `(#N)`; a subject may
-# also carry an EARLIER `(#N)` (a revert of "X (#42)" (#50)). Take the LAST one
-# — the outer/actual PR number (adversarial review #1083).
-_SQUASH_PR_RE = re.compile(r"\(#(\d+)\)")
+# END-ANCHORED (#1083 REWORK): GitHub appends the squash/rebase PR number as a
+# TRAILING `(#N)`, so a conventional-commit scope earlier in the subject
+# ("docs(#7421): … (#7662)") is NEVER read as the PR number — only the final
+# `(#7662)` is. A revert "X (#42)" (#50) likewise yields the outer #50.
+_SQUASH_PR_RE = re.compile(r"\(#(\d+)\)\s*$")
 
-# Issue refs a PR actually CLOSES — GitHub's OWN auto-close semantics: a CLOSING
-# KEYWORD (close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved) OR a
-# `Issue: #N` line, each immediately before `#N`. A BARE `#N` is a cross-reference
-# (follow-up to #N, part of epic #N, cross-repo owner/repo#N) the PR does NOT
-# close — and #1083 exists precisely because `Closes #N` did NOT auto-close the
-# ticket off the default branch, so a bare mention must NOT pull an UNRELATED open
-# ticket out of `I` into `M` (the never-falsely-done contract; adversarial review
-# #1083, both reviewers, BLOCKER). A cross-repo `owner/repo#N` has no space before
-# `#`, so `\s+#` never matches it.
+# TITLE issue refs (#1083 REWORK) — on the target 3-branch repo (odoo-erp) the
+# implemented ticket number(s) live in the PR TITLE, not the body, and carry NO
+# closing keyword: `#7644 (M1): …`, the multi-ticket `#7631 #7632 …`, and the
+# conventional-commit scope `docs(#7421): …`. So EVERY `#N` in the TITLE is an
+# implemented ticket (the PR's own number is excluded by the caller); a bare
+# number with no `#` ("úloha 980") never matches.
+_TITLE_REF_RE = re.compile(r"#(\d+)")
+
+# BODY issue refs — GitHub's OWN auto-close semantics ONLY: a CLOSING KEYWORD
+# (close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved) OR a
+# `Issue: #N` line, each immediately before `#N`. A BARE `#N` in the BODY is a
+# cross-reference (follow-up to #N, part of epic #N, cross-repo owner/repo#N) the
+# PR does NOT close, so it must NOT pull an UNRELATED open ticket out of `I` into
+# `M` (the never-falsely-done contract; adversarial review #1083, both reviewers,
+# BLOCKER). A cross-repo `owner/repo#N` has no space before `#`, so `\s+#` never
+# matches it. (The TITLE, unlike the body, IS the ticket carrier — see above.)
 _CLOSE_KW_RE = re.compile(
     r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s+#(\d+)")
 _ISSUE_LINE_RE = re.compile(r"(?im)^\s*Issue:\s*#(\d+)")
@@ -214,13 +222,17 @@ def _save_cache(cache_path, data):
 
 
 def _issue_refs(title, body, exclude_pr):
-    """The issue numbers a PR CLOSES — a closing keyword (or `Issue:` line)
-    before `#N`, GitHub's own auto-close semantics — from its title+body, with
-    the PR's OWN number removed. A bare cross-reference `#N` is deliberately NOT
-    counted (see `_CLOSE_KW_RE`)."""
-    text = "%s\n%s" % (title or "", body or "")
-    refs = {int(m.group(1)) for m in _CLOSE_KW_RE.finditer(text)}
-    refs |= {int(m.group(1)) for m in _ISSUE_LINE_RE.finditer(text)}
+    """The implemented-ticket numbers for a PR, with the PR's OWN number removed.
+    Two carriers (#1083 REWORK):
+      * TITLE — EVERY `#N` is an implemented ticket (the odoo-erp convention: the
+        ticket number(s) live in the title, incl. the `docs(#N):` scope form and
+        the multi-ticket `#7631 #7632` form);
+      * BODY — ONLY GitHub closing-keyword refs + `Issue: #N` lines; a bare body
+        `#N` is a cross-reference and deliberately NOT counted (see `_CLOSE_KW_RE`)."""
+    refs = {int(m) for m in _TITLE_REF_RE.findall(title or "")}
+    body_text = body or ""
+    refs |= {int(m.group(1)) for m in _CLOSE_KW_RE.finditer(body_text)}
+    refs |= {int(m.group(1)) for m in _ISSUE_LINE_RE.finditer(body_text)}
     refs.discard(int(exclude_pr))
     return refs
 
@@ -237,10 +249,10 @@ def _pr_introducing_commits(root, git_fn):
             if mm:
                 pr = mm.group(1)
             else:
-                sq = _SQUASH_PR_RE.findall(subj)   # LAST (#N) = the outer PR
+                sq = _SQUASH_PR_RE.search(subj)   # trailing (#N) = the PR number
                 if not sq:
                     continue
-                pr = sq[-1]
+                pr = sq.group(1)
             out.setdefault(int(pr), oid)
     return out
 
