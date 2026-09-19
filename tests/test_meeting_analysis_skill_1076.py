@@ -29,12 +29,18 @@ def _text():
     return SKILL.read_text(encoding="utf-8")
 
 
+def _norm(t):
+    """Whitespace-collapsed copy so a cross-LINE assertion is not defeated by
+    where the prose happens to wrap (the rule may span two wrapped lines)."""
+    return re.sub(r"\s+", " ", t)
+
+
 class TestHardRuleZero(unittest.TestCase):
     def test_hard_rule_0_present(self):
-        t = _text()
+        t = _norm(_text())
         # A Hard Rule 0 that puts interpretation in the MAIN session and the
         # subagent on mechanics only.
-        self.assertRegex(t, r"(?i)0\.\s")  # a rule numbered 0 exists
+        self.assertRegex(t, r"(?i)(^|\s)0\.\s")  # a rule numbered 0 exists
         self.assertRegex(t, r"(?i)interpretation.*(main|fable)")
         self.assertRegex(t, r"(?i)subagent.*(mechan|extract|asr|dedup)")
 

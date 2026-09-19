@@ -275,6 +275,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-meeting-analysis-delegation.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/inject-situational-rule.sh"
           }
         ]
@@ -417,6 +422,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/block-meeting-analysis-delegation.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/inject-situational-rule.sh"
           }
         ]
@@ -521,6 +531,11 @@
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/stop-check-lane-fill.sh",
             "timeout": 15
+          },
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/stop-check-meeting-analysis.sh",
+            "timeout": 10
           },
           {
             "type": "command",
