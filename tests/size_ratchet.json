@@ -39,7 +39,7 @@
     "cli_quals.py": 3071,
     "cli_quals_cmd.py": 1520,
     "cli_release_state.py": 372,
-    "cli_remote.py": 2034,
+    "cli_remote.py": 2046,
     "cli_resource_guards.py": 881,
     "cli_scratch_sweep.py": 1854,
     "cli_skill_usage.py": 337,

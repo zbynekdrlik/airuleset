@@ -1262,17 +1262,29 @@ def _playwright_chromium_postcheck():
         'echo "PLAYWRIGHT-POSTCHECK FAILED: headless chromium exited 127 — missing '
         'system shared libraries — run npx playwright install-deps chromium as root '
         '(#1048); stderr tail: $TAIL" >&2; '
+        # #1085: a persisting npm cache race (npm error stderr, not exit 127) —
+        # name the class it actually saw so the log never blames drift for a
+        # cache collision. Reached only via the retry (the predicate below always
+        # retries an npm error with RC != 127), so "persisted after one retry".
+        'elif [ "$NPM" = 1 ]; then '
+        'echo "PLAYWRIGHT-POSTCHECK FAILED: npm cache race persisted after one '
+        'retry (npm exit $RC) (#1085); stderr tail: $TAIL" >&2; '
         'else echo "PLAYWRIGHT-POSTCHECK FAILED: headless chromium (--browser '
         'chromium) did not render in 30s (rc=$RC) — chrome-channel / version drift '
         '(#1048); stderr tail: $TAIL" >&2; fi; exit 88; }; '
         'if _pw_probe; then exit 0; fi; '
-        # #1058 (item 4): an npm cache race (rc 1 + `npm error` — david4: a live
-        # `@playwright/mcp` npx run racing the probe's own npx cache with "Remove
-        # the existing file and try again") is transient, not a browser fault —
-        # retry ONCE after a short pause (AIRULESET_PW_POSTCHECK_RETRY_SLEEP for
-        # tests, 5 s in prod). exit 127 and every non-npm failure FAIL immediately;
-        # a SECOND failure FAILs.
-        'if [ "$RC" = 1 ] && [ "$NPM" = 1 ]; then '
+        # #1058 (item 4) / #1085: an npm cache race (`npm error` on stderr —
+        # david4: a live `@playwright/mcp` npx run racing the probe's own npx
+        # cache with "Remove the existing file and try again") is transient, not a
+        # browser fault — retry ONCE after a short pause
+        # (AIRULESET_PW_POSTCHECK_RETRY_SLEEP for tests, 5 s in prod). Keyed on the
+        # `npm error` SIGNATURE (the NPM flag), NOT a guessed exit code: npm reports
+        # the EEXIST race with exit -2 = shell rc 254 (#1085 — the original `RC=1`
+        # guard never fired for the very failure it was written for), and npm's
+        # numeric codes are not a stable contract. exit 127 (missing shared libs)
+        # is a hard fault and FAILs immediately even with an `npm error`; every
+        # non-npm failure and a SECOND npm failure FAIL.
+        'if [ "$NPM" = 1 ] && [ "$RC" != 127 ]; then '
         'sleep "${AIRULESET_PW_POSTCHECK_RETRY_SLEEP:-5}"; '
         'if _pw_probe; then exit 0; fi; _pw_fail; fi; '
         '_pw_fail; }'
