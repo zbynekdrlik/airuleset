@@ -9339,6 +9339,12 @@ def _add_dispatch_flags(parser):
              "satisfied; a reason:dep-wait line "
              "follows a 0 (#993 item 3)")
     parser.add_argument(
+        "--list-dispatchable", action="store_true",
+        help="Print the dispatchable members as `number<TAB>title` lines, OLDEST "
+             "first (the SAME dispatchable_numbers set --count-dispatchable "
+             "counts). The lane-fill Stop gate shells this so ONE quals call "
+             "yields both the count and the ticket names (#1078 item 1)")
+    parser.add_argument(
         "--role", choices=("review", "infra"), default=None,
         help="Slice the rows by work class (#993 r2b): 'review' = rows whose "
              "class is NOT infra; 'infra' = rows whose class IS infra; omitted "
