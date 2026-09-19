@@ -109,23 +109,29 @@ class TestMarkerAndVerbs(unittest.TestCase):
 # ---- signal detection ---------------------------------------------------- #
 
 class TestSignals(unittest.TestCase):
-    def test_each_signal_with_interp_blocks(self):
-        # a signal + an interpretation verb ("read the screen") -> block
+    def test_each_artifact_signal_with_interp_blocks(self):
+        # an ARTIFACT-path signal + an interpretation verb ("read the screen") -> block
         for sig in ("transcript.txt", "speaker_turns.json", "frames_kept",
-                    "screen_inventory", "notes_verbatim.md", "VIDEO-NOTES",
-                    "analýza meetingu", "meeting analysis", "doplnok z meetingu"):
+                    "screen_inventory", "notes_verbatim.md", "VIDEO-NOTES"):
             v, _ = _ev({"tool_name": "Agent",
                         "tool_input": {"prompt": "read the screens; handle the %s" % sig}})
-            self.assertEqual(v, "block", "signal %r + interp should block" % sig)
+            self.assertEqual(v, "block", "artifact %r + interp should block" % sig)
 
-    def test_signal_alone_without_interp_allows(self):
-        # #1076 review (F2): naming a meeting artifact WITHOUT interpretation
+    def test_phrase_signal_blocks_on_its_own(self):
+        # a PHRASE-intent signal blocks with no separate artifact/verb
+        for phrase in ("analýza meetingu", "doplnok z meetingu"):
+            v, _ = _ev({"tool_name": "Agent",
+                        "tool_input": {"prompt": "prosím sprav %s" % phrase}})
+            self.assertEqual(v, "block", "phrase %r should block alone" % phrase)
+
+    def test_artifact_alone_without_interp_allows(self):
+        # #1076 review (F2): naming a meeting ARTIFACT WITHOUT interpretation
         # intent -- a code/dev/review/search dispatch -- must NOT be blocked.
         for sig in ("transcript.txt", "speaker_turns.json", "frames_kept",
                     "screen_inventory"):
             v, _ = _ev({"tool_name": "Agent",
                         "tool_input": {"prompt": "fix the parsing bug in %s handling" % sig}})
-            self.assertEqual(v, "allow", "signal %r alone (no interp) should allow" % sig)
+            self.assertEqual(v, "allow", "artifact %r alone (no interp) should allow" % sig)
 
     def test_no_signal_allows_workflow(self):
         v, _ = _ev({"tool_name": "Workflow",

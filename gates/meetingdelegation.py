@@ -54,13 +54,20 @@ _ARTIFACT_SIGNALS = (
 # PHRASE-INTENT signals -- phrases that NAME the interpretation act itself, so
 # they are BOTH a signal AND intent (a dispatch carrying one BLOCKS on its own,
 # no separate verb needed -- #1076 integration review: the owner's literal
-# "Sprav analýzu meetingu …" / "spracuj ten meeting" must block). Diacritic-
-# robust (`anal[yý][sz]` catches analýza/analýzu/analyza/analysis) and both word
-# orders (`analýza meetingu` Slovak, `meeting analysis` English). `\w*\s+` is
-# ReDoS-safe (disjoint classes either side of the gap).
+# "Sprav analýzu meetingu …" must block). Diacritic-robust (`anal[yý][sz]`
+# catches analýza/analýzu/analyza/analysis). `\w*\s+` is ReDoS-safe (disjoint
+# classes either side of the gap).
+#
+# NOTE (#1076 delta review): the ENGLISH `meeting[\s-]anal[yý][sz]` order is
+# DELIBERATELY NOT a phrase-alone arm -- the skill's own directory is literally
+# `skills/meeting-analysis`, so a `meeting-analysis` phrase-alone arm blocks
+# every dev/grep/review/worker dispatch that merely names the skill (incl. the
+# autopilot-worker dispatch for this ticket). A REAL English interpretation
+# ("do the meeting analysis from transcript.txt") still blocks via the
+# `anal[yý][sz]` STEM in _INTERP_RE + the artifact signal; only the analysis→
+# meeting (Slovak) order and `doplnok z meetingu` are phrase-alone.
 _PHRASE_INTENT_RE = re.compile(
-    r"anal[yý][sz]\w*\s+meeting"       # analýza/analýzu/analyza meetingu
-    r"|meeting[\s-]+anal[yý][sz]"       # meeting analysis / meeting-analysis
+    r"anal[yý][sz]\w*\s+meeting"       # analýza/analýzu/analyza meetingu; "analysis meeting"
     r"|doplnok\s+z\s+meeting",              # doplnok z meetingu
     re.IGNORECASE)
 
