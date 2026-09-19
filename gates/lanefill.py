@@ -236,11 +236,17 @@ def _dispatchable(payload, cwd):
         raise _Unreadable("authority %s" % e)
     cmd = "core-quals" if authority == "full" else "slice-quals"
     try:
+        # Timeout MUST sit under the Stop hook's own settings.json timeout (30s)
+        # so a slow quals call on a big repo (`--count`-class ~15-25s on odoo-erp,
+        # #619) fails-open GRACEFULLY here (journal + allow) instead of the whole
+        # hook being hard-killed at the CC ceiling. Accepted residual: on a repo
+        # whose dispatchable read exceeds this, the gate under-enforces (fail-open)
+        # rather than wedging — the designed direction.
         r = subprocess.run(
             [sys.executable, _airuleset_path(), cmd, "--list-dispatchable"],
-            cwd=cwd, capture_output=True, text=True, timeout=45)
+            cwd=cwd, capture_output=True, text=True, timeout=25)
     except Exception as e:  # noqa: BLE001
-        raise _Unreadable("quals subprocess %s" % e)
+        raise _Unreadable("quals subprocess %s" % type(e).__name__)
     if r.returncode != 0:
         raise _Unreadable("quals rc %d" % r.returncode)
     return _parse_quals_lines(r.stdout)

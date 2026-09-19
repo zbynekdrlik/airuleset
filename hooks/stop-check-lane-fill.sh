@@ -28,7 +28,9 @@ MSG=$(printf '%s' "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/nul
 # Cheap pre-check: LAST non-blank line must carry ⏳ or ✅ DONE (the module's
 # _last_marker semantics — the marker is on the tail line, not merely present).
 LAST_LINE=$(printf '%s\n' "$MSG" | grep -vE '^[[:space:]]*$' | tail -1 || true)
-printf '%s' "$LAST_LINE" | grep -qE "⏳|✅[[:space:]]*(DONE|complete|work complete)" || exit 0
+# Case-insensitive to match gates.lanefill._last_marker (re.I) — never skip a
+# lowercase `✅ done` tail the python gate would otherwise enforce on.
+printf '%s' "$LAST_LINE" | grep -qiE "⏳|✅[[:space:]]*(DONE|complete|work complete)" || exit 0
 
 _LF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 _LF_REPO_ROOT="$(dirname "$_LF_DIR")"
