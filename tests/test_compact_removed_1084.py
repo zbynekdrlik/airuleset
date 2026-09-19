@@ -25,7 +25,6 @@ deletes `deliver_compact` + the request store this early return orphans.
 """
 
 import json
-import os
 import subprocess
 import sys
 import types

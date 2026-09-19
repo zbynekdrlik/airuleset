@@ -1465,6 +1465,26 @@ def _verify_claudy_feed_migration(read_facts=None, box_class=None):
     return (ok, line)
 
 
+def _remove_stale_compact_flag(claude_dir=None):
+    """#1084 (owner ROZHODNUTÉ 2026-09-19): machine-triggered compacts are
+    REMOVED in code, so the #911 hand-placed `~/.claude/watchdog-disable-compact`
+    owner flag is obsolete — a box must never carry a marker the deploy would
+    otherwise have to reason about (the whole point: the deploy is the guarantee,
+    not a per-box file that a new/missed box silently reverts, the forestshop-dev
+    slip). Delete any stale copy and return a LOUD line so `install` reports it;
+    return None when there is nothing to remove. Idempotent, best-effort."""
+    base = Path(claude_dir) if claude_dir is not None else CLAUDE_DIR
+    flag = base / "watchdog-disable-compact"
+    if flag.exists() or flag.is_symlink():
+        try:
+            flag.unlink()
+        except OSError:
+            return None
+        return ("compact: stale owner flag removed — machine compacts are "
+                "gone in code (#1084)")
+    return None
+
+
 def cmd_install(args):
     """Deploy config: generate CLAUDE.md, symlink skills, merge hooks."""
     _check_worktree_repo_dir("install")
@@ -1476,6 +1496,14 @@ def cmd_install(args):
     # Ensure ~/.claude/ exists
     CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
     SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # --- #1084: machine compacts are removed in code — delete any stale
+    # #911 `~/.claude/watchdog-disable-compact` owner flag so the deploy itself
+    # guarantees no box carries a marker (the forestshop-dev slip). LOUD line
+    # when it removed one; a silent no-op otherwise.
+    _compact_flag_line = _remove_stale_compact_flag()
+    if _compact_flag_line:
+        print("  " + _compact_flag_line)
 
     # --- Box class marker (#778): shared-stream (subdev) vs workstation. Read
     # by the heavy-build reaper (Job 38) + block-heavy-build-toolchain.sh hook.
@@ -8143,147 +8171,15 @@ def cmd_watchdog(args):
 
 
 def cmd_compact_request(args):
-    """The two proven-origin entry points for the collapsed `/compact`
-    delivery model (#402 — see `watchdog/compact.py`'s own module
-    docstring for the full design).
-
-    `--self`: the calling SESSION's own explicit callback ("I am at a safe
-    boundary right now") — resolves the calling pane via `$TMUX_PANE`
-    (`resolve_self_pane`), then makes ONE immediate synchronous delivery
-    attempt via `compact._compact_sync_attempt` (records the request under
-    the `self-callback` proven-boundary origin, waits at most a small
-    bounded margin over `COMPACT_MIN_REQUEST_AGE_S` — never a multi-second
-    hold, never a retry loop — then evaluates once). If the attempt is not
-    safe right now (a live sibling task, a busy pane, ...), the request is
-    simply LEFT PENDING for the periodic sweep (job 14, ~60s cadence) to
-    pick up — bounded, eventually, by the hard age cap.
-
-    `--record --session <sid> --cwd <cwd> --origin <origin>`: the hook-side
-    entry point (SAME ONE synchronous attempt). In production only
-    `stop-check-prose-violations.sh` fires it (`--origin self-callback`); #610
-    retired the `subagent-stop` producer (still accepted generically).
-
-    `--status` (#741): a read-only HOLD probe — resolves the session like
-    `--self` (or an explicit `--session <sid>`), prints one line (`PENDING
-    sid=<sid> age=<n>s` / `QUEUED sid=<sid> since=<n>s` (#822 (e) LEGACY: only
-    ever seen from a stale pre-#855 entry, gated by the LIVE pane) / `NONE`) and
-    exits 0. Records nothing, types nothing; the hold-turn doctrine's first
-    action so a goal-fired turn can PROVE from the transcript whether the
-    boundary compact is still pending (hold) or done (dispatch the next batch).
-
-    Prints the disposition word verbatim (`sent` / `expired` / `already-queued` /
-    `cooldown` / `already-compacted` / `skip:<reason>` — the #855 words are
-    `skip:turn-running` (a running turn refused, never queued),
-    `skip:recently-compacted` (the 120s anti-double veto), and the #855-recurrence
-    `already-compacted` (a DUPLICATE self-callback record for a boundary already
-    compacted — CONSUMED with no keystroke; via the record's own sync attempt only
-    on the timestamp belt `bts<=delivered`, the transcript signal being sweep-only); `skip:no-session` covers BOTH a blank session id and a
-    genuine record-time disk-write failure, since neither can be told apart from
-    the caller's side. #855: `deliver_compact` no longer returns `queued` — a
-    residual-race queued outcome is treated as a real send → `sent`) so the
-    calling hook's own decision log stays a faithful trace of what happened."""
-    from watchdog import compact
-    if getattr(args, "status", False):
-        # #741 read-only HOLD probe. Resolves the session like `--self` (via
-        # $TMUX_PANE) or takes an explicit `--session <sid>`; prints exactly one
-        # line — `PENDING sid=<sid> age=<n>s` (a `/compact` request is still
-        # pending for this session) or `NONE` — and always exits 0. The hold-turn
-        # doctrine (skills/autopilot Step 5) runs this as a goal-fired turn's
-        # FIRST action: PENDING (or the LEGACY QUEUED) -> LAUNCH the boundary-hold
-        # task (`sleep 45 && echo boundary-hold`, run_in_background) and end the
-        # turn `⏳ WORKING: boundary hold` with ZERO dispatches (#855: a BARE `⏳`
-        # turn gives CC no accepted Stop under an armed goal, so the pane never
-        # goes idle for the ~60s sweep to type the /compact into — the live hold
-        # task is what yields that idle window); NONE -> the boundary compact is
-        # done, the next batch may be dispatched. #822 (e) QUEUED (read from the
-        # LIVE pane) is now LEGACY: under #855 nothing queues, so it only ever
-        # fires from a stale pre-#855 entry. Transcript-provable, no keystroke.
-        sid = (getattr(args, "session", "") or "").strip()
-        pane_id = ""
-        if not sid:
-            pane_id, _cwd, sid = compact.resolve_self_pane()
-        entry = compact.load_compact_requests().get(sid) if sid else None
-        if isinstance(entry, dict):
-            import time as _time
-            ts = entry.get("ts")
-            age = "?"
-            if isinstance(ts, (int, float)):
-                age = "%d" % max(0, int(_time.time() - ts))
-            # Trailing newline (UNLIKE the hook-captured --self/--record words):
-            # --status is read by the SESSION from its own transcript, so it
-            # renders cleanly on its own line.
-            sys.stdout.write("PENDING sid=%s age=%ss\n" % (sid, age))
-            return
-        # #822 (e), LEGACY under #855: no pending request, but a `❯ /compact` row
-        # still sits unexecuted in the pane. #855 no longer PRODUCES this (a
-        # `/compact` is typed only into an idle pane, never queued), so this branch
-        # only ever fires from a stale pre-#855 entry / a manual queue — kept
-        # defensively. Report QUEUED — not NONE — so the HOLD doctrine ends the
-        # boundary turn `⏳ WORKING` with a live task, never dispatches. GATED on
-        # the LIVE pane actually showing a queued row (self-resolved `pane_id`
-        # only), so a stale days-old queued-since record can never surface QUEUED
-        # unless the pane genuinely shows the row right now (🔵4).
-        if sid and pane_id and compact.compact_queued_in_pane(pane_id):
-            import time as _time
-            qts = compact.compact_queued_since(sid)
-            since = ("%d" % max(0, int(_time.time() - qts))
-                     if isinstance(qts, (int, float)) else "?")
-            sys.stdout.write("QUEUED sid=%s since=%ss\n" % (sid, since))
-            return
-        sys.stdout.write("NONE\n")
-        return
-    if getattr(args, "self", False):
-        pane_id, cwd, sid = compact.resolve_self_pane()
-        if not sid:
-            print("compact-request --self: could not resolve this session's "
-                  "own pane/transcript (not running inside a recognized "
-                  "tmux Claude Code pane, or $TMUX_PANE unset) -- nothing "
-                  "recorded", file=sys.stderr)
-            sys.exit(1)
-        word = compact._compact_sync_attempt(
-            sid, cwd, compact._COMPACT_SELF_CALLBACK_ORIGIN)
-        sys.stdout.write(word)
-        # #822 (d) / #855: when the boundary compact could NOT run yet (the pane
-        # is mid-turn -> `skip:turn-running`, or a prior `/compact` still sits
-        # unexecuted -> `already-queued`), the session must give the pane an
-        # ACCEPTED Stop so it goes IDLE — launch the boundary-hold command as a
-        # tracked `run_in_background` Bash task, then end the turn `⏳ WORKING:
-        # boundary hold`. #855: the compact is TYPED at the next idle poll (never
-        # queued behind a running turn — CC's queue drain is not idempotent).
-        # Print the EXACT command (zero guessing) — never on a clean `sent`.
-        # See skills/autopilot Step 5.
-        if word in compact._COMPACT_HOLD_HINT_WORDS:
-            # #855-🟡3: `--self` runs mid-turn so the pane is always busy ->
-            # `skip:turn-running` is the usual outcome for EVERY session, goal or
-            # not. So the hint is CONDITIONAL: ONLY an armed-`/goal` session must
-            # do the boundary hold (the goal Stop hook blocks its `✅` boundary, so
-            # the pane never goes idle for the sweep without it). A served,
-            # non-`/goal` session's turn ends naturally -> the pane goes idle ->
-            # the ~60s sweep delivers with NO hold, so it may IGNORE this and end
-            # its report `✅` (completion-report.md #822: "needs none of this").
-            sys.stdout.write(
-                "\nboundary-hold (#822/#855) — ONLY if a `/goal` is ARMED in "
-                "this session: the goal Stop hook blocks this boundary's `✅` "
-                "Stop, so launch this as a background Bash task "
-                "(run_in_background: true), then end the turn `⏳ WORKING: "
-                "boundary hold`. The accepted Stop leaves the pane idle, so the "
-                "next watchdog sweep types the /compact into the idle prompt. A "
-                "served, NON-/goal session may IGNORE this and end its report "
-                "`✅` (the pane goes idle on its own; the sweep delivers):"
-                "\n  %s\n" % compact.COMPACT_BOUNDARY_HOLD_CMD)
-        return
-    if getattr(args, "record", False):
-        session = (getattr(args, "session", "") or "").strip()
-        origin = (getattr(args, "origin", "") or "").strip()
-        if not session:
-            sys.stdout.write("skip:no-session")
-            return
-        word = compact._compact_sync_attempt(session, args.cwd, origin)
-        sys.stdout.write(word)
-        return
-    print("compact-request: nothing to do (use --record --session <sid> --cwd <cwd>)",
-          file=sys.stderr)
-    sys.exit(1)
+    """REMOVED (#1084, 2026-09-19, owner ROZHODNUTE): machine-triggered compacts
+    are gone for good. This command no longer records, delivers, or probes any
+    `/compact` -- it prints the removed line and exits 0 so a stale caller (an
+    old skill template, a not-yet-redeployed box's hook) can never break a turn.
+    Claude Code's own threshold autocompact is the only compaction left. The CLI
+    registration stays addressable; L2 removes it with the request store."""
+    print("compact: machine compacts removed (owner 2026-09-19, #1084) "
+          "— native autocompact only")
+    return
 
 
 def cmd_goal_arm(args):

@@ -38,11 +38,11 @@ class TestMessageStatusMarkerRule(TestCase):
         t = read(self.MOD)
         self.assertIn("ARMED", t)
         self.assertIn("◎ /goal", t)
-        # #911: callback compact disabled by owner flag — the per-ticket
-        # compact phrasing is gone; the armed-goal exception + the disabled
-        # note are what the module must still document.
+        # #1084: machine compacts are REMOVED — the per-ticket compact phrasing is
+        # gone; the armed-goal exception + the removed note are what the module
+        # must still document.
         self.assertIn("safe compaction boundary", t)
-        self.assertIn("Callback compact DISABLED #911", t)
+        self.assertIn("Machine compacts REMOVED #1084", t)
 
     def test_reserve_working_for_genuinely_in_flight_work(self):
         t = read(self.MOD)
@@ -99,9 +99,9 @@ class TestAutopilotSkillLoopBody(TestCase):
         t = read(self.SKILL)
         self.assertIn("ARMED GOAL", t)
         self.assertIn("◎ /goal", t)
-        # #741 reworded the loop-continuation clause into the HOLD-turn doctrine:
-        # the next fire re-enters Step 1 ONLY after the boundary compact runs.
-        self.assertIn("Re-enter Step 1 to refill a lane ONLY once", t)
+        # #1084: machine compacts are REMOVED — no HOLD turn; the loop continues
+        # immediately to the next lane refill after the cycle's report.
+        self.assertIn("continues immediately to the next lane refill", t)
 
     def test_old_immediately_assemble_language_is_gone(self):
         t = read(self.SKILL)

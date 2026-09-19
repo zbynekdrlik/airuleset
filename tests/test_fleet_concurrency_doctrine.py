@@ -180,7 +180,10 @@ class TestAutopilotMasterPointsAtTheCanonicalHome(TestCase):
         self.assertIn("up to 5", lines[0].lower())
         self.assertIn("continuous refill", lines[0].lower())
         self.assertNotIn("no refill while a batch", lines[0].lower())
-        self.assertIn("compact-request --self", lines[0])
+        # #1084: machine compacts are REMOVED — the master loop names the removed
+        # state and never instructs a compact-request call.
+        self.assertNotIn("compact-request", lines[0])
+        self.assertIn("REMOVED (#1084)", lines[0])
         self.assertLessEqual(len(lines[0]), 4000)
 
 

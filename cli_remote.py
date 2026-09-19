@@ -1279,6 +1279,18 @@ def _playwright_chromium_postcheck():
     ) % airuleset.PLAYWRIGHT_PW_VERSION
 
 
+def _compact_hardoff_postcheck():
+    """#1084: an INFORMATIONAL per-box post-check line run AFTER
+    `airuleset.py install` on every target — it prints `compact: hard-off (code)`
+    so a push shows, per box, that machine-triggered compacts are removed in code
+    (owner ROZHODNUTÉ 2026-09-19: "samotné deploye na targety by to mali
+    zabezpečiť aby sa to neopakovalo"). Unlike the gh / playwright post-checks
+    this NEVER fails the target — it is a plain `echo`, always exit 0 — so it is a
+    report line, not a gate; there is nothing to verify beyond "the deployed code
+    has no compact machinery", which is true by construction after this push."""
+    return 'echo "compact: hard-off (code)"'
+
+
 def _deploy_to_all_remotes(failed, auth_failed):
     """Deploy this push to every managed remote (step 3 + 3b of cmd_push).
 
@@ -1352,6 +1364,10 @@ def _deploy_to_all_remotes(failed, auth_failed):
                 # launches headless — a chrome-channel/drift regression fails the
                 # target, never ships silently.
                 f" && {_playwright_chromium_postcheck()}"
+                # #1084: report the compact hard-off state per box (informational,
+                # never fails the target) — the deploy IS the guarantee that no
+                # box types /compact any more.
+                f" && {_compact_hardoff_postcheck()}"
             )
             # #347 adversarial-review CRITICAL finding: `audited_hosts` must
             # NOT be marked here (before the ssh call even runs) — a first

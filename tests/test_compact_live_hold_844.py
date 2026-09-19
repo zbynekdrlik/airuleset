@@ -58,34 +58,26 @@ class TestCompactOverLanes848(unittest.TestCase):
             delivered_path=self.delp)
         return logs, tmux
 
-    def test_848_delivers_immediately_past_a_live_lane(self):
-        # THE inversion: a live sibling lane no longer vetoes the boundary
-        # compact. One sweep at T+1750 (past the too-young floor, under the
-        # 30-min age cap) delivers `/compact` as a PLAIN send, no cap involved.
+    def test_1084_sweep_never_delivers_over_a_live_lane(self):
+        # #1084: compact_sweep is REMOVED — it never delivers, over a live lane or
+        # not; it early-returns the removed line. (The #848 "delivers over live
+        # lanes" behaviour is moot: there is no machine compact at all.)
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
         real_now = time.time()
         T = 1_000_000.0
         compact.record_compact_request(self.SID, self.CWD, now=T,
                                        path=self.reqp, origin="self-callback")
-        # A FRESH live lane — under the pre-#848 tree this returned skip:live-tasks.
         _write_subagent_transcript(proj, self.CWD, self.SID,
                                    mtime=real_now, agent_id="lane848")
         logs, tmux = self._sweep(proj, T + 1750)
-        self.assertIn("/compact", tmux.typed_texts(),
-                      "the boundary must deliver over a live lane (#848): %r" % logs)
-        self.assertTrue(any("-> sent" in ln for ln in logs),
-                        "delivery must journal a PLAIN sent, not a cap: %r" % logs)
-        self.assertFalse(any("live-hold-cap" in ln for ln in logs),
-                         "no cap language survives #848: %r" % logs)
-        self.assertFalse(any("skip:live-tasks" in ln for ln in logs),
-                         "the live-tasks veto is GONE: %r" % logs)
-        self.assertNotIn(self.SID, compact.load_compact_requests(self.reqp),
-                         "a delivered compact is terminal — request cleared")
+        self.assertEqual(tmux.typed_texts(), [], "no /compact ever (#1084)")
+        self.assertTrue(any("machine compacts removed" in ln for ln in logs), logs)
+        # the sweep never reads/consumes the request
+        self.assertIn(self.SID, compact.load_compact_requests(self.reqp))
 
-    def test_848_delivers_over_a_young_boundary_with_a_live_lane(self):
-        # A young boundary (not held for any cap) + a live lane still delivers —
-        # there is no cap gate left, only the ordinary too-young floor.
+    def test_1084_sweep_never_delivers_over_a_young_boundary(self):
+        # #1084: same, for a young boundary + a live lane — no delivery, no read.
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, self.SID)
         real_now = time.time()
@@ -94,10 +86,9 @@ class TestCompactOverLanes848(unittest.TestCase):
                                        path=self.reqp, origin="self-callback")
         _write_subagent_transcript(proj, self.CWD, self.SID,
                                    mtime=real_now, agent_id="lane848b")
-        logs, tmux = self._sweep(proj, T + 600)   # held only 600s — no cap needed
-        self.assertIn("/compact", tmux.typed_texts(),
-                      "no cap gate: a live lane never delays delivery: %r" % logs)
-        self.assertFalse(any("skip:live-tasks" in ln for ln in logs), logs)
+        logs, tmux = self._sweep(proj, T + 600)
+        self.assertEqual(tmux.typed_texts(), [], "no /compact ever (#1084)")
+        self.assertTrue(any("machine compacts removed" in ln for ln in logs), logs)
 
     def test_848_record_writes_no_hbts_keeps_ts_and_bts(self):
         # The #844 cap anchor `hbts` (and its across-record inheritance) is gone;

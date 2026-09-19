@@ -58,7 +58,7 @@ Print the `/goal` line below in a code block, then the arm question, and STOP �
 start dispatching lanes yourself; Step 3 is the loop body the armed /goal runs each turn.
 
 ```
-/goal MASTER LOOP — this repo's WHOLE pipeline is DONE only when ALL hold, provable from the transcript: (1) `gh issue list --state open --search "-label:autopilot-skip -label:ops-channel"` shows ZERO open issues repo-wide (core + every stream + prio:bounce + needs-decision), (2) every processed slice is RELEASED (integration→staging→main merged, contained in origin/main), (3) every prod deploy completed per the repo parameters — a windowed instance deployed INSIDE its airuleset:release-window (TZ=Europe/Bratislava; a window spanning midnight wraps) and an approval-gated instance only after my explicit approval — and each deploy post-deploy VERIFIED with evidence in the transcript, (4) main CI green. Until then EVERY turn runs ALL LANES CONCURRENTLY (no round-robin — review, release and core dispatched in parallel; the sub-dev review queue NEVER starves — a hand-off waits ≤1 integration-cycle compact, bounded pacing not starvation): LANE 1 REVIEW — any stream's ready-for-review/needs-gatekeeper hand-off or re-handoff gets the FULL /process-subdev pipeline (cold diff-first review, own CI/release gates, verdict posted to the tickets BEFORE any merge; FINDINGS → the prio:bounce ticket-first bounce lane), depth NEVER degrades across iterations — the 5th hand-off exactly like the 1st. LANE 2 RELEASE — merged-but-unreleased slices run release PREP anytime (preflight, integration→staging with shadow verification, staging→main); a windowed instance's PROD step is STAGED and deploys the moment a turn lands inside the window (then verify); an approval-gated instance is asked the moment its release is STAGED via ❓ ASKED (ask-and-continue; a granted approval carries into the window — no re-ask) and deploys inside the window after approval; a window that OPENS while the deploy is still blocked (gate red / release not staged) raises ONE ❓ ASKED notice naming the blockers — never a silent missed window. LANE 3 CORE — the gatekeeper's own open backlog per the autopilot loop body: validate each ticket (ticket-validator), bundle bundle-safe issues, keep up to 5 PARALLEL worktree autopilot-worker lanes live, refilling a returned slot immediately (CONTINUOUS REFILL, #848); INTEGRATION is serialized by the #8 integration mutex (one merge/test/push at a time across ALL sessions — dispatch never waits on it; ready branches integrate without waiting for stragglers); falls back to the serial single-worker shape when worktree isolation is unavailable. COMPACT: callback compact is DISABLED by owner flag (#911, native autocompact in force) — do NOT call compact-request --self; do NOT HOLD for a compact. LANE 4 QUESTIONS — open tickets needing my decision (needs-decision / needs-answer / design forks) are asked ONE at a time as self-contained Slovak questions via ❓ ASKED + ⏳ WORKING (ask-and-continue, tracked on the ticket; next question after my answer; NO night/day difference (#791) — questions are asked the moment they arise 24/7, no time-of-day deferral). ONLY when EVERY lane is empty (waiting solely on sub-dev fixes, my answers, or a deploy window) hold the turn OPEN with a FOREGROUND sleep-poll — repeated short sleep+re-check tool calls that re-check ALL lanes each pass (bounce returns, new hand-offs, the window opening); NEVER a wakeup/schedule mechanism inside this armed /goal (the loop fires the next turn immediately and spins tokens); end held turns ⏳ WORKING. Waiting IS the designed state — never ask me whether to keep waiting. Never gate on prod-usage/events beyond the repo's declared window/approval parameters. Stop only on a blocking ❓ NEEDS YOU decision (after I answer, resolve it, then re-print this /goal + the arm question with empty input so auto-arm re-arms the loop) or a CI failure unfixable after two real attempts.
+/goal MASTER LOOP — this repo's WHOLE pipeline is DONE only when ALL hold, provable from the transcript: (1) `gh issue list --state open --search "-label:autopilot-skip -label:ops-channel"` shows ZERO open issues repo-wide (core + every stream + prio:bounce + needs-decision), (2) every processed slice is RELEASED (integration→staging→main merged, contained in origin/main), (3) every prod deploy completed per the repo parameters — a windowed instance deployed INSIDE its airuleset:release-window (TZ=Europe/Bratislava; a window spanning midnight wraps) and an approval-gated instance only after my explicit approval — and each deploy post-deploy VERIFIED with evidence in the transcript, (4) main CI green. Until then EVERY turn runs ALL LANES CONCURRENTLY (no round-robin — review, release and core dispatched in parallel; the sub-dev review queue NEVER starves — a hand-off waits ≤1 integration cycle, bounded pacing not starvation): LANE 1 REVIEW — any stream's ready-for-review/needs-gatekeeper hand-off or re-handoff gets the FULL /process-subdev pipeline (cold diff-first review, own CI/release gates, verdict posted to the tickets BEFORE any merge; FINDINGS → the prio:bounce ticket-first bounce lane), depth NEVER degrades across iterations — the 5th hand-off exactly like the 1st. LANE 2 RELEASE — merged-but-unreleased slices run release PREP anytime (preflight, integration→staging with shadow verification, staging→main); a windowed instance's PROD step is STAGED and deploys the moment a turn lands inside the window (then verify); an approval-gated instance is asked the moment its release is STAGED via ❓ ASKED (ask-and-continue; a granted approval carries into the window — no re-ask) and deploys inside the window after approval; a window that OPENS while the deploy is still blocked (gate red / release not staged) raises ONE ❓ ASKED notice naming the blockers — never a silent missed window. LANE 3 CORE — the gatekeeper's own open backlog per the autopilot loop body: validate each ticket (ticket-validator), bundle bundle-safe issues, keep up to 5 PARALLEL worktree autopilot-worker lanes live, refilling a returned slot immediately (CONTINUOUS REFILL, #848); INTEGRATION is serialized by the #8 integration mutex (one merge/test/push at a time across ALL sessions — dispatch never waits on it; ready branches integrate without waiting for stragglers); falls back to the serial single-worker shape when worktree isolation is unavailable. COMPACT: machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD. LANE 4 QUESTIONS — open tickets needing my decision (needs-decision / needs-answer / design forks) are asked ONE at a time as self-contained Slovak questions via ❓ ASKED + ⏳ WORKING (ask-and-continue, tracked on the ticket; next question after my answer; NO night/day difference (#791) — questions are asked the moment they arise 24/7, no time-of-day deferral). ONLY when EVERY lane is empty (waiting solely on sub-dev fixes, my answers, or a deploy window) hold the turn OPEN with a FOREGROUND sleep-poll — repeated short sleep+re-check tool calls that re-check ALL lanes each pass (bounce returns, new hand-offs, the window opening); NEVER a wakeup/schedule mechanism inside this armed /goal (the loop fires the next turn immediately and spins tokens); end held turns ⏳ WORKING. Waiting IS the designed state — never ask me whether to keep waiting. Never gate on prod-usage/events beyond the repo's declared window/approval parameters. Stop only on a blocking ❓ NEEDS YOU decision (after I answer, resolve it, then re-print this /goal + the arm question with empty input so auto-arm re-arms the loop) or a CI failure unfixable after two real attempts.
 ```
 
 End the message with the arm question block (machine question — it neither pings
@@ -119,8 +119,8 @@ refilled immediately), bounded by real resource signals (below).
     watcher — the active run-id, the promotion ticket, any lock target — is noted as a
     ticket comment / tracked state AS THE RELEASE PROGRESSES, not just at the end, so if a
     compaction drops its completion notification the anchor alone is enough to re-derive it
-    (#848 retired the #730 TaskStop-then-relaunch waiver — a live waiter now rides across the
-    per-cycle compact).
+    (#848 retired the #730 TaskStop-then-relaunch waiver; machine compacts are REMOVED #1084, so a
+    live waiter simply rides across a native autocompact).
 - **LANE 3 CORE** — open non-skip core-slice issues remain? Work the backlog with
   **CONTINUOUS REFILL** (#848, restoring #456's continuous refill FOR this lane, retiring
   #723/#724's batch mode): validate each ticket (ticket-validator), bundle
@@ -133,10 +133,9 @@ refilled immediately), bounded by real resource signals (below).
   of the ready ones.
   **LANE SIZE BOUND (#844):** a master lane gets the SAME bundling ceiling as `/autopilot` (the
   per-issue / per-batch LoC caps in the `batch-issue-development` gate) — a lane that grows to
-  ~800k tokens is itself degraded (slow, memory-heavy, and it is the lane most likely to keep
-  `live-tasks` true and hold the boundary compact). Applies to EVERY lane: a LANE 1 REVIEW lane
+  ~800k tokens is itself degraded (slow, memory-heavy). Applies to EVERY lane: a LANE 1 REVIEW lane
   reviews ONE hand-off, never bundles two hand-offs into one review; a LANE 3 CORE lane bundles only
-  bundle-safe issues within the gate. Keep lanes small so the batch drains and the compact fires.
+  bundle-safe issues within the gate. Keep lanes small so each integration cycle stays quick.
   INTEGRATION is the ONLY thing serialized: the supervisor merges each returned branch
   under the #8 **integration mutex** (one merge/test/push cycle at a time across ALL
   sessions — per the `autopilot` skill's repo-flow policy, a direct `push` to `main`
@@ -150,25 +149,15 @@ refilled immediately), bounded by real resource signals (below).
   ends with a FULL completion report + `✅ DONE` (never `⏳` — 2026-07-25 revision,
   `autopilot` skill Step 3 item 5); the MASTER `/goal` still re-fires the next turn
   regardless, so the scheduler simply re-evaluates all lanes fresh.
-  **COMPACT BOUNDARY — DISABLED (#911, owner experiment 2026-09-06).** The callback compact
-  (`compact-request --self`) is disabled fleet-wide by the owner flag `~/.claude/watchdog-disable-compact`.
-  Native Claude Code threshold autocompact is in force instead. The master does NOT call
-  `compact-request --self` at integration boundaries and does NOT HOLD for a compact. The loop
-  continues immediately to the next lane refill. `rm ~/.claude/watchdog-disable-compact` re-enables
-  the callback mechanism. The first turn after ANY compaction (including native autocompact) still
-  RECONCILES lanes from durable state per the autopilot skill Step 5 #844 clause (`git worktree list`
-  + `LANE-RETURN:` comments, never memory), which recovers the residual case of a dropped completion
-  notification. Any granted prod-approval + staged-deploy state MUST still be persisted as a ticket
-  comment promptly (`durable-decisions-to-tickets.md`), since any compaction drops in-context-only state.
-  <details><summary>Historical boundary-hold mechanics (kept for re-enable)</summary>
-  The master's bounded-context boundary was EVERY LANE 3 integration cycle. The moment LANE 3
-  integrated a returned lane, `compact-request --self` (#402) ran as the last tool call — live
-  lanes or not. #848 removed the old drain-to-idle-first gate. Then every later goal turn was a
-  HOLD turn until the compact ran — first action `compact-request --status`, and while it printed
-  `PENDING` the turn ended `⏳ WORKING` with ZERO dispatches; a new lane was refilled only after
-  the compact ran (#741, the watchdog's own writers HOLD the same way). The #730 re-derivable-waiter
-  waiver is RETIRED (#848) — #848 removed the live-tasks veto, so there is no drain to force.
-  </details>
+  **COMPACT BOUNDARY — REMOVED (#1084, owner ROZHODNUTÉ 2026-09-19).** Machine-triggered compacts
+  are gone for good: the master never types `/compact` at an integration boundary or anywhere else,
+  never runs a compact command, and never HOLDS for a compact — the loop continues immediately to the
+  next lane refill. Claude Code's native threshold autocompact is the only compaction left. The first
+  turn after ANY compaction (native autocompact) still RECONCILES lanes from durable state per the
+  autopilot skill Step 5 #844 clause (`git worktree list` + `LANE-RETURN:` comments, never memory),
+  which recovers the residual case of a dropped completion notification. Any granted prod-approval +
+  staged-deploy state MUST still be persisted as a ticket comment promptly
+  (`durable-decisions-to-tickets.md`), since any compaction drops in-context-only state.
 - **LANE 4 QUESTIONS** — open tickets labeled `needs-decision` / `needs-answer` (or a
   design fork surfaced by any lane) with no question currently pending? Ask the next
   one — **ONE at a time**, self-contained Slovak per `user-questions-slovak.md`, via

@@ -60,18 +60,22 @@ class TestAutopilotSkillWaiverIsRetired(TestCase):
         body = norm(read(SKILL))
         self.assertNotIn(norm(
             "Worker LANES get NO waiver — they are drained exactly as today"), body)
-        self.assertIn(norm("Worker lanes, likewise, are no longer drained before the compact"), body)
+        # #1084: machine compacts are removed — a worker lane simply rides across
+        # a native autocompact, never drained before a (now non-existent) compact.
+        self.assertIn(norm("ride across a native autocompact"), body)
 
     def test_the_batch_boundary_crossing_rule_is_gone(self):
         body = norm(read(SKILL))
         self.assertNotIn(norm(
             "A drained batch boundary must NEVER be crossed into the next batch"), body)
 
-    def test_compact_delivers_over_live_lanes(self):
+    def test_machine_compacts_removed_no_live_lane_compact(self):
+        # #1084: there is no machine compact over live lanes anymore — the whole
+        # "compact over live lanes is safe" premise is gone.
         body = norm(read(SKILL))
-        self.assertIn(norm("compact over live lanes is safe"), body)
-        # the old "veto NOT touched / CC #29193 respected" framing is gone
+        self.assertNotIn(norm("compact over live lanes"), body)
         self.assertNotIn(norm("live-tasks veto itself is NOT touched"), body)
+        self.assertIn(norm("machine compacts are now REMOVED"), body)
 
 
 class TestAutopilotMasterWaiverIsRetired(TestCase):
@@ -84,11 +88,11 @@ class TestAutopilotMasterWaiverIsRetired(TestCase):
         self.assertEqual(len(lines), 1, "expected exactly one master /goal line")
         return lines[0]
 
-    def test_goal_line_compact_is_disabled_911(self):
-        # #911: callback compact DISABLED by owner flag.
+    def test_goal_line_compact_is_removed_1084(self):
+        # #1084: machine compacts are REMOVED for good.
         line = self._master_goal_line()
-        self.assertIn("DISABLED", line)
-        self.assertIn("#911", line)
+        self.assertIn("REMOVED", line)
+        self.assertIn("#1084", line)
         self.assertNotIn("(waiver #730)", line)
         self.assertNotIn("DRAIN WINDOW", line)
         self.assertNotIn("BATCH+COMPACT", line)
@@ -101,22 +105,22 @@ class TestAutopilotMasterWaiverIsRetired(TestCase):
 
     def _compact_boundary_window(self):
         body = read(SKILL_MASTER)
-        idx = body.index("**COMPACT BOUNDARY — DISABLED")
+        idx = body.index("**COMPACT BOUNDARY — REMOVED")
         end = body.index("- **LANE 4 QUESTIONS**")
         self.assertGreater(end, idx)
         return body[idx:end]
 
-    def test_compact_boundary_is_disabled(self):
-        # #911: the compact boundary section must name the disabled state.
+    def test_compact_boundary_is_removed(self):
+        # #1084: the compact boundary section must name the removed state.
         window = norm(self._compact_boundary_window())
-        self.assertIn(norm("DISABLED"), window)
-        self.assertIn(norm("#911"), window)
+        self.assertIn(norm("REMOVED"), window)
+        self.assertIn(norm("#1084"), window)
         self.assertIn(norm("native autocompact"), window.lower())
+        self.assertNotIn(norm("compact-request"), window)
 
     def test_the_taskstop_relaunch_protocol_is_gone_from_master(self):
         window = norm(self._compact_boundary_window())
-        # #848 retired the waiver; #911 disabled the whole mechanism —
-        # the retired note is inside the historical details block.
+        # #1084 removed the whole mechanism — the historical hold details are gone.
         self.assertNotIn(norm("`TaskStop` it DELIBERATELY"), window)
         self.assertNotIn(norm("RELAUNCH the waiter fresh"), window)
         self.assertNotIn(norm("live-tasks veto itself is NOT touched"), window)

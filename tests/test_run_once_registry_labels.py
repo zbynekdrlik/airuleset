@@ -55,7 +55,9 @@ EXPECTED_STANDALONE = [
     "bounce_backstop",                  # (8)
     "gk_request_backstop",              # (11)
     "burn_snapshot_job",                # (13)
-    "compact_sweep",                    # (14)
+    "compact_sweep",                    # (14) — REMOVED feature (#1084), the slot
+                                        #        stays REGISTERED so it journals the
+                                        #        removed line each sweep (addressable)
     "fleet_burn_job",                   # (16)
     "burn_alert_job",                   # (19)
     "goal_sweep",                       # (9)
@@ -105,7 +107,12 @@ LIVE_STANDALONE_JOB_LABELS = {
     9: ["goal_sweep"],
     11: ["gk_request_backstop"],
     13: ["burn_snapshot_job"],
-    14: ["compact_sweep"],
+    # 14 (compact_sweep) is NOT here: its docstring is REMOVED (#1084, machine
+    # compacts are gone in code) so it is not a LIVE feature job, yet the label
+    # STAYS in EXPECTED_STANDALONE above because the slot is still REGISTERED to
+    # journal the removed line each sweep (job 14 stays addressable). This map
+    # ties LIVE docstring jobs to registry labels; a REMOVED-but-registered slot
+    # (like the #1084 compact one) deliberately has no entry here.
     16: ["fleet_burn_job"],
     19: ["burn_alert_job"],
     20: ["goal_dark_watch", "goal_lane_sweep"],

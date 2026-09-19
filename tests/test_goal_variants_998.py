@@ -185,15 +185,18 @@ class TestReviewRoleVariant1000(TestCase):
     # scanner never mistakes it for a secret). Regenerate ONLY on a DELIBERATE
     # clause edit (a shared clause change moves every hash).
     _GOLDEN = {
-        "full/parallel/None": "459dee3f682b3819a975fc1f",
-        "full/sequential/None": "8e974d6e821a896c75a61ebf",
-        "full/sequential/infra": "7560982b4accad2b7bea9155",
-        "branch-merge/parallel/None": "a031b9eeaf283fc59d88a2b9",
-        "branch-merge/sequential/None": "c079a31a6513f5e0a9a5e0ab",
-        "branch-merge/sequential/infra": "db3f26aa105edd3d7cf94ec7",
-        "fork-no-merge/parallel/None": "f14dbf490b5a5eab9cc3607d",
-        "fork-no-merge/sequential/None": "cad96fb05510db0570d0578e",
-        "fork-no-merge/sequential/infra": "0ad2db1a459f94fe98fc76f8",
+        # #1084 re-golden: the compact-boundary clause changed (machine compacts
+        # REMOVED — native autocompact only), so every non-review variant's
+        # rendered goal line changed. Regenerated deliberately.
+        "full/parallel/None": "2d9a5539f472a22cda96177c",
+        "full/sequential/None": "6920ca09926869d6679eb0cc",
+        "full/sequential/infra": "c661f5482edc49c49b8c102e",
+        "branch-merge/parallel/None": "f21f471502b66797a3bc22dc",
+        "branch-merge/sequential/None": "e572d2ddb33b2ebaa0b8bb3f",
+        "branch-merge/sequential/infra": "b1ba75e947fa2924cb603291",
+        "fork-no-merge/parallel/None": "d4867acc59f61fcb601b55d9",
+        "fork-no-merge/sequential/None": "6e11554f2de16fcb30f0abea",
+        "fork-no-merge/sequential/infra": "5965fd12cf0969a7305392c2",
     }
 
     def test_nonreview_variants_byte_identical_snapshot(self):

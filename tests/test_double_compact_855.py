@@ -173,21 +173,24 @@ class TestRunningTurnRefused(unittest.TestCase):
         # the idle window the next sweep types into.
         self.assertIn("skip:turn-running", compact._COMPACT_HOLD_HINT_WORDS)
 
-    def test_sweep_hold_extends_a_running_turn(self):
+    def test_sweep_never_delivers_1084(self):
+        # #1084: compact_sweep is REMOVED — it early-returns the removed line and
+        # never delivers, holds, or re-evaluates, whatever the pane/turn state.
         proj = self._dir()
         _marker(proj, CWD, SID)
         T = 1_000_000.0
         compact.record_compact_request(SID, CWD, now=T, path=self.reqp,
                                        origin="self-callback")
         run = _StaticRun(CWD, CB_BUSY)
-        logs = compact.compact_sweep(T + 5 * 60, run=run, projects_dir=proj,
-                                     requests_path=self.reqp,
-                                     delivered_path=self.delp)
-        self.assertTrue(any("skip:turn-running" in ln for ln in logs), logs)
-        self.assertEqual(
-            compact.load_compact_requests(self.reqp)[SID]["ts"], int(T + 5 * 60),
-            "a running turn must hold-extend the boundary (#741/#855)")
-        self.assertEqual(run.sent, [], "no keystroke into a running turn")
+        with m.patch.object(compact, "deliver_compact",
+                            side_effect=AssertionError("must not deliver #1084")):
+            logs = compact.compact_sweep(T + 5 * 60, run=run, projects_dir=proj,
+                                         requests_path=self.reqp,
+                                         delivered_path=self.delp)
+        self.assertTrue(any("machine compacts removed" in ln for ln in logs), logs)
+        self.assertEqual(run.sent, [], "no keystroke ever (#1084)")
+        # the request is never read or ts-refreshed by the sweep
+        self.assertEqual(compact.load_compact_requests(self.reqp)[SID]["ts"], T)
 
 
 class TestRecentlyCompactedVeto(unittest.TestCase):
@@ -326,8 +329,8 @@ def _args(**kw):
 
 
 class TestSelfPrintsHintOnTurnRunning(unittest.TestCase):
-    """`compact-request --self` prints the boundary-hold command when the
-    boundary `/compact` was refused because a turn is running."""
+    """#1084: `compact-request --self` is a REMOVED stub — it NEVER prints a
+    boundary-hold hint any more, whatever a (now-unused) delivery word would be."""
 
     def setUp(self):
         d = TemporaryDirectory()
@@ -352,20 +355,13 @@ class TestSelfPrintsHintOnTurnRunning(unittest.TestCase):
                         airuleset.cmd_compact_request(_args(self=True))
         return "".join(buf)
 
-    def test_self_prints_the_command_on_turn_running(self):
+    def test_self_prints_no_boundary_hold_hint(self):
+        # #1084: the stub prints the removed line and NO boundary-hold command,
+        # regardless of the (now-unused) delivery word.
         out = self._self_output("skip:turn-running")
-        self.assertTrue(out.startswith("skip:turn-running"), out)
-        self.assertIn("sleep 45 && echo boundary-hold", out)
-        self.assertIn("run_in_background", out)
-
-    def test_hint_is_conditional_on_an_armed_goal(self):
-        # 🟡3: `--self` runs mid-turn so `skip:turn-running` fires for EVERY
-        # session — the hint must tell a served, non-/goal session it may IGNORE
-        # it (it does not need the boundary hold; the sweep delivers once its
-        # turn ends and the pane goes idle).
-        out = self._self_output("skip:turn-running")
-        self.assertIn("ARMED", out)
-        self.assertIn("IGNORE", out)
+        self.assertIn("machine compacts removed", out)
+        self.assertNotIn("sleep 45 && echo boundary-hold", out)
+        self.assertNotIn("boundary hold", out)
 
 
 class TestDoctrine(unittest.TestCase):

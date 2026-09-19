@@ -161,22 +161,25 @@ class TestSaturationReconcilesCompactBoundary(TestCase):
     buried in prose (#848 CONTINUOUS REFILL, retiring #723 batch mode):
     saturation-core keeps up to 5 parallel lanes live and refills a returned
     slot immediately; saturation-delivery integrates each returned branch
-    serially; compact-boundary fires the compact at EVERY integration cycle,
-    live lanes or not. They cannot contradict."""
+    serially; compact-boundary now just ENDS each integration cycle with the
+    report — machine compacts are REMOVED (#1084), no `/compact` is ever typed.
+    They cannot contradict."""
 
     def test_the_reconciled_pair_is_registered(self):
         self.assertEqual(gr.SATURATION_RECONCILES_COMPACT,
                          ("saturation-core", "saturation-delivery",
                           "compact-boundary"))
 
-    def test_compact_boundary_is_disabled_911(self):
-        # #911: callback compact DISABLED by owner flag; the clause must name
-        # the disabled state and the native autocompact replacement.
+    def test_compact_boundary_is_removed_1084(self):
+        # #1084: machine compacts are REMOVED for good; the clause must name the
+        # removed state + the native-autocompact-only replacement, and carry NO
+        # compact-request instruction.
         for p in gr.PROFILES:
             cb = next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
-            self.assertIn("DISABLED", cb)
-            self.assertIn("#911", cb)
+            self.assertIn("REMOVED", cb)
+            self.assertIn("#1084", cb)
             self.assertIn("native autocompact", cb)
+            self.assertNotIn("compact-request", cb)
         # TEETH: the retired drained-batch-boundary framing must stay GONE.
         for p in gr.PROFILES:
             cb = next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
@@ -203,19 +206,19 @@ class TestSaturationReconcilesCompactBoundary(TestCase):
             self.assertNotIn("keep building", cb)
 
 
-class TestCompactBoundaryHoldTurn741(TestCase):
-    """#741/#911: callback compact DISABLED by owner flag (#911). The old HOLD
-    mechanism text is no longer in the clause. The clause explicitly says
-    do NOT HOLD for a compact."""
+class TestCompactBoundaryRemoved1084(TestCase):
+    """#1084: machine compacts are REMOVED for good. The clause carries no HOLD
+    and no compact-request instruction; the Step-5 HOLD mechanism is gone from
+    both autopilot skills."""
 
     def _cb(self, p):
         return next(c for c in gr.CLAUSES if c.id == "compact-boundary").text_for(p)
 
-    def test_hold_disabled_in_every_profile(self):
+    def test_no_hold_in_every_profile(self):
         for p in gr.PROFILES:
             cb = self._cb(p)
-            self.assertIn("do NOT HOLD for a compact", cb,
-                          "%s missing the #911 no-hold instruction" % p)
+            self.assertIn("never a compact HOLD", cb,
+                          "%s missing the #1084 no-hold instruction" % p)
             self.assertNotIn("no next batch first", cb)
 
     def test_old_ordering_claim_removed_from_every_profile(self):
@@ -230,26 +233,27 @@ class TestCompactBoundaryHoldTurn741(TestCase):
         t = skill_text()
         self.assertNotIn("compacting then dispatching", t)
 
-    def test_skill_prose_carries_the_hold_turn_mechanism(self):
-        # the full mechanism lives in the NON-capped Step-5 doctrine (the char cap
-        # keeps it out of the rendered lines): the status probe, the exact ⏳ WORKING
-        # line, and the writer-side latch decision word.
+    def test_skill_prose_no_longer_carries_the_hold_turn_mechanism(self):
+        # #1084: the boundary-hold mechanism is REMOVED from the Step-5 doctrine —
+        # no status probe, no boundary-hold ⏳ line, no writer-side latch word.
         t = skill_text()
-        self.assertIn("compact-request --status", t)
-        self.assertIn("čakám na compact hranice várky", t)
-        self.assertIn("hold:compact-pending", t)
+        self.assertNotIn("compact-request --status", t)
+        self.assertNotIn("čakám na compact hranice várky", t)
+        self.assertNotIn("hold:compact-pending", t)
 
-    def test_old_ordering_gone_from_the_autopilot_master_skill_too(self):
-        # #741/#911 doctrine-drift lock: the gatekeeper MASTER loop skill must
-        # NOT still assert the removed "compacting then dispatching the next
-        # batch" ordering, and must name the #911 disabled state.
+    def test_compact_machinery_gone_from_the_autopilot_master_skill_too(self):
+        # #1084 doctrine-drift lock: the gatekeeper MASTER loop skill must NOT
+        # instruct any compact-request call or the removed HOLD ordering, and must
+        # name the #1084 removed state.
         master = (ROOT / "skills/autopilot-master/SKILL.md").read_text(
             encoding="utf-8")
         self.assertNotIn("compacting then dispatching", master)
-        # #911: the master skill must name the disabled state.
+        self.assertNotIn("compact-request --self", master)
+        self.assertNotIn("compact-request --status", master)
+        # #1084: the master skill must name the removed state.
         flat = " ".join(master.split())
-        self.assertIn("DISABLED", flat)
-        self.assertIn("#911", flat)
+        self.assertIn("REMOVED", flat)
+        self.assertIn("#1084", flat)
 
 
 class TestLoadBearingInvariantsSurviveTheRefactor(TestCase):

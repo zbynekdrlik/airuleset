@@ -2751,39 +2751,21 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           `burn-history/snapshots.jsonl` (burn_snapshot_job) — the feed
           `airuleset.py burn --compare` reads, so a change's cost impact is
           measured automatically, with nothing for the user to check.
-      (14) (only when `compact_requests_path` is given) /COMPACT AT TICKET
-          BOUNDARIES (#39 krok 1c, collapsed by #402) — the periodic
-          re-evaluation of every PENDING `/compact` request
-          (`watchdog.compact.compact_sweep`). A request exists ONLY when
-          one of the two proven origins created it (`compact-request
-          --self`, or the SubagentStop hook on an autopilot-worker's
-          return) — no context-size/idle-duration guess, no text-sniffed
-          message shape. Each sweep re-checks the SAME small set of hard
-          conditions (`watchdog/compact.py`'s own module docstring has the
-          full list: pane idle with no draft/dialog, NOT a running turn
-          (#855: a `/compact` is typed ONLY into an idle pane — never
-          queued behind a running turn, whose CC queue drain is not
-          idempotent; a running turn → `skip:turn-running`, re-polled),
-          not on a `⏳`/`❓` marker or an unresumed API error, a 120-s
-          recently-compacted anti-double veto, a 30-min per-session
-          cooldown, and a hard non-refreshable age cap) — ALL
-          unconditional, no time-boxed override on any of them.
-          #855-recurrence: a delivered `/compact` also CONSUMES every
-          pending record for the SAME already-compacted boundary — a
-          DUPLICATE `self-callback` record (the #411 Stop-hook backstop of
-          the same `## ✅ Work Complete` the proactive `--self` already got
-          compacted) is discarded `already-compacted`, never re-delivered,
-          when a compaction is observed newer than the newest report OR the
-          record's `bts` is not newer than the last delivered ts. All pass →
-          `/compact` is typed into the idle prompt (executing immediately,
-          exactly once), logged, and the request cleared. Any fails → left pending for the next
-          sweep, discarded outright only once the age cap is exceeded (or
-          once already otherwise handled) — "no infinite waiting" is the
-          age cap's job, never a refusal to re-evaluate. THE ONLY
-          `/compact` SENDER left in this module (the old separate
-          synchronous #65 path is now the SAME function,
-          `deliver_compact`, called once immediately by
-          `cmd_compact_request` before this sweep ever sees the request).
+      (14) /COMPACT AT TICKET BOUNDARIES — REMOVED (#1084, 2026-09-19, owner
+          ROZHODNUTÉ: "už tie compacty vôbec nechcem … samotné deploye na
+          targety by to mali zabezpečiť"). Machine-triggered compacts are gone
+          for good: `watchdog.compact.compact_sweep` now early-returns a single
+          removed journal line and delivers NOTHING — no request is read, no
+          owner flag is consulted, no enable path exists. Claude Code's own
+          threshold autocompact is the ONLY compaction left. The slot stays
+          addressable (still dispatched when `compact_requests_path` is wired, so
+          prior comments/logs referencing "job 14" resolve — the #132/#102/#402
+          precedent), and journals the removed line each sweep so `journalctl`
+          proves the fleet-wide guarantee with no per-box marker to miss (the
+          forestshop-dev slip that filed this ticket). The #911 per-box
+          `~/.claude/watchdog-disable-compact` flag it used to honour is gone —
+          `install` deletes any stale copy. L2 (a later lane) deletes the
+          orphaned `deliver_compact` + the request store.
       (15) COMPACT OVERGROWN IDLE SESSIONS — REMOVED (#102, 2026-07-27). Used
           to fire `/compact` purely off CONTEXT SIZE + IDLE DURATION, with
           no regard for what marker the session's last turn ended on — the
@@ -4944,32 +4926,29 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              persist=lambda: save_state(state_path, state), sleep_fn=sleep_fn),
          "gkreq-backstop error", min_budget=_BUDGET_MIN_GH_FETCH_S)
 
-    # OWNER KILL-SWITCH (2026-08-12, direct order: "vypni compact watcher a aj
-    # goal watcher lebo stale si ich neopravil zato mi stale promptuju kde
-    # nemaju"): a flag file disables the compact / goal delivery jobs on this
-    # box until the owner (or a fix he approves) removes it. Checked fresh
-    # every sweep; every skip logs LOUDLY so a disabled job can never be
-    # mistaken for a healthy-but-silent one. rm the file to re-enable.
-    # Jobs 9/20 (#403) mirror job 14's own shape exactly: gated HERE (a cheap
-    # pre-filter that skips the call, never dispatching into `watchdog.goal`
-    # at all) AND checked again INSIDE `watchdog.goal`'s own entry functions
-    # (defense-in-depth, same as `watchdog.compact`'s internal
-    # `_owner_disabled("compact")` check) -- so a direct call that bypasses
-    # this gate (a test, a future caller) still self-disables and logs.
+    # OWNER KILL-SWITCH (2026-08-12, direct order: "vypni ... goal watcher lebo
+    # stale si ich neopravil zato mi stale promptuju kde nemaju"): a flag file
+    # disables the goal delivery jobs on this box until the owner (or a fix he
+    # approves) removes it. Checked fresh every sweep; every skip logs LOUDLY so
+    # a disabled job can never be mistaken for a healthy-but-silent one. rm the
+    # file to re-enable. Jobs 9/20 (#403) are gated HERE (a cheap pre-filter that
+    # skips the call, never dispatching into `watchdog.goal` at all) AND checked
+    # again INSIDE `watchdog.goal`'s own entry functions (defense-in-depth) -- so
+    # a direct call that bypasses this gate (a test, a future caller) still
+    # self-disables and logs.
+    # #1084: the compact kill-switch is GONE -- machine compacts are removed in
+    # code (compact_sweep early-returns, journalling the removed line), so there
+    # is no compact disable flag to read and no compact gate that consumes one.
     _goal_jobs_disabled = _owner_disabled("goal")
-    _compact_jobs_disabled = _owner_disabled("compact")
 
-    # The DISABLED lines emit from an ORDERED registry entry (the one non-job
+    # The DISABLED line emits from an ORDERED registry entry (the one non-job
     # entry) at the if-chain's exact position, so `logs` order is byte-identical;
-    # the flags stay computed HERE because the later compact/goal gates read them.
+    # the goal flag stays computed HERE because the later goal gate reads it.
     def _kill_switch_notice():
         _n = []
         if _goal_jobs_disabled:
             _n.append("goal jobs DISABLED by owner flag "
                       "~/.claude/watchdog-disable-goal (rm to re-enable)")
-        if _compact_jobs_disabled:
-            _n.append("compact jobs DISABLED by owner flag "
-                      "~/.claude/watchdog-disable-compact (rm to re-enable)")
         return _n
     _add("_owner_kill_switch_notice", lambda: True, _kill_switch_notice, None,
          calm_ok=True)   # #1055 P3: local journal-only notice, always runs
@@ -5015,13 +4994,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # a fresh keystroke burst either).
     compact_handled_this_sweep = set()
 
-    # Job 14 — /COMPACT AT TICKET BOUNDARIES (#39 krok 1c, collapsed #402):
-    # only when `compact_requests_path` is given (cmd_watchdog passes
-    # watchdog.compact.compact_requests_path()) — same "wired = on"
-    # convention as jobs 3/7/8/11/13, so an existing caller of run_once()
-    # that knows nothing about this job sees NO behavior change. `state` is
-    # threaded through so a real send can mark the shared janitor's
-    # provenance (#372). Best-effort.
+    # Job 14 — /COMPACT AT TICKET BOUNDARIES — REMOVED (#1084, 2026-09-19, owner
+    # ROZHODNUTÉ). The slot stays addressable and dispatched (same "wired = on"
+    # convention as jobs 3/7/8/11/13, gated only on `compact_requests_path`), but
+    # `compact_sweep` now early-returns the removed journal line and delivers
+    # NOTHING — machine compacts are gone in code, native autocompact only. The
+    # `not _compact_jobs_disabled` gate is dropped with the compact kill-switch.
     def _job_compact_sweep():
         from watchdog import compact as _compact
         return _compact.compact_sweep(now, run=run, dry_run=dry_run,
@@ -5029,9 +5007,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                       requests_path=compact_requests_path,
                                       state=state,
                                       handled=compact_handled_this_sweep)
-    _add("compact_sweep", lambda: compact_requests_path and not _compact_jobs_disabled,
+    _add("compact_sweep", lambda: compact_requests_path,
          _job_compact_sweep, "compact-request error",
-         calm_ok=True)   # #1055 P3: file-driven /compact delivery, ≤60s reaction
+         calm_ok=True)   # #1084: journals the removed line each sweep, ≤60s
 
     # Job 15 — REMOVED (#102, 2026-07-27). Used to fire /compact off context
     # size + idle duration alone; see run_once's own docstring paragraph
@@ -5698,32 +5676,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     _cadence = state.get("sweep_cadence") if isinstance(state.get("sweep_cadence"), dict) else {}
     _stored_stamps = _cadence.get("pane_stamps") if isinstance(_cadence.get("pane_stamps"), dict) else {}
     _last_full = _cadence.get("last_full")
+    # #1084: machine compacts are REMOVED in code, so a pending /compact request
+    # NEVER forces a full sweep any more (compact_sweep early-returns, delivering
+    # nothing). The request-file read + `actionable_compact_requests` filter are
+    # gone; `sweep_urgent` keeps its `compact_pending` parameter (its pure branch
+    # is still unit-tested) but the sole caller pins it False.
     _compact_pending = False
-    _compact_ignored = None   # #1055 fix-forward: reason a request exists but is not servable
-    if compact_requests_path:
-        try:
-            from watchdog import compact as _compact_mod
-            # #1055 P3 fix-forward — a pending /compact forces a FULL sweep ONLY
-            # when it is SERVABLE. `actionable_compact_requests` drops requests the
-            # owner disable flag (compact_sweep returns early, never consuming/
-            # GC'ing them) or a >6h / unmeasurable `ts` make dead. Before this fix
-            # a dead request (gk's 2026-09-07 self-callback + the disable flag)
-            # read as "pending" forever and forced a full sweep every minute.
-            _compact_raw = _compact_mod.load_compact_requests(compact_requests_path)
-            _compact_actionable = _compact_mod.actionable_compact_requests(
-                _compact_raw, now=now, jobs_disabled=_compact_jobs_disabled)
-            _compact_pending = bool(_compact_actionable)
-            if _compact_raw and not _compact_actionable:
-                # A request exists but NONE is servable — remember WHY so ONE
-                # decision line can be journaled below on a full-by-cadence sweep
-                # (not every minute; #486 explicit decision log, no silent
-                # suppression). The reason predicate is a PURE helper next to the
-                # filter (unit-tested, keeps run_once small).
-                _compact_ignored = _compact_mod.compact_ignore_reason(
-                    _compact_raw, now=now, jobs_disabled=_compact_jobs_disabled)
-        except Exception as _e:  # noqa: BLE001 — fail toward FULL, never break the sweep
-            logs.append("sweep-cadence: compact-pending read error (=> full): %r" % _e)
-            _compact_pending = True
     _urgent = sweep_urgent(_urgent_state_snapshot, cur_pane_stamps, _stored_stamps,
                            compact_pending=_compact_pending)
     _calm = False
@@ -5746,15 +5704,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
         else:
             logs.append("sweep: full (%s)"
                         % ("cadence" if _elapsed_since_full >= 0 else "clock-skew"))
-    # #1055 P3 fix-forward — a pending compact request that is NOT servable does
-    # not force a full sweep (computed above). When such a dead request exists,
-    # journal ONE explicit decision line naming WHY — but only on a full-by-cadence
-    # sweep (bootstrap or the SWEEP_CALM_S timer: not urgent, not calm), so it
-    # appears at most once per SWEEP_CALM_S rather than every minute, on the sweep
-    # it actually influences (#486 explicit decision log, no silent suppression).
-    if _compact_ignored and not _urgent and not _calm:
-        logs.append("sweep-cadence: compact-pending ignored (%s) — calm allowed"
-                    % _compact_ignored)
+    # #1084: the "compact-pending ignored" decision line is gone with the
+    # request read above — a pending /compact never influences the sweep cadence
+    # any more (machine compacts removed in code).
     # #1055 P3 (b) — deliver_discord_replies is `calm_ok=True` and runs on EVERY
     # calm sweep (it is the reply-routing recovery path — a ❓ answer, a
     # completion-card reply #298, or a remembered #449 channel must be picked up

@@ -56,20 +56,18 @@ class Clause:
 
 
 # The reconciliation the owner asked to be VISIBLE in the registry, not buried
-# in prose (#848, 2026-09-02, retiring the #723/#724 batch doctrine after the
-# STEP-0 live experiment proved a compact over live lanes is safe on CC 2.1.258):
-# `saturation-core` keeps parallel worktree lanes live and refills a returned
-# slot ONLY with a DISPATCHABLE unit (dependencies closed, #993 r2b — the
-# class-based infra-serial half was removed: infra serialisation is ROUTING via
-# --role, not a live-lane gate; the count is sized to box+backlog, #991);
-# `saturation-delivery` integrates each returned
-# branch SERIALLY under the mutex as it returns; `compact-boundary` fires the
-# compact at EVERY integration cycle's `## ✅ Work Complete` — live lanes or not
-# (the lanes reconcile from durable state after the compaction, #844's LANE-RETURN
-# net). So dispatch is continuous-refill, integration is serial, and
-# compact is per cycle; the clauses cannot contradict. Tests assert compact-boundary
-# fires EVERY cycle (live lanes or not) and that the old batch "ZERO live tasks →
-# next batch / NEVER compact while lanes live" framing is GONE.
+# in prose (#848, 2026-09-02): `saturation-core` keeps parallel worktree lanes
+# live and refills a returned slot ONLY with a DISPATCHABLE unit (dependencies
+# closed, #993 r2b — the class-based infra-serial half was removed: infra
+# serialisation is ROUTING via --role, not a live-lane gate; the count is sized
+# to box+backlog, #991); `saturation-delivery` integrates each returned branch
+# SERIALLY under the mutex as it returns; `compact-boundary` now just ENDS every
+# integration cycle with the `## ✅ Work Complete` report — machine compacts are
+# REMOVED (#1084, owner ROZHODNUTÉ 2026-09-19), so there is NO compact command
+# and NO compact HOLD; Claude Code's native threshold autocompact is the only
+# compaction left. So dispatch is continuous-refill, integration is serial, and
+# nothing types `/compact`. Tests assert the compact-boundary clause carries no
+# compact-request instruction and no HOLD.
 SATURATION_RECONCILES_COMPACT = ("saturation-core", "saturation-delivery",
                                  "compact-boundary")
 
@@ -189,9 +187,9 @@ CLAUSES = [
         "fork-no-merge": "Count a hand-off done ONLY after verifying from primary sources — the `READY-FOR-REVIEW:` comment present (`gh issue view --json comments`), the fork branch pushed, local test/lint output shown — never the worker's claim alone; verify the LAST as strictly as the first.",
     }),
     Clause("compact-boundary", PROFILES, {
-        "full": "After EVERY integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Callback compact is DISABLED by owner flag (#911, native autocompact in force) — do NOT call compact-request --self; do NOT HOLD for a compact.",
-        "branch-merge": "After EVERY integration END the turn with the full `## ✅ Work Complete` report (the branch-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Callback compact is DISABLED by owner flag (#911, native autocompact in force) — do NOT call compact-request --self; do NOT HOLD for a compact.",
-        "fork-no-merge": "After EVERY hand-off END the turn with the full `## ✅ Work Complete` report (the fork-no-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Callback compact is DISABLED by owner flag (#911, native autocompact in force) — do NOT call compact-request --self; do NOT HOLD for a compact.",
+        "full": "After EVERY integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
+        "branch-merge": "After EVERY integration END the turn with the full `## ✅ Work Complete` report (the branch-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
+        "fork-no-merge": "After EVERY hand-off END the turn with the full `## ✅ Work Complete` report (the fork-no-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
     }),
 ]
 
