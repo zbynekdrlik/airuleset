@@ -41,6 +41,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 # The develop→staging→main train's non-default branches. `origin/main..origin/X`
@@ -94,6 +95,42 @@ def _reset_memo():
     _MEMO.clear()
 
 
+# #1090 INCIDENT GUARDS — the footer `M` sweep must be BOUNDED, FORK-AWARE and
+# QUOTA-SAFE. On the david1-4 fork clones (`origin` = the stale fork, 3 800+ PRs
+# in `origin/main..origin/develop`) each 120 s statusline refresh walked every
+# PR with one `gh api` call and never reached the end-of-loop cache write, so it
+# restarted at PR 1 every time and exhausted the shared stream App budget within
+# minutes of each hourly reset. Four guards below: canonical range (a), 60-PR
+# cap (b), 15-meta budget + incremental cache (c), quota stop (d).
+
+# (b) A healthy 3-branch repo between cuts holds a few dozen PRs at most (gk
+# today: 1-14). More than this many in range means stale/forked refs, not real
+# release readiness — hide `M`, make ZERO REST calls.
+MERGED_UNRELEASED_MAX_PRS = 60
+
+# (c) At most this many NEW (uncached) PR metas are fetched per refresh; the
+# cache is saved after EVERY new entry, so a killed/timed-out refresh keeps its
+# progress and the remainder fills on later refreshes.
+MERGED_UNRELEASED_META_BUDGET = 15
+
+
+class _QuotaSentinel:
+    """(d) A distinct marker a `pr_meta_fn` returns when `gh` reported a
+    rate-limit / 403 / 429 — NOT the same as `None` (a plain transient miss the
+    loop skips-and-retries). Seeing it, the loop stops making requests at once
+    rather than hammering the remaining PRs with calls that would all fail."""
+    __slots__ = ()
+
+    def __repr__(self):   # pragma: no cover - debugging aid only
+        return "QUOTA"
+
+
+QUOTA = _QuotaSentinel()
+
+# gh prints a rate-limit / 403 / 429 to STDERR; a plain not-found does not.
+_QUOTA_STDERR_RE = re.compile(r"(?i)(rate limit|HTTP 403|\b403\b|\b429\b)")
+
+
 def _default_git_log(root, rng):
     """`git -C <root> log --format=%H<TAB>%s <rng>` -> [(oid, subject), ...],
     OLDEST last (git default). Returns [] on any error OR a missing ref (the
@@ -136,17 +173,16 @@ def _default_is_ancestor(oid, root):
 _GITHUB_SLUG_RE = re.compile(r"github\.com[:/]+([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
 
 
-def _slug_from_git_remote(root):
-    """`owner/repo` parsed LOCALLY from `git -C <root> remote get-url origin` —
-    no network, unlike `gh repo view`. Returns None on any failure. This keeps
-    the hot `--count`/footer path off a `gh repo view` per invocation
-    (adversarial review #1083): the slug is needed to NAME the cache + build the
-    PR-meta REST url, both derivable from the local remote."""
-    if not root:
+def _default_remote_slug(root, name):
+    """`owner/repo` parsed LOCALLY from `git -C <root> remote get-url <name>` —
+    no network, unlike `gh repo view`. Returns None on any failure or when the
+    remote does not exist. Generalised (#1090) from the origin-only reader so
+    the fork-aware range resolver can compare `origin` against `upstream`."""
+    if not root or not name:
         return None
     try:
         r = subprocess.run(
-            ["git", "-C", str(root), "remote", "get-url", "origin"],
+            ["git", "-C", str(root), "remote", "get-url", name],
             capture_output=True, text=True, timeout=8)
     except Exception:
         return None
@@ -156,16 +192,90 @@ def _slug_from_git_remote(root):
     return m.group(1) if m else None
 
 
-def _resolve_slug(root, slug, slug_fn):
+def _slug_from_git_remote(root):
+    """`owner/repo` from the LOCAL `origin` remote (no network, unlike
+    `gh repo view`). Keeps the hot `--count`/footer path off a `gh repo view`
+    per invocation (adversarial review #1083): the slug NAMEs the cache + builds
+    the PR-meta REST url, both derivable from the local remote."""
+    return _default_remote_slug(root, "origin")
+
+
+def _default_ref_exists(root, ref):
+    """True IFF a remote-tracking `ref` (e.g. `upstream/main`) is present in the
+    repo at `root` — `git rev-parse --verify --quiet <ref>`. Fail-safe False (a
+    fork clone that never fetched `upstream` has no `upstream/*` refs, so `M` is
+    hidden rather than computed off the wrong branch). No network."""
+    if not root or not ref:
+        return False
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "--verify", "--quiet",
+             "%s^{commit}" % ref],
+            capture_output=True, text=True, timeout=8)
+    except Exception:
+        return False
+    return r.returncode == 0
+
+
+def _default_ref_date(root, ref):
+    """The committer date of a ref's tip (`git log -1 --format=%ci <ref>`), for
+    the cap journal line — best-effort, None on any error. No network."""
+    if not root or not ref:
+        return None
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(root), "log", "-1", "--format=%ci", ref],
+            capture_output=True, text=True, timeout=8)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    return (r.stdout or "").strip() or None
+
+
+def _canonical_ref_prefix(root, slug, remote_fn, ref_exists_fn):
+    """(a) The branch prefix (`origin` / `upstream`) whose `main..develop` range
+    IS the canonical release train, fork-aware. Returns `(prefix, reason)`:
+
+      * `("origin", None)` — the normal/canonical clone (or the canonical slug
+        is unknown / the local origin remote is unreadable): keep origin,
+        byte-identical to #1083.
+      * `("upstream", None)` — a FORK clone (local `origin` slug != the resolved
+        canonical `slug`) whose `upstream` remote IS the canonical slug AND whose
+        `upstream/main` + `upstream/develop` tracking refs are present.
+      * `(None, "<reason>")` — a fork clone that cannot reach the canonical refs
+        (no matching `upstream`, or its tracking refs were never fetched): `M`
+        is HIDDEN, the caller journals `reason` and makes ZERO REST calls."""
+    if not slug:
+        return ("origin", None)   # canonical unknown -> origin (unchanged)
+    origin_slug = remote_fn(root, "origin")
+    if not origin_slug or origin_slug == slug:
+        # unreadable local remote -> keep origin (the cap still protects it);
+        # or origin IS the canonical slug -> a normal clone.
+        return ("origin", None)
+    # A FORK: local origin != the canonical slug. Use upstream IFF it is the
+    # canonical slug and its tracking refs were actually fetched.
+    if remote_fn(root, "upstream") == slug and \
+            ref_exists_fn(root, "upstream/main") and \
+            ref_exists_fn(root, "upstream/develop"):
+        return ("upstream", None)
+    return (None,
+            "merged-unreleased: fork clone without canonical refs — M hidden")
+
+
+def _resolve_slug(root, slug, slug_fn, remote_fn=None):
     """The `owner/repo` for `root`: an explicit `slug` wins; else `slug_fn()`
-    (a caller-supplied resolver); else the LOCAL git remote (no network). Shared
-    by both public functions so they name the SAME cache file by construction."""
+    (a caller-supplied resolver); else the LOCAL `origin` remote (no network).
+    Shared by both public functions so they name the SAME cache file by
+    construction. `remote_fn` (#1090) overrides the local origin read (tests)."""
     if slug:
         return slug
     if slug_fn is not None:
         s = slug_fn()
         if s:
             return s
+    if remote_fn is not None:
+        return remote_fn(root, "origin")
     return _slug_from_git_remote(root)
 
 
@@ -182,10 +292,15 @@ def _default_cache_path(slug, home=None):
 
 
 def _default_pr_meta_fn(slug):
-    """A `pr_meta_fn(pr) -> (title, body) | None` that reads ONE PR via
-    `gh api repos/<slug>/pulls/<N>`. Returns None on any error so the PR is left
-    UNCACHED (retried next refresh) and contributes no issues — the ticket stays
-    in `I` (never falsely dropped to `M`)."""
+    """A `pr_meta_fn(pr) -> (title, body) | QUOTA | None` that reads ONE PR via
+    `gh api repos/<slug>/pulls/<N>`.
+
+      * (title, body) on success;
+      * QUOTA (#1090 guard d) when `gh` failed with a rate-limit / 403 / 429 —
+        the loop stops at once instead of hammering the remaining PRs;
+      * None on any OTHER error, so the PR is left UNCACHED (retried next
+        refresh) and contributes no issues — the ticket stays in `I` (never
+        falsely dropped to `M`)."""
     def _meta(pr):
         try:
             r = subprocess.run(
@@ -195,6 +310,8 @@ def _default_pr_meta_fn(slug):
         except Exception:
             return None
         if r.returncode != 0:
+            if _QUOTA_STDERR_RE.search(r.stderr or ""):
+                return QUOTA
             return None
         try:
             d = json.loads(r.stdout or "{}")
@@ -249,13 +366,16 @@ def _issue_refs(title, body, exclude_pr):
     return refs
 
 
-def _pr_introducing_commits(root, git_fn):
+def _pr_introducing_commits(root, git_fn, prefix="origin"):
     """{pr_number: oid} for every PR whose introducing commit is in
-    origin/main..origin/develop or origin/main..origin/staging. A range with a
-    missing ref yields [] (the two-branch case). First-seen oid wins per PR."""
+    <prefix>/main..<prefix>/develop or <prefix>/main..<prefix>/staging. A range
+    with a missing ref yields [] (the two-branch case). First-seen oid wins per
+    PR. `prefix` (#1090) is `origin` for a normal clone and `upstream` for a
+    fork clone whose canonical refs live on the upstream remote; it defaults to
+    `origin` so callers that do not resolve a canonical prefix are unchanged."""
     out = {}
     for br in _UNRELEASED_BRANCHES:
-        rng = "origin/main..origin/%s" % br
+        rng = "%s/main..%s/%s" % (prefix, prefix, br)
         for oid, subj in git_fn(root, rng):
             mm = _MERGE_PR_RE.search(subj)
             if mm:
@@ -270,15 +390,36 @@ def _pr_introducing_commits(root, git_fn):
 
 
 def _compute_merged_unreleased(root, git_fn, pr_meta_fn, cache_path, slug,
-                               slug_fn):
-    pr_commits = _pr_introducing_commits(root, git_fn)
+                               slug_fn, remote_fn, ref_exists_fn):
+    if remote_fn is None:
+        remote_fn = _default_remote_slug
+    if ref_exists_fn is None:
+        ref_exists_fn = _default_ref_exists
+    # Resolve the canonical slug FIRST — from an explicit slug, a caller
+    # resolver, or the LOCAL `origin` remote (no network). Cheap on every path,
+    # and (#1090) needed BEFORE the range so a fork clone reads the canonical
+    # branches, not its own stale `origin/*`.
+    if slug is None:
+        slug = _resolve_slug(root, None, slug_fn, remote_fn)
+    # (a) Fork-aware range prefix. A fork clone whose canonical refs are absent
+    # hides `M` here with a journal reason and makes ZERO REST calls.
+    prefix, reason = _canonical_ref_prefix(root, slug, remote_fn, ref_exists_fn)
+    if prefix is None:
+        sys.stderr.write(reason + "\n")
+        return frozenset()
+    pr_commits = _pr_introducing_commits(root, git_fn, prefix)
     if not pr_commits:
         return frozenset()   # two-branch repo / no merged-unreleased commits
-    # Resolve the slug only now that there IS a non-empty range — from the LOCAL
-    # git remote (no network) so the hot `--count`/footer path pays zero gh; a
-    # two-branch repo short-circuited above and never reaches here.
-    if slug is None:
-        slug = _resolve_slug(root, None, slug_fn)
+    # (b) Range cap. A range far past a normal between-cuts backlog means stale /
+    # forked refs, not real release readiness — hide `M`, ZERO REST calls.
+    if len(pr_commits) > MERGED_UNRELEASED_MAX_PRS:
+        d_main = _default_ref_date(root, "%s/main" % prefix)
+        d_dev = _default_ref_date(root, "%s/develop" % prefix)
+        sys.stderr.write(
+            "merged-unreleased: %d PRs in %s/main..%s/develop range "
+            "(main %s, develop %s) — stale/forked refs, M hidden\n"
+            % (len(pr_commits), prefix, prefix, d_main or "?", d_dev or "?"))
+        return frozenset()
     if cache_path is None:
         cache_path = _default_cache_path(slug)
     if pr_meta_fn is None:
@@ -286,48 +427,63 @@ def _compute_merged_unreleased(root, git_fn, pr_meta_fn, cache_path, slug,
     cache = _load_cache(cache_path)
     if not isinstance(cache, dict):
         cache = {}
-    dirty = False
     issues = set()
+    new_metas = 0          # (c) new PR metas fetched THIS refresh
+    quota_hit = False      # (d) gh reported a rate-limit / 403 / 429
     for pr, oid in pr_commits.items():
         key = str(pr)
         entry = cache.get(key)
         if not isinstance(entry, dict) or "issues" not in entry:
+            # (c) budget: never fetch more than the budget of NEW metas per
+            # refresh; the rest fill on later refreshes. Cached PRs below still
+            # contribute at zero cost.
+            if new_metas >= MERGED_UNRELEASED_META_BUDGET:
+                continue
             meta = pr_meta_fn(pr)
+            if meta is QUOTA:
+                quota_hit = True
+                break        # (d) stop hammering; M is partial this refresh
             if meta is None:
-                continue   # REST failed — leave uncached, retry next refresh
+                continue     # REST failed — leave uncached, retry next refresh
             title, body = meta
             entry = {"issues": sorted(_issue_refs(title, body, pr)), "oid": oid}
             cache[key] = entry
-            dirty = True
+            new_metas += 1
+            _save_cache(cache_path, cache)   # (c) save after EVERY new entry
         elif not entry.get("oid"):
             entry["oid"] = oid   # backfill an oid-less (legacy-shaped) entry
-            dirty = True
+            _save_cache(cache_path, cache)
         for n in entry.get("issues", []):
             issues.add(int(n))
-    if dirty:
-        _save_cache(cache_path, cache)
+    if quota_hit:
+        sys.stderr.write(
+            "merged-unreleased: gh quota hit — M partial this refresh\n")
     return frozenset(issues)
 
 
 def merged_unreleased_issues(root, git_fn=None, pr_meta_fn=None,
-                             cache_path=None, now=None, slug=None, slug_fn=None):
+                             cache_path=None, now=None, slug=None, slug_fn=None,
+                             remote_fn=None, ref_exists_fn=None):
     """The set of issue numbers whose fix PR is merged into develop/staging but
     NOT yet in main (`M`). `slug` names the `owner/repo` for the PR-meta REST
     read + the cache filename; pass `slug_fn` instead to resolve it LAZILY (only
     when the git range is non-empty), so a two-branch / no-merge `--count`
     refresh pays zero gh. `now` is accepted for signature stability (the cache is
-    append-only; a merged PR never changes). Memoised per process, BYPASSED when
-    a git/PR seam is injected (tests)."""
+    append-only; a merged PR never changes). `remote_fn`/`ref_exists_fn` (#1090)
+    are the fork-aware range seams (default = local git reads; injected in
+    tests). Memoised per process, BYPASSED when any seam is injected (tests)."""
     root = str(root or "").rstrip("/")
     if not root:
         return frozenset()
-    injected = git_fn is not None or pr_meta_fn is not None
+    injected = (git_fn is not None or pr_meta_fn is not None
+                or remote_fn is not None or ref_exists_fn is not None)
     if not injected:
         memo = _MEMO.get(("mu", root))
         if memo is not None:
             return memo
     result = _compute_merged_unreleased(
-        root, git_fn or _default_git_log, pr_meta_fn, cache_path, slug, slug_fn)
+        root, git_fn or _default_git_log, pr_meta_fn, cache_path, slug, slug_fn,
+        remote_fn, ref_exists_fn)
     if not injected:
         _MEMO[("mu", root)] = result
     return result
