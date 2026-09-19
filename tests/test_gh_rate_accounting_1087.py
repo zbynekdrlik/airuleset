@@ -181,5 +181,23 @@ class ZeroBudgetLine(_Tmp):
                                          env={}, now=_NOW), "")
 
 
+class CliWiring(unittest.TestCase):
+    """`airuleset.py gh-rate --top [--day]` must be WIRED into argparse (the
+    subcommand + flags), not just implemented in cmd_gh_rate — a missing
+    add_argument makes `--top` an 'unrecognized arguments' error at runtime."""
+
+    def test_gh_rate_top_flag_is_recognized(self):
+        import subprocess
+        root = str(Path(__file__).resolve().parent.parent)
+        r = subprocess.run(
+            [sys.executable, "airuleset.py", "gh-rate", "--top",
+             "--day", "2026-01-01"],
+            cwd=root, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("unrecognized arguments", r.stderr)
+        # a no-data day prints the empty line, never a traceback / argparse error
+        self.assertIn("no calls recorded", r.stdout + r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
