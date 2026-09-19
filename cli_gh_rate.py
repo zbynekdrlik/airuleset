@@ -127,6 +127,46 @@ def upstream_path():
     return os.path.join(os.path.expanduser("~"), ".local", "bin", "gh-upstream")
 
 
+def app_shim_path():
+    """#1087 L1b: where the odoo-erp App-token shim is relocated to when we
+    CHAIN over it (never wrap it in place — #1051). On a stream box the live
+    chain is ``gh`` (our wrapper) -> ``gh-app-shim`` (the App shim, mints the
+    installation token) -> the real gh binary. Basename ``gh-app-shim`` is NOT a
+    ``gh`` on PATH, so a ``gh`` PATH walk never re-enters it (the loop breaker)."""
+    return os.path.join(os.path.expanduser("~"), ".local", "bin", "gh-app-shim")
+
+
+def _is_app_token_shim(path):
+    """#1087 L1b: True iff ``path`` is the odoo-erp issue-888 App-token shim
+    (``gh-app-gh-shim.sh``) — the ONE foreign wrapper we know how to chain. It
+    is recognised by its header citing odoo-erp issue 3281/3282 OR by exporting
+    ``GH_TOKEN`` from ``gh-app-token`` (a ``cat`` of ``gh-app-tokens/primary``).
+    Never matches our own wrapper (checked first) or a real binary. Read only a
+    small text head; any error => not the App shim (fail-safe)."""
+    try:
+        if _is_our_wrapper(path):
+            return False
+        with open(path, "rb") as fh:
+            if fh.read(2) != b"#!":
+                return False        # a real binary / non-script is never it
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            head = fh.read(4096)
+    except (OSError, ValueError):
+        return False
+    return (("3281" in head or "3282" in head)
+            or "gh-app-token" in head or "gh-app-tokens" in head)
+
+
+def is_app_shim_box():
+    """#1087 L1b: True iff this box's gh chain runs through the App-token shim
+    (either still at ``~/.local/bin/gh`` pre-chain, or moved to
+    ``gh-app-shim`` post-chain). On such a box the installation ``rate_limit``
+    endpoint LIES (reports a fresh 5000 bucket while real calls 403), so the
+    budget must come from response headers + observed 403s, never a probe."""
+    return (_is_app_token_shim(app_shim_path())
+            or _is_app_token_shim(shim_path()))
+
+
 def _is_our_wrapper(path):
     """True iff `path` is our managed shim (carries WRAPPER_SENTINEL), read
     defensively (a real gh binary is large/binary — read only a small text
@@ -305,16 +345,60 @@ def _cap_journal():
         return   # missing/unrotatable — nothing to cap
 
 
-def _diag(where, exc):
+def _diag_dedup_path():
+    return os.path.join(gh_rate_dir(), "diag-dedup.json")
+
+
+def _diag(where, exc, now=None):
     """Append a best-effort diagnostic line (never raises, never blocks). A
     failure to even write the diagnostic is the one place a bare swallow is
-    unavoidable — there is nowhere left to report to."""
+    unavoidable — there is nowhere left to report to.
+
+    #1087 L1b item 3: identical ``(where, exc)`` failures are DEDUPED to once
+    per hour — the first occurrence writes a line, subsequent identical ones in
+    the same hour only accumulate a count, and the previous hour's total is
+    flushed as ``… ×N since HH:MM`` on the next hour's first occurrence. This
+    collapses the 949-lines/day ``fetch-rate-limit`` DIAG spam (and any other
+    repeated-identical failure) without losing the count. Dedup state is
+    best-effort; if it cannot be read the line is written directly (fail toward
+    logging)."""
+    if now is None:
+        now = time.time()
+    lt = time.localtime(now)
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S%z", lt)
+    hour = time.strftime("%Y-%m-%dT%H", lt)
+    hhmm = time.strftime("%H:%M", lt)
+    payload = "%r" % (exc,)
+    key = "%s\t%s" % (where, payload)
+    to_write = []
+    state = None
+    try:
+        with open(_diag_dedup_path(), encoding="utf-8") as fh:
+            state = json.load(fh)
+        if not isinstance(state, dict):
+            state = {}
+    except (OSError, ValueError):
+        state = {}
+    prev = state.get(key) if isinstance(state.get(key), dict) else None
+    if prev is None or prev.get("hour") != hour:
+        if prev is not None and int(prev.get("count", 0) or 0) > 1:
+            to_write.append("%s\tDIAG\t%s\t%s\t×%d since %s" % (
+                ts, where, payload, int(prev["count"]), prev.get("since", "?")))
+        to_write.append("%s\tDIAG\t%s\t%s" % (ts, where, payload))
+        state[key] = {"hour": hour, "count": 1, "since": hhmm}
+    else:
+        prev["count"] = int(prev.get("count", 0) or 0) + 1
+        state[key] = prev
     try:
         os.makedirs(gh_rate_dir(), exist_ok=True)
         _cap_journal()
-        with open(journal_path(), "a", encoding="utf-8") as fh:
-            fh.write("%s\tDIAG\t%s\t%r\n" % (
-                time.strftime("%Y-%m-%dT%H:%M:%S%z"), where, exc))
+        if to_write:
+            with open(journal_path(), "a", encoding="utf-8") as fh:
+                fh.write("\n".join(to_write) + "\n")
+        tmp = _diag_dedup_path() + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+        os.replace(tmp, _diag_dedup_path())
     except OSError:
         return  # nowhere left to log; fail-open by design
 
@@ -336,6 +420,24 @@ def read_status(now=None, run=None, real_gh="__auto__", force=False):
         real_gh = real_gh_path()
 
     cache = _load_cache()
+
+    # #1087 L1b: on an App-shim (installation-token) box, `gh api rate_limit`
+    # LIES (a fresh 5000 bucket while real calls 403), and it resolves the real
+    # gh binary WITHOUT the token → rc=4 every sweep (the 949-lines/day DIAG
+    # spam). SKIP the probe entirely; the budget is recorded from response
+    # headers (ghread) + observed 403s via `record_headers_reading`. Mark the
+    # probe fresh (the header capture IS the probe here) and keep the marker in
+    # sync so the zero-budget line fires.
+    if is_app_shim_box():
+        _diag("budget-probe-skip",
+              "installation token — headers are the source", now=now)
+        cache["fetched_at"] = now
+        if not isinstance(cache.get("resources"), dict):
+            cache["resources"] = {}
+        _save_cache(cache)
+        _set_throttle_marker(_throttle_warranted(cache))
+        return cache
+
     fetched_at = cache.get("fetched_at")
     fresh = (isinstance(fetched_at, (int, float))
              and (now - fetched_at) < CACHE_TTL_S)
@@ -367,11 +469,93 @@ def read_status(now=None, run=None, real_gh="__auto__", force=False):
     _update_alert_latch(status)
     _save_cache(status)
     # Keep the shim's cheap fast-path marker in sync with the fresh reading:
-    # present iff throttling is currently warranted (some resource < 20 %).
-    _set_throttle_marker(
-        max(backoff_seconds("core", status),
-            backoff_seconds("graphql", status)) > 0)
+    # present iff throttling is currently warranted (some resource < 20 % OR
+    # exhausted at remaining==0, #1087 L1b — so the zero-budget line fires even
+    # when the limit is unknown and remaining_pct is None).
+    _set_throttle_marker(_throttle_warranted(status))
     return status
+
+
+def _throttle_warranted(status):
+    """#1087 L1b: the throttle marker should be present when EITHER resource
+    warrants a backoff (< LOW_PCT) OR is exhausted (remaining == 0). The
+    remaining==0 arm matters for header-sourced readings where the limit may be
+    unknown (remaining_pct None → backoff 0), so a bare backoff test would miss
+    a genuine exhaustion. Fail-open to False."""
+    try:
+        if max(backoff_seconds("core", status),
+               backoff_seconds("graphql", status)) > 0:
+            return True
+        res = (status or {}).get("resources", {})
+        for name in _RESOURCES:
+            blk = res.get(name)
+            if isinstance(blk, dict) and int(blk.get("remaining", 1) or 0) == 0:
+                return True
+    except (TypeError, ValueError):
+        return False
+    return False
+
+
+def record_headers_reading(resource, remaining, reset=None, limit=None,
+                           now=None, source="headers"):
+    """#1087 L1b: record a budget reading taken from a real response's
+    ``X-RateLimit-*`` headers (via ``gates.ghread``) or an observed 403/429,
+    into the gh-rate status cache. This is the ONLY truthful budget signal on an
+    App-shim (installation-token) box, where ``gh api rate_limit`` lies.
+
+    Read-modify-write under an flock so concurrent gh calls never lose a reading.
+    Token-free (only the numeric rate fields are stored). Best-effort: any error
+    is journalled and swallowed (accounting must never break gh). A prior known
+    ``limit`` is preserved when this reading has none (a 403 body carries no
+    limit). On an App-shim box the top-level ``fetched_at`` is bumped so the
+    header capture doubles as the probe; on a plain box it is left for
+    ``_fetch_rate_limit`` to manage (no graphql-staleness regression)."""
+    try:
+        if now is None:
+            now = time.time()
+        resource = resource or "core"
+        os.makedirs(gh_rate_dir(), exist_ok=True)
+        import fcntl
+        fd = os.open(status_path(), os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            chunks = []
+            while True:
+                chunk = os.read(fd, 1 << 20)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            raw = b"".join(chunks).decode("utf-8", "replace")
+            try:
+                data = json.loads(raw) if raw.strip() else {}
+                if not isinstance(data, dict):
+                    data = {}
+            except (ValueError, TypeError):
+                data = {}
+            res = data.get("resources")
+            if not isinstance(res, dict):
+                res = data["resources"] = {}
+            block = {"remaining": int(remaining),
+                     "reset": int(reset or 0), "source": source}
+            if limit is not None:
+                block["limit"] = int(limit)
+            else:
+                prev = res.get(resource)
+                if isinstance(prev, dict) and "limit" in prev:
+                    block["limit"] = prev["limit"]
+            res[resource] = block
+            if is_app_shim_box():
+                data["fetched_at"] = now
+            payload = json.dumps(data).encode("utf-8")
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, payload)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+        _set_throttle_marker(_throttle_warranted(_load_cache()))
+    except Exception as e:   # noqa: BLE001 — accounting must never break gh
+        _diag("record-headers", e)
 
 
 # --------------------------------------------------------------------------- #
@@ -873,7 +1057,8 @@ def current_gh_backoff(status=None, now=None, run=None):
 WRAPPER_SENTINEL = "airuleset gh rate-guard shim (#1040)"
 
 
-def wrapper_script(real_gh, python_exe, module_path):
+def wrapper_script(real_gh, python_exe, module_path, upstream=None,
+                   observe=False):
     """Return the bash shim text. It:
       * passes through immediately for the internal refresh and for any call
         with no ``AIRULESET_GH_POLLER=1`` (a human / interactive / hook call —
@@ -882,8 +1067,25 @@ def wrapper_script(real_gh, python_exe, module_path):
         module, so startup is cheap) and sleeps it before exec'ing the real gh;
       * NEVER blocks — any error path exec's the real gh unchanged (fail-open).
 
-    ``real_gh`` is baked at install time; the shim re-resolves it if that path
-    ever disappears, EXCLUDING its own dir, so it can never re-enter itself."""
+    ``upstream`` (defaults to ``real_gh``) is the depth-1 exec target baked at
+    install time: the real gh binary on a plain box, OR the odoo-erp App-token
+    shim (``gh-app-shim``) on a stream box (#1087 L1b — it mints the
+    installation token, then re-resolves ``gh`` back to THIS wrapper).
+
+    #1087 L1b depth-2 loop breaker: on an ``observe`` (App-shim chain) box, when
+    the App shim re-enters us (``AIRULESET_GH_SHIM_DEPTH`` > 1, the token already
+    in the env), we SKIP our baked upstream (re-exec'ing the App shim would loop)
+    and exec the REAL gh binary directly — re-resolved on PATH, skipping our own
+    sentinel. The App shim now lives at ``gh-app-shim`` (not a ``gh`` on PATH),
+    so this resolves the real binary in one hop: ``gh -> gh-app-shim -> real gh``.
+
+    #1087 L1b exhaustion observation: on an ``observe`` box the depth-1 hop runs
+    the upstream (instead of exec) capturing stderr to a temp, re-emits it
+    unchanged, and on a ``rate limit exceeded`` / HTTP 403 / 429 line records
+    ``remaining=0`` (token-free, backgrounded). A plain box keeps the fast
+    ``exec`` path with zero behaviour change."""
+    if upstream is None:
+        upstream = real_gh
     return """#!/usr/bin/env bash
 # {sentinel}
 # MANAGED by airuleset (cli_gh_rate.ensure_gh_rate_wrapper) — do not edit.
@@ -899,31 +1101,57 @@ if [ "${{AIRULESET_GH_SHIM_DEPTH}}" -gt 2 ]; then
   echo "gh: airuleset rate-guard shim aborting — exec depth ${{AIRULESET_GH_SHIM_DEPTH}} > 2 (shim loop detected; check the ~/.local/bin/gh chain — odoo-erp issue 3281)" >&2
   exit 89
 fi
-REAL_GH={real_gh}
+_OBSERVE={observe}
+_UPSTREAM={upstream}
+# Resolve the REAL gh BINARY on PATH, skipping THIS shim's own dir and any copy
+# of our own shim (sentinel). Used for the #1087 L1b depth>1 App-shim re-entry
+# and as the fallback when the baked upstream vanished.
+_resolve_real_gh() {{
+  _shimdir="$(cd "$(dirname "$0")" && pwd)"
+  IFS=':' read -ra _parts <<< "$PATH"
+  for _d in "${{_parts[@]}}"; do
+    [ -z "$_d" ] && continue
+    [ "$_d" = "$_shimdir" ] && continue
+    if [ -x "$_d/gh" ] && ! grep -q {sentinel_q} "$_d/gh" 2>/dev/null; then
+      printf '%s' "$_d/gh"; return 0
+    fi
+  done
+  return 1
+}}
+# #1087 L1b: re-entered by the App shim (depth>1) on an observe box — the token
+# is already in the env; skip our (App-shim) upstream and exec the real binary
+# directly, the loop-free terminator.
+if [ "${{AIRULESET_GH_SHIM_DEPTH}}" -gt 1 ] && [ "$_OBSERVE" = "1" ]; then
+  _RB="$(_resolve_real_gh || true)"
+  [ -x "$_RB" ] || {{ echo "gh: not found (airuleset shim could not resolve real gh)" >&2; exit 127; }}
+  exec "$_RB" "$@"
+fi
+REAL_GH="$_UPSTREAM"
 if [ ! -x "$REAL_GH" ]; then
-  # Baked path gone — prefer the relocated upstream, else re-resolve gh on PATH
-  # EXCLUDING this shim's own dir (so we can never re-enter ourselves).
-  if [ -x {upstream} ]; then
-    REAL_GH={upstream}
+  # Baked upstream gone — prefer the relocated real gh (wrap-in-place), else
+  # re-resolve gh on PATH EXCLUDING our own shim.
+  if [ -x {upstream_reloc} ]; then
+    REAL_GH={upstream_reloc}
   else
-    _shimdir="$(cd "$(dirname "$0")" && pwd)"
-    _p=""
-    IFS=':' read -ra _parts <<< "$PATH"
-    for _d in "${{_parts[@]}}"; do
-      [ -z "$_d" ] && continue
-      [ "$_d" = "$_shimdir" ] && continue
-      # skip a duplicate copy of THIS shim in another PATH dir (parity with the
-      # Python real_gh_path's _is_our_wrapper guard — never exec into ourselves).
-      if [ -x "$_d/gh" ] && ! grep -q {sentinel_q} "$_d/gh" 2>/dev/null; then
-        _p="$_d/gh"; break
-      fi
-    done
-    REAL_GH="$_p"
+    REAL_GH="$(_resolve_real_gh || true)"
   fi
 fi
 [ -x "$REAL_GH" ] || {{ echo "gh: not found (airuleset shim could not resolve real gh)" >&2; exit 127; }}
-# Internal refresh (the shim's own free rate_limit read): no delay, no
-# accounting, no zero-budget line.
+# _run_upstream: exec the upstream on a plain box (fast, zero behaviour change);
+# on an observe box run it, capture stderr, re-emit unchanged, and on an
+# exhaustion line record remaining=0 (backgrounded, token-free).
+_run_upstream() {{
+  if [ "$_OBSERVE" != "1" ]; then exec "$REAL_GH" "$@"; fi
+  _errf="$(mktemp 2>/dev/null)" || {{ exec "$REAL_GH" "$@"; }}
+  "$REAL_GH" "$@" 2>"$_errf"; _rc=$?
+  cat "$_errf" >&2 2>/dev/null || true
+  if grep -qiE 'rate limit exceeded|API rate limit|HTTP/[0-9.]+ (403|429)' "$_errf" 2>/dev/null; then
+    ( {internal_env}=1 {python_exe} {module_path} --observe-exhausted >/dev/null 2>&1 & ) 2>/dev/null || true
+  fi
+  rm -f "$_errf" 2>/dev/null || true
+  exit $_rc
+}}
+# Internal refresh (the shim's own free read): no delay, no accounting.
 if [ "${{{internal_env}:-}}" = "1" ]; then
   exec "$REAL_GH" "$@"
 fi
@@ -933,28 +1161,29 @@ fi
 ( {python_exe} {module_path} --record -- "$@" >/dev/null 2>&1 & ) 2>/dev/null || true
 # Non-poller (human/interactive/hook) call: never throttled. #1087 (c): print
 # ONE honest zero-budget line only when the throttle marker says budget MIGHT be
-# low (so a healthy call never spends python), then exec with zero delay.
+# low (so a healthy call never spends python), then run with zero delay.
 if [ "${{{poller_env}:-}}" != "1" ]; then
   if [ -e {marker} ]; then
     {python_exe} {module_path} --zero-budget-line -- "$@" || true
   fi
-  exec "$REAL_GH" "$@"
+  _run_upstream "$@"
 fi
 # Fast path: no throttle marker => budget healthy => never spend python. The
 # marker is kept in sync by the per-sweep rate read; a stale marker only ever
 # triggers the (correct) python path below.
-[ -e {marker} ] || exec "$REAL_GH" "$@"
+[ -e {marker} ] || _run_upstream "$@"
 # Poller during a low-budget episode: ask for the backoff (0 for a write/
 # non-poll/healthy/error), sleep it.
 _bo="$({internal_env}=1 {python_exe} {module_path} --wrapper-backoff -- "$@" 2>/dev/null || echo 0)"
 case "$_bo" in ''|*[!0-9]*) _bo=0;; esac
 if [ "$_bo" -gt 0 ] 2>/dev/null; then sleep "$_bo"; fi
-exec "$REAL_GH" "$@"
+_run_upstream "$@"
 """.format(
         sentinel=WRAPPER_SENTINEL,
         sentinel_q=_shq(WRAPPER_SENTINEL),
-        real_gh=_shq(real_gh or ""),
-        upstream=_shq(upstream_path()),
+        upstream=_shq(upstream or ""),
+        upstream_reloc=_shq(upstream_path()),
+        observe=("1" if observe else "0"),
         marker=_shq(throttle_marker_path()),
         internal_env=INTERNAL_ENV,
         poller_env=POLLER_ENV,
@@ -968,11 +1197,14 @@ def _shq(s):
     return "'" + str(s).replace("'", "'\"'\"'") + "'"
 
 
-def _write_wrapper_file(shim, real_gh, python_exe, module):
+def _write_wrapper_file(shim, real_gh, python_exe, module, upstream=None,
+                        observe=False):
     """Atomically (temp + os.replace) write the shim at `shim` delegating to
-    `real_gh`. chmod 755 on the temp BEFORE the replace so the shim is never
-    momentarily present-but-non-executable."""
-    text = wrapper_script(real_gh, python_exe, module)
+    `real_gh` (or `upstream` when given — the #1087 L1b App-shim chain). chmod
+    755 on the temp BEFORE the replace so the shim is never momentarily
+    present-but-non-executable."""
+    text = wrapper_script(real_gh, python_exe, module, upstream=upstream,
+                          observe=observe)
     # pid-suffixed so two overlapping installs never race on the same temp path
     # (the final os.replace is atomic either way — #1040 review-1 NIT-7).
     tmp = "%s.airuleset-tmp.%d" % (shim, os.getpid())
@@ -981,6 +1213,46 @@ def _write_wrapper_file(shim, real_gh, python_exe, module):
     os.chmod(tmp, 0o755)
     os.replace(tmp, shim)
     return text
+
+
+def _chain_over_app_shim(shim, python_exe, module, verbose=True):
+    """#1087 L1b: CHAIN our wrapper over the odoo-erp App-token shim currently at
+    `shim` (~/.local/bin/gh) — never wrap it in place (#1051 exec-loop). Move the
+    App shim to ``app_shim_path()`` (only if that target is absent OR
+    byte-identical — never clobber an unexpected file), then install our wrapper
+    at `shim` with the moved shim baked as its upstream and ``observe=True``. The
+    resulting live chain is ``gh -> gh-app-shim -> real gh``, loop-free (the
+    App shim's basename is no longer a ``gh`` on PATH). Idempotent + LOUD;
+    fail-open (a conflict leaves the App shim at gh, working but unthrottled)."""
+    dest = app_shim_path()
+    try:
+        if os.path.exists(dest):
+            with open(dest, "rb") as a, open(shim, "rb") as b:
+                identical = a.read() == b.read()
+            if not identical:
+                if verbose:
+                    print("    gh rate-guard: chain skipped — %s occupied by a "
+                          "different file (App shim left at gh, unthrottled)"
+                          % dest)
+                return "skip: gh-app-shim occupied by a different file"
+            # byte-identical: gh-app-shim already holds the App shim (odoo-erp
+            # re-installed the identical shim at gh) — just re-assert our wrapper.
+        else:
+            os.replace(shim, dest)          # move the App shim aside (atomic)
+        os.chmod(dest, 0o755)
+        _write_wrapper_file(shim, dest, python_exe, module, upstream=dest,
+                            observe=True)
+        real = real_gh_path() or "/usr/bin/gh"
+        if verbose:
+            print("    gh rate-guard: airuleset wrapper chained over the App "
+                  "shim (gh -> gh-app-shim -> %s)" % real)
+        return "chained over app shim (-> %s)" % dest
+    except OSError as e:
+        _diag("chain-app-shim", e)
+        if verbose:
+            print("    gh rate-guard: ⚠ chain failed (%r) — App shim left at gh"
+                  % e)
+        return "error: chain failed %r" % e
 
 
 def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
@@ -1020,6 +1292,27 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
         shim_exists = os.path.exists(shim)
         shim_is_ours = shim_exists and _is_our_wrapper(shim)
         up_ok = os.path.isfile(upstream) and os.access(upstream, os.X_OK)
+
+        # Case A (#1087 L1b): the steady CHAINED state — our wrapper at gh + the
+        # App-token shim at gh-app-shim. Refresh our wrapper text only if changed
+        # (upstream = the moved App shim, observe on); NEVER repoint at the real
+        # binary — that would bypass the installation token. Checked BEFORE the
+        # wrap-in-place cases so a chained box is never mis-repointed by Case 3.
+        app_dest = app_shim_path()
+        if shim_is_ours and _is_app_token_shim(app_dest):
+            desired = wrapper_script(app_dest, python_exe, module,
+                                     upstream=app_dest, observe=True)
+            try:
+                with open(shim, encoding="utf-8") as fh:
+                    current = fh.read()
+            except OSError:
+                current = None
+            if current == desired:
+                return "already installed (chain -> %s)" % app_dest
+            _write_wrapper_file(shim, app_dest, python_exe, module,
+                                upstream=app_dest, observe=True)
+            _say("chain refreshed (-> %s)" % app_dest)
+            return "chained (refreshed -> %s)" % app_dest
 
         # Case 1: our shim is installed and an upstream is present.
         if shim_is_ours and up_ok:
@@ -1061,10 +1354,21 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
         if shim_exists and not shim_is_ours:
             kind = _classify_local_gh(shim)
             if kind == "foreign":
-                # LOUD line so a push operator sees why the box is unthrottled.
+                # #1087 L1b: the odoo-erp App-token shim is CHAINED (moved to
+                # gh-app-shim, our wrapper installed over it) — supersedes the
+                # #1051 skip so the accounting + zero-budget line + header-sourced
+                # budget go live on the 12 stream boxes that share the scarce
+                # installation budget.
+                if _is_app_token_shim(shim):
+                    return _chain_over_app_shim(shim, python_exe, module,
+                                                verbose=verbose)
+                # Any OTHER foreign wrapper we do not recognise: SKIP loudly and
+                # leave it in place (we only know how to chain the App shim —
+                # fail-open: no throttle there is acceptable, a hang is not).
                 if verbose:
-                    print("    gh-rate: shim install skipped — foreign wrapper "
-                          "at %s (chain it via odoo-erp issue 3281)" % shim)
+                    print("    gh-rate: shim install skipped — unknown foreign "
+                          "wrapper at %s (chain it via odoo-erp issue 3281)"
+                          % shim)
                 return "skip: foreign wrapper at ~/.local/bin/gh"
             # kind == "binary": wrap the real gh in place. Copy FIRST (gh stays
             # intact if anything fails), verify, then atomically swap in the shim.
@@ -1216,6 +1520,36 @@ def _zero_budget_main(argv):
     return 0
 
 
+def _observe_exhausted_main(argv):
+    """`cli_gh_rate.py --observe-exhausted [--reset <epoch>] [--resource <name>]`
+    — the shim's backgrounded 403/429-observed entry (#1087 L1b). Records
+    ``remaining=0`` for the resource (default ``core``) with the reset epoch when
+    the wrapper parsed one, else ``now + 3600`` (a conservative hourly window).
+    Token-free (only the numeric fields are written); fully fail-open."""
+    reset = None
+    resource = "core"
+    i = 1
+    while i < len(argv):
+        if argv[i] == "--reset" and i + 1 < len(argv):
+            try:
+                reset = int(argv[i + 1])
+            except (ValueError, TypeError):
+                reset = None
+            i += 2
+            continue
+        if argv[i] == "--resource" and i + 1 < len(argv):
+            resource = argv[i + 1] or "core"
+            i += 2
+            continue
+        i += 1
+    now = time.time()
+    if reset is None:
+        reset = int(now) + 3600
+    record_headers_reading(resource, remaining=0, reset=reset, now=now,
+                           source="headers")
+    return 0
+
+
 if __name__ == "__main__":
     # #1087 review 🔵: dispatch on the FIRST arg only (equality), never
     # membership — a gh arg literally equal to a sentinel (e.g. `gh issue
@@ -1227,6 +1561,8 @@ if __name__ == "__main__":
         sys.exit(_record_main(sys.argv[1:]))
     if _mode == "--zero-budget-line":
         sys.exit(_zero_budget_main(sys.argv[1:]))
+    if _mode == "--observe-exhausted":
+        sys.exit(_observe_exhausted_main(sys.argv[1:]))
 
     # A bare run prints the rows (handy for a box operator).
     class _A:
