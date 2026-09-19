@@ -2343,6 +2343,7 @@ from watchdog.cross_stream import (  # noqa: E402
     repo_identity as repo_identity,
     _bounce_quals as _bounce_quals,
     _gh_env as _gh_env,
+    _open_issue_snapshot as _open_issue_snapshot,
     _fetch_bounce_tickets as _fetch_bounce_tickets,
     _cache_repo_roots as _cache_repo_roots,
     _try_stash_nudge as _try_stash_nudge,

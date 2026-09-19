@@ -241,25 +241,51 @@ def _gh_env(home=None, base=None):
     return env
 
 
+def _open_issue_snapshot(root, home=None):
+    """#1087 (b): ONE ETag-cached REST snapshot of the repo's OPEN issues
+    (normalized rows), SHARED by both cross-stream fetches below — a 304 re-poll
+    is budget-free, so the bounce + gkreq queries (1 + 3 `gh issue list` per
+    sweep before) collapse to at most ONE paid `gh api` read per repo per sweep
+    (the second fetch hits the same ETag cache). None on any error (fail-safe,
+    exactly like the per-query gh path it replaces — an auth/network hiccup must
+    never look like 'no bounces' / 'no requests'). Runs gh under the SAME
+    `_gh_env(home)` the old per-query path used, so david's ~/.bashrc-token
+    resolution is unchanged."""
+    try:
+        from gates import ghread
+        slug = ghread.resolve_slug(cwd=root)
+        if not slug:
+            return None
+        rows, err = ghread.list_open_issues_cached(
+            slug, cwd=root, env=_gh_env(home), timeout=8)
+        return None if err else rows
+    except Exception:
+        return None
+
+
 def _fetch_bounce_tickets(root, home=None):
     """Open prio:bounce ticket numbers for the repo at `root`, scoped to the
     root's stream. None on any error (fail-safe — an auth/network hiccup must
-    never look like 'no bounces')."""
-    import subprocess
-    nums, env = set(), _gh_env(home)
-    for qual in _bounce_quals(root):
-        try:
-            r = subprocess.run(
-                ["gh", "issue", "list", "--state", "open", "--label",
-                 "prio:bounce", "--search",
-                 (watchdog.AUTOPILOT_SKIP_EXCL + " " + qual).strip(), "-L", "100",
-                 "--json", "number"],
-                cwd=root, env=env, capture_output=True, text=True, timeout=8)
-            if r.returncode != 0:
-                return None
-            nums.update(x["number"] for x in json.loads(r.stdout))
-        except Exception:
-            return None
+    never look like 'no bounces').
+
+    #1087 (b): the per-qual `gh issue list --label prio:bounce --search` loop is
+    now a CLIENT-SIDE filter over the shared cached snapshot (the `--label`
+    flag + the search fold into one client-side `label:prio:bounce <base> <qual>`
+    match). Gatekeeper (`_bounce_quals` == []) still means no query, no nudge."""
+    from gates import ghread
+    quals = _bounce_quals(root)
+    if not quals:
+        return []                               # gatekeeper: no query, no nudge
+    snapshot = _open_issue_snapshot(root, home)
+    if snapshot is None:
+        return None
+    nums = set()
+    for qual in quals:
+        search = (watchdog.AUTOPILOT_SKIP_EXCL + " label:prio:bounce "
+                  + qual).strip()
+        for r in snapshot:
+            if ghread.issue_matches_search(r, search):
+                nums.add(r["number"])
     return sorted(nums)
 
 
@@ -779,53 +805,40 @@ def _fetch_gkreq_tickets(root, home=None):
     and pinging it immediately would be the banned per-phase spam shape.
 
     None on any error (fail-safe — an auth/network hiccup must never look
-    like 'no requests')."""
-    import subprocess
-    nums, handoffs, env = set(), {}, _gh_env(home)
-    # NB: GitHub search TOKENIZES — the in:title query ALSO returns titles
-    # merely containing the words gatekeeper+action ("… gatekeeper GitHub
-    # Actions runner", the live #1768 false ping, 2026-07-24) — so the
-    # fallback fetches titles and keeps only the LITERAL marker client-side.
-    queries = (
-        (["gh", "issue", "list", "--state", "open", "--label",
-          "needs-gatekeeper", "--search", watchdog.AUTOPILOT_SKIP_EXCL,
-          "-L", "100", "--json", "number,updatedAt,labels"], None, True),
-        (["gh", "issue", "list", "--state", "open", "--search",
-          '"GATEKEEPER-ACTION:" in:title ' + watchdog.AUTOPILOT_SKIP_EXCL,
-          "-L", "100", "--json", "number,title,updatedAt,labels"],
-         lambda x: str(x.get("title", "")).startswith("GATEKEEPER-ACTION:"),
-         True),
-        # (#399) ready-for-review hand-offs feed ONLY the stale-alarm map.
-        (["gh", "issue", "list", "--state", "open", "--label",
-          "ready-for-review", "--search", watchdog.AUTOPILOT_SKIP_EXCL,
-          "-L", "100", "--json", "number,updatedAt,labels"], None, False),
-    )
-    for argv, keep, is_request in queries:
-        try:
-            r = subprocess.run(argv, cwd=root, env=env, capture_output=True,
-                               text=True, timeout=8)
-            if r.returncode != 0:
-                return None
-            for x in json.loads(r.stdout):
-                if keep is not None and not keep(x):
-                    continue
-                n = x["number"]
-                if is_request:
-                    nums.add(n)
-                raw = x.get("labels")
-                labels = ({str(lb.get("name", "")) for lb in raw
-                           if isinstance(lb, dict)}
-                          if isinstance(raw, list) else set())
-                if labels & watchdog._STALE_HANDOFF_EXCLUDE_LABELS:
-                    continue
-                upd = watchdog._parse_gh_ts(x.get("updatedAt"))
-                if upd is None:
-                    continue           # unmeasurable → never in the stale map
-                # keep the OLDEST stamp when a number appears in two queries
-                if n not in handoffs or upd < handoffs[n]:
-                    handoffs[n] = upd
-        except Exception:
-            return None
+    like 'no requests').
+
+    #1087 (b): the three per-query `gh issue list` calls (needs-gatekeeper /
+    `GATEKEEPER-ACTION:`-title / ready-for-review) collapse to ONE client-side
+    pass over the shared cached snapshot. GitHub search TOKENIZES the in:title
+    query (it ALSO returned titles merely containing gatekeeper+action — the
+    live #1768 false ping, 2026-07-24), so the title match stays a LITERAL
+    `startswith` client-side, exactly as before. AUTOPILOT_SKIP_EXCL (skip /
+    ops-channel) is now filtered client-side too via the shared base match."""
+    snapshot = _open_issue_snapshot(root, home)
+    if snapshot is None:
+        return None
+    from gates import ghread
+    base = watchdog.AUTOPILOT_SKIP_EXCL
+    nums, handoffs = set(), {}
+    for r in snapshot:
+        if not ghread.issue_matches_search(r, base):
+            continue                    # skip / ops-channel excluded (was --search)
+        labels = {(lb or {}).get("name") for lb in (r.get("labels") or [])}
+        title = str(r.get("title") or "")
+        is_ng = "needs-gatekeeper" in labels
+        is_ga = title.startswith("GATEKEEPER-ACTION:")   # LITERAL, never tokenized
+        is_rfr = "ready-for-review" in labels
+        if not (is_ng or is_ga or is_rfr):
+            continue                    # not matched by any of the three queries
+        n = r["number"]
+        if is_ng or is_ga:
+            nums.add(n)                 # #399: ready-for-review NEVER a request
+        if labels & watchdog._STALE_HANDOFF_EXCLUDE_LABELS:
+            continue
+        upd = watchdog._parse_gh_ts(r.get("updatedAt"))
+        if upd is None:
+            continue                    # unmeasurable → never in the stale map
+        handoffs[n] = upd
     return {"tickets": sorted(nums), "handoffs": handoffs}
 
 

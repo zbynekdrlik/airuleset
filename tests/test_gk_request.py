@@ -500,39 +500,25 @@ class TestGkreqFetch(unittest.TestCase):
         return row
 
     def test_label_and_title_fallback_queries_union(self):
-        calls = []
-
-        def run(argv, **kw):
-            calls.append(argv)
-            if "needs-gatekeeper" in argv:
-                out = [self._row(5, labels=("needs-gatekeeper",))]
-            elif "ready-for-review" in argv:
-                out = [self._row(12, labels=("ready-for-review",))]
-            else:
-                out = [self._row(
-                    9, title="GATEKEEPER-ACTION: obnov docker sock")]
-            return m.Mock(returncode=0, stdout=json.dumps(out))
-
-        with m.patch("subprocess.run", side_effect=run):
+        # #1087 (b): the three per-query `gh issue list` calls collapsed to ONE
+        # client-side pass over the shared cached snapshot; patch that seam.
+        import watchdog.cross_stream as cs
+        snap = [self._row(5, labels=("needs-gatekeeper",)),
+                self._row(12, labels=("ready-for-review",)),
+                self._row(9, title="GATEKEEPER-ACTION: obnov docker sock")]
+        with m.patch.object(cs, "_open_issue_snapshot", return_value=snap):
             got = wd._fetch_gkreq_tickets("/tmp/x")
         self.assertEqual(got["tickets"], [5, 9])
         self.assertEqual(sorted(got["handoffs"]), [5, 9, 12])
-        flat = json.dumps(calls)
-        self.assertIn("needs-gatekeeper", flat)
-        self.assertIn("GATEKEEPER-ACTION", flat)
-        self.assertIn("ready-for-review", flat)
 
     def test_ready_for_review_never_joins_the_tickets_contract(self):
         # #399: a hand-off awaiting review is NOT a stream→supervisor
         # action request — it must never enter job 11's immediate
         # nudge/ping flow (a fresh hand-off pinging immediately would be
         # the banned per-phase spam shape); it feeds ONLY the stale map.
-        def run(argv, **kw):
-            out = ([self._row(12, labels=("ready-for-review",))]
-                   if "ready-for-review" in argv else [])
-            return m.Mock(returncode=0, stdout=json.dumps(out))
-
-        with m.patch("subprocess.run", side_effect=run):
+        import watchdog.cross_stream as cs
+        snap = [self._row(12, labels=("ready-for-review",))]
+        with m.patch.object(cs, "_open_issue_snapshot", return_value=snap):
             got = wd._fetch_gkreq_tickets("/tmp/x")
         self.assertEqual(got["tickets"], [])
         self.assertEqual(sorted(got["handoffs"]), [12])
@@ -542,32 +528,27 @@ class TestGkreqFetch(unittest.TestCase):
         # bounce overrides a hand-off claim); ops-channel = a PERMANENT,
         # never-auto-closing channel that would otherwise read "stale"
         # forever. Both excluded CLIENT-SIDE from the fetched labels.
-        def run(argv, **kw):
-            if "ready-for-review" in argv:
-                out = [
-                    self._row(3, labels=("ready-for-review", "prio:bounce")),
-                    self._row(4, labels=("ready-for-review", "ops-channel")),
-                    self._row(5, labels=("ready-for-review",)),
-                ]
-            else:
-                out = []
-            return m.Mock(returncode=0, stdout=json.dumps(out))
-
-        with m.patch("subprocess.run", side_effect=run):
+        import watchdog.cross_stream as cs
+        snap = [
+            self._row(3, labels=("ready-for-review", "prio:bounce")),
+            self._row(4, labels=("ready-for-review", "ops-channel")),
+            self._row(5, labels=("ready-for-review",)),
+        ]
+        with m.patch.object(cs, "_open_issue_snapshot", return_value=snap):
             got = wd._fetch_gkreq_tickets("/tmp/x")
+        # #3 excluded from the stale map by _STALE_HANDOFF_EXCLUDE_LABELS
+        # (prio:bounce); #4 excluded by the base match (ops-channel, formerly the
+        # --search AUTOPILOT_SKIP_EXCL); only #5 survives -> handoffs [5].
         self.assertEqual(sorted(got["handoffs"]), [5])
         self.assertEqual(got["tickets"], [])
 
     def test_unparsable_updated_at_row_is_skipped_from_handoffs(self):
         # #399: unmeasurable staleness must never alarm — but the row is
         # still a perfectly real REQUEST for the tickets contract.
-        def run(argv, **kw):
-            out = ([self._row(6, updated="not-a-timestamp",
-                              labels=("needs-gatekeeper",))]
-                   if "needs-gatekeeper" in argv else [])
-            return m.Mock(returncode=0, stdout=json.dumps(out))
-
-        with m.patch("subprocess.run", side_effect=run):
+        import watchdog.cross_stream as cs
+        snap = [self._row(6, updated="not-a-timestamp",
+                          labels=("needs-gatekeeper",))]
+        with m.patch.object(cs, "_open_issue_snapshot", return_value=snap):
             got = wd._fetch_gkreq_tickets("/tmp/x")
         self.assertEqual(got["tickets"], [6])
         self.assertEqual(got["handoffs"], {})
@@ -578,50 +559,53 @@ class TestGkreqFetch(unittest.TestCase):
         # #1768 "P1 hardening: … gatekeeper GitHub Actions runner" (tokens
         # gatekeeper + actions) and pinged the user's Discord about a
         # non-request. Only a title carrying the LITERAL marker counts.
-        def run(argv, **kw):
-            out = ([] if "--label" in argv
-                   else [{"number": 1768,
-                          "title": "P1 hardening: dedicated non-sudo OS "
-                                   "identity for the gatekeeper GitHub "
-                                   "Actions runner"}])
-            return m.Mock(returncode=0, stdout=json.dumps(out))
-
-        with m.patch("subprocess.run", side_effect=run):
+        # #1087 (b): the LITERAL-marker filter is now a client-side
+        # `title.startswith("GATEKEEPER-ACTION:")` over the snapshot — a
+        # tokenized-only title (odoo-erp #1768) never counts.
+        import watchdog.cross_stream as cs
+        snap = [self._row(1768,
+                          title="P1 hardening: dedicated non-sudo OS identity "
+                                "for the gatekeeper GitHub Actions runner")]
+        with m.patch.object(cs, "_open_issue_snapshot", return_value=snap):
             got = wd._fetch_gkreq_tickets("/tmp/x")
         self.assertEqual(got["tickets"], [])
         self.assertEqual(got["handoffs"], {})
 
     def test_any_query_error_returns_none(self):
-        with m.patch("subprocess.run",
-                     return_value=m.Mock(returncode=1, stdout="")):
+        # #1087 (b): a snapshot read failure (auth/network/quota) is fail-safe
+        # None -- never 'no requests'.
+        import watchdog.cross_stream as cs
+        with m.patch.object(cs, "_open_issue_snapshot", return_value=None):
             self.assertIsNone(wd._fetch_gkreq_tickets("/tmp/x"))
 
 
 class TestGkreqFetchExcludesOpsChannel(unittest.TestCase):
-    """#364 (follow-up to #362): same defect class as the bounce backstop
-    -- BOTH `_fetch_gkreq_tickets` queries (the `needs-gatekeeper` label
-    query AND the `GATEKEEPER-ACTION:` title-fallback query) still
-    hand-rolled a bare `-label:autopilot-skip` with no `ops-channel`
-    exclusion. A PERMANENT ops-channel ticket that also carried
-    `needs-gatekeeper` (or a `GATEKEEPER-ACTION:` title) would still
-    surface here as a gk-request nudge candidate."""
+    """#364 (follow-up to #362): a PERMANENT ops-channel ticket that also
+    carries `needs-gatekeeper` (or a `GATEKEEPER-ACTION:` title) must NOT
+    surface as a gk-request nudge candidate. #1087 (b): the exclusion moved
+    from a per-query `-label:ops-channel` search fragment to the CLIENT-SIDE
+    base match over the shared snapshot — the BEHAVIOUR is what this locks."""
+
+    @staticmethod
+    def _row(num, updated="2026-08-13T00:00:00Z", labels=(), title=None):
+        row = {"number": num, "updatedAt": updated,
+               "labels": [{"name": n} for n in labels]}
+        if title is not None:
+            row["title"] = title
+        return row
 
     def test_both_queries_exclude_ops_channel(self):
-        calls = []
-
-        def run(argv, **kw):
-            calls.append(argv)
-            return m.Mock(returncode=0, stdout="[]")
-
-        with m.patch("subprocess.run", side_effect=run):
-            wd._fetch_gkreq_tickets("/tmp/x")
-        # 3 queries since #399 added the ready-for-review stale-alarm
-        # fetch alongside the two #364-audited ones — ALL must carry
-        # the ops-channel exclusion.
-        self.assertEqual(len(calls), 3, calls)
-        for c in calls:
-            self.assertIn("-label:ops-channel", json.dumps(c),
-                          "gkreq query missing ops-channel excl: %r" % (c,))
+        import watchdog.cross_stream as cs
+        snap = [
+            self._row(1, labels=("needs-gatekeeper", "ops-channel")),
+            self._row(2, labels=("ops-channel",),
+                      title="GATEKEEPER-ACTION: x"),
+            self._row(3, labels=("needs-gatekeeper",)),   # the only survivor
+        ]
+        with m.patch.object(cs, "_open_issue_snapshot", return_value=snap):
+            got = wd._fetch_gkreq_tickets("/tmp/x")
+        self.assertEqual(got["tickets"], [3])
+        self.assertEqual(sorted(got["handoffs"]), [3])
 class TestStaleHandoffAlarm(unittest.TestCase):
     """#399 — stale ready-for-review / needs-gatekeeper hand-off alarm: the
     GATEKEEPER box watches its own review queue instead of the owner having
