@@ -239,8 +239,8 @@ def sweep_stale_cache(home=None, now=None, max_age_s=STALE_CACHE_MAX_AGE_S):
 # Keys carried forward from a previous good cache when a transient gh failure
 # prevents a fresh read — the "serve stale" doctrine (#952).
 _CARRY_FORWARD_KEYS = (
-    "open", "gk", "bounce", "user_waiting", "ops_wait", "skipped", "wdrain_over",
-    "created_today", "closed_today", "name",
+    "open", "gk", "bounce", "merged_unreleased", "user_waiting", "ops_wait",
+    "skipped", "wdrain_over", "created_today", "closed_today", "name",
 )
 
 _ERROR_LOG_MAX_BYTES = 64 * 1024   # truncate refresh-errors.log beyond this
@@ -389,6 +389,21 @@ def _ops_wait_sfx(cache):
     return ""
 
 
+def _merged_sfx(cache):
+    """The '· M N' suffix (#1083) — open tickets whose fix PR is merged into
+    develop/staging but NOT yet in main, so they have LEFT `I N` (nothing for the
+    box to act on until the release cut) and count release readiness. Rendered
+    right after `I N` (before bounce/U/W/gk) in the gk COLOUR FAMILY (245 — a
+    parked-elsewhere bucket, not this box's urgent work), hidden at 0. Rendered on
+    BOTH scopes (a 3-branch project's stream sees its merged tickets leave I too).
+    Schema-compatible: a legacy cache without `merged_unreleased` → `.get(...)`
+    None → hidden (never a crash, never `M 0`)."""
+    m = cache.get("merged_unreleased")
+    if isinstance(m, int) and m > 0:
+        return " \033[38;5;245m· M %d\033[0m" % m
+    return ""
+
+
 def _bounce_sfx(cache):
     """The '· bounce K' suffix — sub-dev (scope=mine) boxes only: open
     `prio:bounce` tickets in the box's slice, a SUBSET of `I N` (#1056 L1 /
@@ -512,8 +527,9 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
     # is waiting — 0 when unconfigured/stale (never a live Odoo call here).
     shown_open = cache["open"] + task_hygiene_a_count(home, now)
 
-    return "\033[38;5;75mI %d%s\033[0m%s%s%s%s%s" % (
+    return "\033[38;5;75mI %d%s\033[0m%s%s%s%s%s%s" % (
         shown_open, _drift_marker(cache),
+        _merged_sfx(cache),          # #1083: `· M N` right after `I N`
         _bounce_sfx(cache),
         _user_waiting_sfx(cache, ping_count), _ops_wait_sfx(cache),
         _stream_split_sfx(cache), skip_sfx)
