@@ -315,6 +315,46 @@ class TestGoalArmedReadsWatchdogFirst(unittest.TestCase):
             armed = lf._goal_armed(json.dumps({"transcript_path": tp}))
             self.assertTrue(armed)
 
+    def test_fresh_set_deep_past_tail_returns_none_stays_armed(self):
+        # #1089 fix-forward — the headline gk case DIRECTLY: the `set` sits deeper
+        # than the 4 MB tail, so the cheap tail scan finds NO marker (None); the
+        # fresh watchdog `set` must STAND (armed), never a false un-arm.
+        with tempfile.TemporaryDirectory() as tmp:
+            tp = _deep_arm_transcript(tmp, _armset_line(), pad_bytes=1000)
+            sp = _state_file(tmp, "sid-A", "set", os.path.getmtime(tp))
+            out = {}
+            with mock.patch.object(gs, "scan_goal_markers",
+                                   return_value=(0, None)):   # arm past the tail
+                armed = lf._goal_armed(self._payload(tp), state_path=sp, out=out)
+            self.assertTrue(armed)
+            self.assertEqual(out.get("src"), "watchdog")
+
+    def test_fresh_set_old_clear_then_newer_set_in_tail_stays_armed(self):
+        # #1089 fix-forward edge case 2: an OLD `cleared` from a prior /goal cycle
+        # then a NEWER `set` in the tail → scan_goal_markers returns the newest
+        # (the `set`, not the clear) → no override → armed STANDS.
+        with tempfile.TemporaryDirectory() as tmp:
+            p = os.path.join(tmp, "t.jsonl")
+            old_clear = json.dumps({"type": "user", "message": {"content":
+                                   "<local-command-stdout>Goal cleared: prior"
+                                   "</local-command-stdout>"},
+                                   "timestamp": "2026-09-19T08:00:00Z"})
+            new_set = json.dumps({"type": "user", "message": {"content":
+                                 "<local-command-stdout>Goal set: the new run"
+                                 "</local-command-stdout>"},
+                                 "timestamp": "2026-09-19T11:00:00Z"})
+            with open(p, "w") as f:
+                f.write(old_clear + "\n")
+                f.write(json.dumps({"type": "user",
+                                    "message": {"content": "x" * 200}}) + "\n")
+                f.write(new_set + "\n")
+            sp = _state_file(tmp, "sid-A", "set", os.path.getmtime(p),
+                             mark_ts=1000.0)
+            out = {}
+            armed = lf._goal_armed(self._payload(p), state_path=sp, out=out)
+            self.assertTrue(armed)                     # newer tail `set` wins
+            self.assertEqual(out.get("src"), "watchdog")
+
 
 # --------------------------------------------------------------------------- #
 # Item 2 — the per-Stop decision journal.
@@ -398,6 +438,20 @@ class TestDecisionJournal(unittest.TestCase):
         # ISO8601 timestamp lead + all fields present, token-free.
         self.assertRegex(lines[0], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
         self.assertIn("live=1", lines[0])
+
+    def test_journal_swallows_malformed_evidence_never_raises(self):
+        # #1089 F-6: the line is built INSIDE the try + `except Exception`, so a
+        # malformed `evidence` (a non-iterable that makes _fmt_live raise) can
+        # never escape run()'s never-raises contract. Directly proves it.
+        try:
+            lf._decision_journal(armed="true", mode="parallel", cap="4",
+                                 live=1, evidence=object(),   # non-iterable
+                                 dispatchable="6", disp_src="q", verdict="block")
+        except Exception as e:                               # noqa: BLE001
+            self.fail("_decision_journal must swallow a malformed evidence, "
+                      "raised %r" % e)
+        # and it wrote nothing garbled (the line construction failed pre-write).
+        self.assertEqual(self._log(), "")
 
     def test_fmt_live_breakdown(self):
         ev = [tr.WorkerLane("a", "live", 1, None, ""),
