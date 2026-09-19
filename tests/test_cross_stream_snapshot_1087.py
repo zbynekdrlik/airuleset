@@ -20,7 +20,6 @@ from unittest import mock as m
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import watchdog as wd
-import watchdog.cross_stream as cs
 from gates import ghread
 
 
