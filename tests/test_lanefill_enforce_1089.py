@@ -167,7 +167,10 @@ class TestGoalArmedReadsWatchdogFirst(unittest.TestCase):
             self.assertEqual(out.get("src"), "watchdog")
 
     def test_fresh_watchdog_set_short_circuits_without_seed(self):
-        # a FRESH set record is authoritative — the transcript is not rescanned.
+        # a FRESH set record skips the DEEP seed scan; #1089 fix-forward (🟡-1)
+        # still does the CHEAP tail scan, and with no newer clear the `set`
+        # stands (armed). The no-newer-marker case — see
+        # test_fresh_set_still_does_cheap_tail_scan for the tail-scan assertion.
         with tempfile.TemporaryDirectory() as tmp:
             tp = _deep_arm_transcript(tmp, _armset_line(), pad_bytes=1000)
             sp = _state_file(tmp, "sid-A", "set", os.path.getmtime(tp))
@@ -180,7 +183,20 @@ class TestGoalArmedReadsWatchdogFirst(unittest.TestCase):
             with mock.patch.object(gs, "seed_goal_marker", _spy):
                 armed = lf._goal_armed(self._payload(tp), state_path=sp)
             self.assertTrue(armed)
-            self.assertFalse(called["seed"])             # no transcript rescan
+            self.assertFalse(called["seed"])             # no DEEP seed rescan
+
+    def test_fresh_set_ts_guard_keeps_armed_when_tail_clear_is_older(self):
+        # ts guard: a rewound/skewed transcript whose tail `cleared` is OLDER
+        # than the record's `set` ts must NOT un-arm (the record wins).
+        with tempfile.TemporaryDirectory() as tmp:
+            tp = _arm_then_clear_transcript(tmp, pad_bytes=1000,
+                                            clear_ts="2026-09-19T10:00:00Z")
+            sp = _state_file(tmp, "sid-A", "set", os.path.getmtime(tp),
+                             mark_ts=9_999_999_999.0)   # yr 2286 — newer than clear
+            out = {}
+            armed = lf._goal_armed(self._payload(tp), state_path=sp, out=out)
+            self.assertTrue(armed)                       # record set is newer
+            self.assertEqual(out.get("src"), "watchdog")
 
     def test_fresh_watchdog_cleared_is_not_armed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -396,6 +412,18 @@ class TestDecisionJournal(unittest.TestCase):
 
     def test_fmt_live_dash_when_unknown(self):
         self.assertEqual(lf._fmt_live("-", None), "-")
+
+    def test_fmt_live_surfaces_unreadable_bucket(self):
+        # #1089 F-7: an `unreadable` lane is a real non-live exclusion → shown.
+        ev = [tr.WorkerLane("a", "live", 1, None, ""),
+              tr.WorkerLane("b", "unreadable", 2, None, ""),
+              tr.WorkerLane("c", "finished", 3, None, "")]
+        self.assertEqual(lf._fmt_live(1, ev), "1(f=1 s=0 w=0 u=1)")
+
+    def test_fmt_live_omits_unreadable_when_zero(self):
+        ev = [tr.WorkerLane("a", "live", 1, None, ""),
+              tr.WorkerLane("b", "finished", 2, None, "")]
+        self.assertEqual(lf._fmt_live(1, ev), "1(f=1 s=0 w=0)")
 
 
 # --------------------------------------------------------------------------- #

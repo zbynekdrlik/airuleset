@@ -4431,7 +4431,6 @@ from watchdog.lane_resources import (  # noqa: E402,F401
     GOAL_LANE_SATURATION_WORKERS,
     lane_resource_cap,  # noqa: F401 -- backward compat re-export
     lane_resource_caps,
-    count_resource_usage,
     _lane_nudge_text,
 )
 
@@ -5326,6 +5325,26 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     "human activity, never overwrite a live conversation"
                     % (loc, reason))
         return logs, True
+    # #1089 F-4 -- DELIVERY RETIRED. The lane-fill Stop gate (gates/lanefill.py)
+    # is the refill lever now: it BLOCKS the turn end on an under-filled parallel
+    # box WITHOUT typing into the pane, so this nudge no longer delivers a
+    # keystroke. It typed 0x in 24h on gk (starved by the #1023 3h cross-kind
+    # cap) -- pure journal noise and no refill. The DECISION line stays
+    # (observability: the SAME workers/backlog facts the owner reads), but every
+    # keystroke-delivery primitive (send_verified / deliver_with_stash /
+    # submit_own_draft_verified / _try_stash_nudge) AND the batch-collect
+    # contribution are removed -- the AST lock test_lanefill_enforce_1089
+    # .test_kind_never_calls_a_delivery_primitive enforces it. #1089 F-4: emit it
+    # HERE, ABOVE the now-vestigial keystroke cadence gate, so the retirement
+    # decision is CONSISTENTLY logged (it was previously reachable only when the
+    # gate OPENED -- cadence-gated -- inconsistent with the Stop-gate
+    # decisions.log being the authoritative per-Stop observability). The cadence
+    # gate below still runs (its hold:floor/hold:total-cap lines are the #1023
+    # dead-machinery F-1 follow-up, deferred). Recorded on #1023 as the
+    # kinds-rollout decision for lane-occupancy.
+    logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
+                "would-refill; DELIVERY RETIRED (#1089 -- Stop gate enforces)"
+                % (loc, live_workers, waiters, backlog_n))
     # #797/#1023 SHARED CADENCE GATE: `gate_ok` DEFERS this lane nudge (no
     # keystroke, no `_lane_record_nudge`/park/streak change) when the per-pane-
     # per-KIND floor holds (a recent lane-occupancy) OR the #1023 cross-kind TOTAL
@@ -5358,21 +5377,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                     "backlog=%d idle=%dm" % (loc, live_workers, waiters,
                                              backlog_n, idle // 60))
         return logs, True
-    # #1089 -- DELIVERY RETIRED. The lane-fill Stop gate (gates/lanefill.py)
-    # is the refill lever now: it BLOCKS the turn end on an under-filled
-    # parallel box WITHOUT typing into the pane, so this nudge no longer
-    # delivers a keystroke. It typed 0x in 24h on gk (starved by the #1023
-    # 3h cross-kind cap) -- pure journal noise (926 skip:sequential + 874
-    # hold:total-cap lines/day) and no refill. The DECISION line stays
-    # (observability: the SAME workers/backlog facts the owner reads), but
-    # every keystroke-delivery primitive (send_verified / deliver_with_stash
-    # / submit_own_draft_verified / _try_stash_nudge) AND the batch-collect
-    # contribution are removed -- the AST lock test_lanefill_enforce_1089
-    # .test_kind_never_calls_a_delivery_primitive enforces it. Recorded on
-    # #1023 as the kinds-rollout decision for lane-occupancy.
-    logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                "would-refill; DELIVERY RETIRED (#1089 -- Stop gate enforces)"
-                % (loc, live_workers, waiters, backlog_n))
+    # DELIVERY RETIRED — the observability line is emitted above (before the
+    # cadence gate, #1089 F-4); nothing is typed here.
     return logs, True
 
 

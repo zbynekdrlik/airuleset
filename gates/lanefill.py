@@ -196,6 +196,32 @@ def _rec_fresh_for(rec, tp):
     return (tm - rt) <= _REC_STALE_S
 
 
+def _tail_overrides_cleared(tail_mark, rec):
+    """True iff the cheap tail scan (`scan_goal_markers`, last 4 MB) found a
+    NEWER `cleared` marker that must override a (possibly-stale) watchdog `set`
+    record — Review B 🟡-1 (#1089 fix-forward).
+
+    The dark-watch record lags the transcript by up to one sweep, so a `/goal`
+    CLEARED written since the last pass is not yet in `rec`. `scan_goal_markers`
+    returns the NEWEST marker in the recent window, so a tail `cleared` there is
+    the most-recent state change in that window — honour it over the record.
+
+    `newer` is decided by timestamp when BOTH the tail marker and the record's
+    own mark carry a `ts` (a clock-rewound transcript then keeps the record — the
+    ts guard); when either `ts` is absent, the tail scan's newest-in-window
+    marker is authoritative (the record lags by design), so a tail `cleared`
+    wins. A non-`cleared` tail marker (or none) never overrides."""
+    if not isinstance(tail_mark, dict) or tail_mark.get("state") != "cleared":
+        return False
+    rec_mark = rec.get("mark") if isinstance(rec, dict) else None
+    rec_ts = rec_mark.get("ts") if isinstance(rec_mark, dict) else None
+    tail_ts = tail_mark.get("ts")
+    if isinstance(tail_ts, (int, float)) and not isinstance(tail_ts, bool) \
+            and isinstance(rec_ts, (int, float)) and not isinstance(rec_ts, bool):
+        return tail_ts > rec_ts
+    return True
+
+
 def _goal_armed(payload, *, state_path=None, out=None):
     """True iff this session's `/goal` loop is armed — reading the WATCHDOG's
     persisted marker FIRST, the seed scan only as a fallback (#1089).
@@ -209,10 +235,15 @@ def _goal_armed(payload, *, state_path=None, out=None):
     than the 32 MB seed cap → `seed_goal_marker` returns `unknown-past-cap` → the
     #1078 gate fail-opened on 100 % of the sessions it was built for.
 
-    Precedence (mirrors `one_glance.resolve_goal_armed`):
+    Precedence (keys on the same `mark.state` as `one_glance.resolve_goal_armed`,
+    but adds a `_REC_STALE_S` freshness gate and the 🟡-1 tail-scan override that
+    `resolve_goal_armed` has neither of):
       * a FRESH watchdog record (its transcript-mtime snapshot within
-        `_REC_STALE_S`) with `mark.state == "set"` → armed (`src=watchdog`), NO
-        transcript rescan; `"cleared"` → not armed (`src=watchdog`).
+        `_REC_STALE_S`) with `mark.state == "set"` → the deep seed scan is
+        SKIPPED, but the CHEAP tail-only `scan_goal_markers` (last 4 MB) still
+        runs: a NEWER tail `cleared` overrides the (lagging) record → not armed
+        (`src=watchdog+tail`, Review B 🟡-1 #1089); no newer clear → armed
+        (`src=watchdog`). A fresh `"cleared"` → not armed (`src=watchdog`).
       * MISSING / STALE / no-mark record → the seed scan governs: `found`+`set` →
         armed (`src=seed`); `found`+cleared / `none-bof` → not armed;
         `unknown-past-cap` → if a (stale) watchdog record still says `set` the
@@ -236,6 +267,15 @@ def _goal_armed(payload, *, state_path=None, out=None):
     rec_state = _rec_mark_state(rec)
     if _rec_fresh_for(rec, tp):
         if rec_state == "set":
+            # Review B 🟡-1 (#1089 fix-forward): the record lags the transcript
+            # by up to one sweep, so a `/goal` cleared since the last dark-watch
+            # pass is not in `rec`. Do the CHEAP tail-only scan (last 4 MB —
+            # cheap even on a 700 MB transcript, never the deep seed) and let a
+            # NEWER tail `cleared` win before trusting the record's `set`.
+            _tail_off, tail_mark = goal_scan.scan_goal_markers(tp)
+            if _tail_overrides_cleared(tail_mark, rec):
+                _src("watchdog+tail")
+                return False
             _src("watchdog")
             return True
         if rec_state == "cleared":
@@ -456,7 +496,12 @@ def _fmt_live(live, evidence):
     f = sum(1 for lane in evidence if getattr(lane, "state", None) == "finished")
     s = sum(1 for lane in evidence if getattr(lane, "state", None) == "stale")
     w = sum(1 for lane in evidence if getattr(lane, "state", None) == "wedged")
-    return "%s(f=%d s=%d w=%d)" % (live, f, s, w)
+    # #1089 F-7: surface the `unreadable` exclusion too when present, so
+    # live + f + s + w + u accounts for every evidence lane (an unreadable
+    # transcript is a real non-live reason the owner needs to see).
+    u = sum(1 for lane in evidence if getattr(lane, "state", None) == "unreadable")
+    tail = " u=%d" % u if u else ""
+    return "%s(f=%d s=%d w=%d%s)" % (live, f, s, w, tail)
 
 
 def _cap_decisions_log(p):
@@ -476,20 +521,24 @@ def _decision_journal(*, armed="?", mode="-", cap="-", live="-", evidence=None,
     is a file read, not a guess. `-` for a fact an early / fail-open return never
     resolved. Best-effort; never raises, never blocks the gate (observability
     only) — a write failure leaves the verdict unaffected."""
-    line = ("%s armed=%s mode=%s cap=%s live=%s dispatchable=%s/%s verdict=%s\n"
-            % (time.strftime("%Y-%m-%dT%H:%M:%S%z"), armed, mode, cap,
-               _fmt_live(live, evidence), dispatchable, disp_src, verdict))
     try:
+        # #1089 F-6: build the line INSIDE the try too — a malformed `evidence`
+        # (not the count_live_workers list) would raise in `_fmt_live` and, built
+        # outside, propagate past run()'s "never raises" contract.
+        line = ("%s armed=%s mode=%s cap=%s live=%s dispatchable=%s/%s verdict=%s\n"
+                % (time.strftime("%Y-%m-%dT%H:%M:%S%z"), armed, mode, cap,
+                   _fmt_live(live, evidence), dispatchable, disp_src, verdict))
         d = _lanefill_dir()
         os.makedirs(d, exist_ok=True)
         p = os.path.join(d, _DECISIONS_LOG)
         _cap_decisions_log(p)
         with open(p, "a", encoding="utf-8") as f:
             f.write(line)
-    except OSError:
+    except Exception:
         # A decision-journal write is the last-resort observability sink; a
-        # failure has nowhere left to be logged and must never disturb the gate's
-        # verdict (mirrors cli_gh_rate._diag / count_live_workers._warn_stderr).
+        # failure (I/O OR a malformed input) has nowhere left to be logged and
+        # must never disturb the gate's verdict (mirrors cli_gh_rate._diag /
+        # count_live_workers._warn_stderr).
         return  # airuleset:script-ok observability sink — a failed journal write cannot itself be logged
 
 
