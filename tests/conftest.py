@@ -152,6 +152,23 @@ def _isolate_gh_app_token_dir():
 
 
 @pytest.fixture(autouse=True)
+def _disable_quals_snapshot():
+    """#1087 (b): `_union_open_issues` now tries an ETag-cached REST snapshot of
+    the repo's open issues (via `gates.ghread.list_open_issues_cached`) BEFORE
+    the per-qual GraphQL search. That snapshot is a NEW live-gh boundary the ~40
+    hermetic quals tests do not mock (they mock only `airuleset._gh_out`), so
+    left live they would read REAL issues instead of the fixture's. Force the
+    GraphQL-fallback path here via the same operability kill-switch the code
+    honours (`AIRULESET_QUALS_NO_SNAPSHOT=1`) — identical shape/reason to
+    `_isolate_draft_rescue`/`_isolate_gh_app_token_dir` above; `cmd_push`'s own
+    `unittest discover` gate sets the SAME var for Pass B (#385 dual-coverage).
+    A test that DOES exercise the snapshot path (`test_quals_snapshot_1087.py`)
+    wins with its own innermost `os.environ` override, exactly like the others."""
+    with mock.patch.dict(os.environ, {"AIRULESET_QUALS_NO_SNAPSHOT": "1"}):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def _isolate_session_status_dir():
     """#486 G1: the session heartbeat producer (`watchdog/session_status.py`),
     invoked by the notify-discord-pending / notify-compact-subagent-boundary /

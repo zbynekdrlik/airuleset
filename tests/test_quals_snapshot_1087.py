@@ -14,9 +14,27 @@ from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import os
+
 import airuleset
 import cli_quals
 from gates import ghread
+
+
+class _SnapshotEnabled(unittest.TestCase):
+    """This file EXERCISES the snapshot path, so it must opt IN — conftest's
+    autouse fixture and cmd_push's Pass B both set AIRULESET_QUALS_NO_SNAPSHOT=1
+    to force the GraphQL fallback for every OTHER (hermetic) quals test."""
+
+    def setUp(self):
+        self._prev = os.environ.get("AIRULESET_QUALS_NO_SNAPSHOT")
+        os.environ["AIRULESET_QUALS_NO_SNAPSHOT"] = "0"
+
+    def tearDown(self):
+        if self._prev is None:
+            os.environ.pop("AIRULESET_QUALS_NO_SNAPSHOT", None)
+        else:
+            os.environ["AIRULESET_QUALS_NO_SNAPSHOT"] = self._prev
 
 
 def _snap(n, labels=None, title=None, assignee=None, author=None):
@@ -28,7 +46,7 @@ def _snap(n, labels=None, title=None, assignee=None, author=None):
         "user": {"login": author or "someone"}})
 
 
-class UnionUsesSnapshot(unittest.TestCase):
+class UnionUsesSnapshot(_SnapshotEnabled):
     def test_label_quals_filter_snapshot_no_graphql(self):
         snapshot = [
             _snap(1, labels=["needs-gatekeeper"]),

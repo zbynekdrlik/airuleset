@@ -1874,6 +1874,13 @@ def cmd_push(args):
         _exec_state = Path(_lock_tmp) / "main-exec-state"
         _exec_state.mkdir(parents=True, exist_ok=True)
         test_env["AIRULESET_MAIN_EXEC_STATE_DIR"] = str(_exec_state)
+        # #1087 (b) (dual-coverage): `_union_open_issues` now tries an ETag-cached
+        # REST snapshot before the per-qual GraphQL search. That new live-gh
+        # boundary is unmocked by the ~40 hermetic quals tests (they mock only
+        # `_gh_out`), so force the GraphQL-fallback path for the whole suite via
+        # the code's own operability kill-switch. conftest.py's autouse fixture
+        # covers a pytest-direct run; `unittest discover` never reads it.
+        test_env["AIRULESET_QUALS_NO_SNAPSHOT"] = "1"
         # #972 REOPEN (dual-coverage): a test that performs a REAL install writes
         # `Path.home()/.claude`. `unittest discover` never reads conftest.py, so
         # point the WHOLE gate subprocess at a per-run isolated HOME — the
