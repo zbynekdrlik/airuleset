@@ -80,10 +80,20 @@ class RedactionRuleIsBakedIn(_Teeth, unittest.TestCase):
     def test_anti_pattern_names_the_verbatim_trap(self):
         self.assert_teeth("verbatim because", "WRONG")
 
-    def test_subreader_prompt_must_carry_the_rule(self):
-        # #104: a skill body does not reach a dispatched sub-reader, so the
-        # coordinator must put the redaction rule into each sub-reader prompt
-        self.assert_teeth("sub-reader", "prompt")
+    # #1076 removed the screen-reader FAN-OUT (interpretation now runs in the
+    # MAIN session, Hard Rule 0): there is no longer a dispatched sub-reader
+    # that WRITES a deliverable, so the old "put the redaction rule into each
+    # sub-reader prompt" instruction is obsolete. The Phase-5 completeness
+    # critic is read-only over the already-redacted, main-authored output and
+    # never writes a deliverable, so it carries no redaction-in-prompt burden.
+    # The former test_subreader_prompt_must_carry_the_rule teeth were dropped
+    # here; redaction is fully locked by the other teeth (Hard Rule 7 + the
+    # Phase-5 mandatory redaction scan) and the fan-out removal is locked by
+    # test_meeting_analysis_skill_1076.TestFanOutGone.
+    def test_redaction_is_a_write_time_rule_in_main(self):
+        # the redaction rule is enforced at write time (Hard Rule 7), now that
+        # every screen is read + written in main (no fan-out sub-reader).
+        self.assert_teeth("AT WRITE TIME", "OVERRIDES")
 
 
 class CoarseWholeFilePresence(unittest.TestCase):
@@ -180,11 +190,14 @@ class DispatchMandateForGoalArmed(unittest.TestCase):
                         "#926: no line names block-main-implementation near /goal")
 
     def test_phase4_stays_in_main(self):
-        b = _body()
-        lines = [ln for ln in b.splitlines()
-                 if "Phase 4" in ln and "main" in ln]
-        self.assertTrue(lines,
-                        "#926: no line says Phase 4 stays in main")
+        # #1076 strengthened this: the dispatch section now says "Phases 4-6 ...
+        # stay in main" (reading screens IS interpretation, Hard Rule 0).
+        # Whitespace-collapsed so a line wrap between "Phases 4-6" and "main"
+        # does not defeat the check.
+        norm = re.sub(r"\s+", " ", _body())
+        self.assertRegex(
+            norm, r"Phases? 4(-6)?[^.]{0,80}stay(s)? in\s+main",
+            "#926/#1076: the dispatch section must say the reading phase(s) stay in main")
 
 
 if __name__ == "__main__":

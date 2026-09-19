@@ -6,17 +6,24 @@ user-invocable: true
 
 # Multimodal Meeting Analysis
 
-> Turn a recorded meeting into a complete, structured understanding. The recording has
-> THREE information channels — **spoken words**, **who said them**, and **what was shown on
-> screen**. Analyzing only the audio (the common failure) throws away half the meeting:
-> screenshared documents, ERP screens, mockups, and numbers are where the real requirements
-> live. This skill transcribes with **Soniox stt-async-v5** (materially better Slovak +
-> **native speaker diarization**, so "who spoke" needs no caption track; local dev2-GPU
-> whisper is the fallback), reads every shared screen itself, ends with a completeness pass
-> so nothing is missed, and — Phase 6 — **improves its own method after every run**.
+> Turn a recorded meeting into a complete, structured understanding. The recording has THREE
+> channels — **spoken words**, **who said them**, and **what was shown on screen**. Analyzing
+> only the audio (the common failure) throws away half the meeting: screenshared documents, ERP
+> screens, mockups, and numbers are where the real requirements live. Transcribe with **Soniox
+> stt-async-v5** (better Slovak + **native diarization**; local dev2-GPU whisper is the fallback),
+> read every shared screen, end with a completeness pass, and — Phase 6 — **improve the method
+> every run**.
 
 ## The hard rules (the failures this skill exists to prevent)
 
+0. **Interpretation = the MAIN session (Fable); only MECHANICS may be delegated.** A subagent may
+   do ONLY the mechanical phases 1-3 (ffmpeg extraction, the ASR API call, frame dedup). Phases 4-6
+   — reading EVERY screen, correlation, synthesis, per-task supplements, the questions — run in
+   main, whole, no sampling. Repeated client statements carry the HIGHEST weight. A meeting
+   interpreted by a weaker model is the #1 owner complaint (#1076); the delegation gate
+   `block-meeting-analysis-delegation.sh` refuses a subagent dispatch asking for interpretation, and
+   deliverables carry an `Analysed-by: main <model>` audit marker (not proof — a first line can be
+   hand-typed; the gate is the real control).
 1. **NEVER audio-only.** If the meeting had screensharing, you MUST read the screens. A
    transcript without the shown documents/screens is an incomplete analysis. This is the #1
    past failure ("you just listened to the audio and ignored what we showed you").
@@ -32,16 +39,14 @@ user-invocable: true
    When unsure whether something is a requirement, capture it — over-capture, never drop.
 5. **Transcription = Soniox stt-async-v5 (PRIMARY); YOU pick, never ask which.** Whisper twice
    left the user unhappy — it garbles Slovak business terms and needs a caption track for "who
-   spoke". For a requirement-bearing Slovak meeting, transcribe with **Soniox stt-async-v5**
-   (`scripts/transcribe_soniox.py`): far better Slovak, **native speaker diarization**, and it's
-   a cloud API so it runs from **dev1 with NO dev2 GPU contention**. Local whisper on dev2
-   (`transcribe.py`) is the FALLBACK — use it only when the Soniox key/network is unavailable.
-   When the user *lists* options (Soniox/AssemblyAI/Gemini), that is them saying what's available
-   — they want YOU to pick the best (Soniox here), not to ask which. **Verify the newest async
-   model** at `GET https://api.soniox.com/v1/models` (Bearer key) and track it — as of 2026-07
-   it is `stt-async-v5`. **Never reuse the voiceagent BAKERY Soniox context** for a non-bakery
-   meeting — it biases the transcript toward bread terms; the montalu/ERP context ships inside
-   `transcribe_soniox.py`.
+   spoke". For a requirement-bearing Slovak meeting use **Soniox stt-async-v5**
+   (`scripts/transcribe_soniox.py`): far better Slovak, **native speaker diarization**, a cloud
+   API → **dev1, NO dev2 GPU contention**. Local whisper on dev2 (`transcribe.py`) is the
+   FALLBACK, only when the Soniox key/network is down. When the user *lists* options
+   (Soniox/AssemblyAI/Gemini) they want YOU to pick the best (Soniox), not to ask. **Verify the
+   newest async model** at `GET https://api.soniox.com/v1/models` (Bearer key); as of 2026-07 it
+   is `stt-async-v5`. **Never reuse the voiceagent BAKERY Soniox context** for a non-bakery
+   meeting — it biases toward bread terms; the montalu/ERP context ships in `transcribe_soniox.py`.
 6. **Diarization is native, not caption-derived.** Soniox stt-async-v5 labels speakers itself
    (`speaker_turns.json` comes straight out of `transcribe_soniox.py`) — no caption/subtitle
    track required. The caption track is only a fallback speaker source for the local-whisper
@@ -54,9 +59,7 @@ user-invocable: true
    as you write the line — never capture-now-redact-later.
    KEEP every order/reference code (ZAK/OP/PV/doc numbers), dimension, quantity, status,
    label — AND your OWN side's names (team/dev, product/module, vendor): context, not the leak
-   (redaction targets the CUSTOMER only — the Odberateľ / client). When you fan out screen-reader
-   sub-agents (Phase 5), put this rule in EACH sub-reader's prompt: a skill body does not reach a
-   dispatched agent, so the name-safe format lives in the prompt.
+   (redaction targets the CUSTOMER only — the Odberateľ / client).
 
 ## Setup & variables
 
@@ -89,9 +92,9 @@ curl -s -o /dev/null -w "liveness: %{http_code}\n" "http://$IP:$PORT/$TOK/"   # 
 echo "GIVE THE USER:  http://$IP:$PORT/$TOK/"
 ```
 
-- The advertised `IP` must be the address the remote user's VPN actually routes to dev1 (they
-  may reach it on a Tailscale/other IP, not 100.104.8.125). A local 200 does NOT prove the user can
-  reach it — confirm their path. If port 8799 is firewalled from their network, pick another.
+- The advertised `IP` must be the address the remote user's VPN routes to dev1 (a Tailscale/other
+  IP, not 100.104.8.125). A local 200 does NOT prove the user can reach it — confirm their path; if
+  the port is firewalled from their network, pick another.
 - After the user drops the file, read the real saved path out of the endpoint's own log:
   `grep SAVED ~/.claude/upload-logs/upload-<port>.log` → `$HOME/uploads/acme-call/<saved-name>`.
   The name is PRESERVED (#116, e.g. `nahrávka test (1).mp4`) — diacritics/spaces/parens survive (unsafe chars →
@@ -104,7 +107,10 @@ echo "GIVE THE USER:  http://$IP:$PORT/$TOK/"
 When `/goal` is armed, `block-main-implementation.sh` blocks bulk bash in main. Dispatch
 Phases 1-3 (extract/transcribe/dedup — mechanical) to a read-only worker subagent with
 WORK dir + VIDEO path in its prompt; main reads only the returned `frames_kept/` count +
-`summary.json`. Phase 4 (reading screens via Read tool) stays in main — it needs vision.
+`summary.json`. **Mark that worker prompt's FIRST line `MECHANICAL-ONLY: extract|asr|dedup`** —
+the delegation gate (Hard Rule 0) blocks a meeting dispatch without it, and blocks any dispatch
+that also asks for interpretation. Phases 4-6 (reading screens, correlation, synthesis) stay in
+main — they need vision AND are interpretation (Hard Rule 0).
 
 ## Phase 1 — Extract the three channels (dev1, ffmpeg)
 
@@ -117,12 +123,12 @@ VIDEO="$HOME/uploads/acme-call/<saved-name>"   # from the ls above / the SAVED l
 bash "$SKILL/scripts/extract.sh" "$VIDEO" "$WORK"
 ```
 
-Produces `$WORK/audio.wav` (16 kHz mono), `$WORK/frames/f_*.jpg` (1 frame / 8 s — **video
-input only**), `$WORK/duration_s.txt`, and `$WORK/subs.srt` if a TEXT caption track is present
-(sidecar `.srt`/`.vtt`, else a demuxed text stream; bitmap subs like PGS are reported as
-unavailable). **Audio-only input is valid** — it yields 0 frames; Phases 3-frames/4 are then
-skipped and analysis runs on transcript + captions. No caption track → diarization is
-unavailable (request a captions export, or run a local diarizer); ASR + screen reading proceed.
+Produces `$WORK/audio.wav` (16 kHz mono), `$WORK/frames/f_*.jpg` (1 frame / 8 s — **video only**),
+`$WORK/duration_s.txt`, and `$WORK/subs.srt` if a TEXT caption track is present (sidecar
+`.srt`/`.vtt` or a demuxed text stream; bitmap subs like PGS are unavailable). **Audio-only input
+is valid** — 0 frames; Phases 3-frames/4 skip, analysis runs on transcript + captions. No caption
+track → no diarization (request a captions export or run a local diarizer); ASR + screen reading
+proceed.
 
 ## Phase 2 (PRIMARY) — Transcribe with Soniox stt-async-v5 (dev1, native diarization)
 
@@ -192,13 +198,13 @@ ssh newlevel@100.82.64.27 'cd ~/asr && rm -f done error && \
 
 - **Pass the language** (`sk` above) when known — auto-detect can mis-read Slovak as Czech/Polish
   and drift mid-call. Drop the 4th arg only when the language is genuinely unknown.
-- transcribe.py enforces the hard-won lessons in code: missing deps / no-GPU / a non-turbo large
-  model on this 8 GB card all write the `error` marker and exit (never a silent hang); it asserts
-  fp16 actually loaded (else it would OOM).
+- transcribe.py enforces the lessons in code: missing deps / no-GPU / a non-turbo large model on
+  this 8 GB card write the `error` marker and exit (never a silent hang); it asserts fp16 loaded
+  (else OOM).
 
-**Watch — non-blocking, scaled to the recording length, with a HANG branch.** Use the Bash tool
-with `run_in_background: true` (per ci-monitoring), polling until a terminal marker; size the cap
-to ~2× expected runtime (≈ minutes ≈ audio-minutes), not a fixed 40:
+**Watch — non-blocking, scaled to length, with a HANG branch.** Bash `run_in_background: true`
+(per ci-monitoring), poll until a terminal marker; size the cap to ~2× expected runtime (≈
+audio-minutes), not a fixed 40:
 
 ```bash
 ssh newlevel@100.82.64.27 'for i in $(seq 1 90); do
@@ -229,19 +235,18 @@ python3 "$SKILL/scripts/prep.py" "$WORK"
 [ -f "$WORK/speaker_turns.soniox.json" ] && mv "$WORK/speaker_turns.soniox.json" "$WORK/speaker_turns.json"
 ```
 
-**prep.py rewrites `speaker_turns.json` from the CAPTION track** — that is only the whisper-path
-fallback. When you used the Soniox path, its native `speaker_turns.json` is authoritative, so the
-`cp`/`mv` above backs it up and restores it after prep.py's screen dedup. On the whisper fallback
-path there is no Soniox file, so prep.py's caption-derived turns stand.
+**prep.py rewrites `speaker_turns.json` from the CAPTION track** — the whisper-path fallback only.
+On the Soniox path its native `speaker_turns.json` is authoritative, so the `cp`/`mv` above backs
+it up + restores it after prep.py's screen dedup. On the whisper fallback there is no Soniox file,
+so prep.py's caption-derived turns stand.
 
 Produces `$WORK/frames_kept/scr_NNN_tSSSSS.jpg` (one per DISTINCT screen) and
-`$WORK/speaker_turns.json`. **Calibration (proven run): 413 raw frames → 57 distinct screens at
-threshold 10.** If prep.py warns that it kept dozens-to-hundreds of "screens", dedup
-under-collapsed (scrolling/video/cursor/animated UI) — re-run with a higher threshold
-(`prep.py "$WORK" 8 16`) before reading, so the target stays "dozens", not "hundreds". If
-speakers come back `["?"]`, prep.py prints the first caption lines — identify that tool's
-speaker-label format, add a regex to `SPK_PATTERNS`, re-run. `t_sec` is approximate (±8 s); use
-it for loose screen↔speech correlation, not exact alignment (prep.py warns on frame drift).
+`$WORK/speaker_turns.json`. **Calibration (proven): 413 raw frames → 57 screens at threshold 10.**
+If prep.py kept dozens-to-hundreds of "screens", dedup under-collapsed (scrolling/video/cursor/
+animated UI) — re-run higher (`prep.py "$WORK" 8 16`) so the target stays "dozens". If speakers
+come back `["?"]`, prep.py prints the first caption lines — add that tool's label format to
+`SPK_PATTERNS`, re-run. `t_sec` is approximate (±8 s) — loose screen↔speech correlation, not exact
+alignment (prep.py warns on frame drift).
 
 ## Phase 4 — READ every distinct screen yourself (the channel audio misses)
 
@@ -251,10 +256,13 @@ For EACH file in `frames_kept/`, use the Read tool to look at it and record what
 - Read every `frames_kept/scr_*.jpg` (Read renders the image). Don't sample — dedup already cut
   it to a readable set (dozens). If it's hundreds, the dedup threshold needs raising (Phase 3),
   not sampling.
-- Write a `screen_inventory.md`: per screen — what system/screen it is, every field / column /
-  value / status / menu / button visible, and the capability it implies. **Redact AT WRITE TIME
-  (Hard Rule 7):** `[redigované]` for every personal/customer/company name; keep the codes,
-  numbers, dimensions, labels.
+- Write a `screen_inventory.md` whose **FIRST line is the full stamp** —
+  `python3 -c 'import cli_authorship,os;print(cli_authorship.stamp_line("Analysed", os.getcwd()))'`
+  prints the whole `Analysed-by: main <model>` line (use `stamp_line`, NOT `authorship_value` which
+  omits the label; run from the SESSION cwd, not the WORK dir, or it stamps `main unknown`; Hard
+  Rule 0). Then per screen — what system/screen it is, every field / column / value / status / menu
+  / button visible, and the capability it implies. **Redact AT WRITE TIME (Hard Rule 7):**
+  `[redigované]` for every personal/customer/company name; keep the codes, numbers, dimensions, labels.
 - A shown document/spec/quote → transcribe its **exact text** into `*_verbatim.md` (Hard Rule 3),
   customer names → `[redigované]` (Hard Rule 7).
 - Correlate with `transcript.txt` + `speaker_turns.json`: when a screen is on (~its t_sec ±8 s),
@@ -263,70 +271,66 @@ For EACH file in `frames_kept/`, use the Read tool to look at it and record what
 ## Phase 5 — Synthesize, then adversarially critique for completeness
 
 Combine all artifacts — `transcript.txt`, `speaker_turns.json`, `screen_inventory.md`, any
-`*_verbatim.md` — into the deliverable the user asked for (tickets, spec, decision log, summary).
-Then run a **completeness critic** before declaring done:
+`*_verbatim.md` — **IN MAIN (Hard Rule 0)** into the deliverables: `NOTES.md` (the synthesis /
+spec / decision log the user asked for) and `MAPPING.md` (each requirement → its ticket +
+evidence). Every deliverable (`NOTES.md`, `MAPPING.md`, `screen_inventory.md`) carries the same
+FIRST-line stamp from `cli_authorship.stamp_line("Analysed", cwd)` (the full `Analysed-by: main
+<model>` line). Then run a **completeness critic** before declaring done:
 
 - **Redaction check — MANDATORY before accepting ANY produced file (inventory, verbatim, or the
   final deliverable):** scan each for a leaked customer name (person or company); a leak is a GAP
   — redact it to `[redigované]` (Hard Rule 7).
-- Large/important synthesis (e.g. "turn this into tickets") + ultracode on / user asks → use the
-  **Workflow** tool: fan out parallel readers over transcript segments + screen groups (put Hard
-  Rule 7's redaction into EACH reader's prompt — a skill body never reaches a dispatched agent),
-  then a critic agent whose only job is "what requirement, screen, number, or shown document is
-  NOT represented in the output?". Loop until the critic comes back dry.
-- Smaller synthesis → inline critic pass: re-read each screen + speaker turn and tick off where
-  it landed in the output. Anything unticked is a gap — fix it.
+- The completeness critic is READ-ONLY, NEVER the primary reader (Hard Rule 0). Default = inline:
+  re-read each screen + speaker turn IN MAIN, tick off where it landed; anything unticked is a gap —
+  fix it. For a large synthesis you MAY dispatch ONE read-only `Explore` over the FINISHED
+  main-authored output — its only job is "what requirement, screen, number, or shown doc is NOT
+  represented?"; it returns a list, never writes a deliverable. Loop MAIN until it comes back dry.
 - Capture EVERYTHING identified-but-not-done as tracked items (e.g. GitHub issues) — never drop a
   requirement silently (`no-dropped-work.md`).
 
 **Every generated ticket MUST cite its evidence** — the transcript timestamp + speaker, the
-screen file (`frames_kept/scr_*.jpg`), and/or the `*_verbatim.md` line it came from. A ticket
-with no citation is an unverifiable hallucinated requirement; the user must be able to trace each
-one back to the moment in the call it came from.
+screen file (`frames_kept/scr_*.jpg`), and/or the `*_verbatim.md` line. A ticket with no citation
+is an unverifiable hallucinated requirement — the user must be able to trace each one back to the call.
 
-**Delivered-vs-broken cross-check (mandatory when the meeting is a complaint call).** When the
-meeting exists because previously-"delivered" things are called non-functional / unclear / wrong
-(the recurring montalu/Peto pattern), reconcile the call against what was already claimed done:
+**Delivered-vs-broken cross-check (mandatory for a complaint call).** When the meeting exists
+because previously-"delivered" things are called non-functional / unclear / wrong (the montalu/Peto
+pattern), reconcile the call against what was claimed done:
 
-- For each complaint, find the ticket/PR that claimed to deliver it (`gh issue list --state closed`,
-  `gh pr list --state merged`, project memory) and file a **regression/bug ticket** that names the
-  original claim, quotes the call's evidence it is broken, and states the expected behavior — link
-  the origin, never re-file as a fresh feature.
-- **VERIFY THE DEPLOYED VERSION the complainer actually ran BEFORE calling anything a regression** —
-  a merged PR ≠ a deployed feature. Get the git SHA / version / container uptime of the tested env
-  (`ssh <host> 'git -C <addon> rev-parse HEAD'`) and compare it to each candidate PR's **merge
-  date**. A "delivered but broken" complaint is very often just a **stale test/deploy env** (the fix
-  is a deploy/refresh, not a new dev bug — the exact wasted-cycle trap). Split the output into
-  *already-fixed-pending-deploy* (file a deploy-and-reverify item) vs *genuinely-not-done*. (Live:
-  half a cutover call's "regressions" were a 4-day-stale env — the type-to-filter fix was merged to
-  `develop`, just not deployed.)
-- An item found **"unintelligible / unclear / can't tell what it does"** is a real finding → file a
-  **clarity/UX ticket** (labelling, wording, findability — the "Peter must FIND it and know the
-  flow" bar), never drop it.
+- For each complaint, find the ticket/PR that claimed it (`gh issue list --state closed`,
+  `gh pr list --state merged`, memory) and file a **regression/bug ticket** naming the original
+  claim + the call's evidence it is broken + the expected behavior — link the origin, never re-file
+  as a fresh feature.
+- **VERIFY THE DEPLOYED VERSION the complainer ran BEFORE calling anything a regression** — a
+  merged PR ≠ a deployed feature. Get the git SHA / version / uptime of the tested env
+  (`ssh <host> 'git -C <addon> rev-parse HEAD'`) vs each candidate PR's **merge date**. "Delivered
+  but broken" is very often just a **stale test/deploy env** (fix = deploy/refresh, not a new dev
+  bug — the wasted-cycle trap). Split into *already-fixed-pending-deploy* (a deploy-and-reverify
+  item) vs *genuinely-not-done*. (Live: half a cutover call's "regressions" were a 4-day-stale env.)
+- **"unintelligible / unclear / can't tell what it does"** is a real finding → file a **clarity/UX
+  ticket** (labelling, wording, findability), never drop it.
 - Separate **NEW requirements** (never promised) from **REGRESSIONS** (promised, now broken) — the
   user reads them differently.
 
 ## Phase 6 — Self-improve the method (run EVERY time, before declaring done)
 
-**The user's standing instruction: each analysis must be higher-quality than the last, using a
-more functional approach — the skill develops ITSELF.** After delivering, run a short retrospective
-on the METHOD (not the content), then bank the improvement so the next run inherits it:
+**The user's standing instruction: each analysis must be higher-quality than the last — the skill
+develops ITSELF.** After delivering, run a short retrospective on the METHOD (not the content) and
+bank it:
 
-1. Ask: what did THIS run reveal was weak, slow, brittle, or missing in the *method*? (ASR quality
-   on this audio, diarization accuracy, screen-dedup threshold, a channel that got under-read, a
-   step that hung, a manual fix-up you had to improvise, a better tool that would have helped.)
-2. Turn each concrete lesson into an **edit of this SKILL.md and/or its scripts** (tighten a
-   threshold, add a preflight, fix a fragile command, add an anti-pattern), then **commit** it
+1. What did THIS run reveal was weak/slow/brittle/missing in the *method*? (ASR quality,
+   diarization accuracy, dedup threshold, an under-read channel, a step that hung, a manual fix-up,
+   a better tool.)
+2. Turn each lesson into an **edit of this SKILL.md and/or its scripts** (tighten a threshold, add
+   a preflight, fix a fragile command, add an anti-pattern), then **commit**
    (`cd ~/devel/airuleset && git add skills/meeting-analysis && git commit -m "..."`). On an
-   isolated sub-dev box whose airuleset checkout can't push (e.g. montalu), do NOT commit — put
-   the lesson into the completion report's `🔧 Self-improve:` line for the maintainer to apply.
-3. If the lesson is project-state (not method) — e.g. a montalu-specific gotcha — write it to
-   session memory instead, and cross-link.
-4. The completion report MUST end with a one-line `🔧 Self-improve:` note stating what changed in
-   the method (or, rarely, "method held up — no change needed" with the reason).
+   isolated sub-dev box that can't push (e.g. montalu), do NOT commit — put the lesson in the
+   report's `🔧 Self-improve:` line for the maintainer.
+3. A project-state lesson (a montalu-specific gotcha) → session memory instead, cross-linked.
+4. The report MUST end with a one-line `🔧 Self-improve:` note (or "method held up — no change
+   needed" with the reason).
 
-Skipping Phase 6 is the banned "ran it the same flawed way again" failure — the whole point is that
-the method never stops improving.
+Skipping Phase 6 is the banned "ran it the same flawed way again" failure — the method never stops
+improving.
 
 ## Deliver files back as clickable LAN URLs
 
@@ -351,10 +355,12 @@ Any artifact the user should open goes back as a clickable link, never a `/tmp` 
   Background, crash-aware, duration-scaled watch with a HANG branch (Phase 2).
 - On the whisper fallback: launching ASR into a near-full shared GPU, or killing another process's
   GPU memory → **WRONG.** Gate on free memory; never kill prod inference.
-- Declaring complete without the Phase 5 completeness critic → **WRONG.** That's the exact
-  "looked done but dropped half" failure.
+- Dispatching phase 4/5 interpretation (reading screens, synthesis) to a subagent → **WRONG**
+  (Hard Rule 0). Only phases 1-3 (extract/asr/dedup) may be delegated, marked `MECHANICAL-ONLY:`.
+- Declaring complete without the Phase 5 completeness critic → **WRONG** ("looked done but dropped
+  half").
 - Declaring done without the Phase 6 self-improvement pass → **WRONG.** The method must improve
-  every run; skipping it repeats the same flaws.
+  every run.
 - Transcribing a customer/company name verbatim because "transcribe every field" → **WRONG.**
   Verbatim is for codes/numbers/dimensions/labels; names → `[redigované]` at write (Rules 3 + 7).
 
