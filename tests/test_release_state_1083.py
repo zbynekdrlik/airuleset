@@ -53,9 +53,13 @@ class MergedUnreleased(unittest.TestCase):
         got = rs.merged_unreleased_issues(
             "/repo", git_fn=git, pr_meta_fn=pr_meta,
             cache_path=self.cache, slug="o/r")
-        # PR #5 → #105 + #900 (bare ref kept); PR #7 → #107. The PR's own
-        # number is excluded (#7 must not appear from "PR seven (#7)").
-        self.assertEqual(set(got), {105, 900, 107})
+        # PR #5 → #105 (Closes); the bare "follow-up to #900" cross-reference is
+        # NOT closed by the PR, so #900 must NOT be pulled into M (#1083 review
+        # BLOCKER — a bare mention would hide an unrelated open ticket from I).
+        # PR #7 → #107 (Fixes); the PR's own number is excluded.
+        self.assertEqual(set(got), {105, 107})
+        self.assertNotIn(900, set(got),
+                         "a bare cross-reference must never enter M")
         self.assertEqual(sorted(calls), [5, 7])
 
     def test_cache_hit_makes_zero_pr_reads(self):

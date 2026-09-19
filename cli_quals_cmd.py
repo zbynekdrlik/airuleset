@@ -646,15 +646,15 @@ def _print_bounce_rounds(quals, root, user):
 
 def _merged_unreleased(root):
     """#1083 — the git-derived merged-unreleased issue set for `root` (fix in
-    develop/staging, not yet main). Slug resolved LAZILY (only when the git range
-    is non-empty) so a two-branch `--count` pays zero gh. Fail-safe EMPTY (a
-    two-branch repo, a git/REST error, an import failure) — the never-falsely-
-    done direction: a ticket whose merge state cannot be derived stays in `I`."""
-    import airuleset
+    develop/staging, not yet main). The slug is resolved from the LOCAL git
+    remote (no `gh repo view`), so a two-branch OR warm-cache `--count` on the
+    hot `/goal` stop-proof path pays zero gh (adversarial review #1083). Fail-safe
+    EMPTY (a two-branch repo, a git/REST error, an import failure) — the never-
+    falsely-done direction: a ticket whose merge state cannot be derived stays in
+    `I`."""
     try:
         import cli_release_state
-        return cli_release_state.merged_unreleased_issues(
-            root, slug_fn=lambda: airuleset._repo_slug(cwd=root))
+        return cli_release_state.merged_unreleased_issues(root)
     except Exception:
         return frozenset()
 
@@ -662,13 +662,13 @@ def _merged_unreleased(root):
 def _merged_released_still_open_line(seen, root):
     """#1083 — the `core-quals --audit` release-hygiene line: open tickets whose
     fix PR already reached main yet never closed (`#1009` keeps them out of I on
-    the slice box; this NAMES them so the gk session closes them). Empty string
-    when none / on any error."""
-    import airuleset
+    the slice box; this NAMES them so the gk session closes them). The slug is
+    resolved from the LOCAL git remote (same source as `_merged_unreleased`, so
+    both read the SAME cache file). Empty string when none / on any error."""
     try:
         import cli_release_state
         nums = cli_release_state.merged_released_still_open(
-            root, open_numbers=set(seen), slug=airuleset._repo_slug(cwd=root))
+            root, open_numbers=set(seen))
     except Exception:
         return ""
     if not nums:

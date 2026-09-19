@@ -99,6 +99,10 @@ class CoreQualsExcludesMergedFromCount(unittest.TestCase):
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q", "-b", "main", repo],
                            check=True, env=_GENV, capture_output=True)
+            # A real origin remote so the LOCAL slug resolver (#1083 review — no
+            # gh on the hot --count path) names the cache/PR-meta from git.
+            _git(repo, "remote", "add", "origin",
+                 "https://github.com/zbynekdrlik/demo", env=_GENV)
             _git(repo, "commit", "--allow-empty", "-q", "-m", "base", env=_GENV)
             _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD",
                  env=_GENV)
@@ -130,18 +134,20 @@ class CoreQualsAuditReleaseHygiene(unittest.TestCase):
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q", "-b", "main", repo],
                            check=True, env=_GENV, capture_output=True)
+            _git(repo, "remote", "add", "origin",
+                 "https://github.com/zbynekdrlik/demo", env=_GENV)
             _git(repo, "commit", "--allow-empty", "-q", "-m", "base", env=_GENV)
             main_sha = subprocess.run(
                 ["git", "-C", repo, "rev-parse", "HEAD"], check=True,
                 capture_output=True, text=True, env=_GENV).stdout.strip()
             _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD",
                  env=_GENV)
-            # Pre-seed the append-only PR cache: PR #6 -> #106, its merge commit
-            # is the main HEAD (released). merged_released_still_open sees it as
-            # reachable from origin/main.
+            # Pre-seed the append-only PR cache (full-slug filename, #1083
+            # review): PR #6 -> #106, its merge commit is the main HEAD
+            # (released). merged_released_still_open sees it reachable from main.
             tsdir = Path(home) / ".claude" / "tickets-status"
             tsdir.mkdir(parents=True, exist_ok=True)
-            (tsdir / "pr-issues-demo.json").write_text(json.dumps(
+            (tsdir / "pr-issues-zbynekdrlik__demo.json").write_text(json.dumps(
                 {"6": {"issues": [106], "oid": main_sha}}))
             _write_fake_gh(bindir, fixture, {})
             r = _run("--audit", repo, home, bindir)

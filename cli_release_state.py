@@ -51,13 +51,23 @@ _UNRELEASED_BRANCHES = ("develop", "staging")
 # from …") or a squash/rebase merge ("Subject (#N)"). We read PR numbers ONLY
 # from these two shapes, never a bare `#N` in an arbitrary commit subject.
 _MERGE_PR_RE = re.compile(r"Merge pull request #(\d+)\b")
+# GitHub appends the squash/rebase PR number as a trailing `(#N)`; a subject may
+# also carry an EARLIER `(#N)` (a revert of "X (#42)" (#50)). Take the LAST one
+# — the outer/actual PR number (adversarial review #1083).
 _SQUASH_PR_RE = re.compile(r"\(#(\d+)\)")
 
-# Issue refs inside a PR title+body: bare `#N` plus the GitHub closing keywords
-# (Closes/Fixes/Resolves) and `Issue: #N`. The bare form subsumes the keyword
-# forms, so ONE bare pass suffices; the PR's own number is excluded by the
-# caller. (Design item 1: refs via `#N` / `Closes|Fixes|Resolves #N` / `Issue:`.)
-_ISSUE_REF_RE = re.compile(r"#(\d+)")
+# Issue refs a PR actually CLOSES — GitHub's OWN auto-close semantics: a CLOSING
+# KEYWORD (close/closes/closed, fix/fixes/fixed, resolve/resolves/resolved) OR a
+# `Issue: #N` line, each immediately before `#N`. A BARE `#N` is a cross-reference
+# (follow-up to #N, part of epic #N, cross-repo owner/repo#N) the PR does NOT
+# close — and #1083 exists precisely because `Closes #N` did NOT auto-close the
+# ticket off the default branch, so a bare mention must NOT pull an UNRELATED open
+# ticket out of `I` into `M` (the never-falsely-done contract; adversarial review
+# #1083, both reviewers, BLOCKER). A cross-repo `owner/repo#N` has no space before
+# `#`, so `\s+#` never matches it.
+_CLOSE_KW_RE = re.compile(
+    r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s+#(\d+)")
+_ISSUE_LINE_RE = re.compile(r"(?im)^\s*Issue:\s*#(\d+)")
 
 # Per-process memo (keyed ("mu", root) -> frozenset), the repo_identity shape.
 _MEMO = {}
@@ -107,13 +117,52 @@ def _default_is_ancestor(oid, root):
     return r.returncode == 0
 
 
+_GITHUB_SLUG_RE = re.compile(r"github\.com[:/]+([^/\s]+/[^/\s]+?)(?:\.git)?/?$")
+
+
+def _slug_from_git_remote(root):
+    """`owner/repo` parsed LOCALLY from `git -C <root> remote get-url origin` —
+    no network, unlike `gh repo view`. Returns None on any failure. This keeps
+    the hot `--count`/footer path off a `gh repo view` per invocation
+    (adversarial review #1083): the slug is needed to NAME the cache + build the
+    PR-meta REST url, both derivable from the local remote."""
+    if not root:
+        return None
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(root), "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=8)
+    except Exception:
+        return None
+    if r.returncode != 0:
+        return None
+    m = _GITHUB_SLUG_RE.search((r.stdout or "").strip())
+    return m.group(1) if m else None
+
+
+def _resolve_slug(root, slug, slug_fn):
+    """The `owner/repo` for `root`: an explicit `slug` wins; else `slug_fn()`
+    (a caller-supplied resolver); else the LOCAL git remote (no network). Shared
+    by both public functions so they name the SAME cache file by construction."""
+    if slug:
+        return slug
+    if slug_fn is not None:
+        s = slug_fn()
+        if s:
+            return s
+    return _slug_from_git_remote(root)
+
+
 def _default_cache_path(slug, home=None):
-    """`~/.claude/tickets-status/pr-issues-<repo-name>.json` — keyed on the repo
-    NAME (last path segment of `slug`), the same convention statusbar's cwd cache
-    and repo_identity use, so a multi-repo box never collides."""
+    """`~/.claude/tickets-status/pr-issues-<owner>__<repo>.json` — keyed on the
+    FULL `owner/repo` slug (sanitized), so two same-named repos under DIFFERENT
+    owners (a fork + upstream, two clients' `erp`) never collide on one cache
+    (adversarial review #1083; statusbar's own cache is cwd-keyed, not name-keyed,
+    so it never collided — this one would have)."""
     base = Path(home) if home else Path.home()
-    name = (slug or "unknown").rstrip("/").split("/")[-1] or "unknown"
-    return base / ".claude" / "tickets-status" / ("pr-issues-%s.json" % name)
+    safe = re.sub(r"[^0-9A-Za-z._-]", "__",
+                  (slug or "unknown").strip("/")) or "unknown"
+    return base / ".claude" / "tickets-status" / ("pr-issues-%s.json" % safe)
 
 
 def _default_pr_meta_fn(slug):
@@ -152,7 +201,12 @@ def _save_cache(cache_path, data):
     try:
         p = Path(cache_path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = str(p) + ".tmp"
+        # UNIQUE tmp per writer: the footer/`--count` refresh runs CONCURRENTLY
+        # across every pane + the watchdog on the SAME repo cache, so a shared
+        # `<p>.tmp` name would let two writers interleave into one inode and
+        # os.replace a truncated file (adversarial review #1083). os.replace is
+        # atomic; a per-pid tmp makes each writer's replace independent.
+        tmp = "%s.%d.tmp" % (p, os.getpid())
         Path(tmp).write_text(json.dumps(data))
         os.replace(tmp, p)
     except Exception:
@@ -160,11 +214,13 @@ def _save_cache(cache_path, data):
 
 
 def _issue_refs(title, body, exclude_pr):
-    """The issue numbers referenced in a PR's title+body (bare `#N`, which
-    subsumes Closes/Fixes/Resolves/Issue: `#N`), with the PR's OWN number
-    removed."""
+    """The issue numbers a PR CLOSES — a closing keyword (or `Issue:` line)
+    before `#N`, GitHub's own auto-close semantics — from its title+body, with
+    the PR's OWN number removed. A bare cross-reference `#N` is deliberately NOT
+    counted (see `_CLOSE_KW_RE`)."""
     text = "%s\n%s" % (title or "", body or "")
-    refs = {int(m.group(1)) for m in _ISSUE_REF_RE.finditer(text)}
+    refs = {int(m.group(1)) for m in _CLOSE_KW_RE.finditer(text)}
+    refs |= {int(m.group(1)) for m in _ISSUE_LINE_RE.finditer(text)}
     refs.discard(int(exclude_pr))
     return refs
 
@@ -177,10 +233,15 @@ def _pr_introducing_commits(root, git_fn):
     for br in _UNRELEASED_BRANCHES:
         rng = "origin/main..origin/%s" % br
         for oid, subj in git_fn(root, rng):
-            m = _MERGE_PR_RE.search(subj) or _SQUASH_PR_RE.search(subj)
-            if not m:
-                continue
-            out.setdefault(int(m.group(1)), oid)
+            mm = _MERGE_PR_RE.search(subj)
+            if mm:
+                pr = mm.group(1)
+            else:
+                sq = _SQUASH_PR_RE.findall(subj)   # LAST (#N) = the outer PR
+                if not sq:
+                    continue
+                pr = sq[-1]
+            out.setdefault(int(pr), oid)
     return out
 
 
@@ -189,11 +250,11 @@ def _compute_merged_unreleased(root, git_fn, pr_meta_fn, cache_path, slug,
     pr_commits = _pr_introducing_commits(root, git_fn)
     if not pr_commits:
         return frozenset()   # two-branch repo / no merged-unreleased commits
-    # Resolve the slug LAZILY (a `gh repo view`) only now that there IS a
-    # non-empty range — so the hot `--count`/footer path on a TWO-branch repo
-    # pays zero gh (the git log short-circuited above).
-    if slug is None and slug_fn is not None:
-        slug = slug_fn()
+    # Resolve the slug only now that there IS a non-empty range — from the LOCAL
+    # git remote (no network) so the hot `--count`/footer path pays zero gh; a
+    # two-branch repo short-circuited above and never reaches here.
+    if slug is None:
+        slug = _resolve_slug(root, None, slug_fn)
     if cache_path is None:
         cache_path = _default_cache_path(slug)
     if pr_meta_fn is None:
@@ -249,17 +310,22 @@ def merged_unreleased_issues(root, git_fn=None, pr_meta_fn=None,
 
 
 def merged_released_still_open(root, open_numbers, is_ancestor_fn=None,
-                               cache_path=None, slug=None):
+                               cache_path=None, slug=None, slug_fn=None):
     """From the append-only PR cache, the OPEN tickets whose fix PR's introducing
     commit is now reachable from origin/main (the release landed) — a
     release-hygiene defect (the ticket should have closed at the cut). Sorted
-    ascending. Empty on a cold cache / no open set / any error."""
+    ascending. Empty on a cold cache / no open set / any error.
+
+    ACCEPTED COVERAGE LIMIT (adversarial review #1083): only PRs the box OBSERVED
+    while they were in `main..develop` are cached, so a PR that transited
+    develop→main between two refreshes is never flagged — a best-effort hygiene
+    nag, not an exhaustive audit."""
     root = str(root or "").rstrip("/")
     open_set = {int(n) for n in (open_numbers or [])}
     if not root or not open_set:
         return []
     if cache_path is None:
-        cache_path = _default_cache_path(slug)
+        cache_path = _default_cache_path(_resolve_slug(root, slug, slug_fn))
     cache = _load_cache(cache_path)
     if not isinstance(cache, dict) or not cache:
         return []
@@ -269,10 +335,14 @@ def merged_released_still_open(root, open_numbers, is_ancestor_fn=None,
     for entry in cache.values():
         if not isinstance(entry, dict):
             continue
-        oid = entry.get("oid")
-        if not oid or not is_ancestor_fn(oid, root):
+        # #1083 review: intersect with the OPEN set FIRST, so the per-entry
+        # `git merge-base --is-ancestor` subprocess runs ONLY for a PR that
+        # references a still-open ticket (a small, bounded set) — never once per
+        # cached PR ever (the append-only cache grows unboundedly).
+        open_hits = [int(n) for n in entry.get("issues", []) if int(n) in open_set]
+        if not open_hits:
             continue
-        for n in entry.get("issues", []):
-            if int(n) in open_set:
-                out.add(int(n))
+        oid = entry.get("oid")
+        if oid and is_ancestor_fn(oid, root):
+            out.update(open_hits)
     return sorted(out)
