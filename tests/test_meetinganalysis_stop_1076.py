@@ -14,6 +14,7 @@ Design acceptance fixtures:
 """
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -111,6 +112,49 @@ class TestFailOpenScoping(_TmpBase):
         report = "## ✅ Work Complete\nmeeting analysis, share $WORK/screen_inventory.md\n%s\n" % STAMP
         v, _ = ms.evaluate(report, self.d)
         self.assertEqual(v, "journal")
+
+
+class TestReviewFixes(_TmpBase):
+    """#1076 review fixes."""
+
+    def test_transcript_txt_plus_notes_md_unrelated_report_allows(self):
+        # B 🔴: a transcription/podcast project's report mentions transcript.txt
+        # AND names a real unstamped NOTES.md -> must NOT be blocked (the generic
+        # transcript.txt/frames_kept tokens were removed from _MEETING_REPORT_RE).
+        self._write("NOTES.md", "# project notes")
+        report = ("## ✅ Work Complete\nRegenerated transcript.txt and updated "
+                  "%s/NOTES.md in the docs.\n" % self.d)
+        v, _ = ms.evaluate(report, self.d)
+        self.assertEqual(v, "allow")
+
+    def test_video_notes_plus_mapping_md_unrelated_report_allows(self):
+        self._write("MAPPING.md", "# route mapping")
+        report = ("## ✅ Work Complete\nProcessed the video-notes and wrote "
+                  "%s/MAPPING.md.\n" % self.d)
+        v, _ = ms.evaluate(report, self.d)
+        self.assertEqual(v, "allow")
+
+    def test_main_unknown_stamp_journals_not_blocks(self):
+        # A/F5: a `main unknown` stamp is a main session whose model was
+        # unreadable -> fail-OPEN (journal), never a worker -> never block.
+        p = self._write("screen_inventory.md", "Analysed-by: main unknown")
+        report = "## ✅ Work Complete\nmeeting analysis: %s\nAnalysed-by: main unknown\n" % p
+        v, _ = ms.evaluate(report, self.d)
+        self.assertEqual(v, "journal")
+
+    def test_family_derived_from_managed_model(self):
+        # A/F7: the accepted family is derived from airuleset.MANAGED_MODEL, and
+        # the live MANAGED_MODEL must itself be in that family (drift-lock).
+        import airuleset
+        fam = ms._expected_family()
+        mm = re.sub(r"\[[^\]]*\]$", "", airuleset.MANAGED_MODEL.strip().lower())
+        self.assertTrue(mm.startswith(fam),
+                        "MANAGED_MODEL %r not in derived family %r" % (mm, fam))
+        # a deliverable stamped with the live managed model must pass
+        p = self._write("screen_inventory.md", "Analysed-by: main %s" % airuleset.MANAGED_MODEL)
+        report = "## ✅ Work Complete\nmeeting analysis: %s\nAnalysed-by: main %s\n" % (p, airuleset.MANAGED_MODEL)
+        v, _ = ms.evaluate(report, self.d)
+        self.assertEqual(v, "allow")
 
 
 class TestHook(_TmpBase):

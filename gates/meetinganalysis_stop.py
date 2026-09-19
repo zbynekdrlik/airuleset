@@ -4,12 +4,13 @@ hooks/stop-check-meeting-analysis.sh.
 
 After a meeting analysis, its deliverables (`screen_inventory.md`, `NOTES.md`,
 `MAPPING.md`) each carry a first-line `Analysed-by: main <model>` stamp written
-from `cli_authorship.authorship_value(cwd)` (the #1061 mechanism, role `main` +
-the live session model). This Stop gate BLOCKS a meeting-analysis completion
-report unless every NAMED, on-disk deliverable carries `Analysed-by: main
-claude-fable-*` (proving the Fable main authored the interpretation, not a
-weaker subagent) AND the report itself carries the `Analysed-by: main <model>`
-line.
+from `cli_authorship.stamp_line("Analysed", cwd)` (the #1061 mechanism, role
+`main` + the live session model). This Stop gate BLOCKS a meeting-analysis
+completion report unless every NAMED, on-disk deliverable carries `Analysed-by:
+main <Fable model>` (an audit marker attesting the Fable main authored the
+interpretation, not a weaker subagent -- NOT cryptographic proof: a first line
+can be hand-typed, the delegation PreToolUse gate is the real control) AND the
+report itself carries the `Analysed-by: main <model>` line.
 
 FAIL-OPEN by construction (a Stop hook must never wedge an UNRELATED report):
 - a report that is not a meeting-analysis report -> allow;
@@ -34,36 +35,85 @@ _BASENAMES = ("screen_inventory.md", "NOTES.md", "MAPPING.md")
 
 # Is the final message a MEETING-ANALYSIS report at all? Only then do the
 # generic `NOTES.md` / `MAPPING.md` basenames mean a deliverable (they are
-# common filenames elsewhere -- scoping here is what stops a fleet-wide false
-# block on any project's own NOTES.md). A meeting report carries at least one
-# unambiguous meeting signal.
+# common filenames elsewhere). Scope ONLY on tokens EXCLUSIVE to this skill --
+# NOT the generic `transcript.txt` / `frames_kept` / `speaker_turns.json` /
+# `video-notes` (a transcription/podcast/voiceagent project legitimately emits
+# those alongside its own NOTES.md, and keying on them wedged that unrelated
+# report -- #1076 review, reproduced fleet-wide FP). A genuine meeting report
+# always names `screen_inventory.md` (a core deliverable) OR carries the
+# mandated `Analysed-by:` line OR says "meeting analysis" / "analýza meetingu".
 _MEETING_REPORT_RE = re.compile(
     r"screen_inventory\.md"
-    r"|transcript\.txt"
-    r"|speaker_turns\.json"
-    r"|frames_kept"
-    r"|_verbatim\.md"
-    r"|video-notes"
     r"|meeting analysis"
     r"|analýza meetingu|analyza meetingu"
     r"|Analy[sz]ed-?by",
     re.IGNORECASE)
 
-# A path token ending in one of the deliverable basenames. `[^\s'"()`]*` eats the
-# leading directory back to the last whitespace/quote/backtick (paths are
-# whitespace-delimited; a markdown code-span's backticks bound it).
-_PATH_RE = re.compile(
-    r"[^\s'\"()`]*(?:screen_inventory|NOTES|MAPPING)\.md", re.IGNORECASE)
+# Delimiters that bound a path token in the report (whitespace / quotes / parens
+# / a markdown code-span backtick). Used to SPLIT the report into tokens -- a
+# linear scan, NOT a greedy `[^delim]*<basename>` regex, which backtracks
+# polynomially on a long non-delimiter run (`/aaaa….md`) and the Stop gate runs
+# on the whole completion report (#1076 review, ReDoS discipline #577/#1010).
+_TOKEN_DELIM_RE = re.compile(r"[\s'\"()`]+")
+_DELIVERABLE_SUFFIXES = ("screen_inventory.md", "notes.md", "mapping.md")
 
-# The deliverable file's FIRST line: `Analysed-by: main claude-fable-*` (role
-# main + the Fable model family). Bullet/bold/emoji tolerant.
-_FILE_STAMP_RE = re.compile(
-    r"^[ \t>*#\-🧠]*\**[ \t]*Analy[sz]ed-?by\**[ \t]*:[ \t]*\**[ \t]*"
-    r"main[ \t]+claude-fable-", re.IGNORECASE)
+
+def _deliverable_tokens(msg):
+    """Every whitespace/quote/backtick-delimited token in `msg` that ENDS in a
+    deliverable basename. Linear (no backtracking)."""
+    out = []
+    for tok in _TOKEN_DELIM_RE.split(msg):
+        if tok and tok.lower().endswith(_DELIVERABLE_SUFFIXES):
+            out.append(tok)
+    return out
+
+# A deliverable's FIRST line as a stamp: capture role + model. Bullet/bold/emoji
+# tolerant; the leading char class excludes `*` (the trailing `\**` owns bold) so
+# there is no ambiguous `*`-overlap -> no polynomial backtracking on a run of `*`
+# (#577/#1010 ReDoS discipline).
+_STAMP_RE = re.compile(
+    r"^[ \t>#\-🧠]*\**[ \t]*Analy[sz]ed-?by\**[ \t]*:[ \t]*\**[ \t]*"
+    r"(?P<role>main|worker|implementer)\b[ \t]*(?P<model>\S+)?", re.IGNORECASE)
 
 # The report line: `Analysed-by: main <model>` (role main; model any).
 _REPORT_LINE_RE = re.compile(
-    r"(?im)^[ \t>*#\-🧠]*\**[ \t]*Analy[sz]ed-?by\**[ \t]*:[ \t]*\**[ \t]*main\b")
+    r"(?im)^[ \t>#\-🧠]*\**[ \t]*Analy[sz]ed-?by\**[ \t]*:[ \t]*\**[ \t]*main\b")
+
+
+def _expected_family():
+    """The Fable model-family prefix the deliverable stamp must carry, derived
+    from `airuleset.MANAGED_MODEL` (the live MAIN model) so a future family
+    rename adapts without an edit here. Falls back to `claude-fable-`."""
+    try:
+        import airuleset
+        mm = re.sub(r"\[[^\]]*\]$", "", (airuleset.MANAGED_MODEL or "").strip().lower())
+        parts = mm.split("-")
+        if len(parts) >= 2:
+            return "-".join(parts[:2]) + "-"          # claude-fable-5-1 -> claude-fable-
+        return "claude-fable-"
+    except Exception:
+        return "claude-fable-"                          # honest default on any error
+
+
+def _stamp_verdict(first_line):
+    """('ok'|'unknown'|'bad'|'missing') for a deliverable's first line.
+    ok      -> `main <fable-family model>` (the Fable main authored it);
+    unknown -> `main unknown` (a main session whose model was unreadable -- the
+               role is main, not a worker, so fail-OPEN rather than block, #1076
+               review A/F5);
+    bad     -> a stamp with role worker/implementer or a known non-fable model
+               (a subagent authored it) -> block;
+    missing -> the first line is not an Analysed-by stamp at all -> block."""
+    m = _STAMP_RE.match(first_line or "")
+    if not m:
+        return "missing"
+    role = (m.group("role") or "").lower()
+    model = re.sub(r"\[[^\]]*\]$", "", (m.group("model") or "").strip().lower())
+    if role != "main":
+        return "bad"
+    if model in ("unknown", ""):
+        return "unknown"
+    return "ok" if model.startswith(_expected_family()) else "bad"
 
 
 def _journal(why):
@@ -110,36 +160,37 @@ def evaluate(msg, cwd, read_first_line=None):
     if not _MEETING_REPORT_RE.search(msg):
         return "allow", "not a meeting-analysis report"
 
-    tokens = _PATH_RE.findall(msg)
+    tokens = _deliverable_tokens(msg)
     if not tokens:
         return "allow", "no deliverable named"
 
-    readable = []       # (token, first_line)
-    saw_named = False
+    verdicts = []       # one _stamp_verdict per readable on-disk deliverable
     for tok in tokens:
-        saw_named = True
         rp = _resolve(tok, cwd)
         fl = read_first_line(rp) if rp else None
         if fl is not None:
-            readable.append((tok, fl))
+            verdicts.append(_stamp_verdict(fl))
 
-    if not readable:
-        # a prose mention / unexpanded / unreadable path -> fail open (never
-        # wedge an unrelated report).
+    if not verdicts:
+        # a prose mention / unexpanded $WORK var / unreadable path -> fail open
+        # (never wedge an unrelated report).
         return "journal", "meeting report names a deliverable but none is "\
                           "readable on disk"
 
     # A real deliverable is on disk -> enforce the stamp.
-    for _tok, fl in readable:
-        if not _FILE_STAMP_RE.match(fl or ""):
-            return "block", ("a meeting-analysis deliverable on disk does not "
-                             "carry a first-line `Analysed-by: main "
-                             "claude-fable-*` stamp -- the interpretation must "
-                             "be authored by the Fable main, not a subagent")
+    if any(v in ("bad", "missing") for v in verdicts):
+        return "block", ("a meeting-analysis deliverable on disk does not carry "
+                         "a first-line `Analysed-by: main <Fable model>` stamp "
+                         "(or is stamped by a subagent) -- the interpretation "
+                         "must be authored by the Fable main, not a subagent")
     if not _REPORT_LINE_RE.search(msg):
         return "block", ("the meeting-analysis completion report is missing the "
                          "`Analysed-by: main <model>` line")
-    _ = saw_named
+    if any(v == "unknown" for v in verdicts):
+        # a `main unknown` stamp -- the role is main (not a worker), the model
+        # was just unreadable -> fail-OPEN with a journal line (#1076 review).
+        return "journal", "meeting deliverable stamped `main` but the model was "\
+                          "unreadable -- allowing (fail-open)"
     return "allow", "every named deliverable is stamped + the report carries "\
                     "the Analysed-by line"
 

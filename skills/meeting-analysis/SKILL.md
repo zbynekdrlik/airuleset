@@ -17,12 +17,13 @@ user-invocable: true
 ## The hard rules (the failures this skill exists to prevent)
 
 0. **Interpretation = the MAIN session (Fable); only MECHANICS may be delegated.** A subagent may
-   do ONLY the mechanical phases 1-3 (ffmpeg extraction, the ASR API call, frame dedup). Phases
-   4-6 — reading EVERY screen, correlation, synthesis, per-task/ticket supplements, the questions
-   — run in main, whole, no sampling. Repeated client statements carry the HIGHEST weight. A
-   meeting interpreted by a weaker model is the #1 owner complaint (#1076); the delegation gate
-   `block-meeting-analysis-delegation.sh` refuses a phase-4/5 subagent dispatch, and the
-   deliverables carry an `Analysed-by: main <model>` stamp so the author is provable after the fact.
+   do ONLY the mechanical phases 1-3 (ffmpeg extraction, the ASR API call, frame dedup). Phases 4-6
+   — reading EVERY screen, correlation, synthesis, per-task supplements, the questions — run in
+   main, whole, no sampling. Repeated client statements carry the HIGHEST weight. A meeting
+   interpreted by a weaker model is the #1 owner complaint (#1076); the delegation gate
+   `block-meeting-analysis-delegation.sh` refuses a subagent dispatch asking for interpretation, and
+   deliverables carry an `Analysed-by: main <model>` audit marker (not proof — a first line can be
+   hand-typed; the gate is the real control).
 1. **NEVER audio-only.** If the meeting had screensharing, you MUST read the screens. A
    transcript without the shown documents/screens is an incomplete analysis. This is the #1
    past failure ("you just listened to the audio and ignored what we showed you").
@@ -91,9 +92,9 @@ curl -s -o /dev/null -w "liveness: %{http_code}\n" "http://$IP:$PORT/$TOK/"   # 
 echo "GIVE THE USER:  http://$IP:$PORT/$TOK/"
 ```
 
-- The advertised `IP` must be the address the remote user's VPN actually routes to dev1 (they
-  may reach it on a Tailscale/other IP, not 100.104.8.125). A local 200 does NOT prove the user can
-  reach it — confirm their path. If port 8799 is firewalled from their network, pick another.
+- The advertised `IP` must be the address the remote user's VPN routes to dev1 (a Tailscale/other
+  IP, not 100.104.8.125). A local 200 does NOT prove the user can reach it — confirm their path; if
+  the port is firewalled from their network, pick another.
 - After the user drops the file, read the real saved path out of the endpoint's own log:
   `grep SAVED ~/.claude/upload-logs/upload-<port>.log` → `$HOME/uploads/acme-call/<saved-name>`.
   The name is PRESERVED (#116, e.g. `nahrávka test (1).mp4`) — diacritics/spaces/parens survive (unsafe chars →
@@ -234,10 +235,10 @@ python3 "$SKILL/scripts/prep.py" "$WORK"
 [ -f "$WORK/speaker_turns.soniox.json" ] && mv "$WORK/speaker_turns.soniox.json" "$WORK/speaker_turns.json"
 ```
 
-**prep.py rewrites `speaker_turns.json` from the CAPTION track** — that is only the whisper-path
-fallback. When you used the Soniox path, its native `speaker_turns.json` is authoritative, so the
-`cp`/`mv` above backs it up and restores it after prep.py's screen dedup. On the whisper fallback
-path there is no Soniox file, so prep.py's caption-derived turns stand.
+**prep.py rewrites `speaker_turns.json` from the CAPTION track** — the whisper-path fallback only.
+On the Soniox path its native `speaker_turns.json` is authoritative, so the `cp`/`mv` above backs
+it up + restores it after prep.py's screen dedup. On the whisper fallback there is no Soniox file,
+so prep.py's caption-derived turns stand.
 
 Produces `$WORK/frames_kept/scr_NNN_tSSSSS.jpg` (one per DISTINCT screen) and
 `$WORK/speaker_turns.json`. **Calibration (proven): 413 raw frames → 57 screens at threshold 10.**
@@ -255,12 +256,13 @@ For EACH file in `frames_kept/`, use the Read tool to look at it and record what
 - Read every `frames_kept/scr_*.jpg` (Read renders the image). Don't sample — dedup already cut
   it to a readable set (dozens). If it's hundreds, the dedup threshold needs raising (Phase 3),
   not sampling.
-- Write a `screen_inventory.md` whose **FIRST line is the stamp** `Analysed-by: main <model>`
-  (from `python3 -c 'import cli_authorship,os;print(cli_authorship.authorship_value(os.getcwd()))'`
-  — role `main` + the live session model; Hard Rule 0). Then per screen — what system/screen it
-  is, every field / column / value / status / menu / button visible, and the capability it
-  implies. **Redact AT WRITE TIME (Hard Rule 7):** `[redigované]` for every personal/customer/
-  company name; keep the codes, numbers, dimensions, labels.
+- Write a `screen_inventory.md` whose **FIRST line is the full stamp** —
+  `python3 -c 'import cli_authorship,os;print(cli_authorship.stamp_line("Analysed", os.getcwd()))'`
+  prints the whole `Analysed-by: main <model>` line (use `stamp_line`, NOT `authorship_value` which
+  omits the label; run from the SESSION cwd, not the WORK dir, or it stamps `main unknown`; Hard
+  Rule 0). Then per screen — what system/screen it is, every field / column / value / status / menu
+  / button visible, and the capability it implies. **Redact AT WRITE TIME (Hard Rule 7):**
+  `[redigované]` for every personal/customer/company name; keep the codes, numbers, dimensions, labels.
 - A shown document/spec/quote → transcribe its **exact text** into `*_verbatim.md` (Hard Rule 3),
   customer names → `[redigované]` (Hard Rule 7).
 - Correlate with `transcript.txt` + `speaker_turns.json`: when a screen is on (~its t_sec ±8 s),
@@ -272,25 +274,23 @@ Combine all artifacts — `transcript.txt`, `speaker_turns.json`, `screen_invent
 `*_verbatim.md` — **IN MAIN (Hard Rule 0)** into the deliverables: `NOTES.md` (the synthesis /
 spec / decision log the user asked for) and `MAPPING.md` (each requirement → its ticket +
 evidence). Every deliverable (`NOTES.md`, `MAPPING.md`, `screen_inventory.md`) carries the same
-FIRST-line `Analysed-by: main <model>` stamp from `cli_authorship.authorship_value(cwd)`. Then
-run a **completeness critic** before declaring done:
+FIRST-line stamp from `cli_authorship.stamp_line("Analysed", cwd)` (the full `Analysed-by: main
+<model>` line). Then run a **completeness critic** before declaring done:
 
 - **Redaction check — MANDATORY before accepting ANY produced file (inventory, verbatim, or the
   final deliverable):** scan each for a leaked customer name (person or company); a leak is a GAP
   — redact it to `[redigované]` (Hard Rule 7).
-- The completeness critic is READ-ONLY and NEVER the primary reader (Hard Rule 0). Inline is the
-  default: re-read each screen + speaker turn IN MAIN and tick off where it landed in the output;
-  anything unticked is a gap — fix it. For a large synthesis you MAY dispatch a SINGLE read-only
-  `Explore` subagent over the FINISHED main-authored output whose only job is "what requirement,
-  screen, number, or shown document is NOT represented?" — it returns a list, never writes a
-  deliverable. Loop MAIN until the critic comes back dry.
+- The completeness critic is READ-ONLY, NEVER the primary reader (Hard Rule 0). Default = inline:
+  re-read each screen + speaker turn IN MAIN, tick off where it landed; anything unticked is a gap —
+  fix it. For a large synthesis you MAY dispatch ONE read-only `Explore` over the FINISHED
+  main-authored output — its only job is "what requirement, screen, number, or shown doc is NOT
+  represented?"; it returns a list, never writes a deliverable. Loop MAIN until it comes back dry.
 - Capture EVERYTHING identified-but-not-done as tracked items (e.g. GitHub issues) — never drop a
   requirement silently (`no-dropped-work.md`).
 
 **Every generated ticket MUST cite its evidence** — the transcript timestamp + speaker, the
-screen file (`frames_kept/scr_*.jpg`), and/or the `*_verbatim.md` line it came from. A ticket
-with no citation is an unverifiable hallucinated requirement; the user must be able to trace each
-one back to the moment in the call it came from.
+screen file (`frames_kept/scr_*.jpg`), and/or the `*_verbatim.md` line. A ticket with no citation
+is an unverifiable hallucinated requirement — the user must be able to trace each one back to the call.
 
 **Delivered-vs-broken cross-check (mandatory for a complaint call).** When the meeting exists
 because previously-"delivered" things are called non-functional / unclear / wrong (the montalu/Peto

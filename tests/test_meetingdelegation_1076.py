@@ -73,15 +73,11 @@ class TestDesignAcceptance(unittest.TestCase):
 # ---- marker + verb semantics --------------------------------------------- #
 
 class TestMarkerAndVerbs(unittest.TestCase):
-    def test_marker_not_on_first_line_blocks(self):
-        # marker present but not the FIRST line -> unmarked -> block
+    def test_marker_on_line2_does_not_save_an_interp_dispatch(self):
+        # #1076 review: blocking keys on interpretation intent. A marker below the
+        # first line does not save a dispatch that asks for interpretation.
         v, _ = _ev({"tool_name": "Agent",
-                    "tool_input": {"prompt": "Please transcribe transcript.txt.\nMECHANICAL-ONLY: asr"}})
-        self.assertEqual(v, "block")
-
-    def test_fake_phase_marker_blocks(self):
-        v, _ = _ev({"tool_name": "Agent",
-                    "tool_input": {"prompt": "MECHANICAL-ONLY: interpret\nread transcript.txt"}})
+                    "tool_input": {"prompt": "read the screens in frames_kept.\nMECHANICAL-ONLY: asr"}})
         self.assertEqual(v, "block")
 
     def test_marked_but_summarise_blocks(self):
@@ -113,13 +109,23 @@ class TestMarkerAndVerbs(unittest.TestCase):
 # ---- signal detection ---------------------------------------------------- #
 
 class TestSignals(unittest.TestCase):
-    def test_each_signal_triggers(self):
+    def test_each_signal_with_interp_blocks(self):
+        # a signal + an interpretation verb ("read the screen") -> block
         for sig in ("transcript.txt", "speaker_turns.json", "frames_kept",
                     "screen_inventory", "notes_verbatim.md", "VIDEO-NOTES",
                     "analýza meetingu", "meeting analysis", "doplnok z meetingu"):
             v, _ = _ev({"tool_name": "Agent",
-                        "tool_input": {"prompt": "please handle the %s here" % sig}})
-            self.assertEqual(v, "block", "signal %r should trigger a block" % sig)
+                        "tool_input": {"prompt": "read the screens; handle the %s" % sig}})
+            self.assertEqual(v, "block", "signal %r + interp should block" % sig)
+
+    def test_signal_alone_without_interp_allows(self):
+        # #1076 review (F2): naming a meeting artifact WITHOUT interpretation
+        # intent -- a code/dev/review/search dispatch -- must NOT be blocked.
+        for sig in ("transcript.txt", "speaker_turns.json", "frames_kept",
+                    "screen_inventory"):
+            v, _ = _ev({"tool_name": "Agent",
+                        "tool_input": {"prompt": "fix the parsing bug in %s handling" % sig}})
+            self.assertEqual(v, "allow", "signal %r alone (no interp) should allow" % sig)
 
     def test_no_signal_allows_workflow(self):
         v, _ = _ev({"tool_name": "Workflow",
@@ -130,6 +136,32 @@ class TestSignals(unittest.TestCase):
         v, _ = _ev({"tool_name": "Bash",
                     "tool_input": {"command": "cat transcript.txt"}})
         self.assertEqual(v, "allow")
+
+
+class TestOverBlockFix(unittest.TestCase):
+    """#1076 review F2 (both reviewers): the gate must NOT wedge non-interpretation
+    dispatches that merely NAME the meeting-analysis vocabulary."""
+
+    def test_bugfix_dispatch_on_the_skill_code_allows(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"subagent_type": "autopilot-worker",
+                                   "prompt": "Work issue 42: fix the speaker_turns.json parser in prep.py"}})
+        self.assertEqual(v, "allow")
+
+    def test_review_dispatch_naming_artifacts_allows(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"prompt": "Review the diff touching frames_kept and screen_inventory dedup logic"}})
+        self.assertEqual(v, "allow")
+
+    def test_grep_dispatch_allows(self):
+        v, _ = _ev({"tool_name": "Agent",
+                    "tool_input": {"prompt": "grep for frames_kept across the repo and list the files"}})
+        self.assertEqual(v, "allow")
+
+    def test_reader_fanout_still_blocks(self):
+        v, _ = _ev({"tool_name": "Workflow",
+                    "tool_input": {"script": "dispatch parallel readers over transcript.txt segments and screen_inventory groups"}})
+        self.assertEqual(v, "block")
 
 
 # ---- the real hook (stdin contract) -------------------------------------- #
@@ -155,14 +187,16 @@ class TestHook(unittest.TestCase):
 # ---- wiring -------------------------------------------------------------- #
 
 class TestWiring(unittest.TestCase):
-    def test_registered_on_agent_and_workflow(self):
+    def test_registered_on_agent_task_and_workflow(self):
+        # #1076 review F1: the sibling dispatch gates are on Agent+Task+Workflow;
+        # evaluate() handles all three, so all three must be wired.
         cfg = json.loads((REPO / "settings" / "hooks.json").read_text())
         pre = cfg["hooks"]["PreToolUse"]
         matchers = {}
         for block in pre:
             cmds = [h.get("command", "") for h in block.get("hooks", [])]
             matchers.setdefault(block.get("matcher", ""), []).extend(cmds)
-        for m in ("Agent", "Workflow"):
+        for m in ("Agent", "Task", "Workflow"):
             joined = " ".join(matchers.get(m, []))
             self.assertIn("block-meeting-analysis-delegation.sh", joined,
                           "delegation hook must be wired on the %s matcher" % m)

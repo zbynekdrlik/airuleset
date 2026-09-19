@@ -55,17 +55,30 @@ _SIGNALS = (
 _MARKER_RE = re.compile(r"^\s*MECHANICAL-ONLY:\s*.*\b(extract|asr|dedup)\b",
                         re.IGNORECASE)
 
-# Interpretation verbs -- reading/synthesis a marked-mechanical dispatch must NOT
-# ask for (that work runs in main). Slovak variants carry diacritic-stripped
-# alternates so a stream writing Slovak is caught either way.
+# Interpretation intent -- reading/synthesis/mapping that MUST run in main, not a
+# subagent. A dispatch that merely NAMES a meeting artifact WITHOUT any of these
+# is a mechanical / code / review / search dispatch and is ALLOWED (the #1076
+# review's over-block fix: the old "signal alone blocks" wedged airuleset's own
+# dev on this skill, code reviews, and greps naming the artifacts). ReDoS-safe:
+# fixed tokens with `\s+` gaps and a BOUNDED `[\w ]{0,20}` before a fixed suffix
+# (no `\w*` directly before an unbounded proximity gap -- the repo's #577 class).
+# Slovak variants carry diacritic-stripped alternates.
 _INTERP_RE = re.compile(
     r"read\s+the\s+screen"
+    r"|reads?\s+(?:the\s+|every\s+|each\s+)?(?:screen|frame|jpg|obrazovk)"
+    r"|readers?\s+over"                 # "parallel readers over transcript segments"
+    r"|parallel\s+readers?"
     r"|summari[sz]e"
+    r"|analy[sz](?:e|ing)|interpret"
+    r"|inspects?\s+(?:the\s+|each\s+|its\s+)?(?:screen|frame)"
     r"|what\s+did\s+the\s+client"
-    r"|requirements?"
-    r"|prečítaj|precitaj"       # prečítaj / precitaj
-    r"|zhrň|zhrn"                     # zhrň / zhrn(utie)
-    r"|čo\s+klient|co\s+klient",     # čo klient / co klient
+    r"|(?:list|extract|identify|gather|capture)\w*\s+(?:the\s+)?requirement"
+    r"|(?:write|writes|writing|record|records|recording)\s+[\w ]{0,20}"
+    r"(?:notes|mapping|screen_inventory|inventory|deliverable|tickets?|summary)"
+    r"|map\s+(?:it\s+|them\s+)?to\s+(?:tickets?|requirement)"
+    r"|prečítaj|precitaj|zhrň|zhrn|vyhodno"       # prečítaj/zhrň/vyhodnoť
+    r"|napíš\s+(?:poznámky|zhrnutie|shrnut)"
+    r"|čo\s+klient|co\s+klient",                       # čo klient
     re.IGNORECASE)
 
 _BYPASS_RE = re.compile(r"airuleset:meeting-delegation-ok\s*(?P<reason>.*)",
@@ -142,19 +155,27 @@ def evaluate(payload):
             mb.group("reason").strip()))
         return "allow", "meeting-delegation-ok bypass (logged)"
 
-    first_line = primary.split("\n", 1)[0] if primary else ""
-    if not _MARKER_RE.search(first_line):
-        return "block", ("signal `%s`; the dispatch is not marked "
-                         "`MECHANICAL-ONLY: extract|asr|dedup` on its first line"
-                         % signal)
-
+    # BLOCK only a dispatch that actually delegates INTERPRETATION (an interp
+    # verb / a reader fan-out / writing a deliverable). A dispatch that merely
+    # NAMES a meeting artifact without interpretation intent — a bug fix on the
+    # skill's own code, a review, a grep — is ALLOWED (#1076 review, both
+    # reviewers: the old "signal alone blocks" wedged airuleset's own dev + code
+    # reviews + greps that name the artifact vocabulary). The `Analysed-by:`
+    # stamp + Stop gate are the backstop for a paraphrased fan-out that dodges
+    # the verb list (a documented residual of any keyword heuristic).
     mi = _INTERP_RE.search(full)
-    if mi:
-        return "block", ("signal `%s`; the dispatch is marked MECHANICAL-ONLY but "
-                         "also asks for interpretation (`%s`)"
-                         % (signal, mi.group(0).strip()))
+    if not mi:
+        return "allow", ("names meeting artifact `%s` but asks no interpretation "
+                         "(a mechanical / code / review / search dispatch)" % signal)
 
-    return "allow", "MECHANICAL-ONLY meeting dispatch, no interpretation verb"
+    verb = mi.group(0).strip()
+    first_line = primary.split("\n", 1)[0] if primary else ""
+    if _MARKER_RE.search(first_line):
+        return "block", ("signal `%s`; the dispatch is marked MECHANICAL-ONLY but "
+                         "also asks for interpretation (`%s`)" % (signal, verb))
+    return "block", ("signal `%s`; the dispatch delegates meeting interpretation "
+                     "(`%s`) — that runs in the MAIN session (Hard Rule 0)"
+                     % (signal, verb))
 
 
 def _block_message(reason):
@@ -173,11 +194,13 @@ def _block_message(reason):
         "and the\n"
         "  questions (phases 4-6) run in main, whole, no sampling.\n"
         "\n"
-        "  To dispatch ONLY the mechanical phases, mark the prompt's FIRST line\n"
-        "  `MECHANICAL-ONLY: extract|asr|dedup` and keep every interpretation "
-        "verb\n"
-        "  out of it. Bypass (rare, logged): `airuleset:meeting-delegation-ok "
-        "<reason>`." % reason)
+        "  Dispatch ONLY the mechanical phases (ffmpeg extract / ASR / frame "
+        "dedup)\n"
+        "  with NO interpretation verb; mark the prompt's FIRST line "
+        "`MECHANICAL-ONLY:\n"
+        "  extract|asr|dedup` for clarity. Interpretation runs in main. Bypass "
+        "(rare,\n"
+        "  logged): `airuleset:meeting-delegation-ok <reason>`." % reason)
 
 
 def main():

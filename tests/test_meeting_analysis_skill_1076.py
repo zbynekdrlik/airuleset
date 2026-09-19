@@ -69,7 +69,11 @@ class TestAnalysedByStamp(unittest.TestCase):
     def test_stamp_instruction_present(self):
         t = _text()
         self.assertIn("Analysed-by: main", t)
-        self.assertRegex(t, r"authorship_value")
+        # the skill must cite cli_authorship.stamp_line (returns the FULL
+        # `Analysed-by: main <model>` line), NOT authorship_value (value-only,
+        # which would fail the Stop check) — #1076 review A/F4.
+        self.assertRegex(t, r"cli_authorship")
+        self.assertRegex(t, r'stamp_line\("Analysed"')
 
     def test_all_three_deliverables_named(self):
         t = _text()
