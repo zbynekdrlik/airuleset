@@ -753,7 +753,7 @@ def cmd_slice_quals(args):
     want_bounces = getattr(args, "bounces", False) is True   # #843
     want_dep_wait = getattr(args, "dep_wait", False)   # #993 item 7
     want_count_dispatchable = getattr(args, "count_dispatchable", False)  # #993 item 3
-    want_list_dispatchable = getattr(args, "list_dispatchable", False)  # #1078 item 1
+    want_list_dispatchable = getattr(args, "list_dispatchable", False) is True  # #1078 item 1 (#1036 Mock-truthy guard)
     if not (want_count or want_list or want_waiting or want_ops_wait
             or want_audit or want_bounces or want_dep_wait
             or want_count_dispatchable or want_list_dispatchable):
@@ -1270,7 +1270,7 @@ def cmd_core_quals(args):
     want_audit = getattr(args, "audit", False)   # #578
     want_dep_wait = getattr(args, "dep_wait", False)   # #993 item 7
     want_count_dispatchable = getattr(args, "count_dispatchable", False)  # #993 item 3
-    want_list_dispatchable = getattr(args, "list_dispatchable", False)  # #1078 item 1
+    want_list_dispatchable = getattr(args, "list_dispatchable", False) is True  # #1078 item 1 (#1036 Mock-truthy guard)
     if not (want_count or want_list or want_waiting or want_ops_wait or want_audit
             or want_dep_wait or want_count_dispatchable or want_list_dispatchable):
         for q in quals:
