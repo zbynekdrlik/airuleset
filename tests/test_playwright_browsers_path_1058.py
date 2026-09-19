@@ -335,6 +335,51 @@ class TestPostcheckNpmRetry1058(unittest.TestCase):
         self.assertEqual((home / ".npx-n").read_text().strip(), "1",
                          "a non-npm rc 1 must not retry (npx called exactly once)")
 
+    # --- #1085: npm's EEXIST cache race exits -2 = shell rc 254, NOT 1 --------
+    def test_npm_race_rc254_passes_on_the_retry(self):
+        # The real failure #1058 item 4 was written for: npm signals the EEXIST
+        # cache collision with process exit -2, which the shell reports as 254.
+        # The retry MUST still fire (keying on the `npm error` signature, not on
+        # a guessed rc). 1st call: rc 254 + npm error; 2nd call: success.
+        home = self._setup_box()
+        self._fake_npx(home,
+                       'C="$HOME/.npx-n"; n=$(cat "$C" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$C";\n'
+                       'if [ "$n" = 1 ]; then '
+                       'echo "npm error Remove the existing file and try again" >&2; exit 254; fi;\n'
+                       'exit 0')
+        r = self._run(home)
+        self.assertEqual(r.returncode, 0, r.stderr + "\n" + r.stdout)
+        self.assertEqual((home / ".npx-n").read_text().strip(), "2",
+                         "an rc-254 npm race must retry once (npx called twice)")
+
+    def test_exit_127_with_npm_error_never_retries(self):
+        # exit 127 (the ELF loader could not find shared libraries) is a hard
+        # fault even when the stderr happens to carry `npm error` — RC=127 is
+        # excluded from the retry and the message names the 127 class, never the
+        # npm race.
+        home = self._setup_box()
+        self._fake_npx(home,
+                       'C="$HOME/.npx-n"; n=$(cat "$C" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$C";\n'
+                       'echo "npm error while loading shared libraries: libatk" >&2; exit 127')
+        r = self._run(home)
+        self.assertEqual(r.returncode, 88, r.stderr)
+        self.assertIn("exited 127", r.stderr)
+        self.assertEqual((home / ".npx-n").read_text().strip(), "1",
+                         "exit 127 must not retry even with an npm error (npx called once)")
+
+    def test_two_rc254_failures_report_the_npm_race(self):
+        # A persisting npm cache race (two rc-254 failures) FAILs the target with
+        # the npm-race message and the #1085 tag — never "chrome-channel /
+        # version drift", which blamed a transient on a browser fault.
+        home = self._setup_box()
+        self._fake_npx(home,
+                       'echo "npm error Remove the existing file and try again" >&2; exit 254')
+        r = self._run(home)
+        self.assertEqual(r.returncode, 88, r.stderr)
+        self.assertIn("npm cache race", r.stderr)
+        self.assertIn("#1085", r.stderr)
+        self.assertNotIn("did not render", r.stderr)
+
 
 # --------------------------------------------------------------------------- #
 # Item 5 — dep-edge lock (CI-only, network) — injectable fetcher so the FAIL
