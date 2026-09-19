@@ -1370,17 +1370,11 @@ def _deploy_to_all_remotes(failed, auth_failed):
             remote_cmd = (
                 f"cd {remote['repo_path']} && (gh auth setup-git >/dev/null 2>&1 || true) "
                 f"&& git pull --ff-only && {owner_vps_env}python3 airuleset.py install "
-                # #1084 L1b: report the compact hard-off state per box
-                # (informational, never fails the target) — the deploy IS the
-                # guarantee that no box types /compact any more. It MUST run
-                # BEFORE the gating post-checks below: those are `{ … }` command
-                # GROUPS (not subshells) whose success and SKIP paths end in
-                # `exit 0` (`command -v gh || exit 0`, the Playwright OPTOUT /
-                # no-npx / no-marker SKIPs, the probe-success `exit 0`), and
-                # `exit` in a group terminates the whole remote `sh -c` — so a
-                # trailing `&& echo` after them is unreachable on every real box
-                # (the line printed 0× on v0.1.351, #1084 L1b). A report line
-                # belongs before the gates it must not depend on.
+                # #1084 L1b: the compact hard-off report line (informational,
+                # never fails the target) runs BEFORE the gating groups below.
+                # Those are `{ … }` command GROUPS whose success/SKIP paths end in
+                # `exit 0`, which terminates the whole remote `sh -c` — so a
+                # trailing `&& echo` after them was unreachable (0× on v0.1.351).
                 f"&& {_compact_hardoff_postcheck()}"
                 # #1051: prove the freshly-installed gh chain does not hang.
                 f" && {_gh_chain_postcheck()}"
