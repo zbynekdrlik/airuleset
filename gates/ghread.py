@@ -14,9 +14,12 @@ design").
 
 STDLIB ONLY at import; airuleset._gh_env is imported lazily.
 """
+import hashlib
 import json
+import os
 import re
 import subprocess
+import time
 
 GATE_UNAVAILABLE_PREFIX = "gate-unavailable:"
 
@@ -170,3 +173,294 @@ def is_pull_request(number, slug, cwd=None, runner=None, timeout=8, env=None):
     if not isinstance(obj, dict):
         return None, "%s issue read returned no object" % GATE_UNAVAILABLE_PREFIX
     return bool(obj.get("pull_request")), None
+
+
+# --------------------------------------------------------------------------- #
+# #1087 L1 item (b) -- ETag-conditional REST reads for the periodic readers.
+#
+# GitHub's conditional-request mechanism: a request carrying `If-None-Match:
+# <etag>` answered `304 Not Modified` does NOT count against the primary REST
+# rate limit (verified live on this fleet: `rate_limit.core.used` unchanged
+# across a 304). So a periodic reader that re-polls the SAME open-issue set can
+# re-poll for FREE as long as nothing changed. `rest_get_cached` caches
+# `{etag, body, ts}` per URL and sends the ETag; `list_open_issues_cached`
+# pages the REST issues endpoint through it (PRs dropped via the `pull_request`
+# key, exactly as `is_pull_request`/`gates.designdispatch` do); the client-side
+# `search_*` helpers replicate the label/@me `--search` qualifiers so a caller
+# can filter one cached snapshot instead of spending one GraphQL search per
+# qual. FAIL-OPEN throughout: any error falls back to a plain uncached GET, and
+# a failed cache write just means the next read refetches (never a raise).
+# --------------------------------------------------------------------------- #
+def _etag_dir():
+    """The per-URL ETag cache dir, overridable via AIRULESET_GH_ETAG_DIR (for
+    tests, mirroring cli_gh_rate's overridable dirs). Token-free: only an ETag
+    string + the response body are stored, never an auth header."""
+    return (os.environ.get("AIRULESET_GH_ETAG_DIR")
+            or os.path.join(os.path.expanduser("~"), ".claude", "gh-etag"))
+
+
+def _etag_cache_path(url):
+    h = hashlib.sha1(url.encode("utf-8")).hexdigest()
+    return os.path.join(_etag_dir(), h + ".json")
+
+
+def _load_etag_cache(url):
+    try:
+        with open(_etag_cache_path(url), encoding="utf-8") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else None
+    except (OSError, ValueError):
+        return None
+
+
+def _save_etag_cache(url, etag, body, now):
+    """Best-effort atomic write; a failure is fail-open (the next read simply
+    refetches without a conditional header)."""
+    d = _etag_dir()
+    try:
+        os.makedirs(d, exist_ok=True)
+        p = _etag_cache_path(url)
+        tmp = "%s.tmp.%d" % (p, os.getpid())
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"etag": etag, "body": body, "ts": now}, fh)
+        os.replace(tmp, p)
+    except OSError:
+        return
+
+
+def _build_query_url(path, params):
+    """`path` (e.g. `repos/o/r/issues`) + `params` dict -> a stable query URL.
+    Keys are SORTED so the same logical request always maps to the same cache
+    key regardless of dict construction order."""
+    if not params:
+        return path
+    from urllib.parse import urlencode
+    return path + "?" + urlencode(sorted(params.items()))
+
+
+def _loads(text):
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError):
+        return None
+
+
+_STATUS_RE = re.compile(r"^HTTP/\S+\s+(\d{3})")
+
+
+def _parse_include(out):
+    """Parse `gh api --include` raw stdout into (status:int|None, headers:{lower
+    -> value}, body:str). The status line is first; headers run until the first
+    blank line; everything after is the body. Robust to \\r\\n and to a missing
+    status line (transport error) -> status None."""
+    lines = re.split(r"\r?\n", out or "")
+    status = None
+    if lines and lines[0].startswith("HTTP/"):
+        m = _STATUS_RE.match(lines[0])
+        if m:
+            status = int(m.group(1))
+    headers, i = {}, 1
+    while i < len(lines):
+        if lines[i].strip() == "":
+            i += 1
+            break
+        if ":" in lines[i]:
+            k, v = lines[i].split(":", 1)
+            headers[k.strip().lower()] = v.strip()
+        i += 1
+    body = "\n".join(lines[i:])
+    return status, headers, body
+
+
+def rest_get_cached(path, params=None, cwd=None, runner=None, timeout=8,
+                    env=None, now=None, max_age=0):
+    """(obj, err): an ETag-conditional GET of a REST endpoint.
+
+      * `304 Not Modified` -> the cached parsed body (BUDGET-FREE).
+      * `200 OK` -> refresh the cache (store the new ETag + body) and return the
+        parsed body.
+      * any other status / transport error / unparseable body -> fail-open to a
+        plain uncached GET (`gh api <url>`); if that also fails -> (None,
+        `gate-unavailable:<reason>`).
+
+    `max_age`: when > 0 and the cached entry's `ts` is within `max_age` seconds,
+    return it with NO gh call at all (per-sweep dedup for several consumers
+    reading the same URL). Never raises."""
+    if env is None and runner is None:
+        env = _gh_env()
+    if now is None:
+        now = time.time()
+    url = _build_query_url(path, params)
+    cache = _load_etag_cache(url)
+
+    if cache and max_age and max_age > 0:
+        ts = cache.get("ts")
+        if isinstance(ts, (int, float)) and 0 <= (now - ts) < max_age:
+            obj = _loads(cache.get("body"))
+            if obj is not None:
+                return obj, None
+
+    argv = ["gh", "api", "--include"]
+    etag = cache.get("etag") if cache else None
+    if etag:
+        argv += ["-H", "If-None-Match: %s" % etag]
+    argv.append(url)
+    rc, out, err = _run(argv, cwd, timeout, env, runner)
+    status, headers, body = _parse_include(out)
+
+    if status == 304 and cache:
+        obj = _loads(cache.get("body"))
+        if obj is not None:
+            return obj, None                 # cached body, free
+    if status == 200:
+        obj = _loads(body)
+        if obj is not None:
+            _save_etag_cache(url, headers.get("etag"), body, now)
+            return obj, None
+
+    # Fail-open: a plain uncached GET (no --include, no conditional header).
+    prc, pout, perr = _run(["gh", "api", url], cwd, timeout, env, runner)
+    if prc == 0:
+        obj = _loads(pout)
+        if obj is not None:
+            return obj, None
+    return None, _gate_unavailable("%s\n%s" % (err or "", perr or ""), rc)
+
+
+def _normalize_issue(it):
+    """A REST issue object -> the row shape the periodic readers consume, mapping
+    REST field names to the gh `--json` names the old GraphQL path returned
+    (`created_at`->`createdAt`, `updated_at`->`updatedAt`, `user.login`->
+    `authorLogin`). Labels/assignees keep the `[{name}]`/`[{login}]` shape."""
+    labels = [{"name": (lb or {}).get("name")}
+              for lb in (it.get("labels") or []) if isinstance(lb, dict)]
+    assignees = [{"login": (a or {}).get("login")}
+                 for a in (it.get("assignees") or []) if isinstance(a, dict)]
+    user = it.get("user")
+    return {
+        "number": it.get("number"),
+        "title": it.get("title"),
+        "createdAt": it.get("created_at"),
+        "updatedAt": it.get("updated_at"),
+        "labels": labels,
+        "assignees": assignees,
+        "authorLogin": user.get("login") if isinstance(user, dict) else None,
+    }
+
+
+def list_open_issues_cached(slug, cwd=None, runner=None, timeout=8, env=None,
+                            per_page=100, max_pages=20, now=None, max_age=0):
+    """(rows, err): every OPEN ISSUE of `slug` as normalized rows (PRs dropped
+    via the `pull_request` key), paged through `rest_get_cached` so an unchanged
+    set re-reads for free. Returns (None, err) if ANY page read fails -- a
+    PARTIAL listing read as complete would silently reclassify rows (#1021), so
+    the caller falls back to its GraphQL path on None rather than trust a
+    truncated set."""
+    rows = []
+    complete = False
+    for page in range(1, max_pages + 1):
+        params = {"state": "open", "per_page": per_page, "page": page}
+        obj, err = rest_get_cached("repos/%s/issues" % slug, params, cwd=cwd,
+                                   runner=runner, timeout=timeout, env=env,
+                                   now=now, max_age=max_age)
+        if err or not isinstance(obj, list):
+            return None, (err or "%s issue list returned no array"
+                          % GATE_UNAVAILABLE_PREFIX)
+        for it in obj:
+            if not isinstance(it, dict) or it.get("pull_request"):
+                continue                     # skip PR rows (issues endpoint mixes them)
+            rows.append(_normalize_issue(it))
+        if len(obj) < per_page:
+            complete = True
+            break                            # short page -> provably the last page
+    if not complete:
+        # #1087 review: max_pages exhausted with a STILL-FULL last page -> the
+        # set is TRUNCATED. A partial listing read as complete would silently
+        # reclassify rows (#1021, the very failure this fn's docstring cites),
+        # so fail-safe to None and let the caller fall back to GraphQL.
+        return None, ("%s more than %d open issues (paging truncated)"
+                      % (GATE_UNAVAILABLE_PREFIX, max_pages * per_page))
+    return rows, None
+
+
+# The `--search` qualifiers the client-side matcher can replicate against a
+# cached snapshot. Anything else (free text, in:title, is:, created:, ...) is
+# NOT client-side -> the caller keeps the exact GraphQL search for that qual.
+def _token_kind(tok):
+    base = tok[1:] if tok.startswith("-") else tok
+    if base.startswith("label:"):
+        return "label"
+    if base in ("no:label", "no:assignee"):
+        return "no"
+    if base.startswith("assignee:") or base.startswith("author:"):
+        return "person"
+    return None
+
+
+def search_client_side_ok(search, me_login=None):
+    """True iff EVERY token of `search` is a qualifier this module can filter
+    client-side, AND any `@me` person-qualifier has a resolvable `me_login`.
+    A single unsupported token -> False (keep GraphQL, exact semantics).
+
+    #1087 review: GitHub search semantics the exact-string matcher does NOT
+    honour must fall back to GraphQL, or a FALSE EXCLUSION under-counts (the
+    never-stop / footer-wrong class): a comma value (`label:a,b` is ANY-OF), a
+    quoted value (`label:"needs answer"` / `assignee:'x'` keeps the quotes), and
+    an empty `label:` value all defeat it. Reject any value carrying `,`/`"`/`'`
+    and an empty label value; case is handled by `_token_matches` (casefold)."""
+    for tok in (search or "").split():
+        kind = _token_kind(tok)
+        if kind is None:
+            return False
+        base = tok[1:] if tok.startswith("-") else tok
+        value = base.split(":", 1)[1] if ":" in base else ""
+        if any(c in value for c in (",", '"', "'")):
+            return False               # comma-ANY-OF / quoted value -> GraphQL
+        if kind == "label" and value == "":
+            return False               # `label:` with no value -> GraphQL
+        if kind == "person" and value == "@me" and not me_login:
+            return False
+    return True
+
+
+def _cf(s):
+    """casefold, or None for a non-string (GitHub compares label names + logins
+    case-insensitively — #1087 review)."""
+    return s.casefold() if isinstance(s, str) else None
+
+
+def _token_matches(row, t, me_login):
+    if t.startswith("label:"):
+        name = _cf(t[len("label:"):])
+        return any(_cf((lb or {}).get("name")) == name
+                   for lb in row.get("labels") or [])
+    if t == "no:label":
+        return not row.get("labels")
+    if t == "no:assignee":
+        return not row.get("assignees")
+    if t.startswith("assignee:"):
+        who = t[len("assignee:"):]
+        who = _cf(me_login if who == "@me" else who)
+        return who is not None and any(_cf((a or {}).get("login")) == who
+                                       for a in row.get("assignees") or [])
+    if t.startswith("author:"):
+        who = t[len("author:"):]
+        who = _cf(me_login if who == "@me" else who)
+        return who is not None and _cf(row.get("authorLogin")) == who
+    return False
+
+
+def issue_matches_search(row, search, me_login=None):
+    """True iff `row` (a `_normalize_issue` snapshot row) satisfies every token
+    of `search` (space = AND, a `-` prefix negates). Assumes
+    `search_client_side_ok(search, me_login)` -- an unknown token never matches,
+    so it fails the positive case (never a false include)."""
+    for tok in (search or "").split():
+        neg = tok.startswith("-")
+        t = tok[1:] if neg else tok
+        ok = _token_matches(row, t, me_login)
+        if neg and ok:
+            return False
+        if not neg and not ok:
+            return False
+    return True

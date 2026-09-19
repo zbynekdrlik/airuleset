@@ -826,28 +826,29 @@ class TestForeignTmuxUserNeverPings(unittest.TestCase):
 
 
 class TestFetchBounceTicketsExcludesOpsChannel(unittest.TestCase):
-    """#364 (follow-up to #362): job 8's own bounce-nudge candidate query
-    (`_fetch_bounce_tickets`, the `gh_fetch` default) still hand-rolled a
-    bare `-label:autopilot-skip` with no `ops-channel` awareness — #362
-    fixed the `/goal` stop-proof (`core-quals`/`slice-quals` in
-    airuleset.py) but never touched this watchdog-side query. A PERMANENT
-    ops-channel ticket (a stream's own self-declared "never auto-closes"
-    channel) that also happened to carry `prio:bounce` would still surface
-    here as a nudge candidate."""
+    """#364 (follow-up to #362): a PERMANENT ops-channel ticket (a stream's own
+    self-declared "never auto-closes" channel) that also carries `prio:bounce`
+    must NOT surface as a bounce-nudge candidate. #1087 (b): the exclusion moved
+    from a `-label:ops-channel` search fragment to the CLIENT-SIDE base match
+    over the shared snapshot — the BEHAVIOUR is what this locks."""
 
     def test_query_excludes_ops_channel(self):
-        calls = []
+        import watchdog.cross_stream as cs
 
-        def run(argv, **kw):
-            calls.append(argv)
-            return m.Mock(returncode=0, stdout="[]")
+        def _row(num, labels):
+            return {"number": num, "title": "t%d" % num,
+                    "updatedAt": "2026-08-13T00:00:00Z",
+                    "labels": [{"name": n} for n in labels]}
 
+        snap = [
+            _row(1, ("prio:bounce",)),                   # a real bounce
+            _row(2, ("prio:bounce", "ops-channel")),     # excluded (ops-channel)
+            _row(3, ("prio:bounce", "autopilot-skip")),  # excluded (skip)
+        ]
         with TemporaryDirectory() as root:
-            with m.patch("subprocess.run", side_effect=run):
-                wd._fetch_bounce_tickets(root)
-        self.assertTrue(calls, "no gh call recorded")
-        flat = json.dumps(calls)
-        self.assertIn("-label:ops-channel", flat)
+            with m.patch.object(cs, "_open_issue_snapshot", return_value=snap):
+                got = wd._fetch_bounce_tickets(root)
+        self.assertEqual(got, [1])
 
 
 class TestBounceDiscordRepingSurvivesNotifyDedup(unittest.TestCase):

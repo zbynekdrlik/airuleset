@@ -36,7 +36,15 @@ import subprocess
 import sys
 import time
 
-import cli_gh_rate_graphql as _ghql   # #1052: the GraphQL rateLimit object read
+
+def _ghql_mod():
+    """#1087: import the GraphQL rateLimit-object reader LAZILY. Only the
+    cache-REFRESH path (`read_status` / `_update_alert_latch`) needs it; the
+    call-accounting `--record` and the zero-budget `--zero-budget-line` shim
+    entries (spawned on the hot path — every `gh` call) must stay cheap, so they
+    never pay the import."""
+    import cli_gh_rate_graphql as _ghql
+    return _ghql
 
 # --------------------------------------------------------------------------- #
 # Tunables (module constants so tests reference them, not magic numbers).
@@ -346,6 +354,7 @@ def read_status(now=None, run=None, real_gh="__auto__", force=False):
     # GraphQL exhaustion, so ALSO read the authoritative GraphQL rateLimit
     # object and take the LOWER of the two graphql readings. ONE extra call,
     # only on this refresh path (never on a cache hit), fail-open on error.
+    _ghql = _ghql_mod()
     _ghql.merge_graphql_object(resources, _ghql.fetch_graphql_object(
         run, real_gh, timeout=_FETCH_TIMEOUT_S, internal_env=INTERNAL_ENV,
         diag=_diag))
@@ -415,7 +424,7 @@ def _update_alert_latch(status):
     next episode). A single transient low never alerts (debounce)."""
     alert = status.setdefault("alert", {})
     pending = []
-    gql_authoritative = _ghql.graphql_reading_authoritative(status)
+    gql_authoritative = _ghql_mod().graphql_reading_authoritative(status)
     for name in _RESOURCES:
         pct = remaining_pct(name, status)
         if pct is None:
@@ -449,13 +458,15 @@ def pending_alerts(status):
     return list(p) if isinstance(p, list) else []
 
 
-def alert_line(resource, status):
-    """A single human-readable alert line for the journal / conformance detail."""
+def alert_line(resource, status, burners=None):
+    """A single human-readable alert line for the journal / conformance detail.
+    #1087 (a): an optional ``burners`` suffix (the current hour's top-3 gh
+    callers) makes an exhaustion episode self-explaining."""
     pct = remaining_pct(resource, status)
     block = (status or {}).get("resources", {}).get(resource, {})
     reset = _fmt_reset(block.get("reset"))
-    return "gh-rate EXHAUSTED: %s %s remaining (reset %s) — pollers backing off" % (
-        resource, _fmt_pct(pct), reset)
+    return ("gh-rate EXHAUSTED: %s %s remaining (reset %s) — pollers backing off%s"
+            % (resource, _fmt_pct(pct), reset, burners or ""))
 
 
 def record_alerts(status):
@@ -467,11 +478,12 @@ def record_alerts(status):
     try:
         os.makedirs(gh_rate_dir(), exist_ok=True)
         _cap_journal()
+        burners = current_hour_burner_suffix()   # #1087 (a): top-3 of this hour
         with open(journal_path(), "a", encoding="utf-8") as fh:
             for name in fired:
                 fh.write("%s\t%s\n" % (
                     time.strftime("%Y-%m-%dT%H:%M:%S%z"),
-                    alert_line(name, status)))
+                    alert_line(name, status, burners=burners)))
     except OSError as e:
         _diag("journal-write", e)
     return fired
@@ -494,9 +506,11 @@ def _fmt_reset(reset):
     return time.strftime("%H:%M", time.localtime(r))
 
 
-def status_row(status):
-    """A single ``gh-rate: core X% graphql Y% reset HH:MM`` status row, or None
-    when no reading is available (nothing to show)."""
+def status_row(status, now=None):
+    """A single ``gh-rate: core X% graphql Y% reset HH:MM [calls N]`` status row,
+    or None when no reading is available (nothing to show). #1087 (a): the
+    ``calls N`` suffix is the day's total gh spend recorded by the shim (omitted
+    when zero / unrecorded)."""
     res = (status or {}).get("resources") or {}
     if not any(name in res for name in _RESOURCES):
         return None
@@ -508,8 +522,12 @@ def status_row(status):
         if isinstance(b, dict) and b.get("reset"):
             reset = b["reset"]
             break
-    return "gh-rate: core %s graphql %s reset %s" % (
+    row = "gh-rate: core %s graphql %s reset %s" % (
         _fmt_pct(core_pct), _fmt_pct(gql_pct), _fmt_reset(reset))
+    total = day_total(load_calls(now))
+    if total:
+        row += " calls %d" % total
+    return row
 
 
 # --------------------------------------------------------------------------- #
@@ -529,24 +547,35 @@ _API_WRITE_FLAGS = {"-X", "--method", "-f", "-F", "--field", "--raw-field",
                     "--input"}
 _API_WRITE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 
+# gh flags that TAKE A VALUE in the NEXT token. `_subcommand_words` must skip the
+# value too, or the value is misread as a COMMAND word — and for `gh api` that
+# means a header value (`-H "If-None-Match: <etag>"`, `-H "Authorization: token
+# X"`) or a `-q`/`-f` value would be persisted into the call-accounting key
+# (#1087 B-review 🟡1: key-space pollution + a token-free-invariant leak on the
+# lane's OWN ETag reads). `-R`/`--repo` was already handled specially below.
+_VALUE_FLAGS = {"-H", "--header", "-f", "-F", "--field", "--raw-field",
+                "-X", "--method", "-q", "--jq", "--input"}
+
 
 def _subcommand_words(argv, n):
-    """The first `n` COMMAND words, skipping any leading global flags — notably
-    `-R`/`--repo` and ITS value, so `gh -R o/r issue view 5` still resolves to
-    ("issue", "view") (#1040 review-2 MINOR-4). A lone unrecognized `-flag` is
-    treated as valueless (best-effort; a misparse only ever fails open to
+    """The first `n` COMMAND words, skipping any leading flags — notably
+    `-R`/`--repo` and every `_VALUE_FLAGS` flag AND ITS value token, so
+    `gh -R o/r issue view 5` -> ("issue", "view") and
+    `gh api -H "If-None-Match: X" repos/o/r/issues` -> ("api",
+    "repos/o/r/issues") (never the header value). A lone unrecognized `-flag`
+    is treated as valueless (best-effort; a misparse only ever fails open to
     "not a poll" = pass-through, never a wrongly-throttled call)."""
     out = []
     i = 0
     while i < len(argv) and len(out) < n:
         t = argv[i]
-        if t in ("-R", "--repo"):
+        if t in ("-R", "--repo") or t in _VALUE_FLAGS:
             i += 2                       # skip the flag AND its value token
             continue
         if t.startswith("-R") and len(t) > 2:      # glued `-Ro/r`
             i += 1
             continue
-        if t.startswith("--repo="):
+        if "=" in t and t.startswith("-"):         # `--repo=o/r`, `--header=X`
             i += 1
             continue
         if t.startswith("-"):
@@ -615,6 +644,182 @@ def classify_call(argv):
         resource = "graphql" if "--json" in toks else "core"
         return True, resource
     return False, None
+
+
+# --------------------------------------------------------------------------- #
+# #1087 (a) — per-box call accounting. Every shim invocation appends one counter
+# to ``~/.claude/gh-rate/calls-<YYYY-MM-DD>.json`` keyed by
+# ``"<w0> <w1>|<kind>"`` under the current HOUR, where kind is poller|human|
+# write (internal refreshes are never counted). NO argv beyond the two
+# subcommand words, NO env values, NO tokens — token-free like the status cache.
+# Fail-open: a counter error never delays or blocks the call.
+# --------------------------------------------------------------------------- #
+def classify_kind(argv, env=None):
+    """The 3-way call class the counter records: ``poller`` (background poll,
+    ``AIRULESET_GH_POLLER=1``), ``human`` (an interactive READ shape with no
+    poller env), ``write`` (everything else — comment/edit/merge/create/api
+    write/…), or ``internal`` (the shim's own free ``rate_limit`` refresh,
+    ``AIRULESET_GH_RATE_INTERNAL=1`` — never counted). Single source of truth,
+    reusing ``classify_call``'s read-shape allowlist so the write/human split
+    never drifts from the throttle classifier."""
+    env = env if env is not None else os.environ
+    if env.get(INTERNAL_ENV) == "1":
+        return "internal"
+    if env.get(POLLER_ENV) == "1":
+        return "poller"
+    is_poll, _res = classify_call(argv)
+    return "human" if is_poll else "write"
+
+
+def _day_str(now):
+    return time.strftime("%Y-%m-%d", time.localtime(now))
+
+
+def calls_path(now=None):
+    if now is None:
+        now = time.time()
+    return os.path.join(gh_rate_dir(), "calls-%s.json" % _day_str(now))
+
+
+def _call_key(argv, kind):
+    words = _subcommand_words([a for a in argv if a], 2)
+    # #1087 B-review 🟡1: for `gh api <path>` strip the query string so the key
+    # is the ENDPOINT (`api repos/o/r/issues`), never fragmented per page / per
+    # etag / per state qualifier — the accounting counts endpoints, not URLs.
+    if len(words) == 2 and words[0] == "api":
+        words = [words[0], words[1].split("?", 1)[0]]
+    label = " ".join(words) if words else "?"
+    return "%s|%s" % (label, kind)
+
+
+def record_call(argv, env=None, now=None):
+    """Append one counter for this gh invocation (best-effort, never raises,
+    never delays — the shim backgrounds it). Internal refreshes are skipped.
+    Uses an flock'd read-modify-write so concurrent shim calls never lose a
+    count."""
+    try:
+        if now is None:
+            now = time.time()
+        kind = classify_kind(argv, env)
+        if kind == "internal":
+            return
+        key = _call_key(argv, kind)
+        hour = time.strftime("%H", time.localtime(now))
+        path = calls_path(now)
+        os.makedirs(gh_rate_dir(), exist_ok=True)
+        import fcntl
+        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            # Read the WHOLE file (#1087 review 🔵: a fixed 1 MB cap would
+            # truncate an oversized day file -> json parse fail -> the day's
+            # counters reset). Loop until EOF so no size assumption is made.
+            chunks = []
+            while True:
+                chunk = os.read(fd, 1 << 20)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            raw = b"".join(chunks).decode("utf-8", "replace")
+            try:
+                data = json.loads(raw) if raw.strip() else {}
+                if not isinstance(data, dict):
+                    data = {}
+            except (ValueError, TypeError):
+                data = {}
+            bucket = data.setdefault(hour, {})
+            if not isinstance(bucket, dict):
+                bucket = data[hour] = {}
+            bucket[key] = int(bucket.get(key, 0) or 0) + 1
+            payload = json.dumps(data).encode("utf-8")
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.ftruncate(fd, 0)
+            os.write(fd, payload)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+    except Exception as e:   # noqa: BLE001 — accounting must never break gh
+        _diag("record-call", e)
+
+
+def load_calls(now=None):
+    """The day's counter dict ``{hour: {key: count}}`` (empty on absent/bad)."""
+    try:
+        with open(calls_path(now), encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _flatten_calls(data, hour=None):
+    """Sum a day's (or one hour's) counters into ``{key: count}``."""
+    out = {}
+    hours = [hour] if hour is not None else list((data or {}).keys())
+    for h in hours:
+        bucket = (data or {}).get(h) or {}
+        if isinstance(bucket, dict):
+            for k, v in bucket.items():
+                try:
+                    out[k] = out.get(k, 0) + int(v)
+                except (ValueError, TypeError):
+                    continue
+    return out
+
+
+def top_burners(data, limit=10, hour=None):
+    """``[(key, count), …]`` for the day (or one hour), highest first."""
+    flat = _flatten_calls(data, hour=hour)
+    return sorted(flat.items(), key=lambda kv: (-kv[1], kv[0]))[:limit]
+
+
+def hour_top3(data, hour):
+    return top_burners(data, limit=3, hour=hour)
+
+
+def day_total(data):
+    return sum(_flatten_calls(data).values())
+
+
+def current_hour_burner_suffix(now=None):
+    """`` — top: k1×n1, k2×n2, k3×n3`` from the current hour's counters, or ``""``
+    when nothing is recorded (so the alert line stays clean)."""
+    if now is None:
+        now = time.time()
+    hour = time.strftime("%H", time.localtime(now))
+    top = hour_top3(load_calls(now), hour)
+    if not top:
+        return ""
+    return " — top: " + ", ".join("%s×%d" % (k, n) for k, n in top)
+
+
+# --------------------------------------------------------------------------- #
+# #1087 (c) — honest zero-budget fast-fail line for a non-poller READ.
+# --------------------------------------------------------------------------- #
+def zero_budget_line(argv, env=None, status=None, now=None):
+    """The ONE stderr line the shim prints BEFORE exec'ing the real gh when the
+    CACHED status shows ``remaining == 0`` for the resource a HUMAN read will
+    use: ``gh: <resource> budget exhausted until HH:MM — retry after the reset``.
+    Empty for a poller (it backs off instead), a write (passes through
+    unchanged), or when budget remains / is unknown. Cache-only (never a gh
+    call), fail-open to ``""``."""
+    try:
+        if classify_kind(argv, env) != "human":
+            return ""
+        is_poll, resource = classify_call(argv)
+        if not resource:
+            return ""
+        if status is None:
+            status = _load_cache()
+        block = (status or {}).get("resources", {}).get(resource)
+        if not isinstance(block, dict):
+            return ""
+        if int(block.get("remaining", 1)) != 0:
+            return ""
+        return ("gh: %s budget exhausted until %s — retry after the reset"
+                % (resource, _fmt_reset(block.get("reset"))))
+    except Exception:
+        return ""
 
 
 def wrapper_backoff(argv, status=None, now=None, run=None):
@@ -717,8 +922,22 @@ if [ ! -x "$REAL_GH" ]; then
   fi
 fi
 [ -x "$REAL_GH" ] || {{ echo "gh: not found (airuleset shim could not resolve real gh)" >&2; exit 127; }}
-# Internal refresh, or any non-poller (human/interactive/hook) call: no delay.
-if [ "${{{internal_env}:-}}" = "1" ] || [ "${{{poller_env}:-}}" != "1" ]; then
+# Internal refresh (the shim's own free rate_limit read): no delay, no
+# accounting, no zero-budget line.
+if [ "${{{internal_env}:-}}" = "1" ]; then
+  exec "$REAL_GH" "$@"
+fi
+# #1087 (a) call accounting: append one counter for THIS call (poller/human/
+# write), BACKGROUNDED so it never delays exec, and fail-open (any error is
+# journalled by --record, never surfaced). Every non-internal call is counted.
+( {python_exe} {module_path} --record -- "$@" >/dev/null 2>&1 & ) 2>/dev/null || true
+# Non-poller (human/interactive/hook) call: never throttled. #1087 (c): print
+# ONE honest zero-budget line only when the throttle marker says budget MIGHT be
+# low (so a healthy call never spends python), then exec with zero delay.
+if [ "${{{poller_env}:-}}" != "1" ]; then
+  if [ -e {marker} ]; then
+    {python_exe} {module_path} --zero-budget-line -- "$@" || true
+  fi
   exec "$REAL_GH" "$@"
 fi
 # Fast path: no throttle marker => budget healthy => never spend python. The
@@ -890,10 +1109,37 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
 # --------------------------------------------------------------------------- #
 # `airuleset.py gh-rate` + the shim's `--wrapper-backoff` entry.
 # --------------------------------------------------------------------------- #
+def _cmd_gh_rate_top(args):
+    """#1087 (a): ``airuleset.py gh-rate --top [--day YYYY-MM-DD]`` — print the
+    day's top gh burners per (subcommand, class), highest first. Reads ONLY the
+    counter file (no gh call, no budget)."""
+    day = getattr(args, "day", None)
+    if day:
+        try:
+            now = time.mktime(time.strptime(day, "%Y-%m-%d"))
+        except ValueError:
+            print("gh-rate --top: bad --day %r (want YYYY-MM-DD)" % day)
+            return 2
+    else:
+        now = time.time()
+    data = load_calls(now)
+    total = day_total(data)
+    if not total:
+        print("gh-rate: no calls recorded for %s" % _day_str(now))
+        return 0
+    print("gh-rate top burners for %s (total %d):" % (_day_str(now), total))
+    for key, count in top_burners(data, limit=getattr(args, "limit", 15) or 15):
+        print("  %6d  %s" % (count, key))
+    return 0
+
+
 def cmd_gh_rate(args):
     """Print the two rate rows (core + graphql), refreshing the cache. With
+    ``--top`` print the day's top burners (counter file only, no gh); with
     ``--json`` dump the raw status; with ``--no-refresh`` read the cache only.
     Fires (records) any pending once-alert as a side effect of the refresh."""
+    if getattr(args, "top", False):
+        return _cmd_gh_rate_top(args)
     no_refresh = getattr(args, "no_refresh", False)
     status = read_status(force=(not no_refresh) and not _cache_is_fresh())
     record_alerts(status)
@@ -933,15 +1179,18 @@ def _cache_is_fresh(now=None):
     return isinstance(fa, (int, float)) and (now - fa) < CACHE_TTL_S
 
 
+def _gh_args_after_dashdash(argv):
+    try:
+        return argv[argv.index("--") + 1:]
+    except ValueError:
+        return []
+
+
 def _wrapper_backoff_main(argv):
     """`cli_gh_rate.py --wrapper-backoff -- <gh args>` — print the shim's
     backoff seconds (0 on anything but a poll under a low budget). Never
     raises; prints 0 on any error (fail-open)."""
-    try:
-        idx = argv.index("--")
-        gh_args = argv[idx + 1:]
-    except ValueError:
-        gh_args = []
+    gh_args = _gh_args_after_dashdash(argv)
     try:
         print(wrapper_backoff(gh_args))
     except Exception:
@@ -949,9 +1198,35 @@ def _wrapper_backoff_main(argv):
     return 0
 
 
+def _record_main(argv):
+    """`cli_gh_rate.py --record -- <gh args>` — the shim's backgrounded call-
+    accounting entry (#1087 a). `record_call` is itself fully fail-open (logs to
+    the diag journal, never raises), so this is a thin pass-through."""
+    record_call(_gh_args_after_dashdash(argv))
+    return 0
+
+
+def _zero_budget_main(argv):
+    """`cli_gh_rate.py --zero-budget-line -- <gh args>` — print the honest
+    zero-budget stderr line for a non-poller read at remaining==0 (#1087 c), or
+    nothing. `zero_budget_line` is cache-only and fail-open (returns "")."""
+    line = zero_budget_line(_gh_args_after_dashdash(argv))
+    if line:
+        sys.stderr.write(line + "\n")
+    return 0
+
+
 if __name__ == "__main__":
-    if "--wrapper-backoff" in sys.argv:
+    # #1087 review 🔵: dispatch on the FIRST arg only (equality), never
+    # membership — a gh arg literally equal to a sentinel (e.g. `gh issue
+    # comment 5 --body "--record"`, passed after `--`) must not mis-dispatch.
+    _mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    if _mode == "--wrapper-backoff":
         sys.exit(_wrapper_backoff_main(sys.argv[1:]))
+    if _mode == "--record":
+        sys.exit(_record_main(sys.argv[1:]))
+    if _mode == "--zero-budget-line":
+        sys.exit(_zero_budget_main(sys.argv[1:]))
 
     # A bare run prints the rows (handy for a box operator).
     class _A:

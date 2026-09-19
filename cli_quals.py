@@ -2452,8 +2452,58 @@ def _union_open_issues(quals, base, cwd=None, repo=None):
     `cwd`'s git remote instead."""
     import airuleset
     seen, failed = {}, False
+
+    # #1087 (b): fetch ONE ETag-cached REST snapshot of the repo's open issues
+    # and filter each qual CLIENT-SIDE, so N per-qual GraphQL searches collapse
+    # to ONE snapshot read (a 304 re-poll is budget-free). A qual whose
+    # `--search` semantics the client-side matcher can't represent (free text,
+    # in:title, ...), an unresolvable @me login, or a snapshot that couldn't be
+    # read ALL fall back to the ORIGINAL per-qual GraphQL search below — so the
+    # counts are never worse than the pre-#1087 behaviour (fail-safe: a snapshot
+    # error over-reads via GraphQL exactly as before, never a silent under-count
+    # that would false a /goal stop-proof).
+    #
+    # AIRULESET_QUALS_NO_SNAPSHOT=1 is an operability + test kill-switch (same
+    # idiom as AIRULESET_DRAFT_RESCUE_DIR / AIRULESET_TEST_IGNORE_DISABLE): it
+    # forces the pre-#1087 per-qual GraphQL path, so a box on which the snapshot
+    # ever misbehaves reverts cleanly, and the ~40 hermetic quals tests that mock
+    # only `_gh_out` keep exercising the GraphQL contract they were written for.
+    snapshot = None
+    if os.environ.get("AIRULESET_QUALS_NO_SNAPSHOT") != "1":
+        try:
+            from gates import ghread
+            slug = repo or ghread.resolve_slug(cwd)
+            if slug:
+                snapshot, snap_err = ghread.list_open_issues_cached(
+                    slug, cwd=cwd, timeout=20)
+                if snap_err:
+                    snapshot = None
+        except Exception:
+            snapshot = None
+
+    me_login, me_resolved = None, False
     for qual in quals:
         search = (base + " " + qual).strip() if qual else base
+        rows = None
+        if snapshot is not None:
+            if ("@me" in search) and not me_resolved:
+                try:
+                    me_login = airuleset._gh_login(cwd)
+                except Exception:
+                    me_login = None
+                me_resolved = True
+            if ghread.search_client_side_ok(search, me_login):
+                rows = [r for r in snapshot
+                        if ghread.issue_matches_search(r, search, me_login)]
+        if rows is not None:
+            # Reduce to the SAME 4-key row shape the GraphQL path returns, so
+            # every downstream consumer is byte-identical regardless of source.
+            for r in rows:
+                seen[r["number"]] = {"number": r["number"],
+                                     "title": r.get("title"),
+                                     "createdAt": r.get("createdAt"),
+                                     "labels": r.get("labels") or []}
+            continue
         gh_args = ["issue", "list", "--state", "open", "--search", search]
         if repo:
             gh_args += ["-R", repo]

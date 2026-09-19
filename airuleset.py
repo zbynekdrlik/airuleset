@@ -10253,6 +10253,16 @@ def main():
     p_ghrate.add_argument(
         "--no-refresh", action="store_true",
         help="Read the cache only; do not call gh api rate_limit")
+    p_ghrate.add_argument(
+        "--top", action="store_true",
+        help="Print this box's top gh burners for the day (#1087 call "
+             "accounting) from ~/.claude/gh-rate/calls-<day>.json — no gh call")
+    p_ghrate.add_argument(
+        "--day", default=None,
+        help="With --top: the day YYYY-MM-DD to report (default today)")
+    p_ghrate.add_argument(
+        "--limit", type=int, default=15,
+        help="With --top: how many burners to print (default 15)")
 
     # --- #993: lane-overlap independence check ---
     p_lo = sub.add_parser(
