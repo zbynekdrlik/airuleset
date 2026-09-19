@@ -32,6 +32,7 @@ Stop payload on stdin; exit 2 (reason on stderr) blocks, exit 0 allows. See the
 
 Dry-run: echo '{"last_assistant_message":"…\n⏳ WORKING","cwd":"/repo","session_id":"s","transcript_path":"/t.jsonl"}' | python3 -m gates.lanefill
 """
+import json
 import os
 import re
 import sys
@@ -61,6 +62,15 @@ _DONE_RE = re.compile(r"✅\s*(?:DONE|complete|work complete)", re.I)
 _FAKE_QUALS_ENV = "AIRULESET_LANEFILL_FAKE_QUALS"
 
 _MAX_NAMED = 5
+
+# The per-cwd tickets-status cache freshness window (the footer refresh TTL): a
+# `dispatchable` set written within this many seconds is trusted as-is (no live
+# call). Mirrors the footer's own 120s refresh cadence.
+_CACHE_TTL_S = 120
+
+# The bounded live-fallback timeout — a stale-cache turn's one quals call. Kept
+# small (< the Stop hook's settings.json timeout) so it fails-open gracefully.
+_FALLBACK_TIMEOUT_S = 8
 
 
 class _Unreadable(Exception):
@@ -231,12 +241,46 @@ def _airuleset_path():
                         "airuleset.py")
 
 
+def _cached_dispatchable(cwd):
+    """`(count, [(num, title), …])` from a FRESH per-cwd tickets-status cache,
+    or None. The footer refresh (`tickets-status --refresh`, run at most every
+    `_CACHE_TTL_S`) persists the `dispatchable: [{number, title}]` set next to
+    its counts, so the common turn-end reads it here with NO subprocess and NO
+    gh — the #1078 integration-review fix (14 parallel boxes must NOT each pay a
+    ~15-25s live quals call + a shared-app-token gh burst per turn). None when
+    the cache is stale / missing / lacks the key (an older writer) / stores
+    `null` (that refresh's dep read was unmeasurable) / is malformed → the caller
+    does its bounded live fallback."""
+    try:
+        import statusbar
+        p = statusbar.cache_dir() / (statusbar.cwd_key(cwd) + ".json")
+        with open(p) as f:
+            entry = json.load(f)
+    except Exception:  # noqa: BLE001 — absent / unreadable / malformed → fallback
+        return None
+    ts = entry.get("ts")
+    if not isinstance(ts, (int, float)) or (time.time() - ts) > _CACHE_TTL_S:
+        return None                          # stale → fallback
+    disp = entry.get("dispatchable")
+    if not isinstance(disp, list):
+        return None                          # old writer (no key) / null → fallback
+    tickets = []
+    for d in disp:
+        if isinstance(d, dict) and isinstance(d.get("number"), int):
+            tickets.append((d["number"], str(d.get("title", ""))))
+    return len(tickets), tickets
+
+
 def _dispatchable(payload, cwd):
-    """`(count, tickets)` of DISPATCHABLE candidates, from ONE quals call —
-    `slice-quals`/`core-quals --list-dispatchable` (authority-picked, the SAME
-    seam `--count-dispatchable` reuses). The count is the line count, consistent
-    with `--count-dispatchable` by construction. Test seam `_FAKE_QUALS_ENV`
-    supplies canned lines with NO gh. Any failure → _Unreadable → fail-open."""
+    """`(count, tickets)` of DISPATCHABLE candidates — CACHE-FIRST.
+
+    Order: (1) the `_FAKE_QUALS_ENV` test seam (canned lines, no gh);
+    (2) the FRESH tickets-status cache (`_cached_dispatchable` — the common path,
+    no subprocess, no gh); (3) ONE live `slice-quals`/`core-quals
+    --list-dispatchable` fallback capped at `_FALLBACK_TIMEOUT_S` (8s, small — a
+    stale-cache turn; the footer refresh warms the cache for the next turn) → on
+    timeout / rc≠0 → `_Unreadable` → fail-open. The count is the line count,
+    consistent with `--count-dispatchable` by construction."""
     fake = os.environ.get(_FAKE_QUALS_ENV)
     if fake is not None:
         if fake.startswith("@"):
@@ -246,6 +290,9 @@ def _dispatchable(payload, cwd):
             except OSError as e:
                 raise _Unreadable("fake quals file %s" % e)
         return _parse_quals_lines(fake)
+    cached = _cached_dispatchable(cwd)
+    if cached is not None:
+        return cached
     import subprocess
     import cli_quals
     try:
@@ -255,15 +302,13 @@ def _dispatchable(payload, cwd):
         raise _Unreadable("authority %s" % e)
     cmd = "core-quals" if authority == "full" else "slice-quals"
     try:
-        # Timeout MUST sit under the Stop hook's own settings.json timeout (30s)
-        # so a slow quals call on a big repo (`--count`-class ~15-25s on odoo-erp,
-        # #619) fails-open GRACEFULLY here (journal + allow) instead of the whole
-        # hook being hard-killed at the CC ceiling. Accepted residual: on a repo
-        # whose dispatchable read exceeds this, the gate under-enforces (fail-open)
-        # rather than wedging — the designed direction.
+        # Bounded at 8s (< the Stop hook's own settings.json timeout) so a slow
+        # fallback on a big repo fails-open GRACEFULLY (journal + allow) within
+        # budget instead of being hard-killed. A stale-cache turn hits this at
+        # most once; the footer refresh warms the cache for the next turn.
         r = subprocess.run(
             [sys.executable, _airuleset_path(), cmd, "--list-dispatchable"],
-            cwd=cwd, capture_output=True, text=True, timeout=25)
+            cwd=cwd, capture_output=True, text=True, timeout=_FALLBACK_TIMEOUT_S)
     except Exception as e:  # noqa: BLE001
         raise _Unreadable("quals subprocess %s" % type(e).__name__)
     if r.returncode != 0:

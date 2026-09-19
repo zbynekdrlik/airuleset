@@ -528,5 +528,204 @@ class TestListDispatchableIsTrueGuard(unittest.TestCase):
         self.assertGreaterEqual(row[0].count("\t"), 3)
 
 
+class TestDispatchableCacheFirst(unittest.TestCase):
+    """#1078 REWORK (coordinator integration review): the gate must read the
+    dispatchable set CACHE-FIRST from the per-cwd tickets-status cache (written
+    <=120s by the footer refresh) — NO per-turn subprocess / gh on the common
+    path (14 parallel boxes paying ~15-25s + shared-app-token gh burst each turn
+    was the reject). A stale/missing/keyless/malformed cache → ONE live fallback
+    capped at 8s → on timeout fail-open."""
+
+    def _cache(self, home, cwd, entry):
+        import statusbar
+        d = os.path.join(home, ".claude", "tickets-status")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, statusbar.cwd_key(cwd) + ".json"), "w") as f:
+            json.dump(entry, f)
+
+    def _payload(self, cwd, sid="s"):
+        return json.dumps({"cwd": cwd, "session_id": sid})
+
+    def test_fresh_cache_returns_dispatchable_without_subprocess(self):
+        import tempfile
+        import unittest.mock as m
+        with tempfile.TemporaryDirectory() as tmp:
+            home, cwd = os.path.join(tmp, "h"), os.path.join(tmp, "repo")
+            os.makedirs(home)
+            os.makedirs(cwd)
+            self._cache(home, cwd, {"ts": time.time(), "open": 3,
+                                    "dispatchable": [{"number": 11, "title": "a"},
+                                                     {"number": 12, "title": "b"}]})
+            with m.patch.dict(os.environ, {"HOME": home}, clear=False), \
+                 m.patch("subprocess.run") as run:
+                os.environ.pop("AIRULESET_LANEFILL_FAKE_QUALS", None)
+                count, tickets = lf._dispatchable(self._payload(cwd), cwd)
+            self.assertEqual(count, 2)
+            self.assertEqual(tickets, [(11, "a"), (12, "b")])
+            run.assert_not_called()             # cache-first: NO subprocess
+
+    def test_stale_cache_falls_back_to_live_call_capped_at_8s(self):
+        import tempfile
+        import unittest.mock as m
+        with tempfile.TemporaryDirectory() as tmp:
+            home, cwd = os.path.join(tmp, "h"), os.path.join(tmp, "repo")
+            os.makedirs(home)
+            os.makedirs(cwd)
+            self._cache(home, cwd, {"ts": time.time() - 9999, "open": 3,
+                                    "dispatchable": [{"number": 11, "title": "a"}]})
+            fake_cp = m.Mock(returncode=0, stdout="77\tfell back\n")
+            with m.patch.dict(os.environ, {"HOME": home}, clear=False), \
+                 m.patch("cli_quals.resolve_authority", return_value="full"), \
+                 m.patch("cli_quals._repo_root", return_value=cwd), \
+                 m.patch("subprocess.run", return_value=fake_cp) as run:
+                os.environ.pop("AIRULESET_LANEFILL_FAKE_QUALS", None)
+                count, tickets = lf._dispatchable(self._payload(cwd), cwd)
+            self.assertEqual((count, tickets), (1, [(77, "fell back")]))
+            run.assert_called_once()
+            self.assertEqual(run.call_args.kwargs.get("timeout"), 8)
+
+    def test_cache_missing_dispatchable_key_falls_back(self):
+        import tempfile
+        import unittest.mock as m
+        with tempfile.TemporaryDirectory() as tmp:
+            home, cwd = os.path.join(tmp, "h"), os.path.join(tmp, "repo")
+            os.makedirs(home)
+            os.makedirs(cwd)
+            self._cache(home, cwd, {"ts": time.time(), "open": 3})  # old writer
+            fake_cp = m.Mock(returncode=0, stdout="5\tx\n")
+            with m.patch.dict(os.environ, {"HOME": home}, clear=False), \
+                 m.patch("cli_quals.resolve_authority", return_value="full"), \
+                 m.patch("cli_quals._repo_root", return_value=cwd), \
+                 m.patch("subprocess.run", return_value=fake_cp) as run:
+                os.environ.pop("AIRULESET_LANEFILL_FAKE_QUALS", None)
+                count, _ = lf._dispatchable(self._payload(cwd), cwd)
+            self.assertEqual(count, 1)
+            run.assert_called_once()
+
+    def test_null_dispatchable_key_falls_back(self):
+        # writer stored dispatchable: null (dep read unmeasurable that refresh).
+        import tempfile
+        import unittest.mock as m
+        with tempfile.TemporaryDirectory() as tmp:
+            home, cwd = os.path.join(tmp, "h"), os.path.join(tmp, "repo")
+            os.makedirs(home)
+            os.makedirs(cwd)
+            self._cache(home, cwd, {"ts": time.time(), "dispatchable": None})
+            fake_cp = m.Mock(returncode=0, stdout="5\tx\n")
+            with m.patch.dict(os.environ, {"HOME": home}, clear=False), \
+                 m.patch("cli_quals.resolve_authority", return_value="full"), \
+                 m.patch("cli_quals._repo_root", return_value=cwd), \
+                 m.patch("subprocess.run", return_value=fake_cp) as run:
+                os.environ.pop("AIRULESET_LANEFILL_FAKE_QUALS", None)
+                lf._dispatchable(self._payload(cwd), cwd)
+            run.assert_called_once()
+
+    def test_malformed_cache_falls_back(self):
+        import tempfile
+        import unittest.mock as m
+        with tempfile.TemporaryDirectory() as tmp:
+            home, cwd = os.path.join(tmp, "h"), os.path.join(tmp, "repo")
+            os.makedirs(home)
+            os.makedirs(cwd)
+            d = os.path.join(home, ".claude", "tickets-status")
+            os.makedirs(d, exist_ok=True)
+            import statusbar
+            with open(os.path.join(d, statusbar.cwd_key(cwd) + ".json"), "w") as f:
+                f.write("{not json")
+            fake_cp = m.Mock(returncode=0, stdout="5\tx\n")
+            with m.patch.dict(os.environ, {"HOME": home}, clear=False), \
+                 m.patch("cli_quals.resolve_authority", return_value="full"), \
+                 m.patch("cli_quals._repo_root", return_value=cwd), \
+                 m.patch("subprocess.run", return_value=fake_cp) as run:
+                os.environ.pop("AIRULESET_LANEFILL_FAKE_QUALS", None)
+                lf._dispatchable(self._payload(cwd), cwd)
+            run.assert_called_once()
+
+    def test_fallback_timeout_is_unreadable_fail_open(self):
+        import subprocess as _sp
+        import tempfile
+        import unittest.mock as m
+        with tempfile.TemporaryDirectory() as tmp:
+            home, cwd = os.path.join(tmp, "h"), os.path.join(tmp, "repo")
+            os.makedirs(home)
+            os.makedirs(cwd)  # no cache -> fallback
+            with m.patch.dict(os.environ, {"HOME": home}, clear=False), \
+                 m.patch("cli_quals.resolve_authority", return_value="full"), \
+                 m.patch("cli_quals._repo_root", return_value=cwd), \
+                 m.patch("subprocess.run",
+                         side_effect=_sp.TimeoutExpired("x", 8)):
+                os.environ.pop("AIRULESET_LANEFILL_FAKE_QUALS", None)
+                with self.assertRaises(lf._Unreadable):
+                    lf._dispatchable(self._payload(cwd), cwd)
+
+
+class TestDispatchableForCacheWriter(unittest.TestCase):
+    """#1078 REWORK: the cache-writer helper persists the dispatchable set as
+    [{number, title}] (oldest-first, dep-wait excluded) — the same set
+    --list-dispatchable returns — or None on any failure (gate then falls back).
+    Backward compatible: it is a new JSON key readers ignore."""
+
+    def setUp(self):
+        import airuleset
+        self.airuleset = airuleset
+        self.rows = {5: {"title": "alpha", "createdAt": "2026-01-02"},
+                     3: {"title": "beta", "createdAt": "2026-01-01"}}
+
+    def test_persists_number_title_oldest_first(self):
+        import unittest.mock as m
+        import cli_quals_cmd
+        with m.patch.object(cli_quals_cmd, "_dep_wait_map_for",
+                            return_value=({}, "montalu", True)), \
+             m.patch.object(self.airuleset, "dispatchable_numbers",
+                            return_value=({3, 5}, None)):
+            got = self.airuleset._dispatchable_for_cache(self.rows, "/repo")
+        self.assertEqual(got, [{"number": 3, "title": "beta"},
+                               {"number": 5, "title": "alpha"}])
+
+    def test_unmeasurable_dep_read_returns_none(self):
+        import unittest.mock as m
+        import cli_quals_cmd
+        with m.patch.object(cli_quals_cmd, "_dep_wait_map_for",
+                            return_value=({}, None, False)):
+            self.assertIsNone(self.airuleset._dispatchable_for_cache(self.rows, "/repo"))
+
+    def test_exception_returns_none(self):
+        import unittest.mock as m
+        import cli_quals_cmd
+        with m.patch.object(cli_quals_cmd, "_dep_wait_map_for",
+                            side_effect=RuntimeError("boom")):
+            self.assertIsNone(self.airuleset._dispatchable_for_cache(self.rows, "/repo"))
+
+    def test_round_trips_through_the_gate_reader(self):
+        # writer output is byte-compatible for the gate reader.
+        import tempfile
+        import unittest.mock as m
+        import cli_quals_cmd
+        import statusbar
+        with m.patch.object(cli_quals_cmd, "_dep_wait_map_for",
+                            return_value=({}, "montalu", True)), \
+             m.patch.object(self.airuleset, "dispatchable_numbers",
+                            return_value=({3, 5}, None)):
+            disp = self.airuleset._dispatchable_for_cache(self.rows, "/repo")
+        with tempfile.TemporaryDirectory() as tmp:
+            home, cwd = os.path.join(tmp, "h"), os.path.join(tmp, "repo")
+            os.makedirs(home)
+            os.makedirs(cwd)
+            d = os.path.join(home, ".claude", "tickets-status")
+            os.makedirs(d, exist_ok=True)
+            entry = {"ts": time.time(), "open": 2, "user_waiting": 0,
+                     "dispatchable": disp}
+            with open(os.path.join(d, statusbar.cwd_key(cwd) + ".json"), "w") as f:
+                json.dump(entry, f)
+            with m.patch.dict(os.environ, {"HOME": home}, clear=False), \
+                 m.patch("subprocess.run") as run:
+                os.environ.pop("AIRULESET_LANEFILL_FAKE_QUALS", None)
+                count, tickets = lf._dispatchable(json.dumps({"cwd": cwd,
+                                                              "session_id": "s"}), cwd)
+            self.assertEqual(count, 2)
+            self.assertEqual(tickets, [(3, "beta"), (5, "alpha")])
+            run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

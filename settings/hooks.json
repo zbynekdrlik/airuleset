@@ -520,7 +520,7 @@
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/stop-check-lane-fill.sh",
-            "timeout": 30
+            "timeout": 12
           },
           {
             "type": "command",
