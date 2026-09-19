@@ -644,6 +644,38 @@ def _print_bounce_rounds(quals, root, user):
         print("%d\t%d\t%s\t%s" % (num, rnd, tag, title))
 
 
+def _merged_unreleased(root):
+    """#1083 — the git-derived merged-unreleased issue set for `root` (fix in
+    develop/staging, not yet main). Slug resolved LAZILY (only when the git range
+    is non-empty) so a two-branch `--count` pays zero gh. Fail-safe EMPTY (a
+    two-branch repo, a git/REST error, an import failure) — the never-falsely-
+    done direction: a ticket whose merge state cannot be derived stays in `I`."""
+    import airuleset
+    try:
+        import cli_release_state
+        return cli_release_state.merged_unreleased_issues(
+            root, slug_fn=lambda: airuleset._repo_slug(cwd=root))
+    except Exception:
+        return frozenset()
+
+
+def _merged_released_still_open_line(seen, root):
+    """#1083 — the `core-quals --audit` release-hygiene line: open tickets whose
+    fix PR already reached main yet never closed (`#1009` keeps them out of I on
+    the slice box; this NAMES them so the gk session closes them). Empty string
+    when none / on any error."""
+    import airuleset
+    try:
+        import cli_release_state
+        nums = cli_release_state.merged_released_still_open(
+            root, open_numbers=set(seen), slug=airuleset._repo_slug(cwd=root))
+    except Exception:
+        return ""
+    if not nums:
+        return ""
+    return "merged-released-still-open: " + " ".join("#%d" % n for n in nums)
+
+
 def cmd_slice_quals(args):
     """THE single definition of "my slice" (#181) — reused verbatim by the
     reduced-authority `/goal` stop-proof templates in skills/autopilot/SKILL.md
@@ -821,6 +853,14 @@ def cmd_slice_quals(args):
         # question map is read only on the on-demand `--waiting` display path
         # below (#370). #654: own_stream=user keeps THIS box's OWN stream rows in U.
         workable_rows, waiting, ops_wait = airuleset._partition_workable(rows, own_stream=user)
+    # #1083: pull merged-to-develop-not-main tickets OUT of I/W into M — a stream
+    # sees its merged tickets leave `--count`/dispatchable without pretending
+    # they are done. DEFAULT path only (a bounce-seed --extra query keeps its
+    # full set, like #468/#510 above). ONE derivation (#367): the same split the
+    # footer applies, so `--count` and `I N` cannot drift.
+    if not extra:
+        workable_rows, ops_wait, _merged_rows = airuleset._split_merged_unreleased(
+            workable_rows, ops_wait, _merged_unreleased(root))
     unhandled = {n: v for n, v in workable_rows.items() if not handed.get(n)}
     # #1045 CORRECTION of #1025: role-filter the workable `I` slice AND the
     # third-party `W` (ops_wait) — NEVER the owner-court `U` (waiting). #1008
@@ -1344,6 +1384,13 @@ def cmd_core_quals(args):
         slug = airuleset._repo_slug(cwd=root)
         workable = _apply_role_filter(workable, root, role, slug=slug)
         ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)  # #1045
+    # #1083: split merged-to-develop-not-main tickets OUT of I/W into M, AFTER the
+    # role filter (M role-scoped by construction). DEFAULT path only (a bounce-
+    # seed --extra query keeps its full set). ONE derivation (#367): the same
+    # split the footer applies, so `--count` and the footer `I N` cannot drift.
+    if not extra:
+        workable, ops_wait, _merged_rows = airuleset._split_merged_unreleased(
+            workable, ops_wait, _merged_unreleased(root))
     if not seen:
         _refuse_unless_empty_is_trustworthy("core-quals", quals, cwd=root)
     if not seen and not extra:
@@ -1446,6 +1493,12 @@ def cmd_core_quals(args):
         # dep-aware action column.
         _dep_map, _slug, _ok = _dep_wait_map_for(workable, root)
         _print_audit_rows(workable, own_stream=None, dep_wait_map=_dep_map)
+        # #1083: release-hygiene — open tickets whose fix already reached main
+        # (a #1009 released ticket that never closed). NAMED so the gk session
+        # closes it, never silently re-counted as I.
+        _rel = _merged_released_still_open_line(seen, root)
+        if _rel:
+            print(_rel)
         return
     # #1029 item 2 — the INFRA-role human display leads with a NEW-since banner
     # (additive, ABOVE the rows, never changes the count). Only the --list path

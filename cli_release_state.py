@@ -184,10 +184,16 @@ def _pr_introducing_commits(root, git_fn):
     return out
 
 
-def _compute_merged_unreleased(root, git_fn, pr_meta_fn, cache_path, slug):
+def _compute_merged_unreleased(root, git_fn, pr_meta_fn, cache_path, slug,
+                               slug_fn):
     pr_commits = _pr_introducing_commits(root, git_fn)
     if not pr_commits:
-        return frozenset()
+        return frozenset()   # two-branch repo / no merged-unreleased commits
+    # Resolve the slug LAZILY (a `gh repo view`) only now that there IS a
+    # non-empty range — so the hot `--count`/footer path on a TWO-branch repo
+    # pays zero gh (the git log short-circuited above).
+    if slug is None and slug_fn is not None:
+        slug = slug_fn()
     if cache_path is None:
         cache_path = _default_cache_path(slug)
     if pr_meta_fn is None:
@@ -219,11 +225,14 @@ def _compute_merged_unreleased(root, git_fn, pr_meta_fn, cache_path, slug):
 
 
 def merged_unreleased_issues(root, git_fn=None, pr_meta_fn=None,
-                             cache_path=None, now=None, slug=None):
+                             cache_path=None, now=None, slug=None, slug_fn=None):
     """The set of issue numbers whose fix PR is merged into develop/staging but
-    NOT yet in main (`M`). `now` is accepted for signature stability (the cache
-    is append-only; a merged PR never changes, so no freshness clock is needed).
-    Memoised per process, BYPASSED when a git/PR seam is injected (tests)."""
+    NOT yet in main (`M`). `slug` names the `owner/repo` for the PR-meta REST
+    read + the cache filename; pass `slug_fn` instead to resolve it LAZILY (only
+    when the git range is non-empty), so a two-branch / no-merge `--count`
+    refresh pays zero gh. `now` is accepted for signature stability (the cache is
+    append-only; a merged PR never changes). Memoised per process, BYPASSED when
+    a git/PR seam is injected (tests)."""
     root = str(root or "").rstrip("/")
     if not root:
         return frozenset()
@@ -233,7 +242,7 @@ def merged_unreleased_issues(root, git_fn=None, pr_meta_fn=None,
         if memo is not None:
             return memo
     result = _compute_merged_unreleased(
-        root, git_fn or _default_git_log, pr_meta_fn, cache_path, slug)
+        root, git_fn or _default_git_log, pr_meta_fn, cache_path, slug, slug_fn)
     if not injected:
         _MEMO[("mu", root)] = result
     return result
