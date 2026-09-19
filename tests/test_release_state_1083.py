@@ -134,6 +134,69 @@ class MergedUnreleased(unittest.TestCase):
         self.assertEqual(set(got), {105, 108})
 
 
+class RealOdooTitleMapping(unittest.TestCase):
+    """#1083 REWORK (coordinator integration review) — on the real odoo-erp repo
+    the ticket numbers live in the PR TITLE (no body closing keyword), and the
+    squash subject appends the PR number as a TRAILING `(#N)`. Fixtures verbatim
+    from the last merged-to-develop PRs the coordinator sampled."""
+
+    def setUp(self):
+        import tempfile
+        rs._reset_memo()
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        self.cache = str(Path(d) / "pr-issues.json")
+
+    def test_title_is_the_ticket_carrier(self):
+        git = _git_fn_factory({
+            "origin/main..origin/develop": [
+                ("a", "docs(#7421): gk Prevencia batch 15 (#7662)"),
+                ("b", "#7644 (M1): stream_merge_guard hardening (#7660)"),
+                ("c", "#7581 (úloha 980) Čo objednať (#7606)"),
+                ("d", "#7631 #7632 (M1): gate advisories (#7657)"),
+            ],
+            "origin/main..origin/staging": [],
+        })
+        # PR REST titles (the squash subject minus the trailing (#PRnum)).
+        meta = {
+            7662: ("docs(#7421): gk Prevencia batch 15", "bare refs: #1 #2 #3"),
+            7660: ("#7644 (M1): stream_merge_guard hardening", "see #9000"),
+            7606: ("#7581 (úloha 980) Čo objednať", ""),
+            7657: ("#7631 #7632 (M1): gate advisories", "follow-up to #5"),
+        }
+        got = rs.merged_unreleased_issues(
+            "/repo", git_fn=git, pr_meta_fn=lambda pr: meta.get(pr),
+            cache_path=self.cache, slug="o/r")
+        # tickets from the TITLES (incl. the docs(#N): scope form + multi-ticket
+        # "#7631 #7632"); "úloha 980" (no #) excluded; every BARE BODY cross-ref
+        # (#1 #2 #3 / #9000 / #5) refused; the PR's own number excluded.
+        self.assertEqual(set(got), {7421, 7644, 7581, 7631, 7632})
+
+    def test_squash_pr_number_is_the_trailing_paren_not_the_scope(self):
+        commits = rs._pr_introducing_commits(
+            "/repo", _git_fn_factory({
+                "origin/main..origin/develop": [
+                    ("a", "docs(#7421): gk Prevencia batch 15 (#7662)")],
+                "origin/main..origin/staging": []}))
+        self.assertEqual(commits, {7662: "a"},
+                         "the (#7421) scope must NOT be read as the PR number")
+
+    def test_squash_regex_end_anchored(self):
+        self.assertIsNone(rs._SQUASH_PR_RE.search("docs(#7421): mid-string"))
+        self.assertEqual(rs._SQUASH_PR_RE.search("x (#7662)").group(1), "7662")
+
+    def test_body_only_bare_refs_yield_no_issues(self):
+        git = _git_fn_factory({
+            "origin/main..origin/develop": [("a", "Refactor thing (#7700)")],
+            "origin/main..origin/staging": []})
+        meta = {7700: ("Refactor thing", "see #100, #200\nfollow-up to #300")}
+        got = rs.merged_unreleased_issues(
+            "/repo", git_fn=git, pr_meta_fn=lambda pr: meta.get(pr),
+            cache_path=self.cache, slug="o/r")
+        self.assertEqual(set(got), set(),
+                         "a title with no #N + only bare body cross-refs = no M")
+
+
 class MergedReleasedStillOpen(unittest.TestCase):
     def setUp(self):
         import tempfile
