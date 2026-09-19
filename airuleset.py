@@ -253,17 +253,14 @@ MANAGED_TUI = "fullscreen"
 # auto-compact threshold. The user's call, which overrides that decision:
 # a LOW auto-compact threshold cuts big tasks off MID-WORK and defeats the
 # entire point of the 1M context window — compaction should never fire on
-# an artificial token budget. Context is bounded at SAFE BOUNDARIES instead
-# — the per-ticket `✅ DONE` completion report + the ticket-boundary
-# `/compact` (watchdog job 14 — see `notify-compact-request.sh` and
-# `milestone-notifications.md`) for autopilot-style sessions, AND, for a
-# long-lived session that never reports a ticket, an IDLE-based backstop
-# (watchdog job 15, #39/#43 follow-up: a session whose context exceeds
-# 400K tokens AND has sat genuinely idle >= 20 minutes — no draft, no
-# worker in flight — gets `/compact`'d automatically) — never by a blanket
-# token window that could fire mid-work. No replacement constant:
+# an artificial token budget. #1084 (owner ROZHODNUTÉ 2026-09-19): machine-
+# triggered compacts are REMOVED entirely — no session ever types `/compact`
+# (the ticket-boundary job-14 delivery and the #102-removed idle backstop are
+# both gone). Claude Code's OWN native threshold autocompact is the only
+# compaction left; a completed `## ✅ Work Complete` report is simply a safe
+# point for it. No replacement constant:
 # `apply_managed_settings_defaults` now actively STRIPS `autoCompactWindow`
-# from settings.json on every deploy so the 6 managed boxes go back to
+# from settings.json on every deploy so the managed boxes go back to
 # Claude Code's own default.
 
 UNIVERSAL_PROFILE = REPO_DIR / "profiles" / "universal.profile"
@@ -8249,8 +8246,8 @@ def cmd_goal_arm(args):
     that profile is resolved fresh (`goal.goal_template_for_authority`,
     never a stale copy), the request is recorded, and ONE immediate
     synchronous delivery attempt is made. Prints the disposition word
-    verbatim (mirrors `compact-request`'s own contract: `sent` / `expired`
-    / `skip:<reason>`) so the calling turn's own decision log stays
+    verbatim (`sent` / `expired` / `skip:<reason>`) so the calling turn's own
+    decision log stays
     honest -- though the REAL delivery path is the periodic sweep (job 9,
     `goal.goal_sweep`) picking the still-pending request back up once the
     pane genuinely goes idle."""

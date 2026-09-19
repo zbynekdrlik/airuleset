@@ -418,11 +418,14 @@ class TestRunOnceDocstringIsAccurate(unittest.TestCase):
         total, live, retired = (int(m.group(i)) for i in (1, 2, 3))
         self.assertEqual(total, live + retired,
                          "header arithmetic: %d != %d + %d" % (total, live, retired))
+        # #1084: scope each entry to the NEXT job boundary, not a fixed 400-char
+        # window — a short live entry (job 13) sitting just above a REMOVED entry
+        # (job 14) otherwise catches the next entry's "REMOVED" and false-counts.
         actually_removed = {
             n for n in self._documented()
-            if "REMOVED" in (re.search(r"^\s*\(%s\)(.{0,400})" % n, doc,
-                                       re.M | re.S) or
-                             re.match("", "")).group(1)}
+            if "REMOVED" in (re.search(
+                r"^\s*\(%s\)(.*?)(?=^\s*\(\d+[a-z]?\)|\Z)" % n, doc,
+                re.M | re.S) or re.match("", "")).group(1)}
         self.assertEqual(
             len(actually_removed), retired,
             "header says %d retired but %d entries are marked REMOVED: %s"

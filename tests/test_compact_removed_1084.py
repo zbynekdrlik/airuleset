@@ -238,29 +238,43 @@ class TestPushPostCheckCompactLine(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# (e) no doctrine text instructs a compact-request call any more
+# (e) no LIVE doctrine text or machine-emitted nudge instructs a compact-request
+#     call any more. Scanned surfaces: EVERY doctrine .md (modules/ + skills/,
+#     which reach a session's system prompt) PLUS the live watchdog nudge string
+#     (watchdog/lane_resources.py's _lane_nudge_text — the #1084-review miss the
+#     old 5-file whitelist could not catch). The kept-for-L2 machinery's own
+#     internal code COMMENTS (watchdog/compact.py, cards.py) and the historical
+#     docs/autopilot-log.md are deliberately out of scope — they instruct no live
+#     session and L2 deletes the machinery.
 # --------------------------------------------------------------------------- #
-class TestDoctrineHasNoCompactRequestInstruction(unittest.TestCase):
-    DOCTRINE = [
-        "modules/core/message-status-marker.md",
-        "modules/core/completion-report.md",
-        "skills/completion-report-deep/DEEP.md",
-        "skills/autopilot/SKILL.md",
-        "skills/autopilot-master/SKILL.md",
-    ]
+NEEDLES = ("compact-request --self", "compact-request --record",
+           "compact-request --status")
 
-    def test_no_self_record_status_instruction(self):
+
+class TestDoctrineHasNoCompactRequestInstruction(unittest.TestCase):
+    def _doctrine_md(self):
+        files = sorted((ROOT / "modules").rglob("*.md"))
+        files += sorted((ROOT / "skills").rglob("*.md"))
+        return files
+
+    def test_no_self_record_status_instruction_in_any_doctrine_md(self):
         offenders = []
-        for rel in self.DOCTRINE:
-            text = (ROOT / rel).read_text()
-            for needle in ("compact-request --self",
-                           "compact-request --record",
-                           "compact-request --status"):
+        for path in self._doctrine_md():
+            text = path.read_text(encoding="utf-8")
+            for needle in NEEDLES:
                 if needle in text:
-                    offenders.append("%s: %s" % (rel, needle))
+                    offenders.append("%s: %s" % (path.relative_to(ROOT), needle))
         self.assertEqual(offenders, [],
-                         "doctrine must not instruct a compact-request call (#1084): %r"
+                         "no doctrine .md may instruct a compact-request call (#1084): %r"
                          % offenders)
+
+    def test_live_lane_nudge_carries_no_compact_request(self):
+        # the watchdog lane-check nudge is machine-EMITTED into armed /goal
+        # sessions — a live doctrine surface the .md scan above cannot see.
+        from watchdog import lane_resources
+        text = lane_resources._lane_nudge_text(10, 2, {"total": 5})
+        self.assertNotIn("compact-request", text)
+        self.assertNotIn("compact --self", text)
 
 
 if __name__ == "__main__":

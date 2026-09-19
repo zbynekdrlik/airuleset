@@ -2575,8 +2575,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              health_probes=None, health_probe_fetch=None,
              task_hygiene_enabled=False, gh_rate_fetch=None,
              bounceflip_fetch=None, cred_mtime_fn=None, proc_start_fn=None):
-    """Scan every `claude` pane once. 50 numbered jobs per poll — 44 LIVE and 6
-    RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402), whose
+    """Scan every `claude` pane once. 50 numbered jobs per poll — 43 LIVE and 7
+    RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402; 14 in
+    #1084 — the slot stays registered as a journal-only tombstone), whose
     numbers are kept addressable so historical log lines and code comments
     still resolve.
     The (4a) sub-entry belongs to job 4 and is not separately numbered:
