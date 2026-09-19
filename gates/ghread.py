@@ -400,22 +400,39 @@ def _token_kind(tok):
 def search_client_side_ok(search, me_login=None):
     """True iff EVERY token of `search` is a qualifier this module can filter
     client-side, AND any `@me` person-qualifier has a resolvable `me_login`.
-    A single unsupported token -> False (keep GraphQL, exact semantics)."""
+    A single unsupported token -> False (keep GraphQL, exact semantics).
+
+    #1087 review: GitHub search semantics the exact-string matcher does NOT
+    honour must fall back to GraphQL, or a FALSE EXCLUSION under-counts (the
+    never-stop / footer-wrong class): a comma value (`label:a,b` is ANY-OF), a
+    quoted value (`label:"needs answer"` / `assignee:'x'` keeps the quotes), and
+    an empty `label:` value all defeat it. Reject any value carrying `,`/`"`/`'`
+    and an empty label value; case is handled by `_token_matches` (casefold)."""
     for tok in (search or "").split():
         kind = _token_kind(tok)
         if kind is None:
             return False
-        if kind == "person":
-            base = tok[1:] if tok.startswith("-") else tok
-            if base.split(":", 1)[1] == "@me" and not me_login:
-                return False
+        base = tok[1:] if tok.startswith("-") else tok
+        value = base.split(":", 1)[1] if ":" in base else ""
+        if any(c in value for c in (",", '"', "'")):
+            return False               # comma-ANY-OF / quoted value -> GraphQL
+        if kind == "label" and value == "":
+            return False               # `label:` with no value -> GraphQL
+        if kind == "person" and value == "@me" and not me_login:
+            return False
     return True
+
+
+def _cf(s):
+    """casefold, or None for a non-string (GitHub compares label names + logins
+    case-insensitively — #1087 review)."""
+    return s.casefold() if isinstance(s, str) else None
 
 
 def _token_matches(row, t, me_login):
     if t.startswith("label:"):
-        name = t[len("label:"):]
-        return any((lb or {}).get("name") == name
+        name = _cf(t[len("label:"):])
+        return any(_cf((lb or {}).get("name")) == name
                    for lb in row.get("labels") or [])
     if t == "no:label":
         return not row.get("labels")
@@ -423,13 +440,13 @@ def _token_matches(row, t, me_login):
         return not row.get("assignees")
     if t.startswith("assignee:"):
         who = t[len("assignee:"):]
-        who = me_login if who == "@me" else who
-        return any((a or {}).get("login") == who
-                   for a in row.get("assignees") or [])
+        who = _cf(me_login if who == "@me" else who)
+        return who is not None and any(_cf((a or {}).get("login")) == who
+                                       for a in row.get("assignees") or [])
     if t.startswith("author:"):
         who = t[len("author:"):]
-        who = me_login if who == "@me" else who
-        return row.get("authorLogin") == who
+        who = _cf(me_login if who == "@me" else who)
+        return who is not None and _cf(row.get("authorLogin")) == who
     return False
 
 

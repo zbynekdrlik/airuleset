@@ -233,6 +233,38 @@ class ClientSideSearch(unittest.TestCase):
         self.assertTrue(ghread.issue_matches_search(row, "author:@me",
                                                     me_login="zed"))
 
+    # --- #1087 review 🟡: GitHub search semantics the matcher must honour or
+    # keep GraphQL, else a FALSE EXCLUSION under-counts (never-stop / footer-wrong)
+    def test_comma_list_label_is_not_client_side(self):
+        # `label:a,b` is ANY-OF in GitHub search; the exact-string matcher would
+        # match neither -> a false exclusion. Must fall back to GraphQL.
+        self.assertFalse(ghread.search_client_side_ok("label:needs-answer,needs-decision"))
+        self.assertFalse(ghread.search_client_side_ok("-label:a,b label:c"))
+
+    def test_quoted_value_is_not_client_side(self):
+        self.assertFalse(ghread.search_client_side_ok('label:"needs answer"'))
+        self.assertFalse(ghread.search_client_side_ok("assignee:'someone'"))
+        self.assertFalse(ghread.search_client_side_ok('author:"x"'))
+
+    def test_empty_label_value_is_not_client_side(self):
+        self.assertFalse(ghread.search_client_side_ok("label:"))
+
+    def test_label_match_is_case_insensitive(self):
+        # GitHub compares label names case-insensitively.
+        row = ghread._normalize_issue(_issue(9, labels=["bug"]))
+        self.assertTrue(ghread.issue_matches_search(row, "label:Bug"))
+        self.assertTrue(ghread.issue_matches_search(row, "label:BUG"))
+        upper = ghread._normalize_issue(_issue(10, labels=["Needs-Gatekeeper"]))
+        self.assertTrue(ghread.issue_matches_search(upper, "label:needs-gatekeeper"))
+
+    def test_login_match_is_case_insensitive(self):
+        # GitHub compares logins case-insensitively.
+        row = ghread._normalize_issue(_issue(11, assignee=["zbynek"], author="Zbynek"))
+        self.assertTrue(ghread.issue_matches_search(row, "assignee:@me",
+                                                    me_login="Zbynek"))
+        self.assertTrue(ghread.issue_matches_search(row, "author:@me",
+                                                    me_login="zbynek"))
+
 
 class ClientSideUnionParity(unittest.TestCase):
     """The client-side filter over a snapshot must reproduce the previous
