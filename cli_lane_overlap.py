@@ -63,30 +63,47 @@ def _topic_tokens(topics):
 def compute_overlap(paths, topics, *, live_lanes, open_prs):
     """Return ``(verdict, overlaps)``.
 
-    ``verdict`` is ``"overlap"`` when the candidate unit shares any touched
-    PATH with a live lane or an open PR, OR shares a TOPIC token with a live
-    lane; else ``"clear"``. ``overlaps`` is a list of
-    ``[kind, ref, detail]`` rows (kind in lane/lane-topic/pr).
+    ``verdict``:
+    - ``"overlap"`` — the candidate unit shares a touched PATH with a LIVE lane,
+      or a TOPIC token with a live lane. A live lane is in-flight work; the next
+      lane WAITS for a free slot (SKILL.md doctrine).
+    - ``"clear-with-resync"`` (#1078 item 2) — the ONLY overlaps are with OPEN
+      PR file lists (no live-lane / lane-topic hit). An open PR is FINISHED work
+      awaiting review/merge, not an occupied lane: dispatch is allowed and the
+      next lane RESYNCs (``git merge origin/<base>`` once the PR lands, rebase
+      before hand-off) rather than idling. On 2026-09-18 three montalu lanes
+      waited hours for PR #7558/#7566/#7585 to merge — the exact idle this fixes.
+    - ``"clear"`` — no overlap at all.
+
+    ``overlaps`` is a list of ``[kind, ref, detail]`` rows (kind in
+    lane/lane-topic/pr).
     """
     path_set = {p for p in (paths or []) if p}
     topic_toks = _topic_tokens(topics)
     overlaps = []
+    live_hit = False
     for lane in live_lanes or []:
         ref = lane.get("ref", "?")
         common = sorted(path_set & set(lane.get("files") or []))
         if common:
             overlaps.append(["lane", ref, common])
+            live_hit = True
             continue
         lane_toks = _topic_tokens([lane.get("topic", "")])
         shared = sorted(topic_toks & lane_toks)
         if shared:
             overlaps.append(["lane-topic", ref, shared])
+            live_hit = True
     for pr in open_prs or []:
         num = pr.get("number", "?")
         common = sorted(path_set & set(pr.get("files") or []))
         if common:
             overlaps.append(["pr", num, common])
-    return ("overlap" if overlaps else "clear"), overlaps
+    if not overlaps:
+        return "clear", overlaps
+    # A live-lane (path or topic) hit means WAIT; only PR-file overlaps and no
+    # live lane means the next lane may dispatch + resync (#1078 item 2).
+    return ("overlap" if live_hit else "clear-with-resync"), overlaps
 
 
 def write_receipt(home, cwd_key, issues, verdict, overlaps, deps="satisfied"):
@@ -489,6 +506,15 @@ def cmd_lane_overlap(args):
     if verdict == "clear":
         print("CLEAR: issues %s — no path/topic overlap with %d live lane(s) "
               "+ %d open PR(s)" % (issues, len(live_lanes), len(open_prs)))
+    elif verdict == "clear-with-resync":
+        # #1078 item 2: PR-only overlap — dispatch allowed, the prompt MUST carry
+        # a Resync obligation. Name every overlapping PR + its clashing files.
+        pr_refs = ", ".join(
+            "PR #%s (%s)" % (ref, ", ".join(str(d) for d in detail))
+            for kind, ref, detail in overlaps if kind == "pr")
+        print("CLEAR-WITH-RESYNC: issues %s — %s — dispatch allowed; the prompt "
+              "must carry `Resync: merge origin/<base> once the PR lands, rebase "
+              "before hand-off`" % (issues, pr_refs))
     else:
         print("OVERLAP: issues %s —" % issues)
         for kind, ref, detail in overlaps:
