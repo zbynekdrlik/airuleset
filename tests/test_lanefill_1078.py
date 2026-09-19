@@ -727,5 +727,153 @@ class TestDispatchableForCacheWriter(unittest.TestCase):
             run.assert_not_called()
 
 
+class TestDispatchableCacheFirstReviewFixes(unittest.TestCase):
+    """#1078 REWORK review (both delta reviewers): non-dict cache JSON must
+    fall back (not raise); a malformed list element is skipped; a null title
+    renders ""; the live fallback must apply the pane's --role to match the
+    role-filtered cached writer; a sequential pane skips the dep read."""
+
+    def _cache_raw(self, home, cwd, text):
+        import statusbar
+        d = os.path.join(home, ".claude", "tickets-status")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, statusbar.cwd_key(cwd) + ".json"), "w") as f:
+            f.write(text)
+
+    def _cache_json(self, home, cwd, entry):
+        import json as _j
+        self._cache_raw(home, cwd, _j.dumps(entry))
+
+    def _payload(self, cwd):
+        return json.dumps({"cwd": cwd, "session_id": "s"})
+
+    def _tmp(self):
+        import tempfile
+        tmp = tempfile.mkdtemp(prefix="lf-rf-")
+        home, cwd = os.path.join(tmp, "h"), os.path.join(tmp, "repo")
+        os.makedirs(home)
+        os.makedirs(cwd)
+        return home, cwd
+
+    def test_non_dict_json_cache_falls_back_not_raises(self):
+        import unittest.mock as m
+        for text in ("null", "[1, 2, 3]", '"x"', "42"):
+            home, cwd = self._tmp()
+            self._cache_raw(home, cwd, text)
+            fake_cp = m.Mock(returncode=0, stdout="5\tx\n")
+            with m.patch.dict(os.environ, {"HOME": home}, clear=False), \
+                 m.patch("cli_quals.resolve_authority", return_value="full"), \
+                 m.patch("cli_quals._repo_root", return_value=cwd), \
+                 m.patch("cli_concurrency.resolve_role", return_value=None), \
+                 m.patch("subprocess.run", return_value=fake_cp) as run:
+                os.environ.pop("AIRULESET_LANEFILL_FAKE_QUALS", None)
+                count, _ = lf._dispatchable(self._payload(cwd), cwd)
+            self.assertEqual(count, 1, "cache %r should fall back" % text)
+            run.assert_called_once()
+
+    def test_malformed_list_element_skipped_valid_kept(self):
+        import unittest.mock as m
+        home, cwd = self._tmp()
+        self._cache_json(home, cwd, {"ts": time.time(), "dispatchable": [
+            {"number": 11, "title": "a"},        # valid
+            {"title": "no number"},               # skip (no number)
+            {"number": "12", "title": "str num"}, # skip (non-int)
+            {"number": 13, "title": None},        # valid, null title -> ""
+        ]})
+        with m.patch.dict(os.environ, {"HOME": home}, clear=False), \
+             m.patch("subprocess.run") as run:
+            os.environ.pop("AIRULESET_LANEFILL_FAKE_QUALS", None)
+            count, tickets = lf._dispatchable(self._payload(cwd), cwd)
+        self.assertEqual(tickets, [(11, "a"), (13, "")])
+        self.assertEqual(count, 2)
+        run.assert_not_called()
+
+    def test_dict_dispatchable_key_falls_back(self):
+        import unittest.mock as m
+        home, cwd = self._tmp()
+        self._cache_json(home, cwd, {"ts": time.time(), "dispatchable": {"x": 1}})
+        fake_cp = m.Mock(returncode=0, stdout="5\tx\n")
+        with m.patch.dict(os.environ, {"HOME": home}, clear=False), \
+             m.patch("cli_quals.resolve_authority", return_value="full"), \
+             m.patch("cli_quals._repo_root", return_value=cwd), \
+             m.patch("cli_concurrency.resolve_role", return_value=None), \
+             m.patch("subprocess.run", return_value=fake_cp) as run:
+            os.environ.pop("AIRULESET_LANEFILL_FAKE_QUALS", None)
+            lf._dispatchable(self._payload(cwd), cwd)
+        run.assert_called_once()
+
+    def test_fallback_appends_role_for_a_role_window(self):
+        import unittest.mock as m
+        home, cwd = self._tmp()  # no cache -> fallback
+        fake_cp = m.Mock(returncode=0, stdout="5\tx\n")
+        with m.patch.dict(os.environ, {"HOME": home}, clear=False), \
+             m.patch("cli_quals.resolve_authority", return_value="full"), \
+             m.patch("cli_quals._repo_root", return_value=cwd), \
+             m.patch("cli_concurrency.resolve_role", return_value="review"), \
+             m.patch("subprocess.run", return_value=fake_cp) as run:
+            os.environ.pop("AIRULESET_LANEFILL_FAKE_QUALS", None)
+            lf._dispatchable(self._payload(cwd), cwd)
+        argv = run.call_args.args[0]
+        self.assertIn("--role", argv)
+        self.assertEqual(argv[argv.index("--role") + 1], "review")
+
+    def test_fallback_omits_role_when_none(self):
+        import unittest.mock as m
+        home, cwd = self._tmp()
+        fake_cp = m.Mock(returncode=0, stdout="5\tx\n")
+        with m.patch.dict(os.environ, {"HOME": home}, clear=False), \
+             m.patch("cli_quals.resolve_authority", return_value="full"), \
+             m.patch("cli_quals._repo_root", return_value=cwd), \
+             m.patch("cli_concurrency.resolve_role", return_value=None), \
+             m.patch("subprocess.run", return_value=fake_cp) as run:
+            os.environ.pop("AIRULESET_LANEFILL_FAKE_QUALS", None)
+            lf._dispatchable(self._payload(cwd), cwd)
+        self.assertNotIn("--role", run.call_args.args[0])
+
+
+class TestDispatchableForCacheReviewFixes(unittest.TestCase):
+    """#1078 REWORK review F1/F3."""
+
+    def test_sequential_mode_skips_the_dep_read(self):
+        import unittest.mock as m
+        import airuleset
+        import cli_quals_cmd
+        called = {"dep": False}
+
+        def dep(*a, **k):
+            called["dep"] = True
+            return ({}, "m", True)
+        with m.patch("cli_concurrency.resolve_mode", return_value="sequential"), \
+             m.patch.object(cli_quals_cmd, "_dep_wait_map_for", side_effect=dep):
+            got = airuleset._dispatchable_for_cache(
+                {5: {"title": "a", "createdAt": "2026-01-01"}}, "/repo")
+        self.assertIsNone(got)                    # F3: skipped on sequential
+        self.assertFalse(called["dep"])           # no expensive dep read
+
+    def test_parallel_mode_computes(self):
+        import unittest.mock as m
+        import airuleset
+        import cli_quals_cmd
+        with m.patch("cli_concurrency.resolve_mode", return_value="parallel"), \
+             m.patch.object(cli_quals_cmd, "_dep_wait_map_for",
+                            return_value=({}, "m", True)), \
+             m.patch.object(airuleset, "dispatchable_numbers",
+                            return_value=({5}, None)):
+            got = airuleset._dispatchable_for_cache(
+                {5: {"title": "a", "createdAt": "2026-01-01"}}, "/repo")
+        self.assertEqual(got, [{"number": 5, "title": "a"}])
+
+    def test_slice_writer_feeds_unhandled_not_workable_rows(self):
+        # F1 source-lock: the slice branch must exclude handed-off (gk) tickets
+        # before the cache write, matching `cmd_slice_quals`'s
+        # `_emit_list_dispatchable(unhandled, root)`. A revert to
+        # `_dispatchable_for_cache(workable_rows, root)` fails this.
+        import inspect
+        import airuleset
+        src = inspect.getsource(airuleset.cmd_tickets_status)
+        self.assertIn("if not handed.get(n)", src)
+        self.assertIn("_dispatchable_for_cache(_unhandled, root)", src)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3965,8 +3965,14 @@ def cmd_tickets_status(args):
                 # #1078: persist the DISPATCHABLE set (workable ∧ deps-satisfied)
                 # so the lane-fill Stop gate reads it cheaply (no per-turn quals
                 # subprocess). Fail-safe (None on any dep-read failure → the gate
-                # falls back to a bounded live call).
-                entry["dispatchable"] = _dispatchable_for_cache(workable_rows, root)
+                # falls back to a bounded live call). #1078 review F1: feed the
+                # UNHANDLED subset — `slice-quals --list-dispatchable` computes
+                # over `unhandled` (workable minus handed-off/gk), so passing the
+                # full `workable_rows` would OVERCOUNT by the gk set (a false
+                # block naming handed-off tickets on a slice box like montalu1).
+                _unhandled = {n: v for n, v in workable_rows.items()
+                              if not handed.get(n)}
+                entry["dispatchable"] = _dispatchable_for_cache(_unhandled, root)
             # Skipped bucket (2026-07-16): same slice quals, POSITIVE label
             # filter — how many of MY tickets are excluded from autopilot runs.
             # `quals` empty ⟺ SliceUnresolved above (it is otherwise always 1
@@ -6596,7 +6602,21 @@ def _dispatchable_for_cache(workable, root):
     uses. Returns None on any failure / unmeasurable dep read (the gate then does
     its bounded live fallback). Fail-safe: NEVER raises, so a dep-read failure can
     never break the footer refresh. `workable` is the `_partition_workable` rows
-    dict `{number: {"title","createdAt",…}}`."""
+    dict `{number: {"title","createdAt",…}}`.
+
+    #1078 review F3: the dep-resolution below (`_dep_wait_map_for` → per-row
+    `Depends-on:` reads) is the expensive part of the quals class, and the
+    lane-fill gate reads `dispatchable` ONLY on `parallel` panes (sequential
+    panes — the controller, gk-infra — are EXEMPT and never consult it). Skip it
+    on a sequential pane; a mode-resolve failure defaults to computing (parallel
+    is the fleet default) so a pane that CAN consult it is never starved."""
+    try:
+        import cli_concurrency
+        _mode = cli_concurrency.resolve_mode(root)
+    except Exception:  # noqa: BLE001
+        _mode = None  # unknown → compute (parallel is the fleet default)
+    if _mode == "sequential":
+        return None
     try:
         import cli_quals_cmd
         dep_map, slug2, ok = cli_quals_cmd._dep_wait_map_for(workable, root)

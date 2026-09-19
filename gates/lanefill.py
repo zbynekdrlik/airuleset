@@ -258,6 +258,8 @@ def _cached_dispatchable(cwd):
             entry = json.load(f)
     except Exception:  # noqa: BLE001 — absent / unreadable / malformed → fallback
         return None
+    if not isinstance(entry, dict):
+        return None                          # valid JSON but not an object → fallback
     ts = entry.get("ts")
     if not isinstance(ts, (int, float)) or (time.time() - ts) > _CACHE_TTL_S:
         return None                          # stale → fallback
@@ -267,7 +269,8 @@ def _cached_dispatchable(cwd):
     tickets = []
     for d in disp:
         if isinstance(d, dict) and isinstance(d.get("number"), int):
-            tickets.append((d["number"], str(d.get("title", ""))))
+            # `or ""` — a `title: null` element yields "" (not the str "None").
+            tickets.append((d["number"], str(d.get("title") or "")))
     return len(tickets), tickets
 
 
@@ -296,19 +299,34 @@ def _dispatchable(payload, cwd):
     import subprocess
     import cli_quals
     try:
+        import cli_concurrency
         root = cli_quals._repo_root(cwd=cwd) or cwd
         authority = cli_quals.resolve_authority(cwd=root)
+        role = cli_concurrency.resolve_role(cwd)
     except Exception as e:  # noqa: BLE001
-        raise _Unreadable("authority %s" % e)
+        raise _Unreadable("authority %s" % type(e).__name__)
     cmd = "core-quals" if authority == "full" else "slice-quals"
+    argv = [sys.executable, _airuleset_path(), cmd, "--list-dispatchable"]
+    # #1078 review B1: the CACHED writer feeds the ROLE-FILTERED workable set
+    # (the footer's `_role_filter_footer`), so the fallback MUST apply the same
+    # `--role` or a review/parallel pane would enforce the WHOLE-repo set on a
+    # cache miss and the role-scoped set on a hit (a path-dependent wrong block).
+    if role in ("review", "infra"):
+        argv += ["--role", role]
     try:
-        # Bounded at 8s (< the Stop hook's own settings.json timeout) so a slow
-        # fallback on a big repo fails-open GRACEFULLY (journal + allow) within
-        # budget instead of being hard-killed. A stale-cache turn hits this at
-        # most once; the footer refresh warms the cache for the next turn.
-        r = subprocess.run(
-            [sys.executable, _airuleset_path(), cmd, "--list-dispatchable"],
-            cwd=cwd, capture_output=True, text=True, timeout=_FALLBACK_TIMEOUT_S)
+        # Bounded at _FALLBACK_TIMEOUT_S (< the Stop hook's settings.json timeout)
+        # so a slow fallback on a big repo fails-open (_Unreadable → journal +
+        # allow) rather than being hard-killed. A stale-cache turn hits this at
+        # most once; the footer refresh warms the cache for the next turn. HONEST
+        # residual (review B2): on a big repo (odoo-erp, ~15-25s dep read) the 8s
+        # fallback ALWAYS times out → fail-open — the gate there rests on the
+        # fresh 120s cache, not this coarse best-effort fallback. And a cache-miss
+        # turn whose pre-subprocess seams (the 32MB goal-scan + imports) plus the
+        # subprocess exceed the hook's own timeout is SIGKILLed → still fail-open
+        # (no exit 2) but WITHOUT the journal line; the common cache-HIT path (no
+        # subprocess) is well within budget.
+        r = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
+                           timeout=_FALLBACK_TIMEOUT_S)
     except Exception as e:  # noqa: BLE001
         raise _Unreadable("quals subprocess %s" % type(e).__name__)
     if r.returncode != 0:
