@@ -1370,16 +1370,18 @@ def _deploy_to_all_remotes(failed, auth_failed):
             remote_cmd = (
                 f"cd {remote['repo_path']} && (gh auth setup-git >/dev/null 2>&1 || true) "
                 f"&& git pull --ff-only && {owner_vps_env}python3 airuleset.py install "
+                # #1084 L1b: the compact hard-off report line (informational,
+                # never fails the target) runs BEFORE the gating groups below.
+                # Those `{ … }` groups (not subshells) `exit` on their SKIP paths
+                # (Playwright on its success path too) — and `exit` in a group ends
+                # the whole remote `sh -c`, so a trailing `&& echo` was unreachable.
+                f"&& {_compact_hardoff_postcheck()}"
                 # #1051: prove the freshly-installed gh chain does not hang.
-                f"&& {_gh_chain_postcheck()}"
+                f" && {_gh_chain_postcheck()}"
                 # #1048: prove the managed Playwright MCP chromium actually
                 # launches headless — a chrome-channel/drift regression fails the
                 # target, never ships silently.
                 f" && {_playwright_chromium_postcheck()}"
-                # #1084: report the compact hard-off state per box (informational,
-                # never fails the target) — the deploy IS the guarantee that no
-                # box types /compact any more.
-                f" && {_compact_hardoff_postcheck()}"
             )
             # #347 adversarial-review CRITICAL finding: `audited_hosts` must
             # NOT be marked here (before the ssh call even runs) — a first

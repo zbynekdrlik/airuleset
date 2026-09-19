@@ -24,7 +24,10 @@ untouched — this lane removes the DELIVERY machinery only. L2 (a later lane)
 deletes `deliver_compact` + the request store this early return orphans.
 """
 
+import inspect
 import json
+import os
+import shutil
 import subprocess
 import sys
 import types
@@ -235,6 +238,171 @@ class TestPushPostCheckCompactLine(unittest.TestCase):
     def test_postcheck_is_wired_into_the_deploy_loop(self):
         src = Path(cli_remote.__file__).read_text()
         self.assertIn("_compact_hardoff_postcheck(", src)
+
+
+# --------------------------------------------------------------------------- #
+# (d.2) #1084 L1b — the `compact: hard-off (code)` line must actually PRINT on a
+#       real box. Root cause: the L1 lane appended the echo AFTER the gh-chain
+#       (#1051) and Playwright (#1048/#1058) post-check GROUPS, whose success and
+#       SKIP paths end in `exit 0`; `exit` inside a `{ … }` command group (not a
+#       subshell) terminates the whole remote `sh -c`, so a trailing `&& echo`
+#       after them is unreachable on every real box (the line printed 0× on
+#       v0.1.351). Approach 1 moves the report line to run right after
+#       `airuleset.py install`, BEFORE the gating groups.
+#         (a) an argv-order lock (index of the compact echo vs install / GH-CHAIN);
+#         (b) an EXECUTION test that RUNS the assembled post-install fragment
+#             through `sh -c` — the class of miss the L1 shape-lock could not
+#             catch (it asserted the echo is PRESENT in the string, but never
+#             executed the shell, so it stayed green on the broken ordering).
+# --------------------------------------------------------------------------- #
+class TestCompactLinePrintsBeforeGatingPostChecks(unittest.TestCase):
+    _NAMES = ("_compact_hardoff_postcheck", "_gh_chain_postcheck",
+              "_playwright_chromium_postcheck")
+
+    def _deploy_src(self):
+        return inspect.getsource(cli_remote._deploy_to_all_remotes)
+
+    # (a) argv-order lock -------------------------------------------------- #
+    def test_compact_echo_runs_after_install_and_before_the_gating_postchecks(self):
+        src = self._deploy_src()
+        i_install = src.index("python3 airuleset.py install")
+        i_compact = src.index("_compact_hardoff_postcheck()", i_install)
+        i_gh = src.index("_gh_chain_postcheck()", i_install)
+        i_pw = src.index("_playwright_chromium_postcheck()", i_install)
+        self.assertLess(i_install, i_compact,
+                        "the compact report line must run AFTER `airuleset.py install`")
+        self.assertLess(
+            i_compact, i_gh,
+            "the compact report line must run BEFORE the gh-chain group — a "
+            "`{ … } && exit 0` group swallows a trailing echo (#1084 L1b)")
+        self.assertLess(
+            i_compact, i_pw,
+            "the compact report line must run BEFORE the Playwright group (#1084 L1b)")
+
+    def test_install_through_the_gates_is_and_chained_never_seq_or_or(self):
+        # #1084 L1b review F2: the order lock alone would still pass if a future
+        # edit swapped a `&&` joiner for `;` or `||` between install and the
+        # gates — which would let a gate FAILURE (rc 87/88) NOT abort the target
+        # (`;`) or be masked (`||`). Lock the joiners too: from `airuleset.py
+        # install` through the Playwright call the (comment-stripped) source must
+        # carry no `;` and no `||`. The `|| true` in `(gh auth setup-git…)` sits
+        # BEFORE install, so the install-onward span excludes it.
+        src = self._deploy_src()
+        i_install = src.index("python3 airuleset.py install")
+        i_pw_end = (src.index("_playwright_chromium_postcheck()", i_install)
+                    + len("_playwright_chromium_postcheck()"))
+        span = "\n".join(ln for ln in src[i_install:i_pw_end].splitlines()
+                         if not ln.strip().startswith("#"))
+        self.assertNotIn(";", span,
+                         "install→gates must be &&-chained, never `;` "
+                         "(a `;` would stop a gate rc 87/88 from aborting the target)")
+        self.assertNotIn("||", span,
+                         "install→gates must be &&-chained, never `||` "
+                         "(an `||` would mask a gate failure)")
+
+    # (b) execution test --------------------------------------------------- #
+    def _ordered_postcheck_fragments(self):
+        """The three post-check fragment strings, ordered as
+        `_deploy_to_all_remotes` interpolates them into `remote_cmd` — read from
+        the SHIPPED source, so the ordering under test is the real one, never a
+        test-local copy. This is what makes (b) RED on the L1 (broken) ordering
+        and GREEN on Approach 1's reorder."""
+        src = self._deploy_src()
+        anchor = src.index("python3 airuleset.py install")
+        funcs = {
+            "_compact_hardoff_postcheck": cli_remote._compact_hardoff_postcheck,
+            "_gh_chain_postcheck": cli_remote._gh_chain_postcheck,
+            "_playwright_chromium_postcheck": cli_remote._playwright_chromium_postcheck,
+        }
+        ordered = sorted(self._NAMES, key=lambda n: src.index(n + "()", anchor))
+        return [funcs[n]() for n in ordered]
+
+    def _assembled_fragment(self):
+        """The post-`git pull` remote fragment: `python3 airuleset.py install`
+        then the post-checks in shipped source order. A no-op fake `airuleset.py`
+        in the cwd makes the real `python3 airuleset.py install` exit 0 with no
+        real install (the design's "a stub … a temp dir")."""
+        return " && ".join(["python3 airuleset.py install"]
+                           + self._ordered_postcheck_fragments())
+
+    # the coreutils the deploy fragment invokes by name. A curated PATH holding
+    # ONLY these makes the "no npx" SKIP path deterministic on any box: without
+    # it, the fragment's `export PATH="$HOME/.local/bin:$PATH"` still leaves the
+    # box's real npx resolvable, so `command -v npx` would find it and RUN it
+    # (a real chromium launch) instead of SKIPping.
+    _SYS_TOOLS = ("python3", "timeout", "cat", "head", "tail", "grep",
+                  "mktemp", "rm", "sleep")
+
+    def _sysbin(self):
+        td = TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        d = Path(td.name)
+        for tool in self._SYS_TOOLS:
+            real = shutil.which(tool)
+            if real:
+                os.symlink(real, d / tool)
+        return d
+
+    def _box(self, *, with_npx):
+        td = TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        home = Path(td.name)
+        (home / ".claude").mkdir()
+        bindir = home / ".local" / "bin"
+        bindir.mkdir(parents=True)
+        # the Playwright probe reads this marker; present => it does NOT SKIP as
+        # "not provisioned", so the success path reaches the (fake) npx probe.
+        (home / ".claude" / "airuleset-playwright-browsers-path").write_text("/tmp/bp\n")
+        # a fake gh that resolves and whose `--version` returns 0, so the gh-chain
+        # group ends normally (rc 0, control flows on) rather than taking its
+        # `command -v gh || exit 0` SKIP path.
+        gh = bindir / "gh"
+        gh.write_text("#!/bin/sh\nexit 0\n")
+        gh.chmod(0o755)
+        if with_npx:
+            # a fake npx: the probe's `npx … screenshot` returns 0 => probe success
+            # => the Playwright group `exit 0`s (its success path).
+            npx = bindir / "npx"
+            npx.write_text("#!/bin/sh\nexit 0\n")
+            npx.chmod(0o755)
+        # a no-op fake airuleset.py so the real `python3 airuleset.py install`
+        # exits 0 in this cwd without touching the box.
+        repo = home / "repo"
+        repo.mkdir()
+        (repo / "airuleset.py").write_text("import sys\nraise SystemExit(0)\n")
+        return home, repo
+
+    def _run(self, home, repo):
+        env = dict(os.environ)
+        env["HOME"] = str(home)
+        env["PATH"] = str(self._sysbin())     # only curated coreutils + the fakes
+        env["AIRULESET_PW_POSTCHECK_RETRY_SLEEP"] = "0"   # no real 5 s wait
+        # `/bin/sh` explicitly (not via PATH) — the curated PATH omits `sh`.
+        return subprocess.run(["/bin/sh", "-c", self._assembled_fragment()],
+                              cwd=str(repo), capture_output=True, text=True,
+                              timeout=60, env=env)
+
+    def test_line_prints_on_the_healthy_success_path(self):
+        # gh + npx present, both succeed — the Playwright group `exit 0`s on its
+        # probe-success path, which swallowed the trailing echo on v0.1.351.
+        home, repo = self._box(with_npx=True)
+        r = self._run(home, repo)
+        self.assertEqual(r.returncode, 0, r.stderr + "\n" + r.stdout)
+        self.assertIn(
+            PUSH_POSTCHECK_LINE, r.stdout,
+            "the compact hard-off line must print on a healthy box (gh + npx "
+            "present) — it printed 0× on v0.1.351 (#1084 L1b). stdout=%r" % r.stdout)
+
+    def test_line_prints_on_the_no_npx_skip_path(self):
+        # no npx — the Playwright group takes its `exit 0` SKIP path, which also
+        # terminated the remote shell before the trailing echo on v0.1.351.
+        home, repo = self._box(with_npx=False)
+        r = self._run(home, repo)
+        self.assertEqual(r.returncode, 0, r.stderr + "\n" + r.stdout)
+        self.assertIn(
+            PUSH_POSTCHECK_LINE, r.stdout,
+            "the compact hard-off line must print even when Playwright SKIPs "
+            "(no npx) — the L1 ordering swallowed it (#1084 L1b). stdout=%r" % r.stdout)
 
 
 # --------------------------------------------------------------------------- #
