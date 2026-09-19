@@ -24,7 +24,6 @@ never weakened).
 import json
 import sys
 import unittest
-import unittest.mock as m
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -34,7 +33,7 @@ sys.path.insert(0, str(REPO))
 import watchdog as wd  # noqa: E402
 from watchdog import goal  # noqa: E402
 from _goal_arm_helpers import (  # noqa: E402
-    DeliverGoalFakeTmux, GOAL_ARMED_CAP, _write_marker_transcript, _encode,
+    DeliverGoalFakeTmux, GOAL_ARMED_CAP,
 )
 
 PID = "%9"
@@ -349,86 +348,6 @@ class CallerProvenOwnDraft806(unittest.TestCase):
 #    draft keeps today's deliver_with_stash behavior byte-for-byte.
 # --------------------------------------------------------------------------- #
 
-class LaneGuardOwnDraft(unittest.TestCase):
-    CWD = "/home/newlevel/devel/lanenudge-own"
-    SID = "sess-lane-own-1"
-
-    def _dir(self):
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        return Path(d.name)
-
-    def _run(self, initial_box, rec, state, enters_swallowed=0,
-             stash_return=False):
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, self.SID)
-        tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
-        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
-                                   GOAL_ARMED_CAP, model_type=True,
-                                   transcript_path=tpath,
-                                   enters_swallowed=enters_swallowed,
-                                   initial_box=initial_box)
-        captured = tmux._render()
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch("airuleset.resolve_authority", return_value="full"), \
-             m.patch.object(wd, "deliver_with_stash",
-                            return_value=stash_return) as dws:
-            logs, owns = goal.goal_lane_occupancy_nudge(
-                now, tmux, rec, self.SID, self.CWD, "111", captured, tpath,
-                tmtime, "loc", None, False, None, proj,
-                backlog_fetch=lambda cwd: 5, state=state,
-                sleep_fn=lambda s: None)
-        return logs, owns, tmux, dws, tpath
-
-    def test_swallowed_own_nudge_draft_is_submitted_in_place(self):
-        # #501 RED — the held draft is our OWN lane-check nudge; the guard must
-        # SUBMIT it in place (transcript-verified) and NEVER route it through
-        # the foreign `deliver_with_stash` stash-around path.
-        rec, state = {}, {}
-        logs, owns, tmux, dws, tpath = self._run(OWN_LANE, rec, state)
-        self.assertTrue(owns)
-        self.assertTrue(any("lane-occupancy nudge (own-submit)" in ln
-                            for ln in logs), logs)
-        self.assertEqual(rec.get("ln"), 1)
-        self.assertNotIn("lna", rec)
-        dws.assert_not_called()               # foreign stash path NOT taken
-        self.assertEqual(tmux.box, "")        # draft submitted (box cleared)
-        self.assertIn("lane-check: ", tpath.read_text())
-
-    def test_own_draft_submit_failure_advances_the_abort_streak(self):
-        # A recognized own draft that will not submit-verify is a genuinely
-        # wedged pane — advance the SAME lna streak + backoff park the foreign
-        # abort uses (so it still reaches the give-up ping), never consume the
-        # nudge budget, and NEVER backspace the own draft.
-        rec, state = {}, {}
-        logs, owns, tmux, dws, tpath = self._run(OWN_LANE, rec, state,
-                                                 enters_swallowed=99)
-        self.assertTrue(owns)
-        self.assertFalse(any("lane-occupancy nudge (own-submit)" in ln
-                             for ln in logs), logs)
-        self.assertTrue(any("own-draft submit-unverified" in ln
-                            for ln in logs), logs)
-        self.assertNotIn("ln", rec)
-        self.assertEqual(rec.get("lna"), 1)
-        self.assertIn("lnpark", rec)
-        dws.assert_not_called()
-        self.assertEqual(tmux.box, OWN_LANE)  # own draft left in place
-        self.assertFalse(any("BSpace" in " ".join(a) for a in tmux.sent),
-                         tmux.sent)
-
-    def test_foreign_draft_keeps_todays_deliver_with_stash_behavior(self):
-        # HARD CONSTRAINT a — a FOREIGN (unrecognized) draft is byte-for-byte
-        # today's path: deliver_with_stash, NEVER submit_own_draft_verified.
-        rec, state = {}, {}
-        with m.patch.object(wd, "submit_own_draft_verified") as sov:
-            logs, owns, tmux, dws, tpath = self._run("rozpisany user draft",
-                                                     rec, state,
-                                                     stash_return=True)
-        self.assertTrue(owns)
-        dws.assert_called_once()
-        sov.assert_not_called()
-        self.assertEqual(rec.get("ln"), 1)    # stash succeeded -> nudge booked
 
 
 # --------------------------------------------------------------------------- #
@@ -504,61 +423,6 @@ class WrappedSubmitOwnDraft(unittest.TestCase):
         _no_double_escape(tmux.sent)
 
 
-class WrappedLaneGuardOwnDraft(unittest.TestCase):
-    CWD = "/home/newlevel/devel/lanenudge-wrap"
-    SID = "sess-lane-wrap-1"
-
-    def _dir(self):
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        return Path(d.name)
-
-    def _run(self, initial_box, rec, state, enters_swallowed=0):
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, self.SID)
-        tpath = proj / _encode(self.CWD) / (self.SID + ".jsonl")
-        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
-                                   GOAL_ARMED_CAP, model_type=True,
-                                   transcript_path=tpath,
-                                   enters_swallowed=enters_swallowed,
-                                   initial_box=initial_box, wrap_width=BOX_WIDTH)
-        captured = tmux._render()
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        with m.patch("airuleset.resolve_authority", return_value="full"), \
-             m.patch.object(wd, "deliver_with_stash", return_value=False) as dws:
-            logs, owns = goal.goal_lane_occupancy_nudge(
-                now, tmux, rec, self.SID, self.CWD, "111", captured, tpath,
-                tmtime, "loc", None, False, None, proj,
-                backlog_fetch=lambda cwd: 5, state=state,
-                sleep_fn=lambda s: None)
-        return logs, owns, tmux, dws, tpath
-
-    def test_wrapped_own_nudge_draft_is_submitted_in_place(self):
-        # THE incident: a wrapped swallowed lane-check draft. The guard must
-        # submit it in place (via the HEAD), never route it to deliver_with_stash.
-        rec, state = {}, {}
-        logs, owns, tmux, dws, tpath = self._run(OWN_LANE, rec, state)
-        self.assertTrue(owns)
-        self.assertTrue(any("lane-occupancy nudge (own-submit)" in ln
-                            for ln in logs), logs)
-        self.assertEqual(rec.get("ln"), 1)
-        self.assertNotIn("lna", rec)
-        dws.assert_not_called()
-        self.assertEqual(tmux.box, "")
-        self.assertIn("lane-check: ", tpath.read_text())
-
-    def test_wrapped_own_draft_submit_failure_advances_streak(self):
-        rec, state = {}, {}
-        logs, owns, tmux, dws, tpath = self._run(OWN_LANE, rec, state,
-                                                 enters_swallowed=99)
-        self.assertTrue(owns)
-        self.assertTrue(any("own-draft submit-unverified" in ln
-                            for ln in logs), logs)
-        self.assertEqual(rec.get("lna"), 1)
-        self.assertNotIn("ln", rec)
-        dws.assert_not_called()
-        self.assertEqual(tmux.box, OWN_LANE)
 
 
 if __name__ == "__main__":

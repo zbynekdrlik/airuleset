@@ -189,18 +189,21 @@ class TestLaneOccupancyGate(_Base):
                          "the lane nudge (restored cross-kind total cap)")
         self.assertTrue(any("hold:total-cap" in ln for ln in logs), logs)
 
-    def test_control_open_gate_delivers_and_marks(self):
+    def test_control_open_gate_reaches_refill_decision_without_delivery(self):
+        # #1089: the cadence GATE still defers lane-occupancy (hold:floor /
+        # hold:total-cap — locked above), but the keystroke DELIVERY is RETIRED.
+        # With an OPEN gate the nudge reaches the refill DECISION (the DELIVERY
+        # RETIRED observability line) WITHOUT typing, and — because it no longer
+        # delivers — it no longer stamps the shared cadence clock (a retired kind
+        # consumes nothing from the cross-kind total cap).
         tmux = self._tmux()
         state = {}
         logs, owns = self._run(tmux, state)
         self.assertFalse(any("hold:floor" in ln for ln in logs), logs)
-        self.assertNotEqual(tmux.typed_texts(), [],
-                            "with an open gate the lane nudge is delivered "
-                            "(control: the defer is the gate, not the harness)")
-        # the delivered lane nudge stamps the shared cadence clock so a sibling
-        # priority kind defers via the restored cross-kind total cap (RED if the
-        # lane rider's mark_sent is reverted — the burst fix would half-die).
-        self.assertEqual(state["nudge_cadence"][self.sid]["lane-occupancy"], NOW)
+        self.assertTrue(any("DELIVERY RETIRED" in ln for ln in logs), logs)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertIsNone(
+            state.get("nudge_cadence", {}).get(self.sid, {}).get("lane-occupancy"))
 
 
 if __name__ == "__main__":

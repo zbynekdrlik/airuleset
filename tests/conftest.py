@@ -269,3 +269,19 @@ def _isolate_autopilot_lock_dir(monkeypatch):
         lock_dir = Path(d) / "autopilot-lock"
         monkeypatch.setenv("AIRULESET_AUTOPILOT_LOCK_DIR", str(lock_dir))
         yield lock_dir
+
+
+@pytest.fixture(autouse=True)
+def _isolate_lanefill_decisions():
+    """#1089: the lane-fill Stop gate (`gates.lanefill`) appends a per-Stop
+    decision line to `~/.claude/lanefill/decisions.log` by default. Any test that
+    drives `gates.lanefill.run` past the cheap early returns would otherwise write
+    the developer's REAL home. Point it at a fresh per-test dir via the same
+    `AIRULESET_LANEFILL_DIR` seam the module reads; `mock.patch.dict` (a real
+    os.environ entry) so a subprocess the test spawns (`python3 -m gates.lanefill`)
+    inherits it. The push-gate `unittest discover` gets its own floor in
+    `cmd_push` (the #385 dual-runner pattern)."""
+    with TemporaryDirectory() as d:
+        with mock.patch.dict(os.environ,
+                             {"AIRULESET_LANEFILL_DIR": str(Path(d) / "lanefill")}):
+            yield Path(d) / "lanefill"

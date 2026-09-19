@@ -67,6 +67,7 @@ MOVED_FUNCTIONS = [
     "_newest_marker",
     "scan_goal_markers",
     "seed_goal_marker",
+    "persisted_goal_mark",          # #1089 -- shared goal-mark reader (lane-fill gate)
     "pane_goal_armed",
     "_tmux_client_recent_input",    # #731 -- signal 3 (attached tmux client input)
 ]

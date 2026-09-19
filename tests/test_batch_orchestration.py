@@ -281,33 +281,39 @@ class TestWatchdogLaneNudgeIsContinuous(TestCase):
         self.assertFalse(any("lane-occupancy nudge" in ln for ln in logs), logs)
         self.assertEqual(tmux.sent, [], tmux.sent)
 
-    def test_dispatchable_candidates_nudge_names_count(self):
-        # #993 item 3/6b: with dispatchable candidates the nudge fires and the
-        # text names ONLY the candidate count.
+    def test_dispatchable_candidates_reach_the_refill_decision(self):
+        # #993 item 3/6b: with dispatchable candidates the refill decision is
+        # reached. #1089: the keystroke delivery is RETIRED (the lane-fill Stop
+        # gate is the lever), so this is the DELIVERY RETIRED observability line
+        # + no keystroke; the candidate-count naming lived in the retired nudge
+        # TEXT. The dep-wait skip (0 candidates) is still locked above.
         logs, tmux = self._drive(
             workers=0, backlog=37, dispatchable={"count": 4, "reason": None})
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
-        self.assertIn("4 DISPATCHOVATEĽNÝCH", "".join(tmux.typed_texts()))
+        self.assertTrue(any("DELIVERY RETIRED" in ln for ln in logs), logs)
+        self.assertEqual(tmux.sent, [], tmux.sent)
 
-    def test_partially_full_box_is_nudged_to_refill(self):
+    def test_partially_full_box_reaches_the_refill_decision(self):
         # #848 FLIP (was test_running_batch_is_skipped_never_refilled): 2 live
         # lanes < 5 + a large backlog means there are FREE slots — the refill
-        # nudge FIRES now (under batch mode it was skip:batch-running).
+        # decision is reached (#1089: DELIVERY RETIRED, no keystroke), never
+        # skip:batch-running.
         logs, tmux = self._drive(workers=2, backlog=37)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("DELIVERY RETIRED" in ln for ln in logs), logs)
         self.assertFalse(any("skip:batch-running" in ln for ln in logs), logs)
 
-    def test_single_lane_box_is_nudged_to_refill(self):
+    def test_single_lane_box_reaches_the_refill_decision(self):
         # #848 FLIP (was test_one_worker_draining_batch_is_skipped...): 1 live
-        # lane < 5 has room to refill up to 5 — the nudge fires.
+        # lane < 5 has room to refill up to 5 — the refill decision is reached
+        # (#1089: DELIVERY RETIRED, no keystroke).
         logs, tmux = self._drive(workers=1, backlog=37)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("DELIVERY RETIRED" in ln for ln in logs), logs)
         self.assertFalse(any("skip:batch-running" in ln for ln in logs), logs)
 
-    def test_empty_box_with_backlog_still_fires_the_refill_nudge(self):
-        # live_workers==0 + workable backlog -> the refill nudge DOES fire.
+    def test_empty_box_with_backlog_reaches_the_refill_decision(self):
+        # live_workers==0 + workable backlog -> the refill decision IS reached
+        # (#1089: DELIVERY RETIRED, no keystroke).
         logs, tmux = self._drive(workers=0, backlog=37)
-        self.assertTrue(any("lane-occupancy nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("DELIVERY RETIRED" in ln for ln in logs), logs)
 
     def test_saturated_box_skips(self):
         # #848: a FULL box (>= 5 lanes) has no free slot — it skips, no refill.
