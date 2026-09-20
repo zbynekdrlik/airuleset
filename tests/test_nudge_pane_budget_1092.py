@@ -88,5 +88,106 @@ class TestPaneBudgetPrimitives(unittest.TestCase):
         self.assertIn("%live", state["nudge_pane_attempts"])
 
 
+class TestSendVerifiedPaneBudget(unittest.TestCase):
+    """#1092 (a)+(c) — the single path (`send_verified`) consults the pane budget
+    BEFORE any keystroke and stamps a typing attempt + the per-kind floor AFTER
+    a swallow. Driven through the SAME stateful fake tmux the send_verified suite
+    uses (an accepted submit clears the box + appends a `user` turn; a swallowed
+    one keeps the box)."""
+
+    PID = "%9"
+    TEXT = "štuchnutie: zaplň lány, backlog=5"
+
+    def _tpath(self):
+        import json
+        from tempfile import TemporaryDirectory
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = Path(d.name) / "sess.jsonl"
+        p.write_text(json.dumps(
+            {"type": "assistant", "message": {"content": "prev"}}) + "\n")
+        return p
+
+    def _fake(self, enters_swallowed=0, transcript_path=None):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _goal_arm_helpers import DeliverGoalFakeTmux, GOAL_IDLE_CAP
+        return DeliverGoalFakeTmux([(self.PID, "claude", "/x", "111")],
+                                   GOAL_IDLE_CAP, model_type=True,
+                                   enters_swallowed=enters_swallowed,
+                                   transcript_path=transcript_path)
+
+    def test_pane_budget_refuses_the_third_gated_send_before_any_keystroke(self):
+        import watchdog as wd
+        import time as _t
+        p = self._tpath()
+        tmux = self._fake(transcript_path=p)
+        now = _t.time()
+        state = {"nudge_pane_attempts": {self.PID: [now - 10, now - 5]}}
+        out, logs = {}, []
+        ok = wd.send_verified(self.PID, self.TEXT, tmux, p,
+                              sleep_fn=lambda s: None, logs=logs, out=out,
+                              nudge="queue-arrival", state=state)
+        self.assertFalse(ok)
+        self.assertTrue(out.get("pane_budget_held"), logs)
+        self.assertEqual(tmux.sent, [], "no keystroke fired on a budget refusal")
+        self.assertTrue(any("hold:pane-budget" in ln for ln in logs), logs)
+
+    def test_confirmed_gated_send_marks_a_pane_attempt(self):
+        import watchdog as wd
+        p = self._tpath()
+        tmux = self._fake(transcript_path=p)
+        state, out = {}, {}
+        ok = wd.send_verified(self.PID, self.TEXT, tmux, p,
+                              sleep_fn=lambda s: None, logs=[], out=out,
+                              nudge="queue-arrival", state=state)
+        self.assertTrue(ok)
+        self.assertEqual(len(state.get("nudge_pane_attempts", {}).get(self.PID, [])), 1)
+        self.assertTrue(out.get("attempted"))
+
+    def test_genuine_swallow_stamps_floor_and_marks_attempt(self):
+        import watchdog as wd
+        p = self._tpath()
+        tmux = self._fake(enters_swallowed=99, transcript_path=p)
+        state, out = {}, {}
+        ok = wd.send_verified(self.PID, self.TEXT, tmux, p,
+                              sleep_fn=lambda s: None, logs=[], out=out,
+                              nudge="queue-arrival", state=state)
+        self.assertFalse(ok)
+        self.assertTrue(out.get("swallowed"), out)
+        # a swallowed attempt IS a delivery attempt: per-kind floor stamped for sid
+        self.assertIn("queue-arrival",
+                      state.get("nudge_cadence", {}).get("sess", {}))
+        # and it counts toward the pane budget
+        self.assertEqual(len(state.get("nudge_pane_attempts", {}).get(self.PID, [])), 1)
+
+    def test_recovery_kind_is_not_blocked_by_the_pane_budget(self):
+        # a REVIVAL of a dead session must never be stranded by prior nudge
+        # attempts into the same pane (#520 / #1092 addendum Approach-2 rejection).
+        import watchdog as wd
+        import time as _t
+        p = self._tpath()
+        tmux = self._fake(transcript_path=p)
+        now = _t.time()
+        state, out = {"nudge_pane_attempts": {self.PID: [now - 10, now - 5]}}, {}
+        ok = wd.send_verified(self.PID, self.TEXT, tmux, p,
+                              sleep_fn=lambda s: None, logs=[], out=out,
+                              nudge="resume", state=state)
+        self.assertFalse(out.get("pane_budget_held"))
+        self.assertTrue(ok)   # the revival delivered despite an exhausted budget
+
+    def test_owner_reply_is_not_blocked_by_the_pane_budget(self):
+        import watchdog as wd
+        import time as _t
+        p = self._tpath()
+        tmux = self._fake(transcript_path=p)
+        now = _t.time()
+        state, out = {"nudge_pane_attempts": {self.PID: [now - 10, now - 5]}}, {}
+        ok = wd.send_verified(self.PID, self.TEXT, tmux, p,
+                              sleep_fn=lambda s: None, logs=[], out=out,
+                              nudge="queue-arrival", state=state, user_authored=True)
+        self.assertFalse(out.get("pane_budget_held"))
+        self.assertTrue(ok)
+
+
 if __name__ == "__main__":
     unittest.main()
