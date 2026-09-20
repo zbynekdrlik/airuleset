@@ -481,11 +481,14 @@ def render_ssh_attach_block(session_target, cwd_chain):
     controller override).
 
     `cwd_chain` is a tuple of relative-to-$HOME dir names tried in order
-    (first existing wins, else $HOME).
+    (#1088: first git WORK TREE wins, else the loud last resort — see
+    render_stream_cwd_chain_shell).
 
-    The output is byte-identical to the pre-#985 STREAM_SSH_ATTACH_BLOCK
-    constant when called with `session_target='"$(whoami)"'` and
-    `cwd_chain=STREAM_DEV_CWD_CHAIN`."""
+    The output was byte-identical to the pre-#985 STREAM_SSH_ATTACH_BLOCK
+    constant at the #985 refactor; #1088 DELIBERATELY changed the rendered cwd
+    loop (repo-aware `.git` predicate + loud fallback) and recomputed the golden
+    hash (test_stream_block_golden_hash), so it is no longer byte-identical to
+    the pre-#985 form."""
     return (
         f"{STREAM_SSH_ATTACH_MARK_START}\n"
         "# #264: one subdev stream account = one tmux session -- an interactive\n"
@@ -593,8 +596,9 @@ def render_ssh_attach_block(session_target, cwd_chain):
     )
 
 
-# The default stream block: session = $(whoami), cwd = odoo chain.
-# Byte-identical to the pre-#985 STREAM_SSH_ATTACH_BLOCK constant.
+# The default stream block: session = $(whoami), cwd = the #1088 repo-aware
+# odoo chain (golden-hash locked by test_stream_block_golden_hash; NOT
+# byte-identical to the pre-#985 form since #1088 changed the cwd loop).
 STREAM_SSH_ATTACH_BLOCK = render_ssh_attach_block(
     '"$(whoami)"', STREAM_DEV_CWD_CHAIN)
 

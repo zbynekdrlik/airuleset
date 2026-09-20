@@ -803,8 +803,9 @@ class TestApplyStreamSshAttach(TestCase):
                              p.read_text(), f"{user} must not get the block")
 
     def test_ssh_attach_block_cwd_uses_the_fallback_chain(self):
-        # #563: the block's cwd must iterate STREAM_DEV_CWD_CHAIN (odoo-erp,
-        # then devel/odoo) before $HOME -- the old binary "odoo-erp or $HOME"
+        # #563/#1088: the block's cwd must iterate STREAM_DEV_CWD_CHAIN
+        # (odoo-erp, odoo-slovnormal, then devel/odoo) requiring `.git`, before
+        # the loud fallback -- the old binary "odoo-erp or $HOME"
         # fallback dropped montalu1 (project dir ~/devel/odoo, no odoo-erp
         # subdir) into $HOME, so a claude launched there wrote under the wrong
         # project key (no history/memory). Derive the expected loop FROM the
