@@ -224,7 +224,7 @@
     "tests/test_design_record_1061.py": 197,
     "tests/test_designbypost_gate_1061.py": 150,
     "tests/test_designdispatch_gate_1061.py": 241,
-    "tests/test_dev_env_provisioning.py": 2799,
+    "tests/test_dev_env_provisioning.py": 2800,
     "tests/test_discord_notify_check.py": 108,
     "tests/test_discord_reply.py": 2030,
     "tests/test_discuss_close_binding_695.py": 312,
