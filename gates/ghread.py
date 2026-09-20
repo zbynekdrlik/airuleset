@@ -272,6 +272,32 @@ def _parse_include(out):
     return status, headers, body
 
 
+def _record_rate_headers(headers, now=None):
+    """#1087 L1b: record a response's ``X-RateLimit-*`` headers into the gh-rate
+    status cache — the ONLY truthful budget signal on an App-shim (installation-
+    token) box, where ``gh api rate_limit`` reports a fresh bucket while real
+    calls 403. Best-effort + fail-open: any error (no headers, cli_gh_rate not
+    importable, an unwritable cache) is swallowed — a budget-capture failure must
+    never break a REST read. Token-free (only the numeric rate fields)."""
+    try:
+        if not isinstance(headers, dict):
+            return
+        rem = headers.get("x-ratelimit-remaining")
+        if rem is None:
+            return                     # no rate headers on this response
+        remaining = int(rem)
+        reset = headers.get("x-ratelimit-reset")
+        reset = int(reset) if reset is not None else None
+        limit = headers.get("x-ratelimit-limit")
+        limit = int(limit) if limit is not None else None
+        resource = headers.get("x-ratelimit-resource") or "core"
+        import cli_gh_rate
+        cli_gh_rate.record_headers_reading(resource, remaining=remaining,
+                                           reset=reset, limit=limit, now=now)
+    except Exception:                  # noqa: BLE001 — budget capture is best-effort
+        return
+
+
 def rest_get_cached(path, params=None, cwd=None, runner=None, timeout=8,
                     env=None, now=None, max_age=0):
     """(obj, err): an ETag-conditional GET of a REST endpoint.
@@ -307,6 +333,11 @@ def rest_get_cached(path, params=None, cwd=None, runner=None, timeout=8,
     argv.append(url)
     rc, out, err = _run(argv, cwd, timeout, env, runner)
     status, headers, body = _parse_include(out)
+    # #1087 L1b: capture the response's rate-limit headers into the gh-rate
+    # status cache (the truthful budget on installation-token boxes). Runs on
+    # EVERY --include response — 200, 304 (still carries the budget) and 403
+    # (remaining 0). Best-effort + fail-open; never affects the read's result.
+    _record_rate_headers(headers, now=now)
 
     if status == 304 and cache:
         obj = _loads(cache.get("body"))
