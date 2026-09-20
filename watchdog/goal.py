@@ -5498,6 +5498,41 @@ def _lane_stuck_owner_alert(now, run, rec, glance, sid, cwd, pid, loc,
             "next sweep [stuckalert:%s:%d]" % (loc, status, sid, anchor)]
 
 
+def _janitor_undo_if_own_stranded(pid, run, own_text, loc, sleep_fn, logs):
+    """#1092 (b) -- after a SWALLOWED or DELIVERED-UNCONFIRMED keystroke, capture
+    the pane ONCE and, when it still shows OUR OWN nudge/goal text sitting unsent,
+    run the #372 janitor clear (backspace it away) so the owner never finds a
+    foreign paragraph in his prompt (the incident: a delivered-unconfirmed batch
+    whose text sat in the active gk-infra prompt). Provenance is the caller's own
+    `_janitor_mark_watch` (set before the send) PLUS the content-shape recognizers
+    (`_looks_like_own_stuck_content` -- own prefix / collapsed-paste placeholder --
+    or a >= GOAL_ARM_LEFTOVER_MIN_SUBSTR own-substring): a box that does NOT
+    provably hold our text is left COMPLETELY untouched (a foreign draft is never
+    a >=80-char substring of our own text, never carries our prefix). A bare box
+    (the submit was accepted, or send_verified already backed the text out) is a
+    no-op. Returns True only once a fresh capture confirms the clear converged.
+    Explicit journal verbs on EVERY branch (#1092 (d), #486)."""
+    cap = watchdog.capture_pane(pid, run, lines=40)
+    head = watchdog._input_box_head_text(cap)
+    itext = watchdog._input_line_text(cap)
+    own = (watchdog._looks_like_own_stuck_content(head)
+           or watchdog._looks_like_own_stuck_content(itext)
+           or watchdog._box_is_own_leftover(
+               cap, own_text, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR))
+    if not own:
+        logs.append("janitor-undo %s -> box clean (nothing stranded)" % loc)
+        return False
+
+    def _log(reason):
+        logs.append(reason)
+
+    cleared = watchdog._janitor_clear_box(pid, run, sleep_fn, _log)
+    logs.append("janitor-undo %s -> %s" % (
+        loc, "cleared stranded machine text" if cleared
+        else "clear did not converge (retry next sweep)"))
+    return cleared
+
+
 def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     state=None, handled=None, backlog_fetch=None,
                     send_fn=None, sleep_fn=None, time_fn=None,
@@ -5843,9 +5878,45 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     logs.append("batch-nudge %s -> %d section(s): %s%s"
                                 % (loc, len(_incl),
                                    ", ".join(_incl), _bnote))
+                    # #1092 (b) -- a delivered-UNCONFIRMED submit may not have
+                    # cleared the box (the incident: the text sat in the prompt);
+                    # run the janitor UNDO so no stranded batch-nudge is left. A
+                    # CONFIRMED submit (`_bok`) leaves the box genuinely bare, so
+                    # skip it (a capture is enough there).
+                    if not _bok:
+                        _janitor_undo_if_own_stranded(
+                            pid, run, _bt, loc, sleep_fn, logs)
+                elif send_out.get("pane_budget_held"):
+                    # #1092 (c) -- the per-pane budget refused this BEFORE any
+                    # keystroke (send_verified already logged `hold:pane-budget`):
+                    # nothing typed, so NEVER stamp the floor or run the undo. This
+                    # branch is the storm brake -- the 3rd typing attempt into a
+                    # pane in one hour is turned away, not swallowed-and-retried.
+                    logs.append("batch-nudge %s -> held (pane-budget, not typed)"
+                                % loc)
+                elif send_out.get("attempted"):
+                    # #1092 (a)+(b) -- a SWALLOWED attempt IS a delivery attempt:
+                    # the text reached the pane. Stamp the per-kind FLOOR for ALL
+                    # included kinds + WRITE-THROUGH persist (exactly like the
+                    # delivered branch), so the SAME batch can NEVER re-fire on the
+                    # next ~70s sweep -- the exact 10-attempts-in-12-min storm this
+                    # ticket fixes. Then run the janitor UNDO so no stranded
+                    # batch-nudge is left in the owner's prompt.
+                    _nudge_gate.mark_batch_sent(state, sid, _incl, now)
+                    _queue_arrival._persist(persist, logs)
+                    logs.append("batch-nudge %s -> swallowed (%d section(s)); "
+                                "floor stamped for %s"
+                                % (loc, len(_incl), ", ".join(_incl)))
+                    _janitor_undo_if_own_stranded(
+                        pid, run, _bt, loc, sleep_fn, logs)
                 else:
-                    logs.append("batch-nudge %s -> swallowed (%d section(s))"
-                                % (loc, len(_incl)))
+                    # #1092 (d) -- a PRE-TYPE abort (box busy / raced / collapsed
+                    # paste): send_verified fired no type keystroke, so this is NOT
+                    # a swallow -- never stamp the floor for a box we could not type
+                    # into; retry next sweep from a clean prompt. Explicit word, no
+                    # silent branch (#486).
+                    logs.append("batch-nudge %s -> deferred (not typed: box "
+                                "busy/raced)" % loc)
         # Clear the dark_watch batch entry for this sid (consumed or empty).
         state.get("nudge_batch", {}).pop(sid, None)
     # #804 -- DEAD-SESSION census: a rostered EXPECTED-armed stream with NO live
