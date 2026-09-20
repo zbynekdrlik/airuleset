@@ -2229,9 +2229,10 @@ if [ "$INTRO_FIRE" = "1" ]; then
         # SAME Stop payload (piped on stdin) and blocks unless the message
         # carries a LIVE guide deep-link (or, for a `NONE — #N` fact, the guide
         # ticket reference); an UNKNOWN fact FAILS CLOSED with the fix named, so
-        # a fabricated link is impossible by construction. exit 2 = block, exit
-        # 0 = allow, any other rc = infra failure (python/curl hiccup) -> fail
-        # OPEN (never fabricate a block on an infra error). The bypass
+        # while the gate runs a fabricated/dead link cannot pass. exit 2 =
+        # block, exit 0 = allow, any other rc = infra failure (python/curl
+        # hiccup) -> fail OPEN (never fabricate a block on an infra error). The
+        # bypass
         # `# airuleset:intro-link-ok <dôvod>` (checked above) still exempts an
         # API-only feature with no product page.
         NAVODY_RC=0

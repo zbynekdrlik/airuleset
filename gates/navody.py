@@ -13,8 +13,10 @@ Three consumers share this ONE module:
       `python3 -m gates.navody` on a client-acceptance hand-off (the Stop
       payload on stdin) -- `run()` reads the per-tenant fact and blocks unless
       the message carries a LIVE guide link (or, for a NONE fact, the guide
-      ticket reference); an UNKNOWN fact FAILS CLOSED with the fix named, so a
-      fabricated link is impossible by construction;
+      ticket reference); an UNKNOWN fact FAILS CLOSED with the fix named, so
+      while the gate runs a fabricated or dead link cannot pass (the ONE
+      fail-OPEN is an infra error — a python/curl crash — which mirrors every
+      sibling gate's rc-only block convention);
   (b) `airuleset.py handoff`'s composer preflight calls `guide_maintenance()`
       -- a client-visible surface change in the RFR diff must ALSO touch
       `docs/<tenant>/navody-*.html` OR carry `Navody: n/a — <why>`;
@@ -66,6 +68,14 @@ _GUIDE_BASENAME_RE = re.compile(r'^navody-.+\.html$', re.IGNORECASE)
 # a guide file path anywhere in a diff: docs/<tenant>/navody-<oblast>.html
 _GUIDE_PATH_RE = re.compile(r'(?:^|/)docs/[^/]+/navody-[^/]*\.html$',
                             re.IGNORECASE)
+# `Navody: n/a` with a bounded separator (a REASON on the same line is required
+# and checked from the captured remainder, never a trailing `.*\S` that
+# backtracks polynomially — the repo's #577/#1010 ReDoS discipline). `[ \t]`
+# (not `\s`) so a newline never straddles the match; `.` here is line-bounded
+# (no DOTALL). Bounded reps around the optional `/` remove the adjacent-star
+# ambiguity the #1073 review measured.
+_NAVODY_NA_RE = re.compile(
+    r'(?im)^[ \t]*N[aá]vody[ \t]{0,4}:[ \t]{0,4}n[ \t]{0,2}/?[ \t]{0,2}a\b(?P<rest>.*)$')
 
 
 # --------------------------------------------------------------------------- #
@@ -201,7 +211,9 @@ def _repo_static_ok(link, repo_root):
         return True, None
     if not repo_root:
         return True, None
-    matches = glob.glob(os.path.join(repo_root, "docs", "**", base),
+    # glob.escape the basename: it is derived from a message URL, so a literal
+    # `*`/`?`/`[` in it must not become a glob metacharacter (#1073 review nit).
+    matches = glob.glob(os.path.join(repo_root, "docs", "**", glob.escape(base)),
                         recursive=True)
     if matches:
         return True, None
@@ -244,10 +256,15 @@ def _fix_missing_link(url):
 
 
 def _fix_dead_link(url):
+    # Fails CLOSED for BOTH a real non-200 AND a curl-infra error (curl missing,
+    # DNS/timeout) — `_curl_head` returns None for the latter, so the wording is
+    # honest about the unknowable case rather than asserting "dead" (#1073
+    # review): the link could NOT be verified LIVE.
     return (
-        "BLOCKED (#1073): odkaz na klientský návod nie je ŽIVÝ (`curl -sI` != "
-        "200). Over a naprav deep-link na sekciu návodu (`%s`) — odovzdávka "
-        "smie niesť len ŽIVÝ odkaz na návod, nikdy fabrikovaný." % url)
+        "BLOCKED (#1073): odkaz na klientský návod sa nepodarilo overiť ako ŽIVÝ "
+        "(`curl -sI` != 200, alebo chyba overenia — curl/DNS/timeout). Over a "
+        "naprav deep-link na sekciu návodu (`%s`) — odovzdávka smie niesť len "
+        "ŽIVÝ odkaz na návod, nikdy fabrikovaný ani neoverený." % url)
 
 
 def evaluate_stop(url, ticket, message, *, curl=None, repo_root=None):
@@ -263,8 +280,12 @@ def evaluate_stop(url, ticket, message, *, curl=None, repo_root=None):
 
     if ticket is not None:
         tnum = re.escape(ticket.lstrip("#"))
-        pat = re.compile(r'N[aá]vody\s*:\s*pripravujeme\s*,?\s*#%s\b' % tnum,
-                         re.IGNORECASE)
+        # Bounded reps around the optional comma (no adjacent-unbounded-star
+        # ambiguity → linear, per #577/#1010 ReDoS discipline); `[ \t]` never
+        # spans a newline.
+        pat = re.compile(
+            r'N[aá]vody[ \t]{0,4}:[ \t]{0,4}pripravujeme[ \t]{0,4},?[ \t]{0,4}#%s\b'
+            % tnum, re.IGNORECASE)
         if pat.search(message or ""):
             return "allow", "guide-in-progress ticket referenced"
         return "block", _fix_none(ticket)
@@ -292,8 +313,18 @@ def evaluate_stop(url, ticket, message, *, curl=None, repo_root=None):
 # Same-PR guide-maintenance preflight (airuleset.py handoff composer)
 # --------------------------------------------------------------------------- #
 def _matches_surface(path, surfaces):
-    p = (path or "").replace("\\", "/")
-    return any(s and s in p for s in surfaces)
+    # Segment-boundary match, never a raw substring: `views/` must NOT match
+    # `reviews/`/`previews/`/`interviews/` (#1073 review). A trailing `*`/`**`
+    # glob tail on a surface is stripped to its directory fragment.
+    p = "/" + (path or "").replace("\\", "/").lstrip("/")
+    for s in surfaces:
+        seg = (s or "").replace("\\", "/").rstrip("*")
+        if not seg:
+            continue
+        seg = "/" + seg.lstrip("/")
+        if seg in p:
+            return True
+    return False
 
 
 def _is_guide_file(path):
@@ -302,9 +333,12 @@ def _is_guide_file(path):
 
 def _has_navody_na(body):
     # `Navody: n/a — <why>` (a reason after n/a is REQUIRED; a bare `n/a` does
-    # not escape). Accent + slash tolerant.
-    return bool(re.search(r'(?im)^\s*N[aá]vody\s*:\s*n\s*/?\s*a\b.*\S',
-                          body or ""))
+    # not escape). Linear — the reason is read from the captured line remainder,
+    # never a backtracking `.*\S`.
+    for m in _NAVODY_NA_RE.finditer(body or ""):
+        if (m.group("rest") or "").strip():
+            return True
+    return False
 
 
 def guide_maintenance(changed_paths, body, *, surfaces=None):

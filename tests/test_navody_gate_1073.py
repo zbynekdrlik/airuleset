@@ -251,6 +251,49 @@ class TestPreflightMaintenance(unittest.TestCase):
         ok, _ = navody.guide_maintenance([], body="RFR")
         self.assertTrue(ok)
 
+    def test_reviews_dir_is_not_a_views_surface(self):
+        # #1073 review: `views/` must NOT substring-match `reviews/` /
+        # `previews/` / `interviews/` — a legit RFR touching those must pass.
+        for d in ("reviews", "previews", "interviews"):
+            with self.subTest(dir=d):
+                ok, _ = navody.guide_maintenance(
+                    ["addons/montalu/%s/models.py" % d], body="RFR")
+                self.assertTrue(ok)
+
+    def test_static_src_glob_tail_surface_detected(self):
+        # a surface override with a `**` glob tail still matches by directory.
+        ok, _ = navody.guide_maintenance(
+            ["addons/montalu/static/src/js/w.js"], body="RFR",
+            surfaces=["static/src/**"])
+        self.assertFalse(ok)
+
+
+class TestReDoS(unittest.TestCase):
+    """#1073 review 🔴 — the fact/maintenance regexes must be LINEAR (the
+    repo's #577/#1010 no-catastrophic-backtracking discipline)."""
+
+    def test_navody_na_linear_on_pathological_whitespace(self):
+        import time
+        body = "Navody: n" + " " * 40000 + "X"
+        t0 = time.monotonic()
+        navody._has_navody_na(body)
+        self.assertLess(time.monotonic() - t0, 0.5)
+
+    def test_none_ticket_matcher_linear_on_pathological_whitespace(self):
+        import time
+        msg = "Návody: pripravujeme" + " " * 40000 + "Y"
+        t0 = time.monotonic()
+        navody.evaluate_stop(None, "#7560", msg)
+        self.assertLess(time.monotonic() - t0, 0.5)
+
+    def test_navody_na_still_matches_valid_reason(self):
+        self.assertTrue(navody._has_navody_na("Navody: n/a — backend-only"))
+        self.assertTrue(navody._has_navody_na("Návody: n/a - dôvod"))
+
+    def test_navody_na_bare_without_reason_does_not_match(self):
+        self.assertFalse(navody._has_navody_na("Navody: n/a"))
+        self.assertFalse(navody._has_navody_na("Navody: n/a   "))
+
 
 # --------------------------------------------------------------------------- #
 # 4. HOOK end-to-end (through stop-check-prose-violations.sh, no network)

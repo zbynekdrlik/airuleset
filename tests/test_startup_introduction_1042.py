@@ -51,9 +51,12 @@ SK_ANCHORS = [
 HEADING = "Štartovací Introduction v produkte"
 
 
-def _run(msg):
+def _run(msg, cwd=None):
     sid = "intro1042-%s" % uuid.uuid4().hex[:10]
-    payload = json.dumps({"session_id": sid, "last_assistant_message": msg})
+    obj = {"session_id": sid, "last_assistant_message": msg}
+    if cwd is not None:
+        obj["cwd"] = cwd
+    payload = json.dumps(obj)
     p = subprocess.run(["bash", str(HOOK)], input=payload, capture_output=True,
                        text=True, timeout=300)
     sweep_session_files(sid)
@@ -212,7 +215,11 @@ class GateAllowsWhenLinkedOrBypassedOrIrrelevant(TestCase):
         # fact (this fixture runs with no stream file) now BLOCKS. The
         # live-200-link ALLOW path is covered in
         # tests/test_navody_gate_1073.py::TestStopEvaluate (fact + fake curl).
-        self.assertTrue(_blocked(_run(ACCEPT_BLOCK_WITH_LINK)))
+        # cwd = an empty dir so the UNKNOWN-fact state is DETERMINISTIC (no
+        # `.claude/streams/<uid>.md` fact), never ambient on this repo (#1073
+        # review 2).
+        with TemporaryDirectory() as d:
+            self.assertTrue(_blocked(_run(ACCEPT_BLOCK_WITH_LINK, cwd=d)))
 
     def test_accept_block_with_bypass_is_allowed(self):
         self.assertFalse(_blocked(_run(ACCEPT_BLOCK_WITH_BYPASS)))
