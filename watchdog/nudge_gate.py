@@ -85,6 +85,7 @@ legit nudge; u-freshness additionally has its own last_nudge backstop in the rid
 so it can't burst even on a corrupt gate).
 """
 import os
+import time
 
 # The gated keystroke-rider family. Jobs 8/11 (bounce / gk-request backstops) are
 # deliberately OUT — a different lane (idle-pane queue backstops with their own
@@ -185,6 +186,28 @@ RECOVERY_NUDGE_KINDS = frozenset(
 # is never reaped regardless of age), this is only the SECONDARY safety for a
 # budget-deferred pane.
 NUDGE_CADENCE_ORPHAN_TTL_S = 24 * 3600
+
+# #1092 (owner incident 2026-09-20) — the PER-PANE typing-attempt BUDGET. A brake
+# INDEPENDENT of the per-kind floor + cross-kind total cap, keyed on the PANE
+# (pid) not the session (sid): at most PANE_ATTEMPT_BUDGET machine typing attempts
+# per pane per rolling PANE_ATTEMPT_WINDOW_S, across ALL kinds. It is the belt on
+# top of the per-kind/total-cap gates: even if a future delivery outcome ESCAPES
+# the per-kind floor stamp (the #1092 swallowed-batch storm — 10 typing attempts
+# in 12 min because a swallowed batch stamped nothing), the pane can never receive
+# more than two typing attempts an hour, so any escape is harmless by construction.
+# Consulted BEFORE a keystroke + stamped AFTER any typing attempt (delivered,
+# delivered-unconfirmed, OR swallowed) by every delivery path that types INTO AN
+# ACTIVE PANE: the #923 batch, the single-nudge riders (both via `send_verified`),
+# and the goal RE-ARM family (`deliver_goal`, #1092 item e). A REVIVAL into a DEAD
+# session (resume/compact/wake-parked via send_verified) is NOT gated — "the
+# owner's problem is typing INTO an active/human pane, not recovery itself" (#1092
+# addendum, Approach-2 rejection); gating a revival would strand a limit/401-dead
+# session for up to an hour (#520). Kept a LEAF helper over ONE state namespace,
+# no new I/O, no new job (mirrors the #797 cadence gate):
+#
+#   state["nudge_pane_attempts"] = {pid: [ts, ts, ...]}   # windowed on write
+PANE_ATTEMPT_BUDGET = 2
+PANE_ATTEMPT_WINDOW_S = 3600
 
 
 def _env_int(key, default_s):
@@ -484,6 +507,86 @@ def mark_batch_sent(state, sid, categories, now):
         mark_sent(state, sid, cat, now)
 
 
+# --------------------------------------------------------------------------- #
+# #1092 — the per-pane typing-attempt BUDGET (see PANE_ATTEMPT_BUDGET above).
+# --------------------------------------------------------------------------- #
+def _pane_attempts(state, pid, now):
+    """The typing-attempt timestamps for `pid` WITHIN the rolling window, at
+    `now`. A future-skewed / non-numeric ts is dropped by `_gate_ts` (the same
+    fail-safe direction as the cadence gate — a corrupt entry never suppresses).
+    Returns [] on any malformed state (fail-safe: 'no prior attempt' → ALLOW)."""
+    if not isinstance(state, dict):
+        return []
+    pa = state.get("nudge_pane_attempts")
+    if not isinstance(pa, dict):
+        return []
+    lst = pa.get(pid)
+    if not isinstance(lst, list):
+        return []
+    win = PANE_ATTEMPT_WINDOW_S
+    return [t for t in lst
+            if _gate_ts(t, now) is not None and now - t < win]
+
+
+def pane_budget_ok(state, pid, now):
+    """True iff FEWER than `PANE_ATTEMPT_BUDGET` typing attempts have been made
+    into `pid` within the rolling `PANE_ATTEMPT_WINDOW_S`. The keystroke brake
+    every active-pane delivery path consults BEFORE typing; the 3rd attempt in the
+    hour is refused. Fail-safe ALLOWS on malformed state (never suppress a legit
+    delivery by accident — mirrors `gate_ok`)."""
+    return len(_pane_attempts(state, pid, now)) < PANE_ATTEMPT_BUDGET
+
+
+def pane_budget_hold_reason(state, pid, now):
+    """The honest journal clause for a typing attempt the pane budget REFUSED:
+    `hold:pane-budget (<n> attempts since HH:MM)` — the count of in-window
+    attempts + the OLDEST one's local clock time (what the owner reads in the
+    journal). Fail-safe `hold:pane-budget (budget exhausted)` when no ts is
+    readable (never claim a time we cannot compute)."""
+    attempts = sorted(_pane_attempts(state, pid, now))
+    if not attempts:
+        return "hold:pane-budget (budget exhausted)"
+    hhmm = time.strftime("%H:%M", time.localtime(attempts[0]))
+    return "hold:pane-budget (%d attempts since %s)" % (len(attempts), hhmm)
+
+
+def mark_pane_attempt(state, pid, now):
+    """Record a typing attempt into `pid` at `now`. Called AFTER any keystroke
+    delivery attempt regardless of outcome (delivered, delivered-unconfirmed, OR
+    swallowed — each is a typing attempt into the pane). Prunes the pid's own list
+    to the rolling window on write so the namespace stays bounded. A no-op on a
+    malformed `state` or a falsy `pid` (mirrors `mark_sent`)."""
+    if not isinstance(state, dict) or not pid:
+        return
+    pa = state.get("nudge_pane_attempts")
+    if not isinstance(pa, dict):
+        pa = {}
+        state["nudge_pane_attempts"] = pa
+    prior = pa.get(pid)
+    kept = ([t for t in prior
+             if isinstance(t, (int, float)) and not isinstance(t, bool)
+             and 0 <= now - t < PANE_ATTEMPT_WINDOW_S]
+            if isinstance(prior, list) else [])
+    kept.append(now)
+    pa[pid] = kept
+
+
+def _prune_pane_attempts(state, now):
+    """#1092 — reap `nudge_pane_attempts` entries for panes with NO in-window
+    attempt left (a gone/idle pane). Keyed on pid (not sid), so it cannot use the
+    `visited_sids` gate the cadence prune uses; the window itself is the bound —
+    an entry the mark-on-write already trimmed to <= 1 h simply has no live ts
+    once the pane stops receiving attempts, so `_pane_attempts` reads []. Never
+    raises."""
+    if not isinstance(state, dict):
+        return
+    pa = state.get("nudge_pane_attempts")
+    if not isinstance(pa, dict):
+        return
+    for pid in [p for p in list(pa.keys()) if not _pane_attempts(state, p, now)]:
+        pa.pop(pid, None)
+
+
 def _stale_entry(v, now, ttl_s):
     """True iff a per-sid cadence entry is reapable by AGE (the secondary gate):
     malformed, OR every recorded ts older than `ttl_s`. A future ts (clock skew)
@@ -506,6 +609,7 @@ def prune(state, visited_sids, now, ttl_s=NUDGE_CADENCE_ORPHAN_TTL_S):
     orphan reapers."""
     if not isinstance(state, dict):
         return
+    _prune_pane_attempts(state, now)   # #1092 — pid-keyed pane-budget namespace
     cad = state.get("nudge_cadence")
     if not isinstance(cad, dict):
         return
