@@ -262,5 +262,141 @@ class TestJanitorUndoHelper(unittest.TestCase):
         self.assertNotIn("BSpace", [x for a in tmux.sent for x in a])
 
 
+class TestRearmThroughPaneBudget(unittest.TestCase):
+    """#1092 (e) — a watchdog RE-ARM (`deliver_goal` for a watchdog re-arm origin)
+    types into an ACTIVE stream pane, so it goes through the SAME per-pane budget +
+    empty-box-at-idle precondition as a nudge (deliver_goal delivers via
+    _send_goal_verified, not send_verified, so it is enforced there)."""
+
+    CWD = "/home/newlevel/devel/rearmbudget"
+
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _goal_arm_helpers import _isolate_goal_state
+        self.reqp, self.syncp = _isolate_goal_state(self)
+
+    def _dir(self):
+        from tempfile import TemporaryDirectory
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _deliver(self, sid, armed_cond, template, state, now=100000,
+                 initial_box="", origin="stale-rearm"):
+        import unittest.mock as m
+        import watchdog as wd
+        from watchdog import goal
+        from _goal_arm_helpers import (
+            DeliverGoalFakeTmux, GOAL_ARMED_CAP,
+            _write_marker_transcript, _write_goal_marker)
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, sid)
+        _write_goal_marker(proj, self.CWD, sid, "Goal set: " + armed_cond,
+                           ts_epoch=500)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP, model_type=True,
+                                   initial_box=initial_box)
+        with m.patch.object(wd, "_goal_autoarm_recent_human_activity",
+                            return_value=(False, "test")):
+            word = goal.deliver_goal(
+                sid, self.CWD, template, "branch-merge", run=tmux, projects_dir=proj,
+                now=now, request_ts=now, sleep_fn=lambda s: None, state=state,
+                origin=origin)
+        return word, tmux
+
+    _OLD = ("STOP CONDITIONS — the loop is DONE the moment EITHER holds, both "
+            "checkable from the transcript: (A) an OLDER wording of the stop "
+            "conditions, from before the shipped template changed.")
+    _TMPL = ("/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, "
+             "both checkable from the transcript: (A) the NEW wording carrying "
+             "the saturation clause: SATURATE parallel isolation:worktree lanes.")
+
+    def test_rearm_deferred_when_pane_budget_exhausted(self):
+        state = {"nudge_pane_attempts": {"%9": [100000 - 10, 100000 - 5]}}
+        word, tmux = self._deliver("sess-rb-1", self._OLD, self._TMPL, state)
+        self.assertEqual(word, "skip:pane-budget")
+        self.assertEqual(tmux.sent, [], "no keystroke on a pane-budget defer")
+
+    def test_rearm_into_bare_box_marks_a_pane_attempt(self):
+        state = {}
+        word, tmux = self._deliver("sess-rb-2", self._OLD, self._TMPL, state)
+        self.assertEqual(word, "sent", "a stale-rearm REPLACE into a bare box types")
+        self.assertEqual(len(state.get("nudge_pane_attempts", {}).get("%9", [])), 1)
+
+    def test_rearm_deferred_on_a_foreign_draft_never_stashes(self):
+        state = {}
+        word, tmux = self._deliver("sess-rb-3", self._OLD, self._TMPL, state,
+                                   initial_box="moja vlastná poznámka k tiketu")
+        self.assertEqual(word, "skip:pane-busy-draft")
+        # never typed / stashed around the owner's own draft
+        self.assertNotIn("-l", [x for a in tmux.sent for x in a])
+
+
+class TestStaleRearmOncePerTemplateVersion(unittest.TestCase):
+    """#1092 (e) — a template change is NOT an emergency: `stale-rearm` records at
+    most ONE re-arm per session per TEMPLATE VERSION (keyed on the shipped
+    template hash), so a template deploy cannot storm every armed session's prompt
+    sweep after sweep."""
+
+    CWD = "/home/newlevel/devel/stalever"
+
+    _SIG = "STOP CONDITIONS — the loop is DONE the moment EITHER holds"
+    _OLD = (_SIG + ", both checkable from the transcript: (A) an OLDER wording of "
+            "the stop conditions, from before the shipped template changed.")
+    _TMPL = ("/goal " + _SIG + ", both checkable from the transcript: (A) the NEW "
+             "wording carrying the saturation clause: SATURATE parallel lanes.")
+    _TMPL2 = _TMPL + " EXTRA v2 clause."
+
+    def setUp(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _goal_arm_helpers import _isolate_goal_state
+        self.reqp, self.syncp = _isolate_goal_state(self)
+
+    def _dir(self):
+        from tempfile import TemporaryDirectory
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return Path(d.name)
+
+    def _sweep(self, sid, tmpl, state, reqs, now=100000):
+        from watchdog import goal
+        from _goal_arm_helpers import (
+            DeliverGoalFakeTmux, GOAL_ARMED_CAP, _write_marker_transcript,
+            _write_goal_marker)
+        proj = self._dir()
+        _write_marker_transcript(proj, self.CWD, sid)
+        _write_goal_marker(proj, self.CWD, sid, "Goal set: " + self._OLD,
+                           ts_epoch=500)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
+                                   GOAL_ARMED_CAP)
+        logs = goal.goal_dark_watch(
+            now, run=tmux, send_fn=lambda mm, **k: None, projects_dir=proj,
+            state=state, sleep_fn=lambda s: None,
+            obligation_fn=lambda cwd: (7, now), rearm_fn=lambda cwd: (tmpl, "branch-merge"),
+            requests_path=reqs, dry_run=False)
+        return goal.load_goal_requests(reqs), logs
+
+    def test_second_sweep_same_version_does_not_re_record(self):
+        from watchdog import goal
+        st = {}
+        reqs = self._dir() / "goal-requests.json"
+        r1, _ = self._sweep("sess-v1", self._TMPL, st, reqs)
+        self.assertEqual(r1.get("sess-v1", {}).get("origin"), "stale-rearm")
+        goal.clear_goal_request("sess-v1", path=reqs)
+        r2, logs2 = self._sweep("sess-v1", self._TMPL, st, reqs)
+        self.assertEqual(r2, {}, "same template version -> no second re-arm record")
+        self.assertTrue(any("template version" in ln for ln in logs2), logs2)
+
+    def test_a_new_template_version_re_records(self):
+        from watchdog import goal
+        st = {}
+        reqs = self._dir() / "goal-requests.json"
+        self._sweep("sess-v2", self._TMPL, st, reqs)
+        goal.clear_goal_request("sess-v2", path=reqs)
+        r2, _ = self._sweep("sess-v2", self._TMPL2, st, reqs)
+        self.assertEqual(r2.get("sess-v2", {}).get("origin"), "stale-rearm",
+                         "a changed template version re-arms again")
+
+
 if __name__ == "__main__":
     unittest.main()
