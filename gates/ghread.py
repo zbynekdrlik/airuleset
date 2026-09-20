@@ -122,12 +122,19 @@ def _remote_slug(name, cwd, runner):
     return _parse_remote_slug(out)
 
 
-def _gh_default_remote(cwd, runner):
-    """The NAME of the remote `gh repo set-default` marked as the base repo, or
-    None. `gh repo set-default <remote>` writes `remote.<name>.gh-resolved = base`
-    into `.git/config`; the entry whose value is exactly `base` names the default
-    base remote (a non-remote default carries an `owner/repo` value instead, which
-    is NOT a local remote to trust). A LOCAL git op — no network."""
+def _gh_resolved_slug(cwd, runner):
+    """The canonical `owner/name` recorded by `gh repo set-default`, or None.
+    `gh` writes ONE `remote.<name>.gh-resolved` entry into `.git/config` in one of
+    two forms, BOTH of which name gh's own canonical base repo:
+
+      * `= base`         -- the base repo IS the `<name>` remote (use its URL);
+      * `= [host/]owner/repo` -- the base repo is NOT a local remote (a fork whose
+        parent has no remote), so gh recorded the repo directly. This value IS the
+        canonical slug (#1094 review) -- honour it, or a fork clone whose only
+        signal is this marker leaks the fork slug to `cli_release_state` (which has
+        no snapshot authority check to catch it).
+
+    A LOCAL git op -- no network."""
     argv = ["git"] + (["-C", cwd] if cwd else []) + [
         "config", "--get-regexp", r"remote\..*\.gh-resolved"]
     rc, out, _err = _run(argv, cwd, 6, None, runner)
@@ -135,10 +142,21 @@ def _gh_default_remote(cwd, runner):
         return None
     for line in (out or "").splitlines():
         parts = line.split()
-        if len(parts) == 2 and parts[1] == "base":
-            m = re.match(r"remote\.(.+)\.gh-resolved$", parts[0])
+        if len(parts) != 2:
+            continue
+        key, val = parts
+        if val == "base":
+            m = re.match(r"remote\.(.+)\.gh-resolved$", key)
             if m:
-                return m.group(1)
+                slug = _remote_slug(m.group(1), cwd, runner)
+                if slug:
+                    return slug
+        elif "/" in val:
+            # a non-remote default recorded as `[host/]owner/repo` -> last two
+            # path segments are the canonical owner/name.
+            segs = [s for s in val.split("/") if s]
+            if len(segs) >= 2:
+                return "%s/%s" % (segs[-2], segs[-1])
     return None
 
 
@@ -147,7 +165,8 @@ def canonical_slug(cwd, runner=None):
     the way `gh` does but with LOCAL git ONLY (never an API call, so it survives a
     GraphQL/REST quota exhaustion — #1070/#1094):
 
-      (1) the remote `gh repo set-default` marked `gh-resolved = base` wins;
+      (1) the `gh repo set-default` marker (`gh-resolved = base` -> that remote,
+          or `gh-resolved = [host/]owner/repo` -> that repo) wins;
       (2) else an `upstream` remote (a fork clone points `upstream` at the base);
       (3) else `origin`.
 
@@ -157,11 +176,9 @@ def canonical_slug(cwd, runner=None):
     clone (david1-4 — origin = the fork, issues disabled) resolves to the
     canonical repo exactly as `gh` does, instead of the fork whose empty issues
     listing would silently zero the footer (#1094)."""
-    name = _gh_default_remote(cwd, runner)
-    if name:
-        slug = _remote_slug(name, cwd, runner)
-        if slug:
-            return slug
+    slug = _gh_resolved_slug(cwd, runner)
+    if slug:
+        return slug
     slug = _remote_slug("upstream", cwd, runner)
     if slug:
         return slug

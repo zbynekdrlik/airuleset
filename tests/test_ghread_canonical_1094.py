@@ -90,14 +90,26 @@ class CanonicalSlug(unittest.TestCase):
         r = self._runner(gh_resolved=None, upstream=None, origin=None)
         self.assertIsNone(ghread.canonical_slug("/repo", runner=r))
 
-    def test_gh_resolved_other_value_is_ignored(self):
-        # only the value `base` marks the default base repo; anything else
-        # (a non-remote default) is NOT a remote name to trust.
+    def test_gh_resolved_owner_repo_value_is_used(self):
+        # gh writes `remote.<name>.gh-resolved = owner/repo` when the base repo is
+        # NOT a local remote (a fork whose parent has no remote); that value IS
+        # gh's canonical answer and must win over origin (#1094 review — otherwise
+        # the fork slug leaks to cli_release_state, which has no authority check).
         r = self._runner(
-            gh_resolved="remote.origin.gh-resolved someoneelse/repo",
-            upstream="git@github.com:canon/erp.git",
-            origin="git@github.com:fork/erp.git")
-        self.assertEqual(ghread.canonical_slug("/repo", runner=r), "canon/erp")
+            gh_resolved="remote.origin.gh-resolved zbynekdrlik/odoo-erp",
+            upstream=None,
+            origin="git@github.com:kvaskodev/odoo-erp.git")
+        self.assertEqual(ghread.canonical_slug("/repo", runner=r),
+                         "zbynekdrlik/odoo-erp")
+
+    def test_gh_resolved_host_owner_repo_value_is_used(self):
+        # gh may record the host too: `remote.origin.gh-resolved =
+        # github.com/owner/repo` -> the last two path segments are the slug.
+        r = self._runner(
+            gh_resolved="remote.origin.gh-resolved github.com/zbynekdrlik/odoo-erp",
+            origin="git@github.com:kvaskodev/odoo-erp.git")
+        self.assertEqual(ghread.canonical_slug("/repo", runner=r),
+                         "zbynekdrlik/odoo-erp")
 
     def test_resolve_slug_is_backcompat_alias(self):
         # the old name resolves canonically now (a fork with upstream -> upstream)
