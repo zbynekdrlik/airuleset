@@ -9,6 +9,12 @@ set -euo pipefail
 
 command -v jq &>/dev/null || exit 0
 
+# #1073 — repo root for the `python3 -m gates.navody` dispatch (the #1042 block
+# now delegates the client-guide live-link check to gates.navody). hooks/ live
+# directly under the repo root.
+_PROSE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+_PROSE_REPO_ROOT="$(dirname "$_PROSE_DIR")"
+
 INPUT=$(cat 2>/dev/null || echo "")
 MSG=$(echo "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null || echo "")
 
@@ -2160,12 +2166,16 @@ if [ "$VERIF_REPORT" = "1" ]; then
     fi
 fi
 
-# #1042 — Startup Introduction link on a client-acceptance hand-off. Owner
-# directive (montalu6, 15.9.2026): every client handover delivers ONE startup
-# „Introduction / Začíname" page IN the product (the Návody section), and the
-# acceptance hand-off LINKS it. So a `❓` acceptance block, OR a needs-acceptance
-# labelling turn, whose text carries NO https:// link to a Návody/Introduction/
-# Začíname page is an incomplete handover. FIRE detectors read MSG_MENTION (a
+# #1042/#1073 — client-guide (Návody) link on a client-acceptance hand-off.
+# Owner directive (montalu6, 15.9.2026): every client handover delivers ONE
+# startup „Introduction / Začíname" page IN the product (the Návody section),
+# and the acceptance hand-off LINKS it. #1073 (owner 18.9.2026: „návody buduj a
+# udržiavaj a nech to je airuleset pravidlo") REPLACES the round-1 word check
+# (https:// + a Návody keyword) — which could not tell a live guide from a
+# fabricated URL and so forced a dead link on a tenant with no guide (#1072) —
+# with a per-tenant live-link gate: the FIRE detectors below still classify the
+# hand-off shape, but the SATISFIER is now `gates.navody` (a live-link + fact
+# check; see the block body). FIRE detectors read MSG_MENTION (a
 # backticked/quoted MENTION of the rule never fires — the #96 use-vs-mention
 # split, so a message DESCRIBING this rule or a code-fenced example is not gated);
 # the satisfier + bypass read the raw MSG (a link in a code span still counts).
@@ -2207,12 +2217,32 @@ fi
 INTRO_LABEL=$(LC_ALL=C.UTF-8 msg_has "$MSG_MENTION" -qiE '(--?add-label|add_label|pridal|ozna[čc]il|nastav|[šs]t[íi]tk|labell?ed).{0,120}needs-acceptance|needs-acceptance.{0,40}(--?add-label|add_label)|gh[[:space:]]+issue[[:space:]]+edit.{0,80}needs-acceptance' && echo 1 || echo 0)
 if [ "$INTRO_LABEL" = "1" ]; then INTRO_FIRE=1; fi
 if [ "$INTRO_FIRE" = "1" ]; then
-    INTRO_HAS_LINK=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qE 'https?://' && echo 1 || echo 0)
-    INTRO_HAS_KW=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE 'n[áa]vod|introduction|za[čc][íi]nam|zaciname' && echo 1 || echo 0)
     INTRO_BYPASS=$(msg_has "$MSG" -qF 'airuleset:intro-link-ok' && echo 1 || echo 0)
-    if [ "$INTRO_BYPASS" = "0" ] && { [ "$INTRO_HAS_LINK" = "0" ] || [ "$INTRO_HAS_KW" = "0" ]; }; then
-        echo "VIOLATION: Odovzdávaš klientovi / označuješ needs-acceptance, ale správa nenesie https:// odkaz na štartovaciu Introduction / Začíname / Návody stránku v produkte. Per airuleset #1042 (owner 15.9.2026): každá odovzdávka funkčnej oblasti klientovi má JEDEN štartovací Introduction priamo v produkte (sekcia Návody: screenshoty reálnych obrazoviek, overené deep-linky, sekcia per zariadenie/cestu, kontakt na AI pomocníka + IT), z ktorého vie nová osoba bez kontextu rovno začať; akceptačné vlákno naň ODKAZUJE (deep-link), neopisuje kroky — needs-acceptance hand-off bez odkazu na Introduction = nekompletná odovzdávka. Pridaj do správy https:// odkaz na Návody/Introduction/Začíname stránku. Ak je to API-only funkcia bez produktovej stránky, pridaj marker: # airuleset:intro-link-ok <dôvod>. Pozri skills/odoo-client-messaging/handover-compose.md (#1042)." >&2
-        add_hard "client-acceptance hand-off with no https:// link to a Návody/Introduction/Začíname page (#1042)"
+    if [ "$INTRO_BYPASS" = "0" ]; then
+        # #1073 (owner ruling 18.9.2026, montalu1: „návody buduj a udržiavaj a
+        # nech to je airuleset pravidlo") — REPLACE the #1042 word check
+        # (https:// + a Návody keyword) with the per-tenant live-link gate. The
+        # word check could not tell a live guide from a fabricated URL, so on a
+        # tenant with no guide it forced a dead `/odoo/knowledge` link into a
+        # client message (#1072). gates.navody reads the per-tenant `navody_url`
+        # fact from `.claude/streams/<stream>.md` + the message/cwd from the
+        # SAME Stop payload (piped on stdin) and blocks unless the message
+        # carries a LIVE guide deep-link (or, for a `NONE — #N` fact, the guide
+        # ticket reference); an UNKNOWN fact FAILS CLOSED with the fix named, so
+        # while the gate runs a fabricated/dead link cannot pass. exit 2 =
+        # block, exit 0 = allow, any other rc = infra failure (python/curl
+        # hiccup) -> fail OPEN (never fabricate a block on an infra error). The
+        # bypass
+        # `# airuleset:intro-link-ok <dôvod>` (checked above) still exempts an
+        # API-only feature with no product page.
+        NAVODY_RC=0
+        NAVODY_REASON=$(printf '%s' "$INPUT" | env PYTHONPATH="${_PROSE_REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m gates.navody 2>&1) || NAVODY_RC=$?
+        if [ "$NAVODY_RC" = "2" ]; then
+            printf '%s\n' "$NAVODY_REASON" >&2
+            add_hard "client-acceptance hand-off: client-guide (Návody) live-link/fact check failed (#1073)"
+        elif [ "$NAVODY_RC" != "0" ]; then
+            printf 'stop-check-prose-violations: navody gate infra rc=%s — fail-open (#1073)\n' "$NAVODY_RC" >&2
+        fi
     fi
 fi
 
