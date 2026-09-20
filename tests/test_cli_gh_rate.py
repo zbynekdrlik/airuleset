@@ -553,6 +553,67 @@ class TestEnsureWrapper(unittest.TestCase):
         self.assertEqual(open(cli_gh_rate.app_shim_path(), encoding="utf-8").read(),
                          saved)
 
+    def _make_app_shim_variant(self, path, tag):
+        # an app-token shim with DIFFERENT bytes (an odoo UPDATE) that is still
+        # recognised as the app-token shim (keeps the 3281 / gh-app-token markers).
+        self._make_app_shim(path)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write("# odoo-erp update marker %s (issue 3281)\n" % tag)
+
+    def test_updated_app_shim_is_re_chained_not_wedged(self):
+        # #1087 L1b F3: odoo ships an UPDATED (non-identical) App shim at gh while
+        # gh-app-shim holds the old one. Both are app-token shims -> refresh
+        # gh-app-shim to the newer bytes and re-chain (never wedge unthrottled).
+        self._make_app_shim(cli_gh_rate.shim_path())
+        cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                           verbose=False)
+        old = open(cli_gh_rate.app_shim_path(), encoding="utf-8").read()
+        # odoo re-installs a DIFFERENT app shim at gh (clobbering our wrapper).
+        self._make_app_shim_variant(cli_gh_rate.shim_path(), "v2")
+        new_at_gh = open(cli_gh_rate.shim_path(), encoding="utf-8").read()
+        self.assertNotEqual(old, new_at_gh)           # genuinely updated
+        status = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                    verbose=False)
+        self.assertIn("chain", status)
+        self.assertTrue(cli_gh_rate._is_our_wrapper(cli_gh_rate.shim_path()))
+        # gh-app-shim refreshed to the NEW shim, not left at the old bytes.
+        self.assertEqual(open(cli_gh_rate.app_shim_path(), encoding="utf-8").read(),
+                         new_at_gh)
+
+    def test_non_app_shim_at_gh_app_shim_is_left_untouched(self):
+        # a genuinely FOREIGN non-app-shim file occupying gh-app-shim is NOT
+        # clobbered (fail-safe) — the App shim is left at gh, unthrottled.
+        self._make_app_shim(cli_gh_rate.shim_path())
+        with open(cli_gh_rate.app_shim_path(), "w", encoding="utf-8") as fh:
+            fh.write("#!/usr/bin/env bash\n# someone else's file\nexit 0\n")
+        before = open(cli_gh_rate.app_shim_path(), encoding="utf-8").read()
+        status = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                    verbose=False)
+        self.assertIn("skip", status)
+        self.assertEqual(open(cli_gh_rate.app_shim_path(), encoding="utf-8").read(),
+                         before)                       # unexpected file untouched
+
+    def test_chained_wrapper_removed_when_app_shim_vanishes(self):
+        # #1087 L1b F2: a chained (observe) wrapper whose gh-app-shim vanished
+        # must be REMOVED (clean PATH fallback), never repointed at the bare
+        # binary (which would exec the token-less real gh -> unauthenticated).
+        self._make_app_shim(cli_gh_rate.shim_path())
+        cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                           verbose=False)
+        self.assertTrue(cli_gh_rate._is_our_wrapper(cli_gh_rate.shim_path()))
+        os.remove(cli_gh_rate.app_shim_path())         # the App shim disappears
+        # a real gh exists elsewhere (would be the wrong, token-less repoint).
+        other = os.path.join(self.tmp, "sysbin")
+        os.makedirs(other)
+        self._make_real_gh(os.path.join(other, "gh"))
+        os.environ["PATH"] = self.bin + os.pathsep + other
+        status = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                    verbose=False)
+        self.assertIn("removed", status)
+        self.assertNotIn("repointed", status)
+        self.assertFalse(os.path.exists(cli_gh_rate.shim_path()),
+                         "the chained shim must be removed, not repointed")
+
     def test_app_shim_chain_prints_loud_line(self):
         # #1087 L1b: the chain must be LOUD so a push operator sees the box is
         # now throttled/accounted through the chain.
@@ -878,6 +939,35 @@ class TestChainTermination(unittest.TestCase):
         self.assertLessEqual(len(hops), 3, "chain took > 3 hops: %r" % hops)
         self.assertIn("appshim", hops, "the app shim (token) must run")
         self.assertIn("sysgh", hops, "the real system gh must be reached")
+
+    def test_app_token_propagates_through_the_chain(self):
+        # #1087 L1b N1: the WHOLE reason to chain (not skip) is to keep the
+        # installation token. Prove GH_TOKEN — exported by the App shim from
+        # ~/.local/bin/gh-app-token — actually reaches the final real gh through
+        # the gh -> gh-app-shim -> wrapper(d2) -> real gh chain.
+        self._make_app_shim(cli_gh_rate.shim_path())
+        # the token file the App shim cats (HOME points at self.tmp below).
+        with open(os.path.join(self.bin, "gh-app-token"), "w") as fh:
+            fh.write("INSTALL-TOKEN-abc123\n")
+        # a real gh stand-in that records the GH_TOKEN it received.
+        seen = os.path.join(self.tmp, "seen-token")
+        sysgh = os.path.join(self.sys, "gh")
+        with open(sysgh, "w", encoding="utf-8") as fh:
+            fh.write('#!/usr/bin/env bash\n'
+                     '[ -n "$HOPFILE" ] && echo sysgh >> "$HOPFILE"\n'
+                     'printf "%s" "${GH_TOKEN:-NONE}" > '
+                     + cli_gh_rate._shq(seen) + '\n'
+                     'echo "gh version 2.40.0 (test)"\n')
+        os.chmod(sysgh, 0o755)
+        status = cli_gh_rate.ensure_gh_rate_wrapper(module="/repo/cli_gh_rate.py",
+                                                    verbose=False)
+        self.assertIn("chain", status)
+        env = {"PATH": self.bin + os.pathsep + self.sys, "HOME": self.tmp}
+        r = self._run_gh(cli_gh_rate.shim_path(), env=env, timeout=10)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(seen), "the real gh never ran")
+        self.assertEqual(open(seen).read(), "INSTALL-TOKEN-abc123",
+                         "the App token must reach the final gh through the chain")
 
     def test_wrap_in_place_chain_terminates(self):
         # #1051 item 1: the wrap-in-place layout (a plain box with a real gh)

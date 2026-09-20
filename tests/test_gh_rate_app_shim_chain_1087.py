@@ -170,6 +170,25 @@ class TestHeaderSourcedBudget(_AppShimBox):
                                            reset=1_800_000_000, now=1000.0)
         self.assertTrue(os.path.exists(cli_gh_rate.throttle_marker_path()))
 
+    def test_headers_zero_sets_marker_even_with_unknown_limit(self):
+        # #1087 L1b N2: the remaining==0 arm of _throttle_warranted exists for a
+        # reading whose limit is unknown (remaining_pct None -> backoff 0). A
+        # 403-observed reading has no limit; the marker MUST still be set so the
+        # zero-budget line fires.
+        cli_gh_rate.record_headers_reading("core", remaining=0, limit=None,
+                                           reset=1_800_000_000, now=1000.0)
+        self.assertTrue(os.path.exists(cli_gh_rate.throttle_marker_path()))
+
+    def test_observe_exhausted_classifies_the_resource(self):
+        # #1087 L1b F2: --observe-exhausted -- <gh args> records the resource the
+        # exhausted call USED (graphql for a graphql read), not always core.
+        cli_gh_rate._observe_exhausted_main(
+            ["--observe-exhausted", "--", "api", "graphql", "-f", "query=x"])
+        res = json.load(open(cli_gh_rate.status_path()))["resources"]
+        self.assertIn("graphql", res)
+        self.assertEqual(res["graphql"]["remaining"], 0)
+        self.assertNotIn("core", res)     # a graphql 403 is NOT misattributed to core
+
     def test_observe_exhausted_writes_zero_and_reset(self):
         # #1087 L1b: the wrapper-observed 403/429 path writes remaining=0.
         cli_gh_rate._observe_exhausted_main(["--observe-exhausted"])
@@ -216,9 +235,10 @@ class TestDiagDedup(unittest.TestCase):
             cli_gh_rate._diag("fetch-rate-limit", exc, now=base + i)     # hour H
         cli_gh_rate._diag("fetch-rate-limit", exc, now=base + 3700)      # hour H+1
         hits = [ln for ln in self._lines() if "fetch-rate-limit" in ln]
-        # H's first line + H's flush (x3) + H+1's first line.
+        # H's first line + H's flush (×2 more = the 2 suppressed beyond the
+        # logged first) + H+1's first line == 3 total occurrences, exactly.
         joined = "\n".join(hits)
-        self.assertIn("×3", joined)
+        self.assertIn("×2 more", joined)
         self.assertGreaterEqual(len(hits), 2)
 
     def test_distinct_failures_are_not_deduped_together(self):
@@ -333,15 +353,22 @@ class TestObserveRunCapture(unittest.TestCase):
                      "    pathlib.Path(%r).write_text('1')\n" % sentinel)
         return mod, sentinel
 
-    def _run(self, argv_stderr, rc):
+    def _run(self, argv_stderr, rc, poller=True):
         up = self._fake_upstream(argv_stderr, rc)
         mod, sentinel = self._fake_recorder_module()
         shim = cli_gh_rate.shim_path()
         cli_gh_rate._write_wrapper_file(shim, up, sys.executable, mod,
                                         upstream=up, observe=True)
         import subprocess
+        env = dict(os.environ)
+        # #1087 L1b F1/F3: the observe run-and-capture path is POLLER-only; a
+        # poller call sets AIRULESET_GH_POLLER=1.
+        if poller:
+            env["AIRULESET_GH_POLLER"] = "1"
+        else:
+            env.pop("AIRULESET_GH_POLLER", None)
         r = subprocess.run([shim, "issue", "list"], capture_output=True,
-                           text=True, timeout=10)
+                           text=True, timeout=10, env=env)
         # the recorder is backgrounded — give it a bounded moment to land.
         for _ in range(50):
             if os.path.exists(sentinel):
@@ -369,6 +396,23 @@ class TestObserveRunCapture(unittest.TestCase):
         r, observed = self._run("error: some unrelated failure", 2)
         self.assertEqual(r.returncode, 2)
         self.assertFalse(observed)
+
+    def test_permission_403_does_not_fire(self):
+        # #1087 L1b F8a: a plain permission 403 (no rate-limit text) must NOT be
+        # misread as a budget exhaustion, even as a poller.
+        r, observed = self._run("HTTP 403: Resource not accessible (gh api ...)", 1)
+        self.assertEqual(r.returncode, 1)
+        self.assertFalse(observed, "a permission 403 must NOT record remaining=0")
+
+    def test_human_call_execs_directly_no_capture(self):
+        # #1087 L1b F1/F3: a HUMAN (non-poller) call must exec the upstream
+        # directly — its stderr streams, and even an exhaustion line does NOT
+        # fire the poller-only observe recorder.
+        r, observed = self._run("API rate limit exceeded (HTTP 403)", 1,
+                                poller=False)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("rate limit exceeded", r.stderr)     # still re-emitted (exec)
+        self.assertFalse(observed, "a human call must not run the observe capture")
 
 
 if __name__ == "__main__":
