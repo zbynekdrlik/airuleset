@@ -167,26 +167,27 @@ class TestBoundedRetry(_OrchBase):
     cadence instead of retrying every sweep."""
 
     def test_persistent_swallow_backs_off_after_max_fails(self):
+        # #714 — a persistently-swallowing pane must BACK OFF, never type-and-fail
+        # every 60s sweep. #1092 (a) makes this even TIGHTER: a SWALLOWED attempt
+        # now stamps the per-kind FLOOR (the text reached the pane), so the SAME
+        # kind (partition-audit) hits hold:floor on the NEXT sweep — bounded to
+        # 1/kind/hour, well inside the old MAX_SEND_FAILS window. (The rider's
+        # send_fails backoff stays as a secondary bound; the floor fires first —
+        # the SAME reversal as the release_gap + u_freshness swallow tests.)
         wrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
         state = {}
-        attempts = 0
-        backed_off = False
-        for _ in range(6):
-            tmux = self._tmux(enters_swallowed=99)   # every submit swallowed
-            logs = self._run(wrecs, lambda cwd: [41], tmux, state=state)
-            if any("submit-unverified" in ln for ln in logs):
-                attempts += 1
-            if any("backing off" in ln for ln in logs):
-                backed_off = True
-        self.assertTrue(backed_off,
-                        "a persistently-swallowing pane must BACK OFF, never "
-                        "type-and-fail every 60s sweep (the retry storm, #714)")
-        self.assertLessEqual(
-            attempts, owr.MAX_SEND_FAILS,
-            "bounded retry: at most MAX_SEND_FAILS type-and-fail attempts per "
-            "cadence, not one per sweep forever — got %d" % attempts)
-        self.assertEqual(wrecs[self.sid]["last_nudge"], NOW,
-                         "the backoff advances last_nudge (waits a full cadence)")
+        # sweep 1: a genuine swallow -> booked AND the per-kind floor stamped
+        logs = self._run(wrecs, lambda cwd: [41],
+                         self._tmux(enters_swallowed=99), state=state)
+        self.assertTrue(any("submit-unverified" in ln for ln in logs))
+        self.assertIn("partition-audit",
+                      state.get("nudge_cadence", {}).get(self.sid, {}))
+        # sweep 2 (same hour): the floor HOLDS it before any keystroke — bounded,
+        # never per-sweep-forever.
+        tmux = self._tmux(enters_swallowed=99)
+        logs = self._run(wrecs, lambda cwd: [41], tmux, state=state)
+        self.assertTrue(any("hold:floor" in ln for ln in logs))
+        self.assertEqual(tmux.typed_texts(), [])
 
     def test_corrupt_send_fails_is_tolerated_not_crashed(self):
         # send_fails crosses the JSON boundary; a corrupt/legacy non-int must

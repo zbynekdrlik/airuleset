@@ -164,6 +164,7 @@ imports `watchdog.goal`, `watchdog/__init__.py` has already finished
 executing top to bottom.
 """
 
+import hashlib
 import json
 import os
 import time
@@ -1747,6 +1748,24 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         if _cskip:
             return _cskip
 
+    # #1092 (e) -- a watchdog RE-ARM types into an ACTIVE (idle) stream pane, so it
+    # goes through the SAME per-pane typing budget as a nudge: at most
+    # PANE_ATTEMPT_BUDGET typing attempts into this pane per rolling hour, across
+    # ALL kinds. deliver_goal delivers via _send_goal_verified / deliver_with_stash
+    # (not send_verified), so the budget is enforced HERE, right before the
+    # keystroke and after the human-active guards above. Refused BEFORE any
+    # keystroke -> a zero-keystroke, non-terminal defer (retry next sweep once the
+    # rolling hour frees a slot, or the 30-min age cap expires it silently). The
+    # user's OWN `self-callback` arm is NOT a watchdog re-arm and is never gated
+    # here (the owner at the keyboard). This is the second writer the addendum
+    # names: a template change can no longer storm a pane's prompt via re-arms.
+    if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
+        if not _nudge_gate.pane_budget_ok(state, pid, now):
+            _log_goal_sync("SKIP pane-budget(%s) sid=%s cwd=%s" % (origin, sid, cwd))
+            if out is not None:
+                out["detail"] = _nudge_gate.pane_budget_hold_reason(state, pid, now)
+            return "skip:pane-budget"
+
     kind, draft = watchdog._classify_boundary(captured)
     if kind == "no-input-line":
         _log_goal_sync("SKIP no-input-line sid=%s cwd=%s" % (sid, cwd))
@@ -1781,6 +1800,10 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         if _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath,
                                      run, state, now, sleep_fn, logs,
                                      nudge=_nudge):
+            # #1092 (e) -- recovering our OWN stranded /goal was a keystroke into
+            # the pane; count it against the per-pane budget for a watchdog re-arm.
+            if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
+                _nudge_gate.mark_pane_attempt(state, pid, now)
             watchdog._janitor_clear_watch(state, pid)
             if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
                 _log_goal_sync("SKIP not-armed(stranded) sid=%s cwd=%s" % (sid, cwd))
@@ -1789,6 +1812,26 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                 return "skip:verify-failed"
             _log_goal_sync("SEND recover-swallowed sid=%s cwd=%s" % (sid, cwd))
             return "sent"
+        # #1092 (e) -- a watchdog RE-ARM types ONLY into an EMPTY box at the idle
+        # prompt, NEVER stash-around a FOREIGN draft (the owner's own text): the
+        # incident's second writer was the re-arm typing its whole /goal payload
+        # into an active pane. So for a watchdog re-arm origin (dark/stale/auth/
+        # fulfilled/answer-rearm AND declared-virgin, all in _GOAL_WATCHDOG_REARM_
+        # ORIGINS), once the box holds a foreign draft (our own stranded /goal was
+        # already submitted above), DEFER -- a zero-keystroke, non-terminal defer,
+        # retried on the next idle sweep (a fresh-after-reboot declared-virgin
+        # window is normally EMPTY, so it rarely reaches here; when it does hold a
+        # human draft, deferring is the SAFE choice, never type over it). ONLY the
+        # user's OWN `self-callback` arm (the owner having just typed /autopilot)
+        # keeps the stash-around below (it protects the owner's just-typed draft,
+        # #35) -- it is NOT a watchdog re-arm origin.
+        if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
+            watchdog._janitor_clear_watch(state, pid)   # nothing typed -> release
+            _log_goal_sync("SKIP pane-busy-draft(%s) sid=%s cwd=%s"
+                           % (origin, sid, cwd))
+            if out is not None:
+                out["detail"] = "deferred (pane busy/draft)"
+            return "skip:pane-busy-draft"
         # #488: thread `state` so deliver_with_stash can DURABLY record a park
         # it definitively creates (STASH_PARKED) -> the shared janitor reclaims
         # it after ANY delay, not just the 6h generic-mark window (the gk
@@ -1823,6 +1866,12 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     ok = _send_goal_verified(pid, text, run, captured=captured,
                              sleep_fn=sleep_fn, logs=logs,
                              nudge=_nudge)   # #1038 declared-window -> goal-arm
+    # #1092 (e) -- the type keystroke into the (empty) box was a typing attempt
+    # into an active pane; count it against the per-pane budget for a watchdog
+    # re-arm regardless of the verify outcome (a swallowed re-arm is recovered
+    # next sweep via the #372 janitor watch set above / _submit_stranded_own_goal).
+    if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
+        _nudge_gate.mark_pane_attempt(state, pid, now)
 
     if ok:
         watchdog._janitor_clear_watch(state, pid)
@@ -2859,7 +2908,8 @@ def _default_rearm_fn(cwd):
 
 
 def _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run, rearm_fn,
-                        obligation_fn, requests_path, attempts_state):
+                        obligation_fn, requests_path, attempts_state,
+                        tmpl_seen_state=None):
     """#623 -- for a LIVE, ARMED loop (`goal_dark_watch`'s `armed is True`
     branch), decide whether its stored condition has DRIFTED from the shipped
     template and, if so, RECORD a `stale-rearm` request (goal_sweep/deliver_goal
@@ -2887,6 +2937,22 @@ def _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run, rearm_fn,
     # or clobber it. This also covers the already-queued stale-rearm case.
     if isinstance(load_goal_requests(requests_path).get(sid), dict):
         return None
+    # #1092 (e) -- a template change is NOT an emergency: record at most ONE
+    # stale-rearm per session per TEMPLATE VERSION (keyed on the shipped template
+    # hash). After the #1084 template deploy, EVERY armed session on every box
+    # reads "stale" at once; without this key each one re-records a stale-rearm
+    # every ~30 min (its request expires, the loop is still stale, it re-records)
+    # under only the 24h/2 attempt cap -- the addendum's second-writer storm. Once
+    # a stale-rearm was recorded for this (sid, template) the loop stays on old
+    # doctrine until it dies OR the template changes again (a new hash re-opens
+    # the key), which the addendum accepts ("kept, bounded"). A dry-run never
+    # stamps (it records nothing). `tmpl_seen_state` is `state["goal_stale_rearm_
+    # tmpl"]`, threaded from goal_dark_watch like the sibling `*_attempts` dicts.
+    _tmpl_hash = hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:16]
+    if isinstance(tmpl_seen_state, dict) and tmpl_seen_state.get(sid) == _tmpl_hash:
+        return ("stale-rearm %s sid=%s -> STALE but already re-armed for this "
+                "template version -- skip (loop stays on old doctrine until it "
+                "dies or the template changes again)" % (loc, sid))
     open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
     fresh = cts is not None and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S
     if not (isinstance(open_n, int) and open_n > 0 and fresh):
@@ -2907,6 +2973,11 @@ def _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run, rearm_fn,
     # delivery ("sent").  Same class as auth-rearm.
     record_goal_request(sid, cwd, text, authority, now=now,
                         origin=_GOAL_STALE_REARM_ORIGIN, path=requests_path)
+    # #1092 (e) -- stamp the template version so a later sweep (after this request
+    # expires / delivers) never re-records another stale-rearm for the SAME
+    # template into this session.
+    if isinstance(tmpl_seen_state, dict):
+        tmpl_seen_state[sid] = _tmpl_hash
     return ("stale-rearm %s sid=%s -> STALE: recording re-arm (open=%s "
             "authority=%s)"
             % (loc, sid, open_n, authority))
@@ -3364,6 +3435,11 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     # entry forever (the #486-G5 dedup-dict-leak lesson).
     confirm_state = state.setdefault("goal_dark_confirm", {})
     attempts_state = state.setdefault("goal_dark_rearm_attempts", {})
+    # #1092 (e) -- the per-sid stale-rearm TEMPLATE-VERSION latch: once a session
+    # has been re-armed for a given shipped-template hash, do not re-record another
+    # stale-rearm for it until the template changes (a template deploy no longer
+    # storms every armed session's prompt every ~30 min).
+    stale_tmpl_state = state.setdefault("goal_stale_rearm_tmpl", {})
     # #764 -- the per-sid fulfilled-rearm record timestamps (rate limiter), a
     # JSON list per sid; reaped below exactly like `attempts_state`.
     fulfilled_state = state.setdefault("goal_fulfilled_rearm", {})
@@ -3628,7 +3704,8 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             # request for goal_sweep/deliver_goal to REPLACE it.
             sr = _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run,
                                      rearm_fn, obligation_fn, requests_path,
-                                     attempts_state)
+                                     attempts_state,
+                                     tmpl_seen_state=stale_tmpl_state)
             if sr:
                 logs.append(sr)
             # #878 — goal-guard rider: an ALIVE armed loop with a FOREIGN
@@ -3855,6 +3932,25 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
 
     if not dry_run:   # #519 -- prune goal_mark for gone+aged sessions (dry-run: no state mutation)
         _prune_goal_mark_orphans(off_state, visited_sids, now)
+        # #1092 (e) -- reap the stale-rearm TEMPLATE-VERSION latch for GONE
+        # sessions (a sid with no live transcript this sweep), the PRIMARY
+        # live-gate the sibling per-sid dedup dicts use (#486-G5 leak lesson): the
+        # value is a bare template hash with no ts, so it cannot age-reap. A
+        # session that resolved a live transcript this sweep is in `visited_sids`
+        # (added at transcript resolution above). CAVEAT (accepted): a live
+        # session TRANSIENTLY skipped BEFORE that add-point (pane-in-mode /
+        # janitor-recover / sweep-budget-break / transcript-miss continue) is not
+        # in `visited_sids`, so its latch CAN be dropped that sweep -- UNLIKE
+        # `_prune_goal_mark_orphans` (#519) which pairs the live-gate with an age
+        # secondary. The impact is bounded + strictly better than pre-#1092 (never
+        # a re-record storm): a dropped latch re-opens at most ONE fresh stale-rearm
+        # next sweep, still capped by the pending-request guard, the surviving #804
+        # attempt cap, the "delivered -> condition current -> no re-record" path,
+        # AND the new deliver_goal per-pane budget (<=2 keystrokes/pane/hour). A
+        # returning session simply re-classifies (current -> no re-arm).
+        for _gsid in [k for k in list(stale_tmpl_state.keys())
+                      if k not in visited_sids]:
+            stale_tmpl_state.pop(_gsid, None)
     return logs
 
 
@@ -5498,6 +5594,41 @@ def _lane_stuck_owner_alert(now, run, rec, glance, sid, cwd, pid, loc,
             "next sweep [stuckalert:%s:%d]" % (loc, status, sid, anchor)]
 
 
+def _janitor_undo_if_own_stranded(pid, run, own_text, loc, sleep_fn, logs):
+    """#1092 (b) -- after a SWALLOWED or DELIVERED-UNCONFIRMED keystroke, capture
+    the pane ONCE and, when it still shows OUR OWN nudge/goal text sitting unsent,
+    run the #372 janitor clear (backspace it away) so the owner never finds a
+    foreign paragraph in his prompt (the incident: a delivered-unconfirmed batch
+    whose text sat in the active gk-infra prompt). Provenance is the caller's own
+    `_janitor_mark_watch` (set before the send) PLUS the content-shape recognizers
+    (`_looks_like_own_stuck_content` -- own prefix / collapsed-paste placeholder --
+    or a >= GOAL_ARM_LEFTOVER_MIN_SUBSTR own-substring): a box that does NOT
+    provably hold our text is left COMPLETELY untouched (a foreign draft is never
+    a >=80-char substring of our own text, never carries our prefix). A bare box
+    (the submit was accepted, or send_verified already backed the text out) is a
+    no-op. Returns True only once a fresh capture confirms the clear converged.
+    Explicit journal verbs on EVERY branch (#1092 (d), #486)."""
+    cap = watchdog.capture_pane(pid, run, lines=40)
+    head = watchdog._input_box_head_text(cap)
+    itext = watchdog._input_line_text(cap)
+    own = (watchdog._looks_like_own_stuck_content(head)
+           or watchdog._looks_like_own_stuck_content(itext)
+           or watchdog._box_is_own_leftover(
+               cap, own_text, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR))
+    if not own:
+        logs.append("janitor-undo %s -> box clean (nothing stranded)" % loc)
+        return False
+
+    def _log(reason):
+        logs.append(reason)
+
+    cleared = watchdog._janitor_clear_box(pid, run, sleep_fn, _log)
+    logs.append("janitor-undo %s -> %s" % (
+        loc, "cleared stranded machine text" if cleared
+        else "clear did not converge (retry next sweep)"))
+    return cleared
+
+
 def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     state=None, handled=None, backlog_fetch=None,
                     send_fn=None, sleep_fn=None, time_fn=None,
@@ -5810,7 +5941,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     pid, _bt, run, tpath, sleep_fn=sleep_fn,
                     logs=logs, out=send_out,
                     nudge=(_incl[0] if _incl else None),
-                    state=state, skip_confirm=_b_skip_confirm)  # #1022 wedge / #1023 budget
+                    state=state, skip_confirm=_b_skip_confirm,
+                    now=now)  # #1022 wedge / #1023 budget / #1092 one-clock pane budget
                 _bdeliv = _bok or bool(send_out.get("delivered_unconfirmed"))
                 if _bdeliv:
                     _incl_set = set(_incl)
@@ -5843,9 +5975,45 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     logs.append("batch-nudge %s -> %d section(s): %s%s"
                                 % (loc, len(_incl),
                                    ", ".join(_incl), _bnote))
+                    # #1092 (b) -- a delivered-UNCONFIRMED submit may not have
+                    # cleared the box (the incident: the text sat in the prompt);
+                    # run the janitor UNDO so no stranded batch-nudge is left. A
+                    # CONFIRMED submit (`_bok`) leaves the box genuinely bare, so
+                    # skip it (a capture is enough there).
+                    if not _bok:
+                        _janitor_undo_if_own_stranded(
+                            pid, run, _bt, loc, sleep_fn, logs)
+                elif send_out.get("pane_budget_held"):
+                    # #1092 (c) -- the per-pane budget refused this BEFORE any
+                    # keystroke (send_verified already logged `hold:pane-budget`):
+                    # nothing typed, so NEVER stamp the floor or run the undo. This
+                    # branch is the storm brake -- the 3rd typing attempt into a
+                    # pane in one hour is turned away, not swallowed-and-retried.
+                    logs.append("batch-nudge %s -> held (pane-budget, not typed)"
+                                % loc)
+                elif send_out.get("attempted"):
+                    # #1092 (a)+(b) -- a SWALLOWED attempt IS a delivery attempt:
+                    # the text reached the pane. Stamp the per-kind FLOOR for ALL
+                    # included kinds + WRITE-THROUGH persist (exactly like the
+                    # delivered branch), so the SAME batch can NEVER re-fire on the
+                    # next ~70s sweep -- the exact 10-attempts-in-12-min storm this
+                    # ticket fixes. Then run the janitor UNDO so no stranded
+                    # batch-nudge is left in the owner's prompt.
+                    _nudge_gate.mark_batch_sent(state, sid, _incl, now)
+                    _queue_arrival._persist(persist, logs)
+                    logs.append("batch-nudge %s -> swallowed (%d section(s)); "
+                                "floor stamped for %s"
+                                % (loc, len(_incl), ", ".join(_incl)))
+                    _janitor_undo_if_own_stranded(
+                        pid, run, _bt, loc, sleep_fn, logs)
                 else:
-                    logs.append("batch-nudge %s -> swallowed (%d section(s))"
-                                % (loc, len(_incl)))
+                    # #1092 (d) -- a PRE-TYPE abort (box busy / raced / collapsed
+                    # paste): send_verified fired no type keystroke, so this is NOT
+                    # a swallow -- never stamp the floor for a box we could not type
+                    # into; retry next sweep from a clean prompt. Explicit word, no
+                    # silent branch (#486).
+                    logs.append("batch-nudge %s -> deferred (not typed: box "
+                                "busy/raced)" % loc)
         # Clear the dark_watch batch entry for this sid (consumed or empty).
         state.get("nudge_batch", {}).pop(sid, None)
     # #804 -- DEAD-SESSION census: a rostered EXPECTED-armed stream with NO live

@@ -1362,9 +1362,15 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     send_out = {}
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
                                 logs=logs, out=send_out, nudge="partition-audit",
-                                state=state)  # #1022: record for the wedge
+                                state=state, now=now)  # #1022 wedge / #1092 pane budget
     delivered = ok or bool(send_out.get("delivered_unconfirmed"))
     if not delivered:
+        # #1092 (c) F6 — a per-pane budget REFUSAL typed nothing: not a swallow,
+        # never book a give-up; retry once the budget frees.
+        if send_out.get("pane_budget_held"):
+            logs.append("ops-wait-recheck %s -> held (pane-budget, not typed; "
+                        "retry next sweep)" % loc)
+            return logs
         # #714 BOUNDED RETRY: a genuine swallow leaves last_nudge unadvanced so it
         # retries next sweep — but a PERSISTENTLY-swallowing NON-busy pane would
         # then be typed into every 60s sweep forever (the retry storm; the #594

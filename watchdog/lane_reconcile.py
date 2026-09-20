@@ -289,9 +289,15 @@ def goal_lane_reconcile_recheck(now, run, lrecs, sid, cwd, pid, tpath, loc,
     send_out = {}
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
                                 logs=logs, out=send_out, nudge=CATEGORY,
-                                state=state)  # #1022: record for the wedge
+                                state=state, now=now)  # #1022 wedge / #1092 pane budget
     delivered = ok or bool(send_out.get("delivered_unconfirmed"))
     if not delivered:
+        # #1092 (c) F6 — a per-pane budget REFUSAL typed nothing: not a swallow,
+        # never book a give-up; retry once the budget frees.
+        if send_out.get("pane_budget_held"):
+            logs.append("lane-reconcile %s -> held (pane-budget, not typed; "
+                        "retry next sweep)" % loc)
+            return logs
         # A genuine swallow leaves the dedup anchor unadvanced -> retries next
         # sweep, bounded by MAX_SEND_FAILS so a persistently-swallowing NON-busy
         # pane backs off (accepts the compaction) rather than re-fetching forever.

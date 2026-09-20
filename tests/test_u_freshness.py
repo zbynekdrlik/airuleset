@@ -254,14 +254,20 @@ class TestOrchestrator(_OrchBase):
         state = {}
         logs = self._run(urecs, lambda cwd: (5, FRESH_TS), tmux, handled=set(),
                          state=state)
-        # a genuine swallow does NOT advance last_nudge (retries next sweep) and
-        # books a failure toward the bounded retry cap.
+        # a genuine swallow does NOT advance last_nudge (the baseline / delivery
+        # record); the text was backed out by send_verified.
         self.assertIsNone(urecs[self.sid]["last_nudge"])
         self.assertTrue(any("submit-unverified" in ln for ln in logs))
-        # a swallowed send must NOT stamp the shared cadence clock (else a real
-        # swallow would still start the 1x/hour strop — RED if mark_sent moved
-        # above the delivered check).
-        self.assertNotIn("nudge_cadence", state)
+        # #1092 (a) SUPERSEDES the pre-#1092 choice here: a SWALLOWED attempt IS a
+        # delivery attempt (the text reached the pane), so send_verified now stamps
+        # the per-kind FLOOR on the swallow -> the SAME kind cannot re-fire on the
+        # next ~70s sweep (it defers a full hour, `hold:floor`), and the attempt
+        # counts against the per-pane budget. Bounded even tighter than the old
+        # MAX_SEND_FAILS retry (the storm shape is impossible by construction). The
+        # stamp uses send_verified's own wall-clock (≈ the sweep `now` within
+        # seconds; a 1 h floor makes the skew immaterial), so assert PRESENCE.
+        self.assertIn("u-freshness", state.get("nudge_cadence", {}).get(self.sid, {}))
+        self.assertEqual(len(state["nudge_pane_attempts"]["%9"]), 1)
 
 
 # --------------------------------------------------------------------------- #

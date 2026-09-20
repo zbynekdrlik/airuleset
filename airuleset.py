@@ -10792,6 +10792,32 @@ def _print_nudges_status(home=None):
     recovery = sorted(_wd.RECOVERY_NUDGE_KINDS)
     if recovery:
         print("  %s: always-on (recovery)" % ", ".join(recovery))
+    # #1092 (e) — a SECOND recovery line: the goal RE-ARM family (dark/stale/auth/
+    # fulfilled-rearm, delivered via the `goal-arm` recovery kind) TYPES into an
+    # active pane and is EXEMPT from the `nudges off` switch, so a plain `nudges:
+    # OFF` summary must never read as "nothing types". State whether the box
+    # carries the owner's `~/.claude/watchdog-disable-goal` kill switch — the ONE
+    # flag that silences ALL goal jobs (re-arms included). Read the flag directly
+    # (NOT `_owner_disabled`, which the test-ignore env would mask) so the line is
+    # honest on a live box.
+    _flag = os.path.exists(
+        os.path.join(home or os.path.expanduser("~"), ".claude",
+                     "watchdog-disable-goal"))
+    if _flag:
+        print("  goal re-arms: SUPPRESSED — this box carries "
+              "~/.claude/watchdog-disable-goal (present; the owner kill switch "
+              "that silences ALL goal jobs, re-arms included)")
+    else:
+        # #1092 F2 — be honest per WINDOW CLASS: a DECLARED managed window's arm
+        # rides the always-on `goal-arm` recovery kind (NOT covered by 'nudges
+        # OFF'); a non-declared box's re-arm rides `goal-sweep`, a machine nudge
+        # that DOES follow the OFF switch. Both, when they type, go through the
+        # per-pane budget + human-active guard + empty-box precondition.
+        print("  goal re-arms: a DECLARED window's arm (goal-arm) is always-on "
+              "recovery, NOT covered by 'nudges OFF'; a non-declared box's re-arm "
+              "rides goal-sweep and DOES follow the switch. Both type via the "
+              "per-pane budget + human-active guard "
+              "(~/.claude/watchdog-disable-goal: absent)")
 
 
 def _nudges_fleet(verb, runner=None):

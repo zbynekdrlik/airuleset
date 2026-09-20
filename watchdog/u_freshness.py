@@ -352,13 +352,23 @@ def goal_u_freshness_recheck(now, run, urecs, sid, cwd, pid, tpath, loc,
     send_out = {}
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
                                 logs=logs, out=send_out, nudge=CATEGORY,
-                                state=state)  # #1022: record for the wedge
+                                state=state, now=now)  # #1022 wedge / #1092 pane budget
     delivered = ok or bool(send_out.get("delivered_unconfirmed"))
     if not delivered:
+        # #1092 (c) F6 — a per-pane budget REFUSAL typed NOTHING, so it is NOT a
+        # swallow: do not book a MAX_SEND_FAILS give-up (that would let a pane
+        # saturated by OTHER kinds make u-freshness "give up" + advance without
+        # delivering). Just log the hold and retry once the budget frees.
+        if send_out.get("pane_budget_held"):
+            logs.append("u-freshness %s -> held (pane-budget, not typed; retry "
+                        "next sweep)" % loc)
+            return logs
         # A genuine swallow leaves last_nudge unadvanced -> retries next sweep;
         # bounded so a persistently-swallowing NON-busy pane backs off after
         # MAX_SEND_FAILS. send_verified already backed our text OUT of the box on a
-        # genuine swallow, so nothing parks; sid NOT claimed, gate NOT marked.
+        # genuine swallow, so nothing parks; sid NOT claimed. #1092 (a): the
+        # per-kind FLOOR is stamped inside send_verified on the swallow, so the
+        # SAME kind defers a full hour (not just MAX_SEND_FAILS retries).
         logs.append(_book_unverified_send(rec, new_rec, loc, u_count, now))
         return logs
     watchdog._janitor_clear_watch(state, pid)

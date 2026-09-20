@@ -1170,7 +1170,7 @@ def _await_typed_landed(pane_id, text, run, sleep_fn, want=True):
 
 def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
                   out=None, user_authored=False, nudge=None, state=None,
-                  skip_confirm=False):
+                  skip_confirm=False, now=None):
     """Type `text` + Enter into a BARE input box and VERIFY the submit landed
     via the TRANSCRIPT (the #486 delivery bullet's structured proof), not the
     pane render: after the send, the session jsonl at `tpath` must gain a new
@@ -1256,6 +1256,39 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         watchdog._draft_rescue_persist(pane_id, cap, logs=logs)
         _log("send-verified abort: box not bare pre-send")
         return False
+    # #1092 (c) -- the PER-PANE typing-attempt BUDGET, consulted BEFORE any
+    # keystroke. A GATED machine nudge (a threaded `nudge=` that is not a RECOVERY
+    # revival kind, with `state` to read/write, and NOT the owner's own reply) is
+    # refused when the pane has already had `PANE_ATTEMPT_BUDGET` typing attempts
+    # this rolling hour, across ALL kinds -- the belt on top of the per-kind floor
+    # + total cap that makes any future escape (the #1092 swallowed-batch storm was
+    # exactly that) harmless by construction. A REVIVAL of a dead session (resume/
+    # compact/wake-parked -> RECOVERY_NUDGE_KINDS) and the owner's OWN reply
+    # (`user_authored`) are NEVER gated here: "the owner's problem is typing INTO
+    # an active/human pane, not recovery itself" (#1092 addendum), and stranding a
+    # limit/401-dead session for an hour is the #520 harm. Placed AFTER the bare
+    # check so a box-busy abort (no keystroke) never burns the budget, and BEFORE
+    # the strip-Escape (the first keystroke). The goal RE-ARM family's own pane
+    # budget is enforced in `deliver_goal` (it delivers via `_send_goal_verified`,
+    # not this primitive) -- #1092 item (e).
+    # #1092 F1 fix — use the CALLER's sweep `now` when threaded, so the pane-budget
+    # stamp shares ONE clock with the end-of-sweep prune (`_prune_pane_attempts`,
+    # run at the sweep `now`) and with the re-arm path (`deliver_goal`, which stamps
+    # at `now`). A `time.time()` stamp (later than the sweep `now`) used to be
+    # reaped by that same-sweep prune as "future", so the budget never accumulated
+    # (Review 2 F1). Callers that thread no `now` (card/bounce) fall back to
+    # `time.time()`, and the prune's future-keep direction covers that skew.
+    _pane_now = now if now is not None else time.time()
+    _gated_nudge = (state is not None and nudge is not None
+                    and nudge not in RECOVERY_NUDGE_KINDS and not user_authored)
+    if _gated_nudge:
+        from watchdog import nudge_gate as _ng
+        if not _ng.pane_budget_ok(state, pane_id, _pane_now):
+            _log("send-verified " + _ng.pane_budget_hold_reason(
+                state, pane_id, _pane_now))
+            if isinstance(out, dict):
+                out["pane_budget_held"] = True
+            return False
     # #1002 -- the strip-deselect Escape carries the delivery's "send" kind, so
     # the ONE `keys` primitive gates it: at OFF a machine caller fires ZERO
     # keystrokes (keys suppresses + returns False, this helper bails), while the
@@ -1300,6 +1333,17 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         else:
             _log("send-verified abort: type not head+tail-verified, not submitted")
         return False
+    # #1092 (c) -- the type keystrokes landed (text is in the box), so a typing
+    # attempt has DEFINITIVELY been made: stamp the per-pane budget NOW, before
+    # the Enter, so it counts regardless of the submit outcome below (delivered,
+    # delivered-unconfirmed, OR swallowed). A pre-type abort (box busy / collapsed
+    # paste / withheld) returned above WITHOUT reaching here, so it never burns the
+    # budget. Only gated machine nudges are counted (see the consult above).
+    if _gated_nudge:
+        from watchdog import nudge_gate as _ng
+        _ng.mark_pane_attempt(state, pane_id, _pane_now)
+        if isinstance(out, dict):
+            out["attempted"] = True
     watchdog.keys(pane_id, "Enter", kind="send", nudge=nudge,
                   user_authored=user_authored, run=run, logs=logs)
     # #1023 timeout-race — `skip_confirm` (budget too low for the ~10s
@@ -1330,6 +1374,23 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
             watchdog._undo_and_release_slot(pane_id, run, text, False, _log,
                                             "send-verified swallowed",
                                             sleep_fn=sleep_fn)
+            # #1092 (a)+(b) -- a SWALLOWED attempt IS a delivery attempt: the text
+            # reached the pane (and is now backed out, the janitor UNDO). Stamp
+            # the per-kind FLOOR for this kind so the SAME kind can never re-fire
+            # on the next ~70s sweep (the storm shape) -- one attempt per kind per
+            # hour, matching the delivered-unconfirmed floor (#1023 🟡4). Only for
+            # a gated single-nudge caller (`send_verified` IS the single delivery
+            # path, #1092 design); it already holds `state`+`nudge`+`tpath`, so the
+            # sid is `tpath`.stem. The BATCH caller additionally stamps ALL its
+            # included kinds via `mark_batch_sent` in its else branch (this stamps
+            # only the composite's first kind), and surfaces `out["swallowed"]`.
+            if isinstance(out, dict):
+                out["swallowed"] = True
+            if _gated_nudge:
+                from watchdog import nudge_gate as _ng
+                _sid = os.path.splitext(os.path.basename(str(tpath)))[0] or None
+                if _sid:
+                    _ng.mark_sent(state, _sid, nudge, _pane_now)
             return False
     # #1023 timeout-race — on the skip_confirm path we did NO post-Enter poll, so
     # the box may not have render-cleared yet; ONE short settle before the read
