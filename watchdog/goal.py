@@ -3935,11 +3935,19 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         # #1092 (e) -- reap the stale-rearm TEMPLATE-VERSION latch for GONE
         # sessions (a sid with no live transcript this sweep), the PRIMARY
         # live-gate the sibling per-sid dedup dicts use (#486-G5 leak lesson): the
-        # value is a bare template hash with no ts, so it cannot age-reap; a live
-        # session is always in `visited_sids` (added at transcript resolution
-        # above) so its latch is never dropped while the loop lives. A returning
-        # session simply re-classifies (current -> no re-arm; still stale ->
-        # ONE fresh re-arm, not a storm).
+        # value is a bare template hash with no ts, so it cannot age-reap. A
+        # session that resolved a live transcript this sweep is in `visited_sids`
+        # (added at transcript resolution above). CAVEAT (accepted): a live
+        # session TRANSIENTLY skipped BEFORE that add-point (pane-in-mode /
+        # janitor-recover / sweep-budget-break / transcript-miss continue) is not
+        # in `visited_sids`, so its latch CAN be dropped that sweep -- UNLIKE
+        # `_prune_goal_mark_orphans` (#519) which pairs the live-gate with an age
+        # secondary. The impact is bounded + strictly better than pre-#1092 (never
+        # a re-record storm): a dropped latch re-opens at most ONE fresh stale-rearm
+        # next sweep, still capped by the pending-request guard, the surviving #804
+        # attempt cap, the "delivered -> condition current -> no re-record" path,
+        # AND the new deliver_goal per-pane budget (<=2 keystrokes/pane/hour). A
+        # returning session simply re-classifies (current -> no re-arm).
         for _gsid in [k for k in list(stale_tmpl_state.keys())
                       if k not in visited_sids]:
             stale_tmpl_state.pop(_gsid, None)
