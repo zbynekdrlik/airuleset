@@ -468,5 +468,65 @@ class TestResolveSelfPane(unittest.TestCase):
         self.assertEqual(cwd, "")
         self.assertEqual(sid, "")
 
+
+# --------------------------------------------------------------------------- #
+# 5. The recent-human helpers cards.py (job 25) reads — #1084 L2 restores their
+#    focused coverage (they were only exercised through the deleted
+#    deliver_compact before). `_compact_recent_human_activity` is imported by
+#    `watchdog.cards.report_boundary_after`'s recent-human gate.
+# --------------------------------------------------------------------------- #
+class TestRecentHumanWindowClamp(unittest.TestCase):
+    def test_explicit_window_is_returned_verbatim(self):
+        self.assertEqual(compact._compact_recent_human_window(999), 999)
+
+    def test_default_is_the_constant(self):
+        with m.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AIRULESET_COMPACT_RECENT_HUMAN_S", None)
+            self.assertEqual(compact._compact_recent_human_window(),
+                             compact.COMPACT_RECENT_HUMAN_ACTIVITY_S)
+
+    def test_zero_or_negative_env_clamps_up_to_one(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_RECENT_HUMAN_S": "0"}):
+            self.assertEqual(compact._compact_recent_human_window(), 1)
+
+    def test_over_cap_env_clamps_below_the_request_max_age(self):
+        with m.patch.dict(os.environ,
+                          {"AIRULESET_COMPACT_RECENT_HUMAN_S": "999999"}):
+            self.assertEqual(compact._compact_recent_human_window(),
+                             compact.COMPACT_REQUEST_MAX_AGE_S - 1)
+
+
+class TestRecentHumanActivity(unittest.TestCase):
+    def test_delegates_with_discord_prefixes_and_returns_the_bool(self):
+        seen = {}
+
+        def _spy(sid, tpath, now, window_s=None, extra_human_prefixes=None):
+            seen["sid"] = sid
+            seen["window_s"] = window_s
+            seen["prefixes"] = extra_human_prefixes
+            return True, "ok"
+
+        with m.patch.object(wd, "_transcript_for_session",
+                            return_value="/fake/t.jsonl"), \
+                m.patch.object(wd, "_goal_autoarm_recent_human_activity",
+                               side_effect=_spy):
+            out = compact._compact_recent_human_activity(
+                "/cwd", "sid-x", 1000.0, projects_dir="/pd", window_s=42)
+        self.assertTrue(out)
+        self.assertEqual(seen["sid"], "sid-x")
+        self.assertEqual(seen["window_s"], 42)
+        # the Discord-relay prefixes must be forwarded so a relayed answer counts
+        self.assertEqual(seen["prefixes"], compact._COMPACT_DISCORD_ANSWER_PREFIXES)
+
+    def test_false_when_the_primitive_says_not_recent(self):
+        with m.patch.object(wd, "_transcript_for_session",
+                            return_value="/fake/t.jsonl"), \
+                m.patch.object(wd, "_goal_autoarm_recent_human_activity",
+                               return_value=(False, "stale")):
+            self.assertFalse(compact._compact_recent_human_activity(
+                "/cwd", "sid-x", 1000.0))
+
+
 if __name__ == "__main__":
     unittest.main()

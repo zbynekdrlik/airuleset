@@ -442,7 +442,7 @@ DELETED_COMPACT_SYMBOLS = (
     "_compact_boundary_already_compacted", "_compact_duplicate_consume_reason",
     "_session_has_live_bg_tasks", "_live_bg_tasks_detail",
     "_safe_age", "_compact_min_request_age", "_compact_request_too_young",
-    "COMPACT_MIN_REQUEST_AGE_S", "COMPACT_LIVE_WORKER_FRESHNESS_S",
+    "COMPACT_MIN_REQUEST_AGE_S",
     "_log_compact_sync", "COMPACT_SYNC_LOG_LINES_MAX",
 )
 
@@ -472,6 +472,9 @@ KEPT_COMPACT_SYMBOLS = (
     "resolve_self_pane", "resolve_declared_window_pane",
     "_COMPACT_COMPLETION_HEADING_RX", "_compact_recent_human_activity",
     "compact_sync_log_path",
+    # KEPT: gates/lanefill.py (the lane-fill Stop gate) imports this constant as
+    # its single source for watchdog.count_live_workers() (#1084 L2 review BLOCKER).
+    "COMPACT_LIVE_WORKER_FRESHNESS_S",
 )
 
 

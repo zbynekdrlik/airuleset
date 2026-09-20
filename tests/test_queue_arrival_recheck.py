@@ -585,5 +585,25 @@ class TestRunOnceWiring(unittest.TestCase):
             self.assertIsNone(airuleset._watchdog_queue_fetch("/r"))
 
 
+# Re-homed from the deleted tests/test_riders_floor_latch_780.py (#1084 L2):
+# the compact-latch half of that file went with the machinery, but this #1023
+# "the per-job nudge floor stays removed" lock is NOT compact machinery and had
+# no equivalent anywhere else — it belongs with the queue-arrival rider it guards.
+class TestPerJobFloorRemoved1023(unittest.TestCase):
+    def test_queue_decision_takes_no_floor_arg(self):
+        # the per-job floor param + the floor `hold`/`last_nudge` machinery are gone
+        rec = {"base": [1], "first_seen": NOW - DAY}
+        action, out, reason, arr = qa._queue_decision(rec, [1, 2], NOW)
+        self.assertEqual(action, "nudge")   # a delta always yields a nudge verdict
+        self.assertEqual(arr, [2])
+        self.assertEqual(out["base"], [1])          # base kept OLD (accumulation)
+        self.assertNotIn("last_nudge", out)         # dead field removed
+
+    def test_per_job_floor_symbols_removed(self):
+        self.assertFalse(hasattr(qa, "QUEUE_ARRIVAL_NUDGE_FLOOR_S"))
+        self.assertFalse(hasattr(qa, "QUEUE_ARRIVAL_NUDGE_FLOOR_MIN_S"))
+        self.assertFalse(hasattr(qa, "_nudge_floor"))
+
+
 if __name__ == "__main__":
     unittest.main()

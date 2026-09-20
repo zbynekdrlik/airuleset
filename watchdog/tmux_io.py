@@ -150,12 +150,13 @@ MACHINE_NUDGE_KINDS = frozenset({
 # As a recovery kind it is now exempt from the kill switch, the per-kind floor
 # and the total cap; its OWN bounds stay (a proven 5-streak, the recent-human
 # veto, and the 24h/2 attempt cap in `goal_question_repoke_watch`).
-# #1084 (2026-09-19): machine-triggered `/compact` is REMOVED — its producer
-# (`compact.deliver_compact` / `_compact_submit_verified`) is deleted. `compact`
-# STAYS a reserved recovery identity here (a compaction nudge, if one ever
-# returns, is a session revival, never a prompt) and keeps `MACHINE|RECOVERY`
-# disjoint/union invariants + the drift-lock with nudge_gate stable; nothing
-# emits `nudge="compact"` today.
+# #1084 (2026-09-19): machine-triggered `/compact` is REMOVED for good — its
+# producer (`compact.deliver_compact` / `_compact_submit_verified`) is deleted
+# and NOTHING emits `nudge="compact"` any more. The inert identity is left in
+# this set (rather than removed) purely to keep the `MACHINE|RECOVERY`
+# disjoint/union invariants + the drift-lock with nudge_gate stable across the
+# test files that hardcode this frozenset; it is not a placeholder for a
+# comeback (the owner's ruling is "vôbec").
 RECOVERY_NUDGE_KINDS = frozenset(
     {"resume", "compact", "goal-arm", "wake-parked", "goal-disarm"})
 

@@ -162,8 +162,9 @@ def _janitor_watch_seen(state, pid, now, max_age_s=None):
     Callers that attempt a delivery mark this (job 9/20's own call sites
     in `watchdog.goal.deliver_goal` -- the two GOAL_REARM-era functions
     that used to hold these call sites, `goal_rearm`/`_goal_template_
-    drift`, were deleted wholesale by #403's collapse; job 14's own send
-    point, `watchdog.compact.deliver_compact`) — never the janitor
+    drift`, were deleted wholesale by #403's collapse; job 14's former send
+    point `watchdog.compact.deliver_compact` was deleted by #1084 with the
+    machine-compact removal) — never the janitor
     itself. Bounded by
     `max_age_s` (default `JANITOR_WATCH_MAX_AGE_S`) so a stale mark from
     long ago (the delivering job's own state got wedged, or this pane was

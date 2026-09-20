@@ -195,7 +195,8 @@ from watchdog import resurrect as _resurrect                 # #804 (mode-5 rela
 
 def goal_requests_path():
     """`~/.claude/goal-requests.json`, resolved at CALL time -- never a
-    frozen module-level constant (mirrors `compact.compact_requests_path`)."""
+    frozen module-level constant, so a relocated `$HOME`/override is honoured on
+    every call (the established resolve-at-call idiom across the watchdog)."""
     return Path.home() / ".claude" / "goal-requests.json"
 
 
@@ -361,7 +362,7 @@ def record_goal_request(session, cwd, text, authority, now=None, path=None,
     `auth-rearm` (#675), `fulfilled-rearm` (#764). Overwrites any earlier
     pending request for the SAME session, with two protections a single-writer
     store never needed (#478 adversarial-review MAJOR, mirroring the identical
-    `compact.record_compact_request` #402-review MAJOR-1 fix):
+    fix once applied to `compact.record_compact_request` — deleted by #1084):
 
       * DOWNGRADE REFUSED — a watchdog GUESS re-arm (`dark-rearm` #478, or
         `fulfilled-rearm` #764) NEVER overwrites a still-pending entry from a

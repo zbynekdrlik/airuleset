@@ -56,6 +56,17 @@ import watchdog
 
 _log = logging.getLogger(__name__)
 
+
+# #1084 L2 KEEP: the live-worker freshness window (15 min). Its former compact
+# consumers (`_live_bg_tasks_detail` / `_session_has_live_bg_tasks`, the #848
+# live-tasks delivery veto) were deleted with the machinery, but a DIFFERENT live
+# subsystem imports it as its single source: `gates/lanefill.py` (the lane-fill
+# Stop gate, #1078/#1089) reads it for `watchdog.count_live_workers(...)`. Kept
+# here so that gate keeps working — deleting it silently fails-open that gate
+# fleet-wide (the #1084-L2-review BLOCKER this restores).
+COMPACT_LIVE_WORKER_FRESHNESS_S = 15 * 60
+
+
 def _find_pane_for_session(sid, cwd, run=None, projects_dir=None):
     """Resolve the SINGLE current live pane hosting session `sid` — used by the
     `--record` origin and by the periodic sweep, neither of which has
@@ -220,19 +231,11 @@ def resolve_declared_window_pane(cwd, run=None, projects_dir=None):
 _COMPACT_COMPLETION_HEADING_RX = re.compile(
     r"(?m)^(?:## )?✅ Work Complete\b")
 
-# A request whose `ts` is older than this is DISCARDED. KEPT at 30 min; its
-# SEMANTICS measure "time since the claim was last JUSTIFIED" (NOT "time since
-# first-seen" — #400's non-refreshable anchor is reversed). `ts` REFRESHES on
-# a genuine boundary re-record (#599 supersede — `record_compact_request`) AND
-# on any #741 actively-held-boundary hold during the sweep (recent-human / busy —
-# via `_touch_compact_request_ts`; #848 removed the #727 live-own-task holds). So
-# a busy/held loop NEVER bites (the claim HOLDS until it delivers at the first
-# safe moment, fixing cambox's 244 SKIP / 0 SEND); a GONE-QUIET session (no hold
-# word fires) ages out after 30 min — including a ❓-blocked session, whose
-# `skip:not-a-boundary` is deliberately NOT hold-extended (#741). The "late
-# inappropriate moment" hazard #400 guarded is now handled by the DIRECT
-# delivery conditions (pane idle, no draft/recent-human, not `❓`; #848 removed
-# the live-worker/bg-bash conditions), never by this cap.
+# #1084 L2: the compact REQUEST store this constant used to age out is DELETED —
+# it is NO LONGER a request TTL. Its ONLY surviving role is the upper CLAMP
+# ceiling for `_compact_recent_human_window` (below): a `AIRULESET_COMPACT_RECENT_
+# HUMAN_S` env value >= this is clamped to `this - 1` so a misconfigured window
+# can't lapse the recent-human veto. 30 min is retained as that clamp bound.
 COMPACT_REQUEST_MAX_AGE_S = 30 * 60
 
 # #377 — never deliver into a live human Q&A window with THIS session.
@@ -294,9 +297,7 @@ def pending_compact_hold(sid, now=None, hold_s=None, path=None):
     #921 owner-flag-fail-open behaviour is subsumed by "there is no store"."""
     return False
 
-def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
-                  requests_path=None, delivered_path=None, state=None,
-                  handled=None):
+def compact_sweep(now, run=None, dry_run=False, projects_dir=None):
     """REMOVED (#1084, 2026-09-19, owner ROZHODNUTE): machine-triggered compacts
     are gone for good -- "uz tie compacty vobec nechcem ... samotne deploye na
     targety by to mali zabezpecit". No pending request is ever delivered, no
@@ -306,13 +307,14 @@ def compact_sweep(now, run=None, dry_run=False, projects_dir=None,
     fleet-wide guarantee on every box with no per-box marker to miss (the
     forestshop-dev slip that filed this ticket).
 
-    `run` / `dry_run` / `requests_path` / `delivered_path` / `state` / `handled`
-    are kept in the signature for backward-compat with any existing test caller;
-    none is read any more (the request store is gone). L2 (#1084, this lane) has
-    DELETED `deliver_compact` and the whole request/delivered/queued store this
-    early return orphaned -- the compaction OBSERVATION helpers (`_pane_compacting`,
-    `COMPACTING_MARKER`, the transcript compaction records lane-reconcile / the
-    goal jobs read) live in `watchdog/long_turn.py` and are untouched.
+    L2 (#1084, this lane) DELETED `deliver_compact` and the whole
+    request/delivered/queued store this early return orphaned, and trimmed the
+    now-dead `requests_path`/`delivered_path`/`state`/`handled` params off this
+    signature (the sole caller, `run_once`'s `_job_compact_sweep`, and the test
+    callers all pass only `now`/`run`/`projects_dir`). The compaction OBSERVATION
+    helpers (`_pane_compacting`, `COMPACTING_MARKER`, the transcript compaction
+    records lane-reconcile / the goal jobs read) live in `watchdog/long_turn.py`
+    and are untouched.
     """
     return ["compact: machine compacts removed (owner 2026-09-19, #1084) "
             "— native autocompact only"]

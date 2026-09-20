@@ -469,8 +469,8 @@ def watchdog_disable_marker():
     """`~/.claude/api-watchdog.disabled` — the opt-out that makes a deliberate
     `systemctl --user stop api-watchdog.timer` SURVIVE a deploy (#132).
 
-    Resolved at CALL time, never frozen at import (same reasoning as
-    `watchdog.compact.compact_requests_path()`).
+    Resolved at CALL time, never frozen at import (the established
+    resolve-at-call idiom, e.g. `watchdog.goal.goal_requests_path()`).
 
     Why this exists: on 2026-07-28 the watchdog typed `/exit` into a live
     session, the timer was stopped fleet-wide as the mitigation — and was found

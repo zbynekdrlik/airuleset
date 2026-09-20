@@ -2994,9 +2994,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           boundary — the companion alarm to the claim/lock system #402's
           collapse retired wholesale. With exactly two mutually-exclusive
           request origins and no shared claim file left to get stuck, there
-          is nothing left for this job to watch: a request that cannot be
-          delivered simply ages out via `COMPACT_REQUEST_MAX_AGE_S` (job
-          14's own hard, non-refreshable cap), logged the moment it lapses.
+          is nothing left for this job to watch. #1084 (2026-09-19) then removed
+          machine `/compact` entirely — job 14 delivers nothing and there is no
+          request store at all — so there is not even a request to age out.
           Number retained (not reused) for historical addressability.
       (27) (only when `issue_counts_fetch` is given) NET-ISSUE-DRIFT ALARM
           (#137) — per repo discovered by `repo_roots` (a list or a callable
@@ -4956,10 +4956,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
          calm_ok=True)   # #1055 P3: local journal-only notice, always runs
 
     # Job 9's own real body (goal.goal_sweep) is dispatched further down,
-    # alongside job 20 -- both now need `compact_handled_this_sweep`
+    # alongside job 20 -- both take `compact_handled_this_sweep`
     # (goal_sweep can deliver via `deliver_with_stash`, same keystroke
-    # hazard class job 20's lane-nudge already coordinates against), which
-    # is not populated until after job 14's /compact senders run below.
+    # hazard class job 20's lane-nudge already coordinates against). #1084 L2:
+    # job 14's /compact senders are gone, so that set is now always empty.
 
     # Jobs 12 / 18 / 23 — REMOVED (#132, 2026-07-28). All three drove the
     # same `_restart_pane` helper, which typed `/exit` into a live pane and
@@ -4988,12 +4988,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                    dry_run=dry_run),
          "burn-snapshot error")
 
-    # #69 — shared per-sweep set: job 14 records every sid it actually
-    # compacts THIS sweep. Originally also fed job 15/17 (both REMOVED,
-    # #102) to keep them from double-firing on the same pane; job 14 is now
-    # this module's only /compact sender that populates it, and job 20
-    # still reads it (a session just compacted this sweep is not safe for
-    # a fresh keystroke burst either).
+    # #69 — shared per-sweep set. #1084 L2: job 14 (/compact delivery) is
+    # REMOVED, so NOTHING populates this any more — it is now ALWAYS EMPTY. It is
+    # kept (rather than deleted) only so `goal_sweep` / `goal_lane_sweep` keep
+    # their `handled=` signatures unchanged; they still READ it (a session just
+    # compacted this sweep would be unsafe for a fresh keystroke burst), but with
+    # no /compact sender left it never carries a sid.
     compact_handled_this_sweep = set()
 
     # Job 14 — /COMPACT AT TICKET BOUNDARIES — REMOVED (#1084, 2026-09-19, owner
@@ -5053,9 +5053,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # source of truth for this model. Dispatched HERE (not in its old
     # earlier slot) because `goal_sweep` can now deliver via
     # `deliver_with_stash`, the same keystroke hazard job 20's lane-nudge
-    # below already coordinates against — it needs
-    # `compact_handled_this_sweep` fully populated, which only happens
-    # after job 14's /compact senders run above. Only when
+    # below already coordinates against — it reads
+    # `compact_handled_this_sweep` (now always empty, #1084 L2: job 14's
+    # /compact senders are gone). Only when
     # `goal_jobs_enabled` is truthy (cmd_watchdog passes True) — same
     # "wired = on" convention as jobs 13/14/16/19.
     def _job_goal_sweep():
@@ -5209,8 +5209,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # Job 26 — COMPACT-STALL WATCH — REMOVED (#402, 2026-08-12). Used to
     # watch the shared /compact claim file for a stuck entry; that whole
     # claim system was retired by the compact collapse (see run_once's own
-    # docstring paragraph (26)). A request that cannot be delivered now
-    # simply ages out via job 14's own hard cap, logged the moment it does.
+    # docstring paragraph (26)). #1084 then removed machine /compact entirely —
+    # no request store exists, so there is nothing to stall or age out.
 
     # Job 27 — NET-ISSUE-DRIFT ALARM (#137): only when `issue_counts_fetch`
     # is given (cmd_watchdog wires the real gh round trip) — the "wired = on"

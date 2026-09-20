@@ -211,10 +211,10 @@ class TestOwnerReplyBypass(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class TestCompactAlwaysOn(unittest.TestCase):
     # #1084 L2: the machine /compact producer (`compact._compact_submit_verified`)
-    # is DELETED, so the old end-to-end delivery assertions are gone. `compact`
-    # STAYS a RECOVERY_NUDGE_KINDS member (a reserved recovery identity — a
-    # compaction nudge, if one ever returns, is a session revival, never a prompt),
-    # so the kill-switch-exempt invariant is what this class now locks.
+    # is DELETED for good, so the old end-to-end delivery assertions are gone.
+    # `compact` is left an INERT RECOVERY_NUDGE_KINDS member only to keep the
+    # drift-lock + the frozenset-hardcoding test files stable (not a placeholder
+    # for a comeback), so the kill-switch-exempt invariant is what this locks.
     def test_compact_is_a_recovery_kind(self):
         self.assertIn("compact", wd.RECOVERY_NUDGE_KINDS,
                       "compact stays a reserved recovery identity (#1084)")
