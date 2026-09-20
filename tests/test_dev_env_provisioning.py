@@ -150,10 +150,16 @@ class TestEnsureClaudeCliInstalled(TestCase):
 # ---------------------------------------------------------------------------
 
 class TestStreamSessionCwd(TestCase):
+    # #1088: the chain is now REPO-AWARE — a candidate is accepted only if it
+    # is a git WORK TREE (`<dir>/.git` present). So these fixtures create a real
+    # `.git` under the checkout; a plain dir falls through to the loud last
+    # resort. The full repo-aware behaviour (odoo-slovnormal, plain-dir
+    # rejection, gitfile, loud fallback) is covered in
+    # tests/test_stream_cwd_repo_aware_1088.py.
     def test_returns_the_odoo_erp_checkout_when_it_exists(self):
         d = Path(tempfile.mkdtemp())
         checkout = d / "devel" / "odoo" / "odoo-erp"
-        checkout.mkdir(parents=True)
+        (checkout / ".git").mkdir(parents=True)
         with m.patch.object(Path, "home", return_value=d):
             self.assertEqual(airuleset._stream_session_cwd(), checkout)
 
@@ -162,23 +168,27 @@ class TestStreamSessionCwd(TestCase):
         with m.patch.object(Path, "home", return_value=d):
             self.assertEqual(airuleset._stream_session_cwd(), d)
 
-    # --- #563: cwd fallback CHAIN. montalu1's real project dir is
-    # ~/devel/odoo (no odoo-erp subdir), so the old binary "odoo-erp or
-    # $HOME" fallback dropped it into $HOME (wrong project key = no
-    # history/memory). The chain tries odoo-erp, THEN devel/odoo, THEN $HOME.
+    # --- #563/#1088: cwd fallback CHAIN. montalu1's real project dir is
+    # ~/devel/odoo (a PLAIN folder, checkout named odoo-slovnormal), so the old
+    # binary "odoo-erp or $HOME" fallback dropped it into $HOME (wrong project
+    # key = no history/memory). #1088: no chain candidate is a work tree here,
+    # so devel/odoo is the LOUD last resort (still returned, now loud).
 
     def test_returns_devel_odoo_when_only_that_exists(self):
         d = Path(tempfile.mkdtemp())
-        (d / "devel" / "odoo").mkdir(parents=True)
+        (d / "devel" / "odoo").mkdir(parents=True)   # plain folder, no .git
         with m.patch.object(Path, "home", return_value=d):
+            # #1088: the loud last resort — devel/odoo exists but is not a work
+            # tree, so it is still chosen (the checkout is what would win).
             self.assertEqual(airuleset._stream_session_cwd(),
                              d / "devel" / "odoo")
 
     def test_odoo_erp_wins_when_both_dirs_exist(self):
         # priority preserved: odoo-erp is first in the chain, so an account
-        # WITH the odoo-erp checkout still lands there, not one level up.
+        # WITH the odoo-erp checkout (a real work tree) still lands there, not
+        # one level up.
         d = Path(tempfile.mkdtemp())
-        (d / "devel" / "odoo" / "odoo-erp").mkdir(parents=True)
+        (d / "devel" / "odoo" / "odoo-erp" / ".git").mkdir(parents=True)
         with m.patch.object(Path, "home", return_value=d):
             self.assertEqual(airuleset._stream_session_cwd(),
                              d / "devel" / "odoo" / "odoo-erp")
@@ -300,7 +310,7 @@ class TestEnsureStreamTmuxSession(TestCase):
             return _FakeCP(returncode=0)
 
         checkout = d / "devel" / "odoo" / "odoo-erp"
-        checkout.mkdir(parents=True)
+        (checkout / ".git").mkdir(parents=True)  # #1088: must be a git work tree
         with m.patch.object(Path, "home", return_value=d):
             result = airuleset.ensure_stream_tmux_session(
                 user="miva1", run=run, sentinel_path=self._sentinel())
@@ -332,6 +342,7 @@ class TestEnsureStreamTmuxSession(TestCase):
         checkout = d / "devel" / "odoo" / "odoo-erp"
         subdir = checkout / "addons" / "montalu_install_config"
         subdir.mkdir(parents=True)
+        (checkout / ".git").mkdir()  # #1088: checkout is a git work tree
 
         def run(argv):
             calls.append(argv)
@@ -403,7 +414,7 @@ class TestEnsureStreamTmuxSession(TestCase):
 
         d = Path(tempfile.mkdtemp())
         checkout = d / "devel" / "odoo" / "odoo-erp"
-        checkout.mkdir(parents=True)
+        (checkout / ".git").mkdir(parents=True)  # #1088: must be a git work tree
         with m.patch.object(Path, "home", return_value=d):
             airuleset.ensure_stream_tmux_session(
                 user="montalu3", run=run, sentinel_path=self._sentinel())
@@ -511,7 +522,7 @@ class TestEnsureStreamTmuxSession(TestCase):
             return _FakeCP(returncode=0)
 
         checkout = d / "devel" / "odoo" / "odoo-erp"
-        checkout.mkdir(parents=True)
+        (checkout / ".git").mkdir(parents=True)  # #1088: must be a git work tree
         sentinel = self._sentinel()
         sentinel.parent.mkdir(parents=True, exist_ok=True)
         sentinel.write_text("bootstrapped for montalu2\n")   # already bootstrapped
@@ -1038,14 +1049,18 @@ class TestControllerSshAttach(TestCase):
                 airuleset.STREAM_DEV_CWD_CHAIN))
 
     def test_stream_block_golden_hash(self):
-        # Non-tautological lock: the pre-#985 STREAM_SSH_ATTACH_BLOCK's
-        # sha256 is baked here, not derived from the code under test.
+        # Non-tautological lock: the STREAM_SSH_ATTACH_BLOCK's sha256 is baked
+        # here, not derived from the code under test. #1088 changed the cwd
+        # chain loop to the repo-aware `.git` predicate + the loud last-resort
+        # line, so the hash was deliberately recomputed (was
+        # 42fe3ea8...891755, the pre-#985/pre-#1088 value).
         import hashlib
         h = hashlib.sha256(
             airuleset.STREAM_SSH_ATTACH_BLOCK.encode()).hexdigest()
         self.assertEqual(
-            h, "42fe3ea8b527613b749cb7825f6da7641771380e"
-               "b8baa998fa82977b69891755")
+            h, "f09b01629a6dd96adc1086"
+               "ac7305f8d9fa2a69cbc4ab"
+               "19c0bfee4b6f62c4c4c3")
 
     def test_controller_does_not_regress_sibling_consumers(self):
         # RED-1 from fable review: widening is_single_session_box_user

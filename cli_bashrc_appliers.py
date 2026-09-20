@@ -366,21 +366,103 @@ def apply_tmux_attach_helpers(bashrc_path: Path = None, user: str = None) -> boo
     return False
 
 
-# --- #263/#264/#563: subdev stream account dev-env convention --------------
+# --- #263/#264/#563/#1088: subdev stream account dev-env convention ---------
 # The convention working directory for a subdev/gatekeeper account's tmux
-# session. NOT every account checks out at the same path (#563): montalu1
-# (renamed from montalu, #537) has its project at ~/devel/odoo, other
-# accounts check out ~/devel/odoo/odoo-erp, and gatekeeper has no odoo
-# checkout at all. So the cwd is a FALLBACK CHAIN: the first EXISTING dir of
-# STREAM_DEV_CWD_CHAIN wins, else $HOME. A binary "odoo-erp or $HOME"
-# fallback dropped montalu1 into $HOME, where a claude wrote under the wrong
-# project key (no history/memory -- the owner's complaint). STREAM_DEV_CWD_REL
-# stays the primary (chain[0]). Used by BOTH #263's tmux bootstrap
-# (_stream_session_cwd, below AUTHORITY_BY_USER) and #264's ssh auto-attach
-# block (right below) -- ONE shared chain, not two independently-maintained
-# copies.
+# session. NOT every account checks out at the same path (#563), and worse, a
+# checkout may be NAMED DIFFERENTLY: montalu1 (renamed from montalu, #537)
+# checks out ~/devel/odoo/odoo-slovnormal, other accounts check out
+# ~/devel/odoo/odoo-erp, and ~/devel/odoo itself is a PLAIN folder (screenshots
+# + the checkout). #563's chain accepted the first EXISTING dir with NO git
+# check, so on montalu1 (no odoo-erp subdir) it picked the non-repo parent
+# ~/devel/odoo -- a claude launched there wrote under the wrong project key (no
+# history/memory), the footer rendered nothing, and lane-fill saw no dispatchable
+# tickets (the owner's complaint, #1088).
+#
+# #1088: the chain is now REPO-AWARE -- a candidate is accepted ONLY if it is a
+# git WORK TREE (`<dir>/.git` present, work tree or gitfile). The checkout names
+# come first, then the bare `devel/odoo` (accepted as a repo only if IT carries
+# .git). When NO candidate is a work tree, the LOUD last resort is
+# STREAM_DEV_CWD_FALLBACK_REL (`devel/odoo`) if it merely exists, else $HOME,
+# printing ONE line so a missing checkout is visible at login (never silent).
+# STREAM_DEV_CWD_REL stays the primary (chain[0]). ONE chain + ONE predicate,
+# shared by BOTH #263's tmux bootstrap (airuleset._stream_session_cwd, mirroring
+# the predicate in Python via resolve_stream_cwd) and #264's ssh auto-attach
+# block (render_stream_cwd_chain_shell, right below) -- not two independently-
+# maintained copies. (cli_webterm's #961 forced command is a THIRD reader of
+# this SAME chain CONSTANT and thus lands montalu1 in odoo-slovnormal too; it
+# keeps its own `[ -d ]` predicate, locked by #961's tests -- deliberately out
+# of #1088's named scope, and harmless because the checkout dir exists.)
 STREAM_DEV_CWD_REL = "devel/odoo/odoo-erp"
-STREAM_DEV_CWD_CHAIN = (STREAM_DEV_CWD_REL, "devel/odoo")
+STREAM_DEV_CWD_CHAIN = (STREAM_DEV_CWD_REL, "devel/odoo/odoo-slovnormal",
+                        "devel/odoo")
+# The LOUD last-resort dir when no chain candidate is a git work tree: prefer
+# `devel/odoo` if it merely exists (a plain folder), else $HOME.
+STREAM_DEV_CWD_FALLBACK_REL = "devel/odoo"
+# The one loud line printed (attach block: to stderr; bootstrap: via Python) when
+# the last resort is used. `%s` = the chosen dir. Shared literal so the bash and
+# Python renderings can't drift; a test asserts both carry it.
+STREAM_DEV_CWD_NO_REPO_MSG = (
+    "stream cwd: no git checkout under ~/devel/odoo -- session starts in %s; "
+    "tickets footer will show no-repo")
+
+
+def resolve_stream_cwd(home, cwd_chain=STREAM_DEV_CWD_CHAIN,
+                       fallback_rel=STREAM_DEV_CWD_FALLBACK_REL):
+    """#1088: resolve the stream session start directory under `home`, mirroring
+    render_stream_cwd_chain_shell's predicate in Python.
+
+    Returns `(chosen: Path, no_repo: bool)`: the first `cwd_chain` candidate that
+    is a git WORK TREE (`<dir>/.git` exists -- work tree OR gitfile) wins with
+    no_repo=False; when none is, the last resort is `home/<fallback_rel>` if that
+    dir exists, else `home`, with no_repo=True (the caller prints ONE loud line
+    and the footer shows a `no-repo` marker)."""
+    home = Path(home)
+    for rel in cwd_chain:
+        if (home / rel / ".git").exists():
+            return home / rel, False
+    fb = home / fallback_rel
+    if fb.is_dir():
+        return fb, True
+    return home, True
+
+
+def render_stream_cwd_chain_shell(cwd_chain, var="__airuleset_cwd",
+                                  loopvar="__airuleset_rel",
+                                  fallback_rel=STREAM_DEV_CWD_FALLBACK_REL,
+                                  indent="  "):
+    """#1088: render the bash that resolves the stream start dir into `$<var>`,
+    the SAME predicate resolve_stream_cwd applies in Python.
+
+    The first `cwd_chain` candidate that is a git WORK TREE
+    (`[ -e "$HOME/$<loopvar>/.git" ]`, work tree or gitfile) wins; when none is,
+    the LOUD last resort is `$HOME/<fallback_rel>` if that dir merely exists,
+    else `$HOME`, echoing ONE line to stderr (STREAM_DEV_CWD_NO_REPO_MSG) so a
+    missing checkout is visible at login. Used by the ssh attach block below.
+
+    The default `fallback_rel`/message are odoo-chain specific (the stream
+    accounts this fix targets). The #985 controller override passes its own
+    single-element `("devel/airuleset",)` chain here but never REACHES the
+    fallback — the controller's airuleset checkout is always a git work tree, so
+    the first candidate always wins and the odoo-worded last-resort line is
+    unreachable there."""
+    i = indent
+    # The loud line is echoed inside DOUBLE quotes so `$<var>` expands; the
+    # message has no `"`/backtick/backslash, and `~` stays literal in "" (we want
+    # the literal `~/devel/odoo`). Shares STREAM_DEV_CWD_NO_REPO_MSG with Python.
+    msg = STREAM_DEV_CWD_NO_REPO_MSG % ("$%s" % var)
+    return (
+        f'{i}{var}=""\n'
+        f'{i}for {loopvar} in {" ".join(cwd_chain)}; do\n'
+        f'{i}  if [ -e "$HOME/${loopvar}/.git" ]; then\n'
+        f'{i}    {var}="$HOME/${loopvar}"; break\n'
+        f'{i}  fi\n'
+        f'{i}done\n'
+        f'{i}if [ -z "${var}" ]; then\n'
+        f'{i}  if [ -d "$HOME/{fallback_rel}" ]; then '
+        f'{var}="$HOME/{fallback_rel}"; else {var}="$HOME"; fi\n'
+        f'{i}  echo "{msg}" >&2\n'
+        f'{i}fi\n'
+    )
 
 # --- #264: subdev stream ssh auto-attach ------------------------------------
 # One subdev stream account = one tmux session; an interactive ssh login
@@ -421,16 +503,14 @@ def render_ssh_attach_block(session_target, cwd_chain):
         # guard keeps that failure mode from ever being reachable).
         'if [[ $- == *i* ]] && [ -n "${SSH_TTY:-}" ] && [ -z "${TMUX:-}" ] '
         '&& command -v tmux >/dev/null 2>&1; then\n'
-        # #563: cwd FALLBACK CHAIN -- first EXISTING dir of cwd_chain
-        # wins, else $HOME. A binary "odoo-erp or $HOME" fallback dropped montalu1
-        # (project dir ~/devel/odoo, no odoo-erp subdir) into $HOME, so a claude
-        # launched there wrote under the wrong project key (no history/memory).
-        '  __airuleset_cwd="$HOME"\n'
-        f'  for __airuleset_rel in {" ".join(cwd_chain)}; do\n'
-        '    if [ -d "$HOME/$__airuleset_rel" ]; then\n'
-        '      __airuleset_cwd="$HOME/$__airuleset_rel"; break\n'
-        '    fi\n'
-        '  done\n'
+        # #1088: cwd REPO-AWARE CHAIN -- first cwd_chain candidate that is a git
+        # WORK TREE (`[ -e "$HOME/$rel/.git" ]`) wins, else the LOUD last resort
+        # `$HOME/devel/odoo` (if it exists) or $HOME. #563's `-d`-only chain
+        # dropped montalu1 (checkout `odoo-slovnormal`, ~/devel/odoo a plain
+        # folder) into the non-repo parent -> wrong project key (no
+        # history/memory), footer blank. Shared with the Python bootstrap
+        # (resolve_stream_cwd) -- ONE predicate.
+        + render_stream_cwd_chain_shell(cwd_chain) +
         f'  __airuleset_me={session_target}\n'
         "  # #284/#593: search for a live group survivor whose NAME may differ\n"
         "  # from this exact username before the plain -A reattach. This once\n"

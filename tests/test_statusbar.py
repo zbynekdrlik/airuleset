@@ -1654,7 +1654,7 @@ class RefreshCLI(unittest.TestCase):
             self.assertEqual(cache["open"], 3)       # {1} ∪ {2} ∪ {9}
             self.assertEqual(cache.get("scope"), "mine")
 
-    def test_refresh_outside_git_repo_writes_null(self):
+    def test_refresh_outside_git_repo_writes_null_and_no_repo_reason(self):
         with TemporaryDirectory() as home, TemporaryDirectory() as nonrepo:
             r = subprocess.run(
                 [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
@@ -1667,10 +1667,14 @@ class RefreshCLI(unittest.TestCase):
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(nonrepo) + ".json")).read_text())
             self.assertIsNone(cache["open"])
-            # → the statusline renders nothing for this dir (and won't re-spawn
-            # until the TTL passes)
-            self.assertEqual(statusbar.tickets_segment(nonrepo, home=home,
-                                                       spawn=False), "")
+            # #1088: a non-repo cwd is now RECORDED (reason="no-repo", root="")
+            # so it is distinguishable from a gh failure.
+            self.assertEqual(cache.get("reason"), "no-repo")
+            self.assertEqual(cache.get("root"), "")
+            # → the statusline renders a dim `no-repo` marker for this dir (no
+            # longer nothing — "not in a repo" must not read as "gh is down").
+            self.assertIn("no-repo", statusbar.tickets_segment(
+                nonrepo, home=home, spawn=False))
 
     def test_refresh_falls_back_to_git_credentials_token_when_gh_unauthenticated(self):
         # #25: david (and every sub-dev stream) never runs `gh auth login` —

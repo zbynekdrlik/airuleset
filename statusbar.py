@@ -512,6 +512,16 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
         u = cache.get("user_waiting") if isinstance(cache, dict) else None
         total = (u if isinstance(u, int) else 0) + \
                 (ping_count if isinstance(ping_count, int) else 0)
+        # #1088: a NON-repo cwd (the refresh recorded reason="no-repo", or a
+        # legacy root=="" cache) is a DIFFERENT state from a gh failure (root
+        # known, counts None): render a DIM `no-repo` token in the `I` slot so
+        # "not in a repo" can never again read as "gh is down" (which renders
+        # nothing). A gh failure — a cold/missing cache included — keeps
+        # rendering nothing here. A pending question still surfaces as `U N`.
+        if isinstance(cache, dict) and (
+                cache.get("reason") == "no-repo" or cache.get("root") == ""):
+            u_sfx = " \033[38;5;208m· U %d\033[0m" % total if total > 0 else ""
+            return "\033[38;5;245mno-repo\033[0m" + u_sfx
         return "\033[38;5;208mU %d\033[0m" % total if total > 0 else ""
 
     # Skipped bucket (2026-07-16): tickets labeled autopilot-skip. An EXCLUSION
