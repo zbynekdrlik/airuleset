@@ -164,6 +164,7 @@ imports `watchdog.goal`, `watchdog/__init__.py` has already finished
 executing top to bottom.
 """
 
+import hashlib
 import json
 import os
 import time
@@ -1747,6 +1748,24 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         if _cskip:
             return _cskip
 
+    # #1092 (e) -- a watchdog RE-ARM types into an ACTIVE (idle) stream pane, so it
+    # goes through the SAME per-pane typing budget as a nudge: at most
+    # PANE_ATTEMPT_BUDGET typing attempts into this pane per rolling hour, across
+    # ALL kinds. deliver_goal delivers via _send_goal_verified / deliver_with_stash
+    # (not send_verified), so the budget is enforced HERE, right before the
+    # keystroke and after the human-active guards above. Refused BEFORE any
+    # keystroke -> a zero-keystroke, non-terminal defer (retry next sweep once the
+    # rolling hour frees a slot, or the 30-min age cap expires it silently). The
+    # user's OWN `self-callback` arm is NOT a watchdog re-arm and is never gated
+    # here (the owner at the keyboard). This is the second writer the addendum
+    # names: a template change can no longer storm a pane's prompt via re-arms.
+    if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
+        if not _nudge_gate.pane_budget_ok(state, pid, now):
+            _log_goal_sync("SKIP pane-budget(%s) sid=%s cwd=%s" % (origin, sid, cwd))
+            if out is not None:
+                out["detail"] = _nudge_gate.pane_budget_hold_reason(state, pid, now)
+            return "skip:pane-budget"
+
     kind, draft = watchdog._classify_boundary(captured)
     if kind == "no-input-line":
         _log_goal_sync("SKIP no-input-line sid=%s cwd=%s" % (sid, cwd))
@@ -1781,6 +1800,10 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         if _submit_stranded_own_goal(sid, cwd, text, pid, captured, tpath,
                                      run, state, now, sleep_fn, logs,
                                      nudge=_nudge):
+            # #1092 (e) -- recovering our OWN stranded /goal was a keystroke into
+            # the pane; count it against the per-pane budget for a watchdog re-arm.
+            if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
+                _nudge_gate.mark_pane_attempt(state, pid, now)
             watchdog._janitor_clear_watch(state, pid)
             if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
                 _log_goal_sync("SKIP not-armed(stranded) sid=%s cwd=%s" % (sid, cwd))
@@ -1789,6 +1812,21 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                 return "skip:verify-failed"
             _log_goal_sync("SEND recover-swallowed sid=%s cwd=%s" % (sid, cwd))
             return "sent"
+        # #1092 (e) -- a watchdog RE-ARM types ONLY into an EMPTY box at the idle
+        # prompt, NEVER stash-around a FOREIGN draft (the owner's own text): the
+        # incident's second writer was the re-arm typing its whole /goal payload
+        # into an active pane. So for a watchdog re-arm origin, once the box holds
+        # a foreign draft (our own stranded /goal was already handled above), DEFER
+        # -- a zero-keystroke, non-terminal defer, retried on the next idle sweep.
+        # The user's OWN self-callback / declared-virgin arm keeps the stash-around
+        # (it protects the owner's just-typed draft, #35) below.
+        if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
+            watchdog._janitor_clear_watch(state, pid)   # nothing typed -> release
+            _log_goal_sync("SKIP pane-busy-draft(%s) sid=%s cwd=%s"
+                           % (origin, sid, cwd))
+            if out is not None:
+                out["detail"] = "deferred (pane busy/draft)"
+            return "skip:pane-busy-draft"
         # #488: thread `state` so deliver_with_stash can DURABLY record a park
         # it definitively creates (STASH_PARKED) -> the shared janitor reclaims
         # it after ANY delay, not just the 6h generic-mark window (the gk
@@ -1823,6 +1861,12 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     ok = _send_goal_verified(pid, text, run, captured=captured,
                              sleep_fn=sleep_fn, logs=logs,
                              nudge=_nudge)   # #1038 declared-window -> goal-arm
+    # #1092 (e) -- the type keystroke into the (empty) box was a typing attempt
+    # into an active pane; count it against the per-pane budget for a watchdog
+    # re-arm regardless of the verify outcome (a swallowed re-arm is recovered
+    # next sweep via the #372 janitor watch set above / _submit_stranded_own_goal).
+    if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
+        _nudge_gate.mark_pane_attempt(state, pid, now)
 
     if ok:
         watchdog._janitor_clear_watch(state, pid)
@@ -2859,7 +2903,8 @@ def _default_rearm_fn(cwd):
 
 
 def _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run, rearm_fn,
-                        obligation_fn, requests_path, attempts_state):
+                        obligation_fn, requests_path, attempts_state,
+                        tmpl_seen_state=None):
     """#623 -- for a LIVE, ARMED loop (`goal_dark_watch`'s `armed is True`
     branch), decide whether its stored condition has DRIFTED from the shipped
     template and, if so, RECORD a `stale-rearm` request (goal_sweep/deliver_goal
@@ -2887,6 +2932,22 @@ def _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run, rearm_fn,
     # or clobber it. This also covers the already-queued stale-rearm case.
     if isinstance(load_goal_requests(requests_path).get(sid), dict):
         return None
+    # #1092 (e) -- a template change is NOT an emergency: record at most ONE
+    # stale-rearm per session per TEMPLATE VERSION (keyed on the shipped template
+    # hash). After the #1084 template deploy, EVERY armed session on every box
+    # reads "stale" at once; without this key each one re-records a stale-rearm
+    # every ~30 min (its request expires, the loop is still stale, it re-records)
+    # under only the 24h/2 attempt cap -- the addendum's second-writer storm. Once
+    # a stale-rearm was recorded for this (sid, template) the loop stays on old
+    # doctrine until it dies OR the template changes again (a new hash re-opens
+    # the key), which the addendum accepts ("kept, bounded"). A dry-run never
+    # stamps (it records nothing). `tmpl_seen_state` is `state["goal_stale_rearm_
+    # tmpl"]`, threaded from goal_dark_watch like the sibling `*_attempts` dicts.
+    _tmpl_hash = hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:16]
+    if isinstance(tmpl_seen_state, dict) and tmpl_seen_state.get(sid) == _tmpl_hash:
+        return ("stale-rearm %s sid=%s -> STALE but already re-armed for this "
+                "template version -- skip (loop stays on old doctrine until it "
+                "dies or the template changes again)" % (loc, sid))
     open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
     fresh = cts is not None and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S
     if not (isinstance(open_n, int) and open_n > 0 and fresh):
@@ -2907,6 +2968,11 @@ def _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run, rearm_fn,
     # delivery ("sent").  Same class as auth-rearm.
     record_goal_request(sid, cwd, text, authority, now=now,
                         origin=_GOAL_STALE_REARM_ORIGIN, path=requests_path)
+    # #1092 (e) -- stamp the template version so a later sweep (after this request
+    # expires / delivers) never re-records another stale-rearm for the SAME
+    # template into this session.
+    if isinstance(tmpl_seen_state, dict):
+        tmpl_seen_state[sid] = _tmpl_hash
     return ("stale-rearm %s sid=%s -> STALE: recording re-arm (open=%s "
             "authority=%s)"
             % (loc, sid, open_n, authority))
@@ -3364,6 +3430,11 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     # entry forever (the #486-G5 dedup-dict-leak lesson).
     confirm_state = state.setdefault("goal_dark_confirm", {})
     attempts_state = state.setdefault("goal_dark_rearm_attempts", {})
+    # #1092 (e) -- the per-sid stale-rearm TEMPLATE-VERSION latch: once a session
+    # has been re-armed for a given shipped-template hash, do not re-record another
+    # stale-rearm for it until the template changes (a template deploy no longer
+    # storms every armed session's prompt every ~30 min).
+    stale_tmpl_state = state.setdefault("goal_stale_rearm_tmpl", {})
     # #764 -- the per-sid fulfilled-rearm record timestamps (rate limiter), a
     # JSON list per sid; reaped below exactly like `attempts_state`.
     fulfilled_state = state.setdefault("goal_fulfilled_rearm", {})
@@ -3628,7 +3699,8 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             # request for goal_sweep/deliver_goal to REPLACE it.
             sr = _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run,
                                      rearm_fn, obligation_fn, requests_path,
-                                     attempts_state)
+                                     attempts_state,
+                                     tmpl_seen_state=stale_tmpl_state)
             if sr:
                 logs.append(sr)
             # #878 — goal-guard rider: an ALIVE armed loop with a FOREIGN
