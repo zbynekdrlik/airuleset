@@ -398,5 +398,43 @@ class TestStaleRearmOncePerTemplateVersion(unittest.TestCase):
                          "a changed template version re-arms again")
 
 
+class TestNudgesStatusRecoveryLine(unittest.TestCase):
+    """#1092 (e) — `nudges status` names the recovery re-arm family's typing state
+    + whether the box carries `~/.claude/watchdog-disable-goal`, so a `nudges: OFF`
+    summary never again reads as 'nothing types' (the addendum: the owner saw
+    'goal' arriving after every nudge kind was off)."""
+
+    def _status_out(self, disable_goal):
+        import io
+        import contextlib
+        import importlib
+        from tempfile import TemporaryDirectory
+        import unittest.mock as m
+        with TemporaryDirectory() as home:
+            with m.patch.dict(os.environ, {"HOME": home}, clear=False):
+                os.environ.pop("AIRULESET_TEST_IGNORE_DISABLE", None)
+                if disable_goal:
+                    os.makedirs(os.path.join(home, ".claude"), exist_ok=True)
+                    open(os.path.join(home, ".claude",
+                                      "watchdog-disable-goal"), "w").close()
+                airuleset = importlib.import_module("airuleset")
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    airuleset._print_nudges_status(home=home)
+                return buf.getvalue()
+
+    def test_names_recovery_rearms_and_flag_absent(self):
+        out = self._status_out(disable_goal=False)
+        self.assertIn("re-arm", out.lower())
+        self.assertIn("watchdog-disable-goal", out)
+        # absent -> the re-arm family still types (through the gate)
+        self.assertIn("absent", out.lower())
+
+    def test_reports_the_flag_when_present(self):
+        out = self._status_out(disable_goal=True)
+        self.assertIn("watchdog-disable-goal", out)
+        self.assertIn("present", out.lower())
+
+
 if __name__ == "__main__":
     unittest.main()
