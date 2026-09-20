@@ -579,7 +579,7 @@
     "tests/test_transcript_compress.py": 631,
     "tests/test_transcript_newest_model_1061.py": 107,
     "tests/test_ttyd_installer.py": 211,
-    "tests/test_u_freshness.py": 386,
+    "tests/test_u_freshness.py": 392,
     "tests/test_u_labels.py": 402,
     "tests/test_upload_url.py": 1165,
     "tests/test_usage_cache.py": 209,
