@@ -3707,14 +3707,18 @@ def _role_filter_footer(workable, waiting, ops_wait, root, cwd):
     this returns (`_split_merged_unreleased`), so M narrows by role for free
     without widening this function's contract.
 
-    #1045 CORRECTION of #1025: `workable` (I) AND `ops_wait` (W) are role-
-    filtered; only `waiting` (owner-court U) is returned UNFILTERED. #998/#1008
-    filtered all three; #1025 correctly exempted U (an infra ticket's needs-
-    answer must stay in the review window's U — footer `U 0` with a live
-    `❓ ASKED`, odoo-erp#6883) but ALSO stopped filtering W, so the FLOW window's
-    footer `W` counted infra members (owner 2026-09-16, airuleset#1045). W is
-    review-vs-infra work-window scope, so it narrows by role like I; only U is a
-    parked owner-court state global to the box ("čo sa ťa Claude pýta").
+    #1065 REVERSES #1025: ALL THREE — `workable` (I), `ops_wait` (W) AND
+    `waiting` (owner-court U) — are role-filtered, so a two-window box shows each
+    owner question in exactly ONE window. #998/#1008 filtered all three; #1025
+    exempted U ("an infra ticket's needs-answer must stay in the review window's
+    U"), #1045 restored the W filter but kept U un-sliced — so on the gk box the
+    SAME owner question was counted and re-presented in BOTH windows, the owner
+    risked answering twice with two sessions acting on it (odoo-erp#7421 17.9.,
+    live on #7720; owner 20.9.2026: "U 1 v gk nie je gk ale gk infra"). Now U
+    narrows by role exactly like I and W: `infra`-labelled → the INFRA window,
+    everything else → the FLOW window; the exactly-one-window invariant
+    (U(FLOW)+U(INFRA)==U(unfiltered)) keeps the "never lose a question" property.
+    role None (every box but the gk windows) → all three unchanged.
 
     Fail-SAFE: any resolver / slug error leaves all three UNFILTERED (the safe
     over-count direction, #589/#636) and is LOGGED, never a footer crash."""
@@ -3738,14 +3742,18 @@ def _role_filter_footer(workable, waiting, ops_wait, root, cwd):
             sys.stderr.write("tickets-status: role filter unavailable "
                              "(slug unresolved) — unfiltered\n")
             return workable, waiting, ops_wait
-        # #1045 CORRECTION of #1025: filter the workable `I` bucket AND the
-        # third-party `W` (ops_wait). Only `waiting` (owner-court U) is left
-        # UNFILTERED — an infra ticket's needs-answer must stay in the review
-        # window's U (odoo-erp#6883). #1025 also removed the W filter, so the
-        # FLOW window's footer `W` counted infra members (airuleset#1045). W is
-        # review-vs-infra work-window scope → it narrows by role like I.
+        # #1065 REVERSES #1025: filter the workable `I` bucket, the third-party
+        # `W` (ops_wait) AND the owner-court `U` (waiting) — a question shows in
+        # the ONE window whose role owns the ticket (`infra` → INFRA), never
+        # both. #1025 exempted U so an infra needs-answer stayed in the FLOW
+        # window's U too (odoo-erp#6883); on the gk box that duplicated every
+        # owner question across both windows (owner 20.9.2026, odoo-erp#7720).
+        # The exactly-one-window invariant preserves "never lose a question".
+        # The session `❓` pings without a ticket ref are added per-cwd elsewhere
+        # (`_qmap_extra`, stream-only, no role) and are NOT filtered here.
         workable = cli_quals_cmd._apply_role_filter(workable, root, role, slug=slug)
         ops_wait = cli_quals_cmd._apply_role_filter(ops_wait, root, role, slug=slug)  # #1045
+        waiting = cli_quals_cmd._apply_role_filter(waiting, root, role, slug=slug)  # #1065
     except SystemExit as e:
         # defensive: _apply_role_filter fail-CLOSES on an empty slug; we already
         # short-circuit that above, but never let it escape the footer.
