@@ -3453,7 +3453,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     recovery class run), decided in `state["sweep_cadence"]` by `sweep_urgent`
     (an active stall/park/goal-lane state entry, or transcript activity) OR a
     `last_full` older than `SWEEP_CALM_S`. #1084 (2026-09-19): machine-triggered
-    compacts are REMOVED, so a pending /compact is no longer an urgency signal at
+    compacts are gone, so a pending /compact is no longer an urgency signal at
     all — `sweep_urgent`'s `compact_pending` parameter is pinned False by the sole
     caller (no request is ever recorded)."""
     now = time.time() if now is None else now
