@@ -31,40 +31,52 @@ can drift). Lessons for anyone touching this partition:
   `_ticket_is_stream_labeled`, `_released_stream_numbers`) expands through this ONE
   primitive — follow the pattern for any new branch/label/identity match.
 
-- **`--role` filtering (`_apply_role_filter`) narrows the WORKABLE `I` slice AND the
-  third-party `W` (ops_wait) — NEVER `waiting` (U) (#1045, refining #1025).** The role
-  exclusion (review vs infra) scopes the WORK WINDOW: `I` and `W` both narrow to that
-  window (a `--role review` W = the FLOW window's ops-wait members — stream-dependent +
-  gk-owned WITHOUT `infra`; `--role infra` W = the infra ones). Only `U` (owner court:
-  needs-answer/decision/owner-action) is a PARKED state GLOBAL to the box, shown FULL
-  for both roles — an owner question on ANY ticket (infra included) is never role-
-  dropped. HISTORY: #998/#1008 filtered all three (I/U/W); #1025 correctly exempted U
-  (the exemption fixed an `infra` ticket's needs-answer hidden from the review (FLOW)
-  window's U — owner saw `U 0` with a live `❓ ASKED`, odoo-erp#6883) but ALSO stopped
-  filtering W, so the FLOW window's W showed infra members (`core-quals --role review
-  --ops-wait` == `--role infra --ops-wait`, owner 2026-09-16: "chcem vidieť čísla
-  týkajúce sa gk flow, nie mix kadečoho"); #1045 restored the W filter, keeping U
-  exempt. The three sites — footer (`_role_filter_footer`, fail-SAFE) + both CLI
-  commands (fail-CLOSED on empty slug) — each apply the filter to `I` AND `W`. ONE
-  derivation: the filtered `ops_wait` feeds the `--ops-wait` rows, the `# W-summary:
-  total=` line, and the statusline `entry["ops_wait"]` (#367). role `None` returns rows
-  unchanged (no slug resolution), byte-identical off a role window. gk + gk-infra are
-  TWO windows on the SAME box over the SAME repo, so both footers show the SAME U
-  (global), but DIFFERENT disjoint W and I (role-partitioned) — no double count.
-  Doctrine: statusline-vocabulary.md's `U` bullet — "the role slice narrows `I` and
-  `W`; only `U` is global".
+- **`--role` filtering (`_apply_role_filter`) narrows ALL THREE — the WORKABLE `I`
+  slice, the third-party `W` (ops_wait) AND the owner-court `U` (waiting) (#1065,
+  REVERSING #1025).** The role exclusion (review vs infra) scopes BOTH the work window
+  AND the owner-court: `I`, `W` and `U` all narrow to that window (a `--role review` W =
+  the FLOW window's ops-wait members — stream-dependent + gk-owned WITHOUT `infra`;
+  `--role infra` W = the infra ones; and now the SAME for U — an `infra`-labelled owner
+  question shows ONLY in the INFRA window, every other owner question ONLY in the FLOW
+  window). HISTORY: #998/#1008 filtered all three (I/U/W); #1025 exempted U (to fix an
+  `infra` ticket's needs-answer hidden from the review (FLOW) window's U — owner saw
+  `U 0` with a live `❓ ASKED`, odoo-erp#6883) but ALSO stopped filtering W, so the FLOW
+  window's W showed infra members (`core-quals --role review --ops-wait` == `--role
+  infra --ops-wait`, owner 2026-09-16: "chcem vidieť čísla týkajúce sa gk flow, nie mix
+  kadečoho"); #1045 restored the W filter, keeping U exempt; #1065 REVERSED the U
+  exemption — on the gk box the SAME owner question was counted+re-presented in BOTH
+  windows (the owner asked "U 1?" in INFRA and the FLOW session re-presented the infra
+  question, risking a double answer and two sessions on one ticket — odoo-erp#7421
+  17.9., live on #7720; owner 20.9.2026: "U 1 v gk nie je gk ale gk infra stale ma to
+  pletie"). The three sites — footer (`_role_filter_footer`, fail-SAFE) + both CLI
+  commands (fail-CLOSED on empty slug) — each apply the filter to `I`, `W` AND `U`. The
+  `_qmap_extra` supplement (stream-only session `❓` pings, no ticket ref) is NEVER
+  role-filtered — it stays per-cwd, merged into the `--waiting` listing AFTER the filter
+  and absent on the gk core path. ONE derivation: the filtered `ops_wait` feeds the
+  `--ops-wait` rows, the `# W-summary: total=` line, and the statusline
+  `entry["ops_wait"]`; the filtered `waiting` feeds the `--waiting` rows AND the
+  statusline `entry["user_waiting"]`/`user_waiting_numbers` per window (#367). role
+  `None` returns rows unchanged (no slug resolution), byte-identical off a role window.
+  gk + gk-infra are TWO windows on the SAME box over the SAME repo showing DIFFERENT
+  disjoint I, W AND U (all role-partitioned) — no double count; the exactly-one-window
+  invariant U(FLOW)+U(INFRA)==U(unfiltered) (a total binary INFRA/INDEPENDENT partition)
+  keeps "never lose a question". Doctrine: statusline-vocabulary.md's `U` bullet — "the
+  `--role` slice narrows `I`, `W` AND `U` — a question shows in ONE window whose role
+  owns it".
 
-- **GOTCHA — the role-filter SCOPE has oscillated twice; change all FIVE surfaces
+- **GOTCHA — the role-filter SCOPE has oscillated THREE times; change all FIVE surfaces
   together or it re-regresses.** Which of `I`/`U`/`W` the `--role` filter narrows has
-  flipped: #998/#1008 = all three → #1025 = `I` only → #1045 = `I`+`W`, `U` global.
-  The #1045 regression happened because #1025 updated CODE but a prior lane once
-  updated only code COMMENTS and left the doctrine saying the old rule — a later
-  session then "restores doctrine" and re-regresses. The invariant surfaces that MUST
-  move in lockstep for ANY future scope change: (1) `_apply_role_filter` call in
-  `cmd_slice_quals`, (2) in `cmd_core_quals`, (3) in `airuleset._role_filter_footer`,
-  (4) this bullet, (5) `modules/core/statusline-vocabulary.md`'s `U` bullet — plus the
-  RED locks in `test_w_role_filter_1045.py` / `test_role_filter_uw_1008.py` /
-  `test_footer_role_998.py`. A lane touching role scope that leaves any of the five
+  flipped: #998/#1008 = all three → #1025 = `I` only → #1045 = `I`+`W`, `U` global →
+  #1065 = all three again (`I`+`W`+`U`, per the owner's 20.9.2026 ruling). The #1045
+  regression happened because #1025 updated CODE but a prior lane once updated only code
+  COMMENTS and left the doctrine saying the old rule — a later session then "restores
+  doctrine" and re-regresses. The invariant surfaces that MUST move in lockstep for ANY
+  future scope change: (1) `_apply_role_filter` call in `cmd_slice_quals`, (2) in
+  `cmd_core_quals`, (3) in `airuleset._role_filter_footer`, (4) this bullet + the
+  `--role` filtering bullet above, (5) `modules/core/statusline-vocabulary.md`'s `U`
+  bullet — plus the RED locks in `test_w_role_filter_1045.py` /
+  `test_role_filter_uw_1008.py` / `test_footer_role_998.py` (and the #1065 lock
+  `test_u_role_filter_1065.py`). A lane touching role scope that leaves any of the five
   stale is an incomplete fix.
 
 - **#1025 stop-gate: a `❓ ASKED`/`❓ NEEDS YOU` turn naming a same-repo `#N` must point

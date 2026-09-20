@@ -1381,10 +1381,10 @@ def cmd_core_quals(args):
     # sessions acting on it (odoo-erp#7421 17.9., live on #7720; owner
     # 20.9.2026: "U 1 v gk nie je gk ale gk infra stale ma to pletie"). U now
     # narrows by role exactly like I/W; the exactly-one-window invariant
-    # (U(FLOW)+U(INFRA)==U(unfiltered)) keeps "never lose a question" — every
-    # ticket belongs to exactly one role slice on a two-window box, and a ticket
-    # outside both slices falls back to the FLOW (full-authority) window. This is
-    # the gk full-auth path with no `_qmap_extra` supplement, so filtering
+    # (U(FLOW)+U(INFRA)==U(unfiltered)) keeps "never lose a question" — a ticket
+    # is either infra (→ INFRA) or not (→ FLOW), a total binary partition, so
+    # every question lands in exactly one window. This is the gk full-auth path
+    # with no `_qmap_extra` supplement, so filtering
     # `waiting` here directly partitions the gk box's U (the #7720 path). ONE
     # derivation: the filtered `ops_wait` feeds the `--ops-wait` rows AND the
     # `# W-summary: total=` line below (#367). role None = no-op (byte-identical,
