@@ -553,6 +553,10 @@ from cli_bashrc_appliers import (  # noqa: E402, F401
     apply_ultracode_launcher as apply_ultracode_launcher,
     STREAM_DEV_CWD_REL as STREAM_DEV_CWD_REL,
     STREAM_DEV_CWD_CHAIN as STREAM_DEV_CWD_CHAIN,
+    STREAM_DEV_CWD_FALLBACK_REL as STREAM_DEV_CWD_FALLBACK_REL,
+    STREAM_DEV_CWD_NO_REPO_MSG as STREAM_DEV_CWD_NO_REPO_MSG,
+    resolve_stream_cwd as resolve_stream_cwd,
+    render_stream_cwd_chain_shell as render_stream_cwd_chain_shell,
     STREAM_SSH_ATTACH_MARK_START as STREAM_SSH_ATTACH_MARK_START,
     STREAM_SSH_ATTACH_MARK_END as STREAM_SSH_ATTACH_MARK_END,
     STREAM_SSH_ATTACH_BLOCK as STREAM_SSH_ATTACH_BLOCK,
@@ -4151,6 +4155,15 @@ def cmd_tickets_status(args):
                 entry["skipped"] = int(s)
             except (TypeError, ValueError):
                 entry["skipped"] = None
+    else:
+        # #1088: a non-repo cwd (root=="") is a DISTINCT state from a gh failure
+        # (root known, counts None). _repo_root already descends into a lone
+        # child repo (#61), so this fires only when there is genuinely no repo
+        # (0 or >1 child repos, or a leaf like $HOME). Record it so the footer
+        # renders a dim `no-repo` marker instead of nothing — the statusline
+        # needs no second probe. (A gh failure keeps root non-empty + no reason,
+        # so it still renders nothing, distinguishing the two at a glance.)
+        entry["reason"] = "no-repo"
     _cwd_key = statusbar.cwd_key(cwd)
     cache = statusbar.cache_dir() / (_cwd_key + ".json")
     cache.parent.mkdir(parents=True, exist_ok=True)
@@ -8343,18 +8356,16 @@ def _stream_session_cwd() -> Path:
     early-returns for any account NOT in AUTHORITY_BY_USER, so this function is
     never reached for gatekeeper -- gatekeeper's own ssh-attach cwd is computed
     by the bash block's inline chain loop over the SAME STREAM_DEV_CWD_CHAIN,
-    not here. #563: a FALLBACK CHAIN -- the first EXISTING dir of
-    STREAM_DEV_CWD_CHAIN wins (odoo-erp, then devel/odoo), else $HOME. The old
-    binary "odoo-erp or $HOME" fallback dropped montalu1 (project dir
-    ~/devel/odoo, no odoo-erp subdir) into $HOME. Falling back to $HOME keeps
-    bootstrap from hard-failing on a stream account gatekeeper hasn't finished
-    Phase 1 for."""
-    home = Path.home()
-    for rel in STREAM_DEV_CWD_CHAIN:
-        p = home / rel
-        if p.is_dir():
-            return p
-    return home
+    not here. #1088: a REPO-AWARE chain -- the first STREAM_DEV_CWD_CHAIN
+    candidate that is a git WORK TREE (`<dir>/.git`) wins (odoo-erp, then
+    odoo-slovnormal, then a bare devel/odoo repo), else the LOUD last resort
+    `devel/odoo` (plain folder) or $HOME. #563's `-d`-only chain dropped montalu1
+    (checkout `odoo-slovnormal`, ~/devel/odoo a plain folder) into the non-repo
+    parent. Delegates to the shared resolver so the Python bootstrap and the
+    bash attach block cannot drift; the no_repo flag (surfaced loudly at the
+    creation site) is dropped here since callers that compare against a live
+    pane cwd only need the directory."""
+    return resolve_stream_cwd(Path.home())[0]
 
 
 def _tmux_session_exists(name, run=None):
@@ -8529,7 +8540,12 @@ def ensure_stream_tmux_session(user=None, run=None, launch_script=None,
     if bootstrapped:
         return ("already bootstrapped once for '%s' -- never re-created "
                  "(a since-stopped session stays stopped)" % user)
-    cwd = _stream_session_cwd()
+    cwd, no_repo = resolve_stream_cwd(Path.home())
+    if no_repo:
+        # #1088: the loud last resort (no git work tree under ~/devel/odoo).
+        # Mirrors the ssh attach block's echo so a missing checkout is visible
+        # at bootstrap too, never a silent non-repo session start.
+        print("  ⚠ %s" % (STREAM_DEV_CWD_NO_REPO_MSG % cwd), file=sys.stderr)
     script = launch_script or CLAUDE_LAUNCH_SCRIPT_DEST
     try:
         r = run(["tmux", "new-session", "-d", "-s", user, "-c", str(cwd)])
