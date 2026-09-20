@@ -402,11 +402,23 @@ def _compute_merged_unreleased(root, git_fn, pr_meta_fn, cache_path, slug,
     # `git remote get-url origin` on the hot footer path).
     origin_slug = remote_fn(root, "origin")
     # Resolve the canonical slug FIRST — from an explicit slug, a caller
-    # resolver, or that origin read. Cheap on every path, and (#1090) needed
-    # BEFORE the range so a fork clone reads the canonical branches, not its own
-    # stale `origin/*`.
+    # resolver, the SHARED fork-aware resolver, or that origin read. Cheap on
+    # every path, and (#1090) needed BEFORE the range so a fork clone reads the
+    # canonical branches, not its own stale `origin/*`.
     if slug is None:
-        slug = (slug_fn() if slug_fn is not None else None) or origin_slug
+        slug = (slug_fn() if slug_fn is not None else None)
+        if not slug:
+            # #1094: the ONE fleet resolver (gh-resolved=base / upstream /
+            # origin) shared with the open-issue snapshot, so the M sweep and the
+            # footer agree on one slug + its branches on a fork clone. LOCAL git
+            # only — zero network on the hot `--count`/footer path.
+            try:
+                from gates import ghread
+                slug = ghread.canonical_slug(root)
+            except Exception:
+                slug = None
+        if not slug:
+            slug = origin_slug
     # (a) Fork-aware range prefix. A fork clone whose canonical refs are absent
     # hides `M` here with a journal reason and makes ZERO REST calls.
     prefix, reason = _canonical_ref_prefix(

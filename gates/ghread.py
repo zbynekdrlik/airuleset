@@ -97,16 +97,11 @@ def _parse_gql_comments(out):
             if isinstance(c, dict) and isinstance(c.get("body"), str)]
 
 
-def resolve_slug(cwd, runner=None):
-    """`owner/name` from `git -C <cwd> remote get-url origin` (a LOCAL git op,
-    NEVER an API call, so it survives a GraphQL/REST quota exhaustion), or None.
-    Handles the ssh (`git@github.com:owner/name.git`) and https
+def _parse_remote_slug(url):
+    """`owner/name` from a git remote URL, or None. Handles the ssh
+    (`git@github.com:owner/name.git`) and https
     (`https://github.com/owner/name(.git)`) remote forms."""
-    argv = ["git"] + (["-C", cwd] if cwd else []) + ["remote", "get-url", "origin"]
-    rc, out, _err = _run(argv, cwd, 6, None, runner)
-    if rc != 0:
-        return None
-    url = (out or "").strip().rstrip("/")
+    url = (url or "").strip().rstrip("/")
     if url.endswith(".git"):
         url = url[:-4]
     # ssh `git@host:owner/name` -> the ':' becomes '/', then last two segments.
@@ -115,6 +110,70 @@ def resolve_slug(cwd, runner=None):
     if len(parts) >= 2:
         return "%s/%s" % (parts[-2], parts[-1])
     return None
+
+
+def _remote_slug(name, cwd, runner):
+    """`owner/name` of the `<name>` git remote at `cwd` (a LOCAL git op, NEVER an
+    API call), or None when the remote does not exist / is unreadable."""
+    argv = ["git"] + (["-C", cwd] if cwd else []) + ["remote", "get-url", name]
+    rc, out, _err = _run(argv, cwd, 6, None, runner)
+    if rc != 0:
+        return None
+    return _parse_remote_slug(out)
+
+
+def _gh_default_remote(cwd, runner):
+    """The NAME of the remote `gh repo set-default` marked as the base repo, or
+    None. `gh repo set-default <remote>` writes `remote.<name>.gh-resolved = base`
+    into `.git/config`; the entry whose value is exactly `base` names the default
+    base remote (a non-remote default carries an `owner/repo` value instead, which
+    is NOT a local remote to trust). A LOCAL git op — no network."""
+    argv = ["git"] + (["-C", cwd] if cwd else []) + [
+        "config", "--get-regexp", r"remote\..*\.gh-resolved"]
+    rc, out, _err = _run(argv, cwd, 6, None, runner)
+    if rc != 0:
+        return None
+    for line in (out or "").splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1] == "base":
+            m = re.match(r"remote\.(.+)\.gh-resolved$", parts[0])
+            if m:
+                return m.group(1)
+    return None
+
+
+def canonical_slug(cwd, runner=None):
+    """The `owner/name` of the CANONICAL repo for the checkout at `cwd`, resolved
+    the way `gh` does but with LOCAL git ONLY (never an API call, so it survives a
+    GraphQL/REST quota exhaustion — #1070/#1094):
+
+      (1) the remote `gh repo set-default` marked `gh-resolved = base` wins;
+      (2) else an `upstream` remote (a fork clone points `upstream` at the base);
+      (3) else `origin`.
+
+    None when no remote resolves. The SINGLE slug resolver shared by the open-
+    issue snapshot (`cli_quals._union_open_issues`), the watchdog cross-stream
+    backstops and `cli_release_state`, so every reader agrees on one repo: a fork
+    clone (david1-4 — origin = the fork, issues disabled) resolves to the
+    canonical repo exactly as `gh` does, instead of the fork whose empty issues
+    listing would silently zero the footer (#1094)."""
+    name = _gh_default_remote(cwd, runner)
+    if name:
+        slug = _remote_slug(name, cwd, runner)
+        if slug:
+            return slug
+    slug = _remote_slug("upstream", cwd, runner)
+    if slug:
+        return slug
+    return _remote_slug("origin", cwd, runner)
+
+
+def resolve_slug(cwd, runner=None):
+    """Back-compat alias for :func:`canonical_slug` (#1094 renamed the origin-only
+    resolver to the shared fork-aware one; the name is kept for the
+    `gates.designdispatch` / `gates.commitdesign` gates that import it, which now
+    also read the canonical repo on a fork clone)."""
+    return canonical_slug(cwd, runner=runner)
 
 
 def read_comment_bodies(number, slug, cwd=None, runner=None, timeout=8, env=None):
@@ -379,6 +438,52 @@ def _normalize_issue(it):
     }
 
 
+def _authoritative_issue_slug(slug, cwd=None, runner=None, timeout=8, env=None,
+                              now=None, max_age=0):
+    """(auth_slug, err): the slug whose OPEN-issue listing is AUTHORITATIVE, using
+    GitHub's own repo metadata (`fork` / `has_issues` / `parent`) read through the
+    ETag cache (one cached call per repo — a 304 is free).
+
+      * (slug, None)   -- a canonical repo that hosts issues (the common path).
+      * (parent, None) -- a FORK (or an issues-disabled repo): GitHub's own
+        `parent.full_name` hosts the issues, so the listing is redone there.
+      * (None, "gate-unavailable: issues disabled on <slug>") -- issues are
+        disabled and no issue-hosting parent exists, so an empty listing would be
+        a LIE; the caller falls back to its GraphQL path (which `gh` resolves to
+        the parent) rather than trust a silent 0 (#1094, the david1-4 incident).
+      * (slug, None) FAIL-OPEN -- the metadata read failed or was not the expected
+        shape: a meta hiccup must never degrade a working listing; the page reads
+        then succeed or fall back exactly as before."""
+    meta, err = rest_get_cached("repos/%s" % slug, cwd=cwd, runner=runner,
+                                timeout=timeout, env=env, now=now, max_age=max_age)
+    if err or not isinstance(meta, dict):
+        return slug, None                    # unknown authority -> fail-open
+    has_issues = meta.get("has_issues")
+    is_fork = bool(meta.get("fork"))
+    if not is_fork and has_issues is not False:
+        return slug, None                    # canonical repo that hosts issues
+    # a fork, or an issues-disabled repo: use GitHub's own canonical answer.
+    parent = meta.get("parent")
+    parent_slug = (parent.get("full_name")
+                   if isinstance(parent, dict) else None)
+    if parent_slug and parent_slug != slug:
+        pmeta, perr = rest_get_cached("repos/%s" % parent_slug, cwd=cwd,
+                                      runner=runner, timeout=timeout, env=env,
+                                      now=now, max_age=max_age)
+        if (not perr and isinstance(pmeta, dict)
+                and pmeta.get("has_issues") is not False):
+            return parent_slug, None         # the parent hosts issues
+        # the parent is unreadable or ALSO issues-disabled -> not authoritative.
+        return None, ("%s issues disabled on %s (fork of %s)"
+                      % (GATE_UNAVAILABLE_PREFIX, slug, parent_slug))
+    # no parent to redirect to.
+    if has_issues is False:
+        return None, ("%s issues disabled on %s"
+                      % (GATE_UNAVAILABLE_PREFIX, slug))
+    # a fork with issues enabled but no resolvable parent -> proceed (fail-open).
+    return slug, None
+
+
 def list_open_issues_cached(slug, cwd=None, runner=None, timeout=8, env=None,
                             per_page=100, max_pages=20, now=None, max_age=0):
     """(rows, err): every OPEN ISSUE of `slug` as normalized rows (PRs dropped
@@ -386,7 +491,17 @@ def list_open_issues_cached(slug, cwd=None, runner=None, timeout=8, env=None,
     set re-reads for free. Returns (None, err) if ANY page read fails -- a
     PARTIAL listing read as complete would silently reclassify rows (#1021), so
     the caller falls back to its GraphQL path on None rather than trust a
-    truncated set."""
+    truncated set.
+
+    #1094: resolves the AUTHORITATIVE slug first (`_authoritative_issue_slug`) so
+    a fork clone / issues-disabled repo can never produce an authoritative empty
+    snapshot -- the listing is redone against `parent.full_name`, or (None,
+    gate-unavailable) when issues are genuinely disabled with no parent."""
+    slug, auth_err = _authoritative_issue_slug(
+        slug, cwd=cwd, runner=runner, timeout=timeout, env=env, now=now,
+        max_age=max_age)
+    if auth_err:
+        return None, auth_err
     rows = []
     complete = False
     for page in range(1, max_pages + 1):
