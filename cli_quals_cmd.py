@@ -862,24 +862,27 @@ def cmd_slice_quals(args):
         workable_rows, ops_wait, _merged_rows = airuleset._split_merged_unreleased(
             workable_rows, ops_wait, _merged_unreleased(root))
     unhandled = {n: v for n, v in workable_rows.items() if not handed.get(n)}
-    # #1045 CORRECTION of #1025: role-filter the workable `I` slice AND the
-    # third-party `W` (ops_wait) — NEVER the owner-court `U` (waiting). #1008
-    # filtered all three; #1025 correctly exempted U (an owner question on an
-    # infra ticket must stay visible in the review (FLOW) window's U — the owner
-    # saw `U 0` with a live `❓ ASKED`, odoo-erp#6883) but ALSO removed the W
-    # filter, so `--role review --ops-wait` == `--role infra --ops-wait` (the
-    # FLOW window's W showed infra members — owner 2026-09-16: "chcem vidieť
-    # čísla týkajúce sa gk flow, nie mix kadečoho", airuleset#1045). W IS
-    # review-vs-infra work-window scope, so it narrows by role exactly like I;
-    # only U is a parked owner-court state global to the box ("čo sa ťa Claude
-    # pýta / čo máš schváliť"). ONE derivation: the filtered `ops_wait` feeds the
-    # `--ops-wait` rows AND the `# W-summary: total=` line below (#367). `slug`
-    # already resolved above, reused. role None = no-op (byte-identical, no slug
-    # touch); an empty slug fail-CLOSES on the first call (#993 r2b).
-    role = getattr(args, "role", None)  # #993 r2b / #1025 / #1045
+    # #1065 REVERSES #1025: role-filter the workable `I` slice, the third-party
+    # `W` (ops_wait) AND the owner-court `U` (waiting) — a question shows in the
+    # ONE window whose role owns the ticket (`infra` → INFRA), never both. #1008
+    # filtered all three; #1025 exempted U (an owner question on an infra ticket
+    # stayed in the review (FLOW) window's U too, odoo-erp#6883), #1045 restored
+    # only the W filter — so on the gk box the SAME owner question was counted
+    # and re-presented in BOTH windows and the owner risked answering it twice
+    # (odoo-erp#7421 17.9., live on #7720; owner 20.9.2026: "U 1 v gk nie je gk
+    # ale gk infra"). U now narrows by role exactly like I/W; the exactly-one-
+    # window invariant (U(FLOW)+U(INFRA)==U(unfiltered)) keeps "never lose a
+    # question". The `_qmap_extra` supplement merged into the `--waiting` listing
+    # below is stream-only (session ❓ pings, no ticket ref) and stays per-cwd —
+    # NOT filtered here (design: session pings stay per-session). ONE derivation:
+    # the filtered `ops_wait` feeds the `--ops-wait` rows AND the `# W-summary:
+    # total=` line below (#367). `slug` already resolved above, reused. role None
+    # = no-op (byte-identical, no slug touch); an empty slug fail-CLOSES (#993 r2b).
+    role = getattr(args, "role", None)  # #993 r2b / #1025 / #1045 / #1065
     if role in ("review", "infra"):
         unhandled = _apply_role_filter(unhandled, root, role, slug=slug)
         ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)  # #1045
+        waiting = _apply_role_filter(waiting, root, role, slug=slug)  # #1065
     if want_ops_wait:
         # #526: tag each W member `acceptance` (client thread sent) vs `ops-wait`
         # (external event/evidence) so they are distinguishable in the listing.
@@ -1367,23 +1370,31 @@ def cmd_core_quals(args):
         # approval, never dispatchable-now I). Pure label partition; the question
         # map is read only on the on-demand `--waiting` display path (#370).
         workable, waiting, ops_wait = airuleset._partition_workable(seen)
-    # #1045 CORRECTION of #1025: role-filter the workable `I` slice AND
-    # `--ops-wait` (W) — NEVER `--waiting` (U). #1008 filtered all three; #1025
-    # correctly exempted U (an infra ticket's needs-answer must stay in the
-    # review (FLOW) window's U, else `U 0` with a live `❓ ASKED`, odoo-erp#6883)
-    # but ALSO removed the W filter, so `core-quals --role review --ops-wait` ==
-    # `--role infra --ops-wait` — the FLOW window's W showed infra members
-    # (owner 2026-09-16: "chcem vidieť čísla týkajúce sa gk flow, nie mix
-    # kadečoho", airuleset#1045). W is review-vs-infra work-window scope → it
-    # narrows by role like I; only U is the parked owner-court state global to
-    # the box. ONE derivation: the filtered `ops_wait` feeds the `--ops-wait`
-    # rows AND the `# W-summary: total=` line below (#367). role None = no-op
-    # (byte-identical, no slug touch); an empty slug fail-CLOSES (#993 r2b).
-    role = getattr(args, "role", None)  # #993 r2b / #1025 / #1045
+    # #1065 REVERSES #1025: role-filter the workable `I` slice, `--ops-wait` (W)
+    # AND `--waiting` (U) — a question shows in the ONE window whose role owns
+    # the ticket (`infra` → INFRA window), never both. #1008 filtered all three;
+    # #1025 exempted U (an infra ticket's needs-answer stayed in the review
+    # (FLOW) window's U too, odoo-erp#6883), #1045 restored only the W filter —
+    # so on the gk box the SAME owner question was counted and re-presented in
+    # BOTH windows: the owner asked "U 1?" in the INFRA window and the FLOW
+    # session re-presented the infra question, risking a double answer and two
+    # sessions acting on it (odoo-erp#7421 17.9., live on #7720; owner
+    # 20.9.2026: "U 1 v gk nie je gk ale gk infra stale ma to pletie"). U now
+    # narrows by role exactly like I/W; the exactly-one-window invariant
+    # (U(FLOW)+U(INFRA)==U(unfiltered)) keeps "never lose a question" — a ticket
+    # is either infra (→ INFRA) or not (→ FLOW), a total binary partition, so
+    # every question lands in exactly one window. This is the gk full-auth path
+    # with no `_qmap_extra` supplement, so filtering
+    # `waiting` here directly partitions the gk box's U (the #7720 path). ONE
+    # derivation: the filtered `ops_wait` feeds the `--ops-wait` rows AND the
+    # `# W-summary: total=` line below (#367). role None = no-op (byte-identical,
+    # no slug touch); an empty slug fail-CLOSES (#993 r2b).
+    role = getattr(args, "role", None)  # #993 r2b / #1025 / #1045 / #1065
     if role in ("review", "infra"):
         slug = airuleset._repo_slug(cwd=root)
         workable = _apply_role_filter(workable, root, role, slug=slug)
         ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)  # #1045
+        waiting = _apply_role_filter(waiting, root, role, slug=slug)  # #1065
     # #1083: split merged-to-develop-not-main tickets OUT of I/W into M, AFTER the
     # role filter (M role-scoped by construction). DEFAULT path only (a bounce-
     # seed --extra query keeps its full set). ONE derivation (#367): the same

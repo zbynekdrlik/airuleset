@@ -2,13 +2,14 @@
 
 `airuleset._role_filter_footer` slices the workable (`I`) partition by the
 pane's resolved role so the two gk windows show DIFFERENT `I` (review = core
-minus infra/architecture-rework, infra = only those). #1045 CORRECTION of #1025:
-it filters `I` AND the third-party `W` (ops_wait) — only the owner-court `U`
-(waiting) is a parked state global to the box and NEVER role-filtered (an infra
-ticket's needs-answer must stay in the review window's U — airuleset #1025).
-#1025 also stopped filtering W, so the FLOW window's footer `W` showed infra
-members (airuleset #1045). Fail-safe: role None = unchanged; an unresolvable
-slug degrades to unfiltered, never a crash.
+minus infra/architecture-rework, infra = only those). #1065 REVERSES #1025: it
+filters `I`, the third-party `W` (ops_wait) AND the owner-court `U` (waiting) —
+an owner question shows in the ONE window whose role owns the ticket (`infra` →
+INFRA), never both. #1025 exempted U (an infra needs-answer stayed in the review
+window's U too, airuleset#6883), but on the gk box that duplicated every owner
+question across both windows (owner 20.9.2026, odoo-erp#7720 — airuleset#1065).
+Fail-safe: role None = unchanged; an unresolvable slug degrades to unfiltered,
+never a crash.
 """
 import sys
 import unittest.mock as m
@@ -52,7 +53,7 @@ class TestRoleFilterFooter(TestCase):
             w, wa, o = airuleset._role_filter_footer(
                 self.workable, self.waiting, self.ops, "/root", "/cwd")
         self.assertEqual(set(w), {"a"})               # I filtered
-        self.assertEqual(set(wa), {"d", "e"})         # #1025: U unfiltered
+        self.assertEqual(set(wa), {"e"})              # #1065: U filtered — infra "d" dropped
         self.assertEqual(set(o), {"g"})               # #1045: W filtered — infra "f" dropped
 
     def test_infra_role_keeps_only_infra_class_in_I(self):
@@ -61,7 +62,7 @@ class TestRoleFilterFooter(TestCase):
             w, wa, o = airuleset._role_filter_footer(
                 self.workable, self.waiting, self.ops, "/root", "/cwd")
         self.assertEqual(set(w), {"b", "c"})          # I filtered
-        self.assertEqual(set(wa), {"d", "e"})         # #1025: U unfiltered (same as review)
+        self.assertEqual(set(wa), {"d"})              # #1065: U filtered — only infra "d" kept
         self.assertEqual(set(o), {"f"})               # #1045: W filtered — only infra "f" kept
 
     def test_unresolvable_slug_degrades_to_unfiltered(self):
