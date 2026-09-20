@@ -1170,7 +1170,7 @@ def _await_typed_landed(pane_id, text, run, sleep_fn, want=True):
 
 def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
                   out=None, user_authored=False, nudge=None, state=None,
-                  skip_confirm=False):
+                  skip_confirm=False, now=None):
     """Type `text` + Enter into a BARE input box and VERIFY the submit landed
     via the TRANSCRIPT (the #486 delivery bullet's structured proof), not the
     pane render: after the send, the session jsonl at `tpath` must gain a new
@@ -1271,7 +1271,14 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     # the strip-Escape (the first keystroke). The goal RE-ARM family's own pane
     # budget is enforced in `deliver_goal` (it delivers via `_send_goal_verified`,
     # not this primitive) -- #1092 item (e).
-    _pane_now = time.time()
+    # #1092 F1 fix — use the CALLER's sweep `now` when threaded, so the pane-budget
+    # stamp shares ONE clock with the end-of-sweep prune (`_prune_pane_attempts`,
+    # run at the sweep `now`) and with the re-arm path (`deliver_goal`, which stamps
+    # at `now`). A `time.time()` stamp (later than the sweep `now`) used to be
+    # reaped by that same-sweep prune as "future", so the budget never accumulated
+    # (Review 2 F1). Callers that thread no `now` (card/bounce) fall back to
+    # `time.time()`, and the prune's future-keep direction covers that skew.
+    _pane_now = now if now is not None else time.time()
     _gated_nudge = (state is not None and nudge is not None
                     and nudge not in RECOVERY_NUDGE_KINDS and not user_authored)
     if _gated_nudge:

@@ -10804,12 +10804,19 @@ def _print_nudges_status(home=None):
         os.path.join(home or os.path.expanduser("~"), ".claude",
                      "watchdog-disable-goal"))
     if _flag:
-        print("  goal re-arms (goal-arm etc.): SUPPRESSED — this box carries "
-              "~/.claude/watchdog-disable-goal (present; owner kill switch, "
-              "re-arms included)")
+        print("  goal re-arms: SUPPRESSED — this box carries "
+              "~/.claude/watchdog-disable-goal (present; the owner kill switch "
+              "that silences ALL goal jobs, re-arms included)")
     else:
-        print("  goal re-arms (goal-arm etc.): active — types via the per-pane "
-              "budget + human-active guard, NOT covered by 'nudges OFF' "
+        # #1092 F2 — be honest per WINDOW CLASS: a DECLARED managed window's arm
+        # rides the always-on `goal-arm` recovery kind (NOT covered by 'nudges
+        # OFF'); a non-declared box's re-arm rides `goal-sweep`, a machine nudge
+        # that DOES follow the OFF switch. Both, when they type, go through the
+        # per-pane budget + human-active guard + empty-box precondition.
+        print("  goal re-arms: a DECLARED window's arm (goal-arm) is always-on "
+              "recovery, NOT covered by 'nudges OFF'; a non-declared box's re-arm "
+              "rides goal-sweep and DOES follow the switch. Both type via the "
+              "per-pane budget + human-active guard "
               "(~/.claude/watchdog-disable-goal: absent)")
 
 

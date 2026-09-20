@@ -190,20 +190,26 @@ NUDGE_CADENCE_ORPHAN_TTL_S = 24 * 3600
 # #1092 (owner incident 2026-09-20) — the PER-PANE typing-attempt BUDGET. A brake
 # INDEPENDENT of the per-kind floor + cross-kind total cap, keyed on the PANE
 # (pid) not the session (sid): at most PANE_ATTEMPT_BUDGET machine typing attempts
-# per pane per rolling PANE_ATTEMPT_WINDOW_S, across ALL kinds. It is the belt on
-# top of the per-kind/total-cap gates: even if a future delivery outcome ESCAPES
+# per pane per rolling PANE_ATTEMPT_WINDOW_S, across all GATED kinds. It is the
+# belt on top of the per-kind/total-cap gates: even if a delivery outcome ESCAPES
 # the per-kind floor stamp (the #1092 swallowed-batch storm — 10 typing attempts
-# in 12 min because a swallowed batch stamped nothing), the pane can never receive
-# more than two typing attempts an hour, so any escape is harmless by construction.
-# Consulted BEFORE a keystroke + stamped AFTER any typing attempt (delivered,
-# delivered-unconfirmed, OR swallowed) by every delivery path that types INTO AN
-# ACTIVE PANE: the #923 batch, the single-nudge riders (both via `send_verified`),
-# and the goal RE-ARM family (`deliver_goal`, #1092 item e). A REVIVAL into a DEAD
-# session (resume/compact/wake-parked via send_verified) is NOT gated — "the
-# owner's problem is typing INTO an active/human pane, not recovery itself" (#1092
+# in 12 min because a swallowed batch stamped nothing), a GATED-nudge pane cannot
+# receive more than two GATED typing attempts an hour, so any such escape is
+# harmless by construction. Consulted BEFORE a keystroke + stamped AFTER any
+# typing attempt (delivered, delivered-unconfirmed, OR swallowed) by every
+# delivery path that TYPES INTO AN ACTIVE PANE and threads `state`: the #923
+# batch, the single-nudge riders (both via `send_verified`), and the goal RE-ARM
+# family (`deliver_goal`, #1092 item e). A REVIVAL into a DEAD session
+# (resume/compact/wake-parked via send_verified) is NOT gated — "the owner's
+# problem is typing INTO an active/human pane, not recovery itself" (#1092
 # addendum, Approach-2 rejection); gating a revival would strand a limit/401-dead
-# session for up to an hour (#520). Kept a LEAF helper over ONE state namespace,
-# no new I/O, no new job (mirrors the #797 cadence gate):
+# session for up to an hour (#520). SCOPE NOTE (Review 2 F4): the gate binds a
+# caller that threads `state` + a non-recovery `nudge`; the rare `task-hygiene`
+# delivery (Job 49, threads no `state`) is out of scope here and stays bounded by
+# its own ~2 h job cadence, so this is not a fleet-absolute "no pane ever gets a
+# 3rd keystroke", it is the storm-shape brake for the gated footer/re-arm paths.
+# Kept a LEAF helper over ONE state namespace, no new I/O, no new job (mirrors the
+# #797 cadence gate):
 #
 #   state["nudge_pane_attempts"] = {pid: [ts, ts, ...]}   # windowed on write
 PANE_ATTEMPT_BUDGET = 2
@@ -382,12 +388,17 @@ def floor_hold_reason(state, sid, category, now):
 
 def mark_sent(state, sid, category, now):
     """Record a DELIVERED nudge of `category` to `sid` at `now` — a keystroke
-    that reached the pane. Called on a confirmed OR a delivered-unconfirmed send
-    (a genuine swallow, text backed out, must not advance the clock — each
-    rider's own MAX_SEND_FAILS bound stays the storm limiter). The recorded per-kind timestamps are what BOTH the per-kind floor
-    and the cross-kind total cap (`_total_cap_block`) read. Never raises on a
-    pre-existing malformed namespace — it is replaced with a fresh dict for this
-    sid rather than crashing the sweep."""
+    that reached the pane. Called on a confirmed send, a delivered-unconfirmed
+    send, AND (since #1092 (a)) a GENUINE SWALLOW: a swallowed attempt IS a
+    delivery attempt (the text reached the pane before it was backed out), so it
+    stamps the per-kind floor too — the SAME kind then cannot re-fire on the next
+    ~70s sweep (the #1092 storm shape). (Pre-#1092 a swallow deliberately did NOT
+    advance the clock and relied on each rider's MAX_SEND_FAILS bound; #1092
+    tightened that to one attempt per kind per hour.) The recorded per-kind
+    timestamps are what BOTH the per-kind floor and the cross-kind total cap
+    (`_total_cap_block`) read. Never raises on a pre-existing malformed namespace
+    — it is replaced with a fresh dict for this sid rather than crashing the
+    sweep."""
     if not isinstance(state, dict):
         return
     cad = state.get("nudge_cadence")
@@ -563,27 +574,54 @@ def mark_pane_attempt(state, pid, now):
         pa = {}
         state["nudge_pane_attempts"] = pa
     prior = pa.get(pid)
+    # keep in-window AND future-skewed (the #1092 F1 direction): a prior attempt
+    # another delivery path stamped at a slightly-later clock (`time.time()` vs
+    # this sweep's `now`) must NOT be dropped here either, or a same-sweep re-arm
+    # mark would wipe the nudge's just-stamped attempt.
     kept = ([t for t in prior
              if isinstance(t, (int, float)) and not isinstance(t, bool)
-             and 0 <= now - t < PANE_ATTEMPT_WINDOW_S]
+             and (t > now or now - t < PANE_ATTEMPT_WINDOW_S)]
             if isinstance(prior, list) else [])
     kept.append(now)
     pa[pid] = kept
 
 
+def _pane_attempt_recent(lst, now):
+    """#1092 blocker fix — True iff `lst` holds a ts the PRUNE must treat as still
+    live: in the rolling window OR FUTURE-skewed. This mirrors `_stale_entry`'s
+    #519 "a future ts counts as FRESH" direction — the OPPOSITE of the gate READ
+    (`_pane_attempts`/`_gate_ts`, which DROPS a future ts so a corrupt entry can
+    never BLOCK a send). The two directions are each the SAFE one for their job:
+    the read errs toward ALLOW, the prune errs toward KEEP. Without this the
+    end-of-sweep prune (run at the sweep `now`) reaped the attempt `send_verified`
+    had just stamped a few seconds LATER (`time.time()` > `now`), so the budget
+    never accumulated across sweeps and the belt was inert against the batch
+    storm (Review 2 F1). Type-checked like `_gate_ts`."""
+    if not isinstance(lst, list):
+        return False
+    for t in lst:
+        if isinstance(t, (int, float)) and not isinstance(t, bool):
+            if t > now or now - t < PANE_ATTEMPT_WINDOW_S:
+                return True
+    return False
+
+
 def _prune_pane_attempts(state, now):
-    """#1092 — reap `nudge_pane_attempts` entries for panes with NO in-window
-    attempt left (a gone/idle pane). Keyed on pid (not sid), so it cannot use the
-    `visited_sids` gate the cadence prune uses; the window itself is the bound —
-    an entry the mark-on-write already trimmed to <= 1 h simply has no live ts
-    once the pane stops receiving attempts, so `_pane_attempts` reads []. Never
-    raises."""
+    """#1092 — reap `nudge_pane_attempts` entries for panes with NO recent attempt
+    left (a gone/idle pane). Keyed on pid (not sid), so it cannot use the
+    `visited_sids` gate the cadence prune uses; the window is the bound. Reaps a
+    pid ONLY when it has no ts in the window AND none future-skewed
+    (`_pane_attempt_recent`) — so a just-stamped attempt whose clock ran slightly
+    ahead of this sweep's `now` (a `time.time()`-stamping caller) is KEPT, not
+    wiped (the Review 2 F1 blocker: the belt must survive to the NEXT sweep).
+    Never raises."""
     if not isinstance(state, dict):
         return
     pa = state.get("nudge_pane_attempts")
     if not isinstance(pa, dict):
         return
-    for pid in [p for p in list(pa.keys()) if not _pane_attempts(state, p, now)]:
+    for pid in [p for p in list(pa.keys())
+                if not _pane_attempt_recent(pa.get(p), now)]:
         pa.pop(pid, None)
 
 

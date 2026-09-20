@@ -688,27 +688,29 @@ class TestOrchestrator(_OrchBase):
         self.assertNotIn(self.sid, handled)
 
     def test_persistent_swallow_backs_off_after_max_fails(self):
-        # #749 — a pane whose submit is persistently swallowed (verify fails
-        # every sweep) MUST back off after a bounded number of consecutive failed
-        # sends instead of re-typing every ~60s sweep forever (the user-visible
-        # "dokolecka promptuje"). Mirrors ops_wait_recheck's #714 bound.
+        # #749 — a pane whose submit is persistently swallowed MUST back off, not
+        # re-type every ~60s sweep forever ("dokolecka promptuje").
+        # #1092 (a) makes this even TIGHTER: a SWALLOWED attempt now stamps the
+        # per-kind FLOOR (the text reached the pane), so the SAME kind defers a
+        # FULL HOUR after ONE swallow — bounded to 1/kind/hour by construction,
+        # well inside the old MAX_SEND_FAILS window. (The rider's send_fails
+        # backoff stays as a secondary bound; the floor now fires first.)
         rrecs = {self.sid: {"first_seen": NOW - 5 * DAY, "last_nudge": None}}
 
         def fetch(cwd):
             return {"ahead": 5, "in_flight": False}
         state = {}
-        max_fails = getattr(rg, "MAX_SEND_FAILS", 3)
-        for _ in range(max_fails):
-            logs = self._run(rrecs, fetch, self._tmux(enters_swallowed=5),
-                             handled=set(), state=state)
-            self.assertTrue(any("submit-unverified" in ln for ln in logs))
-        # After MAX_SEND_FAILS consecutive failures the anchor is advanced one
-        # full cadence (back off), so the NEXT sweep produces a WAIT verdict with
-        # NO keystroke — the storm is bounded, not per-sweep-forever.
-        self.assertEqual(rrecs[self.sid]["last_nudge"], NOW)
+        # sweep 1: a genuine swallow -> booked AND the per-kind floor stamped
+        logs = self._run(rrecs, fetch, self._tmux(enters_swallowed=5),
+                         handled=set(), state=state)
+        self.assertTrue(any("submit-unverified" in ln for ln in logs))
+        self.assertIn("release-gap",
+                      state.get("nudge_cadence", {}).get(self.sid, {}))
+        # sweep 2 (same hour): the floor HOLDS it before any keystroke — bounded,
+        # never per-sweep-forever.
         tmux = self._tmux(enters_swallowed=5)
         logs = self._run(rrecs, fetch, tmux, handled=set(), state=state)
-        self.assertTrue(any("-> wait" in ln for ln in logs))
+        self.assertTrue(any("hold:floor" in ln for ln in logs))
         self.assertEqual(tmux.typed_texts(), [])
 
     def test_corrupt_send_fails_counter_tolerated(self):

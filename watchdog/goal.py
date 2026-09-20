@@ -1815,11 +1815,16 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         # #1092 (e) -- a watchdog RE-ARM types ONLY into an EMPTY box at the idle
         # prompt, NEVER stash-around a FOREIGN draft (the owner's own text): the
         # incident's second writer was the re-arm typing its whole /goal payload
-        # into an active pane. So for a watchdog re-arm origin, once the box holds
-        # a foreign draft (our own stranded /goal was already handled above), DEFER
-        # -- a zero-keystroke, non-terminal defer, retried on the next idle sweep.
-        # The user's OWN self-callback / declared-virgin arm keeps the stash-around
-        # (it protects the owner's just-typed draft, #35) below.
+        # into an active pane. So for a watchdog re-arm origin (dark/stale/auth/
+        # fulfilled/answer-rearm AND declared-virgin, all in _GOAL_WATCHDOG_REARM_
+        # ORIGINS), once the box holds a foreign draft (our own stranded /goal was
+        # already submitted above), DEFER -- a zero-keystroke, non-terminal defer,
+        # retried on the next idle sweep (a fresh-after-reboot declared-virgin
+        # window is normally EMPTY, so it rarely reaches here; when it does hold a
+        # human draft, deferring is the SAFE choice, never type over it). ONLY the
+        # user's OWN `self-callback` arm (the owner having just typed /autopilot)
+        # keeps the stash-around below (it protects the owner's just-typed draft,
+        # #35) -- it is NOT a watchdog re-arm origin.
         if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
             watchdog._janitor_clear_watch(state, pid)   # nothing typed -> release
             _log_goal_sync("SKIP pane-busy-draft(%s) sid=%s cwd=%s"
@@ -3927,6 +3932,17 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
 
     if not dry_run:   # #519 -- prune goal_mark for gone+aged sessions (dry-run: no state mutation)
         _prune_goal_mark_orphans(off_state, visited_sids, now)
+        # #1092 (e) -- reap the stale-rearm TEMPLATE-VERSION latch for GONE
+        # sessions (a sid with no live transcript this sweep), the PRIMARY
+        # live-gate the sibling per-sid dedup dicts use (#486-G5 leak lesson): the
+        # value is a bare template hash with no ts, so it cannot age-reap; a live
+        # session is always in `visited_sids` (added at transcript resolution
+        # above) so its latch is never dropped while the loop lives. A returning
+        # session simply re-classifies (current -> no re-arm; still stale ->
+        # ONE fresh re-arm, not a storm).
+        for _gsid in [k for k in list(stale_tmpl_state.keys())
+                      if k not in visited_sids]:
+            stale_tmpl_state.pop(_gsid, None)
     return logs
 
 
@@ -5917,7 +5933,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     pid, _bt, run, tpath, sleep_fn=sleep_fn,
                     logs=logs, out=send_out,
                     nudge=(_incl[0] if _incl else None),
-                    state=state, skip_confirm=_b_skip_confirm)  # #1022 wedge / #1023 budget
+                    state=state, skip_confirm=_b_skip_confirm,
+                    now=now)  # #1022 wedge / #1023 budget / #1092 one-clock pane budget
                 _bdeliv = _bok or bool(send_out.get("delivered_unconfirmed"))
                 if _bdeliv:
                     _incl_set = set(_incl)

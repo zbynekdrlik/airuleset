@@ -756,7 +756,8 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
         _skip_confirm = True
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
                                 logs=logs, out=send_out, nudge="queue-arrival",
-                                state=state, skip_confirm=_skip_confirm)  # #1022 wedge / #1023 budget
+                                state=state, skip_confirm=_skip_confirm,
+                                now=now)  # #1022 wedge / #1023 budget / #1092 pane budget
     if not ok:
         if send_out.get("delivered_unconfirmed"):
             # NON-terminal for the baseline — leave base untouched + janitor
@@ -768,6 +769,12 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                         "nudge turn; baseline unchanged, floor stamped, undo via "
                         "janitor, re-check after floor, %d new)"
                         % (loc, len(arrivals)))
+            return logs
+        # #1092 (c) F6 — a per-pane budget REFUSAL typed nothing: not a swallow,
+        # never book a give-up; retry once the budget frees.
+        if send_out.get("pane_budget_held"):
+            logs.append("queue-arrival %s -> held (pane-budget, not typed; retry "
+                        "next sweep, %d new)" % (loc, len(arrivals)))
             return logs
         # A genuine swallow leaves base unadvanced -> retries next sweep; bounded
         # so a persistently-swallowing NON-busy pane backs off after

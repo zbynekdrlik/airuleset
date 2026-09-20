@@ -87,6 +87,29 @@ class TestPaneBudgetPrimitives(unittest.TestCase):
         self.assertNotIn("%gone", state["nudge_pane_attempts"])
         self.assertIn("%live", state["nudge_pane_attempts"])
 
+    def test_prune_keeps_a_future_skewed_attempt_the_F1_blocker(self):
+        # #1092 F1 (Review 2 blocker): a stamp written a few seconds AFTER this
+        # sweep's `now` (a `time.time()`-stamping caller vs the sweep `now` the
+        # prune runs at) must SURVIVE the end-of-sweep prune, else the belt never
+        # accumulates across sweeps. `_gate_ts` drops future ts on the gate READ
+        # (allow direction), but the PRUNE keeps them (fresh direction).
+        state = {"nudge_pane_attempts": {"%p": [NOW + 8]}}
+        ng.prune(state, visited_sids=set(), now=NOW)
+        self.assertIn("%p", state["nudge_pane_attempts"],
+                      "a just-stamped (future-skewed) attempt must not be reaped")
+
+    def test_belt_trips_across_sweeps_when_stamped_ahead_of_the_prune_now(self):
+        # end-to-end of the F1 fix: two attempts stamped slightly AHEAD of each
+        # sweep's `now` (as send_verified's time.time() would), each followed by
+        # the end-of-sweep prune at that sweep's `now`; the 3rd sweep must REFUSE.
+        state = {}
+        ng.mark_pane_attempt(state, "%p", NOW + 8)          # sweep 1 send
+        ng.prune(state, visited_sids=set(), now=NOW)        # sweep 1 end
+        ng.mark_pane_attempt(state, "%p", NOW + 70 + 8)     # sweep 2 send
+        ng.prune(state, visited_sids=set(), now=NOW + 70)   # sweep 2 end
+        # sweep 3: both prior attempts are now in the past -> budget exhausted
+        self.assertFalse(ng.pane_budget_ok(state, "%p", NOW + 140))
+
 
 class TestSendVerifiedPaneBudget(unittest.TestCase):
     """#1092 (a)+(c) — the single path (`send_verified`) consults the pane budget

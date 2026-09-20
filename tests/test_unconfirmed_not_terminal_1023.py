@@ -49,7 +49,7 @@ class _SV:
 
     def __call__(self, pid, text, run=None, tpath=None, sleep_fn=None, logs=None,
                  out=None, user_authored=False, nudge=None, state=None,
-                 skip_confirm=False):
+                 skip_confirm=False, now=None):
         self.n += 1
         if self.unconfirmed and isinstance(out, dict):
             out["delivered_unconfirmed"] = True
