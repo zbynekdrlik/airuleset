@@ -52,7 +52,7 @@ class OneFetchPerCall(unittest.TestCase):
             calls["n"] += 1
             return snapshot, None
 
-        with m.patch.object(ghread, "resolve_slug", return_value="o/r"), \
+        with m.patch.object(ghread, "canonical_slug", return_value="o/r"), \
              m.patch.object(ghread, "list_open_issues_cached",
                             side_effect=fake_list):
             got = wd._fetch_gkreq_tickets("/tmp/x")
@@ -93,7 +93,11 @@ class SharedEtagCacheAcrossFetches(unittest.TestCase):
         self.assertIsNone(e2)
         self.assertEqual([x["number"] for x in r1], [1])
         self.assertEqual([x["number"] for x in r2], [1])   # cached body via 304
-        self.assertEqual(paid["n"], 1)                     # only ONE paid fetch
+        # #1094: the first call pays TWO 200s — the repo-metadata authority read
+        # (`repos/o/r`, here a list body -> unknown authority -> fail-open) plus
+        # the issues listing; the SECOND call is fully 304-free, so the
+        # "second read is budget-free" invariant this test guards still holds.
+        self.assertEqual(paid["n"], 2)                     # meta + listing, once
 
 
 class ClientSideGuardFailSafe(unittest.TestCase):

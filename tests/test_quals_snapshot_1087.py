@@ -3,7 +3,7 @@ snapshot + client-side qual filter, spending one GraphQL search per qual only
 for a qual the client-side matcher can't represent (or when the snapshot can't
 be read). The counts must be byte-identical to the old per-qual GraphQL union.
 
-Hermetic: patch `gates.ghread.list_open_issues_cached` / `resolve_slug` and
+Hermetic: patch `gates.ghread.list_open_issues_cached` / `canonical_slug` and
 `airuleset._gh_out` / `airuleset._gh_login`; no network, no gh.
 """
 import json
@@ -59,7 +59,7 @@ class UnionUsesSnapshot(_SnapshotEnabled):
         quals = ["-label:stream:montalu1", "label:needs-gatekeeper",
                  "label:ready-for-review"]
 
-        with mock.patch.object(ghread, "resolve_slug", return_value="o/r"), \
+        with mock.patch.object(ghread, "canonical_slug", return_value="o/r"), \
              mock.patch.object(ghread, "list_open_issues_cached",
                                return_value=(snapshot, None)) as m_snap, \
              mock.patch.object(airuleset, "_gh_out") as m_gh:
@@ -82,7 +82,7 @@ class UnionUsesSnapshot(_SnapshotEnabled):
                                 "createdAt": "2026-09-01T00:00:00Z",
                                 "labels": []}])
 
-        with mock.patch.object(ghread, "resolve_slug", return_value="o/r"), \
+        with mock.patch.object(ghread, "canonical_slug", return_value="o/r"), \
              mock.patch.object(ghread, "list_open_issues_cached",
                                return_value=(snapshot, None)), \
              mock.patch.object(airuleset, "_gh_out", side_effect=fake_gh) as m_gh:
@@ -104,7 +104,7 @@ class UnionUsesSnapshot(_SnapshotEnabled):
                                 "createdAt": "2026-09-01T00:00:00Z",
                                 "labels": []}])
 
-        with mock.patch.object(ghread, "resolve_slug", return_value="o/r"), \
+        with mock.patch.object(ghread, "canonical_slug", return_value="o/r"), \
              mock.patch.object(ghread, "list_open_issues_cached",
                                return_value=(None, "gate-unavailable: quota")), \
              mock.patch.object(airuleset, "_gh_out", side_effect=fake_gh) as m_gh:
@@ -124,7 +124,7 @@ class UnionUsesSnapshot(_SnapshotEnabled):
         base = "-label:autopilot-skip"
         quals = ["assignee:@me", "author:@me", "label:stream:david1"]
 
-        with mock.patch.object(ghread, "resolve_slug", return_value="o/r"), \
+        with mock.patch.object(ghread, "canonical_slug", return_value="o/r"), \
              mock.patch.object(ghread, "list_open_issues_cached",
                                return_value=(snapshot, None)), \
              mock.patch.object(airuleset, "_gh_login",
@@ -139,7 +139,7 @@ class UnionUsesSnapshot(_SnapshotEnabled):
 
     def test_returned_rows_have_the_expected_shape(self):
         snapshot = [_snap(7, labels=["needs-gatekeeper"], title="hello")]
-        with mock.patch.object(ghread, "resolve_slug", return_value="o/r"), \
+        with mock.patch.object(ghread, "canonical_slug", return_value="o/r"), \
              mock.patch.object(ghread, "list_open_issues_cached",
                                return_value=(snapshot, None)), \
              mock.patch.object(airuleset, "_gh_out"):

@@ -2472,7 +2472,7 @@ def _union_open_issues(quals, base, cwd=None, repo=None):
     if os.environ.get("AIRULESET_QUALS_NO_SNAPSHOT") != "1":
         try:
             from gates import ghread
-            slug = repo or ghread.resolve_slug(cwd)
+            slug = repo or ghread.canonical_slug(cwd)
             if slug:
                 snapshot, snap_err = ghread.list_open_issues_cached(
                     slug, cwd=cwd, timeout=20)

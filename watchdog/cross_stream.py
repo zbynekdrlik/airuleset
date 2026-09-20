@@ -253,7 +253,7 @@ def _open_issue_snapshot(root, home=None):
     resolution is unchanged."""
     try:
         from gates import ghread
-        slug = ghread.resolve_slug(cwd=root)
+        slug = ghread.canonical_slug(cwd=root)
         if not slug:
             return None
         # #1087 review 🔵: max_age lets the SECOND fetch of a sweep (gkreq after
