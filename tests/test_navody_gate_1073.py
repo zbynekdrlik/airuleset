@@ -320,6 +320,50 @@ class TestHookEndToEnd(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 4b. airuleset handoff composer preflight integration (injected diff)
+# --------------------------------------------------------------------------- #
+class TestHandoffPreflightIntegration(unittest.TestCase):
+    def setUp(self):
+        import airuleset
+        self.air = airuleset
+
+    def test_surface_change_without_guide_blocks(self):
+        blk = self.air._handoff_guide_preflight(
+            "READY-FOR-REVIEW: done.",
+            changed_paths=["addons/montalu/views/x.xml"],
+            stream="montalu1")
+        self.assertIsNotNone(blk)
+        self.assertIn("handoff BLOCK", blk)
+
+    def test_surface_change_with_guide_passes(self):
+        blk = self.air._handoff_guide_preflight(
+            "READY-FOR-REVIEW: done.",
+            changed_paths=["addons/montalu/views/x.xml",
+                           "docs/montalu1/navody-x.html"],
+            stream="montalu1")
+        self.assertIsNone(blk)
+
+    def test_surface_change_with_navody_na_passes(self):
+        blk = self.air._handoff_guide_preflight(
+            "READY-FOR-REVIEW: done.\nNavody: n/a — backend-only",
+            changed_paths=["addons/montalu/kiosk/k.xml"],
+            stream="montalu1")
+        self.assertIsNone(blk)
+
+    def test_non_surface_change_passes(self):
+        blk = self.air._handoff_guide_preflight(
+            "RFR", changed_paths=["addons/montalu/models/x.py"],
+            stream="montalu1")
+        self.assertIsNone(blk)
+
+    def test_undeterminable_diff_fails_open(self):
+        # _handoff_changed_paths returns None -> pre-flight must not block.
+        blk = self.air._handoff_guide_preflight(
+            "RFR", changed_paths=None, cwd="/nonexistent-xyz", stream="montalu1")
+        self.assertIsNone(blk)
+
+
+# --------------------------------------------------------------------------- #
 # 5. SKILL text lock
 # --------------------------------------------------------------------------- #
 class TestSkillText(unittest.TestCase):

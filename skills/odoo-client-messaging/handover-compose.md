@@ -302,22 +302,23 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   Hotovo authority per `client-board-tasks.md`; lag=violation. Discuss is NEVER
   the source of truth; the task is.
 
-- **Štartovací Introduction v produkte — každá odovzdávka funkčnej oblasti
-  klientovi má štartovaciu stránku V PRODUKTE, nie školiace vlákno (airuleset
-  #1042, owner 15.9.2026).** Odovzdávka NIE JE krok-za-krokom školenie v Discuss
-  vlákne (to zlyhalo, odoo-erp 4650/7307). Dodaj JEDEN štartovací „Introduction /
-  Začíname" PRIAMO v produkte (sekcia Návody; ref. odoo-erp 7169/7307/7170), z
-  ktorého vie NOVÁ osoba bez kontextu rovno začať — nikdy externý dokument, nikdy
-  školiace vlákno. Povinné: screenshoty reálnych obrazoviek (bez klientskych dát),
-  overené deep-linky, odkazy na návody + FAQ, sekcia per zariadenie/cestu (kiosk
-  tablet + Fully Kiosk; vlastný PC/telefón cez OTP), „čo skontrolovať" pre AI,
-  kontakt na AI pomocníka + IT. Findability proof (step 2) beží NAD Introduction.
-  Akceptačné vlákno klientovi ODKAZUJE na Introduction (deep-link), nikdy
-  neopisuje kroky. **`needs-acceptance` hand-off BEZ `https://` odkazu na
-  Introduction = nekompletná odovzdávka** — HOOK-ENFORCED
-  (`hooks/stop-check-prose-violations.sh`, #1042): `❓` akceptačný blok /
-  `needs-acceptance` labelling turn bez odkazu na Návody/Introduction/Začíname je
-  BLOKOVANÝ; bypass (API-only): `# airuleset:intro-link-ok <dôvod>`.
+- **Štartovací Introduction v produkte — udržiavaný per-tenant návod (airuleset
+  #1042/#1073, owner 18.9.2026: „návody buduj a udržiavaj").** Dodaj JEDEN
+  štartovací „Introduction / Začíname" v produkte (Návody), z ktorého vie NOVÁ
+  osoba bez kontextu rovno začať — nikdy externý dokument, nikdy školiace vlákno.
+  FORMA: statické self-contained HTML v repo
+  `docs/<tenant>/navody-<oblasť>.html` (screenshoty z PROD kópie tenanta), pod
+  token cestou; Odoo `ir.attachment` NIE JE OK — CSP láme obrázky. Sekcia per
+  zariadenie (kiosk + Fully Kiosk; vlastný PC/telefón cez OTP), kontakt AI
+  pomocníka + IT. Findability proof nad Introduction. Akceptačné vlákno klientovi
+  ODKAZUJE na Introduction (sekcia, deep-link), neopisuje kroky. Per-tenant fakt
+  `navody_url:` v `.claude/streams/<stream>.md` (`<https://…>` / `NONE — #<ticket>`);
+  kým návod nie je → v hand-offe `Návody: pripravujeme, #<ticket>`, NIKDY
+  fabrikovaný odkaz (zmenu obrazovky sprevádza úprava návodu v tom istom PR, gate
+  #1073). **`needs-acceptance` hand-off musí niesť ŽIVÝ deep-link na návod — inak
+  nekompletná odovzdávka** — HOOK-ENFORCED (`stop-check-prose-violations.sh` →
+  `gates/navody.py`, #1073: `curl -sI` 200); bypass (API-only):
+  `# airuleset:intro-link-ok <dôvod>`.
 
 Every thread this file governs follows the project's own channel placement
 rule — for odoo-erp see `.claude/rules/odoo-task-sync.md` (task chatter for

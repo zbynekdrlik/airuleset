@@ -200,8 +200,19 @@ class GateBlocksAcceptanceWithoutIntroLink(TestCase):
 
 
 class GateAllowsWhenLinkedOrBypassedOrIrrelevant(TestCase):
-    def test_accept_block_with_intro_link_is_allowed(self):
-        self.assertFalse(_blocked(_run(ACCEPT_BLOCK_WITH_LINK)))
+    def test_accept_block_with_intro_link_but_unknown_fact_is_blocked(self):
+        # SUPERSEDED by #1073 (owner ruling 18.9.2026: „návody buduj a udržiavaj
+        # a nech to je airuleset pravidlo"). The round-1 (#1042) contract this
+        # method used to assert — "any https:// link + the word Návody satisfies
+        # the gate" — is EXACTLY the word-pattern check that could not tell a
+        # live guide from a fabricated URL and so forced a dead `/odoo/knowledge`
+        # link into a client message (#1072). Under #1073 the gate reads the
+        # per-tenant `navody_url` fact from `.claude/streams/<stream>.md` and
+        # fails CLOSED on an UNKNOWN fact — so a Návody link with NO known guide
+        # fact (this fixture runs with no stream file) now BLOCKS. The
+        # live-200-link ALLOW path is covered in
+        # tests/test_navody_gate_1073.py::TestStopEvaluate (fact + fake curl).
+        self.assertTrue(_blocked(_run(ACCEPT_BLOCK_WITH_LINK)))
 
     def test_accept_block_with_bypass_is_allowed(self):
         self.assertFalse(_blocked(_run(ACCEPT_BLOCK_WITH_BYPASS)))

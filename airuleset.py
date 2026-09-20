@@ -4620,6 +4620,71 @@ def _pf_journal(repo, issue, gl, decision, journal=None):
         return
 
 
+def _handoff_changed_paths(cwd=None, run=None):
+    """#1073 — the RFR diff as a name-only path list: HEAD vs the repo's
+    integration base (`origin/HEAD` default, else `origin/develop`/`main`/
+    `master`, first that resolves). None when undeterminable (no base, git
+    error) so the caller FAILS OPEN. `run(argv)->CompletedProcess` injected in
+    tests; production shells `git` in `cwd`."""
+    import subprocess as _sp
+    if run is None:
+        def run(argv):
+            try:
+                return _sp.run(argv, capture_output=True, text=True,
+                               timeout=15, cwd=cwd or None)
+            except Exception as e:
+                return _sp.CompletedProcess(argv, 1, "", str(e))
+    bases = []
+    hr = run(["git", "symbolic-ref", "--quiet", "--short",
+              "refs/remotes/origin/HEAD"])
+    if getattr(hr, "returncode", 1) == 0 and (hr.stdout or "").strip():
+        bases.append((hr.stdout or "").strip())
+    bases += ["origin/develop", "origin/main", "origin/master"]
+    seen = set()
+    for base in bases:
+        if not base or base in seen:
+            continue
+        seen.add(base)
+        dr = run(["git", "diff", "--name-only", "%s...HEAD" % base])
+        if getattr(dr, "returncode", 1) == 0:
+            return [ln.strip() for ln in (dr.stdout or "").splitlines()
+                    if ln.strip()]
+    return None
+
+
+def _handoff_guide_preflight(body, *, cwd=None, changed_paths=None,
+                             stream=None):
+    """#1073 same-PR guide-maintenance gate for the composer pre-flight (owner
+    ruling 18.9.2026: „návody buduj a udržiavaj").
+
+    Returns a `handoff BLOCK: …` reason string, or None when the RFR may post.
+    When the RFR diff touches a client-visible surface (`gates.navody`'s
+    allowlist, or the stream's `navody_surfaces:` override) it must ALSO touch a
+    `docs/<tenant>/navody-*.html` guide file OR the body must carry a
+    `Navody: n/a — <why>` line. FAIL-OPEN when the diff cannot be computed (a git
+    error must never fabricate a block — the never-false-accuse direction the gk
+    pre-flight uses)."""
+    import gates.navody as _nav
+    paths = changed_paths
+    if paths is None:
+        paths = _handoff_changed_paths(cwd)
+    if paths is None:
+        sys.stderr.write("handoff: guide-maintenance pre-flight skipped "
+                         "(diff undeterminable) — fail-open (#1073)\n")
+        return None
+    if stream is None:
+        try:
+            stream = _current_user()
+        except Exception:
+            stream = None
+    try:
+        surfaces = _nav.tenant_surfaces(cwd or os.getcwd(), stream)
+    except Exception:
+        surfaces = None
+    ok, reason = _nav.guide_maintenance(paths, body, surfaces=surfaces)
+    return None if ok else reason
+
+
 def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
                           watch_result=None, commits_since=None, journal=None):
     """The composer hand-off gk-watch pre-flight (#1056 L2 (f)).
@@ -4814,6 +4879,13 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
                                  watch_result=_gk_state)
     if _blk:
         print(_blk)
+        return 1
+
+    # #1073: same-PR guide-maintenance gate (pass-through path — same shape as
+    # the compose path). Fail-open when the diff is undeterminable.
+    _gblk = _handoff_guide_preflight(body, cwd=_repo_root())
+    if _gblk:
+        print(_gblk)
         return 1
     _undis = (_gk_state or {}).get("undispositioned_ids") or [] \
         if isinstance(_gk_state, dict) else []
@@ -5180,6 +5252,14 @@ def cmd_handoff(args):
                                  watch_result=_gk_state)
     if _blk:
         print(_blk)
+        return 1
+
+    # #1073: same-PR guide-maintenance gate — a client-visible surface change in
+    # the RFR diff must also touch docs/<tenant>/navody-*.html or carry a
+    # `Navody: n/a — <why>` line (fail-open when the diff is undeterminable).
+    _gblk = _handoff_guide_preflight(body, cwd=target_root)
+    if _gblk:
+        print(_gblk)
         return 1
 
     # Write receipt BEFORE posting (the hook checks the receipt).
