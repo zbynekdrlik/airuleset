@@ -103,7 +103,13 @@ can drift). Lessons for anyone touching this partition:
   then confirms `not_in_u` (the label genuinely did not land; `in_u` catches the
   just-added-label-cache-lag case → allow; `unmeasurable`/gh-error → allow). The U==0
   precondition is what makes it safe: a context `#N` reference only ever matters when
-  the owner's court is otherwise empty. The gh fallback searches the FULL
+  the owner's court is otherwise empty. #1065 NOTE: `obligation_partition(cwd)[1]` is
+  now PER-WINDOW role-filtered (the U bullet above), so on a two-window gk box the FLOW
+  and INFRA windows have DIFFERENT U counts — a FLOW `❓` naming a bare `infra` `#N`
+  while FLOW's U==0 now reaches `question_ticket_in_u` → `"infra"` → the #1026 infra-lane
+  routing, which is the INTENDED #1065 outcome (a FLOW question about an infra ticket
+  belongs in the infra window), not a false block; locked by
+  `test_u_role_filter_1065.py::TestQuestionScopePerWindowU`. The gh fallback searches the FULL
   `USER_WAITING_LABELS` (all 4, needs-acceptance incl.) so it agrees with the cache's
   `user_waiting_numbers` set — else a just-added needs-acceptance ticket on a stale
   U==0 cache gh-misses → false block (#1025 review 🟡2). Label search over-approximates

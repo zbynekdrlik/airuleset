@@ -260,5 +260,67 @@ class TestVocabularyLock(TestCase):
         self.assertNotIn("never role-dropped (#1025/#1045)", self.text)
 
 
+# --------------------------------------------------------------------------- #
+# #1065 × #1025/#1026 cross-gate — the questionscope stop-gate reads the
+# PER-WINDOW role-filtered U count (`obligation_partition`), so the SAME infra
+# owner-question is ROUTED to the infra lane when asked from the FLOW window
+# (where #1065 drops it → U 0) and ALLOWED from the INFRA window (where it is
+# the clickable owner question). Locks the composition review-2 🟡 flagged as
+# untested: the #1065 per-window cache filter feeding the #1026 infra routing.
+# --------------------------------------------------------------------------- #
+class TestQuestionScopePerWindowU(TestCase):
+    _ASK = (
+        "**Otázka — projekt odoo-erp (Odoo ERP):** V infra tickete #7720 je "
+        "otvorená otázka na teba.\n\n• A (odporúčam) — dôsledok\n• B — dôsledok"
+        "\n\n❓ ASKED: rozhodni A alebo B pre #7720?"
+    )
+
+    def _payload(self, cwd):
+        return json.dumps({"last_assistant_message": self._ASK,
+                           "session_id": "qs1065-" + str(time.time()),
+                           "cwd": cwd})
+
+    def _write_cache(self, home, cwd, u, nums):
+        d = statusbar.cache_dir(home)
+        d.mkdir(parents=True, exist_ok=True)
+        (d / (statusbar.cwd_key(cwd) + ".json")).write_text(json.dumps(
+            {"ts": int(time.time()), "root": cwd,
+             "user_waiting": u, "user_waiting_numbers": nums}))
+
+    def test_flow_window_routes_infra_question_to_infra_lane(self):
+        # #1065: infra 7720 dropped from FLOW's U → FLOW cache U=0, so the gate
+        # consults the membership check, which returns "infra" → #1026 routing.
+        import tempfile
+        import gates.questionscope as qs
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self._write_cache(home, "/flow", 0, [])
+            uc = lambda c: statusbar.obligation_partition(c, home=home)[1]  # noqa: E731
+            block, reason = qs.decide(self._payload("/flow"), u_count_fn=uc,
+                                      question_fn=lambda refs, cwd: "infra")
+        self.assertTrue(block)                       # routed to infra lane, not asked
+        self.assertIn("GATEKEEPER-ACTION (INFRA)", reason)
+
+    def test_infra_window_allows_its_own_infra_question(self):
+        # #1065: the infra question IS in the INFRA window's U (cache U=1), so
+        # u_count != 0 → the gate allows and never even consults membership.
+        import tempfile
+        import gates.questionscope as qs
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self._write_cache(home, "/infra", 1, [7720])
+            uc = lambda c: statusbar.obligation_partition(c, home=home)[1]  # noqa: E731
+            calls = []
+
+            def qf(refs, cwd):
+                calls.append((tuple(refs), cwd))
+                return "infra"
+
+            block, reason = qs.decide(self._payload("/infra"), u_count_fn=uc,
+                                      question_fn=qf)
+        self.assertFalse(block)                      # U>0 → clickable owner question
+        self.assertEqual(calls, [])                  # membership fn not consulted
+
+
 if __name__ == "__main__":
     main()
