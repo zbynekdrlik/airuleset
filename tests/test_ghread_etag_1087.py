@@ -23,13 +23,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from gates import ghread
 
 
-def _include_response(status, etag=None, body="", reason="OK"):
+def _include_response(status, etag=None, body="", reason="OK", rate=None):
     """A `gh api --include` style raw stdout: status line + headers + blank +
-    body. gh returns rc0 for 200, rc1 for a 304 (an HTTP 'error')."""
+    body. gh returns rc0 for 200, rc1 for a 304 (an HTTP 'error'). `rate` adds
+    X-RateLimit-* headers (the #1087 L1b header-sourced budget)."""
     lines = ["HTTP/2.0 %d %s" % (status, reason),
              "Content-Type: application/json; charset=utf-8"]
     if etag is not None:
         lines.append("Etag: %s" % etag)
+    for k, v in (rate or {}).items():
+        lines.append("%s: %s" % (k, v))
     lines.append("Date: Sat, 19 Sep 2026 16:28:30 GMT")
     lines.append("")               # blank line separates headers from body
     lines.append(body)
@@ -138,6 +141,95 @@ class RestGetCached(_EtagTmp):
         self.assertIsNone(err)
         self.assertEqual(obj, [{"number": 3}])
         self.assertEqual(n["calls"], 1)               # no second gh call
+
+
+class RateHeaderCapture(_EtagTmp):
+    """#1087 L1b: rest_get_cached records the response's X-RateLimit-* headers
+    into the gh-rate status cache (the truthful budget signal for installation
+    tokens, where /rate_limit lies). The capture is best-effort + fail-open."""
+
+    def setUp(self):
+        super().setUp()
+        import cli_gh_rate
+        self._cg = cli_gh_rate
+        self._rate = tempfile.mkdtemp(prefix="ghrate-1087-")
+        self._orig_gd = cli_gh_rate.gh_rate_dir
+        self._orig_sp = cli_gh_rate.status_path
+        cli_gh_rate.gh_rate_dir = lambda: self._rate
+        cli_gh_rate.status_path = lambda: os.path.join(self._rate, "status.json")
+
+    def tearDown(self):
+        self._cg.gh_rate_dir = self._orig_gd
+        self._cg.status_path = self._orig_sp
+        super().tearDown()
+
+    def _core(self):
+        p = self._cg.status_path()
+        if not os.path.exists(p):
+            return None
+        return json.load(open(p)).get("resources", {}).get("core")
+
+    def test_200_records_rate_headers(self):
+        rate = {"X-RateLimit-Remaining": "3653", "X-RateLimit-Limit": "5000",
+                "X-RateLimit-Reset": "1800000000", "X-RateLimit-Resource": "core"}
+
+        def runner(argv):
+            return 0, _include_response(200, etag='W/"a"',
+                                        body=json.dumps([]), rate=rate), ""
+
+        ghread.rest_get_cached("repos/o/r/issues", {"state": "open"},
+                               runner=runner)
+        blk = self._core()
+        self.assertIsNotNone(blk, "a 200 with rate headers must record a reading")
+        self.assertEqual(blk["remaining"], 3653)
+        self.assertEqual(blk["limit"], 5000)
+        self.assertEqual(blk["reset"], 1800000000)
+        self.assertEqual(blk["source"], "headers")
+
+    def test_304_also_records_rate_headers(self):
+        rate = {"X-RateLimit-Remaining": "10", "X-RateLimit-Limit": "5000",
+                "X-RateLimit-Reset": "1800000000", "X-RateLimit-Resource": "core"}
+        # prime the cache with a 200, then a 304 carrying fresher rate headers.
+        def r200(argv):
+            return 0, _include_response(200, etag='W/"a"',
+                                        body=json.dumps([])), ""
+
+        ghread.rest_get_cached("repos/o/r/issues", {"state": "open"},
+                               runner=r200)
+
+        def r304(argv):
+            return 1, _include_response(304, etag='W/"a"', body="", rate=rate), ""
+
+        ghread.rest_get_cached("repos/o/r/issues", {"state": "open"},
+                               runner=r304)
+        blk = self._core()
+        self.assertEqual(blk["remaining"], 10)     # 304 still carries budget
+        self.assertEqual(blk["source"], "headers")
+
+    def test_403_records_zero_remaining(self):
+        # the exhausted installation bucket returns 403 WITH rate headers
+        # (remaining 0) — the ghread capture records the exhaustion.
+        rate = {"X-RateLimit-Remaining": "0", "X-RateLimit-Limit": "5000",
+                "X-RateLimit-Reset": "1800000000", "X-RateLimit-Resource": "core"}
+
+        def runner(argv):
+            if "--include" in argv:
+                return 1, _include_response(403, body="", reason="Forbidden",
+                                            rate=rate), "rate limit"
+            return 1, "", "rate limit"        # the plain-GET fallback also fails
+
+        ghread.rest_get_cached("repos/o/r/issues", runner=runner)
+        blk = self._core()
+        self.assertIsNotNone(blk, "a 403 with rate headers must record remaining=0")
+        self.assertEqual(blk["remaining"], 0)
+
+    def test_no_rate_headers_records_nothing(self):
+        def runner(argv):
+            return 0, _include_response(200, etag='W/"a"',
+                                        body=json.dumps([])), ""
+
+        ghread.rest_get_cached("repos/o/r/issues", runner=runner)
+        self.assertIsNone(self._core(), "no X-RateLimit headers -> no reading")
 
 
 class ListOpenIssuesCached(_EtagTmp):
