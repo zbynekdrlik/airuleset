@@ -770,7 +770,7 @@
     ".claude/rules/airuleset-internals.md": 8192,
     ".claude/rules/internals-burn.md": 51200,
     ".claude/rules/internals-ci.md": 51200,
-    ".claude/rules/internals-cli.md": 51587,
+    ".claude/rules/internals-cli.md": 51200,
     ".claude/rules/internals-filedrop.md": 51200,
     ".claude/rules/internals-hooks.md": 51200,
     ".claude/rules/internals-notify.md": 51200,
