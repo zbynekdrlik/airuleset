@@ -150,6 +150,12 @@ MACHINE_NUDGE_KINDS = frozenset({
 # As a recovery kind it is now exempt from the kill switch, the per-kind floor
 # and the total cap; its OWN bounds stay (a proven 5-streak, the recent-human
 # veto, and the 24h/2 attempt cap in `goal_question_repoke_watch`).
+# #1084 (2026-09-19): machine-triggered `/compact` is REMOVED — its producer
+# (`compact.deliver_compact` / `_compact_submit_verified`) is deleted. `compact`
+# STAYS a reserved recovery identity here (a compaction nudge, if one ever
+# returns, is a session revival, never a prompt) and keeps `MACHINE|RECOVERY`
+# disjoint/union invariants + the drift-lock with nudge_gate stable; nothing
+# emits `nudge="compact"` today.
 RECOVERY_NUDGE_KINDS = frozenset(
     {"resume", "compact", "goal-arm", "wake-parked", "goal-disarm"})
 
@@ -875,11 +881,12 @@ def send_continue(pane_id, text=NUDGE_TEXT, run=None, logs=None, nudge=None,
     #994 suppression contract: when a GATED nudge kind is OFF the chokepoint types
     NOTHING, journals one line, and returns False (the caller reads the return so
     the request stays pending, never booked delivered). Returns True on an
-    attempted send (this helper never post-verifies). NOTE (#1023 addendum): the
-    SOLE production caller is `compact._compact_submit_verified` with
-    `nudge="compact"`, a RECOVERY kind that is ALWAYS-ON — so the False/suppressed
-    path is unexercised in production today and only reachable for a hypothetical
-    future GATED caller; the logic stays general and correct for that case.
+    attempted send (this helper never post-verifies). NOTE (#1023 addendum;
+    updated #1084): its former sole production caller was the callback-compact
+    submit path (`nudge="compact"`, a RECOVERY kind, ALWAYS-ON) — deleted with the
+    #1084 machine-compact removal — so the False/suppressed path is unexercised in
+    production today and only reachable for a hypothetical future GATED caller; the
+    logic stays general and correct for that case.
 
     Captures the pane FIRST (issue #36): if the agent-strip selector holds
     focus (`_strip_selected`), send ONE Escape before typing — otherwise the
@@ -899,8 +906,8 @@ def send_continue(pane_id, text=NUDGE_TEXT, run=None, logs=None, nudge=None,
     # False, and this helper bails -- exactly one journal line, no type, no
     # Enter. `_type_literal` carries the `--` end-of-options `-` safety
     # (#322/#372) and the same kind, so at OFF it types NOTHING and returns False
-    # -- the caller (`compact._compact_submit_verified`) then leaves its /compact
-    # request PENDING (`nudges-off`), never booked delivered.
+    # -- a GATED caller then leaves its request PENDING (`nudges-off`), never
+    # booked delivered (the former callback-compact caller was deleted in #1084).
     if _strip_selected(captured):
         if not watchdog.keys(pane_id, "Escape", kind="continue", nudge=nudge,
                              run=run, logs=logs):
@@ -1154,9 +1161,8 @@ def _await_typed_landed(pane_id, text, run, sleep_fn, want=True):
     """Poll (bounded) until the input box shows evidence of `text`
     (`want=True`) or has stopped showing it (`want=False`) — the pre-Enter
     TYPE verify. Mirrors `goal._await_typed`, reproduced here to keep tmux_io's
-    `import watchdog`-only module boundary (#433, the same idiom
-    `compact._compact_still_in_box` repeats). Returns the final verdict; a type
-    that never renders is refused (`not want`)."""
+    `import watchdog`-only module boundary (#433). Returns the final verdict; a
+    type that never renders is refused (`not want`)."""
     sleep_fn = sleep_fn or time.sleep
     for i in range(SEND_TYPE_SETTLE_POLLS):
         landed = watchdog._typed_landed(text, watchdog._input_line_text(

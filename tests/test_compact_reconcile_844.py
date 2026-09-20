@@ -58,14 +58,9 @@ class ReconcileRider844(unittest.TestCase):
     SID = "sess-reconcile-844"
 
     def setUp(self):
-        # Isolate the compact-requests store the rider's #741 latch reads.
-        d = TemporaryDirectory()
-        self.addCleanup(d.cleanup)
-        self.creqp = Path(d.name) / "compact-requests.json"
-        p = m.patch.object(wd_compact, "compact_requests_path",
-                           return_value=self.creqp)
-        p.start()
-        self.addCleanup(p.stop)
+        # #1084 L2: machine compacts are removed, so the rider's compact-pending
+        # hold gate (`compact.pending_compact_hold`) is now unconditionally False
+        # — there is no request store to isolate any more.
         self.tdir = TemporaryDirectory()
         self.addCleanup(self.tdir.cleanup)
 
@@ -162,18 +157,20 @@ class ReconcileRider844(unittest.TestCase):
                          "a reduced-authority box never reconciles lanes: %r"
                          % logs)
 
-    def test_844_pending_compact_holds_the_nudge(self):
+    def test_844_pending_compact_never_holds_the_nudge(self):
+        # #1084 L2: machine compacts are removed, so no /compact is ever pending
+        # — the rider's `compact.pending_compact_hold` gate is always False and
+        # can never hold a reconcile nudge (it was the old #741 latch). A normal
+        # observed compaction + returned lane therefore delivers the one nudge.
         now = time.time()
         tpath = self._tpath(compaction_epoch=now - 60)
         def fetch(cwd):
             return [("worktree-agent-abc", 700, "x")]
-        # A NEW compact is pending for this sid -> the #741 latch HOLDS the nudge.
-        wd_compact.record_compact_request(self.SID, self.CWD, now=now,
-                                          path=self.creqp, origin="self-callback")
+        self.assertFalse(wd_compact.pending_compact_hold(self.SID, now=now))
         logs, tmux, state = self._run(now, tpath, fetch)
-        self.assertEqual(tmux.typed(), [],
-                         "a pending /compact must hold the reconcile nudge: %r"
-                         % logs)
+        self.assertEqual(len(tmux.typed()), 1,
+                         "the reconcile nudge must deliver (no compact can hold "
+                         "it any more, #1084): %r" % logs)
 
     def test_844_dry_run_types_nothing(self):
         now = time.time()

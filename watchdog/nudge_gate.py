@@ -178,6 +178,9 @@ NUDGE_TOTAL_GAP_MIN_S = 3 * 3600
 # in lockstep with tmux_io (the drift-lock test asserts identity). Its OWN bounds
 # (a proven 5-streak, the recent-human veto, the 24h/2 attempt cap in
 # `goal_question_repoke_watch`) keep it storm-safe — exactly like the others.
+# #1084: machine `/compact` is removed (producer deleted); `compact` stays a
+# reserved recovery identity here in lockstep with tmux_io (the drift-lock test
+# asserts identity) — nothing emits `nudge="compact"` today.
 RECOVERY_NUDGE_KINDS = frozenset(
     {"resume", "compact", "goal-arm", "wake-parked", "goal-disarm"})
 
