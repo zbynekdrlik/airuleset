@@ -189,5 +189,78 @@ class TestSendVerifiedPaneBudget(unittest.TestCase):
         self.assertTrue(ok)
 
 
+class TestBatchSwallowedFloorAndUndo(unittest.TestCase):
+    """#1092 (a)+(b) — the #923 batch delivery block (an inline block in
+    `goal.goal_lane_sweep`, so a source-lock, mutation-verified) must, on a
+    SWALLOWED-with-attempt outcome, stamp the per-kind floor for ALL included
+    kinds + write-through persist + run the janitor UNDO — and must NOT mis-stamp
+    a pane-budget refusal (no keystroke) as a swallow."""
+
+    def _src(self):
+        import inspect
+        from watchdog import goal
+        return " ".join(inspect.getsource(goal.goal_lane_sweep).split())
+
+    def test_swallowed_attempt_stamps_floor_for_all_included(self):
+        src = self._src()
+        # the swallow (attempted) branch stamps ALL included kinds + persists
+        self.assertIn('send_out.get("attempted")', src)
+        self.assertIn("_nudge_gate.mark_batch_sent(state, sid, _incl, now)", src)
+
+    def test_pane_budget_refusal_is_not_treated_as_a_swallow(self):
+        src = self._src()
+        self.assertIn('send_out.get("pane_budget_held")', src)
+
+    def test_janitor_undo_is_run_on_swallow_and_unconfirmed(self):
+        src = self._src()
+        self.assertIn("_janitor_undo_if_own_stranded", src)
+
+
+class TestJanitorUndoHelper(unittest.TestCase):
+    """#1092 (b) — `_janitor_undo_if_own_stranded` clears OUR OWN stranded
+    nudge/goal text and leaves a foreign / clean box untouched."""
+
+    PID = "%9"
+
+    def _fake(self, box_text):
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from _goal_arm_helpers import DeliverGoalFakeTmux, GOAL_IDLE_CAP
+        # a fake whose box holds `box_text` on the input line.
+        tmux = DeliverGoalFakeTmux([(self.PID, "claude", "/x", "111")],
+                                   GOAL_IDLE_CAP, model_type=True)
+        tmux.box = box_text
+        return tmux
+
+    def test_clears_our_own_nudge_prefix_text(self):
+        from watchdog import goal
+        tmux = self._fake("nudge: [queue-arrival] 3 new tickets to triage")
+        logs = []
+        cleared = goal._janitor_undo_if_own_stranded(
+            self.PID, tmux, "nudge: [queue-arrival] 3 new tickets to triage",
+            "sess:1", lambda s: None, logs)
+        self.assertTrue(cleared, logs)
+        self.assertTrue(any("janitor-undo" in ln and "cleared" in ln for ln in logs), logs)
+
+    def test_leaves_a_clean_box_untouched(self):
+        from watchdog import goal
+        tmux = self._fake("")   # bare box (submit accepted / already backed out)
+        logs = []
+        cleared = goal._janitor_undo_if_own_stranded(
+            self.PID, tmux, "nudge: [queue-arrival] x", "sess:1",
+            lambda s: None, logs)
+        self.assertFalse(cleared)
+        self.assertTrue(any("box clean" in ln for ln in logs), logs)
+
+    def test_leaves_a_foreign_draft_untouched(self):
+        from watchdog import goal
+        tmux = self._fake("toto je moja vlastná poznámka nič spoločné s nudge")
+        logs = []
+        cleared = goal._janitor_undo_if_own_stranded(
+            self.PID, tmux, "nudge: [queue-arrival] x", "sess:1",
+            lambda s: None, logs)
+        self.assertFalse(cleared)
+        self.assertNotIn("BSpace", [x for a in tmux.sent for x in a])
+
+
 if __name__ == "__main__":
     unittest.main()
