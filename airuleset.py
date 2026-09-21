@@ -10843,7 +10843,49 @@ def _remove_legacy_nudges_off_marker(home=None):
         return False
 
 
-def cmd_nudges(args):
+def _nudges_keystroke_pane_warnings(run=None):
+    """#1104 -- classify this box's managed Claude panes (busy / draft / idle) so
+    `nudges on --kind <keystroke kind>` can WARN the owner BEFORE enabling a kind
+    that would type into a live pane. A BUSY pane (a turn mid-render, or waiting on
+    background agents) or a pane holding an at-rest DRAFT defers its first delivery
+    to a true idle tick (the classifier + the busy gate handle that at runtime);
+    this only SURFACES the state at enable time, since flipping a keystroke kind ON
+    while the session is visibly busy is itself the montalu1 incident's trigger.
+    Returns a list of one-line warnings (empty when every managed pane is idle or
+    unreadable). Never raises -- a read failure yields no warning, never a crash of
+    the enable."""
+    import watchdog as _wd
+    try:
+        from watchdog import ops_wait_recheck as _owr
+    except Exception:  # noqa: BLE001
+        _owr = None
+    run = run or _wd._default_run
+    out = []
+    try:
+        panes = _wd._reconcile_candidate_panes(run)
+    except Exception:  # noqa: BLE001
+        return out
+    for pid, cwd, _cmd in panes:
+        try:
+            cap = _wd.capture_pane(pid, run) or ""
+        except Exception:  # noqa: BLE001
+            continue
+        kind, draft = _wd._classify_boundary(cap)
+        busy = kind == "busy" or (_owr is not None
+                                  and _owr._pane_busy_waiting(cap))
+        if busy:
+            out.append(
+                "warning: pane %s (%s) is BUSY (turn mid-render / waiting on "
+                "background agents) — the first delivery will wait for a TRUE "
+                "idle tick, not this sweep." % (pid, cwd))
+        elif kind == "input" and draft:
+            out.append(
+                "warning: pane %s (%s) holds an at-rest DRAFT — the first "
+                "delivery defers until the box is bare." % (pid, cwd))
+    return out
+
+
+def cmd_nudges(args, run=None):
     """#1023 owner nudge kill switch, per-KIND staging — `nudges on|off|status
     [--kind <k>[,<k>]] [--all] [--fleet]`. The owner enables machine-nudge kinds
     ONE AT A TIME: `nudges on --kind queue-arrival` enables just that kind; a bare
@@ -10896,6 +10938,13 @@ def cmd_nudges(args):
             return 2
         for k in kinds:
             _wd.set_nudge_kind(k, True, by=by)
+        # #1104 -- a keystroke kind was just enabled; WARN if any managed pane is
+        # busy/draft right now, so the owner knows the first delivery will wait
+        # for a true idle tick rather than typing into a swallowing pane (the
+        # montalu1 incident: goal-sweep enabled while the session waited on
+        # background agents). Best-effort: no pane read must fail the enable.
+        for _w in _nudges_keystroke_pane_warnings(run):
+            print(_w)
     elif action == "off":
         # a bare `nudges off` (or --all) turns EVERYTHING off — off is safe.
         for k in (kinds if kinds else all_kinds):
