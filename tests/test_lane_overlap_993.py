@@ -102,7 +102,11 @@ class TestCmdVerdictOutput(TestCase):
         args = argparse.Namespace(paths="watchdog/goal.py", topics="x",
                                   issue=["1078"])
         buf = io.StringIO()
-        with m.patch.object(lo, "gather_live_lanes", return_value=live_lanes), \
+        # #1103: the printer classifies ONCE (classify_lanes) and derives the
+        # live subset from it, so inject the classified list (each live lane
+        # carries state="live") rather than patching gather_live_lanes.
+        classified = [{**ln, "state": "live", "path": ""} for ln in live_lanes]
+        with m.patch.object(lo, "classify_lanes", return_value=classified), \
              m.patch.object(lo, "gather_open_prs", return_value=open_prs), \
              m.patch.object(lo, "gather_issue_deps", return_value="satisfied"), \
              m.patch.dict(os.environ, {"HOME": home}), \
