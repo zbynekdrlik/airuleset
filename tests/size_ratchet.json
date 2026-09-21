@@ -466,6 +466,7 @@
     "tests/test_question_footer_e2e.py": 199,
     "tests/test_question_footer_suppressed_716.py": 451,
     "tests/test_question_gate_approval_body_936.py": 398,
+    "tests/test_question_gate_attachments_1098.py": 607,
     "tests/test_question_gate_odoo_task_907.py": 220,
     "tests/test_question_gate_pipeline_race.py": 560,
     "tests/test_question_gate_posix_locale_735.py": 171,
