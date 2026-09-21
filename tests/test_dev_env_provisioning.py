@@ -2261,6 +2261,9 @@ class TestManagedWindowCreation998(TestCase):
         self.assertIn("devel/odoo/odoo-erp-infra", block)
         self.assertIn("airuleset-claude-launch.sh", block)
         self.assertRegex(block, r"airuleset-claude-launch\.sh[^ ]* default")
+        # #1037: the launcher runs inside a login shell that survives /exit.
+        self.assertIn("bash -lc", block)
+        self.assertIn("exec bash -l", block)
         # dedup by NAME and by pane CWD; inner formats escaped ##{...} so the
         # OUTER run-shell format-expansion leaves them literal for the inner
         # tmux (not the created session's own name)
@@ -2286,7 +2289,15 @@ class TestManagedWindowCreation998(TestCase):
             self._GK_WINDOWS)
         self.assertIn('-n gk-infra', body)
         self.assertIn('-c "$HOME/devel/odoo/odoo-erp-infra"', body)
-        self.assertIn('"$HOME/.claude/airuleset-claude-launch.sh" default', body)
+        # #1037: the launcher is now WRAPPED in a login shell that survives
+        # claude's /exit (bash -lc "<launcher> default; exec bash -l") — never
+        # the bare launcher as the pane's only process. Intent kept: the managed
+        # launcher + `default` still run.
+        self.assertIn(
+            'bash -lc "$HOME/.claude/airuleset-claude-launch.sh default; '
+            'exec bash -l"', body)
+        self.assertNotIn(
+            '"$HOME/.claude/airuleset-claude-launch.sh" default', body)
         self.assertIn('grep -Fxq gk-infra', body)
         self.assertIn('grep -Fxq "$HOME/devel/odoo/odoo-erp-infra"', body)
         # the reusable body carries the escaped inner formats (goes through a

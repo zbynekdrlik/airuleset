@@ -192,6 +192,20 @@ repo's own CLAUDE.md / playbook is what names the command.
      `airuleset.py handoff` composer already refuses to post the RFR without it); a real
      deviation with no owner decision + `airuleset.py spec-change` on the spec ticket is a
      FINDING — the spec stays the durable truth, never a silently-forked implementation.
+   - **Prod-transfer parity (#1105)** — erp-test parity is NOT prod parity: ask, at the
+     moment of supply, "ako sa toto dostane na prod?". When the diff/hand-off touched an
+     erp-test-only surface a developer supplied (a credential via `secret request`, an
+     `ir.config_parameter` / `res.config.settings` record, seed data, an `.env` value, a
+     webhook / `api_key`, a `REFRESH-DEV-BOX-FROM-PROD` seed) the ticket MUST carry a
+     `Prod-transfer:` manifest line per input (or `Prod-transfer: none — <why>`); a
+     missing manifest on such a hand-off is a FINDING (the `airuleset.py handoff` composer
+     already refuses to post the RFR without it, `_handoff_prod_transfer_preflight`). A
+     manifest line carrying a secret VALUE (not a name + vault path) is a FINDING —
+     secrets reach prod via `secret show` to the owner (#879), never in the ticket.
+     **Scope: the composer pre-flight scans the DIFF, so it catches config-in-code
+     surfaces; a credential supplied via `secret request`, a `REFRESH-DEV-BOX-FROM-PROD`
+     seed, or a config set through the Odoo UI leaves NO diff footprint — the REVIEWER
+     catches those, so check the lane's supply history, not only the diff.**
 3. **Only then** read the tickets + readiness comments and cross-check: does the diff
    actually solve each ticket? Any unbacked claim is a FINDING.
 
@@ -246,6 +260,18 @@ repo's own CLAUDE.md / playbook is what names the command.
      `odoo-client-messaging` skill's `handover-compose.md` companion (the single
      source of truth for handover-proposal completeness, deep-link URL, and
      owner membership).
+  5. **Prod-transfer check-off (#1105):** for EVERY `Prod-transfer:` manifest line on
+     a ticket in the released slice (the developer-supplied erp-test inputs the feature
+     depends on), verify the input actually reached prod and record a
+     `Prod-transfer-status: <what> — transferred | owner-action pending | developer step
+     pending | n/a` line on the ticket. A `pending` item is NOT done: label the ticket
+     `needs-owner-action` (an owner secret/`secret show` step → U, #601; secret show #879)
+     or `ops-wait` (a developer manual step → W) with the item named, and do NOT send the client
+     acceptance/handover message while any Prod-transfer item is `pending`
+     (`handover-compose.md`). (The gk deploy-report / release-notes RENDERING of this
+     check-off list is odoo-erp-side; this repo owns the `Prod-transfer-status:` shape +
+     the pending→label decision — `gates.prod_transfer.status_lines` / `pending_items` /
+     `label_for_pending`.)
      THEN post the review verdict + merge evidence, DROP whichever hand-off label was
      applied (`ready-for-review` and/or `needs-gatekeeper` — a carve-out stream's
      hand-off carries `needs-gatekeeper`, not `ready-for-review`) by SWAPPING it for

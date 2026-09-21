@@ -4878,6 +4878,40 @@ def _handoff_spec_preflight(body, *, issue=None, repo=None, cwd=None,
         return None
 
 
+def _handoff_prod_transfer_preflight(body, *, cwd=None, scan_text=None,
+                                     authority=None):
+    """#1105 — the Prod-transfer manifest gate for the composer/gk hand-off
+    pre-flight. Returns a `handoff BLOCK: …` reason string, or None when the RFR
+    may post.
+
+    When the lane's diff/commands (`scan_text`) touched an erp-test-only surface
+    (`ir.config_parameter` / `res.config.settings` / `secret request` / `.env` /
+    webhook / `api_key` / `set_param` / a `REFRESH-DEV-BOX-FROM-PROD` seed) the
+    RFR body MUST carry `Prod-transfer:` lines OR `Prod-transfer: none — <why>`;
+    a manifest line carrying a secret VALUE is refused too. This is the SUB-DEV
+    discipline (a developer-supplied erp-test input the gatekeeper must carry to
+    prod), so it runs only for a reduced-authority stream — a full-authority box
+    passes. FAIL-OPEN in every unprovable direction (undeterminable diff,
+    unresolvable authority, any exception) -> None, the sibling pre-flights'
+    never-false-accuse convention. `scan_text` / `authority` are injected in
+    tests; production derives `scan_text` from
+    `gates.prod_transfer.lane_scan_text(cwd)` and `authority` from
+    `cli_quals.resolve_authority(cwd)`."""
+    try:
+        import gates.prod_transfer as _pt
+        if authority is None:
+            import cli_quals
+            authority = cli_quals.resolve_authority(cwd)
+        if authority == "full":
+            return None
+        if scan_text is None:
+            scan_text = _pt.lane_scan_text(cwd)
+        ok, reason = _pt.manifest_preflight(body, scan_text)
+        return None if ok else reason
+    except Exception:
+        return None
+
+
 def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
                           watch_result=None, commits_since=None, journal=None):
     """The composer hand-off gk-watch pre-flight (#1056 L2 (f)).
@@ -5085,6 +5119,13 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
                                     cwd=_repo_root())
     if _sblk:
         print(_sblk)
+        return 1
+    # #1105: the Prod-transfer manifest gate (pass-through path) — an erp-test-
+    # only surface change with no manifest is refused (reduced-authority streams
+    # only; fail-open when the diff/authority is undeterminable).
+    _ptblk = _handoff_prod_transfer_preflight(body, cwd=_repo_root())
+    if _ptblk:
+        print(_ptblk)
         return 1
     _undis = (_gk_state or {}).get("undispositioned_ids") or [] \
         if isinstance(_gk_state, dict) else []
@@ -5467,6 +5508,14 @@ def cmd_handoff(args):
                                     cwd=target_root)
     if _sblk:
         print(_sblk)
+        return 1
+
+    # #1105: the Prod-transfer manifest gate (compose path) — an erp-test-only
+    # surface change with no manifest is refused (reduced-authority streams only;
+    # fail-open when the diff/authority is undeterminable).
+    _ptblk = _handoff_prod_transfer_preflight(body, cwd=target_root)
+    if _ptblk:
+        print(_ptblk)
         return 1
 
     # Write receipt BEFORE posting (the hook checks the receipt).
@@ -9605,6 +9654,10 @@ from cli_design_record import (  # noqa: E402, F401
 from cli_spec_change import (  # noqa: E402, F401
     cmd_spec_change as cmd_spec_change,
 )
+# --- #1105: Prod-transfer manifest poster (`prod-transfer add`) ---
+from cli_prod_transfer import (  # noqa: E402, F401
+    cmd_prod_transfer as cmd_prod_transfer,
+)
 from cli_mdreview_audit import (  # noqa: E402, F401
     cmd_mdreview_audit as cmd_mdreview_audit,
 )
@@ -10638,6 +10691,36 @@ def main():
     p_sc.add_argument("--repo", default=None,
                       help="owner/name (default: the cwd repo)")
 
+    # --- #1105: Prod-transfer manifest (developer-supplied erp-test input -> prod) ---
+    p_pt = sub.add_parser(
+        "prod-transfer",
+        help="Record a developer-supplied erp-test input on a ticket as a "
+             "`Prod-transfer:` manifest line (#1105) — WHAT/WHO/where on "
+             "erp-test/HOW it reaches prod/sensitivity — refusing a secret VALUE "
+             "(name + vault path only). The hand-off pre-flight requires this "
+             "line when the lane touched an erp-test-only surface.")
+    p_pt.add_argument("action", choices=["add"],
+                      help="add: post one manifest line")
+    p_pt.add_argument("--issue", type=int, required=True,
+                      help="Ticket number to append the manifest line to")
+    p_pt.add_argument("--what", required=True,
+                      help="What was supplied (a NAME, never a secret value)")
+    p_pt.add_argument("--who", required=True,
+                      help="Who supplied it (the developer)")
+    p_pt.add_argument("--path", required=True,
+                      help="How it reaches prod: 'vault→owner (secret show)' | "
+                           "'gk config step' | 'data migration <script>' | "
+                           "'developer manual step' | 'n/a test-only'")
+    p_pt.add_argument("--sensitivity", required=True,
+                      help="secret | data | config")
+    p_pt.add_argument("--location", default=None,
+                      help="Where it lives on erp-test (default: 'erp-test "
+                           "shadow box')")
+    p_pt.add_argument("--date", default=None,
+                      help="Supply date D.M.YYYY (default: today)")
+    p_pt.add_argument("--repo", default=None,
+                      help="owner/name (default: the cwd repo)")
+
     p_ab = sub.add_parser(
         "account-bootstrap",
         help="Render idempotent root bootstrap script for a service account")
@@ -11307,6 +11390,7 @@ SUBCOMMANDS = {
     "doctrine-audit": cmd_doctrine_audit,
     "design-record": cmd_design_record,
     "spec-change": cmd_spec_change,
+    "prod-transfer": cmd_prod_transfer,
     "account-bootstrap": cmd_account_bootstrap,
     "nudges": cmd_nudges,
     "model-gateway": cmd_model_gateway,

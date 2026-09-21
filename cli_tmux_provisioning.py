@@ -1086,6 +1086,43 @@ _SAFE_STREAM_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 _SHELL_TOKEN_SAFE_RE = re.compile(r"^[A-Za-z0-9._/-]+$")
 
 
+def _window_shell_command(launcher):
+    """#1037: wrap a declared-window ``launcher`` command in a LOGIN shell that
+    SURVIVES the claude ``/exit`` — the shared window-command renderer for BOTH
+    ``_managed_windows_create_body`` (gk-infra, gk-quality, …) and
+    ``_impl_window_create_snippet`` (the d3 impl window).
+
+    Returns ``bash -lc "<launcher>; exec bash -l"``. The launcher runs as a
+    CHILD of ``bash -lc`` (its own ``exec claude`` replaces only that child), so
+    when claude exits control returns to the parent shell, which ``exec``s an
+    interactive LOGIN bash in the window's cwd — the owner sees a prompt and
+    types ``claude`` (the bashrc ``claude()`` wrapper) to relaunch, exactly like
+    the primary window on every box. Before #1037 the launcher WAS the pane's
+    only process and tmux closed the whole window on ``/exit`` / a crash / a
+    401-kill (owner escalation 21.9.2026).
+
+    ``launcher`` MUST be a quote-FREE command (it is embedded inside this
+    wrapper's own double quotes — the fixed launcher name carries no space or
+    shell metachar, and ``$HOME`` expands at the outer run-shell layer exactly
+    as it did for the bare launcher). The whole snippet uses ONLY double quotes,
+    so the session-created hook can keep wrapping the create body in single
+    quotes (``run-shell '…'``). Shape verified live on gk (tmux 3.7b): the pane
+    process tree is ``bash -lc`` → ``claude``, and the parent shell survives the
+    exit.
+
+    The ``assert`` enforces the double-quote-free MUST-invariant at the shell
+    boundary (both callers pass fixed constants, so it never fires in practice —
+    defense-in-depth for this shared helper). RUNTIME invariant it can NOT cover:
+    the launcher path is unquoted INSIDE the wrapper, so a ``$HOME`` carrying a
+    space/glob would word-split at the pane's ``bash -lc`` parse — every managed
+    box's home is metachar-free (``/home/<user>``), and single quotes are barred
+    here by the outer ``run-shell`` single-quote wrap, so this stays a documented
+    assumption rather than a code guard."""
+    assert '"' not in launcher and "'" not in launcher, \
+        "window launcher command must be quote-free: %r" % launcher
+    return 'bash -lc "%s; exec bash -l"' % launcher
+
+
 def _managed_windows_create_body(windows):
     """#998 item 1(a): the reusable POSIX-sh create-if-missing snippet for the
     box's NON-primary DECLARED managed windows (``windows[1:]``), or ``""`` when
@@ -1100,9 +1137,13 @@ def _managed_windows_create_body(windows):
     window whose pane cwd equals the declared cwd exists (so the owner's
     hand-made window in the same cwd is never DUPLICATED — the incident this
     dedup prevents), else ``new-window -d -t "$S" -n <name> -c "$HOME/<cwd>"
-    <managed launcher>``. The new window STARTS the managed claude launcher —
-    the SAME command the box's primary pane runs (the ``claude()`` bashrc
-    wrapper, ``cli_bashrc_appliers.ULTRACODE_BASHRC_BLOCK``), reused via
+    <window command>``. #1037: the window command is the managed claude launcher
+    WRAPPED in a login shell that survives ``/exit`` (``_window_shell_command`` —
+    ``bash -lc "<launcher> default; exec bash -l"``), so the pane drops to a bash
+    prompt on exit and the owner relaunches ``claude`` like the primary window,
+    instead of tmux closing the whole window. The launcher itself is the SAME
+    command the box's primary pane runs (the ``claude()`` bashrc wrapper,
+    ``cli_bashrc_appliers.ULTRACODE_BASHRC_BLOCK``), reused via
     ``CLAUDE_LAUNCH_SCRIPT_DEST`` (never a hand-written ``claude`` string).
 
     Inner tmux formats are DOUBLED (``##{window_name}``) so the OUTER run-shell
@@ -1118,7 +1159,11 @@ def _managed_windows_create_body(windows):
     if len(windows) < 2:
         return ""
     from cli_claude_scripts import CLAUDE_LAUNCH_SCRIPT_DEST
-    launcher = '"$HOME/.claude/%s" default' % CLAUDE_LAUNCH_SCRIPT_DEST.name
+    # #1037: wrap the launcher in a login shell that survives claude's /exit
+    # (the launcher token is double-quote-free — it is embedded inside the
+    # wrapper's own double quotes; `$HOME` still expands at the run-shell layer).
+    launcher = _window_shell_command(
+        '$HOME/.claude/%s default' % CLAUDE_LAUNCH_SCRIPT_DEST.name)
     blocks = []
     for w in windows[1:]:
         name = (w.get("name") or "").strip()
@@ -1225,7 +1270,15 @@ def _impl_window_create_snippet(marker):
     the outer run-shell format-expansion hands the inner ``list-windows`` a
     literal ``#{window_name}``."""
     from cli_claude_scripts import CLAUDE_IMPL_LAUNCH_SCRIPT_DEST
-    launcher = '"$HOME/.claude/%s"' % CLAUDE_IMPL_LAUNCH_SCRIPT_DEST.name
+    # #1037: wrap the impl launcher in a login shell that survives claude's /exit
+    # (shared helper; double-quote-free launcher token inside the wrapper's own
+    # double quotes). remain-on-exit below stays as the last-resort pane guard.
+    # NOTE: this is only ONE of the impl window's three creators; the bashrc
+    # attach block (cli_bashrc_appliers) and the watchdog relaunch (watchdog/
+    # tmux_io.py) still emit the bare launcher — a #1037 followup, out of this
+    # renderer's scope.
+    launcher = _window_shell_command(
+        '$HOME/.claude/%s' % CLAUDE_IMPL_LAUNCH_SCRIPT_DEST.name)
     marker_file = '"$HOME/.claude/airuleset-model-backend.json"'
     cwd = (marker.get("cwd") or "").strip() if isinstance(marker, dict) else ""
     # cwd is already validated shell-safe by cli_model_backend._MARKER_UNSAFE_RE;

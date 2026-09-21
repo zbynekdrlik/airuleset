@@ -468,7 +468,14 @@ def impl_window_presence(marker, run=None, logs=None, dry_run=False):
         ecwd = os.path.expanduser(cwd)
         if os.path.isdir(ecwd):
             argv += ["-c", ecwd]
-    argv.append(launcher)
+    # #1037: run the launcher inside a login shell that SURVIVES claude's /exit
+    # (drops to a bash prompt; `claude` relaunches) instead of tmux closing the
+    # whole window when the launcher's `exec claude` ends. This MIRRORS
+    # cli_tmux_provisioning._window_shell_command; watchdog/ must not import a
+    # cli_* module for this (no new cross-layer import), so the shape is
+    # drift-locked to the canonical helper in test_declared_window_exit_1037.py.
+    # argv-list form: tmux execvp's `bash -lc "<launcher>; exec bash -l"`.
+    argv += ["bash", "-lc", "%s; exec bash -l" % launcher]
     run(argv)
     # Keep the pane visible if `claude-impl` REFUSES (exit 1 on a misprovisioned
     # key/cwd) so its LOUD stderr is readable — matching the attach block.
