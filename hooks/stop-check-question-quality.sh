@@ -796,6 +796,34 @@ if [ -z "$VIOLATION" ]; then
     fi
 fi
 
+# Check 9 — an Odoo BOARD-TASK question must state what the task's ATTACHMENTS
+# contained (#1098). Incident: a client put the spec as an IMAGE inside a
+# project.task description (montalu task 1010 "Sieťka robust", att 37652,
+# 20.9.2026); the stream's text-only board read missed it and parked its ticket
+# on needs-answer asking for the very data the screenshot carried. Owner
+# 21.9.2026 verbatim: „preco tuto ulohu vobec neriesis tam v popise je
+# screenshot", „aj ostatne ulohy skontroluj popis fotky".
+# ROZHODNUTÉ #1098 (supervisor, 2026-09-21): Option A — UNIVERSAL. When Check 7's
+# Odoo context holds AND the block references a specific project.task deep URL
+# (/odoo/project/<pid>/tasks/<tid> — a board task, which carries attachments),
+# the block MUST carry a `Prílohy:` line — `Prílohy: att <ids> prečítané …` or
+# `Prílohy: žiadne` for a dev task with none. An action URL or an explicit
+# no-task statement references no board task (nothing to read), so is exempt —
+# the trigger is the task URL only (its consequence "every other #907 case stays
+# byte-identical" keeps ODOO_WITH_ACTION unchanged). Same fail-safe as Checks
+# 6-8: away-user turns past Checks 1-8, narrow scope, over-block is safe (model
+# re-adds the line). Reuses Check 7's $odoo_ctx (guarded ${odoo_ctx:-} under
+# set -u; when odoo_ctx is unset a prior check already set VIOLATION and the
+# short-circuit below never evaluates it).
+if [ -z "$VIOLATION" ] && [ -n "${odoo_ctx:-}" ]; then
+    ATTACH_TASK_URL_RX='/odoo/project/[0-9]+/tasks/[0-9]+'
+    ATTACH_LINE_RX='^[[:space:]]*Pr[ií]lohy:[[:space:]]*(att|žiadne|ziadne|none)'
+    if LC_ALL=C.UTF-8 grep -qiE "$ATTACH_TASK_URL_RX" <<<"$BLOCK" \
+        && ! LC_ALL=C.UTF-8 grep -qiE "$ATTACH_LINE_RX" <<<"$BLOCK"; then
+        VIOLATION="attachments"
+    fi
+fi
+
 if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
     echo "$((RETRIES+1))" > "$RETRY_FILE"
     TEMPLATE="\nShape: **Otázka — projekt <meno> (<čo robí>):** <úvod 2–4 vety> · • <možnosť> (odporúčam) — <dôsledok> · ❓ NEEDS YOU: <jedno rozhodnutie>. See user-questions-slovak.md."
@@ -816,6 +844,8 @@ if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
             REASON="Your ❓ block is about Odoo work but does NOT carry an Odoo task reference URL. Per #907 (owner directive montalu 2026-09-06): EVERY Odoo-context question MUST carry the project.task deep URL — napr. https://erp.montalu.cloud/odoo/project/4/tasks/503 — a meno tasku + stage. Odoo task je primárny klientsky tracking; GitHub issue je len developerský. Ak task neexistuje, napíš to explicitne ('Odoo task neexistuje — čisto technická úloha'). NIKDY nepoužívaj model-form URL (/odoo/project.task/503) — ten otvorí natívny formulár bez custom záložiek. See issue-reference-context.md." ;;
         approvebody)
             REASON="Your ❓ block asks to APPROVE/SEND a client message but the message body is NOT inline — it points at a file path, ticket comment, or share/file-drop URL instead. The owner reads the ping on their phone/webterm and has NO access to your filesystem, terminal scrollback, or external URLs. INLINE the FULL proposed text as a blockquote (> ...) right in the ❓ block (>= 2 quoted lines for a share URL, >= 40 chars for a path pointer). NEVER 'text je v súbore ~/…' / 'pozri draft na tikete' / 'Návrh textu: http://…:8795/…'. A share URL may ACCOMPANY the inline text (e.g. for an attachment), never REPLACE it. See skills/odoo-client-messaging/handover-compose.md (#936/#977)." ;;
+        attachments)
+            REASON="Your ❓ block is about an Odoo board task (it carries a /odoo/project/<pid>/tasks/<tid> URL) but does NOT state what the task's ATTACHMENTS contained. Per #1098 (owner montalu 2026-09-21: „tam v popise je screenshot\", „aj ostatne ulohy skontroluj popis fotky\"): a client often puts the spec as an IMAGE/spreadsheet in the project.task DESCRIPTION — a PRIMARY source. BEFORE parking a task on needs-answer, read its attachments (the ir.attachment rows with res_model=project.task, every /web/image/<id> in the description, and the task's message attachment_ids) and add a 'Prílohy:' line to this block: 'Prílohy: att <ids> prečítané (<hodnoty z prílohy>)' — alebo 'Prílohy: žiadne' ak task žiadne prílohy nemá. This is Check 9. See skills/odoo-client-messaging/read-with-attachments.md (the project.task section) + client-board-tasks.md rule 15." ;;
     esac
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0
