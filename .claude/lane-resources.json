@@ -1,3 +1,4 @@
 {
-  "mode": "sequential"
+  "mode": "parallel",
+  "max_lanes": 2
 }
