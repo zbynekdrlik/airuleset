@@ -521,6 +521,16 @@ class TestHistoryFileRelocation(unittest.TestCase):
         self.assertNotIn("Why per-board profiles, not one table", d)
         self.assertNotIn("montalu úloha 1010", d)
 
+    def test_history_size_bounded(self):
+        # size_ratchet.json tracks only .py / functions / .claude/rules/*.md — a
+        # skills/*.md is NOT in its measured set, so this is the ENFORCED bloat
+        # guard for the non-injected history file (its size is otherwise harmless
+        # — it never injects). Currently ~3.1 KB; the cap leaves generous room.
+        n = len(HISTORY.read_text(encoding="utf-8"))
+        self.assertLess(n, 6000,
+                        "history file grew to %d codepoints — keep it a lean "
+                        "relocation of rationale, not a dumping ground (#1098)" % n)
+
 
 class TestCofireHeadroom(unittest.TestCase):
     """#1098 Option C: the injected board-tasks companion + the messaging SKILL.md
