@@ -260,7 +260,10 @@ class CoreQualsExcludesOpsWait(unittest.TestCase):
             self._prep(home, repo, bindir)
             r = _run_quals("core-quals", "--list", repo, home, bindir)
             self.assertEqual(r.returncode, 0, r.stderr)
-            nums = {ln.split("\t", 1)[0] for ln in r.stdout.splitlines() if ln.strip()}
+            # #1101: skip the `#` legend header line (the #754 non-member-line
+            # contract) — data rows only.
+            nums = {ln.split("\t", 1)[0] for ln in r.stdout.splitlines()
+                    if ln.strip() and not ln.lstrip().startswith("#")}
             self.assertEqual(nums, {"1", "2"},
                              "core-quals --list must be workable-only (exclude ops-wait)")
 

@@ -763,6 +763,62 @@ if LC_ALL=C.UTF-8 msg_has "$SK_TH_FLAT" -qiE "$SK_TH_MAIN_ALT" || \
     fi
 fi
 
+# #1101 — disowning items of the footer `I` obligation set without moving the
+# label the partition reads. The gk FLOW session repeatedly told the owner its
+# footer `I 24` items were "gk-infra / stream / not mine" while they were its
+# OWN gk-processing pickups (0 carried `infra`). The obligation column
+# (`action-only` = a stream hand-off THIS box must review → merge →
+# release/return) is still THIS box's `I`; the ONLY correct act on an item
+# believed to be someone else's is the LABEL move the partition reads
+# (`infra` → INFRA window, `prio:bounce` → back to the stream,
+# `needs-answer`/`needs-decision` → U, `ops-wait` → W) — never a status line
+# that explains the number away. Same shape as the tester-handoff block above:
+# a msg_has trigger (footer/obligation context AND a disowning phrase) → a
+# msg_missing exoneration (a label-move token in the SAME turn, checked as
+# MISSING per #195 — a backticked `--add-label …` counts as evidence the label
+# moved) → VIOLATION + legend. The Slovak family runs on a newline-flattened
+# MSG_MENTION under LC_ALL=C.UTF-8 (diacritic char-classes), so a hard-wrapped
+# disowning line can't escape; a strip_mentions failure already records
+# UNDETERMINABLE upstream and falls back to raw MSG, and a clean (non-disowning)
+# message never matches, so a strip failure never fabricates a block.
+I_NOT_MINE_FLAT=$(tr '\n' ' ' <<<"$MSG_MENTION") || I_NOT_MINE_FLAT="$MSG_MENTION"
+# The bare `I <n>` footer form REQUIRES a space (`[[:space:]]+`, never `*`) AND
+# a non-digit/non-`%` char after the digits, so neither an `i18n`/`i7` token
+# (case-insensitive, no space) NOR a plain-English "I 100% confirm …" is read as
+# the footer count "I 24" (#1101 reviews A+B, MEDIUM: "Fixed the i18n bug … not
+# mine to edit" and a DB-migration report "I 100% confirm … not mine to drop"
+# were false-blocked). The footer renders "I 24" WITH a space; the other footer
+# tokens (footer/core-quals/položky I/v I/…) carry the real incident phrasings
+# regardless.
+I_FOOTER_CTX_RX="\bI[[:space:]]+[0-9]+([^0-9%]|$)|polo[žz]k\w*[[:space:]]+I\b|\bv[[:space:]]+I\b|footer|p[äa]ti[čc]k|paticka|core-quals|slice-quals|obligation"
+I_DISOWN_RX="(s[úu]|patria|patr[íi])[[:space:]]+(gk-)?infra|patria[[:space:]]+(streamu|subdevu|streamom|in[ée]mu|streamy)|nie[[:space:]]+s[úu][[:space:]]+(moje|jeho|na[šs]e)|ni[čc][[:space:]]+spolo[čc]n|nem[áa][[:space:]].{0,15}spolo[čc]n|[čc]ak[áa](j[úu])?[[:space:]]+na[[:space:]]+stream|not[[:space:]]+(mine|ours|my[[:space:]]+tickets)|belong(s)?[[:space:]]+to[[:space:]]+(the[[:space:]]+)?(infra|stream|subdev)"
+# Leading `(` (never a bare `--…`) so grep never misreads the pattern as an
+# option — a pattern arg starting with `-` errors (rc>=2 → read as MISSING →
+# a false block).
+I_LABELMOVE_RX="(--add-label[[:space:]]+(infra|prio:bounce|needs-answer|needs-decision|ops-wait)|label\w*[[:space:]]+(infra|prio:bounce|needs-answer|needs-decision|ops-wait)\b.{0,30}(prida|nastav|presun|added|set|moved)|(prida|nastav|presun|added|set|moved)\w*.{0,30}label\w*[[:space:]]+(infra|prio:bounce|needs-answer|needs-decision|ops-wait))"
+if LC_ALL=C.UTF-8 msg_has "$I_NOT_MINE_FLAT" -qiE "$I_FOOTER_CTX_RX" && \
+   LC_ALL=C.UTF-8 msg_has "$I_NOT_MINE_FLAT" -qiE "$I_DISOWN_RX"; then
+    # EXONERATION checked as MISSING on raw MSG (a backticked `--add-label …`
+    # still counts as the label move) — #195: an unsubstantiated exemption must
+    # never disarm an established violation. The exoneration is DELIBERATELY
+    # narrow to the label-move vocabulary (`--add-label …` / `label … presun…`)
+    # — a colloquial "bounced it" without naming the label does NOT exonerate,
+    # because the whole point is to make the box MOVE (or cite) the label the
+    # partition reads, not merely assert it acted (#1101 review B, accepted).
+    if LC_ALL=C.UTF-8 msg_missing "$MSG" -qiE "$I_LABELMOVE_RX"; then
+        echo "VIOLATION: You explained items of the footer \`I\` obligation set away as 'infra / gk-infra / belong to the stream / subdevu / not mine / waiting on streams' WITHOUT moving a label. The footer counts THIS box's obligation, and an \`action-only\` row is a stream hand-off YOU must review → merge → release → return/close — still YOUR \`I\`, never 'theirs' (\`gk-processing\` = you already picked it up). If you genuinely believe an item is someone else's, the ONLY correct act is the LABEL move the partition reads — never a status line that narrates the number away." >&2
+        echo "" >&2
+        echo "  Route by LABEL, then the item leaves your I truthfully:" >&2
+        echo "    • infra-class            → \`gh issue edit <N> --add-label infra\`      (→ the INFRA window)" >&2
+        echo "    • belongs to the stream  → \`gh issue edit <N> --add-label prio:bounce\` (→ back to the stream, leaves your I)" >&2
+        echo "    • a question for the owner→ \`--add-label needs-answer\` / \`needs-decision\` (→ U)" >&2
+        echo "    • blocked on a 3rd party → \`--add-label ops-wait\`                       (→ W)" >&2
+        echo "" >&2
+        echo "  Otherwise ACT on it (review → merge → release → return/close). See statusline-vocabulary.md (the I bullet) + skills/statusline-vocabulary-deep/DEEP-1.md (reading \`--list\`)." >&2
+        add_hard "Disowned items of the footer I obligation set ('are infra / belong to the stream / not mine') without moving a label — an action-only row is a stream hand-off THIS box must review → merge → release/return, still YOUR I; the ONLY correct act on an item you believe is someone else's is the LABEL move the partition reads: infra → INFRA window, prio:bounce → back to the stream, needs-answer/needs-decision → U, ops-wait → W. Move the label (or act), never explain the number away."
+    fi
+fi
+
 # Check for a DIRECT request that the user PASTE a credential VALUE into chat
 # (#152 point 3, user-decided 2026-08-08: mechanically enforce via THIS
 # existing hook — FREEZE forbids a new hook file). receive-files-via-upload-

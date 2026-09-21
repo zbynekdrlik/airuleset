@@ -245,7 +245,9 @@ class CoreQualsExcludesForeignStreamFromU(unittest.TestCase):
             self.assertEqual(r.returncode, 0, r.stderr)
             by_num = {}
             for ln in r.stdout.splitlines():
-                if not ln.strip():
+                # #1101: skip blanks + the `#` legend header (the #754
+                # non-member-line contract) — data rows only.
+                if not ln.strip() or ln.lstrip().startswith("#"):
                     continue
                 parts = ln.split("\t")
                 by_num[parts[0]] = parts[2]   # field 2 = action column
