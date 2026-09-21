@@ -4207,14 +4207,13 @@ def goal_question_repoke_watch(now, run=None, state=None, send_fn=None,
 # --------------------------------------------------------------------------- #
 
 GOAL_LANE_IDLE_S = 15 * 60
-# #530 -- HARD HOURLY CAP: no single sid gets a second lane-nudge within this
-# window of its last landed one. Bumped 15min->1h (owner directive: "nesmie sa to
-# diať častejšie ako raz za hodinu"). #729: with the under-saturated
-# ineffective-backoff ladder deleted, this cap is the SOLE cadence floor for the
-# empty-lane nudge (paired with the #670 dedup) -- one shared check in
-# `_lane_cooldown_decision` (`skip:hourly-cap`), never a new layer -- `llast` is
-# written only on a landed nudge and no counter reset touches it, so the cap holds
-# regardless of resets.
+# #530 -- 1h reference window. Originally the empty-lane nudge's HARD HOURLY CAP;
+# #1089 retired the lane-occupancy keystroke DELIVERY and #1096 deleted the whole
+# delivery-cadence gate (`_lane_cooldown_decision`/`skip:hourly-cap`/`llast`), so
+# this constant now serves ONLY as the idle threshold in
+# `_lane_effective_min_backlog` (a loop idle > 1h over 1-2 workable tickets drops
+# its min-backlog floor to 1). Refill-nudge cadence is bounded by the shared
+# per-kind `_nudge_gate.gate_ok` gate now, not by this cap.
 GOAL_LANE_INTERVAL_S = 60 * 60
 # #937-review C1 -- agent_type values that represent IMPLEMENTATION workers
 # whose finished state means "ticket in integration" (coverage). Non-worker
@@ -4633,7 +4632,8 @@ def _cached_dispatchable(cwd, dispatchable_fetch, state, now):
     # #993 review 2: explicit 5-min TTL for BOTH success and failure — the
     # default fail TTL (60s) would re-run the O(deps) subprocess every sweep on a
     # slow/failed read (a gh-call storm); 5 min matches the queue-arrival cache's
-    # cadence and the refill nudge's own hourly cap makes a 5-min-stale count fine.
+    # cadence and the refill nudge's own per-kind cadence gate makes a 5-min-stale
+    # count fine.
     lst = _ops_wait_recheck._cached_member_fetch(
         cwd, dispatchable_fetch, state, now, "dispatchable_cache",
         ttl=300, fail_ttl=300)
@@ -4764,11 +4764,10 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # never reached the fill-the-cap decision and journalled nothing (gk 2
     # workers, I 32, guard silent 20+ min). #619 removed the empty-lane idle
     # floor ENTIRELY (it was structurally self-suppressing on a busy-solo box);
-    # `idle` below is now logging-only. Keystroke safety is carried by the gates
-    # that fire AT the keystroke (`_lane_boundary_ok` idle-prompt + recent-human
-    # + draft-diff + hourly cap + MAX_NUDGES give-up). The give-up counter reset
-    # is now on lane appearance (`_lane_count_giveup_reset`, #620), not on a
-    # session-active/backlog-change signal.
+    # `idle` below is now logging-only. #1089 retired the keystroke DELIVERY and
+    # #1096 deleted the give-up/cooldown/abort-backoff cadence gates, so the nudge
+    # only journals its decision line now — the surviving cadence bound is the
+    # shared per-kind `_nudge_gate.gate_ok` gate below.
     marker = watchdog.transcript_last_marker(tpath)
     if marker == "❓":
         _lane_skip(logs, loc, "skip:awaiting-user (❓ marker -- session blocked "
@@ -4788,8 +4787,9 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # blocking dialog occupies the input area, so there is no free prompt to deliver
     # into); worker presence is not. The `_boundary_ok` idle-prompt gate below still
     # refuses to type into a non-idle pane (so a mid-dispatch spinning pane is
-    # skipped there), and the hourly cap bounds re-nudging, so folding worker
-    # presence into the count is safe even without the (removed, #619) idle floor.
+    # skipped there), and the shared per-kind cadence gate bounds re-nudging, so
+    # folding worker presence into the count is safe even without the (removed,
+    # #619) idle floor.
     if watchdog.pane_waiting_on_user(captured):
         _lane_skip(logs, loc, "skip:blocking-dialog (a dialog/prompt occupies "
                               "the input area -- no free prompt to deliver into)")
@@ -4853,8 +4853,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # both silent-death modes (api-error + text-toolcall-stall), so a box whose
     # "workers" are all dead reads 0 and fires the empty-lane recovery nudge --
     # the render floor's stale-strip over-count used to SUPPRESS exactly that
-    # (#486-G2 dangerous direction). #729: the #509 effectiveness re-consumer below
-    # is deleted; live_workers now feeds only saturation + the #670 dedup signature.
+    # (#486-G2 dangerous direction). #1096: live_workers now feeds only the
+    # saturation floor + #937 coverage (the #509/#670 cadence consumers are gone).
     # #571 -- live_workers/backlog_n resolved ABOVE (reused, one pass per sweep).
     if not isinstance(backlog_n, int) or backlog_n <= 0:
         logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%r -> "
@@ -4901,10 +4901,10 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # fires for BOTH an empty box (live_workers==0) AND a partially-full box
     # (0 < live_workers < floor) — refill a returned lane's slot up to 5. The old
     # `skip:batch-running` (NO refill while a batch runs) branch is REMOVED; the
-    # 0<lw<floor case now falls through to the same nudge path. (#620's give-up
-    # reset already fired above for any live_workers>0, and the #530 min-backlog
-    # floor + #670 dedup + cadence cap (#530 hourly / #929 15-min starved) below
-    # bound the refill nudge cadence.)
+    # 0<lw<floor case now falls through to the same nudge path. (The #530
+    # min-backlog floor below + the shared per-kind `_nudge_gate.gate_ok` gate
+    # bound the refill-nudge cadence; the #670 dedup / hourly / #929 starved caps
+    # were deleted with the delivery-cadence machinery, #1096.)
     # #530 refill floor: a lone/tiny backlog is not worth a fresh lane for a
     # FRESHLY-idle box (the anti-storm gate against nudge->"nič workable"->nudge).
     # #804 mode-4: but a loop that has STOOD idle > 1h over just 1-2 workable
