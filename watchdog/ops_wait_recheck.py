@@ -813,7 +813,13 @@ _NUDGE_TAIL = " Label mení supervisor s dôkazom, nikdy automaticky."
 _I_TRIGGER = (
     "I=%d: `slice-quals --audit` + `--bounces` #843, re-audituj "
     "(gated → ops-wait W; needs-owner-action U #601; gk-close → "
-    "needs-gatekeeper #636; acceptance → U #622); ostáva I.")
+    "needs-gatekeeper #636; acceptance → U #622); ostáva I. "
+    # #1101 — an action-only row is a stream hand-off THIS box must
+    # review→merge→release; it is still YOUR I, never "theirs". If it really
+    # belongs elsewhere, MOVE the label (infra → INFRA window), never explain
+    # the number away.
+    "action-only = tvoja povinnosť (review→merge→release), stále TVOJE I; "
+    "infra? → presuň label infra (#1101).")
 
 # The W→I trigger (#547/#588/#607): re-check the parked external events. COUNT
 # only -- the members + their stale!/recheck!/gk-handoff! tags are in the
