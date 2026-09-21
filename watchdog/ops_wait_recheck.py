@@ -813,11 +813,17 @@ _NUDGE_TAIL = " Label mení supervisor s dôkazom, nikdy automaticky."
 _I_TRIGGER = (
     "I=%d: `slice-quals --audit` + `--bounces` #843, re-audituj "
     "(gated → ops-wait W; needs-owner-action U #601; gk-close → "
-    "needs-gatekeeper #636; acceptance → U #622); ostáva I. "
-    # #1101 — an action-only row is a stream hand-off THIS box must
-    # review→merge→release; it is still YOUR I, never "theirs". If it really
-    # belongs elsewhere, MOVE the label (infra → INFRA window), never explain
-    # the number away.
+    "needs-gatekeeper #636; acceptance → U #622); ostáva I.")
+
+# #1101 — an action-only row is a stream hand-off THIS box must
+# review→merge→release; it is still YOUR I, never "theirs". If it really
+# belongs elsewhere, MOVE the label (infra → INFRA window), never explain the
+# number away. This is an OPTIONAL detail item appended LAST (after the W flag
+# clauses + DISCUSS/#978 + unpark) so it drops FIRST under the greedy
+# NUDGE_MAX_CHARS cap — it must never starve the pre-existing #695/#978 DISCUSS
+# clause the way baking it into the mandatory _I_TRIGGER core did (#1101 review
+# A, HIGH). It rides only when I>0.
+_I_ACTION_ONLY_CLAUSE = (
     "action-only = tvoja povinnosť (review→merge→release), stále TVOJE I; "
     "infra? → presuň label infra (#1101).")
 
@@ -1035,6 +1041,10 @@ def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
     if isinstance(unpark_audit_n, int) and not isinstance(unpark_audit_n, bool) \
             and unpark_audit_n > 0:
         optional.append(_UNPARK_AUDIT_TRIGGER % unpark_audit_n)
+    # #1101 — the action-only duty reminder rides LAST (lowest priority) so it
+    # drops first under the greedy cap and never starves DISCUSS/#978/unpark.
+    if i_pos:
+        optional.append(_I_ACTION_ONLY_CLAUSE)
     detail = []
     for item in optional:
         cand = (_NUDGE_HEAD + core_body + " "

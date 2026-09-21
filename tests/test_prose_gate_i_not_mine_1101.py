@@ -163,6 +163,27 @@ class TestNoFalsePositives(_HookCase):
                          "context must be unaffected; reason=%r"
                          % self._reason(r))
 
+    def test_percentage_or_ixx_token_is_not_footer_context(self):
+        # #1101 reviews A+B (MEDIUM): a bare `I <digits>` footer signal must not
+        # false-match "I 100%" (a percentage) NOR "i18n"/"i7" (case-insensitive,
+        # no space) when combined with a disowning phrase in a NON-footer report.
+        cases = {
+            "percentage": ("I 100% confirm the migration ran; these tables are "
+                           "not mine to drop.\n✅ DONE"),
+            "i18n": ("Fixed the i18n bug; the translation strings are not mine "
+                     "to edit.\n✅ DONE"),
+            "i7_box": ("Benchmarked on the i7 box, 24 threads; results not mine "
+                       "to publish yet.\n✅ DONE"),
+        }
+        for name, msg in cases.items():
+            with self.subTest(case=name):
+                r = self._run(msg)
+                self.assertFalse(
+                    self._blocked(r),
+                    "a %s token + a disowning phrase in a NON-footer message "
+                    "must not fabricate a block (%s); reason=%r"
+                    % ("percentage/ixx", name, self._reason(r)))
+
     def test_footer_context_without_disowning_passes(self):
         # footer/obligation context present, but NO disowning phrase — the
         # check must not fire on the mere presence of "I 24" / "core-quals".

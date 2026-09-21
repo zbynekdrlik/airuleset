@@ -782,7 +782,15 @@ fi
 # UNDETERMINABLE upstream and falls back to raw MSG, and a clean (non-disowning)
 # message never matches, so a strip failure never fabricates a block.
 I_NOT_MINE_FLAT=$(tr '\n' ' ' <<<"$MSG_MENTION") || I_NOT_MINE_FLAT="$MSG_MENTION"
-I_FOOTER_CTX_RX="\bI[[:space:]]*[0-9]+|polo[žz]k\w*[[:space:]]+I\b|\bv[[:space:]]+I\b|footer|p[äa]ti[čc]k|paticka|core-quals|slice-quals|obligation"
+# The bare `I <n>` footer form REQUIRES a space (`[[:space:]]+`, never `*`) AND
+# a non-digit/non-`%` char after the digits, so neither an `i18n`/`i7` token
+# (case-insensitive, no space) NOR a plain-English "I 100% confirm …" is read as
+# the footer count "I 24" (#1101 reviews A+B, MEDIUM: "Fixed the i18n bug … not
+# mine to edit" and a DB-migration report "I 100% confirm … not mine to drop"
+# were false-blocked). The footer renders "I 24" WITH a space; the other footer
+# tokens (footer/core-quals/položky I/v I/…) carry the real incident phrasings
+# regardless.
+I_FOOTER_CTX_RX="\bI[[:space:]]+[0-9]+([^0-9%]|$)|polo[žz]k\w*[[:space:]]+I\b|\bv[[:space:]]+I\b|footer|p[äa]ti[čc]k|paticka|core-quals|slice-quals|obligation"
 I_DISOWN_RX="(s[úu]|patria|patr[íi])[[:space:]]+(gk-)?infra|patria[[:space:]]+(streamu|subdevu|streamom|in[ée]mu|streamy)|nie[[:space:]]+s[úu][[:space:]]+(moje|jeho|na[šs]e)|ni[čc][[:space:]]+spolo[čc]n|nem[áa][[:space:]].{0,15}spolo[čc]n|[čc]ak[áa](j[úu])?[[:space:]]+na[[:space:]]+stream|not[[:space:]]+(mine|ours|my[[:space:]]+tickets)|belong(s)?[[:space:]]+to[[:space:]]+(the[[:space:]]+)?(infra|stream|subdev)"
 # Leading `(` (never a bare `--…`) so grep never misreads the pattern as an
 # option — a pattern arg starting with `-` errors (rc>=2 → read as MISSING →
@@ -792,7 +800,11 @@ if LC_ALL=C.UTF-8 msg_has "$I_NOT_MINE_FLAT" -qiE "$I_FOOTER_CTX_RX" && \
    LC_ALL=C.UTF-8 msg_has "$I_NOT_MINE_FLAT" -qiE "$I_DISOWN_RX"; then
     # EXONERATION checked as MISSING on raw MSG (a backticked `--add-label …`
     # still counts as the label move) — #195: an unsubstantiated exemption must
-    # never disarm an established violation.
+    # never disarm an established violation. The exoneration is DELIBERATELY
+    # narrow to the label-move vocabulary (`--add-label …` / `label … presun…`)
+    # — a colloquial "bounced it" without naming the label does NOT exonerate,
+    # because the whole point is to make the box MOVE (or cite) the label the
+    # partition reads, not merely assert it acted (#1101 review B, accepted).
     if LC_ALL=C.UTF-8 msg_missing "$MSG" -qiE "$I_LABELMOVE_RX"; then
         echo "VIOLATION: You explained items of the footer \`I\` obligation set away as 'infra / gk-infra / belong to the stream / subdevu / not mine / waiting on streams' WITHOUT moving a label. The footer counts THIS box's obligation, and an \`action-only\` row is a stream hand-off YOU must review → merge → release → return/close — still YOUR \`I\`, never 'theirs' (\`gk-processing\` = you already picked it up). If you genuinely believe an item is someone else's, the ONLY correct act is the LABEL move the partition reads — never a status line that narrates the number away." >&2
         echo "" >&2

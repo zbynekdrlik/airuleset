@@ -561,11 +561,19 @@ class TestNudgeText(unittest.TestCase):
         t = owr._nudge_text(0, [41, 43], NOW)
         self.assertNotIn("action-only", t)
 
-    def test_i_and_w_both_present_still_within_cap_with_clause(self):
-        # the mandatory core (I clause + action-only duty + W clause) must fit
-        # even at an incident-scale W with every flag firing.
-        t = owr._nudge_text(41, list(range(3498, 3498 + 53)), NOW)
+    def test_action_only_clause_rides_a_realistic_i_and_w(self):
+        # #1101: at a realistic I>0 + small W the action-only clause still fits
+        # (it is optional-last, but there is room here).
+        t = owr._nudge_text(2, [41], NOW)
         self.assertIn("action-only", t)
+        self.assertLessEqual(len(t), owr.NUDGE_MAX_CHARS)
+
+    def test_incident_scale_stays_within_cap(self):
+        # #1101 review A (HIGH): the action-only clause is OPTIONAL-LAST, so at
+        # an incident-scale W with every flag firing it drops FIRST (never
+        # starves the mandatory core or the pre-existing DISCUSS/#978 clause);
+        # the only invariant here is the cap.
+        t = owr._nudge_text(41, list(range(3498, 3498 + 53)), NOW)
         self.assertLessEqual(len(t), owr.NUDGE_MAX_CHARS)
 
 
