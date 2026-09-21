@@ -399,6 +399,7 @@
     "tests/test_oauth_revoked_resume_602.py": 237,
     "tests/test_oauth_stuck_alert_662.py": 529,
     "tests/test_oauth_suppression_676.py": 158,
+    "tests/test_odoo_html_shipped_file_1054.py": 485,
     "tests/test_odoo_message_post_html_915.py": 260,
     "tests/test_onboard_project.py": 485,
     "tests/test_onboard_project_review_fixes.py": 214,
