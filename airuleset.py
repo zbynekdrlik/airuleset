@@ -3729,7 +3729,7 @@ def _role_filter_footer(workable, waiting, ops_wait, root, cwd):
     except Exception as e:  # noqa: BLE001
         sys.stderr.write("tickets-status: role resolve skipped (%s)\n" % e)
         return workable, waiting, ops_wait
-    if role not in ("review", "infra"):
+    if role not in ("review", "infra", "quality"):
         return workable, waiting, ops_wait
     # #998 review — resolve the slug ONCE (a network `gh repo view`) and reuse it
     # across the three filter calls, instead of one `gh` per bucket. An empty
@@ -9641,7 +9641,7 @@ def _add_dispatch_flags(parser):
              "counts). The lane-fill Stop gate shells this so ONE quals call "
              "yields both the count and the ticket names (#1078 item 1)")
     parser.add_argument(
-        "--role", choices=("review", "infra"), default=None,
+        "--role", choices=("review", "infra", "quality"), default=None,
         help="Slice the rows by work class (#993 r2b): 'review' = rows whose "
              "class is NOT infra; 'infra' = rows whose class IS infra; omitted "
              "= no filter. This is how the `infra` label ROUTES a ticket into "

@@ -436,7 +436,7 @@ def _dispatchable(payload, cwd, out=None):
     # (the footer's `_role_filter_footer`), so the fallback MUST apply the same
     # `--role` or a review/parallel pane would enforce the WHOLE-repo set on a
     # cache miss and the role-scoped set on a hit (a path-dependent wrong block).
-    if role in ("review", "infra"):
+    if role in ("review", "infra", "quality"):  # #1074 — the gk-quality window
         argv += ["--role", role]
     try:
         # Bounded at _FALLBACK_TIMEOUT_S (< the Stop hook's settings.json timeout)

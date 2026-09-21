@@ -30,11 +30,16 @@ import re
 INFRA_LABEL = "infra"
 #: The top lane-priority label — also forces `infra` class (a rework IS infra).
 ARCHITECTURE_REWORK_LABEL = "architecture-rework"
+#: #1074 — the `gk-quality` label (odoo-erp) routes a ticket into the gk-quality
+#: window / role. Highest label precedence below the airuleset-repo rule.
+QUALITY_LABEL = "gk-quality"
 #: The whole fleet-harness repo is infra-class regardless of any label.
 AIRULESET_REPO = "zbynekdrlik/airuleset"
 
 INFRA = "infra"
 INDEPENDENT = "independent"
+#: #1074 — the gk-quality work class (its own gk window + role partition).
+QUALITY = "quality"
 
 #: Only a SUPERVISOR/maintainer comment may OVERRIDE the body's Depends-on
 #: (#993 review 6): a low-trust commenter (external/webterm dev) must never be
@@ -58,22 +63,28 @@ def _label_names(labels):
 
 
 def work_class(repo, labels):
-    """The orchestration work class of an issue: ``"infra"`` or ``"independent"``.
+    """The orchestration work class of an issue: ``"infra"``, ``"quality"`` or
+    ``"independent"``.
 
     - repo ``zbynekdrlik/airuleset`` → ``infra`` ALWAYS (the whole repo is the
       fleet harness), regardless of labels.
-    - any other repo → ``infra`` iff the ``infra`` OR ``architecture-rework``
-      label is present; else ``independent``.
     - MISSING / undeterminable labels (None, or not a list) → ``infra``
       (fail-safe serial, #993 item 6d — the same conservative direction
       `_row_action` takes for an undeterminable ownership read). A genuinely
       EMPTY label list (``[]``) is determinable-and-unlabelled → ``independent``.
+    - any other repo, by LABEL PRECEDENCE (#1074):
+      * ``gk-quality`` → ``quality`` (routes to the gk-quality window/role —
+        WINS over a co-present ``infra`` label);
+      * else ``infra``/``architecture-rework`` → ``infra``;
+      * else → ``independent``.
     """
     if (repo or "").strip().lower() == AIRULESET_REPO:
         return INFRA
     if not isinstance(labels, list):
         return INFRA
     names = _label_names(labels)
+    if QUALITY_LABEL in names:  # #1074 — highest label precedence
+        return QUALITY
     if INFRA_LABEL in names or ARCHITECTURE_REWORK_LABEL in names:
         return INFRA
     return INDEPENDENT

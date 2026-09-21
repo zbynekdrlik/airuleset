@@ -101,6 +101,18 @@ REMOTE_HOSTS = [
              "role": "review", "mode": "parallel"},
             {"name": "gk-infra", "cwd": "~/devel/odoo/odoo-erp-infra",
              "role": "infra", "mode": "sequential"},
+            # #1074 — the THIRD gk window `gk-quality` (owner directive 18.9.,
+            # escalated 21.9.): its own managed odoo-erp checkout, SEQUENTIAL
+            # like gk-infra (one sensitive quality unit at a time). Owns subdev
+            # delivery QUALITY end-to-end (review lenses + hand-off gate
+            # promotions, root-causing every bounce/release-break into a
+            # mechanical guard, fresh-prod-copy + E2E evidence at hand-off, a
+            # read-only prod fact source). Provisioned by the SAME data-driven
+            # declared-window mechanism as gk-infra (session-created create
+            # body, session-start-fetch FF of its own cwd, resurrect relaunch
+            # by cwd) — no hardcoded install step.
+            {"name": "gk-quality", "cwd": "~/devel/odoo/odoo-erp-quality",
+             "role": "quality", "mode": "sequential"},
         ],
         # #999 — attached-but-unmounted 20 GB Hetzner volume gk-vol1 (id
         # 106853757, ext4, /dev/disk/by-id/scsi-0HC_Volume_106853757). The
@@ -629,7 +641,7 @@ def box_paused_reason(user, hostname=None):
 #: The valid values for a declared window's ``role`` / ``mode`` (``None`` =
 #: unset, resolved to the default). ``resolve_concurrency`` (cli_concurrency)
 #: is the single consumer; kept here next to the data it validates.
-WINDOW_ROLES = ("review", "infra")
+WINDOW_ROLES = ("review", "infra", "quality")  # #1074 — the gk-quality window
 WINDOW_MODES = ("parallel", "sequential")
 
 

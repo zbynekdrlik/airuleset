@@ -44,12 +44,15 @@ module has no import-time dependency on any of them.
 import os
 import time
 
-# The role -> kept-work-class map (#1065 role partition). resolve_role returns
-# "review" for a FLOW window, "infra" for an INFRA window, None for a single-
-# window box. work_class returns "infra" or "independent" (cli_work_class).
+# The role -> kept-work-class map (#1065 role partition; ternary since #1074).
+# resolve_role returns "review" for a FLOW window, "infra" for an INFRA window,
+# "quality" for the gk-quality window, None for a single-window box. work_class
+# returns "infra", "quality" or "independent" (cli_work_class).
 _REVIEW = "review"
 _INFRA_ROLE = "infra"
+_QUALITY_ROLE = "quality"
 _INFRA_CLASS = "infra"
+_QUALITY_CLASS = "quality"
 _INDEPENDENT_CLASS = "independent"
 
 
@@ -90,12 +93,17 @@ def _resolve_role(cwd):
 
 
 def _role_keeps(role, cls):
-    """The #1065 role partition: an INFRA window owes only ``infra``-class
-    tickets, a REVIEW (FLOW) window only ``independent``-class ones, and a role-
-    less (single-window) box owes everything. Any unexpected role value keeps
-    everything (fail-open toward owed)."""
+    """The #1065/#1074 role partition: an INFRA window owes only ``infra``-class
+    tickets, a QUALITY window only ``quality``-class ones, a REVIEW (FLOW) window
+    only ``independent``-class ones, and a role-less (single-window) box owes
+    everything. Any unexpected role value keeps everything (fail-open toward
+    owed). Disjoint: work_class returns exactly one of infra/quality/independent,
+    each kept by exactly one role — so a ticket's owed card fires in ONE window,
+    never duplicated (the ternary partition, #1074)."""
     if role == _INFRA_ROLE:
         return cls == _INFRA_CLASS
+    if role == _QUALITY_ROLE:
+        return cls == _QUALITY_CLASS
     if role == _REVIEW:
         return cls == _INDEPENDENT_CLASS
     return True

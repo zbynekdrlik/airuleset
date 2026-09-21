@@ -2,11 +2,14 @@
 no background lane is live; with lanes live use ASK-AND-CONTINUE and let the
 footer U carry the question.
 
-The sentence renders into all 9 (authority, mode, role) variants via a new
-`stop-a-livelane` clause (byte-identical join after `stop-a`); the tightest-
-arming gk-review variant DROPS it (it already carries the #1007 rule in its own
-(B) block) so it stays byte-identical + under its headroom cap. `goal-inventory
---check` re-locks the shipped SKILL.md lines against the registry.
+The sentence renders into every `variant_specs()` (authority, mode, role) variant
+via a new `stop-a-livelane` clause (byte-identical join after `stop-a`); the
+tightest-arming gk-review variant DROPS it (it already carries the #1007 rule in
+its own (B) block) so it stays byte-identical + under its headroom cap. The #1074
+gk-quality variant likewise substitutes the (B) block but EMBEDS the #1007
+sentence verbatim in its own (B) condition, so the `variant_specs` sweep still
+finds it. `goal-inventory --check` re-locks the shipped SKILL.md lines against
+the registry.
 """
 import subprocess
 import sys
@@ -22,7 +25,10 @@ SENTENCE_TAIL = "ASK-AND-CONTINUE and let the footer U carry the question"
 
 
 class GoalLiveLane1007(TestCase):
-    def test_sentence_present_in_all_nine_variants(self):
+    def test_sentence_present_in_every_variant_spec(self):
+        # #1074: variant_specs() now has 10 entries (incl. full/sequential/
+        # quality); the quality (B)-block embeds the #1007 sentence verbatim,
+        # so the sweep still finds it in every variant.
         for authority, mode, role in gr.variant_specs():
             line = gr.render_goal_line(authority, mode, role)
             self.assertIn(SENTENCE_KEY, line,
