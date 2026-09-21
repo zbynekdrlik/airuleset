@@ -4668,7 +4668,7 @@ def _handoff_guide_preflight(body, *, cwd=None, changed_paths=None,
     Returns a `handoff BLOCK: …` reason string, or None when the RFR may post.
     When the RFR diff touches a client-visible surface (`gates.navody`'s
     allowlist, or the stream's `navody_surfaces:` override) it must ALSO touch a
-    `docs/<tenant>/navody-*.html` guide file OR the body must carry a
+    `docs/<tenant>/**/navody-*.html` guide file OR the body must carry a
     `Navody: n/a — <why>` line. FAIL-OPEN when the diff cannot be computed (a git
     error must never fabricate a block — the never-false-accuse direction the gk
     pre-flight uses)."""
@@ -5263,7 +5263,7 @@ def cmd_handoff(args):
         return 1
 
     # #1073: same-PR guide-maintenance gate — a client-visible surface change in
-    # the RFR diff must also touch docs/<tenant>/navody-*.html or carry a
+    # the RFR diff must also touch docs/<tenant>/**/navody-*.html or carry a
     # `Navody: n/a — <why>` line (fail-open when the diff is undeterminable).
     _gblk = _handoff_guide_preflight(body, cwd=target_root)
     if _gblk:

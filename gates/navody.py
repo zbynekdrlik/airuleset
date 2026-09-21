@@ -19,7 +19,7 @@ Three consumers share this ONE module:
       sibling gate's rc-only block convention);
   (b) `airuleset.py handoff`'s composer preflight calls `guide_maintenance()`
       -- a client-visible surface change in the RFR diff must ALSO touch
-      `docs/<tenant>/navody-*.html` OR carry `Navody: n/a — <why>`;
+      `docs/<tenant>/**/navody-*.html` OR carry `Navody: n/a — <why>`;
   (c) tests call the pure functions directly with an injected `curl` /
       `read_text` seam.
 
@@ -65,8 +65,13 @@ _NONE_TICKET_RE = re.compile(r'^NONE\b.*?#(\d+)', re.IGNORECASE)
 _HTTPS_RE = re.compile(r'https?://[^\s)>\]"\'`]+')
 # a repo-static guide file basename: navody-<oblast>.html
 _GUIDE_BASENAME_RE = re.compile(r'^navody-.+\.html$', re.IGNORECASE)
-# a guide file path anywhere in a diff: docs/<tenant>/navody-<oblast>.html
-_GUIDE_PATH_RE = re.compile(r'(?:^|/)docs/[^/]+/navody-[^/]*\.html$',
+# a guide file path anywhere in a diff: docs/<tenant>/**/navody-<oblast>.html
+# — the basename `navody-*.html` at ANY depth under docs/<tenant>/ (#1099: the
+# tenant may nest the guide, e.g. montalu's `prirucka/`; the sibling
+# `_repo_static_ok` already resolves the basename recursively). Linear: each
+# `(?:[^/]+/)*` segment is anchored by a required `/`, so slashes partition the
+# input deterministically (no catastrophic backtracking — #577/#1010).
+_GUIDE_PATH_RE = re.compile(r'(?:^|/)docs/[^/]+/(?:[^/]+/)*navody-[^/]*\.html$',
                             re.IGNORECASE)
 # `Navody: n/a` with a bounded separator (a REASON on the same line is required
 # and checked from the captured remainder, never a trailing `.*\S` that
@@ -345,7 +350,7 @@ def guide_maintenance(changed_paths, body, *, surfaces=None):
     """(ok, reason_or_None) for the RFR diff.
 
     When the diff touches a client-visible surface, it must ALSO touch a
-    `docs/<tenant>/navody-*.html` guide file OR the RFR body must carry
+    `docs/<tenant>/**/navody-*.html` guide file OR the RFR body must carry
     `Navody: n/a — <why>`; otherwise refuse, naming the surface to document.
     A non-surface diff passes."""
     surfaces = surfaces or list(DEFAULT_SURFACES)
@@ -360,7 +365,7 @@ def guide_maintenance(changed_paths, body, *, surfaces=None):
     return False, (
         "handoff BLOCK: RFR mení klientsky viditeľnú plochu (%s) bez zmeny "
         "návodu (#1073). V rovnakom PR uprav sekciu návodu "
-        "`docs/<tenant>/navody-*.html` pre túto obrazovku, alebo pridaj do RFR "
+        "`docs/<tenant>/**/navody-*.html` pre túto obrazovku, alebo pridaj do RFR "
         "riadok `Navody: n/a — <prečo>`. (owner 18.9.2026: „návody buduj a "
         "udržiavaj\")" % ", ".join(touched[:5]))
 
