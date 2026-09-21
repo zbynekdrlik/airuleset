@@ -30,7 +30,41 @@ existing ``watchdog.<name>`` seams (stash / goal / job 1 / compact, hooks, tests
 keep resolving unchanged.
 """
 
+import re
+
 import watchdog
+
+
+# #1104 -- a RUNNING-turn spinner's FRAME-AGNOSTIC signature: the gerund ellipsis
+# followed by CC's parenthesised live-activity readout (`… (33s · ↓ 1.4k tokens)`,
+# `… (4m 2s · esc to interrupt)`, `… (2h 40m …)`). Frame-agnostic ON PURPOSE: CC
+# cycles the LEADING spinner GLYPH per animation frame (`✻`/`✳`/`✽`/`✢`/`·`/…,
+# documented live in watchdog/long_turn.py), so keying on the glyph MISSES
+# whichever frame the race-moment capture happens to land on -- the exact
+# #1104-review finding (the incident's own render race). Keying on the
+# `…(<duration|↓|esc>)` readout matches EVERY frame AND excludes both a FINISHED-
+# turn summary (`✻ Brewed for 24s` -- no `…(`) and the ellipsis-free "Waiting for
+# N background agents" AMBIENT line (so the #458 MONTALU3 lock holds and that
+# state stays `_pane_busy_waiting`'s job). Sibling of `long_turn._TURN_ELAPSED_RX`,
+# kept TIGHTER here (a duration/`↓`/`esc` token is REQUIRED, not the all-optional
+# `…(`) because this feeds a keystroke-DEFER decision, not a diagnostic: a bare
+# `…(prose)` in a draft must never read busy.
+_ACTIVITY_SPINNER_RX = re.compile(r"…\s*\(\s*(?:\d+\s*[hms]\b|↓|esc to interrupt)")
+
+
+def _pane_activity_spinner_above_box(captured):
+    """#1104 -- True iff the row IMMEDIATELY above the input box is a RUNNING-turn
+    activity spinner (a turn suspended mid-render). A bare/at-rest `❯` box with
+    such a line above it is a SUSPENDED turn whose Enter is SWALLOWED, so every
+    keystroke job must DEFER. Reuses `_above_box_scan` (which peels queued `❯`
+    rows + the `◎ /goal` indicator and returns ONLY the adjacent content row), so
+    a spinner merely QUOTED deeper in the transcript never false-matches
+    (#1104-review adjacency finding). Frame-agnostic (see `_ACTIVITY_SPINNER_RX`).
+    Fail-safe False: no adjacent spinner row never turns an idle pane busy (a
+    false busy only delays a nudge one sweep, and a false busy on a DRAFT pane is
+    harmless -- delivery defers rather than typing over a draft anyway)."""
+    _queued, spinner = watchdog._above_box_scan(captured or "")
+    return bool(spinner) and bool(_ACTIVITY_SPINNER_RX.search(spinner))
 
 
 def _input_line_text(captured):
@@ -106,6 +140,14 @@ def _classify_boundary(captured):
     box = watchdog._find_input_box_from(rows)
     if box is not None:
         head, tail, wrapped = box
+        # #1104 -- a turn SUSPENDED mid-render shows an ACTIVITY spinner ABOVE an
+        # at-rest box; the Enter is swallowed, so classify BUSY (every keystroke
+        # job's `kind=="busy"` check then defers). The sibling "Waiting for N
+        # background agents" AMBIENT line (no ellipsis) is NOT matched here and
+        # stays `_pane_busy_waiting`'s job -- which keeps the #458 lock
+        # `_classify_boundary(MONTALU3) == ("input","")` green.
+        if _pane_activity_spinner_above_box(captured):
+            return ("busy", None)
         return ("input", tail if wrapped else head[1:].strip())
     return ("busy", None) if rows else ("no-input-line", None)
 

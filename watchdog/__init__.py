@@ -865,6 +865,7 @@ from watchdog.pane_text import (  # noqa: E402
     _input_line_text as _input_line_text,
     _input_box_head_text as _input_box_head_text,
     _classify_boundary as _classify_boundary,
+    _pane_activity_spinner_above_box as _pane_activity_spinner_above_box,
     _above_input_box as _above_input_box,
     _above_box_scan as _above_box_scan,
     _pane_has_queued_compact as _pane_has_queued_compact,
