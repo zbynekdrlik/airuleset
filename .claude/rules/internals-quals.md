@@ -33,7 +33,8 @@ can drift). Lessons for anyone touching this partition:
 
 - **`--role` filtering (`_apply_role_filter`) narrows ALL THREE — the WORKABLE `I`
   slice, the third-party `W` (ops_wait) AND the owner-court `U` (waiting) (#1065,
-  REVERSING #1025).** The role exclusion (review vs infra) scopes BOTH the work window
+  REVERSING #1025; extended to a THIRD role `quality` by #1074).** The role exclusion
+  (review vs infra vs quality) scopes BOTH the work window
   AND the owner-court: `I`, `W` and `U` all narrow to that window (a `--role review` W =
   the FLOW window's ops-wait members — stream-dependent + gk-owned WITHOUT `infra`;
   `--role infra` W = the infra ones; and now the SAME for U — an `infra`-labelled owner
@@ -57,12 +58,15 @@ can drift). Lessons for anyone touching this partition:
   `entry["ops_wait"]`; the filtered `waiting` feeds the `--waiting` rows AND the
   statusline `entry["user_waiting"]`/`user_waiting_numbers` per window (#367). role
   `None` returns rows unchanged (no slug resolution), byte-identical off a role window.
-  gk + gk-infra are TWO windows on the SAME box over the SAME repo showing DIFFERENT
+  gk + gk-infra + gk-quality are THREE windows on the SAME box over the SAME repo
+  showing DIFFERENT
   disjoint I, W AND U (all role-partitioned) — no double count; the exactly-one-window
-  invariant U(FLOW)+U(INFRA)==U(unfiltered) (a total binary INFRA/INDEPENDENT partition)
+  invariant U(FLOW)+U(INFRA)+U(QUALITY)==U(unfiltered) (a total ternary partition over the
+  work classes independent/infra/quality, #1074 — was binary INFRA/INDEPENDENT before)
   keeps "never lose a question". Doctrine: statusline-vocabulary.md's `U` bullet — "the
   `--role` slice narrows `I`, `W` AND `U` — a question shows in ONE window whose role
-  owns it".
+  owns it" (still true for three windows), and `skills/statusline-vocabulary-deep/DEEP-1.md`'s
+  gk-quality section (#1074).
 
 - **GOTCHA — the role-filter SCOPE has oscillated THREE times; change all FIVE surfaces
   together or it re-regresses.** Which of `I`/`U`/`W` the `--role` filter narrows has
@@ -77,7 +81,14 @@ can drift). Lessons for anyone touching this partition:
   bullet — plus the RED locks in `test_w_role_filter_1045.py` /
   `test_role_filter_uw_1008.py` / `test_footer_role_998.py` (and the #1065 lock
   `test_u_role_filter_1065.py`). A lane touching role scope that leaves any of the five
-  stale is an incomplete fix.
+  stale is an incomplete fix. **A separate axis — the role SET (#1074 added a THIRD role
+  `quality`, making the partition ternary): adding/removing a role additionally touches
+  `cli_fleet.WINDOW_ROLES`, `cli_work_class.work_class` (the class the filter maps to),
+  `goal_registry.ROLES` + its role (B)-block, and `gates/lanefill.py`'s `--role`
+  pass-through — plus `airuleset.py`'s `--role` argparse `choices` and
+  `_role_filter_footer` guard. Keep the ternary invariant statements (this bullet + the
+  `--role` filtering bullet + `_apply_role_filter`'s in-code comment) in lockstep with the
+  code exactly as the scope axis above.**
 
 - **#1025 stop-gate: a `❓ ASKED`/`❓ NEEDS YOU` turn naming a same-repo `#N` must point
   at a ticket in THIS box's U.** `cli_quals.question_ticket_in_u(numbers, cwd)` decides

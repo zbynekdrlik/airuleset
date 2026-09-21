@@ -891,7 +891,8 @@ def cmd_slice_quals(args):
     # and re-presented in BOTH windows and the owner risked answering it twice
     # (odoo-erp#7421 17.9., live on #7720; owner 20.9.2026: "U 1 v gk nie je gk
     # ale gk infra"). U now narrows by role exactly like I/W; the exactly-one-
-    # window invariant (U(FLOW)+U(INFRA)==U(unfiltered)) keeps "never lose a
+    # window invariant (U(FLOW)+U(INFRA)+U(QUALITY)==U(unfiltered), #1074 — a
+    # DISJOINT 3-way role partition) keeps "never lose a
     # question". The `_qmap_extra` supplement merged into the `--waiting` listing
     # below is stream-only (session ❓ pings, no ticket ref) and stays per-cwd —
     # NOT filtered here (design: session pings stay per-session). ONE derivation:
@@ -1415,8 +1416,9 @@ def cmd_core_quals(args):
     # sessions acting on it (odoo-erp#7421 17.9., live on #7720; owner
     # 20.9.2026: "U 1 v gk nie je gk ale gk infra stale ma to pletie"). U now
     # narrows by role exactly like I/W; the exactly-one-window invariant
-    # (U(FLOW)+U(INFRA)==U(unfiltered)) keeps "never lose a question" — a ticket
-    # is either infra (→ INFRA) or not (→ FLOW), a total binary partition, so
+    # (U(FLOW)+U(INFRA)+U(QUALITY)==U(unfiltered)) keeps "never lose a question"
+    # — a ticket is quality (→ QUALITY), else infra (→ INFRA), else FLOW: a
+    # DISJOINT 3-way partition (#1074), so
     # every question lands in exactly one window. This is the gk full-auth path
     # with no `_qmap_extra` supplement, so filtering
     # `waiting` here directly partitions the gk box's U (the #7720 path). ONE

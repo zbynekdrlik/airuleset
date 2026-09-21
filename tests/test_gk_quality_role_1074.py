@@ -123,6 +123,13 @@ class TestWorkClassQuality(TestCase):
         self.assertEqual(
             wc.work_class(ODOO, _labels("architecture-rework")), "infra")
 
+    def test_quality_precedence_over_architecture_rework(self):
+        # gk-quality also WINS over architecture-rework (both would otherwise
+        # be infra-class); the quality window owns the ticket.
+        self.assertEqual(
+            wc.work_class(ODOO, _labels("gk-quality", "architecture-rework")),
+            "quality")
+
     def test_unlabelled_is_independent(self):
         self.assertEqual(wc.work_class(ODOO, []), "independent")
 
@@ -276,6 +283,28 @@ class TestDeep1Doctrine(TestCase):
         self.assertIn("gk-quality", text)
         self.assertIn("quality", text)
         self.assertIn("1074", text)
+
+
+# --------------------------------------------------------------------------- #
+# owed_verify — the ternary partition holds for the owed-verify consumer too
+# (#1074: a quality window owes only quality-class hand-back cards, never a
+# duplicate of an infra/independent card).
+# --------------------------------------------------------------------------- #
+class TestOwedVerifyRolePartition(TestCase):
+    def test_role_keeps_is_disjoint_across_classes(self):
+        from watchdog import owed_verify as ov
+        classes = ("infra", "quality", "independent")
+        # every class kept by EXACTLY one of the three windows
+        for cls in classes:
+            keepers = [r for r in ("review", "infra", "quality")
+                       if ov._role_keeps(r, cls)]
+            self.assertEqual(len(keepers), 1, "%s kept by %r" % (cls, keepers))
+        self.assertTrue(ov._role_keeps("quality", "quality"))
+        self.assertFalse(ov._role_keeps("quality", "infra"))
+        self.assertFalse(ov._role_keeps("quality", "independent"))
+        # a role-less (single-window) box still owes everything (fail-open)
+        for cls in classes:
+            self.assertTrue(ov._role_keeps(None, cls))
 
 
 if __name__ == "__main__":
