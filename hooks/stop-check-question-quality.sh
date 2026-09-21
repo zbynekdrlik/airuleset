@@ -832,6 +832,15 @@ fi
 # bracket class (#735 convention; Review 1); the markdown-tolerant anchor mirrors
 # Check 6's THREAD_VLAKNO_RX so `**Prílohy:**` / `- Prílohy:` pass. Same fail-safe
 # as Checks 6-8: away-user turns past Checks 1-8, over-block is safe.
+# Accepted residuals (#1098 review, informational — this is a TEXT heuristic, not
+# a security boundary; the fail direction is UNDER-block by design, "model re-adds
+# the values"): (1) the read-evidence branch discharges on a Prílohy line that only
+# MENTIONS a read-word without genuine reading (`Prílohy: je tam screenshot,
+# nestihol som otvoriť` passes) — a session that lies on this line defeats it, the
+# same way it could lie in any doctrine line; (2) the Check-3 exemption anchor uses
+# `[*-]*` (no multibyte `•`) while this anchor uses `[*•-]*`, so a `• Prílohy:` line
+# is not matched by the Check-3 EXEMPTION regex, but it IS matched by Check 3's
+# option-bullet EXIT rule, so the net effect ("not counted toward the brief") holds.
 if [ -z "$VIOLATION" ]; then
     # Fence-stripped block — a `Prílohy:` inside a ``` fence must not count.
     BLOCK_NOFENCE=$(printf '%s\n' "$BLOCK" | awk '

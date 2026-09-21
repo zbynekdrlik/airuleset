@@ -470,7 +470,7 @@
     "tests/test_question_gate_pipeline_race.py": 560,
     "tests/test_question_gate_posix_locale_735.py": 171,
     "tests/test_question_gate_thread_name.py": 439,
-    "tests/test_question_inline_draft_977.py": 266,
+    "tests/test_question_inline_draft_977.py": 277,
     "tests/test_question_ping_off_710.py": 328,
     "tests/test_question_policy.py": 223,
     "tests/test_question_prune.py": 503,
