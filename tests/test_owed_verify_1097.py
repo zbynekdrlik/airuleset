@@ -18,6 +18,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -83,9 +84,13 @@ class ClosesRegexLookbehind(unittest.TestCase):
     def test_hot_fix_hyphen_does_not_match(self):
         self.assertEqual([], _closes_in("hot-fix #12"))
 
-    def test_release_fix_parenthesised_ref_does_not_match(self):
-        # release-fix(#7710) — the keyword is hyphen-preceded, so no match.
-        self.assertEqual([], _closes_in("release-fix(#7710) landed"))
+    def test_release_fix_whitespace_ref_does_not_match(self):
+        # A whitespace-separated hyphen case: the OLD `\b` regex matched this
+        # (word boundary after the hyphen), so it genuinely DISCRIMINATES the new
+        # `(?<![\w-])` lookbehind from the old regex — reverting the lookbehind
+        # makes this RED (unlike `release-fix(#7710)`, which the mandatory `\s+`
+        # rejected on the old regex too and so proved nothing about the belt).
+        self.assertEqual([], _closes_in("release-fix #7710 landed"))
 
     def test_plain_fixes_matches_full_number(self):
         self.assertEqual([4], _closes_in("Fixes #4"))
@@ -177,7 +182,9 @@ class VerifyOwedStateWindow(unittest.TestCase):
 
 # --------------------------------------------------------------------------- #
 # (c) Role scoping — INFRA window owes only infra-class, FLOW/review only
-#     independent-class; role None owes everything; unreadable labels -> infra.
+#     independent-class; role None owes everything. Role scoping applies ONLY to
+#     RELIABLY-classified (readable, closed, in-window) rows; an unreadable row is
+#     kept regardless of role (dedup-safe, #1097 review-1 MAJOR).
 # --------------------------------------------------------------------------- #
 
 class VerifyOwedRoleScoping(unittest.TestCase):
@@ -229,14 +236,66 @@ class VerifyOwedRoleScoping(unittest.TestCase):
         self.assertEqual({4: 7.0}, out)
         self.assertIn("owed-verify keep-unreadable #4", j)
 
-    def test_unreadable_row_dropped_on_review_role_never_lost_on_both(self):
-        # An unreadable candidate: work_class(None) -> infra, so it stays owed on
-        # the INFRA root (above) and is dropped on the FLOW/review root here.
+    def test_unreadable_row_kept_on_review_role_preserves_dedup(self):
+        # An UNREADABLE candidate is KEPT regardless of role — including on the
+        # FLOW/review root (#1097 review-1 MAJOR). Its work-class is only a guess
+        # (work_class(None) -> infra), so role-DROPPING it on the review root
+        # would shrink the acted set and pop the caller's #534 per-ticket dedup on
+        # a TRANSIENT gh failure -> a re-nudge/re-escalate on gh recovery. So an
+        # unreadable candidate is never role-scoped: it stays owed (dedup safe),
+        # journals keep-unreadable, and NEVER emits a role-drop line.
         out, j = self._run(None, "review", err="gate-unavailable: down")
-        self.assertEqual({}, out)
-        self.assertIn("role=review", j)
-        # A role-drop supersedes the keep-unreadable note (one line per candidate).
-        self.assertNotIn("keep-unreadable", j)
+        self.assertEqual({4: 7.0}, out)
+        self.assertIn("owed-verify keep-unreadable #4", j)
+        self.assertNotIn("role=review", j)
+
+
+# --------------------------------------------------------------------------- #
+# (c2) The LIVE default seams — `verify_owed(fetch=None)` builds the real
+#      ETag-cached REST read via canonical_slug, and `_resolve_role` fails open.
+# --------------------------------------------------------------------------- #
+
+class DefaultSeams(unittest.TestCase):
+    def test_default_fetch_uses_canonical_slug_and_rest_get_cached(self):
+        import gates.ghread as ghread
+        seen = {}
+
+        def fake_slug(root):
+            return "owner/repo"
+
+        def fake_rest(path, params=None, cwd=None, runner=None, timeout=8,
+                      env=None, now=None, max_age=0):
+            seen.update(path=path, cwd=cwd, now=now, max_age=max_age)
+            return _row(closed_at=IN_WINDOW, labels=[]), None
+
+        root = _root()
+        with mock.patch.object(ov, "_canonical_slug", fake_slug), \
+                mock.patch.object(ghread, "rest_get_cached", fake_rest):
+            out = ov.verify_owed(root, {4: 1.0}, WIN_START, None, None, 555.0)
+        self.assertEqual({4: 1.0}, out)
+        self.assertEqual("repos/owner/repo/issues/4", seen["path"])
+        self.assertEqual(root, seen["cwd"])
+        self.assertEqual(555.0, seen["now"])
+        self.assertEqual(ov._ROW_CACHE_MAX_AGE_S, seen["max_age"])
+        self.assertGreaterEqual(ov._ROW_CACHE_MAX_AGE_S, 300,
+                                "row cache must be long enough to collapse the "
+                                "per-sweep fan-out (#1097 review-1 MAJOR)")
+
+    def test_resolve_role_fails_open_to_none_on_resolver_error(self):
+        import cli_concurrency
+        def boom(cwd, *a, **k):
+            raise RuntimeError("resolver down")
+        with mock.patch.object(cli_concurrency, "resolve_role", boom):
+            self.assertIsNone(ov._resolve_role("/whatever"))
+        # fail-open None keeps everything (an infra-labelled row would otherwise
+        # be dropped on a review role — the resolver error must not drop it).
+        f = _fetch({4: (_row(labels=[{"name": "infra"}]), None)})
+        flt = ov.make_verified_closed_filter(
+            lambda root, closed: dict(closed), since_fn=lambda: WIN_START,
+            fetch=f, now_fn=lambda: 1.0)          # role_fn defaults to _resolve_role
+        with mock.patch.object(cli_concurrency, "resolve_role", boom):
+            out = flt("/r", {4: 9.0})
+        self.assertEqual({4: 9.0}, out)
 
 
 # --------------------------------------------------------------------------- #

@@ -101,15 +101,29 @@ def _role_keeps(role, cls):
     return True
 
 
+# A CLOSED issue's row (state / closed_at / labels) is IMMUTABLE barring a
+# reopen — and card_reconcile's own `reopen_fetch` is the authoritative reopen
+# guard, not this verifier — so the row can be cached aggressively. The
+# `owned_closed` seam hands verify_owed the WHOLE 48h `merged_closes` set (dozens
+# on a multi-stream repo like odoo-erp), NOT the 0-5 post-trim owed set, so a
+# short `max_age` re-fetched every candidate every sweep, per root — a real
+# per-sweep subprocess fan-out toward the 120 s systemd kill (#1097 review-1). A
+# 15-min TTL collapses that to a handful of reads/hour per candidate while still
+# re-validating a reopen ~4x/hour, and lets gk's two roots (odoo-erp FLOW +
+# INFRA) share ONE read across sweeps (a 304 does not refresh the cache `ts`, so
+# only the `max_age` short-circuit — not the 304 path — actually dedups the roots).
+_ROW_CACHE_MAX_AGE_S = 900
+
+
 def _make_default_fetch(root, now):
     """The production ``fetch(slug, n) -> (obj, err)``: an ETag-conditional REST
-    read of the issue row (#1087, budget-free on a 304), per-sweep deduped via
-    ``max_age`` so the two gk roots share one call within a sweep."""
+    read of the issue row (#1087, budget-free on a 304), deduped across sweeps
+    and across gk's two roots via ``max_age`` (a closed row is immutable)."""
     from gates.ghread import rest_get_cached
 
     def fetch(slug, n):
         return rest_get_cached("repos/%s/issues/%d" % (slug, n),
-                               cwd=root, now=now, max_age=50)
+                               cwd=root, now=now, max_age=_ROW_CACHE_MAX_AGE_S)
 
     return fetch
 
@@ -127,27 +141,36 @@ def verify_owed(root, closed, since_ts, role, fetch, now, journal=None):
     """Filter a ``{issue_num: commit_ts}`` owed candidate set down to the tickets
     that are TRULY owed by this box's window, against GitHub.
 
-    For each candidate ``n`` (in ascending order — deterministic journal):
+    For each candidate ``n`` (in ascending order — deterministic journal), the
+    row is either RELIABLY classified (drop or role-scope) or UNREADABLE (keep):
 
-      * ``fetch(slug, n) -> (obj, err)`` reads the issue row. ``slug`` is the
-        canonical repo of ``root`` (the injected ``fetch`` in tests ignores it).
-      * unreadable row (``err``, ``obj`` not a dict, or a fetch that raised) ->
-        KEEP (fail toward owed) and later journal ``keep-unreadable`` — UNLESS the
-        role partition drops it (labels then resolve to ``infra``).
-      * ``state != "closed"`` -> DROP + journal ``state=<state>``.
-      * ``closed_at`` unparseable -> treated as unreadable (KEEP, fail-open).
-      * ``closed_at`` parses but < ``since_ts`` (closed before the window) -> DROP
-        + journal ``closed_at <ts> outside window``. This is the odoo-erp #4 case.
-      * otherwise the close is real and in-window -> subject to the role check.
-
-    Role check (applied to every candidate that was not already hard-dropped,
-    unreadable ones included): ``_role_keeps(role, work_class(slug, labels))``.
-    Dropped -> journal ``role=<role> class=<cls>``.
+      * UNREADABLE -> KEEP (fail toward owed) + journal ``keep-unreadable``, and
+        NEVER role-scoped. An unreadable row's work-class is only a guess
+        (``work_class(None) -> infra``), so role-DROPPING it would shrink the
+        acted set and pop the CALLER's #534 per-ticket dedup on a TRANSIENT gh
+        failure -> a re-nudge / re-escalate the next time gh recovers (the #534
+        MINOR-2 invariant, and the very re-escalation class #1097 exists to kill).
+        So a transiently-unreadable candidate stays owed regardless of role; the
+        next readable sweep role-scopes it reliably. Unreadable =
+        ``err`` / a fetch that raised / ``obj`` not a dict / a ``state`` that is
+        neither ``"closed"`` nor ``"open"`` (a rate-limit JSON object, a truncated
+        body) / a ``closed_at`` that will not parse.
+      * ``state == "open"`` -> DROP + journal ``state=open`` (reliably not owed).
+      * ``state == "closed"`` AND ``closed_at`` parses AND ``closed_at < since_ts``
+        (closed before the window) -> DROP + journal ``closed_at <ts> outside
+        window``. This is the odoo-erp #4 case.
+      * ``state == "closed"`` AND ``closed_at >= since_ts`` -> the close is real
+        and in-window, so the labels are RELIABLE -> role check
+        ``_role_keeps(role, work_class(slug, labels))``; dropped -> journal
+        ``role=<role> class=<cls>``. A role-drop here is safe: the OTHER role's
+        root owns the ticket (reliably, with its own dedup), so popping this
+        root's dedup is correct.
 
     ``since_ts`` None disables the window comparison (fail-open toward owed).
-    ``journal`` is an optional ``str -> None`` sink (e.g. ``list.append``); at most
-    ONE line is emitted per candidate. Returns the kept ``{n: ts}`` subset; an
-    empty ``closed`` returns a copy of it unchanged (no fetch, no journal)."""
+    ``journal`` is an optional ``str -> None`` sink (e.g. ``list.append``);
+    EXACTLY ONE line is emitted per candidate. Returns the kept ``{n: ts}``
+    subset; an empty ``closed`` returns a copy of it unchanged (no fetch, no
+    journal)."""
     if not closed:
         return dict(closed)
     if journal is None:
@@ -162,34 +185,40 @@ def verify_owed(root, closed, since_ts, role, fetch, now, journal=None):
     for n in sorted(closed):
         ts = closed[n]
         obj, err = _safe_fetch(fetch, slug, n)
-        labels = None
-        unreadable = None
+        # --- UNREADABLE row: KEEP, never role-scope (fail toward owed; the
+        # role class of an unreadable row is only a guess and dropping it pops
+        # the caller's #534 dedup on a transient gh failure). ---
         if err or not isinstance(obj, dict):
-            unreadable = err or "no-row"
-        else:
-            state = obj.get("state")
-            if state != "closed":
-                journal("owed-verify drop #%d %s: state=%s" % (n, base, state))
-                continue
-            closed_at = _iso_to_epoch(obj.get("closed_at"))
-            if closed_at is None:
-                unreadable = "closed_at unparseable (%r)" % (obj.get("closed_at"),)
-            elif since_ts is not None and closed_at < since_ts:
-                journal("owed-verify drop #%d %s: closed_at %s outside window"
-                        % (n, base, obj.get("closed_at")))
-                continue
-            else:
-                labels = obj.get("labels")
-
-        cls = _work_class(slug, labels)
+            keep[n] = ts
+            journal("owed-verify keep-unreadable #%d %s: %s" % (n, base, err or "no-row"))
+            continue
+        state = obj.get("state")
+        if state == "open":
+            journal("owed-verify drop #%d %s: state=open" % (n, base))
+            continue
+        if state != "closed":
+            # An unexpected/absent state (a rate-limit JSON object, a truncated
+            # body) — cannot confirm, so fail toward owed (never a silent drop).
+            keep[n] = ts
+            journal("owed-verify keep-unreadable #%d %s: state=%r" % (n, base, state))
+            continue
+        closed_at = _iso_to_epoch(obj.get("closed_at"))
+        if closed_at is None:
+            keep[n] = ts
+            journal("owed-verify keep-unreadable #%d %s: closed_at %r unparseable"
+                    % (n, base, obj.get("closed_at")))
+            continue
+        if since_ts is not None and closed_at < since_ts:
+            journal("owed-verify drop #%d %s: closed_at %s outside window"
+                    % (n, base, obj.get("closed_at")))
+            continue
+        # --- RELIABLE close, in-window: labels are trustworthy -> role scope. ---
+        cls = _work_class(slug, obj.get("labels"))
         if not _role_keeps(role, cls):
             journal("owed-verify drop #%d %s: role=%s class=%s"
                     % (n, base, role, cls))
             continue
-
         keep[n] = ts
-        if unreadable is not None:
-            journal("owed-verify keep-unreadable #%d %s: %s" % (n, base, unreadable))
     return keep
 
 
