@@ -125,6 +125,13 @@ class TestManagedWindowsCreateBodyWrapsLauncher(unittest.TestCase):
 
 
 class TestImplWindowSnippetWrapsLauncher(unittest.TestCase):
+    # SCOPE: this covers ONLY the session-created-hook impl creator
+    # (`_impl_window_create_snippet`). The impl window has TWO OTHER creators
+    # NOT wrapped by #1037 (out of this lane's cli_tmux_provisioning scope) —
+    # the bashrc attach block (cli_bashrc_appliers.py ~295,298) and the watchdog
+    # relaunch (watchdog/tmux_io.py ~471) — so impl is NOT yet fixed fleet-wide;
+    # see the #1037 followup. gk-infra / gk-quality (the owner's actual
+    # complaint) ARE fully fixed via _managed_windows_create_body.
     _MARKER = {"base_url": "http://gw", "key_file": "~/.secrets/k",
                "main": "m", "sub": "s", "fast": "f",
                "cwd": "/home/miva1/devel/odoo/odoo-erp"}

@@ -1101,14 +1101,25 @@ def _window_shell_command(launcher):
     only process and tmux closed the whole window on ``/exit`` / a crash / a
     401-kill (owner escalation 21.9.2026).
 
-    ``launcher`` MUST be a double-quote-FREE command (it is embedded inside this
+    ``launcher`` MUST be a quote-FREE command (it is embedded inside this
     wrapper's own double quotes — the fixed launcher name carries no space or
     shell metachar, and ``$HOME`` expands at the outer run-shell layer exactly
     as it did for the bare launcher). The whole snippet uses ONLY double quotes,
     so the session-created hook can keep wrapping the create body in single
     quotes (``run-shell '…'``). Shape verified live on gk (tmux 3.7b): the pane
     process tree is ``bash -lc`` → ``claude``, and the parent shell survives the
-    exit."""
+    exit.
+
+    The ``assert`` enforces the double-quote-free MUST-invariant at the shell
+    boundary (both callers pass fixed constants, so it never fires in practice —
+    defense-in-depth for this shared helper). RUNTIME invariant it can NOT cover:
+    the launcher path is unquoted INSIDE the wrapper, so a ``$HOME`` carrying a
+    space/glob would word-split at the pane's ``bash -lc`` parse — every managed
+    box's home is metachar-free (``/home/<user>``), and single quotes are barred
+    here by the outer ``run-shell`` single-quote wrap, so this stays a documented
+    assumption rather than a code guard."""
+    assert '"' not in launcher and "'" not in launcher, \
+        "window launcher command must be quote-free: %r" % launcher
     return 'bash -lc "%s; exec bash -l"' % launcher
 
 
@@ -1262,6 +1273,10 @@ def _impl_window_create_snippet(marker):
     # #1037: wrap the impl launcher in a login shell that survives claude's /exit
     # (shared helper; double-quote-free launcher token inside the wrapper's own
     # double quotes). remain-on-exit below stays as the last-resort pane guard.
+    # NOTE: this is only ONE of the impl window's three creators; the bashrc
+    # attach block (cli_bashrc_appliers) and the watchdog relaunch (watchdog/
+    # tmux_io.py) still emit the bare launcher — a #1037 followup, out of this
+    # renderer's scope.
     launcher = _window_shell_command(
         '$HOME/.claude/%s' % CLAUDE_IMPL_LAUNCH_SCRIPT_DEST.name)
     marker_file = '"$HOME/.claude/airuleset-model-backend.json"'
