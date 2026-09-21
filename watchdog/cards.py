@@ -906,7 +906,15 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
     #516: `nudged`/`pinged` are ONE-SHOT latches (a handled ticket is never
     re-evaluated), so the persisted `state["report_owed"]` write is gated on
     `not dry_run` — a diagnostic `--once --dry-run` mutates only a local copy
-    and can never suppress the genuine nudge on a later real timer sweep."""
+    and can never suppress the genuine nudge on a later real timer sweep.
+
+    #1092 fix-forward: the whole #511 swallow→escalate flow above applies ONLY
+    when the `card` nudge kind is ON. When it is OFF (#1023 per-kind staging),
+    `send_verified` types NOTHING and returns False — that is NOT a pane swallow.
+    `nudges_enabled` (default: the package facade) is pre-checked after the
+    mutex/recent-human vetoes; a kind-off root journals ONE `withheld (kind card
+    off)` decision line, never touches `swallows`/`last_try`, never sends, and
+    never escalates (killing the false owner-ping from a kind-off state)."""
     if not cwd_by_sid:
         return []
     window = CARD_WINDOW_S if window is None else window
@@ -1061,9 +1069,16 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
             # decision-log contract): ONE journal line, `swallows`/`last_try`
             # left EXACTLY as they were, the send primitive never called, and no
             # owner escalation from a kind-off state (the false-ping class:
-            # `report-owed ESCALATE … issues=#4` on gk 08:17 for a ticket never
-            # typed). The ticket stays owed (`nudged` unwritten) so the normal
-            # nudge path resumes the moment the owner re-enables `card`.
+            # `report-owed ESCALATE … -> sent` on gk 08:17 for a ticket never
+            # typed). The kind checked here MUST match the kind the default
+            # `verified_send` closure passes (`nudge="card"`, ~L951) — this veto
+            # is a faithful pre-check of exactly what the send primitive would
+            # have suppressed. The ticket stays owed (`nudged` unwritten) so the
+            # normal nudge path resumes the moment the owner re-enables `card`.
+            # (The SEPARATE question of a stale ticket NUMBER being derived as
+            # owed — e.g. gk's long-closed #4 re-mentioned in a recent commit —
+            # is a `merged_closes` regex Finding tracked on #1092, NOT fixed
+            # here: this branch stops the false ESCALATION, not the false owed.)
             if not nudges_enabled("card"):
                 logs.append("report-owed withheld (kind card off) %s issues=%s"
                             % (root, ", ".join("#%d" % n
