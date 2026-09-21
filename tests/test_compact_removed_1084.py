@@ -373,14 +373,14 @@ class TestCompactLinePrintsBeforeGatingPostChecks(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# (e) no LIVE doctrine text or machine-emitted nudge instructs a compact-request
-#     call any more. Scanned surfaces: EVERY doctrine .md (modules/ + skills/,
-#     which reach a session's system prompt) PLUS the live watchdog nudge string
-#     (watchdog/lane_resources.py's _lane_nudge_text — the #1084-review miss the
-#     old 5-file whitelist could not catch). The kept-for-L2 machinery's own
-#     internal code COMMENTS (watchdog/compact.py, cards.py) and the historical
-#     docs/autopilot-log.md are deliberately out of scope — they instruct no live
-#     session and L2 deletes the machinery.
+# (e) no LIVE doctrine text instructs a compact-request call any more. Scanned
+#     surface: EVERY doctrine .md (modules/ + skills/, which reach a session's
+#     system prompt). (#1096: the machine-emitted lane-check nudge STRING was a
+#     scanned surface too, but #1089 retired the lane-occupancy keystroke
+#     DELIVERY and #1096 deleted its text builder — there is no live nudge string
+#     left to scan.) The kept-for-L2 machinery's own internal code COMMENTS
+#     (watchdog/compact.py, cards.py) and the historical docs/autopilot-log.md are
+#     deliberately out of scope — they instruct no live session.
 # --------------------------------------------------------------------------- #
 NEEDLES = ("compact-request --self", "compact-request --record",
            "compact-request --status")
@@ -402,14 +402,6 @@ class TestDoctrineHasNoCompactRequestInstruction(unittest.TestCase):
         self.assertEqual(offenders, [],
                          "no doctrine .md may instruct a compact-request call (#1084): %r"
                          % offenders)
-
-    def test_live_lane_nudge_carries_no_compact_request(self):
-        # the watchdog lane-check nudge is machine-EMITTED into armed /goal
-        # sessions — a live doctrine surface the .md scan above cannot see.
-        from watchdog import lane_resources
-        text = lane_resources._lane_nudge_text(10, 2, {"total": 5})
-        self.assertNotIn("compact-request", text)
-        self.assertNotIn("compact --self", text)
 
 
 # --------------------------------------------------------------------------- #

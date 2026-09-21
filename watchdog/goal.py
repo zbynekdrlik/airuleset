@@ -2325,8 +2325,8 @@ GOAL_DARK_REARM_MAX_PER_DAY = 2         # base cap: fast auto-types per sid / 24
 # silent-until-midnight (montalu2 "sam sa vypne a uz nezapne"). It keeps
 # re-arming on an ESCALATING backoff from the last attempt (30m -> 1h -> 3h ->
 # 6h, holding at 6h), bounded by a hard daily STROP (anti-keystorm). This
-# mirrors mode-1's shipped inline `_lane_giveup_backoff` (NOT the settled
-# design's nudge_gate resurrect-family) for consistency with shipped reality + a
+# mirrors the repo's escalating-backoff PATTERN for bounded resurrection (NOT the
+# settled design's nudge_gate resurrect-family) for consistency with shipped reality + a
 # lower blast radius. At 6h spacing only ~4 attempts fit a rolling 24h, so the
 # strop is a safety ceiling the backoff practically never reaches -- the loop
 # gets a bounded resurrection attempt every ~6h forever instead of dying at 2.
@@ -2539,7 +2539,7 @@ def _dark_confirm_advance(win, mark_ts, now):
 def _dark_rearm_backoff(i):
     """#804 mode-2 -- the ith re-arm-backoff window past the base cap
     (`GOAL_DARK_REARM_BACKOFF_S`, clamped to the last value so it holds at 6h
-    forever, mirroring `_lane_giveup_backoff`). `i` is the 0-based stage (attempts
+    forever). `i` is the 0-based stage (attempts
     already recorded PAST `GOAL_DARK_REARM_MAX_PER_DAY`)."""
     sched = GOAL_DARK_REARM_BACKOFF_S
     j = i if i < len(sched) else len(sched) - 1
@@ -4216,32 +4216,12 @@ GOAL_LANE_IDLE_S = 15 * 60
 # written only on a landed nudge and no counter reset touches it, so the cap holds
 # regardless of resets.
 GOAL_LANE_INTERVAL_S = 60 * 60
-# #929 — STARVED FULL-AUTHORITY shortcut: when the box is full-authority,
-# live_workers == 0, and backlog > 0, the refill-nudge interval drops from
-# the 1h hourly cap to 15 min. The owner's directive: "gk musi pracovat
-# intenzivne a paralelne" — a full-authority box sitting idle with a
-# backlog is not a "correctly-declining supervisor", it is starvation.
-GOAL_LANE_STARVED_INTERVAL_S = 15 * 60
-# #937 -- after this many consecutive starved nudges with no observed dispatch,
-# the starved shortcut is disabled and the session falls back to the 1h cap
-# + #670 dedup. Reset on dispatch (_lane_count_giveup_reset) or backlog change.
-GOAL_LANE_STARVED_MAX_CONSECUTIVE = 2
 # #937-review C1 -- agent_type values that represent IMPLEMENTATION workers
 # whose finished state means "ticket in integration" (coverage). Non-worker
 # subagents (validator/Explore/an ad-hoc review consult) review/validate, not
 # implement. (#991: the pinned tier-agent types are gone — the lane worker is
 # the single autopilot-worker type; the working model chooses its model.)
 _LANE_WORKER_AGENT_TYPES = frozenset({"autopilot-worker"})
-GOAL_LANE_MAX_NUDGES = 2
-# #804 mode-1 -- the count give-up is a BACKOFF, not a permanent LATCH. Pre-#804
-# a 0-worker box that ignored 2 nudges latched `skip:gave-up` FOREVER (its only
-# reset was a lane appearance, i.e. exactly the dispatch a dead-stuck box never
-# makes -- so the loop sat silent until the owner found it). Instead, after the
-# give-up record, HOLD for a widening window then RE-ARM ONE bounded nudge
-# attempt -- a stuck armed loop gets a retry chain forever, never 2-and-silent.
-# Escalating (1h -> 3h -> 6h cap; the last value holds), so a genuinely-wedged
-# box is re-probed rarely, not stormed (each attempt is still hourly-capped).
-GOAL_LANE_GIVEUP_BACKOFF_S = (60 * 60, 3 * 60 * 60, 6 * 60 * 60)
 
 
 def _lane_effective_min_backlog(idle):
@@ -4266,12 +4246,6 @@ def _lane_effective_min_backlog(idle):
 # workable tickets is poked instead of parked forever.
 GOAL_LANE_MIN_BACKLOG = 3
 GOAL_LANE_LIVE_WINDOW_S = 15 * 60
-# #693 -- how fresh the tickets-status cache must be for the give-up CAUSE
-# classification to trust its I/U/W/gk partition. Mirrors airuleset.py's #618
-# `_BACKLOG_STATUS_CACHE_MAX_AGE_S` (the same cache, the same tolerance: a
-# give-up verdict tolerates counts minutes old). Older/unreadable -> the
-# classifier returns the honest `unknown`, never a guess.
-GOAL_LANE_GIVEUP_CACHE_MAX_AGE_S = 15 * 60
 
 # #804 -- how often the DEAD-SESSION roster census re-surfaces a persistently-
 # dead expected-armed stream: at most ONE verdict line per dead cwd per this
@@ -4363,24 +4337,9 @@ def _resurrect_dead_entry(dcwd, dentry, dloc, now, run, projects_dir, dry_run):
 # captured, via the shared check's symmetric clamp). Un-submitted
 # COMPOSITION stamps neither signal and is caught separately, by the
 # two-capture draft-diff check at the send point below. Worst-case
-# annoyance stays bounded by the cadence cap (GOAL_LANE_INTERVAL_S, or the
-# #929 GOAL_LANE_STARVED_INTERVAL_S for a starved full-authority box) +
-# GOAL_LANE_MAX_NUDGES regardless.
+# annoyance stays bounded by the shared per-kind cadence gate (and #1089 retired
+# the lane-occupancy keystroke DELIVERY entirely — only the decision line remains).
 GOAL_LANE_LIVE_CONVO_S = 3 * 60
-
-# #442-review F2 -- bound on CONSECUTIVE zero-progress stash aborts. A
-# "transient, retry next sweep" abort that recurs every ~60s forever (the
-# classic shape: the stash slot is occupied by the user's OWN parked
-# draft, which no janitor provenance will ever clear) is the repo's
-# known bounded-consecutive-occurrence class: without a bound, the
-# give-up branch is structurally unreachable (the nudge counter only
-# advances on SUCCESS), so a permanently-aborting lane would silently
-# retry -- and for keystroke-bearing abort shapes, retype -- forever.
-# Past this many consecutive aborts the existing give-up branch writes
-# its one-shot record (#693: a classified machine-channel verdict) and
-# stops attempting; the counter clears on any
-# successful delivery and on the session-active idle reset.
-GOAL_LANE_MAX_STASH_ABORTS = 5
 
 # #531 -- orphan-reap TTL for state["goal_lane"] per-sid records. Same 24h
 # magnitude as GOAL_MARK_ORPHAN_TTL_S, deliberately well above the 1h nudge
@@ -4388,33 +4347,6 @@ GOAL_LANE_MAX_STASH_ABORTS = 5
 # sweep it is visited-and-armed -- is never reaped by the SECONDARY age gate; only
 # a genuinely gone session's aged, not-visited entry is.
 GOAL_LANE_ORPHAN_TTL_S = 24 * 3600
-
-# #479 -- escalating backoff for a lane whose stash delivery keeps ABORTING
-# against the SAME persistently-parked live draft. The single reactions were
-# already correct (never overwrite a live draft, rescue before any keystroke);
-# what was missing was REPETITION damping. The abort branch only bumped the
-# consecutive-abort counter and returned "retry next sweep", so a stash slot
-# held by the user's OWN parked draft was re-typed + re-rescued every ~60s
-# sweep for hours (the 2026-08-14 storm: 15:18->15:19->15:20->15:21) until the
-# give-up at MAX aborts. A stash-abort now PARKS the next attempt for a
-# widening window in durable `rec['lnpark']`; within it the nudge skips
-# WITHOUT touching the pane at all. Mirrors the repo's staged-schedule PATTERN
-# (`WORKING_RESPONDED_BACKOFF_SCHEDULE_S`, `_gkreq_reping_due`) -- an explicit
-# tuple of widening intervals, `min(n-1, len-1)` indexing, holding at the cap
-# stage forever. The refusal itself is NEVER weakened: deliver_with_stash
-# still refuses the live draft, the give-up record is still reached (just over
-# elapsed time, not once per sweep), and the park clears on any successful
-# delivery and on the session-active idle reset.
-GOAL_LANE_STASH_ABORT_BACKOFF_S = (120, 300, 900, 1800)
-
-
-def _lane_stash_abort_backoff(aborts):
-    """Seconds to park the lane's next stash-delivery attempt after its
-    `aborts`-th consecutive abort (1-indexed). Widens with each abort and
-    holds at the final stage forever -- see GOAL_LANE_STASH_ABORT_BACKOFF_S."""
-    sched = GOAL_LANE_STASH_ABORT_BACKOFF_S
-    idx = min(max(int(aborts), 1) - 1, len(sched) - 1)
-    return sched[idx]
 
 
 # #502 -- account-limit back-off HARD cap. When the supervisor's transcript shows a
@@ -4528,17 +4460,7 @@ from watchdog.lane_resources import (  # noqa: E402,F401
     GOAL_LANE_SATURATION_WORKERS,
     lane_resource_cap,  # noqa: F401 -- backward compat re-export
     lane_resource_caps,
-    _lane_nudge_text,
 )
-
-# #970 fix-forward: GOAL_LANE_NUDGE_TEXT was a dead duplicate of
-# _lane_nudge_text with hardcoded 5 (fable-review LOW finding #1: drift
-# between #848 and #848/#970 references, 6 test files pointing at it).
-# Replaced with a function call so there is ONE body.
-def GOAL_LANE_NUDGE_TEXT_FN(backlog_n, waiters):
-    """Backward-compat helper — returns the nudge text with the flat-5 cap."""
-    return _lane_nudge_text(backlog_n, waiters,
-                            {"total": GOAL_LANE_SATURATION_WORKERS})
 
 # #442/#481/#848 -- the lane ceiling (up to 5 parallel lanes).  The constant
 # GOAL_LANE_SATURATION_WORKERS is now defined in watchdog/lane_resources.py
@@ -4595,187 +4517,6 @@ def _stuck_alert_streak():
         v = GOAL_LANE_STUCK_ALERT_STREAK
     return v if v >= 1 else GOAL_LANE_STUCK_ALERT_STREAK
 
-# #726 -- the UNDER-SATURATED (non-zero worker) fill nudge text is RETIRED. Its
-# doctrine (#442/#481/#456: "fill lanes to 5 whenever a slot opens") was the
-# continuous-saturation refill #723/#724 reversed; under batch mode a running
-# batch (live_workers>0) is never refilled -- goal_lane_occupancy_nudge logs
-# skip:batch-running instead. GOAL_LANE_UNDERSAT_NUDGE_TEXT/_SURPLUS are removed.
-
-
-# #726 -- GOAL_LANE_UNDERSAT_NUDGE_TEXT / _SURPLUS (the retired under-saturated
-# "fill lanes to floor" nudge text + its #509 surplus floor) are removed: a
-# running batch is never refilled under batch mode (#723/#724), so there is no
-# "push for more lanes" decision. #729 -- the #509 effectiveness backoff that
-# shaped that fill nudge (GOAL_LANE_INEFFECTIVE_BACKOFF_S + _lane_effective_
-# interval + _lane_effectiveness + the under_saturated branch of the cooldown
-# gate) went with it: it was reachable ONLY from the retired fill nudge (a running
-# batch skips at skip:batch-running before delivery), so it is DELETED, leaving the
-# hourly cap (#530) + #670 dedup as the single un-branched cadence gate below.
-
-
-def _lane_cooldown_decision(rec, now, backlog_n, loc, live_workers, waiters,
-                            authority=None):
-    """#530/#670 -- the lane-nudge cadence gate. Returns (skip, logline): whether
-    to hold this sweep and its decision line. Two gates, in order:
-
-    #530 HARD HOURLY CAP: no sid gets a second lane-nudge within
-    GOAL_LANE_INTERVAL_S (1h) of its last landed one (`llast` is set only on a
-    landed nudge and no reset touches it). #929: on a FULL-AUTHORITY box with
-    live_workers == 0 and backlog > 0 (hard starvation), the cap drops to
-    GOAL_LANE_STARVED_INTERVAL_S (15 min) and the #670 dedup is BYPASSED --
-    a starved box with an unchanged (0, N) signature still needs re-nudging
-    because the prior nudge visibly failed to revive the loop.
-
-    #670 DEDUP: past the hourly cap, an EXACTLY-unchanged (live_workers, backlog_n)
-    signature to the last landed nudge (`rec["lsw"]`/`rec["lsb"]`, stamped by
-    `_lane_record_nudge`) returns `skip:dedup-unchanged` -- deliberately
-    PERMANENTLY SILENT until the state MOVES (owner directive: rovnaký počet lán
-    + rovnaký backlog ⇒ žiadny nový prompt ani po hodine). A correctly-declining
-    supervisor is not a stall, so a frozen state stays silent HERE -- EXCEPT the
-    #804 give-up-BACKOFF re-arm (`_lane_giveup_decision`) deliberately POPS
-    `lsw`/`lsb` before falling through, so a genuinely dead-stuck box IS re-probed
-    on the widening (1h/3h/6h) schedule instead of being permanently silent (the
-    "sam sa vypne a uz nezapne" report). Only a genuinely CHANGED state -- or a
-    give-up-backoff re-arm -- re-nudges (still under the 1h floor). #929: a
-    STARVED full-authority box bypasses this gate entirely (see above).
-
-    #729: the under-saturated effectiveness backoff branch is gone. #848: the
-    refill nudge reaches delivery for ANY live_workers < floor (0..4), so
-    live_workers is part of the #670 dedup signature `(live_workers, backlog)`
-    -- it VARIES as lanes come and go -- never a fill-effectiveness input."""
-    last = rec.get("llast")
-    if last is None:
-        return False, None
-    # #929 -- STARVED FULL-AUTHORITY shortcut: a full-authority box with zero
-    # workers and a non-empty backlog uses the 15-min interval AND bypasses
-    # the #670 dedup. The dedup bypass is necessary: without it, a frozen
-    # (0, N) state is permanently silent past the cap, and the #804 give-up
-    # requires n >= MAX_NUDGES (2 landed nudges) which dedup prevents from
-    # ever reaching (ln stays at 1). See #929 design comment approach 2.
-    starved = (authority == "full" and live_workers == 0 and backlog_n > 0)
-    # #937 effectiveness backoff: after GOAL_LANE_STARVED_MAX_CONSECUTIVE
-    # consecutive starved nudges with no dispatch observed (lsc), the session
-    # is NOT going to dispatch (non-dispatchable backlog). Fall back to the
-    # 1h interval + re-enable dedup. Reset on dispatch or backlog change.
-    lsc = rec.get("lsc", 0)
-    if starved and lsc >= GOAL_LANE_STARVED_MAX_CONSECUTIVE:
-        # Backlog composition changed since streak started? -> reset streak.
-        if backlog_n != rec.get("lsb_starved"):
-            rec.pop("lsc", None)
-            rec.pop("lsb_starved", None)
-            # Streak reset — allow the starved shortcut again this sweep.
-        else:
-            starved = False  # fall back to 1h + dedup
-    interval = GOAL_LANE_STARVED_INTERVAL_S if starved else GOAL_LANE_INTERVAL_S
-    # #530 -- HARD CAP (1h default, #929 15-min for starved full-authority).
-    if (now - last) < interval:
-        detail = ""
-        if not starved and lsc >= GOAL_LANE_STARVED_MAX_CONSECUTIVE and authority == "full":
-            detail = " (starved-backoff: %d consecutive, no dispatch)" % lsc
-        return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                      "skip:hourly-cap remaining=%ds%s"
-                      % (loc, live_workers, waiters, backlog_n,
-                         int(interval - (now - last)), detail))
-    # #929 -- a starved full-authority box bypasses the dedup: the prior nudge
-    # failed to revive the loop (workers still 0), so re-nudging at the
-    # 15-min cadence is correct pressure, not spam.
-    if starved:
-        return False, None
-    # #670 -- DEDUP on UNCHANGED lane state (owner 2026-08-24). PAST the hourly
-    # cap, an IDENTICAL (workers, backlog) signature to the last LANDED nudge
-    # never re-nudges: the supervisor already saw+acted-on (or correctly
-    # DECLINED -- e.g. file-deps on unmerged branches) this exact state, so
-    # repeating the same "start a NEW batch" line every hour is the "kazdu
-    # chvilu" spam. lsw/lsb are stamped by `_lane_record_nudge` on a LANDED nudge
-    # ONLY, so: a never-nudged sid (last is None) returned above and always fires
-    # its first; a pre-#670 rec (llast set, no lsw/lsb) sees None != int -> one
-    # grace nudge, then dedup engages. On a FROZEN state a correctly-declining
-    # supervisor is an explicit decision, not a stall (#620/#670) -- but the #804
-    # give-up-backoff re-arm pops lsw/lsb first, so a dead-stuck box IS re-probed
-    # on the widening schedule rather than staying silent here forever.
-    if rec.get("lsw") == live_workers and rec.get("lsb") == backlog_n:
-        return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                      "skip:dedup-unchanged (workers+backlog unchanged since "
-                      "last nudge)"
-                      % (loc, live_workers, waiters, backlog_n))
-    return False, None
-
-
-def _lane_record_nudge(rec, live_workers, backlog_n, n, now):
-    """#479/#670 -- commit a LANDED nudge's state. Clears the abort-backoff (#479),
-    stamps the nudge counter + cooldown clock, and records the #670 dedup
-    signature (live_workers/backlog for the next sweep to compare against).
-    #729: the #509 under-saturated effectiveness baseline (lnw/lnb + the ineffective
-    streak) is gone. #848: the refill nudge reaches delivery for ANY live_workers
-    < floor (0..4), stamped as part of the #670 dedup signature."""
-    rec.pop("lna", None)
-    rec.pop("lnpark", None)
-    # #511 -- a LANDED nudge means the delivery-mechanics failure that drove the
-    # stash-abort give-up has genuinely cleared, so drop the one-shot give-up
-    # ping flag: a genuinely-new future abort storm must be able to re-escalate
-    # to the owner, never re-probe silently forever behind a stale lpinged.
-    rec.pop("lpinged", None)
-    rec["ln"] = n + 1
-    rec["llast"] = now
-    # #670 -- stamp the dedup signature: the next sweep suppresses an identical
-    # (workers, backlog) past the cooldown (skip:dedup-unchanged).
-    rec["lsw"] = live_workers
-    rec["lsb"] = backlog_n
-    # #937 -- track consecutive starved nudges (workers==0). A non-starved nudge
-    # (workers>0, i.e. a refill nudge) resets the streak.
-    if live_workers == 0:
-        rec["lsc"] = rec.get("lsc", 0) + 1
-        rec.setdefault("lsb_starved", backlog_n)
-    else:
-        rec.pop("lsc", None)
-        rec.pop("lsb_starved", None)
-
-
-def _lane_count_giveup_reset(rec):
-    """#620 -- refresh the EMPTY-LANE count give-up budget (`ln`) when the box
-    HAS a lane (`live_workers > 0`), the true "the nudge worked / the box
-    dispatched" signal.
-
-    Pre-#620 the reset (`_lane_idle_reset`) cleared `ln` on a BACKLOG CHANGE
-    (`backlog_n != lnbk`, #530), but a busy-solo box churns its backlog inline
-    (33->25 as it solves tickets), so `ln` was wiped between EVERY nudge -> the
-    MAX_NUDGES give-up (then an owner ping; a machine-channel record since
-    #693) was never reached (all nudges logged (1/2)).
-    Keying the reset on lane APPEARANCE lets consecutive INEFFECTIVE empty-lane
-    nudges (workers stays 0) advance `ln` monotonically to the give-up record. The
-    shared `lpinged` latch clears too, unless a stash-abort give-up is still
-    latched, so a future give-up can re-escalate. The stash-abort streak
-    (`lna`/`lnpark`) is NOT touched here: it self-heals via the #479 park + the
-    successful-delivery reset in `_lane_record_nudge` (dropping the old
-    session-active reset avoids re-opening the #479 retry hammer now that #619
-    lets the empty-lane flow fall through to delivery instead of skip:idle).
-
-    The CALLER invokes this the moment `live_workers > 0` is known -- BEFORE the
-    boundary / backlog / saturation gates -- so a lane appearance is observed even
-    when the pane is busy/non-idle (`_lane_boundary_ok` would skip) or the backlog
-    reads None. Otherwise a box that dispatched a worker then went straight back to
-    working inline (pane busy -> boundary skip -> this reset never reached) whose
-    worker drained before the pane next idled would reach the next 0-worker sweep
-    with `ln` still latched at the cap and fire a FALSE give-up record (#693:
-    machine-channel, but a false verdict pollutes the journal all the same)
-    (adversarial-review 🔵)."""
-    for k in ("ln", "lnbk", "lgn", "lgts"):   # #804 -- also reset the give-up
-        rec.pop(k, None)                       # backoff schedule (the box dispatched)
-    # #937 -- dispatch observed, reset the starved-nudge backoff streak.
-    rec.pop("lsc", None)
-    rec.pop("lsb_starved", None)
-    if rec.get("lna", 0) < GOAL_LANE_MAX_STASH_ABORTS:
-        rec.pop("lpinged", None)
-
-
-def _lane_giveup_backoff(n):
-    """#804 mode-1 -- the nth give-up-backoff window (`GOAL_LANE_GIVEUP_BACKOFF_S`,
-    clamped to the last value so it holds forever at 6h, never falls off the end).
-    `n` is the number of give-up cycles already completed for this episode."""
-    sched = GOAL_LANE_GIVEUP_BACKOFF_S
-    i = n if n < len(sched) else len(sched) - 1
-    return sched[max(0, i)]
-
 
 def _lane_boundary_ok(cap):
     """#509 -- extracted from the nested `_boundary_ok` (keeps
@@ -4801,169 +4542,6 @@ def _lane_skip(logs, loc, reason):
     every-sweep logging contract). The early skips below run before
     `live_workers`/`backlog_n` are counted, so they name the gate, not counts."""
     logs.append("lane-occupancy %s -> %s" % (loc, reason))
-
-
-def _lane_giveup_cause(cwd, now):
-    """#693 -- resolve + classify WHY the lanes stayed empty at give-up time,
-    from the per-cwd tickets-status cache (`statusbar.obligation_partition` --
-    the SAME cache the footer renders and `obligation_count` reads, never a
-    parallel derivation) through the PURE `_one_glance.lane_giveup_cause_
-    decision`. The FRESH cache read matters: the nudge's own gate goes through
-    the ~10-min-TTL `backlog_cache`, so a session that drained its backlog to
-    0 workable (or parked everything on U/W/gk) mid-window still reaches the
-    give-up looking like "backlog>0, lanes empty" -- the exact NORMAL states
-    the owner ruled must be ANALYZED, never pinged. Fully guarded, mirroring
-    `_default_obligation_fn`: any failure (statusbar unimportable, corrupt
-    cache) degrades to the honest `unknown` verdict -- never a guess, never a
-    raise on the sweep path."""
-    try:
-        import statusbar
-        workable, user_waiting, ops_wait, gk, ts = \
-            statusbar.obligation_partition(cwd)
-    except Exception:
-        workable = user_waiting = ops_wait = gk = ts = None
-    age_s = (now - ts) if isinstance(ts, (int, float)) else None
-    return _one_glance.lane_giveup_cause_decision(
-        workable=workable, user_waiting=user_waiting, ops_wait=ops_wait,
-        gk=gk, age_s=age_s, max_age_s=GOAL_LANE_GIVEUP_CACHE_MAX_AGE_S)
-
-
-def _lane_giveup_decision(rec, count_gaveup, aborts, loc, live_workers, waiters,
-                          backlog_n, idle, cwd, sid, tmtime, pid, run, send_fn,
-                          dry_run, now):
-    """#442-review F2 / #511 -- the give-up branch, extracted to keep
-    `goal_lane_occupancy_nudge` under its function-line cap (the #509
-    "never grow the capped function" rule). Returns `(skip, logs)`:
-
-    * The one-shot per-episode record fires on the `lpinged` False->True
-      transition for EITHER give-up kind. #693 (owner ruling 2026-08-25): it
-      is a MACHINE-CHANNEL record now, not an owner escalation -- the body is
-      still composed and passed to send(), but `lanestall:` is in
-      `SUPPRESSED_ALERT_PREFIXES`, so send() drops the Discord PING and keeps
-      the machine channel (the journal GAVE-UP verdict below + the
-      `suppressed` delivery-log line) -- the #546/#676/#688 audience split.
-      The journal verdict additionally CLASSIFIES the cause of the empty
-      lanes (`_lane_giveup_cause`: backlog-exhausted / parked / stall /
-      unknown, with the I/U/W/gk counts) -- backlog-exhausted and parked are
-      NORMAL states; `stall` (workable>0, lanes stayed empty) is the one
-      airuleset-bug signal, machine-channel too. `acctblock:` + watchdog job
-      35 (dead-fleet) stay the only phone alarms for a coverage outage.
-    * `count_gaveup` (0-worker EMPTY-lane, fully-stalled box): NO LONGER a
-      permanent latch (#804 mode-1). It records the classified verdict ONCE
-      (#693), then HOLDS for a WIDENING backoff window (`GOAL_LANE_GIVEUP_BACKOFF_S`,
-      1h -> 3h -> 6h) and RE-ARMS one bounded nudge attempt when it elapses -- so
-      a dead-stuck armed loop gets a retry chain forever instead of the pre-#804
-      `skip:gave-up` FOREVER (whose only reset was a lane appearance, i.e. exactly
-      the dispatch a dead box never makes -- the owner "sam sa vypne a uz nezapne"
-      report). #620: the counters STILL reset (`_lane_count_giveup_reset`) when the
-      box GETS a lane (workers>0 = the nudge worked / it dispatched) -- that path
-      also clears the backoff schedule (`lgn`/`lgts`); a busy-solo box churns its
-      backlog inline, and the pre-#620 backlog-change reset (#530) made
-      GOAL_LANE_MAX_NUDGES structurally unreachable there. Each re-armed cycle
-      re-records the ANALYZED verdict (#693: which class of empty-lane state),
-      machine-channel, never a phone alarm.
-    * stash-abort give-up (already pinged): `skip=False` -- the caller FALLS
-      THROUGH to the #479 abort-backoff park, which re-probes delivery on the
-      capped (30-min) schedule. This is the #511 fix: the stash-abort give-up's
-      only reset (the 0-worker idle branch) is unreachable on an under-saturated
-      box that never drains to 0 live workers, so the pre-#511 unconditional
-      `return` left it permanently silent even after the wedged draft cleared
-      and a huge surplus opened (gk 2026-08-16: lna=5/lpinged, park elapsed 10h,
-      I 20 vs 2 workers, skip:gave-up every sweep for hours incl. across backlog
-      GROWTH). Re-probing restores the #479/#502/#509 "hold at cap, re-probe
-      forever, never permanently silent" invariant. The every-sweep decision
-      contract is preserved downstream by the park's own skip:abort-backoff log
-      (still parked) or the delivery attempt's log (park elapsed)."""
-    logs = []
-    if count_gaveup:
-        why = ("ani po %d štúchnutiach sa lány nezaplnili"
-               % GOAL_LANE_MAX_NUDGES)
-        gave = "GAVE UP after %d nudges" % GOAL_LANE_MAX_NUDGES
-    else:
-        why = ("%d pokusov o doručenie štuchnutia za sebou zlyhalo "
-               "(stash abort)" % aborts)
-        gave = "GAVE UP after %d consecutive stash aborts" % aborts
-    if not rec.get("lpinged"):
-        # #693 -- classify the cause of the empty lanes BEFORE writing the
-        # machine-channel verdict (read-only cache read, dry-run safe).
-        cause = _lane_giveup_cause(cwd, now)
-        if send_fn is not None and not dry_run:
-            rec["lpinged"] = True
-            # #804 mode-1 -- anchor the give-up-backoff window on THIS record so
-            # the already-recorded branch below can re-arm after it elapses. `lgn`
-            # (the cycle count) is preserved across re-arms (only widened there /
-            # cleared on a lane appearance), never reset to 0 here.
-            rec["lgts"] = now
-            from notify import stream_redirect
-            # #848: the count give-up accumulates only for a fully-DEAD box
-            # (live_workers == 0) -- `_lane_count_giveup_reset` clears `ln`
-            # whenever live_workers > 0, so a partially-full box never reaches
-            # this give-up (its storm is bounded by the #670 dedup instead). So
-            # live_workers is 0 here -- the box has a workable backlog but never
-            # dispatched a lane despite repeated nudges.
-            # #693: send() SUPPRESSES this ping (`lanestall:` is in
-            # SUPPRESSED_ALERT_PREFIXES) -- the composed body survives only
-            # as the `suppressed` delivery-log trace; the owner-facing
-            # channel is gone, the journal verdict below is the signal.
-            send_fn("⚠️ **%s** — backlog=%d otvorených (nie všetky "
-                    "rozpracovateľné), "
-                    "`/goal` armovaný, ale %d min sa NEDISPATCHLA žiadna lána na "
-                    "workable backlog (beží %d workerov, waiterov: %d) a %s "
-                    "(%s). Pozri sa na reláciu, prosím."
-                    % (watchdog.project_label(cwd), backlog_n,
-                       int(idle // 60), live_workers, waiters, why, loc),
-                    owner=stream_redirect(watchdog.pane_owner(pid, run)) or None,
-                    dedup_key="lanestall:%s:%d" % (sid, int(tmtime or 0)),
-                    dry_run=dry_run)
-        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d "
-                    "idle=%dm -> %s; cause=%s (%s) [machine-channel per #693]"
-                    % (loc, live_workers, waiters, backlog_n, idle // 60, gave,
-                       cause.cause, cause.detail))
-        return True, logs
-    # The one-shot per-episode record has already fired (`lpinged`).
-    if count_gaveup:
-        # #804 mode-1 -- HOLD for a widening backoff window, then RE-ARM one
-        # bounded nudge attempt (never the pre-#804 permanent `skip:gave-up`
-        # latch). `lgn` widens per re-arm (1h -> 3h -> 6h) and is cleared only by
-        # a lane appearance (`_lane_count_giveup_reset` = the box dispatched).
-        lgn = int(rec.get("lgn", 0) or 0)
-        back = _lane_giveup_backoff(lgn)
-        lgts = rec.get("lgts")
-        if not isinstance(lgts, (int, float)):
-            # #804-review 🟡 (reviewers A+B): a PRE-#804 already-latched rec
-            # (`lpinged=True`, no `lgts`) -- the exact fleet population that was
-            # stuck at deploy time -- has no window anchor, so it would never
-            # re-arm and the countdown log would lie. Start the first window NOW
-            # instead of holding forever (the honest re-arm, one backoff later).
-            rec["lgts"] = now
-            logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                        "skip:gave-up (backoff window started, re-arm in %ds, "
-                        "retry #%d)" % (loc, live_workers, waiters, backlog_n,
-                                        back, lgn + 1))
-            return True, logs
-        if (now - lgts) >= back:
-            rec["lgn"] = lgn + 1
-            # #804-review 🔴 (reviewer B): ALSO drop the #670 dedup signature
-            # (`lsw`/`lsb`), else the re-armed nudge hits `skip:dedup-unchanged`
-            # on a FROZEN (0-worker, unchanged-backlog) box -- exactly the
-            # dead-stuck box this backoff exists for -- and never lands, relocating
-            # the permanent silence from `skip:gave-up` to `skip:dedup-unchanged`.
-            # A give-up-backoff re-arm is a sanctioned override of the #670 "frozen
-            # state = silent" rule (the whole point is to re-probe a frozen box).
-            for k in ("ln", "lnbk", "lpinged", "lsw", "lsb"):
-                rec.pop(k, None)           # re-arm: next sweep nudges from ln=1
-            logs.append("lane-occupancy %s -> giveup-backoff elapsed (%ds), "
-                        "re-arming one nudge attempt (retry #%d)"
-                        % (loc, back, lgn + 1))
-            return False, logs             # fall through to a fresh nudge
-        remaining = int(back - (now - lgts)) if isinstance(lgts, (int, float)) else back
-        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                    "skip:gave-up (backoff, re-arm in %ds, retry #%d)"
-                    % (loc, live_workers, waiters, backlog_n,
-                       max(0, remaining), lgn + 1))
-        return True, logs
-    # #511 stash-abort give-up: re-probe -> fall through (skip=False).
-    return False, logs
 
 
 def _lane_pre_send_race(ok, fresh_armed, loc):
@@ -5238,11 +4816,6 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
         logs.append(_wnt_log)
     if _wnt_defer:
         return logs, False
-    if live_workers > 0:
-        # #620 -- a lane appeared -> refresh the empty-lane give-up budget. Placed
-        # BEFORE the boundary/backlog gates (see _lane_count_giveup_reset) so a
-        # busy/non-idle pane's lane still resets `ln`.
-        _lane_count_giveup_reset(rec)
     # #502 -- ACCOUNT-LIMIT BACK-OFF (extracted helper, keeps this function small).
     # When the supervisor's OWN transcript shows a recent account-level dispatch
     # block, dispatching a fresh worker is a certain loss (it dies on the SAME cap
@@ -5339,8 +4912,8 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # gate was parking FOREVER (#530's "1-2 held/foreign items read as workable"),
     # in direct conflict with 24/7 (#791: "loop with 1-2 workable tickets stojí
     # navždy by design"). Drop the floor to 1 once idle > GOAL_LANE_INTERVAL_S, so
-    # such a box is poked; if the ticket is genuinely non-dispatchable the nudge
-    # count still climbs to the give-up backoff (mode-1), never a storm.
+    # such a box is poked; the shared per-kind cadence gate (below) bounds how
+    # often the DECISION line re-journals (the keystroke DELIVERY is retired, #1089).
     min_backlog = _lane_effective_min_backlog(idle)
     if backlog_n < min_backlog:
         _lane_skip(logs, loc, "skip:min-backlog (backlog=%d < %d)"
@@ -5351,65 +4924,12 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # turn every few min, so `idle` almost never reached 15m and the nudge was
     # structurally unreachable (114x skip:idle/9h, 0 fill nudge on montalu1; the
     # #611 escalated-bypass was dead because the marker flaps ⏳<->non-⏳ and the
-    # 3-consecutive-sweep streak never accumulated). Keystroke safety is carried
-    # entirely by the gates that fire AT the keystroke: _lane_boundary_ok (only
-    # deliver at an idle prompt -- already passed above, so a spinning/busy pane
-    # already skipped), recent-human (GOAL_LANE_LIVE_CONVO_S), the two-capture
-    # draft-diff, the hourly cap, and the MAX_NUDGES give-up. The idle floor was a
-    # redundant "wait for quiet" gate that a busy under-saturated session defeats.
-    n = rec.get("ln", 0)
-    aborts = rec.get("lna", 0)
-    # #442 THIRD GAP -- the nudge-count give-up (GOAL_LANE_MAX_NUDGES): a truly
-    # stalled (0-worker) box gets bounded pokes then ONE per-episode record (#693:
-    # classified machine-channel verdict; the owner ping is send()-suppressed).
-    # #804 mode-1: the give-up is a WIDENING BACKOFF, not a forever-latch -- after
-    # the window elapses it re-arms one bounded nudge (a retry chain forever,
-    # never silent). #848: the refill nudge now reaches here for ANY live_workers
-    # < floor (0..4). The count give-up accumulates only for a fully-DEAD box
-    # (live_workers == 0) -- `_lane_count_giveup_reset` fires above whenever
-    # live_workers > 0 (a live lane = the box is making progress), so a
-    # partially-full box's storm is bounded by the #670 dedup + #530 hourly cap
-    # below, not by the give-up. The stash-abort give-up stays -- a
-    # delivery-mechanics bound, not a "stop nudging" one.
-    count_gaveup = n >= GOAL_LANE_MAX_NUDGES
-    stash_gaveup = aborts >= GOAL_LANE_MAX_STASH_ABORTS
-    if count_gaveup or stash_gaveup:
-        giveup_skip, giveup_logs = _lane_giveup_decision(
-            rec, count_gaveup, aborts, loc, live_workers, waiters, backlog_n,
-            idle, cwd, sid, tmtime, pid, run, send_fn, dry_run, now)
-        logs += giveup_logs
-        if giveup_skip:
-            return logs, True
-        # #511 -- the STASH-ABORT give-up did NOT return: after its one-shot
-        # escalation ping it FALLS THROUGH to the #479 abort-backoff park below,
-        # which re-probes delivery on the capped (30-min) schedule instead of
-        # latching on `skip:gave-up` forever. See _lane_giveup_decision.
-    # #479 -- abort-backoff park (next to the cooldown gate, after the
-    # give-up check so a MAX-abort lane still escalates). A stash-abort
-    # against a persistently-parked live draft parks the NEXT attempt for a
-    # widening window; within it, skip WITHOUT capture/keystroke/rescue --
-    # this is the sole damping of the ~60s retry hammer. The park clears on
-    # success and on the idle reset; it "resumes" naturally when the draft
-    # goes (existing gates take the send_continue path) or the window elapses.
-    park = rec.get("lnpark")
-    if park is not None and now < park:
-        logs.append("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                    "skip:abort-backoff remaining=%ds (%d aborts, park until %d)"
-                    % (loc, live_workers, waiters, backlog_n,
-                       int(park - now), aborts, int(park)))
-        return logs, True
-    # #530/#670 -- hourly cap + dedup-on-unchanged cadence gate. #848: the refill
-    # nudge reaches here for ANY live_workers < floor (0..4), so live_workers is
-    # part of the #670 dedup signature `(live_workers, backlog_n)` -- which VARIES
-    # as lanes come and go, so an identical signature (same lane count + backlog)
-    # correctly dedups a repeat, and a state MOVE (a lane returned) re-nudges.
-    # #929: authority forwarded so the starved full-authority shortcut engages.
-    cd_skip, cd_log = _lane_cooldown_decision(
-        rec, now, backlog_n, loc, live_workers, waiters, authority=authority)
-    if cd_log:
-        logs.append(cd_log)
-    if cd_skip:
-        return logs, True
+    # 3-consecutive-sweep streak never accumulated). #1096: the give-up / cooldown
+    # / abort-backoff DELIVERY-cadence gates that used to sit here are DELETED --
+    # they only governed WHEN to re-DELIVER a keystroke, and #1089 retired the
+    # keystroke delivery entirely (the gates/lanefill.py Stop gate is the refill
+    # lever now). What remains is the DECISION line below + the shared per-kind
+    # cadence gate; keystroke safety is moot because no keystroke is typed.
     # #442: the SAME shared check job 9's virgin-arm gate uses, but through
     # the lane path's OWN short window (never the 30-min default -- see
     # GOAL_LANE_LIVE_CONVO_S above). The `window_s` seam already exists on
@@ -5521,8 +5041,9 @@ def _lane_stuck_owner_alert(now, run, rec, glance, sid, cwd, pid, loc,
                             send_fn, dry_run):
     """#662 -- route a PERSISTENT structural one-glance `stuck` verdict to a
     real OWNER ALERT (never another pane keystroke). SILENCE B of the montalu6
-    9,5h outage: the lane KEYSTROKE nudge above tries to RECOVER a stuck pane
-    (bounded GOAL_LANE_MAX_NUDGES); when the pane stays `stuck` across
+    9,5h outage: the lane-occupancy nudge above no longer types a keystroke
+    (delivery retired, #1089) — the lane-fill Stop gate is the refill lever — so
+    when the pane stays `stuck` across
     `_stuck_alert_streak()` sweeps the session has NOT revived (a dead /
     login-dialog-covered session a `continue` cannot bring back). Records ONE
     per-episode signal (dedup_key `stuckalert:`), reusing the ALREADY-cached

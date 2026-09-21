@@ -30,7 +30,17 @@ from test_wrapped_draft import render_box
 # 400-700c and WRAP at 176 col, so their leading prefix (`lane-check: ` /
 # `stuck-check: `) sits on the box HEAD row, ABSENT from the wrapped TAIL — the
 # #506 dead-branch input (`_janitor_recover` read the tail).
-OWN_LANE_NUDGE = goal.GOAL_LANE_NUDGE_TEXT_FN(5, 0)      # 691c, "lane-check: "
+# #1096: the lane-occupancy nudge DELIVERY is retired, so its text builder is
+# gone; the `lane-check: ` prefix stays a recognized own-draft prefix
+# (`_JANITOR_OWN_PREFIXES`, watchdog/stash.py), so a frozen representative draft
+# (> BOX_WIDTH so it wraps at 176) stands in for it.
+OWN_LANE_NUDGE = (
+    "lane-check: backlog=5 OTVORENÝCH tiketov — dispatchni len naozaj workable "
+    "lány PARALELNE (isolation:\"worktree\" autopilot-worker, run_in_background), "
+    "refill vrátený slot po jeho návrate, integruj SÉRIOVO pod integračným "
+    "mutexom; ustúp len na reálny resource signál. PRIORITU ani POČET lán "
+    "NEURČUJE tento nudge — platí priorita dohodnutá v tejto session (#993)."
+)
 OWN_STUCK_NUDGE = wd.WORKING_NUDGE_TEXT                  # 431c, "stuck-check: "
 # A long FOREIGN draft that WRAPS but does NOT start with any own prefix — the
 # invariant control (head-read must not widen what the janitor claims as ours).

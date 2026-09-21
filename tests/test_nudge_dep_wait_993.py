@@ -12,7 +12,6 @@ from unittest import TestCase, main
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
-import watchdog.lane_resources as lr  # noqa: E402
 import watchdog.queue_arrival_recheck as qa  # noqa: E402
 import watchdog.goal as goal  # noqa: E402
 
@@ -91,22 +90,6 @@ class TestLaneDispatchableDecision(TestCase):
             lambda cwd: None, "/c", {}, 100, "loc", 0, 0, 5)
         self.assertTrue(skip)
         self.assertIn("skip:dispatchable-unknown", log)
-
-
-class TestLaneNudgeTextCandidateCount(TestCase):
-    """#993 item 3 — when candidate_n is given the text names it (dispatchable
-    count), dropping the unconditional 'sú voľné sloty' pressure."""
-
-    def test_candidate_count_named(self):
-        t = lr._lane_nudge_text(37, 2, {"total": 5}, candidate_n=3)
-        self.assertIn("3 DISPATCHOVATEĽNÝCH", t)
-        self.assertNotIn("Sú VOĽNÉ sloty", t)
-        self.assertIn("backlog=37", t)   # raw backlog still reported
-
-    def test_no_candidate_keeps_legacy_wording(self):
-        t = lr._lane_nudge_text(37, 2, {"total": 5})
-        self.assertIn("Sú VOĽNÉ sloty", t)
-        self.assertNotIn("DISPATCHOVATEĽNÝCH", t)
 
 
 if __name__ == "__main__":

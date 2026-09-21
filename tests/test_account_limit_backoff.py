@@ -268,22 +268,5 @@ class TestAccountLimitBackoff(unittest.TestCase):
         self.assertEqual(rec["alim"]["first_seen"], now)              # re-armed
 
 
-class TestNudgeTextQualifiesOpenCount(unittest.TestCase):
-    """#502 defect (b): the nudge text names OPEN tickets honestly, not as if all
-    were dispatchable -- while keeping the whole #442/#481 fleet doctrine."""
-
-    def test_empty_lane_text_qualifies_open_not_workable(self):
-        rendered = goal.GOAL_LANE_NUDGE_TEXT_FN(7, 2)
-        low = rendered.lower()
-        self.assertIn("nie všetky", low)
-        self.assertIn("rozpracovate", low)
-        self.assertIn("workable", low)
-        # doctrine preserved (#726: within-batch bound is the resource-signal
-        # backoff, not the retired #442 "cap 8")
-        self.assertIn("worktree", low)
-        self.assertIn("rate-limit", low)
-        self.assertIn("sériovo", low)
-
-
 if __name__ == "__main__":
     unittest.main()

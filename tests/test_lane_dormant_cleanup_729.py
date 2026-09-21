@@ -64,64 +64,12 @@ class EffectivenessBackoffRemoved(unittest.TestCase):
             self.assertFalse(hasattr(goal, name),
                              "goal.%s must be removed (#729)" % name)
 
-    def test_cooldown_decision_signature_is_simplified(self):
-        params = set(inspect.signature(goal._lane_cooldown_decision).parameters)
-        for gone in ("under_saturated", "eff_workers"):
-            self.assertNotIn(gone, params,
-                             "_lane_cooldown_decision must drop %r (#729)" % gone)
-        # the hourly-cap + #670 dedup inputs stay
-        for kept in ("rec", "now", "backlog_n", "live_workers", "waiters"):
-            self.assertIn(kept, params, kept)
 
-    def test_record_nudge_signature_is_simplified(self):
-        params = set(inspect.signature(goal._lane_record_nudge).parameters)
-        for gone in ("under_saturated", "moved"):
-            self.assertNotIn(gone, params,
-                             "_lane_record_nudge must drop %r (#729)" % gone)
-        for kept in ("rec", "backlog_n", "n", "now"):
-            self.assertIn(kept, params, kept)
-
-
-class CooldownStillDedupsAndCaps(unittest.TestCase):
-    """The KEPT behaviour: hourly cap + #670 dedup on the (workers, backlog)
-    signature, now the single un-branched cadence gate."""
-
-    NOW = 1_000_000_000.0
-
-    def _decide(self, rec, live_workers, backlog_n):
-        return goal._lane_cooldown_decision(
-            rec, self.NOW, backlog_n, loc="zbynek:1.0",
-            live_workers=live_workers, waiters=1)
-
-    def test_unchanged_state_past_cooldown_is_deduped(self):
-        hour = goal.GOAL_LANE_INTERVAL_S
-        rec = {"llast": self.NOW - 2 * hour, "lsw": 0, "lsb": 22}
-        skip, log = self._decide(rec, live_workers=0, backlog_n=22)
-        self.assertTrue(skip)
-        self.assertIn("dedup-unchanged", log or "")
-
-    def test_within_cooldown_is_hourly_capped(self):
-        hour = goal.GOAL_LANE_INTERVAL_S
-        rec = {"llast": self.NOW - hour // 2, "lsw": 0, "lsb": 22}
-        skip, log = self._decide(rec, live_workers=0, backlog_n=22)
-        self.assertTrue(skip)
-        self.assertIn("hourly-cap", log or "")
-
-    def test_changed_state_past_cooldown_still_fires(self):
-        hour = goal.GOAL_LANE_INTERVAL_S
-        rec = {"llast": self.NOW - 2 * hour, "lsw": 0, "lsb": 22}
-        skip, log = self._decide(rec, live_workers=0, backlog_n=21)
-        self.assertFalse(skip, log)
-
-    def test_record_then_decide_dedups(self):
-        rec = {}
-        hour = goal.GOAL_LANE_INTERVAL_S
-        goal._lane_record_nudge(rec, live_workers=0, backlog_n=22, n=0,
-                                now=self.NOW - 2 * hour)
-        self.assertEqual((rec.get("lsw"), rec.get("lsb")), (0, 22))
-        skip, log = self._decide(rec, live_workers=0, backlog_n=22)
-        self.assertTrue(skip)
-        self.assertIn("dedup-unchanged", log or "")
+# #1096: the `_lane_cooldown_decision` / `_lane_record_nudge` signature +
+# behaviour tests that lived here are DELETED — those helpers (the whole lane
+# delivery-cadence machinery) were removed once #1089 retired the lane-occupancy
+# keystroke DELIVERY they gated. Their absence is now locked by
+# tests/test_delivery_cadence_removed_1096.py.
 
 
 if __name__ == "__main__":

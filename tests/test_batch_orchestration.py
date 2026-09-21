@@ -219,29 +219,6 @@ class TestWatchdogLaneNudgeIsContinuous(TestCase):
 
     # ---- content locks (stable, no driving) ----
 
-    def test_nudge_text_teaches_refill(self):
-        rendered = goal.GOAL_LANE_NUDGE_TEXT_FN(37, 2)
-        low = rendered.lower()
-        self.assertIn("refill", low)        # refill mechanism kept (#848)
-        self.assertIn("doplň", low)         # "refill (doplň) vrátený slot"
-        self.assertIn("worktree", low)
-        self.assertIn("paraleln", low)
-        self.assertIn("sériovo", low)       # serial integration under the mutex
-        self.assertIn("rate-limit", low)
-        self.assertNotIn("cap 8", low)      # not the retired #442 fixed "cap 8"
-        # the retired batch noun must be GONE
-        self.assertNotIn("várk", low)
-        # #994: no lane-COUNT prescription (was `assertIn("5")` for "up to 5
-        # lanes") and no priority override — defers to the #993 session priority.
-        self.assertIn("#993", rendered)
-        self.assertNotIn("drž až", low)
-        self.assertNotIn("saturuj", low)
-
-    def test_nudge_text_dropped_the_batch_phrasing(self):
-        low = goal.GOAL_LANE_NUDGE_TEXT_FN(1, 0).lower()
-        self.assertNotIn("začni novú várku", low)
-        self.assertNotIn("žiadny refill kým", low)
-
     def test_under_saturated_fill_text_and_surplus_constant_are_retired(self):
         self.assertFalse(hasattr(goal, "GOAL_LANE_UNDERSAT_NUDGE_TEXT"))
         self.assertFalse(hasattr(goal, "GOAL_LANE_UNDERSAT_SURPLUS"))

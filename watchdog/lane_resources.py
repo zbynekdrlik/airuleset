@@ -8,9 +8,10 @@ instead of split).  The module owns:
 - ``lane_resource_caps(cwd)`` — reads ``.claude/lane-resources.json`` and
   returns ``(caps_dict, reason)`` where caps_dict carries ``total`` and
   optionally per-resource counts (``box``, ...)
-- ``count_resource_usage(cwd, evidence)`` — reads ``.lane-needs`` from live
-  worktree directories and returns ``{"box": K}``
-- ``_lane_nudge_text(...)`` — resource-aware nudge text
+
+(#1096: ``count_resource_usage`` and ``_lane_nudge_text`` were removed with the
+lane-occupancy delivery-cadence machinery — #1089 retired the keystroke DELIVERY
+that consumed the nudge text + its per-resource usage read.)
 
 Backward compat: ``goal.py`` re-imports the public names so existing
 ``from watchdog.goal import lane_resource_cap`` keeps working.
@@ -136,113 +137,3 @@ def lane_resource_cap(cwd):
     pair, exactly like the original #970 implementation."""
     caps, reason = lane_resource_caps(cwd)
     return caps["total"], reason
-
-
-# ---------------------------------------------------------------------------
-# count_resource_usage -- reads .lane-needs from live worktrees
-# ---------------------------------------------------------------------------
-
-def count_resource_usage(cwd, evidence):
-    """Count lanes per resource class by reading ``.lane-needs`` files in
-    worktree directories that correspond to LIVE workers.
-
-    ``evidence`` is the ``[WorkerLane, ...]`` list from
-    ``count_live_workers`` -- only lanes with ``state == "live"`` are
-    counted.  Returns ``{"box": K}`` (a key per resource that has at
-    least one occupant, or ``{}`` when none).
-    """
-    if not cwd or not evidence:
-        return {}
-    # Y-2 fix: read from the worktree's PRIVATE gitdir, not the working tree.
-    # The gitdir for a worktree is <main-repo>/.git/worktrees/<agent-id>/.
-    git_dir = os.path.join(cwd, ".git", "worktrees")
-    # Fallback: also check the old working-tree path for transition compat.
-    worktrees_dir = os.path.join(cwd, ".claude", "worktrees")
-    counts = {}
-    for lane in evidence:
-        if lane.state != "live":
-            continue
-        # Primary: gitdir path (invisible to git status, dies with worktree)
-        needs_path = os.path.join(git_dir, lane.agent_id, _LANE_NEEDS_FILE)
-        if not os.path.isfile(needs_path):
-            # Fallback: old working-tree-root path (transition compat)
-            needs_path = os.path.join(
-                worktrees_dir, lane.agent_id, _LANE_NEEDS_FILE)
-        try:
-            with open(needs_path) as f:
-                needs = [line.strip() for line in f if line.strip()]
-        except (OSError, IOError):
-            # No lane-needs or unreadable -> box-free lane, no resource counted
-            continue
-        for rname in needs:
-            counts[rname] = counts.get(rname, 0) + 1
-    return counts
-
-
-# ---------------------------------------------------------------------------
-# Nudge text -- resource-aware
-# ---------------------------------------------------------------------------
-
-def _lane_nudge_text(backlog_n, waiters, caps, usage=None, live_workers=0,
-                     candidate_n=None):
-    """Build the lane-check nudge text with resource-aware info (#970).
-
-    ``caps`` is the dict from ``lane_resource_caps`` (``{"total": N, "box": M}``
-    or ``{"total": N}``).  ``usage`` is from ``count_resource_usage`` or
-    ``None``.  ``live_workers`` is the total live lane count for the
-    resource snippet.
-
-    ``candidate_n`` (#993 item 3): the DISPATCHABLE-candidate count (workable ∧
-    deps satisfied). When given, the action
-    sentence names it — "dispatchni N DISPATCHOVATEĽNÝCH jednotiek" — instead of
-    the old unconditional "sú voľné sloty — workable tikety dispatchni" pressure
-    (the DECISION already refused to fire when candidate_n was 0). None keeps the
-    legacy wording (a caller that has no dispatchable count, e.g. the backward-
-    compat GOAL_LANE_NUDGE_TEXT_FN).
-    """
-    if isinstance(candidate_n, int) and not isinstance(candidate_n, bool):
-        _action = ("Je %d DISPATCHOVATEĽNÝCH jednotiek (so zavretými "
-                   "závislosťami) — dispatchni ich" % candidate_n)
-    else:
-        _action = "Sú VOĽNÉ sloty — workable tikety dispatchni"
-    total = caps.get("total", GOAL_LANE_SATURATION_WORKERS)
-    resource_keys = sorted(k for k in caps if k != "total")
-    resource_snippet = ""
-    if resource_keys and usage is not None:
-        parts = []
-        resource_occupied = 0
-        for rk in resource_keys:
-            rcap = caps[rk]
-            rused = usage.get(rk, 0)
-            resource_occupied += rused
-            parts.append("%s %d/%d occupied" % (rk, rused, rcap))
-        box_free_cap = total - sum(caps[rk] for rk in resource_keys)
-        box_free_used = max(0, live_workers - resource_occupied)
-        box_free_avail = max(0, box_free_cap - box_free_used)
-        parts.append("box-free %d/%d free" % (box_free_avail, max(0, box_free_cap)))
-        resource_snippet = " (%s)" % " · ".join(parts)
-
-    # #994 — FACTS + the #848 CONTINUOUS REFILL mechanism, but NEVER a
-    # count/priority PRESCRIPTION. The nudge reports backlog, live lanes,
-    # waiters + resource caps and keeps the refill/worktree/serial-integration
-    # mechanism, but it no longer says "hold up to N parallel lanes" / "saturate"
-    # / "as many as possible" (the exact priority override the owner reported):
-    # HOW MANY lanes and WHICH tickets first are the session's call, bounded by
-    # real resource limits, and PRIORITY is the one the owner agreed this session
-    # (#993), not this nudge.
-    return (
-        "lane-check: backlog=%d OTVORENÝCH tiketov (nie všetky musia byť hneď "
-        "rozpracovateľné — zadržané zelené vetvy, časť v cudzom repe či zastrešujúce "
-        "NErátaj; dispatchni len naozaj workable), BEŽÍ %d živých lán "
-        "(waiterov beží: %d)%s. " + _action + " "
-        "PARALELNÝMI isolation:\"worktree\" autopilot-worker lánmi "
-        "(run_in_background), refill (doplň) vrátený slot po jeho návrate, "
-        "integruj SÉRIOVO pod integračným mutexom (machine compacty sú ZRUŠENÉ, "
-        "#1084 — native autocompact, žiadny compact príkaz); ustúp len na REÁLNY resource signál "
-        "(server-side rate-limit, memory pressure boxu, CC max-subagents strop). "
-        "PRIORITU (ČO riešiť a v akom poradí) ani POČET lán NEURČUJE tento nudge "
-        "— platí priorita dohodnutá v tejto session: architektúra > "
-        "architecture-rework > prio:bounce > backlog (#993). "
-        "NErefillni dep-wait jednotku (otvorené Depends-on); infra tikety rieš "
-        "po jednom (sériová infra rola je v návrhu, kolo 3 #993)."
-    ) % (backlog_n, live_workers, waiters, resource_snippet)

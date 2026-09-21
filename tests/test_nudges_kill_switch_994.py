@@ -363,19 +363,6 @@ class TestNudgeTextPhraseLock(unittest.TestCase):
         self.assertNotIn("drž až", text)               # "hold up to N lanes"
         self.assertNotIn("menej než", text)            # cap-count framing
 
-    def test_lane_nudge_text_facts_no_count(self):
-        from watchdog.lane_resources import _lane_nudge_text
-        text = _lane_nudge_text(7, 1, {"total": 5}, usage=None, live_workers=2)
-        self._no_count_prescription(text)
-        self.assertIn("backlog", text)                 # still reports the fact
-        self.assertIn("#993", text)                    # agreed-priority reference
-
-    def test_goal_lane_nudge_text_fn_no_count(self):
-        import watchdog.goal as goal
-        text = goal.GOAL_LANE_NUDGE_TEXT_FN(7, 1)
-        self._no_count_prescription(text)
-        self.assertIn("#993", text)
-
     def test_queue_arrival_nudge_text_no_count(self):
         from watchdog.queue_arrival_recheck import _nudge_text as q_nudge
         text = q_nudge([5177, 5310], 3)

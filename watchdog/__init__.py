@@ -2830,9 +2830,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           Escape+BSpace via `_clear_stranded_truncated_goal`), so none of the
           old re-arm delivery-discipline machinery is needed any more — a false
           ping just costs the user one glance and a cheap re-run.
-          `goal.goal_lane_sweep` is the ONE watchdog-INITIATED keystroke
-          left in the whole family (#365/#351's own lane-occupancy nudge,
-          functionally unchanged) and needs `compact_handled_this_sweep`
+          `goal.goal_lane_sweep` is where the remaining watchdog-INITIATED
+          keystrokes originate (its RIDERS deliver; the #365/#351 lane-occupancy
+          nudge DELIVERY is retired, #1089/#1096) and needs `compact_handled_this_sweep`
           for the same coordination reason job 9 above does. It also carries
           the per-armed-pane RIDERS (ZERO extra pane walk, same `handled`
           coordination, NOT separately numbered): the W/I partition-audit
@@ -5086,9 +5086,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     #     truncated-/goal CLEAR (`_clear_stranded_truncated_goal`, Escape+
     #     BSpace, gated on a clean boundary + fail-closed recent-human + a
     #     byte-exact-prefix content proof + a bounded give-up).
-    #   * `goal_lane_sweep` is the OTHER watchdog-INITIATED keystroke in
-    #     the family (#365/#351's own lane-occupancy nudge,
-    #     functionally unchanged) and needs `compact_handled_this_sweep`
+    #   * `goal_lane_sweep` is where the OTHER watchdog-INITIATED keystrokes
+    #     originate (its RIDERS deliver; the #365/#351 lane-occupancy nudge
+    #     DELIVERY is retired, #1089/#1096) and needs `compact_handled_this_sweep`
     #     for the identical reason job 9 above does.
     def _job_goal_dark_watch():
         from watchdog import goal as _goal_mod

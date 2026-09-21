@@ -1,6 +1,6 @@
 """#704 — apply the analyze-not-ping doctrine fleet-wide: suppress airuleset's own
 STATE / STALL heuristic owner-pings, the direct siblings of the already-suppressed
-apierr / sesslimit / stuckalert(#688) / lanestall(#693) / oauthblock(#676) family.
+apierr / sesslimit / stuckalert(#688) / oauthblock(#676) family (lanestall retired #1096).
 
 Owner directive (2026-08-25, verbatim): "chodi mi od teba denne stovky sprav na
 discord je to uplne nepouzitelne … spravny postup by mal byt analyzovat preco bola
