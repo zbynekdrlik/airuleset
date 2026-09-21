@@ -145,6 +145,30 @@ PRODUCT_CODE_FLAG_NO_READBACK = (
     "                      body_is_html=True)\n"
 )
 
+# Driver with flag + genuine read-back, then a TRAILING mention of message_post
+# (a print/comment). The read-back window must anchor to the FIRST post so this
+# still PASSES (review #1054 F2).
+DRIVER_FLAG_READBACK_TRAILING = (
+    "import xmlrpc.client\n"
+    "models = xmlrpc.client.ServerProxy(url + '/xmlrpc/2/object')\n"
+    'mid = models.execute_kw(db, uid, pwd, "discuss.channel", "message_post",\n'
+    '    [[283]], {"body": "<p>Dobry den.</p>", "body_is_html": True})\n'
+    'stored = models.execute_kw(db, uid, pwd, "mail.message", "read",\n'
+    '    [[mid]], {"fields": ["body"]})[0]["body"]\n'
+    'assert stored.startswith("<p>") and "&lt;" not in stored\n'
+    'print("message_post complete")\n'
+)
+
+# Driver whose body double-escapes NON-allowlisted tags (<i>, <code>) -- the
+# escaped detector must be GENERIC, not a fixed tag list (review #1054 F4).
+DRIVER_ESC_UNCOMMON = (
+    "import xmlrpc.client\n"
+    "models = xmlrpc.client.ServerProxy(url + '/xmlrpc/2/object')\n"
+    'models.execute_kw(db, uid, pwd, "discuss.channel", "message_post",\n'
+    '    [[283]], {"body": "&lt;i&gt;x&lt;/i&gt; &lt;code&gt;y&lt;/code&gt;",\n'
+    '     "body_is_html": True})\n'
+)
+
 
 def _write(tmpdir, name, content):
     p = Path(tmpdir) / name
@@ -186,6 +210,14 @@ class TestDoubleEscape(unittest.TestCase):
         # double-escape; it carries the flag, so it passes.
         rc, _ = _run_hook(ESCAPED_MATH_NOT_TAG, "Bash")
         self.assertEqual(rc, 0)
+
+    def test_inline_uncommon_escaped_tag_blocked(self):
+        # An escaped NON-allowlisted tag inline (any tool) -> BLOCK (generic
+        # escaped detector, review #1054 F4).
+        payload = 'task.message_post(body="&lt;code&gt;x&lt;/code&gt;", body_is_html=True)'
+        for tool in ("Bash", "Write", "Edit"):
+            rc, _ = _run_hook(payload, tool)
+            self.assertEqual(rc, 2, "tool=%s" % tool)
 
 
 # --------------------------------------------------------------------------- #
@@ -286,33 +318,108 @@ class TestShippedFile(unittest.TestCase):
             rc, err = _run_cmd("ruff check %s" % f)
             self.assertEqual(rc, 0, err)
 
+    # -- review #1054 regressions --
+
+    def test_scp_filename_contains_message_post_blocked(self):
+        # F1: a ship command whose command line contains `message_post` (the
+        # driver FILENAME) must still open the FILE, not route past it.
+        with tempfile.TemporaryDirectory() as d:
+            f = _write(d, "send_message_post.py", DRIVER_NO_FLAG)
+            rc, err = _run_cmd("scp %s gk:/tmp/x.py" % f)
+            self.assertEqual(rc, 2, err)
+
+    def test_scp_trailing_comment_message_post_blocked(self):
+        # F1: a trailing comment mentioning message_post must not route past
+        # the file open.
+        with tempfile.TemporaryDirectory() as d:
+            f = _write(d, "driver.py", DRIVER_NO_FLAG)
+            rc, err = _run_cmd("scp %s gk:/tmp/x.py # runs the message_post" % f)
+            self.assertEqual(rc, 2, err)
+
+    def test_scp_apostrophe_in_command_still_blocks(self):
+        # F3: an unbalanced quote in the command must not lose the operand and
+        # silently fail-open (regex operand collection, no shlex).
+        with tempfile.TemporaryDirectory() as d:
+            f = _write(d, "driver.py", DRIVER_NO_FLAG)
+            rc, err = _run_cmd("scp %s gk:/tmp/x.py # Milan's driver" % f)
+            self.assertEqual(rc, 2, err)
+
+    def test_scp_uncommon_escaped_tag_blocked(self):
+        # F4: an escaped NON-allowlisted tag (<i>, <code>) must BLOCK (generic
+        # escaped detector).
+        with tempfile.TemporaryDirectory() as d:
+            f = _write(d, "driver.py", DRIVER_ESC_UNCOMMON)
+            rc, err = _run_cmd("scp %s gk:/tmp/x.py" % f)
+            self.assertEqual(rc, 2, err)
+
+    def test_sftp_ship_no_flag_blocked(self):
+        # F5: sftp is a ship shape too.
+        with tempfile.TemporaryDirectory() as d:
+            f = _write(d, "driver.py", DRIVER_NO_FLAG)
+            rc, err = _run_cmd("sftp gk:/tmp/ <<< 'put %s'" % f)
+            self.assertEqual(rc, 2, err)
+
+    def test_scp_readback_with_trailing_mention_allowed(self):
+        # F2: a genuine read-back followed by a trailing message_post mention
+        # must PASS (read-back window anchored to the FIRST post).
+        with tempfile.TemporaryDirectory() as d:
+            f = _write(d, "driver.py", DRIVER_FLAG_READBACK_TRAILING)
+            rc, err = _run_cmd("scp %s gk:/tmp/x.py" % f)
+            self.assertEqual(rc, 0, err)
+
+    def test_shipped_block_message_has_no_shell_errors(self):
+        # Path B block messages must render cleanly (no command-substitution
+        # from backticks in an unquoted heredoc) and keep their key tokens.
+        with tempfile.TemporaryDirectory() as d:
+            f = _write(d, "driver.py", DRIVER_NO_FLAG)
+            rc, err = _run_cmd("scp %s gk:/tmp/x.py" % f)
+            self.assertEqual(rc, 2, err)
+            self.assertNotIn("command not found", err)
+            self.assertNotIn("syntax error", err)
+            self.assertIn("body_is_html", err)
+            self.assertIn("driver.py", err)
+
 
 # --------------------------------------------------------------------------- #
-# (f) Write/Edit of a driver-shaped file (direct payload) -- read-back.
+# Write/Edit of a driver-shaped file -- read-back is NOT enforced at authoring
+# time (it over-blocks docs / product code / tests fleet-wide, review #1054);
+# it is enforced where a driver is unambiguously being SENT (the ship-file
+# check above). Authoring a driver is allowed; shipping it flag-less/no-readback
+# is blocked.
 # --------------------------------------------------------------------------- #
-class TestWriteEditReadback(unittest.TestCase):
-    def test_write_driver_flag_no_readback_blocked(self):
+class TestWriteEditNoAuthoringReadback(unittest.TestCase):
+    def test_write_driver_flag_no_readback_allowed(self):
+        # Authoring a driver (flag, no read-back) is allowed -- the read-back is
+        # required at SHIP time, not at Write time.
         rc, err = _run_hook(DRIVER_FLAG_NO_READBACK, "Write")
-        self.assertEqual(rc, 2, err)
-        self.assertRegex(err.lower(), r"read.?back")
+        self.assertEqual(rc, 0, err)
 
-    def test_edit_driver_flag_no_readback_blocked(self):
+    def test_edit_driver_flag_no_readback_allowed(self):
         rc, err = _run_hook(DRIVER_FLAG_NO_READBACK, "Edit")
-        self.assertEqual(rc, 2, err)
+        self.assertEqual(rc, 0, err)
 
     def test_write_driver_flag_readback_allowed(self):
         rc, err = _run_hook(DRIVER_FLAG_READBACK, "Write")
         self.assertEqual(rc, 0, err)
 
-    def test_write_product_code_no_false_positive(self):
-        # self.message_post + flag, no connection idiom -> not a driver ->
-        # read-back not required -> PASS (no false positive on product code).
+    def test_write_product_code_allowed(self):
+        # self.message_post + flag, no read-back -> allowed (product code).
         rc, err = _run_hook(PRODUCT_CODE_FLAG_NO_READBACK, "Write")
         self.assertEqual(rc, 0, err)
 
+    def test_write_doc_discussing_driver_mechanics_allowed(self):
+        # A DOC that mentions message_post + "odoo shell" + raw <p> + the flag
+        # (e.g. this very doctrine file) must stay editable fleet-wide -- the
+        # authoring-time read-back check would have blocked it (review #1054).
+        doc = (
+            "Chatter helper: a driver shipped by `ssh gk 'odoo shell'` posts\n"
+            'via message_post(body="<p>Dobry den</p>", body_is_html=True).\n'
+        )
+        rc, err = _run_hook(doc, "Write")
+        self.assertEqual(rc, 0, err)
+
     def test_bash_inline_flag_no_readback_unchanged(self):
-        # An INLINE Bash post with the flag but no read-back stays #915-clean
-        # (read-back is a driver-FILE requirement, not an inline-post one).
+        # An INLINE Bash post with the flag but no read-back stays #915-clean.
         rc, err = _run_hook(DRIVER_FLAG_NO_READBACK, "Bash")
         self.assertEqual(rc, 0, err)
 

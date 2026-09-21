@@ -80,7 +80,7 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   NEVER posts via an ad-hoc driver — NIKDY ad-hoc driver mimo stream recept:** use
   the stream-approved poster (its read-back); a driver shipped by
   `scp` / `ssh … odoo shell < driver.py` is OPENED + gated too — dvojité
-  escapnutie (`&lt;p&gt;`) or a missing read-back = BLOCK (#1054, odoo-erp #4650).
+  escapnutie tagov or a missing read-back = BLOCK (#1054, odoo-erp #4650).
 - **The message body MUST carry a direct deep-link URL to the LIVE feature** on
   the client's PROD — the actual route/record/page URL the client clicks to SEE
   it, never a menu path ("Predaj → Objednávky → …") and never the bare homepage.
