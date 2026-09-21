@@ -4543,32 +4543,6 @@ def _lane_skip(logs, loc, reason):
     logs.append("lane-occupancy %s -> %s" % (loc, reason))
 
 
-def _lane_pre_send_race(ok, fresh_armed, loc):
-    """#486 G6 -- the pre-send race re-check over the FRESH capture, taken right
-    before the keystroke. The STRUCTURED signal already gated this pane armed;
-    this final RENDER read only VETOES a genuine change SINCE the sweep. Returns
-    ``(should_skip, log_lines)`` (`log_lines` is a 0/1-element list).
-
-    A readable footer that lost the glyph (`is False` = a real clear right now,
-    the render is the freshest truth there) or a lost/unreadable input box
-    (`not ok`) vetoes. An UNREADABLE footer (`None`, the #486 obscured case) NO
-    LONGER vetoes: re-vetoing on the same undeterminable footer the structured
-    gate just overrode is what re-silenced the incident one layer down. It
-    proceeds, logged. The `is False` veto is also the safety net for a 60s-stale
-    goal_mark "set" (a goal cleared THIS sweep leaves the footer readable without
-    the glyph) and a stale heartbeat-True -- defense in depth."""
-    if not ok:
-        return True, ["skip raced (lane-occupancy) %s -> pane moved since "
-                      "the sweep" % loc]
-    if fresh_armed is False:
-        return True, ["skip raced (lane-occupancy) %s -> footer readable, goal "
-                      "cleared since the sweep" % loc]
-    if fresh_armed is None:
-        return False, ["race-check (lane-occupancy) %s -> render footer "
-                       "unreadable; structured-armed stands" % loc]
-    return False, []
-
-
 def _lane_wnt_gate(rec, marker, waiters, projects_dir, cwd, sid, now,
                    backlog_fetch, state, loc, dry_run, idle=None):
     """#571 -- the STRUCTURED live-lane gate + working-no-tasks decision,

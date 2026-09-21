@@ -45,6 +45,7 @@ _GOAL_DEAD_SYMBOLS = (
     "_lane_giveup_backoff",
     "_lane_count_giveup_reset",
     "_lane_stash_abort_backoff",
+    "_lane_pre_send_race",  # #486 pre-send race gate — orphaned since #1089 retired delivery
     "GOAL_LANE_NUDGE_TEXT_FN",
     # orphaned cadence constants (only consumer was a deleted helper)
     "GOAL_LANE_STARVED_INTERVAL_S",
