@@ -1,18 +1,6 @@
 # Client Board Tasks — project.task Formatting Doctrine
 
-**Canonical rule for HOW a stream writes to a client's Odoo project board
-(`project.task`) and to a client Discuss thread.** ONE fleet doctrine, every
-client board — the universal rules below hold for EVERY stream/instance; a small
-**per-board profile** supplies only what genuinely differs (stage vocabulary,
-assignee, addressee, who moves to Done). Origin: operator directives montalu4
-2026-09-08 (#949); the fleet-unification directives of 13.–14.9.2026
-(#1014 / #1018 / #1024); lint odoo-erp#6605.
-
-**Why per-board profiles, not one table:** the montalu-shaped table applied
-literally is WRONG on the slovnormal board (different stages, an assignee, a
-named addressee). The universal rules are identical everywhere; only the profile
-row changes. A correction the owner makes to a board changes THIS file (one place
-for all streams), never a per-stream memory (#1028) — see rule 12.
+Full rationale & background: `client-board-tasks-history.md` (verbatim, not injected, #1098).
 
 ---
 
@@ -31,17 +19,7 @@ ujasniť** (montalu / miva); slovnormal has no dedicated question stage, so a
 question stays in **V práci** with the chatter question of rule 4.
 
 Adding a new board = adding a profile row here (and its GitHub `needs-answer`
-mirror if a client answer is pending). The stage names above are the CURRENT
-(transitional) PROD vocabulary; the column-vocabulary convergence to the native
-Odoo 19 stage set — **Nové → Požadujú sa zmeny → V riešení → Čaká → Hotové →
-Zrušené** (with **Čaká** as the awaiting-verification stage), opt-in per
-`board_standard_managed` — and the shared `odoo_post.py` posting template are
-owned by **odoo-erp#7101**; this file's profile rows are updated from there,
-never invented locally. **COUPLING:** when that convergence lands on a managed
-board, rule 3's Verifikácia Stop-hook stage names (`VERIF_STAGE_RX` in
-`hooks/stop-check-prose-violations.sh`) MUST be updated together with the profile
-rows (add `Čaká`), or the shape check silently stops firing on the renamed
-stage — this belongs to the odoo-erp#7101 rollout, tracked as a follow-up.
+mirror if a client answer is pending).
 
 ---
 
@@ -210,3 +188,20 @@ Absent an explicit owner order, a posted message stands.
 | Výhrada k dodanému | Realizácia + ticket (bounce) |
 | Otázka | Potrebuje ujasniť (rule 4) |
 | Dodané na PROD | Verifikácia so správou + návrat späť (rule 3) |
+
+### 15. Prílohy v popise úlohy = primárny zdroj (#1098)
+
+**Pri KAŽDEJ novej/zmenenej board úlohe — a vždy pred filing ticketu aj pred
+parkovaním — prečítaj VŠETKY prílohy** z troch zdrojov (plný recept v `read-with-attachments.md`):
+
+- `ir.attachment` na úlohe — `search_read([["res_model","=","project.task"],["res_id","=",tid],["res_field","=",False]], ["id","name","mimetype"])` (Odoo skryto predradí `('res_field','=',False)` — polia viazané prílohy vidno len s `["res_field","!=",False]`)
+- att-id z popisu — `re.findall(r"/web/(?:image|content)/(\d+)", desc or "")` (vložený Excel = `/web/content/<id>`)
+- prílohy zo správ úlohy — `search_read("mail.message",[["model","=","project.task"],["res_id","=",tid]],["attachment_ids"])`
+
+Stiahni každú do `~/.claude/work-products/<projekt>-podklady-<D.M.YYYY>/t<task>-<att>.<ext>` a Read ju. V GH ticket-e cituj KAŽDÉ att-id + hodnoty z neho (úplnosť: každé att-id otvorenej board úlohy sa vyskytuje v body/komentároch ticketu — stream to audituje skriptom).
+
+`needs-answer` daj LEN na to, čo v prílohe NIE JE — a aj vtedy implementuj s čestným (deklarovaným) null defaultom a pokračuj, NIKDY nečakaj na odpoveď.
+
+KAŽDÁ otázka nesúca Odoo task URL (aj interná dev úloha) nesie riadok `Prílohy: att <ids> prečítané (<hodnoty>)` alebo `Prílohy: žiadne` (Check 9 v `stop-check-question-quality.sh`).
+
+Owner 21.9.2026 verbatim (rule 12): „preco tuto ulohu vobec neriesis tam v popise je screenshot", „aj ostatne ulohy skontroluj popis fotky".

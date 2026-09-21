@@ -79,6 +79,7 @@ MIVA1_SHARE_URL_NO_QUOTE = (
     "Odoo task: " + _LQ + "Portál" + _RQ + " "
     "(stage: V riešení) "
     "— https://erp.montalu.cloud/odoo/project/4/tasks/510\n"
+    "Prílohy: žiadne\n"
     "\n"
     "Návrh textu: http://100.118.174.27:8795/QwyMS1ybzQ65aDuZ1Rbxog/"
     "accept-6726-draft.html\n"
@@ -99,6 +100,7 @@ DROP_HOST_URL_NO_QUOTE = (
     "Odoo task: " + _LQ + "Objednávky" + _RQ + " "
     "(stage: V riešení) "
     "— https://erp.montalu.cloud/odoo/project/4/tasks/511\n"
+    "Prílohy: žiadne\n"
     "\n"
     "Text odpovede: https://drop-subdev.newlevel.media/abc123/reply.txt\n"
     "\n"
@@ -118,6 +120,7 @@ FILEDROP_8788_URL_NO_QUOTE = (
     "Odoo task: " + _LQ + "Výroba" + _RQ + " "
     "(stage: V riešení) "
     "— https://erp.montalu.cloud/odoo/project/4/tasks/520\n"
+    "Prílohy: žiadne\n"
     "\n"
     "Návrh textu: http://100.104.8.125:8788/xyz/draft.txt\n"
     "\n"
@@ -141,6 +144,7 @@ SHARE_URL_WITH_QUOTE = (
     "Odoo task: " + _LQ + "Portál" + _RQ + " "
     "(stage: V riešení) "
     "— https://erp.montalu.cloud/odoo/project/4/tasks/510\n"
+    "Prílohy: žiadne\n"
     "\n"
     "Návrh textu (príloha: http://100.118.174.27:8795/QwyMS1ybzQ65aDuZ1Rbxog/"
     "accept-6726-draft.html):\n"
@@ -169,6 +173,7 @@ ONE_QUOTE_LINE_BLOCKS = (
     "Odoo task: " + _LQ + "Portál" + _RQ + " "
     "(stage: V riešení) "
     "— https://erp.montalu.cloud/odoo/project/4/tasks/510\n"
+    "Prílohy: žiadne\n"
     "\n"
     "Návrh textu (http://100.118.174.27:8795/abc/draft.html):\n"
     "\n"
@@ -193,6 +198,7 @@ SCREENSHOT_SHARE_URL = (
     "Odoo task: " + _LQ + "Dashboard graf" + _RQ + " "
     "(stage: V riešení) "
     "— https://erp.montalu.cloud/odoo/project/4/tasks/600\n"
+    "Prílohy: žiadne\n"
     "\n"
     "Screenshot: http://100.118.174.27:8795/abc123/screenshot.png\n"
     "\n"
@@ -221,17 +227,24 @@ class TestInlineDraftBlock(_HookCase):
         r = self._run(DROP_HOST_URL_NO_QUOTE)
         self.assertTrue(self._blocked(r),
                         "drop-* host URL with no inline quote should BLOCK")
+        # #1098: the fixture now carries `Prílohy: žiadne`, so the ONLY blocker
+        # is Check 8 (approvebody, #977 in reason) — not the universal Check 9;
+        # this makes the #977 proof non-vacuous (neutering POINTER_URL_RX ->
+        # nothing blocks -> RED).
+        self.assertIn("#977", self._reason(r))
 
     def test_filedrop_8788_url_blocks(self):
         r = self._run(FILEDROP_8788_URL_NO_QUOTE)
         self.assertTrue(self._blocked(r),
                         ":8788 URL with no inline quote should BLOCK")
+        self.assertIn("#977", self._reason(r))  # #1098: Check 8, not vacuous Check 9
 
     def test_one_quote_line_blocks(self):
         """Pins the >= 2 threshold: 1 quote line is NOT enough."""
         r = self._run(ONE_QUOTE_LINE_BLOCKS)
         self.assertTrue(self._blocked(r),
                         "1 quote line with share URL should BLOCK")
+        self.assertIn("#977", self._reason(r))  # #1098: Check 8, not vacuous Check 9
 
 
 class TestInlineDraftPass(_HookCase):

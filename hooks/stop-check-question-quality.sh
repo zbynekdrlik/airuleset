@@ -520,7 +520,14 @@ fi
 # block→rewrite→block live in camera-box (2026-07-05, the user's "velke
 # zhorsenie" report).
 if [ -z "$VIOLATION" ]; then
+    # #1098 (Review 1): a `Prílohy:` line (Check 9's mandated attachment
+    # statement) is a MANDATED line, not briefing prose — exempt it from the
+    # brief count so a multi-attachment citation cannot trip briewall and push
+    # the model to drop attachment values. `Pr(í|i)lohy` ALTERNATION, never a
+    # `[ií]` byte-splitting bracket class; the `[*-]*` prefix (no multibyte `•`)
+    # tolerates `**Prílohy:` / `- Prílohy:` without an awk byte-class trap.
     BRIEF=$(awk '
+        /^[[:space:]]*[*-]*[[:space:]]*Pr(í|i)lohy[^:]*:/ { next }
         /^[[:space:]]*((•|-)[[:space:]]|[0-9]+[.)][[:space:]])/ { exit }
         /^[[:space:]]*[*_>~-]*[[:space:]]*❓/ { exit }
         { print }' <<<"$BLOCK")
@@ -661,6 +668,12 @@ if [ -z "$VIOLATION" ]; then
     fi
 fi
 
+# Shared constant — an Odoo project.task deep URL (/odoo/project/<pid>/tasks/<tid>).
+# Defined ONCE here so Check 7 (task-URL-required) and Check 9
+# (attachments-required) read the SAME regex, never a divergent second copy
+# (#1098 Review 1).
+TASK_URL_RX='/odoo/project/[0-9]+/tasks/[0-9]+'
+
 # Check 7 — an Odoo-context question must carry an Odoo task URL (#907).
 # Owner directive (montalu 2026-09-06): every question about Odoo work must
 # reference the Odoo project.task with its deep URL — the primary client
@@ -703,9 +716,8 @@ if [ -z "$VIOLATION" ]; then
     # (domain detector removed — see comment above)
     if [ -z "$odoo_ctx" ] && LC_ALL=C.UTF-8 grep -qiE "$ODOO_WORK_RX" <<<"$BLOCK"; then odoo_ctx=1; fi
     if [ -n "$odoo_ctx" ]; then
-        # Satisfying evidence: an Odoo task deep URL, an action URL, or an
-        # explicit no-task statement.
-        TASK_URL_RX='/odoo/project/[0-9]+/tasks/[0-9]+'
+        # Satisfying evidence: an Odoo task deep URL (shared $TASK_URL_RX,
+        # defined above Check 7), an action URL, or an explicit no-task statement.
         ACTION_URL_RX='/odoo/action-[A-Za-z0-9_.]+/[0-9]+'
         NO_TASK_RX='task[[:space:]]+(neexistuje|nexist)|bez[[:space:]]+tasku|no[[:space:]]+(matching[[:space:]]+)?task|[čc]isto[[:space:]]+technick'
         if ! LC_ALL=C.UTF-8 grep -qiE "$TASK_URL_RX" <<<"$BLOCK" \
@@ -796,6 +808,51 @@ if [ -z "$VIOLATION" ]; then
     fi
 fi
 
+# Check 9 — an Odoo BOARD-TASK question must state what the task's ATTACHMENTS
+# contained (#1098). Incident: a client put the spec as an IMAGE inside a
+# project.task description (montalu task 1010 "Sieťka robust", att 37652,
+# 20.9.2026); the stream's text-only board read missed it and parked its ticket
+# on needs-answer asking for the very data the screenshot carried. Owner
+# 21.9.2026 verbatim: „preco tuto ulohu vobec neriesis tam v popise je
+# screenshot", „aj ostatne ulohy skontroluj popis fotky".
+# ROZHODNUTÉ #1098 (supervisor, 2026-09-21): Option A — UNIVERSAL. The trigger is
+# a project.task deep URL ($TASK_URL_RX, the shared constant above Check 7) ALONE
+# — NOT gated on Check 7's $odoo_ctx (Review 1): the incident's OWN shape is
+# headed „projekt montalu (Odoo ERP…)" which Check 7's ODOO_PROJECT_RX /
+# ODOO_WORK_RX do NOT match, so odoo_ctx is EMPTY there and the old precondition
+# let the #555 shape through. Any /odoo/project/N/tasks/M block MUST carry a
+# `Prílohy:` line whose VALUE is one of: `žiadne`/`ziadne`/`none`, OR `att`
+# followed by an id digit, OR a read-evidence word (prečítané/screenshot/…) — a
+# vague „pozriem neskôr" or a bare „att" do NOT discharge (Review 1 🔵 / Review 2
+# 🔵). An action URL or an explicit no-task statement references no board task
+# (nothing to read), so is exempt. The line MAY sit BELOW the option bullets
+# (Check 3 exempts it from the brief count). Anti-cheat: a `Prílohy:` line inside
+# a ``` fence does NOT discharge — the block is fence-stripped first (same awk as
+# Check 8). `Pr(í|i)lohy` is an ALTERNATION, never a `Pr[ií]lohy` multibyte
+# bracket class (#735 convention; Review 1); the markdown-tolerant anchor mirrors
+# Check 6's THREAD_VLAKNO_RX so `**Prílohy:**` / `- Prílohy:` pass. Same fail-safe
+# as Checks 6-8: away-user turns past Checks 1-8, over-block is safe.
+# Accepted residuals (#1098 review, informational — this is a TEXT heuristic, not
+# a security boundary; the fail direction is UNDER-block by design, "model re-adds
+# the values"): (1) the read-evidence branch discharges on a Prílohy line that only
+# MENTIONS a read-word without genuine reading (`Prílohy: je tam screenshot,
+# nestihol som otvoriť` passes) — a session that lies on this line defeats it, the
+# same way it could lie in any doctrine line; (2) the Check-3 exemption anchor uses
+# `[*-]*` (no multibyte `•`) while this anchor uses `[*•-]*`, so a `• Prílohy:` line
+# is not matched by the Check-3 EXEMPTION regex, but it IS matched by Check 3's
+# option-bullet EXIT rule, so the net effect ("not counted toward the brief") holds.
+if [ -z "$VIOLATION" ]; then
+    # Fence-stripped block — a `Prílohy:` inside a ``` fence must not count.
+    BLOCK_NOFENCE=$(printf '%s\n' "$BLOCK" | awk '
+        /^[[:space:]]*```/ { fence = !fence; next }
+        !fence { print }')
+    ATTACH_LINE_RX='^[[:space:]]*[*•-]*[[:space:]]*Pr(í|i)lohy[[:space:]]*\**[[:space:]]*:[[:space:]]*\**[[:space:]]*((žiadne|ziadne|none)|att[^[:alnum:]]*[0-9]|.*(pre(č|c)(í|i)tan|screenshot|obr(á|a)zok|foto|tabu(ľ|l)k|excel))'
+    if LC_ALL=C.UTF-8 grep -qiE "$TASK_URL_RX" <<<"$BLOCK" \
+        && ! LC_ALL=C.UTF-8 grep -qiE "$ATTACH_LINE_RX" <<<"$BLOCK_NOFENCE"; then
+        VIOLATION="attachments"
+    fi
+fi
+
 if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
     echo "$((RETRIES+1))" > "$RETRY_FILE"
     TEMPLATE="\nShape: **Otázka — projekt <meno> (<čo robí>):** <úvod 2–4 vety> · • <možnosť> (odporúčam) — <dôsledok> · ❓ NEEDS YOU: <jedno rozhodnutie>. See user-questions-slovak.md."
@@ -816,6 +873,8 @@ if [ -n "$VIOLATION" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
             REASON="Your ❓ block is about Odoo work but does NOT carry an Odoo task reference URL. Per #907 (owner directive montalu 2026-09-06): EVERY Odoo-context question MUST carry the project.task deep URL — napr. https://erp.montalu.cloud/odoo/project/4/tasks/503 — a meno tasku + stage. Odoo task je primárny klientsky tracking; GitHub issue je len developerský. Ak task neexistuje, napíš to explicitne ('Odoo task neexistuje — čisto technická úloha'). NIKDY nepoužívaj model-form URL (/odoo/project.task/503) — ten otvorí natívny formulár bez custom záložiek. See issue-reference-context.md." ;;
         approvebody)
             REASON="Your ❓ block asks to APPROVE/SEND a client message but the message body is NOT inline — it points at a file path, ticket comment, or share/file-drop URL instead. The owner reads the ping on their phone/webterm and has NO access to your filesystem, terminal scrollback, or external URLs. INLINE the FULL proposed text as a blockquote (> ...) right in the ❓ block (>= 2 quoted lines for a share URL, >= 40 chars for a path pointer). NEVER 'text je v súbore ~/…' / 'pozri draft na tikete' / 'Návrh textu: http://…:8795/…'. A share URL may ACCOMPANY the inline text (e.g. for an attachment), never REPLACE it. See skills/odoo-client-messaging/handover-compose.md (#936/#977)." ;;
+        attachments)
+            REASON="Your ❓ block is about an Odoo board task (it carries a /odoo/project/<pid>/tasks/<tid> URL) but does NOT state what the task's ATTACHMENTS contained. Per #1098 (owner montalu 2026-09-21: „tam v popise je screenshot\", „aj ostatne ulohy skontroluj popis fotky\"): a client often puts the spec as an IMAGE/spreadsheet in the project.task DESCRIPTION — a PRIMARY source. BEFORE parking a task on needs-answer, read its attachments (the ir.attachment rows with res_model=project.task, every /web/image|content/<id> in the description, and the task's message attachment_ids) and add a 'Prílohy:' line: 'Prílohy: att <ids> prečítané (<hodnoty z prílohy>)' — alebo 'Prílohy: žiadne' ak task žiadne prílohy nemá. Hodnota musí byť 'žiadne', 'att <ids>', alebo obsahovať dôkaz čítania (prečítané/screenshot/obrázok/tabuľka) — vágne „pozriem neskôr\" ani holé „att\" NESTAČÍ. Riadok 'Prílohy:' MÔŽE byť aj POD možnosťami (nie je súčasť úvodu — Check 3 ho nepočíta). This is Check 9. See skills/odoo-client-messaging/read-with-attachments.md (the project.task section) + client-board-tasks.md rule 15." ;;
     esac
     jq -n --arg reason "$REASON" '{decision: "block", reason: $reason}'
     exit 0

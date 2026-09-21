@@ -63,12 +63,17 @@ ODOO_NO_TASK = (
     "❓ NEEDS YOU: opraviť číslo šarže len pre výrobu alebo univerzálne?\n"
 )
 
-# With a task URL — should PASS
+# With a task URL — should PASS.
+# #1098 invariant refinement (ROZHODNUTÉ 2026-09-21, Option A): a task-URL
+# question now ALSO declares its attachments (Check 9); a dev task with none
+# states `Prílohy: žiadne`. The #907 task-URL invariant itself is unchanged —
+# this one line keeps the case green under Check 9.
 ODOO_WITH_TASK = (
     "**Otázka — projekt odoo-erp (Odoo ERP pre montalu):** V IT-Výroba "
     "module som narazil na problém s číslom šarže pri výrobe.\n"
     'Odoo task: „Číslo šarže v IT-Výroba“ (stage: V riešení) '
     "— https://erp.montalu.cloud/odoo/project/4/tasks/503\n"
+    "Prílohy: žiadne\n"
     "\n"
     "• Opraviť len pre výrobu (odporúčam)\n"
     "• Opraviť univerzálne\n"
