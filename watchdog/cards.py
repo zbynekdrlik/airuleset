@@ -880,7 +880,7 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
                      mutex_held=None, recent_human=None,
                      transcript_fn=None, rows_fn=None,
                      verified_send=None, compact_log_path=None,
-                     owned_closed=None):
+                     owned_closed=None, nudges_enabled=None):
     """The #525 report-owed reconciliation — see the section comment.
 
     Iterates ONLY the SUPERVISOR (main-checkout) sessions in `cwd_by_sid` (a
@@ -906,7 +906,15 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
     #516: `nudged`/`pinged` are ONE-SHOT latches (a handled ticket is never
     re-evaluated), so the persisted `state["report_owed"]` write is gated on
     `not dry_run` — a diagnostic `--once --dry-run` mutates only a local copy
-    and can never suppress the genuine nudge on a later real timer sweep."""
+    and can never suppress the genuine nudge on a later real timer sweep.
+
+    #1092 fix-forward: the whole #511 swallow→escalate flow above applies ONLY
+    when the `card` nudge kind is ON. When it is OFF (#1023 per-kind staging),
+    `send_verified` types NOTHING and returns False — that is NOT a pane swallow.
+    `nudges_enabled` (default: the package facade) is pre-checked after the
+    mutex/recent-human vetoes; a kind-off root journals ONE `withheld (kind card
+    off)` decision line, never touches `swallows`/`last_try`, never sends, and
+    never escalates (killing the false owner-ping from a kind-off state)."""
     if not cwd_by_sid:
         return []
     window = CARD_WINDOW_S if window is None else window
@@ -952,6 +960,13 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
                     state=state))  # #1022: record for the wedge
             except Exception:
                 return False
+    if nudges_enabled is None:
+        # #1092 fix-forward: resolve the per-kind staging predicate lazily via
+        # the package facade (the leaf-module circular-import discipline — cards
+        # never top-imports watchdog). The suite injects it (conftest forces the
+        # real predicate True via AIRULESET_TEST_IGNORE_DISABLE).
+        import watchdog
+        nudges_enabled = watchdog.nudges_enabled
 
     # compact-sync.log self-callback records — read ONCE per sweep.
     records = {}
@@ -1044,6 +1059,30 @@ def report_reconcile(now, run, state, cwd_by_sid, panes_by_sid,
                 continue
             if recent_human(cwd, sid):
                 logs.append("report-owed SKIP recent-human %s" % root)
+                _save()
+                continue
+
+            # #1092 fix-forward: the `card` nudge kind being OFF (#1023 per-kind
+            # staging) is NOT a pane swallow — `send_verified(..., nudge="card")`
+            # would return False because `keys()` suppresses the keystroke and
+            # types NOTHING. Distinguish it as a WITHHELD decision (the #486
+            # decision-log contract): ONE journal line, `swallows`/`last_try`
+            # left EXACTLY as they were, the send primitive never called, and no
+            # owner escalation from a kind-off state (the false-ping class:
+            # `report-owed ESCALATE … -> sent` on gk 08:17 for a ticket never
+            # typed). The kind checked here MUST match the kind the default
+            # `verified_send` closure passes (`nudge="card"`, ~L951) — this veto
+            # is a faithful pre-check of exactly what the send primitive would
+            # have suppressed. The ticket stays owed (`nudged` unwritten) so the
+            # normal nudge path resumes the moment the owner re-enables `card`.
+            # (The SEPARATE question of a stale ticket NUMBER being derived as
+            # owed — e.g. gk's long-closed #4 re-mentioned in a recent commit —
+            # is a `merged_closes` regex Finding tracked on #1092, NOT fixed
+            # here: this branch stops the false ESCALATION, not the false owed.)
+            if not nudges_enabled("card"):
+                logs.append("report-owed withheld (kind card off) %s issues=%s"
+                            % (root, ", ".join("#%d" % n
+                                               for n in owed[:REPORT_MAX_LISTED])))
                 _save()
                 continue
 
