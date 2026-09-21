@@ -267,6 +267,45 @@ class TestPreflightMaintenance(unittest.TestCase):
             surfaces=["static/src/**"])
         self.assertFalse(ok)
 
+    def test_nested_guide_file_satisfies_maintenance(self):
+        # #1099: a guide file in a subdirectory under docs/<tenant>/ (montalu's
+        # real `prirucka/` layout) satisfies the same-PR guide requirement — a
+        # surface-touching diff with a nested guide edit passes.
+        ok, reason = navody.guide_maintenance(
+            ["views/x.xml", "docs/montalu/prirucka/navody-vyroba.html"], "")
+        self.assertTrue(ok)
+        self.assertIsNone(reason)
+
+
+class TestGuidePathDepth(unittest.TestCase):
+    """#1099 — the guide path predicate matches by BASENAME anywhere under
+    `docs/<tenant>/`, not only one directory deep (the montalu `prirucka/`
+    false-block; the sibling `_repo_static_ok` already resolves recursively)."""
+
+    def test_nested_guide_recognised(self):
+        self.assertTrue(
+            navody._is_guide_file("docs/montalu/prirucka/navody-vyroba.html"))
+
+    def test_deeply_nested_guide_recognised(self):
+        self.assertTrue(navody._is_guide_file("docs/montalu/a/b/navody-x.html"))
+
+    def test_flat_guide_still_recognised(self):
+        # the one-segment layout that worked before must keep working.
+        self.assertTrue(navody._is_guide_file("docs/montalu/navody-x.html"))
+
+    def test_no_tenant_segment_not_a_guide(self):
+        # a bare docs/navody-*.html has no <tenant> segment — not a guide path.
+        self.assertFalse(navody._is_guide_file("docs/navody-x.html"))
+
+    def test_wrong_extension_not_a_guide(self):
+        self.assertFalse(
+            navody._is_guide_file("docs/montalu/prirucka/navody-x.htm"))
+
+    def test_docs_anchor_matches_mid_path(self):
+        # the (?:^|/)docs/ anchor still matches a docs/ segment mid-path.
+        self.assertTrue(
+            navody._is_guide_file("src/docs/montalu/prirucka/navody-x.html"))
+
 
 class TestReDoS(unittest.TestCase):
     """#1073 review 🔴 — the fact/maintenance regexes must be LINEAR (the
@@ -403,6 +442,16 @@ class TestHandoffPreflightIntegration(unittest.TestCase):
         # _handoff_changed_paths returns None -> pre-flight must not block.
         blk = self.air._handoff_guide_preflight(
             "RFR", changed_paths=None, cwd="/nonexistent-xyz", stream="montalu1")
+        self.assertIsNone(blk)
+
+    def test_nested_guide_passes(self):
+        # #1099: the composer pre-flight accepts a nested-layout guide edit
+        # (docs/<tenant>/prirucka/navody-*.html) alongside a surface change.
+        blk = self.air._handoff_guide_preflight(
+            "",
+            changed_paths=["views/x.xml",
+                           "docs/montalu/prirucka/navody-vyroba.html"],
+            stream="montalu1")
         self.assertIsNone(blk)
 
 
