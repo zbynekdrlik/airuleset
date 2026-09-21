@@ -217,25 +217,30 @@ class TestReviewSpecGate(unittest.TestCase):
         ok3, reason = spec.classify_spec_check("no spec check here")
         self.assertFalse(ok3)
 
+    # A review body long enough to clear the pre-existing MIN_LEN_REVIEW=60
+    # floor (the spec check is what this class exercises, not the length gate).
+    REVIEW = ("Ran /review and requesting-code-review on this branch, "
+              "result clean, 0 🔴 0 🟡 0 🔵, fixed in commit deadbeef1")
+
     def test_review_comment_on_spec_ticket_requires_spec_check(self):
         from gates import design as dg
-        review = ("/review clean, 0 🔴 0 🟡 0 🔵, fixed in commit deadbeef1")
         # No ticket body -> unchanged (backward compatible).
-        ok, _ = dg.classify_review_comment(review)
+        ok, _ = dg.classify_review_comment(self.REVIEW)
         self.assertTrue(ok)
         # Spec ticket, no Spec-check -> block.
-        ok2, reason = dg.classify_review_comment(review, ticket_body="Spec: #501 §2")
+        ok2, reason = dg.classify_review_comment(
+            self.REVIEW, ticket_body="Spec: #501 §2")
         self.assertFalse(ok2)
         self.assertIn("Spec-check", reason)
         # Spec ticket, with Spec-check -> pass.
         ok3, _ = dg.classify_review_comment(
-            review + "\nSpec-check: §2 — conform", ticket_body="Spec: #501 §2")
+            self.REVIEW + "\nSpec-check: §2 — conform",
+            ticket_body="Spec: #501 §2")
         self.assertTrue(ok3)
 
     def test_review_comment_no_spec_ticket_is_unchanged(self):
         from gates import design as dg
-        review = "/review clean 0 🔴 0 🟡 0 🔵"
-        ok, _ = dg.classify_review_comment(review, ticket_body="no spec here")
+        ok, _ = dg.classify_review_comment(self.REVIEW, ticket_body="no spec here")
         self.assertTrue(ok)
 
 

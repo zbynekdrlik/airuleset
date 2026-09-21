@@ -4701,6 +4701,45 @@ def _handoff_guide_preflight(body, *, cwd=None, changed_paths=None,
     return None if ok else reason
 
 
+def _handoff_spec_preflight(body, *, issue=None, repo=None, cwd=None,
+                            read_issue=None):
+    """#1106 — the review-lens spec gate for the composer pre-flight. Returns a
+    `handoff BLOCK: …` reason string, or None when the RFR may post.
+
+    When the TICKET carries a `Spec: #N §x` reference, the RFR body MUST carry a
+    `Spec-check: §x -- conform | deviation <ref>` line (the review checked the
+    diff against the spec section). FAIL-OPEN in every direction that cannot
+    prove a spec is present: a read error (quota / no slug), a no-spec ticket,
+    or any exception -> None (never fabricate a block from an unreadable ticket,
+    the same never-false-accuse direction the gk/guide pre-flights use).
+    `read_issue(number, slug, **kw) -> (obj|None, err)` is injected in tests."""
+    try:
+        import gates.spec as _gspec
+        from gates import ghread
+        if read_issue is None:
+            slug = repo or ghread.resolve_slug(cwd)
+            reader = ghread.read_issue
+        else:
+            slug = repo
+            reader = read_issue
+        if not slug or not issue:
+            return None
+        obj, err = reader(int(issue), slug, cwd=cwd)
+        if err or not isinstance(obj, dict):
+            return None
+        if not _gspec.ticket_has_spec(obj.get("body") or ""):
+            return None
+        ok, reason = _gspec.classify_spec_check(body)
+        if ok:
+            return None
+        return ("handoff BLOCK: this ticket carries a `Spec:` ref -- the RFR "
+                "body must carry a `Spec-check: §x -- conform | deviation "
+                "<ref>` line proving the diff was reviewed against the spec "
+                "section (#1106). %s" % reason)
+    except Exception:
+        return None
+
+
 def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
                           watch_result=None, commits_since=None, journal=None):
     """The composer hand-off gk-watch pre-flight (#1056 L2 (f)).
@@ -4902,6 +4941,12 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     _gblk = _handoff_guide_preflight(body, cwd=_repo_root())
     if _gblk:
         print(_gblk)
+        return 1
+    # #1106: review-lens spec gate on the verbatim body-file RFR too.
+    _sblk = _handoff_spec_preflight(body, issue=issue, repo=repo,
+                                    cwd=_repo_root())
+    if _sblk:
+        print(_sblk)
         return 1
     _undis = (_gk_state or {}).get("undispositioned_ids") or [] \
         if isinstance(_gk_state, dict) else []
@@ -5276,6 +5321,14 @@ def cmd_handoff(args):
     _gblk = _handoff_guide_preflight(body, cwd=target_root)
     if _gblk:
         print(_gblk)
+        return 1
+
+    # #1106: the review-lens spec gate — a Spec:-bearing ticket's RFR must carry
+    # a Spec-check: line. Fail-open (no spec / unreadable ticket -> None).
+    _sblk = _handoff_spec_preflight(body, issue=issue, repo=repo,
+                                    cwd=target_root)
+    if _sblk:
+        print(_sblk)
         return 1
 
     # Write receipt BEFORE posting (the hook checks the receipt).
