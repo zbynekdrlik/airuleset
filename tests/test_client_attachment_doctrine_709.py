@@ -50,6 +50,7 @@ MODULE = ROOT / "modules" / "core" / "view-image-urls.md"
 SKILL_IMG = ROOT / "skills" / "view-image-urls" / "SKILL.md"
 SKILL_ODOO = ROOT / "skills" / "odoo-client-messaging" / "SKILL.md"
 COMPANION = ROOT / "skills" / "odoo-client-messaging" / "read-with-attachments.md"
+COMPANION_HISTORY = ROOT / "skills" / "odoo-client-messaging" / "read-with-attachments-history.md"
 COMP_LOGGING = ROOT / "skills" / "comprehensive-logging" / "SKILL.md"
 HOOK = ROOT / "hooks" / "inject-situational-rule.sh"
 CONF = ROOT / "hooks" / "situational-triggers.conf"
@@ -230,7 +231,11 @@ class TestReadWithAttachmentsCompanion(_Teeth, TestCase):
         self.assertIn("no-browser-needed path", self.t)
 
     def test_incident_numbers(self):
-        t = self.raw
+        # #1098 ff2: the "Incident that created this" paragraph relocated VERBATIM
+        # into the non-injected read-with-attachments-history.md (to fit the #745
+        # three-way co-fire budget) — nothing deleted, so the incident numbers
+        # are asserted against the history file now.
+        t = read(COMPANION_HISTORY)
         self.assertIn("1742799", t)
         self.assertIn("13204", t)
         self.assertIn("odoo-erp #5162", t)

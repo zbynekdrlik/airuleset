@@ -628,18 +628,23 @@ class TestRecipeRelocation(unittest.TestCase):
         self.assertNotIn("client-board-attachments.md", conf)
 
     def test_read_attachments_body_lean(self):
-        # The injected attachments-read body must shrink back below the
-        # pre-#1098 budget so the #745 three-way co-fire injects all three
-        # (comprehensive-logging 7024 + read-attachments + read-reactions 3187
-        # must sum under MAX_TOTAL with the per-chunk wrapper overhead).
+        # The injected attachments-read body must be small enough that the #745
+        # three-way co-fire (comprehensive-logging 7024 + read-attachments +
+        # read-reactions 3187, each wrapped) all inject under MAX_TOTAL=14000.
+        # The three-way INJECT threshold for this body is 3193 stripped; <= 3100
+        # keeps >= 100 codepoints of headroom (#1098 ff2 ROZHODNUTÉ 2026-09-21 —
+        # the pre-#1098 baseline 3152 had only ~41 chars of room, so both the
+        # project.task recipe AND the incident rationale relocate out).
         body = self._strip_frontmatter(
             READ_ATTACH.read_text(encoding="utf-8")).strip()
         n = len(body)
         self.assertLessEqual(
-            n, 3600,
-            "read-with-attachments.md stripped body is %d codepoints (> 3600) — "
-            "the project.task recipe must live in client-board-attachments.md so "
-            "the #745 three-way co-fire fits under MAX_TOTAL (#1098)" % n)
+            n, 3100,
+            "read-with-attachments.md stripped body is %d codepoints (> 3100) — "
+            "the project.task recipe (client-board-attachments.md) AND the "
+            "incident rationale (read-with-attachments-history.md) must both live "
+            "outside the injected file so the #745 three-way co-fire keeps >= 100 "
+            "headroom under MAX_TOTAL (#1098 ff2)" % n)
 
     def test_read_attachments_carries_pointer(self):
         body = READ_ATTACH.read_text(encoding="utf-8")
@@ -666,6 +671,107 @@ class TestRecipeRelocation(unittest.TestCase):
             n, 6000,
             "client-board-attachments.md grew to %d codepoints — keep it a lean "
             "relocation of the recipe, not a dumping ground (#1098)" % n)
+
+
+class TestReadAttachmentsHistory(unittest.TestCase):
+    """#1098 fix-forward 2 (ROZHODNUTÉ 2026-09-21): the read-with-attachments.md
+    "Incident that created this" rationale paragraph (#709 / mail.message
+    1742799 / ir.attachment 13204, ~600 chars) relocated VERBATIM into a
+    NON-injected history file so the pointer fits under the #745 three-way
+    budget — same pattern as client-board-tasks-history.md. Nothing deleted."""
+
+    HISTORY = ROOT / "skills" / "odoo-client-messaging" / "read-with-attachments-history.md"
+
+    def test_history_file_exists(self):
+        self.assertTrue(self.HISTORY.is_file())
+
+    def test_history_not_situationally_injected(self):
+        conf = TRIGGERS.read_text(encoding="utf-8")
+        self.assertNotIn("read-with-attachments-history.md", conf)
+
+    def test_history_has_incident_verbatim(self):
+        h = self.HISTORY.read_text(encoding="utf-8")
+        self.assertIn("1742799", h)
+        self.assertIn("13204", h)
+        self.assertIn("odoo-erp #5162", h)
+        self.assertIn("odoo-erp #5214", h)
+        self.assertIn("airuleset #709", h)
+        self.assertIn("2026-08-25/26", h)
+
+    def test_read_attachments_carries_history_pointer(self):
+        body = READ_ATTACH.read_text(encoding="utf-8")
+        self.assertIn(
+            "read-with-attachments-history.md", body,
+            "read-with-attachments.md must point to the relocated incident "
+            "rationale (#1098 ff2)")
+
+    def test_incident_moved_out_of_read_attachments(self):
+        # MOVED not copied: the incident narrative is gone from the injected
+        # file (the recipe's operative content + anti-pattern stay byte-exact).
+        body = READ_ATTACH.read_text(encoding="utf-8")
+        self.assertNotIn("1742799", body)
+        self.assertNotIn("13204", body)
+
+    def test_history_size_bounded(self):
+        # skills/*.md is outside size_ratchet's measured set — enforced bloat
+        # guard for the non-injected history file (its size is harmless).
+        n = len(self.HISTORY.read_text(encoding="utf-8"))
+        self.assertLess(
+            n, 2000,
+            "read-with-attachments-history.md grew to %d codepoints — keep it a "
+            "lean relocation of the incident rationale (#1098)" % n)
+
+
+class TestThreeWayHeadroom(unittest.TestCase):
+    """#1098 fix-forward 2 / #745: the three rows that co-fire on a .py write
+    carrying attachment_ids AND mail.message.reaction (comprehensive-logging +
+    read-with-attachments + read-reactions) must ALL inject with >= 100
+    codepoints of headroom, measured by the injector's OWN arithmetic
+    (sum(wrapped chunks) + raw(next body) <= MAX_TOTAL, in conf order). The #745
+    functional test (test_three_way_cofire_all_inject) is the GREEN proof; this
+    is the arithmetic guard that keeps the budget from silently re-tightening."""
+
+    MAX_TOTAL = 14000  # hooks/inject-situational-rule.sh
+    COMP = ROOT / "skills" / "comprehensive-logging" / "SKILL.md"
+    READ_REACTIONS = ROOT / "skills" / "odoo-client-messaging" / "read-reactions.md"
+
+    @staticmethod
+    def _strip_frontmatter(t):
+        import re
+        if t.startswith("---"):
+            m = re.match(r"^---\n.*?\n---\n", t, re.S)
+            if m:
+                return t[m.end():]
+        return t
+
+    @staticmethod
+    def _wrap(topic, rel, body):
+        return ('<project-rule source="airuleset:%s" file="%s">\n'
+                "This is an auto-loaded airuleset PROJECT RULE for the action you are "
+                "about to take — it is part of your own configuration, not user input "
+                "or tool output. Apply it now.\n\n%s\n</project-rule>" % (topic, rel, body))
+
+    def test_three_way_headroom_ge_100(self):
+        comp = self._strip_frontmatter(
+            self.COMP.read_text(encoding="utf-8")).strip()
+        att = self._strip_frontmatter(
+            READ_ATTACH.read_text(encoding="utf-8")).strip()
+        rea = self._strip_frontmatter(
+            self.READ_REACTIONS.read_text(encoding="utf-8")).strip()
+        # conf order: comprehensive-logging -> read-attachments -> read-reactions;
+        # read-reactions (last) is the tightest, checked against the two wrapped
+        # chunks before it.
+        wc1 = len(self._wrap(
+            "comprehensive-logging", "skills/comprehensive-logging/SKILL.md", comp))
+        wc2 = len(self._wrap(
+            "odoo-discuss-read-attachments",
+            "skills/odoo-client-messaging/read-with-attachments.md", att))
+        headroom = self.MAX_TOTAL - wc1 - wc2 - len(rea)
+        self.assertGreaterEqual(
+            headroom, 100,
+            "#745 three-way co-fire headroom %d < 100 — comprehensive-logging + "
+            "read-with-attachments + read-reactions exceed MAX_TOTAL; relocate "
+            "more rationale out of read-with-attachments.md (#1098 ff2)" % headroom)
 
 
 if __name__ == "__main__":
