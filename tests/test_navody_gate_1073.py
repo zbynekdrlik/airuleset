@@ -325,6 +325,18 @@ class TestReDoS(unittest.TestCase):
         navody.evaluate_stop(None, "#7560", msg)
         self.assertLess(time.monotonic() - t0, 0.5)
 
+    def test_guide_path_linear_on_pathological_nesting(self):
+        # #1099 review — _GUIDE_PATH_RE gained a `(?:[^/]+/)*` quantifier; lock
+        # its linearity. Each segment is `/`-anchored so slashes partition the
+        # input deterministically (no catastrophic backtracking, #577/#1010). A
+        # deeply-nested near-miss (right basename prefix, wrong extension) must
+        # resolve in microseconds, not blow up.
+        import time
+        path = "docs/t/" + "seg/" * 20000 + "navody-" + "x" * 20000 + "Y"
+        t0 = time.monotonic()
+        self.assertFalse(navody._is_guide_file(path))
+        self.assertLess(time.monotonic() - t0, 0.5)
+
     def test_navody_na_still_matches_valid_reason(self):
         self.assertTrue(navody._has_navody_na("Navody: n/a — backend-only"))
         self.assertTrue(navody._has_navody_na("Návody: n/a - dôvod"))
