@@ -31,7 +31,6 @@ Locked here (Approach 1 -- extend the #915 hook in place):
 """
 
 import json
-import os
 import subprocess
 import sys
 import tempfile
