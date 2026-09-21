@@ -26,7 +26,7 @@ from gates.filing.parse import (
     extract_heredocs, flag_value, is_issue_create,
     resolve_body, split_top_level, strip_prefix, tokens_of,
     _all_labels, _apply_cd, _chain_parent, _chain_parents, _clean_field,
-    _no_field_decoy, _target_repo_for_segment,
+    _explicit_stream_labels, _no_field_decoy, _target_repo_for_segment,
 )
 from gates.filing.caps import (
     CHAIN_WIDTH_CAP, DAILY_CAP, cwd_repo_of,
@@ -357,6 +357,20 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
         stream_reason = _stream_routing_block_reason(
             tk, api_call, body, cwd, target_repo, repo_dir)
 
+        # #1106 -- spec-anchoring: a stream-labelled ticket filed while its
+        # stream has an open `spec` ticket (per the stream's `specs:` fact in
+        # `.claude/streams/<stream>.md`) MUST carry a `Spec: #N §x` line (or
+        # `Spec: none -- <why>`). Same tier as stream_reason (a labeling/anchor
+        # HYGIENE question, not a scope-gate-criterion one); computed
+        # unconditionally per segment, degrades to None on any unmeasurable
+        # state (no stream label, no `specs:` fact) exactly like stream_reason.
+        try:
+            import gates.spec as _gspec
+            spec_reason = _gspec.filing_spec_block_reason(
+                _explicit_stream_labels(tk, api_call), body, cwd)
+        except Exception:
+            spec_reason = None
+
         # #802 adversarial-review 🔵: a whitespace-only `-t` title cleans to ""
         # -- an EMPTY field, which bash's `IFS=$'\t' read` collapses (line ~1220
         # comment), shifting every field after it. `title = title or "(no
@@ -373,6 +387,9 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
                              target_repo, ""))
         elif stream_reason:
             results.append(("BLOCK", clean_title, stream_reason, parents_str,
+                             target_repo, ""))
+        elif spec_reason:
+            results.append(("BLOCK", clean_title, spec_reason, parents_str,
                              target_repo, ""))
         elif not (crit and crit.lower() in ALLOWED):
             # missing/invalid Scope-gate -- the concrete, decoy-neutralised reason
