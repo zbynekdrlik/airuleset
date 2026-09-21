@@ -16,6 +16,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 
 # --------------------------------------------------------------------------- #
 # Markdown structure helpers -- fence-aware header/line iteration (#1106 review
@@ -259,9 +260,19 @@ _STOP_WORDS = frozenset((
 
 
 def content_tokens(text):
-    """The casefolded content-token SET of `text` -- split on non-alphanumeric
-    (Latin-1 supplement / extended kept), stop-words + single chars removed."""
-    raw = re.split(r'[^0-9a-zÀ-ɏ]+', (text or "").casefold())
+    """The casefolded, DIACRITIC-FOLDED content-token SET of `text` -- split on
+    non-alphanumeric (Latin-1 supplement / extended kept), stop-words + single
+    chars removed.
+
+    #1106 live-read (montalu1 v0.1.378): Slovak owners/streams type the SAME
+    question with and without diacritics (`tlač` vs `tlac`, `má` vs `ma`), so a
+    diacritic-only re-ask dropped shared tokens below the 0.6 threshold and Check
+    10 missed it. NFD-decompose then drop combining marks so `tlač`/`tlac` and
+    `má`/`ma` collapse to ONE token; both the asked question and the settled
+    entry go through here, so both sides fold identically."""
+    folded = unicodedata.normalize("NFD", text or "")
+    folded = "".join(ch for ch in folded if not unicodedata.combining(ch))
+    raw = re.split(r'[^0-9a-zÀ-ɏ]+', folded.casefold())
     return {t for t in raw if len(t) > 1 and t not in _STOP_WORDS}
 
 

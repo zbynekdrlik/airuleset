@@ -532,7 +532,7 @@
     "tests/test_skill_usage_903.py": 92,
     "tests/test_slash_surface_hygiene.py": 84,
     "tests/test_soniox_provisioning.py": 787,
-    "tests/test_spec_anchoring_1106.py": 751,
+    "tests/test_spec_anchoring_1106.py": 788,
     "tests/test_stale_worktree_sweep.py": 1365,
     "tests/test_stash_delivery.py": 667,
     "tests/test_stash_unconditional.py": 905,
