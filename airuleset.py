@@ -9543,6 +9543,10 @@ from cli_design_record import (  # noqa: E402, F401
     cmd_design_record as cmd_design_record,
     design_record_help_template as design_record_help_template,
 )
+# --- #1106: spec-change poster (Spec-change: comment + spec section edit) ---
+from cli_spec_change import (  # noqa: E402, F401
+    cmd_spec_change as cmd_spec_change,
+)
 from cli_mdreview_audit import (  # noqa: E402, F401
     cmd_mdreview_audit as cmd_mdreview_audit,
 )
@@ -10561,6 +10565,21 @@ def main():
     p_dr.add_argument("--dry-run", dest="dry_run", action="store_true",
                       help="Print the stamped body without posting")
 
+    # --- #1106: spec-change (owner-decided deviation -> spec stays the truth) ---
+    p_sc = sub.add_parser(
+        "spec-change",
+        help="Post a Spec-change: comment on a spec ticket AND edit the named "
+             "§section in its body (the one path a spec deviation takes once "
+             "the owner has decided it, #1106)")
+    p_sc.add_argument("--spec", type=int, required=True,
+                      help="The spec ticket number")
+    p_sc.add_argument("--section", required=True,
+                      help="The section to replace (e.g. 2 or §2)")
+    p_sc.add_argument("--body-file", dest="body_file", required=True,
+                      help="File with the NEW section body text")
+    p_sc.add_argument("--repo", default=None,
+                      help="owner/name (default: the cwd repo)")
+
     p_ab = sub.add_parser(
         "account-bootstrap",
         help="Render idempotent root bootstrap script for a service account")
@@ -11229,6 +11248,7 @@ SUBCOMMANDS = {
     "mdreview-audit": cmd_mdreview_audit,
     "doctrine-audit": cmd_doctrine_audit,
     "design-record": cmd_design_record,
+    "spec-change": cmd_spec_change,
     "account-bootstrap": cmd_account_bootstrap,
     "nudges": cmd_nudges,
     "model-gateway": cmd_model_gateway,
