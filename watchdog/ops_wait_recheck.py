@@ -945,6 +945,27 @@ def _flag_items(w_members, release_landed, stagnation_count=0,
     return items
 
 
+def _spec_missing_signal(cwd):
+    """#1106 — (spec_missing_count, spec_open_numbers) from the per-cwd
+    tickets-status cache (written by cmd_tickets_status --refresh, no gh on this
+    watchdog path). Any absence / unreadable cache / bad shape -> (0, []), the
+    fail-safe no-clause direction. Never raises."""
+    try:
+        import statusbar
+        cache = statusbar._load(
+            statusbar.cache_dir() / (statusbar.cwd_key(cwd) + ".json"))
+        if not isinstance(cache, dict):
+            return 0, []
+        n = cache.get("spec_missing")
+        opens = cache.get("spec_open")
+        n = n if isinstance(n, int) and not isinstance(n, bool) else 0
+        opens = [x for x in opens if isinstance(x, int)] \
+            if isinstance(opens, list) else []
+        return n, opens
+    except Exception:
+        return 0, []
+
+
 def _discuss_audit_scope(cwd):
     """True iff the repo at `cwd` is odoo-erp -- the ONLY repo whose tickets
     bind client Odoo Discuss threads (#695; the same repo scope the #627 close
@@ -990,7 +1011,8 @@ _UNPARK_AUDIT_TRIGGER = (
 
 def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
                 release_landed=None, discuss_audit=False, unpark_audit_n=0,
-                stagnation_count=0, deploy_window=None, deploy_miss=None):
+                stagnation_count=0, deploy_window=None, deploy_miss=None,
+                spec_missing_n=0, spec_open=None):
     """The compact partition-audit TRIGGER keystroke (#714 -- replaced the
     per-member enumeration + full-doctrine wall that parked orphaned in the
     incident). Carries the `stuck-check: ` prefix (janitor own-payload
@@ -1045,6 +1067,21 @@ def _nudge_text(i_count, w_members, now=None, w_seen=None, *,
     # drops first under the greedy cap and never starves DISCUSS/#978/unpark.
     if i_pos:
         optional.append(_I_ACTION_ONLY_CLAUSE)
+    # #1106 — the OPTIONAL partition-audit clause: open stream tickets carry no
+    # `Spec:` reference while a `spec` ticket is open. Rides LAST (after the
+    # action-only reminder) so it drops FIRST under the greedy cap and never
+    # starves any W/DISCUSS/unpark signal. gates.spec caps its own length.
+    _spec_clause = None
+    if isinstance(spec_missing_n, int) and not isinstance(spec_missing_n, bool) \
+            and spec_missing_n > 0:
+        try:
+            import gates.spec as _gspec
+            _spec_clause = _gspec.spec_partition_audit_clause(
+                spec_open or [], spec_missing_n, max_chars=NUDGE_MAX_CHARS)
+        except Exception:
+            _spec_clause = None
+    if _spec_clause:
+        optional.append(_spec_clause)
     detail = []
     for item in optional:
         cand = (_NUDGE_HEAD + core_body + " "
@@ -1342,13 +1379,19 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     # is the acceptance-parked W members from the ALREADY-fetched rows (zero new
     # gh calls), so the session re-audits their cited Discuss threads.
     _dscope = _discuss_audit_scope(cwd)
+    # #1106: the OPTIONAL spec partition-audit clause — open stream tickets with
+    # no `Spec:` ref while a `spec` ticket is open. Read from the per-cwd
+    # tickets-status cache (written by cmd_tickets_status --refresh, no gh here);
+    # any absence -> (0, []) -> no clause.
+    _spec_missing_n, _spec_open = _spec_missing_signal(cwd)
     text = _nudge_text(i_count, members, now, release_landed=landed,
                        discuss_audit=_dscope,
                        unpark_audit_n=(len(_acceptance_numbers(members))
                                        if _dscope else 0),
                        stagnation_count=stag_count,
                        deploy_window=deploy_window_nums,
-                       deploy_miss=deploy_miss_nums)
+                       deploy_miss=deploy_miss_nums,
+                       spec_missing_n=_spec_missing_n, spec_open=_spec_open)
     # #923 BATCH COLLECT: contribute text, defer delivery+state to caller.
     if batch_collect is not None:
         def _on_deliver(_nr=new_rec, _w=wrecs, _s=sid, _n=now, _h=handled,

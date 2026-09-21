@@ -117,13 +117,19 @@ def compose_body(raw_body, cwd, projects_dir=None, home=None):
     return "%s\n\n%s\n" % (body, stamp)
 
 
-def validate_body(raw_body):
+def validate_body(raw_body, ticket_body=None):
     """(ok, reasons) -- does `raw_body` carry a gate-valid design? Applies the
     SAME acceptance post-record-design-comment.sh uses for the "design" kind:
     the design shape (root cause + approach + rejected alternative), a `Triage:`
     line, an `Architektúra:` section (only when non-trivial, #428), and a
     `Shared-benefit:` line (#877, unconditional). Returns every failing reason
-    so the caller surfaces them all at once, never a multi-round discovery."""
+    so the caller surfaces them all at once, never a multi-round discovery.
+
+    #1106 -- when `ticket_body` is given AND it carries a `Spec:` ref, the design
+    ALSO must cite the spec section (`Spec-ref:` + `Spec-conform: yes` |
+    `Spec-deviation:` + a `needs-decision` question). `ticket_body` None (not
+    fetched) or a no-spec ticket -> the spec check is skipped (fail-open), so
+    every pre-#1106 caller is byte-identical."""
     from gates import design as dg
     reasons = []
     ok_design, r_design = dg.classify_design_comment(raw_body)
@@ -140,7 +146,30 @@ def validate_body(raw_body):
     sb_ok, r_sb = dg.classify_shared_benefit(raw_body)
     if not sb_ok:
         reasons.append("shared-benefit: " + r_sb)
+    if ticket_body is not None:
+        import gates.spec as gspec
+        ok_spec, r_spec = gspec.classify_spec_design(raw_body, ticket_body)
+        if not ok_spec:
+            reasons.append("spec: " + r_spec)
     return (not reasons), reasons
+
+
+def _fetch_ticket_body(issue, repo, cwd):
+    """The ticket's body text for the #1106 spec check, or None (fail-open) --
+    REST-first via gates.ghread (the same reader the design-dispatch gate uses,
+    survives the GraphQL exhaustion). Never raises; a read error just skips the
+    spec check."""
+    try:
+        from gates import ghread
+        slug = repo or ghread.resolve_slug(cwd)
+        if not slug:
+            return None
+        obj, err = ghread.read_issue(int(issue), slug, cwd=cwd)
+        if err or not isinstance(obj, dict):
+            return None
+        return obj.get("body") or ""
+    except Exception:
+        return None
 
 
 def _default_runner(argv, body):
@@ -174,15 +203,17 @@ def _repo_key(repo, cwd):
 
 
 def post_and_record(issue, repo, raw_body, cwd, runner=None, projects_dir=None,
-                    home=None):
+                    home=None, ticket_body=None):
     """Validate -> compose (stamp) -> post -> write marker.
 
     Returns (True, comment_url, stamp_line) on success, or (False, reason, None)
     when the design is invalid or the post fails. `runner(argv, body)` ->
     (rc, stdout, stderr) is injected in tests; production uses `_default_runner`.
     The design marker is written ONLY after a confirmed post (never
-    speculatively), the same #135 lesson post-record-design-comment.sh encodes."""
-    ok, reasons = validate_body(raw_body)
+    speculatively), the same #135 lesson post-record-design-comment.sh encodes.
+    `ticket_body` (#1106) threads the fetched ticket body into `validate_body`
+    for the spec check (None -> skipped, fail-open)."""
+    ok, reasons = validate_body(raw_body, ticket_body=ticket_body)
     if not ok:
         return False, "invalid design: " + "; ".join(reasons), None
     # #1061 fix-forward: never post a `Design-by: <role> unknown` stamp -- the
@@ -243,7 +274,11 @@ def cmd_design_record(args):
         print("design-record BLOCK: --body-file is empty")
         return 1
     cwd = os.getcwd()
-    ok, reasons = validate_body(raw)
+    # #1106 -- fetch the ticket body ONCE so validate_body can require a
+    # Spec-ref when the ticket carries a `Spec:` line. Fail-open: a read error
+    # (quota / no slug) returns None and the spec check is skipped.
+    ticket_body = _fetch_ticket_body(issue, repo, cwd)
+    ok, reasons = validate_body(raw, ticket_body=ticket_body)
     if not ok:
         print("design-record BLOCK: the design comment would not pass the gate:")
         for r in reasons:
@@ -269,7 +304,8 @@ def cmd_design_record(args):
             sys.stdout.write("\n")
         print("[dry-run] would post to #%s with stamp: %s" % (issue, stamp))
         return 0
-    ok2, url_or_reason, stamp = post_and_record(issue, repo, raw, cwd)
+    ok2, url_or_reason, stamp = post_and_record(issue, repo, raw, cwd,
+                                                ticket_body=ticket_body)
     if not ok2:
         print("design-record FAILED: %s" % url_or_reason)
         return 1
