@@ -339,9 +339,12 @@ def _nudge_text(arrivals, cur_count):
 
 
 # --- ROLE-AWARE (#1029) ----------------------------------------------------
-# The gk box declares TWO windows (cli_fleet, #998): gk (role=review, parallel,
-# ~/devel/odoo/odoo-erp) and gk-infra (role=infra, sequential,
-# ~/devel/odoo/odoo-erp-infra). The FLOW review session routes infra-caused
+# The gk box declares THREE windows (cli_fleet, #998/#1074): gk (role=review,
+# parallel, ~/devel/odoo/odoo-erp), gk-infra (role=infra, sequential,
+# ~/devel/odoo/odoo-erp-infra) and gk-quality (role=quality, sequential,
+# ~/devel/odoo/odoo-erp-quality). This infra-arrival rider is gated on
+# role=="infra" (via watchdog/goal.py) — a quality/review window never reaches
+# it. The FLOW review session routes infra-caused
 # STOP:/GATEKEEPER-ACTION (INFRA) as comments on odoo-erp #6883 + infra tickets,
 # but nothing woke the INFRA session — the rider was blind to it (the #998
 # sequential skip + hardcoded review union). This rider is now ROLE-AWARE: the

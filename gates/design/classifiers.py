@@ -151,10 +151,16 @@ _REVIEW_RESULT_RE = re.compile(
 )
 
 
-def classify_review_comment(body):
+def classify_review_comment(body, ticket_body=None):
     """Heuristic verdict for #214: does `body` plausibly carry a review
     ACTION plus a review RESULT (finding counts, "clean", or a fixing
-    commit sha)? Returns `(ok: bool, reason: str)`, same contract."""
+    commit sha)? Returns `(ok: bool, reason: str)`, same contract.
+
+    #1106 -- when `ticket_body` is given AND it carries a `Spec:` ref, the
+    review comment ALSO must carry a `Spec-check: §x -- conform | deviation
+    <ref>` line (the review lens: did the diff match the spec section?).
+    `ticket_body` None (the pre-#1106 call shape) or a no-spec ticket -> the
+    spec check is skipped, so every existing caller is byte-identical."""
     text = (body or "").strip()
     if len(text) < MIN_LEN_REVIEW:
         return False, "too short (%d chars, need >= %d)" % (
@@ -166,6 +172,12 @@ def classify_review_comment(body):
         missing.append("findings/fix evidence")
     if missing:
         return False, "missing: " + ", ".join(missing)
+    if ticket_body is not None:
+        import gates.spec as _gspec
+        if _gspec.ticket_has_spec(ticket_body):
+            ok_sc, r_sc = _gspec.classify_spec_check(text)
+            if not ok_sc:
+                return False, r_sc
     return True, "ok"
 
 
