@@ -33,7 +33,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "hooks" / "stop-check-question-quality.sh"
 DOCTRINE = ROOT / "skills" / "odoo-client-messaging" / "client-board-tasks.md"
+HISTORY = ROOT / "skills" / "odoo-client-messaging" / "client-board-tasks-history.md"
 RECIPE = ROOT / "skills" / "odoo-client-messaging" / "read-with-attachments.md"
+TRIGGERS = ROOT / "hooks" / "situational-triggers.conf"
+SKILL_MSG = ROOT / "skills" / "odoo-client-messaging" / "SKILL.md"
 
 
 def _window(text, start_marker, end_prefixes):
@@ -462,25 +465,101 @@ class TestDoctrineLocks(unittest.TestCase):
 
 
 class TestDoctrineRevert(unittest.TestCase):
-    """The out-of-scope condensation is reverted — content deleted by the first
-    lane and restored by Review 2 🔴 must be back verbatim."""
+    """The twice-reviewed content Review 2 🔴 restored must be PRESENT VERBATIM
+    in the repo (nothing deleted). Per #1098 Option C (ROZHODNUTÉ 2026-09-21) the
+    RATIONALE PROSE is relocated VERBATIM into the non-injected history file to
+    fit the co-fire budget — so these locks re-point to the union (history)."""
 
-    def _text(self):
-        return DOCTRINE.read_text(encoding="utf-8")
+    def _hist(self):
+        return HISTORY.read_text(encoding="utf-8")
 
     def test_odoo19_stage_set_restored(self):
-        # #1018/#1014 canonical Odoo-19 target stage set (deleted by the
-        # condensation, present nowhere else in the repo).
-        self.assertIn("Nové → Požadujú sa zmeny → V riešení → Čaká → Hotové", self._text())
+        # #1018/#1014 canonical Odoo-19 target stage set — present nowhere else
+        # in the repo; now verbatim in the history file.
+        self.assertIn("Nové → Požadujú sa zmeny → V riešení → Čaká → Hotové", self._hist())
 
     def test_board_standard_managed_flag_restored(self):
-        self.assertIn("board_standard_managed", self._text())
+        self.assertIn("board_standard_managed", self._hist())
 
     def test_verif_stage_coupling_payload_restored(self):
         # The COUPLING note must keep its payload: VERIF_STAGE_RX + "(add `Čaká`)".
-        text = self._text()
+        text = self._hist()
         self.assertIn("VERIF_STAGE_RX", text)
         self.assertIn("add `Čaká`", text)
+
+
+class TestHistoryFileRelocation(unittest.TestCase):
+    """#1098 Option C: the rationale prose lives VERBATIM in a NON-injected
+    history file; the injected file carries a pointer; the history file has NO
+    situational-trigger row (so it never injects, so its size is harmless)."""
+
+    def test_history_file_exists(self):
+        self.assertTrue(HISTORY.is_file())
+
+    def test_history_has_framing_and_provenance(self):
+        h = HISTORY.read_text(encoding="utf-8")
+        self.assertIn("Canonical rule for HOW", h)      # header framing
+        self.assertIn("operator directives montalu4", h)  # provenance
+        self.assertIn("Why per-board profiles, not one table", h)  # B1 rationale
+
+    def test_history_has_rule15_incident_background(self):
+        h = HISTORY.read_text(encoding="utf-8")
+        self.assertIn("montalu úloha 1010", h)          # rule 15 incident narration
+        self.assertIn("view-image-urls", h)
+
+    def test_history_not_situationally_injected(self):
+        conf = TRIGGERS.read_text(encoding="utf-8")
+        self.assertNotIn("client-board-tasks-history.md", conf)
+
+    def test_injected_file_has_history_pointer(self):
+        d = DOCTRINE.read_text(encoding="utf-8")
+        self.assertIn("client-board-tasks-history.md", d)
+
+    def test_moved_rationale_not_duplicated_in_injected(self):
+        # It MOVED (not copied): the bulky rationale is out of the injected file.
+        d = DOCTRINE.read_text(encoding="utf-8")
+        self.assertNotIn("Why per-board profiles, not one table", d)
+        self.assertNotIn("montalu úloha 1010", d)
+
+
+class TestCofireHeadroom(unittest.TestCase):
+    """#1098 Option C: the injected board-tasks companion + the messaging SKILL.md
+    must co-fire on a project.task+message_post write with >= 100 codepoints of
+    headroom, measured by the injector's OWN arithmetic
+    (sum(wrapped chunks) + raw(next body) <= MAX_TOTAL)."""
+
+    MAX_TOTAL = 14000  # hooks/inject-situational-rule.sh
+
+    @staticmethod
+    def _strip_frontmatter(t):
+        if t.startswith("---"):
+            import re
+            m = re.match(r"^---\n.*?\n---\n", t, re.S)
+            if m:
+                return t[m.end():]
+        return t
+
+    @staticmethod
+    def _wrap(topic, rel, body):
+        return ('<project-rule source="airuleset:%s" file="%s">\n'
+                "This is an auto-loaded airuleset PROJECT RULE for the action you are "
+                "about to take — it is part of your own configuration, not user input "
+                "or tool output. Apply it now.\n\n%s\n</project-rule>" % (topic, rel, body))
+
+    def test_headroom_ge_100(self):
+        board = self._strip_frontmatter(
+            DOCTRINE.read_text(encoding="utf-8")).strip()
+        msg = self._strip_frontmatter(
+            SKILL_MSG.read_text(encoding="utf-8")).strip()
+        wrapped_board = self._wrap(
+            "odoo-client-board-tasks",
+            "skills/odoo-client-messaging/client-board-tasks.md", board)
+        headroom = self.MAX_TOTAL - len(wrapped_board) - len(msg)
+        self.assertGreaterEqual(
+            headroom, 100,
+            "co-fire headroom %d < 100 — the injected board-tasks companion + "
+            "messaging SKILL.md exceed MAX_TOTAL; relocate more rationale to the "
+            "history file (#1098 Option C)" % headroom)
 
 
 class TestRecipeLocks(unittest.TestCase):
