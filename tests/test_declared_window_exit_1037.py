@@ -250,5 +250,133 @@ class TestWrapperFallsThroughToLoginShellAtRuntime(unittest.TestCase):
         self.assertLess(out.index("LAUNCHER_RAN"), out.index("RECORDER_RAN"), out)
 
 
+# --------------------------------------------------------------------------- #
+# #1037 follow-up: the impl window has THREE creators — the session-created hook
+# snippet (above), the bashrc attach block, and the watchdog relaunch. All THREE
+# must wrap the launcher in the surviving login shell, or the owner's "exit to
+# bash everywhere" mandate is inconsistent per box (whichever creator won the
+# race decides the pane's fate). The bashrc block and the watchdog live in lower
+# / cross-layer modules that must not import cli_tmux_provisioning, so they MIRROR
+# the one-line wrapper; the drift-lock below ties all three to the canonical
+# `_window_shell_command` shape.
+# --------------------------------------------------------------------------- #
+
+import cli_bashrc_appliers  # noqa: E402
+import watchdog.tmux_io as _tmux_io  # noqa: E402
+
+_IMPL = "airuleset-claude-impl.sh"
+
+
+class _FakeTmuxRun:
+    """Minimal watchdog run(argv): returns canned list-windows output, records
+    every argv."""
+
+    def __init__(self, windows_output=""):
+        self.windows_output = windows_output
+        self.calls = []
+
+    def __call__(self, argv):
+        self.calls.append(list(argv))
+        if argv[:2] == ["tmux", "list-windows"]:
+            return self.windows_output
+        return ""
+
+    def new_window_calls(self):
+        return [c for c in self.calls if c[:2] == ["tmux", "new-window"]]
+
+
+class TestBashrcAttachBlockWrapsImplLauncher(unittest.TestCase):
+    def setUp(self):
+        self.block = cli_bashrc_appliers.render_tmux_attach_block("miva1")
+
+    def test_impl_launcher_is_wrapped_in_both_branches(self):
+        # exactly the two impl new-window branches (with cwd + without), each
+        # wrapping the launcher in the surviving login shell.
+        wrapped = 'bash -lc "$HOME/.claude/%s; exec bash -l"' % _IMPL
+        self.assertEqual(self.block.count(wrapped), 2, self.block)
+        self.assertEqual(self.block.count("bash -lc"), 2)
+        self.assertEqual(self.block.count("exec bash -l"), 2)
+
+    def test_never_a_bare_impl_launcher(self):
+        # the OLD bare shape (launcher double-quoted as the pane command) is gone.
+        self.assertNotIn('-n impl -c "$_impl_cwd" "$HOME/.claude/%s"' % _IMPL,
+                         self.block)
+        self.assertNotIn('-n impl "$HOME/.claude/%s"' % _IMPL, self.block)
+
+    def test_intent_preserved(self):
+        # the cwd branch prefix, the dedup, and remain-on-exit are unchanged.
+        self.assertIn('-n impl -c "$_impl_cwd"', self.block)
+        self.assertIn("grep -Fxq impl", self.block)
+        self.assertIn("remain-on-exit on", self.block)
+
+
+class TestWatchdogRelaunchWrapsImplLauncher(unittest.TestCase):
+    _MARKER = {"base_url": "http://gw", "key_file": "~/.secrets/k",
+               "main": "m", "sub": "s", "fast": "f",
+               "cwd": "/home/miva1/devel/odoo/odoo-erp"}
+
+    def _relaunch_argv(self):
+        fake = _FakeTmuxRun("miva1\t0\tmiva1\n")
+        rc = _tmux_io.impl_window_presence(self._MARKER, run=fake, logs=[])
+        self.assertEqual(rc, "relaunched")
+        nw = fake.new_window_calls()
+        self.assertEqual(len(nw), 1, nw)
+        return nw[0]
+
+    def test_relaunch_argv_wraps_the_launcher(self):
+        argv = self._relaunch_argv()
+        self.assertIn("bash", argv)
+        i = argv.index("bash")
+        self.assertEqual(argv[i:i + 2], ["bash", "-lc"], argv)
+        inner = argv[i + 2]
+        self.assertTrue(inner.endswith("; exec bash -l"), inner)
+        self.assertIn(_IMPL, inner)
+
+    def test_relaunch_never_appends_a_bare_launcher(self):
+        argv = self._relaunch_argv()
+        # the final arg is the wrapper's inner command, NOT the bare launcher
+        # path (which would end in `.sh`, closing the whole tmux window on exit).
+        self.assertFalse(argv[-1].endswith(_IMPL), argv)
+        self.assertTrue(argv[-1].endswith("; exec bash -l"), argv)
+
+
+class TestThreeImplRenderersDriftLock(unittest.TestCase):
+    """All three impl-window creators produce the SAME wrapper shape, tied to the
+    canonical cli_tmux_provisioning._window_shell_command. The bashrc block and
+    the watchdog MIRROR the one-liner (they must not import cli_tmux_provisioning);
+    this lock fails the moment any of the three drifts from the canonical shape."""
+
+    _MARKER = {"base_url": "http://gw", "key_file": "~/.secrets/k",
+               "main": "m", "sub": "s", "fast": "f",
+               "cwd": "/home/miva1/devel/odoo/odoo-erp"}
+
+    def test_canonical_shape(self):
+        self.assertEqual(ctp._window_shell_command("L"),
+                         'bash -lc "L; exec bash -l"')
+
+    def test_all_three_match_the_canonical_shape(self):
+        canonical = ctp._window_shell_command("$HOME/.claude/%s" % _IMPL)
+
+        # 1) session-created hook snippet
+        snip = ctp._impl_window_create_snippet(self._MARKER)
+        self.assertIn(canonical, snip)
+
+        # 2) bashrc attach block (mirror)
+        block = cli_bashrc_appliers.render_tmux_attach_block("miva1")
+        self.assertIn(canonical, block)
+
+        # 3) watchdog relaunch argv (mirror; $HOME expanded to an abs path)
+        fake = _FakeTmuxRun("miva1\t0\tmiva1\n")
+        _tmux_io.impl_window_presence(self._MARKER, run=fake, logs=[])
+        argv = fake.new_window_calls()[0]
+        i = argv.index("bash")
+        inner = argv[i + 2]                       # "<abs launcher>; exec bash -l"
+        launcher_part = inner[:-len("; exec bash -l")]
+        # reconstruct the wrapper string from the argv and compare to canonical
+        self.assertEqual('bash -lc "%s"' % inner,
+                         ctp._window_shell_command(launcher_part))
+        self.assertTrue(launcher_part.endswith(_IMPL), launcher_part)
+
+
 if __name__ == "__main__":
     unittest.main()
