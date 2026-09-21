@@ -3987,6 +3987,14 @@ def cmd_tickets_status(args):
                 gk = sum(1 for n_num in workable_rows if handed.get(n_num))
                 entry["open"] = len(workable_rows) - gk
                 entry["gk"] = gk
+                # #1103: the handed-off ticket NUMBERS (the whole `handed`
+                # subset, not just the workable-gk count) — the lane-liveness
+                # classifier reads this from the FRESH cache to mark a lane whose
+                # ticket is with the gatekeeper as FINISHED (excluded from live),
+                # with ZERO gh on the hot dispatch path. Parked+handed rows are
+                # included (their lane is still finished for THIS box).
+                entry["gk_numbers"] = sorted(int(n) for n in rows
+                                             if handed.get(n))
                 # #1083: the M bucket count + numbers (release-readiness).
                 entry["merged_unreleased"] = len(merged_rows)
                 entry["merged_unreleased_numbers"] = sorted(
