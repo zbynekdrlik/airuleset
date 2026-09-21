@@ -10843,6 +10843,14 @@ def _remove_legacy_nudges_off_marker(home=None):
         return False
 
 
+# #1104-review F4 -- MACHINE_NUDGE_KINDS members whose DELIVERY never types into a
+# pane: `card` is a Discord report card (a notification), and `lane-occupancy`'s
+# keystroke delivery was RETIRED (#1089, the lane-fill Stop gate refills instead).
+# Enabling one of these must NOT print a busy-pane "first delivery will wait"
+# warning -- it is misleading (nothing ever types).
+_NON_KEYSTROKE_NUDGE_KINDS = frozenset({"card", "lane-occupancy"})
+
+
 def _nudges_keystroke_pane_warnings(run=None):
     """#1104 -- classify this box's managed Claude panes (busy / draft / idle) so
     `nudges on --kind <keystroke kind>` can WARN the owner BEFORE enabling a kind
@@ -10938,13 +10946,16 @@ def cmd_nudges(args, run=None):
             return 2
         for k in kinds:
             _wd.set_nudge_kind(k, True, by=by)
-        # #1104 -- a keystroke kind was just enabled; WARN if any managed pane is
-        # busy/draft right now, so the owner knows the first delivery will wait
-        # for a true idle tick rather than typing into a swallowing pane (the
-        # montalu1 incident: goal-sweep enabled while the session waited on
-        # background agents). Best-effort: no pane read must fail the enable.
-        for _w in _nudges_keystroke_pane_warnings(run):
-            print(_w)
+        # #1104 -- a KEYSTROKE-delivering kind was just enabled; WARN if any
+        # managed pane is busy/draft right now, so the owner knows the first
+        # delivery will wait for a true idle tick rather than typing into a
+        # swallowing pane (the montalu1 incident: goal-sweep enabled while the
+        # session waited on background agents). Skip the warning entirely for a
+        # pure non-keystroke enable (card / retired lane-occupancy, #1104-review
+        # F4 -- those never type). Best-effort: no pane read must fail the enable.
+        if set(kinds) - _NON_KEYSTROKE_NUDGE_KINDS:
+            for _w in _nudges_keystroke_pane_warnings(run):
+                print(_w)
     elif action == "off":
         # a bare `nudges off` (or --all) turns EVERYTHING off — off is safe.
         for k in (kinds if kinds else all_kinds):

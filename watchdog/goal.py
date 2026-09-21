@@ -856,7 +856,7 @@ def _await_goal_armed(pid, run, sleep_fn):
 
 
 def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
-                        verify_armed=True, nudge="goal-sweep"):
+                        verify_armed=True, nudge="goal-sweep", out=None):
     """Type a LONG `/goal ...` into a BARE input box and submit it,
     verifying every step against a fresh capture -- the same protocol
     `deliver_with_stash` uses for its own type/submit steps, minus the
@@ -919,6 +919,13 @@ def _send_goal_verified(pid, text, run, captured=None, sleep_fn=None, logs=None,
                                            kind="goal", nudge=nudge, logs=logs):
         _log("goal-verify-abort: type-not-verified")
         return False                       # not byte-exact -- never submit it
+    # #1104 -- the type keystrokes LANDED (the box holds our text): a keystroke
+    # was ACTUALLY sent. Surface it so a re-arm caller books the per-pane budget
+    # ONLY on a real send, never on an OFF-suppressed / raced-abort no-keystroke
+    # bail above (mirrors send_verified's `out["attempted"]`). A False return with
+    # no `out["typed"]` therefore means NOTHING was typed.
+    if isinstance(out, dict):
+        out["typed"] = True
     # #1002 -- reached only when ON (a suppressed type returned False above); the
     # submit Enter + corrective go through the ONE `keys` primitive.
     watchdog.keys(pid, "Enter", kind="goal", nudge=nudge, run=run, logs=logs)
@@ -1421,11 +1428,13 @@ def _log_arm_confirm_fail(sid, cwd, text, pid, run, sleep_fn=None,
         # #1104 -- a LIVE turn (busy / non-input boundary) holds our OWN /goal
         # stranded in the box. We MUST NOT Escape-clear it now (that interrupts
         # the running turn -- the never-Escape-a-live-turn rule). Instead DEFER
-        # the cleanup to the FIRST true idle tick by setting the #372 janitor
-        # watch: the shared janitor (`_janitor_recover`, sweep top) then recovers
-        # the stranded /goal at idle, never only after the hourly floor (the
-        # montalu1 incident's text sat unsent for the whole background-agent
-        # wait). A no-op when `state` is None (a caller/test not threading it).
+        # the cleanup by setting the #372 janitor watch: the shared janitor
+        # (`_janitor_recover`, sweep top) then recovers the stranded /goal on a
+        # SUBSEQUENT sweep -- subject to its OWN provenance + own-content gates,
+        # not only after the hourly floor that a watch-less verify-failed would
+        # have waited for (the montalu1 incident's text sat unsent for the whole
+        # background-agent wait). A no-op when `state` is None (a caller/test not
+        # threading it).
         watchdog._janitor_mark_watch(state, pid,
                                      now if now is not None else time.time())
         _log_goal_sync("ARM-CONFIRM-FAIL sid=%s cwd=%s "
@@ -1877,22 +1886,22 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     # Bare box -- verified typed send. Mark provenance BEFORE typing so the
     # shared janitor (#372) can recover a stuck send for THIS pane.
     watchdog._janitor_mark_watch(state, pid, now)
+    _send_out = {}
     ok = _send_goal_verified(pid, text, run, captured=captured,
                              sleep_fn=sleep_fn, logs=logs,
-                             nudge=_nudge)   # #1038 declared-window -> goal-arm
+                             nudge=_nudge, out=_send_out)   # #1038 declared-window -> goal-arm
     # #1092 (e) -- the type keystroke into the (empty) box was a typing attempt
     # into an active pane; count it against the per-pane budget for a watchdog
     # re-arm -- but ONLY when a keystroke was ACTUALLY sent (#1104). A swallowed
-    # re-arm (typed, submit unconfirmed) DID keystroke and still counts; an
-    # OFF-suppressed re-arm (`_send_goal_verified` bailed keystroke-free through
-    # the #1002 kill switch, typing NOTHING) must NOT consume the pane budget --
-    # else switching the kind ON later inherits a spent budget with zero real
+    # re-arm (typed, submit unconfirmed) DID keystroke and still counts (`typed`
+    # set); an OFF-suppressed re-arm (`_send_goal_verified` bailed keystroke-free
+    # through the #1002 kill switch) OR a raced-abort (box no longer bare) typed
+    # NOTHING (`typed` unset) and must NOT consume the pane budget -- else
+    # switching the kind ON later inherits a spent budget with zero real
     # keystrokes (the montalu1 16:04 `hold:pane-budget` with no keystrokes).
-    # `_keystroke_suppressed` is the deterministic proxy for "keys returned
-    # True": it is exactly what `_send_goal_verified`'s first gated keystroke
-    # consulted.
-    if origin in _GOAL_WATCHDOG_REARM_ORIGINS \
-            and not watchdog._keystroke_suppressed("goal", False, _nudge):
+    # `out["typed"]` is the real "a keystroke was emitted" signal, not the
+    # kill-switch proxy (#1104-review: the proxy over-books on a raced abort).
+    if origin in _GOAL_WATCHDOG_REARM_ORIGINS and _send_out.get("typed"):
         _nudge_gate.mark_pane_attempt(state, pid, now)
 
     if ok:

@@ -35,6 +35,7 @@ Four coupled fixes, RED-first (root cause traced in the #1104 design comment):
    and WARNS on a busy/draft pane before enabling a keystroke kind.
 """
 import io
+import json
 import os
 import sys
 import types
@@ -86,6 +87,27 @@ class TestClassifierSpinnerAboveBox(unittest.TestCase):
         # RED: pre-fix `_classify_boundary` sees only the bare box and returns
         # ("input", ""), so a keystroke job types into a swallowing pane.
         self.assertEqual(wd._classify_boundary(SPINNER_ABOVE_BARE), ("busy", None))
+
+    def test_all_cc_spinner_frames_are_busy_not_just_one_glyph(self):
+        # #1104-review F1: CC cycles the leading spinner GLYPH per animation frame
+        # (`✻`/`✳`/`✽`/`✢`/`·`, watchdog/long_turn.py). The detection MUST be
+        # frame-agnostic — a race-moment capture landing on `✳`/`·` was the
+        # incident's own trigger. RED against a glyph-hardcoded regex.
+        def cap(spin):
+            return "● Hotovo.\n" + spin + "\n❯ \n  ctx ███░  caveman:lite\n"
+        for spin in ("✳ Baking… (4m 2s · esc to interrupt)",
+                     "· Germinating… (2h 40m 36s · ↓ 69.3k tokens)",
+                     "✽ Simmering… (7s · ↓ 2k tokens)",
+                     "✢ Whisking… (12s)"):
+            self.assertEqual(wd._classify_boundary(cap(spin)), ("busy", None),
+                             "frame %r must classify busy" % spin[:12])
+
+    def test_finished_turn_summary_is_not_busy(self):
+        # A FINISHED-turn summary reuses the spinner glyph but has no `…(duration)`
+        # readout (`✻ Brewed for 24s`) — it must NOT read busy (else an idle pane
+        # after a turn ends is starved).
+        cap = "● Hotovo.\n✻ Brewed for 24s\n❯ \n  ctx ███░  caveman:lite\n"
+        self.assertEqual(wd._classify_boundary(cap), ("input", ""))
 
     def test_waiting_line_stays_input_handled_by_pane_busy_waiting(self):
         # The #458 lock: a Waiting line (no ellipsis) is NOT a classifier "busy"
@@ -148,44 +170,48 @@ class TestGoalDeliveryDefersOnBusy(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-#    LANE nudge defers on a spinner-busy pane (it gates on `_classify_boundary`).
+#    The shared delivery primitive send_verified (every ops-wait / u-freshness /
+#    queue-arrival / release-gap / lane-reconcile rider + the batch send routes
+#    through it) DEFERS on a spinner-above-bare-box (#1104-review F2 shared-
+#    benefit: the riders gate only on _pane_busy_waiting, which catches the
+#    ellipsis-free Waiting line but NOT a mid-render spinner).
 # --------------------------------------------------------------------------- #
-class TestLaneNudgeDefersOnSpinner(unittest.TestCase):
-    CWD = "/home/newlevel/devel/lanespin1104"
-    SID = "sess-lanespin-1104"
+class TestRiderDefersOnSpinnerViaSendVerified(unittest.TestCase):
+    PID = "%9"
 
-    def setUp(self):
-        self.reqp, self.syncp = _isolate_goal_state(self)
-
-    def _dir(self):
+    def _tpath(self):
         d = TemporaryDirectory()
         self.addCleanup(d.cleanup)
-        return Path(d.name)
+        p = Path(d.name) / "sess.jsonl"
+        p.write_text(json.dumps({"type": "assistant",
+                                 "message": {"content": "x"}}) + "\n")
+        return p
 
-    def test_lane_occupancy_nudge_defers_on_spinner_busy(self):
-        # A spinner-ABOVE-armed-box: the lane occupancy refill nudge must NOT
-        # type (Enter is swallowed). RED: pre-fix `_classify_boundary` reads
-        # "input" and it types.
-        cap = (
-            "● Predošlá práca hotová.\n"
-            "✻ Frosting… (33s · ↓ 1.4k tokens)\n"
-            "❯ \n"
-            "  ctx ███░  caveman:lite  ◎ /goal active\n")
-        now = 100000
-        tmtime = now - goal.GOAL_LANE_IDLE_S - 100
-        proj = self._dir()
-        _write_marker_transcript(proj, self.CWD, self.SID)
-        tpath = proj / wd.encode_project_dir(self.CWD) / (self.SID + ".jsonl")
-        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
-                                   cap, model_type=True, transcript_path=tpath)
-        with m.patch("airuleset.resolve_authority", return_value="full"):
-            logs, _owns = goal.goal_lane_occupancy_nudge(
-                now, tmux, {}, self.SID, self.CWD, "111", cap,
-                tpath, tmtime, "loc", None, False, None, proj,
-                backlog_fetch=lambda cwd: 5, state={}, sleep_fn=lambda s: None)
-        self.assertEqual(tmux.sent, [],
-                         "a spinner-busy pane must never be typed into")
-        self.assertTrue(any("busy" in ln for ln in logs), logs)
+    def test_send_verified_defers_on_spinner_above_bare_box(self):
+        # A rider's keystroke into a spinner-above-BARE-box would be SWALLOWED:
+        # the box reads bare so the pre-fix bare-check passed and it TYPED. RED
+        # against the pre-F2 tree; GREEN once send_verified aborts on the spinner.
+        p = self._tpath()
+        tmux = DeliverGoalFakeTmux([(self.PID, "claude", "/x", "111")],
+                                   SPINNER_ABOVE_BARE, model_type=True,
+                                   transcript_path=p)
+        logs = []
+        ok = wd.send_verified(self.PID, "rider-nudge: fill the lane, backlog=5",
+                              tmux, p, sleep_fn=lambda s: None, logs=logs)
+        self.assertFalse(ok, "a rider must not deliver into a spinner-busy pane")
+        self.assertEqual(tmux.sent, [], "zero keystrokes into a suspended turn")
+        self.assertTrue(any("spinner above box" in ln for ln in logs), logs)
+
+    def test_send_verified_still_delivers_into_a_clean_idle_pane(self):
+        # Control: the gate is narrow — a genuinely idle pane still delivers.
+        p = self._tpath()
+        tmux = DeliverGoalFakeTmux([(self.PID, "claude", "/x", "111")],
+                                   CLEAN_IDLE, model_type=True,
+                                   transcript_path=p)
+        ok = wd.send_verified(self.PID, "rider-nudge: fill the lane",
+                              tmux, p, sleep_fn=lambda s: None, logs=[])
+        self.assertTrue(ok)
+        self.assertNotEqual(tmux.sent, [])
 
 
 # --------------------------------------------------------------------------- #
@@ -393,6 +419,22 @@ class TestNudgesEnableWarnsOnBusyPane(unittest.TestCase):
         out = buf.getvalue()
         self.assertEqual(rc, 0)
         self.assertIn("BUSY", out)
+
+    def test_nudges_on_non_keystroke_kind_prints_no_busy_warning(self):
+        # #1104-review F4: `card` (a Discord notification) never types into a
+        # pane, so enabling it must NOT print the busy-pane warning even when a
+        # managed pane is busy.
+        import airuleset
+        with TemporaryDirectory() as home:
+            with m.patch.dict(os.environ, {"HOME": home}):
+                args = types.SimpleNamespace(
+                    nudges_action="on", kind="card", all=False, fleet=False)
+                buf = io.StringIO()
+                with redirect_stdout(buf):
+                    rc = airuleset.cmd_nudges(args, run=self._fake(WAITING_ABOVE_BARE))
+        out = buf.getvalue()
+        self.assertEqual(rc, 0)
+        self.assertNotIn("BUSY", out)
 
 
 if __name__ == "__main__":

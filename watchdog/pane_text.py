@@ -35,31 +35,36 @@ import re
 import watchdog
 
 
-# #1104 -- a GENERIC ACTIVITY spinner line CC renders while a turn is mid-render:
-# a spinner glyph, whitespace, content, and the spinner's own trailing ellipsis
-# (`✻ Frosting… (33s · ↓ 1.4k tokens)`). This is DISTINCT from the ambient
-# "Waiting for N background agents to finish" line (no ellipsis -> NOT matched
-# here; that state stays `_pane_busy_waiting`'s gate, unchanged -- and keeping it
-# out of the classifier is what preserves the #458 lock
-# `_classify_boundary(MONTALU3) == ("input","")`, since MONTALU3 carries that
-# Waiting line above a bare box). Anchored at line start (post-strip) so a mid-
-# prose mention never matches; the glyph set is CC's spinner frames.
-_ACTIVITY_SPINNER_RX = re.compile(r"[✻✢✽∗]\s+\S.*…")
+# #1104 -- a RUNNING-turn spinner's FRAME-AGNOSTIC signature: the gerund ellipsis
+# followed by CC's parenthesised live-activity readout (`… (33s · ↓ 1.4k tokens)`,
+# `… (4m 2s · esc to interrupt)`, `… (2h 40m …)`). Frame-agnostic ON PURPOSE: CC
+# cycles the LEADING spinner GLYPH per animation frame (`✻`/`✳`/`✽`/`✢`/`·`/…,
+# documented live in watchdog/long_turn.py), so keying on the glyph MISSES
+# whichever frame the race-moment capture happens to land on -- the exact
+# #1104-review finding (the incident's own render race). Keying on the
+# `…(<duration|↓|esc>)` readout matches EVERY frame AND excludes both a FINISHED-
+# turn summary (`✻ Brewed for 24s` -- no `…(`) and the ellipsis-free "Waiting for
+# N background agents" AMBIENT line (so the #458 MONTALU3 lock holds and that
+# state stays `_pane_busy_waiting`'s job). Sibling of `long_turn._TURN_ELAPSED_RX`,
+# kept TIGHTER here (a duration/`↓`/`esc` token is REQUIRED, not the all-optional
+# `…(`) because this feeds a keystroke-DEFER decision, not a diagnostic: a bare
+# `…(prose)` in a draft must never read busy.
+_ACTIVITY_SPINNER_RX = re.compile(r"…\s*\(\s*(?:\d+\s*[hms]\b|↓|esc to interrupt)")
 
 
 def _pane_activity_spinner_above_box(captured):
-    """#1104 -- True iff the region ABOVE the input box carries a GENERIC ACTIVITY
-    spinner line (a turn suspended mid-render). A bare/at-rest `❯` box with such a
-    line above it is a SUSPENDED turn whose Enter is SWALLOWED, so every keystroke
-    job must DEFER (`_classify_boundary` returns busy). Scans `_above_input_box`
-    (trailing chrome peeled, the `❯` line dropped), never the box's own rows.
-    Fail-safe False: an unreadable region / no spinner never turns an idle pane
-    busy that wasn't (a false busy only delays a nudge one sweep)."""
-    above = watchdog._above_input_box(captured or "")
-    for ln in above.splitlines():
-        if _ACTIVITY_SPINNER_RX.match(ln.strip()):
-            return True
-    return False
+    """#1104 -- True iff the row IMMEDIATELY above the input box is a RUNNING-turn
+    activity spinner (a turn suspended mid-render). A bare/at-rest `❯` box with
+    such a line above it is a SUSPENDED turn whose Enter is SWALLOWED, so every
+    keystroke job must DEFER. Reuses `_above_box_scan` (which peels queued `❯`
+    rows + the `◎ /goal` indicator and returns ONLY the adjacent content row), so
+    a spinner merely QUOTED deeper in the transcript never false-matches
+    (#1104-review adjacency finding). Frame-agnostic (see `_ACTIVITY_SPINNER_RX`).
+    Fail-safe False: no adjacent spinner row never turns an idle pane busy (a
+    false busy only delays a nudge one sweep, and a false busy on a DRAFT pane is
+    harmless -- delivery defers rather than typing over a draft anyway)."""
+    _queued, spinner = watchdog._above_box_scan(captured or "")
+    return bool(spinner) and bool(_ACTIVITY_SPINNER_RX.search(spinner))
 
 
 def _input_line_text(captured):
