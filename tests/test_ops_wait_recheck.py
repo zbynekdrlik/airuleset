@@ -546,6 +546,28 @@ class TestNudgeText(unittest.TestCase):
         t = owr._nudge_text(41, list(range(3498, 3498 + 53)), NOW)
         self.assertLessEqual(len(t), owr.NUDGE_MAX_CHARS)
 
+    def test_i_positive_carries_the_action_only_duty_clause(self):
+        # #1101: when I>0 the partition-audit nudge must state that an
+        # action-only row is THIS box's own duty (review→merge→release), and
+        # that an infra-class item is a LABEL move, never an explanation.
+        t = owr._nudge_text(3, [], NOW, None)
+        self.assertIn("action-only", t)
+        self.assertRegex(t, r"review.{0,6}merge.{0,10}release")
+        self.assertIn("infra", t)          # the label-move pointer
+        self.assertLessEqual(len(t), owr.NUDGE_MAX_CHARS)
+
+    def test_action_only_clause_absent_when_i_zero(self):
+        # I==0: no I trigger, so no action-only duty clause.
+        t = owr._nudge_text(0, [41, 43], NOW)
+        self.assertNotIn("action-only", t)
+
+    def test_i_and_w_both_present_still_within_cap_with_clause(self):
+        # the mandatory core (I clause + action-only duty + W clause) must fit
+        # even at an incident-scale W with every flag firing.
+        t = owr._nudge_text(41, list(range(3498, 3498 + 53)), NOW)
+        self.assertIn("action-only", t)
+        self.assertLessEqual(len(t), owr.NUDGE_MAX_CHARS)
+
 
 class TestOrchestratorIDirection(_OrchBase):
     """#552 — the orchestrator's I direction end-to-end (fetch/decide/deliver)."""
