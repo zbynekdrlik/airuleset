@@ -198,7 +198,8 @@ def concurrency_status_row(cwd, window_name=None, user=None, home=None,
                            windows=None):
     """The ``airuleset.py status`` row (#998 item 4):
     ``concurrency: <mode> (source: role|project|default)``. When a role is
-    resolved it is named too, so the two gk windows read distinctly."""
+    resolved it is named too, so the gk windows (review / infra / quality,
+    #1074) read distinctly."""
     mode, role, source = resolve_concurrency(cwd, window_name, user, home,
                                              windows)
     role_sfx = " role=%s" % role if role else ""

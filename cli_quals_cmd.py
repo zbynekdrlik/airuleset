@@ -891,7 +891,8 @@ def cmd_slice_quals(args):
     # and re-presented in BOTH windows and the owner risked answering it twice
     # (odoo-erp#7421 17.9., live on #7720; owner 20.9.2026: "U 1 v gk nie je gk
     # ale gk infra"). U now narrows by role exactly like I/W; the exactly-one-
-    # window invariant (U(FLOW)+U(INFRA)==U(unfiltered)) keeps "never lose a
+    # window invariant (U(FLOW)+U(INFRA)+U(QUALITY)==U(unfiltered), #1074 — a
+    # DISJOINT 3-way role partition) keeps "never lose a
     # question". The `_qmap_extra` supplement merged into the `--waiting` listing
     # below is stream-only (session ❓ pings, no ticket ref) and stays per-cwd —
     # NOT filtered here (design: session pings stay per-session). ONE derivation:
@@ -899,7 +900,7 @@ def cmd_slice_quals(args):
     # total=` line below (#367). `slug` already resolved above, reused. role None
     # = no-op (byte-identical, no slug touch); an empty slug fail-CLOSES (#993 r2b).
     role = getattr(args, "role", None)  # #993 r2b / #1025 / #1045 / #1065
-    if role in ("review", "infra"):
+    if role in ("review", "infra", "quality"):  # #1074
         unhandled = _apply_role_filter(unhandled, root, role, slug=slug)
         ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)  # #1045
         waiting = _apply_role_filter(waiting, root, role, slug=slug)  # #1065
@@ -998,7 +999,7 @@ def cmd_slice_quals(args):
     _print_issue_rows(unhandled, own_stream=user, dep_wait_map=_dep_map)
     released_rows = {n: workable_rows[n] for n in workable_rows
                      if handed.get(n) == "released"}
-    if released_rows and role in ("review", "infra"):
+    if released_rows and role in ("review", "infra", "quality"):  # #1074
         released_rows = _apply_role_filter(released_rows, root, role, slug=slug)
     if released_rows:
         _print_issue_rows(released_rows, own_stream=user,
@@ -1028,9 +1029,11 @@ def _slice_quals_runner(root):
 # --------------------------------------------------------------------------- #
 
 def _apply_role_filter(rows, root, role, slug=None):
-    """#993 r2b — slice `rows` by work class for `--role`. `review` keeps rows
-    whose class is NOT infra; `infra` keeps rows whose class IS infra; None (no
-    flag) returns `rows` unchanged (today's behaviour). This is the ROUTING that
+    """#993 r2b / #1074 — slice `rows` by work class for `--role`. `review`
+    keeps rows whose class is NEITHER infra NOR quality (independent); `infra`
+    keeps rows whose class IS infra; `quality` keeps rows whose class IS quality
+    (the `gk-quality` label / gk-quality window, #1074); None (no flag) returns
+    `rows` unchanged (today's behaviour). This is the ROUTING that
     replaces the removed class-based live-infra-lane gate: the `infra` label (and
     the whole airuleset repo, and `architecture-rework`) sends a ticket into the
     infra role/target (the per-role sequential mode is PENDING round 3, #993 —
@@ -1048,7 +1051,7 @@ def _apply_role_filter(rows, root, role, slug=None):
     --count` (a false stop-proof). When `--role` is set and the slug cannot be
     resolved, REFUSE (exit 1) instead of silently mis-slicing — the same
     unmeasurable→refuse contract `_dep_wait_map_for` uses."""
-    if role not in ("review", "infra"):
+    if role not in ("review", "infra", "quality"):
         return rows
     import airuleset
     if slug is None:
@@ -1061,8 +1064,19 @@ def _apply_role_filter(rows, root, role, slug=None):
     out = {}
     for n, row in rows.items():
         labels = row.get("labels") if isinstance(row, dict) else None
-        is_infra = airuleset.work_class(slug, labels) == "infra"
-        if is_infra == (role == "infra"):
+        # #1074 — the DISJOINT 3-way partition: work_class returns exactly one
+        # of {infra, quality, independent}, mapped to exactly one role, so
+        # U(review) + U(infra) + U(quality) == U(all) (the #1065 invariant
+        # extended). `infra` keeps infra-class; `quality` keeps quality-class;
+        # `review` (FLOW) keeps everything else (independent).
+        cls = airuleset.work_class(slug, labels)
+        if role == "infra":
+            keep = cls == "infra"
+        elif role == "quality":
+            keep = cls == "quality"
+        else:  # review / FLOW
+            keep = cls not in ("infra", "quality")
+        if keep:
             out[n] = row
     return out
 
@@ -1402,8 +1416,9 @@ def cmd_core_quals(args):
     # sessions acting on it (odoo-erp#7421 17.9., live on #7720; owner
     # 20.9.2026: "U 1 v gk nie je gk ale gk infra stale ma to pletie"). U now
     # narrows by role exactly like I/W; the exactly-one-window invariant
-    # (U(FLOW)+U(INFRA)==U(unfiltered)) keeps "never lose a question" — a ticket
-    # is either infra (→ INFRA) or not (→ FLOW), a total binary partition, so
+    # (U(FLOW)+U(INFRA)+U(QUALITY)==U(unfiltered)) keeps "never lose a question"
+    # — a ticket is quality (→ QUALITY), else infra (→ INFRA), else FLOW: a
+    # DISJOINT 3-way partition (#1074), so
     # every question lands in exactly one window. This is the gk full-auth path
     # with no `_qmap_extra` supplement, so filtering
     # `waiting` here directly partitions the gk box's U (the #7720 path). ONE
@@ -1411,7 +1426,7 @@ def cmd_core_quals(args):
     # `# W-summary: total=` line below (#367). role None = no-op (byte-identical,
     # no slug touch); an empty slug fail-CLOSES (#993 r2b).
     role = getattr(args, "role", None)  # #993 r2b / #1025 / #1045 / #1065
-    if role in ("review", "infra"):
+    if role in ("review", "infra", "quality"):  # #1074
         slug = airuleset._repo_slug(cwd=root)
         workable = _apply_role_filter(workable, root, role, slug=slug)
         ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)  # #1045

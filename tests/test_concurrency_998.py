@@ -24,6 +24,10 @@ GK_WINDOWS = [
      "mode": "parallel"},
     {"name": "gk-infra", "cwd": "~/devel/odoo/odoo-erp-infra", "role": "infra",
      "mode": "sequential"},
+    # #1074 — the third declared window (gk-quality); the full #1074 role/
+    # resolver behaviour is locked in test_gk_quality_role_1074.py.
+    {"name": "gk-quality", "cwd": "~/devel/odoo/odoo-erp-quality",
+     "role": "quality", "mode": "sequential"},
 ]
 
 
@@ -37,7 +41,7 @@ class TestFleetWindows(TestCase):
 
     def test_gk_declares_review_and_infra_windows(self):
         w = cli_fleet.managed_windows(self._gk())
-        self.assertEqual([x["name"] for x in w], ["gk", "gk-infra"])
+        self.assertEqual([x["name"] for x in w], ["gk", "gk-infra", "gk-quality"])
         infra = [x for x in w if x["name"] == "gk-infra"][0]
         self.assertEqual(infra["role"], "infra")
         self.assertEqual(infra["mode"], "sequential")
@@ -69,7 +73,7 @@ class TestFleetWindows(TestCase):
     def test_box_windows_scopes_to_the_user(self):
         self.assertEqual(
             [w["name"] for w in cli_fleet.box_windows("gatekeeper")],
-            ["gk", "gk-infra"])
+            ["gk", "gk-infra", "gk-quality"])
         # a non-declaring account gets nothing — never mis-inherits gk's.
         self.assertEqual(cli_fleet.box_windows("newlevel"), [])
         self.assertEqual(cli_fleet.box_windows(""), [])

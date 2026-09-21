@@ -205,7 +205,7 @@ CLAUSES = [
 # --------------------------------------------------------------------------- #
 
 MODES = ("parallel", "sequential")
-ROLES = (None, "review", "infra")
+ROLES = (None, "review", "infra", "quality")  # #1074 — the gk-quality window
 
 # The sequential clause that REPLACES `saturation-core` (the refill clause).
 _SEQUENTIAL_SATURATION = (
@@ -292,6 +292,40 @@ _REVIEW_ROLE = (
     "h, lanes N/cap, stav release (cut PR, shadow, main PR, posledné deploy runy "
     "s DB verziou, montalu/slovnormal/miva vs main).")
 
+# The gk-QUALITY-ROLE block (#1074, owner directive 18.9., escalated 21.9. — a
+# dedicated gk session that owns subdev delivery QUALITY end-to-end). Like the
+# review block it REPLACES the generic (B) proof + obligation block (clause (h)
+# below is the gk-quality window's own (B) done condition) — the SAME mechanism,
+# a different charter — so it fits under the 4000 arm cap; every OTHER clause
+# stays byte-identical. gk-full-only + SEQUENTIAL (one quality unit at a time).
+# Carries NO turn cap. Inserted at the `stop-b-header` position by
+# render_goal_line when role=="quality".
+_QUALITY_ROLE = (
+    "(B) QUALITY CONTRACT HELD — gk-QUALITY window, PROVEN IN THIS TURN, NEVER "
+    "CLAIMED: DONE only when 0 subdev hand-offs failed the gate for a class not "
+    "yet root-caused into a mechanical guard AND `audit_bounce_rule_updates.py "
+    "--rounds` is trending DOWN per stream AND no gk-quality ticket is workable "
+    "— else CONTINUE with NO turn limit; the only other stop is (A) `❓ NEEDS "
+    "YOU` on the owner's answer, which (#1007) applies only when no background "
+    "agent/lane is live; with lanes live use ASK-AND-CONTINUE and let the footer "
+    "U carry the question. "
+    "QUALITY ROLE — I own subdev delivery QUALITY end-to-end: "
+    "(a) own the review lenses (`gk-review-lenses*.md`) + the hand-off gate "
+    "`subdev_handoff_gate.py` promotions — an advisory check graduates to FAIL "
+    "per the 7-day policy; "
+    "(b) root-cause EVERY bounce and release-break into a guard / lane / rule so "
+    "the class never recurs — `audit_bounce_rule_updates.py --rounds` trends "
+    "DOWN per stream; a re-introduced solved problem is a rule defect, never a "
+    "fresh bounce; "
+    "(c) enforce fresh-prod-copy + E2E evidence at hand-off as gate evidence — a "
+    "green suite alone is not delivery; "
+    "(d) give the streams a read-only PROD fact source (live PROD version / row "
+    "reads) so a hand-off is verified against prod, never guessed; "
+    "(e) infra tickets (label infra) are NOT worked here, only filed; "
+    "(f) per cycle print `python3 ~/devel/airuleset/airuleset.py core-quals "
+    "--role quality --count`, the bounce-rounds trend per stream, and the gate "
+    "promotion state.")
+
 # A turn cap in an OPERATIONAL goal is banned (#993 comment 2026-09-12). Matches
 # "stop after N turns" / "stop after 30 turns" / "…or stop after …".
 _TURN_CAP_RE = _re.compile(r"stop\s+after\s+(?:\d+|N)\s+turns?", _re.IGNORECASE)
@@ -305,30 +339,35 @@ def render_goal_line(authority, mode="parallel", role=None):
     the refill clause; `role="infra"` appends the infra-scope clause;
     `role="review"` REPLACES the generic (B) proof + obligation block with the
     gk review window's own (B) done condition + operating clauses (a)-(g)
-    (#1000). Never inserts a turn cap."""
+    (#1000); `role="quality"` REPLACES the same block with the gk-quality
+    window's (B) done condition + the subdev-quality charter (a)-(f) (#1074).
+    Never inserts a turn cap."""
     if authority not in PROFILES:
         raise ValueError("unknown authority: %r" % (authority,))
     if mode not in MODES:
         raise ValueError("unknown mode: %r" % (mode,))
     if role not in ROLES:
         raise ValueError("unknown role: %r" % (role,))
-    if role == "review" and authority != "full":
-        # #1000 F5 — the review block hardcodes full-authority gk semantics
-        # (montalu/slovnormal/miva, release train, core-quals); it is only ever
-        # paired with the full-authority gk review window. Refuse a nonsensical
-        # reduced-authority review render rather than emit gk clauses into it.
+    if role in ("review", "quality") and authority != "full":
+        # #1000 F5 / #1074 — the review AND quality blocks hardcode
+        # full-authority gk semantics (montalu/slovnormal/miva, release train,
+        # core-quals, the subdev quality contract); each is only ever paired
+        # with a full-authority gk window. Refuse a nonsensical reduced-authority
+        # render rather than emit gk clauses into it.
         raise ValueError(
-            "review role is gk-full-only, not %r" % (authority,))
+            "%s role is gk-full-only, not %r" % (role, authority))
     parts = []
     for c in CLAUSES:
         if authority not in c.profiles:
             continue
-        if role == "review" and c.id in _REVIEW_B_BLOCK:
-            # The generic (B) machinery is superseded by the review block's own
-            # (h) done condition; insert the review block ONCE at the (B)
-            # position and drop the rest of the generic block (see _REVIEW_ROLE).
+        if role in ("review", "quality") and c.id in _REVIEW_B_BLOCK:
+            # The generic (B) machinery is superseded by the review/quality
+            # block's own (B) done condition; insert that block ONCE at the (B)
+            # position and drop the rest of the generic block (#1000 / #1074 —
+            # SAME (B)-substitution mechanism, a different charter).
             if c.id == "stop-b-header":
-                parts.append(_REVIEW_ROLE)
+                parts.append(_REVIEW_ROLE if role == "review"
+                             else _QUALITY_ROLE)
             continue
         text = c.text_for(authority)
         if mode == "sequential" and c.id == "saturation-core":
@@ -349,14 +388,17 @@ def render(profile):
 def variant_specs():
     """Every (authority, mode, role) variant `goal-inventory --check` locks: all
     authority × mode with no role, PLUS the infra-role variant per authority
-    (the gk-infra window is inherently sequential-infra). Enumerated so a new
-    clause that breaks any variant (over budget, a stray turn cap, a dropped
-    required clause) is caught mechanically."""
+    (the gk-infra window is inherently sequential-infra), PLUS the gk-full-only
+    sequential QUALITY variant (#1074 — the 10th locked variant; the gk-quality
+    window is inherently sequential-quality). Enumerated so a new clause that
+    breaks any variant (over budget, a stray turn cap, a dropped required
+    clause) is caught mechanically."""
     specs = []
     for a in PROFILES:
         for m in MODES:
             specs.append((a, m, None))
         specs.append((a, "sequential", "infra"))
+    specs.append(("full", "sequential", "quality"))  # #1074 — gk-full-only
     return specs
 
 
@@ -364,7 +406,8 @@ def variant_check():
     """Return a list of error strings ([] == every variant is valid). Locks, per
     variant: renders, ≤ GOAL_ARM_CHAR_CAP, NO turn cap, carries every required
     clause, and — for sequential — the sequential phrase present + the refill
-    phrase absent; for infra — the infra phrase present. The gk-full-only
+    phrase absent; for infra — the infra phrase present; for quality — the
+    quality phrase present (#1074). The gk-full-only
     `review` variant (#1000) is checked SEPARATELY below for BUDGET + no-turn-cap
     only — its required-clause leg is skipped because it legitimately SUBSTITUTES
     the (B) proof/obligation clauses (clause (h) supersedes them), which the
@@ -391,6 +434,8 @@ def variant_check():
                 errs.append("%s sequential still carries the refill clause" % tag)
         if role == "infra" and "INFRA ROLE" not in line:
             errs.append("%s infra missing the infra-role clause" % tag)
+        if role == "quality" and "QUALITY ROLE" not in line:  # #1074
+            errs.append("%s quality missing the quality-role clause" % tag)
     # #1000 F1 — the review variant is the TIGHTEST-arming variant and is NOT in
     # variant_specs (its required-clause leg cannot model the (B) substitution),
     # so lock its BUDGET + no-turn-cap here so `goal-inventory --check` is honest
