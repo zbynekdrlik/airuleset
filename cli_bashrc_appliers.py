@@ -250,6 +250,15 @@ def render_tmux_attach_block(default_session: str) -> str:
             "unsafe tmux default session name for #651 block: %r"
             % (default_session,))
     impl_launcher = "$HOME/.claude/%s" % CLAUDE_IMPL_LAUNCH_SCRIPT_DEST.name
+    # #1037: run the launcher inside a login shell that SURVIVES claude's /exit
+    # (drops to a bash prompt in the impl cwd; `claude` relaunches), instead of
+    # tmux closing the whole window when the launcher's `exec claude` ends. This
+    # MIRRORS cli_tmux_provisioning._window_shell_command — cli_tmux_provisioning
+    # imports THIS module (lower layer), so a reverse import would invert the
+    # dependency direction; the shape is drift-locked to the canonical helper in
+    # tests/test_declared_window_exit_1037.py. Double quotes only (this block
+    # already carries single quotes, so no run-shell single-quote constraint).
+    impl_window_cmd = 'bash -lc "%s; exec bash -l"' % impl_launcher
     lines = [
         TMUX_ATTACH_MARK_START,
         "# #651: `tmux new -t <name>` is the GROUP-target form -- it always",
@@ -292,11 +301,11 @@ def render_tmux_attach_block(default_session: str) -> str:
         '        if ! command tmux list-windows -t "$_s" '
         "-F '#{window_name}' 2>/dev/null | grep -Fxq impl; then",
         '          if [ -n "$_impl_cwd" ] && [ -d "$_impl_cwd" ]; then',
-        ('            command tmux new-window -d -t "$_s" -n impl -c "$_impl_cwd" "%s"'
-         % impl_launcher),
+        ('            command tmux new-window -d -t "$_s" -n impl -c "$_impl_cwd" %s'
+         % impl_window_cmd),
         "          else",
-        ('            command tmux new-window -d -t "$_s" -n impl "%s"'
-         % impl_launcher),
+        ('            command tmux new-window -d -t "$_s" -n impl %s'
+         % impl_window_cmd),
         "          fi",
         # L3a review A 🔵: keep the impl pane visible if the launcher REFUSES
         # (exit 1, e.g. a misprovisioned key/cwd) so its LOUD stderr is readable
