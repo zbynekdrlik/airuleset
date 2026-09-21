@@ -1367,7 +1367,8 @@ def _goal_cap_drop(sid, cwd, text, origin, dl_fails, request_ts, run,
     return logs, leftover, loc
 
 
-def _log_arm_confirm_fail(sid, cwd, text, pid, run, sleep_fn=None):
+def _log_arm_confirm_fail(sid, cwd, text, pid, run, sleep_fn=None,
+                          state=None, now=None):
     """#731 D -- ONE structured diagnostic line at an arm-confirm failure, from a
     FRESH TALLER capture (the 40-row delivery capture may not show a busy render
     a row above the box). The next incident's discriminator between the #720
@@ -1417,8 +1418,18 @@ def _log_arm_confirm_fail(sid, cwd, text, pid, run, sleep_fn=None):
                        "(box not our own leftover)" % (sid, cwd))
         return
     if boundary != "input" or busy:
-        _log_goal_sync("ARM-CONFIRM-FAIL sid=%s cwd=%s cleanup=declined "
-                       "(non-input boundary)" % (sid, cwd))
+        # #1104 -- a LIVE turn (busy / non-input boundary) holds our OWN /goal
+        # stranded in the box. We MUST NOT Escape-clear it now (that interrupts
+        # the running turn -- the never-Escape-a-live-turn rule). Instead DEFER
+        # the cleanup to the FIRST true idle tick by setting the #372 janitor
+        # watch: the shared janitor (`_janitor_recover`, sweep top) then recovers
+        # the stranded /goal at idle, never only after the hourly floor (the
+        # montalu1 incident's text sat unsent for the whole background-agent
+        # wait). A no-op when `state` is None (a caller/test not threading it).
+        watchdog._janitor_mark_watch(state, pid,
+                                     now if now is not None else time.time())
+        _log_goal_sync("ARM-CONFIRM-FAIL sid=%s cwd=%s "
+                       "cleanup=deferred(live-turn)" % (sid, cwd))
         return
     cleared = watchdog._janitor_clear_box(
         pid, run, sleep_fn or time.sleep,
@@ -1809,7 +1820,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
             if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
                 _log_goal_sync("SKIP not-armed(stranded) sid=%s cwd=%s" % (sid, cwd))
                 _log_arm_confirm_fail(sid, cwd, text, pid, run,
-                                      sleep_fn=sleep_fn)  # #731 D + #737 A
+                                      sleep_fn=sleep_fn,
+                                      state=state, now=now)  # #731 D + #737 A + #1104 defer
                 return "skip:verify-failed"
             _log_goal_sync("SEND recover-swallowed sid=%s cwd=%s" % (sid, cwd))
             return "sent"
@@ -1848,7 +1860,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
             if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
                 _log_goal_sync("SKIP not-armed(stash) sid=%s cwd=%s" % (sid, cwd))
                 _log_arm_confirm_fail(sid, cwd, text, pid, run,
-                                      sleep_fn=sleep_fn)  # #731 D + #737 A
+                                      sleep_fn=sleep_fn,
+                                      state=state, now=now)  # #731 D + #737 A + #1104 defer
                 return "skip:verify-failed"
             _log_goal_sync("SEND stash sid=%s cwd=%s" % (sid, cwd))
             return "sent"
@@ -1880,7 +1893,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         return "sent"
     _log_goal_sync("SKIP verify-failed sid=%s cwd=%s" % (sid, cwd))
     _log_arm_confirm_fail(sid, cwd, text, pid, run,
-                                      sleep_fn=sleep_fn)  # #731 D + #737 A
+                                      sleep_fn=sleep_fn,
+                                      state=state, now=now)  # #731 D + #737 A + #1104 defer
     return "skip:verify-failed"
 
 
