@@ -1207,7 +1207,11 @@ gap in either.
    `✅ Výstup:` (RELAYS each worker's Step-4 read-back; deploy version merges here) +
    `**Goal:**`/`**What changed:**` + 🌐 URL(s) + `📔 Playbook:` + terminal marker. **On
    `U > 0`/`W > 0` the report ALSO prints the parked BREAKDOWN** (Step-1 `--waiting`/`--ops-wait`
-   members + tags, #527), never a bare `U N`.
+   members + tags, #527), never a bare `U N`. **On a `Spec:`-bearing member (its ticket body carries
+   `Spec: #N §x`) the report ALSO appends the reconciliation line `Spec-status #N: done §…, pending
+   §…, deviations …`** (#1106 — the spec is read at least once per integration cycle, so the stream
+   never drifts from the plan; a deviation takes the one path owner-decision → `airuleset.py
+   spec-change`).
    Terminating in the marker `message-status-marker.md` prescribes: a genuine
    `✅ DONE: <plain outcome, e.g. "#41+#43+#317 merged -> v1.2.3, CI green">` when no lane is left
    running, or `⏳ WORKING` when this turn still has dispatched lanes in flight (background work IS

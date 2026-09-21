@@ -3817,6 +3817,124 @@ def _write_verify_on_copy_status(rows, slug, root, now=None):
         sys.stderr.write("verify-on-copy: status write skipped (%s)\n" % e)
 
 
+_SPEC_CACHE_TTL_S = 900
+
+
+def _rest_issue_rows(out, root, api_path):
+    """The JSON array from `gh api <api_path>` (the REST issues endpoint), or []
+    (gh error / non-list / parse error). REST draws on the core 5000/h bucket,
+    NOT the shared 5000/h GraphQL bucket the whole fleet spends via `gh issue
+    list` (#370). The `out(argv, cd) -> str` seam keeps the fake runners
+    working. The REST issues endpoint returns PRs too — the caller skips any row
+    carrying a `pull_request` key."""
+    raw = out(["gh", "api", api_path], root)
+    if not raw:
+        return []
+    try:
+        rows = json.loads(raw)
+    except ValueError:
+        return []
+    return rows if isinstance(rows, list) else []
+
+
+def _refresh_spec_settled_cache(slug, name, root, out, prev_entry=None,
+                                now=None):
+    """#1106 — rewrite ~/.claude/spec-settled/<name>.json from the repo's open
+    `spec` tickets and return (spec_open_numbers, spec_missing, spec_checked_ts).
+
+    QUOTA (#1106 area review, #370 class): reads via the REST issues endpoint
+    (`gh api repos/<slug>/issues?...`, core bucket) NOT `gh issue list` (which is
+    POST /graphql on the shared 5000/h bucket the whole fleet uses), AND a 15-min
+    TTL keyed on the PREVIOUS cwd entry's `spec_checked_ts` skips BOTH reads when
+    the last spec check is younger than `_SPEC_CACHE_TTL_S` — so a cwd re-reads
+    GitHub ~4x/h not ~30x/h, and a cache-ABSENT (no-spec) repo pays exactly ONE
+    cheap REST call per 15 min. The TTL lives in the cwd tickets-status entry
+    (written every refresh), NOT the spec-settled cache file, so a no-spec repo
+    keeps NO spec-settled cache file — the question-gate empty-dir short-circuit
+    stays effective.
+
+    `spec_missing` = the count of OPEN tickets in a stream that actually has an
+    open `spec` ticket, carrying no valid `Spec:` line (#1106 review R2#3:
+    per-stream, never repo-wide). `out(argv, cd) -> str` is the tickets-status
+    runner (empty string on gh error). Best-effort throughout: a gh/parse/write
+    error leaves the cache untouched and returns ([], 0, now)."""
+    import gates.spec as gspec
+    import time
+    now = now if now is not None else int(time.time())
+    if not slug:
+        return [], 0, None
+    # TTL: reuse the previous spec check when younger than the TTL. The
+    # future-skew guard (0 <= age) fails toward a re-read on a bad clock (#1055
+    # P3).
+    if isinstance(prev_entry, dict):
+        pts = prev_entry.get("spec_checked_ts")
+        if isinstance(pts, (int, float)) and not isinstance(pts, bool) \
+                and 0 <= (now - pts) < _SPEC_CACHE_TTL_S:
+            po = [x for x in (prev_entry.get("spec_open") or [])
+                  if isinstance(x, int)]
+            sm = prev_entry.get("spec_missing")
+            sm = sm if isinstance(sm, int) and not isinstance(sm, bool) else 0
+            return po, sm, pts
+    specs = _rest_issue_rows(
+        out, root,
+        "repos/%s/issues?labels=spec&state=open&per_page=20" % slug)
+    spec_input = [{"number": s.get("number"), "body": s.get("body") or ""}
+                  for s in specs
+                  if isinstance(s, dict) and isinstance(s.get("number"), int)
+                  and not s.get("pull_request")]
+    spec_open = [s["number"] for s in spec_input]
+    # The set of streams that actually have an open spec (from the spec tickets'
+    # own `stream:<x>` labels) — spec_missing is scoped to THESE streams only.
+    spec_streams = set()
+    for s in specs:
+        if not isinstance(s, dict) or s.get("pull_request"):
+            continue
+        for lb in (s.get("labels") or []):
+            nm = lb.get("name", "") if isinstance(lb, dict) else ""
+            if nm.startswith("stream:"):
+                spec_streams.add(nm)
+    path = gspec.settled_cache_path(name)
+    if not spec_open:
+        # No open spec ticket -> clear any stale cache so Check 10 fails open AND
+        # the question-gate empty-dir short-circuit stays effective for no-spec
+        # boxes. The TTL still holds (spec_checked_ts=now in the cwd entry).
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError as e:
+            sys.stderr.write("spec-settled: stale cache clear skipped (%s)\n" % e)
+        return [], 0, now
+    cache = gspec.build_settled_cache(spec_input)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh)
+        os.replace(tmp, path)
+    except OSError as e:
+        sys.stderr.write("spec-settled: cache write skipped (%s)\n" % e)
+    # spec_missing: open tickets in a spec-having stream, no valid `Spec:` line.
+    # When NO spec ticket carries a stream label (e.g. a stream:core spec), the
+    # nudge is not stream-scopable -> spec_missing stays 0 (never nag).
+    spec_missing = 0
+    if spec_streams:
+        issues = _rest_issue_rows(
+            out, root, "repos/%s/issues?state=open&per_page=100" % slug)
+        for it in issues:
+            if not isinstance(it, dict) or it.get("pull_request"):
+                continue
+            labels = [lb.get("name", "") for lb in (it.get("labels") or [])
+                      if isinstance(lb, dict)]
+            if "spec" in labels:
+                continue
+            # only a ticket whose OWN stream has an open spec is nagged.
+            if not any(lb in spec_streams for lb in labels):
+                continue
+            if gspec.parse_spec_line(it.get("body") or "") is None:
+                spec_missing += 1
+    return spec_open, spec_missing, now
+
+
 def cmd_tickets_status(args):
     """Statusline github-tickets segment. Default: PRINT the segment for --cwd
     (composed from local caches; may spawn a detached refresh). --refresh: the
@@ -3880,6 +3998,26 @@ def cmd_tickets_status(args):
         slug = _out(["gh", "repo", "view", "--json", "nameWithOwner",
                      "-q", ".nameWithOwner"], root)
         entry["name"] = slug.rstrip("/").split("/")[-1] if slug else ""
+        # #1106: refresh the per-repo settled-questions cache
+        # (~/.claude/spec-settled/<name>.json) off THIS slow refresh path, so
+        # the Stop-hook Check 10 (gates.spec_question) never touches gh. Also
+        # records spec_open / spec_missing on the entry for the partition-audit
+        # nudge. Best-effort: a gh error leaves the cache untouched, [] / 0.
+        if entry["name"]:
+            try:
+                # Load the PREVIOUS cwd entry for the spec-check TTL (its
+                # `spec_checked_ts` gates the 15-min re-read, #1106 area review).
+                _prev = statusbar._load(
+                    statusbar.cache_dir() / (statusbar.cwd_key(cwd) + ".json"))
+                _spec_open, _spec_missing, _spec_ts = _refresh_spec_settled_cache(
+                    slug, entry["name"], root, _out, prev_entry=_prev)
+                entry["spec_open"] = _spec_open
+                entry["spec_missing"] = _spec_missing
+                if _spec_ts is not None:
+                    entry["spec_checked_ts"] = _spec_ts
+            except Exception as _se:
+                sys.stderr.write(
+                    "tickets-status: spec-settled refresh skipped (%s)\n" % _se)
         # #1083: the git-derived merged-unreleased set (fix in develop/staging,
         # not yet main). Computed ONCE and threaded through BOTH the slice and
         # core partitions below so `I`/dispatchable exclude `M` consistently.
@@ -4701,6 +4839,45 @@ def _handoff_guide_preflight(body, *, cwd=None, changed_paths=None,
     return None if ok else reason
 
 
+def _handoff_spec_preflight(body, *, issue=None, repo=None, cwd=None,
+                            read_issue=None):
+    """#1106 — the review-lens spec gate for the composer pre-flight. Returns a
+    `handoff BLOCK: …` reason string, or None when the RFR may post.
+
+    When the TICKET carries a `Spec: #N §x` reference, the RFR body MUST carry a
+    `Spec-check: §x -- conform | deviation <ref>` line (the review checked the
+    diff against the spec section). FAIL-OPEN in every direction that cannot
+    prove a spec is present: a read error (quota / no slug), a no-spec ticket,
+    or any exception -> None (never fabricate a block from an unreadable ticket,
+    the same never-false-accuse direction the gk/guide pre-flights use).
+    `read_issue(number, slug, **kw) -> (obj|None, err)` is injected in tests."""
+    try:
+        import gates.spec as _gspec
+        from gates import ghread
+        if read_issue is None:
+            slug = repo or ghread.resolve_slug(cwd)
+            reader = ghread.read_issue
+        else:
+            slug = repo
+            reader = read_issue
+        if not slug or not issue:
+            return None
+        obj, err = reader(int(issue), slug, cwd=cwd)
+        if err or not isinstance(obj, dict):
+            return None
+        if not _gspec.ticket_has_spec(obj.get("body") or ""):
+            return None
+        ok, reason = _gspec.classify_spec_check(body)
+        if ok:
+            return None
+        return ("handoff BLOCK: this ticket carries a `Spec:` ref -- the RFR "
+                "body must carry a `Spec-check: §x -- conform | deviation "
+                "<ref>` line proving the diff was reviewed against the spec "
+                "section (#1106). %s" % reason)
+    except Exception:
+        return None
+
+
 def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
                           watch_result=None, commits_since=None, journal=None):
     """The composer hand-off gk-watch pre-flight (#1056 L2 (f)).
@@ -4902,6 +5079,12 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     _gblk = _handoff_guide_preflight(body, cwd=_repo_root())
     if _gblk:
         print(_gblk)
+        return 1
+    # #1106: review-lens spec gate on the verbatim body-file RFR too.
+    _sblk = _handoff_spec_preflight(body, issue=issue, repo=repo,
+                                    cwd=_repo_root())
+    if _sblk:
+        print(_sblk)
         return 1
     _undis = (_gk_state or {}).get("undispositioned_ids") or [] \
         if isinstance(_gk_state, dict) else []
@@ -5276,6 +5459,14 @@ def cmd_handoff(args):
     _gblk = _handoff_guide_preflight(body, cwd=target_root)
     if _gblk:
         print(_gblk)
+        return 1
+
+    # #1106: the review-lens spec gate — a Spec:-bearing ticket's RFR must carry
+    # a Spec-check: line. Fail-open (no spec / unreadable ticket -> None).
+    _sblk = _handoff_spec_preflight(body, issue=issue, repo=repo,
+                                    cwd=target_root)
+    if _sblk:
+        print(_sblk)
         return 1
 
     # Write receipt BEFORE posting (the hook checks the receipt).
@@ -9410,6 +9601,10 @@ from cli_design_record import (  # noqa: E402, F401
     cmd_design_record as cmd_design_record,
     design_record_help_template as design_record_help_template,
 )
+# --- #1106: spec-change poster (Spec-change: comment + spec section edit) ---
+from cli_spec_change import (  # noqa: E402, F401
+    cmd_spec_change as cmd_spec_change,
+)
 from cli_mdreview_audit import (  # noqa: E402, F401
     cmd_mdreview_audit as cmd_mdreview_audit,
 )
@@ -10428,6 +10623,21 @@ def main():
     p_dr.add_argument("--dry-run", dest="dry_run", action="store_true",
                       help="Print the stamped body without posting")
 
+    # --- #1106: spec-change (owner-decided deviation -> spec stays the truth) ---
+    p_sc = sub.add_parser(
+        "spec-change",
+        help="Post a Spec-change: comment on a spec ticket AND edit the named "
+             "§section in its body (the one path a spec deviation takes once "
+             "the owner has decided it, #1106)")
+    p_sc.add_argument("--spec", type=int, required=True,
+                      help="The spec ticket number")
+    p_sc.add_argument("--section", required=True,
+                      help="The section to replace (e.g. 2 or §2)")
+    p_sc.add_argument("--body-file", dest="body_file", required=True,
+                      help="File with the NEW section body text")
+    p_sc.add_argument("--repo", default=None,
+                      help="owner/name (default: the cwd repo)")
+
     p_ab = sub.add_parser(
         "account-bootstrap",
         help="Render idempotent root bootstrap script for a service account")
@@ -11096,6 +11306,7 @@ SUBCOMMANDS = {
     "mdreview-audit": cmd_mdreview_audit,
     "doctrine-audit": cmd_doctrine_audit,
     "design-record": cmd_design_record,
+    "spec-change": cmd_spec_change,
     "account-bootstrap": cmd_account_bootstrap,
     "nudges": cmd_nudges,
     "model-gateway": cmd_model_gateway,
