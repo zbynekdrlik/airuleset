@@ -631,16 +631,19 @@ class TestRecipeRelocation(unittest.TestCase):
         # The injected attachments-read body must be small enough that the #745
         # three-way co-fire (comprehensive-logging 7024 + read-attachments +
         # read-reactions 3187, each wrapped) all inject under MAX_TOTAL=14000.
-        # The three-way INJECT threshold for this body is 3193 stripped; <= 3100
-        # keeps >= 100 codepoints of headroom (#1098 ff2 ROZHODNUTÉ 2026-09-21 —
-        # the pre-#1098 baseline 3152 had only ~41 chars of room, so both the
-        # project.task recipe AND the incident rationale relocate out).
+        # This row's wrapper overhead is a fixed 310, so headroom = 14000 - 7310
+        # (comp wrapped) - (310 + body) - 3187; body <= 3093 is the exact bound
+        # that guarantees headroom >= 100 (a coarse secondary guard —
+        # TestThreeWayHeadroom.test_three_way_headroom_ge_100 is the authoritative
+        # invariant). #1098 ff2 ROZHODNUTÉ 2026-09-21: the pre-#1098 baseline 3152
+        # had only ~41 chars of room, so both the project.task recipe AND the
+        # incident rationale relocate out.
         body = self._strip_frontmatter(
             READ_ATTACH.read_text(encoding="utf-8")).strip()
         n = len(body)
         self.assertLessEqual(
-            n, 3100,
-            "read-with-attachments.md stripped body is %d codepoints (> 3100) — "
+            n, 3093,
+            "read-with-attachments.md stripped body is %d codepoints (> 3093) — "
             "the project.task recipe (client-board-attachments.md) AND the "
             "incident rationale (read-with-attachments-history.md) must both live "
             "outside the injected file so the #745 three-way co-fire keeps >= 100 "
