@@ -48,6 +48,42 @@ owner asked about the image (odoo-erp #5214). airuleset #709, 2026-08-25/26.
    attachment: Read it too, or convert first if the format needs it. Only
    AFTER seeing every attachment do you interpret what the message is asking.
 
+## project.task — a client board task's attachments (#1098)
+
+A client often puts the spec as an IMAGE/spreadsheet in the `project.task`
+DESCRIPTION, not the text — see `client-board-tasks.md` rule 15. A board task
+carries attachments in THREE places; read ALL of them before filing a ticket
+from the task or parking it on `needs-answer`.
+
+1. **`ir.attachment` rows on the task** — `res_model='project.task'`,
+   `res_id=<task id>`:
+   ```python
+   atts = models.execute_kw(db, uid, api_key,
+       "ir.attachment", "search_read",
+       [[["res_model", "=", "project.task"], ["res_id", "=", task_id]]],
+       {"fields": ["id", "name", "mimetype", "datas"]})
+   ```
+2. **Inline images in the description** — every `/web/image/<id>` reference in
+   `project.task.description` is an `ir.attachment` id; extract them and
+   `ir.attachment.read` their bytes:
+   ```python
+   import re
+   task = models.execute_kw(db, uid, api_key, "project.task", "read",
+       [[task_id]], {"fields": ["description"]})[0]
+   img_ids = [int(m) for m in re.findall(r"/web/image/(\d+)", task["description"] or "")]
+   ```
+3. **The task's message attachments** — `mail.message` on
+   `model='project.task'`, `res_id=<task id>`, each message's `attachment_ids`
+   (same fetch shape as the Discuss recipe above).
+
+**Download + Read every attachment** into
+`~/.claude/work-products/<projekt>-podklady-<D.M.YYYY>/t<task>-<att>.<ext>`
+(base64 `datas` → bytes, as in step 2 of the Discuss recipe) and open each with
+the Read tool BEFORE interpreting the task. **Cite** each att-id + the values you
+read in the GitHub ticket body — e.g. `att 37652: rozmery 1575/1924`; a question
+to the owner about the task carries `Prílohy: att <ids> prečítané (<hodnoty>)` or
+`Prílohy: žiadne` (enforced by Check 9 in `stop-check-question-quality.sh`).
+
 ## Anti-pattern (all rewordings apply)
 
 "Spracoval som správu" / "I processed the message" / "I read the message and
