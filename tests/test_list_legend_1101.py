@@ -151,17 +151,32 @@ class TestDeep1CarriesTheReadingListDoctrine(TestCase):
     """The doctrine home for reading `--list` is the DEEP-1 companion (the
     always-on module stays unchanged — context-baseline is down-only)."""
 
-    def test_deep1_has_a_reading_list_legend_paragraph(self):
+    def _reading_list_window(self):
+        # #498/#500 window-teeth: bind the assertions to the #1101 paragraph
+        # alone (the tokens recur in sibling DEEP-1 sections, so a whole-file
+        # assertIn has no teeth against a paragraph-only revert). Anchor on the
+        # bold lead UNIQUE to this paragraph → the next `### ` section header.
         text = DEEP1.read_text(encoding="utf-8")
-        self.assertIn("--list", text)
-        self.assertIn("action-only", text)
+        anchor = "**Reading `core-quals`/`slice-quals --list`"
+        start = text.find(anchor)
+        self.assertNotEqual(start, -1,
+                            "the reading-`--list` paragraph is gone from DEEP-1")
+        nxt = text.find("\n### ", start)
+        end = nxt if nxt != -1 else len(text)
+        return text[start:end]
+
+    def test_deep1_has_a_reading_list_legend_paragraph(self):
+        win = self._reading_list_window()
+        self.assertIn("--list", win)
+        self.assertIn("action-only", win)
         for tok in ("review", "merge", "release"):
-            self.assertIn(tok, text.lower())
-        # the label-move routing, the actual fix for "not mine"
+            self.assertIn(tok, win.lower())
+        # the label-move routing, the actual fix for "not mine" — all IN the
+        # #1101 paragraph, not merely somewhere in the file.
         for tok in ("infra", "prio:bounce", "needs-answer", "ops-wait"):
-            self.assertIn(tok, text)
+            self.assertIn(tok, win)
         # names the exact regression: an action-only hand-off is still YOUR I
-        self.assertRegex(text.lower(),
+        self.assertRegex(win.lower(),
                          r"action-only.{0,400}(oblig|povinnos|your i|tvoj)")
 
     def test_always_on_module_unchanged_marker(self):
