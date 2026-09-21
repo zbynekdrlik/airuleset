@@ -254,6 +254,14 @@ PUSH_LANDED=0
 [ -n "$REMOTE_TIP" ] && [ "$REMOTE_TIP" = "$HEAD_SHA" ] && PUSH_LANDED=1
 
 # Active runs on this branch with their commit sha (one gh call).
+# #1059 note: gh here stays scoped to the SESSION cwd's repo (not $DIR). For the
+# real fleet shape — `git -C <worktree> push`, where the worktree is a worktree
+# of the SAME GitHub repo — cwd and $DIR resolve the same repo, so this is
+# correct. A genuinely cross-repo `-C` (cwd repo A, `-C` repo B) would list A's
+# runs on the pushed branch NAME, but the candidate shas then fail the
+# `git -C "$DIR" merge-base --is-ancestor` check below (B's shas are unknown in
+# A) → no wrong cancel, it merely does nothing. Fail-safe, so gh is left
+# cwd-scoped (the design deliberately carries -C only on the git calls).
 RUNS_JSON=$(gh run list --branch "$BRANCH" --limit 30 \
     --json databaseId,status,headSha,event 2>/dev/null || echo "[]")
 

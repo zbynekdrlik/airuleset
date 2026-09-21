@@ -313,3 +313,88 @@ exit 0
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertEqual(self._lines(paths["branchq"]), ["dev"])
         self.assertEqual(self._lines(paths["cancels"]), ["111"])
+
+    # --- coverage closed from the two adversarial reviews (#1059) ----------
+
+    def test_set_upstream_option_is_skipped(self):
+        """`git push -u origin dev` — the -u/--set-upstream flag is skipped, the
+        branch resolves from the refspec, dev's ancestor is cancelled."""
+        root, bind = self._root()
+        repo, head, old = self._new_repo(root, "repo", branch="dev")
+        paths = self._paths(root)
+        open(paths["runlist"], "w").write(self._runlist([
+            (111, "in_progress", old, "push"),
+        ]))
+        self._write_gh(bind, paths)
+        r = self._run("git push -u origin dev", repo, self._env(bind))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self._lines(paths["branchq"]), ["dev"])
+        self.assertEqual(self._lines(paths["cancels"]), ["111"])
+
+    def test_force_plus_refspec_prefix_is_stripped(self):
+        """A force refspec `+dev` resolves to branch `dev` (the leading + is
+        stripped), and cancels dev's superseded ancestor."""
+        root, bind = self._root()
+        repo, head, old = self._new_repo(root, "repo", branch="dev")
+        paths = self._paths(root)
+        open(paths["runlist"], "w").write(self._runlist([
+            (111, "in_progress", old, "push"),
+        ]))
+        self._write_gh(bind, paths)
+        r = self._run("git push origin +dev", repo, self._env(bind))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self._lines(paths["branchq"]), ["dev"])
+        self.assertEqual(self._lines(paths["cancels"]), ["111"])
+
+    def test_multiple_refspecs_resolves_first_only(self):
+        """`git push origin dev main` resolves the FIRST refspec (dev). A second
+        refspec is not handled — fail-safe (a superseded `main` run is missed,
+        never a wrong branch cancelled). The fleet pushes one ref per command."""
+        root, bind = self._root()
+        repo, head, old = self._new_repo(root, "repo", branch="dev")
+        paths = self._paths(root)
+        open(paths["runlist"], "w").write(self._runlist([
+            (111, "in_progress", old, "push"),
+        ]))
+        self._write_gh(bind, paths)
+        r = self._run("git push origin dev main", repo, self._env(bind))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self._lines(paths["branchq"]), ["dev"])
+        self.assertNotIn("main", self._lines(paths["branchq"]))
+
+    def test_non_allowlisted_event_at_head_is_not_cancelled(self):
+        """A workflow_dispatch run AT the pushed HEAD sha is never a supersede
+        candidate (sha == HEAD) — it must not be cancelled by the push+monitor
+        path either."""
+        root, bind = self._root()
+        repo, head, old = self._new_repo(root, "repo", branch="dev")
+        paths = self._paths(root)
+        open(paths["runlist"], "w").write(self._runlist([
+            (500, "in_progress", head, "workflow_dispatch"),  # a canary AT head
+            (111, "in_progress", old, "push"),                # a real superseded run
+        ]))
+        self._write_gh(bind, paths)
+        r = self._run("git push origin dev", repo, self._env(bind))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        # only the superseded push ancestor cancelled; the head canary kept
+        self.assertEqual(self._lines(paths["cancels"]), ["111"])
+        self.assertNotIn("500", self._lines(paths["cancels"]))
+
+    def test_dash_C_push_that_did_not_land_cancels_nothing(self):
+        """`git -C <lane> push origin lane` where the lane's remote tip != HEAD
+        (push failed/rejected) lists lane's runs but cancels none — the in-flight
+        run may still be the live tip (PUSH_LANDED=0 path for the -C shape)."""
+        root, bind = self._root()
+        cwd_repo, _, _ = self._new_repo(root, "cwd", branch="develop")
+        lane_repo, lane_head, lane_old = self._new_repo(root, "lane", branch="lane",
+                                                        landed=False)
+        paths = self._paths(root)
+        open(paths["runlist"], "w").write(self._runlist([
+            (911, "in_progress", lane_old, "push"),
+        ]))
+        self._write_gh(bind, paths)
+        r = self._run(f"git -C {lane_repo} push origin lane", cwd_repo, self._env(bind))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self._lines(paths["branchq"]), ["lane"])
+        self.assertEqual(self._lines(paths["cancels"]), [],
+                         "a push that did not land must cancel nothing")
