@@ -23,6 +23,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 import cli_lane_overlap as lo  # noqa: E402
 import cli_concurrency as cc  # noqa: E402
+import watchdog.lane_reconcile as lr  # noqa: E402
 
 _ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
@@ -184,7 +185,7 @@ class TestClassifyStates(TestCase):
         self.assertEqual(st, "idle-unmerged")
         porc = _porc(MAIN, [("agent-idle", "david3/7184-vyroba")])
         lanes = lo.gather_live_lanes(MAIN, run=_Fake(porc), now=1_000_000.0)
-        self.assertEqual({l["ref"] for l in lanes}, {"david3/7184-vyroba"})
+        self.assertEqual({ln["ref"] for ln in lanes}, {"david3/7184-vyroba"})
 
     def test_detached_lane_is_live(self):
         porc = ("worktree %s\nHEAD aaaa\nbranch refs/heads/mainfeat\n"
@@ -364,7 +365,7 @@ class TestPruneFinishedWorktrees(TestCase):
 
     def test_finished_clean_old_worktree_removed_branch_kept(self):
         wt = self._add_lane("agent-fin", "montalu/7840-done")
-        logs = lo.prune_finished_worktrees(
+        logs = lr.prune_finished_worktrees(
             str(self.repo), now=time.time(),
             live_worker_ids=set(), proc_cwds=set(), handoff_numbers={7840})
         self.assertFalse(wt.exists(), "the worktree dir must be gone: %s" % logs)
@@ -377,7 +378,7 @@ class TestPruneFinishedWorktrees(TestCase):
 
     def test_dirty_worktree_kept(self):
         wt = self._add_lane("agent-dirty", "montalu/7841-done", dirty=True)
-        logs = lo.prune_finished_worktrees(
+        logs = lr.prune_finished_worktrees(
             str(self.repo), now=time.time(),
             live_worker_ids=set(), proc_cwds=set(), handoff_numbers={7841})
         self.assertTrue(wt.exists(), "a dirty worktree must be kept")
@@ -385,7 +386,7 @@ class TestPruneFinishedWorktrees(TestCase):
 
     def test_process_holding_worktree_kept(self):
         wt = self._add_lane("agent-proc", "montalu/7842-done")
-        logs = lo.prune_finished_worktrees(
+        lr.prune_finished_worktrees(
             str(self.repo), now=time.time(),
             live_worker_ids=set(),
             proc_cwds={os.path.realpath(str(wt))}, handoff_numbers={7842})
@@ -394,7 +395,7 @@ class TestPruneFinishedWorktrees(TestCase):
     def test_young_worktree_kept(self):
         # committed NOW (< 2h old) => kept even though finished.
         wt = self._add_lane("agent-young", "montalu/7843-done", old=False)
-        logs = lo.prune_finished_worktrees(
+        logs = lr.prune_finished_worktrees(
             str(self.repo), now=time.time(),
             live_worker_ids=set(), proc_cwds=set(), handoff_numbers={7843})
         self.assertTrue(wt.exists(), "a <2h worktree must be kept: %s" % logs)
@@ -402,7 +403,7 @@ class TestPruneFinishedWorktrees(TestCase):
     def test_idle_unmerged_worktree_kept(self):
         # no hand-off, no evidence => idle-unmerged => NOT a prune candidate.
         wt = self._add_lane("agent-idle", "montalu/7844-wip")
-        lo.prune_finished_worktrees(
+        lr.prune_finished_worktrees(
             str(self.repo), now=time.time(),
             live_worker_ids=set(), proc_cwds=set(), handoff_numbers=set())
         self.assertTrue(wt.exists(), "an idle-unmerged (live) worktree must be kept")
@@ -411,11 +412,11 @@ class TestPruneFinishedWorktrees(TestCase):
         self._add_lane("agent-cad", "montalu/7845-done")
         state = {}
         now = time.time()
-        lo.prune_finished_worktrees(str(self.repo), now=now, state=state,
+        lr.prune_finished_worktrees(str(self.repo), now=now, state=state,
                                     live_worker_ids=set(), proc_cwds=set(),
                                     handoff_numbers=set())
         # second call within the hour is a no-op (returns [] without re-listing)
-        logs2 = lo.prune_finished_worktrees(str(self.repo), now=now + 60,
+        logs2 = lr.prune_finished_worktrees(str(self.repo), now=now + 60,
                                             state=state, live_worker_ids=set(),
                                             proc_cwds=set(), handoff_numbers=set())
         self.assertEqual(logs2, [])

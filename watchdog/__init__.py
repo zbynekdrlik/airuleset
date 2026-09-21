@@ -5130,7 +5130,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
 
     def _job_goal_lane_sweep():
         from watchdog import goal as _goal_mod
-        return _goal_mod.goal_lane_sweep(
+        logs = _goal_mod.goal_lane_sweep(
             now, run=run, dry_run=dry_run, projects_dir=projects_dir,
             state=state, handled=compact_handled_this_sweep,
             backlog_fetch=backlog_fetch, send_fn=send_fn,
@@ -5146,6 +5146,27 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             infra_queue_fetch=infra_queue_fetch,         # #1029 role-aware
             resolve_role_fn=resolve_role_fn,             # #1029 role-aware
             persist=lambda: save_state(state_path, state))  # #1023 timeout-race write-through
+        # #1103 — finished-worktree HYGIENE SWEEP rides Job 20 (NO new registry
+        # job): a lane worktree that is merged into its target or handed off (no
+        # process, clean, >2h) is removed so `git worktree list` stops lying to
+        # the liveness derivation. Gated on the already-wired `repo_roots` seam
+        # (goal.py is NOT touched); the whole per-repo pass self-gates hourly via
+        # a session `_walk_ts` marker so the os.walk + git reads run once/hour.
+        if repo_roots is not None:
+            try:
+                from watchdog import lane_reconcile as _lr
+                _wp = state.setdefault("worktree_prune", {})
+                if now - _wp.get("_walk_ts", 0) >= _lr.WORKTREE_PRUNE_CADENCE_S:
+                    _wp["_walk_ts"] = now
+                    roots = repo_roots() if callable(repo_roots) else repo_roots
+                    for _root in (roots or []):
+                        plogs = _lr.prune_finished_worktrees(
+                            _root, run=run, now=now, dry_run=dry_run, cadence_s=0)
+                        if plogs:
+                            logs = list(logs or []) + plogs
+            except Exception as _e:  # noqa: BLE001 — hygiene never sinks the sweep
+                logs = list(logs or []) + ["worktree-prune error: %r" % _e]
+        return logs
     _add("goal_lane_sweep", lambda: goal_jobs_enabled and not _goal_jobs_disabled,
          _job_goal_lane_sweep, "goal-lane-sweep error")
 

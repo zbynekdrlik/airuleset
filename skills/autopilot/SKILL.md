@@ -556,6 +556,19 @@ dispatch hook, no new hook); `OVERLAP-BYPASS: <reason>` in the prompt escapes it
 on the same feature/area = STOP one or merge them; a lane that would touch the same files as a live
 lane WAITS (it is not lost — it fills a later free lane).
 
+**A lane is LIVE only while an AGENT still works it (#1103).** `lane-overlap` no longer treats every
+unmerged worktree as live — it CLASSIFIES each lane and prints `lanes: live=N finished=M idle=K`. A
+lane is `live` (a fresh worker transcript matches the worktree, or a live process' cwd is inside it),
+`merged` (its tip is an ancestor of its OWN target — `main` for a `hotfix-main`/`bring-upstream` lane,
+else `develop`), `finished` (unmerged, no process, but its ticket is handed off — `needs-gatekeeper` /
+`gk-processing` / `ready-for-review`, or merged-unreleased), or `idle-unmerged` (no evidence either
+way). ONLY `live` + `idle-unmerged` count toward the overlap set and the sequential cap; `finished`
+and `merged` are EXCLUDED — **a handed-off lane is FINISHED for the box that handed it off**, so its
+files no longer block a new lane, and the same derivation feeds the receipt, the cap gate and the
+lane-fill gate (the #367 one-derivation rule). A finished/merged worktree that is clean, process-free
+and >2h old is PRUNED by the watchdog (Job 20's lane-reconcile rung — `git worktree remove`, branch
+ref kept), so the worktree list stops lying; a dirty or process-holding worktree is left untouched.
+
 **Lane count — sized to box + backlog, resource-aware (#970); back off on a real resource signal +
 stagger (#848; the #332 numbers below are measured CONTEXT).** The live lane count is bounded by the
 project's declared resource caps and the account-wide rate-limit signal, refilled continuously —

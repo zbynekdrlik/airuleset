@@ -344,3 +344,144 @@ def _prune_lane_reconcile_orphans(lrecs, visited_sids, now,
                          and isinstance(v.get("lts"), (int, float))
                          and (now - v["lts"]) < ttl_s)]:
         lrecs.pop(sid, None)
+
+
+# ---------------------------------------------------------------------------
+# #1103 — the finished-worktree HYGIENE SWEEP (a rung in the lane-reconcile job
+# family, no new run_once job). Removes a lane worktree that is FINISHED for
+# this box — merged into its target, or handed off with no live process — once
+# it is clean + old, so the `git worktree list` (which `cli_lane_overlap`
+# derives liveness from) stops lying. The BRANCH REF is always KEPT (the wip
+# backup + the hand-off live on origin); a dirty or process-holding worktree is
+# left and journaled. Wired from run_once's existing `_job_goal_lane_sweep`
+# closure, gated on the already-wired `repo_roots` seam — so goal.py is not
+# touched and the run_once registry is unchanged.
+# ---------------------------------------------------------------------------
+
+# A lane worktree is pruned only once it is at least this OLD (its branch tip
+# commit date) — so a lane handed off / merged moments ago (or a fresh
+# intra-sweep race) is never removed while a worker may still be settling. This
+# is the same conservative direction as the #513 data-loss recency guard.
+WORKTREE_PRUNE_MIN_AGE_S = 2 * 3600
+
+# The sweep self-gates per repo at this cadence (git-heavy `worktree list` +
+# `status` reads), mirroring the hourly self-gate of the sibling per-repo jobs
+# (stuck_main / wip_ref). > age-threshold, so a skipped sweep loses nothing.
+WORKTREE_PRUNE_CADENCE_S = 3600
+
+
+def _prune_run_default(cmd):
+    import subprocess
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+
+
+def _worktree_clean(path, run):
+    """True when the worktree at ``path`` has NO uncommitted changes
+    (``git -C <path> status --porcelain`` empty). Fail-safe: any error / non-zero
+    rc => False (treated as DIRTY, so it is never removed). Never raises."""
+    try:
+        r = run(["git", "-C", path, "status", "--porcelain"])
+    except Exception:  # noqa: BLE001 — cannot verify => treat as dirty (keep it)
+        return False
+    return getattr(r, "returncode", 1) == 0 and not (r.stdout or "").strip()
+
+
+def _lane_age_s(repo_root, branch, run, now):
+    """Seconds since the lane branch's tip commit (its committer date), or None
+    when unmeasurable (any error / non-zero rc / unparsable) — None is treated by
+    the caller as "too young to prune" (the fail-safe direction). Never raises."""
+    try:
+        r = run(["git", "-C", repo_root, "log", "-1", "--format=%ct", branch])
+    except Exception:  # noqa: BLE001
+        return None
+    if getattr(r, "returncode", 1) != 0:
+        return None
+    try:
+        return now - int((r.stdout or "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
+                             state=None, cadence_s=WORKTREE_PRUNE_CADENCE_S,
+                             age_min_s=WORKTREE_PRUNE_MIN_AGE_S,
+                             live_worker_ids=None, proc_cwds=None,
+                             handoff_numbers=None, projects_dir=None, cwd=None):
+    """Remove FINISHED/MERGED lane worktrees under ``repo_root`` that are clean,
+    process-free and older than ``age_min_s``; keep (and journal) any that are
+    dirty, process-holding or too young. The branch ref is ALWAYS kept
+    (``git worktree remove`` never ``--force``). Returns one decision-log line
+    per removed/kept candidate; [] when nothing qualifies or the cadence gate
+    holds. Never raises — a hygiene sweep must never crash the watchdog sweep.
+
+    Liveness is the SAME derivation the receipt uses (``cli_lane_overlap.
+    classify_lanes``, #367 one-derivation), so a lane counted live by the
+    overlap check is never pruned. The evidence seams mirror it (each None =>
+    derived from the box; injected sets in tests)."""
+    import os
+    import time as _time
+    import cli_lane_overlap as lo
+    run = run or _prune_run_default
+    now = _time.time() if now is None else now
+    logs = []
+
+    # per-repo hourly self-gate (skip the git-heavy read on the 59/60 sweeps
+    # that need not run); an untimed caller (tests) passes cadence_s=0.
+    if state is not None and cadence_s:
+        wp_state = state.setdefault("worktree_prune", {})
+        last = wp_state.get(repo_root)
+        if isinstance(last, (int, float)) and (now - last) < cadence_s:
+            return logs
+        wp_state[repo_root] = now
+
+    # gather the process-cwd set ONCE — reused for BOTH the classify AND the
+    # per-lane no-process guard (a `merged` lane's state does not encode a
+    # process, so the guard must check independently before removal).
+    if proc_cwds is None:
+        proc_cwds = lo._worktree_process_cwds()
+
+    try:
+        lanes = lo.classify_lanes(repo_root, run=run, now=now,
+                                  live_worker_ids=live_worker_ids,
+                                  proc_cwds=proc_cwds,
+                                  handoff_numbers=handoff_numbers,
+                                  projects_dir=projects_dir, cwd=cwd)
+    except Exception as e:  # noqa: BLE001 — never crash the sweep
+        logs.append("worktree-prune %s -> skip:classify-failed (%r)"
+                    % (repo_root, e))
+        return logs
+
+    for lane in lanes:
+        if lane.get("state") not in ("merged", "finished"):
+            continue
+        path = lane.get("path")
+        if not path or not os.path.isdir(path):
+            continue
+        ref = lane.get("ref")
+        if lo._path_has_proc(path, proc_cwds):
+            logs.append("worktree-prune kept (process holding): %s" % path)
+            continue
+        if not _worktree_clean(path, run):
+            logs.append("worktree-prune kept (dirty tree): %s" % path)
+            continue
+        age = _lane_age_s(repo_root, ref, run, now)
+        if age is None or age < age_min_s:
+            logs.append("worktree-prune kept (<%dh old): %s"
+                        % (age_min_s // 3600, path))
+            continue
+        if dry_run:
+            logs.append("worktree-prune would remove (%s, branch kept): %s"
+                        % (lane.get("state"), path))
+            continue
+        try:
+            r = run(["git", "-C", repo_root, "worktree", "remove", path])
+        except Exception as e:  # noqa: BLE001
+            logs.append("worktree-prune kept (remove error %r): %s" % (e, path))
+            continue
+        if getattr(r, "returncode", 1) == 0:
+            logs.append("worktree-prune removed (%s, branch %s kept): %s"
+                        % (lane.get("state"), ref, path))
+        else:
+            logs.append("worktree-prune kept (remove rc=%s): %s"
+                        % (getattr(r, "returncode", "?"), path))
+    return logs
