@@ -565,7 +565,7 @@ else `develop`), `finished` (unmerged, no process, but its ticket is handed off 
 way). ONLY `live` + `idle-unmerged` count toward the overlap set and the sequential cap; `finished`
 and `merged` are EXCLUDED — **a handed-off lane is FINISHED for the box that handed it off**, so its
 files no longer block a new lane, and the same derivation feeds the receipt, the cap gate and the
-lane-fill gate (the #367 one-derivation rule). A finished/merged worktree that is clean, process-free
+finished-worktree prune (the #367 one-derivation rule). A finished/merged worktree that is clean, process-free
 and >2h old is PRUNED by the watchdog (Job 20's lane-reconcile rung — `git worktree remove`, branch
 ref kept), so the worktree list stops lying; a dirty or process-holding worktree is left untouched.
 

@@ -396,21 +396,20 @@ def _ref_exists(repo_root, ref, run):
 
 
 def _lane_target(repo_root, branch, base_branch, run):
-    """The ref a lane's merged-ness is judged against (#1103). The branch's OWN
-    target, not always the integration base: (1) the branch's configured
-    upstream when it resolves; (2) a ``main``-family ref for a
-    ``hotfix-main``/``bring-upstream`` branch (the most advanced existing of
-    upstream/origin/local main|master); (3) otherwise the integration base.
-    Fails toward ``base_branch``, never raises."""
-    try:
-        r = run(["git", "-C", repo_root, "rev-parse", "--abbrev-ref",
-                 "--symbolic-full-name", branch + "@{upstream}"])
-        up = (r.stdout or "").strip() if getattr(r, "returncode", 1) == 0 else ""
-        if up and up != branch:
-            return up
-    except Exception as e:  # noqa: BLE001 — no upstream / git error => pattern/base
-        print("lane-overlap: upstream probe for %s failed (%s)" % (branch, e),
-              file=sys.stderr)
+    """The ref a lane's merged-ness is judged against (#1103). A
+    ``hotfix-main``/``bring-upstream`` lane targets ``main`` (the most advanced
+    existing of upstream/origin/local main|master), so it is never falsely read
+    as "pinned live forever" against ``develop``; every OTHER lane is judged
+    against the integration base.
+
+    The branch's own ``@{upstream}`` is DELIBERATELY NOT used as the target
+    (#1103 review, BLOCKER): a pushed lane branch tracks its OWN origin ref
+    (``origin/<self>`` — set by ``git push -u`` / ``push.autoSetupRemote`` /
+    ``gh pr create``), so a just-pushed HEAD==origin lane would be trivially an
+    ancestor of its upstream and wrongly classified ``merged`` — dropping a
+    genuinely live lane from the overlap set + the sequential cap. The
+    ``_MAIN_TARGET_RX`` regex already covers the only case the upstream lookup
+    was meant to catch (a hotfix/bring-upstream targeting main). Never raises."""
     if _MAIN_TARGET_RX.search(branch or ""):
         for cand in ("upstream/main", "origin/main", "main",
                      "upstream/master", "origin/master", "master"):
@@ -486,8 +485,18 @@ def _live_worker_agent_ids(repo_root, projects_dir=None, now=None,
                     projects_dir, repo_root, name, now, freshness_s)
             except Exception:  # noqa: BLE001 — one bad session never sinks the set
                 continue
+            # #1103 review — reuse the #565/#587 worker-liveness partition
+            # (`_LANE_NOT_LIVE_STATES` = stale/finished) rather than a narrower
+            # ``== "live"``: a WEDGED / UNREADABLE fresh lane is a worker still
+            # in-flight (recoverable), so it counts as live evidence — failing
+            # TOWARD keeping a lane live, never dropping a busy-but-not-cleanly-
+            # live worker to `finished`. Falls back to the ``live`` literal only
+            # if the partition constant is unavailable (older transcripts.py).
+            not_live = getattr(T, "_LANE_NOT_LIVE_STATES", frozenset())
             for lane in evidence or []:
-                if getattr(lane, "state", None) == "live":
+                st = getattr(lane, "state", None)
+                is_live = (st not in not_live) if not_live else (st == "live")
+                if st is not None and is_live:
                     ids.add(lane.agent_id)
     except Exception as e:  # noqa: BLE001
         print("lane-overlap: worker-transcript evidence unavailable (%s)" % e,
@@ -496,12 +505,15 @@ def _live_worker_agent_ids(repo_root, projects_dir=None, now=None,
 
 
 def _lane_ticket_numbers(repo_root, branch, run):
-    """Candidate ticket numbers for a lane: the leading number of the branch's
+    """The lane's OWN ticket number(s). A branch WITH a leading number in its
     last path segment (``<stream>/<N>-…`` / ``worktree-issue-<N>`` /
-    ``worktree-<N>``) PLUS every ``#N`` in the lane's recent commit subjects
-    (the design's two sources). A spurious number never marks a lane finished —
-    it only matches when it is ALSO in the hand-off set. Never raises."""
-    nums = set()
+    ``worktree-<N>``) uses ONLY that — its own ticket — and does NOT widen via
+    commit subjects (#1103 review, 🟡): an incidental other-ticket ``#N`` in a
+    subject like ``green(#7184): also closes #7000`` must not mark the lane
+    finished off a handed-off #7000 while its own #7184 is live (that would
+    erode the ``idle-unmerged`` fail-safe). A branch with NO leading number
+    (e.g. ``diag/searchmore-2314``) falls back to the ``#N`` in its recent
+    commit subjects — the only ticket signal it has. Never raises."""
     seg = (branch or "").rsplit("/", 1)[-1]
     if seg.startswith("worktree-"):
         seg = seg[len("worktree-"):]
@@ -509,10 +521,11 @@ def _lane_ticket_numbers(repo_root, branch, run):
         seg = seg[len("issue-"):]
     m = re.match(r"(\d{2,7})", seg)
     if m:
-        nums.add(int(m.group(1)))
+        return {int(m.group(1))}          # the branch's own number — do not widen
+    nums = set()
     try:
         r = run(["git", "-C", repo_root, "log", "--format=%s", "-20", branch])
-    except Exception:  # noqa: BLE001 — subjects unavailable => branch number only
+    except Exception:  # noqa: BLE001 — subjects unavailable => no number
         return nums
     if getattr(r, "returncode", 1) == 0:
         for mm in re.finditer(r"#(\d{2,7})", r.stdout or ""):

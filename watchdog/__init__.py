@@ -2892,6 +2892,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           cross-category family-spacing floor that DEFERS a second category's
           keystroke to a later sweep, killing the "nudges chodia jak besne po
           sebe" cross-sweep bursts without changing any rider's own cadence.
+          And, when `repo_roots` is wired, the #1103 FINISHED-WORKTREE PRUNE
+          rung (`lane_reconcile.prune_finished_worktrees`) — the ONE job-20
+          rung that MUTATES the filesystem (all others nudge/read): per repo it
+          `git worktree remove`s (branch ref KEPT, never `--force`) a lane
+          worktree the shared liveness derivation
+          (`cli_lane_overlap.classify_lanes`) classifies FINISHED or MERGED and
+          that is clean + not in live use + >2h idle, so `git worktree list`
+          stops over-counting handed-off / hotfix / dead-worker lanes as live;
+          self-gated per repo hourly via `state["worktree_prune"]`, dirty /
+          live-held / young worktrees kept + journaled.
       (21) (only when `long_turn_enabled` is truthy) LONG-TURN WATCH (#84) —
           a turn that simply RUNS for hours is a fault state of its own:
           nothing compacts, no question is delivered, and every keystroke
@@ -5148,22 +5158,22 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             persist=lambda: save_state(state_path, state))  # #1023 timeout-race write-through
         # #1103 — finished-worktree HYGIENE SWEEP rides Job 20 (NO new registry
         # job): a lane worktree that is merged into its target or handed off (no
-        # process, clean, >2h) is removed so `git worktree list` stops lying to
-        # the liveness derivation. Gated on the already-wired `repo_roots` seam
-        # (goal.py is NOT touched); the whole per-repo pass self-gates hourly via
-        # a session `_walk_ts` marker so the os.walk + git reads run once/hour.
+        # live use, clean, >2h idle) is removed so `git worktree list` stops
+        # lying to the liveness derivation. Gated on the already-wired
+        # `repo_roots` seam (goal.py is NOT touched, per its sibling lane). ONE
+        # cadence gate: `prune_finished_worktrees` self-gates per-repo hourly via
+        # `state["worktree_prune"]` (the same pattern the sibling per-repo jobs
+        # stuck_main/wip_ref use — they call `repo_roots()` every sweep too and
+        # self-gate internally).
         if repo_roots is not None:
             try:
                 from watchdog import lane_reconcile as _lr
-                _wp = state.setdefault("worktree_prune", {})
-                if now - _wp.get("_walk_ts", 0) >= _lr.WORKTREE_PRUNE_CADENCE_S:
-                    _wp["_walk_ts"] = now
-                    roots = repo_roots() if callable(repo_roots) else repo_roots
-                    for _root in (roots or []):
-                        plogs = _lr.prune_finished_worktrees(
-                            _root, run=run, now=now, dry_run=dry_run, cadence_s=0)
-                        if plogs:
-                            logs = list(logs or []) + plogs
+                roots = repo_roots() if callable(repo_roots) else repo_roots
+                for _root in (roots or []):
+                    plogs = _lr.prune_finished_worktrees(
+                        _root, run=run, now=now, dry_run=dry_run, state=state)
+                    if plogs:
+                        logs = list(logs or []) + plogs
             except Exception as _e:  # noqa: BLE001 — hygiene never sinks the sweep
                 logs = list(logs or []) + ["worktree-prune error: %r" % _e]
         return logs

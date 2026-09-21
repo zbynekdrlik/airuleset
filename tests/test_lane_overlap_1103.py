@@ -194,6 +194,29 @@ class TestClassifyStates(TestCase):
         lanes = lo.gather_live_lanes(MAIN, run=_Fake(porc), now=1_000_000.0)
         self.assertEqual(len(lanes), 1, "a detached lane mid-operation is live")
 
+    def test_self_tracked_branch_not_dropped_as_merged(self):
+        # #1103 review BLOCKER regression: a pushed lane branch tracks its OWN
+        # origin ref (origin/<self>); the merged-check must be judged against the
+        # integration base (develop), NOT the branch's @{upstream}, or a
+        # just-pushed HEAD==origin lane reads as "merged into its upstream" and is
+        # wrongly dropped from the live set.
+        br = "montalu/7796-fix"
+        st = self._state([("agent-self", br)], br,
+                         upstreams={br: "origin/" + br},
+                         merged_bases={br: "origin/" + br})  # merged into SELF only
+        self.assertEqual(st, "idle-unmerged",
+                         "a self-tracked, not-merged-to-base lane stays LIVE")
+
+    def test_incidental_subject_ticket_does_not_finish_lane(self):
+        # #1103 review 🟡: a commit subject naming a DIFFERENT handed-off ticket
+        # must not mark this lane finished — only its OWN (branch) ticket counts.
+        br = "montalu/7840-searchmore"
+        st = self._state([("agent-inc", br)], br,
+                         subjects={br: "green(#7840): work; also closes #7000"},
+                         handoff_numbers={7000})  # 7000 handed off, 7840 is NOT
+        self.assertEqual(st, "idle-unmerged",
+                         "an incidental #7000 in the subject must not finish #7840")
+
 
 # --------------------------------------------------------------------------
 # (e) montalu1-shaped overlap + per-state counts
@@ -347,7 +370,8 @@ class TestPruneFinishedWorktrees(TestCase):
         _git(self.repo, "add", "f.txt")
         _git(self.repo, "commit", "-qm", "base")
 
-    def _add_lane(self, dirbase, branch, *, commit=True, old=True, dirty=False):
+    def _add_lane(self, dirbase, branch, *, commit=True, dirty=False,
+                  old_commit=False):
         wt = self.repo / ".claude" / "worktrees" / dirbase
         wt.parent.mkdir(parents=True, exist_ok=True)
         _git(self.repo, "worktree", "add", "-q", "-b", branch, str(wt))
@@ -355,7 +379,7 @@ class TestPruneFinishedWorktrees(TestCase):
             (wt / "w.txt").write_text("x")
             _git(wt, "add", "w.txt")
             env = dict(_ENV)
-            if old:
+            if old_commit:  # a hand-off commit >2h ago (real commit-age path)
                 env["GIT_COMMITTER_DATE"] = "2020-01-01T00:00:00"
                 env["GIT_AUTHOR_DATE"] = "2020-01-01T00:00:00"
             _git(wt, "commit", "-qm", branch + " work", env=env)
@@ -363,13 +387,35 @@ class TestPruneFinishedWorktrees(TestCase):
             (wt / "dirty.txt").write_text("uncommitted")
         return wt
 
+    def test_real_helpers_remove_old_finished_worktree(self):
+        # NO injected seams: exercises the REAL cli_worktree_sweep clean +
+        # live-use helpers AND the real commit-age guard end-to-end. A backdated
+        # hand-off commit (>2h) + clean tree + no process rooted in it => removed.
+        wt = self._add_lane("agent-realrm", "montalu/7850-done", old_commit=True)
+        logs = lr.prune_finished_worktrees(
+            str(self.repo), now=time.time(), handoff_numbers={7850},
+            live_worker_ids=set(), proc_cwds=set())
+        self.assertFalse(wt.exists(), "real-helper path must remove it: %s" % logs)
+        self.assertTrue(any("remove" in ln for ln in logs), logs)
+
+    # The removal-safety leaf plumbing is reused from cli_worktree_sweep, which
+    # reads REAL mtimes (recency age) and REAL /proc (live-use). A freshly-created
+    # tempdir worktree is always "recent" and holds no rooted process, so the
+    # tests inject the age_fn / live_use_fn seams to drive those two guards
+    # deterministically; the clean guard runs the REAL git status on the real
+    # worktree (so the dirty test needs no seam).
+    _OLD = staticmethod(lambda p: 3 * 3600)     # idle > 2h
+    _FRESH = staticmethod(lambda p: 60)         # idle < 2h
+    _FREE = staticmethod(lambda p: False)       # no live process
+    _HELD = staticmethod(lambda p: True)        # a live process holds it
+
     def test_finished_clean_old_worktree_removed_branch_kept(self):
         wt = self._add_lane("agent-fin", "montalu/7840-done")
         logs = lr.prune_finished_worktrees(
-            str(self.repo), now=time.time(),
-            live_worker_ids=set(), proc_cwds=set(), handoff_numbers={7840})
+            str(self.repo), now=time.time(), handoff_numbers={7840},
+            live_worker_ids=set(), proc_cwds=set(),
+            age_fn=self._OLD, live_use_fn=self._FREE)
         self.assertFalse(wt.exists(), "the worktree dir must be gone: %s" % logs)
-        # branch ref kept
         r = subprocess.run(["git", "-C", str(self.repo), "rev-parse",
                             "--verify", "montalu/7840-done"],
                            capture_output=True, text=True)
@@ -379,33 +425,38 @@ class TestPruneFinishedWorktrees(TestCase):
     def test_dirty_worktree_kept(self):
         wt = self._add_lane("agent-dirty", "montalu/7841-done", dirty=True)
         logs = lr.prune_finished_worktrees(
-            str(self.repo), now=time.time(),
-            live_worker_ids=set(), proc_cwds=set(), handoff_numbers={7841})
+            str(self.repo), now=time.time(), handoff_numbers={7841},
+            live_worker_ids=set(), proc_cwds=set(),
+            age_fn=self._OLD, live_use_fn=self._FREE)
         self.assertTrue(wt.exists(), "a dirty worktree must be kept")
         self.assertTrue(any("dirty" in ln.lower() for ln in logs), logs)
 
     def test_process_holding_worktree_kept(self):
         wt = self._add_lane("agent-proc", "montalu/7842-done")
-        lr.prune_finished_worktrees(
-            str(self.repo), now=time.time(),
-            live_worker_ids=set(),
-            proc_cwds={os.path.realpath(str(wt))}, handoff_numbers={7842})
+        logs = lr.prune_finished_worktrees(
+            str(self.repo), now=time.time(), handoff_numbers={7842},
+            live_worker_ids=set(), proc_cwds=set(),
+            age_fn=self._OLD, live_use_fn=self._HELD)
         self.assertTrue(wt.exists(), "a process-holding worktree must be kept")
+        self.assertTrue(any("live use" in ln.lower() for ln in logs), logs)
 
     def test_young_worktree_kept(self):
-        # committed NOW (< 2h old) => kept even though finished.
-        wt = self._add_lane("agent-young", "montalu/7843-done", old=False)
+        wt = self._add_lane("agent-young", "montalu/7843-done")
         logs = lr.prune_finished_worktrees(
-            str(self.repo), now=time.time(),
-            live_worker_ids=set(), proc_cwds=set(), handoff_numbers={7843})
+            str(self.repo), now=time.time(), handoff_numbers={7843},
+            live_worker_ids=set(), proc_cwds=set(),
+            age_fn=self._FRESH, live_use_fn=self._FREE)
         self.assertTrue(wt.exists(), "a <2h worktree must be kept: %s" % logs)
+        self.assertTrue(any("last commit" in ln.lower() for ln in logs), logs)
 
     def test_idle_unmerged_worktree_kept(self):
-        # no hand-off, no evidence => idle-unmerged => NOT a prune candidate.
+        # no hand-off, no evidence => idle-unmerged => NOT a prune candidate,
+        # even when old + free (the classifier keeps it out of the candidate set).
         wt = self._add_lane("agent-idle", "montalu/7844-wip")
         lr.prune_finished_worktrees(
-            str(self.repo), now=time.time(),
-            live_worker_ids=set(), proc_cwds=set(), handoff_numbers=set())
+            str(self.repo), now=time.time(), handoff_numbers=set(),
+            live_worker_ids=set(), proc_cwds=set(),
+            age_fn=self._OLD, live_use_fn=self._FREE)
         self.assertTrue(wt.exists(), "an idle-unmerged (live) worktree must be kept")
 
     def test_cadence_gate_skips_within_hour(self):
