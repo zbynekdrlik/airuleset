@@ -20,6 +20,26 @@ import sys
 # infra work is ROUTED to the infra role via --role, #993 r2b).
 ARCHITECTURE_REWORK_LABEL = "architecture-rework"
 
+# #1101 -- the `--list` legend header. ONE `#`-prefixed line printed BEFORE the
+# rows on the `--list` path of BOTH cmd_core_quals and cmd_slice_quals (never on
+# --count/--waiting/--ops-wait/--audit), so a session reading the obligation
+# column can never disown its own `action-only` hand-offs as "gk-infra / stream /
+# not mine" (the owner-escalated regression: the gk FLOW session narrated its
+# footer `I 24` away as "17 patria gk-infra" while they were its OWN
+# gk-processing pickups, 0 carried `infra`). It is a non-member line by the #754
+# contract (a leading `#`), so every consumer that skips `#` lines reads the data
+# rows unchanged. No TAB, so `startswith("#")` alone identifies it.
+_LIST_LEGEND = (
+    "# columns: number  created  action  title"
+    " | implement = write the code HERE"
+    " | action-only = a stream hand-off YOU must review → merge → release"
+    " → return/close (still YOUR I, never \"theirs\"; gk-processing = you"
+    " already picked it up)"
+    " | route by LABEL, never by explanation: infra → INFRA window"
+    " · prio:bounce → back to the stream"
+    " · needs-answer/needs-decision → U · ops-wait → W"
+)
+
 
 def _row_label_rank(row):
     """0 when `row` carries the architecture-rework label (highest lane
@@ -974,6 +994,7 @@ def cmd_slice_quals(args):
     # (workable ∧ ¬dep-wait), so a released row can never be selected. Printed as
     # a trailing block, not interleaved, so the workable candidates read first.
     _dep_map, _slug, _ok = _dep_wait_map_for(unhandled, root)
+    print(_LIST_LEGEND)   # #1101: the obligation-column legend, ONE `#` line
     _print_issue_rows(unhandled, own_stream=user, dep_wait_map=_dep_map)
     released_rows = {n: workable_rows[n] for n in workable_rows
                      if handed.get(n) == "released"}
@@ -1528,4 +1549,5 @@ def cmd_core_quals(args):
     # stream-labelled row in its obligation set is action-only. #993 item 7:
     # dep-aware action column (--list).
     _dep_map, _slug, _ok = _dep_wait_map_for(workable, root)
+    print(_LIST_LEGEND)   # #1101: the obligation-column legend, ONE `#` line
     _print_issue_rows(workable, own_stream=None, dep_wait_map=_dep_map)
