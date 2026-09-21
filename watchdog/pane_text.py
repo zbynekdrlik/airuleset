@@ -30,7 +30,36 @@ existing ``watchdog.<name>`` seams (stash / goal / job 1 / compact, hooks, tests
 keep resolving unchanged.
 """
 
+import re
+
 import watchdog
+
+
+# #1104 -- a GENERIC ACTIVITY spinner line CC renders while a turn is mid-render:
+# a spinner glyph, whitespace, content, and the spinner's own trailing ellipsis
+# (`✻ Frosting… (33s · ↓ 1.4k tokens)`). This is DISTINCT from the ambient
+# "Waiting for N background agents to finish" line (no ellipsis -> NOT matched
+# here; that state stays `_pane_busy_waiting`'s gate, unchanged -- and keeping it
+# out of the classifier is what preserves the #458 lock
+# `_classify_boundary(MONTALU3) == ("input","")`, since MONTALU3 carries that
+# Waiting line above a bare box). Anchored at line start (post-strip) so a mid-
+# prose mention never matches; the glyph set is CC's spinner frames.
+_ACTIVITY_SPINNER_RX = re.compile(r"[✻✢✽∗]\s+\S.*…")
+
+
+def _pane_activity_spinner_above_box(captured):
+    """#1104 -- True iff the region ABOVE the input box carries a GENERIC ACTIVITY
+    spinner line (a turn suspended mid-render). A bare/at-rest `❯` box with such a
+    line above it is a SUSPENDED turn whose Enter is SWALLOWED, so every keystroke
+    job must DEFER (`_classify_boundary` returns busy). Scans `_above_input_box`
+    (trailing chrome peeled, the `❯` line dropped), never the box's own rows.
+    Fail-safe False: an unreadable region / no spinner never turns an idle pane
+    busy that wasn't (a false busy only delays a nudge one sweep)."""
+    above = watchdog._above_input_box(captured or "")
+    for ln in above.splitlines():
+        if _ACTIVITY_SPINNER_RX.match(ln.strip()):
+            return True
+    return False
 
 
 def _input_line_text(captured):
@@ -106,6 +135,14 @@ def _classify_boundary(captured):
     box = watchdog._find_input_box_from(rows)
     if box is not None:
         head, tail, wrapped = box
+        # #1104 -- a turn SUSPENDED mid-render shows an ACTIVITY spinner ABOVE an
+        # at-rest box; the Enter is swallowed, so classify BUSY (every keystroke
+        # job's `kind=="busy"` check then defers). The sibling "Waiting for N
+        # background agents" AMBIENT line (no ellipsis) is NOT matched here and
+        # stays `_pane_busy_waiting`'s job -- which keeps the #458 lock
+        # `_classify_boundary(MONTALU3) == ("input","")` green.
+        if _pane_activity_spinner_above_box(captured):
+            return ("busy", None)
         return ("input", tail if wrapped else head[1:].strip())
     return ("busy", None) if rows else ("no-input-line", None)
 

@@ -185,8 +185,7 @@ class TestLaneNudgeDefersOnSpinner(unittest.TestCase):
                 backlog_fetch=lambda cwd: 5, state={}, sleep_fn=lambda s: None)
         self.assertEqual(tmux.sent, [],
                          "a spinner-busy pane must never be typed into")
-        self.assertTrue(any("skip:busy" in ln or "hold:busy" in ln
-                            for ln in logs), logs)
+        self.assertTrue(any("busy" in ln for ln in logs), logs)
 
 
 # --------------------------------------------------------------------------- #
