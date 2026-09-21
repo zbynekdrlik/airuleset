@@ -2169,6 +2169,14 @@ from watchdog.cards import (  # noqa: E402
     make_owned_closed_filter as make_owned_closed_filter,
 )
 
+# #1097 — the GitHub-STATE + ROLE verifier composed onto the #534 owner-scoping
+# seam (leaf module, lazy gh/cli imports). Same facade convention as the cards
+# block above: `run_once` calls `make_verified_closed_filter` by bare name.
+from watchdog.owed_verify import (  # noqa: E402
+    verify_owed as verify_owed,
+    make_verified_closed_filter as make_verified_closed_filter,
+)
+
 
 # --------------------------------------------------------------------------- #
 # #433 (module split cluster E) -- per-service submodule re-exports, same
@@ -5188,7 +5196,18 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # derive the identical `merged_closes` candidate set for a given root). Built
     # HERE, per sweep, so its memo is fresh each sweep (a gh-failure sweep
     # re-queries next sweep rather than latching a wrong owner map).
-    _owned_scope = make_owned_closed_filter()
+    # #1097: compose the #534 owner filter with a GitHub-STATE + ROLE verifier so
+    # a prose "fixes #<old>" of a long-closed ticket (odoo-erp 1e9e1f4d0 re-owed
+    # #4) is not re-derived as owed, and a ticket is owed only to the window whose
+    # ROLE owns its work class (gk's FLOW vs INFRA roots of one repo). Built HERE,
+    # per sweep, so its per-(root,set) verify memo + journal are fresh each sweep
+    # and the SAME composed callable is shared by BOTH jobs (its ETag-cached read
+    # thus fires at most once per candidate per sweep). `since_fn` is the same
+    # `now - CARD_WINDOW_S` window `merged_closes` used. Journal lines
+    # (`owed-verify drop/keep-unreadable …`) accumulate on `_owned_scope.logs`,
+    # appended to the job's log output below.
+    _owned_scope = make_verified_closed_filter(
+        make_owned_closed_filter(), since_fn=lambda: now - CARD_WINDOW_S)
     _add("card_reconcile", lambda: card_probe is not None,
          lambda: card_reconcile(now, run, state, cwd_by_sid,
                                 send_fn=send_fn, dry_run=dry_run,
@@ -5201,7 +5220,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                     send_fn=send_fn, dry_run=dry_run,
                                     owner_by_sid=owner_by_sid,
                                     projects_dir=projects_dir, sleep_fn=sleep_fn,
-                                    owned_closed=_owned_scope),
+                                    owned_closed=_owned_scope)
+                 + list(_owned_scope.logs),
          "card-reconcile error", min_budget=_BUDGET_MIN_GH_BATCH_S,
          gh_poll_hold=True,          # #1040 pure-read poller
          max_subprocess=_MAX_SUBPROCESS_GH_BATCH)  # #1055 P2 (e) late/non-urgent
