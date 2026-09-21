@@ -196,6 +196,16 @@ FIXTURES = [
      _w("/repo/hand.py", "env['project.task'].write({'stage_id': verif}); "
         "task.message_post(body=note, body_is_html=True)"), None,
      [CORE, STAGES, SKILL]),
+    # #1102 adversarial (review 2): the realistic 2-action "read the task's spec
+    # attachments THEN post a note" combo co-fires the LARGE attachments recipe
+    # with CORE + the posting recipe — the tightest realistic board triple.
+    ("attachment read + message_post", "Write",
+     _w("/repo/spec_then_post.py",
+        "atts = m('ir.attachment','search_read',"
+        "[[['res_model','=','project.task'],['res_id','=',tid]]],"
+        "{'fields':['attachment_ids']})\n"
+        "task.message_post(body=html, body_is_html=True)"), None,
+     [CORE, ATT, SKILL]),
 ]
 
 # generic payloads that must NOT inject any board companion (#949)
@@ -313,6 +323,36 @@ class TestUnionContentLocks(unittest.TestCase):
                     hits, [home],
                     f"rule {header!r} must appear in exactly {Path(home).name}, "
                     f"found in {[Path(h).name for h in hits]}")
+
+
+class TestPrimaryInvariantUnderPressure(unittest.TestCase):
+    """#1102 primary invariant (review-2 adversarial): on ANY project.task
+    payload — including a kitchen-sink that names stage + question + attachment +
+    message_post at once — CORE and the messaging posting recipe (SKILL.md, when
+    message_post is present) must NEVER defer. The injector's documented
+    defer-to-next-action contract may drop the LEAST-relevant large secondary
+    companion (e.g. the attachments recipe) on such an overloaded payload; that
+    body re-fires on the stream's next attachment-only action, so nothing is
+    lost. This test locks the invariant that matters — the board CORE and the
+    posting recipe always co-fire — against a regression that would defer either.
+    """
+
+    KITCHEN_SINK = (
+        "env['project.task'].write({'stage_id': verifik, 'description': d})\n"
+        "atts = m('ir.attachment','search_read',"
+        "[[['res_model','=','project.task']]],{'fields':['attachment_ids']})\n"
+        "# Potrebuje ujasniť / needs-answer\n"
+        "task.message_post(body=note, body_is_html=True)")
+
+    def test_core_and_posting_recipe_never_defer(self):
+        ctx = run_hook("Write",
+                       _w("/repo/board_everything.py", self.KITCHEN_SINK),
+                       session_id="kitchensink-1102")
+        self.assertIn(f'file="{CORE}"', ctx,
+                      "CORE must never defer on a project.task payload")
+        self.assertIn(f'file="{SKILL}"', ctx,
+                      "the messaging posting recipe must never defer when "
+                      "message_post is present (the #1102 primary invariant)")
 
 
 if __name__ == "__main__":

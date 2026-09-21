@@ -1,6 +1,6 @@
 # Client Board Task Attachments — recipe (#1098)
 
-The extended `project.task` board-task attachment recipe, relocated VERBATIM out of the injected `read-with-attachments.md` so the #745 three-way co-fire (comprehensive-logging + read-attachments + read-reactions) fits under `MAX_TOTAL=14000` (`hooks/inject-situational-rule.sh`, #1098) — nothing is condensed; this file has its OWN situational-trigger row (#1102 — `odoo-client-board-attachments`, fired on a `project.task` attachment read) and is also read on demand from the pointer in `read-with-attachments.md`. It carries rule 15 (moved verbatim from `client-board-tasks.md`, #1102) plus the recipe.
+Companion of `client-board-tasks.md` (CORE). Carries rule 15 (moved verbatim, #1102) + the `project.task` attachment recipe (relocated verbatim out of `read-with-attachments.md`, #1098). Auto-loads on a `project.task` attachment read (its own row, #1102); also read on demand from the `read-with-attachments.md` pointer.
 
 ## project.task — a client board task's attachments (#1098)
 

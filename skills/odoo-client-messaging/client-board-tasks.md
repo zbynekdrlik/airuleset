@@ -1,8 +1,6 @@
 # Client Board Tasks — project.task Formatting Doctrine (CORE)
 
-Always-injected CORE for a `project.task` write. Full background: `client-board-tasks-history.md` (#1098).
-
-**Topic companions** — each auto-loads on its own `project.task` action (#1102): `client-board-stages.md` (rules 3, 5, 6, 14); `client-board-questions.md` (rules 4, 8, 10); `client-board-attachments.md` (rule 15).
+Always-injected CORE for a `project.task` write; background: `client-board-tasks-history.md` (#1098). **Companions** (each auto-loads on its own `project.task` action, #1102): `client-board-stages.md` (rules 3, 5, 6, 14); `client-board-questions.md` (rules 4, 8, 10); `client-board-attachments.md` (rule 15).
 
 ---
 
