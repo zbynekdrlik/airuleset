@@ -192,7 +192,7 @@ Absent an explicit owner order, a posted message stands.
 ### 15. Prílohy v popise úlohy = primárny zdroj (#1098)
 
 **Pri KAŽDEJ novej/zmenenej board úlohe — a vždy pred filing ticketu aj pred
-parkovaním — prečítaj VŠETKY prílohy** z troch zdrojov (plný recept v `read-with-attachments.md`):
+parkovaním — prečítaj VŠETKY prílohy** z troch zdrojov (plný recept v `client-board-attachments.md`):
 
 - `ir.attachment` na úlohe — `search_read([["res_model","=","project.task"],["res_id","=",tid],["res_field","=",False]], ["id","name","mimetype"])` (Odoo skryto predradí `('res_field','=',False)` — polia viazané prílohy vidno len s `["res_field","!=",False]`)
 - att-id z popisu — `re.findall(r"/web/(?:image|content)/(\d+)", desc or "")` (vložený Excel = `/web/content/<id>`)

@@ -46,6 +46,10 @@ class TestNoChannelPrescriptiveContent(TestCase):
         # prescription — they teach HOW to read, not WHERE to post)
         "skills/odoo-client-messaging/read-reactions.md",
         "skills/odoo-client-messaging/read-with-attachments.md",
+        # #1098 ff2: the project.task board-task read recipe, relocated verbatim
+        # out of read-with-attachments.md — same transport-specific recipe
+        # category (teaches HOW to read a board task's attachments).
+        "skills/odoo-client-messaging/client-board-attachments.md",
         # Modules that mention XML-RPC in a non-acceptance context
         "modules/core/view-image-urls.md",  # ir.attachment recipe
         "modules/core/ci-monitoring.md",    # deploy-watch example
