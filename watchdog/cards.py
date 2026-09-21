@@ -322,7 +322,15 @@ REPORT_TAIL_LINES = 400          # a fresh (un-compacted) report sits near the
                                    # tail — the compact-sync.log covers a report
                                    # already compacted OUT of this window
 
-_CLOSES_RE = re.compile(r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)",
+# #1097: the `(?<![\w-])` lookbehind stops a HYPHENATED prose mention from
+# matching (`Release-fix #4` / `hot-fix #12` — the odoo-erp #4 false-owed case:
+# a bare `\b` holds after a hyphen, so `-fix #4` was a hit). A space- or start-of-
+# message-preceded keyword still matches, preserving GitHub's own rule that a
+# `Fixes #N` ANYWHERE in the message closes the issue. The lookbehind is only the
+# cheap first belt — `watchdog/owed_verify.py` then verifies each candidate
+# against the GitHub row (state + closed_at inside the window), because no regex
+# can tell a fresh close from a re-mention of a long-closed number.
+_CLOSES_RE = re.compile(r"(?<![\w-])(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)",
                         re.I)
 
 
