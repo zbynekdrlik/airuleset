@@ -9,14 +9,9 @@ import json
 import os
 import tempfile
 import unittest
-from collections import namedtuple
 
 from watchdog import goal
 from watchdog import lane_resources
-
-# A minimal WorkerLane-compatible namedtuple for count_resource_usage tests.
-_FakeLane = namedtuple("_FakeLane", ["agent_id", "state", "age_s",
-                                      "agent_type", "detail"])
 
 
 class TestLaneResourceCap(unittest.TestCase):
@@ -229,130 +224,6 @@ class TestLaneResourceCaps(unittest.TestCase):
         self.assertIs(goal.lane_resource_caps, lane_resources.lane_resource_caps)
 
 
-class TestCountResourceUsage(unittest.TestCase):
-    """Tests for count_resource_usage() — reads .lane-needs files."""
-
-    def test_no_evidence_returns_empty(self):
-        with tempfile.TemporaryDirectory() as d:
-            self.assertEqual(lane_resources.count_resource_usage(d, []), {})
-
-    def test_no_lane_needs_file_returns_empty(self):
-        with tempfile.TemporaryDirectory() as d:
-            wt = os.path.join(d, ".claude", "worktrees", "agent-abc123")
-            os.makedirs(wt)
-            ev = [_FakeLane("agent-abc123", "live", 10, "autopilot-worker", "")]
-            self.assertEqual(lane_resources.count_resource_usage(d, ev), {})
-
-    def _write_gitdir_lane_needs(self, d, agent_id, content):
-        """Write lane-needs into the PRIVATE gitdir path (Y-2 fix)."""
-        gd = os.path.join(d, ".git", "worktrees", agent_id)
-        os.makedirs(gd, exist_ok=True)
-        with open(os.path.join(gd, "lane-needs"), "w") as f:
-            f.write(content)
-
-    def test_box_lane_counted_gitdir(self):
-        """Y-2: lane-needs in the gitdir is read correctly."""
-        with tempfile.TemporaryDirectory() as d:
-            self._write_gitdir_lane_needs(d, "agent-abc123", "box\n")
-            ev = [_FakeLane("agent-abc123", "live", 10, "autopilot-worker", "")]
-            self.assertEqual(lane_resources.count_resource_usage(d, ev),
-                             {"box": 1})
-
-    def test_stale_lane_not_counted(self):
-        with tempfile.TemporaryDirectory() as d:
-            self._write_gitdir_lane_needs(d, "agent-abc123", "box\n")
-            ev = [_FakeLane("agent-abc123", "stale", 999, None, "")]
-            self.assertEqual(lane_resources.count_resource_usage(d, ev), {})
-
-    def test_multiple_box_lanes(self):
-        with tempfile.TemporaryDirectory() as d:
-            for aid in ("agent-a", "agent-b"):
-                self._write_gitdir_lane_needs(d, aid, "box\n")
-            ev = [
-                _FakeLane("agent-a", "live", 5, "autopilot-worker", ""),
-                _FakeLane("agent-b", "live", 8, "autopilot-worker", ""),
-            ]
-            self.assertEqual(lane_resources.count_resource_usage(d, ev),
-                             {"box": 2})
-
-    def test_mixed_box_and_free(self):
-        with tempfile.TemporaryDirectory() as d:
-            self._write_gitdir_lane_needs(d, "agent-box", "box\n")
-            # agent-free has no lane-needs -> box-free
-            ev = [
-                _FakeLane("agent-box", "live", 5, "autopilot-worker", ""),
-                _FakeLane("agent-free", "live", 5, "autopilot-worker", ""),
-            ]
-            usage = lane_resources.count_resource_usage(d, ev)
-            self.assertEqual(usage, {"box": 1})
-
-    def test_none_cwd_returns_empty(self):
-        ev = [_FakeLane("agent-x", "live", 5, "autopilot-worker", "")]
-        self.assertEqual(lane_resources.count_resource_usage(None, ev), {})
-
-
-class TestLaneNudgeText(unittest.TestCase):
-    """Tests for _lane_nudge_text -- the resource-aware nudge formatter."""
-
-    def test_default_cap_no_count_prescription(self):
-        # #994: the nudge no longer prescribes the cap count ("menej než N" /
-        # "až N PARALELNÝCH"). It keeps the #848 refill mechanism and defers to
-        # the session-agreed priority (#993).
-        text = lane_resources._lane_nudge_text(10, 2, {"total": 5})
-        self.assertNotIn("menej než", text)
-        self.assertNotIn("drž až", text)
-        self.assertIn("refill", text.lower())
-        self.assertIn("#993", text)
-
-    def test_cap_1_no_count_prescription(self):
-        text = lane_resources._lane_nudge_text(10, 2, {"total": 1})
-        self.assertNotIn("až 1 PARALELNÝCH", text)
-        self.assertNotIn("menej než 1", text)
-        self.assertIn("#993", text)
-
-    def test_cap_2_no_count_prescription(self):
-        text = lane_resources._lane_nudge_text(10, 2, {"total": 2})
-        self.assertNotIn("až 2 PARALELNÝCH", text)
-        self.assertNotIn("menej než 2", text)
-        self.assertIn("#993", text)
-
-    def test_backlog_and_waiters_are_formatted(self):
-        text = lane_resources._lane_nudge_text(7, 3, {"total": 5})
-        self.assertIn("backlog=7", text)
-        self.assertIn("waiterov beží: 3", text)
-
-    def test_resource_aware_snippet_present(self):
-        """With per-resource caps+usage, the nudge shows occupancy."""
-        caps = {"total": 5, "box": 1}
-        usage = {"box": 1}
-        text = lane_resources._lane_nudge_text(
-            10, 2, caps, usage=usage, live_workers=3)
-        self.assertIn("box 1/1 occupied", text)
-        self.assertIn("box-free", text)
-
-    def test_resource_snippet_absent_when_no_resources(self):
-        """Flat cap (no resources key) -> no resource snippet."""
-        text = lane_resources._lane_nudge_text(10, 2, {"total": 5})
-        self.assertNotIn("occupied", text)
-        self.assertNotIn("box-free", text)
-
-    def test_box_free_count_computed_correctly(self):
-        """box-free shows AVAILABLE slots, not used (L-1 fix)."""
-        caps = {"total": 5, "box": 1}
-        usage = {"box": 1}
-        text = lane_resources._lane_nudge_text(
-            10, 2, caps, usage=usage, live_workers=3)
-        # box_free_used = 3 - 1 = 2, box_free_cap = 4, avail = 4 - 2 = 2
-        self.assertIn("box-free 2/4 free", text)
-
-    def test_backward_compat_fn(self):
-        """GOAL_LANE_NUDGE_TEXT_FN backward compat helper."""
-        text = goal.GOAL_LANE_NUDGE_TEXT_FN(10, 2)
-        self.assertIn("backlog=10", text)
-        self.assertNotIn("menej než 5", text)      # #994: no cap-count prescription
-        self.assertIn("#993", text)
-
-
 class TestLaneResourceGuardConstants(unittest.TestCase):
     """Guard tests for the constants and file path."""
 
@@ -493,72 +364,6 @@ class TestIntegrationNudgeWithResources(unittest.TestCase):
         log_text = " ".join(logs)
         self.assertIn("saturated", log_text)
 
-    def test_nudge_text_carries_resource_snippet(self):
-        """Y-1: the nudge text (via batch_collect) includes per-resource
-        occupancy when a lane-needs file is present and the evidence carries
-        a live lane — mutation-kills count_resource_usage(cwd, [])."""
-        import time
-        import unittest.mock as m
-        cwd = self._make_project({"max_lanes": 5, "resources": {"box": 1}})
-        # Write lane-needs into the gitdir for agent-x
-        gd = os.path.join(cwd, ".git", "worktrees", "agent-x")
-        os.makedirs(gd)
-        with open(os.path.join(gd, "lane-needs"), "w") as f:
-            f.write("box\n")
-
-        now = time.time()
-        ev = [_FakeLane("agent-x", "live", 5, "autopilot-worker", "")]
-        batch = []
-
-        with m.patch.object(goal, "watchdog") as mock_wd:
-            mock_wd.transcript_last_marker.return_value = "⏳"
-            mock_wd.pane_waiting_on_user.return_value = False
-            mock_wd._pane_compacting.return_value = False
-            mock_wd._pane_live_task_count.return_value = 0
-            mock_wd.count_live_workers.return_value = (1, ev)
-            mock_wd._cached_backlog_count.return_value = 5
-            mock_wd.lane_has_live_evidence.return_value = True
-            mock_wd.project_label.return_value = "test"
-            mock_wd.pane_owner.return_value = None
-            mock_wd.pane_goal_armed.return_value = True
-            mock_wd._goal_autoarm_recent_human_activity.return_value = (
-                False, "")
-            mock_wd.transcript_last_error.return_value = None
-            mock_wd.capture_pane.return_value = ""
-
-            with m.patch.object(goal, "_compact") as mc:
-                mc.pending_compact_hold.return_value = False
-                with m.patch.object(goal, "_one_glance") as mog:
-                    mog.lane_working_no_tasks_decision.return_value = (
-                        m.Mock(defer=False, streak=0, log=None))
-                    with m.patch.object(goal, "_lane_boundary_ok",
-                                        return_value=(True, "idle", "")):
-                        with m.patch.object(goal,
-                                            "_account_limit_decision",
-                                            return_value=(False, None,
-                                                          None)):
-                            with m.patch.object(
-                                goal, "_lane_effective_min_backlog",
-                                return_value=1,
-                            ):
-                                goal.goal_lane_occupancy_nudge(
-                                    now=now, run={}, rec={},
-                                    sid="test-sid", cwd=cwd, pid=1,
-                                    captured="", tpath="/dev/null",
-                                    tmtime=now - 10, loc="test:0.0",
-                                    send_fn=None, dry_run=True,
-                                    handled=None, projects_dir="/tmp",
-                                    backlog_fetch=lambda: 5,
-                                    state={}, batch_collect=batch)
-        # batch_collect is not populated in dry_run mode, so check logs
-        # are clean (READY) and the resource_usage was actually computed
-        usage = lane_resources.count_resource_usage(cwd, ev)
-        self.assertEqual(usage, {"box": 1})
-        # Verify the nudge text includes the snippet
-        caps = {"total": 5, "box": 1}
-        text = lane_resources._lane_nudge_text(
-            5, 0, caps, usage=usage, live_workers=1)
-        self.assertIn("box 1/1 occupied", text)
 
 
 if __name__ == "__main__":

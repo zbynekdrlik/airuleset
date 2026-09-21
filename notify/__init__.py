@@ -3090,20 +3090,12 @@ SUPPRESSED_ALERT_PREFIXES = (
     # untouched. `acctblock:` (genuine account-block, needs a human) is the ONE
     # escalation class that stays un-suppressed.
     ("stuckalert", "structural-stuck (#688)"),  # goal_lane_sweep frozen-goal alarm (#662 — owner-ruled spam)
-    # #693 (2026-08-25 owner ruling): the `lanestall:` give-up ping
-    # (goal_lane_occupancy_nudge -> _lane_giveup_decision, "⚠️ … /goal
-    # armovaný, ale lány sa nezaplnili … pozri sa na reláciu") was the LAST
-    # un-suppressed member of the same armed-/goal + empty-lanes class the
-    # owner ruled spam three times (#546/#676/#688) — and it routinely fired
-    # on NORMAL states (backlog exhausted / everything parked on U·W·gk),
-    # because its gate reads a ~10-min-TTL backlog cache. Same #546 audience
-    # split: no Discord PING, the machine channel keeps the signal (watchdog
-    # journal — which since #693 also names the CLASSIFIED cause of the empty
-    # lanes — + the `suppressed` delivery-log line). The lane keystroke nudge
-    # never routes through send(), so it is untouched. `acctblock:` (genuine
-    # account-block) + watchdog job 35 (dead-fleet) stay the ONLY phone
-    # alarms for a coverage outage.
-    ("lanestall", "lane-stall give-up (#693)"),  # goal lane give-up ping (owner-ruled spam)
+    # #1096: the `lanestall:` give-up ping (#693) is GONE — its only emitter,
+    # `_lane_giveup_decision`, was deleted with the lane-occupancy delivery-cadence
+    # machinery (#1089 retired the keystroke DELIVERY, so the give-up branch can no
+    # longer fire). The give-up-cause classification the ping used to name now has
+    # no producer; the surviving lane-occupancy observability is the
+    # `would-refill; DELIVERY RETIRED` decision line + the #662 `stuckalert:` above.
     # #704 (2026-08-25 owner ruling, GENERAL): "an idle/stall/no-work/session-stojí
     # state NEVER owner-pings" — the phone keeps ONLY ❓ question / ✅ final done /
     # per-ticket run-card / acctblock / job-35 dead-fleet. These airuleset-OWNED

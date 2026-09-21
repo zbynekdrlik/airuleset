@@ -31,7 +31,6 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 import watchdog as wd  # noqa: E402
-from watchdog import goal  # noqa: E402
 from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux, GOAL_ARMED_CAP,
 )
@@ -51,8 +50,17 @@ def _no_double_escape(sent):
 
 
 # A realistic OWN lane-check nudge (starts with the unambiguous machine prefix
-# `lane-check: `) — the exact class the live cam-box draft was.
-OWN_LANE = goal.GOAL_LANE_NUDGE_TEXT_FN(5, 0)
+# `lane-check: `) — the exact class the live cam-box draft was. #1096: the
+# lane-occupancy nudge DELIVERY is retired, so its text builder is gone; the
+# `lane-check: ` prefix is still a recognized own-draft prefix (watchdog/stash.py),
+# so a frozen representative draft (> BOX_WIDTH so it wraps) stands in for it.
+OWN_LANE = (
+    "lane-check: backlog=5 OTVORENÝCH tiketov — dispatchni len naozaj workable "
+    "lány PARALELNE (isolation:\"worktree\" autopilot-worker, run_in_background), "
+    "refill vrátený slot po jeho návrate, integruj SÉRIOVO pod integračným "
+    "mutexom; ustúp len na reálny resource signál. PRIORITU ani POČET lán "
+    "NEURČUJE tento nudge — platí priorita dohodnutá v tejto session (#993)."
+)
 OWN_BOUNCE = wd.BOUNCE_NUDGE % ("#12, #13", "camera-box")
 OWN_GKREQ = wd.GKREQ_NUDGE % ("#40", "odoo-erp")
 

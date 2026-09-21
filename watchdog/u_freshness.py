@@ -60,8 +60,8 @@ CATEGORY = "u-freshness"
 
 # How fresh the tickets-status cache must be for its `user_waiting` count to be
 # trusted for a nudge decision. Mirrors airuleset.py's #618
-# `_BACKLOG_STATUS_CACHE_MAX_AGE_S` / goal.py's GOAL_LANE_GIVEUP_CACHE_MAX_AGE_S
-# (the SAME cache, the same 15-min tolerance). Older/unreadable → spawn a refresh
+# `_BACKLOG_STATUS_CACHE_MAX_AGE_S` (the SAME cache, the same 15-min tolerance;
+# goal.py's parallel constant was deleted, #1096). Older/unreadable → spawn a refresh
 # and skip this sweep (the count self-heals within one refresh cycle).
 U_STATUS_CACHE_MAX_AGE_S = 15 * 60
 
