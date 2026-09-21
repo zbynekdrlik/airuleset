@@ -56,33 +56,55 @@ carries attachments in THREE places; read ALL of them before filing a ticket
 from the task or parking it on `needs-answer`.
 
 1. **`ir.attachment` rows on the task** — `res_model='project.task'`,
-   `res_id=<task id>`:
+   `res_id=<task id>`. Odoo's `ir.attachment._search` silently PREPENDS
+   `('res_field', '=', False)` when the domain names neither `id` nor
+   `res_field` — that HIDES every field-bound attachment (an inline description
+   image is stored with `res_field='description'`). Name `res_field` in TWO
+   passes:
    ```python
-   atts = models.execute_kw(db, uid, api_key,
-       "ir.attachment", "search_read",
-       [[["res_model", "=", "project.task"], ["res_id", "=", task_id]]],
-       {"fields": ["id", "name", "mimetype", "datas"]})
+   base = [["res_model", "=", "project.task"], ["res_id", "=", task_id]]
+   unbound = models.execute_kw(db, uid, api_key, "ir.attachment", "search_read",
+       [base + [["res_field", "=", False]]],
+       {"fields": ["id", "name", "mimetype"]})
+   bound = models.execute_kw(db, uid, api_key, "ir.attachment", "search_read",
+       [base + [["res_field", "!=", False]]],
+       {"fields": ["id", "name", "mimetype", "res_field"]})
    ```
-2. **Inline images in the description** — every `/web/image/<id>` reference in
-   `project.task.description` is an `ir.attachment` id; extract them and
-   `ir.attachment.read` their bytes:
+2. **Inline images / files in the description** — extract every attachment id
+   from the description HTML. A screenshot is `/web/image/<id>`; a spreadsheet
+   dropped in is emitted as `/web/content/<id>?download=true`:
    ```python
    import re
    task = models.execute_kw(db, uid, api_key, "project.task", "read",
        [[task_id]], {"fields": ["description"]})[0]
-   img_ids = [int(m) for m in re.findall(r"/web/image/(\d+)", task["description"] or "")]
+   ids = [int(m) for m in re.findall(r"/web/(?:image|content)/(\d+)", task["description"] or "")]
    ```
+   Caveat: `/web/image/<model>/<id>/<field>` (THREE path segments) carries a
+   RECORD id, not an attachment id — do NOT feed it to `ir.attachment.read`.
 3. **The task's message attachments** — `mail.message` on
-   `model='project.task'`, `res_id=<task id>`, each message's `attachment_ids`
-   (same fetch shape as the Discuss recipe above).
+   `model='project.task'`, `res_id=<task id>`; read each message's
+   `attachment_ids`:
+   ```python
+   msgs = models.execute_kw(db, uid, api_key, "mail.message", "search_read",
+       [[["model", "=", "project.task"], ["res_id", "=", task_id]]],
+       {"fields": ["body", "author_id", "attachment_ids", "date"]})
+   ```
 
 **Download + Read every attachment** into
 `~/.claude/work-products/<projekt>-podklady-<D.M.YYYY>/t<task>-<att>.<ext>`
-(base64 `datas` → bytes, as in step 2 of the Discuss recipe) and open each with
-the Read tool BEFORE interpreting the task. **Cite** each att-id + the values you
-read in the GitHub ticket body — e.g. `att 37652: rozmery 1575/1924`; a question
-to the owner about the task carries `Prílohy: att <ids> prečítané (<hodnoty>)` or
-`Prílohy: žiadne` (enforced by Check 9 in `stop-check-question-quality.sh`).
+(base64 `datas` → bytes) and open each with the Read tool BEFORE interpreting
+the task — never the Discuss recipe's `/tmp/{name}` scratch path (a board task's
+podklady are a durable work-product, #1098):
+```python
+import base64, pathlib
+d = pathlib.Path.home() / ".claude" / "work-products" / f"{projekt}-podklady-{datum}"
+d.mkdir(parents=True, exist_ok=True)
+(d / f"t{task_id}-{att['id']}.{ext}").write_bytes(base64.b64decode(att["datas"]))
+```
+**Cite** each att-id + the values you read in the ticket body — e.g.
+`att 37652: rozmery 1575/1924`; a question to the owner about the task carries
+`Prílohy: att <ids> prečítané (<hodnoty>)` or `Prílohy: žiadne` (enforced by
+Check 9 in `stop-check-question-quality.sh`).
 
 ## Anti-pattern (all rewordings apply)
 
