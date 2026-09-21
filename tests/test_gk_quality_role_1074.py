@@ -30,7 +30,6 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-import airuleset  # noqa: E402
 import cli_concurrency  # noqa: E402
 import cli_fleet  # noqa: E402
 import cli_quals_cmd  # noqa: E402
