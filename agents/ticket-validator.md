@@ -56,6 +56,14 @@ The dispatch tells you the issue number + repo (e.g. `Validate issue #567 in mon
      direction already SETTLE this ticket's approach (cite it so the worker follows it), or
      CONTRADICT it? A ticket that runs past a frozen governing decision is a conflict the caller
      raises with the user — never a silent implementation that quietly buries settled work.
+   - **Spec anchoring (#1106).** When the ticket body carries a `Spec: #N §x` reference, read
+     that spec ticket's section §x FIRST and compare the ticket against it: (a) the spec section
+     already delivers this ask, or a `Settled questions` entry already answers it → OVERCOME,
+     close/rescope with evidence citing the spec; (b) the ticket contradicts the spec section →
+     a SUPERSEDED conflict the caller resolves via owner-decision → `airuleset.py spec-change`
+     (never a silent re-implementation); (c) the ticket conforms → cite `Spec: #N §x` in the
+     verdict so the worker's design keeps the anchor. A `Spec:`-bearing ticket validated without
+     reading its spec section is an incomplete validation.
 
 ## VERDICT — return EXACTLY this block
 
