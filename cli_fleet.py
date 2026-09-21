@@ -191,6 +191,13 @@ REMOTE_HOSTS = [
         "user": "miva1",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
+        # owner 2026-09-21 („prepni david1 až david4 aby nemali multi subagent mod ale
+        # aby išli sekvenčne … to isté aj miva1"): the SAME #998/#1031 declared-window
+        # mechanism as gk-infra/d3 — ONE autopilot-worker lane at a time, no refill.
+        "windows": [
+            {"name": "miva", "cwd": "~/devel/odoo/odoo-erp",
+             "role": None, "mode": "sequential"},
+        ],
     },
     {
         # david2 -- 6th/7th/8th sub-dev streams (airuleset#326, 2026-08-08):
@@ -210,6 +217,13 @@ REMOTE_HOSTS = [
         "user": "david2",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
+        # owner 2026-09-21 („prepni david1 až david4 aby nemali multi subagent mod ale
+        # aby išli sekvenčne … to isté aj miva1"): the SAME #998/#1031 declared-window
+        # mechanism as gk-infra/d3 — ONE autopilot-worker lane at a time, no refill.
+        "windows": [
+            {"name": "d2", "cwd": "~/devel/odoo/odoo-erp",
+             "role": None, "mode": "sequential"},
+        ],
     },
     {
         "name": "david3@subdev",
@@ -249,6 +263,13 @@ REMOTE_HOSTS = [
         "user": "david4",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
+        # owner 2026-09-21 („prepni david1 až david4 aby nemali multi subagent mod ale
+        # aby išli sekvenčne … to isté aj miva1"): the SAME #998/#1031 declared-window
+        # mechanism as gk-infra/d3 — ONE autopilot-worker lane at a time, no refill.
+        "windows": [
+            {"name": "d4", "cwd": "~/devel/odoo/odoo-erp",
+             "role": None, "mode": "sequential"},
+        ],
     },
     {
         # montalu5/montalu6/montalu7/montalu8 (airuleset#378,
@@ -429,6 +450,13 @@ REMOTE_HOSTS = [
         "user": "david1",
         "repo_path": "~/devel/airuleset",
         "identity": "~/.secrets/gatekeeper_access_ed25519",
+        # owner 2026-09-21 („prepni david1 až david4 aby nemali multi subagent mod ale
+        # aby išli sekvenčne … to isté aj miva1"): the SAME #998/#1031 declared-window
+        # mechanism as gk-infra/d3 — ONE autopilot-worker lane at a time, no refill.
+        "windows": [
+            {"name": "d1", "cwd": "~/devel/odoo/odoo-erp",
+             "role": None, "mode": "sequential"},
+        ],
     },
     {
         # montalu1 — the renamed base montalu stream (was `montalu`; #537 live
