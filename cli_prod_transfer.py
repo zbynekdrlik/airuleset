@@ -64,7 +64,10 @@ def cmd_prod_transfer(args, runner=None):
               "(got %r)" % (" | ".join(_pt.SENSITIVITIES), sensitivity))
         return 1
     if not date:
-        date = datetime.date.today().strftime("%-d.%-m.%Y")
+        # Portable D.M.YYYY (no leading zeros) — `strftime("%-d")` is a
+        # glibc-only extension (#1105 review C); build it from the fields.
+        d = datetime.date.today()
+        date = "%d.%d.%d" % (d.day, d.month, d.year)
 
     line = _pt.render_manifest_line(
         what=what, who=who, date=date, location=location, path=path,

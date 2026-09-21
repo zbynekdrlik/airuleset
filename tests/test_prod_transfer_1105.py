@@ -91,6 +91,20 @@ class TestSurfaceDetection(unittest.TestCase):
     def test_none_text_is_empty(self):
         self.assertEqual(pt.surfaces_in(None), [])
 
+    def test_env_does_not_match_odoo_orm_env(self):
+        # #1105 review F1: `.env` must NOT fire on the Odoo ORM attribute access
+        # (`self.env[...]`, `request.env`, `process.env.X`) — that dominates
+        # every Odoo diff and would false-flag nearly every hand-off.
+        self.assertNotIn(".env", pt.surfaces_in("+ p = self.env['res.partner']"))
+        self.assertNotIn(".env", pt.surfaces_in("+ u = request.env.user"))
+        self.assertNotIn(".env", pt.surfaces_in("+ x = process.env.NODE"))
+        self.assertNotIn(".env", pt.surfaces_in("+ self.env.cr.execute(q)"))
+
+    def test_env_still_matches_the_dotenv_file(self):
+        self.assertIn(".env", pt.surfaces_in("--- a/.env\n+++ b/.env"))
+        self.assertIn(".env", pt.surfaces_in("+ cat .env >> config"))
+        self.assertIn(".env", pt.surfaces_in("+ cp .env.local .env"))
+
 
 # --------------------------------------------------------------------------- #
 # (b) MANIFEST LINE PARSING -- Prod-transfer: <...> and the none escape
@@ -113,6 +127,16 @@ class TestManifestParsing(unittest.TestCase):
     def test_bare_none_is_not_an_escape(self):
         ok, _ = pt.has_manifest_none("Prod-transfer: none")
         self.assertFalse(ok)
+
+    def test_glued_hyphen_none_is_not_an_escape(self):
+        # #1105 review F5: `none-critical config` must NOT read as "nothing to
+        # transfer" — only an em/en-dash or a SPACED hyphen escapes.
+        ok, _ = pt.has_manifest_none("Prod-transfer: none-critical config X")
+        self.assertFalse(ok)
+        # A real, spaced-hyphen escape still works.
+        ok2, r2 = pt.has_manifest_none("Prod-transfer: none - test-only flag")
+        self.assertTrue(ok2)
+        self.assertIn("test-only", r2)
 
     def test_none_line_is_not_a_real_manifest_line(self):
         self.assertEqual(pt.manifest_lines("Prod-transfer: none — nothing"), [])
@@ -263,6 +287,36 @@ class TestAcceptanceBlock(unittest.TestCase):
         blocked, _ = pt.acceptance_block("just a normal ticket body")
         self.assertFalse(blocked)
 
+    def test_duplicate_resolved_does_not_unblock_a_different_item(self):
+        # #1105 review E1: two items, one checked off TWICE, the other never ->
+        # count would say resolved(2) >= real(2); identity matching must BLOCK
+        # on the never-checked item (the "worked on erp-test, nothing on prod"
+        # hole this feature closes).
+        body = ("Prod-transfer: Stripe key — sensitivity: secret\n"
+                "Prod-transfer: Webhook URL — sensitivity: config\n"
+                "Prod-transfer-status: Stripe key — transferred\n"
+                "Prod-transfer-status: Stripe key — transferred\n")
+        blocked, item = pt.acceptance_block(body)
+        self.assertTrue(blocked)
+        self.assertIn("Webhook URL", item)
+
+    def test_misnamed_status_does_not_unblock(self):
+        # #1105 review E2: a status naming a DIFFERENT item than the manifest
+        # must not satisfy it.
+        body = ("Prod-transfer: Stripe key — sensitivity: secret\n"
+                "Prod-transfer-status: seed data — transferred\n")
+        blocked, item = pt.acceptance_block(body)
+        self.assertTrue(blocked)
+        self.assertIn("Stripe key", item)
+
+    def test_each_item_resolved_by_name_not_blocked(self):
+        body = ("Prod-transfer: Stripe key — sensitivity: secret\n"
+                "Prod-transfer: Webhook URL — sensitivity: config\n"
+                "Prod-transfer-status: Stripe key — transferred\n"
+                "Prod-transfer-status: Webhook URL — n/a\n")
+        blocked, _ = pt.acceptance_block(body)
+        self.assertFalse(blocked)
+
 
 # --------------------------------------------------------------------------- #
 # (g) lane_scan_text -- the production git-diff seam (fail-open)
@@ -349,6 +403,36 @@ class TestRenderAndCli(unittest.TestCase):
         rc = cli.cmd_prod_transfer(A(), runner=runner)
         self.assertEqual(rc, 1)
 
+    def test_cli_add_default_date_is_portable(self):
+        # #1105 review C: the default-date branch (no --date) must post a valid
+        # D.M.YYYY line without the glibc-only strftime("%-d") extension.
+        import datetime
+        import cli_prod_transfer as cli
+
+        posted = {}
+
+        def runner(argv, body=None):
+            posted["body"] = body
+            return 0, "ok", ""
+
+        class A:
+            action = "add"
+            issue = 1105
+            what = "seed data"
+            who = "David"
+            date = None
+            location = "res.partner rows"
+            path = "data migration seed.py"
+            sensitivity = "data"
+            repo = "zbynekdrlik/airuleset"
+        rc = cli.cmd_prod_transfer(A(), runner=runner)
+        self.assertEqual(rc, 0)
+        d = datetime.date.today()
+        self.assertIn("%d.%d.%d" % (d.day, d.month, d.year), posted["body"])
+        self.assertRegex(posted["body"], r"supplied by David \d+\.\d+\.\d{4}")
+        # No unexpanded strftime directive leaked in.
+        self.assertNotIn("%-", posted["body"])
+
     def test_cli_add_rejects_unknown_sensitivity(self):
         import cli_prod_transfer as cli
 
@@ -425,11 +509,26 @@ class TestComposerWiring(unittest.TestCase):
     def test_preflight_defined(self):
         self.assertIn("def _handoff_prod_transfer_preflight", self.SRC)
 
+    def _func_body(self, name):
+        # Slice a top-level function body: from `def <name>(` to the next
+        # top-level `\ndef ` (or EOF). Teeth against removing ONE call site
+        # (#1105 review F4): a bare count>=2 passed even with one call removed
+        # (1 def + 1 call), so assert the call is INSIDE each function.
+        i = self.SRC.find("\ndef %s(" % name)
+        assert i != -1, "function %s not found" % name
+        j = self.SRC.find("\ndef ", i + 1)
+        return self.SRC[i:j if j != -1 else len(self.SRC)]
+
     def test_wired_at_both_call_sites(self):
         # Both cmd_handoff (compose) and _cmd_handoff_post_body_file
         # (pass-through) must call the pre-flight, like the guide/spec siblings.
+        self.assertIn("_handoff_prod_transfer_preflight(",
+                      self._func_body("cmd_handoff"))
+        self.assertIn("_handoff_prod_transfer_preflight(",
+                      self._func_body("_cmd_handoff_post_body_file"))
+        # 1 def + 2 calls: a bare count would pass with a call removed.
         self.assertGreaterEqual(
-            self.SRC.count("_handoff_prod_transfer_preflight("), 2)
+            self.SRC.count("_handoff_prod_transfer_preflight("), 3)
 
     def test_subcommand_wired(self):
         self.assertIn('"prod-transfer"', self.SRC)

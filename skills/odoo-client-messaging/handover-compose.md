@@ -195,8 +195,8 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
 - **Prod-transfer gate (#1105) — NEPOSIELAJ akceptačnú/odovzdávaciu správu, kým
   je ktorákoľvek `Prod-transfer:` položka `pending`.** Vývojárom dodané erp-test
   vstupy musia byť na PROD odškrtnuté (`Prod-transfer-status:` =
-  `transferred`/`n/a`); `pending` drží ticket na `needs-owner-action` (U, #879)
-  alebo `ops-wait` (W), blok pomenuje položku. Rodinné batchovanie (#755) platí.
+  `transferred`/`n/a`); `pending` drží ticket na `needs-owner-action` (U, #601;
+  secret show #879) alebo `ops-wait` (W), blok pomenuje položku (#755 platí).
 - **INTAKE reaction FIRST + STANDING ack grant (#978/#1027/#1033):** the MOMENT
   you pick up a client message you will act on — before filing/dispatching —
   react 👷 (`ack_reaction_emoji`, legacy 👀 selectable) via

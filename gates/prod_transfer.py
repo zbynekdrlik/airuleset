@@ -47,7 +47,12 @@ _SURFACES = (
     ("set_param", re.compile(r"\bset_param\b", re.I)),
     ("secret request", re.compile(r"\bsecret[ \t]+request\b", re.I)),
     ("REFRESH-DEV-BOX-FROM-PROD", re.compile(r"REFRESH-DEV-BOX-FROM-PROD")),
-    (".env", re.compile(r"\.env\b", re.I)),
+    # `(?<!\w)` so the `.env` FILE matches (`/.env`, `.env.local`, `cat .env`)
+    # but the Odoo ORM attribute access does NOT (`self.env[...]`,
+    # `request.env`, `process.env.X` — the identifier char before the dot fails
+    # the look-behind). Without it `\.env\b` fired on nearly every Odoo line
+    # (#1105 review-1 F1) — a fleet-wide false positive.
+    (".env", re.compile(r"(?<!\w)\.env\b", re.I)),
     # No trailing \b: `webhook` must still match `webhook_url` / `webhooks`.
     ("webhook", re.compile(r"\bwebhook", re.I)),
     ("api_key", re.compile(r"\bapi[_-]?key\b", re.I)),
@@ -73,7 +78,10 @@ def surfaces_in(text):
 # `Prod-transfer:` (never `Prod-transfer-status:`, which has `-status` before the
 # colon so `transfer:` never appears there).
 _MANIFEST_RE = re.compile(r"(?im)^[ \t]*Prod-transfer:[ \t]*(.+?)[ \t]*$")
-_NONE_RE = re.compile(r"^none\b[ \t]*[—–-][ \t]*(\S.*)$", re.I)
+# `none — <why>`: an em/en-dash, or a SPACED ascii hyphen — never a GLUED bare
+# hyphen (so `none-critical config` is NOT read as "nothing to transfer" —
+# #1105 review-1 F5), mirroring the `_SEP_RE` spaced-only discipline below.
+_NONE_RE = re.compile(r"^none\b(?:[ \t]*[—–][ \t]*|[ \t]+-[ \t]+)(\S.*)$", re.I)
 
 
 def _is_none_escape(value):
@@ -228,9 +236,18 @@ def status_lines(body):
         if len(parts) < 2:
             out.append((val, ""))
             continue
-        what = "—".join(p.strip() for p in parts[:-1]).strip()
+        what = " — ".join(p.strip() for p in parts[:-1]).strip()
         out.append((what, _classify_state(parts[-1])))
     return out
+
+
+def _manifest_item_name(value):
+    """The leading NAME of a manifest line value — the text before the first
+    ` — ` separator — which is the identity a `Prod-transfer-status:` line
+    checks off (it is what `render_manifest_line` puts first and what a status
+    line names)."""
+    parts = _SEP_RE.split(value or "")
+    return (parts[0] if parts else (value or "")).strip()
 
 
 def pending_items(body):
@@ -252,16 +269,26 @@ def acceptance_block(body):
     """`(blocked, reason_or_None)` -- the client-acceptance/handover composer must
     NOT send while any Prod-transfer item is pending. An item is pending when a
     status line marks it so, OR when a real manifest item has no resolving
-    (`transferred`/`n/a`) status line yet (never checked off = not transferred).
-    A `Prod-transfer: none -- <why>` escape (nothing to transfer) never blocks."""
+    (`transferred`/`n/a`) status line matching it BY NAME (never checked off =
+    not transferred). A `Prod-transfer: none -- <why>` escape (nothing to
+    transfer) never blocks.
+
+    Matching is by NAME, never by count (#1105 review F3/E1/E2): a count-only
+    check let a duplicated or mis-named `transferred` status silently satisfy a
+    DIFFERENT unchecked item -- the exact "worked on erp-test, nothing on prod"
+    hole this feature closes -- so EVERY real manifest item must have its OWN
+    resolving status line."""
     pend = pending_items(body)
     if pend:
         return True, pend[0][0]
     real = manifest_lines(body)
-    resolved = [(w, s) for w, s in status_lines(body) if s in _RESOLVED_STATES]
-    if real and len(resolved) < len(real):
-        return True, ("%d of %d Prod-transfer item(s) not yet checked off"
-                      % (len(resolved), len(real)))
+    if not real:
+        return False, None
+    resolved = {w for w, s in status_lines(body) if s in _RESOLVED_STATES}
+    for val in real:
+        name = _manifest_item_name(val)
+        if name not in resolved:
+            return True, name
     return False, None
 
 
@@ -273,7 +300,18 @@ def lane_scan_text(cwd=None, run=None):
     `surfaces_in`), mirroring `airuleset._handoff_changed_paths`' base resolution
     (`origin/HEAD` default, else develop/main/master). None when undeterminable
     (no base / git error) so the caller FAILS OPEN. `run(argv)->CompletedProcess`
-    is injected in tests; production shells `git` in `cwd`."""
+    is injected in tests; production shells `git` in `cwd`.
+
+    SCOPE (honest): the COMPOSER pre-flight scans the DIFF only, so it catches
+    the surfaces that leave a CODE footprint (`ir.config_parameter` /
+    `res.config.settings` / `set_param` / `.env` / webhook / `api_key`). A
+    surface supplied as a SESSION COMMAND with no diff footprint (`secret
+    request`, a `REFRESH-DEV-BOX-FROM-PROD` seed, a config set through the Odoo
+    UI) is NOT seen here — that case is caught by the supply-time manifest
+    doctrine + the process-subdev review lens, not this diff scan. `surfaces_in`
+    itself is pure and WILL detect those tokens in any text it is given (e.g. a
+    transcript blob), so a future caller can widen the scan without changing the
+    classifier."""
     import subprocess as _sp
     if run is None:
         def run(argv):

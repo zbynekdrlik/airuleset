@@ -202,6 +202,10 @@ repo's own CLAUDE.md / playbook is what names the command.
      already refuses to post the RFR without it, `_handoff_prod_transfer_preflight`). A
      manifest line carrying a secret VALUE (not a name + vault path) is a FINDING —
      secrets reach prod via `secret show` to the owner (#879), never in the ticket.
+     **Scope: the composer pre-flight scans the DIFF, so it catches config-in-code
+     surfaces; a credential supplied via `secret request`, a `REFRESH-DEV-BOX-FROM-PROD`
+     seed, or a config set through the Odoo UI leaves NO diff footprint — the REVIEWER
+     catches those, so check the lane's supply history, not only the diff.**
 3. **Only then** read the tickets + readiness comments and cross-check: does the diff
    actually solve each ticket? Any unbacked claim is a FINDING.
 
@@ -261,8 +265,8 @@ repo's own CLAUDE.md / playbook is what names the command.
      depends on), verify the input actually reached prod and record a
      `Prod-transfer-status: <what> — transferred | owner-action pending | developer step
      pending | n/a` line on the ticket. A `pending` item is NOT done: label the ticket
-     `needs-owner-action` (an owner secret/`secret show` step → U, #879) or `ops-wait`
-     (a developer manual step → W) with the item named, and do NOT send the client
+     `needs-owner-action` (an owner secret/`secret show` step → U, #601; secret show #879)
+     or `ops-wait` (a developer manual step → W) with the item named, and do NOT send the client
      acceptance/handover message while any Prod-transfer item is `pending`
      (`handover-compose.md`). (The gk deploy-report / release-notes RENDERING of this
      check-off list is odoo-erp-side; this repo owns the `Prod-transfer-status:` shape +
