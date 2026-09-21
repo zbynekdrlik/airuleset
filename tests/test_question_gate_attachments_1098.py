@@ -34,7 +34,8 @@ ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "hooks" / "stop-check-question-quality.sh"
 DOCTRINE = ROOT / "skills" / "odoo-client-messaging" / "client-board-tasks.md"
 HISTORY = ROOT / "skills" / "odoo-client-messaging" / "client-board-tasks-history.md"
-RECIPE = ROOT / "skills" / "odoo-client-messaging" / "read-with-attachments.md"
+RECIPE = ROOT / "skills" / "odoo-client-messaging" / "client-board-attachments.md"
+READ_ATTACH = ROOT / "skills" / "odoo-client-messaging" / "read-with-attachments.md"
 TRIGGERS = ROOT / "hooks" / "situational-triggers.conf"
 SKILL_MSG = ROOT / "skills" / "odoo-client-messaging" / "SKILL.md"
 
@@ -601,6 +602,70 @@ class TestRecipeLocks(unittest.TestCase):
 
     def test_section_work_products_path(self):
         self.assertIn("work-products", self._section())
+
+
+class TestRecipeRelocation(unittest.TestCase):
+    """#1098 fix-forward 2: the ``## project.task`` recipe moved OUT of the
+    injected ``read-with-attachments.md`` into the NON-injected
+    ``client-board-attachments.md`` (no situational-trigger row), so the #745
+    three-way co-fire (comprehensive-logging + read-attachments + read-reactions)
+    fits under MAX_TOTAL=14000 again. The injected file keeps only a pointer."""
+
+    @staticmethod
+    def _strip_frontmatter(t):
+        import re
+        if t.startswith("---"):
+            m = re.match(r"^---\n.*?\n---\n", t, re.S)
+            if m:
+                return t[m.end():]
+        return t
+
+    def test_recipe_file_exists(self):
+        self.assertTrue(RECIPE.is_file())
+
+    def test_recipe_not_situationally_injected(self):
+        conf = TRIGGERS.read_text(encoding="utf-8")
+        self.assertNotIn("client-board-attachments.md", conf)
+
+    def test_read_attachments_body_lean(self):
+        # The injected attachments-read body must shrink back below the
+        # pre-#1098 budget so the #745 three-way co-fire injects all three
+        # (comprehensive-logging 7024 + read-attachments + read-reactions 3187
+        # must sum under MAX_TOTAL with the per-chunk wrapper overhead).
+        body = self._strip_frontmatter(
+            READ_ATTACH.read_text(encoding="utf-8")).strip()
+        n = len(body)
+        self.assertLessEqual(
+            n, 3600,
+            "read-with-attachments.md stripped body is %d codepoints (> 3600) — "
+            "the project.task recipe must live in client-board-attachments.md so "
+            "the #745 three-way co-fire fits under MAX_TOTAL (#1098)" % n)
+
+    def test_read_attachments_carries_pointer(self):
+        body = READ_ATTACH.read_text(encoding="utf-8")
+        self.assertIn(
+            "client-board-attachments.md", body,
+            "read-with-attachments.md must point to the relocated project.task "
+            "recipe (#1098)")
+
+    def test_recipe_moved_out_of_read_attachments(self):
+        # It MOVED (not copied): the bulky res_field two-pass recipe is gone
+        # from the injected file (same MOVE-not-copy discipline as the history
+        # file's test_moved_rationale_not_duplicated_in_injected).
+        body = READ_ATTACH.read_text(encoding="utf-8")
+        self.assertNotIn('"res_model", "=", "project.task"', body)
+
+    def test_recipe_size_bounded(self):
+        # client-board-attachments.md is NOT in size_ratchet's measured set
+        # (.py / functions / .claude/rules/*.md only), so this ENFORCED test is
+        # the bloat guard for the non-injected recipe file (its size is
+        # otherwise harmless — it never injects). Same pattern as the history
+        # file's cap.
+        n = len(RECIPE.read_text(encoding="utf-8"))
+        self.assertLess(
+            n, 6000,
+            "client-board-attachments.md grew to %d codepoints — keep it a lean "
+            "relocation of the recipe, not a dumping ground (#1098)" % n)
 
 
 if __name__ == "__main__":
