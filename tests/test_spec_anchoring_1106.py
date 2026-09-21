@@ -628,7 +628,8 @@ class TestReviewRegressions(unittest.TestCase):
         import airuleset
 
         def out(argv, cd):
-            if "--label" in argv and "spec" in argv:
+            path = argv[2] if len(argv) > 2 else ""
+            if "labels=spec" in path:
                 # one open spec ticket owned by stream:alpha
                 return json.dumps([{"number": 501, "body": "## §1 X",
                                     "labels": [{"name": "spec"},
@@ -641,11 +642,103 @@ class TestReviewRegressions(unittest.TestCase):
                  "labels": [{"name": "stream:beta"}]}])
         with tempfile.TemporaryDirectory() as home:
             os.environ["HOME"] = home
-            spec_open, spec_missing = airuleset._refresh_spec_settled_cache(
-                "odoo-erp", "/repo", out)
+            spec_open, spec_missing, ts = airuleset._refresh_spec_settled_cache(
+                "o/odoo-erp", "odoo-erp", "/repo", out)
             self.assertEqual(spec_open, [501])
             # only the alpha ticket (whose stream has a spec) is counted, not beta
             self.assertEqual(spec_missing, 1)
+            self.assertIsNotNone(ts)
+
+
+# --------------------------------------------------------------------------- #
+# #1106 area-review fix: REST (not GraphQL) + a 15-min TTL on the hot path.
+# --------------------------------------------------------------------------- #
+class TestSpecCacheRestAndTTL(unittest.TestCase):
+    def test_fresh_ttl_makes_zero_gh_calls_and_returns_stored(self):
+        import airuleset
+        calls = []
+
+        def counting_out(argv, cd):
+            calls.append(argv)
+            return "[]"
+        prev = {"spec_checked_ts": 1000, "spec_open": [501], "spec_missing": 3}
+        so, sm, ts = airuleset._refresh_spec_settled_cache(
+            "o/r", "r", "/repo", counting_out, prev_entry=prev, now=1100)
+        self.assertEqual(calls, [])            # ZERO gh calls within the TTL
+        self.assertEqual(so, [501])
+        self.assertEqual(sm, 3)
+        self.assertEqual(ts, 1000)             # unchanged check time
+
+    def test_stale_ttl_reads_via_rest_never_issue_list(self):
+        import airuleset
+        argvs = []
+
+        def out(argv, cd):
+            argvs.append(argv)
+            path = argv[2] if len(argv) > 2 else ""
+            if "labels=spec" in path:
+                return json.dumps([{"number": 501, "body": "## §1 X",
+                                    "labels": [{"name": "spec"},
+                                               {"name": "stream:alpha"}]}])
+            return json.dumps([{"number": 10, "body": "no spec",
+                                "labels": [{"name": "stream:alpha"}]}])
+        prev = {"spec_checked_ts": 1, "spec_open": [], "spec_missing": 0}
+        with tempfile.TemporaryDirectory() as home:
+            os.environ["HOME"] = home
+            so, sm, ts = airuleset._refresh_spec_settled_cache(
+                "o/r", "r", "/repo", out, prev_entry=prev, now=100000)
+        self.assertEqual(so, [501])
+        self.assertEqual(sm, 1)
+        self.assertEqual(ts, 100000)           # a real re-read stamps now
+        # REST shape only — never `gh issue list` (the GraphQL hot-path spend).
+        for argv in argvs:
+            self.assertEqual(argv[0], "gh")
+            self.assertEqual(argv[1], "api")
+            self.assertIn("repos/", argv[2])
+            self.assertNotIn("list", argv)
+
+    def test_pr_row_excluded_from_spec_missing(self):
+        import airuleset
+
+        def out(argv, cd):
+            path = argv[2] if len(argv) > 2 else ""
+            if "labels=spec" in path:
+                return json.dumps([{"number": 501, "body": "## §1 X",
+                                    "labels": [{"name": "spec"},
+                                               {"name": "stream:alpha"}]}])
+            # a PR row (pull_request key) + a real issue, both stream:alpha,
+            # both without a Spec: line — only the ISSUE must be counted.
+            return json.dumps([
+                {"number": 20, "body": "no spec",
+                 "labels": [{"name": "stream:alpha"}],
+                 "pull_request": {"url": "https://x/pull/20"}},
+                {"number": 21, "body": "no spec",
+                 "labels": [{"name": "stream:alpha"}]}])
+        with tempfile.TemporaryDirectory() as home:
+            os.environ["HOME"] = home
+            so, sm, ts = airuleset._refresh_spec_settled_cache(
+                "o/r", "r", "/repo", out, now=100000)
+        self.assertEqual(so, [501])
+        self.assertEqual(sm, 1)                # the PR (#20) is NOT counted
+
+    def test_no_spec_repo_removes_cache_and_holds_ttl(self):
+        import airuleset
+        import gates.spec as spec
+
+        def out(argv, cd):
+            return "[]"                         # no spec tickets
+        with tempfile.TemporaryDirectory() as home:
+            os.environ["HOME"] = home
+            # a stale pre-existing cache must be removed (Check 10 fails open,
+            # question-gate empty-dir short-circuit preserved).
+            os.makedirs(os.path.join(home, ".claude", "spec-settled"))
+            p = spec.settled_cache_path("r", home=home)
+            with open(p, "w") as fh:
+                fh.write("{}")
+            so, sm, ts = airuleset._refresh_spec_settled_cache(
+                "o/r", "r", "/repo", out, now=100000)
+            self.assertEqual((so, sm, ts), ([], 0, 100000))
+            self.assertFalse(os.path.exists(p))
 
 
 class _Args:

@@ -3817,56 +3817,95 @@ def _write_verify_on_copy_status(rows, slug, root, now=None):
         sys.stderr.write("verify-on-copy: status write skipped (%s)\n" % e)
 
 
-def _refresh_spec_settled_cache(name, root, out):
-    """#1106 — rewrite ~/.claude/spec-settled/<name>.json from the repo's open
-    `spec` tickets (label:spec) and return (spec_open_numbers, spec_missing).
+_SPEC_CACHE_TTL_S = 900
 
-    `spec_missing` = the count of OPEN stream-labelled tickets carrying no valid
-    `Spec:` line WHOSE OWN STREAM has an open `spec` ticket (#1106 review R2#3:
-    the count must be per-stream, never repo-wide — a stream with no spec
-    initiative must not have all its tickets nagged just because a DIFFERENT
-    stream opened a spec). Computed only when a stream-scoped spec exists, so a
-    non-spec repo pays ONE cheap `--label spec` list that returns empty.
-    `out(argv, cd) -> str` is the tickets-status runner (empty string on gh
-    error). Best-effort throughout: a gh/parse/write error leaves the cache
-    untouched and returns ([], 0)."""
-    import gates.spec as gspec
-    raw = out(["gh", "issue", "list", "--state", "open", "--label", "spec",
-               "--json", "number,body,labels", "-L", "20"], root)
+
+def _rest_issue_rows(out, root, api_path):
+    """The JSON array from `gh api <api_path>` (the REST issues endpoint), or []
+    (gh error / non-list / parse error). REST draws on the core 5000/h bucket,
+    NOT the shared 5000/h GraphQL bucket the whole fleet spends via `gh issue
+    list` (#370). The `out(argv, cd) -> str` seam keeps the fake runners
+    working. The REST issues endpoint returns PRs too — the caller skips any row
+    carrying a `pull_request` key."""
+    raw = out(["gh", "api", api_path], root)
     if not raw:
-        return [], 0
+        return []
     try:
-        specs = json.loads(raw)
+        rows = json.loads(raw)
     except ValueError:
-        return [], 0
-    if not isinstance(specs, list):
-        return [], 0
+        return []
+    return rows if isinstance(rows, list) else []
+
+
+def _refresh_spec_settled_cache(slug, name, root, out, prev_entry=None,
+                                now=None):
+    """#1106 — rewrite ~/.claude/spec-settled/<name>.json from the repo's open
+    `spec` tickets and return (spec_open_numbers, spec_missing, spec_checked_ts).
+
+    QUOTA (#1106 area review, #370 class): reads via the REST issues endpoint
+    (`gh api repos/<slug>/issues?...`, core bucket) NOT `gh issue list` (which is
+    POST /graphql on the shared 5000/h bucket the whole fleet uses), AND a 15-min
+    TTL keyed on the PREVIOUS cwd entry's `spec_checked_ts` skips BOTH reads when
+    the last spec check is younger than `_SPEC_CACHE_TTL_S` — so a cwd re-reads
+    GitHub ~4x/h not ~30x/h, and a cache-ABSENT (no-spec) repo pays exactly ONE
+    cheap REST call per 15 min. The TTL lives in the cwd tickets-status entry
+    (written every refresh), NOT the spec-settled cache file, so a no-spec repo
+    keeps NO spec-settled cache file — the question-gate empty-dir short-circuit
+    stays effective.
+
+    `spec_missing` = the count of OPEN tickets in a stream that actually has an
+    open `spec` ticket, carrying no valid `Spec:` line (#1106 review R2#3:
+    per-stream, never repo-wide). `out(argv, cd) -> str` is the tickets-status
+    runner (empty string on gh error). Best-effort throughout: a gh/parse/write
+    error leaves the cache untouched and returns ([], 0, now)."""
+    import gates.spec as gspec
+    import time
+    now = now if now is not None else int(time.time())
+    if not slug:
+        return [], 0, None
+    # TTL: reuse the previous spec check when younger than the TTL. The
+    # future-skew guard (0 <= age) fails toward a re-read on a bad clock (#1055
+    # P3).
+    if isinstance(prev_entry, dict):
+        pts = prev_entry.get("spec_checked_ts")
+        if isinstance(pts, (int, float)) and not isinstance(pts, bool) \
+                and 0 <= (now - pts) < _SPEC_CACHE_TTL_S:
+            po = [x for x in (prev_entry.get("spec_open") or [])
+                  if isinstance(x, int)]
+            sm = prev_entry.get("spec_missing")
+            sm = sm if isinstance(sm, int) and not isinstance(sm, bool) else 0
+            return po, sm, pts
+    specs = _rest_issue_rows(
+        out, root,
+        "repos/%s/issues?labels=spec&state=open&per_page=20" % slug)
     spec_input = [{"number": s.get("number"), "body": s.get("body") or ""}
                   for s in specs
-                  if isinstance(s, dict) and isinstance(s.get("number"), int)]
+                  if isinstance(s, dict) and isinstance(s.get("number"), int)
+                  and not s.get("pull_request")]
     spec_open = [s["number"] for s in spec_input]
     # The set of streams that actually have an open spec (from the spec tickets'
     # own `stream:<x>` labels) — spec_missing is scoped to THESE streams only.
     spec_streams = set()
     for s in specs:
-        if not isinstance(s, dict):
+        if not isinstance(s, dict) or s.get("pull_request"):
             continue
         for lb in (s.get("labels") or []):
             nm = lb.get("name", "") if isinstance(lb, dict) else ""
             if nm.startswith("stream:"):
                 spec_streams.add(nm)
+    path = gspec.settled_cache_path(name)
     if not spec_open:
-        # No open spec ticket -> clear any stale cache so Check 10 fails open.
+        # No open spec ticket -> clear any stale cache so Check 10 fails open AND
+        # the question-gate empty-dir short-circuit stays effective for no-spec
+        # boxes. The TTL still holds (spec_checked_ts=now in the cwd entry).
         try:
-            path = gspec.settled_cache_path(name)
             if os.path.exists(path):
                 os.remove(path)
         except OSError as e:
             sys.stderr.write("spec-settled: stale cache clear skipped (%s)\n" % e)
-        return [], 0
+        return [], 0, now
     cache = gspec.build_settled_cache(spec_input)
     try:
-        path = gspec.settled_cache_path(name)
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -3879,14 +3918,10 @@ def _refresh_spec_settled_cache(name, root, out):
     # nudge is not stream-scopable -> spec_missing stays 0 (never nag).
     spec_missing = 0
     if spec_streams:
-        raw2 = out(["gh", "issue", "list", "--state", "open",
-                    "--json", "number,body,labels", "-L", "100"], root)
-        try:
-            issues = json.loads(raw2) if raw2 else []
-        except ValueError:
-            issues = []
-        for it in issues if isinstance(issues, list) else []:
-            if not isinstance(it, dict):
+        issues = _rest_issue_rows(
+            out, root, "repos/%s/issues?state=open&per_page=100" % slug)
+        for it in issues:
+            if not isinstance(it, dict) or it.get("pull_request"):
                 continue
             labels = [lb.get("name", "") for lb in (it.get("labels") or [])
                       if isinstance(lb, dict)]
@@ -3897,7 +3932,7 @@ def _refresh_spec_settled_cache(name, root, out):
                 continue
             if gspec.parse_spec_line(it.get("body") or "") is None:
                 spec_missing += 1
-    return spec_open, spec_missing
+    return spec_open, spec_missing, now
 
 
 def cmd_tickets_status(args):
@@ -3970,10 +4005,16 @@ def cmd_tickets_status(args):
         # nudge. Best-effort: a gh error leaves the cache untouched, [] / 0.
         if entry["name"]:
             try:
-                _spec_open, _spec_missing = _refresh_spec_settled_cache(
-                    entry["name"], root, _out)
+                # Load the PREVIOUS cwd entry for the spec-check TTL (its
+                # `spec_checked_ts` gates the 15-min re-read, #1106 area review).
+                _prev = statusbar._load(
+                    statusbar.cache_dir() / (statusbar.cwd_key(cwd) + ".json"))
+                _spec_open, _spec_missing, _spec_ts = _refresh_spec_settled_cache(
+                    slug, entry["name"], root, _out, prev_entry=_prev)
                 entry["spec_open"] = _spec_open
                 entry["spec_missing"] = _spec_missing
+                if _spec_ts is not None:
+                    entry["spec_checked_ts"] = _spec_ts
             except Exception as _se:
                 sys.stderr.write(
                     "tickets-status: spec-settled refresh skipped (%s)\n" % _se)
