@@ -11,22 +11,45 @@ injectable runner seam).
 import re
 import subprocess
 
+import gates.spec as _gspec
+
 
 def edit_section(spec_body, section, new_text):
     """Return `spec_body` with the `## §<section>` section's BODY replaced by
-    `new_text` (the header line is preserved; siblings are untouched). The
-    section runs from just after its header line to the next `#`-header (or
-    EOF). Raises KeyError when no such section header exists."""
+    `new_text` (the header line is preserved; siblings are untouched). Raises
+    KeyError when no such section header exists.
+
+    Robust against the #1106-review corruption class (R1#1/R2#5): the section
+    boundary is the next ATX header (via `gates.spec.iter_headers`, which SKIPS
+    ``` code fences) whose level is <= the target section's level -- so a
+    `#`-comment inside a fenced code block, or a `### Sub`-header inside the
+    section, never truncates the replacement. A §-carrying header is PREFERRED
+    for a numeric section so `## 2 things` can never shadow `## §2 Real`."""
     sec = (section or "").lstrip("§").strip()
-    hdr_re = re.compile(r'(?m)^#{1,6}[ \t]*§?[ \t]*' + re.escape(sec) + r'\b.*$')
-    m = hdr_re.search(spec_body or "")
-    if not m:
+    body = spec_body or ""
+    headers = list(_gspec.iter_headers(body))
+    # Prefer a §-carrying header; fall back to a bare-number header only if no
+    # §-header matches (design template is `## §N`, but tolerate `## N`).
+    with_sec = re.compile(r'^#{1,6}[ \t]+§[ \t]*' + re.escape(sec) + r'\b')
+    any_sec = re.compile(r'^#{1,6}[ \t]+§?[ \t]*' + re.escape(sec) + r'\b')
+    target = None
+    for pat in (with_sec, any_sec):
+        for idx, (hstart, hend, level) in enumerate(headers):
+            if pat.match(body[hstart:hend]):
+                target = (idx, hend, level)
+                break
+        if target is not None:
+            break
+    if target is None:
         raise KeyError("section §%s not found in spec body" % sec)
-    start = m.end()
-    nxt = re.compile(r'(?m)^#{1,6}[ \t]+\S').search(spec_body, start)
-    end = nxt.start() if nxt else len(spec_body)
+    idx, hend, level = target
+    end = len(body)
+    for hstart2, _hend2, level2 in headers[idx + 1:]:
+        if level2 <= level:
+            end = hstart2
+            break
     new_section = "\n" + (new_text or "").rstrip() + "\n\n"
-    return spec_body[:start] + new_section + spec_body[end:]
+    return body[:hend] + new_section + body[end:]
 
 
 def _default_runner(argv, body=None):

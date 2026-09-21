@@ -364,12 +364,18 @@ def classify_command(cmd, sid, cwd, repo_dir, log_path, unattended):
         # HYGIENE question, not a scope-gate-criterion one); computed
         # unconditionally per segment, degrades to None on any unmeasurable
         # state (no stream label, no `specs:` fact) exactly like stream_reason.
-        try:
-            import gates.spec as _gspec
-            spec_reason = _gspec.filing_spec_block_reason(
-                _explicit_stream_labels(tk, api_call), body, cwd)
-        except Exception:
-            spec_reason = None
+        # #1106 review R1#5: SKIP when `body` is unresolved (None) -- otherwise a
+        # body-read failure would be reported as "add a `Spec:` line" instead of
+        # the accurate body-unresolved reason `_invalid_criterion_reason` builds
+        # below. A readable body with no `Spec:` line still blocks correctly.
+        spec_reason = None
+        if body:
+            try:
+                import gates.spec as _gspec
+                spec_reason = _gspec.filing_spec_block_reason(
+                    _explicit_stream_labels(tk, api_call), body, cwd)
+            except Exception:
+                spec_reason = None
 
         # #802 adversarial-review 🔵: a whitespace-only `-t` title cleans to ""
         # -- an EMPTY field, which bash's `IFS=$'\t' read` collapses (line ~1220

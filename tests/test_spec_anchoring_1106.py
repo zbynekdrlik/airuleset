@@ -522,11 +522,130 @@ class TestStep5DoctrineLock(unittest.TestCase):
 class TestDoctrinePresence(unittest.TestCase):
     def test_ticket_validator_mentions_spec(self):
         t = (ROOT / "agents/ticket-validator.md").read_text(encoding="utf-8")
-        self.assertIn("Spec", t)
+        # a strong assertion, not the weak substring "Spec" (R1#9).
+        self.assertIn("Spec anchoring", t)
+        self.assertIn("spec section", t)
 
     def test_process_subdev_mentions_spec_check(self):
         t = (ROOT / "skills/process-subdev/SKILL.md").read_text(encoding="utf-8")
         self.assertIn("Spec-check", t)
+
+
+# --------------------------------------------------------------------------- #
+# Adversarial-review regression tests (#1106 review, both fresh reviewers).
+# --------------------------------------------------------------------------- #
+class TestReviewRegressions(unittest.TestCase):
+    # R1#1/R2#5 — edit_section must not corrupt a section containing a code
+    # fence (whose `#`-comment lines are NOT headers) or a sub-header.
+    def test_edit_section_preserves_code_fence_comment(self):
+        import cli_spec_change as csc
+        body = ("## §1 First\norig one\n\n"
+                "## §2 Setup\n```bash\n# install deps\napt-get install foo\n```\n"
+                "old prose\n\n"
+                "## §3 Third\norig three\n")
+        out = csc.edit_section(body, "2", "REPLACED two")
+        self.assertIn("REPLACED two", out)
+        self.assertNotIn("# install deps", out)   # old §2 body fully gone
+        self.assertNotIn("old prose", out)
+        self.assertIn("orig one", out)            # siblings intact
+        self.assertIn("orig three", out)
+        self.assertIn("## §3 Third", out)
+
+    def test_edit_section_keeps_subheader_inside_section(self):
+        import cli_spec_change as csc
+        body = ("## §1 First\norig one\n\n"
+                "## §2 Second\nintro\n### Sub A\ndetail\n\n"
+                "## §3 Third\norig three\n")
+        out = csc.edit_section(body, "1", "NEW one")
+        # editing §1 must stop at §2, never swallow it or its sub-header.
+        self.assertIn("NEW one", out)
+        self.assertIn("## §2 Second", out)
+        self.assertIn("### Sub A", out)
+        self.assertIn("orig three", out)
+
+    def test_edit_section_prefers_section_marker_header(self):
+        import cli_spec_change as csc
+        body = ("## 2 things to note\nnot the section\n\n"
+                "## §2 Real Section\nreal body\n\n## §3 T\nt\n")
+        out = csc.edit_section(body, "2", "REPLACED real")
+        self.assertIn("REPLACED real", out)
+        self.assertNotIn("real body", out)
+        self.assertIn("not the section", out)     # the `## 2 things` shadow header untouched
+
+    # R1#2 — parse_settled_questions must survive a code fence + a decorated header.
+    def test_settled_questions_survive_code_fence(self):
+        import gates.spec as spec
+        body = ("## §1 X\n## Settled questions\n"
+                "- Q: How do we reach Money from the shadow box? "
+                "→ A: Via the prod proxy. (1.1.2026)\n"
+                "```\n# not a header\n```\n"
+                "- Q: Which currency does the invoice use? "
+                "→ A: The customer billing currency. (2.1.2026)\n\n## §2 Y\n")
+        entries = spec.parse_settled_questions(body, spec_number=5)
+        self.assertEqual(len(entries), 2)
+
+    def test_settled_questions_decorated_header(self):
+        import gates.spec as spec
+        body = ("## Settled questions (round 2)\n"
+                "- Q: How do we reach Money from the shadow box today? "
+                "→ A: Via the prod proxy on 9000. (1.1.2026)\n")
+        entries = spec.parse_settled_questions(body, spec_number=7)
+        self.assertEqual(len(entries), 1)
+
+    # R1#3/R2#4 — a short (3-token) settled question must NOT block a new question.
+    def test_short_settled_question_no_false_block(self):
+        import gates.spec as spec
+        entries = [{"q": "Which currency to render?", "a": "billing", "spec": 9}]
+        hit = spec.settled_conflict(
+            "How do we fix the invoice currency rounding bug?", entries)
+        self.assertIsNone(hit)
+
+    # R2#6 — a bulleted `- Spec: #N §x` must parse (filing gate is a hard block).
+    def test_bulleted_spec_line_parses(self):
+        import gates.spec as spec
+        self.assertTrue(spec.ticket_has_spec("body\n- Spec: #501 §2\nmore"))
+        self.assertTrue(spec.ticket_has_spec("* Spec: #501 §2"))
+
+    # R1#6 — a `Spec:` line inside a code fence is NOT a real anchor.
+    def test_spec_line_inside_code_fence_ignored(self):
+        import gates.spec as spec
+        body = "intro\n```\nSpec: #999 §9\n```\nno real spec here"
+        self.assertFalse(spec.ticket_has_spec(body))
+        self.assertIsNone(spec.parse_spec_line(body))
+
+    # R1#7 — a deviation must demand a needs-decision even alongside a
+    # contradictory `Spec-conform: yes`.
+    def test_deviation_with_conform_still_needs_decision(self):
+        import gates.spec as spec
+        ok, reason = spec.classify_spec_design(
+            "Spec-ref: #501 §2\nSpec-conform: yes\nSpec-deviation: but B differs",
+            "Spec: #501 §2")
+        self.assertFalse(ok)
+        self.assertIn("needs-decision", reason)
+
+    # R2#3 — spec_missing is scoped per-stream (a spec-less stream is not nagged).
+    def test_spec_missing_scoped_per_stream(self):
+        import airuleset
+
+        def out(argv, cd):
+            if "--label" in argv and "spec" in argv:
+                # one open spec ticket owned by stream:alpha
+                return json.dumps([{"number": 501, "body": "## §1 X",
+                                    "labels": [{"name": "spec"},
+                                               {"name": "stream:alpha"}]}])
+            # the full open-issue list: one alpha ticket (no Spec:), one beta
+            return json.dumps([
+                {"number": 10, "body": "no spec",
+                 "labels": [{"name": "stream:alpha"}]},
+                {"number": 11, "body": "no spec",
+                 "labels": [{"name": "stream:beta"}]}])
+        with tempfile.TemporaryDirectory() as home:
+            os.environ["HOME"] = home
+            spec_open, spec_missing = airuleset._refresh_spec_settled_cache(
+                "odoo-erp", "/repo", out)
+            self.assertEqual(spec_open, [501])
+            # only the alpha ticket (whose stream has a spec) is counted, not beta
+            self.assertEqual(spec_missing, 1)
 
 
 class _Args:

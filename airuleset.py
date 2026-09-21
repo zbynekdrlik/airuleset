@@ -3822,14 +3822,17 @@ def _refresh_spec_settled_cache(name, root, out):
     `spec` tickets (label:spec) and return (spec_open_numbers, spec_missing).
 
     `spec_missing` = the count of OPEN stream-labelled tickets carrying no valid
-    `Spec:` line while a `spec` ticket is open (the partition-audit-nudge signal;
-    computed only when a spec exists, so a non-spec repo pays ONE cheap
-    `--label spec` list that returns empty). `out(argv, cd) -> str` is the
-    tickets-status runner (empty string on gh error). Best-effort throughout: a
-    gh/parse/write error leaves the cache untouched and returns ([], 0)."""
+    `Spec:` line WHOSE OWN STREAM has an open `spec` ticket (#1106 review R2#3:
+    the count must be per-stream, never repo-wide — a stream with no spec
+    initiative must not have all its tickets nagged just because a DIFFERENT
+    stream opened a spec). Computed only when a stream-scoped spec exists, so a
+    non-spec repo pays ONE cheap `--label spec` list that returns empty.
+    `out(argv, cd) -> str` is the tickets-status runner (empty string on gh
+    error). Best-effort throughout: a gh/parse/write error leaves the cache
+    untouched and returns ([], 0)."""
     import gates.spec as gspec
     raw = out(["gh", "issue", "list", "--state", "open", "--label", "spec",
-               "--json", "number,body", "-L", "20"], root)
+               "--json", "number,body,labels", "-L", "20"], root)
     if not raw:
         return [], 0
     try:
@@ -3842,6 +3845,16 @@ def _refresh_spec_settled_cache(name, root, out):
                   for s in specs
                   if isinstance(s, dict) and isinstance(s.get("number"), int)]
     spec_open = [s["number"] for s in spec_input]
+    # The set of streams that actually have an open spec (from the spec tickets'
+    # own `stream:<x>` labels) — spec_missing is scoped to THESE streams only.
+    spec_streams = set()
+    for s in specs:
+        if not isinstance(s, dict):
+            continue
+        for lb in (s.get("labels") or []):
+            nm = lb.get("name", "") if isinstance(lb, dict) else ""
+            if nm.startswith("stream:"):
+                spec_streams.add(nm)
     if not spec_open:
         # No open spec ticket -> clear any stale cache so Check 10 fails open.
         try:
@@ -3861,25 +3874,29 @@ def _refresh_spec_settled_cache(name, root, out):
         os.replace(tmp, path)
     except OSError as e:
         sys.stderr.write("spec-settled: cache write skipped (%s)\n" % e)
-    # spec_missing: open stream-labelled tickets with no valid `Spec:` line.
+    # spec_missing: open tickets in a spec-having stream, no valid `Spec:` line.
+    # When NO spec ticket carries a stream label (e.g. a stream:core spec), the
+    # nudge is not stream-scopable -> spec_missing stays 0 (never nag).
     spec_missing = 0
-    raw2 = out(["gh", "issue", "list", "--state", "open",
-                "--json", "number,body,labels", "-L", "100"], root)
-    try:
-        issues = json.loads(raw2) if raw2 else []
-    except ValueError:
-        issues = []
-    for it in issues if isinstance(issues, list) else []:
-        if not isinstance(it, dict):
-            continue
-        labels = [lb.get("name", "") for lb in (it.get("labels") or [])
-                  if isinstance(lb, dict)]
-        if "spec" in labels:
-            continue
-        if not any(lb.startswith("stream:") for lb in labels):
-            continue
-        if gspec.parse_spec_line(it.get("body") or "") is None:
-            spec_missing += 1
+    if spec_streams:
+        raw2 = out(["gh", "issue", "list", "--state", "open",
+                    "--json", "number,body,labels", "-L", "100"], root)
+        try:
+            issues = json.loads(raw2) if raw2 else []
+        except ValueError:
+            issues = []
+        for it in issues if isinstance(issues, list) else []:
+            if not isinstance(it, dict):
+                continue
+            labels = [lb.get("name", "") for lb in (it.get("labels") or [])
+                      if isinstance(lb, dict)]
+            if "spec" in labels:
+                continue
+            # only a ticket whose OWN stream has an open spec is nagged.
+            if not any(lb in spec_streams for lb in labels):
+                continue
+            if gspec.parse_spec_line(it.get("body") or "") is None:
+                spec_missing += 1
     return spec_open, spec_missing
 
 

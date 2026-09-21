@@ -18,9 +18,57 @@ import re
 import time
 
 # --------------------------------------------------------------------------- #
+# Markdown structure helpers -- fence-aware header/line iteration (#1106 review
+# R1#1/#6, R2#5/#6). A `#`-comment inside a ``` code fence is NOT a header, and a
+# `Spec:` line inside a fence is NOT a real anchor -- so every structural scan
+# skips fenced regions, and header-finding tracks the ATX level so a sub-header
+# (`### Sub`) inside a section is never mistaken for the section's boundary.
+# --------------------------------------------------------------------------- #
+_FENCE_RE = re.compile(r'^[ \t]*```')
+_ATX_HEADER_RE = re.compile(r'^(#{1,6})[ \t]+\S')
+
+
+def iter_headers(text):
+    """Yield `(start_offset, end_of_line_offset, level)` for each ATX header
+    line (`#{1,6} <text>`, a space REQUIRED after the hashes) that sits OUTSIDE a
+    ``` code fence. `level` is the number of leading `#`. The required space is
+    the single header definition shared by every consumer, so a no-space `##§2`
+    or a `#`-comment is consistently NOT a header (a filer using the design's
+    `## §N` template is unaffected)."""
+    fence = False
+    offset = 0
+    for raw in (text or "").splitlines(keepends=True):
+        line = raw.rstrip("\n")
+        if _FENCE_RE.match(line):
+            fence = not fence
+        elif not fence:
+            m = _ATX_HEADER_RE.match(line)
+            if m:
+                yield offset, offset + len(line), len(m.group(1))
+        offset += len(raw)
+
+
+def _iter_content_lines(text):
+    """Yield each line of `text` that is OUTSIDE a ``` code fence (fence marker
+    lines themselves excluded)."""
+    fence = False
+    for raw in (text or "").splitlines():
+        if _FENCE_RE.match(raw):
+            fence = not fence
+            continue
+        if not fence:
+            yield raw
+
+
+# --------------------------------------------------------------------------- #
 # Parsing -- the `Spec:` line on a ticket body
 # --------------------------------------------------------------------------- #
-_SPEC_LINE_RE = re.compile(r'(?im)^[ \t]*Spec[ \t]*:[ \t]*(.+?)[ \t]*$')
+# An optional leading bullet is tolerated (R2#6: `- Spec: #N §x` must parse for
+# parity with the search-anywhere design tokens -- the filing gate is a hard
+# PreToolUse block). Per-LINE (no MULTILINE): the caller feeds only lines
+# outside code fences (R1#6).
+_SPEC_LINE_RE = re.compile(
+    r'^[ \t]*(?:[-*][ \t]+)?Spec[ \t]*:[ \t]*(.+?)[ \t]*$', re.IGNORECASE)
 # a `#N` optionally followed by a section token (`§2`, `§ 2`, `s2`, `section 2`).
 _SPEC_REF_TOKEN_RE = re.compile(
     r'#(\d+)(?:[ \t]+(§[ \t]*\d+|§\S+|s\d+|section[ \t]+\d+))?', re.IGNORECASE)
@@ -40,11 +88,17 @@ def parse_spec_line(body):
       None                                      -- no `Spec:` line (or a
           malformed one with neither `#N` nor `none` -- the fail-safe
           "missing spec" direction for the filing gate).
-    """
-    m = _SPEC_LINE_RE.search(body or "")
-    if not m:
+
+    A `Spec:` line inside a ``` code fence is IGNORED (R1#6): only the first
+    real, non-fenced `Spec:` line counts."""
+    val = None
+    for line in _iter_content_lines(body):
+        m = _SPEC_LINE_RE.match(line)
+        if m:
+            val = (m.group(1) or "").strip()
+            break
+    if val is None:
         return None
-    val = (m.group(1) or "").strip()
     if _SPEC_NONE_RE.match(val):
         reason = re.sub(r'^\s*none\s*[—–:-]*\s*', '', val, flags=re.IGNORECASE)
         return ("none", reason.strip())
@@ -151,7 +205,10 @@ def classify_spec_design(design_body, ticket_body):
         return (False, "missing Spec-conform: yes / Spec-deviation: <what "
                 "differs and why> (the design must state whether it conforms "
                 "to the spec section or deviates)")
-    if deviation and not conform and not _NEEDS_DECISION_RE.search(text):
+    # A `Spec-deviation:` ALWAYS demands a needs-decision question -- even when
+    # the comment also (contradictorily) carries `Spec-conform: yes` (R1#7): a
+    # deviation is decided (owner -> spec-change), never silently implemented.
+    if deviation and not _NEEDS_DECISION_RE.search(text):
         return (False, "Spec-deviation: requires a needs-decision question to "
                 "the owner in the same comment -- a deviation is decided (owner "
                 "-> spec-change), never silently implemented")
@@ -179,9 +236,12 @@ def classify_spec_check(review_body):
 # --------------------------------------------------------------------------- #
 # (d) QUESTION GATE -- settled questions are never re-asked (Check 10).
 # --------------------------------------------------------------------------- #
+# The `$` anchor is DROPPED (R1#2/R2 review): a decorated header
+# `## Settled questions (round 2)` must still be found. `\b` keeps it from
+# matching `Settled questionsss`. The `#` count is captured for level-aware
+# boundary detection.
 _SETTLED_HEADER_RE = re.compile(
-    r'(?im)^[ \t]*#{1,6}[ \t]*Settled[ \t]+questions[ \t]*$')
-_NEXT_HEADER_RE = re.compile(r'(?m)^[ \t]*#{1,6}[ \t]+\S')
+    r'(?im)^[ \t]*(#{1,6})[ \t]*Settled[ \t]+questions\b')
 _SETTLED_ITEM_RE = re.compile(
     r'(?im)^[ \t]*[-*][ \t]*Q[ \t]*:[ \t]*(.+?)[ \t]*'
     r'(?:→|->)[ \t]*A[ \t]*:[ \t]*(.+?)[ \t]*$')
@@ -213,9 +273,18 @@ def parse_settled_questions(spec_body, spec_number=None):
     m = _SETTLED_HEADER_RE.search(text)
     if not m:
         return []
+    hdr_level = len(m.group(1))
     start = m.end()
-    nxt = _NEXT_HEADER_RE.search(text[start:])
-    section = text[start:start + nxt.start()] if nxt else text[start:]
+    # The section ends at the next ATX header (OUTSIDE a code fence) whose level
+    # is <= the Settled-questions header's own level -- so a `### Sub` inside the
+    # section, or a `#`-comment in a fenced code block, never truncates it
+    # (R1#2: a `#`-comment in a code block was dropping later settled Qs).
+    end = len(text)
+    for hstart, _hend, level in iter_headers(text):
+        if hstart >= start and level <= hdr_level:
+            end = hstart
+            break
+    section = text[start:end]
     entries = []
     for im in _SETTLED_ITEM_RE.finditer(section):
         entries.append({"q": im.group(1).strip(),
@@ -224,20 +293,31 @@ def parse_settled_questions(spec_body, spec_number=None):
     return entries
 
 
+_SETTLED_MIN_TOKENS = 4
+_SETTLED_MIN_SHARED = 3
+
+
 def settled_conflict(question_text, entries, *, threshold=0.6):
     """The FIRST settled entry whose question shares >= `threshold` of its
     content tokens with `question_text`, or None. Overlap is measured against
     the SETTLED question's tokens (the focused set), so a briefing/options
-    preamble in the asked block never dilutes it. Entries with < 3 content
-    tokens are skipped (too small to match reliably)."""
+    preamble in the asked block never dilutes it.
+
+    A short settled question over-matches (R1#3/R2#4: a 3-token settled entry
+    re-using common domain nouns wrongly BLOCKED a genuinely-new question at
+    2/3=0.67), so an entry needs >= `_SETTLED_MIN_TOKENS` content tokens AND the
+    match needs >= `_SETTLED_MIN_SHARED` shared tokens IN ADDITION to the ratio
+    -- the two floors together make a false block require a real, substantial
+    overlap, while a near-verbatim re-ask of a full question still clears them."""
     block = content_tokens(question_text)
     if not block:
         return None
     for e in entries or []:
         q = content_tokens(e.get("q", ""))
-        if len(q) < 3:
+        if len(q) < _SETTLED_MIN_TOKENS:
             continue
-        if len(q & block) / len(q) >= threshold:
+        shared = len(q & block)
+        if shared >= _SETTLED_MIN_SHARED and shared / len(q) >= threshold:
             return e
     return None
 
