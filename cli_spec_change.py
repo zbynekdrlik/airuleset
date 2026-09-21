@@ -8,10 +8,8 @@ injectable runner seam).
 
     airuleset.py spec-change --spec N --section x --body-file <new-section.md> [--repo owner/name]
 """
-import os
 import re
 import subprocess
-import sys
 
 
 def edit_section(spec_body, section, new_text):

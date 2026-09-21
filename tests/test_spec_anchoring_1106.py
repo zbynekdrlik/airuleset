@@ -13,7 +13,6 @@ contract as gates/design/classifiers.py — never a proof of correctness.
 """
 import json
 import os
-import re
 import subprocess
 import sys
 import tempfile
