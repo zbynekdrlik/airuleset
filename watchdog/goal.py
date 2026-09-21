@@ -1882,9 +1882,17 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                              nudge=_nudge)   # #1038 declared-window -> goal-arm
     # #1092 (e) -- the type keystroke into the (empty) box was a typing attempt
     # into an active pane; count it against the per-pane budget for a watchdog
-    # re-arm regardless of the verify outcome (a swallowed re-arm is recovered
-    # next sweep via the #372 janitor watch set above / _submit_stranded_own_goal).
-    if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
+    # re-arm -- but ONLY when a keystroke was ACTUALLY sent (#1104). A swallowed
+    # re-arm (typed, submit unconfirmed) DID keystroke and still counts; an
+    # OFF-suppressed re-arm (`_send_goal_verified` bailed keystroke-free through
+    # the #1002 kill switch, typing NOTHING) must NOT consume the pane budget --
+    # else switching the kind ON later inherits a spent budget with zero real
+    # keystrokes (the montalu1 16:04 `hold:pane-budget` with no keystrokes).
+    # `_keystroke_suppressed` is the deterministic proxy for "keys returned
+    # True": it is exactly what `_send_goal_verified`'s first gated keystroke
+    # consulted.
+    if origin in _GOAL_WATCHDOG_REARM_ORIGINS \
+            and not watchdog._keystroke_suppressed("goal", False, _nudge):
         _nudge_gate.mark_pane_attempt(state, pid, now)
 
     if ok:
