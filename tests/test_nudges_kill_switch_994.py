@@ -210,42 +210,22 @@ class TestOwnerReplyBypass(unittest.TestCase):
 # Compact: #1023 addendum — /compact is a RECOVERY revival, ALWAYS-ON.
 # --------------------------------------------------------------------------- #
 class TestCompactAlwaysOn(unittest.TestCase):
-    def test_compact_delivers_even_when_all_kinds_off(self):
-        # PRODUCTION TRUTH: /compact carries nudge="compact" (RECOVERY_NUDGE_KINDS),
-        # so the kill switch NEVER gates it — even with every PRIORITY kind staged
-        # OFF (the real predicate, bypass popped) it reaches the send and types.
-        import watchdog.compact as compact
-        rec = _Recorder()
-        logs = []
-        patcher = m.patch.dict(os.environ)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        os.environ.pop("AIRULESET_TEST_IGNORE_DISABLE", None)
-        with m.patch.object(wd, "_input_line_text", lambda *a, **k: ""):
-            out = compact._compact_submit_verified(
-                PID, rec, lambda *a, **k: None, logs.append)
-        self.assertNotEqual(out, "nudges-off",
-                            "/compact is RECOVERY (always-on) — never suppressed")
-        self.assertNotEqual(rec.sent_keys(), [],
-                            "/compact must type even with all PRIORITY kinds off")
+    # #1084 L2: the machine /compact producer (`compact._compact_submit_verified`)
+    # is DELETED for good, so the old end-to-end delivery assertions are gone.
+    # `compact` is left an INERT RECOVERY_NUDGE_KINDS member only to keep the
+    # drift-lock + the frozenset-hardcoding test files stable (not a placeholder
+    # for a comeback), so the kill-switch-exempt invariant is what this locks.
+    def test_compact_is_a_recovery_kind(self):
+        self.assertIn("compact", wd.RECOVERY_NUDGE_KINDS,
+                      "compact stays a reserved recovery identity (#1084)")
 
-    def test_defensive_pending_word_if_send_continue_were_ever_suppressed(self):
-        # DEFENSIVE guard, NOT production /compact gating (the test above proves
-        # /compact is always-on). This mocks nudges_enabled->False (a state
-        # impossible for the 'compact' identity) to prove the ladder's fallback:
-        # were 'compact' ever reclassified to a gated PRIORITY kind, a suppressed
-        # send leaves the request PENDING ('nudges-off'), never misclassified 'sent'.
-        import watchdog.compact as compact
-        rec = _Recorder()
-        logs = []
-        with m.patch.object(wd, "nudges_enabled", lambda *a, **k: False), \
-                m.patch.object(wd, "_input_line_text", lambda *a, **k: ""):
-            out = compact._compact_submit_verified(
-                PID, rec, lambda *a, **k: None, logs.append)
-        self.assertEqual(out, "nudges-off")
-        self.assertEqual(rec.sent_keys(), [])
-        self.assertTrue(any("nudges OFF: suppressed" in ln for ln in logs),
-                        "the defensive suppression must journal: %r" % logs)
+    def test_compact_is_never_gated_by_the_kill_switch(self):
+        # A RECOVERY kind's `nudges_enabled` is ALWAYS-ON regardless of the
+        # per-kind staging / kill-switch state — the exact exemption the machine
+        # /compact relied on, still true for the retained identity.
+        with TemporaryDirectory() as home:
+            self.assertTrue(wd.nudges_enabled("compact", home=home),
+                            "compact (RECOVERY) must never be gated off")
 
 
 # --------------------------------------------------------------------------- #

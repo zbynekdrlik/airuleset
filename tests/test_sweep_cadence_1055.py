@@ -7,13 +7,16 @@ the cheap local pane loop (jobs 1/1b/6 resume, always) + the recovery class
 (compact_sweep, parked_wake_job, deliver_pending_done, deliver_discord_replies
 while a ❓ waits, cleanup_stale_exec_markers, _owner_kill_switch_notice) and
 skips every other registry job. A FULL sweep is forced by `sweep_urgent` (an
-active stall/park/goal-lane state entry, a pending /compact request, or
-transcript activity) OR when the last full sweep is ≥ SWEEP_CALM_S old.
+active stall/park/goal-lane state entry, or transcript activity) OR when the
+last full sweep is ≥ SWEEP_CALM_S old. (#1084 removed machine compacts, so a
+pending /compact is no longer a full-sweep reason — `sweep_urgent`'s
+`compact_pending` parameter is retained but the caller always pins it False; the
+compact-store filter tests moved out with the deleted request store.)
 
 These are the RED lock tests for design (a)-(f). On the pre-P3 tree none of
 `sweep_urgent`, `SWEEP_CALM_S`, the `calm_ok` registry field, the `sweep: calm/
-full` journal lines, `COMPACT_PENDING_HOLD_S`, or the timer `RandomizedDelaySec`
-exist, so every case here fails.
+full` journal lines, or the timer `RandomizedDelaySec` exist, so every case here
+fails.
 
 Reconciliation note (see the ticket's Anchors-confirmed comment): design (a)
 lists the ✅-pending glob and an unanswered ❓ as `sweep: full` reasons, but the
@@ -39,7 +42,6 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 import watchdog as wd            # noqa: E402
-import watchdog.compact as wd_compact  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -183,19 +185,6 @@ class TestCalmVsFullSweep(unittest.TestCase):
         self.assertTrue(line and line.startswith("sweep: full"), "%r" % logs)
         self.assertIn("clock-skew", line)
 
-    def test_pending_compact_never_forces_full(self):
-        # #1084: machine compacts are REMOVED in code, so a pending /compact
-        # request no longer forces a full sweep (it once did — the #1055 P3
-        # contract). run_once now pins sweep_urgent(compact_pending=False).
-        _run(1000.0, self.state_path)                 # bootstrap (full)
-        creqp = Path(self._td.name) / "compact-requests.json"
-        wd_compact.record_compact_request("sid-x", "/repo", now=1055,
-                                           path=str(creqp), origin="self-callback")
-        logs = _run(1060.0, self.state_path, compact_requests_path=str(creqp))
-        line = self._sweep_line(logs)
-        self.assertTrue(line and line.startswith("sweep: calm"),
-                        "a pending /compact must NOT force full (#1084): %r" % logs)
-        self.assertNotIn("urgent: compact", line or "")
 
     def test_calm_skips_heavy_jobs_runs_recovery(self):
         # card_reconcile (heavy, not calm_ok) must be HELD skip:calm; a recovery
@@ -415,32 +404,6 @@ class TestCalmOkRegistrySet(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# (d) COMPACT_PENDING_HOLD is seconds, cadence-independent
-# --------------------------------------------------------------------------- #
-class TestCompactPendingHoldSeconds(unittest.TestCase):
-    def test_seconds_constant_exists_and_is_120(self):
-        self.assertEqual(wd_compact.COMPACT_PENDING_HOLD_S, 120)
-
-    def test_sweeps_count_constant_is_gone(self):
-        self.assertFalse(hasattr(wd_compact, "COMPACT_PENDING_HOLD_SWEEPS"),
-                         "the sweep-count bound must be replaced by seconds (#1055 P3 d)")
-        # the nominal-interval constant only ever fed the old sweep-count bound;
-        # it has no other consumer, so it is removed too (mvp-philosophy).
-        self.assertFalse(hasattr(wd_compact, "COMPACT_SWEEP_INTERVAL_S"),
-                         "the dead nominal-interval constant must be removed (#1055 P3 d)")
-
-    def test_hold_behaviour_preserved_at_120s(self):
-        with TemporaryDirectory() as d:
-            p = str(Path(d) / "creq.json")
-            wd_compact.record_compact_request("sid", "/r", now=1000,
-                                              path=p, origin="self-callback")
-            # 30s < 120s -> hold; 200s > 120s -> no hold (byte-identical to the
-            # old 2×60s bound)
-            self.assertTrue(wd_compact.pending_compact_hold("sid", 1030, path=p))
-            self.assertFalse(wd_compact.pending_compact_hold("sid", 1200, path=p))
-
-
-# --------------------------------------------------------------------------- #
 # (e) timer template spreads the fleet over the minute
 # --------------------------------------------------------------------------- #
 class TestTimerRandomizedDelay(unittest.TestCase):
@@ -460,203 +423,6 @@ class TestTimerRandomizedDelay(unittest.TestCase):
         errs = [e for e in cli_config._validate_watchdog()
                 if "timer template" in e]
         self.assertEqual(errs, [], "timer template validation must stay green: %r" % errs)
-
-
-# --------------------------------------------------------------------------- #
-# #1055 P3 fix-forward — compact_pending from ACTIONABLE requests only.
-#
-# The P3 defect (measured on gk 2026-09-17): run_once set
-# `compact_pending = bool(load_compact_requests(path))`, so ANY entry in
-# ~/.claude/compact-requests.json forced a FULL sweep every minute. gk holds a
-# 2026-09-07 `self-callback` request that can never be served (the owner disable
-# flag `~/.claude/watchdog-disable-compact` makes compact_sweep return early
-# before it would ever consume or GC it), so `sweep: full (urgent: compact)` fired
-# every minute and the P3 CPU saving never engaged on the busiest box.
-# --------------------------------------------------------------------------- #
-class TestActionableCompactRequests(unittest.TestCase):
-    """(item 1) the PURE filter — no I/O, no clock read."""
-
-    NOW = 1_000_000.0
-
-    def _req(self, **kw):
-        e = {"cwd": "/repo", "origin": "self-callback"}
-        e.update(kw)
-        return e
-
-    def test_stale_cap_is_six_hours(self):
-        self.assertEqual(wd_compact.COMPACT_REQUEST_STALE_S, 6 * 3600)
-
-    def test_empty_when_jobs_disabled(self):
-        # the owner flag makes compact_sweep return early -> no request is
-        # servable -> NONE is actionable, even a brand-new one.
-        reqs = {"s1": self._req(ts=self.NOW - 10)}
-        self.assertEqual(
-            wd_compact.actionable_compact_requests(
-                reqs, now=self.NOW, jobs_disabled=True), {})
-
-    def test_keeps_fresh_request(self):
-        reqs = {"s1": self._req(ts=self.NOW - 60)}
-        out = wd_compact.actionable_compact_requests(
-            reqs, now=self.NOW, jobs_disabled=False)
-        self.assertEqual(set(out), {"s1"})
-
-    def test_drops_stale_request_over_6h(self):
-        reqs = {"s1": self._req(ts=self.NOW - (6 * 3600 + 1))}
-        self.assertEqual(
-            wd_compact.actionable_compact_requests(
-                reqs, now=self.NOW, jobs_disabled=False), {})
-
-    def test_keeps_request_at_exactly_6h(self):
-        # age == cap is NOT > cap -> kept (the boundary belongs to actionable)
-        reqs = {"s1": self._req(ts=self.NOW - 6 * 3600)}
-        out = wd_compact.actionable_compact_requests(
-            reqs, now=self.NOW, jobs_disabled=False)
-        self.assertEqual(set(out), {"s1"})
-
-    def test_drops_missing_ts(self):
-        reqs = {"s1": {"cwd": "/repo", "origin": "self-callback"}}
-        self.assertEqual(
-            wd_compact.actionable_compact_requests(
-                reqs, now=self.NOW, jobs_disabled=False), {})
-
-    def test_drops_non_numeric_ts(self):
-        reqs = {"s1": self._req(ts="not-a-number")}
-        self.assertEqual(
-            wd_compact.actionable_compact_requests(
-                reqs, now=self.NOW, jobs_disabled=False), {})
-
-    def test_keeps_future_skewed_ts(self):
-        # age < 0 is NOT > STALE_S -> KEPT: fail toward FULL, never silently calm
-        # past a request whose age can't be trusted downward.
-        reqs = {"s1": self._req(ts=self.NOW + 500)}
-        out = wd_compact.actionable_compact_requests(
-            reqs, now=self.NOW, jobs_disabled=False)
-        self.assertEqual(set(out), {"s1"})
-
-    def test_drops_non_dict_entry_keeps_valid_sibling(self):
-        reqs = {"s1": "corrupt", "s2": self._req(ts=self.NOW - 30)}
-        out = wd_compact.actionable_compact_requests(
-            reqs, now=self.NOW, jobs_disabled=False)
-        self.assertEqual(set(out), {"s2"})
-
-    def test_non_dict_requests_arg_is_empty(self):
-        self.assertEqual(
-            wd_compact.actionable_compact_requests(
-                None, now=self.NOW, jobs_disabled=False), {})
-        self.assertEqual(
-            wd_compact.actionable_compact_requests(
-                [], now=self.NOW, jobs_disabled=False), {})
-
-    def test_does_not_mutate_input(self):
-        reqs = {"s1": self._req(ts=self.NOW - 7 * 3600),
-                "s2": self._req(ts=self.NOW - 30)}
-        snapshot = json.loads(json.dumps(reqs))
-        wd_compact.actionable_compact_requests(
-            reqs, now=self.NOW, jobs_disabled=False)
-        self.assertEqual(reqs, snapshot)
-
-
-class TestCompactIgnoreReason(unittest.TestCase):
-    """(item 2 helper) the PURE reason predicate for the journal ignore line."""
-
-    NOW = 1_000_000.0
-
-    def _req(self, **kw):
-        e = {"cwd": "/repo", "origin": "self-callback"}
-        e.update(kw)
-        return e
-
-    def test_none_when_a_request_is_actionable(self):
-        reqs = {"s1": self._req(ts=self.NOW - 60)}
-        self.assertIsNone(wd_compact.compact_ignore_reason(
-            reqs, now=self.NOW, jobs_disabled=False))
-
-    def test_none_when_empty(self):
-        self.assertIsNone(wd_compact.compact_ignore_reason(
-            {}, now=self.NOW, jobs_disabled=False))
-        self.assertIsNone(wd_compact.compact_ignore_reason(
-            None, now=self.NOW, jobs_disabled=False))
-
-    def test_owner_flag_reason(self):
-        reqs = {"s1": self._req(ts=self.NOW - 60)}   # fresh, but flag disables
-        self.assertEqual(wd_compact.compact_ignore_reason(
-            reqs, now=self.NOW, jobs_disabled=True), "owner-flag")
-
-    def test_stale_hours_reason(self):
-        reqs = {"s1": self._req(ts=self.NOW - 7 * 3600)}
-        self.assertEqual(wd_compact.compact_ignore_reason(
-            reqs, now=self.NOW, jobs_disabled=False), "stale 7h")
-
-    def test_stale_hours_reports_the_oldest(self):
-        reqs = {"s1": self._req(ts=self.NOW - 7 * 3600),
-                "s2": self._req(ts=self.NOW - 9 * 3600)}
-        self.assertEqual(wd_compact.compact_ignore_reason(
-            reqs, now=self.NOW, jobs_disabled=False), "stale 9h")
-
-    def test_bad_ts_reason(self):
-        reqs = {"s1": self._req(ts="not-a-number")}
-        self.assertEqual(wd_compact.compact_ignore_reason(
-            reqs, now=self.NOW, jobs_disabled=False), "stale (bad ts)")
-
-    def test_bad_ts_reason_with_non_dict_entry(self):
-        reqs = {"s1": "corrupt"}
-        self.assertEqual(wd_compact.compact_ignore_reason(
-            reqs, now=self.NOW, jobs_disabled=False), "stale (bad ts)")
-
-
-class TestCompactPendingNeverForcesFull(unittest.TestCase):
-    """#1084 — machine compacts are REMOVED in code, so a pending /compact
-    request never forces a full sweep and never journals a compact-cadence line,
-    whatever its ts / owner-flag state. This inverts the #1055 P3 "actionable
-    request forces full + journals an ignore reason" contract, which is gone with
-    the delivery machinery (run_once now pins sweep_urgent(compact_pending=False)
-    and no longer reads the requests file for the cadence decision)."""
-
-    def setUp(self):
-        self._td = TemporaryDirectory()
-        self.addCleanup(self._td.cleanup)
-        self.state_path = Path(self._td.name) / "state.json"
-
-    def _sweep_line(self, logs):
-        for ln in logs:
-            if ln.startswith("sweep: calm") or ln.startswith("sweep: full"):
-                return ln
-        return None
-
-    def _creq(self):
-        return Path(self._td.name) / "compact-requests.json"
-
-    def _second_sweep(self, entry, now0=100000.0):
-        creqp = self._creq()
-        creqp.write_text(json.dumps({"sid-x": entry}))
-        _run(now0, self.state_path, compact_requests_path=str(creqp))   # bootstrap full
-        return self._sweep_line(
-            _run(now0 + 60, self.state_path, compact_requests_path=str(creqp)))
-
-    def test_fresh_request_does_not_force_full(self):
-        # a 5-min-old request once forced full (the #1055 P3 contract) — no more.
-        line = self._second_sweep({"cwd": "/repo", "ts": 100060 - 300,
-                                   "origin": "self-callback"})
-        self.assertTrue(line and line.startswith("sweep: calm"),
-                        "a fresh /compact must NOT force full (#1084): %r" % line)
-        self.assertNotIn("urgent: compact", line or "")
-
-    def test_stale_request_does_not_force_full(self):
-        line = self._second_sweep({"cwd": "/repo", "ts": 100000 - 7 * 3600,
-                                   "origin": "self-callback"})
-        self.assertTrue(line and line.startswith("sweep: calm"),
-                        "a stale /compact must NOT force full (#1084): %r" % line)
-
-    def test_no_compact_cadence_line_is_ever_journaled(self):
-        creqp = self._creq()
-        creqp.write_text(json.dumps({"sid-x": {"cwd": "/repo",
-                                               "ts": 100000 - 7 * 3600,
-                                               "origin": "self-callback"}}))
-        logs = _run(100000.0, self.state_path,           # bootstrap full sweep
-                    compact_requests_path=str(creqp))
-        self.assertFalse(any("compact-pending ignored" in ln for ln in logs),
-                         "the compact-pending ignore line is gone (#1084): %r" % logs)
-        self.assertFalse(any("urgent: compact" in ln for ln in logs), logs)
 
 
 if __name__ == "__main__":

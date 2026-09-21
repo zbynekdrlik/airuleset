@@ -2473,11 +2473,10 @@ def sweep_urgent(state, pane_stamps, stored_stamps, *, compact_pending=False):
     short-circuits on the first hit; issues NO subprocess of its own.
 
     Forces a FULL sweep on the ACTIVE signals only:
-      * ``compact_pending`` — a SERVABLE pending /compact request exists (#1055
-        fix-forward: the caller reads the requests file, filters it through
-        ``compact.actionable_compact_requests`` — dropping requests the owner
-        disable flag or a >6h/unmeasurable ``ts`` make dead — and passes a bool,
-        so this function stays pure and a wedged request never forces full).
+      * ``compact_pending`` — retained as a pure boolean parameter (still
+        unit-tested), but #1084 (2026-09-19) REMOVED machine-triggered compacts
+        for good, so the sole caller now pins it False: no /compact request is
+        ever recorded, so a pending compact never forces a full sweep any more.
       * ``state["parked_wake"]`` non-empty — a session is parked on the
         account-switch banner (a recovery situation).
       * a goal-lane STALL — any ``state["goal_lane"][sid]["soa"] > 0`` (the
@@ -2549,7 +2548,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              done_grace=PENDING_DONE_GRACE, pending_prefix=PENDING_PREFIX,
              discord_fetch=None, bounce_fetch=None, gkreq_fetch=None,
              sleep_fn=None, burn_snapshot_path=None,
-             compact_requests_path=None, fleet_fetch=None, fleet_hosts=None,
+             fleet_fetch=None, fleet_hosts=None,
              fleet_path=None, shared_fleet_path=None,
              burn_alert_enabled=False,
              goal_jobs_enabled=False, long_turn_enabled=False,
@@ -2761,14 +2760,16 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           removed journal line and delivers NOTHING — no request is read, no
           owner flag is consulted, no enable path exists. Claude Code's own
           threshold autocompact is the ONLY compaction left. The slot stays
-          addressable (still dispatched when `compact_requests_path` is wired, so
-          prior comments/logs referencing "job 14" resolve — the #132/#102/#402
+          addressable and is ALWAYS dispatched (the number is kept so prior
+          comments/logs referencing "job 14" resolve — the #132/#102/#402
           precedent), and journals the removed line each sweep so `journalctl`
           proves the fleet-wide guarantee with no per-box marker to miss (the
           forestshop-dev slip that filed this ticket). The #911 per-box
           `~/.claude/watchdog-disable-compact` flag it used to honour is gone —
-          `install` deletes any stale copy. L2 (a later lane) deletes the
-          orphaned `deliver_compact` + the request store.
+          `install` deletes any stale copy. L2 (#1084) DELETED the orphaned
+          `deliver_compact`, the whole request store, and the `compact-request`
+          CLI command — `watchdog/compact.py` now holds only the pane resolvers +
+          the observation helpers the other jobs read.
       (15) COMPACT OVERGROWN IDLE SESSIONS — REMOVED (#102, 2026-07-27). Used
           to fire `/compact` purely off CONTEXT SIZE + IDLE DURATION, with
           no regard for what marker the session's last turn ended on — the
@@ -2993,9 +2994,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           boundary — the companion alarm to the claim/lock system #402's
           collapse retired wholesale. With exactly two mutually-exclusive
           request origins and no shared claim file left to get stuck, there
-          is nothing left for this job to watch: a request that cannot be
-          delivered simply ages out via `COMPACT_REQUEST_MAX_AGE_S` (job
-          14's own hard, non-refreshable cap), logged the moment it lapses.
+          is nothing left for this job to watch. #1084 (2026-09-19) then removed
+          machine `/compact` entirely — job 14 delivers nothing and there is no
+          request store at all — so there is not even a request to age out.
           Number retained (not reused) for historical addressability.
       (27) (only when `issue_counts_fetch` is given) NET-ISSUE-DRIFT ALARM
           (#137) — per repo discovered by `repo_roots` (a list or a callable
@@ -3450,13 +3451,11 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     `sweep_cadence` (#1055 P3, cross-cutting — not a numbered job): each sweep is
     FULL (every registry job runs) or CALM (only the pane loop + the `calm_ok`
     recovery class run), decided in `state["sweep_cadence"]` by `sweep_urgent`
-    (an active stall/park/goal-lane state entry, transcript activity, or a
-    SERVABLE pending /compact) OR a `last_full` older than `SWEEP_CALM_S`. #1055
-    fix-forward: a pending /compact is an urgency ONLY when SERVABLE — a request
-    the owner disable flag or a >6h/unmeasurable `ts` has wedged is filtered out
-    (`compact.actionable_compact_requests`), journaled once per full-by-cadence
-    sweep as `sweep-cadence: compact-pending ignored (…)`, and never forces
-    full."""
+    (an active stall/park/goal-lane state entry, or transcript activity) OR a
+    `last_full` older than `SWEEP_CALM_S`. #1084 (2026-09-19): machine-triggered
+    compacts are gone, so a pending /compact is no longer an urgency signal at
+    all — `sweep_urgent`'s `compact_pending` parameter is pinned False by the sole
+    caller (no request is ever recorded)."""
     now = time.time() if now is None else now
     run = run or _default_run
     time_fn = time_fn or time.monotonic
@@ -4957,10 +4956,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
          calm_ok=True)   # #1055 P3: local journal-only notice, always runs
 
     # Job 9's own real body (goal.goal_sweep) is dispatched further down,
-    # alongside job 20 -- both now need `compact_handled_this_sweep`
+    # alongside job 20 -- both take `compact_handled_this_sweep`
     # (goal_sweep can deliver via `deliver_with_stash`, same keystroke
-    # hazard class job 20's lane-nudge already coordinates against), which
-    # is not populated until after job 14's /compact senders run below.
+    # hazard class job 20's lane-nudge already coordinates against). #1084 L2:
+    # job 14's /compact senders are gone, so that set is now always empty.
 
     # Jobs 12 / 18 / 23 — REMOVED (#132, 2026-07-28). All three drove the
     # same `_restart_pane` helper, which typed `/exit` into a live pane and
@@ -4989,28 +4988,27 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                    dry_run=dry_run),
          "burn-snapshot error")
 
-    # #69 — shared per-sweep set: job 14 records every sid it actually
-    # compacts THIS sweep. Originally also fed job 15/17 (both REMOVED,
-    # #102) to keep them from double-firing on the same pane; job 14 is now
-    # this module's only /compact sender that populates it, and job 20
-    # still reads it (a session just compacted this sweep is not safe for
-    # a fresh keystroke burst either).
+    # #69 — shared per-sweep set. #1084 L2: job 14 (/compact delivery) is
+    # REMOVED, so NOTHING populates this any more — it is now ALWAYS EMPTY. It is
+    # kept (rather than deleted) only so `goal_sweep` / `goal_lane_sweep` keep
+    # their `handled=` signatures unchanged; they still READ it (a session just
+    # compacted this sweep would be unsafe for a fresh keystroke burst), but with
+    # no /compact sender left it never carries a sid.
     compact_handled_this_sweep = set()
 
     # Job 14 — /COMPACT AT TICKET BOUNDARIES — REMOVED (#1084, 2026-09-19, owner
-    # ROZHODNUTÉ). The slot stays addressable and dispatched (same "wired = on"
-    # convention as jobs 3/7/8/11/13, gated only on `compact_requests_path`), but
-    # `compact_sweep` now early-returns the removed journal line and delivers
-    # NOTHING — machine compacts are gone in code, native autocompact only. The
-    # `not _compact_jobs_disabled` gate is dropped with the compact kill-switch.
+    # ROZHODNUTÉ). The slot stays addressable and ALWAYS dispatched (the number is
+    # kept — the #132/#102/#402 kept-slot precedent), but `compact_sweep` now
+    # early-returns the removed journal line and delivers NOTHING — machine
+    # compacts are gone in code, native autocompact only. L2 (#1084) deleted the
+    # request store, so the former `compact_requests_path` "wired = on" gate is
+    # gone; the slot is unconditionally on so `journalctl` proves the guarantee
+    # on every box each sweep.
     def _job_compact_sweep():
         from watchdog import compact as _compact
         return _compact.compact_sweep(now, run=run, dry_run=dry_run,
-                                      projects_dir=projects_dir,
-                                      requests_path=compact_requests_path,
-                                      state=state,
-                                      handled=compact_handled_this_sweep)
-    _add("compact_sweep", lambda: compact_requests_path,
+                                      projects_dir=projects_dir)
+    _add("compact_sweep", lambda: True,
          _job_compact_sweep, "compact-request error",
          calm_ok=True)   # #1084: journals the removed line each sweep, ≤60s
 
@@ -5055,9 +5053,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # source of truth for this model. Dispatched HERE (not in its old
     # earlier slot) because `goal_sweep` can now deliver via
     # `deliver_with_stash`, the same keystroke hazard job 20's lane-nudge
-    # below already coordinates against — it needs
-    # `compact_handled_this_sweep` fully populated, which only happens
-    # after job 14's /compact senders run above. Only when
+    # below already coordinates against — it reads
+    # `compact_handled_this_sweep` (now always empty, #1084 L2: job 14's
+    # /compact senders are gone). Only when
     # `goal_jobs_enabled` is truthy (cmd_watchdog passes True) — same
     # "wired = on" convention as jobs 13/14/16/19.
     def _job_goal_sweep():
@@ -5211,8 +5209,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # Job 26 — COMPACT-STALL WATCH — REMOVED (#402, 2026-08-12). Used to
     # watch the shared /compact claim file for a stuck entry; that whole
     # claim system was retired by the compact collapse (see run_once's own
-    # docstring paragraph (26)). A request that cannot be delivered now
-    # simply ages out via job 14's own hard cap, logged the moment it does.
+    # docstring paragraph (26)). #1084 then removed machine /compact entirely —
+    # no request store exists, so there is nothing to stall or age out.
 
     # Job 27 — NET-ISSUE-DRIFT ALARM (#137): only when `issue_counts_fetch`
     # is given (cmd_watchdog wires the real gh round trip) — the "wired = on"

@@ -8034,7 +8034,6 @@ def cmd_watchdog(args):
     still erase."""
     import burn
     from watchdog import run_once, fetch_usage, fetch_channel_messages
-    from watchdog import compact as _compact_mod
     from watchdog import goal as _goal_mod
     # #1040 — mark EVERY gh call this watchdog process makes as a background
     # POLL. The managed gh shim throttles a poll ONLY when this env is set AND
@@ -8099,7 +8098,6 @@ def cmd_watchdog(args):
                     # the existing <repo>#<issue> key format.
                     reopen_fetch=_watchdog_reopened_fetch,
                     burn_snapshot_path=burn.snapshots_path(),
-                    compact_requests_path=_compact_mod.compact_requests_path(),
                     fleet_fetch=fleet_fetch, fleet_hosts=REMOTE_HOSTS,
                     fleet_path=burn.fleet_path(),
                     shared_fleet_path=shared_fleet_path,
@@ -8316,18 +8314,6 @@ def cmd_watchdog(args):
                     # "prints nothing" symptom this fix exists to kill.
                     log_fn=lambda line: print(line, flush=True))
     del logs   # already streamed via log_fn above; nothing left to print
-
-
-def cmd_compact_request(args):
-    """REMOVED (#1084, 2026-09-19, owner ROZHODNUTE): machine-triggered compacts
-    are gone for good. This command no longer records, delivers, or probes any
-    `/compact` -- it prints the removed line and exits 0 so a stale caller (an
-    old skill template, a not-yet-redeployed box's hook) can never break a turn.
-    Claude Code's own threshold autocompact is the only compaction left. The CLI
-    registration stays addressable; L2 removes it with the request store."""
-    print("compact: machine compacts removed (owner 2026-09-19, #1084) "
-          "— native autocompact only")
-    return
 
 
 def cmd_goal_arm(args):
@@ -9773,45 +9759,10 @@ def main():
     p_watchdog.add_argument("--verbose", action="store_true",
                             help="Print the actions taken this cycle")
 
-    p_creq = sub.add_parser(
-        "compact-request",
-        help="Record a /compact request for a session at a safe ticket "
-             "boundary (#39 krok 1c, collapsed by #402) — consumed by "
-             "watchdog job 14 (watchdog.compact.compact_sweep)")
-    p_creq.add_argument("--record", action="store_true",
-                        help="Record the request (fired by "
-                             "stop-check-prose-violations.sh; #610 retired the subagent-stop producer)")
-    p_creq.add_argument("--session", default="", help="Session id (transcript stem)")
-    p_creq.add_argument("--cwd", default="", help="Session cwd")
-    p_creq.add_argument("--origin", default="",
-                        help="What PROVED this is a ticket boundary. "
-                             "'self-callback' = the session's own Work-Complete "
-                             "boundary (sole production origin post-#610; the "
-                             "subagent-stop producer hook was retired). Required "
-                             "for --record; --self supplies 'self-callback'.")
-    p_creq.add_argument("--self", action="store_true",
-                        help="#225 -- explicit self-callback: resolve THIS "
-                             "session's own pane via $TMUX_PANE, record the "
-                             "request under the self-callback proven-boundary "
-                             "origin, and attempt ONE immediate synchronous "
-                             "/compact delivery (#402 -- no retry/hold loop "
-                             "any more; an attempt that isn't safe right now "
-                             "is simply left for the periodic sweep). "
-                             "Ignores --record/--session/--cwd/--origin -- "
-                             "everything is resolved from the calling pane "
-                             "itself. Call this as your OWN last tool call "
-                             "right after finishing a ticket, before "
-                             "dispatching anything else.")
-    p_creq.add_argument("--status", action="store_true",
-                        help="#741 read-only HOLD probe: resolve THIS session "
-                             "(via $TMUX_PANE, or --session <sid>) and print one "
-                             "line -- `PENDING sid=<sid> age=<n>s`, `QUEUED "
-                             "sid=<sid> since=<n>s` (#822) or `NONE` -- then exit "
-                             "0. The hold-turn doctrine's first action: PENDING/"
-                             "QUEUED => launch the boundary-hold task + end the "
-                             "turn `⏳ WORKING: boundary hold` with ZERO "
-                             "dispatches; NONE => the boundary compact is done. "
-                             "Records + types nothing.")
+    # #1084 L2: the `compact-request` subcommand is REMOVED (owner ROZHODNUTE
+    # 2026-09-19 — machine compacts are gone for good). No producer records a
+    # request any more (L1 deleted the Stop-hook recorder + both notify-compact
+    # hooks), so the command has nothing to do; it is an unknown subcommand now.
 
     p_garm = sub.add_parser(
         "goal-arm",
@@ -11045,7 +10996,6 @@ SUBCOMMANDS = {
     "filedrop": cmd_filedrop,
     "notify": cmd_notify,
     "watchdog": cmd_watchdog,
-    "compact-request": cmd_compact_request,
     "goal-arm": cmd_goal_arm,
     "goal-roster": cmd_goal_roster,
     "privileges": cmd_privileges,

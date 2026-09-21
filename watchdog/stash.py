@@ -701,8 +701,9 @@ def _undo_typed_text(pid, run, text, sleep_fn=None):
 
 
 def draft_rescue_dir():
-    """`~/.claude/draft-rescue/`, resolved at CALL time (same reasoning as
-    `watchdog.compact.compact_requests_path()`: never a frozen module-level
+    """`~/.claude/draft-rescue/`, resolved at CALL time (the established
+    resolve-at-call idiom, e.g. `watchdog.goal.goal_requests_path()`: never a
+    frozen module-level
     constant, so a
     relocated `$HOME`/override is honoured on every call, not just the one
     that happened to run at import time).
@@ -722,7 +723,7 @@ def draft_rescue_dir():
     activity. A single test wanting a precise, deterministic rescue-file
     assertion still patches this function directly
     (`unittest.mock.patch.object(wd, "draft_rescue_dir", return_value=<tmp>)`
-    — the same established shape `watchdog.compact.compact_requests_path()`
+    — the same established shape `watchdog.goal.goal_requests_path()`
     already uses)."""
     override = os.environ.get("AIRULESET_DRAFT_RESCUE_DIR")
     if override:

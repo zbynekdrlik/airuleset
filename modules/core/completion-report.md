@@ -8,4 +8,4 @@
 
 **MANDATORY compact template (~7 lines, #940):** `## ✅ Work Complete` heading + ONE audit-summary line (plan-check + review + requesting-code-review) + `✅ Výstup:` line + `🏛 Architektúra:` line + `🌐` URL (if UI) + Goal/What changed + `📔 Playbook:` + terminal marker. `✅ Výstup:` is ALWAYS present — concrete OBSERVED values, or `n/a — <prečo>`. `🏛 Architektúra: <oblasť> — OK` | `— REWORK #N` = area-review verdict (#993). Hook-enforced (`stop-check-prose-violations.sh`).
 
-The full template, hard rules, and enforcement details are in the situational companion `skills/completion-report-deep/DEEP.md` — loaded automatically on `compact-request`/`plan-check`/`gh pr merge` commands. History + rationale: `.claude/rules-reference/completion-report-history.md` (#859).
+The full template, hard rules, and enforcement details are in the situational companion `skills/completion-report-deep/DEEP.md` — loaded automatically on `plan-check`/`gh pr merge` commands. History + rationale: `.claude/rules-reference/completion-report-history.md` (#859).

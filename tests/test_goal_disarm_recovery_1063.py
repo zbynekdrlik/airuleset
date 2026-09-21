@@ -151,7 +151,9 @@ class TestDisarmDeliversWithMachineKindsOff(unittest.TestCase):
 # functions whose keystroke/send delivery is a session revival, never a prompt.
 RECOVERY_DELIVERY_SITES = {
     "watchdog/goal.py": ["_deliver_goal_clear"],
-    "watchdog/compact.py": ["_compact_submit_verified"],
+    # #1084 L2: `watchdog/compact.py::_compact_submit_verified` was the machine
+    # /compact recovery-delivery site — DELETED with the callback-compact removal,
+    # so compact.py no longer has a recovery-delivery call site to pin here.
     "watchdog/__init__.py": ["_send_stuckcheck_verified"],
     "watchdog/parked_wake.py": ["deliver_wake"],
 }

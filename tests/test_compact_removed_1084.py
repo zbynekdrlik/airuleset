@@ -20,8 +20,22 @@ These are the L1 "never delivers / never records" locks:
 
 The compaction OBSERVATION helpers (`_pane_compacting`, `COMPACTING_MARKER`,
 transcript compaction records that lane-reconcile / the goal jobs read) are
-untouched — this lane removes the DELIVERY machinery only. L2 (a later lane)
-deletes `deliver_compact` + the request store this early return orphans.
+untouched — this lane removes the DELIVERY machinery only.
+
+#1084 L2 (this file also carries the DELETION locks now that L2 has landed):
+  - `deliver_compact` and the whole request/delivered/queued store, the
+    submit-verify + sync-attempt helpers, and the cooldown/boundary/live-bg
+    machinery are DELETED from `watchdog.compact` (asserted absent by
+    `hasattr`) — `compact.py` shrinks to the pane resolvers + the observation
+    helpers the surviving jobs read.
+  - `airuleset.py compact-request` is UNREGISTERED — an unknown subcommand
+    (argparse rejects it, `SystemExit`), not a stub; it is gone from the
+    dispatch table and `cmd_compact_request` no longer exists.
+  - the surviving symbols the other jobs reference are KEPT and intact:
+    `pending_compact_hold` (now unconditionally `False` — no machine compact is
+    ever pending), `_find_pane_for_session`, `resolve_self_pane`,
+    `resolve_declared_window_pane`, `_COMPACT_COMPLETION_HEADING_RX`,
+    `_compact_recent_human_activity`, `compact_sync_log_path`.
 """
 
 import inspect
@@ -30,7 +44,6 @@ import os
 import shutil
 import subprocess
 import sys
-import types
 import unittest
 import unittest.mock as m
 from pathlib import Path
@@ -52,70 +65,30 @@ INSTALL_LOUD_LINE = ("compact: stale owner flag removed — machine compacts are
 PUSH_POSTCHECK_LINE = "compact: hard-off (code)"
 
 
-def _isolate_requests(testcase):
-    """Own isolated compact-requests file — the live systemd watchdog runs this
-    working tree every 60s, so a test must never touch the real ~/.claude copy."""
-    d = TemporaryDirectory()
-    testcase.addCleanup(d.cleanup)
-    reqp = Path(d.name) / "compact-requests-test.json"
-    for name in ("compact_requests_path", "compact_delivered_path",
-                 "compact_sync_log_path", "compact_queued_path"):
-        path = Path(d.name) / ("%s.json" % name)
-        p = m.patch.object(compact, name, return_value=path)
-        p.start()
-        testcase.addCleanup(p.stop)
-    return reqp
-
-
-def _args(**kw):
-    kw.setdefault("self", False)
-    kw.setdefault("record", False)
-    kw.setdefault("status", False)
-    kw.setdefault("session", "")
-    kw.setdefault("cwd", "")
-    kw.setdefault("origin", "")
-    return types.SimpleNamespace(**kw)
-
-
 # --------------------------------------------------------------------------- #
-# (a) compact_sweep returns at its top, never delivers
+# (a) compact_sweep returns at its top, never delivers (L2: `deliver_compact`
+#     and the request store are GONE, so the sweep CANNOT deliver by
+#     construction — it just journals the removed line each sweep).
 # --------------------------------------------------------------------------- #
 class TestCompactSweepRemoved(unittest.TestCase):
-    CWD = "/home/newlevel/devel/removed-sweep"
-
-    def setUp(self):
-        self.reqp = _isolate_requests(self)
-
-    def test_journals_removed_line_and_never_calls_deliver(self):
-        # A fully SERVABLE request + an idle pane: pre-#1084 this delivered.
-        now = 1_000_000.0
-        compact.record_compact_request("sess-r", self.CWD, now=now,
-                                       path=self.reqp, origin="self-callback")
+    def test_journals_removed_line_and_issues_no_keystrokes(self):
         keys = []
-        with m.patch.object(compact, "deliver_compact",
-                            side_effect=AssertionError(
-                                "compact_sweep must NOT call deliver_compact (#1084)")):
-            logs = compact.compact_sweep(
-                now + 5, run=lambda *a, **k: keys.append((a, k)),
-                projects_dir=None, requests_path=self.reqp)
+        logs = compact.compact_sweep(
+            1_000_005.0, run=lambda *a, **k: keys.append((a, k)),
+            projects_dir=None)
         self.assertTrue(any("machine compacts removed" in ln and "#1084" in ln
                             for ln in logs),
                         "compact_sweep must journal the removed line: %r" % logs)
         self.assertEqual(keys, [], "compact_sweep must issue no keystrokes")
 
     def test_exact_removed_line(self):
-        logs = compact.compact_sweep(1.0, run=None, requests_path=self.reqp)
+        logs = compact.compact_sweep(1.0, run=None)
         self.assertIn(REMOVED_LINE, logs)
 
-    def test_never_delivers_even_when_owner_flag_absent_and_disable_ignored(self):
-        # No flag read at all: the removed line fires regardless of the
-        # (now-vestigial) owner disable flag state.
-        compact.record_compact_request("sess-x", self.CWD, now=1000.0,
-                                       path=self.reqp, origin="self-callback")
-        with m.patch.object(compact, "deliver_compact",
-                            side_effect=AssertionError("must not deliver")):
-            logs = compact.compact_sweep(2000.0, run=None, requests_path=self.reqp)
-        self.assertIn(REMOVED_LINE, logs)
+    def test_no_delivery_symbol_exists_to_call(self):
+        # L2: there is no `deliver_compact` left for the sweep to call.
+        self.assertFalse(hasattr(compact, "deliver_compact"),
+                         "deliver_compact must be deleted in L2 (#1084)")
 
 
 # --------------------------------------------------------------------------- #
@@ -123,14 +96,11 @@ class TestCompactSweepRemoved(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class TestSweepUrgentNeverForcedByCompact(unittest.TestCase):
     def test_run_once_caller_passes_compact_pending_false(self):
-        # run_once must call sweep_urgent with compact_pending=False, no matter
-        # what compact requests exist — a banned behaviour cannot force a full
-        # sweep any more (#1084).
+        # run_once must call sweep_urgent with compact_pending=False — a banned
+        # behaviour cannot force a full sweep any more (#1084). L2: the
+        # compact_requests_path plumbing is gone, so run_once takes no such kwarg.
         td = TemporaryDirectory()
         self.addCleanup(td.cleanup)
-        creqp = Path(td.name) / "compact-requests.json"
-        compact.record_compact_request("sid-x", "/repo", now=1055,
-                                       path=str(creqp), origin="self-callback")
         state_path = Path(td.name) / "state.json"
         captured = {}
         real_su = wd.sweep_urgent
@@ -140,44 +110,41 @@ class TestSweepUrgentNeverForcedByCompact(unittest.TestCase):
             return real_su(*a, **k)
 
         with m.patch.object(wd, "sweep_urgent", side_effect=_spy):
-            wd.run_once(now=1060.0, state_path=str(state_path), dry_run=True,
-                        compact_requests_path=str(creqp))
+            wd.run_once(now=1060.0, state_path=str(state_path), dry_run=True)
         self.assertEqual(captured.get("compact_pending"), False,
                          "run_once must pass compact_pending=False (#1084)")
 
+    def test_run_once_rejects_the_deleted_compact_requests_path_kwarg(self):
+        # L2: the parameter is gone from run_once's signature.
+        self.assertNotIn("compact_requests_path",
+                         inspect.signature(wd.run_once).parameters,
+                         "run_once must not carry the deleted compact_requests_path "
+                         "plumbing (#1084 L2)")
+
 
 # --------------------------------------------------------------------------- #
-# (c) cmd_compact_request is a removed stub
+# (c) L2: `compact-request` is UNREGISTERED — an unknown subcommand, not a stub.
 # --------------------------------------------------------------------------- #
-class TestCmdCompactRequestStub(unittest.TestCase):
-    def _run(self, args):
-        buf = []
-        with m.patch("sys.stdout") as out:
-            out.write = lambda s: buf.append(s)
-            rc = airuleset.cmd_compact_request(args)
-        return rc, "".join(buf)
+class TestCompactRequestUnregistered(unittest.TestCase):
+    def test_cmd_compact_request_function_is_gone(self):
+        self.assertFalse(hasattr(airuleset, "cmd_compact_request"),
+                         "cmd_compact_request must be deleted in L2 (#1084)")
 
-    def test_self_is_a_noop_stub_exit_zero(self):
-        rc, txt = self._run(_args(self=True))
-        self.assertIn("machine compacts removed", txt)
-        self.assertIn(rc, (None, 0))
+    def test_not_in_the_dispatch_table(self):
+        # The command dispatch dict (SUBCOMMANDS) no longer routes it.
+        self.assertNotIn("compact-request", airuleset.SUBCOMMANDS,
+                         "compact-request must not be a routable command (#1084 L2)")
 
-    def test_record_is_a_noop_stub_exit_zero(self):
-        rc, txt = self._run(_args(record=True, session="s", cwd="/x",
-                                  origin="self-callback"))
-        self.assertIn("machine compacts removed", txt)
-        self.assertIn(rc, (None, 0))
-
-    def test_status_is_a_noop_stub_exit_zero(self):
-        rc, txt = self._run(_args(status=True, session="s"))
-        self.assertIn("machine compacts removed", txt)
-        self.assertIn(rc, (None, 0))
-
-    def test_no_flags_is_a_noop_stub_exit_zero(self):
-        # pre-#1084 this exited non-zero (usage); now it can never break a turn.
-        rc, txt = self._run(_args())
-        self.assertIn("machine compacts removed", txt)
-        self.assertIn(rc, (None, 0))
+    def test_argparse_rejects_the_subcommand(self):
+        # An unknown subcommand -> argparse errors out with SystemExit (code 2)
+        # during parse_args, before any dispatch.
+        import contextlib
+        import io
+        with m.patch.object(sys, "argv",
+                            ["airuleset", "compact-request", "--self"]):
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    airuleset.main()
 
 
 # --------------------------------------------------------------------------- #
@@ -443,6 +410,103 @@ class TestDoctrineHasNoCompactRequestInstruction(unittest.TestCase):
         text = lane_resources._lane_nudge_text(10, 2, {"total": 5})
         self.assertNotIn("compact-request", text)
         self.assertNotIn("compact --self", text)
+
+
+# --------------------------------------------------------------------------- #
+# (f) L2 DELETION: the whole callback-compact delivery + store + cooldown +
+#     queued + submit-verify + boundary/live-bg machinery is GONE from
+#     watchdog.compact — nothing surviving references any of it.
+# --------------------------------------------------------------------------- #
+DELETED_COMPACT_SYMBOLS = (
+    # delivery + submit-verify + sync attempt
+    "deliver_compact", "_compact_sync_attempt", "_compact_submit_verified",
+    "_compact_still_in_box", "_compact_post_send_classify",
+    "_COMPACT_TERMINAL_WORDS", "_COMPACT_HOLD_EXTEND_WORDS",
+    "_COMPACT_HOLD_HINT_WORDS", "COMPACT_TEXT", "COMPACT_BOUNDARY_HOLD_CMD",
+    "COMPACT_SYNC_ATTEMPT_MARGIN_S",
+    # request store
+    "compact_requests_path", "load_compact_requests", "_save_compact_requests",
+    "record_compact_request", "clear_compact_request", "has_pending_request",
+    "_touch_compact_request_ts", "actionable_compact_requests",
+    "compact_ignore_reason", "COMPACT_PENDING_HOLD_S", "COMPACT_REQUEST_STALE_S",
+    # delivered / cooldown store
+    "compact_delivered_path", "mark_compact_delivery_ts",
+    "compact_delivery_in_cooldown", "compact_recently_compacted",
+    "COMPACT_MIN_DELIVERY_INTERVAL_S", "COMPACT_RECENTLY_COMPACTED_VETO_S",
+    "_compact_min_delivery_interval",
+    # queued store
+    "compact_queued_path", "mark_compact_queued_ts", "clear_compact_queued_ts",
+    "compact_queued_since", "compact_queued_in_pane",
+    # boundary / liveness / age / sync-log writer
+    "_compact_not_at_boundary", "_compact_session_unresumed",
+    "_compact_boundary_already_compacted", "_compact_duplicate_consume_reason",
+    "_session_has_live_bg_tasks", "_live_bg_tasks_detail",
+    "_safe_age", "_compact_min_request_age", "_compact_request_too_young",
+    "COMPACT_MIN_REQUEST_AGE_S",
+    "_log_compact_sync", "COMPACT_SYNC_LOG_LINES_MAX",
+)
+
+
+class TestCompactMachineryDeleted(unittest.TestCase):
+    def test_every_dead_symbol_is_gone(self):
+        still = [s for s in DELETED_COMPACT_SYMBOLS if hasattr(compact, s)]
+        self.assertEqual(still, [],
+                         "L2 (#1084) must delete every dead compact symbol; "
+                         "still present: %r" % still)
+
+    def test_the_hooks_are_gone(self):
+        # the two notify-compact hooks stay deleted (L1 already removed them).
+        for name in ("notify-compact-request.sh",
+                     "notify-compact-subagent-boundary.sh"):
+            self.assertFalse((ROOT / "hooks" / name).exists(),
+                             "%s must not exist (#1084)" % name)
+
+
+# --------------------------------------------------------------------------- #
+# (g) L2 KEPT: the pane-resolution + observation helpers surviving jobs read
+#     stay defined and intact; `pending_compact_hold` is now unconditionally
+#     False (no machine compact is ever pending — its store is gone).
+# --------------------------------------------------------------------------- #
+KEPT_COMPACT_SYMBOLS = (
+    "compact_sweep", "pending_compact_hold", "_find_pane_for_session",
+    "resolve_self_pane", "resolve_declared_window_pane",
+    "_COMPACT_COMPLETION_HEADING_RX", "_compact_recent_human_activity",
+    "compact_sync_log_path",
+    # KEPT: gates/lanefill.py (the lane-fill Stop gate) imports this constant as
+    # its single source for watchdog.count_live_workers() (#1084 L2 review BLOCKER).
+    "COMPACT_LIVE_WORKER_FRESHNESS_S",
+)
+
+
+class TestObservationAndPaneHelpersKept(unittest.TestCase):
+    def test_every_kept_symbol_is_present(self):
+        missing = [s for s in KEPT_COMPACT_SYMBOLS if not hasattr(compact, s)]
+        self.assertEqual(missing, [],
+                         "L2 (#1084) must KEEP the helpers surviving jobs read; "
+                         "missing: %r" % missing)
+
+    def test_pending_compact_hold_is_unconditionally_false(self):
+        # Even with a well-formed fresh request written directly to a store file
+        # and the owner disable flag absent, no compact is ever pending now.
+        td = TemporaryDirectory()
+        self.addCleanup(td.cleanup)
+        reqp = Path(td.name) / "compact-requests.json"
+        now = 1_000_000.0
+        reqp.write_text(json.dumps(
+            {"sid-live": {"cwd": "/repo", "ts": int(now), "bts": int(now),
+                          "origin": "self-callback"}}), encoding="utf-8")
+        with m.patch.object(wd, "_owner_disabled", return_value=False):
+            self.assertFalse(
+                compact.pending_compact_hold("sid-live", now=now + 1,
+                                             path=str(reqp)),
+                "pending_compact_hold must be False in L2 — no machine compact "
+                "is ever pending (#1084)")
+
+    def test_observation_helpers_live_in_long_turn_untouched(self):
+        # the OBSERVATION helpers the design keeps are re-exported via watchdog.
+        self.assertTrue(hasattr(wd, "_pane_compacting"))
+        self.assertTrue(hasattr(wd, "COMPACTING_MARKER"))
+        self.assertTrue(hasattr(wd, "_QUEUED_COMPACT_RX"))
 
 
 if __name__ == "__main__":

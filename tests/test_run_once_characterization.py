@@ -131,8 +131,11 @@ CANONICAL_SWEEP = [
             "gkreq_fetch", _stub_fetch, "list", "gkreq-backstop error"),
     JobSpec("burn_snapshot_job", "wd", "burn_snapshot_job",
             "burn_snapshot_path", _PATH, "list", "burn-snapshot error"),
+    # #1084 L2: machine compacts are REMOVED; the former `compact_requests_path`
+    # gate is gone and the slot is ALWAYS-ON (gate=None) — it journals the removed
+    # line each sweep so the number stays addressable.
     JobSpec("compact_sweep", "wd.compact", "compact_sweep",
-            "compact_requests_path", _PATH, "list", "compact-request error"),
+            None, None, "list", "compact-request error"),
     JobSpec("fleet_burn_job", "wd", "fleet_burn_job",
             "fleet_fetch", _stub_fetch, "list", "fleet-burn error"),
     JobSpec("burn_alert_job", "wd", "burn_alert_job",
