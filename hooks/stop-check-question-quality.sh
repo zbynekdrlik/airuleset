@@ -392,6 +392,31 @@ BLOCK=$(printf '%s\n' "$MSG" | LC_ALL=C awk -v m="$N" '
         print blk
     }')
 
+# --- #1106 Check 10: a settled question is NOT re-asked. On a repo with a
+# per-repo settled-questions cache (`~/.claude/spec-settled/<slug>.json`,
+# refreshed off the tickets-status refresh — no gh on this Stop path), a ❓
+# block whose question overlaps >= 60% of a spec's `Settled questions` entry is
+# BLOCKED, quoting the settled answer. The token-overlap logic lives in
+# gates.spec (hermetic, testable); this hook just runs the runner over the
+# already-extracted BLOCK and blocks on rc=2. FAIL-OPEN in every direction
+# (cache absent / no slug / any error -> rc 0). Runs BEFORE the #1006 shape
+# checks; the #740 verbatim-repeat bypass above already exited 0 for an
+# already-delivered question, so Check 10 only ever fires on a question's FIRST
+# emergence. Under the shared RETRY_FILE cap so it can never wedge.
+if [ -n "$BLOCK" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
+    _HOOK_DIR_1106="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    _REPO_ROOT_1106="$(dirname "$_HOOK_DIR_1106")"
+    _CWD_1106=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
+    SPEC_REASON=$(env PYTHONPATH="${_REPO_ROOT_1106}${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -P -m gates.spec_question --cwd "$_CWD_1106" <<<"$BLOCK" 2>/dev/null) \
+        && SPEC_RC=0 || SPEC_RC=$?
+    if [ "$SPEC_RC" = 2 ] && [ -n "$SPEC_REASON" ]; then
+        echo "$((RETRIES+1))" > "$RETRY_FILE"
+        jq -n --arg reason "$SPEC_REASON" '{decision: "block", reason: $reason}'
+        exit 0
+    fi
+fi
+
 # --- #1006 (montalu, repeated escalation 2026-09-12): ONE ❓ block = ONE
 # client text. A ❓ approval block that bundled TWO client-message drafts
 # (Text úloha 638 + Text úloha 881, each signed `ZbynekAI`) with ONE decision

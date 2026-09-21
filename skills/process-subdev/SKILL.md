@@ -185,6 +185,13 @@ repo's own CLAUDE.md / playbook is what names the command.
      SHARED; a shared-path edit gets the same review depth for the OTHER instance, and
      both instances' pre-prod green is mandatory evidence (watch data files that
      re-apply on upgrade and silently rewrite the other prod's records).
+   - **Spec conformance (#1106)** — when the ticket body carries a `Spec: #N §x` reference
+     (the initiative's pinned `spec` ticket), the hand-off/RFR MUST carry a
+     `Spec-check: §x — conform | deviation <comment-id>` line, and the diff must match that
+     spec section. A missing `Spec-check:` on a `Spec:`-bearing ticket is a FINDING (the
+     `airuleset.py handoff` composer already refuses to post the RFR without it); a real
+     deviation with no owner decision + `airuleset.py spec-change` on the spec ticket is a
+     FINDING — the spec stays the durable truth, never a silently-forked implementation.
 3. **Only then** read the tickets + readiness comments and cross-check: does the diff
    actually solve each ticket? Any unbacked claim is a FINDING.
 

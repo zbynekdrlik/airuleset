@@ -1,6 +1,6 @@
 # Client Board Tasks — project.task Formatting Doctrine
 
-Full rationale & background: `client-board-tasks-history.md` (verbatim, not injected, #1098).
+Full background: `client-board-tasks-history.md` (#1098).
 
 ---
 
@@ -18,8 +18,8 @@ transition INTO it. The "blocked on a client question" stage is **Potrebuje
 ujasniť** (montalu / miva); slovnormal has no dedicated question stage, so a
 question stays in **V práci** with the chatter question of rule 4.
 
-Adding a new board = adding a profile row here (and its GitHub `needs-answer`
-mirror if a client answer is pending).
+Adding a board = a profile row here (+ its GitHub `needs-answer` mirror if a
+client answer is pending).
 
 ---
 
@@ -29,8 +29,7 @@ mirror if a client answer is pending).
 
 The task name (`project.task.name`) is written in the CLIENT's language
 (today: Slovak for every board) — never English, never internal/developer
-jargon. A task name the client's employee cannot understand without asking
-defeats the board's purpose.
+jargon. A name the employee cannot understand defeats the board's purpose.
 
 ### 2. Description — 2–4 sentences for the employee
 
@@ -170,14 +169,15 @@ here; the #1028 doctrine-audit retires any that slip through.
 Every `message_post` on a client task goes through the repo's task-sync poster
 (`body_is_html=True`, recipient guard) from the stream's OWN Odoo account — never
 a manual browser post, never another stream's account, never the shared admin
-account. The `handover-compose.md` signature and `body_is_html` rules apply to
-task chatter too.
+account, and **never an ad-hoc driver `.py`** (gk posts on a stream's behalf via
+the stream-approved poster + its read-back — `handover-compose.md`; a shipped
+driver is gated by `block-odoo-message-post-without-html.sh`, #1054). The
+`handover-compose.md` `body_is_html` rule applies to task chatter too.
 
 **Never edit or delete a posted chatter message**, with ONE exception: an
-OWNER-ORDERED cleanup of the stream's OWN messages (e.g. „zmaž ten technický spam
-z komentárov", #1018) — a `mail.message.write` on own-author messages only, never
-another author's, recorded on the relevant GitHub ticket so the edit is logged.
-Absent an explicit owner order, a posted message stands.
+OWNER-ORDERED cleanup of the stream's OWN messages (#1018) — a
+`mail.message.write` on own-author messages only, recorded on the GitHub ticket
+so the edit is logged. Absent an owner order, a posted message stands.
 
 ### 14. Udalosť → fáza (#1036)
 

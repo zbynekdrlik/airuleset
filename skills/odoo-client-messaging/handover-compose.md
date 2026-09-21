@@ -32,24 +32,21 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   channel number and NEVER only wrapped in prose:
   `Vlákno: „Tabula objednavok 1" (pod IT-support, montalu PROD)`; (2) the FULL
   message body verbatim; (3) the member list. NEVER "the text is on the ticket" —
-  the owner does not read tickets (naming it only by its internal number forced
-  the owner to ask which thread — airuleset #632: „vlákno 250"). Every thread
+  the owner does not read tickets (airuleset #632: „vlákno 250"). Every thread
   mention carries its deep URL, never a bare channel number (airuleset #657/#650):
   `Vlákno: „Tabula objednavok 1" — https://erp.montalu.cloud/odoo/discuss?active_id=discuss.channel_288`
   — confirm it loads before pasting (Check 6 #650 + `stop-check-prose-violations.sh` #657).
 - **The thread NAME ends with the owning stream's NUMBER**, so the owner sees at
-  a glance which stream owns it (montalu3 → "Kontrola zákazníckych e-mailov 3"),
-  formalizing the existing IT-support convention on montalu PROD. The suffix is
+  a glance which stream owns it (montalu3 → "Kontrola zákazníckych e-mailov 3").
+  The suffix is
   the STREAM'S NUMBER: for a NUMBERED stream it is the trailing digits of the
   stream name (montalu2..8 → 2..8, david2..4 → 2..4, miva1 → 1). For an
   UNNUMBERED base stream (montalu, marek, david, simap) the suffix is "1" — the
   first stream of its client family — CONFIRMED by the owner on airuleset #532
   (2026-08-18; base streams renamed <name>1 per airuleset #537), so every active
   handover stream ends with its number. **The name is at most ~30 CHARACTERS including that trailing number**
-  (airuleset #597): a longer name is truncated behind the Discuss sidebar's
-  first page. The proposal you present must ALREADY carry a name satisfying
-  both conditions — never a long or un-numbered draft the owner
-  has to fix. Both are HOOK-ENFORCED at create time
+  (airuleset #597). The proposal you present must ALREADY carry a name satisfying
+  both conditions. Both are HOOK-ENFORCED at create time
   (`hooks/block-discuss-thread-name.sh`, airuleset #596/#597): a create whose
   name breaks either condition is BLOCKED before it reaches PROD (a rename is
   never blocked; a `message_post` gets its own SIGNATURE check — next bullet,
@@ -70,8 +67,7 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   derived from those `\d+` regexes. On any single client Odoo instance only ONE
   stream family posts, so the bare number is unambiguous. The signature stays on
   EVERY message — never dropped the way the greeting is (a POISTKA while streams
-  share one Odoo account; renaming per stream, airuleset #598 → odoo-erp #4624,
-  keeps the layer uncontradicted). HOOK-ENFORCED
+  share one Odoo account; per-stream rename airuleset #598 → odoo-erp #4624). HOOK-ENFORCED
   (`hooks/block-discuss-thread-name.sh`, airuleset #609): a `message_post` with
   no valid identity signature (`ZbynekAI <N>` / `MarekAI <N>`, or the WRONG
   identity, #641) is BLOCKED before PROD, regardless of the loaded skill.
@@ -80,7 +76,11 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   `message_post` with HTML tags.** Without it Odoo escapes the HTML and clients
   see raw `<p>` tags. HOOK-ENFORCED (`hooks/block-odoo-message-post-without-html.sh`,
   airuleset #915): payload with HTML + no `body_is_html` is BLOCKED fleet-wide.
-  After posting, read back and verify 0 escaped messages (#916 Stop check).
+  After posting, read back and verify 0 escaped messages (#916 Stop check). **Gk
+  NEVER posts via an ad-hoc driver — NIKDY ad-hoc driver mimo stream recept:** use
+  the stream-approved poster (its read-back); a driver shipped by
+  `scp` / `ssh … odoo shell < driver.py` is OPENED + gated too — dvojité
+  escapnutie tagov or a missing read-back = BLOCK (#1054, odoo-erp #4650).
 - **The message body MUST carry a direct deep-link URL to the LIVE feature** on
   the client's PROD — the actual route/record/page URL the client clicks to SEE
   it, never a menu path ("Predaj → Objednávky → …") and never the bare homepage.
@@ -94,8 +94,7 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   must SAY so ("teba pridám do vlákna ako člena"), so the owner knows they will
   see the thread and can catch a broken delivery.
 - **Announce ONLY functions that are ALREADY LIVE on the client's PROD.** Never a
-  merged-but-undeployed or scheduled feature — the client must act the moment they
-  read. Confirm it is live on their PROD first.
+  merged-but-undeployed or scheduled feature; confirm it is live first.
 - **Len minulé, overené udalosti — klientska správa sa NIKDY neodvoláva na to,
   čo sa LEN STANE (airuleset #696, owner ruling 2026-08-25).** Incident: stream sľúbil „od zajtrajšieho ranného e-mailu" digest kým ešte
   neexistoval. Keď je viditeľný výstup funkcie plánovaný ARTEFAKT (digest
@@ -138,8 +137,7 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   carries NO greeting — it continues directly with the content (a REAL
   `@`-mention anchor for EVERY addressee — #702 above — and `partner_ids` for
   delivery ALWAYS, on every message). Repeating „Dobrý deň…" on every follow-up
-  reads as machine-sent (airuleset #573). Greet once, at the top of the thread; after that,
-  just the message.
+  reads as machine-sent (airuleset #573). Greet once, at the top of the thread.
 - **Explain the concept to the client, not just a link + feature list.** For a
   non-technical client, explain in one plain sentence WHAT each named thing is and
   HOW it fits their day before any link (#1028).
