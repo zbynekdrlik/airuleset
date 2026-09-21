@@ -169,10 +169,10 @@ here; the #1028 doctrine-audit retires any that slip through.
 Every `message_post` on a client task goes through the repo's task-sync poster
 (`body_is_html=True`, recipient guard) from the stream's OWN Odoo account — never
 a manual browser post, never another stream's account, never the shared admin
-account, and **never an ad-hoc driver `.py`** (gk posts on a stream's behalf via
-the stream-approved poster + its read-back — `handover-compose.md`; a shipped
-driver is gated by `block-odoo-message-post-without-html.sh`, #1054). The
-`handover-compose.md` `body_is_html` rule applies to task chatter too.
+account, and **never an ad-hoc driver `.py`** — use the stream-approved poster
+with read-back (`handover-compose.md`; hook
+`block-odoo-message-post-without-html.sh`, #1054). The `handover-compose.md`
+`body_is_html` rule applies to task chatter too.
 
 **Never edit or delete a posted chatter message**, with ONE exception: an
 OWNER-ORDERED cleanup of the stream's OWN messages (#1018) — a
