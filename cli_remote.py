@@ -995,16 +995,30 @@ def _shared_remote_host_ips():
 
 
 def _remote_cmd_with_home_audit(remote_cmd):
-    """Append a same-connection `/home` listing to an existing remote
-    install command, WITHOUT letting the trailing `ls` change the ssh
-    call's own exit code — `;` sequencing after the `&&`-chained install
-    steps would otherwise make the LAST command's exit code win, silently
-    turning a genuine `git pull`/`install` failure into a false push
-    success the moment this audit rides along on that connection. Capture
-    the real exit code with `$?` immediately after the original chain, run
-    the audit unconditionally, then `exit` with the ORIGINAL code."""
+    """Run an existing remote install command in a SUBSHELL and append a
+    same-connection `/home` listing, WITHOUT letting the trailing `ls`
+    change the ssh call's own exit code AND without the gated chain's own
+    `exit` swallowing the audit.
+
+    The assembled command's tail (since #1048/#1051) is
+    `… && { gh-chain } && { playwright }` — two `{ … }` command GROUPS
+    whose every path ends in `exit` (0 on success/SKIP, 87/88 on
+    failure). `exit` inside a `{ … }` group terminates the WHOLE remote
+    `sh -c`, so a plain `<chain>; __ar_rc=$?; …` tail was unreachable on
+    every real box: the marker never reached stdout, `_home_audit` saw no
+    trustworthy listing and printed `REGISTRATION AUDIT NOT VERIFIED`
+    once per push — for two weeks, on the shared hosts (#1095). Wrapping
+    the chain in a subshell `( … )` makes the gates' `exit` end the
+    SUBSHELL only; `$?` then captures the subshell's real rc (a genuine
+    `git pull`/`install` failure, or a gate's 87/88), the audit runs
+    unconditionally, and `exit $__ar_rc` re-raises the ORIGINAL code so
+    the deploy loop's `rc != 0 -> failed.append` accounting is unchanged.
+    (`;`-sequencing after the trailing `ls` would otherwise let the LAST
+    command's exit code win, silently turning a genuine failure into a
+    false push success the moment this audit rides along on that
+    connection.)"""
     return (
-        remote_cmd
+        "( " + remote_cmd + " )"
         + "; __ar_rc=$?; echo '%s'; ls -1 /home 2>/dev/null; exit $__ar_rc"
         % _HOME_AUDIT_MARKER
     )
