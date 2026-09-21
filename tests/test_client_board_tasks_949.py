@@ -23,11 +23,7 @@ class TestClientBoardTasksDoctrine949(TestCase):
 
     @classmethod
     def setUpClass(cls):
-        # #1102: read the UNION (CORE + topic companions) — each byte-identical
-        # rule is found wherever the partition placed it (nothing deleted).
-        cls.body = "\n".join((BODY_DIR / f).read_text(encoding="utf-8") for f in (
-            "client-board-tasks.md", "client-board-stages.md",
-            "client-board-questions.md", "client-board-attachments.md"))
+        cls.body = "\n".join((BODY_DIR / f).read_text(encoding="utf-8") for f in ("client-board-tasks.md", "client-board-stages.md", "client-board-questions.md", "client-board-attachments.md"))
         cls.normed = " ".join(cls.body.split())
 
     # -- Injection identity (test_situational_injection.py depends on the H1) --

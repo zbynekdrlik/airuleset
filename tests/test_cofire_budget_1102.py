@@ -113,13 +113,17 @@ def _haystack(surface, tool_input=None, prompt=None):
 def simulate(surface, tool_input=None, prompt=None):
     """Faithful re-implementation of the injector's accept/DEFER loop.
 
-    Returns (accepted_body_rels, headroom) where headroom is measured by the
-    hook's OWN arithmetic — MAX_TOTAL minus the tightest check value across the
-    accepted chunks (the last accepted chunk is always the tightest)."""
+    The accept/DEFER decision is the injector's OWN (asymmetric) arithmetic —
+    `sum(len(wrapped chunks)) + len(unwrapped candidate) > MAX_TOTAL` in conf
+    order, with the `and chunks` guard. The RETURNED headroom, however, is the
+    conservative FULL-WRAPPER residual (MAX_TOTAL minus the sum of the wrapped
+    accepted chunks) — the TRUE injected-context budget the model actually
+    receives (a03d MINOR-3: the hook's own check under-counts the last body by ~1
+    wrapper, so an arithmetic-check headroom overstates the real slack). Returns
+    (accepted_body_rels_in_conf_order, full_wrapper_headroom)."""
     hay = _haystack(surface, tool_input, prompt)
     chunks = []
     accepted = []
-    max_check = 0
     for topic, tool_pat, pattern, rel, exclude in _load_conf():
         try:
             if not re.fullmatch(tool_pat, surface):
@@ -136,15 +140,14 @@ def simulate(surface, tool_input=None, prompt=None):
             continue
         if not body:
             continue
-        if len(body) > MAX_BODY:
-            body = body[:MAX_BODY]
-        check = sum(len(c) for c in chunks) + len(body)
+        if len(body) > MAX_BODY:  # mirror the injector's truncation exactly
+            body = body[:MAX_BODY] + "\n\n[...truncated — read " + rel + " for the rest]"
+        check = sum(len(c) for c in chunks) + len(body)  # hook's own DEFER check
         if check > MAX_TOTAL and chunks:
             continue  # defer
         chunks.append(_wrap(topic, rel, body))
         accepted.append(rel)
-        max_check = max(max_check, check)
-    headroom = (MAX_TOTAL - max_check) if accepted else MAX_TOTAL
+    headroom = (MAX_TOTAL - sum(len(c) for c in chunks)) if accepted else MAX_TOTAL
     return accepted, headroom
 
 
@@ -217,6 +220,16 @@ NEGATIVES = [
     ("rust write_task", "Write", _w("/repo/m.rs", "write_task(&mut b, &d)?;"), None),
     ("generic prompt task", "UserPromptSubmit", None, "❓ how do I create a task queue in asyncio?"),
     ("generic prompt build", "UserPromptSubmit", None, "❓ ako spravím build na dev2?"),
+    # review a03d MAJOR-1 / a8e3a1bf MINOR-1: `board` must be \b-anchored so a ❓
+    # prompt about a dashboard / keyboard / cardboard does NOT inject the questions
+    # companion (the #949 over-fire class).
+    ("dashboard prompt", "UserPromptSubmit", None, "❓ how do I fix the dashboard grid layout?"),
+    ("keyboard prompt", "UserPromptSubmit", None, "❓ what is the keyboard shortcut to save?"),
+    ("cardboard prompt", "UserPromptSubmit", None, "❓ where do I buy cardboard boxes cheaply?"),
+    # the ❓-prompt branch is a SEPARATE UserPromptSubmit-only row — a Write whose
+    # content merely carries ❓ + klient (no project.task) must NOT fire it.
+    ("write with ❓+klient no project.task", "Write",
+     _w("/repo/help.py", "TOOLTIP = '❓ napíš klientovi na dashboard'"), None),
 ]
 
 # byte-identical rule header -> the ONE file it must live in after the partition
@@ -326,17 +339,32 @@ class TestUnionContentLocks(unittest.TestCase):
 
 
 class TestPrimaryInvariantUnderPressure(unittest.TestCase):
-    """#1102 primary invariant (review-2 adversarial): on ANY project.task
-    payload — including a kitchen-sink that names stage + question + attachment +
-    message_post at once — CORE and the messaging posting recipe (SKILL.md, when
-    message_post is present) must NEVER defer. The injector's documented
-    defer-to-next-action contract may drop the LEAST-relevant large secondary
-    companion (e.g. the attachments recipe) on such an overloaded payload; that
-    body re-fires on the stream's next attachment-only action, so nothing is
-    lost. This test locks the invariant that matters — the board CORE and the
-    posting recipe always co-fire — against a regression that would defer either.
+    """#1102 primary invariant (review a30f Q3 / a03d MINOR-4): on ANY realistic
+    multi-token project.task write — a task-sync .py naming stage + question +
+    message_post at once — CORE and the messaging posting recipe (SKILL.md) must
+    NEVER defer, and the posting recipe must be processed BEFORE the board TOPIC
+    companions (stages/questions/attachments), so a budget-constrained write can
+    only ever defer a topic companion (which re-fires on its own next action),
+    never the posting recipe.
+
+    This is the structural fix for the fragility review a30f found: before the
+    board companions were clustered after the xmlrpc row, the posting recipe was
+    processed LAST on a 4-token write and co-fit with only ~59 chars — a future
+    CORE edit under CORE_MAX would have silently deferred the posting recipe (the
+    exact #1102 bug). Now the conf order guarantees CORE then posting recipe then
+    topic companions.
     """
 
+    TOPIC_COMPANIONS = (STAGES, QUEST, ATT)
+
+    # review a30f Q3's exact payload: a task-sync dispatcher naming a stage move
+    # + a client question + a chatter post in one file (NO attachment token, so
+    # ATT does not fire — the firing set is CORE + posting recipe + STAGES + QUEST).
+    TASK_SYNC = (
+        "env['project.task'].write({'stage_id': verifik})\n"
+        "# Potrebuje ujasniť — needs-answer from the client\n"
+        "task.message_post(body=note, body_is_html=True)")
+    # + the maximal kitchen-sink (adds the attachment tokens).
     KITCHEN_SINK = (
         "env['project.task'].write({'stage_id': verifik, 'description': d})\n"
         "atts = m('ir.attachment','search_read',"
@@ -344,15 +372,30 @@ class TestPrimaryInvariantUnderPressure(unittest.TestCase):
         "# Potrebuje ujasniť / needs-answer\n"
         "task.message_post(body=note, body_is_html=True)")
 
-    def test_core_and_posting_recipe_never_defer(self):
-        ctx = run_hook("Write",
-                       _w("/repo/board_everything.py", self.KITCHEN_SINK),
-                       session_id="kitchensink-1102")
-        self.assertIn(f'file="{CORE}"', ctx,
-                      "CORE must never defer on a project.task payload")
+    def _check(self, name, content):
+        # real hook: CORE + posting recipe must inject
+        ctx = run_hook("Write", _w(f"/repo/{name}.py", content),
+                       session_id=f"{name}-1102")
+        self.assertIn(f'file="{CORE}"', ctx, f"[{name}] CORE must never defer")
         self.assertIn(f'file="{SKILL}"', ctx,
-                      "the messaging posting recipe must never defer when "
-                      "message_post is present (the #1102 primary invariant)")
+                      f"[{name}] the posting recipe must never defer when "
+                      "message_post is present (#1102 primary invariant)")
+        # structural: the posting recipe is ordered before every topic companion
+        # that fires, so only a topic companion can ever be the one deferred.
+        accepted, _ = simulate("Write", _w(f"/repo/{name}.py", content))
+        self.assertIn(SKILL, accepted)
+        for comp in self.TOPIC_COMPANIONS:
+            if comp in accepted:
+                self.assertLess(
+                    accepted.index(SKILL), accepted.index(comp),
+                    f"[{name}] posting recipe must be processed before {comp} so "
+                    "a budget-constrained write never defers the posting recipe")
+
+    def test_task_sync_dispatcher(self):
+        self._check("task_sync", self.TASK_SYNC)
+
+    def test_kitchen_sink(self):
+        self._check("board_everything", self.KITCHEN_SINK)
 
 
 if __name__ == "__main__":

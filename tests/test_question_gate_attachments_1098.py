@@ -431,11 +431,7 @@ class TestCheck9Passes(_HookCase):
 
 
 class TestDoctrineLocks(unittest.TestCase):
-    """Window teeth (#498/#500) on rule 15 — a deletion of the payload FAILS.
-
-    #1102: rule 15 moved VERBATIM out of the injected CORE (client-board-tasks.md)
-    into RECIPE (client-board-attachments.md), which now has its own trigger row;
-    these locks re-point to RECIPE (the union home of rule 15)."""
+    """Window teeth (#498/#500) on rule 15 — a deletion of the payload FAILS."""
 
     def _rule15(self):
         text = RECIPE.read_text(encoding="utf-8")
@@ -611,10 +607,9 @@ class TestRecipeLocks(unittest.TestCase):
 class TestRecipeRelocation(unittest.TestCase):
     """#1098 fix-forward 2: the ``## project.task`` recipe moved OUT of the
     injected ``read-with-attachments.md`` into ``client-board-attachments.md``,
-    so the #745 three-way co-fire (comprehensive-logging + read-attachments +
-    read-reactions) fits under MAX_TOTAL=14000 again. The injected file keeps
-    only a pointer. #1102: client-board-attachments.md now ALSO carries rule 15
-    and has its OWN situational-trigger row (a project.task attachment read)."""
+    so the #745 three-way co-fire fits under MAX_TOTAL=14000 again; the injected
+    file keeps only a pointer. #1102: that file now also carries rule 15 and has
+    its OWN situational-trigger row (a project.task attachment read)."""
 
     @staticmethod
     def _strip_frontmatter(t):
@@ -629,13 +624,8 @@ class TestRecipeRelocation(unittest.TestCase):
         self.assertTrue(RECIPE.is_file())
 
     def test_recipe_situationally_injected(self):
-        # #1102: client-board-attachments.md now HAS its own trigger row (rule 15
-        # + recipe, fired on a project.task attachment read) — the co-fire budget
-        # is locked by tests/test_cofire_budget_1102.py, not by starving it of a row.
         conf = TRIGGERS.read_text(encoding="utf-8")
-        self.assertIn(
-            "odoo-client-board-attachments\tWrite|Edit", conf,
-            "client-board-attachments.md must have its own situational-trigger row (#1102)")
+        self.assertIn("odoo-client-board-attachments\tWrite|Edit", conf)
 
     def test_read_attachments_body_lean(self):
         # The injected attachments-read body must be small enough that the #745
