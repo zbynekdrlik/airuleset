@@ -291,12 +291,33 @@ class TestDavid3Sequential1031(TestCase):
                                    windows=gk, home="/home/gatekeeper"),
             ("parallel", "review", "role"))
 
-    def test_sibling_david_streams_still_default_parallel(self):
-        for u in ("david1", "david2", "david4"):
-            self.assertEqual(cli_fleet.box_windows(u), [],
-                             "%s must NOT declare a window (#1031)" % u)
+    def test_sibling_streams_declared_sequential_20260921(self):
+        # Owner directive 2026-09-21 („prepni david1 až david4 aby nemali multi
+        # subagent mod ale aby išli sekvenčne … to isté aj miva1") reverses the
+        # #1031 "david3 ONLY" scoping: david1/2/4 and miva1 now declare the SAME
+        # single sequential window shape as d3 (window name = the box alias).
+        for u, alias in (("david1", "d1"), ("david2", "d2"), ("david4", "d4"),
+                         ("miva1", "miva")):
+            w = cli_fleet.box_windows(u)
+            self.assertEqual([x["name"] for x in w], [alias],
+                             "%s must declare exactly its own window" % u)
+            self.assertEqual(w[0]["cwd"], "~/devel/odoo/odoo-erp")
+            self.assertIsNone(w[0]["role"])
+            self.assertEqual(w[0]["mode"], "sequential")
+            self.assertEqual(cli_fleet.validate_windows(w), [])
             self.assertEqual(
                 cc.resolve_concurrency("/home/%s/devel/odoo/odoo-erp" % u,
+                                       windows=w, home="/home/%s" % u),
+                ("sequential", None, "role"))
+
+    def test_montalu_streams_still_default_parallel(self):
+        # the flip is scoped to the david family + miva1; montalu* keep the
+        # parallel default (owner 2026-09-21: gk + montalu1 run full throttle).
+        for u in ("montalu1", "montalu2", "montalu5"):
+            self.assertEqual(cli_fleet.box_windows(u), [],
+                             "%s must NOT declare a window" % u)
+            self.assertEqual(
+                cc.resolve_concurrency("/home/%s/devel/odoo/odoo-slovnormal" % u,
                                        windows=cli_fleet.box_windows(u),
                                        home="/home/%s" % u),
                 ("parallel", None, "default"))
