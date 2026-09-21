@@ -3987,6 +3987,14 @@ def cmd_tickets_status(args):
                 gk = sum(1 for n_num in workable_rows if handed.get(n_num))
                 entry["open"] = len(workable_rows) - gk
                 entry["gk"] = gk
+                # #1103: the handed-off ticket NUMBERS (the whole `handed`
+                # subset, not just the workable-gk count) — the lane-liveness
+                # classifier reads this from the FRESH cache to mark a lane whose
+                # ticket is with the gatekeeper as FINISHED (excluded from live),
+                # with ZERO gh on the hot dispatch path. Parked+handed rows are
+                # included (their lane is still finished for THIS box).
+                entry["gk_numbers"] = sorted(int(n) for n in rows
+                                             if handed.get(n))
                 # #1083: the M bucket count + numbers (release-readiness).
                 entry["merged_unreleased"] = len(merged_rows)
                 entry["merged_unreleased_numbers"] = sorted(
@@ -10843,7 +10851,57 @@ def _remove_legacy_nudges_off_marker(home=None):
         return False
 
 
-def cmd_nudges(args):
+# #1104-review F4 -- MACHINE_NUDGE_KINDS members whose DELIVERY never types into a
+# pane: `card` is a Discord report card (a notification), and `lane-occupancy`'s
+# keystroke delivery was RETIRED (#1089, the lane-fill Stop gate refills instead).
+# Enabling one of these must NOT print a busy-pane "first delivery will wait"
+# warning -- it is misleading (nothing ever types).
+_NON_KEYSTROKE_NUDGE_KINDS = frozenset({"card", "lane-occupancy"})
+
+
+def _nudges_keystroke_pane_warnings(run=None):
+    """#1104 -- classify this box's managed Claude panes (busy / draft / idle) so
+    `nudges on --kind <keystroke kind>` can WARN the owner BEFORE enabling a kind
+    that would type into a live pane. A BUSY pane (a turn mid-render, or waiting on
+    background agents) or a pane holding an at-rest DRAFT defers its first delivery
+    to a true idle tick (the classifier + the busy gate handle that at runtime);
+    this only SURFACES the state at enable time, since flipping a keystroke kind ON
+    while the session is visibly busy is itself the montalu1 incident's trigger.
+    Returns a list of one-line warnings (empty when every managed pane is idle or
+    unreadable). Never raises -- a read failure yields no warning, never a crash of
+    the enable."""
+    import watchdog as _wd
+    try:
+        from watchdog import ops_wait_recheck as _owr
+    except Exception:  # noqa: BLE001
+        _owr = None
+    run = run or _wd._default_run
+    out = []
+    try:
+        panes = _wd._reconcile_candidate_panes(run)
+    except Exception:  # noqa: BLE001
+        return out
+    for pid, cwd, _cmd in panes:
+        try:
+            cap = _wd.capture_pane(pid, run) or ""
+        except Exception:  # noqa: BLE001
+            continue
+        kind, draft = _wd._classify_boundary(cap)
+        busy = kind == "busy" or (_owr is not None
+                                  and _owr._pane_busy_waiting(cap))
+        if busy:
+            out.append(
+                "warning: pane %s (%s) is BUSY (turn mid-render / waiting on "
+                "background agents) — the first delivery will wait for a TRUE "
+                "idle tick, not this sweep." % (pid, cwd))
+        elif kind == "input" and draft:
+            out.append(
+                "warning: pane %s (%s) holds an at-rest DRAFT — the first "
+                "delivery defers until the box is bare." % (pid, cwd))
+    return out
+
+
+def cmd_nudges(args, run=None):
     """#1023 owner nudge kill switch, per-KIND staging — `nudges on|off|status
     [--kind <k>[,<k>]] [--all] [--fleet]`. The owner enables machine-nudge kinds
     ONE AT A TIME: `nudges on --kind queue-arrival` enables just that kind; a bare
@@ -10896,6 +10954,16 @@ def cmd_nudges(args):
             return 2
         for k in kinds:
             _wd.set_nudge_kind(k, True, by=by)
+        # #1104 -- a KEYSTROKE-delivering kind was just enabled; WARN if any
+        # managed pane is busy/draft right now, so the owner knows the first
+        # delivery will wait for a true idle tick rather than typing into a
+        # swallowing pane (the montalu1 incident: goal-sweep enabled while the
+        # session waited on background agents). Skip the warning entirely for a
+        # pure non-keystroke enable (card / retired lane-occupancy, #1104-review
+        # F4 -- those never type). Best-effort: no pane read must fail the enable.
+        if set(kinds) - _NON_KEYSTROKE_NUDGE_KINDS:
+            for _w in _nudges_keystroke_pane_warnings(run):
+                print(_w)
     elif action == "off":
         # a bare `nudges off` (or --all) turns EVERYTHING off — off is safe.
         for k in (kinds if kinds else all_kinds):

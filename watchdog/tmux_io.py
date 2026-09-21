@@ -1312,6 +1312,17 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         watchdog._draft_rescue_persist(pane_id, fresh, logs=logs)
         _log("send-verified abort: box raced busy pre-send")
         return False
+    # #1104 -- a RUNNING-turn activity spinner rendered ABOVE the (bare) box is a
+    # SUSPENDED turn: the box reads bare but the Enter is SWALLOWED (the montalu1
+    # render race). `_input_line_text=="" ` alone misses it (the box IS bare) and
+    # the sibling `_pane_busy_waiting` gate every rider consults only catches the
+    # ellipsis-free "Waiting for N background agents" line, NOT a mid-render
+    # spinner. Defer here at the ONE shared delivery primitive so EVERY caller
+    # (the ops-wait / u-freshness / queue-arrival / release-gap / lane-reconcile
+    # riders + the batch send) inherits it (#1104-review shared-benefit finding).
+    if watchdog._pane_activity_spinner_above_box(fresh):
+        _log("send-verified abort: activity spinner above box (suspended turn)")
+        return False
     try:
         baseline = os.path.getsize(tpath)
     except OSError:
