@@ -3817,6 +3817,72 @@ def _write_verify_on_copy_status(rows, slug, root, now=None):
         sys.stderr.write("verify-on-copy: status write skipped (%s)\n" % e)
 
 
+def _refresh_spec_settled_cache(name, root, out):
+    """#1106 — rewrite ~/.claude/spec-settled/<name>.json from the repo's open
+    `spec` tickets (label:spec) and return (spec_open_numbers, spec_missing).
+
+    `spec_missing` = the count of OPEN stream-labelled tickets carrying no valid
+    `Spec:` line while a `spec` ticket is open (the partition-audit-nudge signal;
+    computed only when a spec exists, so a non-spec repo pays ONE cheap
+    `--label spec` list that returns empty). `out(argv, cd) -> str` is the
+    tickets-status runner (empty string on gh error). Best-effort throughout: a
+    gh/parse/write error leaves the cache untouched and returns ([], 0)."""
+    import gates.spec as gspec
+    raw = out(["gh", "issue", "list", "--state", "open", "--label", "spec",
+               "--json", "number,body", "-L", "20"], root)
+    if not raw:
+        return [], 0
+    try:
+        specs = json.loads(raw)
+    except ValueError:
+        return [], 0
+    if not isinstance(specs, list):
+        return [], 0
+    spec_input = [{"number": s.get("number"), "body": s.get("body") or ""}
+                  for s in specs
+                  if isinstance(s, dict) and isinstance(s.get("number"), int)]
+    spec_open = [s["number"] for s in spec_input]
+    if not spec_open:
+        # No open spec ticket -> clear any stale cache so Check 10 fails open.
+        try:
+            path = gspec.settled_cache_path(name)
+            if os.path.exists(path):
+                os.remove(path)
+        except OSError as e:
+            sys.stderr.write("spec-settled: stale cache clear skipped (%s)\n" % e)
+        return [], 0
+    cache = gspec.build_settled_cache(spec_input)
+    try:
+        path = gspec.settled_cache_path(name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(cache, fh)
+        os.replace(tmp, path)
+    except OSError as e:
+        sys.stderr.write("spec-settled: cache write skipped (%s)\n" % e)
+    # spec_missing: open stream-labelled tickets with no valid `Spec:` line.
+    spec_missing = 0
+    raw2 = out(["gh", "issue", "list", "--state", "open",
+                "--json", "number,body,labels", "-L", "100"], root)
+    try:
+        issues = json.loads(raw2) if raw2 else []
+    except ValueError:
+        issues = []
+    for it in issues if isinstance(issues, list) else []:
+        if not isinstance(it, dict):
+            continue
+        labels = [lb.get("name", "") for lb in (it.get("labels") or [])
+                  if isinstance(lb, dict)]
+        if "spec" in labels:
+            continue
+        if not any(lb.startswith("stream:") for lb in labels):
+            continue
+        if gspec.parse_spec_line(it.get("body") or "") is None:
+            spec_missing += 1
+    return spec_open, spec_missing
+
+
 def cmd_tickets_status(args):
     """Statusline github-tickets segment. Default: PRINT the segment for --cwd
     (composed from local caches; may spawn a detached refresh). --refresh: the
@@ -3880,6 +3946,20 @@ def cmd_tickets_status(args):
         slug = _out(["gh", "repo", "view", "--json", "nameWithOwner",
                      "-q", ".nameWithOwner"], root)
         entry["name"] = slug.rstrip("/").split("/")[-1] if slug else ""
+        # #1106: refresh the per-repo settled-questions cache
+        # (~/.claude/spec-settled/<name>.json) off THIS slow refresh path, so
+        # the Stop-hook Check 10 (gates.spec_question) never touches gh. Also
+        # records spec_open / spec_missing on the entry for the partition-audit
+        # nudge. Best-effort: a gh error leaves the cache untouched, [] / 0.
+        if entry["name"]:
+            try:
+                _spec_open, _spec_missing = _refresh_spec_settled_cache(
+                    entry["name"], root, _out)
+                entry["spec_open"] = _spec_open
+                entry["spec_missing"] = _spec_missing
+            except Exception as _se:
+                sys.stderr.write(
+                    "tickets-status: spec-settled refresh skipped (%s)\n" % _se)
         # #1083: the git-derived merged-unreleased set (fix in develop/staging,
         # not yet main). Computed ONCE and threaded through BOTH the slice and
         # core partitions below so `I`/dispatchable exclude `M` consistently.
