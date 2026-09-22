@@ -1,18 +1,23 @@
-"""#1039 — the footer nudges badge NAMES the always-on RECOVERY kinds with a
-`· rec` suffix, so an `oauth-resume` (a recovery nudge) no longer arrives under a
-badge reading `nudges OFF` (the owner's 2026-09-15 contradiction).
+"""#1039 fix-forward — the footer nudges badge NEVER says `OFF` while the
+always-on recovery arming is on: it states both switches in plain words for
+every state, so an all-off box reads `nudges 0/13 · recovery on` (owner, dev1
+22.9.2026: „preco tam stale pise nudges off v paticke ked ty tvrdis ze je to
+zapnute!").
 
-`statusbar.nudges_off_segment` renders `nudges OFF · rec` / `nudges N/M · rec`.
-The ` · rec` suffix renders IFF `watchdog.RECOVERY_NUDGE_KINDS` is non-empty —
-read from the SAME watchdog constant the CLI (`airuleset.py nudges`) already
-prints; `M = len(watchdog.MACHINE_NUDGE_KINDS)` is read from the constant, never
-hard-coded; the segment stays empty on any read error. One net-neutral clause in
-`modules/core/statusline-vocabulary.md` documents the badge (context-baseline
-ratchet stays under its ceiling).
+`statusbar.nudges_off_segment` renders `nudges N/M · recovery on` for EVERY
+state — `N` = staged machine kinds on (`0` when none), `M =
+len(watchdog.MACHINE_NUDGE_KINDS)` read from the constant (never hard-coded).
+The ` · recovery on` suffix renders IFF `watchdog.RECOVERY_NUDGE_KINDS` is
+non-empty (the SAME constant the CLI `airuleset.py nudges` already prints); the
+segment stays empty on any read error. There is NO `OFF` word in any rendered
+form. One byte-neutral-or-shorter clause in
+`modules/core/statusline-vocabulary.md` documents the badge (the down-only
+context-baseline ratchet stays under its ceiling).
 
-RED against the pre-#1039 tree: the badge is a bare `nudges OFF` / `nudges N/M`
-with NO recovery suffix, and statusline-vocabulary.md carries no nudges clause.
-GREEN once the suffix + clause land.
+RED against the current tree: the badge still renders `nudges OFF · rec`
+(all-off) / `nudges N/M · rec` (staged), and statusline-vocabulary.md carries the
+old `nudges OFF · rec` clause. GREEN once the one-branch renderer + the reworded
+clause land.
 """
 import json
 import os
@@ -48,31 +53,56 @@ def _stage(home, kinds):
         json.dump({"on": sorted(kinds)}, fh)
 
 
-class TestRecoverySuffix(unittest.TestCase):
-    """The ` · rec` suffix is present in every rendered form of the badge."""
+class TestRecoveryOnEveryState(unittest.TestCase):
+    """The `· recovery on` suffix and the `N/M` fraction render in EVERY state;
+    the badge never says `OFF`."""
 
-    def test_off_case_has_rec_suffix(self):
+    def test_all_off_shows_zero_fraction_and_recovery_on(self):
         with TemporaryDirectory() as home:
+            mtotal = len(wd.MACHINE_NUDGE_KINDS)
             self.assertEqual(
                 _plain(statusbar.nudges_off_segment(home=home)),
-                "nudges OFF · rec")
+                "nudges 0/%d · recovery on" % mtotal)
 
-    def test_one_staged_has_rec_suffix(self):
+    def test_one_staged_shows_recovery_on(self):
         with TemporaryDirectory() as home:
             one = sorted(wd.MACHINE_NUDGE_KINDS)[0]
             _stage(home, [one])
             mtotal = len(wd.MACHINE_NUDGE_KINDS)
             self.assertEqual(
                 _plain(statusbar.nudges_off_segment(home=home)),
-                "nudges 1/%d · rec" % mtotal)
+                "nudges 1/%d · recovery on" % mtotal)
 
-    def test_all_staged_has_rec_suffix(self):
+    def test_all_staged_shows_recovery_on(self):
         with TemporaryDirectory() as home:
             _stage(home, wd.MACHINE_NUDGE_KINDS)
             mtotal = len(wd.MACHINE_NUDGE_KINDS)
             self.assertEqual(
                 _plain(statusbar.nudges_off_segment(home=home)),
-                "nudges %d/%d · rec" % (mtotal, mtotal))
+                "nudges %d/%d · recovery on" % (mtotal, mtotal))
+
+
+class TestNoOffWordEver(unittest.TestCase):
+    """The word `OFF` must not appear in ANY rendered form — the whole point of
+    the fix-forward (the mutation target: restoring `OFF` in the renderer must
+    turn these RED)."""
+
+    def test_no_off_substring_all_off(self):
+        with TemporaryDirectory() as home:
+            self.assertNotIn(
+                "OFF", _plain(statusbar.nudges_off_segment(home=home)))
+
+    def test_no_off_substring_when_staged(self):
+        with TemporaryDirectory() as home:
+            _stage(home, sorted(wd.MACHINE_NUDGE_KINDS)[:2])
+            self.assertNotIn(
+                "OFF", _plain(statusbar.nudges_off_segment(home=home)))
+
+    def test_no_off_substring_when_recovery_empty(self):
+        with TemporaryDirectory() as home, \
+                m.patch.object(wd, "RECOVERY_NUDGE_KINDS", frozenset()):
+            self.assertNotIn(
+                "OFF", _plain(statusbar.nudges_off_segment(home=home)))
 
 
 class TestConstantSourced(unittest.TestCase):
@@ -89,21 +119,23 @@ class TestConstantSourced(unittest.TestCase):
             _stage(home, ["card"])
             self.assertEqual(
                 _plain(statusbar.nudges_off_segment(home=home)),
-                "nudges 1/3 · rec")
+                "nudges 1/3 · recovery on")
 
     def test_suffix_absent_when_recovery_kinds_empty(self):
         # A patched-empty RECOVERY set drops the suffix in BOTH forms — proving
         # the suffix is sourced from RECOVERY_NUDGE_KINDS, not a literal string.
+        # The `N/M` fraction (and the absence of `OFF`) is unaffected.
         with TemporaryDirectory() as home, \
                 m.patch.object(wd, "RECOVERY_NUDGE_KINDS", frozenset()):
+            mtotal = len(wd.MACHINE_NUDGE_KINDS)
             self.assertEqual(
                 _plain(statusbar.nudges_off_segment(home=home)),
-                "nudges OFF")
+                "nudges 0/%d" % mtotal)
             one = sorted(wd.MACHINE_NUDGE_KINDS)[0]
             _stage(home, [one])
             self.assertEqual(
                 _plain(statusbar.nudges_off_segment(home=home)),
-                "nudges 1/%d" % len(wd.MACHINE_NUDGE_KINDS))
+                "nudges 1/%d" % mtotal)
 
 
 class TestFailSafe(unittest.TestCase):
@@ -122,7 +154,7 @@ class TestVocabularyClause(unittest.TestCase):
 
     def _bullet(self):
         lines = VOCAB.read_text(encoding="utf-8").splitlines()
-        return [ln for ln in lines if ln.startswith("- `nudges OFF · rec`")]
+        return [ln for ln in lines if ln.startswith("- `nudges N/M · recovery on`")]
 
     def test_clause_bullet_present(self):
         bullets = self._bullet()
@@ -130,19 +162,25 @@ class TestVocabularyClause(unittest.TestCase):
                          "expected exactly one nudges-badge clause bullet, "
                          "got %d" % len(bullets))
 
-    def test_clause_documents_both_forms_and_recovery(self):
+    def test_clause_documents_form_and_recovery(self):
         b = self._bullet()[0]
-        self.assertIn("nudges N/M · rec", b)
         self.assertIn("recovery", b.lower())
         self.assertTrue(
             any(k in b for k in ("resume", "compact", "goal-arm")),
             "clause must name at least one always-on recovery kind")
 
+    def test_clause_carries_no_off_word(self):
+        # The doctrine line must not reintroduce the `OFF` wording the fix
+        # removed from the footer.
+        b = self._bullet()[0]
+        self.assertNotIn("OFF", b)
+
 
 class TestContextBaselineRatchet(unittest.TestCase):
     def test_context_baseline_check_passes(self):
-        # The clause must be paid for by an in-module trim: the DOWN-ONLY
-        # context-baseline ratchet must still pass (drive the REAL check).
+        # The reworded clause must be paid for by an in-module trim: the
+        # DOWN-ONLY context-baseline ratchet must still pass (drive the REAL
+        # check).
         r = subprocess.run(
             [sys.executable, "airuleset.py", "context-baseline", "--check"],
             cwd=str(REPO), capture_output=True, text=True)

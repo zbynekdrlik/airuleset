@@ -3,11 +3,11 @@ kind is OFF (the state file absent reads as all-OFF). `nudges on --kind <k>` /
 `nudges off --kind <k>` / `nudges on --all` stage kinds one at a time; a bare
 `nudges on` REFUSES and prints the kinds. `nudges_enabled(kind)` is the predicate
 the ONE keystroke primitive consults via the threaded `nudge=` identity. The badge
-renders `nudges OFF` when all off, `nudges N/M` when some are on.
+renders `nudges N/M · recovery on` for every state (never `OFF`, since #1039).
 
 RED against the pre-#1023 tree: `nudges_enabled` is global (existence of
 `~/.claude/nudges-off`); there is no per-kind state, no `--kind`, no `nudge=`
-identity on `keys`, and the badge is a bare `nudges OFF`. GREEN once the per-kind
+identity on `keys`, and the badge was a bare `nudges OFF`. GREEN once the per-kind
 switch lands.
 """
 import argparse
@@ -112,17 +112,22 @@ class TestCLI(unittest.TestCase):
 
 
 class TestBadge(unittest.TestCase):
-    def test_all_off_shows_nudges_off(self):
+    def test_all_off_shows_zero_fraction_recovery_on(self):
+        # #1039 fix-forward: all-off renders `nudges 0/M · recovery on`, never the
+        # word OFF (deliberately overturned wording, not a weakened invariant —
+        # the badge still shows the exact staged-kind state, in plain words).
         with TemporaryDirectory() as home:
             seg = statusbar.nudges_off_segment(home=home)
-            self.assertIn("nudges OFF", seg)
+            self.assertIn("nudges 0/", seg)
+            self.assertIn("recovery on", seg)
+            self.assertNotIn("OFF", seg)
 
     def test_some_on_shows_fraction(self):
         with TemporaryDirectory() as home:
             wd.set_nudge_kind("queue-arrival", True, home=home)
             seg = statusbar.nudges_off_segment(home=home)
             self.assertIn("nudges 1/", seg)
-            self.assertNotIn("nudges OFF", seg)
+            self.assertNotIn("OFF", seg)
 
 
 class TestPrimitivePerKind(unittest.TestCase):

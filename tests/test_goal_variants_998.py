@@ -188,15 +188,20 @@ class TestReviewRoleVariant1000(TestCase):
         # #1084 re-golden: the compact-boundary clause changed (machine compacts
         # REMOVED — native autocompact only), so every non-review variant's
         # rendered goal line changed. Regenerated deliberately.
+        # #1066 lane B re-golden: item 1 (reduced proof bounce clause) changed
+        # every branch-merge/fork-no-merge variant; item 2 (infra proof
+        # role-scope, FULL-only) changed full/sequential/infra. full/parallel and
+        # full/sequential are UNTOUCHED (item 1 skips full, item 2 skips
+        # non-infra). Regenerated deliberately.
         "full/parallel/None": "2d9a5539f472a22cda96177c",
         "full/sequential/None": "6920ca09926869d6679eb0cc",
-        "full/sequential/infra": "c661f5482edc49c49b8c102e",
-        "branch-merge/parallel/None": "f21f471502b66797a3bc22dc",
-        "branch-merge/sequential/None": "e572d2ddb33b2ebaa0b8bb3f",
-        "branch-merge/sequential/infra": "b1ba75e947fa2924cb603291",
-        "fork-no-merge/parallel/None": "d4867acc59f61fcb601b55d9",
-        "fork-no-merge/sequential/None": "6e11554f2de16fcb30f0abea",
-        "fork-no-merge/sequential/infra": "5965fd12cf0969a7305392c2",
+        "full/sequential/infra": "e3836d97e467eafe428a92ec",
+        "branch-merge/parallel/None": "dd68a602c7f3b08b3d61bea0",
+        "branch-merge/sequential/None": "054d3ccf16c12b4bdb800848",
+        "branch-merge/sequential/infra": "179a402988f31933f68f7ecb",
+        "fork-no-merge/parallel/None": "b5056da7563e13c148e4f402",
+        "fork-no-merge/sequential/None": "42ae0a7c4d24b1fc7df6c1e1",
+        "fork-no-merge/sequential/infra": "5d43b4b3cbc0c35294699ffe",
     }
 
     def test_nonreview_variants_byte_identical_snapshot(self):
