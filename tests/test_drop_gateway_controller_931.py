@@ -290,16 +290,24 @@ class TestDropIngressRulesForController(unittest.TestCase):
         self.assertIn("drop-subdev-david3.newlevel.media", hosts)
         self.assertIn("drop-subdev-david4.newlevel.media", hosts)
 
-    def test_service_urls_point_at_tailscale(self):
+    def test_service_urls_point_at_origin(self):
+        # #1111: gk rides the same controller tunnel with its OWN origin
+        # (100.90.94.41), so the invariant is per lane: every rule's service URL
+        # points at that lane's origin_host, and the subdev lanes keep the
+        # subdev tailscale origin.
         rules = dg.drop_ingress_rules_for_controller()
-        # #1114: the service URL is the LAST element for both the 2-tuple drop
-        # rule and the 3-tuple /s/ rule.
+        origin_by_host = {l.host: l.origin_host for (node, _u), l in dg.DROP_LANES.items()
+                          if l.topology == "controller" and l.origin_host}
         for rule in rules:
             host, svc = rule[0], rule[-1]
             self.assertTrue(
-                svc.startswith("http://100.118.174.27:"),
-                "service URL %s for %s must point at subdev tailscale"
-                % (svc, host))
+                svc.startswith("http://%s:" % origin_by_host[host]),
+                "service URL %s for %s must point at that lane's origin (%s)"
+                % (svc, host, origin_by_host[host]))
+        for (node, _u), lane in dg.DROP_LANES.items():
+            if lane.topology == "controller" and node == "subdev":
+                self.assertEqual(lane.origin_host, "100.118.174.27",
+                                 "subdev lane %s must point at subdev tailscale" % lane.host)
 
     def test_ports_match_registry(self):
         # #1114 deliberately extended contract: each controller lane now emits the
