@@ -202,7 +202,9 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;;
 # mode INCLUDING `plain`, because unsetting these is what makes `plain` truly
 # vanilla-stock (stock CC defaults these ON); the one managed-env line NOT `plain`-
 # guarded. `unset` never trips `set -u` (only REFERENCING an unset var does).
-unset CLAUDE_CODE_DISABLE_MOUSE CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN
+# #1116: the names are rendered from the ONE cli_bashrc_drift.MANAGED_ENV_DROP_KEYS
+# tuple (shared with the settings-merge drop list) — never a second hardcoded copy.
+{{MANAGED_ENV_UNSET}}
 
 # #659/#669: the owner_vps headless OAuth-token export that once stood here was
 # REMOVED. login/auth ON a target is the PROJECT claudy's responsibility, and
@@ -256,6 +258,17 @@ esac
 """
 
 
+def _managed_env_unset_line():
+    """The launcher `unset` line, built from the ONE
+    cli_bashrc_drift.MANAGED_ENV_DROP_KEYS tuple that the settings-merge drop
+    list (cli_config) also uses (#1116) — so the launcher and the merge can never
+    name a different key set. Local import: cli_bashrc_drift is a leaf (re/json/
+    subprocess/pathlib only), so this adds no module-level coupling / import cycle
+    (the deferred-coupling discipline the cluster-split test locks)."""
+    from cli_bashrc_drift import MANAGED_ENV_DROP_KEYS
+    return "unset " + " ".join(MANAGED_ENV_DROP_KEYS)
+
+
 def render_claude_launch_script():
     """The launch-script content with the managed model substituted in — the
     write site MUST use this, never the raw constant (same discipline as
@@ -268,8 +281,9 @@ def render_claude_launch_script():
     launcher (render_claude_impl_launch_script), scoped to the implementer
     window's own process."""
     import airuleset
-    return CLAUDE_LAUNCH_SCRIPT_CONTENT.replace("{{MANAGED_MODEL}}",
-                                                airuleset.MANAGED_MODEL)
+    return (CLAUDE_LAUNCH_SCRIPT_CONTENT
+            .replace("{{MANAGED_MODEL}}", airuleset.MANAGED_MODEL)
+            .replace("{{MANAGED_ENV_UNSET}}", _managed_env_unset_line()))
 
 
 # --------------------------------------------------------------------------- #
@@ -297,7 +311,8 @@ export CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1
 # it OWNS the mouse/altscreen env exactly like the main launcher — a stray shell
 # `export CLAUDE_CODE_DISABLE_MOUSE=1` must not take native scrolling away here
 # either (a model-backend box runs this window). `unset` never trips `set -u`.
-unset CLAUDE_CODE_DISABLE_MOUSE CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN
+# #1116: rendered from the shared MANAGED_ENV_DROP_KEYS tuple (cli_bashrc_drift).
+{{MANAGED_ENV_UNSET}}
 
 _marker="$HOME/.claude/airuleset-model-backend.json"
 if [ ! -f "$_marker" ]; then
@@ -406,10 +421,13 @@ fi
 
 def render_claude_impl_launch_script():
     """The claude-impl launcher content. The write site MUST use this (same
-    discipline as render_claude_launch_script). No substitution — every backend
-    value is read from the per-box marker at shell time, so ONE rendered script
-    serves every box (it refuses LOUDLY off a marker box)."""
-    return CLAUDE_IMPL_LAUNCH_SCRIPT_CONTENT
+    discipline as render_claude_launch_script). The only substitution is the
+    #1116 `{{MANAGED_ENV_UNSET}}` line (from the shared MANAGED_ENV_DROP_KEYS
+    tuple); every backend value is still read from the per-box marker at shell
+    time, so ONE rendered script serves every box (it refuses LOUDLY off a marker
+    box)."""
+    return CLAUDE_IMPL_LAUNCH_SCRIPT_CONTENT.replace(
+        "{{MANAGED_ENV_UNSET}}", _managed_env_unset_line())
 
 
 def render_claude_implementer_prompt():
