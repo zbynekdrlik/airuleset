@@ -356,9 +356,15 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # guard's injectable process-start reader) was appended after
                # cred_mtime_fn=None on the SAME last line; the anchor grew again,
                # the mutation target vault_purge=None is still untouched.
+               # #959 re-pin: erp_heartbeat_enabled=False (Job 51's erp-test box
+               # heartbeat gate) was appended on a NEW trailing line after
+               # proc_start_fn=None, so the closing `):` moved off that line onto
+               # the new one; the anchor grew a last line, the mutation target
+               # vault_purge=None is untouched.
                "             task_hygiene_enabled=False, gh_rate_fetch=None,\n"
                "             bounceflip_fetch=None, cred_mtime_fn=None, "
-               "proc_start_fn=None):")
+               "proc_start_fn=None,\n"
+               "             erp_heartbeat_enabled=False):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a

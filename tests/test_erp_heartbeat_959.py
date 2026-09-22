@@ -67,7 +67,7 @@ class TestGate(unittest.TestCase):
         logs, st, call = _run_job(call, authority="full")
         self.assertEqual(call.calls, [])
         self.assertNotIn("erp_heartbeat", st)
-        self.assertTrue(any("skip" in l and "full-authority" in l for l in logs))
+        self.assertTrue(any("skip" in ln and "full-authority" in ln for ln in logs))
 
     def test_non_shared_stream_box_does_not_call(self):
         for box in ("workstation", "controller", None):
@@ -76,8 +76,8 @@ class TestGate(unittest.TestCase):
                 logs, st, call = _run_job(call, box=box)
                 self.assertEqual(call.calls, [])
                 self.assertNotIn("erp_heartbeat", st)
-                self.assertTrue(any("skip" in l and "shared-stream" in l
-                                    for l in logs))
+                self.assertTrue(any("skip" in ln and "shared-stream" in ln
+                                    for ln in logs))
 
     def test_reduced_authority_shared_stream_calls(self):
         for authority in ("fork-no-merge", "branch-merge"):
@@ -93,8 +93,8 @@ class TestLiveness(unittest.TestCase):
         logs, st, call = _run_job(call, cwds=())
         self.assertEqual(call.calls, [])
         self.assertNotIn("erp_heartbeat", st)
-        self.assertTrue(any("skip" in l and "no live claude" in l
-                            and "montalu1" in l for l in logs))
+        self.assertTrue(any("skip" in ln and "no live claude" in ln
+                            and "montalu1" in ln for ln in logs))
 
 
 class TestScriptResolution(unittest.TestCase):
@@ -110,7 +110,7 @@ class TestScriptResolution(unittest.TestCase):
             find_script_fn=lambda _c: None,
             call_fn=call)
         self.assertEqual(call.calls, [])
-        self.assertTrue(any("skip" in l and "script" in l for l in logs))
+        self.assertTrue(any("skip" in ln and "script" in ln for ln in logs))
 
     def test_default_find_script_resolves_odoo_erp_checkout(self):
         with TemporaryDirectory() as d:
@@ -163,33 +163,33 @@ class TestReturnCodes(unittest.TestCase):
     def test_rc0_ok(self):
         logs, st, _ = self._drive(0, "heartbeat stream=montalu1 relay=OK "
                                      "expires_at=2026-09-22T12:30:00")
-        self.assertTrue(any("ok rc=0" in l for l in logs))
-        self.assertTrue(any("expires_at=" in l for l in logs))  # line passed 1:1
+        self.assertTrue(any("ok rc=0" in ln for ln in logs))
+        self.assertTrue(any("expires_at=" in ln for ln in logs))  # line passed 1:1
         self.assertEqual(st["erp_heartbeat"]["rc"], 0)
         self.assertEqual(st["erp_heartbeat"]["ts"], 4242.0)
         self.assertIn("expires_at=", st["erp_heartbeat"]["line"])
 
     def test_rc2_retry_no_alarm(self):
         logs, st, _ = self._drive(2, "noop reason=relay-error")
-        self.assertTrue(any("retry rc=2" in l for l in logs))
-        self.assertFalse(any("ALARM" in l for l in logs))
+        self.assertTrue(any("retry rc=2" in ln for ln in logs))
+        self.assertFalse(any("ALARM" in ln for ln in logs))
         self.assertEqual(st["erp_heartbeat"]["rc"], 2)
 
     def test_rc3_alarm(self):
         logs, st, _ = self._drive(3, "auth refused")
-        self.assertTrue(any("ALARM" in l and "rc=3" in l for l in logs))
+        self.assertTrue(any("ALARM" in ln and "rc=3" in ln for ln in logs))
         self.assertEqual(st["erp_heartbeat"]["rc"], 3)
 
     def test_other_rc_is_error_retry(self):
         logs, st, _ = self._drive(5, "weird")
-        self.assertTrue(any("error rc=5" in l for l in logs))
+        self.assertTrue(any("error rc=5" in ln for ln in logs))
         self.assertEqual(st["erp_heartbeat"]["rc"], 5)
 
     def test_timeout_is_error(self):
         def boom(script, user, timeout):
             raise subprocess.TimeoutExpired(cmd="bash", timeout=timeout)
         logs, st, _ = _run_job(boom, now=7.0)
-        self.assertTrue(any("timeout" in l for l in logs))
+        self.assertTrue(any("timeout" in ln for ln in logs))
         self.assertEqual(st["erp_heartbeat"]["rc"], eh._TIMEOUT_RC)
         self.assertEqual(st["erp_heartbeat"]["ts"], 7.0)
 
@@ -200,7 +200,7 @@ class TestDryRun(unittest.TestCase):
         logs, st, call = _run_job(call, dry_run=True)
         self.assertEqual(call.calls, [])
         self.assertNotIn("erp_heartbeat", st)
-        self.assertTrue(any("would call" in l for l in logs))
+        self.assertTrue(any("would call" in ln for ln in logs))
 
 
 # --------------------------------------------------------------------------- #
@@ -260,7 +260,7 @@ class TestRunOnceWiring(unittest.TestCase):
 
         with TemporaryDirectory() as d:
             logs = _drive_run_once(1000.0, str(Path(d) / "state.json"), boom)
-        self.assertTrue(any("erp-heartbeat error" in l for l in logs),
+        self.assertTrue(any("erp-heartbeat error" in ln for ln in logs),
                         "run_once must log the isolated job error, not crash")
 
 

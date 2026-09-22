@@ -298,8 +298,8 @@ class TestRunOnceJob43(unittest.TestCase):
     def test_docstring_counts_49_jobs(self):
         from watchdog import run_once
         doc = run_once.__doc__
-        self.assertIn("50 numbered", doc)  # #1034 Job 48, #1036 Job 49, #1056 L2 Job 50 (bounce-flip-revert)
-        self.assertIn("43 LIVE", doc)  # #1084 job 14 moved LIVE->RETIRED (compact removed)
+        self.assertIn("51 numbered", doc)  # #1034 Job 48, #1036 Job 49, #1056 L2 Job 50, #959 Job 51 (erp-heartbeat)
+        self.assertIn("44 LIVE", doc)  # #1084 job 14 moved LIVE->RETIRED (compact removed); #959 job 51 added LIVE
 
     def test_docstring_mentions_job_43(self):
         from watchdog import run_once
