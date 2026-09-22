@@ -4257,8 +4257,12 @@ def cmd_tickets_status(args):
                 # TypeError — #989). Fail-open: any error -> omit the
                 # field (hook falls back to total ops_wait).
                 try:
+                    # #1067 (a): batched comment prefetch (O(quals) gh calls)
+                    # on the hot footer refresh instead of O(members) per-member
+                    # `gh issue view` — the SAME `member_quals` slice that
+                    # produced the W members.
                     entry["ops_wait_stale"] = _compute_net_stale_w(
-                        ops_wait, cwd=root)
+                        ops_wait, cwd=root, member_quals=quals)
                 except Exception as _e:
                     sys.stderr.write("tickets-status: stale W count "
                                      "skipped (%s)\n" % _e)
@@ -4366,8 +4370,11 @@ def cmd_tickets_status(args):
                 # #989: use _compute_net_stale_w (same fix as the slice
                 # path — the inline set - tuple was a TypeError).
                 try:
+                    # #1067 (a): batched comment prefetch on the core footer's
+                    # hot refresh, keyed by the SAME obligation quals that
+                    # produced the W members (O(quals) gh, not O(members)).
                     entry["ops_wait_stale"] = _compute_net_stale_w(
-                        ops_wait, cwd=root)
+                        ops_wait, cwd=root, member_quals=_obligation_quals())
                 except Exception as _e:
                     sys.stderr.write("tickets-status: stale W count "
                                      "skipped (%s)\n" % _e)
@@ -7292,6 +7299,15 @@ def _watchdog_ops_wait_fetch(cwd):
         r = subprocess.run(
             [sys.executable, os.path.abspath(__file__), cmd_name, "--ops-wait"],
             cwd=cwd, capture_output=True, text=True, timeout=35)
+    except subprocess.TimeoutExpired:
+        # #1067 (b): a TIMEOUT is DISTINCT from a gh error — return the sentinel
+        # so `_cached_member_fetch` backs its fail-TTL off geometrically (a
+        # persistently-slow `--ops-wait` can never re-fire every ~60 s sweep).
+        # A gh error / any other failure stays the plain-None transient (base
+        # fail-TTL, re-checks soon). The #1067 (a) prefetch should keep this
+        # child well under 35 s, so the sentinel is the defense-in-depth belt.
+        import watchdog.ops_wait_recheck as _owr
+        return _owr.FETCH_TIMEOUT
     except Exception:
         return None
     if r.returncode != 0:
@@ -9446,6 +9462,9 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _comment_has_citation as _comment_has_citation,
     _comment_is_final_reminder as _comment_is_final_reminder,
     _issue_comment_ages as _issue_comment_ages,
+    _ages_from_comments as _ages_from_comments,
+    _ops_wait_prefetch_comments as _ops_wait_prefetch_comments,
+    ops_wait_ages_fn as ops_wait_ages_fn,
     _stale_ops_wait_flagged as _stale_ops_wait_flagged,
     _tacit_window_flagged as _tacit_window_flagged,
     _compute_net_stale_w as _compute_net_stale_w,

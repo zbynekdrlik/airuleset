@@ -27,7 +27,6 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
-import cli_quals
 import cli_quals_cmd
 import watchdog.ops_wait_recheck as owr
 
@@ -37,8 +36,13 @@ def _iso(dt):
 
 
 # member 41 → an OLD own comment (stale!); member 42 → a fresh own comment.
-_OLD = _iso(datetime(2020, 1, 1, tzinfo=timezone.utc))
-_FRESH = _iso(datetime.now(timezone.utc) - timedelta(hours=1))
+# The ticket `createdAt` is kept recent (< OPS_WAIT_CONVERGE_AGE_D=14d) so the
+# #881 `converge!` age-ceiling never fires and subtracts these from `stale`
+# (converge! suppresses stale!) — this test exercises the stale path, not converge.
+_NOW = datetime.now(timezone.utc)
+_OLD = _iso(_NOW - timedelta(days=6))      # > 24h WORKING time → stale!
+_FRESH = _iso(_NOW - timedelta(hours=1))
+_CREATED = _iso(_NOW - timedelta(days=10))  # < 14d → no converge! age-ceiling
 
 COMMENTS = {
     41: [{"author": {"login": "me"}, "createdAt": _OLD, "body": "cakame"}],
@@ -49,7 +53,7 @@ COMMENTS = {
 def _ow(*nums):
     return {n: {"number": n, "title": "parked ticket %d" % n,
                "labels": [{"name": "ops-wait"}],
-               "createdAt": "2026-08-01T00:00:00Z"} for n in nums}
+               "createdAt": _CREATED} for n in nums}
 
 
 class _GhRecorder:
@@ -146,7 +150,7 @@ class PrefetchMissingMemberFallback(unittest.TestCase):
     def test_missing_member_uses_per_issue_view(self):
         ow = _ow(41, 42, 43)
         c = dict(COMMENTS)
-        c[43] = [{"author": {"login": "me"}, "createdAt": _OLD, "body": "x"}]
+        c[43] = [{"author": {"login": "me"}, "createdAt": _OLD, "body": "cakame"}]
         # the batched list returns only 41,42 (43 truncated/label just changed).
         rec = _GhRecorder(c, present={41, 42})
         sets = _run_flag_sets(ow, ["label:stream:x"], rec)

@@ -632,6 +632,20 @@ def _user_waiting_reason(labels):
 # ticket is never lost (open + surfaced in W N / --ops-wait / the disarm report).
 OPS_WAIT_LABELS = ("ops-wait",)
 
+# #1067 (a): the labels that DEFINE W (ops-wait) membership — a row is in the W
+# bucket iff it carries `ops-wait` (external event) OR `needs-acceptance` (client
+# thread sent, routed to W by `_partition_workable`'s acceptance-scoped override).
+# The batched comment prefetch (`_ops_wait_prefetch_comments`) ANDs this label OR
+# onto each member-defining qual, so ONE `gh issue list --search "<qual>
+# label:ops-wait,needs-acceptance" --json number,comments` fetches every W
+# member's comments in a single call instead of one `gh issue view` per member.
+# gh's `--search "label:a,b"` ORs the labels (live-verified 2026-09-23).
+OPS_WAIT_PREFETCH_LABELS = OPS_WAIT_LABELS + ("needs-acceptance",)
+# gh issue list --limit ceiling for the prefetch (covers up to 1000 in one
+# invocation). A member beyond it, or a member missing from a truncated list,
+# falls back to today's per-issue `gh issue view` — correct, just slower.
+OPS_WAIT_PREFETCH_LIMIT = 500
+
 
 def _row_is_ops_wait(labels):
     """True if `labels` (a gh --json labels value: a list of {'name': ...} dicts,
@@ -1530,43 +1544,16 @@ def _stream_self_login():
     return airuleset._gh_login()
 
 
-def _issue_comment_ages(number, self_login, now, cwd=None):
-    """Evidence ages for issue `number`, the #570 freshness fallback (#753
-    extends it citation-aware; #818 adds the tacit-window opener). Returns the
-    DICT `{own, any, own_cited, own_oldest, own_final_reminder}`:
-      - `own`      — createdAt of the newest comment authored by `self_login`;
-      - `any`      — createdAt of the newest comment of ANY author;
-      - `own_cited`— createdAt of the newest own comment that CITES a source
-                     (`_comment_has_citation` — the #753 reset anchor);
-      - `own_oldest`— createdAt of the OLDEST own comment (sustained-engagement
-                     proxy — the montalu3 bare-push case);
-      - `own_final_reminder` — createdAt of the newest own comment carrying the
-                     #818 line-anchored `Acceptance-reminder:` marker (the #799
-                     tacit-window opener); None when no reminder was recorded.
-    Each is None when absent. Returns None (the WHOLE dict) when the gh fetch
-    FAILED or was unusable → the caller does NOT flag (fail-safe, "nikdy
-    falošný", #539). The DICT (over the pre-#753 2-tuple) is the extensible
-    shape the #698 lesson prefers; `_norm_ages` keeps legacy 2-tuple fakes
-    working, so the #699/#607 tests are untouched.
-
-    `airuleset._gh_out` returns "" on ANY failure OR empty result, but a
-    successful `gh issue view <n> --json comments` always prints a JSON object
-    (`{"comments": [...]}`, non-empty even with zero comments), so "" is
-    unambiguously a FAILURE here → None. The `--json comments` payload already
-    carried `body` (the gh invocation is UNCHANGED) — #753 READS it to detect
-    each own comment's citation, #818 additionally for the `Acceptance-reminder:`
-    marker; `now` is unused for the read itself (passed for signature symmetry
-    with the injectable seam the caller uses)."""
-    import airuleset
-    raw = airuleset._gh_out("issue", "view", str(number), "--json", "comments",
-                            cwd=cwd, timeout=15)
-    if not raw:
-        return None                              # gh failed -> fail-safe
-    try:
-        obj = json.loads(raw)
-    except (ValueError, TypeError):
-        return None
-    comments = obj.get("comments") if isinstance(obj, dict) else None
+def _ages_from_comments(comments, self_login):
+    """The PURE parse half of `_issue_comment_ages` (#1067 (a)): turn a gh
+    `comments` list into the `{own, any, own_cited, own_oldest,
+    own_final_reminder, own_target, own_target_event}` dict, or None when
+    `comments` is not a usable list. The element shape is identical whether it
+    came from `gh issue view --json comments` (per-issue) or the per-row
+    `comments` of `gh issue list --json number,comments` (the batched prefetch),
+    so both feed the SAME parse → byte-identical ages. `now` is not needed here
+    (the read never depends on the clock — the caller passes it only for the
+    signature symmetry `_issue_comment_ages` keeps)."""
     if not isinstance(comments, list):
         return None
     own_ts = any_ts = own_cited = own_oldest = own_final_reminder = None
@@ -1612,6 +1599,126 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
             "own_final_reminder": own_final_reminder,
             "own_target": own_target,
             "own_target_event": own_target_event}
+
+
+def _issue_comment_ages(number, self_login, now, cwd=None):
+    """Evidence ages for issue `number`, the #570 freshness fallback (#753
+    extends it citation-aware; #818 adds the tacit-window opener). Returns the
+    DICT `{own, any, own_cited, own_oldest, own_final_reminder}`:
+      - `own`      — createdAt of the newest comment authored by `self_login`;
+      - `any`      — createdAt of the newest comment of ANY author;
+      - `own_cited`— createdAt of the newest own comment that CITES a source
+                     (`_comment_has_citation` — the #753 reset anchor);
+      - `own_oldest`— createdAt of the OLDEST own comment (sustained-engagement
+                     proxy — the montalu3 bare-push case);
+      - `own_final_reminder` — createdAt of the newest own comment carrying the
+                     #818 line-anchored `Acceptance-reminder:` marker (the #799
+                     tacit-window opener); None when no reminder was recorded.
+    Each is None when absent. Returns None (the WHOLE dict) when the gh fetch
+    FAILED or was unusable → the caller does NOT flag (fail-safe, "nikdy
+    falošný", #539). The DICT (over the pre-#753 2-tuple) is the extensible
+    shape the #698 lesson prefers; `_norm_ages` keeps legacy 2-tuple fakes
+    working, so the #699/#607 tests are untouched.
+
+    `airuleset._gh_out` returns "" on ANY failure OR empty result, but a
+    successful `gh issue view <n> --json comments` always prints a JSON object
+    (`{"comments": [...]}`, non-empty even with zero comments), so "" is
+    unambiguously a FAILURE here → None. The `--json comments` payload already
+    carried `body` (the gh invocation is UNCHANGED) — #753 READS it to detect
+    each own comment's citation, #818 additionally for the `Acceptance-reminder:`
+    marker; `now` is unused for the read itself (passed for signature symmetry
+    with the injectable seam the caller uses)."""
+    import airuleset
+    raw = airuleset._gh_out("issue", "view", str(number), "--json", "comments",
+                            cwd=cwd, timeout=15)
+    if not raw:
+        return None                              # gh failed -> fail-safe
+    try:
+        obj = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    comments = obj.get("comments") if isinstance(obj, dict) else None
+    # #1067 (a): the pure parse is factored into `_ages_from_comments` so the
+    # SAME logic runs on a batched-prefetch `comments` list (identical shape) and
+    # on this per-issue read — through the shared `ages_fn` seam.
+    return _ages_from_comments(comments, self_login)
+
+
+def _ops_wait_prefetch_comments(member_quals, root, limit=None):
+    """#1067 (a): ONE batched `gh issue list --search "<qual>
+    label:ops-wait,needs-acceptance" --json number,comments` per member-defining
+    qual, returning `{number: comments}`. Replaces the per-member `gh issue view
+    --json comments` loop behind `--ops-wait` / the footer's stale-W count
+    (one gh call per W member — 102 s for 74 members on montalu1, #1067).
+
+    The `comments` payload has the SAME element shape `gh issue view --json
+    comments` returns, so `_ages_from_comments` parses it unchanged. `member_quals`
+    are the SAME quals that produced the W members (ONE derivation, #367 — no
+    parallel membership query): `cmd_slice_quals`'s `_slice_quals(user)` (usually
+    ONE qual on a shared-account stream box) or `cmd_core_quals`'s
+    `_obligation_quals()`. A qual whose gh read fails / is unparsable contributes
+    nothing (its members fall back to the per-issue call); an empty `member_quals`
+    returns `{}` (everything falls back — byte-identical to today). Over-fetch
+    (a qual that also matches non-W tickets) is harmless: only members present in
+    the `ops_wait` set are ever consumed."""
+    import airuleset
+    out = {}
+    if not member_quals:
+        return out
+    label_q = "label:" + ",".join(OPS_WAIT_PREFETCH_LABELS)
+    lim = str(limit if limit else OPS_WAIT_PREFETCH_LIMIT)
+    for qual in member_quals:
+        search = ("%s %s" % (qual, label_q)).strip() if qual else label_q
+        raw = airuleset._gh_out("issue", "list", "--state", "open",
+                                "--search", search, "--json", "number,comments",
+                                "--limit", lim, cwd=root, timeout=20)
+        if not raw:
+            continue                              # gh failure/empty -> fall back
+        try:
+            rows = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            num = row.get("number")
+            comments = row.get("comments")
+            if isinstance(num, int) and isinstance(comments, list):
+                out.setdefault(num, comments)
+    return out
+
+
+def ops_wait_ages_fn(ops_wait, root, member_quals):
+    """#1067 (a): return an `ages_fn(n)` closure backed by the batched comment
+    prefetch, memoized per call. A member present in the prefetch is parsed from
+    it (`_ages_from_comments`); one absent from it (truncated list / label just
+    changed / `member_quals` None) falls back to the per-issue `_issue_comment_
+    ages`. The ONE seam shared by the `--ops-wait` reason column
+    (`cli_quals_cmd._ops_wait_flag_sets`) and the footer's stale-W count
+    (`_compute_net_stale_w` in `cmd_tickets_status`), so BOTH pay O(quals) gh
+    calls, not O(members) — with results byte-identical to the per-member path.
+
+    Routed through `airuleset.*` (not bare names) so a test mocking
+    `airuleset._issue_comment_ages` / `_stream_self_login` / `_gh_out` intercepts,
+    exactly as the pre-#1067 inline `_ages` closure did."""
+    import airuleset
+    self_login = airuleset._stream_self_login()
+    prefetch = (airuleset._ops_wait_prefetch_comments(member_quals, root)
+                if member_quals else {})
+    cache = {}
+
+    def _ages(n):
+        if n not in cache:
+            if n in prefetch:
+                cache[n] = airuleset._ages_from_comments(prefetch[n], self_login)
+            else:
+                cache[n] = airuleset._issue_comment_ages(
+                    n, self_login, None, cwd=root)
+        return cache[n]
+
+    return _ages
 
 
 def _stale_ops_wait_flagged(rows, cwd=None, now=None, self_login=None, ages_fn=None):
@@ -1749,9 +1856,16 @@ def _tacit_window_flagged(rows, cwd=None, now=None, self_login=None,
     return tacit_wait, tacit_close
 
 
-def _compute_net_stale_w(ops_wait, cwd=None, ages_fn=None, now=None):
+def _compute_net_stale_w(ops_wait, cwd=None, ages_fn=None, now=None,
+                         member_quals=None):
     """#989: compute the net stale W count — ``_stale_ops_wait_flagged`` minus
     the ``_tacit_window_flagged`` exemption.
+
+    #1067 (a): when ``ages_fn`` is not supplied and ``member_quals`` is given,
+    build the shared batched-prefetch ``ages_fn`` (``ops_wait_ages_fn``) so the
+    footer's hot stale-W refresh pays O(quals) gh calls, not O(members) — the
+    SAME seam ``_ops_wait_flag_sets`` uses. An explicit ``ages_fn`` still wins
+    (test fakes / callers that already share a fetch).
 
     ``_tacit_window_flagged`` returns a 2-tuple ``(tacit_wait, tacit_close)``
     that must be unpacked and unioned before subtraction.  The #986 review
@@ -1762,6 +1876,8 @@ def _compute_net_stale_w(ops_wait, cwd=None, ages_fn=None, now=None):
 
     Returns the count (``int``) of net-stale members.  Raises on any
     upstream failure (the caller's ``try/except`` is the fail-open wrapper)."""
+    if ages_fn is None and member_quals:
+        ages_fn = ops_wait_ages_fn(ops_wait, cwd, member_quals)
     stale = _stale_ops_wait_flagged(ops_wait, cwd=cwd, ages_fn=ages_fn,
                                     now=now)
     tacit_wait, tacit_close = _tacit_window_flagged(ops_wait, cwd=cwd,
