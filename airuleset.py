@@ -4637,24 +4637,23 @@ HANDOFF_GATE_DIR = ".claude/handoff-gate"
 # Decision log path.
 HANDOFF_GATE_LOG = ".claude/handoff-gate.log"
 
-# Finding id pattern from gatekeeper bounce comments.
+# Finding id shape (#1081): ids come ONLY from finding SHAPES -- an emoji marker
+# `(?:🔴|🟡|🔵)<n>` (group 1 = emoji, group 2 = number) or the legacy `F<n>` at a
+# line/bullet boundary (group 3) -- never a bare `[A-Z]\d+` prose token (a gate
+# code B22, a mutation-probe label M1..M8, a model fragment) the old catch-all
+# arm mis-read. A per-severity count line caps each severity (see parse_findings).
 _GK_FINDING_ID_RE = re.compile(
-    r'(?:🔴|🟡|🔵)\s*(\d+)|([A-Z]\d+)|F(\d+)', re.UNICODE)
+    r'(🔴|🟡|🔵)\s*(\d+)|(?:^|[\s(\[-])F(\d+)\b', re.MULTILINE | re.UNICODE)
 
 
 def _parse_gk_findings(comment_body):
-    """Extract finding ids from a gatekeeper bounce comment body.
-
-    Returns a list of string ids (e.g. ["1", "2", "F3"]) or an empty list
-    when unparseable."""
-    if not comment_body:
-        return []
-    ids = []
-    for m in _GK_FINDING_ID_RE.finditer(comment_body):
-        fid = m.group(1) or m.group(2) or ("F" + m.group(3))
-        if fid and fid not in ids:
-            ids.append(fid)
-    return ids
+    """The ONE gk finding-id parser (the composer pre-flight, cli_gk_watch, the
+    hook receipt match, the tests). Returns string ids ["1", "2", "F3"] in
+    first-seen order, per-severity capped by the verdict count line; prose
+    `[A-Z]\\d+` tokens (gate codes, probe labels) are never ids (#1081). Impl in
+    cli_gk_watch to hold airuleset.py under its size ratchet."""
+    import cli_gk_watch
+    return cli_gk_watch.parse_findings(comment_body, _GK_FINDING_ID_RE)
 
 
 _LENS_ID_RE = re.compile(r'^[a-z][a-z0-9-]+$')
