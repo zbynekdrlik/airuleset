@@ -27,6 +27,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock as m
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -64,12 +65,20 @@ class TestWindowShellCommandHelper(unittest.TestCase):
     def test_wraps_a_launcher_in_a_surviving_login_shell(self):
         cmd = ctp._window_shell_command(
             "$HOME/.claude/airuleset-claude-launch.sh default")
-        # exact shape verified LIVE on gk: launcher runs as a child, then the
-        # parent bash execs an interactive LOGIN shell that survives /exit.
+        # #1037 live: `set -m` gives the launcher (claude) its OWN process group
+        # so a non-interactive `bash -lc` reports `claude` (not `bash`) to tmux —
+        # the pane stays visible to every watchdog job. Then the parent bash
+        # execs an interactive LOGIN shell that survives /exit.
         self.assertEqual(
             cmd,
-            'bash -lc "$HOME/.claude/airuleset-claude-launch.sh default; '
+            'bash -lc "set -m; $HOME/.claude/airuleset-claude-launch.sh default; '
             'exec bash -l"')
+
+    def test_set_m_precedes_the_launcher(self):
+        # the job-control statement must come BEFORE the launcher runs.
+        cmd = ctp._window_shell_command("LAUNCH")
+        self.assertEqual(cmd, 'bash -lc "set -m; LAUNCH; exec bash -l"')
+        self.assertLess(cmd.index("set -m;"), cmd.index("LAUNCH"))
 
     def test_uses_only_double_quotes(self):
         # the create body is wrapped in the hook's SINGLE-quoted run-shell body,
@@ -88,9 +97,10 @@ class TestManagedWindowsCreateBodyWrapsLauncher(unittest.TestCase):
         # one wrapper per NON-primary declared window (gk-infra, gk-quality).
         self.assertEqual(self.body.count("bash -lc"), 2, self.body)
         self.assertEqual(self.body.count("exec bash -l"), 2, self.body)
-        # the full wrapped launcher command is present.
+        # the full wrapped launcher command is present, with job control.
+        self.assertEqual(self.body.count("set -m;"), 2, self.body)
         self.assertIn(
-            'bash -lc "$HOME/.claude/airuleset-claude-launch.sh default; '
+            'bash -lc "set -m; $HOME/.claude/airuleset-claude-launch.sh default; '
             'exec bash -l"',
             self.body)
 
@@ -141,9 +151,11 @@ class TestImplWindowSnippetWrapsLauncher(unittest.TestCase):
 
     def test_impl_launcher_is_wrapped(self):
         self.assertIn(
-            'bash -lc "$HOME/.claude/airuleset-claude-impl.sh; exec bash -l"',
+            'bash -lc "set -m; $HOME/.claude/airuleset-claude-impl.sh; '
+            'exec bash -l"',
             self.snip)
         self.assertIn("bash -lc", self.snip)
+        self.assertIn("set -m;", self.snip)
         self.assertIn("exec bash -l", self.snip)
 
     def test_impl_never_a_bare_launcher(self):
@@ -291,10 +303,11 @@ class TestBashrcAttachBlockWrapsImplLauncher(unittest.TestCase):
 
     def test_impl_launcher_is_wrapped_in_both_branches(self):
         # exactly the two impl new-window branches (with cwd + without), each
-        # wrapping the launcher in the surviving login shell.
-        wrapped = 'bash -lc "$HOME/.claude/%s; exec bash -l"' % _IMPL
+        # wrapping the launcher in the surviving login shell, with job control.
+        wrapped = 'bash -lc "set -m; $HOME/.claude/%s; exec bash -l"' % _IMPL
         self.assertEqual(self.block.count(wrapped), 2, self.block)
         self.assertEqual(self.block.count("bash -lc"), 2)
+        self.assertEqual(self.block.count("set -m;"), 2)
         self.assertEqual(self.block.count("exec bash -l"), 2)
 
     def test_never_a_bare_impl_launcher(self):
@@ -329,6 +342,7 @@ class TestWatchdogRelaunchWrapsImplLauncher(unittest.TestCase):
         i = argv.index("bash")
         self.assertEqual(argv[i:i + 2], ["bash", "-lc"], argv)
         inner = argv[i + 2]
+        self.assertTrue(inner.startswith("set -m; "), inner)   # job control
         self.assertTrue(inner.endswith("; exec bash -l"), inner)
         self.assertIn(_IMPL, inner)
 
@@ -351,11 +365,13 @@ class TestThreeImplRenderersDriftLock(unittest.TestCase):
                "cwd": "/home/miva1/devel/odoo/odoo-erp"}
 
     def test_canonical_shape(self):
+        # #1037 live: `set -m` gives the child its own process group.
         self.assertEqual(ctp._window_shell_command("L"),
-                         'bash -lc "L; exec bash -l"')
+                         'bash -lc "set -m; L; exec bash -l"')
 
     def test_all_three_match_the_canonical_shape(self):
         canonical = ctp._window_shell_command("$HOME/.claude/%s" % _IMPL)
+        self.assertIn("set -m;", canonical)
 
         # 1) session-created hook snippet
         snip = ctp._impl_window_create_snippet(self._MARKER)
@@ -370,12 +386,91 @@ class TestThreeImplRenderersDriftLock(unittest.TestCase):
         _tmux_io.impl_window_presence(self._MARKER, run=fake, logs=[])
         argv = fake.new_window_calls()[0]
         i = argv.index("bash")
-        inner = argv[i + 2]                       # "<abs launcher>; exec bash -l"
-        launcher_part = inner[:-len("; exec bash -l")]
-        # reconstruct the wrapper string from the argv and compare to canonical
+        inner = argv[i + 2]            # "set -m; <abs launcher>; exec bash -l"
+        _PRE, _SUF = "set -m; ", "; exec bash -l"
+        self.assertTrue(inner.startswith(_PRE), inner)
+        self.assertTrue(inner.endswith(_SUF), inner)
+        launcher_part = inner[len(_PRE):-len(_SUF)]      # bare "<abs launcher>"
+        # the canonical wraps the SAME bare launcher into the SAME argv string
         self.assertEqual('bash -lc "%s"' % inner,
                          ctp._window_shell_command(launcher_part))
         self.assertTrue(launcher_part.endswith(_IMPL), launcher_part)
+
+
+# --------------------------------------------------------------------------- #
+# #1037 live belt: a pane whose CURRENT command is bash/sh (a non-interactive
+# `bash -lc` wrapper reports `bash` to tmux — claude shares its process group
+# when the wrapper lacks job control) must STILL be discovered by the inventory,
+# via the pane_pid's claude child — so the CURRENTLY-running gk-quality pane is
+# visible the moment the fix deploys, without a respawn, and any future wrapper
+# shape is covered. A genuine BARE shell (no claude child) stays invisible (the
+# #804 resurrect contract). Models tests/test_sudo_hosted_pane.py.
+# --------------------------------------------------------------------------- #
+
+import watchdog as _wd  # noqa: E402
+
+
+class _FakePanes:
+    """A fake watchdog run(argv) that returns a canned `list-panes` line."""
+
+    def __init__(self, panes_line):
+        self.panes_line = panes_line
+
+    def __call__(self, argv, timeout=8):
+        j = " ".join(argv)
+        if "list-panes" in j:
+            return self.panes_line
+        if "display" in j:
+            return "0"
+        return ""
+
+
+class TestListClaudePanesBashRootedBelt(unittest.TestCase):
+    # parts: pane_id \t pane_current_command \t pane_current_path \t pane_pid
+    BASH_LINE = "%3\tbash\t/home/x\t2172642"
+    SH_LINE = "%4\tsh\t/home/y\t3000"
+    LOGIN_BASH_LINE = "%5\t-bash\t/home/z\t4000"
+    CLAUDE_LINE = "%1\tclaude\t/home/x/devel/demo\t4321"
+
+    def test_bash_rooted_pane_hosting_claude_is_listed_with_child_cwd(self):
+        with m.patch.object(_wd, "_pane_hosted_claude_pid",
+                            return_value="2172652"), \
+             m.patch.object(_wd, "_hosted_claude_cwd",
+                            return_value="/home/x/devel/odoo-erp-quality") as hc:
+            res = _wd.list_claude_panes(_FakePanes(self.BASH_LINE))
+        self.assertEqual(res, [("%3", "/home/x/devel/odoo-erp-quality")])
+        hc.assert_called_once_with("2172652", "/home/x")
+
+    def test_sh_and_login_bash_rooted_panes_hosting_claude_are_listed(self):
+        for line, pid in ((self.SH_LINE, "%4"), (self.LOGIN_BASH_LINE, "%5")):
+            with m.patch.object(_wd, "_pane_hosted_claude_pid",
+                                return_value="999"), \
+                 m.patch.object(_wd, "_hosted_claude_cwd",
+                                return_value="/home/hosted"):
+                res = _wd.list_claude_panes(_FakePanes(line))
+            self.assertEqual(res, [(pid, "/home/hosted")], line)
+
+    def test_bare_bash_pane_without_a_claude_child_stays_invisible(self):
+        # the #804 resurrect contract: a genuine bare shell is NOT a claude pane.
+        with m.patch.object(_wd, "_pane_hosted_claude_pid", return_value=None):
+            res = _wd.list_claude_panes(_FakePanes(self.BASH_LINE))
+        self.assertEqual(res, [])
+
+    def test_plain_claude_pane_unchanged(self):
+        # an interactive-shell pane reporting `claude` never walks /proc.
+        with m.patch.object(_wd, "_pane_hosted_claude_pid") as walk:
+            res = _wd.list_claude_panes(_FakePanes(self.CLAUDE_LINE))
+        self.assertEqual(res, [("%1", "/home/x/devel/demo")])
+        walk.assert_not_called()
+
+    def test_sudo_hosted_pane_branch_unchanged(self):
+        # the sudo/su branch is byte-identical: still discovered via the walk.
+        with m.patch.object(_wd, "_pane_hosted_claude_pid", return_value="777"), \
+             m.patch.object(_wd, "_hosted_claude_cwd",
+                            return_value="/home/montalu/x"):
+            res = _wd.list_claude_panes(
+                _FakePanes("%7\tsudo\t/home/newlevel\t8901"))
+        self.assertEqual(res, [("%7", "/home/montalu/x")])
 
 
 if __name__ == "__main__":

@@ -258,7 +258,11 @@ def render_tmux_attach_block(default_session: str) -> str:
     # dependency direction; the shape is drift-locked to the canonical helper in
     # tests/test_declared_window_exit_1037.py. Double quotes only (this block
     # already carries single quotes, so no run-shell single-quote constraint).
-    impl_window_cmd = 'bash -lc "%s; exec bash -l"' % impl_launcher
+    # #1037 live-fix: leading `set -m` (job control) gives the launcher its own
+    # process group so tmux reports `claude` (not `bash`) — mirrors
+    # cli_tmux_provisioning._window_shell_command, drift-locked in
+    # test_declared_window_exit_1037.py.
+    impl_window_cmd = 'bash -lc "set -m; %s; exec bash -l"' % impl_launcher
     lines = [
         TMUX_ATTACH_MARK_START,
         "# #651: `tmux new -t <name>` is the GROUP-target form -- it always",
