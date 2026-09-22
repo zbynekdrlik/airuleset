@@ -143,10 +143,34 @@ class SeverityCounts(unittest.TestCase):
 
 
 class ParseFindingsHelper(unittest.TestCase):
-    def test_parse_findings_matches_public_parser(self):
+    def test_parse_findings_direct_output(self):
+        # Assert the impl's OUTPUT directly (not merely equal-to-the-delegator,
+        # which would be a tautology since _parse_gk_findings delegates to it).
         self.assertEqual(
-            gw.parse_findings(GK_7599_ACCEPT, airuleset._GK_FINDING_ID_RE),
-            airuleset._parse_gk_findings(GK_7599_ACCEPT))
+            gw.parse_findings("- 🟡1 a\n- 🔵1 b\n- 🔵2 c",
+                              airuleset._GK_FINDING_ID_RE),
+            ["1", "2"])
+
+    def test_public_parser_delegates_to_helper(self):
+        # The delegation contract (the public entry produces the impl's result).
+        self.assertEqual(
+            airuleset._parse_gk_findings(GK_7599_ACCEPT),
+            gw.parse_findings(GK_7599_ACCEPT, airuleset._GK_FINDING_ID_RE))
+
+    def test_count_cap_keeps_all_contiguous_findings(self):
+        # The real gk template numbers open findings 1..count per severity, so
+        # count == bullet count and NOTHING real is dropped — the cap only ever
+        # drops a prose number ABOVE the count (#1081 review, safe-case lock).
+        body = ("**Počty (otvorené @ s): 0 🔴 · 0 🟡 · 3 🔵**\n"
+                "- 🔵1 a\n- 🔵2 b\n- 🔵3 c\n")
+        self.assertEqual(airuleset._parse_gk_findings(body), ["1", "2", "3"])
+
+    def test_zero_is_never_a_finding_id(self):
+        # An emoji-first count line (`🔴 0 · 🟡 2`) must not leak "0" (#1081
+        # review): no finding is numbered 0.
+        ids = airuleset._parse_gk_findings(
+            "**Počty (otvorené @ s): 🔴 0 · 🟡 2 · 🔵 5**\n- 🟡1 x\n- 🟡2 y")
+        self.assertNotIn("0", ids)
 
 
 class WatchIssueNoFalseBlock(unittest.TestCase):

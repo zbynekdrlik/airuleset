@@ -4648,10 +4648,10 @@ _GK_FINDING_ID_RE = re.compile(
 
 def _parse_gk_findings(comment_body):
     """The ONE gk finding-id parser (the composer pre-flight, cli_gk_watch, the
-    hook receipt match, the tests). Returns string ids ["1", "2", "F3"] in
-    first-seen order, per-severity capped by the verdict count line; prose
-    `[A-Z]\\d+` tokens (gate codes, probe labels) are never ids (#1081). Impl in
-    cli_gk_watch to hold airuleset.py under its size ratchet."""
+    tests). Returns string ids ["1", "2", "F3"] in first-seen order, per-severity
+    capped by the verdict count line; prose `[A-Z]\\d+` tokens (gate codes, probe
+    labels) are never ids (#1081). Impl in cli_gk_watch to hold airuleset.py
+    under its size ratchet."""
     import cli_gk_watch
     return cli_gk_watch.parse_findings(comment_body, _GK_FINDING_ID_RE)
 

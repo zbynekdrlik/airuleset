@@ -109,12 +109,25 @@ def parse_findings(body, id_re):
     """Finding ids from a gk verdict body via the finding-SHAPE regex `id_re`
     (`airuleset._GK_FINDING_ID_RE`) -- the impl behind
     `airuleset._parse_gk_findings`, which stays the ONE public parser (the
-    composer pre-flight, the hook receipt match, `_findings`, the tests); the
-    body lives here because airuleset.py is at its size ratchet (#1081). Emoji
-    markers (`🟡1`; group 1 = emoji, group 2 = number) and the legacy `F<n>` form
-    (group 3) are ids; an emoji number beyond its severity count
-    (`severity_counts`) is a prose mention and is dropped. Returns string ids
-    (["1", "2", "F3"]) in first-seen order, or []."""
+    composer pre-flight + `_findings` + the tests; the composer's receipt hook
+    matches the RFR body sha256 downstream, NOT finding ids); the body lives here
+    because airuleset.py is at its size ratchet (#1081). Emoji markers (`🟡1`;
+    group 1 = emoji, group 2 = number) and the legacy `F<n>` form (group 3) are
+    ids; an emoji number beyond its severity count (`severity_counts`) is a prose
+    mention and is dropped. Returns string ids (["1", "2", "F3"]) in first-seen
+    order, or [].
+
+    KNOWN LIMIT (#1081 review, both fresh-context reviewers, escalated to main):
+    the count cap assumes the gk numbers OPEN findings CONTIGUOUSLY 1..count per
+    severity (the current verdict template — count == bullet count, evidenced by
+    odoo-erp 7599). If the gk ever numbers findings STABLY across rounds (a
+    surviving finding whose number > the reduced open count, e.g. a delta comment
+    listing 🔵3/🔵4/🔵5 with count `3 🔵`), the cap drops a REAL open finding — a
+    silent fail-OPEN on the disposition gate. The count-independent alternative
+    the reviewers recommend (anchor the emoji arm to a line/bullet boundary so a
+    mid-prose mention is excluded positionally) changes the design's mandated
+    count-cross-check + its acceptance criterion, so it is a DESIGN decision for
+    the main, not a worker substitution."""
     if not body:
         return []
     caps = severity_counts(body)
@@ -123,6 +136,9 @@ def parse_findings(body, id_re):
         emoji = m.group(1)
         if emoji:
             num = m.group(2)
+            if int(num) == 0:
+                continue  # #1081 review: no finding is #0 — guards an
+                # emoji-first count line ("🔴 0 · …") leaking "0" as an id.
             cap = caps.get(emoji)
             if cap is not None and int(num) > cap:
                 continue
