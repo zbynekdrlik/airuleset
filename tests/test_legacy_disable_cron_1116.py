@@ -202,6 +202,109 @@ class TestLegacyDisableCronRemover(unittest.TestCase):
             appliers.remove_legacy_disable_cron_export(bashrc_path=self.bashrc))
         self.assertEqual(self._read(), "keep\n")
 
+    # ---- FINDING 2: the over-deletion direction (never eat a user line) ---- #
+    def test_export_with_trailing_comment_kept(self):
+        """`export CLAUDE_CODE_DISABLE_CRON=1 # note` is NOT the legacy line
+        (the regex is `$`-anchored) — a user variant is kept."""
+        original = "export CLAUDE_CODE_DISABLE_CRON=1 # my own\necho hi\n"
+        self._write(original)
+        self.assertFalse(
+            appliers.remove_legacy_disable_cron_export(bashrc_path=self.bashrc))
+        self.assertEqual(self._read(), original)
+
+    def test_indented_export_kept(self):
+        """An indented export does not match `^export…` — kept (design-strict)."""
+        original = "    export CLAUDE_CODE_DISABLE_CRON=1\necho hi\n"
+        self._write(original)
+        self.assertFalse(
+            appliers.remove_legacy_disable_cron_export(bashrc_path=self.bashrc))
+        self.assertEqual(self._read(), original)
+
+    def test_semicolon_joined_export_kept(self):
+        """A semicolon-joined command line is not the bare legacy export — kept."""
+        original = "export CLAUDE_CODE_DISABLE_CRON=1; echo hi\nkeep\n"
+        self._write(original)
+        self.assertFalse(
+            appliers.remove_legacy_disable_cron_export(bashrc_path=self.bashrc))
+        self.assertEqual(self._read(), original)
+
+    # ---- FINDING 3: unexercised real behaviors ---- #
+    def test_lone_legacy_comment_not_followed_by_export_kept(self):
+        """The legacy COMMENT with a non-export line after it is left intact
+        (only the pair, or a lone matching export, is removed)."""
+        original = f"{LEGACY_COMMENT}\necho not-an-export\nkeep\n"
+        self._write(original)
+        self.assertFalse(
+            appliers.remove_legacy_disable_cron_export(bashrc_path=self.bashrc))
+        self.assertEqual(self._read(), original)
+
+    def test_multiple_occurrences_all_removed_backup_once(self):
+        """Two legacy pairs in one file are both removed; the backup holds the
+        original and is written once."""
+        original = (
+            f"{LEGACY_COMMENT}\n{LEGACY_EXPORT}\n"
+            "keep1\n"
+            f"{LEGACY_EXPORT}\n"
+            "keep2\n"
+        )
+        self._write(original)
+        self.assertTrue(
+            appliers.remove_legacy_disable_cron_export(bashrc_path=self.bashrc))
+        self.assertEqual(self._read(), "keep1\nkeep2\n")
+        backup = self.bashrc.with_name(self.bashrc.name + BACKUP_SUFFIX)
+        self.assertEqual(backup.read_text(), original)
+
+    def test_orphan_marker_start_does_not_shield_export(self):
+        """An UNCLOSED `# >>> airuleset` START opens no block (matches the drift
+        scan's balanced-pair rule), so an export beneath it IS removed — locking
+        the documented behavior."""
+        self._write(
+            "# >>> airuleset: orphan >>>\n"
+            f"{LEGACY_EXPORT}\n"
+            "keep\n"
+        )
+        self.assertTrue(
+            appliers.remove_legacy_disable_cron_export(bashrc_path=self.bashrc))
+        self.assertEqual(
+            self._read(),
+            "# >>> airuleset: orphan >>>\n"
+            "keep\n",
+        )
+
+    # ---- FINDING 1: non-fatal on an undecodable / unreadable file ---- #
+    def test_non_utf8_file_is_noop_and_untouched(self):
+        """A non-UTF-8 ~/.bashrc (the ssh/LANG-unset risk) must NOT abort: the
+        remover returns False and leaves the file byte-for-byte intact."""
+        raw = b"export CLAUDE_CODE_DISABLE_CRON=1\n\xff\xfe not utf8\n"
+        self.bashrc.write_bytes(raw)
+        self.assertFalse(
+            appliers.remove_legacy_disable_cron_export(bashrc_path=self.bashrc))
+        self.assertEqual(self.bashrc.read_bytes(), raw)
+        backup = self.bashrc.with_name(self.bashrc.name + BACKUP_SUFFIX)
+        self.assertFalse(backup.exists())
+
+    def test_marker_index_mirror_agrees_with_drift_scan(self):
+        """`_airuleset_managed_line_indices` must agree line-for-line with
+        `cli_bashrc_drift._managed_line_indices` (the two are intentional mirrors;
+        a future divergence in either marker regex would silently break the
+        remover's block-skip). Compare on a corpus incl. balanced, nested-like
+        and orphan-marker shapes."""
+        import cli_bashrc_drift as drift
+        samples = [
+            "a\n# >>> airuleset: x >>>\nb\n# <<< airuleset: x <<<\nc\n",
+            "# >>> airuleset: orphan >>>\nb\nc\n",
+            "# >>> airuleset >>>\n# <<< airuleset <<<\n",
+            "no markers at all\njust lines\n",
+            "  # >>> airuleset: indented >>>\ninner\n  # <<< airuleset: indented <<<\n",
+        ]
+        for s in samples:
+            lines = s.splitlines(keepends=True)
+            drift_lines = s.splitlines()  # drift uses splitlines() (no keepends)
+            self.assertEqual(
+                appliers._airuleset_managed_line_indices(lines),
+                drift._managed_line_indices(drift_lines),
+                msg=f"mirror divergence for sample: {s!r}")
+
 
 class TestCmdInstallWiresRemover(unittest.TestCase):
     def test_cmd_install_calls_remover(self):

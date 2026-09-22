@@ -1165,50 +1165,66 @@ def remove_legacy_disable_cron_export(bashrc_path: Path = None) -> bool:
     `~/.bashrc.airuleset-1116.bak` once (before the first edit), reports the
     removal on stderr, and is idempotent (a second run is a no-op).
 
-    `bashrc_path` is injectable for tests. Returns True iff the file changed."""
+    `bashrc_path` is injectable for tests. Returns True iff the file changed.
+
+    NON-FATAL by construction (#1116 review FINDING 1): the whole body is wrapped
+    so an unreadable / non-UTF-8 ~/.bashrc (a real risk when `push` installs over
+    ssh with LANG unset — the #1108 lesson) can NEVER abort the rest of
+    `cmd_install`; the sibling appliers stay non-fatal only via a call-site
+    try/except, this leaf owns it directly so the call can stay one line. A read
+    that fails to decode returns False BEFORE any write, so a file we cannot
+    cleanly round-trip is left untouched."""
     import airuleset
     bpath = bashrc_path or Path(airuleset.BASHRC)
-    if not bpath.exists():
+    try:
+        if not bpath.exists():
+            return False
+
+        # explicit UTF-8 (never the locale default): a decode failure raises
+        # here, is caught below, and the file is left untouched.
+        existing = bpath.read_text(encoding="utf-8")
+        # keepends=True so a rewrite preserves every kept line's exact
+        # terminator, incl. "delete a whole line + its newline" at end-of-file.
+        lines = existing.splitlines(keepends=True)
+        managed = _airuleset_managed_line_indices(lines)
+
+        out = []
+        i, n = 0, len(lines)
+        removed = 0
+        while i < n:
+            raw = lines[i]
+            if i not in managed:
+                # the legacy comment + the export directly after it (both
+                # outside a managed block)
+                if (raw.rstrip() == LEGACY_DISABLE_CRON_COMMENT
+                        and i + 1 < n and (i + 1) not in managed
+                        and _LEGACY_DISABLE_CRON_EXPORT_RE.match(
+                            lines[i + 1].rstrip())):
+                    removed += 2
+                    i += 2
+                    continue
+                # a lone matching export line
+                if _LEGACY_DISABLE_CRON_EXPORT_RE.match(raw.rstrip()):
+                    removed += 1
+                    i += 1
+                    continue
+            out.append(raw)
+            i += 1
+
+        if removed == 0:
+            return False
+
+        new = "".join(out)
+        backup = bpath.with_name(bpath.name + LEGACY_DISABLE_CRON_BACKUP_SUFFIX)
+        if not backup.exists():
+            backup.write_text(existing, encoding="utf-8")
+        tmp = bpath.with_suffix(bpath.suffix + ".airuleset-tmp")
+        tmp.write_text(new, encoding="utf-8")
+        os.replace(str(tmp), str(bpath))
+        print(f"  Removed:   {bpath} legacy CLAUDE_CODE_DISABLE_CRON export "
+              f"({removed} line(s) deleted; backup {backup})", file=sys.stderr)
+        return True
+    except (OSError, UnicodeError) as e:
+        print(f"  legacy CLAUDE_CODE_DISABLE_CRON removal skipped (non-fatal): "
+              f"{type(e).__name__} on {bpath}", file=sys.stderr)
         return False
-
-    existing = bpath.read_text()
-    # keepends=True so a rewrite preserves every kept line's exact terminator,
-    # including "delete a whole line + its trailing newline" at end-of-file.
-    lines = existing.splitlines(keepends=True)
-    managed = _airuleset_managed_line_indices(lines)
-
-    out = []
-    i, n = 0, len(lines)
-    removed = 0
-    while i < n:
-        raw = lines[i]
-        if i not in managed:
-            # the legacy comment + the export directly after it (both outside a
-            # managed block)
-            if (raw.rstrip() == LEGACY_DISABLE_CRON_COMMENT
-                    and i + 1 < n and (i + 1) not in managed
-                    and _LEGACY_DISABLE_CRON_EXPORT_RE.match(lines[i + 1].rstrip())):
-                removed += 2
-                i += 2
-                continue
-            # a lone matching export line
-            if _LEGACY_DISABLE_CRON_EXPORT_RE.match(raw.rstrip()):
-                removed += 1
-                i += 1
-                continue
-        out.append(raw)
-        i += 1
-
-    if removed == 0:
-        return False
-
-    new = "".join(out)
-    backup = bpath.with_name(bpath.name + LEGACY_DISABLE_CRON_BACKUP_SUFFIX)
-    if not backup.exists():
-        backup.write_text(existing)
-    tmp = bpath.with_suffix(bpath.suffix + ".airuleset-tmp")
-    tmp.write_text(new)
-    os.replace(str(tmp), str(bpath))
-    print(f"  Removed:   {bpath} legacy CLAUDE_CODE_DISABLE_CRON export "
-          f"({removed} line(s) deleted; backup {backup})", file=sys.stderr)
-    return True
