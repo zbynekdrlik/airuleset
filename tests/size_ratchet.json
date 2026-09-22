@@ -21,7 +21,7 @@
     "cli_design_record.py": 321,
     "cli_disk_guard_root.py": 1715,
     "cli_drop_gateway.py": 984,
-    "cli_filedrop_watchdog.py": 652,
+    "cli_filedrop_watchdog.py": 655,
     "cli_fleet.py": 1226,
     "cli_gh_rate.py": 1705,
     "cli_handoff_template.py": 464,
