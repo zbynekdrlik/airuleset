@@ -48,6 +48,7 @@ resolves them without an import cycle.
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -1108,3 +1109,122 @@ def apply_stream_env(bashrc_path=None, user=None):
         os.replace(str(tmp), str(bpath))
         return True
     return False
+
+
+# --------------------------------------------------------------------------- #
+# #1116 slice 2 — remove the legacy, un-marked CLAUDE_CODE_DISABLE_CRON export.
+# A pre-marker April-2026 install (writer 71804eab, writer removed in 75a3932d
+# with NO remover) wrote two lines at the top of ~/.bashrc that disable /loop +
+# CronCreate — contradicting claude-code-tooling.md and showing as a permanent
+# `cli_bashrc_drift` row. This narrow remover deletes them at install; the drift
+# scan (cli_bashrc_drift, unchanged) is the live proof of the removal.
+# --------------------------------------------------------------------------- #
+LEGACY_DISABLE_CRON_COMMENT = (
+    "# Claude Code: disable /loop and CronCreate (managed by airuleset)")
+_LEGACY_DISABLE_CRON_EXPORT_RE = re.compile(r"^export CLAUDE_CODE_DISABLE_CRON=1$")
+LEGACY_DISABLE_CRON_BACKUP_SUFFIX = ".airuleset-1116.bak"
+
+# Generic `# >>> airuleset … <<<` marker sentinels — matched exactly as
+# cli_bashrc_drift does (colon optional), so the remover and the drift scan
+# agree on what "inside a managed block" means. Kept LOCAL (no cli_bashrc_drift
+# import) to preserve this module's one-directional dependency contract.
+_AIRULESET_BLOCK_START_RE = re.compile(r"^\s*#\s*>>>\s*airuleset\b")
+_AIRULESET_BLOCK_END_RE = re.compile(r"^\s*#\s*<<<\s*airuleset\b")
+
+
+def _airuleset_managed_line_indices(lines):
+    """0-based indices INSIDE a BALANCED `# >>> airuleset … <<<` marker block.
+    Same balanced-pair scan as cli_bashrc_drift._managed_line_indices: each
+    START pairs with the NEXT END; an unclosed START opens no block, so it can
+    never swallow the rest of the file. The remover skips these indices so it
+    can never touch a genuine managed block."""
+    managed = set()
+    i, n = 0, len(lines)
+    while i < n:
+        if _AIRULESET_BLOCK_START_RE.match(lines[i]):
+            j = i + 1
+            while j < n and not _AIRULESET_BLOCK_END_RE.match(lines[j]):
+                j += 1
+            if j < n:                       # balanced block: mark i..j inclusive
+                managed.update(range(i, j + 1))
+                i = j + 1
+                continue
+            # orphan START — do NOT swallow; skip only this line
+        i += 1
+    return managed
+
+
+def remove_legacy_disable_cron_export(bashrc_path: Path = None) -> bool:
+    """#1116 slice 2: delete the legacy
+    `# Claude Code: disable /loop and CronCreate (managed by airuleset)` comment
+    line together with the `export CLAUDE_CODE_DISABLE_CRON=1` line directly
+    after it; a lone matching export line (no preceding legacy comment) is also
+    removed. NEVER touches a line inside a managed marker block, a user
+    `export CLAUDE_CODE_FOO=1`, or a differently-valued
+    `export CLAUDE_CODE_DISABLE_CRON=0`. Backs up to
+    `~/.bashrc.airuleset-1116.bak` once (before the first edit), reports the
+    removal on stderr, and is idempotent (a second run is a no-op).
+
+    `bashrc_path` is injectable for tests. Returns True iff the file changed.
+
+    NON-FATAL by construction (#1116 review FINDING 1): the whole body is wrapped
+    so an unreadable / non-UTF-8 ~/.bashrc (a real risk when `push` installs over
+    ssh with LANG unset — the #1108 lesson) can NEVER abort the rest of
+    `cmd_install`; the sibling appliers stay non-fatal only via a call-site
+    try/except, this leaf owns it directly so the call can stay one line. A read
+    that fails to decode returns False BEFORE any write, so a file we cannot
+    cleanly round-trip is left untouched."""
+    import airuleset
+    bpath = bashrc_path or Path(airuleset.BASHRC)
+    try:
+        if not bpath.exists():
+            return False
+
+        # explicit UTF-8 (never the locale default): a decode failure raises
+        # here, is caught below, and the file is left untouched.
+        existing = bpath.read_text(encoding="utf-8")
+        # keepends=True so a rewrite preserves every kept line's exact
+        # terminator, incl. "delete a whole line + its newline" at end-of-file.
+        lines = existing.splitlines(keepends=True)
+        managed = _airuleset_managed_line_indices(lines)
+
+        out = []
+        i, n = 0, len(lines)
+        removed = 0
+        while i < n:
+            raw = lines[i]
+            if i not in managed:
+                # the legacy comment + the export directly after it (both
+                # outside a managed block)
+                if (raw.rstrip() == LEGACY_DISABLE_CRON_COMMENT
+                        and i + 1 < n and (i + 1) not in managed
+                        and _LEGACY_DISABLE_CRON_EXPORT_RE.match(
+                            lines[i + 1].rstrip())):
+                    removed += 2
+                    i += 2
+                    continue
+                # a lone matching export line
+                if _LEGACY_DISABLE_CRON_EXPORT_RE.match(raw.rstrip()):
+                    removed += 1
+                    i += 1
+                    continue
+            out.append(raw)
+            i += 1
+
+        if removed == 0:
+            return False
+
+        new = "".join(out)
+        backup = bpath.with_name(bpath.name + LEGACY_DISABLE_CRON_BACKUP_SUFFIX)
+        if not backup.exists():
+            backup.write_text(existing, encoding="utf-8")
+        tmp = bpath.with_suffix(bpath.suffix + ".airuleset-tmp")
+        tmp.write_text(new, encoding="utf-8")
+        os.replace(str(tmp), str(bpath))
+        print(f"  Removed:   {bpath} legacy CLAUDE_CODE_DISABLE_CRON export "
+              f"({removed} line(s) deleted; backup {backup})", file=sys.stderr)
+        return True
+    except (OSError, UnicodeError) as e:
+        print(f"  legacy CLAUDE_CODE_DISABLE_CRON removal skipped (non-fatal): "
+              f"{type(e).__name__} on {bpath}", file=sys.stderr)
+        return False
