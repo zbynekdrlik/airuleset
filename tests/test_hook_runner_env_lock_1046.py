@@ -49,16 +49,66 @@ def _test_files():
     return sorted(TESTS_DIR.glob("test_*.py"))
 
 
-def _is_subprocess_exec(node):
-    """True iff ``node`` (an ast.Call) is ``subprocess.run/Popen/...``. Requires
-    the ``subprocess.`` prefix — a bare ``run``/``Popen`` is this repo's own
-    dependency-injected fake (the false-positive corpus the tmux isolation lock
-    documents), never a real spawn."""
+# Deferred wrappers that run their arg later (teardown / interpreter exit): the
+# exec function is arg 0, the argv is arg 1 (the #734 blind spot the tmux
+# isolation lock documents).
+_DEFERRED_WRAPPERS = {"addCleanup", "register"}
+
+
+def _bare_exec_names(tree):
+    """subprocess exec names brought into the module namespace by
+    ``from subprocess import run[, Popen, ...]`` — so a bare ``run(...)`` call is
+    a real spawn, not this repo's dependency-injected fake. Empty unless the file
+    actually does such an import (keeps the tmux-lock false-positive corpus out
+    of files that never import bare)."""
+    names = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "subprocess":
+            for a in node.names:
+                if a.name in _EXEC_FUNCS:
+                    names.add(a.asname or a.name)
+    return names
+
+
+def _is_subprocess_exec(node, bare_names=frozenset()):
+    """True iff ``node`` (an ast.Call) is a real subprocess spawn:
+    ``subprocess.run/Popen/...`` (the ``subprocess.`` prefix), or a bare
+    ``run``/``Popen`` ONLY when the file imported it from subprocess."""
     f = node.func
-    return (isinstance(f, ast.Attribute)
-            and f.attr in _EXEC_FUNCS
-            and isinstance(f.value, ast.Name)
-            and f.value.id == "subprocess")
+    if (isinstance(f, ast.Attribute) and f.attr in _EXEC_FUNCS
+            and isinstance(f.value, ast.Name) and f.value.id == "subprocess"):
+        return True
+    return isinstance(f, ast.Name) and f.id in bare_names
+
+
+def _is_exec_ref(node, bare_names=frozenset()):
+    """True iff ``node`` is a bare REFERENCE (not a call) to a subprocess exec —
+    ``subprocess.run`` as a callable, or an imported bare name."""
+    if (isinstance(node, ast.Attribute) and node.attr in _EXEC_FUNCS
+            and isinstance(node.value, ast.Name) and node.value.id == "subprocess"):
+        return True
+    return isinstance(node, ast.Name) and node.id in bare_names
+
+
+def _exec_sites(tree, bare_names):
+    """Yield ``(call_for_env, argv_node)`` for every real subprocess exec:
+      * DIRECT   ``subprocess.run(ARGV, …)``                    -> (call, args[0])
+      * DEFERRED ``addCleanup(subprocess.run, ARGV, …)`` /
+                 ``register(subprocess.run, ARGV, …)``          -> (call, args[1])
+    ``call_for_env`` is the node whose ``env=`` keyword governs the spawn (the
+    exec call itself for direct, the wrapper for deferred)."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        if _is_subprocess_exec(node, bare_names):
+            yield node, _argv_node(node)
+            continue
+        f = node.func
+        wname = (f.attr if isinstance(f, ast.Attribute)
+                 else f.id if isinstance(f, ast.Name) else None)
+        if (wname in _DEFERRED_WRAPPERS and len(node.args) >= 2
+                and _is_exec_ref(node.args[0], bare_names)):
+            yield node, node.args[1]
 
 
 def _argv_node(node):
@@ -85,31 +135,55 @@ def _names_and_attrs(node):
 
 def _hook_path_vars(tree):
     """Variable / attribute names bound anywhere in the module to an expression
-    whose source names a ``hooks`` path (``HOOK = ROOT / "hooks" / "x.sh"``,
-    ``self.HOOK = …``, ``HOOKS = ROOT / "hooks"``). A subprocess argv that
-    references one of these drives a hook even though the literal path is not at
-    the call site."""
-    names = set()
+    that resolves to a hook path — ``HOOK = ROOT / "hooks" / "x.sh"``,
+    ``HOOKS = ROOT / "hooks"``, ``NUDGE = HOOKS / "x.sh"`` (derived from another
+    hook-path var), ``self.HOOK = …``. A subprocess argv that references one of
+    these drives a hook even though the literal path is not at the call site.
+
+    Case-insensitive on ``hooks`` (a `HOOKS = REPO / "hooks"` parent counts),
+    matches a bare ``*.sh`` filename constant, and is TRANSITIVE (a var built
+    from an already-recorded hook-path var, computed to a fixpoint) — the
+    NUDGE/CIBLOCK derived-var gap review #1046 exposed."""
+    assigns = []       # (targets, value_src, referenced_names)
     for node in ast.walk(tree):
         if isinstance(node, ast.Assign):
-            targets = node.targets
-            value = node.value
+            targets, value = node.targets, node.value
         elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets = [node.target]
-            value = node.value
+            targets, value = [node.target], node.value
         else:
             continue
         try:
             src = ast.unparse(value)
         except Exception:
             continue
-        if "hooks" not in src and not _HOOK_SH_RE.search(src):
-            continue
+        assigns.append((targets, src, _names_and_attrs(value)))
+
+    def _target_names(targets):
         for t in targets:
             if isinstance(t, ast.Name):
-                names.add(t.id)
+                yield t.id
             elif isinstance(t, ast.Attribute):
-                names.add(t.attr)
+                yield t.attr
+
+    names = set()
+    for targets, src, _refs in assigns:
+        # A `hooks` path segment (case-insensitive, so a `HOOKS = REPO/"hooks"`
+        # parent counts) or a literal `hooks/x.sh`. A bare `*.sh` filename is
+        # NOT enough on its own — that over-matched a rendered `script.sh` a test
+        # runs `bash -n` on (test_volume_provision_999) — derived hook-path vars
+        # (`NUDGE = HOOKS / "x.sh"`) are caught by the transitive closure below.
+        if "hooks" in src.lower() or _HOOK_SH_RE.search(src):
+            names.update(_target_names(targets))
+    # transitive closure: a var built from a known hook-path var is one too
+    changed = True
+    while changed:
+        changed = False
+        for targets, _src, refs in assigns:
+            if refs & names:
+                for n in _target_names(targets):
+                    if n not in names:
+                        names.add(n)
+                        changed = True
     return names
 
 
@@ -126,10 +200,14 @@ def _argv_drives_hook(argv, hook_vars):
     if "-m" in src and _GATES_MOD_RE.search(src):
         return True
     # A gates.<mod> string constant anywhere in the argv (covers the
-    # `[sys.executable, "-P", "-m", "gates.designdispatch"]` shape).
+    # `[sys.executable, "-P", "-m", "gates.designdispatch"]` shape), OR a bare
+    # `"hooks"` path segment (covers the inline-join basename shape
+    # `["bash", str(REPO_DIR / "hooks" / self.HOOK)]` where HOOK is a bare
+    # basename and no file-wide hooks-path var records it — review #1046).
     for sub in ast.walk(argv):
         if isinstance(sub, ast.Constant) and isinstance(sub.value, str):
-            if sub.value.startswith("gates.") or _HOOK_SH_RE.search(sub.value):
+            if (sub.value == "hooks" or sub.value.startswith("gates.")
+                    or _HOOK_SH_RE.search(sub.value)):
                 return True
     if _names_and_attrs(argv) & hook_vars:
         return True
@@ -155,22 +233,20 @@ def _offenders():
         except SyntaxError:
             continue
         hook_vars = _hook_path_vars(tree)
+        bare_names = _bare_exec_names(tree)
         controls_home = _file_controls_home(source)
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call) or not _is_subprocess_exec(node):
-                continue
-            argv = _argv_node(node)
+        for call, argv in _exec_sites(tree, bare_names):
             if not _argv_drives_hook(argv, hook_vars):
                 continue
             rel = path.name
-            if not _call_has_env(node):
+            if not _call_has_env(call):
                 out.append("%s:%d: subprocess exec drives a hook without an "
                            "explicit env= (needs hermetic_hook_env(self))"
-                           % (rel, node.lineno))
+                           % (rel, call.lineno))
             elif not controls_home:
                 out.append("%s:%d: subprocess exec passes env= but the file "
                            "never controls HOME (no hermetic_hook_env, no "
-                           '"HOME" key)' % (rel, node.lineno))
+                           '"HOME" key)' % (rel, call.lineno))
     return sorted(out)
 
 
@@ -186,9 +262,9 @@ class TestHookRunnerEnvLock(TestCase):
             except SyntaxError:
                 continue
             hook_vars = _hook_path_vars(tree)
-            for node in ast.walk(tree):
-                if (isinstance(node, ast.Call) and _is_subprocess_exec(node)
-                        and _argv_drives_hook(_argv_node(node), hook_vars)):
+            bare_names = _bare_exec_names(tree)
+            for _call, argv in _exec_sites(tree, bare_names):
+                if _argv_drives_hook(argv, hook_vars):
                     drivers += 1
         self.assertGreater(drivers, 40,
                            "expected many hook-driving subprocess execs; the "

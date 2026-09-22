@@ -1357,7 +1357,7 @@ exit 0
         repo, env, cancels, head, old = self._cancel_fixture()
         # rewind the remote-tracking ref so HEAD != remote tip (push failed/rejected)
         import subprocess
-        subprocess.run(["git", "update-ref", "refs/remotes/origin/dev", old], cwd=repo)
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/dev", old], cwd=repo, env=hermetic_hook_env(self))
         r = self._run_env(repo, env, "git push origin dev")
         self.assertEqual(r.returncode, 0)
         self.assertFalse(os.path.exists(cancels) and open(cancels).read().strip(),
@@ -1903,7 +1903,7 @@ class TestPrePushBaseSyncHook(TestCase):
 
     def _g(self, cwd, *args):
         import subprocess
-        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, env=hermetic_hook_env(self))
 
     def _base_repo(self):
         """Remote + clone, main+dev, with a 3-line 'shared' file (so divergent
@@ -2456,7 +2456,7 @@ class TestSessionStartFetchHook(TestCase):
 
     def _g(self, cwd, *args):
         import subprocess
-        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, env=hermetic_hook_env(self))
 
     def _base_repo(self):
         """Remote (bare) + a clone on 'main', origin/HEAD set, one commit."""
@@ -2816,7 +2816,7 @@ class TestPreDeployCleanTreeHook(TestCase):
             cwd=str(repo),
             check=True,
             capture_output=True,
-            text=True,
+            text=True, env=hermetic_hook_env(self)
         )
 
     def _make_repo(self):
@@ -12843,7 +12843,7 @@ class TestRemoteCmdWithHomeAudit(TestCase):
     def test_marker_present_and_original_failing_exit_code_preserved(self):
         cmd = airuleset._remote_cmd_with_home_audit("false")
         r = subprocess.run(["bash", "-c", cmd], capture_output=True,
-                            text=True, timeout=10)
+                            text=True, timeout=10, env=hermetic_hook_env(self))
         self.assertEqual(r.returncode, 1,
                           "the ORIGINAL chain's failing exit code must survive "
                           "the trailing audit, never the ls's own exit code")
@@ -12852,7 +12852,7 @@ class TestRemoteCmdWithHomeAudit(TestCase):
     def test_marker_present_and_original_successful_exit_code_preserved(self):
         cmd = airuleset._remote_cmd_with_home_audit("true")
         r = subprocess.run(["bash", "-c", cmd], capture_output=True,
-                            text=True, timeout=10)
+                            text=True, timeout=10, env=hermetic_hook_env(self))
         self.assertEqual(r.returncode, 0)
         self.assertIn(airuleset._HOME_AUDIT_MARKER, r.stdout)
 

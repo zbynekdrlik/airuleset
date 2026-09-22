@@ -50,7 +50,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset                                          # noqa: E402
 import cli_quals                                          # noqa: E402
 
-from _hook_state_cleanup import MODULE_HOOK_HOME  # noqa: E402  (#1046 hermetic HOME)
+from _hook_state_cleanup import MODULE_HOOK_HOME, hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "block-fork-no-merge-issue-close.sh"
@@ -1406,7 +1406,7 @@ class TestRepoFlagUnparseableHereString(TestCase):
             "if _repo_flag_unparseable \"\"; then echo TRUE; else echo FALSE; fi\n"
         )
         r = subprocess.run(["bash", "-c", driver], input=cmd,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=hermetic_hook_env(self))
         # RED on the `printf | grep` form (SIGPIPE → FALSE / wrong-allow);
         # GREEN on the here-string form (TRUE → the fail-safe blocks).
         self.assertEqual(r.stdout.strip(), "TRUE",
@@ -1546,7 +1546,7 @@ class TestFrontGateSigpipe824(TestCase):
         driver = ("set -euo pipefail\nCMD=$(cat)\n" + func + "\n"
                   "if _cmd_has_comment_flag; then echo TRUE; else echo FALSE; fi\n")
         r = subprocess.run(["bash", "-c", driver], input=cmd,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=hermetic_hook_env(self))
         # RED (FALSE, SIGPIPE) on the pipe form; GREEN (TRUE) on the here-string.
         self.assertEqual(r.stdout.strip(), "TRUE",
                          "stdout=%r stderr=%r" % (r.stdout, r.stderr))

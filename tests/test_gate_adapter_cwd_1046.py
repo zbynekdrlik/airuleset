@@ -59,10 +59,31 @@ _PAYLOADS = {
 }
 
 
+# Repo top-level modules (plus the package dirs) — a hook that imports one of
+# these from a `python3 -c`/`-` is cwd-shadowable and needs `-P` too, not only
+# the `-m gates.` adapters (review #1046: block-main-implementation.sh imports
+# gates.shellcmd via `-c`, block-dispatch-over-wdrain.sh imports cli_concurrency).
+_REPO_MODS = {p.stem for p in ROOT.glob("*.py")} | {"gates", "watchdog", "notify"}
+_PY_DASH_RE = re.compile(r"python3\s+(?:-P\s+)?(?:-c\b|-\s|-$|-\")")
+
+
+def _imports_repo_module(text):
+    for name in re.findall(r"\b(?:import|from)\s+([A-Za-z_]\w*)", text):
+        if name in _REPO_MODS:
+            return True
+    return False
+
+
 def _adapter_hooks():
+    """Every gate-adapter hook that resolves a REPO module from a subprocess
+    interpreter — discovered by scan, never a hand-kept list: the `-m gates.`
+    adapters, plus any hook running `python3 -c`/`-` (stdin) that imports a repo
+    module (block-main-implementation.sh, the stdin heredocs), plus wdrain."""
     out = []
     for p in sorted(HOOKS.glob("*.sh")):
-        if re.search(r"-m gates\.", p.read_text(encoding="utf-8")):
+        text = p.read_text(encoding="utf-8")
+        if re.search(r"-m gates\.", text) or (
+                _PY_DASH_RE.search(text) and _imports_repo_module(text)):
             out.append(p.name)
     if WDRAIN not in out:
         out.append(WDRAIN)
@@ -81,9 +102,13 @@ class TestGateAdapterIgnoresStaleCwd(TestCase):
     def test_discovery_covers_wdrain_and_the_m_gates_adapters(self):
         hooks = _adapter_hooks()
         self.assertIn(WDRAIN, hooks)
+        # block-main-implementation.sh imports gates.shellcmd via `python3 -P -c`
+        # (not `-m gates.`) — a named-vulnerable importer the lock must cover
+        # (review #1046 finding 2).
+        self.assertIn("block-main-implementation.sh", hooks)
         self.assertGreaterEqual(
             len(hooks), 10,
-            "expected the -m gates. adapter family plus wdrain")
+            "expected the -m gates. adapter family plus the -c/- repo importers")
 
     def test_adapters_never_resolve_a_repo_module_from_the_caller_cwd(self):
         offenders = []
