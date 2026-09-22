@@ -32,17 +32,25 @@ PATTERNS = [
 ]
 
 # #1069 -- the ONE sanctioned skip shape the fleet gate allows: a TOP-LEVEL
-# (column 0) Playwright `test.skip` whose first argument is EXACTLY the bare
-# call notApplicable(), followed by a comma (a reason). It marks a per-instance
-# e2e spec not applicable when its addon is absent from the -i install list
-# (odoo-erp .claude/rules/gk-review-lenses.md §test-integrity; the odoo-erp CI
-# job `No Skip Validation` guards its placement). Anchored at column 0 (no
-# leading `\s*`): the SAME shape INDENTED inside a `test(`/`describe(` body —
-# where a real skip could hide behind the literal — is NOT sanctioned and stays
-# blocked by PATTERNS. A line matching a SANCTIONED entry is dropped by
-# scan_test_file before the PATTERNS pass; everything else still runs.
+# (column 0) Playwright `test.skip` whose ONLY arguments are exactly the bare
+# call notApplicable() and a quoted/template reason, forming the WHOLE line. It
+# marks a per-instance e2e spec not applicable when its addon is absent from
+# the -i install list (odoo-erp .claude/rules/gk-review-lenses.md
+# §test-integrity; the odoo-erp CI job `No Skip Validation` guards placement).
+# The regex is anchored on BOTH axes so a real skip cannot hide behind the
+# literal: column 0 at the START (no leading `\s*` -> an INDENTED nested skip
+# stays blocked) AND `\)\s*;?\s*$` at the END (the whole line is just this one
+# call -> a real truthy skip call appended on the SAME physical line is NOT
+# sanctioned, since git diff -U0 added-lines are per physical line). The reason
+# class `'[^'\n]*'` / "..." / `...` requires a real reason and cannot span its
+# own closing quote (no `.*?` backtracking across an injected `;)`), so an empty
+# reason is rejected too. A matching line is dropped by scan_test_file before
+# the PATTERNS pass; everything else still runs.
 SANCTIONED = [
-    re.compile(r'^test\.skip\(\s*notApplicable\(\)\s*,'),
+    re.compile(
+        r"""^test\.skip\(\s*notApplicable\(\)\s*,\s*"""
+        r"""(?:'[^'\n]*'|"[^"\n]*"|`[^`\n]*`)\s*\)\s*;?\s*$"""
+    ),
 ]
 EMPTY_BODY = re.compile(
     r'^[ \t]*def\s+test_\w*\([^)]*\):[ \t]*\n[ \t]*pass[ \t]*$'
