@@ -316,6 +316,108 @@ class TestConstants(unittest.TestCase):
         self.assertIn("erp_heartbeat", labels)
 
 
+# --------------------------------------------------------------------------- #
+# #959 fix-forward: Job 51 must actually RUN on a busy stream account (was held
+# by `hold:budget` because min_budget was the 65s ssh-fleet class while the sweep
+# soft cap is 100s and earlier jobs eat 30-60s). The fix sizes the budget to the
+# real one-wrapper-call cost.
+# --------------------------------------------------------------------------- #
+class TestBudgetSizing(unittest.TestCase):
+    def test_timeout_sized_to_the_ssh_connect_plus_relay(self):
+        # The wrapper's ssh uses ConnectTimeout=10; 25s covers connect + relay
+        # round-trip with margin (the old 60s over-sized it ~6x).
+        self.assertEqual(eh.ERP_HEARTBEAT_TIMEOUT_S, 25)
+
+    def test_job51_min_budget_sized_to_the_wrapper_call_not_ssh_fleet(self):
+        # min_budget must be the wrapper-call class (timeout + 5), NOT the 65s
+        # ssh-fleet class — else Job 51 holds forever on a busy account.
+        self.assertLessEqual(wd._BUDGET_MIN_ERP_HEARTBEAT_S, 30)
+        self.assertGreaterEqual(wd._BUDGET_MIN_ERP_HEARTBEAT_S,
+                                eh.ERP_HEARTBEAT_TIMEOUT_S + 5)
+        # and it must NOT be the ssh-fleet class it used to alias.
+        self.assertLess(wd._BUDGET_MIN_ERP_HEARTBEAT_S,
+                        wd._BUDGET_MIN_SSH_FLEET_S)
+
+    def test_call_receives_the_25s_timeout(self):
+        call = _Call(0, "heartbeat relay=OK")
+        _run_job(call)
+        self.assertEqual(len(call.calls), 1)
+        self.assertEqual(call.calls[0][2], eh.ERP_HEARTBEAT_TIMEOUT_S)
+        self.assertEqual(call.calls[0][2], 25)
+
+    def test_timeout_at_25s_maps_to_timeout_rc(self):
+        def boom(script, user, timeout):
+            self.assertEqual(timeout, 25)
+            raise subprocess.TimeoutExpired(cmd="bash", timeout=timeout)
+        logs, st, _ = _run_job(boom, now=9.0)
+        self.assertEqual(st["erp_heartbeat"]["rc"], eh._TIMEOUT_RC)
+        self.assertTrue(any("timeout" in ln for ln in logs))
+
+
+def _drive_run_once_budget(now, state_path, recorder, remaining_s):
+    """Drive run_once with the sweep budget pinned so that EVERY registry job is
+    evaluated with `remaining_s` seconds left. Injected `time_fn`: the FIRST read
+    establishes `_sweep_start` at 0.0, every later read returns the fixed elapsed
+    `SWEEP_SOFT_CAP_S - remaining_s`, so `remaining_budget_s()` == remaining_s
+    throughout (no real clock, deterministic)."""
+    elapsed = float(wd.SWEEP_SOFT_CAP_S - remaining_s)
+    calls = {"n": 0}
+
+    def time_fn():
+        calls["n"] += 1
+        return 0.0 if calls["n"] == 1 else elapsed
+
+    with mock.patch.object(wd, "list_claude_panes", lambda *a, **k: []), \
+         mock.patch.object(wd, "_owner_disabled", lambda kind: False), \
+         mock.patch.object(wd.erp_heartbeat, "run_erp_heartbeat", recorder):
+        return wd.run_once(
+            now=now, dry_run=False,
+            run=lambda *a, **k: "",
+            send_fn=lambda *a, **k: None,
+            projects_dir=Path(state_path).parent / "proj",
+            state_path=state_path,
+            erp_heartbeat_enabled=True,
+            time_fn=time_fn,
+        )
+
+
+class TestRunOnceBudget(unittest.TestCase):
+    def test_runs_the_leaf_with_40s_left_instead_of_holding(self):
+        # The live montalu1 bug: ~40s left, Job 51 held (`need >=65s`). With the
+        # fix (min 30) the leaf RUNS.
+        seen = []
+
+        def rec(now, state, **k):
+            seen.append(now)
+            return ["erp-heartbeat: (recorder)"]
+
+        with TemporaryDirectory() as d:
+            logs = _drive_run_once_budget(
+                1000.0, str(Path(d) / "state.json"), rec, remaining_s=40)
+        self.assertEqual(seen, [1000.0],
+                         "Job 51 must RUN with 40s left, not hold:budget")
+        self.assertFalse(
+            any("erp_heartbeat -> hold:budget" in ln for ln in logs),
+            "Job 51 must not be held at 40s left")
+
+    def test_still_holds_when_budget_is_under_the_minimum(self):
+        # The guard is not removed — under the (new) minimum it still holds.
+        seen = []
+
+        def rec(now, state, **k):
+            seen.append(now)
+            return []
+
+        with TemporaryDirectory() as d:
+            logs = _drive_run_once_budget(
+                2000.0, str(Path(d) / "state.json"), rec, remaining_s=20)
+        self.assertEqual(seen, [],
+                         "Job 51 must still hold when under its minimum budget")
+        self.assertTrue(
+            any("erp_heartbeat -> hold:budget" in ln for ln in logs),
+            "a sub-minimum budget must still journal hold:budget")
+
+
 if __name__ == "__main__":
     unittest.main()
 
