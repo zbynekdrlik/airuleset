@@ -538,12 +538,61 @@ def _safe_to_bounce_nudge(captured, cwd, projects_dir):
     return True
 
 
+def _bounce_seen_tokens(tickets, verdict_map):
+    """#1066 lane B — the job-8 dedup token SET. A ticket whose gk BOUNCE verdict
+    is known (in `verdict_map`, `{number: verdict_ts}` from the per-cwd
+    bounce_unhandled cache) becomes an `N@<verdict_ts>` token; an unresolved
+    member stays a bare `N`. So a FRESH verdict on a seen ticket is a CHANGED set
+    that re-nudges inside the 6 h renudge window, while an unchanged verdict is
+    the same set (silent). `verdict_ts` is coerced to int so a float epoch and
+    its JSON-round-tripped render never diverge. Returns a `set` (the caller
+    sorts it for a stable persisted list)."""
+    toks = set()
+    vm = verdict_map if isinstance(verdict_map, dict) else {}
+    for n in tickets:
+        ts = vm.get(n)
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool):
+            toks.add("%d@%d" % (int(n), int(ts)))
+        else:
+            toks.add("%d" % int(n))
+    return toks
+
+
+def _bounce_verdict_map(root, home=None):
+    """`{number: verdict_ts}` for `root`'s unhandled bounces, read from the
+    per-cwd tickets-status cache field `bounce_unhandled` (lane A #1066) — ZERO
+    gh (the footer refreshes it ~every 120 s). Empty `{}` on any failure /
+    absence (a full box, or a box lane A never populated) so every token stays a
+    bare `N` and job-8 dedup degrades to its pre-#1066 int-set form."""
+    try:
+        import json
+        import statusbar
+        path = statusbar.cache_dir(home) / (statusbar.cwd_key(root) + ".json")
+        with open(path, encoding="utf-8") as h:
+            d = json.load(h)
+        field = d.get("bounce_unhandled") if isinstance(d, dict) else None
+        if not isinstance(field, list):
+            return {}
+        out = {}
+        for e in field:
+            if not isinstance(e, dict):
+                continue
+            n = e.get("number")
+            ts = e.get("verdict_ts")
+            if isinstance(n, int) and not isinstance(n, bool) \
+                    and isinstance(ts, (int, float)) and not isinstance(ts, bool):
+                out[n] = ts
+        return out
+    except Exception:
+        return {}
+
+
 def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                     gh_fetch=None, interval=None,
                     renudge=None, persist=None,
                     projects_dir=None, user=None, cross_stream_repos=None,
                     time_fn=None, sweep_deadline=None, sleep_fn=None,
-                    watch_fn=None):
+                    watch_fn=None, verdict_map_fetch=None):
     """Job 8 — see the section comment. Mutates state['bounce']; `persist` (the
     caller's save-state closure) is invoked BEFORE any keystroke/ping leaves
     the process — the live incident: TimeoutStartSec killed the run after the
@@ -579,6 +628,11 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
     b["seen"] = seen
     state["bounce"] = b
     fetch = gh_fetch or (lambda root: _fetch_bounce_tickets(root, home))
+    # #1066 lane B — the per-cwd verdict source for the dedup token set (ZERO gh:
+    # reads the `bounce_unhandled` cache lane A refreshes at footer render). None
+    # -> the default cache reader; a fake/full-box root reads {} so tokens stay
+    # bare `N` (pre-#1066 int-set dedup, byte-identical).
+    verdict_fetch = verdict_map_fetch or (lambda r: _bounce_verdict_map(r, home))
     persist = persist or (lambda: None)
     projects_dir = projects_dir or watchdog.PROJECTS_DIR
     time_fn = time_fn or time.monotonic
@@ -649,7 +703,14 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
             seen.pop(name, None)               # clean → forget the set
             continue
         prev = seen.get(name) or {}
-        same = prev.get("tickets") == tickets
+        # #1066 lane B — dedup on a `N@<verdict_ts>` TOKEN set (verdict from the
+        # per-cwd bounce_unhandled cache), so a FRESH gk verdict on a SEEN ticket
+        # is a CHANGED set that re-nudges inside the 6 h renudge window; an
+        # unchanged verdict is the same set (silent). An unresolved member stays
+        # a bare `N` token -> a full box / an un-populated cache degrades to the
+        # pre-#1066 int-set dedup, byte-identical.
+        cur_toks = sorted(_bounce_seen_tokens(tickets, verdict_fetch(root)))
+        same = prev.get("tickets") == cur_toks
         fresh = (now - prev.get("ts", 0)) < renudge
         if same and fresh:
             continue                           # already nudged/pinged this set
@@ -690,14 +751,14 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                                     % (name, tick_str, "; ".join(why) or "no reason"))
                     continue
                 _clear_verify_fail(b, name)   # a delivered nudge ends the streak
-                seen[name] = {"tickets": tickets, "ts": int(now)}
+                seen[name] = {"tickets": cur_toks, "ts": int(now)}
                 persist()
                 logs.append("bounce-nudge %s %s" % (name, tick_str))
                 continue
             # #193 — persist the dedup BEFORE the keystroke so a systemd
             # TimeoutStartSec kill after a LANDED nudge but before run_once's
             # save_state cannot lose it (the 4x re-nudge incident).
-            seen[name] = {"tickets": tickets, "ts": int(now)}
+            seen[name] = {"tickets": cur_toks, "ts": int(now)}
             persist()
             if dry_run:
                 logs.append("bounce-nudge %s %s (dry-run)" % (name, tick_str))
@@ -726,7 +787,7 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
                     "prácu (%s), ale nebeží žiadna Claude session, ktorá by ju "
                     "spracovala. Spusti session v `%s` (autopilot ich zoberie "
                     "cez prio:bounce)." % (name, len(tickets), tick_str, root))
-            seen[name] = {"tickets": tickets, "ts": int(now)}
+            seen[name] = {"tickets": cur_toks, "ts": int(now)}
             persist()                          # dedup memory BEFORE the ping
             # #369: routes to the repo's own project thread — mirrors the
             # SAME stream-qualified label a run-card / idle ping for the

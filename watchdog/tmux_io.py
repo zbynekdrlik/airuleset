@@ -102,6 +102,11 @@ MACHINE_NUDGE_KINDS = frozenset({
     # longer produce a keystroke. Do NOT touch the other kinds.
     "queue-arrival", "lane-occupancy", "release-gap", "lane-reconcile",
     "partition-audit", "u-freshness", "goal-guard",
+    # #1066 lane B — the goal-lane BOUNCE-verdict rider (reduced-authority
+    # panes): a fresh gk BOUNCE verdict on the stream's own ticket wakes the
+    # armed /goal loop. A GATED priority kind (default OFF, owner stages it);
+    # the `nudges` CLI kind list derives from THIS set.
+    "bounce-verdict",
     # goal auto-arm / dying-subagent stuck-check
     "goal-sweep", "subagent-stuck",
     # idle-pane backstops + report-owed card (jobs 8/11 + cards)
