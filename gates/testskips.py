@@ -30,6 +30,20 @@ PATTERNS = [
     (re.compile(r'expect\(true\)\.toBe\(true\)'),
      "expect(true).toBe(true) — tautology, verifies nothing"),
 ]
+
+# #1069 -- the ONE sanctioned skip shape the fleet gate allows: a TOP-LEVEL
+# (column 0) Playwright `test.skip` whose first argument is EXACTLY the bare
+# call notApplicable(), followed by a comma (a reason). It marks a per-instance
+# e2e spec not applicable when its addon is absent from the -i install list
+# (odoo-erp .claude/rules/gk-review-lenses.md §test-integrity; the odoo-erp CI
+# job `No Skip Validation` guards its placement). Anchored at column 0 (no
+# leading `\s*`): the SAME shape INDENTED inside a `test(`/`describe(` body —
+# where a real skip could hide behind the literal — is NOT sanctioned and stays
+# blocked by PATTERNS. A line matching a SANCTIONED entry is dropped by
+# scan_test_file before the PATTERNS pass; everything else still runs.
+SANCTIONED = [
+    re.compile(r'^test\.skip\(\s*notApplicable\(\)\s*,'),
+]
 EMPTY_BODY = re.compile(
     r'^[ \t]*def\s+test_\w*\([^)]*\):[ \t]*\n[ \t]*pass[ \t]*$'
     r'|fn\s+test_\w*\([^)]*\)\s*\{\s*\}'
@@ -76,6 +90,8 @@ def scan_test_file(tf, base_ref, dest_ref):
                        if ln.startswith("+") and not ln.startswith("+++")]
         kept = []
         for ln in added_lines:
+            if any(s.search(ln) for s in SANCTIONED):
+                continue  # #1069 -- the one allowed literal; never scanned
             if dest and ln.strip() in dest:
                 for pat, _lbl in PATTERNS:
                     if pat.search(ln):
@@ -119,6 +135,13 @@ _BLOCK_MSG = (
     "  Per modules/ci/test-strictness.md, every test must run for real and verify\n"
     "  actual behavior — no #[ignore], no .skip(), no assume!(), no assert!(true),\n"
     "  no empty test bodies.\n"
+    "\n"
+    "  The ONE sanctioned exception (odoo-erp .claude/rules/gk-review-lenses.md\n"
+    "  §test-integrity): a TOP-LEVEL (column 0) `test.skip` whose first argument is\n"
+    "  exactly the bare call notApplicable() followed by a reason — marking a\n"
+    "  per-instance Playwright e2e spec not applicable. That literal is allowed\n"
+    "  automatically; every other skip shape (indented, truthy/condition arg,\n"
+    "  compound arg, no reason, it-skip, pytest mark) stays blocked below.\n"
     "\n"
     "%s\n"
     "\n"
