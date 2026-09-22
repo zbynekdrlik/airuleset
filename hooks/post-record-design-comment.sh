@@ -86,7 +86,7 @@ REPO_ROOT="$(dirname "$HOOK_DIR")"
 # Data via ARGV, never a pipe into a `python3 -` heredoc — the heredoc
 # already claims stdin for the SCRIPT SOURCE (this repo's own recurring
 # trap, see subagent-stop-check-run-card.sh).
-python3 - "$REPO_ROOT" "$CMD" "$CWD" <<'PYEOF' 2>/dev/null || true
+python3 -P - "$REPO_ROOT" "$CMD" "$CWD" <<'PYEOF' 2>/dev/null || true
 import datetime
 import json
 import os

@@ -46,6 +46,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 REPO = Path(airuleset.__file__).resolve().parent
 HOOKS = REPO / "hooks"
 HOOK = HOOKS / "block-local-poll-repeat.sh"
@@ -101,7 +103,7 @@ class _Runner(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def run_hook(self, command, hook=None, **kw):
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["AIRULESET_LOCALPOLL_STATE_DIR"] = self.state
         out = subprocess.run(
             ["bash", str(hook or HOOK)], input=payload(command, **kw),
@@ -244,7 +246,7 @@ class NeverBothBlockTest(_Runner):
         seen = []
         for _ in range(n):
             local = self.run_hook(cmd).returncode
-            env = dict(os.environ)
+            env = hermetic_hook_env(self)
             env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
             ci = subprocess.run(
                 ["bash", str(self.CI)], input=payload(cmd), text=True,
@@ -589,7 +591,7 @@ class Issue281TargetKeyHardeningTest(_Runner):
 
 class FailOpenTest(_Runner):
     def test_unparseable_payload_fails_open(self):
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["AIRULESET_LOCALPOLL_STATE_DIR"] = self.state
         out = subprocess.run(["bash", str(HOOK)], input="not json at all",
                              text=True, env=env, capture_output=True,

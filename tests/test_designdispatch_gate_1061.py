@@ -4,8 +4,10 @@ unless the newest `Design-by:` comment on every issue is `Design-by: main
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -13,6 +15,29 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 from gates import designdispatch as dd  # noqa: E402
+
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
+# #1046: some classes call dd.* IN-PROCESS, which _logs to
+# ~/.claude/design-by-gate.log via expanduser("~"). Point HOME at a fresh empty
+# dir for the whole module (module-scoped save+restore — batch-31-safe).
+_A1046_ORIG_HOME = None
+_A1046_HOME = None
+
+
+def setUpModule():
+    global _A1046_ORIG_HOME, _A1046_HOME
+    _A1046_ORIG_HOME = os.environ.get("HOME")
+    _A1046_HOME = tempfile.mkdtemp(prefix="a1046-modhome-")
+    os.environ["HOME"] = _A1046_HOME
+
+
+def tearDownModule():
+    if _A1046_ORIG_HOME is None:
+        os.environ.pop("HOME", None)
+    else:
+        os.environ["HOME"] = _A1046_ORIG_HOME
+    shutil.rmtree(_A1046_HOME, ignore_errors=True)
 
 FABLE = "claude-fable-5-1"
 
@@ -216,7 +241,7 @@ class TestAdapterEndToEnd(unittest.TestCase):
 
     def _run(self, prompt, comments_json):
         ghdir = self._fake_gh(comments_json)
-        env = dict(os.environ, PATH=ghdir + os.pathsep + os.environ["PATH"])
+        env = hermetic_hook_env(self, PATH=ghdir + os.pathsep + os.environ["PATH"])
         # cwd must be a REAL directory -- _resolve_slug runs `gh` with cwd=<the
         # payload cwd>, so a non-existent cwd fails the subprocess (not the gate).
         return subprocess.run(

@@ -39,6 +39,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from _hook_state_cleanup import MODULE_HOOK_HOME  # noqa: E402  (#1046 hermetic HOME)
+
 ROOT = Path(__file__).resolve().parent.parent
 WORKER_MD = ROOT / "agents" / "autopilot-worker.md"
 SKILL_MD = ROOT / "skills" / "autopilot" / "SKILL.md"
@@ -218,7 +220,7 @@ def _run_hook(hook, repo, command):
     payload = {"tool_input": {"command": command}}
     return subprocess.run(["bash", str(HOOKS / hook)], input=json.dumps(payload),
                           cwd=str(repo), capture_output=True, text=True,
-                          env=dict(os.environ), timeout=30)
+                          env=dict(os.environ, HOME=MODULE_HOOK_HOME), timeout=30)
 
 
 @unittest.skipUnless(shutil.which("ruff"), "ruff not installed")

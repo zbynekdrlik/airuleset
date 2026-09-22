@@ -5,10 +5,13 @@ which have no such flag, while leaving the READ subcommands (list/view) and the
 correct -F/--body-file recipe untouched. Locks the "fifth attempt" loop shut.
 """
 
+import os
 import json
 import subprocess
 from pathlib import Path
 from unittest import TestCase, main
+
+from _hook_state_cleanup import MODULE_HOOK_HOME  # noqa: E402  (#1046 hermetic HOME)
 
 HOOK = Path(__file__).resolve().parent.parent / "hooks" / "block-gh-invalid-json-flag.sh"
 
@@ -16,7 +19,7 @@ HOOK = Path(__file__).resolve().parent.parent / "hooks" / "block-gh-invalid-json
 def run(cmd):
     payload = json.dumps({"tool_input": {"command": cmd}})
     return subprocess.run(
-        ["bash", str(HOOK)], input=payload, capture_output=True, text=True
+        ["bash", str(HOOK)], input=payload, capture_output=True, text=True, env={**os.environ, "HOME": MODULE_HOOK_HOME}
     )
 
 

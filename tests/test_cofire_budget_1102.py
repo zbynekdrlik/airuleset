@@ -36,6 +36,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from _hook_state_cleanup import MODULE_HOOK_HOME  # noqa: E402  (#1046 hermetic HOME)
+
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "hooks" / "inject-situational-rule.sh"
 CONF = ROOT / "hooks" / "situational-triggers.conf"
@@ -159,7 +161,7 @@ def run_hook(surface, tool_input=None, prompt=None, session_id="s"):
         payload = {"session_id": session_id, "tool_name": surface,
                    "tool_input": tool_input}
     with tempfile.TemporaryDirectory() as td:
-        env = dict(os.environ, TMPDIR=td)
+        env = dict(os.environ, HOME=MODULE_HOOK_HOME, TMPDIR=td)
         r = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
                            capture_output=True, text=True, env=env)
     out = r.stdout.strip()

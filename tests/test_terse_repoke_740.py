@@ -45,7 +45,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _hook_state_cleanup import new_hook_sid  # noqa: E402
+from _hook_state_cleanup import hermetic_hook_env, new_hook_sid  # noqa: E402  (#1046 hermetic HOME)
 
 ROOT = Path(__file__).resolve().parent.parent
 PENDING = ROOT / "hooks" / "notify-discord-pending.sh"
@@ -113,7 +113,7 @@ class TerseRepokeIsSafe(unittest.TestCase):
     def _run_gate(self, msg, sid):
         payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
         return subprocess.run(["bash", str(GATE)], input=payload,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=hermetic_hook_env(self))
 
     def _questions_map(self):
         p = self.home / ".claude" / "discord-questions.json"

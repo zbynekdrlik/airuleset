@@ -11,12 +11,14 @@ import uuid
 from pathlib import Path
 from unittest import TestCase, main
 
+from _hook_state_cleanup import MODULE_HOOK_HOME  # noqa: E402  (#1046 hermetic HOME)
+
 LIB = Path(__file__).resolve().parent.parent / "hooks" / "lib-presence.sh"
 
 
 def _is_away(sid, away_s=None):
     """Run the helper in a fresh bash, return True iff it reports AWAY (exit 0)."""
-    env = dict(os.environ)
+    env = dict(os.environ, HOME=MODULE_HOOK_HOME)
     if away_s is not None:
         env["AIRULESET_MAIN_GUARD_AWAY_S"] = str(away_s)
     script = (

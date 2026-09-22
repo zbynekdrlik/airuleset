@@ -29,6 +29,8 @@ import subprocess
 from pathlib import Path
 from unittest import TestCase, main
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 REPO = Path(__file__).resolve().parent.parent
 HOOKS = REPO / "hooks"
 HOOK = HOOKS / "block-foreign-airuleset-write.sh"
@@ -132,7 +134,8 @@ class ForeignRuleAWidenedHook(TestCase):
                               "transcript_path": FOREIGN_TR})
         return subprocess.run(["bash", str(HOOK)], input=payload,
                               capture_output=True, text=True,
-                              env={"PATH": "/usr/bin:/bin"})
+                              env={"PATH": "/usr/bin:/bin",
+                                   "HOME": hermetic_hook_env(self)["HOME"]})
 
     def test_new_write_shapes_are_blocked_by_the_hook(self):
         for c in NEW_WRITE_SHAPES:
@@ -190,7 +193,8 @@ class LineContinuation842Hook(TestCase):
                               "cwd": FOREIGN_CWD, "transcript_path": FOREIGN_TR})
         return subprocess.run(["bash", str(HOOK)], input=payload,
                               capture_output=True, text=True,
-                              env={"PATH": "/usr/bin:/bin"})
+                              env={"PATH": "/usr/bin:/bin",
+                                   "HOME": hermetic_hook_env(self)["HOME"]})
 
     def test_hook_blocks_the_continuation_write(self):
         for c in ("git \\\n-C %s commit -m x" % AR,

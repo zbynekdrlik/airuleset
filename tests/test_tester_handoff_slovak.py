@@ -105,7 +105,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import airuleset  # noqa: E402
-from _hook_state_cleanup import sweep_session_files  # noqa: E402
+from _hook_state_cleanup import (  # noqa: E402
+    MODULE_HOOK_HOME, sweep_session_files)
 
 HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-prose-violations.sh"
 
@@ -116,6 +117,10 @@ def _run_stop_prose(text, env=None):
     per-session), swept immediately after (#202 leftover-counter class)."""
     sid = f"test-424-{uuid.uuid4().hex[:10]}"
     payload = json.dumps({"session_id": sid, "last_assistant_message": text})
+    # #1046: module-level runner (no testcase for addCleanup) — force a shared
+    # hermetic HOME so the hook never reads the box's real ~/.claude; a caller's
+    # own env keeps its vars but HOME is forced hermetic too.
+    env = {**(env if env is not None else os.environ), "HOME": MODULE_HOOK_HOME}
     p = subprocess.run(
         ["bash", str(HOOK)], input=payload, capture_output=True, text=True,
         env=env,

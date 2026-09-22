@@ -32,6 +32,8 @@ from tempfile import TemporaryDirectory
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 BLOCK_HOOK = REPO / "hooks" / "block-main-implementation.sh"
 BG_HOOK = REPO / "hooks" / "subagent-stop-check-bg-work.sh"
 
@@ -66,7 +68,7 @@ class TornTranscriptBlockMain1013(unittest.TestCase):
                        "hook_event_name": "PreToolUse", "tool_name": "Bash",
                        "tool_input": {"command": command},
                        "transcript_path": tp}
-            env = dict(os.environ)
+            env = hermetic_hook_env(self)
             if jqdir:
                 env["PATH"] = jqdir + os.pathsep + env.get("PATH", "")
             return subprocess.run(["bash", str(BLOCK_HOOK)],
@@ -154,7 +156,7 @@ class TornTranscriptBgWork1013(unittest.TestCase):
                        "agent_transcript_path": tp}
             out = subprocess.run(["bash", str(BG_HOOK)],
                                  input=json.dumps(payload),
-                                 env=dict(os.environ),
+                                 env=hermetic_hook_env(self),
                                  capture_output=True, text=True)
             self.assertIn("task-XYZ1013", out.stdout,
                           "the launched task must be detected past the torn line")

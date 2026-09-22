@@ -136,7 +136,7 @@ fi
 # post-#998 live-lane count (merged lanes excluded).
 REPO_DIR=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || echo "")
 if [ -n "$REPO_DIR" ]; then
-    SEQ_LINE=$(AIRULESET_GATE_CWD="$CWD" PYTHONPATH="$REPO_DIR" python3 -c \
+    SEQ_LINE=$(AIRULESET_GATE_CWD="$CWD" PYTHONPATH="$REPO_DIR" python3 -P -c \
 'import os, cli_concurrency; print(cli_concurrency.dispatch_gate_line(os.environ.get("AIRULESET_GATE_CWD","")))' \
         2>/dev/null || echo "allow|error|0")
     SEQ_VERDICT=${SEQ_LINE%%|*}

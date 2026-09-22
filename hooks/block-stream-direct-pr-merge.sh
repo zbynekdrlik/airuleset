@@ -83,7 +83,7 @@ REPO_ROOT_DIR=""
 [ -n "$HOOK_DIR" ] && REPO_ROOT_DIR="$(dirname "$HOOK_DIR")"
 
 RC=0
-python3 - "$CMD" "$(pwd)" "$REPO_ROOT_DIR" <<'PYEOF' || RC=$?
+python3 -P - "$CMD" "$(pwd)" "$REPO_ROOT_DIR" <<'PYEOF' || RC=$?
 import re
 import shlex
 import sys

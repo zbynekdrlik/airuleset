@@ -355,7 +355,7 @@ class TestDiscordNotifyHooks(TestCase):
         # simulate the UserPromptSubmit hook firing (the user actually typed)
         payload = json.dumps({"session_id": sid, "prompt": "odpoveď"})
         return subprocess.run(["bash", str(self.CLEAR)], input=payload, text=True,
-                              capture_output=True)
+                              capture_output=True, env=hermetic_hook_env(self))
 
     def _stop(self, sid, msg, cwd="", owner="", home=None):
         # Hermetic: DRYRUN + ND_DRYRUN_FILE → the ❓ immediate-send composes to a
@@ -1201,7 +1201,7 @@ class TestSecretStagingHook(TestCase):
         payload = json.dumps({"tool_name": "Bash",
                               "tool_input": {"command": command}})
         return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
-                              capture_output=True)
+                              capture_output=True, env=hermetic_hook_env(self))
 
     def test_blocks_credentials_via_stdin(self):
         r = self._run("git add credentials.json")
@@ -1235,7 +1235,7 @@ class TestSecretStagingHook(TestCase):
         payload = json.dumps({"tool_input": {"command": "",
                                              "description": "git add .env note"}})
         r = subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
-                           capture_output=True, timeout=10)
+                           capture_output=True, timeout=10, env=hermetic_hook_env(self))
         self.assertEqual(r.returncode, 0, r.stdout)
 
     def test_tool_input_env_fallback_still_blocks(self):
@@ -1245,7 +1245,7 @@ class TestSecretStagingHook(TestCase):
     def test_empty_payload_does_not_hang_or_block(self):
         import subprocess
         r = subprocess.run(["bash", str(self.HOOK)], input="", text=True,
-                           capture_output=True, timeout=10)
+                           capture_output=True, timeout=10, env=hermetic_hook_env(self))
         self.assertEqual(r.returncode, 0)
 
 
@@ -1260,7 +1260,7 @@ class TestPostPushCiCleanupHook(TestCase):
         payload = json.dumps({"tool_name": "Bash",
                               "tool_input": {"command": command}})
         return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
-                              capture_output=True, cwd=cwd, timeout=30)
+                              capture_output=True, cwd=cwd, timeout=30, env=hermetic_hook_env(self))
 
     def test_non_push_command_is_noop(self):
         r = self._run("ls -la")
@@ -1357,7 +1357,7 @@ exit 0
         repo, env, cancels, head, old = self._cancel_fixture()
         # rewind the remote-tracking ref so HEAD != remote tip (push failed/rejected)
         import subprocess
-        subprocess.run(["git", "update-ref", "refs/remotes/origin/dev", old], cwd=repo)
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/dev", old], cwd=repo, env=hermetic_hook_env(self))
         r = self._run_env(repo, env, "git push origin dev")
         self.assertEqual(r.returncode, 0)
         self.assertFalse(os.path.exists(cancels) and open(cancels).read().strip(),
@@ -1903,7 +1903,7 @@ class TestPrePushBaseSyncHook(TestCase):
 
     def _g(self, cwd, *args):
         import subprocess
-        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, env=hermetic_hook_env(self))
 
     def _base_repo(self):
         """Remote + clone, main+dev, with a 3-line 'shared' file (so divergent
@@ -2456,7 +2456,7 @@ class TestSessionStartFetchHook(TestCase):
 
     def _g(self, cwd, *args):
         import subprocess
-        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+        return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, env=hermetic_hook_env(self))
 
     def _base_repo(self):
         """Remote (bare) + a clone on 'main', origin/HEAD set, one commit."""
@@ -2502,7 +2502,7 @@ class TestSessionStartFetchHook(TestCase):
     def _run(self, repo):
         import subprocess
         return subprocess.run(["bash", str(self.HOOK)], cwd=repo,
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=30, env=hermetic_hook_env(self))
 
     def test_clean_behind_fast_forwards(self):
         repo = self._base_repo()
@@ -2721,7 +2721,7 @@ class TestProdGatingHook(TestCase):
         import subprocess
         payload = json.dumps({"last_assistant_message": msg, "session_id": self._sid()})
         return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
-                              capture_output=True)
+                              capture_output=True, env=hermetic_hook_env(self))
 
     def _blocked(self, r):
         return r.returncode == 0 and '"block"' in r.stdout
@@ -2816,7 +2816,7 @@ class TestPreDeployCleanTreeHook(TestCase):
             cwd=str(repo),
             check=True,
             capture_output=True,
-            text=True,
+            text=True, env=hermetic_hook_env(self)
         )
 
     def _make_repo(self):
@@ -3372,7 +3372,7 @@ class TestProseViolationsAutoMergeSignals(TestCase):
     def _run(self, msg, sid=None):
         payload = json.dumps({"last_assistant_message": msg, "session_id": sid or self._sid()})
         return subprocess.run(["bash", str(self.HOOK)], input=payload,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=hermetic_hook_env(self))
 
     def test_merged_prose_report_without_heading_blocked(self):
         msg = ("Merged to main (a1b2c3d), v1.2.0 deployed and verified.\n"
@@ -3418,7 +3418,7 @@ class TestProseViolationsPrlessCompletion(TestCase):
     def _run(self, msg):
         payload = json.dumps({"last_assistant_message": msg, "session_id": self._sid()})
         return subprocess.run(["bash", str(self.HOOK)], input=payload,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=hermetic_hook_env(self))
 
     def test_bare_slovak_ticket_done_blocked(self):
         # david's literal failure message — no PR URL, no heading, no audits.
@@ -3490,7 +3490,7 @@ class TestIssueRefTitles(TestCase):
     def _run(self, msg):
         payload = json.dumps({"last_assistant_message": msg, "session_id": self._sid()})
         return subprocess.run(["bash", str(self.HOOK)], input=payload,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=hermetic_hook_env(self))
 
     def test_module_exists_and_in_profile(self):
         self.assertTrue(self.MODULE.exists())
@@ -3531,7 +3531,7 @@ class TestPreAskAutoAnswerMergeQuestions(TestCase):
     def _run(self, question):
         payload = json.dumps({"tool_input": {"questions": [{"question": question}]}})
         return subprocess.run(["bash", str(self.HOOK)], input=payload,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=hermetic_hook_env(self))
 
     def test_merge_permission_question_blocked(self):
         r = self._run("PR #5 is green — should I merge now or wait for your approval?")
@@ -3571,7 +3571,7 @@ class TestSendMessageNarrationHook(TestCase):
     def _run(self, msg):
         payload = json.dumps({"last_assistant_message": msg, "session_id": self._sid()})
         return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
-                              capture_output=True)
+                              capture_output=True, env=hermetic_hook_env(self))
 
     def _blocked(self, r):
         return r.returncode == 0 and '"block"' in r.stdout
@@ -11778,7 +11778,7 @@ class TestTier0BuildBlock(TestCase):
     def _run(self, cmd, cwd):
         payload = json.dumps({"tool_input": {"command": cmd}, "cwd": cwd})
         return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
-                              capture_output=True)
+                              capture_output=True, env=hermetic_hook_env(self))
 
     def _proj(self, marker=None):
         d = tempfile.mkdtemp()
@@ -12843,7 +12843,7 @@ class TestRemoteCmdWithHomeAudit(TestCase):
     def test_marker_present_and_original_failing_exit_code_preserved(self):
         cmd = airuleset._remote_cmd_with_home_audit("false")
         r = subprocess.run(["bash", "-c", cmd], capture_output=True,
-                            text=True, timeout=10)
+                            text=True, timeout=10, env=hermetic_hook_env(self))
         self.assertEqual(r.returncode, 1,
                           "the ORIGINAL chain's failing exit code must survive "
                           "the trailing audit, never the ls's own exit code")
@@ -12852,7 +12852,7 @@ class TestRemoteCmdWithHomeAudit(TestCase):
     def test_marker_present_and_original_successful_exit_code_preserved(self):
         cmd = airuleset._remote_cmd_with_home_audit("true")
         r = subprocess.run(["bash", "-c", cmd], capture_output=True,
-                            text=True, timeout=10)
+                            text=True, timeout=10, env=hermetic_hook_env(self))
         self.assertEqual(r.returncode, 0)
         self.assertIn(airuleset._HOME_AUDIT_MARKER, r.stdout)
 
@@ -14477,7 +14477,7 @@ class TestBlockDestructiveRemoteWinSshHazard(TestCase):
         # while tolerating measured fleet-load scheduling delay.
         r = subprocess.run(
             ["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
-            input=payload, text=True, capture_output=True, cwd=d, timeout=30,
+            input=payload, text=True, capture_output=True, cwd=d, timeout=30, env=hermetic_hook_env(self)
         )
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
@@ -15344,7 +15344,7 @@ class TestLocalhostOnGlobeLineHook(TestCase):
         self.addCleanup(lambda: os.path.exists(retry_file) and os.remove(retry_file))
         payload = json.dumps({"session_id": sid, "last_assistant_message": msg})
         return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
-                              capture_output=True, timeout=30)
+                              capture_output=True, timeout=30, env=hermetic_hook_env(self))
 
     def test_blocks_globe_line_with_localhost(self):
         r = self._run("Here's the preview: \U0001F310 Dev: http://localhost:5173")
@@ -15386,7 +15386,7 @@ class TestLocalhostOnApkLineHook(TestCase):
         self.addCleanup(lambda: os.path.exists(retry_file) and os.remove(retry_file))
         payload = json.dumps({"session_id": sid, "last_assistant_message": msg})
         return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
-                              capture_output=True, timeout=30)
+                              capture_output=True, timeout=30, env=hermetic_hook_env(self))
 
     def test_blocks_apk_line_with_localhost(self):
         r = self._run("Build is ready: \U0001F4F1 APK: http://localhost:8788/app.apk")
@@ -15476,7 +15476,7 @@ class TestTesterHandoffHook(TestCase):
         self.addCleanup(lambda: os.path.exists(retry_file) and os.remove(retry_file))
         payload = json.dumps({"session_id": sid, "last_assistant_message": msg})
         return subprocess.run(["bash", str(self.HOOK)], input=payload, text=True,
-                              capture_output=True, timeout=30)
+                              capture_output=True, timeout=30, env=hermetic_hook_env(self))
 
     def test_blocks_can_you_test_it(self):
         r = self._run("I fixed the EQ bug. Can you test it on your end and let me know if it works?")
@@ -15597,7 +15597,7 @@ class TestProseHookIgnoresGoalTemplateLines(TestCase):
             f"/tmp/airuleset-stop-block-{sid}").unlink(missing_ok=True))
         payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
         return subprocess.run(["bash", str(self.HOOK)], input=payload,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=hermetic_hook_env(self))
 
     def test_autopilot_arm_message_with_goal_template_passes(self):
         goal = (airuleset.REPO_DIR / "skills" / "autopilot" / "SKILL.md").read_text(
@@ -15669,7 +15669,7 @@ class TestQualityGateExemptsArmQuestions(TestCase):
             f"/tmp/airuleset-question-quality-block-{sid}").unlink(missing_ok=True))
         payload = json.dumps({"last_assistant_message": msg, "session_id": sid})
         return subprocess.run(["bash", str(self.HOOK)], input=payload,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=hermetic_hook_env(self))
 
     def test_bare_arm_question_is_not_blocked(self):
         msg = ("/goal STOP CONDITIONS — ...\n\n"
@@ -16010,7 +16010,7 @@ class TestNudgePollLoopTimeoutHook(TestCase):
         payload = json.dumps({"tool_input": tool_input})
         return subprocess.run(
             ["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
-            input=payload, text=True, capture_output=True, timeout=30)
+            input=payload, text=True, capture_output=True, timeout=30, env=hermetic_hook_env(self))
 
     def test_poll_loop_with_no_timeout_param_is_nudged(self):
         r = self._run("for i in $(seq 1 18); do gh run view 1 "
@@ -16112,7 +16112,7 @@ class TestNudgePollLoopTimeoutHook(TestCase):
         payload = json.dumps({"tool_input": tool_input})
         r = subprocess.run(
             ["bash", str(airuleset.REPO_DIR / "hooks" / self.HOOK)],
-            input=payload, text=True, capture_output=True, timeout=30)
+            input=payload, text=True, capture_output=True, timeout=30, env=hermetic_hook_env(self))
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertNotIn("NUDGE", r.stdout + r.stderr)
 

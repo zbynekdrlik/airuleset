@@ -10,6 +10,7 @@ detector, independent of whether the visual-companion QUESTION row is
 present in the table) and stays regression-locked here.
 """
 
+import os
 import json
 import subprocess
 import sys
@@ -21,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import airuleset  # noqa: E402
-from _hook_state_cleanup import sweep_session_files  # noqa: E402
+from _hook_state_cleanup import MODULE_HOOK_HOME, sweep_session_files  # noqa: E402  (#1046 hermetic HOME)
 
 HOOK = airuleset.REPO_DIR / "hooks" / "stop-check-prose-violations.sh"
 
@@ -30,7 +31,7 @@ def _run_stop_prose(text):
     sid = f"test-ascii-art-{uuid.uuid4().hex[:10]}"
     payload = json.dumps({"session_id": sid, "last_assistant_message": text})
     p = subprocess.run(
-        ["bash", str(HOOK)], input=payload, capture_output=True, text=True)
+        ["bash", str(HOOK)], input=payload, capture_output=True, text=True, env={**os.environ, "HOME": MODULE_HOOK_HOME})
     sweep_session_files(sid)
     return '"decision"' in p.stdout and '"block"' in p.stdout
 

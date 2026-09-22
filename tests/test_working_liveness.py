@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import airuleset
-from _hook_state_cleanup import sweep_session_files
+from _hook_state_cleanup import hermetic_hook_env, sweep_session_files  # noqa: E402  (#1046 hermetic HOME)
 
 REPO = Path(airuleset.__file__).resolve().parent
 HOOK = REPO / "hooks" / "stop-check-working-liveness.sh"
@@ -87,7 +87,7 @@ class HookBase(unittest.TestCase):
             ["bash", str(HOOK)],
             input=payload(msg, background_tasks=background_tasks,
                           session_id=sid),
-            capture_output=True, text=True, timeout=HOOK_TIMEOUT_S)
+            capture_output=True, text=True, timeout=HOOK_TIMEOUT_S, env=hermetic_hook_env(self))
 
 
 class TestHookExistsAndWired(unittest.TestCase):
@@ -216,13 +216,13 @@ class TestFailOpenWhenUnprovable(HookBase):
 
     def test_no_jq_no_input_never_crashes(self):
         out = subprocess.run(["bash", str(HOOK)], input="", capture_output=True,
-                              text=True, timeout=HOOK_TIMEOUT_S)
+                              text=True, timeout=HOOK_TIMEOUT_S, env=hermetic_hook_env(self))
         self.assertEqual(out.returncode, 0)
 
     def test_garbage_stdin_fails_open(self):
         out = subprocess.run(["bash", str(HOOK)], input="not json at all",
                               capture_output=True, text=True,
-                              timeout=HOOK_TIMEOUT_S)
+                              timeout=HOOK_TIMEOUT_S, env=hermetic_hook_env(self))
         self.assertEqual(out.returncode, 0)
         self.assertNotIn('"decision"', out.stdout)
 
