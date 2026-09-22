@@ -325,6 +325,9 @@ from watchdog.decide import (  # noqa: E402
     DATED_RESET_STALE_GRACE_S as DATED_RESET_STALE_GRACE_S,
     pane_session_limited as pane_session_limited,
     pane_auto_continue_parked as pane_auto_continue_parked,   # #1034 Job 48
+    pane_limit_dialog as pane_limit_dialog,                   # #1086 Job 6 branch
+    capacity_recovered as capacity_recovered,                 # #1086 Job 6 branch
+    LIMIT_WINDOW_CAP_PCT as LIMIT_WINDOW_CAP_PCT,             # #1086
     parse_reset_epoch as parse_reset_epoch,
     _reset_epoch_from_scanned_text as _reset_epoch_from_scanned_text,
     parse_reset_epoch_from_error_text as parse_reset_epoch_from_error_text,
@@ -2305,6 +2308,11 @@ from watchdog import healthz_probe as healthz_probe  # noqa: E402,F401
 # + a lazy `import watchdog` inside `deliver_wake` for its keystroke defaults →
 # no cycle; imports NO notify — machine-channel journal only, lock-tested).
 from watchdog import parked_wake as parked_wake  # noqa: E402,F401
+# #1086 — Job 6's INTERACTIVE usage-limit DIALOG branch: dismiss the modal +
+# resume once the box provably has capacity (a claudy switch). Stdlib + a lazy
+# `import watchdog` inside its keystroke helpers → no cycle; imports NO notify
+# (machine-channel journal only, lock-tested).
+from watchdog import limit_dialog as limit_dialog  # noqa: E402,F401
 from watchdog import task_hygiene as task_hygiene  # noqa: E402,F401  (#1036 Job 49)
 
 
@@ -3571,6 +3579,12 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # characterization suite pins "pane loop runs before EVERY standalone job,
     # list_claude_panes never fires twice" (test_run_once_characterization.py).
     panes = list(list_claude_panes(run, dry_run=dry_run))
+    # #1086 — gk / gk-infra / gk-quality FIRST in the sweep (owner high-priority
+    # targets) so a limit-dialog on one is dismissed before a lower-priority pane
+    # even under sweep-budget pressure. Stable sort on the fleet-declared cwd
+    # basenames; a box without them is identity. Still ONE list_claude_panes call
+    # (job 41 reuses this reordered list).
+    panes = limit_dialog.prioritize_panes(panes)
     # #1060 L3b item 8 — dual-agent IMPLEMENTER window presence, marker-gated,
     # folded into the sweep body (NOT a new numbered job). See
     # `impl_window_presence` / `_impl_marker` for the full rationale; a non-marker
@@ -3641,6 +3655,27 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             # check + job 7 reply routing).
             captured = capture_pane(pid, run)
             panes_by_sid[key] = (pid, captured)   # job 7: route a Discord reply here
+
+            # --- (6b #1086) INTERACTIVE USAGE-LIMIT DIALOG → dismiss + resume on
+            # capacity (a claudy switch). A BLOCKING modal `pane_session_limited`
+            # does NOT match; handled FIRST (before job 10 would misread the
+            # `❯ 1.` selector as a wedged draft / job 1 would seed a limit ping)
+            # and `continue`s to own the pane. Branch body + episode state live in
+            # the satellite; see watchdog/limit_dialog.py for the full rationale.
+            if pane_limit_dialog(captured):
+                from watchdog import goal as _goal_mod   # deferred: avoid cycle
+                _cache_1086 = limit_dialog.read_usage_cache()
+                logs += limit_dialog.handle_limit_dialog(
+                    now, state, pid=pid, cwd=cwd, tpath=tpath, sid=key,
+                    project=project, captured=captured, usage_cache=_cache_1086,
+                    in_mode=lambda: pane_in_mode(pid, run),
+                    recent_human=lambda: _goal_mod._recovery_recent_human(
+                        key, cwd, tpath, now, pid=pid, run=run),
+                    deliver=lambda: limit_dialog.deliver_dismiss(
+                        pid, tpath, run=run, sleep_fn=sleep_fn, logs=logs,
+                        dry_run=dry_run),
+                    dry_run=dry_run)
+                continue                        # job 6 owns this modal-blocked pane
 
             # --- (10) QUEUED-PROMPT-WEDGE (#20): frozen input-box text + stale
             # transcript → ONE deduped owner ping (ping-first, never auto-Enter).
@@ -4770,6 +4805,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                 or k.startswith("sesslimit:") or k.startswith("busypane:")
                 or k.startswith("apierr-busypane:") or k.startswith("apierr-stashabort:")
                 or k.startswith("apierr-authdead:")   # #1075 credential-dead episode
+                or k.startswith("limit-dialog:")       # #1086 usage-limit dialog episode
                 or k.startswith("liveshell:")):
             # episode keys (job 2 waiting / job 4 working-stall): drop only after the
             # condition has been ABSENT for wait_clear seconds (the prompt was
