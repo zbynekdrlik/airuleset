@@ -527,8 +527,10 @@ label into the infra role/target. `--role` is a TERNARY slice — `--role review
 `core-quals`/`slice-quals --role infra` slices the infra rows, `--role quality` the quality rows (the
 odoo-erp `gk-quality` label — the `gk-quality` declared window, #1074), and `--role review` the rest
 (FLOW — the rows that are neither infra nor quality); the three are DISJOINT and total
-(`U(review) + U(infra) + U(quality) == U(all)`). A DECLARED window's role decides the slice;
-`core-quals --role <role> --count` is that window's stop-proof. The class-based "live-infra-lane" gate inside a parallel
+(`U(review) + U(infra) + U(quality) == U(all)`). A DECLARED window's role decides its slice —
+`core-quals --role <role> --count` counts exactly that window's rows; the review and quality windows
+arm that roled count as their `/goal` (B) stop-proof (the gk-infra window still arms the unroled
+`core-quals --count`, #1074 follow-up). The class-based "live-infra-lane" gate inside a parallel
 target was REMOVED in round 2b (it was a second, redundant mechanism for the same goal — the owner's
 "uz mam dost patchworkov"). **PENDING (round 3, #993, designed in the directive-3/4 comments, not yet
 shipped): the per-role/target sequential CONCURRENCY MODE (one lane, main design + main review, no

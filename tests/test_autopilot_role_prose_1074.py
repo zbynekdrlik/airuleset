@@ -58,9 +58,25 @@ class TestStep3TernarySlice(TestCase):
         self.assertIn("`--role quality` the quality rows", self.w)
 
     def test_the_declared_window_rule_sentence(self):
+        self.assertIn("A DECLARED window's role decides its slice", self.w)
         self.assertIn(
-            "A DECLARED window's role decides the slice; "
-            "`core-quals --role <role> --count` is that window's stop-proof",
+            "`core-quals --role <role> --count` counts exactly that window's rows",
+            self.w,
+        )
+        # review/quality arm the roled count as their (B) proof
+        self.assertIn(
+            "the review and quality windows arm that roled count "
+            "as their `/goal` (B) stop-proof",
+            self.w,
+        )
+
+    def test_infra_window_b_proof_is_not_overclaimed_as_roled(self):
+        # #1074 correctness (adversarial review 1): render_goal_line(full,
+        # sequential, infra) arms the UNROLED `core-quals --count`, only
+        # review/quality get the roled count. The prose must NOT claim the
+        # roled count is the infra window's stop-proof.
+        self.assertIn(
+            "the gk-infra window still arms the unroled `core-quals --count`",
             self.w,
         )
 
