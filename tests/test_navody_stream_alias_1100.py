@@ -210,6 +210,17 @@ class TestHermeticDegrade(unittest.TestCase):
             self.assertIsNone(url)
             self.assertIsNone(ticket)
 
+    def test_degrades_when_alias_table_malformed(self):
+        # the WHOLE resolution is guarded: a non-dict STREAM_RENAME_ALIASES (a
+        # `.items()`/`in` failure, not an import failure) must ALSO degrade to []
+        # / exact-name-only, never raise out of the Stop hook.
+        import cli_fleet
+        for bad in (None, ["montalu1"], 42):
+            with mock.patch.object(cli_fleet, "STREAM_RENAME_ALIASES", bad):
+                self.assertEqual(navody._alias_equivalents("montalu1"), [])
+                self.assertEqual(navody._stream_file_candidates("montalu1"),
+                                 ["montalu1"])
+
     def test_alias_still_works_after_degrade_context(self):
         # the try/except must not permanently poison the alias (cli_fleet is a
         # real leaf module once the patch is lifted).

@@ -122,28 +122,30 @@ def _alias_equivalents(stream):
     itself is added by the caller, not here.
 
     Reads `cli_fleet.STREAM_RENAME_ALIASES` LAZILY (a ZERO-import pure-data leaf
-    module) wrapped in try/except -> []: a gate / Stop hook must NEVER import the
-    `airuleset` facade or `cli_quals` (the 11k-line facade must not load in the
-    hook), and the reader degrades to the exact name alone when the import is
-    unavailable. Mirrors `cli_quals._stream_rename_equivalents`' one-edge-either-
-    direction semantics; the table is FLAT (no name is both a key AND a value),
-    so exactly ONE edge resolves per name — NO numeric-suffix heuristic."""
+    module); a gate / Stop hook must NEVER import the `airuleset` facade or
+    `cli_quals` (the 11k-line facade must not load in the hook). The WHOLE alias
+    resolution is wrapped in try/except -> [] so the reader degrades to the exact
+    name alone (fail-closed = UNKNOWN, the safe direction) on ANY failure — the
+    import being unavailable OR a malformed (non-dict) table. Mirrors
+    `cli_quals._stream_rename_equivalents`' one-edge-either-direction semantics;
+    the table is FLAT (no name is both a key AND a value), so exactly ONE edge
+    resolves per name — NO numeric-suffix heuristic."""
     if not stream:
         return []
     try:
         import cli_fleet
         aliases = cli_fleet.STREAM_RENAME_ALIASES
+        out = []
+        if stream in aliases:                       # old -> new
+            out.append(aliases[stream])
+        else:
+            for old, new in aliases.items():        # new -> old
+                if new == stream:
+                    out.append(old)
+                    break
+        return out
     except Exception:
         return []
-    out = []
-    if stream in aliases:                       # old -> new
-        out.append(aliases[stream])
-    else:
-        for old, new in aliases.items():        # new -> old
-            if new == stream:
-                out.append(old)
-                break
-    return out
 
 
 def _stream_file_candidates(stream):
