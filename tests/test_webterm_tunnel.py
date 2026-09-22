@@ -185,6 +185,26 @@ class TestMultiIngressRenderer870(unittest.TestCase):
             self.assertIn("service: %s" % svc, cfg)
         self.assertIn("service: http_status:404", cfg)
 
+    def test_multi_ingress_optional_path_field(self):
+        # #1114 deliberately extended contract: a rule may be (host, service) OR
+        # (host, path, service). A 3-tuple emits a `path:` line; the 2-tuple form
+        # stays byte-identical (no path line).
+        rules = [
+            ("drop.example.com", "^/s/", "http://127.0.0.1:8790"),
+            ("drop.example.com", "http://127.0.0.1:8870"),
+            ("web.example.com", "unix:/run/x.sock"),
+        ]
+        cfg = tun.render_cloudflared_multi_ingress_config("u", "/c.json", rules)
+        self.assertIn(
+            "  - hostname: drop.example.com\n    path: ^/s/\n"
+            "    service: http://127.0.0.1:8790\n", cfg)
+        # 2-tuple rows carry no path line.
+        self.assertIn("  - hostname: web.example.com\n    service: unix:/run/x.sock\n", cfg)
+        # The /s/ rule precedes the same host's catch-all drop rule.
+        self.assertLess(cfg.index("path: ^/s/"),
+                        cfg.index("service: http://127.0.0.1:8870"))
+        self.assertIn("service: http_status:404", cfg)
+
     def test_multi_ingress_trailing_catchall(self):
         cfg = tun.render_cloudflared_multi_ingress_config(
             "x", "/c.json", [("a.example.com", "http://localhost:80")])

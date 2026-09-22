@@ -282,8 +282,9 @@ class TestDropIngressRulesForController(unittest.TestCase):
 
     def test_returns_david_lanes(self):
         rules = dg.drop_ingress_rules_for_controller()
-        # Should contain entries for david1-4 (all controller-topology).
-        hosts = [h for h, _s in rules]
+        # #1114 deliberately extended contract: a rule is (host, service) OR
+        # (host, path, service) — take the hostname (element 0) either way.
+        hosts = [r[0] for r in rules]
         self.assertIn("drop-david.newlevel.media", hosts)
         self.assertIn("drop-subdev-david2.newlevel.media", hosts)
         self.assertIn("drop-subdev-david3.newlevel.media", hosts)
@@ -291,27 +292,39 @@ class TestDropIngressRulesForController(unittest.TestCase):
 
     def test_service_urls_point_at_tailscale(self):
         rules = dg.drop_ingress_rules_for_controller()
-        for host, svc in rules:
+        # #1114: the service URL is the LAST element for both the 2-tuple drop
+        # rule and the 3-tuple /s/ rule.
+        for rule in rules:
+            host, svc = rule[0], rule[-1]
             self.assertTrue(
                 svc.startswith("http://100.118.174.27:"),
                 "service URL %s for %s must point at subdev tailscale"
                 % (svc, host))
 
     def test_ports_match_registry(self):
+        # #1114 deliberately extended contract: each controller lane now emits the
+        # /s/ path rule (3-tuple -> filedrop_port) BEFORE its drop rule (2-tuple ->
+        # drop port). Assert BOTH per host, in that order.
         rules = dg.drop_ingress_rules_for_controller()
-        rule_map = {h: s for h, s in rules}
         for (node, user), lane in dg.DROP_LANES.items():
             if lane.topology != "controller":
                 continue
-            expected_svc = "http://%s:%d" % (lane.origin_host, lane.port)
-            self.assertEqual(rule_map.get(lane.host), expected_svc,
-                             "port mismatch for %s@%s" % (user, node))
+            drop_rule = (lane.host, "http://%s:%d" % (lane.origin_host, lane.port))
+            self.assertIn(drop_rule, rules,
+                          "drop rule missing for %s@%s" % (user, node))
+            if lane.filedrop_port is not None:
+                s_rule = (lane.host, "^/s/",
+                          "http://%s:%d" % (lane.origin_host, lane.filedrop_port))
+                self.assertIn(s_rule, rules,
+                              "/s/ rule missing for %s@%s" % (user, node))
+                self.assertLess(rules.index(s_rule), rules.index(drop_rule),
+                                "/s/ rule must precede the drop rule for %s" % lane.host)
 
     def test_does_not_include_local_topology_lanes(self):
         """Local-topology lanes (spinbike) must NOT appear in controller
         ingress rules."""
         rules = dg.drop_ingress_rules_for_controller()
-        hosts = [h for h, _s in rules]
+        hosts = [r[0] for r in rules]   # #1114: hostname is element 0 of 2- or 3-tuples
         self.assertNotIn("drop-spinbike.newlevel.media", hosts)
 
     def test_no_duplicate_rules(self):
@@ -351,6 +364,16 @@ class TestControllerWebterm931(unittest.TestCase):
             self.assertIn(expected_svc, config,
                           "service URL for %s missing from controller config"
                           % lane.host)
+            # #1114 deliberately extended contract: the /s/ path rule to the
+            # persistent filedrop service must be rendered before the drop rule.
+            if lane.filedrop_port is not None:
+                s_svc = "http://%s:%d" % (lane.origin_host, lane.filedrop_port)
+                self.assertIn("path: ^/s/", config,
+                              "no /s/ path rule in controller config")
+                self.assertIn(s_svc, config,
+                              "/s/ service URL for %s missing" % lane.host)
+                self.assertLess(config.index(s_svc), config.index(expected_svc),
+                                "/s/ rule must precede drop rule for %s" % lane.host)
 
         # The catch-all 404 must be present.
         self.assertIn("http_status:404", config)
