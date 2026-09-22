@@ -400,8 +400,11 @@ def _public_share_status(url, timeout=3):
             return None                          # do not follow — surface the 3xx code
 
     opener = urllib.request.build_opener(_NoRedirect)
+    # A named agent: Cloudflare's browser-integrity check answers 403 to urllib's
+    # default `Python-urllib/3.x` while the same URL serves 200 (david4, 22.9.).
+    req = urllib.request.Request(url, headers={"User-Agent": "airuleset-share"})
     try:
-        return opener.open(url, timeout=timeout).status
+        return opener.open(req, timeout=timeout).status
     except urllib.error.HTTPError as e:
         return e.code                            # 302 / 5xx surface here
     except Exception:
