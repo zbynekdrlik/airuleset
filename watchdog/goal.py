@@ -52,12 +52,22 @@ through a callback in the /autopilot command." Concretely:
              undeterminable, leave pending; `False` -> proceed -- this is
              what makes a race between the callback and the user's own
              manual paste of the printed line benign, and protects a
-             foreign manually-armed goal from being clobbered); then the
-             pane's boundary is classified and the payload is delivered via
-             the SAME shared primitives every other keystroke-sending job
-             in this file already uses (`deliver_with_stash` for a foreign
-             draft, `_send_goal_verified` -- moved here verbatim, together
-             with its `_await_typed` helper -- for a bare box).
+             foreign manually-armed goal from being clobbered); a #1110
+             TRANSCRIPT-LIVENESS gate (`watchdog.goal_turn_liveness`)
+             BEFORE the render boundary -- a transcript written within
+             GOAL_TURN_LIVE_WINDOW_S means the turn is still running (the
+             render's bare box is a mid-turn frame, byte-identical to idle),
+             so DEFER with zero keystrokes (`skip:busy-transcript`) rather
+             than type a /goal into a live turn (the dev1 songplayer 22.9.
+             swallowed-Enter + attempt-cap DROP); then the pane's boundary
+             is classified and the payload is delivered via the SAME shared
+             primitives every other keystroke-sending job in this file
+             already uses (`deliver_with_stash` for a foreign draft,
+             `_send_goal_verified` -- moved here verbatim, together with its
+             `_await_typed` helper -- for a bare box). #1110: a keystroke
+             whose arm never confirms while the transcript advanced during
+             the confirm window is `skip:verify-failed-live` -- a mis-timed
+             keystroke that never counts toward the attempt cap.
 
              Deliberately NOT gated on the TRANSCRIPT recent-human check
              (`_goal_autoarm_recent_human_activity`'s signals 1/2, #392/#398):
@@ -183,6 +193,7 @@ from watchdog import lane_reconcile as _lane_reconcile       # #844 (post-compac
 from watchdog import nudge_gate as _nudge_gate               # #797 (cadence gate)
 from watchdog import roster as _roster                       # #804 (armed roster)
 from watchdog import resurrect as _resurrect                 # #804 (mode-5 relaunch)
+from watchdog import goal_turn_liveness as _turn_liveness     # #1110 (transcript liveness)
 
 
 # --------------------------------------------------------------------------- #
@@ -461,9 +472,11 @@ def clear_goal_request(session, path=None):
     return False
 
 
-def _bump_goal_delivery_fail(session, word, path=None):
+def _bump_goal_delivery_fail(session, word, path=None, field="dl_fails"):
     """#731 -- record ONE failed keystroke delivery on the pending entry: bump
-    `dl_fails` (INT-guarded across the JSON boundary, #714 -- a string value
+    `field` (default `dl_fails`; #1110-review passes `dl_live_fails` for the
+    separate verify-failed-live give-up counter) (INT-guarded across the JSON
+    boundary, #714 -- a string value
     read back from a hand-edited/legacy store must never crash the sweep) and
     stamp `dl_last` with the skip word (the incident trail + the drop line's
     `last=<word>`). Owns the store mutation like `clear_goal_request`; the
@@ -491,10 +504,10 @@ def _bump_goal_delivery_fail(session, word, path=None):
     if not isinstance(entry, dict):
         return 0
     try:
-        n = int(entry.get("dl_fails", 0)) + 1
+        n = int(entry.get(field, 0)) + 1
     except (TypeError, ValueError):
         n = 1
-    entry["dl_fails"] = n
+    entry[field] = n
     entry["dl_last"] = word
     _save_goal_requests(d, path)
     return n
@@ -755,6 +768,19 @@ GOAL_STASH_ABORT_ESCALATION = 6
 # (cleaning up any leftover it stranded, B). Small, like #566's own debounce:
 # 3 failed keystroke deliveries is a livelock, not 3 independent transients.
 GOAL_DELIVERY_ATTEMPT_CAP = 3
+# #1110-review -- a SEPARATE, LOOSER bound on `skip:verify-failed-live`. A
+# keystroke whose arm never confirms while the transcript advanced during the
+# confirm window is deliberately NOT counted toward the STRICT cap above (it may
+# be a mis-timed keystroke into a genuinely live turn). But our OWN submit read
+# as a plain prompt also advances the transcript identically (the #720
+# silent-'sent' tail: box clears, a `user` turn is appended, the goal never
+# arms), and that is a real failed delivery -- so a run of verify-failed-live
+# must still hit a give-up bound, or an accept-as-plain-prompt livelock re-types
+# a junk /goal every idle cycle until the 30-min age cap. > the strict cap so a
+# genuine quiet+live-turn race gets more benefit-of-the-doubt (the pre-gate
+# defers a live turn on most sweeps, so verify-failed-live is sparse for a real
+# live turn but repeats for the accept-as-prompt class).
+GOAL_DELIVERY_LIVE_ATTEMPT_CAP = 6
 # The skip words that entered the TYPING protocol (real keystrokes, or the
 # zero-keystroke stash-abort sub-tvars whose counting errs toward NOT typing --
 # the #524-sanctioned "count confirmed records, fail SAFE"). NEVER counts
@@ -1376,7 +1402,7 @@ def _goal_cap_drop(sid, cwd, text, origin, dl_fails, request_ts, run,
 
 
 def _log_arm_confirm_fail(sid, cwd, text, pid, run, sleep_fn=None,
-                          state=None, now=None):
+                          state=None, now=None, tpath=None):
     """#731 D -- ONE structured diagnostic line at an arm-confirm failure, from a
     FRESH TALLER capture (the 40-row delivery capture may not show a busy render
     a row above the box). The next incident's discriminator between the #720
@@ -1403,8 +1429,15 @@ def _log_arm_confirm_fail(sid, cwd, text, pid, run, sleep_fn=None,
     busy = _ops_wait_recheck._pane_busy_waiting(cap)
     armed = watchdog.pane_goal_armed(cap)
     box = _goal_box_kind(cap, text)
+    # #1110 -- the transcript age at the keystroke: the one field that would have
+    # explained the dev1 songplayer class (`boundary=input box=empty` while the
+    # turn was live). A None age (missing/unreadable transcript) renders `tage=?`.
+    _tage = _turn_liveness.transcript_age_s(
+        tpath, now if now is not None else time.time())
+    tage = "?" if _tage is None else "%d" % int(_tage)
     _log_goal_sync("ARM-CONFIRM-FAIL sid=%s cwd=%s boundary=%s busywait=%s "
-                   "armed=%s box=%s" % (sid, cwd, boundary, busy, armed, box))
+                   "armed=%s box=%s tage=%s"
+                   % (sid, cwd, boundary, busy, armed, box, tage))
     watchdog._draft_rescue_persist(pid, cap)
     # #737 A -- DELIVERY-TIME self-cleanup: a verify-failed / arm-confirm-fail
     # arm can strand our OWN /goal in the box (a swallowed submit whose len-based
@@ -1480,6 +1513,25 @@ _GOAL_TERMINAL_WORDS = frozenset((
 ))
 
 
+def _verify_fail_word(tpath, age_before, now):
+    """#1110 -- classify a keystroke that did NOT arm. Re-read the transcript age
+    (the SAME stat source as the pre-keystroke busy-transcript gate) and, if it
+    ADVANCED since `age_before` (the age captured before the keystroke) ->
+    `skip:verify-failed-live` (NOT in `_GOAL_KEYSTROKE_SKIPS`, so goal_sweep never
+    counts it toward the STRICT GOAL_DELIVERY_ATTEMPT_CAP and the request stays
+    pending). The advance is unfalsifiable -- a FOREIGN live turn (a mis-timed
+    keystroke) OR our OWN submit read as a plain prompt (#720 silent-'sent' tail,
+    a real failed delivery) -- so goal_sweep bounds verify-failed-live with the
+    SEPARATE looser GOAL_DELIVERY_LIVE_ATTEMPT_CAP (#1110-review). A quiet
+    transcript is the #731 swallowed-submit class -> `skip:verify-failed`
+    (counted on the strict cap). All classification logic lives in the leaf; this
+    is the call-site adapter that maps the leaf verdict to the disposition word."""
+    age_after = _turn_liveness.transcript_age_s(tpath, now)
+    if _turn_liveness.classify_confirm_fail(age_before, age_after) == "live":
+        return "skip:verify-failed-live"
+    return "skip:verify-failed"
+
+
 def _declared_window_nudge(cwd):
     """#1038 -- the keystroke NUDGE identity for arming `cwd`'s pane, derived from
     WHETHER `cwd` is a DECLARED managed window (gk review, gk-infra, d3 today —
@@ -1540,6 +1592,24 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                                         goal_sweep drops it; `skip:client-
                                         active` (an attached human typing NOW)
                                         is a zero-keystroke defer, never counted.
+      "skip:busy-transcript"        -- #1110: the session TRANSCRIPT was written
+                                        within GOAL_TURN_LIVE_WINDOW_S (the turn
+                                        is running), so the render's bare box is
+                                        a mid-turn frame, not idle. A
+                                        zero-keystroke, non-counting defer
+                                        evaluated BEFORE the render gate.
+      "skip:verify-failed-live"     -- #1110: a keystroke WAS typed but the arm
+                                        never confirmed AND the transcript
+                                        advanced during the confirm window (a
+                                        FOREIGN live turn OR our own accepted
+                                        submit). NOT in `_GOAL_KEYSTROKE_SKIPS`,
+                                        so it never counts toward the STRICT cap
+                                        (unlike a quiet `skip:verify-failed`); the
+                                        request stays pending -- bounded by the
+                                        separate looser
+                                        `GOAL_DELIVERY_LIVE_ATTEMPT_CAP`
+                                        (#1110-review) so an accept-as-plain-
+                                        prompt livelock still gives up.
 
     Deliberately does NOT check `_goal_autoarm_recent_human_activity` for
     the normal (user-`/autopilot`) origin -- see this module's own header
@@ -1788,6 +1858,31 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                 out["detail"] = _nudge_gate.pane_budget_hold_reason(state, pid, now)
             return "skip:pane-budget"
 
+    # #1110 -- TRANSCRIPT-LIVENESS gate, evaluated BEFORE the render gate. A
+    # live turn renders a bare `❯` box between tool rounds, byte-identical to a
+    # genuinely idle prompt (the #1104 spinner belt cannot see it: there is no
+    # spinner row between tool calls), so the render alone is NOT proof the turn
+    # ended. The session TRANSCRIPT is the structured truth (#486): a running
+    # turn appends an entry at every tool round. When it was written within the
+    # live window, DEFER with ZERO keystrokes -- never type a /goal into a
+    # running turn (the swallowed-Enter + attempt-cap DROP the dev1 songplayer
+    # 22.9. hit). A zero-keystroke, non-terminal, non-counting defer (not in
+    # `_GOAL_KEYSTROKE_SKIPS`): the next sweep re-evaluates once the turn ends. A
+    # missing/unreadable transcript is NOT a liveness signal -> no defer here
+    # (fall through to the render gate, never a new wedge). `_tage` (the
+    # pre-keystroke age) is reused by the confirm split (`_verify_fail_word`).
+    _tage = _turn_liveness.transcript_age_s(tpath, now)
+    if _turn_liveness.turn_live(_tage):
+        # #1110-review -- clamp a small-negative live age (a write a moment ahead
+        # of the frozen sweep `now`, within the future-skew floor) to 0 so the
+        # human-facing "advanced Ns ago" never renders a negative "advanced -3s".
+        _tage_ago = max(0, int(_tage))
+        _log_goal_sync("SKIP busy-transcript sid=%s cwd=%s tage=%d"
+                       % (sid, cwd, _tage_ago))
+        if out is not None:
+            out["detail"] = "transcript advanced %ds ago" % _tage_ago
+        return "skip:busy-transcript"
+
     kind, draft = watchdog._classify_boundary(captured)
     if kind == "no-input-line":
         _log_goal_sync("SKIP no-input-line sid=%s cwd=%s" % (sid, cwd))
@@ -1830,9 +1925,12 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
             if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
                 _log_goal_sync("SKIP not-armed(stranded) sid=%s cwd=%s" % (sid, cwd))
                 _log_arm_confirm_fail(sid, cwd, text, pid, run,
-                                      sleep_fn=sleep_fn,
-                                      state=state, now=now)  # #731 D + #737 A + #1104 defer
-                return "skip:verify-failed"
+                                      sleep_fn=sleep_fn, tpath=tpath,
+                                      state=state, now=now)  # #731 D + #737 A + #1104 defer + #1110 tage
+                # #1110 -- a keystroke that did NOT arm: verify-failed-live (the
+                # transcript advanced during the confirm window = a live turn,
+                # uncounted) vs verify-failed (quiet = the #731 counted class).
+                return _verify_fail_word(tpath, _tage, now)
             _log_goal_sync("SEND recover-swallowed sid=%s cwd=%s" % (sid, cwd))
             return "sent"
         # #1092 (e) -- a watchdog RE-ARM types ONLY into an EMPTY box at the idle
@@ -1870,9 +1968,12 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
             if not _await_goal_armed(pid, run, sleep_fn):   # #720 same arm-confirm
                 _log_goal_sync("SKIP not-armed(stash) sid=%s cwd=%s" % (sid, cwd))
                 _log_arm_confirm_fail(sid, cwd, text, pid, run,
-                                      sleep_fn=sleep_fn,
-                                      state=state, now=now)  # #731 D + #737 A + #1104 defer
-                return "skip:verify-failed"
+                                      sleep_fn=sleep_fn, tpath=tpath,
+                                      state=state, now=now)  # #731 D + #737 A + #1104 defer + #1110 tage
+                # #1110 -- a keystroke that did NOT arm: verify-failed-live (the
+                # transcript advanced during the confirm window = a live turn,
+                # uncounted) vs verify-failed (quiet = the #731 counted class).
+                return _verify_fail_word(tpath, _tage, now)
             _log_goal_sync("SEND stash sid=%s cwd=%s" % (sid, cwd))
             return "sent"
         _log_goal_sync("SKIP stash-abort sid=%s cwd=%s" % (sid, cwd))
@@ -1911,9 +2012,12 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         return "sent"
     _log_goal_sync("SKIP verify-failed sid=%s cwd=%s" % (sid, cwd))
     _log_arm_confirm_fail(sid, cwd, text, pid, run,
-                                      sleep_fn=sleep_fn,
-                                      state=state, now=now)  # #731 D + #737 A + #1104 defer
-    return "skip:verify-failed"
+                          sleep_fn=sleep_fn, tpath=tpath,
+                          state=state, now=now)  # #731 D + #737 A + #1104 defer + #1110 tage
+    # #1110 -- bare-box confirm split: verify-failed-live (transcript advanced
+    # during the confirm window = a mis-timed keystroke into a live turn,
+    # uncounted) vs verify-failed (quiet = the #731 swallowed-submit class).
+    return _verify_fail_word(tpath, _tage, now)
 
 
 def _goal_sync_attempt(sid, cwd, text, authority, origin, run=None,
@@ -2186,10 +2290,21 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             dl_fails = int(entry.get("dl_fails", 0))
         except (TypeError, ValueError):
             dl_fails = 0
-        if dl_fails >= GOAL_DELIVERY_ATTEMPT_CAP:
+        # #1110-review -- the SEPARATE looser bound on verify-failed-live (our own
+        # accept-as-plain-prompt submit advances the transcript identically to a
+        # live turn, so the confirm split cannot count it toward the strict cap;
+        # this restores the #731 give-up guarantee for that livelock). INT-guarded
+        # across the JSON boundary exactly like `dl_fails` (#714).
+        try:
+            dl_live_fails = int(entry.get("dl_live_fails", 0))
+        except (TypeError, ValueError):
+            dl_live_fails = 0
+        if (dl_fails >= GOAL_DELIVERY_ATTEMPT_CAP
+                or dl_live_fails >= GOAL_DELIVERY_LIVE_ATTEMPT_CAP):
             dl_last = entry.get("dl_last", "")
+            _dl_count = max(dl_fails, dl_live_fails)   # the count that tripped the cap
             clog, leftover, loc = _goal_cap_drop(
-                sid, cwd, text, entry.get("origin"), dl_fails,
+                sid, cwd, text, entry.get("origin"), _dl_count,
                 entry.get("ts"), run, projects_dir, state, now, send_fn,
                 dry_run, sleep_fn)
             logs += clog
@@ -2201,7 +2316,7 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             _record_delivered_attempt(state, entry.get("origin"), sid, now)
             logs.append("DROP (goal-sweep) %s sid=%s -> drop:attempt-cap "
                         "(%d keystroke deliveries failed, last=%s; leftover=%s)"
-                        % (loc, sid, dl_fails, dl_last, leftover))
+                        % (loc, sid, _dl_count, dl_last, leftover))
             if handled is not None:
                 handled.add(sid)
             continue
@@ -2289,10 +2404,23 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             aborts.pop(sid, None)
             # #731 -- a keystroke-delivering skip (verify-failed / stash-abort)
             # counts toward the per-request attempt cap; every zero-keystroke
-            # defer (undeterminable / busy / recent-human / client-active / ...)
-            # does NOT (counting those would starve a legitimate delivery, #611).
+            # defer (undeterminable / busy / busy-transcript / recent-human /
+            # client-active / ...) does NOT (counting those would starve a
+            # legitimate delivery, #611). #1110 -- `skip:verify-failed-live` is a
+            # keystroke that DID type but the transcript advanced during the
+            # confirm window: NOT in `_GOAL_KEYSTROKE_SKIPS`, so it never counts
+            # toward the STRICT cap (it may be a mis-timed keystroke into a
+            # genuinely live turn -- the dev1 songplayer fix: three such can no
+            # longer exhaust the cap while the session is about to go idle). But
+            # #1110-review -- our OWN accept-as-plain-prompt submit advances the
+            # transcript identically, and that IS a real failed delivery; so it
+            # counts toward the SEPARATE, looser `dl_live_fails` bound instead,
+            # restoring the give-up guarantee for that livelock.
             if word in _GOAL_KEYSTROKE_SKIPS:
                 _bump_goal_delivery_fail(sid, word, path=requests_path)
+            elif word == "skip:verify-failed-live":
+                _bump_goal_delivery_fail(sid, word, path=requests_path,
+                                         field="dl_live_fails")
             logs.append("SKIP (goal-sweep) %s sid=%s -> %s%s"
                         % (loc, sid, word, dsuf))
     return logs
