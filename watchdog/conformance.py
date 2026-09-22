@@ -350,7 +350,8 @@ def run_conformance_check(now, state, dry_run=False,
                           git_run=None, timer_check=None, is_target_check=None,
                           interval=None, reping=None, persist=None,
                           symlink_scan=None, doctrine_scan=None,
-                          root_guard_provisioned_fn=None):
+                          root_guard_provisioned_fn=None,
+                          bashrc_drift_fn=None):
     """Job 34: the daily per-box conformance sweep. Cadence-gated on its OWN state
     key ``conformance_last_check`` (``_sweep_due``); the cadence marker is stamped +
     persisted BEFORE any network op (#172 kill-safe). Best-effort — every dimension
@@ -513,6 +514,23 @@ def run_conformance_check(now, state, dry_run=False,
         if not dry_run:
             state["root_guard_provisioned"] = rgp
 
+    # #1015: a REPORT-ONLY per-box fact (NOT a drift dimension — mirrors the
+    # #1047 root-guard fact above): the count of stray `export CLAUDE_CODE_*`
+    # lines OUTSIDE the managed ~/.bashrc / ~/.profile marker blocks. Injectable
+    # for tests; the import is INSIDE the try so a broken leaf degrades to
+    # `unknown`, never raises here and aborts the drift loop below.
+    try:
+        if bashrc_drift_fn is None:
+            from cli_bashrc_drift import count_bashrc_drift as bashrc_drift_fn
+        bdrift = int(bashrc_drift_fn())
+    except Exception as e:
+        bdrift = None
+        logs.append("conformance %s [bashrc-drift] unknown -- %r" % (host, e))
+    if bdrift is not None:
+        logs.append("conformance %s [bashrc-drift] %d" % (host, bdrift))
+        if not dry_run:
+            state["bashrc_drift"] = bdrift
+
     for (dim, ok, detail), facts in decisions:
         logs.append("conformance %s [%s] %s -- %s"
                     % (host, dim, {True: "OK", False: "DRIFT", None: "unknown"}[ok],
@@ -568,6 +586,13 @@ def conformance_status_row(state):
     rg = state.get("root_guard_provisioned")
     suffix = ("" if rg is None else
               " · root disk-guard: %s" % ("provisioned" if rg else "not provisioned"))
+    # #1015: the report-only bashrc-drift count rides the row as a ` · ` suffix,
+    # but ONLY when there IS drift (N>0). Unlike the root-guard fact (whose two
+    # states are both informative), a count of 0 is the healthy norm and would be
+    # pure noise on every clean box's row.
+    bd = state.get("bashrc_drift")
+    if isinstance(bd, int) and bd > 0:
+        suffix += " · bashrc-drift: %d" % bd
     episodes = state.get("conformance") or {}
     if episodes:
         parts = []

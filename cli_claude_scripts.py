@@ -195,6 +195,15 @@ case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;;
 # named risk, tracked as #470).
 [ "$mode" = plain ] || export CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1
 
+# #1015: the launcher OWNS the mouse / alternate-screen env — the fleet default
+# is Claude Code's native mouse + altscreen (dev1/controller/gk). A login shell
+# that inherited a stray `export CLAUDE_CODE_DISABLE_MOUSE=1` (dev2's unmanaged
+# ~/.bashrc for weeks) must NOT take native scrolling away. UNCONDITIONAL — every
+# mode INCLUDING `plain`, because unsetting these is what makes `plain` truly
+# vanilla-stock (stock CC defaults these ON); the one managed-env line NOT `plain`-
+# guarded. `unset` never trips `set -u` (only REFERENCING an unset var does).
+unset CLAUDE_CODE_DISABLE_MOUSE CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN
+
 # #659/#669: the owner_vps headless OAuth-token export that once stood here was
 # REMOVED. login/auth ON a target is the PROJECT claudy's responsibility, and
 # airuleset never touches auth (owner ROZHODNUTÉ #659, #537 machine-identity
@@ -284,6 +293,11 @@ set -euo pipefail
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac
 # Same managed default as the main launcher (#460): keep a bg-shell waiter alive.
 export CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1
+# #1015: the implementer window is a real interactive Claude Code session too, so
+# it OWNS the mouse/altscreen env exactly like the main launcher — a stray shell
+# `export CLAUDE_CODE_DISABLE_MOUSE=1` must not take native scrolling away here
+# either (a model-backend box runs this window). `unset` never trips `set -u`.
+unset CLAUDE_CODE_DISABLE_MOUSE CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN
 
 _marker="$HOME/.claude/airuleset-model-backend.json"
 if [ ! -f "$_marker" ]; then

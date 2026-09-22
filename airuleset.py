@@ -1486,6 +1486,21 @@ def _remove_stale_compact_flag(claude_dir=None):
     return None
 
 
+def _warn_bashrc_drift_at_install():
+    """#1015: make a stray `export CLAUDE_CODE_*` OUTSIDE the managed bashrc/
+    profile blocks LOUD at install (the "gk Discord .env" lesson). The launcher
+    overrides it, but the line should be removed. Non-fatal; the leaf composes
+    the message. Extracted so the install call site stays a one-liner (keeps
+    cmd_install off its function size cap)."""
+    try:
+        from cli_bashrc_drift import bashrc_drift_install_warning
+        _bd_warn = bashrc_drift_install_warning()
+        if _bd_warn:
+            print(_bd_warn)
+    except Exception as e:
+        print(f"  bashrc-drift check error (non-fatal): {e}", file=sys.stderr)
+
+
 def cmd_install(args):
     """Deploy config: generate CLAUDE.md, symlink skills, merge hooks."""
     _check_worktree_repo_dir("install")
@@ -1683,6 +1698,8 @@ def cmd_install(args):
             print(f"  No change: {BASHRC} (claude launcher wrappers)")
     except Exception as e:
         print(f"  claude launcher error: {e}", file=sys.stderr)
+
+    _warn_bashrc_drift_at_install()  # 3b-α (#1015): LOUD stray-export warning
 
     # --- 3b-bis. tmux attach-or-create interactive helpers (#651) ---
     # `t [name]` + a `tmux()` wrapper that rewrites the simple `new|new-session|
@@ -2654,6 +2671,17 @@ def cmd_status(args):
             print("paused: %s" % _paused)
     except Exception as e:
         print(f"\nconformance: error ({e})", file=sys.stderr)
+
+    # --- bashrc drift (#1015): a stray `export CLAUDE_CODE_*` OUTSIDE the managed
+    # ~/.bashrc / ~/.profile blocks (dev2's mouse-scroll loss). Shown only when
+    # there IS drift, naming file:line (leaf logic). ---
+    try:
+        from cli_bashrc_drift import bashrc_drift_status_row
+        _bd_row = bashrc_drift_status_row()
+        if _bd_row:
+            print("\n" + _bd_row)
+    except Exception as e:
+        print(f"\nbashrc-drift: error ({e})", file=sys.stderr)
 
     # --- gh rate budget (#1040): the SAME supervisor-facing, report-only surface
     # — the last CACHED `gh api rate_limit` reading (never a fresh gh call from a
