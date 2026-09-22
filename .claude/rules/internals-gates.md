@@ -10,6 +10,19 @@ paths:
 `re` predicate; tests call the pure functions directly (no hook I/O). NEW gate lessons land here
 until the ratchet cap, then the oldest move to `.claude/rules-reference/internals-archive.md`.
 
+- **#1077 — `gates.agenteval` ties a guide-SOURCE change to a recorded agent eval.** A changed
+  path matching the four globs (`docs/<tenant>/navody/**`, `docs/**/build-*-guide.py`,
+  `docs/**/navody_*_sections.py`, `docs/**/*-qa.json`) makes the `airuleset.py handoff` composer
+  pre-flight (`_handoff_agent_eval_preflight`, right after the `_handoff_guide_preflight` block in
+  `cmd_handoff`) demand an `AI-eval: <fixture>-qa.json → <tally> (<report>)` line whose fixture AND
+  report exist under `cwd`, OR `AI-eval: n/a — <why>`. The per-tenant fact `agent_eval: NONE — <why>`
+  in `.claude/streams/<stream>.md` (read via the shared `gates.navody._read_stream_file`, same
+  rename-alias resolution as `navody_url`) makes a bare `n/a` sufficient yet STILL mandatory. The
+  RUNNER stays the project's (`services/agent/scripts/eval_navody.py` in odoo-erp — copy-target
+  fail-closed, persona enrollment, effect verify+revert); airuleset defines the RULE, never a second
+  runner. FAIL-OPEN when the diff is undeterminable (the sibling pre-flights' never-false-accuse
+  convention). Rule text + `paths:` injection: `rules/guide-agent-eval.md` (+ profile line + a
+  `situational-triggers.conf` row so it also lands at the hand-off action). Owner ruling 18.9.2026.
 - **#1064 — the `Design-by:` stamp records the CONFIGURED (launch) model, the API-SERVED model
   is an optional ` (served: <id>)` audit suffix.** The stamp is the ONE token the dispatch gate
   (`gates.designdispatch.check_issue`), the anti-spoof gate (`gates.designbypost`) and the float

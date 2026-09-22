@@ -4880,6 +4880,24 @@ def _handoff_guide_preflight(body, *, cwd=None, changed_paths=None,
     return None if ok else reason
 
 
+def _handoff_agent_eval_preflight(body, *, cwd=None, changed_paths=None,
+                                  stream=None):
+    """#1077 agent-eval composer pre-flight (owner ruling 18.9.2026): a
+    guide-SOURCE change must carry an `AI-eval:` line proving the tenant's
+    assistant was checked on a copy (all logic in gates.agenteval, which also
+    resolves the stream + fact). FAIL-OPEN when the diff is undeterminable."""
+    import gates.agenteval as _ae
+    paths = changed_paths if changed_paths is not None \
+        else _handoff_changed_paths(cwd)
+    if paths is None:
+        sys.stderr.write("handoff: agent-eval pre-flight skipped "
+                         "(diff undeterminable) — fail-open (#1077)\n")
+        return None
+    ok, reason = _ae.check_handoff(body, paths, cwd=cwd or os.getcwd(),
+                                   stream=stream)
+    return None if ok else reason
+
+
 def _handoff_spec_preflight(body, *, issue=None, repo=None, cwd=None,
                             read_issue=None):
     """#1106 — the review-lens spec gate for the composer pre-flight. Returns a
@@ -5541,6 +5559,13 @@ def cmd_handoff(args):
     _gblk = _handoff_guide_preflight(body, cwd=target_root)
     if _gblk:
         print(_gblk)
+        return 1
+
+    # #1077: agent-eval gate — a guide-SOURCE change must carry an `AI-eval:`
+    # line (fixture run against the assistant on a copy, or `n/a — <why>`).
+    _aeblk = _handoff_agent_eval_preflight(body, cwd=target_root)
+    if _aeblk:
+        print(_aeblk)
         return 1
 
     # #1106: the review-lens spec gate — a Spec:-bearing ticket's RFR must carry
