@@ -187,9 +187,24 @@ def _hook_path_vars(tree):
     return names
 
 
+# Executables that can never RUN a hook or a gate adapter: `git` reads the
+# checkout (a `git ls-files -z tests hooks` scan references the `hooks` dir as
+# DATA, not as a script to execute). #1046 fix-forward 2 (CI RED 35727612017):
+# the first sweep wrapped exactly such a call with a hermetic HOME, which hid
+# the CI runner's global `safe.directory` and turned the scan into exit 128;
+# the lock must not demand a hermetic HOME for it in the first place.
+_NON_HOOK_EXECUTABLES = frozenset({"git"})
+
+
 def _argv_drives_hook(argv, hook_vars):
-    """True iff the argv node drives a hook script or a gate adapter."""
+    """True iff the argv node drives a hook script or a gate adapter. An argv
+    whose EXECUTABLE (element 0) is a known non-hook program (`git`) never
+    does, whatever its later elements reference."""
     if argv is None:
+        return False
+    if (isinstance(argv, ast.List) and argv.elts
+            and isinstance(argv.elts[0], ast.Constant)
+            and argv.elts[0].value in _NON_HOOK_EXECUTABLES):
         return False
     try:
         src = ast.unparse(argv)
@@ -248,6 +263,33 @@ def _offenders():
                            "never controls HOME (no hermetic_hook_env, no "
                            '"HOME" key)' % (rel, call.lineno))
     return sorted(out)
+
+
+class TestGitScanIsNotAHookRunner(TestCase):
+    """#1046 fix-forward 2: `["git", "ls-files", "-z", *_SCAN_DIRS]` with
+    `_SCAN_DIRS = ("tests", "hooks")` references the hooks dir as DATA — the
+    lock must not classify it as a hook-driving exec (it drove a hermetic HOME
+    onto a checkout `git` call and broke CI: exit 128, no safe.directory)."""
+
+    def test_git_argv_referencing_hooks_dir_is_not_hook_driving(self):
+        tree = ast.parse(
+            '_SCAN_DIRS = ("tests", "hooks")\n'
+            'import subprocess\n'
+            'out = subprocess.run(["git", "ls-files", "-z", *_SCAN_DIRS], '
+            'capture_output=True, text=True, check=True)\n')
+        hook_vars = _hook_path_vars(tree)
+        self.assertIn("_SCAN_DIRS", hook_vars)   # the var IS hooks-ish ...
+        sites = list(_exec_sites(tree, frozenset()))
+        self.assertEqual(len(sites), 1)
+        self.assertFalse(_argv_drives_hook(sites[0][1], hook_vars))  # ... but git never runs a hook
+
+    def test_bash_hook_argv_is_still_hook_driving(self):
+        tree = ast.parse(
+            'HOOK = ROOT / "hooks" / "x.sh"\n'
+            'import subprocess\n'
+            'subprocess.run(["bash", str(HOOK)], capture_output=True)\n')
+        sites = list(_exec_sites(tree, frozenset()))
+        self.assertTrue(_argv_drives_hook(sites[0][1], _hook_path_vars(tree)))
 
 
 class TestHookRunnerEnvLock(TestCase):

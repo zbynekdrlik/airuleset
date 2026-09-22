@@ -76,7 +76,6 @@ spells out the banned subcommand strings in prose, which would otherwise
 trip its own scan; see tests/test_no_session_kill.py's identical,
 already-established self-exclusion for the same reason.
 """
-import os
 import ast
 import re
 import subprocess
