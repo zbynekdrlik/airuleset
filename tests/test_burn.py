@@ -123,6 +123,112 @@ class TestScan(unittest.TestCase):
             self.assertEqual(report["by_model"], {})
 
 
+class TestScanGzippedTranscripts(unittest.TestCase):
+    """#1117 slice 2 — the disk-guard pressure drain gzips transcripts (2-day
+    floor on shared-stream boxes, #925) that are still inside the 7-day burn
+    window. `_compress_transcript_file` (#410) stamps the `.jsonl.gz` with the
+    ORIGINAL mtime, so the window stays exact — but `scan()` only ever walked
+    and `open()`-ed `*.jsonl`, so those compressed files vanished from the cost
+    report. `scan()` must read a `.jsonl.gz` transcript exactly like its plain
+    twin."""
+
+    @staticmethod
+    def _write_gz(root, project, session, lines, subdir=None):
+        import gzip as _gzip
+        d = Path(root) / project
+        if subdir:
+            d = d / subdir
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / (session + ".jsonl.gz")
+        with _gzip.open(p, "wt") as f:
+            f.write("\n".join(lines) + "\n")
+        return p
+
+    def test_gz_main_transcript_counted_same_as_plain_twin(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        lines = [
+            _line("claude-opus-5", i=100, cw=20, cr=300, o=50, ts=now.isoformat()),
+            _line("claude-opus-5", i=40, cr=100, o=10, ts=now.isoformat()),
+        ]
+        with TemporaryDirectory() as tmp_plain, TemporaryDirectory() as tmp_gz:
+            _write(tmp_plain, "proj", "s1", lines)
+            self._write_gz(tmp_gz, "proj", "s1", lines)
+            rp = burn.scan(tmp_plain, days=7, now=now)
+            rg = burn.scan(tmp_gz, days=7, now=now)
+            self.assertEqual(rg["files_scanned"], 1)
+            self.assertEqual(rg["usage_lines"], rp["usage_lines"])
+            self.assertEqual(rg["by_model"], rp["by_model"])
+            self.assertEqual(rg["main_vs_sidechain"], rp["main_vs_sidechain"])
+
+    def test_gz_subagent_transcript_counted_same_as_plain_twin(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        lines = [
+            _line("claude-fable-5-1", i=200, cr=400, o=80,
+                  ts=now.isoformat(), sidechain=True),
+        ]
+        sub = os.path.join("s1", "subagents")
+        with TemporaryDirectory() as tmp_plain, TemporaryDirectory() as tmp_gz:
+            # plain twin
+            dp = Path(tmp_plain) / "proj" / "s1" / "subagents"
+            dp.mkdir(parents=True, exist_ok=True)
+            (dp / "agent-abc.jsonl").write_text("\n".join(lines) + "\n")
+            # gz version
+            self._write_gz(tmp_gz, "proj", "agent-abc", lines, subdir=sub)
+            rp = burn.scan(tmp_plain, days=7, now=now)
+            rg = burn.scan(tmp_gz, days=7, now=now)
+            self.assertEqual(rg["files_scanned"], 1)
+            self.assertEqual(rg["usage_lines"], rp["usage_lines"])
+            self.assertEqual(rg["by_model"], rp["by_model"])
+            # isSidechain must survive the gz read -> sidechain bucket
+            self.assertEqual(rg["main_vs_sidechain"], rp["main_vs_sidechain"])
+            self.assertTrue(any(k.startswith("sidechain|")
+                                for k in rg["main_vs_sidechain"]))
+
+    def test_jsonl_and_gz_twin_counted_once_prefers_plain(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        lines = [_line("claude-opus-5", i=100, cr=300, o=50, ts=now.isoformat())]
+        with TemporaryDirectory() as tmp:
+            _write(tmp, "proj", "s1", lines)
+            self._write_gz(tmp, "proj", "s1", lines)
+            report = burn.scan(tmp, days=7, now=now)
+            # the pair is one transcript: count it once, not twice
+            self.assertEqual(report["files_scanned"], 1)
+            self.assertEqual(report["usage_lines"], 1)
+            self.assertEqual(report["by_model"]["claude-opus-5"]["msgs"], 1)
+
+    def test_split_transcripts_prefers_plain_over_gz_twin(self):
+        now = datetime.datetime.now(datetime.timezone.utc)
+        lines = [_line("claude-opus-5", i=1, o=1, ts=now.isoformat())]
+        with TemporaryDirectory() as tmp:
+            _write(tmp, "proj", "s1", lines)
+            self._write_gz(tmp, "proj", "s1", lines)
+            paths = [p for p, _proj, _kind in burn._split_transcripts(tmp)]
+            self.assertEqual(len(paths), 1)
+            self.assertTrue(paths[0].endswith("s1.jsonl"))
+            self.assertFalse(paths[0].endswith(".gz"))
+
+    def test_out_of_window_gz_is_not_opened(self):
+        import gzip as _gzip
+        real_gzip_open = _gzip.open
+        now = datetime.datetime.now(datetime.timezone.utc)
+        with TemporaryDirectory() as tmp:
+            p = self._write_gz(
+                tmp, "proj", "s1",
+                [_line("claude-opus-5", i=1, o=1, ts=now.isoformat())])
+            old_ts = (now - datetime.timedelta(days=30)).timestamp()
+            os.utime(p, (old_ts, old_ts))
+
+            def _boom(*a, **k):
+                raise AssertionError(
+                    "gzip.open must not be called for an out-of-window .gz")
+
+            with m.patch.object(burn.gzip, "open", _boom):
+                report = burn.scan(tmp, days=7, now=now)
+            self.assertEqual(report["files_scanned"], 0)
+        # sanity: the module-level gzip.open is restored
+        self.assertIs(_gzip.open, real_gzip_open)
+
+
 class TestLocalReport(unittest.TestCase):
     def test_adds_host_and_user(self):
         with TemporaryDirectory() as tmp:
