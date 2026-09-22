@@ -1,4 +1,5 @@
 # tests/test_playbook.py
+import os
 import json
 import subprocess
 import sys
@@ -6,6 +7,8 @@ from pathlib import Path
 from unittest import TestCase
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset
+
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 REPO = airuleset.REPO_DIR
 
@@ -48,7 +51,6 @@ class TestPlaybookStopHook(TestCase):
     # exit with EMPTY stdout here and fail the block assertion (live flake,
     # 2026-08-13, full-suite run alongside a concurrent test runner).
     def setUp(self):
-        import os
         import uuid
         self._sid = "test-pb-%s" % uuid.uuid4().hex[:12]
         self._retry_file = "/tmp/airuleset-playbook-block-%s" % self._sid
@@ -58,7 +60,6 @@ class TestPlaybookStopHook(TestCase):
             pass
 
     def tearDown(self):
-        import os
         try:
             os.remove(self._retry_file)
         except FileNotFoundError:
@@ -67,7 +68,7 @@ class TestPlaybookStopHook(TestCase):
     def _run(self, msg):
         payload = json.dumps({"last_assistant_message": msg, "session_id": self._sid})
         return subprocess.run(["bash", self.HOOK], input=payload,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=hermetic_hook_env(self))
 
     def test_completion_report_without_marker_blocks(self):
         msg = "## ✅ Work Complete\n\nGoal: x\nPR #5 merged abc123"

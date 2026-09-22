@@ -39,8 +39,10 @@ _HOOK_SH_RE = re.compile(r"hooks/[\w.\-]+\.sh")
 # A `-m gates.<module>` adapter invocation in an argv literal.
 _GATES_MOD_RE = re.compile(r"\bgates\.\w")
 # A file that controls HOME for its hook subprocess: it either uses the shared
-# hermetic seam or builds its own env with a "HOME" key.
-_HOME_KEY_RE = re.compile(r"""["']HOME["']""")
+# hermetic seam or builds its own env with a HOME override — a "HOME" dict key
+# (``env["HOME"] = …`` / ``{"HOME": …}``) OR a ``HOME=`` keyword
+# (``dict(os.environ, HOME=tmp)``). Both are legitimate own-HOME patterns.
+_HOME_KEY_RE = re.compile(r"""(?:["']HOME["']|\bHOME\s*=)""")
 
 
 def _test_files():

@@ -40,6 +40,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 REPO = Path(airuleset.__file__).resolve().parent
 STOP_HOOK = REPO / "hooks" / "subagent-stop-check-bg-work.sh"
 PRE_HOOK = REPO / "hooks" / "block-subagent-bg-ci-poll.sh"
@@ -788,7 +790,7 @@ class TestPreToolUseBgCiPollGuard(unittest.TestCase):
             payload["agent_type"] = "autopilot-worker"
         return subprocess.run(["bash", str(PRE_HOOK)],
                               input=json.dumps(payload),
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=hermetic_hook_env(self))
 
     def test_bg_ci_poll_in_subagent_denied(self):
         out = self._run("sleep 300 && gh run view 24421409735 --json status")

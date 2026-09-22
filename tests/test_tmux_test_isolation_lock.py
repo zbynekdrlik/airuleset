@@ -76,12 +76,15 @@ spells out the banned subcommand strings in prose, which would otherwise
 trip its own scan; see tests/test_no_session_kill.py's identical,
 already-established self-exclusion for the same reason.
 """
+import os
 import ast
 import re
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+
+from _hook_state_cleanup import MODULE_HOOK_HOME  # noqa: E402  (#1046 hermetic HOME)
 
 REPO = Path(__file__).resolve().parent.parent
 _SELF = Path(__file__).resolve()
@@ -107,7 +110,7 @@ _EXEC_CALL_NAMES = {"run", "Popen", "call", "check_call", "check_output"}
 
 def _tracked_files():
     out = subprocess.run(["git", "ls-files", "-z", *_SCAN_DIRS],
-                         cwd=REPO, capture_output=True, text=True, check=True)
+                         cwd=REPO, capture_output=True, text=True, check=True, env={**os.environ, "HOME": MODULE_HOOK_HOME})
     for rel in out.stdout.split("\0"):
         if not rel or not (rel.endswith(".py") or rel.endswith(".sh")):
             continue

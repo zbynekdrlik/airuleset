@@ -33,6 +33,8 @@ sys.path.insert(0, str(ROOT))
 import discuss_thread_guard as g                                # noqa: E402
 import cli_aliases                                              # noqa: E402
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 
 # --------------------------------------------------------------------------- #
 # Layer 0 -- cli_aliases.stream_number (single derivation, reused not reinvented)
@@ -291,8 +293,7 @@ class _HookBase(TestCase):
             tool_input["file_path"] = "/tmp/scratch/post.py"
         payload = {"tool_input": tool_input, "cwd": "/some/repo",
                    "session_id": "dtn-sess"}
-        import os
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         if user is None:
             env.pop("AIRULESET_DISCUSS_STREAM_USER", None)
             # force a definitely-non-stream identity for the whoami fallback

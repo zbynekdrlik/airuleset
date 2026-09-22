@@ -5,7 +5,6 @@ identity: the box's unix user is appended for sub-dev/gatekeeper stream users
 (gatekeeper → odoo-erp-gatekeeper, montalu → odoo-montalu, david →
 odoo-erp-david); the personal `newlevel` boxes keep the plain label."""
 
-import os
 import subprocess
 import sys
 import unittest
@@ -15,6 +14,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import watchdog as wd
+
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 ROOT = Path(__file__).resolve().parent.parent
 AIRULESET = ROOT / "airuleset.py"
@@ -81,7 +82,7 @@ class TestSendHookAppendsStreamUser(unittest.TestCase):
              "--cwd", str(ROOT)],
             capture_output=True, text=True).stdout.strip()
         self.assertTrue(expected, "notify --project-label produced nothing")
-        env = {**os.environ, "ND_EMOJI": "✅", "ND_TEXT": "hotovo",
+        env = {**hermetic_hook_env(self), "ND_EMOJI": "✅", "ND_TEXT": "hotovo",
               "ND_CWD": str(ROOT), "DISCORD_NOTIFY_DRYRUN": "1"}
         env.pop("ND_DRYRUN_FILE", None)
         r = subprocess.run(["bash", str(SEND_HOOK)], input="",

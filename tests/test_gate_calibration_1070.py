@@ -12,7 +12,10 @@ Items covered here:
   8. the ATTENDED filing classifier (classify_command) shares the item-3
      CREATE-shape helpers, so a REST comment POST / label PATCH is not a filing.
 """
+import os
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -20,6 +23,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import gates.designdispatch as dd
 from gates.filing.__main__ import classify_command
+
+# #1046: some items call dd.* IN-PROCESS, which _logs to
+# ~/.claude/design-by-gate.log via expanduser("~"). Point HOME at a fresh empty
+# dir for the whole module (module-scoped save+restore — batch-31-safe).
+_A1046_ORIG_HOME = None
+_A1046_HOME = None
+
+
+def setUpModule():
+    global _A1046_ORIG_HOME, _A1046_HOME
+    _A1046_ORIG_HOME = os.environ.get("HOME")
+    _A1046_HOME = tempfile.mkdtemp(prefix="a1046-modhome-")
+    os.environ["HOME"] = _A1046_HOME
+
+
+def tearDownModule():
+    if _A1046_ORIG_HOME is None:
+        os.environ.pop("HOME", None)
+    else:
+        os.environ["HOME"] = _A1046_ORIG_HOME
+    shutil.rmtree(_A1046_HOME, ignore_errors=True)
 
 
 def _payload(prompt, cwd="/repo", tool="Agent", subagent="autopilot-worker"):

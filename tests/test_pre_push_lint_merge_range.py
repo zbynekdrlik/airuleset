@@ -25,6 +25,8 @@ import tempfile
 from pathlib import Path
 from unittest import TestCase, main
 
+from _hook_state_cleanup import MODULE_HOOK_HOME  # noqa: E402  (#1046 hermetic HOME)
+
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "pre-push-lint.sh"
 
@@ -49,7 +51,7 @@ def _git(repo, *args, check=True):
 def _run_hook(cwd):
     """Run pre-push-lint.sh with a git-push payload on stdin."""
     payload = {"tool_input": {"command": "git push origin feature"}}
-    env = {**os.environ, **_GIT_ENV}
+    env = {**os.environ, "HOME": MODULE_HOOK_HOME, **_GIT_ENV}
     return subprocess.run(
         ["bash", str(HOOK)],
         input=json.dumps(payload),

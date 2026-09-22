@@ -29,6 +29,8 @@ HOOK = ROOT / "hooks" / "block-worker-close-trigger.sh"
 sys.path.insert(0, str(ROOT))
 import close_trigger as ct                                   # noqa: E402
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 WORKTREE_CWD = "/some/repo/.claude/worktrees/agent-abc123"
 MAIN_CWD = "/some/repo"
 
@@ -156,7 +158,7 @@ class _HookBase(TestCase):
         if agent_type is not None:
             payload["agent_type"] = agent_type
         return subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=hermetic_hook_env(self))
 
 
 class TestHookBlocksWorkerCloseTriggers(_HookBase):

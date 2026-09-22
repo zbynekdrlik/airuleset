@@ -24,6 +24,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "hooks" / "block-test-skips.sh"
 FIXTURES = REPO_ROOT / "tests" / "fixtures" / "testskips_1069"
@@ -172,7 +174,7 @@ class TestSanctionedTestSkip(unittest.TestCase):
     def test_wired_hook_exists_and_parses(self):
         # sanity: the hook script itself is syntactically valid bash.
         r = subprocess.run(["bash", "-n", str(HOOK)],
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=hermetic_hook_env(self))
         self.assertEqual(r.returncode, 0, r.stderr)
 
 

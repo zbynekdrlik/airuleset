@@ -18,6 +18,7 @@ one-ticket question block has at most one `#N …?` line. The doctrine (the
 primary fix) lives in the always-on modules + the autopilot skill.
 """
 
+import os
 import json
 import subprocess
 import sys
@@ -26,7 +27,7 @@ from pathlib import Path
 from unittest import TestCase, main
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _hook_state_cleanup import sweep_session_files  # noqa: E402
+from _hook_state_cleanup import MODULE_HOOK_HOME, sweep_session_files  # noqa: E402  (#1046 hermetic HOME)
 
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "stop-check-prose-violations.sh"
@@ -43,7 +44,7 @@ def _run(msg, sid=None):
     payload = json.dumps({"session_id": sid, "last_assistant_message": msg})
     p = subprocess.run(
         ["bash", str(HOOK)], input=payload, capture_output=True, text=True,
-        timeout=300)
+        timeout=300, env={**os.environ, "HOME": MODULE_HOOK_HOME})
     sweep_session_files(sid)
     return p
 

@@ -25,13 +25,14 @@ message_post recipe's delivery.
 """
 
 import json
-import os
 import re
 import subprocess
 import tempfile
 import time
 from pathlib import Path
 from unittest import TestCase, main
+
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 ROOT = Path(__file__).resolve().parent.parent
 SKILL = ROOT / "skills" / "odoo-client-messaging" / "SKILL.md"
@@ -231,7 +232,7 @@ class TestCoFitSizeGuard(TestCase):
                                       "content": "channel.message_post(body=h, body_is_html=True)"}}
             r = subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
                                capture_output=True, text=True,
-                               env=dict(os.environ, TMPDIR=td))
+                               env=hermetic_hook_env(self, TMPDIR=td))
         self.assertEqual(r.returncode, 0, "injector hook must never block: %r" % r.stderr)
         # both co-firing bodies must be present — neither deferred over the real budget
         self.assertIn("Odoo Client Messaging", r.stdout,
@@ -252,7 +253,7 @@ class TestHandoverTriggerInjection(TestCase):
     def _run(self, payload):
         r = subprocess.run(
             ["bash", str(HOOK)], input=json.dumps(payload),
-            capture_output=True, text=True, env=dict(os.environ, TMPDIR=self.tmpdir),
+            capture_output=True, text=True, env=hermetic_hook_env(self, TMPDIR=self.tmpdir),
         )
         # F7: the injector must never fail — assert clean exit + valid JSON output
         self.assertEqual(r.returncode, 0, "injector hook must never block: %r" % r.stderr)

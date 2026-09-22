@@ -19,6 +19,8 @@ import tempfile
 from pathlib import Path
 from unittest import TestCase, main
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "pre-push-lint.sh"
 
@@ -49,7 +51,7 @@ class _NestedRepoBase(TestCase):
 
     def run_hook(self, cwd):
         payload = {"tool_input": {"command": "git push origin main"}}
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         return subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
                               cwd=str(cwd), capture_output=True, text=True, env=env)
 

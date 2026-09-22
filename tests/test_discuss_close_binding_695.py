@@ -49,6 +49,8 @@ from _goal_arm_helpers import (  # noqa: E402
     _write_marker_transcript,
 )
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 HOOK = ROOT / "hooks" / "block-discuss-thread-name.sh"
 
 DEEP_URL = ("https://erp.montalu.cloud/odoo/discuss?"
@@ -168,7 +170,7 @@ class _HookBase(unittest.TestCase):
     def run_hook(self, *, command, user="montalu2"):
         payload = {"tool_input": {"command": command}, "cwd": "/some/repo",
                    "session_id": "b695-sess"}
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["AIRULESET_DISCUSS_STREAM_USER"] = user
         return subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
                               capture_output=True, text=True, env=env)

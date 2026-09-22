@@ -26,6 +26,8 @@ import unittest
 import uuid
 from pathlib import Path
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "hooks" / "stop-check-prose-violations.sh"
 
@@ -106,7 +108,7 @@ class _HookCase(unittest.TestCase):
         fake = bindir / "python3"
         fake.write_text(_FAKE_PYTHON3_TEMPLATE % (real_python3, str(self.fake_log)))
         fake.chmod(fake.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-        self.env = dict(os.environ)
+        self.env = hermetic_hook_env(self)   # #1046: no live box state (U cache)
         self.env["PATH"] = "%s:%s" % (bindir, os.environ.get("PATH", ""))
 
     def _run(self, msg, session_id=None, cwd=None):

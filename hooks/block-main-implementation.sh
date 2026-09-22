@@ -412,7 +412,7 @@ PYEOF
     _MI_HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
     _MI_ARM=$(MI_ARM_CMD="$BASH_CMD" \
         PYTHONPATH="$(dirname "$_MI_HOOK_DIR")${PYTHONPATH:+:$PYTHONPATH}" \
-        python3 -c 'import os, re
+        python3 -P -c 'import os, re
 from gates.shellcmd import split_top_level
 segs = [s.strip() for s in split_top_level(os.environ.get("MI_ARM_CMD", "")) if s.strip()]
 print("1" if (len(segs) == 1

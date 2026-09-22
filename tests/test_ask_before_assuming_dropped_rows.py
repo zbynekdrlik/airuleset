@@ -54,7 +54,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import airuleset  # noqa: E402
-from _hook_state_cleanup import sweep_session_files  # noqa: E402
+from _hook_state_cleanup import MODULE_HOOK_HOME, hermetic_hook_env, sweep_session_files  # noqa: E402  (#1046 hermetic HOME)
 
 HOOKS = airuleset.REPO_DIR / "hooks"
 
@@ -66,7 +66,7 @@ def _run_pre_ask(text):
     payload = json.dumps({"tool_input": {"question": text}})
     p = subprocess.run(
         ["bash", str(HOOKS / "pre-ask-auto-answer.sh")],
-        input=payload, capture_output=True, text=True,
+        input=payload, capture_output=True, text=True, env={**os.environ, "HOME": MODULE_HOOK_HOME}
     )
     return p.returncode == 2
 
@@ -83,7 +83,7 @@ def _run_stop_prose(text):
     payload = json.dumps({"session_id": sid, "last_assistant_message": text})
     p = subprocess.run(
         ["bash", str(HOOKS / "stop-check-prose-violations.sh")],
-        input=payload, capture_output=True, text=True,
+        input=payload, capture_output=True, text=True, env={**os.environ, "HOME": MODULE_HOOK_HOME}
     )
     sweep_session_files(sid)
     return '"decision"' in p.stdout and '"block"' in p.stdout
@@ -101,7 +101,7 @@ def _run_stop_untracked_work(text):
     payload = json.dumps({"session_id": sid, "last_assistant_message": text})
     p = subprocess.run(
         ["bash", str(HOOKS / "stop-check-untracked-work.sh")],
-        input=payload, capture_output=True, text=True,
+        input=payload, capture_output=True, text=True, env={**os.environ, "HOME": MODULE_HOOK_HOME}
     )
     sweep_session_files(sid)
     return '"decision"' in p.stdout and '"block"' in p.stdout
@@ -361,7 +361,7 @@ class TestNewSlovakDetectorsSurviveABareLocale(TestCase):
     grep calls that need it."""
 
     def _run_stop_prose_bare_locale(self, text):
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["LC_ALL"] = "C"
         env["LANG"] = "C"
         sid = f"test-319-locale-{uuid.uuid4().hex[:10]}"

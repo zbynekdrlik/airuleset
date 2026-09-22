@@ -50,6 +50,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset                                          # noqa: E402
 import cli_quals                                          # noqa: E402
 
+from _hook_state_cleanup import MODULE_HOOK_HOME  # noqa: E402  (#1046 hermetic HOME)
+
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "block-fork-no-merge-issue-close.sh"
 
@@ -143,7 +145,7 @@ def run(cmd, cwd, hook=None, me="", author="", gh_fail=False,
     # specific renamed identity assert the ownership SET in-process instead (see
     # TestStreamLabelAcceptanceClose).
     payload = json.dumps({"tool_input": {"command": cmd}})
-    env = dict(os.environ)
+    env = dict(os.environ, HOME=MODULE_HOOK_HOME)
     env["PATH"] = _fake_gh_dir() + os.pathsep + env.get("PATH", "")
     env["FAKE_GH_ME"] = me
     env["FAKE_GH_AUTHOR"] = author
@@ -1436,7 +1438,7 @@ def _run_with_gh_body(cmd, cwd, gh_body, hook=None):
     gh.write_text(gh_body)
     gh.chmod(0o755)
     payload = json.dumps({"tool_input": {"command": cmd}})
-    env = dict(os.environ)
+    env = dict(os.environ, HOME=MODULE_HOOK_HOME)
     env["PATH"] = d + os.pathsep + env.get("PATH", "")
     env.pop("GH_APP_TOKEN_DIR", None)
     return subprocess.run(["bash", str(hook or HOOK)], input=payload,
