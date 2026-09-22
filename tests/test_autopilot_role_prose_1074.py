@@ -19,7 +19,6 @@ are byte-identical to the committed `main` ref and that `goal-inventory --check`
 stays clean.
 """
 
-import re
 import subprocess
 import sys
 from pathlib import Path
