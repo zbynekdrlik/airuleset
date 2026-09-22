@@ -55,6 +55,7 @@ DROP_PORT_MAX = 8889
 # `drop-<box>-<account>.newlevel.media` on shared boxes (#889).
 DROP_HOST_SPINBIKE = "drop-spinbike.newlevel.media"
 DROP_HOST_DAVID = "drop-david.newlevel.media"  # grandfathered for david1
+DROP_HOST_GK = "drop-gk.newlevel.media"  # gatekeeper box (#1111)
 
 # The go-live marker a `drop-gateway --apply` writes once a box's drop lane is
 # LIVE (ingress reconciled + tunnel restarted). The CLI's public channel is
@@ -79,6 +80,11 @@ class DropLane:
 
     `access=True` = double protection Access+token (external-dev accounts:
     david, dominika); `access=False` = token-only TLS (owner/trusted accounts).
+    EXCEPTION (#1111): the owner's own gk secret-pickup box deliberately runs
+    `access=True` (owner identity as the sole Access include) — defense-in-depth
+    for a credential-delivery/intake box is strictly stricter than token-only,
+    so this is a considered upgrade, not a violation of the owner→`access=False`
+    default above.
 
     `gateway_account` (#838): the unix account that OWNS this lane's tunnel
     config + restart unit on the box. On a SHARED box (subdev) multiple accounts
@@ -141,6 +147,9 @@ class DropLane:
 # CONTROLLER_TUNNEL_UUID) to keep this leaf self-contained (#433 rule).
 _CONTROLLER_TUNNEL_UUID = "f85ea304-920b-4ba4-96bc-a68001ce6fb4"
 _SUBDEV_TAILSCALE = "100.118.174.27"
+# gk box (odoo-gatekeeper, Hetzner cx23) tailscale IP — the controller tunnel's
+# origin for the gk drop lane (#1111).
+_GK_TAILSCALE = "100.90.94.41"
 
 
 
@@ -208,6 +217,21 @@ DROP_LANES = {
         tunnel_system_unit=False, access=True,
         gateway_account="dominika",
         filedrop_port=8804),  # measured 22.9.2026 (uid-derived, no drift)
+
+    # --- gatekeeper box (controller-ingress topology, #1111) ---
+    # The owner's daily secret-pickup box joins the controller multi-ingress
+    # tunnel as one more drop lane. No local tunnel (the controller renders the
+    # ingress); the persistent filedrop service listens on 100.90.94.41:8788
+    # (uid 1000, #493 — no persisted port file, measured 22.9.2026). Access is
+    # the owner identity only (this is the owner's own box).
+    ("odoo-gatekeeper", "gatekeeper"): DropLane(
+        host=DROP_HOST_GK, port=8876,
+        tunnel_uuid=_CONTROLLER_TUNNEL_UUID,
+        tunnel_config=None, tunnel_service=None,
+        tunnel_system_unit=False, access=True,
+        gateway_account=None,
+        topology="controller", origin_host=_GK_TAILSCALE,
+        filedrop_port=8788),  # measured 22.9.2026
     # NOTE: simap1 is PAUSED (#851) — no entry. montalu1-8 and miva1 ride the
     # controller tunnel once provisioned (go-live step, same topology shape).
 }
@@ -244,6 +268,14 @@ DROP_ACCESS_APPS = {
         "hostname": "drop-subdev-dominika.newlevel.media",
         "name": "drop — dominika",
         "allowed_emails": ["dominika@grena.sk", "drlik.zbynek@gmail.com"],
+        "session_duration": "24h",
+    },
+    # #1111: gk is the owner's own box — the Access include is the owner
+    # identity ALONE (the same owner email the owner-facing lanes carry).
+    DROP_HOST_GK: {
+        "hostname": DROP_HOST_GK,
+        "name": "drop — gatekeeper",
+        "allowed_emails": ["drlik.zbynek@gmail.com"],
         "session_duration": "24h",
     },
 }

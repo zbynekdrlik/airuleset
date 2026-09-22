@@ -2051,6 +2051,7 @@ _BUDGET_MIN_PS_REAPER_S = 10      # a ps read + targeted kill / a per-pane tmux 
 _BUDGET_MIN_DISK_DRAIN_S = 30     # the du-heavy disk-guard drain ladder, cadence-gated (10 min)
 _BUDGET_MIN_MDREVIEW_S = 30       # the mdreview-audit subprocess + gh reopen, daily
 _BUDGET_MIN_LOCAL_SEND_S = 15     # a local fleet.jsonl read + a bounded Discord send (conformance heartbeat)
+_BUDGET_MIN_ERP_HEARTBEAT_S = 65  # #959 the erp-test heartbeat wrapper call (bash → ssh, 60s timeout) + margin
 
 
 def _owner_disabled(kind):
@@ -2314,6 +2315,13 @@ from watchdog import parked_wake as parked_wake  # noqa: E402,F401
 # (machine-channel journal only, lock-tested).
 from watchdog import limit_dialog as limit_dialog  # noqa: E402,F401
 from watchdog import task_hygiene as task_hygiene  # noqa: E402,F401  (#1036 Job 49)
+# #959 — Job 51, the erp-test box heartbeat: each subdev stream account's own
+# watchdog, while its Claude is alive, calls odoo-erp's contracted
+# `dev-box-heartbeat-remote.sh <stream>` to extend the box TTL. Stdlib at top
+# level + deferred `import watchdog`/`airuleset`/reaper inside its default seams
+# → no cycle; imports NO notify (machine-channel journal only — the gk-side relay
+# owns box-level alerting). `watchdog/erp_heartbeat.py`'s docstring is the SSOT.
+from watchdog import erp_heartbeat as erp_heartbeat  # noqa: E402,F401
 
 
 # #535 — job 34, per-box cross-target conformance check. Extracted to
@@ -2592,8 +2600,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              infra_queue_fetch=None, resolve_role_fn=None,
              health_probes=None, health_probe_fetch=None,
              task_hygiene_enabled=False, gh_rate_fetch=None,
-             bounceflip_fetch=None, cred_mtime_fn=None, proc_start_fn=None):
-    """Scan every `claude` pane once. 50 numbered jobs per poll — 43 LIVE and 7
+             bounceflip_fetch=None, cred_mtime_fn=None, proc_start_fn=None,
+             erp_heartbeat_enabled=False):
+    """Scan every `claude` pane once. 51 numbered jobs per poll — 44 LIVE and 7
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402; 14 in
     #1084 — the slot stays registered as a journal-only tombstone), whose
     numbers are kept addressable so historical log lines and code comments
@@ -3448,6 +3457,30 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           the verdict / the gk's own action is never reverted). MACHINE-CHANNEL
           only (a note on the ticket; a ping only when a label edit fails).
           `watchdog/cross_stream.py`'s `bounce_flip_revert` is the SSOT.
+      (51) ERP-TEST BOX HEARTBEAT (#959) — gated on `erp_heartbeat_enabled`
+          (cmd_watchdog passes it; run_once unit tests leave it False so no real
+          ssh ever runs) AND a 10-min cadence (`_sweep_due` on
+          `state["erp_heartbeat_last_ts"]`). odoo-erp#6642 made every stream's
+          erp-test box self-expiring (24h TTL) and shipped the heartbeat side on
+          odoo-erp `main`; this is the CALLER. Each subdev stream account's OWN
+          watchdog, while THAT stream's Claude is alive, calls odoo-erp's
+          contracted `scripts/dev-box-heartbeat-remote.sh <stream>` (which
+          SSH-execs the real heartbeat ON the box — the per-box destruct token
+          never leaves the box) to extend the box's `expires_at`. The leaf gates
+          INTERNALLY on box-class (`default_box_class` == shared-stream) +
+          authority (`_box_authority` != full) + liveness (a live `claude` owned
+          by this uid) + a resolvable wrapper (the live cwd's odoo-erp checkout,
+          else a `~/devel/odoo/*/` scan; never a guess), so the flag may be
+          passed unconditionally — off every non-shared-stream / full box it is a
+          silent no-op skip line. exit 0 → ok; 2 → retry (no alarm); 3 → ALARM
+          auth-refused (journalled every tick); other/timeout → error rc=N
+          (retry); `state["erp_heartbeat"] = {rc, ts, line}` records the last
+          outcome, and the wrapper's one stdout line is journalled verbatim. No
+          box whose Claude is off is kept alive (it dies on its own TTL — the
+          point). MACHINE-CHANNEL only (never pings the owner — the gk-side relay
+          owns box-level alerting, analyze-not-ping #693/#704). `min_budget` =
+          the wrapper call class (`_BUDGET_MIN_ERP_HEARTBEAT_S`).
+          `watchdog/erp_heartbeat.py`'s docstring is the SSOT.
 
     PAUSED BOX (#851/#1032): when `box_paused` is True — the box's OWN fleet entry
     carries `paused` (a stream the owner froze), resolved once in `cmd_watchdog`
@@ -5746,6 +5779,27 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
          and _th_config() is not None,
          _job_task_hygiene, "task-hygiene error",
          min_budget=_BUDGET_MIN_HTTP_PROBE_S)
+
+    # Job 51 (#959) — ERP-TEST BOX HEARTBEAT. Gated on `erp_heartbeat_enabled`
+    # (cmd_watchdog passes it; run_once unit tests leave it False so no real ssh
+    # ever fires) AND a 10-min cadence via the shared `_sweep_due` (own
+    # `erp_heartbeat_last_ts` key), so the wrapper call never runs on the 60s
+    # poll. The `_job` advances the cadence stamp itself (the job-41/47 pattern);
+    # the leaf gates INTERNALLY on box-class + authority + liveness + a resolvable
+    # wrapper (so the flag may be passed unconditionally — off a non-shared-stream
+    # / full box the leaf is a silent no-op). `min_budget` = the wrapper-call
+    # class (bash → ssh, 60s timeout). `watchdog/erp_heartbeat.py`'s docstring is
+    # the SSOT.
+    def _job_erp_heartbeat():
+        state["erp_heartbeat_last_ts"] = now      # cadence stamp (gate proved due)
+        return erp_heartbeat.run_erp_heartbeat(now, state, run=run,
+                                               dry_run=dry_run)
+    _add("erp_heartbeat",
+         lambda: (erp_heartbeat_enabled
+                  and _sweep_due(state, "erp_heartbeat_last_ts", now,
+                                 erp_heartbeat.ERP_HEARTBEAT_INTERVAL_S)),
+         _job_erp_heartbeat, "erp-heartbeat error",
+         min_budget=_BUDGET_MIN_ERP_HEARTBEAT_S)
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with
