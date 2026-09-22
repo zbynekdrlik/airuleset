@@ -489,8 +489,16 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # SUBSTRING of it is the missing proof. A foreign draft is never a substring
     # of our own /goal, so the fail-safe (no proof -> untouched) still holds; the
     # provenance gate below is UNCHANGED and stays the ownership decision.
+    # #1113 -- a TRUNCATED / grid-wrapped own payload reconstructs to a
+    # NON-substring (a mid-token wrap boundary inserts a spurious space), so the
+    # #737 substring proof missed it and the janitor DECLINED its own leftover
+    # (the >10x david1-3 regression). The provenance-backed branch (tail == the
+    # payload tail + whitespace-stripped body substring) recognises it, gated on
+    # THIS pane's own `_janitor_watch_seen` mark -- the SAME provenance the
+    # destructive `clear` below requires -- so a foreign draft is never cleared.
     own_leftover = bool(own_payload) and watchdog._box_is_own_leftover(
-        captured, own_payload, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR)
+        captured, own_payload, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
+        provenance=_janitor_watch_seen(state, pid, now))
     # #852 C — the incident's `slane-check:` shape: a stray human char (the
     # owner's forgotten `s`) raced to the FRONT of our own swallowed nudge, so
     # the own prefix is at box-head position 1..3, not 0. A park record carrying

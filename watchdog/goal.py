@@ -30,9 +30,14 @@ through a callback in the /autopilot command." Concretely:
              "please compact." One HUMAN origin is honest, not a shortcut.
              (The watchdog LATER added AUTOMATIC re-arm origins that write the
              SAME store through the SAME deliver_goal gates: `dark-rearm`
-             #478, `stale-rearm` #623, `auth-rearm` #675, and `fulfilled-rearm`
-             #764 -- see `_GOAL_WATCHDOG_REARM_ORIGINS`; none is a human arm,
-             each recovers a specific loop state the human would otherwise
+             #478, `auth-rearm` #675, `fulfilled-rearm` #764, `answer-rearm`
+             #890, `declared-virgin` #1038 -- see `_GOAL_WATCHDOG_REARM_ORIGINS`;
+             none is a human arm, and EVERY one targets a DARK footer only. The
+             `stale-rearm` #623 origin -- which alone typed a REPLACE into an
+             ALIVE, armed loop -- is RETIRED (#1113, the >10x david1-3
+             regression): an active loop is never touched by a keystroke; a
+             template change waits for the next natural arm.
+             Each remaining origin recovers a specific loop state the human would otherwise
              have to re-`/autopilot` by hand.)
 
   DELIVERY -- ONE function, `deliver_goal()`. It checks, in order: the
@@ -48,8 +53,10 @@ through a callback in the /autopilot command." Concretely:
              timestamp NEWER than this request -- drop, never retry: #170's
              guard, now trivial because there is no heuristic re-arm left
              to fight); a TRI-STATE
-             already-armed check (`True` -> nothing to do, drop; `None` ->
-             undeterminable, leave pending; `False` -> proceed -- this is
+             already-armed check (`True` -> nothing to do, drop -- #1113
+             UNCONDITIONAL for every origin, a keystroke NEVER reaches an
+             armed footer; `None` -> undeterminable, leave pending; `False`
+             -> proceed -- this is
              what makes a race between the callback and the user's own
              manual paste of the printed line benign, and protects a
              foreign manually-armed goal from being clobbered); a #1110
@@ -243,11 +250,17 @@ def _save_goal_requests(d, path=None):
 # `goal_dark_watch` auto-re-arm (this weak, watchdog-INITIATED origin).
 _GOAL_REARM_ORIGIN = "dark-rearm"
 _GOAL_SELF_CALLBACK_ORIGIN = "self-callback"
-# #623 -- a watchdog-INITIATED re-arm of an ALIVE, armed loop whose stored
-# condition has DRIFTED from the shipped template (a `/goal` template change
-# deployed after the loop armed). Delivered by the SAME goal_sweep/deliver_goal
-# channel, but at the armed footer it REPLACES a still-stale autopilot goal
-# instead of dropping "already-armed" (deliver_goal, origin-gated).
+# #623 (RETIRED by #1113) -- once a watchdog-INITIATED re-arm of an ALIVE, armed
+# loop whose stored condition had DRIFTED from the shipped template: it typed a
+# fresh /goal into the LIVE box to REPLACE the stale one. The owner ruling
+# 22.9.2026 (>10x reported): an ACTIVE loop is NEVER touched by a machine
+# keystroke -- a template change waits for the NEXT NATURAL arm (session death /
+# dark footer / the owner's own `/autopilot`). So the typing path is DELETED:
+# `_stale_rearm_decide` now only OBSERVES the drift (one journal line), never
+# records a request; this origin joins NEITHER `_GOAL_WATCHDOG_REARM_ORIGINS`
+# NOR `_GOAL_USER_CALLBACK_ORIGINS` (it is no longer PRODUCED). The constant
+# survives ONLY so `deliver_goal` can recognise a leftover on-disk request
+# recorded before the retire and DROP it `drop:stale-rearm-retired`, never typed.
 _GOAL_STALE_REARM_ORIGIN = "stale-rearm"
 # #675 -- a watchdog-INITIATED re-arm of a loop CC cleared on a TRANSIENT auth
 # failure (marker clear_kind="auth"). Delivered by the SAME channel + gates as
@@ -289,7 +302,7 @@ _GOAL_DECLARED_VIRGIN_ORIGIN = "declared-virgin"
 # The watchdog-INITIATED re-arm origins that honour deliver_goal's recent-human
 # gate (never type into a pane a human just touched) — as opposed to the user's
 # own `self-callback` arm, whose origin IS the user.
-_GOAL_WATCHDOG_REARM_ORIGINS = (_GOAL_REARM_ORIGIN, _GOAL_STALE_REARM_ORIGIN,
+_GOAL_WATCHDOG_REARM_ORIGINS = (_GOAL_REARM_ORIGIN,
                                 _GOAL_AUTH_REARM_ORIGIN,
                                 _GOAL_FULFILLED_REARM_ORIGIN,
                                 _GOAL_ANSWER_REARM_ORIGIN,
@@ -312,7 +325,10 @@ _GOAL_RECOVERY_ORIGINS = (_GOAL_AUTH_REARM_ORIGIN, _GOAL_ANSWER_REARM_ORIGIN)
 # re-arm AND every unknown/empty origin PRESERVES the anchor (fail-safe: this
 # is an ALLOWLIST, so a future automatic origin nobody classified defaults to
 # preserve, never to refresh). RULE: every NEW origin string MUST be added to
-# exactly ONE of these two tuples.
+# exactly ONE of these two tuples -- the ONE exception is a RETIRED origin no
+# longer PRODUCED (`_GOAL_STALE_REARM_ORIGIN`, #1113): it is recognised only to
+# DROP a leftover on-disk request, so it joins neither tuple and defaults to the
+# fail-safe "preserve the anchor" branch above, exactly like an unknown origin.
 _GOAL_USER_CALLBACK_ORIGINS = (_GOAL_SELF_CALLBACK_ORIGIN,)
 # #766 -- a distinguishable THIRD return state from `_fulfilled_rearm_decide`
 # (alongside handled True/False): a 🏁-PROVEN achieved loop with a FRESH open==0
@@ -339,7 +355,9 @@ _GOAL_ATTEMPTS_STATE_KEYS = {
     _GOAL_AUTH_REARM_ORIGIN: "goal_auth_rearm_attempts",
     _GOAL_ANSWER_REARM_ORIGIN: "goal_answer_rearm_attempts",
     _GOAL_REARM_ORIGIN: "goal_dark_rearm_attempts",
-    _GOAL_STALE_REARM_ORIGIN: "goal_dark_rearm_attempts",
+    # #1113 -- the stale-rearm origin is RETIRED (never typed, so it never
+    # records a delivered attempt); its former "goal_dark_rearm_attempts" entry
+    # is removed with the typing path.
     _GOAL_FULFILLED_REARM_ORIGIN: "goal_fulfilled_rearm",
 }
 
@@ -370,8 +388,10 @@ def record_goal_request(session, cwd, text, authority, now=None, path=None,
                         origin=None):
     """Record a pending `/goal` arm request for `session`. MULTIPLE writers:
     the user's `goal-arm --self` callback (origin "self-callback", #478) AND
-    the watchdog auto-re-arms — `dark-rearm` (#478), `stale-rearm` (#623),
-    `auth-rearm` (#675), `fulfilled-rearm` (#764). Overwrites any earlier
+    the watchdog auto-re-arms — `dark-rearm` (#478), `auth-rearm` (#675),
+    `fulfilled-rearm` (#764), `answer-rearm` (#890), `declared-virgin` (#1038).
+    (#1113: `stale-rearm` #623 is RETIRED -- it is no longer recorded; a
+    template drift on an ACTIVE loop is only observed, never re-typed.) Overwrites any earlier
     pending request for the SAME session, with two protections a single-writer
     store never needed (#478 adversarial-review MAJOR, mirroring the identical
     fix once applied to `compact.record_compact_request` — deleted by #1084):
@@ -405,11 +425,11 @@ def record_goal_request(session, cwd, text, authority, now=None, path=None,
         -- every watchdog re-arm AND every unknown/empty origin -- preserves),
         so it fails SAFE for a future origin nobody classified. Note it is
         also STRICTER than the old `dark-rearm`-exclusion rule in one
-        practically-unreachable direction: a `stale-rearm`/`auth-rearm`/
-        unknown origin landing over a `dark-rearm` prior used to get a fresh
-        ts and now PRESERVES -- the correct safe direction (those are all
-        automatic re-arms, and stale/auth-rearm already defer to any pending
-        request, so this path is not normally reached).
+        practically-unreachable direction: an `auth-rearm`/unknown (or a
+        pre-#1113 leftover `stale-rearm`) origin landing over a `dark-rearm`
+        prior used to get a fresh ts and now PRESERVES -- the correct safe
+        direction (those are all automatic re-arms, and auth-rearm already
+        defers to any pending request, so this path is not normally reached).
 
     `cwd`/`origin`/`authority`/`text` otherwise take the newest call's
     values. Fail-safe (never raises). Returns True on success (INCLUDING a
@@ -486,7 +506,8 @@ def _bump_goal_delivery_fail(session, word, path=None, field="dl_fails"):
     #731-review -- the counter is PER-REQUEST and a re-record RESETS it
     (`record_goal_request` rebuilds the entry dict without dl_fails). That is
     correct: a genuine fresh `/autopilot` is a NEW episode that must get its own
-    cap. The only mechanical re-record (a dark/stale-rearm) is bounded 24h/2 AND
+    cap. The only mechanical re-record (a dark-rearm; #1113 retired stale-rearm)
+    is bounded 24h/2 AND
     gated on a CONFIRMED-dead read, and the cap fires in ~CAP sweeps (~3.5-4.6
     min) BEFORE a re-record can happen mid-livelock -- so a re-record never
     defeats the cap for the montalu4 case; carrying dl_fails across a same-origin
@@ -868,12 +889,11 @@ def _await_goal_armed(pid, run, sleep_fn):
     turns a render-lag false-negative into `drop:already-armed`, never a
     double-arm. Shared by all three arm routes (bare / stash / stranded).
 
-    KNOWN BLIND SPOT (#720-review 🔵): a stale-rearm REPLACE types past an
-    ALREADY-armed footer, so this confirm reads the still-lit OLD `◎ /goal` and
-    passes even if the replace-submit was consumed as a plain prompt -- it cannot
-    tell old-armed from new-armed. Bounded: `goal_dark_watch` re-detects the
-    still-stale marker under its 24h/2 cap. The confirm's real teeth are on a
-    FRESH arm (armed was False before -> a True read is genuinely ours)."""
+    (#1113: the old #720-review blind spot -- a stale-rearm REPLACE typing past
+    an ALREADY-armed footer, where this confirm could not tell old-armed from
+    new-armed -- is GONE: no origin types past an armed footer any more, so every
+    delivery this confirms started from a DARK footer, and a True read here is
+    genuinely our fresh arm.)"""
     for i in range(GOAL_TYPE_SETTLE_POLLS):
         if watchdog.pane_goal_armed(watchdog.capture_pane(pid, run, lines=40)) is True:
             return True
@@ -1374,7 +1394,7 @@ def _goal_cap_drop(sid, cwd, text, origin, dl_fails, request_ts, run,
                 else:
                     leftover = "none"
     # origin-gated ping -- the SAME gate as the expiry ping (normal / dark-rearm
-    # only; stale-rearm + auth-rearm + #764 fulfilled-rearm are SILENT: each is a
+    # only; auth-rearm + #764 fulfilled-rearm + answer-rearm are SILENT: each is a
     # loop that is ALIVE / self-healing, so a "re-run /autopilot" ping would go
     # to the very human whose presence deferred it — a fulfilled-rearm most often
     # fails delivery on skip:recent-human, dark_watch re-detects it next sweep
@@ -1384,7 +1404,7 @@ def _goal_cap_drop(sid, cwd, text, origin, dl_fails, request_ts, run,
     # the full 14-day dedup TTL (the #134 silence class); request_ts gives each
     # episode its own ping.
     if (send_fn is not None and not dry_run
-            and origin not in (_GOAL_STALE_REARM_ORIGIN, _GOAL_AUTH_REARM_ORIGIN,
+            and origin not in (_GOAL_AUTH_REARM_ORIGIN,
                                _GOAL_FULFILLED_REARM_ORIGIN,
                                _GOAL_ANSWER_REARM_ORIGIN)):
         from notify import stream_redirect
@@ -1451,8 +1471,15 @@ def _log_arm_confirm_fail(sid, cwd, text, pid, run, sleep_fn=None,
     # placeholder). A CLEAN idle input boundary only (never Escape/clear a live
     # turn's render). Every outcome is falsifiable in goal-sync.log (design D).
     head = watchdog._input_box_head_text(cap)
-    own = (watchdog._box_is_own_leftover(cap, text,
-                                         watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR)
+    # #1113 -- the delivery set `_janitor_mark_watch(state, pid, now)` for THIS
+    # attempt just before the type, so provenance holds: a TRUNCATED / grid-
+    # wrapped own payload (whose reconstruction is NOT a clean substring -- the
+    # >10x david1-3 regression) is proven ours by the tail + whitespace-stripped
+    # body, not only the #737 clean substring / the `/goal ` head prefix.
+    _now = now if now is not None else time.time()
+    own = (watchdog._box_is_own_leftover(
+               cap, text, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
+               provenance=watchdog._janitor_watch_seen(state, pid, _now))
            or watchdog._looks_like_own_stuck_content(head))
     if not own:
         _log_goal_sync("ARM-CONFIRM-FAIL sid=%s cwd=%s cleanup=declined "
@@ -1509,7 +1536,10 @@ def _goal_client_active_skip(sid, cwd, pid, run, now, out):
 _GOAL_TERMINAL_WORDS = frozenset((
     "sent", "expired", "drop:cleared-after-request", "drop:already-armed",
     "drop:stale-rearm",   # #524 -- a dark-rearm too old to type (delivery gate)
-    "drop:already-current",  # #623 -- a stale-rearm whose loop is no longer stale
+    "drop:stale-rearm-retired",  # #1113 -- a leftover stale-rearm request, never
+                                 # typed (the origin is retired); cleared in one
+                                 # sweep. (The #623 `drop:already-current` word is
+                                 # removed with the stale-rearm REPLACE path.)
 ))
 
 
@@ -1575,14 +1605,21 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
       "drop:cleared-after-request"  -- the #170 clear-suppression guard:
                                         the newest marker is `cleared` and
                                         postdates this request.
-      "drop:already-armed"          -- nothing to do; some goal (this
-                                        request's own earlier delivery, a
-                                        manual paste, or a foreign one) is
-                                        already armed.
+      "drop:already-armed"          -- #1113 UNCONDITIONAL: the footer shows
+                                        `◎ /goal` armed, so NOTHING is typed for
+                                        ANY origin (this request's own earlier
+                                        delivery, a manual paste, a foreign goal,
+                                        or an alive loop carrying a stale
+                                        condition -- a template change waits for
+                                        the next natural arm, never a keystroke).
       "drop:stale-rearm"            -- #524: a `dark-rearm`-origin request
                                         older than GOAL_DARK_REARM_STALE_S;
                                         the dark read it acted on has gone
                                         stale, so never type it late.
+      "drop:stale-rearm-retired"    -- #1113: a leftover on-disk `stale-rearm`
+                                        request (recorded before that typing path
+                                        was removed); dropped terminally before
+                                        any pane work, never typed.
       "skip:<reason>"               -- not safe right now; the caller LEAVES
                                         the request pending for the next sweep
                                         -- BUT #731: a KEYSTROKE-delivering skip
@@ -1635,6 +1672,17 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     projects_dir = projects_dir or watchdog.PROJECTS_DIR
     sleep_fn = sleep_fn or time.sleep
 
+    # #1113 -- the stale-rearm typing path is REMOVED: a machine /goal keystroke
+    # NEVER reaches an ACTIVE, armed loop (the >10x david1-3 regression). A
+    # leftover on-disk `stale-rearm` request (recorded before the retire) is
+    # dropped TERMINALLY here, before any pane resolution / keystroke, so
+    # goal_sweep clears it and it is never typed. `goal_dark_watch` no longer
+    # records this origin, so on a settled fleet this is only ever a one-sweep
+    # cleanup of a pre-#1113 request.
+    if origin == _GOAL_STALE_REARM_ORIGIN:
+        _log_goal_sync("DROP stale-rearm-retired sid=%s cwd=%s" % (sid, cwd))
+        return "drop:stale-rearm-retired"
+
     # #1038 -- the keystroke NUDGE identity, derived from WHETHER this cwd is a
     # DECLARED managed window (see `_declared_window_nudge`): a declared window
     # rides the ALWAYS-ON `goal-arm` recovery nudge (never suppressed by the
@@ -1650,9 +1698,10 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         if age is not None and age > GOAL_REQUEST_MAX_AGE_S:
             _log_goal_sync("SKIP expired sid=%s cwd=%s origin=%s"
                            % (sid, cwd, origin))
-            # #623/#675-review -- SILENT expiry for the stale-rearm, auth-rearm
-            # AND #764 fulfilled-rearm origins. stale-rearm: the loop is
-            # ALIVE+armed (just a stale condition). auth-rearm: an auth blip is
+            # #675-review -- SILENT expiry for the auth-rearm AND #764
+            # fulfilled-rearm origins (#1113: the stale-rearm origin is retired
+            # and dropped `drop:stale-rearm-retired` far above, so it never
+            # reaches this expiry gate). auth-rearm: an auth blip is
             # owner-ruled NORMAL, silence + mechanical recovery only (#662/#676).
             # fulfilled-rearm: a COMPLETED loop whose delivery was deferred (most
             # often skip:recent-human) is neither dead nor abandoned, and its
@@ -1669,8 +1718,7 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
             # #675 banned shape. dark_watch/the virgin scan re-detect the silenced
             # origins next sweep. Still returns "expired" -> goal_sweep clears it.
             if (send_fn is not None and not dry_run
-                    and origin not in (_GOAL_STALE_REARM_ORIGIN,
-                                       _GOAL_AUTH_REARM_ORIGIN,
+                    and origin not in (_GOAL_AUTH_REARM_ORIGIN,
                                        _GOAL_FULFILLED_REARM_ORIGIN,
                                        _GOAL_ANSWER_REARM_ORIGIN,
                                        _GOAL_DECLARED_VIRGIN_ORIGIN)):
@@ -1710,10 +1758,11 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
 
     tpath = None            # #566: defined for the case-(a) recovery below even
                             # when there is no active transcript (normal origin)
-    mark = None             # #623: the newest marker from the 4 MB tail, read
-                            # below when a transcript exists; used ONLY for the
-                            # cleared-after-request check -- the stale-rearm
-                            # replace re-reads via seed_goal_marker (32 MB reach)
+    mark = None             # the newest marker from the 4 MB tail, read below
+                            # when a transcript exists; used ONLY for the
+                            # cleared-after-request check (#170). (#1113: the
+                            # #623 stale-rearm REPLACE that re-read via
+                            # seed_goal_marker is removed.)
     tinfo = watchdog.find_active_transcript(projects_dir, cwd)
     if tinfo:
         tpath, _tmtime = tinfo
@@ -1732,8 +1781,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         # (a "skip:" word) so a later sweep re-tries once the human leaves,
         # or the 30-min age cap eventually expires it with the "arm failed"
         # ping. `tpath` is guaranteed defined here (pane resolution above
-        # already required an active transcript). #623 -- the stale-rearm origin
-        # is ALSO watchdog-initiated, so it honours the SAME gate.
+        # already required an active transcript). #675 -- auth-rearm is ALSO
+        # watchdog-initiated, so it honours the SAME gate.
         if origin in _GOAL_WATCHDOG_REARM_ORIGINS:
             # #675 -- delivery passes the SMALL future clock-skew tolerance (not
             # the full window): a grossly-future presence marker vetoing this
@@ -1755,7 +1804,7 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         # means the recent-human gate cannot run. For a watchdog-INITIATED
         # origin, refuse on unprovable state rather than type blind. Non-terminal
         # "skip:" -> stays pending; a later sweep (or the 30-min age cap) resolves
-        # it. #623/#675: stale-rearm + auth-rearm honour the SAME gate.
+        # it. #675: auth-rearm honours the SAME gate.
         _log_goal_sync("SKIP no-transcript(%s) sid=%s cwd=%s" % (origin, sid, cwd))
         return "skip:no-transcript"
 
@@ -1786,33 +1835,14 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     # Tri-state already-armed check.
     armed = watchdog.pane_goal_armed(captured)
     if armed is True:
-        # #623 -- a STALE-REARM is the ONE origin allowed to proceed past an
-        # armed footer: the loop is alive+armed but carries a condition older
-        # than the shipped template. RE-VERIFY the marker is STILL a stale
-        # AUTOPILOT condition vs our fresh `text` (never clobber a foreign or an
-        # already-current goal), and if so fall through to type -> a /goal
-        # REPLACE. Every other origin drops as before.
-        if origin == _GOAL_STALE_REARM_ORIGIN:
-            # #623-review -- RE-VERIFY with the SAME reach dark_watch used to
-            # DETECT (`seed_goal_marker`'s bounded reverse-scan), NOT the 4 MB
-            # tail `mark` above: CC writes the `Goal set:` marker ONCE at arm
-            # time, so a loop armed far back in a large (hundreds-of-MB) main
-            # transcript has its marker PAST the tail. The tail read would be
-            # None -> a genuinely still-stale loop would wrongly drop and never
-            # be delivered (record->drop churn under the cap, never re-armed) --
-            # exactly the long-running loops most likely to be stale after a
-            # template deploy. A fresh re-arm / clear always writes at EOF (in
-            # the tail), so this still catches a loop the user fixed meanwhile.
-            _soff, smark, _sst = watchdog.seed_goal_marker(tpath)
-            verdict = _classify_armed_condition(
-                smark.get("payload") if isinstance(smark, dict) else None, text)
-            if verdict != "stale":
-                _log_goal_sync("DROP stale-rearm-%s sid=%s cwd=%s"
-                               % (verdict, sid, cwd))
-                return "drop:already-current"
-        else:
-            _log_goal_sync("DROP already-armed sid=%s cwd=%s" % (sid, cwd))
-            return "drop:already-armed"
+        # #1113 -- UNCONDITIONAL for EVERY origin: a machine /goal keystroke NEVER
+        # reaches a `◎ /goal` armed footer. The #623 stale-rearm carve-out (a
+        # RE-VERIFY-then-REPLACE into the live box) is DELETED -- it typed a
+        # 3.7 kB payload into david1-3's ACTIVE loops (the >10x regression); a
+        # template change now waits for the next NATURAL arm. Every other re-arm
+        # origin only targets a DARK footer by its own gate, so this is a belt.
+        _log_goal_sync("DROP already-armed sid=%s cwd=%s" % (sid, cwd))
+        return "drop:already-armed"
     if armed is None:
         _log_goal_sync("SKIP undeterminable sid=%s cwd=%s" % (sid, cwd))
         return "skip:undeterminable"
@@ -3069,79 +3099,34 @@ def _default_rearm_fn(cwd):
 
 
 def _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run, rearm_fn,
-                        obligation_fn, requests_path, attempts_state,
                         tmpl_seen_state=None):
-    """#623 -- for a LIVE, ARMED loop (`goal_dark_watch`'s `armed is True`
-    branch), decide whether its stored condition has DRIFTED from the shipped
-    template and, if so, RECORD a `stale-rearm` request (goal_sweep/deliver_goal
-    then REPLACES it). Returns ONE decision-log line, or None (silent) for the
-    common non-actionable cases (current / foreign / unknown / already-pending).
-
-    Bounds + fail-safe, all mirroring the sibling dark-rearm path:
-      * classify via `_classify_armed_condition` -- only a `stale` AUTOPILOT
-        condition proceeds; `foreign` (a hand-armed goal) is NEVER touched;
-      * a pending request of ANY origin (goal_sweep is delivering it) -> silent,
-        no re-record / never clobber a self-callback or dark-rearm;
-      * requires a WORKABLE, fresh backlog (open>0) -- an achieved/empty loop is
-        not worth a keystroke;
-      * SHARES the dark-rearm 24h/2 per-sid attempt cap: in any ONE sweep a loop
-        is either dead-dark OR alive-stale (the two record paths sit in mutually-
-        exclusive `armed` branches), so across sweeps both count against one
-        per-sid daily budget and a non-converging comparison burns at most 2/day."""
+    """#623 (RETIRED by #1113) -- for a LIVE, ARMED loop (`goal_dark_watch`'s
+    `armed is True` branch), OBSERVE whether its stored condition has DRIFTED
+    from the shipped template. It NO LONGER records a re-arm request / types a
+    keystroke: the owner ruling 22.9.2026 (>10x reported) is that an ACTIVE loop
+    is NEVER touched by a machine keystroke -- a template change applies at the
+    NEXT NATURAL arm (session death / dark footer / the owner's own `/autopilot`),
+    never by re-typing 3.7 kB into a live box (the david1-3 regression). So this
+    is now a pure OBSERVATION: return ONE journal line naming the drift the FIRST
+    time it is seen for a (session, template) pair (deduped via the existing
+    `goal_stale_rearm_tmpl` stamp so a template deploy does not re-log every
+    sweep), or None for the non-drift cases (current / foreign / unknown) and for
+    an already-observed drift. A dry-run logs the drift but never stamps."""
     payload = mark.get("payload") if isinstance(mark, dict) else None
-    text, authority = (rearm_fn or _default_rearm_fn)(cwd)
+    text, _authority = (rearm_fn or _default_rearm_fn)(cwd)
     if _classify_armed_condition(payload, text) != "stale":
         return None
-    # #623-review -- defer to ANY pending request (not just a stale-rearm): a
-    # pending self-callback / dark-rearm is already being delivered (and arms
-    # the SAME current template -> the loop becomes current), so never pile on
-    # or clobber it. This also covers the already-queued stale-rearm case.
-    if isinstance(load_goal_requests(requests_path).get(sid), dict):
-        return None
-    # #1092 (e) -- a template change is NOT an emergency: record at most ONE
-    # stale-rearm per session per TEMPLATE VERSION (keyed on the shipped template
-    # hash). After the #1084 template deploy, EVERY armed session on every box
-    # reads "stale" at once; without this key each one re-records a stale-rearm
-    # every ~30 min (its request expires, the loop is still stale, it re-records)
-    # under only the 24h/2 attempt cap -- the addendum's second-writer storm. Once
-    # a stale-rearm was recorded for this (sid, template) the loop stays on old
-    # doctrine until it dies OR the template changes again (a new hash re-opens
-    # the key), which the addendum accepts ("kept, bounded"). A dry-run never
-    # stamps (it records nothing). `tmpl_seen_state` is `state["goal_stale_rearm_
-    # tmpl"]`, threaded from goal_dark_watch like the sibling `*_attempts` dicts.
+    # #1113 -- dedup the OBSERVATION per (session, template version) via the same
+    # `state["goal_stale_rearm_tmpl"]` stamp the record path used, so a template
+    # deploy logs the drift ONCE per armed session, not every ~30 min sweep.
     _tmpl_hash = hashlib.sha1((text or "").encode("utf-8")).hexdigest()[:16]
     if isinstance(tmpl_seen_state, dict) and tmpl_seen_state.get(sid) == _tmpl_hash:
-        return ("stale-rearm %s sid=%s -> STALE but already re-armed for this "
-                "template version -- skip (loop stays on old doctrine until it "
-                "dies or the template changes again)" % (loc, sid))
-    open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
-    fresh = cts is not None and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S
-    if not (isinstance(open_n, int) and open_n > 0 and fresh):
-        return ("stale-rearm %s sid=%s -> STALE (armed condition predates the "
-                "shipped template) but backlog not workable (open=%s) -- skip"
-                % (loc, sid, open_n))
-    ok, pruned, wait_s = _dark_rearm_attempt_ok(attempts_state.get(sid), now)
-    if not ok:
-        if wait_s is not None:   # #804 mode-2 -- backoff, never silent-until-midnight
-            return ("stale-rearm %s sid=%s -> STALE but re-arm BACKOFF (next in "
-                    "%ss) -- skip" % (loc, sid, wait_s))
-        return ("stale-rearm %s sid=%s -> STALE but ATTEMPT-CAP (%d/24h) -- skip"
-                % (loc, sid, GOAL_DARK_REARM_HARD_CAP_PER_DAY))
-    if dry_run:
-        return ("stale-rearm %s sid=%s -> STALE would record re-arm (dry-run, "
-                "open=%s authority=%s)" % (loc, sid, open_n, authority))
-    # #921 residual: attempt recording moved to goal_sweep after verified
-    # delivery ("sent").  Same class as auth-rearm.
-    record_goal_request(sid, cwd, text, authority, now=now,
-                        origin=_GOAL_STALE_REARM_ORIGIN, path=requests_path)
-    # #1092 (e) -- stamp the template version so a later sweep (after this request
-    # expires / delivers) never re-records another stale-rearm for the SAME
-    # template into this session.
-    if isinstance(tmpl_seen_state, dict):
+        return None
+    if not dry_run and isinstance(tmpl_seen_state, dict):
         tmpl_seen_state[sid] = _tmpl_hash
-    return ("stale-rearm %s sid=%s -> STALE: recording re-arm (open=%s "
-            "authority=%s)"
-            % (loc, sid, open_n, authority))
+    return ("stale-drift %s sid=%s -> condition predates the shipped template; "
+            "waits for the next natural arm (never re-typed into an active loop, "
+            "#1113)" % (loc, sid))
 
 
 def _goal_guard_decide(sid, payload, template_line, state, now, loc,
@@ -3860,13 +3845,13 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                 logs.append("dark-watch %s sid=%s -> VETO-ALIVE:render-armed "
                             "(glyph present, confirmation run reset)"
                             % (loc, sid))
-            # #623 -- an ALIVE armed loop can still carry a STALE condition
-            # (armed before the last SKILL.md deploy). Record a stale-rearm
-            # request for goal_sweep/deliver_goal to REPLACE it.
+            # #623/#1113 -- an ALIVE armed loop can carry a STALE condition
+            # (armed before the last SKILL.md deploy). We NEVER re-type it (the
+            # owner's >10x regression): OBSERVE the drift once, and let the next
+            # NATURAL arm apply the new template. A keystroke into an active loop
+            # is deleted here.
             sr = _stale_rearm_decide(sid, cwd, mark, now, loc, dry_run,
-                                     rearm_fn, obligation_fn, requests_path,
-                                     attempts_state,
-                                     tmpl_seen_state=stale_tmpl_state)
+                                     rearm_fn, tmpl_seen_state=stale_tmpl_state)
             if sr:
                 logs.append(sr)
             # #878 — goal-guard rider: an ALIVE armed loop with a FOREIGN

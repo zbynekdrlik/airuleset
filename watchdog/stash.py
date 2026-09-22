@@ -1589,7 +1589,19 @@ def _box_norm_from_capture(captured):
     return " ".join(full.split())
 
 
-def _box_is_own_leftover(captured, payload, min_chars):
+def _box_tail_row_norm(captured):
+    """#1113 -- the LAST visible input-box row, whitespace-normalized (the `❯`
+    glyph + any continuation indent stripped). '' when no box is located. This is
+    the tail END of the payload for a COMPLETE own leftover (never a spurious
+    row-join space, unlike `_box_norm_from_capture` -- a single row is read as-is)
+    so `payload.endswith(box_tail)` proves the box ends where the payload ends."""
+    rows = watchdog._input_box_rows_raw(captured)
+    if not rows:
+        return ""
+    return " ".join(rows[-1].lstrip("❯").split())
+
+
+def _box_is_own_leftover(captured, payload, min_chars, provenance=False):
     """#737 -- True when the VISIBLE input-box content is a contiguous SUBSTRING
     of `payload`, at least `min_chars` normalized chars long: the render
     signature of a SCROLLED long own /goal (head rows scrolled off, only the
@@ -1599,13 +1611,39 @@ def _box_is_own_leftover(captured, payload, min_chars):
     so the fail-safe direction (no proof -> untouched, foreign draft nikdy) is
     preserved. `payload` is the request's own `text` / the /goal template the
     caller supplies -- NEVER a rescue snapshot of the box itself (that would be
-    a tautology and could match a raced-in foreign draft, #737 design fork)."""
+    a tautology and could match a raced-in foreign draft, #737 design fork).
+
+    #1113 -- a SECOND, PROVENANCE-BACKED proof for a TRUNCATED / grid-wrapped
+    render whose reconstruction is NOT a clean contiguous substring: a wrap
+    boundary that cuts a token mid-word (`origin/main` -> `origin/` + `main`)
+    makes `_box_norm_from_capture` insert a spurious row-join space, so the #737
+    substring test fails and the janitor logged `cleanup=declined` on a box that
+    was genuinely ours (the >10x david1-3 regression, #1113). When the CALLER
+    proves provenance (`provenance=True` -- a live `_janitor_mark_watch` mark for
+    THIS pane, checked by the caller against its own attempt window), the leftover
+    is accepted when BOTH the box TAIL row is the payload tail AND the
+    whitespace-STRIPPED box body is a substring of the whitespace-stripped payload
+    (>= `min_chars`). Whitespace-stripping absorbs the spurious/missing wrap
+    spaces; the tail equality proves the box holds the COMPLETE payload (ends
+    where it ends, never a mid-typing fragment). A foreign draft matches NEITHER
+    (its tail is not the payload's, and its body is not a contiguous run of the
+    payload with the spaces removed), so provenance is REQUIRED -- shape alone
+    never clears, the fail-safe (no proof -> untouched) still holds."""
     if not payload:
         return False
     box_norm = _box_norm_from_capture(captured)
     if not box_norm or len(box_norm) < min_chars:
         return False
-    return box_norm in " ".join(payload.split())
+    payload_norm = " ".join(payload.split())
+    if box_norm in payload_norm:
+        return True
+    if not provenance:
+        return False
+    box_tail = _box_tail_row_norm(captured)
+    if not box_tail or not payload_norm.endswith(box_tail):
+        return False
+    box_ns = "".join(box_norm.split())
+    return len(box_ns) >= min_chars and box_ns in "".join(payload_norm.split())
 
 
 def _box_own_with_short_prefix(captured, own_typed):

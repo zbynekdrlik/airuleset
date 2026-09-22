@@ -305,19 +305,24 @@ class TestRearmThroughPaneBudget(unittest.TestCase):
         return Path(d.name)
 
     def _deliver(self, sid, armed_cond, template, state, now=100000,
-                 initial_box="", origin="stale-rearm"):
+                 initial_box="", origin="dark-rearm"):
+        # #1113 -- the pane-budget path is exercised via a DARK-rearm keystroke
+        # into an IDLE (dark) pane. The old vehicle (a stale-rearm REPLACE into
+        # an ARMED pane) is deleted: an armed footer now drops `already-armed`
+        # and stale-rearm drops `stale-rearm-retired`, neither typing -- so a
+        # DARK loop's dark-rearm is the live keystroke path the budget governs.
         import unittest.mock as m
         import watchdog as wd
         from watchdog import goal
         from _goal_arm_helpers import (
-            DeliverGoalFakeTmux, GOAL_ARMED_CAP,
+            DeliverGoalFakeTmux, GOAL_IDLE_CAP,
             _write_marker_transcript, _write_goal_marker)
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, sid)
         _write_goal_marker(proj, self.CWD, sid, "Goal set: " + armed_cond,
                            ts_epoch=500)
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
-                                   GOAL_ARMED_CAP, model_type=True,
+                                   GOAL_IDLE_CAP, model_type=True,
                                    initial_box=initial_box)
         with m.patch.object(wd, "_goal_autoarm_recent_human_activity",
                             return_value=(False, "test")):
@@ -343,7 +348,7 @@ class TestRearmThroughPaneBudget(unittest.TestCase):
     def test_rearm_into_bare_box_marks_a_pane_attempt(self):
         state = {}
         word, tmux = self._deliver("sess-rb-2", self._OLD, self._TMPL, state)
-        self.assertEqual(word, "sent", "a stale-rearm REPLACE into a bare box types")
+        self.assertEqual(word, "sent", "a dark-rearm into a bare box types")
         self.assertEqual(len(state.get("nudge_pane_attempts", {}).get("%9", [])), 1)
 
     def test_rearm_deferred_on_a_foreign_draft_never_stashes(self):
@@ -356,10 +361,11 @@ class TestRearmThroughPaneBudget(unittest.TestCase):
 
 
 class TestStaleRearmOncePerTemplateVersion(unittest.TestCase):
-    """#1092 (e) — a template change is NOT an emergency: `stale-rearm` records at
-    most ONE re-arm per session per TEMPLATE VERSION (keyed on the shipped
-    template hash), so a template deploy cannot storm every armed session's prompt
-    sweep after sweep."""
+    """#1092 (e) / #1113 — a template change is NOT an emergency. The #623
+    stale-rearm RECORD path is RETIRED (never re-typed into an active loop): the
+    armed-True branch now only OBSERVES the drift, and the per-(session,template)
+    hash stamp dedups that OBSERVATION so a template deploy logs each armed
+    session's drift ONCE, not every ~30 min sweep."""
 
     CWD = "/home/newlevel/devel/stalever"
 
@@ -399,26 +405,26 @@ class TestStaleRearmOncePerTemplateVersion(unittest.TestCase):
             requests_path=reqs, dry_run=False)
         return goal.load_goal_requests(reqs), logs
 
-    def test_second_sweep_same_version_does_not_re_record(self):
-        from watchdog import goal
+    def test_second_sweep_same_version_observes_once_no_record(self):
         st = {}
         reqs = self._dir() / "goal-requests.json"
-        r1, _ = self._sweep("sess-v1", self._TMPL, st, reqs)
-        self.assertEqual(r1.get("sess-v1", {}).get("origin"), "stale-rearm")
-        goal.clear_goal_request("sess-v1", path=reqs)
+        r1, logs1 = self._sweep("sess-v1", self._TMPL, st, reqs)
+        self.assertEqual(r1, {}, "#1113: an armed loop is never re-armed/recorded")
+        self.assertTrue(any("stale-drift" in ln for ln in logs1), logs1)
         r2, logs2 = self._sweep("sess-v1", self._TMPL, st, reqs)
-        self.assertEqual(r2, {}, "same template version -> no second re-arm record")
-        self.assertTrue(any("template version" in ln for ln in logs2), logs2)
+        self.assertEqual(r2, {})
+        self.assertFalse(any("stale-drift" in ln for ln in logs2),
+                         "same template version -> drift observed only ONCE")
 
-    def test_a_new_template_version_re_records(self):
-        from watchdog import goal
+    def test_a_new_template_version_re_observes(self):
         st = {}
         reqs = self._dir() / "goal-requests.json"
-        self._sweep("sess-v2", self._TMPL, st, reqs)
-        goal.clear_goal_request("sess-v2", path=reqs)
-        r2, _ = self._sweep("sess-v2", self._TMPL2, st, reqs)
-        self.assertEqual(r2.get("sess-v2", {}).get("origin"), "stale-rearm",
-                         "a changed template version re-arms again")
+        _, logs1 = self._sweep("sess-v2", self._TMPL, st, reqs)
+        self.assertTrue(any("stale-drift" in ln for ln in logs1), logs1)
+        r2, logs2 = self._sweep("sess-v2", self._TMPL2, st, reqs)
+        self.assertEqual(r2, {}, "still never records a re-arm")
+        self.assertTrue(any("stale-drift" in ln for ln in logs2),
+                        "a changed template version re-observes the drift")
 
 
 class TestNudgesStatusRecoveryLine(unittest.TestCase):
