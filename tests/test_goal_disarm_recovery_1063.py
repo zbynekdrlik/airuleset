@@ -156,6 +156,7 @@ RECOVERY_DELIVERY_SITES = {
     # so compact.py no longer has a recovery-delivery call site to pin here.
     "watchdog/__init__.py": ["_send_stuckcheck_verified"],
     "watchdog/parked_wake.py": ["deliver_wake"],
+    "watchdog/limit_dialog.py": ["deliver_dismiss"],   # #1086 Job 6 dialog branch
 }
 
 
