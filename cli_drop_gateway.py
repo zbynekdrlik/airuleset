@@ -93,7 +93,7 @@ class DropLane:
 
     def __init__(self, host, port, tunnel_uuid, tunnel_config, tunnel_service,
                  tunnel_system_unit, access, gateway_account=None,
-                 topology="local", origin_host=None):
+                 topology="local", origin_host=None, filedrop_port=None):
         self.host = host
         self.port = port
         self.tunnel_uuid = tunnel_uuid
@@ -112,6 +112,16 @@ class DropLane:
         self.topology = topology
         # The tailscale IP the controller's tunnel proxies to (controller topology only).
         self.origin_host = origin_host
+        # #1114: the account's PERSISTENT filedrop service port (FILEDROP_DEFAULT_PORT
+        # + uid%1000, #493 — but the value can DRIFT off the uid-default if that port
+        # was taken, so it is the port actually persisted on the box). The `/s/` share
+        # ingress rule targets origin_host:filedrop_port (controller topology) or
+        # 127.0.0.1:filedrop_port (local). It CANNOT be derived on the controller
+        # (no per-account unix uid there), so controller lanes carry a MEASURED value;
+        # a local lane can leave it None and derive at `--apply` time (uid available).
+        # None on a controller lane -> NO `/s/` rule (share falls back to the private
+        # URLs). measured 22.9.2026; #1115 makes install read it from the box.
+        self.filedrop_port = filedrop_port
 
 
 # Per-account drop lanes (#889), keyed by (nodename, username) — each account
@@ -153,28 +163,32 @@ DROP_LANES = {
         tunnel_config=None, tunnel_service=None,
         tunnel_system_unit=False, access=True,
         gateway_account="david1",
-        topology="controller", origin_host=_SUBDEV_TAILSCALE),
+        topology="controller", origin_host=_SUBDEV_TAILSCALE,
+        filedrop_port=8790),  # measured 22.9.2026; #1115 install-reads it
     ("subdev", "david2"): DropLane(
         host="drop-subdev-david2.newlevel.media", port=8871,
         tunnel_uuid=_CONTROLLER_TUNNEL_UUID,
         tunnel_config=None, tunnel_service=None,
         tunnel_system_unit=False, access=True,
         gateway_account="david1",
-        topology="controller", origin_host=_SUBDEV_TAILSCALE),
+        topology="controller", origin_host=_SUBDEV_TAILSCALE,
+        filedrop_port=8796),  # measured 22.9.2026
     ("subdev", "david3"): DropLane(
         host="drop-subdev-david3.newlevel.media", port=8872,
         tunnel_uuid=_CONTROLLER_TUNNEL_UUID,
         tunnel_config=None, tunnel_service=None,
         tunnel_system_unit=False, access=True,
         gateway_account="david1",
-        topology="controller", origin_host=_SUBDEV_TAILSCALE),
+        topology="controller", origin_host=_SUBDEV_TAILSCALE,
+        filedrop_port=8797),  # measured 22.9.2026
     ("subdev", "david4"): DropLane(
         host="drop-subdev-david4.newlevel.media", port=8873,
         tunnel_uuid=_CONTROLLER_TUNNEL_UUID,
         tunnel_config=None, tunnel_service=None,
         tunnel_system_unit=False, access=True,
         gateway_account="david1",
-        topology="controller", origin_host=_SUBDEV_TAILSCALE),
+        topology="controller", origin_host=_SUBDEV_TAILSCALE,
+        filedrop_port=8798),  # measured 22.9.2026
 
     # --- subdev / marek tunnel ---
     ("subdev", "marek"): DropLane(
@@ -192,7 +206,8 @@ DROP_LANES = {
         tunnel_config=_CFDIR / "config.yml",
         tunnel_service="webterm-dominika-tunnel.service",
         tunnel_system_unit=False, access=True,
-        gateway_account="dominika"),
+        gateway_account="dominika",
+        filedrop_port=8804),  # measured 22.9.2026 (uid-derived, no drift)
     # NOTE: simap1 is PAUSED (#851) — no entry. montalu1-8 and miva1 ride the
     # controller tunnel once provisioned (go-live step, same topology shape).
 }
@@ -275,6 +290,18 @@ def public_url_line(host, token):
     `_secret_url_line`'s labelled shape so the user sees WHAT the channel is."""
     return ("https://%s/%s/   [verejné cez Cloudflare tunnel — šifrované (TLS), "
             "jednorazový token]" % (host, token))
+
+
+def public_share_url_line(host, token_name, access=True):
+    """The advertised public HTTPS SHARE URL + its transport (#1114). `token_name`
+    is the `<token>/<name>` suffix; the `/s/` prefix routes it (at the tunnel) to
+    the persistent filedrop service. Mirrors `public_url_line`'s labelled shape;
+    the label reflects whether Cloudflare Access fronts this lane (#1114 review —
+    a token-only lane must not claim Access)."""
+    transport = ("šifrované (TLS), Access" if access
+                 else "šifrované (TLS), jednorazový token")
+    return "https://%s/s/%s   [verejné cez Cloudflare tunnel — %s]" % (
+        host, token_name, transport)
 
 
 def write_drop_marker(host, port=DROP_PORT_BASE, path=None):
@@ -380,34 +407,69 @@ def resolve_public_lane_full(marker_path=None, nodename=None, username=None):
 _CATCHALL_RE = re.compile(r"^(\s*)-\s*service:\s*http_status:404\s*$")
 
 
-def _drop_ingress_already_present(config_text, drop_host, port=None):
-    """True when `drop_host` is already an ingress hostname. When `port` is given,
-    also verifies the service line points at the right port (#889 migration: a
-    host present at the OLD port 8828 must be rewritten to its per-account port)."""
-    m = re.search(r"(?m)^\s*-\s*hostname:\s*" + re.escape(drop_host) + r"\s*$",
-                  config_text)
-    if not m:
-        return False
+def _drop_ingress_already_present(config_text, drop_host, port=None, filedrop_port=None):
+    """True when `drop_host`'s ingress is already present with the expected port(s).
+
+    #1114: with `filedrop_port`, recognises the `/s/` PATH rule (a `hostname` line
+    followed by `path: ^/s/` then `service: http://127.0.0.1:<filedrop_port>`).
+    Otherwise checks the DROP rule: with `port`, a `hostname` line IMMEDIATELY
+    followed by `service: http://127.0.0.1:<port>` — so a preceding `/s/` rule for
+    the SAME host (whose next line is `path:`, not `service:`) is never mistaken for
+    the drop rule (#889 migration: a host present at the WRONG drop port reads as
+    absent and gets rewritten). With neither, just hostname presence.
+    """
+    esc = re.escape(drop_host)
+    if filedrop_port is not None:
+        s_pat = (r"(?m)^[ \t]*-[ \t]*hostname:[ \t]*" + esc +
+                 r"[ \t]*\n[ \t]*path:[ \t]*\^/s/[ \t]*\n[ \t]*"
+                 r"service:[ \t]*http://127\.0\.0\.1:" + str(int(filedrop_port)) + r"[ \t]*$")
+        return re.search(s_pat, config_text) is not None
     if port is None:
-        return True
-    # Check the service line immediately following the hostname line.
-    rest = config_text[m.end():]
-    svc_m = re.match(r"\n\s*service:\s*http://127\.0\.0\.1:(\d+)\s*$", rest, re.M)
-    if svc_m and int(svc_m.group(1)) == port:
-        return True
-    return False  # hostname present but wrong port — needs rewrite
+        return re.search(r"(?m)^[ \t]*-[ \t]*hostname:[ \t]*" + esc + r"[ \t]*$",
+                         config_text) is not None
+    d_pat = (r"(?m)^[ \t]*-[ \t]*hostname:[ \t]*" + esc +
+             r"[ \t]*\n[ \t]*service:[ \t]*http://127\.0\.0\.1:" + str(int(port)) + r"[ \t]*$")
+    return re.search(d_pat, config_text) is not None
 
 
 def _remove_ingress_for_host(config_text, drop_host):
-    """Remove a hostname+service ingress entry for `drop_host` from the config.
-    Returns the config unchanged if the host is not present."""
+    """Remove the DROP ingress entry (`hostname` + immediately-following `service`)
+    for `drop_host`. A `/s/` PATH rule (hostname + path + service) is NOT matched
+    (the `path:` line sits between), so an existing share rule is preserved."""
     # Match the hostname line + the immediately following service line.
     pat = (r"(?m)^(\s*)-\s*hostname:\s*" + re.escape(drop_host) +
            r"\s*\n\s*service:\s*\S+\s*\n")
     return re.sub(pat, "", config_text)
 
 
-def render_drop_ingress_augmentation(config_text, drop_host, port=DROP_PORT_BASE):
+def _remove_all_ingress_for_host(config_text, drop_host):
+    """#1114: remove ALL ingress entries for `drop_host` — both the `/s/` PATH rule
+    (hostname + path + service) and the drop rule (hostname + service) — so the pair
+    can be re-inserted in the correct order (`/s/` first)."""
+    pat = (r"(?m)^[ \t]*-[ \t]*hostname:[ \t]*" + re.escape(drop_host) +
+           r"[ \t]*\n(?:[ \t]*path:[ \t]*\S+[ \t]*\n)?[ \t]*service:[ \t]*\S+[ \t]*\n")
+    return re.sub(pat, "", config_text)
+
+
+def _insert_before_catchall(config_text, build_entry):
+    """Insert ingress lines immediately BEFORE the `- service: http_status:404`
+    catch-all. `build_entry(indent)` returns the lines, given the catch-all's own
+    `-` column so the new entry matches existing indentation. REFUSES (ValueError)
+    when the catch-all is absent — a live prod config must not be corrupted."""
+    lines = config_text.splitlines(keepends=True)
+    for i, line in enumerate(lines):
+        m = _CATCHALL_RE.match(line.rstrip("\n"))
+        if m:
+            lines.insert(i, build_entry(m.group(1)))   # m.group(1) = the `-` column
+            return "".join(lines)
+    raise ValueError(
+        "no `- service: http_status:404` catch-all found in the cloudflared "
+        "config — refusing to guess where the drop ingress belongs (a live prod "
+        "config must not be corrupted)")
+
+
+def render_drop_ingress_augmentation(config_text, drop_host, port=DROP_PORT_BASE,
+                                     filedrop_port=None):
     """`config_text` with a drop-host ingress inserted BEFORE the catch-all 404,
     preserving EVERY existing ingress entry.
 
@@ -417,25 +479,58 @@ def render_drop_ingress_augmentation(config_text, drop_host, port=DROP_PORT_BASE
     on the well-known cloudflared config shape (an `ingress:` list whose last
     entry is `- service: http_status:404`). REFUSES (raises ValueError) when it
     cannot find that catch-all.
+
+    #1114: when `filedrop_port` is given (a LOCAL-topology drop lane, so the origin
+    is loopback), ALSO manages a `/s/` PATH rule to `http://127.0.0.1:<filedrop_port>`
+    rendered BEFORE the drop rule (so `share` deliveries reach the persistent
+    filedrop service). Both rules are (re)written together and idempotent. When
+    `filedrop_port` is None the pre-#1114 behaviour is byte-identical AND an
+    existing `/s/` rule is never stripped (the reconcile heal path keeps it).
     """
-    if _drop_ingress_already_present(config_text, drop_host, port=port):
+    if filedrop_port is None:
+        if _drop_ingress_already_present(config_text, drop_host, port=port):
+            return config_text
+        # If the drop rule exists at the wrong port, remove it first (migration).
+        if _drop_ingress_already_present(config_text, drop_host, port=None):
+            config_text = _remove_ingress_for_host(config_text, drop_host)
+        return _insert_before_catchall(
+            config_text,
+            lambda ind: ("%s- hostname: %s\n%s  service: http://127.0.0.1:%d\n"
+                         % (ind, drop_host, ind, port)))
+
+    # #1114 share lane: manage the /s/ rule AND the drop rule as a pair.
+    drop_ok = _drop_ingress_already_present(config_text, drop_host, port=port)
+    share_ok = _drop_ingress_already_present(config_text, drop_host,
+                                             filedrop_port=filedrop_port)
+    if drop_ok and share_ok:
         return config_text
-    # If the hostname exists but at the wrong port, remove it first (migration).
-    if _drop_ingress_already_present(config_text, drop_host, port=None):
-        config_text = _remove_ingress_for_host(config_text, drop_host)
-    lines = config_text.splitlines(keepends=True)
-    for i, line in enumerate(lines):
-        m = _CATCHALL_RE.match(line.rstrip("\n"))
-        if m:
-            indent = m.group(1)                       # the `-` column
-            entry = ("%s- hostname: %s\n%s  service: http://127.0.0.1:%d\n"
-                     % (indent, drop_host, indent, port))
-            lines.insert(i, entry)
-            return "".join(lines)
-    raise ValueError(
-        "no `- service: http_status:404` catch-all found in the cloudflared "
-        "config — refusing to guess where the drop ingress belongs (a live prod "
-        "config must not be corrupted)")
+    config_text = _remove_all_ingress_for_host(config_text, drop_host)
+    return _insert_before_catchall(
+        config_text,
+        lambda ind: (
+            "%s- hostname: %s\n%s  path: ^/s/\n%s  service: http://127.0.0.1:%d\n"
+            "%s- hostname: %s\n%s  service: http://127.0.0.1:%d\n"
+            % (ind, drop_host, ind, ind, filedrop_port,
+               ind, drop_host, ind, port)))
+
+
+def _local_filedrop_port(lane):
+    """The filedrop service port for a LOCAL-topology lane's `/s/` rule (#1114):
+    the lane's MEASURED value if set, else derived from THIS account's uid (#493) —
+    valid at `--apply` time because the invoking process IS the lane's account for a
+    local tunnel. Returns None if neither is available (no `/s/` rule is rendered)."""
+    if lane.filedrop_port is not None:
+        return lane.filedrop_port
+    try:
+        # Mirror the filedrop SERVER's own port resolution exactly
+        # (filedrop.PORT = env -> persisted_port() -> default_port_for_uid()), so a
+        # box that hit the #33/#493 collision fallback and PERSISTED a non-uid port
+        # gets the SAME port in its /s/ rule as the server serves (a share/server
+        # port DISAGREEMENT is itself a 404 — the exact class #493 forbids).
+        from filedrop import default_port_for_uid, persisted_port
+        return persisted_port() or default_port_for_uid()
+    except Exception:
+        return None
 
 
 def _restart_argv(lane):
@@ -524,9 +619,17 @@ def drop_ingress_rules_for_controller():
     The ``service_url`` uses the lane's ``origin_host`` (the box's tailscale
     IP) + ``port`` — cloudflared on the controller proxies to
     ``http://<tailscale>:<port>`` where the drop server listens.
+
+    #1114: each lane with a known ``filedrop_port`` ALSO gets a ``/s/`` path rule
+    ``(host, "^/s/", http://origin_host:filedrop_port)`` emitted BEFORE its drop
+    rule, so ``share`` deliveries reach the persistent filedrop service while the
+    ephemeral upload endpoint keeps the same host's catch-all. Order matters:
+    cloudflared matches ingress top-to-bottom, so the path rule MUST precede the
+    no-path drop rule. A lane with ``filedrop_port=None`` emits no ``/s/`` rule
+    (``share`` on it falls back to the private URLs).
     """
     rules = []
-    seen = {}  # host -> service_url (dedup + conflict detection)
+    seen = {}  # host -> drop service_url (dedup + conflict detection)
     for (_n, _u), lane in sorted(DROP_LANES.items()):
         if lane.topology != "controller" or not lane.origin_host:
             continue
@@ -539,6 +642,9 @@ def drop_ingress_rules_for_controller():
                     % (lane.host, prev, svc))
             continue  # same host + same service — dedup
         seen[lane.host] = svc
+        if lane.filedrop_port is not None:      # #1114: /s/ rule FIRST
+            rules.append((lane.host, "^/s/",
+                          "http://%s:%d" % (lane.origin_host, lane.filedrop_port)))
         rules.append((lane.host, svc))
     return rules
 
@@ -643,16 +749,25 @@ def cmd_drop_gateway(args):
 
     # Add ingress lines for all lanes sharing THIS tunnel (C1 fix: never graft
     # one tunnel's lanes onto another's — subdev has 3 different tunnels).
+    # #1114: local topology → also emit the /s/ rule to loopback:<filedrop_port>
+    # (the lane's measured value, else derived from this account's uid at --apply
+    # time, #493 — the invoking process IS the lane's account for a local tunnel).
     augmented = config_text
     added_hosts = []
     for (_n, _u), lane in tunnel_lanes:
+        fp = _local_filedrop_port(lane)
         try:
-            new = render_drop_ingress_augmentation(augmented, lane.host, lane.port)
+            new = render_drop_ingress_augmentation(augmented, lane.host, lane.port,
+                                                   filedrop_port=fp)
         except ValueError as e:
             print("drop-gateway: %s" % e, file=sys.stderr)
             return 1
         if new != augmented:
-            added_hosts.append("%s -> http://127.0.0.1:%d" % (lane.host, lane.port))
+            if fp is not None:
+                added_hosts.append("%s -> /s/ http://127.0.0.1:%d + http://127.0.0.1:%d"
+                                   % (lane.host, fp, lane.port))
+            else:
+                added_hosts.append("%s -> http://127.0.0.1:%d" % (lane.host, lane.port))
         augmented = new
 
     changed = augmented != config_text

@@ -61,6 +61,14 @@ def safe_resolve(raw_path, base_dir):
     if ".." in raw_segments:
         return None
     parts = [p for p in raw_segments if p not in ("", ".")]
+    # #1114: the account's PUBLIC drop lane fronts this SAME filedrop service under
+    # a `/s/` path prefix (cloudflared passes the full request path through, split
+    # by an ingress `path: ^/s/` rule). Strip a leading `s` segment so
+    # `/s/<token>/<name>` resolves identically to `/<token>/<name>` — everything
+    # below (strict token/name alphabets, containment, is_file) is unchanged, so
+    # `/s/` alone and any traversal still 404.
+    if len(parts) == 3 and parts[0] == "s":
+        parts = parts[1:]
     if len(parts) != 2:
         return None
     token, name = parts
