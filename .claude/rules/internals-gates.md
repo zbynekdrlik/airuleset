@@ -10,6 +10,34 @@ paths:
 `re` predicate; tests call the pure functions directly (no hook I/O). NEW gate lessons land here
 until the ratchet cap, then the oldest move to `.claude/rules-reference/internals-archive.md`.
 
+- **#1064 — the `Design-by:` stamp records the CONFIGURED (launch) model, the API-SERVED model
+  is an optional ` (served: <id>)` audit suffix.** The stamp is the ONE token the dispatch gate
+  (`gates.designdispatch.check_issue`), the anti-spoof gate (`gates.designbypost`) and the float
+  audit (`cli_model_audit`) read. It USED to record the served model, so a Fable-LAUNCHED main
+  served another model for a turn (a FLOAT) stamped the wrong id and the gate refused the main's
+  OWN design — forcing an `airuleset:design-by-ok` bypass that also hid the class the gate exists
+  for. Now `cli_authorship.configured_model(cwd)` resolves the LAUNCH id: implementer env alias
+  (`AIRULESET_ROLE`+`ANTHROPIC_MODEL`) → pane argv `--model` (`_pane_configured_model`, a
+  READ-ONLY reuse of `watchdog._pane_claude_pid` + `/proc/<pid>/cmdline`) → `MANAGED_MODEL` →
+  `unknown`. `stamp_line` appends the suffix ONLY when the served model is known AND differs
+  (normalised compare, so a `[1m]` tag never triggers a spurious suffix); byte-identical
+  otherwise. `_DESIGN_BY_RE` tolerates + captures the optional suffix; `newest_design_by` stays a
+  `(role, model)` 2-tuple (served is surfaced in `check_issue`'s refusal reason via
+  `_newest_design_by_match`); the accepted set is unchanged (only the Fable id). The design-record
+  `unknown` refusal now fires ONLY when NEITHER configured NOR served resolves.
+  - **Dependency-light discipline (why the imports are lazy):** the dispatch gate never imports
+    `cli_authorship`, and the anti-spoof gate calls ONLY `authorship_role` (never
+    `configured_model`) — so `cli_authorship`'s `watchdog`/`airuleset` imports MUST stay lazy
+    (inside `configured_model`/`_managed_model`/`_pane_configured_model`), else the two light gate
+    hot paths would drag the whole import graph in. `_pane_configured_model` is best-effort/None on
+    every failure (no tmux, cross-user `/proc` denial, malformed cmdline).
+  - **WORKFLOW GOTCHA — `hooks/block-design-by-spoof.sh` blocks the literal `Design-by:`+`main`
+    token inside ANY `gh issue comment` / `gh api …/comments` Bash command (incl. its `-F` body
+    file) from a worktree/implementer cwd.** So a lane worker's `Anchors-confirmed:` / `Reviewed:`
+    comment that QUOTES the token is blocked — reword to "main-role stamp". And write a TEST file
+    that contains the token via the **Write tool**, never a Bash heredoc (`cat > f <<EOF … gh issue
+    comment … Design-by: main … EOF` trips the hook on the heredoc's command text).
+
 - **#1073/#1099 — the guide-maintenance gate (`gates/navody.py`) has TWO halves that must AGREE
   on where a guide file may live; change one, check the other.**
   - `_is_guide_file` / `_GUIDE_PATH_RE` — the diff-PATH predicate (`guide_maintenance` uses it to

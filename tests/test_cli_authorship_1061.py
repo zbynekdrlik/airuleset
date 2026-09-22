@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -130,13 +131,26 @@ class TestStampLine(unittest.TestCase):
             {"type": "assistant",
              "message": {"role": "assistant", "model": "claude-opus-4-8",
                          "content": [{"type": "text", "text": "work"}]}}) + "\n")
+        # #1064 review 🟡2 (de-masked): a dispatched worker has NO pane, so
+        # configured_model returns UNKNOWN and the stamp falls through to the
+        # TRUTHFUL served model -- `worker claude-opus-4-8`, never a false
+        # `worker claude-fable-5-1 (served: …)`. No pane mock: this is the real
+        # production path for a worktree lane cwd.
         self.assertEqual(
             cli_authorship.stamp_line("Reviewed", wt, projects_dir=str(self.pd)),
             "Reviewed-by: worker claude-opus-4-8")
 
     def test_unknown_model_still_labels_role(self):
         cwd = "/home/airuleset/devel/airuleset"  # main role, no transcript
-        line = cli_authorship.stamp_line("Design", cwd, projects_dir=str(self.pd))
+        # #1064: the stamp reads `unknown` ONLY when NEITHER the configured
+        # (launch) model NOR the served (transcript) model resolves; the role is
+        # still labelled. (A resolvable configured model now stamps that id, so
+        # both seams are forced unresolvable here to reach the unknown branch.)
+        with mock.patch("cli_authorship._pane_configured_model",
+                        return_value=None), \
+             mock.patch("cli_authorship._managed_model", return_value=None):
+            line = cli_authorship.stamp_line("Design", cwd,
+                                             projects_dir=str(self.pd))
         self.assertEqual(line, "Design-by: main unknown")
 
     def test_authorship_value_is_role_and_model(self):

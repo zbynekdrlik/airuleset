@@ -185,9 +185,9 @@ def dispatch_gate_line(cwd, repo_root=None, run=None, live_count=None):
         return "allow|%s|0" % mode
     if live_count is None:
         try:
-            import cli_lane_overlap
+            import cli_lane_liveness
             root = repo_root or cwd
-            live_count = len(cli_lane_overlap.gather_live_lanes(root, run=run))
+            live_count = len(cli_lane_liveness.gather_live_lanes(root, run=run))
         except Exception:  # noqa: BLE001 — cannot count => fail-safe allow
             return "allow|sequential|0"
     verdict = "block" if live_count >= 1 else "allow"
