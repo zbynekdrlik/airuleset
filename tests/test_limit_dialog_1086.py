@@ -80,6 +80,19 @@ UNRELATED_MENU = (
     "   Enter to confirm · Esc to cancel\n"
 )
 BARE_IDLE = "● hotovo\n❯"
+# exactly ONE of the two anchors — a DIFFERENT dialog that happens to ask "what
+# do you want to do?" but is NOT the limit dialog (BOTH anchors required).
+PROMPT_ANCHOR_ONLY = (
+    "   What do you want to do?\n"
+    "   ❯ 1. Keep the current plan\n"
+    "     2. Start over\n"
+    "   Enter to confirm · Esc to cancel\n"
+)
+# and the option phrase alone, in prose, with no "what do you want to do?"
+OPTION_ANCHOR_ONLY = (
+    "I could stop and wait for limit to reset, but let me try one more thing.\n"
+    "❯\n"
+)
 
 
 class TestLimitDialogDetector(unittest.TestCase):
@@ -94,6 +107,13 @@ class TestLimitDialogDetector(unittest.TestCase):
 
     def test_unrelated_numbered_menu_is_not_the_dialog(self):
         self.assertFalse(pane_limit_dialog(UNRELATED_MENU))
+
+    def test_requires_BOTH_anchors_not_either(self):
+        # a "what do you want to do?" dialog that is NOT the limit dialog, and the
+        # option phrase alone in prose — each carries ONE anchor, neither is the
+        # dialog (kills the and→or mutation).
+        self.assertFalse(pane_limit_dialog(PROMPT_ANCHOR_ONLY))
+        self.assertFalse(pane_limit_dialog(OPTION_ANCHOR_ONLY))
 
     def test_empty_and_none(self):
         self.assertFalse(pane_limit_dialog(""))
