@@ -4885,17 +4885,22 @@ def _handoff_agent_eval_preflight(body, *, cwd=None, changed_paths=None,
     """#1077 agent-eval composer pre-flight (owner ruling 18.9.2026): a
     guide-SOURCE change must carry an `AI-eval:` line proving the tenant's
     assistant was checked on a copy (all logic in gates.agenteval, which also
-    resolves the stream + fact). FAIL-OPEN when the diff is undeterminable."""
-    import gates.agenteval as _ae
-    paths = changed_paths if changed_paths is not None \
-        else _handoff_changed_paths(cwd)
-    if paths is None:
-        sys.stderr.write("handoff: agent-eval pre-flight skipped "
-                         "(diff undeterminable) — fail-open (#1077)\n")
+    resolves the stream + fact). FAIL-OPEN in every undeterminable direction
+    (undeterminable diff, any exception) -> None, the sibling pre-flights'
+    never-false-accuse convention."""
+    try:
+        import gates.agenteval as _ae
+        paths = changed_paths if changed_paths is not None \
+            else _handoff_changed_paths(cwd)
+        if paths is None:
+            sys.stderr.write("handoff: agent-eval pre-flight skipped "
+                             "(diff undeterminable) — fail-open (#1077)\n")
+            return None
+        ok, reason = _ae.check_handoff(body, paths, cwd=cwd or os.getcwd(),
+                                       stream=stream)
+        return None if ok else reason
+    except Exception:
         return None
-    ok, reason = _ae.check_handoff(body, paths, cwd=cwd or os.getcwd(),
-                                   stream=stream)
-    return None if ok else reason
 
 
 def _handoff_spec_preflight(body, *, issue=None, repo=None, cwd=None,
@@ -5172,6 +5177,14 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
     _gblk = _handoff_guide_preflight(body, cwd=_repo_root())
     if _gblk:
         print(_gblk)
+        return 1
+    # #1077: agent-eval gate on the pass-through RFR too — the guide streams
+    # (odoo-erp) hand off via --body-file, so the gate MUST fire here as well as
+    # in the compose path, mirroring the guide/spec gates above (#1106 both-paths
+    # convention). Fail-open when the diff is undeterminable.
+    _aeblk = _handoff_agent_eval_preflight(body, cwd=_repo_root())
+    if _aeblk:
+        print(_aeblk)
         return 1
     # #1106: review-lens spec gate on the verbatim body-file RFR too.
     _sblk = _handoff_spec_preflight(body, issue=issue, repo=repo,

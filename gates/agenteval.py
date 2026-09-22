@@ -67,13 +67,49 @@ _AI_EVAL_RE = re.compile(
 # `n/a` at the start of the remainder, with a bounded separator; the reason is
 # whatever follows (`.strip()` truthy == a reason present).
 _NA_RE = re.compile(r'(?i)^n[ \t]{0,2}/?[ \t]{0,2}a\b(?P<why>.*)$')
-# the first `<path>-qa.json` token (a fixture path).
-_FIXTURE_RE = re.compile(r'(?P<fixture>\S+-qa\.json)\b')
-# the `(<report>)` path.
-_REPORT_RE = re.compile(r'\((?P<report>[^)]+)\)')
 # the per-tenant `agent_eval:` fact line.
 _FACT_RE = re.compile(r'^\s*agent_eval\s*:\s*(.+?)\s*$',
                       re.IGNORECASE | re.MULTILINE)
+# the report path: the TRAILING `(<report>)` group on the line, so a natural
+# parenthetical tally (`16/18 (2 skipped) (<report>)`) does not steal the match
+# (the review's F2 false-block). `[^()]+` is a single negated-class quantifier
+# anchored at `$` — linear, no catastrophic backtracking (#577/#1010).
+_REPORT_TAIL_RE = re.compile(r'\(([^()]+)\)\s*$')
+# fixture suffix (case-insensitive, matching is_guide_source's IGNORECASE) —
+# extracted by WHITESPACE TOKENISATION, not a `\S+-qa\.json` regex (that is
+# accidentally O(n²) on a long non-matching line under `.search` — the #577/#1010
+# discipline; the docstring's "every regex is LINEAR" holds because this is not
+# a regex).
+_QA_SUFFIX = "-qa.json"
+
+
+def _first_fixture(rest):
+    """The first whitespace-delimited token ending in `-qa.json` (any case), or
+    None. Linear in the line length."""
+    for tok in rest.split():
+        if tok.lower().endswith(_QA_SUFFIX):
+            return tok
+    return None
+
+
+def _report_path(rest):
+    """The `(<report>)` path — the TRAILING parenthesized group, so a tally
+    parenthetical earlier on the line is not mistaken for the report. None when
+    absent/empty."""
+    m = _REPORT_TAIL_RE.search(rest or "")
+    if not m:
+        return None
+    report = (m.group(1) or "").strip()
+    return report or None
+
+
+def _is_repo_relative(p):
+    """True when `p` is a repo-relative path that stays under the tree — not
+    absolute and with no `..` segment. Makes the doctrine's "exists under cwd"
+    literally true (a `../` traversal report must not pass, review F5)."""
+    if not p or os.path.isabs(p):
+        return False
+    return ".." not in p.replace("\\", "/").split("/")
 
 
 def is_guide_source(path):
@@ -113,31 +149,31 @@ def _eval_one(rest, cwd, fact):
             "blokovaný, uveď ticket>`), alebo nastav v "
             "`.claude/streams/<stream>.md` fakt `agent_eval: NONE — <prečo>` "
             "(#1077).")
-    fx = _FIXTURE_RE.search(r)
-    if not fx:
+    fixture = _first_fixture(r)
+    if not fixture:
         return False, (
             "handoff BLOCK: `AI-eval:` má neplatný tvar — očakávam "
             "`AI-eval: <fixture>-qa.json → <rubric tally> (<report>)` alebo "
             "`AI-eval: n/a — <prečo>` (#1077).")
-    fixture = fx.group("fixture")
     base = cwd or "."
-    if not os.path.exists(os.path.join(base, fixture)):
+    if not _is_repo_relative(fixture) or \
+            not os.path.exists(os.path.join(base, fixture)):
         return False, (
-            "handoff BLOCK: `AI-eval:` fixture `%s` v strome neexistuje — "
-            "uveď skutočnú cestu k `docs/<tenant>/navody/<sekcia>-qa.json` "
-            "(#1077)." % fixture)
-    rep = _REPORT_RE.search(r)
-    if not rep:
+            "handoff BLOCK: `AI-eval:` fixture `%s` v strome (pod cwd) neexistuje "
+            "— uveď skutočnú repo-relatívnu cestu k "
+            "`docs/<tenant>/navody/<sekcia>-qa.json` (#1077)." % fixture)
+    report = _report_path(r)
+    if not report:
         return False, (
             "handoff BLOCK: `AI-eval:` musí uviesť cestu k reportu v zátvorke "
             "`(<report>)` (napr. `(docs/ai-agent/eval-navody-<sekcia>-<dátum>.md)`) "
             "(#1077).")
-    report = (rep.group("report") or "").strip()
-    if not os.path.exists(os.path.join(base, report)):
+    if not _is_repo_relative(report) or \
+            not os.path.exists(os.path.join(base, report)):
         return False, (
-            "handoff BLOCK: `AI-eval:` report `%s` v strome neexistuje — spusti "
-            "projektový runner `services/agent/scripts/eval_navody.py` na KÓPII "
-            "a commitni report (#1077)." % report)
+            "handoff BLOCK: `AI-eval:` report `%s` v strome (pod cwd) neexistuje "
+            "— spusti projektový runner `services/agent/scripts/eval_navody.py` "
+            "na KÓPII a commitni report (#1077)." % report)
     return True, None
 
 

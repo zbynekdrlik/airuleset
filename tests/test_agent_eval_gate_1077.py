@@ -242,6 +242,48 @@ class TestAgentEvalGate(unittest.TestCase):
                                    cwd=self.d, fact=None)
         self.assertTrue(ok, reason)
 
+    def test_tally_parenthetical_does_not_steal_the_report(self):
+        # review F2: `16/18 (2 skipped)` is a natural tally; the REPORT is the
+        # TRAILING (…) group — a leading parenthetical must not false-block.
+        body = ("AI-eval: docs/x/navody/a-qa.json → 16/18 (2 skipped) "
+                "(docs/ai-agent/r.md)")
+        ok, reason = ae.agent_eval(["docs/x/navody/a-qa.json"], body,
+                                   cwd=self.d, fact=None)
+        self.assertTrue(ok, reason)
+
+    def test_uppercase_fixture_suffix_recognised(self):
+        # review #6: is_guide_source matches -qa.json case-insensitively, so the
+        # AI-eval fixture token must be recognised case-insensitively too.
+        os.makedirs(os.path.join(self.d, "docs", "y", "navody"))
+        with open(os.path.join(self.d, "docs", "y", "navody", "B-QA.JSON"),
+                  "w") as f:
+            f.write("{}")
+        body = "AI-eval: docs/y/navody/B-QA.JSON → 18/18 (docs/ai-agent/r.md)"
+        ok, reason = ae.agent_eval(["docs/y/navody/B-QA.JSON"], body,
+                                   cwd=self.d, fact=None)
+        self.assertTrue(ok, reason)
+
+    def test_traversal_report_refused(self):
+        # review F5: a `../` report escapes cwd — the doctrine says "under cwd",
+        # so it must be refused even if the traversal target exists.
+        body = ("AI-eval: docs/x/navody/a-qa.json → 16/18 "
+                "(../../../etc/hosts)")
+        ok, reason = ae.agent_eval(["docs/x/navody/a-qa.json"], body,
+                                   cwd=self.d, fact=None)
+        self.assertFalse(ok)
+
+    def test_absolute_report_refused(self):
+        body = "AI-eval: docs/x/navody/a-qa.json → 16/18 (/etc/hosts)"
+        ok, reason = ae.agent_eval(["docs/x/navody/a-qa.json"], body,
+                                   cwd=self.d, fact=None)
+        self.assertFalse(ok)
+
+    def test_traversal_fixture_refused(self):
+        body = ("AI-eval: ../../secret-qa.json → 16/18 (docs/ai-agent/r.md)")
+        ok, reason = ae.agent_eval(["docs/x/navody/a-qa.json"], body,
+                                   cwd=self.d, fact=None)
+        self.assertFalse(ok)
+
 
 # --------------------------------------------------------------------------- #
 # 3. per-tenant fact reader (uses gates.navody._read_stream_file)
@@ -348,6 +390,31 @@ class TestComposerPreflight(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 4b. WIRING — the gate must fire on BOTH hand-off paths (review 🔴)
+# --------------------------------------------------------------------------- #
+class TestComposerWiring(unittest.TestCase):
+    """The gate is the SOLE enforcement of #1077 (no Stop-hook backstop), so it
+    must be called in BOTH the compose path (`cmd_handoff`) AND the `--body-file`
+    pass-through (`_cmd_handoff_post_body_file`) — the path the odoo-erp guide
+    streams actually hand off through. #1106 established the both-paths
+    convention; a single call site (compose-only) leaves the gate bypassable via
+    the primary path."""
+    def setUp(self):
+        import airuleset
+        import inspect
+        self.air = airuleset
+        self.inspect = inspect
+
+    def test_wired_into_compose_path(self):
+        src = self.inspect.getsource(self.air.cmd_handoff)
+        self.assertIn("_handoff_agent_eval_preflight(", src)
+
+    def test_wired_into_body_file_pass_through_path(self):
+        src = self.inspect.getsource(self.air._cmd_handoff_post_body_file)
+        self.assertIn("_handoff_agent_eval_preflight(", src)
+
+
+# --------------------------------------------------------------------------- #
 # 5. rule file — frontmatter globs + rule text
 # --------------------------------------------------------------------------- #
 class TestRuleFile(unittest.TestCase):
@@ -365,7 +432,26 @@ class TestRuleFile(unittest.TestCase):
         self.assertTrue(matches("docs/montalu/navody/sklad-qa.json"))
         self.assertTrue(matches("docs/montalu/build-vyroba-guide.py"))
         self.assertTrue(matches("docs/montalu/navody_sklad_sections.py"))
+        # review F3/#7: a non-`navody`-prefixed file INSIDE a navody/ dir is a
+        # guide source per the gate, so the frontmatter must inject on it too.
+        self.assertTrue(matches("docs/slovnormal/navody/prehlad.html"))
+        self.assertTrue(matches("docs/x/navody/img/diagram.svg"))
         self.assertFalse(matches("addons/x/models/y.py"))
+
+    def test_frontmatter_superset_of_gate_sources(self):
+        # the injected `paths:` set must be a SUPERSET of the gate's source set,
+        # or an operator edits a guide source without ever seeing the advisory
+        # rule on Read (#1073/#1099 dual-definition drift). Check the gate's own
+        # positive cases all match a frontmatter glob.
+        pats = [_glob_to_re(g) for g in _frontmatter_paths(RULE)]
+        for p in ("docs/montalu/navody/sklad-qa.json",
+                  "docs/slovnormal/navody/prehlad.html",
+                  "docs/x/navody/img/diagram.svg",
+                  "docs/montalu/build-vyroba-guide.py",
+                  "docs/montalu/navody_sklad_sections.py"):
+            self.assertTrue(ae.is_guide_source(p), p)
+            self.assertTrue(any(rx.match(p) for rx in pats),
+                            "frontmatter misses guide source %s" % p)
 
     def test_rule_text_names_the_ai_eval_line(self):
         text = RULE.read_text(encoding="utf-8")
@@ -467,6 +553,16 @@ class TestReDoS(unittest.TestCase):
     def test_ai_eval_line_linear_on_pathological_whitespace(self):
         import time
         body = "AI-eval: n" + " " * 40000 + "X"
+        t0 = time.monotonic()
+        ae.agent_eval(["docs/x/navody/a-qa.json"], body, cwd="/tmp", fact=None)
+        self.assertLess(time.monotonic() - t0, 0.5)
+
+    def test_fixture_extraction_linear_on_long_nonwhitespace_token(self):
+        # review F1/#2: the fixture extraction must be LINEAR on a long
+        # NON-whitespace token with no `-qa.json` (the case a `\S+-qa\.json`
+        # regex made O(n²)). A whitespace-broken input (above) never exercised it.
+        import time
+        body = "AI-eval: " + "a" * 200000
         t0 = time.monotonic()
         ae.agent_eval(["docs/x/navody/a-qa.json"], body, cwd="/tmp", fact=None)
         self.assertLess(time.monotonic() - t0, 0.5)

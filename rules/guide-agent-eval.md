@@ -1,6 +1,7 @@
 ---
 paths:
   - "**/docs/**/navody*"
+  - "**/docs/**/navody/**"
   - "**/docs/**/build-*-guide.py"
   - "**/docs/**/navody_*_sections.py"
   - "**/docs/**/*-qa.json"
