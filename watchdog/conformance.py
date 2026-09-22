@@ -349,7 +349,8 @@ def run_conformance_check(now, state, dry_run=False,
                           repo_root=None, claude_md_path=None, baseline_path=None,
                           git_run=None, timer_check=None, is_target_check=None,
                           interval=None, reping=None, persist=None,
-                          symlink_scan=None, doctrine_scan=None):
+                          symlink_scan=None, doctrine_scan=None,
+                          root_guard_provisioned_fn=None):
     """Job 34: the daily per-box conformance sweep. Cadence-gated on its OWN state
     key ``conformance_last_check`` (``_sweep_due``); the cadence marker is stamped +
     persisted BEFORE any network op (#172 kill-safe). Best-effort — every dimension
@@ -489,6 +490,26 @@ def run_conformance_check(now, state, dry_run=False,
     if not dry_run:
         state["conformance"] = seen      # same dict from here on (#172-F3)
 
+    # #1047: a REPORT-ONLY per-box fact (NOT a drift dimension — a never-
+    # provisioned owner workstation is a legitimate state, never an alarm): is
+    # the root disk-guard provisioned on this box? Read from the SAME predicate
+    # the disk-guard escalate discriminator uses (imported, never a second timer
+    # check). Stored BESIDE `state["conformance"]` (a top-level key, so the
+    # drift-episode loop and `conformance_status_row` never mistake it for a
+    # DRIFT row); the SUPERVISOR reads it per box for the fleet provisioned view.
+    if root_guard_provisioned_fn is None:
+        from watchdog.disk_guard import _root_guard_provisioned as root_guard_provisioned_fn
+    try:
+        rgp = bool(root_guard_provisioned_fn())
+    except Exception as e:
+        rgp = None
+        logs.append("conformance %s [root-guard] unknown -- %r" % (host, e))
+    if rgp is not None:
+        logs.append("conformance %s [root-guard] %s"
+                    % (host, "provisioned" if rgp else "not provisioned"))
+        if not dry_run:
+            state["root_guard_provisioned"] = rgp
+
     for (dim, ok, detail), facts in decisions:
         logs.append("conformance %s [%s] %s -- %s"
                     % (host, dim, {True: "OK", False: "DRIFT", None: "unknown"}[ok],
@@ -537,6 +558,11 @@ def conformance_status_row(state):
     ran → ``conformance: (not yet checked)``. Pure — no I/O, safe on any dict."""
     if not isinstance(state, dict):
         state = {}
+    # #1047: the report-only root-guard fact rides the row as a suffix (present
+    # only once a sweep has recorded it); it is a per-box FACT, never a DRIFT.
+    rg = state.get("root_guard_provisioned")
+    suffix = ("" if rg is None else
+              "; root disk-guard: %s" % ("provisioned" if rg else "not provisioned"))
     episodes = state.get("conformance") or {}
     if episodes:
         parts = []
@@ -544,7 +570,7 @@ def conformance_status_row(state):
             ep = episodes.get(dim) or {}
             detail = ep.get("detail") if isinstance(ep, dict) else None
             parts.append("%s: %s" % (dim, detail or "drift"))
-        return "conformance: DRIFT — " + "; ".join(parts)
+        return "conformance: DRIFT — " + "; ".join(parts) + suffix
     if state.get("conformance_last_check"):
-        return "conformance: OK"
-    return "conformance: (not yet checked)"
+        return "conformance: OK" + suffix
+    return "conformance: (not yet checked)" + suffix

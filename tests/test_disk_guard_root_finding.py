@@ -183,6 +183,13 @@ class TestRunDiskGuardWiring(unittest.TestCase):
         calls = []
         orig = r.maybe_record_root_finding
         r.maybe_record_root_finding = lambda *a, **k: calls.append(a) or []
+        # #1047: this test proves the LEVEL gate (critical → records), not the
+        # provisioned gate — provision the root guard so the recorder still fires
+        # (on a real box with no ROOT_TIMER_PATH the escalate branch now skips it
+        # and logs the honest 'not provisioned' line instead; that path is
+        # covered by test_disk_guard_root_provisioned_1047).
+        orig_prov = dg._root_guard_provisioned
+        dg._root_guard_provisioned = lambda: True
         try:
             with tempfile.TemporaryDirectory() as td:
                 dg.run_disk_guard(
@@ -191,6 +198,7 @@ class TestRunDiskGuardWiring(unittest.TestCase):
                     geteuid_fn=lambda: 1000, mounts=("/",))
         finally:
             r.maybe_record_root_finding = orig
+            dg._root_guard_provisioned = orig_prov
         self.assertEqual(len(calls), 1, "root-finding recorder not called at critical")
 
     def test_notice_does_not_invoke_the_recorder(self):
