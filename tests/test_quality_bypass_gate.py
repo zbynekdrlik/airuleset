@@ -38,6 +38,8 @@ import uuid
 from pathlib import Path
 from unittest import TestCase, main
 
+from _hook_state_cleanup import MODULE_HOOK_HOME  # noqa: E402  (#1046 hermetic HOME)
+
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "stop-check-prose-violations.sh"
 MODULE = ROOT / "modules" / "core" / "autonomous-quality-discipline.md"
@@ -52,7 +54,7 @@ def run(msg):
         os.remove(retry)
     payload = json.dumps({"session_id": sid, "last_assistant_message": msg})
     r = subprocess.run(["bash", str(HOOK)], input=payload, text=True,
-                       capture_output=True, timeout=30)
+                       capture_output=True, timeout=30, env={**os.environ, "HOME": MODULE_HOOK_HOME})
     if os.path.exists(retry):
         os.remove(retry)
     return r

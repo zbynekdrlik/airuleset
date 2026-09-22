@@ -15,6 +15,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import airuleset
 import cli_quals
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 
 class TestBounceRound(unittest.TestCase):
     """_bounce_round: count prio:bounce label-add events + 1 (#942)."""
@@ -399,7 +401,7 @@ class TestHookRoute(unittest.TestCase):
             ["bash", hp],
             input=json.dumps({"tool_input": {"command": cmd}}),
             capture_output=True, text=True, timeout=10,
-            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))), env=hermetic_hook_env(self))
 
     def test_plain_ok(self):
         self.assertEqual(0, self._run(

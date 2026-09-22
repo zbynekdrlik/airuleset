@@ -37,7 +37,6 @@ self-referential trap this repo has hit seven tickets running.
 """
 
 import json
-import os
 import shutil
 import subprocess
 import sys
@@ -58,6 +57,8 @@ CIBLOCK = HOOKS / "block-ci-poll-repeat.sh"
 
 sys.path.insert(0, str(HOOKS))
 import lib_poll_payload as lpp                                 # noqa: E402
+
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 # Every fixture is built as DATA here, never read back from a repo file, so no
 # test can pass or fail because of prose that happens to sit near it.
@@ -106,7 +107,7 @@ class _HookRunner(unittest.TestCase):
         """
         out = subprocess.run(
             ["bash", str(hook or NUDGE)], input=payload(command, **kw),
-            text=True, capture_output=True, timeout=60)
+            text=True, capture_output=True, timeout=60, env=hermetic_hook_env(self))
         self.assertEqual(out.returncode, 0, out.stderr)
         # the library's own header credits exactly this assertion with catching
         # the unterminated-heredoc-in-$() bug, and this file exercises the
@@ -116,7 +117,7 @@ class _HookRunner(unittest.TestCase):
         return "additionalContext" in out.stdout
 
     def ci_rc(self, command, hook=None, **kw):
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
         return subprocess.run(
             ["bash", str(hook or CIBLOCK)], input=payload(command, **kw),
@@ -348,7 +349,7 @@ class FailOpenWithoutTheLibraryTest(_HookRunner):
             if f.name in (LIB.name, LIBPY.name):
                 continue                       # the library is NOT copied
             shutil.copy2(f, d / "hooks" / f.name)
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
         env["AIRULESET_LOCALPOLL_STATE_DIR"] = self.state
         for name in ("nudge-poll-loop-timeout.sh", "block-ci-poll-repeat.sh",
@@ -540,7 +541,7 @@ class ShellWordContinuationDiscriminatorTest(unittest.TestCase):
 class FailOpenTest(_HookRunner):
     def test_unparseable_payload_is_silent_and_exit_zero(self):
         out = subprocess.run(["bash", str(NUDGE)], input="not json at all",
-                             text=True, capture_output=True, timeout=60)
+                             text=True, capture_output=True, timeout=60, env=hermetic_hook_env(self))
         self.assertEqual(out.returncode, 0)
         self.assertNotIn("additionalContext", out.stdout)
 

@@ -100,7 +100,7 @@ REPO_ROOT="$(dirname "$HOOK_DIR")"
 
 # Data via ARGV, never a pipe into `python3 -`'s own stdin (this repo's own
 # recurring trap). Output protocol: "BYPASS" | "HIT"+number+offending+suggestion.
-OUT=$(python3 - "$REPO_ROOT" "$STREAM_USER" "$CONTENT" <<'PYEOF' 2>/dev/null || true
+OUT=$(python3 -P - "$REPO_ROOT" "$STREAM_USER" "$CONTENT" <<'PYEOF' 2>/dev/null || true
 import sys
 repo_root, user, content = sys.argv[1], sys.argv[2], sys.argv[3]
 sys.path.insert(0, repo_root)

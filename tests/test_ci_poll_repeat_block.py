@@ -41,6 +41,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 REPO = Path(airuleset.__file__).resolve().parent
 HOOK = REPO / "hooks" / "block-ci-poll-repeat.sh"
 
@@ -85,7 +87,7 @@ class CiPollRepeatBlockTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def run_hook(self, command, **kw):
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
         return subprocess.run(
             ["bash", str(HOOK)],
@@ -254,7 +256,7 @@ class CiPollRepeatBlockTest(unittest.TestCase):
 
     # ---- fail-open -------------------------------------------------------
     def test_unparseable_payload_fails_open(self):
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
         out = subprocess.run(["bash", str(HOOK)], input="not json at all",
                              text=True, env=env, capture_output=True, timeout=30)
@@ -285,7 +287,7 @@ class CorpusFoundWrongBlockTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def run_hook(self, command, **kw):
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
         return subprocess.run(
             ["bash", str(HOOK)],
@@ -404,7 +406,7 @@ class Issue127CiSideGapTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def run_hook(self, command, **kw):
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
         return subprocess.run(
             ["bash", str(HOOK)],
@@ -473,7 +475,7 @@ class JobLevelFailFastTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def run_hook(self, command, **kw):
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
         return subprocess.run(
             ["bash", str(HOOK)],
@@ -583,7 +585,7 @@ class OneShotStatusPollBlockTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def run_hook(self, command, **kw):
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
         return subprocess.run(
             ["bash", str(HOOK)],
@@ -807,7 +809,7 @@ class OneShotReviewFollowupTest(unittest.TestCase):
         self.addCleanup(self._tmp.cleanup)
 
     def run_hook(self, command, extra_env=None, **kw):
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["AIRULESET_CIPOLL_STATE_DIR"] = self.state
         if extra_env:
             env.update(extra_env)

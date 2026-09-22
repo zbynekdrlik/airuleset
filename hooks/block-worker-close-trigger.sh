@@ -64,7 +64,7 @@ REPO_ROOT="$(dirname "$HOOK_DIR")"
 # Data via ARGV, never a pipe into `python3 -`'s own stdin (this repo's own
 # recurring trap -- see block-commit-without-design.sh / subagent-stop-check-run-card.sh).
 # Output protocol: "BYPASS" | "HIT"+<trigger on line 2> | nothing.
-OUT=$(python3 - "$REPO_ROOT" "$CMD" "$CWD" "$AGENT_TYPE" <<'PYEOF' 2>/dev/null || true
+OUT=$(python3 -P - "$REPO_ROOT" "$CMD" "$CWD" "$AGENT_TYPE" <<'PYEOF' 2>/dev/null || true
 import sys
 repo_root, cmd, cwd, agent_type = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 sys.path.insert(0, repo_root)

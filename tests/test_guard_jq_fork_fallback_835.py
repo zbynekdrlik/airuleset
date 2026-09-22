@@ -31,6 +31,8 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _exec_marker_helpers as em     # noqa: E402  (#1012 marker-path seam)
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "hooks" / "block-main-implementation.sh"
 CONSUMER = REPO / "hooks" / "post-consume-main-exec-marker.sh"
@@ -96,7 +98,7 @@ class GuardJqForkFallback835(unittest.TestCase):
                        "tool_name": "Bash",
                        "tool_input": {"command": "grep -rn 'TODO' ."},
                        "transcript_path": tp}
-            env = dict(os.environ)
+            env = hermetic_hook_env(self)
             env["PATH"] = str(self.jqdir) + os.pathsep + env.get("PATH", "")
             env["AIRULESET_FAKEJQ_REAL"] = self.realjq
             if fail_on:

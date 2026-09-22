@@ -24,6 +24,7 @@ close hook whose default is BLOCK: each keeps its own safe default when it canno
 verify.
 """
 
+import os
 import json
 import subprocess
 import sys
@@ -34,6 +35,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import discuss_close_guard as g  # noqa: E402
+
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 MODULE = ROOT / "discuss_close_guard.py"
 
@@ -220,9 +223,8 @@ class TestHookIntegration(TestCase):
         return fd.name
 
     def _run(self, cmd, cwd, fixture=None):
-        import os
         payload = json.dumps({"tool_input": {"command": cmd}})
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         if fixture is not None:
             env["AIRULESET_DISCUSS_CLOSE_FIXTURE"] = fixture
         return subprocess.run(
@@ -373,13 +375,12 @@ class TestHookIntegrationCompound(TestCase):
         return d
 
     def _run(self, cmd, bound_num):
-        import os
         import tempfile
         d = tempfile.mkdtemp()
         gh = Path(d) / "gh"
         gh.write_text(self._FAKE_GH)
         gh.chmod(0o755)
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["PATH"] = d + os.pathsep + env.get("PATH", "")
         env["FAKE_BOUND_NUM"] = bound_num
         payload = json.dumps({"tool_input": {"command": cmd}})

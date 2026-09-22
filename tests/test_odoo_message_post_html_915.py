@@ -15,10 +15,13 @@ Locked here:
   7. Content without message_post => ALLOWED (pre-filter exit 0).
 """
 
+import os
 import json
 import subprocess
 import unittest
 from pathlib import Path
+
+from _hook_state_cleanup import MODULE_HOOK_HOME  # noqa: E402  (#1046 hermetic HOME)
 
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "block-odoo-message-post-without-html.sh"
@@ -40,7 +43,7 @@ def _run_hook(content, tool="Bash"):
         input=payload,
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=10, env={**os.environ, "HOME": MODULE_HOOK_HOME}
     )
     return r.returncode, r.stderr
 

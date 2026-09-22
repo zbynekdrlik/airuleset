@@ -39,6 +39,8 @@ import unittest
 import uuid
 from pathlib import Path
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "hooks" / "stop-check-prose-violations.sh"
 
@@ -60,6 +62,10 @@ class _HookCase(unittest.TestCase):
         sid = "prace-%s" % uuid.uuid4().hex[:12]
         self.addCleanup(
             lambda: Path("/tmp/airuleset-stop-block-%s" % sid).unlink(missing_ok=True))
+        # #1046: hook must never read the box's real ~/.claude. Default to a
+        # hermetic HOME; a caller's own env keeps its vars but HOME is forced.
+        _hh = hermetic_hook_env(self)
+        env = _hh if env is None else {**env, "HOME": _hh["HOME"]}
         return subprocess.run(
             ["bash", str(HOOK)],
             input=json.dumps({"last_assistant_message": msg, "session_id": sid}),

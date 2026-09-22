@@ -21,6 +21,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase, main
 
+from _hook_state_cleanup import MODULE_HOOK_HOME  # noqa: E402  (#1046 hermetic HOME)
+
 REPO = Path(__file__).resolve().parents[1]
 HOOK = REPO / "hooks" / "block-main-implementation.sh"
 
@@ -40,7 +42,7 @@ def _run(command, model="claude-fable-5-1"):
                    "tool_name": "Bash", "tool_input": {"command": command},
                    "transcript_path": tp}
         return subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
-                              env=dict(os.environ), capture_output=True, text=True)
+                              env=dict(os.environ, HOME=MODULE_HOOK_HOME), capture_output=True, text=True)
 
 
 class TestInfraReviewReadAllowed(TestCase):

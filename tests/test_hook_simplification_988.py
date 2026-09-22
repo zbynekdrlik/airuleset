@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 REPO = Path(airuleset.__file__).resolve().parent
 HOOK_BMI = REPO / "hooks" / "block-main-implementation.sh"
 HOOK_CPR = REPO / "hooks" / "block-ci-poll-repeat.sh"
@@ -253,7 +255,7 @@ class HeredocBodyFile988(unittest.TestCase):
         return subprocess.run(
             ["bash", str(HOOK_UGI)],
             input=json.dumps(payload),
-            capture_output=True, text=True,
+            capture_output=True, text=True, env=hermetic_hook_env(self)
         )
 
     def test_heredoc_then_issue_create_blocked_with_separate_command_message(self):

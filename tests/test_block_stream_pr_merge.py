@@ -18,6 +18,8 @@ import textwrap
 from pathlib import Path
 from unittest import TestCase, main
 
+from _hook_state_cleanup import MODULE_HOOK_HOME, hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "block-stream-direct-pr-merge.sh"
 
@@ -28,7 +30,7 @@ def _run_hook(command, authority="fork-no-merge"):
     Returns (returncode, stderr_text).
     """
     payload = json.dumps({"tool_input": {"command": command}})
-    env = dict(os.environ)
+    env = dict(os.environ, HOME=MODULE_HOOK_HOME)
 
     import tempfile
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -128,7 +130,7 @@ class TestAuthorityResolutionFailure(TestCase):
                 capture_output=True,
                 text=True,
                 cwd=str(tmpdir),  # cwd with no airuleset.py either
-                timeout=10,
+                timeout=10, env=hermetic_hook_env(self)
             )
         self.assertEqual(result.returncode, 0)
 

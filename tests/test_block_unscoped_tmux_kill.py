@@ -26,10 +26,13 @@ blocked; a SOCKET-SCOPED kill of a private socket (`-S <path>` / `-L <name>`
 — tmux's own documented selectors that override `$TMUX`) stays free, so the
 fleet's own isolated-server teardown never trips its own guard.
 """
+import os
 import json
 import subprocess
 from pathlib import Path
 from unittest import TestCase, main
+
+from _hook_state_cleanup import MODULE_HOOK_HOME, hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 REPO = Path(__file__).resolve().parent.parent
 HOOK = REPO / "hooks" / "block-unscoped-tmux-kill.sh"
@@ -44,7 +47,7 @@ def run_hook(cmd):
     payload = json.dumps({"tool_input": {"command": cmd}})
     return subprocess.run(
         ["bash", str(HOOK)], input=payload, capture_output=True, text=True,
-        timeout=HOOK_TIMEOUT_S,
+        timeout=HOOK_TIMEOUT_S, env={**os.environ, "HOME": MODULE_HOOK_HOME}
     )
 
 
@@ -189,13 +192,13 @@ class TestFailOpenOnGarbage(TestCase):
     def test_no_command_field_passes(self):
         r = subprocess.run(
             ["bash", str(HOOK)], input="{}", capture_output=True, text=True,
-            timeout=HOOK_TIMEOUT_S)
+            timeout=HOOK_TIMEOUT_S, env=hermetic_hook_env(self))
         self.assertEqual(r.returncode, 0)
 
     def test_malformed_json_passes(self):
         r = subprocess.run(
             ["bash", str(HOOK)], input="not json at all",
-            capture_output=True, text=True, timeout=HOOK_TIMEOUT_S)
+            capture_output=True, text=True, timeout=HOOK_TIMEOUT_S, env=hermetic_hook_env(self))
         self.assertEqual(r.returncode, 0)
 
 

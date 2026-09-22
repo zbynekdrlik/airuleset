@@ -32,6 +32,27 @@ from gates import designbypost as dbp  # noqa: E402
 from gates import designdispatch as dd  # noqa: E402
 from watchdog.transcripts import encode_project_dir  # noqa: E402
 
+# #1046: some classes call dbp/dd IN-PROCESS, which _logs to
+# ~/.claude/design-by-gate.log via expanduser("~"). Point HOME at a fresh empty
+# dir for the whole module (module-scoped save+restore — batch-31-safe).
+_A1046_ORIG_HOME = None
+_A1046_HOME = None
+
+
+def setUpModule():
+    global _A1046_ORIG_HOME, _A1046_HOME
+    _A1046_ORIG_HOME = os.environ.get("HOME")
+    _A1046_HOME = tempfile.mkdtemp(prefix="a1046-modhome-")
+    os.environ["HOME"] = _A1046_HOME
+
+
+def tearDownModule():
+    if _A1046_ORIG_HOME is None:
+        os.environ.pop("HOME", None)
+    else:
+        os.environ["HOME"] = _A1046_ORIG_HOME
+    shutil.rmtree(_A1046_HOME, ignore_errors=True)
+
 MAIN_CWD = "/home/airuleset/devel/airuleset"
 FABLE = "claude-fable-5-1"
 

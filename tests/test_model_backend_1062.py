@@ -34,6 +34,8 @@ sys.path.insert(0, str(REPO))
 
 import cli_model_backend as mb  # noqa: E402
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 MARKER = {
     "base_url": "http://100.101.214.103:4000",
     "key_file": "~/.secrets/model-gateway.key",
@@ -745,7 +747,7 @@ class TestBannedModelAliasesPass(unittest.TestCase):
         payload = json.dumps({"tool_name": "Agent",
                               "tool_input": {"model": model}})
         return subprocess.run(["bash", str(self.HOOK)], input=payload,
-                              capture_output=True, text=True)
+                              capture_output=True, text=True, env=hermetic_hook_env(self))
 
     @unittest.skipUnless(
         subprocess.run(["bash", "-c", "command -v jq"],

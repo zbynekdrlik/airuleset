@@ -28,6 +28,8 @@ import tempfile
 from pathlib import Path
 from unittest import TestCase
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 
 class TestPostPushCiCleanup1059(TestCase):
     HOOK = Path(__file__).resolve().parent.parent / "hooks" / "post-push-ci-cleanup.sh"
@@ -108,7 +110,7 @@ exit 0
         os.chmod(gh, os.stat(gh).st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
     def _env(self, bind):
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["PATH"] = bind + os.pathsep + env["PATH"]
         return env
 

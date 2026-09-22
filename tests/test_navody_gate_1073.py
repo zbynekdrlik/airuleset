@@ -43,7 +43,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from _hook_state_cleanup import sweep_session_files  # noqa: E402
+from _hook_state_cleanup import hermetic_hook_env, sweep_session_files  # noqa: E402  (#1046 hermetic HOME)
 
 from gates import navody  # noqa: E402
 
@@ -367,7 +367,7 @@ class TestHookEndToEnd(unittest.TestCase):
         payload = json.dumps({"session_id": sid, "last_assistant_message": msg,
                               "cwd": cwd})
         p = subprocess.run(["bash", str(HOOK)], input=payload,
-                           capture_output=True, text=True, timeout=300)
+                           capture_output=True, text=True, timeout=300, env=hermetic_hook_env(self))
         sweep_session_files(sid)
         return p
 

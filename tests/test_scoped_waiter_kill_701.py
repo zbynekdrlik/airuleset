@@ -24,10 +24,13 @@ These tests lock the #701 outcome:
   documentation bodies untouched — failing OPEN on malformed input.
 """
 
+import os
 import json
 import subprocess
 from pathlib import Path
 from unittest import TestCase, main
+
+from _hook_state_cleanup import MODULE_HOOK_HOME, hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 REPO = Path(__file__).resolve().parent.parent
 SKILL = REPO / "skills" / "verify-launched-work-liveness" / "SKILL.md"
@@ -52,7 +55,7 @@ def run_hook(cmd):
     payload = json.dumps({"tool_input": {"command": cmd}})
     return subprocess.run(
         ["bash", str(HOOK)], input=payload, capture_output=True, text=True,
-        timeout=HOOK_TIMEOUT_S,
+        timeout=HOOK_TIMEOUT_S, env={**os.environ, "HOME": MODULE_HOOK_HOME}
     )
 
 
@@ -242,14 +245,14 @@ class TestHookAllowsScopedAndUnrelated(TestCase):
         r = subprocess.run(
             ["bash", str(HOOK)],
             input=json.dumps({"tool_input": {}}),
-            capture_output=True, text=True, timeout=HOOK_TIMEOUT_S,
+            capture_output=True, text=True, timeout=HOOK_TIMEOUT_S, env=hermetic_hook_env(self)
         )
         self.assertEqual(r.returncode, 0)
 
     def test_garbage_stdin_fails_open(self):
         r = subprocess.run(
             ["bash", str(HOOK)], input="{not json",
-            capture_output=True, text=True, timeout=HOOK_TIMEOUT_S,
+            capture_output=True, text=True, timeout=HOOK_TIMEOUT_S, env=hermetic_hook_env(self)
         )
         self.assertEqual(r.returncode, 0)
 

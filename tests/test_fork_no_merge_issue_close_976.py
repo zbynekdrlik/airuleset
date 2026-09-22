@@ -27,6 +27,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset  # noqa: E402
 
+from _hook_state_cleanup import MODULE_HOOK_HOME, hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "block-fork-no-merge-issue-close.sh"
 
@@ -104,7 +106,7 @@ def _run(cmd, cwd, author="", labels="", app_token_dir=None,
     (profile resolution) working.
     """
     payload = json.dumps({"tool_input": {"command": cmd}})
-    env = dict(os.environ)
+    env = dict(os.environ, HOME=MODULE_HOOK_HOME)
     path_dirs = [_fake_gh_dir()]
     if break_identity:
         path_dirs.insert(0, _python3_wrapper_dir())
@@ -219,7 +221,7 @@ esac
         gh.chmod(0o755)
         payload = json.dumps({"tool_input": {"command":
             "gh issue close 4986 --comment done"}})
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         path_dirs = [str(d), _python3_wrapper_dir()]
         env["PATH"] = os.pathsep.join(path_dirs) + os.pathsep + env.get("PATH", "")
         env["FAKE_GH_AUTHOR"] = airuleset.STREAM_APP_BOT_LOGIN
@@ -261,7 +263,7 @@ esac
         gh.chmod(0o755)
         payload = json.dumps({"tool_input": {"command":
             "gh issue close 4986 --comment done"}})
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         path_dirs = [str(d), _python3_wrapper_dir()]
         env["PATH"] = os.pathsep.join(path_dirs) + os.pathsep + env.get("PATH", "")
         env["FAKE_GH_AUTHOR"] = airuleset.STREAM_APP_BOT_LOGIN
@@ -309,7 +311,7 @@ esac
         gh.chmod(0o755)
         payload = json.dumps({"tool_input": {"command":
             "gh issue close 100 --comment done"}})
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["PATH"] = str(d) + os.pathsep + env.get("PATH", "")
         env["FAKE_GH_AUTHOR"] = "kvaskodev"
         env.pop("GH_APP_TOKEN_DIR", None)

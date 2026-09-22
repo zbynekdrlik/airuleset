@@ -64,7 +64,7 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
 # the same functions). Data via ARGV, never a pipe into a `python3 -` heredoc:
 # the heredoc already claims stdin for the SCRIPT SOURCE, so piped data never
 # arrives (the repo's own recurring trap).
-MISSING=$(python3 - "$HOOK_DIR" "$CWD" "$MSG" <<'PYEOF' 2>/dev/null || true
+MISSING=$(python3 -P - "$HOOK_DIR" "$CWD" "$MSG" <<'PYEOF' 2>/dev/null || true
 import sys, os
 sys.path.insert(0, os.path.dirname(sys.argv[1]))
 try:

@@ -16,6 +16,28 @@ sys.path.insert(0, str(REPO))
 
 from gates import designbypost as dbp  # noqa: E402
 
+# #1046: TestEvaluate calls dbp.evaluate() IN-PROCESS, which _logs BYPASS/SKIP-PR
+# to ~/.claude/design-by-gate.log via expanduser("~"). Point HOME at a fresh
+# empty dir for the whole module (module-scoped save+restore, so no fixture ever
+# reaches the real audit log and a later module is never poisoned — batch-31).
+_A1046_ORIG_HOME = None
+_A1046_HOME = None
+
+
+def setUpModule():
+    global _A1046_ORIG_HOME, _A1046_HOME
+    _A1046_ORIG_HOME = os.environ.get("HOME")
+    _A1046_HOME = tempfile.mkdtemp(prefix="a1046-modhome-")
+    os.environ["HOME"] = _A1046_HOME
+
+
+def tearDownModule():
+    if _A1046_ORIG_HOME is None:
+        os.environ.pop("HOME", None)
+    else:
+        os.environ["HOME"] = _A1046_ORIG_HOME
+    shutil.rmtree(_A1046_HOME, ignore_errors=True)
+
 WT = "/home/airuleset/devel/airuleset/.claude/worktrees/agent-x"
 MAIN = "/home/airuleset/devel/airuleset"
 

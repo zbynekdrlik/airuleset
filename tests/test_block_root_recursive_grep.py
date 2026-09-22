@@ -6,10 +6,13 @@ shape that spawns a runaway shadow-ugrep — while leaving scoped greps, non-
 recursive greps, and text merely MENTIONING the shape untouched. FAIL-OPEN.
 """
 
+import os
 import json
 import subprocess
 from pathlib import Path
 from unittest import TestCase, main
+
+from _hook_state_cleanup import MODULE_HOOK_HOME  # noqa: E402  (#1046 hermetic HOME)
 
 HOOK = Path(__file__).resolve().parent.parent / "hooks" / "block-root-recursive-grep.sh"
 
@@ -17,7 +20,7 @@ HOOK = Path(__file__).resolve().parent.parent / "hooks" / "block-root-recursive-
 def run(cmd):
     payload = json.dumps({"tool_input": {"command": cmd}})
     return subprocess.run(
-        ["bash", str(HOOK)], input=payload, capture_output=True, text=True
+        ["bash", str(HOOK)], input=payload, capture_output=True, text=True, env={**os.environ, "HOME": MODULE_HOOK_HOME}
     )
 
 
