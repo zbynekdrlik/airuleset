@@ -222,13 +222,22 @@ class TestSettingsEnvScanLeg(unittest.TestCase):
         # an EXPLICIT-paths call when the source kwargs are left at their default.
         # (A bashrc-only call is `paths=[...]` with no source kwargs.) Only a
         # DEFAULT box scan (paths=None) touches the real sources.
+        #
+        # Mutation teeth: patch the DEFAULT tmux reader to a DIRTY one, so that a
+        # mutant which flips the box-scan gate (and thus runs the default legs on
+        # a targeted call) is caught DETERMINISTICALLY — not only when the real
+        # box happens to be dirty.
+        import unittest.mock as m
         with tempfile.TemporaryDirectory() as td:
             br = Path(td) / ".bashrc"
             br.write_text("export %s=1\n" % _MOUSE)
-            hits = bd.scan_env_drift(paths=[str(br)])  # default source kwargs
+            with m.patch.object(bd, "_default_tmux_env_reader",
+                                lambda: "%s=1\n" % _ALT):
+                hits = bd.scan_env_drift(paths=[str(br)])  # default source kwargs
             self.assertTrue(hits)
             self.assertTrue(all(h.source.startswith("bashrc:") for h in hits),
-                            "a targeted scan_env_drift must stay bashrc-only")
+                            "a targeted scan_env_drift must stay bashrc-only "
+                            "(it must NOT invoke the default tmux/settings legs)")
 
 
 # --------------------------------------------------------------------------- #
