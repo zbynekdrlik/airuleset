@@ -30,6 +30,12 @@ set -euo pipefail
 # command line inspected). Unreadable/absent file, no `.py` operand, or a
 # non-ship command => fail-open.
 #
+# COMMAND-POSITION rule (#1054 live FP fix): a ship word (scp/rsync/sftp) counts
+# ONLY at command position (statement start or right after ; && || | ( $(, opt.
+# sudo/env prefix) and NEVER inside quotes, and .py operands are collected ONLY
+# from the matched ship segment / the exact redirect|cat token -- so a quoted
+# `scp` in ticket prose + a `python3 airuleset.py` run no longer false-block.
+#
 # RESIDUAL (documented, not closed): a driver RUN LOCALLY (`python3 driver.py`
 # against a client Odoo over xmlrpc, no ssh) or one already resident on the
 # remote (`ssh host 'odoo shell < /remote/driver.py'`) is NOT a ship shape /
@@ -92,27 +98,75 @@ RAW_TAG_RE='</?[a-zA-Z][a-zA-Z0-9]*(\s|/|>)'
 # =========================================================================== #
 if [ -n "$CMD" ] && command -v python3 &>/dev/null; then
     SHIP_RC=0
-    REASON=$(HOOK_CMD="$CMD" HOOK_CWD="$CWD" python3 - <<'PY'
+    # The resolver runs inside a FUNCTION, not directly inside $(...): a
+    # heredoc whose python body has paren/quote-heavy regexes confuses bash's
+    # command-substitution parser when the heredoc sits inside $() (#1054).
+    _ship_file_check() {
+      HOOK_CMD="$CMD" HOOK_CWD="$CWD" python3 - <<'PY'
 import os, re, sys
 
-cmd = os.environ.get("HOOK_CMD", "")
+cmd_raw = os.environ.get("HOOK_CMD", "")
 cwd = os.environ.get("HOOK_CWD", "") or os.getcwd()
 
-# Ship-a-local-file shapes: a transfer (scp/rsync/sftp), a stdin redirect of a
-# .py (ssh ... < driver.py / docker compose ... odoo shell < driver.py /
-# ssh host python3 - < driver.py), or a cat-pipe (cat driver.py | ssh ...).
-is_ship = (
-    re.search(r"\b(scp|rsync|sftp)\b", cmd)
-    or re.search(r"<\s*[^\s|;&<>]+\.py\b", cmd)
-    or re.search(r"\bcat\s+[^\s|;&<>]+\.py\b\s*\|", cmd)
-)
-if not is_ship:
-    sys.exit(0)          # not a ship shape -> fail open
+# COMMAND-POSITION ship detection (#1054 live FP fix). The old word-boundary
+# scp/rsync/sftp match fired ANYWHERE -- including inside quoted PROSE (a ticket
+# body / a notify --goal argument) -- and then collected EVERY .py in the whole
+# command (airuleset.py from `python3 airuleset.py …`), opened it, and
+# airuleset.py's own source (posting-call name / HTML strings / xmlrpc) tripped
+# the driver rule -> fleet-wide false block. Fix: a ship word counts ONLY at
+# command position and NEVER inside quotes, and .py operands are collected ONLY
+# from the matched ship segment / the exact redirect|cat token.
 
-# Collect every local .py operand by regex (no shlex: an unbalanced quote or a
-# trailing `#` comment must never lose the operand and silently fail-open, #1054
-# F3). A remote `host:/path.py` token is collected here and skipped below.
-pys = re.findall(r"""[^\s|;&<>'"]+\.py\b""", cmd)
+# Mask single- and double-quoted regions with spaces (length-preserving) so a
+# ship word or a .py token inside quoted prose is never matched or collected.
+def mask_quotes(s):
+    out = list(s)
+    i, n = 0, len(s)
+    while i < n:
+        c = s[i]
+        if c in ("'", '"'):
+            out[i] = " "
+            i += 1
+            while i < n and s[i] != c:
+                out[i] = " "
+                i += 1
+            if i < n:
+                out[i] = " "   # closing quote
+                i += 1
+        else:
+            i += 1
+    return "".join(out)
+
+cmd = mask_quotes(cmd_raw)
+
+PY_TOK = r"[^\s|;&<>()'\"]+\.py\b"
+# A ship word only at command position: statement start, or right after a
+# separator (semicolon, and/or, pipe, subshell/command-sub open), optionally
+# after a sudo / env VAR= prefix. [(] / [$][(] char-classes avoid a literal
+# command-sub token in this heredoc body (bash mis-parses it, #1054).
+SHIP_CMD_RE = re.compile(
+    r"(?:^|[;&|]|&&|\|\||[(]|[$][(])\s*"
+    r"(?:sudo\s+)?(?:env\s+\w+=\S+\s+)*(?:scp|rsync|sftp)\b")
+# The SCRIPT of a `python3 FILE.py` invocation is a RUN, never a shipped file.
+RUN_RE = re.compile(r"\bpython[0-9.]*\s+(?:-\S+\s+)*(" + PY_TOK + r")")
+run_scripts = set(RUN_RE.findall(cmd))
+
+pys = []
+# Transfer statements: split on ; && || (NOT | -- a pipeline stays one
+# statement for the cat|ssh shape). Collect .py operands ONLY from a statement
+# whose command position IS a ship word.
+for st in re.split(r";|&&|\|\|", cmd):
+    if SHIP_CMD_RE.search("|" + st):   # leading sep so a bare statement start counts
+        pys += re.findall(PY_TOK, st)
+# stdin redirect of a .py (ssh … odoo shell < driver.py): the exact token only.
+pys += re.findall(r"<\s*(" + PY_TOK + r")", cmd)
+# cat FILE.py | ssh …: the exact cat'd token only (piped INTO ssh).
+pys += re.findall(r"\bcat\s+(" + PY_TOK + r")\s*\|\s*ssh\b", cmd)
+# A python3 run-script is never a shipped file.
+pys = [p for p in pys if p not in run_scripts]
+
+if not pys:
+    sys.exit(0)          # no ship-segment .py operand -> fail open
 
 ESC_RE = re.compile(r"&lt;/?[a-zA-Z][a-zA-Z0-9]*(&|/|\s|$)")
 RAW_RE = re.compile(r"</?[a-zA-Z][a-zA-Z0-9]*(\s|/|>)")
@@ -158,7 +212,8 @@ for p in pys:
             sys.exit(2)
 sys.exit(0)
 PY
-    ) || SHIP_RC=$?
+    }
+    REASON=$(_ship_file_check) || SHIP_RC=$?
     SHIP_RC=${SHIP_RC:-0}
 
     if [ "$SHIP_RC" = "2" ]; then
