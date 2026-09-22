@@ -70,10 +70,11 @@ RESUME_NUDGE = "resume"
 # owner ping on give-up (analyze-not-ping, #693/#704) — the journal carries it.
 LIMIT_DIALOG_MAX_TRIES = 4
 
-# The fleet-declared gatekeeper high-priority checkout basenames (cli_fleet.py
-# `gk` / `gk-infra` / `gk-quality` windows). Data-driven, NOT a per-box branch:
-# a box without these cwds is unaffected (the sort is stable). Order = the sweep
-# priority the owner asked for.
+# A hardcoded copy of the gatekeeper's high-priority checkout basenames — it
+# MIRRORS cli_fleet.py's `gk` / `gk-infra` / `gk-quality` window→checkout mapping
+# but is not read from it, so keep it in sync if that mapping ever changes. It is
+# a generic cwd-basename rank, NOT a per-box `if`: a box without these cwds is
+# unaffected (the sort is stable). Order = the sweep priority the owner asked for.
 _GK_PRIORITY_BASENAMES = ("odoo-erp", "odoo-erp-infra", "odoo-erp-quality")
 
 
@@ -145,18 +146,24 @@ def _cache_age_str(now, usage_cache):
 def deliver_dismiss(pid, tpath, *, run, sleep_fn=None, logs=None,
                     keys_fn=None, send_verified_fn=None, capture_fn=None,
                     dialog_fn=None, at_idle_fn=None, dry_run=False):
-    """Dismiss the modal and resume: send ONE `Escape` (cancel the dialog),
-    RE-CAPTURE and confirm the dialog is GONE and the prompt is a bare `❯`
-    BEFORE typing, then submit the resume text (`continue`) transcript-verified.
-    Returns True ONLY on a verified submit; False otherwise (the caller keeps the
-    episode un-latched and retries next sweep, bounded).
+    """Dismiss the modal and resume: RE-CONFIRM the modal is still present on a
+    FRESH capture, send ONE `Escape` (cancel the dialog), re-capture and confirm
+    the dialog is GONE and the prompt is a bare `❯`, then submit the resume text
+    (`continue`) transcript-verified. Returns True ONLY on a verified submit;
+    False otherwise (the caller keeps the episode un-latched and retries next
+    sweep, bounded).
 
-    The dialog-gone + bare-idle confirmation BEFORE the resume text is
-    load-bearing: the resume text must never land INSIDE a still-open modal
-    (it would be typed into option-2's own composer, not the prompt). A single
-    Escape only (a rapid double-Escape into a pane holding a draft can delete it,
-    #35); `send_verified`'s own bare-check is a second belt and it draft-rescues
-    rather than clobber real text.
+    The FRESH pre-Escape re-confirm is load-bearing (a review finding, #1086, the
+    parked_wake `deliver_wake` review-2 🟡-1 TOCTOU): between the caller's
+    top-of-loop capture and this send there is real latency (a usage-cache read +
+    the recent-human `capture_pane` subprocess), in which a human may have
+    resolved the modal or CC self-resumed — Escaping then would interrupt a live
+    turn (#233). So capture fresh and ABORT (no Escape) unless the modal is still
+    up. The post-Escape dialog-gone + bare-idle confirmation is equally
+    load-bearing: the resume text must never land INSIDE a still-open modal (it
+    would be typed into option-2's own composer, not the prompt). A single Escape
+    only (a rapid double-Escape into a pane holding a draft can delete it, #35);
+    `send_verified`'s own bare-check is a further belt on the CONTINUE typing.
 
     Both keystrokes carry `nudge=RESUME_NUDGE` (a RECOVERY kind → always-on) and
     go through the ONE `keys`/`send_verified` primitive — never a raw
@@ -180,6 +187,13 @@ def deliver_dismiss(pid, tpath, *, run, sleep_fn=None, logs=None,
         if isinstance(logs, list):
             logs.append(reason)
 
+    # FRESH re-confirm the modal is STILL up right before the Escape (close the
+    # TOCTOU): if it vanished since the caller's capture, never Escape a bare box
+    # / running turn.
+    pre = cf()
+    if not dfn(pre):
+        _log("limit-dialog: %s modal gone before Escape, abort (no keystroke)" % pid)
+        return False
     # Cancel the modal. kind="continue" is GATED but nudge=RESUME_NUDGE is
     # RECOVERY (always-on), so the #1023 staging switch never suppresses it.
     kf(pid, "Escape", kind="continue", nudge=RESUME_NUDGE, run=run, logs=logs)
@@ -199,8 +213,8 @@ def deliver_dismiss(pid, tpath, *, run, sleep_fn=None, logs=None,
 
 
 def handle_limit_dialog(now, state, *, pid, cwd, tpath, sid, project, captured,
-                        usage_cache, in_mode, at_idle=None, recent_human,
-                        deliver, dry_run=False):
+                        usage_cache, in_mode, recent_human, deliver,
+                        dry_run=False):
     """The per-pane limit-dialog branch body. Called ONLY when
     `decide.pane_limit_dialog(captured)` is True (the run_once caller gates).
     Returns journal log lines; NEVER pings the owner (machine-channel only).
@@ -215,9 +229,9 @@ def handle_limit_dialog(now, state, *, pid, cwd, tpath, sid, project, captured,
       in_mode()              -> bool  copy-mode/scroll → skip this sweep
       recent_human()         -> bool  VETO: a human just touched this pane
       deliver()              -> bool  Escape + dialog-gone confirm + continue verified
-    `at_idle` is accepted for call-site symmetry with the sibling recovery jobs
-    but the post-Escape bare-idle check lives inside `deliver` (`deliver_dismiss`)
-    — before the Escape the pane shows the MODAL, never a bare `❯`.
+    There is no `at_idle` gate here: before the Escape the pane shows the MODAL
+    (never a bare `❯`), so the bare-idle confirmation lives inside `deliver`
+    (`deliver_dismiss`), after the Escape.
 
     dry-run contract (#1075 shape): a `--dry-run` sweep persists NOTHING — every
     mutation lands on a local dict copy stored back into `state` ONLY when

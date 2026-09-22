@@ -93,6 +93,14 @@ OPTION_ANCHOR_ONLY = (
     "I could stop and wait for limit to reset, but let me try one more thing.\n"
     "❯\n"
 )
+# BOTH phrases present but in PROSE (a session quoting the dialog — this review
+# session is itself such a case) — the option is NOT a numbered menu row, so it
+# must NOT match (kills the "phrase anywhere" mutation).
+BOTH_IN_PROSE = (
+    "The modal asked: What do you want to do? I chose to stop and wait for "
+    "limit to reset.\n"
+    "❯\n"
+)
 
 
 class TestLimitDialogDetector(unittest.TestCase):
@@ -114,6 +122,12 @@ class TestLimitDialogDetector(unittest.TestCase):
         # dialog (kills the and→or mutation).
         self.assertFalse(pane_limit_dialog(PROMPT_ANCHOR_ONLY))
         self.assertFalse(pane_limit_dialog(OPTION_ANCHOR_ONLY))
+
+    def test_option_must_be_a_menu_row_not_prose(self):
+        # BOTH phrases present but the option is in PROSE, not a numbered menu row
+        # — a pane quoting the dialog must NOT false-match (kills the
+        # phrase-anywhere mutation; the #1086 false-positive review finding).
+        self.assertFalse(pane_limit_dialog(BOTH_IN_PROSE))
 
     def test_empty_and_none(self):
         self.assertFalse(pane_limit_dialog(""))
@@ -179,6 +193,20 @@ class TestCapacityRecovered(unittest.TestCase):
         cache = {"ts": 200, "account_email": "old@x.bid",
                  "windows": [{"percent": True}]}
         self.assertFalse(capacity_recovered(self.EP, cache))
+
+    def test_switch_to_a_still_capped_account_is_not_recovery(self):
+        # a review finding (#1086): a switch to a NEW account whose OWN window is
+        # still at cap is NOT capacity — never dismiss straight into a re-cap.
+        capped = {"ts": 200, "account_email": "new@y.bid",
+                  "windows": [{"percent": 5}, {"percent": 100}]}
+        self.assertFalse(capacity_recovered(self.EP, capped))
+        # but a switch to a below-cap account IS recovery (the gk incident: ~5%)
+        below = {"ts": 200, "account_email": "new@y.bid",
+                 "windows": [{"percent": 5}]}
+        self.assertTrue(capacity_recovered(self.EP, below))
+        # and a switch with NO window data is trusted blind (the switch alone)
+        nodata = {"ts": 200, "account_email": "new@y.bid"}
+        self.assertTrue(capacity_recovered(self.EP, nodata))
 
 
 class TestPrioritizePanes(unittest.TestCase):
@@ -308,15 +336,40 @@ class TestHandleLimitDialog(unittest.TestCase):
         # nothing written to the real state under dry-run
         self.assertEqual(state, {})
 
+    def test_dry_run_on_a_recovered_episode_persists_nothing(self):
+        # the dry-run contract that MATTERS: a seeded episode + capacity back +
+        # dry_run must NOT persist `dismissed`/`attempts` (deliver still runs but
+        # the caller's dry_run makes it a no-op keystroke — modelled by the fake).
+        state = self._seeded()
+        before = dict(state["limit-dialog:sess1086"])
+        out, state, delivered = _drive(usage_cache=self.CACHE_RECOVERED,
+                                       state=state, dry_run=True)
+        # the state dict is UNCHANGED (no dismissed latch, no attempts bump)
+        self.assertEqual(state["limit-dialog:sess1086"], before)
+
 
 # --- deliver_dismiss ------------------------------------------------------- #
 
 class TestDeliverDismiss(unittest.TestCase):
-    def test_escape_then_confirm_then_continue_recovery_kind(self):
+    def _staged_capture(self, escaped):
+        """A capture that returns the MODAL until an Escape has been observed,
+        then the BARE box — a real dismiss. `escaped` is a 1-element mutable list
+        the keys_fn / fake run flips when it sees the Escape. Uses the REAL
+        detectors (pane_limit_dialog / pane_at_idle_prompt) as the defaults so
+        the pre-Escape re-confirm + post-Escape gates are exercised for real."""
+        def cap():
+            return BARE_IDLE if escaped[0] else GK_DIALOG
+        return cap
+
+    def test_reconfirm_escape_then_continue_recovery_kind(self):
+        escaped = [False]
+        cap = self._staged_capture(escaped)
         calls = []
 
         def keys_fn(pane, *ks, kind=None, nudge=None, run=None, logs=None):
             calls.append(("keys", pane, ks, kind, nudge))
+            if "Escape" in ks:
+                escaped[0] = True
             return True
 
         def sv_fn(pane, text, run=None, tpath=None, sleep_fn=None, logs=None, nudge=None):
@@ -325,10 +378,8 @@ class TestDeliverDismiss(unittest.TestCase):
 
         ok = limit_dialog.deliver_dismiss(
             "%1", "/t/repo.jsonl", run=None, sleep_fn=None, logs=[],
-            keys_fn=keys_fn, send_verified_fn=sv_fn,
-            capture_fn=lambda: BARE_IDLE,       # after Escape: dialog gone, bare box
-            dialog_fn=lambda cap: False,        # dialog is GONE post-Escape
-            at_idle_fn=lambda cap: True)
+            keys_fn=keys_fn, send_verified_fn=sv_fn, capture_fn=cap,
+            dialog_fn=pane_limit_dialog, at_idle_fn=None)   # real detectors
         self.assertTrue(ok)
         # Escape FIRST (cancel the modal), then the continue submit
         self.assertEqual(calls[0][0], "keys")
@@ -338,6 +389,19 @@ class TestDeliverDismiss(unittest.TestCase):
         self.assertEqual(calls[1][2], watchdog.NUDGE_TEXT)          # "continue"
         self.assertEqual(calls[1][3], limit_dialog.RESUME_NUDGE)
 
+    def test_aborts_before_escape_when_modal_vanished(self):
+        # a review finding (#1086, the parked_wake TOCTOU): if the modal is gone
+        # by the time deliver runs (human resolved it / self-resume), NEVER Escape.
+        calls = []
+        ok = limit_dialog.deliver_dismiss(
+            "%1", "/t/repo.jsonl", run=None, logs=[],
+            keys_fn=lambda *a, **k: calls.append("keys") or True,
+            send_verified_fn=lambda *a, **k: calls.append("sv") or True,
+            capture_fn=lambda: BARE_IDLE,       # modal already gone
+            dialog_fn=pane_limit_dialog, at_idle_fn=None)
+        self.assertFalse(ok)
+        self.assertEqual(calls, [])              # NO Escape, NO continue
+
     def test_aborts_when_dialog_still_open_after_escape(self):
         # dialog-gone MUST be confirmed BEFORE the resume text — a still-open
         # modal means the resume text would land IN the modal, not the prompt.
@@ -346,21 +410,44 @@ class TestDeliverDismiss(unittest.TestCase):
             "%1", "/t/repo.jsonl", run=None, logs=[],
             keys_fn=lambda *a, **k: True,
             send_verified_fn=lambda *a, **k: sv_called.append(a) or True,
-            capture_fn=lambda: GK_DIALOG,
-            dialog_fn=lambda cap: True,          # dialog STILL open post-Escape
-            at_idle_fn=lambda cap: True)
+            capture_fn=lambda: GK_DIALOG,        # modal present pre AND post Escape
+            dialog_fn=pane_limit_dialog, at_idle_fn=None)
         self.assertFalse(ok)
         self.assertEqual(sv_called, [])          # NO resume text into a modal
 
-    def test_aborts_when_not_bare_idle_after_escape(self):
+    def test_dialog_gone_confirm_has_independent_teeth(self):
+        # the POST-Escape dialog-gone check is its OWN guard, not covered by the
+        # bare-idle check: with the detector reporting the modal STILL up but a
+        # (contrived) idle box, the resume text must NOT be typed into the modal.
         sv_called = []
         ok = limit_dialog.deliver_dismiss(
             "%1", "/t/repo.jsonl", run=None, logs=[],
             keys_fn=lambda *a, **k: True,
             send_verified_fn=lambda *a, **k: sv_called.append(a) or True,
-            capture_fn=lambda: "❯ half-typed draft",
-            dialog_fn=lambda cap: False,
-            at_idle_fn=lambda cap: False)        # box not bare-idle
+            capture_fn=lambda: GK_DIALOG,
+            dialog_fn=lambda cap: True,          # modal still up per the detector
+            at_idle_fn=lambda cap: True)         # box (contrived) reads idle
+        self.assertFalse(ok)
+        self.assertEqual(sv_called, [])          # NO resume text while the modal is up
+
+    def test_aborts_when_not_bare_idle_after_escape(self):
+        escaped = [False]
+
+        def cap():
+            # modal pre-Escape, a DRAFT box (not bare-idle) post-Escape
+            return "❯ half-typed draft" if escaped[0] else GK_DIALOG
+
+        def keys_fn(pane, *ks, kind=None, nudge=None, run=None, logs=None):
+            if "Escape" in ks:
+                escaped[0] = True
+            return True
+
+        sv_called = []
+        ok = limit_dialog.deliver_dismiss(
+            "%1", "/t/repo.jsonl", run=None, logs=[],
+            keys_fn=keys_fn,
+            send_verified_fn=lambda *a, **k: sv_called.append(a) or True,
+            capture_fn=cap, dialog_fn=pane_limit_dialog, at_idle_fn=None)
         self.assertFalse(ok)
         self.assertEqual(sv_called, [])
 
@@ -370,8 +457,8 @@ class TestDeliverDismiss(unittest.TestCase):
             "%1", "/t/r.jsonl", run=None, logs=[],
             keys_fn=lambda *a, **k: calls.append(a) or True,
             send_verified_fn=lambda *a, **k: calls.append(a) or True,
-            capture_fn=lambda: BARE_IDLE, dialog_fn=lambda cap: False,
-            at_idle_fn=lambda cap: True, dry_run=True)
+            capture_fn=lambda: GK_DIALOG, dialog_fn=pane_limit_dialog,
+            at_idle_fn=None, dry_run=True)
         self.assertTrue(ok)
         self.assertEqual(calls, [])
 
@@ -399,18 +486,20 @@ class TestDeliverDismiss(unittest.TestCase):
         # sanity: the real predicate reads all machine kinds OFF here
         self.assertEqual(watchdog.nudges_on_kinds(home), set())
 
-        sent = []
+        escaped = [False]
 
         def fake_run(argv, timeout=8):
             sent.append(argv)
+            if argv[:2] == ["tmux", "send-keys"] and "Escape" in argv:
+                escaped[0] = True
             return ""
 
-        sv_called = []
+        sent = []
         ok = limit_dialog.deliver_dismiss(
             "%1", "/t/repo.jsonl", run=fake_run, sleep_fn=lambda s: None, logs=[],
-            send_verified_fn=lambda *a, **k: sv_called.append(a) or True,
-            capture_fn=lambda: BARE_IDLE, dialog_fn=lambda cap: False,
-            at_idle_fn=lambda cap: True)
+            send_verified_fn=lambda *a, **k: True,
+            capture_fn=self._staged_capture(escaped),
+            dialog_fn=pane_limit_dialog, at_idle_fn=None)
         self.assertTrue(ok)
         # a REAL Escape send-keys reached the pane (recovery kind, not suppressed)
         self.assertTrue(any(a[:2] == ["tmux", "send-keys"] and "Escape" in a
