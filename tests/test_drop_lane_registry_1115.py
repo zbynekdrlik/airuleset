@@ -429,8 +429,15 @@ class TestSplitImportBothOrders(unittest.TestCase):
 
     def test_leaf_does_not_import_gateway(self):
         # the leaf must never import cli_drop_gateway (that would be the cycle).
+        # AST-scan the actual import STATEMENTS (a raw-substring guard would
+        # false-fail on a docstring that merely mentions the name — review MINOR-1).
+        import ast
         src = (Path(__file__).resolve().parent.parent / "cli_drop_lanes.py").read_text()
-        self.assertNotIn("import cli_drop_gateway", src)
+        for node in ast.walk(ast.parse(src)):
+            if isinstance(node, ast.Import):
+                self.assertNotIn("cli_drop_gateway", [a.name for a in node.names])
+            elif isinstance(node, ast.ImportFrom):
+                self.assertNotEqual(node.module, "cli_drop_gateway")
 
 
 class TestLoopbackBind(unittest.TestCase):

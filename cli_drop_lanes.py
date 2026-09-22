@@ -216,6 +216,9 @@ def build_drop_lanes(remote_hosts, *, seed, drop_lane_cls,
 # `drop_ingress_rules_for_controller()` PREFERS it, so the measured
 # `DropLane.filedrop_port` literal in code is now only the fallback. A missing /
 # unreadable / malformed cache degrades silently to that fallback.
+# The effective READ binds THIS name (cli_drop_gateway re-exports a SEPARATE
+# binding), so to override the cache path in a test, patch
+# cli_drop_lanes.DROP_LANES_CACHE, not the gateway copy (review MINOR-2).
 DROP_LANES_CACHE = Path.home() / ".claude" / "drop-lanes.json"
 
 
