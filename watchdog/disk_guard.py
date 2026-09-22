@@ -2507,8 +2507,15 @@ def _plan_transcripts(home, now, box_class_fn=None):
     from cli_scratch_sweep import discover_old_transcript_candidates
     age_days = _effective_transcript_age_days(box_class_fn)
     try:
+        # #1117: the pressure path ALSO reclaims subagent transcripts
+        # (the largest consumer on a long-lived supervisor box -- 4.4 GB on
+        # gk). A subagent idle >= the age floor is terminated, and every
+        # other safety rule (symlink refusal / size floor / open-fd live
+        # check) is reused unchanged. The install-step report-only sweep
+        # keeps the default (main-only), so its 30d behaviour is untouched.
         rows = discover_old_transcript_candidates(
-            home=home, now=now, min_age_days=age_days) or []
+            home=home, now=now, min_age_days=age_days,
+            include_subagents=True) or []
     except Exception as e:
         return [{"cls": "transcript", "path": "-", "bytes": 0, "kind": "skip",
                  "reason": "transcript discovery error: %r" % e}]
