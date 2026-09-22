@@ -434,11 +434,11 @@ class TestDoctrineLocks(unittest.TestCase):
     """Window teeth (#498/#500) on rule 15 — a deletion of the payload FAILS."""
 
     def _rule15(self):
-        text = DOCTRINE.read_text(encoding="utf-8")
+        text = RECIPE.read_text(encoding="utf-8")
         return _window(text, "### 15.", ["### "])
 
     def test_rule15_present(self):
-        self.assertIn("### 15.", DOCTRINE.read_text(encoding="utf-8"))
+        self.assertIn("### 15.", RECIPE.read_text(encoding="utf-8"))
 
     def test_rule15_owner_quote(self):
         self.assertIn(
@@ -606,10 +606,10 @@ class TestRecipeLocks(unittest.TestCase):
 
 class TestRecipeRelocation(unittest.TestCase):
     """#1098 fix-forward 2: the ``## project.task`` recipe moved OUT of the
-    injected ``read-with-attachments.md`` into the NON-injected
-    ``client-board-attachments.md`` (no situational-trigger row), so the #745
-    three-way co-fire (comprehensive-logging + read-attachments + read-reactions)
-    fits under MAX_TOTAL=14000 again. The injected file keeps only a pointer."""
+    injected ``read-with-attachments.md`` into ``client-board-attachments.md``,
+    so the #745 three-way co-fire fits under MAX_TOTAL=14000 again; the injected
+    file keeps only a pointer. #1102: that file now also carries rule 15 and has
+    its OWN situational-trigger row (a project.task attachment read)."""
 
     @staticmethod
     def _strip_frontmatter(t):
@@ -623,9 +623,9 @@ class TestRecipeRelocation(unittest.TestCase):
     def test_recipe_file_exists(self):
         self.assertTrue(RECIPE.is_file())
 
-    def test_recipe_not_situationally_injected(self):
+    def test_recipe_situationally_injected(self):
         conf = TRIGGERS.read_text(encoding="utf-8")
-        self.assertNotIn("client-board-attachments.md", conf)
+        self.assertIn("odoo-client-board-attachments\tWrite|Edit", conf)
 
     def test_read_attachments_body_lean(self):
         # The injected attachments-read body must be small enough that the #745

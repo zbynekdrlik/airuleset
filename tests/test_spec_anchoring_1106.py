@@ -741,6 +741,43 @@ class TestSpecCacheRestAndTTL(unittest.TestCase):
             self.assertFalse(os.path.exists(p))
 
 
+# --------------------------------------------------------------------------- #
+# #1106 live-read (montalu1 v0.1.378): Check 10 missed a Slovak re-ask that
+# differs only by DIACRITICS — content_tokens casefolded but did not fold
+# diacritics, so `tlač`≠`tlac`, `má`≠`ma` dropped shared tokens under 0.6.
+# --------------------------------------------------------------------------- #
+class TestDiacriticsFolding(unittest.TestCase):
+    # The live cache entry (ASCII, as the stream typed the spec) vs a diacritic
+    # re-ask (as the owner typed the question).
+    ENTRY = {"q": "ma byt tlac cenoviek cez PDF alebo cez tlaciaren priamo",
+             "a": "cez PDF", "spec": 501}
+
+    def test_diacritics_reask_conflicts(self):
+        import gates.spec as spec
+        hit = spec.settled_conflict(
+            "má byť tlač cenoviek cez PDF alebo cez tlačiareň priamo?",
+            [self.ENTRY])
+        self.assertIsNotNone(hit)          # was None (0.56 < 0.6) before the fix
+        self.assertEqual(hit["a"], "cez PDF")
+
+    def test_unrelated_diacritics_question_does_not_conflict(self):
+        import gates.spec as spec
+        hit = spec.settled_conflict(
+            "Ktorý sklad je predvolený pre pekáreň?", [self.ENTRY])
+        self.assertIsNone(hit)
+
+    def test_content_tokens_folds_diacritics(self):
+        import gates.spec as spec
+        self.assertEqual(spec.content_tokens("tlač cenoviek"),
+                         spec.content_tokens("tlac cenoviek"))
+        # a fuller round-trip: the diacritic re-ask and the ASCII entry produce
+        # the SAME token set.
+        self.assertEqual(
+            spec.content_tokens(
+                "má byť tlač cenoviek cez PDF alebo cez tlačiareň priamo?"),
+            spec.content_tokens(self.ENTRY["q"]))
+
+
 class _Args:
     def __init__(self, **kw):
         for k, v in kw.items():

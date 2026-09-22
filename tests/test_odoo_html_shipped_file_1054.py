@@ -1,33 +1,17 @@
 # airuleset:html-ok -- every string below is a HOOK-TEST payload, not a real
 # Odoo post; the marker keeps the #915/#1054 PreToolUse hook from blocking the
 # Write/Edit of this fixture file itself.
-"""#1054 -- close the two gaps left in the Odoo HTML-body posting guard.
+"""#1054 -- close the two gaps in the Odoo HTML-body posting guard (#915).
 
-Gap 1 (shipped-file drivers): a driver written locally, moved with `scp` and
-run with `ssh ... odoo shell < driver.py` bypassed the #915 hook, because the
-Bash payload the hook saw was the `scp`/`ssh` command line -- the posting call
-lived in the FILE, which the hook never opened (odoo-erp #4650, montalu PROD
-thread 283, 16.9., mail.message 1847975, gk driver send_handover_283_v5.py).
-
-Gap 2 (double wrapping): a body already HTML-escaped (`&lt;p&gt;...`) passed
-whenever `body_is_html` was present -- the flag whitewashed an escaped body that
-Odoo renders as raw tags.
-
-Locked here (Approach 1 -- extend the #915 hook in place):
-  (a) Bash/Write/Edit content with an ALREADY-ESCAPED tag (`&lt;p&gt;`, `&lt;a`,
-      `&lt;br`) AND body_is_html=True => BLOCK (dedicated double-escape reason).
-  (b) Bash `scp <local.py> gk:...` where the local file posts HTML without the
-      flag => BLOCK; same file WITH the flag but WITHOUT a mail.message read +
-      assert after the post => BLOCK (read-back reason); with flag + read-back
-      => PASS.
-  (c) `ssh gk 'docker compose run ... odoo shell' < <local.py>` and
-      `cat <local.py> | ssh ...` => same as (b).
-  (d) `scp` of a `.py` that never posts => PASS; an unreadable/absent path
-      => PASS (fail-open, never guess).
-  (e) the existing #915 shapes are unchanged.
-  (f) Write/Edit of a driver-shaped `.py` (connection idiom present) that posts
-      HTML with the flag but no read-back => BLOCK; product-code-shaped content
-      (self.message_post, no connection idiom) => PASS (no false positive).
+Gap 1: a driver moved with `scp` / run via `ssh ... odoo shell < driver.py`
+bypassed the hook -- the posting call lived in the FILE, not the command line
+(odoo-erp #4650). Gap 2: an already entity-escaped body passed when body_is_html
+was present. Locked: double-escape blocks all tools; a shipped .py is resolved
+and checked (missing flag / double-escape / driver read-back); read-back is
+enforced at SHIP time, never at authoring; existing #915 shapes unchanged; and a
+ship WORD counts only at command position, never in quoted prose -- so
+`python3 airuleset.py --goal '... scp ...'` no longer opens airuleset.py
+(the live #1054 fleet-wide false positive).
 """
 
 import json
@@ -68,10 +52,7 @@ def _run_cmd(command, cwd=None):
     return r.returncode, r.stderr
 
 
-# --------------------------------------------------------------------------- #
 # Fixtures.
-# --------------------------------------------------------------------------- #
-
 # (a) Double-escaped bodies -- already entity-escaped tags + the flag.
 DOUBLE_ESCAPE_P = (
     'task.message_post(body="&lt;p&gt;Dobrý deň&lt;/p&gt;", body_is_html=True)'
@@ -145,9 +126,8 @@ PRODUCT_CODE_FLAG_NO_READBACK = (
     "                      body_is_html=True)\n"
 )
 
-# Driver with flag + genuine read-back, then a TRAILING mention of message_post
-# (a print/comment). The read-back window must anchor to the FIRST post so this
-# still PASSES (review #1054 F2).
+# Read-back + a TRAILING message_post mention -> must PASS (window anchors to
+# the FIRST post, review #1054 F2).
 DRIVER_FLAG_READBACK_TRAILING = (
     "import xmlrpc.client\n"
     "models = xmlrpc.client.ServerProxy(url + '/xmlrpc/2/object')\n"
@@ -159,8 +139,7 @@ DRIVER_FLAG_READBACK_TRAILING = (
     'print("message_post complete")\n'
 )
 
-# Driver whose body double-escapes NON-allowlisted tags (<i>, <code>) -- the
-# escaped detector must be GENERIC, not a fixed tag list (review #1054 F4).
+# Body double-escapes NON-allowlisted tags -> generic escaped detector (F4).
 DRIVER_ESC_UNCOMMON = (
     "import xmlrpc.client\n"
     "models = xmlrpc.client.ServerProxy(url + '/xmlrpc/2/object')\n"
@@ -318,54 +297,28 @@ class TestShippedFile(unittest.TestCase):
             rc, err = _run_cmd("ruff check %s" % f)
             self.assertEqual(rc, 0, err)
 
-    # -- review #1054 regressions --
+    # -- review #1054 regressions (data-driven; name, filename, fixture, cmd, rc)
+    _REGRESSIONS = [
+        ("f1_filename", "send_message_post.py", "DRIVER_NO_FLAG",
+         "scp %s gk:/tmp/x.py", 2),          # ship cmdline mentions the call
+        ("f1_comment", "driver.py", "DRIVER_NO_FLAG",
+         "scp %s gk:/tmp/x.py # runs the driver", 2),
+        ("f3_apostrophe", "driver.py", "DRIVER_NO_FLAG",
+         "scp %s gk:/tmp/x.py # Milan's driver", 2),   # unbalanced quote
+        ("f4_uncommon_esc", "driver.py", "DRIVER_ESC_UNCOMMON",
+         "scp %s gk:/tmp/x.py", 2),          # escaped i/code tags (generic)
+        ("f5_sftp", "driver.py", "DRIVER_NO_FLAG",
+         "sftp -b %s gk:/tmp/", 2),          # sftp command-position
+        ("f2_readback_trailing", "driver.py", "DRIVER_FLAG_READBACK_TRAILING",
+         "scp %s gk:/tmp/x.py", 0),          # read-back + trailing mention -> ok
+    ]
 
-    def test_scp_filename_contains_message_post_blocked(self):
-        # F1: a ship command whose command line contains `message_post` (the
-        # driver FILENAME) must still open the FILE, not route past it.
-        with tempfile.TemporaryDirectory() as d:
-            f = _write(d, "send_message_post.py", DRIVER_NO_FLAG)
-            rc, err = _run_cmd("scp %s gk:/tmp/x.py" % f)
-            self.assertEqual(rc, 2, err)
-
-    def test_scp_trailing_comment_message_post_blocked(self):
-        # F1: a trailing comment mentioning message_post must not route past
-        # the file open.
-        with tempfile.TemporaryDirectory() as d:
-            f = _write(d, "driver.py", DRIVER_NO_FLAG)
-            rc, err = _run_cmd("scp %s gk:/tmp/x.py # runs the message_post" % f)
-            self.assertEqual(rc, 2, err)
-
-    def test_scp_apostrophe_in_command_still_blocks(self):
-        # F3: an unbalanced quote in the command must not lose the operand and
-        # silently fail-open (regex operand collection, no shlex).
-        with tempfile.TemporaryDirectory() as d:
-            f = _write(d, "driver.py", DRIVER_NO_FLAG)
-            rc, err = _run_cmd("scp %s gk:/tmp/x.py # Milan's driver" % f)
-            self.assertEqual(rc, 2, err)
-
-    def test_scp_uncommon_escaped_tag_blocked(self):
-        # F4: an escaped NON-allowlisted tag (<i>, <code>) must BLOCK (generic
-        # escaped detector).
-        with tempfile.TemporaryDirectory() as d:
-            f = _write(d, "driver.py", DRIVER_ESC_UNCOMMON)
-            rc, err = _run_cmd("scp %s gk:/tmp/x.py" % f)
-            self.assertEqual(rc, 2, err)
-
-    def test_sftp_ship_no_flag_blocked(self):
-        # F5: sftp is a ship shape too.
-        with tempfile.TemporaryDirectory() as d:
-            f = _write(d, "driver.py", DRIVER_NO_FLAG)
-            rc, err = _run_cmd("sftp gk:/tmp/ <<< 'put %s'" % f)
-            self.assertEqual(rc, 2, err)
-
-    def test_scp_readback_with_trailing_mention_allowed(self):
-        # F2: a genuine read-back followed by a trailing message_post mention
-        # must PASS (read-back window anchored to the FIRST post).
-        with tempfile.TemporaryDirectory() as d:
-            f = _write(d, "driver.py", DRIVER_FLAG_READBACK_TRAILING)
-            rc, err = _run_cmd("scp %s gk:/tmp/x.py" % f)
-            self.assertEqual(rc, 0, err)
+    def test_review_1054_regressions(self):
+        for name, fn, fx, tpl, exp in self._REGRESSIONS:
+            with self.subTest(name), tempfile.TemporaryDirectory() as d:
+                f = _write(d, fn, globals()[fx])
+                rc, err = _run_cmd(tpl % f)
+                self.assertEqual(rc, exp, "%s: %s" % (name, err))
 
     def test_shipped_block_message_has_no_shell_errors(self):
         # Path B block messages must render cleanly (no command-substitution
@@ -381,12 +334,58 @@ class TestShippedFile(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# Write/Edit of a driver-shaped file -- read-back is NOT enforced at authoring
-# time (it over-blocks docs / product code / tests fleet-wide, review #1054);
-# it is enforced where a driver is unambiguously being SENT (the ship-file
-# check above). Authoring a driver is allowed; shipping it flag-less/no-readback
-# is blocked.
+# COMMAND-POSITION ship detection (#1054 live FP fix). A ship WORD counts only
+# at command position and never inside quotes; the fleet-wide FP was a quoted
+# ship word in prose + `python3 airuleset.py` opening airuleset.py.
 # --------------------------------------------------------------------------- #
+# A driver-shaped module (like airuleset.py): posting call + connection idiom.
+MODULE_DRIVERISH = (
+    "import xmlrpc.client\n"
+    "models = xmlrpc.client.ServerProxy(url)\n"
+    'CALL = "message_post"\n'
+    "def notify():\n"
+    "    env.message_post(body='<p>done</p>', body_is_html=True)\n"
+)
+
+
+class TestShipCommandPosition(unittest.TestCase):
+    # A quoted ship word in prose + a `python3 airuleset.py` run must NOT open
+    # any local .py (the fleet-wide #1054 false positive) -> all rc 0.
+    _NEG = [
+        "python3 airuleset.py notify --run-card "
+        "--goal 'driver poslaný cez scp/ssh odoo shell'",
+        'git commit -m "fix: scp driver docs" && python3 airuleset.py push',
+        'echo "use rsync for backups" && python3 tool.py',
+        'gh issue comment 5 --body "we use sftp for backups" --body-file note.md',
+        "echo ship tool.py via scp && python3 airuleset.py notify",  # anchor-only guard
+    ]
+
+    def test_quoted_ship_word_in_prose_allowed(self):
+        for cmd in self._NEG:
+            with self.subTest(cmd[:36]), tempfile.TemporaryDirectory() as d:
+                _write(d, "airuleset.py", MODULE_DRIVERISH)
+                _write(d, "tool.py", MODULE_DRIVERISH)
+                _write(d, "note.md", "notes")
+                rc, err = _run_cmd(cmd, cwd=d)
+                self.assertEqual(rc, 0, err)
+
+    def test_python3_run_of_driver_is_not_shipped(self):
+        # item (3): a `python3 FILE.py` invocation is a RUN, never a shipped file.
+        with tempfile.TemporaryDirectory() as d:
+            f = _write(d, "driver.py", DRIVER_NO_FLAG)
+            rc, err = _run_cmd("python3 %s" % f)
+            self.assertEqual(rc, 0, err)
+
+    def test_ship_word_at_command_position_still_blocks(self):
+        for tpl in ("sudo scp %s gk:/tmp/", "cd /tmp && scp %s gk:/tmp/"):
+            with self.subTest(tpl), tempfile.TemporaryDirectory() as d:
+                f = _write(d, "driver.py", DRIVER_NO_FLAG)
+                rc, err = _run_cmd(tpl % f)
+                self.assertEqual(rc, 2, err)
+
+
+# Write/Edit read-back is NOT enforced at authoring time (over-blocks docs /
+# product code / tests fleet-wide, review #1054) -- only at SHIP time.
 class TestWriteEditNoAuthoringReadback(unittest.TestCase):
     def test_write_driver_flag_no_readback_allowed(self):
         # Authoring a driver (flag, no read-back) is allowed -- the read-back is
