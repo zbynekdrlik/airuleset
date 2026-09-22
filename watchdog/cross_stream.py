@@ -558,6 +558,54 @@ def _bounce_seen_tokens(tickets, verdict_map):
     return toks
 
 
+def _parse_bounce_tokens(toks):
+    """`{number: verdict_ts|None}` from a stored/current dedup value — accepts the
+    #1066 `N@<verdict_ts>`/`N` STRING tokens AND a pre-#1066 int/str number list
+    (so a mixed old state parses without a crash, absorbing the migration)."""
+    out = {}
+    for t in (toks or []):
+        if isinstance(t, bool):
+            continue
+        if isinstance(t, int):
+            out[t] = None
+            continue
+        s = str(t)
+        num, sep, ts = s.partition("@")
+        try:
+            n = int(num)
+        except ValueError:
+            continue
+        if sep and ts:
+            try:
+                out[n] = float(ts)
+            except ValueError:
+                out[n] = None
+        else:
+            out[n] = None
+    return out
+
+
+def _bounce_material_change(prev, cur):
+    """#1066 lane B — is the CURRENT bounce state a MATERIAL change from what was
+    last nudged? True iff a ticket was ADDED/REMOVED, OR a KNOWN gk verdict got
+    strictly NEWER for a still-present ticket (a genuine re-bounce, item 4). A
+    ticket merely GAINING or LOSING a known verdict (bare `N` <-> `N@ts`, the
+    per-cwd bounce_unhandled cache's empty->populated transition) is NOT material
+    — job 8 already nudged it on PRESENCE, and the fast goal-lane rider owns the
+    verdict — so it never spuriously re-nudges at that transition (review B 🟡).
+    Also absorbs the one-time int-list -> token-list migration (old `[6474]` and
+    new `["6474"]` both parse to `{6474: None}` -> no change)."""
+    pv = _parse_bounce_tokens(prev)
+    cv = _parse_bounce_tokens(cur)
+    if set(pv) != set(cv):
+        return True
+    for n, cts in cv.items():
+        pts = pv.get(n)
+        if cts is not None and pts is not None and cts > pts:
+            return True
+    return False
+
+
 def _bounce_verdict_map(root, home=None):
     """`{number: verdict_ts}` for `root`'s unhandled bounces, read from the
     per-cwd tickets-status cache field `bounce_unhandled` (lane A #1066) — ZERO
@@ -704,13 +752,15 @@ def bounce_backstop(now, run, state, send_fn, home=None, dry_run=False,
             continue
         prev = seen.get(name) or {}
         # #1066 lane B — dedup on a `N@<verdict_ts>` TOKEN set (verdict from the
-        # per-cwd bounce_unhandled cache), so a FRESH gk verdict on a SEEN ticket
-        # is a CHANGED set that re-nudges inside the 6 h renudge window; an
-        # unchanged verdict is the same set (silent). An unresolved member stays
-        # a bare `N` token -> a full box / an un-populated cache degrades to the
-        # pre-#1066 int-set dedup, byte-identical.
+        # per-cwd bounce_unhandled cache) via `_bounce_material_change`, so a
+        # FRESH gk verdict on a SEEN ticket (a strictly-newer ts) re-nudges
+        # inside the 6 h renudge window, while a ticket merely gaining/losing a
+        # KNOWN verdict (the cache empty->populated transition) or the one-time
+        # int->token state migration is NOT material and stays silent. A full box
+        # / an un-populated cache leaves every member a bare `N` -> pre-#1066
+        # int-set dedup semantics.
         cur_toks = sorted(_bounce_seen_tokens(tickets, verdict_fetch(root)))
-        same = prev.get("tickets") == cur_toks
+        same = not _bounce_material_change(prev.get("tickets"), cur_toks)
         fresh = (now - prev.get("ts", 0)) < renudge
         if same and fresh:
             continue                           # already nudged/pinged this set

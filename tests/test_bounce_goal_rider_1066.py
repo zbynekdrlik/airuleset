@@ -377,6 +377,26 @@ class TestRiderOrchestrator(_RiderBase):
         # base kept OLD so the held member ACCUMULATES into the next post-floor nudge
         self.assertEqual(brecs[self.sid]["base"], [seeded])
 
+    def test_recent_sibling_kind_holds_via_total_cap(self):
+        # review A 🔵1 — the SECONDARY double-keystroke guard: even when a
+        # same-sweep batch of a SIBLING kind stamped only the cross-kind floor
+        # (mark_batch_sent, NOT `handled`), the rider's own gate_ok sees the 3h
+        # total cap and holds — so at most ONE priority keystroke reaches the
+        # pane per window regardless of which guard applies.
+        seeded = bv._encode_token(6474, TS1)
+        state = {}
+        nudge_gate.mark_sent(state, self.sid, "queue-arrival", NOW)   # a sibling kind
+        brecs = {self.sid: {"base": [seeded], "first_seen": NOW - DAY}}
+        tmux = self._tmux()
+        logs = self._run(
+            brecs,
+            lambda cwd: [{"number": 6474, "verdict_ts": TS1},
+                         {"number": 6413, "verdict_ts": TS2}],
+            tmux, handled=set(), state=state)
+        self.assertTrue(any("hold:total-cap" in ln for ln in logs), logs)
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertEqual(brecs[self.sid]["base"], [seeded])   # base kept OLD
+
     def test_already_handled_defers_no_keystroke(self):
         seeded = bv._encode_token(6474, TS1)
         brecs = {self.sid: {"base": [seeded], "first_seen": NOW - DAY}}
@@ -486,6 +506,49 @@ class TestJob8VerdictTokens(unittest.TestCase):
         a = cross_stream._bounce_seen_tokens([6474], {6474: TS1})
         b = cross_stream._bounce_seen_tokens([6474], {6474: TS2})
         self.assertNotEqual(a, b)
+
+
+class TestJob8MaterialChange(unittest.TestCase):
+    """review B 🟡 — the dedup MATERIAL-change semantics: only a ticket
+    add/remove or a strictly-NEWER known verdict re-nudges; a bare-N<->N@ts
+    cache-visibility transition and the int->token state migration do NOT."""
+
+    def test_added_or_removed_ticket_is_material(self):
+        self.assertTrue(cross_stream._bounce_material_change(
+            ["6474"], ["6474", "6413"]))
+        self.assertTrue(cross_stream._bounce_material_change(
+            ["6474", "6413"], ["6474"]))
+
+    def test_newer_verdict_on_a_seen_ticket_is_material(self):
+        self.assertTrue(cross_stream._bounce_material_change(
+            ["6474@%d" % TS1], ["6474@%d" % TS2]))
+
+    def test_older_or_same_verdict_is_not_material(self):
+        self.assertFalse(cross_stream._bounce_material_change(
+            ["6474@%d" % TS2], ["6474@%d" % TS1]))   # older -> not material
+        self.assertFalse(cross_stream._bounce_material_change(
+            ["6474@%d" % TS1], ["6474@%d" % TS1]))   # same
+
+    def test_cache_visibility_transition_is_not_material(self):
+        # bare N -> N@ts (cache empty->populated): job 8 already nudged on
+        # presence; the fast rider owns the verdict -> NOT a re-nudge.
+        self.assertFalse(cross_stream._bounce_material_change(
+            ["6474"], ["6474@%d" % TS1]))
+        self.assertFalse(cross_stream._bounce_material_change(
+            ["6474@%d" % TS1], ["6474"]))   # verdict cache lost -> not material
+
+    def test_int_to_token_migration_is_not_material(self):
+        # a pre-#1066 int-list state vs the new string-token list must NOT
+        # spuriously re-nudge at the deploy boundary.
+        self.assertFalse(cross_stream._bounce_material_change([6474], ["6474"]))
+        self.assertFalse(cross_stream._bounce_material_change(
+            [6474, 6413], ["6413", "6474"]))
+
+    def test_none_and_malformed_never_raise(self):
+        self.assertFalse(cross_stream._bounce_material_change(None, None))
+        self.assertTrue(cross_stream._bounce_material_change(None, ["6474"]))
+        # a malformed token is skipped, not fatal
+        self.assertFalse(cross_stream._bounce_material_change(["x@y"], []))
 
 
 # --------------------------------------------------------------------------- #
