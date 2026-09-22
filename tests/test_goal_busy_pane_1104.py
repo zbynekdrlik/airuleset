@@ -53,7 +53,7 @@ from watchdog import goal  # noqa: E402
 from watchdog import ops_wait_recheck as owr  # noqa: E402
 from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux,
-    GOAL_ARMED_CAP,
+    GOAL_IDLE_CAP,
     _isolate_goal_state,
     _write_marker_transcript,
     _write_goal_marker,
@@ -310,11 +310,12 @@ class TestVerifyFailedDefersCleanupOnLiveTurn(unittest.TestCase):
 # 4. ATTEMPT BOOKING — only a REAL (not OFF-suppressed) keystroke consumes the
 #    per-pane budget.
 # --------------------------------------------------------------------------- #
-# A template DRIFT (OLD armed wording vs NEW shipped template) so the stale-rearm
-# actually PROCEEDS to the send instead of `drop:already-current`.
-_ARMED_OLD = ("STOP CONDITIONS — the loop is DONE the moment EITHER holds, both "
-              "checkable from the transcript: (A) an OLDER wording of the stop "
-              "conditions, from before the shipped template changed.")
+# #1113 -- the pane-budget booking is exercised via a DARK-rearm keystroke into
+# an IDLE (dark) pane. (The old vehicle was a stale-rearm REPLACE into an ARMED
+# pane; that path is deleted -- an armed footer now drops `already-armed` and the
+# stale-rearm origin drops `stale-rearm-retired`, neither typing, so it can no
+# longer prove the budget-books-on-a-real-send behaviour. A dark-rearm into a
+# dead/dark loop is the live keystroke path that still books.)
 _REARM_TMPL = ("/goal STOP CONDITIONS — the loop is DONE the moment EITHER holds, "
                "both checkable from the transcript: (A) the NEW wording carrying "
                "the saturation clause: SATURATE parallel isolation:worktree lanes.")
@@ -334,10 +335,12 @@ class TestAttemptBookingOnlyOnRealSend(unittest.TestCase):
     def _deliver(self, sid, state, nudges_on):
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, sid)
-        _write_goal_marker(proj, self.CWD, sid, "Goal set: " + _ARMED_OLD,
+        # a dark/dead loop's own marker (set); the DARK pane (GOAL_IDLE_CAP) reads
+        # armed=False so the dark-rearm keystroke path proceeds and books.
+        _write_goal_marker(proj, self.CWD, sid, "Goal set: " + _REARM_TMPL[len("/goal "):],
                            ts_epoch=500)
         tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
-                                   GOAL_ARMED_CAP, model_type=True)
+                                   GOAL_IDLE_CAP, model_type=True)
         ctx = []
         # a NON-declared window keeps the staged `goal-sweep` (suppressible) nudge.
         ctx.append(m.patch.object(goal, "_declared_window_nudge",
@@ -354,7 +357,7 @@ class TestAttemptBookingOnlyOnRealSend(unittest.TestCase):
         word = goal.deliver_goal(
             sid, self.CWD, _REARM_TMPL, "branch-merge", run=tmux, projects_dir=proj,
             now=now, request_ts=now, sleep_fn=lambda s: None, state=state,
-            origin="stale-rearm")
+            origin="dark-rearm")
         return word, tmux
 
     def test_off_suppressed_send_leaves_the_budget_untouched(self):

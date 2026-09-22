@@ -213,16 +213,19 @@ class TestGoalSweep(unittest.TestCase):
         self.assertIn("sess:0.0", line)
 
     def test_recent_human_skip_line_carries_loc_and_reason_detail(self):
-        # The LIVE montalu1 case: a stale-rearm request CORRECTLY deferring on
+        # The LIVE montalu1 case: a watchdog re-arm request CORRECTLY deferring on
         # a genuine human presence. The journal line must SAY the reason detail
         # (the `presence marker Ns old` deliver_goal already computes for
         # goal-sync.log), so case-1 is self-evident without a second file.
+        # (#1113: uses dark-rearm as the vehicle -- the stale-rearm origin is
+        # retired and now drops `stale-rearm-retired` before the recent-human
+        # gate, so it can no longer exercise the recent-human skip line.)
         proj = self._dir()
         sid = "sess-sweep-rh-" + uuid.uuid4().hex[:8]
         _write_marker_transcript(proj, self.CWD, sid)
         reqp = self._reqp()
         goal.record_goal_request(sid, self.CWD, "/goal x", "branch-merge",
-                                 now=1000, path=reqp, origin="stale-rearm")
+                                 now=1000, path=reqp, origin="dark-rearm")
         marker = "/tmp/claude-user-active-%s" % sid
         Path(marker).write_text("")
         self.addCleanup(lambda: Path(marker).unlink(missing_ok=True))
@@ -2309,7 +2312,11 @@ class TestGoalDeliveryAttemptCap731(unittest.TestCase):
         self.assertEqual(len(capped), 1,
                          "a normal-origin attempt-cap drop pings exactly once")
 
-    def test_attempt_cap_silent_for_stale_rearm(self):
+    def test_leftover_stale_rearm_request_dropped_retired_first_sweep(self):
+        # #1113 (RETIRES the #675 stale-rearm silent-attempt-cap path): a leftover
+        # on-disk stale-rearm request is dropped `drop:stale-rearm-retired` on the
+        # FIRST sweep -- before any keystroke or the attempt cap -- so it types
+        # nothing, pings nothing, and clears in one sweep.
         proj = self._dir()
         sid = "sess-cap-stale"
         _write_marker_transcript(proj, self.CWD, sid)
@@ -2319,17 +2326,15 @@ class TestGoalDeliveryAttemptCap731(unittest.TestCase):
                                    GOAL_IDLE_CAP, model_type=True,
                                    arm_on_submit=False)
         pings = []
-        for t in range(self._cap() + 1):
-            goal.goal_sweep(2000 + t, run=tmux, projects_dir=proj,
-                            requests_path=self.reqp,
-                            send_fn=lambda m, **k: pings.append((m, k)),
-                            sleep_fn=lambda *a, **k: None)
-        capped = [k for _m, k in pings
-                  if str(k.get("dedup_key", "")).startswith("goalarm-attempt-cap")]
-        self.assertEqual(capped, [],
-                         "a stale-rearm attempt-cap drop is SILENT (#675)")
+        goal.goal_sweep(2000, run=tmux, projects_dir=proj,
+                        requests_path=self.reqp,
+                        send_fn=lambda m, **k: pings.append((m, k)),
+                        sleep_fn=lambda *a, **k: None)
+        self.assertEqual(tmux.typed_texts(), [],
+                         "a retired stale-rearm never types")
+        self.assertEqual(pings, [], "a retired stale-rearm never pings")
         self.assertEqual(goal.load_goal_requests(self.reqp), {},
-                         "silent drop still clears the request")
+                         "the retired drop clears the request in ONE sweep")
 
     # -------- D2: cap-drop cleans up OUR leftover, never a foreign one ---- #
     def _preseed_at_cap(self, sid, box, origin="self-callback"):
