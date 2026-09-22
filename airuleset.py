@@ -8482,11 +8482,7 @@ def cmd_watchdog(args):
                     # and the keystroke queue of THAT session, wherever it
                     # runs. Detection only, so it never types into a pane.
                     long_turn_enabled=True,
-                    # Job 51 (#959) — erp-test box heartbeat. The leaf gates
-                    # itself on box class + authority + a live claude + a
-                    # resolvable odoo-erp wrapper, so it is wired everywhere
-                    # and is a silent no-op off a subdev stream account.
-                    erp_heartbeat_enabled=True,
+                    erp_heartbeat_enabled=True,  # Job 51 (#959): the leaf self-gates
                     # Job 26 (#140) — REMOVED (#402, 2026-08-12). Used to
                     # watch the shared /compact claim file for a stuck
                     # entry; that whole claim system was retired by the
