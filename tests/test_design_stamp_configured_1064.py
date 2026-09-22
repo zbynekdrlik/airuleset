@@ -168,6 +168,86 @@ class TestWorkerStampTruthful(unittest.TestCase):
                 "Reviewed-by: worker claude-opus-4-8")
 
 
+class TestManagedFallbackProvenance(unittest.TestCase):
+    """#1064 review 🟡3 (owner ruling: NOT an accepted residual — close it). A
+    MANAGED_MODEL fallback is only the launcher's DEFAULT guess, not a read of the
+    actual launch id, so it must NOT stamp Fable for an off-policy MAIN whose real
+    (served) model differs — that would let the dispatch gate ACCEPT a non-Fable
+    -authored design (the miva1 hand-launched-non-Fable-main class). The stamp
+    composer demotes a `managed-fallback` configured model to the truthful served
+    model when they disagree; an `argv`/`alias` provenance keeps the float
+    behaviour."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.pd = Path(self.tmp) / "projects"
+
+    def _stamp(self):
+        return cli_authorship.stamp_line("Design", MAIN_CWD,
+                                         projects_dir=str(self.pd))
+
+    def test_a_fallback_plus_served_differs_stamps_served_and_gate_refuses(self):
+        _write_transcript(self.pd, MAIN_CWD, "claude-opus-5")
+        with mock.patch("cli_authorship._pane_configured_model",
+                        return_value=None):
+            self.assertEqual(self._stamp(), "Design-by: main claude-opus-5")
+        ok, _ = dd.check_issue(
+            1064, "o/r", "/repo",
+            fetch=lambda s, n, c: (["Design-by: main claude-opus-5"], None),
+            fable_id=FABLE)
+        self.assertFalse(ok, "the gate must refuse a non-Fable served stamp")
+
+    def test_b_argv_fable_plus_served_differs_keeps_float_suffix(self):
+        _write_transcript(self.pd, MAIN_CWD, "claude-opus-5")
+        with mock.patch("cli_authorship._pane_configured_model",
+                        return_value="claude-fable-5-1[1m]"):
+            self.assertEqual(
+                self._stamp(),
+                "Design-by: main claude-fable-5-1 (served: claude-opus-5)")
+        ok, _ = dd.check_issue(
+            1064, "o/r", "/repo",
+            fetch=lambda s, n, c: (
+                ["Design-by: main claude-fable-5-1 (served: claude-opus-5)"],
+                None),
+            fable_id=FABLE)
+        self.assertTrue(ok, "the argv-Fable float stamp must still be accepted")
+
+    def test_c_fallback_plus_served_equals_keeps_today_stamp(self):
+        _write_transcript(self.pd, MAIN_CWD, "claude-fable-5-1")
+        with mock.patch("cli_authorship._pane_configured_model",
+                        return_value=None):
+            self.assertEqual(self._stamp(), "Design-by: main claude-fable-5-1")
+
+    def test_d_fallback_plus_served_unknown_keeps_today_stamp(self):
+        # no transcript -> served unknown -> the managed fallback stands.
+        with mock.patch("cli_authorship._pane_configured_model",
+                        return_value=None):
+            self.assertEqual(self._stamp(), "Design-by: main claude-fable-5-1")
+
+    def test_provenance_tags(self):
+        with mock.patch("cli_authorship._pane_configured_model",
+                        return_value="claude-fable-5-1[1m]"):
+            self.assertEqual(
+                cli_authorship.configured_model_with_provenance(MAIN_CWD),
+                ("claude-fable-5-1", "argv"))
+        with mock.patch("cli_authorship._pane_configured_model",
+                        return_value=None):
+            self.assertEqual(
+                cli_authorship.configured_model_with_provenance(MAIN_CWD),
+                ("claude-fable-5-1", "managed-fallback"))
+            self.assertEqual(
+                cli_authorship.configured_model_with_provenance(
+                    "/home/x/proj/.claude/worktrees/agent-zzz"),
+                (cli_authorship.UNKNOWN_MODEL, "unknown"))
+
+    def test_public_configured_model_shape_unchanged(self):
+        # existing callers (design-record's unknown-refusal) still get a bare id.
+        with mock.patch("cli_authorship._pane_configured_model",
+                        return_value=None):
+            self.assertEqual(cli_authorship.configured_model(MAIN_CWD), FABLE)
+
+
 class TestDispatchGateSuffix(unittest.TestCase):
     def test_suffixed_main_stamp_accepted(self):
         ok, _ = dd.check_issue(

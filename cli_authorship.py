@@ -254,59 +254,77 @@ def _pane_configured_model(cwd):
     return None
 
 
-def configured_model(cwd, projects_dir=None, home=None):
-    """The model the session running in `cwd` was LAUNCHED with, normalised
-    (#1064) -- the stamp's PRIMARY identity, as opposed to `session_model`'s
-    API-SERVED model (which floats). Resolution order:
-      1. the dual-agent IMPLEMENTER alias (`AIRULESET_ROLE=implementer` +
-         `ANTHROPIC_MODEL`), mirroring `session_model` so the pair matches;
-      2. the pane's claude argv `--model <id>` (`_pane_configured_model`);
-      3. the managed launch default (`_managed_model`) -- BUT ONLY for the MAIN
-         role: the main is the session actually launched with MANAGED_MODEL, so
-         the fallback is truthful for the common design author (and covers a main
-         launched via the settings `model` key with no `--model` argv). A
-         worker/implementer with no readable pane argv was launched with ANOTHER
-         model, so returning the Fable id there would FALSELY claim the main's
-         launch identity (#1064 review 🟡1) -- so a non-main falls through to
-         `UNKNOWN_MODEL`, and `_stamp_value` then uses the truthful SERVED model.
-      4. `UNKNOWN_MODEL` otherwise (a non-main with no pane, or a main whose
-         managed default is unresolvable) -- the honest, gate-refused direction.
-    `projects_dir`/`home` are accepted for signature symmetry with
-    `session_model`; the pane resolution keys on `cwd`.
+def configured_model_with_provenance(cwd, projects_dir=None, home=None):
+    """`(model, provenance)` for the session running in `cwd` (#1064) -- the
+    stamp's PRIMARY identity (vs `session_model`'s API-SERVED model, which
+    floats), PLUS how the launch model was learned. `provenance` is one of:
+      - `"alias"`   -- the dual-agent IMPLEMENTER alias (`AIRULESET_ROLE=
+        implementer` + `ANTHROPIC_MODEL`), a direct read of the launch id;
+      - `"argv"`    -- the pane's claude argv `--model <id>`
+        (`_pane_configured_model`), a direct read of the launch id;
+      - `"managed-fallback"` -- the managed launch DEFAULT (`_managed_model`),
+        used ONLY for the MAIN role. This is a GUESS (the launcher's default),
+        NOT a read of the actual launch id, so the stamp composer demotes it to
+        the served model when they disagree (#1064 review 🟡3);
+      - `"unknown"` -- nothing resolved (a non-main with no pane, or a main whose
+        managed default is unresolvable) -- the honest, gate-refused direction.
 
-    Accepted residual (#1064 review 🟡3, ROZHODNUTÉ on the ticket): an off-policy
-    MAIN launched via a settings `model` key set to a NON-Fable model, with no
-    `--model` argv, still falls back to MANAGED_MODEL (Fable) here and the gate
-    would accept it. The managed launcher always passes `--model
-    claude-fable-5-1[1m]` (which wins over settings), and a deliberate
-    `claude --model opus…` puts opus in the argv (correctly refused), so this
-    only bites a hand-launched bare-`claude` main with settings model != Fable --
-    inherent to Approach 1's fallback, out of scope for this fix."""
+    A `"managed-fallback"` is deliberately restricted to `role == "main"`: a
+    worker/implementer is launched with ANOTHER model, so returning the Fable id
+    there would FALSELY claim the main's launch identity (#1064 review 🟡1) -- a
+    non-main with no direct read falls through to `("unknown", "unknown")` and the
+    composer uses the truthful SERVED model. `projects_dir`/`home` are accepted
+    for signature symmetry with `session_model`; the pane resolution keys on
+    `cwd`."""
     if os.environ.get("AIRULESET_ROLE") == "implementer":
         alias = (os.environ.get("ANTHROPIC_MODEL") or "").strip()
         if alias:
-            return _norm_model(alias)
+            return _norm_model(alias), "alias"
     raw = None
     try:
         raw = _pane_configured_model(cwd)
     except Exception:
         raw = None
     if raw and raw.strip():
-        return _norm_model(raw)
+        return _norm_model(raw), "argv"
     if authorship_role(cwd) == "main":
         managed = _managed_model()
         if managed:
-            return managed
-    return UNKNOWN_MODEL
+            return managed, "managed-fallback"
+    return UNKNOWN_MODEL, "unknown"
 
 
-def _stamp_value(role, configured, served):
+def configured_model(cwd, projects_dir=None, home=None):
+    """The model the session running in `cwd` was LAUNCHED with, normalised
+    (#1064) -- the model id ONLY (the pre-#1064-review-🟡3 public shape existing
+    callers depend on: `cli_design_record`'s unknown-refusal wants just the id).
+    See `configured_model_with_provenance` for the provenance the stamp composer
+    uses to decide whether a managed-fallback guess is trustworthy."""
+    return configured_model_with_provenance(
+        cwd, projects_dir=projects_dir, home=home)[0]
+
+
+def _stamp_value(role, configured, served, provenance="argv"):
     """Compose the `"<role> <model>[ (served: <served>)]"` value (#1064). The
     stamp records the CONFIGURED identity; the served model is appended ONLY when
     it is known AND differs -- so a session served the model it was launched with
-    stamps byte-identically to before this change. When the configured model is
-    unresolvable the served model (if known) becomes the stamp model; when
-    NEITHER resolves the model is `unknown` (role still labelled)."""
+    stamps byte-identically to before this change.
+
+    #1064 review 🟡3: a `"managed-fallback"` configured model is only the
+    launcher's DEFAULT guess, not a read of the actual launch id. When the served
+    model is known AND differs from that guess, TRUST the served model instead
+    (demote the guess to UNKNOWN): the stamp becomes the truthful served id, the
+    dispatch gate then refuses a non-Fable-authored design, and the operator
+    fixes the launch. When served == managed (the normal main) or served is
+    unknown, the fallback stands as today. An `"argv"`/`"alias"` provenance is a
+    real read, so configured always wins (the float suffix behaviour).
+
+    When the configured model is unresolvable the served model (if known) becomes
+    the stamp model; when NEITHER resolves the model is `unknown` (role still
+    labelled)."""
+    if (provenance == "managed-fallback" and served != UNKNOWN_MODEL
+            and _norm_model(served) != configured):
+        configured = UNKNOWN_MODEL
     if configured == UNKNOWN_MODEL:
         return "%s %s" % (role, served)
     if served != UNKNOWN_MODEL and _norm_model(served) != configured:
@@ -318,13 +336,14 @@ def authorship_value(cwd, projects_dir=None, home=None):
     """The `"<role> <model>"` VALUE of an authorship stamp, e.g.
     `"main claude-fable-5-1"` / `"worker claude-opus-4-8"` / `"main unknown"`,
     with an optional ` (served: <model>)` audit suffix when the API-served model
-    floated off the launch model (#1064). The half a `<kind>-by:` label is
-    prefixed to (see `stamp_line`); a caller that emits its own `Reviewed-by:`
-    field wants just this value."""
+    floated off a directly-read launch model (#1064). The half a `<kind>-by:`
+    label is prefixed to (see `stamp_line`); a caller that emits its own
+    `Reviewed-by:` field wants just this value."""
     role = authorship_role(cwd)
-    configured = configured_model(cwd, projects_dir=projects_dir, home=home)
+    configured, provenance = configured_model_with_provenance(
+        cwd, projects_dir=projects_dir, home=home)
     served = session_model(cwd, projects_dir=projects_dir, home=home)
-    return _stamp_value(role, configured, served)
+    return _stamp_value(role, configured, served, provenance)
 
 
 def stamp_line(kind, cwd, projects_dir=None, home=None):
