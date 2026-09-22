@@ -23,6 +23,26 @@ until the ratchet cap, then the oldest move to `.claude/rules-reference/internal
   runner. FAIL-OPEN when the diff is undeterminable (the sibling pre-flights' never-false-accuse
   convention). Rule text + `paths:` injection: `rules/guide-agent-eval.md` (+ profile line + a
   `situational-triggers.conf` row so it also lands at the hand-off action). Owner ruling 18.9.2026.
+  **Five reusable gotchas (both fresh-context reviews):** (1) **a NEW composer pre-flight MUST be
+  wired into BOTH `cmd_handoff` AND `_cmd_handoff_post_body_file`** — `cmd_handoff` early-returns to
+  the pass-through for `--body-file` (~5407), the path the odoo-erp guide streams hand off through,
+  and there is NO Stop-hook backstop, so a compose-only call site is a SILENT no-op for the target
+  streams (the #1073/#1106 both-paths convention); lock BOTH with an `inspect.getsource` wiring test.
+  (2) **a `\S+<literal>` regex under `.search` is O(n²)** on a long non-matching line (the fixture
+  token: measured 36 s @ 80 KB) — extract by whitespace tokenisation, and a ReDoS test must feed a
+  long NON-whitespace token (a whitespace-broken input never reaches it). (3) **parse the TRAILING
+  `(...)` group for a report**, never the first — a natural tally `16/18 (2 skipped) (report)`
+  false-blocks otherwise (fail-closed false-accuse). (4) **a rule's `paths:` frontmatter must be a
+  SUPERSET of the gate's own source globs** or an operator edits a guide source without ever seeing
+  the advisory rule on Read (dual-definition drift, #1073/#1099); when two frontmatter globs both
+  cover a case a content-lock loses teeth for one, so lock each glob with a case ONLY it covers
+  (mutation-verify catches this). (5) **`context-baseline --check` counts EVERY
+  `profiles/universal.profile` line, incl. path-scoped `rules/*.md`** (`cli_context_baseline.
+  _measure_repo_ceilings` reads the raw profile, not `categorize_entries`), so adding a `rules/` line
+  — required to install a path-scoped rule to `~/.claude/rules/` — ALWAYS bumps `module_count` even
+  though a path-scoped rule adds ZERO genuinely-always-on bytes, and `context-baseline --check`
+  cannot stay "unchanged"; downstream `nudge-module-context-cost.sh` then exits 1 (2
+  `test_context_diet_tier3` fails). The honest fix measures only `categorize_entries`'s modules half.
 - **#1064 — the `Design-by:` stamp records the CONFIGURED (launch) model, the API-SERVED model
   is an optional ` (served: <id>)` audit suffix.** The stamp is the ONE token the dispatch gate
   (`gates.designdispatch.check_issue`), the anti-spoof gate (`gates.designbypost`) and the float
