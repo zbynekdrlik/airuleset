@@ -689,6 +689,46 @@ function attachClipboard(win) {                  // idempotent: attach once per 
     }
   } catch (e) {}
 }
+// #1016: Windows-Terminal-style BLOCK (column) selection with a plain Alt+drag.
+// The fleet tmux runs `mouse on` (#646), so xterm.js forces its OWN selection
+// under mouse-tracking only when shiftKey is set (shouldForceSelection), and
+// makes it a COLUMN block only when altKey is set (_shouldColumnSelect) -- so a
+// plain Alt+drag (the Windows habit) goes to tmux (ordinary line selection) and
+// the real block gesture is Shift+Alt+drag (which on Windows is the input-language
+// toggle). We translate the gesture where the dash already reaches each same-origin
+// xterm (the #613/#643/#886 `window.term` hook): a CAPTURE-phase mousedown listener
+// on term.element re-dispatches a plain Alt+left-mousedown as Shift+Alt, so xterm
+// forces its own column selection; mousemove/mouseup are untouched (xterm tracks
+// the drag once the selection started). altClickMovesCursor is also disabled so an
+// Alt CLICK (no drag) never moves the shell cursor. Fully guarded so an error can
+// never break the page or leave console noise (browser-console-zero-errors).
+function attachBlockSelect(win) {                // idempotent: attach once per terminal
+  const term = win && win.term;
+  if (!term || term.__wtBlockSel) return;
+  const el = term.element;
+  if (!el || !el.addEventListener) return;       // xterm element not painted yet -> poll retries
+  term.__wtBlockSel = true;
+  try { term.options.altClickMovesCursor = false; } catch (e) { /* older xterm -> ignore */ }
+  try {
+    el.addEventListener('mousedown', (ev) => {
+      try {
+        if (ev.button !== 0 || !ev.altKey || ev.shiftKey) return;   // only a plain Alt+left drag
+        ev.preventDefault();
+        ev.stopImmediatePropagation();           // hide the plain Alt+drag from xterm
+        const ME = win.MouseEvent || MouseEvent; // construct in the iframe's own realm
+        const block = new ME('mousedown', {
+          bubbles: true, cancelable: true, view: win,
+          button: ev.button, buttons: ev.buttons,
+          clientX: ev.clientX, clientY: ev.clientY,
+          screenX: ev.screenX, screenY: ev.screenY,
+          ctrlKey: ev.ctrlKey, metaKey: ev.metaKey,
+          altKey: true, shiftKey: true,          // shift forces the selection + alt makes it a column block
+        });
+        (ev.target || el).dispatchEvent(block);  // shiftKey:true makes the re-dispatch a no-op for THIS listener
+      } catch (e) { /* never break the terminal or emit console noise */ }
+    }, true);                                     // CAPTURE: run before xterm's own selection listener
+  } catch (e) { /* addEventListener unavailable -> no translation, page stays alive */ }
+}
 function applyFixedGrid(f) {                     // poll for window.term, fit, then watch resize
   if (!f) return;
   const win = f.contentWindow;
@@ -697,6 +737,7 @@ function applyFixedGrid(f) {                     // poll for window.term, fit, t
   const poll = () => {
     themeTerminal(win.term);                     // #643: Campbell palette + font, once term exists
     attachClipboard(win);                        // #671: OSC 52 + copy-on-select -> browser clipboard
+    attachBlockSelect(win);                      // #1016: plain Alt+drag -> column (block) selection
     if (fitFixedGrid(win)) {
       scheduleFill(win);                           // deferred FILL passes (below)
       if (!win.__wtResize) {                       // re-fit + re-fill on window resize
