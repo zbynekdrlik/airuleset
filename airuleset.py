@@ -578,6 +578,7 @@ from cli_bashrc_appliers import (  # noqa: E402, F401
     render_owner_vps_ssh_attach_block as render_owner_vps_ssh_attach_block,
     _owner_vps_project as _owner_vps_project,
     apply_owner_vps_ssh_attach as apply_owner_vps_ssh_attach,
+    remove_legacy_disable_cron_export as remove_legacy_disable_cron_export,
 )
 
 
@@ -1699,6 +1700,7 @@ def cmd_install(args):
     except Exception as e:
         print(f"  claude launcher error: {e}", file=sys.stderr)
 
+    remove_legacy_disable_cron_export()  # #1116 slice 2: drop legacy DISABLE_CRON export
     _warn_bashrc_drift_at_install()  # 3b-α (#1015): LOUD stray-export warning
 
     # --- 3b-bis. tmux attach-or-create interactive helpers (#651) ---
