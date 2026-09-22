@@ -3,7 +3,7 @@ kind is OFF (the state file absent reads as all-OFF). `nudges on --kind <k>` /
 `nudges off --kind <k>` / `nudges on --all` stage kinds one at a time; a bare
 `nudges on` REFUSES and prints the kinds. `nudges_enabled(kind)` is the predicate
 the ONE keystroke primitive consults via the threaded `nudge=` identity. The badge
-renders `nudges OFF` when all off, `nudges N/M` when some are on.
+renders `nudges N/M · recovery on` for every state (never `OFF`, since #1039).
 
 RED against the pre-#1023 tree: `nudges_enabled` is global (existence of
 `~/.claude/nudges-off`); there is no per-kind state, no `--kind`, no `nudge=`
