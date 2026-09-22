@@ -3690,6 +3690,101 @@ def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
     return logs
 
 
+# --------------------------------------------------------------------------- #
+# #1047 — root-guard PROVISIONED discriminator: tell "never provisioned on this
+# box" from "root timer dead". The `ROOT-REPORT-STALE … the root timer may be
+# dead` alarm (`disk_guard_root._warn_once_per_day`) is honest ONLY on a box that
+# WAS provisioned; on the owner workstations (root units are the owner's call,
+# #841) it is a false dead-timer cry. The provisioned signal is the systemd timer
+# unit's presence — the single artefact `airuleset.py disk-guard-root` installs.
+# --------------------------------------------------------------------------- #
+ROOT_NOT_PROVISIONED_WARN_NAME = "root-not-provisioned-warn"
+# Fallback timer-unit path, used ONLY if the lazy `cli_disk_guard_root` import
+# fails. It MUST equal `cli_disk_guard_root.ROOT_TIMER_PATH`; a drift-lock test
+# (`test_disk_guard_root_provisioned_1047`) asserts the equality so a rename of
+# the real constant can never leave this stale (which would make a box whose
+# import fails falsely probe the wrong path and report 'not provisioned').
+_ROOT_TIMER_PATH_FALLBACK = "/etc/systemd/system/airuleset-disk-guard-root.timer"
+
+
+def _root_guard_provisioned(timer_path=None, exists_fn=None):
+    """True iff the root disk-guard is provisioned on THIS box — i.e. its systemd
+    timer unit exists. That unit (``cli_disk_guard_root.ROOT_TIMER_PATH``) is the
+    single artefact ``airuleset.py disk-guard-root`` installs (#841), so its
+    presence is the honest provisioned signal. Lazy import keeps this watchdog
+    leaf light; falls back to :data:`_ROOT_TIMER_PATH_FALLBACK` (drift-locked to
+    the real constant) if the CLI module is somehow unavailable. Best-effort —
+    never raises (a broken ``exists_fn`` → NOT provisioned, the fail-safe that
+    keeps the honest 'not provisioned' line over a false dead-timer alarm).
+    ``exists_fn`` injectable for tests."""
+    exists_fn = exists_fn or os.path.exists
+    if timer_path is None:
+        try:
+            from cli_disk_guard_root import ROOT_TIMER_PATH as _tp
+            timer_path = _tp
+        except Exception as e:
+            _dbg("root-timer-path import failed, using fallback: %r" % e)
+            timer_path = _ROOT_TIMER_PATH_FALLBACK
+    try:
+        return bool(exists_fn(timer_path))
+    except Exception as e:
+        _dbg("root-guard provisioned probe failed: %r" % e)
+        return False
+
+
+def _warn_not_provisioned_once_per_day(home, now):
+    """#1047: at CRITICAL pressure on a box where the root disk-guard was NEVER
+    provisioned, log an HONEST 'not provisioned' line ONCE per day — never the
+    false 'the root timer may be dead' alarm (that verdict is reserved for a
+    provisioned box whose report went stale, ``disk_guard_root._warn_once_per_day``).
+    Deduped by a date-stamped marker DISTINCT from the dead-timer stale-warn
+    marker so the two never collide. Returns the log lines actually written
+    (empty if already warned today). Best-effort — never raises."""
+    today = time.strftime("%Y%m%d", time.gmtime(now))
+    marker = _guard_dir(home) / ROOT_NOT_PROVISIONED_WARN_NAME
+    try:
+        if marker.exists() and marker.read_text().strip() == today:
+            return []
+    except OSError as e:
+        _dbg("root-not-provisioned marker read failed: %r" % e)
+    line = ("disk-guard: root disk-guard not provisioned on this box "
+            "(no ROOT_TIMER_PATH) — root-level survey skipped")
+    _append_log(_log_path(home), [line])
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(today)
+    except OSError as e:
+        _dbg("root-not-provisioned marker write failed: %r" % e)
+    return [line]
+
+
+def _record_root_finding_or_warn(status, home, now, dry_run):
+    """#1047: the CRITICAL escalate branch's root-level step. On a PROVISIONED box
+    this is byte-identical to the pre-#1047 behaviour — record the root-level
+    finding from the root reporter (#841 leg C), whose stale path keeps the
+    ``ROOT-REPORT-STALE … may be dead`` alarm. On a box that was NEVER provisioned
+    it instead logs the honest once/day 'not provisioned' line and SKIPS the
+    survey (there is no root reporter to read). ``dry_run`` mutates/logs nothing.
+    Returns log lines."""
+    if not _root_guard_provisioned():
+        return [] if dry_run else _warn_not_provisioned_once_per_day(home, now)
+    try:
+        from watchdog import disk_guard_root
+        return list(disk_guard_root.maybe_record_root_finding(
+            status, home, now, dry_run=dry_run))
+    except Exception as e:
+        return ["disk-guard: root-finding error: %r" % e]
+
+
+def root_guard_status_row(provisioned_fn=None):
+    """#1047: the one-line `airuleset.py status` row (the logic lives in this
+    watchdog leaf; cmd_status just prints it, next to the swap/volume rows) —
+    ``root disk-guard: provisioned`` | ``not provisioned`` from the SAME predicate
+    the escalate discriminator uses. ``provisioned_fn`` injectable for tests."""
+    provisioned_fn = provisioned_fn or _root_guard_provisioned
+    return "root disk-guard: %s" % ("provisioned" if provisioned_fn() else "not provisioned")
+
+
 def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=None,
                    geteuid_fn=None, mounts=None, min_drain_interval_s=None,
                    planners_fn=None, sudo_probe_fn=None, scratch_discover_fn=None,
@@ -3866,13 +3961,12 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     # world-readable /run report). Cheap file read — runs even when the du-heavy
     # drain below is cadence-gated. Records a finding a SESSION raises the
     # owner-daily ❓ from; NEVER pings (notify stays out of the guard).
+    # #1047: gate on whether the root guard is PROVISIONED here — a never-
+    # provisioned box logs an honest 'not provisioned' line (once/day) and skips
+    # the survey, instead of the false `ROOT-REPORT-STALE … may be dead` alarm;
+    # a provisioned box records the finding byte-identically to before.
     if status["level"] == "critical":
-        try:
-            from watchdog import disk_guard_root
-            logs += disk_guard_root.maybe_record_root_finding(
-                status, home, now, dry_run=dry_run)
-        except Exception as e:
-            logs.append("disk-guard: root-finding error: %r" % e)
+        logs += _record_root_finding_or_warn(status, home, now, dry_run)
     # #854: severity beats cadence — at CRITICAL pressure the drain runs EVERY
     # poll; only the 80-95 % band is cadence-gated (`will_drain`, above).
     if not will_drain:
