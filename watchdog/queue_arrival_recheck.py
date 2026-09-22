@@ -81,10 +81,48 @@ within one floor window is folded into the single post-floor nudge (an
 improvement over the pre-#780 one-nudge-per-flap).
 """
 import os
+import re
 
 import watchdog
 from watchdog import ops_wait_recheck as _ops_wait_recheck
 from watchdog import nudge_gate as _nudge_gate   # #797 shared cadence gate
+
+# #1109 — the PRIORITY classification of an infra arrival. A release-blocking
+# hand-off is EITHER a tagged STOP:/GATEKEEPER-ACTION (INFRA) COMMENT (the
+# `_watchdog_infra_queue_fetch` records with kind=="comment" carry exactly these
+# two tags), OR an infra TICKET carrying a prio:*/release-block label. Delivered
+# under the `infra-priority` nudge kind (cap-exempt, 15-min floor).
+INFRA_PRIORITY_NUDGE = "infra-priority"
+_PRIORITY_COMMENT_TAGS = frozenset({"GATEKEEPER-ACTION (INFRA)", "STOP:"})
+_PRIORITY_LABEL_RE = re.compile(r"^(?:prio:|release-block\b)")
+
+
+def _is_priority_record(rec):
+    """True iff an infra-queue record is a RELEASE-BLOCKING priority arrival:
+    a tagged STOP:/GATEKEEPER-ACTION (INFRA) comment, or an infra ticket carrying
+    a `prio:*` / `release-block` label. Malformed / plain records are NOT priority
+    (never raises). The label path reads `rec["labels"]` (a list of strings) when
+    the fetch supplies it; the current `_watchdog_infra_queue_fetch` does not yet
+    attach labels to ticket records, so the label path activates the moment that
+    builder does — the comment path (the 22.9 incident record) is live today."""
+    if not isinstance(rec, dict):
+        return False
+    if rec.get("kind") == "comment" and rec.get("tag") in _PRIORITY_COMMENT_TAGS:
+        return True
+    labels = rec.get("labels")
+    if isinstance(labels, list) and any(
+            isinstance(lbl, str) and _PRIORITY_LABEL_RE.match(lbl)
+            for lbl in labels):
+        return True
+    return False
+
+
+def _wave_has_priority(arrivals, id_map):
+    """True iff any NEW arrival id in this wave maps to a priority record.
+    `id_map` None (the review union / an unwired fetch) → never priority."""
+    if not id_map:
+        return False
+    return any(_is_priority_record(id_map.get(a)) for a in arrivals)
 
 # env AIRULESET_QUEUE_ARRIVAL_FETCH_TTL_S — how long a queue-union snapshot is
 # CACHED per repo (`state["queue_arrival_cache"]`, keyed by cwd). #1055 P2:
@@ -453,6 +491,99 @@ def _nudge_text_infra(records, cur_count):
     return text[:NUDGE_MAX_CHARS - 1].rsplit(" ", 1)[0] + "…"
 
 
+# --- HUB RECEIPT (#1109) ---------------------------------------------------
+
+_RECEIPT_STATE_KEY = "infra_priority_receipts"
+
+
+def _default_hub_receipt_post(cwd):
+    """Build the PRODUCTION hub-receipt poster for `cwd`: `(num, text) -> gh
+    issue comment <num> -R <slug> --body <text>` in the repo the window serves,
+    using the box's own gh identity. Returns None when the repo slug is
+    unresolvable (no receipt rather than a wrong-repo post). The rider passes
+    None for `receipt_post_fn` from a unit test, so a test NEVER shells gh; only
+    the goal.py call site wires this default in production."""
+    def _post(num, text):
+        import subprocess
+        import airuleset
+        slug = airuleset._repo_slug(cwd=airuleset._repo_root(cwd=cwd) or cwd)
+        if not slug:
+            return
+        try:
+            subprocess.run(
+                ["gh", "issue", "comment", str(num), "-R", slug,
+                 "--body", text],
+                cwd=cwd, capture_output=True, text=True, timeout=20)
+        except Exception:  # noqa: BLE001 — a hub-post failure never breaks delivery
+            return
+    return _post
+
+
+def _receipt_clock_hhmm(now):
+    """`HH:MM CEST` for the receipt line, from `now` (an epoch). Europe/Bratislava
+    (== Prague, the owner's tz) via zoneinfo; UTC fallback on any error so the
+    receipt never fails to compose."""
+    from datetime import datetime, timezone
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.fromtimestamp(now, ZoneInfo("Europe/Bratislava")
+                                      ).strftime("%H:%M CEST")
+    except Exception:  # noqa: BLE001 — never let tz resolution break the receipt
+        return datetime.fromtimestamp(now, timezone.utc).strftime("%H:%M UTC")
+
+
+def _post_hub_receipts(state, priority_records, now, loc, receipt_post_fn):
+    """#1109 req 3 — on a VERIFIED delivery, post ONE hub receipt per NEW priority
+    arrival id onto the hub ticket the arrival sits on (`rec["num"]`), so the FLOW
+    session sees in the thread that INFRA was woken. Deduped per arrival id in
+    `state[_RECEIPT_STATE_KEY]` (JSON-persisted list) — a re-detected arrival never
+    double-posts. `receipt_post_fn(hub_num, text)` is the injectable seam (the gk
+    `gh issue comment` in production; a spy in tests) — None or a non-priority
+    wave posts nothing. Returns the number of receipts posted. Never raises."""
+    if receipt_post_fn is None or not isinstance(state, dict):
+        return 0
+    seen = state.get(_RECEIPT_STATE_KEY)
+    if not isinstance(seen, list):
+        seen = []
+    seen_set = set(seen)
+    posted = 0
+    hhmm = _receipt_clock_hhmm(now)
+    for rec in priority_records:
+        if not isinstance(rec, dict):
+            continue
+        try:
+            rid = int(rec["id"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if rid in seen_set:
+            continue
+        num = rec.get("num", rid)
+        text = ("delivered %s → gk-infra (%s) — arrival #%s (%s)"
+                % (hhmm, loc, rid, rec.get("tag") or "infra"))
+        try:
+            receipt_post_fn(num, text)
+        except Exception:  # noqa: BLE001 — a hub-post failure never breaks delivery
+            continue
+        seen_set.add(rid)
+        seen.append(rid)
+        posted += 1
+    if posted:
+        state[_RECEIPT_STATE_KEY] = seen
+    return posted
+
+
+def _post_receipts_for_wave(state, arrivals, id_map, now, loc, receipt_post_fn):
+    """#1109 — the confirmed-delivery hub-receipt call for a PRIORITY wave: filter
+    `arrivals` to their priority records via `id_map`, post + dedup, and return the
+    (0-or-1-element) journal line list. Keeps `goal_queue_arrival_recheck`'s hot
+    path a single call."""
+    prio_recs = [id_map[a] for a in arrivals
+                 if id_map and a in id_map and _is_priority_record(id_map[a])]
+    n = _post_hub_receipts(state, prio_recs, now, loc, receipt_post_fn)
+    return (["infra-priority %s -> hub receipt posted x%d" % (loc, n)]
+            if n else [])
+
+
 # --- BOUNDED RETRY ---------------------------------------------------------
 
 def _book_unverified_send(rec, new_rec, cur_sorted, loc, arrivals_n):
@@ -508,7 +639,8 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                                sleep_fn=None, captured=None,
                                batch_collect=None, classify_builder=None,
                                infra_queue_fetch=None, resolve_role_fn=None,
-                               persist=None, budget_left_fn=None):
+                               persist=None, budget_left_fn=None,
+                               receipt_post_fn=None):
     """Audit ONE armed candidate pane's gk-queue snapshot and, on a NEW arrival,
     deliver ONE verified nudge into that session. Called from
     `goal.goal_lane_sweep`'s existing armed-pane loop with the already-resolved
@@ -632,6 +764,19 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     action, new_rec, reason, arrivals = _queue_decision(rec, cur_ids, now,
                                                         classify_fn=classify_fn)
 
+    # #1109 — a wave carrying a RELEASE-BLOCKING infra arrival (a STOP:/
+    # GATEKEEPER-ACTION (INFRA) comment, or a prio:*/release-block infra ticket)
+    # is delivered under the `infra-priority` nudge kind: cap-EXEMPT (never sits
+    # 3 h behind the owner's cross-kind anti-spam cap) but with its own 15-min
+    # floor + every idle/busy/liveness gate. Only the INFRA role can be priority
+    # (the review union has no id_map). A priority wave ALWAYS takes the DIRECT
+    # delivery path (never the batch path, whose single `queue-arrival` identity
+    # is capped), so `infra-priority` reaches the pane on its own gate.
+    priority = role == "infra" and _wave_has_priority(arrivals, id_map)
+    nudge_kind = INFRA_PRIORITY_NUDGE if priority else "queue-arrival"
+    if priority:
+        batch_collect = None
+
     if action == "skip":
         logs.append("queue-arrival %s -> skip:%s (state unchanged)"
                     % (loc, reason))
@@ -681,9 +826,9 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # as pre-#741).
     # #923 BATCH MODE: common delivery guards handled once by the caller.
     if batch_collect is None:
-        if not watchdog.nudges_enabled("queue-arrival"):   # #1023 per-kind switch
-            logs.append("queue-arrival %s -> skip:kind-off (queue-arrival, %d new)"
-                        % (loc, len(arrivals)))
+        if not watchdog.nudges_enabled(nudge_kind):   # #1023/#1109 per-kind switch
+            logs.append("queue-arrival %s -> skip:kind-off (%s, %d new)"
+                        % (loc, nudge_kind, len(arrivals)))
             return logs
         from watchdog import compact as _compact
         if _compact.pending_compact_hold(sid, now):   # #848 bounded
@@ -706,10 +851,10 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                         "agents — deferred to next idle tick, %d new)"
                         % (loc, len(arrivals)))
             return logs
-        if not _nudge_gate.gate_ok(state, sid, "queue-arrival", now):
+        if not _nudge_gate.gate_ok(state, sid, nudge_kind, now):
             logs.append("queue-arrival %s -> %s; retry next sweep, "
                         "%d new" % (loc, _nudge_gate.floor_hold_reason(
-                            state, sid, "queue-arrival", now), len(arrivals)))
+                            state, sid, nudge_kind, now), len(arrivals)))
             return logs
     if dry_run:
         logs.append("queue-arrival %s -> WOULD-NUDGE (%d new: %s)"
@@ -758,15 +903,17 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     if _left is not None and _left < QUEUE_ARRIVAL_CONFIRM_MIN_BUDGET_S:
         _skip_confirm = True
     ok = watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                logs=logs, out=send_out, nudge="queue-arrival",
+                                logs=logs, out=send_out, nudge=nudge_kind,
                                 state=state, skip_confirm=_skip_confirm,
                                 now=now)  # #1022 wedge / #1023 budget / #1092 pane budget
     if not ok:
         if send_out.get("delivered_unconfirmed"):
             # NON-terminal for the baseline — leave base untouched + janitor
             # watch SET for the undo path — but stamp the per-kind floor so the
-            # re-confirm defers a full hour (owner's 1/hour rule, 🟡4).
-            _nudge_gate.mark_sent(state, sid, "queue-arrival", now)   # #1023 🟡4
+            # re-confirm defers a full hour (owner's 1/hour rule, 🟡4). A
+            # delivered-unconfirmed infra-priority is NOT a VERIFIED delivery, so
+            # NO hub receipt is posted (#1109 req 3: receipt on confirmed only).
+            _nudge_gate.mark_sent(state, sid, nudge_kind, now)   # #1023 🟡4
             _persist(persist, logs)   # #1023 timeout-race: durable before a kill
             logs.append("queue-arrival %s -> delivered-unconfirmed (no confirmed "
                         "nudge turn; baseline unchanged, floor stamped, undo via "
@@ -790,10 +937,16 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     new_rec["base"] = _advanced_base(new_rec["base"], cur_sorted, arrivals)  # #993 review 3
     new_rec["send_fails"] = 0
     qrecs[sid] = new_rec
-    _nudge_gate.mark_sent(state, sid, "queue-arrival", now)   # #797
+    _nudge_gate.mark_sent(state, sid, nudge_kind, now)   # #797/#1109
+    # #1109 req 3 — a VERIFIED priority delivery posts ONE hub receipt per NEW
+    # priority arrival id (deduped in state) so FLOW sees INFRA was woken.
+    if priority:
+        logs += _post_receipts_for_wave(state, arrivals, id_map, now, loc,
+                                        receipt_post_fn)
     _persist(persist, logs)   # #1023 timeout-race: mark+baseline durable before a kill
     if handled is not None:
         handled.add(sid)
-    logs.append("queue-arrival nudge %s -> %d new (%s), baseline advanced to %d"
-                % (loc, len(arrivals), _fmt_arrivals(arrivals), len(cur_sorted)))
+    logs.append("%s nudge %s -> %d new (%s), baseline advanced to %d"
+                % (nudge_kind, loc, len(arrivals), _fmt_arrivals(arrivals),
+                   len(cur_sorted)))
     return logs

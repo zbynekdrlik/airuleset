@@ -61,9 +61,13 @@ class TestInfraPriorityGate(unittest.TestCase):
         self.assertNotIn(INFRA, ng.GATED_CATEGORIES)
 
     def test_default_off_absent_state(self):
-        with TemporaryDirectory() as home:
-            self.assertFalse(wd.nudges_enabled(INFRA, home=home),
-                             "infra-priority must be OFF by default (staged on gk)")
+        # the conftest forces AIRULESET_TEST_IGNORE_DISABLE=1 (a real box's staged
+        # state never fails the suite), so unset it to see the true default.
+        with m.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AIRULESET_TEST_IGNORE_DISABLE", None)
+            with TemporaryDirectory() as home:
+                self.assertFalse(wd.nudges_enabled(INFRA, home=home),
+                                 "infra-priority must be OFF by default (staged on gk)")
 
     def test_fifteen_minute_floor(self):
         self.assertEqual(ng._category_floor(INFRA), 15 * MIN)
@@ -293,8 +297,9 @@ class TestGkStallNotice(unittest.TestCase):
 
     def _fire(self, *, now, rec, verdict="stuck", pct=94, limited=True,
               role="infra", send_fn=None, dry_run=False):
-        role_fn = lambda cwd: ("sequential", role, "role") if role else (
-            "parallel", None, "default")
+        def role_fn(cwd):
+            return ("sequential", role, "role") if role else (
+                "parallel", None, "default")
         return gsn.gk_stall_notice(
             now, rec, self._Glance(verdict), self._cap(pct, limited),
             self.CWD, "sess-x", "%9", "gk-infra:0", send_fn, dry_run,
