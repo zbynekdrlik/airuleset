@@ -389,13 +389,23 @@ def _measure_repo_ceilings():
         return {"modules_resolved_bytes": 0, "skill_desc_chars": 0,
                 "module_count": 0}
 
+    # #1077: count ONLY the always-on half — the `modules/` entries
+    # `categorize_entries` classifies as modules — NEVER the path-scoped
+    # `rules/*.md` profile lines. A path-scoped rule installs as a
+    # nested_memory attachment (symlinked to ~/.claude/rules/, not @import into
+    # CLAUDE.md), so it adds ZERO always-on bytes; counting it would make the
+    # baseline change every time a `rules/` line is added, which is exactly the
+    # over-count the #1077 Design-question hit. (The sibling box-scope scanner
+    # `always_on_rule_files` already excludes `paths:` rules.)
+    from cli_config import categorize_entries
+    entries = [ln.strip() for ln in lines
+               if ln.strip() and not ln.strip().startswith("#")]
+    modules, _rules = categorize_entries(entries)
+
     total = 0
     count = 0
     missing_modules = []
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
+    for line in modules:
         mod_path = REPO_DIR / line
         if mod_path.exists():
             try:
