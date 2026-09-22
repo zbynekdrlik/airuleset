@@ -376,6 +376,7 @@
     "tests/test_memory_classification_860.py": 92,
     "tests/test_merge_drivers.py": 431,
     "tests/test_merged_partition_1083.py": 108,
+    "tests/test_miva_profile_1093.py": 336,
     "tests/test_model_audit.py": 284,
     "tests/test_model_backend_1062.py": 1052,
     "tests/test_model_float_audit_job.py": 183,
