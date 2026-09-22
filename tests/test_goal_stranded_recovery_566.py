@@ -23,6 +23,7 @@ gate:
   (d) a recent-human pane vetoes every recovery keystroke.
 """
 import json
+import os
 import sys
 import time
 import unittest
@@ -57,11 +58,23 @@ def _proj_with_transcript(testcase, human_prompt=None):
     proj = Path(d.name)
     tpath = _write_marker_transcript(proj, CWD, SID)
     if human_prompt is not None:
-        iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+        # #1110 FIXTURE REALISM: a "recent human" typed a WHILE ago, not this
+        # instant — the recent-human window is 30 min (GOAL_AUTOARM_RECENT_HUMAN_S),
+        # far larger than the 45 s transcript-liveness window. Stamp the prompt
+        # 120 s ago (still well within the recent-human window, so the veto this
+        # test exercises still fires) and RE-AGE the file mtime the same 120 s
+        # after the append (an inline transcript write, os.utime'd exactly as the
+        # decision directs) — otherwise the append re-freshens the mtime to now
+        # and `deliver_goal`'s transcript-liveness gate reads a LIVE turn and
+        # defers before the recovery path this test asserts on. Assertion
+        # unchanged.
+        aged = time.time() - 120
+        iso = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime(aged))
         with open(tpath, "a", encoding="utf-8") as f:
             f.write(json.dumps({"type": "user",
                                 "message": {"content": human_prompt},
                                 "timestamp": iso}) + "\n")
+        os.utime(tpath, (aged, aged))
     return proj, tpath
 
 
