@@ -350,7 +350,7 @@ def _prune_lane_reconcile_orphans(lrecs, visited_sids, now,
 # #1103 — the finished-worktree HYGIENE SWEEP (a rung in the lane-reconcile job
 # family, no new run_once job). Removes a lane worktree that is FINISHED for
 # this box — merged into its target, or handed off with no live process — once
-# it is clean + old, so the `git worktree list` (which `cli_lane_overlap`
+# it is clean + old, so the `git worktree list` (which `cli_lane_liveness`
 # derives liveness from) stops lying. The BRANCH REF is always KEPT (the wip
 # backup + the hand-off live on origin); a dirty or process-holding worktree is
 # left and journaled. Wired from run_once's existing `_job_goal_lane_sweep`
@@ -416,7 +416,7 @@ def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
     holds. Never raises — a hygiene sweep must never crash the watchdog sweep.
 
     The DISCRIMINATOR (which worktrees are candidates) is the SAME liveness
-    derivation the receipt uses (``cli_lane_overlap.classify_lanes``, #367
+    derivation the receipt uses (``cli_lane_liveness.classify_lanes``, #367
     one-derivation) — a lane counted live by the overlap check is never a
     candidate. The removal-safety LEAF plumbing is REUSED from the hardened
     worktree sweeper (``cli_worktree_sweep``): ``_worktree_is_clean`` (dirty =>
@@ -428,7 +428,7 @@ def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
     are test seams; each None => the default (framework helper or commit-age)."""
     import os
     import time as _time
-    import cli_lane_overlap as lo
+    import cli_lane_liveness as lo
     import cli_worktree_sweep as ws
     run = run or _prune_run_default
     now = _time.time() if now is None else now
