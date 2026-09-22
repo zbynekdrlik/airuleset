@@ -2898,7 +2898,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           rung that MUTATES the filesystem (all others nudge/read): per repo it
           `git worktree remove`s (branch ref KEPT, never `--force`) a lane
           worktree the shared liveness derivation
-          (`cli_lane_overlap.classify_lanes`) classifies FINISHED or MERGED and
+          (`cli_lane_liveness.classify_lanes`) classifies FINISHED or MERGED and
           that is clean + not in live use + >2h idle, so `git worktree list`
           stops over-counting handed-off / hotfix / dead-worker lanes as live;
           self-gated per repo hourly via `state["worktree_prune"]`, dirty /

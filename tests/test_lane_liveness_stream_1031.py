@@ -28,7 +28,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 import cli_concurrency as cc  # noqa: E402
-import cli_lane_overlap as lo  # noqa: E402
+import cli_lane_liveness as lo  # noqa: E402
+import cli_lane_overlap as ovl  # noqa: E402  (compute_overlap — overlap half)
 
 HOOK = REPO / "hooks" / "block-dispatch-over-wdrain.sh"
 
@@ -183,7 +184,7 @@ class TestReceiptSeesStreamLane(unittest.TestCase):
         fake = _FakeGit(STREAM_PORCELAIN)  # the lane touches addons/x/models/y.py
         lanes = lo.gather_live_lanes(D3, run=fake)
         self.assertEqual(len(lanes), 1, "the stream lane must be seen at all")
-        verdict, overlaps = lo.compute_overlap(
+        verdict, overlaps = ovl.compute_overlap(
             paths=["addons/x/models/y.py"], topics=["vyroba dokoncenie"],
             live_lanes=lanes, open_prs=[])
         self.assertEqual(verdict, "overlap")

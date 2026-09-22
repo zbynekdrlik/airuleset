@@ -53,9 +53,15 @@ _BYPASS_RE = re.compile(r"airuleset:design-by-ok\s*(?P<reason>.*)", re.IGNORECAS
 # MINOR-3 lesson shared with the design classifiers): a `**Design-by:**` /
 # `- **Design-by:**` form has `**` before the label AND after the colon, so
 # `\**` is allowed at both spots.
+# #1064: tolerate + capture an optional ` (served: <id>)` audit suffix. The
+# stamp now records the CONFIGURED (launch) model as `<model>` and the API-SERVED
+# model in the suffix; `<model>` is still the FIRST token after the role (a
+# `\S+` stops at the space before `(served:`), so the accept/refuse decision
+# keys on the configured id unchanged, and `served` is available for the reason.
 _DESIGN_BY_RE = re.compile(
     r"(?im)^[ \t>*#-]*\**[ \t]*Design-?by\**[ \t]*:[ \t]*\**[ \t]*"
-    r"(?P<role>main|worker)\b[ \t]*(?P<model>\S+)?")
+    r"(?P<role>main|worker)\b[ \t]*(?P<model>\S+)?"
+    r"(?:[ \t]*\(served:[ \t]*(?P<served>[^)]*)\))?")
 
 
 def _log(line):
@@ -103,16 +109,29 @@ def _norm_model(m):
     return re.sub(r"\[[^\]]*\]$", "", m)
 
 
-def newest_design_by(comment_bodies):
-    """(role, model) of the `Design-by:` line in the NEWEST comment that carries
-    one, or None. `comment_bodies` is the thread in CREATION order (oldest
-    first); the last body with a `Design-by:` line wins."""
+def _newest_design_by_match(comment_bodies):
+    """The `_DESIGN_BY_RE` match in the NEWEST comment carrying a `Design-by:`
+    line, or None. `comment_bodies` is the thread in CREATION order (oldest
+    first); the last body with a `Design-by:` line wins. Kept separate so both
+    `newest_design_by` (the 2-tuple decision) and `check_issue` (which also wants
+    the `served` suffix for the reason text, #1064) share ONE 'newest wins' pass."""
     result = None
     for body in comment_bodies:
         m = _DESIGN_BY_RE.search(body or "")
         if m:
-            result = (m.group("role").lower(), (m.group("model") or "").strip())
+            result = m
     return result
+
+
+def newest_design_by(comment_bodies):
+    """(role, model) of the `Design-by:` line in the NEWEST comment that carries
+    one, or None. The optional `(served: …)` audit suffix (#1064) is captured
+    separately (see `check_issue`'s reason text) and does NOT change this 2-tuple
+    contract -- the accept/refuse decision keys on role + the CONFIGURED model."""
+    m = _newest_design_by_match(comment_bodies)
+    if not m:
+        return None
+    return (m.group("role").lower(), (m.group("model") or "").strip())
 
 
 def _fable_id():
@@ -200,20 +219,27 @@ def check_issue(number, slug, cwd, fetch=None, fable_id=None):
     if bodies is None:
         return False, ("could not read #%d's comments (gh error / no network) "
                        "-- refusing (fail-closed)" % number)
-    db = newest_design_by(bodies)
-    if db is None:
+    m = _newest_design_by_match(bodies)
+    if m is None:
         return False, ("#%d has no `Design-by:` comment -- the Fable main must "
                        "author the design (airuleset.py design-record) before "
                        "an autopilot-worker is dispatched" % number)
-    role, model = db
+    role = m.group("role").lower()
+    model = (m.group("model") or "").strip()
+    # #1064: the CONFIGURED model is `<model>`; the API-served model, when the
+    # stamp carries the audit suffix, is surfaced in the reason so a refused
+    # float is legible ("configured X, served Y").
+    served = (m.group("served") or "").strip()
+    served_note = " (served: %s)" % served if served else ""
     if role != "main":
-        return False, ("#%d's newest design comment is `Design-by: %s %s` -- the "
+        return False, ("#%d's newest design comment is `Design-by: %s %s%s` -- the "
                        "design must be authored by the MAIN session, not the "
-                       "worker (#871/#1061)" % (number, role, model or "?"))
+                       "worker (#871/#1061)" % (number, role, model or "?",
+                                                served_note))
     if _norm_model(model) not in accepted:
-        return False, ("#%d's newest design comment is `Design-by: main %s` -- "
+        return False, ("#%d's newest design comment is `Design-by: main %s%s` -- "
                        "expected %s; the design must be authored by the Fable "
-                       "main" % (number, model or "?", fable_id))
+                       "main" % (number, model or "?", served_note, fable_id))
     return True, "ok"
 
 
