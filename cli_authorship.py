@@ -15,6 +15,7 @@ from a PreToolUse gate on every Agent dispatch, so it must never drag airuleset'
 whole import graph in. The Fable-id MATCH lives in the gate, not here.
 """
 import os
+import re
 from pathlib import Path
 
 # The isolated-lane worktree segment -- the SAME predicate `_is_worktree_repo_dir`
@@ -22,6 +23,15 @@ from pathlib import Path
 WORKTREE_MARKER = "/.claude/worktrees/"
 
 UNKNOWN_MODEL = "unknown"
+
+
+def _norm_model(m):
+    """A model id normalised for the configured/served comparison (#1064): the
+    trailing `[..]` context tag stripped, lowercased -- the SAME tolerance
+    `gates.designdispatch._norm_model` / `airuleset.is_allowed_model` apply, kept
+    LOCAL so cli_authorship stays dependency-light."""
+    m = (m or "").strip().lower()
+    return re.sub(r"\[[^\]]*\]$", "", m)
 
 
 def authorship_role(cwd):
@@ -165,14 +175,136 @@ def session_model(cwd, projects_dir=None, home=None):
     return model if model else UNKNOWN_MODEL
 
 
+def _managed_model():
+    """The managed launch default (`airuleset.MANAGED_MODEL`) normalised, or
+    None when airuleset is unimportable -- the degenerate case that still lets
+    the `unknown` stamp/refusal fire (#1064). airuleset is imported LAZILY so the
+    dependency-light dispatch-gate path (which never calls configured_model)
+    stays untouched."""
+    try:
+        import airuleset
+        return _norm_model(airuleset.MANAGED_MODEL)
+    except Exception:
+        return None
+
+
+def _read_model_from_cmdline(pid):
+    """The `--model <id>` value from `/proc/<pid>/cmdline` (NUL-separated argv),
+    or None. Handles both `--model X` and `--model=X`. Best-effort: any read
+    error / no flag -> None."""
+    try:
+        with open("/proc/%s/cmdline" % pid, "rb") as fh:
+            raw = fh.read()
+    except OSError:
+        return None
+    args = [a for a in raw.split(b"\x00") if a]
+    for i, a in enumerate(args):
+        s = a.decode("utf-8", "replace")
+        if s == "--model" and i + 1 < len(args):
+            return args[i + 1].decode("utf-8", "replace").strip() or None
+        if s.startswith("--model="):
+            return s[len("--model="):].strip() or None
+    return None
+
+
+def _pane_configured_model(cwd):
+    """The `--model <id>` the live claude pane running in `cwd` was LAUNCHED with,
+    or None (#1064). READ-ONLY reuse of the watchdog tmux inventory +
+    `_pane_claude_pid` primitive: match a claude pane whose (sudo-resolved) cwd
+    equals `cwd`, resolve its claude pid, read `/proc/<pid>/cmdline` for a
+    `--model` argv. Best-effort -- no tmux / no matching pane / no `--model` flag
+    / a cross-user /proc read denial -> None (the caller falls back to the
+    managed default). A dispatched subagent has no pane of its own, so a worktree
+    lane cwd resolves to None here by design."""
+    if not cwd:
+        return None
+    try:
+        import watchdog
+        from watchdog import tmux_io
+    except Exception:
+        return None
+    targets = {str(cwd).rstrip("/")}
+    try:
+        rp = os.path.realpath(str(cwd)).rstrip("/")
+    except Exception:
+        rp = None
+    if rp:
+        targets.add(rp)
+    try:
+        panes = tmux_io.list_claude_panes()
+    except Exception:
+        return None
+    for pane_id, pcwd in panes or []:
+        if (pcwd or "").rstrip("/") not in targets:
+            continue
+        try:
+            ppid = (watchdog._default_run(
+                ["tmux", "display-message", "-p", "-t", pane_id,
+                 "#{pane_pid}"]) or "").strip()
+            cpid = watchdog._pane_claude_pid(ppid) if ppid.isdigit() else None
+        except Exception:
+            cpid = None
+        if cpid:
+            model = _read_model_from_cmdline(cpid)
+            if model:
+                return model
+    return None
+
+
+def configured_model(cwd, projects_dir=None, home=None):
+    """The model the session running in `cwd` was LAUNCHED with, normalised
+    (#1064) -- the stamp's PRIMARY identity, as opposed to `session_model`'s
+    API-SERVED model (which floats). Resolution order:
+      1. the dual-agent IMPLEMENTER alias (`AIRULESET_ROLE=implementer` +
+         `ANTHROPIC_MODEL`), mirroring `session_model` so the pair matches;
+      2. the pane's claude argv `--model <id>` (`_pane_configured_model`);
+      3. the managed launch default (`_managed_model`) -- the main is always
+         launched with it, so it is truthful for the common design author and
+         covers a session launched via the settings `model` key (no `--model`
+         argv) or a dispatched subagent (no pane);
+      4. `UNKNOWN_MODEL` when even the managed default is unresolvable.
+    `projects_dir`/`home` are accepted for signature symmetry with
+    `session_model`; the pane resolution keys on `cwd`."""
+    if os.environ.get("AIRULESET_ROLE") == "implementer":
+        alias = (os.environ.get("ANTHROPIC_MODEL") or "").strip()
+        if alias:
+            return _norm_model(alias)
+    raw = None
+    try:
+        raw = _pane_configured_model(cwd)
+    except Exception:
+        raw = None
+    if raw and raw.strip():
+        return _norm_model(raw)
+    managed = _managed_model()
+    return managed if managed else UNKNOWN_MODEL
+
+
+def _stamp_value(role, configured, served):
+    """Compose the `"<role> <model>[ (served: <served>)]"` value (#1064). The
+    stamp records the CONFIGURED identity; the served model is appended ONLY when
+    it is known AND differs -- so a session served the model it was launched with
+    stamps byte-identically to before this change. When the configured model is
+    unresolvable the served model (if known) becomes the stamp model; when
+    NEITHER resolves the model is `unknown` (role still labelled)."""
+    if configured == UNKNOWN_MODEL:
+        return "%s %s" % (role, served)
+    if served != UNKNOWN_MODEL and _norm_model(served) != configured:
+        return "%s %s (served: %s)" % (role, configured, served)
+    return "%s %s" % (role, configured)
+
+
 def authorship_value(cwd, projects_dir=None, home=None):
     """The `"<role> <model>"` VALUE of an authorship stamp, e.g.
-    `"main claude-fable-5-1"` / `"worker claude-opus-4-8"` / `"main unknown"`.
-    The half a `<kind>-by:` label is prefixed to (see `stamp_line`); a caller
-    that emits its own `Reviewed-by:` field wants just this value."""
+    `"main claude-fable-5-1"` / `"worker claude-opus-4-8"` / `"main unknown"`,
+    with an optional ` (served: <model>)` audit suffix when the API-served model
+    floated off the launch model (#1064). The half a `<kind>-by:` label is
+    prefixed to (see `stamp_line`); a caller that emits its own `Reviewed-by:`
+    field wants just this value."""
     role = authorship_role(cwd)
-    model = session_model(cwd, projects_dir=projects_dir, home=home)
-    return "%s %s" % (role, model)
+    configured = configured_model(cwd, projects_dir=projects_dir, home=home)
+    served = session_model(cwd, projects_dir=projects_dir, home=home)
+    return _stamp_value(role, configured, served)
 
 
 def stamp_line(kind, cwd, projects_dir=None, home=None):

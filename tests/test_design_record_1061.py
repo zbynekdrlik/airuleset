@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -150,19 +151,24 @@ class TestPostAndRecord(unittest.TestCase):
                          "no marker may be written when the post failed")
 
     def test_unknown_model_refuses_and_does_not_post(self):
-        # #1061 fix-forward deliverable 4: never post a `Design-by: <role>
-        # unknown` stamp (the dispatch gate would then reject a legitimate
-        # design). A cwd with no readable transcript resolves to UNKNOWN_MODEL.
+        # #1061 deliverable 4 / #1064: never post a `Design-by: <role> unknown`
+        # stamp (the dispatch gate would then reject a legitimate design). Since
+        # #1064 the stamp records the CONFIGURED model, so `unknown` fires ONLY
+        # when NEITHER configured (pane argv / MANAGED_MODEL) NOR served
+        # (transcript) resolves -- both seams are forced unresolvable here.
         posted = {}
 
         def fake_runner(argv, body):
             posted["called"] = True
             return (0, "url", "")
 
-        ok, reason, stamp = dr.post_and_record(
-            issue=14, repo="zbynekdrlik/airuleset", raw_body=VALID_DESIGN,
-            cwd="/home/airuleset/no-transcript-here", runner=fake_runner,
-            projects_dir=str(self.pd), home=self.home)
+        with mock.patch("cli_authorship._pane_configured_model",
+                        return_value=None), \
+             mock.patch("cli_authorship._managed_model", return_value=None):
+            ok, reason, stamp = dr.post_and_record(
+                issue=14, repo="zbynekdrlik/airuleset", raw_body=VALID_DESIGN,
+                cwd="/home/airuleset/no-transcript-here", runner=fake_runner,
+                projects_dir=str(self.pd), home=self.home)
         self.assertFalse(ok)
         self.assertIsNone(stamp)
         self.assertIn("unknown", reason.lower())
@@ -185,10 +191,14 @@ class TestPostAndRecord(unittest.TestCase):
             posted["body"] = body
             return (0, "url#c", "")
 
-        ok, url, stamp = dr.post_and_record(
-            issue=11, repo="zbynekdrlik/airuleset", raw_body=VALID_DESIGN,
-            cwd=wt, runner=fake_runner, projects_dir=str(self.pd),
-            home=self.home)
+        # #1064: the worker lane's CONFIGURED model comes from its pane argv
+        # (seamed here). served == configured == claude-opus-4-8 -> no suffix.
+        with mock.patch("cli_authorship._pane_configured_model",
+                        return_value="claude-opus-4-8"):
+            ok, url, stamp = dr.post_and_record(
+                issue=11, repo="zbynekdrlik/airuleset", raw_body=VALID_DESIGN,
+                cwd=wt, runner=fake_runner, projects_dir=str(self.pd),
+                home=self.home)
         self.assertTrue(ok, (url, stamp))
         self.assertIn("Design-by: worker claude-opus-4-8", posted["body"])
 
