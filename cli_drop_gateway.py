@@ -80,6 +80,11 @@ class DropLane:
 
     `access=True` = double protection Access+token (external-dev accounts:
     david, dominika); `access=False` = token-only TLS (owner/trusted accounts).
+    EXCEPTION (#1111): the owner's own gk secret-pickup box deliberately runs
+    `access=True` (owner identity as the sole Access include) — defense-in-depth
+    for a credential-delivery/intake box is strictly stricter than token-only,
+    so this is a considered upgrade, not a violation of the owner→`access=False`
+    default above.
 
     `gateway_account` (#838): the unix account that OWNS this lane's tunnel
     config + restart unit on the box. On a SHARED box (subdev) multiple accounts

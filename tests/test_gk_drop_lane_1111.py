@@ -105,10 +105,12 @@ class TestGkControllerIngress(unittest.TestCase):
 
 class TestFleetWideDropPortUniqueness(unittest.TestCase):
     def test_drop_ports_unique_across_all_lanes(self):
-        """gk shares the controller tunnel with the subdev accounts, so the
-        drop `port` must be unique across the WHOLE table, not just per box —
-        two lanes on the same tunnel with the same origin port would conflate
-        their ingress origins."""
+        """Drop ports are allocated from ONE fleet-wide range (8870-8889, plus
+        the grandfathered 8828), so the `port` must be unique across the WHOLE
+        table, not just per box. gk newly shares the controller tunnel with the
+        subdev accounts; keeping the allocation globally distinct keeps each
+        lane's ingress origin (`http://<origin_host>:<port>`) unambiguous and
+        leaves the next-free-port arithmetic (which picked gk's 8876) correct."""
         ports = [lane.port for lane in dg.DROP_LANES.values()]
         dups = sorted({p for p in ports if ports.count(p) > 1})
         self.assertEqual(dups, [], "duplicate drop ports fleet-wide: %s" % dups)
@@ -141,6 +143,8 @@ class TestGkAccessOwnerOnly(unittest.TestCase):
     def test_access_spec_owner_identity_only(self):
         spec = dg.DROP_ACCESS_APPS.get(GK_HOST)
         self.assertIsNotNone(spec, "gk Access lane needs a DROP_ACCESS_APPS spec")
+        self.assertEqual(spec["hostname"], GK_HOST,
+                         "the Access spec's hostname must match its key")
         # gk is the owner's box: the Access include list is the OWNER only,
         # sourced the same way the owner-facing lanes source their include
         # (david1's include is [david@grena.sk, drlik.zbynek@gmail.com]; the
