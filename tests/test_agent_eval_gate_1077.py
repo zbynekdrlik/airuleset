@@ -430,6 +430,10 @@ class TestRuleFile(unittest.TestCase):
             return any(p.match(path) for p in pats)
 
         self.assertTrue(matches("docs/montalu/navody/sklad-qa.json"))
+        # a *-qa.json OUTSIDE a navody/ dir — locks the `*-qa.json` glob
+        # independently of the `navody/**` glob (a qa.json under navody/ is
+        # covered by both, so this keeps the `*-qa.json` glob's teeth).
+        self.assertTrue(matches("docs/miva/x/y-qa.json"))
         self.assertTrue(matches("docs/montalu/build-vyroba-guide.py"))
         self.assertTrue(matches("docs/montalu/navody_sklad_sections.py"))
         # review F3/#7: a non-`navody`-prefixed file INSIDE a navody/ dir is a
@@ -445,6 +449,7 @@ class TestRuleFile(unittest.TestCase):
         # positive cases all match a frontmatter glob.
         pats = [_glob_to_re(g) for g in _frontmatter_paths(RULE)]
         for p in ("docs/montalu/navody/sklad-qa.json",
+                  "docs/miva/x/y-qa.json",
                   "docs/slovnormal/navody/prehlad.html",
                   "docs/x/navody/img/diagram.svg",
                   "docs/montalu/build-vyroba-guide.py",
