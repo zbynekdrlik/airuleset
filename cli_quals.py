@@ -641,10 +641,20 @@ OPS_WAIT_LABELS = ("ops-wait",)
 # member's comments in a single call instead of one `gh issue view` per member.
 # gh's `--search "label:a,b"` ORs the labels (live-verified 2026-09-23).
 OPS_WAIT_PREFETCH_LABELS = OPS_WAIT_LABELS + ("needs-acceptance",)
-# gh issue list --limit ceiling for the prefetch (covers up to 1000 in one
-# invocation). A member beyond it, or a member missing from a truncated list,
-# falls back to today's per-issue `gh issue view` — correct, just slower.
+# gh issue list --limit ceiling for the prefetch. A member beyond it, or a
+# member missing from a truncated list, falls back to today's per-issue
+# `gh issue view` — correct, just slower.
 OPS_WAIT_PREFETCH_LIMIT = 500
+# #1067 — gh's `issue list --json comments` truncates the nested comments
+# connection at 100 per issue (GraphQL default page), while `gh issue view
+# --json comments` paginates FULLY (live-verified 2026-09-23: airuleset #870
+# list=100 vs view=136). A prefetch row at/over this cap is therefore possibly
+# MISSING its newest comments — which would give a wrong `own`/`own_cited`
+# freshness anchor and a FALSE `stale!` ("nikdy falošný", #539/#570). So such a
+# row is EXCLUDED from the prefetch map and falls back to the fully-paginated
+# per-issue read. W tickets with >100 comments are rare, so the extra per-issue
+# reads are few; correctness is never traded for the batch.
+OPS_WAIT_PREFETCH_COMMENT_CAP = 100
 
 
 def _row_is_ops_wait(labels):
@@ -1551,9 +1561,9 @@ def _ages_from_comments(comments, self_login):
     `comments` is not a usable list. The element shape is identical whether it
     came from `gh issue view --json comments` (per-issue) or the per-row
     `comments` of `gh issue list --json number,comments` (the batched prefetch),
-    so both feed the SAME parse → byte-identical ages. `now` is not needed here
-    (the read never depends on the clock — the caller passes it only for the
-    signature symmetry `_issue_comment_ages` keeps)."""
+    so both feed the SAME parse → byte-identical ages. This parse never depends
+    on the clock, so it takes no `now` (its caller `_issue_comment_ages` keeps a
+    `now` param only for the injectable-seam signature symmetry)."""
     if not isinstance(comments, list):
         return None
     own_ts = any_ts = own_cited = own_oldest = own_final_reminder = None
@@ -1652,15 +1662,21 @@ def _ops_wait_prefetch_comments(member_quals, root, limit=None):
     (one gh call per W member — 102 s for 74 members on montalu1, #1067).
 
     The `comments` payload has the SAME element shape `gh issue view --json
-    comments` returns, so `_ages_from_comments` parses it unchanged. `member_quals`
-    are the SAME quals that produced the W members (ONE derivation, #367 — no
-    parallel membership query): `cmd_slice_quals`'s `_slice_quals(user)` (usually
-    ONE qual on a shared-account stream box) or `cmd_core_quals`'s
-    `_obligation_quals()`. A qual whose gh read fails / is unparsable contributes
-    nothing (its members fall back to the per-issue call); an empty `member_quals`
-    returns `{}` (everything falls back — byte-identical to today). Over-fetch
-    (a qual that also matches non-W tickets) is harmless: only members present in
-    the `ops_wait` set are ever consumed."""
+    comments` returns, so `_ages_from_comments` parses it unchanged — EXCEPT gh
+    truncates the list's nested comments connection at
+    OPS_WAIT_PREFETCH_COMMENT_CAP (100), while `gh issue view` paginates fully,
+    so a row at/over that cap is EXCLUDED from the map and falls back to the
+    per-issue read (its ages could otherwise be wrong — see the constant). This
+    is what keeps the prefetched and per-issue results byte-identical.
+
+    `member_quals` are the SAME quals that produced the W members (ONE
+    derivation, #367 — no parallel membership query): `cmd_slice_quals`'s
+    `_slice_quals(user)` (usually ONE qual on a shared-account stream box) or
+    `cmd_core_quals`'s `_obligation_quals()`. A qual whose gh read fails / is
+    unparsable contributes nothing (its members fall back to the per-issue call);
+    an empty `member_quals` returns `{}` (everything falls back — byte-identical
+    to today). Over-fetch (a qual that also matches non-W tickets) is harmless:
+    only members present in the `ops_wait` set are ever consumed."""
     import airuleset
     out = {}
     if not member_quals:
@@ -1685,7 +1701,11 @@ def _ops_wait_prefetch_comments(member_quals, root, limit=None):
                 continue
             num = row.get("number")
             comments = row.get("comments")
-            if isinstance(num, int) and isinstance(comments, list):
+            # A row whose comment list hit gh's 100-cap is possibly TRUNCATED
+            # (missing its newest comments) → leave it OUT so it falls back to
+            # the fully-paginated per-issue read (never a false `stale!`).
+            if (isinstance(num, int) and isinstance(comments, list)
+                    and len(comments) < OPS_WAIT_PREFETCH_COMMENT_CAP):
                 out.setdefault(num, comments)
     return out
 
@@ -1702,11 +1722,16 @@ def ops_wait_ages_fn(ops_wait, root, member_quals):
 
     Routed through `airuleset.*` (not bare names) so a test mocking
     `airuleset._issue_comment_ages` / `_stream_self_login` / `_gh_out` intercepts,
-    exactly as the pre-#1067 inline `_ages` closure did."""
+    exactly as the pre-#1067 inline `_ages` closure did.
+
+    The prefetch runs ONLY when there are actually W members to serve
+    (`ops_wait` non-empty) — an empty W set makes ZERO gh calls (the common
+    idle-box footer case), never firing a per-qual `gh issue list` for a fetch
+    nothing will consume."""
     import airuleset
     self_login = airuleset._stream_self_login()
     prefetch = (airuleset._ops_wait_prefetch_comments(member_quals, root)
-                if member_quals else {})
+                if (member_quals and ops_wait) else {})
     cache = {}
 
     def _ages(n):

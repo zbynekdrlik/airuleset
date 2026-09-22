@@ -62,11 +62,15 @@ class _GhRecorder:
     how many COMMENTS-bearing gh calls were made (so the test can prove the
     prefetch makes ONE, the per-member path N)."""
 
-    def __init__(self, comments, present=None):
+    def __init__(self, comments, present=None, list_comments=None):
         self.comments = comments
         # `present` limits which members the batched list returns (a missing
         # member must fall back to its per-issue view). None → all.
         self.present = set(comments) if present is None else set(present)
+        # `list_comments` overrides what the BATCHED list returns per member
+        # (e.g. a gh-truncated 100-comment list) vs the per-issue `comments`
+        # (the fully-paginated view). Defaults to `comments` (identical data).
+        self.list_comments = list_comments or comments
         self.list_calls = 0
         self.view_calls = []
 
@@ -74,8 +78,8 @@ class _GhRecorder:
         # batched prefetch: gh issue list ... --json number,comments
         if args[:2] == ("issue", "list") and "number,comments" in args:
             self.list_calls += 1
-            rows = [{"number": n, "comments": self.comments[n]}
-                    for n in sorted(self.present)]
+            rows = [{"number": n, "comments": self.list_comments[n]}
+                    for n in sorted(self.present) if n in self.list_comments]
             return json.dumps(rows)
         # per-issue fallback: gh issue view <n> --json comments
         if args[:2] == ("issue", "view") and "comments" in args:
@@ -159,6 +163,61 @@ class PrefetchMissingMemberFallback(unittest.TestCase):
         self.assertNotIn(41, rec.view_calls)     # served from the prefetch
         # 43 (old own comment, per-issue) is still correctly stale!
         self.assertIn(43, sets[0])
+
+
+class PrefetchTruncationFallback(unittest.TestCase):
+    """(a) — gh `issue list --json comments` truncates the nested comments at 100
+    (live-verified), while `gh issue view` paginates fully. A prefetch row at the
+    cap is EXCLUDED → falls back to the per-issue read (never a false stale!)."""
+
+    def test_over_cap_row_falls_back_and_avoids_false_stale(self):
+        import cli_quals
+        cap = cli_quals.OPS_WAIT_PREFETCH_COMMENT_CAP
+        # member 44: the BATCHED list returns `cap` OLD third-party comments
+        # (truncated — the stream's newest CITED push is beyond gh's 100 window);
+        # the per-issue VIEW returns those PLUS the newest fresh CITED own push.
+        old_batch = [{"author": {"login": "other"}, "createdAt": _OLD,
+                      "body": "cakame %d" % i} for i in range(cap)]
+        full_view = old_batch + [{"author": {"login": "me"},
+                                  "createdAt": _FRESH,
+                                  "body": "nasadene vo v1.2.3"}]
+        c = {44: full_view}          # what `gh issue view` returns (full)
+        lc = {44: old_batch}         # what the batched list returns (truncated)
+        ow = _ow(44)
+        rec = _GhRecorder(c, list_comments=lc)
+        sets = _run_flag_sets(ow, ["label:stream:x"], rec)
+        self.assertEqual(1, rec.list_calls)
+        self.assertIn(44, rec.view_calls)    # cap-excluded → per-issue fallback
+        # served from the FULL per-issue view (fresh newest own) → NOT stale.
+        self.assertNotIn(44, sets[0])
+
+    def test_under_cap_row_served_from_prefetch(self):
+        # a row with < cap comments is served from the prefetch (no per-issue).
+        ow = _ow(41)
+        rec = _GhRecorder(COMMENTS)
+        _run_flag_sets(ow, ["label:stream:x"], rec)
+        self.assertEqual([], rec.view_calls)
+
+
+class PrefetchSkippedWhenNoWMembers(unittest.TestCase):
+    """(a) — an EMPTY W set makes ZERO gh calls (the idle-box footer case): the
+    prefetch never fires a per-qual `gh issue list` nobody will consume."""
+
+    def test_empty_ops_wait_no_gh(self):
+        rec = _GhRecorder(COMMENTS)
+        with mock.patch.object(airuleset, "_gh_out", rec), \
+                mock.patch.object(airuleset, "_stream_self_login", lambda: "me"):
+            airuleset.ops_wait_ages_fn({}, "/r", ["q1", "q2"])
+        self.assertEqual(0, rec.comment_calls)
+
+    def test_compute_net_stale_w_empty_no_gh(self):
+        rec = _GhRecorder(COMMENTS)
+        with mock.patch.object(airuleset, "_gh_out", rec), \
+                mock.patch.object(airuleset, "_stream_self_login", lambda: "me"):
+            n = airuleset._compute_net_stale_w({}, cwd="/r",
+                                               member_quals=["q1"])
+        self.assertEqual(0, n)
+        self.assertEqual(0, rec.comment_calls)
 
 
 class CacheTimeoutBackoff(unittest.TestCase):
