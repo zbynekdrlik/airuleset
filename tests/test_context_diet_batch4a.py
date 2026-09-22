@@ -6,11 +6,12 @@ Enforcement-core content MUST stay in the stub.
 Functional tests verify each new trigger row fires the injector.
 """
 import json
-import os
 import subprocess
 import uuid
 from pathlib import Path
 from unittest import TestCase, main
+
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -190,7 +191,7 @@ class _InjectorTestBase(TestCase):
             "tool_input": tool_input if isinstance(tool_input, dict) else json.loads(tool_input),
             "session_id": sid,
         })
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["AIRULESET_SITUATIONAL_CONF"] = self.CONF
         result = subprocess.run(
             ["bash", self.HOOK],

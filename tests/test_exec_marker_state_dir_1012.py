@@ -31,6 +31,8 @@ sys.path.insert(0, str(REPO / "tests"))
 import watchdog as wd                       # noqa: E402
 import _exec_marker_helpers as em           # noqa: E402
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 BLOCK_HOOK = REPO / "hooks" / "block-main-implementation.sh"
 CONSUME_HOOK = REPO / "hooks" / "post-consume-main-exec-marker.sh"
 BIG = "x" * 40000     # over the edit threshold — a goal-armed main would block
@@ -113,7 +115,7 @@ class BlockHookHonoursStateDir1012(unittest.TestCase):
             payload = {"session_id": sid, "hook_event_name": "PreToolUse",
                        "tool_name": "Bash", "tool_input": {"command": command},
                        "transcript_path": tp}
-            env = dict(os.environ)
+            env = hermetic_hook_env(self)
             env["AIRULESET_MAIN_EXEC_STATE_DIR"] = state_dir
             return subprocess.run(["bash", str(BLOCK_HOOK)],
                                   input=json.dumps(payload), env=env,
@@ -166,7 +168,7 @@ class ConsumeHookHonoursStateDir1012(unittest.TestCase):
             pending.write_text("reason\n")
             payload = {"session_id": sid, "hook_event_name": "PostToolUse",
                        "tool_name": "Bash", "tool_input": {"command": "x"}}
-            env = dict(os.environ)
+            env = hermetic_hook_env(self)
             env["AIRULESET_MAIN_EXEC_STATE_DIR"] = sd
             subprocess.run(["bash", str(CONSUME_HOOK)],
                            input=json.dumps(payload), env=env,

@@ -31,6 +31,8 @@ import tempfile
 from pathlib import Path
 from unittest import TestCase, main
 
+from _hook_state_cleanup import MODULE_HOOK_HOME, hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "inject-situational-rule.sh"
 CONF = ROOT / "hooks" / "situational-triggers.conf"
@@ -55,7 +57,7 @@ def run(tool_input, tool_name="Bash", session_id="sess-A", tmpdir=None):
     payload = json.dumps(
         {"session_id": session_id, "tool_name": tool_name, "tool_input": tool_input}
     )
-    env = dict(os.environ)
+    env = dict(os.environ, HOME=MODULE_HOOK_HOME)
     if tmpdir:
         env["TMPDIR"] = tmpdir
     return subprocess.run(
@@ -222,14 +224,14 @@ class TestInjection(TestCase):
 
     def test_missing_session_id_still_works(self):
         payload = json.dumps({"tool_input": {"command": "gh pr merge 5"}})
-        env = dict(os.environ, TMPDIR=self.tmpdir)
+        env = hermetic_hook_env(self, TMPDIR=self.tmpdir)
         r = subprocess.run(
             ["bash", str(HOOK)], input=payload, capture_output=True, text=True, env=env
         )
         self.assertEqual(r.returncode, 0)
 
     def test_malformed_payload_fails_open(self):
-        env = dict(os.environ, TMPDIR=self.tmpdir)
+        env = hermetic_hook_env(self, TMPDIR=self.tmpdir)
         r = subprocess.run(
             ["bash", str(HOOK)], input="not json at all", capture_output=True,
             text=True, env=env,
@@ -386,7 +388,7 @@ class TestItem95_Item12NewSkillTriggers(TestCase):
                 "prompt": text,
             }
         )
-        env = dict(os.environ, TMPDIR=self.tmpdir)
+        env = hermetic_hook_env(self, TMPDIR=self.tmpdir)
         return subprocess.run(
             ["bash", str(HOOK)], input=payload, capture_output=True, text=True, env=env
         )
@@ -492,7 +494,7 @@ class TestItem95_RootCauseNewSkillTriggers(TestCase):
                 "prompt": text,
             }
         )
-        env = dict(os.environ, TMPDIR=self.tmpdir)
+        env = hermetic_hook_env(self, TMPDIR=self.tmpdir)
         return subprocess.run(
             ["bash", str(HOOK)], input=payload, capture_output=True, text=True, env=env
         )

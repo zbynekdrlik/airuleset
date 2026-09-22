@@ -16,11 +16,12 @@ silently break those tests without an obvious local failure first.
 """
 
 import json
-import os
 import subprocess
 import tempfile
 from pathlib import Path
 from unittest import TestCase, main
+
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -198,7 +199,7 @@ class TestAskUserQuestionWiring(TestCase):
                 },
             }
         )
-        env = dict(os.environ, TMPDIR=self.tmpdir)
+        env = hermetic_hook_env(self, TMPDIR=self.tmpdir)
         r = subprocess.run(
             ["bash", str(INJECT_HOOK)], input=payload, capture_output=True, text=True, env=env
         )

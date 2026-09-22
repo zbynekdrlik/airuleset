@@ -50,6 +50,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset                                          # noqa: E402
 import cli_quals                                          # noqa: E402
 
+from _hook_state_cleanup import MODULE_HOOK_HOME, hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "block-fork-no-merge-issue-close.sh"
 
@@ -143,7 +145,7 @@ def run(cmd, cwd, hook=None, me="", author="", gh_fail=False,
     # specific renamed identity assert the ownership SET in-process instead (see
     # TestStreamLabelAcceptanceClose).
     payload = json.dumps({"tool_input": {"command": cmd}})
-    env = dict(os.environ)
+    env = dict(os.environ, HOME=MODULE_HOOK_HOME)
     env["PATH"] = _fake_gh_dir() + os.pathsep + env.get("PATH", "")
     env["FAKE_GH_ME"] = me
     env["FAKE_GH_AUTHOR"] = author
@@ -1404,7 +1406,7 @@ class TestRepoFlagUnparseableHereString(TestCase):
             "if _repo_flag_unparseable \"\"; then echo TRUE; else echo FALSE; fi\n"
         )
         r = subprocess.run(["bash", "-c", driver], input=cmd,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=hermetic_hook_env(self))
         # RED on the `printf | grep` form (SIGPIPE → FALSE / wrong-allow);
         # GREEN on the here-string form (TRUE → the fail-safe blocks).
         self.assertEqual(r.stdout.strip(), "TRUE",
@@ -1436,7 +1438,7 @@ def _run_with_gh_body(cmd, cwd, gh_body, hook=None):
     gh.write_text(gh_body)
     gh.chmod(0o755)
     payload = json.dumps({"tool_input": {"command": cmd}})
-    env = dict(os.environ)
+    env = dict(os.environ, HOME=MODULE_HOOK_HOME)
     env["PATH"] = d + os.pathsep + env.get("PATH", "")
     env.pop("GH_APP_TOKEN_DIR", None)
     return subprocess.run(["bash", str(hook or HOOK)], input=payload,
@@ -1544,7 +1546,7 @@ class TestFrontGateSigpipe824(TestCase):
         driver = ("set -euo pipefail\nCMD=$(cat)\n" + func + "\n"
                   "if _cmd_has_comment_flag; then echo TRUE; else echo FALSE; fi\n")
         r = subprocess.run(["bash", "-c", driver], input=cmd,
-                           capture_output=True, text=True)
+                           capture_output=True, text=True, env=hermetic_hook_env(self))
         # RED (FALSE, SIGPIPE) on the pipe form; GREEN (TRUE) on the here-string.
         self.assertEqual(r.stdout.strip(), "TRUE",
                          "stdout=%r stderr=%r" % (r.stdout, r.stderr))

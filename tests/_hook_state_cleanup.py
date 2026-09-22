@@ -18,11 +18,14 @@ this helper needs no per-hook knowledge of which exact filename convention a
 given hook happens to use — it covers the whole class of hook-driving tests,
 not just the one or two hooks a caller has in mind today.
 """
+import atexit
 import glob
 import os
 import re
+import shutil
 import stat
 import sys
+import tempfile
 import time
 import uuid
 
@@ -181,11 +184,24 @@ def hermetic_hook_env(testcase, **extra):
     deliberately exercise HOME-resident state (question maps, dedup files) keep
     building their own ``env`` instead of calling this.
     """
-    import tempfile
     home = tempfile.mkdtemp(prefix="hermetic-hook-home-")
-    testcase.addCleanup(__import__("shutil").rmtree, home, True)
+    testcase.addCleanup(shutil.rmtree, home, True)
     env = dict(os.environ)
     env["HOME"] = home
     env.update(extra)
     return env
+
+
+# #1046: a process-lived empty HOME for MODULE-LEVEL hook runners that spawn a
+# hook from a plain module function (no `testcase` for `addCleanup`, so
+# `hermetic_hook_env` above cannot be used). A module-level helper points the
+# subprocess HOME here so the hook never reads the box's real ~/.claude — the
+# same box-state-independence `hermetic_hook_env` gives method-level runners.
+# A SINGLE shared empty dir is safe for this set: it is only ever READ by the
+# hooks module-level helpers drive (prose / question / lint / block gates; the
+# #1046 audit confirmed no notify-discord dedup/delivery WRITER — nor any
+# design-by-gate.log / tickets-status writer — runs from a module-level helper),
+# so there is nothing to contaminate across tests. Removed at interpreter exit.
+MODULE_HOOK_HOME = tempfile.mkdtemp(prefix="airuleset-hho-1046-mod-")
+atexit.register(shutil.rmtree, MODULE_HOOK_HOME, True)
 

@@ -36,7 +36,8 @@ from pathlib import Path
 from unittest import TestCase, main
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _hook_state_cleanup import sweep_session_files  # noqa: E402
+from _hook_state_cleanup import (  # noqa: E402
+    MODULE_HOOK_HOME, sweep_session_files)
 
 ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "stop-check-prose-violations.sh"
@@ -45,6 +46,10 @@ HOOK = ROOT / "hooks" / "stop-check-prose-violations.sh"
 def _run(msg, sid=None, env=None):
     sid = sid or ("credreq152-%s" % uuid.uuid4().hex[:10])
     payload = json.dumps({"session_id": sid, "last_assistant_message": msg})
+    # #1046: module-level runner (no testcase for addCleanup) — force a shared
+    # hermetic HOME so the hook never reads the box's real ~/.claude; a caller's
+    # own env keeps its vars but HOME is forced hermetic too.
+    env = {**(env if env is not None else os.environ), "HOME": MODULE_HOOK_HOME}
     p = subprocess.run(
         ["bash", str(HOOK)], input=payload, capture_output=True, text=True,
         timeout=300, env=env)

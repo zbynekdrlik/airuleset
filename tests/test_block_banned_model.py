@@ -19,13 +19,15 @@ from unittest import TestCase
 
 import airuleset
 
+from _hook_state_cleanup import MODULE_HOOK_HOME, hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOOK = os.path.join(REPO, "hooks", "block-banned-model.sh")
 
 
 def _run(payload):
     r = subprocess.run(["bash", HOOK], input=json.dumps(payload),
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env={**os.environ, "HOME": MODULE_HOOK_HOME})
     return r.returncode, r.stderr
 
 
@@ -101,7 +103,7 @@ class TestHookBanlistMatchesSource(TestCase):
 
 class TestHookShellClean(TestCase):
     def test_hook_parses(self):
-        r = subprocess.run(["bash", "-n", HOOK], capture_output=True, text=True)
+        r = subprocess.run(["bash", "-n", HOOK], capture_output=True, text=True, env=hermetic_hook_env(self))
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_hook_under_3kb(self):

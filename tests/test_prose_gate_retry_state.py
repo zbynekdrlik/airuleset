@@ -47,6 +47,8 @@ import unittest
 import uuid
 from pathlib import Path
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 ROOT = Path(__file__).resolve().parents[1]
 HOOK = ROOT / "hooks" / "stop-check-prose-violations.sh"
 
@@ -94,7 +96,7 @@ class _HookCase(unittest.TestCase):
             payload["session_id"] = sid
         return subprocess.run(
             ["bash", str(HOOK)], input=json.dumps(payload),
-            capture_output=True, text=True, timeout=300)
+            capture_output=True, text=True, timeout=300, env=hermetic_hook_env(self))
 
     def _blocked(self, r):
         return '"block"' in r.stdout
@@ -430,7 +432,7 @@ class TestTheCounterPathIsNotAWritePrimitive(_HookCase):
                 ["bash", str(HOOK)],
                 input=json.dumps({"last_assistant_message": BYPASS_MSG,
                                   "session_id": sid}),
-                capture_output=True, text=True, timeout=30)
+                capture_output=True, text=True, timeout=30, env=hermetic_hook_env(self))
         except subprocess.TimeoutExpired:
             self.fail("the hook hung on a FIFO at its counter path -- in"
                       " production the harness kills it and the message ships")

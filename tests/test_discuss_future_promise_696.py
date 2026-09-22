@@ -21,7 +21,6 @@ Locked here (RED against the pre-#696 tree):
 """
 
 import json
-import os
 import re
 import subprocess
 import sys
@@ -32,6 +31,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import discuss_thread_guard as g  # noqa: E402
+
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 HOOK = ROOT / "hooks" / "block-discuss-thread-name.sh"
 COMPOSE = ROOT / "skills" / "odoo-client-messaging" / "handover-compose.md"
@@ -152,7 +153,7 @@ class _HookBase(unittest.TestCase):
     def run_hook(self, *, command, user="montalu5"):
         payload = {"tool_input": {"command": command}, "cwd": "/some/repo",
                    "session_id": "p696-sess"}
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["AIRULESET_DISCUSS_STREAM_USER"] = user
         return subprocess.run(["bash", str(HOOK)], input=json.dumps(payload),
                               capture_output=True, text=True, env=env)

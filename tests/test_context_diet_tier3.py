@@ -5,6 +5,8 @@ import re
 import subprocess
 import unittest
 
+from _hook_state_cleanup import MODULE_HOOK_HOME, hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
@@ -261,7 +263,7 @@ class TestNudgeModuleContextCost(unittest.TestCase):
         r = subprocess.run(
             ["bash", hook],
             input=payload, capture_output=True, text=True, timeout=30,
-            cwd=REPO_DIR,
+            cwd=REPO_DIR, env=hermetic_hook_env(self)
         )
         return r
 
@@ -305,7 +307,7 @@ def _inject(tool_input, tool_name="Bash", session_id=None, tmpdir=None):
         {"session_id": session_id, "tool_name": tool_name, "tool_input": tool_input}
     )
     import tempfile as _tf
-    env = dict(os.environ)
+    env = dict(os.environ, HOME=MODULE_HOOK_HOME)
     if tmpdir is None:
         tmpdir = _tf.mkdtemp(prefix="diet3-inject-")
     env["TMPDIR"] = tmpdir

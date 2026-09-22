@@ -50,6 +50,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset  # noqa: E402
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 REPO = Path(airuleset.__file__).resolve().parent
 HOOK = REPO / "hooks" / "block-tier0-local-build.sh"
 
@@ -79,7 +81,7 @@ class _Runner(unittest.TestCase):
         return p
 
     def run_hook(self, command, cwd, extra_env=None):
-        env = dict(os.environ)
+        env = hermetic_hook_env(self)
         env["AIRULESET_TIER0_AUDIT_LOG"] = str(self.audit_log)
         env.pop("AIRULESET_ALLOW_LOCAL_BUILD", None)
         if extra_env:

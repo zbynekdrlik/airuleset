@@ -14,6 +14,7 @@ ship WORD counts only at command position, never in quoted prose -- so
 (the live #1054 fleet-wide false positive).
 """
 
+import os
 import json
 import subprocess
 import sys
@@ -35,6 +36,8 @@ from test_odoo_message_post_html_915 import (  # noqa: E402
     SUBTYPE_XMLID,
 )
 
+from _hook_state_cleanup import MODULE_HOOK_HOME  # noqa: E402  (#1046 hermetic HOME)
+
 
 def _run_cmd(command, cwd=None):
     """Drive the hook with a Bash command payload, optionally carrying `.cwd`
@@ -47,7 +50,7 @@ def _run_cmd(command, cwd=None):
         input=json.dumps(payload),
         capture_output=True,
         text=True,
-        timeout=10,
+        timeout=10, env={**os.environ, "HOME": MODULE_HOOK_HOME}
     )
     return r.returncode, r.stderr
 

@@ -35,6 +35,8 @@ import tempfile
 from pathlib import Path
 from unittest import TestCase, main
 
+from _hook_state_cleanup import MODULE_HOOK_HOME  # noqa: E402  (#1046 hermetic HOME)
+
 ROOT = Path(__file__).resolve().parent.parent
 STATUS = ROOT / "modules" / "core" / "statusline-vocabulary.md"
 STATUS_DEEP2 = ROOT / "skills" / "statusline-vocabulary-deep" / "DEEP-2.md"
@@ -81,7 +83,7 @@ def run_hook(tool_input, tool_name="Write", session_id="sess-745", tmpdir=None):
     payload = json.dumps(
         {"session_id": session_id, "tool_name": tool_name, "tool_input": tool_input}
     )
-    env = dict(os.environ)
+    env = dict(os.environ, HOME=MODULE_HOOK_HOME)
     if tmpdir:
         env["TMPDIR"] = tmpdir
     return subprocess.run(

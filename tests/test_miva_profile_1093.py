@@ -18,6 +18,7 @@ Each assertion is a STATEMENT lock (against the isolated miva row line / a real
 hook drive), never a bare file-wide substring.
 """
 
+import os
 import json
 import re
 import subprocess
@@ -27,7 +28,7 @@ from pathlib import Path
 from unittest import TestCase, main
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _hook_state_cleanup import sweep_session_files  # noqa: E402
+from _hook_state_cleanup import MODULE_HOOK_HOME, sweep_session_files  # noqa: E402  (#1046 hermetic HOME)
 
 ROOT = Path(__file__).resolve().parent.parent
 MSG = ROOT / "skills" / "odoo-client-messaging"
@@ -83,7 +84,7 @@ def _run(msg, sid=None):
     payload = json.dumps({"session_id": sid, "last_assistant_message": msg})
     p = subprocess.run(
         ["bash", str(HOOK)], input=payload, capture_output=True, text=True,
-        timeout=300)
+        timeout=300, env={**os.environ, "HOME": MODULE_HOOK_HOME})
     sweep_session_files(sid)
     return p
 

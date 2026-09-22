@@ -16,7 +16,7 @@ from pathlib import Path
 from unittest import TestCase, main
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _hook_state_cleanup import sweep_session_files  # noqa: E402
+from _hook_state_cleanup import MODULE_HOOK_HOME, sweep_session_files  # noqa: E402  (#1046 hermetic HOME)
 
 ROOT = Path(__file__).resolve().parent.parent
 HOOK_INJECT = ROOT / "hooks" / "inject-situational-rule.sh"
@@ -32,7 +32,7 @@ def _run_inject(tool_input, tool_name="Write", session_id=None, tmpdir=None):
     payload = json.dumps(
         {"session_id": sid, "tool_name": tool_name, "tool_input": tool_input}
     )
-    env = dict(os.environ)
+    env = dict(os.environ, HOME=MODULE_HOOK_HOME)
     if tmpdir:
         env["TMPDIR"] = tmpdir
     p = subprocess.run(
@@ -56,7 +56,7 @@ def _run_prose(msg, sid=None):
     payload = json.dumps({"session_id": sid, "last_assistant_message": msg})
     p = subprocess.run(
         ["bash", str(HOOK_PROSE)], input=payload, capture_output=True, text=True,
-        timeout=300)
+        timeout=300, env={**os.environ, "HOME": MODULE_HOOK_HOME})
     sweep_session_files(sid)
     return p
 

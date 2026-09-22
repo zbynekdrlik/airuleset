@@ -32,7 +32,7 @@ from tempfile import TemporaryDirectory
 from unittest import TestCase, main
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _hook_state_cleanup import sweep_session_files  # noqa: E402
+from _hook_state_cleanup import MODULE_HOOK_HOME, sweep_session_files  # noqa: E402  (#1046 hermetic HOME)
 
 import cli_doctrine_audit as da  # noqa: E402
 
@@ -58,7 +58,7 @@ def _run(msg, cwd=None):
         obj["cwd"] = cwd
     payload = json.dumps(obj)
     p = subprocess.run(["bash", str(HOOK)], input=payload, capture_output=True,
-                       text=True, timeout=300)
+                       text=True, timeout=300, env={**os.environ, "HOME": MODULE_HOOK_HOME})
     sweep_session_files(sid)
     return p
 

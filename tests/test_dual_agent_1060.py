@@ -22,6 +22,8 @@ from unittest import mock
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
+
 FABLE = "claude-fable-5-1"
 
 
@@ -86,7 +88,7 @@ class TestDesignGateReceivingCLI(unittest.TestCase):
                 '#!/usr/bin/env bash\n'
                 "echo '{\"body\":\"%s\"}'\n" % body)
             gh.chmod(0o755)
-            env = dict(os.environ)
+            env = hermetic_hook_env(self)
             env["PATH"] = str(td) + os.pathsep + env["PATH"]
             env["PYTHONPATH"] = str(REPO) + os.pathsep + env.get("PYTHONPATH", "")
             r = subprocess.run(

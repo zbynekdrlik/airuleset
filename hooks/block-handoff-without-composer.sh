@@ -68,7 +68,7 @@ REPO_ROOT_DIR=""
 [ -n "$HOOK_DIR" ] && REPO_ROOT_DIR="$(dirname "$HOOK_DIR")"
 
 RC=0
-OUT=$(python3 - "$CMD" "$(pwd)" "$REPO_ROOT_DIR" <<'PYEOF' 2>/dev/null
+OUT=$(python3 -P - "$CMD" "$(pwd)" "$REPO_ROOT_DIR" <<'PYEOF' 2>/dev/null
 import hashlib, json, os, re, shlex, sys, time
 
 cmd, cwd, repo_root = sys.argv[1], sys.argv[2], sys.argv[3]

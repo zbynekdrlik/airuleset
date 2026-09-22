@@ -51,7 +51,7 @@ REPO_ROOT="$(dirname "$HOOK_DIR")"
 
 # Data via ARGV, never a pipe into a `python3 -` heredoc (see
 # subagent-stop-check-run-card.sh for why).
-MISSING=$(python3 - "$REPO_ROOT" "$CWD" "$MSG" <<'PYEOF' 2>/dev/null || true
+MISSING=$(python3 -P - "$REPO_ROOT" "$CWD" "$MSG" <<'PYEOF' 2>/dev/null || true
 import re, sys, os
 sys.path.insert(0, sys.argv[1])
 try:
