@@ -264,6 +264,16 @@ class TestVerifStageRegex(TestCase):
                          "VERIF_STAGE_RX must NOT match the lowercase verb "
                          "`čaká` (fleet-wide false-block class)")
 
+    def test_cue_is_boundary_anchored(self):
+        # a WORD ENDING in "do" ("todo"/"kedo") followed by "Čaká" carries the
+        # substring "do Čaká" but is NOT the move cue — the cue is anchored at a
+        # word boundary (#1093 review 🔵-1). Real cues still match.
+        for s in ("todo Čaká", "kedo Čaká", "budo Čaká"):
+            self.assertFalse(_rx_matches(self.rx, s),
+                             f"VERIF_STAGE_RX must NOT read the cue inside `{s}`")
+        self.assertTrue(_rx_matches(self.rx, "presunul do Čaká"),
+                        "a real spaced `do` cue must still match")
+
     def test_does_not_match_longer_words(self):
         for w in ("do Čakať", "do Čakáreň"):
             self.assertFalse(_rx_matches(self.rx, w),

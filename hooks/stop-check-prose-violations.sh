@@ -2212,9 +2212,11 @@ fi
 # DIRECTIONAL MOVE CUE immediately before it — "do "/"do stavu "/"do stage "/"do
 # fázy "/"→ "/"-> " — which a stage-move report always carries ("presunul som do
 # Čaká") and the verb forms never do; a trailing `\b` still keeps it off longer
-# words ("Čakať" / "Čakáreň"). Accepted residual: a real Čaká handover phrased
-# with no move cue is not shape-checked (safe direction — never a false block).
-VERIF_STAGE_RX='(Verifik[áa]ci|Na overeni|(do +|→ *|-> *)(stavu? +|stage +|f[áa]z[ye] +)?Čak[áa]\b)'
+# words ("Čakať" / "Čakáreň"). The cue itself is anchored at a word boundary
+# (`(^|[^[:alpha:]])`) so a word ENDING in "do" ("todo"/"kedo Čaká") is not misread
+# as the cue. Accepted residual: a real Čaká handover phrased with no move cue is
+# not shape-checked (safe direction — never a false block).
+VERIF_STAGE_RX='(Verifik[áa]ci|Na overeni|(^|[^[:alpha:]])(do +|→ *|-> *)(stavu? +|stage +|f[áa]z[ye] +)?Čak[áa]\b)'
 # PAST-TENSE only: a future-tense mention ("presuniem ... do Verifikácia" = "I
 # WILL move it") must NOT be gated — so the SK stems are the past-participle
 # forms (presunul/posunul/…), never the bare present/future stem.
