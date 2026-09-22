@@ -1684,6 +1684,18 @@ def cmd_install(args):
     except Exception as e:
         print(f"  claude launcher error: {e}", file=sys.stderr)
 
+    # --- 3b-α. bashrc drift warning (#1015): a stray `export CLAUDE_CODE_*`
+    # OUTSIDE the managed bashrc/profile blocks is drift — make the gap LOUD at
+    # install (the "gk Discord .env" lesson). The launcher overrides it; remove
+    # the line. Non-fatal. ---
+    try:
+        from cli_bashrc_drift import bashrc_drift_status_row
+        _bd_row = bashrc_drift_status_row()
+        if _bd_row:
+            print(f"  WARNING: {_bd_row} (stray CLAUDE_CODE_* export — remove it)")
+    except Exception as e:
+        print(f"  bashrc-drift check error (non-fatal): {e}", file=sys.stderr)
+
     # --- 3b-bis. tmux attach-or-create interactive helpers (#651) ---
     # `t [name]` + a `tmux()` wrapper that rewrites the simple `new|new-session|
     # a|attach|attach-session -t NAME` shapes to `command tmux new-session -A -s
@@ -2654,6 +2666,17 @@ def cmd_status(args):
             print("paused: %s" % _paused)
     except Exception as e:
         print(f"\nconformance: error ({e})", file=sys.stderr)
+
+    # --- bashrc drift (#1015): a stray `export CLAUDE_CODE_*` OUTSIDE the managed
+    # ~/.bashrc / ~/.profile blocks (dev2's mouse-scroll loss). Shown only when
+    # there IS drift, naming file:line (leaf logic). ---
+    try:
+        from cli_bashrc_drift import bashrc_drift_status_row
+        _bd_row = bashrc_drift_status_row()
+        if _bd_row:
+            print("\n" + _bd_row)
+    except Exception as e:
+        print(f"\nbashrc-drift: error ({e})", file=sys.stderr)
 
     # --- gh rate budget (#1040): the SAME supervisor-facing, report-only surface
     # — the last CACHED `gh api rate_limit` reading (never a fresh gh call from a
