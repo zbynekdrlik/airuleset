@@ -110,3 +110,39 @@ until the ratchet cap, then the oldest move to `.claude/rules-reference/internal
     does `tenant_surfaces`. The UNKNOWN block text (`_fix_unknown(candidates)`) names the candidate
     files so the next operator sees the alias, not a phantom file. Tests:
     `tests/test_navody_stream_alias_1100.py` (mutation-verified, 6/6 killed).
+
+- **#1066 — the UNHANDLED-bounce Stop gate (`gates/bounce_unhandled.py` +
+  `hooks/stop-check-bounce-unhandled.sh`) reads a CACHE, never gh; the derivation lives OFF the
+  Stop path in `cli_bounce_unhandled.py` (the tickets-status refresh).** Split of concerns:
+  - `cli_bounce_unhandled.derive_at_refresh` runs at `cmd_tickets_status --refresh` (one `gh` comment
+    read per `prio:bounce` member, quota-guarded) and writes `entry["bounce_unhandled"] =
+    [{"number": N, "verdict_ts": <epoch>}]`; the Stop gate only READS that cache field. So the Stop
+    path stays gh-free (the sibling `gates.questionscope`/`gates.spec_question` discipline). Do NOT
+    add a gh call to the gate.
+  - **Fail-open has TWO shapes (#1066 R1) — keep them distinct.** WHOLE-slice read failure →
+    `derive_numbers` returns None → the caller leaves the cache field ABSENT (never a false
+    '0 unhandled'). PER-member failure → `unhandled_from_fetch` returns `(entries, read_ok,
+    unreadable)`: the unreadable member is OMITTED (never reported unhandled, which would false-BLOCK,
+    nor claimed handled) while a CONFIRMED-unhandled sibling is NEVER dropped, and `derive_numbers`
+    LOGS `unreadable` so a persistently-unreadable bounce is surfaced, not silent.
+  - **Reader substitution (design named `gates.ghread.read_comment_bodies`, which returns
+    `list[str]` of BODIES only).** `cli_gk_watch.watch_issue` needs full `{id,body,login,created_at}`
+    rows, so the leaf drives it over `airuleset._infra_ticket_comments` (the SAME reader
+    `gk_watch_issue` feeds — genuinely ONE derivation), NOT `read_comment_bodies`. It deliberately
+    passes `head_ts_fn=None` (the `bounce-unanswered` verdict ignores the PR head) and batches the
+    rate-guard once, which is why it wires `watch_issue` directly instead of calling `gk_watch_issue`
+    (that does a per-member `_pr_head_commit_ts` gh call and exposes no head-skip knob).
+  - **The `prio:bounce` label constant is imported LAZILY** from
+    `cli_quals._GK_HANDOFF_BOUNCE_OVERRIDE` inside `_bounce_numbers` (refresh path only) — never
+    module-top, or importing the leaf for its `BOUNCE_GRACE_SECONDS` constant (the gate does) would
+    drag `cli_quals` onto the Stop path.
+  - **`gates.questionscope`'s infra-LABEL verdict is role-scoped (#1066 finding b):** the
+    `verdict == "infra"` block applies only when `cli_concurrency.resolve_role(cwd) != "infra"` —
+    from the INFRA window a bare `#N` naming an `infra` ticket is an ordinary owner question (passes);
+    FLOW/review windows still route to infra. Only the LABEL verdict is scoped; the U-independent
+    TEXT-shape trigger (`_is_release_block_shape`) stays unscoped. Fail-safe: an unresolvable role →
+    None → keeps the FLOW route (only a CONFIRMED infra window is exempted).
+  - Tests: `tests/test_bounce_unhandled_1066.py` (32, every lock mutation-verified). `cli_quals.py`
+    is UNCHANGED — the #512 `NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS` override already pulls the 6474
+    combo (`needs-acceptance,ops-wait,prio:bounce`) to workable, so the partition lock HOLDS
+    (re-locked, not re-implemented).
