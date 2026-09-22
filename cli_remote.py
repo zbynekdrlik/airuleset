@@ -1317,6 +1317,27 @@ def _compact_hardoff_postcheck():
     return 'echo "compact: hard-off (code)"'
 
 
+def _persist_measured_filedrop_ports(measured):
+    """#1115: merge the push-measured filedrop ports into the controller cache
+    (~/.claude/drop-lanes.json) so `drop_ingress_rules_for_controller()` renders
+    each lane's `/s/` rule at the target's REAL port (the in-code literal becomes
+    the fallback). Merged into any existing cache so a partial push (some targets
+    unreachable this run) never drops a previously-measured port. Best-effort: a
+    write failure is loud but never fails the push."""
+    import cli_drop_gateway
+    if not measured:
+        return
+    try:
+        merged = cli_drop_gateway.read_drop_lanes_cache()
+        merged.update(measured)
+        cli_drop_gateway.write_drop_lanes_cache(merged)
+        print("  drop-lanes cache: wrote %d filedrop port(s) to %s"
+              % (len(measured), cli_drop_gateway.DROP_LANES_CACHE))
+    except OSError as e:
+        print("  ⚠ drop-lanes cache write failed (non-fatal): %r" % e,
+              file=sys.stderr)
+
+
 def _deploy_to_all_remotes(failed, auth_failed):
     """Deploy this push to every managed remote (step 3 + 3b of cmd_push).
 
@@ -1335,6 +1356,8 @@ def _deploy_to_all_remotes(failed, auth_failed):
     import subprocess
     import time
     import airuleset  # #433 L-E: REMOTE_HOSTS read via the airuleset facade
+    import cli_drop_gateway  # #1115: the deploy ssh harvests each target's
+    # persisted filedrop port into the controller-side drop-lanes.json cache.
 
     # 3. Deploy to each remote
     # #358: one per-run ssh ControlMaster socket directory, shared by the
@@ -1368,6 +1391,11 @@ def _deploy_to_all_remotes(failed, auth_failed):
         # #851: a `"paused": "<why>"` entry is excluded the SAME way -- see
         # the SKIPPED report above.
         deployable_list = _deployable_hosts()
+        # #1115: accumulate each target's push-measured persistent filedrop port
+        # (harvested from the probe appended to remote_cmd below) → the controller
+        # cache written after the loop. `drop_ingress_rules_for_controller()`
+        # prefers it over the in-code `DropLane.filedrop_port` literal.
+        measured_filedrop_ports = {}
         for remote in deployable_list:
             print(f"\n{'=' * 50}")
             print(f"Deploying to {remote['name']} ({remote['host']})...")
@@ -1384,6 +1412,12 @@ def _deploy_to_all_remotes(failed, auth_failed):
             remote_cmd = (
                 f"cd {remote['repo_path']} && (gh auth setup-git >/dev/null 2>&1 || true) "
                 f"&& git pull --ff-only && {owner_vps_env}python3 airuleset.py install "
+                # #1115: harvest the target's persisted filedrop port RIGHT AFTER
+                # install and BEFORE the gating groups below — those `{ … }` groups
+                # `exit` the remote shell, so anything chained after them never
+                # runs. This probe is exit-0 + `exit`-free, so the `&& …` chain
+                # continues to the post-checks unchanged.
+                f"&& {cli_drop_gateway.filedrop_port_probe_snippet()} "
                 # #1084 L1b: the compact hard-off report line (informational,
                 # never fails the target) runs BEFORE the gating groups below.
                 # Those `{ … }` groups (not subshells) `exit` on their SKIP paths
@@ -1490,6 +1524,12 @@ def _deploy_to_all_remotes(failed, auth_failed):
                       f"— continuing to the next host")
                 failed.append((remote["name"], "timeout"))
                 continue
+            # #1115: harvest the filedrop-port marker from this target's stdout.
+            # The probe runs right after install and BEFORE the gating post-checks,
+            # so its line is present even when a later post-check fails the leg —
+            # harvest regardless of rc. Never raises (parse_* is defensive).
+            measured_filedrop_ports.update(
+                cli_drop_gateway.parse_filedrop_port_markers(ssh_result.stdout))
             if ssh_result.returncode != 0:
                 print(f"  FAILED: {ssh_result.stderr.strip()}")
                 failed.append((remote["name"], "rc=%d" % ssh_result.returncode))
@@ -1563,6 +1603,9 @@ def _deploy_to_all_remotes(failed, auth_failed):
                               f"_REDUCED_STREAM_USERS + notify's STREAM_NOTIFY_OWNER "
                               f"(see #251/#263/#300/#326/#347's own onboarding "
                               f"checklist).", file=sys.stderr)
+
+        # #1115: persist the harvested filedrop ports to the controller cache.
+        _persist_measured_filedrop_ports(measured_filedrop_ports)
 
         # #347: any shared host that never got a TRUSTWORTHY audit this run
         # (every connection failed before the appended `ls` ever ran, or every

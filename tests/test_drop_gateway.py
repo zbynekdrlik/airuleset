@@ -85,8 +85,11 @@ class TestDropLaneRegistry(unittest.TestCase):
         self.assertFalse(lane.tunnel_system_unit)  # --user unit
 
     def test_unknown_account_has_no_lane(self):
-        self.assertIsNone(dg.drop_lane_for_account("dev1", "newlevel"))
+        # #1115: dev1/newlevel is now a GENERATED fleet lane (every non-paused
+        # REMOTE_HOSTS account has one), so it is no longer "unknown". A box/user
+        # pair that is not in REMOTE_HOSTS at all still resolves to None.
         self.assertIsNone(dg.drop_lane_for_account("some-random-box", "nobody"))
+        self.assertIsNone(dg.drop_lane_for_account("dev1", "not-a-real-user"))
 
     def test_gateway_account_is_a_fleet_deploy_target(self):
         # #838: a sibling account's install-time ingress re-assert diverts to a
