@@ -470,6 +470,131 @@ def pane_auto_continue_parked(captured):
     return bool(_AUTO_CONTINUE_PARKED_RX.search("\n".join(lines[-10:])))
 
 
+# --- INTERACTIVE usage-limit DIALOG (#1086) -----------------------------------
+# The MODAL Claude Code renders when a hard cap is hit on an armed `/goal` — a
+# DIFFERENT shape from both the plain banner (`pane_session_limited`) and the
+# auto-continue banner (`pane_auto_continue_parked`). Verified against the gk
+# 2026-09-19 capture:
+#   ● Goal paused · usage limit reached · send a message after it resets to continue
+#      What do you want to do?
+#      ❯ 1. Stop and wait for limit to reset
+#        2. Wait here, then continue automatically at <date>
+#        3. Switch to usage credits
+#      Enter to confirm · Esc to cancel
+# Anchored on the dialog STRUCTURE — BOTH the `What do you want to do?` prompt
+# AND the `Stop and wait for limit to reset` OPTION ROW — never the bare
+# `usage limit reached` headline (the #175/#183 lesson: a bare headline
+# false-matches ordinary prose and any auto-continue banner). Requiring BOTH
+# also excludes an unrelated numbered menu (a permission/plan dialog carries
+# `❯ 1.` but neither of these two limit-specific lines).
+#
+# The OPTION anchor is deliberately STRUCTURAL (a review finding, #1086): it must
+# be an actual MENU ROW — `^ [❯] N. Stop and wait for limit to reset` — not the
+# phrase anywhere in prose. Without this, a pane merely QUOTING the dialog (a
+# session reviewing THIS very code / test / ticket, whose recent-human veto is
+# clear on an autonomous box) could render both phrases in its output and be
+# Escaped mid-turn. A numbered/selected option row is something only the live
+# modal draws; prose that says "I could stop and wait for limit to reset" is not.
+_LIMIT_DIALOG_PROMPT_RX = re.compile(r"what\s+do\s+you\s+want\s+to\s+do\??", re.I)
+_LIMIT_DIALOG_OPTION_RX = re.compile(
+    r"^\s*(?:❯\s*)?\d+[.)]\s+.*stop\s+and\s+wait\s+for\s+(?:the\s+)?"
+    r"limit\s+to\s+reset", re.I | re.M)
+# A window is AT its cap (no capacity) at/above this percent; strictly below it
+# has capacity (`capacity_recovered`'s same-account path).
+LIMIT_WINDOW_CAP_PCT = 100
+
+
+def pane_limit_dialog(captured):
+    """True if the pane's BOTTOM shows Claude Code's INTERACTIVE usage-limit
+    dialog — matched on the dialog STRUCTURE, requiring BOTH the
+    `What do you want to do?` prompt AND a `Stop and wait for limit to reset`
+    MENU-OPTION row (a numbered/selected row, not the phrase in prose — so a
+    pane merely quoting the dialog never false-matches), never the bare
+    `usage limit reached` headline. Bottom-scoped to
+    the last 10 lines above the input box (falling back to the raw last 10 when
+    no `❯` boundary is located), the SAME scope + fallback `pane_session_limited`
+    and `pane_auto_continue_parked` use — a dialog echo scrolled high above fresh
+    work is not still-open (the gk 2026-07-24 freshest-thing discipline). Never
+    raises; empty/None → False."""
+    if not captured:
+        return False
+    region = watchdog._above_input_box(captured)
+    lines = [ln for ln in region.splitlines() if ln.strip()]
+    if not lines:
+        lines = [ln for ln in captured.splitlines() if ln.strip()]
+    tail = "\n".join(lines[-10:])
+    return bool(_LIMIT_DIALOG_PROMPT_RX.search(tail)
+                and _LIMIT_DIALOG_OPTION_RX.search(tail))
+
+
+def capacity_recovered(episode, usage_cache):
+    """PURE: True iff the box provably has capacity again since the limit dialog
+    was first seen (#1086) — the signal that makes the dialog stale and safe to
+    dismiss. Reads NOTHING; the caller passes the already-parsed usage cache
+    (`watchdog/usage.py`'s `{ts, account_email, windows}` shape). True iff:
+
+      * the cache is a dict with a numeric `ts` NEWER than the episode's
+        `first_seen` (the dialog's first sighting) — a cache written BEFORE or AT
+        the dialog reflects the capped state, never recovery; AND
+      * EITHER the cache's `account_email` differs from the one recorded at the
+        episode start (a claudy credential switch — the gk incident), with BOTH
+        emails known (an episode recorded with an unreadable "" account never
+        reads a later readable email as a switch — the parked_wake discipline)
+        AND the new account's own window data does NOT contradict it (a switch to
+        an ALSO-capped account is not recovery — a review finding, #1086: never
+        resume straight into a re-cap; when the switch cache carries windows they
+        must all be below cap too, and when it carries none the switch is trusted
+        blind, matching the gk incident where the new account showed ~5 %),
+      * OR (same account, or an unprovable switch) every window's `percent` is
+        strictly below its cap (`LIMIT_WINDOW_CAP_PCT`) — the original account's
+        limit reset.
+
+    Fail-safe False on ANY missing/stale/unparseable input (never a keystroke on
+    a guess): a non-dict episode/cache, a non-numeric `ts`/`first_seen`, a cache
+    not newer than the sighting, an empty/absent/non-numeric `windows` on the
+    same-account path. Never raises."""
+    if not isinstance(episode, dict) or not isinstance(usage_cache, dict):
+        return False
+    ts = usage_cache.get("ts")
+    first_seen = episode.get("first_seen")
+    if isinstance(ts, bool) or not isinstance(ts, (int, float)):
+        return False
+    if isinstance(first_seen, bool) or not isinstance(first_seen, (int, float)):
+        return False
+    if ts <= first_seen:
+        return False                       # cache not newer than the sighting
+    # Window capacity: present (a non-empty list) AND every entry a valid numeric
+    # percent strictly below its cap. Any missing/malformed/at-cap window → not
+    # proven below cap. `windows_present` distinguishes "no data" from "all below".
+    windows = usage_cache.get("windows")
+    windows_present = isinstance(windows, list) and bool(windows)
+    windows_all_below = windows_present
+    if windows_present:
+        for w in windows:
+            if not isinstance(w, dict):
+                windows_all_below = False
+                break
+            pct = w.get("percent")
+            if isinstance(pct, bool) or not isinstance(pct, (int, float)):
+                windows_all_below = False
+                break
+            if pct >= LIMIT_WINDOW_CAP_PCT:
+                windows_all_below = False   # a window still at/over its cap
+                break
+    cache_email = usage_cache.get("account_email")
+    ep_email = episode.get("account")
+    switched = (isinstance(cache_email, str) and cache_email
+                and isinstance(ep_email, str) and ep_email
+                and cache_email != ep_email)
+    # A claudy switch proves capacity UNLESS the new account's OWN window data
+    # (when present) shows it is still capped — never dismiss into a re-cap.
+    if switched and not (windows_present and not windows_all_below):
+        return True
+    # Same account (or an unprovable switch): capacity only when every window is
+    # present and strictly below its cap.
+    return windows_present and windows_all_below
+
+
 def parse_reset_epoch(captured, now):
     """Parse 'resets <clock>' (optionally 'resets <Month> <day>, <clock>')
     from the banner. The BARE-CLOCK form (a 5-hour session-limit reset)
