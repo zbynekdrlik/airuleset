@@ -497,9 +497,12 @@ def run_conformance_check(now, state, dry_run=False,
     # check). Stored BESIDE `state["conformance"]` (a top-level key, so the
     # drift-episode loop and `conformance_status_row` never mistake it for a
     # DRIFT row); the SUPERVISOR reads it per box for the fleet provisioned view.
-    if root_guard_provisioned_fn is None:
-        from watchdog.disk_guard import _root_guard_provisioned as root_guard_provisioned_fn
     try:
+        # review 🟡: the IMPORT is inside the try too — an import failure (a rename
+        # / a broken disk_guard) must degrade this fact to `unknown`, never raise
+        # here and abort the drift loop below (the module's "never raises" invariant).
+        if root_guard_provisioned_fn is None:
+            from watchdog.disk_guard import _root_guard_provisioned as root_guard_provisioned_fn
         rgp = bool(root_guard_provisioned_fn())
     except Exception as e:
         rgp = None
@@ -560,9 +563,11 @@ def conformance_status_row(state):
         state = {}
     # #1047: the report-only root-guard fact rides the row as a suffix (present
     # only once a sweep has recorded it); it is a per-box FACT, never a DRIFT.
+    # review 🔵: a DISTINCT ` · ` delimiter (not the `; ` the DRIFT dims use) so
+    # this aside never reads as a drift item on the DRIFT branch.
     rg = state.get("root_guard_provisioned")
     suffix = ("" if rg is None else
-              "; root disk-guard: %s" % ("provisioned" if rg else "not provisioned"))
+              " · root disk-guard: %s" % ("provisioned" if rg else "not provisioned"))
     episodes = state.get("conformance") or {}
     if episodes:
         parts = []

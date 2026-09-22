@@ -292,7 +292,7 @@ def test_conformance_check_uses_the_injected_predicate():
 
     with tempfile.TemporaryDirectory() as td:
         _run_conf({}, td, provisioned_fn=_fn)
-    assert called["n"] >= 1, "the conformance job must call the provisioned predicate"
+    assert called["n"] == 1, "the conformance job must call the provisioned predicate exactly once"
 
 
 def test_conformance_check_dry_run_does_not_persist_the_fact():
@@ -304,7 +304,9 @@ def test_conformance_check_dry_run_does_not_persist_the_fact():
 
 def test_conformance_check_default_predicate_is_the_disk_guard_one():
     # No injected fn -> defaults to disk_guard._root_guard_provisioned (import it,
-    # never a second timer check). In this env the timer is absent -> fact False.
+    # never a second timer check). HERMETIC (review 🟡): assert the recorded fact
+    # EQUALS the disk_guard predicate's own verdict on THIS box, never a hardcoded
+    # False (a box that HAS provisioned the root guard is a legitimate fleet state).
     with tempfile.TemporaryDirectory() as td:
         state = {}
         conf.run_conformance_check(
@@ -314,7 +316,7 @@ def test_conformance_check_default_predicate_is_the_disk_guard_one():
             git_run=_conf_fake_git(), timer_check=lambda unit=None: "active",
             is_target_check=lambda: True, symlink_scan=lambda: [],
             doctrine_scan=lambda: {"high": 0, "medium": 0}, persist=lambda: None)
-        assert state.get("root_guard_provisioned") is False
+        assert state.get("root_guard_provisioned") is dg._root_guard_provisioned()
 
 
 def test_conformance_status_row_shows_provisioned():
@@ -332,3 +334,23 @@ def test_conformance_status_row_shows_not_provisioned():
 def test_conformance_status_row_absent_field_has_no_root_suffix():
     row = conf.conformance_status_row({"conformance_last_check": 1})
     assert "root disk-guard" not in row
+
+
+def test_conformance_status_row_suffix_on_drift_branch_and_not_a_drift_dim():
+    # review 🟡: the suffix must ride the DRIFT branch too, with a DISTINCT
+    # delimiter so it is never mistaken for a drift dimension.
+    row = conf.conformance_status_row(
+        {"conformance": {"timer": {"detail": "dead"}},
+         "conformance_last_check": 1, "root_guard_provisioned": False})
+    assert "DRIFT" in row and "timer: dead" in row
+    # a DISTINCT ` · ` delimiter, never the `; ` the drift dims use (review 🔵)
+    assert " · root disk-guard: not provisioned" in row
+    assert "; root disk-guard:" not in row
+    # the report-only fact must NOT render as a drift dimension (no `key: drift`)
+    assert "root_guard_provisioned:" not in row
+
+
+def test_conformance_status_row_suffix_on_not_yet_checked_branch():
+    row = conf.conformance_status_row({"root_guard_provisioned": True})
+    assert "not yet checked" in row
+    assert "root disk-guard: provisioned" in row
