@@ -91,6 +91,7 @@ EXPECTED_STANDALONE = [
     "healthz_probe",                    # (47) — #1005 presenter /healthz.ai external health-check
     "parked_wake_job",                  # (48) — #1034 wake a parked session after a claudy account switch
     "task_hygiene_job",                 # (49) — #1036 Odoo task-hygiene overseer
+    "erp_heartbeat",                    # (51) — #959 erp-test box heartbeat
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at
