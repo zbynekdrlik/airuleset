@@ -2595,6 +2595,16 @@ def cmd_status(args):
     except Exception as e:
         print(f"\nvolume: error ({e})", file=sys.stderr)
 
+    # --- Root disk-guard provisioned state (#1047) — one read of whether THIS
+    # box carries the root guard (the systemd timer `disk-guard-root` installs);
+    # a never-provisioned box (owner workstation) reads 'not provisioned'. Logic
+    # lives in the watchdog leaf; provisioning stays an explicit per-box command. ---
+    try:
+        from watchdog.disk_guard import root_guard_status_row
+        print("\n" + root_guard_status_row())
+    except Exception as e:
+        print(f"\nroot disk-guard: error ({e})", file=sys.stderr)
+
     # --- Concurrency mode/role (#998) ---
     try:
         import cli_concurrency

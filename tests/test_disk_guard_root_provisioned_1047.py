@@ -16,7 +16,6 @@ All I/O is a temp HOME or an injected `exists_fn` — no real /run report, no re
 """
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
