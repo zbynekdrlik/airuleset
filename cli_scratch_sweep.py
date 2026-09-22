@@ -1332,12 +1332,29 @@ def sweep_airuleset_state(tmp_dir=None, uid=None, dry_run: bool = False, now=Non
 # leg drops ONLY the newest-per-dir protection; every other safety rule
 # (symlink refusal, age floor, size floor, `_target_in_live_use`,
 # never-follow-a-symlinked-dir) is reused unchanged. The v1 concern about
-# ad-hoc `**/*.jsonl` corpus scanners was resolved by AUDITING every
-# in-repo `subagents` reader (#1117): each is either bounded to a recency
-# window well under the 7d gzip floor (`cli_model_audit` 2h,
-# `cli_lane_liveness`/`watchdog.transcripts` 15min, `cli_authorship`
-# live-lane-only) or already gz-tolerant by construction (`burn.scan`'s
-# own mtime window; a >7d gzipped file falls outside it on a workstation).
+# ad-hoc `**/*.jsonl` corpus scanners was addressed by AUDITING every
+# in-repo `subagents` reader (#1117):
+#   - BOUNDED well under the 7d gzip floor, so a gzipped file is always
+#     outside the window: `cli_model_audit` (2h), `cli_lane_liveness` /
+#     `watchdog.transcripts.count_live_workers` / `_count_live_subagents`
+#     (15min). `watchdog.transcripts.newest_subagent_transcript` is
+#     additionally fail-safe (None when the newest is gzipped).
+#   - `cli_authorship._worktree_subagent_transcript`: no explicit age
+#     bound, but it fails CLOSED -- an all-gzipped (>= floor, idle) lane
+#     yields None -> `session_model` UNKNOWN -> the dispatch gate refuses;
+#     a LIVE lane always has a fresh plain `.jsonl`, so it is unaffected.
+#   - ACCEPTED RESIDUAL (pre-existing, NOT introduced here): `burn.scan`'s
+#     mtime window is 7d and it is not gz-aware. On a WORKSTATION (7d
+#     floor -- gk/dev1/controller) a gzipped file is >= 7d = outside the
+#     window, so burn is unaffected. On a SHARED-STREAM box (2d floor) a
+#     2-7d file can be gzipped yet still inside burn's window, so burn
+#     under-reports it -- but MAIN transcripts already gzip at that same
+#     2d floor (#925), so this gap pre-dates #1117; #1117 only widens it
+#     to subagent spend. A gz-aware `burn.scan` is a separate follow-up.
+#   - `scripts/measure_question_quality_baseline.py`: a one-shot
+#     #95-item-9 REPLAY baseline (already run), read-only, not runtime --
+#     gz-blind + unbounded, so it would under-sample a gzipped historical
+#     transcript; acceptable for a manual one-shot, noted for completeness.
 #
 # claude-history's own `.jsonl.gz` READ support (find_transcripts/
 # _read_jsonl, above in this file's CLAUDE_HISTORY_SCRIPT_CONTENT) landed
@@ -1389,6 +1406,37 @@ def _min_size_bytes_env(explicit, env_key, default):
     except (TypeError, ValueError):
         return default
     return default if v < 0 else v
+
+
+def _classify_transcript_entry(p, is_link, mtime, size, now, min_age_days,
+                               min_size_bytes, proc_dir):
+    """The SINGLE gzip-eligibility classifier for one already-`lstat`'d
+    transcript file, shared by BOTH legs of
+    `discover_old_transcript_candidates` -- the MAIN leg and the #1117
+    subagent leg. Returns the `{"path", "reason", "age_days", "size"}`
+    row: `reason is None` for a genuine candidate, else WHY it was
+    excluded. Sharing this is deliberate (#1117 review) -- the design's
+    Approach 3 was rejected precisely because two separate discoveries
+    can drift; keeping ONE classifier means a future change to a safety
+    rule (a new check, a changed reason string) cannot apply to one leg
+    and silently miss the other. The newest-per-dir protection is NOT
+    here: it is a per-directory decision the MAIN leg makes before calling
+    this (the subagent leg has none -- each file is its own agent)."""
+    entry = {"path": str(p), "reason": None,
+             "age_days": (now - mtime) / 86400.0, "size": size}
+    if is_link:
+        entry["reason"] = "symlink entry -- never followed, never compressed"
+        return entry
+    if entry["age_days"] < min_age_days:
+        entry["reason"] = "too recent (%.1fd < %sd)" % (entry["age_days"], min_age_days)
+        return entry
+    if size < min_size_bytes:
+        entry["reason"] = "below size floor (%d B < %d B)" % (size, min_size_bytes)
+        return entry
+    if _target_in_live_use(p, proc_dir=proc_dir):
+        entry["reason"] = "in live use (or undeterminable) -- skipped"
+        return entry
+    return entry   # reason stays None -- genuine candidate
 
 
 def discover_old_transcript_candidates(home=None, projects_dir=None, now=None,
@@ -1479,25 +1527,8 @@ def discover_old_transcript_candidates(home=None, projects_dir=None, now=None,
         for mtime, p, size, is_link in rows:
             if mtime == newest_mtime:
                 continue   # newest (or tied-for-newest) in its own dir -- never a candidate
-            entry = {"path": str(p), "reason": None,
-                    "age_days": (now - mtime) / 86400.0, "size": size}
-            if is_link:
-                entry["reason"] = "symlink entry -- never followed, never compressed"
-                out.append(entry)
-                continue
-            if entry["age_days"] < min_age_days:
-                entry["reason"] = "too recent (%.1fd < %sd)" % (entry["age_days"], min_age_days)
-                out.append(entry)
-                continue
-            if size < min_size_bytes:
-                entry["reason"] = "below size floor (%d B < %d B)" % (size, min_size_bytes)
-                out.append(entry)
-                continue
-            if _target_in_live_use(p, proc_dir=proc_dir):
-                entry["reason"] = "in live use (or undeterminable) -- skipped"
-                out.append(entry)
-                continue
-            out.append(entry)   # reason stays None -- genuine candidate
+            out.append(_classify_transcript_entry(
+                p, is_link, mtime, size, now, min_age_days, min_size_bytes, proc_dir))
 
     if include_subagents:
         out.extend(_discover_subagent_transcript_candidates(
@@ -1511,24 +1542,23 @@ def _discover_subagent_transcript_candidates(pdir, names, now, min_age_days,
     """The subagent leg of `discover_old_transcript_candidates` (#1117) --
     every `<project>/<session>/subagents/**/*.jsonl` transcript, each row
     the IDENTICAL `{"path", "reason", "age_days"?, "size"?}` shape as the
-    main leg. There is NO newest-per-dir protection here: each subagent
-    file is its own never-`/resume`d agent. Every other safety rule of the
-    main leg is reused unchanged (symlink refusal via `os.lstat` +
-    `is_symlink`, the age floor, the size floor, and the `_target_in_live_
-    use` open-fd/cwd/exe check). `os.walk(followlinks=False)` means a
-    symlinked `subagents/` directory (or any symlinked dir under it) is
-    never descended; an already-compressed `.jsonl.gz` file is never
-    matched (the suffix test is `.jsonl`)."""
+    main leg -- via the SAME `_classify_transcript_entry` helper, so the
+    two legs cannot drift. There is NO newest-per-dir protection here:
+    each subagent file is its own never-`/resume`d agent. Every other
+    safety rule of the main leg is reused unchanged (symlink refusal via
+    `os.lstat` + `is_symlink`, the age floor, the size floor, and the
+    `_target_in_live_use` open-fd/cwd/exe check). `os.walk(followlinks=
+    False)` (with the default `onerror=None`, which silently skips an
+    unreadable subdir rather than raising) means a symlinked `subagents/`
+    directory (or any symlinked dir under it) is never descended; an
+    already-compressed `.jsonl.gz` file is never matched (the suffix test
+    is `.jsonl`)."""
     out = []
     for name in names:
         d = pdir / name
         if not d.is_dir():
             continue
-        try:
-            walker = os.walk(d, followlinks=False)
-        except OSError:
-            continue
-        for dirpath, _dirnames, filenames in walker:
+        for dirpath, _dirnames, filenames in os.walk(d, followlinks=False):
             try:
                 comps = Path(dirpath).relative_to(d).parts
             except ValueError:
@@ -1545,25 +1575,9 @@ def _discover_subagent_transcript_candidates(pdir, names, now, min_age_days,
                 except OSError as e:
                     out.append({"path": str(p), "reason": "could not stat: %s" % e})
                     continue
-                entry = {"path": str(p), "reason": None,
-                        "age_days": (now - st.st_mtime) / 86400.0, "size": st.st_size}
-                if is_link:
-                    entry["reason"] = "symlink entry -- never followed, never compressed"
-                    out.append(entry)
-                    continue
-                if entry["age_days"] < min_age_days:
-                    entry["reason"] = "too recent (%.1fd < %sd)" % (entry["age_days"], min_age_days)
-                    out.append(entry)
-                    continue
-                if st.st_size < min_size_bytes:
-                    entry["reason"] = "below size floor (%d B < %d B)" % (st.st_size, min_size_bytes)
-                    out.append(entry)
-                    continue
-                if _target_in_live_use(p, proc_dir=proc_dir):
-                    entry["reason"] = "in live use (or undeterminable) -- skipped"
-                    out.append(entry)
-                    continue
-                out.append(entry)   # reason stays None -- genuine candidate
+                out.append(_classify_transcript_entry(
+                    p, is_link, st.st_mtime, st.st_size, now,
+                    min_age_days, min_size_bytes, proc_dir))
     return out
 
 
