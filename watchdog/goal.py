@@ -201,6 +201,7 @@ from watchdog import nudge_gate as _nudge_gate               # #797 (cadence gat
 from watchdog import roster as _roster                       # #804 (armed roster)
 from watchdog import resurrect as _resurrect                 # #804 (mode-5 relaunch)
 from watchdog import goal_turn_liveness as _turn_liveness     # #1110 (transcript liveness)
+from watchdog import gk_stall_notice as _gk_stall_notice      # #1109 (gk role-pane stall notice)
 
 
 # --------------------------------------------------------------------------- #
@@ -5462,7 +5463,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                         infra_queue_fetch=infra_queue_fetch,
                         resolve_role_fn=resolve_role_fn, state=state,
                         sleep_fn=sleep_fn, captured=captured,
-                        persist=persist, budget_left_fn=_budget_left_fn)  # #1023 timeout-race
+                        persist=persist, budget_left_fn=_budget_left_fn,  # #1023 timeout-race
+                        receipt_post_fn=_queue_arrival._default_hub_receipt_post(cwd))  # #1109
             continue
         # #804 -- this stream is CONFIRMED armed this sweep (the STRUCTURED
         # one-glance verdict, not a render guess): refresh its durable roster
@@ -5528,6 +5530,14 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             stuck_seen.add(sid)
             logs += _lane_stuck_owner_alert(now, run, rec, glance, sid, cwd, pid,
                                             loc, send_fn, dry_run)
+            # #1109 — the owner-scoped exception: a DECLARED gk role pane
+            # (review/infra/quality) stuck >= 20 min at the 5 h session limit
+            # gets ONE owner notice per episode (the 22.9 gk-infra 2 h silence).
+            # Reuses the ALREADY-cached one-glance `glance` + `captured` (ZERO new
+            # fetch); episode state rides the same goal_lane `rec`.
+            logs += _gk_stall_notice.gk_stall_notice(
+                now, rec, glance, captured, cwd, sid, pid, loc, send_fn, dry_run,
+                run=run)
         # #547 W→I + #552 I→W/U -- partition-audit re-check for this armed pane.
         if ops_wait_fetch is not None:
             logs += _ops_wait_recheck.goal_ops_wait_recheck(
@@ -5557,6 +5567,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 infra_queue_fetch=infra_queue_fetch,   # #1029 role-aware
                 resolve_role_fn=resolve_role_fn,       # #1029 role-aware
                 persist=persist, budget_left_fn=_budget_left_fn,   # #1023 timeout-race
+                receipt_post_fn=_queue_arrival._default_hub_receipt_post(cwd),  # #1109
                 batch_collect=(_batch_collect if _batch_collect is not None
                                and "queue-arrival" in _eligible else None))
         # #797 -- U-freshness reconcile for this armed pane.

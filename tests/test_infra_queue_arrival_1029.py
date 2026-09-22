@@ -127,13 +127,18 @@ class TestInfraRiderPath(_InfraOrchBase):
     def test_comment_arrival_nudges(self):
         # A NEW tagged comment (a big comment id) arriving on #6883 is an
         # arrival -> one nudge; the ticket #6883 was already known (baseline).
+        # #1109: a GATEKEEPER-ACTION (INFRA) COMMENT is now a RELEASE-BLOCKING
+        # priority arrival, delivered under the cap-exempt `infra-priority` kind
+        # (was `queue-arrival`) — the whole point of #1109. The nudge TEXT + the
+        # baseline-advance are unchanged; only the delivery KIND (and its journal
+        # token) differ.
         cid = 5_673_000_001
         qrecs = {self.sid: {"base": [6883], "first_seen": NOW - DAY}}
         tmux = self._tmux()
         recs = [_rec(6883),
                 _rec(cid, kind="comment", num=6883, tag="GATEKEEPER-ACTION (INFRA)")]
         logs = self._run(qrecs, lambda cwd: recs, tmux, handled=set(), state={})
-        self.assertTrue(any("queue-arrival nudge" in ln for ln in logs), logs)
+        self.assertTrue(any("infra-priority nudge" in ln for ln in logs), logs)
         typed = "".join(tmux.typed_texts())
         self.assertIn("stuck-check:", typed)
         self.assertIn("#6883", typed)   # names the tracked ticket the comment sits on

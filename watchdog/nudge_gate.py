@@ -41,6 +41,12 @@ Two problems this fixes, both reported by the owner:
    BOTH bounds and never count as "another kind delivered" for the cap — a
    revival into a dead/blocked session is not a prompt interruption.
 
+   #1109 — PRIORITY_CAP_EXEMPT_KINDS (`infra-priority`) are exempt from the
+   cross-kind TOTAL cap ONLY (they neither block via it nor count toward it) but
+   KEEP their own per-kind floor (15 min) — a release-blocking infra hand-off must
+   reach the gk-infra window even while an ordinary priority kind holds the 3 h
+   cap, yet is still a floored, staged prompt interruption (NOT a recovery kind).
+
 DESIGN — a pure helper over ONE state namespace, no new I/O, no new job:
 
   state["nudge_cadence"] = {sid: {category: last_delivered_ts}}
@@ -189,6 +195,27 @@ NUDGE_TOTAL_GAP_MIN_S = 3 * 3600
 RECOVERY_NUDGE_KINDS = frozenset(
     {"resume", "compact", "goal-arm", "wake-parked", "goal-disarm"})
 
+# #1109 — PRIORITY kinds that are EXEMPT from the cross-kind TOTAL cap while
+# KEEPING their own per-kind floor. UNLIKE a RECOVERY kind (which is a session
+# revival and skips BOTH the floor AND the total cap AND the per-kind staging
+# switch), an `infra-priority` nudge IS a prompt interruption — it is a stageable
+# MACHINE_NUDGE_KIND (default OFF, staged on gk) and it obeys its own per-kind
+# floor + every idle/busy/liveness gate; it is exempt ONLY from the #913/#1023
+# TOTAL cap, so a RELEASE-BLOCKING infra hand-off can never sit for 3 h behind the
+# owner's anti-spam cross-kind cap (the 22.9.2026 odoo-erp 2.318 incident). The
+# exemption is two-sided: an infra-priority send is neither BLOCKED by the cap
+# (`gate_ok` skips the cap check for it) nor COUNTS toward the cap for any other
+# kind (`_total_cap_block` skips it in the scan) — exactly like the recovery
+# kinds are skipped in the scan, but WITHOUT the floor exemption. This set MUST
+# be disjoint from RECOVERY_NUDGE_KINDS (a kind is one OR the other, never both).
+PRIORITY_CAP_EXEMPT_KINDS = frozenset({"infra-priority"})
+
+# #1109 — the `infra-priority` per-kind floor: a release-blocking infra hand-off
+# may reach the pane at most once every 15 min (well under the owner's default
+# 1 h floor for ordinary priority kinds — a release block is time-critical, the
+# owner's „do 5 min" directive), never a keystorm.
+INFRA_PRIORITY_FLOOR_S = 15 * 60
+
 # orphan-reaper TTL for a per-sid cadence rec whose session is gone (mirrors the
 # #519/#531 per-sid-leak reaper): the `visited_sids` gate is PRIMARY (a live pane
 # is never reaped regardless of age), this is only the SECONDARY safety for a
@@ -269,6 +296,14 @@ def _category_floor(category):
         return max(_min_interval(), _u_cadence())
     if category == "goal-guard":
         return max(_min_interval(), GOAL_GUARD_FLOOR_S)
+    # #1109 — infra-priority is the ONE kind with a SHORTER floor than the global
+    # 1 h: a release-blocking hand-off is time-critical (owner „do 5 min"), so it
+    # deliberately does NOT max() up to `_min_interval()`. It is not a GATED
+    # category, so the #1023 "every gated kind carries the 60-min floor" lock does
+    # not cover it — the shorter floor is intentional, paired with the cap
+    # exemption in `gate_ok`.
+    if category == "infra-priority":
+        return INFRA_PRIORITY_FLOOR_S
     return _min_interval()
 
 
@@ -323,15 +358,22 @@ def _total_cap_block(sess, now):
     while the per-kind floor stayed 1 h: a pane dominated by one kind delivered
     hourly. `gate_ok` still checks the per-kind floor FIRST, so a sub-60-min
     same-kind repeat is reported as `hold:floor`, not `hold:total-cap`.
-    RECOVERY kinds are skipped: a revival is not a prompt interruption and never
-    counts toward the cap (they never call `mark_sent` in production either, so
-    this is a defensive belt on top of that). A FUTURE-skewed / non-numeric ts is
+    RECOVERY kinds AND #1109 PRIORITY_CAP_EXEMPT_KINDS (`infra-priority`) are
+    skipped: a recovery revival is not a prompt interruption and never counts
+    toward the cap (recovery kinds never call `mark_sent` in production either, so
+    that is a defensive belt on top of that), and a release-blocking infra-priority
+    wake must never consume the shared 3 h anti-spam budget (its own 15-min
+    per-kind floor still applies via `gate_ok`). A FUTURE-skewed / non-numeric ts is
     ignored by `_gate_ts`, so a corrupt entry can never mute a session via the
     cap (the same fail-safe direction as the per-kind floor)."""
     gap = _total_gap()
     blocker = None
     for cat, raw in sess.items():
-        if cat in RECOVERY_NUDGE_KINDS:
+        if cat in RECOVERY_NUDGE_KINDS or cat in PRIORITY_CAP_EXEMPT_KINDS:
+            # #1109 — an infra-priority send never counts toward the cross-kind
+            # cap for ANY other kind, exactly like a recovery revival: a
+            # release-blocking wake must not consume the owner's 3 h anti-spam
+            # budget that ordinary priority kinds share.
             continue
         ts = _gate_ts(raw, now)
         if ts is not None and now - ts < gap and (blocker is None or ts > blocker[1]):
@@ -362,6 +404,11 @@ def gate_ok(state, sid, category, now):
     last_cat = _gate_ts(sess.get(category), now)
     if last_cat is not None and now - last_cat < _category_floor(category):
         return False                              # per-kind floor
+    if category in PRIORITY_CAP_EXEMPT_KINDS:
+        # #1109 — a release-blocking infra-priority nudge KEEPS its per-kind floor
+        # (checked above) but is EXEMPT from the cross-kind total cap, so it can
+        # reach the pane even while an ordinary priority kind holds the cap.
+        return True
     if _total_cap_block(sess, now) is not None:
         return False                              # cross-kind total cap
     return True
@@ -386,6 +433,10 @@ def floor_hold_reason(state, sid, category, now):
     if last is not None and now - last < _category_floor(category):
         return "hold:floor (%s, %d min since last send)" % (
             category, int((now - last) // 60))
+    if category in PRIORITY_CAP_EXEMPT_KINDS:
+        # #1109 — a cap-exempt kind is only ever held by its own floor (above);
+        # it is never held by the total cap, so never report `hold:total-cap`.
+        return "hold:floor (%s, floor not elapsed)" % category
     blocker = _total_cap_block(sess, now)
     if blocker is not None:
         bcat, bts = blocker

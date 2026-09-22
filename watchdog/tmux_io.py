@@ -115,6 +115,18 @@ MACHINE_NUDGE_KINDS = frozenset({
     # default; NOT a nudge_gate GATED_CATEGORY — its cadence is decided by
     # gate_ok("task-hygiene") directly, like bounce/card/goal-sweep).
     "task-hygiene",
+    # #1109 — a RELEASE-BLOCKING infra hand-off (a STOP:/GATEKEEPER-ACTION (INFRA)
+    # comment, or an infra ticket carrying prio:*/release-block) delivered into
+    # the gk-infra window. A GATED priority kind (default OFF, the supervisor
+    # stages it on the gk box `nudges on --kind infra-priority`); the `nudges`
+    # CLI list derives from THIS set. It is EXEMPT from the #913/#1023 cross-kind
+    # total cap (so a release block never sits 3 h behind the owner's anti-spam
+    # cap) but KEEPS its own 15-min per-kind floor + every idle/busy/recent-human/
+    # transcript-liveness gate (nudge_gate.PRIORITY_CAP_EXEMPT_KINDS). NOT a
+    # RECOVERY kind (it IS a prompt interruption — staged + floored) and NOT a
+    # nudge_gate GATED_CATEGORY (its floor is 15 min, below the 60-min GATED floor
+    # lock) — its cadence is decided by gate_ok("infra-priority") directly.
+    "infra-priority",
 })
 
 # #1023 addendum (owner, 2026-09-14) — RECOVERY revivals: identities that REVIVE a
