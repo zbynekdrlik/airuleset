@@ -30,11 +30,16 @@ Two consumers in `deliver_goal`:
 
   * POST-keystroke confirm split: after a keystroke that did NOT arm, re-read
     the transcript age; if it advanced during the confirm window
-    (`classify_confirm_fail` → "live") the keystroke landed in a turn that was
-    live after all → `skip:verify-failed-live`, which is deliberately NOT in
-    `_GOAL_KEYSTROKE_SKIPS`, so `goal_sweep` never counts it toward the cap and
-    the request stays pending. A genuinely quiet confirm-fail (the #731
-    swallowed-submit class) stays `skip:verify-failed` and still counts.
+    (`classify_confirm_fail` → "live") → `skip:verify-failed-live`, which is
+    deliberately NOT in `_GOAL_KEYSTROKE_SKIPS`, so `goal_sweep` never counts it
+    toward the STRICT #731 cap and the request stays pending. The advance is
+    unfalsifiable, though: it may be a FOREIGN live turn (a mis-timed keystroke)
+    OR our OWN submit read as a plain prompt (#720 silent-'sent' tail) — so
+    `goal_sweep` bounds `skip:verify-failed-live` with a SEPARATE, looser
+    `GOAL_DELIVERY_LIVE_ATTEMPT_CAP` (drop+ping after N) to keep the give-up
+    guarantee for the accept-as-plain-prompt livelock. A genuinely quiet
+    confirm-fail (the #731 swallowed-submit class) stays `skip:verify-failed` and
+    counts on the strict cap.
 
 Fail-safe throughout: a missing / unreadable / future-dated transcript is NOT a
 liveness signal — the gate falls through to the existing render gate (never a new
@@ -104,7 +109,13 @@ def turn_live(age, window_s=None, env=None):
     transcript) → False (no defer). An age below ``−_GOAL_TURN_FUTURE_SKEW_S``
     (a transcript dated well into the future relative to ``now`` — not a
     same-clock liveness signal) → False, so the gate never defers on an
-    inconsistent clock."""
+    inconsistent clock. On a heavily-loaded box the sweep's frozen ``now`` can
+    lag the stat by more than the skew, so a genuinely-fresh live transcript can
+    read past the floor and NOT defer here — the post-keystroke confirm split is
+    the second belt that keeps that from becoming a permanent drop (it returns
+    the uncounted ``skip:verify-failed-live`` when the transcript advanced during
+    the confirm window), so the worst case is one wasted keystroke, never the
+    dropped arm #1110 fixes."""
     if age is None:
         return False
     win = window_s if window_s is not None else goal_turn_live_window_s(env)
@@ -119,12 +130,18 @@ def classify_confirm_fail(age_before, age_after):
     the age after the confirm window.
 
     A write during the window moves the mtime FORWARD, so the age SHRINKS
-    (``age_after < age_before``) → ``"live"`` — a mis-timed keystroke that landed
-    in a running turn, NOT to be counted toward the attempt cap. No write → the
-    age is unchanged (same ``now``, same mtime) → ``"quiet"`` — the #731
-    swallowed-submit class, counted. A ``None`` on either side (no transcript to
-    compare) → ``"quiet"``: default to the existing counted behaviour, never a
-    new non-counting escape hatch."""
+    (``age_after < age_before``) → ``"live"``. NOTE the mtime source is
+    unfalsifiable: the write may be a FOREIGN live turn (a genuinely mis-timed
+    keystroke) OR our OWN submit read as a plain prompt (box clears, a ``user``
+    turn is appended, the goal never arms — the #720 silent-'sent' tail). Both
+    produce ``"live"`` identically; the caller does NOT count it toward the
+    STRICT #731 cap but DOES bound it with the separate looser
+    ``GOAL_DELIVERY_LIVE_ATTEMPT_CAP`` so the accept-as-plain-prompt livelock
+    still gives up (see ``goal.py``). No write → the age is unchanged (same
+    ``now``, same mtime) → ``"quiet"`` — the #731 swallowed-submit class, counted
+    on the strict cap. A ``None`` on either side (no transcript to compare) →
+    ``"quiet"``: default to the existing counted behaviour, never a new
+    non-counting escape hatch."""
     if age_before is None or age_after is None:
         return "quiet"
     return "live" if age_after < age_before else "quiet"

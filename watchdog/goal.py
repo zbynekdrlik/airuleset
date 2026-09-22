@@ -472,9 +472,11 @@ def clear_goal_request(session, path=None):
     return False
 
 
-def _bump_goal_delivery_fail(session, word, path=None):
+def _bump_goal_delivery_fail(session, word, path=None, field="dl_fails"):
     """#731 -- record ONE failed keystroke delivery on the pending entry: bump
-    `dl_fails` (INT-guarded across the JSON boundary, #714 -- a string value
+    `field` (default `dl_fails`; #1110-review passes `dl_live_fails` for the
+    separate verify-failed-live give-up counter) (INT-guarded across the JSON
+    boundary, #714 -- a string value
     read back from a hand-edited/legacy store must never crash the sweep) and
     stamp `dl_last` with the skip word (the incident trail + the drop line's
     `last=<word>`). Owns the store mutation like `clear_goal_request`; the
@@ -502,10 +504,10 @@ def _bump_goal_delivery_fail(session, word, path=None):
     if not isinstance(entry, dict):
         return 0
     try:
-        n = int(entry.get("dl_fails", 0)) + 1
+        n = int(entry.get(field, 0)) + 1
     except (TypeError, ValueError):
         n = 1
-    entry["dl_fails"] = n
+    entry[field] = n
     entry["dl_last"] = word
     _save_goal_requests(d, path)
     return n
@@ -766,6 +768,19 @@ GOAL_STASH_ABORT_ESCALATION = 6
 # (cleaning up any leftover it stranded, B). Small, like #566's own debounce:
 # 3 failed keystroke deliveries is a livelock, not 3 independent transients.
 GOAL_DELIVERY_ATTEMPT_CAP = 3
+# #1110-review -- a SEPARATE, LOOSER bound on `skip:verify-failed-live`. A
+# keystroke whose arm never confirms while the transcript advanced during the
+# confirm window is deliberately NOT counted toward the STRICT cap above (it may
+# be a mis-timed keystroke into a genuinely live turn). But our OWN submit read
+# as a plain prompt also advances the transcript identically (the #720
+# silent-'sent' tail: box clears, a `user` turn is appended, the goal never
+# arms), and that is a real failed delivery -- so a run of verify-failed-live
+# must still hit a give-up bound, or an accept-as-plain-prompt livelock re-types
+# a junk /goal every idle cycle until the 30-min age cap. > the strict cap so a
+# genuine quiet+live-turn race gets more benefit-of-the-doubt (the pre-gate
+# defers a live turn on most sweeps, so verify-failed-live is sparse for a real
+# live turn but repeats for the accept-as-prompt class).
+GOAL_DELIVERY_LIVE_ATTEMPT_CAP = 6
 # The skip words that entered the TYPING protocol (real keystrokes, or the
 # zero-keystroke stash-abort sub-tvars whose counting errs toward NOT typing --
 # the #524-sanctioned "count confirmed records, fail SAFE"). NEVER counts
@@ -1501,13 +1516,16 @@ _GOAL_TERMINAL_WORDS = frozenset((
 def _verify_fail_word(tpath, age_before, now):
     """#1110 -- classify a keystroke that did NOT arm. Re-read the transcript age
     (the SAME stat source as the pre-keystroke busy-transcript gate) and, if it
-    ADVANCED since `age_before` (the age captured before the keystroke), the
-    keystroke landed in a turn that was live after all -> `skip:verify-failed-live`
-    (a MIS-timed keystroke: NOT in `_GOAL_KEYSTROKE_SKIPS`, so goal_sweep never
-    counts it toward GOAL_DELIVERY_ATTEMPT_CAP and the request stays pending). A
-    quiet transcript is the #731 swallowed-submit class -> `skip:verify-failed`
-    (counted). All classification logic lives in the leaf; this is the call-site
-    adapter that maps the leaf verdict to the disposition word."""
+    ADVANCED since `age_before` (the age captured before the keystroke) ->
+    `skip:verify-failed-live` (NOT in `_GOAL_KEYSTROKE_SKIPS`, so goal_sweep never
+    counts it toward the STRICT GOAL_DELIVERY_ATTEMPT_CAP and the request stays
+    pending). The advance is unfalsifiable -- a FOREIGN live turn (a mis-timed
+    keystroke) OR our OWN submit read as a plain prompt (#720 silent-'sent' tail,
+    a real failed delivery) -- so goal_sweep bounds verify-failed-live with the
+    SEPARATE looser GOAL_DELIVERY_LIVE_ATTEMPT_CAP (#1110-review). A quiet
+    transcript is the #731 swallowed-submit class -> `skip:verify-failed`
+    (counted on the strict cap). All classification logic lives in the leaf; this
+    is the call-site adapter that maps the leaf verdict to the disposition word."""
     age_after = _turn_liveness.transcript_age_s(tpath, now)
     if _turn_liveness.classify_confirm_fail(age_before, age_after) == "live":
         return "skip:verify-failed-live"
@@ -1582,12 +1600,16 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                                         evaluated BEFORE the render gate.
       "skip:verify-failed-live"     -- #1110: a keystroke WAS typed but the arm
                                         never confirmed AND the transcript
-                                        advanced during the confirm window (the
-                                        turn was live). A MIS-timed keystroke, NOT
-                                        in `_GOAL_KEYSTROKE_SKIPS`, so it never
-                                        counts toward the cap (unlike a quiet
-                                        `skip:verify-failed`); the request stays
-                                        pending for the next sweep.
+                                        advanced during the confirm window (a
+                                        FOREIGN live turn OR our own accepted
+                                        submit). NOT in `_GOAL_KEYSTROKE_SKIPS`,
+                                        so it never counts toward the STRICT cap
+                                        (unlike a quiet `skip:verify-failed`); the
+                                        request stays pending -- bounded by the
+                                        separate looser
+                                        `GOAL_DELIVERY_LIVE_ATTEMPT_CAP`
+                                        (#1110-review) so an accept-as-plain-
+                                        prompt livelock still gives up.
 
     Deliberately does NOT check `_goal_autoarm_recent_human_activity` for
     the normal (user-`/autopilot`) origin -- see this module's own header
@@ -1851,10 +1873,14 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     # pre-keystroke age) is reused by the confirm split (`_verify_fail_word`).
     _tage = _turn_liveness.transcript_age_s(tpath, now)
     if _turn_liveness.turn_live(_tage):
+        # #1110-review -- clamp a small-negative live age (a write a moment ahead
+        # of the frozen sweep `now`, within the future-skew floor) to 0 so the
+        # human-facing "advanced Ns ago" never renders a negative "advanced -3s".
+        _tage_ago = max(0, int(_tage))
         _log_goal_sync("SKIP busy-transcript sid=%s cwd=%s tage=%d"
-                       % (sid, cwd, int(_tage)))
+                       % (sid, cwd, _tage_ago))
         if out is not None:
-            out["detail"] = "transcript advanced %ds ago" % int(_tage)
+            out["detail"] = "transcript advanced %ds ago" % _tage_ago
         return "skip:busy-transcript"
 
     kind, draft = watchdog._classify_boundary(captured)
@@ -2264,10 +2290,21 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             dl_fails = int(entry.get("dl_fails", 0))
         except (TypeError, ValueError):
             dl_fails = 0
-        if dl_fails >= GOAL_DELIVERY_ATTEMPT_CAP:
+        # #1110-review -- the SEPARATE looser bound on verify-failed-live (our own
+        # accept-as-plain-prompt submit advances the transcript identically to a
+        # live turn, so the confirm split cannot count it toward the strict cap;
+        # this restores the #731 give-up guarantee for that livelock). INT-guarded
+        # across the JSON boundary exactly like `dl_fails` (#714).
+        try:
+            dl_live_fails = int(entry.get("dl_live_fails", 0))
+        except (TypeError, ValueError):
+            dl_live_fails = 0
+        if (dl_fails >= GOAL_DELIVERY_ATTEMPT_CAP
+                or dl_live_fails >= GOAL_DELIVERY_LIVE_ATTEMPT_CAP):
             dl_last = entry.get("dl_last", "")
+            _dl_count = max(dl_fails, dl_live_fails)   # the count that tripped the cap
             clog, leftover, loc = _goal_cap_drop(
-                sid, cwd, text, entry.get("origin"), dl_fails,
+                sid, cwd, text, entry.get("origin"), _dl_count,
                 entry.get("ts"), run, projects_dir, state, now, send_fn,
                 dry_run, sleep_fn)
             logs += clog
@@ -2279,7 +2316,7 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             _record_delivered_attempt(state, entry.get("origin"), sid, now)
             logs.append("DROP (goal-sweep) %s sid=%s -> drop:attempt-cap "
                         "(%d keystroke deliveries failed, last=%s; leftover=%s)"
-                        % (loc, sid, dl_fails, dl_last, leftover))
+                        % (loc, sid, _dl_count, dl_last, leftover))
             if handled is not None:
                 handled.add(sid)
             continue
@@ -2370,14 +2407,20 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             # defer (undeterminable / busy / busy-transcript / recent-human /
             # client-active / ...) does NOT (counting those would starve a
             # legitimate delivery, #611). #1110 -- `skip:verify-failed-live` is a
-            # keystroke that DID type but landed in a still-live turn (the
-            # transcript advanced during the confirm window): a MIS-timed
-            # attempt, deliberately NOT in `_GOAL_KEYSTROKE_SKIPS`, so it never
-            # counts and the request re-evaluates next sweep -- the dev1
-            # songplayer fix (three mis-timed attempts can no longer exhaust the
-            # cap while the session is alive and about to go idle).
+            # keystroke that DID type but the transcript advanced during the
+            # confirm window: NOT in `_GOAL_KEYSTROKE_SKIPS`, so it never counts
+            # toward the STRICT cap (it may be a mis-timed keystroke into a
+            # genuinely live turn -- the dev1 songplayer fix: three such can no
+            # longer exhaust the cap while the session is about to go idle). But
+            # #1110-review -- our OWN accept-as-plain-prompt submit advances the
+            # transcript identically, and that IS a real failed delivery; so it
+            # counts toward the SEPARATE, looser `dl_live_fails` bound instead,
+            # restoring the give-up guarantee for that livelock.
             if word in _GOAL_KEYSTROKE_SKIPS:
                 _bump_goal_delivery_fail(sid, word, path=requests_path)
+            elif word == "skip:verify-failed-live":
+                _bump_goal_delivery_fail(sid, word, path=requests_path,
+                                         field="dl_live_fails")
             logs.append("SKIP (goal-sweep) %s sid=%s -> %s%s"
                         % (loc, sid, word, dsuf))
     return logs

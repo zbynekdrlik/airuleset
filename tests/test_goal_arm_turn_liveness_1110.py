@@ -323,5 +323,59 @@ class TestArmConfirmFailCarriesTage(unittest.TestCase):
         self.assertRegex(log, r"tage=\d+", "the diagnostic must record the transcript age")
 
 
+# --------------------------------------------------------------------------- #
+# #1110-review — the ACCEPT-AS-PLAIN-PROMPT livelock is still BOUNDED. Our OWN
+# submit, read by CC as a plain prompt (box clears, a `user` turn is appended,
+# but the goal never arms — the #720 silent-'sent' tail), advances the SAME
+# transcript `_verify_fail_word` re-stats, so classify_confirm_fail reads "live"
+# and returns the UNCOUNTED skip:verify-failed-live even though the session was
+# idle at the gate. Left unbounded that defeats the #731 attempt cap for this
+# subclass (re-typing a junk /goal each idle cycle). A SEPARATE, looser
+# live-counter (`GOAL_DELIVERY_LIVE_ATTEMPT_CAP` > the strict cap) restores the
+# give-up guarantee: after N live-classified attempts the request DROPS + pings,
+# exactly like the strict quiet cap.
+# --------------------------------------------------------------------------- #
+class TestVerifyFailedLiveIsBounded(unittest.TestCase):
+    def setUp(self):
+        self.reqp, self.syncp = _isolate_goal_state(self)
+
+    def test_accept_as_prompt_livelock_eventually_drops_and_pings(self):
+        proj = Path(self._dir())
+        tpath = _write_marker_transcript(proj, CWD, SID, transcript_age_s=None)
+        goal.record_goal_request(SID, CWD, TEXT, "full",
+                                 path=self.reqp, origin="self-callback")
+        pings = []
+        dropped = False
+        # Drive well past any reasonable live cap. Each sweep: the transcript is
+        # quiet at the gate (aged 120 s), our submit is accepted-as-plain-prompt
+        # (arm_on_submit=False + transcript_path set → the fake appends a `user`
+        # turn), so the confirm reads verify-failed-live. Left uncounted this
+        # loops forever; the bounded live-counter must DROP + ping within N.
+        for _i in range(12):
+            now = time.time()
+            os.utime(tpath, (now - 120, now - 120))
+            tmux = DeliverGoalFakeTmux(PANE, GOAL_IDLE_CAP, model_type=True,
+                                       arm_on_submit=False, transcript_path=str(tpath))
+            with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+                logs = goal.goal_sweep(now, run=tmux, projects_dir=proj,
+                                       requests_path=self.reqp,
+                                       send_fn=lambda msg, **kw: pings.append(msg),
+                                       sleep_fn=lambda *a, **k: None)
+            if any("drop:attempt-cap" in ln for ln in logs):
+                dropped = True
+                break
+        self.assertTrue(dropped,
+                        "an accept-as-plain-prompt livelock must hit the bounded "
+                        "live-counter and DROP, never re-type forever")
+        self.assertNotIn(SID, goal.load_goal_requests(self.reqp),
+                         "the drop clears the request")
+        self.assertTrue(pings, "the drop pings the owner (origin-gated)")
+
+    def _dir(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        return d.name
+
+
 if __name__ == "__main__":
     unittest.main()
