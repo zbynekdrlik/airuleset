@@ -474,8 +474,11 @@ def impl_window_presence(marker, run=None, logs=None, dry_run=False):
     # cli_tmux_provisioning._window_shell_command; watchdog/ must not import a
     # cli_* module for this (no new cross-layer import), so the shape is
     # drift-locked to the canonical helper in test_declared_window_exit_1037.py.
-    # argv-list form: tmux execvp's `bash -lc "<launcher>; exec bash -l"`.
-    argv += ["bash", "-lc", "%s; exec bash -l" % launcher]
+    # argv-list form: tmux execvp's `bash -lc "set -m; <launcher>; exec bash -l"`.
+    # #1037 live-fix: `set -m` (job control) gives the launcher its own process
+    # group so tmux reports `claude` (not `bash`), keeping the relaunched pane
+    # visible to the inventory.
+    argv += ["bash", "-lc", "set -m; %s; exec bash -l" % launcher]
     run(argv)
     # Keep the pane visible if `claude-impl` REFUSES (exit 1 on a misprovisioned
     # key/cwd) so its LOUD stderr is readable — matching the attach block.
@@ -803,7 +806,15 @@ def list_claude_panes(run=None, logs=None, dry_run=False):
         if not pid or pid in seen:
             continue
         if cmd != "claude":
-            if cmd not in ("sudo", "su") or not ppid:
+            # #1037 live belt: a declared-window `bash -lc` wrapper reports its
+            # ROOT shell (bash/sh/-bash) to tmux when the wrapper lacks job
+            # control (claude shares the pgid), so recognise such a pane via the
+            # SAME pane_pid->claude-child walk the sudo/su-hosted shape uses — the
+            # gk-quality pane stays visible even without a `set -m` respawn, and
+            # any future wrapper shape is covered. A genuine bare shell (no claude
+            # child -> _pane_hosted_claude_pid None -> continue) stays invisible
+            # (the #804 resurrect contract). The sudo/su handling is unchanged.
+            if cmd not in ("sudo", "su", "bash", "sh", "-bash") or not ppid:
                 continue
             cpid = watchdog._pane_hosted_claude_pid(ppid)
             if not cpid:
