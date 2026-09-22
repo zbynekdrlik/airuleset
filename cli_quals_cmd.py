@@ -675,6 +675,12 @@ def _print_bounce_unhandled(quals, root, user):
     import airuleset
     import cli_bounce_unhandled
     slug = airuleset._repo_slug(cwd=root)
+    # INTENTIONAL footer parity (#1066): scoped to `prio:bounce` ONLY — the SAME
+    # population the footer's `bounce_unhandled` field + the Stop gate + the
+    # lane-B goal clause consume — NOT the parent `--bounces`'s
+    # `prio:bounce ∪ ready-for-review` union. A `ready-for-review` ticket
+    # carrying an unhandled BOUNCE is a label inconsistency (gk adds
+    # `prio:bounce` on a bounce), out of this subset by design.
     bounce_rows, _handed, failed = airuleset._slice_mine_and_handed(
         quals, root, slug, extra="label:prio:bounce")
     if failed:

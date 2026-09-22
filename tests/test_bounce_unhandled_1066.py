@@ -71,9 +71,10 @@ class DeriveUnhandled(unittest.TestCase):
             _row(1, STREAM, "working on it", "2026-09-16T10:00:00Z"),
             _row(2, GK, BOUNCE_BODY, "2026-09-16T14:21:00Z"),
         ]}
-        out, read_ok = bu.unhandled_from_fetch(
+        out, read_ok, unreadable = bu.unhandled_from_fetch(
             [6474], fetch=lambda n: rows[n], gk_login=GK, self_login=STREAM)
         self.assertTrue(read_ok)
+        self.assertEqual(unreadable, [])
         self.assertEqual([e["number"] for e in out], [6474])
         import cli_gk_watch
         self.assertEqual(out[0]["verdict_ts"],
@@ -84,10 +85,39 @@ class DeriveUnhandled(unittest.TestCase):
             _row(2, GK, BOUNCE_BODY, "2026-09-16T14:21:00Z"),
             _row(3, STREAM, RFR_BODY, "2026-09-16T15:00:00Z"),
         ]}
-        out, read_ok = bu.unhandled_from_fetch(
+        out, read_ok, unreadable = bu.unhandled_from_fetch(
             [6474], fetch=lambda n: rows[n], gk_login=GK, self_login=STREAM)
         self.assertTrue(read_ok)
         self.assertEqual(out, [])
+        self.assertEqual(unreadable, [])
+
+    def test_mixed_success_reports_confirmed_and_omits_unreadable(self):
+        # #1066 review R1: one member unreadable (gh error → None), one member a
+        # CONFIRMED unhandled bounce. The confirmed member is reported (NEVER
+        # dropped for the sibling's failure); the unreadable member is omitted
+        # AND surfaced as `unreadable` (never silently claimed handled).
+        rows = {
+            6474: [_row(2, GK, BOUNCE_BODY, "2026-09-16T14:21:00Z")],   # unhandled
+            6413: None,                                                  # gh error
+        }
+        out, read_ok, unreadable = bu.unhandled_from_fetch(
+            [6474, 6413], fetch=lambda n: rows[n], gk_login=GK,
+            self_login=STREAM)
+        self.assertTrue(read_ok)
+        self.assertEqual([e["number"] for e in out], [6474])
+        self.assertEqual(unreadable, [6413])
+
+    def test_mixed_all_readable_no_unreadable(self):
+        rows = {
+            6474: [_row(2, GK, BOUNCE_BODY, "2026-09-16T14:21:00Z")],
+            6413: [_row(2, GK, BOUNCE_BODY, "2026-09-16T14:21:00Z"),
+                   _row(3, STREAM, RFR_BODY, "2026-09-16T15:00:00Z")],  # handled
+        }
+        out, read_ok, unreadable = bu.unhandled_from_fetch(
+            [6474, 6413], fetch=lambda n: rows[n], gk_login=GK,
+            self_login=STREAM)
+        self.assertEqual([e["number"] for e in out], [6474])
+        self.assertEqual(unreadable, [])
 
     def test_gh_failure_yields_absent_field(self):
         # A gh error (fetch returns None) → derive_numbers returns None so the
@@ -129,6 +159,16 @@ class AttachUnhandled(unittest.TestCase):
     def test_leaves_field_absent_on_read_failure(self):
         entry = {}
         with m.patch.object(bu, "derive_at_refresh", return_value=None):
+            bu.attach_unhandled(entry, _rows((6474, "prio:bounce")), {}, {},
+                                "/repo", "o/r")
+        self.assertNotIn("bounce_unhandled", entry)
+
+    def test_never_crashes_the_refresh(self):
+        # attach_unhandled must swallow ANY derivation error and leave the field
+        # absent — the footer refresh can never crash on this addition.
+        entry = {}
+        with m.patch.object(bu, "derive_at_refresh",
+                            side_effect=RuntimeError("boom")):
             bu.attach_unhandled(entry, _rows((6474, "prio:bounce")), {}, {},
                                 "/repo", "o/r")
         self.assertNotIn("bounce_unhandled", entry)
@@ -181,6 +221,53 @@ class StopRunner(unittest.TestCase):
         block, _ = gate.decide(self._payload("✅ DONE"), now=now, home=self.home)
         self.assertFalse(block)
 
+    def test_grace_boundary_exact(self):
+        # Contract: `(now - verdict_ts) < grace` allows, so `>= grace` blocks.
+        now = time.time()
+        grace = gate._grace_seconds()
+        # just INSIDE the grace (age = grace-1) → allow
+        self._write_cache([{"number": 6474, "verdict_ts": now - (grace - 1)}])
+        block, _ = gate.decide(self._payload("✅ DONE"), now=now, home=self.home)
+        self.assertFalse(block, "age just under grace is not yet blockable")
+        # exactly AT / past the grace edge (age >= grace) → block
+        self._write_cache([{"number": 6474, "verdict_ts": now - grace}])
+        block, _ = gate.decide(self._payload("✅ DONE"), now=now, home=self.home)
+        self.assertTrue(block, "age at/over grace is blockable")
+
+    def test_ack_exact_number_no_prefix_match(self):
+        # `BOUNCE-ACK: #647` must NOT clear #6474 (the exact-number contract).
+        now = time.time()
+        self._write_cache([{"number": 6474, "verdict_ts": now - 3600}])
+        block, reason = gate.decide(
+            self._payload("BOUNCE-ACK: #647 unrelated. ⏳"),
+            now=now, home=self.home)
+        self.assertTrue(block, "#647 must not ACK #6474")
+        self.assertIn("6474", reason)
+
+    def test_ack_longer_number_does_not_match_shorter(self):
+        # The (?![0-9]) lookahead: `BOUNCE-ACK: #6474` must NOT clear cache #647.
+        now = time.time()
+        self._write_cache([{"number": 647, "verdict_ts": now - 3600}])
+        block, reason = gate.decide(
+            self._payload("BOUNCE-ACK: #6474 done. ⏳"),
+            now=now, home=self.home)
+        self.assertTrue(block, "#6474 must not ACK #647")
+        self.assertIn("647", reason)
+
+    def test_ack_no_hash_still_matches(self):
+        now = time.time()
+        self._write_cache([{"number": 6474, "verdict_ts": now - 3600}])
+        block, _ = gate.decide(
+            self._payload("BOUNCE-ACK: 6474 (no hash). ⏳"),
+            now=now, home=self.home)
+        self.assertFalse(block)
+
+    def test_unmeasurable_verdict_ts_allows(self):
+        now = time.time()
+        self._write_cache([{"number": 6474, "verdict_ts": "not-a-number"}])
+        block, _ = gate.decide(self._payload("✅ DONE"), now=now, home=self.home)
+        self.assertFalse(block)
+
     def test_no_cache_allows(self):
         block, _ = gate.decide(self._payload("✅ DONE"), home=self.home)
         self.assertFalse(block)
@@ -221,6 +308,42 @@ class StopRunner(unittest.TestCase):
             env={**env, "PYTHONPATH": str(REPO)})
         self.assertEqual(r.returncode, 2)
         self.assertIn("6474", (r.stdout + r.stderr))
+
+
+# --------------------------------------------------------------------------- #
+# slice-quals --bounces --unhandled CLI print.
+# --------------------------------------------------------------------------- #
+class CliPrintUnhandled(unittest.TestCase):
+    def _run(self, bounce_rows, derive_ret):
+        import contextlib
+        import io
+        import airuleset
+        import cli_quals_cmd
+        out = io.StringIO()
+        with m.patch.object(airuleset, "_repo_slug", return_value="o/r"), \
+             m.patch.object(airuleset, "_slice_mine_and_handed",
+                            return_value=(bounce_rows, {}, False)), \
+             m.patch.object(bu, "derive_numbers", return_value=derive_ret), \
+             contextlib.redirect_stdout(out):
+            cli_quals_cmd._print_bounce_unhandled(["q"], "/repo", "user")
+        return out.getvalue()
+
+    def test_prints_oldest_verdict_first(self):
+        rows = {6474: {"number": 6474}, 6413: {"number": 6413}}
+        txt = self._run(rows, [{"number": 6474, "verdict_ts": 100.0},
+                               {"number": 6413, "verdict_ts": 50.0}])
+        lines = [ln for ln in txt.splitlines() if ln.strip()]
+        self.assertEqual(lines[0].split("\t")[0], "6413")   # ts 50 first
+        self.assertEqual(lines[1].split("\t")[0], "6474")
+
+    def test_no_bounce_members_prints_nothing(self):
+        self.assertEqual(self._run({}, []), "")
+
+    def test_read_failure_exits_1(self):
+        rows = {6474: {"number": 6474}}
+        with self.assertRaises(SystemExit) as cm:
+            self._run(rows, None)      # derive_numbers None = gh read failed
+        self.assertEqual(cm.exception.code, 1)
 
 
 # --------------------------------------------------------------------------- #

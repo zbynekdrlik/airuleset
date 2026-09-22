@@ -360,6 +360,12 @@ def decide(payload, question_fn=None, u_count_fn=None, lane_fn=None,
         # REQUIRE) was false-routed. Apply the infra route ONLY when the asking
         # window's role is NOT infra; from the infra window a bare `#N` naming an
         # infra ticket is an ordinary owner question and falls through to allow.
+        # DELIBERATE scope: ONLY the LABEL verdict is role-scoped (the finding +
+        # design name the "infra-label verdict"); the U-independent TEXT-shape
+        # trigger above (`_is_release_block_shape`) is left unscoped — its STRONG
+        # tokens (deploy-prod / startup_failure / …) name a real release block
+        # even from the infra window, and the reported incidents were all the
+        # LABEL path with no strong token.
         if _asking_role(cwd, role_fn) != "infra":
             return True, _INFRA_REASON
     if verdict == "not_in_u":

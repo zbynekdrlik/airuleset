@@ -23,19 +23,41 @@ REST-first paginated reader the composer already trusts -- so the unhandled
 state is genuinely ONE derivation, REST-first, one call per bounce member, under
 the shared gh-rate budget guard.
 
-FAIL-OPEN throughout: a gh error / low budget / unresolvable slug yields None so
-the caller leaves the cache field ABSENT (never a false '0 unhandled'); a member
-whose read errors simply is not reported (never drops OTHER confirmed members).
+FAIL-OPEN, in two distinct shapes (#1066 review R1):
+  * WHOLE-SLICE failure (rate-guard low budget / unresolvable slug / EVERY
+    member read errored) -> None, so the caller leaves the cache field ABSENT
+    (never a false '0 unhandled' across the board);
+  * PER-MEMBER failure (one member's gh read errored while others succeeded) ->
+    that member is OMITTED from the reported list (its state is unmeasurable, so
+    it is never reported as unhandled — which would false-BLOCK — nor claimed
+    handled) and LOGGED to stderr, and a CONFIRMED-unhandled member is NEVER
+    dropped for a sibling's failure. So a per-member failure yields a
+    field-PRESENT list that omits the unreadable member; it self-heals on the
+    next refresh (which usually reads it). The residual gap (a PERSISTENTLY
+    unreadable bounce stays invisible to the Stop gate) is surfaced by the
+    stderr log, never silent.
 """
 import sys
+
 
 # The Stop-hook grace shared with `gates.bounce_unhandled` (30 min after the
 # verdict -- a bounce younger than this is not yet blockable). One source of
 # truth so the refresh derivation and the gate can never disagree.
 BOUNCE_GRACE_SECONDS = 1800
 
-# The returned-bounce label the partition + footer already key on.
-_BOUNCE_LABEL = "prio:bounce"
+
+def _bounce_label():
+    """The returned-bounce label — the ONE source of truth `cli_quals` keys the
+    footer's `bounce` count on (`_GK_HANDOFF_BOUNCE_OVERRIDE`), imported LAZILY
+    (only on the refresh path, never the Stop path) so the footer's `bounce`
+    count and this unhandled subset can never drift on a future rename (#1066
+    review R2). A safe literal fallback keeps the leaf importable if cli_quals is
+    ever unavailable — cli_quals is a core module present in every real call."""
+    try:
+        from cli_quals import _GK_HANDOFF_BOUNCE_OVERRIDE
+        return _GK_HANDOFF_BOUNCE_OVERRIDE
+    except Exception:
+        return "prio:bounce"
 
 
 def _bounce_numbers(*buckets):
@@ -43,13 +65,14 @@ def _bounce_numbers(*buckets):
     buckets (each a `{number: {"labels": [...]}}` dict). A missing/malformed
     labels value counts as no-bounce (the safe direction, mirroring
     `cli_quals._count_bounce`)."""
+    label = _bounce_label()
     nums = set()
     for bucket in buckets:
         for num, row in (bucket or {}).items():
             labels = row.get("labels") if isinstance(row, dict) else None
             names = {(lb or {}).get("name") for lb in (labels or [])
                      if isinstance(lb, dict)}
-            if _BOUNCE_LABEL in names:
+            if label in names:
                 try:
                     nums.add(int(num))
                 except (TypeError, ValueError):
@@ -60,32 +83,38 @@ def _bounce_numbers(*buckets):
 def unhandled_from_fetch(numbers, *, fetch, gk_login, self_login,
                          now=None, is_own_login=None):
     """Drive `cli_gk_watch.watch_issue` per member over the injected `fetch`
-    (the REST reader / test seam) and return `(entries, read_ok)`:
+    (the REST reader / test seam) and return `(entries, read_ok, unreadable)`:
 
       * `entries` -- `[{"number": N, "verdict_ts": <epoch>}, ...]` for every
         member whose state is `bounce-unanswered` (the newest gk BOUNCE is newer
         than the stream's last own comment/RFR), ORDERED by number;
       * `read_ok` -- True iff at least one member's read succeeded (state !=
-        `unknown`). The caller leaves the cache field ABSENT when NO read
-        succeeded (a whole-slice gh failure), so a transient error never reads
-        as '0 unhandled' (fail-open). A per-member error just omits that member.
+        `unknown`). The caller returns None (field ABSENT) when NO read succeeded
+        (a whole-slice gh failure), so a transient error never reads as '0
+        unhandled' (fail-open);
+      * `unreadable` -- the member numbers whose read errored (state `unknown`).
+        A per-member error OMITS that member (its state is unmeasurable) but
+        NEVER drops a CONFIRMED-unhandled sibling; the caller logs `unreadable`
+        so a persistently-unreadable bounce is surfaced, not silent (#1066 R1).
 
     `head_ts_fn` is deliberately None: `bounce-unanswered` depends only on the
     newest-BOUNCE-vs-last-RFR timestamps, never on the PR head, so no per-member
     PR-head lookup is spent on the hot refresh path."""
     import cli_gk_watch
-    entries, read_ok = [], False
+    entries, read_ok, unreadable = [], False, []
     for n in sorted({int(x) for x in (numbers or [])}):
         st = cli_gk_watch.watch_issue(
             n, fetch=fetch, gk_login=gk_login, self_login=self_login,
             head_ts_fn=None, now=now, is_own_login=is_own_login)
         state = st.get("state") if isinstance(st, dict) else None
-        if state and state != "unknown":
-            read_ok = True
+        if state == "unknown" or state is None:
+            unreadable.append(n)
+            continue
+        read_ok = True
         if state == "bounce-unanswered":
             gl = st.get("gk_latest") or {}
             entries.append({"number": n, "verdict_ts": gl.get("created_at")})
-    return entries, read_ok
+    return entries, read_ok, unreadable
 
 
 def derive_numbers(numbers, *, cwd, slug, now=None, fetch=None, gk_login=None,
@@ -101,7 +130,17 @@ def derive_numbers(numbers, *, cwd, slug, now=None, fetch=None, gk_login=None,
     to airuleset.py and the derivation stays the composer's ONE trusted path.
     `rate_guard` skips the whole derivation when the shared core gh budget is
     below the poll floor (mirrors `gk_watch_issue`); an explicit CLI invocation
-    passes `rate_guard=False`."""
+    passes `rate_guard=False`.
+
+    Why this wires `watch_issue` directly rather than calling `gk_watch_issue`
+    (#1066 review R2): `gk_watch_issue` does a per-member `_pr_head_commit_ts`
+    (`gh pr list`) call that `bounce-unanswered` does NOT need (`head_ts_fn=None`
+    here), and it re-checks the rate guard per member; this leaf skips the PR-head
+    call and hoists ONE rate-guard check for the whole batch. `gk_watch_issue`
+    exposes no head-skip knob, and adding one would edit airuleset.py (at its
+    ratchet ceiling) beyond this lane's single call site — so the fetch reader,
+    logins and matcher are RESOLVED from the same airuleset/cli_quals sources
+    (never re-implemented), keeping the divergence to the head-skip + batching."""
     nums = sorted({int(x) for x in (numbers or [])})
     if not nums:
         return []                        # no bounces in the slice -> truthful 0
@@ -132,9 +171,17 @@ def derive_numbers(numbers, *, cwd, slug, now=None, fetch=None, gk_login=None,
             sys.stderr.write(
                 "bounce-unhandled: own-login matcher unavailable (%s)\n" % _e)
             is_own_login = None
-    entries, read_ok = unhandled_from_fetch(
+    entries, read_ok, unreadable = unhandled_from_fetch(
         nums, fetch=fetch, gk_login=gk_login, self_login=self_login,
         now=now, is_own_login=is_own_login)
+    if unreadable:
+        # A per-member gh failure omits that member (unmeasurable state) but does
+        # NOT drop the confirmed-unhandled siblings; surface it so a PERSISTENTLY
+        # unreadable bounce is never silent (#1066 review R1).
+        sys.stderr.write(
+            "bounce-unhandled: %d member(s) unreadable this refresh (%s) — "
+            "omitted (state unmeasurable), confirmed members still reported\n"
+            % (len(unreadable), ",".join("#%d" % n for n in unreadable)))
     return entries if read_ok else None    # no read succeeded -> absent
 
 
