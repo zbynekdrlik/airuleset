@@ -1,0 +1,4 @@
+test('some scenario', async ({ page }) => {
+  test.skip(notApplicable(), 'nested skip must still block');
+  await page.goto('/');
+});

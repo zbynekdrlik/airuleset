@@ -1,0 +1,1 @@
+test.skip(notApplicable(), 'ok'); test.skip(true, 'hidden real skip on same line');
