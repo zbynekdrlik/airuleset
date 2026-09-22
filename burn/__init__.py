@@ -16,10 +16,65 @@ back from a remote box by invoking that box's own already-deployed
 `airuleset.py burn --json` over ssh (see `airuleset._burn_remote`).
 """
 import datetime
+import gzip
 import json
 import os
+import zlib
 from collections import defaultdict
 from pathlib import Path
+
+
+class _SafeGzLines:
+    """A context-manager line iterator over a `.jsonl.gz` that treats a corrupt
+    or truncated stream as end-of-file (#1117).
+
+    gzip decompression is LAZY — a corrupt / truncated `.jsonl.gz` does not fail
+    at open, it raises (`EOFError`, `gzip.BadGzipFile` — itself an `OSError` —
+    or `zlib.error`) partway through iteration. The plain `open(errors="replace")`
+    path never had that failure mode: decode errors are silently replaced and
+    iteration never raises, so one bad transcript could never abort a whole burn
+    report. This wrapper restores that property for the gz path — the readers
+    keep using `with fh:` / `for line in fh:` unchanged, and a decompression
+    failure simply stops the file early (partial data already read is kept),
+    never propagating out to crash `scan` / `scan_split` / `scan_dispatches`
+    (and the watchdog burn jobs / fleet-over-ssh report that call them)."""
+
+    def __init__(self, fh):
+        self._fh = fh
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._fh.close()
+        return False
+
+    def __iter__(self):
+        try:
+            for line in self._fh:
+                yield line
+        except (OSError, EOFError, zlib.error):
+            return
+
+
+def _open_transcript(path):
+    """Open a transcript for text reading, transparently decompressing a
+    `.jsonl.gz` (#1117).
+
+    The disk-guard pressure drain gzips transcripts in place (2-day floor on
+    shared-stream boxes, #925) via `cli_scratch_sweep._compress_transcript_file`
+    (#410), which `os.utime()`-stamps the `.gz` with the ORIGINAL mtime — so a
+    compressed file can still sit inside the 7-day burn window. Every burn
+    reader routes its transcript reads through here so a `.jsonl.gz` counts
+    exactly like its plain twin. `encoding="utf-8"` (transcripts are UTF-8 JSON)
+    + `errors="replace"` are pinned on BOTH branches so the gz read is
+    byte-for-byte equivalent to the plain read regardless of the box's locale.
+    A `.gz` is wrapped so a corrupt stream degrades to EOF instead of raising
+    mid-iteration (see `_SafeGzLines`)."""
+    if path.endswith(".gz"):
+        return _SafeGzLines(
+            gzip.open(path, "rt", encoding="utf-8", errors="replace"))
+    return open(path, "r", encoding="utf-8", errors="replace")
 
 # per-Mtok (input, cache_write, cache_read, output) — Opus-5-era pricing, the
 # SAME table `modules/core/model-awareness.md` documents. `cache_write` here
@@ -114,7 +169,7 @@ def scan(root, days=7, now=None):
             continue
         files += 1
         try:
-            fh = open(path, "r", errors="replace")
+            fh = _open_transcript(path)
         except OSError:
             continue
         with fh:
@@ -1507,8 +1562,15 @@ def _split_transcripts(root):
                 kind = "sub"
             else:
                 kind = "other"
+            # #1117: also yield gzipped transcripts (`.jsonl.gz`, written by the
+            # disk-guard pressure drain). A `.jsonl` + `.jsonl.gz` pair for the
+            # same transcript (the compress-verify-swap window can leave both on
+            # disk briefly) is counted ONCE, preferring the plain file.
+            names = set(filenames)
             for fn in sorted(filenames):
                 if fn.endswith(".jsonl"):
+                    yield os.path.join(dirpath, fn), proj, kind
+                elif fn.endswith(".jsonl.gz") and fn[:-len(".gz")] not in names:
                     yield os.path.join(dirpath, fn), proj, kind
 
 
@@ -1592,7 +1654,7 @@ def scan_split(root, hours=12, now=None, repo_resolver=None):
         row = _split_row()
         cwd = None
         try:
-            fh = open(path, "r", errors="replace")
+            fh = _open_transcript(path)
         except OSError:
             continue
         with fh:
@@ -1919,7 +1981,7 @@ def read_dispatch(path):
     model = None
     attribution = None
     try:
-        fh = open(path, "r", errors="replace")
+        fh = _open_transcript(path)
     except OSError:
         return None
     with fh:
@@ -1980,6 +2042,9 @@ def read_dispatch(path):
 
 def _agent_id_of(path):
     base = os.path.basename(path)
+    # #1117: a gzipped sub-transcript is `agent-<id>.jsonl.gz`.
+    if base.endswith(".gz"):
+        base = base[:-len(".gz")]
     if base.startswith("agent-") and base.endswith(".jsonl"):
         return base[len("agent-"):-len(".jsonl")]
     return None
@@ -2017,12 +2082,16 @@ def agent_types_from_parent(parent_path, agent_ids):
     """
     wanted = set(agent_ids or ())
     out = {}
+    # #1117: the parent transcript path is built as `<sid>.jsonl`; if the disk
+    # guard gzipped it, fall back to the `.jsonl.gz` twin.
+    if not os.path.exists(parent_path) and os.path.exists(parent_path + ".gz"):
+        parent_path = parent_path + ".gz"
     if not wanted or not os.path.exists(parent_path):
         return out
     uses = {}
     pending = {}
     try:
-        fh = open(parent_path, "r", errors="replace")
+        fh = _open_transcript(parent_path)
     except OSError:
         return out
     with fh:
