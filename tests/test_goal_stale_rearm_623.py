@@ -110,7 +110,12 @@ class TestClassifyArmedCondition(unittest.TestCase):
         self.assertEqual(goal._classify_armed_condition(cond, line), "current")
 
 
-class TestStaleArmedRearmRecorded(unittest.TestCase):
+class TestStaleArmedRearmObserved(unittest.TestCase):
+    """#1113 (RETIRES the #623 record path) -- goal_dark_watch's armed-True
+    branch only OBSERVES a template drift on an ALIVE armed loop; it NEVER
+    records a re-arm request and NEVER types (the >10x david1-3 regression).
+    A template change waits for the next NATURAL arm."""
+
     CWD = "/home/newlevel/devel/stalerearm"
 
     def setUp(self):
@@ -138,114 +143,72 @@ class TestStaleArmedRearmRecorded(unittest.TestCase):
             requests_path=reqs, dry_run=dry_run)
         return goal.load_goal_requests(reqs), tmux, logs, reqs
 
-    def test_stale_armed_loop_records_a_rearm(self):
+    def test_stale_armed_loop_observes_drift_without_recording(self):
         reqs, tmux, logs, _ = self._sweep("sess-stale-1", _OLD_COND)
-        req = reqs.get("sess-stale-1")
-        self.assertIsInstance(req, dict, "a stale-rearm request must be recorded")
-        self.assertEqual(req.get("origin"), "stale-rearm")
-        self.assertEqual(req.get("text"), _NEW_TEMPLATE)
+        self.assertEqual(reqs, {},
+                         "an ACTIVE armed loop is NEVER re-armed by a keystroke")
         self.assertEqual(tmux.sent, [],
-                         "dark_watch records a request, never keystrokes")
-        self.assertTrue(any("STALE: recording re-arm" in ln for ln in logs), logs)
+                         "dark_watch OBSERVES the drift, never keystrokes")
+        self.assertTrue(any("stale-drift" in ln
+                            and "waits for the next natural arm" in ln
+                            for ln in logs), logs)
 
-    def test_current_armed_loop_records_nothing(self):
+    def test_current_armed_loop_is_silent(self):
         reqs, _, logs, _ = self._sweep("sess-current-1", _NEW_COND)
-        self.assertEqual(reqs, {}, "a current condition needs no re-arm")
-        self.assertFalse(any("stale-rearm" in ln for ln in logs), logs)
+        self.assertEqual(reqs, {}, "a current condition needs no observation")
+        self.assertFalse(any("stale-drift" in ln for ln in logs), logs)
 
     def test_foreign_armed_loop_is_never_touched(self):
         reqs, _, logs, _ = self._sweep("sess-foreign-1",
                                        "fix the login bug and ship it")
-        self.assertEqual(reqs, {}, "a hand-armed foreign goal is never clobbered")
-        self.assertFalse(any("stale-rearm" in ln for ln in logs), logs)
+        self.assertEqual(reqs, {}, "a hand-armed foreign goal is never observed")
+        self.assertFalse(any("stale-drift" in ln for ln in logs), logs)
 
-    def test_not_workable_stale_loop_skips_with_log(self):
-        reqs, _, logs, _ = self._sweep("sess-stale-empty", _OLD_COND, obl=(0, 100000))
-        self.assertEqual(reqs, {}, "an empty backlog is not worth a keystroke")
-        self.assertTrue(any("backlog not workable" in ln for ln in logs), logs)
+    def test_drift_observed_regardless_of_backlog(self):
+        # #1113: the former workability/cache/attempt-cap gates governed a
+        # KEYSTROKE, which no longer happens -- an empty/stale-cache backlog no
+        # longer suppresses the pure OBSERVATION.
+        reqs, _, logs, _ = self._sweep("sess-stale-empty", _OLD_COND,
+                                       obl=(0, 100000))
+        self.assertEqual(reqs, {})
+        self.assertTrue(any("stale-drift" in ln for ln in logs), logs)
 
-    def test_stale_cache_too_old_is_not_workable(self):
-        # a stale obligation cache (older than GOAL_DARK_CACHE_MAX_AGE_S = 3d) is
-        # not trusted -> no re-arm (fail toward no keystroke). now=400000, cts=1
-        # -> age ~4.6d > cap.
+    def test_drift_observed_even_on_stale_cache(self):
         reqs, _, logs, _ = self._sweep("sess-stale-oldcache", _OLD_COND,
                                        obl=(7, 1), now=400000)
         self.assertEqual(reqs, {})
-        self.assertTrue(any("backlog not workable" in ln for ln in logs), logs)
+        self.assertTrue(any("stale-drift" in ln for ln in logs), logs)
 
-    def test_dry_run_records_nothing(self):
-        reqs, tmux, logs, _ = self._sweep("sess-stale-dry", _OLD_COND, dry_run=True)
-        self.assertEqual(reqs, {}, "dry-run must not mutate the request store")
+    def test_dry_run_observes_but_records_nothing(self):
+        reqs, tmux, logs, _ = self._sweep("sess-stale-dry", _OLD_COND,
+                                          dry_run=True)
+        self.assertEqual(reqs, {}, "dry-run records nothing")
         self.assertEqual(tmux.sent, [])
-        self.assertTrue(any("would record re-arm (dry-run" in ln for ln in logs),
-                        logs)
+        self.assertTrue(any("stale-drift" in ln for ln in logs), logs)
 
-    def test_already_pending_is_not_re_recorded(self):
-        reqs_path = self._dir() / "goal-requests.json"
-        # seed a pending stale-rearm request, then a sweep must NOT overwrite it
-        # (it is being delivered by goal_sweep).
-        goal.record_goal_request("sess-stale-pend", self.CWD, _NEW_TEMPLATE,
-                                 "branch-merge", now=90000, path=reqs_path,
-                                 origin="stale-rearm")
-        reqs, _, logs, _ = self._sweep("sess-stale-pend", _OLD_COND,
-                                       reqs=reqs_path)
-        # the pending request stands, unchanged (same ts anchor), no new log
-        self.assertEqual(reqs["sess-stale-pend"]["ts"], 90000)
-        self.assertFalse(any("recording re-arm" in ln for ln in logs), logs)
-
-    def test_defers_to_a_pending_request_of_any_origin(self):
-        # #623-review 🔵: a pending self-callback (user /autopilot) is already
-        # being delivered and arms the SAME current template -> the stale-rearm
-        # must never clobber it (nor pile on a pending dark-rearm).
-        reqs_path = self._dir() / "goal-requests.json"
-        goal.record_goal_request("sess-defer", self.CWD, _NEW_TEMPLATE,
-                                 "branch-merge", now=90000, path=reqs_path,
-                                 origin="self-callback")
-        reqs, _, logs, _ = self._sweep("sess-defer", _OLD_COND, reqs=reqs_path)
-        self.assertEqual(reqs["sess-defer"]["origin"], "self-callback",
-                         "a pending self-callback is never clobbered")
-        self.assertFalse(any("recording re-arm" in ln for ln in logs), logs)
-
-    def test_stale_rearm_is_version_capped_1092(self):
-        # #1092 (e) SUPERSEDES the pre-#1092 stale-rearm re-record cadence for the
-        # SAME template: a stale-rearm now records at most ONCE per session per
-        # TEMPLATE VERSION (keyed on the shipped template hash). After the first
-        # record+delivery, a later sweep with the SAME template is version-locked
-        # (no re-record, no #804 backoff re-arm) -- so a template deploy can no
-        # longer storm an armed session's prompt every ~30 min. The shared
-        # `_dark_rearm_attempt_ok` backoff helper itself is UNCHANGED and still
-        # governs the DARK-rearm (dead-loop) path; only stale-rearm's re-record
-        # governance moved to the version key.
+    def test_drift_observation_deduped_per_template_version(self):
+        # #1113 (was #1092 (e), reused for the observation): the drift is logged
+        # ONCE per (session, template hash), so a template deploy does not
+        # re-log every armed session's drift every ~30 min sweep.
         state = {}
-        reqs_path = self._dir() / "goal-requests.json"
-        sid = "sess-cap"
-        # record #1 (now=100000) — stamps the template version
-        self._sweep(sid, _OLD_COND, reqs=reqs_path, state=state)
-        self.assertEqual(goal.load_goal_requests(reqs_path)[sid]["origin"],
-                         "stale-rearm")
-        goal._record_delivered_attempt(state, "stale-rearm", sid, 100000)
-        goal.clear_goal_request(sid, path=reqs_path)
-        # a later sweep, SAME template -> version-locked, NEVER re-records
-        reqs, _, logs, _ = self._sweep(sid, _OLD_COND, reqs=reqs_path,
-                                       state=state, now=100200)
-        self.assertEqual(reqs, {}, "same template version -> no second re-arm record")
-        self.assertTrue(any("template version" in ln for ln in logs), logs)
-        # even far in the future (past any old backoff window) it stays locked
-        reqs, _, logs, _ = self._sweep(
-            sid, _OLD_COND, reqs=reqs_path, state=state,
-            now=100100 + goal.GOAL_DARK_REARM_BACKOFF_S[0] + 10)
-        self.assertEqual(reqs, {}, "still version-locked until the template changes")
-        # a CHANGED template re-opens the version key -> re-arms again
+        _, _, l1, _ = self._sweep("sess-cap", _OLD_COND, state=state)
+        self.assertTrue(any("stale-drift" in ln for ln in l1), l1)
+        _, _, l2, _ = self._sweep("sess-cap", _OLD_COND, state=state, now=100200)
+        self.assertFalse(any("stale-drift" in ln for ln in l2),
+                         "same template version -> observed once")
+        # a CHANGED template re-opens the observation.
         newer = _NEW_TEMPLATE + " EXTRA v2 clause."
-        reqs, _, _, _ = self._sweep(sid, _OLD_COND, tmpl=newer,
-                                    reqs=reqs_path, state=state, now=100500)
-        self.assertEqual(reqs[sid]["origin"], "stale-rearm",
-                         "a changed template version re-arms again")
+        _, _, l3, _ = self._sweep("sess-cap", _OLD_COND, tmpl=newer,
+                                  state=state, now=100500)
+        self.assertTrue(any("stale-drift" in ln for ln in l3),
+                        "a changed template version re-observes the drift")
 
 
-class TestDeliverStaleRearmReplaces(unittest.TestCase):
-    """deliver_goal REPLACES a still-stale armed autopilot goal, and drops a
-    loop that is no longer stale — never clobbers a foreign / current goal."""
+class TestDeliverStaleRearmRetired(unittest.TestCase):
+    """#1113 -- deliver_goal never REPLACES an armed loop. A leftover on-disk
+    `stale-rearm` request (recorded before the origin was retired) is dropped
+    `drop:stale-rearm-retired` before any pane work / keystroke; an armed footer
+    drops `already-armed` for every origin. The #623 REPLACE path is deleted."""
 
     CWD = "/home/newlevel/devel/stalereplace"
 
@@ -258,7 +221,7 @@ class TestDeliverStaleRearmReplaces(unittest.TestCase):
         return Path(d.name)
 
     def _deliver(self, sid, armed_cond, text=_NEW_TEMPLATE, recent=False,
-                 model_type=True):
+                 model_type=True, origin="stale-rearm"):
         proj = self._dir()
         _write_marker_transcript(proj, self.CWD, sid)
         _write_goal_marker(proj, self.CWD, sid, "Goal set: " + armed_cond,
@@ -270,58 +233,33 @@ class TestDeliverStaleRearmReplaces(unittest.TestCase):
             word = goal.deliver_goal(
                 sid, self.CWD, text, "branch-merge", run=tmux, projects_dir=proj,
                 now=100000, request_ts=100000, sleep_fn=lambda s: None,
-                origin="stale-rearm")
+                origin=origin)
         return word, tmux
 
-    def test_replaces_a_still_stale_armed_goal(self):
+    def test_leftover_stale_rearm_request_dropped_retired(self):
         word, tmux = self._deliver("sess-repl-1", _OLD_COND)
-        self.assertEqual(word, "sent", "a still-stale armed loop is REPLACED")
-        # `_type_literal` chunks a long paste across several `-l` send-keys.
-        self.assertEqual("".join(tmux.typed_texts()), _NEW_TEMPLATE)
+        self.assertEqual(word, "drop:stale-rearm-retired",
+                         "a leftover stale-rearm request is never typed")
+        self.assertEqual(tmux.sent, [])
 
-    def test_drops_when_the_loop_is_already_current(self):
-        word, tmux = self._deliver("sess-repl-2", _NEW_COND)
-        self.assertEqual(word, "drop:already-current")
-        self.assertEqual(tmux.sent, [], "an already-current loop is not retyped")
-
-    def test_drops_a_foreign_armed_goal_without_clobbering(self):
-        word, tmux = self._deliver("sess-repl-3", "fix the login bug")
-        self.assertEqual(word, "drop:already-current")
-        self.assertEqual(tmux.sent, [], "a foreign goal is NEVER replaced")
-
-    def test_recent_human_defers_the_replace(self):
+    def test_retired_drop_precedes_the_recent_human_gate(self):
+        # the retired drop is terminal BEFORE any pane resolution, so even a
+        # human-present pane yields the same terminal drop (never a keystroke).
         word, tmux = self._deliver("sess-repl-4", _OLD_COND, recent=True)
-        self.assertEqual(word, "skip:recent-human")
-        self.assertEqual(tmux.sent, [], "never keystroke a human-active pane")
+        self.assertEqual(word, "drop:stale-rearm-retired")
+        self.assertEqual(tmux.sent, [])
 
-    def test_replace_uses_seed_reach_when_marker_is_past_the_tail(self):
-        # #623-review 🟡: the stale marker is PAST the 4 MB tail
-        # (`scan_goal_markers` returns None) but findable by `seed_goal_marker`'s
-        # reverse-scan. The re-verify MUST use seed's reach, else a still-stale
-        # long-running loop (the ones most likely to be stale after a deploy)
-        # drops forever. Simulate the past-tail read by patching
-        # `scan_goal_markers` to None; `seed_goal_marker` still reads the file.
-        proj = self._dir()
-        sid = "sess-repl-seed"
-        _write_marker_transcript(proj, self.CWD, sid)
-        _write_goal_marker(proj, self.CWD, sid, "Goal set: " + _OLD_COND,
-                           ts_epoch=500)
-        tmux = DeliverGoalFakeTmux([("%9", "claude", self.CWD, "111")],
-                                   GOAL_ARMED_CAP, model_type=True)
-        with m.patch.object(wd, "_goal_autoarm_recent_human_activity",
-                            return_value=(False, "")), \
-             m.patch.object(wd, "scan_goal_markers", return_value=(0, None)):
-            word = goal.deliver_goal(
-                sid, self.CWD, _NEW_TEMPLATE, "branch-merge", run=tmux,
-                projects_dir=proj, now=100000, request_ts=100000,
-                sleep_fn=lambda s: None, origin="stale-rearm")
-        self.assertEqual(word, "sent",
-                         "seed_goal_marker's reach finds the past-tail stale marker")
-        self.assertEqual("".join(tmux.typed_texts()), _NEW_TEMPLATE)
+    def test_retired_drop_even_for_a_current_or_foreign_condition(self):
+        # the origin drops FIRST, whatever the loop's stored condition is.
+        for cond in (_NEW_COND, "fix the login bug"):
+            word, tmux = self._deliver("sess-repl-c-" + cond[:4], cond)
+            self.assertEqual(word, "drop:stale-rearm-retired")
+            self.assertEqual(tmux.sent, [])
 
-    def test_stale_rearm_expiry_is_silent_no_false_ping(self):
-        # #623-review 🟡: an ALIVE (just stale) loop must NOT get the "arm
-        # failed, re-run /autopilot" ping when its stale-rearm request expires.
+    def test_stale_rearm_expiry_never_reached_no_false_ping(self):
+        # #623-review 🟡 held: an ALIVE (just stale) loop must NOT get the "arm
+        # failed" ping. #1113: it now drops retired BEFORE the expiry gate, so
+        # no ping regardless of age.
         proj = self._dir()
         sid = "sess-exp-stale"
         _write_marker_transcript(proj, self.CWD, sid)
@@ -333,9 +271,9 @@ class TestDeliverStaleRearmReplaces(unittest.TestCase):
             projects_dir=proj, now=100000 + goal.GOAL_REQUEST_MAX_AGE_S + 10,
             request_ts=100000, send_fn=lambda mm, **k: pings.append(mm),
             sleep_fn=lambda s: None, origin="stale-rearm")
-        self.assertEqual(word, "expired")
+        self.assertEqual(word, "drop:stale-rearm-retired")
         self.assertEqual(pings, [],
-                         "an alive stale loop gets NO false arm-failed ping")
+                         "a retired stale-rearm gets NO arm-failed ping")
 
     def test_dark_rearm_expiry_still_pings(self):
         # contrast: a dead-loop dark-rearm expiry DOES ping (unchanged).
@@ -353,9 +291,19 @@ class TestDeliverStaleRearmReplaces(unittest.TestCase):
         self.assertEqual(word, "expired")
         self.assertEqual(len(pings), 1, "a dead-loop dark-rearm expiry pings")
 
-    def test_drop_already_current_is_terminal_so_goal_sweep_clears_it(self):
-        self.assertIn("drop:already-current", goal._GOAL_TERMINAL_WORDS)
+    def test_stale_rearm_retired_is_terminal_so_goal_sweep_clears_it(self):
+        self.assertIn("drop:stale-rearm-retired", goal._GOAL_TERMINAL_WORDS)
 
+    def test_already_current_word_removed(self):
+        # the #623 stale-rearm REPLACE re-verify (the only producer of
+        # drop:already-current) is deleted, so the terminal word is gone.
+        self.assertNotIn("drop:already-current", goal._GOAL_TERMINAL_WORDS)
+
+    def test_stale_rearm_origin_left_the_partition_tuples(self):
+        self.assertNotIn(goal._GOAL_STALE_REARM_ORIGIN,
+                         goal._GOAL_WATCHDOG_REARM_ORIGINS)
+        self.assertNotIn(goal._GOAL_STALE_REARM_ORIGIN,
+                         goal._GOAL_ATTEMPTS_STATE_KEYS)
 
 if __name__ == "__main__":
     unittest.main()
