@@ -259,13 +259,25 @@ class TestCmdSharePublicFirst(unittest.TestCase):
     PRIVATE = ("http://100.64.0.1:8790/TOKTOKTOKTOKTOKTOK12/rec.wav",
                "http://192.168.1.5:8790/TOKTOKTOKTOKTOKTOK12/rec.wav")
 
-    def _run(self, lane_full, status):
+    def _run(self, lane_full, status, origin_live=True):
         def fake_share(path, base_dir=None):
             return (self.LOCAL_URL, Path("/tmp/x/TOK/rec.wav"))
+
+        origin_prefix = None
+        if lane_full is not None:
+            origin_prefix = "http://%s:%s/" % (lane_full[2], 8790)  # bind_ip:sp.port
+
+        def fake_live(u, timeout=2):
+            # The origin liveness probe (bind_ip:sp.port) is controllable; the
+            # local primary + private URLs are always live in these tests.
+            if origin_prefix is not None and u.startswith(origin_prefix):
+                return origin_live
+            return True
+
         with mock.patch.object(fshare, "share", fake_share), \
              mock.patch.object(filedrop, "advertise_urls",
                                lambda port=None, path="": list(self.PRIVATE)), \
-             mock.patch.object(fw, "_filedrop_is_live", lambda u, timeout=2: True), \
+             mock.patch.object(fw, "_filedrop_is_live", fake_live), \
              mock.patch.object(dg, "resolve_public_lane_full",
                                lambda *a, **k: lane_full), \
              mock.patch.object(fw, "_public_share_status", lambda u, timeout=3: status):
@@ -308,6 +320,85 @@ class TestCmdSharePublicFirst(unittest.TestCase):
         self.assertIn("192.168.1.5", out)
         self.assertIn("no public lane on this box", err)
         self.assertIn("see #1115", err)
+
+    def test_dead_origin_falls_back_even_when_edge_302(self):
+        # A LOCAL lane whose loopback origin isn't served (dominika): the Access
+        # edge answers 302, but the origin liveness probe fails -> must NOT
+        # advertise the public URL, fall back to labelled private (#1114 review MAJOR).
+        lane = ("drop-subdev-dominika.newlevel.media", 8875, "127.0.0.1")
+        out, err = self._run(lane, 302, origin_live=False)
+        self.assertNotIn("https://drop-subdev-dominika", out)
+        self.assertIn("192.168.1.5", out)
+        self.assertIn("origin down", err)
+        self.assertIn("see #1115", err)
+
+
+class TestPublicShareStatusRealHTTP(unittest.TestCase):
+    """Real-HTTP coverage of `_public_share_status` (#1114 review MINOR): a live
+    local server proves the non-redirect opener surfaces the CODE (200/302/5xx)
+    and does NOT follow a 302 into the Access page's own 200."""
+
+    def _serve(self, handler_cls):
+        from http.server import HTTPServer
+        httpd = HTTPServer(("127.0.0.1", 0), handler_cls)
+        port = httpd.server_address[1]
+        t = threading.Thread(target=httpd.serve_forever, daemon=True)
+        t.start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        return port
+
+    def test_200_is_live(self):
+        from http.server import BaseHTTPRequestHandler
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        port = self._serve(H)
+        self.assertEqual(fw._public_share_status(f"http://127.0.0.1:{port}/s/x/y"), 200)
+
+    def test_302_is_live_and_not_followed(self):
+        from http.server import BaseHTTPRequestHandler
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                # A redirect target that would 200 if followed — must NOT be followed.
+                self.send_response(302)
+                self.send_header("Location", "/login")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            def log_message(self, *a):
+                pass
+        port = self._serve(H)
+        self.assertEqual(fw._public_share_status(f"http://127.0.0.1:{port}/s/x/y"), 302)
+
+    def test_502_surfaces_the_code(self):
+        from http.server import BaseHTTPRequestHandler
+
+        class H(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(502)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        port = self._serve(H)
+        self.assertEqual(fw._public_share_status(f"http://127.0.0.1:{port}/s/x/y"), 502)
+
+    def test_connection_refused_is_none(self):
+        # An unbound port -> connection refused -> None (the fallback trigger).
+        import socket
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        dead = s.getsockname()[1]
+        s.close()
+        self.assertIsNone(fw._public_share_status(f"http://127.0.0.1:{dead}/s/x/y", timeout=1))
 
 
 if __name__ == "__main__":

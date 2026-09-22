@@ -292,12 +292,16 @@ def public_url_line(host, token):
             "jednorazový token]" % (host, token))
 
 
-def public_share_url_line(host, token_name):
+def public_share_url_line(host, token_name, access=True):
     """The advertised public HTTPS SHARE URL + its transport (#1114). `token_name`
     is the `<token>/<name>` suffix; the `/s/` prefix routes it (at the tunnel) to
-    the persistent filedrop service. Mirrors `public_url_line`'s labelled shape."""
-    return ("https://%s/s/%s   [verejné cez Cloudflare tunnel — šifrované (TLS), "
-            "Access]" % (host, token_name))
+    the persistent filedrop service. Mirrors `public_url_line`'s labelled shape;
+    the label reflects whether Cloudflare Access fronts this lane (#1114 review —
+    a token-only lane must not claim Access)."""
+    transport = ("šifrované (TLS), Access" if access
+                 else "šifrované (TLS), jednorazový token")
+    return "https://%s/s/%s   [verejné cez Cloudflare tunnel — %s]" % (
+        host, token_name, transport)
 
 
 def write_drop_marker(host, port=DROP_PORT_BASE, path=None):
@@ -518,8 +522,13 @@ def _local_filedrop_port(lane):
     if lane.filedrop_port is not None:
         return lane.filedrop_port
     try:
-        from filedrop import default_port_for_uid
-        return default_port_for_uid()
+        # Mirror the filedrop SERVER's own port resolution exactly
+        # (filedrop.PORT = env -> persisted_port() -> default_port_for_uid()), so a
+        # box that hit the #33/#493 collision fallback and PERSISTED a non-uid port
+        # gets the SAME port in its /s/ rule as the server serves (a share/server
+        # port DISAGREEMENT is itself a 404 — the exact class #493 forbids).
+        from filedrop import default_port_for_uid, persisted_port
+        return persisted_port() or default_port_for_uid()
     except Exception:
         return None
 

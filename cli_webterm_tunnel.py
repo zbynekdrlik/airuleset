@@ -69,9 +69,13 @@ def render_cloudflared_multi_ingress_config(tunnel_uuid, credentials_file,
             hostname, path, service_url = rule
             rules += ("  - hostname: %s\n    path: %s\n    service: %s\n"
                       % (hostname, path, service_url))
-        else:                                    # (hostname, service) — byte-identical
+        elif len(rule) == 2:                     # (hostname, service) — byte-identical
             hostname, service_url = rule
             rules += "  - hostname: %s\n    service: %s\n" % (hostname, service_url)
+        else:                                    # never silently mis-handle (#1114 review)
+            raise ValueError(
+                "ingress rule must be (hostname, service) or (hostname, path, "
+                "service): %r" % (rule,))
     rules += "  - service: http_status:404\n"
     return header + rules
 

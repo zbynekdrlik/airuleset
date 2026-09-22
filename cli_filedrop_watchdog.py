@@ -457,7 +457,10 @@ def cmd_share(args):
     # account. Resolve the lane; when it + a live marker exist AND the public /s/
     # URL answers (200 or 302 Access-redirect), print it FIRST.
     import cli_drop_gateway as _dg
-    lane_full = _dg.resolve_public_lane_full()
+    try:
+        lane_full = _dg.resolve_public_lane_full()
+    except Exception:
+        lane_full = None            # never lose ALL output — fall to private URLs
     if lane_full is None:
         for u in private:
             print(u)
@@ -465,18 +468,33 @@ def cmd_share(args):
               file=sys.stderr)
         return
 
-    public_host, _port, _bind_ip = lane_full
+    public_host, _drop_port, bind_ip = lane_full
     public_url = f"https://{public_host}/s/{token_name}"
-    status = _public_share_status(public_url)
-    if status in (200, 302):
-        print(_dg.public_share_url_line(public_host, token_name))   # FIRST = public
+    # The /s/ route reaches the PERSISTENT filedrop service at the ingress origin
+    # `bind_ip:<this box's filedrop port>`. VERIFY that origin actually answers
+    # (a local check) BEFORE advertising the public URL — an Access-gated lane's
+    # edge 302 proves only edge+DNS+Access, NOT that the origin is up, and a
+    # LOCAL-topology lane whose origin is loopback is dead unless the filedrop
+    # service also binds loopback (#1114 review MAJOR: dominika's 127.0.0.1 origin
+    # is not bound on a tailscale box, so its /s/ would 502 — never advertise it).
+    # sp.port is this box's actual filedrop port; bind_ip is where the ingress points.
+    origin_live = _filedrop_is_live(f"http://{bind_ip}:{sp.port}/")
+    status = _public_share_status(public_url) if origin_live else None
+    if origin_live and status in (200, 302):
+        try:                        # label the transport by the lane's real Access mode
+            _lane = _dg.drop_lane_for_account()
+            _access = bool(getattr(_lane, "access", True))
+        except Exception:
+            _access = True
+        print(_dg.public_share_url_line(public_host, token_name, access=_access))
         for u in private:                                          # labelled fallback
             print(u)
     else:
         for u in private:
             print(u)
-        code = status if status is not None else "timeout"
-        print(f"share: public lane unreachable ({code}) — private URLs only, "
+        reason = ("origin down" if not origin_live
+                  else (status if status is not None else "timeout"))
+        print(f"share: public lane unreachable ({reason}) — private URLs only, "
               f"see #1115", file=sys.stderr)
 
 
