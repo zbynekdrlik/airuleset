@@ -379,6 +379,31 @@ class TestGkStallNotice(unittest.TestCase):
         self.assertEqual(sends, [])
         self.assertEqual(rec, {}, "dry-run persists no episode state")
 
+    def test_dry_run_does_not_wipe_an_active_episode(self):
+        # R1-1: a dry-run sweep with a non-stuck verdict must NOT reset a live
+        # episode's persisted anchor/flag (run_once's save_state is unconditional).
+        rec = {"gks_ts": NOW, "gks_alert": True}
+        self._fire(now=NOW + 5 * MIN, rec=rec, verdict="working", dry_run=True,
+                   send_fn=lambda *a, **k: None)
+        self.assertEqual(rec, {"gks_ts": NOW, "gks_alert": True},
+                         "dry-run must not wipe the persisted episode")
+        # a REAL non-stuck sweep DOES reset it.
+        self._fire(now=NOW + 5 * MIN, rec=rec, verdict="working",
+                   send_fn=lambda *a, **k: None)
+        self.assertEqual(rec, {}, "a real recovery resets the episode")
+
+    def test_future_skewed_anchor_reanchors(self):
+        # R1-6: a future gks_ts (clock skew) is dropped + re-anchored to now, so
+        # the notice is never muted forever; it fires 20 min after the re-anchor.
+        sends = []
+        rec = {"gks_ts": NOW + 10 * HOUR}   # corrupt future anchor
+        self._fire(now=NOW, rec=rec, send_fn=lambda *a, **k: sends.append(a))
+        self.assertEqual(sends, [], "re-anchored to now → not due yet")
+        self.assertEqual(rec["gks_ts"], NOW, "future anchor re-anchored to now")
+        self._fire(now=NOW + 21 * MIN, rec=rec,
+                   send_fn=lambda *a, **k: sends.append(a))
+        self.assertEqual(len(sends), 1, "fires 20 min after the re-anchor")
+
 
 if __name__ == "__main__":
     unittest.main()

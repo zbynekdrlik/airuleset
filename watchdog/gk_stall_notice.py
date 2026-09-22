@@ -137,22 +137,31 @@ def gk_stall_notice(now, rec, glance, captured, cwd, sid, pid, loc, send_fn,
     ANY exit condition (not a declared gk role pane, not `stuck`, not at the
     limit) RESETS the episode so a later re-stall alarms afresh."""
     logs = []
+    # `dry_run` mutates NO persisted episode state (run_once's save_state is
+    # unconditional, so an in-place reset of the live `rec` would leak, #1075-A#2).
     role = _declared_gk_role(cwd, role_fn)
     if role is None:
-        _reset_episode(rec)
+        if not dry_run:
+            _reset_episode(rec)
         return logs
     if getattr(glance, "verdict", None) != "stuck":
-        _reset_episode(rec)          # recovered / not-a-candidate -> reset
+        if not dry_run:
+            _reset_episode(rec)      # recovered / not-a-candidate -> reset
         return logs
     limited, pct = _limit_signal(captured)
     if not limited:
-        _reset_episode(rec)          # stuck but not at the limit -> not our case
+        if not dry_run:
+            _reset_episode(rec)      # stuck but not at the limit -> not our case
         return logs
 
-    # stuck AND at the limit: anchor / measure the episode.
+    # stuck AND at the limit: anchor / measure the episode. A FUTURE prev_ts
+    # (clock skew) is re-anchored to `now` (drop the corrupt value + restart the
+    # 20-min clock) — the nudge_gate `_gate_ts` future-skew discipline, the safe
+    # direction (never suppress forever on a corrupt anchor).
     prev_ts = rec.get(_TS_KEY) if isinstance(rec, dict) else None
-    anchor = prev_ts if isinstance(prev_ts, (int, float)) \
-        and not isinstance(prev_ts, bool) else now
+    anchor = prev_ts if (isinstance(prev_ts, (int, float))
+                         and not isinstance(prev_ts, bool)
+                         and prev_ts <= now) else now
     mins = int(max(0, now - anchor) // 60)
 
     if dry_run:
@@ -162,8 +171,11 @@ def gk_stall_notice(now, rec, glance, captured, cwd, sid, pid, loc, send_fn,
                         % (loc, mins, role))
         return logs
 
-    if isinstance(rec, dict) and prev_ts is None:
-        rec[_TS_KEY] = anchor        # first stuck-at-limit sweep of the episode
+    if isinstance(rec, dict) and prev_ts != anchor:
+        # first stuck-at-limit sweep of the episode (prev_ts None) OR a corrupt
+        # FUTURE prev_ts re-anchored to now — persist the correction either way so
+        # a skewed anchor self-heals instead of muting the notice forever.
+        rec[_TS_KEY] = anchor
     if now - anchor < STALL_NOTICE_MIN_S:
         return logs                  # not yet 20 min — accumulate silently
     if isinstance(rec, dict) and rec.get(_ALERT_KEY):

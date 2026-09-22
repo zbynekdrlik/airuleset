@@ -94,7 +94,10 @@ from watchdog import nudge_gate as _nudge_gate   # #797 shared cadence gate
 # under the `infra-priority` nudge kind (cap-exempt, 15-min floor).
 INFRA_PRIORITY_NUDGE = "infra-priority"
 _PRIORITY_COMMENT_TAGS = frozenset({"GATEKEEPER-ACTION (INFRA)", "STOP:"})
-_PRIORITY_LABEL_RE = re.compile(r"^(?:prio:|release-block\b)")
+# `prio:*` (the design's literal set) OR any `release-block` family label
+# (release-block / release-blocker / release-blocking — no trailing `\b`, which
+# would miss `release-blocker`).
+_PRIORITY_LABEL_RE = re.compile(r"^(?:prio:|release-block)")
 
 
 def _is_priority_record(rec):
@@ -494,15 +497,20 @@ def _nudge_text_infra(records, cur_count):
 # --- HUB RECEIPT (#1109) ---------------------------------------------------
 
 _RECEIPT_STATE_KEY = "infra_priority_receipts"
+# Cap the deduped-receipt id list so it can never grow unbounded on a long-lived
+# box (the sibling nudge_cadence has its own reaper; the receipt set is tiny in
+# practice — a few GATEKEEPER-ACTION comments per release — so a simple keep-last
+# bound is enough).
+_RECEIPT_STATE_MAX = 500
 
 
 def _default_hub_receipt_post(cwd):
     """Build the PRODUCTION hub-receipt poster for `cwd`: `(num, text) -> gh
     issue comment <num> -R <slug> --body <text>` in the repo the window serves,
-    using the box's own gh identity. Returns None when the repo slug is
-    unresolvable (no receipt rather than a wrong-repo post). The rider passes
-    None for `receipt_post_fn` from a unit test, so a test NEVER shells gh; only
-    the goal.py call site wires this default in production."""
+    using the box's own gh identity. ALWAYS returns the `_post` closure; the
+    no-op-on-unresolvable-slug (no wrong-repo post) lives INSIDE `_post`. The
+    rider passes None for `receipt_post_fn` from a unit test, so a test NEVER
+    shells gh; only the goal.py call site wires this default in production."""
     def _post(num, text):
         import subprocess
         import airuleset
@@ -520,14 +528,15 @@ def _default_hub_receipt_post(cwd):
 
 
 def _receipt_clock_hhmm(now):
-    """`HH:MM CEST` for the receipt line, from `now` (an epoch). Europe/Bratislava
-    (== Prague, the owner's tz) via zoneinfo; UTC fallback on any error so the
+    """`HH:MM <TZ>` for the receipt line, from `now` (an epoch). Europe/Bratislava
+    (== Prague, the owner's tz) via zoneinfo, `%Z` so the label is CEST in summer
+    and CET in winter (never a hardcoded season); UTC fallback on any error so the
     receipt never fails to compose."""
     from datetime import datetime, timezone
     try:
         from zoneinfo import ZoneInfo
         return datetime.fromtimestamp(now, ZoneInfo("Europe/Bratislava")
-                                      ).strftime("%H:%M CEST")
+                                      ).strftime("%H:%M %Z")
     except Exception:  # noqa: BLE001 — never let tz resolution break the receipt
         return datetime.fromtimestamp(now, timezone.utc).strftime("%H:%M UTC")
 
@@ -568,7 +577,8 @@ def _post_hub_receipts(state, priority_records, now, loc, receipt_post_fn):
         seen.append(rid)
         posted += 1
     if posted:
-        state[_RECEIPT_STATE_KEY] = seen
+        # keep-last bound so the deduped id list never grows unbounded (#1109-R1).
+        state[_RECEIPT_STATE_KEY] = seen[-_RECEIPT_STATE_MAX:]
     return posted
 
 

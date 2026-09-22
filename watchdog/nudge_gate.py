@@ -359,12 +359,11 @@ def _total_cap_block(sess, now):
     hourly. `gate_ok` still checks the per-kind floor FIRST, so a sub-60-min
     same-kind repeat is reported as `hold:floor`, not `hold:total-cap`.
     RECOVERY kinds AND #1109 PRIORITY_CAP_EXEMPT_KINDS (`infra-priority`) are
-    skipped: a revival is not a prompt interruption, and a release-blocking
-    infra-priority wake must never consume the shared 3 h anti-spam budget (its own
-    15-min per-kind floor still applies via `gate_ok`).
-    RECOVERY kinds are skipped: a revival is not a prompt interruption and never
-    counts toward the cap (they never call `mark_sent` in production either, so
-    this is a defensive belt on top of that). A FUTURE-skewed / non-numeric ts is
+    skipped: a recovery revival is not a prompt interruption and never counts
+    toward the cap (recovery kinds never call `mark_sent` in production either, so
+    that is a defensive belt on top of that), and a release-blocking infra-priority
+    wake must never consume the shared 3 h anti-spam budget (its own 15-min
+    per-kind floor still applies via `gate_ok`). A FUTURE-skewed / non-numeric ts is
     ignored by `_gate_ts`, so a corrupt entry can never mute a session via the
     cap (the same fail-safe direction as the per-kind floor)."""
     gap = _total_gap()
