@@ -34,17 +34,34 @@ import re
 import sys
 from pathlib import Path
 
+# #1115: the drop-lane registry is GENERATED from the fleet registry. cli_fleet
+# is a pure DATA leaf with ZERO top-level imports (it never imports this module),
+# so importing it here creates no cycle — the #433 rule explicitly permits a new
+# leaf to import cli_fleet directly.
+import cli_fleet
+
+# #1115 (#993 area-review split): the GENERATED-registry engine + cache + harvest
+# helpers live in the cli_drop_lanes leaf (imports ONLY cli_fleet — no cross-import
+# cycle; the wrappers below inject the lane-shape primitives; names re-exported).
+import cli_drop_lanes
+from cli_drop_lanes import (  # noqa: F401 — re-exported for cli_drop_gateway.X callers
+    DROP_LANES_CACHE, _is_tailscale_host, _nodename_for_entry, drop_lanes_cache_key,
+    filedrop_port_probe_snippet, parse_filedrop_port, persist_measured_filedrop_ports,
+    read_drop_lanes_cache, write_drop_lanes_cache)
+
 # #433 self-contained leaf: same directory, identical value as airuleset.REPO_DIR.
 REPO_DIR = Path(__file__).resolve().parent
 
-# Per-account loopback port range for the public drop lane (#889). Each account
-# on a shared box gets its own port, so concurrent ephemeral servers (upload,
-# secret show, secret request) never collide. Range 8870-8889 sits above show's
-# 8850-8869 and below no other airuleset range. Distinct from filedrop 8788,
-# upload 8799-8819, secret 8830-8849, show 8850-8869. Grandfathered:
-# spinbike's 8828 predates the per-account range and sits in the gap.
+# Per-account loopback/drop port range for the public drop lane (#889). Each
+# account on a shared box gets its own port, so concurrent ephemeral servers
+# (upload, secret show, secret request) never collide. Range 8870-8899 sits
+# above show's 8850-8869 and below no other airuleset range. Distinct from
+# filedrop 8788, upload 8799-8819, secret 8830-8849, show 8850-8869.
+# Grandfathered: spinbike's 8828 predates the per-account range. #1115: MAX
+# raised 8889 -> 8909 to fit the 14 generated fleet lanes (cli_drop_lanes.
+# build_drop_lanes) above the 7 hand-authored 8870-8876 ports, with headroom.
 DROP_PORT_BASE = 8870
-DROP_PORT_MAX = 8889
+DROP_PORT_MAX = 8909
 
 # Flat single-level drop hostnames. Single-level is LOAD-BEARING: Cloudflare
 # Universal SSL for newlevel.media is `*.newlevel.media` (ONE level), so a
@@ -153,7 +170,13 @@ _GK_TAILSCALE = "100.90.94.41"
 
 
 
-DROP_LANES = {
+# #1115: the HAND-AUTHORED seed lanes. These carry the irregular, grandfathered
+# facts a pure derivation cannot reproduce (`drop-david`/`drop-spinbike`/`drop-gk`
+# hostnames, the marek/dominika/spinbike local tunnels, the measured filedrop
+# ports), so `build_drop_lanes()` preserves every one of them BYTE-FOR-BYTE and
+# only GENERATES the fleet accounts that have no seed. The public `DROP_LANES`
+# below is `build_drop_lanes(cli_fleet.REMOTE_HOSTS)`.
+_SEED_DROP_LANES = {
     # --- spinbike (single-account, SYSTEM unit, no Access) ---
     ("spinbike", "newlevel"): DropLane(
         host=DROP_HOST_SPINBIKE, port=8828,
@@ -235,6 +258,18 @@ DROP_LANES = {
     # NOTE: simap1 is PAUSED (#851) — no entry. montalu1-8 and miva1 ride the
     # controller tunnel once provisioned (go-live step, same topology shape).
 }
+
+
+def build_drop_lanes(remote_hosts):
+    """Bound wrapper (#1115): cli_drop_lanes engine with injected primitives."""
+    return cli_drop_lanes.build_drop_lanes(
+        remote_hosts, seed=_SEED_DROP_LANES, drop_lane_cls=DropLane,
+        controller_tunnel_uuid=_CONTROLLER_TUNNEL_UUID,
+        port_base=DROP_PORT_BASE, port_max=DROP_PORT_MAX)
+
+
+DROP_LANES = build_drop_lanes(cli_fleet.REMOTE_HOSTS)  # generated at import (#1115)
+
 
 # Access specs for Access-gated drop hostnames — reconciled via
 # cli_webterm_access.apply_profile (same shape as WEBTERM_ACCESS_APPS).
@@ -640,45 +675,10 @@ def _lanes_for_tunnel(nodename, tunnel_uuid):
             if n == nodename and lane.tunnel_uuid == tunnel_uuid]
 
 
-def drop_ingress_rules_for_controller():
-    """Ingress rules for controller-topology drop lanes (#931).
-
-    Returns ``[(hostname, service_url), ...]`` for the controller tunnel's
-    multi-ingress config.  Called from ``_setup_controller_webterm`` in
-    ``cli_webterm.py`` at install time — the drop ingress entries ride the SAME
-    controller tunnel that fronts the webterm hostnames.
-
-    The ``service_url`` uses the lane's ``origin_host`` (the box's tailscale
-    IP) + ``port`` — cloudflared on the controller proxies to
-    ``http://<tailscale>:<port>`` where the drop server listens.
-
-    #1114: each lane with a known ``filedrop_port`` ALSO gets a ``/s/`` path rule
-    ``(host, "^/s/", http://origin_host:filedrop_port)`` emitted BEFORE its drop
-    rule, so ``share`` deliveries reach the persistent filedrop service while the
-    ephemeral upload endpoint keeps the same host's catch-all. Order matters:
-    cloudflared matches ingress top-to-bottom, so the path rule MUST precede the
-    no-path drop rule. A lane with ``filedrop_port=None`` emits no ``/s/`` rule
-    (``share`` on it falls back to the private URLs).
-    """
-    rules = []
-    seen = {}  # host -> drop service_url (dedup + conflict detection)
-    for (_n, _u), lane in sorted(DROP_LANES.items()):
-        if lane.topology != "controller" or not lane.origin_host:
-            continue
-        svc = "http://%s:%d" % (lane.origin_host, lane.port)
-        prev = seen.get(lane.host)
-        if prev is not None:
-            if prev != svc:
-                raise ValueError(
-                    "conflicting controller ingress for %s: %s vs %s"
-                    % (lane.host, prev, svc))
-            continue  # same host + same service — dedup
-        seen[lane.host] = svc
-        if lane.filedrop_port is not None:      # #1114: /s/ rule FIRST
-            rules.append((lane.host, "^/s/",
-                          "http://%s:%d" % (lane.origin_host, lane.filedrop_port)))
-        rules.append((lane.host, svc))
-    return rules
+def drop_ingress_rules_for_controller(cache=None):
+    """Controller-tunnel drop ingress rules — thin wrapper over the cli_drop_lanes
+    engine with THIS module's DROP_LANES injected (#931/#1114/#1115)."""
+    return cli_drop_lanes.drop_ingress_rules_for_controller(DROP_LANES, cache=cache)
 
 
 def cmd_drop_gateway(args):
