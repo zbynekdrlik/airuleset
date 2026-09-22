@@ -231,7 +231,10 @@ def _pane_configured_model(cwd):
     if rp:
         targets.add(rp)
     try:
-        panes = tmux_io.list_claude_panes()
+        # dry_run=True keeps this strictly READ-ONLY: the socket-orphan (#318)
+        # recovery inside list_claude_panes can otherwise send a real SIGUSR1;
+        # a stamp read must never mutate tmux server state (#1064 review 🔵4).
+        panes = tmux_io.list_claude_panes(dry_run=True)
     except Exception:
         return None
     for pane_id, pcwd in panes or []:
@@ -258,13 +261,27 @@ def configured_model(cwd, projects_dir=None, home=None):
       1. the dual-agent IMPLEMENTER alias (`AIRULESET_ROLE=implementer` +
          `ANTHROPIC_MODEL`), mirroring `session_model` so the pair matches;
       2. the pane's claude argv `--model <id>` (`_pane_configured_model`);
-      3. the managed launch default (`_managed_model`) -- the main is always
-         launched with it, so it is truthful for the common design author and
-         covers a session launched via the settings `model` key (no `--model`
-         argv) or a dispatched subagent (no pane);
-      4. `UNKNOWN_MODEL` when even the managed default is unresolvable.
+      3. the managed launch default (`_managed_model`) -- BUT ONLY for the MAIN
+         role: the main is the session actually launched with MANAGED_MODEL, so
+         the fallback is truthful for the common design author (and covers a main
+         launched via the settings `model` key with no `--model` argv). A
+         worker/implementer with no readable pane argv was launched with ANOTHER
+         model, so returning the Fable id there would FALSELY claim the main's
+         launch identity (#1064 review 🟡1) -- so a non-main falls through to
+         `UNKNOWN_MODEL`, and `_stamp_value` then uses the truthful SERVED model.
+      4. `UNKNOWN_MODEL` otherwise (a non-main with no pane, or a main whose
+         managed default is unresolvable) -- the honest, gate-refused direction.
     `projects_dir`/`home` are accepted for signature symmetry with
-    `session_model`; the pane resolution keys on `cwd`."""
+    `session_model`; the pane resolution keys on `cwd`.
+
+    Accepted residual (#1064 review 🟡3, ROZHODNUTÉ on the ticket): an off-policy
+    MAIN launched via a settings `model` key set to a NON-Fable model, with no
+    `--model` argv, still falls back to MANAGED_MODEL (Fable) here and the gate
+    would accept it. The managed launcher always passes `--model
+    claude-fable-5-1[1m]` (which wins over settings), and a deliberate
+    `claude --model opus…` puts opus in the argv (correctly refused), so this
+    only bites a hand-launched bare-`claude` main with settings model != Fable --
+    inherent to Approach 1's fallback, out of scope for this fix."""
     if os.environ.get("AIRULESET_ROLE") == "implementer":
         alias = (os.environ.get("ANTHROPIC_MODEL") or "").strip()
         if alias:
@@ -276,8 +293,11 @@ def configured_model(cwd, projects_dir=None, home=None):
         raw = None
     if raw and raw.strip():
         return _norm_model(raw)
-    managed = _managed_model()
-    return managed if managed else UNKNOWN_MODEL
+    if authorship_role(cwd) == "main":
+        managed = _managed_model()
+        if managed:
+            return managed
+    return UNKNOWN_MODEL
 
 
 def _stamp_value(role, configured, served):

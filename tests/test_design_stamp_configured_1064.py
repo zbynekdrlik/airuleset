@@ -65,6 +65,17 @@ class TestConfiguredModel(unittest.TestCase):
             self.assertEqual(cli_authorship.configured_model(MAIN_CWD),
                              cli_authorship.UNKNOWN_MODEL)
 
+    def test_worker_no_pane_falls_through_to_unknown_not_managed(self):
+        # #1064 review 🟡1: a paneless worker/implementer must NOT get the
+        # MANAGED_MODEL (Fable) fallback -- that would falsely claim the main's
+        # launch id. configured_model returns UNKNOWN so the stamp uses the
+        # truthful served model. (The MAIN keeps the MANAGED_MODEL fallback.)
+        wt = "/home/x/proj/.claude/worktrees/agent-zzz"
+        with mock.patch("cli_authorship._pane_configured_model",
+                        return_value=None):
+            self.assertEqual(cli_authorship.configured_model(wt),
+                             cli_authorship.UNKNOWN_MODEL)
+
     def test_implementer_alias_is_the_configured_model(self):
         saved = {k: os.environ.get(k)
                  for k in ("AIRULESET_ROLE", "ANTHROPIC_MODEL")}
@@ -129,6 +140,32 @@ class TestStampSuffix(unittest.TestCase):
                         return_value=None), \
              mock.patch("cli_authorship._managed_model", return_value=None):
             self.assertEqual(self._stamp(), "Design-by: main claude-opus-5")
+
+
+class TestWorkerStampTruthful(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.pd = Path(self.tmp) / "projects"
+
+    def test_paneless_worker_stamps_served_never_false_fable(self):
+        # #1064 review 🟡1: a worktree lane (dispatched subagent, no pane) with a
+        # served model must stamp `worker <served>`, NEVER
+        # `worker claude-fable-5-1 (served: …)` (which would claim the main's id).
+        main = "/home/x/proj"
+        wt = main + "/.claude/worktrees/agent-zzz"
+        sub = (self.pd / encode_project_dir(main) / "sess" / "subagents")
+        sub.mkdir(parents=True, exist_ok=True)
+        (sub / "agent-zzz.jsonl").write_text(json.dumps({
+            "type": "assistant",
+            "message": {"role": "assistant", "model": "claude-opus-4-8",
+                        "content": [{"type": "text", "text": "w"}]}}) + "\n")
+        with mock.patch("cli_authorship._pane_configured_model",
+                        return_value=None):
+            self.assertEqual(
+                cli_authorship.stamp_line("Reviewed", wt,
+                                          projects_dir=str(self.pd)),
+                "Reviewed-by: worker claude-opus-4-8")
 
 
 class TestDispatchGateSuffix(unittest.TestCase):

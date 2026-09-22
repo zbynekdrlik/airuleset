@@ -131,15 +131,14 @@ class TestStampLine(unittest.TestCase):
             {"type": "assistant",
              "message": {"role": "assistant", "model": "claude-opus-4-8",
                          "content": [{"type": "text", "text": "work"}]}}) + "\n")
-        # #1064: the stamp records the CONFIGURED (launch) model; a worker lane
-        # resolves its own launch id via the pane argv (seamed here). served ==
-        # configured == claude-opus-4-8 -> no `(served: …)` suffix, byte-identical.
-        with mock.patch("cli_authorship._pane_configured_model",
-                        return_value="claude-opus-4-8"):
-            self.assertEqual(
-                cli_authorship.stamp_line("Reviewed", wt,
-                                          projects_dir=str(self.pd)),
-                "Reviewed-by: worker claude-opus-4-8")
+        # #1064 review 🟡2 (de-masked): a dispatched worker has NO pane, so
+        # configured_model returns UNKNOWN and the stamp falls through to the
+        # TRUTHFUL served model -- `worker claude-opus-4-8`, never a false
+        # `worker claude-fable-5-1 (served: …)`. No pane mock: this is the real
+        # production path for a worktree lane cwd.
+        self.assertEqual(
+            cli_authorship.stamp_line("Reviewed", wt, projects_dir=str(self.pd)),
+            "Reviewed-by: worker claude-opus-4-8")
 
     def test_unknown_model_still_labels_role(self):
         cwd = "/home/airuleset/devel/airuleset"  # main role, no transcript

@@ -191,14 +191,14 @@ class TestPostAndRecord(unittest.TestCase):
             posted["body"] = body
             return (0, "url#c", "")
 
-        # #1064: the worker lane's CONFIGURED model comes from its pane argv
-        # (seamed here). served == configured == claude-opus-4-8 -> no suffix.
-        with mock.patch("cli_authorship._pane_configured_model",
-                        return_value="claude-opus-4-8"):
-            ok, url, stamp = dr.post_and_record(
-                issue=11, repo="zbynekdrlik/airuleset", raw_body=VALID_DESIGN,
-                cwd=wt, runner=fake_runner, projects_dir=str(self.pd),
-                home=self.home)
+        # #1064 review 🟡2 (de-masked): a dispatched worker has NO pane, so
+        # configured_model returns UNKNOWN and the stamp is the TRUTHFUL served
+        # model -- `worker claude-opus-4-8`, never a false Fable. No pane mock:
+        # the real production path for a worktree lane cwd.
+        ok, url, stamp = dr.post_and_record(
+            issue=11, repo="zbynekdrlik/airuleset", raw_body=VALID_DESIGN,
+            cwd=wt, runner=fake_runner, projects_dir=str(self.pd),
+            home=self.home)
         self.assertTrue(ok, (url, stamp))
         self.assertIn("Design-by: worker claude-opus-4-8", posted["body"])
 
