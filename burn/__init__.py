@@ -19,8 +19,42 @@ import datetime
 import gzip
 import json
 import os
+import zlib
 from collections import defaultdict
 from pathlib import Path
+
+
+class _SafeGzLines:
+    """A context-manager line iterator over a `.jsonl.gz` that treats a corrupt
+    or truncated stream as end-of-file (#1117).
+
+    gzip decompression is LAZY — a corrupt / truncated `.jsonl.gz` does not fail
+    at open, it raises (`EOFError`, `gzip.BadGzipFile` — itself an `OSError` —
+    or `zlib.error`) partway through iteration. The plain `open(errors="replace")`
+    path never had that failure mode: decode errors are silently replaced and
+    iteration never raises, so one bad transcript could never abort a whole burn
+    report. This wrapper restores that property for the gz path — the readers
+    keep using `with fh:` / `for line in fh:` unchanged, and a decompression
+    failure simply stops the file early (partial data already read is kept),
+    never propagating out to crash `scan` / `scan_split` / `scan_dispatches`
+    (and the watchdog burn jobs / fleet-over-ssh report that call them)."""
+
+    def __init__(self, fh):
+        self._fh = fh
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self._fh.close()
+        return False
+
+    def __iter__(self):
+        try:
+            for line in self._fh:
+                yield line
+        except (OSError, EOFError, zlib.error):
+            return
 
 
 def _open_transcript(path):
@@ -32,11 +66,15 @@ def _open_transcript(path):
     (#410), which `os.utime()`-stamps the `.gz` with the ORIGINAL mtime — so a
     compressed file can still sit inside the 7-day burn window. Every burn
     reader routes its transcript reads through here so a `.jsonl.gz` counts
-    exactly like its plain twin. `errors="replace"` matches the plain-`open`
-    contract the readers already relied on."""
+    exactly like its plain twin. `encoding="utf-8"` (transcripts are UTF-8 JSON)
+    + `errors="replace"` are pinned on BOTH branches so the gz read is
+    byte-for-byte equivalent to the plain read regardless of the box's locale.
+    A `.gz` is wrapped so a corrupt stream degrades to EOF instead of raising
+    mid-iteration (see `_SafeGzLines`)."""
     if path.endswith(".gz"):
-        return gzip.open(path, "rt", errors="replace")
-    return open(path, "r", errors="replace")
+        return _SafeGzLines(
+            gzip.open(path, "rt", encoding="utf-8", errors="replace"))
+    return open(path, "r", encoding="utf-8", errors="replace")
 
 # per-Mtok (input, cache_write, cache_read, output) — Opus-5-era pricing, the
 # SAME table `modules/core/model-awareness.md` documents. `cache_write` here

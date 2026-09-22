@@ -228,6 +228,108 @@ class TestScanGzippedTranscripts(unittest.TestCase):
         # sanity: the module-level gzip.open is restored
         self.assertIs(_gzip.open, real_gzip_open)
 
+    def test_corrupt_gz_does_not_crash_the_report(self):
+        # gzip is lazy: a truncated/garbage .jsonl.gz raises EOFError/
+        # BadGzipFile DURING iteration, not at open — which `except OSError`
+        # around the open never catches. One bad transcript must not abort the
+        # whole burn report (matching the plain-file errors="replace"
+        # resilience). #1117 review finding.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        with TemporaryDirectory() as tmp:
+            # a valid plain transcript (unique model) we still expect counted
+            _write(tmp, "proj", "good",
+                   [_line("claude-sonnet-5", i=100, o=50, ts=now.isoformat())])
+            # a corrupt .jsonl.gz inside the window (raw bytes, not a gz stream)
+            bad = Path(tmp) / "proj" / "bad.jsonl.gz"
+            bad.write_bytes(b"this is not a valid gzip stream at all\n" * 50)
+            # a genuinely TRUNCATED gz (valid header, cut mid-stream)
+            trunc_src = Path(tmp) / "proj" / "trunc.jsonl.gz"
+            self._write_gz(tmp, "proj", "trunc",
+                           [_line("claude-opus-5", i=9, o=9, ts=now.isoformat())]
+                           * 200)
+            raw = trunc_src.read_bytes()
+            trunc_src.write_bytes(raw[:len(raw) // 2])
+            # must NOT raise, and must still fully count the good file. (The
+            # truncated gz may contribute the lines it managed to decompress
+            # before the cut — that partial-then-EOF behavior is exactly the
+            # graceful degradation we want; we assert only that it did not
+            # crash the scan and the good file is intact.)
+            report = burn.scan(tmp, days=7, now=now)
+            self.assertEqual(report["by_model"]["claude-sonnet-5"]["in"], 100)
+            self.assertEqual(report["by_model"]["claude-sonnet-5"]["msgs"], 1)
+
+    def test_scan_dispatches_reads_gzipped_subagent_transcript(self):
+        # scan_dispatches / read_dispatch / _agent_id_of must all handle a
+        # gzipped agent-<id>.jsonl.gz (the shared _split_transcripts feeds it).
+        now = datetime.datetime.now(datetime.timezone.utc)
+        lines = [
+            _line("claude-opus-5", i=500, cw=1000, o=40, ts=now.isoformat()),
+            _line("claude-opus-5", i=500, cw=1000, o=440, ts=now.isoformat()),
+        ]
+        with TemporaryDirectory() as tmp_plain, TemporaryDirectory() as tmp_gz:
+            dp = Path(tmp_plain) / "proj" / "s1" / "subagents"
+            dp.mkdir(parents=True, exist_ok=True)
+            (dp / "agent-xyz.jsonl").write_text("\n".join(lines) + "\n")
+            self._write_gz(tmp_gz, "proj", "agent-xyz", lines,
+                           subdir=os.path.join("s1", "subagents"))
+            rp = burn.scan_dispatches(tmp_plain, hours=12, now=now)
+            rg = burn.scan_dispatches(tmp_gz, hours=12, now=now)
+            self.assertEqual(rg["files_scanned"], 1)
+            self.assertEqual(len(rg["dispatches"]), 1)
+            # _agent_id_of must strip the trailing .gz
+            self.assertEqual(rg["dispatches"][0]["agent_id"], "xyz")
+            for k in ("turns", "floor", "total_ctx", "out"):
+                self.assertEqual(rg["dispatches"][0][k],
+                                 rp["dispatches"][0][k], k)
+
+    def test_scan_dispatches_out_of_window_gz_subagent_not_opened(self):
+        import gzip as _gzip
+        real_gzip_open = _gzip.open
+        now = datetime.datetime.now(datetime.timezone.utc)
+        with TemporaryDirectory() as tmp:
+            p = self._write_gz(
+                tmp, "proj", "agent-old",
+                [_line("claude-opus-5", i=1, o=1, ts=now.isoformat())],
+                subdir=os.path.join("s1", "subagents"))
+            old_ts = (now - datetime.timedelta(days=30)).timestamp()
+            os.utime(p, (old_ts, old_ts))
+
+            def _boom(*a, **k):
+                raise AssertionError("out-of-window gz sub must not be opened")
+
+            with m.patch.object(burn.gzip, "open", _boom):
+                data = burn.scan_dispatches(tmp, hours=12, now=now)
+            self.assertEqual(data["files_scanned"], 0)
+        self.assertIs(_gzip.open, real_gzip_open)
+
+    def test_agent_types_from_parent_falls_back_to_gzipped_parent(self):
+        # #1117: the parent path is built as `<sid>.jsonl`; if the disk guard
+        # gzipped it, agent_types_from_parent must read the `.jsonl.gz` twin.
+        now = datetime.datetime.now(datetime.timezone.utc)
+        parent_lines = [
+            json.dumps({
+                "timestamp": now.isoformat(), "type": "assistant",
+                "message": {"role": "assistant", "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "Agent",
+                     "input": {"subagent_type": "Explore"}}]}}),
+            json.dumps({
+                "timestamp": now.isoformat(), "type": "user",
+                "message": {"role": "user", "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1",
+                     "content": "agentId: abc123 started"}]}}),
+        ]
+        with TemporaryDirectory() as tmp:
+            d = Path(tmp) / "proj"
+            d.mkdir(parents=True, exist_ok=True)
+            with __import__("gzip").open(d / "s1.jsonl.gz", "wt") as f:
+                f.write("\n".join(parent_lines) + "\n")
+            # caller passes the PLAIN path (which does not exist); the fallback
+            # must find the .gz twin
+            plain_parent = str(d / "s1.jsonl")
+            self.assertFalse(os.path.exists(plain_parent))
+            out = burn.agent_types_from_parent(plain_parent, {"abc123"})
+            self.assertEqual(out.get("abc123"), "Explore")
+
 
 class TestLocalReport(unittest.TestCase):
     def test_adds_host_and_user(self):
