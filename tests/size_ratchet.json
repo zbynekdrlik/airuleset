@@ -280,6 +280,7 @@
     "tests/test_gk_box_class_998.py": 93,
     "tests/test_gk_comment_end_condition_589.py": 278,
     "tests/test_gk_comment_handoff_570.py": 279,
+    "tests/test_gk_findings_prose_1081.py": 193,
     "tests/test_gk_handoff_limbo_636.py": 158,
     "tests/test_gk_i_counting_audit_578.py": 234,
     "tests/test_gk_i_named_audit_578.py": 78,
