@@ -114,20 +114,77 @@ def _repo_root_for(cwd):
     return None
 
 
+def _alias_equivalents(stream):
+    """Stream names equivalent to `stream` under the fleet's in-progress base-
+    stream rename (#537/#561): its rename alias in EITHER direction —
+    `montalu1 -> montalu` (new uid -> the file that kept the old name) and
+    `montalu -> montalu1` (old name -> new, for a future FILE rename). `stream`
+    itself is added by the caller, not here.
+
+    Reads `cli_fleet.STREAM_RENAME_ALIASES` LAZILY (a ZERO-import pure-data leaf
+    module) wrapped in try/except -> []: a gate / Stop hook must NEVER import the
+    `airuleset` facade or `cli_quals` (the 11k-line facade must not load in the
+    hook), and the reader degrades to the exact name alone when the import is
+    unavailable. Mirrors `cli_quals._stream_rename_equivalents`' one-edge-either-
+    direction semantics; the table is FLAT (no name is both a key AND a value),
+    so exactly ONE edge resolves per name — NO numeric-suffix heuristic."""
+    if not stream:
+        return []
+    try:
+        import cli_fleet
+        aliases = cli_fleet.STREAM_RENAME_ALIASES
+    except Exception:
+        return []
+    out = []
+    if stream in aliases:                       # old -> new
+        out.append(aliases[stream])
+    else:
+        for old, new in aliases.items():        # new -> old
+            if new == stream:
+                out.append(old)
+                break
+    return out
+
+
+def _stream_file_candidates(stream):
+    """Ordered, deduplicated candidate stream names for `stream`'s fact file:
+    the EXACT name first, then its rename-alias equivalent. NO numeric-suffix
+    heuristic (`montalu7` never falls back to `montalu.md` — a different tenant's
+    fact is worse than fail-closed UNKNOWN); only the declared alias table
+    resolves."""
+    if not stream:
+        return []
+    out = [stream]
+    for name in _alias_equivalents(stream):
+        if name not in out:
+            out.append(name)
+    return out
+
+
 def _read_stream_file(cwd, stream, *, read_text=None):
-    """The text of `<repo>/.claude/streams/<stream>.md`, or None (unreadable /
-    missing / no stream). `read_text(path) -> str|None` is injected in tests."""
+    """The text of the stream's `<repo>/.claude/streams/<stream>.md` fact file,
+    resolving `stream` through the fleet rename alias (#1100: montalu1 ->
+    montalu.md, david1 -> david.md, so a renamed base stream finds the file that
+    kept its old name). The EXACT name is tried FIRST, then the alias equivalent;
+    the FIRST candidate whose file exists wins. None when no stream, or every
+    candidate file is unreadable / missing. `read_text(path) -> str|None` is
+    injected in tests (called per candidate path)."""
     if not stream:
         return None
     root = _repo_root_for(cwd) or os.path.abspath(cwd or os.getcwd())
-    path = os.path.join(root, STREAMS_DIR, "%s.md" % stream)
-    if read_text is not None:
-        return read_text(path)
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            return fh.read()
-    except OSError:
-        return None
+    for cand in _stream_file_candidates(stream):
+        path = os.path.join(root, STREAMS_DIR, "%s.md" % cand)
+        if read_text is not None:
+            text = read_text(path)
+        else:
+            try:
+                with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                    text = fh.read()
+            except OSError:
+                text = None
+        if text is not None:
+            return text
+    return None
 
 
 def tenant_guide(cwd, stream, *, read_text=None):
@@ -243,6 +300,22 @@ _FIX_UNKNOWN = (
     "stránky: `# airuleset:intro-link-ok <dôvod>`.")
 
 
+def _fix_unknown(candidates=None):
+    """The UNKNOWN fail-closed message. When `candidates` (the resolved fact-file
+    candidate stream names, #1100) is given, name the files tried so the operator
+    sees the rename alias, not a phantom file — a renamed base stream (montalu1/
+    david1) keeps its fact in the OLD file name (montalu.md/david.md)."""
+    msg = _FIX_UNKNOWN
+    if candidates:
+        files = " alebo ".join(
+            os.path.join(STREAMS_DIR, "%s.md" % c) for c in candidates)
+        msg = msg + (
+            " Skúšané súbory faktu pre tento stream (#1100, rename alias): %s "
+            "— premenovaný base-stream má fakt v súbore so starým menom; doplň "
+            "`navody_url:` do existujúceho z nich." % files)
+    return msg
+
+
 def _fix_none(ticket):
     return (
         "BLOCKED (#1073): pre tento stream ešte NEEXISTUJE klientský návod "
@@ -272,16 +345,19 @@ def _fix_dead_link(url):
         "ŽIVÝ odkaz na návod, nikdy fabrikovaný ani neoverený." % url)
 
 
-def evaluate_stop(url, ticket, message, *, curl=None, repo_root=None):
+def evaluate_stop(url, ticket, message, *, curl=None, repo_root=None,
+                  candidates=None):
     """('allow'|'block', reason) for a client-acceptance hand-off.
 
-    - UNKNOWN fact (url is None and ticket is None) -> block, fail CLOSED;
+    - UNKNOWN fact (url is None and ticket is None) -> block, fail CLOSED; when
+      `candidates` (the resolved fact-file candidate stream names, #1100) is
+      given the fix names the files tried (the rename alias, not a phantom file);
     - NONE fact (ticket set) -> require `Návody: pripravujeme, #N` in the
       message, else block;
     - URL fact -> require a guide deep-link that is LIVE (`curl` 200); for a
       repo-static `navody-*.html` URL the file must also exist in the repo."""
     if url is None and ticket is None:
-        return "block", _FIX_UNKNOWN
+        return "block", _fix_unknown(candidates)
 
     if ticket is not None:
         tnum = re.escape(ticket.lstrip("#"))
@@ -382,8 +458,9 @@ def run(payload, *, curl=None, read_text=None):
     stream = _current_stream()
     url, ticket = tenant_guide(cwd, stream, read_text=read_text)
     repo_root = _repo_root_for(cwd)
+    candidates = _stream_file_candidates(stream)
     verdict, reason = evaluate_stop(url, ticket, msg, curl=curl,
-                                    repo_root=repo_root)
+                                    repo_root=repo_root, candidates=candidates)
     if verdict == "block":
         emit_block_stderr(reason)
 
