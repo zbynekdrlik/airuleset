@@ -29,9 +29,19 @@ Two tiers of coverage:
   with the original suppressed; a plain drag is untouched; an already-Shift+Alt
   drag is not double-processed; `altClickMovesCursor` is false after attach; the
   attach is idempotent; and NO console output is emitted (console stays clean).
-  The xterm.js JS bundle is not reachable offline (it is compiled into the ttyd
-  binary; neither python nor node `playwright` is installed), so the design's
-  sanctioned stub-`term.element` fallback is used rather than a real xterm.
+  This ALWAYS-RUN tier uses the design's sanctioned stub-`term.element` harness
+  (not a real xterm) for a concrete reason: no `playwright` DRIVER is installed on
+  this box (python import fails; not in node_modules), so a real-browser pytest
+  — like the sibling `test_webterm_short_viewport_798.py` real-browser tier —
+  would only SKIP here, giving no regression net. The xterm.js JS SOURCE is also
+  not a file on disk (it is compiled into the ttyd binary), so it cannot be
+  `<script>`-loaded into a node harness either. A real xterm IS reachable at
+  DEPLOY time via a loopback ttyd + browser (the #678/#700 recipe), and the
+  end-to-end column-selection OUTCOME (a Shift+Alt drag under tmux `mouse on`
+  yields a block with no leading indent) is the ticket's UNVERIFIED item, confirmed
+  in the owner's browser after deploy per the #1015 live-verification rule — this
+  stub tier proves the TRANSLATION (the JS reshapes the event correctly), which is
+  the part that lives in this repo.
 """
 import json
 import shutil
@@ -55,9 +65,15 @@ def _inv():
 # ---------------------------------------------------------------------------
 # Node harness: run the REAL extracted attachBlockSelect against a stub term
 # whose `element` is a node EventTarget and whose `win.MouseEvent` is a shim.
-# A stand-in xterm listener (registered AFTER attachBlockSelect, so node's
-# insertion-order + stopImmediatePropagation models capture-runs-before-xterm)
-# records exactly what xterm would receive.
+# A stand-in xterm listener (registered AFTER attachBlockSelect) records exactly
+# what xterm would receive: node's flat EventTarget fires listeners in
+# REGISTRATION order and honours stopImmediatePropagation, so the translator
+# (registered first) suppresses the original at the recorder (registered second)
+# and only the re-dispatched clone reaches it. NB this models REGISTRATION-order
+# suppression, NOT a real DOM tree's capture-before-descendant phase — the actual
+# capture flag is a FLAT-model no-op here, so the `, true` capture requirement is
+# locked STRUCTURALLY by test_capture_phase_listener, not behaviourally (a real
+# tree-capture test needs a browser, which is the deploy-time #678/#700 recipe).
 # ---------------------------------------------------------------------------
 _BLOCK_HARNESS = r"""
 %(attach)s
@@ -78,7 +94,7 @@ class MouseEvt extends Event {
   }
 }
 const el = new EventTarget();
-const term = { element: el, options: { altClickMovesCursor: true } };
+const term = { element: el, options: { altClickMovesCursor: true, macOptionClickForcesSelection: false } };
 const win = { MouseEvent: MouseEvt, term: term };
 
 let attachError = null;
@@ -105,6 +121,7 @@ function fire(init) {
 const out = {
   attachError: attachError,
   altClickMovesCursor: term.options.altClickMovesCursor,
+  macOptionClickForcesSelection: term.options.macOptionClickForcesSelection,
   altDrag: fire({ altKey: true, shiftKey: false }),         // plain Alt+left
   plainDrag: fire({ altKey: false, shiftKey: false }),      // ordinary drag
   shiftAltDrag: fire({ altKey: true, shiftKey: true }),     // already the block gesture
@@ -149,6 +166,21 @@ class TestAltBlockSelectStructure1016(unittest.TestCase):
         self.assertIn("altClickMovesCursor", fn)
         self.assertRegex(fn, r"altClickMovesCursor\s*=\s*false")
 
+    def test_forces_selection_on_macos(self):
+        # on macOS xterm's shouldForceSelection keys on altKey &&
+        # macOptionClickForcesSelection, NOT shiftKey -- so this must be enabled or
+        # the synthetic Shift+Alt forces nothing on a Mac (the template is shared
+        # across every lane, not only the Windows owner).
+        fn = _extract_js_function(self.html, "attachBlockSelect")
+        self.assertRegex(fn, r"macOptionClickForcesSelection\s*=\s*true")
+
+    def test_only_mousedown_is_hooked(self):
+        # mousemove/mouseup must be left to xterm once the selection has started;
+        # a lock so a future edit can't silently hook them.
+        fn = _extract_js_function(self.html, "attachBlockSelect")
+        self.assertNotIn("'mousemove'", fn)
+        self.assertNotIn("'mouseup'", fn)
+
     def test_capture_phase_listener(self):
         # MUST be capture -- xterm's own selection listener lives on a descendant
         # and would consume the plain Alt+drag first in the bubble phase.
@@ -190,6 +222,9 @@ class TestAltBlockSelectBehaviour1016(unittest.TestCase):
 
     def test_alt_click_moves_cursor_false_after_attach(self):
         self.assertIs(self.out["altClickMovesCursor"], False)
+
+    def test_mac_option_click_forces_selection_true_after_attach(self):
+        self.assertIs(self.out["macOptionClickForcesSelection"], True)
 
     def test_alt_drag_becomes_shift_alt_block_original_suppressed(self):
         # xterm receives exactly ONE event: the translated Shift+Alt (column

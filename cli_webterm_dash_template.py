@@ -708,7 +708,14 @@ function attachBlockSelect(win) {                // idempotent: attach once per 
   const el = term.element;
   if (!el || !el.addEventListener) return;       // xterm element not painted yet -> poll retries
   term.__wtBlockSel = true;
+  // altClickMovesCursor: an Alt CLICK (no drag) must not move the shell cursor.
+  // macOptionClickForcesSelection: on macOS xterm's shouldForceSelection keys on
+  // altKey && macOptionClickForcesSelection (NOT shiftKey), so without this the
+  // synthetic Shift+Alt below would force NOTHING on a Mac while the plain Alt+drag
+  // is suppressed -> a dead gesture. Setting it makes the SAME synthetic event force
+  // a column selection on every platform (the template is shared across all lanes).
   try { term.options.altClickMovesCursor = false; } catch (e) { /* older xterm -> ignore */ }
+  try { term.options.macOptionClickForcesSelection = true; } catch (e) { /* older xterm -> ignore */ }
   try {
     el.addEventListener('mousedown', (ev) => {
       try {
