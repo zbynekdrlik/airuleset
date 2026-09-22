@@ -137,6 +137,29 @@ class TestSanctionedTestSkip(unittest.TestCase):
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
         self.assertIn("BLOCKED", r.stdout + r.stderr)
 
+    def test_blocks_real_skip_appended_on_same_physical_line(self):
+        # adversarial-review BLOCKER: `git diff -U0` yields one added line per
+        # PHYSICAL line, so a real truthy skip call appended AFTER the
+        # sanctioned prefix on the SAME line must NOT sail through. This is the
+        # horizontal-axis twin of the indented (vertical-axis) hole.
+        r = self._push("block_sameline_append.txt", "tests/e2e/money.spec.ts")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("BLOCKED", r.stdout + r.stderr)
+
+    def test_blocks_it_skip_appended_on_same_physical_line(self):
+        # same-line append of a DIFFERENT banned shape (it.skip) after the
+        # sanctioned prefix — must still block.
+        r = self._push("block_sameline_it_skip.txt", "tests/e2e/money.spec.ts")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("BLOCKED", r.stdout + r.stderr)
+
+    def test_blocks_empty_reason_comma_only(self):
+        # the sanctioned prefix with a comma but an EMPTY reason (no string);
+        # the contract requires a real reason, so it must block.
+        r = self._push("block_empty_reason.txt", "tests/e2e/money.spec.ts")
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("BLOCKED", r.stdout + r.stderr)
+
     # --- the BLOCK text names the sanctioned exception -----------------
 
     def test_block_text_names_the_sanctioned_exception(self):
