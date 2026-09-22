@@ -2,7 +2,9 @@
 
 Topic companion of `client-board-tasks.md` (CORE). Auto-loads on a `project.task` stage move. The per-board stage vocabulary + profiles live in the CORE profile table; these are the rules that govern MOVING a task between stages.
 
-The profile's "awaiting client verification" stage is **Verifikácia** (montalu / miva) or **Na overenie** (slovnormal) — rule 3's handover note fires on the transition INTO it. The "blocked on a client question" stage is **Potrebuje ujasniť** (montalu / miva); slovnormal has no dedicated question stage, so a question stays in **V práci** with the chatter question of rule 4 (`client-board-questions.md`).
+The profile's "awaiting client verification" stage is **Verifikácia** (montalu) or **Na overenie** (slovnormal) — rule 3's handover note fires on the transition INTO it. The "blocked on a client question" stage is **Potrebuje ujasniť** (montalu); slovnormal has no dedicated question stage, so a question stays in **V práci** with the chatter question of rule 4 (`client-board-questions.md`).
+
+On the **miva** profile the stage names differ (canonical set, odoo-erp #7101): awaiting client verification = **Čaká** (rule 3's handover note posts there), the client-question stage = **Požadujú sa zmeny** (rule 4/8 answers), **Hotové** moved by the OWNER only after client confirmation (rule 6), **Zrušené** never set by a stream.
 
 Adding a board = a profile row here (+ its GitHub `needs-answer` mirror if a
 client answer is pending).

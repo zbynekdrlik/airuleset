@@ -2184,8 +2184,12 @@ fi
 # visible to the agent that has to act on it.
 # #1018 — Verifikácia handover-note SHAPE check. When the assistant's message
 # REPORTS moving a client task to the "awaiting client verification" stage
-# (Verifikácia / Na overenie) and posting the handover note, that note MUST carry
-# the four sections Čo / Kde / Čo skúsiť / stačí 👍 (client-board-tasks.md rule 3).
+# (Verifikácia / Na overenie / Čaká) and posting the handover note, that note MUST
+# carry the four sections Čo / Kde / Čo skúsiť / stačí 👍 (client-board-tasks.md
+# rule 3). The stage alternation COUPLES to the per-board profile table
+# (client-board-tasks.md / client-board-stages.md): Verifikácia on montalu, Na
+# overenie on slovnormal, Čaká on miva (odoo-erp #7101) — add a board's
+# awaiting-verification stage here when its profile row is added (#1093).
 # Same information space as the #916/#978 self-report checks (last_assistant_message
 # only): it fires ONLY on a self-reported Verifikácia post and requires the
 # distinctive section markers (Kde + Čo skúsiť + stačí 👍) to be evidenced in the
@@ -2195,12 +2199,15 @@ fi
 # gated. Fail-safe like its siblings: an unknown SECTION check resolves to
 # "present" (msg_has UNKNOWN->0), so a grep meltdown never fabricates a violation.
 # CAPITALIZED proper stage name only (#1018 review-1 F4): the board STAGE is the
-# proper noun "Verifikácia" / "Na overenie" — a lowercase "na overenie" is the
-# ordinary Slovak phrase "for checking" ("poslal na overenie správnosti"), which
-# must NOT be gated. So the stage match is CASE-SENSITIVE (requires the capital),
-# and the verbs carry explicit-case classes so the proximity check can run
-# case-sensitively without missing a sentence-initial or lowercase verb.
-VERIF_STAGE_RX='(Verifik[áa]ci|Na overeni)'
+# proper noun "Verifikácia" / "Na overenie" / "Čaká" — a lowercase "na overenie"
+# is the ordinary Slovak phrase "for checking" ("poslal na overenie správnosti"),
+# and a lowercase "čaká" is the everyday verb "waits" ("úloha čaká na klienta"),
+# both of which must NOT be gated. So the stage match is CASE-SENSITIVE (requires
+# the capital), the miva stage carries a trailing `\b` so it matches the whole
+# token "Čaká"/"Čaka" and never a longer word ("Čakať" / "Čakáreň"), and the verbs
+# carry explicit-case classes so the proximity check can run case-sensitively
+# without missing a sentence-initial or lowercase verb.
+VERIF_STAGE_RX='(Verifik[áa]ci|Na overeni|Čak[áa]\b)'
 # PAST-TENSE only: a future-tense mention ("presuniem ... do Verifikácia" = "I
 # WILL move it") must NOT be gated — so the SK stems are the past-participle
 # forms (presunul/posunul/…), never the bare present/future stem.
