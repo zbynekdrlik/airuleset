@@ -96,13 +96,12 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
 - **Announce ONLY functions that are ALREADY LIVE on the client's PROD.** Never a
   merged-but-undeployed or scheduled feature; confirm it is live first.
 - **Len minulé, overené udalosti — klientska správa sa NIKDY neodvoláva na to,
-  čo sa LEN STANE (airuleset #696, owner ruling 2026-08-25).** Incident: stream sľúbil „od zajtrajšieho ranného e-mailu" digest kým ešte
-  neexistoval. Keď je viditeľný výstup funkcie plánovaný ARTEFAKT (digest
-  e-mail, report, cron), máš dve cesty — obe končia správou v MINULOM ČASE: (1)
-  spusti artefakt TERAZ (vlastnou právomocou / `GATEKEEPER-ACTION:`) a OVER, že
-  odišiel S prisľúbeným obsahom (read-back z čerstvej prod-kópie, nikdy len
-  „odoslané"); alebo (2) počkaj na najbližší plánovaný beh, over ho, potom píš
-  — v minulom čase. HOOK-ENFORCED
+  čo sa LEN STANE (airuleset #696, owner ruling 2026-08-25; incident „od
+  zajtrajšieho e-mailu").** Keď je výstup plánovaný ARTEFAKT (digest, report,
+  cron), dve cesty, obe v minulom čase: (1) spusti artefakt TERAZ
+  (`GATEKEEPER-ACTION:`) a OVER read-backom z čerstvej prod-kópie, že odišiel s
+  prisľúbeným obsahom; alebo (2) počkaj na plánovaný beh, over ho, potom píš.
+  HOOK-ENFORCED
   (`hooks/block-discuss-thread-name.sh`, airuleset #696): `message_post` s
   budúcim sľubom v tele je BLOKOVANÝ, kým obsah nenesie falsifikovateľnú značku
   `airuleset:artifact-verified <ref>` — referenciu na to, čo si z artefaktu
@@ -136,14 +135,13 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   (opening) message of a thread.** A follow-up reply in an existing thread
   carries NO greeting — it continues directly with the content (a REAL
   `@`-mention anchor for EVERY addressee — #702 above — and `partner_ids` for
-  delivery ALWAYS, on every message). Repeating „Dobrý deň…" on every follow-up
-  reads as machine-sent (airuleset #573). Greet once, at the top of the thread.
-- **Explain the concept to the client, not just a link + feature list.** For a
-  non-technical client, explain in one plain sentence WHAT each named thing is and
-  HOW it fits their day before any link (#1028).
-- **No promises on the client's behalf.** Keep closings neutral and async — never
-  promise the user will personally demo/explain, never offer live demos or video
-  calls to a non-technical client (#1028).
+  delivery ALWAYS, on every message). Opakované „Dobrý deň…" pôsobí strojovo
+  (airuleset #573). Greet once, at the top of the thread.
+- **Explain the concept to the client, not just a link + feature list.** Pre
+  netechnického klienta jedna veta: ČO každá vec je a AKO mu pomôže, pred
+  odkazom (#1028).
+- **No promises on the client's behalf.** Neutrálne, async závery — never
+  promise the user will personally demo/explain, žiadne live demá/hovory (#1028).
 - **React to the client's previous answer FIRST — never drop a new question into
   a thread that ignores what the client last said.** Before posting a new
   question into an EXISTING client thread, check the client's last unreflected
@@ -194,6 +192,11 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   **STANDING template grant:** finálna pripomienka + closing nóta citujú
   `airuleset:owner-approved template:final-reminder` / `template:closing-note`;
   nesankcionovaný `template:<iný>` NEudelí — hook #628/#799.
+- **Prod-transfer gate (#1105) — NEPOSIELAJ akceptačnú/odovzdávaciu správu, kým
+  je ktorákoľvek `Prod-transfer:` položka `pending`.** Vývojárom dodané erp-test
+  vstupy musia byť na PROD odškrtnuté (`Prod-transfer-status:` =
+  `transferred`/`n/a`); `pending` drží ticket na `needs-owner-action` (U, #601;
+  secret show #879) alebo `ops-wait` (W), blok pomenuje položku (#755 platí).
 - **INTAKE reaction FIRST + STANDING ack grant (#978/#1027/#1033):** the MOMENT
   you pick up a client message you will act on — before filing/dispatching —
   react 👷 (`ack_reaction_emoji`, legacy 👀 selectable) via
