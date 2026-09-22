@@ -65,9 +65,11 @@ class TestManagedEnvDropKeys(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class TestSettingsMergeDropsMouseToggles(unittest.TestCase):
     def _merge(self, settings):
-        """Run the merge, returning (merged_dict, printed_stdout)."""
+        """Run the merge, returning (merged_dict, printed_stderr). The removal
+        line is printed to STDERR (matches the function's playwright diagnostic;
+        keeps cmd_diff stdout clean) — so we capture stderr here."""
         buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
+        with contextlib.redirect_stderr(buf):
             merged = cli_config.apply_managed_settings_defaults(settings)
         return merged, buf.getvalue()
 
@@ -174,6 +176,20 @@ class TestSettingsEnvScanLeg(unittest.TestCase):
                 paths=[], settings_path=str(p), tmux_env_reader=None)
             self.assertEqual(hits, [])
 
+    def test_invalid_utf8_settings_no_raise(self):
+        # adversarial-review finding: an invalid-UTF-8 settings.json makes
+        # read_text(encoding="utf-8") raise UnicodeDecodeError (a ValueError, NOT
+        # OSError). The leg's "never raise on malformed" contract requires it to
+        # degrade to no error — read uses errors="replace" so json.loads then
+        # fails into the caught branch. A file whose bytes ARE a drop key with a
+        # garbled value still yields the hit (the key name is intact).
+        with tempfile.TemporaryDirectory() as td:
+            p = Path(td) / "settings.json"
+            p.write_bytes(b'{"env": {"NOT_A_DROP_KEY": "\xff\xfe garbage"}}')
+            hits = bd.scan_env_drift(
+                paths=[], settings_path=str(p), tmux_env_reader=None)
+            self.assertEqual(hits, [])  # no drop key present, and NO raise
+
     def test_settings_without_env_object_no_hit(self):
         with tempfile.TemporaryDirectory() as td:
             p = Path(td) / "settings.json"
@@ -199,6 +215,20 @@ class TestSettingsEnvScanLeg(unittest.TestCase):
             self.assertEqual(hits, [])
             # sanity: the file DOES hold a drop key (so None truly skipped it).
             self.assertTrue(sp.exists())
+
+    def test_targeted_scan_with_default_kwargs_is_bashrc_only(self):
+        # adversarial-review finding (both reviewers): the SINGLE entry point
+        # scan_env_drift must NOT read the real box settings.json / spawn tmux on
+        # an EXPLICIT-paths call when the source kwargs are left at their default.
+        # (A bashrc-only call is `paths=[...]` with no source kwargs.) Only a
+        # DEFAULT box scan (paths=None) touches the real sources.
+        with tempfile.TemporaryDirectory() as td:
+            br = Path(td) / ".bashrc"
+            br.write_text("export %s=1\n" % _MOUSE)
+            hits = bd.scan_env_drift(paths=[str(br)])  # default source kwargs
+            self.assertTrue(hits)
+            self.assertTrue(all(h.source.startswith("bashrc:") for h in hits),
+                            "a targeted scan_env_drift must stay bashrc-only")
 
 
 # --------------------------------------------------------------------------- #

@@ -172,9 +172,20 @@ def _scan_settings_env_drift(settings_path):
     object. Best-effort: a missing / unreadable / malformed file, or an `env`
     that is not an object, yields no hit and never raises (the cli_config merge
     removes these keys at the next install; this leg only NAMES the source so the
-    owner / next supervisor can see where a toggle lived before then)."""
+    owner / next supervisor can see where a toggle lived before then).
+
+    Scope (#1116, deliberate): this reads the airuleset-managed
+    `~/.claude/settings.json` only — the ONE file the merge owns and rewrites.
+    `settings.local.json` (a user-owned override CC applies at HIGHER precedence)
+    is intentionally NOT dropped-at-merge nor scanned here: airuleset never writes
+    it, so dropping a user's own local key would be an overreach; a stray toggle
+    there is an owner-authored choice, out of this ticket's scope."""
     try:
-        text = Path(settings_path).read_text(encoding="utf-8")
+        # errors="replace" (parity with scan_bashrc_drift) so an invalid-UTF-8
+        # file degrades to a json.loads failure caught below, NEVER a
+        # UnicodeDecodeError escaping this best-effort leg (adversarial-review
+        # finding, #1116).
+        text = Path(settings_path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
     try:
@@ -226,38 +237,41 @@ def _scan_tmux_env_drift(tmux_env_reader):
 
 
 def scan_env_drift(paths=None, *, settings_path=_DEFAULT, tmux_env_reader=_DEFAULT):
-    """The unified box-environment drift scan (#1116): the bashrc leg
-    (`scan_bashrc_drift`) PLUS a `settings.json:env` leg and a `tmux:global-env`
-    leg, every hit an EnvDriftHit(source, detail, fix). A leg is SKIPPED when its
-    source argument is None (targeted bashrc-only mode); `_DEFAULT` uses the real
-    box source (`~/.claude/settings.json`, `tmux show-environment -g`). A callable
-    `tmux_env_reader` (or a `settings_path` string) is injected by the tests."""
+    """The unified box-environment drift scan (#1116) — the SINGLE entry point,
+    with ONE scope rule (adversarial-review finding: no second wrapper with
+    divergent semantics). The bashrc leg (`scan_bashrc_drift`) PLUS a
+    `settings.json:env` leg and a `tmux:global-env` leg, every hit an
+    EnvDriftHit(source, detail, fix).
+
+    Scope rule per leg:
+      - source arg is None  -> leg SKIPPED (targeted bashrc-only, or a caller
+        that explicitly opts a leg out).
+      - source arg is `_DEFAULT` (the caller left it unset): the leg runs ONLY on
+        a DEFAULT BOX SCAN (`paths is None` — what `status` / install / conformance
+        do), against the real box source (`~/.claude/settings.json`,
+        `tmux show-environment -g`); on a TARGETED call (explicit `paths`, the
+        #1015 tests) it is SKIPPED, so a targeted bashrc scan never silently reads
+        the real settings.json / spawns tmux.
+      - source arg is an explicit value (a settings_path string / a callable
+        tmux_env_reader — the #1116 tests): the leg ALWAYS runs against it,
+        regardless of `paths`.
+    """
+    box_scan = paths is None
     hits = [EnvDriftHit(source="bashrc:%s:%d" % (path, lineno),
                         detail=line, fix="")
             for (path, lineno, line) in scan_bashrc_drift(paths)]
-    if settings_path is not None:
-        sp = (Path.home() / ".claude" / "settings.json") \
-            if settings_path is _DEFAULT else settings_path
-        hits += _scan_settings_env_drift(sp)
-    if tmux_env_reader is not None:
-        reader = _default_tmux_env_reader \
-            if tmux_env_reader is _DEFAULT else tmux_env_reader
-        hits += _scan_tmux_env_drift(reader)
+    if settings_path is _DEFAULT:
+        if box_scan:
+            hits += _scan_settings_env_drift(
+                Path.home() / ".claude" / "settings.json")
+    elif settings_path is not None:
+        hits += _scan_settings_env_drift(settings_path)
+    if tmux_env_reader is _DEFAULT:
+        if box_scan:
+            hits += _scan_tmux_env_drift(_default_tmux_env_reader)
+    elif tmux_env_reader is not None:
+        hits += _scan_tmux_env_drift(tmux_env_reader)
     return hits
-
-
-def _box_scan_or_targeted(paths, settings_path, tmux_env_reader):
-    """The scope rule the three consumers share: a DEFAULT box scan (paths is
-    None — what `status` / install / conformance call) runs all three legs against
-    the real box sources; a TARGETED call (explicit `paths`, as the #1015 tests
-    use) is bashrc-only UNLESS the caller explicitly injects a settings_path /
-    tmux_env_reader (the #1116 tests do)."""
-    if paths is None:
-        return scan_env_drift(None, settings_path=settings_path,
-                              tmux_env_reader=tmux_env_reader)
-    sp = None if settings_path is _DEFAULT else settings_path
-    tr = None if tmux_env_reader is _DEFAULT else tmux_env_reader
-    return scan_env_drift(paths, settings_path=sp, tmux_env_reader=tr)
 
 
 def _render_hit(hit):
@@ -275,7 +289,8 @@ def count_bashrc_drift(paths=None, *, settings_path=_DEFAULT,
     conformance sweep — the fact stays one integer, `bashrc_drift`). All-legs on
     the default box scan; bashrc-only for a targeted explicit-paths call unless a
     source is injected."""
-    return len(_box_scan_or_targeted(paths, settings_path, tmux_env_reader))
+    return len(scan_env_drift(paths, settings_path=settings_path,
+                              tmux_env_reader=tmux_env_reader))
 
 
 def bashrc_drift_status_row(paths=None, *, settings_path=_DEFAULT,
@@ -284,7 +299,8 @@ def bashrc_drift_status_row(paths=None, *, settings_path=_DEFAULT,
     caller prints nothing on a clean box). On drift:
     `bashrc-drift: <source> <detail>[ (fix: ...)]; ...` — the source names each
     of bashrc / settings.json:env / tmux:global-env."""
-    hits = _box_scan_or_targeted(paths, settings_path, tmux_env_reader)
+    hits = scan_env_drift(paths, settings_path=settings_path,
+                          tmux_env_reader=tmux_env_reader)
     if not hits:
         return None
     return "bashrc-drift: " + "; ".join(_render_hit(h) for h in hits)
