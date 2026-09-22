@@ -14,6 +14,7 @@ Design comment 5784187008 (Approach 1, Slice A). Acceptance A:
     advertise URLs never gain a loopback entry.
 """
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -107,8 +108,10 @@ class TestEveryFleetAccountHasALane(unittest.TestCase):
 
     def test_the_14_previously_missing_accounts_now_have_lanes(self):
         lanes = dg.build_drop_lanes(cli_fleet.REMOTE_HOSTS)
+        # controller is keyed by its REAL nodename "airuleset" (not the
+        # "@controller" label) — review fix so drop_lane_for_account resolves.
         for key in [("dev1", "newlevel"), ("dev2", "newlevel"),
-                    ("controller", "claudy"), ("forestshop-dev", "admin"),
+                    ("airuleset", "claudy"), ("forestshop-dev", "admin"),
                     ("forestshop-dev", "stepan"), ("subdev", "miva1"),
                     ("subdev", "montalu1"), ("subdev", "montalu8")]:
             self.assertIn(key, lanes, "%s should now have a lane" % (key,))
@@ -151,13 +154,14 @@ class TestGeneratedLaneFields(unittest.TestCase):
                          "drop-forestshop-dev-admin.newlevel.media")
 
     def test_single_account_box_hostname_omits_the_account(self):
-        # dev1/dev2/controller each host ONE non-paused account -> drop-<box>.
+        # dev1/dev2 each host ONE non-paused account -> drop-<box>. The
+        # controller box's real nodename is "airuleset".
         self.assertEqual(self.lanes[("dev1", "newlevel")].host,
                          "drop-dev1.newlevel.media")
         self.assertEqual(self.lanes[("dev2", "newlevel")].host,
                          "drop-dev2.newlevel.media")
-        self.assertEqual(self.lanes[("controller", "claudy")].host,
-                         "drop-controller.newlevel.media")
+        self.assertEqual(self.lanes[("airuleset", "claudy")].host,
+                         "drop-airuleset.newlevel.media")
 
     def test_generated_hosts_are_flat_single_level(self):
         for key, lane in self.lanes.items():
@@ -172,6 +176,38 @@ class TestGeneratedLaneFields(unittest.TestCase):
                          "100.104.8.125")
         self.assertEqual(self.lanes[("dev2", "newlevel")].origin_host,
                          "100.82.64.27")
+
+    def test_no_generated_controller_lane_has_a_nontailscale_origin(self):
+        # Review fix: a controller-topology origin MUST be a tailscale IP (the
+        # drop hop stays on the tailnet). A public-only box (forestshop) would
+        # otherwise proxy over the public internet in cleartext.
+        for key, lane in self.lanes.items():
+            if lane.topology == "controller" and lane.origin_host:
+                self.assertTrue(dg._is_tailscale_host(lane.origin_host),
+                                "%s controller origin %s is not tailscale"
+                                % (key, lane.origin_host))
+
+    def test_public_only_box_is_local_placeholder_not_controller(self):
+        # forestshop-dev has a PUBLIC FQDN host -> a local-topology placeholder
+        # (no controller origin, not rendered into the controller ingress).
+        for user in ("admin", "stepan"):
+            lane = self.lanes[("forestshop-dev", user)]
+            self.assertEqual(lane.topology, "local")
+            self.assertIsNone(lane.origin_host)
+            self.assertIsNone(lane.tunnel_uuid)
+
+    def test_forestshop_lanes_absent_from_controller_ingress(self):
+        hosts = [r[0] for r in dg.drop_ingress_rules_for_controller(cache={})]
+        self.assertNotIn("drop-forestshop-dev-admin.newlevel.media", hosts)
+        self.assertNotIn("drop-forestshop-dev-stepan.newlevel.media", hosts)
+
+    def test_is_tailscale_host(self):
+        self.assertTrue(dg._is_tailscale_host("100.118.174.27"))
+        self.assertTrue(dg._is_tailscale_host("100.64.0.1"))
+        self.assertFalse(dg._is_tailscale_host("forestshop-dev.newlevel.media"))
+        self.assertFalse(dg._is_tailscale_host("178.105.89.168"))
+        self.assertFalse(dg._is_tailscale_host("10.77.0.1"))
+        self.assertFalse(dg._is_tailscale_host(None))
 
 
 class TestBuildDropLanesSynthetic(unittest.TestCase):
@@ -213,10 +249,47 @@ class TestNodenameDerivation(unittest.TestCase):
         self.assertEqual(
             dg._nodename_for_entry({"name": "spinbike-vps"}), "spinbike")
 
+    def test_controller_maps_to_real_hostname_airuleset(self):
+        # Review fix: the controller box's uname -n is `airuleset`, not the
+        # `@controller` label — the key must match so resolution + cache agree.
+        self.assertEqual(
+            dg._nodename_for_entry({"name": "claudy@controller"}), "airuleset")
+
     def test_at_form_and_bare_form(self):
         self.assertEqual(
             dg._nodename_for_entry({"name": "montalu1@subdev"}), "subdev")
         self.assertEqual(dg._nodename_for_entry({"name": "dev1"}), "dev1")
+
+
+class TestGracefulDegradation(unittest.TestCase):
+    """Review fix: build_drop_lanes runs at IMPORT (imported by airuleset.py), so
+    a port collision / range exhaustion must LOG + SKIP, never raise (a raise
+    would crash the whole CLI + statusline + watchdog)."""
+
+    def test_range_exhaustion_skips_not_raises(self):
+        # More untabled accounts than the range can hold -> the overflow accounts
+        # are skipped with a warning; build_drop_lanes never raises.
+        span = dg.DROP_PORT_MAX - dg.DROP_PORT_BASE + 1
+        hosts = [{"name": "x%d@subdev" % i, "user": "x%d" % i,
+                  "host": "100.118.174.27"} for i in range(span + 5)]
+        lanes = dg.build_drop_lanes(hosts)  # must NOT raise
+        ports = [lane.port for lane in lanes.values()]
+        self.assertEqual(len(ports), len(set(ports)), "ports still unique")
+        # at least the seed lanes survive; some synthetic accounts are dropped.
+        self.assertGreaterEqual(len(lanes), len(_SEED_SNAPSHOT))
+
+    def test_duplicate_drop_block_port_skips_not_raises(self):
+        # Two accounts forcing the SAME drop-block port -> the second is skipped
+        # with a warning, not a raise.
+        hosts = [
+            {"name": "a@subdev", "user": "a", "host": "100.118.174.27",
+             "drop": {"port": 8895}},
+            {"name": "b@subdev", "user": "b", "host": "100.118.174.27",
+             "drop": {"port": 8895}},
+        ]
+        lanes = dg.build_drop_lanes(hosts)  # must NOT raise
+        got = [k for k in (("subdev", "a"), ("subdev", "b")) if k in lanes]
+        self.assertEqual(len(got), 1, "exactly one of the colliding lanes kept")
 
 
 class TestControllerIngressReadsCache(unittest.TestCase):
@@ -289,32 +362,36 @@ class TestFiledropPortProbe(unittest.TestCase):
     def test_probe_snippet_runs_in_shell_and_parses(self):
         import subprocess
         snippet = dg.filedrop_port_probe_snippet()
-        r = subprocess.run(["bash", "-c", snippet],
-                           capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
-        parsed = dg.parse_filedrop_port_markers(r.stdout)
-        self.assertEqual(len(parsed), 1)
-        (key, port), = parsed.items()
-        self.assertEqual(len(key.split("/")), 2)
-        self.assertIsInstance(port, int)
+        for shell in ("bash", "dash", "sh"):
+            r = subprocess.run([shell, "-c", snippet],
+                               capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, "%s: %s" % (shell, r.stderr))
+            port = dg.parse_filedrop_port(r.stdout)
+            self.assertIsInstance(port, int, "%s produced no port: %r"
+                                  % (shell, r.stdout))
 
     def test_probe_is_exit_free(self):
-        # It must NOT contain a bare `exit` (that would end the remote sh before
-        # the later gh/playwright post-checks in the deploy command).
-        self.assertNotIn("exit", dg.filedrop_port_probe_snippet())
+        # It must contain no `exit` TOKEN (that would end the remote sh before
+        # the later gh/playwright post-checks). Word-boundary, not substring.
+        self.assertIsNone(re.search(r"\bexit\b",
+                                    dg.filedrop_port_probe_snippet()))
+
+    def test_probe_emits_only_the_port_not_uname(self):
+        # The key comes from the fleet entry (deploy loop), never `uname -n`.
+        self.assertNotIn("uname", dg.filedrop_port_probe_snippet())
+        self.assertNotIn("id -un", dg.filedrop_port_probe_snippet())
 
     def test_parse_ignores_noise_and_malformed(self):
         blob = ("some install output\n"
-                "AIRULESET-FILEDROP-PORT subdev montalu1 8811\n"
-                "AIRULESET-FILEDROP-PORT bad line only three\n"
-                "AIRULESET-FILEDROP-PORT node user notanint\n"
+                "AIRULESET-FILEDROP-PORT 8811\n"
+                "AIRULESET-FILEDROP-PORT bad extra\n"
+                "AIRULESET-FILEDROP-PORT notanint\n"
                 "unrelated\n")
-        self.assertEqual(dg.parse_filedrop_port_markers(blob),
-                         {"subdev/montalu1": 8811})
+        self.assertEqual(dg.parse_filedrop_port(blob), 8811)
 
     def test_parse_empty(self):
-        self.assertEqual(dg.parse_filedrop_port_markers(""), {})
-        self.assertEqual(dg.parse_filedrop_port_markers(None), {})
+        self.assertIsNone(dg.parse_filedrop_port(""))
+        self.assertIsNone(dg.parse_filedrop_port(None))
 
 
 class TestLoopbackBind(unittest.TestCase):

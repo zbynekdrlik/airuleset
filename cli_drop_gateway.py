@@ -49,10 +49,11 @@ REPO_DIR = Path(__file__).resolve().parent
 # above show's 8850-8869 and below no other airuleset range. Distinct from
 # filedrop 8788, upload 8799-8819, secret 8830-8849, show 8850-8869.
 # Grandfathered: spinbike's 8828 predates the per-account range and sits in the
-# gap. #1115: MAX raised 8889 -> 8899 to fit the 14 generated fleet lanes
-# (build_drop_lanes) on top of the 7 hand-authored 8870-8876 ports.
+# gap. #1115: MAX raised 8889 -> 8909 to fit the 14 generated fleet lanes
+# (build_drop_lanes) on top of the 7 hand-authored 8870-8876 ports, with ~19
+# ports of headroom so a few new fleet accounts never exhaust the range.
 DROP_PORT_BASE = 8870
-DROP_PORT_MAX = 8899
+DROP_PORT_MAX = 8909
 
 # Flat single-level drop hostnames. Single-level is LOAD-BEARING: Cloudflare
 # Universal SSL for newlevel.media is `*.newlevel.media` (ONE level), so a
@@ -260,20 +261,24 @@ _SEED_DROP_LANES = {
 }
 
 # #1115: a box `name` in cli_fleet.REMOTE_HOSTS is a LABEL, not the box's
-# os.uname().nodename — two labels are irregular (`gatekeeper` box is nodename
-# `odoo-gatekeeper`, `spinbike-vps` box is nodename `spinbike`). Every other
-# label maps cleanly: `<user>@<box>` → box, a bare `<box>` → itself. The two
-# irregular boxes already have seed lanes, so this override only ever matters for
-# the lock test's key derivation, never for a generated lane.
-_NODENAME_OVERRIDE = {"gatekeeper": "odoo-gatekeeper", "spinbike-vps": "spinbike"}
+# os.uname().nodename — three labels are irregular: the `gatekeeper` box is
+# nodename `odoo-gatekeeper`, `spinbike-vps` is `spinbike`, and the `controller`
+# box's real hostname is `airuleset` (the `@controller` label is the human name,
+# `uname -n` == `airuleset`). The KEY must equal the box's real nodename so
+# `drop_lane_for_account(os.uname().nodename, user)` resolves AND the push
+# port-harvest key matches (both keyed the same way). Every other label maps
+# cleanly: `<user>@<box>` → box, a bare `<box>` → itself.
+_NODENAME_OVERRIDE = {"gatekeeper": "odoo-gatekeeper", "spinbike-vps": "spinbike",
+                      "claudy@controller": "airuleset"}
 
 # #1115: the FIXED per-account drop-port allocation for the GENERATED lanes
-# (the 14 fleet accounts with no seed lane). Sorted (nodename, username), packed
-# above the 7 hand-authored ports (8870-8876) inside the 8870-8899 range. A lock
+# (the 14 fleet accounts with no seed lane). Keyed by the REAL (nodename,
+# username) — controller is keyed `airuleset` per _NODENAME_OVERRIDE. Packed
+# above the 7 hand-authored ports (8870-8876) inside the 8870-8909 range. A lock
 # test asserts fleet-wide uniqueness; a future account with no entry here (and no
 # `drop` block) auto-allocates the next free in-range port (still deterministic).
 _GENERATED_DROP_PORTS = {
-    ("controller", "claudy"): 8877,
+    ("airuleset", "claudy"): 8877,
     ("dev1", "newlevel"): 8878,
     ("dev2", "newlevel"): 8879,
     ("forestshop-dev", "admin"): 8880,
@@ -309,22 +314,58 @@ def _generated_drop_host(nodename, username, shared):
     return "%s.newlevel.media" % stem
 
 
+def _is_tailscale_host(host):
+    """True iff `host` is a tailscale CGNAT IPv4 (100.64.0.0/10 → 100.64-127.x.x).
+
+    A generated controller-topology lane's origin MUST be a tailscale IP: the
+    controller's cloudflared proxies the drop hostname to `http://<origin>:<port>`
+    over the tailnet. A non-tailscale `host` (a public IP or a public FQDN like
+    forestshop-dev.newlevel.media) would route the drop hop over the PUBLIC
+    internet in cleartext to a box whose filedrop server binds only tailscale +
+    loopback — a 502 + a plaintext-over-public leak (review finding). Such a box
+    gets a LOCAL-topology placeholder lane instead (its own tunnel is a Slice-B
+    go-live decision), which is never rendered into the controller ingress."""
+    if not isinstance(host, str):
+        return False
+    parts = host.split(".")
+    if len(parts) != 4:
+        return False                    # a FQDN or non-dotted-quad → not tailscale
+    try:
+        octets = [int(p) for p in parts]
+    except ValueError:
+        return False
+    if any(o < 0 or o > 255 for o in octets):
+        return False
+    return octets[0] == 100 and 64 <= octets[1] <= 127
+
+
 def build_drop_lanes(remote_hosts):
     """The drop-lane registry GENERATED from the fleet (#1115).
 
     Returns a fresh `(nodename, username) -> DropLane` dict: every hand-authored
     `_SEED_DROP_LANES` entry preserved BYTE-FOR-BYTE, plus one generated lane for
     every non-paused `remote_hosts` account that has no seed. A generated lane
-    rides the ONE controller multi-ingress tunnel (topology="controller",
-    origin = the account's tailscale `host`), Access-gated by default (deny-by-
-    default / defense-in-depth), with `filedrop_port=None` (the push-measured
-    value arrives via the ~/.claude/drop-lanes.json cache — see
-    drop_ingress_rules_for_controller). A per-account host/port/access override
-    may be supplied by an optional `drop` block on the entry.
+    whose box has a TAILSCALE `host` rides the ONE controller multi-ingress
+    tunnel (topology="controller", origin = that tailscale IP); a NON-tailscale
+    box (a public-only box like forestshop) gets a LOCAL-topology PLACEHOLDER
+    (origin_host=None, tunnel TBD at Slice-B go-live) that is never rendered into
+    the controller ingress — never a public/plaintext origin (review finding).
+    Access-gated by default (deny-by-default intent; the per-account Access app +
+    include list is provisioned at Slice-B go-live, which is HARD-gated on a
+    DROP_ACCESS_APPS spec, so an unspecced lane can never serve unprotected).
+    `filedrop_port=None` (the push-measured value arrives via the
+    ~/.claude/drop-lanes.json cache). A per-account host/port/access override may
+    be supplied by an optional `drop` block on the entry.
 
     Paused accounts (simap1) are excluded. Port precedence: the entry's `drop`
     block, else the fixed `_GENERATED_DROP_PORTS` table, else the next free
     in-range port (deterministic — accounts scanned in sorted key order).
+
+    NON-FATAL by construction: this runs at IMPORT (DROP_LANES = build_drop_lanes
+    (...)), and cli_drop_gateway is imported by airuleset.py, so a raise here
+    would crash the WHOLE CLI + statusline + watchdog (review finding). A port
+    collision / range exhaustion therefore LOGS loudly to stderr and SKIPS that
+    one account (the box simply has no drop lane until fixed) rather than raising.
     """
     lanes = dict(_SEED_DROP_LANES)
     used_ports = {lane.port for lane in lanes.values()}
@@ -353,30 +394,48 @@ def build_drop_lanes(remote_hosts):
         for cand in range(DROP_PORT_BASE, DROP_PORT_MAX + 1):
             if cand not in used_ports:
                 return cand
-        raise ValueError(
-            "#1115 drop-port range %d-%d exhausted (%d lanes) — widen the range"
-            % (DROP_PORT_BASE, DROP_PORT_MAX, len(used_ports)))
+        return None                     # exhausted — caller logs + skips
 
     for key, entry in pending:
         nodename, username = key
         drop = entry.get("drop") or {}
         port = drop.get("port") or _GENERATED_DROP_PORTS.get(key) or _next_free_port()
+        if port is None:
+            print("#1115 WARNING: drop-port range %d-%d exhausted — %s@%s gets NO "
+                  "drop lane this build (widen DROP_PORT_MAX)."
+                  % (DROP_PORT_BASE, DROP_PORT_MAX, username, nodename),
+                  file=sys.stderr)
+            continue
         if port in used_ports:
-            raise ValueError("#1115 duplicate drop port %d for %s@%s"
-                             % (port, username, nodename))
+            print("#1115 WARNING: duplicate drop port %d for %s@%s — SKIPPING this "
+                  "lane (fix _GENERATED_DROP_PORTS / the drop block)."
+                  % (port, username, nodename), file=sys.stderr)
+            continue
         used_ports.add(port)
         host = drop.get("host") or _generated_drop_host(
             nodename, username, node_counts.get(nodename, 0) > 1)
         access = drop.get("access")
         access = True if access is None else bool(access)
-        lanes[key] = DropLane(
-            host=host, port=port,
-            tunnel_uuid=_CONTROLLER_TUNNEL_UUID,
-            tunnel_config=None, tunnel_service=None,
-            tunnel_system_unit=False, access=access,
-            gateway_account=None,
-            topology="controller", origin_host=entry.get("host"),
-            filedrop_port=None)
+        # Tailscale box → controller-tunnel origin; public-only box → a
+        # local-topology placeholder (never a public/plaintext controller origin).
+        if _is_tailscale_host(entry.get("host")):
+            lanes[key] = DropLane(
+                host=host, port=port,
+                tunnel_uuid=_CONTROLLER_TUNNEL_UUID,
+                tunnel_config=None, tunnel_service=None,
+                tunnel_system_unit=False, access=access,
+                gateway_account=None,
+                topology="controller", origin_host=entry.get("host"),
+                filedrop_port=None)
+        else:
+            lanes[key] = DropLane(
+                host=host, port=port,
+                tunnel_uuid=None,        # its own tunnel is a Slice-B decision
+                tunnel_config=None, tunnel_service=None,
+                tunnel_system_unit=False, access=access,
+                gateway_account=None,
+                topology="local", origin_host=None,
+                filedrop_port=None)
     return lanes
 
 
@@ -844,36 +903,43 @@ _FILEDROP_PORT_MARKER = "AIRULESET-FILEDROP-PORT"
 def filedrop_port_probe_snippet():
     """A pure-shell fragment chained into the deploy ssh command with ``&&``
     RIGHT AFTER ``airuleset.py install`` (#1115). It prints one line
-    ``AIRULESET-FILEDROP-PORT <nodename> <user> <port>`` where <port> is the
-    target's persisted ~/.claude/filedrop.port, else the #493 uid-derived default
-    (8788 + uid%1000). It is a ``{ … }`` group whose LAST command is ``echo`` (so
-    it ALWAYS exits 0) and contains NO ``exit`` (so the ``&& …`` chain to the
-    later post-checks continues) — the gh/playwright post-checks `exit` the remote
-    shell, which is why this must precede them, never follow.
+    ``AIRULESET-FILEDROP-PORT <port>`` where <port> is the target's persisted
+    ~/.claude/filedrop.port, else the #493 uid-derived default (8788 + uid%1000).
 
-    Arithmetic ``%`` binds tighter than ``+`` (POSIX), so the derived port is
-    ``8788 + (uid % 1000)`` exactly like ``filedrop.default_port_for_uid``."""
+    It prints ONLY the port — NOT the node/user — deliberately: the deploy loop
+    already knows WHICH fleet entry it is contacting, so it builds the cache key
+    from `_nodename_for_entry(entry)` + the entry's user (the SAME derivation the
+    ingress consumer uses), never from the target's `uname -n`. That closes the
+    label-vs-`uname` mismatch (the controller box's `uname -n` is `airuleset`, not
+    its `@controller` label — review finding): the harvest key can never disagree
+    with the DROP_LANES key.
+
+    It is a ``{ … }`` group whose LAST command is ``echo`` (so it ALWAYS exits 0)
+    and contains NO ``exit`` (so the ``&& …`` chain to the later post-checks
+    continues) — the gh/playwright post-checks `exit` the remote shell, which is
+    why this must precede them, never follow. Arithmetic ``%`` binds tighter than
+    ``+`` (POSIX): the derived port is ``8788 + (uid % 1000)`` exactly like
+    ``filedrop.default_port_for_uid``."""
     return (
         '{ port=$(cat "$HOME/.claude/filedrop.port" 2>/dev/null || true); '
         '[ -n "$port" ] || port=$((8788 + $(id -u) %% 1000)); '
-        'echo "%s $(uname -n) $(id -un) $port"; }' % _FILEDROP_PORT_MARKER
+        'echo "%s $port"; }' % _FILEDROP_PORT_MARKER
     )
 
 
-def parse_filedrop_port_markers(text):
-    """Harvest ``{"<node>/<user>": port}`` from a deploy ssh stdout blob (#1115).
-
-    Scans for ``AIRULESET-FILEDROP-PORT <node> <user> <port>`` lines; ignores
-    everything else and any malformed line. Never raises."""
-    out = {}
+def parse_filedrop_port(text):
+    """The port from a target's ``AIRULESET-FILEDROP-PORT <port>`` marker line in
+    a deploy ssh stdout blob, or None (#1115). Ignores noise / malformed lines;
+    returns the LAST valid marker if several appear. Never raises."""
+    port = None
     for line in (text or "").splitlines():
         parts = line.split()
-        if len(parts) == 4 and parts[0] == _FILEDROP_PORT_MARKER:
+        if len(parts) == 2 and parts[0] == _FILEDROP_PORT_MARKER:
             try:
-                out[drop_lanes_cache_key(parts[1], parts[2])] = int(parts[3])
+                port = int(parts[1])
             except ValueError:
                 continue
-    return out
+    return port
 
 
 def drop_ingress_rules_for_controller(cache=None):

@@ -1322,18 +1322,23 @@ def _persist_measured_filedrop_ports(measured):
     (~/.claude/drop-lanes.json) so `drop_ingress_rules_for_controller()` renders
     each lane's `/s/` rule at the target's REAL port (the in-code literal becomes
     the fallback). Merged into any existing cache so a partial push (some targets
-    unreachable this run) never drops a previously-measured port. Best-effort: a
-    write failure is loud but never fails the push."""
+    unreachable this run) never drops a previously-measured port; then PRUNED to
+    the current fleet's lane keys so a removed/renamed account leaves no stale
+    entry that could later mis-target a reused hostname (review finding).
+    Best-effort: any write failure is loud but never fails the push."""
     import cli_drop_gateway
     if not measured:
         return
     try:
         merged = cli_drop_gateway.read_drop_lanes_cache()
         merged.update(measured)
-        cli_drop_gateway.write_drop_lanes_cache(merged)
+        valid = {cli_drop_gateway.drop_lanes_cache_key(n, u)
+                 for (n, u) in cli_drop_gateway.DROP_LANES}
+        pruned = {k: v for k, v in merged.items() if k in valid}
+        cli_drop_gateway.write_drop_lanes_cache(pruned)
         print("  drop-lanes cache: wrote %d filedrop port(s) to %s"
               % (len(measured), cli_drop_gateway.DROP_LANES_CACHE))
-    except OSError as e:
+    except Exception as e:  # noqa: BLE001 — best-effort; never fail the push
         print("  ⚠ drop-lanes cache write failed (non-fatal): %r" % e,
               file=sys.stderr)
 
@@ -1527,9 +1532,17 @@ def _deploy_to_all_remotes(failed, auth_failed):
             # #1115: harvest the filedrop-port marker from this target's stdout.
             # The probe runs right after install and BEFORE the gating post-checks,
             # so its line is present even when a later post-check fails the leg —
-            # harvest regardless of rc. Never raises (parse_* is defensive).
-            measured_filedrop_ports.update(
-                cli_drop_gateway.parse_filedrop_port_markers(ssh_result.stdout))
+            # harvest regardless of rc. The cache KEY is derived from the fleet
+            # ENTRY (the same `_nodename_for_entry` derivation the ingress consumer
+            # uses), NOT from the target's `uname -n`, so it can never disagree
+            # with the DROP_LANES key (review finding — the controller box's uname
+            # is `airuleset`, not its `@controller` label). Never raises.
+            _measured_port = cli_drop_gateway.parse_filedrop_port(ssh_result.stdout)
+            if _measured_port is not None:
+                _key = cli_drop_gateway.drop_lanes_cache_key(
+                    cli_drop_gateway._nodename_for_entry(remote),
+                    remote.get("user", ""))
+                measured_filedrop_ports[_key] = _measured_port
             if ssh_result.returncode != 0:
                 print(f"  FAILED: {ssh_result.stderr.strip()}")
                 failed.append((remote["name"], "rc=%d" % ssh_result.returncode))
