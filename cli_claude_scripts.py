@@ -293,6 +293,11 @@ set -euo pipefail
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac
 # Same managed default as the main launcher (#460): keep a bg-shell waiter alive.
 export CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1
+# #1015: the implementer window is a real interactive Claude Code session too, so
+# it OWNS the mouse/altscreen env exactly like the main launcher — a stray shell
+# `export CLAUDE_CODE_DISABLE_MOUSE=1` must not take native scrolling away here
+# either (a model-backend box runs this window). `unset` never trips `set -u`.
+unset CLAUDE_CODE_DISABLE_MOUSE CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN
 
 _marker="$HOME/.claude/airuleset-model-backend.json"
 if [ ! -f "$_marker" ]; then

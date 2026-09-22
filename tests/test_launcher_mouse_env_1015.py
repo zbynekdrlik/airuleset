@@ -95,6 +95,22 @@ class TestLauncherUnsetsMouseEnv(unittest.TestCase):
                     "the unset must be unconditional (plain gets it too), never "
                     "guarded by the mode")
 
+    def test_impl_launcher_also_unsets_before_its_exec(self):
+        # The implementer-window launcher (#1060 L3a) ALSO execs claude — on a
+        # model-backend box it inherits the same stray shell export, so it must
+        # own the toggle too (both adversarial reviews' finding #1). The unset
+        # must appear before its (single) `exec claude` lines.
+        content = cli_claude_scripts.render_claude_impl_launch_script()
+        self.assertIn(_UNSET, content)
+        lines = content.splitlines()
+        unset_line = next(i for i, ln in enumerate(lines) if _UNSET in ln)
+        exec_lines = [i for i, ln in enumerate(lines)
+                      if ln.strip().startswith("exec claude")]
+        self.assertTrue(exec_lines, "no `exec claude` in the impl launcher")
+        for ei in exec_lines:
+            self.assertLess(unset_line, ei,
+                            "the impl launcher must unset before every exec")
+
 
 # --------------------------------------------------------------------------- #
 # (b) runtime: a real subprocess launch strips the inherited vars from the child
@@ -248,6 +264,61 @@ class TestBashrcDriftScan(unittest.TestCase):
             p = self._write(
                 td, "export CLAUDE_CODE_DISABLE_MOUSE=1\nexport CLAUDE_CODE_X=1\n")
             self.assertEqual(bd.count_bashrc_drift([str(p)]), 2)
+
+    def test_unterminated_managed_block_does_not_swallow_later_drift(self):
+        # review finding #2: an orphan/unterminated `# >>> airuleset:` START must
+        # NOT leave the scanner "inside a block" for the rest of the file — that
+        # would SILENTLY hide every later stray export (the opposite of the job).
+        import cli_bashrc_drift as bd
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(
+                td,
+                "# >>> airuleset: ultracode default >>>\n"   # START, no END
+                "export CLAUDE_CODE_DISABLE_MOUSE=1\n"        # line 2 — the stray
+                "alias ll='ls -la'\n")
+            hits = bd.scan_bashrc_drift([str(p)])
+            self.assertEqual(len(hits), 1, hits)
+            self.assertEqual(hits[0][1], 2)
+
+    def test_declare_x_and_multivar_and_no_equals_are_caught(self):
+        # review finding #2 (R1): a `declare -x`, a multi-var export, and an
+        # `export` with no `=` all contaminate the child env — the LOUD backstop
+        # must catch them.
+        import cli_bashrc_drift as bd
+        for body in (
+                "declare -x CLAUDE_CODE_DISABLE_MOUSE=1\n",
+                "export FOO=1 CLAUDE_CODE_DISABLE_MOUSE=1\n",
+                "export CLAUDE_CODE_DISABLE_MOUSE\n"):
+            with tempfile.TemporaryDirectory() as td:
+                p = self._write(td, body)
+                self.assertEqual(len(bd.scan_bashrc_drift([str(p)])), 1, body)
+
+    def test_value_string_mentioning_the_var_is_not_flagged(self):
+        # a value that merely CONTAINS the token (never exports a CLAUDE_CODE_*
+        # var) must not false-positive.
+        import cli_bashrc_drift as bd
+        with tempfile.TemporaryDirectory() as td:
+            p = self._write(td, "export MYVAR=CLAUDE_CODE_HOME\n")
+            self.assertEqual(bd.scan_bashrc_drift([str(p)]), [])
+
+    def test_default_paths_cover_the_login_shell_files(self):
+        # review finding #3: bash reads the FIRST of .bash_profile/.bash_login/
+        # .profile for a login shell, plus .bashrc — all four must be scanned.
+        import cli_bashrc_drift as bd
+        names = {p.name for p in bd.default_bashrc_paths()}
+        self.assertEqual(
+            names, {".bashrc", ".bash_profile", ".bash_login", ".profile"})
+
+    def test_symlinked_files_are_scanned_once(self):
+        # review finding #5: a `.profile -> .bashrc` symlink must not double-count
+        # the same physical stray line.
+        import cli_bashrc_drift as bd
+        with tempfile.TemporaryDirectory() as td:
+            real = Path(td) / ".bashrc"
+            real.write_text("export CLAUDE_CODE_DISABLE_MOUSE=1\n")
+            link = Path(td) / ".profile"
+            link.symlink_to(real)
+            self.assertEqual(len(bd.scan_bashrc_drift([str(real), str(link)])), 1)
 
 
 # --------------------------------------------------------------------------- #
