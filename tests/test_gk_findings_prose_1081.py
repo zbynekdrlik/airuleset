@@ -1,19 +1,19 @@
 """#1081 -- gk finding ids come ONLY from finding SHAPES, never bare prose tokens.
 
-RED-first (dispatch): the bare `([A-Z]\\d+)` arm of `airuleset._GK_FINDING_ID_RE`
-turned a gate check code (`B22-e trieda`) and the gk's mutation-probe labels
-(`M1 clobber ... M7 write-by-code`) into "finding ids", so `cli_gk_watch.
-watch_issue` reported `needs-disposition B22,M1,...,M8` and `airuleset.py handoff`
-BLOCKED a legitimate RFR (odoo-erp 7599, 18.9.2026).
+The bare `([A-Z]\\d+)` arm of `airuleset._GK_FINDING_ID_RE` turned a gate check
+code (`B22-e trieda`) and the gk's mutation-probe labels (`M1 clobber ... M7
+write-by-code`) into "finding ids", so `cli_gk_watch.watch_issue` reported
+`needs-disposition B22,M1,...,M8` and `airuleset.py handoff` BLOCKED a legitimate
+RFR (odoo-erp 7599, 18.9.2026).
 
-Approach 1: ids come from (a) emoji finding markers `(?:🔴|🟡|🔵)<n>`, (b) the
-legacy `F<n>` form ONLY at a line/bullet boundary (never mid-word), cross-checked
-against (c) the verdict COUNT line (`0 🔴 · 2 🟡 · 5 🔵`) so an emoji number
-beyond its severity's open count is a prose mention and is dropped. Gate codes,
-probe labels, and any other `[A-Z]\\d+` token are never ids.
-
-These tests fail on the pre-#1081 parser (they assert the false ids are ABSENT
-and the new `cli_gk_watch.severity_counts`/`parse_findings` helpers exist).
+Fix (main ruling on the Design-question): ids come ONLY from (a) a BULLET-ANCHORED
+emoji marker — line start + optional indent/bullet/bold, then `(🔴|🟡|🔵)<n>` — and
+(b) the legacy `F<n>` form at a line/bullet boundary (never mid-word). A
+mid-sentence emoji mention, the count line (`0 🔴 · 2 🟡 · 5 🔵`, number BEFORE the
+emoji), and any bare `[A-Z]\\d+` token are all EXCLUDED positionally. There is NO
+count-line cross-check: it was a silent fail-open under stable cross-round
+numbering (a survivor's number > the reduced open count got dropped) and was not
+load-bearing for the incident.
 """
 import sys
 import unittest
@@ -24,12 +24,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset
 import cli_gk_watch as gw
 
-# A realistic odoo-erp 7599-shaped gk ACCEPT verdict: the per-severity count
-# line, real finding bullets (🟡1/🟡2/🔵1..🔵5), plus the exact prose the old
-# bare-letter arm mis-read -- a gate code (`B22-e`), the mutation-probe labels
-# (`M1..M8`, no `M6`), a model fragment (`claude-opus-4-8`), a `PR<n>` token, and
-# other gate codes (`E24`, `S3`). Also a SECOND `·`-triple in prose ("nový
-# count") that must NOT be taken as the authoritative count line.
+# A realistic odoo-erp 7599-shaped gk ACCEPT verdict: the count line, real
+# finding bullets (🟡1/🟡2/🔵1..🔵5), plus the exact prose the old bare-letter arm
+# mis-read -- a gate code (`B22-e`), the mutation-probe labels (`M1..M8`, no
+# `M6`), a model fragment (`claude-opus-4-8`), a `PR<n>` token, other gate codes
+# (`E24`, `S3`), and mid-sentence emoji mentions (`adv 🟡1 ... 🔴1`).
 GK_7599_ACCEPT = (
     "## Gatekeeper review verdict: ACCEPT\n"
     "gk-state: ACCEPT @13aa61ad4\n"
@@ -51,9 +50,9 @@ GK_7599_ACCEPT = (
     "nový count `0 🔴 · 0 🟡 · 5 🔵` po dispozícii 🟡1/🟡2.\n"
 )
 
-# A real BOUNCE whose ONE 🔴 finding is genuinely open (a count that INCLUDES it)
-# -- the new parser must STILL surface it (never over-narrow), while dropping the
-# `B22-c` gate note and the `M4` probe in the same bullet.
+# A real BOUNCE whose ONE 🔴 finding is genuinely open -- the new parser must
+# STILL surface it (never over-narrow), while dropping the `B22-c` gate note and
+# the `M4` probe in the same bullet.
 GK_BOUNCE_RED1 = (
     "## Gatekeeper review -- BOUNCE\n"
     "gk-state: BOUNCE @beef1234\n"
@@ -61,12 +60,18 @@ GK_BOUNCE_RED1 = (
     "- 🔴1 (security) token logged; B22-c gate note, mutačná sonda M4 revert\n"
 )
 
-# A bullet id BEYOND its severity's open count is a prose mention -> dropped.
-CAP_BODY = (
-    "**Počty (otvorené @ abc1234): 0 🔴 · 2 🟡 · 0 🔵**\n"
-    "- 🟡1 real finding\n"
-    "- 🟡2 real finding\n"
-    "- 🟡3 (prose mention -- beyond the 2 🟡 count) nižšie ako 🟡1/🟡2\n"
+# A mid-sentence emoji mention is NOT a finding id (not at a bullet position).
+MID_SENTENCE = (
+    "Poznámka k procesu: viď 🟡3 vyššie v tomto komentári — to nie je nový "
+    "nález, len odkaz na predchádzajúce kolo.\n"
+)
+
+# STABLE cross-round numbering: a survivor bullet `🟡3` under a `1 🟡` count line
+# IS a real open finding (the old count-cap fail-open dropped it; the anchored
+# shape keeps it — it is a genuine bullet).
+BULLET_STABLE = (
+    "**Počty (otvorené @ s): 0 🔴 · 1 🟡 · 0 🔵**\n"
+    "- 🟡3 (survivor across rounds — its number exceeds the reduced open count)\n"
 )
 
 GK = "zbynekdrlik"
@@ -79,8 +84,8 @@ def _row(cid, login, body, created_at):
 
 class ParseFindingsShapesOnly(unittest.TestCase):
     def test_7599_ids_are_only_the_emoji_numbers(self):
-        # 🟡1,🟡2 + 🔵1..🔵5 collapse (digit-only, first-seen) to 1..5; the 🔴1
-        # prose mention (count 0 🔴) contributes nothing new.
+        # 🟡1,🟡2 + 🔵1..🔵5 bullets collapse (digit-only, first-seen) to 1..5;
+        # the mid-sentence `🟡1`/`🔴1` mentions are NOT at bullet positions.
         self.assertEqual(
             airuleset._parse_gk_findings(GK_7599_ACCEPT),
             ["1", "2", "3", "4", "5"])
@@ -92,9 +97,14 @@ class ParseFindingsShapesOnly(unittest.TestCase):
             self.assertNotIn(bogus, ids, "prose token %r must not be an id"
                              % bogus)
 
-    def test_count_line_caps_per_severity(self):
-        # 🟡3 exceeds the 2 🟡 open count -> dropped; no other severity carries 3.
-        self.assertEqual(airuleset._parse_gk_findings(CAP_BODY), ["1", "2"])
+    def test_mid_sentence_emoji_mention_is_not_an_id(self):
+        # A `🟡3` in the middle of a sentence is a reference, not a finding.
+        self.assertEqual(airuleset._parse_gk_findings(MID_SENTENCE), [])
+
+    def test_bullet_survivor_above_count_is_still_an_id(self):
+        # STABLE numbering: 🟡3 as a real bullet under a `1 🟡` count is kept
+        # (the removed count-cap would have dropped it — the fail-open).
+        self.assertEqual(airuleset._parse_gk_findings(BULLET_STABLE), ["3"])
 
     def test_legacy_f_id_at_line_start(self):
         self.assertIn("F3", airuleset._parse_gk_findings("F3 finding here"))
@@ -111,35 +121,14 @@ class ParseFindingsShapesOnly(unittest.TestCase):
             self.assertEqual(airuleset._parse_gk_findings(prose), [],
                              "bare token prose %r must yield no ids" % prose)
 
-    def test_emoji_ids_still_parse_without_a_count_line(self):
-        # No count line -> no cap, every emoji finding kept.
+    def test_line_start_emoji_findings_parse(self):
+        # An emoji at line start (with or without a bullet marker) is a finding.
         self.assertEqual(
             airuleset._parse_gk_findings("🔴 1 sec\n🟡 2 corr"), ["1", "2"])
 
     def test_empty_and_none(self):
         self.assertEqual(airuleset._parse_gk_findings(""), [])
         self.assertEqual(airuleset._parse_gk_findings(None), [])
-
-
-class SeverityCounts(unittest.TestCase):
-    def test_parses_the_authoritative_pocty_line(self):
-        self.assertEqual(gw.severity_counts(GK_7599_ACCEPT),
-                         {"🔴": 0, "🟡": 2, "🔵": 5})
-
-    def test_ignores_a_non_authoritative_triple_in_prose(self):
-        # The "nový count 0 🔴 · 0 🟡 · 5 🔵" prose line is NOT the count line;
-        # only the `Počty (otvorené …)` line counts (else 🟡 would read 0).
-        self.assertEqual(gw.severity_counts(GK_7599_ACCEPT)["🟡"], 2)
-
-    def test_total_count_form_has_no_per_severity_caps(self):
-        # The #1056 fixture's `**Počty (otvorené @ sha)**: 2` total form carries
-        # no `<n> <emoji>` pair -> {} -> no cap applied.
-        self.assertEqual(
-            gw.severity_counts("**Počty (otvorené @ a1b2c3d4)**: 2"), {})
-
-    def test_no_count_line(self):
-        self.assertEqual(gw.severity_counts("just a note"), {})
-        self.assertEqual(gw.severity_counts(""), {})
 
 
 class ParseFindingsHelper(unittest.TestCase):
@@ -157,20 +146,11 @@ class ParseFindingsHelper(unittest.TestCase):
             airuleset._parse_gk_findings(GK_7599_ACCEPT),
             gw.parse_findings(GK_7599_ACCEPT, airuleset._GK_FINDING_ID_RE))
 
-    def test_count_cap_keeps_all_contiguous_findings(self):
-        # The real gk template numbers open findings 1..count per severity, so
-        # count == bullet count and NOTHING real is dropped — the cap only ever
-        # drops a prose number ABOVE the count (#1081 review, safe-case lock).
-        body = ("**Počty (otvorené @ s): 0 🔴 · 0 🟡 · 3 🔵**\n"
-                "- 🔵1 a\n- 🔵2 b\n- 🔵3 c\n")
-        self.assertEqual(airuleset._parse_gk_findings(body), ["1", "2", "3"])
-
     def test_zero_is_never_a_finding_id(self):
-        # An emoji-first count line (`🔴 0 · 🟡 2`) must not leak "0" (#1081
-        # review): no finding is numbered 0.
-        ids = airuleset._parse_gk_findings(
-            "**Počty (otvorené @ s): 🔴 0 · 🟡 2 · 🔵 5**\n- 🟡1 x\n- 🟡2 y")
+        # A `🔴 0` bullet must not leak "0" (#1081 review): no finding is #0.
+        ids = airuleset._parse_gk_findings("- 🔴 0 weird\n- 🟡 1 real")
         self.assertNotIn("0", ids)
+        self.assertIn("1", ids)
 
 
 class WatchIssueNoFalseBlock(unittest.TestCase):
@@ -179,10 +159,10 @@ class WatchIssueNoFalseBlock(unittest.TestCase):
                               self_login=STREAM, now=now, **kw)
 
     def test_7599_accept_then_real_dispositions_is_rfr_current(self):
-        # old RFR, then gk ACCEPT (raises ids), then a stream disposition
-        # comment naming every REAL id (1..5). The pre-#1081 parser also raised
-        # B22,M1.. from the ACCEPT prose -> needs-disposition (the false block);
-        # the new parser raises only 1..5, all dispositioned -> rfr-current.
+        # old RFR, then gk ACCEPT (raises ids 1..5 from bullets), then a stream
+        # disposition comment naming every REAL id. The pre-#1081 parser also
+        # raised B22,M1.. -> needs-disposition (the false block); the new parser
+        # raises only 1..5, all dispositioned -> rfr-current.
         disp = (
             "Closes-finding: 🟡1 — fixed in `eval_navody.py:435`\n"
             "Closes-finding: 🟡2 — followup_candidates line added\n"

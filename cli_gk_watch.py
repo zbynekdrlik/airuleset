@@ -42,14 +42,6 @@ _SHA_RE = re.compile(r"@\s*([0-9a-f]{7,40})\b")
 # The advisory count block header the gk verdict/advisory template uses.
 _ADVISORY_COUNTS_RE = re.compile(r"Po[čc]ty\s*\(otvoren", re.IGNORECASE)
 
-# #1081 -- the per-severity open-finding COUNT on that line
-# (`... : 0 🔴 · 2 🟡 · 5 🔵`). Each `<n> <emoji>` pair caps that severity in
-# `parse_findings`, so an emoji finding-number BEYOND its count is a PROSE
-# mention (`nižšie ako 🔵1/🔵2/🔵3`) and is dropped, never a finding id. The
-# number PRECEDES the emoji here, the opposite of a finding bullet (`🟡1`), so
-# the count line and the finding bullets never collide.
-_SEVERITY_COUNT_RE = re.compile(r"(\d+)\s*(🔴|🟡|🔵)")
-
 # Heuristic BOUNCE / ACCEPT verdict words (author-gated to the gk login, so a
 # stream comment quoting "BOUNCE" is never classified as a verdict).
 _BOUNCE_RE = re.compile(r"\bBOUNCE\b")
@@ -91,60 +83,30 @@ def _parse_iso(s):
         return None
 
 
-def severity_counts(body):
-    """`{emoji: int}` open-finding counts from the gk verdict COUNT line -- the
-    first `Počty (otvorené …)` line (`_ADVISORY_COUNTS_RE`). `{}` when the body
-    has no such line (then `parse_findings` applies no per-severity cap). Scoped
-    to that ONE line so a hypothetical future-count `·`-triple elsewhere in the
-    prose (odoo-erp 7599's "nový count 0 🔴 · 0 🟡 · 5 🔵") is ignored (#1081)."""
-    if not body:
-        return {}
-    for line in body.splitlines():
-        if _ADVISORY_COUNTS_RE.search(line):
-            return {em: int(n) for n, em in _SEVERITY_COUNT_RE.findall(line)}
-    return {}
-
-
 def parse_findings(body, id_re):
     """Finding ids from a gk verdict body via the finding-SHAPE regex `id_re`
-    (`airuleset._GK_FINDING_ID_RE`) -- the impl behind
-    `airuleset._parse_gk_findings`, which stays the ONE public parser (the
-    composer pre-flight + `_findings` + the tests; the composer's receipt hook
-    matches the RFR body sha256 downstream, NOT finding ids); the body lives here
-    because airuleset.py is at its size ratchet (#1081). Emoji markers (`🟡1`;
-    group 1 = emoji, group 2 = number) and the legacy `F<n>` form (group 3) are
-    ids; an emoji number beyond its severity count (`severity_counts`) is a prose
-    mention and is dropped. Returns string ids (["1", "2", "F3"]) in first-seen
-    order, or [].
-
-    KNOWN LIMIT (#1081 review, both fresh-context reviewers, escalated to main):
-    the count cap assumes the gk numbers OPEN findings CONTIGUOUSLY 1..count per
-    severity (the current verdict template — count == bullet count, evidenced by
-    odoo-erp 7599). If the gk ever numbers findings STABLY across rounds (a
-    surviving finding whose number > the reduced open count, e.g. a delta comment
-    listing 🔵3/🔵4/🔵5 with count `3 🔵`), the cap drops a REAL open finding — a
-    silent fail-OPEN on the disposition gate. The count-independent alternative
-    the reviewers recommend (anchor the emoji arm to a line/bullet boundary so a
-    mid-prose mention is excluded positionally) changes the design's mandated
-    count-cross-check + its acceptance criterion, so it is a DESIGN decision for
-    the main, not a worker substitution."""
+    (`airuleset._GK_FINDING_ID_RE`) — the impl behind `airuleset._parse_gk_findings`,
+    which stays the ONE public parser (the composer pre-flight + `_findings` + the
+    tests; the composer's receipt hook matches the RFR body sha256 downstream, NOT
+    finding ids); the body lives here because airuleset.py is at its size ratchet
+    (#1081). Ids come from a BULLET-ANCHORED emoji marker (group 1 = number) and
+    the anchored legacy `F<n>` form (group 2); a mid-sentence emoji mention, a
+    gate code / probe label, and the count line (`0 🔴 · 2 🟡`, number before the
+    emoji) are all EXCLUDED positionally by `id_re` — no count-line cross-check,
+    so stable cross-round numbering never drops a real open finding (main ruling,
+    #1081, replacing the earlier count-cap). Returns string ids (["1", "2", "F3"])
+    in first-seen order, or []."""
     if not body:
         return []
-    caps = severity_counts(body)
     ids = []
     for m in id_re.finditer(body):
-        emoji = m.group(1)
-        if emoji:
-            num = m.group(2)
+        num = m.group(1)                 # bullet-anchored emoji finding
+        if num is not None:
             if int(num) == 0:
-                continue  # #1081 review: no finding is #0 — guards an
-                # emoji-first count line ("🔴 0 · …") leaking "0" as an id.
-            cap = caps.get(emoji)
-            if cap is not None and int(num) > cap:
-                continue
+                continue                 # no finding is #0 (#1081 review)
             fid = num
         else:
-            fid = "F" + m.group(3)
+            fid = "F" + m.group(2)       # legacy anchored F<n>
         if fid not in ids:
             ids.append(fid)
     return ids
