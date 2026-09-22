@@ -4185,6 +4185,11 @@ def cmd_tickets_status(args):
                 # the rarer U-parked bounce too.
                 entry["bounce"] = _count_bounce_all(workable_rows, waiting,
                                                     ops_wait)
+                # #1066 L1: the UNHANDLED bounce subset (same partitioned rows as
+                # `bounce`, #367) — left ABSENT on a gh error (fail-open).
+                import cli_bounce_unhandled
+                cli_bounce_unhandled.attach_unhandled(
+                    entry, workable_rows, waiting, ops_wait, root, slug)
                 entry["user_waiting"] = len(waiting)
                 entry["ops_wait"] = len(ops_wait)
                 # #948: question-map-aware U supplement — see the full
@@ -10484,6 +10489,12 @@ def main():
         "--bounces", action="store_true",
         help="Print bounce rounds for open prio:bounce/ready-for-review "
              "tickets in this slice (#843) — tags round >= 3 as round3!")
+    p_slice.add_argument(
+        "--unhandled", action="store_true",
+        help="With --bounces: print only the UNHANDLED bounces (newest gk "
+             "BOUNCE newer than the stream's last comment/RFR), number<TAB>"
+             "verdict_ts per line — the same derivation as the footer's "
+             "bounce_unhandled cache field (#1066)")
     p_slice.add_argument("--extra", default=None,
                          help="Extra search qualifier ANDed onto every query "
                               "(e.g. label:prio:bounce)")

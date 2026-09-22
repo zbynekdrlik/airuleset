@@ -118,7 +118,6 @@ class DeriveUnhandled(unittest.TestCase):
 
 class AttachUnhandled(unittest.TestCase):
     def test_sets_field_when_derivable(self):
-        rows = {6474: [_row(2, GK, BOUNCE_BODY, "2026-09-16T14:21:00Z")]}
         entry = {}
         with m.patch.object(bu, "derive_at_refresh",
                             return_value=[{"number": 6474, "verdict_ts": 1.0}]):

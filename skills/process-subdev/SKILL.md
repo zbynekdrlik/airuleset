@@ -313,6 +313,15 @@ repo's own CLAUDE.md / playbook is what names the command.
   (template ships with this skill) auto-adds `ready-for-review` on the readiness comment
   AND auto-removes `prio:bounce` on the re-ready comment (a read-role sub-dev cannot
   touch labels).
+  **Re-home a FOREIGN-PR bounce (#1066) — a stream is never held on a bounce it cannot
+  fix.** When a BOUNCE's findings name ANOTHER repo/stream's PR (e.g. the fix lives in
+  `automatizacie-montalu PR 479`, not this stream's code), do NOT leave `prio:bounce` on
+  the origin ticket: re-home it — gk opens/labels a `prio:bounce` ticket in THAT repo
+  (the stream that owns the fix), and the origin ticket keeps only `ops-wait` (it is
+  genuinely waiting on another stream's fix, not reworkable here). The Stop gate
+  `stop-check-bounce-unhandled.sh` names this as the `relay` action (vs `ACK + lane` for
+  a bounce this stream owns), so an un-re-homed foreign bounce stops blocking once it is
+  relayed.
   **Mandatory rule-update step (bounce ⇒ rule-update loop, #222) — every bounce is
   evidence the sub-dev RULES are deficient, not just that this one PR was wrong.**
   Before finishing the bounce, answer: **"which sub-dev rule/checklist item would have

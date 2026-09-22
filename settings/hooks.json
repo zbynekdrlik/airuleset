@@ -534,6 +534,11 @@
           },
           {
             "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/stop-check-bounce-unhandled.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/stop-check-lane-fill.sh",
             "timeout": 15
           },

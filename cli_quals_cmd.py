@@ -664,6 +664,36 @@ def _print_bounce_rounds(quals, root, user):
         print("%d\t%d\t%s\t%s" % (num, rnd, tag, title))
 
 
+def _print_bounce_unhandled(quals, root, user):
+    """#1066: print the UNHANDLED bounces in this slice — one `number<TAB>
+    verdict_ts` line per member (newest gk BOUNCE newer than the stream's last
+    own comment/RFR), OLDEST verdict first. The SAME `cli_bounce_unhandled`
+    derivation the footer's `bounce_unhandled` cache field uses (#367 one-
+    derivation) — an EXPLICIT CLI invocation, so `rate_guard=False` (always
+    runs). Empty output = 0 unhandled; the lane-B goal clause counts the lines.
+    A gh query failure exits 1 (never a false '0' the loop could stop on)."""
+    import airuleset
+    import cli_bounce_unhandled
+    slug = airuleset._repo_slug(cwd=root)
+    bounce_rows, _handed, failed = airuleset._slice_mine_and_handed(
+        quals, root, slug, extra="label:prio:bounce")
+    if failed:
+        print("slice-quals --bounces --unhandled: gh query failed",
+              file=sys.stderr)
+        sys.exit(1)
+    numbers = sorted(bounce_rows)
+    if not numbers:
+        return
+    out = cli_bounce_unhandled.derive_numbers(
+        numbers, cwd=root, slug=slug, rate_guard=False)
+    if out is None:
+        print("slice-quals --bounces --unhandled: gh read failed",
+              file=sys.stderr)
+        sys.exit(1)
+    for e in sorted(out, key=lambda x: (x.get("verdict_ts") or 0)):
+        print("%d\t%s" % (e["number"], e.get("verdict_ts")))
+
+
 def _merged_unreleased(root):
     """#1083 — the git-derived merged-unreleased issue set for `root` (fix in
     develop/staging, not yet main). The slug is resolved from the LOCAL git
@@ -803,6 +833,7 @@ def cmd_slice_quals(args):
     want_ops_wait = getattr(args, "ops_wait", False)
     want_audit = getattr(args, "audit", False)   # #578
     want_bounces = getattr(args, "bounces", False) is True   # #843
+    want_unhandled = getattr(args, "unhandled", False) is True   # #1066
     want_dep_wait = getattr(args, "dep_wait", False)   # #993 item 7
     want_count_dispatchable = getattr(args, "count_dispatchable", False)  # #993 item 3
     want_list_dispatchable = getattr(args, "list_dispatchable", False) is True  # #1078 item 1 (#1036 Mock-truthy guard)
@@ -815,8 +846,13 @@ def cmd_slice_quals(args):
 
     # #843: --bounces is a SEPARATE path — scoped to prio:bounce/ready-for-review
     # labeled tickets, calls _bounce_round per member. No shared rows path.
+    # #1066: --bounces --unhandled is the UNHANDLED subset (the same gk-watch
+    # derivation the footer's bounce_unhandled cache field uses).
     if want_bounces:
-        _print_bounce_rounds(quals, root, user)
+        if want_unhandled:
+            _print_bounce_unhandled(quals, root, user)
+        else:
+            _print_bounce_rounds(quals, root, user)
         return
 
     extra = getattr(args, "extra", None)
