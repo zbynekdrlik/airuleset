@@ -230,3 +230,105 @@ def test_status_row_defaults_to_the_predicate():
     # unit is absent, so the row reads 'not provisioned' (never raises).
     row = dg.root_guard_status_row()
     assert row in ("root disk-guard: provisioned", "root disk-guard: not provisioned")
+
+
+# --------------------------------------------------------------------------- #
+# Point 3 — the per-box report-only `root_guard_provisioned` fact in the
+# conformance Job 34 report (watchdog/conformance.py), from the SAME predicate.
+# --------------------------------------------------------------------------- #
+from watchdog import conformance as conf          # noqa: E402
+
+
+def _conf_fake_git(head="aaaa1111", origin="aaaa1111"):
+    def g(args, cwd, timeout=None):
+        sub = args[0]
+        if sub == "fetch":
+            return (0, "")
+        if sub == "rev-parse":
+            return (0, (head if args[-1] == "HEAD" else origin) + "\n")
+        if sub == "merge-base":
+            return (0, "")
+        if sub == "status":
+            return (0, "")
+        return (0, "")
+    return g
+
+
+def _run_conf(state, tmp, provisioned_fn, dry_run=False):
+    cmd = str(Path(tmp) / "CLAUDE.md")
+    Path(cmd).write_text("managed\n")
+    base = str(Path(tmp) / conf.CONFORMANCE_BASELINE_NAME)
+    Path(base).write_text('{"claude_md_md5": %r, "head_sha": "aaaa1111"}'
+                          % conf._md5_file(cmd))
+    return conf.run_conformance_check(
+        1_000_000, state, dry_run=dry_run, repo_root=tmp,
+        claude_md_path=cmd, baseline_path=base,
+        git_run=_conf_fake_git(), timer_check=lambda unit=None: "active",
+        is_target_check=lambda: True, symlink_scan=lambda: [],
+        doctrine_scan=lambda: {"high": 0, "medium": 0},
+        persist=lambda: None, root_guard_provisioned_fn=provisioned_fn)
+
+
+def test_conformance_check_records_provisioned_true():
+    with tempfile.TemporaryDirectory() as td:
+        state = {}
+        _run_conf(state, td, provisioned_fn=lambda: True)
+        assert state.get("root_guard_provisioned") is True
+
+
+def test_conformance_check_records_provisioned_false():
+    with tempfile.TemporaryDirectory() as td:
+        state = {}
+        _run_conf(state, td, provisioned_fn=lambda: False)
+        assert state.get("root_guard_provisioned") is False
+
+
+def test_conformance_check_uses_the_injected_predicate():
+    called = {"n": 0}
+
+    def _fn():
+        called["n"] += 1
+        return True
+
+    with tempfile.TemporaryDirectory() as td:
+        _run_conf({}, td, provisioned_fn=_fn)
+    assert called["n"] >= 1, "the conformance job must call the provisioned predicate"
+
+
+def test_conformance_check_dry_run_does_not_persist_the_fact():
+    with tempfile.TemporaryDirectory() as td:
+        state = {}
+        _run_conf(state, td, provisioned_fn=lambda: True, dry_run=True)
+        assert "root_guard_provisioned" not in state
+
+
+def test_conformance_check_default_predicate_is_the_disk_guard_one():
+    # No injected fn -> defaults to disk_guard._root_guard_provisioned (import it,
+    # never a second timer check). In this env the timer is absent -> fact False.
+    with tempfile.TemporaryDirectory() as td:
+        state = {}
+        conf.run_conformance_check(
+            1_000_000, state, dry_run=False, repo_root=td,
+            claude_md_path=str(Path(td) / "C.md"),
+            baseline_path=str(Path(td) / conf.CONFORMANCE_BASELINE_NAME),
+            git_run=_conf_fake_git(), timer_check=lambda unit=None: "active",
+            is_target_check=lambda: True, symlink_scan=lambda: [],
+            doctrine_scan=lambda: {"high": 0, "medium": 0}, persist=lambda: None)
+        assert state.get("root_guard_provisioned") is False
+
+
+def test_conformance_status_row_shows_provisioned():
+    row = conf.conformance_status_row(
+        {"conformance_last_check": 1, "root_guard_provisioned": True})
+    assert "root disk-guard: provisioned" in row
+
+
+def test_conformance_status_row_shows_not_provisioned():
+    row = conf.conformance_status_row(
+        {"conformance_last_check": 1, "root_guard_provisioned": False})
+    assert "root disk-guard: not provisioned" in row
+
+
+def test_conformance_status_row_absent_field_has_no_root_suffix():
+    row = conf.conformance_status_row({"conformance_last_check": 1})
+    assert "root disk-guard" not in row
