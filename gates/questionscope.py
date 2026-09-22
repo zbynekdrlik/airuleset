@@ -255,7 +255,27 @@ def _client_report_lane_in_flight(numbers, cwd, *, runner=None, cache_fn=None):
     return "in_flight" if (nums & open_nums) else "shipped"
 
 
-def decide(payload, question_fn=None, u_count_fn=None, lane_fn=None):
+def _asking_role(cwd, role_fn=None):
+    """#1066 finding (b) — the RESOLVED role of the asking window (`infra` /
+    `review` / None), via `cli_concurrency.resolve_role`. `role_fn` overrides for
+    tests. FAIL-SAFE to None (the conservative direction: only a CONFIRMED infra
+    window is exempted from the infra-label verdict; an unresolvable role keeps
+    the existing FLOW routing)."""
+    fn = role_fn
+    if fn is None:
+        try:
+            import cli_concurrency
+            fn = cli_concurrency.resolve_role
+        except Exception:  # noqa: BLE001 — unresolvable role -> not infra (route)
+            return None
+    try:
+        return fn(cwd)
+    except Exception:  # noqa: BLE001 — a resolution error -> not infra (route)
+        return None
+
+
+def decide(payload, question_fn=None, u_count_fn=None, lane_fn=None,
+           role_fn=None):
     """Return ``(block: bool, reason: str)``.
 
     #1027 (no interim workaround) is checked FIRST after ref-extraction, on its
@@ -333,7 +353,21 @@ def decide(payload, question_fn=None, u_count_fn=None, lane_fn=None):
                          "allowing (fail-open)\n" % e)
         return False, ""
     if verdict == "infra":                   # #1026 — infra lane, not owner court
-        return True, _INFRA_REASON
+        # #1066 finding (b): the infra-LABEL verdict exists to route a FLOW/
+        # stream question TO the infra lane — but from the INFRA window itself
+        # EVERY named ticket carries `infra` by construction, so an ordinary
+        # owner question there (a PROD-host config approval the project rules
+        # REQUIRE) was false-routed. Apply the infra route ONLY when the asking
+        # window's role is NOT infra; from the infra window a bare `#N` naming an
+        # infra ticket is an ordinary owner question and falls through to allow.
+        # DELIBERATE scope: ONLY the LABEL verdict is role-scoped (the finding +
+        # design name the "infra-label verdict"); the U-independent TEXT-shape
+        # trigger above (`_is_release_block_shape`) is left unscoped — its STRONG
+        # tokens (deploy-prod / startup_failure / …) name a real release block
+        # even from the infra window, and the reported incidents were all the
+        # LABEL path with no strong token.
+        if _asking_role(cwd, role_fn) != "infra":
+            return True, _INFRA_REASON
     if verdict == "not_in_u":
         listed = ", ".join("#%d" % n for n in sorted(refs))
         reason = (
