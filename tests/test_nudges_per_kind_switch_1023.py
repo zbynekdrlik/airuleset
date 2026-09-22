@@ -7,7 +7,7 @@ renders `nudges N/M · recovery on` for every state (never `OFF`, since #1039).
 
 RED against the pre-#1023 tree: `nudges_enabled` is global (existence of
 `~/.claude/nudges-off`); there is no per-kind state, no `--kind`, no `nudge=`
-identity on `keys`, and the badge is a bare `nudges OFF`. GREEN once the per-kind
+identity on `keys`, and the badge was a bare `nudges OFF`. GREEN once the per-kind
 switch lands.
 """
 import argparse

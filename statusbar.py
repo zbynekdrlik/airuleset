@@ -621,10 +621,10 @@ def nudges_off_segment(home=None):
         import watchdog as _wd
         on = _wd.nudges_on_kinds(home)
         total = len(_wd.MACHINE_NUDGE_KINDS)
-        rec = " · recovery on" if _wd.RECOVERY_NUDGE_KINDS else ""
+        recovery_sfx = " · recovery on" if _wd.RECOVERY_NUDGE_KINDS else ""
     except Exception:
         return ""
-    return "\033[38;5;208mnudges %d/%d%s\033[0m" % (len(on), total, rec)
+    return "\033[38;5;208mnudges %d/%d%s\033[0m" % (len(on), total, recovery_sfx)
 
 
 def quota_segment(home=None, now=None):
