@@ -73,6 +73,36 @@ def test_predicate_never_raises_on_broken_exists_fn():
     assert dg._root_guard_provisioned(timer_path="/x", exists_fn=_boom) is False
 
 
+def test_fallback_timer_path_is_drift_locked_to_the_real_constant():
+    # review 🟡: the lazy-import fallback literal MUST equal the real constant,
+    # else a box whose `cli_disk_guard_root` import fails probes a stale path and
+    # falsely reports 'not provisioned'.
+    from cli_disk_guard_root import ROOT_TIMER_PATH
+    assert dg._ROOT_TIMER_PATH_FALLBACK == ROOT_TIMER_PATH
+
+
+def test_predicate_uses_fallback_when_import_fails(monkeypatch):
+    # Force the lazy import to raise; the predicate must probe the FALLBACK path
+    # (drift-locked above) and honour exists_fn's verdict on it.
+    import builtins
+    seen = {}
+    real_import = builtins.__import__
+
+    def _no_cli(name, *a, **k):
+        if name == "cli_disk_guard_root":
+            raise ImportError("forced")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", _no_cli)
+
+    def _exists(p):
+        seen["path"] = p
+        return True
+
+    assert dg._root_guard_provisioned(exists_fn=_exists) is True
+    assert seen["path"] == dg._ROOT_TIMER_PATH_FALLBACK
+
+
 # --------------------------------------------------------------------------- #
 # Point 1b — the once/day 'not provisioned' warn helper
 # --------------------------------------------------------------------------- #
@@ -154,6 +184,21 @@ def test_critical_provisioned_calls_recorder_byte_identically(monkeypatch):
     assert a[1] == td and a[2] == 1_000_000 and k.get("dry_run") is False
     assert not any("not provisioned on this box" in ln for ln in logs)
     assert any("ROOT-REPORT-STALE" in ln for ln in logs)
+
+
+def test_critical_provisioned_recorder_error_is_caught_and_logged(monkeypatch):
+    # review nit: force the recorder to RAISE — the escalate branch must catch it
+    # and log the preserved error line, never propagate (the guard is best-effort).
+    monkeypatch.setattr(dg, "_root_guard_provisioned", lambda: True, raising=False)
+
+    def _boom(*a, **k):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(r, "maybe_record_root_finding", _boom)
+    with tempfile.TemporaryDirectory() as td:
+        logs = dg.run_disk_guard(now=1_000_000, home=td, dry_run=False,
+                                 statvfs_fn=_statvfs(92), **_CRIT_KW)
+    assert any("root-finding error" in ln and "kaboom" in ln for ln in logs)
 
 
 def test_notice_level_neither_warns_nor_calls(monkeypatch):

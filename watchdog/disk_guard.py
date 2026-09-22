@@ -3699,6 +3699,12 @@ def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
 # unit's presence — the single artefact `airuleset.py disk-guard-root` installs.
 # --------------------------------------------------------------------------- #
 ROOT_NOT_PROVISIONED_WARN_NAME = "root-not-provisioned-warn"
+# Fallback timer-unit path, used ONLY if the lazy `cli_disk_guard_root` import
+# fails. It MUST equal `cli_disk_guard_root.ROOT_TIMER_PATH`; a drift-lock test
+# (`test_disk_guard_root_provisioned_1047`) asserts the equality so a rename of
+# the real constant can never leave this stale (which would make a box whose
+# import fails falsely probe the wrong path and report 'not provisioned').
+_ROOT_TIMER_PATH_FALLBACK = "/etc/systemd/system/airuleset-disk-guard-root.timer"
 
 
 def _root_guard_provisioned(timer_path=None, exists_fn=None):
@@ -3706,18 +3712,19 @@ def _root_guard_provisioned(timer_path=None, exists_fn=None):
     timer unit exists. That unit (``cli_disk_guard_root.ROOT_TIMER_PATH``) is the
     single artefact ``airuleset.py disk-guard-root`` installs (#841), so its
     presence is the honest provisioned signal. Lazy import keeps this watchdog
-    leaf light; falls back to the literal path if the CLI module is somehow
-    unavailable. Best-effort — never raises (a broken ``exists_fn`` → NOT
-    provisioned, the fail-safe that keeps the honest 'not provisioned' line over
-    a false dead-timer alarm). ``exists_fn`` injectable for tests."""
+    leaf light; falls back to :data:`_ROOT_TIMER_PATH_FALLBACK` (drift-locked to
+    the real constant) if the CLI module is somehow unavailable. Best-effort —
+    never raises (a broken ``exists_fn`` → NOT provisioned, the fail-safe that
+    keeps the honest 'not provisioned' line over a false dead-timer alarm).
+    ``exists_fn`` injectable for tests."""
     exists_fn = exists_fn or os.path.exists
     if timer_path is None:
         try:
             from cli_disk_guard_root import ROOT_TIMER_PATH as _tp
             timer_path = _tp
         except Exception as e:
-            _dbg("root-timer-path import failed, using literal: %r" % e)
-            timer_path = "/etc/systemd/system/airuleset-disk-guard-root.timer"
+            _dbg("root-timer-path import failed, using fallback: %r" % e)
+            timer_path = _ROOT_TIMER_PATH_FALLBACK
     try:
         return bool(exists_fn(timer_path))
     except Exception as e:
