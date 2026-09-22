@@ -61,17 +61,26 @@ class _CP:
 
 class _FakeRun:
     """A fake `run(argv, cwd=None)` runner that records every call and answers
-    a git clone with a configurable return code / stderr."""
+    a git clone / gh set-default with a configurable return code / stderr.
+    `clone_creates` simulates a PARTIAL clone leaving a dir at the target (the
+    review-F1 timeout case)."""
 
-    def __init__(self, clone_rc=0, clone_stderr=""):
+    def __init__(self, clone_rc=0, clone_stderr="", setdefault_rc=0,
+                 clone_creates=False):
         self.calls = []            # list of (argv, cwd)
         self.clone_rc = clone_rc
         self.clone_stderr = clone_stderr
+        self.setdefault_rc = setdefault_rc
+        self.clone_creates = clone_creates
 
     def __call__(self, argv, cwd=None):
         self.calls.append((list(argv), cwd))
         if argv[:2] == ["git", "clone"]:
+            if self.clone_creates:
+                os.makedirs(argv[-1], exist_ok=True)   # partial dir at target
             return _CP(returncode=self.clone_rc, stderr=self.clone_stderr)
+        if argv[:3] == ["gh", "repo", "set-default"]:
+            return _CP(returncode=self.setdefault_rc)
         return _CP(returncode=0)
 
 
@@ -91,7 +100,10 @@ class TestValidateWindowsRepoBranch(unittest.TestCase):
 
     def test_rejects_bad_repo(self):
         for bad in ("notowner", "a/b/c", "owner/", "/name",
-                    "own er/name", "owner/na me", "owner/name;rm"):
+                    "own er/name", "owner/na me", "owner/name;rm",
+                    # review F2: a leading `-` is an argv-flag token to
+                    # `gh repo set-default <repo>` — barred in BOTH segments.
+                    "-owner/name", "owner/-name", "-x/y"):
             errs = cli_fleet.validate_windows(
                 [{"name": "x", "cwd": "a", "repo": bad}])
             self.assertTrue(any("repo" in e for e in errs), (bad, errs))
@@ -205,6 +217,38 @@ class TestEnsureDeclaredCheckouts(unittest.TestCase):
         self.assertIn("gk-quality", lines[0])
         self.assertIn("could not be cloned", lines[0])
         self.assertIn("~/devel/odoo/odoo-erp-quality", lines[0])
+        # review F4: the loud line is ASCII (push runs install over ssh where
+        # LANG is often unset — a non-ASCII byte would raise at print time).
+        self.assertTrue(lines[0].isascii(), lines[0])
+        self.assertTrue(lines[0].startswith("WARN:"), lines[0])
+
+    def test_failed_clone_removes_the_partial_dir(self):
+        # review F1: a failed/timed-out clone can leave a partial dir; it MUST
+        # be removed so the next install retries it instead of treating the
+        # broken tree as (present) forever — the exact outcome #1108 fixes.
+        home = tempfile.mkdtemp()
+        fake = _FakeRun(clone_rc=1, clone_stderr="fatal\n", clone_creates=True)
+        target = os.path.join(home, "devel/odoo/odoo-erp-quality")
+        lines = ctp.ensure_declared_checkouts([_GK3[2]], home=home, run=fake)
+        self.assertFalse(os.path.isdir(target),
+                         "partial dir must be removed after a failed clone")
+        self.assertEqual(len(lines), 1, lines)
+        self.assertIn("could not be cloned", lines[0])
+
+    def test_setdefault_nonzero_is_logged_not_loud(self):
+        # review F3: a non-zero `gh repo set-default` exit is logged to stderr
+        # (non-fatal — the checkout is valid), never a LOUD return line.
+        import contextlib
+        import io
+        home = tempfile.mkdtemp()
+        fake = _FakeRun(setdefault_rc=1)
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf):
+            lines = ctp.ensure_declared_checkouts(
+                [_GK3[2]], home=home, run=fake)
+        self.assertEqual(lines, [])                     # not a loud line
+        self.assertIn("set-default", buf.getvalue())
+        self.assertIn("gk-quality", buf.getvalue())
 
     def test_window_without_repo_is_skipped(self):
         home = tempfile.mkdtemp()
@@ -334,6 +378,55 @@ class TestDeclaredWindowStatusLines(unittest.TestCase):
 
     def test_empty_windows_is_empty(self):
         self.assertEqual(ctp.declared_window_status_lines([], home="/tmp"), [])
+
+
+# --------------------------------------------------------------------------- #
+# review F6: EXECUTE the rendered guard (not just string / bash -n) with a
+# PATH-stub `tmux` recorder — prove new-window is SKIPPED on a missing cwd and
+# RUN on a present one.
+# --------------------------------------------------------------------------- #
+class TestManagedBodyGuardRuntime(unittest.TestCase):
+    _W = [
+        {"name": "primary", "cwd": "~/devel/odoo/odoo-erp"},
+        {"name": "w", "cwd": "~/sub"},
+    ]
+
+    def _run_body(self, cwd_present):
+        d = tempfile.mkdtemp()
+        home = os.path.join(d, "home")
+        os.makedirs(home)
+        if cwd_present:
+            os.makedirs(os.path.join(home, "sub"))
+        rec = os.path.join(d, "newwindows.txt")
+        bindir = os.path.join(d, "bin")
+        os.makedirs(bindir)
+        # stub tmux: record every `new-window` invocation, answer list-windows
+        # with empty output (so the name/cwd dedup never matches).
+        stub = os.path.join(bindir, "tmux")
+        with open(stub, "w") as f:
+            f.write('#!/bin/sh\n'
+                    'if [ "$1" = "new-window" ]; then echo "$*" >> "$REC"; fi\n'
+                    'exit 0\n')
+        os.chmod(stub, 0o755)
+        script = os.path.join(d, "body.sh")
+        with open(script, "w") as f:
+            f.write("S=x\n" + ctp._managed_windows_create_body(self._W) + "\n")
+        env = dict(os.environ, HOME=home, REC=rec,
+                   PATH=bindir + os.pathsep + os.environ.get("PATH", ""))
+        subprocess.run(["bash", script], env=env, check=True,
+                       capture_output=True, text=True)
+        return rec
+
+    def test_new_window_skipped_when_cwd_missing(self):
+        rec = self._run_body(cwd_present=False)
+        got = open(rec).read().strip() if os.path.exists(rec) else ""
+        self.assertEqual(got, "", "new-window must NOT run when cwd is missing")
+
+    def test_new_window_runs_when_cwd_present(self):
+        rec = self._run_body(cwd_present=True)
+        self.assertTrue(os.path.exists(rec),
+                        "new-window must run when the cwd exists")
+        self.assertIn("-n w", open(rec).read())
 
 
 if __name__ == "__main__":

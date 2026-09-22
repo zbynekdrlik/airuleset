@@ -669,12 +669,19 @@ def _repo_ok(s):
     ``^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`` shape, as a per-char check to keep
     this leaf zero-import). The value is baked into a ``git clone
     https://github.com/<repo>.git`` URL + a ``gh repo set-default <repo>``
-    argv, so it must carry no shell/URL metachar."""
+    argv, so it must carry no shell/URL metachar AND (review F2) neither
+    segment may START with ``-`` — a leading dash is an argv-flag token to
+    ``gh repo set-default <repo>``, exactly what ``_branch_ok`` bars for
+    ``git clone -b <branch>``."""
     s = str(s)
     if s.count("/") != 1:
         return False
     owner, _, name = s.partition("/")
     if not owner or not name:
+        return False
+    if not (owner[0].isascii() and owner[0].isalnum()):
+        return False
+    if not (name[0].isascii() and name[0].isalnum()):
         return False
     return all((c.isascii() and c.isalnum()) or c in "._-"
                for c in owner + name)

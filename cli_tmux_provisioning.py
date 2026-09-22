@@ -1237,15 +1237,21 @@ def ensure_declared_checkouts(windows, home=None, run=None):
       * cwd PRESENT -> UNTOUCHED — never a reset/pull; a dirty or diverged tree
         is the owner's. Idempotent: one clone per lifetime of the checkout.
       * clone FAILURE (or an unsafe repo/branch shape) -> a LOUD non-fatal line
-        is appended to the returned list; provisioning continues to the next
-        window and the install is never aborted.
+        is appended to the returned list; the PARTIAL directory a failed/timed-out
+        clone may leave is removed (so the next install RETRIES it and it is never
+        masked as `(present)` — the exact broken-checkout outcome #1108 fixes,
+        review F1); provisioning continues to the next window; install never aborts.
 
     A window WITHOUT `repo` (the FLOW primary window, every non-declaring box)
     is skipped entirely — byte-identical to today (no clone, no runner call).
+    The loud lines are ASCII (`WARN:`, not `⚠`, review F4) — `push` runs install
+    over ssh where `LANG` is often unset, so a non-ASCII byte would raise
+    UnicodeEncodeError at print time and swallow the specific reason.
     Returns the list of LOUD report lines (`[]` on full success); the caller
     (`cmd_install`) prints them. `run(argv, cwd=None)` is the injectable runner
     (default `_default_checkout_run`); `home` defaults to the running user's."""
     import cli_fleet
+    import shutil
     runner = run or _default_checkout_run
     home = home or os.path.expanduser("~")
     lines = []
@@ -1265,7 +1271,7 @@ def ensure_declared_checkouts(windows, home=None, run=None):
         # gates the declaration; this guards a hand-edited / future entry).
         if not cli_fleet._repo_ok(repo) or (branch and
                                             not cli_fleet._branch_ok(branch)):
-            lines.append("⚠ declared window %s: unsafe repo/branch "
+            lines.append("WARN: declared window %s: unsafe repo/branch "
                          "(%r/%r) -- not cloned" % (name, repo, branch))
             continue
         argv = ["git", "clone", "-q", "-o", "origin"]
@@ -1275,20 +1281,29 @@ def ensure_declared_checkouts(windows, home=None, run=None):
         try:
             res = runner(argv)
         except Exception as e:             # a raised runner (timeout, OSError)
-            lines.append("⚠ declared window %s: checkout %s could not be "
+            # a SIGKILL'd (timed-out) clone leaves a partial dir -> remove it so
+            # the next install retries (F1); safe, target was proven absent above.
+            shutil.rmtree(target, ignore_errors=True)
+            lines.append("WARN: declared window %s: checkout %s could not be "
                          "cloned (%s) -- window will not open" % (name, cwd, e))
             continue
         if getattr(res, "returncode", 1) != 0:
+            shutil.rmtree(target, ignore_errors=True)     # F1: no partial mask
             err = (getattr(res, "stderr", "") or "").strip().splitlines()
             tail = err[-1] if err else "exit %s" % getattr(res, "returncode", "?")
-            lines.append("⚠ declared window %s: checkout %s could not be "
+            lines.append("WARN: declared window %s: checkout %s could not be "
                          "cloned (%s) -- window will not open" % (name, cwd, tail))
             continue
         # set the fresh checkout's default repo (the odoo-erp-infra idiom), so
         # `gh` in that window targets the right repo. Non-fatal: a failure here
-        # leaves a valid checkout — logged, never a LOUD line, never aborts.
+        # leaves a valid checkout — logged (both a non-zero rc AND a raise, review
+        # F3), never a LOUD line, never aborts the install.
         try:
-            runner(["gh", "repo", "set-default", repo], cwd=target)
+            sd = runner(["gh", "repo", "set-default", repo], cwd=target)
+            if getattr(sd, "returncode", 0) != 0:
+                print("  declared window %s: gh repo set-default rc=%s "
+                      "(non-fatal, checkout is valid)"
+                      % (name, getattr(sd, "returncode", "?")), file=sys.stderr)
         except Exception as e:
             print("  declared window %s: gh repo set-default failed "
                   "(non-fatal, checkout is valid): %s" % (name, e),

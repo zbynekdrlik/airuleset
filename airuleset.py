@@ -2033,6 +2033,27 @@ def cmd_install(args):
     except Exception as e:
         print(f"  shared-stream env setup error (non-fatal): {e}",
               file=sys.stderr)
+    # --- 3g-quater. #1108: PROVISION each declared window's git checkout BEFORE
+    # the window-name step below creates the windows. A declared window whose cwd
+    # is a managed checkout (gk-infra/gk-quality carry repo+branch) needs its tree
+    # cloned first, else the window-create's `[ ! -d <cwd> ]` guard skips it (and
+    # a bare tmux `-c` would fall back to `$HOME` — a role-less Claude in the home
+    # dir, owner incident 21.9.2026). Cloning FIRST lets the live window-create
+    # see the fresh tree and open the window immediately (#998 immediacy, review
+    # ordering finding). Clone when absent, existing tree untouched, LOUD non-fatal
+    # line on failure — gated on box_windows so it is a no-op on every
+    # non-declaring box.
+    try:
+        import cli_fleet as _cli_fleet
+        _decl_windows = _cli_fleet.box_windows(_current_user())
+        if _decl_windows:
+            from cli_tmux_provisioning import ensure_declared_checkouts
+            for _co_line in ensure_declared_checkouts(_decl_windows):
+                print("  " + _co_line)
+    except Exception as e:
+        print(f"  declared-window checkout provisioning error "
+              f"(non-fatal): {e}", file=sys.stderr)
+
     try:
         # #554/#592: name the tmux WINDOW after the box's short TARGET ALIAS
         # (gk/mN/dN/...) so the owner sees WHERE they are. #593: renders ONLY on
@@ -2049,24 +2070,6 @@ def cmd_install(args):
             print(f"  Updated:   {TMUX_CONF} (tmux window-name block, #592/#593)")
     except Exception as e:
         print(f"  stream tmux window-name setup error (non-fatal): {e}", file=sys.stderr)
-
-    # --- 3g-quater. #1108: PROVISION each declared window's git checkout. The
-    # window step above only creates the WINDOW; a declared window whose cwd is
-    # a managed checkout (gk-infra/gk-quality carry repo+branch) needs its tree
-    # cloned, else tmux opens `-c` into a missing dir, falls back to `$HOME`, and
-    # a role-less Claude starts in the home dir (owner incident 21.9.2026). Clone
-    # when absent, leave an existing tree untouched, LOUD non-fatal line on
-    # failure — gated on box_windows so it is a no-op on every non-declaring box.
-    try:
-        import cli_fleet as _cli_fleet
-        _decl_windows = _cli_fleet.box_windows(_current_user())
-        if _decl_windows:
-            from cli_tmux_provisioning import ensure_declared_checkouts
-            for _co_line in ensure_declared_checkouts(_decl_windows):
-                print("  " + _co_line)
-    except Exception as e:
-        print(f"  declared-window checkout provisioning error "
-              f"(non-fatal): {e}", file=sys.stderr)
 
     # --- 3g-bis. #660: native session-created AUDIT hook on the OWNER box, to
     # capture a future stray's creator deterministically (full rationale +
@@ -2605,9 +2608,12 @@ def cmd_status(args):
     try:
         import cli_fleet as _cli_fleet
         from cli_tmux_provisioning import declared_window_status_lines
-        _win = _cli_fleet.box_windows(_current_user())
-        for _wline in declared_window_status_lines(_win):
-            print(_wline)
+        _wlines = declared_window_status_lines(
+            _cli_fleet.box_windows(_current_user()))
+        if _wlines:
+            # F7: one leading blank line so the block reads as its own section
+            # (matching the sibling `swap:`/`volume:`/`concurrency:` rows).
+            print("\n" + "\n".join(_wlines))
     except Exception as e:
         print(f"\nwindow: error ({e})", file=sys.stderr)
 
