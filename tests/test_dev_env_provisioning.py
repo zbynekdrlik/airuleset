@@ -2290,11 +2290,12 @@ class TestManagedWindowCreation998(TestCase):
         self.assertIn('-n gk-infra', body)
         self.assertIn('-c "$HOME/devel/odoo/odoo-erp-infra"', body)
         # #1037: the launcher is now WRAPPED in a login shell that survives
-        # claude's /exit (bash -lc "<launcher> default; exec bash -l") — never
-        # the bare launcher as the pane's only process. Intent kept: the managed
-        # launcher + `default` still run.
+        # claude's /exit, with `set -m` job control so tmux reports `claude`
+        # (bash -lc "set -m; <launcher> default; exec bash -l") — never the bare
+        # launcher as the pane's only process. Intent kept: the managed launcher
+        # + `default` still run.
         self.assertIn(
-            'bash -lc "$HOME/.claude/airuleset-claude-launch.sh default; '
+            'bash -lc "set -m; $HOME/.claude/airuleset-claude-launch.sh default; '
             'exec bash -l"', body)
         self.assertNotIn(
             '"$HOME/.claude/airuleset-claude-launch.sh" default', body)

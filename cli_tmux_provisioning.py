@@ -1110,6 +1110,16 @@ def _window_shell_command(launcher):
     process tree is ``bash -lc`` → ``claude``, and the parent shell survives the
     exit.
 
+    #1037 live-fix: the leading ``set -m`` turns on job control in the
+    non-interactive ``bash -lc``, so the launcher (→ claude) gets its OWN
+    process group and tmux reports ``pane_current_command=claude`` — matching
+    the interactive primary window. WITHOUT it the child shares the shell's pgid
+    and tmux reports ``bash``, hiding the pane from every watchdog job (the live
+    gk-quality regression). ``set -m`` is quote-free, so the double-quote-only /
+    single-quote-free discipline is unchanged. Verified on a private gk tmux
+    server: with ``set -m`` tmux reports the CHILD (child pgid == its own pid);
+    without it, ``bash``.
+
     The ``assert`` enforces the double-quote-free MUST-invariant at the shell
     boundary (both callers pass fixed constants, so it never fires in practice —
     defense-in-depth for this shared helper). RUNTIME invariant it can NOT cover:
@@ -1120,7 +1130,7 @@ def _window_shell_command(launcher):
     assumption rather than a code guard."""
     assert '"' not in launcher and "'" not in launcher, \
         "window launcher command must be quote-free: %r" % launcher
-    return 'bash -lc "%s; exec bash -l"' % launcher
+    return 'bash -lc "set -m; %s; exec bash -l"' % launcher
 
 
 def _managed_windows_create_body(windows):
