@@ -296,8 +296,8 @@ class TestDropIngressRulesForController(unittest.TestCase):
         # points at that lane's origin_host, and the subdev lanes keep the
         # subdev tailscale origin.
         rules = dg.drop_ingress_rules_for_controller()
-        origin_by_host = {l.host: l.origin_host for (node, _u), l in dg.DROP_LANES.items()
-                          if l.topology == "controller" and l.origin_host}
+        origin_by_host = {lane.host: lane.origin_host for _key, lane in dg.DROP_LANES.items()
+                          if lane.topology == "controller" and lane.origin_host}
         for rule in rules:
             host, svc = rule[0], rule[-1]
             self.assertTrue(
