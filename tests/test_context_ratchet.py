@@ -168,6 +168,61 @@ class TestPathsFrontmatter(unittest.TestCase):
             self.assertNotIn("scoped.md", names)
 
 
+class TestProfileMeasureExcludesPathScopedRules(unittest.TestCase):
+    """#1077 — `_measure_repo_ceilings` must count only the ALWAYS-ON half of
+    the profile (the `modules/` entries `categorize_entries` classifies as
+    modules), NEVER the path-scoped `rules/*.md` lines. A path-scoped rule
+    installs as a nested_memory attachment (symlinked to ~/.claude/rules/, not
+    @import into CLAUDE.md) — it adds ZERO always-on bytes — so adding a `rules/`
+    profile line must leave `module_count` / `modules_resolved_bytes` unchanged.
+    (The sibling box-scope scanner `always_on_rule_files` already excludes
+    `paths:` rules; this brings the PROFILE measurement in line.)"""
+
+    def _repo(self, td, profile_lines):
+        import cli_context_baseline as cb  # noqa: F401 (patch target below)
+        repo = Path(td)
+        (repo / "modules" / "core").mkdir(parents=True)
+        (repo / "modules" / "core" / "a.md").write_text(
+            "module A body — always on", encoding="utf-8")
+        (repo / "rules").mkdir()
+        (repo / "rules" / "x.md").write_text(
+            "---\npaths:\n  - src/**\n---\nrule X body, path-scoped, "
+            "not always-on", encoding="utf-8")
+        (repo / "skills").mkdir()
+        (repo / "profiles").mkdir()
+        (repo / "profiles" / "universal.profile").write_text(
+            "\n".join(profile_lines) + "\n", encoding="utf-8")
+        return repo
+
+    def test_adding_a_path_scoped_rule_line_does_not_change_the_measurement(self):
+        import cli_context_baseline as cb
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._repo(td, ["modules/core/a.md"])
+            with patch.object(cb, "REPO_DIR", repo):
+                before = cb._measure_repo_ceilings()
+            # now add a path-scoped rule line to the SAME profile
+            prof = repo / "profiles" / "universal.profile"
+            prof.write_text("modules/core/a.md\nrules/x.md\n", encoding="utf-8")
+            with patch.object(cb, "REPO_DIR", repo):
+                after = cb._measure_repo_ceilings()
+            self.assertEqual(before["module_count"], after["module_count"],
+                             "adding a rules/ line changed module_count")
+            self.assertEqual(before["modules_resolved_bytes"],
+                             after["modules_resolved_bytes"],
+                             "adding a rules/ line changed modules_resolved_bytes")
+
+    def test_module_count_counts_only_modules(self):
+        import cli_context_baseline as cb
+        with tempfile.TemporaryDirectory() as td:
+            repo = self._repo(td, ["modules/core/a.md", "rules/x.md"])
+            with patch.object(cb, "REPO_DIR", repo):
+                m = cb._measure_repo_ceilings()
+            self.assertEqual(m["module_count"], 1)  # only the module, not the rule
+            self.assertEqual(
+                m["modules_resolved_bytes"],
+                (repo / "modules" / "core" / "a.md").stat().st_size)
+
+
 class TestSkillDescription(unittest.TestCase):
     """description extraction incl. multi-line + malformed -> 0 flagged."""
 
