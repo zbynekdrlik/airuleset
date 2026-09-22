@@ -83,6 +83,35 @@ def _parse_iso(s):
         return None
 
 
+def parse_findings(body, id_re):
+    """Finding ids from a gk verdict body via the finding-SHAPE regex `id_re`
+    (`airuleset._GK_FINDING_ID_RE`) — the impl behind `airuleset._parse_gk_findings`,
+    which stays the ONE public parser (the composer pre-flight + `_findings` + the
+    tests; the composer's receipt hook matches the RFR body sha256 downstream, NOT
+    finding ids); the body lives here because airuleset.py is at its size ratchet
+    (#1081). Ids come from a BULLET-ANCHORED emoji marker (group 1 = number) and
+    the anchored legacy `F<n>` form (group 2); a mid-sentence emoji mention, a
+    gate code / probe label, and the count line (`0 🔴 · 2 🟡`, number before the
+    emoji) are all EXCLUDED positionally by `id_re` — no count-line cross-check,
+    so stable cross-round numbering never drops a real open finding (main ruling,
+    #1081, replacing the earlier count-cap). Returns string ids (["1", "2", "F3"])
+    in first-seen order, or []."""
+    if not body:
+        return []
+    ids = []
+    for m in id_re.finditer(body):
+        num = m.group(1)                 # bullet-anchored emoji finding
+        if num is not None:
+            if int(num) == 0:
+                continue                 # no finding is #0 (#1081 review)
+            fid = num
+        else:
+            fid = "F" + m.group(2)       # legacy anchored F<n>
+        if fid not in ids:
+            ids.append(fid)
+    return ids
+
+
 def _findings(body):
     """Finding ids in a gk comment body, via `airuleset._parse_gk_findings`
     (its first caller). Lazy import keeps this module import-cycle-free; on any

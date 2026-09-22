@@ -2184,8 +2184,12 @@ fi
 # visible to the agent that has to act on it.
 # #1018 — Verifikácia handover-note SHAPE check. When the assistant's message
 # REPORTS moving a client task to the "awaiting client verification" stage
-# (Verifikácia / Na overenie) and posting the handover note, that note MUST carry
-# the four sections Čo / Kde / Čo skúsiť / stačí 👍 (client-board-tasks.md rule 3).
+# (Verifikácia / Na overenie / Čaká) and posting the handover note, that note MUST
+# carry the four sections Čo / Kde / Čo skúsiť / stačí 👍 (client-board-tasks.md
+# rule 3). The stage alternation COUPLES to the per-board profile table
+# (client-board-tasks.md / client-board-stages.md): Verifikácia on montalu, Na
+# overenie on slovnormal, Čaká on miva (odoo-erp #7101) — add a board's
+# awaiting-verification stage here when its profile row is added (#1093).
 # Same information space as the #916/#978 self-report checks (last_assistant_message
 # only): it fires ONLY on a self-reported Verifikácia post and requires the
 # distinctive section markers (Kde + Čo skúsiť + stačí 👍) to be evidenced in the
@@ -2200,7 +2204,19 @@ fi
 # must NOT be gated. So the stage match is CASE-SENSITIVE (requires the capital),
 # and the verbs carry explicit-case classes so the proximity check can run
 # case-sensitively without missing a sentence-initial or lowercase verb.
-VERIF_STAGE_RX='(Verifik[áa]ci|Na overeni)'
+# The miva stage "Čaká" needs MORE than case (#1093 review): "čaká" is the everyday
+# verb "waits" and it is ALSO capitalised at the start of a sentence ("Čaká na
+# klienta" / "Čaká sa na odpoveď" / "Čaká, kým klient potvrdí"), so a bare
+# capital-token match would false-block ordinary status prose fleet-wide (the very
+# class Approach 3 was rejected for). The miva stage therefore requires a
+# DIRECTIONAL MOVE CUE immediately before it — "do "/"do stavu "/"do stage "/"do
+# fázy "/"→ "/"-> " — which a stage-move report always carries ("presunul som do
+# Čaká") and the verb forms never do; a trailing `\b` still keeps it off longer
+# words ("Čakať" / "Čakáreň"). The cue itself is anchored at a word boundary
+# (`(^|[^[:alpha:]])`) so a word ENDING in "do" ("todo"/"kedo Čaká") is not misread
+# as the cue. Accepted residual: a real Čaká handover phrased with no move cue is
+# not shape-checked (safe direction — never a false block).
+VERIF_STAGE_RX='(Verifik[áa]ci|Na overeni|(^|[^[:alpha:]])(do +|→ *|-> *)(stavu? +|stage +|f[áa]z[ye] +)?Čak[áa]\b)'
 # PAST-TENSE only: a future-tense mention ("presuniem ... do Verifikácia" = "I
 # WILL move it") must NOT be gated — so the SK stems are the past-participle
 # forms (presunul/posunul/…), never the bare present/future stem.
