@@ -1471,11 +1471,20 @@ def _log_arm_confirm_fail(sid, cwd, text, pid, run, sleep_fn=None,
     # placeholder). A CLEAN idle input boundary only (never Escape/clear a live
     # turn's render). Every outcome is falsifiable in goal-sync.log (design D).
     head = watchdog._input_box_head_text(cap)
-    # #1113 -- the delivery set `_janitor_mark_watch(state, pid, now)` for THIS
-    # attempt just before the type, so provenance holds: a TRUNCATED / grid-
-    # wrapped own payload (whose reconstruction is NOT a clean substring -- the
-    # >10x david1-3 regression) is proven ours by the tail + whitespace-stripped
-    # body, not only the #737 clean substring / the `/goal ` head prefix.
+    # #1113 -- the BARE-BOX delivery path sets `_janitor_mark_watch(state, pid,
+    # now)` immediately before the type and never clears it on failure, so on the
+    # regression path (a swallowed submit that strands a TRUNCATED / grid-wrapped
+    # own /goal -- the >10x david1-3 report) provenance holds here and the payload
+    # is proven ours by the tail + whitespace-stripped body substring (the
+    # un-foolable teeth), not only the #737 clean substring / the `/goal ` head
+    # prefix. The two STASH/stranded-submit confirm-fail callers CLEAR the watch
+    # on their verified submit before reaching here, so the provenance branch is
+    # inert on those paths -- deliberately SAFE: a verified stash/stranded submit
+    # left the box empty, so there is nothing to clear (a truncated leftover only
+    # arises when the bare-box type itself failed to converge, which keeps its
+    # mark). `state=None`/no mark -> the provenance branch stays inert and the
+    # #737 clean-substring / head-shape fallback governs (a foreign draft, never
+    # a >=80-char substring of our payload, is untouched either way).
     _now = now if now is not None else time.time()
     own = (watchdog._box_is_own_leftover(
                cap, text, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
@@ -3010,8 +3019,9 @@ def _dark_awaiting_user_veto(tpath):
     the pane awaiting-user while dark-watch declared CONFIRMED-DEAD and re-armed a
     truncated /goal into it. The caller invokes this BEFORE every re-arm path
     (auth-rearm AND the armed True/None/False branches), so an awaiting-user
-    session is never re-armed by any of them, and a stale-rearm REPLACE never
-    clobbers the owner's answer box. Bounded
+    session is never re-armed by any of them (#1113: the armed-True branch no
+    longer re-arms at all -- it only observes a template drift -- so this guard
+    now protects the dark/auth/fulfilled/answer re-arm paths). Bounded
     tail read (#599): a parked-on-❓ session has that turn as its LAST real
     assistant message, well inside the 2 MB tail (a false-negative would only be a
     single >2 MB entry sitting AFTER the ❓ turn -- vanishingly rare)."""
@@ -3265,7 +3275,8 @@ def _auth_rearm_decide(sid, cwd, mark, armed, now, loc, dry_run, rearm_fn,
     if armed is not False:
         return None
     # defer to ANY pending request (goal_sweep is already delivering it) -- never
-    # clobber a self-callback / dark-rearm / stale-rearm.
+    # clobber a self-callback / dark-rearm (or a pre-#1113 leftover stale-rearm
+    # request, which deliver_goal drops as retired).
     if isinstance(load_goal_requests(requests_path).get(sid), dict):
         return None
     text, authority = (rearm_fn or _default_rearm_fn)(cwd)
@@ -3581,10 +3592,11 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
     # entry forever (the #486-G5 dedup-dict-leak lesson).
     confirm_state = state.setdefault("goal_dark_confirm", {})
     attempts_state = state.setdefault("goal_dark_rearm_attempts", {})
-    # #1092 (e) -- the per-sid stale-rearm TEMPLATE-VERSION latch: once a session
-    # has been re-armed for a given shipped-template hash, do not re-record another
-    # stale-rearm for it until the template changes (a template deploy no longer
-    # storms every armed session's prompt every ~30 min).
+    # #1092 (e) / #1113 -- the per-sid stale-drift OBSERVATION latch: once a
+    # session's template drift has been LOGGED for a given shipped-template hash,
+    # do not re-LOG it until the template changes (originally a re-RECORD dedup;
+    # #1113 retired the record, so the same stamp now dedups the observation so a
+    # template deploy no longer floods the journal every ~30 min sweep).
     stale_tmpl_state = state.setdefault("goal_stale_rearm_tmpl", {})
     # #764 -- the per-sid fulfilled-rearm record timestamps (rate limiter), a
     # JSON list per sid; reaped below exactly like `attempts_state`.
@@ -3779,8 +3791,10 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         # marker was ❓. #890 makes it ANSWER-AWARE: when the ❓ is present but
         # a genuine human user message FOLLOWED it, the veto LIFTS — the owner
         # answered, so the answer-rearm rider (below) should fire. The veto
-        # still holds for all NON-answer-rearm paths (auth-rearm, stale-rearm,
-        # dead-loop) when the ❓ is unanswered.
+        # still holds for all NON-answer-rearm paths (auth-rearm, fulfilled-rearm,
+        # dead-loop) when the ❓ is unanswered (#1113: the armed-True branch no
+        # longer re-arms -- it only observes a template drift -- so there is no
+        # stale-rearm path for this veto to protect any more).
         _awaiting_user = _dark_awaiting_user_veto(tpath)
         if _awaiting_user:
             # #890 -- peek at whether the ❓ was answered. If so, DON'T veto:
@@ -3826,13 +3840,12 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
 
         # #741/#890 WRITER-SIDE LATCH: a pending /compact for this session HOLDS
         # the dead-loop RE-ARM below (a re-arm WRITE schedules a next-batch /goal
-        # for job 9 to type). Moved DOWN from its prior position (above marker
-        # reading) so FOUR origins now run ABOVE it: auth-rearm (mark != "set"
-        # branch), stale-rearm (armed=True branch), fulfilled-rearm (armed=False
-        # branch, before the hold), and answer-rearm (armed=False branch, before
-        # the hold). All four only RECORD requests (file writes, not keystrokes);
-        # the hold was built for work-pushing nudges, not recordings. The dead-
-        # loop confirmation + dark-rearm machinery stays BELOW.
+        # for job 9 to type). Moved DOWN from its prior position so these run
+        # ABOVE it: auth-rearm, the stale-DRIFT observation (armed=True, #1113 --
+        # LOGS only, never records/types), fulfilled-rearm + answer-rearm. The
+        # RECORD paths only write a request file (never a keystroke) and the
+        # stale-drift path only logs; the hold was built for work-pushing nudges,
+        # not recordings. The dead-loop confirmation + dark-rearm stays BELOW.
 
         if armed is True:
             seen_state.pop(sid, None)
@@ -4078,7 +4091,7 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
 
     if not dry_run:   # #519 -- prune goal_mark for gone+aged sessions (dry-run: no state mutation)
         _prune_goal_mark_orphans(off_state, visited_sids, now)
-        # #1092 (e) -- reap the stale-rearm TEMPLATE-VERSION latch for GONE
+        # #1092 (e) / #1113 -- reap the stale-drift OBSERVATION latch for GONE
         # sessions (a sid with no live transcript this sweep), the PRIMARY
         # live-gate the sibling per-sid dedup dicts use (#486-G5 leak lesson): the
         # value is a bare template hash with no ts, so it cannot age-reap. A
@@ -4088,12 +4101,10 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         # janitor-recover / sweep-budget-break / transcript-miss continue) is not
         # in `visited_sids`, so its latch CAN be dropped that sweep -- UNLIKE
         # `_prune_goal_mark_orphans` (#519) which pairs the live-gate with an age
-        # secondary. The impact is bounded + strictly better than pre-#1092 (never
-        # a re-record storm): a dropped latch re-opens at most ONE fresh stale-rearm
-        # next sweep, still capped by the pending-request guard, the surviving #804
-        # attempt cap, the "delivered -> condition current -> no re-record" path,
-        # AND the new deliver_goal per-pane budget (<=2 keystrokes/pane/hour). A
-        # returning session simply re-classifies (current -> no re-arm).
+        # secondary. The impact is now trivial (#1113 removed the record/keystroke
+        # the pre-#1113 note reasoned about): a dropped latch re-opens at most ONE
+        # extra `stale-drift` JOURNAL LINE next sweep -- no request, no keystroke.
+        # A returning session simply re-classifies (current -> silent).
         for _gsid in [k for k in list(stale_tmpl_state.keys())
                       if k not in visited_sids]:
             stale_tmpl_state.pop(_gsid, None)

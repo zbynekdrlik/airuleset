@@ -116,6 +116,21 @@ class _GridScrollFake(DeliverGoalFakeTmux):
         return _grid_scroll_capture(self.box)
 
 
+class _CleanWrapFake(DeliverGoalFakeTmux):
+    """A fake `run` whose input box renders a clean WORD-wrapped scroll
+    (`_clean_wrap_capture`, the #737 shape) -- a contiguous substring of the
+    payload, so `_box_is_own_leftover` proves ownership WITHOUT provenance and
+    `_janitor_clear_box`'s backspace loop converges to a bare box (no 1-char
+    grid-remainder artifacts). Used to prove the clear ACTUALLY empties the box
+    (the convergence property the grid fixture's terminal-reflow model can't
+    show)."""
+
+    def _render(self):
+        if not self.box:
+            return self._with_arm(self.captured)
+        return _clean_wrap_capture(self.box)
+
+
 PANE = [("%9", "claude", "/home/newlevel/devel/armed1113", "111")]
 CWD = "/home/newlevel/devel/armed1113"
 PID = "%9"
@@ -301,6 +316,23 @@ class TestArmConfirmCleanupTruncated(unittest.TestCase):
                       "a foreign draft is NEVER cleared, even with a mark")
         self.assertNotIn("BSpace", [a[-1] for a in fake.sent])
 
+    def test_clear_actually_empties_the_box_convergence(self):
+        # r2 evidence-gap fix: prove the arm-confirm cleanup ACTUALLY empties the
+        # box (`cleared=True`), not just that it is attempted. A clean word-wrap
+        # own leftover converges within `_janitor_clear_box`'s iteration cap.
+        fake = _CleanWrapFake(PANE, GOAL_ARMED_CAP, model_type=True)
+        fake.box = _PAYLOAD[:1600]
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            goal._log_arm_confirm_fail(
+                "sess-conv", CWD, _PAYLOAD[:1600], PID, fake,
+                sleep_fn=lambda s: None,
+                state={"janitor_watch": {PID: 100000.0}}, now=100000.0, tpath=None)
+        log = Path(self.syncp).read_text(encoding="utf-8")
+        self.assertIn("ARM-CONFIRM-CLEANUP", log)
+        self.assertIn("cleared=True", log, "the box is actually cleared to bare")
+        self.assertEqual(fake.box, "", "the box is actually emptied")
+        self.assertNotIn("Enter", [a[-1] for a in fake.sent])
+
 
 # --------------------------------------------------------------------------- #
 # (e) _janitor_recover clears the truncated own payload on the next sweep.
@@ -327,11 +359,32 @@ class TestJanitorRecoverTruncated(unittest.TestCase):
         self.assertTrue(any("draft-rescue" in ln for ln in logs),
                         "the janitor DECIDED its own leftover needs clearing "
                         "(no early foreign-untouched return): %r" % logs)
-        self.assertNotIn("a genuine foreign occupant", " ".join(logs))
         self.assertIn("Escape", [a[-1] for a in fake.sent],
                       "the janitor takes the clear path")
+        self.assertIn("BSpace", [a[-1] for a in fake.sent],
+                      "the janitor backspaces the stranded payload")
         self.assertNotIn("Enter", [a[-1] for a in fake.sent],
                          "the janitor NEVER submits a truncated payload")
+
+    def test_janitor_clear_actually_empties_the_box_convergence(self):
+        # r2 evidence-gap fix: prove the clear ACTUALLY empties the box (not just
+        # that it is attempted). A clean word-wrapped own leftover (the #737
+        # shape) is a contiguous substring, so `_box_is_own_leftover` proves it
+        # ours and `_janitor_clear_box`'s backspace loop converges to bare.
+        fake = _CleanWrapFake(PANE, GOAL_ARMED_CAP, model_type=True)
+        fake.box = _PAYLOAD[:1600]          # clean-wraps + clears within the cap
+        captured = fake(["tmux", "capture-pane", "-p", "-t", PID])
+        state = {"janitor_watch": {PID: 100000.0}}
+        logs = janitor._janitor_recover(
+            fake, {}, PID, CWD, captured, "sess:0.0",
+            send_fn=lambda *a, **k: None, dry_run=False,
+            sleep_fn=lambda s: None, state=state, now=100000.0,
+            own_payload=_PAYLOAD[:1600])
+        self.assertTrue(any(ln.startswith("RECOVERED (janitor)") for ln in logs),
+                        "the janitor RECOVERED (cleared) the own leftover: %r" % logs)
+        self.assertEqual(fake.box, "", "the box is actually emptied")
+        self.assertNotIn("Enter", [a[-1] for a in fake.sent],
+                         "never a submit, even on the converging path")
 
     def test_janitor_leaves_foreign_untouched(self):
         foreign = ("napis mi prosim zhrnutie stretnutia z minuleho tyzdna a "
@@ -348,6 +401,8 @@ class TestJanitorRecoverTruncated(unittest.TestCase):
             own_payload=_PAYLOAD)
         self.assertFalse(any(ln.startswith("RECOVERED") for ln in logs),
                          "a foreign draft is never cleared: %r" % logs)
+        self.assertEqual(fake.sent, [],
+                         "a foreign draft gets NO keystroke at all")
 
 
 # --------------------------------------------------------------------------- #
