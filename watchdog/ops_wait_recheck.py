@@ -237,6 +237,23 @@ OPS_WAIT_FETCH_TTL_MIN_S = 5 * 60
 # mirrors BACKLOG_CHECK_FAILURE_TTL_S.
 OPS_WAIT_FETCH_FAIL_TTL_S = 60
 
+
+class _FetchTimeout:
+    """#1067 (b) sentinel: the member-list fetch subprocess TIMED OUT (as
+    distinct from a gh error / a genuine empty result). `_watchdog_ops_wait_fetch`
+    returns this on `subprocess.TimeoutExpired`; `_cached_member_fetch` treats it
+    as unmeasurable (returns None to the caller) BUT backs its fail-TTL off
+    geometrically, capped at the full TTL, so a persistently-slow fetch can never
+    re-fire every ~60 s sweep. A plain None (gh error) keeps the base fail-TTL —
+    a transient hiccup re-checks soon."""
+    __slots__ = ()
+
+    def __repr__(self):
+        return "FETCH_TIMEOUT"
+
+
+FETCH_TIMEOUT = _FetchTimeout()
+
 # #1041 — the ops-wait re-check does TWO sequential fetches on a double cache-miss:
 # a gh union fetch (`_cached_ops_wait`, ~15s) THEN, when a deploy-parked W member
 # exists, the deploy-state fetch (`deploy_state_fetch`). That deploy fetch is now
@@ -344,7 +361,16 @@ def _entry_is_fresh(entry, now, ttl, fail_ttl):
     except (TypeError, ValueError):
         return False
     members = entry.get("members")
-    entry_ttl = ttl if isinstance(members, list) else fail_ttl
+    if isinstance(members, list):
+        entry_ttl = ttl
+    else:
+        # #1067 (b): a backed-off TIMEOUT entry carries its OWN escalated
+        # `fail_ttl`; a plain None entry (gh error) has no such key → the base
+        # `fail_ttl` (backward-compatible with every pre-#1067 cache entry).
+        try:
+            entry_ttl = float(entry.get("fail_ttl", fail_ttl))
+        except (TypeError, ValueError):
+            entry_ttl = fail_ttl
     return age < entry_ttl
 
 
@@ -378,6 +404,20 @@ def _cached_member_fetch(cwd, fetch, state, now, cache_key, ttl=None,
         members = fetch(cwd)
     except Exception:
         members = None
+    # #1067 (b): a TIMEOUT sentinel (distinct from a gh error / None) backs the
+    # fail-TTL off geometrically — double the PREVIOUS backoff (from the base
+    # `fail_ttl` on the first timeout), capped at the full `ttl` — so a
+    # persistently-slow fetch can never fire every sweep. A gh error / genuine
+    # None keeps the base `fail_ttl` (a transient hiccup re-checks soon).
+    if members is FETCH_TIMEOUT:
+        prev = entry.get("fail_ttl") if isinstance(entry, dict) else None
+        try:
+            prev = float(prev)
+        except (TypeError, ValueError):
+            prev = None
+        backed_off = min((prev if prev else fail_ttl) * 2, ttl)
+        cache[cwd] = {"ts": now, "members": None, "fail_ttl": backed_off}
+        return None
     if not (members is None or isinstance(members, list)):
         members = None
     cache[cwd] = {"ts": now, "members": members}
