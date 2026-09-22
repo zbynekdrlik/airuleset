@@ -121,8 +121,8 @@ CLAUSES = [
     }),
     Clause("proof", PROFILES, {
         "full": "and (B) holds ONLY when my final message carries the pasted OUTPUT of both proof commands: `python3 ~/devel/airuleset/airuleset.py core-quals --count` printing exactly `0` under it (it counts EXACTLY that obligation set), AND `gh run list -b main -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker.",
-        "branch-merge": "and (B) holds ONLY when my final message carries the pasted OUTPUT of all four proof commands: `python3 ~/devel/airuleset/airuleset.py slice-quals --count` printing exactly `0` under it, AND `gh run list -b <integration> -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND `git merge-base --is-ancestor <my last integration merge> origin/main && echo RELEASED` printing exactly `RELEASED` under it, AND `python3 ~/devel/airuleset/airuleset.py tickets-status --refresh >/dev/null; python3 ~/devel/airuleset/airuleset.py tickets-status` pasted under it (a `gk N`/`U N`/`W N` is parked — gatekeeper-owned/user-parked/ops-wait, not mine to wait on, never blocks 🏁; blank = unmeasurable), AND then the line `🏁 BACKLOG EMPTY: 0 open, integration green, released` directly above the terminal `✅ DONE:` marker.",
-        "fork-no-merge": "and (B) holds ONLY when my final message carries the pasted OUTPUT of all three proof commands: `python3 ~/devel/airuleset/airuleset.py slice-quals --count` printing exactly `0` under it, AND `git merge-base --is-ancestor <my last merged commit> origin/main && echo RELEASED` printing exactly `RELEASED` under it (release still pending is STILL review-watch, not done), AND `python3 ~/devel/airuleset/airuleset.py tickets-status --refresh >/dev/null; python3 ~/devel/airuleset/airuleset.py tickets-status` pasted under it (a `gk N`/`U N`/`W N` is parked — gatekeeper-owned/user-parked/ops-wait, not mine to wait on, never blocks 🏁; blank = unmeasurable), AND then the line `🏁 BACKLOG EMPTY: 0 open, released` directly above the terminal `✅ DONE:` marker.",
+        "branch-merge": "and (B) holds ONLY when my final message carries the pasted OUTPUT of all four proof commands: `python3 ~/devel/airuleset/airuleset.py slice-quals --count` printing exactly `0` under it, AND `gh run list -b <integration> -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND `git merge-base --is-ancestor <my last integration merge> origin/main && echo RELEASED` printing exactly `RELEASED` under it, AND `python3 ~/devel/airuleset/airuleset.py tickets-status --refresh >/dev/null; python3 ~/devel/airuleset/airuleset.py tickets-status` pasted under it (`gk N`/`U N`/`W N` = parked, never blocks 🏁; blank = unmeasurable; a `bounce K` BLOCKS 🏁 until `slice-quals --bounces --unhandled` prints nothing under it), AND then the line `🏁 BACKLOG EMPTY: 0 open, integration green, released` directly above the terminal `✅ DONE:` marker.",
+        "fork-no-merge": "and (B) holds ONLY when my final message carries the pasted OUTPUT of all three proof commands: `python3 ~/devel/airuleset/airuleset.py slice-quals --count` printing exactly `0` under it, AND `git merge-base --is-ancestor <my last merged commit> origin/main && echo RELEASED` printing exactly `RELEASED` under it (release still pending is STILL review-watch, not done), AND `python3 ~/devel/airuleset/airuleset.py tickets-status --refresh >/dev/null; python3 ~/devel/airuleset/airuleset.py tickets-status` pasted under it (`gk N`/`U N`/`W N` = parked, never blocks 🏁; blank = unmeasurable; a `bounce K` BLOCKS 🏁 until `slice-quals --bounces --unhandled` prints nothing under it), AND then the line `🏁 BACKLOG EMPTY: 0 open, released` directly above the terminal `✅ DONE:` marker.",
     }),
     Clause("how-to-tell", PROFILES,
         "HOW TO TELL A REAL COMPLETION FROM A CLAIMED ONE: real = output shown; claimed = asserted."),
@@ -372,6 +372,21 @@ def render_goal_line(authority, mode="parallel", role=None):
         text = c.text_for(authority)
         if mode == "sequential" and c.id == "saturation-core":
             text = _SEQUENTIAL_SATURATION
+        if role == "infra" and authority == "full" and c.id == "proof":
+            # #1066 lane B item 2 (finding a) — the gk-infra window (full
+            # authority, sequential) must prove its OWN slice, not the WHOLE gk
+            # obligation set it can neither action nor drive to 0. Role-scope its
+            # ONE quals proof command (`core-quals --count` ->
+            # `core-quals --role infra --count`, exactly what `airuleset.py
+            # status` already resolves for that pane, #1065/#1074). FULL-ONLY
+            # (documented in the #1066 Anchors-confirmed comment): applying it to
+            # the lock-only reduced+infra defensive variants would STACK on
+            # item 1's bounce clause and breach the design's explicit >=20
+            # arm-cap headroom invariant; no reduced-authority infra window
+            # exists, so scoping to full is behaviourally identical in
+            # production. Non-infra variants are byte-identical (drift/snapshot
+            # locks stay green); `_INFRA_ROLE` append below is unchanged.
+            text = text.replace("-quals --count", "-quals --role infra --count")
         parts.append(text)
         if role == "infra" and c.id == "saturation-delivery":
             parts.append(_INFRA_ROLE)

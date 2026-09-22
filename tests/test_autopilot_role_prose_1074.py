@@ -26,6 +26,7 @@ from unittest import TestCase, main
 
 REPO = Path(__file__).resolve().parent.parent
 SKILL = REPO / "skills" / "autopilot" / "SKILL.md"
+sys.path.insert(0, str(REPO))   # #1066 lane B — for `import goal_registry`
 
 
 def _norm(s):
@@ -127,23 +128,25 @@ class TestStopConditionsUntouched(TestCase):
     def test_exactly_three_stop_condition_lines(self):
         self.assertEqual(len(_stop_condition_lines(_text())), 3)
 
-    def test_stop_condition_lines_byte_identical_to_main(self):
+    def test_stop_condition_lines_match_the_registry_no_role_render(self):
+        # #1066 lane B: the by-authority /goal STOP CONDITIONS lines carry NO
+        # role/mode variant (composed at ARM time, never in prose) -- the true
+        # invariant. The pre-#1066 mechanism (byte-identical to MAIN) forbade
+        # even a DELIBERATE base-content edit; lane B's item-1 change to the
+        # reduced proof clause is exactly such an edit (re-rendered into SKILL.md
+        # via `goal-inventory --write`, item 5). So lock the lines against the
+        # REGISTRY's own parallel/no-role render (`gr.render`) -- byte-identical
+        # in the CLEAN tree above, and a role baked into prose would differ from
+        # the no-role render. `goal-inventory --check` (below) is the companion
+        # SKILL.md<->registry drift lock.
+        import goal_registry as gr
         cur = _stop_condition_lines(_text())
-        main_blob = None
-        for ref in ("main", "origin/main"):
-            r = subprocess.run(
-                ["git", "show", f"{ref}:skills/autopilot/SKILL.md"],
-                cwd=str(REPO), capture_output=True, text=True)
-            if r.returncode == 0:
-                main_blob = r.stdout
-                break
-        if main_blob is None:
-            self.skipTest("neither main nor origin/main resolves in this checkout"
-                          " -- goal-inventory --check is the standing byte lock")
+        want = [gr.render(p) for p in gr.PROFILES]
         self.assertEqual(
-            cur, _stop_condition_lines(main_blob),
-            "the by-authority /goal STOP CONDITIONS lines MUST stay byte-identical "
-            "to main -- the role variant is composed at ARM time, never in prose")
+            cur, want,
+            "SKILL.md /goal STOP CONDITIONS lines drifted from the registry's "
+            "no-role render -- run `airuleset.py goal-inventory --write`, and "
+            "never bake a role/mode variant into the prose")
 
     def test_goal_inventory_check_stays_clean(self):
         r = subprocess.run(

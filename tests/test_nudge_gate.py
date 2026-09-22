@@ -189,6 +189,7 @@ class TestClassification923(unittest.TestCase):
     def test_work_driving_members(self):
         self.assertEqual(ng.WORK_DRIVING_CATEGORIES, frozenset({
             "lane-occupancy", "release-gap", "queue-arrival", "lane-reconcile",
+            "bounce-verdict",   # #1066 lane B — the BOUNCE-verdict goal-lane rider
         }))
 
     def test_audit_members(self):
