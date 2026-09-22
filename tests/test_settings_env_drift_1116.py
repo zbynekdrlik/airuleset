@@ -293,7 +293,7 @@ class TestConsumersAcrossAllLegs(unittest.TestCase):
                 paths=[str(br)], settings_path=str(sp),
                 tmux_env_reader=lambda: tmux_out)
             self.assertEqual(len(hits), 3, hits)
-            row = bd.env_drift_status_row(
+            row = bd.bashrc_drift_status_row(
                 paths=[str(br)], settings_path=str(sp),
                 tmux_env_reader=lambda: tmux_out)
             self.assertIn("bashrc-drift:", row)
@@ -305,14 +305,14 @@ class TestConsumersAcrossAllLegs(unittest.TestCase):
     def test_install_warning_names_each_source(self):
         with tempfile.TemporaryDirectory() as td:
             sp = self._settings(td)
-            warn = bd.env_drift_install_warning(
+            warn = bd.bashrc_drift_install_warning(
                 paths=[], settings_path=str(sp), tmux_env_reader=None)
             self.assertIsNotNone(warn)
             self.assertIn("WARNING", warn)
             self.assertIn("settings.json:env", warn)
 
     def test_install_warning_none_when_clean(self):
-        warn = bd.env_drift_install_warning(
+        warn = bd.bashrc_drift_install_warning(
             paths=[], settings_path="/nonexistent/x.json", tmux_env_reader=None)
         self.assertIsNone(warn)
 
@@ -321,7 +321,7 @@ class TestConsumersAcrossAllLegs(unittest.TestCase):
             br = self._bashrc(td)          # 1 bashrc hit
             sp = self._settings(td)        # 1 settings hit
             tmux_out = "%s=1\n%s=1\n" % (_MOUSE, _ALT)  # 2 tmux hits
-            n = bd.count_env_drift(
+            n = bd.count_bashrc_drift(
                 paths=[str(br)], settings_path=str(sp),
                 tmux_env_reader=lambda: tmux_out)
             self.assertEqual(n, 4)

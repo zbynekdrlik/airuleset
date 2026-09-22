@@ -413,6 +413,21 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     # #288.
     existing_env = result.get("env")
     result["env"] = dict(existing_env) if isinstance(existing_env, dict) else {}
+    # #1116: the launcher OWNS the mouse/alternate-screen toggles (it `unset`s
+    # them before exec, cli_claude_scripts); a stray CLAUDE_CODE_DISABLE_MOUSE /
+    # CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN in the settings `env` is applied INSIDE
+    # the Claude Code process and defeats that unset (dev2's first restart still
+    # carried the toggle from here), so the merge DROPS them and reports each. The
+    # SAME cli_bashrc_drift.MANAGED_ENV_DROP_KEYS tuple the launcher's `unset` line
+    # is built from — one source of truth, so the merge and the launcher can never
+    # name a different set. A deliberate opt-in, if ever wanted, goes through a
+    # managed setting, never a hand-written `env` key.
+    from cli_bashrc_drift import MANAGED_ENV_DROP_KEYS as _managed_env_drop_keys
+    for _drop_key in _managed_env_drop_keys:
+        if _drop_key in result["env"]:
+            _drop_val = result["env"].pop(_drop_key)
+            print("settings: removed unmanaged env key %s=%s (the launcher owns "
+                  "it, #1116)" % (_drop_key, _drop_val))
     result["env"]["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"] = airuleset.MANAGED_MAX_SUBAGENTS_PER_SESSION
     # #991: the fleet DEFAULT subagent model — the native env var Claude Code
     # reads for a dispatched subagent with no per-dispatch `model` param and no
