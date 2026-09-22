@@ -33,7 +33,7 @@ it parses nothing but the exit code.
     live claude processes' cwd (`git rev-parse --show-toplevel` → origin slug
     ``zbynekdrlik/odoo-erp``), else a fallback scan of ``~/devel/odoo/*/``; not
     found → a skip line, never a guess.
-  - **Call:** `bash <script> <user>` with a 60s timeout; the wrapper's one stdout
+  - **Call:** `bash <script> <user>` with a 25s timeout; the wrapper's one stdout
     line is journalled verbatim. rc 0 → ok; 2 → retry (no alarm); 3 → ALARM
     auth-refused (journalled every tick); other rc / timeout → error rc=N
     (retry). `state["erp_heartbeat"] = {rc, ts, line}` records the last outcome
@@ -60,9 +60,11 @@ ERP_HEARTBEAT_INTERVAL_S = 600
 
 # Wrapper call timeout. The odoo-erp wrapper uses ssh ConnectTimeout=10, so a
 # reachable box replies fast and a dead box fails ~10s (rc 255 → the wrapper's
-# own exit 0 + `noop reason=box-unreachable-…`); 60s is generous headroom for a
-# slow-but-alive box.
-ERP_HEARTBEAT_TIMEOUT_S = 60
+# own exit 0 + `noop reason=box-unreachable-…`); 25s covers ssh connect + the
+# relay round-trip with margin. The old 60s over-sized one bash→ssh call ~6x and
+# forced the Job 51 min_budget above the sweep soft cap, so on a busy stream
+# account the job held forever with `hold:budget` (#959 fix-forward).
+ERP_HEARTBEAT_TIMEOUT_S = 25
 
 ODOO_ERP_SLUG = "zbynekdrlik/odoo-erp"
 SCRIPT_RELPATH = "scripts/dev-box-heartbeat-remote.sh"

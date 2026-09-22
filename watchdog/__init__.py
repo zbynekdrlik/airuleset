@@ -2051,7 +2051,7 @@ _BUDGET_MIN_PS_REAPER_S = 10      # a ps read + targeted kill / a per-pane tmux 
 _BUDGET_MIN_DISK_DRAIN_S = 30     # the du-heavy disk-guard drain ladder, cadence-gated (10 min)
 _BUDGET_MIN_MDREVIEW_S = 30       # the mdreview-audit subprocess + gh reopen, daily
 _BUDGET_MIN_LOCAL_SEND_S = 15     # a local fleet.jsonl read + a bounded Discord send (conformance heartbeat)
-_BUDGET_MIN_ERP_HEARTBEAT_S = 65  # #959 the erp-test heartbeat wrapper call (bash → ssh, 60s timeout) + margin
+_BUDGET_MIN_ERP_HEARTBEAT_S = 30  # #959 the erp-test heartbeat wrapper call (bash → ssh, ERP_HEARTBEAT_TIMEOUT_S=25) + 5; NOT the ssh-fleet class (65 > soft cap - earlier jobs → always held on a busy account)
 
 
 def _owner_disabled(kind):
@@ -3478,9 +3478,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           outcome, and the wrapper's one stdout line is journalled verbatim. No
           box whose Claude is off is kept alive (it dies on its own TTL — the
           point). MACHINE-CHANNEL only (never pings the owner — the gk-side relay
-          owns box-level alerting, analyze-not-ping #693/#704). `min_budget` =
-          the wrapper call class (`_BUDGET_MIN_ERP_HEARTBEAT_S`).
-          `watchdog/erp_heartbeat.py`'s docstring is the SSOT.
+          owns box-level alerting, analyze-not-ping #693/#704). `min_budget` = the
+          wrapper-call class (`_BUDGET_MIN_ERP_HEARTBEAT_S`=25s timeout+5; #959 sized
+          down from 65s ssh-fleet that overran the budget). `erp_heartbeat.py`=SSOT.
 
     PAUSED BOX (#851/#1032): when `box_paused` is True — the box's OWN fleet entry
     carries `paused` (a stream the owner froze), resolved once in `cmd_watchdog`
@@ -5788,8 +5788,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # the leaf gates INTERNALLY on box-class + authority + liveness + a resolvable
     # wrapper (so the flag may be passed unconditionally — off a non-shared-stream
     # / full box the leaf is a silent no-op). `min_budget` = the wrapper-call
-    # class (bash → ssh, 60s timeout). `watchdog/erp_heartbeat.py`'s docstring is
-    # the SSOT.
+    # class (bash → ssh, 25s timeout + 5; #959 sized down from the 65s ssh-fleet
+    # class that overran the sweep budget). `erp_heartbeat.py`'s docstring = SSOT.
     def _job_erp_heartbeat():
         state["erp_heartbeat_last_ts"] = now      # cadence stamp (gate proved due)
         return erp_heartbeat.run_erp_heartbeat(now, state, run=run,
