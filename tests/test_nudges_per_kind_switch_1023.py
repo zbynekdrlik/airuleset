@@ -112,17 +112,22 @@ class TestCLI(unittest.TestCase):
 
 
 class TestBadge(unittest.TestCase):
-    def test_all_off_shows_nudges_off(self):
+    def test_all_off_shows_zero_fraction_recovery_on(self):
+        # #1039 fix-forward: all-off renders `nudges 0/M · recovery on`, never the
+        # word OFF (deliberately overturned wording, not a weakened invariant —
+        # the badge still shows the exact staged-kind state, in plain words).
         with TemporaryDirectory() as home:
             seg = statusbar.nudges_off_segment(home=home)
-            self.assertIn("nudges OFF", seg)
+            self.assertIn("nudges 0/", seg)
+            self.assertIn("recovery on", seg)
+            self.assertNotIn("OFF", seg)
 
     def test_some_on_shows_fraction(self):
         with TemporaryDirectory() as home:
             wd.set_nudge_kind("queue-arrival", True, home=home)
             seg = statusbar.nudges_off_segment(home=home)
             self.assertIn("nudges 1/", seg)
-            self.assertNotIn("nudges OFF", seg)
+            self.assertNotIn("OFF", seg)
 
 
 class TestPrimitivePerKind(unittest.TestCase):

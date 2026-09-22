@@ -611,21 +611,19 @@ def disk_segment(home=None, now=None):
 
 
 def nudges_off_segment(home=None):
-    """The nudge-switch footer segment (#1023 staging, #1039 recovery suffix):
-    `nudges OFF · rec` when every machine kind is off (the owner's default), else
-    `nudges N/M · rec` (N of M staged on). The ` · rec` suffix NAMES the always-on
-    recovery kinds (`watchdog.RECOVERY_NUDGE_KINDS`, resume/compact/goal-arm/…)
-    that fire even under `OFF`, so an `oauth-resume` there is no contradiction; it
-    renders iff that constant is non-empty. Reads ONLY the local state; empty on error."""
+    """The nudge-switch footer segment (#1023 staging, #1039 fix-forward): always
+    `nudges N/M · recovery on` — N of M staged machine kinds on (`0/M` when none,
+    NEVER the word `OFF`), so a recovery keystroke under `0/13` reads as no
+    contradiction. The ` · recovery on` suffix names the always-on recovery kinds
+    (`watchdog.RECOVERY_NUDGE_KINDS`, resume/compact/goal-arm/…) and renders iff
+    that constant is non-empty. Reads ONLY the local state; empty on error."""
     try:
         import watchdog as _wd
         on = _wd.nudges_on_kinds(home)
         total = len(_wd.MACHINE_NUDGE_KINDS)
-        rec = " · rec" if _wd.RECOVERY_NUDGE_KINDS else ""
+        rec = " · recovery on" if _wd.RECOVERY_NUDGE_KINDS else ""
     except Exception:
         return ""
-    if not on:
-        return "\033[38;5;208mnudges OFF%s\033[0m" % rec
     return "\033[38;5;208mnudges %d/%d%s\033[0m" % (len(on), total, rec)
 
 
