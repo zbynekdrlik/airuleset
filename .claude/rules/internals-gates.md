@@ -59,3 +59,26 @@ until the ratchet cap, then the oldest move to `.claude/rules-reference/internal
     a `Spec-change:` comment. Overlap direction in `settled_conflict` is `|q∩block|/|q|`
     (fraction of the SETTLED question present in the block) so a long briefing never dilutes it;
     entries < 3 content tokens are skipped.
+
+- **#1100 — the ONE stream-fact reader (`gates/navody._read_stream_file`) resolves the stream
+  through the fleet rename alias, so a RENAMED base stream finds the file that kept the old name.**
+  - `_current_stream()` returns the UNSPOOFABLE uid (`montalu1`/`david1` after the #537 rename) —
+    it stays the uid, never a mapped name. The alias resolution lives in the READER, not the
+    identity.
+  - `_read_stream_file` builds `_stream_file_candidates(stream)` = `[stream] +
+    _alias_equivalents(stream)`, EXACT name first, deduplicated; the FIRST candidate whose file
+    exists wins. So `montalu1` finds `montalu.md`, `david1` finds `david.md`; both edge directions
+    resolve (a future FILE rename `montalu -> montalu1.md` too).
+  - `_alias_equivalents` reads `cli_fleet.STREAM_RENAME_ALIASES` LAZILY (a ZERO-import pure-data
+    leaf) in a `try/except -> []`. A gate / Stop hook must NEVER import the `airuleset` facade or
+    `cli_quals` (the 11k-line facade must not load in the hook) — this is the ONE place the alias
+    is read differently from `cli_quals._stream_rename_equivalents` (which reads
+    `airuleset.STREAM_RENAME_ALIASES` for test-patchability); the EDGE semantics are mirrored, the
+    import source is not. It degrades to the exact name alone when the import is unavailable.
+  - NO numeric-suffix heuristic: `montalu7` with no `montalu7.md` stays fail-closed UNKNOWN — a
+    WRONG tenant's client guide is worse than UNKNOWN (Approach 3 rejected). Only the declared flat
+    table resolves.
+  - `gates.spec.specs_for_stream` inherits the fix FOR FREE (it reads via `_read_stream_file`); so
+    does `tenant_surfaces`. The UNKNOWN block text (`_fix_unknown(candidates)`) names the candidate
+    files so the next operator sees the alias, not a phantom file. Tests:
+    `tests/test_navody_stream_alias_1100.py` (mutation-verified, 6/6 killed).
