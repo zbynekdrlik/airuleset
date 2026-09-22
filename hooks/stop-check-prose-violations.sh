@@ -2199,15 +2199,22 @@ fi
 # gated. Fail-safe like its siblings: an unknown SECTION check resolves to
 # "present" (msg_has UNKNOWN->0), so a grep meltdown never fabricates a violation.
 # CAPITALIZED proper stage name only (#1018 review-1 F4): the board STAGE is the
-# proper noun "Verifikácia" / "Na overenie" / "Čaká" — a lowercase "na overenie"
-# is the ordinary Slovak phrase "for checking" ("poslal na overenie správnosti"),
-# and a lowercase "čaká" is the everyday verb "waits" ("úloha čaká na klienta"),
-# both of which must NOT be gated. So the stage match is CASE-SENSITIVE (requires
-# the capital), the miva stage carries a trailing `\b` so it matches the whole
-# token "Čaká"/"Čaka" and never a longer word ("Čakať" / "Čakáreň"), and the verbs
-# carry explicit-case classes so the proximity check can run case-sensitively
-# without missing a sentence-initial or lowercase verb.
-VERIF_STAGE_RX='(Verifik[áa]ci|Na overeni|Čak[áa]\b)'
+# proper noun "Verifikácia" / "Na overenie" — a lowercase "na overenie" is the
+# ordinary Slovak phrase "for checking" ("poslal na overenie správnosti"), which
+# must NOT be gated. So the stage match is CASE-SENSITIVE (requires the capital),
+# and the verbs carry explicit-case classes so the proximity check can run
+# case-sensitively without missing a sentence-initial or lowercase verb.
+# The miva stage "Čaká" needs MORE than case (#1093 review): "čaká" is the everyday
+# verb "waits" and it is ALSO capitalised at the start of a sentence ("Čaká na
+# klienta" / "Čaká sa na odpoveď" / "Čaká, kým klient potvrdí"), so a bare
+# capital-token match would false-block ordinary status prose fleet-wide (the very
+# class Approach 3 was rejected for). The miva stage therefore requires a
+# DIRECTIONAL MOVE CUE immediately before it — "do "/"do stavu "/"do stage "/"do
+# fázy "/"→ "/"-> " — which a stage-move report always carries ("presunul som do
+# Čaká") and the verb forms never do; a trailing `\b` still keeps it off longer
+# words ("Čakať" / "Čakáreň"). Accepted residual: a real Čaká handover phrased
+# with no move cue is not shape-checked (safe direction — never a false block).
+VERIF_STAGE_RX='(Verifik[áa]ci|Na overeni|(do +|→ *|-> *)(stavu? +|stage +|f[áa]z[ye] +)?Čak[áa]\b)'
 # PAST-TENSE only: a future-tense mention ("presuniem ... do Verifikácia" = "I
 # WILL move it") must NOT be gated — so the SK stems are the past-participle
 # forms (presunul/posunul/…), never the bare present/future stem.

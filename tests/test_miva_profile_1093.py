@@ -101,8 +101,8 @@ SK_MIVA_MOVED_NO_SECTIONS = (
 )
 
 SK_MIVA_MOVED_WITH_SECTIONS = (
-    "Presunul som úlohu do Čaká na project.task boarde a odoslal handover "
-    "poznámku. Read-back: 0 escaped správ.\n"
+    "Presunul som úlohu do Čaká a odoslal handover poznámku na project.task "
+    "boarde. Read-back: 0 escaped správ.\n"
     "Čo: cenník je nasadený.\n"
     "Kde: Predaj ▸ Cenník — https://erp.example.cloud/odoo/action-123/45\n"
     "Čo skúsiť: otvorte cenník a skontrolujte ceny.\n"
@@ -114,6 +114,25 @@ SK_MIVA_MOVED_WITH_SECTIONS = (
 SK_MIVA_LOWERCASE_VERB = (
     "Presunul som úlohu na project.task boarde, teraz úloha čaká na klienta. "
     "Read-back: 0 escaped."
+)
+
+# #1093 review (BOTH adversarial reviewers): a CAPITALISED sentence-initial verb
+# `Čaká na …` / `Čaká sa …` — with a past-tense move/post verb + an Odoo anchor
+# nearby — is ordinary status prose (a move to a DIFFERENT stage, or a plain
+# question-post), NOT a move to the awaiting-verification stage. It must NOT be
+# gated: the miva stage requires a directional move cue (do / →) which none of
+# these carry.
+SK_MIVA_CAPITAL_VERB_MOVED_ELSEWHERE = (
+    "Presunul som úlohu do stage V riešení na project.task boarde. "
+    "Čaká na klienta, kým potvrdí zmeny. Read-back: 0 escaped."
+)
+SK_MIVA_CAPITAL_VERB_QUESTION = (
+    "Odoslal som otázku klientovi na project.task boarde. "
+    "Čaká na jeho odpoveď. Read-back: 0 escaped."
+)
+SK_MIVA_CAPITAL_VERB_REFLEXIVE = (
+    "Presunul som úlohu späť na project.task boarde. "
+    "Čaká sa na odpoveď klienta. Read-back: 0 escaped."
 )
 
 
@@ -160,16 +179,16 @@ class TestMivaStagesCompanion(TestCase):
         return [ln for ln in self.lines if all(t in ln for t in tokens)]
 
     def test_caka_is_mivas_awaiting_verification(self):
+        # tied to the miva BULLET's distinctive phrasing so the rule-14 caveat
+        # line (which also carries miva+Čaká) cannot lend it false teeth (#498).
         self.assertTrue(
-            self._line_with("miva", "Čaká"),
-            "no line associates the miva board with its awaiting-verification "
-            "stage `Čaká`")
+            self._line_with("miva", "awaiting client verification", "Čaká"),
+            "the miva bullet must name `Čaká` as its awaiting-verification stage")
 
     def test_pozaduju_is_mivas_question_stage(self):
         self.assertTrue(
-            self._line_with("miva", "Požadujú sa zmeny"),
-            "no line associates the miva board with its question stage "
-            "`Požadujú sa zmeny`")
+            self._line_with("client-question", "Požadujú sa zmeny"),
+            "the miva bullet must name `Požadujú sa zmeny` as its question stage")
 
     def test_miva_not_grouped_with_verifikacia(self):
         # miva's awaiting-verification stage is Čaká now, never Verifikácia —
@@ -181,8 +200,22 @@ class TestMivaStagesCompanion(TestCase):
 
     def test_zrusene_never_set_by_stream(self):
         self.assertTrue(
-            self._line_with("Zrušené"),
-            "the miva mapping must name `Zrušené` (never set by a stream)")
+            self._line_with("Zrušené", "never set by a stream"),
+            "the miva bullet must name `Zrušené` (never set by a stream)")
+
+    def test_rule3_enumeration_includes_caka(self):
+        # rule 3's awaiting-verification parenthetical lists all three board
+        # stage names (the ONLY line carrying all of Verifikácia+Na overenie+Čaká)
+        self.assertTrue(
+            self._line_with("Verifikácia", "Na overenie", "Čaká"),
+            "rule 3 must enumerate Čaká alongside Verifikácia / Na overenie")
+
+    def test_rule14_table_has_board_mapping_caveat(self):
+        # the montalu-worded event→phase table carries a caveat mapping to each
+        # board's own stages, so a miva stream is not sent to a non-existent one
+        self.assertTrue(
+            self._line_with("montalu vocabulary"),
+            "rule 14's table needs the board-vocabulary mapping caveat (#1093)")
 
     def test_stage_rules_still_exactly_once_in_stages(self):
         # union lock, focused on the file this lane edits: rules 3/5/6 live in
@@ -198,8 +231,11 @@ class TestMivaStagesCompanion(TestCase):
 
 
 class TestVerifStageRegex(TestCase):
-    """VERIF_STAGE_RX recognises the capitalised miva stage token `Čaká` and
-    never the lowercase verb `čaká`; existing stage names keep matching."""
+    """VERIF_STAGE_RX recognises the miva stage `Čaká` ONLY after a directional
+    move cue (do / → / ->), never the everyday verb `Čaká`/`čaká` — even
+    capitalised at the start of a sentence (`Čaká na klienta`); existing stage
+    names keep matching. The move cue is what distinguishes a stage move from
+    the verb (#1093 review: a bare capital token false-blocked ordinary prose)."""
 
     @classmethod
     def setUpClass(cls):
@@ -208,9 +244,20 @@ class TestVerifStageRegex(TestCase):
     def test_rx_extracted(self):
         self.assertIsNotNone(self.rx, "could not read VERIF_STAGE_RX from hook")
 
-    def test_matches_caka_capitalised(self):
-        self.assertTrue(_rx_matches(self.rx, "Čaká"),
-                        "VERIF_STAGE_RX must match the miva stage `Čaká`")
+    def test_matches_caka_with_move_cue(self):
+        for s in ("do Čaká", "do stage Čaká", "do stavu Čaká", "→ Čaká",
+                  "-> Čaká", "do fázy Čaká"):
+            self.assertTrue(_rx_matches(self.rx, s),
+                            f"VERIF_STAGE_RX must match the miva stage move `{s}`")
+
+    def test_does_not_match_bare_caka_without_cue(self):
+        # a bare capitalised token is the sentence-initial verb "Čaká na …" —
+        # it must NEVER be gated without a directional move cue (#1093 fix for
+        # the fleet-wide false-block on ordinary status prose).
+        for s in ("Čaká", "Čaká na klienta", "Čaká sa na odpoveď",
+                  "Čaká, kým klient potvrdí"):
+            self.assertFalse(_rx_matches(self.rx, s),
+                             f"VERIF_STAGE_RX must NOT match the bare verb `{s}`")
 
     def test_does_not_match_lowercase_verb(self):
         self.assertFalse(_rx_matches(self.rx, "úloha čaká na klienta"),
@@ -218,10 +265,10 @@ class TestVerifStageRegex(TestCase):
                          "`čaká` (fleet-wide false-block class)")
 
     def test_does_not_match_longer_words(self):
-        for w in ("Čakať", "Čakáreň"):
+        for w in ("do Čakať", "do Čakáreň"):
             self.assertFalse(_rx_matches(self.rx, w),
                              f"VERIF_STAGE_RX must not match `{w}` (word "
-                             "boundary)")
+                             "boundary, even with a move cue)")
 
     def test_existing_stage_names_still_match(self):
         for s in ("Verifikácia", "Na overenie"):
@@ -247,6 +294,24 @@ class TestHookDrivesCaka(TestCase):
             _blocked(_run(SK_MIVA_LOWERCASE_VERB)),
             "a lowercase `čaká` status line must NOT trigger the #1018 shape "
             "check")
+
+    def test_capital_verb_moved_elsewhere_not_gated(self):
+        self.assertFalse(
+            _blocked(_run(SK_MIVA_CAPITAL_VERB_MOVED_ELSEWHERE)),
+            "a task moved to V riešení with a sentence-initial verb `Čaká na "
+            "klienta` must NOT be gated (#1093 false-block fix)")
+
+    def test_capital_verb_question_not_gated(self):
+        self.assertFalse(
+            _blocked(_run(SK_MIVA_CAPITAL_VERB_QUESTION)),
+            "a plain question-post ending `Čaká na jeho odpoveď` must NOT be "
+            "gated (#1093 false-block fix)")
+
+    def test_capital_verb_reflexive_not_gated(self):
+        self.assertFalse(
+            _blocked(_run(SK_MIVA_CAPITAL_VERB_REFLEXIVE)),
+            "the impersonal reflexive `Čaká sa na odpoveď` must NOT be gated "
+            "(#1093 false-block fix)")
 
 
 class TestCoreSizeGuard(TestCase):

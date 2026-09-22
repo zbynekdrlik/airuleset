@@ -14,8 +14,8 @@ client answer is pending).
 ### 3. Handover chatter note — MANDATORY on the "awaiting verification" transition
 
 Moving a task to the profile's **awaiting-client-verification** stage
-(**Verifikácia** / **Na overenie**) REQUIRES a chatter note (`message_post` on
-the task) with exactly these sections, in this order:
+(**Verifikácia** / **Na overenie** / **Čaká**) REQUIRES a chatter note
+(`message_post` on the task) with exactly these sections, in this order:
 
 1. **Čo** — one sentence: what was delivered
 2. **Kde** — the menu path AND a functional `https://` deep-link URL to the exact
@@ -54,6 +54,8 @@ confirmation closes the family).
 ### 14. Udalosť → fáza (#1036)
 
 👷 ACK + presun fázy = OKAMŽITÉ na každý komentár klienta; text pre klienta čaká na schválenie ownera (#606 U flow).
+
+The phase names below are the montalu vocabulary — map each to YOUR board's own profile stages (miva: **V riešení** / **Požadujú sa zmeny** / **Čaká**; slovnormal: **V práci** / **Na overenie**).
 
 | Udalosť klienta | Fáza + akcia |
 |---|---|
