@@ -47,8 +47,13 @@ def render_cloudflared_multi_ingress_config(tunnel_uuid, credentials_file,
                                             ingress_rules):
     """A locally-managed cloudflared `config.yml` fronting N hostnames onto their
     respective origins (#870 F4a D1). ``ingress_rules`` is a list of
-    ``(hostname, service_url)`` tuples. The trailing ``http_status:404`` catch-all
-    makes any unmatched host a 404 rather than leaking to any origin."""
+    ``(hostname, service_url)`` OR ``(hostname, path, service_url)`` tuples (#1114):
+    a 3-tuple emits a ``path:`` line (a cloudflared path-regex, matched top-to-
+    bottom before the same host's later catch-all rule), so one hostname can split
+    ``/s/`` shares onto the persistent filedrop service and everything else onto
+    the ephemeral drop endpoint. A 2-tuple's output is byte-identical to before.
+    The trailing ``http_status:404`` catch-all makes any unmatched host a 404
+    rather than leaking to any origin."""
     header = (
         "# airuleset-managed cloudflared tunnel config (webterm, #635/#870). Do NOT\n"
         "# hand-edit — regenerated + reconciled on every `airuleset.py install`.\n"
@@ -59,8 +64,14 @@ def render_cloudflared_multi_ingress_config(tunnel_uuid, credentials_file,
         "ingress:\n"
         % (tunnel_uuid, credentials_file))
     rules = ""
-    for hostname, service_url in ingress_rules:
-        rules += "  - hostname: %s\n    service: %s\n" % (hostname, service_url)
+    for rule in ingress_rules:
+        if len(rule) == 3:                       # (hostname, path, service) — #1114
+            hostname, path, service_url = rule
+            rules += ("  - hostname: %s\n    path: %s\n    service: %s\n"
+                      % (hostname, path, service_url))
+        else:                                    # (hostname, service) — byte-identical
+            hostname, service_url = rule
+            rules += "  - hostname: %s\n    service: %s\n" % (hostname, service_url)
     rules += "  - service: http_status:404\n"
     return header + rules
 
