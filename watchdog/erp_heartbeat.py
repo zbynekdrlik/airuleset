@@ -116,18 +116,51 @@ def _default_user():
             return "?"
 
 
+def _cmdline_is_claude_cli(cmdline):
+    """True when a process cmdline IS the Claude CLI, in EITHER fleet launch
+    shape — the direct binary / bin-symlink (`claude`, `node .../claude`) OR the
+    npm shape (`node .../claude-code/cli.js`). Mirrors
+    `priority_policy._looks_like_claude_cli`'s documented two-shape recognition.
+    A bare `pgrep -x claude` (comm == "claude") MISSES the npm-launched shape
+    (comm == "node"), which would read a live stream as dead and let its box
+    wrongly expire — the exact failure #959 exists to prevent."""
+    toks = (cmdline or "").split()
+    if not toks:
+        return False
+    if os.path.basename(toks[0]) == "claude":
+        return True
+    if os.path.basename(toks[0]) in ("node", "nodejs"):
+        for t in toks[1:]:
+            if os.path.basename(t) == "claude" or t.endswith("claude-code/cli.js") \
+                    or "/claude-code/" in t:
+                return True
+    return False
+
+
 def _default_live_claude_cwds(run):
-    """cwds of live `claude` processes owned by THIS uid: `pgrep -u <uid> -x
-    claude` → per-pid `os.readlink(/proc/<pid>/cwd)`. Empty on none / any
-    error (fail-safe: no proof of life → no heartbeat)."""
+    """cwds of live Claude CLI processes owned by THIS uid. Matches BOTH fleet
+    launch shapes (`pgrep -u <uid> -f claude` → a per-pid cmdline signature
+    check via `_cmdline_is_claude_cli`, so the npm `node .../claude-code/cli.js`
+    shape is not missed the way a bare `-x claude` would), then
+    `os.readlink(/proc/<pid>/cwd)`. Empty on none / any error (fail-safe: no
+    proof of life → no heartbeat). The `-f claude` over-match (any cmdline
+    mentioning "claude", e.g. an editor on a claude-named path) is filtered out
+    by the signature check — only a real CLI process contributes a cwd."""
     try:
-        out = run(["pgrep", "-u", str(os.getuid()), "-x", "claude"]) or ""
+        out = run(["pgrep", "-u", str(os.getuid()), "-f", "claude"]) or ""
     except Exception:
         return []
     cwds = []
     for pid in out.split():
         pid = pid.strip()
         if not pid.isdigit():
+            continue
+        try:
+            with open("/proc/%s/cmdline" % pid, "rb") as fh:
+                cmdline = fh.read().replace(b"\x00", b" ").decode("utf-8", "replace")
+        except OSError:
+            continue
+        if not _cmdline_is_claude_cli(cmdline):
             continue
         try:
             cwds.append(os.readlink("/proc/%s/cwd" % pid))
@@ -193,9 +226,19 @@ def _default_find_script(cwds, run):
 
 def _default_call(script, user, timeout):
     """`bash <script> <user>`; returns (rc, first_stdout_line). Raises
-    subprocess.TimeoutExpired on timeout (the caller maps it to _TIMEOUT_RC)."""
-    r = subprocess.run(["bash", script, user],
-                       capture_output=True, text=True, timeout=timeout)
+    subprocess.TimeoutExpired on timeout (the caller maps it to _TIMEOUT_RC).
+    Timed + recorded into the per-sweep subprocess counter (#1055-P2
+    "count EVERY runner") — this bash→ssh wrapper call is the heavy runner of
+    this job, so a `max_subprocess` budget must see it. The record runs in a
+    `finally` so a TimeoutExpired is still counted (mirrors tmux_io._default_run)."""
+    import time as _time
+    from watchdog.subprocess_budget import record_subprocess
+    t0 = _time.monotonic()
+    try:
+        r = subprocess.run(["bash", script, user],
+                           capture_output=True, text=True, timeout=timeout)
+    finally:
+        record_subprocess("bash", _time.monotonic() - t0)
     out = (r.stdout or "").strip()
     line = out.splitlines()[0] if out else ""
     return r.returncode, line

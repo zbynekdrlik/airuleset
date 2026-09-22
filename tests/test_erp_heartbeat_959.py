@@ -86,6 +86,32 @@ class TestGate(unittest.TestCase):
                 logs, st, call = _run_job(call, authority=authority)
                 self.assertEqual(len(call.calls), 1)
 
+    def test_unknown_authority_on_shared_stream_proceeds(self):
+        # fail-safe: authority_fn returning None (an error / unmapped user) on a
+        # shared-stream box is treated as reduced and PROCEEDS (only == "full"
+        # skips) — a shared-stream box only ever hosts reduced stream accounts.
+        call = _Call()
+        logs, st, call = _run_job(call, authority=None)
+        self.assertEqual(len(call.calls), 1)
+
+
+class TestCmdlineClaudeCli(unittest.TestCase):
+    def test_matches_both_fleet_launch_shapes(self):
+        for cmd in ("claude --resume",
+                    "/home/montalu1/.local/bin/claude",
+                    "node /home/montalu1/.npm/claude-code/cli.js",
+                    "node /home/montalu1/.local/share/x/claude",
+                    "nodejs /opt/claude-code/cli.js --print"):
+            self.assertTrue(eh._cmdline_is_claude_cli(cmd), cmd)
+
+    def test_rejects_non_cli_processes_mentioning_claude(self):
+        for cmd in ("python3 /home/montalu1/claude-notes/gen.py",
+                    "vim /home/montalu1/claude.md",
+                    "grep -r claude /home/montalu1",
+                    "node /home/montalu1/mcp-server/index.js",
+                    "", "   "):
+            self.assertFalse(eh._cmdline_is_claude_cli(cmd), cmd)
+
 
 class TestLiveness(unittest.TestCase):
     def test_no_live_claude_skips_without_calling(self):
@@ -228,13 +254,28 @@ class TestRunOnceWiring(unittest.TestCase):
             seen.append(now)
             return ["erp-heartbeat: (recorder)"]
 
+        # Derive the ticks from the LIVE constants so the "not due" middle tick
+        # is proven by the erp cadence gate, NOT masked by a calm-sweep skip
+        # (#959 review NIT): the middle tick must be a FULL sweep
+        # (gap > SWEEP_CALM_S) yet inside the 10-min interval (gap < INTERVAL),
+        # and the third must be BOTH a full sweep since the middle AND cadence-due
+        # since the first. This holds for the current 300/600; guard it explicitly.
+        calm = wd.SWEEP_CALM_S
+        interval = eh.ERP_HEARTBEAT_INTERVAL_S
+        margin = 30.0
+        assert calm + margin < interval, "test needs SWEEP_CALM_S+margin < INTERVAL"
+        base = 1000.0
+        mid = base + calm + margin          # FULL sweep, cadence NOT due
+        third = base + 2 * calm + 2 * margin  # FULL sweep (vs mid) AND cadence due
+        assert third - base > interval, "third tick must be cadence-due"
+
         with TemporaryDirectory() as d:
             sp = str(Path(d) / "state.json")
-            _drive_run_once(1000.0, sp, rec)          # due (first)
-            _drive_run_once(1300.0, sp, rec)          # 300s < 600 → not due
-            self.assertEqual(seen, [1000.0])
-            _drive_run_once(1700.0, sp, rec)          # 700s > 600 → due again
-            self.assertEqual(seen, [1000.0, 1700.0])
+            _drive_run_once(base, sp, rec)            # due (first, bootstrap full)
+            _drive_run_once(mid, sp, rec)             # full sweep, < interval → not due
+            self.assertEqual(seen, [base])
+            _drive_run_once(third, sp, rec)           # full sweep, > interval → due
+            self.assertEqual(seen, [base, third])
 
     def test_disabled_by_default_does_not_run(self):
         seen = []
