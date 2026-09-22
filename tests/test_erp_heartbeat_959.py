@@ -318,3 +318,27 @@ class TestConstants(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestCmdWatchdogWiresErpHeartbeat(unittest.TestCase):
+    """The leaf is inert unless cmd_watchdog passes `erp_heartbeat_enabled`
+    to run_once (run_once defaults it to False so unit tests never ssh).
+    Drive the real cmd_watchdog and capture the kwarg."""
+
+    class _Args:
+        dry_run = False
+        verbose = False
+
+    def test_cmd_watchdog_enables_job_51(self):
+        import airuleset
+        captured = {}
+
+        def fake_run_once(*a, **kw):
+            captured.update(kw)
+            return []
+
+        with mock.patch.object(wd, "run_once", side_effect=fake_run_once):
+            airuleset.cmd_watchdog(self._Args())
+        self.assertIs(captured.get("erp_heartbeat_enabled"), True,
+                      "cmd_watchdog must wire erp_heartbeat_enabled=True, "
+                      "or Job 51 never runs on any box (#959)")
