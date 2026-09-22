@@ -113,15 +113,20 @@ MERGED_UNRELEASED_MAX_PRS = 60
 # progress and the remainder fills on later refreshes.
 MERGED_UNRELEASED_META_BUDGET = 15
 
-# #1112 — the TWO-BRANCH analog of the (b) 60-PR cap: a two-branch repo derives M
-# from the COMMITS in `<main>..<prefix>/dev` (each commit is one unit of merged
-# work, like each PR is in the 3-branch model), so the cap is on COMMITS not PRs.
-# A normal between-cuts two-branch backlog is a few dozen tickets × a few commits
-# each (bump/red/green/review/merge), well under this; a stale/forked `main..dev`
-# (the #1090 fork-clone pathology, thousands of commits) is far above — hide M
-# with a journal reason rather than derive a garbage set. Deliberately higher than
-# MERGED_UNRELEASED_MAX_PRS: 60 would false-hide a legitimate two-branch backlog.
-MERGED_UNRELEASED_MAX_COMMITS = 400
+# #1112 — a SANITY cap on the two-branch `<main>..<prefix>/dev` commit walk. It
+# is NOT the (b) 60-PR cap's twin: that cap protects a REST BUDGET (each over-cap
+# PR = one `gh api` call, the #1090 quota incident), and the #1090 fork pathology
+# is ALREADY filtered upstream — a two-branch fork has no `upstream/develop`, so
+# `_canonical_ref_prefix` returns `(None, reason)` and hides M BEFORE this path.
+# The two-branch walk makes ZERO network calls and the git call is already bounded
+# by `_default_git_log_full`'s 15 s timeout, so this cap guards only a PATHOLOGICAL
+# range: a broken/unrelated-history `main..dev` (a rebased/re-created dev, an
+# accidental cross-repo graft) whose `git log` is tens of thousands of commits.
+# Set FAR above any real between-cuts backlog (even a long release gap — ~80
+# tickets × ~5 commits each ≈ 400 — must NOT be hidden, or the fix re-introduces
+# the very bug above the cap), so a legitimate backlog always derives; only a
+# genuinely broken range hides M with a journal reason (design Acceptance 1).
+MERGED_UNRELEASED_MAX_COMMITS = 2000
 
 
 class _QuotaSentinel:
@@ -447,7 +452,26 @@ def _compute_two_branch(root, git_full_fn, prefix, ref_exists_fn):
     (subject `#N` incl. `feat(#N):`/`(#N)`/`[#N]` forms + body closing-keyword
     refs, with the revert exclusion) — `exclude_pr=0` never discards a real
     ticket. No REST, no cache, no network. Fail-safe EMPTY (missing main ref,
-    empty range, or a range over the cap)."""
+    empty range, or a range over the cap).
+
+    ACCEPTED over-count (subject convention): like the 3-branch PR-TITLE path,
+    EVERY `#N` in a subject is read as an implemented ticket — the real fleet
+    convention carries the ticket as a bare subject ref (`fix: [green] #1114 …`),
+    so restricting to only the scoped `feat(#N):` forms would MISS most real
+    commits. A subject that ALSO cites an unrelated `#N` for context, or a
+    GitHub `Merge pull request #N` PR number, therefore enters this raw set — but
+    the harm is bounded at the consumer: `_split_merged_unreleased` intersects M
+    with the OPEN-WORKABLE set, so a number that is not an open workable ticket
+    (a PR number, a closed/cross-repo ref) never surfaces in `M`. This mirrors
+    the accepted trade-off the 3-branch title path already makes.
+
+    ACCEPTED limitations: (a) a revert whose ORIGINAL `feat(#N)` commit is ALSO
+    in range re-adds `#N` (same as the 3-branch PR+revert pair); (b) a body
+    containing a raw RS byte (\\x1e) truncates that body's post-RS refs (subject
+    refs survive) — astronomically rare; (c) a two-branch FORK yields empty here
+    (a fork lacks `upstream/develop`, so `_canonical_ref_prefix` returns None
+    before this path — `prefix` is effectively always `origin`), fail-safe never
+    false."""
     main_ref = _two_branch_main_ref(root, prefix, ref_exists_fn)
     if main_ref is None:
         return frozenset()

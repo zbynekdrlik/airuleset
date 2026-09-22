@@ -36,17 +36,19 @@ def _commit(repo, subject, body=""):
     _git(repo, "commit", "--allow-empty", "-q", "-m", msg)
 
 
-def _init_two_branch(repo, *, with_dev=True, with_develop=False, dev_commits=None):
-    """A REAL git repo with a `main` baseline mirrored to origin/main, then a
-    `dev` branch carrying `dev_commits` mirrored to origin/dev. No network: the
-    remote-tracking refs are set via `update-ref`, and a local `origin` remote
-    URL lets the LOCAL slug resolver name the cache without gh. `with_develop`
-    additionally mirrors origin/develop (the 3-branch guard)."""
-    subprocess.run(["git", "init", "-q", "-b", "main", repo], check=True,
+def _init_two_branch(repo, *, with_dev=True, with_develop=False, dev_commits=None,
+                     main_branch="main"):
+    """A REAL git repo with a `<main_branch>` baseline mirrored to
+    origin/<main_branch>, then a `dev` branch carrying `dev_commits` mirrored to
+    origin/dev. No network: the remote-tracking refs are set via `update-ref`,
+    and a local `origin` remote URL lets the LOCAL slug resolver name the cache
+    without gh. `with_develop` additionally mirrors origin/develop (the 3-branch
+    guard); `main_branch="master"` exercises the master fallback."""
+    subprocess.run(["git", "init", "-q", "-b", main_branch, repo], check=True,
                    env=_GENV, capture_output=True)
     _git(repo, "remote", "add", "origin", "https://github.com/o/r")
     _commit(repo, "chore: baseline")
-    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    _git(repo, "update-ref", "refs/remotes/origin/%s" % main_branch, "HEAD")
     if with_develop:
         _git(repo, "update-ref", "refs/remotes/origin/develop", "HEAD")
     if with_dev:
@@ -99,6 +101,23 @@ class TwoBranchDerivesMFromDevRange(unittest.TestCase):
             got = rs.merged_unreleased_issues(repo)
         self.assertEqual(set(got), set())
 
+    def test_dev_present_but_empty_range_is_empty(self):
+        # dev exists but carries no commits beyond main -> `main..dev` empty ->
+        # frozenset() (the `if not commits` guard), not a crash.
+        with TemporaryDirectory() as repo:
+            _init_two_branch(repo, dev_commits=[])
+            got = rs.merged_unreleased_issues(repo)
+        self.assertEqual(set(got), set())
+
+    def test_master_fallback_when_no_main(self):
+        # A repo whose default branch is `master` (no `main`): the derivation
+        # falls back to `<prefix>/master..<prefix>/dev`.
+        with TemporaryDirectory() as repo:
+            _init_two_branch(repo, main_branch="master",
+                             dev_commits=[("fix(#1349): repair",)])
+            got = rs.merged_unreleased_issues(repo)
+        self.assertEqual(set(got), {1349})
+
     def test_develop_present_keeps_the_pr_based_result_byte_identical(self):
         # A repo WITH develop uses the UNCHANGED PR-based source; the two-branch
         # git_full_fn (which WOULD yield #9999) must NOT be consulted even though
@@ -129,12 +148,13 @@ class TwoBranchRangeCap(unittest.TestCase):
     """A range far past a normal between-cuts backlog hides M with a journal
     line and makes ZERO further work (the two-branch analog of the #1090 cap)."""
 
-    def _run(self, n_commits, cap_stderr):
+    def _run(self, commits):
+        """Drive the two-branch path with an injected `git_full_fn` returning
+        exactly `commits` (a list of (oid, subject, body)); capture stderr."""
         rs._reset_memo()
 
         def _git_full_fn(root, rng):
-            return [("o%d" % i, "feat(#%d): change" % (3000 + i), "")
-                    for i in range(n_commits)]
+            return list(commits)
 
         import contextlib
         import io
@@ -147,16 +167,33 @@ class TwoBranchRangeCap(unittest.TestCase):
                 cache_path=str(Path("/nonexistent-cache.json")))
         return got, err.getvalue()
 
+    @staticmethod
+    def _distinct_ticket_commits(n):
+        return [("o%d" % i, "feat(#%d): change" % (3000 + i), "")
+                for i in range(n)]
+
     def test_over_the_cap_is_empty_with_a_journal_line(self):
-        got, err = self._run(rs.MERGED_UNRELEASED_MAX_COMMITS + 1, True)
+        got, err = self._run(
+            self._distinct_ticket_commits(rs.MERGED_UNRELEASED_MAX_COMMITS + 1))
         self.assertEqual(set(got), set())
         self.assertIn("merged-unreleased", err)
         self.assertIn("M hidden", err)
 
     def test_exactly_at_the_cap_is_derived(self):
-        got, _err = self._run(rs.MERGED_UNRELEASED_MAX_COMMITS, False)
+        got, _err = self._run(
+            self._distinct_ticket_commits(rs.MERGED_UNRELEASED_MAX_COMMITS))
         # every commit references a distinct ticket -> all derived, not hidden.
         self.assertEqual(len(got), rs.MERGED_UNRELEASED_MAX_COMMITS)
+
+    def test_cap_counts_commits_not_distinct_issues(self):
+        # OVER the cap in COMMITS but only ONE distinct ticket: the cap must
+        # still hide M. A mutant capping on len(issues) (==1) would derive
+        # {3000} instead of empty -> this pins the cap-on-commits semantics.
+        over = [("o%d" % i, "feat(#3000): same ticket", "")
+                for i in range(rs.MERGED_UNRELEASED_MAX_COMMITS + 1)]
+        got, err = self._run(over)
+        self.assertEqual(set(got), set())
+        self.assertIn("M hidden", err)
 
 
 # --- Acceptance 1: the split precedence feeds through to the consumer ---------
