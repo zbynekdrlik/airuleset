@@ -2050,6 +2050,24 @@ def cmd_install(args):
     except Exception as e:
         print(f"  stream tmux window-name setup error (non-fatal): {e}", file=sys.stderr)
 
+    # --- 3g-quater. #1108: PROVISION each declared window's git checkout. The
+    # window step above only creates the WINDOW; a declared window whose cwd is
+    # a managed checkout (gk-infra/gk-quality carry repo+branch) needs its tree
+    # cloned, else tmux opens `-c` into a missing dir, falls back to `$HOME`, and
+    # a role-less Claude starts in the home dir (owner incident 21.9.2026). Clone
+    # when absent, leave an existing tree untouched, LOUD non-fatal line on
+    # failure — gated on box_windows so it is a no-op on every non-declaring box.
+    try:
+        import cli_fleet as _cli_fleet
+        _decl_windows = _cli_fleet.box_windows(_current_user())
+        if _decl_windows:
+            from cli_tmux_provisioning import ensure_declared_checkouts
+            for _co_line in ensure_declared_checkouts(_decl_windows):
+                print("  " + _co_line)
+    except Exception as e:
+        print(f"  declared-window checkout provisioning error "
+              f"(non-fatal): {e}", file=sys.stderr)
+
     # --- 3g-bis. #660: native session-created AUDIT hook on the OWNER box, to
     # capture a future stray's creator deterministically (full rationale +
     # ordering note in apply_owner_session_created_audit's docstring; MUST run
@@ -2580,6 +2598,18 @@ def cmd_status(args):
         print("\n" + cli_concurrency.concurrency_status_row(os.getcwd()))
     except Exception as e:
         print(f"\nconcurrency: error ({e})", file=sys.stderr)
+
+    # --- Declared managed windows (#1108) — each declared window's checkout as
+    # present/MISSING, so a missing role-window cwd is visible WITHOUT ssh (the
+    # 21.9.2026 gk-quality-in-$HOME incident). Empty on every non-declaring box.
+    try:
+        import cli_fleet as _cli_fleet
+        from cli_tmux_provisioning import declared_window_status_lines
+        _win = _cli_fleet.box_windows(_current_user())
+        for _wline in declared_window_status_lines(_win):
+            print(_wline)
+    except Exception as e:
+        print(f"\nwindow: error ({e})", file=sys.stderr)
 
     # --- /goal armed state (#1038 + follow-up) ---
     # goal_status_probe reads the SAME truth the arm machinery uses -- the

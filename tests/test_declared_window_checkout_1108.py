@@ -324,9 +324,9 @@ class TestDeclaredWindowStatusLines(unittest.TestCase):
             lines[0],
             "window gk: cwd ~/devel/odoo/odoo-erp (present) "
             "role=review mode=parallel")
-        self.assertTrue(any("gk-infra" in l and "(present)" in l
-                            for l in lines), lines)
-        quality = [l for l in lines if "gk-quality" in l][0]
+        self.assertTrue(any("gk-infra" in ln and "(present)" in ln
+                            for ln in lines), lines)
+        quality = [ln for ln in lines if "gk-quality" in ln][0]
         self.assertIn("(MISSING)", quality)
         self.assertIn("role=quality", quality)
         self.assertIn("mode=sequential", quality)

@@ -99,7 +99,13 @@ REMOTE_HOSTS = [
         "windows": [
             {"name": "gk", "cwd": "~/devel/odoo/odoo-erp",
              "role": "review", "mode": "parallel"},
+            # #1108: gk-infra/gk-quality declare their managed checkout so the
+            # install PROVISIONS it (clone when absent — `ensure_declared_
+            # checkouts`), never touching an existing tree. The FLOW primary
+            # window (gk) carries NO repo: it is the box's own existing
+            # checkout, left as-is.
             {"name": "gk-infra", "cwd": "~/devel/odoo/odoo-erp-infra",
+             "repo": "zbynekdrlik/odoo-erp", "branch": "develop",
              "role": "infra", "mode": "sequential"},
             # #1074 — the THIRD gk window `gk-quality` (owner directive 18.9.,
             # escalated 21.9.): its own managed odoo-erp checkout, SEQUENTIAL
@@ -112,6 +118,7 @@ REMOTE_HOSTS = [
             # body, session-start-fetch FF of its own cwd, resurrect relaunch
             # by cwd) — no hardcoded install step.
             {"name": "gk-quality", "cwd": "~/devel/odoo/odoo-erp-quality",
+             "repo": "zbynekdrlik/odoo-erp", "branch": "develop",
              "role": "quality", "mode": "sequential"},
         ],
         # #999 — attached-but-unmounted 20 GB Hetzner volume gk-vol1 (id
@@ -656,6 +663,36 @@ def _window_name_ok(name):
     return all((c.isascii() and c.isalnum()) or c in "._-" for c in s)
 
 
+def _repo_ok(s):
+    """#1108: a declared window's ``repo`` — ``owner/name`` where each side is
+    ASCII alnum / ``.`` ``_`` ``-`` only, exactly one slash (the same
+    ``^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$`` shape, as a per-char check to keep
+    this leaf zero-import). The value is baked into a ``git clone
+    https://github.com/<repo>.git`` URL + a ``gh repo set-default <repo>``
+    argv, so it must carry no shell/URL metachar."""
+    s = str(s)
+    if s.count("/") != 1:
+        return False
+    owner, _, name = s.partition("/")
+    if not owner or not name:
+        return False
+    return all((c.isascii() and c.isalnum()) or c in "._-"
+               for c in owner + name)
+
+
+def _branch_ok(s):
+    """#1108: a declared window's ``branch`` — a safe git ref token: ASCII
+    alnum start, then ASCII alnum / ``.`` ``_`` ``-`` ``/``, no ``..``, no
+    leading/trailing ``/``. Baked as the value of ``git clone -b <branch>``, so
+    a leading ``-`` (argv-flag injection) and any shell metachar are barred."""
+    s = str(s)
+    if not s or ".." in s or s.startswith("/") or s.endswith("/"):
+        return False
+    if not (s[0].isascii() and s[0].isalnum()):
+        return False
+    return all((c.isascii() and c.isalnum()) or c in "._-/" for c in s)
+
+
 def managed_windows(remote):
     """The DECLARED managed tmux windows for a REMOTE_HOSTS entry (#998), or
     ``[]`` when the entry declares none — an empty list means "one default
@@ -697,6 +734,18 @@ def validate_windows(windows):
         mode = w.get("mode")
         if mode is not None and mode not in WINDOW_MODES:
             errs.append("window[%d] mode %r not in %s" % (i, mode, WINDOW_MODES))
+        # #1108: OPTIONAL repo/branch — a declared window's managed checkout the
+        # install clones when absent (`ensure_declared_checkouts`). Absent ==
+        # today (a window with no clone step, byte-identical). When present they
+        # are baked into a clone URL/argv, so the shape must be token-safe.
+        repo = w.get("repo")
+        if repo is not None and not _repo_ok(repo):
+            errs.append("window[%d] repo %r is not owner/name token-safe"
+                        % (i, repo))
+        branch = w.get("branch")
+        if branch is not None and not _branch_ok(branch):
+            errs.append("window[%d] branch %r is not a safe ref token"
+                        % (i, branch))
     return errs
 
 
