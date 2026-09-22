@@ -10,6 +10,7 @@ into this split).
 """
 
 import json
+import os
 import time
 import unittest.mock as m
 from pathlib import Path
@@ -22,16 +23,33 @@ def _encode(cwd):
     return wd.encode_project_dir(cwd)
 
 
-def _write_marker_transcript(base, cwd, sid, marker_text=None):
+def _write_marker_transcript(base, cwd, sid, marker_text=None,
+                             transcript_age_s=120):
     """A minimal real transcript at <base>/<encoded-cwd>/<sid>.jsonl —
     required for pane resolution (`_find_pane_for_session` matches by
-    transcript STEM, never by cwd alone)."""
+    transcript STEM, never by cwd alone).
+
+    #1110 FIXTURE REALISM: an IDLE session's transcript was last written when
+    its previous turn ENDED — minutes ago, not this instant. The
+    transcript-liveness gate (`watchdog.goal_turn_liveness`) reads a transcript
+    younger than `GOAL_TURN_LIVE_WINDOW_S` (45 s) as a still-RUNNING turn and
+    defers `deliver_goal` with zero keystrokes — exactly the dev1 songplayer
+    22.9. incident (a transcript written seconds ago IS a live turn). A fixture
+    that wrote the transcript at wall-clock `now` therefore modelled an
+    impossible state (an idle pane with a 0-second-old transcript). So this
+    helper AGES the file's mtime to `now − transcript_age_s` (default 120 s =
+    a genuinely idle session) via `os.utime`, the SAME `stat().st_mtime` source
+    the gate reads. A test exercising a LIVE turn passes a small age (e.g. 5),
+    and the busy-transcript / confirm-live locks pass their own explicit age."""
     d = Path(base) / _encode(cwd)
     d.mkdir(parents=True, exist_ok=True)
     p = d / (sid + ".jsonl")
     entry = {"type": "assistant", "message": {
         "id": "msg_1", "content": marker_text or ""}}
     p.write_text(json.dumps(entry) + "\n")
+    if transcript_age_s is not None:
+        aged = time.time() - transcript_age_s
+        os.utime(p, (aged, aged))
     return p
 
 
