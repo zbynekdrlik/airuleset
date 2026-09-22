@@ -26,7 +26,6 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset                                          # noqa: E402
-import cli_scratch_sweep                                  # noqa: E402
 from watchdog import disk_guard as dg                     # noqa: E402
 
 NOW = 1786176246.0          # fixed; never time.time() (repo convention)

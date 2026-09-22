@@ -1314,18 +1314,30 @@ def sweep_airuleset_state(tmp_dir=None, uid=None, dry_run: bool = False, now=Non
 # new watchdog job, no new hook), wired as a non-fatal cmd_install() step
 # plus a manual/testable CLI entry point.
 #
-# SCOPE (v1, deliberate -- see the #410 design comment on the ticket):
-# MAIN (top-level, per-project) transcripts ONLY -- the direct *.jsonl
-# children of a `~/.claude/projects/<encoded-cwd>/` directory, the exact
-# population `/resume`/`claude --continue`/claude-history ever read.
-# Anything under a `subagents/` component is NEVER touched here: it costs
-# zero real disk reclamation today (live census on dev1, 2026-08-12: 0
-# reclaimable bytes -- every subagent transcript on this box is under 30
-# days old), and this repo's own playbook documents numerous ad-hoc
-# forensic/corpus-scanning scripts that glob `**/*.jsonl` recursively
-# with no time-window bound, none of which have been audited here for
-# `.gz`-awareness. Revisit once real subagent-transcript disk pressure
-# exists.
+# SCOPE (v1, #410): the MAIN (top-level, per-project) transcripts -- the
+# direct *.jsonl children of a `~/.claude/projects/<encoded-cwd>/`
+# directory, the exact population `/resume`/`claude --continue`/
+# claude-history ever read. This is the DEFAULT (`include_subagents=False`)
+# and is ALL the install-step report-only sweep ever touches.
+#
+# SCOPE (v2, #1117): the PRESSURE path (`disk_guard._plan_transcripts`)
+# additionally passes `include_subagents=True`, which walks
+# `<project>/<session>/subagents/**/*.jsonl` too. The v1 comment deferred
+# this ("Revisit once real subagent-transcript disk pressure exists") on a
+# 2026-08-12 dev1 census that found 0 reclaimable bytes; that pressure now
+# exists -- the disk-guard auto-filed #1117 at 95% on odoo-gatekeeper,
+# where a single long-lived supervisor session had accumulated 4.36 GB of
+# subagent transcripts (3.05 GB > 7d) that no drain rung could reclaim.
+# Each subagent file is its own never-`/resume`d agent, so the subagent
+# leg drops ONLY the newest-per-dir protection; every other safety rule
+# (symlink refusal, age floor, size floor, `_target_in_live_use`,
+# never-follow-a-symlinked-dir) is reused unchanged. The v1 concern about
+# ad-hoc `**/*.jsonl` corpus scanners was resolved by AUDITING every
+# in-repo `subagents` reader (#1117): each is either bounded to a recency
+# window well under the 7d gzip floor (`cli_model_audit` 2h,
+# `cli_lane_liveness`/`watchdog.transcripts` 15min, `cli_authorship`
+# live-lane-only) or already gz-tolerant by construction (`burn.scan`'s
+# own mtime window; a >7d gzipped file falls outside it on a workstation).
 #
 # claude-history's own `.jsonl.gz` READ support (find_transcripts/
 # _read_jsonl, above in this file's CLAUDE_HISTORY_SCRIPT_CONTENT) landed
@@ -1381,7 +1393,7 @@ def _min_size_bytes_env(explicit, env_key, default):
 
 def discover_old_transcript_candidates(home=None, projects_dir=None, now=None,
                                        min_age_days=None, min_size_bytes=None,
-                                       proc_dir=None):
+                                       proc_dir=None, include_subagents=False):
     """Every MAIN (top-level, per-project) `.jsonl` transcript that is
     safe to gzip-at-rest -- #410. A list of dicts `{"path", "reason",
     "size"?, "age_days"?}` -- `reason` is `None` for a genuine candidate,
@@ -1392,7 +1404,7 @@ def discover_old_transcript_candidates(home=None, projects_dir=None, now=None,
       - only a `.jsonl` file DIRECTLY inside a project directory is ever
         considered -- an already-compressed `.jsonl.gz` sibling is never
         re-matched by the glob at all, and a `subagents/` descendant is
-        never walked into (v1 scope, see the module comment above);
+        never walked into (the MAIN leg; see `include_subagents` below);
       - the NEWEST `.jsonl` file in its OWN project directory is NEVER a
         candidate, regardless of age (protects `/resume`/`claude
         --continue` in a dormant project) -- computed per-directory, so a
@@ -1405,6 +1417,18 @@ def discover_old_transcript_candidates(home=None, projects_dir=None, now=None,
       - a surviving candidate still needs a live-process check
         (`_target_in_live_use`, #315's own /proc exe/cwd/fd scan, REUSED
         VERBATIM -- never a new mechanism) before being genuine.
+
+    `include_subagents` (default False, the v1/main-only behaviour -- #1117):
+    when True, the result ALSO carries every `<project>/<session>/
+    subagents/**/*.jsonl` transcript (each row the identical shape).
+    Turned on ONLY by the pressure caller (`disk_guard._plan_transcripts`);
+    the install-step report-only sweep keeps the default so its 30d
+    behaviour stays byte-identical. Every safety rule above is reused
+    unchanged for the subagent leg EXCEPT the newest-per-dir protection:
+    each subagent file is its OWN agent and is never `/resume`d, so there
+    is nothing to protect (a subagent idle >= the age floor is terminated).
+    Symlinked subagent files are refused individually and a symlinked
+    `subagents/` directory is never descended (`os.walk(followlinks=False)`).
     """
     import time as _time
     now = _time.time() if now is None else now
@@ -1475,6 +1499,71 @@ def discover_old_transcript_candidates(home=None, projects_dir=None, now=None,
                 continue
             out.append(entry)   # reason stays None -- genuine candidate
 
+    if include_subagents:
+        out.extend(_discover_subagent_transcript_candidates(
+            pdir, names, now, min_age_days, min_size_bytes, proc_dir))
+
+    return out
+
+
+def _discover_subagent_transcript_candidates(pdir, names, now, min_age_days,
+                                             min_size_bytes, proc_dir):
+    """The subagent leg of `discover_old_transcript_candidates` (#1117) --
+    every `<project>/<session>/subagents/**/*.jsonl` transcript, each row
+    the IDENTICAL `{"path", "reason", "age_days"?, "size"?}` shape as the
+    main leg. There is NO newest-per-dir protection here: each subagent
+    file is its own never-`/resume`d agent. Every other safety rule of the
+    main leg is reused unchanged (symlink refusal via `os.lstat` +
+    `is_symlink`, the age floor, the size floor, and the `_target_in_live_
+    use` open-fd/cwd/exe check). `os.walk(followlinks=False)` means a
+    symlinked `subagents/` directory (or any symlinked dir under it) is
+    never descended; an already-compressed `.jsonl.gz` file is never
+    matched (the suffix test is `.jsonl`)."""
+    out = []
+    for name in names:
+        d = pdir / name
+        if not d.is_dir():
+            continue
+        try:
+            walker = os.walk(d, followlinks=False)
+        except OSError:
+            continue
+        for dirpath, _dirnames, filenames in walker:
+            try:
+                comps = Path(dirpath).relative_to(d).parts
+            except ValueError:
+                continue
+            if "subagents" not in comps:
+                continue
+            for fn in sorted(filenames):
+                if not fn.endswith(".jsonl"):
+                    continue
+                p = Path(dirpath) / fn
+                is_link = p.is_symlink()
+                try:
+                    st = os.lstat(p)   # never follow -- report the LINK's own metadata
+                except OSError as e:
+                    out.append({"path": str(p), "reason": "could not stat: %s" % e})
+                    continue
+                entry = {"path": str(p), "reason": None,
+                        "age_days": (now - st.st_mtime) / 86400.0, "size": st.st_size}
+                if is_link:
+                    entry["reason"] = "symlink entry -- never followed, never compressed"
+                    out.append(entry)
+                    continue
+                if entry["age_days"] < min_age_days:
+                    entry["reason"] = "too recent (%.1fd < %sd)" % (entry["age_days"], min_age_days)
+                    out.append(entry)
+                    continue
+                if st.st_size < min_size_bytes:
+                    entry["reason"] = "below size floor (%d B < %d B)" % (st.st_size, min_size_bytes)
+                    out.append(entry)
+                    continue
+                if _target_in_live_use(p, proc_dir=proc_dir):
+                    entry["reason"] = "in live use (or undeterminable) -- skipped"
+                    out.append(entry)
+                    continue
+                out.append(entry)   # reason stays None -- genuine candidate
     return out
 
 
