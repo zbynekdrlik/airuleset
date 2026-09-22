@@ -183,6 +183,7 @@ from watchdog import lane_reconcile as _lane_reconcile       # #844 (post-compac
 from watchdog import nudge_gate as _nudge_gate               # #797 (cadence gate)
 from watchdog import roster as _roster                       # #804 (armed roster)
 from watchdog import resurrect as _resurrect                 # #804 (mode-5 relaunch)
+from watchdog import goal_turn_liveness as _turn_liveness     # #1110 (transcript liveness)
 
 
 # --------------------------------------------------------------------------- #
@@ -1787,6 +1788,27 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
             if out is not None:
                 out["detail"] = _nudge_gate.pane_budget_hold_reason(state, pid, now)
             return "skip:pane-budget"
+
+    # #1110 -- TRANSCRIPT-LIVENESS gate, evaluated BEFORE the render gate. A
+    # live turn renders a bare `❯` box between tool rounds, byte-identical to a
+    # genuinely idle prompt (the #1104 spinner belt cannot see it: there is no
+    # spinner row between tool calls), so the render alone is NOT proof the turn
+    # ended. The session TRANSCRIPT is the structured truth (#486): a running
+    # turn appends an entry at every tool round. When it was written within the
+    # live window, DEFER with ZERO keystrokes -- never type a /goal into a
+    # running turn (the swallowed-Enter + attempt-cap DROP the dev1 songplayer
+    # 22.9. hit). A zero-keystroke, non-terminal, non-counting defer (not in
+    # `_GOAL_KEYSTROKE_SKIPS`): the next sweep re-evaluates once the turn ends. A
+    # missing/unreadable transcript is NOT a liveness signal -> no defer here
+    # (fall through to the render gate, never a new wedge). `_tage` (the
+    # pre-keystroke age) is reused by the confirm split (`_verify_fail_word`).
+    _tage = _turn_liveness.transcript_age_s(tpath, now)
+    if _turn_liveness.turn_live(_tage):
+        _log_goal_sync("SKIP busy-transcript sid=%s cwd=%s tage=%d"
+                       % (sid, cwd, int(_tage)))
+        if out is not None:
+            out["detail"] = "transcript advanced %ds ago" % int(_tage)
+        return "skip:busy-transcript"
 
     kind, draft = watchdog._classify_boundary(captured)
     if kind == "no-input-line":
