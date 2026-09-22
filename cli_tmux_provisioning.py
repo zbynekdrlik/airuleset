@@ -1182,15 +1182,157 @@ def _managed_windows_create_body(windows):
                 not _SHELL_TOKEN_SAFE_RE.match(tail):
             continue
         cwd_sh = '"$HOME/%s"' % tail
+        # #1108: guard the create against a MISSING cwd BEFORE `new-window`. tmux
+        # falls back to `$HOME` when `-c` names a non-existent directory, which
+        # started a role-less Claude in `/home/gatekeeper` (owner incident
+        # 21.9.2026). The `elif [ ! -d <cwd> ]` branch turns that into a loud
+        # `>&2` line instead — a declared window is never opened into a fallback
+        # `$HOME`. The install clones the cwd (`ensure_declared_checkouts`), so
+        # this guard only fires when the clone failed / was skipped. ASCII `--`
+        # (not an em-dash) keeps the double-quoted echo byte-clean through the
+        # run-shell wrap. Only double quotes (the single-quote run-shell hold).
         blocks.append(
             'if tmux list-windows -t "$S" -F "##{window_name}" | grep -Fxq %s; '
             'then :; '
             'elif tmux list-windows -t "$S" -F "##{pane_current_path}" | '
             'grep -Fxq %s; then :; '
+            'elif [ ! -d %s ]; then '
+            'echo "declared window %s: cwd missing -- not created" >&2; '
             'else tmux new-window -d -t "$S" -n %s -c %s %s; fi'
-            % (name, cwd_sh, name, cwd_sh, launcher)
+            % (name, cwd_sh, cwd_sh, name, name, cwd_sh, launcher)
         )
     return "; ".join(blocks)
+
+
+def _default_checkout_run(argv, cwd=None):
+    """#1108: the real runner for `ensure_declared_checkouts` — a bounded
+    subprocess like `_default_tmux_run`, but it takes an optional `cwd` (a
+    `git clone` runs anywhere; `gh repo set-default` must run INSIDE the fresh
+    checkout). Separate injection point so a test can fake git/gh and assert the
+    exact argv + cwd without a real clone. A clone can be slow, so the timeout
+    is generous (300 s) rather than the tmux path's 8 s."""
+    import subprocess
+    return subprocess.run(argv, capture_output=True, text=True, timeout=300,
+                          cwd=cwd)
+
+
+def _declared_window_target(cwd, home):
+    """Resolve a declared window's `cwd` (`~/x` or a plain relative `x`) to an
+    absolute path under `home` — the same `$HOME`-anchoring the renderer's
+    `-c "$HOME/<tail>"` applies. `validate_windows` forbids an absolute cwd and
+    `..`, so a leading `~/` OR a plain relative path both anchor under home."""
+    tail = cwd[2:] if cwd.startswith("~/") else cwd.lstrip("/")
+    return os.path.join(home, tail)
+
+
+def ensure_declared_checkouts(windows, home=None, run=None):
+    """#1108: provision each DECLARED managed window's git checkout at install
+    time — the missing half the #1074 design assumed existed. For a window that
+    carries `repo`:
+
+      * cwd ABSENT  -> `git clone -q -o origin [-b <branch>]
+        https://github.com/<repo>.git <abs-cwd>` then `gh repo set-default
+        <repo>` INSIDE the fresh checkout (the box's own gh identity, the same
+        one every stream box uses).
+      * cwd PRESENT -> UNTOUCHED — never a reset/pull; a dirty or diverged tree
+        is the owner's. Idempotent: one clone per lifetime of the checkout.
+      * clone FAILURE (or an unsafe repo/branch shape) -> a LOUD non-fatal line
+        is appended to the returned list; the PARTIAL directory a failed/timed-out
+        clone may leave is removed (so the next install RETRIES it and it is never
+        masked as `(present)` — the exact broken-checkout outcome #1108 fixes,
+        review F1); provisioning continues to the next window; install never aborts.
+
+    A window WITHOUT `repo` (the FLOW primary window, every non-declaring box)
+    is skipped entirely — byte-identical to today (no clone, no runner call).
+    The loud lines are ASCII (`WARN:`, not `⚠`, review F4) — `push` runs install
+    over ssh where `LANG` is often unset, so a non-ASCII byte would raise
+    UnicodeEncodeError at print time and swallow the specific reason.
+    Returns the list of LOUD report lines (`[]` on full success); the caller
+    (`cmd_install`) prints them. `run(argv, cwd=None)` is the injectable runner
+    (default `_default_checkout_run`); `home` defaults to the running user's."""
+    import cli_fleet
+    import shutil
+    runner = run or _default_checkout_run
+    home = home or os.path.expanduser("~")
+    lines = []
+    for w in (windows or []):
+        repo = (w.get("repo") or "").strip()
+        if not repo:
+            continue                       # no managed checkout -> nothing to do
+        name = (w.get("name") or "").strip()
+        cwd = (w.get("cwd") or "").strip()
+        branch = (w.get("branch") or "").strip()
+        if not name or not cwd:
+            continue
+        target = _declared_window_target(cwd, home)
+        if os.path.isdir(target):
+            continue                       # present -> UNTOUCHED
+        # defense-in-depth at the clone/argv boundary (validate_windows also
+        # gates the declaration; this guards a hand-edited / future entry).
+        if not cli_fleet._repo_ok(repo) or (branch and
+                                            not cli_fleet._branch_ok(branch)):
+            lines.append("WARN: declared window %s: unsafe repo/branch "
+                         "(%r/%r) -- not cloned" % (name, repo, branch))
+            continue
+        argv = ["git", "clone", "-q", "-o", "origin"]
+        if branch:
+            argv += ["-b", branch]
+        argv += ["https://github.com/%s.git" % repo, target]
+        try:
+            res = runner(argv)
+        except Exception as e:             # a raised runner (timeout, OSError)
+            # a SIGKILL'd (timed-out) clone leaves a partial dir -> remove it so
+            # the next install retries (F1); safe, target was proven absent above.
+            shutil.rmtree(target, ignore_errors=True)
+            lines.append("WARN: declared window %s: checkout %s could not be "
+                         "cloned (%s) -- window will not open" % (name, cwd, e))
+            continue
+        if getattr(res, "returncode", 1) != 0:
+            shutil.rmtree(target, ignore_errors=True)     # F1: no partial mask
+            err = (getattr(res, "stderr", "") or "").strip().splitlines()
+            tail = err[-1] if err else "exit %s" % getattr(res, "returncode", "?")
+            lines.append("WARN: declared window %s: checkout %s could not be "
+                         "cloned (%s) -- window will not open" % (name, cwd, tail))
+            continue
+        # set the fresh checkout's default repo (the odoo-erp-infra idiom), so
+        # `gh` in that window targets the right repo. Non-fatal: a failure here
+        # leaves a valid checkout — logged (both a non-zero rc AND a raise, review
+        # F3), never a LOUD line, never aborts the install.
+        try:
+            sd = runner(["gh", "repo", "set-default", repo], cwd=target)
+            if getattr(sd, "returncode", 0) != 0:
+                print("  declared window %s: gh repo set-default rc=%s "
+                      "(non-fatal, checkout is valid)"
+                      % (name, getattr(sd, "returncode", "?")), file=sys.stderr)
+        except Exception as e:
+            print("  declared window %s: gh repo set-default failed "
+                  "(non-fatal, checkout is valid): %s" % (name, e),
+                  file=sys.stderr)
+    return lines
+
+
+def declared_window_status_lines(windows, home=None):
+    """#1108 item 4: one `airuleset.py status` line per DECLARED managed window
+    — `window <name>: cwd <path> (present|MISSING) role=<role> mode=<mode>` — so
+    a missing role-window checkout is visible without ssh. `home` (default the
+    running user's) resolves the declared `~/...`/relative cwd for the
+    present/MISSING probe; `<path>` is shown as the DECLARED cwd (readable, and
+    matching the declaration). Returns `[]` when no windows are declared (every
+    target but gk), keeping the status output byte-identical there."""
+    home = home or os.path.expanduser("~")
+    lines = []
+    for w in (windows or []):
+        name = (w.get("name") or "").strip()
+        cwd = (w.get("cwd") or "").strip()
+        if not name or not cwd:
+            continue
+        present = ("present" if os.path.isdir(_declared_window_target(cwd, home))
+                   else "MISSING")
+        role = w.get("role") or "-"
+        mode = w.get("mode") or "-"
+        lines.append("window %s: cwd %s (%s) role=%s mode=%s"
+                     % (name, cwd, present, role, mode))
+    return lines
 
 
 def render_stream_tmux_window_block(name, windows=None):
@@ -1285,15 +1427,28 @@ def _impl_window_create_snippet(marker):
     # defense-in-depth at the shell boundary — bake it only when it passes the
     # stricter token check (same predicate _managed_windows_create_body uses).
     cwd_clause = ""
+    # #1108: the SAME missing-cwd guard `_managed_windows_create_body` carries —
+    # a declared window is never opened into a fallback `$HOME` (tmux's `-c`
+    # behaviour on a missing dir). When the marker declares a cwd, wrap the
+    # create in `if [ ! -d <cwd> ]; then <loud >&2 line>; else <create>; fi`. No
+    # cwd -> no `-c` and no guard (opens in the session's own cwd, as before,
+    # byte-identical). ASCII `--`, only double quotes (the single-quote hold).
+    cwd_guard = ""
+    guard_close = ""
     if cwd and _SHELL_TOKEN_SAFE_RE.match(cwd):
         cwd_clause = '-c "%s" ' % cwd
+        cwd_guard = ('if [ ! -d "%s" ]; then '
+                     'echo "declared window impl: cwd missing -- not created" '
+                     '>&2; else ' % cwd)
+        guard_close = "fi; "
     return (
         'if [ -f %s ] && ! tmux list-windows -t "$S" -F "##{window_name}" | '
         'grep -Fxq impl; then '
+        '%s'
         'tmux new-window -d -t "$S" -n impl %s%s; '
         'tmux set-window-option -t "$S:impl" remain-on-exit on 2>/dev/null || '
-        'true; fi'
-        % (marker_file, cwd_clause, launcher))
+        'true; %sfi'
+        % (marker_file, cwd_guard, cwd_clause, launcher, guard_close))
 
 
 def _session_created_hook_value(name, windows, marker=_HOOK_MARKER_UNSET):
