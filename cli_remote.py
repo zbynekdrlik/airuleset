@@ -1317,32 +1317,6 @@ def _compact_hardoff_postcheck():
     return 'echo "compact: hard-off (code)"'
 
 
-def _persist_measured_filedrop_ports(measured):
-    """#1115: merge the push-measured filedrop ports into the controller cache
-    (~/.claude/drop-lanes.json) so `drop_ingress_rules_for_controller()` renders
-    each lane's `/s/` rule at the target's REAL port (the in-code literal becomes
-    the fallback). Merged into any existing cache so a partial push (some targets
-    unreachable this run) never drops a previously-measured port; then PRUNED to
-    the current fleet's lane keys so a removed/renamed account leaves no stale
-    entry that could later mis-target a reused hostname (review finding).
-    Best-effort: any write failure is loud but never fails the push."""
-    import cli_drop_gateway
-    if not measured:
-        return
-    try:
-        merged = cli_drop_gateway.read_drop_lanes_cache()
-        merged.update(measured)
-        valid = {cli_drop_gateway.drop_lanes_cache_key(n, u)
-                 for (n, u) in cli_drop_gateway.DROP_LANES}
-        pruned = {k: v for k, v in merged.items() if k in valid}
-        cli_drop_gateway.write_drop_lanes_cache(pruned)
-        print("  drop-lanes cache: wrote %d filedrop port(s) to %s"
-              % (len(measured), cli_drop_gateway.DROP_LANES_CACHE))
-    except Exception as e:  # noqa: BLE001 — best-effort; never fail the push
-        print("  ⚠ drop-lanes cache write failed (non-fatal): %r" % e,
-              file=sys.stderr)
-
-
 def _deploy_to_all_remotes(failed, auth_failed):
     """Deploy this push to every managed remote (step 3 + 3b of cmd_push).
 
@@ -1617,8 +1591,10 @@ def _deploy_to_all_remotes(failed, auth_failed):
                               f"(see #251/#263/#300/#326/#347's own onboarding "
                               f"checklist).", file=sys.stderr)
 
-        # #1115: persist the harvested filedrop ports to the controller cache.
-        _persist_measured_filedrop_ports(measured_filedrop_ports)
+        # #1115: persist the harvested filedrop ports to the controller cache
+        # (leaf helper; DROP_LANES injected for the stale-key prune).
+        cli_drop_gateway.persist_measured_filedrop_ports(
+            measured_filedrop_ports, cli_drop_gateway.DROP_LANES)
 
         # #347: any shared host that never got a TRUSTWORTHY audit this run
         # (every connection failed before the appended `ls` ever ran, or every

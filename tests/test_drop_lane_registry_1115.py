@@ -24,6 +24,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cli_drop_gateway as dg          # noqa: E402
+import cli_drop_lanes as dl            # noqa: E402 — the #1115 registry/cache leaf
 import cli_fleet                       # noqa: E402
 import filedrop                        # noqa: E402
 
@@ -314,9 +315,11 @@ class TestControllerIngressReadsCache(unittest.TestCase):
                           "http://100.118.174.27:8790"), rules)
 
     def test_default_cache_path_read_when_present(self):
-        # cache=None -> reads DROP_LANES_CACHE; patch it to our temp file.
+        # cache=None -> the leaf reads DROP_LANES_CACHE; patch the LEAF's constant
+        # (the read happens in cli_drop_lanes after the #993 split — the gateway
+        # re-export is a separate binding).
         dg.write_drop_lanes_cache({"subdev/david1": 9712}, path=self.cache)
-        with mock.patch.object(dg, "DROP_LANES_CACHE", Path(self.cache)):
+        with mock.patch.object(dl, "DROP_LANES_CACHE", Path(self.cache)):
             rules = dg.drop_ingress_rules_for_controller()
         self.assertIn(("drop-david.newlevel.media", "^/s/",
                        "http://100.118.174.27:9712"), rules)
@@ -392,6 +395,42 @@ class TestFiledropPortProbe(unittest.TestCase):
     def test_parse_empty(self):
         self.assertIsNone(dg.parse_filedrop_port(""))
         self.assertIsNone(dg.parse_filedrop_port(None))
+
+
+class TestSplitImportBothOrders(unittest.TestCase):
+    """#1115 (#993 split): cli_drop_lanes is a true leaf (imports only cli_fleet,
+    never cli_drop_gateway), so importing EITHER module first must succeed with no
+    cross-import cycle. A fresh subprocess per order (a stale sys.modules would
+    mask a cycle)."""
+
+    def _fresh_import(self, first):
+        import subprocess
+        code = ("import %s as a; import cli_drop_gateway as g; "
+                "import cli_drop_lanes as l; "
+                "assert len(g.DROP_LANES) == len(l.build_drop_lanes("
+                "  __import__('cli_fleet').REMOTE_HOSTS, seed=g._SEED_DROP_LANES,"
+                "  drop_lane_cls=g.DropLane,"
+                "  controller_tunnel_uuid=g._CONTROLLER_TUNNEL_UUID,"
+                "  port_base=g.DROP_PORT_BASE, port_max=g.DROP_PORT_MAX)); "
+                "print('OK', len(g.DROP_LANES))" % first)
+        r = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0,
+                         "import-%s-first failed: %s" % (first, r.stderr))
+        self.assertIn("OK", r.stdout)
+
+    def test_gateway_first(self):
+        self._fresh_import("cli_drop_gateway")
+
+    def test_leaf_first(self):
+        self._fresh_import("cli_drop_lanes")
+
+    def test_leaf_does_not_import_gateway(self):
+        # the leaf must never import cli_drop_gateway (that would be the cycle).
+        src = (Path(__file__).resolve().parent.parent / "cli_drop_lanes.py").read_text()
+        self.assertNotIn("import cli_drop_gateway", src)
 
 
 class TestLoopbackBind(unittest.TestCase):
