@@ -16,14 +16,14 @@ from pathlib import Path
 from unittest import TestCase, main
 
 ROOT = Path(__file__).resolve().parent.parent
-BODY_PATH = ROOT / "skills" / "odoo-client-messaging" / "client-board-tasks.md"
+BODY_DIR = ROOT / "skills" / "odoo-client-messaging"  # #1102: CORE + companions
 
 
 class TestClientBoardTasksDoctrine949(TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.body = BODY_PATH.read_text(encoding="utf-8")
+        cls.body = "\n".join((BODY_DIR / f).read_text(encoding="utf-8") for f in ("client-board-tasks.md", "client-board-stages.md", "client-board-questions.md", "client-board-attachments.md"))
         cls.normed = " ".join(cls.body.split())
 
     # -- Injection identity (test_situational_injection.py depends on the H1) --

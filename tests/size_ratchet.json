@@ -190,6 +190,7 @@
     "tests/test_cloudflare_dns_983.py": 406,
     "tests/test_cluster_le_split.py": 202,
     "tests/test_cluster_lf_split.py": 209,
+    "tests/test_cofire_budget_1102.py": 402,
     "tests/test_compact_helpers_1084.py": 532,
     "tests/test_compact_reconcile_844.py": 186,
     "tests/test_compact_removed_1084.py": 505,

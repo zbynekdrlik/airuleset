@@ -1,6 +1,6 @@
 # Client Board Task Attachments — recipe (#1098)
 
-The extended `project.task` board-task attachment recipe, relocated VERBATIM out of the injected `read-with-attachments.md` so the #745 three-way co-fire (comprehensive-logging + read-attachments + read-reactions) fits under `MAX_TOTAL=14000` (`hooks/inject-situational-rule.sh`, #1098) — nothing is condensed; this file has NO situational-trigger row (never auto-injected) and is read on demand from the pointer in `read-with-attachments.md` and from rule 15 in `client-board-tasks.md`.
+Companion of `client-board-tasks.md` (CORE). Carries rule 15 (moved verbatim, #1102) + the `project.task` attachment recipe (relocated verbatim out of `read-with-attachments.md`, #1098). Auto-loads on a `project.task` attachment read (its own row, #1102); also read on demand from the `read-with-attachments.md` pointer.
 
 ## project.task — a client board task's attachments (#1098)
 
@@ -59,3 +59,22 @@ d.mkdir(parents=True, exist_ok=True)
 `att 37652: rozmery 1575/1924`; a question to the owner about the task carries
 `Prílohy: att <ids> prečítané (<hodnoty>)` or `Prílohy: žiadne` (enforced by
 Check 9 in `stop-check-question-quality.sh`).
+
+---
+
+### 15. Prílohy v popise úlohy = primárny zdroj (#1098)
+
+**Pri KAŽDEJ novej/zmenenej board úlohe — a vždy pred filing ticketu aj pred
+parkovaním — prečítaj VŠETKY prílohy** z troch zdrojov (plný recept v `client-board-attachments.md`):
+
+- `ir.attachment` na úlohe — `search_read([["res_model","=","project.task"],["res_id","=",tid],["res_field","=",False]], ["id","name","mimetype"])` (Odoo skryto predradí `('res_field','=',False)` — polia viazané prílohy vidno len s `["res_field","!=",False]`)
+- att-id z popisu — `re.findall(r"/web/(?:image|content)/(\d+)", desc or "")` (vložený Excel = `/web/content/<id>`)
+- prílohy zo správ úlohy — `search_read("mail.message",[["model","=","project.task"],["res_id","=",tid]],["attachment_ids"])`
+
+Stiahni každú do `~/.claude/work-products/<projekt>-podklady-<D.M.YYYY>/t<task>-<att>.<ext>` a Read ju. V GH ticket-e cituj KAŽDÉ att-id + hodnoty z neho (úplnosť: každé att-id otvorenej board úlohy sa vyskytuje v body/komentároch ticketu — stream to audituje skriptom).
+
+`needs-answer` daj LEN na to, čo v prílohe NIE JE — a aj vtedy implementuj s čestným (deklarovaným) null defaultom a pokračuj, NIKDY nečakaj na odpoveď.
+
+KAŽDÁ otázka nesúca Odoo task URL (aj interná dev úloha) nesie riadok `Prílohy: att <ids> prečítané (<hodnoty>)` alebo `Prílohy: žiadne` (Check 9 v `stop-check-question-quality.sh`).
+
+Owner 21.9.2026 verbatim (rule 12): „preco tuto ulohu vobec neriesis tam v popise je screenshot", „aj ostatne ulohy skontroluj popis fotky".
