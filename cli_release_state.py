@@ -113,6 +113,16 @@ MERGED_UNRELEASED_MAX_PRS = 60
 # progress and the remainder fills on later refreshes.
 MERGED_UNRELEASED_META_BUDGET = 15
 
+# #1112 — the TWO-BRANCH analog of the (b) 60-PR cap: a two-branch repo derives M
+# from the COMMITS in `<main>..<prefix>/dev` (each commit is one unit of merged
+# work, like each PR is in the 3-branch model), so the cap is on COMMITS not PRs.
+# A normal between-cuts two-branch backlog is a few dozen tickets × a few commits
+# each (bump/red/green/review/merge), well under this; a stale/forked `main..dev`
+# (the #1090 fork-clone pathology, thousands of commits) is far above — hide M
+# with a journal reason rather than derive a garbage set. Deliberately higher than
+# MERGED_UNRELEASED_MAX_PRS: 60 would false-hide a legitimate two-branch backlog.
+MERGED_UNRELEASED_MAX_COMMITS = 400
+
 
 class _QuotaSentinel:
     """(d) A distinct marker a `pr_meta_fn` returns when `gh` reported a
@@ -151,6 +161,34 @@ def _default_git_log(root, rng):
         oid, _, subj = line.partition("\t")
         if oid:
             rows.append((oid, subj))
+    return rows
+
+
+def _default_git_log_full(root, rng):
+    """#1112 — `git -C <root> log --format=<oid US subject US body RS> <rng>` ->
+    [(oid, subject, body), ...] for the TWO-BRANCH source, which reads the ticket
+    from each commit's SUBJECT + BODY (not per-PR REST). Unit/record separators
+    (US=\\x1f, RS=\\x1e) survive a body with newlines/tabs. Returns [] on any
+    error OR a missing ref (the caller gates on ref existence first, so a missing
+    range never reaches here). No network (remote-tracking refs only; never
+    fetches, exactly like `_default_git_log`)."""
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(root), "log",
+             "--format=%H%x1f%s%x1f%b%x1e", rng],
+            capture_output=True, text=True, timeout=15)
+    except Exception:
+        return []
+    if r.returncode != 0:
+        return []
+    rows = []
+    for rec in (r.stdout or "").split("\x1e"):
+        rec = rec.lstrip("\n")
+        if not rec:
+            continue
+        parts = rec.split("\x1f", 2)
+        if len(parts) >= 3 and parts[0]:
+            rows.append((parts[0], parts[1], parts[2]))
     return rows
 
 
@@ -391,12 +429,58 @@ def _pr_introducing_commits(root, git_fn, prefix="origin"):
     return out
 
 
-def _compute_merged_unreleased(root, git_fn, pr_meta_fn, cache_path, slug,
-                               slug_fn, remote_fn, ref_exists_fn):
+def _two_branch_main_ref(root, prefix, ref_exists_fn):
+    """#1112 — the release/default branch a two-branch repo cuts INTO:
+    `<prefix>/main`, else `<prefix>/master` where main is absent. None when
+    neither exists (M cannot be derived → the caller returns empty)."""
+    for base in ("main", "master"):
+        ref = "%s/%s" % (prefix, base)
+        if ref_exists_fn(root, ref):
+            return ref
+    return None
+
+
+def _compute_two_branch(root, git_full_fn, prefix, ref_exists_fn):
+    """#1112 — the M set for a TWO-BRANCH repo (dev -> main, no develop/staging).
+    Walks `<main-ref>..<prefix>/dev` and derives implemented tickets from each
+    commit's SUBJECT + BODY through the SAME `_issue_refs` the 3-branch path uses
+    (subject `#N` incl. `feat(#N):`/`(#N)`/`[#N]` forms + body closing-keyword
+    refs, with the revert exclusion) — `exclude_pr=0` never discards a real
+    ticket. No REST, no cache, no network. Fail-safe EMPTY (missing main ref,
+    empty range, or a range over the cap)."""
+    main_ref = _two_branch_main_ref(root, prefix, ref_exists_fn)
+    if main_ref is None:
+        return frozenset()
+    dev_ref = "%s/dev" % prefix
+    commits = git_full_fn(root, "%s..%s" % (main_ref, dev_ref))
+    if not commits:
+        return frozenset()
+    # The two-branch analog of the (b) cap: a range far past a normal
+    # between-cuts backlog means stale/forked refs, not real release readiness —
+    # hide M with a journal reason (mirrors the 3-branch cap's stderr line).
+    if len(commits) > MERGED_UNRELEASED_MAX_COMMITS:
+        d_main = _default_ref_date(root, main_ref)
+        d_dev = _default_ref_date(root, dev_ref)
+        sys.stderr.write(
+            "merged-unreleased: %d commits in %s..%s range "
+            "(main %s, dev %s) — stale/oversized range, M hidden\n"
+            % (len(commits), main_ref, dev_ref, d_main or "?", d_dev or "?"))
+        return frozenset()
+    issues = set()
+    for oid, subj, body in commits:
+        for n in _issue_refs(subj, body, 0):
+            issues.add(int(n))
+    return frozenset(issues)
+
+
+def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path,
+                               slug, slug_fn, remote_fn, ref_exists_fn):
     if remote_fn is None:
         remote_fn = _default_remote_slug
     if ref_exists_fn is None:
         ref_exists_fn = _default_ref_exists
+    if git_full_fn is None:
+        git_full_fn = _default_git_log_full
     # Read the LOCAL `origin` remote ONCE (no network) and reuse it for BOTH the
     # slug resolution and the fork check (review #1090 — avoids a redundant
     # `git remote get-url origin` on the hot footer path).
@@ -426,6 +510,18 @@ def _compute_merged_unreleased(root, git_fn, pr_meta_fn, cache_path, slug,
     if prefix is None:
         sys.stderr.write(reason + "\n")
         return frozenset()
+    # #1112 — a TWO-BRANCH repo (dev -> main, no develop/staging): commits land
+    # on `dev` directly carrying the ticket in the SUBJECT, no PR merge commits,
+    # so `_pr_introducing_commits` finds nothing. When `<prefix>/dev` exists but
+    # NEITHER `<prefix>/develop` NOR `<prefix>/staging` does, derive M from the
+    # `<main>..<prefix>/dev` range's commit subjects + bodies. The `dev`-first
+    # check short-circuits so a 3-branch (odoo-erp: no `dev`) or a no-`dev` repo
+    # pays exactly ONE local `git rev-parse`, and the 3-branch path below stays
+    # byte-identical (this branch is NEVER taken when develop/staging exist).
+    if (ref_exists_fn(root, "%s/dev" % prefix)
+            and not ref_exists_fn(root, "%s/develop" % prefix)
+            and not ref_exists_fn(root, "%s/staging" % prefix)):
+        return _compute_two_branch(root, git_full_fn, prefix, ref_exists_fn)
     pr_commits = _pr_introducing_commits(root, git_fn, prefix)
     if not pr_commits:
         return frozenset()   # two-branch repo / no merged-unreleased commits
@@ -482,7 +578,8 @@ def _compute_merged_unreleased(root, git_fn, pr_meta_fn, cache_path, slug,
 
 def merged_unreleased_issues(root, git_fn=None, pr_meta_fn=None,
                              cache_path=None, now=None, slug=None, slug_fn=None,
-                             remote_fn=None, ref_exists_fn=None):
+                             remote_fn=None, ref_exists_fn=None,
+                             git_full_fn=None):
     """The set of issue numbers whose fix PR is merged into develop/staging but
     NOT yet in main (`M`). `slug` names the canonical `owner/repo` for the
     PR-meta REST read + the cache filename; `slug_fn` is an alternative resolver.
@@ -492,19 +589,22 @@ def merged_unreleased_issues(root, git_fn=None, pr_meta_fn=None,
     pays zero gh). `now` is accepted for signature stability (the cache is
     append-only; a merged PR never changes). `remote_fn`/`ref_exists_fn` (#1090)
     are the fork-aware range seams (default = local git reads; injected in
-    tests). Memoised per process, BYPASSED when any seam is injected (tests)."""
+    tests). `git_full_fn` (#1112) is the TWO-BRANCH range seam reading
+    oid+subject+body (default `_default_git_log_full`). Memoised per process,
+    BYPASSED when any seam is injected (tests)."""
     root = str(root or "").rstrip("/")
     if not root:
         return frozenset()
     injected = (git_fn is not None or pr_meta_fn is not None
-                or remote_fn is not None or ref_exists_fn is not None)
+                or remote_fn is not None or ref_exists_fn is not None
+                or git_full_fn is not None)
     if not injected:
         memo = _MEMO.get(("mu", root))
         if memo is not None:
             return memo
     result = _compute_merged_unreleased(
-        root, git_fn or _default_git_log, pr_meta_fn, cache_path, slug, slug_fn,
-        remote_fn, ref_exists_fn)
+        root, git_fn or _default_git_log, git_full_fn, pr_meta_fn, cache_path,
+        slug, slug_fn, remote_fn, ref_exists_fn)
     if not injected:
         _MEMO[("mu", root)] = result
     return result
