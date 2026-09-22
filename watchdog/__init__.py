@@ -5177,6 +5177,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
 
     def _job_goal_lane_sweep():
         from watchdog import goal as _goal_mod
+        from watchdog import bounce_verdict_recheck as _bv_mod   # #1066 lane B
         logs = _goal_mod.goal_lane_sweep(
             now, run=run, dry_run=dry_run, projects_dir=projects_dir,
             state=state, handled=compact_handled_this_sweep,
@@ -5192,6 +5193,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
             deploy_state_fetch=deploy_state_fetch,       # #944
             infra_queue_fetch=infra_queue_fetch,         # #1029 role-aware
             resolve_role_fn=resolve_role_fn,             # #1029 role-aware
+            bounce_unhandled_fetch=_bv_mod._default_bounce_unhandled_fetch,  # #1066 lane B
             persist=lambda: save_state(state_path, state))  # #1023 timeout-race write-through
         # #1103 — finished-worktree HYGIENE SWEEP rides Job 20 (NO new registry
         # job): a lane worktree that is merged into its target or handed off (no

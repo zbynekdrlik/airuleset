@@ -174,7 +174,11 @@ class BounceNudgeAdoption(unittest.TestCase):
     def test_verified_submit_persists_dedup(self):
         state = {}
         self._go(state, [1705], result=True)
-        self.assertEqual(state["bounce"]["seen"]["demo"]["tickets"], [1705],
+        # #1066 lane B — the dedup value is now a SORTED `N@<verdict_ts>` token
+        # LIST (`_bounce_seen_tokens`), not the bare int list; with no
+        # bounce_unhandled cache for this fake root the verdict map is empty, so
+        # the token stays a bare `"1705"` (= pre-#1066 int-set dedup, string form).
+        self.assertEqual(state["bounce"]["seen"]["demo"]["tickets"], ["1705"],
                          "a verified nudge books the set delivered")
 
     def test_swallowed_submit_does_not_dedup_itself_out(self):

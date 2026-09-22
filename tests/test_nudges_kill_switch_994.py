@@ -310,15 +310,21 @@ class TestNudgesCLI(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class TestNudgesBadge(unittest.TestCase):
     def test_off_when_all_off_fraction_when_some_on(self):
-        # #1023: default (all off) shows `nudges OFF`; some staged on shows
-        # `nudges N/M` — the badge is never hidden (the switch state is always
-        # visible now).
+        # #1039 fix-forward: default (all off) shows `nudges 0/M · recovery on`
+        # (never the word OFF); some staged on shows `nudges N/M · recovery on`
+        # — the badge is never hidden (the switch state is always visible now).
+        # Deliberately overturned wording (was `nudges OFF`), not a weakened
+        # invariant: the badge still renders the exact switch state, just in
+        # plain words the owner can read.
         with TemporaryDirectory() as home:
-            self.assertIn("nudges OFF", statusbar.nudges_off_segment(home=home))
+            seg0 = statusbar.nudges_off_segment(home=home)
+            self.assertIn("nudges 0/", seg0)
+            self.assertIn("recovery on", seg0)
+            self.assertNotIn("OFF", seg0)
             wd.set_nudge_kind("queue-arrival", True, home=home)
             seg = statusbar.nudges_off_segment(home=home)
             self.assertIn("nudges 1/", seg)
-            self.assertNotIn("nudges OFF", seg)
+            self.assertNotIn("OFF", seg)
 
 
 # --------------------------------------------------------------------------- #

@@ -990,8 +990,18 @@ class TestReducedAuthorityTemplatesSurfaceParkedWork(TestCase):
                              line.index(self.TICKETS_STATUS_REFRESH))
 
     def test_the_stop_text_states_parked_tickets_are_gatekeeper_owned(self):
+        # #1066 lane B — item 1 shortened the parked parenthetical (dropping the
+        # verbose "gatekeeper-owned/user-parked/ops-wait" expansion to fit the
+        # arm-cap budget while ADDING the bounce clause). The parked semantics
+        # survive via the `gk N`/`U N`/`W N` = parked markers; a returned
+        # `bounce K` now BLOCKS 🏁 until `slice-quals --bounces --unhandled`
+        # prints nothing (the whole point of the ticket — a bounce is NOT a
+        # silently-parked lane).
         for profile in (BRANCH_MERGE, FORK_NO_MERGE):
-            self.assertIn("gatekeeper-owned", goal_lines()[profile])
+            line = goal_lines()[profile]
+            self.assertIn("= parked", line)
+            self.assertIn("bounce K", line)
+            self.assertIn("slice-quals --bounces --unhandled", line)
 
     def test_the_surfacing_proof_never_blocks_termination(self):
         # the presence of the evidence is required (declared_commands above);

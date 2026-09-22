@@ -177,6 +177,7 @@ from watchdog import session_status as _session_status  # #486 G3 (reaper)
 from watchdog import ops_wait_recheck as _ops_wait_recheck  # #547 (W re-check)
 from watchdog import release_gap as _release_gap             # #616 (release gap)
 from watchdog import queue_arrival_recheck as _queue_arrival  # #733 (gk arrival)
+from watchdog import bounce_verdict_recheck as _bounce_verdict  # #1066 (bounce)
 from watchdog import u_freshness as _u_freshness             # #797 (U reconcile)
 from watchdog import lane_reconcile as _lane_reconcile       # #844 (post-compact lane reconcile)
 from watchdog import nudge_gate as _nudge_gate               # #797 (cadence gate)
@@ -5164,7 +5165,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     queue_classify=None, dispatchable_fetch=None,
                     u_fetch=None, reconcile_fetch=None,
                     deploy_state_fetch=None, infra_queue_fetch=None,
-                    resolve_role_fn=None, persist=None):
+                    resolve_role_fn=None, persist=None,
+                    bounce_unhandled_fetch=None):
     """The lane-occupancy driver -- the second half of job 20's new body.
     For every candidate pane whose goal is genuinely ARMED right now, runs
     `goal_lane_occupancy_nudge`. Owns its own small per-sid state namespace
@@ -5213,6 +5215,11 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
     # so unlike the gh-subprocess riders it is gated only on its seam being wired
     # (`u_fetch`, default the statusbar-backed reader in run_once).
     urecs = state.setdefault("u_freshness", {}) if u_fetch is not None else {}
+    # #1066 lane B -- BOUNCE-verdict rider (reduced-authority panes): a LOCAL
+    # tickets-status cache read (ZERO gh, like #797), so gated only on its
+    # `bounce_unhandled_fetch` seam being wired.
+    brecs = (state.setdefault("bounce_verdict", {})
+             if bounce_unhandled_fetch is not None else {})
     # #844 -- post-compact lane reconcile: keyed on the transcript's observed
     # compaction (ZERO gh unless a compaction is actually observed), gated only on
     # its `reconcile_fetch` seam being wired (default the git/gh reader in run_once).
@@ -5541,6 +5548,19 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                     # silent branch (#486).
                     logs.append("batch-nudge %s -> deferred (not typed: box "
                                 "busy/raced)" % loc)
+        # #1066 lane B -- BOUNCE-verdict rider for this armed REDUCED-authority
+        # pane. Runs AFTER the batch delivery + every #733 rider so the shared
+        # per-sweep `handled` set (at most ONE keystroke per pane per sweep) is
+        # honoured: a pane any earlier rider/batch already typed this sweep is
+        # deferred (base kept OLD, re-detects next sweep). Direct-send (not
+        # batched); its own authority gate skips FULL-authority panes, so it
+        # never collides with the full-only queue-arrival rider.
+        if bounce_unhandled_fetch is not None:
+            logs += _bounce_verdict.goal_bounce_verdict_recheck(
+                now, run, brecs, sid, cwd, pid, tpath, loc, dry_run, handled,
+                bounce_unhandled_fetch=bounce_unhandled_fetch, state=state,
+                sleep_fn=sleep_fn, captured=captured,
+                persist=persist, budget_left_fn=_budget_left_fn)
         # Clear the dark_watch batch entry for this sid (consumed or empty).
         state.get("nudge_batch", {}).pop(sid, None)
     # #804 -- DEAD-SESSION census: a rostered EXPECTED-armed stream with NO live
@@ -5598,6 +5618,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         # #1023: the #921 `busy_first_seen` prune is gone with the aged override —
         # no rider writes that state any more.
         _queue_arrival._prune_queue_arrival_orphans(qrecs, visited_sids, now)  # #733
+        if bounce_unhandled_fetch is not None:
+            _bounce_verdict._prune_bounce_verdict_orphans(brecs, visited_sids, now)  # #1066
         if u_fetch is not None:
             _u_freshness._prune_u_freshness_orphans(urecs, visited_sids, now)  # #797
         if reconcile_fetch is not None:

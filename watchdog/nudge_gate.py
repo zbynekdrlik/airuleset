@@ -110,6 +110,10 @@ import time
 # Every new gated category MUST be added to exactly ONE of these frozensets.
 WORK_DRIVING_CATEGORIES = frozenset({
     "lane-occupancy", "release-gap", "queue-arrival", "lane-reconcile",
+    # #1066 lane B — a fresh gk BOUNCE verdict on a reduced-authority stream's
+    # own ticket DRIVES work (ACK + dispatch a lane); the goal-lane rider
+    # `bounce_verdict_recheck` delivers it under this per-kind 60-min floor.
+    "bounce-verdict",
 })
 
 AUDIT_CATEGORIES = frozenset({

@@ -84,7 +84,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from _hook_state_cleanup import MODULE_HOOK_HOME  # noqa: E402  (#1046 hermetic HOME)
 
 REPO = Path(__file__).resolve().parent.parent
 _SELF = Path(__file__).resolve()
@@ -110,7 +109,12 @@ _EXEC_CALL_NAMES = {"run", "Popen", "call", "check_call", "check_output"}
 
 def _tracked_files():
     out = subprocess.run(["git", "ls-files", "-z", *_SCAN_DIRS],
-                         cwd=REPO, capture_output=True, text=True, check=True, env={**os.environ, "HOME": MODULE_HOOK_HOME})
+                         cwd=REPO, capture_output=True, text=True, check=True)
+    # #1046 fix-forward (CI RED 35727612017): this is a `git` call against the
+    # REAL checkout, not a hook — it keeps the process HOME, because in CI the
+    # runner's `safe.directory` lives in that HOME's global git config and a
+    # hermetic HOME turns `git ls-files` into exit 128 (dubious ownership).
+    # Hermetic HOME is for HOOK subprocesses only (the static lock scopes it so).
     for rel in out.stdout.split("\0"):
         if not rel or not (rel.endswith(".py") or rel.endswith(".sh")):
             continue
