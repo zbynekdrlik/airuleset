@@ -274,10 +274,10 @@ def render_claude_launch_script():
     write site MUST use this, never the raw constant (same discipline as
     render_caveman_shim()).
 
-    #1060 L3a: the MAIN launcher `--model` is ALWAYS airuleset.MANAGED_MODEL,
-    even on a model-backend marker box. The #1062 L2 alias flip (the marker's
-    `main`) is REMOVED — settings.json is shared, so the main window must stay
-    Fable + OAuth; the gateway backend lives ONLY in the separate `claude-impl`
+    #1060 L3a: the MAIN launcher `--model` is ALWAYS airuleset.MANAGED_MODEL
+    (Opus 5.5 since #1119), even on a model-backend marker box. The #1062 L2 alias
+    flip (the marker's `main`) is REMOVED — settings.json is shared, so the main
+    window must stay on the managed model + OAuth; the gateway backend lives ONLY in the separate `claude-impl`
     launcher (render_claude_impl_launch_script), scoped to the implementer
     window's own process."""
     import airuleset

@@ -10,7 +10,7 @@ The choice of a subagent's TYPE, MODEL and COUNT is the working model's, resolve
 by Claude Code natively. airuleset contributes exactly two things:
 
   1. a fleet DEFAULT subagent model via the native env
-     CLAUDE_CODE_SUBAGENT_MODEL = MODEL_TIERS["opus"] (claude-opus-4-8), no
+     CLAUDE_CODE_SUBAGENT_MODEL = MODEL_TIERS["opus5"] (claude-opus-5-5, #1119), no
      _FORCE — the native precedence (per-dispatch model -> agent frontmatter ->
      env -> main) stays, so main overrides by its own judgment;
   2. a BAN of Opus 5 (BANNED_MODELS) enforced by one small dispatch hook
@@ -37,15 +37,20 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class TestModelTiers(TestCase):
-    def test_four_exact_tiers(self):
+    def test_five_exact_tiers(self):
+        # #1119: opus5 (claude-opus-5-5) added as the MAIN tier; fable + opus
+        # (4-8) stay as ALLOWED non-default dispatch ids.
         self.assertEqual(set(airuleset.MODEL_TIERS),
-                         {"fable", "opus", "sonnet", "haiku"})
+                         {"opus5", "fable", "opus", "sonnet", "haiku"})
 
     def test_opus_tier_is_4_8(self):
+        # #1119: opus (4-8) is no longer the subagent default but stays an
+        # allowed exact id; the MAIN tier is opus5 (claude-opus-5-5).
         self.assertEqual(airuleset.MODEL_TIERS["opus"], "claude-opus-4-8")
 
-    def test_managed_main_model_is_fable(self):
-        self.assertTrue(airuleset.MANAGED_MODEL.startswith("claude-fable-5-1"))
+    def test_managed_main_model_is_opus_5_5(self):
+        # #1119: Opus 5.5 replaced Fable 5.1 as the managed MAIN model.
+        self.assertTrue(airuleset.MANAGED_MODEL.startswith("claude-opus-5-5"))
 
 
 class TestBannedModels(TestCase):
@@ -57,13 +62,13 @@ class TestBannedModels(TestCase):
         self.assertIn("opusplan", airuleset.BANNED_MODELS)
 
     def test_allowed_tiers_not_in_banlist(self):
-        for m in ("claude-opus-4-8", "claude-sonnet-5",
+        for m in ("claude-opus-5-5", "claude-opus-4-8", "claude-sonnet-5",
                   "claude-haiku-4-5", "claude-fable-5-1", "sonnet", "haiku"):
             self.assertNotIn(m, airuleset.BANNED_MODELS)
 
 
 class TestAgentNames(TestCase):
-    """Only the two claude-opus-4-8-pinned-by-env worker agents survive — the
+    """Only the two env-default-model worker agents survive — the
     fable-advisor / sonnet-implementer / sonnet-mechanical tier agents are
     deleted (native selection replaces them)."""
 
@@ -94,10 +99,11 @@ class TestSubagentModelDefault(TestCase):
         import cli_config
         return cli_config.apply_managed_settings_defaults({})
 
-    def test_env_subagent_model_is_opus_tier(self):
+    def test_env_subagent_model_is_main_tier(self):
+        # #1119: the subagent default is now the opus5 (Opus 5.5) tier.
         env = self._settings()["env"]
         self.assertEqual(env["CLAUDE_CODE_SUBAGENT_MODEL"],
-                         airuleset.MODEL_TIERS["opus"])
+                         airuleset.MODEL_TIERS["opus5"])
 
     def test_no_force_variant(self):
         env = self._settings()["env"]

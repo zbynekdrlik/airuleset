@@ -121,12 +121,17 @@ class TestRuntimeLaunchArgNeverBanned(TestCase):
                 "launcher --model '%s' is a BANNED Opus 5 value" % v)
 
     def test_no_opus5_id_substring_anywhere_in_launcher(self):
-        # Defense in depth: not even a stray/commented opus-5 id (case-insensitive,
-        # so `Claude-Opus-5` is caught too). Non-emptiness guarded so a future
-        # render returning "" can never pass this vacuously (adversarial-review F3).
+        # Defense in depth: not even a stray/commented BANNED opus-5 id
+        # (case-insensitive, so `Claude-Opus-5` is caught too). #1119: the managed
+        # main is `claude-opus-5-5`, a DISTINCT allowed id, so match `opus-5` only
+        # when NOT immediately followed by `-5` (the negative lookahead spares
+        # opus-5-5 while still catching bare `opus-5` and a dated `opus-5-2026…`).
+        # Non-emptiness guarded so a future render returning "" can never pass
+        # this vacuously (adversarial-review F3).
         script = airuleset.render_claude_launch_script()
         self.assertTrue(script.strip(), "rendered launcher is empty")
-        self.assertNotIn("opus-5", script.lower())
+        self.assertIsNone(re.search(r"opus-5(?!-5)", script.lower()),
+                          "a BANNED opus-5 id leaked into the launcher")
 
 
 class TestSettingsDefaultModelNeverBanned(TestCase):

@@ -204,7 +204,7 @@ class TestApplyManagedSettings(unittest.TestCase):
         self.assertNotIn("apiKeyHelper", out)
         self.assertEqual(out["model"], airuleset.MANAGED_MODEL)
         self.assertEqual(out["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
-                         airuleset.MODEL_TIERS["opus"])
+                         airuleset.MODEL_TIERS["opus5"])  # #1119: subagent default = Opus 5.5
 
     def test_cross_session_inbound_accept(self):
         # #1060 L3a item 2: both sessions accept cross-session SendMessage (the
@@ -254,7 +254,7 @@ class TestApplyManagedSettings(unittest.TestCase):
                          "the managed L2 apiKeyHelper must be healed away")
         self.assertEqual(out["model"], airuleset.MANAGED_MODEL)
         self.assertEqual(out["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
-                         airuleset.MODEL_TIERS["opus"])
+                         airuleset.MODEL_TIERS["opus5"])  # #1119: subagent default = Opus 5.5
         self.assertEqual(out["env"].get("USER_OWN_KEY"), "keep-me",
                          "a user's own env key must survive the self-heal")
 
@@ -608,8 +608,10 @@ class TestTmuxImplWindow(unittest.TestCase):
 
 
 class TestDesignGateFableOnly(unittest.TestCase):
-    """#1060 L3a item 1: the design gate accepts ONLY the Fable id again — the
-    pilot-alias acceptance (allowed_alias / _pilot_main_alias) is deleted."""
+    """#1060 L3a item 1: the design gate accepts only managed MAIN-tier ids — the
+    pilot-alias acceptance (allowed_alias / _pilot_main_alias) is deleted. #1119:
+    the accepted set is the managed main (Opus 5.5) plus Fable 5.1 through the
+    transition; a bare alias like `impl-main` is still rejected."""
 
     def _payload(self, prompt="Work issue #1060"):
         return json.dumps({

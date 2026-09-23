@@ -16,7 +16,7 @@ Adaptive thinking with five tiers: `low`, `medium`, `high`, `xhigh`, `max`. **Th
 - `high` — default; complex reasoning, difficult coding, agentic tasks
 - `low`/`medium` — trivial edits, formatting fixes, simple commits, mechanical/read-only work
 
-**Effort by what the stage IS.** The MAIN session runs the user's `/model` choice (managed default Fable 5.1) — leave it; raise effort per session with `/effort` when a task needs the depth. The subagent MODEL/TYPE/COUNT is the working model's decision, resolved natively (`CLAUDE_CODE_SUBAGENT_MODEL` gives the fleet default `claude-opus-4-8`, a per-dispatch `model` param overrides it, only Opus 5 is banned — `model-awareness.md`).
+**Effort by what the stage IS.** The MAIN session runs the user's `/model` choice (managed default Opus 5.5) — leave it; raise effort per session with `/effort` when a task needs the depth. The subagent MODEL/TYPE/COUNT is the working model's decision, resolved natively (`CLAUDE_CODE_SUBAGENT_MODEL` gives the fleet default `claude-opus-5-5`, a per-dispatch `model` param overrides it, only Opus 5 is banned — `model-awareness.md`).
 
 **ultracode** mode = `xhigh` + permission to launch multi-agent workflows (not a separate API tier); NO LONGER a managed launch flag (owner directive 2026-08-30) — sessions launch at effort `high`, ultracode is a per-session opt-in.
 

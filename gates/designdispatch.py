@@ -142,6 +142,24 @@ def _fable_id():
         return "claude-fable-5-1"
 
 
+def _accepted_main_ids():
+    """The set of NORMALISED model ids accepted as a MAIN-authored design stamp
+    (#1061/#1119): the CURRENT managed main (derived from MANAGED_MODEL — Opus
+    5.5 since #1119) AND the immediately-prior main (Fable 5.1). Fable stays
+    accepted through the transition so a design stamped by a still-running Fable
+    main dispatches until that session is relaunched onto Opus 5.5 (running
+    sessions keep the model they launched with). Both ids come from the
+    single-source MODEL_TIERS lineup, never a bare hard-coded string. Degrades to
+    the two known ids when airuleset is unimportable (the dependency-light gate
+    path)."""
+    try:
+        import airuleset
+        return {_norm_model(airuleset.MANAGED_MODEL),
+                _norm_model(airuleset.MODEL_TIERS["fable"])}
+    except Exception:
+        return {_norm_model("claude-opus-5-5"), _norm_model("claude-fable-5-1")}
+
+
 def _gh_env():
     try:
         import airuleset
@@ -192,15 +210,22 @@ def _fetch_comment_bodies(slug, number, cwd, timeout=8):
 
 
 def check_issue(number, slug, cwd, fetch=None, fable_id=None):
-    """(ok, reason) -- is `#number`'s newest design comment authored by the Fable
-    main? FAIL-CLOSED: an unreadable thread returns (False, ...). `fetch(slug,
-    number, cwd)` -> [bodies]|None is injected in tests. #1060 L3a: the design is
-    ALWAYS authored by the Fable main (the implementer never designs), so the
-    Fable id is the ONLY accepted design model on every box -- the #1062 L2
-    pilot-alias acceptance is removed."""
+    """(ok, reason) -- is `#number`'s newest design comment authored by the
+    managed MAIN? FAIL-CLOSED: an unreadable thread returns (False, ...).
+    `fetch(slug, number, cwd)` -> [bodies]|None is injected in tests. #1060 L3a:
+    the design is ALWAYS authored by the managed main (the implementer never
+    designs). #1119: the accepted design model is any managed MAIN-tier id --
+    Opus 5.5 (the new main) plus Fable 5.1 (the prior main, accepted through the
+    transition) -- derived from MODEL_TIERS via `_accepted_main_ids`, so the
+    lineup has ONE source and a relaunched main is accepted the day it ships."""
     fetch = fetch or _fetch_comment_bodies
-    fable_id = fable_id or _fable_id()
-    accepted = {_norm_model(fable_id)}
+    # #1119: accept any MANAGED MAIN-tier id (Opus 5.5 now, plus Fable 5.1 through
+    # the transition), derived from the single-source MODEL_TIERS lineup. An
+    # injected `fable_id` (tests / an explicit override) is added to the set, so
+    # existing injected-id tests keep passing.
+    accepted = _accepted_main_ids()
+    if fable_id:
+        accepted.add(_norm_model(fable_id))
     res = fetch(slug, number, cwd)
     # #1070 item 1 -- the fetch may return the new `(bodies, err)` tuple (a
     # ghread read: `err` a `gate-unavailable:<reason>` when BOTH REST and
@@ -238,8 +263,10 @@ def check_issue(number, slug, cwd, fetch=None, fable_id=None):
                                                 served_note))
     if _norm_model(model) not in accepted:
         return False, ("#%d's newest design comment is `Design-by: main %s%s` -- "
-                       "expected %s; the design must be authored by the Fable "
-                       "main" % (number, model or "?", served_note, fable_id))
+                       "expected a managed MAIN model (%s); the design must be "
+                       "authored by the managed main session (#1061/#1119)"
+                       % (number, model or "?", served_note,
+                          ", ".join(sorted(accepted))))
     return True, "ok"
 
 

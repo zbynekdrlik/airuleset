@@ -177,10 +177,19 @@ class TestEvaluate(unittest.TestCase):
         self.assertIn("worker", r)
 
     def test_wrong_model_blocks(self):
+        # #1119: claude-opus-4-8 stays an allowed dispatch id but is NOT a
+        # managed MAIN model, so a `Design-by: main claude-opus-4-8` stamp is
+        # still refused; the reason now names the accepted managed MAIN models.
         v, r = _ev("Work issue #1061 in repo",
                    ["Design-by: main claude-opus-4-8"])
         self.assertEqual(v, "block")
-        self.assertIn("Fable", r)
+        self.assertIn("managed MAIN model", r)
+
+    def test_opus_5_5_main_allows(self):
+        # #1119: the new managed main authors designs as claude-opus-5-5.
+        v, _ = _ev("Work issue #1061 in repo",
+                   ["Design-by: main claude-opus-5-5"])
+        self.assertEqual(v, "allow")
 
     def test_no_design_by_blocks(self):
         v, r = _ev("Work issue #1061 in repo", ["just a normal comment"])

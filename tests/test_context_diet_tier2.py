@@ -311,7 +311,10 @@ class TestModelAwarenessB2(TestCase):
         self.assertNotIn("burn only SHIFTED, it did not shrink", self.module)
 
     def test_fable51_is_the_fleet_tier(self):
-        # #894: Fable 5.1 is now the fleet tier, not banned.
+        # #1119: Opus 5.5 replaced Fable 5.1 as the managed MAIN; Fable 5.1
+        # (claude-fable-5-1) stays a documented ALLOWED (non-default) dispatch id.
+        self.assertIn("Opus 5.5", self.module)
+        self.assertIn("claude-opus-5-5", self.module)
         self.assertIn("Fable 5.1", self.module)
         self.assertIn("claude-fable-5-1", self.module)
 
