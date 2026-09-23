@@ -1549,7 +1549,13 @@ def _stream_self_login():
     validating the
     App-token detection: if ``_gh_login()`` succeeds (returns a real
     login), the box is NOT operating as an App-token box (a genuine
-    App token makes ``gh api user`` 403 → ``_gh_login()`` = None)."""
+    App token makes ``gh api user`` 403 → ``_gh_login()`` = None).
+
+    Issue 1129: on a genuine App-token box the identity is the App that
+    MINTED the token in use (``_gh_app_token_slug()``, the ``.app``
+    sidecar next to it) — a second-App stream (``odoo-erp-stream-tokens-2``)
+    comments as that slug — falling back to ``STREAM_APP_BOT_LOGIN`` when
+    no valid record exists."""
     import airuleset
     if _is_gh_app_token_box():
         # Validate: a genuine App-token box has no user identity
@@ -1559,8 +1565,48 @@ def _stream_self_login():
         real_login = airuleset._gh_login()
         if real_login is not None:
             return real_login
+        # Issue 1129: the App that actually minted this box's token.
+        slug = _gh_app_token_slug()
+        if slug:
+            return "app/" + slug
         return airuleset.STREAM_APP_BOT_LOGIN
     return airuleset._gh_login()
+
+
+# Issue 1129: the SAME identifier rule odoo-erp `push-stream-tokens.sh`
+# (`safe_name`) and `mint-installation-token.sh` apply to an App slug.
+_APP_SLUG_RX = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def _gh_app_token_slug():
+    """The GitHub App slug recorded next to the token THIS box's `gh` uses,
+    or None when there is no usable record (issue 1129).
+
+    The token in use is `~/.config/gh-app-tokens/primary` (what
+    `gh-app-token` with no argument reads) — a symlink the minting path
+    (odoo-erp `scripts/gh-app/push-stream-tokens.sh`) points at the
+    per-repo token file `<owner>__<name>`, next to which it already writes
+    the `.expires` sidecar. The slug record is the SIBLING `.app` sidecar of
+    the resolved token file (`realpath(primary) + ".app"`; a regular-file
+    `primary` therefore reads `primary.app`). Streams minted by a second App
+    (streams.conf `app=odoo-erp-stream-tokens-2`) author their comments as
+    that App's slug, so the constant `STREAM_APP_BOT_LOGIN` misreads every
+    own comment as foreign.
+
+    Local, static read — no network (the #356 rule for App-token boxes).
+    Returns None on a missing/unreadable sidecar or content that is not a
+    single identifier, so the caller keeps today's constant (never guesses a
+    wider identity — accepting any `odoo-erp-stream-tokens*` slug would let
+    another stream's comment refresh this stream's W freshness)."""
+    try:
+        primary = _gh_app_token_dir() / "primary"
+        sidecar = Path(os.path.realpath(primary) + ".app")
+        content = sidecar.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return None
+    if not _APP_SLUG_RX.fullmatch(content):
+        return None
+    return content
 
 
 def _ages_from_comments(comments, self_login):
