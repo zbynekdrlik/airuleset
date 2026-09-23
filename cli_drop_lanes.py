@@ -213,6 +213,43 @@ def build_drop_lanes(remote_hosts, *, seed, drop_lane_cls,
     return lanes
 
 
+def generated_access_specs(lanes, existing_specs, owner_emails,
+                           *, session_duration="24h"):
+    """Owner-only ``DROP_ACCESS_APPS`` specs for every GENERATED access lane
+    (#1115 slice D) — ONE derivation from the generated lane list, never a spec
+    hand-typed per account.
+
+    For every ``access=True`` lane whose ``host`` is not already in
+    ``existing_specs``, produce a spec whose shape matches the hand-authored gk
+    spec EXACTLY — ``{hostname, name, allowed_emails, session_duration}`` — with
+    ``allowed_emails`` = the owner-only include (decision 5787094428). The name is
+    ``"drop — <stem>"``, the host with its ``drop-`` prefix and ``.newlevel.media``
+    suffix stripped. A lane already covered by ``existing_specs`` is SKIPPED, so
+    the hand-authored specs (gk, david1, david2-4, dominika) stay authoritative
+    and byte-identical — the caller merges this dict UNDER them.
+
+    Each spec owns a fresh ``allowed_emails`` list (never a shared reference).
+    Pure + dependency-injected (a self-contained leaf, #433): no import of the
+    gateway, no I/O.
+    """
+    specs = {}
+    for lane in lanes.values():
+        if not getattr(lane, "access", False):
+            continue
+        host = lane.host
+        if host in existing_specs or host in specs:
+            continue
+        stem = host[len("drop-"):] if host.startswith("drop-") else host
+        stem = stem.rsplit(".newlevel.media", 1)[0]
+        specs[host] = {
+            "hostname": host,
+            "name": "drop — %s" % stem,
+            "allowed_emails": list(owner_emails),
+            "session_duration": session_duration,
+        }
+    return specs
+
+
 # #1115: the controller-side cache of each target's PUSH-MEASURED persistent
 # filedrop port, keyed "<nodename>/<username>". `push` reads each target's port
 # (~/.claude/filedrop.port, else the #493 uid-derived default) over the deploy
@@ -412,6 +449,12 @@ CHANNEL_NO_LANE = "no-lane"
 CHANNEL_PENDING = "pending"
 CHANNEL_MARKER_ABSENT = "marker-absent"
 CHANNEL_UNREACHABLE = "unreachable"
+# #1115 slice D: the fail-safe branch's reason family. The resolver never raises
+# (a producer must still print its private URLs), but a REAL breakage must not
+# hide behind a benign "no-lane" on the conformance surface (slice-C review B).
+# The reason carries the exception CLASS name only — never the message, which can
+# carry a path / host / credential — as "error:<ClassName>".
+CHANNEL_ERROR = "error"
 
 _CHANNEL_FALLBACK_PHRASE = {
     CHANNEL_NO_LANE: "no lane for this account",
@@ -454,8 +497,11 @@ def delivery_channel(*, marker_path=None, nodename=None, username=None,
     it and trust the go-live marker (their pre-#1115 behaviour).
 
     Fail-safe: any unexpected error resolving the gateway seams degrades to
-    ``(None, "no-lane")`` — never a raise (a producer must still print its private
-    URLs) and never a wrong public URL.
+    ``(None, "error:<ExceptionClassName>")`` — never a raise (a producer must
+    still print its private URLs) and never a wrong public URL. The reason carries
+    the exception CLASS name only (never its message, which can leak a
+    path/host/secret); conformance collapses it to ``broken:error`` (#1115 slice
+    D) so a real resolver breakage is visible instead of a benign ``no-lane``.
     """
     try:
         if lane_lookup is None or resolve is None or access_specs is None:
@@ -480,8 +526,11 @@ def delivery_channel(*, marker_path=None, nodename=None, username=None,
         if probe is not None and not probe(host):
             return None, CHANNEL_UNREACHABLE
         return base, CHANNEL_LIVE
-    except Exception:
-        return None, CHANNEL_NO_LANE
+    except Exception as exc:
+        # Fail-safe: never raise, never a wrong public URL. Report the exception
+        # CLASS name only (never the message — it can leak a path/host/secret)
+        # so a resolver breakage is visible as broken:error, not a benign no-lane.
+        return None, "%s:%s" % (CHANNEL_ERROR, type(exc).__name__)
 
 
 def channel_fallback_line(reason, prog="share", detail=None):
@@ -555,6 +604,12 @@ def public_url_channel_fact(*, marker_path=None, nodename=None, username=None,
     base, reason = delivery_channel(marker_path=marker_path, nodename=nodename,
                                     username=username)
     if base is None:
+        # #1115 slice D: the fail-safe error family is a BREAKAGE, not a benign
+        # fallback. Collapse "error:<ClassName>" to a single "broken:error" token
+        # so the status surface stays one word (the class name lives in the
+        # delivery_channel reason for a caller that logs it).
+        if reason == CHANNEL_ERROR or reason.startswith(CHANNEL_ERROR + ":"):
+            return "broken:%s" % CHANNEL_ERROR
         return "fallback:%s" % reason
     code = (probe or _probe_public_status)("%s/s/" % base)
     if code in (200, 302, 404):

@@ -113,14 +113,44 @@ class TestDeliveryChannelStates(unittest.TestCase):
         self.assertEqual(seen["host"], self.HOST)
 
     def test_fail_safe_on_seam_error(self):
-        # A gateway seam that raises degrades to (None, "no-lane"), never a raise.
+        # #1115 slice D: a gateway seam that raises degrades to (None, error:...)
+        # — never a raise, and never no-lane (which hid a real breakage behind a
+        # benign "no lane" on the conformance surface, slice-C review B).
         def _boom(*a, **k):
             raise RuntimeError("gateway broken")
 
         base, reason = dl.delivery_channel(
             lane_lookup=_boom, resolve=lambda **k: None, access_specs={})
         self.assertIsNone(base)
-        self.assertEqual(reason, dl.CHANNEL_NO_LANE)
+        self.assertTrue(reason == dl.CHANNEL_ERROR
+                        or reason.startswith(dl.CHANNEL_ERROR + ":"))
+        self.assertNotEqual(reason, dl.CHANNEL_NO_LANE)
+
+    def test_fail_safe_reason_carries_exception_class_name(self):
+        class WeirdGatewayError(Exception):
+            pass
+
+        def _boom(*a, **k):
+            raise WeirdGatewayError("some detail")
+
+        base, reason = dl.delivery_channel(
+            lane_lookup=_boom, resolve=lambda **k: None, access_specs={})
+        self.assertIsNone(base)
+        self.assertEqual(reason, "%s:WeirdGatewayError" % dl.CHANNEL_ERROR)
+
+    def test_fail_safe_never_leaks_the_exception_message(self):
+        # The message can carry a path / host / credential in the wild; the reason
+        # must expose the exception CLASS only, never the message text.
+        leaky = "connection refused to internal-host-42 with detail-marker-xyz"
+
+        def _boom(*a, **k):
+            raise RuntimeError(leaky)
+
+        base, reason = dl.delivery_channel(
+            lane_lookup=_boom, resolve=lambda **k: None, access_specs={})
+        self.assertIsNone(base)
+        self.assertNotIn("internal-host-42", reason)
+        self.assertNotIn("detail-marker-xyz", reason)
 
 
 # ---------------------------------------------------------------------------
@@ -215,6 +245,15 @@ class TestPublicUrlChannelFact(unittest.TestCase):
         with mock.patch.object(dl, "delivery_channel",
                                lambda **k: (None, dl.CHANNEL_MARKER_ABSENT)):
             self.assertEqual(dl.public_url_channel_fact(), "fallback:marker-absent")
+
+    def test_broken_error_on_resolver_exception(self):
+        # #1115 slice D: the fail-safe error family is a BREAKAGE, not a benign
+        # fallback — conformance renders exactly "broken:error" (the class name
+        # in the reason is collapsed away here so the surface stays one token).
+        for reason in (dl.CHANNEL_ERROR, dl.CHANNEL_ERROR + ":RuntimeError"):
+            with mock.patch.object(dl, "delivery_channel",
+                                   lambda r=reason, **k: (None, r)):
+                self.assertEqual(dl.public_url_channel_fact(), "broken:error")
 
 
 # ---------------------------------------------------------------------------
