@@ -90,71 +90,48 @@ class TestReviewWatchLifecycle(TestCase):
         # order in the file: full, branch-merge, fork-no-merge
         return lines[1], lines[2]
 
-    def _asserts_release_containment(self, line):
-        """The release-containment invariant, in the PROVEN form (#159).
+    # #1128 (owner ruling 2026-09-23) SUPERSEDES the review-watch lifecycle
+    # below: a stream loop has NO backlog-empty end at all — gk/U/W work keeps
+    # returning, so the old (B) (release containment + an hourly foreground
+    # REVIEW-WATCH that was only PREFERRED, never a hard precondition since
+    # #395) still let the loop END while a hand-off sat with the gatekeeper
+    # (david1-4 idle). The strictly stronger invariant: the loop never ends;
+    # its idle state is ONE background `stream-wait` that wakes on any change
+    # to the stream's slice (a bounce, a gk comment, a client reply, a new
+    # ticket). "Never ends" subsumes "holds until released".
 
-        It used to be the prose "contained in origin/main". It is now a proof
-        command whose output must be pasted into the stopping turn — strictly
-        stronger, since the old phrase could be satisfied by the template
-        merely saying so while nothing ever checked it.
-        """
-        self.assertIn("git merge-base --is-ancestor", line)
-        self.assertIn("origin/main", line)
-        self.assertIn("printing exactly `RELEASED`", line)
-
-    def test_branch_merge_holds_until_release_and_no_bounce(self):
+    def test_branch_merge_never_ends_and_idles_on_stream_wait(self):
         bm, _ = self.reduced_goal_lines()
-        self.assertIn("REVIEW-WATCH", bm)
-        self._asserts_release_containment(bm)
+        self.assertIn("this stream loop never ends on an empty slice", bm)
+        self.assertIn("airuleset.py stream-wait", bm)
+        self.assertNotIn("REVIEW-WATCH", bm)
 
     def test_fork_closing_is_the_maintainers_job_not_mine_to_prove(self):
-        # #395 (2026-08-12): the old wording said the ticket "is CLOSED by
-        # the maintainer" as the (B) precondition -- but neither proof
-        # command in this template ever checked GitHub's closed state, so
-        # the phrase was an unproven claim, not a fact. Replaced with the
-        # honest statement: hand-off is genuinely MINE-done; the later close
-        # is not part of the (B) proof.
-        #
-        # #761 (round-2 odoo-erp#5378 ripple): the old wording ("closing it
-        # after is the maintainer's job, not mine to prove") asserted a
-        # now-FALSE absolute for odoo-erp streams -- on odoo-erp the
-        # delivering STREAM self-closes after the gk review-verdict + queue-
-        # label drop (odoo-erp#5378 / #756). True-making reword: "a later
-        # close is not my (B) proof" is literally true for BOTH maintainer-
-        # close and stream-self-close, and still says closure is not the (B)
-        # gate. The odoo-erp HOW lives in the uncapped **AUTHORITY:
-        # fork-no-merge** header + the block-fork-no-merge-issue-close.sh
-        # #756 carve-out, never in the char-capped condition.
-        #
-        # #395 adversarial-review MAJOR-1: the REVIEW-WATCH lifecycle this
-        # class exists to lock was ALSO reworded here (not just the (B)
-        # precondition) -- the old "is NOT done" framing directly
-        # contradicted the new (B) proof's own "a gk N ... never blocks
-        # 🏁" disclaimer (#395's whole design is that a handed-off
-        # ticket never blocks the stop). The stop condition may now hold
-        # while such a ticket is open; REVIEW-WATCH (staying alive to catch
-        # a bounce quickly, instead of relying on job 9's dispatch-on-nudge
-        # fallback) is PREFERRED, never a hard precondition any more.
+        # #395/#761 negatives stay locked (no unproven "CLOSED by the
+        # maintainer" precondition, no false "maintainer's job" absolute);
+        # since #1128 there is no (B) proof at all, so closure can never be
+        # read as the fork loop's end either.
         _, fk = self.reduced_goal_lines()
-        self.assertIn("REVIEW-WATCH", fk)
-        self.assertIn("a later close is not my (B) proof", fk)
-        self.assertNotIn("the maintainer's job", fk)        # #761: false absolute gone
+        self.assertNotIn("the maintainer's job", fk)
         self.assertNotIn("CLOSED by the maintainer", fk)
-        self.assertIn("never blocks", fk)
+        self.assertNotIn("(B)", fk)
+        self.assertIn("this stream loop never ends on an empty slice", fk)
 
     def test_fork_holds_until_released_too(self):
-        # 2026-07-20 morning incident: david's loop ended when the maintainer
-        # closed his tickets at the develop merge — but nothing was RELEASED
-        # and the user found prod empty ("ping pong moze skoncit az ked je
-        # vsetko deploynute do produ a nie skor"). The fork loop holds until
-        # the merged work is contained in origin/main, same as branch-merge.
+        # 2026-07-20 incident ("ping pong moze skoncit az ked je vsetko
+        # deploynute do produ a nie skor"): #1128 makes the fork loop never
+        # end at all, which is strictly stronger than holding until release.
         _, fk = self.reduced_goal_lines()
-        self._asserts_release_containment(fk)
+        self.assertIn("Only I end this loop (`/goal clear`)", fk)
+        self.assertNotIn("RELEASED", fk)
 
     def test_review_watch_cadence_is_hourly_and_working(self):
+        # the hourly re-check became an event-driven waiter (default heartbeat
+        # 3600 s, `stream-wait --max`); the turn still ends ⏳ WORKING and a
+        # dead waiter is relaunched — never parked silently.
         for line in self.reduced_goal_lines():
-            self.assertIn("hourly", line)
-            self.assertIn("never park", line)
+            self.assertIn("end ⏳ WORKING", line)
+            self.assertIn("relaunch it if gone", line)
 
     def test_nudge_without_armed_loop_dispatches_worker(self):
         t = read(self.SKILL)
@@ -227,8 +204,13 @@ class TestReviewWatchHoldsForeground(TestCase):
         return lines
 
     def test_reduced_templates_hold_foreground(self):
+        # #1128: the foreground sleep-poll became ONE bounded background
+        # `stream-wait` (Claude Code defers /goal evaluation while a background
+        # task runs, so it costs no turns). ScheduleWakeup stays banned.
         for line in self.goal_lines()[1:]:
-            self.assertIn("FOREGROUND sleep-poll", line)
+            self.assertNotIn("FOREGROUND sleep-poll", line)
+            self.assertIn("ONE background `python3 ~/devel/airuleset/airuleset.py "
+                          "stream-wait`", line)
             self.assertNotIn("ScheduleWakeup", line)
 
 
@@ -296,9 +278,10 @@ class TestBounceMeansOneThingInAllThreeHomes(TestCase):
         self._assert_canonical(window, "cross-stream rule 3")
 
     def test_the_branch_merge_stop_condition_is_still_the_subdevs_own(self):
-        """The reduced-authority template's (B) is unchanged by this
-        reconciliation — its scope was never the gatekeeper's."""
+        """The reduced-authority template's bounce scope was never the
+        gatekeeper's. #1128 removed its (B) ("no open prio:bounce for my
+        stream"); the bounce lane still works only MY prio:bounce tickets."""
         line = [ln for ln in read(self.SKILL).splitlines()
                 if ln.startswith("/goal STOP CONDITIONS")][1]
         self.assertIn("prio:bounce", line)
-        self.assertIn("for my stream", line)
+        self.assertIn("my prio:bounce tickets", line)

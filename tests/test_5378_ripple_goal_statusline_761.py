@@ -60,24 +60,31 @@ class TestForkGoalNoLongerAssertsFalseAbsolute(TestCase):
         self.assertNotIn("never close the issue", fk)
         self.assertNotIn("the maintainer's job", fk)
 
+    # #1128 (owner ruling 2026-09-23): the fork-no-merge (B) — and with it the
+    # "a later close is not my (B) proof" true-making reword — is GONE: a stream
+    # loop has no backlog-empty end, so closure can never be read as its end.
+    # The true-making authority reword ("close only per authority") stays.
+
     def test_registry_render_carries_the_true_making_rewords(self):
         fk = gr.render("fork-no-merge")
-        self.assertIn("a later close is not my (B) proof", fk)
+        self.assertNotIn("(B)", fk)
         self.assertIn("close only per authority", fk)
 
     def test_shipped_skill_line_matches(self):
         fk = fork_goal_line()
+        self.assertEqual(fk, gr.render("fork-no-merge"))
         self.assertNotIn("never close the issue", fk)
         self.assertNotIn("the maintainer's job", fk)
-        self.assertIn("a later close is not my (B) proof", fk)
         self.assertIn("close only per authority", fk)
 
     def test_review_watch_and_never_blocks_survive(self):
-        # the #395 REVIEW-WATCH lifecycle + "never blocks" disclaimer are
-        # untouched by the true-making reword (regression guard).
+        # #1128 supersedes the #395 REVIEW-WATCH lifecycle + "never blocks"
+        # disclaimer: nothing blocks a stop that no longer exists; the loop
+        # idles on ONE background stream-wait instead.
         fk = fork_goal_line()
-        self.assertIn("REVIEW-WATCH", fk)
-        self.assertIn("never blocks", fk)
+        self.assertNotIn("REVIEW-WATCH", fk)
+        self.assertIn("never ends on an empty slice", fk)
+        self.assertIn("stream-wait", fk)
 
 
 class TestForkGoalHeadroomImproved(TestCase):

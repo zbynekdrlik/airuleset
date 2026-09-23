@@ -104,12 +104,16 @@ class TestClauseCoverage(TestCase):
     def test_profile_specific_load_bearing_clauses_are_required(self):
         # the coverage guard must protect NON-shared load-bearing clauses too:
         # full's prod-gate (approval-scope.md "never gate on events/prod" hardest
-        # rule) + parked, and the reduced review-watch/authority-ends.
+        # rule) + parked, and the reduced stream-idle/authority-ends (#1128:
+        # stream-idle replaced review-watch, and the reduced profiles no longer
+        # require any (B) clause — a stream loop has no done-state).
         self.assertIn("prod-gate", gr.REQUIRED_BY_PROFILE["full"])
         self.assertIn("parked", gr.REQUIRED_BY_PROFILE["full"])
         for p in ("branch-merge", "fork-no-merge"):
-            self.assertIn("review-watch", gr.REQUIRED_BY_PROFILE[p])
+            self.assertIn("stream-idle", gr.REQUIRED_BY_PROFILE[p])
             self.assertIn("authority-ends", gr.REQUIRED_BY_PROFILE[p])
+            for b in gr._B_CLAUSES:
+                self.assertNotIn(b, gr.REQUIRED_BY_PROFILE[p])
 
     def test_dropping_a_full_only_clause_is_a_red_coverage_result(self):
         # deleting prod-gate from the registry must now be CAUGHT (it wasn't
@@ -267,10 +271,15 @@ class TestLoadBearingInvariantsSurviveTheRefactor(TestCase):
               "CONTINUE", "no third answer", "❓ NEEDS YOU")
 
     def test_shared_tokens_present_in_every_profile(self):
+        # #1128: the (B) tokens are FULL-only now (a stream loop has no
+        # done-state); ❓ NEEDS YOU and CONTINUE stay in every profile.
         for p in gr.PROFILES:
             r = gr.render(p)
             for tok in self.SHARED:
-                self.assertIn(tok, r, "%s missing %r" % (p, tok))
+                if p == "full" or tok in ("CONTINUE", "❓ NEEDS YOU"):
+                    self.assertIn(tok, r, "%s missing %r" % (p, tok))
+                else:
+                    self.assertNotIn(tok, r, "%s still carries %r" % (p, tok))
 
     def test_full_profile_specific_invariants(self):
         r = gr.render("full")
@@ -284,10 +293,14 @@ class TestLoadBearingInvariantsSurviveTheRefactor(TestCase):
         self.assertNotIn("prio:bounce", oc)
 
     def test_reduced_profile_specific_invariants(self):
+        # #1128: the RELEASED containment proof left with the reduced (B); the
+        # slice scoping (slice-quals, never `--assignee @me`) stays, now as the
+        # idle gate in front of the stream-wait waiter.
         for p in ("branch-merge", "fork-no-merge"):
             r = gr.render(p)
             self.assertIn("slice-quals --count", r)
-            self.assertIn("RELEASED", r)
+            self.assertIn("airuleset.py stream-wait", r)
+            self.assertNotIn("RELEASED", r)
             self.assertNotIn("--assignee @me", r)
 
     def test_full_and_branch_merge_still_stop_after_two_real_attempts(self):

@@ -70,15 +70,19 @@ TS2 = 1_790_050_000
 
 class TestBounceProofClauseReduced(unittest.TestCase):
     def test_both_reduced_proofs_name_the_unhandled_flag(self):
+        # #1128 (owner ruling 2026-09-23): the reduced (B) proof — and its
+        # "`bounce K` BLOCKS 🏁" wording — is gone (a stream loop has no done-
+        # state). The lane-A flag survives as the IDLE gate: the loop idles on
+        # its stream-wait only once the flag prints nothing.
         for prof in ("branch-merge", "fork-no-merge"):
             for mode in ("parallel", "sequential"):
                 line = gr.render_goal_line(prof, mode, None)
                 self.assertIn("slice-quals --bounces --unhandled", line,
-                              "%s/%s proof must name the lane-A flag" % (prof, mode))
-                self.assertIn("bounce K", line, prof)
-                self.assertIn("BLOCKS", line, prof)
-                # STATEMENT lock: the flag output IS the proof — empty == 0
+                              "%s/%s idle gate must name the lane-A flag" % (prof, mode))
+                # STATEMENT lock: the flag printing nothing == no unhandled bounce
                 self.assertIn("prints nothing", line, prof)
+                self.assertLess(line.index("--bounces --unhandled"),
+                                line.index("stream-wait"), prof)
 
     def test_full_proof_has_no_bounce_clause(self):
         for mode in ("parallel", "sequential"):
