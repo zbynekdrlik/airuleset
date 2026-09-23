@@ -458,9 +458,11 @@ class TestRegistrySeedAndWiring(unittest.TestCase):
         names = {e["name"] for e in entries}
         # spot-check the current managed set (dev1 + dev2)
         for expected in ("camera-box", "montalu-vyuctovanie", "montalu-n8n",
-                         "email-extractor", "parovanie-produktov",
-                         "forecasting-storage"):
+                         "email-extractor", "forecasting-storage"):
             self.assertIn(expected, names, expected)
+        # #1126: forestshop was removed from dev1 on 2026-09-23 (owner) — the
+        # retired parovanie-produktov checkout is no longer a managed project.
+        self.assertNotIn("parovanie-produktov", names)
         # every entry has the required schema fields
         for e in entries:
             for field in ("name", "host", "path", "branch_model",
