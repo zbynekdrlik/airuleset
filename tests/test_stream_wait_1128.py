@@ -181,6 +181,66 @@ class TestWaitForChange(unittest.TestCase):
         self.assertEqual(verdict, "heartbeat")
         self.assertEqual(sum(clock.sleeps), 120)
 
+    def test_an_exception_inside_fetch_is_a_poll_error_not_a_crash(self):
+        def boom():
+            raise RuntimeError("gh exploded")
+        clock = Clock()
+        verdict, lines, stats = sw.wait_for_change(
+            boom, interval=300, max_s=600, now_fn=clock.now,
+            sleep_fn=clock.sleep, backoff_fn=lambda: 0)
+        self.assertEqual(verdict, "heartbeat")
+        self.assertEqual(stats["errors"], 3)
+
+    def test_a_persisted_baseline_catches_a_change_absorbed_between_runs(self):
+        # review (#1128): a change that landed while no waiter ran (the loop was
+        # working, or between the slice-quals check and launch) must wake the
+        # FIRST poll, not be silently absorbed into a fresh baseline.
+        clock, seen = Clock(), []
+        verdict, lines, _s = sw.wait_for_change(
+            ScriptedFetch([({1: row(1, "T2")}, None)]), interval=300,
+            max_s=3600, now_fn=clock.now, sleep_fn=clock.sleep,
+            backoff_fn=lambda: 0, baseline=sw.fingerprint({1: row(1, "T1")}),
+            record_fn=seen.append)
+        self.assertEqual(verdict, "changed")
+        self.assertEqual(clock.sleeps, [], "detected on the very first poll")
+        self.assertEqual(seen, [sw.fingerprint({1: row(1, "T2")})])
+
+    def test_an_equal_persisted_baseline_keeps_waiting(self):
+        clock, seen = Clock(), []
+        verdict, _l, _s = sw.wait_for_change(
+            ScriptedFetch([({1: row(1)}, None)]), interval=300, max_s=900,
+            now_fn=clock.now, sleep_fn=clock.sleep, backoff_fn=lambda: 0,
+            baseline=sw.fingerprint({1: row(1)}), record_fn=seen.append)
+        self.assertEqual(verdict, "heartbeat")
+        self.assertEqual(len(seen), 4, "every successful poll is recorded")
+
+    def test_baseline_store_roundtrip_and_fail_safe(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d, True)
+        path = os.path.join(d, "x.json")
+        self.assertIsNone(sw.load_baseline(path), "missing -> None")
+        fp = sw.fingerprint({3: row(3, "T3", ("b", "a")), 4: row(4, None, ())})
+        sw.save_baseline(path, fp)
+        self.assertEqual(sw.load_baseline(path), fp)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write("{not json")
+        self.assertIsNone(sw.load_baseline(path), "corrupt -> None")
+
+    def test_make_fetch_resolves_the_slice_quals_once(self):
+        calls = []
+        with unittest.mock.patch.object(airuleset, "_current_user",
+                                        return_value="david1"), \
+                unittest.mock.patch.object(
+                    airuleset, "_slice_quals",
+                    side_effect=lambda u, cwd=None: calls.append(u) or ["label:s"]), \
+                unittest.mock.patch.object(airuleset, "_union_open_issues",
+                                           return_value=({1: row(1)}, False)):
+            fetch = sw.make_fetch("/r")
+            for _ in range(3):
+                self.assertIsNone(fetch()[1])
+        self.assertEqual(calls, ["david1"])
+
     def test_invalid_bounds_are_refused(self):
         for interval, max_s in ((0, 10), (10, 0), (-1, 10)):
             with self.assertRaises(ValueError):
@@ -336,12 +396,40 @@ class TestCli(unittest.TestCase):
         self.assertEqual(sw.DEFAULT_MAX_S, 3600)
 
     def _stream_box(self):
+        import shutil
+        import tempfile
         for target, value in (("resolve_authority", "fork-no-merge"),
                               ("_repo_root", "/r")):
             patcher = unittest.mock.patch.object(airuleset, target,
                                                  return_value=value)
             patcher.start()
             self.addCleanup(patcher.stop)
+        self.state_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.state_dir, True)
+        patcher = unittest.mock.patch.object(sw, "STATE_DIR", self.state_dir)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_run_threads_the_persisted_baseline_and_its_recorder(self):
+        self._stream_box()
+        seen = {}
+
+        def fake_wait(fetch, interval, max_s, **kw):
+            seen.update(kw)
+            return "heartbeat", [], {"polls": 1, "errors": 0, "holds": 0}
+
+        fp = sw.fingerprint({1: row(1)})
+        sw.save_baseline(sw.state_path("/r"), fp)
+        with unittest.mock.patch.object(sw, "wait_for_change",
+                                        side_effect=fake_wait), \
+                redirect_stdout(io.StringIO()):
+            rc = sw.run(self._args())
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen["baseline"], fp)
+        self.assertTrue(os.path.dirname(sw.state_path("/r")) == self.state_dir)
+        seen["record_fn"](sw.fingerprint({2: row(2)}))
+        self.assertEqual(sw.load_baseline(sw.state_path("/r")),
+                         sw.fingerprint({2: row(2)}))
 
     def _args(self, **kw):
         ns = unittest.mock.Mock(spec=["interval", "max"])

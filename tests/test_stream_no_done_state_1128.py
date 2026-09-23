@@ -59,15 +59,25 @@ class TestStreamLoopHasNoDoneState(unittest.TestCase):
             self.assertIn(IDLE, line, key)
             self.assertIn("relaunch it if gone", line, key)
             self.assertIn("end ⏳ WORKING", line, key)
-            self.assertIn("Only I end this loop (`/goal clear`)", line, key)
+            self.assertIn("Only the OWNER ends this loop (`/goal clear`)", line, key)
 
     def test_the_idle_gate_is_the_slice_and_its_unhandled_bounces(self):
+        # review (#1128): the gate is the DISPATCHABLE count (a dep-wait-only
+        # slice keeps --count > 0 and would have no idle state), with no lane
+        # live; a slice-quals error must still lead to the waiter, never a spin.
         for key, line in reduced_variants():
-            i_count = line.index("slice-quals --count` prints 0")
+            i_count = line.index("slice-quals --count-dispatchable` prints 0 "
+                                 "(or errors)")
             i_bounce = line.index("slice-quals --bounces --unhandled` prints nothing")
             i_wait = line.index(IDLE)
+            self.assertLess(line.index("when no lane is live"), i_count, key)
             self.assertLess(i_count, i_wait, key)
             self.assertLess(i_bounce, i_wait, key)
+
+    def test_the_evaluator_is_told_an_empty_slice_is_never_met(self):
+        for key, line in reduced_variants():
+            self.assertIn("an empty slice is NEVER a stop condition — never "
+                          "judge this goal met on it", line, key)
 
     def test_the_foreground_review_watch_is_replaced(self):
         for key, line in reduced_variants():

@@ -378,7 +378,7 @@ class TestReducedAuthorityTemplatesToo(TestCase):
             self.assertIn(
                 "keep exactly ONE background "
                 "`python3 ~/devel/airuleset/airuleset.py stream-wait` live", line)
-            self.assertIn("Only I end this loop (`/goal clear`)", line)
+            self.assertIn("Only the OWNER ends this loop (`/goal clear`)", line)
             self.assertNotIn(profile, PROOF_SPEC)
 
 

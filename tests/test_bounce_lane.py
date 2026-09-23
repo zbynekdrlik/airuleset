@@ -122,7 +122,7 @@ class TestReviewWatchLifecycle(TestCase):
         # deploynute do produ a nie skor"): #1128 makes the fork loop never
         # end at all, which is strictly stronger than holding until release.
         _, fk = self.reduced_goal_lines()
-        self.assertIn("Only I end this loop (`/goal clear`)", fk)
+        self.assertIn("Only the OWNER ends this loop (`/goal clear`)", fk)
         self.assertNotIn("RELEASED", fk)
 
     def test_review_watch_cadence_is_hourly_and_working(self):
