@@ -33,21 +33,48 @@ from typing import Optional
 _RFR_MARKER_RE = re.compile(r'^\s*([#*_-]+\s*)?READY-FOR-REVIEW', re.MULTILINE)
 _CFR_MARKER_RE = re.compile(
     r'Ready for gatekeeper cross-fork review[.!]?\s*$', re.MULTILINE)
-_SELF_REVIEW_MODEL_LINE_RE = re.compile(
-    r'(?im)^[ \t]*[-*]?[ \t]*\**Self-review-model\**[ \t]*:')
-_ROOTCAUSE_LINE_RE = re.compile(
-    r'(?im)^[ \t]*[-*]?[ \t]*\**Root-cause-of-previous-bounce\**[ \t]*:')
-# Prevencia: the GATE's round>=3 check wants `Prevencia (stream):`, while
-# airuleset's own composer/sign-only convention emits `Prevencia-read:`. For a
-# pass-through body (the STREAM authors it to pass the GATE, which OWNS the
-# shape), accept EITHER label so a gate-correct body is never blocked (#1044
-# review 🟡 — enforcing only `Prevencia-read:` here would reject the exact
-# `Prevencia (stream):` line the gate requires). The lingering compose/sign-only
-# label divergence is pre-existing and tracked separately.
-_PREVENCIA_READ_RE = re.compile(
-    r'(?im)^[ \t]*[-*]?[ \t]*\**Prevencia-read\**[ \t]*:')
-_PREVENCIA_STREAM_RE = re.compile(
-    r'(?im)^[ \t]*[-*]?[ \t]*\**Prevencia \(stream\)\**[ \t]*:')
+# #1125: ONE shared line prefix for the four label regexes, so their shapes
+# cannot drift from each other (or the gate) again: indent, an optional
+# `#{1,6}` heading (odoo-erp PR 8095's exact shape), bullet, bold. PRESENCE-only
+# fail-fasts — the repo gate stays the authority on the shape it accepts.
+_LABEL_LINE_PREFIX = r'^[ \t]*(?:#{1,6}[ \t]+)?[-*]?[ \t]*\**'
+
+
+def _label_line_re(label: str) -> "re.Pattern[str]":
+    return re.compile(r'(?im)' + _LABEL_LINE_PREFIX + label + r'\**[ \t]*:')
+
+
+_SELF_REVIEW_MODEL_LINE_RE = _label_line_re(r'Self-review-model')
+_ROOTCAUSE_LINE_RE = _label_line_re(r'Root-cause-of-previous-bounce')
+# The compose paths EMIT the gate's canonical `Prevencia (stream):` (the only
+# label odoo-erp develop's round>=3 check accepts); the checks ACCEPT either.
+_PREVENCIA_READ_RE = _label_line_re(r'Prevencia-read')
+_PREVENCIA_STREAM_RE = _label_line_re(r'Prevencia \(stream\)')
+PREVENCIA_LABEL = "Prevencia (stream)"
+
+# #1125: `Gate-dry-run:` value shape, verbatim from the gate's own check
+# (odoo-erp scripts/handoff_gate/dry_run.py::check_gate_dry_run_field,
+# advisory MISSING-GATE-DRY-RUN, `re.match`). The composer cannot run the full
+# gate: the value is the stream's own dry-run (`handoff --gate-dry-run`) or the
+# explicit GATE_DRY_RUN_NOT_RUN — a PASS is never fabricated.
+_GATE_DRY_RUN_VALUE_RE = re.compile(r'(?i)PASS\s+@\s+[0-9a-f]{7,40}')
+GATE_DRY_RUN_NOT_RUN = "not run"
+
+
+def gate_dry_run_value(value: Optional[str]) -> tuple[str, Optional[str]]:
+    """``(value_to_emit, error)`` for the ``Gate-dry-run:`` line: blank ->
+    ``not run``; otherwise ONE line in the gate's ``PASS @ <hex-sha>`` shape
+    (an embedded newline would inject body lines, e.g. a second ``HEAD:``)."""
+    v = (value or "").strip()
+    if not v:
+        return (GATE_DRY_RUN_NOT_RUN, None)
+    if "\n" in v or "\r" in v or not _GATE_DRY_RUN_VALUE_RE.match(v):
+        return ("", "handoff BLOCK: --gate-dry-run %r is not the gate's shape "
+                "`PASS @ <hex-sha>`; omit it to record Gate-dry-run: %s"
+                % (v, GATE_DRY_RUN_NOT_RUN))
+    return (v, None)
+
+
 # Line-anchored template field labels (bullet/bold tolerant, mirroring the
 # gate's own FIELD_PATTERNS) — used to detect a FULL body wrongly passed as
 # the Self-review table.
@@ -82,6 +109,23 @@ def is_full_body(table_text: str) -> bool:
         return True
     hits = sum(1 for rx in _FULL_BODY_FIELD_LABEL_RES if rx.search(table_text))
     return hits >= 2
+
+
+def bounce_escalation_error(
+    body: str, bounce_round: int, source: str
+) -> Optional[str]:
+    """The bounce-escalation PRESENCE check shared by the --body-file and
+    --sign-only paths (#1125): a ``Root-cause-of-previous-bounce:`` line and
+    a Prevencia line under EITHER label. The caller owns the round threshold.
+    Returns the BLOCK message, or None."""
+    if not _ROOTCAUSE_LINE_RE.search(body):
+        return ("handoff BLOCK: round %d %s body missing "
+                "Root-cause-of-previous-bounce:" % (bounce_round, source))
+    if not (_PREVENCIA_STREAM_RE.search(body)
+            or _PREVENCIA_READ_RE.search(body)):
+        return ("handoff BLOCK: round %d %s body missing "
+                "Prevencia (stream): / Prevencia-read:" % (bounce_round, source))
+    return None
 
 
 def validate_passthrough_body(
@@ -122,13 +166,9 @@ def validate_passthrough_body(
     # (Root-cause must NAME a lens id, Prevencia must be non-empty) — we do not
     # mirror those here, to avoid coupling to the gate's evolving round>=3 rules.
     if bounce_round >= 3:
-        if not _ROOTCAUSE_LINE_RE.search(body):
-            return ("handoff BLOCK: round %d --body-file body missing "
-                    "Root-cause-of-previous-bounce:" % bounce_round)
-        if not (_PREVENCIA_STREAM_RE.search(body)
-                or _PREVENCIA_READ_RE.search(body)):
-            return ("handoff BLOCK: round %d --body-file body missing "
-                    "Prevencia (stream): / Prevencia-read:" % bounce_round)
+        err = bounce_escalation_error(body, bounce_round, "--body-file")
+        if err:
+            return err
     # #1056 L2 (f): the disposition-shape mirror. Reuses the ONE primitive so
     # the pass-through path and the composer pre-flight agree by construction.
     if required_disposition_ids:
@@ -292,6 +332,7 @@ def render_extended_body(
     # the requirement is enforced in compose_body against the repo's template.
     frontline_impact: Optional[str] = None,
     source_verified: Optional[str] = None,
+    gate_dry_run: Optional[str] = None,  # #1125, None = `not run`
     # Bounce-specific fields.
     root_cause: Optional[str] = None,
     prevencia_read: Optional[str] = None,
@@ -354,13 +395,14 @@ def render_extended_body(
     parts.append("Shared-benefit: %s" % shared_benefit)
     if source_verified:
         parts.append("Source-verified: %s" % source_verified)
+    parts.append("Gate-dry-run: %s" % (gate_dry_run or GATE_DRY_RUN_NOT_RUN))
 
-    # Bounce-specific fields.
+    # Bounce-specific fields. Prevencia uses the gate's canonical label (#1125).
     if bounce_round >= 2:
         if root_cause:
             parts.append("Root-cause-of-previous-bounce: %s" % root_cause)
         if prevencia_read:
-            parts.append("Prevencia-read: %s" % prevencia_read)
+            parts.append("%s: %s" % (PREVENCIA_LABEL, prevencia_read))
 
     for cf in (closes_finding or []):
         parts.append("Closes-finding: %s" % cf)
@@ -387,6 +429,7 @@ def render_generic_body(
     self_review_model: Optional[str] = None,
     reviewed_by: Optional[str] = None,
     frontline_impact: Optional[str] = None,
+    gate_dry_run: Optional[str] = None,
 ) -> str:
     """Compose the original generic READY-FOR-REVIEW comment body.
 
@@ -410,12 +453,13 @@ def render_generic_body(
         parts.append("Reviewed-by: %s" % reviewed_by)
     if frontline_impact:
         parts.append("Frontline-impact: %s" % frontline_impact)
+    parts.append("Gate-dry-run: %s" % (gate_dry_run or GATE_DRY_RUN_NOT_RUN))
 
     if bounce_round >= 2:
         if root_cause:
             parts.append("Root-cause-of-previous-bounce: %s" % root_cause)
         if prevencia_read:
-            parts.append("Prevencia-read: %s" % prevencia_read)
+            parts.append("%s: %s" % (PREVENCIA_LABEL, prevencia_read))
 
     for cf in (closes_finding or []):
         parts.append("Closes-finding: %s" % cf)
@@ -469,6 +513,7 @@ def compose_body(
     closes_finding: Optional[list[str]] = None,
     self_review_model: Optional[str] = None,
     reviewed_by: Optional[str] = None,
+    gate_dry_run: Optional[str] = None,
 ) -> tuple[str, Optional[str]]:
     """Compose the comment body, choosing extended or generic shape.
 
@@ -488,6 +533,11 @@ def compose_body(
                 "gate then parses. Author the complete gate-compliant body and "
                 "post it verbatim with `airuleset.py handoff --body-file "
                 "<body.md>` instead.")
+
+    # #1125: validate Gate-dry-run: BEFORE any repo probe (never emit bad).
+    gate_dry_run, err = gate_dry_run_value(gate_dry_run)
+    if err:
+        return ("", err)
 
     # #1120: FAIL LOUD when the target repo's hand-off template DECLARES the
     # Frontline-impact: field but this hand-off omits the value (same class as
@@ -523,8 +573,8 @@ def compose_body(
             bounce_round=bounce_round, tested_tree=tested_tree,
             evidence_head=evidence_head, tenant_scope=tenant_scope,
             frontline_impact=frontline_impact,
-            source_verified=source_verified, root_cause=root_cause,
-            prevencia_read=prevencia_read,
+            source_verified=source_verified, gate_dry_run=gate_dry_run,
+            root_cause=root_cause, prevencia_read=prevencia_read,
             closes_finding=closes_finding,
             self_review_model=self_review_model,
             reviewed_by=reviewed_by,
@@ -539,5 +589,6 @@ def compose_body(
             self_review_model=self_review_model,
             reviewed_by=reviewed_by,
             frontline_impact=frontline_impact,
+            gate_dry_run=gate_dry_run,
         )
     return (body, None)

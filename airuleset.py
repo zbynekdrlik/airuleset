@@ -5404,6 +5404,7 @@ def cmd_handoff(args):
     source_verified = getattr(args, "source_verified", None)
     tested_tree = getattr(args, "tested_tree", None)
     evidence_head = getattr(args, "evidence_head", None)
+    gate_dry_run = getattr(args, "gate_dry_run", None)
 
     # --- sign-only mode (#919) -------------------------------------------
     # Create a receipt for an existing body file without posting it.
@@ -5422,22 +5423,18 @@ def cmd_handoff(args):
         if not body.strip():
             print("handoff BLOCK: sign-only file is empty")
             return 1
-        # The body must contain the READY-FOR-REVIEW marker (the same
-        # marker the hook checks — without it the receipt is useless).
-        import re as _re
-        _rfr = _re.compile(
-            r'^\s*([#*_-]+\s*)?READY-FOR-REVIEW', _re.MULTILINE)
-        _cfr = _re.compile(
-            r'Ready for gatekeeper cross-fork review[.!]?\s*$', _re.MULTILINE)
-        if not _rfr.search(body) and not _cfr.search(body):
+        # #1125: the sign-only checks reuse cli_handoff_template's shared
+        # shapes (RFR marker, heading/bullet/bold-tolerant label lines), so
+        # this path accepts exactly what --body-file accepts. The RFR marker
+        # is what the hook checks (without it the receipt is useless);
+        # Self-review-model: is a FACT the gate requires on EVERY readiness
+        # comment (#991 review finding 2).
+        import cli_handoff_template as _sho
+        if not _sho._has_rfr_marker(body):
             print("handoff BLOCK: sign-only file has no "
                   "READY-FOR-REVIEW marker")
             return 1
-        # Self-review-model: is a FACT the odoo-erp gate requires on EVERY
-        # readiness comment (#991 review finding 2). A sign-only body that
-        # omits it would get a receipt here and a bounce at the gate (#957
-        # friction), so require it in the body directly (all rounds).
-        if not _re.compile(r'^Self-review-model:', _re.MULTILINE).search(body):
+        if not _sho._SELF_REVIEW_MODEL_LINE_RE.search(body):
             print("handoff BLOCK: sign-only body missing Self-review-model: "
                   "line (required on every readiness comment)")
             return 1
@@ -5445,19 +5442,11 @@ def cmd_handoff(args):
         # cross-repo fields must be present even in sign-only mode.
         self_login = _stream_self_login()
         rnd = _bounce_round(int(issue), self_login, cwd=None, repo=repo)
-        if rnd >= 2:
-            _rc_re = _re.compile(
-                r'^Root-cause-of-previous-bounce:', _re.MULTILINE)
-            _prev_re = _re.compile(
-                r'^Prevencia-read:', _re.MULTILINE)
-            if not _rc_re.search(body):
-                print("handoff BLOCK: sign-only round %d body missing "
-                      "Root-cause-of-previous-bounce:" % rnd)
-                return 1
-            if not _prev_re.search(body):
-                print("handoff BLOCK: sign-only round %d body missing "
-                      "Prevencia-read:" % rnd)
-                return 1
+        err = (_sho.bounce_escalation_error(body, rnd, "sign-only")
+               if rnd >= 2 else None)
+        if err:
+            print(err)
+            return 1
         body_hash = hashlib.sha256(body.encode()).hexdigest()
         gate_dir = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_DIR)
         os.makedirs(gate_dir, exist_ok=True)
@@ -5619,6 +5608,7 @@ def cmd_handoff(args):
         closes_finding=closes_finding,
         self_review_model=self_review_model,
         reviewed_by=reviewed_by,
+        gate_dry_run=gate_dry_run,
     )
     if err:
         print(err)
@@ -10075,8 +10065,8 @@ def main():
                       help="Root-cause-of-previous-bounce (required round >= 2)")
     p_ho.add_argument("--closes-finding", action="append",
                       help="Closes-finding: <id> — <evidence> (repeatable)")
-    p_ho.add_argument("--prevencia-read",
-                      help="Prevencia-read: <path> (required round >= 2)")
+    p_ho.add_argument("--prevencia-read", help="Prevencia rule path (round "
+                      ">= 2), emitted as `Prevencia (stream): <path>` (#1125)")
     p_ho.add_argument("--self-review-model", dest="self_review_model",
                       help="Self-review-model: the EXACT model id that "
                            "performed the fresh-context self-review "
@@ -10119,6 +10109,9 @@ def main():
     p_ho.add_argument("--evidence-head", dest="evidence_head",
                       help="Evidence-HEAD: commit evidence was captured at "
                            "(optional)")
+    p_ho.add_argument("--gate-dry-run", dest="gate_dry_run", help="local gate "
+                      "--body-file dry-run result 'PASS @ <gate-sha>' (#1125); "
+                      "omitted = 'Gate-dry-run: not run'")
 
     p_mt = sub.add_parser(
         "model-tiers",

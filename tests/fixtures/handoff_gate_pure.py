@@ -4,7 +4,7 @@
 # scripts/handoff_gate/_gate.py for airuleset's hand-off composer contract
 # test (#1044). Regenerate with scripts/extract_handoff_gate_validators.py.
 #
-# Provenance: odoo-erp scripts/handoff_gate/_gate.py blob 189f7b7cb00597ab55c108efd454cba70d2b2e53, develop b9b4a1881b, extracted 2026-09-16
+# Provenance: odoo-erp scripts/handoff_gate/_gate.py blob 2c016160b2bda7f8df923d406c88996ee70f0497, develop 2c2fef52fc, extracted 2026-09-23
 #
 # The full gate is NOT importable off an odoo-erp checkout (it needs
 # check_changelog_placement + git/gh); these pure functions are its
