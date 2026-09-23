@@ -19,6 +19,9 @@ never the real `~/.config/gh-app-tokens`.
 """
 
 import os
+import shutil
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,6 +29,9 @@ from unittest import mock
 
 import airuleset
 import cli_quals
+from _hook_state_cleanup import hermetic_hook_env
+
+REPO = Path(__file__).resolve().parent.parent
 
 
 APP1 = "odoo-erp-stream-tokens"
@@ -129,6 +135,93 @@ class TestOwnTargetVisibleEndToEnd(_TokenDirCase):
             self.COMMENTS, cli_quals._stream_self_login())
         self.assertIsNone(ages["own"])
         self.assertIsNone(ages["own_target"])
+
+
+class TestSidecarReaderHardening(_TokenDirCase):
+    """Review findings (2 adversarial passes): the reader sits on the footer
+    and PreToolUse-hook paths, so it must never hang, never read a huge file,
+    never trust a stale record, and only accept a real GitHub App slug."""
+
+    def test_dangling_primary_ignores_orphan_sidecar(self):
+        self.write_sidecar(APP2)
+        self.token_file.unlink()          # primary now dangles
+        self.assertEqual(airuleset.STREAM_APP_BOT_LOGIN,
+                         cli_quals._stream_self_login())
+
+    def test_missing_primary_ignores_orphan_primary_sidecar(self):
+        (self.token_dir / "primary").unlink()
+        self.write_sidecar(APP2, name="primary.app")
+        self.assertEqual(airuleset.STREAM_APP_BOT_LOGIN,
+                         cli_quals._stream_self_login())
+
+    def test_relative_primary_symlink_reads_sibling_sidecar(self):
+        (self.token_dir / "primary").unlink()
+        (self.token_dir / "primary").symlink_to(TOKEN_NAME)
+        self.write_sidecar(APP2)
+        self.assertEqual("app/" + APP2, cli_quals._stream_self_login())
+
+    def test_non_slug_values_fall_back(self):
+        for bad in (".", "..", "-lead", "Odoo-Erp-Stream-Tokens-2",
+                    "odoo_erp", "a" * 300):
+            with self.subTest(bad=bad):
+                self.write_sidecar(bad)
+                self.assertEqual(airuleset.STREAM_APP_BOT_LOGIN,
+                                 cli_quals._stream_self_login())
+
+    def test_directory_sidecar_falls_back(self):
+        (self.token_dir / (TOKEN_NAME + ".app")).mkdir()
+        self.assertEqual(airuleset.STREAM_APP_BOT_LOGIN,
+                         cli_quals._stream_self_login())
+
+    def test_fifo_sidecar_never_blocks(self):
+        """A FIFO with no writer would block a plain open() forever."""
+        os.mkfifo(self.token_dir / (TOKEN_NAME + ".app"))
+        code = ("import cli_quals, airuleset;"
+                "airuleset._gh_login=lambda *a, **k: None;"
+                "print(cli_quals._stream_self_login())")
+        r = subprocess.run([sys.executable, "-c", code], cwd=str(REPO),
+                           capture_output=True, text=True, timeout=20,
+                           env=dict(os.environ))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(airuleset.STREAM_APP_BOT_LOGIN, r.stdout.strip())
+
+
+def _fake_gh_403_dir(testcase):
+    d = tempfile.mkdtemp(prefix="fake-gh-1129-")
+    testcase.addCleanup(shutil.rmtree, d, True)
+    gh = Path(d) / "gh"
+    gh.write_text("#!/usr/bin/env bash\n"
+                  "echo 'HTTP 403: Resource not accessible by integration' >&2\n"
+                  "exit 1\n")
+    gh.chmod(0o755)
+    return d
+
+
+class TestAuthorityCliOnSecondAppBox(_TokenDirCase):
+    """The hook reads identity through `airuleset.py authority` subprocesses:
+    both `--self-login` and the #773 fallback `--app-bot-login` must name the
+    App that minted THIS box's token."""
+
+    def _authority(self, flag):
+        env = hermetic_hook_env(self, GH_APP_TOKEN_DIR=str(self.token_dir))
+        env["PATH"] = _fake_gh_403_dir(self) + os.pathsep + env["PATH"]
+        r = subprocess.run([sys.executable, str(REPO / "airuleset.py"),
+                            "authority", flag], cwd=str(REPO),
+                           capture_output=True, text=True, timeout=60, env=env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        return r.stdout.strip()
+
+    def test_self_login_cli_names_second_app(self):
+        self.write_sidecar(APP2)
+        self.assertEqual("app/" + APP2, self._authority("--self-login"))
+
+    def test_app_bot_login_cli_names_second_app(self):
+        self.write_sidecar(APP2)
+        self.assertEqual("app/" + APP2, self._authority("--app-bot-login"))
+
+    def test_app_bot_login_cli_without_record_is_constant(self):
+        self.assertEqual(airuleset.STREAM_APP_BOT_LOGIN,
+                         self._authority("--app-bot-login"))
 
 
 if __name__ == "__main__":
