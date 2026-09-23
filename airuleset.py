@@ -2102,9 +2102,8 @@ def cmd_install(args):
     try:
         # #554/#592: name the tmux WINDOW after the box's short TARGET ALIAS
         # (gk/mN/dN/...) so the owner sees WHERE they are. #593: renders ONLY on
-        # `is_window_name_eligible` boxes (gk + subdev streams + the single-
-        # project controller, #1124), NEVER an owner/
-        # newlevel MULTI-PROJECT box (dev1/dev2) -- one fixed name there froze
+        # `is_window_name_eligible` boxes (gk + streams + the controller, #1124),
+        # NEVER an owner MULTI-PROJECT box (dev1/dev2) -- one fixed name there froze
         # every project window and destroyed navigation (the #592 regression).
         # The alias comes from the SAME source the webterm tabs use
         # (cli_aliases.short_target_alias).
