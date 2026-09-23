@@ -4,8 +4,10 @@ hooks/block-dispatch-without-main-design.sh.
 
 Active ONLY for an `autopilot-worker` Agent/Task dispatch. REFUSES the dispatch
 unless the NEWEST `Design-by:` comment on every issue named in the prompt is
-`Design-by: main <Fable id>` -- i.e. the design was authored by the Fable MAIN
-session, per the owner's standing #871 rule. FAIL-CLOSED: an unreadable comment
+`Design-by: main <managed-main id>` -- a managed MAIN-tier id (Opus 5.5 since
+#1119, or Fable 5.1 through the transition; see `_accepted_main_ids`), i.e. the
+design was authored by the managed MAIN session, per the owner's standing #871
+rule. FAIL-CLOSED: an unreadable comment
 thread (gh error / no network / auth) REFUSES with an honest reason (the owner's
 rule -- never dispatch a worker onto an unverifiable design). A prompt with no
 parseable issue number can't be checked and is ALLOWED (the same documented

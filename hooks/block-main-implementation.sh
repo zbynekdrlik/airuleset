@@ -715,14 +715,29 @@ for raw in lines:
     if not isinstance(c, str) or "Set model to" not in c:
         continue
     picked = re.sub(r"\x1b\[[0-9;]*m", "", c).split("Set model to", 1)[1]
-    model = "claude-fable-5-1" if re.search(r"fable", picked, re.I) else ""
+    # #1119: the managed MAIN is Opus 5.5 (was Fable 5.1). Detect either from the
+    # /model picker text (a still-running Fable main is covered through the
+    # transition); return a canonical id the bash `case` below classifies.
+    if re.search(r"opus[\s-]*5[.\s-]*5", picked, re.I):
+        model = "claude-opus-5-5"
+    elif re.search(r"fable", picked, re.I):
+        model = "claude-fable-5-1"
+    else:
+        model = ""
 
 print(model)
 PYEOF
 )
-IS_FABLE=0
+# #1119: the managed MAIN model is Opus 5.5 (`claude-opus-5-5`); Fable 5.1
+# (`claude-fable-*`) stays matched through the transition (a still-running Fable
+# main must still be blocked). This is the "expensive managed main must not
+# implement" condition (#32) — it keys on the managed MAIN family, not a single
+# hard-coded model. `claude-opus-5-*` covers the new main; `claude-opus-4-8` is
+# an allowed SUBAGENT/dispatch id, never the managed main, so it is deliberately
+# NOT matched here.
+IS_MANAGED_MAIN=0
 case "$MODEL" in
-    claude-fable-*) IS_FABLE=1 ;;
+    claude-fable-*|claude-opus-5-*) IS_MANAGED_MAIN=1 ;;
 esac
 
 # ---- condition 3: the user is AWAY (#128) ----
@@ -807,8 +822,8 @@ GOAL_JQ_RC=0
 # ITSELF shares a torn physical line, that line is dropped too, so an armed goal
 # reads as NOT armed and a bulk read is ALLOWED (a narrow fail-OPEN) instead of
 # blocked. Accepted because (a) this guard is cost-discipline, not a security
-# boundary; (b) a FABLE main — the fleet default, hook-enforced — is still
-# blocked via the SEPARATE, already-robust Python IS_FABLE reader regardless of
+# boundary; (b) the managed MAIN (Opus 5.5 since #1119) — the fleet default, hook-enforced — is still
+# blocked via the SEPARATE, already-robust Python IS_MANAGED_MAIN reader regardless of
 # the goal read; and (c) it replaces a strictly worse fail-CLOSED-FOREVER
 # availability bug (one torn line anywhere used to brick the session).
 GOAL_JQ_OUT=$(jq -R -r '
@@ -834,7 +849,7 @@ else
     esac
 fi
 
-if [ "$IS_FABLE" != "1" ] && [ "$GOAL_ARMED" != "1" ] \
+if [ "$IS_MANAGED_MAIN" != "1" ] && [ "$GOAL_ARMED" != "1" ] \
    && [ "$AWAY" != "1" ] && [ "$GOAL_UNKNOWN" != "1" ]; then
     exit 0                               # no condition holds — allow
 fi
@@ -843,7 +858,7 @@ fi
 # say which rule engaged, and now more than one can.
 RULE_TAG=""
 REASON=""
-[ "$IS_FABLE" = "1" ] && { RULE_TAG="FABLE"; REASON="runs FABLE"; }
+[ "$IS_MANAGED_MAIN" = "1" ] && { RULE_TAG="MAIN"; REASON="runs the managed MAIN model"; }
 if [ "$GOAL_ARMED" = "1" ]; then
     RULE_TAG="${RULE_TAG:+$RULE_TAG+}GOAL_ARMED"
     REASON="${REASON:+$REASON and }has an ARMED /goal"

@@ -15,11 +15,12 @@ anyway — the exact failure class a HOOK enforces:
   `block-fable-main-implementation.sh`): a MAIN session (no agent_id)
   writing MORE than AIRULESET_FABLE_EDIT_MAX (~800 chars) in one Edit/Write
   is blocked with the delegation instruction whenever EITHER (a) its CURRENT
-  model is claude-fable-*, OR (b) the session's TRANSCRIPT shows an ARMED
+  model is the managed MAIN family (claude-opus-5-* since #1119, or the
+  transition claude-fable-*), OR (b) the session's TRANSCRIPT shows an ARMED
   /goal (the latest `<local-command-stdout>Goal set:` / `Goal cleared:`
   marker is a "set" with no later "cleared"). Small surgical edits pass
   (oversight is legitimate); subagents pass (execution belongs there); a
-  plain non-Fable, non-goal-armed main passes (unchanged existing
+  plain non-managed-main, non-goal-armed main passes (unchanged existing
   behavior); unknown model / no goal markers fails open; deliberate bypass
   = touch /tmp/airuleset-main-exec-ok-<session_id> (logged), with the
   original /tmp/airuleset-fable-exec-ok-<session_id> still honored for
@@ -203,7 +204,17 @@ class MainImplementationGuard(unittest.TestCase):
     def test_fable_main_big_edit_blocked(self):
         out = self._run()
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
-        self.assertIn("FABLE", out.stderr)
+        self.assertIn("MAIN", out.stderr)
+        self.assertIn("worker", out.stderr)
+
+    def test_opus_5_5_managed_main_big_edit_blocked(self):
+        # #1119: Opus 5.5 replaced Fable as the managed MAIN — the anti-burn
+        # guard's primary condition ("the expensive managed main must not
+        # implement") MUST still fire for the new main. Attended (no away
+        # marker), no armed goal -> the model condition alone must block.
+        out = self._run(model="claude-opus-5-5")
+        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+        self.assertIn("MAIN", out.stderr)
         self.assertIn("worker", out.stderr)
 
     def test_fable_main_big_write_blocked(self):
@@ -273,7 +284,7 @@ class MainImplementationGuard(unittest.TestCase):
                                "new sessions</local-command-stdout>") + "\n")
         out = self._run(transcript_text=tx)
         self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
-        self.assertIn("FABLE", out.stderr)
+        self.assertIn("MAIN", out.stderr)  # #1119: tag renamed FABLE -> MAIN
 
     def test_quoted_foreign_model_in_tool_result_is_not_the_session_model(self):
         # The raw `grep -oE '"model"…'` matched ANY occurrence in the tail —

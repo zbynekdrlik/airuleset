@@ -301,7 +301,7 @@ def render_claude_launch_script():
 CLAUDE_IMPL_LAUNCH_SCRIPT_CONTENT = r"""#!/usr/bin/env bash
 # airuleset-managed (do NOT edit) — the IMPLEMENTER window launcher (#1060 L3a).
 # Scopes the controller LiteLLM model gateway to THIS process only; the main
-# window stays on the Anthropic OAuth login + Fable. Requires bash >= 4.4.
+# window stays on the Anthropic OAuth login + the managed model (Opus 5.5, #1119). Requires bash >= 4.4.
 set -euo pipefail
 
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac
