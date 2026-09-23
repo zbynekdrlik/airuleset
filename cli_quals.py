@@ -24,6 +24,7 @@ import subprocess
 import time
 from pathlib import Path
 
+import cli_app_token
 import working_time
 
 
@@ -96,10 +97,8 @@ def _core_search_excl():
     `_partition_workable` (which cannot see box authority) would now route it to
     `U` (#622: a bare needs-acceptance is queued for owner approval → U
     unconditionally; the exclusion keeps a FOREIGN one out of this box's counts
-    entirely, be that `U` or `I`). One that DOES carry a MAINTAINER_ACTION_LABELS
-    label re-enters via `_obligation_quals()` and is kept out of `U` by the #507
-    gk-override (NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS, derived from the same
-    tuple — issue 1130) → action-only `I`.
+    entirely, be that `U` or `I`). One WITH such a label re-enters via
+    `_obligation_quals()` and the #507 gk-override keeps it in `I` (issue 1130).
 
     #561: each excluded stream is EXPANDED via `_stream_rename_equivalents()`
     — the SAME single alias primitive `_slice_quals()`/`_ticket_is_stream_
@@ -140,6 +139,12 @@ def _gh_app_token_dir():
     if override:
         return Path(override)
     return Path.home() / ".config" / "gh-app-tokens"
+
+
+def _gh_app_token_slug():
+    """The slug of the App that minted this box's token, or None (issue 1129,
+    `cli_app_token.read_app_slug` — the `.app` sidecar next to `primary`)."""
+    return cli_app_token.read_app_slug(_gh_app_token_dir())
 
 
 def _is_gh_app_token_box():
@@ -491,12 +496,8 @@ USER_WAITING_LABELS = ("needs-answer", "needs-decision", "needs-acceptance",
 # states, so their #468 routing (a handed + user-waiting row goes to U) is left
 # byte-identical — this override applies solely to the one POST-hand-off label.
 #
-# Issue 1130: DERIVED from MAINTAINER_ACTION_LABELS (never a literal copy), so
-# #1053's `gk-processing` (gk picked the hand-off up) overrides too. Before, a
-# FOREIGN stream's `needs-acceptance` + `gk-processing` row — pulled into the
-# full-authority core set by the `label:gk-processing` obligation qual — fell
-# to the gk owner's `U` (odoo-erp#8002, stream:david4), and on the owning
-# stream's box gk's pickup dropped a needs-acceptance re-hand-off out of `gk`.
+# Issue 1130: DERIVED from MAINTAINER_ACTION_LABELS, so `gk-processing` overrides
+# too (a foreign acceptance in gk-processing fell to the gk owner's U).
 NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS = MAINTAINER_ACTION_LABELS + (
     "prio:bounce",)
 
@@ -1517,7 +1518,7 @@ def _is_own_login(login, self_login):
     """App-aware identity match for own-comment detection (#904).
 
     On App-token streams, ``_stream_self_login()`` returns the ``app/``-prefixed
-    form (``STREAM_APP_BOT_LOGIN = "app/odoo-erp-stream-tokens"``), but
+    form (``app/<minting App slug>``, else ``STREAM_APP_BOT_LOGIN``), but
     GitHub's ``gh issue view --json comments`` renders the comment
     ``author.login`` as the bare slug (``"odoo-erp-stream-tokens"``).
 
@@ -1563,10 +1564,7 @@ def _stream_self_login():
     App token makes ``gh api user`` 403 → ``_gh_login()`` = None).
 
     Issue 1129: on a genuine App-token box the identity is the App that
-    MINTED the token in use (``_gh_app_token_slug()``, the ``.app``
-    sidecar next to it) — a second-App stream (``odoo-erp-stream-tokens-2``)
-    comments as that slug — falling back to ``STREAM_APP_BOT_LOGIN`` when
-    no valid record exists."""
+    MINTED the token in use (``_gh_app_token_slug()``), else the constant."""
     import airuleset
     if _is_gh_app_token_box():
         # Validate: a genuine App-token box has no user identity
@@ -1582,42 +1580,6 @@ def _stream_self_login():
             return "app/" + slug
         return airuleset.STREAM_APP_BOT_LOGIN
     return airuleset._gh_login()
-
-
-# Issue 1129: the SAME identifier rule odoo-erp `push-stream-tokens.sh`
-# (`safe_name`) and `mint-installation-token.sh` apply to an App slug.
-_APP_SLUG_RX = re.compile(r"[A-Za-z0-9._-]+")
-
-
-def _gh_app_token_slug():
-    """The GitHub App slug recorded next to the token THIS box's `gh` uses,
-    or None when there is no usable record (issue 1129).
-
-    The token in use is `~/.config/gh-app-tokens/primary` (what
-    `gh-app-token` with no argument reads) — a symlink the minting path
-    (odoo-erp `scripts/gh-app/push-stream-tokens.sh`) points at the
-    per-repo token file `<owner>__<name>`, next to which it already writes
-    the `.expires` sidecar. The slug record is the SIBLING `.app` sidecar of
-    the resolved token file (`realpath(primary) + ".app"`; a regular-file
-    `primary` therefore reads `primary.app`). Streams minted by a second App
-    (streams.conf `app=odoo-erp-stream-tokens-2`) author their comments as
-    that App's slug, so the constant `STREAM_APP_BOT_LOGIN` misreads every
-    own comment as foreign.
-
-    Local, static read — no network (the #356 rule for App-token boxes).
-    Returns None on a missing/unreadable sidecar or content that is not a
-    single identifier, so the caller keeps today's constant (never guesses a
-    wider identity — accepting any `odoo-erp-stream-tokens*` slug would let
-    another stream's comment refresh this stream's W freshness)."""
-    try:
-        primary = _gh_app_token_dir() / "primary"
-        sidecar = Path(os.path.realpath(primary) + ".app")
-        content = sidecar.read_text(encoding="utf-8").strip()
-    except (OSError, ValueError):
-        return None
-    if not _APP_SLUG_RX.fullmatch(content):
-        return None
-    return content
 
 
 def _ages_from_comments(comments, self_login):
@@ -2551,15 +2513,16 @@ def cmd_authority(args):
             print(login)
         return
     if getattr(args, "app_bot_login", False):
-        # #773: the shared stream App bot login (STREAM_APP_BOT_LOGIN), printed
-        # UNCONDITIONALLY -- it is a static constant, not a per-box identity, so
-        # no network call and no App-token-box detection is needed. The hook's
-        # #773 fallback compares a ticket's AUTHOR against it: a ticket authored
-        # by this bot was FILED by a stream (never maintainer-assigned, which is
-        # authored by MAINTAINER_GH_LOGIN), so a reduced-authority stream may
-        # self-close it even when --self-login could not resolve the box's own
-        # identity.
-        print(airuleset.STREAM_APP_BOT_LOGIN)
+        # #773: the stream App bot login, printed without App-token-box
+        # detection or a network call. The hook's #773 fallback compares a
+        # ticket's AUTHOR against it: a ticket authored by a stream App was
+        # FILED by a stream (never maintainer-assigned, which is authored by
+        # MAINTAINER_GH_LOGIN), so a reduced-authority stream may self-close it
+        # even when --self-login could not resolve the box's own identity.
+        # Issue 1129: the App that minted THIS box's token when its slug
+        # sidecar is readable, else the constant STREAM_APP_BOT_LOGIN.
+        slug = _gh_app_token_slug()
+        print("app/" + slug if slug else airuleset.STREAM_APP_BOT_LOGIN)
         return
     if getattr(args, "stream_label", False):
         # #533: THIS stream's ownership label `stream:<unix-user>` for the

@@ -585,7 +585,8 @@ if [ -n "$ISSUE_NUM" ]; then
     # 403s structurally ("Resource not accessible by integration"), leaving ME
     # empty and the self-authored carve-out permanently unreachable even for a
     # genuinely App-authored sub-finding (#463). `authority --self-login`
-    # returns the fixed stream bot login on such a box (no network call) and
+    # returns the minting App's bot login on such a box (issue 1129: the
+    # token's `.app` sidecar slug, else the constant; no network call) and
     # the real `gh api user` login (via `_gh_login()`) on every other box — a
     # box whose gh resolves identically stays behaviourally the same, and a
     # git-credentials-only box (david's fork-no-merge) is a strict FAIL-SAFE
