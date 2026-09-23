@@ -1803,10 +1803,23 @@ def _setup_controller_webterm():
         str(config_path), cloudflared_bin,
         after=" ".join(after_parts))
 
-    return tun._provision_managed_tunnel(
+    tunnel_ok = tun._provision_managed_tunnel(
         creds_path, cloudflared_bin, config_path, config_text,
         service_dest, service_name, unit_text,
         lane="(controller)")
+
+    # #1115 slice B: go-live reconcile — the controller holds both Cloudflare
+    # tokens, so it (and only it) reconciles each controller-topology drop lane's
+    # DNS CNAME + Access app and writes the go-live cache push reads. Non-fatal
+    # by contract (its own LOUD lines carry any failure; never a whole-install
+    # abort), so it rides here without gating the tunnel provision result.
+    try:
+        import cli_drop_golive
+        cli_drop_golive.reconcile_and_report(dry_run=False)
+    except Exception as e:                             # pragma: no cover - defensive
+        print("  drop-lanes go-live error (non-fatal): %s" % e, file=sys.stderr)
+
+    return tunnel_ok
 
 
 def maybe_setup_webterm():
