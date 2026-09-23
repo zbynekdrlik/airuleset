@@ -222,6 +222,27 @@ def bind_ips():
     return out or ["127.0.0.1"]
 
 
+def with_loopback(ips):
+    """``ips`` with ``127.0.0.1`` appended (deduped, loopback LAST) — the bind
+    set for the PERSISTENT filedrop SERVER (#1115).
+
+    The controller's drop lane for a LOCAL-topology box (spinbike) fronts a
+    loopback origin (``/s/`` → ``127.0.0.1:<filedrop_port>``), so the share server
+    MUST listen on loopback there — and on any future local-topology box that ALSO
+    has a private interface (where ``bind_ips()`` would otherwise omit loopback).
+    Applied ONLY to the persistent server's bind list (cli_filedrop_watchdog's
+    unit render), never to ``bind_ips()``/``advertise_urls`` — so the URLs handed
+    to the USER never gain a useless ``127.0.0.1`` entry and every existing
+    ``bind_ips()`` caller (vault/upload/secret, the #438 host_ip invariant) stays
+    byte-identical. Takes the base list as an ARGUMENT so the persistent server
+    can compose it onto its own ``filedrop_bind_ips`` back-ref (the leaf-vs-facade
+    seam) without a second bind-ips resolution."""
+    out = list(ips)
+    if "127.0.0.1" not in out:
+        out.append("127.0.0.1")
+    return out
+
+
 def advertise_urls(port=None, path=""):
     """One clickable URL per PRIVATE interface (bind_ips() order — tailscale first).
 

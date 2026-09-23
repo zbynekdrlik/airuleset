@@ -39,6 +39,7 @@ try:
                           PORT_FILE as FILEDROP_PORT_FILE, persisted_port as filedrop_persisted_port,
                           default_port_for_uid as filedrop_default_port_for_uid,
                           host_ip as filedrop_host_ip, bind_ips as filedrop_bind_ips,
+                          with_loopback as filedrop_with_loopback,
                           filedrop_url, FILEDROP_DIR)
 except Exception:  # pragma: no cover — filedrop package should always import
     FILEDROP_PORT = int(os.environ.get("FILEDROP_PORT", "8788"))
@@ -59,6 +60,12 @@ except Exception:  # pragma: no cover — filedrop package should always import
 
     def filedrop_bind_ips():
         return [filedrop_host_ip()]
+
+    def filedrop_with_loopback(ips):
+        out = list(ips)
+        if "127.0.0.1" not in out:
+            out.append("127.0.0.1")
+        return out
 
     def filedrop_url():
         return f"http://{filedrop_host_ip()}:{FILEDROP_PORT}/"
@@ -134,9 +141,14 @@ def _render_filedrop_unit(port=None):
     Environment so the sandboxed server never needs AF_NETLINK to discover its own
     address. {{PORT}} -> the per-user port chosen by _choose_filedrop_port (a
     second airuleset user on the same host cannot reuse the first user's :8788)."""
+    # #1115: the persistent server ALSO binds 127.0.0.1 (local-topology drop
+    # lanes front a loopback origin — filedrop.with_loopback). Composed onto the
+    # `filedrop_bind_ips` back-ref (not a second resolution) so the leaf-vs-facade
+    # seam test still proves leaf resolution; user-facing URLs (advertise_urls)
+    # are untouched.
     return (FILEDROP_SERVICE_TEMPLATE.read_text()
             .replace("{{REPO_DIR}}", str(REPO_DIR))
-            .replace("{{HOST_IPS}}", ",".join(filedrop_bind_ips()))
+            .replace("{{HOST_IPS}}", ",".join(filedrop_with_loopback(filedrop_bind_ips())))
             .replace("{{HOST_IP}}", filedrop_host_ip())
             .replace("{{PORT}}", str(port if port is not None else FILEDROP_PORT)))
 

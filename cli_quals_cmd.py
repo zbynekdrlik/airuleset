@@ -552,7 +552,7 @@ def _handoff_label_mechanism_health(cwd=None):
     return ("ok", path)
 
 
-def _ops_wait_flag_sets(ops_wait, root):
+def _ops_wait_flag_sets(ops_wait, root, member_quals=None):
     """#699 — the (stale, recheck, gk_handoff, unpark, tacit_wait, tacit_close,
     converge, no_target, deploy_target) flag sets for the `--ops-wait` reason
     column, SHARING ONE per-member comment-age fetch between the #570 `stale!`
@@ -585,14 +585,13 @@ def _ops_wait_flag_sets(ops_wait, root):
     a deploy/release. PURE regex, no external read. From the SAME shared ages
     fetch (`own_target_event` was read in the same pass)."""
     import airuleset
-    self_login = airuleset._stream_self_login()
-    ages_cache = {}
-
-    def _ages(n):
-        if n not in ages_cache:
-            ages_cache[n] = airuleset._issue_comment_ages(
-                n, self_login, None, cwd=root)
-        return ages_cache[n]
+    # #1067 (a): ONE batched comment prefetch for the W members (O(quals) gh
+    # calls) feeding the shared `ages_fn` seam, instead of one `gh issue view`
+    # per member. `member_quals` are the SAME quals that produced the W members
+    # (`_slice_quals`/`_obligation_quals`); None → per-member fallback for all
+    # (byte-identical to the pre-#1067 path). The `_ages` closure memoizes and
+    # falls back per-member for any member absent from the prefetch.
+    _ages = airuleset.ops_wait_ages_fn(ops_wait, root, member_quals)
 
     stale = airuleset._stale_ops_wait_flagged(ops_wait, ages_fn=_ages)
     recheck = airuleset._release_recheck_flagged(ops_wait, ages_fn=_ages)
@@ -964,7 +963,7 @@ def cmd_slice_quals(args):
         # acceptance member inside/past its #799 N=3 window (subtracted from
         # stale!/recheck! by _ops_wait_flag_sets — no second-reminder nudge).
         _stale, _recheck, _gkh, _unpark, _tw, _tc, _conv, _nt, _dt = (
-            _ops_wait_flag_sets(ops_wait, root))
+            _ops_wait_flag_sets(ops_wait, root, member_quals=quals))
         _print_issue_rows(ops_wait, own_stream=user,
                           reason_fn=airuleset._ops_wait_reason,
                           stale_numbers=_stale, recheck_numbers=_recheck,
@@ -1527,7 +1526,7 @@ def cmd_core_quals(args):
         # acceptance member inside/past its #799 N=3 window (subtracted from
         # stale!/recheck! by _ops_wait_flag_sets — no second-reminder nudge).
         _stale, _recheck, _gkh, _unpark, _tw, _tc, _conv, _nt, _dt = (
-            _ops_wait_flag_sets(ops_wait, root))
+            _ops_wait_flag_sets(ops_wait, root, member_quals=quals))
         _print_issue_rows(ops_wait, own_stream=None,
                           reason_fn=airuleset._ops_wait_reason,
                           stale_numbers=_stale, recheck_numbers=_recheck,
