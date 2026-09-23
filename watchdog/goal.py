@@ -202,6 +202,7 @@ from watchdog import roster as _roster                       # #804 (armed roste
 from watchdog import resurrect as _resurrect                 # #804 (mode-5 relaunch)
 from watchdog import goal_turn_liveness as _turn_liveness     # #1110 (transcript liveness)
 from watchdog import gk_stall_notice as _gk_stall_notice      # #1109 (gk role-pane stall notice)
+from watchdog import stream_migrate as _stream_migrate        # #1128 (old-template stream re-arm)
 
 
 # --------------------------------------------------------------------------- #
@@ -307,7 +308,8 @@ _GOAL_WATCHDOG_REARM_ORIGINS = (_GOAL_REARM_ORIGIN,
                                 _GOAL_AUTH_REARM_ORIGIN,
                                 _GOAL_FULFILLED_REARM_ORIGIN,
                                 _GOAL_ANSWER_REARM_ORIGIN,
-                                _GOAL_DECLARED_VIRGIN_ORIGIN)
+                                _GOAL_DECLARED_VIRGIN_ORIGIN,
+                                _stream_migrate.ORIGIN)       # #1128
 # #890 -- RECOVERY-class origins: events that are PROVEN (not guessed) — an auth
 # clear is CC saying so, an answered-❓ is the transcript saying so. These are
 # EXEMPT from the dead-dark attempt cap (they have their OWN rate states) and from
@@ -456,7 +458,8 @@ def record_goal_request(session, cwd, text, authority, now=None, path=None,
             and new_origin in (_GOAL_REARM_ORIGIN, _GOAL_FULFILLED_REARM_ORIGIN,
                                _GOAL_AUTH_REARM_ORIGIN,
                                _GOAL_ANSWER_REARM_ORIGIN,
-                               _GOAL_DECLARED_VIRGIN_ORIGIN) \
+                               _GOAL_DECLARED_VIRGIN_ORIGIN,
+                               _stream_migrate.ORIGIN) \
             and prior_origin != new_origin:
         return True                              # pending arm stands, untouched
 
@@ -1407,7 +1410,8 @@ def _goal_cap_drop(sid, cwd, text, origin, dl_fails, request_ts, run,
     if (send_fn is not None and not dry_run
             and origin not in (_GOAL_AUTH_REARM_ORIGIN,
                                _GOAL_FULFILLED_REARM_ORIGIN,
-                               _GOAL_ANSWER_REARM_ORIGIN)):
+                               _GOAL_ANSWER_REARM_ORIGIN,
+                               _stream_migrate.ORIGIN)):
         from notify import stream_redirect
         owner = (stream_redirect(watchdog.pane_owner(pid, run))
                  if pid else None)
@@ -1545,7 +1549,7 @@ def _goal_client_active_skip(sid, cwd, pid, run, now, out):
     return "skip:client-active"
 
 
-def _structured_goal_mark_state(sid, state):
+def _structured_goal_mark_state(sid, state, with_mark=False):
     """#1113 recurrence -- the watchdog's STRUCTURED, transcript-derived `/goal`
     mark state for `sid` ("set" / "cleared" / None), the #486 single-source
     `one_glance.resolve_goal_armed` reads. Prefers the in-memory sweep `state`
@@ -1577,7 +1581,11 @@ def _structured_goal_mark_state(sid, state):
     watchdog re-arm returns at the refusal, deliver_goal's downstream expiry-ping
     / recent-human / `drop:stale-rearm` freshness / client-active / pane-budget
     gates now govern ONLY the NOT-set cases for a watchdog origin (auth-rearm mark
-    "cleared", declared-virgin no mark, or a mark absent/unreadable)."""
+    "cleared", declared-virgin no mark, or a mark absent/unreadable) -- plus the
+    ONE owner-ruled exemption (#1128 part 3): a `stream-migrate` request whose
+    armed payload is still the OLD pre-#1128 stream template and whose transcript
+    is idle >= 10 min (`stream_migrate.delivery_ok`). `with_mark=True` returns the
+    mark dict (its `payload`) instead of the state, from the SAME read."""
     rec = None
     if isinstance(state, dict):
         gm = state.get("goal_mark")
@@ -1594,7 +1602,7 @@ def _structured_goal_mark_state(sid, state):
     if not isinstance(mark, dict):
         return None
     st = mark.get("state")
-    return st if st in ("set", "cleared") else None
+    return (st if st in ("set", "cleared") else None) if not with_mark else mark
 
 
 # --------------------------------------------------------------------------- #
@@ -1776,7 +1784,11 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     # NOT-set cases, and a full origin tombstone is a cross-cutting follow-up --
     # is documented on `_structured_goal_mark_state`.
     if origin in _GOAL_WATCHDOG_REARM_ORIGINS \
-            and _structured_goal_mark_state(sid, state) == "set":
+            and _structured_goal_mark_state(sid, state) == "set" \
+            and not _stream_migrate.delivery_ok(  # #1128: old-template stream only
+                origin, authority, (_structured_goal_mark_state(
+                    sid, state, with_mark=True) or {}).get("payload"),
+                watchdog.find_active_transcript(projects_dir, cwd), now):
         _log_goal_sync("REFUSE structured-armed sid=%s cwd=%s origin=%s "
                        "(refuse:structured-armed goal_mark=set)"
                        % (sid, cwd, origin))
@@ -1820,7 +1832,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                     and origin not in (_GOAL_AUTH_REARM_ORIGIN,
                                        _GOAL_FULFILLED_REARM_ORIGIN,
                                        _GOAL_ANSWER_REARM_ORIGIN,
-                                       _GOAL_DECLARED_VIRGIN_ORIGIN)):
+                                       _GOAL_DECLARED_VIRGIN_ORIGIN,
+                                       _stream_migrate.ORIGIN)):
                 from notify import stream_redirect
                 pid_for_owner = _compact._find_pane_for_session(
                     sid, cwd, run=run, projects_dir=projects_dir)
@@ -2920,7 +2933,7 @@ def _recovery_rearm_ok(recs, now, min_gap, max_per_day):
 def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
                             rearm_fn, obligation_fn, requests_path,
                             fulfilled_state, fulfilled_proof, seen_state,
-                            pinged_state, confirm_state):
+                            pinged_state, confirm_state, mark=None, state=None):
     """#764 -- for a footer-DARK, mark=="set" loop (`goal_dark_watch`'s
     `armed is False` branch), decide whether it is a FULFILLED (stop-(B)
     completed) loop whose backlog REFILLED and, if so, RECORD a `fulfilled-rearm`
@@ -2949,7 +2962,11 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
 
     All state mutations are guarded on `not dry_run`. Never raises via the pure
     helpers it calls; a `record_goal_request` / rearm_fn / obligation_fn failure
-    degrades to a fall-through (the safe, no-keystroke direction)."""
+    degrades to a fall-through (the safe, no-keystroke direction).
+
+    #1128 part 3: when the armed `mark` payload is an OLD pre-#1128 stream
+    template, the 🏁-proven loop is handed to `stream_migrate.decide` (the
+    owner-ruled migration watcher, `stream-migrate` origin, 1/h) instead."""
     # #767 -- BACKWARD-scan the bounded tail (scan_back=True) so a genuine 🏁 is
     # not SHADOWED by later non-🏁 post-achieve chore turns (the live gk failure:
     # a completed loop kept working ~18 min after 🏁 and its newest turn hid the
@@ -2994,6 +3011,26 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
         else:
             seen = now                            # first sighting w/o a prior seen
         fulfilled_proof[sid] = {"mark_ts": mark_ts, "bts": bts, "seen": seen}
+
+    # #1128 part 3 -- an achieved OLD-template stream loop is re-armed with the
+    # current template by the migration-only watcher (guards: stream_migrate).
+    payload = mark.get("payload") if isinstance(mark, dict) else None
+    if state is not None and _stream_migrate.is_old_stream_payload(payload):
+        def _record(text, auth):
+            record_goal_request(sid, cwd, text, auth, now=now,
+                                origin=_stream_migrate.ORIGIN, path=requests_path)
+
+        def _reset():
+            for _st in (seen_state, pinged_state, confirm_state):
+                _st.pop(sid, None)
+        line, handled = _stream_migrate.decide(
+            sid, cwd, tpath, payload, now, loc, dry_run,
+            state.setdefault("goal_stream_migrate", {}),
+            rearm_fn or _default_rearm_fn,
+            lambda s: isinstance(load_goal_requests(requests_path).get(s), dict),
+            _record, _reset)
+        if handled:
+            return line, True
 
     open_n, cts = (obligation_fn or _default_obligation_fn)(cwd)
     fresh = (cts is not None and 0 <= (now - cts) <= GOAL_DARK_CACHE_MAX_AGE_S)
@@ -4026,7 +4063,7 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         _frline, _frhandled = _fulfilled_rearm_decide(
             sid, cwd, tpath, mark_ts, now, loc, dry_run, rearm_fn,
             obligation_fn, requests_path, fulfilled_state, fulfilled_proof,
-            seen_state, pinged_state, confirm_state)
+            seen_state, pinged_state, confirm_state, mark=mark, state=state)
         if _frline:
             logs.append(_frline)
         if _frhandled is _FULFILLED_SILENT:
