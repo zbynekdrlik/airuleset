@@ -288,8 +288,9 @@ _ROWS = {
          "createdAt": "2026-07-02T00:00:00Z"},
     41: {"number": 41, "title": "parked", "labels": [{"name": "ops-wait"}],
          "createdAt": "2026-07-03T00:00:00Z"},
-    43: {"number": 43, "title": "parked gk",
-         "labels": [{"name": "ops-wait"}, {"name": "needs-gatekeeper"}],
+    # the gk-handoff! tag comes from the patched flag sets (a real
+    # needs-gatekeeper label would route 43 to I, #943 precedence)
+    43: {"number": 43, "title": "parked gk", "labels": [{"name": "ops-wait"}],
          "createdAt": "2026-07-04T00:00:00Z"},
 }
 _FLAGS = ({41}, set(), {43}, set(), set(), set(), set(), set(), set())
