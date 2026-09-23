@@ -87,7 +87,15 @@ def short_target_alias(user, box_name):
         # (newlevel@dev1/dev2, airuleset@controller) — key on the box NAME,
         # not the user.  Keyed on _OWNER_ALIAS_USERS (== MAINTAINER_USERS)
         # instead of a literal (#967).
-        return (box_name.split("-")[0] or box_name)[:8]
+        stem = box_name.split("-")[0] or box_name
+        # #1124: the controller box (hostname `airuleset`) -> "ar", its
+        # webterm tab id, so the tmux WINDOW name and the tab agree (the plain
+        # 8-char cut gave `airulese`). Box-keyed like sb/fs, but kept inside
+        # the owner-account branch: the same box also hosts the `claudy`
+        # account, whose own alias is `claudy`, never `ar`.
+        if stem == "airuleset":
+            return "ar"
+        return stem[:8]
     if user:
         return user[:8]
     return (box_name.split("-")[0] or box_name)[:8]

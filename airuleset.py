@@ -2120,7 +2120,7 @@ def cmd_install(args):
     # capture a future stray's creator deterministically (full rationale +
     # ordering note in apply_owner_session_created_audit's docstring; MUST run
     # AFTER apply_stream_tmux_window_name, whose owner-box #593 revert live-
-    # UNSETS session-created).
+    # unsets the window-name session-created index, #1124).
     try:
         audit_changed = apply_owner_session_created_audit()
         if audit_changed:

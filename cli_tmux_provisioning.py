@@ -1049,7 +1049,11 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
 # newlevel MULTI-PROJECT box (dev1/dev2): those run many project sessions with
 # per-command window names, and one fixed name + `automatic-rename off` froze
 # every window to `dev1`, destroying navigation (the #592 regression, owner
-# 2026-08-20). The name = the box's `cli_aliases.short_target_alias`
+# 2026-08-20). #1124 adds the controller's `airuleset` account (a single-
+# PROJECT box, so the #593 hazard does not apply) through the dedicated
+# `is_window_name_eligible` predicate, never by widening
+# `is_single_session_box_user` (#985). The name = the box's
+# `cli_aliases.short_target_alias`
 # (gatekeeper->gk, montaluN->mN, davidN->dN, ...) -- the SAME single source the
 # webterm dashboard tabs draw on (cli_webterm._short_alias), never a parallel
 # map. The "stream" in the marker/function names below is historical (#554).
@@ -1066,6 +1070,27 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
 
 STREAM_TMUX_WINDOW_MARK_START = "# >>> airuleset tmux stream-window >>>"
 STREAM_TMUX_WINDOW_MARK_END = "# <<< airuleset tmux stream-window <<<"
+
+# #1124: the ONE `session-created` hook-index registry. tmux hooks are ARRAY
+# options, and a set WITHOUT an index (`set-hook -g session-created ...`)
+# CLEARS the whole array (live-verified on a private `-L` tmux 3.7b socket). So
+# two managed writers on one box (the controller carries both the window-name
+# hook and the #660 owner audit) silently deleted each other: the later one won.
+# Each managed writer therefore owns a FIXED index, used by its conf line, its
+# live-apply AND its `-gu` revert, so no writer ever clears a sibling. The #998
+# declared-windows create and the #1060 impl-window create are NOT separate
+# writers: they ride the window-name hook value (`_session_created_hook_value`).
+# `window-name` keeps index 0 so the stale UNINDEXED value a pre-#1124 install
+# left at index 0 is overwritten in place on gk/streams/the controller, and
+# removed by the owner-box revert on dev1/dev2.
+SESSION_CREATED_HOOK_INDEX = {"window-name": 0, "owner-audit": 1}
+
+
+def _session_created_hook_name(writer):
+    """`session-created[<index>]` for a managed writer in the registry above.
+    Every managed `set-hook` on `session-created` goes through this, so an
+    unindexed (array-clearing) set cannot be written by accident."""
+    return "session-created[%d]" % SESSION_CREATED_HOOK_INDEX[writer]
 
 # The alias is interpolated as a LITERAL into a tmux `rename-window` argument --
 # constrain it to a shell/tmux-safe unix-name shape so an exotic hostname/user
@@ -1385,7 +1410,8 @@ def render_stream_tmux_window_block(name, windows=None):
         "# sees WHERE they are (gk/mN/dN/...). automatic-rename off makes it\n"
         "# STICK (a command-tracking 'node'/'bash' name hides the identity).\n"
         "# #593: rendered ONLY on single-session-per-account boxes (gk + subdev\n"
-        "# streams), never an owner multi-project box; the alias is the SAME\n"
+        "# streams) and the single-project controller (#1124), never an owner\n"
+        "# multi-project box; the alias is the SAME\n"
         "# source the webterm tabs use (cli_aliases.short_target_alias).\n"
         "set-option -gw automatic-rename off\n"
         f"{_render_session_created_hook_line(name, windows)}"
@@ -1503,21 +1529,24 @@ def _session_created_hook_value(name, windows, marker=_HOOK_MARKER_UNSET):
 
 
 def _render_session_created_hook_line(name, windows):
-    """#998: the ``set-hook -g session-created "..."`` ~/.tmux.conf LINE. Wraps
+    """#998: the ``set-hook -g session-created[N] "..."`` ~/.tmux.conf LINE
+    (#1124: at the window-name writer's own registry index). Wraps
     the shared raw hook value from ``_session_created_hook_value`` in the conf's
     double-quoted value, escaping the value's own double-quotes for that outer
     context (the ONLY difference between the persisted conf and the live-applied
     argv). ≤1 declared window -> byte-identical to today's bare ``rename-window``
     hook line."""
     value = _session_created_hook_value(name, windows)
-    return 'set-hook -g session-created "%s"\n' % value.replace('"', '\\"')
+    return 'set-hook -g %s "%s"\n' % (_session_created_hook_name("window-name"),
+                                      value.replace('"', '\\"'))
 
 
 def _live_apply_stream_window_name(new_name, windows=None, home=None, run=None):
     """Best-effort live-apply on any RUNNING tmux server for this box, so an
     ALREADY-running/attached session updates on the next push WITHOUT waiting
-    for a session re-create. Called ONLY for a single-session-per-account box
-    (gk + subdev streams, #593). `new_name` is the box alias — the default name
+    for a session re-create. Called ONLY for a window-name-eligible box
+    (`is_window_name_eligible`: gk + subdev streams, #593, and the single-
+    project controller, #1124). `new_name` is the box alias — the default name
     for a window that matches no declaration (#592, e.g. `m2`/`gk`).
 
     #998 (owner 2026-09-12 "prečo mám dva gk"): `windows` is the box's DECLARED
@@ -1542,8 +1571,9 @@ def _live_apply_stream_window_name(new_name, windows=None, home=None, run=None):
     `=<unix-user>` target matched nothing and the currently-attached window
     stayed FROZEN at its command name (`bash`, under the global
     `automatic-rename off` set just above) until the next `session-created`.
-    Every session on this single-session box IS this account's, so the box alias
-    is the right name for all of them; `automatic-rename off` then keeps it
+    Every session on such a box belongs to its one project (gk/stream: the
+    account's own; controller: the owner's `zbynek` airuleset session), so the
+    box alias is the right name for all of them; `automatic-rename off` then keeps it
     stuck. (Owner/newlevel multi-project boxes are excluded upstream by #593 --
     they must keep per-command names, so this fn is never called for them.)
 
@@ -1561,7 +1591,8 @@ def _live_apply_stream_window_name(new_name, windows=None, home=None, run=None):
     # passes its hook. `windows` is [] for every non-declaring target => the
     # value is `rename-window <alias>`, byte-identical to the pre-#998 hook.
     for argv in (["tmux", "set-option", "-gw", "automatic-rename", "off"],
-                 ["tmux", "set-hook", "-g", "session-created",
+                 ["tmux", "set-hook", "-g",
+                  _session_created_hook_name("window-name"),
                   _session_created_hook_value(new_name, windows)]):
         try:
             runner(argv)
@@ -1645,8 +1676,10 @@ def _live_revert_stream_window_name(alias, run=None):
 
       1. `set-option -gwu automatic-rename` -- reset the GLOBAL window option
          to tmux's default `on` (new windows resume per-command tracking).
-      2. `set-hook -gu session-created` -- remove the rename hook (new sessions
-         no longer get the fixed name).
+      2. `set-hook -gu session-created[<window-name index>]` -- remove the
+         rename hook (new sessions no longer get the fixed name). #1124: ONLY
+         this writer's own index, never the whole array, so the #660 owner
+         audit at its own index survives.
       3. For every EXISTING window still frozen at the `<alias>` literal,
          `set-option -wu -t <wid> automatic-rename` -- clear its PER-WINDOW
          override so the owner's already-open project windows resume tracking.
@@ -1669,7 +1702,8 @@ def _live_revert_stream_window_name(alias, run=None):
     frozen `off` + fixed name did)."""
     runner = run or _default_tmux_run
     for argv in (["tmux", "set-option", "-gwu", "automatic-rename"],
-                 ["tmux", "set-hook", "-gu", "session-created"]):
+                 ["tmux", "set-hook", "-gu",
+                  _session_created_hook_name("window-name")]):
         try:
             runner(argv)
         except Exception as e:
@@ -1966,9 +2000,10 @@ def _live_normalize_owner_session(owner, run=None, audit_dir=None,
 def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
                                    run=None, home=None):
     """Idempotently add/remove the #554/#592 window-naming marker block in
-    ~/.tmux.conf. #593: rendered ONLY on a SINGLE-SESSION-per-account box
-    (`is_single_session_box_user` -- subdev streams + the gk `gatekeeper`
-    account, the SAME set #264's ssh-auto-attach uses), NEVER an owner/newlevel
+    ~/.tmux.conf. #593: rendered ONLY on a window-name-eligible box
+    (`is_window_name_eligible` -- subdev streams + the gk `gatekeeper` account,
+    plus since #1124 the single-project controller's `airuleset` account; the
+    SAME set #264/#985's ssh-auto-attach uses), NEVER an owner/newlevel
     MULTI-PROJECT box (dev1/dev2): one fixed name + `automatic-rename off` froze
     every project window to `dev1` and destroyed navigation (the #592
     regression). The window name = the box's short TARGET ALIAS
@@ -1976,7 +2011,7 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
     mN, davidN->dN, ...), the SAME single source the webterm dashboard tabs draw
     on, never a parallel map. `host` defaults to the box's hostname
     (`os.uname().nodename`). The block is stripped when a box is NOT
-    single-session OR yields no SAFE alias (an alias failing
+    eligible OR yields no SAFE alias (an alias failing
     `_SAFE_STREAM_NAME_RE`, the injection guard).
 
     Same overall shape as apply_stream_ssh_attach (#264): positional-span
@@ -1990,7 +2025,7 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
     import airuleset
     import cli_fleet
     from cli_aliases import short_target_alias
-    from cli_bashrc_appliers import is_single_session_box_user
+    from cli_bashrc_appliers import is_window_name_eligible
     path = tmux_conf_path or TMUX_CONF
     u = user or airuleset._current_user()
     box = host or os.uname().nodename
@@ -2005,9 +2040,12 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
     # owner/newlevel MULTI-PROJECT box (dev1/dev2) must NEVER get it: one fixed
     # window name + `automatic-rename off` destroys its per-project navigation
     # (the #592 regression). newlevel@dev1 yields a SAFE alias ("dev1"), so the
-    # single-session predicate -- not alias safety -- is what excludes it.
-    single_session = is_single_session_box_user(u)
-    should_have = single_session and safe_alias
+    # eligibility predicate -- not alias safety -- is what excludes it. #1124:
+    # `is_window_name_eligible` = single-session boxes + the #985 controller
+    # account (a single-PROJECT box); `_owner_session_default` and the #660
+    # audit keep `is_single_session_box_user`.
+    eligible = is_window_name_eligible(u)
+    should_have = eligible and safe_alias
     existing = path.read_text() if path.exists() else ""
     spans = _clean_tmux_block_spans(
         existing, STREAM_TMUX_WINDOW_MARK_START, STREAM_TMUX_WINDOW_MARK_END)
@@ -2048,7 +2086,7 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
         # stays byte-identical (all windows -> alias, no create) there.
         _live_apply_stream_window_name(
             alias, windows=windows, home=home, run=run)
-    elif safe_alias and not single_session:
+    elif safe_alias and not eligible:
         # #593: a multi-project owner box (dev1/dev2) the pre-#593 code wrongly
         # provisioned -- self-heal any running server that still carries the bad
         # #592 options AND un-freeze its already-open windows stuck at `<alias>`
@@ -2072,16 +2110,15 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
 # creation's client pid/tty/name + a ps chain of the creator, so the NEXT
 # stray's creator is captured for certain.
 #
-# OWNER BOXES ONLY. A single-session box (gk + subdev streams,
-# `is_single_session_box_user`) already binds `session-created` to
-# `rename-window` (#593), so this must NEVER render there -- the two are
-# mutually exclusive by box type, so the single global hook slot never
-# collides. On an owner box (dev1/dev2), `session-created` is otherwise unset
-# (apply_stream_tmux_window_name's owner-box path REVERTS/unsets it), so this
-# applier must run AFTER apply_stream_tmux_window_name in the install flow
-# (else that revert's live `set-hook -gu session-created` would clear this
-# hook right after we set it -- the persistent conf block below survives a
-# server restart regardless, but the live-apply needs the ordering).
+# OWNER BOXES ONLY (`not is_single_session_box_user`): never on gk / subdev
+# streams. The controller (#1124) is an owner box that ALSO carries the window-
+# name hook, so the two writers share `session-created`; each owns its own
+# index in SESSION_CREATED_HOOK_INDEX (an UNINDEXED set clears the whole hook
+# array, which is how the later writer used to delete the other). The owner-
+# box #593 revert in apply_stream_tmux_window_name unsets ONLY the window-name
+# index; this applier still runs AFTER it in the install flow, so on a dev1/
+# dev2 server upgraded from the pre-#1124 unindexed shape the stale index-0
+# audit value is removed first and the audit is then re-set at its own index.
 # ---------------------------------------------------------------------------
 
 OWNER_AUDIT_MARK_START = "# >>> airuleset tmux owner session-created audit >>>"
@@ -2187,9 +2224,10 @@ def render_owner_session_audit_block(logger_path):
         "# #660: capture the CREATOR of every new tmux session so a stray\n"
         "# <owner>-N / foreign owner-session can be root-caused deterministically\n"
         "# (the pane process tree ends at the server -> the creating CLIENT is\n"
-        "# otherwise unrecoverable). Native set-hook (#649). Owner boxes only --\n"
-        "# single-session boxes own session-created for rename-window (#593).\n"
-        f"set-hook -g session-created '{_owner_audit_hook_command(logger_path)}'\n"
+        "# otherwise unrecoverable). Native set-hook (#649). Owner boxes only,\n"
+        "# at its own hook index (#1124: never clears the window-name hook).\n"
+        f"set-hook -g {_session_created_hook_name('owner-audit')} "
+        f"'{_owner_audit_hook_command(logger_path)}'\n"
         f"{OWNER_AUDIT_MARK_END}"
     )
 
@@ -2207,13 +2245,14 @@ def _write_owner_audit_logger(logger_path):
 
 
 def _live_apply_owner_session_audit(logger_path, run=None):
-    """Best-effort live `set-hook -g session-created` on any RUNNING server so an
+    """Best-effort live `set-hook -g session-created[<owner-audit index>]` on any
+    RUNNING server (#1124: its own index, so a sibling hook survives) so an
     already-running owner server captures creators WITHOUT waiting for a restart.
     Config-path ONLY (`set-hook`, never a `send-keys` keystroke), failure-
     tolerant (no server -> no-op). Mirrors `_live_apply_stream_window_name`."""
     runner = run or _default_tmux_run
     try:
-        runner(["tmux", "set-hook", "-g", "session-created",
+        runner(["tmux", "set-hook", "-g", _session_created_hook_name("owner-audit"),
                 _owner_audit_hook_command(logger_path)])
     except Exception as e:
         print("  tmux owner audit-hook live-apply skipped (non-fatal): %s" % e,
@@ -2224,18 +2263,20 @@ def apply_owner_session_created_audit(tmux_conf_path=None, user=None, run=None,
                                       home=None):
     """#660: idempotently add/remove the owner-box `session-created` audit
     marker block in ~/.tmux.conf. Rendered ONLY on an OWNER (multi-project)
-    box (`not is_single_session_box_user` -- dev1/dev2 newlevel); a single-
-    session box (gk + subdev streams) owns `session-created` for #593
-    rename-window, so the block is STRIPPED there (and never live-applied).
+    box (`not is_single_session_box_user` -- dev1/dev2 newlevel, and the
+    controller's `airuleset`, unchanged by #1124); on a single-session box (gk +
+    subdev streams) the block is STRIPPED (and never live-applied). The hook
+    sits at its own SESSION_CREATED_HOOK_INDEX slot (#1124).
 
     On an owner box it also writes the managed logger script and live-applies
     the hook (`_live_apply_owner_session_audit`). Same positional-span rewrite
     + create-file-if-absent + no-op-on-second-run shape as
     apply_stream_tmux_window_name. Returns True iff ~/.tmux.conf changed.
 
-    MUST be called AFTER apply_stream_tmux_window_name in the install flow: on
-    an owner box that applier live-UNSETS session-created (its #593 revert), so
-    this applier's live `set-hook` has to run afterwards to win."""
+    Called AFTER apply_stream_tmux_window_name in the install flow: on an
+    owner box that applier's #593 revert live-unsets the window-name index,
+    which on a server still carrying the pre-#1124 unindexed audit (stored at
+    index 0) removes it; this applier then re-sets the audit at its own index."""
     import airuleset
     from cli_bashrc_appliers import is_single_session_box_user
     path = tmux_conf_path or TMUX_CONF
