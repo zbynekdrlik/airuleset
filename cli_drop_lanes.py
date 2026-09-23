@@ -403,6 +403,40 @@ def _lane_go_live_eligible(lane, access_specs):
     return access_specs.get(lane.host) is not None
 
 
+def _repo_is_worktree_checkout():
+    """True when THIS checkout is a git worktree (#1115 / #972).
+
+    A LIVE Cloudflare write must never originate from a worktree copy of the
+    go-live code: the 23.9. incident (comment 5787949642) created 12 proxied
+    CNAMEs from a worktree lane with the controller's real tokens, before any
+    Access app existed. Reuses ``airuleset._is_worktree_repo_dir`` (the #972
+    install/push predicate) via a FUNCTION-LOCAL ``import airuleset`` — the
+    sanctioned cycle-safe pattern (this pure leaf never module-level-imports
+    airuleset). Fails CLOSED: if the checkout cannot be classified (import/attr
+    error), returns True (treat as a worktree, REFUSE the live write) — a
+    degraded private-only lane is safe; a stray live write is the incident.
+
+    #1115 slice F: MOVED here from cli_drop_golive (re-exported there) so the
+    three manual live-write entries (cmd_drop_gateway, cmd_webterm_access,
+    ensure_managed_records) re-use ONE definition, never a copy."""
+    try:
+        import airuleset
+        return airuleset._is_worktree_repo_dir(airuleset.REPO_DIR)
+    except Exception:
+        return True
+
+
+def _refuse_worktree_live_write(what, out=None):
+    """The LOUD refusal line for a live Cloudflare write attempted from a git
+    worktree checkout (#1115 / #972), shared by every live-write entry — ONE
+    definition, re-used never copied. No API call is made by the caller after
+    this. ``out`` defaults to stdout."""
+    print("airuleset: REFUSING a LIVE %s from a git worktree checkout — live "
+          "DNS/Access writes run ONLY from the main checkout on the controller "
+          "(#1115/#972). No Cloudflare API call was made." % what,
+          file=out if out is not None else sys.stdout)
+
+
 def drop_ingress_rules_for_controller(drop_lanes, cache=None, access_specs=None):
     """Ingress rules for controller-topology drop lanes (#931).
 

@@ -1052,17 +1052,30 @@ def _write_box_class_marker():
 
 
 def _is_worktree_repo_dir(repo_dir):
-    """True when `repo_dir` lies under a `.claude/worktrees/` segment (#972).
+    """True when `repo_dir` is a git worktree checkout (#972, #1115 slice F).
 
-    When airuleset.py is executed from a worktree checkout, REPO_DIR resolves to
-    the worktree path (e.g. `…/.claude/worktrees/agent-xxx/`). install/push from
-    such a REPO_DIR creates symlinks pointing INTO the worktree that become
-    dangling the moment the worktree is removed — the incident that broke agent
-    types on the controller (2026-09-09).
+    Two independent markers, either one means a worktree:
+    1. a `.claude/worktrees/` path segment (the isolated-lane convention), OR
+    2. a `.git` that is a FILE, not a directory — git's linked-worktree
+       `gitdir:` pointer, produced by `git worktree add` ANYWHERE (so an
+       out-of-tree worktree, e.g. `/tmp/x`, is caught too). The toplevel is the
+       first ancestor of `repo_dir` (inclusive) that contains a `.git`; no
+       subprocess.
+
+    install/push from such a REPO_DIR creates symlinks pointing INTO the worktree
+    that become dangling the moment the worktree is removed — the incident that
+    broke agent types on the controller (2026-09-09).
     """
-    parts = Path(repo_dir).resolve().parts
-    return any(a == ".claude" and b == "worktrees"
-               for a, b in zip(parts, parts[1:]))
+    resolved = Path(repo_dir).resolve()
+    parts = resolved.parts
+    if any(a == ".claude" and b == "worktrees"
+           for a, b in zip(parts, parts[1:])):
+        return True
+    for d in (resolved, *resolved.parents):
+        dotgit = d / ".git"
+        if dotgit.exists():
+            return dotgit.is_file()
+    return False
 
 
 def _main_checkout_from_worktree(repo_dir):

@@ -293,6 +293,12 @@ class TestRestartEnv(unittest.TestCase):
 
 
 def _args(**kw):
+    # #1115 slice F: the write-path tests below run inside the CI/test worktree,
+    # where the real _repo_is_worktree_checkout() is True and would refuse every
+    # --apply. These tests exercise the WRITE behaviour, not the worktree guard
+    # (which has its own tests in test_drop_slice_f_1115.py), so they opt OUT of
+    # it via the injectable seam. An explicit _is_worktree_fn kwarg still wins.
+    kw.setdefault("_is_worktree_fn", lambda: False)
     return types.SimpleNamespace(**kw)
 
 

@@ -212,35 +212,8 @@ def _resolve_access_specs(access_specs):
 # imports only ``cli_fleet`` and never imports this module back, so this
 # module-level import is cycle-safe (tests/test_drop_slice_e_1115.py
 # TestGoliveLeafImportBothOrders proves the graph in every import order).
-from cli_drop_lanes import _lane_go_live_eligible  # noqa: E402 — re-export
-
-
-def _repo_is_worktree_checkout():
-    """True when THIS checkout is a git worktree (#1115 slice E / #972).
-
-    A LIVE Cloudflare write must never originate from a worktree copy of the
-    go-live code: the 23.9. incident (comment 5787949642) created 12 proxied
-    CNAMEs from a worktree lane with the controller's real tokens, before any
-    Access app existed. Reuses ``airuleset._is_worktree_repo_dir`` (the #972
-    install/push predicate) via a FUNCTION-LOCAL ``import airuleset`` — the
-    sanctioned cycle-safe pattern (cli_authorship / cli_bashrc_appliers use it).
-
-    Fails CLOSED: if the checkout cannot be classified (import/attr error), it
-    returns True (treat as a worktree, REFUSE the live write). A degraded
-    private-only lane is safe; a stray live write is the incident."""
-    try:
-        import airuleset
-        return airuleset._is_worktree_repo_dir(airuleset.REPO_DIR)
-    except Exception:
-        return True
-
-
-def _refuse_worktree_live_write(what, out):
-    """The LOUD refusal line for a live write attempted from a worktree checkout
-    (#1115 slice E / #972). No API call is made by the caller after this."""
-    print("drop-lanes: REFUSING a LIVE %s from a git worktree checkout — live "
-          "DNS/Access writes run ONLY from the main checkout on the controller "
-          "(#1115/#972). No Cloudflare API call was made." % what, file=out)
+from cli_drop_lanes import (  # noqa: E402,F401 — re-export (ONE shared def in the leaf)
+    _lane_go_live_eligible, _refuse_worktree_live_write, _repo_is_worktree_checkout)
 
 
 def reconcile_drop_lanes(dry_run=True, drop_lanes=None, access_specs=None,

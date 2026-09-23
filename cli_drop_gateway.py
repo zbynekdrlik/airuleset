@@ -709,6 +709,16 @@ def cmd_drop_gateway(args):
     dry_run = getattr(args, "dry_run", False) or not getattr(args, "apply", False)
     username = getattr(args, "_username", None)
 
+    # #1115 slice F: an --apply reconciles live Access; REFUSE it from a git
+    # worktree checkout BEFORE resolving the lane or building any client (the
+    # 23.9. incident class). Dry-run is never refused. Injectable seam for tests.
+    if not dry_run:
+        is_wt = getattr(args, "_is_worktree_fn", None) \
+            or cli_drop_lanes._repo_is_worktree_checkout
+        if is_wt():
+            cli_drop_lanes._refuse_worktree_live_write("drop-gateway --apply")
+            return 1
+
     node = nodename or os.uname().nodename
 
     # Resolve the invoking account's lane first.
