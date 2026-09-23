@@ -50,6 +50,7 @@ live change.
 """
 import json
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -180,6 +181,27 @@ def _controller_lanes(drop_lanes):
             if lane.topology == "controller" and lane.origin_host]
 
 
+def _resolve_access_specs(access_specs):
+    """The Access-spec dict to use — the injected one, else DROP_ACCESS_APPS."""
+    if access_specs is not None:
+        return access_specs
+    import cli_drop_gateway as dg
+    return dg.DROP_ACCESS_APPS
+
+
+def _lane_go_live_eligible(lane, access_specs):
+    """A lane is ELIGIBLE for go-live iff it is token-only (access=False) OR it is
+    an access lane that ALREADY has a DROP_ACCESS_APPS spec (#1115 slice B review,
+    both reviewers): an access lane with NO spec must NEVER have its DNS CNAME
+    created — a proxied CNAME with no Access app in front is publicly routable and
+    UNPROTECTED (the #983 RED-1 class). Such a lane is PENDING go-live (its spec
+    is an owner-provided go-live data step), NOT a failure, and gets neither DNS
+    nor a marker until the spec lands."""
+    if not lane.access:
+        return True
+    return access_specs.get(lane.host) is not None
+
+
 def reconcile_drop_lanes(dry_run=True, drop_lanes=None, access_specs=None,
                          dns_client=None, access_client=None, zone="newlevel.media",
                          issue="1115", out=None):
@@ -199,6 +221,12 @@ def reconcile_drop_lanes(dry_run=True, drop_lanes=None, access_specs=None,
     clients built from the on-disk tokens). In ``dry_run`` NOTHING is written
     (DNS reports would_create, Access issues only GETs) and the go-live cache is
     NOT touched.
+
+    Idempotent for the OBSERVABLE state: a 2nd run creates NO DNS record (an
+    existing identical CNAME is ``unchanged``, no POST/PUT) and marks the same
+    lanes live. The Access side is CONVERGENT rather than a strict no-op — a
+    present app is re-PUT with the same include list every run (mirrors
+    ``cli_drop_gateway._reconcile_access``), which is harmless.
     """
     out = out if out is not None else sys.stdout
     if drop_lanes is None:
@@ -227,36 +255,78 @@ def reconcile_drop_lanes(dry_run=True, drop_lanes=None, access_specs=None,
         except OSError:
             dns_c = dns.DnsClient(token="")
 
+    specs = _resolve_access_specs(access_specs)
     results = []
     live = {}
+    pending = []
     all_ok = True
     comment = "airuleset #%s — drop lane go-live (controller tunnel)" % issue
 
     for (node, user), lane in _controller_lanes(drop_lanes):
         row = {"host": lane.host, "port": lane.port, "node": node, "user": user,
                "dns_action": None, "access_action": None, "live": False,
-               "error": None}
-        content = _cname_content(lane.tunnel_uuid)
-        dns_res = ensure_cname_create_only(dns_c, zone, lane.host, content,
-                                           comment, dry_run=dry_run)
-        row["dns_action"] = dns_res["action"]
-        acc_ok, acc_action, acc_msg = reconcile_access_for_lane(
-            lane, dry_run=dry_run, access_client=access_client,
-            access_specs=access_specs)
-        row["access_action"] = acc_action
+               "pending": False, "error": None}
 
-        if dns_res["ok"] and acc_ok:
-            row["live"] = True
-            live[lane.host] = lane.port
-            print("  drop-lanes: %s DNS=%s Access=%s -> LIVE"
-                  % (lane.host, dns_res["action"], acc_msg), file=out)
-        else:
+        # PENDING (not a failure): an access lane whose Access spec has not been
+        # provisioned yet — never create its DNS CNAME (that would expose an
+        # unprotected public hostname), never mark it live. Reported once as a
+        # summary line below, not a per-lane FAILED line (which would be 12 lines
+        # of false-failure on EVERY controller push until the specs land).
+        if not _lane_go_live_eligible(lane, specs):
+            row["pending"] = True
+            row["access_action"] = "pending-no-spec"
+            row["dns_action"] = "skipped"
+            pending.append(lane.host)
+            results.append(row)
+            continue
+
+        try:
+            # Access FIRST (the go-live gate) — for an access lane the DNS CNAME
+            # is created ONLY once Access is confirmed, so the hostname is never
+            # publicly routable without its Access app (the #983 RED-1 ordering).
+            acc_ok, acc_action, acc_msg = reconcile_access_for_lane(
+                lane, dry_run=dry_run, access_client=access_client,
+                access_specs=specs)
+            row["access_action"] = acc_action
+            if lane.access and not acc_ok:
+                all_ok = False
+                row["dns_action"] = "skipped (access gate)"
+                row["error"] = acc_msg
+                print("  drop-lanes: %s DNS/Access FAILED (Access=%s): %s — DNS "
+                      "NOT created (fail-closed)"
+                      % (lane.host, acc_action, acc_msg), file=out)
+                results.append(row)
+                continue
+
+            dns_res = ensure_cname_create_only(
+                dns_c, zone, lane.host, _cname_content(lane.tunnel_uuid),
+                comment, dry_run=dry_run)
+            row["dns_action"] = dns_res["action"]
+            if dns_res["ok"]:
+                row["live"] = True
+                live[lane.host] = lane.port
+                print("  drop-lanes: %s DNS=%s Access=%s -> LIVE"
+                      % (lane.host, dns_res["action"], acc_msg), file=out)
+            else:
+                all_ok = False
+                row["error"] = dns_res.get("error")
+                print("  drop-lanes: %s DNS/Access FAILED (DNS=%s): %s"
+                      % (lane.host, dns_res["action"], dns_res.get("error")),
+                      file=out)
+        except Exception as e:  # noqa: BLE001 — a transport-level error (URLError/
+            # timeout: tunnel down, DNS-server unreachable) must NOT abort go-live
+            # for EVERY OTHER lane, and must stay a LOUD per-lane line (the module
+            # contract). Record this one lane as failed, keep going.
             all_ok = False
-            err = dns_res.get("error") or acc_msg
-            row["error"] = err
-            print("  drop-lanes: %s DNS/Access FAILED (DNS=%s Access=%s): %s"
-                  % (lane.host, dns_res["action"], acc_action, err), file=out)
+            row["error"] = "%s: %s" % (type(e).__name__, e)
+            print("  drop-lanes: %s DNS/Access FAILED (%s): %s"
+                  % (lane.host, type(e).__name__, e), file=out)
         results.append(row)
+
+    if pending:
+        print("  drop-lanes: %d lane(s) PENDING go-live (no DROP_ACCESS_APPS "
+              "spec yet, no DNS/marker): %s"
+              % (len(pending), ", ".join(sorted(pending))), file=out)
 
     if not dry_run:
         try:
@@ -357,8 +427,11 @@ def marker_snippet_for_entry(remote, live_hosts, drop_lanes=None):
     The marker is written by the target's OWN
     ``cli_drop_gateway.write_drop_marker`` (the deploy shell is already cd'd to
     the repo, so ``import cli_drop_gateway`` resolves), reusing its O_NOFOLLOW +
-    0600 write verbatim. host + port are passed as ``argv`` (never interpolated
-    into the shell), so there is no injection surface. The group ends with
+    0600 write verbatim. host + port reach python as ``argv`` (no python-level
+    injection) AND the host is ``shlex.quote``-d before it is spliced into the
+    shell command string, so a hostname with a shell metachar cannot break out
+    (the values are the git-controlled DROP_LANES registry, but the quoting makes
+    the safety a property of the code, not of the data). The group ends with
     ``|| true`` and contains NO ``exit``, so it ALWAYS exits 0 and the ``&& …``
     chain to the later gating post-checks continues (mirrors
     ``filedrop_port_probe_snippet``'s exit-0/exit-free contract — it must precede
@@ -377,7 +450,7 @@ def marker_snippet_for_entry(remote, live_hosts, drop_lanes=None):
         '{ python3 -c '
         '"import cli_drop_gateway,sys; '
         'cli_drop_gateway.write_drop_marker(sys.argv[1], int(sys.argv[2]))" '
-        '%s %d 2>/dev/null || true; }' % (lane.host, int(port))
+        '%s %d 2>/dev/null || true; }' % (shlex.quote(lane.host), int(port))
     )
 
 

@@ -318,17 +318,75 @@ class TestReconcileDropLanes(unittest.TestCase):
         # a failed run writes an EMPTY live cache (fail-closed).
         self.assertEqual(json.loads(gl.GOLIVE_CACHE.read_text()), {})
 
-    def test_access_lane_without_spec_not_live(self):
-        # no spec for the access lane -> fail-closed -> not live, no marker
-        dns_c, _dt = _dns(records=[])
+    def test_access_lane_without_spec_is_pending_no_dns_no_failure(self):
+        # no spec for the access lane -> PENDING go-live (fail-closed): not live,
+        # NO DNS CNAME created (the #983 RED-1 exposure fix), and NOT a failure
+        # (all_ok stays True — the missing spec is an owner go-live data step,
+        # not a reconcile error, so it must not spam a FAILED line every push).
+        # ONLY the no-spec access lane, so any POST would be its (forbidden) CNAME.
+        dns_c, dns_t = _dns(records=[])
         acc_c, _at = _acc(apps=[])
         out = io.StringIO()
-        all_ok, _results, live = gl.reconcile_drop_lanes(
-            dry_run=False, drop_lanes=self.lanes, access_specs={},
-            dns_client=dns_c, access_client=acc_c, out=out)
+        all_ok, results, live = gl.reconcile_drop_lanes(
+            dry_run=False, drop_lanes={("boxa", "u1"): self.access_lane},
+            access_specs={}, dns_client=dns_c, access_client=acc_c, out=out)
+        self.assertTrue(all_ok)                            # pending != failure
+        self.assertNotIn(self.access_lane.host, live)      # fail-closed, not live
+        # CRITICAL: NO DNS record is created for the no-spec access lane — a
+        # proxied CNAME with no Access app would be publicly UNPROTECTED.
+        self.assertNotIn("POST", dns_t.methods())
+        row = next(r for r in results if r["host"] == self.access_lane.host)
+        self.assertTrue(row["pending"])
+        self.assertEqual(row["dns_action"], "skipped")
+        self.assertIn("PENDING go-live", out.getvalue())
+
+    def test_access_gate_precedes_dns_when_access_fails(self):
+        # an access lane WITH a spec whose Access reconcile FAILS must NOT get a
+        # DNS CNAME (Access-before-DNS ordering, fail-closed) and IS a failure.
+        dns_c, dns_t = _dns(records=[])
+        acc_c, _at = _acc(apps=[], fail_write=True)        # Access create 4xx
+        out = io.StringIO()
+        all_ok, results, live = gl.reconcile_drop_lanes(
+            dry_run=False, drop_lanes={("boxa", "u1"): self.access_lane},
+            access_specs=self.specs, dns_client=dns_c, access_client=acc_c, out=out)
         self.assertFalse(all_ok)
-        self.assertNotIn(self.access_lane.host, live)     # fail-closed
-        self.assertIn(self.tok_lane.host, live)           # token-only still live
+        self.assertEqual(live, {})
+        self.assertNotIn("POST", dns_t.methods())          # DNS never created
+        row = results[0]
+        self.assertEqual(row["dns_action"], "skipped (access gate)")
+        self.assertIn("DNS NOT created", out.getvalue())
+
+    def test_transport_exception_on_one_lane_does_not_abort_the_rest(self):
+        # a URLError-class exception from the DNS transport for the FIRST lane
+        # must be a LOUD per-lane failure, not abort go-live for the others.
+        import cli_cloudflare_dns as dns
+
+        class BoomThenOk:
+            def __init__(self):
+                self.n = 0
+
+            def __call__(self, method, path, body):
+                # zone lookup ok; first record GET raises, rest behave.
+                if method == "GET" and "/zones?" in path:
+                    return 200, {"success": True, "result": [{"id": "z"}]}
+                if method == "GET" and "/dns_records?" in path:
+                    self.n += 1
+                    if self.n == 1:
+                        raise dns.urllib.error.URLError("tunnel down")
+                    return 200, {"success": True, "result": []}
+                if method == "POST":
+                    return 201, {"success": True, "result": {"id": "r"}}
+                return 200, {"success": True, "result": {}}
+
+        dns_c = dns.DnsClient(token="t", transport=BoomThenOk())
+        acc_c, _at = _acc(apps=[])
+        out = io.StringIO()
+        all_ok, results, live = gl.reconcile_drop_lanes(
+            dry_run=False, drop_lanes=self.lanes, access_specs=self.specs,
+            dns_client=dns_c, access_client=acc_c, out=out)
+        self.assertFalse(all_ok)                           # the boom lane failed
+        self.assertEqual(len(results), 2)                  # BOTH lanes processed
+        self.assertIn("URLError", out.getvalue())
 
     def test_dry_run_writes_no_cache_and_no_api_writes(self):
         dns_c, dns_t = _dns(records=[])
