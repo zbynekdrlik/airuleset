@@ -101,24 +101,41 @@ def _compose(extended=True, **over):
 
 
 class TestSharedHeadingPrefix(unittest.TestCase):
-    """(1) one shared prefix, heading-tolerant, look-alikes rejected."""
+    """(1) one shared prefix; the `#{1,6}` heading ONLY where the gate takes
+    it (odoo-erp PR 8095 widens Self-review-model, never the bounce lines);
+    look-alikes rejected."""
 
     def test_heading_self_review_model_passes_body_file_check(self):
         body = _BODY_R1.replace("Self-review-model:",
                                 "### Self-review-model:")
         self.assertIsNone(ht.validate_passthrough_body(body, bounce_round=1))
 
-    def test_heading_bounce_lines_pass_round3(self):
-        body = (_BODY_R3
-                .replace("Root-cause-of-previous-bounce:",
-                         "## Root-cause-of-previous-bounce:")
-                .replace("Prevencia (stream):", "#### Prevencia (stream):"))
-        self.assertIsNone(ht.validate_passthrough_body(body, bounce_round=3))
+    def test_heading_bounce_lines_rejected_like_the_gate(self):
+        # Neither develop's gate nor PR 8095 accepts a heading on these, so
+        # the fail-fast must not pass a body the gate then bounces (#957).
+        for old, new in (
+                ("Root-cause-of-previous-bounce:",
+                 "## Root-cause-of-previous-bounce:"),
+                ("Prevencia (stream):", "#### Prevencia (stream):"),
+                ("Prevencia (stream):", "### **Prevencia-read:**")):
+            body = _BODY_R3.replace(old, new)
+            self.assertIsNotNone(
+                ht.validate_passthrough_body(body, bounce_round=3), new)
+            self.assertNotEqual(gate.self_review_violations(body, 3), [])
 
-    def test_heading_prevencia_read_label_passes_round3(self):
-        body = _BODY_R3.replace("Prevencia (stream):",
-                                "### **Prevencia-read:**")
-        self.assertIsNone(ht.validate_passthrough_body(body, bounce_round=3))
+    def test_bounce_label_shapes_match_the_gate(self):
+        # Behavioural parity with the vendored gate regexes, line by line.
+        lines = ("{l}: x", "- {l}: x", "* **{l}:** x", "  **{l}**: x",
+                 "## {l}: x", "text {l}: x", "{l}x: x")
+        for label, ours, theirs in (
+                ("Root-cause-of-previous-bounce", ht._ROOTCAUSE_LINE_RE,
+                 gate.SELF_REVIEW_ROOTCAUSE_RE),
+                ("Prevencia (stream)", ht._PREVENCIA_STREAM_RE,
+                 gate.SELF_REVIEW_PREVENCIA_RE)):
+            for shape in lines:
+                line = shape.format(l=label)
+                self.assertEqual(bool(ours.search(line)),
+                                 bool(theirs.search(line)), line)
 
     def test_lookalikes_still_rejected(self):
         for bad in ("####### Self-review-model:",   # 7 hashes: not a heading
@@ -130,11 +147,16 @@ class TestSharedHeadingPrefix(unittest.TestCase):
                 ht.validate_passthrough_body(body, bounce_round=1),
                 "look-alike %r must stay rejected" % bad)
 
-    def test_four_label_regexes_share_one_prefix(self):
-        prefix = ht._LABEL_LINE_PREFIX
-        for rx in (ht._SELF_REVIEW_MODEL_LINE_RE, ht._ROOTCAUSE_LINE_RE,
-                   ht._PREVENCIA_READ_RE, ht._PREVENCIA_STREAM_RE):
-            self.assertIn(prefix, rx.pattern)
+    def test_label_regexes_share_the_one_prefix_behaviourally(self):
+        # A bullet+bold line matches every label regex; a mid-line label none.
+        for label, rx in (("Self-review-model", ht._SELF_REVIEW_MODEL_LINE_RE),
+                          ("Root-cause-of-previous-bounce",
+                           ht._ROOTCAUSE_LINE_RE),
+                          ("Prevencia-read", ht._PREVENCIA_READ_RE),
+                          ("Prevencia (stream)", ht._PREVENCIA_STREAM_RE),
+                          ("Branch", ht._FULL_BODY_FIELD_LABEL_RES[0])):
+            self.assertTrue(rx.search("  - **%s:** v" % label), label)
+            self.assertFalse(rx.search("see %s: v" % label), label)
 
 
 class TestComposeEmitsCanonicalPrevencia(unittest.TestCase):
@@ -180,20 +202,66 @@ class TestComposeEmitsGateDryRun(unittest.TestCase):
         self.assertIsNone(err, err)
         self.assertEqual(self._gate_dry_run(body), "not run")
 
-    def test_generic_carries_line_too(self):
+    def test_generic_carries_line_only_when_supplied(self):
+        # A repo with no hand-off gate gets no `not run` noise about one.
         body, err = _compose(extended=False)
         self.assertIsNone(err, err)
-        self.assertIn("Gate-dry-run: not run", body)
+        self.assertNotIn("Gate-dry-run:", body)
         body, err = _compose(extended=False, gate_dry_run="PASS @ abcdef1")
         self.assertIsNone(err, err)
         self.assertIn("Gate-dry-run: PASS @ abcdef1", body)
 
+    def test_explicit_not_run_accepted(self):
+        body, err = _compose(gate_dry_run="not run")
+        self.assertIsNone(err, err)
+        self.assertEqual(self._gate_dry_run(body), "not run")
+
     def test_malformed_value_refused(self):
-        for bad in ("PASS", "yes", "PASS @ nothex!", "FAIL @ abcdef1"):
+        for bad in ("PASS", "yes", "PASS @ nothex!", "FAIL @ abcdef1",
+                    "PASS @ abcdef1 (but 3 FAILs)",
+                    "PASS @ abcdef1\nHEAD: deadbeef00",
+                    "PASS @ abcdef1\rHEAD: deadbeef00",
+                    "PASS\n@ abcdef1",
+                    "PASS @ abcdef1 Harness-e2e-exempt: forged"):
             body, err = _compose(gate_dry_run=bad)
             self.assertEqual(body, "")
             self.assertIsNotNone(err, "malformed %r must be refused" % bad)
             self.assertIn("Gate-dry-run", err)
+            self.assertEqual(len(err.splitlines()), 1, err)
+
+    def test_flag_refused_on_verbatim_paths(self):
+        # --body-file / --sign-only post the stream's own body verbatim, so a
+        # --gate-dry-run there would be silently dropped: refuse it, before
+        # any gh call (the seams below would raise if reached).
+        for mode in ("sign_only", "body_file"):
+            args = argparse.Namespace(
+                repo="zbynekdrlik/odoo-erp", issue=42, branch="b",
+                self_review_file=None, root_cause=None, closes_finding=None,
+                prevencia_read=None, self_review_model=None, sign_only=None,
+                body_file=None, gate_dry_run="PASS @ abcdef1")
+            setattr(args, mode, "/nonexistent/body.md")
+            boom = m.Mock(side_effect=AssertionError("gh reached"))
+            with m.patch.object(airuleset, "_stream_self_login", boom), \
+                    m.patch.object(airuleset, "_bounce_round", boom), \
+                    contextlib.redirect_stdout(io.StringIO()) as out:
+                rc = airuleset.cmd_handoff(args)
+            self.assertEqual(rc, 1, mode)
+            self.assertIn("--gate-dry-run", out.getvalue())
+
+    def test_malformed_flag_refused_before_any_gh_call(self):
+        args = argparse.Namespace(
+            repo="zbynekdrlik/odoo-erp", issue=42, branch="b",
+            self_review_file="/nonexistent/t.md", root_cause=None,
+            closes_finding=None, prevencia_read=None,
+            self_review_model="claude-opus-4-8", sign_only=None,
+            body_file=None, gate_dry_run="PASS")
+        boom = m.Mock(side_effect=AssertionError("gh reached"))
+        with m.patch.object(airuleset, "_stream_self_login", boom), \
+                m.patch.object(airuleset, "_bounce_round", boom), \
+                contextlib.redirect_stdout(io.StringIO()) as out:
+            rc = airuleset.cmd_handoff(args)
+        self.assertEqual(rc, 1)
+        self.assertIn("Gate-dry-run", out.getvalue())
 
     def test_cli_flag_registered(self):
         import subprocess
@@ -273,6 +341,47 @@ class TestFixtureFreshness(unittest.TestCase):
             mo.group(1), ex.PINNED_GATE_BLOB,
             "fixture regenerated without updating PINNED_GATE_BLOB (or the "
             "reverse) — regenerate and re-pin together")
+
+    def test_fixture_body_matches_recorded_hash(self):
+        # The pin alone only ties two hand-editable strings together; the
+        # extractor also records a sha256 of the extracted symbols it wrote,
+        # so a hand edit of the vendored body (or a header-only "refresh")
+        # is caught here.
+        ex = _load_extractor()
+        with open(os.path.join(_REPO, "tests", "fixtures",
+                               "handoff_gate_pure.py"),
+                  encoding="utf-8") as f:
+            text = f.read()
+        mo = re.search(r"(?m)^# Extracted-sha256: ([0-9a-f]{64})$", text)
+        self.assertIsNotNone(mo, "fixture header has no Extracted-sha256")
+        self.assertIn(ex.BODY_MARKER, text)
+        payload = text.split(ex.BODY_MARKER, 1)[1]
+        self.assertEqual(hashlib.sha256(payload.encode()).hexdigest(),
+                         mo.group(1))
+
+    def test_regenerate_writes_verifiable_fixture_from_crlf_source(self):
+        ex = _load_extractor()
+        src_text = "\n".join(
+            "%s = %d" % (n, i) for i, n in enumerate(sorted(ex.WANT_ASSIGN)))
+        src_text += "\n" + "\n".join(
+            "def %s():\n    return 1\n" % n for n in sorted(ex.WANT_FUNC))
+        with tempfile.TemporaryDirectory() as td:
+            src, out = os.path.join(td, "_gate.py"), os.path.join(td, "f.py")
+            data = src_text.replace("\n", "\r\n").encode()
+            with open(src, "wb") as f:
+                f.write(data)
+            with contextlib.redirect_stdout(io.StringIO()):
+                rc = ex.main(["--src", src, "--out", out,
+                              "--provenance", "develop x"])
+            with open(out, "rb") as f:
+                written = f.read()
+        self.assertEqual(rc, 0)
+        self.assertNotIn(b"\r", written)
+        text = written.decode()
+        self.assertIn("blob %s, develop x" % ex.git_blob_sha(data), text)
+        payload = text.split(ex.BODY_MARKER, 1)[1]
+        self.assertIn("# Extracted-sha256: %s" % hashlib.sha256(
+            payload.encode()).hexdigest(), text)
 
     def test_git_blob_sha_matches_git(self):
         ex = _load_extractor()
