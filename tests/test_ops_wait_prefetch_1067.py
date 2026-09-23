@@ -1,19 +1,29 @@
-"""#1067 slice 1 — the batched W-member comment prefetch + the watchdog
+"""#1067 slice 1/1b — the batched W-member comment prefetch + the watchdog
 cache's timeout backoff.
 
-Approach 1 of the design (issue #1067 comment 5785415886):
+Approach 1 of the design (issue #1067 comment 5787085030, slice 1b):
 
   (a) `_ops_wait_flag_sets` / the footer's `_compute_net_stale_w` used to run one
       `gh issue view <n> --json comments` per W member (102 s for 74 members on
-      montalu1). A single batched prefetch (`_ops_wait_prefetch_comments`, ONE
-      `gh issue list --search "<qual> label:ops-wait,needs-acceptance" --json
-      number,comments` per member-defining qual) feeds the existing `ages_fn`
-      seam via `ops_wait_ages_fn`; a member missing from the prefetch falls back
-      to the per-issue call. The flag sets are byte-identical with and without
-      the prefetch.
+      montalu1). A single batched prefetch (`_ops_wait_prefetch_comments`) feeds
+      the existing `ages_fn` seam via `ops_wait_ages_fn`; a member missing from
+      the prefetch falls back to the per-issue call. The flag sets are
+      byte-identical with and without the prefetch.
+
+  (1b) The slice-1 prefetch used ONE `gh issue list --search "<qual>
+      label:ops-wait,needs-acceptance" --json number,comments --limit 500`. That
+      call HTTP-502s (`--limit 500`) / 504s (`--limit 100`) on the busy stream
+      repo (odoo-erp), so the prefetch returned 0 rows there and slice 1 had no
+      effect. Slice 1b replaces it with a paginated `gh api graphql` search
+      (`search(type: ISSUE, first: 10)` + `comments(last: 100)`) that pages by
+      cursor, carries only the newest 100 comments per issue, bounds each page
+      with its own 20 s timeout, and keeps earlier pages when a later page fails.
+      The `totalCount > 100` cap-fallback replaces slice 1's `len(comments) <
+      100` rule (a fully-fetched `comments(last: 100)` list is always exactly
+      len 100 at/over the cap, so length alone can no longer signal truncation).
 
   (b) `watchdog.ops_wait_recheck._cached_member_fetch`: a TIMEOUT result (the
-      new `FETCH_TIMEOUT` sentinel, distinct from a gh error / None) doubles its
+      `FETCH_TIMEOUT` sentinel, distinct from a gh error / None) doubles its
       fail-TTL geometrically, capped at the full TTL, so a persistently-slow
       fetch can never fire every sweep again.
 """
@@ -56,31 +66,80 @@ def _ow(*nums):
                "createdAt": _CREATED} for n in nums}
 
 
-class _GhRecorder:
-    """A fake `airuleset._gh_out` that answers the batched `issue list` prefetch
-    AND per-issue `issue view` reads from the SAME `COMMENTS` fixture, and counts
-    how many COMMENTS-bearing gh calls were made (so the test can prove the
-    prefetch makes ONE, the per-member path N)."""
+def _cursor_of(args):
+    """Extract the `cursor=<c>` value from a `gh api graphql` argv, or None."""
+    for a in args:
+        if isinstance(a, str) and a.startswith("cursor="):
+            return a[len("cursor="):]
+    return None
 
-    def __init__(self, comments, present=None, list_comments=None):
+
+class _GhRecorder:
+    """A fake `airuleset._gh_out` that answers the slice-1b paginated GraphQL
+    search prefetch AND per-issue `issue view` reads from the SAME `COMMENTS`
+    fixture, and counts how many COMMENTS-bearing gh calls were made (so a test
+    can prove the prefetch pages the members, the per-member path reads N).
+
+    The GraphQL search serves `self.present` (an ordered member list) in pages
+    of `page_size` by cursor. `list_comments` overrides the per-row comment
+    nodes the SEARCH returns (defaults to `comments`); `total_counts` overrides
+    the per-row `totalCount` (defaults to len of the served nodes) so a test can
+    force the >100 cap-fallback. `fail_pages` is the set of 0-based page indices
+    whose GraphQL call returns "" (a `_gh_out` failure)."""
+
+    def __init__(self, comments, present=None, list_comments=None,
+                 total_counts=None, page_size=10, fail_pages=None,
+                 raw_pages=None, force_has_next=False):
         self.comments = comments
-        # `present` limits which members the batched list returns (a missing
-        # member must fall back to its per-issue view). None → all.
-        self.present = set(comments) if present is None else set(present)
-        # `list_comments` overrides what the BATCHED list returns per member
-        # (e.g. a gh-truncated 100-comment list) vs the per-issue `comments`
-        # (the fully-paginated view). Defaults to `comments` (identical data).
+        self.present = list(comments) if present is None else list(present)
         self.list_comments = list_comments or comments
-        self.list_calls = 0
+        self.total_counts = total_counts or {}
+        self.page_size = page_size
+        self.fail_pages = set(fail_pages or ())
+        # raw_pages: {page_idx: raw_string} — returned VERBATIM for that page
+        # (models a GraphQL 200 carrying `errors` / `data:null` / a null cursor).
+        self.raw_pages = raw_pages or {}
+        # force_has_next: always report hasNextPage=True (models an unbounded
+        # result set so the `max_pages` cap is what terminates the loop).
+        self.force_has_next = force_has_next
+        self.graphql_calls = 0
+        self.graphql_queries = []                # captured `q=` search strings
         self.view_calls = []
 
     def __call__(self, *args, **kwargs):
-        # batched prefetch: gh issue list ... --json number,comments
-        if args[:2] == ("issue", "list") and "number,comments" in args:
-            self.list_calls += 1
-            rows = [{"number": n, "comments": self.list_comments[n]}
-                    for n in sorted(self.present) if n in self.list_comments]
-            return json.dumps(rows)
+        # The repo slug is resolved via ghread.canonical_slug (LOCAL git), NOT
+        # gh — so this fake never serves a slug; tests patch canonical_slug.
+        # slice-1b batched prefetch: gh api graphql ... search(...)
+        if args[:2] == ("api", "graphql"):
+            for a in args:
+                if isinstance(a, str) and a.startswith("q="):
+                    self.graphql_queries.append(a[len("q="):])
+            page_idx = 0
+            cursor = _cursor_of(args)
+            if cursor is not None and cursor.startswith("off:"):
+                offset = int(cursor[len("off:"):])
+                page_idx = offset // self.page_size
+            else:
+                offset = 0
+            self.graphql_calls += 1
+            if page_idx in self.raw_pages:
+                return self.raw_pages[page_idx]  # verbatim (errors/data:null/…)
+            if page_idx in self.fail_pages:
+                return ""                        # page failure → _gh_out ""
+            chunk = self.present[offset:offset + self.page_size]
+            nodes = []
+            for n in chunk:
+                cnodes = self.list_comments.get(n, [])
+                tc = self.total_counts.get(n, len(cnodes))
+                nodes.append({"number": n,
+                              "comments": {"totalCount": tc, "nodes": cnodes}})
+            has_next = (self.force_has_next
+                        or (offset + self.page_size) < len(self.present))
+            end_cursor = "off:%d" % (offset + self.page_size)
+            return json.dumps({"data": {"search": {
+                "issueCount": len(self.present),
+                "pageInfo": {"hasNextPage": has_next, "endCursor": end_cursor},
+                "nodes": nodes}}})
         # per-issue fallback: gh issue view <n> --json comments
         if args[:2] == ("issue", "view") and "comments" in args:
             n = int(args[2])
@@ -92,11 +151,13 @@ class _GhRecorder:
 
     @property
     def comment_calls(self):
-        return self.list_calls + len(self.view_calls)
+        return self.graphql_calls + len(self.view_calls)
 
 
-def _run_flag_sets(ow, member_quals, rec):
+def _run_flag_sets(ow, member_quals, rec, slug="owner/repo"):
+    from gates import ghread
     with mock.patch.object(airuleset, "_gh_out", rec), \
+            mock.patch.object(ghread, "canonical_slug", lambda root: slug), \
             mock.patch.object(airuleset, "_stream_self_login", lambda: "me"), \
             mock.patch.object(airuleset, "resolve_authority",
                               lambda cwd=None: "full"), \
@@ -106,23 +167,49 @@ def _run_flag_sets(ow, member_quals, rec):
 
 
 class PrefetchBatchesCommentReads(unittest.TestCase):
-    """(a) — one comments-bearing gh call for N members, not N."""
+    """(a) — the prefetch pages the members, ZERO per-issue views."""
 
-    def test_exactly_one_comments_call_for_all_members(self):
+    def test_one_page_serves_all_members(self):
         ow = _ow(41, 42)
         rec = _GhRecorder(COMMENTS)
         _run_flag_sets(ow, ["label:stream:x"], rec)
-        # ONE batched list call, ZERO per-issue views.
-        self.assertEqual(1, rec.list_calls)
+        # ONE GraphQL page (2 members < page_size), ZERO per-issue views.
+        self.assertEqual(1, rec.graphql_calls)
         self.assertEqual([], rec.view_calls)
         self.assertEqual(1, rec.comment_calls)
 
-    def test_one_call_per_member_qual(self):
-        # The prefetch runs ONE gh issue list per member-defining qual.
+    def test_one_search_per_member_qual(self):
+        # The prefetch runs ONE paginated search per member-defining qual.
         ow = _ow(41, 42)
         rec = _GhRecorder(COMMENTS)
         _run_flag_sets(ow, ["q1", "q2"], rec)
-        self.assertEqual(2, rec.list_calls)
+        self.assertEqual(2, rec.graphql_calls)
+        self.assertEqual([], rec.view_calls)
+
+
+class PrefetchPaginates(unittest.TestCase):
+    """(1b) — 2 GraphQL pages of 10 issues each → all prefetched in exactly 2
+    calls, ZERO per-issue views (the odoo-erp busy-repo case slice 1 could not
+    serve)."""
+
+    def test_two_pages_of_ten_prefetched_in_two_calls(self):
+        nums = list(range(101, 121))            # 20 members → 2 pages of 10
+        c = {n: [{"author": {"login": "me"}, "createdAt": _FRESH,
+                  "body": "cakame"}] for n in nums}
+        ow = _ow(*nums)
+        rec = _GhRecorder(c, page_size=10)
+        _run_flag_sets(ow, ["label:stream:x"], rec)
+        self.assertEqual(2, rec.graphql_calls)   # exactly ceil(20/10) pages
+        self.assertEqual([], rec.view_calls)     # nothing fell back
+
+    def test_pages_until_has_next_page_false(self):
+        nums = list(range(101, 126))            # 25 members → 3 pages (10/10/5)
+        c = {n: [{"author": {"login": "me"}, "createdAt": _FRESH,
+                  "body": "cakame"}] for n in nums}
+        ow = _ow(*nums)
+        rec = _GhRecorder(c, page_size=10)
+        _run_flag_sets(ow, ["label:stream:x"], rec)
+        self.assertEqual(3, rec.graphql_calls)
         self.assertEqual([], rec.view_calls)
 
 
@@ -143,9 +230,37 @@ class PrefetchFlagParity(unittest.TestCase):
         self.assertIn(41, stale_per)
         self.assertNotIn(42, stale_pre)
         # per-member path made one view per member (>1 comments call),
-        # prefetch path made exactly one.
+        # prefetch path made exactly one (a single GraphQL page).
         self.assertEqual(1, rec_pre.comment_calls)
         self.assertGreater(len(rec_per.view_calls), 1)
+
+    def test_full_flag_parity_across_categories(self):
+        # A richer fixture exercising the flag categories named in the design
+        # (stale!/recheck!/gk-handoff!/unpark?/acceptance-tacit): the WHOLE
+        # returned tuple must match the per-issue path byte-for-byte.
+        gk = _iso(_NOW - timedelta(hours=2))
+        ow = {
+            41: {"number": 41, "title": "t", "labels": [{"name": "ops-wait"}],
+                 "createdAt": _CREATED},                       # stale!
+            42: {"number": 42, "title": "t", "labels": [{"name": "ops-wait"}],
+                 "createdAt": _CREATED},                       # fresh
+            43: {"number": 43, "title": "t",
+                 "labels": [{"name": "needs-acceptance"},
+                            {"name": "ready-for-review"}],
+                 "createdAt": _CREATED},                       # gk-handoff!
+        }
+        c = {
+            41: [{"author": {"login": "me"}, "createdAt": _OLD, "body": "x"}],
+            42: [{"author": {"login": "me"}, "createdAt": gk, "body": "x"}],
+            43: [{"author": {"login": "me"}, "createdAt": _FRESH, "body": "x"}],
+        }
+        rec_pre = _GhRecorder(c)
+        with_prefetch = _run_flag_sets(ow, ["label:stream:x"], rec_pre)
+        rec_per = _GhRecorder(c)
+        without = _run_flag_sets(ow, None, rec_per)
+        self.assertEqual(without, with_prefetch)
+        self.assertEqual(1, rec_pre.graphql_calls)
+        self.assertEqual([], rec_pre.view_calls)
 
 
 class PrefetchMissingMemberFallback(unittest.TestCase):
@@ -155,53 +270,87 @@ class PrefetchMissingMemberFallback(unittest.TestCase):
         ow = _ow(41, 42, 43)
         c = dict(COMMENTS)
         c[43] = [{"author": {"login": "me"}, "createdAt": _OLD, "body": "cakame"}]
-        # the batched list returns only 41,42 (43 truncated/label just changed).
-        rec = _GhRecorder(c, present={41, 42})
+        # the search returns only 41,42 (43 label just changed / not indexed).
+        rec = _GhRecorder(c, present=[41, 42])
         sets = _run_flag_sets(ow, ["label:stream:x"], rec)
-        self.assertEqual(1, rec.list_calls)
+        self.assertEqual(1, rec.graphql_calls)
         self.assertIn(43, rec.view_calls)        # fell back to per-issue
         self.assertNotIn(41, rec.view_calls)     # served from the prefetch
         # 43 (old own comment, per-issue) is still correctly stale!
         self.assertIn(43, sets[0])
 
 
+class PrefetchPageFailureFallback(unittest.TestCase):
+    """(1b) — a failing page keeps the pages already read and leaves the
+    unfetched members to the per-issue fallback."""
+
+    def test_failed_page_keeps_earlier_pages_rest_fall_back(self):
+        page0 = list(range(41, 51))             # served on page 0
+        page1 = list(range(51, 61))             # page 1 fails
+        nums = page0 + page1
+        c = {n: [{"author": {"login": "me"}, "createdAt": _OLD, "body": "x"}]
+             for n in nums}
+        ow = _ow(*nums)
+        rec = _GhRecorder(c, page_size=10, fail_pages={1})
+        sets = _run_flag_sets(ow, ["label:stream:x"], rec)
+        # both page attempts were made (page 0 ok, page 1 failed).
+        self.assertEqual(2, rec.graphql_calls)
+        # page-0 members served from the prefetch (no per-issue view)…
+        self.assertNotIn(41, rec.view_calls)
+        # …page-1 members fell back to the per-issue read.
+        self.assertIn(51, rec.view_calls)
+        # correctness preserved on BOTH paths (old own comment → stale!).
+        self.assertIn(41, sets[0])
+        self.assertIn(51, sets[0])
+
+
 class PrefetchTruncationFallback(unittest.TestCase):
-    """(a) — gh `issue list --json comments` truncates the nested comments at 100
-    (live-verified), while `gh issue view` paginates fully. A prefetch row at the
-    cap is EXCLUDED → falls back to the per-issue read (never a false stale!)."""
+    """(1b) — `comments(last: 100)` carries only the newest 100; a row whose
+    `totalCount > 100` is EXCLUDED from the prefetch map and falls back to the
+    fully-paginated `gh issue view` (never a false stale! from a missing OLD
+    comment). This replaces slice 1's `len(comments) < 100` rule."""
 
     def test_over_cap_row_falls_back_and_avoids_false_stale(self):
         import cli_quals
         cap = cli_quals.OPS_WAIT_PREFETCH_COMMENT_CAP
-        # member 44: the BATCHED list returns `cap` OLD third-party comments
-        # (truncated — the stream's newest CITED push is beyond gh's 100 window);
-        # the per-issue VIEW returns those PLUS the newest fresh CITED own push.
-        old_batch = [{"author": {"login": "other"}, "createdAt": _OLD,
-                      "body": "cakame %d" % i} for i in range(cap)]
-        full_view = old_batch + [{"author": {"login": "me"},
-                                  "createdAt": _FRESH,
-                                  "body": "nasadene vo v1.2.3"}]
+        # member 44: the SEARCH returns 100 recent nodes but totalCount=cap+1
+        # (the issue has more than 100 comments); the per-issue VIEW returns the
+        # full history including the newest fresh CITED own push.
+        recent_100 = [{"author": {"login": "other"}, "createdAt": _OLD,
+                       "body": "cakame %d" % i} for i in range(cap)]
+        full_view = recent_100 + [{"author": {"login": "me"},
+                                   "createdAt": _FRESH,
+                                   "body": "nasadene vo v1.2.3"}]
         c = {44: full_view}          # what `gh issue view` returns (full)
-        lc = {44: old_batch}         # what the batched list returns (truncated)
+        lc = {44: recent_100}        # what the search returns (newest 100)
         ow = _ow(44)
-        rec = _GhRecorder(c, list_comments=lc)
+        rec = _GhRecorder(c, list_comments=lc, total_counts={44: cap + 1})
         sets = _run_flag_sets(ow, ["label:stream:x"], rec)
-        self.assertEqual(1, rec.list_calls)
+        self.assertEqual(1, rec.graphql_calls)
         self.assertIn(44, rec.view_calls)    # cap-excluded → per-issue fallback
         # served from the FULL per-issue view (fresh newest own) → NOT stale.
         self.assertNotIn(44, sets[0])
 
-    def test_under_cap_row_served_from_prefetch(self):
-        # a row with < cap comments is served from the prefetch (no per-issue).
-        ow = _ow(41)
-        rec = _GhRecorder(COMMENTS)
-        _run_flag_sets(ow, ["label:stream:x"], rec)
-        self.assertEqual([], rec.view_calls)
+    def test_at_cap_totalcount_served_from_prefetch(self):
+        # totalCount == cap (exactly 100, not over) is served from the prefetch:
+        # `comments(last: 100)` carried the whole list, nothing is missing.
+        import cli_quals
+        cap = cli_quals.OPS_WAIT_PREFETCH_COMMENT_CAP
+        nodes = ([{"author": {"login": "other"}, "createdAt": _OLD,
+                   "body": "x %d" % i} for i in range(cap - 1)]
+                 + [{"author": {"login": "me"}, "createdAt": _FRESH,
+                     "body": "x"}])
+        c = {45: nodes}
+        ow = _ow(45)
+        rec = _GhRecorder(c, total_counts={45: cap})
+        sets = _run_flag_sets(ow, ["label:stream:x"], rec)
+        self.assertEqual([], rec.view_calls)     # served from the prefetch
+        self.assertNotIn(45, sets[0])            # fresh newest own → not stale
 
 
 class PrefetchSkippedWhenNoWMembers(unittest.TestCase):
     """(a) — an EMPTY W set makes ZERO gh calls (the idle-box footer case): the
-    prefetch never fires a per-qual `gh issue list` nobody will consume."""
+    prefetch never fires a per-qual search nobody will consume."""
 
     def test_empty_ops_wait_no_gh(self):
         rec = _GhRecorder(COMMENTS)
@@ -218,6 +367,110 @@ class PrefetchSkippedWhenNoWMembers(unittest.TestCase):
                                                member_quals=["q1"])
         self.assertEqual(0, n)
         self.assertEqual(0, rec.comment_calls)
+
+
+class PrefetchSlugFailureFallsBack(unittest.TestCase):
+    """(1b) — an unresolvable repo slug makes the search unbuildable, so the
+    prefetch contributes nothing and every member falls back per-issue
+    (byte-identical to today's failure mode)."""
+
+    def test_empty_slug_falls_back_to_per_issue(self):
+        ow = _ow(41, 42)
+        rec = _GhRecorder(COMMENTS)
+        # canonical_slug → "" (unresolvable repo) → no search buildable.
+        sets = _run_flag_sets(ow, ["label:stream:x"], rec, slug="")
+        # no GraphQL page attempted (nothing to query), all members per-issue.
+        self.assertEqual(0, rec.graphql_calls)
+        self.assertIn(41, rec.view_calls)
+        self.assertIn(42, rec.view_calls)
+        self.assertIn(41, sets[0])               # still correctly stale!
+
+
+def _run_prefetch(rec, member_quals, slug="owner/repo", limit=None):
+    """Call the prefetch directly with `_gh_out` + `canonical_slug` patched —
+    for asserting the returned map / call counts on the pager's edge paths."""
+    import cli_quals
+    from gates import ghread
+    with mock.patch.object(airuleset, "_gh_out", rec), \
+            mock.patch.object(ghread, "canonical_slug", lambda root: slug):
+        return cli_quals._ops_wait_prefetch_comments(member_quals, "/r", limit=limit)
+
+
+class PrefetchQueryString(unittest.TestCase):
+    """(1b) — the search string embeds the resolved slug, is:issue is:open, the
+    member qual and the ops-wait,needs-acceptance label OR."""
+
+    def test_search_query_carries_slug_scope_qual_and_labels(self):
+        rec = _GhRecorder(COMMENTS)
+        _run_prefetch(rec, ["label:stream:x"], slug="owner/repo")
+        self.assertEqual(1, len(rec.graphql_queries))
+        q = rec.graphql_queries[0]
+        self.assertIn("repo:owner/repo", q)
+        self.assertIn("is:issue is:open", q)
+        self.assertIn("label:stream:x", q)
+        self.assertIn("label:ops-wait,needs-acceptance", q)
+
+
+class PrefetchPartialResponseFallback(unittest.TestCase):
+    """(1b) — a GraphQL 200 carrying `errors` / `data:null` stops that qual's
+    paging, keeps pages already read, and never NoneType-crashes."""
+
+    def test_graphql_errors_keeps_earlier_pages_rest_fall_back(self):
+        nums = list(range(41, 61))              # page 0 (41-50), page 1 (51-60)
+        c = {n: [{"author": {"login": "me"}, "createdAt": _OLD, "body": "x"}]
+             for n in nums}
+        # page 1 returns a valid HTTP 200 body carrying GraphQL `errors`.
+        err = json.dumps({"data": None,
+                          "errors": [{"message": "something failed"}]})
+        rec = _GhRecorder(c, page_size=10, raw_pages={1: err})
+        out = _run_prefetch(rec, ["label:stream:x"])
+        # page-0 members kept…
+        self.assertIn(41, out)
+        # …page-1 members absent (fall back per-issue at the consumer).
+        self.assertNotIn(51, out)
+
+    def test_data_null_no_errors_no_crash_returns_empty(self):
+        # a `{"data": null}` body without `errors` must not NoneType-crash;
+        # `(None or {}).get("search")` → None → break, nothing mapped.
+        rec = _GhRecorder(COMMENTS, raw_pages={0: json.dumps({"data": None})})
+        out = _run_prefetch(rec, ["label:stream:x"])
+        self.assertEqual({}, out)
+        self.assertEqual(1, rec.graphql_calls)
+
+
+class PrefetchNullCursorTerminates(unittest.TestCase):
+    """(1b) — hasNextPage true but a null/missing endCursor stops the loop
+    (no re-fetch of page 1 with cursor=None, no infinite loop)."""
+
+    def test_has_next_but_null_cursor_stops_after_one_call(self):
+        page = json.dumps({"data": {"search": {
+            "pageInfo": {"hasNextPage": True, "endCursor": None},
+            "nodes": [{"number": 41,
+                       "comments": {"totalCount": 1,
+                                    "nodes": COMMENTS[41]}}]}}})
+        rec = _GhRecorder(COMMENTS, raw_pages={0: page})
+        out = _run_prefetch(rec, ["label:stream:x"])
+        self.assertEqual(1, rec.graphql_calls)   # no loop
+        self.assertIn(41, out)
+
+
+class PrefetchMaxPagesCap(unittest.TestCase):
+    """(1b) — the pager stops at ceil(limit/page_size) pages even while the
+    result set still reports hasNextPage; the remainder falls back per-issue."""
+
+    def test_cap_bounds_pages_when_has_next_never_false(self):
+        # 100 members, page_size 10, limit 25 → ceil(25/10)=3 pages, then stop.
+        nums = list(range(101, 201))
+        c = {n: [{"author": {"login": "me"}, "createdAt": _FRESH, "body": "x"}]
+             for n in nums}
+        rec = _GhRecorder(c, page_size=10, force_has_next=True)
+        out = _run_prefetch(rec, ["label:stream:x"], limit=25)
+        self.assertEqual(3, rec.graphql_calls)   # capped at ceil(25/10)
+        # only the first 30 members (3 pages of 10) are in the map…
+        self.assertIn(101, out)
+        self.assertIn(130, out)
+        # …the rest are absent (would fall back per-issue at the consumer).
+        self.assertNotIn(131, out)
 
 
 class CacheTimeoutBackoff(unittest.TestCase):

@@ -636,10 +636,11 @@ OPS_WAIT_LABELS = ("ops-wait",)
 # bucket iff it carries `ops-wait` (external event) OR `needs-acceptance` (client
 # thread sent, routed to W by `_partition_workable`'s acceptance-scoped override).
 # The batched comment prefetch (`_ops_wait_prefetch_comments`) ANDs this label OR
-# onto each member-defining qual, so ONE `gh issue list --search "<qual>
-# label:ops-wait,needs-acceptance" --json number,comments` fetches every W
-# member's comments in a single call instead of one `gh issue view` per member.
-# gh's `--search "label:a,b"` ORs the labels (live-verified 2026-09-23).
+# onto each member-defining qual, so ONE paginated `gh api graphql` search
+# (`search(query: "<qual> label:ops-wait,needs-acceptance" …)`, #1067 slice 1b)
+# fetches every W member's newest comments in O(pages) calls instead of one
+# `gh issue view` per member. GraphQL search `label:a,b` ORs the labels
+# (live-verified 2026-09-23 on odoo-erp: issueCount matched the union).
 OPS_WAIT_PREFETCH_LABELS = OPS_WAIT_LABELS + ("needs-acceptance",)
 # gh issue list --limit ceiling for the prefetch. A member beyond it, or a
 # member missing from a truncated list, falls back to today's per-issue
@@ -655,6 +656,14 @@ OPS_WAIT_PREFETCH_LIMIT = 500
 # per-issue read. W tickets with >100 comments are rare, so the extra per-issue
 # reads are few; correctness is never traded for the batch.
 OPS_WAIT_PREFETCH_COMMENT_CAP = 100
+# #1067 slice 1b — the GraphQL `search` page size. `search(type: ISSUE,
+# first: N)` carries N issues per request, each with its newest
+# `comments(last: OPS_WAIT_PREFETCH_COMMENT_CAP)`. Small pages keep a single
+# request light on a busy repo (the slice-1 `gh issue list` HTTP-502/504'd on
+# odoo-erp trying to pull up to 100 issues × 100 comments at once). The pager
+# stops at `hasNextPage == false` OR after `ceil(OPS_WAIT_PREFETCH_LIMIT /
+# page-size)` pages, whichever comes first.
+OPS_WAIT_PREFETCH_PAGE_SIZE = 10
 
 
 def _row_is_ops_wait(labels):
@@ -1654,59 +1663,138 @@ def _issue_comment_ages(number, self_login, now, cwd=None):
     return _ages_from_comments(comments, self_login)
 
 
-def _ops_wait_prefetch_comments(member_quals, root, limit=None):
-    """#1067 (a): ONE batched `gh issue list --search "<qual>
-    label:ops-wait,needs-acceptance" --json number,comments` per member-defining
-    qual, returning `{number: comments}`. Replaces the per-member `gh issue view
-    --json comments` loop behind `--ops-wait` / the footer's stale-W count
-    (one gh call per W member — 102 s for 74 members on montalu1, #1067).
+# #1067 slice 1b — the paginated GraphQL search that carries only the newest
+# comments per W member. `first: %d` = OPS_WAIT_PREFETCH_PAGE_SIZE issues per
+# page; `comments(last: %d)` = the newest OPS_WAIT_PREFETCH_COMMENT_CAP comments
+# (what every freshness anchor needs) plus `totalCount` (drives the >cap
+# fallback). `$q` is the search string, `$cursor` the page cursor (null → page 1).
+_OPS_WAIT_PREFETCH_GQL = (
+    "query($q: String!, $cursor: String) {"
+    " search(query: $q, type: ISSUE, first: %d, after: $cursor) {"
+    " pageInfo { hasNextPage endCursor }"
+    " nodes { ... on Issue { number"
+    " comments(last: %d) { totalCount nodes {"
+    " author { login } createdAt body } } } } } }"
+) % (OPS_WAIT_PREFETCH_PAGE_SIZE, OPS_WAIT_PREFETCH_COMMENT_CAP)
 
-    The `comments` payload has the SAME element shape `gh issue view --json
-    comments` returns, so `_ages_from_comments` parses it unchanged — EXCEPT gh
-    truncates the list's nested comments connection at
-    OPS_WAIT_PREFETCH_COMMENT_CAP (100), while `gh issue view` paginates fully,
-    so a row at/over that cap is EXCLUDED from the map and falls back to the
-    per-issue read (its ages could otherwise be wrong — see the constant). This
-    is what keeps the prefetched and per-issue results byte-identical.
+
+def _ops_wait_prefetch_comments(member_quals, root, limit=None):
+    """#1067 slice 1b: ONE paginated `gh api graphql` search per member-defining
+    qual, returning `{number: comments}` — the newest comments of every W
+    member. Replaces the per-member `gh issue view --json comments` loop behind
+    `--ops-wait` / the footer's stale-W count (one gh call per W member — 102 s
+    for 74 members on montalu1, #1067).
+
+    WHY GraphQL search, not `gh issue list` (slice 1): `gh issue list --search
+    "<qual> label:ops-wait,needs-acceptance" --json number,comments` cannot page
+    by cursor and cannot bound the nested comments connection, so it pulls up to
+    the full 100 comments of up to `--limit` issues in ONE request — which
+    HTTP-502s (`--limit 500`) / 504s (`--limit 100`) on a busy stream repo
+    (odoo-erp), leaving the slice-1 prefetch returning 0 rows there. The search
+    query is bounded on BOTH axes: `first: OPS_WAIT_PREFETCH_PAGE_SIZE` issues
+    per page (paged by `pageInfo.endCursor` until `hasNextPage` is false, capped
+    at `ceil(OPS_WAIT_PREFETCH_LIMIT / page-size)` pages), and `comments(last:
+    OPS_WAIT_PREFETCH_COMMENT_CAP)` newest comments per issue. Live-measured
+    2026-09-23: 74 montalu W members in 8 pages, ≈ 12 s total (vs the old 502/504
+    and the 115–120 s `slice-quals --ops-wait`).
+
+    Each page carries its own 20 s timeout; a page that FAILS (gh error / parse
+    error / GraphQL `errors`) stops that qual's paging but KEEPS the pages
+    already read (their members stay in the map), and every unfetched member
+    falls back to the per-issue read.
+
+    The GraphQL comment node carries the SAME THREE keys `_ages_from_comments`
+    consumes (`author: {login}`, `createdAt`, `body`) — `gh issue view --json
+    comments` also carries extra keys (id/url/…) this query omits, but the parse
+    reads only those three, so the ages are IDENTICAL either way — EXCEPT
+    `comments(last: 100)` carries only the newest
+    100, so a row whose `totalCount > OPS_WAIT_PREFETCH_COMMENT_CAP` is EXCLUDED
+    from the map and falls back to the fully-paginated per-issue read (its OLD
+    anchors could otherwise be missing — never a false `stale!`, #539/#570).
+    This is slice 1b's cap rule; it replaces slice 1's `len(comments) < 100`
+    check (a full `comments(last: 100)` list is always exactly 100 at/over the
+    cap, so length alone can no longer distinguish a truncated list from a
+    naturally-100-comment one — `totalCount` can).
 
     `member_quals` are the SAME quals that produced the W members (ONE
     derivation, #367 — no parallel membership query): `cmd_slice_quals`'s
     `_slice_quals(user)` (usually ONE qual on a shared-account stream box) or
     `cmd_core_quals`'s `_obligation_quals()`. A qual whose gh read fails / is
-    unparsable contributes nothing (its members fall back to the per-issue call);
-    an empty `member_quals` returns `{}` (everything falls back — byte-identical
-    to today). Over-fetch (a qual that also matches non-W tickets) is harmless:
-    only members present in the `ops_wait` set are ever consumed."""
+    unparsable on its FIRST page contributes nothing (its members fall back);
+    an empty `member_quals`, or an unresolvable repo slug, returns `{}`
+    (everything falls back — byte-identical to today's failure mode). Over-fetch
+    (a qual that also matches non-W tickets) is harmless: only members present in
+    the `ops_wait` set are ever consumed."""
     import airuleset
+    from gates import ghread
     out = {}
     if not member_quals:
         return out
+    # The search string needs the repo slug embedded (`repo:<slug>`). Resolve it
+    # with the FLEET fork-aware, LOCAL-git-only resolver (`ghread.canonical_slug`,
+    # the ONE slug reader the open-issue snapshot / cross-stream / release-state
+    # readers share, #1094) — NEVER the origin-only `_repo_slug`: on a fork clone
+    # (david1-4 — origin = the fork, issues disabled) `_repo_slug` returns the
+    # FORK slug, whose `search(query: "repo:<fork> …")` silently returns nothing
+    # (prefetch inert on exactly the busiest streams) or, worse, a colliding fork
+    # issue's comments for a canonical member. `canonical_slug` resolves the base
+    # repo the way `gh` does, with zero network (survives quota exhaustion, and
+    # removes the extra `gh repo view` round-trip). An empty / unresolvable slug
+    # can't build a valid search → everything falls back per-issue.
+    slug = (ghread.canonical_slug(root) or "").strip()
+    if not slug:
+        return out
     label_q = "label:" + ",".join(OPS_WAIT_PREFETCH_LABELS)
-    lim = str(limit if limit else OPS_WAIT_PREFETCH_LIMIT)
+    lim = limit if limit else OPS_WAIT_PREFETCH_LIMIT
+    max_pages = max(1, -(-lim // OPS_WAIT_PREFETCH_PAGE_SIZE))  # ceil(lim/size)
+    base = "repo:%s is:issue is:open" % slug
     for qual in member_quals:
-        search = ("%s %s" % (qual, label_q)).strip() if qual else label_q
-        raw = airuleset._gh_out("issue", "list", "--state", "open",
-                                "--search", search, "--json", "number,comments",
-                                "--limit", lim, cwd=root, timeout=20)
-        if not raw:
-            continue                              # gh failure/empty -> fall back
-        try:
-            rows = json.loads(raw)
-        except (ValueError, TypeError):
-            continue
-        if not isinstance(rows, list):
-            continue
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            num = row.get("number")
-            comments = row.get("comments")
-            # A row whose comment list hit gh's 100-cap is possibly TRUNCATED
-            # (missing its newest comments) → leave it OUT so it falls back to
-            # the fully-paginated per-issue read (never a false `stale!`).
-            if (isinstance(num, int) and isinstance(comments, list)
-                    and len(comments) < OPS_WAIT_PREFETCH_COMMENT_CAP):
-                out.setdefault(num, comments)
+        parts = [base]
+        if qual:
+            parts.append(qual)
+        parts.append(label_q)
+        search = " ".join(parts)
+        cursor = None
+        for _page in range(max_pages):
+            # `-f` (raw string) for every String-typed variable — `$q`/`$cursor`
+            # are `String`, so avoid `-F`'s number/bool/null/@file coercion.
+            gh_args = ["api", "graphql", "-f",
+                       "query=" + _OPS_WAIT_PREFETCH_GQL, "-f", "q=" + search]
+            if cursor:
+                gh_args += ["-f", "cursor=" + cursor]
+            raw = airuleset._gh_out(*gh_args, cwd=root, timeout=20)
+            if not raw:
+                break                             # page failure -> keep earlier
+            try:
+                data = json.loads(raw)
+            except (ValueError, TypeError):
+                break
+            if not isinstance(data, dict) or data.get("errors"):
+                break                             # GraphQL error -> keep earlier
+            search_res = (data.get("data") or {}).get("search")
+            if not isinstance(search_res, dict):
+                break
+            for node in (search_res.get("nodes") or []):
+                if not isinstance(node, dict):
+                    continue
+                num = node.get("number")
+                cconn = node.get("comments")
+                if not isinstance(num, int) or not isinstance(cconn, dict):
+                    continue
+                nodes = cconn.get("nodes")
+                total = cconn.get("totalCount")
+                # A row with MORE than the cap comments carries only its newest
+                # 100 -> possibly missing an OLD anchor -> exclude, fall back to
+                # the fully-paginated per-issue read (never a false `stale!`).
+                if (isinstance(nodes, list) and isinstance(total, int)
+                        and total <= OPS_WAIT_PREFETCH_COMMENT_CAP):
+                    out.setdefault(num, nodes)
+            page_info = search_res.get("pageInfo") or {}
+            if not page_info.get("hasNextPage"):
+                break
+            cursor = page_info.get("endCursor")
+            if not cursor:
+                break                             # no cursor -> can't page on
     return out
 
 
