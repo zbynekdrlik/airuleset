@@ -63,6 +63,14 @@ _TASK_NOTE = ("<task-notification>\n<task-id>b1</task-id>\n<status>completed"
               "</task-notification>")
 
 
+# the watchdog's OWN typed keystrokes (#1133 review): never the owner's answer
+_OWN_NUDGES = ("nudge: [u-freshness] stuck-check: U-reconcile",
+               "report-owed: montalu — napíš ## ✅ Work Complete",
+               "lane-check: 2 lanes", "goal-guard: x", "recheck: y",
+               "UNPARK-AUDIT: z", "stuck-check: w", "bounce-backstop: v",
+               "gk-request backstop: u", "resume")
+
+
 def _iso(ts):
     return datetime.fromtimestamp(ts, timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%S.000Z")
@@ -152,7 +160,8 @@ class TestAnsweredProof(unittest.TestCase):
                                               "tool_use_id": "t",
                                               "content": "ok"}])]),
                 ("continue", [_user(700, "continue")]),
-        ):
+        ) + tuple((t, [_user(700, t), _asst(710, _AFTER, "m")])
+                  for t in _OWN_NUDGES):
             ok, why = self._t([_asst(600, _Q, "q")] + tail)
             self.assertFalse(ok, label)
             self.assertTrue(why, label)
@@ -195,6 +204,10 @@ class TestAnsweredProof(unittest.TestCase):
 
 
 class TestStreamAnsweredRearm(unittest.TestCase):
+    # A dark-watch CONFIRMATION RUN (#524): 8 dark reads over >= 10 min, the
+    # last at `self.now`; the transcript was last written 25 min before that.
+    RUN = [-630 + 90 * k for k in range(8)]
+
     def setUp(self):
         self.reqp, self.syncp = _isolate_goal_state(self)
         self.now = float(int(time.time()))
@@ -204,7 +217,7 @@ class TestStreamAnsweredRearm(unittest.TestCase):
         self.addCleanup(d.cleanup)
         return Path(d.name)
 
-    def _fixture(self, sid, payload=NEW_FORK, tail=None, idle_s=1200,
+    def _fixture(self, sid, payload=NEW_FORK, tail=None, idle_s=1500,
                  mark="Goal set: ", mark_ts=500):
         proj = self._dir()
         tpath = _write_marker_transcript(proj, CWD, sid, "warmup")
@@ -234,6 +247,19 @@ class TestStreamAnsweredRearm(unittest.TestCase):
             requests_path=self.reqp, dry_run=dry_run)
         return goal.load_goal_requests(self.reqp), logs, state, tmux
 
+    def _run(self, proj, base=0, state=None, caps=None, **kw):
+        """The production cadence: one sweep per RUN offset (relative to
+        `self.now + base`) with the SAME state; `caps` overrides the pane
+        render per sweep. Returns (requests, all logs, state, last tmux)."""
+        state = {} if state is None else state
+        logs = []
+        for k, off in enumerate(self.RUN):
+            cap = caps[k] if caps else kw.pop("cap", GOAL_IDLE_CAP)
+            reqs, lg, state, tmux = self._sweep(proj, state=state, cap=cap,
+                                                now=self.now + base + off, **kw)
+            logs += lg
+        return reqs, logs, state, tmux
+
     def _deliver(self, proj, sid, state, cap=GOAL_IDLE_CAP, cmd="claude",
                  req=None):
         req = req or goal.load_goal_requests(self.reqp)[sid]
@@ -252,18 +278,20 @@ class TestStreamAnsweredRearm(unittest.TestCase):
         return {"text": NEW_FORK, "authority": authority,
                 "origin": sm.ORIGIN, "ts": self.now}
 
-    def _assert_never(self, proj, sid, state, reqs, **deliver_kw):
+    def _assert_never(self, proj, sid, state, reqs, reason, **deliver_kw):
+        """Nothing recorded, and a FORCED stream-migrate request is refused at
+        the #1113 structured-armed refusal for THIS guard's `reason`."""
         self.assertNotEqual((reqs.get(sid) or {}).get("origin"), sm.ORIGIN)
         word, live = self._deliver(proj, sid, state, req=self._forced(),
                                    **deliver_kw)
-        self.assertNotEqual(word, "sent")
+        self.assertEqual(word, "drop:already-armed")
         self.assertEqual(live.sent, [])
-        return word
+        self.assertIn(reason, Path(self.syncp).read_text())
 
     # --- fires -------------------------------------------------------------- #
     def test_answered_question_re_arms_the_current_template(self):
         proj = self._fixture("a-ok")
-        reqs, logs, state, tmux = self._sweep(proj)
+        reqs, logs, state, tmux = self._run(proj)
         req = reqs.get("a-ok")
         self.assertIsInstance(req, dict, logs)
         self.assertEqual(req["origin"], sm.ORIGIN)
@@ -278,15 +306,15 @@ class TestStreamAnsweredRearm(unittest.TestCase):
 
     def test_branch_merge_answered_re_arms(self):
         proj = self._fixture("a-bm", payload=NEW_BRANCH)
-        reqs, _l, state, _t = self._sweep(proj, authority="branch-merge",
-                                          tmpl=NEW_BRANCH)
+        reqs, _l, state, _t = self._run(proj, authority="branch-merge",
+                                        tmpl=NEW_BRANCH)
         self.assertEqual(reqs["a-bm"]["origin"], sm.ORIGIN)
         self.assertEqual(reqs["a-bm"]["text"], NEW_BRANCH)
         self.assertEqual(self._deliver(proj, "a-bm", state)[0], "sent")
 
     def test_an_old_template_loop_that_ended_on_a_question_re_arms_too(self):
         proj = self._fixture("a-old", payload=OLD_FORK)
-        reqs, _l, state, _t = self._sweep(proj)
+        reqs, _l, state, _t = self._run(proj)
         self.assertEqual(reqs["a-old"]["origin"], sm.ORIGIN)
         self.assertEqual(reqs["a-old"]["text"], NEW_FORK)
         self.assertEqual(self._deliver(proj, "a-old", state)[0], "sent")
@@ -295,29 +323,55 @@ class TestStreamAnsweredRearm(unittest.TestCase):
         proj = self._fixture("a-dc", tail=[
             _asst(600, _Q, "q"), _user(700, "Odpoveď z Discordu: A"),
             _asst(800, _AFTER, "a")])
-        reqs, _l, state, _t = self._sweep(proj)
+        reqs, _l, state, _t = self._run(proj)
         self.assertEqual(reqs["a-dc"]["origin"], sm.ORIGIN)
+
+    # --- never: an unconfirmed dark footer (#524) ----------------------------- #
+    def test_never_on_a_single_dark_read(self):
+        proj = self._fixture("c-one")
+        reqs, logs, _s, _t = self._sweep(proj)
+        self.assertEqual(reqs, {})
+        self.assertTrue(any("not yet confirmed" in ln for ln in logs), logs)
+
+    def test_an_armed_read_restarts_the_confirmation_run(self):
+        # an idle-but-ALIVE loop whose glyph flickers: one ◎ read mid-run.
+        proj = self._fixture("c-flick")
+        caps = [GOAL_IDLE_CAP] * 8
+        caps[4] = GOAL_ARMED_CAP
+        reqs, _l, state, _t = self._run(proj, caps=caps)
+        self.assertEqual(reqs, {})
+        reqs, _l, _s, _t = self._run(proj, base=720, state=state)
+        self.assertEqual(reqs["c-flick"]["origin"], sm.ORIGIN)
 
     # --- never: unanswered ---------------------------------------------------- #
     def test_never_while_the_question_is_the_last_turn(self):
         proj = self._fixture("u-last", tail=[_asst(600, _Q, "q")])
-        reqs, _l, state, _t = self._sweep(proj)
+        reqs, _l, state, _t = self._run(proj)
         self.assertEqual(reqs, {})
-        self._assert_never(proj, "u-last", state, reqs)
+        self._assert_never(proj, "u-last", state, reqs, "is unanswered")
 
     def test_never_when_only_a_goal_command_followed(self):
         for sid, text in (("u-gcmd", _GOAL_CMD), ("u-gbare", "/goal")):
             proj = self._fixture(sid, tail=[_asst(600, _Q, "q"),
                                             _user(700, text)])
-            reqs, logs, state, _t = self._sweep(proj)
-            self._assert_never(proj, sid, state, reqs)
+            reqs, logs, state, _t = self._run(proj)
+            self._assert_never(proj, sid, state, reqs, "is unanswered")
 
     def test_never_when_only_a_task_notification_followed(self):
         proj = self._fixture("u-note", tail=[
             _asst(600, _Q, "q"), _user(700, _TASK_NOTE),
             _asst(710, "Waiter skončil, nič nové.\n✅ DONE: nič", "n")])
-        reqs, _l, state, _t = self._sweep(proj)
-        self._assert_never(proj, "u-note", state, reqs)
+        reqs, _l, state, _t = self._run(proj)
+        self._assert_never(proj, "u-note", state, reqs, "is unanswered")
+
+    def test_never_when_only_a_watchdog_nudge_followed(self):
+        for k, text in enumerate(_OWN_NUDGES[:2]):
+            sid = "u-nudge%d" % k
+            proj = self._fixture(sid, tail=[
+                _asst(600, _Q, "q"), _user(700, text),
+                _asst(710, "U opravené.\n✅ DONE: U", "n")])
+            reqs, _l, state, _t = self._run(proj)
+            self._assert_never(proj, sid, state, reqs, "is unanswered")
 
     def test_never_when_only_hook_or_system_records_followed(self):
         proj = self._fixture("u-hook", tail=[
@@ -327,57 +381,72 @@ class TestStreamAnsweredRearm(unittest.TestCase):
             {"type": "system", "subtype": "stop_hook_summary",
              "timestamp": _iso(702), "content": "hook ran"},
             _asst(710, "Opravené.\n✅ DONE: marker", "h")])
-        reqs, _l, state, _t = self._sweep(proj)
-        self._assert_never(proj, "u-hook", state, reqs)
+        reqs, _l, state, _t = self._run(proj)
+        self._assert_never(proj, "u-hook", state, reqs, "is unanswered")
 
     def test_never_when_the_answered_question_predates_the_arm(self):
         proj = self._fixture("u-pre", mark_ts=900)
-        reqs, _l, state, _t = self._sweep(proj)
-        self._assert_never(proj, "u-pre", state, reqs)
+        reqs, _l, state, _t = self._run(proj)
+        self._assert_never(proj, "u-pre", state, reqs, "predates the arm")
 
-    def test_delivery_rechecks_the_answer(self):
-        # recorded while answered; a NEW unanswered ❓ turn lands before the
-        # delivery (and the pane goes quiet again) -> never typed.
-        proj = self._fixture("u-toctou")
-        _r, _l, state, _t = self._sweep(proj)
-        tpath = next(proj.rglob("u-toctou.jsonl"))
+    def _new_question_before_delivery(self, proj, sid):
+        tpath = next(proj.rglob(sid + ".jsonl"))
         with open(tpath, "a", encoding="utf-8") as f:
             f.write(json.dumps(_asst(900, "Ešte jedna vec.\n"
                                      "❓ NEEDS YOU: potvrdíš?", "q2")) + "\n")
         self._age(tpath, 1200)
-        word, live = self._deliver(proj, "u-toctou", state)
+
+    def test_delivery_rechecks_the_answer(self):
+        # recorded while answered; a NEW unanswered ❓ turn lands before the
+        # delivery (and the pane goes quiet again) -> never typed.
+        for sid, payload in (("u-toctou", NEW_FORK), ("u-toctou-old", OLD_FORK)):
+            proj = self._fixture(sid, payload=payload)
+            _r, _l, state, _t = self._run(proj)
+            self._new_question_before_delivery(proj, sid)
+            word, live = self._deliver(proj, sid, state)
+            self.assertEqual(word, "drop:already-armed", sid)
+            self.assertEqual(live.sent, [], sid)
+        self.assertIn("is unanswered", Path(self.syncp).read_text())
+
+    def test_delivery_refuses_a_newer_foreign_transcript(self):
+        proj = self._fixture("u-sid")
+        _r, _l, state, _t = self._run(proj)
+        other = _write_marker_transcript(proj, CWD, "u-other", "x")
+        self._age(other, 900)                 # newer than ours, still idle
+        word, live = self._deliver(proj, "u-sid", state)
         self.assertEqual(word, "drop:already-armed")
         self.assertEqual(live.sent, [])
-        self.assertIn("unanswered", Path(self.syncp).read_text())
+        self.assertIn("not this session's", Path(self.syncp).read_text())
 
     # --- never: owner stop / live / busy / shell / not idle -------------------- #
     def test_never_on_an_owner_cleared_goal(self):
         proj = self._fixture("n-clr", mark="Goal cleared: ")
-        reqs, _l, _s, _t = self._sweep(proj)
+        reqs, _l, _s, _t = self._run(proj)
         self.assertEqual(reqs, {})
 
     def test_never_on_an_armed_pane(self):
         proj = self._fixture("n-armed")
-        reqs, _l, state, _t = self._sweep(proj, cap=GOAL_ARMED_CAP)
+        reqs, _l, state, _t = self._run(proj, cap=GOAL_ARMED_CAP)
         self.assertEqual(reqs, {})
-        word = self._assert_never(proj, "n-armed", state, reqs,
-                                  cap=GOAL_ARMED_CAP)
+        word, live = self._deliver(proj, "n-armed", state, cap=GOAL_ARMED_CAP,
+                                   req=self._forced())
         self.assertEqual(word, "drop:already-armed")
+        self.assertEqual(live.sent, [])
 
     def test_never_on_a_busy_pane(self):
         proj = self._fixture("n-busy")
-        reqs, _l, _s, _t = self._sweep(proj, cap=GOAL_BUSY_CAP)
+        reqs, _l, _s, _t = self._run(proj, cap=GOAL_BUSY_CAP)
         self.assertEqual(reqs, {})
-        _r, _l, state, _t = self._sweep(proj)             # recorded idle...
+        _r, _l, state, _t = self._run(proj)               # recorded idle...
         word, live = self._deliver(proj, "n-busy", state, cap=GOAL_BUSY_CAP)
         self.assertTrue(word.startswith("skip:"), word)    # ...never typed busy
         self.assertEqual(live.sent, [])
 
     def test_never_on_a_bare_shell(self):
         proj = self._fixture("n-shell")
-        reqs, _l, _s, _t = self._sweep(proj, cmd="bash")
+        reqs, _l, _s, _t = self._run(proj, cmd="bash")
         self.assertEqual(reqs, {})
-        _r, _l, state, _t = self._sweep(proj)
+        _r, _l, state, _t = self._run(proj)
         word, live = self._deliver(proj, "n-shell", state, cmd="bash")
         self.assertNotEqual(word, "sent")
         self.assertEqual(live.sent, [])
@@ -389,30 +458,32 @@ class TestStreamAnsweredRearm(unittest.TestCase):
 
     def test_never_on_a_foreign_hand_armed_goal(self):
         proj = self._fixture("n-foreign", payload="/goal oprav testy v module X")
-        reqs, _l, state, _t = self._sweep(proj)
-        self._assert_never(proj, "n-foreign", state, reqs)
+        reqs, _l, state, _t = self._run(proj)
+        self._assert_never(proj, "n-foreign", state, reqs,
+                           "not a stream template")
 
     # --- a full box is unchanged ---------------------------------------------- #
     def test_a_full_box_is_unchanged(self):
         full = gr.render("full")
         proj = self._fixture("f-full", payload=full)
-        reqs, _l, state, _t = self._sweep(proj, authority="full", tmpl=full)
+        reqs, _l, state, _t = self._run(proj, authority="full", tmpl=full)
         self.assertNotEqual((reqs.get("f-full") or {}).get("origin"), sm.ORIGIN)
+        self.assertNotIn("goal_stream_migrate", state)
+        self.assertNotIn("goal_stream_answered_memo", state)
         word, live = self._deliver(proj, "f-full", state,
                                    req=self._forced("full"))
         self.assertEqual(word, "drop:already-armed")
         self.assertEqual(live.sent, [])
 
-    # --- shared #1128 guards: 1/h, dry-run ------------------------------------ #
+    # --- shared #1128 guards: 1/h, dry-run, memo ------------------------------ #
     def test_one_attempt_per_session_per_hour(self):
-        proj = self._fixture("r-rate")
-        _r, _l, state, _t = self._sweep(proj)
+        proj = self._fixture("r-rate", idle_s=2000)
+        _r, _l, state, _t = self._run(proj)
         goal.clear_goal_request("r-rate", path=self.reqp)
-        reqs, logs, state, _t = self._sweep(proj, state=state,
-                                            now=self.now + 1800)
+        reqs, logs, state, _t = self._run(proj, base=1800, state=state)
         self.assertEqual(reqs, {}, "a second attempt inside the hour")
         self.assertTrue(any("1/h" in ln for ln in logs), logs)
-        reqs, _l, _s, _t = self._sweep(proj, state=state, now=self.now + 3700)
+        reqs, _l, _s, _t = self._run(proj, base=3700, state=state)
         self.assertEqual(reqs["r-rate"]["origin"], sm.ORIGIN)
 
     def test_the_proof_is_read_once_per_transcript_change(self):
@@ -442,10 +513,18 @@ class TestStreamAnsweredRearm(unittest.TestCase):
 
     def test_dry_run_mutates_no_state(self):
         proj = self._fixture("r-dry")
-        reqs, logs, state, _t = self._sweep(proj, dry_run=True)
+        state = {}
+        for off in self.RUN[:-1]:        # 7 real reads: not yet confirmed
+            reqs, _l, state, _t = self._sweep(proj, state=state,
+                                              now=self.now + off)
         self.assertEqual(reqs, {})
-        self.assertNotIn("goal_stream_migrate", state)
-        self.assertNotIn("goal_stream_answered_memo", state)
+        keys = ("goal_stream_migrate", "goal_stream_answered_memo",
+                "goal_dark_confirm")
+        before = json.dumps({k: state.get(k) for k in keys}, sort_keys=True)
+        reqs, logs, state, _t = self._sweep(proj, state=state, dry_run=True)
+        self.assertEqual(reqs, {})
+        self.assertEqual(json.dumps({k: state.get(k) for k in keys},
+                                    sort_keys=True), before)
         self.assertTrue(any("would record" in ln for ln in logs), logs)
 
 

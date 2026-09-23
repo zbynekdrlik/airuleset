@@ -1585,7 +1585,7 @@ def _structured_goal_mark_state(sid, state, with_mark=False):
     ONE owner-ruled exemption: a `stream-migrate` request on an idle (>= 10 min)
     stream loop whose payload is the OLD pre-#1128 template or whose last `❓ NEEDS
     YOU` was answered (#1133) -- `stream_migrate.delivery_ok`. `with_mark=True` returns the
-    mark dict (its `payload`) instead of the state, from the SAME read."""
+    mark dict (`payload` + `ts`) instead of the state, from the SAME read."""
     rec = None
     if isinstance(state, dict):
         gm = state.get("goal_mark")
@@ -1786,7 +1786,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     if origin in _GOAL_WATCHDOG_REARM_ORIGINS \
             and _structured_goal_mark_state(sid, state) == "set":
         _mig_ok, _mig_why = _stream_migrate.delivery_ok(  # #1128/#1133 only
-            origin, authority, lambda: _structured_goal_mark_state(sid, state, True),
+            origin, authority, lambda: _structured_goal_mark_state(
+                sid, state, with_mark=True),
             lambda: watchdog.find_active_transcript(projects_dir, cwd), now, sid)
         if not _mig_ok:
             _log_goal_sync("REFUSE structured-armed sid=%s cwd=%s origin=%s "
@@ -2952,6 +2953,19 @@ def _stream_seams(sid, cwd, now, rearm_fn, requests_path, state,
         lambda: load_goal_requests(requests_path))
 
 
+def _stream_answered(logs, sid, cwd, tpath, mark, now, loc, dry_run, state,
+                     rearm_fn, requests_path, episode_states):
+    """#1133 -- dark-watch's ANSWERED-(A) stream trigger (`stream_migrate.
+    dark_watch_answered`), fed this module's seams lazily and the SAME #524
+    `confirm_state` (`episode_states[2]`) the armed/None/mtime vetoes reset."""
+    return _stream_migrate.dark_watch_answered(
+        logs, sid, cwd, tpath, mark, now, loc, dry_run, state,
+        lambda: _stream_seams(sid, cwd, now, rearm_fn, requests_path, state,
+                              episode_states, dry_run),
+        _stream_migrate.confirm_run(episode_states[2], sid, now, dry_run,
+                                    _dark_confirm_advance))
+
+
 def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
                             rearm_fn, obligation_fn, requests_path,
                             fulfilled_state, fulfilled_proof, seen_state,
@@ -4094,11 +4108,9 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             continue
         if _frhandled:
             continue
-        if _stream_migrate.dark_watch_answered(  # #1133 answered (A) stream loop
-                logs, sid, cwd, tpath, mark, now, loc, dry_run, state, _stream_seams(
-                    sid, cwd, now, rearm_fn, requests_path, state,
-                    (seen_state, pinged_state, confirm_state), dry_run)):
-            continue
+        if _stream_answered(logs, sid, cwd, tpath, mark, now, loc, dry_run, state, rearm_fn,
+                            requests_path, (seen_state, pinged_state, confirm_state)):
+            continue   # #1133 -- an answered stop-(A) stream loop (held / re-armed)
 
         # #890 ANSWER-REARM lane: a stop-(A) ❓-blocked loop whose owner
         # ANSWERED. The awaiting-user veto (above) holds while the ❓ is

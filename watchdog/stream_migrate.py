@@ -39,12 +39,14 @@ the moment of delivery. An unanswered `❓` is exactly what stop (A) protects,
 so it is never re-armed; an owner `/goal clear` leaves the mark "cleared",
 which never reaches dark-watch's "set" branch.
 
-Pure helpers + one decision function with injected seams (template / pending /
-record / reset), so `watchdog.goal` only wires it in.
+Recognizers, the bounded transcript proof, and one decision function with
+injected `Seams` (store / template / pending / record / reset) plus the wiring
+helpers, so `watchdog.goal` only passes its request store and episode state in.
 """
 
 import os
 from datetime import datetime
+from typing import Callable, NamedTuple
 
 import watchdog
 from watchdog import goal_turn_liveness as _turn_liveness
@@ -96,24 +98,47 @@ def _epoch(ts):
         return None
 
 
+# The watchdog's OWN typed keystrokes that the shared #522
+# `watchdog._MACHINE_PROMPT_PREFIXES` does not list (that list is tuned for the
+# recent-human gates, where a nudge misread as human only DEFERS). Here a nudge
+# misread as the owner's answer would re-arm over an unanswered ❓, so every
+# known own prefix is rejected: stash's own-payload + own-submit sets, the #923
+# batch prefix, the #890 detector's extras, the report-owed card nudge (#1133
+# review). Resolved at call time from their owning modules (one source each).
+_OWN_EXTRA_PREFIXES = ("recheck:", "UNPARK-AUDIT:", "report-owed:",
+                       "gk-freshness backstop", "goal-guard:", "lane-check:")
+_OWN_EXACT = ("resume",)
+
+
+def _own_keystroke(text):
+    from watchdog import nudge_gate, stash
+    prefixes = (tuple(stash._JANITOR_OWN_PREFIXES)
+                + tuple(stash._OWN_NUDGE_SUBMIT_PREFIXES)
+                + (nudge_gate.BATCH_PREFIX,) + _OWN_EXTRA_PREFIXES)
+    return (text in _OWN_EXACT or text.startswith("/goal")
+            or any(text.startswith(p) for p in prefixes))
+
+
 def _is_answer(entry):
     """A REAL human prompt: `watchdog._is_genuine_human_prompt` (#522 -- no
     `/goal ` / `<command-` / `<task-notification>` / `<system-reminder` /
     Stop-hook feedback / isMeta / compact summary / tool_result; a Discord-
-    relayed answer IS human) plus a belt for a bare `/goal` (no trailing space,
-    so the shared prefix list does not catch it)."""
+    relayed answer IS human) AND not one of the watchdog's own keystrokes
+    (`_own_keystroke`, incl. a bare `/goal`)."""
     if not watchdog._is_genuine_human_prompt(entry):
         return False
-    return not (_tx._entry_text(entry) or "").strip().startswith("/goal")
+    return not _own_keystroke((_tx._entry_text(entry) or "").strip())
 
 
-def answered_question(tpath, mark_ts):
-    """`(ok, why)` -- the ANSWERED-(A) proof (#1133): the transcript's LAST
-    `❓ NEEDS YOU` turn (the marker line of a real assistant turn, the same
-    `_turn_marker_line` extraction the #522 re-poke detector uses -- a
-    `❓ ASKED` body line under a `⏳` terminal is not one) is at or after the
-    current arm (`mark_ts`; fail CLOSED when either time is unknown) AND a real
-    human prompt (`_is_answer`) follows it. Bounded tail read, never raises."""
+def question_state(tpath, mark_ts):
+    """`(state, why)` for the transcript's LAST `❓ NEEDS YOU` turn (the marker
+    line of a real assistant turn, the same `_turn_marker_line` extraction the
+    #522 re-poke detector uses -- a `❓ ASKED` body line under a `⏳` terminal
+    is not one): "answered" (at or after the current arm AND a real human prompt,
+    `_is_answer`, follows it), "unanswered" (at or after the arm, no such
+    prompt), or "none" (no `❓ NEEDS YOU` in the bounded tail, or it predates the
+    arm, or a time is unknown -- fail CLOSED for the answered proof). Never
+    raises."""
     entries = _tx._read_jsonl_byte_tail(tpath, ANSWER_TAIL_BYTES,
                                         ANSWER_TAIL_ENTRIES) if tpath else []
     q = None
@@ -127,14 +152,21 @@ def answered_question(tpath, mark_ts):
             q = i
             break
     if q is None:
-        return False, "no ❓ NEEDS YOU in the transcript tail"
+        return "none", "no ❓ NEEDS YOU in the transcript tail"
     q_ts = _epoch(entries[q].get("timestamp"))
     if not (isinstance(mark_ts, (int, float)) and q_ts is not None
             and q_ts >= mark_ts):
-        return False, "the last ❓ NEEDS YOU predates the arm (or no time)"
+        return "none", "the last ❓ NEEDS YOU predates the arm (or no time)"
     if any(_is_answer(e) for e in entries[q + 1:]):
-        return True, ""
-    return False, "the last ❓ NEEDS YOU is unanswered"
+        return "answered", ""
+    return "unanswered", "the last ❓ NEEDS YOU is unanswered"
+
+
+def answered_question(tpath, mark_ts):
+    """`(ok, why)` -- the ANSWERED-(A) proof (#1133): `question_state` is
+    "answered"."""
+    st, why = question_state(tpath, mark_ts)
+    return st == "answered", why
 
 
 def eligible(authority, payload, tpath, now):
@@ -158,7 +190,8 @@ def delivery_ok(origin, authority, mark_fn, tinfo_fn, now, sid=None):
     refusal? Only THIS origin (checked FIRST, so every other origin pays no
     read), and only while the core AND a trigger proof still hold at the moment
     of delivery: the old (B) payload (migration, #1128) or, for any other
-    stream payload, the answered `❓` (#1133) -- read from `sid`'s OWN
+    stream payload, the answered `❓` (#1133) -- and, for BOTH, never while the
+    last `❓ NEEDS YOU` after the arm is unanswered. Read from `sid`'s OWN
     transcript (a different newest transcript in the cwd refuses). `mark_fn()`
     gives the structured mark (payload + ts); `tinfo_fn()` gives
     `find_active_transcript(...)` -- the NEWEST transcript in the cwd, never
@@ -173,12 +206,15 @@ def delivery_ok(origin, authority, mark_fn, tinfo_fn, now, sid=None):
     ok, why = eligible(authority, payload, tpath, now)
     if not ok:
         return False, why
-    if is_old_stream_payload(payload):
-        return True, "old stream template, transcript idle"
     if sid is not None and getattr(tpath, "stem", None) != sid:
         return False, "newest transcript is not this session's"
-    ok, why = answered_question(tpath, mark.get("ts"))
-    return (True, "answered ❓, transcript idle") if ok else (False, why)
+    st, why = question_state(tpath, mark.get("ts"))
+    if st == "unanswered":          # never type over an open owner question
+        return False, why
+    if is_old_stream_payload(payload):
+        return True, "old stream template, transcript idle"
+    return (True, "answered ❓, transcript idle") if st == "answered" \
+        else (False, why)
 
 
 def _reap(store, now):
@@ -189,27 +225,39 @@ def _reap(store, now):
         store.pop(sid, None)
 
 
+class Seams(NamedTuple):
+    """The injected seams of `decide` (built by the caller's `seams()` wiring,
+    so `watchdog.goal` keeps its request store and dead-loop episode state)."""
+    store: dict
+    template_fn: Callable
+    pending_fn: Callable
+    record_fn: Callable
+    reset_fn: Callable
+
+
 def decide(sid, cwd, tpath, payload, now, loc, dry_run, store, template_fn,
-           pending_fn, record_fn, reset_fn, proof_fn=None,
+           pending_fn, record_fn, reset_fn, proof_fn=None, confirm_fn=None,
            label="stream-migrate"):
     """The dark-watch decision for a DARK, mark-"set" session whose armed goal
     is a stream template. Returns `(logline_or_None, handled)`. The MIGRATION
     trigger (#1128: an old template, 🏁 proven by the caller) passes no
     `proof_fn`; the ANSWERED-(A) trigger (#1133, `decide_answered`) passes its
-    own `proof_fn() -> (ok, why)` and `label`.
+    own `proof_fn() -> (ok, why)`, a `confirm_fn() -> bool` (the #524 dark-
+    footer confirmation run: an answered `❓` alone does not prove the loop
+    ENDED, since (A) does not stop a loop with a lane live) and `label`.
 
-    Cheap gates first (idle, then the trigger proof if any, the 1 h gap, a
-    pending request), then the template resolution. No newest-turn gate:
-    dark-watch reaches only a DARK footer, so a 🏁 the evaluator rejected (loop
-    still running, ◎ lit) never gets here, while a human turn after a real
-    achievement must not block the migration (live david1, 2026-09-23).
-    `handled` is False -- the caller's normal fulfilled / answer / dead-loop
-    path applies -- for a non-stream box, an unreadable transcript, an
-    unresolvable template, and (answered trigger only) a not-yet-idle
-    transcript (silent) or a failed proof: neither is this trigger's own state,
-    so the #459 visibility must not be hidden. Every other outcome is trigger-
-    bound (True). A skip is journalled ONCE per (session, reason). Nothing is
-    mutated on dry_run."""
+    Cheap gates first (idle, then the trigger proof + confirmation if any, the
+    1 h gap, a pending request), then the template resolution and the shared
+    `eligible()` core. No newest-turn gate: dark-watch reaches only a DARK
+    footer, so a 🏁 the evaluator rejected (loop still running, ◎ lit) never
+    gets here, while a human turn after a real achievement must not block the
+    migration (live david1, 2026-09-23). `handled` is False -- the caller's
+    normal fulfilled / answer / dead-loop path applies -- for a non-stream box,
+    an unreadable transcript, an unresolvable template, and (answered trigger
+    only) a not-yet-idle transcript (silent) or a failed proof: neither is this
+    trigger's own state, so the #459 visibility must not be hidden. Every other
+    outcome is trigger-bound (True). A skip is journalled ONCE per (session,
+    reason). Nothing is mutated on dry_run (the caller's `confirm_fn` included)."""
     if not dry_run:
         _reap(store, now)
     rec = store.get(sid) if isinstance(store.get(sid), dict) else {}
@@ -227,6 +275,8 @@ def decide(sid, cwd, tpath, payload, now, loc, dry_run, store, template_fn,
         pok, pwhy = proof_fn() if proof_fn is not None else (True, "")
         if not pok:
             ok, why, handled = False, pwhy, False
+        elif confirm_fn is not None and not confirm_fn():
+            ok, why = False, "dark footer not yet confirmed (#524 run)"
         elif isinstance(last, (int, float)) and 0 <= now - last < MIN_GAP_S:
             ok, why = False, "1/h attempt gap"
         elif pending_fn(sid):
@@ -236,7 +286,10 @@ def decide(sid, cwd, tpath, payload, now, loc, dry_run, store, template_fn,
         text, authority = template_fn(cwd)
         if authority not in STREAM_AUTHORITIES:
             return None, False
-        if not text:
+        cok, cwhy = eligible(authority, payload, tpath, now)
+        if not cok:
+            ok, why, handled = False, cwhy, False
+        elif not text:
             ok, why, handled = False, "no current template resolved", False
         elif is_old_stream_payload(text):
             ok, why = False, "the resolved template is still the old one"
@@ -260,19 +313,17 @@ def decide(sid, cwd, tpath, payload, now, loc, dry_run, store, template_fn,
                IDLE_MIN_S, "#1128" if proof_fn is None else "#1133")), True
 
 
-def decide_answered(sid, cwd, tpath, mark, now, loc, dry_run, store, memo,
-                    template_fn, pending_fn, record_fn, reset_fn):
+def decide_answered(sid, cwd, tpath, mark, now, loc, dry_run, seams_, memo,
+                    confirm_fn):
     """#1133 -- the ANSWERED-(A) trigger over `decide`: a DARK, mark-"set"
     stream loop whose last `❓ NEEDS YOU` (after the arm) was answered by a real
-    human prompt. `(None, False)` at once for a non-stream payload. The proof
-    is memoized in `memo[sid]` per (arm ts, transcript mtime) -- a dark idle
-    pane is swept every 60 s but its transcript does not change, so the bounded
-    8 MB read runs once per change (never written on dry_run; reaped 24 h after
-    its last sighting, like `store`)."""
+    human prompt, re-armed once the dark footer is #524-confirmed. The proof is
+    memoized in `memo[sid]` per (arm ts, transcript mtime) -- a dark idle pane
+    is swept every 60 s but its transcript does not change, so the bounded
+    8 MB read runs once per change (never written on dry_run; `seen` refreshed
+    on every hit, so an entry is reaped 24 h after its last sighting)."""
     payload = mark.get("payload") if isinstance(mark, dict) else None
-    if not is_stream_payload(payload):
-        return None, False
-    mark_ts = mark.get("ts")
+    mark_ts = mark.get("ts") if isinstance(mark, dict) else None
 
     def _proof():
         try:
@@ -281,17 +332,18 @@ def decide_answered(sid, cwd, tpath, mark, now, loc, dry_run, store, memo,
             key = [mark_ts, None]
         hit = memo.get(sid)
         if isinstance(hit, dict) and hit.get("key") == key:
-            return bool(hit.get("ok")), str(hit.get("why") or "")
-        ok, why = answered_question(tpath, mark_ts)
+            ok, why = bool(hit.get("ok")), str(hit.get("why") or "")
+        else:
+            ok, why = answered_question(tpath, mark_ts)
         if not dry_run:
             memo[sid] = {"key": key, "ok": ok, "why": why, "seen": now}
         return ok, why
 
     if not dry_run:
         _reap(memo, now)
-    return decide(sid, cwd, tpath, payload, now, loc, dry_run, store,
-                  template_fn, pending_fn, record_fn, reset_fn,
-                  proof_fn=_proof, label="stream-answered")
+    return decide(sid, cwd, tpath, payload, now, loc, dry_run, *seams_,
+                  proof_fn=_proof, confirm_fn=lambda: confirm_fn(mark_ts),
+                  label="stream-answered")
 
 
 def state_store(state, key, dry_run):
@@ -302,32 +354,49 @@ def state_store(state, key, dry_run):
 
 def seams(sid, cwd, now, dry_run, state, episode_states, template_fn,
           record_request, load_requests):
-    """The injected seams of `decide`, shared by both dark-watch triggers:
-    `(store, template_fn, pending_fn, record_fn, reset_fn)`. `record_request`
-    / `load_requests` are the caller's request-store functions (bound to its
-    requests path); `record_fn` writes a request of THIS origin; `reset_fn`
-    ends the session's dead-loop episode (`episode_states`)."""
+    """`Seams` for both dark-watch triggers. `record_request` / `load_requests`
+    are the caller's request-store functions (bound to its requests path);
+    `record_fn` writes a request of THIS origin; `reset_fn` ends the session's
+    dead-loop episode (`episode_states`)."""
     def _record(text, auth):
         record_request(sid, cwd, text, auth, now=now, origin=ORIGIN)
 
     def _reset():
         for st in episode_states:
             st.pop(sid, None)
-    return (state_store(state, "goal_stream_migrate", dry_run), template_fn,
-            lambda s: isinstance(load_requests().get(s), dict), _record, _reset)
+    return Seams(state_store(state, "goal_stream_migrate", dry_run), template_fn,
+                 lambda s: isinstance(load_requests().get(s), dict), _record,
+                 _reset)
+
+
+def confirm_run(confirm_state, sid, now, dry_run, advance_fn):
+    """`confirm_fn` for the answered trigger: advance the caller's #524
+    death-confirmation run (`advance_fn` = `goal._dark_confirm_advance`, the
+    SAME `confirm_state` every armed / undeterminable / mtime-advance read in
+    dark-watch resets) and return whether it is confirmed. Dry-run: evaluate,
+    never persist."""
+    def _fn(mark_ts):
+        confirmed, win = advance_fn(confirm_state.get(sid), mark_ts, now)
+        if not dry_run:
+            confirm_state[sid] = win
+        return confirmed
+    return _fn
 
 
 def dark_watch_answered(logs, sid, cwd, tpath, mark, now, loc, dry_run, state,
-                        seams_):
+                        seams_fn, confirm_fn):
     """#1133 -- `goal_dark_watch`'s call of the ANSWERED-(A) trigger for a DARK,
     mark-"set" pane (after the fulfilled lane, before the #890 answer rider).
-    Appends its one log line (if any) to `logs`; True = handled (the caller
-    `continue`s), False = the caller's answer / dead-loop machinery applies."""
-    st, template_fn, pending_fn, record_fn, reset_fn = seams_
+    A non-stream payload returns False at once, touching no state (a full box is
+    unchanged); only then are `seams_fn()` and the proof memo built. Appends its
+    one log line (if any) to `logs`; True = handled (the caller `continue`s),
+    False = the caller's answer / dead-loop machinery applies."""
+    if not is_stream_payload(mark.get("payload") if isinstance(mark, dict)
+                             else None):
+        return False
     line, handled = decide_answered(
-        sid, cwd, tpath, mark, now, loc, dry_run, st,
-        state_store(state, "goal_stream_answered_memo", dry_run),
-        template_fn, pending_fn, record_fn, reset_fn)
+        sid, cwd, tpath, mark, now, loc, dry_run, seams_fn(),
+        state_store(state, "goal_stream_answered_memo", dry_run), confirm_fn)
     if line:
         logs.append(line)
     return handled
