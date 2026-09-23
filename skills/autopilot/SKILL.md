@@ -440,12 +440,14 @@ was cut back; `tests/test_goal_backlog_proof.py` now locks the cap):
   old SLICE-EMPTY stop (release containment + an hourly foreground review-watch that was only
   preferred) still let a stream whose own `I` was 0 ACHIEVE while the gatekeeper held its
   hand-off; david1-4 then sat idle while gk bounces and client replies arrived. Any countable
-  done-state eventually holds while third-party work is still coming. So an empty stream slice
-  (and no unhandled bounce) keeps exactly ONE background `airuleset.py stream-wait` live and
-  ends `⏳ WORKING`. The waiter polls the SAME search `slice-quals` runs, fingerprinting
-  number/updatedAt/labels, and exits on the first change (a comment, label change, reopen or new
-  ticket) or at `--max` (default 1 h) as a heartbeat. Claude Code defers `/goal` evaluation while
-  a background task runs, so the idle costs no turns. A wakeup/schedule mechanism stays banned
+  done-state eventually holds while third-party work is still coming. So a stream with nothing
+  dispatchable, no lane live and no unhandled bounce keeps exactly ONE background
+  `airuleset.py stream-wait` live and ends `⏳ WORKING`. The waiter polls the SAME search
+  `slice-quals` runs, fingerprinting number/updatedAt/labels (persisted per repo, so a change
+  that landed while no waiter ran still wakes it), and exits on the first change (a comment,
+  label change, reopen or new ticket) or at `--max` (default 1 h) as a heartbeat. The design
+  premise (the #733 gk incident) is that Claude Code defers `/goal` evaluation while a
+  background task runs, so an idle stream costs one turn per wake. A wakeup/schedule mechanism stays banned
   inside an armed `/goal`: it fires the next turn at once and spins tokens (the gk burn,
   2026-07-20). Only the owner ends a stream loop (`/goal clear`).
 
