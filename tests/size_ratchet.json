@@ -51,7 +51,7 @@
     "cli_tmux_provisioning.py": 2481,
     "cli_vault.py": 1094,
     "cli_wdrain.py": 274,
-    "cli_webterm.py": 1876,
+    "cli_webterm.py": 1882,
     "cli_webterm_access.py": 389,
     "cli_webterm_dash_template.py": 1045,
     "cli_webterm_david.py": 196,
