@@ -428,12 +428,17 @@ class TestSplitImportBothOrders(unittest.TestCase):
         self._fresh_import("cli_drop_lanes")
 
     def test_leaf_does_not_import_gateway(self):
-        # the leaf must never import cli_drop_gateway (that would be the cycle).
-        # AST-scan the actual import STATEMENTS (a raw-substring guard would
-        # false-fail on a docstring that merely mentions the name — review MINOR-1).
+        # the leaf must never import cli_drop_gateway AT MODULE LEVEL (that is the
+        # load-time cycle: cli_drop_gateway imports THIS at its top). A
+        # FUNCTION-LOCAL lazy import is cycle-safe (resolved at call time, after
+        # both modules are fully loaded — proven by test_gateway_first /
+        # test_leaf_first) and is the sanctioned pattern `delivery_channel` uses
+        # (#1115 slice C), so scan only the MODULE-LEVEL statements
+        # (`ast.parse(src).body`), never `ast.walk` which also catches nested
+        # function-local imports.
         import ast
         src = (Path(__file__).resolve().parent.parent / "cli_drop_lanes.py").read_text()
-        for node in ast.walk(ast.parse(src)):
+        for node in ast.parse(src).body:
             if isinstance(node, ast.Import):
                 self.assertNotIn("cli_drop_gateway", [a.name for a in node.names])
             elif isinstance(node, ast.ImportFrom):
