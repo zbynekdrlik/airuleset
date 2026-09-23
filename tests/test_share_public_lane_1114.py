@@ -173,6 +173,18 @@ class TestDropLaneFiledropPort(unittest.TestCase):
 
 
 class TestControllerSlashSRules(unittest.TestCase):
+    def setUp(self):
+        # #1115 slice A: the ingress prefers the push-measured
+        # ~/.claude/drop-lanes.json cache over the in-code filedrop_port. Point
+        # it at an absent file so these tests read the in-code values on every
+        # box (the controller has a real, populated cache).
+        import cli_drop_lanes
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        orig = cli_drop_lanes.DROP_LANES_CACHE
+        cli_drop_lanes.DROP_LANES_CACHE = Path(tmp.name) / "absent.json"
+        self.addCleanup(setattr, cli_drop_lanes, "DROP_LANES_CACHE", orig)
+
     def test_each_controller_lane_has_s_rule_before_drop_rule(self):
         rules = dg.drop_ingress_rules_for_controller()
         checked = 0
