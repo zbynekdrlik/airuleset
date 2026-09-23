@@ -472,15 +472,18 @@ def cmd_share(args):
     # account. Resolve the lane; when it + a live marker exist AND the public /s/
     # URL answers (200 or 302 Access-redirect), print it FIRST.
     import cli_drop_gateway as _dg
+    import cli_drop_lanes as _dl
     try:
         lane_full = _dg.resolve_public_lane_full()
     except Exception:
         lane_full = None            # never lose ALL output — fall to private URLs
     if lane_full is None:
+        # #1115 Slice C: name WHY we fell back (no-lane / pending / marker-absent)
+        # through the ONE resolver, and print the ONE shared labelled line.
+        _, _reason = _dl.delivery_channel()
         for u in private:
             print(u)
-        print("share: no public lane on this box — private URLs only, see #1115",
-              file=sys.stderr)
+        print(_dl.channel_fallback_line(_reason, prog="share"), file=sys.stderr)
         return
 
     public_host, _drop_port, bind_ip = lane_full
@@ -507,10 +510,10 @@ def cmd_share(args):
     else:
         for u in private:
             print(u)
-        reason = ("origin down" if not origin_live
+        detail = ("origin down" if not origin_live
                   else (status if status is not None else "timeout"))
-        print(f"share: public lane unreachable ({reason}) — private URLs only, "
-              f"see #1115", file=sys.stderr)
+        print(_dl.channel_fallback_line(_dl.CHANNEL_UNREACHABLE, prog="share",
+                                        detail=detail), file=sys.stderr)
 
 
 def _filedrop_status():

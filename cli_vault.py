@@ -506,6 +506,7 @@ def _secret_show(args):
 
     # Public-TLS drop lane (#664): same tailscale -> public fallback as request.
     public_host, port, bind_ip = _secret_public_lane(args)
+    _fallback_reason = None            # #1115 Slice C: WHY the private fallback
     if public_host:
         if getattr(args, "port", None) or getattr(args, "allow_plain", False):
             print("secret show: public drop lane — ignoring --port/--allow-plain "
@@ -518,6 +519,8 @@ def _secret_show(args):
                   file=sys.stderr)
             sys.exit(1)
     else:
+        import cli_drop_lanes as _dl
+        _, _fallback_reason = _dl.delivery_channel()
         if not ips:
             print("secret show: only unencrypted interfaces are available (%s). A "
                   "credential would cross the LAN in cleartext — re-run with "
@@ -572,6 +575,10 @@ def _secret_show(args):
         if _live(_secret_health_url(ip, port)):
             print(_secret_public_url_line(public_host, token) if public_host
                   else _secret_url_line(ip, port, token))
+    if not public_host:
+        import cli_drop_lanes as _dl
+        print(_dl.channel_fallback_line(_fallback_reason or _dl.CHANNEL_NO_LANE,
+                                        prog="secret show"), file=sys.stderr)
     if dropped:
         print("(skipped %s — cleartext; --allow-plain offers them too)"
               % ", ".join(dropped))
@@ -758,6 +765,7 @@ def _secret_request(args):
     # on the fixed drop port that a managed cloudflared tunnel fronts and
     # advertise ONE public HTTPS URL — never an ssh -L instruction.
     public_host, port, bind_ip = _secret_public_lane(args)
+    _fallback_reason = None            # #1115 Slice C: WHY the private fallback
     if public_host:
         if getattr(args, "port", None) or getattr(args, "allow_plain", False):
             print("secret: public drop lane — ignoring --port/--allow-plain "
@@ -770,6 +778,8 @@ def _secret_request(args):
                   file=sys.stderr)
             sys.exit(1)
     else:
+        import cli_drop_lanes as _dl
+        _, _fallback_reason = _dl.delivery_channel()
         if not ips:
             print("secret: only unencrypted interfaces are available (%s). A "
                   "credential would cross the LAN in cleartext — re-run with "
@@ -832,6 +842,10 @@ def _secret_request(args):
         if _live(_secret_health_url(ip, port)):
             print(_secret_public_url_line(public_host, token) if public_host
                   else _secret_url_line(ip, port, token))
+    if not public_host:
+        import cli_drop_lanes as _dl
+        print(_dl.channel_fallback_line(_fallback_reason or _dl.CHANNEL_NO_LANE,
+                                        prog="secret"), file=sys.stderr)
     if dropped:
         print("(skipped %s — cleartext; --allow-plain offers them too)"
               % ", ".join(dropped))

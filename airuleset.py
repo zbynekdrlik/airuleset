@@ -9577,7 +9577,9 @@ def cmd_upload(args):
     # origin IP (127.0.0.1 for local topology, tailscale IP for controller
     # topology) at the per-account drop port and advertise ONE public HTTPS URL.
     import cli_drop_gateway as _dg
+    import cli_drop_lanes as _dl
     public_lane = _dg.resolve_public_lane_full()
+    _fallback_reason = None            # #1115 Slice C: WHY the private fallback
     if public_lane:
         public_host, port, bind_ip = public_lane
         if getattr(args, "port", None):
@@ -9591,6 +9593,7 @@ def cmd_upload(args):
             sys.exit(1)
     else:
         public_host = None
+        _, _fallback_reason = _dl.delivery_channel()
         port = int(getattr(args, "port", None) or 0) or None
         if port is None:
             # Probe the addresses the server is ABOUT TO BIND, not loopback (#115).
@@ -9642,6 +9645,11 @@ def cmd_upload(args):
         reachable = [u for u in urls if _live(u)] or [urls[0]]
         for u in reachable:   # one URL per interface — open whichever your network reaches
             print(u)
+        # #1115 Slice C: the private URLs (stdout) are always accompanied by ONE
+        # labelled line (stderr, keeping stdout URL-clean) naming why there is no
+        # public lane — never a silent private-only output.
+        print(_dl.channel_fallback_line(_fallback_reason or _dl.CHANNEL_NO_LANE,
+                                        prog="upload"), file=sys.stderr)
     print(f"dest={dest}  ttl={ttl}s  log={log}")
     if public_host:
         print("Otvor URL v prehliadači. Po nahratí over: grep SAVED " + str(log))

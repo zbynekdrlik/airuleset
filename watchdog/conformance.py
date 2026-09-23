@@ -351,7 +351,8 @@ def run_conformance_check(now, state, dry_run=False,
                           interval=None, reping=None, persist=None,
                           symlink_scan=None, doctrine_scan=None,
                           root_guard_provisioned_fn=None,
-                          bashrc_drift_fn=None):
+                          bashrc_drift_fn=None,
+                          public_url_channel_fn=None):
     """Job 34: the daily per-box conformance sweep. Cadence-gated on its OWN state
     key ``conformance_last_check`` (``_sweep_due``); the cadence marker is stamped +
     persisted BEFORE any network op (#172 kill-safe). Best-effort — every dimension
@@ -531,6 +532,26 @@ def run_conformance_check(now, state, dry_run=False,
         if not dry_run:
             state["bashrc_drift"] = bdrift
 
+    # #1115 Slice C: a REPORT-ONLY per-account fact (NOT a drift dimension —
+    # mirrors the #1047 root-guard + #1015 bashrc facts above): can THIS account
+    # deliver a user-facing URL over the public Cloudflare channel? Resolves the
+    # ONE `delivery_channel()` and, when live, probes the account's public `/s/`
+    # probe path with a named User-Agent. `ok` / `fallback:<reason>` /
+    # `broken:<code>`. Injectable for tests; the import is INSIDE the try so a
+    # broken leaf degrades to `unknown`, never raises here.
+    try:
+        if public_url_channel_fn is None:
+            import cli_drop_lanes
+            public_url_channel_fn = cli_drop_lanes.public_url_channel_fact
+        puc = public_url_channel_fn()
+    except Exception as e:
+        puc = None
+        logs.append("conformance %s [public-url-channel] unknown -- %r" % (host, e))
+    if puc is not None:
+        logs.append("conformance %s [public-url-channel] %s" % (host, puc))
+        if not dry_run:
+            state["public_url_channel"] = puc
+
     for (dim, ok, detail), facts in decisions:
         logs.append("conformance %s [%s] %s -- %s"
                     % (host, dim, {True: "OK", False: "DRIFT", None: "unknown"}[ok],
@@ -593,6 +614,13 @@ def conformance_status_row(state):
     bd = state.get("bashrc_drift")
     if isinstance(bd, int) and bd > 0:
         suffix += " · bashrc-drift: %d" % bd
+    # #1115 Slice C: the report-only public-URL-channel fact rides the row as a
+    # ` · ` suffix, but ONLY when it is NOT `ok` (a healthy public channel is the
+    # norm and would be pure noise on every clean box's row — same rationale as
+    # the bashrc count above).
+    puc = state.get("public_url_channel")
+    if isinstance(puc, str) and puc != "ok":
+        suffix += " · public-url-channel: %s" % puc
     episodes = state.get("conformance") or {}
     if episodes:
         parts = []
