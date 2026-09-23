@@ -242,7 +242,10 @@ def spawn_refresher(cwd, cmd_name, argv0=None, run_fn=None, popen_fn=None,
     never finishes and the cache is never written (``setsid`` does NOT escape a
     cgroup). PRIMARY path: launch the child as a transient ``systemd-run --user``
     unit, which runs in its OWN cgroup and survives the sweep's exit; the user bus
-    env comes from the shared ``_xdg_runtime_env`` (#826). FALLBACK (systemd-run
+    env for the systemd-run CLIENT comes from the shared ``_xdg_runtime_env``
+    (#826), and the derivation's required env (PATH incl. the gh shim, HOME,
+    GH_*/GITHUB_* auth) is forwarded INTO the unit via ``--setenv`` (a unit does
+    NOT inherit the caller's env — review F1). FALLBACK (systemd-run
     absent or failing — a non-systemd test/CI box, where there is no killing
     oneshot cgroup anyway): the plain detached Popen, logged
     ``refresh-spawn: popen-fallback (<reason>)`` so a box where it would be killed
@@ -265,23 +268,57 @@ def spawn_refresher(cwd, cmd_name, argv0=None, run_fn=None, popen_fn=None,
     _spawn_via_popen(repo_root, child_argv, popen_fn, log)
 
 
+# #1067 slice 1c review F1: a `systemd-run --user` transient unit inherits the
+# USER MANAGER's environment, NOT the caller's — so PATH / gh / auth are NOT
+# forwarded unless we pass them explicitly. The child's derivation shells `gh` by
+# BARE NAME (needs PATH incl. the ~/.local/bin app-token shim on stream boxes) +
+# gh auth, so forward the watchdog process's own env for these into the unit via
+# `--setenv=NAME=VALUE` (argv elements — no shell, no injection). Curated to the
+# keys the derivation needs; the old Popen path inherited the full env for free.
+_UNIT_ENV_KEYS = ("PATH", "HOME", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
+                  "LANG", "LC_ALL")
+_UNIT_ENV_PREFIXES = ("GH_", "GITHUB_")
+
+
+def _unit_setenv_args(source):
+    """`--setenv=NAME=VALUE` args forwarding the derivation's required env INTO
+    the transient unit (see the _UNIT_ENV_KEYS comment). `source` is the
+    watchdog process's env (os.environ / `_xdg_runtime_env()`)."""
+    out = []
+    for k in sorted(source):
+        if k in _UNIT_ENV_KEYS or k.startswith(_UNIT_ENV_PREFIXES):
+            out.append("--setenv=%s=%s" % (k, source[k]))
+    return out
+
+
 def _spawn_via_systemd_run(cwd, repo_root, child_argv, run_fn, log):
     """Launch the refresher as a transient ``--user`` unit in its own cgroup.
     Returns True when the unit is running (or already running — the unit name is
-    the atomic single-flight backstop), False when the caller must fall back."""
+    the atomic single-flight backstop), False when the caller must fall back.
+    The unit captures the child's stdout/stderr to its own journal
+    (``journalctl --user -u airuleset-opswait-*``), so a child failure is visible
+    there in addition to the ``error`` cache entry it writes."""
     run = run_fn or subprocess.run
     try:
         from cli_filedrop_watchdog import _xdg_runtime_env
         env = _xdg_runtime_env()
     except Exception:
-        env = None   # no user-bus helper -> systemd-run likely unusable -> fall back
+        # xdg helper unavailable: the systemd-run CLIENT still inherits
+        # os.environ (a live user-bus in a --user service), and _unit_setenv_args
+        # forwards from os.environ below — so this is NOT a forced fall-back.
+        env = None
+    src = env if env is not None else os.environ
     argv = ["systemd-run", "--user", "--collect", "--quiet",
             "--unit", _refresh_unit_name(cwd),
             "--working-directory", repo_root,
             "--property", "RuntimeMaxSec=%d" % (CHILD_TIMEOUT_S + 30),
+            *_unit_setenv_args(src),
             "--", *child_argv]
     try:
-        r = run(argv, capture_output=True, text=True, timeout=30, env=env)
+        # a short client-call ceiling: systemd-run returns in ms once the unit is
+        # started; 10 s bounds a bus hang without re-adding real latency to the
+        # sweep (the derivation itself runs detached, off the sweep path).
+        r = run(argv, capture_output=True, text=True, timeout=10, env=env)
     except FileNotFoundError:
         log("popen-fallback (systemd-run absent)")
         return False

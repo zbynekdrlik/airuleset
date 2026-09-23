@@ -279,10 +279,34 @@ class SpawnRefresher(unittest.TestCase):
         self.assertIn("watchdog.ops_wait_refresh", child)
         self.assertEqual(child[child.index("--target") + 1], "/repo/a")
         self.assertEqual(child[child.index("--cmd") + 1], "core-quals")
-        # the user-bus env is carried (issue 826)
+        self.assertEqual(child[child.index("--cache") + 1], "/c/x.json")
+        self.assertEqual(child[child.index("--pid") + 1], "/c/x.pid")
+        self.assertEqual(child[child.index("--argv0") + 1], "/root/airuleset.py")
+        # review F1: the derivation's env (PATH incl. the gh shim, HOME) is
+        # forwarded INTO the unit via --setenv (a --user transient unit does NOT
+        # inherit the caller's env), not merely handed to the systemd-run client.
+        self.assertTrue(any(a.startswith("--setenv=PATH=") for a in argv), argv)
+        self.assertTrue(any(a.startswith("--setenv=HOME=") for a in argv), argv)
+        # the client env carries the user bus for systemd-run itself (issue 826)
         self.assertIsNotNone(calls["env"])
         self.assertIn("XDG_RUNTIME_DIR", calls["env"])
         popen.assert_not_called()   # no cgroup-bound fallback on the primary path
+
+    def test_unit_setenv_forwards_derivation_env_only(self):
+        src = {"PATH": "/home/s/.local/bin:/usr/bin", "HOME": "/home/s",
+               "GH_TOKEN": "tok", "GITHUB_TOKEN": "g", "XDG_RUNTIME_DIR": "/run/user/9",
+               "LANG": "en_US.UTF-8", "IRRELEVANT": "x", "PYTHONPATH": "/y"}
+        args = owref._unit_setenv_args(src)
+        got = dict(a[len("--setenv="):].split("=", 1) for a in args)
+        # the derivation's env is forwarded (PATH incl. the ~/.local/bin gh shim)
+        self.assertEqual(got["PATH"], "/home/s/.local/bin:/usr/bin")
+        self.assertEqual(got["HOME"], "/home/s")
+        self.assertEqual(got["GH_TOKEN"], "tok")
+        self.assertEqual(got["GITHUB_TOKEN"], "g")
+        self.assertEqual(got["LANG"], "en_US.UTF-8")
+        # unrelated env is NOT forwarded
+        self.assertNotIn("IRRELEVANT", got)
+        self.assertNotIn("PYTHONPATH", got)
 
     def test_unit_already_exists_is_benign_single_flight(self):
         def fake_run(argv, **kw):
