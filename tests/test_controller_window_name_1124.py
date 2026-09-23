@@ -271,5 +271,81 @@ class TestNoUnindexedSessionCreatedWriter(unittest.TestCase):
                       text)
 
 
+class TestReviewFindings1124(unittest.TestCase):
+    """Findings from the two adversarial reviews of the #1124 diff."""
+
+    def test_window_name_and_ssh_attach_eligibility_are_equal_today(self):
+        # Two names on purpose; a divergence must be a deliberate edit here.
+        users = ("airuleset", "newlevel", "montalu2", "gatekeeper",
+                 "dominika", "claudy", "david1")
+        for cls in ("controller", "workstation", "shared-stream", None):
+            with _box(cls):
+                for u in users:
+                    self.assertEqual(
+                        bash_appliers.is_window_name_eligible(u),
+                        bash_appliers._is_ssh_attach_eligible(u), (cls, u))
+
+    def test_conf_hook_line_escapes_dollar_so_parse_time_never_expands(self):
+        # tmux expands `$VAR` inside a DOUBLE-quoted conf string at PARSE
+        # time; the gk run-shell body carries `$S`/`$HOME` that must survive
+        # to fire time exactly like the live-applied argv.
+        import cli_fleet
+        windows = cli_fleet.box_windows("gatekeeper")
+        self.assertTrue(windows, "gk declares managed windows")
+        with _no_marker():
+            line = tmuxprov._render_session_created_hook_line("gk", windows)
+        self.assertIn("$S", line)
+        self.assertIsNone(re.search(r"(?<!\\)\$", line), line)
+
+    def test_audit_live_apply_drops_its_own_stale_unindexed_copy(self):
+        logger = "/home/x/.claude/tmux-audit/log-session-created.sh"
+        own = "session-created[%d]" % tmuxprov.SESSION_CREATED_HOOK_INDEX[
+            "owner-audit"]
+        calls = []
+
+        def run(argv):
+            calls.append(list(argv))
+            out = ""
+            if "show-hooks" in argv:
+                # pre-#1124 server: the audit sat UNINDEXED (== index 0)
+                out = ('session-created[0] run-shell -b "%s x#{q:hook_'
+                       'session_name}"\n' % logger)
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+        tmuxprov._live_apply_owner_session_audit(logger, run=run)
+        self.assertIn(["tmux", "set-hook", "-gu", "session-created[0]"], calls)
+        self.assertEqual(calls[-1][:4], ["tmux", "set-hook", "-g", own])
+
+    def test_audit_live_apply_never_drops_a_sibling_writers_hook(self):
+        logger = "/home/x/.claude/tmux-audit/log-session-created.sh"
+        calls = []
+
+        def run(argv):
+            calls.append(list(argv))
+            out = ""
+            if "show-hooks" in argv:
+                out = "session-created[0] rename-window ar\n"
+            return subprocess.CompletedProcess(argv, 0, stdout=out, stderr="")
+
+        tmuxprov._live_apply_owner_session_audit(logger, run=run)
+        self.assertFalse([c for c in calls if "-gu" in c], calls)
+
+    def test_no_production_source_writes_an_unindexed_session_created(self):
+        # A future THIRD writer must also take an index: scan every production
+        # .py/.sh (tests excluded) for a set-hook naming a bare session-created.
+        root = Path(__file__).resolve().parent.parent
+        bad = re.compile(r"session-created(?![\[\w-])[\"'\s,]")
+        files = [f for f in root.glob("*.py")]
+        files += list((root / "watchdog").rglob("*.py"))
+        files += list((root / "hooks").rglob("*.sh"))
+        offenders = []
+        for f in files:
+            for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(),
+                                     1):
+                if "set-hook" in line and bad.search(line):
+                    offenders.append("%s:%d: %s" % (f.name, n, line.strip()))
+        self.assertEqual(offenders, [])
+
+
 if __name__ == "__main__":
     unittest.main()

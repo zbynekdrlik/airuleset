@@ -108,5 +108,27 @@ class TestControllerWindowNameRealTmux(unittest.TestCase):
         self.assertIn("log-session-created.sh", hooks)
 
 
+    def test_conf_loaded_hook_equals_the_live_applied_value(self):
+        # #1124 review: `$S`/`$HOME` in the gk run-shell body must NOT be
+        # expanded when tmux parses the conf; the conf-loaded hook must be
+        # byte-identical to the same value set live via argv.
+        import cli_fleet
+        windows = cli_fleet.box_windows("gatekeeper")
+        conf = self.home / ".tmux.conf"
+        with mock.patch("cli_tmux_provisioning._hook_marker",
+                        return_value=None):
+            conf.write_text(
+                tmuxprov._render_session_created_hook_line("gk", windows))
+            value = tmuxprov._session_created_hook_value("gk", windows)
+        res = self._tmux("-f", str(conf), "new-session", "-d", "-s", "t",
+                         "sleep 60")
+        self.assertEqual(res.returncode, 0, res.stderr)
+        res = self._tmux("set-hook", "-g", "session-created[7]", value)
+        self.assertEqual(res.returncode, 0, res.stderr)
+        loaded = self._tmux("show-hooks", "-g", "session-created[0]").stdout
+        live = self._tmux("show-hooks", "-g", "session-created[7]").stdout
+        self.assertIn("$S", live)
+        self.assertEqual(loaded.split(" ", 1)[1], live.split(" ", 1)[1])
+
 if __name__ == "__main__":
     unittest.main()
