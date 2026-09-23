@@ -210,7 +210,7 @@ class TestOwnerOnlyAccessSpec(unittest.TestCase):
         self.assertIsNotNone(spec, "controller-local lane has no Access spec")
         self.assertEqual(spec["allowed_emails"], [OWNER])
         self.assertEqual(spec["name"], "drop — controller")
-        self.assertEqual(spec["session_duration"], "24h")
+        self.assertEqual(spec["session_duration"], "720h")
         self.assertEqual(spec["hostname"], CONTROLLER_HOST)
 
     def test_spec_shape_matches_hand_authored(self):
