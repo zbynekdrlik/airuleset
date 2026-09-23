@@ -44,6 +44,24 @@ from filedrop import vault as st                 # noqa: E402
 ROOT = Path(__file__).resolve().parent.parent
 SERVER = ROOT / "filedrop" / "vault_server.py"
 
+# These tests exercise the PRIVATE secret-request URLs. A box with a live public
+# drop lane (the controller since #1115 slice G) prints the public URL first, so
+# pin "no public lane" for the module; a public-path test patches it itself.
+_NO_PUBLIC_LANE = None
+
+
+def setUpModule():
+    global _NO_PUBLIC_LANE
+    import cli_drop_gateway
+    _NO_PUBLIC_LANE = m.patch.object(cli_drop_gateway, "resolve_public_lane_full",
+                                     return_value=None)
+    _NO_PUBLIC_LANE.start()
+
+
+def tearDownModule():
+    if _NO_PUBLIC_LANE is not None:
+        _NO_PUBLIC_LANE.stop()
+
 # Deliberately not spelled `secret = "..."` / `token = "..."`: those shapes are
 # what hooks/block-sensitive-staging.sh's KV_PAT is for, and a fixture must not
 # have to reach for its bypass marker.
@@ -629,6 +647,7 @@ class TestPlainHttpIsOptIn(_StoreCase):
     def test_a_real_request_advertises_no_cleartext_url_by_default(self):
         env = dict(os.environ)
         env.update(self._env)
+        env["HOME"] = self.tmp.name  # no live drop marker: a private-path test (#1115 slice G)
         out = subprocess.run(
             [sys.executable, str(ROOT / "airuleset.py"), "secret", "request",
              "PLAIN_CHECK", "--ttl", "30", "--keep", "60"],
@@ -1338,6 +1357,7 @@ class TestHealthProbeCarriesNoToken(_ServerCase):
         # output the whole command exists to produce.
         env = dict(os.environ)
         env.update(self._env)
+        env["HOME"] = self.tmp.name  # no live drop marker: a private-path test (#1115 slice G)
         out = subprocess.run(
             [sys.executable, str(ROOT / "airuleset.py"), "secret", "request",
              "URL_PRINT", "--ttl", "30", "--keep", "60"],
