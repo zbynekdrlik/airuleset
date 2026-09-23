@@ -1558,7 +1558,26 @@ def _structured_goal_mark_state(sid, state):
     while the loop is armed (the `◎ /goal` glyph scrolled off behind a long
     stranded draft: the >10x david1-3 regression). Returns None on any
     missing / malformed record (fail-safe: no structured proof -> do NOT refuse
-    on this basis, the pane-based `drop:already-armed` belt still governs)."""
+    on this basis, the pane-based `drop:already-armed` belt still governs).
+
+    DESIGN-OWNED CONSEQUENCE of the deliver_goal refusal that reads this (design
+    5790100100 Approach-2 rejection: "(a) keeps exactly [the virgin/declared
+    window] and nothing else"): answer-rearm (#890) and fulfilled-rearm (#764)
+    both FIRE ONLY when mark=="set" (a stop-(A) `❓`-disarm / a stop-(B) fulfilled
+    loop leaves mark "set", CC never writing a `cleared` marker), and a dark-rearm
+    of a silently-dead loop also leaves mark "set" -- so the refusal INTENTIONALLY
+    supersedes their keystroke recovery for the mark-set case. Recovery of a
+    genuinely dead / answered / fulfilled loop is by the NEXT natural arm (session
+    death -> a virgin/declared arm, or the owner's `/autopilot`), never a machine
+    type into a possibly-live armed loop. `goal_dark_watch` still RECORDS those
+    requests in its `armed is False, mark=="set"` branch; they now drop at the
+    refusal. A full tombstone of the now-superseded answer-rearm/fulfilled-rearm
+    recording paths is a cross-cutting follow-up (the #764/#707 origin-retirement
+    checklist), out of the (a)+(b)+(c) recurrence-fix scope. Because a mark-SET
+    watchdog re-arm returns at the refusal, deliver_goal's downstream expiry-ping
+    / recent-human / `drop:stale-rearm` freshness / client-active / pane-budget
+    gates now govern ONLY the NOT-set cases for a watchdog origin (auth-rearm mark
+    "cleared", declared-virgin no mark, or a mark absent/unreadable)."""
     rec = None
     if isinstance(state, dict):
         gm = state.get("goal_mark")
@@ -1749,31 +1768,13 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     # refused here (the owner is at the keyboard). A VIRGIN arm (declared-virgin)
     # legitimately needs NO prior goal, so it proceeds only when NO goal_mark
     # record exists (state None) -- a genuinely fresh / crashed-and-restarted
-    # session. This is the STRUCTURED belt above the pane-based
-    # `drop:already-armed` check below (which still governs when goal_mark is
-    # absent / stale but the pane clearly renders armed).
-    #
-    # DESIGN-OWNED CONSEQUENCE (Approach-2 rejection, design 5790100100: "(a)
-    # keeps exactly [the virgin/declared window] and nothing else"): answer-rearm
-    # (#890) and fulfilled-rearm (#764) both FIRE ONLY when mark=="set" (a
-    # stop-(A) ❓-disarm / a stop-(B) fulfilled loop leaves mark "set", CC never
-    # writing a `cleared` marker), and a dark-rearm of a silently-dead loop also
-    # leaves mark "set" -- so this refusal INTENTIONALLY supersedes their
-    # keystroke recovery for the mark-set case. Recovery of a genuinely dead /
-    # answered / fulfilled loop is by the NEXT natural arm (session death -> a
-    # virgin/declared arm, or the owner's `/autopilot`), never a machine type
-    # into a possibly-live armed loop. `goal_dark_watch` still RECORDS those
-    # requests in its `armed is False, mark=="set"` branch; they now drop here. A
-    # full tombstone of the now-superseded answer-rearm/fulfilled-rearm recording
-    # paths is a cross-cutting follow-up (the #764/#707 origin-retirement
-    # checklist), out of this fix's (a)+(b)+(c) scope.
-    #
-    # SCOPE of the downstream gates for these origins: because a mark-SET
-    # watchdog re-arm returns HERE, the expiry-ping / recent-human /
-    # `drop:stale-rearm` freshness / client-active / pane-budget gates BELOW now
-    # govern ONLY the NOT-set cases for a watchdog origin -- auth-rearm (mark
-    # "cleared"), declared-virgin (no mark), or a mark genuinely absent/unreadable
-    # in both the in-memory and persisted state.
+    # session. STRUCTURED belt above the pane-based `drop:already-armed` check
+    # below (which still governs when goal_mark is absent/stale but the pane
+    # clearly renders armed). The DESIGN-OWNED consequence -- this refusal
+    # supersedes answer-rearm (#890) / fulfilled-rearm (#764) keystroke recovery
+    # (both fire ONLY at mark=="set"), the downstream gates then govern only the
+    # NOT-set cases, and a full origin tombstone is a cross-cutting follow-up --
+    # is documented on `_structured_goal_mark_state`.
     if origin in _GOAL_WATCHDOG_REARM_ORIGINS \
             and _structured_goal_mark_state(sid, state) == "set":
         _log_goal_sync("REFUSE structured-armed sid=%s cwd=%s origin=%s "
