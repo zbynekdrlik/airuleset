@@ -22,6 +22,18 @@ _HB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd || true)"
 printf '%s' "$_HB_INPUT" | PYTHONPATH="$_HB_DIR" \
     python3 -m watchdog.session_status --event session_start >/dev/null 2>&1 || true
 
+# issue 1127 — on EVERY exit path below (the ff logic has many), deliver the
+# project's stream directives from the BASE ref via
+# session-start-stream-directives.sh. An EXIT trap, not a sibling hooks.json
+# entry: hooks of one event run in parallel, and the step must read the base
+# AFTER this hook's `git fetch origin`. Best-effort, never changes our exit.
+_ORIGIN_FETCHED=""
+_stream_directives_step() {
+    AIRULESET_STREAM_BASE_FETCHED="$_ORIGIN_FETCHED" \
+        bash "$_HB_DIR/hooks/session-start-stream-directives.sh" </dev/null 2>/dev/null || true
+}
+trap _stream_directives_step EXIT
+
 # Only run if we're in a git repo
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
     exit 0
@@ -33,7 +45,7 @@ if ! git remote get-url origin &>/dev/null; then
 fi
 
 # Fetch latest from origin (suppress output to avoid noise)
-git fetch origin --quiet 2>/dev/null || true
+git fetch origin --quiet 2>/dev/null && _ORIGIN_FETCHED=origin || true
 
 # Never touch a repo with an in-progress merge/rebase/cherry-pick/revert/
 # bisect — HEAD may be detached mid-operation, so this check runs BEFORE
