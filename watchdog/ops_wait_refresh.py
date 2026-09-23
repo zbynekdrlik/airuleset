@@ -1,33 +1,46 @@
-"""#1067 slice 1c (a) — the DETACHED ops-wait refresher.
+"""#1067 slices 1c + 1d — the DETACHED quals refresher (one snapshot per repo).
 
-``airuleset._watchdog_ops_wait_fetch`` used to run the
-``slice-quals|core-quals --ops-wait`` derivation as a BLOCKING subprocess
-(``timeout=35``) inside the 90 s watchdog sweep, so a slow derivation (58 s live
-on montalu1 after slice 1b) timed out on every stale-cache sweep and job 20
-logged ``partition i:1|w:?``. The slice-1 FETCH_TIMEOUT backoff only made it fail
-LESS often; the structural problem is that a slow, TTL-cached derivation sat on
-the SYNCHRONOUS sweep path at all.
+The watchdog sweep used to run the quals derivation as BLOCKING subprocesses
+inside the 90 s sweep. First the ops-wait fetch (`--ops-wait`, 58 s live on
+montalu1, slice 1c). Then the backlog (`--count`, 17.7 s) and dispatchable
+(`--count-dispatchable`, 19.7 s) fetches inside `goal_lane_sweep`, which cost
+30 s of a 39 s sweep (slice 1d). The structural problem is that a slow,
+TTL-cached derivation sat on the SYNCHRONOUS sweep path at all.
 
-This leaf moves the derivation OFF the sweep path. The sweep READS a per-repo
-atomic cache file (``fetch_or_refresh``); when that file is stale AND no
-refresher child is alive it spawns ONE refresher child (``spawn_refresher`` →
-``airuleset.py <cmd> --ops-wait``, its own ``CHILD_TIMEOUT_S`` timeout) that
-parses the CLI output (``parse_members``) and atomically writes the member list
-into the same file (tmp + ``os.replace``). The child is launched as a transient
-``systemd-run --user`` unit so it runs in its OWN cgroup and survives the sweep
-process's exit — the watchdog runs as ``api-watchdog.service`` (``Type=oneshot``
-+ ``KillMode=control-group``), which would otherwise kill a same-cgroup child the
-moment the oneshot exits (``setsid``/``start_new_session`` does NOT escape a
-cgroup); a logged Popen fallback covers a non-systemd (test/CI) box. The
-sweep NEVER waits for the derivation — it returns the last good result, ``None``
-(undetermined — no result yet, exactly as before), or the caller's timeout
-sentinel (a cold refresh timeout with no prior good result, so the outer
-``_cached_member_fetch`` backs its fail-TTL off geometrically, slice 1).
+This leaf moves the derivation OFF the sweep path, and slice 1d makes it ONE
+derivation. The sweep READS a per-repo atomic snapshot file through the
+non-blocking readers `backlog_count` / `dispatchable` / `fetch_or_refresh`
+(ops-wait members). All three go through `read_snapshot`, which spawns ONE
+refresher child when the snapshot is stale AND no child is alive. The spawn
+is single-flight through the pidfile, the transient unit name and an
+in-process guard across the readers of one sweep. The child runs
+`airuleset.py <cmd> --snapshot-json` (its own `CHILD_TIMEOUT_S` timeout) and
+gets `{open_count, i_members, dispatchable_count, dispatchable_reason,
+ops_wait_members}` from ONE `_partition_workable` pass (#367). It then
+atomically writes ONE versioned snapshot (tmp + `os.replace`).
 
-The members still come from the ONE ``_partition_workable`` derivation (#367):
-the child runs the SAME authority-aware ``--ops-wait`` CLI the blocking fetch
-ran; only WHO waits for it changes. A child failure/timeout PRESERVES the prior
-good member list in the file so a transient hiccup never drops a served W set.
+The child is launched as a transient `systemd-run --user` unit so it runs in its
+OWN cgroup and survives the sweep process's exit. The watchdog runs as
+`api-watchdog.service` (`Type=oneshot` + `KillMode=control-group`), which would
+otherwise kill a same-cgroup child the moment the oneshot exits
+(`setsid`/`start_new_session` does NOT escape a cgroup). A logged Popen
+fallback covers a non-systemd (test/CI) box.
+
+The sweep NEVER waits for the derivation. Each reader returns its field from
+the last good snapshot. With no snapshot it returns None (undetermined —
+backlog is then "unmeasurable", NEVER 0), and the ops-wait reader may return
+its timeout sentinel instead (a cold refresh timeout, so the outer
+`_cached_member_fetch` backs its fail-TTL off geometrically, slice 1). A child
+failure or timeout PRESERVES the prior good fields in the file, so a
+transient hiccup never drops a served value. A last-good value older than
+`MAX_SERVE_AGE_S` stops being served (it goes honest). Consecutive failures
+back the re-spawn off geometrically (`_fail_ttl`), and the child skips the
+derivation while the gh-rate budget is in backoff (`rate_hold`). The only
+sweep-side cost is the systemd-run CLIENT call on a spawn (≤10 s timeout).
+
+Naming: the module, the `~/.claude/ops-wait-refresh/` dir and the
+`airuleset-opswait-*` unit keep their slice-1c names (the design kept the path;
+a rename would orphan live caches/units). Since 1d they hold EVERY quals fact.
 
 # airuleset:script-ok the pidfile-remove in run_refresh_child's `finally` uses a
 # bare `except OSError: pass` on purpose — the file may already be gone (a
@@ -40,26 +53,38 @@ import subprocess
 import sys
 import time
 
-# Reuse the #547 TTL semantics. Kept as LOCAL constants (mirroring
-# ops_wait_recheck.OPS_WAIT_FETCH_TTL_S / OPS_WAIT_FETCH_FAIL_TTL_S) so this leaf
-# stays LIGHT on the hot import path — it is imported (lazily) by
-# airuleset._watchdog_ops_wait_fetch on every stale-cache sweep, so it must not
-# pull ops_wait_recheck's whole dependency tree in just to read two ints.
-REFRESH_TTL_S = 30 * 60           # a good result is fresh for the full TTL
+# #1067 slice 1d: ONE snapshot TTL for every consumer — the SHORTEST any of them
+# needs (the lane nudge's dispatchable count was cached 5 min; the backlog 10;
+# ops-wait 30). The watchdog's outer per-consumer caches keep their own TTLs on
+# top; this only bounds how stale the shared snapshot may get before a refresh.
+REFRESH_TTL_S = 5 * 60            # a good snapshot is fresh for the full TTL
 REFRESH_FAIL_TTL_S = 60           # an error/timeout entry re-checks soon
-# how long a last-good member set is SERVED while the derivation keeps failing.
-# A transient hiccup (minutes) still serves the prior set, but a PERMANENTLY
-# broken derivation must eventually go honest (return None) rather than
-# re-surfacing days-old W members forever — this restores the pre-1c gh-error
-# fail-safe (the old blocking fetch returned None on a gh error). 4 failed
-# refresh cycles.
-MAX_SERVE_AGE_S = 4 * REFRESH_TTL_S
-# the detached child's own hard timeout (generous vs the ~30-58 s derivation).
+# how long last-good values are SERVED while the derivation keeps failing. A
+# transient hiccup (minutes) still serves the prior snapshot, but a PERMANENTLY
+# broken derivation must go honest (None) rather than re-surface stale counts
+# and W members forever (the pre-1c fail-safe: a gh error read as None). Six
+# refresh windows.
+MAX_SERVE_AGE_S = 6 * REFRESH_TTL_S
+# the ceiling of the geometric failure backoff (`_fail_ttl`) — slice 1's cap
+# (the old 30-min ops-wait TTL), so a permanently slow/broken derivation costs
+# at most one run per half hour instead of one per minute.
+FAIL_BACKOFF_CAP_S = 30 * 60
+# the detached child's own hard timeout (generous vs the ~30-60 s derivation).
 CHILD_TIMEOUT_S = 180
 # reclaim a pidfile whose recorded child is older than this even if /proc still
 # shows the pid (pid reuse / a crash without cleanup) — a belt beyond the child's
 # own CHILD_TIMEOUT_S so a wedged/reused pid can never block refresh forever.
 CHILD_MAX_AGE_S = CHILD_TIMEOUT_S + 120
+# the snapshot schema. A success entry without it (a slice-1c members-only
+# cache) is due at once so the backlog/dispatchable readers are not starved.
+SNAPSHOT_VERSION = 2
+# every field a success writes and a failure carries forward (never partially)
+_SNAPSHOT_FIELDS = ("v", "members", "members_ts", "open_count", "i_members",
+                    "dispatchable_count", "dispatchable_reason")
+# in-process single-flight across the readers of ONE sweep: {cache path: ts}.
+# A just-launched child has not written its pidfile yet, so without this the
+# 2nd and 3rd reader of the same sweep would each spawn again.
+_SPAWNED = {}
 
 
 class _Timeout(Exception):
@@ -94,46 +119,56 @@ def _read_json(path):
 
 
 def _write_atomic(path, obj):
+    # 0o600: the snapshot carries issue numbers + W titles; owner-only even if
+    # a box's ~/.claude were ever wider than 0700 (shared-stream subdev).
     tmp = "%s.tmp.%d" % (path, os.getpid())
-    with open(tmp, "w", encoding="utf-8") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(obj, f)
     os.replace(tmp, path)
 
 
 def parse_members(stdout):
-    """Parse ``--ops-wait`` TSV stdout into the member-dict list the job-20 nudge
-    consumes. Returns ``None`` on a malformed member line (undetermined — never a
-    partial set), ``[]`` on a clean empty result. Moved VERBATIM from
-    ``airuleset._watchdog_ops_wait_fetch``'s parse loop (#1067 slice 1c) so the
-    child and the pre-1c fetch parse identically."""
-    members = []
-    for line in (stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # #754: `--ops-wait` appends a `#`-prefixed aggregate W-summary line —
-        # skip it here so it never trips the malformed→None guard below.
-        if line.startswith("#"):
-            continue
-        parts = line.split("\t")
-        try:
-            num = int(parts[0])
-        except (ValueError, IndexError):
-            return None   # a malformed line -> undetermined, never a partial set
-        # field 3 is the reason column (>=5 fields = the full form); field 4+ the
-        # (tab-joined) title. Anything shorter -> no flags, empty title.
-        reason = parts[3] if len(parts) >= 5 else ""
-        title = "\t".join(parts[4:]) if len(parts) >= 5 else ""
-        members.append({"number": num, "stale": "stale!" in reason,
-                        "gk_handoff": "gk-handoff!" in reason,
-                        "release_recheck": "recheck!" in reason,
-                        "acceptance": "acceptance" in reason,
-                        "tacit_close": "tacit-close?" in reason,
-                        "converge": "converge!" in reason,
-                        "no_target": "no-target!" in reason,
-                        "deploy_target": "deploy-target!" in reason,
-                        "title": title})
-    return members
+    """Parse `--ops-wait` TSV stdout into the job-20 member-dict list (None on a
+    malformed member line, [] on a clean empty result). The body lives with its
+    producer, `cli_quals_snapshot.parse_ops_wait_members` (#1067 slice 1d), where
+    `--snapshot-json` parses its own listing. This delegator keeps the ONE
+    parser reachable under its historical name."""
+    from cli_quals_snapshot import parse_ops_wait_members
+    return parse_ops_wait_members(stdout)
+
+
+def _is_int(v):
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def parse_snapshot(stdout):
+    """Validate `--snapshot-json` stdout into the snapshot dict, or None when the
+    CORE (`open_count`) is malformed (the child then records an `error` and keeps
+    the prior good snapshot). The other parts degrade PER FIELD so a failure in
+    one never costs the backlog count (#1067 1d review F3/F4):
+    `ops_wait_members` may be null (that part failed → the ops-wait reader reads
+    undetermined), `dispatchable_count` may be None only WITH a reason (#1021),
+    and a malformed `i_members` (no watchdog reader today) is dropped to None."""
+    try:
+        snap = json.loads(stdout or "")
+    except ValueError:
+        return None
+    if not isinstance(snap, dict):
+        return None
+    members = snap.get("ops_wait_members")
+    dc, dr = snap.get("dispatchable_count"), snap.get("dispatchable_reason")
+    if not (_is_int(snap.get("open_count")) and snap["open_count"] >= 0
+            and (members is None or (isinstance(members, list) and all(
+                isinstance(m, dict) and _is_int(m.get("number"))
+                for m in members)))
+            and (dr is None or isinstance(dr, str))
+            and (_is_int(dc) or (dc is None and dr))):
+        return None
+    i_members = snap.get("i_members")
+    if not (isinstance(i_members, list) and all(map(_is_int, i_members))):
+        snap["i_members"] = None
+    return snap
 
 
 def refresher_alive(cwd, now=None):
@@ -165,30 +200,49 @@ def _reclaim_pid(cwd):
         return   # already gone / not ours to remove
 
 
+def _failed(entry):
+    """The entry's LATEST attempt did not produce a snapshot."""
+    return any(entry.get(k) for k in ("error", "timeout", "rate_hold"))
+
+
+def _fail_ttl(entry):
+    """The re-spawn window after a failed attempt, GEOMETRIC in the consecutive
+    failure count (`fail_streak`): 60 s, 120 s, 240 s … capped at
+    FAIL_BACKOFF_CAP_S. The slice-1 backoff lived only in the ops-wait outer
+    cache; since 1d the backlog/dispatchable readers (60 s outer fail-TTLs) also
+    reach `read_snapshot`, so the backoff must live HERE or a derivation that
+    keeps timing out re-runs every minute (#1067 1d review F1/F2)."""
+    streak = entry.get("fail_streak")
+    streak = streak if _is_int(streak) and streak > 0 else 1
+    return min(REFRESH_FAIL_TTL_S * 2 ** min(streak - 1, 10), FAIL_BACKOFF_CAP_S)
+
+
 def _spawn_due(entry, now):
     """Should a refresh be spawned? A missing/typeless entry is always due; a
-    SUCCESS entry is fresh for the full TTL; an entry whose LATEST attempt failed
-    (error/timeout flag) is fresh only for the short fail-window so a transient
-    failure re-checks soon (mirrors the outer cache's fail-TTL)."""
+    SUCCESS entry is fresh for the full TTL, unless it predates the snapshot
+    schema (a slice-1c members-only cache → due at once); an entry whose LATEST
+    attempt failed (error/timeout/rate_hold) waits its geometric `_fail_ttl`."""
     if not isinstance(entry, dict):
         return True
     ts = entry.get("ts")
     if not isinstance(ts, (int, float)):
         return True
-    failed = bool(entry.get("error") or entry.get("timeout"))
-    ttl = REFRESH_FAIL_TTL_S if failed else REFRESH_TTL_S
+    failed = _failed(entry)
+    if not failed and entry.get("v") != SNAPSHOT_VERSION:
+        return True
+    ttl = _fail_ttl(entry) if failed else REFRESH_TTL_S
     return (now - ts) >= ttl
 
 
 def _serve(entry, timeout_sentinel, now):
-    """What the sweep returns from a cache entry: the last good member list when
-    present AND not too stale, else the timeout sentinel for a cold timeout, else
-    None (no usable result yet).
+    """What the ops-wait reader returns from a snapshot entry: the last good
+    member list when present AND not too stale, else the timeout sentinel for a
+    cold timeout, else None (no usable result yet).
 
     `members_ts` is the last SUCCESSFUL derivation time (carried forward across
     preserved failures). When it is older than MAX_SERVE_AGE_S the last-good set
     is NO LONGER served (a permanently-broken derivation goes honest → None /
-    sentinel instead of re-surfacing days-old W). A legacy entry with no
+    sentinel instead of re-surfacing stale W). A legacy entry with no
     `members_ts` is served (backward compatible)."""
     if isinstance(entry, dict):
         members = entry.get("members")
@@ -201,18 +255,78 @@ def _serve(entry, timeout_sentinel, now):
     return None
 
 
+def _good_snapshot(entry, now):
+    """The entry when it is a v2 snapshot whose last SUCCESSFUL derivation is
+    within MAX_SERVE_AGE_S, else None — the backlog/dispatchable readers serve
+    nothing from a legacy, never-succeeded or too-stale entry."""
+    if not isinstance(entry, dict) or entry.get("v") != SNAPSHOT_VERSION:
+        return None
+    mts = entry.get("members_ts")
+    if not isinstance(mts, (int, float)) or (now - mts) > MAX_SERVE_AGE_S:
+        return None
+    return entry
+
+
+def read_snapshot(cwd, cmd_name, argv0=None, now=None, spawn_fn=None,
+                  alive_fn=None):
+    """NON-BLOCKING: read the per-repo snapshot entry (or None) and, when it is
+    due AND no refresher is alive AND this process did not already spawn one
+    for it, spawn ONE detached refresher. Never runs the derivation itself —
+    the ONE entry point every reader shares (single-flight, #1067 1d)."""
+    now = time.time() if now is None else now
+    path = cache_path(cwd)
+    entry = _read_json(path)
+    alive = alive_fn or refresher_alive
+    spawned = _SPAWNED.get(path)
+    recently = (isinstance(spawned, (int, float))
+                and 0 <= now - spawned < CHILD_MAX_AGE_S)
+    if _spawn_due(entry, now) and not recently and not alive(cwd):
+        _SPAWNED[path] = now
+        (spawn_fn or spawn_refresher)(cwd, cmd_name, argv0)
+    return entry
+
+
 def fetch_or_refresh(cwd, cmd_name, timeout_sentinel, argv0=None, now=None,
                      spawn_fn=None, alive_fn=None):
-    """NON-BLOCKING ops-wait member fetch (the module docstring has the full
-    contract). Reads the per-repo cache file; when it is stale AND no refresher
-    child is alive, spawns ONE detached refresher; returns the last good result,
-    None, or ``timeout_sentinel``. Never runs the derivation itself."""
+    """NON-BLOCKING ops-wait member reader: the last good members, None, or
+    ``timeout_sentinel`` (see `_serve`), after `read_snapshot`."""
     now = time.time() if now is None else now
-    entry = _read_json(cache_path(cwd))
-    alive = alive_fn or refresher_alive
-    if _spawn_due(entry, now) and not alive(cwd):
-        (spawn_fn or spawn_refresher)(cwd, cmd_name, argv0)
+    entry = read_snapshot(cwd, cmd_name, argv0, now, spawn_fn, alive_fn)
     return _serve(entry, timeout_sentinel, now)
+
+
+def backlog_count(cwd, cmd_name, argv0=None, now=None, spawn_fn=None,
+                  alive_fn=None):
+    """NON-BLOCKING backlog reader: the snapshot's `open_count` (the same number
+    `--count` prints — a real 0 passed the #181 refusal inside the command), or
+    None when there is no good snapshot — unmeasurable, NEVER a guessed 0.
+
+    Staleness (documented trade-off): a later REFUSED/failed derivation keeps
+    serving the last good count until it is MAX_SERVE_AGE_S old (the pre-1d
+    blocking fetch read a refusal as None at once). The risk direction is a
+    stale POSITIVE count, never a false 0."""
+    now = time.time() if now is None else now
+    good = _good_snapshot(
+        read_snapshot(cwd, cmd_name, argv0, now, spawn_fn, alive_fn), now)
+    count = good.get("open_count") if good else None
+    return count if _is_int(count) else None
+
+
+def dispatchable(cwd, cmd_name, argv0=None, now=None, spawn_fn=None,
+                 alive_fn=None):
+    """NON-BLOCKING dispatchable reader, in the lane nudge's fetch shape:
+    `[{"count": N, "reason": r}]`; `[{"count": None, "reason": r}]` for an
+    unmeasurable count WITH a reason (#1021); None when there is no good
+    snapshot or an unmeasurable count carries no reason."""
+    now = time.time() if now is None else now
+    good = _good_snapshot(
+        read_snapshot(cwd, cmd_name, argv0, now, spawn_fn, alive_fn), now)
+    if not good:
+        return None
+    count, reason = good.get("dispatchable_count"), good.get("dispatchable_reason")
+    if not _is_int(count):
+        return [{"count": None, "reason": reason}] if reason else None
+    return [{"count": count, "reason": reason}]
 
 
 def _refresh_unit_name(cwd):
@@ -232,8 +346,8 @@ def _log_spawn(msg):
 
 def spawn_refresher(cwd, cmd_name, argv0=None, run_fn=None, popen_fn=None,
                     log_fn=None):
-    """Spawn ONE refresher child that runs ``<cmd_name> --ops-wait`` for ``cwd``
-    and writes the parsed members into the cache file.
+    """Spawn ONE refresher child that runs ``<cmd_name> --snapshot-json`` for
+    ``cwd`` and writes the validated snapshot into the cache file.
 
     #1067 slice 1c REVIEW: the watchdog runs as ``api-watchdog.service``
     (``Type=oneshot`` + ``KillMode=control-group``), so a plain
@@ -365,19 +479,41 @@ def _spawn_via_popen(repo_root, child_argv, popen_fn, log):
 
 
 def _default_run(target, cmd_name, argv0):
-    """Run ``<cmd_name> --ops-wait`` for ``target`` with the child's own hard
-    timeout; return ``(returncode, stdout)``. Raises ``_Timeout`` on overrun."""
+    """Run ``<cmd_name> --snapshot-json`` for ``target`` with the child's own
+    hard timeout; return ``(returncode, stdout)``. Raises ``_Timeout`` on
+    overrun."""
     try:
         r = subprocess.run(
-            [sys.executable, argv0, cmd_name, "--ops-wait"],
+            [sys.executable, argv0, cmd_name, "--snapshot-json"],
             cwd=target, capture_output=True, text=True, timeout=CHILD_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         raise _Timeout()
     return r.returncode, r.stdout
 
 
-def _derive(target, cmd_name, argv0, run_fn=None):
-    """Run the derivation; classify the outcome as ok/timeout/error."""
+def _default_gh_backoff():
+    """The watchdog registry's own gh-rate hold signal (#1040/#1041): > 0 while
+    either gh resource is under its backoff threshold. Reads the CACHED status
+    only (the sweep's gh_rate_fetch keeps it fresh) — the probe never spends a
+    gh call itself. Fail-open → 0."""
+    try:
+        import cli_gh_rate
+        return cli_gh_rate.current_gh_backoff(status=cli_gh_rate._load_cache())
+    except Exception as e:  # noqa: BLE001 — never block a refresh on the probe
+        sys.stderr.write("refresh-child: gh-rate probe failed (%s)\n"
+                         % type(e).__name__)
+        return 0
+
+
+def _derive(target, cmd_name, argv0, run_fn=None, backoff_fn=None):
+    """Run the ONE derivation; classify the outcome as
+    ok/timeout/error/rate_hold. The detached child escapes the watchdog
+    registry's gh-rate hold (it runs outside the sweep), so it consults the
+    same signal itself and SKIPS the gh-heavy derivation while the shared
+    budget is low (#1067 1d review F3) — the prior good snapshot stays served."""
+    backoff = (backoff_fn or _default_gh_backoff)()
+    if _is_int(backoff) and backoff > 0:
+        return {"kind": "rate_hold"}
     run = run_fn or _default_run
     try:
         rc, out = run(target, cmd_name, argv0)
@@ -385,35 +521,41 @@ def _derive(target, cmd_name, argv0, run_fn=None):
         return {"kind": "timeout"}
     if rc != 0:
         return {"kind": "error"}
-    members = parse_members(out)
-    if members is None:
+    snap = parse_snapshot(out)
+    if snap is None:
         return {"kind": "error"}   # malformed output -> undetermined
-    return {"kind": "ok", "members": members}
+    return {"kind": "ok", "snap": snap}
 
 
-def run_refresh_child(target, cmd_name, cache, pid_file, argv0, run_fn=None):
+def run_refresh_child(target, cmd_name, cache, pid_file, argv0, run_fn=None,
+                      backoff_fn=None):
     """The detached child body: record the pidfile, run the derivation (its own
-    timeout), and atomically write the result to ``cache`` — PRESERVING the prior
-    good member list on a failure/timeout so a transient hiccup never drops a
-    served W set. Removes the pidfile at exit no matter what."""
+    timeout), and atomically write ONE snapshot to ``cache`` — PRESERVING every
+    prior good field (with its `members_ts` age) on a failure/timeout so a
+    transient hiccup never drops a served value. Removes the pidfile at exit no
+    matter what."""
     try:
         _write_atomic(pid_file, {"pid": os.getpid(), "ts": time.time()})
         prior = _read_json(cache)
-        prior_members = (prior.get("members")
-                         if isinstance(prior, dict) else None)
-        prior_members_ts = (prior.get("members_ts")
-                            if isinstance(prior, dict) else None)
-        result = _derive(target, cmd_name, argv0, run_fn)
+        prior = prior if isinstance(prior, dict) else {}
+        result = _derive(target, cmd_name, argv0, run_fn, backoff_fn)
         entry = {"ts": time.time()}
         if result["kind"] == "ok":
-            entry["members"] = result["members"]
-            entry["members_ts"] = entry["ts"]      # last SUCCESSFUL derivation
-        else:                                      # "timeout" | "error"
+            snap = result["snap"]
+            entry.update({
+                "v": SNAPSHOT_VERSION,
+                "members": snap["ops_wait_members"],   # None = that part failed
+                "members_ts": entry["ts"],        # last SUCCESSFUL derivation
+                "open_count": snap["open_count"],
+                "i_members": snap["i_members"],
+                "dispatchable_count": snap["dispatchable_count"],
+                "dispatchable_reason": snap["dispatchable_reason"]})
+        else:                              # "timeout" | "error" | "rate_hold"
             entry[result["kind"]] = True
-            if isinstance(prior_members, list):
-                entry["members"] = prior_members   # preserve last good
-                if isinstance(prior_members_ts, (int, float)):
-                    entry["members_ts"] = prior_members_ts   # carry its age fwd
+            streak = prior.get("fail_streak") if _failed(prior) else 0
+            entry["fail_streak"] = (streak if _is_int(streak) else 0) + 1
+            entry.update({k: prior[k] for k in _SNAPSHOT_FIELDS
+                          if k in prior})         # last good, age carried fwd
         _write_atomic(cache, entry)
     finally:
         try:

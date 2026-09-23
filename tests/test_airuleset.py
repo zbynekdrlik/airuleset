@@ -11486,283 +11486,189 @@ class TestWatchdogRepoSweepTimeouts_172(TestCase):
 
 
 class TestWatchdogBacklogFetch(TestCase):
-    """#160 defects 1/4 — `_watchdog_backlog_fetch(cwd)`: does THIS box's
-    own slice of the repo at `cwd` still have open backlog work, or None on
-    any failure/refusal.
+    """#160 defects 1/4 — `_watchdog_backlog_fetch(cwd)`: the open WORKABLE
+    backlog count of THIS box's own slice of the repo at `cwd`, or None when
+    unmeasurable.
 
-    #238-review-style finding 🔴F1 (this ticket's own review): the ORIGINAL
-    version counted the WHOLE REPO via a raw `gh issue list` -- the wrong
-    population to verify a session's own `🏁 BACKLOG EMPTY` claim against, a
-    full-authority box's /goal loop stops on the CORE/OBLIGATION partition,
-    a reduced-authority stream's loop stops on its OWN slice, never the
-    whole repo. Rewritten to shell `core-quals --count` / `slice-quals
-    --count` -- the SAME commands the `/goal` stop-proof templates
-    themselves use -- so this check reads exactly the population the
-    session's own claim is about, and inherits their refuse-rather-than-
-    guess contract (a non-zero exit prints no number at all).
+    #160 🔴F1: the population is the one the session's own `/goal` stop-proof
+    reads — `core-quals --count` (full authority) / `slice-quals --count`
+    (stream) — never the whole repo; both refuse (no number) rather than guess,
+    and that refusal reads as None here.
 
-    #618: the fetch now reads the tickets-status cache FIRST (the ONE-derivation
-    principle — the SAME `open` the footer + goal_dark_watch already read via
-    `statusbar.obligation_count`) and only shells the live `--count` as a
-    cache-miss/stale FALLBACK, warming the cache for the next sweep via
-    `statusbar._spawn_refresh`. setUp defaults the cache to a MISS + neuters the
-    refresh spawn, so the pre-existing subprocess-path tests below exercise the
-    cache-miss fallback deterministically (no real Popen, no dependence on the
-    box's real ~/.claude cache); the #618 tests re-patch the cache locally."""
+    #618: the tickets-status cache (`statusbar.obligation_count`) is read FIRST;
+    a fresh POSITIVE value is served, anything else warms it via
+    `statusbar._spawn_refresh` and falls through.
+
+    #1067 slice 1d: the fall-through reads the detached quals SNAPSHOT
+    (`watchdog.ops_wait_refresh.backlog_count`) instead of running `--count` as
+    a BLOCKING subprocess (17.7 s live, #619's 30 s timeout). setUp defaults the
+    footer cache to a MISS, neuters the refresh spawn, stubs the snapshot reader
+    and makes ANY `subprocess.run` fail the test — the sweep path must never
+    block on the derivation again."""
 
     def setUp(self):
-        # #618 — default every test to a cache MISS (so the historic subprocess
-        # tests take the live fallback path) and neuter the detached refresh
-        # spawn (never Popen a real `tickets-status --refresh` in a unit test).
         p1 = m.patch("statusbar.obligation_count", return_value=(None, None))
         p2 = m.patch("statusbar._spawn_refresh")
+        p3 = m.patch("watchdog.ops_wait_refresh.backlog_count",
+                     return_value=None)
+        p4 = m.patch("subprocess.run",
+                     side_effect=AssertionError("blocking --count subprocess"))
         self._obl = p1.start()
         self._spawn = p2.start()
-        self.addCleanup(p1.stop)
-        self.addCleanup(p2.stop)
+        self._snap = p3.start()
+        p4.start()
+        for p in (p1, p2, p3, p4):
+            self.addCleanup(p.stop)
 
-    def _fake(self, stdout="", returncode=0, raises=None):
-        calls = []
+    def _authority(self, value="full", root="/some/repo"):
+        return (m.patch.object(airuleset, "_repo_root", return_value=root),
+                m.patch.object(airuleset, "resolve_authority",
+                               return_value=value))
 
-        def fake_run(argv, **kw):
-            calls.append((argv, kw))
-            if raises is not None:
-                raise raises
-            import subprocess as sp
-            return sp.CompletedProcess(argv, returncode, stdout=stdout)
-        return fake_run, calls
-
-    def test_full_authority_shells_core_quals(self):
-        fake_run, calls = self._fake(stdout="3\n")
-        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
-             m.patch.object(airuleset, "resolve_authority", return_value="full"), \
-             m.patch("subprocess.run", side_effect=fake_run):
+    def test_full_authority_reads_the_core_quals_snapshot(self):
+        self._snap.return_value = 3
+        rr, ra = self._authority("full")
+        with rr, ra:
             result = airuleset._watchdog_backlog_fetch("/some/repo")
         self.assertEqual(result, 3)
-        self.assertEqual(len(calls), 1)
-        argv, kw = calls[0]
-        self.assertIn("core-quals", argv)
-        self.assertIn("--count", argv)
-        self.assertNotIn("slice-quals", argv)
-        self.assertEqual(kw.get("cwd"), "/some/repo")
-        # #619: bumped 15s -> _BACKLOG_LIVE_COUNT_TIMEOUT_S (30s) so the cache-miss
-        # live fallback COMPLETES on a 16-17s slice instead of always timing out.
-        self.assertEqual(kw.get("timeout"), airuleset._BACKLOG_LIVE_COUNT_TIMEOUT_S)
-        # value-teeth: the constant must give real margin over the measured 16-17s
-        # slice (a regression to e.g. 5s would re-introduce the always-timeout bug).
-        self.assertGreaterEqual(airuleset._BACKLOG_LIVE_COUNT_TIMEOUT_S, 20)
+        args, kw = self._snap.call_args
+        self.assertEqual(args, ("/some/repo", "core-quals"))
+        self.assertEqual(kw.get("argv0"), os.path.abspath(airuleset.__file__))
 
-    def test_reduced_authority_shells_slice_quals(self):
-        fake_run, calls = self._fake(stdout="0\n")
-        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
-             m.patch.object(airuleset, "resolve_authority",
-                           return_value="fork-no-merge"), \
-             m.patch("subprocess.run", side_effect=fake_run):
+    def test_reduced_authority_reads_the_slice_quals_snapshot(self):
+        self._snap.return_value = 0
+        rr, ra = self._authority("fork-no-merge")
+        with rr, ra:
             result = airuleset._watchdog_backlog_fetch("/some/repo")
-        self.assertEqual(result, 0)
-        argv, _kw = calls[0]
-        self.assertIn("slice-quals", argv)
-        self.assertNotIn("core-quals", argv)
+        self.assertEqual(result, 0)   # a snapshot 0 passed the #181 refusal
+        self.assertEqual(self._snap.call_args[0][1], "slice-quals")
 
     def test_authority_resolved_against_the_repo_root_not_the_bare_cwd(self):
-        # #160-review-style finding 🟡F3 (this ticket's own review) — a
-        # PANE cwd can be a SUBDIRECTORY of the actual repo root; authority
-        # must resolve against the ROOT (mirroring `cmd_core_quals`'s/
-        # `cmd_slice_quals`'s own `_repo_root()` call inside the child
-        # subprocess), never the bare cwd directly, or the parent and the
-        # child can pick DIFFERENT profiles and the child refuses forever.
-        fake_run, _calls = self._fake(stdout="1\n")
+        # #160 🟡F3 — a PANE cwd can be a SUBDIRECTORY of the repo root;
+        # authority must resolve against the ROOT (as the child command does),
+        # never the bare cwd, or the two can pick DIFFERENT profiles.
         with m.patch.object(airuleset, "_repo_root",
-                           return_value="/some/repo") as rr, \
-             m.patch.object(airuleset, "resolve_authority") as ra, \
-             m.patch("subprocess.run", side_effect=fake_run):
-            ra.return_value = "full"
+                            return_value="/some/repo") as rr, \
+             m.patch.object(airuleset, "resolve_authority",
+                            return_value="full") as ra:
             airuleset._watchdog_backlog_fetch("/some/repo/sub/dir")
         rr.assert_called_once_with(cwd="/some/repo/sub/dir")
         ra.assert_called_once_with(cwd="/some/repo")
 
     def test_falls_back_to_the_bare_cwd_when_the_root_cannot_be_resolved(self):
-        fake_run, _calls = self._fake(stdout="1\n")
         with m.patch.object(airuleset, "_repo_root", return_value=""), \
-             m.patch.object(airuleset, "resolve_authority") as ra, \
-             m.patch("subprocess.run", side_effect=fake_run):
-            ra.return_value = "full"
+             m.patch.object(airuleset, "resolve_authority",
+                            return_value="full") as ra:
             airuleset._watchdog_backlog_fetch("/some/repo")
         ra.assert_called_once_with(cwd="/some/repo")
 
-    def test_nonzero_exit_is_none(self):
-        # core-quals/slice-quals REFUSE (non-zero, no number) rather than
-        # ever print a false 0 -- this function inherits that refusal.
-        fake_run, _calls = self._fake(returncode=1, stdout="")
-        with m.patch.object(airuleset, "resolve_authority", return_value="full"), \
-             m.patch("subprocess.run", side_effect=fake_run):
-            result = airuleset._watchdog_backlog_fetch("/some/repo")
-        self.assertIsNone(result)
-
-    def test_subprocess_exception_is_none(self):
-        fake_run, _calls = self._fake(raises=OSError("no gh"))
-        with m.patch.object(airuleset, "resolve_authority", return_value="full"), \
-             m.patch("subprocess.run", side_effect=fake_run):
-            result = airuleset._watchdog_backlog_fetch("/some/repo")
-        self.assertIsNone(result)
+    def test_no_snapshot_is_none_never_zero(self):
+        # a refused/failed/never-run derivation left no good snapshot ->
+        # unmeasurable (None), never a false 0.
+        rr, ra = self._authority("full")
+        with rr, ra:
+            self.assertIsNone(airuleset._watchdog_backlog_fetch("/some/repo"))
 
     def test_resolve_authority_exception_is_none(self):
         with m.patch.object(airuleset, "resolve_authority",
-                           side_effect=RuntimeError("boom")):
+                            side_effect=RuntimeError("boom")):
             result = airuleset._watchdog_backlog_fetch("/some/repo")
         self.assertIsNone(result)
+        self._snap.assert_not_called()
 
-    def test_malformed_stdout_is_none(self):
-        fake_run, _calls = self._fake(stdout="not a number")
-        with m.patch.object(airuleset, "resolve_authority", return_value="full"), \
-             m.patch("subprocess.run", side_effect=fake_run):
-            result = airuleset._watchdog_backlog_fetch("/some/repo")
-        self.assertIsNone(result)
+    # ---- #618: cache-first backlog read (ONE-derivation) ----
 
-    def test_invokes_this_own_script_via_the_current_interpreter(self):
-        # never a bare "airuleset.py" resolved off PATH -- sys.executable +
-        # an absolute path to THIS file, so it runs regardless of cwd/PATH.
-        fake_run, calls = self._fake(stdout="1\n")
-        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
-             m.patch.object(airuleset, "resolve_authority", return_value="full"), \
-             m.patch("subprocess.run", side_effect=fake_run):
-            airuleset._watchdog_backlog_fetch("/some/repo")
-        argv, _kw = calls[0]
-        self.assertEqual(argv[0], sys.executable)
-        self.assertTrue(os.path.isabs(argv[1]))
-
-    # ---- #618: cache-first backlog read (ONE-derivation, no tight-timeout) --
-
-    def test_fresh_cache_is_read_without_any_subprocess(self):
-        # #618: a fresh tickets-status cache is the SAME `open` the footer
-        # renders (statusbar.obligation_count). Reading it means NO live
-        # `slice-quals`/`core-quals --count` subprocess at all — which is the
-        # whole point: that subprocess is 16-17s on a big shared-account slice
-        # and ALWAYS timed out at 15s → backlog=n/a. A fresh cache never
-        # touches it and never spawns a refresh.
+    def test_fresh_cache_is_read_without_touching_the_snapshot(self):
         import time
-        fake_run, calls = self._fake(stdout="99\n")   # would return 99 if shelled
+        self._snap.return_value = 99
         self._obl.return_value = (30, time.time())
-        with m.patch("subprocess.run", side_effect=fake_run):
-            result = airuleset._watchdog_backlog_fetch("/some/repo")
-        self.assertEqual(result, 30)      # from the cache, NOT the 99 subprocess
-        self.assertEqual(calls, [])       # no subprocess ran
-        self._spawn.assert_not_called()   # fresh cache needs no refresh
+        result = airuleset._watchdog_backlog_fetch("/some/repo")
+        self.assertEqual(result, 30)          # from the footer cache, not 99
+        self._snap.assert_not_called()
+        self._spawn.assert_not_called()       # fresh cache needs no refresh
 
-    def test_stale_cache_spawns_a_refresh_and_falls_back_to_live_count(self):
-        # #618: a hours-stale cache (montalu1's live 7h-stale state) must NOT be
-        # trusted; the fetch warms it for the NEXT sweep via _spawn_refresh and
-        # falls back to the live count for THIS sweep (self-heals next sweep).
+    def test_stale_cache_warms_and_reads_the_snapshot(self):
         import time
-        fake_run, calls = self._fake(stdout="30\n")
+        self._snap.return_value = 30
         self._obl.return_value = (25, time.time() - 100000)   # ~28h stale
-        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
-             m.patch.object(airuleset, "resolve_authority",
-                            return_value="branch-merge"), \
-             m.patch("subprocess.run", side_effect=fake_run):
+        rr, ra = self._authority("branch-merge")
+        with rr, ra:
             result = airuleset._watchdog_backlog_fetch("/some/repo")
-        self.assertEqual(result, 30)          # live fallback this sweep
-        self.assertEqual(len(calls), 1)       # subprocess DID run
-        self._spawn.assert_called_once()      # refresh warmed for next sweep
+        self.assertEqual(result, 30)
+        self._snap.assert_called_once()
+        self._spawn.assert_called_once()
 
-    def test_missing_cache_spawns_a_refresh_and_falls_back(self):
-        # #618: a MISSING cache (obligation_count -> (None, None)) also warms +
-        # falls back — same path the pre-existing subprocess tests take.
-        fake_run, calls = self._fake(stdout="7\n")
-        # setUp already set the cache to a miss.
-        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
-             m.patch.object(airuleset, "resolve_authority", return_value="full"), \
-             m.patch("subprocess.run", side_effect=fake_run):
+    def test_missing_cache_warms_and_reads_the_snapshot(self):
+        self._snap.return_value = 7
+        rr, ra = self._authority("full")
+        with rr, ra:
             result = airuleset._watchdog_backlog_fetch("/some/repo")
         self.assertEqual(result, 7)
-        self.assertEqual(len(calls), 1)
         self._spawn.assert_called_once()
 
     def test_a_non_int_cached_open_is_treated_as_a_miss(self):
-        # #618: obligation_count returns (None, ts) when the cache carries no
-        # int `open` — never trust it, warm + fall back.
         import time
-        fake_run, calls = self._fake(stdout="5\n")
-        self._obl.return_value = (None, time.time())   # fresh ts, but no int open
-        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
-             m.patch.object(airuleset, "resolve_authority", return_value="full"), \
-             m.patch("subprocess.run", side_effect=fake_run):
+        self._snap.return_value = 5
+        self._obl.return_value = (None, time.time())
+        rr, ra = self._authority("full")
+        with rr, ra:
             result = airuleset._watchdog_backlog_fetch("/some/repo")
         self.assertEqual(result, 5)
         self._spawn.assert_called_once()
 
     def test_cache_within_the_freshness_bound_is_served(self):
-        # #618: mutation-lock on _BACKLOG_STATUS_CACHE_MAX_AGE_S — a count aged
-        # just INSIDE the bound is served from cache (no subprocess). A mutant
-        # shrinking the bound (e.g. to 60s) would fail this (the age exceeds it).
+        # mutation-lock on _BACKLOG_STATUS_CACHE_MAX_AGE_S (inside the bound).
         import time
-        fake_run, calls = self._fake(stdout="99\n")
-        age = airuleset._BACKLOG_STATUS_CACHE_MAX_AGE_S - 60   # comfortably inside
+        self._snap.return_value = 99
+        age = airuleset._BACKLOG_STATUS_CACHE_MAX_AGE_S - 60
         self._obl.return_value = (30, time.time() - age)
-        with m.patch("subprocess.run", side_effect=fake_run):
-            result = airuleset._watchdog_backlog_fetch("/some/repo")
+        result = airuleset._watchdog_backlog_fetch("/some/repo")
         self.assertEqual(result, 30)
-        self.assertEqual(calls, [])
+        self._snap.assert_not_called()
         self._spawn.assert_not_called()
 
     def test_cache_just_past_the_freshness_bound_falls_back(self):
-        # #618: the other side of the mutation-lock — a count aged just PAST the
-        # bound is NOT trusted (warm + live fallback).
         import time
-        fake_run, calls = self._fake(stdout="30\n")
+        self._snap.return_value = 30
         age = airuleset._BACKLOG_STATUS_CACHE_MAX_AGE_S + 60
         self._obl.return_value = (25, time.time() - age)
-        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
-             m.patch.object(airuleset, "resolve_authority",
-                            return_value="branch-merge"), \
-             m.patch("subprocess.run", side_effect=fake_run):
+        rr, ra = self._authority("branch-merge")
+        with rr, ra:
             result = airuleset._watchdog_backlog_fetch("/some/repo")
         self.assertEqual(result, 30)
-        self.assertEqual(len(calls), 1)
+        self._snap.assert_called_once()
         self._spawn.assert_called_once()
 
     def test_future_dated_cache_ts_is_not_trusted(self):
-        # #618: clock skew / a cross-box-synced cache can carry a FUTURE ts;
-        # `0 <= (now - ts)` rejects it as not-fresh (mirrors the #459
-        # goal_dark_watch sibling reader), warming + falling back.
         import time
-        fake_run, calls = self._fake(stdout="30\n")
-        self._obl.return_value = (25, time.time() + 3600)   # ts an hour ahead
-        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
-             m.patch.object(airuleset, "resolve_authority", return_value="full"), \
-             m.patch("subprocess.run", side_effect=fake_run):
+        self._snap.return_value = 30
+        self._obl.return_value = (25, time.time() + 3600)
+        rr, ra = self._authority("full")
+        with rr, ra:
             result = airuleset._watchdog_backlog_fetch("/some/repo")
         self.assertEqual(result, 30)
         self._spawn.assert_called_once()
 
     def test_int_open_with_missing_ts_is_treated_as_a_miss(self):
-        # #618: obligation_count can return (int, None) — an int `open` but a
-        # malformed/absent `ts` (statusbar coerces a non-numeric ts to None).
-        # `isinstance(ts, (int, float))` rejects it (no TypeError), warm + fall back.
-        fake_run, calls = self._fake(stdout="8\n")
+        self._snap.return_value = 8
         self._obl.return_value = (30, None)
-        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
-             m.patch.object(airuleset, "resolve_authority", return_value="full"), \
-             m.patch("subprocess.run", side_effect=fake_run):
+        rr, ra = self._authority("full")
+        with rr, ra:
             result = airuleset._watchdog_backlog_fetch("/some/repo")
         self.assertEqual(result, 8)
         self._spawn.assert_called_once()
 
-    def test_fresh_cached_zero_falls_through_to_the_refusing_subprocess(self):
-        # #618: a cached 0 is NOT trusted (the tickets-status writer has no #181
-        # refuse-guard, so a broken-search-index 0 can land in it) — it falls
-        # through to the live `--count`, which DOES refuse an untrustworthy empty
-        # as None. Here the fresh cache says 0 but the subprocess REFUSES
-        # (rc != 0) → the result is None, not the false cached 0.
+    def test_fresh_cached_zero_falls_through_to_the_refusing_snapshot(self):
+        # #618: a cached 0 is NOT trusted (the footer writer has no #181
+        # refuse-guard); it falls through to the snapshot, whose command DOES
+        # refuse — no snapshot -> None, not the false cached 0.
         import time
-        fake_run, calls = self._fake(returncode=1, stdout="")
-        self._obl.return_value = (0, time.time())   # fresh, but 0 (untrusted)
-        with m.patch.object(airuleset, "_repo_root", return_value="/some/repo"), \
-             m.patch.object(airuleset, "resolve_authority", return_value="full"), \
-             m.patch("subprocess.run", side_effect=fake_run):
+        self._obl.return_value = (0, time.time())
+        rr, ra = self._authority("full")
+        with rr, ra:
             result = airuleset._watchdog_backlog_fetch("/some/repo")
-        self.assertIsNone(result)          # cached 0 was NOT returned
-        self.assertEqual(len(calls), 1)    # fell through to the live count
+        self.assertIsNone(result)
+        self._snap.assert_called_once()
         self._spawn.assert_called_once()
 
 

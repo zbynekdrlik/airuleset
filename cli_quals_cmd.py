@@ -268,8 +268,8 @@ def _ops_wait_summary_line(ops_wait, stale_numbers, recheck_numbers,
 
     Returns the line string, or None when the bucket is empty (nothing to
     summarise). The `#` prefix keeps it OUT of the machine-parsed member set: the
-    sole programmatic consumer, `_watchdog_ops_wait_fetch`, skips `#`-lines
-    (#754), so the summary never trips its malformed→None guard. A member whose
+    parser (`cli_quals_snapshot.parse_ops_wait_members`, #1067 1d) skips `#`
+    lines (#754), so the summary never trips its malformed→None guard. A member whose
     `createdAt` is missing/empty sorts LAST (never spuriously wins `oldest=`)."""
     import airuleset
     total = len(ops_wait)
@@ -558,7 +558,7 @@ def _ops_wait_flag_sets(ops_wait, root, member_quals=None):
     column, SHARING ONE per-member comment-age fetch between the #570 `stale!`
     (24h), #699 `recheck!` (1h release cadence), #818 tacit-window, #881
     convergence and #944 deploy-target tags so the reason column never DOUBLES
-    the gh reads (margin for the 35s `_watchdog_ops_wait_fetch` timeout).
+    the gh reads (margin for the detached refresher's 180s child timeout).
     `gk-handoff!` is pure-label (no gh).
 
     #753 part 1a — `unpark?`: ONE per-repo ORIGIN release-train read (via
@@ -842,9 +842,11 @@ def cmd_slice_quals(args):
     want_dep_wait = getattr(args, "dep_wait", False)   # #993 item 7
     want_count_dispatchable = getattr(args, "count_dispatchable", False)  # #993 item 3
     want_list_dispatchable = getattr(args, "list_dispatchable", False) is True  # #1078 item 1 (#1036 Mock-truthy guard)
+    want_snapshot = getattr(args, "snapshot_json", False) is True  # #1067 1d (#1036 Mock-truthy guard)
     if not (want_count or want_list or want_waiting or want_ops_wait
             or want_audit or want_bounces or want_dep_wait
-            or want_count_dispatchable or want_list_dispatchable):
+            or want_count_dispatchable or want_list_dispatchable
+            or want_snapshot):
         for q in quals:
             print(q)
         return
@@ -945,41 +947,15 @@ def cmd_slice_quals(args):
         unhandled = _apply_role_filter(unhandled, root, role, slug=slug)
         ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)  # #1045
         waiting = _apply_role_filter(waiting, root, role, slug=slug)  # #1065
+    if want_snapshot:
+        # #1067 slice 1d: ALL watchdog quals facts from THIS one partition.
+        import cli_quals_snapshot
+        cli_quals_snapshot.emit_snapshot_json(
+            unhandled, ops_wait, root, quals, user, _emit_ops_wait, _dispatchable_fields)
+        return
     if want_ops_wait:
-        # #526: tag each W member `acceptance` (client thread sent) vs `ops-wait`
-        # (external event/evidence) so they are distinguishable in the listing.
-        # #570: also tag `stale!` a member with no fresh (≤24h) stream-push
-        # evidence — one per-member `gh issue view` on this on-demand path (the
-        # #539 `no-question!` shape), never on the hot footer refresh.
-        # #636: tag `gk-handoff!` a member ALSO carrying needs-gatekeeper/
-        # ready-for-review — the post-release-limbo contradiction (pure label
-        # check, no gh; drop the stale ops-wait so it enters gk N / the gk box's I).
-        # #699: also tag `recheck!` a RELEASE-parked member with no fresh (<=1h
-        # working) OWN re-check — sharing the SAME comment-age fetch as stale!.
-        # #753: also tag `unpark?` a release-parked member whose release has
-        # PROVABLY landed (origin train drained, full/branch-merge authority) —
-        # ONE per-repo origin read, only when a release-shaped member exists.
-        # #818: also tag `tacit-wait`/`tacit-close?` a delivered+reminded
-        # acceptance member inside/past its #799 N=3 window (subtracted from
-        # stale!/recheck! by _ops_wait_flag_sets — no second-reminder nudge).
-        _stale, _recheck, _gkh, _unpark, _tw, _tc, _conv, _nt, _dt = (
-            _ops_wait_flag_sets(ops_wait, root, member_quals=quals))
-        _print_issue_rows(ops_wait, own_stream=user,
-                          reason_fn=airuleset._ops_wait_reason,
-                          stale_numbers=_stale, recheck_numbers=_recheck,
-                          gk_handoff_numbers=_gkh, unpark_numbers=_unpark,
-                          tacit_wait_numbers=_tw, tacit_close_numbers=_tc,
-                          converge_numbers=_conv, no_target_numbers=_nt,
-                          deploy_target_numbers=_dt)
-        # #754: aggregate W-summary (`#`-comment, skipped by the watchdog fetch).
-        _summary = _ops_wait_summary_line(ops_wait, _stale, _recheck, _gkh,
-                                          unpark_numbers=_unpark,
-                                          tacit_wait_numbers=_tw,
-                                          tacit_close_numbers=_tc,
-                                          converge_numbers=_conv,
-                                          no_target_numbers=_nt)
-        if _summary:
-            print(_summary)
+        # the W listing, tagged per member (`_emit_ops_wait` documents each tag)
+        _emit_ops_wait(ops_wait, root, quals, own_stream=user)
         return
     if want_waiting:
         # #512: each labeled member gets a reason tag (answer/decision/
@@ -1259,18 +1235,63 @@ def _emit_count_dispatchable(rows, root):
     fetch flows the REASON into the journal (`skip:dispatchable-unknown (meta
     read failed)`) — the fail-safe direction (unmeasurable never nudges) is
     unchanged, only the explanation is added (#1021; #993 review 5)."""
+    count, reason = _dispatchable_fields(rows, root)
+    if count is None:
+        print("unmeasurable:" + reason)   # #1021: the reason says WHY
+        return
+    print(count)
+    if reason:
+        print("reason:" + reason)
+
+
+def _dispatchable_fields(rows, root):
+    """`(count, reason)` — the ONE dispatchable derivation `--count-dispatchable`
+    and `--snapshot-json` share (#1067 1d). count None = UNMEASURABLE (a failed
+    dependency-meta read, the ONLY `ok=False` cause → `meta read failed`); else
+    `reason` is set only for a 0 count over a non-empty set (`dep-wait`)."""
     import airuleset
     dep_map, slug, ok = _dep_wait_map_for(rows, root)
     if not ok:
-        # #1021: the ONLY reason `_dep_wait_map_for` reports `ok=False` is a
-        # failed dependency-meta read; the colon-form carries that reason so the
-        # inert nudge says WHY in the journal, not only `unmeasurable`.
-        print("unmeasurable:meta read failed")
-        return
+        return None, "meta read failed"
     dispatchable_set, reason = airuleset.dispatchable_numbers(rows, slug, dep_map)
-    print(len(dispatchable_set))
-    if not dispatchable_set and rows and reason:
-        print("reason:" + reason)
+    if dispatchable_set or not rows:
+        reason = None
+    return len(dispatchable_set), reason
+
+
+def _emit_ops_wait(ops_wait, root, quals, own_stream):
+    """`--ops-wait`: the W members, OLDEST first, each tagged in the reason
+    column, then the `# W-summary:` line (#754). Shared by both commands AND
+    `--snapshot-json` (which parses this very output), so the snapshot's
+    ops-wait members cannot drift from the listing (#1067 slice 1d).
+
+    Tags: `acceptance` (client thread sent) vs `ops-wait` (#526); `stale!` no
+    fresh (≤24h) stream-push evidence (#570, per-member `gh issue view`, never
+    on the hot footer); `gk-handoff!` ALSO needs-gatekeeper/ready-for-review,
+    the post-release limbo (#636, label-only; drop the stale ops-wait);
+    `recheck!` release-parked, no fresh (≤1h) OWN re-check (#699); `unpark?`
+    its release PROVABLY landed (#753, ONE origin read); `tacit-wait`/
+    `tacit-close?` a reminded acceptance inside/past its #799 N=3 window
+    (#818, subtracted from stale!/recheck! by `_ops_wait_flag_sets`)."""
+    import airuleset
+    _stale, _recheck, _gkh, _unpark, _tw, _tc, _conv, _nt, _dt = (
+        _ops_wait_flag_sets(ops_wait, root, member_quals=quals))
+    _print_issue_rows(ops_wait, own_stream=own_stream,
+                      reason_fn=airuleset._ops_wait_reason,
+                      stale_numbers=_stale, recheck_numbers=_recheck,
+                      gk_handoff_numbers=_gkh, unpark_numbers=_unpark,
+                      tacit_wait_numbers=_tw, tacit_close_numbers=_tc,
+                      converge_numbers=_conv, no_target_numbers=_nt,
+                      deploy_target_numbers=_dt)
+    # #754: aggregate W-summary (`#`-comment, skipped by the member parser).
+    _summary = _ops_wait_summary_line(ops_wait, _stale, _recheck, _gkh,
+                                      unpark_numbers=_unpark,
+                                      tacit_wait_numbers=_tw,
+                                      tacit_close_numbers=_tc,
+                                      converge_numbers=_conv,
+                                      no_target_numbers=_nt)
+    if _summary:
+        print(_summary)
 
 
 def _emit_list_dispatchable(rows, root):
@@ -1395,8 +1416,10 @@ def cmd_core_quals(args):
     want_dep_wait = getattr(args, "dep_wait", False)   # #993 item 7
     want_count_dispatchable = getattr(args, "count_dispatchable", False)  # #993 item 3
     want_list_dispatchable = getattr(args, "list_dispatchable", False) is True  # #1078 item 1 (#1036 Mock-truthy guard)
+    want_snapshot = getattr(args, "snapshot_json", False) is True  # #1067 1d (#1036 Mock-truthy guard)
     if not (want_count or want_list or want_waiting or want_ops_wait or want_audit
-            or want_dep_wait or want_count_dispatchable or want_list_dispatchable):
+            or want_dep_wait or want_count_dispatchable or want_list_dispatchable
+            or want_snapshot):
         for q in quals:
             print(q)
         return
@@ -1513,41 +1536,19 @@ def cmd_core_quals(args):
                 "Refusing (#181 round 4)." % (health, detail),
                 file=sys.stderr)
             sys.exit(1)
+    if want_snapshot:
+        # #1067 slice 1d: ALL watchdog quals facts from THIS one partition
+        # (own_stream=None: a full-authority box owns no stream).
+        import cli_quals_snapshot
+        cli_quals_snapshot.emit_snapshot_json(
+            workable, ops_wait, root, quals, None, _emit_ops_wait, _dispatchable_fields)
+        return
     if want_ops_wait:
         # own_stream=None: a full-authority box owns no stream, so EVERY
-        # stream-labelled row is action-only. #526: tag each W member
-        # `acceptance` (client thread sent) vs `ops-wait` (external event).
-        # #570: also tag `stale!` a member with no fresh (≤24h) stream-push
-        # evidence (one per-member `gh issue view`, on-demand path only).
-        # #636: tag `gk-handoff!` a member ALSO carrying needs-gatekeeper/
-        # ready-for-review — the post-release-limbo contradiction (pure label,
-        # no gh). On a gk-model box this NAMES a stream ticket whose hand-off the
-        # stale ops-wait hides from THIS box's own I; drop the ops-wait to close it.
-        # #699: also tag `recheck!` a RELEASE-parked member with no fresh (<=1h
-        # working) OWN re-check — sharing the SAME comment-age fetch as stale!.
-        # #753: also tag `unpark?` a release-parked member whose release has
-        # PROVABLY landed (origin train drained, full/branch-merge authority).
-        # #818: also tag `tacit-wait`/`tacit-close?` a delivered+reminded
-        # acceptance member inside/past its #799 N=3 window (subtracted from
-        # stale!/recheck! by _ops_wait_flag_sets — no second-reminder nudge).
-        _stale, _recheck, _gkh, _unpark, _tw, _tc, _conv, _nt, _dt = (
-            _ops_wait_flag_sets(ops_wait, root, member_quals=quals))
-        _print_issue_rows(ops_wait, own_stream=None,
-                          reason_fn=airuleset._ops_wait_reason,
-                          stale_numbers=_stale, recheck_numbers=_recheck,
-                          gk_handoff_numbers=_gkh, unpark_numbers=_unpark,
-                          tacit_wait_numbers=_tw, tacit_close_numbers=_tc,
-                          converge_numbers=_conv, no_target_numbers=_nt,
-                          deploy_target_numbers=_dt)
-        # #754: aggregate W-summary (`#`-comment, skipped by the watchdog fetch).
-        _summary = _ops_wait_summary_line(ops_wait, _stale, _recheck, _gkh,
-                                          unpark_numbers=_unpark,
-                                          tacit_wait_numbers=_tw,
-                                          tacit_close_numbers=_tc,
-                                          converge_numbers=_conv,
-                                          no_target_numbers=_nt)
-        if _summary:
-            print(_summary)
+        # stream-labelled row is action-only. On a gk-model box `gk-handoff!`
+        # NAMES a stream ticket whose hand-off the stale ops-wait hides from
+        # THIS box's own I; drop the ops-wait to close it (#636).
+        _emit_ops_wait(ops_wait, root, quals, own_stream=None)
         return
     if want_waiting:
         # own_stream=None: a full-authority box owns no stream, so EVERY

@@ -7030,103 +7030,53 @@ def _watchdog_delivery_probe(root, base):
 
 
 # #618 -- how fresh the tickets-status cache must be for the watchdog backlog
-# read to trust it over a live (slow) `--count` subprocess. Generous: a
+# read to trust it before the quals snapshot (#1067 1d). Generous: a
 # saturation-nudge decision tolerates a count minutes old. The cache
 # periodically dips just out of this bound by design (the watchdog re-warms it
 # only when it reads stale) and self-heals one sweep later — it is not held
 # strictly under the bound at every instant.
 _BACKLOG_STATUS_CACHE_MAX_AGE_S = 15 * 60
 
-# #619 -- the cache-miss LIVE `--count` fallback's subprocess timeout. The
-# measured `slice-quals --count` on a big shared-account slice is 16-17s
-# (O(backlog) serial gh timeline reads, #618), so the #618 timeout=15 ALWAYS
-# expired -> backlog=None on every cache-miss sweep (92x/9h on montalu1), which
-# starved the saturation nudge's under-saturation confirmation. Bumped to 30s
-# (comfortable margin over 17s) so the synchronous fallback COMPLETES instead of
-# bailing; the result then caches for 10min (BACKLOG_CHECK_INTERVAL_S) PER cwd, so
-# the 30s cost is paid at most once per that window per REPO, never per sweep.
-# Interaction noted (adversarial review): a cold fetch starting late in a sweep can
-# overshoot the unit's TimeoutStartSec (~120s) by ~15s more than the old 15s did --
-# but a mid-sweep kill is designed-for + self-recovering (a few/day), the cold path
-# is rare (cache-first), and the warmed cache serves the next sweep, so the wider
-# overshoot window is an accepted tradeoff for a reliable backlog read.
-_BACKLOG_LIVE_COUNT_TIMEOUT_S = 30
-# #993 review 2 — `--count-dispatchable` is heavier than `--count`: even with the
-# batched `fetch_meta` (ONE `gh issue list`), it still resolves each Depends-on
-# ref's state (per-dep `gh issue view`) + a live-infra-lane git scan. A generous
-# ceiling so it COMPLETES on a big shared backlog (a timeout → None →
-# skip:dispatchable-unknown, suppressing the refill nudge) rather than being cut
-# off. It is cached per-cwd (5-min TTL, `_cached_dispatchable`), so this cost is
-# paid at most once per repo per window, never every sweep.
-_DISPATCHABLE_COUNT_TIMEOUT_S = 90
+
+def _watchdog_quals_cmd(cwd):
+    """The authority-aware quals command for the repo at `cwd` — `core-quals`
+    on a FULL-authority box, `slice-quals` on a reduced-authority stream —
+    resolved against `_repo_root(cwd=cwd)` (falling back to the raw `cwd`), the
+    #160 🟡F3 fix: a pane cwd can be a SUBDIRECTORY of the repo, and resolving
+    authority against it directly could pick a DIFFERENT profile than the child
+    (which resolves against `_repo_root()` inside the command) — the child
+    would then refuse forever. Shared by the three watchdog quals readers
+    (#1067 slice 1d). Raises on a resolution error; callers map it to None."""
+    root = _repo_root(cwd=cwd) or cwd
+    return "core-quals" if resolve_authority(cwd=root) == "full" else "slice-quals"
 
 
 def _watchdog_backlog_fetch(cwd):
-    """#160 defect 1 / defect 4 — does THIS BOX's own slice of the repo at
-    `cwd` still have open, non-`autopilot-skip` backlog work, or None on any
-    failure/refusal.
+    """#160 defect 1 / defect 4 — the open, non-`autopilot-skip` WORKABLE
+    backlog count of THIS BOX's own slice of the repo at `cwd`, or None when
+    unmeasurable (every caller reads None as "cannot tell, do not act" —
+    `_cached_backlog_open` — never as 0).
 
-    #238-review-style finding (🔴F1, this ticket's own review): the FIRST
-    version of this function counted the WHOLE REPO via a raw `gh issue
-    list`, which is the wrong population to verify a session's own `🏁
-    BACKLOG EMPTY` claim against — a full-authority box's `/goal` loop stops
-    on the CORE/OBLIGATION partition (`core-quals`), and a reduced-authority
-    stream's loop stops on its OWN slice (`slice-quals`), NOT on the whole
-    repo (which routinely still has plenty of OTHER streams' open tickets on
-    a shared tracker). Counting the whole repo would make this check refuse
-    to trust a genuinely-true "backlog empty" claim on any repo with other
-    streams' work still open — exactly the false-positive direction #164/
-    #181 already fixed for the footer and the `/goal` stop-proof commands.
+    The population is the one the session's own `/goal` stop-proof reads (#160
+    🔴F1: never the whole repo): `core-quals --count` on a full-authority box,
+    `slice-quals --count` on a stream (`_watchdog_quals_cmd`). Both refuse
+    (non-zero exit, no number) on an untrustworthy empty result (#181), and
+    that refusal surfaces here as None.
 
-    Reuses those SAME commands (`core-quals --count` / `slice-quals
-    --count`), run as a subprocess against THIS repo (`cwd=cwd`) so
-    `resolve_authority`/`_repo_root` resolve exactly as they would inside
-    that session's own pane — never a second, independently-derived
-    partition that could drift from the one the session's own stop-proof
-    reads. Both commands already refuse (non-zero exit, no printed number)
-    on an untrustworthy empty result (#181's search-index guard) rather than
-    ever printing a false `0` — this function inherits that refusal as
-    `None` (unmeasurable), which every caller already treats as "never
-    guess, skip acting" (`_cached_backlog_open`).
+    #618: the tickets-status cache is read FIRST — the SAME workable `open` the
+    footer renders (`statusbar.obligation_count`, the ONE-derivation principle
+    #367/#468). A fresh POSITIVE value is served as is. A cached 0 is NOT
+    trusted (that writer has no #181 refuse-guard), so it falls through. A
+    stale/missing/untrusted read also WARMS the footer cache via the detached,
+    rate-limited `statusbar._spawn_refresh`.
 
-    #160-review-style finding 🟡F3 (this ticket's own review, proven live)
-    — the very #181 I-5 bug `_repo_root`'s own docstring describes (a
-    project's `airuleset:authority=...` marker invisible whenever cwd is a
-    SUBDIRECTORY of the repo) was reintroduced ONE LEVEL UP here: `cwd` is
-    the PANE's cwd, which can be a subdirectory of the actual repo root, so
-    resolving authority against it directly can pick a DIFFERENT profile
-    than the CHILD subprocess (which always resolves against `_repo_root()`
-    inside `cmd_core_quals`/`cmd_slice_quals`) — the child then refuses
-    outright, permanently and silently disabling both defect 1 and defect 4
-    for any such repo. Resolving authority against `_repo_root(cwd=cwd)`
-    here (falling back to the raw `cwd` only when the root itself cannot be
-    resolved) guarantees this function picks the SAME command the child
-    would independently choose for itself.
-
-    Wired HERE, like every other network call in this file, so run_once's
-    unit tests stay network-free.
-
-    #618: reads the tickets-status cache FIRST — the SAME workable `open` the
-    footer renders (`statusbar.obligation_count`, written by an UNTIMED
-    background refresh; the ONE-derivation principle #367/#468, sibling of the
-    #459 goal_dark_watch reader) — and only shells the live `--count`
-    subprocess as a cache-miss/stale/untrusted FALLBACK. That subprocess is
-    16-17s on a big shared-account slice (O(backlog) serial gh timeline reads);
-    the #618 timeout=15 ALWAYS expired → backlog=n/a → the saturation nudge
-    (goal_lane_occupancy_nudge) could never confirm under-saturation (92
-    backlog=None sweeps/9h on montalu1). #619 bumped it to
-    `_BACKLOG_LIVE_COUNT_TIMEOUT_S` (30s) so the synchronous fallback COMPLETES
-    on THIS sweep instead of bailing. A fresh POSITIVE cache read is still the
-    fast path (instant, never times out). A cached 0 is NOT trusted (the
-    tickets-status writer has no #181 refuse-guard — cmd_tickets_status's own
-    note — so a broken-index 0 can land in it), so it falls through to the
-    live count, which DOES refuse an untrustworthy empty as None: the #181
-    contract above is preserved. A stale/missing/untrusted read ALSO WARMS the
-    cache for the next sweep via the same detached, rate-limited `_spawn_refresh`
-    the statusline uses (so an idle box whose footer isn't rendering — montalu1's
-    7h-stale cache — is re-warmed by the watchdog's own 60s cadence). The bumped
-    live count now serves THIS sweep; the warmed cache is the belt-and-suspenders
-    for the next one."""
+    #1067 slice 1d: the fall-through no longer runs `--count` as a BLOCKING
+    subprocess (17.7 s live on montalu1, once `timeout=30`, #619). It reads the
+    per-repo quals SNAPSHOT (`watchdog.ops_wait_refresh.backlog_count`), which
+    ONE detached `--snapshot-json` refresher writes. When the snapshot is stale
+    the reader spawns it (single-flight, a ≤10 s client call) and never waits. The
+    snapshot count passed the SAME #181 refusal inside the command, so a
+    snapshot 0 is trusted, and no snapshot yet is None."""
     import time
     try:
         import statusbar
@@ -7145,29 +7095,15 @@ def _watchdog_backlog_fetch(cwd):
         return open_n
     # Cache missing/stale/untrusted: warm it for the NEXT sweep (detached,
     # untimed, rate-limited by SPAWN_GUARD_S; _spawn_refresh swallows its own
-    # errors), then attempt the live count for THIS sweep.
+    # errors), then read the non-blocking quals snapshot for THIS sweep.
     if statusbar is not None:
         statusbar._spawn_refresh(cwd)
-    import subprocess
+    import watchdog.ops_wait_refresh as _owref
     try:
-        root = _repo_root(cwd=cwd) or cwd
-        authority = resolve_authority(cwd=root)
+        cmd_name = _watchdog_quals_cmd(cwd)
     except Exception:
         return None
-    cmd_name = "core-quals" if authority == "full" else "slice-quals"
-    try:
-        r = subprocess.run(
-            [sys.executable, os.path.abspath(__file__), cmd_name, "--count"],
-            cwd=cwd, capture_output=True, text=True,
-            timeout=_BACKLOG_LIVE_COUNT_TIMEOUT_S)   # #619: 30s, was 15s (always timed out on a 16-17s slice)
-    except Exception:
-        return None
-    if r.returncode != 0:
-        return None
-    try:
-        return int((r.stdout or "").strip())
-    except ValueError:
-        return None
+    return _owref.backlog_count(cwd, cmd_name, argv0=os.path.abspath(__file__))
 
 
 def _dispatchable_for_cache(workable, root):
@@ -7215,92 +7151,46 @@ def _dispatchable_for_cache(workable, root):
 
 def _watchdog_dispatchable_fetch(cwd):
     """#993 item 3 — the DISPATCHABLE-candidate signal (`workable ∧ deps
-    satisfied`) for the repo at `cwd`, as a
-    ONE-element list `[{"count": N, "reason": r}]` (never `[]`), or None on any
-    failure/refusal. Sibling of `_watchdog_backlog_fetch`: same authority-aware
-    command choice (`core-quals`/`slice-quals`) + `_repo_root(cwd=cwd)` resolution
-    + refuse→None contract — only the flag differs (`--count-dispatchable`, which
-    prints the count on line 1 and, when the count is 0, a `reason:dep-wait`
-    line). The lane nudge reads it through `goal._cached_dispatchable`
-    (per-cwd TTL) so the O(workable) `--count-dispatchable` subprocess fires at
-    most once per repo per window, never every sweep. Wired HERE, like every
-    network call in this file, so run_once unit tests stay network-free
-    (dispatchable_fetch None → the lane nudge does NOT dep-gate)."""
-    import subprocess
+    satisfied`) for the repo at `cwd`, as a ONE-element list
+    `[{"count": N, "reason": r}]` (never `[]`), or None when unmeasurable.
+    `count` None + a reason (`meta read failed`, #1021) flows the reason into
+    the journal (`skip:dispatchable-unknown (<reason>)`) — still fail-safe,
+    never a nudge. The lane nudge reads it through `goal._cached_dispatchable`.
+
+    #1067 slice 1d: a NON-BLOCKING reader of the per-repo quals snapshot
+    (`watchdog.ops_wait_refresh.dispatchable`), which the detached
+    `--snapshot-json` refresher writes from the SAME derivation as
+    `--count-dispatchable` (`cli_quals_cmd._dispatchable_fields`). It is no
+    longer a blocking 19.7 s `--count-dispatchable` subprocess on the sweep
+    path. Same authority-aware command choice as the backlog reader."""
+    import watchdog.ops_wait_refresh as _owref
     try:
-        root = _repo_root(cwd=cwd) or cwd
-        authority = resolve_authority(cwd=root)
+        cmd_name = _watchdog_quals_cmd(cwd)
     except Exception:
         return None
-    cmd_name = "core-quals" if authority == "full" else "slice-quals"
-    try:
-        r = subprocess.run(
-            [sys.executable, os.path.abspath(__file__), cmd_name,
-             "--count-dispatchable"],
-            cwd=cwd, capture_output=True, text=True,
-            timeout=_DISPATCHABLE_COUNT_TIMEOUT_S)   # #993 review 2: batched but O(deps)
-    except Exception:
-        return None
-    if r.returncode != 0:
-        return None
-    lines = [ln.strip() for ln in (r.stdout or "").splitlines() if ln.strip()]
-    if not lines:
-        return None
-    try:
-        count = int(lines[0])
-    except ValueError:
-        # #1021: an `unmeasurable:<reason>` first line (a failed dependency-meta
-        # read) flows the REASON through so `goal._lane_dispatchable_decision`
-        # journals `skip:dispatchable-unknown (<reason>)` instead of only
-        # `unmeasurable` — still count=None → the unmeasurable branch, still
-        # fail-safe (never nudges). A bare `unmeasurable` (no reason) or any
-        # other unparseable head stays None (legacy / unknown).
-        head = lines[0]
-        if head.startswith("unmeasurable:"):
-            reason = head.split(":", 1)[1].strip() or None
-            return [{"count": None, "reason": reason}]
-        return None
-    reason = None
-    for ln in lines[1:]:
-        if ln.startswith("reason:"):
-            reason = ln.split(":", 1)[1].strip() or None
-    return [{"count": count, "reason": reason}]
+    return _owref.dispatchable(cwd, cmd_name, argv0=os.path.abspath(__file__))
 
 
 def _watchdog_ops_wait_fetch(cwd):
-    """#547/#1067 — the parked W (`ops-wait`) member NUMBERS for THIS box's slice
-    of the repo at `cwd`, or None on any failure/refusal. Same authority-aware
-    command choice (`core-quals`/`slice-quals`) and `_repo_root(cwd=cwd)`
-    resolution as the sibling `_watchdog_backlog_fetch`, so the child resolves
-    authority exactly as that session's own pane would.
+    """#547/#1067 — the parked W (`ops-wait`) members for THIS box's slice of
+    the repo at `cwd`, or None on any failure/refusal. Same authority-aware
+    command choice as the backlog reader (`_watchdog_quals_cmd`).
 
-    #1067 slice 1c (a): this is now NON-BLOCKING. The derivation used to run here
-    as a `subprocess.run(..., timeout=35)` inside the 90 s sweep, so a slow
-    `--ops-wait` (58 s live on montalu1 after slice 1b) timed out every stale-
-    cache sweep and job 20 logged `w:?`. The derivation is moved OFF the sweep
-    path into a DETACHED refresher (`watchdog.ops_wait_refresh.fetch_or_refresh`):
-    the sweep reads a per-repo atomic cache file and, when it is stale and no
-    refresher child is alive, spawns ONE detached `airuleset.py <cmd> --ops-wait`
-    child (own 180 s timeout) that writes the parsed members back atomically. The
-    sweep returns the last good result, None (undetermined — no result yet), or
-    the FETCH_TIMEOUT sentinel (a cold refresh timeout with no prior good result,
-    so the outer `_cached_member_fetch` backs its fail-TTL off geometrically —
-    the slice-1 backoff). The members still come from the ONE `_partition_
-    workable` derivation (#367/#181): the child runs the SAME `--ops-wait` CLI;
-    only WHO waits for it changes. The member-dict shape (`{number, stale,
-    gk_handoff, release_recheck, acceptance, tacit_close, converge, no_target,
-    deploy_target, title}`) and the None/[] contract are unchanged.
-
-    Wired HERE, like every other network call in this file, so run_once's unit
-    tests stay network-free (the spawn only fires on a stale-cache sweep)."""
+    NON-BLOCKING (#1067 slice 1c, folded into the ONE quals snapshot by slice
+    1d). The sweep reads the per-repo snapshot, and when it is stale spawns ONE
+    detached `--snapshot-json` refresher (`watchdog.ops_wait_refresh.
+    fetch_or_refresh`). It returns the last good members, None (no result yet),
+    or the FETCH_TIMEOUT sentinel (a cold refresh timeout with no prior good
+    result, so the outer `_cached_member_fetch` backs its fail-TTL off, slice
+    1). The member-dict shape (`{number, stale, gk_handoff, release_recheck,
+    acceptance, tacit_close, converge, no_target, deploy_target, title}`) and
+    the None/[] contract are unchanged."""
     import watchdog.ops_wait_recheck as _owr
     import watchdog.ops_wait_refresh as _owref
     try:
-        root = _repo_root(cwd=cwd) or cwd
-        authority = resolve_authority(cwd=root)
+        cmd_name = _watchdog_quals_cmd(cwd)
     except Exception:
         return None
-    cmd_name = "core-quals" if authority == "full" else "slice-quals"
     return _owref.fetch_or_refresh(cwd, cmd_name, _owr.FETCH_TIMEOUT,
                                    argv0=os.path.abspath(__file__))
 
@@ -8443,10 +8333,10 @@ def cmd_watchdog(args):
                     repo_roots=_watchdog_repo_roots,
                     issue_counts_fetch=_watchdog_issue_counts_fetch,
                     git_fetch=_watchdog_git_fetch,
-                    # #160 defects 1/4 run on EVERY managed box — both are
-                    # per-repo `gh` reads (cached per cwd, 10-min TTL, so a
-                    # box with several panes on one repo costs at most one
-                    # extra call per window) consulted by job 20's
+                    # #160 defects 1/4 run on EVERY managed box — both read
+                    # the per-repo quals SNAPSHOT (#1067 1d, non-blocking; a
+                    # detached refresher writes it, cached per cwd 10 min on
+                    # top) and are consulted by job 20's
                     # goal-achieved backstop and job 10's widened wedge ping.
                     backlog_fetch=_watchdog_backlog_fetch,
                     # #547 — job 20's W/ops-wait re-check nudge reads the parked
@@ -9768,6 +9658,11 @@ def _add_dispatch_flags(parser):
              "first (the SAME dispatchable_numbers set --count-dispatchable "
              "counts). The lane-fill Stop gate shells this so ONE quals call "
              "yields both the count and the ticket names (#1078 item 1)")
+    parser.add_argument(
+        "--snapshot-json", action="store_true",
+        help="Print ONE JSON object: open_count, i_members, dispatchable_count/"
+             "_reason and ops_wait_members, all from ONE derivation (the "
+             "watchdog's detached quals refresher, #1067 slice 1d)")
     parser.add_argument(
         "--role", choices=("review", "infra", "quality"), default=None,
         help="Slice the rows by work class (#993 r2b): 'review' = rows whose "

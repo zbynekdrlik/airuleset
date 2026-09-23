@@ -4,9 +4,10 @@ already does (#1023), reusing job 20's existing `_budget_left_fn` seam — NOT a
 one. Each skips with `hold:budget` + UNTOUCHED state when too little sweep budget
 remains, so a rider fetch never runs the sweep into the unit's 120s kill.
 
-The dispatchable guard is CACHE-AWARE (skips only when the 5-min --count-dispatchable
-subprocess would actually MISS the cache and fire), so a normal cache-HIT sweep never
-defers the refill nudge — the key non-over-defer property.
+#1067 slice 1d REMOVED the dispatchable rider's guard: its fetch no longer runs the
+blocking `--count-dispatchable` subprocess (it reads the detached quals snapshot), so
+there is no sweep budget to protect. `TestDispatchableNoBudgetGuard` locks that a
+low-budget cache MISS still reads (never `hold:budget`).
 
 RED against the pre-fix tree: the three riders take no `budget_left_fn` and fetch
 regardless of the remaining budget.
@@ -42,45 +43,28 @@ def _iso(epoch):
         epoch, datetime.timezone.utc).replace(tzinfo=None).isoformat() + "Z"
 
 
-class TestDispatchableBudget(unittest.TestCase):
+class TestDispatchableNoBudgetGuard(unittest.TestCase):
+    """#1067 slice 1d: the dispatchable fetch is a non-blocking snapshot read, so
+    the former #1041 `hold:budget` guard is gone — a cache MISS still reads, and
+    the decision takes no budget parameter."""
     CWD = "/c"
 
-    def _decide(self, state, budget_left, calls):
+    def test_cache_miss_still_reads(self):
+        calls = []
         spy = lambda cwd: (calls.append(cwd), [{"count": 3}])[1]  # noqa: E731
-        return goal._lane_dispatchable_decision(
-            spy, self.CWD, state, 1000, "loc", 1, 0, 5,
-            budget_left_fn=(lambda: budget_left))
-
-    def test_cache_miss_low_budget_holds_and_does_not_fetch(self):
-        calls = []
-        skip, log, cand = self._decide({}, 5, calls)   # empty state => cache MISS
-        self.assertTrue(skip)
-        self.assertIn("hold:budget", log)
-        self.assertEqual(calls, [], "no --count-dispatchable subprocess at 5s budget")
-
-    def test_cache_miss_ample_budget_fetches(self):
-        calls = []
-        skip, log, cand = self._decide({}, 200, calls)
-        self.assertEqual(calls, [self.CWD], "an ample budget must run the fetch")
+        skip, log, cand = goal._lane_dispatchable_decision(
+            spy, self.CWD, {}, 1000, "loc", 1, 0, 5)   # empty state => MISS
+        self.assertEqual(calls, [self.CWD])
         self.assertNotIn("hold:budget", log or "")
         self.assertEqual(cand, 3)
 
-    def test_cache_hit_low_budget_still_uses_cache_no_hold(self):
-        # a FRESH cache entry => the guard must NOT defer (microsecond read), so the
-        # refill nudge is never crippled on a normal sweep even at low budget.
-        state = {"dispatchable_cache": {self.CWD: {"ts": 1000, "members": [{"count": 4}]}}}
-        calls = []
-        skip, log, cand = self._decide(state, 5, calls)
-        self.assertEqual(calls, [], "a cache hit does not fetch")
-        self.assertFalse(skip)
-        self.assertIsNone(log)
-        self.assertEqual(cand, 4)
-
-    def test_unmeasurable_budget_applies_no_guard(self):
-        calls = []
-        skip, log, cand = self._decide({}, None, calls)  # budget_left_fn returns None
-        self.assertEqual(calls, [self.CWD])
-        self.assertEqual(cand, 3)
+    def test_the_guard_constant_and_parameter_are_gone(self):
+        import inspect
+        self.assertFalse(hasattr(goal, "DISPATCHABLE_FETCH_MIN_BUDGET_S"))
+        self.assertNotIn("budget_left_fn", inspect.signature(
+            goal._lane_dispatchable_decision).parameters)
+        self.assertNotIn("budget_left_fn", inspect.signature(
+            goal.goal_lane_occupancy_nudge).parameters)
 
 
 class TestReconcileBudget(unittest.TestCase):
@@ -162,6 +146,15 @@ class TestOpsWaitBudget(unittest.TestCase):
                          "an ample budget must run the ops-wait fetch\n"
                          + "\n".join(logs))
 
+    def test_ops_wait_miss_alone_no_longer_holds(self):
+        # #1067 1d review F5: the ops-wait member fetch is a non-blocking
+        # snapshot read, so only a deploy-state MISS holds at low budget.
+        ow_calls = []
+        state = {"deploy_state_cache": {self.CWD: {"ts": 1000, "members": []}}}
+        logs, _state = self._run(5, ow_calls, [], state=state)
+        self.assertEqual(ow_calls, [self.CWD], "\n".join(logs))
+        self.assertFalse(any("hold:budget" in ln for ln in logs), logs)
+
     def test_boundary_just_below_min_holds_just_above_runs(self):
         # #1041 review-2 🟡-2 — lock the ACTUAL threshold value: a revert of the min
         # would flip one of these. Budget is measured against the 110 ref, but the
@@ -230,12 +223,6 @@ class TestBudgetValueLocks(unittest.TestCase):
         start_at = _RIDER_REF_S - lane_reconcile.RECONCILE_FETCH_MIN_BUDGET_S
         self.assertLessEqual(start_at + reconcile_worst, _KILL_S,
                              "reconcile min too low vs its 40s git budget")
-
-    def test_dispatchable_min_covers_the_count_subprocess(self):
-        dispatchable_worst = 90                          # _DISPATCHABLE_COUNT_TIMEOUT_S
-        start_at = _RIDER_REF_S - goal.DISPATCHABLE_FETCH_MIN_BUDGET_S
-        self.assertLessEqual(start_at + dispatchable_worst, _KILL_S,
-                             "dispatchable min too low vs the 90s --count subprocess")
 
 
 if __name__ == "__main__":
