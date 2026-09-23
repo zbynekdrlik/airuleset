@@ -169,6 +169,58 @@ def has_extended_template(repo: str, *, runner=None) -> bool:
     return r.returncode == 0 and bool((r.stdout or "").strip())
 
 
+#: A LINE-ANCHORED `Frontline-impact:` field declaration in a hand-off template
+#: (tolerating leading markdown list / block-quote / emphasis chars). Not a bare
+#: substring, so a prose mention or inline example does not falsely require it.
+_FRONTLINE_FIELD_RE = re.compile(r"(?im)^[ \t>*_-]*Frontline-impact:")
+
+
+def _declares_frontline_impact(content: Optional[str]) -> bool:
+    """True iff ``content`` DECLARES a ``Frontline-impact:`` field on its own
+    line (see ``_FRONTLINE_FIELD_RE``). False for empty/None content."""
+    return bool(content) and bool(_FRONTLINE_FIELD_RE.search(content))
+
+
+def template_requires_frontline_impact(repo: str, *, runner=None) -> bool:
+    """True iff ``repo``'s ``subdev-handoff-comment.md`` template DECLARES the
+    ``Frontline-impact:`` field (#1120).
+
+    The repo declares the requirement — airuleset only supplies the field
+    plumbing (design 5791161529, Approach 2 rejected: which modules a shared
+    shell hosts is the target repo's domain knowledge). A repo that adds the
+    ``Frontline-impact:`` field to its hand-off template thereby opts into
+    requiring it; the composer then fails LOUD on a hand-off that omits the
+    value.
+
+    Reads the template CONTENT (base64-decoded from the ``gh api`` contents
+    endpoint), unlike ``has_extended_template`` which only probes existence.
+    ``runner(path)`` is injectable for tests and returns the raw template text
+    (not base64). Fail-safe False on any error (a repo whose template cannot be
+    read never blocks a hand-off).
+
+    The requirement is a LINE-ANCHORED field declaration (``^Frontline-impact:``,
+    tolerating leading markdown/quote chars) — not a bare substring — so a prose
+    mention or an inline example (e.g. "add a ``Frontline-impact:`` line") does
+    NOT flip a repo into requiring it (review finding: match the docstring's
+    'DECLARES the field' intent tightly)."""
+    path = "repos/%s/contents/.claude/rules/subdev-handoff-comment.md" % repo
+    if runner is not None:
+        try:
+            content = runner(path)
+        except Exception:
+            return False
+        return _declares_frontline_impact(content)
+    r = _run(["gh", "api", path, "-q", ".content"])
+    if r.returncode != 0:
+        return False
+    import base64
+    try:
+        content = base64.b64decode(r.stdout or "").decode("utf-8", "replace")
+    except Exception:
+        return False
+    return _declares_frontline_impact(content)
+
+
 def _parse_origin_slug(url: str) -> Optional[str]:
     """owner/name from a git remote URL, or None.
 
@@ -235,6 +287,10 @@ def render_extended_body(
     tested_tree: Optional[str] = None,
     evidence_head: Optional[str] = None,
     tenant_scope: Optional[str] = None,
+    # #1120: the shared-Frontline-shell impact line — every module the shell
+    # hosts, each with its entry-path E2E evidence. Optional/pass-through here;
+    # the requirement is enforced in compose_body against the repo's template.
+    frontline_impact: Optional[str] = None,
     source_verified: Optional[str] = None,
     # Bounce-specific fields.
     root_cause: Optional[str] = None,
@@ -292,6 +348,8 @@ def render_extended_body(
         parts.append("Evidence-HEAD: %s" % evidence_head)
     if tenant_scope:
         parts.append("Tenant-scope: %s" % tenant_scope)
+    if frontline_impact:
+        parts.append("Frontline-impact: %s" % frontline_impact)
     # shared_benefit is unconditionally required (validated upstream).
     parts.append("Shared-benefit: %s" % shared_benefit)
     if source_verified:
@@ -328,11 +386,13 @@ def render_generic_body(
     closes_finding: Optional[list[str]] = None,
     self_review_model: Optional[str] = None,
     reviewed_by: Optional[str] = None,
+    frontline_impact: Optional[str] = None,
 ) -> str:
     """Compose the original generic READY-FOR-REVIEW comment body.
 
     This is the pre-#969 shape, preserved for repos without the extended
-    template.
+    template. ``frontline_impact`` (#1120) is an optional pass-through, emitted
+    only when given.
     """
     parts: list[str] = []
 
@@ -348,6 +408,8 @@ def render_generic_body(
     parts.append("HEAD: %s" % head_sha)
     if reviewed_by:
         parts.append("Reviewed-by: %s" % reviewed_by)
+    if frontline_impact:
+        parts.append("Frontline-impact: %s" % frontline_impact)
 
     if bounce_round >= 2:
         if root_cause:
@@ -398,6 +460,7 @@ def compose_body(
     harness: Optional[str] = None,
     shared_benefit: Optional[str] = None,
     tenant_scope: Optional[str] = None,
+    frontline_impact: Optional[str] = None,
     source_verified: Optional[str] = None,
     tested_tree: Optional[str] = None,
     evidence_head: Optional[str] = None,
@@ -426,6 +489,20 @@ def compose_body(
                 "post it verbatim with `airuleset.py handoff --body-file "
                 "<body.md>` instead.")
 
+    # #1120: FAIL LOUD when the target repo's hand-off template DECLARES the
+    # Frontline-impact: field but this hand-off omits the value (same class as
+    # the odoo-erp gate's Tenant-scope:). Probed only when the value is absent,
+    # so a hand-off that supplies it pays zero extra gh. The repo declares the
+    # requirement; airuleset supplies the plumbing (Approach 2 rejected).
+    if not (frontline_impact or "").strip():
+        if template_requires_frontline_impact(repo):
+            return ("", "handoff BLOCK: repo's hand-off template requires "
+                    "Frontline-impact: — pass --frontline-impact "
+                    "\"<app>: <module> <evidence>; …\" listing every module the "
+                    "shared Frontline shell hosts, each with its entry-path "
+                    "E2E spec (a shell change must prove every hosted module "
+                    "still works; #1120)")
+
     # Y1 review finding (#969): when any extended flag is explicitly supplied,
     # treat the intent as "extended" even if the probe fails — silently
     # falling back to generic would post a body the gate rejects.
@@ -445,6 +522,7 @@ def compose_body(
             shared_benefit=shared_benefit, self_review_table=self_review_table,
             bounce_round=bounce_round, tested_tree=tested_tree,
             evidence_head=evidence_head, tenant_scope=tenant_scope,
+            frontline_impact=frontline_impact,
             source_verified=source_verified, root_cause=root_cause,
             prevencia_read=prevencia_read,
             closes_finding=closes_finding,
@@ -460,5 +538,6 @@ def compose_body(
             closes_finding=closes_finding,
             self_review_model=self_review_model,
             reviewed_by=reviewed_by,
+            frontline_impact=frontline_impact,
         )
     return (body, None)

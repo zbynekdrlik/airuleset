@@ -173,14 +173,24 @@ def normalize_ref(ref, default_repo):
     return (repo, int(m.group("num")))
 
 
-def dep_wait(deps, state_fn, self_ref=None):
+def dep_wait(deps, state_fn, self_ref=None, merged_fn=None):
     """``(blocked, unsatisfied)``: ANY dependency that is OPEN or unresolvable
     (``state_fn`` → None) makes the ticket ``dep-wait``. ``deps`` is a list of
     ``(repo, number)`` tuples; ``state_fn(repo, number)`` returns
     ``"OPEN"`` / ``"CLOSED"`` / None (unresolvable). A dep equal to ``self_ref``
     (a 1-cycle) is treated as OPEN → blocked. Any longer cycle resolves to
     both-wait naturally (each member's predecessor is still open). Fail-safe:
-    an unresolvable dep counts as blocking (#993 item 7)."""
+    an unresolvable dep counts as blocking (#993 item 7).
+
+    ``merged_fn(repo, number)`` (#1120): THE single point where dependency
+    satisfaction is decided — a dep counts as SATISFIED when it is CLOSED **or**
+    when ``merged_fn`` returns True, i.e. the dep's fix is MERGED into the
+    integration branch (in the repo's merged-unreleased ``M`` bucket) but not
+    yet closed at release. A cross-stream adoption ticket therefore becomes
+    dispatchable the moment the mechanism merges, not days later at close
+    (odoo-erp #7883/#7892). ``merged_fn=None`` (default) preserves the
+    CLOSED-only behaviour; an errored ``merged_fn`` counts the dep un-merged, so
+    satisfaction stays fail-safe toward BLOCKED."""
     unsatisfied = []
     for dep in deps:
         if self_ref is not None and dep == self_ref:
@@ -190,8 +200,17 @@ def dep_wait(deps, state_fn, self_ref=None):
             st = state_fn(dep[0], dep[1])
         except Exception:
             st = None
-        if not (isinstance(st, str) and st.upper() == "CLOSED"):
-            unsatisfied.append(dep)
+        if isinstance(st, str) and st.upper() == "CLOSED":
+            continue
+        merged = False
+        if merged_fn is not None:
+            try:
+                merged = bool(merged_fn(dep[0], dep[1]))
+            except Exception:
+                merged = False   # fail-safe: an errored probe → not merged
+        if merged:
+            continue
+        unsatisfied.append(dep)
     return (bool(unsatisfied), unsatisfied)
 
 
@@ -201,6 +220,40 @@ def dispatchable(is_dep_wait):
     nudges use (#993 item 7; the class-based live-infra-lane gate was removed in
     round 2b — infra serialisation is now ROUTING via ``--role``, not gating)."""
     return not is_dep_wait
+
+
+def merged_unreleased_fn(slug, root):
+    """Build the ``merged_fn(repo, number) -> bool`` that ``dep_wait`` uses to
+    count a MERGED-but-not-yet-closed dependency as satisfied (#1120).
+
+    Reuses the ONE merged-unreleased (``M``) derivation
+    ``cli_release_state.merged_unreleased_issues`` — the SAME set the footer,
+    statusbar and tickets-status read (#1083 three-branch, #1112 two-branch);
+    no second derivation. That set is LOCAL-repo-scoped, so only a SAME-repo dep
+    (``repo == slug``) can be satisfied by merge; a cross-repo dep stays
+    fail-safe (it still needs CLOSED — the local M set says nothing about
+    another repo's release state). Empty/False on ANY error (the
+    never-falsely-dispatch direction: a ticket whose merge state cannot be
+    derived stays dep-wait). The derivation is memoised per process in
+    ``cli_release_state``, so building the fn per dep-resolution call is cheap
+    and, on the warm-cache ``--count`` path, pays zero gh."""
+    try:
+        import cli_release_state
+        merged = cli_release_state.merged_unreleased_issues(root)
+        # Coerce INSIDE the try so a non-int member honours the stated
+        # "empty on ANY error" contract (review B LOW) rather than raising
+        # past the fail-safe.
+        merged_set = {int(n) for n in (merged or [])}
+    except Exception:
+        merged_set = set()
+
+    def merged_fn(repo, number):
+        try:
+            return repo == slug and int(number) in merged_set
+        except (TypeError, ValueError):
+            return False
+
+    return merged_fn
 
 
 # --------------------------------------------------------------------------- #
@@ -452,7 +505,7 @@ def _ref_str(repo, num, slug):
     return ("#%d" % num) if repo == slug else ("%s#%d" % (repo, num))
 
 
-def dep_wait_map(rows, slug, runner, root, meta=None):
+def dep_wait_map(rows, slug, runner, root, meta=None, merged_fn=None):
     """`{row-key: [blocking ref strings]}` for the workable rows that are
     dep-wait (any `Depends-on:` referent OPEN/unresolvable/cyclic). Rows with no
     `Depends-on:` or all-closed deps are ABSENT.
@@ -496,7 +549,8 @@ def dep_wait_map(rows, slug, runner, root, meta=None):
             continue
         ni = _as_int(number)
         self_ref = (slug, ni) if (slug and ni is not None) else None
-        blocked, unsat = dep_wait(deps, state_fn, self_ref=self_ref)
+        blocked, unsat = dep_wait(deps, state_fn, self_ref=self_ref,
+                                  merged_fn=merged_fn)
         if blocked:
             out[number] = [_ref_str(r[0], r[1], slug) for r in unsat]
     return out
@@ -530,7 +584,7 @@ def dispatchable_numbers(rows, slug, dep_map):
     return dispatchable_set, reason
 
 
-def classify_number(number, slug, runner, root):
+def classify_number(number, slug, runner, root, merged_fn=None):
     """The dispatch class of ONE issue: ``"dispatchable"`` | ``"dep-wait"`` (the
     queue-arrival nudge's per-arrival gate, #993 item 4). Fetches the issue's
     ``Depends-on:`` via ``runner`` (gh) and resolves it; a workable issue is
@@ -550,11 +604,11 @@ def classify_number(number, slug, runner, root):
     self_ref = (slug, ni) if (slug and ni is not None) else None
     is_dw = bool(deps) and dep_wait(
         deps, lambda rp, nu: issue_state(rp, nu, runner, root),
-        self_ref=self_ref)[0]
+        self_ref=self_ref, merged_fn=merged_fn)[0]
     return "dispatchable" if dispatchable(is_dw) else "dep-wait"
 
 
-def resolve_issue_deps(issues, slug, runner, root):
+def resolve_issue_deps(issues, slug, runner, root, merged_fn=None):
     """The lane-overlap receipt's deps field (#993 item 7): ``"satisfied"`` when
     EVERY issue's ``Depends-on:`` refs are closed (or none), else the list of
     unsatisfied blocking ref strings. Same fail-safe as ``dep_wait`` (an
@@ -577,7 +631,8 @@ def resolve_issue_deps(issues, slug, runner, root):
             continue
         ni = _as_int(n)
         self_ref = (slug, ni) if (slug and ni is not None) else None
-        blocked, unsat = dep_wait(deps, state_fn, self_ref=self_ref)
+        blocked, unsat = dep_wait(deps, state_fn, self_ref=self_ref,
+                                  merged_fn=merged_fn)
         if blocked:
             unsatisfied += [_ref_str(r[0], r[1], slug) for r in unsat]
     return "satisfied" if not unsatisfied else unsatisfied
