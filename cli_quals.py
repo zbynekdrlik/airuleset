@@ -1703,9 +1703,11 @@ def _ops_wait_prefetch_comments(member_quals, root, limit=None):
     already read (their members stay in the map), and every unfetched member
     falls back to the per-issue read.
 
-    The GraphQL comment node shape (`{author: {login}, createdAt, body}`) is
-    BYTE-IDENTICAL to `gh issue view --json comments`, so `_ages_from_comments`
-    parses it unchanged — EXCEPT `comments(last: 100)` carries only the newest
+    The GraphQL comment node carries the SAME THREE keys `_ages_from_comments`
+    consumes (`author: {login}`, `createdAt`, `body`) — `gh issue view --json
+    comments` also carries extra keys (id/url/…) this query omits, but the parse
+    reads only those three, so the ages are IDENTICAL either way — EXCEPT
+    `comments(last: 100)` carries only the newest
     100, so a row whose `totalCount > OPS_WAIT_PREFETCH_COMMENT_CAP` is EXCLUDED
     from the map and falls back to the fully-paginated per-issue read (its OLD
     anchors could otherwise be missing — never a false `stale!`, #539/#570).
@@ -1724,13 +1726,22 @@ def _ops_wait_prefetch_comments(member_quals, root, limit=None):
     (a qual that also matches non-W tickets) is harmless: only members present in
     the `ops_wait` set are ever consumed."""
     import airuleset
+    from gates import ghread
     out = {}
     if not member_quals:
         return out
-    # The search string needs the repo slug embedded (`repo:<slug>`); resolve it
-    # the way the module already does (`_repo_slug` — `gh repo view`). An empty /
-    # unresolvable slug can't build a valid search → everything falls back.
-    slug = (airuleset._repo_slug(cwd=root) or "").strip()
+    # The search string needs the repo slug embedded (`repo:<slug>`). Resolve it
+    # with the FLEET fork-aware, LOCAL-git-only resolver (`ghread.canonical_slug`,
+    # the ONE slug reader the open-issue snapshot / cross-stream / release-state
+    # readers share, #1094) — NEVER the origin-only `_repo_slug`: on a fork clone
+    # (david1-4 — origin = the fork, issues disabled) `_repo_slug` returns the
+    # FORK slug, whose `search(query: "repo:<fork> …")` silently returns nothing
+    # (prefetch inert on exactly the busiest streams) or, worse, a colliding fork
+    # issue's comments for a canonical member. `canonical_slug` resolves the base
+    # repo the way `gh` does, with zero network (survives quota exhaustion, and
+    # removes the extra `gh repo view` round-trip). An empty / unresolvable slug
+    # can't build a valid search → everything falls back per-issue.
+    slug = (ghread.canonical_slug(root) or "").strip()
     if not slug:
         return out
     label_q = "label:" + ",".join(OPS_WAIT_PREFETCH_LABELS)
@@ -1745,10 +1756,12 @@ def _ops_wait_prefetch_comments(member_quals, root, limit=None):
         search = " ".join(parts)
         cursor = None
         for _page in range(max_pages):
+            # `-f` (raw string) for every String-typed variable — `$q`/`$cursor`
+            # are `String`, so avoid `-F`'s number/bool/null/@file coercion.
             gh_args = ["api", "graphql", "-f",
-                       "query=" + _OPS_WAIT_PREFETCH_GQL, "-F", "q=" + search]
+                       "query=" + _OPS_WAIT_PREFETCH_GQL, "-f", "q=" + search]
             if cursor:
-                gh_args += ["-F", "cursor=" + cursor]
+                gh_args += ["-f", "cursor=" + cursor]
             raw = airuleset._gh_out(*gh_args, cwd=root, timeout=20)
             if not raw:
                 break                             # page failure -> keep earlier

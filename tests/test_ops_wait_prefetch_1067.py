@@ -89,23 +89,31 @@ class _GhRecorder:
 
     def __init__(self, comments, present=None, list_comments=None,
                  total_counts=None, page_size=10, fail_pages=None,
-                 slug="owner/repo"):
+                 raw_pages=None, force_has_next=False):
         self.comments = comments
         self.present = list(comments) if present is None else list(present)
         self.list_comments = list_comments or comments
         self.total_counts = total_counts or {}
         self.page_size = page_size
         self.fail_pages = set(fail_pages or ())
-        self.slug = slug
+        # raw_pages: {page_idx: raw_string} — returned VERBATIM for that page
+        # (models a GraphQL 200 carrying `errors` / `data:null` / a null cursor).
+        self.raw_pages = raw_pages or {}
+        # force_has_next: always report hasNextPage=True (models an unbounded
+        # result set so the `max_pages` cap is what terminates the loop).
+        self.force_has_next = force_has_next
         self.graphql_calls = 0
+        self.graphql_queries = []                # captured `q=` search strings
         self.view_calls = []
 
     def __call__(self, *args, **kwargs):
-        # repo slug resolution: gh repo view --json nameWithOwner -q .nameWithOwner
-        if args[:2] == ("repo", "view") and "nameWithOwner" in args:
-            return self.slug
+        # The repo slug is resolved via ghread.canonical_slug (LOCAL git), NOT
+        # gh — so this fake never serves a slug; tests patch canonical_slug.
         # slice-1b batched prefetch: gh api graphql ... search(...)
         if args[:2] == ("api", "graphql"):
+            for a in args:
+                if isinstance(a, str) and a.startswith("q="):
+                    self.graphql_queries.append(a[len("q="):])
             page_idx = 0
             cursor = _cursor_of(args)
             if cursor is not None and cursor.startswith("off:"):
@@ -114,6 +122,8 @@ class _GhRecorder:
             else:
                 offset = 0
             self.graphql_calls += 1
+            if page_idx in self.raw_pages:
+                return self.raw_pages[page_idx]  # verbatim (errors/data:null/…)
             if page_idx in self.fail_pages:
                 return ""                        # page failure → _gh_out ""
             chunk = self.present[offset:offset + self.page_size]
@@ -123,7 +133,8 @@ class _GhRecorder:
                 tc = self.total_counts.get(n, len(cnodes))
                 nodes.append({"number": n,
                               "comments": {"totalCount": tc, "nodes": cnodes}})
-            has_next = (offset + self.page_size) < len(self.present)
+            has_next = (self.force_has_next
+                        or (offset + self.page_size) < len(self.present))
             end_cursor = "off:%d" % (offset + self.page_size)
             return json.dumps({"data": {"search": {
                 "issueCount": len(self.present),
@@ -143,8 +154,10 @@ class _GhRecorder:
         return self.graphql_calls + len(self.view_calls)
 
 
-def _run_flag_sets(ow, member_quals, rec):
+def _run_flag_sets(ow, member_quals, rec, slug="owner/repo"):
+    from gates import ghread
     with mock.patch.object(airuleset, "_gh_out", rec), \
+            mock.patch.object(ghread, "canonical_slug", lambda root: slug), \
             mock.patch.object(airuleset, "_stream_self_login", lambda: "me"), \
             mock.patch.object(airuleset, "resolve_authority",
                               lambda cwd=None: "full"), \
@@ -363,13 +376,101 @@ class PrefetchSlugFailureFallsBack(unittest.TestCase):
 
     def test_empty_slug_falls_back_to_per_issue(self):
         ow = _ow(41, 42)
-        rec = _GhRecorder(COMMENTS, slug="")     # gh repo view → "" (no slug)
-        sets = _run_flag_sets(ow, ["label:stream:x"], rec)
+        rec = _GhRecorder(COMMENTS)
+        # canonical_slug → "" (unresolvable repo) → no search buildable.
+        sets = _run_flag_sets(ow, ["label:stream:x"], rec, slug="")
         # no GraphQL page attempted (nothing to query), all members per-issue.
         self.assertEqual(0, rec.graphql_calls)
         self.assertIn(41, rec.view_calls)
         self.assertIn(42, rec.view_calls)
         self.assertIn(41, sets[0])               # still correctly stale!
+
+
+def _run_prefetch(rec, member_quals, slug="owner/repo", limit=None):
+    """Call the prefetch directly with `_gh_out` + `canonical_slug` patched —
+    for asserting the returned map / call counts on the pager's edge paths."""
+    import cli_quals
+    from gates import ghread
+    with mock.patch.object(airuleset, "_gh_out", rec), \
+            mock.patch.object(ghread, "canonical_slug", lambda root: slug):
+        return cli_quals._ops_wait_prefetch_comments(member_quals, "/r", limit=limit)
+
+
+class PrefetchQueryString(unittest.TestCase):
+    """(1b) — the search string embeds the resolved slug, is:issue is:open, the
+    member qual and the ops-wait,needs-acceptance label OR."""
+
+    def test_search_query_carries_slug_scope_qual_and_labels(self):
+        rec = _GhRecorder(COMMENTS)
+        _run_prefetch(rec, ["label:stream:x"], slug="owner/repo")
+        self.assertEqual(1, len(rec.graphql_queries))
+        q = rec.graphql_queries[0]
+        self.assertIn("repo:owner/repo", q)
+        self.assertIn("is:issue is:open", q)
+        self.assertIn("label:stream:x", q)
+        self.assertIn("label:ops-wait,needs-acceptance", q)
+
+
+class PrefetchPartialResponseFallback(unittest.TestCase):
+    """(1b) — a GraphQL 200 carrying `errors` / `data:null` stops that qual's
+    paging, keeps pages already read, and never NoneType-crashes."""
+
+    def test_graphql_errors_keeps_earlier_pages_rest_fall_back(self):
+        nums = list(range(41, 61))              # page 0 (41-50), page 1 (51-60)
+        c = {n: [{"author": {"login": "me"}, "createdAt": _OLD, "body": "x"}]
+             for n in nums}
+        # page 1 returns a valid HTTP 200 body carrying GraphQL `errors`.
+        err = json.dumps({"data": None,
+                          "errors": [{"message": "something failed"}]})
+        rec = _GhRecorder(c, page_size=10, raw_pages={1: err})
+        out = _run_prefetch(rec, ["label:stream:x"])
+        # page-0 members kept…
+        self.assertIn(41, out)
+        # …page-1 members absent (fall back per-issue at the consumer).
+        self.assertNotIn(51, out)
+
+    def test_data_null_no_errors_no_crash_returns_empty(self):
+        # a `{"data": null}` body without `errors` must not NoneType-crash;
+        # `(None or {}).get("search")` → None → break, nothing mapped.
+        rec = _GhRecorder(COMMENTS, raw_pages={0: json.dumps({"data": None})})
+        out = _run_prefetch(rec, ["label:stream:x"])
+        self.assertEqual({}, out)
+        self.assertEqual(1, rec.graphql_calls)
+
+
+class PrefetchNullCursorTerminates(unittest.TestCase):
+    """(1b) — hasNextPage true but a null/missing endCursor stops the loop
+    (no re-fetch of page 1 with cursor=None, no infinite loop)."""
+
+    def test_has_next_but_null_cursor_stops_after_one_call(self):
+        page = json.dumps({"data": {"search": {
+            "pageInfo": {"hasNextPage": True, "endCursor": None},
+            "nodes": [{"number": 41,
+                       "comments": {"totalCount": 1,
+                                    "nodes": COMMENTS[41]}}]}}})
+        rec = _GhRecorder(COMMENTS, raw_pages={0: page})
+        out = _run_prefetch(rec, ["label:stream:x"])
+        self.assertEqual(1, rec.graphql_calls)   # no loop
+        self.assertIn(41, out)
+
+
+class PrefetchMaxPagesCap(unittest.TestCase):
+    """(1b) — the pager stops at ceil(limit/page_size) pages even while the
+    result set still reports hasNextPage; the remainder falls back per-issue."""
+
+    def test_cap_bounds_pages_when_has_next_never_false(self):
+        # 100 members, page_size 10, limit 25 → ceil(25/10)=3 pages, then stop.
+        nums = list(range(101, 201))
+        c = {n: [{"author": {"login": "me"}, "createdAt": _FRESH, "body": "x"}]
+             for n in nums}
+        rec = _GhRecorder(c, page_size=10, force_has_next=True)
+        out = _run_prefetch(rec, ["label:stream:x"], limit=25)
+        self.assertEqual(3, rec.graphql_calls)   # capped at ceil(25/10)
+        # only the first 30 members (3 pages of 10) are in the map…
+        self.assertIn(101, out)
+        self.assertIn(130, out)
+        # …the rest are absent (would fall back per-issue at the consumer).
+        self.assertNotIn(131, out)
 
 
 class CacheTimeoutBackoff(unittest.TestCase):
