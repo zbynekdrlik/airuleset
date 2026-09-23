@@ -301,6 +301,42 @@ class TestFleetFloorConstant(unittest.TestCase):
         self.assertGreaterEqual(t, (2, 1, 251))
 
 
+class TestFloorCoversManagedLineup1121(unittest.TestCase):
+    """#1121: the fleet floor must be high enough for every MANAGED model.
+
+    #1119 made claude-opus-5-5 the main + subagent default while the floor
+    stayed at 2.1.251; a 2.1.278 binary got HTTP 400 ("version 2.1.280 or
+    newer required"). A lineup swap must now declare its minimum CLI version
+    and carry the floor with it."""
+
+    def _managed_ids(self):
+        import airuleset
+        return {airuleset.MANAGED_MODEL.split("[", 1)[0],
+                airuleset.MODEL_TIERS["opus5"]}
+
+    def test_every_managed_model_declares_its_min_cli_version(self):
+        table = getattr(cli_fleet, "MODEL_MIN_CLAUDE_VERSION", {})
+        for mid in self._managed_ids():
+            self.assertIn(mid, table,
+                          f"{mid} is a managed default but has no "
+                          "MODEL_MIN_CLAUDE_VERSION entry")
+
+    def test_fleet_floor_covers_every_managed_model(self):
+        floor = cv.parse_claude_version(cli_fleet.FLEET_CLAUDE_MIN_VERSION)
+        table = getattr(cli_fleet, "MODEL_MIN_CLAUDE_VERSION", {})
+        for mid in self._managed_ids():
+            need = cv.parse_claude_version(table.get(mid, "999.0.0"))
+            self.assertGreaterEqual(
+                floor, need,
+                f"fleet floor {cli_fleet.FLEET_CLAUDE_MIN_VERSION} is below "
+                f"the minimum CLI version {mid} needs")
+
+    def test_opus55_needs_2_1_280(self):
+        """The API floor quoted in the #1121 400 error."""
+        table = getattr(cli_fleet, "MODEL_MIN_CLAUDE_VERSION", {})
+        self.assertEqual(table.get("claude-opus-5-5"), "2.1.280")
+
+
 class TestFacadeReExport(unittest.TestCase):
     """airuleset.py facade re-exports the new module's names."""
 
