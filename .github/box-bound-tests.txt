@@ -23,6 +23,8 @@ tests/test_webterm_stream_footer_672.py
 tests/test_airuleset.py::TestClaudeHistoryPopupScript::test_real_execution_fails_loudly_when_capture_pane_is_blank_too
 tests/test_airuleset.py::TestClaudeHistoryPopupScript::test_real_execution_falls_back_to_real_capture_pane
 tests/test_airuleset.py::TestClaudeHistoryPopupScript::test_real_execution_falls_back_when_claude_history_exits_zero_but_empty
+# #1124: drives a private `-L` tmux server (no tmux in the container)
+tests/test_controller_window_name_tmux_1124.py
 #
 # --- git/tmux session-state dependent ---
 tests/test_airuleset.py::TestSessionStartFetchHook::test_unmeasurable_status_refuses_rather_than_guesses_clean
