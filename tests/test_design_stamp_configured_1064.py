@@ -55,6 +55,9 @@ def tearDownModule():
 
 MAIN_CWD = "/home/airuleset/devel/airuleset"
 FABLE = "claude-fable-5-1"
+# #1119: the managed MAIN model (MANAGED_MODEL, sans [1m]) is now Opus 5.5;
+# the managed-fallback configured model resolves to this.
+MANAGED = "claude-opus-5-5"
 
 
 def _write_transcript(pd, cwd, model):
@@ -74,10 +77,10 @@ class TestConfiguredModel(unittest.TestCase):
             self.assertEqual(cli_authorship.configured_model(MAIN_CWD), FABLE)
 
     def test_falls_back_to_managed_model_when_no_pane(self):
-        # no pane/argv resolves -> the managed default (normalised).
+        # no pane/argv resolves -> the managed default (normalised, Opus 5.5 #1119).
         with mock.patch("cli_authorship._pane_configured_model",
                         return_value=None):
-            self.assertEqual(cli_authorship.configured_model(MAIN_CWD), FABLE)
+            self.assertEqual(cli_authorship.configured_model(MAIN_CWD), MANAGED)
 
     def test_unknown_only_when_neither_resolves(self):
         with mock.patch("cli_authorship._pane_configured_model",
@@ -88,7 +91,7 @@ class TestConfiguredModel(unittest.TestCase):
 
     def test_worker_no_pane_falls_through_to_unknown_not_managed(self):
         # #1064 review 🟡1: a paneless worker/implementer must NOT get the
-        # MANAGED_MODEL (Fable) fallback -- that would falsely claim the main's
+        # MANAGED_MODEL (Opus 5.5, #1119) fallback -- that would falsely claim the main's
         # launch id. configured_model returns UNKNOWN so the stamp uses the
         # truthful served model. (The MAIN keeps the MANAGED_MODEL fallback.)
         wt = "/home/x/proj/.claude/worktrees/agent-zzz"
@@ -235,16 +238,18 @@ class TestManagedFallbackProvenance(unittest.TestCase):
         self.assertTrue(ok, "the argv-Fable float stamp must still be accepted")
 
     def test_c_fallback_plus_served_equals_keeps_today_stamp(self):
-        _write_transcript(self.pd, MAIN_CWD, "claude-fable-5-1")
+        # #1119: served == the managed-fallback configured model (Opus 5.5) -> no
+        # suffix, no demotion.
+        _write_transcript(self.pd, MAIN_CWD, MANAGED)
         with mock.patch("cli_authorship._pane_configured_model",
                         return_value=None):
-            self.assertEqual(self._stamp(), "Design-by: main claude-fable-5-1")
+            self.assertEqual(self._stamp(), "Design-by: main claude-opus-5-5")
 
     def test_d_fallback_plus_served_unknown_keeps_today_stamp(self):
-        # no transcript -> served unknown -> the managed fallback stands.
+        # no transcript -> served unknown -> the managed fallback stands (Opus 5.5 #1119).
         with mock.patch("cli_authorship._pane_configured_model",
                         return_value=None):
-            self.assertEqual(self._stamp(), "Design-by: main claude-fable-5-1")
+            self.assertEqual(self._stamp(), "Design-by: main claude-opus-5-5")
 
     def test_provenance_tags(self):
         with mock.patch("cli_authorship._pane_configured_model",
@@ -256,7 +261,7 @@ class TestManagedFallbackProvenance(unittest.TestCase):
                         return_value=None):
             self.assertEqual(
                 cli_authorship.configured_model_with_provenance(MAIN_CWD),
-                ("claude-fable-5-1", "managed-fallback"))
+                ("claude-opus-5-5", "managed-fallback"))  # #1119: managed = Opus 5.5
             self.assertEqual(
                 cli_authorship.configured_model_with_provenance(
                     "/home/x/proj/.claude/worktrees/agent-zzz"),
@@ -266,7 +271,7 @@ class TestManagedFallbackProvenance(unittest.TestCase):
         # existing callers (design-record's unknown-refusal) still get a bare id.
         with mock.patch("cli_authorship._pane_configured_model",
                         return_value=None):
-            self.assertEqual(cli_authorship.configured_model(MAIN_CWD), FABLE)
+            self.assertEqual(cli_authorship.configured_model(MAIN_CWD), MANAGED)
 
 
 class TestDispatchGateSuffix(unittest.TestCase):

@@ -1,8 +1,8 @@
 """#1076 -- gates.meetingdelegation + hooks/block-meeting-analysis-delegation.sh.
 
 The meeting-analysis INTERPRETATION-stays-in-main PreToolUse gate (owner
-directive 2026-09-18): a meeting/call recording is interpreted by the Fable
-main, never a subagent. An Agent/Workflow dispatch carrying a meeting-analysis
+directive 2026-09-18): a meeting/call recording is interpreted by the managed
+main (Opus 5.5 since #1119), never a subagent. An Agent/Workflow dispatch carrying a meeting-analysis
 signal is REFUSED unless marked `MECHANICAL-ONLY: extract|asr|dedup` on its
 first line AND free of interpretation verbs. See Hard Rule 0 in
 skills/meeting-analysis/SKILL.md.

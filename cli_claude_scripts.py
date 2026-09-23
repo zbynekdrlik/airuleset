@@ -274,10 +274,10 @@ def render_claude_launch_script():
     write site MUST use this, never the raw constant (same discipline as
     render_caveman_shim()).
 
-    #1060 L3a: the MAIN launcher `--model` is ALWAYS airuleset.MANAGED_MODEL,
-    even on a model-backend marker box. The #1062 L2 alias flip (the marker's
-    `main`) is REMOVED — settings.json is shared, so the main window must stay
-    Fable + OAuth; the gateway backend lives ONLY in the separate `claude-impl`
+    #1060 L3a: the MAIN launcher `--model` is ALWAYS airuleset.MANAGED_MODEL
+    (Opus 5.5 since #1119), even on a model-backend marker box. The #1062 L2 alias
+    flip (the marker's `main`) is REMOVED — settings.json is shared, so the main
+    window must stay on the managed model + OAuth; the gateway backend lives ONLY in the separate `claude-impl`
     launcher (render_claude_impl_launch_script), scoped to the implementer
     window's own process."""
     import airuleset
@@ -301,7 +301,7 @@ def render_claude_launch_script():
 CLAUDE_IMPL_LAUNCH_SCRIPT_CONTENT = r"""#!/usr/bin/env bash
 # airuleset-managed (do NOT edit) — the IMPLEMENTER window launcher (#1060 L3a).
 # Scopes the controller LiteLLM model gateway to THIS process only; the main
-# window stays on the Anthropic OAuth login + Fable. Requires bash >= 4.4.
+# window stays on the Anthropic OAuth login + the managed model (Opus 5.5, #1119). Requires bash >= 4.4.
 set -euo pipefail
 
 case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac

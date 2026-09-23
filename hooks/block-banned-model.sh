@@ -44,7 +44,7 @@ _is_banned() {
 _block() {
     echo "BLOCKED: dispatch model \"$1\" is a BANNED model (Opus 5 off-lineup, #991;" >&2
     echo "  the bare opus/opusplan alias floats onto it). Pick sonnet/haiku/" >&2
-    echo "  claude-opus-4-8, or omit the param (native default = claude-opus-4-8)." >&2
+    echo "  claude-opus-5-5, or omit the param (native default = claude-opus-5-5, #1119)." >&2
     exit 2
 }
 

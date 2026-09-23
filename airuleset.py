@@ -64,29 +64,39 @@ MANAGED_EFFORT_LEVEL = "high"
 # family, so an exact id never floats. A new model version joins the fleet
 # ONLY by an owner-approved edit of this table, never by an alias float.
 MODEL_TIERS = {
-    "fable": "claude-fable-5-1",      # main session model (MANAGED_MODEL)
-    "opus": "claude-opus-4-8",        # fleet subagent default (CLAUDE_CODE_SUBAGENT_MODEL)
+    "opus5": "claude-opus-5-5",       # main session model (MANAGED_MODEL) AND fleet subagent default (CLAUDE_CODE_SUBAGENT_MODEL) — owner directive 2026-09-23, #1119
+    "fable": "claude-fable-5-1",      # allowed dispatch choice (former main, pre-#1119)
+    "opus": "claude-opus-4-8",        # allowed dispatch choice (former subagent default, pre-#1119)
     "sonnet": "claude-sonnet-5",      # allowed dispatch choice
     "haiku": "claude-haiku-4-5",      # allowed dispatch choice (trivial reads)
 }
 
 # Managed default MAIN-session model (user directive 2026-08-13: **Opus 5 is
-# BANNED**; 2026-09-05: Fable 5.1 @ medium replaces 5.0, #894) — Fable 5.1,
-# derived from MODEL_TIERS so the lineup has ONE source. The `[1m]` suffix is a
-# DELIBERATE part of the id, not a typo: it is how Claude Code's own usage
-# tracking keys the 1M-context variant (verified — `lastModelUsage` entries in
-# ~/.claude.json store ids exactly like `claude-fable-5-1[1m]`) — kept so this
-# does NOT shrink the context window. The unconditional-managed-default
-# treatment (cli_config.apply_managed_settings_defaults) is what makes the
-# lineup self-healing: any settings.json `model` != MANAGED_MODEL is overwritten
-# on the next install/push. burn.tier("claude-fable-5-1[1m]") → "fable", so the
-# statusline highlight keeps working. Full policy history:
+# BANNED**; 2026-09-05: Fable 5.1 @ medium replaces 5.0, #894; 2026-09-23:
+# **Opus 5.5 replaces Fable 5.1 as the main AND Opus 4.8 as the subagent
+# default**, #1119) — Opus 5.5 (`claude-opus-5-5`), derived from MODEL_TIERS so
+# the lineup has ONE source. The `[1m]` suffix is a DELIBERATE part of the id,
+# not a typo: it is how Claude Code's own usage tracking keys the 1M-context
+# variant (verified — `lastModelUsage` entries in ~/.claude.json store ids
+# exactly like `claude-opus-5-5[1m]`) — kept so this does NOT shrink the context
+# window. The unconditional-managed-default treatment
+# (cli_config.apply_managed_settings_defaults) is what makes the lineup
+# self-healing: any settings.json `model` != MANAGED_MODEL is overwritten on the
+# next install/push. burn.tier("claude-opus-5-5[1m]") → "opus" (substring), so
+# the statusline highlight keeps working. NB: `claude-opus-5-5` is a DISTINCT
+# exact id from the BANNED `claude-opus-5` — it is on the allowlist
+# (MODEL_TIERS) and never matched by the exact-id ban (see is_banned_model /
+# block-banned-model.sh below). Full policy history:
 # .claude/rules-reference/model-awareness-history.md.
-MANAGED_MODEL = MODEL_TIERS["fable"] + "[1m]"
+MANAGED_MODEL = MODEL_TIERS["opus5"] + "[1m]"
 
 # Models BANNED as a DISPATCH value fleet-wide (owner directive 2026-08-13,
-# reaffirmed #991 2026-09-11): Opus 5 is off-lineup. The bare `opus`/`opusplan`
-# alias resolves to the LATEST Opus (= Opus 5), so it is banned too. This is the
+# reaffirmed #991 2026-09-11): Opus 5 (the exact id `claude-opus-5`) is
+# off-lineup. NB (#1119): `claude-opus-5-5` is a DISTINCT exact id that is NOW
+# the allowlisted main + subagent default — it is never matched by the exact-id
+# `claude-opus-5` ban. The bare `opus`/`opusplan` alias still FLOATS to whatever
+# the latest Opus ships (an exact-id-only lineup, #871), so it stays banned too.
+# This is the
 # ban-list source of truth for the DISPATCH surface (hooks/block-banned-model.sh)
 # AND the read-only Job-41 model-float AUDIT — the ONLY thing airuleset forbids
 # on a subagent's model now that the working model chooses its subagents' models

@@ -91,7 +91,7 @@ class TestSettingsMergeDropsMouseToggles(unittest.TestCase):
             airuleset.MANAGED_MAX_SUBAGENTS_PER_SESSION)
         self.assertEqual(
             merged["env"].get("CLAUDE_CODE_SUBAGENT_MODEL"),
-            airuleset.MODEL_TIERS["opus"])
+            airuleset.MODEL_TIERS["opus5"])  # #1119: subagent default = Opus 5.5
 
     def test_removal_line_printed_per_key_with_value_and_citation(self):
         _, out = self._merge({"env": {_MOUSE: "1", _ALT: "0"}})

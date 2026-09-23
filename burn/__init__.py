@@ -90,7 +90,13 @@ PRICE = {
 
 def tier(model):
     """Map a `message.model` id (e.g. `claude-fable-5-1[1m]`) to a PRICE key, or
-    'other' when unrecognized (never crashes on an unknown/foreign model)."""
+    'other' when unrecognized (never crashes on an unknown/foreign model).
+
+    #1119: `claude-opus-5-5[1m]` (the new managed main + subagent default) maps
+    to the `opus` price key by substring, since a separate Opus 5.5 per-Mtok
+    rate is not known from a primary source in this repo — the Opus family key
+    is the honest best-available cost basis. The `opus` key is checked before
+    `sonnet`/`haiku` in PRICE-insertion order, so the match is unambiguous."""
     m = (model or "").lower()
     for k in PRICE:
         if k in m:

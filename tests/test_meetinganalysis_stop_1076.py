@@ -3,13 +3,13 @@
 The meeting-analysis AUTHORSHIP Stop gate (owner directive 2026-09-18): a
 meeting-analysis completion report is BLOCKED unless every named, on-disk
 deliverable (`screen_inventory.md` / `NOTES.md` / `MAPPING.md`) carries a
-first-line `Analysed-by: main claude-fable-*` stamp AND the report carries the
+first-line `Analysed-by: main claude-opus-*` stamp AND the report carries the
 `Analysed-by: main <model>` line. FAIL-OPEN for an unrelated report / an
 unreadable deliverable path (a Stop hook must never wedge an unrelated report).
 
 Design acceptance fixtures:
   - a report naming screen_inventory.md whose file lacks the stamp -> exit 2;
-  - with the stamp `Analysed-by: main claude-fable-5-1` (+ the report line) -> exit 0;
+  - with the stamp `Analysed-by: main claude-opus-5-5` (+ the report line) -> exit 0;
   - an unreadable path -> exit 0 + journal.
 """
 import json
@@ -28,7 +28,7 @@ from gates import meetinganalysis_stop as ms  # noqa: E402
 
 HOOK = REPO / "hooks" / "stop-check-meeting-analysis.sh"
 
-STAMP = "Analysed-by: main claude-fable-5-1"
+STAMP = "Analysed-by: main claude-opus-5-5"  # #1119: managed main family is now claude-opus-*
 
 
 class _TmpBase(unittest.TestCase):

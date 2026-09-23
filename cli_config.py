@@ -315,9 +315,10 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       function's own `promptSuggestionEnabled` bullet documents for a different
       key.
 
-    - `model = MANAGED_MODEL` (Fable 5.1 = `claude-fable-5-1[1m]` — user
-      directive 2026-08-13, Opus 5 banned; #894 made Fable 5.1 the fleet
-      tier, reversing #871's ban) is the default MAIN-session model on
+    - `model = MANAGED_MODEL` (Opus 5.5 = `claude-opus-5-5[1m]` — owner
+      directive 2026-09-23 #1119, replacing Fable 5.1; the exact id
+      `claude-opus-5` stays banned, `claude-opus-5-5` is a distinct
+      allowlisted id) is the default MAIN-session model on
       every managed box — see MANAGED_MODEL's own comment for the history.
       The UNCONDITIONAL overwrite is exactly what SELF-HEALS a banned
       `model` back to `MANAGED_MODEL`: a stale banned id a prior session
@@ -363,8 +364,8 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       feature that also needs an `env` key does not silently clobber this
       one (or vice versa).
 
-    - `env["CLAUDE_CODE_SUBAGENT_MODEL"] = MODEL_TIERS["opus"]` (#991) is the
-      fleet DEFAULT subagent model — the native env var Claude Code applies to a
+    - `env["CLAUDE_CODE_SUBAGENT_MODEL"] = MODEL_TIERS["opus5"]` (#991/#1119) is
+      the fleet DEFAULT subagent model — the native env var Claude Code applies to a
       dispatched subagent that carries no per-dispatch `model` param and whose
       agent definition pins no model. The native precedence order stays intact
       (per-dispatch model -> agent frontmatter -> this env -> main), so the
@@ -436,15 +437,16 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
             print("settings: removed unmanaged env key %s=%s (the launcher owns "
                   "it, #1116)" % (_drop_key, _drop_val), file=sys.stderr)
     result["env"]["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"] = airuleset.MANAGED_MAX_SUBAGENTS_PER_SESSION
-    # #991: the fleet DEFAULT subagent model — the native env var Claude Code
-    # reads for a dispatched subagent with no per-dispatch `model` param and no
-    # agent-frontmatter model. Set to the Opus tier (claude-opus-4-8) so a bare
-    # dispatch runs on the escalation tier by default, while the native
-    # precedence (per-dispatch model -> agent frontmatter -> this env -> main)
-    # is untouched: the working model still overrides per dispatch by its own
-    # judgment, and REMOVING this one key turns the whole default off. No _FORCE
-    # variant — this is a DEFAULT, not an override.
-    result["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] = airuleset.MODEL_TIERS["opus"]
+    # #991/#1119: the fleet DEFAULT subagent model — the native env var Claude
+    # Code reads for a dispatched subagent with no per-dispatch `model` param and
+    # no agent-frontmatter model. Set to the main tier (claude-opus-5-5, #1119 —
+    # was claude-opus-4-8) so a bare dispatch runs on the current top tier by
+    # default, while the native precedence (per-dispatch model -> agent
+    # frontmatter -> this env -> main) is untouched: the working model still
+    # overrides per dispatch by its own judgment, and REMOVING this one key turns
+    # the whole default off. No _FORCE variant — this is a DEFAULT, not an
+    # override.
+    result["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] = airuleset.MODEL_TIERS["opus5"]
     # #950/#1058: set PLAYWRIGHT_BROWSERS_PATH in the settings.json env (inherited
     # by interactive `playwright` and every Claude-Code-spawned tool) on
     # shared-stream boxes. #1058 (area review of #1048) routes this through the ONE
