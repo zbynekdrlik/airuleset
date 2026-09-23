@@ -282,31 +282,66 @@ class SpawnRefresher(unittest.TestCase):
         self.assertEqual(child[child.index("--cache") + 1], "/c/x.json")
         self.assertEqual(child[child.index("--pid") + 1], "/c/x.pid")
         self.assertEqual(child[child.index("--argv0") + 1], "/root/airuleset.py")
-        # review F1: the derivation's env (PATH incl. the gh shim, HOME) is
-        # forwarded INTO the unit via --setenv (a --user transient unit does NOT
-        # inherit the caller's env), not merely handed to the systemd-run client.
-        self.assertTrue(any(a.startswith("--setenv=PATH=") for a in argv), argv)
-        self.assertTrue(any(a.startswith("--setenv=HOME=") for a in argv), argv)
-        # the client env carries the user bus for systemd-run itself (issue 826)
+        # review F1+security: the derivation's env is IMPORTED into the unit by
+        # NAME (`--setenv=NAME`, NO `=VALUE`) so a value never enters argv; the
+        # value rides the client env instead.
+        self.assertIn("--setenv=PATH", argv)
+        self.assertIn("--setenv=HOME", argv)
+        self.assertFalse(any(a.startswith("--setenv=PATH=") for a in argv), argv)
+        # the client env carries the values (systemd-run imports them by name)
         self.assertIsNotNone(calls["env"])
         self.assertIn("XDG_RUNTIME_DIR", calls["env"])
         popen.assert_not_called()   # no cgroup-bound fallback on the primary path
 
-    def test_unit_setenv_forwards_derivation_env_only(self):
+    def test_unit_setenv_forwards_names_only_no_values(self):
         src = {"PATH": "/home/s/.local/bin:/usr/bin", "HOME": "/home/s",
-               "GH_TOKEN": "tok", "GITHUB_TOKEN": "g", "XDG_RUNTIME_DIR": "/run/user/9",
-               "LANG": "en_US.UTF-8", "IRRELEVANT": "x", "PYTHONPATH": "/y"}
+               "GH_TOKEN": "tok", "GH_CONFIG_DIR": "/c", "GITHUB_TOKEN": "g",
+               "XDG_CONFIG_HOME": "/x", "LANG": "en_US.UTF-8",
+               "XDG_RUNTIME_DIR": "/run/user/9", "GITHUB_ACTIONS": "true",
+               "IRRELEVANT": "x", "PYTHONPATH": "/y"}
         args = owref._unit_setenv_args(src)
-        got = dict(a[len("--setenv="):].split("=", 1) for a in args)
+        # NAME-only: no arg carries a value (no `=` after --setenv=NAME)
+        for a in args:
+            self.assertNotIn("=", a[len("--setenv="):], a)
+        names = {a[len("--setenv="):] for a in args}
         # the derivation's env is forwarded (PATH incl. the ~/.local/bin gh shim)
-        self.assertEqual(got["PATH"], "/home/s/.local/bin:/usr/bin")
-        self.assertEqual(got["HOME"], "/home/s")
-        self.assertEqual(got["GH_TOKEN"], "tok")
-        self.assertEqual(got["GITHUB_TOKEN"], "g")
-        self.assertEqual(got["LANG"], "en_US.UTF-8")
-        # unrelated env is NOT forwarded
-        self.assertNotIn("IRRELEVANT", got)
-        self.assertNotIn("PYTHONPATH", got)
+        self.assertEqual(names, {"PATH", "HOME", "GH_TOKEN", "GH_CONFIG_DIR",
+                                 "GITHUB_TOKEN", "XDG_CONFIG_HOME", "LANG"})
+        # narrowed (review): XDG_RUNTIME_DIR + broad GITHUB_* + unrelated dropped
+        self.assertNotIn("XDG_RUNTIME_DIR", names)
+        self.assertNotIn("GITHUB_ACTIONS", names)
+        self.assertNotIn("IRRELEVANT", names)
+        self.assertNotIn("PYTHONPATH", names)
+
+    def test_credential_value_never_appears_in_argv(self):
+        # distinctive non-token-shaped sentinels (a realistic gh-token prefix or a
+        # `secret =` name trips the secret-staging hook); any distinctive string
+        # proves the leak-absence.
+        tok, gtok = "SENTINEL-must-not-leak-1", "SENTINEL-must-not-leak-2"
+        calls = {}
+
+        def fake_run(argv, **kw):
+            calls["argv"] = argv
+            calls["env"] = kw.get("env")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        cp, pp = self._patch_paths()
+        with cp, pp, m.patch.dict("os.environ",
+                                  {"GH_TOKEN": tok, "GITHUB_TOKEN": gtok},
+                                  clear=False):
+            owref.spawn_refresher("/repo/a", "slice-quals",
+                                  argv0="/root/airuleset.py",
+                                  run_fn=fake_run, popen_fn=m.Mock())
+        argv = calls["argv"]
+        # the credential VALUE must appear in NO argv element (ps aux / /proc cmdline)
+        for a in argv:
+            self.assertNotIn(tok, a, a)
+            self.assertNotIn(gtok, a, a)
+        # but the NAMES are imported by systemd-run from its client env
+        self.assertIn("--setenv=GH_TOKEN", argv)
+        self.assertIn("--setenv=GITHUB_TOKEN", argv)
+        # the values ride the client env (in-process), not argv
+        self.assertEqual(calls["env"].get("GH_TOKEN"), tok)
+        self.assertEqual(calls["env"].get("GITHUB_TOKEN"), gtok)
 
     def test_unit_already_exists_is_benign_single_flight(self):
         def fake_run(argv, **kw):

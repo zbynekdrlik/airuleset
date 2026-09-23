@@ -269,26 +269,41 @@ def spawn_refresher(cwd, cmd_name, argv0=None, run_fn=None, popen_fn=None,
 
 
 # #1067 slice 1c review F1: a `systemd-run --user` transient unit inherits the
-# USER MANAGER's environment, NOT the caller's — so PATH / gh / auth are NOT
-# forwarded unless we pass them explicitly. The child's derivation shells `gh` by
-# BARE NAME (needs PATH incl. the ~/.local/bin app-token shim on stream boxes) +
-# gh auth, so forward the watchdog process's own env for these into the unit via
-# `--setenv=NAME=VALUE` (argv elements — no shell, no injection). Curated to the
-# keys the derivation needs; the old Popen path inherited the full env for free.
-_UNIT_ENV_KEYS = ("PATH", "HOME", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME",
-                  "LANG", "LC_ALL")
-_UNIT_ENV_PREFIXES = ("GH_", "GITHUB_")
+# USER MANAGER's environment, NOT the caller's — so the derivation's env is NOT
+# forwarded unless we ask for it. The child shells `gh`/`git` by BARE NAME, so it
+# needs, and ONLY needs, the following (each justified — least privilege):
+#   PATH           resolve `gh` (incl. the ~/.local/bin app-token shim, #888) + git
+#   HOME           ~/.claude cache dir + ~/.config/gh
+#   XDG_CONFIG_HOME gh's config dir when relocated off ~/.config
+#   LANG, LC_ALL   gh/git output encoding (avoids the #1108 UnicodeEncode class)
+#   GITHUB_TOKEN   gh honours it for auth
+#   GH_* prefix    gh's OWN namespace (GH_TOKEN / GH_CONFIG_DIR / GH_HOST / …) —
+#                  all legitimately gh's; forwarding the whole namespace keeps the
+#                  child's gh behaving identically to the watchdog's.
+# The broad `GITHUB_` prefix and XDG_RUNTIME_DIR were REMOVED (review: narrow to
+# need — the unit gets XDG_RUNTIME_DIR from its manager, and CI `GITHUB_*` vars
+# are not the derivation's business).
+_UNIT_ENV_KEYS = ("PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL",
+                  "GITHUB_TOKEN")
+_UNIT_ENV_PREFIXES = ("GH_",)
 
 
 def _unit_setenv_args(source):
-    """`--setenv=NAME=VALUE` args forwarding the derivation's required env INTO
-    the transient unit (see the _UNIT_ENV_KEYS comment). `source` is the
-    watchdog process's env (os.environ / `_xdg_runtime_env()`)."""
-    out = []
-    for k in sorted(source):
-        if k in _UNIT_ENV_KEYS or k.startswith(_UNIT_ENV_PREFIXES):
-            out.append("--setenv=%s=%s" % (k, source[k]))
-    return out
+    """`--setenv=NAME` args (NAME ONLY — no `=VALUE`) telling systemd-run to
+    IMPORT each var's value from its OWN client environment into the unit
+    (systemd 255: "When = and VALUE are omitted, the value of the variable with
+    the same name in the program environment will be used").
+
+    Emitting NAME-only keeps credential VALUES (GH_TOKEN / GITHUB_TOKEN / any
+    GH_* secret) OUT of the systemd-run ARGV — on a shared-stream box (subdev,
+    ~15 accounts) `/proc/<pid>/cmdline` / `ps aux` is readable by every other
+    account, and a `--setenv=NAME=VALUE` would ALSO persist the value in the
+    transient unit's properties (review: cross-account credential leak). The
+    values ride the systemd-run client's `env=` dict instead (in-process memory,
+    never argv). `source` is the watchdog process env; only vars PRESENT in it are
+    forwarded, so every emitted NAME resolves in the client env."""
+    return ["--setenv=%s" % k for k in sorted(source)
+            if k in _UNIT_ENV_KEYS or k.startswith(_UNIT_ENV_PREFIXES)]
 
 
 def _spawn_via_systemd_run(cwd, repo_root, child_argv, run_fn, log):
