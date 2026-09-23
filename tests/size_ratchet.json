@@ -38,7 +38,7 @@
     "cli_playwright_mcp.py": 949,
     "cli_privileges.py": 938,
     "cli_push_gate.py": 218,
-    "cli_quals.py": 3350,
+    "cli_quals.py": 3409,
     "cli_quals_cmd.py": 1610,
     "cli_release_state.py": 673,
     "cli_remote.py": 2122,
