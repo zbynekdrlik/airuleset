@@ -16,7 +16,6 @@ Approach 1 (main design comment 5791160954):
   (c) the same helper excludes the receipt SHAPE (`^delivered … → gk-infra`) so
       receipts already on #6883 stop counting after deploy.
 """
-import os
 import unittest
 import unittest.mock as m
 from pathlib import Path
