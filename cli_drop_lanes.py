@@ -162,6 +162,14 @@ def build_drop_lanes(remote_hosts, *, seed, drop_lane_cls,
     lanes = dict(seed)
     used_ports = {lane.port for lane in lanes.values()}
 
+    # #1115 slice G: RESERVE the LOCAL controller account's fixed port BEFORE the
+    # fleet loop so `_next_free_port` can never hand it to a future no-fixed-port
+    # account and silently displace the controller-local lane (which is injected
+    # AFTER the loop by `_add_controller_local_lane`). Review finding (port-steal).
+    _ctrl_port = _GENERATED_DROP_PORTS.get((CONTROLLER_NODENAME, CONTROLLER_NODENAME))
+    if _ctrl_port is not None:
+        used_ports.add(_ctrl_port)
+
     # Deterministic order: sort the not-yet-covered accounts by their key so the
     # next-free-port fallback is stable regardless of REMOTE_HOSTS ordering.
     pending = []
@@ -279,9 +287,14 @@ def _add_controller_local_lane(lanes, remote_hosts, used_ports, drop_lane_cls,
         print("#1115 slice G WARNING: no _GENERATED_DROP_PORTS entry for the LOCAL "
               "controller account — NO drop lane.", file=sys.stderr)
         return
-    if port in used_ports:
-        print("#1115 slice G WARNING: controller-local drop port %d already in "
-              "use — NO drop lane (fix _GENERATED_DROP_PORTS)." % port,
+    # A REAL collision = some OTHER lane already holds this port. `used_ports`
+    # now RESERVES this port for us (build_drop_lanes seeds it before the loop),
+    # so we check the actual lane ports, never the reservation set (else we would
+    # falsely skip our own reserved port). With the reservation in place a seed is
+    # the only way this could ever be non-empty.
+    if any(ln.port == port for ln in lanes.values()):
+        print("#1115 slice G WARNING: controller-local drop port %d already held "
+              "by another lane — NO drop lane (fix _GENERATED_DROP_PORTS)." % port,
               file=sys.stderr)
         return
     used_ports.add(port)
