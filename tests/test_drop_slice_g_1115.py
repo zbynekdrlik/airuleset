@@ -36,9 +36,57 @@ import cli_drop_gateway as dg           # noqa: E402
 import cli_drop_golive as gl            # noqa: E402
 import cli_drop_lanes as dl             # noqa: E402
 import cli_fleet                        # noqa: E402
+import cli_webterm_access as acc        # noqa: E402
 
-# Reuse the slice-B fake DNS/Access clients (no network, no ssh, no --apply).
-from test_drop_golive_1115 import _dns, _acc  # noqa: E402
+
+# Fake DNS/Access transports — NO network, NO ssh, NO --apply, NO ~/.secrets read
+# (self-contained so this file imports cleanly under both pytest and the push
+# gate's `unittest discover`, which does not put tests/ on sys.modules by name).
+class _FakeDnsTransport:
+    def __init__(self, zone_id="zone-1", records=None):
+        self.calls = []
+        self._zone_id = zone_id
+        self._records = records or []
+
+    def __call__(self, method, path, body):
+        self.calls.append((method, path))
+        if method == "GET" and "/zones?" in path:
+            return 200, {"success": True,
+                         "result": [{"id": self._zone_id}] if self._zone_id else []}
+        if method == "GET" and "/dns_records?" in path:
+            return 200, {"success": True, "result": list(self._records)}
+        if method == "POST" and "/dns_records" in path:
+            return 201, {"success": True, "result": {"id": "new-rec"}}
+        return 200, {"success": True, "result": {}}
+
+
+class _FakeAccessTransport:
+    def __init__(self, apps=None):
+        self.calls = []
+        self._apps = apps or []
+
+    def __call__(self, method, path, body):
+        self.calls.append((method, path))
+        base = path.split("?", 1)[0]
+        if method == "GET" and base.endswith("/apps"):
+            return 200, {"success": True, "result": self._apps}
+        if method == "POST" and base.endswith("/apps"):
+            return 201, {"success": True, "result": {"id": "new-app"}}
+        if method == "PUT" and "/apps/" in base:
+            return 200, {"success": True, "result": {"id": "x"}}
+        return 200, {"success": True, "result": {}}
+
+
+def _dns(records=None):
+    import cli_cloudflare_dns as dns
+    t = _FakeDnsTransport(records=records)
+    return dns.DnsClient(token="dns-tok", transport=t), t
+
+
+def _acc(apps=None):
+    t = _FakeAccessTransport(apps=apps)
+    return acc.AccessClient("acct", token="acc-tok", transport=t), t
+
 
 OWNER = "drlik.zbynek@gmail.com"
 CONTROLLER_KEY = ("airuleset", "airuleset")
