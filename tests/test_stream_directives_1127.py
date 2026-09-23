@@ -636,9 +636,14 @@ class TestReviewRound2(_RepoFixture):
         self.ok(repo, "remote", "set-url", "origin", "ssh://example.invalid/x.git")
         env = dict(self.env)
         env.update({"GIT_TRACE": self.trace, "GIT_SSH_COMMAND": fake_ssh})
+        # SIG_DFL for the child: bash can never trap a signal that was IGNORED
+        # when it started, and the push gate runs under `nohup` (SIGHUP
+        # ignored, inherited) — without the reset the hook finished with rc 0.
         proc = subprocess.Popen(["bash", str(FETCH_HOOK)], cwd=repo,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, env=env)
+                                stderr=subprocess.PIPE, text=True, env=env,
+                                preexec_fn=lambda: signal.signal(
+                                    signal.SIGHUP, signal.SIG_DFL))
         deadline = time.monotonic() + 30
         while not os.path.exists(marker) and time.monotonic() < deadline:
             time.sleep(0.05)
