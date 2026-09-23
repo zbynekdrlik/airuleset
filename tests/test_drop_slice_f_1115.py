@@ -159,10 +159,16 @@ class TestEnsureManagedRecordsRefusesInWorktree(unittest.TestCase):
     def test_injected_client_not_guarded(self):
         # An INJECTED (fake) client makes no live write, so the worktree guard is
         # scoped to the real-client build and must NOT fire.
+        # check_access_fn is ALSO injected: a MANAGED_RECORDS entry with
+        # requires_access_hostname would otherwise call the real _access_app_exists
+        # -> real acc._load_token() + a live Cloudflare GET on the controller
+        # (review 1 finding — the absolute no-live-API rule). Inject a stub so
+        # the whole call stays offline.
         t = FakeDnsTransport(records=[])
         fake = dns.DnsClient(token="dns-tok", transport=t)
         all_ok, results = dns.ensure_managed_records(
-            dry_run=False, client=fake, is_worktree_fn=lambda: True)
+            dry_run=False, client=fake, check_access_fn=lambda _h: True,
+            is_worktree_fn=lambda: True)
         # the fake was exercised (records created), never refused
         self.assertTrue(any(r.get("action") for r in results))
         self.assertNotIn("worktree", " ".join(
@@ -216,6 +222,23 @@ class TestIsWorktreeRepoDirDotGitFile(unittest.TestCase):
             sub = Path(d) / "a" / "b"
             sub.mkdir(parents=True)
             self.assertFalse(airuleset._is_worktree_repo_dir(sub))
+
+    def test_walk_oserror_fails_closed(self):
+        # An EACCES (or any OSError) while probing a `.git` during the walk must
+        # fail CLOSED — treat as a worktree (refuse the live write / refuse
+        # install), never crash the caller (review 2 F1).
+        with tempfile.TemporaryDirectory() as d:
+            sub = Path(d) / "x"
+            sub.mkdir()
+            orig_exists = Path.exists
+
+            def boom(self):
+                if self.name == ".git":
+                    raise PermissionError("EACCES")
+                return orig_exists(self)
+
+            with mock.patch.object(Path, "exists", boom):
+                self.assertTrue(airuleset._is_worktree_repo_dir(sub))
 
     def test_segment_rule_preserved(self):
         # The pre-existing .claude/worktrees/ segment rule still fires (synthetic

@@ -1071,10 +1071,13 @@ def _is_worktree_repo_dir(repo_dir):
     if any(a == ".claude" and b == "worktrees"
            for a, b in zip(parts, parts[1:])):
         return True
-    for d in (resolved, *resolved.parents):
-        dotgit = d / ".git"
-        if dotgit.exists():
-            return dotgit.is_file()
+    try:
+        for d in (resolved, *resolved.parents):
+            dotgit = d / ".git"
+            if dotgit.exists():
+                return dotgit.is_file()
+    except OSError:
+        return True  # cannot classify (e.g. EACCES) — fail CLOSED (treat as worktree)
     return False
 
 
