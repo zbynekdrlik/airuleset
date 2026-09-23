@@ -384,7 +384,26 @@ def parse_filedrop_port(text):
     return port
 
 
-def drop_ingress_rules_for_controller(drop_lanes, cache=None):
+def _lane_go_live_eligible(lane, access_specs):
+    """A lane is ELIGIBLE for go-live iff it is token-only (access=False) OR it is
+    an access lane that ALREADY has a DROP_ACCESS_APPS spec (#1115 slice B review,
+    both reviewers): an access lane with NO spec must NEVER have its DNS CNAME
+    created — a proxied CNAME with no Access app in front is publicly routable and
+    UNPROTECTED (the #983 RED-1 class). Such a lane is PENDING go-live (its spec
+    is an owner-provided go-live data step), NOT a failure, and gets neither DNS
+    nor a marker until the spec lands.
+
+    #1115 slice E: this is the ONE shared eligibility predicate — the controller
+    ingress renderer (below) and the go-live reconcile (`cli_drop_golive`, which
+    re-exports this name) both call it, never a copy. It lives in this pure LEAF
+    (only ``lane`` + a specs dict; no imports) so the leaf's ingress renderer can
+    use it without importing ``cli_drop_gateway`` at module level."""
+    if not lane.access:
+        return True
+    return access_specs.get(lane.host) is not None
+
+
+def drop_ingress_rules_for_controller(drop_lanes, cache=None, access_specs=None):
     """Ingress rules for controller-topology drop lanes (#931).
 
     Returns ``[(hostname, service_url), ...]`` for the controller tunnel's
@@ -410,13 +429,28 @@ def drop_ingress_rules_for_controller(drop_lanes, cache=None):
     (``~/.claude/drop-lanes.json`` keyed ``<node>/<user>``); the in-code
     ``DropLane.filedrop_port`` literal is the fallback only. ``cache`` is
     injectable for tests (``{}``/``None`` → read the default path).
+
+    #1115 slice E: a lane that ``_lane_go_live_eligible`` rejects (an access lane
+    with NO ``DROP_ACCESS_APPS`` spec — PENDING go-live) gets NO ingress rule,
+    neither ``/s/`` nor drop. Once DNS exists, the tunnel ingress is the only
+    guard; routing a host whose Access app is missing serves the origin
+    unprotected (the 23.9. exposure incident, #1115). A PENDING host then answers
+    the tunnel's catch-all 404 even if a leftover DNS record exists. ``access_specs``
+    is injectable for tests; when None it lazily reads ``cli_drop_gateway``'s
+    ``DROP_ACCESS_APPS`` (a FUNCTION-LOCAL import — the cycle-safe pattern the
+    leaf uses everywhere, so this module stays import-pure).
     """
+    if access_specs is None:
+        import cli_drop_gateway as dg  # function-local: cycle-safe leaf pattern
+        access_specs = dg.DROP_ACCESS_APPS
     port_cache = read_drop_lanes_cache() if cache is None else cache
     rules = []
     seen = {}  # host -> drop service_url (dedup + conflict detection)
     for (node, user), lane in sorted(drop_lanes.items()):
         if lane.topology != "controller" or not lane.origin_host:
             continue
+        if not _lane_go_live_eligible(lane, access_specs):
+            continue  # #1115 slice E: PENDING lane (access, no spec) → no rule
         svc = "http://%s:%d" % (lane.origin_host, lane.port)
         prev = seen.get(lane.host)
         if prev is not None:
