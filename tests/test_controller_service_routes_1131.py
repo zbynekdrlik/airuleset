@@ -152,6 +152,36 @@ class TestServiceRouteTable(unittest.TestCase):
         del partial["allowed_emails"]
         self.assertFalse(dl.service_route_complete(partial))
 
+    def test_every_declared_route_is_complete(self):
+        """A typo in a future row must fail here, never silently turn PENDING
+        with all_ok=True (review finding)."""
+        for r in dl.CONTROLLER_SERVICE_ROUTES:
+            self.assertTrue(dl.service_route_complete(r), r)
+
+    def test_hostname_must_be_one_label_under_the_zone(self):
+        """The Universal SSL wildcard covers ONE label under newlevel.media, and
+        the hostname is written into the tunnel YAML, so it must be a plain
+        lowercase DNS name (review finding)."""
+        for bad in ("backup.example.com", "a.b.newlevel.media", "newlevel.media",
+                    "Backup.newlevel.media", "bad host.newlevel.media",
+                    "x.newlevel.media\n  - hostname: evil", "-x.newlevel.media"):
+            self.assertFalse(dl.service_route_complete(_route(hostname=bad)), bad)
+        self.assertTrue(dl.service_route_complete(
+            _route(hostname="fleet-backup2.newlevel.media")))
+
+    def test_allowed_emails_must_look_like_emails(self):
+        self.assertFalse(dl.service_route_complete(
+            _route(allowed_emails=["drlik.zbynek"])))
+        self.assertFalse(dl.service_route_complete(
+            _route(allowed_emails=[OWNER, "nobody"])))
+
+    def test_controller_tunnel_uuid_single_value(self):
+        """The CNAME targets cli_drop_gateway's UUID while the ingress lives on
+        cli_webterm's tunnel. The two copies must never drift."""
+        import cli_webterm
+        self.assertEqual(dg._CONTROLLER_TUNNEL_UUID,
+                         cli_webterm.CONTROLLER_TUNNEL_UUID)
+
     def test_access_spec_shape(self):
         spec = dl.service_route_access_spec(self._backup())
         self.assertEqual(spec, {"hostname": BACKUP_HOST,
