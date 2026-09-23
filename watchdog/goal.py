@@ -4846,38 +4846,23 @@ def _cached_dispatchable(cwd, dispatchable_fetch, state, now):
     """#993 item 3 — the per-cwd TTL cache over the dispatchable-candidate fetch.
     `dispatchable_fetch(cwd)` returns a ONE-element list `[{"count": N, "reason":
     r}]` (never `[]`) or None; cached via the SAME generic `_cached_member_fetch`
-    the backlog/ops-wait/queue caches use (a per-cwd, per-TTL bound so the
-    O(workable) `--count-dispatchable` subprocess fires at most once per repo per
-    window, never every sweep). Returns the inner dict, or None (unmeasurable)."""
-    # #993 review 2: explicit 5-min TTL for BOTH success and failure — the
-    # default fail TTL (60s) would re-run the O(deps) subprocess every sweep on a
-    # slow/failed read (a gh-call storm); 5 min matches the queue-arrival cache's
-    # cadence and the refill nudge's own per-kind cadence gate makes a 5-min-stale
-    # count fine.
+    the backlog/ops-wait/queue caches use. Returns the inner dict, or None
+    (unmeasurable)."""
+    # #993 review 2 set a 5-min TTL for BOTH outcomes because a failed read used
+    # to re-run the O(deps) `--count-dispatchable` subprocess. #1067 slice 1d made
+    # the fetch a NON-BLOCKING read of the detached quals snapshot, so a miss (a
+    # cold snapshot not written yet) re-reads next minute instead of holding the
+    # decision `dispatchable-unknown` for 5 min; a success stays cached 5 min.
     lst = _ops_wait_recheck._cached_member_fetch(
         cwd, dispatchable_fetch, state, now, "dispatchable_cache",
-        ttl=300, fail_ttl=300)
+        ttl=300, fail_ttl=60)
     if isinstance(lst, list) and lst and isinstance(lst[0], dict):
         return lst[0]
     return None
 
 
-# #1041 — the dispatchable fetch is a cache-MISS `--count-dispatchable` subprocess
-# that can run up to `_DISPATCHABLE_COUNT_TIMEOUT_S=90s` (airuleset.py); its minimum
-# is derived from THAT timeout. The guard is CACHE-AWARE (skips only when the 5-min
-# `dispatchable_cache` would MISS), so a normal cache-HIT sweep never defers the
-# refill nudge — only a genuine cache-miss that would run the 90s subprocess into the
-# unit's 120s kill is held. Trade-off (review-2 🔵-4): against the rider's tail_deadline
-# (110) ref this permits a cold-cache fetch only at elapsed ≤ 20, so on a CHRONICALLY
-# slow box whose sweep always reaches goal_lane_sweep past elapsed 20 with a COLD
-# cache the count never warms — a pathological starvation, acceptable vs the certain
-# kill an unbounded 90s subprocess would cause; a warm cache (steady state) is fine.
-DISPATCHABLE_FETCH_MIN_BUDGET_S = 90
-
-
 def _lane_dispatchable_decision(dispatchable_fetch, cwd, state, now, loc,
-                                live_workers, waiters, backlog_n,
-                                budget_left_fn=None):
+                                live_workers, waiters, backlog_n):
     """#993 item 3 — `(skip, logline, candidate_n)`. `dispatchable_fetch` None
     (unwired / legacy tests) → `(False, None, None)`: NO gating, the nudge fires
     as before. A wired fetch returns the dispatchable-candidate count + reason:
@@ -4885,24 +4870,15 @@ def _lane_dispatchable_decision(dispatchable_fetch, cwd, state, now, loc,
     infra-serial reason was removed in round 2b), NO keystroke; an UNMEASURABLE
     count (fetch None / malformed) → `skip:dispatchable-unknown` (safe: never
     push dispatch we cannot justify); count > 0 → `(False, None, count)` and the
-    caller names `candidate_n` in the nudge text."""
+    caller names `candidate_n` in the nudge text.
+
+    #1067 slice 1d REMOVED the #1041 sweep-budget guard (`hold:budget`) that
+    stood here: it existed only because a cache-miss fetch ran the blocking
+    `--count-dispatchable` subprocess (up to 90 s) into the unit's 120 s kill.
+    The fetch is now a non-blocking read of the detached quals snapshot, so
+    there is no budget to guard."""
     if dispatchable_fetch is None:
         return False, None, None
-    # #1041 — SWEEP-BUDGET guard, CACHE-AWARE: a cache-MISS dispatchable fetch fires
-    # the O(deps) --count-dispatchable subprocess (up to 90s); if it would MISS the
-    # 5-min cache AND fewer than its own timeout-derived minimum of sweep budget
-    # remain, SKIP with `hold:budget` (no fetch, no state change) rather than run the
-    # sweep into the unit's 120s kill. A cache HIT proceeds regardless (microseconds),
-    # so the refill nudge is never crippled on a normal sweep. None => no guard.
-    _left = _queue_arrival._budget_left(budget_left_fn)
-    if (_left is not None and _left < DISPATCHABLE_FETCH_MIN_BUDGET_S
-            and _ops_wait_recheck._cache_would_miss(
-                cwd, state, now, "dispatchable_cache", ttl=300, fail_ttl=300)):
-        return True, ("lane-occupancy %s workers=%d waiters=%d backlog=%d -> "
-                      "hold:budget (%ds left, need >=%ds for a cache-miss "
-                      "--count-dispatchable; state untouched, retry next sweep)"
-                      % (loc, live_workers, waiters, backlog_n, int(_left),
-                         DISPATCHABLE_FETCH_MIN_BUDGET_S)), None
     res = _cached_dispatchable(cwd, dispatchable_fetch, state, now)
     count = res.get("count") if isinstance(res, dict) else None
     if not isinstance(count, int) or isinstance(count, bool):
@@ -4934,7 +4910,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
                               tmtime, loc, send_fn, dry_run, handled,
                               projects_dir, backlog_fetch=None, state=None,
                               sleep_fn=None, batch_collect=None,
-                              dispatchable_fetch=None, budget_left_fn=None):
+                              dispatchable_fetch=None):
     """The lane-occupancy branch (#365). Mutates `rec` (the caller
     persists it); returns `(logs, owns)` -- `owns` is the explicit
     ownership signal set from the moment `live_workers`/`backlog_n` are
@@ -5110,8 +5086,7 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # function small; unwired → no gating; candidate_n names the count in the
     # text when it fires).
     disp_skip, disp_log, candidate_n = _lane_dispatchable_decision(
-        dispatchable_fetch, cwd, state, now, loc, live_workers, waiters, backlog_n,
-        budget_left_fn=budget_left_fn)   # #1041 sweep-budget guard
+        dispatchable_fetch, cwd, state, now, loc, live_workers, waiters, backlog_n)
     if disp_log:
         logs.append(disp_log)
     if disp_skip:
@@ -5600,7 +5575,6 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             send_fn, dry_run, handled, projects_dir,
             backlog_fetch=backlog_fetch, state=state, sleep_fn=sleep_fn,
             dispatchable_fetch=dispatchable_fetch,   # #993 item 3
-            budget_left_fn=_budget_left_fn,          # #1041 sweep-budget guard
             batch_collect=(_batch_collect if _batch_collect is not None
                            and "lane-occupancy" in _eligible else None))
         rec["lts"] = now   # #531 -- write-time age anchor for the orphan reaper
