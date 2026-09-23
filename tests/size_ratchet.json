@@ -20,7 +20,7 @@
     "cli_deployer_glue.py": 416,
     "cli_design_record.py": 321,
     "cli_disk_guard_root.py": 1715,
-    "cli_drop_gateway.py": 1039,
+    "cli_drop_gateway.py": 1055,
     "cli_filedrop_watchdog.py": 670,
     "cli_fleet.py": 1232,
     "cli_gh_rate.py": 1705,
