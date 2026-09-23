@@ -202,24 +202,36 @@ def _default_find_script(cwds, run):
     """Resolve the wrapper path from a live-claude cwd whose git toplevel is an
     odoo-erp checkout; else a fallback scan of ``~/devel/odoo/*/``. Returns the
     exists-checked script path or None — never a guess."""
-    seen = set()
+    # Two DIFFERENT questions, two sets (#959 fix-forward 2): `seen_cwds`
+    # de-duplicates the input cwds; `checked_tops` records toplevels already
+    # handed to `_script_at`. Conflating them into one set skipped the checkout
+    # whenever a live cwd WAS its own git toplevel (the normal stream case) —
+    # `top == cwd` was already in the shared set, so `_script_at` never ran, and
+    # the glob fallback skipped the same directory too, returning None forever.
+    seen_cwds = set()
+    checked_tops = set()
     for cwd in cwds:
-        if not cwd or cwd in seen:
+        if not cwd or cwd in seen_cwds:
             continue
-        seen.add(cwd)
+        seen_cwds.add(cwd)
         top = (run(["git", "-C", cwd, "rev-parse", "--show-toplevel"])
                or "").strip()
-        if not top or top in seen:
+        if not top or top in checked_tops:
             continue
-        seen.add(top)
+        checked_tops.add(top)
+        # A later cwd string equal to this resolved toplevel is the same repo
+        # root, already checked — record it so it short-circuits at the entry
+        # `cwd in seen_cwds` test instead of firing a redundant rev-parse
+        # (the #1055-P2 subprocess budget).
+        seen_cwds.add(top)
         found = _script_at(top, run)
         if found:
             return found
     for d in sorted(glob.glob(os.path.expanduser(_ODOO_CHECKOUT_GLOB))):
         d = d.rstrip("/")
-        if d in seen:
+        if d in checked_tops:
             continue
-        seen.add(d)
+        checked_tops.add(d)
         found = _script_at(d, run)
         if found:
             return found
