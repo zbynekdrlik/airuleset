@@ -411,7 +411,7 @@
     "tests/test_oauth_suppression_676.py": 158,
     "tests/test_odoo_html_shipped_file_1054.py": 487,
     "tests/test_odoo_message_post_html_915.py": 263,
-    "tests/test_onboard_project.py": 485,
+    "tests/test_onboard_project.py": 487,
     "tests/test_onboard_project_review_fixes.py": 214,
     "tests/test_onboard_registry_guard_946.py": 367,
     "tests/test_onboard_remote_583.py": 448,
