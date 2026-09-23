@@ -219,6 +219,11 @@ def _default_find_script(cwds, run):
         if not top or top in checked_tops:
             continue
         checked_tops.add(top)
+        # A later cwd string equal to this resolved toplevel is the same repo
+        # root, already checked — record it so it short-circuits at the entry
+        # `cwd in seen_cwds` test instead of firing a redundant rev-parse
+        # (the #1055-P2 subprocess budget).
+        seen_cwds.add(top)
         found = _script_at(top, run)
         if found:
             return found

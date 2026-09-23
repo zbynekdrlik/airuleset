@@ -223,6 +223,7 @@ class TestScriptResolution(unittest.TestCase):
         # hold an odoo-erp checkout with the script → the glob fallback resolves
         # it, and a glob dir already checked as a toplevel (the non-odoo repo)
         # is skipped via checked_tops, not wrongly re-checked.
+        remote_calls = []
         with TemporaryDirectory() as d:
             other = Path(d) / "airuleset"
             other.mkdir()
@@ -236,8 +237,10 @@ class TestScriptResolution(unittest.TestCase):
                 if "rev-parse" in argv:
                     return str(other) + "\n"          # cwd's toplevel = non-odoo
                 if "remote" in argv and target == str(other):
+                    remote_calls.append(target)
                     return "git@github.com:zbynekdrlik/airuleset.git\n"
                 if "remote" in argv and target == str(erp):
+                    remote_calls.append(target)
                     return "git@github.com:zbynekdrlik/odoo-erp.git\n"
                 return ""
 
@@ -245,6 +248,12 @@ class TestScriptResolution(unittest.TestCase):
                                    str(Path(d) / "*/")):
                 found = eh._default_find_script([str(other / "sub")], run)
             self.assertEqual(found, str(script))
+            # Teeth for the checked_tops-in-glob path (F2): the non-odoo toplevel
+            # was queried EXACTLY once — the cwd loop checked it, and the glob
+            # loop skipped it via checked_tops rather than re-`_script_at`-ing it.
+            # A glob loop that consulted the wrong set would query `other` twice.
+            self.assertEqual(remote_calls.count(str(other)), 1)
+            self.assertEqual(remote_calls, [str(other), str(erp)])
 
     def test_slug_matches_url_variants(self):
         for origin in ("git@github.com:zbynekdrlik/odoo-erp.git",
