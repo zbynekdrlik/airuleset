@@ -80,6 +80,16 @@ class _StickyGridFake(_GridScrollFake):
 class TestStructuredArmedRefusal(unittest.TestCase):
     def setUp(self):
         self.reqp, self.syncp = _isolate_goal_state(self)
+        # Isolate STATE_PATH so `_structured_goal_mark_state`'s persisted-goal_mark
+        # fallback reads an EMPTY fixture file, never the box's real
+        # ~/.claude/api-watchdog-state.json (the #732/#548 hermeticity discipline).
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        sp = Path(d.name) / "api-watchdog-state.json"
+        sp.write_text("{}", encoding="utf-8")
+        p = m.patch.object(wd, "STATE_PATH", sp)
+        p.start()
+        self.addCleanup(p.stop)
 
     def _dir(self):
         d = TemporaryDirectory()
@@ -158,6 +168,23 @@ class TestTemplateVariantRecognition(unittest.TestCase):
         self.assertIn(_FORK, variants)
         self.assertIn(_FULL, variants)
         self.assertTrue(all(v.startswith("/goal ") for v in variants))
+
+    def test_every_locked_variant_is_recognised(self):
+        # Completeness lock (review 🟡): EVERY (authority, mode, role) the
+        # `goal-inventory --check` set locks — `variant_specs()` PLUS the
+        # gk-full-only review variant — must be in `all_goal_line_variants()`.
+        # A shipped/armable variant dropped from this set silently reintroduces
+        # the exact recurrence for that variant (the janitor reverts to
+        # `cleanup=declined` on its own leftover). No dupes; all `/goal `-lines.
+        variants = goal_registry.all_goal_line_variants()
+        specs = list(goal_registry.variant_specs()) + [("full", "parallel",
+                                                        "review")]
+        for authority, mode, role in specs:
+            line = goal_registry.render_goal_line(authority, mode, role)
+            self.assertIn(line, variants,
+                          "variant %s/%s/%s missing from all_goal_line_variants"
+                          % (authority, mode, role))
+        self.assertEqual(len(variants), len(set(variants)), "no duplicates")
 
     def test_grid_box_matches_a_template_variant_without_provenance(self):
         # The exact david1 render: a grid-wrapped, scrolled fork-no-merge tail.
