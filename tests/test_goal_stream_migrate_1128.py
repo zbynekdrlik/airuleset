@@ -329,7 +329,7 @@ class TestStreamMigrate(unittest.TestCase):
         line, handled = sm.decide(
             "s", CWD, None, OLD_FORK, self.now, "loc", False, {},
             lambda cwd: (NEW_FORK, "fork-no-merge"), lambda s: False,
-            lambda t, a: None, lambda: None, latest_is_done=True)
+            lambda t, a: None, lambda: None)
         self.assertFalse(handled)
         self.assertIn("transcript unreadable", line)
 

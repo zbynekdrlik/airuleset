@@ -3041,8 +3041,7 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
              else state.setdefault("goal_stream_migrate", {})),
             rearm_fn or _default_rearm_fn,
             lambda s: isinstance(load_goal_requests(requests_path).get(s), dict),
-            _record, _reset, latest_is_done=(
-                watchdog.transcript_last_backlog_empty_ts(tpath) is not None))
+            _record, _reset)
         if line and not handled:     # not migration state: journal, fall through
             _log_goal_sync(line)
         if handled:

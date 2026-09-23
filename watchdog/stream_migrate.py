@@ -89,19 +89,19 @@ def _reap(store, now):
 
 
 def decide(sid, cwd, tpath, payload, now, loc, dry_run, store, template_fn,
-           pending_fn, record_fn, reset_fn, latest_is_done=False):
+           pending_fn, record_fn, reset_fn):
     """The dark-watch decision for a DARK, mark-"set", 🏁-proven session whose
     armed goal is an old stream template. Returns `(logline_or_None, handled)`.
 
-    Cheap gates first (idle, the NEWEST turn is the 🏁 achievement, the 1 h
-    gap, a pending request), then the template resolution. `handled` is False
+    Cheap gates first (idle, the 1 h gap, a pending request), then the
+    template resolution. No newest-turn gate: dark-watch reaches only a DARK
+    footer, so a 🏁 the evaluator rejected (loop still running, ◎ lit) never
+    gets here, while a human turn after a real achievement must not block the
+    migration (live david1, 2026-09-23). `handled` is False
     -- the caller's normal fulfilled / dead-loop path applies -- for a
     non-stream box, an unreadable transcript or an unresolvable template (not
     the migration's own state, so the #459 visibility must not be hidden);
-    every other outcome is migration-bound (True). `latest_is_done` = the
-    newest real assistant turn is the 🏁 turn: a 🏁 the evaluator REJECTED
-    keeps the loop running, so a later turn exists and the session is left
-    alone. A skip is journalled ONCE per (session, reason). Nothing is mutated
+    every other outcome is migration-bound (True). A skip is journalled ONCE per (session, reason). Nothing is mutated
     on dry_run."""
     if not dry_run:
         _reap(store, now)
@@ -114,8 +114,6 @@ def decide(sid, cwd, tpath, payload, now, loc, dry_run, store, template_fn,
         ok, why, handled = False, "transcript unreadable", False
     elif age < IDLE_MIN_S:
         ok, why = False, "transcript not idle %ds" % IDLE_MIN_S
-    elif not latest_is_done:
-        ok, why = False, "the newest turn is not the 🏁 achievement"
     elif isinstance(last, (int, float)) and 0 <= now - last < MIN_GAP_S:
         ok, why = False, "1/h attempt gap"
     elif pending_fn(sid):
