@@ -749,9 +749,14 @@ if [ -n "$ISSUE_NUM" ]; then
                 done <<< "$STREAM_LABEL"
                 return 1
             }
+            # Issue 1130: `gk-processing` (#1053, gk picked the re-hand-off up)
+            # is a queue label exactly like ready-for-review/needs-gatekeeper.
+            # The set must cover cli_quals.MAINTAINER_ACTION_LABELS — locked by
+            # tests/test_close_guard_gk_processing_1130.py.
             if _has_own_stream_label && _has_label "needs-acceptance" \
                && ! _has_label "ready-for-review" \
                && ! _has_label "needs-gatekeeper" \
+               && ! _has_label "gk-processing" \
                && ! _has_label "prio:bounce"; then
                 # Conditions 1+2 hold; condition 3 (--comment/-c) is the last gate
                 # (shared #760 _cmd_has_comment_flag helper).
@@ -860,6 +865,9 @@ if [ -n "$ISSUE_NUM" ]; then
                 VERDICT_FAIL_REASON="queue label present: ready-for-review (the gatekeeper still owns this ticket — it has not been handed back)"
             elif _v_has_label "needs-gatekeeper"; then
                 VERDICT_FAIL_REASON="queue label present: needs-gatekeeper (the gatekeeper still owns this ticket)"
+            elif _v_has_label "gk-processing"; then
+                # Issue 1130: gk is processing it again (#1053) — same as above.
+                VERDICT_FAIL_REASON="queue label present: gk-processing (the gatekeeper is processing this ticket)"
             elif _v_has_label "prio:bounce"; then
                 VERDICT_FAIL_REASON="queue label present: prio:bounce (a returned bounce — re-hand-off first, do not self-close)"
             elif _v_has_label "needs-acceptance"; then
