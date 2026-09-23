@@ -288,8 +288,10 @@ class TestStreamMigrate(unittest.TestCase):
         self.assertEqual(goal.load_goal_requests(self.reqp), {})
         self.assertTrue(any("still the old" in ln for ln in logs), logs)
 
-    def test_never_when_a_later_turn_followed_the_achievement(self):
-        # a 🏁 the evaluator REJECTED keeps the loop running: a later turn exists.
+    def test_migrates_when_a_human_turn_followed_the_achievement(self):
+        # live david1, 2026-09-23: the old loop ACHIEVED, then a human prompt
+        # produced a later plain ✅ turn; the footer is dark (no ◎), so the loop
+        # is not running. A rejected 🏁 keeps ◎ lit and never reaches dark-watch.
         proj = self._fixture("m-later")
         tpath = next(proj.rglob("m-later.jsonl"))
         with open(tpath, "a", encoding="utf-8") as f:
@@ -298,8 +300,8 @@ class TestStreamMigrate(unittest.TestCase):
                                             "ďalšia práca ✅ DONE: x"}}) + "\n")
         os.utime(tpath, (self.now - 1200, self.now - 1200))
         reqs, logs, _s, _t = self._sweep(proj)
-        self.assertEqual(reqs, {})
-        self.assertTrue(any("newest turn" in ln for ln in logs), logs)
+        self.assertEqual(reqs["m-later"]["origin"], sm.ORIGIN, logs)
+        self.assertFalse(any("newest turn" in ln for ln in logs), logs)
 
     def test_an_unresolved_template_falls_through_to_the_normal_path(self):
         proj = self._fixture("m-notpl")
