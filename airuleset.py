@@ -7474,6 +7474,14 @@ def gk_watch_issue(issue, *, cwd=None, repo_slug=None, gk_login=None,
         head_ts_fn=head_ts_fn, now=now, is_own_login=_is_own_login)
 
 
+def cmd_stream_wait(args):
+    """`airuleset.py stream-wait [--interval S] [--max S]` (#1128) — the ONE idle
+    waiter a sub-dev stream loop keeps live instead of ending on an empty
+    slice. Impl in the `cli_stream_wait` leaf."""
+    import cli_stream_wait
+    sys.exit(cli_stream_wait.run(args))
+
+
 def cmd_gk_watch(args):
     """`airuleset.py gk-watch --issues N [N...] [--repo owner/name]
     [--gk-login X] [--json]` (#1056 L1 / #1057 items 1, 2) — per ticket, the gk
@@ -10382,6 +10390,10 @@ def main():
                              "nothing, so the hook's fail-safe refuses the "
                              "exemption.")
 
+    p_sw = sub.add_parser("stream-wait", help="#1128 stream idle waiter: exit on the first slice change, or at --max")
+    p_sw.add_argument("--interval", type=int, default=300, help="Seconds between polls (default 300)")
+    p_sw.add_argument("--max", type=int, default=3600, help="Heartbeat exit after this many seconds (default 3600)")
+
     p_slice = sub.add_parser(
         "slice-quals",
         help="THE single definition of a reduced-authority stream's own "
@@ -11336,6 +11348,7 @@ SUBCOMMANDS = {
     "delegation": cmd_delegation,
     "authority": cmd_authority,
     "slice-quals": cmd_slice_quals,
+    "stream-wait": cmd_stream_wait,
     "core-quals": cmd_core_quals,
     "upload": cmd_upload,
     "secret": cmd_secret,

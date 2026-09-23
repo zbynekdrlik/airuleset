@@ -74,7 +74,10 @@ re-review and no pickup).
    ticket regardless of its `stream:<user>` label, so (B) cannot reach 0 while any of them is
    open. The pre-round-2 whole-repo proof upheld this only as a side effect of being whole-repo;
    round 2's core-only proof dropped it, and a gatekeeper could have stopped with a re-handed-off
-   ticket's ball in its own court.
+   ticket's ball in its own court. **On the STREAM side the loop never ends at all (#1128):** the
+   reduced templates carry no done-state, and an empty slice idles on ONE background
+   `airuleset.py stream-wait` that wakes the stream on any change to its slice (a gk verdict, a
+   bounce, a client reply, a new ticket).
 5. **Machine-local backstop:** the api-watchdog (job 8) independently sweeps every ~30 min — an
    idle claude pane in a repo with open `prio:bounce` gets a nudge (the nudge-ack step — part of
    SKILL.md's own Step 3, not this reference file — handles it, loop or no loop); a repo with NO

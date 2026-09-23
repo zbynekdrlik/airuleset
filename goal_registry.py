@@ -77,17 +77,28 @@ SATURATION_RECONCILES_COMPACT = ("saturation-core", "saturation-delivery",
 # base every profile carries; `REQUIRED_BY_PROFILE` adds the profile-specific
 # load-bearing clauses so a full-only clause (prod-gate — the approval-scope.md
 # "never gate on events/prod" hardest rule; parked) or a reduced-only clause
-# (review-watch, authority-ends) can never be silently dropped either.
+# (stream-idle, authority-ends) can never be silently dropped either.
 REQUIRED_CLAUSES = (
     "header", "stop-a", "stop-a-livelane", "stop-b-header", "obligation", "proof",
     "how-to-tell", "done-never", "cannot-tell", "produce-proof",
     "irreversible", "work-intro", "saturation-core", "saturation-delivery",
     "ask", "night", "bounce", "verify-sources", "compact-boundary",
 )
+# #1128 (owner ruling 2026-09-23): a sub-dev STREAM loop has NO backlog-empty
+# done-state — gk/U/W work keeps returning, so any countable (B) eventually holds
+# and ENDS the loop while work is still coming (david1-4 sat idle). The reduced
+# profiles therefore carry none of these (B) clauses; `stream-idle` replaces
+# them with ONE background `stream-wait` waiter, and `variant_check` locks that
+# no reduced variant mentions (B) or 🏁 (`_STREAM_FORBIDDEN`).
+_B_CLAUSES = ("stop-b-header", "obligation", "proof", "how-to-tell",
+              "done-never", "cannot-tell", "produce-proof")
+_STREAM_FORBIDDEN = ("(B)", "🏁")
+_STREAM_REQUIRED = tuple(c for c in REQUIRED_CLAUSES if c not in _B_CLAUSES) + (
+    "stream-idle", "authority-ends")
 REQUIRED_BY_PROFILE = {
     "full": REQUIRED_CLAUSES + ("stream-note", "prod-gate", "parked"),
-    "branch-merge": REQUIRED_CLAUSES + ("review-watch", "authority-ends"),
-    "fork-no-merge": REQUIRED_CLAUSES + ("review-watch", "authority-ends"),
+    "branch-merge": _STREAM_REQUIRED,
+    "fork-no-merge": _STREAM_REQUIRED,
 }
 
 # The ORDERED clause registry. render(profile) walks this list, keeps the
@@ -109,41 +120,24 @@ CLAUSES = [
     # byte-identical for the review-variant verbatim-present lock.
     Clause("stop-a-livelane", PROFILES,
         "(A) applies only when no background agent/lane is live; with lanes live use ASK-AND-CONTINUE and let the footer U carry the question."),
-    Clause("stop-b-header", PROFILES, {
-        "full": "(B) BACKLOG EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED.",
-        "branch-merge": "(B) SLICE EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED.",
-        "fork-no-merge": "(B) SLICE EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED.",
-    }),
-    Clause("obligation", PROFILES, {
-        "full": "Every open issue THIS box is OBLIGED to action — the CORE slice (not labeled autopilot-skip, not owned by a sub-dev stream) PLUS every ticket only I can action whatever stream owns it (needs-gatekeeper, a hand-off awaiting my review/merge/close) — is resolved,",
-        "branch-merge": "Every open issue ASSIGNED TO ME here not labeled autopilot-skip is MERGED via my own PR into the project's INTEGRATION branch (develop unless the project CLAUDE.md names another), no open prio:bounce for my stream,",
-        "fork-no-merge": "Every issue ASSIGNED TO ME here not labeled autopilot-skip is HANDED OFF — a later close is not my (B) proof —",
-    }),
-    Clause("proof", PROFILES, {
-        "full": "and (B) holds ONLY when my final message carries the pasted OUTPUT of both proof commands: `python3 ~/devel/airuleset/airuleset.py core-quals --count` printing exactly `0` under it (it counts EXACTLY that obligation set), AND `gh run list -b main -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker.",
-        "branch-merge": "and (B) holds ONLY when my final message carries the pasted OUTPUT of all four proof commands: `python3 ~/devel/airuleset/airuleset.py slice-quals --count` printing exactly `0` under it, AND `gh run list -b <integration> -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND `git merge-base --is-ancestor <my last integration merge> origin/main && echo RELEASED` printing exactly `RELEASED` under it, AND `python3 ~/devel/airuleset/airuleset.py tickets-status --refresh >/dev/null; python3 ~/devel/airuleset/airuleset.py tickets-status` pasted under it (`gk N`/`U N`/`W N` = parked, never blocks 🏁; blank = unmeasurable; a `bounce K` BLOCKS 🏁 until `slice-quals --bounces --unhandled` prints nothing under it), AND then the line `🏁 BACKLOG EMPTY: 0 open, integration green, released` directly above the terminal `✅ DONE:` marker.",
-        "fork-no-merge": "and (B) holds ONLY when my final message carries the pasted OUTPUT of all three proof commands: `python3 ~/devel/airuleset/airuleset.py slice-quals --count` printing exactly `0` under it, AND `git merge-base --is-ancestor <my last merged commit> origin/main && echo RELEASED` printing exactly `RELEASED` under it (release still pending is STILL review-watch, not done), AND `python3 ~/devel/airuleset/airuleset.py tickets-status --refresh >/dev/null; python3 ~/devel/airuleset/airuleset.py tickets-status` pasted under it (`gk N`/`U N`/`W N` = parked, never blocks 🏁; blank = unmeasurable; a `bounce K` BLOCKS 🏁 until `slice-quals --bounces --unhandled` prints nothing under it), AND then the line `🏁 BACKLOG EMPTY: 0 open, released` directly above the terminal `✅ DONE:` marker.",
-    }),
-    Clause("how-to-tell", PROFILES,
+    Clause("stop-b-header", ("full",),
+        "(B) BACKLOG EMPTY — PROVEN IN THIS TURN, NEVER CLAIMED."),
+    Clause("obligation", ("full",),
+        "Every open issue THIS box is OBLIGED to action — the CORE slice (not labeled autopilot-skip, not owned by a sub-dev stream) PLUS every ticket only I can action whatever stream owns it (needs-gatekeeper, a hand-off awaiting my review/merge/close) — is resolved,"),
+    Clause("proof", ("full",),
+        "and (B) holds ONLY when my final message carries the pasted OUTPUT of both proof commands: `python3 ~/devel/airuleset/airuleset.py core-quals --count` printing exactly `0` under it (it counts EXACTLY that obligation set), AND `gh run list -b main -L 1 --json conclusion --jq '.[0].conclusion'` printing exactly `success` under it, AND then the line `🏁 BACKLOG EMPTY: 0 open, main green` directly above the terminal `✅ DONE:` marker."),
+    Clause("how-to-tell", ("full",),
         "HOW TO TELL A REAL COMPLETION FROM A CLAIMED ONE: real = output shown; claimed = asserted."),
-    Clause("done-never", PROFILES, {
-        "full": "`✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn full of `✅` rows and a merged PR.",
-        "branch-merge": "`✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn full of `✅` rows and a merged PR.",
-        "fork-no-merge": "`✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn full of `✅` rows and a clean local verification.",
-    }),
-    Clause("cannot-tell", PROFILES,
+    Clause("done-never", ("full",),
+        "`✅ DONE:` NEVER satisfies (B) — it is the per-ticket CONTINUE terminator, even in a turn full of `✅` rows and a merged PR."),
+    Clause("cannot-tell", ("full",),
         "IF I CANNOT TELL — missing, unreadable, or stale output, any doubt — (B) does NOT hold: CONTINUE. There is no third answer."),
-    Clause("produce-proof", PROFILES, {
-        "full": "TO PRODUCE THE PROOF: run both, paste each output, write the `🏁` line — no proof, no stop.",
-        "branch-merge": "TO PRODUCE THE PROOF: run all four, paste each output, write the `🏁` line — no proof, no stop.",
-        "fork-no-merge": "TO PRODUCE THE PROOF: run all three, paste each output, write the `🏁` line — no proof, no stop.",
-    }),
+    Clause("produce-proof", ("full",),
+        "TO PRODUCE THE PROOF: run both, paste each output, write the `🏁` line — no proof, no stop."),
     Clause("stream-note", ("full",),
         "A stream ticket in that set is NOT mine to implement — I ACTION it (review, merge, close, unblock) and never write its code (a bare sub-dev bounce is NOT in this set — `/process-subdev`'s loop holds it)."),
-    Clause("review-watch", ("branch-merge", "fork-no-merge"), {
-        "branch-merge": "A handed-off ticket or an empty backlog, release still pending, is NOT done — REVIEW-WATCH: stay alive, re-check hourly with a FOREGROUND sleep-poll (~1h; never a wakeup/schedule), end ⏳ WORKING; never park silently — work any new stream/bounce ticket.",
-        "fork-no-merge": "An open ticket carrying my READY-FOR-REVIEW comment (names the fork branch + green local verification; the comment is the signal, the label best-effort) never blocks 🏁, but PREFER REVIEW-WATCH: stay alive, re-check hourly with a FOREGROUND sleep-poll (~1h; never a wakeup/schedule), end ⏳ WORKING; never park silently — work any gatekeeper bounce.",
-    }),
+    Clause("stream-idle", ("branch-merge", "fork-no-merge"),
+        "NO BACKLOG-EMPTY END (#1128): this stream loop never ends on an empty slice — gk hand-offs, bounces, client replies and new stream tickets keep arriving. IDLE: when `python3 ~/devel/airuleset/airuleset.py slice-quals --count` prints 0 and `slice-quals --bounces --unhandled` prints nothing, keep exactly ONE background `python3 ~/devel/airuleset/airuleset.py stream-wait` live (relaunch it if gone) and end ⏳ WORKING; when it exits, re-check `slice-quals` and work whatever arrived. Only I end this loop (`/goal clear`)."),
     Clause("authority-ends", ("branch-merge", "fork-no-merge"), {
         "branch-merge": "My authority ENDS at the integration branch: never promote to staging/main, never deploy, never touch other streams'.",
         "fork-no-merge": "My authority ENDS at the hand-off: I push MY fork branches + evidence — NEVER open/merge a PR, never push upstream, never deploy, close only per authority, never touch other streams'.",
@@ -188,8 +182,8 @@ CLAUSES = [
     }),
     Clause("compact-boundary", PROFILES, {
         "full": "After EVERY integration END the turn with the full `## ✅ Work Complete` report (`completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
-        "branch-merge": "After EVERY integration END the turn with the full `## ✅ Work Complete` report (the branch-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
-        "fork-no-merge": "After EVERY hand-off END the turn with the full `## ✅ Work Complete` report (the fork-no-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, NEVER satisfies (B). Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
+        "branch-merge": "After EVERY integration END the turn with the full `## ✅ Work Complete` report (the branch-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, never a stop. Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
+        "fork-no-merge": "After EVERY hand-off END the turn with the full `## ✅ Work Complete` report (the fork-no-merge variant, `completion-report.md`) terminating in `✅ DONE:` — CONTINUE, never a stop. Machine compacts are REMOVED (#1084) — native autocompact only; never a compact command, never a compact HOLD.",
     }),
 ]
 
@@ -476,6 +470,10 @@ def variant_check():
             errs.append("%s infra missing the infra-role clause" % tag)
         if role == "quality" and "QUALITY ROLE" not in line:  # #1074
             errs.append("%s quality missing the quality-role clause" % tag)
+        if authority != "full":  # #1128 — a stream loop has no done-state
+            errs += ["%s stream variant carries %r (a backlog-empty "
+                     "done-state)" % (tag, t) for t in _STREAM_FORBIDDEN
+                     if t in line]
     # #1000 F1 — the review variant is the TIGHTEST-arming variant and is NOT in
     # variant_specs (its required-clause leg cannot model the (B) substitution),
     # so lock its BUDGET + no-turn-cap here so `goal-inventory --check` is honest
