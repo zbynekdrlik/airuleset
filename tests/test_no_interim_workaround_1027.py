@@ -138,6 +138,69 @@ class TestWorkaroundGateDecision(TestCase):
         self.assertEqual(u_called, [])        # U-membership gh call NOT made
 
 
+class TestWorkaroundScopedToQuote(TestCase):
+    """#1027 fix-forward: the workaround-token search runs ONLY over the `> `
+    quoted region (the inline client text the #977 rule requires). An OWNER
+    question that merely contains "zatiaľ" with no proposed client reply is NOT a
+    workaround proposal and must be allowed — the live 23.9. false-block."""
+
+    # Owner cutover question: "Zatiaľ" + an open-lane #N, but NO `> ` client
+    # block at all. Blocked TODAY (search over the whole message); must be ALLOWED
+    # once the search is scoped to the quote.
+    OWNER_ZATIAL_NO_QUOTE = (
+        "**Otázka — projekt airuleset:** Riešim miva1 dual-agent cutover; oprava "
+        "beží ako #1115. Zatiaľ neviem, či prepnúť backend teraz alebo počkať.\n\n"
+        "❓ NEEDS YOU: prepnúť miva1 backend teraz, alebo počkať na #1115?"
+    )
+
+    # A ❓ with a CLEAN `> ` client draft (no workaround phrasing in it), where
+    # "Zatiaľ" appears only in the owner's own prose OUTSIDE the quote. Blocked
+    # TODAY; must be ALLOWED once the search is scoped to the quote.
+    OWNER_ZATIAL_OUTSIDE_CLEAN_QUOTE = (
+        "**Otázka — projekt odoo-erp:** Zatiaľ mám k #288 len tento draft pre "
+        "klientku (žiadny workaround v ňom):\n\n"
+        "> Dobrý deň Alena, chybu filtra sme opravili a je nasadená.\n\n"
+        "❓ ASKED: schváliš túto správu klientke k #288?"
+    )
+
+    def test_owner_question_zatial_no_quote_allowed(self):
+        called = []
+        block, reason = qs.decide(
+            _payload(self.OWNER_ZATIAL_NO_QUOTE),
+            u_count_fn=lambda c: 3,           # U>0 → #1025 path also allows
+            lane_fn=lambda nums, cwd: called.append(1) or "in_flight")
+        self.assertFalse(block, "owner question with no `> ` block must not trip "
+                                "the workaround rule")
+        self.assertEqual(called, [])          # no quoted workaround → no lane call
+
+    def test_zatial_outside_quote_with_clean_quote_allowed(self):
+        called = []
+        block, reason = qs.decide(
+            _payload(self.OWNER_ZATIAL_OUTSIDE_CLEAN_QUOTE),
+            u_count_fn=lambda c: 3,
+            lane_fn=lambda nums, cwd: called.append(1) or "in_flight")
+        self.assertFalse(block, "workaround token outside a clean quote must not "
+                                "block")
+        self.assertEqual(called, [])
+
+    def test_workaround_inside_quote_still_blocks(self):
+        # The rule keeps its teeth: "zatiaľ" INSIDE the `> ` quote + open lane.
+        block, reason = qs.decide(
+            _payload(WORKAROUND_ASKED),
+            lane_fn=lambda nums, cwd: "in_flight")
+        self.assertTrue(block)
+        self.assertIn("workaround", reason.lower())
+
+    def test_quoted_region_extracts_only_blockquote_lines(self):
+        region = qs._quoted_region(
+            "owner prose zatiaľ\n> quoted client text\nmore owner prose")
+        self.assertIn("quoted client text", region)
+        self.assertNotIn("owner prose", region)
+
+    def test_quoted_region_empty_when_no_blockquote(self):
+        self.assertEqual(qs._quoted_region("no quote here at all"), "")
+
+
 class TestLaneInFlightHelper(TestCase):
     # #1027-review 🟡1: the common ONE-ref case uses an EXACT `gh issue view <N>
     # --json state` (no list cap to under-match); multiple refs use a single
