@@ -170,29 +170,37 @@ class TestWatchdogSeams(TestCase):
     """#993 review 8 — the two production watchdog seams: the dispatchable-count
     fetch (protocol + fail-safe) and the queue-classify factory (fail-safe)."""
 
-    def _fetch(self, stdout, rc=0):
+    def _fetch(self, count, reason=None, snapshot=True):
+        # #1067 1d: the fetch reads the detached quals snapshot (the SAME
+        # `_dispatchable_fields` derivation `--count-dispatchable` prints) —
+        # never a blocking `--count-dispatchable` subprocess any more.
+        import time
         import unittest.mock as mk
         import airuleset
-
-        class _CP:
-            returncode = rc
-            def __init__(s):
-                s.stdout = stdout
+        from watchdog import ops_wait_refresh as owref
+        entry = ({"v": owref.SNAPSHOT_VERSION, "ts": time.time(),
+                  "members_ts": time.time(), "members": [], "open_count": 1,
+                  "i_members": [1], "dispatchable_count": count,
+                  "dispatchable_reason": reason} if snapshot else None)
         with mk.patch("airuleset._repo_root", return_value="/root"), \
              mk.patch("airuleset.resolve_authority", return_value="full"), \
-             mk.patch("subprocess.run", return_value=_CP()):
-            return airuleset._watchdog_dispatchable_fetch("/root")
+             mk.patch.object(owref, "read_snapshot", return_value=entry), \
+             mk.patch("subprocess.run") as run:
+            out = airuleset._watchdog_dispatchable_fetch("/root")
+        run.assert_not_called()
+        return out
 
     def test_count_and_reason_parsed(self):
-        self.assertEqual(self._fetch("0\nreason:dep-wait\n"),
+        self.assertEqual(self._fetch(0, "dep-wait"),
                          [{"count": 0, "reason": "dep-wait"}])
-        self.assertEqual(self._fetch("3\n"), [{"count": 3, "reason": None}])
+        self.assertEqual(self._fetch(3), [{"count": 3, "reason": None}])
 
     def test_unmeasurable_is_none(self):
-        self.assertIsNone(self._fetch("unmeasurable\n"))
+        self.assertIsNone(self._fetch(None))
 
     def test_nonzero_rc_is_none(self):
-        self.assertIsNone(self._fetch("5\n", rc=1))
+        # a failed/refused derivation never produced a snapshot -> None
+        self.assertIsNone(self._fetch(5, snapshot=False))
 
     def test_queue_classify_non_full_is_none(self):
         import unittest.mock as mk

@@ -76,7 +76,10 @@ class FetchOrRefresh(_HomeCase):
         self.assertEqual(out, [{"number": 7}])   # non-blocking: last good, not None
 
     def test_fresh_cache_no_spawn(self):
-        self._write_cache({"ts": NOW - 60, "members": [{"number": 9}]})
+        # #1067 1d: a SUCCESS entry is fresh only in the v2 snapshot schema (a
+        # members-only 1c entry is due at once so backlog/dispatchable fill).
+        self._write_cache({"ts": NOW - 60, "members": [{"number": 9}],
+                           "v": owref.SNAPSHOT_VERSION})
         spy = m.Mock()
         out = owref.fetch_or_refresh(CWD, "slice-quals", SENTINEL, now=NOW,
                                      spawn_fn=spy, alive_fn=lambda c: False)
@@ -132,10 +135,9 @@ class FetchOrRefresh(_HomeCase):
 
 class SpawnDueAndServe(_HomeCase):
     def test_spawn_due_success_uses_full_ttl(self):
-        self.assertFalse(owref._spawn_due({"ts": NOW, "members": []},
-                                          NOW + owref.REFRESH_TTL_S - 1))
-        self.assertTrue(owref._spawn_due({"ts": NOW, "members": []},
-                                         NOW + owref.REFRESH_TTL_S))
+        ok = {"ts": NOW, "members": [], "v": owref.SNAPSHOT_VERSION}   # 1d
+        self.assertFalse(owref._spawn_due(ok, NOW + owref.REFRESH_TTL_S - 1))
+        self.assertTrue(owref._spawn_due(ok, NOW + owref.REFRESH_TTL_S))
 
     def test_spawn_due_failed_entry_uses_fail_ttl(self):
         self.assertFalse(owref._spawn_due({"ts": NOW, "error": True},
@@ -178,11 +180,16 @@ class RefresherAlive(_HomeCase):
 
 class RunRefreshChild(_HomeCase):
     def test_ok_writes_members_and_clears_pidfile(self):
+        # #1067 1d: the child now runs `--snapshot-json` (the ops-wait members
+        # arrive already parsed, from the SAME listing parser, inside it).
         tsv = ("41\t2026-01-01T00:00:00Z\taction-only\tops-wait\tt\n"
                "43\t2026-01-01T00:00:00Z\taction-only\tops-wait stale!\tt\n")
+        out = json.dumps({"open_count": 0, "i_members": [],
+                          "dispatchable_count": 0, "dispatchable_reason": None,
+                          "ops_wait_members": owref.parse_members(tsv)})
         owref.run_refresh_child(CWD, "slice-quals", owref.cache_path(CWD),
                                 owref.pid_path(CWD), "/x/airuleset.py",
-                                run_fn=lambda *a: (0, tsv))
+                                run_fn=lambda *a: (0, out))
         entry = self._read_cache()
         self.assertEqual([mm["number"] for mm in entry["members"]], [41, 43])
         self.assertTrue(entry["members"][1]["stale"])

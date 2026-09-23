@@ -231,25 +231,28 @@ class TestEmitCountDispatchable(TestCase):
 
 
 class TestWatchdogReasonFlow(TestCase):
-    def _fetch(self, stdout, rc=0):
-        class _CP:
-            returncode = rc
-
-            def __init__(s):
-                s.stdout = stdout
+    def _fetch(self, count, reason):
+        # #1067 1d: the fetch reads the detached quals snapshot; the reason
+        # rides the snapshot's `dispatchable_reason` field.
+        import time
+        from watchdog import ops_wait_refresh as owref
+        entry = {"v": owref.SNAPSHOT_VERSION, "ts": time.time(),
+                 "members_ts": time.time(), "members": [], "open_count": 1,
+                 "i_members": [1], "dispatchable_count": count,
+                 "dispatchable_reason": reason}
         with mk.patch("airuleset._repo_root", return_value="/root"), \
              mk.patch("airuleset.resolve_authority", return_value="full"), \
-             mk.patch("subprocess.run", return_value=_CP()):
+             mk.patch.object(owref, "read_snapshot", return_value=entry):
             return airuleset._watchdog_dispatchable_fetch("/root")
 
     def test_unmeasurable_with_reason_flows_through(self):
-        # today: `int('unmeasurable:...')` fails -> None (reason lost).
-        self.assertEqual(self._fetch("unmeasurable:meta read failed\n"),
+        # the reason survives from `unmeasurable:meta read failed` to the nudge.
+        self.assertEqual(self._fetch(None, "meta read failed"),
                          [{"count": None, "reason": "meta read failed"}])
 
     def test_bare_unmeasurable_still_none(self):
-        # a bare `unmeasurable` (no colon) stays None (legacy / unknown).
-        self.assertIsNone(self._fetch("unmeasurable\n"))
+        # an unmeasurable count with no reason stays None (legacy / unknown).
+        self.assertIsNone(self._fetch(None, None))
 
     def test_lane_decision_journals_the_reason(self):
         # a reason-carrying fetch -> the journal says WHY (today: the res dict's
