@@ -142,7 +142,9 @@ class TestRegistryAllAccessLanesSpecced(unittest.TestCase):
             self.assertEqual(dg.DROP_ACCESS_APPS.get(host), expected,
                              "hand-authored spec for %s changed" % host)
 
-    def test_the_twelve_controller_pending_lanes_are_now_specced(self):
+    def test_previously_pending_controller_lanes_are_now_specced(self):
+        # The controller lanes slice B left PENDING (a representative subset of
+        # the montalu/dev/airuleset/miva set) now carry an owner-only spec.
         for host in (
                 "drop-airuleset.newlevel.media", "drop-dev1.newlevel.media",
                 "drop-dev2.newlevel.media", "drop-subdev-miva1.newlevel.media",
