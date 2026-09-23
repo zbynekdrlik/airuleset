@@ -15,6 +15,7 @@ directory should be ignored.
 """
 
 import json
+import os
 import unittest
 from unittest import mock
 
@@ -47,10 +48,16 @@ class TestStrayAppTokenDir(unittest.TestCase):
         """On a genuine App-token box (_gh_login returns None because
         gh api user 403s), _stream_self_login must still return
         STREAM_APP_BOT_LOGIN."""
+        # Issue 1129: the identity now also reads the token's `.app` slug
+        # sidecar — point the dir at a missing path so a real App-token box's
+        # sidecar can never leak in (cmd_push's unittest discover has no
+        # conftest isolation).
         with mock.patch.object(cli_quals, "_is_gh_app_token_box",
                                return_value=True), \
              mock.patch.object(airuleset, "_gh_login",
-                               return_value=None):
+                               return_value=None), \
+             mock.patch.dict(os.environ, {
+                 "GH_APP_TOKEN_DIR": "/nonexistent/gh-app-tokens-918"}):
             result = cli_quals._stream_self_login()
         self.assertEqual(APP_BOT, result,
                          "Genuine App-token box must still return "

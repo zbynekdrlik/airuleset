@@ -37,6 +37,11 @@ def _full_box(labels):
                                          own_stream=None)
 
 
+# A reduced-authority stream the fixture names, independent of the live fleet
+# table (a future david4 decommission must not flip these tests).
+_FLEET = m.patch.dict(airuleset.AUTHORITY_BY_USER, {"david4": "fork-no-merge"})
+
+
 class FullBoxForeignAcceptance1130(unittest.TestCase):
 
     def test_foreign_acceptance_gk_processing_not_in_U(self):
@@ -61,6 +66,14 @@ class FullBoxForeignAcceptance1130(unittest.TestCase):
         self.assertNotIn(8002, waiting)
         self.assertNotIn(8002, ops_wait)
 
+    def test_own_core_acceptance_in_gk_processing_is_I_not_U(self):
+        """The box's OWN acceptance re-hand-off in gk-processing is the gk
+        box's work in flight (like ready-for-review), never its owner's U."""
+        workable, waiting, _o = _full_box(("stream:core", "needs-acceptance",
+                                           "gk-processing"))
+        self.assertIn(8002, workable)
+        self.assertNotIn(8002, waiting)
+
     def test_own_core_row_with_gk_processing_unchanged(self):
         workable, waiting, ops_wait = _full_box(("stream:core",
                                                  "gk-processing"))
@@ -71,7 +84,9 @@ class FullBoxForeignAcceptance1130(unittest.TestCase):
     def test_bare_foreign_acceptance_still_search_excluded(self):
         """Without gk-processing the foreign acceptance never reaches the
         partition: the core slice search-excludes its stream label."""
-        self.assertIn("-label:stream:david4", cli_quals._core_search_excl())
+        with _FLEET:
+            self.assertIn("-label:stream:david4",
+                          cli_quals._core_search_excl())
 
     def test_own_bare_acceptance_still_U(self):
         """#622 unchanged: the box's OWN bare needs-acceptance is the owner's
@@ -90,9 +105,14 @@ class HandoffLabelSetsDeriveOnce1130(unittest.TestCase):
         self.assertIn("prio:bounce",
                       cli_quals.NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS)
 
-    def test_gk_handoff_labels_equal_maintainer_labels(self):
-        self.assertEqual(set(cli_quals.MAINTAINER_ACTION_LABELS),
-                         set(cli_quals._GK_HANDOFF_LABELS))
+    def test_gk_handoff_flag_covers_every_maintainer_label(self):
+        """Behavioural drift guard: a W-parked row with ANY maintainer label
+        is the `gk-handoff!` contradiction."""
+        for lb in cli_quals.MAINTAINER_ACTION_LABELS:
+            with self.subTest(label=lb):
+                rows = {1: _row(1, ("ops-wait", lb))}
+                self.assertEqual({1},
+                                 cli_quals._gk_handoff_ops_wait_flagged(rows))
 
     def test_row_is_user_waiting_overridden_by_each_maintainer_label(self):
         for lb in cli_quals.MAINTAINER_ACTION_LABELS:
