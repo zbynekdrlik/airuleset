@@ -260,6 +260,137 @@ class TestStreamMigrate(unittest.TestCase):
             lines += [ln for ln in logs if "stream-migrate SKIP" in ln]
         self.assertEqual(len(lines), 1, lines)
 
+    # --- adversarial-review findings (part 3) -------------------------------- #
+    def test_delivers_even_with_the_staged_goal_sweep_kind_off(self):
+        # 🔴: a stream box with no DECLARED window (montalu1-8) resolves the
+        # staged, default-OFF `goal-sweep` kind -> every keystroke suppressed.
+        # The owner-authorized migration rides the always-on `goal-arm` kind.
+        proj = self._fixture("m-kind")
+        _r, _l, state, _t = self._sweep(proj)
+        home = self._dir()
+        env = {k: v for k, v in os.environ.items()
+               if k != "AIRULESET_TEST_IGNORE_DISABLE"}
+        env["HOME"] = str(home)
+        with unittest.mock.patch.dict(os.environ, env, clear=True):
+            word, live = self._deliver(proj, "m-kind", state)
+        self.assertEqual(word, "sent", Path(self.syncp).read_text())
+        self.assertTrue(any("-l" in a for a in live.sent), live.sent)
+
+    def test_never_re_arms_with_a_template_that_is_itself_old(self):
+        proj = self._fixture("m-oldtpl")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", CWD, "111")], GOAL_IDLE_CAP)
+        logs = goal.goal_dark_watch(
+            self.now, run=tmux, send_fn=lambda mm, **k: None, projects_dir=proj,
+            state={}, sleep_fn=lambda s: None,
+            obligation_fn=lambda cwd: (0, self.now),
+            rearm_fn=lambda cwd: (OLD_FORK, "fork-no-merge"),
+            requests_path=self.reqp)
+        self.assertEqual(goal.load_goal_requests(self.reqp), {})
+        self.assertTrue(any("still the old" in ln for ln in logs), logs)
+
+    def test_never_when_a_later_turn_followed_the_achievement(self):
+        # a 🏁 the evaluator REJECTED keeps the loop running: a later turn exists.
+        proj = self._fixture("m-later")
+        tpath = next(proj.rglob("m-later.jsonl"))
+        with open(tpath, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"type": "assistant", "timestamp": _iso(700),
+                                "message": {"id": "m2", "content":
+                                            "ďalšia práca ✅ DONE: x"}}) + "\n")
+        os.utime(tpath, (self.now - 1200, self.now - 1200))
+        reqs, logs, _s, _t = self._sweep(proj)
+        self.assertEqual(reqs, {})
+        self.assertTrue(any("newest turn" in ln for ln in logs), logs)
+
+    def test_an_unresolved_template_falls_through_to_the_normal_path(self):
+        proj = self._fixture("m-notpl")
+        tmux = DeliverGoalFakeTmux([("%9", "claude", CWD, "111")], GOAL_IDLE_CAP)
+        logs = goal.goal_dark_watch(
+            self.now, run=tmux, send_fn=lambda mm, **k: None, projects_dir=proj,
+            state={}, sleep_fn=lambda s: None,
+            obligation_fn=lambda cwd: (4, self.now),
+            rearm_fn=lambda cwd: (None, "fork-no-merge"),
+            requests_path=self.reqp)
+        self.assertEqual(goal.load_goal_requests(self.reqp), {})
+        self.assertTrue(any("fulfilled-rearm SKIP:no-template" in ln
+                            for ln in logs), logs)
+
+    def test_a_pending_request_blocks_a_new_record(self):
+        proj = self._fixture("m-pend")
+        goal.record_goal_request("m-pend", CWD, "/goal y", "fork-no-merge",
+                                 now=self.now, path=self.reqp,
+                                 origin="self-callback")
+        reqs, logs, _s, _t = self._sweep(proj)
+        self.assertEqual(reqs["m-pend"]["origin"], "self-callback")
+        self.assertTrue(any("already pending" in ln for ln in logs), logs)
+
+    def test_decide_on_an_unreadable_transcript_falls_through(self):
+        line, handled = sm.decide(
+            "s", CWD, None, OLD_FORK, self.now, "loc", False, {},
+            lambda cwd: (NEW_FORK, "fork-no-merge"), lambda s: False,
+            lambda t, a: None, lambda: None, latest_is_done=True)
+        self.assertFalse(handled)
+        self.assertIn("transcript unreadable", line)
+
+    def test_dry_run_mutates_no_state(self):
+        proj = self._fixture("m-dry")
+        state = {}
+        tmux = DeliverGoalFakeTmux([("%9", "claude", CWD, "111")], GOAL_IDLE_CAP)
+        goal.goal_dark_watch(
+            self.now, run=tmux, send_fn=lambda mm, **k: None, projects_dir=proj,
+            state=state, sleep_fn=lambda s: None,
+            obligation_fn=lambda cwd: (0, self.now),
+            rearm_fn=lambda cwd: (NEW_FORK, "fork-no-merge"),
+            requests_path=self.reqp, dry_run=True)
+        self.assertNotIn("goal_stream_migrate", state)
+        self.assertEqual(goal.load_goal_requests(self.reqp), {})
+
+    def test_recent_human_defers_the_delivery(self):
+        proj = self._fixture("m-human")
+        _r, _l, state, _t = self._sweep(proj)
+        req = goal.load_goal_requests(self.reqp)["m-human"]
+        live = DeliverGoalFakeTmux([("%9", "claude", CWD, "111")],
+                                   GOAL_IDLE_CAP, model_type=True)
+        with unittest.mock.patch.object(
+                wd, "_goal_autoarm_recent_human_activity",
+                return_value=(True, "presence marker 3s")):
+            word = goal.deliver_goal(
+                "m-human", CWD, req["text"], req["authority"], run=live,
+                projects_dir=proj, now=self.now + 30, origin=req["origin"],
+                request_ts=req["ts"], sleep_fn=lambda s: None, state=state)
+        self.assertEqual(word, "skip:recent-human")
+        self.assertEqual(live.sent, [])
+
+    def test_delivery_journals_the_exemption_and_its_refusal_reason(self):
+        proj = self._fixture("m-jr")
+        _r, _l, state, _t = self._sweep(proj)
+        self._deliver(proj, "m-jr", state)
+        self.assertIn("PASS structured-armed", Path(self.syncp).read_text())
+        tpath = next(proj.rglob("m-jr.jsonl"))
+        os.utime(tpath, (self.now - 60, self.now - 60))
+        self._deliver(proj, "m-jr", state, req=self._forced())
+        self.assertIn("stream-migrate: transcript not idle",
+                      Path(self.syncp).read_text())
+
+    def test_one_typed_attempt_per_request(self):
+        # guard 5: a keystroke-bearing skip ends a stream-migrate request (the
+        # next attempt is the next hour's decision), never 3-6 retypes.
+        goal.record_goal_request("m-one", CWD, NEW_FORK, "fork-no-merge",
+                                 now=self.now, path=self.reqp,
+                                 origin=sm.ORIGIN)
+        tmux = DeliverGoalFakeTmux([("%9", "claude", CWD, "111")], GOAL_IDLE_CAP)
+        for word in ("skip:verify-failed", "skip:verify-failed-live"):
+            goal.record_goal_request("m-one", CWD, NEW_FORK, "fork-no-merge",
+                                     now=self.now, path=self.reqp,
+                                     origin=sm.ORIGIN)
+            with unittest.mock.patch.object(goal, "deliver_goal",
+                                            return_value=word):
+                logs = goal.goal_sweep(self.now + 30, run=tmux,
+                                       projects_dir=self._dir(),
+                                       requests_path=self.reqp,
+                                       sleep_fn=lambda s: None, state={})
+            self.assertEqual(goal.load_goal_requests(self.reqp), {}, word)
+            self.assertTrue(any("one typed attempt" in ln for ln in logs), logs)
+
     def test_the_origin_is_a_silent_watchdog_rearm(self):
         self.assertIn(sm.ORIGIN, goal._GOAL_WATCHDOG_REARM_ORIGINS)
         self.assertNotIn(sm.ORIGIN, goal._GOAL_USER_CALLBACK_ORIGINS)
