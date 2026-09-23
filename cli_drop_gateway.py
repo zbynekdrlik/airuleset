@@ -315,6 +315,14 @@ DROP_ACCESS_APPS = {
     },
 }
 
+# #1115 slice D: every GENERATED access lane (the accounts with no hand-authored
+# spec above) gets an owner-only Access include, derived by ONE helper from the
+# generated lane list — so slice-B go-live is no longer HARD-gated PENDING on a
+# missing spec (decision 5787094428). Hand-authored specs above WIN (the helper
+# skips an already-specced host), so they stay byte-identical.
+DROP_ACCESS_APPS.update(cli_drop_lanes.generated_access_specs(
+    DROP_LANES, DROP_ACCESS_APPS, ["drlik.zbynek@gmail.com"]))
+
 
 def _current_username():
     """The invoking unix account name. Prefers the real (effective-uid) passwd
