@@ -20,6 +20,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -352,11 +353,12 @@ class TestDev1IsRemoteFromController1123(unittest.TestCase):
     def test_dev1_from_the_controller_goes_over_ssh(self):
         with TemporaryDirectory() as rd:
             run = RemoteRunner(home="/home/newlevel")
-            r = ob.onboard_project("~/devel/foo1123", host="dev1",
-                                   name="foo1123",
-                                   registry_path=str(Path(rd) / "r.json"),
-                                   run=run, dry_run=True,
-                                   local_host="airuleset")
+            with mock.patch("cli_onboard_exec._local_hostname",
+                            return_value="airuleset"):
+                r = ob.onboard_project("~/devel/foo1123", host="dev1",
+                                       name="foo1123",
+                                       registry_path=str(Path(rd) / "r.json"),
+                                       run=run, dry_run=True)
             self.assertFalse(r.get("error"), r.get("error"))
             joined = " || ".join(run.ssh_cmd_strings())
             self.assertIn("/home/newlevel/devel/foo1123", joined,
@@ -367,9 +369,12 @@ class TestDev1IsRemoteFromController1123(unittest.TestCase):
             proj = Path(rd) / "proj1123"
             proj.mkdir()
             run = RemoteRunner()
-            ob.onboard_project(str(proj), host="airuleset", name="proj1123",
-                               registry_path=str(Path(rd) / "r.json"),
-                               run=run, dry_run=True, local_host="airuleset")
+            with mock.patch("cli_onboard_exec._local_hostname",
+                            return_value="airuleset"):
+                ob.onboard_project(str(proj), host="airuleset",
+                                   name="proj1123",
+                                   registry_path=str(Path(rd) / "r.json"),
+                                   run=run, dry_run=True)
             self.assertEqual(run.ssh_calls, [],
                              "this box's own name must not ssh to itself")
 
