@@ -690,50 +690,99 @@ function attachClipboard(win) {                  // idempotent: attach once per 
   } catch (e) {}
 }
 // #1016: Windows-Terminal-style BLOCK (column) selection with a plain Alt+drag.
-// The fleet tmux runs `mouse on` (#646), so xterm.js forces its OWN selection
-// under mouse-tracking only when shiftKey is set (shouldForceSelection), and
-// makes it a COLUMN block only when altKey is set (_shouldColumnSelect) -- so a
-// plain Alt+drag (the Windows habit) goes to tmux (ordinary line selection) and
-// the real block gesture is Shift+Alt+drag (which on Windows is the input-language
-// toggle). We translate the gesture where the dash already reaches each same-origin
-// xterm (the #613/#643/#886 `window.term` hook): a CAPTURE-phase mousedown listener
-// on term.element re-dispatches a plain Alt+left-mousedown as Shift+Alt, so xterm
-// forces its own column selection; mousemove/mouseup are untouched (xterm tracks
-// the drag once the selection started). altClickMovesCursor is also disabled so an
-// Alt CLICK (no drag) never moves the shell cursor. Fully guarded so an error can
-// never break the page or leave console noise (browser-console-zero-errors).
+// The fleet tmux runs `mouse on` (#646), so xterm.js is in mouse-TRACKING mode:
+// its mousedown handler forwards the event to tmux (and arms tmux move/up forwards)
+// unless SelectionService.shouldForceSelection(e) is true -- which keys on shiftKey
+// (or altKey && macOptionClickForcesSelection on macOS). So a plain Alt+drag (the
+// Windows habit) goes to tmux (ordinary line selection); the real block gesture is
+// Shift+Alt+drag (which on Windows toggles the input language). We translate the
+// gesture where the dash already reaches each same-origin xterm (the #613/#643/#886
+// `window.term` hook).
+//
+// #1016 FIX-FORWARD (owner acceptance failed: "cez alt sa prepne kurzor na krizik
+// ale nic sa neda vyznacit" -- the crosshair showed xterm saw Alt, but nothing
+// selected). Two corrections over the v0.1.416 mousedown-only translator:
+//  (1) The synthetic mousedown MUST carry `detail` (the real click's count). xterm
+//      starts a selection only in its `1 === e.detail` single-click branch; a
+//      `new MouseEvent` defaults detail to 0, so the old synthetic reached xterm
+//      with the right modifiers yet NEVER started a selection -- the true root cause.
+//  (2) Translate the WHOLE drag, not just the mousedown. While a translated Alt-drag
+//      is active we re-dispatch every mousemove and the final mouseup as Shift+Alt
+//      (capture-phase on the document, where xterm attaches its own selection
+//      move/up handlers during a drag) and stop the plain originals, so under
+//      mouse-tracking no plain move/up can leak to tmux and clear/miss the block.
+// Our synthetic events carry shiftKey:true, so our own listeners ignore them (no
+// loop). A plain (non-Alt) drag is untouched. altClickMovesCursor stays false so an
+// Alt CLICK never moves the shell cursor; macOptionClickForcesSelection is true so
+// the same synthetic forces a column selection on macOS too (shared template).
+// Fully guarded so an error can never break the page or leave console noise.
 function attachBlockSelect(win) {                // idempotent: attach once per terminal
   const term = win && win.term;
   if (!term || term.__wtBlockSel) return;
   const el = term.element;
   if (!el || !el.addEventListener) return;       // xterm element not painted yet -> poll retries
   term.__wtBlockSel = true;
-  // altClickMovesCursor: an Alt CLICK (no drag) must not move the shell cursor.
-  // macOptionClickForcesSelection: on macOS xterm's shouldForceSelection keys on
-  // altKey && macOptionClickForcesSelection (NOT shiftKey), so without this the
-  // synthetic Shift+Alt below would force NOTHING on a Mac while the plain Alt+drag
-  // is suppressed -> a dead gesture. Setting it makes the SAME synthetic event force
-  // a column selection on every platform (the template is shared across all lanes).
   try { term.options.altClickMovesCursor = false; } catch (e) { /* older xterm -> ignore */ }
   try { term.options.macOptionClickForcesSelection = true; } catch (e) { /* older xterm -> ignore */ }
+  var doc = el.ownerDocument || win.document;    // where xterm attaches drag move/up
+  var ME = win.MouseEvent || MouseEvent;         // construct in the iframe's own realm
+  var dragging = false;
+  function redispatch(type, ev, target) {
+    var block = new ME(type, {
+      bubbles: true, cancelable: true, view: win,
+      button: ev.button, buttons: ev.buttons,
+      clientX: ev.clientX, clientY: ev.clientY,
+      screenX: ev.screenX, screenY: ev.screenY,
+      ctrlKey: ev.ctrlKey, metaKey: ev.metaKey,
+      detail: ev.detail,                         // xterm's `1===detail` single-click starts the selection; a 0 default never does
+      altKey: true, shiftKey: true,              // shift forces the selection + alt makes it a column block
+    });
+    target.dispatchEvent(block);                 // shiftKey:true -> a no-op for our own listeners (self-guard)
+  }
+  function endDrag() {
+    if (!dragging) return;
+    dragging = false;
+    try { doc.removeEventListener('mousemove', onMove, true); } catch (e) {}
+    try { doc.removeEventListener('mouseup', onUp, true); } catch (e) {}
+  }
+  function onMove(ev) {                           // capture on doc, active only during a translated drag
+    if (!dragging || ev.shiftKey) return;        // ignore our own Shift+Alt re-dispatch (self-guard)
+    try {
+      ev.preventDefault();
+      ev.stopImmediatePropagation();             // keep the plain-Alt move out of tmux mouse-tracking
+      redispatch('mousemove', ev, doc);          // xterm's ownerDocument mousemove -> extend the column block
+    } catch (e) { /* never break the terminal or emit console noise */ }
+  }
+  function onUp(ev) {                             // capture on doc, active only during a translated drag
+    if (!dragging) return;
+    if (ev.shiftKey) { endDrag(); return; }      // our own synthetic mouseup -> just tear down
+    try {
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+      redispatch('mouseup', ev, doc);            // xterm's ownerDocument mouseup -> finalize the selection
+    } catch (e) { /* never break the terminal or emit console noise */ }
+    endDrag();
+  }
+  function startDrag() {                          // arm drag-scoped doc listeners (no-op without a document)
+    try {
+      if (dragging || !doc || !doc.addEventListener) return;
+      dragging = true;
+      doc.addEventListener('mousemove', onMove, true);   // CAPTURE: preempt xterm's ownerDocument handlers
+      doc.addEventListener('mouseup', onUp, true);
+    } catch (e) { /* no document -> mousedown translation still runs below */ }
+  }
   try {
     el.addEventListener('mousedown', (ev) => {
       try {
         if (ev.button !== 0 || !ev.altKey || ev.shiftKey) return;   // only a plain Alt+left drag
         ev.preventDefault();
-        ev.stopImmediatePropagation();           // hide the plain Alt+drag from xterm
-        const ME = win.MouseEvent || MouseEvent; // construct in the iframe's own realm
-        const block = new ME('mousedown', {
-          bubbles: true, cancelable: true, view: win,
-          button: ev.button, buttons: ev.buttons,
-          clientX: ev.clientX, clientY: ev.clientY,
-          screenX: ev.screenX, screenY: ev.screenY,
-          ctrlKey: ev.ctrlKey, metaKey: ev.metaKey,
-          altKey: true, shiftKey: true,          // shift forces the selection + alt makes it a column block
-        });
-        (ev.target || el).dispatchEvent(block);  // shiftKey:true makes the re-dispatch a no-op for THIS listener
+        ev.stopImmediatePropagation();           // hide the plain Alt+drag from xterm/tmux
+        startDrag();                             // arm the whole-drag translation before the synthetic mousedown
+        redispatch('mousedown', ev, ev.target || el);   // xterm forces its own column selection
       } catch (e) { /* never break the terminal or emit console noise */ }
     }, true);                                     // CAPTURE: run before xterm's own selection listener
+    try { win.addEventListener('blur', endDrag); } catch (e) {}          // safety: never leave listeners armed
+    try { doc.addEventListener('visibilitychange', endDrag); } catch (e) {}
   } catch (e) { /* addEventListener unavailable -> no translation, page stays alive */ }
 }
 function applyFixedGrid(f) {                     // poll for window.term, fit, then watch resize

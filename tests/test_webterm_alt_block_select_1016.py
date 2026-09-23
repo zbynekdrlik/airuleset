@@ -10,38 +10,48 @@ webterm. Root cause (design comment, main): the fleet tmux runs `mouse on`
 selection) and the real block gesture is Shift+Alt+drag (which on Windows is the
 input-language toggle).
 
-Fix (Approach 1): the dash template attaches ONE capture-phase `mousedown`
-listener per same-origin xterm iframe (the #613/#886 `window.term` integration
-point) that translates a plain Alt+left-mousedown into a Shift+Alt one -- xterm
-then forces its own COLUMN selection -- and sets `altClickMovesCursor = false`.
+Fix (Approach 1, fix-forward): the dash template attaches capture-phase listeners
+per same-origin xterm iframe (the #613/#886 `window.term` integration point) that
+translate a plain Alt+left DRAG into a Shift+Alt one, so xterm forces its own
+COLUMN selection, and sets `altClickMovesCursor = false`.
 
-Two tiers of coverage:
+The v0.1.416 first cut (mousedown-only) failed the owner's acceptance ("cez alt sa
+prepne kurzor na krizik ale nic sa neda vyznacit"). Two corrections, both proven
+by the real-browser tier below:
+  (1) The synthetic mousedown MUST carry `detail` (the real click count). xterm
+      starts a selection only in its `1 === e.detail` single-click branch; a
+      `new MouseEvent` defaults detail to 0, so the old synthetic reached xterm
+      with the right modifiers yet NEVER started a selection -- the TRUE root cause
+      (the design's "moves leak to tmux" diagnosis was incomplete).
+  (2) The WHOLE drag is translated: while a translated Alt-drag is active, every
+      mousemove and the final mouseup are re-dispatched as Shift+Alt (capture-phase
+      on the document, where xterm attaches its selection move/up during a drag)
+      and the plain originals are stopped, so under tmux mouse-tracking nothing
+      leaks to tmux.
+
+Three tiers of coverage:
 
 * STRUCTURAL locks (always run) -- the translator ships, is wired into the
-  per-iframe poll beside attachClipboard/themeTerminal, runs in the CAPTURE
-  phase, guards on `altKey && !shiftKey && button === 0`, re-dispatches with
-  `shiftKey: true` + `altKey: true`, is idempotent, and disables
-  altClickMovesCursor.
+  per-iframe poll beside attachClipboard/themeTerminal, runs in the CAPTURE phase,
+  guards on `altKey && !shiftKey && button === 0`, re-dispatches with
+  `shiftKey: true` + `altKey: true` + `detail: ev.detail`, hooks the whole drag on
+  the document capture-phase and removes those listeners at drag end, is
+  idempotent, and disables altClickMovesCursor.
 * A BEHAVIOURAL node harness (runs when `node` is present) that drives the REAL
-  extracted `attachBlockSelect` against a stub `term.element` (an EventTarget)
-  and a stub `win.MouseEvent`, recording what a stand-in xterm listener actually
-  receives. It proves: an Alt+drag reaches xterm as a Shift+Alt (column) event
-  with the original suppressed; a plain drag is untouched; an already-Shift+Alt
-  drag is not double-processed; `altClickMovesCursor` is false after attach; the
-  attach is idempotent; and NO console output is emitted (console stays clean).
-  This ALWAYS-RUN tier uses the design's sanctioned stub-`term.element` harness
-  (not a real xterm) for a concrete reason: no `playwright` DRIVER is installed on
-  this box (python import fails; not in node_modules), so a real-browser pytest
-  — like the sibling `test_webterm_short_viewport_798.py` real-browser tier —
-  would only SKIP here, giving no regression net. The xterm.js JS SOURCE is also
-  not a file on disk (it is compiled into the ttyd binary), so it cannot be
-  `<script>`-loaded into a node harness either. A real xterm IS reachable at
-  DEPLOY time via a loopback ttyd + browser (the #678/#700 recipe), and the
-  end-to-end column-selection OUTCOME (a Shift+Alt drag under tmux `mouse on`
-  yields a block with no leading indent) is the ticket's UNVERIFIED item, confirmed
-  in the owner's browser after deploy per the #1015 live-verification rule — this
-  stub tier proves the TRANSLATION (the JS reshapes the event correctly), which is
-  the part that lives in this repo.
+  extracted `attachBlockSelect` against a stub `term.element` (an EventTarget) and
+  a stub `win.MouseEvent`, proving the mousedown TRANSLATION: an Alt+drag reaches
+  xterm as a Shift+Alt (column) event with the original suppressed; a plain drag
+  is untouched; an already-Shift+Alt drag is not double-processed;
+  `altClickMovesCursor` is false; the attach is idempotent and console-clean. The
+  flat EventTarget cannot model DOM tree-capture or tmux mouse-tracking routing --
+  those are the real-browser tier's job.
+* A REAL-BROWSER tier (runs where ttyd + tmux + node + a requireable `playwright`
+  + a chromium headless-shell are present -- the controller; SKIPS elsewhere like
+  the sibling `test_webterm_short_viewport_798.py`). It drives real Playwright
+  mouse input against a real xterm under a loopback ttyd on an isolated tmux server
+  with `mouse on`, and asserts the end-to-end column-block OUTCOME that the node
+  harness cannot reach. The owner's own-browser confirmation after deploy remains
+  the #1015 acceptance.
 """
 import glob
 import json
@@ -77,8 +87,10 @@ def _inv():
 # and only the re-dispatched clone reaches it. NB this models REGISTRATION-order
 # suppression, NOT a real DOM tree's capture-before-descendant phase — the actual
 # capture flag is a FLAT-model no-op here, so the `, true` capture requirement is
-# locked STRUCTURALLY by test_capture_phase_listener, not behaviourally (a real
-# tree-capture test needs a browser, which is the deploy-time #678/#700 recipe).
+# locked STRUCTURALLY by test_capture_phase_listener, not behaviourally; the
+# tree-capture + tmux-tracking OUTCOME is the real-browser tier below. The stub
+# has no ownerDocument/document, so the whole-drag doc listeners no-op here (the
+# fix-forward keeps the mousedown translation working without a document).
 # ---------------------------------------------------------------------------
 _BLOCK_HARNESS = r"""
 %(attach)s
@@ -179,12 +191,35 @@ class TestAltBlockSelectStructure1016(unittest.TestCase):
         fn = _extract_js_function(self.html, "attachBlockSelect")
         self.assertRegex(fn, r"macOptionClickForcesSelection\s*=\s*true")
 
-    def test_only_mousedown_is_hooked(self):
-        # mousemove/mouseup must be left to xterm once the selection has started;
-        # a lock so a future edit can't silently hook them.
+    def test_whole_drag_is_translated(self):
+        # fix-forward: the plain-Alt mousemove AND mouseup are ALSO re-dispatched as
+        # Shift+Alt during the drag (mousedown-only left the selection empty under
+        # tmux mouse-tracking). They are hooked drag-scoped on the DOCUMENT (where
+        # xterm attaches its own selection move/up), in the CAPTURE phase.
         fn = _extract_js_function(self.html, "attachBlockSelect")
-        self.assertNotIn("'mousemove'", fn)
-        self.assertNotIn("'mouseup'", fn)
+        self.assertRegex(fn, r"addEventListener\(\s*'mousemove'[\s\S]*?,\s*true\s*\)")
+        self.assertRegex(fn, r"addEventListener\(\s*'mouseup'[\s\S]*?,\s*true\s*\)")
+
+    def test_drag_scoped_listeners_are_removed(self):
+        # the whole-drag move/up listeners are drag-scoped -- removed at drag end so
+        # nothing stays armed between gestures.
+        fn = _extract_js_function(self.html, "attachBlockSelect")
+        self.assertRegex(fn, r"removeEventListener\(\s*'mousemove'")
+        self.assertRegex(fn, r"removeEventListener\(\s*'mouseup'")
+
+    def test_drag_torn_down_on_blur_and_visibility(self):
+        # safety: a drag can never leave listeners armed if focus/visibility is lost
+        # mid-gesture.
+        fn = _extract_js_function(self.html, "attachBlockSelect")
+        self.assertIn("'blur'", fn)
+        self.assertIn("'visibilitychange'", fn)
+
+    def test_synthetic_mousedown_preserves_detail(self):
+        # the TRUE #1016 root cause: xterm starts a selection only in its
+        # `1 === detail` single-click branch, and `new MouseEvent` defaults detail
+        # to 0 -- so the synthetic MUST carry the real click's detail.
+        fn = _extract_js_function(self.html, "attachBlockSelect")
+        self.assertRegex(fn, r"detail\s*:\s*ev\.detail")
 
     def test_capture_phase_listener(self):
         # MUST be capture -- xterm's own selection listener lives on a descendant
