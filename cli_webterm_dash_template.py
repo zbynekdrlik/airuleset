@@ -690,30 +690,32 @@ function attachClipboard(win) {                  // idempotent: attach once per 
   } catch (e) {}
 }
 // #1016: Windows-Terminal-style BLOCK (column) selection with a plain Alt+drag.
-// The fleet tmux runs `mouse on` (#646), so xterm.js forces its OWN selection
-// under mouse-tracking only when shiftKey is set (shouldForceSelection), and
-// makes it a COLUMN block only when altKey is set (_shouldColumnSelect) -- so a
-// plain Alt+drag (the Windows habit) goes to tmux (ordinary line selection) and
-// the real block gesture is Shift+Alt+drag (which on Windows is the input-language
-// toggle). We translate the gesture where the dash already reaches each same-origin
-// xterm (the #613/#643/#886 `window.term` hook): a CAPTURE-phase mousedown listener
-// on term.element re-dispatches a plain Alt+left-mousedown as Shift+Alt, so xterm
-// forces its own column selection; mousemove/mouseup are untouched (xterm tracks
-// the drag once the selection started). altClickMovesCursor is also disabled so an
-// Alt CLICK (no drag) never moves the shell cursor. Fully guarded so an error can
-// never break the page or leave console noise (browser-console-zero-errors).
+// The fleet tmux runs `mouse on` (#646), so xterm.js is in mouse-TRACKING mode:
+// its mousedown handler forwards the event to tmux unless
+// SelectionService.shouldForceSelection(e) is true -- which keys on shiftKey (or
+// altKey && macOptionClickForcesSelection on macOS). So a plain Alt+drag (the
+// Windows habit) goes to tmux; the real block gesture is Shift+Alt+drag (which on
+// Windows toggles the input language). We translate the gesture where the dash
+// already reaches each same-origin xterm (the #613/#643/#886 `window.term` hook):
+// a CAPTURE-phase mousedown listener re-dispatches a plain Alt+left mousedown as
+// Shift+Alt, so xterm forces its OWN column selection and drives the rest of the
+// drag natively (a FORCED selection never enters the tracking branch, so the plain
+// moves are NOT forwarded to tmux -- verified in a real browser).
+//
+// #1016 FIX-FORWARD (acceptance failed: "krizik ale nic sa neda vyznacit"). ROOT
+// CAUSE: the v0.1.416 synthetic mousedown carried no `detail` (`new MouseEvent`
+// defaults it to 0), and xterm starts a selection ONLY in its `1 === e.detail`
+// single-click branch -- so it never started a selection. FIX = carry `detail`
+// (`ev.detail || 1`); that alone makes the gesture work (no per-move translation --
+// supervisor area review dropped it as unneeded machinery, MVP). altClickMovesCursor
+// stays false; macOptionClickForcesSelection true forces a column select on macOS
+// too. Guarded; a plain (non-Alt) drag untouched.
 function attachBlockSelect(win) {                // idempotent: attach once per terminal
   const term = win && win.term;
   if (!term || term.__wtBlockSel) return;
   const el = term.element;
   if (!el || !el.addEventListener) return;       // xterm element not painted yet -> poll retries
   term.__wtBlockSel = true;
-  // altClickMovesCursor: an Alt CLICK (no drag) must not move the shell cursor.
-  // macOptionClickForcesSelection: on macOS xterm's shouldForceSelection keys on
-  // altKey && macOptionClickForcesSelection (NOT shiftKey), so without this the
-  // synthetic Shift+Alt below would force NOTHING on a Mac while the plain Alt+drag
-  // is suppressed -> a dead gesture. Setting it makes the SAME synthetic event force
-  // a column selection on every platform (the template is shared across all lanes).
   try { term.options.altClickMovesCursor = false; } catch (e) { /* older xterm -> ignore */ }
   try { term.options.macOptionClickForcesSelection = true; } catch (e) { /* older xterm -> ignore */ }
   try {
@@ -721,7 +723,7 @@ function attachBlockSelect(win) {                // idempotent: attach once per 
       try {
         if (ev.button !== 0 || !ev.altKey || ev.shiftKey) return;   // only a plain Alt+left drag
         ev.preventDefault();
-        ev.stopImmediatePropagation();           // hide the plain Alt+drag from xterm
+        ev.stopImmediatePropagation();           // hide the plain Alt+drag from xterm/tmux
         const ME = win.MouseEvent || MouseEvent; // construct in the iframe's own realm
         const block = new ME('mousedown', {
           bubbles: true, cancelable: true, view: win,
@@ -729,6 +731,7 @@ function attachBlockSelect(win) {                // idempotent: attach once per 
           clientX: ev.clientX, clientY: ev.clientY,
           screenX: ev.screenX, screenY: ev.screenY,
           ctrlKey: ev.ctrlKey, metaKey: ev.metaKey,
+          detail: ev.detail || 1,                // xterm's `1===detail` single-click STARTS the selection; a 0 default never does
           altKey: true, shiftKey: true,          // shift forces the selection + alt makes it a column block
         });
         (ev.target || el).dispatchEvent(block);  // shiftKey:true makes the re-dispatch a no-op for THIS listener
