@@ -172,6 +172,80 @@ class TestScriptResolution(unittest.TestCase):
                 eh._default_find_script(["/home/montalu1/devel/some-other-repo"],
                                         run))
 
+    def test_default_find_script_cwd_is_the_toplevel_root(self):
+        # #959 fix-forward 2 (RED): the live-stream case — the Claude cwd IS the
+        # git toplevel of an odoo-erp checkout with the script present (live
+        # montalu1: cwd == /home/montalu1/devel/odoo/odoo-slovnormal). Must
+        # resolve the script; returned None before the seen_cwds/checked_tops
+        # split conflated "cwd already de-duped" with "toplevel already checked".
+        with TemporaryDirectory() as d:
+            top = Path(d) / "odoo-slovnormal"
+            (top / "scripts").mkdir(parents=True)
+            script = top / "scripts" / "dev-box-heartbeat-remote.sh"
+            script.write_text("#!/usr/bin/env bash\n")
+            root = str(top)  # cwd == toplevel
+
+            def run(argv, timeout=8):
+                if argv[:3] == ["git", "-C", root] and "rev-parse" in argv:
+                    return root + "\n"
+                if argv[:3] == ["git", "-C", root] and "remote" in argv:
+                    return "git@github.com:zbynekdrlik/odoo-erp.git\n"
+                return ""
+
+            self.assertEqual(eh._default_find_script([root], run), str(script))
+
+    def test_default_find_script_two_cwds_same_repo_checks_top_once(self):
+        # De-duplication survives the fix: two live cwds in the SAME repo resolve
+        # to one toplevel handed to _script_at exactly once (one `remote get-url`)
+        # — no repeated git calls against the #1055-P2 subprocess budget. Script
+        # ABSENT so the loop visits BOTH cwds (an early return on the first would
+        # mask the dedup), glob pinned to nothing → returns None.
+        remote_calls = []
+        top = "/home/montalu1/devel/odoo/odoo-slovnormal"
+
+        def run(argv, timeout=8):
+            if "rev-parse" in argv:
+                return top + "\n"                    # both cwds → same top
+            if "remote" in argv:
+                remote_calls.append(argv[2])         # the -C target
+                return "git@github.com:zbynekdrlik/odoo-erp.git\n"
+            return ""
+
+        with mock.patch.object(eh, "_ODOO_CHECKOUT_GLOB",
+                               "/nonexistent-erp-heartbeat-probe/*/"):
+            found = eh._default_find_script(
+                [top + "/addons", top + "/server"], run)
+        self.assertIsNone(found)                     # script file never created
+        self.assertEqual(remote_calls, [top])        # top checked exactly once
+
+    def test_default_find_script_non_odoo_cwd_falls_through_to_glob(self):
+        # A live cwd whose repo is NOT odoo-erp; the ~/devel/odoo/* glob DOES
+        # hold an odoo-erp checkout with the script → the glob fallback resolves
+        # it, and a glob dir already checked as a toplevel (the non-odoo repo)
+        # is skipped via checked_tops, not wrongly re-checked.
+        with TemporaryDirectory() as d:
+            other = Path(d) / "airuleset"
+            other.mkdir()
+            erp = Path(d) / "odoo-erp"
+            (erp / "scripts").mkdir(parents=True)
+            script = erp / "scripts" / "dev-box-heartbeat-remote.sh"
+            script.write_text("#!/usr/bin/env bash\n")
+
+            def run(argv, timeout=8):
+                target = argv[2] if len(argv) > 2 else ""
+                if "rev-parse" in argv:
+                    return str(other) + "\n"          # cwd's toplevel = non-odoo
+                if "remote" in argv and target == str(other):
+                    return "git@github.com:zbynekdrlik/airuleset.git\n"
+                if "remote" in argv and target == str(erp):
+                    return "git@github.com:zbynekdrlik/odoo-erp.git\n"
+                return ""
+
+            with mock.patch.object(eh, "_ODOO_CHECKOUT_GLOB",
+                                   str(Path(d) / "*/")):
+                found = eh._default_find_script([str(other / "sub")], run)
+            self.assertEqual(found, str(script))
+
     def test_slug_matches_url_variants(self):
         for origin in ("git@github.com:zbynekdrlik/odoo-erp.git",
                        "https://github.com/zbynekdrlik/odoo-erp.git",
