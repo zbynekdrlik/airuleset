@@ -587,7 +587,7 @@
     "tests/test_ttyd_installer.py": 211,
     "tests/test_u_freshness.py": 392,
     "tests/test_u_labels.py": 402,
-    "tests/test_upload_url.py": 1165,
+    "tests/test_upload_url.py": 1184,
     "tests/test_usage_cache.py": 209,
     "tests/test_user_waiting_split.py": 320,
     "tests/test_vault_channel.py": 1401,

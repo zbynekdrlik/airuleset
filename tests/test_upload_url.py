@@ -33,6 +33,25 @@ import airuleset
 ROOT = Path(__file__).resolve().parent.parent
 SERVER = ROOT / "filedrop" / "upload_server.py"
 
+# These tests exercise the PRIVATE per-interface upload path. A box with a live
+# public drop lane (the controller since #1115 slice G) makes cmd_upload print
+# the public URL first, so pin "no public lane" for the whole module; a test that
+# exercises the public path patches resolve_public_lane_full itself.
+_NO_PUBLIC_LANE = None
+
+
+def setUpModule():
+    global _NO_PUBLIC_LANE
+    import cli_drop_gateway
+    _NO_PUBLIC_LANE = m.patch.object(cli_drop_gateway, "resolve_public_lane_full",
+                                     return_value=None)
+    _NO_PUBLIC_LANE.start()
+
+
+def tearDownModule():
+    if _NO_PUBLIC_LANE is not None:
+        _NO_PUBLIC_LANE.stop()
+
 
 def read(rel):
     return (ROOT / rel).read_text(encoding="utf-8")
