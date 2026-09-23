@@ -20,6 +20,26 @@
             "timeout": 30
           }
         ]
+      },
+      {
+        "matcher": "resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/session-start-stream-directives.sh",
+            "timeout": 30
+          }
+        ]
+      },
+      {
+        "matcher": "clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash ~/devel/airuleset/hooks/session-start-stream-directives.sh",
+            "timeout": 30
+          }
+        ]
       }
     ],
     "PreToolUse": [

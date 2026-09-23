@@ -27,12 +27,17 @@ printf '%s' "$_HB_INPUT" | PYTHONPATH="$_HB_DIR" \
 # session-start-stream-directives.sh. An EXIT trap, not a sibling hooks.json
 # entry: hooks of one event run in parallel, and the step must read the base
 # AFTER this hook's `git fetch origin`. Best-effort, never changes our exit.
+# _ORIGIN_FETCHED marks the fetch as ATTEMPTED (ok or not): the step then
+# never re-contacts origin inside this hook's one timeout budget. A signal
+# (Claude Code's timeout kill) clears the trap so nothing new is started.
 _ORIGIN_FETCHED=""
 _stream_directives_step() {
     AIRULESET_STREAM_BASE_FETCHED="$_ORIGIN_FETCHED" \
         bash "$_HB_DIR/hooks/session-start-stream-directives.sh" </dev/null 2>/dev/null || true
 }
 trap _stream_directives_step EXIT
+trap 'trap - EXIT; exit 143' TERM
+trap 'trap - EXIT; exit 130' INT
 
 # Only run if we're in a git repo
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
@@ -45,7 +50,8 @@ if ! git remote get-url origin &>/dev/null; then
 fi
 
 # Fetch latest from origin (suppress output to avoid noise)
-git fetch origin --quiet 2>/dev/null && _ORIGIN_FETCHED=origin || true
+_ORIGIN_FETCHED=origin
+git fetch origin --quiet 2>/dev/null || true
 
 # Never touch a repo with an in-progress merge/rebase/cherry-pick/revert/
 # bisect — HEAD may be detached mid-operation, so this check runs BEFORE
