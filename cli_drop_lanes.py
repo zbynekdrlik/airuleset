@@ -545,6 +545,93 @@ def parse_filedrop_port(text):
     return port
 
 
+# ---------------------------------------------------------------------------
+# #1131: controller-fronted SERVICE routes — an owner-box service (not a drop
+# lane) published on the controller tunnel behind Cloudflare Access.
+# ---------------------------------------------------------------------------
+
+# The ONE Access session value for drop lanes AND service routes (#1115 reopen:
+# 720h like the webterm apps). cli_drop_gateway re-exports it.
+DROP_ACCESS_SESSION = "720h"
+
+# ONE declared table (#1131). Each row is ``{hostname, origin, name,
+# allowed_emails, session_duration}``. It is read by TWO consumers:
+#   - the controller ingress render (``controller_service_ingress_rules`` via
+#     ``cli_webterm._setup_controller_webterm``): ``hostname -> origin``;
+#   - the go-live reconcile (``cli_drop_golive.reconcile_service_routes``):
+#     the Access app FIRST, then a create-only proxied CNAME to the controller
+#     tunnel.
+# An INCOMPLETE row is PENDING in both: no ingress rule, no Access, no CNAME
+# (fail-closed). Adding a future owner dashboard means adding ONE row here.
+# Deliberately NOT a drop lane: drop lanes are per-account filedrop with port
+# caches + go-live markers, and a service has none of that (design comment on
+# the ticket, Approach 2 rejected).
+CONTROLLER_SERVICE_ROUTES = (
+    # fleet-backup dashboard (dev1 fleetbackup-web.service, read-only, strict
+    # Host allowlist; fleet-backup issue 9). Owner-only.
+    {"hostname": "backup.newlevel.media",
+     "origin": "http://100.104.8.125:8795",
+     "name": "fleet-backup dashboard",
+     "allowed_emails": ["drlik.zbynek@gmail.com"],
+     "session_duration": DROP_ACCESS_SESSION},
+)
+
+_SERVICE_ROUTE_KEYS = ("hostname", "origin", "name", "allowed_emails",
+                       "session_duration")
+
+
+def service_route_complete(route):
+    """True iff ``route`` is a complete, publishable spec (#1131): every key is
+    present and non-empty, ``origin`` is an ``http(s)://`` URL, and
+    ``allowed_emails`` is a non-empty list of non-empty strings. An incomplete row
+    is PENDING and must never get ingress, Access or DNS. An Access app with an
+    empty include list is an open door, so an empty list fails too."""
+    if not isinstance(route, dict):
+        return False
+    for key in _SERVICE_ROUTE_KEYS:
+        if not route.get(key):
+            return False
+    if not str(route["origin"]).startswith(("http://", "https://")):
+        return False
+    emails = route["allowed_emails"]
+    if isinstance(emails, str) or not isinstance(emails, (list, tuple)):
+        return False
+    return all(isinstance(e, str) and e.strip() for e in emails)
+
+
+def service_route_access_spec(route):
+    """The ``cli_webterm_access.apply_profile`` spec for a route. It has the
+    same shape as a ``DROP_ACCESS_APPS`` entry (the origin is not part of
+    Access)."""
+    return {"hostname": route["hostname"], "name": route["name"],
+            "allowed_emails": list(route["allowed_emails"]),
+            "session_duration": route["session_duration"]}
+
+
+def controller_service_ingress_rules(routes=None):
+    """``[(hostname, origin), ...]`` for every COMPLETE service route (#1131).
+    The controller tunnel's multi-ingress config appends these. An incomplete
+    route gets no rule, which mirrors the slice E PENDING drop lane. A host that
+    appears twice with different origins raises (the same conflict check as the
+    drop rules). ``routes`` is injectable and defaults to
+    ``CONTROLLER_SERVICE_ROUTES``."""
+    rules = []
+    seen = {}
+    for route in (CONTROLLER_SERVICE_ROUTES if routes is None else routes):
+        if not service_route_complete(route):
+            continue
+        host, origin = route["hostname"], route["origin"]
+        prev = seen.get(host)
+        if prev is not None:
+            if prev != origin:
+                raise ValueError("conflicting controller service route for %s: "
+                                 "%s vs %s" % (host, prev, origin))
+            continue
+        seen[host] = origin
+        rules.append((host, origin))
+    return rules
+
+
 def _lane_go_live_eligible(lane, access_specs):
     """A lane is ELIGIBLE for go-live iff it is token-only (access=False) OR it is
     an access lane that ALREADY has a DROP_ACCESS_APPS spec (#1115 slice B review,
