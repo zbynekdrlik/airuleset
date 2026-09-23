@@ -273,37 +273,41 @@ DROP_LANES = build_drop_lanes(cli_fleet.REMOTE_HOSTS)  # generated at import (#1
 
 # Access specs for Access-gated drop hostnames — reconciled via
 # cli_webterm_access.apply_profile (same shape as WEBTERM_ACCESS_APPS).
-# `allowed_emails` IS the whole authorization (deny-by-default).
+# `allowed_emails` IS the whole authorization (deny-by-default). #1115 reopen:
+# 720h like the webterm apps (24h re-asked the email OTP daily), and each
+# programmer's webterm login email (tests/test_drop_access_programmers_1115.py).
+DROP_ACCESS_SESSION = "720h"
 DROP_ACCESS_APPS = {
     DROP_HOST_DAVID: {
         "hostname": DROP_HOST_DAVID,
         "name": "drop — david1",
         "allowed_emails": ["david@grena.sk", "drlik.zbynek@gmail.com"],
-        "session_duration": "24h",
+        "session_duration": DROP_ACCESS_SESSION,
     },
     "drop-subdev-david2.newlevel.media": {
         "hostname": "drop-subdev-david2.newlevel.media",
         "name": "drop — david2",
         "allowed_emails": ["david@grena.sk", "drlik.zbynek@gmail.com"],
-        "session_duration": "24h",
+        "session_duration": DROP_ACCESS_SESSION,
     },
     "drop-subdev-david3.newlevel.media": {
         "hostname": "drop-subdev-david3.newlevel.media",
         "name": "drop — david3",
         "allowed_emails": ["david@grena.sk", "drlik.zbynek@gmail.com"],
-        "session_duration": "24h",
+        "session_duration": DROP_ACCESS_SESSION,
     },
     "drop-subdev-david4.newlevel.media": {
         "hostname": "drop-subdev-david4.newlevel.media",
         "name": "drop — david4",
         "allowed_emails": ["david@grena.sk", "drlik.zbynek@gmail.com"],
-        "session_duration": "24h",
+        "session_duration": DROP_ACCESS_SESSION,
     },
     "drop-subdev-dominika.newlevel.media": {
         "hostname": "drop-subdev-dominika.newlevel.media",
         "name": "drop — dominika",
-        "allowed_emails": ["dominika@grena.sk", "drlik.zbynek@gmail.com"],
-        "session_duration": "24h",
+        "allowed_emails": ["nika.sarikova@gmail.com", "dominika@grena.sk",
+                           "drlik.zbynek@gmail.com"],
+        "session_duration": DROP_ACCESS_SESSION,
     },
     # #1111: gk is the owner's own box — the Access include is the owner
     # identity ALONE (the same owner email the owner-facing lanes carry).
@@ -311,7 +315,7 @@ DROP_ACCESS_APPS = {
         "hostname": DROP_HOST_GK,
         "name": "drop — gatekeeper",
         "allowed_emails": ["drlik.zbynek@gmail.com"],
-        "session_duration": "24h",
+        "session_duration": DROP_ACCESS_SESSION,
     },
 }
 
@@ -321,7 +325,8 @@ DROP_ACCESS_APPS = {
 # missing spec (decision 5787094428). Hand-authored specs above WIN (the helper
 # skips an already-specced host), so they stay byte-identical.
 DROP_ACCESS_APPS.update(cli_drop_lanes.generated_access_specs(
-    DROP_LANES, DROP_ACCESS_APPS, ["drlik.zbynek@gmail.com"]))
+    DROP_LANES, DROP_ACCESS_APPS, ["drlik.zbynek@gmail.com"],
+    session_duration=DROP_ACCESS_SESSION))
 
 
 def _current_username():
