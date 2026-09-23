@@ -118,6 +118,23 @@ class TestWorktreeLiveWriteRefusal(unittest.TestCase):
         self.assertIn("#1115", msg)
         self.assertIn("#972", msg)
 
+    def test_reconcile_drop_lanes_refuses_before_any_secret_read(self):
+        # review R2: with NO injected clients the guard must still refuse BEFORE
+        # building a real client / reading ~/.secrets. Patch both token loaders to
+        # blow up — any read is a test failure.
+        import cli_cloudflare_dns as dns
+        with mock.patch.object(dns, "_load_token",
+                               side_effect=AssertionError("DNS token read")), \
+             mock.patch.object(acc, "_load_token",
+                               side_effect=AssertionError("Access token read")):
+            all_ok, results, live = gl.reconcile_drop_lanes(
+                dry_run=False, drop_lanes=self.lanes, access_specs=self.specs,
+                dns_client=None, access_client=None,
+                is_worktree_fn=lambda: True, out=io.StringIO())
+        self.assertFalse(all_ok)
+        self.assertEqual(results, [])
+        self.assertEqual(live, {})
+
     def test_access_apply_helper_injected_client_not_guarded(self):
         # an INJECTED (fake) client makes no live write, so the worktree guard
         # is scoped to the real-client build and must NOT fire — the seam guards
@@ -184,6 +201,11 @@ class TestIngressGoLiveEligibilityLock(unittest.TestCase):
     Access app in front (the incident class)."""
 
     def test_every_real_ingress_hostname_is_go_live_eligible(self):
+        # Real-data INVARIANT (snapshot): every host the live registry routes is
+        # eligible today. NOTE: this alone would hold even if the filter were
+        # removed (slice D fills every real spec, so there are 0 pending lanes) —
+        # the BEHAVIOURAL teeth are in
+        # test_ingress_omits_an_ineligible_lane_injected_into_the_real_registry.
         rules = dg.drop_ingress_rules_for_controller(cache={})
         lane_by_host = {lane.host: lane
                         for (_n, _u), lane in dg.DROP_LANES.items()
@@ -196,6 +218,25 @@ class TestIngressGoLiveEligibilityLock(unittest.TestCase):
             self.assertTrue(
                 dl._lane_go_live_eligible(lane, dg.DROP_ACCESS_APPS),
                 "ingress routes %s but it is NOT go-live eligible" % host)
+
+    def test_ingress_omits_an_ineligible_lane_injected_into_the_real_registry(self):
+        # BEHAVIOURAL lock (review R1 FINDING 2 — the invariant above is a
+        # tautology on today's all-eligible data): inject a synthetic
+        # access-with-NO-spec lane into a COPY of the REAL DROP_LANES and render
+        # via the REAL leaf with the REAL specs. It is controller-topology with an
+        # origin, so WITHOUT the eligibility filter it WOULD be routed — the filter
+        # must OMIT it. Removing the filter makes this test fail.
+        lanes = dict(dg.DROP_LANES)
+        pend = _lane("drop-pending-injected.newlevel.media", 8909, access=True)
+        lanes[("injected-box", "injected-user")] = pend
+        rules = dl.drop_ingress_rules_for_controller(
+            lanes, cache={}, access_specs=dg.DROP_ACCESS_APPS)
+        hosts = [r[0] for r in rules]
+        self.assertNotIn(pend.host, hosts)
+        # the omission is due to ELIGIBILITY, not topology:
+        self.assertEqual(pend.topology, "controller")
+        self.assertTrue(pend.origin_host)
+        self.assertFalse(dl._lane_go_live_eligible(pend, dg.DROP_ACCESS_APPS))
 
 
 class TestEligibilityPredicateShared(unittest.TestCase):
@@ -212,6 +253,37 @@ class TestEligibilityPredicateShared(unittest.TestCase):
         self.assertTrue(dl._lane_go_live_eligible(tok, specs))
         self.assertFalse(dl._lane_go_live_eligible(acc_no_spec, specs))
         self.assertTrue(dl._lane_go_live_eligible(acc_spec, specs))
+
+
+class TestGoliveLeafImportBothOrders(unittest.TestCase):
+    """#1115 slice E (review R2 FINDING 1): the module-level re-export
+    `from cli_drop_lanes import _lane_go_live_eligible` in cli_drop_golive must
+    not create an import cycle — importing EITHER module first must succeed, and
+    the predicate identity holds. A fresh subprocess per order (a stale
+    sys.modules would mask a cycle)."""
+
+    def _fresh(self, first):
+        import subprocess
+        code = ("import %s; "
+                "import cli_drop_golive as g; import cli_drop_lanes as l; "
+                "assert g._lane_go_live_eligible is l._lane_go_live_eligible, "
+                "'predicate not shared'; print('OK')" % first)
+        r = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0,
+                         "import-%s-first failed: %s" % (first, r.stderr))
+        self.assertIn("OK", r.stdout)
+
+    def test_golive_first(self):
+        self._fresh("cli_drop_golive")
+
+    def test_leaf_first(self):
+        self._fresh("cli_drop_lanes")
+
+    def test_gateway_first(self):
+        self._fresh("cli_drop_gateway")
 
 
 if __name__ == "__main__":

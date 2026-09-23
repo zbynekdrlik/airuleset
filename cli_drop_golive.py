@@ -210,8 +210,8 @@ def _resolve_access_specs(access_specs):
 # without a module-level ``cli_drop_gateway`` import) and is RE-EXPORTED here —
 # ONE predicate, ingress and go-live import it, never a copy. cli_drop_lanes
 # imports only ``cli_fleet`` and never imports this module back, so this
-# module-level import is cycle-safe (the both-orders import test proves the
-# graph).
+# module-level import is cycle-safe (tests/test_drop_slice_e_1115.py
+# TestGoliveLeafImportBothOrders proves the graph in every import order).
 from cli_drop_lanes import _lane_go_live_eligible  # noqa: E402 — re-export
 
 
