@@ -2729,14 +2729,18 @@ class TestOwnerVpsBlockNoStrayAgainstRealTmux(TestCase):
         self.bin = self.d / "bin"
         self.bin.mkdir()
         shim = self.bin / "tmux"
-        shim.write_text('#!/bin/sh\nexec %s -S %s "$@"\n' % (real, self.sock))
+        # `-f /dev/null`: the server must never load the invoking user's REAL
+        # ~/.tmux.conf (tmux falls back to the passwd home when HOME is unset) —
+        # a managed session-created hook there (#1124 `rename-window ar` on the
+        # controller) renamed this fixture's window.
+        shim.write_text('#!/bin/sh\nexec %s -f /dev/null -S %s "$@"\n' % (real, self.sock))
         shim.chmod(0o755)
         self.addCleanup(self._tmux, "kill-server")
 
     def _tmux(self, *argv):
         # EXPLICIT -S <socket> on every invocation (test_tmux_test_isolation_lock)
         return subprocess.run(
-            ["tmux", "-S", self.sock, *argv],
+            ["tmux", "-f", "/dev/null", "-S", self.sock, *argv],
             env={"PATH": "/usr/local/bin:/usr/bin:/bin"},
             capture_output=True, text=True, timeout=15)
 

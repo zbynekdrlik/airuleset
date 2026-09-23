@@ -625,9 +625,13 @@ class TestReviewRound2(_RepoFixture):
 
     def test_hangup_does_not_start_the_step(self):
         repo, _ = self.base_repo()
+        # the marker proves the hook is INSIDE its fetch (traps installed)
+        # before the hangup — a fixed 1 s sleep raced the heartbeat's python
+        # startup under a loaded push Pass A (rc 0 / -1 instead of 129).
+        marker = os.path.join(self.root, "in-fetch")
         fake_ssh = os.path.join(self.root, "slow-ssh.sh")
         with open(fake_ssh, "w") as fh:
-            fh.write("#!/usr/bin/env bash\nsleep 3\nexit 1\n")
+            fh.write("#!/usr/bin/env bash\ntouch %s\nsleep 3\nexit 1\n" % marker)
         os.chmod(fake_ssh, 0o755)
         self.ok(repo, "remote", "set-url", "origin", "ssh://example.invalid/x.git")
         env = dict(self.env)
@@ -635,7 +639,10 @@ class TestReviewRound2(_RepoFixture):
         proc = subprocess.Popen(["bash", str(FETCH_HOOK)], cwd=repo,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE, text=True, env=env)
-        time.sleep(1.0)
+        deadline = time.monotonic() + 30
+        while not os.path.exists(marker) and time.monotonic() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(marker), "hook never reached its fetch")
         proc.send_signal(signal.SIGHUP)
         proc.communicate(timeout=30)
         self.assertEqual(proc.returncode, 129)
