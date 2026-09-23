@@ -10,10 +10,15 @@ the SYNCHRONOUS sweep path at all.
 
 This leaf moves the derivation OFF the sweep path. The sweep READS a per-repo
 atomic cache file (``fetch_or_refresh``); when that file is stale AND no
-refresher child is alive it spawns ONE detached child (``spawn_refresher`` →
-``airuleset.py <cmd> --ops-wait``, its own ``CHILD_TIMEOUT_S`` timeout,
-``start_new_session=True``) that parses the CLI output (``parse_members``) and
-atomically writes the member list into the same file (tmp + ``os.replace``). The
+refresher child is alive it spawns ONE refresher child (``spawn_refresher`` →
+``airuleset.py <cmd> --ops-wait``, its own ``CHILD_TIMEOUT_S`` timeout) that
+parses the CLI output (``parse_members``) and atomically writes the member list
+into the same file (tmp + ``os.replace``). The child is launched as a transient
+``systemd-run --user`` unit so it runs in its OWN cgroup and survives the sweep
+process's exit — the watchdog runs as ``api-watchdog.service`` (``Type=oneshot``
++ ``KillMode=control-group``), which would otherwise kill a same-cgroup child the
+moment the oneshot exits (``setsid``/``start_new_session`` does NOT escape a
+cgroup); a logged Popen fallback covers a non-systemd (test/CI) box. The
 sweep NEVER waits for the derivation — it returns the last good result, ``None``
 (undetermined — no result yet, exactly as before), or the caller's timeout
 sentinel (a cold refresh timeout with no prior good result, so the outer
@@ -210,27 +215,97 @@ def fetch_or_refresh(cwd, cmd_name, timeout_sentinel, argv0=None, now=None,
     return _serve(entry, timeout_sentinel, now)
 
 
-def spawn_refresher(cwd, cmd_name, argv0=None):
-    """Spawn ONE detached refresher child (``start_new_session=True``) that runs
-    ``<cmd_name> --ops-wait`` for ``cwd`` and writes the parsed members into the
-    cache file. Best-effort: any OSError is swallowed (the next sweep retries)."""
+def _refresh_unit_name(cwd):
+    """The transient systemd unit name for this repo's refresher — the cache key
+    makes it per-repo and stable, so `--collect` cleans a finished run and a
+    concurrent same-name start atomically fails ('already exists') as a backstop
+    to the pidfile single-flight."""
+    return "airuleset-opswait-%s" % _key(cwd)
+
+
+def _log_spawn(msg):
+    """Surface a spawn decision in the watchdog unit's journal (this runs INSIDE
+    the sweep process, whose stderr the systemd unit captures) — a detached
+    refresh has no other channel. Best-effort; stderr in-process never blocks."""
+    sys.stderr.write("refresh-spawn: %s\n" % msg)
+
+
+def spawn_refresher(cwd, cmd_name, argv0=None, run_fn=None, popen_fn=None,
+                    log_fn=None):
+    """Spawn ONE refresher child that runs ``<cmd_name> --ops-wait`` for ``cwd``
+    and writes the parsed members into the cache file.
+
+    #1067 slice 1c REVIEW: the watchdog runs as ``api-watchdog.service``
+    (``Type=oneshot`` + ``KillMode=control-group``), so a plain
+    ``Popen(start_new_session=True)`` child stays in the SAME cgroup and systemd
+    kills it the moment the oneshot main process exits — the 30-58 s derivation
+    never finishes and the cache is never written (``setsid`` does NOT escape a
+    cgroup). PRIMARY path: launch the child as a transient ``systemd-run --user``
+    unit, which runs in its OWN cgroup and survives the sweep's exit; the user bus
+    env comes from the shared ``_xdg_runtime_env`` (#826). FALLBACK (systemd-run
+    absent or failing — a non-systemd test/CI box, where there is no killing
+    oneshot cgroup anyway): the plain detached Popen, logged
+    ``refresh-spawn: popen-fallback (<reason>)`` so a box where it would be killed
+    is visible. Single-flight/liveness is the pidfile (``refresher_alive``), which
+    ``run_refresh_child`` writes regardless of launch method — ONE mechanism.
+    ``run_fn``/``popen_fn``/``log_fn`` are injectable seams for tests."""
     if argv0 is None:
         import airuleset
         argv0 = os.path.abspath(airuleset.__file__)
     # the repo root (parent of the `watchdog` package) so `-m
     # watchdog.ops_wait_refresh` resolves in the fresh child interpreter.
     repo_root = os.path.dirname(os.path.abspath(argv0))
+    child_argv = [sys.executable, "-m", "watchdog.ops_wait_refresh",
+                  "--target", cwd, "--cmd", cmd_name,
+                  "--cache", cache_path(cwd), "--pid", pid_path(cwd),
+                  "--argv0", argv0]
+    log = log_fn or _log_spawn
+    if _spawn_via_systemd_run(cwd, repo_root, child_argv, run_fn, log):
+        return
+    _spawn_via_popen(repo_root, child_argv, popen_fn, log)
+
+
+def _spawn_via_systemd_run(cwd, repo_root, child_argv, run_fn, log):
+    """Launch the refresher as a transient ``--user`` unit in its own cgroup.
+    Returns True when the unit is running (or already running — the unit name is
+    the atomic single-flight backstop), False when the caller must fall back."""
+    run = run_fn or subprocess.run
     try:
-        subprocess.Popen(
-            [sys.executable, "-m", "watchdog.ops_wait_refresh",
-             "--target", cwd, "--cmd", cmd_name,
-             "--cache", cache_path(cwd), "--pid", pid_path(cwd),
-             "--argv0", argv0],
-            cwd=repo_root,
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True)
+        from cli_filedrop_watchdog import _xdg_runtime_env
+        env = _xdg_runtime_env()
+    except Exception:
+        env = None   # no user-bus helper -> systemd-run likely unusable -> fall back
+    argv = ["systemd-run", "--user", "--collect", "--quiet",
+            "--unit", _refresh_unit_name(cwd),
+            "--working-directory", repo_root,
+            "--property", "RuntimeMaxSec=%d" % (CHILD_TIMEOUT_S + 30),
+            "--", *child_argv]
+    try:
+        r = run(argv, capture_output=True, text=True, timeout=30, env=env)
+    except FileNotFoundError:
+        log("popen-fallback (systemd-run absent)")
+        return False
+    except Exception as e:  # noqa: BLE001 — any spawn error falls back, logged
+        log("popen-fallback (systemd-run error: %s)" % type(e).__name__)
+        return False
+    if r.returncode == 0:
+        return True
+    if "exists" in (r.stderr or "").lower():
+        return True   # single-flight: a unit of this name is already running
+    log("popen-fallback (systemd-run rc=%d)" % r.returncode)
+    return False
+
+
+def _spawn_via_popen(repo_root, child_argv, popen_fn, log):
+    """The cgroup-BOUND fallback (killed by KillMode=control-group under the real
+    watchdog unit — used only where systemd-run is unavailable, e.g. CI)."""
+    popen = popen_fn or subprocess.Popen
+    try:
+        popen(child_argv, cwd=repo_root,
+              stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+              stderr=subprocess.DEVNULL, start_new_session=True)
     except OSError:
-        return   # spawn failed -> next sweep retries (fail-safe: no result yet)
+        log("popen-fallback spawn failed (OSError)")
 
 
 def _default_run(target, cmd_name, argv0):

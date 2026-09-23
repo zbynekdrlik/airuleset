@@ -15,6 +15,7 @@ at a time. This suite proves:
   * `spawn_refresher` builds the detached `-m watchdog.ops_wait_refresh` argv.
 """
 import threading
+import types
 import unittest
 import unittest.mock as m
 from pathlib import Path
@@ -242,22 +243,90 @@ class OpsWaitAgesFnParity(unittest.TestCase):
             ica.assert_not_called()
 
 
-class SpawnRefresherArgs(unittest.TestCase):
-    def test_builds_detached_dash_m_child(self):
-        with m.patch("subprocess.Popen") as popen, \
-                m.patch.object(owref, "cache_path", return_value="/c/x.json"), \
-                m.patch.object(owref, "pid_path", return_value="/c/x.pid"):
-            owref.spawn_refresher("/repo/a", "core-quals",
-                                  argv0="/root/airuleset.py")
+class SpawnRefresher(unittest.TestCase):
+    """#1067 slice 1c REVIEW: the primary spawn is a transient `systemd-run
+    --user` unit (own cgroup, survives the KillMode=control-group oneshot exit);
+    a logged Popen fallback covers a non-systemd box."""
+
+    def _patch_paths(self):
+        return (m.patch.object(owref, "cache_path", return_value="/c/x.json"),
+                m.patch.object(owref, "pid_path", return_value="/c/x.pid"))
+
+    def test_primary_path_is_a_systemd_run_user_unit(self):
+        calls = {}
+
+        def fake_run(argv, **kw):
+            calls["argv"] = argv
+            calls["env"] = kw.get("env")
+            return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+        popen = m.Mock()
+        cp, pp = self._patch_paths()
+        with cp, pp:
+            owref.spawn_refresher("/repo/a", "core-quals", argv0="/root/airuleset.py",
+                                  run_fn=fake_run, popen_fn=popen)
+        argv = calls["argv"]
+        self.assertEqual(argv[0], "systemd-run")
+        self.assertIn("--user", argv)
+        self.assertIn("--collect", argv)
+        unit = argv[argv.index("--unit") + 1]
+        self.assertTrue(unit.startswith("airuleset-opswait-"), unit)
+        self.assertEqual(argv[argv.index("--working-directory") + 1], "/root")
+        prop = argv[argv.index("--property") + 1]
+        self.assertEqual(prop, "RuntimeMaxSec=%d" % (owref.CHILD_TIMEOUT_S + 30))
+        # the child argv follows the `--` separator
+        child = argv[argv.index("--") + 1:]
+        self.assertIn("-m", child)
+        self.assertIn("watchdog.ops_wait_refresh", child)
+        self.assertEqual(child[child.index("--target") + 1], "/repo/a")
+        self.assertEqual(child[child.index("--cmd") + 1], "core-quals")
+        # the user-bus env is carried (issue 826)
+        self.assertIsNotNone(calls["env"])
+        self.assertIn("XDG_RUNTIME_DIR", calls["env"])
+        popen.assert_not_called()   # no cgroup-bound fallback on the primary path
+
+    def test_unit_already_exists_is_benign_single_flight(self):
+        def fake_run(argv, **kw):
+            return types.SimpleNamespace(
+                returncode=1, stdout="",
+                stderr="Unit airuleset-opswait-x.service already exists.")
+        popen = m.Mock()
+        cp, pp = self._patch_paths()
+        with cp, pp:
+            owref.spawn_refresher("/repo/a", "slice-quals", argv0="/root/airuleset.py",
+                                  run_fn=fake_run, popen_fn=popen)
+        popen.assert_not_called()   # already running -> no fallback, no double-run
+
+    def test_systemd_run_absent_falls_back_to_popen_and_logs(self):
+        def fake_run(argv, **kw):
+            raise FileNotFoundError("systemd-run")
+        popen = m.Mock()
+        logs = []
+        cp, pp = self._patch_paths()
+        with cp, pp:
+            owref.spawn_refresher("/repo/a", "slice-quals", argv0="/root/airuleset.py",
+                                  run_fn=fake_run, popen_fn=popen,
+                                  log_fn=logs.append)
+        popen.assert_called_once()
+        self.assertTrue(any("popen-fallback" in ln and "absent" in ln
+                            for ln in logs), logs)
+        # the fallback still runs the same -m child, detached
         argv = popen.call_args[0][0]
-        self.assertIn("-m", argv)
         self.assertIn("watchdog.ops_wait_refresh", argv)
-        self.assertEqual(argv[argv.index("--target") + 1], "/repo/a")
-        self.assertEqual(argv[argv.index("--cmd") + 1], "core-quals")
-        self.assertEqual(argv[argv.index("--argv0") + 1], "/root/airuleset.py")
-        kw = popen.call_args[1]
-        self.assertTrue(kw.get("start_new_session"))
-        self.assertEqual(kw.get("cwd"), "/root")   # repo root = dirname(argv0)
+        self.assertTrue(popen.call_args[1].get("start_new_session"))
+
+    def test_systemd_run_error_falls_back_to_popen_and_logs(self):
+        def fake_run(argv, **kw):
+            return types.SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        popen = m.Mock()
+        logs = []
+        cp, pp = self._patch_paths()
+        with cp, pp:
+            owref.spawn_refresher("/repo/a", "slice-quals", argv0="/root/airuleset.py",
+                                  run_fn=fake_run, popen_fn=popen,
+                                  log_fn=logs.append)
+        popen.assert_called_once()
+        self.assertTrue(any("popen-fallback" in ln and "rc=1" in ln
+                            for ln in logs), logs)
 
 
 if __name__ == "__main__":
