@@ -276,7 +276,7 @@ DROP_LANES = build_drop_lanes(cli_fleet.REMOTE_HOSTS)  # generated at import (#1
 # `allowed_emails` IS the whole authorization (deny-by-default). #1115 reopen:
 # 720h like the webterm apps (24h re-asked the email OTP daily), and each
 # programmer's webterm login email (tests/test_drop_access_programmers_1115.py).
-DROP_ACCESS_SESSION = "720h"
+DROP_ACCESS_SESSION = cli_drop_lanes.DROP_ACCESS_SESSION  # ONE def (#1131)
 DROP_ACCESS_APPS = {
     DROP_HOST_DAVID: {
         "hostname": DROP_HOST_DAVID,

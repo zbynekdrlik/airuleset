@@ -114,6 +114,8 @@ class TestWiring3ControllerDispatch(unittest.TestCase):
              mock.patch.object(tun, "_provision_managed_tunnel",
                                return_value=True) as prov_mock, \
              mock.patch("cli_webterm.setup_webterm_service"), \
+             mock.patch("cli_drop_lanes.harvest_local_controller_filedrop_port"), \
+             mock.patch("cli_drop_golive.reconcile_and_report", return_value=True) as golive_mock, \
              mock.patch("cli_webterm.profiles") as prof_mock:
             prof_mock.LANE_HOST = {
                 "zbynek": "dev1", "david": "subdev",
@@ -127,6 +129,7 @@ class TestWiring3ControllerDispatch(unittest.TestCase):
 
         # The shared tunnel must have been provisioned
         prov_mock.assert_called_once()
+        golive_mock.assert_called_once_with(dry_run=False)  # #1131: never the live go-live
         call_kwargs = prov_mock.call_args
         # Verify the config text contains multi-ingress catch-all
         config_text = call_kwargs[0][3] if len(call_kwargs[0]) > 3 else ""
@@ -153,6 +156,8 @@ class TestWiring3ControllerDispatch(unittest.TestCase):
              mock.patch("cli_webterm.setup_webterm_service"), \
              mock.patch.object(zbynek, "setup_webterm_zbynek_service",
                                zbynek_setup), \
+             mock.patch("cli_drop_lanes.harvest_local_controller_filedrop_port"), \
+             mock.patch("cli_drop_golive.reconcile_and_report", return_value=True) as golive_mock, \
              mock.patch("cli_webterm.profiles") as prof_mock:
             prof_mock.LANE_HOST = {
                 "zbynek": "controller", "david": "subdev",
@@ -166,6 +171,7 @@ class TestWiring3ControllerDispatch(unittest.TestCase):
 
         # zbynek's lane setup must have been called
         zbynek_setup.assert_called_once()
+        golive_mock.assert_called_once_with(dry_run=False)  # mocked: no live API
         # The shared tunnel must carry zbynek's ingress rule
         prov_mock.assert_called_once()
         config_text = prov_mock.call_args[0][3]

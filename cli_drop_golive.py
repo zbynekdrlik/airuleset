@@ -32,6 +32,12 @@ This leaf, called from the controller's `install` step
      line `drop-lanes: <host> DNS/Access FAILED …`, never silent, and NEVER a
      whole-install abort.
 
+#1131: the declared controller SERVICE routes (``cli_drop_lanes.
+CONTROLLER_SERVICE_ROUTES``, e.g. backup.newlevel.media) go live the same way
+in ``reconcile_service_routes``: Access first, then a create-only CNAME,
+PENDING when the spec is incomplete. They have no marker and no go-live cache
+entry.
+
 A lane is **LIVE** when DNS ok AND (Access not required OR Access ok). The set of
 live lanes (`{host: port}`) is written to a controller-side cache
 `~/.claude/drop-golive.json` that `push`'s deploy loop
@@ -150,7 +156,6 @@ def reconcile_access_for_lane(lane, dry_run=True, access_client=None,
     (a test / caller-supplied client makes no live write). ``is_worktree_fn`` is
     the same injectable seam ``reconcile_drop_lanes`` uses.
     """
-    import cli_webterm_access as acc
     if not lane.access:
         return True, "none", "no Access (token-only TLS lane)"
     specs = access_specs
@@ -162,26 +167,46 @@ def reconcile_access_for_lane(lane, dry_run=True, access_client=None,
         return (False, "no-spec",
                 "Access lane but no DROP_ACCESS_APPS spec for %s — NOT marking "
                 "live (fail-closed)" % lane.host)
+    return reconcile_access_spec(spec, dry_run=dry_run, access_client=access_client,
+                                 is_worktree_fn=is_worktree_fn)
 
-    client = access_client
-    if client is None:
-        if not dry_run:
-            is_wt = is_worktree_fn if is_worktree_fn is not None \
-                else _repo_is_worktree_checkout
-            if is_wt():
-                return (False, "worktree-refused",
-                        "REFUSING a LIVE Access apply from a git worktree checkout "
-                        "(#1115/#972) — no API call, no token read")
-        try:
-            token = acc._load_token()
-        except OSError as e:
-            return (False, "token-error",
-                    "Access token %s unreadable (%s)"
-                    % (acc.WEBTERM_ACCESS_TOKEN_FILE, e))
-        if not token:
-            return False, "token-error", "Access token file empty"
-        client = acc.AccessClient(acc.WEBTERM_ACCESS_ACCOUNT_ID, token=token)
 
+def _access_client_or_refusal(access_client, dry_run, is_worktree_fn):
+    """``(client, None)`` or ``(None, (False, action, msg))`` (#1115 slice E,
+    shared with the #1131 service routes). An INJECTED client is returned
+    as-is, because a test or caller-supplied client makes no live write. A REAL
+    client for a LIVE apply from a git worktree is REFUSED before any token read."""
+    if access_client is not None:
+        return access_client, None
+    import cli_webterm_access as acc
+    if not dry_run:
+        is_wt = is_worktree_fn if is_worktree_fn is not None \
+            else _repo_is_worktree_checkout
+        if is_wt():
+            return None, (False, "worktree-refused",
+                          "REFUSING a LIVE Access apply from a git worktree checkout "
+                          "(#1115/#972) — no API call, no token read")
+    try:
+        token = acc._load_token()
+    except OSError as e:
+        return None, (False, "token-error", "Access token %s unreadable (%s)"
+                      % (acc.WEBTERM_ACCESS_TOKEN_FILE, e))
+    if not token:
+        return None, (False, "token-error", "Access token file empty")
+    return acc.AccessClient(acc.WEBTERM_ACCESS_ACCOUNT_ID, token=token), None
+
+
+def reconcile_access_spec(spec, dry_run=True, access_client=None,
+                          is_worktree_fn=None):
+    """Reconcile ONE Access app spec via ``cli_webterm_access.apply_profile``
+    and return ``(ok, action, msg)``. This is the shared core of the drop-lane
+    Access step (``reconcile_access_for_lane``) and the service-route Access step
+    (#1131). The token value is NEVER included in ``msg``."""
+    import cli_webterm_access as acc
+    client, refusal = _access_client_or_refusal(access_client, dry_run,
+                                                is_worktree_fn)
+    if refusal is not None:
+        return refusal
     res = acc.apply_profile(client, spec, dry_run=dry_run)
     if res.get("error"):
         return False, "error", "Access ERROR: %s" % res["error"]
@@ -261,27 +286,9 @@ def reconcile_drop_lanes(dry_run=True, drop_lanes=None, access_specs=None,
         import cli_drop_gateway as dg
         drop_lanes = dg.DROP_LANES
 
-    dns_c = dns_client
-    if dns_c is None and not dry_run:
-        import cli_cloudflare_dns as dns
-        try:
-            token = dns._load_token()
-        except OSError as e:
-            print("drop-lanes: cannot read DNS token %s (%s) — SKIPPING go-live"
-                  % (dns.DNS_TOKEN_FILE, e), file=out)
-            return False, [], {}
-        if not token:
-            print("drop-lanes: DNS token file empty — SKIPPING go-live", file=out)
-            return False, [], {}
-        dns_c = dns.DnsClient(token=token)
-    elif dns_c is None:
-        # dry-run with no injected client: build a token-less client that only
-        # ever issues GETs (would_create never POSTs).
-        import cli_cloudflare_dns as dns
-        try:
-            dns_c = dns.DnsClient(token=dns._load_token())
-        except OSError:
-            dns_c = dns.DnsClient(token="")
+    dns_c = _dns_client_or_none(dns_client, dry_run, "drop-lanes", out)
+    if dns_c is None:
+        return False, [], {}
 
     specs = _resolve_access_specs(access_specs)
     results = []
@@ -367,6 +374,133 @@ def reconcile_drop_lanes(dry_run=True, drop_lanes=None, access_specs=None,
     return all_ok, results, live
 
 
+def _dns_client_or_none(dns_client, dry_run, what, out):
+    """The DNS zone client for a reconcile (shared by the drop lanes and the
+    #1131 service routes). An INJECTED client is returned as-is. A LIVE run
+    builds a real client from the on-disk token and returns None, with a LOUD
+    ``<what>: … SKIPPING go-live`` line, when the token is unreadable or empty.
+    A dry-run with no injected client gets a client that only ever issues GETs
+    (``would_create`` never POSTs)."""
+    if dns_client is not None:
+        return dns_client
+    import cli_cloudflare_dns as dns
+    if not dry_run:
+        try:
+            token = dns._load_token()
+        except OSError as e:
+            print("%s: cannot read DNS token %s (%s) — SKIPPING go-live"
+                  % (what, dns.DNS_TOKEN_FILE, e), file=out)
+            return None
+        if not token:
+            print("%s: DNS token file empty — SKIPPING go-live" % what, file=out)
+            return None
+        return dns.DnsClient(token=token)
+    try:
+        return dns.DnsClient(token=dns._load_token())
+    except OSError:
+        return dns.DnsClient(token="")
+
+
+def reconcile_service_routes(dry_run=True, routes=None, dns_client=None,
+                             access_client=None, tunnel_uuid=None,
+                             zone="newlevel.media", issue="1131", out=None,
+                             is_worktree_fn=None):
+    """Reconcile Access + DNS for every declared controller SERVICE route
+    (#1131, ``cli_drop_lanes.CONTROLLER_SERVICE_ROUTES``). Each route is handled
+    exactly like an Access-gated drop lane:
+
+      - an INCOMPLETE spec (``service_route_complete`` False) is PENDING: no
+        Access call and no CNAME. This is reported once as a summary line and
+        is not a failure;
+      - the Access app goes FIRST (``reconcile_access_spec``). Only once it is
+        confirmed is the create-only proxied CNAME ``<host> ->
+        <controller tunnel>.cfargotunnel.com`` created. If Access fails, the DNS
+        step is skipped (fail-closed), so the hostname is never publicly
+        routable without its Access app.
+
+    Returns ``(all_ok, results)``; each row is ``{host, dns_action,
+    access_action, live, pending, error}``. A per-route failure never raises:
+    it is a LOUD ``service-routes: <host> DNS/Access FAILED`` line and the loop
+    continues. Only a client-build error outside the loop can propagate, which
+    matches ``reconcile_drop_lanes``, and the install caller wraps it. A LIVE run
+    from a git worktree is REFUSED with zero API calls (#1115 slice E), even
+    with injected clients. Every seam is injectable for offline tests. Service
+    routes carry no go-live marker (not a drop lane), so nothing is written to
+    the go-live cache.
+
+    Residual, the same as for drop lanes: the ingress rule is rendered from the
+    spec before this reconcile runs. So a leftover or hand-made CNAME for a host
+    whose Access apply FAILED would reach the origin. The create-only DNS step
+    never makes such a record, and the conflict line reports a foreign one."""
+    out = out if out is not None else sys.stdout
+    if not dry_run:
+        is_wt = is_worktree_fn if is_worktree_fn is not None \
+            else _repo_is_worktree_checkout
+        if is_wt():
+            _refuse_worktree_live_write("service-route reconcile", out)
+            return False, []
+    import cli_drop_lanes as dl
+    if routes is None:
+        routes = dl.CONTROLLER_SERVICE_ROUTES
+    if tunnel_uuid is None:
+        import cli_drop_gateway as dg
+        tunnel_uuid = dg._CONTROLLER_TUNNEL_UUID
+    dns_c = _dns_client_or_none(dns_client, dry_run, "service-routes", out)
+    if dns_c is None:
+        return False, []
+
+    comment = "airuleset #%s — controller service route (controller tunnel)" % issue
+    all_ok, results, pending = True, [], []
+    for route in routes:
+        host = (route.get("hostname") if isinstance(route, dict) else None) \
+            or "<unnamed>"
+        row = {"host": host, "dns_action": None, "access_action": None,
+               "live": False, "pending": False, "error": None}
+        results.append(row)
+        if not dl.service_route_complete(route):
+            row.update(pending=True, access_action="pending-incomplete",
+                       dns_action="skipped")
+            pending.append(host)
+            continue
+        try:
+            acc_ok, acc_action, acc_msg = reconcile_access_spec(
+                dl.service_route_access_spec(route), dry_run=dry_run,
+                access_client=access_client, is_worktree_fn=is_worktree_fn)
+            row["access_action"] = acc_action
+            if not acc_ok:
+                all_ok = False
+                row.update(dns_action="skipped (access gate)", error=acc_msg)
+                print("  service-routes: %s DNS/Access FAILED (Access=%s): %s — "
+                      "DNS NOT created (fail-closed)" % (host, acc_action, acc_msg),
+                      file=out)
+                continue
+            dns_res = ensure_cname_create_only(
+                dns_c, zone, host, _cname_content(tunnel_uuid), comment,
+                dry_run=dry_run)
+            row["dns_action"] = dns_res["action"]
+            if dns_res["ok"]:
+                row["live"] = True
+                print("  service-routes: %s -> %s DNS=%s %s -> LIVE"
+                      % (host, route["origin"], dns_res["action"], acc_msg),
+                      file=out)
+            else:
+                all_ok = False
+                row["error"] = dns_res.get("error")
+                print("  service-routes: %s DNS/Access FAILED (DNS=%s): %s"
+                      % (host, dns_res["action"], dns_res.get("error")), file=out)
+        except Exception as e:  # noqa: BLE001 — one route's transport error must
+            # never abort the others; it stays a LOUD per-route line.
+            all_ok = False
+            row["error"] = "%s: %s" % (type(e).__name__, e)
+            print("  service-routes: %s DNS/Access FAILED (%s): %s"
+                  % (host, type(e).__name__, e), file=out)
+    if pending:
+        print("  service-routes: %d route(s) PENDING (incomplete spec — no "
+              "Access, no DNS): %s" % (len(pending), ", ".join(sorted(pending))),
+              file=out)
+    return all_ok, results
+
+
 def reconcile_and_report(dry_run=False, out=None):
     """Controller install-step entry point (#1115 slice B).
 
@@ -376,7 +510,8 @@ def reconcile_and_report(dry_run=False, out=None):
     a LOUD summary line per failure. NEVER raises and NEVER fails the install —
     a reconcile failure is reported, the install continues (the design's
     "never a whole-install abort"). Returns True when nothing failed (or it was a
-    benign no-op off the controller), False when a lane's reconcile failed.
+    benign no-op off the controller), and False when a drop lane's or a
+    ``CONTROLLER_SERVICE_ROUTES`` route's reconcile failed (#1131).
     """
     out = out if out is not None else sys.stdout
     try:
@@ -405,7 +540,13 @@ def reconcile_and_report(dry_run=False, out=None):
     # is a no-op then. Never fails the install.
     if not dry_run:
         _write_local_controller_marker(live, out=out)
-    return all_ok
+    # #1131: the declared controller SERVICE routes (backup.newlevel.media, …)
+    # go live the same Access-first way. Also non-fatal.
+    svc_ok, _svc = reconcile_service_routes(dry_run=dry_run, out=out)
+    if not svc_ok:
+        print("  service-routes: one or more routes FAILED go-live (see the "
+              "lines above) — install continues", file=out)
+    return all_ok and svc_ok
 
 
 def _write_local_controller_marker(live, drop_lanes=None, write_marker=None,
