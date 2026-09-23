@@ -1044,8 +1044,8 @@ def apply_tmux_history_limit(tmux_conf_path: Path = None, limit: int = TMUX_HIST
 # #592 widened #554 from subdev stream accounts to also cover the gk box (owner
 # report 2026-08-20: gk's window showed `bash`). #593 SCOPES that back: window
 # naming renders ONLY on SINGLE-SESSION-per-account boxes -- subdev streams +
-# the gk `gatekeeper` account, i.e. exactly `is_single_session_box_user`, the
-# SAME set the #264 ssh-auto-attach uses. It must NEVER render on an owner/
+# the gk `gatekeeper` account (`is_single_session_box_user`, the set the #264
+# ssh-auto-attach builds on). It must NEVER render on an owner/
 # newlevel MULTI-PROJECT box (dev1/dev2): those run many project sessions with
 # per-command window names, and one fixed name + `automatic-rename off` froze
 # every window to `dev1`, destroying navigation (the #592 regression, owner
@@ -1072,7 +1072,7 @@ STREAM_TMUX_WINDOW_MARK_START = "# >>> airuleset tmux stream-window >>>"
 STREAM_TMUX_WINDOW_MARK_END = "# <<< airuleset tmux stream-window <<<"
 
 # #1124: the ONE `session-created` hook-index registry. tmux hooks are ARRAY
-# options, and a set WITHOUT an index (`set-hook -g session-created ...`)
+# options, and a `set-hook -g` on the bare `session-created` name (no index)
 # CLEARS the whole array (live-verified on a private `-L` tmux 3.7b socket). So
 # two managed writers on one box (the controller carries both the window-name
 # hook and the #660 owner audit) silently deleted each other: the later one won.
@@ -1537,8 +1537,15 @@ def _render_session_created_hook_line(name, windows):
     argv). ≤1 declared window -> byte-identical to today's bare ``rename-window``
     hook line."""
     value = _session_created_hook_value(name, windows)
+    # #1124 review: inside a tmux conf DOUBLE-quoted string, `$VAR` is expanded
+    # at conf-PARSE time (live-verified on tmux 3.4 + 3.7b), so an unescaped
+    # `$S`/`$HOME` in the run-shell body was baked to the server's env at load
+    # (`$S` -> empty) and the conf-loaded hook diverged from the live-applied
+    # one. Escape `\`, `"` and `$` so the stored value equals the live argv.
+    escaped = (value.replace("\\", "\\\\").replace('"', '\\"')
+               .replace("$", "\\$"))
     return 'set-hook -g %s "%s"\n' % (_session_created_hook_name("window-name"),
-                                      value.replace('"', '\\"'))
+                                      escaped)
 
 
 def _live_apply_stream_window_name(new_name, windows=None, home=None, run=None):
@@ -1631,7 +1638,7 @@ def _live_apply_stream_window_name(new_name, windows=None, home=None, run=None):
             # one window's failure never skips the rest
             pass
     # #998 item 1(a): create each NON-primary declared managed window if missing,
-    # on every session of this (single-session) box — so gk gets `gk-infra`
+    # on every session of this (window-name-eligible) box — so gk gets `gk-infra`
     # immediately at provisioning time, not only after a reboot re-fires the
     # session-created hook. The SAME reusable create-if-missing body (single
     # source, no second implementation) fired via `tmux run-shell` per session,
@@ -2077,7 +2084,7 @@ def apply_stream_tmux_window_name(tmux_conf_path=None, user=None, host=None,
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(new)
     if should_have:
-        # rename EVERY window on this (single-session) box's server to the alias
+        # rename EVERY window on this (window-name-eligible) box's server to the alias
         # -- the account's own session name may differ from the unix user (on gk
         # the owner session is zbynek-N, #562), so `list-windows -a` covers it.
         # #998: name each window by its DECLARED cwd (gk -> gk/gk-infra), else
@@ -2249,10 +2256,24 @@ def _live_apply_owner_session_audit(logger_path, run=None):
     RUNNING server (#1124: its own index, so a sibling hook survives) so an
     already-running owner server captures creators WITHOUT waiting for a restart.
     Config-path ONLY (`set-hook`, never a `send-keys` keystroke), failure-
-    tolerant (no server -> no-op). Mirrors `_live_apply_stream_window_name`."""
+    tolerant (no server -> no-op). Mirrors `_live_apply_stream_window_name`.
+
+    #1124 upgrade: a pre-#1124 install stored the audit UNINDEXED, i.e. at
+    index 0. The owner-box #593 revert normally removes it, but if that path
+    did not run (window applier raised, unsafe alias) the audit would fire
+    twice. So first drop any OTHER index still carrying THIS audit's own
+    logger command (never a sibling writer's hook)."""
     runner = run or _default_tmux_run
+    own = _session_created_hook_name("owner-audit")
     try:
-        runner(["tmux", "set-hook", "-g", _session_created_hook_name("owner-audit"),
+        res = runner(["tmux", "show-hooks", "-g", "session-created"])
+        if getattr(res, "returncode", 1) == 0:
+            for line in (getattr(res, "stdout", "") or "").splitlines():
+                name, _, value = line.strip().partition(" ")
+                if (name.startswith("session-created[") and name != own
+                        and str(logger_path) in value):
+                    runner(["tmux", "set-hook", "-gu", name])
+        runner(["tmux", "set-hook", "-g", own,
                 _owner_audit_hook_command(logger_path)])
     except Exception as e:
         print("  tmux owner audit-hook live-apply skipped (non-fatal): %s" % e,

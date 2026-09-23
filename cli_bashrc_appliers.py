@@ -664,8 +664,10 @@ def is_single_session_box_user(user: str = None) -> bool:
     This is the ONE source of truth for that distinction. The #264 ssh
     auto-attach (`apply_stream_ssh_attach`) creates exactly one `-A -s "$me"`
     session per such account, and the #554/#592 per-target WINDOW-name block
-    (`apply_stream_tmux_window_name`) names that single window -- so BOTH gate
-    on this predicate. A multi-project box must NEVER get either: naming every
+    (`apply_stream_tmux_window_name`) names that single window -- so BOTH build
+    on this predicate (each through its own superset that adds the #985
+    controller: `_is_ssh_attach_eligible` / `is_window_name_eligible`). A
+    multi-project box must NEVER get either: naming every
     window the same literal + `automatic-rename off` destroys the owner's
     per-project navigation (#593, the #592 regression on dev1/dev2).
 
@@ -719,7 +721,10 @@ def is_window_name_eligible(user: str = None) -> bool:
     (one fixed name freezing a multi-project box's per-project windows on
     dev1/dev2) does not apply there. A dedicated predicate rather than adding
     `airuleset` to `is_single_session_box_user`, which would also flip
-    `_owner_session_default` and the #660 owner audit for it (#985)."""
+    `_owner_session_default` and the #660 owner audit for it (#985). Today it
+    equals `_is_ssh_attach_eligible` (test-locked); it is a SEPARATE name so the
+    window name and the ssh auto-attach can only diverge by a deliberate edit
+    that also updates that equivalence test."""
     import airuleset
     u = user or airuleset._current_user()
     if is_single_session_box_user(u):
@@ -812,11 +817,11 @@ def apply_stream_ssh_attach(bashrc_path: Path = None, user: str = None) -> bool:
     u = user or airuleset._current_user()
     # The ssh-auto-attach eligibility is `_is_ssh_attach_eligible` — a SUPERSET
     # of `is_single_session_box_user` that also covers the #985 controller
-    # `airuleset` account. The sibling consumers (`apply_stream_tmux_window_name`,
-    # `_owner_session_default`, `apply_owner_session_created_audit`) keep gating
-    # on the narrower `is_single_session_box_user` — the controller user attaches
-    # session `zbynek` (not whoami), so the single-session contract does not hold
-    # for them.
+    # `airuleset` account (as does `is_window_name_eligible` for the window
+    # name, #1124). `_owner_session_default` and `apply_owner_session_created_
+    # audit` keep gating on the narrower `is_single_session_box_user` — the
+    # controller user attaches session `zbynek` (not whoami), so the single-
+    # session contract does not hold for them.
     should_have = _is_ssh_attach_eligible(u)
     existing = bpath.read_text() if bpath.exists() else ""
     spans = _stream_marker_block_spans(existing)

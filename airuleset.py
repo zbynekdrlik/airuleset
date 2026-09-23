@@ -2102,7 +2102,8 @@ def cmd_install(args):
     try:
         # #554/#592: name the tmux WINDOW after the box's short TARGET ALIAS
         # (gk/mN/dN/...) so the owner sees WHERE they are. #593: renders ONLY on
-        # SINGLE-SESSION-per-account boxes (gk + subdev streams), NEVER an owner/
+        # `is_window_name_eligible` boxes (gk + subdev streams + the single-
+        # project controller, #1124), NEVER an owner/
         # newlevel MULTI-PROJECT box (dev1/dev2) -- one fixed name there froze
         # every project window and destroyed navigation (the #592 regression).
         # The alias comes from the SAME source the webterm tabs use
@@ -2117,10 +2118,10 @@ def cmd_install(args):
         print(f"  stream tmux window-name setup error (non-fatal): {e}", file=sys.stderr)
 
     # --- 3g-bis. #660: native session-created AUDIT hook on the OWNER box, to
-    # capture a future stray's creator deterministically (full rationale +
-    # ordering note in apply_owner_session_created_audit's docstring; MUST run
-    # AFTER apply_stream_tmux_window_name, whose owner-box #593 revert live-
-    # unsets the window-name session-created index, #1124).
+    # capture a future stray's creator deterministically (full rationale in
+    # apply_owner_session_created_audit's docstring). Since #1124 each writer
+    # owns its own session-created index, so the order no longer decides which
+    # hook survives; it runs after the window-name applier by convention.
     try:
         audit_changed = apply_owner_session_created_audit()
         if audit_changed:
