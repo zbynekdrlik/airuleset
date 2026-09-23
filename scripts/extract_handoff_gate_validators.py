@@ -97,6 +97,7 @@ HEADER = '''\
 # test (#1044). Regenerate with scripts/extract_handoff_gate_validators.py.
 #
 # Provenance: {provenance}
+# Extracted-sha256: {body_sha}
 #
 # The full gate is NOT importable off an odoo-erp checkout (it needs
 # check_changelog_placement + git/gh); these pure functions are its
@@ -110,6 +111,10 @@ def fleet_model_allowlist():
     # airuleset is unreachable — the MISSING-line/shape checks still apply.
     return None
 '''
+# #1125: everything after this line is the extracted gate symbols; its sha256
+# is recorded in the header, so a hand edit of the vendored body is caught
+# offline by tests/test_handoff_gate_shape_1125.py.
+BODY_MARKER = "# --- extracted gate symbols below, verbatim ---\n"
 
 
 def check_drift(src_bytes: bytes) -> int:
@@ -143,7 +148,11 @@ def main(argv=None) -> int:
         return check_drift(src_bytes)
     if not args.out:
         ap.error("--out is required unless --check")
-    segments = extract(src_bytes.decode("utf-8"))
+    # Universal newlines for the extraction (a CRLF source must not write a
+    # CRLF fixture); the blob sha below stays on the RAW bytes.
+    src_text = src_bytes.decode("utf-8").replace("\r\n", "\n").replace(
+        "\r", "\n")
+    segments = extract(src_text)
     if len(segments) < len(WANT_ASSIGN) + len(WANT_FUNC):
         got = len(segments)
         want = len(WANT_ASSIGN) + len(WANT_FUNC)
@@ -153,11 +162,11 @@ def main(argv=None) -> int:
     blob = git_blob_sha(src_bytes)
     provenance = "odoo-erp scripts/handoff_gate/_gate.py blob %s, %s" % (
         blob, args.provenance)
-    with open(args.out, "w", encoding="utf-8") as f:
-        f.write(HEADER.format(provenance=provenance))
-        f.write("\n\n")
-        f.write("\n\n\n".join(seg for _, seg in segments))
-        f.write("\n")
+    payload = "\n\n" + "\n\n\n".join(seg for _, seg in segments) + "\n"
+    body_sha = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    with open(args.out, "w", encoding="utf-8", newline="\n") as f:
+        f.write(HEADER.format(provenance=provenance, body_sha=body_sha))
+        f.write("\n\n" + BODY_MARKER + payload)
     print("wrote %d symbols -> %s (gate blob %s)" % (
         len(segments), args.out, blob))
     if blob != PINNED_GATE_BLOB:

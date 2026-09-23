@@ -5,6 +5,7 @@
 # test (#1044). Regenerate with scripts/extract_handoff_gate_validators.py.
 #
 # Provenance: odoo-erp scripts/handoff_gate/_gate.py blob 2c016160b2bda7f8df923d406c88996ee70f0497, develop 2c2fef52fc, extracted 2026-09-23
+# Extracted-sha256: 0130789762fa78a89d902d9a7c7aff21ae62c88fc6f0277ab2e26b18d3f9a676
 #
 # The full gate is NOT importable off an odoo-erp checkout (it needs
 # check_changelog_placement + git/gh); these pure functions are its
@@ -17,6 +18,9 @@ def fleet_model_allowlist():
     # UNCHECKED (fail-safe None), exactly as the live gate behaves when
     # airuleset is unreachable — the MISSING-line/shape checks still apply.
     return None
+
+
+# --- extracted gate symbols below, verbatim ---
 
 
 REQUIRED_FIELDS = ["branch", "head", "stack", "verified_at_utc", "harness"]

@@ -5405,6 +5405,11 @@ def cmd_handoff(args):
     tested_tree = getattr(args, "tested_tree", None)
     evidence_head = getattr(args, "evidence_head", None)
     gate_dry_run = getattr(args, "gate_dry_run", None)
+    import cli_handoff_template as _ht
+    err = _ht.gate_dry_run_flag_error(gate_dry_run, bool(sign_only or body_file))
+    if err:
+        print(err)
+        return 1
 
     # --- sign-only mode (#919) -------------------------------------------
     # Create a receipt for an existing body file without posting it.
@@ -5423,26 +5428,17 @@ def cmd_handoff(args):
         if not body.strip():
             print("handoff BLOCK: sign-only file is empty")
             return 1
-        # #1125: the sign-only checks reuse cli_handoff_template's shared
-        # shapes (RFR marker, heading/bullet/bold-tolerant label lines), so
-        # this path accepts exactly what --body-file accepts. The RFR marker
-        # is what the hook checks (without it the receipt is useless);
-        # Self-review-model: is a FACT the gate requires on EVERY readiness
-        # comment (#991 review finding 2).
-        import cli_handoff_template as _sho
-        if not _sho._has_rfr_marker(body):
-            print("handoff BLOCK: sign-only file has no "
-                  "READY-FOR-REVIEW marker")
-            return 1
-        if not _sho._SELF_REVIEW_MODEL_LINE_RE.search(body):
-            print("handoff BLOCK: sign-only body missing Self-review-model: "
-                  "line (required on every readiness comment)")
+        # #1125: the same marker + Self-review-model shapes as --body-file
+        # (cli_handoff_template); the bounce threshold stays round 2 (#919).
+        err = _ht.readiness_marker_error(body, "sign-only")
+        if err:
+            print(err)
             return 1
         # Round >= 2 validation (#919 review RED-1): airuleset's OWN
         # cross-repo fields must be present even in sign-only mode.
         self_login = _stream_self_login()
         rnd = _bounce_round(int(issue), self_login, cwd=None, repo=repo)
-        err = (_sho.bounce_escalation_error(body, rnd, "sign-only")
+        err = (_ht.bounce_escalation_error(body, rnd, "sign-only")
                if rnd >= 2 else None)
         if err:
             print(err)
@@ -5594,8 +5590,7 @@ def cmd_handoff(args):
     except Exception:
         reviewed_by = None
 
-    # Compose the comment body — template-aware (#969).
-    import cli_handoff_template as _ht
+    # Compose the comment body — template-aware (#969; _ht imported above).
     body, err = _ht.compose_body(
         repo=repo, branch=branch, head_sha=head_sha,
         verified_at_utc=now_utc, self_review_table=table_text,

@@ -33,55 +33,72 @@ from typing import Optional
 _RFR_MARKER_RE = re.compile(r'^\s*([#*_-]+\s*)?READY-FOR-REVIEW', re.MULTILINE)
 _CFR_MARKER_RE = re.compile(
     r'Ready for gatekeeper cross-fork review[.!]?\s*$', re.MULTILINE)
-# #1125: ONE shared line prefix for the four label regexes, so their shapes
-# cannot drift from each other (or the gate) again: indent, an optional
-# `#{1,6}` heading (odoo-erp PR 8095's exact shape), bullet, bold. PRESENCE-only
-# fail-fasts — the repo gate stays the authority on the shape it accepts.
-_LABEL_LINE_PREFIX = r'^[ \t]*(?:#{1,6}[ \t]+)?[-*]?[ \t]*\**'
+# #1125: ONE shared line prefix for every label regex here, so their shapes
+# cannot drift from each other again: indent, bullet, bold — the gate's own
+# FIELD_PATTERNS prefix. A `#{1,6}` markdown heading is admitted ONLY where the
+# gate admits it: odoo-erp PR 8095 widens Self-review-model (and the
+# Self-review marker), never Root-cause / Prevencia, so a heading there would
+# pass here and bounce at the gate (#957). PRESENCE-only fail-fasts — the repo
+# gate stays the authority on the shape it accepts.
+_LABEL_LINE_PREFIX = r'[-*]?[ \t]*\**'
+_MD_HEADING = r'(?:#{1,6}[ \t]+)?'
 
 
-def _label_line_re(label: str) -> "re.Pattern[str]":
-    return re.compile(r'(?im)' + _LABEL_LINE_PREFIX + label + r'\**[ \t]*:')
+def _label_line_re(label: str, *, heading: bool = False) -> "re.Pattern[str]":
+    return re.compile(r'(?im)^[ \t]*' + (_MD_HEADING if heading else '')
+                      + _LABEL_LINE_PREFIX + re.escape(label) + r'\**[ \t]*:')
 
 
-_SELF_REVIEW_MODEL_LINE_RE = _label_line_re(r'Self-review-model')
-_ROOTCAUSE_LINE_RE = _label_line_re(r'Root-cause-of-previous-bounce')
+_SELF_REVIEW_MODEL_LINE_RE = _label_line_re('Self-review-model', heading=True)
+_ROOTCAUSE_LINE_RE = _label_line_re('Root-cause-of-previous-bounce')
 # The compose paths EMIT the gate's canonical `Prevencia (stream):` (the only
-# label odoo-erp develop's round>=3 check accepts); the checks ACCEPT either.
-_PREVENCIA_READ_RE = _label_line_re(r'Prevencia-read')
-_PREVENCIA_STREAM_RE = _label_line_re(r'Prevencia \(stream\)')
+# label odoo-erp develop's round>=3 check accepts); the checks ACCEPT either
+# (PR 8095 makes the gate accept the legacy `Prevencia-read:` too).
+_PREVENCIA_READ_RE = _label_line_re('Prevencia-read')
+_PREVENCIA_STREAM_RE = _label_line_re('Prevencia (stream)')
 PREVENCIA_LABEL = "Prevencia (stream)"
+# Template field labels — used to detect a FULL body wrongly passed as the
+# Self-review table.
+_FULL_BODY_FIELD_LABEL_RES = tuple(
+    _label_line_re(lbl)
+    for lbl in ("Branch", "HEAD", "Stack", "Verified-at-UTC", "Harness"))
 
-# #1125: `Gate-dry-run:` value shape, verbatim from the gate's own check
-# (odoo-erp scripts/handoff_gate/dry_run.py::check_gate_dry_run_field,
-# advisory MISSING-GATE-DRY-RUN, `re.match`). The composer cannot run the full
-# gate: the value is the stream's own dry-run (`handoff --gate-dry-run`) or the
-# explicit GATE_DRY_RUN_NOT_RUN — a PASS is never fabricated.
+# #1125: `Gate-dry-run:` value shape from the gate's own check (odoo-erp
+# scripts/handoff_gate/dry_run.py::check_gate_dry_run_field, advisory
+# MISSING-GATE-DRY-RUN), matched in FULL here so nothing rides after the sha.
+# The composer cannot run the full gate: the value is the stream's own dry-run
+# (`handoff --gate-dry-run`) or the explicit GATE_DRY_RUN_NOT_RUN — a PASS is
+# never fabricated.
 _GATE_DRY_RUN_VALUE_RE = re.compile(r'(?i)PASS\s+@\s+[0-9a-f]{7,40}')
 GATE_DRY_RUN_NOT_RUN = "not run"
 
 
 def gate_dry_run_value(value: Optional[str]) -> tuple[str, Optional[str]]:
-    """``(value_to_emit, error)`` for the ``Gate-dry-run:`` line: blank ->
-    ``not run``; otherwise ONE line in the gate's ``PASS @ <hex-sha>`` shape
-    (an embedded newline would inject body lines, e.g. a second ``HEAD:``)."""
+    """``(value_to_emit, error)`` for the ``Gate-dry-run:`` line: blank or
+    ``not run`` -> ``not run``; otherwise exactly ONE line (``splitlines`` —
+    the gate's own line split, so no ``\r``/``\u2028`` can inject a second
+    ``HEAD:``) that is the gate's ``PASS @ <hex-sha>`` shape in full."""
     v = (value or "").strip()
-    if not v:
+    if not v or v.lower() == GATE_DRY_RUN_NOT_RUN:
         return (GATE_DRY_RUN_NOT_RUN, None)
-    if "\n" in v or "\r" in v or not _GATE_DRY_RUN_VALUE_RE.match(v):
+    if len(v.splitlines()) != 1 or not _GATE_DRY_RUN_VALUE_RE.fullmatch(v):
         return ("", "handoff BLOCK: --gate-dry-run %r is not the gate's shape "
                 "`PASS @ <hex-sha>`; omit it to record Gate-dry-run: %s"
                 % (v, GATE_DRY_RUN_NOT_RUN))
     return (v, None)
 
 
-# Line-anchored template field labels (bullet/bold tolerant, mirroring the
-# gate's own FIELD_PATTERNS) — used to detect a FULL body wrongly passed as
-# the Self-review table.
-_FULL_BODY_FIELD_LABEL_RES = tuple(
-    re.compile(r'(?im)^[ \t]*[-*]?[ \t]*\**' + lbl + r'\**[ \t]*:')
-    for lbl in ("Branch", "HEAD", "Stack", "Verified-at-UTC", "Harness")
-)
+def gate_dry_run_flag_error(value: Optional[str], verbatim: bool) -> Optional[str]:
+    """cmd_handoff's up-front ``--gate-dry-run`` check, before any gh call: a
+    verbatim ``--body-file``/``--sign-only`` body carries its own line, so the
+    flag would be silently dropped there — refuse it; else validate it."""
+    if value is None:
+        return None
+    if verbatim:
+        return ("handoff BLOCK: --gate-dry-run applies only to the composed "
+                "body; a --body-file/--sign-only body carries its own "
+                "Gate-dry-run: line")
+    return gate_dry_run_value(value)[1]
 
 
 def _has_rfr_marker(text: str) -> bool:
@@ -109,6 +126,19 @@ def is_full_body(table_text: str) -> bool:
         return True
     hits = sum(1 for rx in _FULL_BODY_FIELD_LABEL_RES if rx.search(table_text))
     return hits >= 2
+
+
+def readiness_marker_error(body: str, source: str) -> Optional[str]:
+    """The invariants every verbatim readiness body needs, shared by the
+    --body-file and --sign-only paths (#1125): the READY-FOR-REVIEW marker
+    (what the hook and gate trigger on) and the ``Self-review-model:`` line
+    (a FACT the gate requires on every readiness comment, #991)."""
+    if not _has_rfr_marker(body):
+        return "handoff BLOCK: %s body has no READY-FOR-REVIEW marker" % source
+    if not _SELF_REVIEW_MODEL_LINE_RE.search(body):
+        return ("handoff BLOCK: %s body missing Self-review-model: line "
+                "(required on every readiness comment)" % source)
+    return None
 
 
 def bounce_escalation_error(
@@ -153,12 +183,9 @@ def validate_passthrough_body(
     skips the check (the pre-#1056 behaviour)."""
     if not (body or "").strip():
         return "handoff BLOCK: --body-file body is empty"
-    if not _has_rfr_marker(body):
-        return ("handoff BLOCK: --body-file body has no READY-FOR-REVIEW "
-                "marker")
-    if not _SELF_REVIEW_MODEL_LINE_RE.search(body):
-        return ("handoff BLOCK: --body-file body missing Self-review-model: "
-                "line (required on every readiness comment)")
+    err = readiness_marker_error(body, "--body-file")
+    if err:
+        return err
     # Bounce escalation is the GATE's domain — mirror its round >= 3 threshold
     # (never over-enforce at round 2, which the gate accepts) and accept either
     # Prevencia label so a gate-correct body passes (#1044 review 🟡). This is
@@ -453,7 +480,8 @@ def render_generic_body(
         parts.append("Reviewed-by: %s" % reviewed_by)
     if frontline_impact:
         parts.append("Frontline-impact: %s" % frontline_impact)
-    parts.append("Gate-dry-run: %s" % (gate_dry_run or GATE_DRY_RUN_NOT_RUN))
+    if gate_dry_run:  # generic repos have no gate: no `not run` noise
+        parts.append("Gate-dry-run: %s" % gate_dry_run)
 
     if bounce_round >= 2:
         if root_cause:
@@ -535,6 +563,9 @@ def compose_body(
                 "<body.md>` instead.")
 
     # #1125: validate Gate-dry-run: BEFORE any repo probe (never emit bad).
+    # The extended body always carries the line; a generic one only when the
+    # stream supplied a value.
+    supplied_gdr = bool((gate_dry_run or "").strip())
     gate_dry_run, err = gate_dry_run_value(gate_dry_run)
     if err:
         return ("", err)
@@ -589,6 +620,6 @@ def compose_body(
             self_review_model=self_review_model,
             reviewed_by=reviewed_by,
             frontline_impact=frontline_impact,
-            gate_dry_run=gate_dry_run,
+            gate_dry_run=gate_dry_run if supplied_gdr else None,
         )
     return (body, None)
