@@ -41,7 +41,6 @@ from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux,
     GOAL_IDLE_CAP,
     _isolate_goal_state,
-    _write_goal_marker,
     _write_marker_transcript,
 )
 

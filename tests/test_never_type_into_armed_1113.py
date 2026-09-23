@@ -287,13 +287,23 @@ class TestArmConfirmCleanupTruncated(unittest.TestCase):
         self.assertNotIn("Enter", keys,
                          "NEVER submit a truncated payload (the whole harm)")
 
-    def test_no_mark_declines(self):
-        # Without the provenance mark, the truncated render is NOT proven ours ->
-        # untouched (the fail-safe: no proof -> never act).
+    def test_no_mark_but_verbatim_template_is_still_cleared(self):
+        # #1113 RECURRENCE — this REVERSES the original #1113 `test_no_mark_
+        # declines`: the box here holds `_PAYLOAD` (a verbatim fork-no-merge
+        # /goal template variant). The 23.9 regression left exactly such a box
+        # stranded for ~6h because the provenance mark had EXPIRED by the time the
+        # cleanup ran. Verbatim template text is un-forgeable, so it is now
+        # recognised WITHOUT provenance (the (b) `match_templates` proof) and the
+        # clear path IS reached — never declined. The fail-safe for NON-template
+        # content is preserved by `test_foreign_tail_declines_even_with_mark`
+        # (a foreign draft matches no template variant, so it still declines even
+        # WITH a mark).
         fake, log = self._run_cleanup(state={})
-        self.assertIn("cleanup=declined", log)
-        keys = [a[-1] for a in fake.sent]
-        self.assertNotIn("BSpace", keys, "no clear without provenance")
+        self.assertNotIn("cleanup=declined", log,
+                         "a verbatim template box is recognised without a mark")
+        self.assertIn("ARM-CONFIRM-CLEANUP", log, "the clear path is reached")
+        self.assertNotIn("Enter", [a[-1] for a in fake.sent],
+                         "NEVER submit a stranded payload")
 
     def test_foreign_tail_declines_even_with_mark(self):
         # A foreign long draft with the provenance mark present: the tail is NOT

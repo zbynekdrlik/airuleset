@@ -1487,9 +1487,15 @@ def _log_arm_confirm_fail(sid, cwd, text, pid, run, sleep_fn=None,
     # #737 clean-substring / head-shape fallback governs (a foreign draft, never
     # a >=80-char substring of our payload, is untouched either way).
     _now = now if now is not None else time.time()
+    # #1113 recurrence -- `match_templates=True` recognises the box as OUR leftover
+    # when it is a verbatim run of ANY rendered /goal template variant, not only
+    # this request's `text`: the 23.9 `cleanup=declined` was a fork-no-merge tail
+    # whose payload-specific tail proof missed because the handed-in payload was a
+    # different variant. Verbatim template text needs no provenance.
     own = (watchdog._box_is_own_leftover(
                cap, text, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
-               provenance=watchdog._janitor_watch_seen(state, pid, _now))
+               provenance=watchdog._janitor_watch_seen(state, pid, _now),
+               match_templates=True)
            or watchdog._looks_like_own_stuck_content(head))
     if not own:
         _log_goal_sync("ARM-CONFIRM-FAIL sid=%s cwd=%s cleanup=declined "
@@ -1537,6 +1543,39 @@ def _goal_client_active_skip(sid, cwd, pid, run, now, out):
     if out is not None:
         out["detail"] = creason
     return "skip:client-active"
+
+
+def _structured_goal_mark_state(sid, state):
+    """#1113 recurrence -- the watchdog's STRUCTURED, transcript-derived `/goal`
+    mark state for `sid` ("set" / "cleared" / None), the #486 single-source
+    `one_glance.resolve_goal_armed` reads. Prefers the in-memory sweep `state`
+    (freshest -- `goal_dark_watch` populates `state["goal_mark"]` EARLIER this
+    same sweep, before `goal_sweep` -> `deliver_goal` runs) and falls back to the
+    persisted `state["goal_mark"]` on disk (`watchdog.persisted_goal_mark`, #1089)
+    for the CLI `_goal_sync_attempt` caller whose `state` may not carry the map.
+
+    A pane glyph / render is NEVER consulted -- the footer render can read dark
+    while the loop is armed (the `◎ /goal` glyph scrolled off behind a long
+    stranded draft: the >10x david1-3 regression). Returns None on any
+    missing / malformed record (fail-safe: no structured proof -> do NOT refuse
+    on this basis, the pane-based `drop:already-armed` belt still governs)."""
+    rec = None
+    if isinstance(state, dict):
+        gm = state.get("goal_mark")
+        if isinstance(gm, dict):
+            rec = gm.get(sid)
+    if not isinstance(rec, dict):
+        try:
+            rec = watchdog.persisted_goal_mark(sid)
+        except Exception:                    # noqa: BLE001 -- fail-safe to None
+            rec = None
+    if not isinstance(rec, dict):
+        return None
+    mark = rec.get("mark")
+    if not isinstance(mark, dict):
+        return None
+    st = mark.get("state")
+    return st if st in ("set", "cleared") else None
 
 
 # --------------------------------------------------------------------------- #
@@ -1692,6 +1731,33 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     if origin == _GOAL_STALE_REARM_ORIGIN:
         _log_goal_sync("DROP stale-rearm-retired sid=%s cwd=%s" % (sid, cwd))
         return "drop:stale-rearm-retired"
+
+    # #1113 RECURRENCE -- STRUCTURED-armed refusal, before ANY pane work or
+    # keystroke. The >10x david1-3 regression (23.9): a `dark-rearm` typed a
+    # 3.7 kB /goal into an ACTIVE, armed loop because the PANE render read dark
+    # (the `◎ /goal` glyph scrolled off behind the stranded draft) while the
+    # watchdog's STRUCTURED goal_mark state was "set" (one-glance logged
+    # `armed=yes src=goal_mark`). A pane glyph / render absence can NEVER on its
+    # own authorise typing a /goal over the structured truth (the #486 direction:
+    # structured state over pane heuristics). So EVERY watchdog-originated re-arm
+    # origin (`_GOAL_WATCHDOG_REARM_ORIGINS`: dark/auth/fulfilled/answer-rearm +
+    # declared-virgin) is refused with ZERO keystrokes while the transcript-
+    # derived goal_mark state for this sid is "set" -- a template / condition
+    # change waits for the next NATURAL arm (session death -> a new sid, the
+    # owner's own `/autopilot`), never a re-typed keystroke. The `self-callback`
+    # (owner-typed /autopilot) origin is NOT a watchdog re-arm and is never
+    # refused here (the owner is at the keyboard). A VIRGIN arm (declared-virgin)
+    # legitimately needs NO prior goal, so it proceeds only when NO goal_mark
+    # record exists (state None) -- a genuinely fresh / crashed-and-restarted
+    # session. This is the STRUCTURED belt above the pane-based
+    # `drop:already-armed` check below (which still governs when goal_mark is
+    # absent / stale but the pane clearly renders armed).
+    if origin in _GOAL_WATCHDOG_REARM_ORIGINS \
+            and _structured_goal_mark_state(sid, state) == "set":
+        _log_goal_sync("REFUSE structured-armed sid=%s cwd=%s origin=%s "
+                       "(refuse:structured-armed goal_mark=set)"
+                       % (sid, cwd, origin))
+        return "drop:already-armed"
 
     # #1038 -- the keystroke NUDGE identity, derived from WHETHER this cwd is a
     # DECLARED managed window (see `_declared_window_nudge`): a declared window
