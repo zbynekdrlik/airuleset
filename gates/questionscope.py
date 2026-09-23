@@ -10,7 +10,11 @@ a client reply whose inline text carries workaround phrasing (``zatiaľ`` /
 ``medzitým`` / ``dovtedy`` / ``obísť`` / ``ručne`` / ``workaround``) while a
 referenced same-repo ``#N`` still has an open implementation lane (the ticket is
 OPEN — the lane closes it when the fix is on PROD) is BLOCKED: the stream replies
-ONCE, after the fix is on PROD and verified. Bypass ``airuleset:client-reply-ok``
+ONCE, after the fix is on PROD and verified. Fix-forward (23.9.): the token
+search runs ONLY over the ``> `` quoted region — the proposed client text the
+#977 rule already requires inline — so an OWNER question that merely contains
+"zatiaľ" (no ``> `` block, no proposed client reply) is never a workaround
+proposal and is allowed. Bypass ``airuleset:client-reply-ok``
 for the sanctioned exception (a yes/no question the client explicitly asked that
 the fix does not answer). When workaround phrasing is present this branch owns
 the one-gh-call budget and the #1025 U-membership check is not additionally run.
@@ -122,6 +126,23 @@ def _bare_refs(msg):
     return out
 
 
+def _quoted_region(msg):
+    """The inline client text of a ❓ approval — the Markdown blockquote (`> `)
+    lines, joined (leading `> ` stripped). The #977 rule (hook Check 8) requires
+    every client-text approval to carry its proposed message INLINE as a `> `
+    block, so this region is exactly the proposed client reply. Returns "" when
+    the message has no quoted block (then it is not a client-reply proposal, so
+    the #1027 workaround branch does not fire). #1027 fix-forward."""
+    if not msg:
+        return ""
+    out = []
+    for line in msg.splitlines():
+        m = _QUOTE_LINE_RE.match(line)
+        if m is not None:
+            out.append(m.group(1))
+    return "\n".join(out)
+
+
 # #1027 — NO INTERIM WORKAROUND while a fix is in flight (owner directive, miva1
 # 2026-09-14). The six phrasing tokens the owner named: a client reply that
 # explains a manual/interim workaround. `\b` word anchors (Py3 `re` is unicode by
@@ -138,6 +159,14 @@ _WORKAROUND_RE = re.compile(
 # client EXPLICITLY asked that the fix does not answer. Mirrors the repo's
 # `airuleset:<x>-ok` bypass convention; the block reason names it.
 _WORKAROUND_BYPASS = "airuleset:client-reply-ok"
+# A Markdown blockquote line (`> ...`, leading whitespace tolerant). #1027
+# fix-forward: the #977 rule (hook Check 8) already REQUIRES a client-text
+# approval to carry the proposed message INLINE as a `> ` quoted block, so the
+# quoted region is exactly the client text. The workaround-token search runs
+# ONLY over this region — an OWNER question that merely contains "zatiaľ" (no
+# proposed client reply, no `> ` block) is not a client-reply proposal and does
+# not trip the no-interim-workaround branch (the live 23.9. false-block).
+_QUOTE_LINE_RE = re.compile(r"^[ \t]*>[ \t]?(.*)$")
 _WORKAROUND_REASON = (
     "❓ navrhuje klientovi INTERIM workaround (%(hit)s) kým je oprava %(refs)s "
     "ešte v behu — ticket je OTVORENÝ, teda fix ešte NIE je na PROD. Owner "
@@ -314,7 +343,12 @@ def decide(payload, question_fn=None, u_count_fn=None, lane_fn=None,
     # OWNS the one-gh-call ceiling and returns — the #1025 U-membership gh call is
     # NOT additionally made (skipping it here fails toward allow, the safe
     # direction). Independent of U (fires regardless of the owner-court count).
-    wm = _WORKAROUND_RE.search(msg)
+    # #1027 fix-forward: the token search runs ONLY over the `> ` quoted region
+    # (the proposed client text, per the #977 inline-quote rule). An OWNER
+    # question that merely contains "zatiaľ" with no `> ` block is not a
+    # client-reply proposal, so there is no quoted region → no match → no gh
+    # call — fixing the live 23.9. false-block of owner cutover questions.
+    wm = _WORKAROUND_RE.search(_quoted_region(msg))
     if wm:
         if _WORKAROUND_BYPASS in msg:
             return False, ""                 # sanctioned client yes/no exception
