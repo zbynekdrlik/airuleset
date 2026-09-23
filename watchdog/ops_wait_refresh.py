@@ -332,8 +332,12 @@ def _spawn_via_systemd_run(cwd, repo_root, child_argv, run_fn, log):
     try:
         # a short client-call ceiling: systemd-run returns in ms once the unit is
         # started; 10 s bounds a bus hang without re-adding real latency to the
-        # sweep (the derivation itself runs detached, off the sweep path).
-        r = run(argv, capture_output=True, text=True, timeout=10, env=env)
+        # sweep (the derivation itself runs detached, off the sweep path). Pass
+        # `env=src` (the SAME dict the `--setenv=NAME` list was derived from) so
+        # every imported NAME always resolves in the client env — the by-name
+        # import can never reference a var absent from what run() receives
+        # (review F1 robustness: no implicit src/env divergence).
+        r = run(argv, capture_output=True, text=True, timeout=10, env=src)
     except FileNotFoundError:
         log("popen-fallback (systemd-run absent)")
         return False
