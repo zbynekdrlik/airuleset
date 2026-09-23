@@ -89,13 +89,17 @@ def _core_search_excl():
     `ops-wait` label (the #578 pipeline-gated/umbrella doctrine), never dropped
     from the count by this exclusion. Conversely a FOREIGN stream's bare
     `needs-acceptance` (a reduced-authority `stream:<user>` in AUTHORITY_BY_USER,
-    with NO `ready-for-review`/`needs-gatekeeper`) IS excluded here, so it never
+    with NO MAINTAINER_ACTION_LABELS label — `ready-for-review`/
+    `needs-gatekeeper`/`gk-processing`) IS excluded here, so it never
     reaches the core obligation `seen` — the ONE mechanical guard against a
     foreign acceptance leaking into the full-authority partition, where
     `_partition_workable` (which cannot see box authority) would now route it to
     `U` (#622: a bare needs-acceptance is queued for owner approval → U
     unconditionally; the exclusion keeps a FOREIGN one out of this box's counts
-    entirely, be that `U` or `I`).
+    entirely, be that `U` or `I`). One that DOES carry a MAINTAINER_ACTION_LABELS
+    label re-enters via `_obligation_quals()` and is kept out of `U` by the #507
+    gk-override (NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS, derived from the same
+    tuple — issue 1130) → action-only `I`.
 
     #561: each excluded stream is EXPANDED via `_stream_rename_equivalents()`
     — the SAME single alias primitive `_slice_quals()`/`_ticket_is_stream_
@@ -486,8 +490,15 @@ USER_WAITING_LABELS = ("needs-answer", "needs-decision", "needs-acceptance",
 # `needs-acceptance` ONLY: `needs-answer`/`needs-decision` are not hand-off
 # states, so their #468 routing (a handed + user-waiting row goes to U) is left
 # byte-identical — this override applies solely to the one POST-hand-off label.
-NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS = (
-    "ready-for-review", "needs-gatekeeper", "prio:bounce")
+#
+# Issue 1130: DERIVED from MAINTAINER_ACTION_LABELS (never a literal copy), so
+# #1053's `gk-processing` (gk picked the hand-off up) overrides too. Before, a
+# FOREIGN stream's `needs-acceptance` + `gk-processing` row — pulled into the
+# full-authority core set by the `label:gk-processing` obligation qual — fell
+# to the gk owner's `U` (odoo-erp#8002, stream:david4), and on the owning
+# stream's box gk's pickup dropped a needs-acceptance re-hand-off out of `gk`.
+NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS = MAINTAINER_ACTION_LABELS + (
+    "prio:bounce",)
 
 # #507: labels that mark a hand-off the gatekeeper has ALREADY PROCESSED, so the
 # ticket is no longer parked with the gatekeeper — it is back in the STREAM's
@@ -2207,7 +2218,8 @@ def _unpark_release_flagged(rows, authority=None, release_fetch=None):
 # gk-request lane (#191/#223 fold both into the same gk bucket).
 # #1053: `gk-processing` (gk's live-work state) is the third gk hand-off label,
 # so a W-parked row also carrying it is the same `gk-handoff!` contradiction.
-_GK_HANDOFF_LABELS = ("needs-gatekeeper", "ready-for-review", "gk-processing")
+# Issue 1130: derived from MAINTAINER_ACTION_LABELS (was a literal duplicate).
+_GK_HANDOFF_LABELS = MAINTAINER_ACTION_LABELS
 
 # #636 review 🟡: a `prio:bounce` OVERRIDES a co-present gk hand-off label back to
 # "the STREAM's own court" (the #313 pt-2 override that `_slice_mine_and_handed`
@@ -3105,8 +3117,8 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
         # count must NOT drop to 0 while gk is working. `verify-on-copy` is
         # deliberately absent: it is the post-deploy RETURN to the sub-dev's own
         # `I` (handled by GATEKEEPER_PROCESSED_LABELS, below).
-        label_handed = ("ready-for-review" in labels) or \
-            ("needs-gatekeeper" in labels) or ("gk-processing" in labels)
+        # Issue 1130: the ONE hand-off label set, never a literal copy.
+        label_handed = any(lb in labels for lb in MAINTAINER_ACTION_LABELS)
         # #313 pt 2 (F2/F3): `prio:bounce` is the gatekeeper's own "returned
         # to the sub-dev, not ready" verdict — it overrides a stale/lagged
         # hand-off LABEL so a bounced ticket reaches `unhandled` naturally;
