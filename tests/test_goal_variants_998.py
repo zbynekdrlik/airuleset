@@ -200,12 +200,12 @@ class TestReviewRoleVariant1000(TestCase):
         "full/parallel/None": "2d9a5539f472a22cda96177c",
         "full/sequential/None": "6920ca09926869d6679eb0cc",
         "full/sequential/infra": "e3836d97e467eafe428a92ec",
-        "branch-merge/parallel/None": "7300c5a7ab7599c8ab0fdd9c",
-        "branch-merge/sequential/None": "770fb6f652f07f38ff91a9c9",
-        "branch-merge/sequential/infra": "18dcf4f0d472cdbadadbc31b",
-        "fork-no-merge/parallel/None": "64467415104f4738d248e056",
-        "fork-no-merge/sequential/None": "36ecc94962f1cdf14b958fb3",
-        "fork-no-merge/sequential/infra": "58c31cbdb7ecbfbf8cb50543",
+        "branch-merge/parallel/None": "baeaa60a576d206e5e031d3d",
+        "branch-merge/sequential/None": "50ea6ffa33954088695a7978",
+        "branch-merge/sequential/infra": "14ec8214eff9cae5330a9eb3",
+        "fork-no-merge/parallel/None": "adf7e0904676c259633645cc",
+        "fork-no-merge/sequential/None": "0d82b098f66601de3038235f",
+        "fork-no-merge/sequential/infra": "a34c388830fba45ecc5ab6ab",
     }
 
     def test_nonreview_variants_byte_identical_snapshot(self):
