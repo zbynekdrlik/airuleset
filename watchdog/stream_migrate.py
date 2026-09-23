@@ -106,7 +106,11 @@ def _epoch(ts):
 # batch prefix, the #890 detector's extras, the report-owed card nudge (#1133
 # review). Resolved at call time from their owning modules (one source each).
 _OWN_EXTRA_PREFIXES = ("recheck:", "UNPARK-AUDIT:", "report-owed:",
-                       "gk-freshness backstop", "goal-guard:", "lane-check:")
+                       "gk-freshness backstop", "goal-guard:", "lane-check:",
+                       "lane-reconcile:", "task-hygiene:", "Discord pripomienka:",
+                       # the card_flags relay of an owner's ❓ REACTION: a new
+                       # question about a card, never an answer to ours
+                       "Užívateľ označil túto tvoju Discord správu")
 _OWN_EXACT = ("resume",)
 
 
@@ -237,18 +241,24 @@ class Seams(NamedTuple):
 
 def decide(sid, cwd, tpath, payload, now, loc, dry_run, store, template_fn,
            pending_fn, record_fn, reset_fn, proof_fn=None, confirm_fn=None,
-           label="stream-migrate"):
+           mark_ts=None):
     """The dark-watch decision for a DARK, mark-"set" session whose armed goal
     is a stream template. Returns `(logline_or_None, handled)`. The MIGRATION
-    trigger (#1128: an old template, 🏁 proven by the caller) passes no
-    `proof_fn`; the ANSWERED-(A) trigger (#1133, `decide_answered`) passes its
-    own `proof_fn() -> (ok, why)`, a `confirm_fn() -> bool` (the #524 dark-
-    footer confirmation run: an answered `❓` alone does not prove the loop
-    ENDED, since (A) does not stop a loop with a lane live) and `label`.
+trigger (#1128: an old template, 🏁 proven by the caller) passes no
+    `proof_fn` but the arm's `mark_ts`, so it never records while the last `❓
+    NEEDS YOU` after the arm is unanswered (the SAME `question_state` predicate
+    `delivery_ok` refuses on -- record and delivery never disagree); the
+    ANSWERED-(A) trigger (#1133, `decide_answered`) passes its own `proof_fn() ->
+    (ok, why)` and a `confirm_fn() -> bool` (the #524 dark-footer confirmation
+    run: an answered `❓` alone does not prove the loop ENDED, since (A) does not
+    stop a loop with a lane live), advanced LAST, only on the path that stays
+    this trigger's own (so the dead-loop path never advances it twice a sweep).
 
-    Cheap gates first (idle, then the trigger proof + confirmation if any, the
-    1 h gap, a pending request), then the template resolution and the shared
-    `eligible()` core. No newest-turn gate: dark-watch reaches only a DARK
+    Order: idle; then the migration's cheap gates (1 h gap, a pending request)
+    before its question read, or the answered trigger's proof; the template
+    resolution and the shared `eligible()` core; then (answered only) the
+    confirmation -- advanced every sweep, the 1 h gap included -- and the gap +
+    pending gates. No newest-turn gate: dark-watch reaches only a DARK
     footer, so a 🏁 the evaluator rejected (loop still running, ◎ lit) never
     gets here, while a human turn after a real achievement must not block the
     migration (live david1, 2026-09-23). `handled` is False -- the caller's
@@ -261,44 +271,53 @@ def decide(sid, cwd, tpath, payload, now, loc, dry_run, store, template_fn,
     if not dry_run:
         _reap(store, now)
     rec = store.get(sid) if isinstance(store.get(sid), dict) else {}
-    handled = True
-    ok, why = True, ""
-    age = _turn_liveness.transcript_age_s(tpath, now)
-    last = rec.get("last")
-    if age is None:
-        ok, why, handled = False, "transcript unreadable", False
-    elif age < IDLE_MIN_S:
-        if proof_fn is not None:   # not yet the answered trigger's state: silent
-            return None, False
-        ok, why = False, "transcript not idle %ds" % IDLE_MIN_S
-    else:
-        pok, pwhy = proof_fn() if proof_fn is not None else (True, "")
-        if not pok:
-            ok, why, handled = False, pwhy, False
-        elif confirm_fn is not None and not confirm_fn():
-            ok, why = False, "dark footer not yet confirmed (#524 run)"
-        elif isinstance(last, (int, float)) and 0 <= now - last < MIN_GAP_S:
-            ok, why = False, "1/h attempt gap"
-        elif pending_fn(sid):
-            ok, why = False, "a request is already pending"
-    text = authority = None
-    if ok:
-        text, authority = template_fn(cwd)
-        if authority not in STREAM_AUTHORITIES:
-            return None, False
-        cok, cwhy = eligible(authority, payload, tpath, now)
-        if not cok:
-            ok, why, handled = False, cwhy, False
-        elif not text:
-            ok, why, handled = False, "no current template resolved", False
-        elif is_old_stream_payload(text):
-            ok, why = False, "the resolved template is still the old one"
-    if not ok:
+    label = "stream-migrate" if proof_fn is None else "stream-answered"
+
+    def _skip(why, handled):
         if dry_run or rec.get("why") == why:
             return None, handled
         store[sid] = dict(rec, why=why, seen=now)
         return ("dark-watch %s sid=%s -> %s SKIP: %s"
                 % (loc, sid, label, why)), handled
+
+    age = _turn_liveness.transcript_age_s(tpath, now)
+    if age is None:
+        return _skip("transcript unreadable", False)
+    if age < IDLE_MIN_S:
+        if proof_fn is not None:   # not yet the answered trigger's state: silent
+            return None, False
+        return _skip("transcript not idle %ds" % IDLE_MIN_S, True)
+    last = rec.get("last")
+    gap = isinstance(last, (int, float)) and 0 <= now - last < MIN_GAP_S
+    if proof_fn is not None:
+        pok, pwhy = proof_fn()
+        if not pok:
+            return _skip(pwhy, False)
+    else:                          # migration: the cheap gates before any read
+        if gap:
+            return _skip("1/h attempt gap", True)
+        if pending_fn(sid):
+            return _skip("a request is already pending", True)
+        if (mark_ts is not None
+                and question_state(tpath, mark_ts)[0] == "unanswered"):
+            return _skip("the last ❓ NEEDS YOU is unanswered", False)
+    text, authority = template_fn(cwd)
+    if authority not in STREAM_AUTHORITIES:
+        return None, False
+    cok, cwhy = eligible(authority, payload, tpath, now)
+    if not cok:
+        return _skip(cwhy, False)
+    if not text:
+        return _skip("no current template resolved", False)
+    if is_old_stream_payload(text):
+        return _skip("the resolved template is still the old one", True)
+    if confirm_fn is not None:     # advanced ONLY on this trigger-owned path
+        if not confirm_fn():
+            return _skip("dark footer not yet confirmed (#524 run)", True)
+        if gap:
+            return _skip("1/h attempt gap", True)
+        if pending_fn(sid):
+            return _skip("a request is already pending", True)
     if dry_run:
         return ("dark-watch %s sid=%s -> %s would record "
                 "(dry-run, authority=%s)" % (loc, sid, label.upper(),
@@ -342,8 +361,7 @@ def decide_answered(sid, cwd, tpath, mark, now, loc, dry_run, seams_, memo,
     if not dry_run:
         _reap(memo, now)
     return decide(sid, cwd, tpath, payload, now, loc, dry_run, *seams_,
-                  proof_fn=_proof, confirm_fn=lambda: confirm_fn(mark_ts),
-                  label="stream-answered")
+                  proof_fn=_proof, confirm_fn=lambda: confirm_fn(mark_ts))
 
 
 def state_store(state, key, dry_run):

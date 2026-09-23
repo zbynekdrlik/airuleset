@@ -3055,7 +3055,7 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
         line, handled = _stream_migrate.decide(
             sid, cwd, tpath, payload, now, loc, dry_run, *_stream_seams(
                 sid, cwd, now, rearm_fn, requests_path, state,
-                (seen_state, pinged_state, confirm_state), dry_run))
+                (seen_state, pinged_state, confirm_state), dry_run), mark_ts=mark_ts)
         if line and not handled:     # not migration state: journal, fall through
             _log_goal_sync(line)
         if handled:

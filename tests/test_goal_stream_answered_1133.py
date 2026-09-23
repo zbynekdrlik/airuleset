@@ -68,7 +68,11 @@ _OWN_NUDGES = ("nudge: [u-freshness] stuck-check: U-reconcile",
                "report-owed: montalu — napíš ## ✅ Work Complete",
                "lane-check: 2 lanes", "goal-guard: x", "recheck: y",
                "UNPARK-AUDIT: z", "stuck-check: w", "bounce-backstop: v",
-               "gk-request backstop: u", "resume")
+               "gk-request backstop: u", "resume",
+               "task-hygiene: A=1 B=0 C=0 — klientske úlohy čakajú na teba.",
+               "lane-reconcile: 1 worktree lane returned during a compact",
+               "Discord pripomienka: ticket #7 bol znovu otvorený",
+               "Užívateľ označil túto tvoju Discord správu ikonkou ❓ (x)")
 
 
 def _iso(ts):
@@ -510,6 +514,28 @@ class TestStreamAnsweredRearm(unittest.TestCase):
                                                   now=self.now + k * 60)
         self.assertEqual(len(calls), 2)
         self.assertEqual(reqs, {})
+
+    def test_the_run_advances_once_per_sweep_on_a_fall_through(self):
+        # an unresolvable template hands the pane to the dead-loop path, which
+        # advances the SAME #524 run -- this trigger must not advance it too.
+        proj = self._fixture("r-once")
+        state = {}
+        for k in range(3):
+            self._sweep(proj, state=state, now=self.now + k * 60, tmpl="")
+        self.assertEqual(state["goal_dark_confirm"]["r-once"]["clean_run"], 2)
+
+    def test_a_migration_never_records_over_an_unanswered_question(self):
+        # an old-template loop asked ❓ with a lane live (stop (A) held off), a
+        # task-notification woke it and it printed 🏁: the question is open.
+        proj = self._fixture("m-q", payload=OLD_FORK, tail=[
+            _asst(600, _Q, "q"), _user(650, _TASK_NOTE),
+            _asst(700, "Hotovo.\n🏁 BACKLOG EMPTY: 0 open, released\n"
+                       "✅ DONE: slice prázdny", "b")])
+        reqs, _l, state, _t = self._sweep(proj)
+        self.assertNotEqual((reqs.get("m-q") or {}).get("origin"), sm.ORIGIN)
+        self.assertIn("stream-migrate SKIP: the last ❓ NEEDS YOU is unanswered",
+                      Path(self.syncp).read_text())
+        self._assert_never(proj, "m-q", state, reqs, "is unanswered")
 
     def test_dry_run_mutates_no_state(self):
         proj = self._fixture("r-dry")
