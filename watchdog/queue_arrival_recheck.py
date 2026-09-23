@@ -120,6 +120,42 @@ def _is_priority_record(rec):
     return False
 
 
+# #1118 — the receipt SHAPE the relay itself posts onto the hub. A comment that
+# IS a receipt (or a receipt of a receipt) is NEVER a fresh request, so it can
+# never re-detect as a new arrival on the next scan pass.
+_INFRA_RECEIPT_SHAPE_RE = re.compile(r"^delivered .* → gk-infra",
+                                     re.MULTILINE)
+# #1118 (b) — a comment is a genuine infra REQUEST only when the marker STARTS
+# the body or a line, after optional leading markdown noise (`**`/`*`/whitespace).
+# A marker mid-sentence, in backticks, or on a markdown-QUOTED line (`> …`, the
+# #818 echo-reply class) does NOT count — the old `.*<marker>` inline match is
+# exactly what let receipts and quoted ACKs re-feed as arrivals. `>` is
+# deliberately NOT in the leading allowance: ignoring it would reverse #818 and
+# re-open the quoted-ACK self-feed this ticket closes.
+_INFRA_REQUEST_RE = re.compile(
+    r"^[ \t*]*(?:GATEKEEPER-ACTION \(INFRA\)|STOP:)", re.MULTILINE)
+
+
+def infra_request_tag(body):
+    """The infra hand-off tag a comment `body` carries as a genuine REQUEST
+    (`'GATEKEEPER-ACTION (INFRA)'` / `'STOP:'`), or None. #1118: the ONE shared
+    marker-match helper — every consumer of the tag (the fetch's comment scan in
+    `airuleset._watchdog_infra_queue_fetch`, and thus `_is_priority_record` which
+    reads the tag it sets) goes through it, so the receipt/quoted-ACK self-feed can
+    never re-open on one path. A receipt shape (`delivered … → gk-infra`) is never
+    a request (c); the marker counts only at the start of the body or a line,
+    ignoring leading `**`/`*`/whitespace but NOT a `> …` quote (b). Never raises."""
+    if not isinstance(body, str) or not body:
+        return None
+    if _INFRA_RECEIPT_SHAPE_RE.search(body):
+        return None
+    mtch = _INFRA_REQUEST_RE.search(body)
+    if not mtch:
+        return None
+    return ("GATEKEEPER-ACTION (INFRA)"
+            if "GATEKEEPER-ACTION (INFRA)" in mtch.group(0) else "STOP:")
+
+
 def _wave_has_priority(arrivals, id_map):
     """True iff any NEW arrival id in this wave maps to a priority record.
     `id_map` None (the review union / an unwired fetch) → never priority."""
@@ -527,6 +563,18 @@ def _default_hub_receipt_post(cwd):
     return _post
 
 
+def _receipt_kind_token(tag):
+    """#1118 (a) — a NEUTRAL kind token for the hub receipt, NEVER the literal
+    `GATEKEEPER-ACTION (INFRA)` / `STOP:` marker: a receipt that quoted the marker
+    was itself re-detected as a new arrival (the self-feed loop). `infra-action`
+    for a GATEKEEPER-ACTION hand-off, `stop` for a STOP:, `infra` otherwise."""
+    if tag == "GATEKEEPER-ACTION (INFRA)":
+        return "infra-action"
+    if tag == "STOP:":
+        return "stop"
+    return "infra"
+
+
 def _receipt_clock_hhmm(now):
     """`HH:MM <TZ>` for the receipt line, from `now` (an epoch). Europe/Bratislava
     (== Prague, the owner's tz) via zoneinfo, `%Z` so the label is CEST in summer
@@ -567,8 +615,10 @@ def _post_hub_receipts(state, priority_records, now, loc, receipt_post_fn):
         if rid in seen_set:
             continue
         num = rec.get("num", rid)
+        # #1118 (a): render a NEUTRAL kind token, never the literal marker, so a
+        # receipt can never re-match the arrival scan on the next pass.
         text = ("delivered %s → gk-infra (%s) — arrival #%s (%s)"
-                % (hhmm, loc, rid, rec.get("tag") or "infra"))
+                % (hhmm, loc, rid, _receipt_kind_token(rec.get("tag"))))
         try:
             receipt_post_fn(num, text)
         except Exception:  # noqa: BLE001 — a hub-post failure never breaks delivery

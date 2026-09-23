@@ -7427,15 +7427,11 @@ def _watchdog_queue_classify(cwd):
 # calls out by naming #6883 explicitly alongside the labelled tickets).
 INFRA_QUEUE_HUB = {"zbynekdrlik/odoo-erp": 6883}
 # a comment is an infra hand-off when its body carries a STOP:/GATEKEEPER-ACTION
-# (INFRA) tag — the exact markers the FLOW session posts (issue #1029).
-# The GATEKEEPER-ACTION (INFRA) arm matches the tag on any line that is NOT a
-# markdown QUOTE (`> …`) — a quoted reply echoes the tag but is not a fresh
-# hand-off, so it must not register as an arrival (review 2, #818 class). The
-# negative lookahead excludes quoted lines ONLY, never a genuine line-start or
-# inline marker, so no arrival is ever MISSED (safe direction). STOP: stays
-# line-anchored (already quote-safe: `>` is not `[ \t]`).
-_INFRA_STOP_TAG_RE = re.compile(
-    r"^(?![ \t]*>).*GATEKEEPER-ACTION \(INFRA\)|^[ \t]*STOP:", re.MULTILINE)
+# (INFRA) marker as a genuine REQUEST — the classification lives in the ONE shared
+# helper `queue_arrival_recheck.infra_request_tag` (#1118), so the receipt/quoted-
+# ACK self-feed (a marker mid-line, in a receipt, or quoted in an ACK) can never
+# re-open on this path. It matches only a line-start marker (after optional
+# `**`/`*`/whitespace, never a `> …` quote — #818) and excludes the receipt shape.
 # rolling window for the tagged-comment fetch: bounds the gh cost AND keeps the
 # set-delta STABLE (a `since=<last-run>` window would shrink each run and churn
 # the baseline; a fixed recent window means a new tagged comment appears and an
@@ -7647,6 +7643,7 @@ def _watchdog_infra_queue_fetch(cwd, clock=None):
     import subprocess
     import time
     from datetime import datetime, timedelta, timezone
+    from watchdog import queue_arrival_recheck as _qa_recheck  # #1118 shared matcher
     if clock is None:
         clock = time.monotonic   # injectable seam so the budget is unit-testable
     try:
@@ -7712,14 +7709,13 @@ def _watchdog_infra_queue_fetch(cwd, clock=None):
             return None
         for c in comments:
             body = c.get("body") or ""
-            if not _INFRA_STOP_TAG_RE.search(body):
+            tag = _qa_recheck.infra_request_tag(body)
+            if tag is None:
                 continue
             try:
                 cid = int(c["id"])
             except (KeyError, TypeError, ValueError):
                 continue
-            tag = ("GATEKEEPER-ACTION (INFRA)"
-                   if "GATEKEEPER-ACTION (INFRA)" in body else "STOP:")
             records.append({"id": cid, "kind": "comment", "num": n,
                             "permalink": c.get("html_url") or "", "tag": tag})
     return records
