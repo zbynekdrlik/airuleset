@@ -415,6 +415,31 @@ class TestStreamAnsweredRearm(unittest.TestCase):
         reqs, _l, _s, _t = self._sweep(proj, state=state, now=self.now + 3700)
         self.assertEqual(reqs["r-rate"]["origin"], sm.ORIGIN)
 
+    def test_the_proof_is_read_once_per_transcript_change(self):
+        # a dark idle pane is swept every 60 s; its unchanged transcript must
+        # not be re-read (the bounded 8 MB tail) on every sweep.
+        proj = self._fixture("r-memo", tail=[_asst(600, _Q, "q"),
+                                             _user(700, _TASK_NOTE),
+                                             _asst(710, _AFTER, "n")])
+        real, calls = sm.answered_question, []
+
+        def _count(*a):
+            calls.append(a)
+            return real(*a)
+        state = {}
+        with unittest.mock.patch.object(sm, "answered_question", _count):
+            for k in range(3):
+                reqs, _l, state, _t = self._sweep(proj, state=state,
+                                                  now=self.now + k * 60)
+            self.assertEqual(len(calls), 1, calls)
+            tpath = next(proj.rglob("r-memo.jsonl"))
+            self._age(tpath, 1100)                     # the transcript changed
+            for k in (4, 5):   # 1st: the mtime-advance liveness veto; 2nd: re-read
+                reqs, _l, state, _t = self._sweep(proj, state=state,
+                                                  now=self.now + k * 60)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(reqs, {})
+
     def test_dry_run_mutates_no_state(self):
         proj = self._fixture("r-dry")
         reqs, logs, state, _t = self._sweep(proj, dry_run=True)

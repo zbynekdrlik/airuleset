@@ -1582,9 +1582,9 @@ def _structured_goal_mark_state(sid, state, with_mark=False):
     / recent-human / `drop:stale-rearm` freshness / client-active / pane-budget
     gates now govern ONLY the NOT-set cases for a watchdog origin (auth-rearm mark
     "cleared", declared-virgin no mark, or a mark absent/unreadable) -- plus the
-    ONE owner-ruled exemption (#1128 part 3): a `stream-migrate` request whose
-    armed payload is still the OLD pre-#1128 stream template and whose transcript
-    is idle >= 10 min (`stream_migrate.delivery_ok`). `with_mark=True` returns the
+    ONE owner-ruled exemption: a `stream-migrate` request on an idle (>= 10 min)
+    stream loop whose payload is the OLD pre-#1128 template or whose last `❓ NEEDS
+    YOU` was answered (#1133) -- `stream_migrate.delivery_ok`. `with_mark=True` returns the
     mark dict (its `payload`) instead of the state, from the SAME read."""
     rec = None
     if isinstance(state, dict):
@@ -1785,18 +1785,17 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     # is documented on `_structured_goal_mark_state`.
     if origin in _GOAL_WATCHDOG_REARM_ORIGINS \
             and _structured_goal_mark_state(sid, state) == "set":
-        _mig_ok, _mig_why = _stream_migrate.delivery_ok(  # #1128 part 3 only
-            origin, authority, lambda: (_structured_goal_mark_state(
-                sid, state, with_mark=True) or {}).get("payload"),
-            lambda: watchdog.find_active_transcript(projects_dir, cwd), now)
+        _mig_ok, _mig_why = _stream_migrate.delivery_ok(  # #1128/#1133 only
+            origin, authority, lambda: _structured_goal_mark_state(sid, state, True),
+            lambda: watchdog.find_active_transcript(projects_dir, cwd), now, sid)
         if not _mig_ok:
             _log_goal_sync("REFUSE structured-armed sid=%s cwd=%s origin=%s "
                            "(refuse:structured-armed goal_mark=set%s)"
                            % (sid, cwd, origin, ("; stream-migrate: %s"
                                                  % _mig_why) if _mig_why else ""))
             return "drop:already-armed"
-        _log_goal_sync("PASS structured-armed sid=%s cwd=%s origin=%s "
-                       "(old stream template, transcript idle)" % (sid, cwd, origin))
+        _log_goal_sync("PASS structured-armed sid=%s cwd=%s origin=%s (%s)"
+                       % (sid, cwd, origin, _mig_why))
 
     # #1038 -- the keystroke NUDGE identity, derived from WHETHER this cwd is a
     # DECLARED managed window (see `_declared_window_nudge`): a declared window
@@ -2942,6 +2941,17 @@ def _recovery_rearm_ok(recs, now, min_gap, max_per_day):
     return True, pruned, ""
 
 
+def _stream_seams(sid, cwd, now, rearm_fn, requests_path, state,
+                  episode_states, dry_run):
+    """#1128/#1133 -- `stream_migrate.seams` bound to THIS module's request
+    store (the module-global `record_goal_request` / `load_goal_requests`, so a
+    test patching either still observes the write/read)."""
+    return _stream_migrate.seams(
+        sid, cwd, now, dry_run, state, episode_states, rearm_fn or _default_rearm_fn,
+        lambda *a, **k: record_goal_request(*a, path=requests_path, **k),
+        lambda: load_goal_requests(requests_path))
+
+
 def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
                             rearm_fn, obligation_fn, requests_path,
                             fulfilled_state, fulfilled_proof, seen_state,
@@ -3028,20 +3038,10 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
     # current template by the migration-only watcher (guards: stream_migrate).
     payload = mark.get("payload") if isinstance(mark, dict) else None
     if state is not None and _stream_migrate.is_old_stream_payload(payload):
-        def _record(text, auth):
-            record_goal_request(sid, cwd, text, auth, now=now,
-                                origin=_stream_migrate.ORIGIN, path=requests_path)
-
-        def _reset():
-            for _st in (seen_state, pinged_state, confirm_state):
-                _st.pop(sid, None)
         line, handled = _stream_migrate.decide(
-            sid, cwd, tpath, payload, now, loc, dry_run,
-            (dict(state.get("goal_stream_migrate") or {}) if dry_run
-             else state.setdefault("goal_stream_migrate", {})),
-            rearm_fn or _default_rearm_fn,
-            lambda s: isinstance(load_goal_requests(requests_path).get(s), dict),
-            _record, _reset)
+            sid, cwd, tpath, payload, now, loc, dry_run, *_stream_seams(
+                sid, cwd, now, rearm_fn, requests_path, state,
+                (seen_state, pinged_state, confirm_state), dry_run))
         if line and not handled:     # not migration state: journal, fall through
             _log_goal_sync(line)
         if handled:
@@ -4093,6 +4093,11 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
                 logs.append(_vline)
             continue
         if _frhandled:
+            continue
+        if _stream_migrate.dark_watch_answered(  # #1133 answered (A) stream loop
+                logs, sid, cwd, tpath, mark, now, loc, dry_run, state, _stream_seams(
+                    sid, cwd, now, rearm_fn, requests_path, state,
+                    (seen_state, pinged_state, confirm_state), dry_run)):
             continue
 
         # #890 ANSWER-REARM lane: a stop-(A) ❓-blocked loop whose owner
