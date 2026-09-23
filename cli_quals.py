@@ -1817,10 +1817,26 @@ def ops_wait_ages_fn(ops_wait, root, member_quals):
     idle-box footer case), never firing a per-qual `gh issue list` for a fetch
     nothing will consume."""
     import airuleset
+    import cli_parallel
     self_login = airuleset._stream_self_login()
     prefetch = (airuleset._ops_wait_prefetch_comments(member_quals, root)
                 if (member_quals and ops_wait) else {})
     cache = {}
+    # #1067 slice 1c (b): the >100-comment fallback members (absent from the
+    # batched 1b prefetch) are read in PARALLEL, bounded to the SAME sorted cap
+    # the flag-set consumers (`_stale_ops_wait_flagged` etc.) query, so a large
+    # W set's per-issue `gh issue view` fallbacks overlap instead of running one
+    # at a time. Identical results to the lazy path — `_ages` still reads `cache`
+    # first; a per-call failure is omitted by `run_parallel` and re-derived
+    # lazily by `_ages` (the same fail-safe direction as before).
+    if ops_wait:
+        fallback = [n for n in sorted(ops_wait)[:OPS_WAIT_STALE_MAX_FETCHES]
+                    if n not in prefetch]
+        if fallback:
+            cache.update(cli_parallel.run_parallel(
+                fallback,
+                lambda n: airuleset._issue_comment_ages(
+                    n, self_login, None, cwd=root)))
 
     def _ages(n):
         if n not in cache:
@@ -3184,46 +3200,89 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
              if not handed.get(n_num) and n_num not in processed_numbers),
             reverse=True)
         walk = unhandled_candidates[:airuleset._HANDOFF_COMMENT_CHECK_LIMIT]
-        # #1009: FIRST detect the merged+released DONE state for the same
-        # candidate set (excluding a bounce — gk returned it for rework, the
-        # stream's own court, so hand-off states stay untouched). ONE batched
-        # `gh pr list` for the whole set (never per-candidate on this hot path).
-        # A released ticket is folded into `handed` as the distinct truthy state
-        # "released" so it leaves `I` in BOTH the footer and slice-quals (every
-        # consumer uses a truthy `handed` check) and counts in `gk`; the
-        # `continue` below also SAVES its timeline fetch.
-        try:
-            stream = airuleset._current_user()
-        except Exception:
-            stream = ""
-        released = _released_stream_numbers(
-            [n for n in walk if n not in bounce_numbers], root, slug, stream)
-        for n_num in walk:
-            if n_num in released:
-                handed[n_num] = "released"
-                continue
-            raw = airuleset._gh_out("api",
-                          "repos/%s/issues/%d/timeline?per_page=100" % (slug, n_num),
-                          cwd=root, timeout=20)
-            try:
-                events = json.loads(raw)
-            except (ValueError, TypeError):
-                events = []
-            if not isinstance(events, list):
-                continue   # e.g. a bare int -- never a real answer
-            verdict = False
-            saw_gatekeeper_comment = False
-            for ev in events:
-                sig, is_gk_comment = airuleset._timeline_handoff_signal(ev)
-                if is_gk_comment:
-                    saw_gatekeeper_comment = True
-                if sig is not None:
-                    verdict = sig
-            if verdict and (n_num not in bounce_numbers or
-                            saw_gatekeeper_comment):
-                handed[n_num] = True
+        # #1009 released detection + #589 timeline verdict, MUTATING `handed`.
+        # #1067 slice 1c (b): the per-issue timeline reads run through a bounded
+        # thread pool (extracted to `_handed_from_timelines`) instead of one
+        # sequential `gh api …/timeline` at a time.
+        _handed_from_timelines(walk, bounce_numbers, handed, root, slug)
 
     return rows, handed, failed
+
+
+def _timeline_verdict(n_num, root, slug):
+    """Fetch issue ``n_num``'s timeline and classify it as ``(verdict,
+    saw_gatekeeper_comment)``, or ``None`` when the response is not a usable
+    event list (parse error / non-list — never a real answer, so no upgrade).
+    A pure per-issue unit so ``_handed_from_timelines`` can run it in parallel
+    (#1067 slice 1c (b)); the verdict logic is byte-preserved from the old
+    inline walk (last-signal-wins over `_timeline_handoff_signal`)."""
+    import airuleset
+    raw = airuleset._gh_out(
+        "api", "repos/%s/issues/%d/timeline?per_page=100" % (slug, n_num),
+        cwd=root, timeout=20)
+    try:
+        events = json.loads(raw)
+    except (ValueError, TypeError):
+        events = []
+    if not isinstance(events, list):
+        return None   # e.g. a bare int -- never a real answer
+    verdict = False
+    saw_gatekeeper_comment = False
+    for ev in events:
+        sig, is_gk_comment = airuleset._timeline_handoff_signal(ev)
+        if is_gk_comment:
+            saw_gatekeeper_comment = True
+        if sig is not None:
+            verdict = sig
+    return (verdict, saw_gatekeeper_comment)
+
+
+def _handed_from_timelines(walk, bounce_numbers, handed, root, slug):
+    """#589/#1009 hand-off resolution for the ``walk`` candidate set, MUTATING
+    ``handed`` in place.
+
+    #1009: FIRST detect the merged+released DONE state for the candidate set
+    (excluding a bounce — gk returned it for rework, the stream's own court, so
+    hand-off states stay untouched) via ONE batched `gh pr list`, folding a
+    released ticket into `handed` as the distinct truthy state "released" (it
+    leaves `I` and counts in `gk`; it also SAVES its timeline fetch).
+
+    #589/#1067 slice 1c (b): each remaining candidate's timeline is then read for
+    a gk-resolution verdict through a bounded `run_parallel` (max_workers=6)
+    instead of one sequential `gh api …/timeline` at a time. The verdicts are
+    folded back in NUMBER order, so the result is identical to — and independent
+    of thread scheduling from — the old sequential walk (every fold only SETS
+    `handed`, never reads a prior value). A per-issue read that raises / parses
+    unusably is isolated by `run_parallel` (no upgrade for that number), the same
+    fail-safe direction as the old `continue`.
+
+    #391 CRITICAL-1: for a `bounce_numbers` row, an upgrade to handed additionally
+    requires a recognised gatekeeper COMMENT (`saw_gatekeeper_comment`) — byte-
+    preserved here."""
+    import airuleset
+    import cli_parallel
+    try:
+        stream = airuleset._current_user()
+    except Exception:
+        stream = ""
+    released = _released_stream_numbers(
+        [n for n in walk if n not in bounce_numbers], root, slug, stream)
+    to_walk = []
+    for n_num in walk:
+        if n_num in released:
+            handed[n_num] = "released"
+        else:
+            to_walk.append(n_num)
+    verdicts = cli_parallel.run_parallel(
+        to_walk, lambda n: _timeline_verdict(n, root, slug))
+    for n_num in sorted(to_walk):        # deterministic number-order fold
+        res = verdicts.get(n_num)
+        if res is None:
+            continue                     # unusable read -> no upgrade
+        verdict, saw_gatekeeper_comment = res
+        if verdict and (n_num not in bounce_numbers or
+                        saw_gatekeeper_comment):
+            handed[n_num] = True
 
 
 # ---------------------------------------------------------------------------

@@ -32,7 +32,6 @@ tickets hung in W long after their release landed (owner hard-fail escalation,
 """
 
 import os
-import subprocess
 import sys
 import unittest
 import unittest.mock as m
@@ -42,6 +41,7 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
+from watchdog import ops_wait_refresh  # noqa: E402
 import watchdog.ops_wait_recheck as owr
 
 from _goal_arm_helpers import (  # noqa: E402
@@ -70,12 +70,7 @@ def _mem(num, title, **kw):
 
 class FetchParsesTitle(unittest.TestCase):
     def _fetch(self, out):
-        cp = subprocess.CompletedProcess([], 0, stdout=out, stderr="")
-        with m.patch("subprocess.run", return_value=cp), \
-                m.patch.object(airuleset, "_repo_root", lambda cwd=None: "/r"), \
-                m.patch.object(airuleset, "resolve_authority",
-                               lambda cwd=None: "full"):
-            return airuleset._watchdog_ops_wait_fetch("/r")
+        return ops_wait_refresh.parse_members(out)
 
     def test_title_parsed_from_field_4(self):
         out = ("41\t2026-01-01T00:00:00Z\taction-only\tops-wait\t"

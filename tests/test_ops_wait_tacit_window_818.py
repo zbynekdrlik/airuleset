@@ -29,7 +29,6 @@ inline/quoted mentions, doubles as the #753 cited push). These tests lock:
 """
 import contextlib
 import io
-import subprocess
 import sys
 import unittest
 from datetime import datetime, timezone
@@ -39,6 +38,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
+from watchdog import ops_wait_refresh  # noqa: E402
 import cli_quals
 import cli_quals_cmd
 import working_time
@@ -333,12 +333,7 @@ class WatchdogFetchParsesTacitClose(unittest.TestCase):
         out = ("41\t2026-01-01T00:00:00Z\taction-only\tacceptance tacit-close?\ttitle\n"
                "43\t2026-01-01T00:00:00Z\taction-only\tacceptance tacit-wait\ttitle\n"
                "45\t2026-01-01T00:00:00Z\taction-only\tacceptance\ttitle\n")
-        cp = subprocess.CompletedProcess([], 0, stdout=out, stderr="")
-        with mock.patch("subprocess.run", return_value=cp), \
-                mock.patch.object(airuleset, "_repo_root", lambda cwd=None: "/r"), \
-                mock.patch.object(airuleset, "resolve_authority",
-                                  lambda cwd=None: "full"):
-            members = airuleset._watchdog_ops_wait_fetch("/r")
+        members = ops_wait_refresh.parse_members(out)
         by_num = {m["number"]: m for m in members}
         self.assertTrue(by_num[41]["tacit_close"])
         self.assertFalse(by_num[43]["tacit_close"])
