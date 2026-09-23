@@ -38,6 +38,20 @@ import cli_fleet
 _NODENAME_OVERRIDE = {"gatekeeper": "odoo-gatekeeper", "spinbike-vps": "spinbike",
                       "claudy@controller": "airuleset"}
 
+# #1115 slice G: the LOCAL controller account. The controller box (real nodename
+# `airuleset`, per _NODENAME_OVERRIDE above) runs `push` + the owner's supervisor
+# session as the unix account `airuleset` — the box's real hostname IS the local
+# account name. That account is NOT a REMOTE_HOSTS deploy target (push never ssh's
+# to itself), so `build_drop_lanes` never generates it from the fleet loop; it is
+# derived at the END of the build from the controller box's OWN fleet entry (the
+# claudy@controller service account is the only REMOTE_HOSTS row on the controller
+# box and carries the controller tailscale origin), with a DISTINCT hostname so it
+# never collides with claudy's drop-airuleset lane. The nodename literal comes
+# from the existing override (no NEW hand literal for the identity); the hostname
+# is a new lane fact.
+CONTROLLER_NODENAME = _NODENAME_OVERRIDE["claudy@controller"]
+CONTROLLER_LOCAL_DROP_HOST = "drop-controller.newlevel.media"
+
 # #1115: the FIXED per-account drop-port allocation for the GENERATED lanes
 # (the 14 fleet accounts with no seed lane). Keyed by the REAL (nodename,
 # username) — controller is keyed `airuleset` per _NODENAME_OVERRIDE. Packed
@@ -59,6 +73,9 @@ _GENERATED_DROP_PORTS = {
     ("subdev", "montalu6"): 8888,
     ("subdev", "montalu7"): 8889,
     ("subdev", "montalu8"): 8890,
+    # #1115 slice G: the LOCAL controller account (not a REMOTE_HOSTS target, so
+    # never reached by the fleet loop — read by _add_controller_local_lane).
+    ("airuleset", "airuleset"): 8891,
 }
 
 
@@ -145,6 +162,14 @@ def build_drop_lanes(remote_hosts, *, seed, drop_lane_cls,
     lanes = dict(seed)
     used_ports = {lane.port for lane in lanes.values()}
 
+    # #1115 slice G: RESERVE the LOCAL controller account's fixed port BEFORE the
+    # fleet loop so `_next_free_port` can never hand it to a future no-fixed-port
+    # account and silently displace the controller-local lane (which is injected
+    # AFTER the loop by `_add_controller_local_lane`). Review finding (port-steal).
+    _ctrl_port = _GENERATED_DROP_PORTS.get((CONTROLLER_NODENAME, CONTROLLER_NODENAME))
+    if _ctrl_port is not None:
+        used_ports.add(_ctrl_port)
+
     # Deterministic order: sort the not-yet-covered accounts by their key so the
     # next-free-port fallback is stable regardless of REMOTE_HOSTS ordering.
     pending = []
@@ -210,7 +235,77 @@ def build_drop_lanes(remote_hosts, *, seed, drop_lane_cls,
                 gateway_account=None,
                 topology="local", origin_host=None,
                 filedrop_port=None)
+
+    # #1115 slice G: the LOCAL controller account is not a REMOTE_HOSTS target, so
+    # the fleet loop above never generated it — derive it here from the controller
+    # box's own fleet entry. NON-FATAL like the loop (logs + skips, never raises).
+    _add_controller_local_lane(lanes, remote_hosts, used_ports, drop_lane_cls,
+                               controller_tunnel_uuid)
     return lanes
+
+
+def _controller_origin_ip(remote_hosts):
+    """The controller box's tailscale origin IP for the LOCAL-account lane (#1115
+    slice G), derived from the controller's OWN fleet entry — the claudy@controller
+    service account is the only REMOTE_HOSTS row on the controller box, so its
+    `host` is the controller tailscale IP. No separate hand literal. Returns None
+    when no such (non-paused, tailscale) entry exists."""
+    for entry in remote_hosts:
+        if cli_fleet.is_paused(entry):
+            continue
+        if _nodename_for_entry(entry) == CONTROLLER_NODENAME \
+                and _is_tailscale_host(entry.get("host")):
+            return entry["host"]
+    return None
+
+
+def _add_controller_local_lane(lanes, remote_hosts, used_ports, drop_lane_cls,
+                               controller_tunnel_uuid):
+    """Inject the LOCAL controller account's drop lane (#1115 slice G).
+
+    Keyed ``(CONTROLLER_NODENAME, CONTROLLER_NODENAME)`` (the box's real hostname
+    IS the local account name), a DISTINCT hostname ``CONTROLLER_LOCAL_DROP_HOST``
+    (never claudy's ``drop-airuleset``), controller topology riding the ONE
+    controller tunnel, origin = the controller's own tailscale IP, access-gated
+    (its owner-only spec is derived by ``generated_access_specs`` like every other
+    generated access lane). ``filedrop_port=None`` — the push-measured value
+    arrives via the ~/.claude/drop-lanes.json cache (harvested locally, see
+    ``harvest_local_controller_filedrop_port``). NON-FATAL: a missing controller
+    entry / missing port / port collision LOGS loudly and skips (the same
+    never-raise contract as ``build_drop_lanes`` — this runs at import)."""
+    key = (CONTROLLER_NODENAME, CONTROLLER_NODENAME)
+    if key in lanes:
+        return  # a seed already covers it (never today) — never overwrite
+    origin = _controller_origin_ip(remote_hosts)
+    port = _GENERATED_DROP_PORTS.get(key)
+    if origin is None:
+        print("#1115 slice G WARNING: no controller fleet entry with a tailscale "
+              "origin — the LOCAL controller account gets NO drop lane.",
+              file=sys.stderr)
+        return
+    if port is None:
+        print("#1115 slice G WARNING: no _GENERATED_DROP_PORTS entry for the LOCAL "
+              "controller account — NO drop lane.", file=sys.stderr)
+        return
+    # A REAL collision = some OTHER lane already holds this port. `used_ports`
+    # now RESERVES this port for us (build_drop_lanes seeds it before the loop),
+    # so we check the actual lane ports, never the reservation set (else we would
+    # falsely skip our own reserved port). With the reservation in place a seed is
+    # the only way this could ever be non-empty.
+    if any(ln.port == port for ln in lanes.values()):
+        print("#1115 slice G WARNING: controller-local drop port %d already held "
+              "by another lane — NO drop lane (fix _GENERATED_DROP_PORTS)." % port,
+              file=sys.stderr)
+        return
+    used_ports.add(port)
+    lanes[key] = drop_lane_cls(
+        host=CONTROLLER_LOCAL_DROP_HOST, port=port,
+        tunnel_uuid=controller_tunnel_uuid,
+        tunnel_config=None, tunnel_service=None,
+        tunnel_system_unit=False, access=True,
+        gateway_account=None,
+        topology="controller", origin_host=origin,
+        filedrop_port=None)
 
 
 def generated_access_specs(lanes, existing_specs, owner_emails,
@@ -335,6 +430,48 @@ def persist_measured_filedrop_ports(measured, drop_lanes):
     except Exception as e:  # noqa: BLE001 — best-effort; never fail the push
         print("  ⚠ drop-lanes cache write failed (non-fatal): %r" % e,
               file=sys.stderr)
+
+
+def harvest_local_controller_filedrop_port(measure_fn=None, drop_lanes=None):
+    """Measure the LOCAL controller account's persistent filedrop port and merge
+    it into the SAME push-measured cache slice A uses (#1115 slice G).
+
+    The controller-local account is not a deploy target, so the push ssh leg
+    (``filedrop_port_probe_snippet``) never harvests its port — it is measured
+    directly on the controller (no ssh) and cached keyed
+    ``drop_lanes_cache_key(CONTROLLER_NODENAME, CONTROLLER_NODENAME)`` so
+    ``drop_ingress_rules_for_controller`` renders the ``/s/`` rule for
+    ``drop-controller.newlevel.media`` at the account's real filedrop port.
+
+    ``measure_fn`` is injectable for tests; the default reads
+    ``filedrop.persisted_port()`` (a function-local import — ``filedrop`` imports
+    neither cli_drop nor cli_fleet, so no cycle) falling back to the #493
+    uid-derived default. ``drop_lanes`` is injected (default
+    ``cli_drop_gateway.DROP_LANES``) so this stays a leaf and the prune keeps the
+    controller-local key. Best-effort: no controller-local lane / a falsy port /
+    any error is a no-op, never raises. Returns the port cached, or None."""
+    if drop_lanes is None:
+        import cli_drop_gateway as dg  # function-local: cycle-safe leaf pattern
+        drop_lanes = dg.DROP_LANES
+    key = (CONTROLLER_NODENAME, CONTROLLER_NODENAME)
+    if key not in drop_lanes:
+        return None
+    try:
+        if measure_fn is None:
+            import filedrop
+            port = filedrop.persisted_port() or filedrop.default_port_for_uid()
+        else:
+            port = measure_fn()
+        if not port:
+            return None
+        port = int(port)
+        persist_measured_filedrop_ports(
+            {drop_lanes_cache_key(*key): port}, drop_lanes)
+        return port
+    except Exception as e:  # noqa: BLE001 — best-effort; never fail the install
+        print("#1115 slice G WARNING: local controller filedrop-port harvest "
+              "failed (non-fatal): %r" % e, file=sys.stderr)
+        return None
 
 
 # #1115: the marker line a target prints so `push` can harvest its persisted

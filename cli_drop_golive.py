@@ -398,7 +398,50 @@ def reconcile_and_report(dry_run=False, out=None):
         print("  drop-lanes: one or more lanes FAILED go-live (see the lines "
               "above) — install continues, those lanes stay private-only",
               file=out)
+    # #1115 slice G: the LOCAL controller account is not a deploy target, so the
+    # ssh marker leg (marker_snippet_for_entry) never reaches it. Write its
+    # go-live marker HERE, on the controller, ONLY when its lane is LIVE — the
+    # same fail-closed rule as the ssh leg. A dry-run's `live` is empty, so this
+    # is a no-op then. Never fails the install.
+    if not dry_run:
+        _write_local_controller_marker(live, out=out)
     return all_ok
+
+
+def _write_local_controller_marker(live, drop_lanes=None, write_marker=None,
+                                   out=None):
+    """Write the LOCAL controller account's go-live marker when its lane is LIVE
+    (#1115 slice G) — the local sibling of ``marker_snippet_for_entry``'s ssh leg.
+
+    ``live`` is the ``{host: port}`` set ``reconcile_drop_lanes`` returned. The
+    marker is written ONLY when the controller-local lane's host is in ``live``
+    (fail-closed: a lane that did not go live never gets a marker), at the LANE's
+    registry port (the value reconcile put in ``live``). Reuses
+    ``cli_drop_gateway.write_drop_marker`` (O_NOFOLLOW + 0600) verbatim.
+    ``drop_lanes`` / ``write_marker`` are injectable for tests. Best-effort: any
+    write error is a LOUD non-fatal line, never a raise."""
+    out = out if out is not None else sys.stdout
+    if drop_lanes is None:
+        import cli_drop_gateway as dg
+        drop_lanes = dg.DROP_LANES
+    import cli_drop_lanes
+    key = (cli_drop_lanes.CONTROLLER_NODENAME, cli_drop_lanes.CONTROLLER_NODENAME)
+    lane = drop_lanes.get(key)
+    if lane is None:
+        return
+    port = (live or {}).get(lane.host)
+    if port is None:
+        return  # not live — fail-closed, no marker
+    if write_marker is None:
+        import cli_drop_gateway as dg
+        write_marker = dg.write_drop_marker
+    try:
+        write_marker(lane.host, int(port))
+        print("  drop-lanes: wrote LOCAL controller go-live marker for %s"
+              % lane.host, file=out)
+    except Exception as e:  # noqa: BLE001 — best-effort; never fail the install
+        print("  ⚠ drop-lanes: LOCAL controller marker write failed "
+              "(non-fatal): %r" % e, file=out)
 
 
 # --------------------------------------------------------------------------- #
