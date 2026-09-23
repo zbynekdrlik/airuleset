@@ -401,6 +401,26 @@ class SnapshotJsonParity(unittest.TestCase):
         self.assertNotEqual(cm.exception.code, 0)
         self.assertEqual(out.getvalue(), "")
 
+    def test_unparseable_ops_wait_listing_refuses_a_partial_snapshot(self):
+        import cli_quals_snapshot as qs
+        out = io.StringIO()
+        with mk.patch.object(cli_quals_cmd, "_emit_ops_wait",
+                             lambda *a: print("garbage-row")), \
+                contextlib.redirect_stdout(out), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as cm:
+                qs.emit_snapshot_json({}, {}, "/r", ["q"], None)
+        self.assertNotEqual(cm.exception.code, 0)
+        self.assertEqual(out.getvalue(), "")
+
+    def test_parse_snapshot_rejects_a_reasonless_unmeasurable_count(self):
+        base = {"open_count": 1, "i_members": [1], "ops_wait_members": [],
+                "dispatchable_count": None, "dispatchable_reason": None}
+        self.assertIsNone(owref.parse_snapshot(json.dumps(base)))
+        base["dispatchable_reason"] = "meta read failed"
+        self.assertEqual(owref.parse_snapshot(json.dumps(base)), base)
+        self.assertIsNone(owref.parse_snapshot("not json"))
+
     def test_cli_parser_accepts_snapshot_json(self):
         # the shared core-quals/slice-quals flag helper carries the new mode
         import argparse

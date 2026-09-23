@@ -949,7 +949,8 @@ def cmd_slice_quals(args):
         waiting = _apply_role_filter(waiting, root, role, slug=slug)  # #1065
     if want_snapshot:
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition.
-        _emit_snapshot_json(unhandled, ops_wait, root, quals, own_stream=user)
+        import cli_quals_snapshot
+        cli_quals_snapshot.emit_snapshot_json(unhandled, ops_wait, root, quals, user)
         return
     if want_ops_wait:
         # the W listing, tagged per member (`_emit_ops_wait` documents each tag)
@@ -1230,9 +1231,7 @@ def _emit_count_dispatchable(rows, root):
     unchanged, only the explanation is added (#1021; #993 review 5)."""
     count, reason = _dispatchable_fields(rows, root)
     if count is None:
-        # #1021: the colon-form carries the reason so the inert nudge says WHY
-        # in the journal, not only `unmeasurable`.
-        print("unmeasurable:" + reason)
+        print("unmeasurable:" + reason)   # #1021: the reason says WHY
         return
     print(count)
     if reason:
@@ -1240,12 +1239,10 @@ def _emit_count_dispatchable(rows, root):
 
 
 def _dispatchable_fields(rows, root):
-    """`(count, reason)` — the ONE dispatchable derivation shared by
-    `--count-dispatchable` and `--snapshot-json` (#1067 slice 1d), so the two
-    outputs cannot drift. `count` None = UNMEASURABLE: the ONLY reason
-    `_dep_wait_map_for` reports `ok=False` is a failed dependency-meta read, so
-    `reason` is then `meta read failed`. Otherwise `reason` is set only for a 0
-    count over a non-empty workable set (`dep-wait`)."""
+    """`(count, reason)` — the ONE dispatchable derivation `--count-dispatchable`
+    and `--snapshot-json` share (#1067 1d). count None = UNMEASURABLE (a failed
+    dependency-meta read, the ONLY `ok=False` cause → `meta read failed`); else
+    `reason` is set only for a 0 count over a non-empty set (`dep-wait`)."""
     import airuleset
     dep_map, slug, ok = _dep_wait_map_for(rows, root)
     if not ok:
@@ -1262,18 +1259,14 @@ def _emit_ops_wait(ops_wait, root, quals, own_stream):
     `--snapshot-json` (which parses this very output), so the snapshot's
     ops-wait members cannot drift from the listing (#1067 slice 1d).
 
-    Tags: `acceptance` (client thread sent) vs `ops-wait` (external event,
-    #526); `stale!` no fresh (≤24h) stream-push evidence (#570, one per-member
-    `gh issue view`, never on the hot footer refresh); `gk-handoff!` ALSO
-    carrying needs-gatekeeper/ready-for-review — the post-release-limbo
-    contradiction (#636, pure label check; drop the stale ops-wait so it enters
-    gk N / the gk box's I); `recheck!` a RELEASE-parked member with no fresh
-    (≤1h working) OWN re-check (#699, the SAME comment-age fetch as stale!);
-    `unpark?` a release-parked member whose release PROVABLY landed (#753, ONE
-    per-repo origin read, only when a release-shaped member exists);
-    `tacit-wait`/`tacit-close?` a delivered+reminded acceptance member
-    inside/past its #799 N=3 window (#818, subtracted from stale!/recheck! by
-    `_ops_wait_flag_sets` — no second-reminder nudge)."""
+    Tags: `acceptance` (client thread sent) vs `ops-wait` (#526); `stale!` no
+    fresh (≤24h) stream-push evidence (#570, per-member `gh issue view`, never
+    on the hot footer); `gk-handoff!` ALSO needs-gatekeeper/ready-for-review,
+    the post-release limbo (#636, label-only; drop the stale ops-wait);
+    `recheck!` release-parked, no fresh (≤1h) OWN re-check (#699); `unpark?`
+    its release PROVABLY landed (#753, ONE origin read); `tacit-wait`/
+    `tacit-close?` a reminded acceptance inside/past its #799 N=3 window
+    (#818, subtracted from stale!/recheck! by `_ops_wait_flag_sets`)."""
     import airuleset
     _stale, _recheck, _gkh, _unpark, _tw, _tc, _conv, _nt, _dt = (
         _ops_wait_flag_sets(ops_wait, root, member_quals=quals))
@@ -1293,71 +1286,6 @@ def _emit_ops_wait(ops_wait, root, quals, own_stream):
                                       no_target_numbers=_nt)
     if _summary:
         print(_summary)
-
-
-def parse_ops_wait_members(stdout):
-    """Parse `--ops-wait` TSV stdout into the member-dict list the job-20 nudge
-    consumes. Returns ``None`` on a malformed member line (undetermined — never
-    a partial set), ``[]`` on a clean empty result. Moved VERBATIM from
-    `watchdog.ops_wait_refresh.parse_members` (#1067 slice 1d): the PRODUCER
-    (`--snapshot-json`) now parses its own listing, and this module stays light
-    (the leaf keeps a delegating `parse_members`)."""
-    members = []
-    for line in (stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # #754: `--ops-wait` appends a `#`-prefixed aggregate W-summary line —
-        # skip it here so it never trips the malformed→None guard below.
-        if line.startswith("#"):
-            continue
-        parts = line.split("\t")
-        try:
-            num = int(parts[0])
-        except (ValueError, IndexError):
-            return None   # a malformed line -> undetermined, never a partial set
-        # field 3 is the reason column (>=5 fields = the full form); field 4+ the
-        # (tab-joined) title. Anything shorter -> no flags, empty title.
-        reason = parts[3] if len(parts) >= 5 else ""
-        title = "\t".join(parts[4:]) if len(parts) >= 5 else ""
-        members.append({"number": num, "stale": "stale!" in reason,
-                        "gk_handoff": "gk-handoff!" in reason,
-                        "release_recheck": "recheck!" in reason,
-                        "acceptance": "acceptance" in reason,
-                        "tacit_close": "tacit-close?" in reason,
-                        "converge": "converge!" in reason,
-                        "no_target": "no-target!" in reason,
-                        "deploy_target": "deploy-target!" in reason,
-                        "title": title})
-    return members
-
-
-def _emit_snapshot_json(rows, ops_wait, root, quals, own_stream):
-    """`--snapshot-json` (#1067 slice 1d): ONE JSON object carrying every quals
-    fact the watchdog reads — `open_count`/`i_members` (the `--count` set),
-    `dispatchable_count`/`dispatchable_reason` (`_dispatchable_fields`, the
-    `--count-dispatchable` derivation) and `ops_wait_members` (the `--ops-wait`
-    listing, captured and parsed) — all from the caller's ONE
-    `_partition_workable` pass (#367). The detached refresher
-    (`watchdog.ops_wait_refresh`) runs this ONE command instead of separate
-    derivations. Unparseable ops-wait rows EXIT non-zero rather than print a
-    partial snapshot (the refresher then keeps the prior good one)."""
-    import contextlib
-    import io
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        _emit_ops_wait(ops_wait, root, quals, own_stream)
-    members = parse_ops_wait_members(buf.getvalue())
-    if members is None:
-        print("quals --snapshot-json: the ops-wait listing did not parse — "
-              "refusing a partial snapshot", file=sys.stderr)
-        sys.exit(1)
-    count, reason = _dispatchable_fields(rows, root)
-    print(json.dumps({"open_count": len(rows),
-                      "i_members": sorted(int(n) for n in rows),
-                      "dispatchable_count": count,
-                      "dispatchable_reason": reason,
-                      "ops_wait_members": members}))
 
 
 def _emit_list_dispatchable(rows, root):
@@ -1605,7 +1533,8 @@ def cmd_core_quals(args):
     if want_snapshot:
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition
         # (own_stream=None: a full-authority box owns no stream).
-        _emit_snapshot_json(workable, ops_wait, root, quals, own_stream=None)
+        import cli_quals_snapshot
+        cli_quals_snapshot.emit_snapshot_json(workable, ops_wait, root, quals, None)
         return
     if want_ops_wait:
         # own_stream=None: a full-authority box owns no stream, so EVERY

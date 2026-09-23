@@ -117,10 +117,10 @@ def _write_atomic(path, obj):
 def parse_members(stdout):
     """Parse `--ops-wait` TSV stdout into the job-20 member-dict list (None on a
     malformed member line, [] on a clean empty result). The body lives with its
-    producer, `cli_quals_cmd.parse_ops_wait_members` (#1067 slice 1d), where
+    producer, `cli_quals_snapshot.parse_ops_wait_members` (#1067 slice 1d), where
     `--snapshot-json` parses its own listing. This delegator keeps the ONE
     parser reachable under its historical name."""
-    from cli_quals_cmd import parse_ops_wait_members
+    from cli_quals_snapshot import parse_ops_wait_members
     return parse_ops_wait_members(stdout)
 
 

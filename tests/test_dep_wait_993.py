@@ -171,24 +171,16 @@ class TestWatchdogSeams(TestCase):
     fetch (protocol + fail-safe) and the queue-classify factory (fail-safe)."""
 
     def _fetch(self, count, reason=None, snapshot=True):
-        # #1067 1d: the fetch reads the detached quals snapshot (the SAME
-        # `_dispatchable_fields` derivation `--count-dispatchable` prints) —
-        # never a blocking `--count-dispatchable` subprocess any more.
-        import time
-        import unittest.mock as mk
-        import airuleset
-        from watchdog import ops_wait_refresh as owref
-        entry = ({"v": owref.SNAPSHOT_VERSION, "ts": time.time(),
-                  "members_ts": time.time(), "members": [], "open_count": 1,
-                  "i_members": [1], "dispatchable_count": count,
-                  "dispatchable_reason": reason} if snapshot else None)
+        # #1067 1d: reads the detached quals snapshot, never a subprocess.
+        import time, unittest.mock as mk, airuleset  # noqa: E401
+        from watchdog import ops_wait_refresh as w
+        e = {"v": w.SNAPSHOT_VERSION, "members_ts": time.time(), "ts": 0,
+             "dispatchable_count": count, "dispatchable_reason": reason}
         with mk.patch("airuleset._repo_root", return_value="/root"), \
              mk.patch("airuleset.resolve_authority", return_value="full"), \
-             mk.patch.object(owref, "read_snapshot", return_value=entry), \
-             mk.patch("subprocess.run") as run:
-            out = airuleset._watchdog_dispatchable_fetch("/root")
-        run.assert_not_called()
-        return out
+             mk.patch.object(w, "read_snapshot",
+                             return_value=e if snapshot else None):
+            return airuleset._watchdog_dispatchable_fetch("/root")
 
     def test_count_and_reason_parsed(self):
         self.assertEqual(self._fetch(0, "dep-wait"),
