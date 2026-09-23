@@ -15,7 +15,6 @@ RED (fails before the fix):
 import ast
 import json
 import os
-import subprocess
 import sys
 import time
 import unittest
@@ -31,10 +30,7 @@ sys.path.insert(0, str(REPO / "tests"))
 import watchdog as wd                       # noqa: E402
 import _exec_marker_helpers as em           # noqa: E402
 
-from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
-BLOCK_HOOK = REPO / "hooks" / "block-main-implementation.sh"
-CONSUME_HOOK = REPO / "hooks" / "post-consume-main-exec-marker.sh"
 BIG = "x" * 40000     # over the edit threshold — a goal-armed main would block
 
 
@@ -107,76 +103,8 @@ class SweeperHonoursStateDir1012(unittest.TestCase):
             self.assertTrue([ln for ln in logs if sid in ln], logs)
 
 
-class BlockHookHonoursStateDir1012(unittest.TestCase):
-    def _drive(self, sid, command, state_dir, transcript_text):
-        with TemporaryDirectory() as d:
-            tp = str(Path(d) / "sess.jsonl")
-            Path(tp).write_text(transcript_text)
-            payload = {"session_id": sid, "hook_event_name": "PreToolUse",
-                       "tool_name": "Bash", "tool_input": {"command": command},
-                       "transcript_path": tp}
-            env = hermetic_hook_env(self)
-            env["AIRULESET_MAIN_EXEC_STATE_DIR"] = state_dir
-            return subprocess.run(["bash", str(BLOCK_HOOK)],
-                                  input=json.dumps(payload), env=env,
-                                  capture_output=True, text=True)
-
-    def test_marker_under_state_dir_is_honoured(self):
-        # RED: the hook reads /tmp, so a marker under the seam dir is invisible
-        # and the bulk command is blocked (exit 2) despite a valid one-shot.
-        with TemporaryDirectory() as sd:
-            sid = "t-1012-hook-" + uuid.uuid4().hex[:8]
-            with mock.patch.dict(os.environ,
-                                 {"AIRULESET_MAIN_EXEC_STATE_DIR": sd}):
-                em.marker_ok(sid).write_text(
-                    "reason: this one bulk read must run here")
-                out = self._drive(sid, "grep -rn 'TODO' .", sd,
-                                  _goal_armed_transcript())
-            self.assertEqual(
-                out.returncode, 0,
-                "a marker under AIRULESET_MAIN_EXEC_STATE_DIR must be honoured; "
-                "stderr=%s" % out.stderr)
-            # and the deferred-consume pending flag must land under the seam dir
-            self.assertTrue(em_pending_exists(sid, sd),
-                            "the pending flag must be written under the seam dir")
-
-    def test_block_message_prints_the_effective_marker_path(self):
-        # RED: with no marker the hook blocks and the arming instruction must
-        # name the EFFECTIVE seam dir, not the literal /tmp.
-        with TemporaryDirectory() as sd:
-            sid = "t-1012-msg-" + uuid.uuid4().hex[:8]
-            out = self._drive(sid, "grep -rn 'TODO' .", sd,
-                              _goal_armed_transcript())
-            self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
-            self.assertIn(sd, out.stderr,
-                          "the block message must print the effective state dir")
-
-
 def em_pending_exists(sid, state_dir):
     return (Path(state_dir) / ("airuleset-main-exec-pending-%s" % sid)).exists()
-
-
-class ConsumeHookHonoursStateDir1012(unittest.TestCase):
-    def test_consumer_deletes_from_state_dir(self):
-        # RED: the consumer reads /tmp, so marker+pending under the seam dir
-        # survive an executed call.
-        with TemporaryDirectory() as sd:
-            sid = "t-1012-consume-" + uuid.uuid4().hex[:8]
-            marker = Path(sd) / ("airuleset-main-exec-ok-%s" % sid)
-            pending = Path(sd) / ("airuleset-main-exec-pending-%s" % sid)
-            marker.write_text("r")
-            pending.write_text("reason\n")
-            payload = {"session_id": sid, "hook_event_name": "PostToolUse",
-                       "tool_name": "Bash", "tool_input": {"command": "x"}}
-            env = hermetic_hook_env(self)
-            env["AIRULESET_MAIN_EXEC_STATE_DIR"] = sd
-            subprocess.run(["bash", str(CONSUME_HOOK)],
-                           input=json.dumps(payload), env=env,
-                           capture_output=True, text=True)
-            self.assertFalse(marker.exists(),
-                             "the consumer must delete the marker from the seam dir")
-            self.assertFalse(pending.exists(),
-                             "the consumer must delete the pending from the seam dir")
 
 
 class HarnessSeamLock1012(unittest.TestCase):

@@ -22,7 +22,14 @@ import airuleset
 from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 REPO = Path(airuleset.__file__).resolve().parent
-HOOK_BMI = REPO / "hooks" / "block-main-implementation.sh"
+LIB_LOG = REPO / "hooks" / "lib_hook_block_log.sh"
+
+
+def _log_via_lib(hook, snippet, env):
+    """Source the shared block-log lib and log one block (#988(g))."""
+    subprocess.run(["bash", "-c", 'source "$1"; log_hook_block "$2" "$3"',
+                    "_", str(LIB_LOG), hook, snippet],
+                   env=env, capture_output=True, text=True, check=True)
 HOOK_CPR = REPO / "hooks" / "block-ci-poll-repeat.sh"
 HOOK_UGI = REPO / "hooks" / "block-ungated-issue-filing.sh"
 
@@ -40,141 +47,6 @@ def goal_armed_transcript(model="claude-opus-4-8"):
 #    by the per-dispatch counter (#80)
 # ---------------------------------------------------------------------------
 
-class CoordinationExemptFromCounter988(unittest.TestCase):
-    """#988 items 1+2+4: the per-dispatch counter blocks ALL Bash calls
-    regardless of classification. Pure coordination commands (read-only gh/git,
-    narrow single-file reads, git worktree ops) must be EXEMPT from the
-    counter, even when the count exceeds the cap."""
-
-    def _run(self, sid, command, n=3, armed=True):
-        env = dict(os.environ)
-        env["AIRULESET_MAIN_BASH_PER_DISPATCH"] = str(n)
-        with TemporaryDirectory() as d:
-            tp = str(Path(d) / "sess.jsonl")
-            Path(tp).write_text(goal_armed_transcript())
-            # Pre-seed counter to OVER the cap
-            run_file = Path("/tmp/airuleset-main-bash-run-%s" % sid)
-            run_file.write_text(str(n + 1))
-            self.addCleanup(lambda: run_file.unlink(missing_ok=True))
-            # Presence marker
-            presence = Path("/tmp/airuleset-presence-%s" % sid)
-            presence.touch()
-            self.addCleanup(lambda: presence.unlink(missing_ok=True))
-            payload = {
-                "session_id": sid,
-                "hook_event_name": "PreToolUse",
-                "tool_name": "Bash",
-                "tool_input": {"command": command},
-                "transcript_path": tp,
-            }
-            return subprocess.run(
-                ["bash", str(HOOK_BMI)],
-                input=json.dumps(payload), env=env,
-                capture_output=True, text=True,
-            )
-
-    def _sid(self, tag):
-        sid = "t988-coord-%s-%s" % (tag, os.getpid())
-        self.addCleanup(lambda: Path(
-            "/tmp/airuleset-main-bash-run-%s" % sid).unlink(missing_ok=True))
-        return sid
-
-    # --- Ticket item 1: gh pr view at counter cap ---
-    def test_gh_pr_view_passes_at_counter_cap(self):
-        """gh pr view --json mergeable must never be blocked by the counter."""
-        sid = self._sid("a1")
-        out = self._run(sid, "gh pr view 42 --json mergeable,mergeableState")
-        self.assertEqual(out.returncode, 0, out.stderr)
-
-    def test_gh_issue_view_passes_at_counter_cap(self):
-        sid = self._sid("a2")
-        out = self._run(sid, "gh issue view 42")
-        self.assertEqual(out.returncode, 0, out.stderr)
-
-    def test_gh_run_view_passes_at_counter_cap(self):
-        sid = self._sid("a3")
-        out = self._run(sid, "gh run view 1234567890")
-        self.assertEqual(out.returncode, 0, out.stderr)
-
-    def test_git_status_passes_at_counter_cap(self):
-        sid = self._sid("a4")
-        out = self._run(sid, "git status")
-        self.assertEqual(out.returncode, 0, out.stderr)
-
-    def test_git_log_oneline_passes_at_counter_cap(self):
-        sid = self._sid("a5")
-        out = self._run(sid, "git log --oneline -5")
-        self.assertEqual(out.returncode, 0, out.stderr)
-
-    # --- Ticket item 2a: sed -i on work-products ---
-    def test_sed_i_on_work_products_passes_at_counter_cap(self):
-        """sed -i on ~/.claude/work-products/ is coordination, not bulk."""
-        sid = self._sid("b2a")
-        out = self._run(sid, "sed -i 's/old/new/g' ~/.claude/work-products/draft.md")
-        self.assertEqual(out.returncode, 0, out.stderr)
-
-    # --- Ticket item 2b: grep -n on one file ---
-    def test_grep_n_single_file_passes_at_counter_cap(self):
-        """grep -n on one file is a narrow read, not bulk."""
-        sid = self._sid("b2b")
-        out = self._run(sid, "grep -n deploy .github/workflows/ci.yml")
-        self.assertEqual(out.returncode, 0, out.stderr)
-
-    # --- Ticket item 2c: git worktree ---
-    def test_git_worktree_remove_passes_at_counter_cap(self):
-        """git worktree ops are coordination."""
-        sid = self._sid("b2c")
-        out = self._run(sid, "git worktree remove .claude/worktrees/agent-dead123")
-        self.assertEqual(out.returncode, 0, out.stderr)
-
-    def test_git_worktree_list_passes_at_counter_cap(self):
-        sid = self._sid("b2c2")
-        out = self._run(sid, "git worktree list")
-        self.assertEqual(out.returncode, 0, out.stderr)
-
-    # --- Ticket item 4: gh run rerun ---
-    def test_gh_run_rerun_passes_at_counter_cap(self):
-        """gh run rerun is coordination."""
-        sid = self._sid("b4")
-        out = self._run(sid, 'R=1234567890; gh run rerun "$R"')
-        self.assertEqual(out.returncode, 0, out.stderr)
-
-    def test_gh_run_rerun_literal_passes(self):
-        sid = self._sid("b4b")
-        out = self._run(sid, "gh run rerun 1234567890")
-        self.assertEqual(out.returncode, 0, out.stderr)
-
-    # --- NEGATIVE: bulk commands must STILL be blocked ---
-    def test_grep_recursive_still_blocked_at_any_count(self):
-        """Bulk grep -rn stays blocked by classifier, not just counter."""
-        sid = self._sid("neg1")
-        out = self._run(sid, "grep -rn 'TODO' .")
-        self.assertEqual(out.returncode, 2, out.stderr)
-
-    def test_ambiguous_commands_still_counted(self):
-        """An ambiguous command (not in allowed or blocked) still counts
-        toward the per-dispatch counter."""
-        sid = self._sid("neg2")
-        out = self._run(sid, "some-unknown-command --flag arg")
-        self.assertEqual(out.returncode, 2, out.stderr)
-        self.assertIn("DISPATCH", out.stderr)
-
-    def test_pipe_with_bulk_tail_still_counted(self):
-        """A piped command (gh pr view | grep -rn) is NOT pure coordination
-        — the pipe tail can be a bulk read (review finding MEDIUM)."""
-        sid = self._sid("neg3")
-        out = self._run(sid, "gh pr view 1 --json body | grep -rn TODO .")
-        self.assertEqual(out.returncode, 2, out.stderr)
-
-    def test_sed_i_on_traversed_work_products_path_still_counted(self):
-        """sed -i on a path that traverses OUT of work-products via ..
-        must still be counted (review finding MEDIUM — security)."""
-        sid = self._sid("neg4")
-        out = self._run(
-            sid,
-            "sed -i 's/x/y/' ~/.claude/work-products/../../devel/x.py",
-        )
-        self.assertEqual(out.returncode, 2, out.stderr)
 
 
 # ---------------------------------------------------------------------------
@@ -283,47 +155,6 @@ class HeredocBodyFile988(unittest.TestCase):
 # G. Measurement: hook blocks logged to ~/.claude/hook-blocks.log
 # ---------------------------------------------------------------------------
 
-class HookBlockLogging988(unittest.TestCase):
-    """#988 item g: every BLOCKED decision appends to ~/.claude/hook-blocks.log."""
-
-    def test_blocked_command_logged_to_hook_blocks(self):
-        """A blocked command should append a line to hook-blocks.log."""
-        with TemporaryDirectory() as d:
-            log_file = Path(d) / "hook-blocks.log"
-            env = dict(os.environ)
-            env["AIRULESET_HOOK_BLOCK_LOG"] = str(log_file)
-            env["AIRULESET_MAIN_BASH_PER_DISPATCH"] = "3"
-            sid = "t988-log-%d" % os.getpid()
-            tp_dir = Path(d) / "transcript"
-            tp_dir.mkdir()
-            tp = tp_dir / "sess.jsonl"
-            tp.write_text(goal_armed_transcript())
-            # Presence marker
-            presence = Path("/tmp/airuleset-presence-%s" % sid)
-            presence.touch()
-            run_file = Path("/tmp/airuleset-main-bash-run-%s" % sid)
-            run_file.write_text("4")  # over cap
-            try:
-                payload = {
-                    "session_id": sid,
-                    "hook_event_name": "PreToolUse",
-                    "tool_name": "Bash",
-                    "tool_input": {"command": "some-unknown-cmd arg"},
-                    "transcript_path": str(tp),
-                }
-                subprocess.run(
-                    ["bash", str(HOOK_BMI)],
-                    input=json.dumps(payload), env=env,
-                    capture_output=True, text=True,
-                )
-                self.assertTrue(log_file.exists(),
-                                "hook-blocks.log should be created on block")
-                content = log_file.read_text()
-                self.assertIn("block-main-implementation", content)
-                self.assertIn("some-unknown-cmd", content)
-            finally:
-                presence.unlink(missing_ok=True)
-                run_file.unlink(missing_ok=True)
 
 
 # G2. Measurement: ci-poll-repeat and ungated-issue-filing also log
@@ -437,171 +268,47 @@ class HookBlockLogUGI988g(unittest.TestCase):
                              "hook-blocks.log should NOT be created on pass")
 
 
-class HookBlockLogBMI988g(unittest.TestCase):
-    """#988(g): block-main-implementation no-log-on-pass."""
-
-    def test_pass_no_log(self):
-        """A passing command (subagent) should NOT log."""
-        with TemporaryDirectory() as d:
-            log_file = Path(d) / "hook-blocks.log"
-            env = dict(os.environ)
-            env["AIRULESET_HOOK_BLOCK_LOG"] = str(log_file)
-            payload = {
-                "session_id": "t988g-bmi-pass-%d" % os.getpid(),
-                "hook_event_name": "PreToolUse",
-                "tool_name": "Bash",
-                "agent_id": "worker-1",
-                "tool_input": {"command": "echo hello"},
-            }
-            subprocess.run(
-                ["bash", str(HOOK_BMI)],
-                input=json.dumps(payload), env=env,
-                capture_output=True, text=True,
-            )
-            self.assertFalse(log_file.exists(),
-                             "hook-blocks.log should NOT be created on pass")
 
 
 class HookBlockLogRedact988g(unittest.TestCase):
-    """#988(g): secret commands are redacted in hook-blocks.log."""
+    """#988(g): secret commands are redacted in hook-blocks.log (driven through
+    the shared lib directly since #1137 removed the main-agent guard that used
+    to be the example hook)."""
 
     def test_secret_redacted(self):
-        """A command containing 'secret' should be redacted."""
         with TemporaryDirectory() as d:
             log_file = Path(d) / "hook-blocks.log"
-            env = dict(os.environ)
-            env["AIRULESET_HOOK_BLOCK_LOG"] = str(log_file)
-            env["AIRULESET_MAIN_BASH_PER_DISPATCH"] = "3"
-            sid = "t988g-redact-%d" % os.getpid()
-            tp_dir = Path(d) / "transcript"
-            tp_dir.mkdir()
-            tp = tp_dir / "sess.jsonl"
-            tp.write_text(goal_armed_transcript())
-            presence = Path("/tmp/airuleset-presence-%s" % sid)
-            presence.touch()
-            run_file = Path("/tmp/airuleset-main-bash-run-%s" % sid)
-            run_file.write_text("4")
-            try:
-                payload = {
-                    "session_id": sid,
-                    "hook_event_name": "PreToolUse",
-                    "tool_name": "Bash",
-                    "tool_input": {"command": "vault secret show mypassword"},
-                    "transcript_path": str(tp),
-                }
-                r = subprocess.run(
-                    ["bash", str(HOOK_BMI)],
-                    input=json.dumps(payload), env=env,
-                    capture_output=True, text=True,
-                )
-                self.assertEqual(r.returncode, 2)
-                self.assertTrue(log_file.exists(),
-                                "hook-blocks.log should be created on block")
-                content = log_file.read_text()
-                self.assertNotIn("mypassword", content)
-                self.assertIn("<redacted>", content)
-            finally:
-                presence.unlink(missing_ok=True)
-                run_file.unlink(missing_ok=True)
+            env = hermetic_hook_env(self, AIRULESET_HOOK_BLOCK_LOG=str(log_file))
+            _log_via_lib("t-hook", "vault secret show mypassword", env)
+            content = log_file.read_text()
+            self.assertIn("t-hook", content)
+            self.assertNotIn("mypassword", content)
+            self.assertIn("<redacted>", content)
 
 
 # G4. Test-driven blocks must not pollute the production log (#988 fix-forward)
 # ---------------------------------------------------------------------------
 
 class TestPytestSuppression988(unittest.TestCase):
-    """#988 fix-forward: when PYTEST_CURRENT_TEST is set (as it always is under
-    pytest) and no explicit AIRULESET_HOOK_BLOCK_LOG overrides, the default
-    ~/.claude/hook-blocks.log must NOT be written — otherwise the test suite
-    inflates the production metric."""
+    """#988 fix-forward: under PYTEST_CURRENT_TEST with no explicit
+    AIRULESET_HOOK_BLOCK_LOG the default ~/.claude/hook-blocks.log is NOT
+    written; an explicit override still is (driven through the shared lib)."""
 
     def test_default_log_not_written_under_pytest(self):
-        """A block under PYTEST_CURRENT_TEST with no explicit override must
-        NOT write to the default log file."""
-        with TemporaryDirectory() as d:
-            fake_home = Path(d) / "home"
-            fake_home.mkdir()
-            claude_dir = fake_home / ".claude"
-            claude_dir.mkdir()
-            default_log = claude_dir / "hook-blocks.log"
-            env = dict(os.environ)
-            env["HOME"] = str(fake_home)
-            env["PYTEST_CURRENT_TEST"] = "tests/test_hook_simplification_988.py::TestPytestSuppression988::test_default_log_not_written_under_pytest (call)"
-            env["AIRULESET_MAIN_BASH_PER_DISPATCH"] = "3"
-            # Remove any explicit override so the lib uses the default
-            env.pop("AIRULESET_HOOK_BLOCK_LOG", None)
-            env.pop("AIRULESET_HOOK_BLOCKS_LOG", None)  # legacy name
-            sid = "t988-pytest-suppress-%d" % os.getpid()
-            tp_dir = Path(d) / "transcript"
-            tp_dir.mkdir()
-            tp = tp_dir / "sess.jsonl"
-            tp.write_text(goal_armed_transcript())
-            presence = Path("/tmp/airuleset-presence-%s" % sid)
-            presence.touch()
-            run_file = Path("/tmp/airuleset-main-bash-run-%s" % sid)
-            run_file.write_text("4")  # over cap → will block
-            try:
-                payload = {
-                    "session_id": sid,
-                    "hook_event_name": "PreToolUse",
-                    "tool_name": "Bash",
-                    "tool_input": {"command": "some-unknown-cmd arg"},
-                    "transcript_path": str(tp),
-                }
-                r = subprocess.run(
-                    ["bash", str(HOOK_BMI)],
-                    input=json.dumps(payload), env=env,
-                    capture_output=True, text=True,
-                )
-                self.assertEqual(r.returncode, 2, "should block")
-                self.assertFalse(default_log.exists(),
-                                 "default log must NOT be written when "
-                                 "PYTEST_CURRENT_TEST is set and no "
-                                 "AIRULESET_HOOK_BLOCK_LOG overrides")
-            finally:
-                presence.unlink(missing_ok=True)
-                run_file.unlink(missing_ok=True)
+        env = hermetic_hook_env(self, PYTEST_CURRENT_TEST="x::y (call)")
+        env.pop("AIRULESET_HOOK_BLOCK_LOG", None)
+        env.pop("AIRULESET_HOOK_BLOCKS_LOG", None)
+        _log_via_lib("t-hook", "some-unknown-cmd arg", env)
+        self.assertFalse(
+            (Path(env["HOME"]) / ".claude" / "hook-blocks.log").exists())
 
     def test_explicit_override_writes_despite_pytest(self):
-        """When AIRULESET_HOOK_BLOCK_LOG=<path> is set, the log IS written
-        there even under PYTEST_CURRENT_TEST — so tests that want to assert
-        the log mechanism still work."""
         with TemporaryDirectory() as d:
             explicit_log = Path(d) / "explicit-blocks.log"
-            env = dict(os.environ)
-            env["AIRULESET_HOOK_BLOCK_LOG"] = str(explicit_log)
-            env["PYTEST_CURRENT_TEST"] = "tests/test_hook_simplification_988.py::TestPytestSuppression988::test_explicit_override_writes_despite_pytest (call)"
-            env["AIRULESET_MAIN_BASH_PER_DISPATCH"] = "3"
-            env.pop("AIRULESET_HOOK_BLOCKS_LOG", None)  # legacy name
-            sid = "t988-pytest-explicit-%d" % os.getpid()
-            tp_dir = Path(d) / "transcript"
-            tp_dir.mkdir()
-            tp = tp_dir / "sess.jsonl"
-            tp.write_text(goal_armed_transcript())
-            presence = Path("/tmp/airuleset-presence-%s" % sid)
-            presence.touch()
-            run_file = Path("/tmp/airuleset-main-bash-run-%s" % sid)
-            run_file.write_text("4")
-            try:
-                payload = {
-                    "session_id": sid,
-                    "hook_event_name": "PreToolUse",
-                    "tool_name": "Bash",
-                    "tool_input": {"command": "some-unknown-cmd arg"},
-                    "transcript_path": str(tp),
-                }
-                subprocess.run(
-                    ["bash", str(HOOK_BMI)],
-                    input=json.dumps(payload), env=env,
-                    capture_output=True, text=True,
-                )
-                self.assertTrue(explicit_log.exists(),
-                                "explicit AIRULESET_HOOK_BLOCK_LOG path "
-                                "must be written even under PYTEST_CURRENT_TEST")
-                content = explicit_log.read_text()
-                self.assertIn("block-main-implementation", content)
-            finally:
-                presence.unlink(missing_ok=True)
-                run_file.unlink(missing_ok=True)
+            env = hermetic_hook_env(self, PYTEST_CURRENT_TEST="x::y (call)",
+                                    AIRULESET_HOOK_BLOCK_LOG=str(explicit_log))
+            _log_via_lib("t-hook", "some-unknown-cmd arg", env)
+            self.assertIn("some-unknown-cmd", explicit_log.read_text())
 
 
 # G3. Status breakdown

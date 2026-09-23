@@ -182,11 +182,6 @@
           },
           {
             "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
-            "timeout": 5
-          },
-          {
-            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-ci-poll-repeat.sh",
             "timeout": 5
           },
@@ -290,11 +285,6 @@
           },
           {
             "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
-            "timeout": 5
-          },
-          {
-            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-dispatch-over-wdrain.sh",
             "timeout": 5
           },
@@ -325,11 +315,6 @@
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/pre-write-script-check.sh",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
             "timeout": 5
           },
           {
@@ -369,11 +354,6 @@
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/pre-write-script-check.sh",
-            "timeout": 5
-          },
-          {
-            "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
             "timeout": 5
           },
           {
@@ -422,11 +402,6 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
-            "timeout": 5
-          },
-          {
-            "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-dispatch-over-wdrain.sh",
             "timeout": 5
           },
@@ -445,11 +420,6 @@
       {
         "matcher": "Workflow",
         "hooks": [
-          {
-            "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/block-main-implementation.sh",
-            "timeout": 5
-          },
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/block-banned-model.sh",
@@ -513,16 +483,6 @@
           {
             "type": "command",
             "command": "bash ~/devel/airuleset/hooks/post-record-subagent-bg-launch.sh",
-            "timeout": 5
-          }
-        ]
-      },
-      {
-        "matcher": "Bash|Write|Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/post-consume-main-exec-marker.sh",
             "timeout": 5
           }
         ]

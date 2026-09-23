@@ -21,7 +21,6 @@ So no code change is warranted there (STEP-0 re-scope, see #1013 design comment)
 RED (fails before the fix): a torn line makes block-main fail closed.
 """
 import json
-import os
 import subprocess
 import sys
 import unittest
@@ -34,7 +33,6 @@ sys.path.insert(0, str(REPO))
 
 from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
-BLOCK_HOOK = REPO / "hooks" / "block-main-implementation.sh"
 BG_HOOK = REPO / "hooks" / "subagent-stop-check-bg-work.sh"
 
 
@@ -57,82 +55,6 @@ def _torn():
                       "message": {"role": "assistant", "model": "claude-opus-4-8",
                                   "content": [{"type": "text", "text": "x"}]}})
     return cut + nxt
-
-
-class TornTranscriptBlockMain1013(unittest.TestCase):
-    def _drive(self, lines, command, jqdir=None):
-        with TemporaryDirectory() as d:
-            tp = str(Path(d) / "sess.jsonl")
-            Path(tp).write_text("\n".join(lines) + "\n")
-            payload = {"session_id": "t-1013-" + uuid.uuid4().hex[:8],
-                       "hook_event_name": "PreToolUse", "tool_name": "Bash",
-                       "tool_input": {"command": command},
-                       "transcript_path": tp}
-            env = hermetic_hook_env(self)
-            if jqdir:
-                env["PATH"] = jqdir + os.pathsep + env.get("PATH", "")
-            return subprocess.run(["bash", str(BLOCK_HOOK)],
-                                  input=json.dumps(payload), env=env,
-                                  capture_output=True, text=True)
-
-    def test_torn_line_with_goal_reads_armed_not_failclosed(self):
-        # RED: today the torn line aborts jq -> GOAL_UNKNOWN -> "transcript read
-        # failed"; after the fix GOAL_ARMED is read and the ordinary classifier
-        # runs (a bulk read under an armed goal blocks with the ARMED reason).
-        out = self._drive([_goal_set(), _assistant(), _torn(), _assistant()],
-                          "grep -rn 'TODO' .")
-        self.assertNotIn(
-            "transcript read failed", out.stderr,
-            "a single torn line must not make the goal read fail closed")
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
-        self.assertIn("ARMED /goal", out.stderr,
-                      "the goal-armed state must be read past the torn line")
-
-    def test_torn_line_no_goal_allows_a_bulk_read(self):
-        # RED: today the torn line aborts jq -> GOAL_UNKNOWN -> a bulk read is
-        # blocked; after the fix the (correct) not-armed state is read and, with
-        # no Fable/goal/away condition, the bulk read is allowed.
-        out = self._drive([_assistant(), _torn(), _assistant()],
-                          "grep -rn 'TODO' .")
-        self.assertNotIn("transcript read failed", out.stderr, out.stderr)
-        self.assertEqual(
-            out.returncode, 0,
-            "a non-armed non-Fable main must not be blocked by a torn line: %s"
-            % out.stderr)
-
-    def test_trailing_non_object_line_does_not_fail_closed(self):
-        # review-2 🔵 lock: a top-level truthy NON-object valid-JSON line as the
-        # LAST line (a bare `true`) must be dropped by `| objects`, NOT error jq
-        # into fail-closed. The armed goal on the healthy lines is still read.
-        out = self._drive([_goal_set(), _assistant(), "true"],
-                          "grep -rn 'TODO' .")
-        self.assertNotIn("transcript read failed", out.stderr, out.stderr)
-        self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
-        self.assertIn("ARMED /goal", out.stderr,
-                      "the goal must be read past a trailing non-object line")
-
-    def test_genuine_jq_failure_still_fails_closed(self):
-        # LOCK (passes before AND after): when jq genuinely CANNOT run the goal
-        # read (a jq that fails on the .message.content filter), the hook must
-        # STILL fail closed (GOAL_UNKNOWN) — the security fail-direction is
-        # preserved, never turned fail-open by the torn-line fix.
-        with TemporaryDirectory() as jqd:
-            real = subprocess.run(["bash", "-c", "command -v jq"],
-                                  capture_output=True, text=True).stdout.strip() \
-                or "/usr/bin/jq"
-            stub = Path(jqd) / "jq"
-            stub.write_text(
-                "#!/usr/bin/env bash\n"
-                "case \"$*\" in\n"
-                "    *'.message.content'*) exit 2 ;;\n"
-                "esac\n"
-                "exec %s \"$@\"\n" % real)
-            stub.chmod(0o755)
-            out = self._drive([_goal_set(), _assistant()],
-                              "grep -rn 'TODO' .", jqdir=jqd)
-            self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
-            self.assertIn("transcript read failed", out.stderr,
-                          "a genuine jq failure must still fail closed")
 
 
 class TornTranscriptBgWork1013(unittest.TestCase):

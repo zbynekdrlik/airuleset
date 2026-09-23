@@ -4,7 +4,6 @@
 - `no-dropped-work.md` — identified WORK is done now or filed as `#N`; this rule extends the same discipline to DECISIONS and FINDINGS, and moves the deadline from "before you stop" to "the moment it lands"
 - `verify-issue-still-valid.md` — a ticket you update is re-validated against current reality first
 - `issue-reference-context.md` — every `#N` you write for the user carries its title
-- `main-context-hygiene.md` — the context window is a scarce, VOLATILE buffer; tickets are the durable store
 
 **The context window is DISPOSABLE. Compaction fires MID-SESSION, without warning, exactly when the conversation has grown rich — and everything that lived only in the conversation (the root cause you found, the approach the user approved, the "spravíme to takto" agreement) is gone.** The user's recurring loss: they converge on findings and decisions with Claude, nothing is written to GitHub, the context compacts, and the session "pozabuda všetko na čo sme prišli a čo sa rozhodol urobiť". The ONLY stores that survive are git, GitHub issues/PRs, and files on disk. So:
 
@@ -28,8 +27,6 @@ The same disposability that eats a decision eats a **work-product** — anything
 
 - **Session SCRATCH → `/tmp`** (the scratchpad). Intermediate values, throwaway files, anything you can regenerate.
 - **A WORK-PRODUCT → `~/.claude/work-products/` IMMEDIATELY at creation**, before any other work — a DURABLE, sweep-safe dir (outside `/tmp`, so no hygiene job deletes it). `/tmp` may hold a WORKING copy, but never the ONLY copy. This is the artifact sibling of the same-turn rule above: a decision goes on its ticket the moment it lands; a work-product that cannot go on a ticket yet goes to the durable dir the moment it exists.
-
-The main-session write guard (`block-main-implementation.sh`) EXEMPTS `~/.claude/work-products/**` from its size limit exactly so "save the draft durably" is a normal action, never an exceptional one.
 
 #### Anti-patterns (intent — all rewordings and semantic equivalents)
 

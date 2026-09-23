@@ -129,11 +129,6 @@ class TestQuestionPolicy(TestCase):
         self.assertIn("AskUserQuestion", read("agents/autopilot-worker.md"))
         self.assertIn("60-second", read("skills/autopilot/SKILL.md"))
 
-    def test_main_context_hygiene_module_exists_and_wired(self):
-        mod = ROOT / "modules" / "core" / "main-context-hygiene.md"
-        self.assertTrue(mod.is_file(), "main-context-hygiene.md must exist")
-        self.assertIn("Delegate Heavy Reading to Subagents", mod.read_text(encoding="utf-8"))
-        self.assertIn("modules/core/main-context-hygiene.md", read("profiles/universal.profile"))
 
 
 if __name__ == "__main__":

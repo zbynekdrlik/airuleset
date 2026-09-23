@@ -102,12 +102,12 @@ echo "GIVE THE USER:  http://$IP:$PORT/$TOK/"
   the SAVED line rather than guessing. Confirm byte count, then `kill <PID>`.
 - If the recording already lives on a dev box, skip this phase.
 
-## Dispatch: Phases 1-3 on a goal-armed box (#926)
+## Optional dispatch of Phases 1-3 (#926, #1137)
 
-When `/goal` is armed, `block-main-implementation.sh` blocks bulk bash in main. Dispatch
-Phases 1-3 (extract/transcribe/dedup — mechanical) to a read-only worker subagent with
-WORK dir + VIDEO path in its prompt; main reads only the returned `frames_kept/` count +
-`summary.json`. **Mark that worker prompt's FIRST line `MECHANICAL-ONLY: extract|asr|dedup`** —
+Phases 1-3 (extract/transcribe/dedup) are mechanical: main may run them itself, or
+dispatch them to a worker subagent with the WORK dir + VIDEO path in its prompt, and
+then read the returned `frames_kept/` count and `summary.json`. Choose what fits the
+session. **If you dispatch, mark the worker prompt's FIRST line `MECHANICAL-ONLY: extract|asr|dedup`** —
 the delegation gate (Hard Rule 0) blocks a meeting dispatch without it, and blocks any dispatch
 that also asks for interpretation. Phases 4-6 (reading screens, correlation, synthesis) stay in
 main — they need vision AND are interpretation (Hard Rule 0).

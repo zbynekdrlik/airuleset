@@ -74,10 +74,6 @@ class TestDurableDecisionsRule(TestCase):
         self.assertIn("never its only copy", t)
         self.assertIn("Session SCRATCH", t)
 
-    def test_main_context_hygiene_points_at_the_durable_work_product_dir_640(self):
-        m = read("modules/core/main-context-hygiene.md")
-        self.assertIn("~/.claude/work-products/", m)
-        self.assertIn("durable-decisions-to-tickets.md", m)
 
     def test_rozhodnute_reversing_shipped_spawns_immediate_lane_912(self):
         # #912 (owner escalation 2026-09-06, odoo-erp #5718): an owner

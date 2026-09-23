@@ -102,10 +102,6 @@ class TestGateAdapterIgnoresStaleCwd(TestCase):
     def test_discovery_covers_wdrain_and_the_m_gates_adapters(self):
         hooks = _adapter_hooks()
         self.assertIn(WDRAIN, hooks)
-        # block-main-implementation.sh imports gates.shellcmd via `python3 -P -c`
-        # (not `-m gates.`) — a named-vulnerable importer the lock must cover
-        # (review #1046 finding 2).
-        self.assertIn("block-main-implementation.sh", hooks)
         self.assertGreaterEqual(
             len(hooks), 10,
             "expected the -m gates. adapter family plus the -c/- repo importers")

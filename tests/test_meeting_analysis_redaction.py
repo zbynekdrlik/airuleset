@@ -168,26 +168,18 @@ class InjectionDeliversTheWholeSkill(unittest.TestCase):
 
 
 class DispatchMandateForGoalArmed(unittest.TestCase):
-    """#926/#991: Phases 1-3 must dispatch to a read-only worker subagent on a
-    goal-armed box. Content-lock teeth ensure the mandate survives in the skill body."""
+    """#926/#1137: dispatching the mechanical Phases 1-3 is OPTIONAL (main may
+    run them itself); when dispatched, the worker prompt carries the
+    MECHANICAL-ONLY marker, and the reading phases always stay in main."""
 
-    def test_dispatch_section_present(self):
-        b = _body()
-        self.assertIn("Dispatch: Phases 1-3", b,
-                       "#926 dispatch section heading missing")
+    def test_dispatch_is_optional_and_marked(self):
+        norm = re.sub(r"\s+", " ", _body())
+        self.assertIn("Optional dispatch of Phases 1-3", norm)
+        self.assertIn("main may run them itself", norm)
+        self.assertIn("MECHANICAL-ONLY: extract|asr|dedup", norm)
 
-    def test_dispatch_names_worker_subagent(self):
-        b = _body()
-        self.assertIn("Dispatch", b)
-        self.assertIn("read-only worker subagent", b,
-                      "#991: mechanical phases must dispatch to a read-only worker subagent")
-
-    def test_dispatch_names_block_main_implementation(self):
-        b = _body()
-        lines = [ln for ln in b.splitlines()
-                 if "block-main-implementation" in ln and "goal" in ln.lower()]
-        self.assertTrue(lines,
-                        "#926: no line names block-main-implementation near /goal")
+    def test_no_forced_main_restriction_is_cited(self):
+        self.assertNotIn("block-main-implementation", _body())
 
     def test_phase4_stays_in_main(self):
         # #1076 strengthened this: the dispatch section now says "Phases 4-6 ...
