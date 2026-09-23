@@ -120,6 +120,12 @@ class TestGeneratedAccessSpecHelper(unittest.TestCase):
         self.assertEqual(specs["drop-b.newlevel.media"]["allowed_emails"], [OWNER])
 
 
+import cli_webterm_access as _wa  # noqa: E402
+
+_WEBTERM_EMAILS = {m for a in _wa.WEBTERM_ACCESS_APPS.values()
+                   for m in a["allowed_emails"]}
+
+
 class TestRegistryAllAccessLanesSpecced(unittest.TestCase):
     """The real registry: every access lane resolves to a spec after the merge."""
 
@@ -133,14 +139,24 @@ class TestRegistryAllAccessLanesSpecced(unittest.TestCase):
         for lane in dg.DROP_LANES.values():
             if not lane.access or lane.host in _HAND_AUTHORED:
                 continue
+            # #1115 reopen (owner 2026-09-23): owner first, then ONLY webterm
+            # readers of that account (test_drop_access_webterm_readers_1115).
             spec = dg.DROP_ACCESS_APPS[lane.host]
-            self.assertEqual(spec["allowed_emails"], [OWNER],
-                             "%s must be owner-only" % lane.host)
+            self.assertEqual(spec["allowed_emails"][0], OWNER, lane.host)
+            self.assertTrue(set(spec["allowed_emails"][1:]) <= _WEBTERM_EMAILS,
+                            "%s carries a non-webterm reader" % lane.host)
 
     def test_hand_authored_specs_are_byte_identical(self):
         for host, expected in _HAND_AUTHORED.items():
-            self.assertEqual(dg.DROP_ACCESS_APPS.get(host), expected,
-                             "hand-authored spec for %s changed" % host)
+            # #1115 reopen: webterm readers are APPENDED to a hand-authored
+            # include; everything else stays byte-identical.
+            got = dict(dg.DROP_ACCESS_APPS.get(host))
+            emails = got.pop("allowed_emails")
+            want = dict(expected)
+            want_emails = want.pop("allowed_emails")
+            self.assertEqual(got, want, "hand-authored spec for %s changed" % host)
+            self.assertEqual(emails[:len(want_emails)], want_emails, host)
+            self.assertTrue(set(emails[len(want_emails):]) <= _WEBTERM_EMAILS, host)
 
     def test_previously_pending_controller_lanes_are_now_specced(self):
         # The controller lanes slice B left PENDING (a representative subset of
@@ -151,7 +167,7 @@ class TestRegistryAllAccessLanesSpecced(unittest.TestCase):
                 "drop-subdev-montalu1.newlevel.media",
                 "drop-subdev-montalu8.newlevel.media"):
             self.assertIn(host, dg.DROP_ACCESS_APPS)
-            self.assertEqual(dg.DROP_ACCESS_APPS[host]["allowed_emails"], [OWNER])
+            self.assertEqual(dg.DROP_ACCESS_APPS[host]["allowed_emails"][0], OWNER)
 
 
 class TestControllerReconcileZeroPending(unittest.TestCase):

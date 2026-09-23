@@ -152,8 +152,10 @@ class TestGkAccessOwnerOnly(unittest.TestCase):
         owner = "drlik.zbynek@gmail.com"
         self.assertIn(owner, dg.DROP_ACCESS_APPS[dg.DROP_HOST_DAVID]["allowed_emails"],
                       "sanity: owner identity is the shared owner-lane include")
-        self.assertEqual(spec["allowed_emails"], [owner],
-                         "gk Access include = owner identity only")
+        # #1115 reopen (owner 2026-09-23): plus every webterm reader whose
+        # dashboard opens gk — Marek's observer tab.
+        self.assertEqual(spec["allowed_emails"], [owner, "drlik.marek@gmail.com"],
+                         "gk Access include = owner + gk webterm readers")
 
 
 if __name__ == "__main__":
