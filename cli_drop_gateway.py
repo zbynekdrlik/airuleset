@@ -329,6 +329,22 @@ DROP_ACCESS_APPS.update(cli_drop_lanes.generated_access_specs(
     session_duration=DROP_ACCESS_SESSION))
 
 
+def _webterm_readers():
+    """[(login emails, dashboard inventory)] per non-owner webterm human — the
+    ONE source for who may open which account (#1115 reopen). Both modules are
+    stdlib-only leaves."""
+    import cli_webterm_access as _wa
+    import cli_webterm_profiles as _wp
+    return [(_wa.WEBTERM_ACCESS_APPS[name]["allowed_emails"], inv())
+            for name, inv in (("david", _wp.david_inventory),
+                              ("marek", _wp.marek_inventory),
+                              ("dominika", _wp.dominika_inventory))]
+
+
+cli_drop_lanes.add_webterm_readers(DROP_ACCESS_APPS, DROP_LANES,
+                                   cli_fleet.REMOTE_HOSTS, _webterm_readers())
+
+
 def _current_username():
     """The invoking unix account name. Prefers the real (effective-uid) passwd
     entry over $USER/$LOGNAME so a stale/spoofed env var cannot mis-route the

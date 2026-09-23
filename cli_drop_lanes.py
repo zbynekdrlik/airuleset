@@ -345,6 +345,30 @@ def generated_access_specs(lanes, existing_specs, owner_emails,
     return specs
 
 
+
+def add_webterm_readers(specs, lanes, remote_hosts, readers):
+    """Add every webterm reader to the drop lane of each account they can open
+    (#1115 reopen, owner 2026-09-23: whoever the webterm lets open an account
+    must also pass that account's drop lane — Marek, Dominika and David were
+    missing). ``readers`` is ``[(emails, inventory_entries)]`` — per webterm
+    human, their login emails and the ``{user, host}`` entries their dashboard
+    connects to. An entry maps to its fleet account (same user + host in
+    ``remote_hosts``) and then to that account's Access-gated lane; an entry with
+    no fleet account or no Access lane is skipped. Mutates ``specs`` in place,
+    appending each missing email once (the existing order is kept). Pure data,
+    no I/O (a self-contained leaf, #433)."""
+    for emails, entries in readers:
+        for e in entries:
+            for entry in remote_hosts:
+                if entry.get("user") == e.get("user") and entry.get("host") == e.get("host"):
+                    lane = lanes.get((_nodename_for_entry(entry), entry.get("user", "")))
+                    spec = specs.get(lane.host) if lane is not None and lane.access else None
+                    if spec is not None:
+                        spec["allowed_emails"] += [m for m in emails
+                                                   if m not in spec["allowed_emails"]]
+                    break
+
+
 # #1115: the controller-side cache of each target's PUSH-MEASURED persistent
 # filedrop port, keyed "<nodename>/<username>". `push` reads each target's port
 # (~/.claude/filedrop.port, else the #493 uid-derived default) over the deploy
