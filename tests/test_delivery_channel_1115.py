@@ -184,10 +184,16 @@ class TestPublicUrlChannelFact(unittest.TestCase):
             dl.public_url_channel_fact(probe=_probe)
         self.assertEqual(seen["url"], "https://%s/s/" % self.HOST)
 
-    def test_broken_on_other_code(self):
+    def test_ok_on_404_reachable(self):
+        # A bare token-less /s/ 404s at the origin on a token-only lane — the
+        # origin ANSWERED, so the channel is reachable = ok (slice-C review).
         with self._live_channel():
-            self.assertEqual(dl.public_url_channel_fact(probe=lambda u: 404),
-                             "broken:404")
+            self.assertEqual(dl.public_url_channel_fact(probe=lambda u: 404), "ok")
+
+    def test_broken_on_5xx(self):
+        with self._live_channel():
+            self.assertEqual(dl.public_url_channel_fact(probe=lambda u: 502),
+                             "broken:502")
 
     def test_broken_unreachable_on_none(self):
         with self._live_channel():
@@ -370,6 +376,71 @@ class TestSecretShowFallbackLabelled(unittest.TestCase):
         self.assertIn("secret show: no public lane on this box (no lane for this account)",
                       err)
         self.assertNotIn("AIRULESET_VAULT_TOKEN", combined)
+
+
+class TestSecretRequestFallbackLabelled(unittest.TestCase):
+    """_secret_request: no public lane -> private URL + ONE labelled reason line
+    (prog='secret'), and NEVER a token/secret value in the output."""
+
+    def _run(self, reason):
+        import cli_vault
+        import filedrop
+        with tempfile.TemporaryDirectory() as td:
+            st = mock.MagicMock()
+            st.DEFAULT_ENDPOINT_TTL_S = 300
+            st.DEFAULT_KEEP_S = 3600
+            st.state.return_value = "absent"
+            st.check_name.return_value = None
+            st.register_request.return_value = "NONCEVALUE"
+            st.log_path.return_value = Path(td) / "vault.log"
+            opener = types.SimpleNamespace(
+                open=lambda u, timeout=2: types.SimpleNamespace(status=200))
+            with mock.patch.object(filedrop, "bind_ips", lambda: ["100.64.0.1"]), \
+                 mock.patch.object(filedrop, "vault", st, create=True), \
+                 mock.patch.object(cli_vault, "_secret_request_names",
+                                   lambda args: ["X"]), \
+                 mock.patch.object(cli_vault, "_secret_parse_persist_map",
+                                   lambda args, names: {}), \
+                 mock.patch.object(cli_vault, "_secret_bindable", lambda ip: True), \
+                 mock.patch.object(cli_vault, "_secret_select_ips",
+                                   lambda ips, allow_plain=False: (["100.64.0.1"], [])), \
+                 mock.patch.object(cli_vault, "_secret_public_lane",
+                                   lambda args: (None, None, None)), \
+                 mock.patch.object(dl, "delivery_channel",
+                                   lambda **k: (None, reason)), \
+                 mock.patch.object(cli_vault, "_pick_free_port",
+                                   lambda ips, rng: 8831), \
+                 mock.patch.object(cli_vault, "_secret_probe_urls",
+                                   lambda ips, port: ["http://100.64.0.1:8831/h"]), \
+                 mock.patch.object(cli_vault, "_secret_opener", lambda: opener), \
+                 mock.patch.object(cli_vault, "_secret_health_url",
+                                   lambda ip, port: "http://%s:%d/h" % (ip, port)), \
+                 mock.patch.object(cli_vault, "_secret_url_line",
+                                   lambda ip, port, token, iface=None:
+                                   "http://%s:%d/PRIVATE/" % (ip, port)), \
+                 mock.patch("subprocess.Popen",
+                            return_value=types.SimpleNamespace(pid=4322)):
+                out, err = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                    cli_vault._secret_request(types.SimpleNamespace(
+                        name="X", cmd=[], ttl=30, keep=None, port=None,
+                        allow_plain=False, public=False, replace=False,
+                        persist=None, persist_map=None))
+                return out.getvalue(), err.getvalue()
+
+    def test_pending(self):
+        out, err = self._run(dl.CHANNEL_PENDING)
+        self.assertIn("http://100.64.0.1:8831/PRIVATE/", out)   # private URL served
+        self.assertIn("secret: no public lane on this box (lane pending", err)
+        self.assertIn("see #1115", err)
+
+    def test_no_secret_value_leaks(self):
+        out, err = self._run(dl.CHANNEL_NO_LANE)
+        combined = out + err
+        self.assertIn("secret: no public lane on this box (no lane for this account)",
+                      err)
+        self.assertNotIn("AIRULESET_VAULT_TOKEN", combined)
+        self.assertNotIn("NONCEVALUE", combined)
 
 
 if __name__ == "__main__":

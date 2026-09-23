@@ -535,7 +535,7 @@ def run_conformance_check(now, state, dry_run=False,
     # #1115 Slice C: a REPORT-ONLY per-account fact (NOT a drift dimension —
     # mirrors the #1047 root-guard + #1015 bashrc facts above): can THIS account
     # deliver a user-facing URL over the public Cloudflare channel? Resolves the
-    # ONE `delivery_channel()` and, when live, HEADs the account's public `/s/`
+    # ONE `delivery_channel()` and, when live, probes the account's public `/s/`
     # probe path with a named User-Agent. `ok` / `fallback:<reason>` /
     # `broken:<code>`. Injectable for tests; the import is INSIDE the try so a
     # broken leaf degrades to `unknown`, never raises here.

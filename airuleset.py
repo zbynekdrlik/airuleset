@@ -9645,8 +9645,9 @@ def cmd_upload(args):
         reachable = [u for u in urls if _live(u)] or [urls[0]]
         for u in reachable:   # one URL per interface — open whichever your network reaches
             print(u)
-        # #1115 Slice C: a private URL is always preceded by ONE labelled line
-        # naming why there is no public lane (never a silent private-only output).
+        # #1115 Slice C: the private URLs (stdout) are always accompanied by ONE
+        # labelled line (stderr, keeping stdout URL-clean) naming why there is no
+        # public lane — never a silent private-only output.
         print(_dl.channel_fallback_line(_fallback_reason or _dl.CHANNEL_NO_LANE,
                                         prog="upload"), file=sys.stderr)
     print(f"dest={dest}  ttl={ttl}s  log={log}")

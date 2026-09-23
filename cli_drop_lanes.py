@@ -2,8 +2,12 @@
 port cache + deploy-loop harvest helpers (#1115, split out of cli_drop_gateway
 for the 1000-line file cap, #993 area review).
 
-This is a SELF-CONTAINED LEAF (#433): it imports ONLY ``cli_fleet`` (a pure
-zero-import data leaf) + stdlib — NEVER ``cli_drop_gateway`` or ``airuleset``. The
+This is a SELF-CONTAINED LEAF (#433): AT MODULE LEVEL it imports ONLY
+``cli_fleet`` (a pure zero-import data leaf) + stdlib — NEVER a module-level
+``cli_drop_gateway`` or ``airuleset`` import (that would be the load-time cycle:
+``cli_drop_gateway`` imports THIS at its top). ``delivery_channel`` (#1115 slice
+C) uses a FUNCTION-LOCAL lazy ``import cli_drop_gateway`` — cycle-safe (resolved
+at call time, after both modules are loaded) and injectable-seamed for tests. The
 lane-shape primitives it cannot own without a cycle (the ``DropLane`` class, the
 hand-authored ``_SEED_DROP_LANES``, the controller tunnel UUID, the port range)
 are INJECTED into ``build_drop_lanes`` by its one caller in ``cli_drop_gateway``.
@@ -432,8 +436,12 @@ def delivery_channel(*, marker_path=None, nodename=None, username=None,
         no ``DROP_ACCESS_APPS`` spec — Slice-B go-live is HARD-gated on that spec
         (fail-closed), so the lane can never serve until the spec is added; naming
         it PENDING points the operator at the spec, not a missing marker.
-      - ``"marker-absent"`` -> ``(None, "marker-absent")``: a live-capable lane but
-        no matching go-live marker on this box yet (the push hasn't reached it).
+      - ``"marker-absent"`` -> ``(None, "marker-absent")``: a live-capable lane for
+        which ``resolve_public_lane_full`` returned ``None`` — normally no go-live
+        marker yet (the push hasn't reached it), but it ALSO covers a stale/foreign
+        marker (host mismatch) and a controller lane with no ``origin_host``
+        (fail-closed). All three are "not live via a marker"; the reason string
+        names the common case.
       - ``"unreachable"``   -> ``(None, "unreachable")``: a live lane whose public
         host did not answer (``probe(host)`` returned falsy).
 
@@ -493,14 +501,16 @@ def channel_fallback_line(reason, prog="share", detail=None):
             % (prog, phrase))
 
 
-def _probe_public_head(url, timeout=3, user_agent="airuleset-conformance"):
-    """HTTP status of GET ``url`` WITHOUT following redirects, or ``None`` on a
-    connection error / timeout (#1115; mirrors
-    ``cli_filedrop_watchdog._public_share_status`` #1114). A NAMED User-Agent:
-    Cloudflare's browser-integrity check answers 403 to urllib's default
-    ``Python-urllib/3.x`` while the same URL serves 200 (david4, 22.9.). Kept a
-    small stdlib probe here rather than importing the heavier filedrop-watchdog
-    module into the leaf / the conformance sweep."""
+def _probe_public_status(url, timeout=3, user_agent="airuleset-conformance"):
+    """HTTP status of a GET on ``url`` WITHOUT following redirects, or ``None`` on
+    a connection error / timeout (#1115; mirrors
+    ``cli_filedrop_watchdog._public_share_status`` #1114 — a GET, not a HEAD, so a
+    filedrop origin that does not implement HEAD is not mis-read as 405). A NAMED
+    User-Agent: Cloudflare's browser-integrity check answers 403 to urllib's
+    default ``Python-urllib/3.x`` while the same URL serves 200 (david4, 22.9.).
+    Kept a small stdlib probe here rather than importing the heavier
+    filedrop-watchdog module into the leaf / the conformance sweep (a deliberate
+    leaf-purity duplication, #433)."""
     import urllib.error
     import urllib.request
 
@@ -525,19 +535,29 @@ def public_url_channel_fact(*, marker_path=None, nodename=None, username=None,
 
     - Resolve the channel state (no reachability probe — the config state):
       not live -> ``"fallback:<reason>"`` (no-lane / pending / marker-absent).
-    - Live: HEAD the account's public ``/s/`` probe path with a named User-Agent:
-      200 / 302 -> ``"ok"``; another HTTP code -> ``"broken:<code>"``;
-      a connection error / timeout -> ``"broken:unreachable"``.
+    - Live: probe (GET, no redirect follow) the account's public ``/s/`` path with
+      a named User-Agent and read REACHABILITY from the status:
+        * ``200`` / ``302`` (Access login) / ``404`` -> ``"ok"``. A bare
+          token-less ``/s/`` legitimately 404s at the filedrop origin on a
+          TOKEN-ONLY lane (no Access edge to 302; proven by
+          ``test_share_public_lane_1114.test_s_alone_is_404``) — the origin
+          ANSWERED, so the channel is reachable. Treating that 404 as ``ok``
+          avoids a permanent false ``broken:404`` on every token-only box's status
+          row (slice-C review, both fresh reviewers). The design named 200/302 as
+          the expected codes; 404 is the third reachable-but-empty case.
+        * any other HTTP code (a real 5xx origin failure, an anomalous 4xx on an
+          access lane) -> ``"broken:<code>"``.
+        * a connection error / timeout -> ``"broken:unreachable"``.
 
     ``probe(url) -> status|None`` is injectable for tests (defaults to a real
-    HEAD). Never raises — keeping it total here means a fixture can assert every
+    GET). Never raises — keeping it total here means a fixture can assert every
     branch deterministically."""
     base, reason = delivery_channel(marker_path=marker_path, nodename=nodename,
                                     username=username)
     if base is None:
         return "fallback:%s" % reason
-    code = (probe or _probe_public_head)("%s/s/" % base)
-    if code in (200, 302):
+    code = (probe or _probe_public_status)("%s/s/" % base)
+    if code in (200, 302, 404):
         return "ok"
     if code is None:
         return "broken:unreachable"
