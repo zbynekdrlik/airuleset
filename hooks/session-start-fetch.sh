@@ -29,7 +29,9 @@ printf '%s' "$_HB_INPUT" | PYTHONPATH="$_HB_DIR" \
 # AFTER this hook's `git fetch origin`. Best-effort, never changes our exit.
 # _ORIGIN_FETCHED marks the fetch as ATTEMPTED (ok or not): the step then
 # never re-contacts origin inside this hook's one timeout budget. A signal
-# (Claude Code's timeout kill) clears the trap so nothing new is started.
+# (Claude Code's timeout kill, a closed pipe, a hangup) clears the trap so
+# nothing new is started. Accepted cost of any trap: bash now finishes the
+# running foreground `git fetch` before it exits on that signal.
 _ORIGIN_FETCHED=""
 _stream_directives_step() {
     AIRULESET_STREAM_BASE_FETCHED="$_ORIGIN_FETCHED" \
@@ -38,6 +40,8 @@ _stream_directives_step() {
 trap _stream_directives_step EXIT
 trap 'trap - EXIT; exit 143' TERM
 trap 'trap - EXIT; exit 130' INT
+trap 'trap - EXIT; exit 129' HUP
+trap 'trap - EXIT; exit 141' PIPE
 
 # Only run if we're in a git repo
 if ! git rev-parse --is-inside-work-tree &>/dev/null; then
