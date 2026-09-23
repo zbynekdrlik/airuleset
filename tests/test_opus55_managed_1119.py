@@ -12,10 +12,14 @@ design's Acceptance section names.
 import json
 import os
 import subprocess
+import sys
 import unittest
 from unittest import TestCase
 
-import airuleset
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import airuleset  # noqa: E402
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -78,7 +82,7 @@ class TestBanLock(TestCase):
                            input=json.dumps({"tool_name": "Agent",
                                              "tool_input": {"model": model}}),
                            capture_output=True, text=True,
-                           env={**os.environ})
+                           env=hermetic_hook_env(self))
         return r.returncode
 
     def test_python_allows_opus_5_5(self):
