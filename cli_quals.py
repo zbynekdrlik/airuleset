@@ -1540,8 +1540,8 @@ def _is_own_login(login, self_login):
 def _stream_self_login():
     """THIS box's own gh identity for own-comment matching (#463, #904).
 
-    Returns the ``app/``-prefixed form on App-token boxes
-    (``STREAM_APP_BOT_LOGIN``; NO network call — ``gh api user`` 403s
+    Returns the ``app/``-prefixed form on App-token boxes (the minting
+    App's slug, else ``STREAM_APP_BOT_LOGIN``; NO network — ``gh api user`` 403s
     structurally), the real gh login on a PAT box, or None when
     unresolvable. None is not fatal: ``_stale_ops_wait_flagged``
     degrades to the any-comment definition (the SAFE direction — it

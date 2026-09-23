@@ -36,10 +36,13 @@ def read_app_slug(token_dir):
         token = Path(os.path.realpath(Path(token_dir) / "primary"))
         if not token.is_file():
             return None
-        fd = os.open(str(token) + ".app", os.O_RDONLY | os.O_NONBLOCK)
+        sidecar = str(token) + ".app"
+        if not stat.S_ISREG(os.stat(sidecar).st_mode):
+            return None     # never open a FIFO / device / tty at all
+        fd = os.open(sidecar, os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
-                return None
+                return None     # swapped between stat and open
             raw = os.read(fd, SLUG_MAX + 1)
         finally:
             os.close(fd)
