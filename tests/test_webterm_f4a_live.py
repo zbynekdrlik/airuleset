@@ -115,13 +115,8 @@ class TestWiring3ControllerDispatch(unittest.TestCase):
                                return_value=True) as prov_mock, \
              mock.patch("cli_webterm.setup_webterm_service"), \
              mock.patch("cli_drop_lanes.harvest_local_controller_filedrop_port"), \
-             mock.patch("cli_drop_golive.reconcile_and_report",
-                        return_value=True) as golive_mock, \
+             mock.patch("cli_drop_golive.reconcile_and_report", return_value=True) as golive_mock, \
              mock.patch("cli_webterm.profiles") as prof_mock:
-            # #1131 review: the controller dispatch ends in the LIVE go-live
-            # reconcile (Cloudflare DNS + Access with the real ~/.secrets tokens
-            # outside a worktree). A test must never reach it, so it is mocked
-            # here and its wiring is asserted instead.
             prof_mock.LANE_HOST = {
                 "zbynek": "dev1", "david": "subdev",
                 "marek": "subdev", "dominika": "subdev",
@@ -134,7 +129,7 @@ class TestWiring3ControllerDispatch(unittest.TestCase):
 
         # The shared tunnel must have been provisioned
         prov_mock.assert_called_once()
-        golive_mock.assert_called_once_with(dry_run=False)
+        golive_mock.assert_called_once_with(dry_run=False)  # #1131: never the live go-live
         call_kwargs = prov_mock.call_args
         # Verify the config text contains multi-ingress catch-all
         config_text = call_kwargs[0][3] if len(call_kwargs[0]) > 3 else ""
@@ -162,8 +157,7 @@ class TestWiring3ControllerDispatch(unittest.TestCase):
              mock.patch.object(zbynek, "setup_webterm_zbynek_service",
                                zbynek_setup), \
              mock.patch("cli_drop_lanes.harvest_local_controller_filedrop_port"), \
-             mock.patch("cli_drop_golive.reconcile_and_report",
-                        return_value=True) as golive_mock, \
+             mock.patch("cli_drop_golive.reconcile_and_report", return_value=True) as golive_mock, \
              mock.patch("cli_webterm.profiles") as prof_mock:
             prof_mock.LANE_HOST = {
                 "zbynek": "controller", "david": "subdev",
