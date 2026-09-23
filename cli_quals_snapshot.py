@@ -4,9 +4,9 @@
 from the caller's ONE `_partition_workable` pass, so the detached refresher
 (`watchdog/ops_wait_refresh.py`) runs ONE derivation instead of separate
 `--count` / `--count-dispatchable` / `--ops-wait` runs. Split out of
-`cli_quals_cmd.py` (at its size ratchet) as a leaf. It reaches the shared
-emitters there by a function-local import (the #433 lazy-import rule), and
-`cli_quals_cmd` imports this leaf lazily from its `--snapshot-json` branch.
+`cli_quals_cmd.py` (at its size ratchet) as a TRUE leaf: `cli_quals_cmd`
+imports it lazily from its `--snapshot-json` branch and PASSES IN its two
+shared emitters, so nothing here imports back from the CLI module.
 Stdlib-only at import time, so the watchdog's `parse_members` delegator stays
 cheap.
 """
@@ -51,28 +51,44 @@ def parse_ops_wait_members(stdout):
     return members
 
 
-def emit_snapshot_json(rows, ops_wait, root, quals, own_stream):
+def emit_snapshot_json(rows, ops_wait, root, quals, own_stream, emit_ops_wait,
+                       dispatchable_fields):
     """`--snapshot-json` (#1067 slice 1d): ONE JSON object carrying every quals
-    fact the watchdog reads — `open_count`/`i_members` (the `--count` set),
-    `dispatchable_count`/`dispatchable_reason` (`_dispatchable_fields`, the
-    `--count-dispatchable` derivation) and `ops_wait_members` (the `--ops-wait`
-    listing, captured and parsed) — all from the caller's ONE
-    `_partition_workable` pass (#367). The detached refresher
-    (`watchdog.ops_wait_refresh`) runs this ONE command instead of separate
-    derivations. Unparseable ops-wait rows EXIT non-zero rather than print a
-    partial snapshot (the refresher then keeps the prior good one)."""
+    fact the watchdog reads, all from the caller's ONE `_partition_workable`
+    pass (#367): `open_count` (the `--count` number; `i_members` its numbers —
+    no watchdog reader today, #714 removed the #578 I-member fetch),
+    `dispatchable_count`/`dispatchable_reason` (the caller's
+    `dispatchable_fields`, the SAME derivation `--count-dispatchable` prints)
+    and `ops_wait_members` (the caller's `emit_ops_wait` listing — the SAME
+    `--ops-wait` text — captured and parsed, so the two cannot drift).
+
+    The two emitters are PASSED IN by `cli_quals_cmd`, so this module imports
+    nothing back from it (a true leaf). Each part degrades on its OWN (review
+    F3/F4): an ops-wait part that raises or does not parse emits
+    `ops_wait_members: null`, a dispatchable part that raises emits
+    `dispatchable_count: null` + a reason, and `open_count` still lands — a
+    tagger bug never costs the backlog count. Each degradation is one stderr
+    line (the refresher unit's journal)."""
     import contextlib
     import io
-    from cli_quals_cmd import _dispatchable_fields, _emit_ops_wait
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
-        _emit_ops_wait(ops_wait, root, quals, own_stream)
-    members = parse_ops_wait_members(buf.getvalue())
-    if members is None:
-        print("quals --snapshot-json: the ops-wait listing did not parse — "
-              "refusing a partial snapshot", file=sys.stderr)
-        sys.exit(1)
-    count, reason = _dispatchable_fields(rows, root)
+    members = None
+    try:
+        with contextlib.redirect_stdout(buf):
+            emit_ops_wait(ops_wait, root, quals, own_stream)
+        members = parse_ops_wait_members(buf.getvalue())
+        if members is None:
+            print("quals --snapshot-json: the ops-wait listing did not parse — "
+                  "ops_wait_members null", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001 — isolate the part, never the count
+        print("quals --snapshot-json: the ops-wait part failed (%s) — "
+              "ops_wait_members null" % type(e).__name__, file=sys.stderr)
+    try:
+        count, reason = dispatchable_fields(rows, root)
+    except Exception as e:  # noqa: BLE001 — isolate the part, never the count
+        print("quals --snapshot-json: the dispatchable part failed (%s)"
+              % type(e).__name__, file=sys.stderr)
+        count, reason = None, "snapshot part failed"
     print(json.dumps({"open_count": len(rows),
                       "i_members": sorted(int(n) for n in rows),
                       "dispatchable_count": count,

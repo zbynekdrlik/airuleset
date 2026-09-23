@@ -1246,20 +1246,19 @@ def goal_ops_wait_recheck(now, run, wrecs, sid, cwd, pid, tpath, loc,
     evidence)."""
     logs = []
     cadence = cadence or _cadence()
-    # #1041 — SWEEP-BUDGET guard, CACHE-AWARE: this rider's gh union fetch and its
-    # (optional) per-instance deploy-state fetch are cached; if EITHER would MISS the
-    # cache AND fewer than OPS_WAIT_FETCH_MIN_BUDGET_S of sweep budget remain, SKIP
-    # with `hold:budget` (no fetch, no state change) rather than run the sweep into
-    # the unit's 120s TimeoutStartSec kill. Cache HITS proceed regardless. None
-    # (unwired/legacy) => no guard. NOTE (review-2 🔵-3): the deploy-state fetch only
-    # actually fires when a deploy-target W member exists (unknown until the union
-    # fetch runs), so treating a deploy-cache miss as "would fetch" can OVER-defer by
-    # one sweep when no such member exists — the SAFE direction (a backstop nudge, not
-    # a kill). Lazy import (queue_arrival imports THIS module → a top-level import cycles).
+    # #1041 — SWEEP-BUDGET guard, CACHE-AWARE, now on the per-instance deploy-state
+    # fetch ONLY: if it would MISS its cache AND fewer than
+    # OPS_WAIT_FETCH_MIN_BUDGET_S remain, SKIP with `hold:budget` (no fetch, no state
+    # change) rather than run the sweep into the unit's 120s kill. The ops-wait
+    # member fetch is a NON-BLOCKING read of the detached quals snapshot since #1067
+    # 1c/1d, so its cache miss no longer holds (#1067 1d review F5). Cache HITS
+    # proceed; None (unwired) => no guard. NOTE (review-2 🔵-3): the deploy fetch
+    # fires only when a deploy-target W member exists, so a miss can OVER-defer by
+    # one sweep — the SAFE direction. Lazy import (queue_arrival imports THIS module).
     from watchdog.queue_arrival_recheck import _budget_left as _bl
     _left = _bl(budget_left_fn)
     if _left is not None and _left < OPS_WAIT_FETCH_MIN_BUDGET_S:
-        _would_fetch = _cache_would_miss(cwd, state, now, "ops_wait_cache") or (
+        _would_fetch = (
             deploy_state_fetch is not None
             and _cache_would_miss(cwd, state, now, "deploy_state_cache",
                                   ttl=OPS_WAIT_FETCH_TTL_S,

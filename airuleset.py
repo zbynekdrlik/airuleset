@@ -7072,7 +7072,7 @@ def _watchdog_backlog_fetch(cwd):
     subprocess (17.7 s live on montalu1, once `timeout=30`, #619). It reads the
     per-repo quals SNAPSHOT (`watchdog.ops_wait_refresh.backlog_count`), which
     ONE detached `--snapshot-json` refresher writes. When the snapshot is stale
-    the reader spawns that refresher (single-flight) and never waits. The
+    the reader spawns it (single-flight, a ≤10 s client call) and never waits. The
     snapshot count passed the SAME #181 refusal inside the command, so a
     snapshot 0 is trusted, and no snapshot yet is None."""
     import time
@@ -8331,10 +8331,10 @@ def cmd_watchdog(args):
                     repo_roots=_watchdog_repo_roots,
                     issue_counts_fetch=_watchdog_issue_counts_fetch,
                     git_fetch=_watchdog_git_fetch,
-                    # #160 defects 1/4 run on EVERY managed box — both are
-                    # per-repo `gh` reads (cached per cwd, 10-min TTL, so a
-                    # box with several panes on one repo costs at most one
-                    # extra call per window) consulted by job 20's
+                    # #160 defects 1/4 run on EVERY managed box — both read
+                    # the per-repo quals SNAPSHOT (#1067 1d, non-blocking; a
+                    # detached refresher writes it, cached per cwd 10 min on
+                    # top) and are consulted by job 20's
                     # goal-achieved backstop and job 10's widened wedge ping.
                     backlog_fetch=_watchdog_backlog_fetch,
                     # #547 — job 20's W/ops-wait re-check nudge reads the parked

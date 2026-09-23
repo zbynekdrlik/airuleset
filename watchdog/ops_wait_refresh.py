@@ -33,7 +33,14 @@ its timeout sentinel instead (a cold refresh timeout, so the outer
 `_cached_member_fetch` backs its fail-TTL off geometrically, slice 1). A child
 failure or timeout PRESERVES the prior good fields in the file, so a
 transient hiccup never drops a served value. A last-good value older than
-`MAX_SERVE_AGE_S` stops being served (it goes honest).
+`MAX_SERVE_AGE_S` stops being served (it goes honest). Consecutive failures
+back the re-spawn off geometrically (`_fail_ttl`), and the child skips the
+derivation while the gh-rate budget is in backoff (`rate_hold`). The only
+sweep-side cost is the systemd-run CLIENT call on a spawn (≤10 s timeout).
+
+Naming: the module, the `~/.claude/ops-wait-refresh/` dir and the
+`airuleset-opswait-*` unit keep their slice-1c names (the design kept the path;
+a rename would orphan live caches/units). Since 1d they hold EVERY quals fact.
 
 # airuleset:script-ok the pidfile-remove in run_refresh_child's `finally` uses a
 # bare `except OSError: pass` on purpose — the file may already be gone (a
@@ -58,6 +65,10 @@ REFRESH_FAIL_TTL_S = 60           # an error/timeout entry re-checks soon
 # and W members forever (the pre-1c fail-safe: a gh error read as None). Six
 # refresh windows.
 MAX_SERVE_AGE_S = 6 * REFRESH_TTL_S
+# the ceiling of the geometric failure backoff (`_fail_ttl`) — slice 1's cap
+# (the old 30-min ops-wait TTL), so a permanently slow/broken derivation costs
+# at most one run per half hour instead of one per minute.
+FAIL_BACKOFF_CAP_S = 30 * 60
 # the detached child's own hard timeout (generous vs the ~30-60 s derivation).
 CHILD_TIMEOUT_S = 180
 # reclaim a pidfile whose recorded child is older than this even if /proc still
@@ -108,8 +119,11 @@ def _read_json(path):
 
 
 def _write_atomic(path, obj):
+    # 0o600: the snapshot carries issue numbers + W titles; owner-only even if
+    # a box's ~/.claude were ever wider than 0700 (shared-stream subdev).
     tmp = "%s.tmp.%d" % (path, os.getpid())
-    with open(tmp, "w", encoding="utf-8") as f:
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
         json.dump(obj, f)
     os.replace(tmp, path)
 
@@ -129,10 +143,13 @@ def _is_int(v):
 
 
 def parse_snapshot(stdout):
-    """Validate `--snapshot-json` stdout into the snapshot dict, or None when it
-    is malformed (the child then records an `error` and keeps the prior good
-    snapshot — never a partial one). `dispatchable_count` may be None only with
-    a reason (the unmeasurable-dependency case, #1021)."""
+    """Validate `--snapshot-json` stdout into the snapshot dict, or None when the
+    CORE (`open_count`) is malformed (the child then records an `error` and keeps
+    the prior good snapshot). The other parts degrade PER FIELD so a failure in
+    one never costs the backlog count (#1067 1d review F3/F4):
+    `ops_wait_members` may be null (that part failed → the ops-wait reader reads
+    undetermined), `dispatchable_count` may be None only WITH a reason (#1021),
+    and a malformed `i_members` (no watchdog reader today) is dropped to None."""
     try:
         snap = json.loads(stdout or "")
     except ValueError:
@@ -140,16 +157,17 @@ def parse_snapshot(stdout):
     if not isinstance(snap, dict):
         return None
     members = snap.get("ops_wait_members")
-    i_members = snap.get("i_members")
     dc, dr = snap.get("dispatchable_count"), snap.get("dispatchable_reason")
     if not (_is_int(snap.get("open_count")) and snap["open_count"] >= 0
-            and isinstance(i_members, list) and all(map(_is_int, i_members))
-            and isinstance(members, list)
-            and all(isinstance(m, dict) and _is_int(m.get("number"))
-                    for m in members)
+            and (members is None or (isinstance(members, list) and all(
+                isinstance(m, dict) and _is_int(m.get("number"))
+                for m in members)))
             and (dr is None or isinstance(dr, str))
             and (_is_int(dc) or (dc is None and dr))):
         return None
+    i_members = snap.get("i_members")
+    if not (isinstance(i_members, list) and all(map(_is_int, i_members))):
+        snap["i_members"] = None
     return snap
 
 
@@ -182,21 +200,37 @@ def _reclaim_pid(cwd):
         return   # already gone / not ours to remove
 
 
+def _failed(entry):
+    """The entry's LATEST attempt did not produce a snapshot."""
+    return any(entry.get(k) for k in ("error", "timeout", "rate_hold"))
+
+
+def _fail_ttl(entry):
+    """The re-spawn window after a failed attempt, GEOMETRIC in the consecutive
+    failure count (`fail_streak`): 60 s, 120 s, 240 s … capped at
+    FAIL_BACKOFF_CAP_S. The slice-1 backoff lived only in the ops-wait outer
+    cache; since 1d the backlog/dispatchable readers (60 s outer fail-TTLs) also
+    reach `read_snapshot`, so the backoff must live HERE or a derivation that
+    keeps timing out re-runs every minute (#1067 1d review F1/F2)."""
+    streak = entry.get("fail_streak")
+    streak = streak if _is_int(streak) and streak > 0 else 1
+    return min(REFRESH_FAIL_TTL_S * 2 ** min(streak - 1, 10), FAIL_BACKOFF_CAP_S)
+
+
 def _spawn_due(entry, now):
     """Should a refresh be spawned? A missing/typeless entry is always due; a
     SUCCESS entry is fresh for the full TTL, unless it predates the snapshot
     schema (a slice-1c members-only cache → due at once); an entry whose LATEST
-    attempt failed (error/timeout flag) is fresh only for the short fail-window
-    so a transient failure re-checks soon (mirrors the outer cache's fail-TTL)."""
+    attempt failed (error/timeout/rate_hold) waits its geometric `_fail_ttl`."""
     if not isinstance(entry, dict):
         return True
     ts = entry.get("ts")
     if not isinstance(ts, (int, float)):
         return True
-    failed = bool(entry.get("error") or entry.get("timeout"))
+    failed = _failed(entry)
     if not failed and entry.get("v") != SNAPSHOT_VERSION:
         return True
-    ttl = REFRESH_FAIL_TTL_S if failed else REFRESH_TTL_S
+    ttl = _fail_ttl(entry) if failed else REFRESH_TTL_S
     return (now - ts) >= ttl
 
 
@@ -265,7 +299,12 @@ def backlog_count(cwd, cmd_name, argv0=None, now=None, spawn_fn=None,
                   alive_fn=None):
     """NON-BLOCKING backlog reader: the snapshot's `open_count` (the same number
     `--count` prints — a real 0 passed the #181 refusal inside the command), or
-    None when there is no good snapshot — unmeasurable, NEVER a guessed 0."""
+    None when there is no good snapshot — unmeasurable, NEVER a guessed 0.
+
+    Staleness (documented trade-off): a later REFUSED/failed derivation keeps
+    serving the last good count until it is MAX_SERVE_AGE_S old (the pre-1d
+    blocking fetch read a refusal as None at once). The risk direction is a
+    stale POSITIVE count, never a false 0."""
     now = time.time() if now is None else now
     good = _good_snapshot(
         read_snapshot(cwd, cmd_name, argv0, now, spawn_fn, alive_fn), now)
@@ -452,8 +491,29 @@ def _default_run(target, cmd_name, argv0):
     return r.returncode, r.stdout
 
 
-def _derive(target, cmd_name, argv0, run_fn=None):
-    """Run the ONE derivation; classify the outcome as ok/timeout/error."""
+def _default_gh_backoff():
+    """The watchdog registry's own gh-rate hold signal (#1040/#1041): > 0 while
+    either gh resource is under its backoff threshold. Reads the CACHED status
+    only (the sweep's gh_rate_fetch keeps it fresh) — the probe never spends a
+    gh call itself. Fail-open → 0."""
+    try:
+        import cli_gh_rate
+        return cli_gh_rate.current_gh_backoff(status=cli_gh_rate._load_cache())
+    except Exception as e:  # noqa: BLE001 — never block a refresh on the probe
+        sys.stderr.write("refresh-child: gh-rate probe failed (%s)\n"
+                         % type(e).__name__)
+        return 0
+
+
+def _derive(target, cmd_name, argv0, run_fn=None, backoff_fn=None):
+    """Run the ONE derivation; classify the outcome as
+    ok/timeout/error/rate_hold. The detached child escapes the watchdog
+    registry's gh-rate hold (it runs outside the sweep), so it consults the
+    same signal itself and SKIPS the gh-heavy derivation while the shared
+    budget is low (#1067 1d review F3) — the prior good snapshot stays served."""
+    backoff = (backoff_fn or _default_gh_backoff)()
+    if _is_int(backoff) and backoff > 0:
+        return {"kind": "rate_hold"}
     run = run_fn or _default_run
     try:
         rc, out = run(target, cmd_name, argv0)
@@ -467,7 +527,8 @@ def _derive(target, cmd_name, argv0, run_fn=None):
     return {"kind": "ok", "snap": snap}
 
 
-def run_refresh_child(target, cmd_name, cache, pid_file, argv0, run_fn=None):
+def run_refresh_child(target, cmd_name, cache, pid_file, argv0, run_fn=None,
+                      backoff_fn=None):
     """The detached child body: record the pidfile, run the derivation (its own
     timeout), and atomically write ONE snapshot to ``cache`` — PRESERVING every
     prior good field (with its `members_ts` age) on a failure/timeout so a
@@ -476,23 +537,25 @@ def run_refresh_child(target, cmd_name, cache, pid_file, argv0, run_fn=None):
     try:
         _write_atomic(pid_file, {"pid": os.getpid(), "ts": time.time()})
         prior = _read_json(cache)
-        result = _derive(target, cmd_name, argv0, run_fn)
+        prior = prior if isinstance(prior, dict) else {}
+        result = _derive(target, cmd_name, argv0, run_fn, backoff_fn)
         entry = {"ts": time.time()}
         if result["kind"] == "ok":
             snap = result["snap"]
             entry.update({
                 "v": SNAPSHOT_VERSION,
-                "members": snap["ops_wait_members"],
+                "members": snap["ops_wait_members"],   # None = that part failed
                 "members_ts": entry["ts"],        # last SUCCESSFUL derivation
                 "open_count": snap["open_count"],
                 "i_members": snap["i_members"],
                 "dispatchable_count": snap["dispatchable_count"],
                 "dispatchable_reason": snap["dispatchable_reason"]})
-        else:                                     # "timeout" | "error"
+        else:                              # "timeout" | "error" | "rate_hold"
             entry[result["kind"]] = True
-            if isinstance(prior, dict) and isinstance(prior.get("members"), list):
-                entry.update({k: prior[k] for k in _SNAPSHOT_FIELDS
-                              if k in prior})     # last good, age carried fwd
+            streak = prior.get("fail_streak") if _failed(prior) else 0
+            entry["fail_streak"] = (streak if _is_int(streak) else 0) + 1
+            entry.update({k: prior[k] for k in _SNAPSHOT_FIELDS
+                          if k in prior})         # last good, age carried fwd
         _write_atomic(cache, entry)
     finally:
         try:

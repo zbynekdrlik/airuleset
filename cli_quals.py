@@ -1297,10 +1297,10 @@ OPS_WAIT_EVIDENCE_MAX_S = 24 * 3600
 # Bound on the per-member `gh issue view` comment fetches per `--ops-wait`
 # invocation (a real W set is a handful — montalu's worst incident was 13; a
 # >25-member W is pathological). Overflow members are left UNTAGGED (the safe
-# direction — never a false accusation). This keeps the watchdog's
-# `_watchdog_ops_wait_fetch` subprocess (which runs `--ops-wait`) bounded so its
-# 35s timeout has margin (~25 × <1s), alongside its own 30-min `_cached_ops_wait`
-# cache; the session's own on-demand `--ops-wait` is uncapped in wall-clock time
+# direction — never a false accusation). This keeps the watchdog's detached
+# quals refresher (`--snapshot-json`, #1067 1d, which runs this same tagging)
+# bounded so its 180s child timeout has margin (~25 × <1s), on a 5-min snapshot
+# TTL; the session's own on-demand `--ops-wait` is uncapped in wall-clock time
 # so it always gets full stale info. TRADE-OFF (#570 review 🔵): the stale
 # computation is COUPLED into the SAME `--ops-wait` invocation the #547 W-nudge
 # reads, so a pathological large-W + slow-gh cold-cache sweep can time the

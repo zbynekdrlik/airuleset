@@ -61,8 +61,8 @@ parking reason — an external event/evidence instead of the user's answer):
   bucket costs ZERO `watchdog/goal.py` change — the dispatch's "keep your goal.py
   touch minimal" was really "touch it NOT AT ALL".** The lane-guard nudge count
   (`goal_lane_occupancy_nudge` → `_cached_backlog_count` → `backlog_fetch` =
-  `airuleset._watchdog_backlog_fetch`, which runs `core-quals`/`slice-quals
-  --count` as a SUBPROCESS), the footer `I N` (`cmd_tickets_status`), and the
+  `airuleset._watchdog_backlog_fetch`, which reads the `--snapshot-json` quals
+  snapshot, #1067 1d), the footer `I N` (`cmd_tickets_status`), and the
   `/goal` stop-proof ALL read the SAME `cli_quals` partition. So making a label
   leave the partition's `workable` bucket excludes it from all three at once. The
   extension is exactly the #468 shape: a label tuple (`OPS_WAIT_LABELS`, mirror

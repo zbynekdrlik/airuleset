@@ -146,7 +146,7 @@ can drift). Lessons for anyone touching this partition:
   --state open --json number,body,comments -L 1000` returns TRUNCATED/invalid JSON on
   a large repo (odoo-erp 280 open + long threads → rc1 / 'unexpected end of JSON
   input' / 0 bytes), and the whole fail-safe chain (`_dep_wait_map_for` ok=False →
-  `_emit_count_dispatchable` `unmeasurable` → `airuleset._watchdog_dispatchable_fetch`
+  `_dispatchable_fields` unmeasurable → (1d: the quals snapshot) → `_watchdog_dispatchable_fetch`
   None → `goal._lane_dispatchable_decision` `skip:dispatchable-unknown`) then goes
   INERT (the review-window nudge never fires; 370 inert ticks on gk). SPLIT it: a
   bodies-only batch (`--json number,body`) + per-row comments ONLY for rows whose
@@ -163,7 +163,7 @@ can drift). Lessons for anyone touching this partition:
   override on the batch path (the per-row paths `classify_number`/`resolve_issue_deps`/
   `dep_wait_map(meta=None)` still honor it) — declare deps in the BODY for uniform
   treatment. To surface WHY an unmeasurable nudge is inert, flow the reason through the
-  EXISTING count protocol (`unmeasurable:<reason>` → `_watchdog_dispatchable_fetch`
+  EXISTING count protocol (`unmeasurable:<reason>`; since #1067 1d the snapshot `dispatchable_reason` → `_watchdog_dispatchable_fetch`
   `{count:None,reason}` → journal `skip:dispatchable-unknown (<reason>)`); `_gh_out`
   strips gh stderr, so the reason is the deterministic failure-mode label
   (`meta read failed`), not gh's raw stderr line. Pre-existing gap NOT closed here:

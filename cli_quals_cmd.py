@@ -268,8 +268,8 @@ def _ops_wait_summary_line(ops_wait, stale_numbers, recheck_numbers,
 
     Returns the line string, or None when the bucket is empty (nothing to
     summarise). The `#` prefix keeps it OUT of the machine-parsed member set: the
-    sole programmatic consumer, `_watchdog_ops_wait_fetch`, skips `#`-lines
-    (#754), so the summary never trips its malformed→None guard. A member whose
+    parser (`cli_quals_snapshot.parse_ops_wait_members`, #1067 1d) skips `#`
+    lines (#754), so the summary never trips its malformed→None guard. A member whose
     `createdAt` is missing/empty sorts LAST (never spuriously wins `oldest=`)."""
     import airuleset
     total = len(ops_wait)
@@ -558,7 +558,7 @@ def _ops_wait_flag_sets(ops_wait, root, member_quals=None):
     column, SHARING ONE per-member comment-age fetch between the #570 `stale!`
     (24h), #699 `recheck!` (1h release cadence), #818 tacit-window, #881
     convergence and #944 deploy-target tags so the reason column never DOUBLES
-    the gh reads (margin for the 35s `_watchdog_ops_wait_fetch` timeout).
+    the gh reads (margin for the detached refresher's 180s child timeout).
     `gk-handoff!` is pure-label (no gh).
 
     #753 part 1a — `unpark?`: ONE per-repo ORIGIN release-train read (via
@@ -950,7 +950,8 @@ def cmd_slice_quals(args):
     if want_snapshot:
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition.
         import cli_quals_snapshot
-        cli_quals_snapshot.emit_snapshot_json(unhandled, ops_wait, root, quals, user)
+        cli_quals_snapshot.emit_snapshot_json(
+            unhandled, ops_wait, root, quals, user, _emit_ops_wait, _dispatchable_fields)
         return
     if want_ops_wait:
         # the W listing, tagged per member (`_emit_ops_wait` documents each tag)
@@ -1534,7 +1535,8 @@ def cmd_core_quals(args):
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition
         # (own_stream=None: a full-authority box owns no stream).
         import cli_quals_snapshot
-        cli_quals_snapshot.emit_snapshot_json(workable, ops_wait, root, quals, None)
+        cli_quals_snapshot.emit_snapshot_json(
+            workable, ops_wait, root, quals, None, _emit_ops_wait, _dispatchable_fields)
         return
     if want_ops_wait:
         # own_stream=None: a full-authority box owns no stream, so EVERY

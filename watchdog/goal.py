@@ -4850,12 +4850,12 @@ def _cached_dispatchable(cwd, dispatchable_fetch, state, now):
     (unmeasurable)."""
     # #993 review 2 set a 5-min TTL for BOTH outcomes because a failed read used
     # to re-run the O(deps) `--count-dispatchable` subprocess. #1067 slice 1d made
-    # the fetch a NON-BLOCKING read of the detached quals snapshot, so a miss (a
-    # cold snapshot not written yet) re-reads next minute instead of holding the
-    # decision `dispatchable-unknown` for 5 min; a success stays cached 5 min.
+    # the fetch a read of the detached quals snapshot (its OWN 5-min TTL + failure
+    # backoff throttle the derivation), so this memo is 1 min either way: a cold
+    # snapshot is picked up next minute, and staleness never stacks to 10 min.
     lst = _ops_wait_recheck._cached_member_fetch(
         cwd, dispatchable_fetch, state, now, "dispatchable_cache",
-        ttl=300, fail_ttl=60)
+        ttl=60, fail_ttl=60)
     if isinstance(lst, list) and lst and isinstance(lst[0], dict):
         return lst[0]
     return None
@@ -4875,8 +4875,8 @@ def _lane_dispatchable_decision(dispatchable_fetch, cwd, state, now, loc,
     #1067 slice 1d REMOVED the #1041 sweep-budget guard (`hold:budget`) that
     stood here: it existed only because a cache-miss fetch ran the blocking
     `--count-dispatchable` subprocess (up to 90 s) into the unit's 120 s kill.
-    The fetch is now a non-blocking read of the detached quals snapshot, so
-    there is no budget to guard."""
+    The fetch is now a read of the detached quals snapshot; its worst sweep-side
+    cost is the ≤10 s systemd-run client call on a spawn, well inside budget."""
     if dispatchable_fetch is None:
         return False, None, None
     res = _cached_dispatchable(cwd, dispatchable_fetch, state, now)

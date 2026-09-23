@@ -146,6 +146,15 @@ class TestOpsWaitBudget(unittest.TestCase):
                          "an ample budget must run the ops-wait fetch\n"
                          + "\n".join(logs))
 
+    def test_ops_wait_miss_alone_no_longer_holds(self):
+        # #1067 1d review F5: the ops-wait member fetch is a non-blocking
+        # snapshot read, so only a deploy-state MISS holds at low budget.
+        ow_calls = []
+        state = {"deploy_state_cache": {self.CWD: {"ts": 1000, "members": []}}}
+        logs, _state = self._run(5, ow_calls, [], state=state)
+        self.assertEqual(ow_calls, [self.CWD], "\n".join(logs))
+        self.assertFalse(any("hold:budget" in ln for ln in logs), logs)
+
     def test_boundary_just_below_min_holds_just_above_runs(self):
         # #1041 review-2 🟡-2 — lock the ACTUAL threshold value: a revert of the min
         # would flip one of these. Budget is measured against the 110 ref, but the
