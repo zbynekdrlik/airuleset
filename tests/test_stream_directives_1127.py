@@ -480,6 +480,168 @@ class TestUpstreamBase(_RepoFixture):
         self.assert_silent(self.run_stream(repo))
 
 
+class TestReviewRound2(_RepoFixture):
+    """Findings of the re-review of the reworked hook."""
+
+    def test_subdirectory_cwd_never_overrides_a_newer_copy(self):
+        """Pathspecs are repo-root relative: a session started in a
+        subdirectory must behave exactly like one started at the root."""
+        repo, _ = self.base_repo()
+        self.ok(repo, "fetch", "-q", "origin")
+        self.ok(repo, "checkout", "-q", "-b", "feature2", "origin/main")
+        self.commit_file(repo, REL, DIRECTIVE + "a newer rule\n", "newer")
+        sub = os.path.join(repo, "sub")
+        os.makedirs(sub)
+        self.assert_silent(self.run_stream(sub))
+
+    def test_subdirectory_cwd_still_delivers(self):
+        repo, _ = self.base_repo()
+        sub = os.path.join(repo, "sub")
+        os.makedirs(sub)
+        r = self.run_stream(sub)
+        self.assertIn(DIRECTIVE.strip(), r.stdout)
+        self.assertIn("ABSENT", r.stdout)
+
+    def test_stale_upstream_ref_predating_streams_is_still_fetched(self):
+        """The local upstream ref predates `.claude/streams/` (nothing else
+        ever fetches upstream), but origin's twin carries it -> this is a
+        stream project, so upstream is fetched and the directive delivered."""
+        up = self.make_remote("upstream")
+        seed = self.make_clone(up, "seed")
+        self.commit_file(seed, "f", "v1\n", "init")
+        self.ok(seed, "push", "-q", "origin", "main")
+        fork = self.make_remote("fork")
+        repo = self.make_clone(fork)
+        self.ok(repo, "remote", "add", "upstream", up)
+        self.ok(repo, "fetch", "-q", "upstream")
+        # the project adds the streams dir; the fork syncs it
+        self.commit_file(seed, SHARED, "shared\n", "streams dir")
+        self.ok(seed, "push", "-q", "origin", "main")
+        self.ok(seed, "push", "-q", fork, "main")
+        self.ok(repo, "fetch", "-q", "origin")
+        self.ok(repo, "checkout", "-q", "-B", "main", "origin/main")
+        self.ok(repo, "remote", "set-head", "origin", "-a")
+        self.ok(repo, "checkout", "-q", "-b", "feature")
+        self.commit_file(seed, REL, DIRECTIVE, "stream directive")
+        self.ok(seed, "push", "-q", "origin", "main")
+        r = self.run_stream(repo)
+        self.assertIn(DIRECTIVE.strip(), r.stdout)
+        self.assertIn("upstream/main", r.stdout)
+
+    def _stale_develop_repo(self):
+        """A dev/main-style repo: `develop` once existed (with an OLD copy of
+        the stream file) and was deleted on the remote, but the local
+        origin/develop tracking ref was never pruned. main has the current
+        copy."""
+        bare = self.make_remote("origin")
+        repo = self.make_clone(bare)
+        self.commit_file(repo, REL, "OLD-DEVELOP-TEXT\n", "init")
+        self.ok(repo, "push", "-q", "origin", "main")
+        self.ok(repo, "push", "-q", "origin", "main:develop")
+        self.ok(repo, "remote", "set-head", "origin", "-a")
+        self.ok(repo, "fetch", "-q", "origin")
+        self.ok(repo, "checkout", "-q", "-b", "feature")
+        self.ok(repo, "rm", "-q", REL)
+        self.ok(repo, "commit", "-qm", "drop local copy")
+        # deleted from ANOTHER clone, so this clone's tracking ref goes stale
+        other = self.push_from_other(bare, REL, DIRECTIVE)
+        self.ok(other, "push", "-q", "origin", "--delete", "develop")
+        self.assertTrue(self.ok(repo, "rev-parse", "refs/remotes/origin/develop"))
+        return repo
+
+    def test_stale_unpruned_develop_is_skipped_on_compact(self):
+        repo = self._stale_develop_repo()
+        r = self.run_stream(repo)
+        self.assertNotIn("OLD-DEVELOP-TEXT", r.stdout)
+        self.assertIn(DIRECTIVE.strip(), r.stdout)
+        self.assertIn("origin/main", r.stdout)
+
+    def test_stale_unpruned_develop_is_skipped_on_startup(self):
+        repo = self._stale_develop_repo()
+        r = self.run_fetch(repo)
+        self.assertNotIn("OLD-DEVELOP-TEXT", r.stdout)
+        self.assertIn(DIRECTIVE.strip(), r.stdout)
+        self.assertEqual(self.fetch_count(), 1)
+
+    def test_private_fetch_never_recurses_into_submodules(self):
+        allow = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "protocol.file.allow",
+                 "GIT_CONFIG_VALUE_0": "always"}
+        self.env.update(allow)
+        sub_bare = self.make_remote("sub")
+        subseed = self.make_clone(sub_bare, "subseed")
+        self.commit_file(subseed, "s", "s1\n", "s1")
+        self.ok(subseed, "push", "-q", "origin", "main")
+        bare = self.make_remote("origin")
+        seed = self.make_clone(bare, "seed")
+        self.ok(seed, "submodule", "add", "-q", sub_bare, "sm")
+        self.commit_file(seed, SHARED, "shared\n", "init")
+        self.ok(seed, "push", "-q", "origin", "main")
+        repo = os.path.join(self.root, "repo")
+        self.ok(self.root, "clone", "-q", "--recurse-submodules", bare, repo)
+        self.ok(repo, "config", "user.email", "t@t")
+        self.ok(repo, "config", "user.name", "t")
+        self.ok(repo, "remote", "set-head", "origin", "-a")
+        self.ok(repo, "checkout", "-q", "-b", "feature")
+        # the submodule advances and the superproject bumps it on main
+        self.commit_file(subseed, "s", "s2\n", "s2")
+        self.ok(subseed, "push", "-q", "origin", "main")
+        self.ok(os.path.join(seed, "sm"), "pull", "-q", "origin", "main")
+        self.ok(seed, "add", "sm")
+        self.commit_file(seed, REL, DIRECTIVE, "bump + directive")
+        self.ok(seed, "push", "-q", "origin", "main")
+        sm = os.path.join(repo, "sm")
+        before = self.ok(sm, "for-each-ref", "refs/remotes")
+        r = self.run_stream(repo, allow)
+        self.assertIn(DIRECTIVE.strip(), r.stdout)
+        self.assertEqual(self.ok(sm, "for-each-ref", "refs/remotes"), before,
+                         "the submodule's remote-tracking refs must not move")
+
+    def test_newer_private_ref_wins_over_stale_tracking_ref_offline(self):
+        """An earlier compact fetched a newer base into the private ref; the
+        remote is now unreachable -> the newer private copy is read, not the
+        older remote-tracking one."""
+        repo, bare = self.base_repo()
+        self.ok(repo, "fetch", "-q", "origin")          # tracking has V1
+        self.push_from_other(bare, REL, "V2 directive\n")
+        self.assertIn("V2 directive", self.run_stream(repo).stdout)  # private = V2
+        self.ok(repo, "remote", "set-url", "origin",
+                os.path.join(self.root, "gone.git"))
+        r = self.run_stream(repo)
+        self.assertIn("V2 directive", r.stdout)
+
+    def test_output_stays_under_claude_code_inline_limit(self):
+        bare = self.make_remote("origin")
+        repo = self.make_clone(bare)
+        self.commit_file(repo, SHARED, "shared\n", "init",
+                         when=time.time() - 30 * 86400)
+        self.ok(repo, "push", "-q", "origin", "main")
+        self.ok(repo, "remote", "set-head", "origin", "-a")
+        self.ok(repo, "checkout", "-q", "-b", "feature")
+        self.push_from_other(bare, REL, "r" * 20000 + "\n")
+        r = self.run_stream(repo)
+        self.assertIn("WARNING", r.stdout)
+        self.assertIn("truncated", r.stdout)
+        self.assertLess(len(r.stdout), 10000)
+
+    def test_hangup_does_not_start_the_step(self):
+        repo, _ = self.base_repo()
+        fake_ssh = os.path.join(self.root, "slow-ssh.sh")
+        with open(fake_ssh, "w") as fh:
+            fh.write("#!/usr/bin/env bash\nsleep 3\nexit 1\n")
+        os.chmod(fake_ssh, 0o755)
+        self.ok(repo, "remote", "set-url", "origin", "ssh://example.invalid/x.git")
+        env = dict(self.env)
+        env.update({"GIT_TRACE": self.trace, "GIT_SSH_COMMAND": fake_ssh})
+        proc = subprocess.Popen(["bash", str(FETCH_HOOK)], cwd=repo,
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, env=env)
+        time.sleep(1.0)
+        proc.send_signal(signal.SIGHUP)
+        proc.communicate(timeout=30)
+        self.assertEqual(proc.returncode, 129)
+        self.assertFalse(self.trace_has("get-url upstream"))
+
+
 class TestHookConventions(TestCase):
     def test_hook_is_executable_and_strict(self):
         self.assertTrue(STREAM_HOOK.exists())
