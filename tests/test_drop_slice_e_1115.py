@@ -30,7 +30,7 @@ import cli_webterm_access as acc        # noqa: E402
 
 # Reuse the exact fake transports + lane/spec helpers slice B already proved.
 from test_drop_golive_1115 import (      # noqa: E402
-    FakeDnsTransport, FakeAccessTransport, _lane, _access_spec, CONTROLLER_UUID)
+    FakeDnsTransport, FakeAccessTransport, _lane, _access_spec)
 
 
 def _dns(records=None):

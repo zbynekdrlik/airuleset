@@ -22,6 +22,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -241,6 +242,16 @@ class TestAccessPerLane(unittest.TestCase):
 
 class TestReconcileDropLanes(unittest.TestCase):
     def setUp(self):
+        # #1115 slice E: these behaviour tests call reconcile_drop_lanes(
+        # dry_run=False) from inside the repo (a worktree, in a lane), so
+        # neutralise the NEW worktree live-write guard — they assert reconcile
+        # BEHAVIOUR, not the guard (which has its own tests in
+        # test_drop_slice_e_1115). Patch the default checkout classifier to
+        # "not a worktree" so the tests are checkout-agnostic.
+        _wt = mock.patch.object(gl, "_repo_is_worktree_checkout",
+                                return_value=False)
+        _wt.start()
+        self.addCleanup(_wt.stop)
         # one access lane (with spec), one token-only lane, one LOCAL lane (skip)
         self.access_lane = _lane("drop-a.newlevel.media", 8902, access=True)
         self.tok_lane = _lane("drop-b.newlevel.media", 8903, access=False)

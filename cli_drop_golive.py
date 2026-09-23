@@ -129,7 +129,7 @@ def ensure_cname_create_only(dns_client, zone, name, content, comment,
 
 
 def reconcile_access_for_lane(lane, dry_run=True, access_client=None,
-                             access_specs=None):
+                             access_specs=None, is_worktree_fn=None):
     """Reconcile the Cloudflare Access app + include list for one lane.
 
     Returns ``(ok, action, msg)``. A token-only lane (``access is False``) needs
@@ -140,6 +140,15 @@ def reconcile_access_for_lane(lane, dry_run=True, access_client=None,
     reconciled via ``cli_webterm_access.apply_profile``. ``access_client`` is
     injectable for tests (no network); when None a real client is built from the
     on-disk token. The token value is NEVER included in ``msg``.
+
+    #1115 slice E: this is a LIVE-write path reachable WITHOUT
+    ``reconcile_drop_lanes`` (a direct caller with ``access_client=None`` builds a
+    real client and applies live). So when it is about to build a REAL client
+    (``access_client is None``) for a LIVE apply (``dry_run=False``) from a git
+    worktree checkout, it REFUSES before reading any token — a falsy result, no
+    ``~/.secrets`` read, no API call. An INJECTED (fake) client is never refused
+    (a test / caller-supplied client makes no live write). ``is_worktree_fn`` is
+    the same injectable seam ``reconcile_drop_lanes`` uses.
     """
     import cli_webterm_access as acc
     if not lane.access:
@@ -156,6 +165,13 @@ def reconcile_access_for_lane(lane, dry_run=True, access_client=None,
 
     client = access_client
     if client is None:
+        if not dry_run:
+            is_wt = is_worktree_fn if is_worktree_fn is not None \
+                else _repo_is_worktree_checkout
+            if is_wt():
+                return (False, "worktree-refused",
+                        "REFUSING a LIVE Access apply from a git worktree checkout "
+                        "(#1115/#972) — no API call, no token read")
         try:
             token = acc._load_token()
         except OSError as e:
@@ -189,22 +205,47 @@ def _resolve_access_specs(access_specs):
     return dg.DROP_ACCESS_APPS
 
 
-def _lane_go_live_eligible(lane, access_specs):
-    """A lane is ELIGIBLE for go-live iff it is token-only (access=False) OR it is
-    an access lane that ALREADY has a DROP_ACCESS_APPS spec (#1115 slice B review,
-    both reviewers): an access lane with NO spec must NEVER have its DNS CNAME
-    created — a proxied CNAME with no Access app in front is publicly routable and
-    UNPROTECTED (the #983 RED-1 class). Such a lane is PENDING go-live (its spec
-    is an owner-provided go-live data step), NOT a failure, and gets neither DNS
-    nor a marker until the spec lands."""
-    if not lane.access:
+# #1115 slice E: the go-live eligibility predicate MOVED to the pure leaf
+# ``cli_drop_lanes`` (so the leaf's controller-ingress renderer can share it
+# without a module-level ``cli_drop_gateway`` import) and is RE-EXPORTED here —
+# ONE predicate, ingress and go-live import it, never a copy. cli_drop_lanes
+# imports only ``cli_fleet`` and never imports this module back, so this
+# module-level import is cycle-safe (the both-orders import test proves the
+# graph).
+from cli_drop_lanes import _lane_go_live_eligible  # noqa: E402 — re-export
+
+
+def _repo_is_worktree_checkout():
+    """True when THIS checkout is a git worktree (#1115 slice E / #972).
+
+    A LIVE Cloudflare write must never originate from a worktree copy of the
+    go-live code: the 23.9. incident (comment 5787949642) created 12 proxied
+    CNAMEs from a worktree lane with the controller's real tokens, before any
+    Access app existed. Reuses ``airuleset._is_worktree_repo_dir`` (the #972
+    install/push predicate) via a FUNCTION-LOCAL ``import airuleset`` — the
+    sanctioned cycle-safe pattern (cli_authorship / cli_bashrc_appliers use it).
+
+    Fails CLOSED: if the checkout cannot be classified (import/attr error), it
+    returns True (treat as a worktree, REFUSE the live write). A degraded
+    private-only lane is safe; a stray live write is the incident."""
+    try:
+        import airuleset
+        return airuleset._is_worktree_repo_dir(airuleset.REPO_DIR)
+    except Exception:
         return True
-    return access_specs.get(lane.host) is not None
+
+
+def _refuse_worktree_live_write(what, out):
+    """The LOUD refusal line for a live write attempted from a worktree checkout
+    (#1115 slice E / #972). No API call is made by the caller after this."""
+    print("drop-lanes: REFUSING a LIVE %s from a git worktree checkout — live "
+          "DNS/Access writes run ONLY from the main checkout on the controller "
+          "(#1115/#972). No Cloudflare API call was made." % what, file=out)
 
 
 def reconcile_drop_lanes(dry_run=True, drop_lanes=None, access_specs=None,
                          dns_client=None, access_client=None, zone="newlevel.media",
-                         issue="1115", out=None):
+                         issue="1115", out=None, is_worktree_fn=None):
     """Reconcile DNS + Access for every controller-topology drop lane (#1115 B).
 
     Returns ``(all_ok, results, live)`` where ``results`` is a list of per-lane
@@ -227,8 +268,22 @@ def reconcile_drop_lanes(dry_run=True, drop_lanes=None, access_specs=None,
     lanes live. The Access side is CONVERGENT rather than a strict no-op — a
     present app is re-PUT with the same include list every run (mirrors
     ``cli_drop_gateway._reconcile_access``), which is harmless.
+
+    #1115 slice E: a LIVE reconcile (``dry_run=False``) is REFUSED when this
+    checkout is a git worktree — zero Cloudflare API calls, a loud line, and a
+    ``(False, [], {})`` result. This closes the 23.9. incident (comment
+    5787949642): a worktree lane must never write live DNS/Access with the
+    controller's real tokens. ``is_worktree_fn`` is an injectable seam
+    (default ``_repo_is_worktree_checkout``) so tests exercise both branches with
+    injected fake clients from inside the repo. A dry-run is never refused.
     """
     out = out if out is not None else sys.stdout
+    if not dry_run:
+        is_wt = is_worktree_fn if is_worktree_fn is not None \
+            else _repo_is_worktree_checkout
+        if is_wt():
+            _refuse_worktree_live_write("go-live reconcile", out)
+            return False, [], {}
     if drop_lanes is None:
         import cli_drop_gateway as dg
         drop_lanes = dg.DROP_LANES
