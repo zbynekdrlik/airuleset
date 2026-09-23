@@ -1788,6 +1788,12 @@ def _setup_controller_webterm():
     # the lane's box, so the drop server is reachable through the controller
     # tunnel (the per-box tunnel was retired in #870).
     import cli_drop_gateway as _dg
+    # #1115 slice G: the LOCAL controller account runs its own persistent filedrop
+    # service but is not a deploy target, so the push ssh leg never harvests its
+    # port. Measure + cache it here (same cache as slice A) BEFORE the ingress
+    # render so the /s/ rule for drop-controller renders this same push.
+    import cli_drop_lanes as _dl
+    _dl.harvest_local_controller_filedrop_port()
     ingress_rules.extend(_dg.drop_ingress_rules_for_controller())
 
     # #983: claudy dashboard — static ingress rule (origin is the tailscale
