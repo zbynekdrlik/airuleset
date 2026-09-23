@@ -67,13 +67,17 @@ def eligible(authority, payload, tpath, now):
     return True, ""
 
 
-def delivery_ok(origin, authority, payload, tinfo, now):
-    """True iff a `deliver_goal` request may pass the #1113 structured-armed
-    refusal: only THIS origin, and only while guards 1 + 2 still hold at the
-    moment of delivery (`tinfo` = `find_active_transcript(...)` or None)."""
+def delivery_ok(origin, authority, payload_fn, tinfo_fn, now):
+    """`(ok, why)`: may a `deliver_goal` request pass the #1113 structured-armed
+    refusal? Only THIS origin (checked FIRST, so every other origin pays no
+    read), and only while guards 1 + 2 still hold at the moment of delivery.
+    `payload_fn()` gives the structured mark's payload; `tinfo_fn()` gives
+    `find_active_transcript(...)` -- the NEWEST transcript in the cwd, never
+    older than the session's own, so the idle re-check errs toward refusing."""
     if origin != ORIGIN:
-        return False
-    return eligible(authority, payload, tinfo[0] if tinfo else None, now)[0]
+        return False, ""
+    tinfo = tinfo_fn()
+    return eligible(authority, payload_fn(), tinfo[0] if tinfo else None, now)
 
 
 def _reap(store, now):
@@ -85,32 +89,52 @@ def _reap(store, now):
 
 
 def decide(sid, cwd, tpath, payload, now, loc, dry_run, store, template_fn,
-           pending_fn, record_fn, reset_fn):
+           pending_fn, record_fn, reset_fn, latest_is_done=False):
     """The dark-watch decision for a DARK, mark-"set", 🏁-proven session whose
-    armed goal is an old stream template. Returns `(logline_or_None, handled)`;
-    `handled` is False only for a non-stream box (the caller's normal path
-    applies), else True -- an ended old-template stream is migration-bound, so
-    the dead-loop ping / dark-rearm must not run for it. A skip is journalled
-    ONCE per (session, reason); all state mutations are skipped on dry_run."""
-    _reap(store, now)
-    text, authority = template_fn(cwd)
-    if authority not in STREAM_AUTHORITIES:
-        return None, False
-    ok, why = eligible(authority, payload, tpath, now)
+    armed goal is an old stream template. Returns `(logline_or_None, handled)`.
+
+    Cheap gates first (idle, the NEWEST turn is the 🏁 achievement, the 1 h
+    gap, a pending request), then the template resolution. `handled` is False
+    -- the caller's normal fulfilled / dead-loop path applies -- for a
+    non-stream box, an unreadable transcript or an unresolvable template (not
+    the migration's own state, so the #459 visibility must not be hidden);
+    every other outcome is migration-bound (True). `latest_is_done` = the
+    newest real assistant turn is the 🏁 turn: a 🏁 the evaluator REJECTED
+    keeps the loop running, so a later turn exists and the session is left
+    alone. A skip is journalled ONCE per (session, reason). Nothing is mutated
+    on dry_run."""
+    if not dry_run:
+        _reap(store, now)
     rec = store.get(sid) if isinstance(store.get(sid), dict) else {}
-    if ok and pending_fn(sid):
-        ok, why = False, "a request is already pending"
-    if ok and not text:
-        ok, why = False, "no current template resolved"
+    handled = True
+    ok, why = True, ""
+    age = _turn_liveness.transcript_age_s(tpath, now)
     last = rec.get("last")
-    if ok and isinstance(last, (int, float)) and 0 <= now - last < MIN_GAP_S:
+    if age is None:
+        ok, why, handled = False, "transcript unreadable", False
+    elif age < IDLE_MIN_S:
+        ok, why = False, "transcript not idle %ds" % IDLE_MIN_S
+    elif not latest_is_done:
+        ok, why = False, "the newest turn is not the 🏁 achievement"
+    elif isinstance(last, (int, float)) and 0 <= now - last < MIN_GAP_S:
         ok, why = False, "1/h attempt gap"
+    elif pending_fn(sid):
+        ok, why = False, "a request is already pending"
+    text = authority = None
+    if ok:
+        text, authority = template_fn(cwd)
+        if authority not in STREAM_AUTHORITIES:
+            return None, False
+        if not text:
+            ok, why, handled = False, "no current template resolved", False
+        elif is_old_stream_payload(text):
+            ok, why = False, "the resolved template is still the old one"
     if not ok:
         if dry_run or rec.get("why") == why:
-            return None, True
+            return None, handled
         store[sid] = dict(rec, why=why, seen=now)
         return ("dark-watch %s sid=%s -> stream-migrate SKIP: %s"
-                % (loc, sid, why)), True
+                % (loc, sid, why)), handled
     if dry_run:
         return ("dark-watch %s sid=%s -> STREAM-MIGRATE would record "
                 "(dry-run, authority=%s)" % (loc, sid, authority)), True

@@ -1784,22 +1784,27 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     # NOT-set cases, and a full origin tombstone is a cross-cutting follow-up --
     # is documented on `_structured_goal_mark_state`.
     if origin in _GOAL_WATCHDOG_REARM_ORIGINS \
-            and _structured_goal_mark_state(sid, state) == "set" \
-            and not _stream_migrate.delivery_ok(  # #1128: old-template stream only
-                origin, authority, (_structured_goal_mark_state(
-                    sid, state, with_mark=True) or {}).get("payload"),
-                watchdog.find_active_transcript(projects_dir, cwd), now):
-        _log_goal_sync("REFUSE structured-armed sid=%s cwd=%s origin=%s "
-                       "(refuse:structured-armed goal_mark=set)"
-                       % (sid, cwd, origin))
-        return "drop:already-armed"
+            and _structured_goal_mark_state(sid, state) == "set":
+        _mig_ok, _mig_why = _stream_migrate.delivery_ok(  # #1128 part 3 only
+            origin, authority, lambda: (_structured_goal_mark_state(
+                sid, state, with_mark=True) or {}).get("payload"),
+            lambda: watchdog.find_active_transcript(projects_dir, cwd), now)
+        if not _mig_ok:
+            _log_goal_sync("REFUSE structured-armed sid=%s cwd=%s origin=%s "
+                           "(refuse:structured-armed goal_mark=set%s)"
+                           % (sid, cwd, origin, ("; stream-migrate: %s"
+                                                 % _mig_why) if _mig_why else ""))
+            return "drop:already-armed"
+        _log_goal_sync("PASS structured-armed sid=%s cwd=%s origin=%s "
+                       "(old stream template, transcript idle)" % (sid, cwd, origin))
 
     # #1038 -- the keystroke NUDGE identity, derived from WHETHER this cwd is a
     # DECLARED managed window (see `_declared_window_nudge`): a declared window
     # rides the ALWAYS-ON `goal-arm` recovery nudge (never suppressed by the
     # #1023 machine-nudge switch) regardless of origin; every other box keeps
     # the staged PRIORITY `goal-sweep`, byte-identical to before.
-    _nudge = _declared_window_nudge(cwd)
+    _nudge = ("goal-arm" if origin == _stream_migrate.ORIGIN  # #1128: owner-
+              else _declared_window_nudge(cwd))  # authorized always-on watcher
 
     # Hard age cap -- checked first, no pane resolution needed. Unlike
     # compact, an expired goal-arm is not harmless: PING once (deduped on
@@ -2558,7 +2563,14 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             # transcript identically, and that IS a real failed delivery; so it
             # counts toward the SEPARATE, looser `dl_live_fails` bound instead,
             # restoring the give-up guarantee for that livelock.
-            if word in _GOAL_KEYSTROKE_SKIPS:
+            if (entry.get("origin") == _stream_migrate.ORIGIN and (
+                    word in _GOAL_KEYSTROKE_SKIPS
+                    or word == "skip:verify-failed-live")):
+                # #1128 guard 5: ONE typed attempt per stream-migrate request
+                # (the next is the next hour's decision), never 3-6 retypes.
+                clear_goal_request(sid, path=requests_path)
+                dsuf += " -> dropped (stream-migrate: one typed attempt)"
+            elif word in _GOAL_KEYSTROKE_SKIPS:
                 _bump_goal_delivery_fail(sid, word, path=requests_path)
             elif word == "skip:verify-failed-live":
                 _bump_goal_delivery_fail(sid, word, path=requests_path,
@@ -3025,10 +3037,14 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
                 _st.pop(sid, None)
         line, handled = _stream_migrate.decide(
             sid, cwd, tpath, payload, now, loc, dry_run,
-            state.setdefault("goal_stream_migrate", {}),
+            (dict(state.get("goal_stream_migrate") or {}) if dry_run
+             else state.setdefault("goal_stream_migrate", {})),
             rearm_fn or _default_rearm_fn,
             lambda s: isinstance(load_goal_requests(requests_path).get(s), dict),
-            _record, _reset)
+            _record, _reset, latest_is_done=(
+                watchdog.transcript_last_backlog_empty_ts(tpath) is not None))
+        if line and not handled:     # not migration state: journal, fall through
+            _log_goal_sync(line)
         if handled:
             return line, True
 
