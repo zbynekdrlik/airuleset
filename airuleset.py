@@ -5390,6 +5390,7 @@ def cmd_handoff(args):
     harness = getattr(args, "harness", None)
     shared_benefit = getattr(args, "shared_benefit", None)
     tenant_scope = getattr(args, "tenant_scope", None)
+    frontline_impact = getattr(args, "frontline_impact", None)
     source_verified = getattr(args, "source_verified", None)
     tested_tree = getattr(args, "tested_tree", None)
     evidence_head = getattr(args, "evidence_head", None)
@@ -5601,6 +5602,7 @@ def cmd_handoff(args):
         verified_at_utc=now_utc, self_review_table=table_text,
         bounce_round=rnd, stack=stack, harness=harness,
         shared_benefit=shared_benefit, tenant_scope=tenant_scope,
+        frontline_impact=frontline_impact,
         source_verified=source_verified, tested_tree=tested_tree,
         evidence_head=evidence_head, root_cause=root_cause,
         prevencia_read=prevencia_read,
@@ -7403,8 +7405,12 @@ def _watchdog_queue_classify(cwd):
     def classify_fn(number):
         if "slug" not in ctx:
             ctx["slug"] = _repo_slug(cwd=root)
+            # #1120: unblock a dep whose fix is merged-unreleased (M bucket),
+            # not only when CLOSED — built once per classify context.
+            ctx["merged_fn"] = _wc.merged_unreleased_fn(ctx["slug"], root)
         try:
-            return _wc.classify_number(number, ctx["slug"], _runner, root)
+            return _wc.classify_number(number, ctx["slug"], _runner, root,
+                                       merged_fn=ctx["merged_fn"])
         except Exception:
             return "dep-wait"         # fail-safe: HOLD on any classify error
 
@@ -10201,6 +10207,10 @@ def main():
                            "extended-template repos)")
     p_ho.add_argument("--tenant-scope", dest="tenant_scope",
                       help="Tenant-scope: which tenants (optional)")
+    p_ho.add_argument("--frontline-impact", dest="frontline_impact",
+                      help="Frontline-impact: shared-shell change — every "
+                           "hosted module + its entry-path E2E (required by "
+                           "repos whose template declares it; #1120)")
     p_ho.add_argument("--source-verified", dest="source_verified",
                       help="Source-verified: external-data horizon (optional)")
     p_ho.add_argument("--tested-tree", dest="tested_tree",

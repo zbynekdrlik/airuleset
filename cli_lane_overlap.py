@@ -150,7 +150,11 @@ def gather_issue_deps(repo_root, issues, run=None):
             return ""
         return (r.stdout or "") if getattr(r, "returncode", 1) == 0 else ""
 
-    return wc.resolve_issue_deps(issues, slug, wc_runner, repo_root)
+    # #1120: a Depends-on: ref whose fix is merged-unreleased (M bucket) counts
+    # as satisfied — the receipt's deps field agrees with the picker.
+    merged_fn = wc.merged_unreleased_fn(slug, repo_root)
+    return wc.resolve_issue_deps(issues, slug, wc_runner, repo_root,
+                                 merged_fn=merged_fn)
 
 
 def _lane_files(repo_root, branch, run, base_branch):

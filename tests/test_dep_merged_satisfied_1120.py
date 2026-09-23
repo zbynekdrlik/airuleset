@@ -30,13 +30,26 @@ def _state(states):
     return state_fn
 
 
+def _merged(*pairs):
+    """merged_fn satisfying exactly the given (repo, num) pairs."""
+    s = set(pairs)
+
+    def fn(repo, num):
+        return (repo, num) in s
+    return fn
+
+
+def _never_merged(repo, num):
+    return False
+
+
 class TestDepWaitMergedSatisfied(TestCase):
     """The ONE shared predicate: dep_wait, given a merged_fn."""
 
     def test_open_dep_in_merged_set_is_satisfied(self):
         # #7892 depends on #7883; #7883 is OPEN but merged into integration.
         deps = [(SLUG, 7883)]
-        merged_fn = lambda repo, num: (repo, num) == (SLUG, 7883)
+        merged_fn = _merged((SLUG, 7883))
         blocked, unsat = wc.dep_wait(
             deps, _state({(SLUG, 7883): "OPEN"}), merged_fn=merged_fn)
         self.assertFalse(blocked, "an OPEN dep in the merged-unreleased set "
@@ -45,7 +58,7 @@ class TestDepWaitMergedSatisfied(TestCase):
 
     def test_open_dep_not_merged_is_dep_wait(self):
         deps = [(SLUG, 7883)]
-        merged_fn = lambda repo, num: False
+        merged_fn = _never_merged
         blocked, unsat = wc.dep_wait(
             deps, _state({(SLUG, 7883): "OPEN"}), merged_fn=merged_fn)
         self.assertTrue(blocked, "an OPEN, un-merged dep is still dep-wait")
@@ -53,7 +66,7 @@ class TestDepWaitMergedSatisfied(TestCase):
 
     def test_closed_dep_is_satisfied_as_today(self):
         deps = [(SLUG, 7883)]
-        merged_fn = lambda repo, num: False
+        merged_fn = _never_merged
         blocked, _ = wc.dep_wait(
             deps, _state({(SLUG, 7883): "CLOSED"}), merged_fn=merged_fn)
         self.assertFalse(blocked)
@@ -61,7 +74,7 @@ class TestDepWaitMergedSatisfied(TestCase):
     def test_unresolvable_dep_still_blocks(self):
         # state_fn → None AND not merged → fail-safe blocked.
         deps = [(SLUG, 9999)]
-        merged_fn = lambda repo, num: False
+        merged_fn = _never_merged
         blocked, unsat = wc.dep_wait(deps, _state({}), merged_fn=merged_fn)
         self.assertTrue(blocked)
         self.assertEqual(unsat, [(SLUG, 9999)])
@@ -74,7 +87,7 @@ class TestDepWaitMergedSatisfied(TestCase):
 
     def test_mixed_one_merged_one_open(self):
         deps = [(SLUG, 7883), (SLUG, 8000)]
-        merged_fn = lambda repo, num: (repo, num) == (SLUG, 7883)
+        merged_fn = _merged((SLUG, 7883))
         blocked, unsat = wc.dep_wait(
             deps,
             _state({(SLUG, 7883): "OPEN", (SLUG, 8000): "OPEN"}),
@@ -117,7 +130,7 @@ class TestDepWaitMapMergedPassthrough(TestCase):
         runner = _MergedRunner(
             bodies={7892: ("Depends-on: #7883", [])},
             states={(SLUG, 7883): "OPEN"})
-        merged_fn = lambda repo, num: (repo, num) == (SLUG, 7883)
+        merged_fn = _merged((SLUG, 7883))
         m = wc.dep_wait_map(rows, SLUG, runner, "/root", merged_fn=merged_fn)
         self.assertNotIn(7892, m, "an adoption row whose mechanism is merged "
                                   "must be dispatchable, not dep-wait")
@@ -128,7 +141,7 @@ class TestDepWaitMapMergedPassthrough(TestCase):
         runner = _MergedRunner(
             bodies={7892: ("Depends-on: #7883", [])},
             states={(SLUG, 7883): "OPEN"})
-        merged_fn = lambda repo, num: False
+        merged_fn = _never_merged
         m = wc.dep_wait_map(rows, SLUG, runner, "/root", merged_fn=merged_fn)
         self.assertIn(7892, m)
 
@@ -138,7 +151,7 @@ class TestResolveIssueDepsMerged(TestCase):
         runner = _MergedRunner(
             bodies={7892: ("Depends-on: #7883", [])},
             states={(SLUG, 7883): "OPEN"})
-        merged_fn = lambda repo, num: (repo, num) == (SLUG, 7883)
+        merged_fn = _merged((SLUG, 7883))
         self.assertEqual(
             wc.resolve_issue_deps([7892], SLUG, runner, "/root",
                                   merged_fn=merged_fn),

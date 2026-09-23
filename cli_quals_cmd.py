@@ -1240,7 +1240,12 @@ def _dep_wait_map_for(rows, root):
     meta = airuleset.fetch_meta(rows, runner, root, slug=slug)
     if meta is None:
         return {}, slug, False
-    dep_map = airuleset.dep_wait_map(rows, slug, runner, root, meta=meta)
+    # #1120: a Depends-on: ref whose fix is MERGED-unreleased (M bucket) counts
+    # as satisfied — a cross-stream adoption unblocks at merge, not at close.
+    import cli_work_class as _wc
+    merged_fn = _wc.merged_unreleased_fn(slug, root)
+    dep_map = airuleset.dep_wait_map(rows, slug, runner, root, meta=meta,
+                                     merged_fn=merged_fn)
     return dep_map, slug, True
 
 

@@ -11,7 +11,6 @@ rejected — domain knowledge stays in odoo-erp).
 
 import re
 import sys
-import unittest
 from pathlib import Path
 from unittest import TestCase, main
 import unittest.mock as m
