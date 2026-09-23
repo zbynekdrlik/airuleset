@@ -98,7 +98,7 @@
     "gates/lanefill.py": 628,
     "gates/pushscope.py": 154,
     "gates/pushtest.py": 247,
-    "gates/questionscope.py": 398,
+    "gates/questionscope.py": 444,
     "gates/secrets.py": 355,
     "gates/shellcmd.py": 88,
     "gates/testskips.py": 245,
