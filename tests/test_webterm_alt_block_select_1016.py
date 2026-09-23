@@ -161,6 +161,101 @@ def _run_block_harness(html):
     return json.loads(r.stdout.strip().splitlines()[-1])
 
 
+# ---------------------------------------------------------------------------
+# WHOLE-DRAG node harness (fix-forward, ALWAYS runs where `node` is present) --
+# an always-run behavioural lock for the mousemove/mouseup re-dispatch that the
+# real-browser tier proves end-to-end but which would otherwise be covered only
+# by the skip-prone browser tier. It gives `el` an `ownerDocument` (a stub `doc`
+# EventTarget) so `startDrag` actually arms the doc listeners, and models xterm
+# registering its OWN selection move/up on ownerDocument at mousedown time (via a
+# stand-in xterm mousedown handler that registers doc move/up recorders when it
+# receives the synthetic Shift+Alt mousedown). Flat EventTarget = REGISTRATION
+# order, and our onMove/onUp are registered by startDrag BEFORE the stand-in xterm
+# registers its doc recorders, so the translator suppresses the plain move/up and
+# only the Shift+Alt re-dispatch reaches xterm -- exactly the real capture-phase
+# ordering. It proves: a plain-Alt drag delivers a Shift+Alt mousemove AND mouseup
+# to xterm (never the plain ones); the drag-scoped listeners are gone after mouseup
+# (a post-up move reaches nothing); console stays clean.
+# ---------------------------------------------------------------------------
+_DRAG_HARNESS = r"""
+%(attach)s
+const consoleHits = [];
+for (const m of ['error', 'warn', 'log', 'info', 'debug']) {
+  console[m] = (...a) => { consoleHits.push(m + ':' + a.join(' ')); };
+}
+class MouseEvt extends Event {
+  constructor(type, init) {
+    init = init || {};
+    super(type, { bubbles: !!init.bubbles, cancelable: !!init.cancelable });
+    const num = ['button', 'buttons', 'clientX', 'clientY', 'screenX', 'screenY', 'detail'];
+    const flag = ['altKey', 'shiftKey', 'ctrlKey', 'metaKey'];
+    for (const k of num) this[k] = (k in init) ? init[k] : 0;
+    for (const k of flag) this[k] = (k in init) ? init[k] : false;
+    this.view = ('view' in init) ? init.view : null;
+    this.__target = null;
+  }
+}
+const doc = new EventTarget();
+const el = new EventTarget();
+el.ownerDocument = doc;
+const winET = new EventTarget();
+const term = { element: el, options: { altClickMovesCursor: true, macOptionClickForcesSelection: false } };
+const win = { MouseEvent: MouseEvt, term: term, document: doc,
+              addEventListener: (...a) => winET.addEventListener(...a) };
+
+let attachError = null;
+try { attachBlockSelect(win); } catch (e) { attachError = String(e && e.message || e); }
+
+// stand-in xterm: mousedown STARTS the selection AND registers its own move/up on
+// ownerDocument (models SelectionService._setMouseDownListeners), recording what
+// it receives.
+const gotMove = [], gotUp = [], gotDown = [];
+function xtermMove(ev) { gotMove.push({ a: ev.altKey, s: ev.shiftKey }); }
+function xtermUp(ev)   { gotUp.push({ a: ev.altKey, s: ev.shiftKey });
+                         doc.removeEventListener('mousemove', xtermMove);
+                         doc.removeEventListener('mouseup', xtermUp); }
+el.addEventListener('mousedown', (ev) => {
+  gotDown.push({ a: ev.altKey, s: ev.shiftKey, d: ev.detail });
+  doc.addEventListener('mousemove', xtermMove);
+  doc.addEventListener('mouseup', xtermUp);
+});
+
+function fireOn(target, type, init) {
+  target.dispatchEvent(new MouseEvt(type,
+    Object.assign({ bubbles: true, cancelable: true, button: 0, buttons: 1, detail: 1 }, init)));
+}
+// a full plain-Alt drag: mousedown on el, moves + up on doc (where xterm listens)
+fireOn(el, 'mousedown', { altKey: true, shiftKey: false, detail: 1 });
+fireOn(doc, 'mousemove', { altKey: true, shiftKey: false, detail: 0 });
+fireOn(doc, 'mouseup', { altKey: true, shiftKey: false, detail: 1 });
+// after mouseup the drag listeners must be gone: a further plain move reaches nothing new
+const moveCountBeforePostUp = gotMove.length;
+fireOn(doc, 'mousemove', { altKey: true, shiftKey: false, detail: 0 });
+
+const out = {
+  attachError: attachError,
+  gotDown: gotDown,
+  gotMove: gotMove,
+  gotUp: gotUp,
+  postUpMoveDelta: gotMove.length - moveCountBeforePostUp,
+  consoleHits: consoleHits,
+};
+process.stdout.write(JSON.stringify(out));
+"""
+
+
+def _run_drag_harness(html):
+    attach = _extract_js_function(html, "attachBlockSelect")
+    src = _DRAG_HARNESS % {"attach": attach}
+    d = tempfile.mkdtemp()
+    hp = Path(d) / "dragharness.js"
+    hp.write_text(src, encoding="utf-8")
+    r = subprocess.run(["node", str(hp)], capture_output=True, text=True, timeout=30)
+    if r.returncode != 0:
+        raise AssertionError("drag harness failed:\n%s\n%s" % (r.stdout, r.stderr))
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
 class TestAltBlockSelectStructure1016(unittest.TestCase):
     """The translator ships, is wired into the per-iframe poll, and carries the
     exact gesture/guard/capture semantics the design specifies."""
@@ -293,6 +388,41 @@ class TestAltBlockSelectBehaviour1016(unittest.TestCase):
         self.assertEqual(self.out["consoleHits"], [])
 
 
+class TestAltBlockDrag1016(unittest.TestCase):
+    """Always-run behavioural lock for the WHOLE-drag translation (fix-forward):
+    every plain-Alt mousemove + the final mouseup reach xterm as Shift+Alt, and
+    the drag-scoped listeners are gone after mouseup."""
+
+    @classmethod
+    def setUpClass(cls):
+        if shutil.which("node") is None:
+            raise unittest.SkipTest("node not available")
+        html = w.render_dashboard_html(_inv(), ttyd_base="/t")
+        cls.out = _run_drag_harness(html)
+
+    def test_attach_never_raises(self):
+        self.assertIsNone(self.out["attachError"])
+
+    def test_mousedown_reaches_xterm_as_shift_alt_single_click(self):
+        # the synthetic mousedown carries detail (starts xterm's selection).
+        self.assertEqual(self.out["gotDown"], [{"a": True, "s": True, "d": 1}])
+
+    def test_mousemove_reaches_xterm_as_shift_alt(self):
+        # the plain-Alt move is suppressed; xterm sees only the Shift+Alt clone.
+        self.assertEqual(self.out["gotMove"], [{"a": True, "s": True}])
+
+    def test_mouseup_reaches_xterm_as_shift_alt(self):
+        self.assertEqual(self.out["gotUp"], [{"a": True, "s": True}])
+
+    def test_listeners_removed_after_mouseup(self):
+        # a further move after the drag ended reaches nothing (no leak / no
+        # stray extension).
+        self.assertEqual(self.out["postUpMoveDelta"], 0)
+
+    def test_console_stays_empty(self):
+        self.assertEqual(self.out["consoleHits"], [])
+
+
 # ---------------------------------------------------------------------------
 # REAL-BROWSER tier (#1016 fix-forward): drives the SHIPPED attachBlockSelect
 # against a REAL xterm served by a loopback ttyd on an ISOLATED tmux server
@@ -407,6 +537,24 @@ def _free_port():
     return port
 
 
+def _wait_port(port, timeout=15.0):
+    """Poll 127.0.0.1:port until it accepts a connection (ttyd ready) or timeout.
+    Replaces a fixed sleep (no-timeout-band-aids): the driver's own
+    waitForFunction(HELLOWORLD) is the content gate, this only gates connect."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.5)
+        try:
+            s.connect(("127.0.0.1", port))
+            s.close()
+            return True
+        except OSError:
+            s.close()
+            time.sleep(0.1)
+    return False
+
+
 class TestAltBlockBrowser1016(unittest.TestCase):
     """Alt+drag over an indented block yields a COLUMN selection in a real xterm
     under tmux `mouse on` -- the outcome the node harness cannot prove."""
@@ -427,16 +575,20 @@ class TestAltBlockBrowser1016(unittest.TestCase):
         html = w.render_dashboard_html(_inv(), ttyd_base="/t")
         cls.attach = _extract_js_function(html, "attachBlockSelect")
 
+        cls.procs = []
         cls.d = tempfile.mkdtemp()
+        # short unix-socket path (tmux caps ~104 bytes) -- never under the long
+        # per-run tempdir. Register cleanup NOW (addClassCleanup fires even if
+        # setUpClass raises mid-way) so no process/socket/tempdir ever leaks
+        # (cleanup-after-yourself, #925 -- kill-server does NOT unlink the socket).
+        cls.sock = "/tmp/wt1016-%s.sock" % uuid.uuid4().hex[:8]
+        cls.addClassCleanup(cls._cleanup_runtime)
+
         cls.driver = Path(cls.d) / "driver.js"
         cls.driver.write_text(_REAL_BROWSER_DRIVER, encoding="utf-8")
         cls.attach_file = Path(cls.d) / "attach.js"
         cls.attach_file.write_text(cls.attach, encoding="utf-8")
 
-        # short unix-socket path (tmux caps ~104 bytes) -- never under the long
-        # per-run tempdir; torn down in tearDownClass.
-        cls.sock = "/tmp/wt1016-%s.sock" % uuid.uuid4().hex[:8]
-        cls.procs = []
         cls._alt = cls._run_mode("alt")
         cls._plain = cls._run_mode("plain")
 
@@ -453,13 +605,13 @@ class TestAltBlockBrowser1016(unittest.TestCase):
             raise unittest.SkipTest("cannot start isolated tmux: %s" % r.stderr)
         subprocess.run(["tmux", "-S", cls.sock, "set", "-g", "mouse", "on"],
                        capture_output=True, text=True)
-        time.sleep(0.4)
         port = _free_port()
         ttyd = subprocess.Popen(["ttyd", "-i", "127.0.0.1", "-p", str(port), "-W",
                                  "tmux", "-S", cls.sock, "attach", "-t", "bs"],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         cls.procs.append(ttyd)
-        time.sleep(1.5)
+        if not _wait_port(port):
+            raise unittest.SkipTest("ttyd did not become reachable on 127.0.0.1:%d" % port)
         try:
             r = subprocess.run([cls.node, str(cls.driver), cls.pw, cls.chromium,
                                 "http://127.0.0.1:%d/" % port, str(cls.attach_file), mode],
@@ -479,7 +631,7 @@ class TestAltBlockBrowser1016(unittest.TestCase):
         return json.loads(r.stdout.strip().splitlines()[-1])
 
     @classmethod
-    def tearDownClass(cls):
+    def _cleanup_runtime(cls):
         for p in getattr(cls, "procs", []):
             try:
                 p.kill()
@@ -490,6 +642,13 @@ class TestAltBlockBrowser1016(unittest.TestCase):
                            capture_output=True, text=True)
         except Exception as e:
             print("teardown tmux kill-server failed:", e, file=sys.stderr)
+        # kill-server does NOT remove the socket file -- unlink it so /tmp never
+        # accumulates dead wt1016-*.sock across CI runs (#925).
+        if os.path.exists(cls.sock):
+            try:
+                os.unlink(cls.sock)
+            except OSError as e:
+                print("teardown socket unlink failed:", e, file=sys.stderr)
         d = getattr(cls, "d", None)
         if d:
             shutil.rmtree(d, ignore_errors=True)
