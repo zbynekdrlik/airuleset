@@ -19,6 +19,7 @@ import ast
 import subprocess
 import sys
 import unittest
+import tempfile
 import unittest.mock as m
 from pathlib import Path
 
@@ -144,6 +145,15 @@ class TestBackRefSeamTeeth(unittest.TestCase):
                          "facade-patched filedrop_bind_ips landed -> a facade patch would silently pass")
 
     def test_choose_port_resolves_persisted_helper_via_leaf_not_facade(self):
+        # _choose_filedrop_port PERSISTS the chosen port; keep that write out of
+        # the real ~/.claude/filedrop.port (a leaked 8789 there made
+        # test_filedrop::test_constants_present fail in the same xdist worker).
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        port_file_patch = m.patch.object(fw, "FILEDROP_PORT_FILE",
+                                         Path(tmp.name) / "filedrop.port")
+        port_file_patch.start()
+        self.addCleanup(port_file_patch.stop)
         leaf_mock = m.Mock(return_value=8791)
         with m.patch.object(fw, "filedrop_persisted_port", leaf_mock), \
              m.patch.object(fw, "_run_systemctl", lambda a: (3, "inactive", "")):
