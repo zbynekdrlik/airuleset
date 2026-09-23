@@ -501,7 +501,7 @@ CAVEMAN_STATUSLINE_COMMAND = f'bash "{CAVEMAN_SHIM_DEST}"'
 
 # Subagent definitions (single .md files) symlinked into ~/.claude/agents/.
 # Only the two worker agents survive (#991): the subagent MODEL default is the
-# native env CLAUDE_CODE_SUBAGENT_MODEL (claude-opus-4-8), and the working model
+# native env CLAUDE_CODE_SUBAGENT_MODEL (claude-opus-5-5, #1119), and the working model
 # chooses TYPE/MODEL/COUNT natively — the old pinned tier-agent types are removed.
 AGENT_NAMES = ["autopilot-worker", "ticket-validator"]
 
