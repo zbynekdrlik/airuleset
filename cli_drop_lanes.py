@@ -18,6 +18,7 @@ at its top; this imports nothing back) — the both-orders import test proves it
 using ``cli_drop_gateway.DROP_LANES`` / ``.build_drop_lanes`` / ``.read_drop_lanes_cache``
 / ``.filedrop_port_probe_snippet`` unchanged.
 """
+import re
 import sys
 from pathlib import Path
 
@@ -578,25 +579,36 @@ CONTROLLER_SERVICE_ROUTES = (
 
 _SERVICE_ROUTE_KEYS = ("hostname", "origin", "name", "allowed_emails",
                        "session_duration")
+# ONE lowercase DNS label directly under the zone. The Universal SSL wildcard
+# covers exactly one level, and the hostname is spliced into the tunnel YAML, so
+# nothing else is publishable.
+_SERVICE_ROUTE_HOST_RE = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+                                    r"\.newlevel\.media")
+_SERVICE_ROUTE_EMAIL_RE = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 
 
 def service_route_complete(route):
-    """True iff ``route`` is a complete, publishable spec (#1131): every key is
-    present and non-empty, ``origin`` is an ``http(s)://`` URL, and
-    ``allowed_emails`` is a non-empty list of non-empty strings. An incomplete row
-    is PENDING and must never get ingress, Access or DNS. An Access app with an
-    empty include list is an open door, so an empty list fails too."""
+    """True iff ``route`` is a complete, publishable spec (#1131). Every key must
+    be present and non-empty. ``hostname`` must be one lowercase label under
+    ``newlevel.media``. ``origin`` must be an ``http(s)://`` URL.
+    ``allowed_emails`` must be a non-empty list of e-mail addresses. An
+    incomplete row is PENDING and must never get ingress, Access or DNS. An
+    Access app with an empty include list is an open door, so an empty list
+    fails too."""
     if not isinstance(route, dict):
         return False
     for key in _SERVICE_ROUTE_KEYS:
         if not route.get(key):
             return False
+    if not _SERVICE_ROUTE_HOST_RE.fullmatch(str(route["hostname"])):
+        return False
     if not str(route["origin"]).startswith(("http://", "https://")):
         return False
     emails = route["allowed_emails"]
     if isinstance(emails, str) or not isinstance(emails, (list, tuple)):
         return False
-    return all(isinstance(e, str) and e.strip() for e in emails)
+    return all(isinstance(e, str) and _SERVICE_ROUTE_EMAIL_RE.fullmatch(e)
+               for e in emails)
 
 
 def service_route_access_spec(route):

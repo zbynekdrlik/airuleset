@@ -419,13 +419,19 @@ def reconcile_service_routes(dry_run=True, routes=None, dns_client=None,
         routable without its Access app.
 
     Returns ``(all_ok, results)``; each row is ``{host, dns_action,
-    access_action, live, pending, error}``. The function never raises: a
-    per-route failure is a LOUD ``service-routes: <host> DNS/Access FAILED``
-    line and the loop continues. A LIVE run from a git worktree is REFUSED with
-    zero API calls (#1115 slice E), even with injected clients, which mirrors
-    ``reconcile_drop_lanes``. Every seam is injectable for offline tests.
-    Service routes carry no go-live marker (not a drop lane), so nothing is
-    written to the go-live cache."""
+    access_action, live, pending, error}``. A per-route failure never raises:
+    it is a LOUD ``service-routes: <host> DNS/Access FAILED`` line and the loop
+    continues. Only a client-build error outside the loop can propagate, which
+    matches ``reconcile_drop_lanes``, and the install caller wraps it. A LIVE run
+    from a git worktree is REFUSED with zero API calls (#1115 slice E), even
+    with injected clients. Every seam is injectable for offline tests. Service
+    routes carry no go-live marker (not a drop lane), so nothing is written to
+    the go-live cache.
+
+    Residual, the same as for drop lanes: the ingress rule is rendered from the
+    spec before this reconcile runs. So a leftover or hand-made CNAME for a host
+    whose Access apply FAILED would reach the origin. The create-only DNS step
+    never makes such a record, and the conflict line reports a foreign one."""
     out = out if out is not None else sys.stdout
     if not dry_run:
         is_wt = is_worktree_fn if is_worktree_fn is not None \
@@ -504,7 +510,8 @@ def reconcile_and_report(dry_run=False, out=None):
     a LOUD summary line per failure. NEVER raises and NEVER fails the install —
     a reconcile failure is reported, the install continues (the design's
     "never a whole-install abort"). Returns True when nothing failed (or it was a
-    benign no-op off the controller), False when a lane's reconcile failed.
+    benign no-op off the controller), and False when a drop lane's or a
+    ``CONTROLLER_SERVICE_ROUTES`` route's reconcile failed (#1131).
     """
     out = out if out is not None else sys.stdout
     try:
