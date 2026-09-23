@@ -193,15 +193,19 @@ class TestReviewRoleVariant1000(TestCase):
         # role-scope, FULL-only) changed full/sequential/infra. full/parallel and
         # full/sequential are UNTOUCHED (item 1 skips full, item 2 skips
         # non-infra). Regenerated deliberately.
+        # #1128 re-golden (owner ruling 2026-09-23): the reduced profiles LOST
+        # their (B) done-state and gained the stream-idle clause, so every
+        # branch-merge/fork-no-merge variant changed. full/* are UNTOUCHED.
+        # Regenerated deliberately.
         "full/parallel/None": "2d9a5539f472a22cda96177c",
         "full/sequential/None": "6920ca09926869d6679eb0cc",
         "full/sequential/infra": "e3836d97e467eafe428a92ec",
-        "branch-merge/parallel/None": "dd68a602c7f3b08b3d61bea0",
-        "branch-merge/sequential/None": "054d3ccf16c12b4bdb800848",
-        "branch-merge/sequential/infra": "179a402988f31933f68f7ecb",
-        "fork-no-merge/parallel/None": "b5056da7563e13c148e4f402",
-        "fork-no-merge/sequential/None": "42ae0a7c4d24b1fc7df6c1e1",
-        "fork-no-merge/sequential/infra": "5d43b4b3cbc0c35294699ffe",
+        "branch-merge/parallel/None": "baeaa60a576d206e5e031d3d",
+        "branch-merge/sequential/None": "50ea6ffa33954088695a7978",
+        "branch-merge/sequential/infra": "14ec8214eff9cae5330a9eb3",
+        "fork-no-merge/parallel/None": "adf7e0904676c259633645cc",
+        "fork-no-merge/sequential/None": "0d82b098f66601de3038235f",
+        "fork-no-merge/sequential/infra": "a34c388830fba45ecc5ab6ab",
     }
 
     def test_nonreview_variants_byte_identical_snapshot(self):

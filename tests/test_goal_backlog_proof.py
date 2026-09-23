@@ -59,6 +59,11 @@ def master_goal_lines():
     return re.findall(r"^/goal MASTER LOOP.*$", read(SKILL_MASTER), re.MULTILINE)
 
 
+def b_lines():
+    """{profile: line} for every profile that HAS a (B) — full only (#1128)."""
+    return {p: goal_lines()[p] for p in PROOF_SPEC}
+
+
 # --------------------------------------------------------------------------- #
 # Discriminators, read out of the shipped template — never hardcoded here.
 # --------------------------------------------------------------------------- #
@@ -93,11 +98,12 @@ SLICE_QUALS_COUNT = "python3 ~/devel/airuleset/airuleset.py slice-quals --count"
 # still had open work.
 CORE_QUALS_COUNT = "python3 ~/devel/airuleset/airuleset.py core-quals --count"
 
+# #1128 (owner ruling 2026-09-23): the reduced-authority STREAM profiles
+# (branch-merge, fork-no-merge) have NO (B) at all — a stream loop never ends on
+# an empty slice (gk/U/W work keeps returning); it idles on ONE `stream-wait`
+# waiter instead. So (B) — and its proof spec — is FULL-authority only.
 PROOF_SPEC = {
     FULL: [(CORE_QUALS_COUNT, "0"), ("gh run list", "success")],
-    BRANCH_MERGE: [(SLICE_QUALS_COUNT, "0"), ("gh run list", "success"),
-                   ("git merge-base", "RELEASED")],
-    FORK_NO_MERGE: [(SLICE_QUALS_COUNT, "0"), ("git merge-base", "RELEASED")],
 }
 
 
@@ -202,39 +208,40 @@ def _proof_block(profile=FULL, **override):
 
 
 class TestTemplatesRequireProofNotProse(TestCase):
-    """Every authority profile's (B) must be a presence test, not a judgement."""
+    """Every (B) must be a presence test, not a judgement. Only the FULL profile
+    carries a (B) since #1128 — the stream profiles have no done-state."""
 
     def test_there_are_still_three_templates(self):
         self.assertEqual(len(goal_lines()), 3)
 
     def test_every_template_requires_the_backlog_empty_marker(self):
-        for line in goal_lines():
+        for line in b_lines().values():
             self.assertIn(MARKER, line)
 
     def test_every_template_says_done_alone_never_satisfies_it(self):
-        for line in goal_lines():
+        for line in b_lines().values():
             self.assertRegex(
                 line, r"`✅ DONE:` NEVER satisfies \(B\)")
 
     def test_every_template_requires_the_output_to_be_pasted(self):
-        for line in goal_lines():
+        for line in b_lines().values():
             self.assertIn("pasted OUTPUT", line)
 
     def test_every_template_falls_back_to_continue_when_it_cannot_tell(self):
-        for line in goal_lines():
+        for line in b_lines().values():
             self.assertIn("CONTINUE", line)
             self.assertIn("no third answer", line)
 
     def test_every_template_says_how_to_tell_real_from_claimed(self):
-        for line in goal_lines():
+        for line in b_lines().values():
             self.assertIn("HOW TO TELL A REAL COMPLETION", line)
 
     def test_every_template_tells_the_worker_to_produce_the_proof(self):
-        for line in goal_lines():
+        for line in b_lines().values():
             self.assertIn("PRODUCE THE PROOF", line)
 
     def test_every_profile_declares_the_commands_its_proof_spec_needs(self):
-        for profile, line in enumerate(goal_lines()):
+        for profile, line in b_lines().items():
             for prefix, _ in PROOF_SPEC[profile]:
                 self.assertTrue(
                     declared_commands(line, prefix),
@@ -250,7 +257,7 @@ class TestTemplatesRequireProofNotProse(TestCase):
         MENTION the bare form to explain why it is unusable, and a mention is
         not a declaration.
         """
-        for profile, line in enumerate(goal_lines()):
+        for profile, line in b_lines().items():
             for prefix, _ in PROOF_SPEC[profile]:
                 if not prefix.startswith("gh"):
                     continue
@@ -261,7 +268,7 @@ class TestTemplatesRequireProofNotProse(TestCase):
     def test_the_template_states_the_exact_token_each_proof_must_print(self):
         """Binds the tokens the decision procedure compares against to the
         shipped text, so the two cannot drift apart."""
-        for profile, line in enumerate(goal_lines()):
+        for profile, line in b_lines().items():
             for _, expected in PROOF_SPEC[profile]:
                 self.assertIn("printing exactly `%s`" % expected, line)
 
@@ -329,11 +336,17 @@ class TestTheTurnThatActuallyStoppedTheLoop(TestCase):
 
 
 class TestReducedAuthorityTemplatesToo(TestCase):
-    """branch-merge and fork-no-merge carry the same defect and the same fix."""
+    """branch-merge and fork-no-merge: #1128 REMOVED their (B) (owner ruling
+    2026-09-23 — a stream loop has NO backlog-empty done-state; gk/U/W work
+    keeps returning, so any countable (B) eventually holds and ends the loop
+    while work is still coming — david1-4 sat idle)."""
 
-    def test_both_reduced_templates_demand_the_same_marker(self):
+    def test_both_reduced_templates_carry_no_done_state(self):
         for line in goal_lines()[1:]:
-            self.assertIn(MARKER, line)
+            self.assertNotIn(MARKER, line)
+            self.assertNotIn("🏁", line)
+            self.assertNotIn("(B)", line)
+            self.assertIn("NO BACKLOG-EMPTY END", line)
 
     def test_the_camera_box_shape_fails_under_every_profile(self):
         for profile in PROOF_SPEC:
@@ -356,15 +369,17 @@ class TestReducedAuthorityTemplatesToo(TestCase):
         for line in goal_lines()[1:]:
             self.assertNotIn("--assignee @me", line)
 
-    def test_a_reduced_stream_must_also_prove_the_work_was_RELEASED(self):
-        """The 2026-07-20 incident: tickets closed, prod got nothing. An empty
-        slice with the release still pending is review-watch, not done."""
+    def test_a_reduced_stream_idles_on_one_stream_wait_never_ends(self):
+        """#1128: the 2026-07-20 release-containment proof is moot — a stream
+        loop no longer ends at all, released or not. Its idle state is ONE
+        background `stream-wait`, and only the owner ends the loop."""
         for profile in (BRANCH_MERGE, FORK_NO_MERGE):
-            turn = (_proof_block(profile, **{"git merge-base": ""})
-                    + MARKER + " 0 open\n✅ DONE: hotovo\n")
-            holds, reason = backlog_empty_holds(turn, profile)
-            self.assertFalse(holds)
-            self.assertIn("git merge-base", reason)
+            line = goal_lines()[profile]
+            self.assertIn(
+                "keep exactly ONE background "
+                "`python3 ~/devel/airuleset/airuleset.py stream-wait` live", line)
+            self.assertIn("Only the OWNER ends this loop (`/goal clear`)", line)
+            self.assertNotIn(profile, PROOF_SPEC)
 
 
 class TestTheFullProofCountsWhatOnlyThisBoxCanAction(TestCase):
@@ -806,7 +821,10 @@ class TestBranchMergeTemplateNeverReadsAsSelfClose(TestCase):
                         goal_lines()[BRANCH_MERGE])
 
     def test_the_replacement_phrase_is_present(self):
-        self.assertIn("is MERGED via my own PR into",
+        # #1128: the obligation clause carrying "is MERGED via my own PR into"
+        # left with the (B) block; the authority boundary it stated survives
+        # in the authority-ends clause.
+        self.assertIn("My authority ENDS at the integration branch",
                       goal_lines()[BRANCH_MERGE])
 
     def test_the_proof_verifies_a_hand_off_not_a_close(self):
@@ -834,11 +852,11 @@ class TestBranchMergeTemplateNeverReadsAsSelfClose(TestCase):
         # backlog with the release still pending is NOT done" — worded only
         # for the empty-backlog case, silently missing the far more common
         # branch-merge shape (one just-handed-off ticket, release pending).
+        # #1128: the review-watch clause is gone because NOTHING ends a stream
+        # loop any more — a handed-off ticket, an empty slice and a pending
+        # release are all simply the idle state.
         line = goal_lines()[BRANCH_MERGE]
-        self.assertIn(
-            "A handed-off ticket or an empty backlog, release still pending, "
-            "is NOT done",
-            line)
+        self.assertIn("this stream loop never ends on an empty slice", line)
 
 
 # --------------------------------------------------------------------------- #
@@ -948,87 +966,32 @@ class TheTemplatesHaveHealthyCapHeadroom(TestCase):
 
 
 class TestReducedAuthorityTemplatesSurfaceParkedWork(TestCase):
-    """#395: after #391, `slice-quals --count == 0` on a reduced-authority
-    box means "own UNHANDLED work is empty" -- a ticket already handed off
-    to the gatekeeper (ready-for-review/needs-gatekeeper) is EXCLUDED from
-    the count even though it may still be OPEN on GitHub (branch-merge:
-    GitHub's Closes #N never auto-fires off a non-default branch, #349).
-    So the (B) proof triple could be fully satisfied -- and the loop
-    terminate via BACKLOG EMPTY + DONE -- while a ticket sits handed-off-
-    but-not-closed, with the template's own English precondition ("the
-    gatekeeper has finished with my slice") never actually machine-checked.
-
-    Design decision (Opus consult, recorded on #395): SURFACE, don't
-    BLOCK. #391's "my work ends at hand-off" semantics stay authoritative
-    for slice-quals/footer/card/dispatch decisions -- this fix does not
-    reintroduce a "wait for real closure" requirement (that would contradict
-    the templates' own stated authority boundary, "My authority ENDS at the
-    integration branch / at the hand-off", and risks an unbounded review-
-    watch loop with no reachable exit -- the #170 guard-with-no-exit shape
-    the FREEZE exists to prevent). Instead the parked (`gk`) count must be
-    PASTED as evidence every time (B) is claimed, and the stop text states
-    plainly that a nonzero count is gatekeeper-owned, not something this
-    loop waits on -- turning a previously silent assumption into a provable
-    fact without changing when the loop is allowed to stop.
-    """
+    """#395 made the reduced (B) SURFACE the parked `gk`/`U`/`W` counts every
+    time it was claimed. #1128 (owner ruling 2026-09-23) removed that (B)
+    entirely: a stream loop has NO backlog-empty end, so there is no stop left
+    to surface parked work against — parked work simply keeps the loop idling
+    on its `stream-wait` waiter until it comes back. A returned bounce still
+    gates the idle state (`slice-quals --bounces --unhandled` must print
+    nothing before the loop idles)."""
 
     TICKETS_STATUS_REFRESH = "python3 ~/devel/airuleset/airuleset.py tickets-status --refresh"
 
-    def test_both_reduced_templates_declare_the_tickets_status_surfacing_proof(self):
-        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
-            cmds = declared_commands(goal_lines()[profile], self.TICKETS_STATUS_REFRESH)
-            self.assertTrue(cmds, "profile %d names no tickets-status surfacing command" % profile)
-
-    def test_the_surfacing_command_comes_after_slice_quals_count(self):
-        # test_reduced_templates_still_scope_the_count_to_my_own_slice above
-        # already locks slice-quals --count as the FIRST "python3" command;
-        # this locks that the NEW command is a SECOND, later one -- never
-        # accidentally displacing it.
+    def test_no_reduced_template_carries_a_parked_surfacing_proof(self):
         for profile in (BRANCH_MERGE, FORK_NO_MERGE):
             line = goal_lines()[profile]
+            self.assertFalse(declared_commands(line, self.TICKETS_STATUS_REFRESH))
+            self.assertNotIn("never blocks 🏁", line)
+
+    def test_the_idle_state_waits_for_unhandled_bounces_first(self):
+        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
+            line = goal_lines()[profile]
+            self.assertIn("slice-quals --bounces --unhandled` prints nothing",
+                          line)
             self.assertLess(line.index("slice-quals --count"),
-                             line.index(self.TICKETS_STATUS_REFRESH))
+                            line.index("stream-wait"))
 
-    def test_the_stop_text_states_parked_tickets_are_gatekeeper_owned(self):
-        # #1066 lane B — item 1 shortened the parked parenthetical (dropping the
-        # verbose "gatekeeper-owned/user-parked/ops-wait" expansion to fit the
-        # arm-cap budget while ADDING the bounce clause). The parked semantics
-        # survive via the `gk N`/`U N`/`W N` = parked markers; a returned
-        # `bounce K` now BLOCKS 🏁 until `slice-quals --bounces --unhandled`
-        # prints nothing (the whole point of the ticket — a bounce is NOT a
-        # silently-parked lane).
-        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
-            line = goal_lines()[profile]
-            self.assertIn("= parked", line)
-            self.assertIn("bounce K", line)
-            self.assertIn("slice-quals --bounces --unhandled", line)
-
-    def test_the_surfacing_proof_never_blocks_termination(self):
-        # the presence of the evidence is required (declared_commands above);
-        # its VALUE is explicitly NOT gated -- distinguishing this from a
-        # PROOF_SPEC entry (which WOULD require an exact token).
-        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
-            self.assertIn("never blocks", goal_lines()[profile])
-
-    def test_the_surfacing_proof_is_not_wired_into_the_strict_decision_function(self):
-        # PROOF_SPEC is the exhaustive list backlog_empty_holds() checks
-        # value-for-value; a NEW entry there would make deriving the exact
-        # gk token load-bearing, which is exactly the "wait for closure"
-        # shape design decision (B) rejected. Full-VALUE equality, never a
-        # bare len() count -- a mutation that SWAPS an existing entry for a
-        # count-preserving tickets-status one (e.g. replacing the branch-
-        # merge "gh run list" check with the tickets-status surfacing
-        # command) silently keeps the length the same and would slip past a
-        # length-only lock; live-verified during adversarial review, #395.
-        self.assertEqual(
-            PROOF_SPEC[BRANCH_MERGE],
-            [(SLICE_QUALS_COUNT, "0"), ("gh run list", "success"),
-             ("git merge-base", "RELEASED")],
-        )
-        self.assertEqual(
-            PROOF_SPEC[FORK_NO_MERGE],
-            [(SLICE_QUALS_COUNT, "0"), ("git merge-base", "RELEASED")],
-        )
+    def test_no_reduced_profile_is_wired_into_the_strict_decision_function(self):
+        self.assertEqual(set(PROOF_SPEC), {FULL})
 
     def test_the_false_gatekeeper_finished_claim_is_gone_from_branch_merge(self):
         # the old wording claimed the gatekeeper "has finished with my
@@ -1044,30 +1007,9 @@ class TestReducedAuthorityTemplatesSurfaceParkedWork(TestCase):
         self.assertNotIn("is CLOSED by the maintainer",
                           goal_lines()[FORK_NO_MERGE])
 
-    def test_both_reduced_templates_still_fit_the_cap_with_the_new_proof(self):
+    def test_both_reduced_templates_still_fit_the_cap(self):
         for profile in (BRANCH_MERGE, FORK_NO_MERGE):
             self.assertLessEqual(len(goal_lines()[profile]), 4000)
-
-
-class TestParkedWorkNeverBlocksTermination(TestCase):
-    """Acceptance: (B) still holds even when the surfacing proof's OWN
-    printed line shows a nonzero `gk N` -- demonstrating design decision
-    (B) SURFACE-ONLY (#395) rather than arguing it. `backlog_empty_holds`
-    only checks PROOF_SPEC value-for-value (unchanged, still 2/3 entries),
-    so a message carrying the tickets-status line with any value at all is
-    exactly as valid a proof as one carrying no such line -- the presence
-    requirement is a template-text obligation, not a decision-function one.
-    """
-
-    def test_a_nonzero_gk_count_in_the_pasted_evidence_still_lets_B_hold(self):
-        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
-            turn = (_proof_block(profile)
-                    + "$ python3 ~/devel/airuleset/airuleset.py tickets-status --refresh ...\n"
-                    + "I 0 · gk 3\n"
-                    + MARKER + " 0 open, released\n"
-                    + "✅ DONE: hotovo\n")
-            holds, reason = backlog_empty_holds(turn, profile)
-            self.assertTrue(holds, reason)
 
 
 class TestUserWaitingTicketsAreParkedNotWorkable(TestCase):
@@ -1094,28 +1036,14 @@ class TestUserWaitingTicketsAreParkedNotWorkable(TestCase):
                       "full template must surface the user-waiting remainder "
                       "in-transcript (`core-quals --waiting`)")
 
-    def test_reduced_templates_surface_user_waiting_in_the_parked_clause(self):
+    def test_reduced_templates_never_end_on_user_waiting_work(self):
+        # #1128: a stream's user-waiting (`U`) ticket can no longer let the loop
+        # END — there is no 🏁 to reach; the loop idles on `stream-wait` and the
+        # owner's answer (a comment/label change) wakes it.
         for profile in (BRANCH_MERGE, FORK_NO_MERGE):
             line = goal_lines()[profile]
-            self.assertIn("U N", line,
-                          "reduced template %d must name the U N parked bucket"
-                          % profile)
-            self.assertIn("never blocks 🏁", line,
-                          "reduced template %d must state parked work never blocks 🏁"
-                          % profile)
-
-    def test_a_nonzero_user_waiting_count_in_the_footer_still_lets_B_hold(self):
-        # SURFACE-ONLY, exactly like the gk lock above: a pasted `U N` of any
-        # value is as valid a proof as none — the loop parks on it, never
-        # claims it as its own remaining workable work.
-        for profile in (BRANCH_MERGE, FORK_NO_MERGE):
-            turn = (_proof_block(profile)
-                    + "$ python3 ~/devel/airuleset/airuleset.py tickets-status --refresh ...\n"
-                    + "I 0 · U 2\n"
-                    + MARKER + " 0 open, released\n"
-                    + "✅ DONE: hotovo\n")
-            holds, reason = backlog_empty_holds(turn, profile)
-            self.assertTrue(holds, reason)
+            self.assertNotIn("🏁", line)
+            self.assertIn("stream-wait", line)
 
     def test_the_new_clause_keeps_every_template_within_the_cap(self):
         for i, line in enumerate(goal_lines()):

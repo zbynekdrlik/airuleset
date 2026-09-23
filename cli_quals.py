@@ -2668,7 +2668,8 @@ def _search_index_healthy(cwd=None):
     return None if not rest_rows else False
 
 
-def _union_open_issues(quals, base, cwd=None, repo=None):
+def _union_open_issues(quals, base, cwd=None, repo=None,
+                       fields=("number", "title", "createdAt", "labels")):
     """Run ONE `gh issue list --search` per qual and union the rows by issue
     number, returning `(rows_by_number, failed)`.
 
@@ -2694,7 +2695,8 @@ def _union_open_issues(quals, base, cwd=None, repo=None):
     "whatever repo `cwd` happens to resolve to". None (default) is
     unchanged for every existing caller (`cmd_tickets_status`,
     `cmd_core_quals`, `_print_issue_rows`), which all resolve the repo from
-    `cwd`'s git remote instead."""
+    `cwd`'s git remote instead. `fields` (#1128) is the row shape; the
+    default is unchanged, `stream-wait` adds `updatedAt` to fingerprint."""
     import airuleset
     seen, failed = {}, False
 
@@ -2741,18 +2743,15 @@ def _union_open_issues(quals, base, cwd=None, repo=None):
                 rows = [r for r in snapshot
                         if ghread.issue_matches_search(r, search, me_login)]
         if rows is not None:
-            # Reduce to the SAME 4-key row shape the GraphQL path returns, so
-            # every downstream consumer is byte-identical regardless of source.
+            # Reduce to the SAME `fields` row shape the GraphQL path returns,
+            # so every consumer is byte-identical regardless of source.
             for r in rows:
-                seen[r["number"]] = {"number": r["number"],
-                                     "title": r.get("title"),
-                                     "createdAt": r.get("createdAt"),
-                                     "labels": r.get("labels") or []}
+                seen[r["number"]] = {k: r.get(k) for k in fields}
             continue
         gh_args = ["issue", "list", "--state", "open", "--search", search]
         if repo:
             gh_args += ["-R", repo]
-        gh_args += ["-L", "1000", "--json", "number,title,createdAt,labels"]
+        gh_args += ["-L", "1000", "--json", ",".join(fields)]
         raw = airuleset._gh_out(*gh_args, cwd=cwd, timeout=20)
         try:
             for x in json.loads(raw):
