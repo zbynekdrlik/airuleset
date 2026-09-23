@@ -417,6 +417,31 @@ def variant_specs():
     return specs
 
 
+def all_goal_line_variants():
+    """#1113 recurrence — every rendered `/goal ...` line the janitor may find
+    stranded in a box: every (authority, mode, role) variant `variant_specs()`
+    locks, PLUS the gk-full-only `review` variant. Deduped, order-stable.
+
+    The janitor matches a stranded box against these (verbatim template text is
+    un-forgeable by a human draft) so it recognises + clears its OWN leftover
+    even when the request payload it was handed is a DIFFERENT variant than the
+    one actually in the box — the exact 22.9/23.9 david1-3 regression, where a
+    fork-no-merge tail matched no clean substring of the current rearm payload.
+    Pure string renders; a render that raises (a nonsensical combination) is
+    skipped, so the caller always gets the valid variants."""
+    seen, out = set(), []
+    for authority, mode, role in list(variant_specs()) + [("full", "parallel",
+                                                           "review")]:
+        try:
+            line = render_goal_line(authority, mode, role)
+        except Exception:  # noqa: BLE001 — a nonsensical combo is simply skipped
+            continue
+        if line not in seen:
+            seen.add(line)
+            out.append(line)
+    return out
+
+
 def variant_check():
     """Return a list of error strings ([] == every variant is valid). Locks, per
     variant: renders, ≤ GOAL_ARM_CHAR_CAP, NO turn cap, carries every required

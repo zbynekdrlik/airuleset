@@ -1601,7 +1601,27 @@ def _box_tail_row_norm(captured):
     return " ".join(rows[-1].lstrip("❯").split())
 
 
-def _box_is_own_leftover(captured, payload, min_chars, provenance=False):
+_GOAL_TEMPLATE_VARIANTS = None   # #1113 recurrence -- memoized rendered variants
+
+
+def _goal_template_variants():
+    """#1113 recurrence -- the memoized list of every rendered `/goal` template
+    variant (from `goal_registry.all_goal_line_variants`). Lazy + module-memoized
+    so the janitor's per-box own-leftover check pays the render cost at most once
+    per process (pure string joins). Fail-safe to `[]` if goal_registry is
+    unavailable -- a missing registry never makes a foreign draft look ours."""
+    global _GOAL_TEMPLATE_VARIANTS
+    if _GOAL_TEMPLATE_VARIANTS is None:
+        try:
+            import goal_registry
+            _GOAL_TEMPLATE_VARIANTS = list(goal_registry.all_goal_line_variants())
+        except Exception:                    # noqa: BLE001 -- fail-safe to none
+            _GOAL_TEMPLATE_VARIANTS = []
+    return _GOAL_TEMPLATE_VARIANTS
+
+
+def _box_is_own_leftover(captured, payload, min_chars, provenance=False,
+                         match_templates=False):
     """#737 -- True when the VISIBLE input-box content is a contiguous SUBSTRING
     of `payload`, at least `min_chars` normalized chars long: the render
     signature of a SCROLLED long own /goal (head rows scrolled off, only the
@@ -1628,22 +1648,47 @@ def _box_is_own_leftover(captured, payload, min_chars, provenance=False):
     where it ends, never a mid-typing fragment). A foreign draft matches NEITHER
     (its tail is not the payload's, and its body is not a contiguous run of the
     payload with the spaces removed), so provenance is REQUIRED -- shape alone
-    never clears, the fail-safe (no proof -> untouched) still holds."""
-    if not payload:
+    never clears, the fail-safe (no proof -> untouched) still holds.
+
+    #1113 RECURRENCE -- a THIRD, provenance-FREE proof: `match_templates=True`
+    accepts the box when its whitespace-STRIPPED body is a >= `min_chars`
+    contiguous run of ANY rendered `/goal` template variant (`_goal_template_
+    variants`), NOT only the single `payload` the caller handed in. The 23.9
+    regression declined a genuinely-ours fork-no-merge tail because (a) the
+    request payload passed was a re-derived / DIFFERENT variant and (b) by the
+    time `_janitor_recover` ran ~6h later the provenance mark had EXPIRED. Verbatim
+    template text is un-forgeable -- a foreign human draft is never an 80-char
+    contiguous run of a shipped template with the spaces removed -- so provenance
+    is NOT required for this proof; the whitespace-stripping absorbs the same
+    grid-wrap spurious spaces the provenance branch handles. The fail-safe holds:
+    an unavailable registry -> `[]` -> no match, and a foreign draft matches no
+    variant."""
+    if not payload and not match_templates:
         return False
     box_norm = _box_norm_from_capture(captured)
     if not box_norm or len(box_norm) < min_chars:
         return False
-    payload_norm = " ".join(payload.split())
-    if box_norm in payload_norm:
-        return True
-    if not provenance:
-        return False
-    box_tail = _box_tail_row_norm(captured)
-    if not box_tail or not payload_norm.endswith(box_tail):
-        return False
-    box_ns = "".join(box_norm.split())
-    return len(box_ns) >= min_chars and box_ns in "".join(payload_norm.split())
+    box_ns = None
+    if payload:
+        payload_norm = " ".join(payload.split())
+        if box_norm in payload_norm:
+            return True
+        if provenance:
+            box_tail = _box_tail_row_norm(captured)
+            if box_tail and payload_norm.endswith(box_tail):
+                box_ns = "".join(box_norm.split())
+                if len(box_ns) >= min_chars \
+                        and box_ns in "".join(payload_norm.split()):
+                    return True
+    # #1113 recurrence -- verbatim TEMPLATE-variant proof, NO provenance.
+    if match_templates:
+        if box_ns is None:
+            box_ns = "".join(box_norm.split())
+        if len(box_ns) >= min_chars:
+            for var in _goal_template_variants():
+                if var and box_ns in "".join(var.split()):
+                    return True
+    return False
 
 
 def _box_own_with_short_prefix(captured, own_typed):

@@ -217,6 +217,39 @@ def _janitor_clear_watch(state, pid):
     state.get("nudge_typed", {}).pop(pid, None)
 
 
+# #1113 recurrence (c) -- the once-per-episode lock on a PROVENANCE-FREE
+# template-variant clear. When `_janitor_recover` recognises a stranded box as
+# OUR leftover ONLY by a verbatim /goal template match (no live `_janitor_watch_
+# seen` mark, no park/stray provenance -- the >10x david1-3 case where the mark
+# had expired by the time the janitor ran ~6h later), it may Escape-clear it, but
+# at MOST ONCE per episode: a box whose clear does not converge (a grid-wrapped
+# render whose backspace loop leaves 1-char tail rows) must never be re-Escaped
+# every sweep. A provenance-BACKED clear is NOT gated by this lock (it carries its
+# own bounded ping/dedup). Keyed per-pane with a TTL backstop so an episode that
+# genuinely re-strands after the window can be cleared again.
+GOAL_TEMPLATE_CLEAR_TTL_S = 1800
+
+
+def _template_clear_locked(state, pid, now):
+    """#1113 recurrence (c) -- True when a provenance-free template clear was
+    ALREADY attempted for `pid` within `GOAL_TEMPLATE_CLEAR_TTL_S` (this episode),
+    so the janitor must NOT re-attempt it. A future-dated stamp (clock skew) or a
+    malformed entry reads NOT locked (fail toward acting once). `state` None ->
+    not locked (a caller/test not threading state)."""
+    ts = (state or {}).get("goal_template_clear", {}).get(pid)
+    return isinstance(ts, (int, float)) and not isinstance(ts, bool) \
+        and 0 <= (now - ts) < GOAL_TEMPLATE_CLEAR_TTL_S
+
+
+def _mark_template_clear(state, pid, now):
+    """#1113 recurrence (c) -- WRITE side of `_template_clear_locked`: record that
+    a provenance-free template clear was attempted for `pid` this episode. A no-op
+    when `state` is None."""
+    if state is None:
+        return
+    state.setdefault("goal_template_clear", {})[pid] = now
+
+
 # --------------------------------------------------------------------------- #
 # #1022 — the wedge machine-draft record. The keystroke primitive (`_type_literal`)
 # already knows what it typed, so it RECORDS every machine nudge (a `nudge=`
@@ -496,9 +529,23 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # payload tail + whitespace-stripped body substring) recognises it, gated on
     # THIS pane's own `_janitor_watch_seen` mark -- the SAME provenance the
     # destructive `clear` below requires -- so a foreign draft is never cleared.
-    own_leftover = bool(own_payload) and watchdog._box_is_own_leftover(
+    own_prov = bool(own_payload) and watchdog._box_is_own_leftover(
         captured, own_payload, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
         provenance=_janitor_watch_seen(state, pid, now))
+    # #1113 RECURRENCE -- a PROVENANCE-FREE template proof: the box is a verbatim
+    # run of ANY rendered /goal template variant, not only the single `own_payload`
+    # the caller handed in. The 23.9 `cleanup=declined` was a genuinely-ours
+    # fork-no-merge tail whose payload-specific proof missed (a different variant)
+    # AND whose `_janitor_watch_seen` mark had EXPIRED by the time this sweep ran
+    # ~6h later. Verbatim template text is un-forgeable, so it needs no provenance
+    # -- it BOTH satisfies the provenance gate below (a valid provenance
+    # substitute) AND, when it is the ONLY proof, gates the clear at most once per
+    # episode via the (c) lock. `captured` is always truthy here (the caller only
+    # reaches this after locating the box).
+    own_tmpl = watchdog._box_is_own_leftover(
+        captured, None, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
+        match_templates=True)
+    own_leftover = own_prov or own_tmpl
     # #852 C — the incident's `slane-check:` shape: a stray human char (the
     # owner's forgotten `s`) raced to the FRONT of our own swallowed nudge, so
     # the own prefix is at box-head position 1..3, not 0. A park record carrying
@@ -565,11 +612,27 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # #852 C — a stray-prefix leftover's park record (carrying the typed string)
     # is age-unbounded provenance exactly like the #488 stash record, so it also
     # licenses the non-occupied own-suffix reclaim below.
-    if not (_janitor_watch_seen(state, pid, now)
-            or (occupied and park_seen)
-            or stray_own):
+    prov_ok = (_janitor_watch_seen(state, pid, now)
+               or (occupied and park_seen)
+               or stray_own)
+    if not (prov_ok or own_tmpl):
         return logs         # no watchdog job is known to have touched this
-                            # pane recently -- never act on content alone
+                            # pane recently, and it is not verbatim template
+                            # text -- never act on content alone
+    # #1113 recurrence (c) -- a TEMPLATE-ONLY recovery (recognised solely by the
+    # verbatim /goal template match, with NO janitor/park/stray provenance) is
+    # licensed by the un-forgeable template text, but cleared at MOST ONCE per
+    # episode: a non-converging grid-wrapped box must never be re-Escaped every
+    # sweep. A provenance-backed clear is NOT gated by this lock (it carries its
+    # own bounded ping/dedup). The lock is stamped BEFORE the clear so a failed /
+    # non-converging attempt still consumes the one-per-episode slot.
+    if own_tmpl and not prov_ok:
+        if _template_clear_locked(state, pid, now):
+            logs.append("janitor %s -> skip:template-clear-locked "
+                        "(#1113 once per episode)" % loc)
+            return logs
+        if not dry_run:
+            _mark_template_clear(state, pid, now)
     if occupied:
         if itext == "":
             action = "pop"
