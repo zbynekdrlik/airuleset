@@ -344,6 +344,37 @@ class TestUnknownHostRefuses(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
+# 8b) #1123 — `dev1` is NOT a hard-coded local alias. On the controller (the
+#     push box since #870) `--host dev1` must go over ssh; only the host whose
+#     name equals THIS box's hostname stays local (the audit's discriminator).
+# --------------------------------------------------------------------------- #
+class TestDev1IsRemoteFromController1123(unittest.TestCase):
+    def test_dev1_from_the_controller_goes_over_ssh(self):
+        with TemporaryDirectory() as rd:
+            run = RemoteRunner(home="/home/newlevel")
+            r = ob.onboard_project("~/devel/foo1123", host="dev1",
+                                   name="foo1123",
+                                   registry_path=str(Path(rd) / "r.json"),
+                                   run=run, dry_run=True,
+                                   local_host="airuleset")
+            self.assertFalse(r.get("error"), r.get("error"))
+            joined = " || ".join(run.ssh_cmd_strings())
+            self.assertIn("/home/newlevel/devel/foo1123", joined,
+                          "dev1 was treated as the local box")
+
+    def test_this_box_name_stays_local(self):
+        with TemporaryDirectory() as rd:
+            proj = Path(rd) / "proj1123"
+            proj.mkdir()
+            run = RemoteRunner()
+            ob.onboard_project(str(proj), host="airuleset", name="proj1123",
+                               registry_path=str(Path(rd) / "r.json"),
+                               run=run, dry_run=True, local_host="airuleset")
+            self.assertEqual(run.ssh_calls, [],
+                             "this box's own name must not ssh to itself")
+
+
+# --------------------------------------------------------------------------- #
 # 9) Review fix — a LOCAL onboard of a NONEXISTENT dir refuses too (onboard
 #    operates on an EXISTING project directory, local and remote alike).
 # --------------------------------------------------------------------------- #
