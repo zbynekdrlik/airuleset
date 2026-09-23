@@ -77,6 +77,11 @@ class TestControllerTopologyRegistry(unittest.TestCase):
 
 
 def _args(**kw):
+    # #1115 slice F: these --apply write-path tests run inside the CI/test
+    # worktree (real _repo_is_worktree_checkout() True), so they opt OUT of the
+    # worktree live-write guard via the injectable seam — the guard has its own
+    # tests in test_drop_slice_f_1115.py. An explicit _is_worktree_fn wins.
+    kw.setdefault("_is_worktree_fn", lambda: False)
     return types.SimpleNamespace(**kw)
 
 

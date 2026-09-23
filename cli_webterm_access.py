@@ -342,6 +342,17 @@ def cmd_webterm_access(args):
     # even if --apply is also passed; otherwise dry-run is the default (no --apply).
     dry_run = getattr(args, "dry_run", False) or not getattr(args, "apply", False)
 
+    # #1115 slice F: --apply creates/updates live Access apps; REFUSE it from a
+    # git worktree checkout BEFORE reading the token or building the client (the
+    # 23.9. incident class). Dry-run reads (GETs) stay allowed. Injectable seam.
+    if not dry_run:
+        import cli_drop_lanes as _dl
+        is_wt = getattr(args, "_is_worktree_fn", None) \
+            or _dl._repo_is_worktree_checkout
+        if is_wt():
+            _dl._refuse_worktree_live_write("webterm-access --apply")
+            return 1
+
     # The token is loaded in BOTH modes — a dry-run still READS (GET /apps) to
     # report create-vs-update. Dry-run safety is that apply_profile(dry_run=True)
     # issues only GETs, never a POST/PUT.

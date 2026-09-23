@@ -225,13 +225,26 @@ def _access_app_exists(hostname, check_fn=None):
 
 
 def ensure_managed_records(dry_run=True, token_path=DNS_TOKEN_FILE,
-                           client=None, check_access_fn=None):
+                           client=None, check_access_fn=None, is_worktree_fn=None):
     """Reconcile ALL ``MANAGED_RECORDS``. Returns ``(all_ok, results_list)``.
     Called from ``cmd_install`` on the controller.
     ``client`` is injectable for offline tests (skip token loading).
     ``check_access_fn(hostname) -> bool`` is injectable to test the
-    Access-app gate (RED-1) without hitting the real API."""
+    Access-app gate (RED-1) without hitting the real API.
+    ``is_worktree_fn`` is an injectable seam for the #1115 slice-F guard: a LIVE
+    write (``dry_run=False`` building a real client) is REFUSED from a git
+    worktree checkout BEFORE any token read / client build (the 23.9. incident
+    class); an injected ``client`` (a test fake) is never refused."""
     if client is None:
+        if not dry_run:
+            import cli_drop_lanes as _dl
+            is_wt = is_worktree_fn or _dl._repo_is_worktree_checkout
+            if is_wt():
+                _dl._refuse_worktree_live_write("DNS record write")
+                return False, [{"ok": False, "name": None, "action": None,
+                                "record_id": None,
+                                "error": "REFUSED live DNS write from a git "
+                                         "worktree checkout (#1115/#972)"}]
         try:
             token = _load_token(token_path)
         except OSError as e:
