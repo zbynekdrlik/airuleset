@@ -187,16 +187,6 @@
     "onboarded": null
   },
   {
-    "name": "parovanie-produktov",
-    "host": "dev1",
-    "path": "~/devel/forestshop/parovanie_produktov",
-    "branch_model": "2-branch",
-    "default_branch": "main",
-    "work_branch": "dev",
-    "overrides": [],
-    "onboarded": "2026-06-25"
-  },
-  {
     "name": "presenter",
     "host": "dev2",
     "path": "~/devel/presenter/presenter-dev2",
