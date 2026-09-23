@@ -70,6 +70,7 @@ STEP_ORDER = [
 from cli_onboard_exec import (  # noqa: E402
     _run as _run,
     resolve_remote as resolve_remote,
+    is_local_host as is_local_host,
     _ssh_prefix as _ssh_prefix,
     _exec as _exec,
     _git as _git,
@@ -761,7 +762,7 @@ def _remote_preflight(orig_path, host, run=None):
     — the same discrimination `_audit_host_target` already applies). REMOTE
     host: verify ssh reachability, expand the remote `~`, verify the target dir
     — on ANY failure return `(None, <reason>)`, never a local false-negative."""
-    if host in (None, "", "local", "dev1"):
+    if is_local_host(host):   # #1123: this box's own name, never a hard-coded dev1
         target = _norm_path(orig_path)
         if not _fs_exists(target, run=run, kind="d"):
             return None, ("path %s does not exist — onboard operates on an "

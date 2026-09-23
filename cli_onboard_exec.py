@@ -27,10 +27,27 @@ def _run(run):
     return run or subprocess.run
 
 
+def _local_hostname():
+    """This box's hostname = its fleet name (machine-identities). The test seam
+    for the local/remote decision (#1123)."""
+    import socket
+    try:
+        return socket.gethostname()
+    except OSError:
+        return None
+
+
+def is_local_host(host):
+    """True when `host` means THIS box: empty, `local`, or this box's own
+    hostname. #1123: `dev1` was hard-coded as local (pre-#870); from the
+    controller it is a REMOTE_HOSTS target like any other."""
+    return host in (None, "", "local") or host == _local_hostname()
+
+
 def resolve_remote(host):
-    """The REMOTE_HOSTS entry for `host` (name or ip), or None for local.
-    dev1 / local / None run locally (this maintainer box)."""
-    if host in (None, "", "local", "dev1"):
+    """The REMOTE_HOSTS entry for `host` (name or ip), or None for local
+    (`is_local_host`) or an unknown host."""
+    if is_local_host(host):
         return None
     try:
         import cli_fleet
