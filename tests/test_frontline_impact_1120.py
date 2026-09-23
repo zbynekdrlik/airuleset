@@ -104,6 +104,21 @@ class TestTemplateRequiresFrontlineImpact(TestCase):
         self.assertFalse(template_requires_frontline_impact(
             "x/y", runner=lambda path: ""))
 
+    def test_prose_mention_does_not_require(self):
+        # A field DECLARATION is line-anchored; an inline prose mention or
+        # example must NOT flip the repo into requiring it.
+        prose = ("When you touch the shared shell, add a `Frontline-impact:` "
+                 "line listing every module.\n")
+        self.assertFalse(template_requires_frontline_impact(
+            "x/y", runner=lambda path: prose))
+
+    def test_field_declaration_with_leading_markdown(self):
+        # A real declaration tolerating a leading list/quote/emphasis char.
+        for tmpl in ("- Frontline-impact:\n", "> Frontline-impact: <fill>\n",
+                     "**Frontline-impact:**\n"):
+            self.assertTrue(template_requires_frontline_impact(
+                "x/y", runner=lambda path, t=tmpl: t), tmpl)
+
 
 class TestComposeFailsLoud(TestCase):
     """compose_body fails LOUD when the template requires the field and no

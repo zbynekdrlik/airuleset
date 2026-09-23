@@ -240,9 +240,12 @@ def merged_unreleased_fn(slug, root):
     try:
         import cli_release_state
         merged = cli_release_state.merged_unreleased_issues(root)
+        # Coerce INSIDE the try so a non-int member honours the stated
+        # "empty on ANY error" contract (review B LOW) rather than raising
+        # past the fail-safe.
+        merged_set = {int(n) for n in (merged or [])}
     except Exception:
-        merged = frozenset()
-    merged_set = {int(n) for n in (merged or [])}
+        merged_set = set()
 
     def merged_fn(repo, number):
         try:

@@ -169,6 +169,18 @@ def has_extended_template(repo: str, *, runner=None) -> bool:
     return r.returncode == 0 and bool((r.stdout or "").strip())
 
 
+#: A LINE-ANCHORED `Frontline-impact:` field declaration in a hand-off template
+#: (tolerating leading markdown list / block-quote / emphasis chars). Not a bare
+#: substring, so a prose mention or inline example does not falsely require it.
+_FRONTLINE_FIELD_RE = re.compile(r"(?im)^[ \t>*_-]*Frontline-impact:")
+
+
+def _declares_frontline_impact(content: Optional[str]) -> bool:
+    """True iff ``content`` DECLARES a ``Frontline-impact:`` field on its own
+    line (see ``_FRONTLINE_FIELD_RE``). False for empty/None content."""
+    return bool(content) and bool(_FRONTLINE_FIELD_RE.search(content))
+
+
 def template_requires_frontline_impact(repo: str, *, runner=None) -> bool:
     """True iff ``repo``'s ``subdev-handoff-comment.md`` template DECLARES the
     ``Frontline-impact:`` field (#1120).
@@ -184,14 +196,20 @@ def template_requires_frontline_impact(repo: str, *, runner=None) -> bool:
     endpoint), unlike ``has_extended_template`` which only probes existence.
     ``runner(path)`` is injectable for tests and returns the raw template text
     (not base64). Fail-safe False on any error (a repo whose template cannot be
-    read never blocks a hand-off)."""
+    read never blocks a hand-off).
+
+    The requirement is a LINE-ANCHORED field declaration (``^Frontline-impact:``,
+    tolerating leading markdown/quote chars) — not a bare substring — so a prose
+    mention or an inline example (e.g. "add a ``Frontline-impact:`` line") does
+    NOT flip a repo into requiring it (review finding: match the docstring's
+    'DECLARES the field' intent tightly)."""
     path = "repos/%s/contents/.claude/rules/subdev-handoff-comment.md" % repo
     if runner is not None:
         try:
             content = runner(path)
         except Exception:
             return False
-        return bool(content) and "Frontline-impact:" in content
+        return _declares_frontline_impact(content)
     r = _run(["gh", "api", path, "-q", ".content"])
     if r.returncode != 0:
         return False
@@ -200,7 +218,7 @@ def template_requires_frontline_impact(repo: str, *, runner=None) -> bool:
         content = base64.b64decode(r.stdout or "").decode("utf-8", "replace")
     except Exception:
         return False
-    return "Frontline-impact:" in content
+    return _declares_frontline_impact(content)
 
 
 def _parse_origin_slug(url: str) -> Optional[str]:
