@@ -128,11 +128,22 @@ def _bare_refs(msg):
 
 def _quoted_region(msg):
     """The inline client text of a ❓ approval — the Markdown blockquote (`> `)
-    lines, joined (leading `> ` stripped). The #977 rule (hook Check 8) requires
-    every client-text approval to carry its proposed message INLINE as a `> `
-    block, so this region is exactly the proposed client reply. Returns "" when
-    the message has no quoted block (then it is not a client-reply proposal, so
-    the #1027 workaround branch does not fire). #1027 fix-forward."""
+    lines, joined (leading `> ` stripped). The #977 rule (hook Check 8) steers a
+    client-text approval to carry its proposed message INLINE as a `> ` block, so
+    this region is the proposed client reply. Returns "" when the message has no
+    quoted block (then it is not a `> `-quoted client-reply proposal, so the
+    #1027 workaround branch does not fire). #1027 fix-forward.
+
+    ACCEPTED RESIDUAL: Check 8 enforces the `> ` block only when BOTH
+    approval-intent AND a pointer (a file path / "na tikete" / share-URL) are
+    present, so a workaround client reply written as bare INLINE PROSE (no `> `
+    block, no pointer) escapes both Check 8 and — after this scoping — the #1027
+    gate. Accepted: the gate is a backstop, the owner still reviews the proposed
+    client text before it is sent, and the false-block being fixed (owner
+    questions suppressed from reaching the owner, live 23.9.) is strictly
+    higher-severity than this narrow false-allow. Scanning outside the quote
+    would risk reintroducing that exact false-block, so the residual is
+    documented rather than closed."""
     if not msg:
         return ""
     out = []
@@ -160,12 +171,13 @@ _WORKAROUND_RE = re.compile(
 # `airuleset:<x>-ok` bypass convention; the block reason names it.
 _WORKAROUND_BYPASS = "airuleset:client-reply-ok"
 # A Markdown blockquote line (`> ...`, leading whitespace tolerant). #1027
-# fix-forward: the #977 rule (hook Check 8) already REQUIRES a client-text
-# approval to carry the proposed message INLINE as a `> ` quoted block, so the
-# quoted region is exactly the client text. The workaround-token search runs
-# ONLY over this region — an OWNER question that merely contains "zatiaľ" (no
-# proposed client reply, no `> ` block) is not a client-reply proposal and does
-# not trip the no-interim-workaround branch (the live 23.9. false-block).
+# fix-forward: the #977 rule (hook Check 8) steers a client-text approval to
+# carry the proposed message INLINE as a `> ` quoted block, so the quoted region
+# is the client text. The workaround-token search runs ONLY over this region —
+# an OWNER question that merely contains "zatiaľ" (no proposed client reply, no
+# `> ` block) is not a client-reply proposal and does not trip the
+# no-interim-workaround branch (the live 23.9. false-block). See `_quoted_region`
+# for the accepted residual (Check 8's `> `-block enforcement is conditional).
 _QUOTE_LINE_RE = re.compile(r"^[ \t]*>[ \t]?(.*)$")
 _WORKAROUND_REASON = (
     "❓ navrhuje klientovi INTERIM workaround (%(hit)s) kým je oprava %(refs)s "
