@@ -15,7 +15,6 @@ spawn, alive→no spawn, cache-file→served-next-call, dead-lock→reclaimed) f
 """
 import json
 import os
-import time
 import unittest
 import unittest.mock as m
 from pathlib import Path
@@ -112,6 +111,24 @@ class FetchOrRefresh(_HomeCase):
                                      spawn_fn=spy, alive_fn=lambda c: False)
         self.assertEqual(out, [{"number": 3}])
 
+    def test_permanently_stale_members_stop_being_served(self):
+        # a derivation broken for MAX_SERVE_AGE_S keeps carrying prior members
+        # forward, but members_ts ages out -> go honest (None), never re-surface
+        # days-old W forever.
+        self._write_cache({"ts": NOW, "error": True, "members": [{"number": 3}],
+                           "members_ts": NOW - owref.MAX_SERVE_AGE_S - 1})
+        spy = m.Mock()
+        out = owref.fetch_or_refresh(CWD, "slice-quals", SENTINEL, now=NOW,
+                                     spawn_fn=spy, alive_fn=lambda c: False)
+        self.assertIsNone(out)
+
+    def test_within_max_serve_age_still_serves(self):
+        self._write_cache({"ts": NOW, "error": True, "members": [{"number": 3}],
+                           "members_ts": NOW - owref.MAX_SERVE_AGE_S + 60})
+        out = owref.fetch_or_refresh(CWD, "slice-quals", SENTINEL, now=NOW,
+                                     spawn_fn=m.Mock(), alive_fn=lambda c: True)
+        self.assertEqual(out, [{"number": 3}])
+
 
 class SpawnDueAndServe(_HomeCase):
     def test_spawn_due_success_uses_full_ttl(self):
@@ -169,6 +186,7 @@ class RunRefreshChild(_HomeCase):
         entry = self._read_cache()
         self.assertEqual([mm["number"] for mm in entry["members"]], [41, 43])
         self.assertTrue(entry["members"][1]["stale"])
+        self.assertIn("members_ts", entry)                 # success stamps it
         self.assertFalse(os.path.exists(owref.pid_path(CWD)))
 
     def test_timeout_preserves_prior_members(self):
@@ -183,6 +201,7 @@ class RunRefreshChild(_HomeCase):
         entry = self._read_cache()
         self.assertTrue(entry.get("timeout"))
         self.assertEqual(entry["members"], [{"number": 5}])   # prior preserved
+        self.assertEqual(entry["members_ts"], NOW - 100)      # age carried fwd
 
     def test_error_preserves_prior_members(self):
         self._write_prior([{"number": 6}])
@@ -203,7 +222,8 @@ class RunRefreshChild(_HomeCase):
 
     def _write_prior(self, members, cwd=CWD):
         with open(owref.cache_path(cwd), "w") as f:
-            json.dump({"ts": NOW - 10, "members": members}, f)
+            json.dump({"ts": NOW - 10, "members": members,
+                       "members_ts": NOW - 100}, f)
 
 
 class ParseMembers(unittest.TestCase):
@@ -230,6 +250,42 @@ class NonBlocking(_HomeCase):
                                    spawn_fn=m.Mock(), alive_fn=lambda c: False)
             run.assert_not_called()
             popen.assert_not_called()
+
+
+class WatchdogFetchDelegates(unittest.TestCase):
+    """`airuleset._watchdog_ops_wait_fetch` is now a thin delegator: it resolves
+    authority -> cmd_name and hands off to `fetch_or_refresh` with the
+    FETCH_TIMEOUT sentinel and this file's argv0; a resolution error -> None."""
+
+    def test_full_authority_uses_core_quals_and_passes_sentinel(self):
+        import airuleset
+        import watchdog.ops_wait_recheck as owr
+        with m.patch.object(airuleset, "_repo_root", lambda cwd=None: "/r"), \
+                m.patch.object(airuleset, "resolve_authority",
+                               lambda cwd=None: "full"), \
+                m.patch("watchdog.ops_wait_refresh.fetch_or_refresh",
+                        return_value=[{"number": 1}]) as fr:
+            out = airuleset._watchdog_ops_wait_fetch("/r")
+        self.assertEqual(out, [{"number": 1}])
+        args = fr.call_args[0]
+        self.assertEqual(args[0], "/r")            # cwd
+        self.assertEqual(args[1], "core-quals")    # full -> core-quals
+        self.assertIs(args[2], owr.FETCH_TIMEOUT)  # slice-1 sentinel preserved
+
+    def test_reduced_authority_uses_slice_quals(self):
+        import airuleset
+        with m.patch.object(airuleset, "_repo_root", lambda cwd=None: "/r"), \
+                m.patch.object(airuleset, "resolve_authority",
+                               lambda cwd=None: "fork-no-merge"), \
+                m.patch("watchdog.ops_wait_refresh.fetch_or_refresh") as fr:
+            airuleset._watchdog_ops_wait_fetch("/r")
+        self.assertEqual(fr.call_args[0][1], "slice-quals")
+
+    def test_resolution_error_returns_none(self):
+        import airuleset
+        with m.patch.object(airuleset, "_repo_root",
+                            side_effect=RuntimeError("boom")):
+            self.assertIsNone(airuleset._watchdog_ops_wait_fetch("/r"))
 
 
 if __name__ == "__main__":

@@ -162,20 +162,31 @@ class OpsWaitAgesFnParity(unittest.TestCase):
         return {"own": n * 100, "any": n * 100, "own_cited": None,
                 "own_oldest": None, "own_final_reminder": None}
 
+    def _recorder(self):
+        # a thread-safe call recorder (Mock.call_count RMW is not lock-guarded,
+        # and the fallback runs on a thread pool — assert on the guarded list).
+        calls, lock = [], threading.Lock()
+
+        def rec(n, *a, **k):
+            with lock:
+                calls.append(n)
+            return self._ages_of(n)
+        return calls, rec
+
     def test_fallback_members_parallel_prefetched_identical_to_lazy(self):
         members = [10, 20, 30]
+        calls, rec = self._recorder()
         with m.patch.object(airuleset, "_stream_self_login", return_value="me"), \
                 m.patch.object(airuleset, "_ops_wait_prefetch_comments",
                                return_value={}), \
-                m.patch.object(airuleset, "_issue_comment_ages",
-                               side_effect=lambda n, *a, **k: self._ages_of(n)) as ica:
+                m.patch.object(airuleset, "_issue_comment_ages", side_effect=rec):
             ages_fn = cli_quals.ops_wait_ages_fn(members, ROOT, ["label:x"])
             # every fallback member prefetched exactly once during construction
-            self.assertEqual(ica.call_count, 3)
+            self.assertEqual(sorted(calls), [10, 20, 30])
             for n in members:
                 self.assertEqual(ages_fn(n), self._ages_of(n))
             # reads are cached -> no extra call after construction
-            self.assertEqual(ica.call_count, 3)
+            self.assertEqual(sorted(calls), [10, 20, 30])
 
     def test_prefetch_hit_bypasses_the_per_issue_fallback(self):
         members = [10, 20]
@@ -193,13 +204,14 @@ class OpsWaitAgesFnParity(unittest.TestCase):
 
     def test_prefetch_bounded_to_stale_max_fetches(self):
         members = list(range(1, 41))   # 40 > OPS_WAIT_STALE_MAX_FETCHES (25)
+        calls, rec = self._recorder()
         with m.patch.object(airuleset, "_stream_self_login", return_value="me"), \
                 m.patch.object(airuleset, "_ops_wait_prefetch_comments",
                                return_value={}), \
-                m.patch.object(airuleset, "_issue_comment_ages",
-                               side_effect=lambda n, *a, **k: self._ages_of(n)) as ica:
+                m.patch.object(airuleset, "_issue_comment_ages", side_effect=rec):
             cli_quals.ops_wait_ages_fn(members, ROOT, ["label:x"])
-            self.assertEqual(ica.call_count, cli_quals.OPS_WAIT_STALE_MAX_FETCHES)
+            self.assertEqual(len(calls), cli_quals.OPS_WAIT_STALE_MAX_FETCHES)
+            self.assertEqual(sorted(calls), list(range(1, 26)))   # the lowest 25
 
     def test_a_failing_fallback_call_is_isolated(self):
         members = [10, 20, 30]

@@ -37,9 +37,18 @@ import time
 
 # Reuse the #547 TTL semantics. Kept as LOCAL constants (mirroring
 # ops_wait_recheck.OPS_WAIT_FETCH_TTL_S / OPS_WAIT_FETCH_FAIL_TTL_S) so this leaf
-# stays import-cycle-free — it is imported by airuleset._watchdog_ops_wait_fetch.
+# stays LIGHT on the hot import path — it is imported (lazily) by
+# airuleset._watchdog_ops_wait_fetch on every stale-cache sweep, so it must not
+# pull ops_wait_recheck's whole dependency tree in just to read two ints.
 REFRESH_TTL_S = 30 * 60           # a good result is fresh for the full TTL
 REFRESH_FAIL_TTL_S = 60           # an error/timeout entry re-checks soon
+# how long a last-good member set is SERVED while the derivation keeps failing.
+# A transient hiccup (minutes) still serves the prior set, but a PERMANENTLY
+# broken derivation must eventually go honest (return None) rather than
+# re-surfacing days-old W members forever — this restores the pre-1c gh-error
+# fail-safe (the old blocking fetch returned None on a gh error). 4 failed
+# refresh cycles.
+MAX_SERVE_AGE_S = 4 * REFRESH_TTL_S
 # the detached child's own hard timeout (generous vs the ~30-58 s derivation).
 CHILD_TIMEOUT_S = 180
 # reclaim a pidfile whose recorded child is older than this even if /proc still
@@ -166,14 +175,22 @@ def _spawn_due(entry, now):
     return (now - ts) >= ttl
 
 
-def _serve(entry, timeout_sentinel):
-    """What the sweep returns from a cache entry: the last good member list
-    whenever present (even alongside a latest-attempt failure flag), else the
-    timeout sentinel for a cold timeout, else None (no usable result yet)."""
+def _serve(entry, timeout_sentinel, now):
+    """What the sweep returns from a cache entry: the last good member list when
+    present AND not too stale, else the timeout sentinel for a cold timeout, else
+    None (no usable result yet).
+
+    `members_ts` is the last SUCCESSFUL derivation time (carried forward across
+    preserved failures). When it is older than MAX_SERVE_AGE_S the last-good set
+    is NO LONGER served (a permanently-broken derivation goes honest → None /
+    sentinel instead of re-surfacing days-old W). A legacy entry with no
+    `members_ts` is served (backward compatible)."""
     if isinstance(entry, dict):
         members = entry.get("members")
         if isinstance(members, list):
-            return members
+            mts = entry.get("members_ts")
+            if not isinstance(mts, (int, float)) or (now - mts) <= MAX_SERVE_AGE_S:
+                return members
         if entry.get("timeout"):
             return timeout_sentinel
     return None
@@ -190,7 +207,7 @@ def fetch_or_refresh(cwd, cmd_name, timeout_sentinel, argv0=None, now=None,
     alive = alive_fn or refresher_alive
     if _spawn_due(entry, now) and not alive(cwd):
         (spawn_fn or spawn_refresher)(cwd, cmd_name, argv0)
-    return _serve(entry, timeout_sentinel)
+    return _serve(entry, timeout_sentinel, now)
 
 
 def spawn_refresher(cwd, cmd_name, argv0=None):
@@ -253,14 +270,19 @@ def run_refresh_child(target, cmd_name, cache, pid_file, argv0, run_fn=None):
         prior = _read_json(cache)
         prior_members = (prior.get("members")
                          if isinstance(prior, dict) else None)
+        prior_members_ts = (prior.get("members_ts")
+                            if isinstance(prior, dict) else None)
         result = _derive(target, cmd_name, argv0, run_fn)
         entry = {"ts": time.time()}
         if result["kind"] == "ok":
             entry["members"] = result["members"]
-        else:                                  # "timeout" | "error"
+            entry["members_ts"] = entry["ts"]      # last SUCCESSFUL derivation
+        else:                                      # "timeout" | "error"
             entry[result["kind"]] = True
             if isinstance(prior_members, list):
                 entry["members"] = prior_members   # preserve last good
+                if isinstance(prior_members_ts, (int, float)):
+                    entry["members_ts"] = prior_members_ts   # carry its age fwd
         _write_atomic(cache, entry)
     finally:
         try:
