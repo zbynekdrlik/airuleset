@@ -40,7 +40,8 @@ python airuleset.py status
   ...
 
 ~/.claude/settings.json      # Hooks referencing airuleset scripts
-  hooks.SessionStart -> bash ~/devel/airuleset/hooks/session-start-fetch.sh
+  hooks.SessionStart -> bash ~/devel/airuleset/hooks/session-start-fetch.sh           (startup)
+  hooks.SessionStart -> bash ~/devel/airuleset/hooks/session-start-stream-directives.sh (compact/resume/clear)
   hooks.PreToolUse   -> bash ~/devel/airuleset/hooks/block-sensitive-staging.sh
 ```
 
