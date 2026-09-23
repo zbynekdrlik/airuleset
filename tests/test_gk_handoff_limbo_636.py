@@ -18,15 +18,14 @@ I). These tests lock:
   4. the job-20 nudge NAMES the gk-handoff members with the doctrine action
      (drop ops-wait — it is a gk hand-off, not a third-party wait).
 """
-import subprocess
 import sys
 import unittest
 from pathlib import Path
-from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
+from watchdog import ops_wait_refresh  # noqa: E402
 import cli_quals
 import cli_quals_cmd
 import watchdog.ops_wait_recheck as owr
@@ -117,12 +116,7 @@ class WatchdogFetchParsesGkHandoff(unittest.TestCase):
     def test_parses_gk_handoff_marker(self):
         out = ("41\t2026-01-01T00:00:00Z\taction-only\tops-wait gk-handoff!\tt\n"
                "43\t2026-01-01T00:00:00Z\taction-only\tops-wait\tt\n")
-        cp = subprocess.CompletedProcess([], 0, stdout=out, stderr="")
-        with mock.patch("subprocess.run", return_value=cp), \
-                mock.patch.object(airuleset, "_repo_root", lambda cwd=None: "/r"), \
-                mock.patch.object(airuleset, "resolve_authority",
-                                  lambda cwd=None: "full"):
-            members = airuleset._watchdog_ops_wait_fetch("/r")
+        members = ops_wait_refresh.parse_members(out)
         by_num = {m["number"]: m for m in members}
         self.assertTrue(by_num[41]["gk_handoff"])
         self.assertFalse(by_num[43]["gk_handoff"])

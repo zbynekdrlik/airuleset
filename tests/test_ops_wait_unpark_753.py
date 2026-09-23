@@ -29,7 +29,6 @@ These tests lock:
 """
 import io
 import contextlib
-import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -38,6 +37,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
+from watchdog import ops_wait_refresh  # noqa: E402
 import cli_quals
 import cli_quals_cmd
 from watchdog import ops_wait_recheck as owr
@@ -199,12 +199,7 @@ class WatchdogFetchParsesAcceptance(unittest.TestCase):
         out = ("41\t2026-01-01T00:00:00Z\taction-only\tops-wait unpark?\ttitle\n"
                "43\t2026-01-01T00:00:00Z\taction-only\tacceptance\ttitle\n"
                "45\t2026-01-01T00:00:00Z\taction-only\tops-wait\ttitle\n")
-        cp = subprocess.CompletedProcess([], 0, stdout=out, stderr="")
-        with mock.patch("subprocess.run", return_value=cp), \
-                mock.patch.object(airuleset, "_repo_root", lambda cwd=None: "/r"), \
-                mock.patch.object(airuleset, "resolve_authority",
-                                  lambda cwd=None: "full"):
-            members = airuleset._watchdog_ops_wait_fetch("/r")
+        members = ops_wait_refresh.parse_members(out)
         by = {m["number"]: m for m in members}
         self.assertTrue(by[43]["acceptance"])
         self.assertFalse(by[45]["acceptance"])

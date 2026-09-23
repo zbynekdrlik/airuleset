@@ -12,7 +12,6 @@ tests lock:
      (back-compatible with legacy `int` members);
   4. the nudge text names the stale members with the doctrine action.
 """
-import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -21,6 +20,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset
+from watchdog import ops_wait_refresh  # noqa: E402
 import cli_quals
 import cli_quals_cmd
 import watchdog.ops_wait_recheck as owr
@@ -148,11 +148,7 @@ class WatchdogFetchParsesStale(unittest.TestCase):
     def test_parses_stale_marker_into_dicts(self):
         out = ("41\t2026-01-01T00:00:00Z\taction-only\tops-wait stale!\ttitle\n"
                "43\t2026-01-01T00:00:00Z\taction-only\tops-wait\ttitle\n")
-        cp = subprocess.CompletedProcess([], 0, stdout=out, stderr="")
-        with mock.patch("subprocess.run", return_value=cp), \
-                mock.patch.object(airuleset, "_repo_root", lambda cwd=None: "/r"), \
-                mock.patch.object(airuleset, "resolve_authority", lambda cwd=None: "full"):
-            members = airuleset._watchdog_ops_wait_fetch("/r")
+        members = ops_wait_refresh.parse_members(out)
         by_num = {m["number"]: m for m in members}
         self.assertTrue(by_num[41]["stale"])
         self.assertFalse(by_num[43]["stale"])

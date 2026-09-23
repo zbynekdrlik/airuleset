@@ -7240,141 +7240,41 @@ def _watchdog_dispatchable_fetch(cwd):
 
 
 def _watchdog_ops_wait_fetch(cwd):
-    """#547 — the parked W (`ops-wait`) member NUMBERS for THIS box's slice of
-    the repo at `cwd`, or None on any failure/refusal. The 1:1 sibling of
-    `_watchdog_backlog_fetch`: same authority-aware command choice
-    (`core-quals`/`slice-quals`), same `_repo_root(cwd=cwd)` resolution so the
-    child subprocess resolves authority exactly as it would inside that session's
-    own pane, same refuse→None contract — only the flag differs (`--ops-wait`
-    instead of `--count`) and the parse (member numbers, not a count). This RAW
-    fetch is uncached; the caller reads it through `ops_wait_recheck._cached_ops_wait`
-    (a per-repo TTL cache, the sibling of `_cached_backlog_count`) so it fires at
-    most once per repo per TTL, never every sweep.
+    """#547/#1067 — the parked W (`ops-wait`) member NUMBERS for THIS box's slice
+    of the repo at `cwd`, or None on any failure/refusal. Same authority-aware
+    command choice (`core-quals`/`slice-quals`) and `_repo_root(cwd=cwd)`
+    resolution as the sibling `_watchdog_backlog_fetch`, so the child resolves
+    authority exactly as that session's own pane would.
 
-    The members come from the SAME `_partition_workable` derivation the footer's
-    `W N`, the `/goal` stop-proof's `--ops-wait` list, and the count all use —
-    NEVER a parallel query (#367/#181). The job-20 W re-check nudge (via
-    `goal_lane_sweep`'s `ops_wait_fetch` seam) reads these to re-surface a
-    long-parked W ticket into an armed loop's attention.
+    #1067 slice 1c (a): this is now NON-BLOCKING. The derivation used to run here
+    as a `subprocess.run(..., timeout=35)` inside the 90 s sweep, so a slow
+    `--ops-wait` (58 s live on montalu1 after slice 1b) timed out every stale-
+    cache sweep and job 20 logged `w:?`. The derivation is moved OFF the sweep
+    path into a DETACHED refresher (`watchdog.ops_wait_refresh.fetch_or_refresh`):
+    the sweep reads a per-repo atomic cache file and, when it is stale and no
+    refresher child is alive, spawns ONE detached `airuleset.py <cmd> --ops-wait`
+    child (own 180 s timeout) that writes the parsed members back atomically. The
+    sweep returns the last good result, None (undetermined — no result yet), or
+    the FETCH_TIMEOUT sentinel (a cold refresh timeout with no prior good result,
+    so the outer `_cached_member_fetch` backs its fail-TTL off geometrically —
+    the slice-1 backoff). The members still come from the ONE `_partition_
+    workable` derivation (#367/#181): the child runs the SAME `--ops-wait` CLI;
+    only WHO waits for it changes. The member-dict shape (`{number, stale,
+    gk_handoff, release_recheck, acceptance, tacit_close, converge, no_target,
+    deploy_target, title}`) and the None/[] contract are unchanged.
 
-    `--ops-wait` prints `number<TAB>createdAt<TAB>action<TAB>reason<TAB>title`
-    per member (oldest-first), plus a trailing `# W-summary:` aggregate line
-    (total / oldest / flag counts / OVER-THRESHOLD marker, #754) which the loop
-    below SKIPS (a `#`-prefixed comment is not a member row); field 0 is the
-    issue number, field 3 the reason
-    (which carries a ` stale!` warning for a member with no fresh (≤24h) stream
-    push — #570 — a ` gk-handoff!` warning for a member ALSO carrying a gk
-    hand-off label — #636 — a ` recheck!` warning — #699 — and/or a ` unpark?`
-    candidate for a release-parked member whose release provably landed — #753,
-    a SESSION-facing tag with no watchdog consumer, so it is not parsed).
-    Returns a list of `{"number": int, "stale": bool, "gk_handoff": bool,
-    "release_recheck": bool, "acceptance": bool, "title": str}` so the job 20
-    nudge can NAME the stale + gk-handoff members, count the acceptance-parked
-    members (the #753 (b) UNPARK-AUDIT), and detect release-SHAPED titles (#698 —
-    field 4, which `--ops-wait` already prints; a degraded short line reads as
-    title "");
-    the sibling `ops_wait_recheck` helpers accept BOTH this dict shape
-    AND a legacy bare `int` (back-compat). A None
-    return (non-zero exit — the #181 untrustworthy-empty refusal — or an
-    unparsable line) is UNDETERMINED and the nudge job fails safe to no-nudge.
-    An empty but SUCCESSFUL result (exit 0, no lines) returns `[]` (genuinely no
-    W parked), which the job treats as "clear the tracking state".
-
-    Timeout (#570): 35s, not the sibling `--count`'s 15s — `--ops-wait` now does
-    up to OPS_WAIT_STALE_MAX_FETCHES (25) per-member `gh issue view` comment
-    reads to compute `stale!`. This is RARE on the sweep: it runs at most once
-    per repo per `_cached_ops_wait` TTL (30 min), so on a 60s sweep a given
-    repo's cache is expired only ~3% of the time — the 120s sweep budget absorbs
-    an occasional cached fetch (~25 × <1s), and a genuine timeout returns None
-    (the W-clause of that day's nudge is dropped, re-checked next TTL via the
-    60s fail_ttl — a bounded, self-healing degradation, #570 review 🔵). Wired
-    HERE, like every other network call in this file, so run_once's unit tests
-    stay network-free."""
-    import subprocess
+    Wired HERE, like every other network call in this file, so run_once's unit
+    tests stay network-free (the spawn only fires on a stale-cache sweep)."""
+    import watchdog.ops_wait_recheck as _owr
+    import watchdog.ops_wait_refresh as _owref
     try:
         root = _repo_root(cwd=cwd) or cwd
         authority = resolve_authority(cwd=root)
     except Exception:
         return None
     cmd_name = "core-quals" if authority == "full" else "slice-quals"
-    try:
-        r = subprocess.run(
-            [sys.executable, os.path.abspath(__file__), cmd_name, "--ops-wait"],
-            cwd=cwd, capture_output=True, text=True, timeout=35)
-    except subprocess.TimeoutExpired:
-        # #1067 (b): a TIMEOUT is DISTINCT from a gh error — return the sentinel
-        # so `_cached_member_fetch` backs its fail-TTL off geometrically (a
-        # persistently-slow `--ops-wait` can never re-fire every ~60 s sweep).
-        # A gh error / any other failure stays the plain-None transient (base
-        # fail-TTL, re-checks soon). The #1067 (a) prefetch should keep this
-        # child well under 35 s, so the sentinel is the defense-in-depth belt.
-        import watchdog.ops_wait_recheck as _owr
-        return _owr.FETCH_TIMEOUT
-    except Exception:
-        return None
-    if r.returncode != 0:
-        return None
-    members = []
-    for line in (r.stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        # #754: `--ops-wait` appends a `#`-prefixed aggregate SUMMARY line
-        # (total / oldest / flag counts / OVER-THRESHOLD marker) after the member
-        # rows. Skip it here so it never trips the malformed→None guard below —
-        # a comment line is not an undetermined member set, it is not a member at
-        # all. (The summary is a human/session report line; the members come from
-        # the int-prefixed rows.)
-        if line.startswith("#"):
-            continue
-        parts = line.split("\t")
-        try:
-            num = int(parts[0])
-        except (ValueError, IndexError):
-            return None   # a malformed line -> undetermined, never a partial set
-        # `--ops-wait` always prints the FULL 5-field form (reason_fn is always
-        # given), so field 3 IS the reason column (`ops-wait`/`acceptance` +
-        # optional ` gk-handoff!` (#636) + optional ` stale!` + optional
-        # ` recheck!` (#699) + optional ` unpark?` (#753) + optional
-        # ` tacit-wait`/` tacit-close?` (#818)). Require >=5 fields so
-        # a hypothetical degraded
-        # 4-field line (title at index 3) can never be misread as a flag (#570
-        # review nit); anything shorter -> no flag.
-        reason = parts[3] if len(parts) >= 5 else ""
-        # #698: the TITLE (field 4, tab-joined in case a title itself carries a
-        # tab) feeds the job-20 release-shaped detection — zero new gh calls.
-        title = "\t".join(parts[4:]) if len(parts) >= 5 else ""
-        # #753 (b): the base `acceptance` reason (client-thread-parked) feeds the
-        # job-20 UNPARK-AUDIT count — parsed from the reason field, zero new gh
-        # calls. No flag token contains "acceptance", so the substring test is
-        # unambiguous. (The `unpark?` (a) token is a SESSION-facing CLI tag with no
-        # watchdog consumer — RELEASE LANDOL stays the nudge's release-landed
-        # signal — so it is deliberately NOT parsed here; a future RELEASE-LANDOL/
-        # unpark? unification, #753 Approach 4, would re-add it.)
-        members.append({"number": num, "stale": "stale!" in reason,
-                        "gk_handoff": "gk-handoff!" in reason,
-                        "release_recheck": "recheck!" in reason,
-                        "acceptance": "acceptance" in reason,
-                        # #818: only `tacit-close?` is consumed by the job-20
-                        # nudge (the actionable "close, don't remind" clause). A
-                        # tacit member keeps its base `acceptance` reason in the
-                        # string, so `acceptance` above stays True and the #753
-                        # UNPARK-AUDIT count still includes it — the client can
-                        # still reply mid-window, so tacit is NEVER excluded from
-                        # UNPARK-AUDIT. `tacit-wait` is a CLI display tag with no
-                        # watchdog consumer (its stale! suppression already
-                        # dropped the false "remind DNES" nudge), so it is
-                        # deliberately NOT parsed here (the #753 no-dead-parse rule).
-                        "tacit_close": "tacit-close?" in reason,
-                        # #881: convergence tags consumed by the job-20 nudge's
-                        # CONVERGE and NO-TARGET clauses.
-                        "converge": "converge!" in reason,
-                        "no_target": "no-target!" in reason,
-                        # #944: deploy-target tag consumed by the job-20
-                        # nudge's DEPLOY-WINDOW / DEPLOY-MISS clauses.
-                        "deploy_target": "deploy-target!" in reason,
-                        "title": title})
-    return members
+    return _owref.fetch_or_refresh(cwd, cmd_name, _owr.FETCH_TIMEOUT,
+                                   argv0=os.path.abspath(__file__))
 
 
 def _watchdog_queue_fetch(cwd, gh_out=None):
