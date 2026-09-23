@@ -35,7 +35,8 @@ class _Rec:
 
     def set_hook_calls(self):
         return [c for c in self.calls
-                if "set-hook" in c and "session-created" in c]
+                if "set-hook" in c
+                and any(a.startswith("session-created") for a in c)]
 
 
 class TestRenderPieces(unittest.TestCase):
@@ -87,9 +88,11 @@ class TestApplier(unittest.TestCase):
         self.assertTrue(logger.is_file())
         self.assertTrue(os.access(logger, os.X_OK), "logger must be executable")
         self.assertEqual(len(rec.set_hook_calls()), 1)
-        # the live-applied hook names session-created and the logger path
+        # the live-applied hook names the audit's OWN session-created index
+        # (#1124: an unindexed set would clear a sibling writer) + the logger
         argv = rec.set_hook_calls()[0]
-        self.assertIn("session-created", argv)
+        self.assertIn("session-created[%d]"
+                      % tmuxprov.SESSION_CREATED_HOOK_INDEX["owner-audit"], argv)
         self.assertTrue(any(str(logger) in a for a in argv))
 
     def test_non_owner_box_no_block_no_live_apply(self):

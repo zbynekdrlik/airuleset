@@ -1767,7 +1767,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
         # session-created hook renames every (primary AND grouped-attach)
         # new session's window to the baked stream literal -- verified live
         # to converge on both tmux 3.4 and 3.7b.
-        self.assertIn('set-hook -g session-created "rename-window montalu1"', block)
+        self.assertIn('set-hook -g session-created[0] "rename-window montalu1"', block)
 
     def test_after_new_window_hook_is_never_emitted(self):
         # #554: `after-new-window` fires ONLY on windows opened after the
@@ -1790,7 +1790,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
         self.assertTrue(changed)
         text = p.read_text()
         self.assertIn(airuleset.STREAM_TMUX_WINDOW_MARK_START, text)
-        self.assertIn('set-hook -g session-created "rename-window m2"', text)
+        self.assertIn('set-hook -g session-created[0] "rename-window m2"', text)
 
     def test_gk_gets_the_gk_alias(self):
         # #592: gk (gatekeeper account) was the owner's report -- window showed
@@ -1807,7 +1807,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
         # (not weakened) to match the extended hook AND to confirm the create
         # rides the SAME hook.
         text = p.read_text()
-        self.assertIn('set-hook -g session-created "rename-window gk ', text)
+        self.assertIn('set-hook -g session-created[0] "rename-window gk ', text)
         self.assertIn("run-shell 'S=#{session_name}; ", text)
         self.assertIn("-n gk-infra", text)
 
@@ -1908,7 +1908,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
         # #592: the hook renames to the ALIAS (m2), not the full username.
         self.assertIn(["tmux", "set-option", "-gw", "automatic-rename", "off"], calls)
         self.assertIn(
-            ["tmux", "set-hook", "-g", "session-created", "rename-window m2"],
+            ["tmux", "set-hook", "-g", "session-created[0]", "rename-window m2"],
             calls)
 
     def test_live_apply_renames_every_window_on_the_server_to_the_alias(self):
@@ -1988,7 +1988,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
             p, user="gatekeeper", host="gatekeeper-cx23",
             home="/home/gatekeeper", run=run)
         hooks = [a for a in seen
-                 if a[:4] == ["tmux", "set-hook", "-g", "session-created"]]
+                 if a[:4] == ["tmux", "set-hook", "-g", "session-created[0]"]]
         self.assertTrue(hooks, "no live session-created hook was set")
         value = hooks[-1][4]
         # the finisher's exact defect: the running server was left on the bare hook
@@ -2029,7 +2029,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
             cli_tmux_provisioning._live_apply_stream_window_name(
                 "gk", windows=[], run=run)
         self.assertIn(
-            ["tmux", "set-hook", "-g", "session-created", "SENTINEL_HOOK"],
+            ["tmux", "set-hook", "-g", "session-created[0]", "SENTINEL_HOOK"],
             seen)
 
     def test_undeclared_target_live_hook_is_byte_identical_bare_rename(self):
@@ -2048,7 +2048,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
         airuleset.apply_stream_tmux_window_name(
             p, user="montalu2", host="subdev", run=run)
         self.assertIn(
-            ["tmux", "set-hook", "-g", "session-created", "rename-window m2"],
+            ["tmux", "set-hook", "-g", "session-created[0]", "rename-window m2"],
             seen)
 
     def test_newlevel_owner_box_does_NO_window_naming_live_apply(self):
@@ -2071,7 +2071,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
         self.assertNotIn(
             ["tmux", "set-option", "-gw", "automatic-rename", "off"], seen)
         self.assertNotIn(
-            ["tmux", "set-hook", "-g", "session-created", "rename-window dev1"],
+            ["tmux", "set-hook", "-g", "session-created[0]", "rename-window dev1"],
             seen)
         self.assertNotIn(["tmux", "rename-window", "-t", "@7", "dev1"], seen)
 
@@ -2085,7 +2085,7 @@ class TestApplyStreamTmuxWindowName(TestCase):
         airuleset.apply_stream_tmux_window_name(
             p, user="newlevel", host="dev1", run=seen.append)
         self.assertIn(["tmux", "set-option", "-gwu", "automatic-rename"], seen)
-        self.assertIn(["tmux", "set-hook", "-gu", "session-created"], seen)
+        self.assertIn(["tmux", "set-hook", "-gu", "session-created[0]"], seen)
 
     def test_owner_box_live_revert_unfreezes_windows_named_the_alias(self):
         # #593 (review 🟡): a manual `rename-window` (what the bad #592 live-apply
@@ -2212,10 +2212,11 @@ class TestManagedWindowCreation998(TestCase):
             "# sees WHERE they are (gk/mN/dN/...). automatic-rename off makes it\n"
             "# STICK (a command-tracking 'node'/'bash' name hides the identity).\n"
             "# #593: rendered ONLY on single-session-per-account boxes (gk + subdev\n"
-            "# streams), never an owner multi-project box; the alias is the SAME\n"
+            "# streams) and the single-project controller (#1124), never an owner\n"
+            "# multi-project box; the alias is the SAME\n"
             "# source the webterm tabs use (cli_aliases.short_target_alias).\n"
             "set-option -gw automatic-rename off\n"
-            'set-hook -g session-created "rename-window dev1"\n'
+            'set-hook -g session-created[0] "rename-window dev1"\n'
             "# <<< airuleset tmux stream-window <<<"
         )
         self.assertEqual(airuleset.render_stream_tmux_window_block("dev1"),
