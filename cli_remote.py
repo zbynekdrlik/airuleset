@@ -1337,6 +1337,8 @@ def _deploy_to_all_remotes(failed, auth_failed):
     import airuleset  # #433 L-E: REMOTE_HOSTS read via the airuleset facade
     import cli_drop_gateway  # #1115: the deploy ssh harvests each target's
     # persisted filedrop port into the controller-side drop-lanes.json cache.
+    import cli_drop_golive  # #1115 slice B: writes each LIVE lane's go-live
+    # marker on the target over this same deploy ssh session.
 
     # 3. Deploy to each remote
     # #358: one per-run ssh ControlMaster socket directory, shared by the
@@ -1375,6 +1377,11 @@ def _deploy_to_all_remotes(failed, auth_failed):
         # cache written after the loop. `drop_ingress_rules_for_controller()`
         # prefers it over the in-code `DropLane.filedrop_port` literal.
         measured_filedrop_ports = {}
+        # #1115 slice B: the LIVE-lane set the controller install just reconciled
+        # ({host: port}); a target whose lane is live gets its go-live marker
+        # written over its deploy ssh session (fail-closed — empty cache = no
+        # markers). Read once; a missing/malformed cache degrades to {}.
+        golive_live_hosts = cli_drop_golive.read_golive_live_hosts()
         for remote in deployable_list:
             print(f"\n{'=' * 50}")
             print(f"Deploying to {remote['name']} ({remote['host']})...")
@@ -1384,6 +1391,13 @@ def _deploy_to_all_remotes(failed, auth_failed):
             # directly (not through this loop) so it never carries the env, and
             # a sub-dev/other host never carries it either.
             owner_vps_env = "AIRULESET_OWNER_VPS=1 " if remote.get("owner_vps") else ""
+            # #1115 slice B: for a target whose drop lane went LIVE this run,
+            # write its go-live marker over this same ssh session, chained RIGHT
+            # AFTER the filedrop probe (exit-0/exit-free, so the &&-chain to the
+            # gating post-checks continues). "" for every non-live account.
+            _golive_marker = cli_drop_golive.marker_snippet_for_entry(
+                remote, golive_live_hosts)
+            _golive_marker = ("&& %s " % _golive_marker) if _golive_marker else ""
             # Self-heal the https credential helper BEFORE the pull: an account whose
             # global credential.helper drifted to `store` fails `git pull` with
             # "could not read Username for 'https://github.com'" while gh is still
@@ -1397,6 +1411,8 @@ def _deploy_to_all_remotes(failed, auth_failed):
                 # runs. This probe is exit-0 + `exit`-free, so the `&& …` chain
                 # continues to the post-checks unchanged.
                 f"&& {cli_drop_gateway.filedrop_port_probe_snippet()} "
+                # #1115 slice B: go-live marker for a LIVE-lane target ("" else).
+                f"{_golive_marker}"
                 # #1084 L1b: the compact hard-off report line (informational,
                 # never fails the target) runs BEFORE the gating groups below.
                 # Those `{ … }` groups (not subshells) `exit` on their SKIP paths
