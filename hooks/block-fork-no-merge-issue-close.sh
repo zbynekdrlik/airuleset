@@ -585,7 +585,8 @@ if [ -n "$ISSUE_NUM" ]; then
     # 403s structurally ("Resource not accessible by integration"), leaving ME
     # empty and the self-authored carve-out permanently unreachable even for a
     # genuinely App-authored sub-finding (#463). `authority --self-login`
-    # returns the fixed stream bot login on such a box (no network call) and
+    # returns the minting App's bot login on such a box (issue 1129: the
+    # token's `.app` sidecar slug, else the constant; no network call) and
     # the real `gh api user` login (via `_gh_login()`) on every other box — a
     # box whose gh resolves identically stays behaviourally the same, and a
     # git-credentials-only box (david's fork-no-merge) is a strict FAIL-SAFE
@@ -608,7 +609,7 @@ if [ -n "$ISSUE_NUM" ]; then
     # fallback below) is sufficient. Fail-SAFE: a non-403 failure (broken gh,
     # network error) leaves ME empty → falls through to the existing BLOCK.
     # The App bot login is fetched from `authority --app-bot-login` (the
-    # single-source constant) first; if the python call ALSO fails
+    # minting App's `.app` slug, else the constant) first; if the python call ALSO fails
     # (the whole chain is broken), the HARDCODED constant is the
     # last-resort fallback so this belt works even with zero python.
     if [ -z "$ME" ]; then
@@ -649,7 +650,7 @@ if [ -n "$ISSUE_NUM" ]; then
     # montalu2 on odoo-erp #5560). With a SHARED bot identity, "my box's own
     # ticket" and "any stream's own ticket" are already identical (the accepted
     # #463 residual), so when ME is unresolvable the ownership test degenerates
-    # to: is this ticket authored by the shared stream App bot? A ticket authored
+    # to: is this ticket authored by this box's stream App bot? A ticket authored
     # by it was FILED by a stream, NEVER maintainer-assigned (maintainer-assigned
     # work is authored by MAINTAINER_LOGIN) — so a reduced-authority stream may
     # self-close it as its own bookkeeping, exactly as the ME==bot==AUTHOR path
@@ -661,8 +662,8 @@ if [ -n "$ISSUE_NUM" ]; then
     # is the SAME fail-safe the #533/#756 carve-outs use: a -R flag present but
     # unparseable (a glued `-Rowner/repo`) would read AUTHOR from the CWD repo
     # while the close targets the named one — refuse the exemption (fail SAFE).
-    # APP_BOT_LOGIN (a static constant, no network call, no App-token-box
-    # detection) is fetched lazily INSIDE this branch, so a resolved-identity
+    # APP_BOT_LOGIN (the token's `.app` slug else the constant, issue 1129; no
+    # network call) is fetched lazily INSIDE this branch, so a resolved-identity
     # close never spawns the extra python3.
     if [ -z "$ME" ] && [ -n "$AUTHOR" ] && ! _repo_unparseable_signal; then
         APP_BOT_LOGIN=$(python3 "$REPO_DIR/airuleset.py" authority --app-bot-login 2>/dev/null || echo "")
@@ -686,7 +687,7 @@ fi
 #       empty on a full-authority box, so the exemption never fires there);
 #   (2) the ticket carries THAT label AND `needs-acceptance` AND NONE of the #512
 #       re-hand-off/bounce override labels (ready-for-review / needs-gatekeeper /
-#       prio:bounce — a re-hand-off/bounce is NOT an acceptance state);
+#       gk-processing / prio:bounce — a re-hand-off/bounce is NOT an acceptance state);
 #   (3) the command carries --comment/-c (close WITH a citation of the acceptance
 #       evidence — a static presence check, deliberately no content grading).
 # Every failure (empty stream label, unreadable labels, foreign/absent label,
@@ -749,9 +750,14 @@ if [ -n "$ISSUE_NUM" ]; then
                 done <<< "$STREAM_LABEL"
                 return 1
             }
+            # Issue 1130: `gk-processing` (#1053, gk picked the re-hand-off up)
+            # is a queue label exactly like ready-for-review/needs-gatekeeper.
+            # The set must cover cli_quals.MAINTAINER_ACTION_LABELS — locked by
+            # tests/test_close_guard_gk_processing_1130.py.
             if _has_own_stream_label && _has_label "needs-acceptance" \
                && ! _has_label "ready-for-review" \
                && ! _has_label "needs-gatekeeper" \
+               && ! _has_label "gk-processing" \
                && ! _has_label "prio:bounce"; then
                 # Conditions 1+2 hold; condition 3 (--comment/-c) is the last gate
                 # (shared #760 _cmd_has_comment_flag helper).
@@ -780,7 +786,7 @@ fi
 #       SECOND net; a `-R` present-but-unparseable falls SAFE (block);
 #   (2) the ticket carries a gk review-verdict ARTIFACT in its comments (the SAME
 #       #3784 detection — never WHO closed);
-#   (3) the ticket carries NONE of `ready-for-review`/`needs-gatekeeper` (gk still
+#   (3) the ticket carries NONE of `ready-for-review`/`needs-gatekeeper`/`gk-processing` (gk still
 #       owns it), `prio:bounce` (a returned bounce), or `needs-acceptance` (that
 #       state is closed via the #533 acceptance carve-out above, which REQUIRES its
 #       own --comment client-confirmation citation — excluding it here stops the
@@ -850,7 +856,7 @@ if [ -n "$ISSUE_NUM" ]; then
             # #1010: an if/elif chain that BOTH decides the ALLOW and records WHICH
             # carve-out condition failed. The allow semantics are BYTE-IDENTICAL to
             # the pre-#1010 conjunction: `exit 0` fires iff the verdict artifact is
-            # present AND none of the four override labels are present AND --comment
+            # present AND none of the five override labels are present AND --comment
             # is present; VERDICT_MISSING_COMMENT=1 fires iff artifact + all-labels-
             # absent + no --comment. Every other path sets a precise reason and
             # falls through to the BLOCK below (the SAME #349/#463 fail direction).
@@ -860,6 +866,9 @@ if [ -n "$ISSUE_NUM" ]; then
                 VERDICT_FAIL_REASON="queue label present: ready-for-review (the gatekeeper still owns this ticket — it has not been handed back)"
             elif _v_has_label "needs-gatekeeper"; then
                 VERDICT_FAIL_REASON="queue label present: needs-gatekeeper (the gatekeeper still owns this ticket)"
+            elif _v_has_label "gk-processing"; then
+                # Issue 1130: gk is processing it again (#1053) — same as above.
+                VERDICT_FAIL_REASON="queue label present: gk-processing (the gatekeeper is processing this ticket)"
             elif _v_has_label "prio:bounce"; then
                 VERDICT_FAIL_REASON="queue label present: prio:bounce (a returned bounce — re-hand-off first, do not self-close)"
             elif _v_has_label "needs-acceptance"; then

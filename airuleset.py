@@ -10366,14 +10366,14 @@ def main():
                              "self-authored-close carve-out in "
                              "block-fork-no-merge-issue-close.sh (#463): on a "
                              "GitHub App-token box `gh api user` 403s, so return "
-                             "the fixed stream bot login (STREAM_APP_BOT_LOGIN) "
-                             "without a network call; on every other box return "
+                             "the minting App's login (the token's .app slug, else "
+                             "STREAM_APP_BOT_LOGIN) offline; else "
                              "the real gh login. Prints nothing when the "
                              "identity cannot be resolved (the hook then refuses "
                              "the exemption / fails safe).")
     p_auth.add_argument("--app-bot-login", action="store_true",
-                        help="Print the shared stream App bot login "
-                             "(STREAM_APP_BOT_LOGIN) unconditionally, for the "
+                        help="Print the stream App bot login (token's .app "
+                             "slug, else STREAM_APP_BOT_LOGIN), for the "
                              "#773 identity fallback in "
                              "block-fork-no-merge-issue-close.sh: when "
                              "--self-login is unresolvable (a bot box whose "

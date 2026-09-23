@@ -250,12 +250,12 @@ class TestAuthorityResolution(TestCase):
                        self_login=False, stream_label=False, app_bot_login=False))
         p.assert_any_call(airuleset.MAINTAINER_GH_LOGIN)
 
-    def test_cli_prints_app_bot_login_unconditionally(self):
-        # #773: `authority --app-bot-login` prints the shared stream App bot
-        # login constant with no network call and no App-token-box detection --
-        # the close-guard hook's identity fallback compares a ticket's author
+    def test_cli_prints_app_bot_login_without_slug_record(self):
+        # #773: `authority --app-bot-login` prints the stream App bot login, no
+        # network call; with no `.app` slug record (issue 1129) it is the constant
+        # -- the close-guard hook's identity fallback compares a ticket's author
         # against it when --self-login could not resolve the box's own login.
-        with m.patch("builtins.print") as p:
+        with m.patch("builtins.print") as p, m.patch.dict("os.environ", {"GH_APP_TOKEN_DIR": "/nonexistent/773"}):
             airuleset.cmd_authority(
                 m.Mock(explain=False, maintainer_login=False,
                        self_login=False, stream_label=False, app_bot_login=True))

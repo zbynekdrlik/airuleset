@@ -15,6 +15,7 @@ directory should be ignored.
 """
 
 import json
+import os
 import unittest
 from unittest import mock
 
@@ -43,6 +44,7 @@ class TestStrayAppTokenDir(unittest.TestCase):
                          "_stream_self_login must prefer the real PAT login "
                          "over the App bot login when the active auth is a PAT")
 
+    @mock.patch.dict(os.environ, {"GH_APP_TOKEN_DIR": "/nonexistent/918"})  # no .app (1129)
     def test_genuine_app_token_box_returns_bot_login(self):
         """On a genuine App-token box (_gh_login returns None because
         gh api user 403s), _stream_self_login must still return

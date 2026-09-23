@@ -24,6 +24,7 @@ import subprocess
 import time
 from pathlib import Path
 
+import cli_app_token
 import working_time
 
 
@@ -89,13 +90,15 @@ def _core_search_excl():
     `ops-wait` label (the #578 pipeline-gated/umbrella doctrine), never dropped
     from the count by this exclusion. Conversely a FOREIGN stream's bare
     `needs-acceptance` (a reduced-authority `stream:<user>` in AUTHORITY_BY_USER,
-    with NO `ready-for-review`/`needs-gatekeeper`) IS excluded here, so it never
+    with NO MAINTAINER_ACTION_LABELS label — `ready-for-review`/
+    `needs-gatekeeper`/`gk-processing`) IS excluded here, so it never
     reaches the core obligation `seen` — the ONE mechanical guard against a
     foreign acceptance leaking into the full-authority partition, where
     `_partition_workable` (which cannot see box authority) would now route it to
     `U` (#622: a bare needs-acceptance is queued for owner approval → U
     unconditionally; the exclusion keeps a FOREIGN one out of this box's counts
-    entirely, be that `U` or `I`).
+    entirely, be that `U` or `I`). One WITH such a label re-enters via
+    `_obligation_quals()` and the #507 gk-override keeps it in `I` (issue 1130).
 
     #561: each excluded stream is EXPANDED via `_stream_rename_equivalents()`
     — the SAME single alias primitive `_slice_quals()`/`_ticket_is_stream_
@@ -136,6 +139,12 @@ def _gh_app_token_dir():
     if override:
         return Path(override)
     return Path.home() / ".config" / "gh-app-tokens"
+
+
+def _gh_app_token_slug():
+    """The slug of the App that minted this box's token, or None (issue 1129,
+    `cli_app_token.read_app_slug` — the `.app` sidecar next to `primary`)."""
+    return cli_app_token.read_app_slug(_gh_app_token_dir())
 
 
 def _is_gh_app_token_box():
@@ -486,8 +495,11 @@ USER_WAITING_LABELS = ("needs-answer", "needs-decision", "needs-acceptance",
 # `needs-acceptance` ONLY: `needs-answer`/`needs-decision` are not hand-off
 # states, so their #468 routing (a handed + user-waiting row goes to U) is left
 # byte-identical — this override applies solely to the one POST-hand-off label.
-NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS = (
-    "ready-for-review", "needs-gatekeeper", "prio:bounce")
+#
+# Issue 1130: DERIVED from MAINTAINER_ACTION_LABELS, so `gk-processing` overrides
+# too (a foreign acceptance in gk-processing fell to the gk owner's U).
+NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS = MAINTAINER_ACTION_LABELS + (
+    "prio:bounce",)
 
 # #507: labels that mark a hand-off the gatekeeper has ALREADY PROCESSED, so the
 # ticket is no longer parked with the gatekeeper — it is back in the STREAM's
@@ -1506,7 +1518,7 @@ def _is_own_login(login, self_login):
     """App-aware identity match for own-comment detection (#904).
 
     On App-token streams, ``_stream_self_login()`` returns the ``app/``-prefixed
-    form (``STREAM_APP_BOT_LOGIN = "app/odoo-erp-stream-tokens"``), but
+    form (``app/<minting App slug>``, else ``STREAM_APP_BOT_LOGIN``), but
     GitHub's ``gh issue view --json comments`` renders the comment
     ``author.login`` as the bare slug (``"odoo-erp-stream-tokens"``).
 
@@ -1528,8 +1540,8 @@ def _is_own_login(login, self_login):
 def _stream_self_login():
     """THIS box's own gh identity for own-comment matching (#463, #904).
 
-    Returns the ``app/``-prefixed form on App-token boxes
-    (``STREAM_APP_BOT_LOGIN``; NO network call — ``gh api user`` 403s
+    Returns the ``app/``-prefixed form on App-token boxes (the minting
+    App's slug, else ``STREAM_APP_BOT_LOGIN``; NO network — ``gh api user`` 403s
     structurally), the real gh login on a PAT box, or None when
     unresolvable. None is not fatal: ``_stale_ops_wait_flagged``
     degrades to the any-comment definition (the SAFE direction — it
@@ -1549,7 +1561,10 @@ def _stream_self_login():
     validating the
     App-token detection: if ``_gh_login()`` succeeds (returns a real
     login), the box is NOT operating as an App-token box (a genuine
-    App token makes ``gh api user`` 403 → ``_gh_login()`` = None)."""
+    App token makes ``gh api user`` 403 → ``_gh_login()`` = None).
+
+    Issue 1129: on a genuine App-token box the identity is the App that
+    MINTED the token in use (``_gh_app_token_slug()``), else the constant."""
     import airuleset
     if _is_gh_app_token_box():
         # Validate: a genuine App-token box has no user identity
@@ -1559,6 +1574,10 @@ def _stream_self_login():
         real_login = airuleset._gh_login()
         if real_login is not None:
             return real_login
+        # Issue 1129: the App that actually minted this box's token.
+        slug = _gh_app_token_slug()
+        if slug:
+            return "app/" + slug
         return airuleset.STREAM_APP_BOT_LOGIN
     return airuleset._gh_login()
 
@@ -2161,7 +2180,8 @@ def _unpark_release_flagged(rows, authority=None, release_fetch=None):
 # gk-request lane (#191/#223 fold both into the same gk bucket).
 # #1053: `gk-processing` (gk's live-work state) is the third gk hand-off label,
 # so a W-parked row also carrying it is the same `gk-handoff!` contradiction.
-_GK_HANDOFF_LABELS = ("needs-gatekeeper", "ready-for-review", "gk-processing")
+# Issue 1130: derived from MAINTAINER_ACTION_LABELS (was a literal duplicate).
+_GK_HANDOFF_LABELS = MAINTAINER_ACTION_LABELS
 
 # #636 review 🟡: a `prio:bounce` OVERRIDES a co-present gk hand-off label back to
 # "the STREAM's own court" (the #313 pt-2 override that `_slice_mine_and_handed`
@@ -2493,15 +2513,16 @@ def cmd_authority(args):
             print(login)
         return
     if getattr(args, "app_bot_login", False):
-        # #773: the shared stream App bot login (STREAM_APP_BOT_LOGIN), printed
-        # UNCONDITIONALLY -- it is a static constant, not a per-box identity, so
-        # no network call and no App-token-box detection is needed. The hook's
-        # #773 fallback compares a ticket's AUTHOR against it: a ticket authored
-        # by this bot was FILED by a stream (never maintainer-assigned, which is
-        # authored by MAINTAINER_GH_LOGIN), so a reduced-authority stream may
-        # self-close it even when --self-login could not resolve the box's own
-        # identity.
-        print(airuleset.STREAM_APP_BOT_LOGIN)
+        # #773: the stream App bot login, printed without App-token-box
+        # detection or a network call. The hook's #773 fallback compares a
+        # ticket's AUTHOR against it: a ticket authored by a stream App was
+        # FILED by a stream (never maintainer-assigned, which is authored by
+        # MAINTAINER_GH_LOGIN), so a reduced-authority stream may self-close it
+        # even when --self-login could not resolve the box's own identity.
+        # Issue 1129: the App that minted THIS box's token when its slug
+        # sidecar is readable, else the constant STREAM_APP_BOT_LOGIN.
+        slug = _gh_app_token_slug()
+        print("app/" + slug if slug else airuleset.STREAM_APP_BOT_LOGIN)
         return
     if getattr(args, "stream_label", False):
         # #533: THIS stream's ownership label `stream:<unix-user>` for the
@@ -3059,8 +3080,8 @@ def _slice_mine_and_handed(quals, root, slug, extra=None):
         # count must NOT drop to 0 while gk is working. `verify-on-copy` is
         # deliberately absent: it is the post-deploy RETURN to the sub-dev's own
         # `I` (handled by GATEKEEPER_PROCESSED_LABELS, below).
-        label_handed = ("ready-for-review" in labels) or \
-            ("needs-gatekeeper" in labels) or ("gk-processing" in labels)
+        # Issue 1130: the ONE hand-off label set, never a literal copy.
+        label_handed = any(lb in labels for lb in MAINTAINER_ACTION_LABELS)
         # #313 pt 2 (F2/F3): `prio:bounce` is the gatekeeper's own "returned
         # to the sub-dev, not ready" verdict — it overrides a stale/lagged
         # hand-off LABEL so a bounced ticket reaches `unhandled` naturally;
