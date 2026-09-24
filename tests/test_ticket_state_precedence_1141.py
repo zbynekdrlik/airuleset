@@ -312,7 +312,8 @@ class ExplainPrintsTheMovedRows(unittest.TestCase):
         self.assertEqual(row5[0].split("\t")[1], "U")
         self.assertIn("#1141", row5[0].split("\t")[2])
         self.assertEqual(printed[-1],
-                         "# explain: I=0 M=0 U=1 W=0 gk=0 hidden=1")
+                         "# explain: I=0 M=0 U=1 W=0 gk=0 hidden=1 "
+                         "count=0 conflicts=2")
         self.assertFalse(any("mismatch" in ln for ln in printed), printed)
 
 
@@ -391,7 +392,8 @@ class CoreQualsCli(unittest.TestCase):
                   for ln in r.stdout.splitlines() if ln and ln[0].isdigit()}
         self.assertEqual(by_num, {"1": "I", "2": "hidden", "3": "I"},
                          r.stdout)
-        self.assertIn("# explain: I=2 M=0 U=0 W=0 gk=0 hidden=1",
+        self.assertIn("# explain: I=2 M=0 U=0 W=0 gk=0 hidden=1 count=2 "
+                      "conflicts=1",
                       r.stdout.splitlines())
 
 

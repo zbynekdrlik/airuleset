@@ -354,7 +354,10 @@ class ClassifierTotality(unittest.TestCase):
 
 
 class Conflicts(unittest.TestCase):
-    """A contradictory label set is REPORTED, never re-classified."""
+    """A contradictory label set is REPORTED, never re-classified. Slice 4
+    (tests/test_ticket_conflicts_1141.py) made each report a `Conflict` with
+    the classify() winner; an unsent needs-acceptance is an owner question
+    there, so needs-acceptance + ready-for-review is now reported."""
 
     def test_the_four_observed_contradictions_are_named(self):
         cases = {
@@ -364,16 +367,15 @@ class Conflicts(unittest.TestCase):
             ("ops-wait", "needs-answer"): "ops-wait",
         }
         for combo, needle in cases.items():
-            lines = cli_ticket_state.conflicts(_labels(*combo))
-            self.assertTrue(lines, combo)
-            self.assertTrue(any(needle in ln and combo[1] in ln
-                                for ln in lines), (combo, lines))
+            got = cli_ticket_state.conflicts(_labels(*combo))
+            self.assertTrue(got, combo)
+            self.assertTrue(any(needle in c.labels and combo[1] in c.labels
+                                for c in got), (combo, got))
 
     def test_consistent_label_sets_report_nothing(self):
         for combo in ((), ("needs-answer",), ("ops-wait",),
                       ("ready-for-review",), ("prio:bounce", "ops-wait"),
-                      ("needs-acceptance", "ops-wait"),
-                      ("needs-acceptance", "ready-for-review")):
+                      ("needs-acceptance", "ops-wait")):
             self.assertEqual(cli_ticket_state.conflicts(_labels(*combo)), [],
                              combo)
 
@@ -404,12 +406,16 @@ class ExplainOutput(unittest.TestCase):
         self.assertEqual(len(row7), 1, text)
         self.assertEqual(row7[0].split("\t")[1], "U")
         self.assertIn("needs-answer", row7[0].split("\t")[2])
-        after7 = out[out.index(row7[0]) + 1]
-        self.assertTrue(after7.startswith("  conflict: "), text)
-        self.assertIn("gk-processing", after7)
+        # slice 4: the conflict line follows the row list
+        c7 = [ln for ln in out if ln.startswith("conflict: #7 ")]
+        self.assertEqual(len(c7), 1, text)
+        self.assertIn("gk-processing", c7[0])
+        self.assertGreater(out.index(c7[0]),
+                           max(i for i, ln in enumerate(out)
+                               if ln[0].isdigit()), text)
         self.assertIn("\tI\t", [ln for ln in out if ln.startswith("5\t")][0])
         self.assertIn("\tW\t", [ln for ln in out if ln.startswith("9\t")][0])
-        self.assertEqual(out[-1], "# explain: I=1 M=0 U=1 W=1 gk=0")
+        self.assertEqual(out[-1], "# explain: I=1 M=0 U=1 W=1 gk=0 count=1 conflicts=1")
         self.assertNotIn("mismatch", text)
 
 
@@ -454,9 +460,10 @@ class ExplainCli(unittest.TestCase):
         by_num = {ln.split("\t")[0]: ln.split("\t")[1] for ln in lines
                   if ln and ln[0].isdigit()}
         self.assertEqual(by_num, {"1": "I", "2": "U", "3": "W"}, r.stdout)
-        self.assertTrue(any(ln.startswith("  conflict: ") for ln in lines),
+        self.assertTrue(any(ln.startswith("conflict: #2 ") for ln in lines),
                         r.stdout)
-        self.assertIn("# explain: I=1 M=0 U=1 W=1 gk=0", lines)
+        self.assertIn("# explain: I=1 M=0 U=1 W=1 gk=0 count=1 conflicts=1",
+                      lines)
 
     def test_core_quals_explain(self):
         self._assert_explained(self._run(["core-quals", "--explain"]))
@@ -484,7 +491,7 @@ class ExplainLinesReviewFixes(unittest.TestCase):
             cli_ticket_state.bucketize(rows, facts, cli_ticket_state.Box()),
             cli_ticket_state.Box(), facts)
         self.assertTrue(out[0].startswith("4\tM\tfix merged"), out)
-        self.assertEqual(out[-1], "# explain: I=0 M=1 U=0 W=0 gk=0")
+        self.assertEqual(out[-1], "# explain: I=0 M=1 U=0 W=0 gk=0 count=0")
 
     def test_counted_elsewhere_prints_a_mismatch_line(self):
         row = {"number": 8, "labels": _labels("needs-answer")}
@@ -502,7 +509,7 @@ class ExplainLinesReviewFixes(unittest.TestCase):
         self.assertEqual(out[0].split("\t")[3], "a b c")
         self.assertEqual(len(out[0].split("\t")), 4)
         self.assertIn("-\tU\tticketless question ping\tq?", out)
-        self.assertEqual(out[-1], "# explain: I=3 M=0 U=1 W=0 gk=0")
+        self.assertEqual(out[-1], "# explain: I=3 M=0 U=1 W=0 gk=0 count=1")
 
     def test_slice_explain_role_filters_gk_and_M_like_the_footer(self):
         # slice 3: the role filter is a PRE-filter of the ONE route
@@ -539,7 +546,7 @@ class ExplainLinesReviewFixes(unittest.TestCase):
             cli_ticket_explain.explain_slice(None, "/nonexistent", rows,
                                              buckets, facts)
         printed = [c.args[0] for c in fake_print.call_args_list]
-        self.assertIn("# explain: I=0 M=0 U=0 W=0 gk=1", printed)
+        self.assertIn("# explain: I=0 M=0 U=0 W=0 gk=1 count=0", printed)
         self.assertEqual(seen, [{1, 2, 5}])
 
 
@@ -587,7 +594,7 @@ class ExplainReviewRound2(unittest.TestCase):
         self.assertIsNone(cli_ticket_explain._footer_cwd)
         self.assertIn("-\tU\tticketless question ping, no ticket to label "
                       "(#512)\twhich one?", printed)
-        self.assertIn("# explain: I=2 M=0 U=1 W=0 gk=0", printed)
+        self.assertIn("# explain: I=2 M=0 U=1 W=0 gk=0 count=0", printed)
 
     def test_junk_cache_timestamp_never_crashes(self):
         from unittest import mock
@@ -649,7 +656,7 @@ class ExplainSliceCli(unittest.TestCase):
                   if ln and ln[0].isdigit()}
         self.assertEqual(by_num, {"1": "I", "2": "U", "4": "U", "6": "gk"},
                          r.stdout)
-        self.assertIn("# explain: I=1 M=0 U=2 W=0 gk=1", lines)
+        self.assertIn("# explain: I=1 M=0 U=2 W=0 gk=1 count=1", lines)
         self.assertEqual(self._run("--count").stdout.strip(), "1")
 
     def test_explain_refuses_extra(self):

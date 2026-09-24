@@ -17,6 +17,9 @@ full-authority box (`_question_route`). A contradictory label set is also
 REPORTED (`conflicts()`). Slice 3 added the machine facts (`Facts`, read by
 `cli_ticket_facts`): P, M extended to "on main, not on PROD yet", C, and it
 dropped the M step's own U veto (an owner question is decided first).
+Slice 4 declared the contradictions (`CONFLICT_PAIRS`): `conflicts()` names
+each one a row carries with the verdict `classify()` gives it, and
+`--explain`, `--conflicts` and the footer cache report and count them.
 
 Buckets (`BUCKETS`): `I` workable, `P` an open linked PR in CI, `M` merged but
 not yet released/deployed, `C` done (the fix is on main and live): close it,
@@ -469,28 +472,144 @@ def bucketize(rows, facts=None, box=None):
     return out
 
 
-def conflicts(labels):
-    """The contradictory label combinations on one ticket, one line each —
-    REPORTED by `--explain`, never used to re-classify. These are
-    the four families the #1141 analysis measured as routinely open for hours:
-    an owner question + a hand-off, ops-wait + a hand-off, verify-on-copy + a
-    hand-off, and ops-wait + an owner question."""
+@dataclass(frozen=True)
+class ConflictPair:
+    """One declared contradiction (#1141 slice 4): a ticket that carries a
+    `left` label AND a `right` label (each a key of `_SIDES`) sends two
+    opposite signals. It names no winner: `classify()` decides that."""
+    name: str
+    left: str
+    right: str
+    meaning: str
+
+
+def _question_side(names, labels):
+    """The owner-question labels on the row: answer/decision/action, else an
+    UNSENT needs-acceptance (`owner_question`, #1141 slice 2)."""
+    got = [lb for lb in _OWNER_QUESTION_LABELS if lb in names]
+    if not got and owner_question(labels) == "acceptance":
+        got = ["needs-acceptance"]
+    return got
+
+
+_SIDES = {
+    "question": _question_side,
+    "handoff": lambda names, _l: [lb for lb in cli_quals.MAINTAINER_ACTION_LABELS
+                                  if lb in names],
+    "ops-wait": lambda names, _l: [lb for lb in cli_quals.OPS_WAIT_LABELS
+                                   if lb in names],
+    "verify": lambda names, _l: [lb for lb in cli_quals.SUBDEV_ACTION_LABELS
+                                 if lb in names],
+    "bounce": lambda names, _l: [_BOUNCE] if _BOUNCE in names else [],
+}
+
+# The contradictions the #1141 analysis measured open for hours (7 days,
+# open >= 3 h: question+hand-off 7, ops-wait+hand-off 23, verify+hand-off 24,
+# ops-wait+question 6), plus prio:bounce + a hand-off (slice 4 design).
+CONFLICT_PAIRS = (
+    ConflictPair("question+handoff", "question", "handoff",
+                 "an owner question AND a gatekeeper hand-off"),
+    ConflictPair("ops-wait+handoff", "ops-wait", "handoff",
+                 "waiting on a third party AND handed to the gatekeeper"),
+    ConflictPair("verify+handoff", "verify", "handoff",
+                 "returned to the stream to verify AND handed to the "
+                 "gatekeeper"),
+    ConflictPair("ops-wait+question", "ops-wait", "question",
+                 "waiting on a third party AND on the owner"),
+    ConflictPair("bounce+handoff", "bounce", "handoff",
+                 "returned for rework AND handed to the gatekeeper"),
+)
+
+
+@dataclass(frozen=True)
+class Conflict:
+    """A declared pair (`name`) found on one row, with the row's `labels` of
+    that pair and the verdict `classify()` gives the row: `bucket` and `why`
+    (the rule that won)."""
+    name: str
+    labels: tuple
+    bucket: str
+    why: str
+
+    def line(self, number):
+        return "conflict: #%s %s → %s (%s)" % (
+            number, "+".join(self.labels), self.bucket, self.why)
+
+
+def _conflict_hits(labels):
+    """`[(pair, labels on the row)]` for every declared pair the row carries —
+    detection only, no verdict. Unreadable labels carry none."""
+    if not isinstance(labels, (list, tuple)):
+        return []
     names = _names(labels)
-    question = [lb for lb in _OWNER_QUESTION_LABELS if lb in names]
-    handoff = [lb for lb in cli_quals.MAINTAINER_ACTION_LABELS if lb in names]
-    ops = [lb for lb in cli_quals.OPS_WAIT_LABELS if lb in names]
-    verify = [lb for lb in cli_quals.SUBDEV_ACTION_LABELS if lb in names]
-    out = []
-    for left, right, what in (
-            (question, handoff, "an owner question AND a gatekeeper hand-off"),
-            (ops, handoff, "waiting on a third party AND handed to the "
-                           "gatekeeper"),
-            (verify, handoff, "returned to the stream to verify AND handed to "
-                              "the gatekeeper"),
-            (ops, question, "waiting on a third party AND on the owner")):
+    hits = []
+    for pair in CONFLICT_PAIRS:
+        left = _SIDES[pair.left](names, labels)
+        right = _SIDES[pair.right](names, labels)
         if left and right:
-            out.append("%s: %s" % (" + ".join(left + right), what))
+            hits.append((pair, tuple(left + right)))
+    return hits
+
+
+def conflicts(labels, box=None, facts=None):
+    """The contradictory label pairs on one ticket (#1141 slice 4), one
+    `Conflict` per `CONFLICT_PAIRS` entry it carries. REPORTED by `--explain`,
+    `--conflicts` and the footer cache, never used to re-classify: each names
+    the bucket and reason `classify(row, facts, box)` gives this row, so there
+    is no second precedence to drift from the first."""
+    hits = _conflict_hits(labels)
+    if not hits:
+        return []
+    bucket, why = classify({"labels": labels}, facts, box)
+    return [Conflict(pair.name, found, bucket, why)
+            for pair, found in hits]
+
+
+def conflict_tally(buckets):
+    """`(count, numbers)` of the conflicts across every row of a `bucketize`
+    result (HIDDEN included): the footer cache fields (`cli_ticket_route
+    .record_conflicts`). `count` counts conflicts (a row can carry several),
+    the number of `conflict_lines` over the same buckets; `numbers` the
+    distinct tickets. The caller passes the rows it counted, the #948
+    supplement included."""
+    count, numbers = 0, set()
+    for rows in buckets.values():
+        for number, row in (rows or {}).items():
+            hits = len(_conflict_hits(_labels_of(row)))
+            if hits:
+                count += hits
+                numbers.add(int(number))
+    return count, sorted(numbers)
+
+
+def conflict_lines(buckets, box, facts=None):
+    """The `conflict:` lines of a counted bucket set, by ticket number: what
+    `--explain` prints after its row list and what `--conflicts` prints alone.
+    Each names the bucket and rule `classify()` gives the row, a #948
+    supplement row included (it is admitted only when classify says U)."""
+    facts = facts or TicketFacts()
+    counted = sorted(((number, bucket, row)
+                      for bucket in BUCKETS + (HIDDEN,)
+                      for number, row in (buckets.get(bucket) or {}).items()),
+                     key=lambda item: int(item[0]))
+    out = []
+    for number, bucket, row in counted:
+        out.extend(c.line(number)
+                   for c in conflicts(_labels_of(row), box, facts.of(number)))
     return out
+
+
+def stop_count(buckets):
+    """The `--count` / `/goal` stop-proof number (#1141 ROZHODNUTÉ ruling 2):
+    the I rows plus the C rows — "done, close me" is an action this box still
+    owes. P waits on a machine and stays out. The ONE definition:
+    `cli_ticket_route.count` and the `--explain` `count=` field both read
+    it."""
+    return len(buckets.get("I") or {}) + len(buckets.get("C") or {})
+
+
+_SUPPLEMENT_REASON = ("a pending question ping names this ticket, which the "
+                      "slice search misses (#948)")
 
 
 def _cell(text):
@@ -513,9 +632,12 @@ def explain_lines(buckets, box, facts=None, supplement=(), extras=()):
     each prints as a `-` row and adds `weight` to its bucket's total.
     `buckets[HIDDEN]` = rows this box counts NOWHERE (#1141 slice 2): each
     prints with its reason, so a ticket is never silently missing from the
-    explanation. The totals line always names I M U W gk and adds ` P=N`,
-    ` C=N` and ` hidden=N` only when N > 0 (P and C show in the footer only
-    then too)."""
+    explanation. After the row list, one `conflict:` line per contradictory
+    label pair (`conflict_lines`, #1141 slice 4). The totals line always names
+    I M U W gk and adds ` P=N`, ` C=N` and ` hidden=N` only when N > 0 (P and
+    C show in the footer only then too), then ` count=N` (the `--count`
+    number: I rows + C rows, without the extras) and ` conflicts=N` only when
+    N > 0."""
     facts = facts or TicketFacts()
     supplement = set(supplement or ())
     totals = {b: len(buckets.get(b) or {}) for b in BUCKETS}
@@ -527,9 +649,7 @@ def explain_lines(buckets, box, facts=None, supplement=(), extras=()):
             row = rows[number]
             title = row.get("title", "") if isinstance(row, dict) else ""
             if number in supplement:
-                got, reason = bucket, ("a pending question ping names this "
-                                       "ticket, which the slice search "
-                                       "misses (#948)")
+                got, reason = bucket, _SUPPLEMENT_REASON
             else:
                 got, reason = classify(row, facts.of(number), box)
             out.append("%s\t%s\t%s\t%s" % (number, bucket, reason,
@@ -537,19 +657,21 @@ def explain_lines(buckets, box, facts=None, supplement=(), extras=()):
             if got != bucket:
                 out.append("  mismatch: classify() says %s — a parity break, "
                            "report it on #1141" % got)
-            where = ("not counted on this box" if bucket == HIDDEN
-                     else "counted as %s" % bucket)
-            for line in conflicts(_labels_of(row)):
-                out.append("  conflict: %s; %s by today's precedence"
-                           % (line, where))
     for bucket, weight, reason, text in extras:
         out.append("-\t%s\t%s\t%s" % (bucket, reason, _cell(text)))
         totals[bucket] += weight
+    found = conflict_lines(buckets, box, facts)
+    out.extend(found)
     if facts.m_note:   # ruling 3: an accepted known limit, said out loud
         out.append("# note: the M set is partial (%s): a merged ticket may "
                    "count as I or C until the next refresh (#1141)"
                    % facts.m_note)
     shown = _ALWAYS_TOTALED + tuple(b for b in ("P", "C", HIDDEN) if totals[b])
+    # count = the `--count` / stop-proof number: the I and C ROWS, never the
+    # footer extras (display terms)
+    count = stop_count(buckets)
     out.append("# explain: " + " ".join("%s=%d" % (b, totals[b])
-                                        for b in shown))
+                                        for b in shown)
+               + " count=%d" % count
+               + (" conflicts=%d" % len(found) if found else ""))
     return out

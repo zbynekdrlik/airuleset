@@ -4248,6 +4248,10 @@ def cmd_tickets_status(args):
                 # so `--waiting` can list the same members (#367 invariant).
                 _qmap_extra = _question_map_u_supplement(rows, root, _out)
                 entry["user_waiting"] += len(_qmap_extra)
+                # #1141 slice 4: the conflict fields over the SAME U the
+                # `--explain`/`--conflicts` commands print (supplement incl.)
+                __import__("cli_ticket_route").record_conflicts(
+                    entry, {**_b, "U": {**_b["U"], **_qmap_extra}})
                 # #1025: the U member NUMBERS (label-partitioned waiting ∪ the
                 # question-map supplement) — the stop-hook question-in-U gate's
                 # fast-allow membership source (zero gh when this cache is fresh).
@@ -9642,13 +9646,21 @@ def _add_dispatch_flags(parser):
              "the infra role/target (the per-role sequential mode is PENDING "
              "round 3, #993 — today this is the routing slice only).")
     parser.add_argument("--explain", action="store_true", help=_EXPLAIN_HELP)
+    parser.add_argument(
+        "--conflicts", action="store_true",
+        help="Print ONLY the `conflict:` lines of --explain: one per "
+             "contradictory label pair, with the bucket classify() gave the "
+             "ticket. Like --explain it replaces the other output modes "
+             "(--count, --list, ...), and it wins over --explain (#1141 "
+             "slice 4)")
 
 
 # #1141: `--explain` on tickets-status / core-quals / slice-quals.
 _EXPLAIN_HELP = ("Print every counted ticket as number<TAB>bucket<TAB>reason"
                  "<TAB>title (bucket = I/M/U/W/gk, ONE reason from "
-                 "cli_ticket_state.classify), a `conflict:` line under a "
-                 "contradictory label set, and a `# explain:` totals line (#1141)")
+                 "cli_ticket_state.classify), a `conflict:` line per "
+                 "contradictory label pair, and a `# explain:` totals line "
+                 "with count=I+C (#1141)")
 
 
 def _add_tickets_status_flags(parser):

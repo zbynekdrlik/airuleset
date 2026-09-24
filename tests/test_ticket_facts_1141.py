@@ -406,7 +406,8 @@ class ExplainPandC(unittest.TestCase):
                   if ln[0].isdigit()}
         self.assertEqual(by_num, {"1": "P", "2": "C", "3": "I"})
         self.assertNotIn("mismatch", "\n".join(out))
-        self.assertEqual(out[-1], "# explain: I=1 M=0 U=0 W=0 gk=0 P=1 C=1")
+        self.assertEqual(out[-1],
+                         "# explain: I=1 M=0 U=0 W=0 gk=0 P=1 C=1 count=2")
 
 
 _OBLIG = json.dumps([
@@ -494,7 +495,7 @@ class CliFacts(unittest.TestCase):
                 [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
                  "core-quals", "--explain"],
                 capture_output=True, text=True, env=env, cwd=repo)
-            self.assertIn("# explain: I=1 M=0 U=0 W=0 gk=0 P=1 C=1",
+            self.assertIn("# explain: I=1 M=0 U=0 W=0 gk=0 P=1 C=1 count=2",
                           r.stdout.splitlines(), r.stdout + r.stderr)
             # review round 1: C left I, so --list names it (someone closes it)
             r = subprocess.run(
