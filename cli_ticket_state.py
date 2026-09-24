@@ -5,8 +5,9 @@ box's scope into EXACTLY one bucket and says WHY in one line. It is the single
 definition behind `_partition_workable` (I/U/W — a thin wrapper over this),
 behind the M step of `_split_merged_unreleased` (`leaves_to_merged`) and
 behind the sub-dev `gk` count. The `--explain` surfaces of `tickets-status`,
-`core-quals` and `slice-quals` print it per ticket, so "why is I 5" is
-answered by the tool, not by a session decoding labels.
+`core-quals` and `slice-quals` (CLI wiring: `cli_ticket_explain`) print it per
+ticket, so "why is I 5" is answered by the tool, not by a session decoding
+labels. This module stays pure: no I/O, no process state.
 
 Slice 1 (this module's first version) is a ZERO-behaviour-change refactor: the
 precedence below reproduces the pre-#1141 label partition exactly (locked by
@@ -20,11 +21,13 @@ Buckets (`BUCKETS`): `I` workable, `U` the owner's court, `W` a third party,
 the gatekeeper (a reduced-authority box only).
 """
 
-import argparse
-import os
-import sys
 from dataclasses import dataclass
+from typing import Optional
 
+# The label predicates still live in cli_quals (re-exported by the airuleset
+# facade and used across the repo). cli_quals imports THIS module lazily inside
+# `_partition_workable`/`_split_merged_unreleased`, so there is no import-time
+# cycle; moving the predicates here is a later #1141 slice.
 import cli_quals
 
 BUCKETS = ("I", "M", "U", "W", "gk")
@@ -33,7 +36,6 @@ BUCKETS = ("I", "M", "U", "W", "gk")
 # which is a client-message approval with its own #526/#622 routing).
 _OWNER_QUESTION_LABELS = ("needs-answer", "needs-decision", "needs-owner-action")
 _BOUNCE = cli_quals._PARTITION_BOUNCE_LABEL
-_ROLES = ("review", "infra", "quality")
 
 _U_REASON = {
     "answer": "needs-answer: waiting for the owner's answer (#468)",
@@ -51,7 +53,7 @@ class Box:
     """Which box is counting. `own_stream` is the box's OWN reduced-authority
     stream (its canonical AUTHORITY_BY_USER key), or None for a full-authority
     (core / gatekeeper) box — the same value `_partition_workable` takes."""
-    own_stream: str = None
+    own_stream: Optional[str] = None
 
     @property
     def kind(self):
@@ -87,42 +89,107 @@ def leaves_to_merged(labels):
 
 
 def _partition(labels, box):
-    """The pre-#1141 label partition, one branch per rule, each with its reason.
+    """The pre-#1141 label partition, one branch per rule, each with its
+    reason. Its precedence documentation below is the former
+    `cli_quals._partition_workable` docstring, moved VERBATIM (#1141) —
+    that function is now a thin wrapper over `classify()`.
+
+    --- moved verbatim from `_partition_workable` ---
+
+    Split a `_union_open_issues`/`_slice_mine_and_handed` rows dict
+    (`{number: {"number","title","createdAt","labels"}}`) THREE ways:
+    `(workable, user_waiting, ops_wait)`. Both the user-waiting (#468) and the
+    ops-wait (#510) buckets LEAVE `workable` — they are parked (on the user's
+    answer / on an external event) and surface as the footer's `U N` / `W N`
+    buckets and `--waiting` / `--ops-wait`, never in the workable count.
+
+    ONE derivation, never independent queries: all three halves come from the
+    SAME already-fetched rows, so the footer's `I N`/`U N`/`W N`, the /goal
+    stop-proof's workable count, and the lane guard (which runs `core-quals`/
+    `slice-quals --count`) cannot silently drift (#367/#468 lesson — the exact
+    reason a search-exclusion + separate positive query was rejected). Extends
+    the repo's own established client-side-partition pattern — no new mechanism.
 
     PRECEDENCE (#526, ROZHODNUTÉ v3): a row carrying BOTH a user-waiting AND an
-    ops-wait label normally goes to U (a pending owner answer is the more
-    actionable of the two) — EXCEPT a `needs-acceptance`-ONLY user-waiting row,
-    which goes to W: once the stream has SENT the client acceptance thread and
-    added `ops-wait`, the ticket waits on a THIRD PARTY. needs-answer/
-    needs-decision + ops-wait STAY in U.
+    ops-wait label normally goes to `user_waiting` (a pending owner answer is the
+    more actionable of the two) — EXCEPT a `needs-acceptance`-ONLY user-waiting
+    row (reason == "acceptance": no needs-answer/needs-decision), which routes to
+    `ops_wait` (W) instead. Once the stream has SENT the client acceptance thread
+    and added `ops-wait`, the ticket is waiting on a THIRD PARTY, not a question
+    for the owner — U is "čo sa ťa Claude pýta / čo máš schváliť", W is
+    "odoslané, čaká tretia strana". needs-answer/needs-decision + ops-wait STAY
+    in U (a pending owner answer beats a sent thread), so the override is
+    acceptance-scoped. Both buckets leave `workable`, so the COUNT is identical
+    either way; the precedence only decides which DISPLAY bucket (U vs W) the row
+    lands in.
 
-    #622: a BARE `needs-acceptance` (no ops-wait, no gk-override) → U
-    unconditionally — its only next step is an owner-approved client message.
-    The delivered-vs-queued distinction is a `--waiting` DISPLAY tag only.
+    #622 (owner directive 2026-08-22): a BARE `needs-acceptance` (no `ops-wait`,
+    no gk-override) → U UNCONDITIONALLY. The code is merged and its only next step
+    is an owner-approved client message, so it is never dispatchable-now code work
+    (I = only that). This REVERSED #539's chained-I branch, which routed a bare
+    needs-acceptance with no DELIVERED draft to `workable` (I) using "no delivered
+    ping" as a proxy for "the stream's own chained work". #606 (2026-08-21) made
+    that proxy wrong for the common case: with owner-questions delivered ONE AT A
+    TIME, "no delivered ping" overwhelmingly means QUEUED-behind-others = waiting
+    on the owner (→ U). The genuinely-chained case collapses into "queued in U"
+    honestly (its dispatchable sibling work is its OWN ticket, still in I, so the
+    loop never falsely disarms). The delivered-vs-queued distinction is now a
+    DISPLAY tag only, computed on the on-demand `--waiting` path from
+    `_acceptance_present_set` (delivered → `acceptance`, undelivered → `queued`) —
+    it no longer routes, so this function is a PURE label partition again (no
+    question-map read on the hot footer/count path).
 
-    #601: `needs-owner-action` routes to U when it is the highest-precedence
-    user-waiting label (answer > decision > acceptance > action, see
-    `_user_waiting_reason`); a pathological row that also carries a higher one
-    follows THAT label's routing.
+    `needs-owner-action` (#601, the owner's own physical/manual step) routes to U
+    via the `else` branch below WHEN it is the HIGHEST-precedence user-waiting
+    label on the row — i.e. `_user_waiting_reason` reads `action` (no co-present
+    needs-answer/needs-decision/needs-acceptance, all of which outrank it). In
+    that normal case: (1) an owner-action + `ops-wait` row still lands in U
+    (owner beats third-party framing — the owner is not a third party); and (2)
+    it never enters the `ops_wait` bucket, so the #570 stale! W-freshness path can
+    never touch it. (Since #622 a bare needs-acceptance is ALSO always U, so
+    owner-action no longer differs from it on the I-vs-U axis — both are the
+    owner's court.)
 
-    #943 / #1053 / #1056 L2: a non-user-waiting ops-wait row that ALSO carries
-    `prio:bounce`, a MAINTAINER_ACTION_LABELS hand-off label or a
-    SUBDEV_ACTION_LABELS label (`verify-on-copy`) stays workable I — only one
-    box can act on it, so it must never be hidden in W. Label-only, the safe
-    over-count direction; unconditional because this is a pure label partition.
+    Because `action` is the LOWEST precedence (deliberately, so needs-answer/
+    needs-decision/needs-acceptance stay byte-exact per #507/#526), a
+    PATHOLOGICAL row that ALSO carries a higher-precedence user-waiting label
+    follows THAT label's routing, not action's: e.g. `needs-acceptance` +
+    `needs-owner-action` + `ops-wait` reads reason `acceptance` and routes to W
+    by the acceptance-scoped override (and the #507 gk-override a co-present
+    `needs-acceptance` triggers applies too). Such a contradictory combo does not
+    occur in practice — the byte-exact preservation of the co-present label's
+    established semantics is the intended design, and a genuine owner-only-blocked
+    ticket never carries a competing acceptance/answer label. The
+    labelled-but-not-yet-announced defect is surfaced by the `no-action!` display
+    flag (`_no_question_flagged` + `_print_issue_rows`), not by a routing gate.
 
-    #654: an answer/decision/action row owned by a FOREIGN stream
-    (`_stream_owner_of` != own_stream) goes to I (action-only), never this box's
-    U — STREAM OWNERSHIP WINS; the owning stream's box asks the owner. Checked
-    FIRST in the user-waiting branch. Scoped away from needs-acceptance.
-    `stream:core`/bare/unreadable → owner "" → not foreign.
+    #943 (owner escalation 2026-09-08, odoo-erp #6294 APK): a NON-user-waiting
+    row carrying BOTH ops-wait AND a MAINTAINER_ACTION_LABELS label
+    (`needs-gatekeeper` / `ready-for-review`) routes to `workable` (action-only
+    I), NOT `ops_wait` (W). Only the full-authority box can action a hand-off,
+    so the hand-off label keeps the row visible in I — the #589/#636
+    over-count-safe direction. The `_gk_handoff_ops_wait_flagged` function (#636)
+    already DETECTED this contradictory shape and tagged it `gk_handoff!` in the
+    nudge text, but the partition itself routed it to W, making it invisible to
+    the gatekeeper's I count for 2 days. The override is unconditional (not
+    authority-gated) because this function is a pure label partition (#622),
+    and on a reduced-authority box these rows are structurally absent.
 
-    #507/#512/#1130: a needs-acceptance row that also carries a re-hand-off
-    (`ready-for-review`/`needs-gatekeeper`/`gk-processing`) or `prio:bounce` is
-    NOT user-waiting — it stays I so the hand-off/bounce logic sees it.
-
-    Unreadable labels read as NOT user-waiting and NOT ops-wait → I (never hide
-    own work because of a failed label read)."""
+    `own_stream` (#654): the box's OWN reduced-authority stream (its canonical
+    AUTHORITY_BY_USER key, `_current_user()`), or None for a full-authority box.
+    An ANSWER/DECISION/ACTION row owned by a FOREIGN stream (`_stream_owner_of`
+    != own_stream) is routed to `workable` (action-only), NOT `user_waiting` —
+    STREAM OWNERSHIP WINS for U routing (the ROZHODNUTÉ decision): a full-authority
+    (gk) box never fields another stream's owner-question, its owning box does.
+    Checked FIRST, so it beats the acceptance→W / U splits. A full box
+    (own_stream=None) drops every such foreign row into I; a slice box keeps its
+    OWN stream rows in its own U (owner == own_stream). SCOPED to answer/decision/
+    action (the enumerated ROZHODNUTÉ reasons): needs-acceptance keeps its own
+    #526/#622 routing (bare → U, sent-thread+ops-wait → W) — a foreign acceptance
+    is search-excluded from the obligation set anyway, so it never reaches this
+    branch on the gk box (the real leak path is answer/decision/action carrying a
+    gk queue label, which have no gk-override). `stream:core`/bare/unreadable →
+    `_stream_owner_of` == "" → not foreign → stays U (the box's own court)."""
     if cli_quals._row_is_user_waiting(labels):
         kind = cli_quals._user_waiting_reason(labels)
         owner = cli_quals._stream_owner_of(labels)
@@ -151,8 +218,10 @@ def _partition(labels, box):
     if not isinstance(labels, (list, tuple)):
         return "I", "labels unreadable: kept workable (the safe side)"
     if "needs-acceptance" in names:
+        # Not user-waiting ⇒ an override label is present today; the fallback
+        # keeps classify() total even if that predicate ever changes.
         ov = [lb for lb in cli_quals.NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS
-              if lb in names]
+              if lb in names] or ["an override label"]
         return ("I", "needs-acceptance is overridden by %s: back in the "
                      "hand-off/bounce flow (#507/#1130)" % ov[0])
     if _BOUNCE in names:
@@ -216,16 +285,28 @@ def conflicts(labels):
     return out
 
 
-def explain_lines(buckets, box, merged=(), handed=None, supplement=()):
-    """The `--explain` text. `buckets` maps each bucket name to the rows the
-    command actually COUNTED there (so the totals line equals the counts);
-    the per-row reason comes from `classify()` with the same facts. A row whose
-    classify() bucket differs from where it was counted gets a `mismatch:`
-    line — that would be a parity break, and must never be printed.
-    `supplement` = question-map U rows the slice search misses (#948)."""
+def _cell(text):
+    """One TSV cell: a tab or newline in a title would split the row."""
+    return " ".join(str(text or "").split())
+
+
+def explain_lines(buckets, box, merged=(), handed=None, supplement=(),
+                  extras=()):
+    """The `--explain` text (pure — the CLI wiring is `cli_ticket_explain`).
+
+    `buckets` maps each bucket name to the rows the command actually COUNTED
+    there, so the totals line equals the counts; the per-row reason comes from
+    `classify()` with the same facts (`merged` numbers, `handed` map). A row
+    whose classify() bucket differs from where it was counted gets a
+    `mismatch:` line — a parity break that must never be printed.
+    `supplement` = question-map U rows the slice search misses (#948).
+    `extras` = `(bucket, weight, reason, text)` footer contributions that are
+    not ticket rows (ticketless ❓ pings in U, the task-hygiene A count in I);
+    each prints as a `-` row and adds `weight` to its bucket's total."""
     merged = {int(n) for n in (merged or ())}
     handed = handed or {}
     supplement = set(supplement or ())
+    totals = {b: len(buckets.get(b) or {}) for b in BUCKETS}
     out = []
     for bucket in BUCKETS:
         rows = buckets.get(bucket) or {}
@@ -240,78 +321,17 @@ def explain_lines(buckets, box, merged=(), handed=None, supplement=()):
                 got, reason = classify(
                     row, Facts(merged=int(number) in merged,
                                handed=bool(handed.get(number))), box)
-            out.append("%s\t%s\t%s\t%s" % (number, bucket, reason, title))
+            out.append("%s\t%s\t%s\t%s" % (number, bucket, reason,
+                                           _cell(title)))
             if got != bucket:
                 out.append("  mismatch: classify() says %s — a parity break, "
                            "report it on #1141" % got)
             for line in conflicts(_labels_of(row)):
                 out.append("  conflict: %s; counted as %s by today's "
                            "precedence" % (line, bucket))
+    for bucket, weight, reason, text in extras:
+        out.append("-\t%s\t%s\t%s" % (bucket, reason, _cell(text)))
+        totals[bucket] += weight
     out.append("# explain: " + " ".join(
-        "%s=%d" % (b, len(buckets.get(b) or {})) for b in BUCKETS))
+        "%s=%d" % (b, totals[b]) for b in BUCKETS))
     return out
-
-
-def _refuse_extra(extra):
-    if extra:
-        print("--explain explains the footer buckets and does not combine "
-              "with --extra (that query skips the partition)", file=sys.stderr)
-        sys.exit(2)
-
-
-def explain_core(extra, workable, merged_rows, waiting, ops_wait, merged_set):
-    """`core-quals --explain`: the full-authority box (no gk bucket — it
-    actions its hand-offs itself). Called with the SAME buckets `--count`
-    uses, after the role filter and the M split."""
-    _refuse_extra(extra)
-    for line in explain_lines({"I": workable, "M": merged_rows, "U": waiting,
-                               "W": ops_wait, "gk": {}}, Box(), merged_set):
-        print(line)
-
-
-def explain_slice(extra, rows, workable_rows, unhandled, waiting, ops_wait,
-                  merged_rows, merged_set, handed, root, user):
-    """`slice-quals --explain`: the reduced-authority box. I = the unhandled
-    workable rows `--count` counts, gk = the handed-off workable rows, U also
-    carries the question-map supplement the footer adds (#948)."""
-    _refuse_extra(extra)
-    import cli_quals_cmd
-    extra_u = cli_quals._question_map_u_supplement(
-        rows, root, cli_quals_cmd._slice_quals_runner(root))
-    gk = {n: r for n, r in workable_rows.items() if handed.get(n)}
-    for line in explain_lines(
-            {"I": unhandled, "M": merged_rows, "U": {**waiting, **extra_u},
-             "W": ops_wait, "gk": gk},
-            Box(own_stream=user), merged_set, handed, supplement=extra_u):
-        print(line)
-
-
-def explain_footer(cwd):
-    """`tickets-status --explain`: explain the footer of the session at `cwd`.
-    It runs the SAME `core-quals`/`slice-quals` derivation for this box's
-    authority, with the role the footer itself resolves for `cwd` (#998), so
-    the printed totals are the footer's I/M/U/W/gk."""
-    import airuleset
-    import cli_quals_cmd
-    root = airuleset._repo_root(cwd)
-    if not root:
-        print("# explain: no repo at %s (the footer shows no-repo)" % cwd)
-        return
-    try:
-        import cli_concurrency
-        role = cli_concurrency.resolve_role(cwd)
-    except Exception as e:  # noqa: BLE001 — the footer degrades unfiltered too
-        sys.stderr.write("tickets-status: role resolve skipped (%s)\n" % e)
-        role = None
-    role = role if role in _ROLES else None
-    full = airuleset.resolve_authority(cwd=root) == "full"
-    print("# tickets-status --explain: scope=%s role=%s root=%s"
-          % ("core" if full else "mine", role or "-", root))
-    ns = argparse.Namespace(explain=True, role=role)
-    prev = os.getcwd()
-    os.chdir(root)   # the quals commands resolve the repo from the process cwd
-    try:
-        (cli_quals_cmd.cmd_core_quals if full
-         else cli_quals_cmd.cmd_slice_quals)(ns)
-    finally:
-        os.chdir(prev)

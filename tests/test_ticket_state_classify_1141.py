@@ -5,7 +5,8 @@ ticket with its bucket, its ONE reason and a `conflict:` line for a
 contradictory label set.
 
 The parity oracle below is a FROZEN copy of the pre-#1141 `_partition_workable`
-and `_split_merged_unreleased` (cli_quals.py @ 7513c2c8). It must never be
+and `_split_merged_unreleased` (cli_quals.py @ origin/main 7575f56f,
+byte-identical at 7513c2c8). It must never be
 "updated to match" the new code — slice 1's whole promise is that no number
 moves, and this copy is what proves it over every label combination the
 partition reads, both box kinds and own vs foreign stream.
@@ -31,7 +32,7 @@ def _labels(*names):
     return [{"name": n} for n in names]
 
 
-# --- FROZEN pre-#1141 oracle (verbatim logic, cli_quals.py @ 7513c2c8) -------
+# --- FROZEN pre-#1141 oracle (verbatim logic, cli_quals.py @ 7575f56f) ---
 
 def _legacy_partition_workable(rows, own_stream=None):
     workable, user_waiting, ops_wait = {}, {}, {}
@@ -326,7 +327,75 @@ class ExplainCli(unittest.TestCase):
         self.assertEqual(r.stdout.strip(), "1", r.stderr)
 
     def test_tickets_status_explain(self):
-        self._assert_explained(self._run(["tickets-status", "--explain"]))
+        r = self._run(["tickets-status", "--explain"])
+        self._assert_explained(r)
+        # the footer's own cached numbers are shown next to the totals
+        self.assertIn("# footer cache: none for this cwd", r.stdout)
+
+
+class ExplainLinesReviewFixes(unittest.TestCase):
+    """Review round 1: M rows, the mismatch canary, footer extras, TSV-safe
+    titles, and the role filter applied to gk/M on the slice path."""
+
+    def test_merged_row_is_M_with_its_reason(self):
+        rows = {4: {"number": 4, "title": "m", "labels": _labels("bug")}}
+        w, _u, o = airuleset._partition_workable(rows)
+        w, o, m = airuleset._split_merged_unreleased(w, o, {4})
+        out = cli_ticket_state.explain_lines(
+            {"I": w, "M": m, "U": {}, "W": o, "gk": {}},
+            cli_ticket_state.Box(), merged={4})
+        self.assertTrue(out[0].startswith("4\tM\tfix merged"), out)
+        self.assertEqual(out[-1], "# explain: I=0 M=1 U=0 W=0 gk=0")
+
+    def test_counted_elsewhere_prints_a_mismatch_line(self):
+        row = {"number": 8, "labels": _labels("needs-answer")}
+        out = cli_ticket_state.explain_lines(
+            {"I": {8: row}}, cli_ticket_state.Box())
+        self.assertTrue(out[1].startswith("  mismatch: classify() says U"),
+                        out)
+
+    def test_extras_add_to_the_totals_and_titles_stay_one_cell(self):
+        rows = {3: {"number": 3, "title": "a\tb\nc", "labels": []}}
+        out = cli_ticket_state.explain_lines(
+            {"I": rows}, cli_ticket_state.Box(),
+            extras=[("U", 1, "ticketless question ping", "q?"),
+                    ("I", 2, "task-hygiene A", "-")])
+        self.assertEqual(out[0].split("\t")[3], "a b c")
+        self.assertEqual(len(out[0].split("\t")), 4)
+        self.assertIn("-\tU\tticketless question ping\tq?", out)
+        self.assertEqual(out[-1], "# explain: I=3 M=0 U=1 W=0 gk=0")
+
+    def test_slice_explain_role_filters_gk_and_M_like_the_footer(self):
+        from unittest import mock
+        import cli_quals_cmd
+        import cli_ticket_explain
+        kept = {1: {"number": 1, "labels": _labels("ready-for-review")}}
+        other = {2: {"number": 2, "labels": _labels("infra",
+                                                   "ready-for-review")}}
+        merged = {5: {"number": 5, "labels": _labels("infra")}}
+        seen = []
+
+        def fake_filter(rows, root, role, slug=None):
+            seen.append(set(rows))
+            return {n: r for n, r in rows.items()
+                    if "infra" not in cli_ticket_state._names(r["labels"])}
+
+        with mock.patch.object(cli_quals_cmd, "_apply_role_filter",
+                               fake_filter), \
+                mock.patch.object(cli_quals, "_question_map_u_supplement",
+                                  return_value={}), \
+                mock.patch.object(cli_ticket_explain, "_footer_extras",
+                                  return_value=[]), \
+                mock.patch("builtins.print") as fake_print:
+            cli_ticket_explain.explain_slice(
+                None, "/nonexistent", _OWN, "review", "o/r",
+                rows={**kept, **other}, handed={1: True, 2: True},
+                workable={**kept, **other}, unhandled={}, waiting={},
+                ops_wait={}, merged_rows=merged, merged_set={5})
+        printed = [c.args[0] for c in fake_print.call_args_list]
+        self.assertIn("# explain: I=0 M=0 U=0 W=0 gk=1", printed)
+        self.assertIn({1, 2}, seen)
+        self.assertIn({5}, seen)
 
 
 class ExplainSliceCli(unittest.TestCase):

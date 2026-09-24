@@ -949,10 +949,12 @@ def cmd_slice_quals(args):
         unhandled = _apply_role_filter(unhandled, root, role, slug=slug)
         ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)  # #1045
         waiting = _apply_role_filter(waiting, root, role, slug=slug)  # #1065
-    if want_explain:   # #1141: the SAME buckets --count/--waiting use, per row
-        return __import__("cli_ticket_state").explain_slice(
-            extra, rows, workable_rows, unhandled, waiting, ops_wait,
-            {} if extra else _merged_rows, _merged_set, handed, root, user)
+    if want_explain:   # #1141: the SAME buckets --count uses (__import__: size budget)
+        return __import__("cli_ticket_explain").explain_slice(
+            extra, root, user, role, slug, rows=rows, handed=handed,
+            workable=workable_rows, unhandled=unhandled, waiting=waiting,
+            ops_wait=ops_wait, merged_rows={} if extra else _merged_rows,
+            merged_set=_merged_set)
     if want_snapshot:
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition.
         import cli_quals_snapshot
@@ -1544,10 +1546,10 @@ def cmd_core_quals(args):
                 "Refusing (#181 round 4)." % (health, detail),
                 file=sys.stderr)
             sys.exit(1)
-    if want_explain:   # #1141: the SAME buckets --count/--waiting use, per row
-        return __import__("cli_ticket_state").explain_core(
-            extra, workable, {} if extra else _merged_rows, waiting, ops_wait,
-            _merged_set)
+    if want_explain:   # #1141: the SAME buckets --count uses (__import__: size budget)
+        return __import__("cli_ticket_explain").explain_core(
+            extra, workable=workable, merged_rows={} if extra else _merged_rows,
+            waiting=waiting, ops_wait=ops_wait, merged_set=_merged_set)
     if want_snapshot:
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition
         # (own_stream=None: a full-authority box owns no stream).

@@ -4048,8 +4048,8 @@ def cmd_tickets_status(args):
     import statusbar
 
     cwd = getattr(args, "cwd", None) or os.getcwd()
-    if getattr(args, "explain", False) is True:   # #1141: the footer, per ticket
-        return __import__("cli_ticket_state").explain_footer(cwd)
+    if getattr(args, "explain", False) is True:   # #1141 (__import__: size budget)
+        return __import__("cli_ticket_explain").explain_footer(cwd)
     if not getattr(args, "refresh", False):
         sys.stdout.write(statusbar.tickets_segment(cwd))
         return
