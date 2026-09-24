@@ -1,37 +1,5 @@
 [
   {
-    "name": "automatizacie-montalu",
-    "host": "dev2",
-    "path": "~/devel/montalu/automatizacie-montalu",
-    "branch_model": "2-branch",
-    "default_branch": "main",
-    "work_branch": "dev",
-    "overrides": [],
-    "onboarded": "2026-07-02"
-  },
-  {
-    "name": "bakerion-ai",
-    "host": "dev2",
-    "path": "~/devel/bakerion-ai/repo",
-    "branch_model": "2-branch",
-    "default_branch": "master",
-    "work_branch": "dev",
-    "overrides": [
-      "local-builds=allowed"
-    ],
-    "onboarded": null
-  },
-  {
-    "name": "camera-box",
-    "host": "dev1",
-    "path": "~/devel/camera-box",
-    "branch_model": "2-branch",
-    "default_branch": "main",
-    "work_branch": "dev",
-    "overrides": [],
-    "onboarded": "2026-06-08"
-  },
-  {
     "name": "claudy",
     "host": "controller",
     "path": "~/devel/claudy",
@@ -43,14 +11,14 @@
     "onboarded": null
   },
   {
-    "name": "codex-bridge",
-    "host": "dev2",
-    "path": "~/devel/codex-bridge",
+    "name": "camera-box",
+    "host": "dev1",
+    "path": "~/devel/camera-box",
     "branch_model": "2-branch",
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": null
+    "onboarded": "2026-06-08"
   },
   {
     "name": "dantetimesync",
@@ -73,44 +41,14 @@
     "onboarded": null
   },
   {
-    "name": "email-extractor",
-    "host": "dev2",
-    "path": "~/devel/n8n/email_extract",
+    "name": "iemmixer",
+    "host": "dev1",
+    "path": "~/devel/iemmixer",
     "branch_model": "2-branch",
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": "2026-06-25"
-  },
-  {
-    "name": "forecasting-storage",
-    "host": "dev2",
-    "path": "~/devel/slovnormal/forecasting_storage",
-    "branch_model": "2-branch",
-    "default_branch": "main",
-    "work_branch": "dev",
-    "overrides": [],
-    "onboarded": "2026-07-14"
-  },
-  {
-    "name": "montalu-n8n",
-    "host": "dev2",
-    "path": "~/devel/montalu/n8n",
-    "branch_model": "2-branch",
-    "default_branch": "main",
-    "work_branch": "dev",
-    "overrides": [],
-    "onboarded": "2026-07-14"
-  },
-  {
-    "name": "montalu-vyuctovanie",
-    "host": "dev2",
-    "path": "~/devel/montalu/vyuctovanie",
-    "branch_model": "2-branch",
-    "default_branch": "master",
-    "work_branch": "dev",
-    "overrides": [],
-    "onboarded": "2026-08-19"
+    "onboarded": "2026-09-24"
   },
   {
     "name": "obsytplayer",
@@ -123,58 +61,6 @@
     "onboarded": null
   },
   {
-    "name": "odoo-erp",
-    "host": "gk",
-    "path": "~/devel/odoo-erp",
-    "github_repo": "zbynekdrlik/odoo-erp",
-    "branch_model": "3-branch",
-    "default_branch": "main",
-    "work_branch": "develop",
-    "overrides": [
-      "3-branch"
-    ],
-    "onboarded": "2026-06-13",
-    "deploy_state": {
-      "main_version_file": "addons/company_base/__manifest__.py",
-      "instances": [
-        {
-          "name": "montalu",
-          "version_source": {
-            "type": "manifest_url",
-            "url": "TODO-PROVISIONING: montalu PROD version endpoint (erp.montalu.cloud /json/2 or version-on-dashboard read)"
-          },
-          "deploy_window": null
-        },
-        {
-          "name": "slovnormal",
-          "version_source": {
-            "type": "manifest_url",
-            "url": "TODO-PROVISIONING: slovnormal PROD version endpoint"
-          },
-          "deploy_window": {
-            "open_start": "19:00",
-            "open_end": "06:00",
-            "timezone": "Europe/Bratislava",
-            "everyday": false
-          }
-        },
-        {
-          "name": "miva",
-          "version_source": {
-            "type": "manifest_url",
-            "url": "TODO-PROVISIONING: miva PROD version endpoint"
-          },
-          "deploy_window": {
-            "open_start": "23:00",
-            "open_end": "05:00",
-            "timezone": "Europe/Bratislava",
-            "everyday": true
-          }
-        }
-      ]
-    }
-  },
-  {
     "name": "odoo-slovnormal",
     "host": "dev1",
     "path": "~/devel/odoo/odoo-slovnormal",
@@ -184,16 +70,6 @@
     "overrides": [
       "3-branch"
     ],
-    "onboarded": null
-  },
-  {
-    "name": "presenter",
-    "host": "dev2",
-    "path": "~/devel/presenter/presenter-dev2",
-    "branch_model": "2-branch",
-    "default_branch": "main",
-    "work_branch": "dev",
-    "overrides": [],
     "onboarded": null
   },
   {
@@ -275,5 +151,139 @@
     "work_branch": "dev",
     "overrides": [],
     "onboarded": "2026-06-03"
+  },
+  {
+    "name": "automatizacie-montalu",
+    "host": "dev2",
+    "path": "~/devel/montalu/automatizacie-montalu",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-07-02"
+  },
+  {
+    "name": "bakerion-ai",
+    "host": "dev2",
+    "path": "~/devel/bakerion-ai/repo",
+    "branch_model": "2-branch",
+    "default_branch": "master",
+    "work_branch": "dev",
+    "overrides": [
+      "local-builds=allowed"
+    ],
+    "onboarded": null
+  },
+  {
+    "name": "codex-bridge",
+    "host": "dev2",
+    "path": "~/devel/codex-bridge",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null
+  },
+  {
+    "name": "email-extractor",
+    "host": "dev2",
+    "path": "~/devel/n8n/email_extract",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-06-25"
+  },
+  {
+    "name": "forecasting-storage",
+    "host": "dev2",
+    "path": "~/devel/slovnormal/forecasting_storage",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-07-14"
+  },
+  {
+    "name": "montalu-n8n",
+    "host": "dev2",
+    "path": "~/devel/montalu/n8n",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-07-14"
+  },
+  {
+    "name": "montalu-vyuctovanie",
+    "host": "dev2",
+    "path": "~/devel/montalu/vyuctovanie",
+    "branch_model": "2-branch",
+    "default_branch": "master",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-08-19"
+  },
+  {
+    "name": "presenter",
+    "host": "dev2",
+    "path": "~/devel/presenter/presenter-dev2",
+    "branch_model": "2-branch",
+    "default_branch": "main",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": null
+  },
+  {
+    "name": "odoo-erp",
+    "host": "gk",
+    "path": "~/devel/odoo-erp",
+    "github_repo": "zbynekdrlik/odoo-erp",
+    "branch_model": "3-branch",
+    "default_branch": "main",
+    "work_branch": "develop",
+    "overrides": [
+      "3-branch"
+    ],
+    "onboarded": "2026-06-13",
+    "deploy_state": {
+      "main_version_file": "addons/company_base/__manifest__.py",
+      "instances": [
+        {
+          "name": "montalu",
+          "version_source": {
+            "type": "manifest_url",
+            "url": "TODO-PROVISIONING: montalu PROD version endpoint (erp.montalu.cloud /json/2 or version-on-dashboard read)"
+          },
+          "deploy_window": null
+        },
+        {
+          "name": "slovnormal",
+          "version_source": {
+            "type": "manifest_url",
+            "url": "TODO-PROVISIONING: slovnormal PROD version endpoint"
+          },
+          "deploy_window": {
+            "open_start": "19:00",
+            "open_end": "06:00",
+            "timezone": "Europe/Bratislava",
+            "everyday": false
+          }
+        },
+        {
+          "name": "miva",
+          "version_source": {
+            "type": "manifest_url",
+            "url": "TODO-PROVISIONING: miva PROD version endpoint"
+          },
+          "deploy_window": {
+            "open_start": "23:00",
+            "open_end": "05:00",
+            "timezone": "Europe/Bratislava",
+            "everyday": true
+          }
+        }
+      ]
+    }
   }
 ]
