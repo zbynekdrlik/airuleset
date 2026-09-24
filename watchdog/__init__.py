@@ -5566,9 +5566,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     # does the du-heavy drain ladder run; >= 90 % after -> machine-channel
     # escalation. Best-effort; the never-delete-on-uncertainty + scope-fence
     # invariants live in the job. The ROOT/system-scope legs (other users'
-    # /tmp, /var/log, system journal, apt, logrotate/fail2ban) are #841.
+    # /tmp, /var/log, system journal, apt, logrotate/fail2ban) are #841. #1067: budget_s.
     _add("disk_guard", lambda: disk_guard_enabled,
-         lambda: disk_guard.run_disk_guard(now, dry_run=dry_run),
+         lambda: disk_guard.run_disk_guard(now, dry_run=dry_run, budget_s=remaining_budget_s()),
          "disk-guard error", min_budget=_BUDGET_MIN_DISK_DRAIN_S)
 
     # Job 41 — MODEL-FLOAT AUDIT (#871). ALWAYS wired (reads local transcripts
