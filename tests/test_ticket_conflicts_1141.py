@@ -234,6 +234,12 @@ class ConflictsCli(unittest.TestCase):
         self.assertIn("# explain: I=2 M=0 U=1 W=1 gk=0 count=2 conflicts=2",
                       r.stdout.splitlines())
         self.assertEqual(self._run("--count").stdout.strip(), "2")
+        # review round 1: the --conflicts lines ARE the conflicts= number
+        explained = [ln for ln in r.stdout.splitlines()
+                     if ln.startswith("conflict: ")]
+        only = self._run("--conflicts").stdout.splitlines()
+        self.assertEqual(only, explained)
+        self.assertEqual(len(only), 2)
 
     def test_conflicts_refuses_extra(self):
         r = self._run("--conflicts", "--extra", "label:prio:bounce")
@@ -273,6 +279,89 @@ class SliceConflictsCli(unittest.TestCase):
         self.assertEqual(len(r.stdout.splitlines()), 1, r.stdout)
         self.assertTrue(r.stdout.startswith(
             "conflict: #4 needs-answer+ready-for-review → U ("), r.stdout)
+
+
+class ReviewRound1(unittest.TestCase):
+    """Review round 1: a #948 supplement row keeps the rule that won, the
+    stop-proof count has ONE definition, the footer cache line shows the
+    conflicts field, and the footer slice path counts supplement rows."""
+
+    def test_supplement_row_conflict_keeps_the_classify_rule(self):
+        row = _row(42, "needs-answer", "ready-for-review")
+        why = ts.classify(row, ts.Facts(), ts.Box(own_stream="david1"))[1]
+        out = ts.explain_lines({"U": {42: row}}, ts.Box(own_stream="david1"),
+                               ts.TicketFacts(), supplement={42})
+        line = [ln for ln in out if ln.startswith("conflict: #42 ")]
+        self.assertEqual(line, ["conflict: #42 needs-answer+ready-for-review"
+                                " → U (%s)" % why], out)
+
+    def test_the_stop_proof_count_has_one_definition(self):
+        self.assertIs(cli_ticket_route.count, ts.stop_count)
+        buckets = ts.bucketize({1: _row(1, "bug")}, ts.TicketFacts(),
+                               ts.Box())
+        self.assertEqual(ts.stop_count(buckets), 1)
+
+    def test_footer_cache_line_shows_the_conflicts_field(self):
+        from unittest import mock
+        import cli_ticket_explain
+        import statusbar
+        with mock.patch.object(statusbar, "_load",
+                               return_value={"open": 1, "conflicts": 3,
+                                             "ts": "x"}):
+            line = cli_ticket_explain._footer_cache_line("/x")
+        self.assertIn(" conflicts=3", line)
+
+    def test_footer_slice_cache_counts_a_supplement_conflict(self):
+        import statusbar
+        user = airuleset._current_user()
+        ten = json.dumps([{"number": 10, "title": "workable",
+                           "createdAt": "2026-01-01T00:00:00Z",
+                           "labels": [{"name": "stream:%s" % user}]}])
+        fortytwo = json.dumps({"labels": [{"name": "needs-answer"},
+                                          {"name": "ready-for-review"}],
+                               "state": "OPEN"})
+        with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
+                TemporaryDirectory() as bindir, \
+                TemporaryDirectory() as tokendir:
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+            Path(repo, "CLAUDE.md").write_text(
+                "<!-- airuleset:authority=fork-no-merge -->\n")
+            gh = Path(bindir) / "gh"
+            gh.write_text(
+                "#!/usr/bin/env bash\n"
+                'case "$*" in\n'
+                '  *"repo view"*|repo*) echo "zbynekdrlik/odoo-erp";;\n'
+                '  *rate_limit*) echo \'{"resources":{"graphql":'
+                '{"remaining":5000}}}\';;\n'
+                '  *"label:stream:"*autopilot-skip*) echo "[]";;\n'
+                "  *\"label:stream:\"*) echo '%s';;\n" % ten +
+                "  *\"issue\"*\"view\"*\"42\"*) echo '%s';;\n" % fortytwo +
+                '  *) echo "[]";;\n'
+                'esac\n')
+            gh.chmod(0o755)
+            d = statusbar._claude_dir(home)
+            d.mkdir(parents=True, exist_ok=True)
+            (d / "discord-questions.json").write_text(json.dumps({
+                "suppressed:s": {
+                    "session": "s", "cwd": str(repo), "channel": "",
+                    "ts": 1000, "asked": 1000,
+                    "question": "Otazka k #42 nieco",
+                    "block": "**Otazka -- projekt x:**\nOtazka k #42\n"
+                             "NEEDS YOU: rozhodnutie",
+                    "suppressed": True}}))
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "tickets-status", "--refresh", "--cwd", repo],
+                capture_output=True, text=True,
+                env={**os.environ, "HOME": home,
+                     "PATH": "%s:%s" % (bindir, os.environ["PATH"]),
+                     "GH_APP_TOKEN_DIR": tokendir})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            cache = json.loads((statusbar.cache_dir(home) / (
+                statusbar.cwd_key(repo) + ".json")).read_text())
+        self.assertIn(42, cache.get("user_waiting_numbers") or [], cache)
+        self.assertEqual((cache.get("conflicts"),
+                          cache.get("conflicts_numbers")), (1, [42]), cache)
 
 
 if __name__ == "__main__":
