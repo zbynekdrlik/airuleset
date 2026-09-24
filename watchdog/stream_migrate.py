@@ -31,9 +31,14 @@ The rule (ALL must hold, else a journalled skip):
   7. ONE recorded attempt per session per `MIN_GAP_S` (1 h), no pending
      request, and the resolved template is not itself old;
   8. the existing verified delivery (`deliver_goal` + the own-template
-     janitor, one typed attempt per request).
-`delivery_ok` re-checks 1, 5, 6 and the session's own transcript at the
-moment of delivery -- the ONLY origin that passes the #1113 refusal. A full
+     janitor, one typed attempt per request);
+  9. ROZHODNUTÉ option 2 on #1143 -- NO structured liveness (`live_signal`):
+     no subagent transcript written < 10 min and no shell / `stream-wait`
+     child under the session's claude (a healthy stream loop idles armed in
+     `stream-wait` for up to 1 h, so the dark footer is never the only
+     evidence); an unresolved claude fails CLOSED.
+`delivery_ok` re-checks 1, 5, 6, the subagent half of 9 and the session's
+own transcript at the moment of delivery -- the ONLY origin that passes the #1113 refusal. A full
 box is unchanged: a non-stream payload returns before any state is touched
 (a stream payload on a non-stream box only journals its skip, never records).
 
@@ -178,6 +183,79 @@ def open_question(tpath, mark_ts):
     return st == "unanswered", why
 
 
+# #1143 ROZHODNUTÉ (option 2) -- the direct children of a session's claude that
+# prove the loop is ALIVE while it idles: Claude Code runs every Bash tool
+# command (a `run_in_background` waiter/poll included) as `/bin/bash -c ...`,
+# and the stream template's own `stream-wait` waiter is one. MCP servers are
+# long-lived non-shell children of EVERY live claude (live dev box: `npm exec
+# @playwright/mcp`), so "any child" would hold every stream loop forever.
+_SHELL_COMMS = ("bash", "sh", "dash", "zsh", "fish")
+
+
+def claude_children(pane_id, run):
+    """`[(comm, cmdline)]` of the DIRECT children of the claude process hosting
+    tmux pane `pane_id` (`#{pane_pid}` -> `tmux_io._pane_claude_pid`, which also
+    resolves a sudo-hosted claude), or None when that claude cannot be resolved
+    or `/proc` cannot be read (the caller fails CLOSED). The production reader
+    behind the injected seam -- tests patch this name, never read `/proc`."""
+    from watchdog import tmux_io
+    try:
+        ppid = (run(["tmux", "display-message", "-p", "-t", pane_id,
+                     "#{pane_pid}"]) or "").strip()
+        cpid = tmux_io._pane_claude_pid(ppid) if ppid.isdigit() else None
+    except Exception:            # noqa: BLE001 -- unreadable = unprovable
+        return None
+    return children_of(cpid) if cpid else None
+
+
+def children_of(pid, proc_root="/proc"):
+    """`[(comm, cmdline)]` of `pid`'s DIRECT children, scanned from
+    `proc_root/<n>/stat` (ppid = field 4, split after the last `") "` since
+    comm may hold spaces/parens), or None when `proc_root` is unreadable."""
+    def _read(path):
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                return fh.read()
+        except OSError:
+            return ""
+    try:
+        names = os.listdir(proc_root)
+    except OSError:
+        return None
+    kids = []
+    for p in names:
+        if not p.isdigit():
+            continue
+        fields = _read(os.path.join(proc_root, p, "stat")).rsplit(") ", 1)[-1].split()
+        if len(fields) < 2 or fields[1] != str(pid):
+            continue
+        cmd = _read(os.path.join(proc_root, p, "cmdline")).replace("\0", " ")
+        kids.append((_read(os.path.join(proc_root, p, "comm")).strip(), cmd.strip()))
+    return kids
+
+
+def live_signal(tpath, now, children_fn, subagent_fn=None):
+    """`(live, why)` -- the #1143 ROZHODNUTÉ structured liveness: the loop is
+    ALIVE (HOLD, never re-arm) while EITHER a subagent transcript of the
+    session was written within `IDLE_MIN_S` (a live lane) OR a direct child of
+    its claude is a shell (a background poll / waiter) or runs `stream-wait`.
+    `children_fn() -> [(comm, cmdline)] | None`; None (claude unresolved /
+    `/proc` unreadable) holds too -- fail CLOSED, the dark footer is never the
+    only evidence (#1113). A relaunched or crashed session has neither sign."""
+    if (subagent_fn or _tx.subagent_active)(tpath, now, IDLE_MIN_S):
+        return True, ("a subagent transcript was written < %ds ago (a live "
+                      "lane)" % IDLE_MIN_S)
+    kids = children_fn() if children_fn is not None else None
+    if kids is None:
+        return True, "the claude process is unresolved (liveness unprovable)"
+    for comm, cmd in kids:
+        if "stream-wait" in (cmd or ""):
+            return True, "a live stream-wait waiter under claude"
+        if (comm or "").strip() in _SHELL_COMMS:
+            return True, "a live background shell under claude (%s)" % comm
+    return False, ""
+
+
 def eligible(authority, payload, tpath, now):
     """(ok, reason): the rule's CORE -- a stream box + a stream payload + the
     idle window -- used by the dark-watch decision AND the delivery re-check
@@ -204,8 +282,10 @@ def delivery_ok(origin, authority, mark_fn, tinfo_fn, now, sid=None):
     ts); `tinfo_fn()` gives `find_active_transcript(...)` -- the NEWEST
     transcript in the cwd, never older than the session's own, so the idle
     re-check errs toward refusing. The dark footer is re-checked by
-    `deliver_goal` itself (an armed pane drops). On a pass `why` names the
-    rule (journalled by the caller)."""
+    `deliver_goal` itself (an armed pane drops), and liveness (b) -- a fresh
+    subagent transcript -- here; liveness (a), a new live child under claude,
+    cannot appear without a turn, which the idle re-check already refuses. On
+    a pass `why` names the rule (journalled by the caller)."""
     if origin != ORIGIN:
         return False, ""
     tinfo = tinfo_fn()
@@ -220,6 +300,9 @@ def delivery_ok(origin, authority, mark_fn, tinfo_fn, now, sid=None):
     is_open, why = open_question(tpath, mark.get("ts"))
     if is_open:                     # never type over an open owner question
         return False, why
+    if _tx.subagent_active(tpath, now, IDLE_MIN_S):     # #1143 liveness (b)
+        return False, ("a subagent transcript was written < %ds ago (a live "
+                       "lane)" % IDLE_MIN_S)
     return True, "dark stream loop not owner-ended, transcript idle"
 
 
@@ -243,13 +326,16 @@ class Seams(NamedTuple):
 
 def decide(sid, cwd, tpath, payload, now, loc, dry_run, store, template_fn,
            pending_fn, record_fn, reset_fn, question_fn=None, confirm_fn=None,
-           mark_ts=None):
+           mark_ts=None, live_fn=None):
     """The ONE rule's dark-watch decision for a DARK, mark-"set" claude pane
     whose armed goal is a stream template. Returns `(logline_or_None,
     handled)`. `question_fn() -> (open, why)` is guard 6 (default
     `open_question(tpath, mark_ts)`; dark-watch passes a memoized one);
     `confirm_fn() -> bool` advances the #524 confirmation run (guard 4) --
-    None fails CLOSED (never confirmed).
+    None fails CLOSED (never confirmed). `live_fn() -> (live, why)` is the
+    ROZHODNUTÉ option-2 liveness HOLD (`live_signal`), the LAST gate before
+    recording (so its `/proc` read runs only for a confirmed, un-gapped,
+    un-pending pane) -- None fails CLOSED too.
 
     Order: the idle window and the open question first (a stat + a memoized
     read, so the template -- `resolve_authority` + the template file -- is
@@ -259,7 +345,7 @@ def decide(sid, cwd, tpath, payload, now, loc, dry_run, store, template_fn,
     template; then the confirmation run -- advanced every sweep that gets this
     far, the 1 h gap included, and ONLY on a path that stays this rule's own
     (handled), so the caller's dead-loop path never advances it twice a sweep
-    -- then the gap and pending gates. `eligible()` re-checks the idle window
+    -- then the gap, pending and liveness gates. `eligible()` re-checks the idle window
     on purpose: it is the ONE core `delivery_ok` shares, so record and
     delivery can never disagree. `handled` is False -- the caller's fulfilled
     / answer / dead-loop path applies -- for a non-stream box, an unreadable or
@@ -305,6 +391,10 @@ def decide(sid, cwd, tpath, payload, now, loc, dry_run, store, template_fn,
         return _skip("1/h attempt gap", True)
     if pending_fn(sid):
         return _skip("a request is already pending", True)
+    live, lwhy = (live_fn() if live_fn is not None
+                  else (True, "liveness unprovable (no reader)"))
+    if live:                       # ROZHODNUTÉ option 2: ◎ is never alone
+        return _skip(lwhy, True)
     case = ("old (B) template" if is_old_stream_payload(payload)
             else "current template")
     if dry_run:
@@ -358,7 +448,7 @@ def confirm_run(confirm_state, sid, now, dry_run, advance_fn):
 
 
 def dark_watch(logs, sid, cwd, tpath, mark, now, loc, dry_run, state,
-               seams_fn, confirm_fn):
+               seams_fn, confirm_fn, children_fn=None):
     """`goal_dark_watch`'s call of the ONE rule for a DARK, mark-"set" pane
     (after the #524 liveness vetoes, before the fulfilled / answer / dead-loop
     lanes). A non-stream payload returns False at once, touching no state (a
@@ -368,8 +458,10 @@ def dark_watch(logs, sid, cwd, tpath, mark, now, loc, dry_run, state,
     per (arm ts, transcript mtime): a dark idle pane is swept every 60 s but
     its transcript does not change, so the bounded 8 MB read runs once per
     change (never written on dry_run; `seen` refreshed on every hit, so an
-    entry is reaped 24 h after its last sighting). Appends its one log line
-    (if any) to `logs`; True = handled (the caller `continue`s)."""
+    entry is reaped 24 h after its last sighting). `children_fn()` is the
+    injected process-tree read (`claude_children` in production) behind the
+    liveness hold. Appends its one log line (if any) to `logs`; True =
+    handled (the caller `continue`s)."""
     payload = mark.get("payload") if isinstance(mark, dict) else None
     if not is_stream_payload(payload):
         return False
@@ -396,7 +488,8 @@ def dark_watch(logs, sid, cwd, tpath, mark, now, loc, dry_run, state,
     line, handled = decide(sid, cwd, tpath, payload, now, loc, dry_run,
                            *seams_fn(), question_fn=_question,
                            confirm_fn=lambda: confirm_fn(mark_ts),
-                           mark_ts=mark_ts)
+                           mark_ts=mark_ts,
+                           live_fn=lambda: live_signal(tpath, now, children_fn))
     if line:
         logs.append(line)
     return handled

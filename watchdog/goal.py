@@ -2954,17 +2954,19 @@ def _stream_seams(sid, cwd, now, rearm_fn, requests_path, state,
 
 
 def _stream_rearm(logs, sid, cwd, tpath, mark, now, loc, dry_run, state,
-                  rearm_fn, requests_path, episode_states):
+                  rearm_fn, requests_path, episode_states, pane, run):
     """#1143 -- dark-watch's ONE stream rule (`stream_migrate.dark_watch`: a
     dark stream loop the owner did not end is re-armed), fed this module's
-    seams lazily and the SAME #524 `confirm_state` (`episode_states[2]`) the
-    armed/None/mtime vetoes reset."""
+    seams lazily, the SAME #524 `confirm_state` (`episode_states[2]`) the
+    armed/None/mtime vetoes reset, and the process-tree read of `pane`'s claude
+    (`stream_migrate.claude_children`, resolved at call time = the test seam)."""
     return _stream_migrate.dark_watch(
         logs, sid, cwd, tpath, mark, now, loc, dry_run, state,
         lambda: _stream_seams(sid, cwd, now, rearm_fn, requests_path, state,
                               episode_states, dry_run),
         _stream_migrate.confirm_run(episode_states[2], sid, now, dry_run,
-                                    _dark_confirm_advance))
+                                    _dark_confirm_advance),
+        lambda: _stream_migrate.claude_children(pane, run))
 
 
 def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
@@ -4061,7 +4063,7 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
             pinged_state.pop(sid, None)
             continue
         if _stream_rearm(logs, sid, cwd, tpath, mark, now, loc, dry_run, state, rearm_fn,
-                         requests_path, (seen_state, pinged_state, confirm_state)):
+                         requests_path, (seen_state, pinged_state, confirm_state), pid, run):
             continue   # #1143 -- a dark stream loop not owner-ended (held / re-armed)
 
         # #764 FULFILLED-REARM lane: a stop-(B) COMPLETED loop (🏁 proof in the

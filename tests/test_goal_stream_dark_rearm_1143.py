@@ -582,6 +582,29 @@ class TestRuleGuardsDirect(unittest.TestCase):
         self.assertTrue(is_open)
         self.assertIn("unanswered", why)
 
+    def test_children_of_reads_direct_children_from_a_fake_proc(self):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        root = Path(d.name)
+        for pid, ppid, comm, cmd in (
+                (500, 1, "claude", "claude"),
+                (501, 500, "bash", "/bin/bash\0-c\0stream-wait"),
+                (502, 500, "npm exec @playw", "npm\0exec\0@playwright/mcp"),
+                (503, 501, "python3", "python3\0airuleset.py"),   # grandchild
+                (504, 50, "bash", "bash")):                       # ppid 50
+            p = root / str(pid)
+            p.mkdir()
+            (p / "stat").write_text("%d (%s) S %d 1 1" % (pid, comm, ppid))
+            (p / "comm").write_text(comm + "\n")
+            (p / "cmdline").write_text(cmd)
+        (root / "self").mkdir()
+        kids = sorted(sm.children_of(500, proc_root=str(root)))
+        self.assertEqual(kids, [("bash", "/bin/bash -c stream-wait"),
+                                ("npm exec @playw", "npm exec @playwright/mcp")])
+        self.assertIsNone(sm.children_of(500, proc_root=str(root / "nope")))
+        self.assertTrue(sm.live_signal(root / "t.jsonl", time.time(),
+                                       lambda: kids)[0])
+
     def test_no_confirmation_run_never_records(self):
         recorded = []
         line, handled = sm.decide(
