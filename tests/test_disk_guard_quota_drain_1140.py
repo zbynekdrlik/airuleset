@@ -242,12 +242,14 @@ def test_drift_first_computation_is_staggered(tmp_path, no_prevention):
 
 
 def test_drift_never_runs_du_on_a_full_drain_poll(tmp_path, no_prevention):
-    def _du(_paths):
-        raise AssertionError("du ran in front of the drain ladder")
+    du_calls = []                    # recorded, never raised (the caller catches)
     ran = []
     _run(tmp_path, box="shared-stream", fs=69, quota=_quota_seq(92),
-         planners=_recording_planners(ran), du_fn=_du, now=_drift_now(10_000.0))
+         planners=_recording_planners(ran), du_fn=lambda p: du_calls.append(p) or 1,
+         now=_drift_now(10_000.0))
     assert ran, "the drain itself must still run"
+    assert du_calls == [], "du ran in front of the drain ladder"
+    assert "quota_drift" not in _cache(tmp_path)
 
 
 def test_unreadable_quota_mid_pass_stops_and_never_records_zero(tmp_path, no_prevention):
@@ -320,3 +322,30 @@ def test_default_du_is_niced_and_reads_the_total(tmp_path, monkeypatch):
     assert dg._dgq.default_du_kib([str(tmp_path), str(tmp_path / "missing")]) == 32
     assert seen and seen[0][:5] == ["nice", "-n19", "ionice", "-c3", "du"]
     assert seen[0][-1] == str(tmp_path), "a missing path must not be passed to du"
+
+
+def test_unreadable_final_read_emits_no_fake_summary(tmp_path, no_prevention):
+    ran = []
+    act = {"r1": [{"cls": "tmp-test", "path": str(tmp_path / "x"), "bytes": 5,
+                   "kind": "delete"}]}
+    logs = _run(tmp_path, box="shared-stream", fs=69, dry_run=True,
+                quota=_quota_seq(92, 92, None),
+                planners=_recording_planners(ran, labels=("r1",), actions=act))
+    assert ran == ["r1"]
+    assert not any("DRAIN" in ln and "→ 0%" in ln for ln in logs), logs
+
+
+@pytest.mark.parametrize("rec", [
+    {"ts": 10_000.0 - 60, "before_pct": 96, "after_pct": 96, "dry_run": True},
+    {"ts": 10_000.0 - 3 * 3600, "before_pct": 96, "after_pct": 96},
+])
+def test_dry_run_or_old_exhausted_record_does_not_back_off(tmp_path, no_prevention, rec):
+    gd = Path(tmp_path) / ".claude" / "disk-guard"
+    gd.mkdir(parents=True)
+    (gd / "last-drain").write_text("%f" % (10_000.0 - 60))
+    (gd / "status.json").write_text(json.dumps(
+        {"worst_pct": 69, "quota_pct": 96, "quota_drain": rec}))
+    ran = []
+    _run(tmp_path, box="shared-stream", fs=69, quota=_quota_seq(96),
+         planners=_recording_planners(ran))
+    assert ran, "a dry-run or stale record must not silence the >=95 %% drain"

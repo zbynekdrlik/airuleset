@@ -137,10 +137,23 @@ class TestRefreshRenderers(unittest.TestCase):
         self.assertIn("ionice -c2 -n7", s)
         self.assertNotIn("ionice -c3", s)
 
-    def test_apply_recounts_when_it_finds_quota_off(self):
+    def test_apply_hands_the_off_recount_to_the_refresh_service(self):
+        """review 3: an inline recount (up to 1800 s) would outlive the push's
+        180 s ssh timeout; the apply queues the ONE refresh path instead."""
         blk = crg._render_quota_apply_block()
+        self.assertIn("systemctl start --no-block airuleset-quota-refresh.service", blk)
         flags = [f for _p, f in _quotacheck_flag_sets(blk)]
-        self.assertIn("um", flags, "the quota-off branch of the apply never recounts")
+        self.assertNotIn("um", flags, "the push apply must not recount inline")
+
+    def test_stoppost_quotaon_takes_the_lock(self):
+        """review 3: ExecStopPost after a busy-lock exit must never quotaon
+        under the apply's running work — it takes the same lock, bounded."""
+        svc = crg.render_quota_refresh_service()
+        line = [ln for ln in svc.splitlines() if ln.startswith("ExecStopPost=")]
+        self.assertEqual(len(line), 1, svc)
+        self.assertIn("flock -w", line[0])
+        self.assertIn(crg.QUOTA_LOCK_PATH, line[0])
+        self.assertTrue(line[0].endswith("/sbin/quotaon -u /"), line[0])
 
     def test_apply_enables_timer_with_readback(self):
         blk = crg._render_quota_apply_block()
@@ -308,6 +321,21 @@ class TestRefreshScriptExecution(unittest.TestCase):
             r = self._run(path, env)
             self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
 
+    def test_skipped_user_is_loud_even_when_the_readback_passes(self):
+        """repquota fails for the APPLY pass, then works for the read-back: no
+        ceiling was refreshed, and the old limits must not read as success."""
+        with tempfile.TemporaryDirectory() as td:
+            path, env, log, _m = self._setup(td)
+            n = os.path.join(td, "rq.count")
+            with open(os.path.join(td, "bin", "repquota"), "w") as f:
+                f.write("#!/usr/bin/env bash\n"
+                        "c=$(cat %s 2>/dev/null || echo 0); echo $((c+1)) > %s\n"
+                        "[ \"$c\" -eq 0 ] && { echo boom >&2; exit 1; }\n"
+                        "echo 'u1  --  1048576  8388608 10485760  0 0 0'\n" % (n, n))
+            r = self._run(path, env)
+            self.assertNotIn("setquota -u", " ".join(self._calls(log)))
+            self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+
     def test_readback_of_a_stale_ceiling_is_loud(self):
         """the applied hard limit must equal the one computed, not merely be set."""
         with tempfile.TemporaryDirectory() as td:
@@ -346,7 +374,8 @@ class TestApplyBlockExecution(unittest.TestCase):
                         'echo "quotaon $*" >> %s' % (state, log)),
             "setquota": 'echo "setquota $*" >> %s' % log,
             "repquota": 'echo "u1  --  1048576  8388608 10485760  0 0 0"',
-            "systemctl": 'case "$1" in is-enabled) echo enabled;; esac',
+            "systemctl": ('echo "systemctl $*" >> %s\n'
+                          'case "$1" in is-enabled) echo enabled;; esac' % log),
             "apt-get": "exit 0",
         }
         for name, body in stubs.items():
@@ -365,7 +394,8 @@ class TestApplyBlockExecution(unittest.TestCase):
         blk = blk.replace("flock -w %d" % crg.QUOTA_APPLY_LOCK_WAIT_S, "flock -w 1")
         path = os.path.join(td, "apply.sh")
         with open(path, "w") as f:
-            f.write("#!/usr/bin/env bash\nset -euo pipefail\n" + blk + "\n")
+            f.write("#!/usr/bin/env bash\nset -euo pipefail\n" + blk + "\n"
+                    '[ -e /proc/$$/fd/9 ] || echo FD9-CLOSED\n')
         env = dict(os.environ)
         env["PATH"] = bindir + ":" + env.get("PATH", "")
         with open(lock, "w") as held:
@@ -376,12 +406,19 @@ class TestApplyBlockExecution(unittest.TestCase):
         calls = open(log).read().splitlines() if os.path.exists(log) else []
         return r, calls
 
-    def test_quota_off_is_recounted_before_quotaon(self):
+    def test_quota_off_queues_the_refresh_after_releasing_the_lock(self):
         with tempfile.TemporaryDirectory() as td:
             r, calls = self._run(td, "off")
-            heads = [c.split()[0] for c in calls]
-            self.assertIn("quotacheck -u -m /", calls, r.stdout + r.stderr)
-            self.assertLess(heads.index("quotacheck"), heads.index("quotaon"))
+            self.assertNotIn("quotacheck -u -m /", calls, "inline recount in a push")
+            self.assertIn("systemctl start --no-block airuleset-quota-refresh.service",
+                          calls, r.stdout + r.stderr)
+            self.assertIn("FD9-CLOSED", r.stdout, "the quota lock fd leaked past the block")
+
+    def test_quota_on_does_not_queue_a_refresh(self):
+        with tempfile.TemporaryDirectory() as td:
+            r, calls = self._run(td, "on")
+            self.assertFalse([c for c in calls if "start --no-block" in c], calls)
+            self.assertIn("FD9-CLOSED", r.stdout)
 
     def test_held_lock_skips_the_quota_section_loudly(self):
         with tempfile.TemporaryDirectory() as td:
