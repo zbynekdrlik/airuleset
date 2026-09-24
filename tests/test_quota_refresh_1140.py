@@ -209,6 +209,8 @@ class TestRefreshScriptExecution(unittest.TestCase):
             "nice": 'while [ "${1#-}" != "$1" ]; do shift; done; exec "$@"',
             "ionice": 'while [ "${1#-}" != "$1" ]; do shift; done; exec "$@"',
             "timeout": 'shift; exec "$@"',
+            # part D: hermetic fs size — 1 TiB free, the fs bound never bites
+            "df": 'echo "  Avail"; echo "  1073741824"',
         }
         for name, body in stubs.items():
             p = os.path.join(bindir, name)
@@ -379,6 +381,8 @@ class TestApplyBlockExecution(unittest.TestCase):
             "systemctl": ('echo "systemctl $*" >> %s\n'
                           'case "$1" in is-enabled) echo enabled;; esac' % log),
             "apt-get": "exit 0",
+            # part D: hermetic fs size — 1 TiB free, the fs bound never bites
+            "df": 'echo "  Avail"; echo "  1073741824"',
         }
         for name, body in stubs.items():
             fp = os.path.join(bindir, name)
