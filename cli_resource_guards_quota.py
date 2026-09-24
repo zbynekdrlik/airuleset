@@ -13,6 +13,11 @@ the files through its ``guard_files()`` + atomic ``_install``, and embeds
   The boot unit and a daily root refresh re-count with ``quotacheck -u -m /``
   (NEVER the create flag — it recreates the file WITHOUT limits) and the refresh
   re-applies the SAME limits block, so ceilings follow usage between pushes.
+* #1140 D: 20 % headroom recomputed once a day was not enough (3+ GB of
+  work-product snapshots in one day → EDQUOT again). A cheap HOURLY root
+  oneshot re-runs ONLY the limits block (no quotaoff / quotacheck / quotaon)
+  under the same lock, and the hard limit is capped at ``used + 50 %`` of the
+  filesystem's free space so one account is never granted the whole disk.
 """
 
 # #950: per-user disk quota on shared-stream boxes.  ext4 usrquota via legacy
@@ -43,6 +48,15 @@ QUOTACHECK_REFRESH_TIMEOUT_S = 1800
 QUOTA_LOCK_PATH = "/run/airuleset-quota.lock"
 QUOTA_LOCK_WAIT_S = 600
 QUOTA_APPLY_LOCK_WAIT_S = 120
+# #1140 D: HOURLY ceiling re-apply (limits block only, no recount) — the
+# daily refresh keeps accounting true, this keeps ceilings following usage.
+QUOTA_CEILING_SCRIPT_PATH = "/usr/local/lib/airuleset/quota-ceiling.sh"
+QUOTA_CEILING_SERVICE_PATH = "/etc/systemd/system/airuleset-quota-ceiling.service"
+QUOTA_CEILING_TIMER_PATH = "/etc/systemd/system/airuleset-quota-ceiling.timer"
+# #1140 D: hard <= used + this share of the filesystem's available space, so a
+# fast-growing account can never be granted the whole disk (the box-level
+# disk guard stays the backstop).
+QUOTA_FS_AVAIL_BOUND_PCT = 50
 
 
 def render_quota_unit():
@@ -84,6 +98,29 @@ def render_quota_unit():
     )
 
 
+def _render_quota_script_preamble(tag: str, holders: str, what: str) -> str:
+    """#1140: the shared head of the root quota scripts (the daily refresh and
+    the hourly ceilings): ``set -euo pipefail``; ``/aquota.user`` missing →
+    exit 3; then ``QUOTA_LOCK_PATH`` on fd 9 — ONE quota writer at a time
+    (the refresh, the ceilings and the push apply all take it); busy or
+    unopenable → exit 4 touching nothing."""
+    return (
+        "set -euo pipefail\n"
+        "if [ ! -f /aquota.user ]; then\n"
+        "    echo \"  ⚠ %s: /aquota.user missing — quota not provisioned\" >&2\n"
+        "    exit 3\n"
+        "fi\n"
+        "# one quota writer at a time — shared with the other quota writers\n"
+        "if ! { exec 9>>%s; } 2>/dev/null || ! flock -w %d 9; then\n"
+        "    echo \"  ⚠ %s: quota lock %s busy/unopenable\" \\\n"
+        "        \"(%s running?) — %s SKIPPED, quota untouched\" >&2\n"
+        "    exit 4\n"
+        "fi\n"
+        % (tag, QUOTA_LOCK_PATH, QUOTA_LOCK_WAIT_S, tag, QUOTA_LOCK_PATH,
+           holders, what)
+    )
+
+
 def render_quota_refresh_script() -> str:
     """#1140 A+B: the daily ROOT refresh (bash) — true accounting, then
     usage-aware ceilings from the ONE ``_render_quota_limits_block()``.
@@ -102,18 +139,8 @@ def render_quota_refresh_script() -> str:
         "#!/bin/bash\n"
         "# Managed by airuleset (#1140) — daily quota accounting refresh +\n"
         "# usage-aware ceilings. NEVER re-create the quota file (drops every limit).\n"
-        "set -euo pipefail\n"
-        "if [ ! -f /aquota.user ]; then\n"
-        "    echo \"  ⚠ quota-refresh: /aquota.user missing — quota not provisioned\" >&2\n"
-        "    exit 3\n"
-        "fi\n"
-        "# one quota writer at a time — the push apply takes the same lock\n"
-        "if ! { exec 9>>%s; } 2>/dev/null || ! flock -w %d 9; then\n"
-        "    echo \"  ⚠ quota-refresh: quota lock %s busy/unopenable\" \\\n"
-        "        \"(a push apply running?) — refresh SKIPPED, quota untouched\" >&2\n"
-        "    exit 4\n"
-        "fi\n"
-        "rc=0\n"
+        + _render_quota_script_preamble("quota-refresh", "a push apply", "refresh")
+        + "rc=0\n"
         "# quota is NEVER left off: re-enable on ANY exit (a no-op EBUSY if on)\n"
         "trap 'quotaon -u / >/dev/null 2>&1 || true' EXIT\n"
         "trap 'exit 143' TERM INT HUP\n"
@@ -144,8 +171,7 @@ def render_quota_refresh_script() -> str:
         "%s\n"
         "if [ \"$qfail\" -ne 0 ]; then rc=1; fi\n"
         "exit \"$rc\"\n"
-        % (QUOTA_LOCK_PATH, QUOTA_LOCK_WAIT_S, QUOTA_LOCK_PATH,
-           QUOTACHECK_REFRESH_TIMEOUT_S, _render_quota_limits_block())
+        % (QUOTACHECK_REFRESH_TIMEOUT_S, _render_quota_limits_block())
     )
 
 
@@ -194,6 +220,71 @@ def render_quota_refresh_timer() -> str:
     )
 
 
+def render_quota_ceiling_script() -> str:
+    """#1140 D: the HOURLY root ceiling re-apply (bash) — runs ONLY the ONE
+    ``_render_quota_limits_block()``: no quotaoff, no quotacheck, no quotaon
+    (the recount stays daily), so it is a sub-second setquota per account
+    with no filesystem walk.
+
+    Same shape as ``render_quota_refresh_script()``: ``set -euo pipefail``,
+    ``/aquota.user`` missing → exit 3, then ``QUOTA_LOCK_PATH`` (shared with
+    the daily refresh and the push apply; busy → exit 4 touching nothing).
+    Exits 1 (LOUD in ``systemctl status``) when the limits block reported a
+    failure (``qfail``). Pure renderer."""
+    return (
+        "#!/bin/bash\n"
+        "# Managed by airuleset (#1140 D) — hourly usage-aware quota ceilings.\n"
+        "# Limits ONLY: no recount, no quota off/on toggle (the daily refresh owns them).\n"
+        + _render_quota_script_preamble(
+            "quota-ceiling", "a refresh or push apply", "ceilings")
+        + _render_quota_limits_block() + "\n"
+        "if [ \"$qfail\" -ne 0 ]; then exit 1; fi\n"
+        "exit 0\n"
+    )
+
+
+def render_quota_ceiling_service() -> str:
+    """#1140 D: the oneshot the hourly timer triggers. ``After=`` the boot unit
+    (a ``Persistent=true`` catch-up at boot waits for its recount) AND the
+    daily refresh: ``hourly`` and ``daily`` both elapse at 00:00, and the
+    ordering makes systemd queue this job behind the refresh instead of racing
+    it for the lock. ``TimeoutStartSec`` exceeds the lock wait. No
+    ``ExecStopPost=quotaon``: nothing here ever switches quota off."""
+    return (
+        "# Managed by airuleset (#1140 D) — hourly usage-aware quota ceilings.\n"
+        "[Unit]\n"
+        "Description=airuleset hourly usage-aware quota ceilings (#1140)\n"
+        "ConditionPathExists=/aquota.user\n"
+        "After=airuleset-quota.service\n"
+        "After=airuleset-quota-refresh.service\n"
+        "\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        "TimeoutStartSec=%d\n"
+        "ExecStart=/bin/bash %s\n"
+        % (QUOTA_LOCK_WAIT_S + 300, QUOTA_CEILING_SCRIPT_PATH)
+    )
+
+
+def render_quota_ceiling_timer() -> str:
+    """#1140 D: hourly; ``Persistent=true`` catches a run missed while the box
+    was down."""
+    return (
+        "# Managed by airuleset (#1140 D) — hourly quota ceilings so an account's\n"
+        "# headroom follows its growth between the daily refreshes.\n"
+        "[Unit]\n"
+        "Description=airuleset hourly quota ceiling timer (#1140)\n"
+        "\n"
+        "[Timer]\n"
+        "OnCalendar=hourly\n"
+        "Persistent=true\n"
+        "Unit=airuleset-quota-ceiling.service\n"
+        "\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+
+
 def _render_quota_kmod_block() -> str:
     """#950 fix-forward D1+D4: ensure quota_v2 kernel module is loaded.
 
@@ -229,7 +320,12 @@ def _render_quota_limits_block() -> str:
 
     For each shared-stream user, reads current usage from repquota and
     computes hard=max(QUOTA_HARD_KIB, ceil(used*1.2)),
-    soft=max(QUOTA_SOFT_KIB, ceil(used*1.1)).  When above target, prints a
+    soft=max(QUOTA_SOFT_KIB, ceil(used*1.1)).  #1140 D: hard is then capped
+    at ``used + QUOTA_FS_AVAIL_BOUND_PCT %`` of the free space on / (one ``df``
+    per run, hoisted like repquota; an unreadable df is LOUD + ``qfail`` and
+    the unbounded ceiling still applies) and soft never exceeds hard. The ONE
+    renderer shared by the push apply, the daily refresh and the hourly
+    ceiling timer.  When above target, prints a
     LOUD warning about the temporary ceiling.  Read-back verify compares
     against the per-user APPLIED value, not the constant.
 
@@ -244,6 +340,22 @@ def _render_quota_limits_block() -> str:
         '# Y5: hoist repquota above the loop (one call for all users)\n'
         '# Y6: capture rc without letting the assignment itself trip -e\n'
         'rq_out=$(repquota -u / 2>&1) && rq_rc=0 || rq_rc=$?\n'
+        '# #1140 D: fs bound — hard <= used + %d%% of the free space on /.\n'
+        '# Unreadable -> LOUD + qfail, and the unbounded ceiling still applies\n'
+        '# (a stale, lower ceiling IS the EDQUOT incident).\n'
+        '# stdout ONLY is parsed (a harmless stderr warning must not void it)\n'
+        'df_out=$(df --output=avail -k / 2>/dev/null) && df_rc=0 || df_rc=$?\n'
+        'fs_avail_kib=$(echo "$df_out" | tail -n 1 | tr -d \' \')\n'
+        'fs_bound_kib=""\n'
+        'if [ "$df_rc" -eq 0 ] && [ -n "$fs_avail_kib" ] && [ -z "${fs_avail_kib//[0-9]/}" ]; then\n'
+        '    fs_avail_kib=$(( 10#$fs_avail_kib ))\n'
+        '    fs_bound_kib=$(( fs_avail_kib * %d / 100 ))\n'
+        'else\n'
+        '    df_err=$(df --output=avail -k / 2>&1 >/dev/null || true)\n'
+        '    echo "  ⚠ quota: df gave no free space for / (rc=$df_rc out=$df_out'
+        ' err=$df_err) — fs bound SKIPPED, unbounded ceilings" >&2\n'
+        '    qfail=1\n'
+        'fi\n'
         'for home in /home/*; do\n'
         '    [ -d "$home" ] || continue\n'
         '    u=$(basename "$home")\n'
@@ -263,6 +375,13 @@ def _render_quota_limits_block() -> str:
         ' — skipping setquota for $u" >&2\n'
         '        qfail=1; continue\n'
         '    fi\n'
+        '    # #1140 D: a non-numeric usage must never abort the loop or guess\n'
+        '    if [ -n "${used_kib//[0-9]/}" ]; then\n'
+        '        echo "  ⚠ quota: repquota gave non-numeric usage \'$used_kib\' for $u'
+        ' — skipping setquota for $u" >&2\n'
+        '        qfail=1; continue\n'
+        '    fi\n'
+        '    used_kib=$(( 10#$used_kib ))\n'
         '    # Target limits (KiB)\n'
         '    target_soft=%d\n'
         '    target_hard=%d\n'
@@ -281,6 +400,18 @@ def _render_quota_limits_block() -> str:
         '    else\n'
         '        soft_kib=$target_soft\n'
         '    fi\n'
+        '    # #1140 D: hard = min(hard, used + fs bound); soft never above hard\n'
+        '    if [ -n "$fs_bound_kib" ]; then\n'
+        '        fs_cap_kib=$(( used_kib + fs_bound_kib ))\n'
+        '        # 0 means NO limit to setquota — never let a full disk invert it\n'
+        '        [ "$fs_cap_kib" -ge 1 ] || fs_cap_kib=1\n'
+        '        if [ "$hard_kib" -gt "$fs_cap_kib" ]; then\n'
+        '            echo "  ⚠ quota: $u ceiling capped by free disk space'
+        ' (hard $hard_kib -> $fs_cap_kib KiB = used + %d%% of ${fs_avail_kib} KiB free)" >&2\n'
+        '            hard_kib=$fs_cap_kib\n'
+        '        fi\n'
+        '    fi\n'
+        '    if [ "$soft_kib" -gt "$hard_kib" ]; then soft_kib=$hard_kib; fi\n'
         '    expected="$expected $u=$hard_kib"\n'
         '    sq_err=$(setquota -u "$u" "$soft_kib" "$hard_kib" 0 0 / 2>&1) \\\n'
         '        || { echo "  ⚠ quota: setquota failed for $u — stderr: $sq_err" >&2; qfail=1; }\n'
@@ -324,8 +455,28 @@ def _render_quota_limits_block() -> str:
         '    echo "  quota: all users applied + verified (grace=%ds)"\n'
         'fi'
         % (QUOTA_GRACE_S, QUOTA_GRACE_S,
+           QUOTA_FS_AVAIL_BOUND_PCT, QUOTA_FS_AVAIL_BOUND_PCT,
            QUOTA_SOFT_KIB, QUOTA_HARD_KIB,
+           QUOTA_FS_AVAIL_BOUND_PCT,
            QUOTA_GRACE_S)
+    )
+
+
+def _render_quota_timer_enable_block(timer: str, label: str) -> str:
+    """#1140: ``enable --now`` one quota timer inside the apply block, then
+    read it back with ``is-enabled`` — a mismatch prints ``QUOTA VERIFY FAIL``
+    (LOUD in the push output). Used for the daily refresh and the hourly
+    ceiling timer."""
+    return (
+        '        systemctl enable --now %s >/dev/null 2>&1 \\\n'
+        '            || echo "  ⚠ quota: %s timer enable failed" >&2\n'
+        '        tmr_state=$(systemctl is-enabled %s 2>&1 || true)\n'
+        '        if [ "$tmr_state" = "enabled" ]; then\n'
+        '            echo "  quota: %s timer enabled + verified"\n'
+        '        else\n'
+        '            echo "  ⚠ QUOTA VERIFY FAIL: %s timer is-enabled=$tmr_state" >&2\n'
+        '        fi\n'
+        % (timer, label, timer, label, label)
     )
 
 
@@ -418,16 +569,11 @@ def _render_quota_apply_block() -> str:
         '    fi\n'
         '    if [ "$quota_fail" -eq 0 ]; then\n'
         + _render_quota_limits_block() + '\n'
-        # #1140: the daily refresh timer + a read-back (LOUD on mismatch)
-        '        systemctl enable --now airuleset-quota-refresh.timer >/dev/null 2>&1 \\\n'
-        '            || echo "  ⚠ quota: refresh timer enable failed" >&2\n'
-        '        tmr_state=$(systemctl is-enabled airuleset-quota-refresh.timer 2>&1 || true)\n'
-        '        if [ "$tmr_state" = "enabled" ]; then\n'
-        '            echo "  quota: refresh timer enabled + verified"\n'
-        '        else\n'
-        '            echo "  ⚠ QUOTA VERIFY FAIL: refresh timer is-enabled=$tmr_state" >&2\n'
-        '        fi\n'
-        '    fi\n'
+        # #1140: the daily refresh timer + the #1140 D hourly ceiling timer,
+        # each with a read-back (LOUD on mismatch)
+        + _render_quota_timer_enable_block("airuleset-quota-refresh.timer", "refresh")
+        + _render_quota_timer_enable_block("airuleset-quota-ceiling.timer", "ceiling")
+        + '    fi\n'
         '    exec 9>&-\n'
         '    if [ "${quota_recount_due:-0}" = 1 ]; then\n'
         '        systemctl start --no-block airuleset-quota-refresh.service \\\n'

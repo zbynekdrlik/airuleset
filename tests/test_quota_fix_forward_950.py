@@ -154,6 +154,7 @@ class TestQuotaBlockExecution(unittest.TestCase):
     def _make_stubs(self, tmpdir, stubs):
         bin_dir = os.path.join(tmpdir, 'bin')
         os.makedirs(bin_dir, exist_ok=True)
+        stubs = {'df': 'echo " Avail"; echo " 1073741824"', **stubs}  # 1140-D: 1T free
         for name, content in stubs.items():
             path = os.path.join(bin_dir, name)
             with open(path, 'w') as f:
@@ -375,7 +376,6 @@ class TestQuotaBlockExecution(unittest.TestCase):
                           "setquota did not use fleet targets for zero-usage. "
                           "Expected: %s, Got: %s"
                           % (expected_sq, calls))
-
 
     # -- Y6: repquota failure must never be treated as zero usage --
 
