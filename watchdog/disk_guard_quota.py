@@ -309,7 +309,8 @@ def run_drain_passes(status, home, now, dry_run, planners, planners_fn, q,
             return logs
         if fs_pressure:
             planners = (planners_fn(home, now) if planners_fn is not None
-                        else dg._default_planners(home, now, scratch_rows=None))
+                        else dg._default_planners(home, now, scratch_rows=None,
+                                                  wt_cache=not dry_run))
     if fs_pressure:
         logs += dg.execute_drain(status, home, planners, recheck, do_action,
                                  geteuid_fn=geteuid_fn, log_path=dg._log_path(home),

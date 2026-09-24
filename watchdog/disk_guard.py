@@ -2659,11 +2659,13 @@ def _plan_scratch_worktrees(home, now):
             for r in rows]
 
 
-def _plan_stale_agent_worktrees(home, now):
-    """#968 — stale agent worktrees (every box class, before journal)."""
-    from watchdog.disk_guard_worktrees import discover_stale_agent_worktrees
+def _plan_stale_agent_worktrees(home, now, wt_cache=False):
+    """#968 — stale agent worktrees (every box class, before journal).
+    #1067 1g: ``wt_cache`` (``not dry_run``) = the guard dir's verdict cache."""
+    from watchdog import disk_guard_worktrees as dgw, disk_guard_wt_cache as wtc
+    cache = _guard_dir(home) / wtc.VERDICTS_NAME if wt_cache else None
     try:
-        return discover_stale_agent_worktrees(home=home, now=now)
+        return dgw.discover_stale_agent_worktrees(home=home, now=now, cache_path=cache)
     except Exception as e:
         return [{"cls": "stale-agent-worktree", "path": "-", "bytes": 0,
                  "kind": "skip",
@@ -2697,7 +2699,7 @@ def _plan_session_scratch(home, now):
     from watchdog.disk_guard_runner import discover_session_scratch
     return [_norm_action("session-scratch", r, "delete")
             for r in discover_session_scratch(now=now, home=home)]
-def _default_planners(home, now, scratch_rows=None):
+def _default_planners(home, now, scratch_rows=None, wt_cache=False):
     """The auto-drain LADDER, cheapest/safest first, ladder STOPS the moment the
     worst mount is back under target. #854 added the cache-class box-level rungs
     (apt / rotated logs / runner cache / docker / user-cache / stale Claude
@@ -2725,7 +2727,7 @@ def _default_planners(home, now, scratch_rows=None):
         ("cli-version", lambda: _plan_cli_versions(home, now)),
         ("user-cache", lambda: _plan_user_cache(home, now)),
         # #968: stale agent worktrees + scratch worktrees BEFORE journal
-        ("stale-agent-worktree", lambda: _plan_stale_agent_worktrees(home, now)),
+        ("stale-agent-worktree", lambda: _plan_stale_agent_worktrees(home, now, wt_cache)),
         ("scratch-worktree", lambda: _plan_scratch_worktrees(home, now)),
         ("journal", lambda: _plan_journal(home, now)),
         ("docker-image", lambda: _plan_docker(home, now)),
@@ -4044,7 +4046,8 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         if planners_fn is not None:
             planners = planners_fn(home, now)
         else:
-            planners = _default_planners(home, now, scratch_rows=scratch_rows)
+            planners = _default_planners(home, now, scratch_rows=scratch_rows,
+                                         wt_cache=not dry_run)
 
         with timer.step("drain", logs):
             logs += _dgq.run_drain_passes(status, home, now, dry_run, planners, planners_fn,

@@ -138,9 +138,32 @@ def _branch_name(wt_path: str, git_run_fn=None) -> str | None:
         return None
 
 
+def _skip(reason):
+    return {"bytes": 0, "kind": "skip", "reason": reason}
+
+
+def _classify(path, git_run_fn=None, dir_stats_fn=None):
+    """The expensive checks — branch, (b) clean, (c) HEAD on origin, and the
+    size walk of a reclaimable tree — as the row's verdict fields. The part
+    the #1067 1g verdict cache may skip; (a) and (d) are never in here."""
+    branch = _branch_name(path, git_run_fn)
+    if branch and branch in _PROTECTED_BRANCHES:        # never main/dev
+        return _skip("protected branch %s — kept" % branch)
+    clean = _is_clean(path, git_run_fn)
+    if clean is None:
+        return _skip("git status unreadable — kept")
+    if not clean:
+        return _skip("dirty worktree — kept")
+    via = _head_contained_in_origin(path, git_run_fn)
+    if via is None:
+        return _skip("HEAD not contained in any origin ref — kept")
+    return {"bytes": _safe_dir_size(path, dir_stats_fn), "kind": "worktree-remove",
+            "reason": None, "branch": branch, "contained_in": via}
+
+
 def discover_stale_agent_worktrees(home=None, now=None,
                                     git_run_fn=None, dir_stats_fn=None,
-                                    live_check_fn=None):
+                                    live_check_fn=None, cache_path=None):
     """Discover ``<repo>/.claude/worktrees/agent-*`` worktrees ready for
     reclaim.  A worktree is reclaimable (``reason is None``) when:
 
@@ -151,13 +174,19 @@ def discover_stale_agent_worktrees(home=None, now=None,
     (d) no live process with cwd inside the worktree.
 
     NO idle age gate — finished agent worktrees are immediately reclaimable
-    once their work is on origin.
+    once their work is on origin. #1067 1g: with ``cache_path`` (the guard
+    dir's verdict file; None on a dry-run poll) an unchanged worktree reuses
+    its last non-reclaimable verdict without any git call
+    (``disk_guard_wt_cache``); (a) and (d) always run fresh.
 
     Returns ``[{cls:"stale-agent-worktree", path, bytes, kind, reason, ...}]``.
     """
+    from watchdog import disk_guard_wt_cache as wtc
     now = time.time() if now is None else now
     home = home or os.path.expanduser("~")
     out: list[dict] = []
+    cache = wtc.VerdictCache(cache_path, now) if cache_path else None
+    seen: list[str] = []
 
     import airuleset
     for root in airuleset._checkout_roots(home):
@@ -172,58 +201,22 @@ def discover_stale_agent_worktrees(home=None, now=None,
             if not d.is_dir() or not _is_agent_worktree_dir(d.name):
                 continue
             path = str(d)
+            seen.append(path)
             row: dict = {"cls": "stale-agent-worktree", "path": path,
                          "repo": str(root)}
-
-            # (a) locked?
-            if _is_locked(path):
-                row.update(bytes=0, kind="skip",
-                           reason="locked worktree — kept")
-                out.append(row)
-                continue
-
-            # (d) live use? (before git ops — cheapest check)
-            if _in_live_use(path, live_check_fn):
-                row.update(bytes=0, kind="skip",
-                           reason="live process cwd inside — kept")
-                out.append(row)
-                continue
-
-            # branch check — never remove main/dev
-            branch = _branch_name(path, git_run_fn)
-            if branch and branch in _PROTECTED_BRANCHES:
-                row.update(bytes=0, kind="skip",
-                           reason="protected branch %s — kept" % branch)
-                out.append(row)
-                continue
-
-            # (b) clean?
-            clean = _is_clean(path, git_run_fn)
-            if clean is None:
-                row.update(bytes=0, kind="skip",
-                           reason="git status unreadable — kept")
-                out.append(row)
-                continue
-            if not clean:
-                row.update(bytes=0, kind="skip",
-                           reason="dirty worktree — kept")
-                out.append(row)
-                continue
-
-            # (c) HEAD on origin?
-            via = _head_contained_in_origin(path, git_run_fn)
-            if via is None:
-                row.update(bytes=0, kind="skip",
-                           reason="HEAD not contained in any origin ref — kept")
-                out.append(row)
-                continue
-
-            # Reclaimable
-            size = _safe_dir_size(path, dir_stats_fn)
-            row.update(bytes=size, kind="worktree-remove",
-                       reason=None, branch=branch, contained_in=via)
+            if _is_locked(path):                          # (a) — never cached
+                row.update(_skip("locked worktree — kept"))
+            elif _in_live_use(path, live_check_fn):       # (d) — never cached
+                row.update(_skip("live process cwd inside — kept"))
+            elif cache is None:
+                row.update(_classify(path, git_run_fn, dir_stats_fn))
+            else:
+                row.update(cache.classify(path, _worktree_gitdir(path), lambda p=path: (
+                    _classify(p, git_run_fn, dir_stats_fn))))
             out.append(row)
-
+    if cache is not None:
+        cache.save(seen)
+    return out
     return out
 
 
