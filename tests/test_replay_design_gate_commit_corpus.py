@@ -184,7 +184,13 @@ class TestNoOutOfRangeOrMissedReferences(TestCase):
             # #122 itself did. The audit stays deliberately broader than
             # the gate on the PREFIX side (`C#7` is still flagged) so a
             # gate regression there is still caught.
-            if re.search(r'#\d{1,5}\b', line):
+            # #1136 -- a fully-qualified cross-repo ref (`owner/repo#N`) is
+            # outside ISSUE_REF_RE by construction (a word char precedes the
+            # `#`), the same sanctioned non-triggering family as "issue N";
+            # strip it before the audit so it stays in lockstep with the gate.
+            # A bare `C#7` prefix (no `owner/repo`) is still flagged.
+            if re.search(r'#\d{1,5}\b',
+                         re.sub(r'\b[\w.-]+/[\w.-]+#\d+\b', ' ', line)):
                 missed.append(line)
         self.assertEqual(missed, [], "issue-shaped mention with zero extracted refs")
 
@@ -257,3 +263,14 @@ class TestCorpusExcludesMergeCommits(TestCase):
 
 if __name__ == "__main__":
     main()
+
+
+class TestCrossRepoRefLockstep(TestCase):
+    """#1136: the missed-mention audit strips a fully-qualified `owner/repo#N`
+    only because the gate itself never extracts it; lock both halves."""
+
+    def test_gate_never_extracts_a_fully_qualified_cross_repo_ref(self):
+        self.assertEqual(dg.issue_refs("fix: cite zbynekdrlik/airuleset#1136 here"), [])
+
+    def test_gate_still_extracts_a_bare_ref_next_to_a_cross_repo_ref(self):
+        self.assertEqual(dg.issue_refs("fix: zbynekdrlik/odoo-erp#8243 and #1136"), [1136])
