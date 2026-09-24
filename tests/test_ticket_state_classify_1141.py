@@ -23,6 +23,7 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset  # noqa: E402
+import cli_quals  # noqa: E402
 import cli_ticket_state  # noqa: E402
 
 
@@ -50,8 +51,8 @@ def _legacy_partition_workable(rows, own_stream=None):
                      if isinstance(lb, dict)}
             if ("prio:bounce" in names
                     or any(ml in names for ml in
-                           (airuleset.MAINTAINER_ACTION_LABELS
-                            + airuleset.SUBDEV_ACTION_LABELS))):
+                           (cli_quals.MAINTAINER_ACTION_LABELS
+                            + cli_quals.SUBDEV_ACTION_LABELS))):
                 workable[number] = row
             else:
                 ops_wait[number] = row
