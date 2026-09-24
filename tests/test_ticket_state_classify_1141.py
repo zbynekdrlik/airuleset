@@ -16,9 +16,13 @@ partition reads, both box kinds and own vs foreign stream.
   "An owner question beats any hand-off label" and "On the full-authority box
   a FOREIGN stream's question is hidden (it counts in that stream's U), which
   reverses #654 for questions."
-The frozen copy stays verbatim. `_slice2_move` lists the moved cases on top
-of it, written from the ruling (not from the new code), so every OTHER label
-combination is still held at slice-1 parity.
+Rule 1 read by the question's OWN labels has one more consequence the
+oracle encodes: on a reduced-authority box a FOREIGN row with
+needs-owner-action + needs-acceptance now takes #654's action-only I (slice 1
+read its reason as `acceptance`, which #654 exempted). The frozen copy stays
+verbatim. `_slice2_move` lists the moved cases on top of it, written from the
+ruling (not from the new code), so every OTHER label combination is still
+held at slice-1 parity.
 """
 
 import itertools

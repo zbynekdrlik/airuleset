@@ -106,8 +106,8 @@ class OwnerActionRoutesToU(unittest.TestCase):
         # comment: a row with needs-owner-action "lands in U"): the ROUTING
         # finds the owner question by its own labels, so needs-acceptance +
         # needs-owner-action + ops-wait is U, no longer W via the acceptance
-        # display precedence. The `--waiting` reason TAG below still reads
-        # `acceptance` first (display only, unchanged).
+        # display precedence. `_user_waiting_reason` itself (below) still
+        # reads acceptance first; the `--waiting` tag reads owner_question.
         rows = {5: _row(5, "needs-acceptance", "needs-owner-action", "ops-wait")}
         workable, user_waiting, ops_wait = airuleset._partition_workable(rows)
         self.assertEqual(set(user_waiting), {5},

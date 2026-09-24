@@ -163,6 +163,77 @@ class ReviewRound1(unittest.TestCase):
         self.assertEqual(got, {}, "a sent acceptance is W, never U")
 
 
+class ReviewRound2(unittest.TestCase):
+    """Review round 2: the `--waiting` display reads the same owner question
+    as the partition; the #948 supplement classifies with this box's stream;
+    liveness needs a live host entry."""
+
+    ROW = {"number": 5, "labels": [{"name": "needs-acceptance"},
+                                   {"name": "needs-owner-action"}]}
+
+    def test_delivered_acceptance_plus_action_is_not_queued(self):
+        import cli_quals_cmd
+        import statusbar
+        with mock.patch.object(statusbar, "question_map_ticket_refs",
+                               return_value={5}):
+            self.assertEqual(
+                cli_quals_cmd._queued_acceptance_numbers({5: self.ROW}, "/r"),
+                set())
+
+    def test_waiting_tag_and_no_action_flag_read_the_owner_question(self):
+        import statusbar
+        with mock.patch.object(statusbar, "question_map_ticket_refs",
+                               return_value=set()):
+            flagged = cli_quals._no_question_flagged(
+                {5: self.ROW}, cwd="/r",
+                comment_state_fn=lambda n, cwd: False)
+        self.assertEqual(flagged, {5}, "an owner action with no notice is "
+                         "flagged no-action!, never exempt as acceptance")
+
+    def test_core_quals_waiting_tags_the_owner_action(self):
+        rows = json.dumps([{"number": 5, "title": "a", "createdAt": "",
+                            "labels": self.ROW["labels"]}])
+        r = CoreQualsCli._run(CoreQualsCli("run"), "--waiting", rows=rows)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        row5 = [ln for ln in r.stdout.splitlines() if ln.startswith("5\t")]
+        self.assertEqual(len(row5), 1, r.stdout)
+        self.assertEqual(row5[0].split("\t")[3], "action", r.stdout)
+
+    def test_supplement_uses_this_box_stream(self):
+        import statusbar
+        rows = {
+            7: {"state": "OPEN", "title": "own", "createdAt": "",
+                "labels": [{"name": "stream:montalu"},
+                           {"name": "needs-answer"}]},
+            8: {"state": "OPEN", "title": "foreign", "createdAt": "",
+                "labels": [{"name": "stream:david1"},
+                           {"name": "needs-answer"}]},
+        }
+
+        def runner(argv, cd):
+            return json.dumps(rows[int(argv[3])])
+
+        with mock.patch.object(statusbar, "question_map_ticket_refs",
+                               return_value={7, 8}), \
+                mock.patch.object(airuleset, "_current_user",
+                                  return_value="montalu1"):
+            got = cli_quals._question_map_u_supplement({}, "/r", runner)
+        self.assertEqual(set(got), {7})
+
+    def test_a_stream_with_no_live_host_entry_is_not_live(self):
+        import cli_fleet
+        row = _row("stream:montalu", "needs-answer", "gk-processing")
+        hosts = [h for h in cli_fleet.REMOTE_HOSTS
+                 if h.get("user") != "montalu1"]
+        with mock.patch.object(cli_fleet, "REMOTE_HOSTS", hosts):
+            self.assertEqual(_bucket(row, GK), "U")
+        two = list(cli_fleet.REMOTE_HOSTS) + [
+            {"user": "montalu1", "host": "x", "paused": "test: old host"}]
+        with mock.patch.object(cli_fleet, "REMOTE_HOSTS", two):
+            self.assertEqual(_bucket(row, GK), cli_ticket_state.HIDDEN,
+                             "one live entry is enough")
+
+
 class ForeignQuestionHiddenOnGk(unittest.TestCase):
     """Rule 2: a foreign stream's owner question is not the gk box's I or U."""
 
@@ -281,7 +352,7 @@ class CoreQualsCli(unittest.TestCase):
          "labels": [{"name": "stream:montalu"}, {"name": "gk-processing"}]},
     ])
 
-    def _run(self, *argv):
+    def _run(self, *argv, rows=None):
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -291,7 +362,7 @@ class CoreQualsCli(unittest.TestCase):
                 'case "$*" in\n'
                 '  *"repo view"*|repo*) echo "zbynekdrlik/demo";;\n'
                 '  *"--search label:autopilot-skip"*) echo 0;;\n'
-                "  *) echo '%s';;\n" % self._ROWS +
+                "  *) echo '%s';;\n" % (rows or self._ROWS) +
                 'esac\n')
             gh.chmod(0o755)
             return subprocess.run(
