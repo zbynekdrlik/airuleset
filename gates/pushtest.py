@@ -40,8 +40,11 @@ _NOTEST_REASON_RE = re.compile(r'\[no-test:\s*[^\]]+\]')
 
 def _git(args, cwd=None):
     try:
+        # #1139: errors="replace" — a non-UTF-8 byte anywhere in a diff must
+        # never crash the gate (it only scans ASCII patterns, so a replaced
+        # byte can never hide a violation).
         return subprocess.run(["git"] + args, cwd=cwd, capture_output=True,
-                              text=True, timeout=10)
+                              text=True, errors="replace", timeout=10)
     except (OSError, subprocess.SubprocessError):
         return None
 
