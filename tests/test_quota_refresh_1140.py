@@ -70,9 +70,18 @@ class TestRefreshRenderers(unittest.TestCase):
                       crg.render_quota_refresh_script())
 
     def test_limits_math_exists_exactly_once_in_source(self):
-        """ONE renderer — no second copy of the usage-aware ceiling math."""
-        src = open(crg.__file__, encoding="utf-8").read()
-        self.assertEqual(src.count("used_kib * 120 + 99"), 1)
+        """ONE renderer — no second copy of the usage-aware ceiling math
+        anywhere in the repo's (non-test) Python source."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        hits = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames[:] = [d for d in dirnames
+                           if d not in ("tests", "worktrees", ".git", "__pycache__")]
+            for fn in filenames:
+                if fn.endswith(".py"):
+                    with open(os.path.join(dirpath, fn), encoding="utf-8") as f:
+                        hits += [fn] * f.read().count("used_kib * 120 + 99")
+        self.assertEqual(hits, ["cli_resource_guards_quota.py"])
 
     def test_refresh_script_has_exit_trap_reenabling_quota(self):
         s = crg.render_quota_refresh_script()
