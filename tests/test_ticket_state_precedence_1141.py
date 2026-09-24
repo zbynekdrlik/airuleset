@@ -109,6 +109,60 @@ class OwnerQuestionBeatsHandoff(unittest.TestCase):
                 "I", extra)
 
 
+class ReviewRound1(unittest.TestCase):
+    """Review round 1 (two adversarial reviews): the owner question is found
+    by its OWN labels, never by the acceptance-first display order."""
+
+    def test_owner_action_beats_a_sent_acceptance(self):
+        for extra in ((),) + tuple((h,) for h in HANDOFFS):
+            own = _row("stream:montalu", "needs-owner-action",
+                       "needs-acceptance", "ops-wait", *extra)
+            bucket, reason = cli_ticket_state.classify(own, None, MONTALU)
+            self.assertEqual(bucket, "U", extra)
+            self.assertIn("needs-owner-action", reason)
+            self.assertEqual(_bucket(own, GK), cli_ticket_state.HIDDEN,
+                             extra)
+            core = _row("needs-owner-action", "needs-acceptance", "ops-wait",
+                        *extra)
+            self.assertEqual(_bucket(core, GK), "U", extra)
+
+    def test_bounce_reason_names_the_bounce(self):
+        row = _row("stream:montalu", "needs-acceptance", "prio:bounce",
+                   "gk-processing")
+        bucket, reason = cli_ticket_state.classify(row, None, MONTALU)
+        self.assertEqual(bucket, "I")
+        self.assertIn("prio:bounce", reason)
+        self.assertNotIn("overridden by gk-processing", reason)
+
+    def test_a_foreign_question_of_a_stream_without_a_live_box_stays_U(self):
+        import cli_fleet
+        row = _row("stream:montalu", "needs-answer", "gk-processing")
+        paused = [dict(h, paused="test: host paused")
+                  if h.get("user") == "montalu1" else h
+                  for h in cli_fleet.REMOTE_HOSTS]
+        with mock.patch.object(cli_fleet, "REMOTE_HOSTS", paused):
+            bucket, reason = cli_ticket_state.classify(row, None, GK)
+        self.assertEqual(bucket, "U")
+        self.assertIn("montalu1", reason)
+        observers = cli_fleet.WEBTERM_OBSERVER_USERS | {"montalu1"}
+        with mock.patch.object(cli_fleet, "WEBTERM_OBSERVER_USERS",
+                               observers):
+            self.assertEqual(_bucket(row, GK), "U")
+        # a live stream's question is still hidden on gk
+        self.assertEqual(_bucket(row, GK), cli_ticket_state.HIDDEN)
+
+    def test_supplement_skips_a_sent_acceptance(self):
+        import statusbar
+        obj = {"state": "OPEN", "title": "t", "createdAt": "",
+               "labels": [{"name": "needs-acceptance"},
+                          {"name": "ops-wait"}]}
+        with mock.patch.object(statusbar, "question_map_ticket_refs",
+                               return_value={7}):
+            got = cli_quals._question_map_u_supplement(
+                {}, "/r", lambda argv, cd: json.dumps(obj))
+        self.assertEqual(got, {}, "a sent acceptance is W, never U")
+
+
 class ForeignQuestionHiddenOnGk(unittest.TestCase):
     """Rule 2: a foreign stream's owner question is not the gk box's I or U."""
 
@@ -250,6 +304,13 @@ class CoreQualsCli(unittest.TestCase):
     def test_count_holds_the_foreign_handoff_but_not_the_question(self):
         r = self._run("--count")
         self.assertEqual(r.stdout.strip(), "2", r.stderr)
+
+    def test_waiting_does_not_list_the_hidden_question(self):
+        r = self._run("--waiting")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        nums = {ln.split("\t", 1)[0] for ln in r.stdout.splitlines()
+                if ln.strip() and not ln.startswith("#")}
+        self.assertNotIn("2", nums, r.stdout)
 
     def test_explain_lists_the_hidden_row(self):
         r = self._run("--explain")
