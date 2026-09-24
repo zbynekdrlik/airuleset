@@ -52,10 +52,11 @@ def parse_ops_wait_members(stdout):
 
 
 def emit_snapshot_json(rows, ops_wait, root, quals, own_stream, emit_ops_wait,
-                       dispatchable_fields):
+                       dispatchable_fields, owed=()):
     """`--snapshot-json` (#1067 slice 1d): ONE JSON object carrying every quals
     fact the watchdog reads, all from the caller's ONE `_partition_workable`
-    pass (#367): `open_count` (the `--count` number; `i_members` its numbers —
+    pass (#367): `open_count` (the `--count` number: I plus the owed C rows
+    `owed`, #1141 ruling 2; `i_members` the I numbers —
     no watchdog reader today, #714 removed the #578 I-member fetch),
     `dispatchable_count`/`dispatchable_reason` (the caller's
     `dispatchable_fields`, the SAME derivation `--count-dispatchable` prints)
@@ -89,7 +90,7 @@ def emit_snapshot_json(rows, ops_wait, root, quals, own_stream, emit_ops_wait,
         print("quals --snapshot-json: the dispatchable part failed (%s)"
               % type(e).__name__, file=sys.stderr)
         count, reason = None, "snapshot part failed"
-    print(json.dumps({"open_count": len(rows),
+    print(json.dumps({"open_count": len(rows) + len(owed or ()),
                       "i_members": sorted(int(n) for n in rows),
                       "dispatchable_count": count,
                       "dispatchable_reason": reason,

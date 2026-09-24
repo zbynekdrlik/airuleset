@@ -23,6 +23,15 @@ read its reason as `acceptance`, which #654 exempted). The frozen copy stays
 verbatim. `_slice2_move` lists the moved cases on top of it, written from the
 ruling (not from the new code), so every OTHER label combination is still
 held at slice-1 parity.
+
+#1141 slice 3 moved the M step, by the ruling on the ticket ("Remove the M
+veto for U-labelled rows. An owner question is decided first, in the classify
+precedence, so the M split no longer needs its own veto"): a merged row the
+partition put in I or W now leaves for M even when it carries a U-class label
+(a foreign question on a stream box, a sent acceptance). `prio:bounce` still
+keeps it in I. The frozen split stays verbatim; `_slice3_split` is the frozen
+split with ONLY that veto dropped, and the test checks that the rows it moves
+are exactly the U-labelled ones.
 """
 
 import itertools
@@ -88,6 +97,21 @@ def _legacy_split_merged_unreleased(workable, ops_wait, merged_numbers):
             if (int(number) in merged_set
                     and not airuleset._row_is_user_waiting(labels)
                     and "prio:bounce" not in names):
+                merged[number] = row
+            else:
+                keep[number] = row
+    return new_workable, new_ops_wait, merged
+
+
+def _slice3_split(workable, ops_wait, merged_numbers):
+    """The frozen split with ONLY its U-label veto dropped (slice-3 ruling):
+    a merged I/W row leaves for M unless it carries prio:bounce."""
+    merged, new_workable, new_ops_wait = {}, {}, {}
+    for bucket, keep in ((workable, new_workable), (ops_wait, new_ops_wait)):
+        for number, row in bucket.items():
+            names = {(lb or {}).get("name") for lb in (row.get("labels") or [])
+                     if isinstance(lb, dict)}
+            if int(number) in merged_numbers and "prio:bounce" not in names:
                 merged[number] = row
             else:
                 keep[number] = row
@@ -252,15 +276,23 @@ class ClassifierParity(unittest.TestCase):
                          _expected_partition(self.rows))
 
     def test_merged_step_matches_the_frozen_split(self):
+        # slice 3: the ONE route (bucketize) with the U veto dropped
         rows = {n: r for n, r in self.rows.items() if isinstance(r, dict)}
         merged_all = set(rows)
         for own in _BOXES:
             w, u, o = _expected_partition(rows, own_stream=own)
-            lw, lo, lm = _legacy_split_merged_unreleased(w, o, merged_all)
-            self.assertEqual(
-                airuleset._split_merged_unreleased(w, o, merged_all),
-                (lw, lo, lm))
+            lw, lo, lm = _slice3_split(w, o, merged_all)
             box = cli_ticket_state.Box(own_stream=own)
+            got = cli_ticket_state.bucketize(rows, cli_ticket_state.TicketFacts(
+                merged=frozenset(merged_all)), box)
+            self.assertEqual((got["I"], got["W"], got["M"], got["U"]),
+                             (lw, lo, lm, u))
+            # the moved rows are exactly U-labelled ones the old veto held
+            _fw, _fo, fm = _legacy_split_merged_unreleased(w, o, merged_all)
+            moved = set(lm) - set(fm)
+            self.assertTrue(moved, own)
+            self.assertTrue(all(airuleset._row_is_user_waiting(
+                rows[n]["labels"]) for n in moved), own)
             facts = cli_ticket_state.Facts(merged=True)
             for number, row in rows.items():
                 want = ("M" if number in lm else "I" if number in lw
@@ -445,12 +477,12 @@ class ExplainLinesReviewFixes(unittest.TestCase):
     titles, and the role filter applied to gk/M on the slice path."""
 
     def test_merged_row_is_M_with_its_reason(self):
+        # slice 3: explain_lines takes the TicketFacts the route used
         rows = {4: {"number": 4, "title": "m", "labels": _labels("bug")}}
-        w, _u, o = airuleset._partition_workable(rows)
-        w, o, m = airuleset._split_merged_unreleased(w, o, {4})
+        facts = cli_ticket_state.TicketFacts(merged=frozenset({4}))
         out = cli_ticket_state.explain_lines(
-            {"I": w, "M": m, "U": {}, "W": o, "gk": {}},
-            cli_ticket_state.Box(), merged={4})
+            cli_ticket_state.bucketize(rows, facts, cli_ticket_state.Box()),
+            cli_ticket_state.Box(), facts)
         self.assertTrue(out[0].startswith("4\tM\tfix merged"), out)
         self.assertEqual(out[-1], "# explain: I=0 M=1 U=0 W=0 gk=0")
 
@@ -473,9 +505,13 @@ class ExplainLinesReviewFixes(unittest.TestCase):
         self.assertEqual(out[-1], "# explain: I=3 M=0 U=1 W=0 gk=0")
 
     def test_slice_explain_role_filters_gk_and_M_like_the_footer(self):
+        # slice 3: the role filter is a PRE-filter of the ONE route
+        # (`cli_ticket_route.quals`), so on a role window gk and M are
+        # filtered exactly like I/U/W, and `--explain` prints those buckets
         from unittest import mock
         import cli_quals_cmd
         import cli_ticket_explain
+        import cli_ticket_route
         kept = {1: {"number": 1, "labels": _labels("ready-for-review")}}
         other = {2: {"number": 2, "labels": _labels("infra",
                                                    "ready-for-review")}}
@@ -487,22 +523,24 @@ class ExplainLinesReviewFixes(unittest.TestCase):
             return {n: r for n, r in rows.items()
                     if "infra" not in cli_ticket_state._names(r["labels"])}
 
+        rows = {**kept, **other, **merged}
         with mock.patch.object(cli_quals_cmd, "_apply_role_filter",
                                fake_filter), \
+                mock.patch.object(cli_quals_cmd, "_merged_unreleased",
+                                  return_value=frozenset({5})), \
                 mock.patch.object(cli_quals, "_question_map_u_supplement",
                                   return_value={}), \
                 mock.patch.object(cli_ticket_explain, "_footer_extras",
                                   return_value=[]), \
                 mock.patch("builtins.print") as fake_print:
-            cli_ticket_explain.explain_slice(
-                None, "/nonexistent", _OWN, "review", "o/r",
-                rows={**kept, **other}, handed={1: True, 2: True},
-                workable={**kept, **other}, unhandled={}, waiting={},
-                ops_wait={}, merged_rows=merged, merged_set={5})
+            buckets, facts = cli_ticket_route.quals(
+                rows, "/nonexistent", cli_ticket_state.Box(own_stream=_OWN),
+                role="review", slug="o/r", handed={1: True, 2: True})
+            cli_ticket_explain.explain_slice(None, "/nonexistent", rows,
+                                             buckets, facts)
         printed = [c.args[0] for c in fake_print.call_args_list]
         self.assertIn("# explain: I=0 M=0 U=0 W=0 gk=1", printed)
-        self.assertIn({1, 2}, seen)
-        self.assertIn({5}, seen)
+        self.assertEqual(seen, [{1, 2, 5}])
 
 
 class ExplainReviewRound2(unittest.TestCase):

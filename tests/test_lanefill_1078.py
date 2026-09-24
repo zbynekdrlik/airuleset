@@ -867,12 +867,14 @@ class TestDispatchableForCacheReviewFixes(unittest.TestCase):
         # F1 source-lock: the slice branch must exclude handed-off (gk) tickets
         # before the cache write, matching `cmd_slice_quals`'s
         # `_emit_list_dispatchable(unhandled, root)`. A revert to
-        # `_dispatchable_for_cache(workable_rows, root)` fails this.
+        # `_dispatchable_for_cache(workable_rows, root)` fails this. #1141 slice
+        # 3: the unhandled set is the ONE route's I bucket (`_b["I"]`, handed
+        # rows are its gk bucket), no longer a local `_unhandled` comprehension.
         import inspect
         import airuleset
         src = inspect.getsource(airuleset.cmd_tickets_status)
-        self.assertIn("if not handed.get(n)", src)
-        self.assertIn("_dispatchable_for_cache(_unhandled, root)", src)
+        self.assertIn('_dispatchable_for_cache(_b["I"], root)', src)
+        self.assertNotIn("_dispatchable_for_cache(workable_rows", src)
 
 
 if __name__ == "__main__":

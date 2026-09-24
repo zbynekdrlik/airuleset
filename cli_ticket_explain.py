@@ -15,6 +15,8 @@ Known differences from the footer, each surfaced rather than hidden:
   records 0.
 - The footer's M set is keyed on the `gh repo view` slug, the quals one on the
   local remote's slug (#1083; they agree unless a fork clone differs).
+- The footer reads the P/C facts fresh; the quals commands read the facts
+  cache the footer refresher wrote (at most 10 min old, else unknown: #1141).
 `tickets-status --explain` prints the footer's cached numbers next to the
 totals, so any such divergence is visible.
 """
@@ -25,9 +27,10 @@ import sys
 import time
 
 import cli_quals
+import cli_ticket_route
 import cli_ticket_state as ts
 
-_ROLES = ("review", "infra", "quality")
+_ROLES = cli_ticket_route.ROLES
 
 # The session cwd `tickets-status --explain` explains. It is set only for the
 # duration of `explain_footer`, so the ping extras key on the RAW cwd string the
@@ -66,51 +69,37 @@ def _footer_extras(cwd=None):
     return extras
 
 
-def _emit(buckets, box, merged_set, handed=None, supplement=()):
-    for line in ts.explain_lines(buckets, box, merged_set, handed, supplement,
+def _emit(buckets, box, facts=None, supplement=()):
+    for line in ts.explain_lines(buckets, box, facts or None, supplement,
                                  extras=_footer_extras(_footer_cwd)):
         print(line)
 
 
-def explain_core(extra, *, workable, merged_rows, waiting, ops_wait,
-                 merged_set, rows=None):
-    """`core-quals --explain`: the full-authority box. It has no gk bucket,
-    because it actions its own hand-offs. Receives the SAME buckets `--count`
-    uses, after the role filter and the M split.
-
-    `rows` = the whole obligation set before the partition. The rows the
-    classifier HIDES on this box (a foreign stream's owner question, #1141
-    slice 2) are in no bucket, so they are picked from `rows` and listed with
-    their reason. They are not role-filtered: they count in no window here."""
+def explain_core(extra, buckets, facts):
+    """`core-quals --explain`: the full-authority box (no gk bucket: it
+    actions its own hand-offs). `buckets`/`facts` are the ONE route's result
+    (`cli_ticket_route.quals`), the SAME `--count` uses — including the HIDDEN
+    rows (a foreign stream's owner question, #1141 slice 2), listed with their
+    reason and counted in no bucket."""
     _refuse_extra(extra)
-    box = ts.Box()
-    hidden = {n: r for n, r in (rows or {}).items()
-              if ts.classify(r, None, box)[0] == ts.HIDDEN}
-    _emit({"I": workable, "M": merged_rows, "U": waiting, "W": ops_wait,
-           "gk": {}, ts.HIDDEN: hidden}, box, merged_set)
+    _emit(buckets, ts.Box(), facts)
 
 
-def explain_slice(extra, root, user, role, slug, *, rows, handed, workable,
-                  unhandled, waiting, ops_wait, merged_rows, merged_set):
-    """`slice-quals --explain`: the reduced-authority box.
-    - I = the unhandled rows `--count` counts.
-    - gk = the handed-off workable rows.
-    - U also carries the #948 question-map supplement the footer adds.
-    The footer role-filters BEFORE it splits M and counts gk, so on a role
-    window gk and M are role-filtered here too. `slice-quals` itself filters
-    only I/U/W; that difference exists before #1141."""
+def explain_slice(extra, root, rows, buckets, facts, box=None):
+    """`slice-quals --explain`: the reduced-authority box `box` (default: this
+    account's stream, as `slice-quals` resolves it). `buckets`/`facts` are the
+    ONE route's result (I = the unhandled rows `--count` counts, gk = the
+    handed-off ones; every bucket role-filtered like the footer, since the
+    role filter is a pre-filter, #1141 slice 3). U also carries the #948
+    question-map supplement the footer adds."""
     _refuse_extra(extra)
+    import airuleset
     import cli_quals_cmd
+    box = box or ts.Box(own_stream=airuleset._current_user())
     extra_u = cli_quals._question_map_u_supplement(
         rows, root, cli_quals_cmd._slice_quals_runner(root))
-    gk = {n: r for n, r in workable.items() if handed.get(n)}
-    if role in _ROLES:
-        gk = cli_quals_cmd._apply_role_filter(gk, root, role, slug=slug)
-        merged_rows = cli_quals_cmd._apply_role_filter(
-            merged_rows, root, role, slug=slug)
-    _emit({"I": unhandled, "M": merged_rows, "U": {**waiting, **extra_u},
-           "W": ops_wait, "gk": gk},
-          ts.Box(own_stream=user), merged_set, handed, supplement=extra_u)
+    _emit({**buckets, "U": {**buckets["U"], **extra_u}}, box, facts,
+          supplement=extra_u)
 
 
 def _footer_cache_line(cwd):
@@ -126,7 +115,8 @@ def _footer_cache_line(cwd):
     age = ("%ds" % (int(time.time()) - int(stamp))
            if isinstance(stamp, (int, float)) and not isinstance(stamp, bool)
            else "?")
-    fields = ("open", "merged_unreleased", "user_waiting", "ops_wait", "gk")
+    fields = ("open", "pipeline", "merged_unreleased", "done", "user_waiting",
+              "ops_wait", "gk")
     return "# footer cache (age %s): %s" % (age, " ".join(
         "%s=%s" % (f, "-" if entry.get(f) is None else entry.get(f))
         for f in fields))

@@ -409,7 +409,8 @@ was cut back; `tests/test_goal_backlog_proof.py` now locks the cap):
   prose guarantee, for a HAND-OFF awaiting review — a bounce still being fixed is the sub-dev's
   ball alone, and the gatekeeper's loop may legitimately stop while it is worked, resuming once
   `ready-for-review` reappears.
-- **`core-quals --count` IS the number the footer renders as `I N` on a full-authority box** —
+- **`core-quals --count` IS the footer's `I N` plus `C N` on a full-authority box** (#1141: a
+  `C` row — the fix is live — is owed: close it with evidence; `--list` tags it `released`) —
   UPDATED by #367 (2026-08-11, third footer simplification round): the footer's own refresh now
   calls the SAME `_obligation_quals()`/`_union_open_issues()` derivation this stop-proof uses,
   never a parallel narrower one, so the two can no longer silently disagree about what "done"

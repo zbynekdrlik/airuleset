@@ -3804,10 +3804,9 @@ def _role_filter_footer(workable, waiting, ops_wait, root, cwd):
     (`cli_concurrency.resolve_role`); when it is None (every box but the gk
     windows) all three are returned unchanged — byte-identical to today.
 
-    #1083 note: the `M` (merged-unreleased) bucket is role-scoped by the CALLER
-    splitting it out of the ALREADY-role-filtered `workable`/`ops_wait` AFTER
-    this returns (`_split_merged_unreleased`), so M narrows by role for free
-    without widening this function's contract.
+    #1141 slice 3: the footer calls this as a per-row PRE-filter on the whole
+    row set (`_role_filter_footer(rows, {}, {}, root, cwd)[0]`, then
+    `cli_ticket_route.footer` buckets), so M, P, C and gk narrow by role too.
 
     #1065 REVERSES #1025: ALL THREE — `workable` (I), `ops_wait` (W) AND
     `waiting` (owner-court U) — are role-filtered, so a two-window box shows each
@@ -4202,33 +4201,19 @@ def cmd_tickets_status(args):
                 entry["ops_wait"] = None
                 entry["dispatchable"] = None           # #1078 (gate falls back)
             else:
-                # #510: partition ops-wait (external-event/evidence) tickets OUT
-                # of the workable slice too, alongside #468's user-waiting split —
-                # both leave `I N`/`gk`, surfacing as `U N`/`W N`. ONE partition of
-                # the SAME fetch `slice-quals --count` uses (#367/#468 guard). `gk`
-                # is the handed-off subset of the WORKABLE remainder only, so a
-                # ticket that is BOTH handed-off AND parked (user-waiting/ops-wait)
-                # is counted in its parked bucket (`U`/`W`), never `gk` — the same
-                # surface treatment #468 already gives a handed + user-waiting row.
-                # #622: a bare needs-acceptance → U unconditionally (queued for
-                # owner approval, never dispatchable-now I). Pure label partition;
-                # the queued/delivered display distinction lives on the on-demand
-                # `--waiting` path, never this hot footer refresh. #654:
-                # own_stream keeps THIS box's OWN stream rows in its own U.
-                workable_rows, waiting, ops_wait = _partition_workable(rows, own_stream=_current_user())
-                # #998: slice by the pane's resolved role (no-op off a role window).
-                workable_rows, waiting, ops_wait = _role_filter_footer(
-                    workable_rows, waiting, ops_wait, root, cwd)
-                # #1083: pull merged-to-develop-not-main tickets OUT of the
-                # (already role-filtered) I/W buckets into M — so a stream sees
-                # its merged tickets leave I without pretending they are done, and
-                # M is role-scoped by construction. BEFORE the gk/handed count so
-                # M rows never count as gk either.
-                workable_rows, ops_wait, merged_rows = _split_merged_unreleased(
-                    workable_rows, ops_wait, merged_set)
-                gk = sum(1 for n_num in workable_rows if handed.get(n_num))
-                entry["open"] = len(workable_rows) - gk
-                entry["gk"] = gk
+                # #1141 slice 3: ONE route (`cli_ticket_route.footer`, the SAME
+                # `bucketize` slice-quals counts with): role pre-filter (#998),
+                # the label partition (#468/#510/#622/#654), the P/M/C facts
+                # (#1083) and the handed-off gk (#391). A handed row parked in
+                # U/W stays there, never gk.
+                _b, _facts = __import__("cli_ticket_route").footer(
+                    rows, root, slug, merged_set, _current_user(),
+                    handed=handed, gh_fn=lambda a: _out(["gh", *a], root),
+                    role_filter=lambda r: _role_filter_footer(
+                        r, {}, {}, root, cwd)[0])
+                waiting, ops_wait = _b["U"], _b["W"]
+                workable_rows = {**_b["I"], **_b["P"], **_b["gk"]}   # bounces
+                entry["open"], entry["gk"] = len(_b["I"]), len(_b["gk"])
                 # #1103: the handed-off ticket NUMBERS (the whole `handed`
                 # subset, not just the workable-gk count) — the lane-liveness
                 # classifier reads this from the FRESH cache to mark a lane whose
@@ -4237,10 +4222,8 @@ def cmd_tickets_status(args):
                 # included (their lane is still finished for THIS box).
                 entry["gk_numbers"] = sorted(int(n) for n in rows
                                              if handed.get(n))
-                # #1083: the M bucket count + numbers (release-readiness).
-                entry["merged_unreleased"] = len(merged_rows)
-                entry["merged_unreleased_numbers"] = sorted(
-                    int(n) for n in merged_rows)
+                # #1083 M / #1141 P, C: counts + numbers for the footer.
+                __import__("cli_ticket_route").record(entry, _b)
                 # #1056 L1/L2 (i0): `· bounce K` — EVERY open prio:bounce ticket
                 # in this box's slice, across the FULL role-filtered partition
                 # (workable ∪ user-waiting ∪ ops-wait), from the SAME already-
@@ -4300,13 +4283,10 @@ def cmd_tickets_status(args):
                 # so the lane-fill Stop gate reads it cheaply (no per-turn quals
                 # subprocess). Fail-safe (None on any dep-read failure → the gate
                 # falls back to a bounded live call). #1078 review F1: feed the
-                # UNHANDLED subset — `slice-quals --list-dispatchable` computes
-                # over `unhandled` (workable minus handed-off/gk), so passing the
-                # full `workable_rows` would OVERCOUNT by the gk set (a false
-                # block naming handed-off tickets on a slice box like montalu1).
-                _unhandled = {n: v for n, v in workable_rows.items()
-                              if not handed.get(n)}
-                entry["dispatchable"] = _dispatchable_for_cache(_unhandled, root)
+                # UNHANDLED subset (I) — `slice-quals --list-dispatchable` computes
+                # over I, so passing `workable_rows` (+gk +P) would OVERCOUNT (a
+                # false block naming handed-off tickets on a slice box).
+                entry["dispatchable"] = _dispatchable_for_cache(_b["I"], root)
             # Skipped bucket (2026-07-16): same slice quals, POSITIVE label
             # filter — how many of MY tickets are excluded from autopilot runs.
             # `quals` empty ⟺ SliceUnresolved above (it is otherwise always 1
@@ -4364,28 +4344,19 @@ def cmd_tickets_status(args):
                 entry["ops_wait"] = None
                 entry["dispatchable"] = None           # #1078 (gate falls back)
             else:
-                # #510: ops-wait leaves the workable `I N` alongside #468's
-                # user-waiting split (both surface as their own footer buckets —
-                # `U N`/`W N`). ONE partition of the SAME fetch the /goal
-                # stop-proof (`core-quals --count`) uses (#367/#468 guard).
-                # #622: bare needs-acceptance → U unconditionally (queued for owner
-                # approval, never dispatchable-now I).
-                workable, waiting, ops_wait = _partition_workable(seen)
-                # #998: slice by the pane's resolved role — the two gk windows
-                # (review vs infra) show DIFFERENT I (no-op off a role window).
-                workable, waiting, ops_wait = _role_filter_footer(
-                    workable, waiting, ops_wait, root, cwd)
-                # #1083: pull merged-to-develop-not-main tickets OUT of the
-                # (already role-filtered) I/W buckets into M (release readiness:
-                # `I` = still to act, `M` = ready for the cut; M role-scoped by
-                # construction).
-                workable, ops_wait, merged_rows = _split_merged_unreleased(
-                    workable, ops_wait, merged_set)
+                # #510/#468: ops-wait and user-waiting leave `I N` (`W N`/`U N`),
+                # ONE partition of the SAME fetch `core-quals --count` uses (#367).
+                # #1141 slice 3: the ONE route (as core-quals): role pre-filter
+                # (#998, the gk windows show DIFFERENT I), the label partition,
+                # the P/M/C facts (#1083 M = ready for the cut) via `bucketize`.
+                _b, _facts = __import__("cli_ticket_route").footer(
+                    seen, root, slug, merged_set,
+                    gh_fn=lambda a: _out(["gh", *a], root),
+                    role_filter=lambda r: _role_filter_footer(
+                        r, {}, {}, root, cwd)[0])
+                workable, waiting, ops_wait = _b["I"], _b["U"], _b["W"]
                 entry["open"] = len(workable)
-                # #1083: the M bucket count + numbers (release-readiness).
-                entry["merged_unreleased"] = len(merged_rows)
-                entry["merged_unreleased_numbers"] = sorted(
-                    int(n) for n in merged_rows)
+                __import__("cli_ticket_route").record(entry, _b)   # M / P / C
                 entry["user_waiting"] = len(waiting)
                 # #1025: the U member NUMBERS — the stop-hook question-in-U
                 # gate's fast-allow membership source (zero gh when fresh). ONE
@@ -9261,7 +9232,6 @@ from cli_quals import (  # noqa: E402  (#433 cluster I facade — leaf re-export
     _row_is_ops_wait as _row_is_ops_wait,
     _ops_wait_reason as _ops_wait_reason,
     _partition_workable as _partition_workable,
-    _split_merged_unreleased as _split_merged_unreleased,
     _count_bounce as _count_bounce,
     count_bounce_all as _count_bounce_all,
     _acceptance_present_set as _acceptance_present_set,

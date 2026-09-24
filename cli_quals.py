@@ -579,8 +579,10 @@ def _row_is_user_waiting(labels):
 
     #1141 slice 2: the I/U/W ROUTING no longer reads this predicate; it reads
     `cli_ticket_state.owner_question` (an UNSENT needs-acceptance beats a
-    hand-off label, owner ruling in the #1141 design comment). This predicate
-    still defines the #1083 M veto (`leaves_to_merged`), unchanged.
+    hand-off label, owner ruling in the #1141 design comment). Since slice 3
+    no routing reads it (the #1083 M veto it defined is gone: a question is
+    decided first). It stays as the label predicate the frozen parity oracle
+    (`tests/test_ticket_state_classify_1141.py`) and the label tests pin.
 
     A missing/unreadable `labels` value reads as NOT user-waiting (→ workable) —
     the SAFE side: never hide a ticket from THIS box's own responsibility because
@@ -743,7 +745,7 @@ def _partition_workable(rows, own_stream=None):
     `core-quals`/`slice-quals --count`). ONE derivation of the SAME already-
     fetched rows, never independent queries (#367/#468).
 
-    #1141: a thin wrapper over `cli_ticket_state.classify(row, None, box)` —
+    #1141: a thin wrapper over `cli_ticket_state.bucketize(rows, None, box)` —
     the ONE total classifier, which holds the whole precedence (#468 #510 #526
     #601 #622 #654 #943 #1053 #1056 #1130) and a one-line reason per branch
     (printed by `--explain`). `own_stream` (#654): the box's OWN reduced-
@@ -751,51 +753,9 @@ def _partition_workable(rows, own_stream=None):
     HIDDEN (a foreign stream's owner question on the full-authority box,
     #1141 slice 2) is in none of the three dicts."""
     import cli_ticket_state
-    box = cli_ticket_state.Box(own_stream=own_stream)
-    out = {"I": {}, "U": {}, "W": {}, cli_ticket_state.HIDDEN: {}}
-    for number, row in rows.items():
-        out[cli_ticket_state.classify(row, None, box)[0]][number] = row
+    out = cli_ticket_state.bucketize(
+        rows, None, cli_ticket_state.Box(own_stream=own_stream))
     return out["I"], out["U"], out["W"]   # HIDDEN: counted on its owner's box
-
-
-def _split_merged_unreleased(workable, ops_wait, merged_numbers):
-    """#1083 — the MERGED-UNRELEASED extension of `_partition_workable`: pull the
-    open tickets whose fix PR is already merged into develop/staging but NOT yet
-    in main (`merged_numbers`, derived from GIT by `cli_release_state`) OUT of the
-    workable `I` and third-party `W` buckets into a distinct `M` bucket. There is
-    nothing for the box to ACT on such a ticket until the release cut, so it must
-    leave `I` (and, being merged, `gk`/handed logic too — those rows never reach
-    this function as workable once they are in `M`).
-
-    Runs on the SAME already-partitioned buckets `_partition_workable` produced —
-    ONE derivation, never a second query (#367) — and is kept a SEPARATE additive
-    function (the #601/#622 additive-partition-extension pattern) so
-    `_partition_workable`'s widely behaviour-locked 3-tuple contract is unchanged.
-
-    PRECEDENCE (design item 2): a merged ticket LEAVES into `M` regardless of its
-    lifecycle label — UNLESS it carries a `U`-class label (`needs-answer` /
-    `needs-decision` / `needs-acceptance`: the owner's court beats "waiting for
-    the cut", so it keeps its existing U/W bucket) or `prio:bounce` (gk returned
-    it for rework: it stays in `I`). A U-class row is never even in `workable`
-    (it is in `user_waiting`); the check still guards `ops_wait`, where a
-    `needs-acceptance`+`ops-wait` row (→ W by #526) must STAY in W, not be pulled
-    into `M`. Returns `(workable, ops_wait, merged)` — all three fresh dicts;
-    `user_waiting` is never touched (owner-court rows are out of scope here)."""
-    import cli_ticket_state
-    merged_set = {int(n) for n in (merged_numbers or [])}
-    if not merged_set:
-        return dict(workable), dict(ops_wait), {}
-    merged, new_workable, new_ops_wait = {}, {}, {}
-    for bucket, keep in ((workable, new_workable), (ops_wait, new_ops_wait)):
-        for number, row in bucket.items():
-            labels = row.get("labels") if isinstance(row, dict) else None
-            # #1141: the M rule is ONE predicate shared with classify().
-            if (int(number) in merged_set
-                    and cli_ticket_state.leaves_to_merged(labels)):
-                merged[number] = row
-            else:
-                keep[number] = row
-    return new_workable, new_ops_wait, merged
 
 
 def _acceptance_present_set(rows, cwd=None, home=None):

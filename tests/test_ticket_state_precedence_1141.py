@@ -295,13 +295,14 @@ class ExplainPrintsTheMovedRows(unittest.TestCase):
                            {"name": "needs-answer"},
                            {"name": "gk-processing"}]},
         }
-        w, u, o = airuleset._partition_workable(rows)
+        # slice 3: explain_core prints the ONE route's buckets (HIDDEN too)
+        facts = cli_ticket_state.TicketFacts()
+        buckets = cli_ticket_state.bucketize(rows, facts,
+                                             cli_ticket_state.Box())
         with mock.patch.object(cli_ticket_explain, "_footer_extras",
                                return_value=[]), \
                 mock.patch("builtins.print") as fake_print:
-            cli_ticket_explain.explain_core(
-                None, workable=w, merged_rows={}, waiting=u, ops_wait=o,
-                merged_set=frozenset(), rows=rows)
+            cli_ticket_explain.explain_core(None, buckets, facts)
         printed = [c.args[0] for c in fake_print.call_args_list]
         row8 = [ln for ln in printed if ln.startswith("8\t")]
         self.assertEqual(len(row8), 1, printed)

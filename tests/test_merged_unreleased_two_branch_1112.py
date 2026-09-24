@@ -203,7 +203,7 @@ class TwoBranchFeedsSplitPrecedence(unittest.TestCase):
         rs._reset_memo()
 
     def test_merged_move_to_M_while_prio_bounce_stays_workable(self):
-        import cli_quals
+        import cli_ticket_state
         with TemporaryDirectory() as repo:
             _init_two_branch(repo, dev_commits=_DEV_COMMITS)
             merged = rs.merged_unreleased_issues(repo)
@@ -214,8 +214,10 @@ class TwoBranchFeedsSplitPrecedence(unittest.TestCase):
             1203: {"labels": []},
             500: {"labels": []},                            # not merged
         }
-        new_workable, _ops, merged_rows = cli_quals._split_merged_unreleased(
-            workable, {}, merged)
+        # #1141 slice 3: the M step lives in the ONE route (bucketize)
+        b = cli_ticket_state.bucketize(workable, cli_ticket_state.TicketFacts(
+            merged=frozenset(merged)), cli_ticket_state.Box())
+        new_workable, merged_rows = b["I"], b["M"]
         self.assertEqual(set(merged_rows), {1350, 1203})
         self.assertIn(1349, new_workable, "a prio:bounce member stays workable")
         self.assertIn(500, new_workable, "a non-merged member stays workable")
