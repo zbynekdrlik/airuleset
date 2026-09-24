@@ -497,7 +497,7 @@ def test_top_consumers_walk_is_timed_and_skipped_when_cut_short(tmp_path, monkey
 
     monkeypatch.setattr(dg, "_collect_top_consumers", _walk)
     calls = []
-    monkeypatch.setattr(dg, "_default_planners", lambda _h, _n, scratch_rows=None: [
+    monkeypatch.setattr(dg, "_default_planners", lambda _h, _n, scratch_rows=None, **_kw: [
         _rung(clock, 50.0, calls, "a"), _rung(clock, 0.0, calls, "b")])
     common = dict(home=str(tmp_path), dry_run=False, statvfs_fn=_statvfs(82),
                   dev_fn=lambda _m: 1, mounts=("/",), geteuid_fn=lambda: 1000,
@@ -505,7 +505,7 @@ def test_top_consumers_walk_is_timed_and_skipped_when_cut_short(tmp_path, monkey
                   scratch_discover_fn=lambda _n, _h: [])
     dg.run_disk_guard(now=10_000.0, clock_fn=clock, **common)
     assert walks == [], "a cut-short poll must not start the top-consumers walk"
-    monkeypatch.setattr(dg, "_default_planners", lambda _h, _n, scratch_rows=None: [
+    monkeypatch.setattr(dg, "_default_planners", lambda _h, _n, scratch_rows=None, **_kw: [
         _rung(clock, 0.0, calls, "c")])
     logs = dg.run_disk_guard(now=10_060.0, clock_fn=clock, **common)
     assert walks == [3]
@@ -676,7 +676,7 @@ def test_completed_default_drain_keeps_the_skip_reasons_in_the_cache(tmp_path, m
     never carried them) — on every real (default planners) drain."""
     monkeypatch.setattr(dg, "_collect_top_consumers",
                         lambda _h, _n, limit=5, scratch_rows=None: [])
-    monkeypatch.setattr(dg, "_default_planners", lambda _h, _n, scratch_rows=None: [
+    monkeypatch.setattr(dg, "_default_planners", lambda _h, _n, scratch_rows=None, **_kw: [
         ("user-cache", lambda: [{"cls": "user-cache", "path": "/y", "bytes": 1,
                                  "kind": "skip", "reason": "in use"}])])
     dg.run_disk_guard(
