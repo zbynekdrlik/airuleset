@@ -197,7 +197,7 @@ def test_ladder_that_reaches_target_is_never_reported_as_deferred(tmp_path):
     """A ladder that STOPS under target is complete — even over budget it must
     not claim deferred rungs (and must stamp the drain as completed)."""
     clock, calls = FakeClock(), []
-    seq = iter([82, 82, 70, 70, 70, 70, 70])
+    seq = iter([82, 70])       # rung a starts at 82 %; rung b starts under target
     status = {"worst_pct": 82, "dim": "bytes", "level": "drain",
               "mounts": [{"mount": "/", "worst_pct": 82}]}
     timer = dgt.PollTimer(clock_fn=clock)
