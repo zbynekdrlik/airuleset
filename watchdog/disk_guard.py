@@ -137,7 +137,8 @@ SUDO_CLASSES = frozenset({"apt-cache", "rotated-log", "runner-update", "runner-c
 DISK_GUARD_DIRNAME = "disk-guard"
 STATUS_CACHE_NAME = "status.json"
 LOG_NAME = "disk-guard.log"
-LAST_DRAIN_NAME = "last-drain"
+LAST_DRAIN_NAME = "last-drain"              # the FULL drain's cadence stamp only
+LAST_PREVENTION_NAME = "last-prevention"    # #1067 1f: the prevention pass's own
 LOCK_NAME = ".lock"
 LOG_MAX_BYTES = 512 * 1024                  # self-bounding (#834 review-bite 7)
 MIN_DRAIN_INTERVAL_S = 10 * 60              # du-heavy ladder runs at most this often
@@ -3556,14 +3557,38 @@ from watchdog.disk_guard_quota import (  # noqa: E402,F401
 from watchdog import disk_guard_quota as _dgq  # noqa: E402
 
 
-def _drain_due(home, now, min_interval_s=None):
+def _stamp_due(home, name, now, min_interval_s=None):
+    """True when the cadence stamp ``name`` is absent, unreadable, or at least
+    ``min_interval_s`` old (default :data:`MIN_DRAIN_INTERVAL_S`)."""
     min_interval_s = MIN_DRAIN_INTERVAL_S if min_interval_s is None else min_interval_s
-    p = _guard_dir(home) / LAST_DRAIN_NAME
     try:
-        last = float(p.read_text().strip())
+        last = float((_guard_dir(home) / name).read_text().strip())
     except (OSError, ValueError):
         return True
     return (now - last) >= min_interval_s
+
+
+def _write_stamp(home, name, now):
+    """Record cadence stamp ``name`` atomically (temp + rename). Best-effort."""
+    p = _guard_dir(home) / name
+    tmp = p.with_name(p.name + ".tmp")
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text("%f" % now)
+        os.replace(tmp, p)
+    except OSError as e:
+        _dbg("could not record %s: %r" % (name, e))
+        _dgt._unlink(tmp)
+
+
+def _drain_due(home, now, min_interval_s=None):
+    return _stamp_due(home, LAST_DRAIN_NAME, now, min_interval_s)
+
+
+def _prevention_due(home, now, min_interval_s=None):
+    """#1067 1f: the prevention pass's OWN cadence — never ``last-drain``, which
+    only the full drain writes (#920), else prevention ran on every poll."""
+    return _stamp_due(home, LAST_PREVENTION_NAME, now, min_interval_s)
 
 
 def _growth_detected(home, current_pct):
@@ -3578,12 +3603,11 @@ def _growth_detected(home, current_pct):
 
 
 def _mark_drained(home, now):
-    try:
-        p = _guard_dir(home) / LAST_DRAIN_NAME
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("%f" % now)
-    except OSError as e:
-        _dbg("could not record last-drain: %r" % e)
+    _write_stamp(home, LAST_DRAIN_NAME, now)
+
+
+def _mark_prevented(home, now):
+    _write_stamp(home, LAST_PREVENTION_NAME, now)
 
 
 # Distinct from `None`: the lock file could not be CREATED (e.g. ENOSPC on a
@@ -3666,7 +3690,9 @@ def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
     at 70-79% pressure. Uses ``PREVENTION_PCT`` as the stop target (not
     ``TARGET_PCT=75``) so the ladder engages at 70-74%. Does NOT stamp
     ``last-drain`` (the full drain's cadence marker) — the prevention pass
-    must never delay the real >=80% drain (#920 review finding).
+    must never delay the real >=80% drain (#920 review finding). #1067 1f: it
+    stamps its OWN ``last-prevention`` after a real pass the budget did not cut
+    short (a cut-short pass resumes at its deferred rung next poll).
     #939: ``target_pct=0`` for proactive worktree sweep on shared-stream boxes
     at <70% — execute_drain's under-target STOP is bypassed (worst always >=0)."""
     if target_pct is None:
@@ -3689,9 +3715,9 @@ def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
                               do_action, geteuid_fn=geteuid_fn,
                               log_path=_log_path(home), now=now, dry_run=dry_run,
                               target_pct=target_pct, timer=timer, ladder="prevention")
-        # NOTE: intentionally NOT calling _mark_drained here — the prevention
-        # pass has its own cadence check in run_disk_guard via _drain_due, and
-        # stamping here would delay the real >=80% drain.
+        # never _mark_drained here (#920: it would delay the real >=80% drain)
+        if not dry_run and not (timer or _dgt.NULL_TIMER).cut_short:
+            _mark_prevented(home, now)
     finally:
         _release_lock(lock)
     return logs
@@ -3948,15 +3974,16 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     # #920: prevention pass at 70-79%
     # #939: on shared-stream boxes, fire at ANY pressure level with target_pct=0
     # (execute_drain's under-target STOP never fires when target=0) so worktree
-    # cleanup runs proactively on the hourly cadence.
+    # cleanup runs proactively on the hourly cadence. #1067 1f: gated on its OWN
+    # `last-prevention` stamp — `last-drain` is never written by this pass.
     _prev_threshold = 0 if _is_shared else PREVENTION_PCT
     _prev_target = 0 if _is_shared and status["worst_pct"] < PREVENTION_PCT else None
     if (not fs_pressure and not q.pressure
             and status["worst_pct"] >= _prev_threshold
             and not is_root
             and _cadence_allows_drain(status["worst_pct"],
-                                      _drain_due(home, now, effective_interval) or growth_boost,
-                                      dry_run=dry_run)):
+                                      _prevention_due(home, now, effective_interval)
+                                      or growth_boost, dry_run=dry_run)):
         with timer.step("prevention", logs):
             logs += _run_prevention_pass(
                 status, home, now, dry_run, scratch_rows,
