@@ -37,7 +37,8 @@ def _statvfs(used_pct):
 
 _CRIT_KW = dict(dev_fn=lambda p: 1, geteuid_fn=lambda: 1000, mounts=("/",),
                 planners_fn=lambda _h, _n: [("noop", lambda: [])],
-                top_consumers_fn=lambda *a, **k: [])
+                top_consumers_fn=lambda *a, **k: [],
+                severe_run_fn=lambda *a, **k: None)
 
 
 # --------------------------------------------------------------------------- #

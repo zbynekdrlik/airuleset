@@ -23,30 +23,29 @@ import cli_scratch_sweep as cs
 import statusbar
 
 
-# --------------------------------------------------------------------------- #
-# #896-899 — negative lock: NOTHING in this file may ever reach the REAL `gh`
-# subprocess the severe-ticket filer defaults to. This is exactly how the
-# #895 lane's own verification filed 4 real duplicate GitHub tickets: a test
-# forcing >=95% + dry_run=False with no `severe_run_fn` injected silently fell
-# through to the real `subprocess.run` default. Scoped to the "gk-request"
-# argv token (the ONLY subcommand `file_severe_ticket` ever invokes) so every
-# other real subprocess this file legitimately exercises (pgrep, git, docker,
-# journalctl fakes) is untouched.
-# --------------------------------------------------------------------------- #
+# #896-899 / #1136 — negative lock: NOTHING in this file may reach the REAL
+# filer (`gk-request`, or `gh issue ...` for an infra-window box). A leaked call
+# is RECORDED and fails at TEARDOWN: a raise inside the call is swallowed by the
+# filer's own `except` (how #1144-#1151 were filed). Every other real subprocess
+# (pgrep, git, docker, journalctl fakes) passes. `own_windows` is pinned to []
+# so no test depends on which box runs it (gk would take the gh path).
 @pytest.fixture(autouse=True)
 def _block_real_gh_severe_ticket_filing(monkeypatch):
-    real_run = subprocess.run
+    import watchdog.disk_guard_escalation as esc
+    real_run, leaked = subprocess.run, []
 
     def _guarded_run(argv, *a, **kw):
-        if isinstance(argv, (list, tuple)) and any("gk-request" == str(x) for x in argv):
-            raise AssertionError(
-                "TEST REACHED THE REAL subprocess.run WITH gk-request IN ARGV "
-                "(%r) -- inject severe_run_fn/run_fn instead of falling through "
-                "to the live filer (the #896-899 duplicate-ticket incident)."
-                % (argv,))
+        toks = [str(x) for x in argv] if isinstance(argv, (list, tuple)) else []
+        if "gk-request" in toks or toks[:2] == ["gh", "issue"]:
+            leaked.append(toks)
+            return subprocess.CompletedProcess(argv, 1, "", "blocked by test")
         return real_run(argv, *a, **kw)
 
     monkeypatch.setattr(subprocess, "run", _guarded_run)
+    monkeypatch.setattr(esc, "own_windows", lambda: [])
+    yield
+    assert not leaked, ("reached the REAL filer (inject severe_run_fn/run_fn;"
+                        " the #896-899 / #1144-1151 incidents): %r" % (leaked,))
 
 
 def _mkfakeproc(root, entries):
@@ -2144,7 +2143,8 @@ def test_critical_band_90_94_runs_with_shorter_cadence(tmp_path):
     logs = dg.run_disk_guard(
         now=_NOW_892, home=str(tmp_path), dry_run=False,
         statvfs_fn=statvfs_map({"/": (92, 20)}), dev_fn=dev_map({"/": 1}),
-        geteuid_fn=lambda: 1000, mounts=("/",), planners_fn=_noop)
+        geteuid_fn=lambda: 1000, mounts=("/",), planners_fn=_noop,
+        severe_run_fn=lambda *a, **kw: types.SimpleNamespace(returncode=0))
     assert ran["drained"] is True, (
         "#892: at 92%% with drain 150s ago, the shorter critical-band "
         "cadence (120s) should allow the drain to run")

@@ -13,9 +13,12 @@ also had to teach it about a drain the poll budget cut short, and
 * the #892 top-consumers walk refreshes ``top_consumers`` in the cache (only on
   the default planners path, and not past the budget — a cut-short poll keeps
   the list the cache already carries);
-* at CRITICAL, the #849 escalation and the #895 severe ticket (>= SEVERE_PCT)
-  get ONE top-consumers list (#896-899) — a fresh walk, or on a cut-short poll
-  the cached list, so no heavy walk runs after the budget is spent.
+* at CRITICAL, the #849 escalation and the #895 severe ticket (>= SEVERE_PCT,
+  or ``drain_exhausted`` at >= the effective critical level, #1136) get ONE
+  top-consumers list (#896-899) — a fresh walk, or on a cut-short poll the
+  cached list, so no heavy walk runs after the budget is spent;
+* below CRITICAL, a small root exhausted from its 85 % effective critical
+  level (#1136) files the severe ticket with the cached list.
 
 Every ``disk_guard`` helper is looked up on the module at call time, so the
 existing test seams (``monkeypatch.setattr(dg, "_collect_top_consumers", …)``,
@@ -65,7 +68,9 @@ def after_drain(status, home, now, dry_run, timer, planners_fn, scratch_rows,
     log lines. ``timer`` is the poll's ``disk_guard_timing.PollTimer``."""
     from watchdog import disk_guard as dg
     from watchdog import disk_guard_quota as dgq
+    from watchdog.disk_guard_worktrees import effective_critical_pct
     logs = []
+    crit = effective_critical_pct(statvfs_fn)
     post = dg.disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts, now=now)
     if not dry_run:
         _record_exhausted(status, post, home, statvfs_fn, timer.cut_short)
@@ -95,8 +100,14 @@ def after_drain(status, home, now, dry_run, timer, planners_fn, scratch_rows,
         logs += dg.escalate(post, home, now, dry_run,
                             top_consumers_fn=lambda *_a, **_kw: top_now)
         # #895: the injectable filer seam — a caller exercising this path MUST
-        # inject a recorder; the unset default reaches the REAL `gh`.
-        if post["worst_pct"] >= dg.SEVERE_PCT:
-            logs += dg.file_severe_ticket(post, home, now, top_now,
-                                          dry_run=dry_run, run_fn=severe_run_fn)
+        # inject a recorder; the unset default reaches the REAL `gh`. The filer
+        # owns its trigger (>= SEVERE_PCT, or drain_exhausted at >= crit, #1136).
+        logs += dg.file_severe_ticket(post, home, now, top_now, dry_run=dry_run,
+                                      run_fn=severe_run_fn, critical_pct=crit)
+    elif post.get("drain_exhausted") is True:
+        # #1136: a small root is exhausted from 85 %, below the 90 % CRITICAL
+        # level; no fresh walk here, the list the cache already carries.
+        logs += dg.file_severe_ticket(
+            post, home, now, _cached_top(post) or _cached_top(status),
+            dry_run=dry_run, run_fn=severe_run_fn, critical_pct=crit)
     return logs
