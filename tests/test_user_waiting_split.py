@@ -53,7 +53,7 @@ class PartitionHelpers(unittest.TestCase):
         # The #507 PREDICATE still reads False for a needs-acceptance ticket
         # that is ALSO a re-hand-off (ready-for-review / needs-gatekeeper); it
         # now feeds only the #1083 M veto. The ROUTING moved to
-        # cli_ticket_state.waiting_kind, where #1141 slice 2 (owner ruling:
+        # cli_ticket_state.owner_question, where #1141 slice 2 (owner ruling:
         # "an owner question beats any hand-off label") puts this row in U —
         # locked in test_ticket_state_precedence_1141.
         self.assertFalse(airuleset._row_is_user_waiting(
