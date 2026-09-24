@@ -29,6 +29,14 @@ import cli_ticket_state as ts
 
 _ROLES = ("review", "infra", "quality")
 
+# The session cwd `tickets-status --explain` explains. It is set only for the
+# duration of `explain_footer`, so the ping extras key on the RAW cwd string the
+# footer keys on (`statusbar.ticketless_question_pings(cwd)` compares strings
+# without realpath). `os.getcwd()` after the chdir would return the resolved
+# path. None = the process cwd (a direct `core-quals`/`slice-quals --explain`,
+# the same cwd `--waiting` uses).
+_footer_cwd = None
+
 
 def _refuse_extra(extra):
     if extra:
@@ -60,7 +68,7 @@ def _footer_extras(cwd=None):
 
 def _emit(buckets, box, merged_set, handed=None, supplement=()):
     for line in ts.explain_lines(buckets, box, merged_set, handed, supplement,
-                                 extras=_footer_extras()):
+                                 extras=_footer_extras(_footer_cwd)):
         print(line)
 
 
@@ -106,9 +114,12 @@ def _footer_cache_line(cwd):
                             / (statusbar.cwd_key(cwd) + ".json"))
     if not isinstance(entry, dict) or "open" not in entry:
         return "# footer cache: none for this cwd"
-    age = int(time.time()) - int(entry.get("ts") or 0)
+    stamp = entry.get("ts")
+    age = ("%ds" % (int(time.time()) - int(stamp))
+           if isinstance(stamp, (int, float)) and not isinstance(stamp, bool)
+           else "?")
     fields = ("open", "merged_unreleased", "user_waiting", "ops_wait", "gk")
-    return "# footer cache (age %ds): %s" % (age, " ".join(
+    return "# footer cache (age %s): %s" % (age, " ".join(
         "%s=%s" % (f, "-" if entry.get(f) is None else entry.get(f))
         for f in fields))
 
@@ -135,10 +146,13 @@ def explain_footer(cwd):
     print("# tickets-status --explain: scope=%s role=%s root=%s"
           % ("core" if full else "mine", role or "-", root))
     print(_footer_cache_line(cwd))
+    global _footer_cwd
     prev = os.getcwd()
     os.chdir(cwd)   # the quals commands resolve the repo from the process cwd
+    _footer_cwd = cwd
     try:
         (cli_quals_cmd.cmd_core_quals if full else cli_quals_cmd.cmd_slice_quals)(
             argparse.Namespace(explain=True, role=role))
     finally:
+        _footer_cwd = None
         os.chdir(prev)

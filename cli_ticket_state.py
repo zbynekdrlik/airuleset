@@ -22,7 +22,7 @@ the gatekeeper (a reduced-authority box only).
 """
 
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Union
 
 # The label predicates still live in cli_quals (re-exported by the airuleset
 # facade and used across the repo). cli_quals imports THIS module lazily inside
@@ -64,10 +64,11 @@ class Box:
 class Facts:
     """Non-label facts about one ticket. `merged`: its fix is merged into the
     integration branch but not yet on main (#1083, git-derived by
-    `cli_release_state`). `handed`: a reduced-authority box already handed it
-    to the gatekeeper (`_slice_mine_and_handed`, #391)."""
+    `cli_release_state`). `handed`: the `_slice_mine_and_handed` state (#391) —
+    False, True (handed off to the gatekeeper) or the truthy "released" (merged
+    and released, done for the stream, #1009); read it TRUTHY, never `is True`."""
     merged: bool = False
-    handed: bool = False
+    handed: Union[bool, str] = False
 
 
 def _names(labels):
@@ -257,6 +258,8 @@ def classify(row, facts=None, box=None):
                          "main: waits for the release cut (#1083)")
         reason += "; merged, but kept here by its owner/bounce label (#1083)"
     if facts.handed and bucket == "I" and box.kind == "slice":
+        if facts.handed == "released":
+            return "gk", "released: done for the stream, counted in gk (#1009)"
         return "gk", "handed off to the gatekeeper: waiting on its review (#391)"
     return bucket, reason
 
@@ -320,7 +323,7 @@ def explain_lines(buckets, box, merged=(), handed=None, supplement=(),
             else:
                 got, reason = classify(
                     row, Facts(merged=int(number) in merged,
-                               handed=bool(handed.get(number))), box)
+                               handed=handed.get(number) or False), box)
             out.append("%s\t%s\t%s\t%s" % (number, bucket, reason,
                                            _cell(title)))
             if got != bucket:

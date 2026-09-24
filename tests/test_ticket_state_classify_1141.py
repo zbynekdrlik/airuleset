@@ -398,6 +398,63 @@ class ExplainLinesReviewFixes(unittest.TestCase):
         self.assertIn({5}, seen)
 
 
+class ExplainReviewRound2(unittest.TestCase):
+    """Review round 2: released gk reason, the footer extras keyed on the RAW
+    session cwd, and a junk cache timestamp."""
+
+    def test_released_row_is_gk_with_its_own_reason(self):
+        row = {"labels": _labels("stream:david1")}
+        got = cli_ticket_state.classify(
+            row, cli_ticket_state.Facts(handed="released"),
+            cli_ticket_state.Box(own_stream=_OWN))
+        self.assertEqual(got[0], "gk")
+        self.assertIn("released", got[1])
+
+    def test_footer_extras_key_on_the_raw_session_cwd(self):
+        from unittest import mock
+        import cli_quals_cmd
+        import cli_ticket_explain
+        import statusbar
+        asked = []
+
+        def fake_pings(cwd=None):
+            asked.append(cwd)
+            return [{"question": "which\tone?"}]
+
+        def fake_core(ns):
+            cli_ticket_explain._emit({"I": {}, "U": {}}, cli_ticket_state.Box(),
+                                     ())
+
+        with TemporaryDirectory() as repo, \
+                mock.patch.object(cli_quals_cmd, "_waiting_ping_entries",
+                                  fake_pings), \
+                mock.patch.object(statusbar, "task_hygiene_a_count",
+                                  return_value=2), \
+                mock.patch.object(cli_quals_cmd, "cmd_core_quals", fake_core), \
+                mock.patch.object(airuleset, "_repo_root", return_value=repo), \
+                mock.patch.object(airuleset, "resolve_authority",
+                                  return_value="full"), \
+                mock.patch("builtins.print") as fake_print:
+            raw = repo + "/"          # a non-canonical spelling of the cwd
+            cli_ticket_explain.explain_footer(raw)
+        printed = [c.args[0] for c in fake_print.call_args_list]
+        self.assertEqual(asked, [raw])
+        self.assertIsNone(cli_ticket_explain._footer_cwd)
+        self.assertIn("-\tU\tticketless question ping, no ticket to label "
+                      "(#512)\twhich one?", printed)
+        self.assertIn("# explain: I=2 M=0 U=1 W=0 gk=0", printed)
+
+    def test_junk_cache_timestamp_never_crashes(self):
+        from unittest import mock
+        import cli_ticket_explain
+        import statusbar
+        with mock.patch.object(statusbar, "_load",
+                               return_value={"open": 1, "ts": "abc"}):
+            line = cli_ticket_explain._footer_cache_line("/x")
+        self.assertTrue(line.startswith("# footer cache (age ?): open=1"),
+                        line)
+
+
 class ExplainSliceCli(unittest.TestCase):
     """The reduced-authority mirror: `slice-quals --explain` shows the sub-dev
     `gk` bucket (a handed-off ticket) next to I and U, and its I total equals
