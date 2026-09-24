@@ -594,7 +594,8 @@ def test_kill_between_rungs_names_the_enclosing_step(tmp_path):
 def test_breadcrumb_of_a_live_other_process_is_left_alone(tmp_path):
     cf = _crumb_file(tmp_path)
     cf.parent.mkdir(parents=True)
-    cf.write_text(json.dumps({"label": "drain", "poll": 9_990.0, "pid": 1}))
+    # the parent of this test process is alive and is not this process
+    cf.write_text(json.dumps({"label": "drain", "poll": 9_990.0, "pid": os.getppid()}))
     logs = _poll(tmp_path, FakeClock(), [], now=10_000.0)
     assert not any("previous poll" in ln for ln in logs)
 
@@ -643,3 +644,45 @@ def test_cut_short_critical_poll_escalates_without_a_new_walk(tmp_path, monkeypa
           used_pct=92, top_consumers_fn=lambda *a, **k: walks.append(1) or [])
     assert walks == [], "a cut-short poll must not start a new top-consumers walk"
     assert seen == [[("/x", 5)]]
+
+
+# --------------------------------------------------------------------------- #
+# review round 3 (#1067 slice 1e)
+# --------------------------------------------------------------------------- #
+def test_cut_short_drain_keeps_a_prior_exhausted_streak(tmp_path):
+    home = str(tmp_path)
+    dg.write_status_cache({"worst_pct": 86, "drain_exhausted": True,
+                           "drain_exhausted_streak": 3}, home=home)
+    clock, calls = FakeClock(), []
+    _poll(tmp_path, clock, [_rung(clock, 50.0, calls, "a"), _rung(clock, 0.0, calls, "b")],
+          used_pct=86)
+    cache = dg._read_status_cache(home)
+    assert cache["drain_exhausted_streak"] == 3
+    assert cache["drain_exhausted"] is True
+
+
+def test_drain_poll_carries_the_top_consumers_timestamp(tmp_path):
+    home = str(tmp_path)
+    dg.write_status_cache({"worst_pct": 81, "top_consumers": [{"path": "/x", "bytes": 5}],
+                           "top_consumers_ts": 7.0}, home=home)
+    clock, calls = FakeClock(), []
+    _poll(tmp_path, clock, [_rung(clock, 50.0, calls, "a"), _rung(clock, 0.0, calls, "b")])
+    assert dg._read_status_cache(home)["top_consumers_ts"] == 7.0
+
+
+def test_completed_default_drain_keeps_the_skip_reasons_in_the_cache(tmp_path, monkeypatch):
+    """#980's per-rung skip reasons were written to the cache and then dropped
+    again by the top-consumers write that followed (it wrote `post`, which
+    never carried them) — on every real (default planners) drain."""
+    monkeypatch.setattr(dg, "_collect_top_consumers",
+                        lambda _h, _n, limit=5, scratch_rows=None: [])
+    monkeypatch.setattr(dg, "_default_planners", lambda _h, _n, scratch_rows=None: [
+        ("user-cache", lambda: [{"cls": "user-cache", "path": "/y", "bytes": 1,
+                                 "kind": "skip", "reason": "in use"}])])
+    dg.run_disk_guard(
+        now=10_000.0, home=str(tmp_path), dry_run=False, statvfs_fn=_statvfs(82),
+        dev_fn=lambda _m: 1, mounts=("/",), geteuid_fn=lambda: 1000,
+        sudo_probe_fn=lambda: False, box_class_fn=lambda: "workstation",
+        scratch_discover_fn=lambda _n, _h: [], clock_fn=FakeClock())
+    cache = dg._read_status_cache(str(tmp_path))
+    assert cache["drain_skipped_rungs"][0]["path"] == "/y"
