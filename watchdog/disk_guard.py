@@ -3019,6 +3019,8 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
         logs.append(line)
         _append_log(log_path, [line])
 
+    planners = list(planners)               # #1067: resume at the deferred rung
+    planners = planners[timer.resume_start([lab for lab, _p in planners], logs):]
     for i, (_label, planner) in enumerate(planners):
         worst = recheck_fn()
         if worst is None:                   # unmeasurable → stop, never guess
@@ -3038,7 +3040,7 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             logs.append(line)
             _append_log(log_path, [line])
             break
-        if timer.over_budget(logs, len(planners) - i):    # #1067: rest → next poll
+        if timer.over_budget(logs, len(planners) - i, _label):   # #1067: rest → next poll
             break
         # #965 R3 fix: skip a rung that has freed < 1 MiB three times in a row
         if _should_skip_low_yield_rung(home, _label, now):
@@ -3048,63 +3050,64 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             logs.append(line)
             _append_log(log_path, [line])
             continue
-        try:
-            with timer.step(_label, logs):
-                actions = planner()
-        except Exception as e:
-            line = _log_line(now, "ERROR", _label, 0, "planner error: %r" % e)
-            logs.append(line)
-            _append_log(log_path, [line])
-            continue
-        rung_lines = []
-        rung_freed = 0
-        rung_acted = 0
-        for a in actions:
-            acls = a.get("cls", _label)
-            path = a.get("path", "-")
-            planned = a.get("bytes", 0) or 0
-            kind = a.get("kind", "delete")
-            reason = a.get("reason")
-            if acls not in RECLAIMABLE_CLASSES:
-                rung_lines.append(_log_line(
-                    now, "SKIP-FENCE", path, planned,
-                    "class %r outside RECLAIMABLE_CLASSES fence" % acls))
-                continue
-            if kind == "skip":
-                rung_lines.append(_log_line(now, "SKIP", path, planned, reason))
-                status.setdefault("drain_skipped_rungs", []).append({"rung": _label, "cls": acls, "path": path, "reason": reason})
-                continue
-            if kind == "report":
-                rung_lines.append(_log_line(now, "REPORT", path, planned,
-                                            reason or "report-only"))
-                continue
+        with timer.step(_label, logs):      # #1067: planner + its actions
+            timer.ran_rung()
             try:
-                freed = do_action_fn(a)
+                actions = planner()
             except Exception as e:
-                rung_lines.append(_log_line(now, "FAIL", path, planned,
-                                            "action error: %r" % e))
+                line = _log_line(now, "ERROR", _label, 0, "planner error: %r" % e)
+                logs.append(line)
+                _append_log(log_path, [line])
                 continue
-            # #863 Fable review 2: a TOCTOU safety REFUSE (the session became
-            # live since plan) is logged as REFUSE, not as a success or FAIL.
-            if freed is not None and freed < 0:
-                rung_lines.append(_log_line(now, "REFUSE", path, planned,
-                                            "TOCTOU: session live/undeterminable since plan (#863)"))
-                continue
-            verb = ("WOULD-" + kind.upper()) if dry_run else kind.upper()
-            rung_lines.append(_log_line(now, verb, path, planned,
-                                        "freed~=%s %s" % (freed, a.get("why") or reason or "")))
-            # #861: durable deletions journal — every ACTED (non-dry-run)
-            # deletion is recorded in a monthly JSONL file the guard never
-            # deletes (outside RECLAIMABLE_CLASSES).
-            if not dry_run:
-                _append_deletion_journal(
-                    home, now, rung=_label, path=path, nbytes=planned,
-                    mtime=a.get("mtime", 0),
-                    level=pressure or status.get("level", "drain"))
-            rung_freed += (freed or 0)
-            rung_acted += 1
-        logs.extend(rung_lines)
-        _append_log(log_path, rung_lines)
+            rung_lines = []
+            rung_freed = 0
+            rung_acted = 0
+            for a in actions:
+                acls = a.get("cls", _label)
+                path = a.get("path", "-")
+                planned = a.get("bytes", 0) or 0
+                kind = a.get("kind", "delete")
+                reason = a.get("reason")
+                if acls not in RECLAIMABLE_CLASSES:
+                    rung_lines.append(_log_line(
+                        now, "SKIP-FENCE", path, planned,
+                        "class %r outside RECLAIMABLE_CLASSES fence" % acls))
+                    continue
+                if kind == "skip":
+                    rung_lines.append(_log_line(now, "SKIP", path, planned, reason))
+                    status.setdefault("drain_skipped_rungs", []).append({"rung": _label, "cls": acls, "path": path, "reason": reason})
+                    continue
+                if kind == "report":
+                    rung_lines.append(_log_line(now, "REPORT", path, planned,
+                                                reason or "report-only"))
+                    continue
+                try:
+                    freed = do_action_fn(a)
+                except Exception as e:
+                    rung_lines.append(_log_line(now, "FAIL", path, planned,
+                                                "action error: %r" % e))
+                    continue
+                # #863 Fable review 2: a TOCTOU safety REFUSE (the session became
+                # live since plan) is logged as REFUSE, not as a success or FAIL.
+                if freed is not None and freed < 0:
+                    rung_lines.append(_log_line(now, "REFUSE", path, planned,
+                                                "TOCTOU: session live/undeterminable since plan (#863)"))
+                    continue
+                verb = ("WOULD-" + kind.upper()) if dry_run else kind.upper()
+                rung_lines.append(_log_line(now, verb, path, planned,
+                                            "freed~=%s %s" % (freed, a.get("why") or reason or "")))
+                # #861: durable deletions journal — every ACTED (non-dry-run)
+                # deletion is recorded in a monthly JSONL file the guard never
+                # deletes (outside RECLAIMABLE_CLASSES).
+                if not dry_run:
+                    _append_deletion_journal(
+                        home, now, rung=_label, path=path, nbytes=planned,
+                        mtime=a.get("mtime", 0),
+                        level=pressure or status.get("level", "drain"))
+                rung_freed += (freed or 0)
+                rung_acted += 1
+            logs.extend(rung_lines)
+            _append_log(log_path, rung_lines)
         if rung_acted > 0:                  # a rung that only skipped gets no summary
             pending = (_label, worst, rung_freed)
             # #965 R3 fix: record the rung's yield for low-yield tracking
@@ -3792,7 +3795,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                    geteuid_fn=None, mounts=None, min_drain_interval_s=None,
                    planners_fn=None, sudo_probe_fn=None, scratch_discover_fn=None,
                    top_consumers_fn=None, severe_run_fn=None, box_class_fn=None,
-                   quota_usage_fn=None, du_fn=None, clock_fn=None):
+                   quota_usage_fn=None, du_fn=None, clock_fn=None, budget_s=None):
     """Watchdog Job 40. Every poll: compute pressure + write the footer cache.
     Only at ≥80 % (and not as root, cadence-gated, single-instance): run the
     drain ladder over this user's own home; if still ≥90 % after, escalate. At
@@ -3817,13 +3820,14 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     here; leaving it unset reaches the REAL ``subprocess.run`` default, which
     is exactly how the #896-899 duplicate tickets were filed. #1140: shared-
     stream QUOTA pressure is a second drain source — see ``disk_guard_quota``.
-    #1067: every step is timed and the ladder honours a wall budget
-    (``disk_guard_timing``; ``clock_fn`` injectable)."""
-    timer = _dgt.PollTimer(clock_fn=clock_fn)
+    #1067: every step is timed and the ladder honours a wall budget capped by
+    the sweep's ``budget_s`` (``disk_guard_timing``; ``clock_fn`` injectable)."""
     now = time.time() if now is None else now
     home = home or os.path.expanduser("~")
+    timer = _dgt.PollTimer(clock_fn=clock_fn, budget_s=budget_s,
+                           state_dir=_guard_dir(home), now=now)
     mounts = mounts or MOUNTS
-    logs = []
+    logs = list(timer.lines)
     try:
         status = disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts, now=now)
     except Exception as e:
@@ -3858,8 +3862,9 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     growth_boost = _is_shared and _growth_detected(home, status["worst_pct"])
     cadence_due = _drain_due(home, now, effective_interval)
     # #1140: per-account quota (shared-stream only) — read BEFORE the decision
-    q = _dgq.quota_state(status, home, now, _is_shared and not is_root,
-                         usage_fn=quota_usage_fn)
+    with timer.step("quota-read", logs):
+        q = _dgq.quota_state(status, home, now, _is_shared and not is_root,
+                             usage_fn=quota_usage_fn)
     fs_pressure = status["level"] not in ("ok", "notice")
     will_drain = ((not is_root) and (fs_pressure or q.pressure)
                   and _cadence_allows_drain(
@@ -4022,8 +4027,9 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         post = disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts, now=now)
         # #925/#968: drain_exhausted + drain_exhausted_streak — the streak is
         # the consecutive count of drains at >= effective critical that freed
-        # < 1 MiB. Badge shows at streak >= 2.
-        if not dry_run:
+        # < 1 MiB. Badge shows at streak >= 2. #1067: a poll the budget cut short
+        # freed nothing because its rungs were DEFERRED, not exhausted.
+        if not dry_run and not timer.cut_short:
             from watchdog.disk_guard_worktrees import effective_critical_pct as _ecp3
             _eff_crit3 = _ecp3(statvfs_fn)
             pre_pct = status.get("worst_pct", 0)
@@ -4060,7 +4066,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         # top_consumers + its own ts. Non-drain polls carry it forward above.
         # Only on the DEFAULT planners path (an injected planners_fn = test;
         # _collect_top_consumers would re-discover scratch, doubling the du walk).
-        if planners_fn is None:
+        if planners_fn is None and not timer.cut_short:     # #1067: no walk past budget
             try:
                 with timer.step("top-consumers", logs):
                     top = _collect_top_consumers(home, now, limit=3, scratch_rows=scratch_rows)

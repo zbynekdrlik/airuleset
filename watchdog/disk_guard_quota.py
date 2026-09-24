@@ -152,7 +152,7 @@ def quota_state(status, home, now, active, usage_fn=None):
     last = prior.get("quota_drain")
     before, after, ts = _num(last, "before_pct"), _num(last, "after_pct"), _num(last, "ts")
     exhausted = (pressure and before is not None and after is not None and after >= before
-                 and not last.get("dry_run") and ts is not None
+                 and not last.get("dry_run") and not last.get("cut_short") and ts is not None
                  and 0 <= now - ts < QUOTA_EXHAUSTED_TTL_S)
     growth = pressure and prev is not None and pct > prev
     return QuotaState(pct, pressure, growth, exhausted, usage, usage_fn)
@@ -253,6 +253,8 @@ def run_quota_pass(status, home, now, dry_run, planners, q, do_action, geteuid_f
     rec = {"ts": now, "before_pct": q.pct, "after_pct": after,
            "trigger_pct": QUOTA_DRAIN_PCT, "target_pct": QUOTA_TARGET_PCT,
            "dry_run": bool(dry_run)}
+    if timer is not None and timer.cut_short:   # #1067: deferred rungs, not exhausted
+        rec["cut_short"] = True
     status["quota_drain"] = rec
     if after is not None:
         status["quota_pct"] = after
