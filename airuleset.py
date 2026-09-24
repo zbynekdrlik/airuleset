@@ -4048,6 +4048,8 @@ def cmd_tickets_status(args):
     import statusbar
 
     cwd = getattr(args, "cwd", None) or os.getcwd()
+    if getattr(args, "explain", False) is True:   # #1141 (__import__: size budget)
+        return __import__("cli_ticket_explain").explain_footer(cwd)
     if not getattr(args, "refresh", False):
         sys.stdout.write(statusbar.tickets_segment(cwd))
         return
@@ -9669,6 +9671,22 @@ def _add_dispatch_flags(parser):
              "= no filter. This is how the `infra` label ROUTES a ticket into "
              "the infra role/target (the per-role sequential mode is PENDING "
              "round 3, #993 — today this is the routing slice only).")
+    parser.add_argument("--explain", action="store_true", help=_EXPLAIN_HELP)
+
+
+# #1141: `--explain` on tickets-status / core-quals / slice-quals.
+_EXPLAIN_HELP = ("Print every counted ticket as number<TAB>bucket<TAB>reason"
+                 "<TAB>title (bucket = I/M/U/W/gk, ONE reason from "
+                 "cli_ticket_state.classify), a `conflict:` line under a "
+                 "contradictory label set, and a `# explain:` totals line (#1141)")
+
+
+def _add_tickets_status_flags(parser):
+    """`tickets-status` flags (moved out of `main()` for its size budget)."""
+    parser.add_argument("--refresh", action="store_true",
+                        help="Slow path: refresh the per-repo cache via git+gh "
+                             "(run detached by the statusline, never inline)")
+    parser.add_argument("--explain", action="store_true", help=_EXPLAIN_HELP)
 
 
 def main():
@@ -10023,9 +10041,7 @@ def main():
         "tickets-status",
         help="Statusline github-tickets segment — autopilot done/total or open issues")
     p_tickets.add_argument("--cwd", help="Session cwd (defaults to $PWD)")
-    p_tickets.add_argument("--refresh", action="store_true",
-                           help="Slow path: refresh the per-repo cache via git+gh "
-                                "(run detached by the statusline, never inline)")
+    _add_tickets_status_flags(p_tickets)   # --refresh + --explain (#1141)
 
     p_gkr = sub.add_parser(
         "gk-request",

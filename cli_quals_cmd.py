@@ -843,10 +843,11 @@ def cmd_slice_quals(args):
     want_count_dispatchable = getattr(args, "count_dispatchable", False)  # #993 item 3
     want_list_dispatchable = getattr(args, "list_dispatchable", False) is True  # #1078 item 1 (#1036 Mock-truthy guard)
     want_snapshot = getattr(args, "snapshot_json", False) is True  # #1067 1d (#1036 Mock-truthy guard)
+    want_explain = getattr(args, "explain", False) is True  # #1141 (#1036 Mock-truthy guard)
     if not (want_count or want_list or want_waiting or want_ops_wait
             or want_audit or want_bounces or want_dep_wait
             or want_count_dispatchable or want_list_dispatchable
-            or want_snapshot):
+            or want_snapshot or want_explain):
         for q in quals:
             print(q)
         return
@@ -921,9 +922,10 @@ def cmd_slice_quals(args):
     # they are done. DEFAULT path only (a bounce-seed --extra query keeps its
     # full set, like #468/#510 above). ONE derivation (#367): the same split the
     # footer applies, so `--count` and `I N` cannot drift.
+    _merged_set = frozenset() if extra else _merged_unreleased(root)
     if not extra:
         workable_rows, ops_wait, _merged_rows = airuleset._split_merged_unreleased(
-            workable_rows, ops_wait, _merged_unreleased(root))
+            workable_rows, ops_wait, _merged_set)
     unhandled = {n: v for n, v in workable_rows.items() if not handed.get(n)}
     # #1065 REVERSES #1025: role-filter the workable `I` slice, the third-party
     # `W` (ops_wait) AND the owner-court `U` (waiting) — a question shows in the
@@ -947,6 +949,12 @@ def cmd_slice_quals(args):
         unhandled = _apply_role_filter(unhandled, root, role, slug=slug)
         ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)  # #1045
         waiting = _apply_role_filter(waiting, root, role, slug=slug)  # #1065
+    if want_explain:   # #1141: the SAME buckets --count uses (__import__: size budget)
+        return __import__("cli_ticket_explain").explain_slice(
+            extra, root, user, role, slug, rows=rows, handed=handed,
+            workable=workable_rows, unhandled=unhandled, waiting=waiting,
+            ops_wait=ops_wait, merged_rows={} if extra else _merged_rows,
+            merged_set=_merged_set)
     if want_snapshot:
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition.
         import cli_quals_snapshot
@@ -1417,9 +1425,10 @@ def cmd_core_quals(args):
     want_count_dispatchable = getattr(args, "count_dispatchable", False)  # #993 item 3
     want_list_dispatchable = getattr(args, "list_dispatchable", False) is True  # #1078 item 1 (#1036 Mock-truthy guard)
     want_snapshot = getattr(args, "snapshot_json", False) is True  # #1067 1d (#1036 Mock-truthy guard)
+    want_explain = getattr(args, "explain", False) is True  # #1141 (#1036 Mock-truthy guard)
     if not (want_count or want_list or want_waiting or want_ops_wait or want_audit
             or want_dep_wait or want_count_dispatchable or want_list_dispatchable
-            or want_snapshot):
+            or want_snapshot or want_explain):
         for q in quals:
             print(q)
         return
@@ -1504,9 +1513,10 @@ def cmd_core_quals(args):
     # role filter (M role-scoped by construction). DEFAULT path only (a bounce-
     # seed --extra query keeps its full set). ONE derivation (#367): the same
     # split the footer applies, so `--count` and the footer `I N` cannot drift.
+    _merged_set = frozenset() if extra else _merged_unreleased(root)
     if not extra:
         workable, ops_wait, _merged_rows = airuleset._split_merged_unreleased(
-            workable, ops_wait, _merged_unreleased(root))
+            workable, ops_wait, _merged_set)
     if not seen:
         _refuse_unless_empty_is_trustworthy("core-quals", quals, cwd=root)
     if not seen and not extra:
@@ -1536,6 +1546,10 @@ def cmd_core_quals(args):
                 "Refusing (#181 round 4)." % (health, detail),
                 file=sys.stderr)
             sys.exit(1)
+    if want_explain:   # #1141: the SAME buckets --count uses (__import__: size budget)
+        return __import__("cli_ticket_explain").explain_core(
+            extra, workable=workable, merged_rows={} if extra else _merged_rows,
+            waiting=waiting, ops_wait=ops_wait, merged_set=_merged_set)
     if want_snapshot:
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition
         # (own_stream=None: a full-authority box owns no stream).
