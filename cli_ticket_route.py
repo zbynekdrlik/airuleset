@@ -73,21 +73,24 @@ def quals(rows, root, box, *, extra=None, role=None, slug=None, handed=None):
     return ts.bucketize(rows, facts, box), facts
 
 
-def count(buckets):
-    """The `--count` / `/goal` stop-proof number (ROZHODNUTÉ ruling 2): I
-    plus C — "done, close me" is an action this box still owes. P waits on a
-    machine and stays out."""
-    return len(buckets["I"]) + len(buckets["C"])
+count = ts.stop_count   # the `--count` / `/goal` stop-proof number (I + C)
 
 
 def record(entry, buckets):
     """The footer cache fields of the fact buckets: `merged_unreleased` (M,
     #1083), `pipeline` (P) and `done` (C), each with its `_numbers` list, and
-    `conflicts` + `conflicts_numbers` (#1141 slice 4): the contradictory
-    label pairs over every row, HIDDEN included. The conflict fields are the
-    gatekeeper's diagnostic, not a footer segment (the footer stays six)."""
+    `conflicts` + `conflicts_numbers` (`record_conflicts`)."""
     for key, bucket in (("merged_unreleased", "M"), ("pipeline", "P"),
                         ("done", "C")):
         entry[key] = len(buckets[bucket])
         entry[key + "_numbers"] = sorted(int(n) for n in buckets[bucket])
+    record_conflicts(entry, buckets)
+
+
+def record_conflicts(entry, buckets):
+    """The footer cache fields `conflicts` + `conflicts_numbers` (#1141 slice
+    4): the contradictory label pairs over every counted row, HIDDEN
+    included. The slice footer calls it again once the #948 supplement is in
+    U, so the cache counts the rows `--conflicts` prints. The gatekeeper's
+    diagnostic, never a footer segment (the footer stays six)."""
     entry["conflicts"], entry["conflicts_numbers"] = ts.conflict_tally(buckets)

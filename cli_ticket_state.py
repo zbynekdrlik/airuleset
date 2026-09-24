@@ -29,7 +29,7 @@ row is counted in NO bucket on this box (it counts on the box of the stream
 that owns it).
 """
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Optional, Union
 
 # The label predicates still live in cli_quals (re-exported by the airuleset
@@ -523,11 +523,11 @@ CONFLICT_PAIRS = (
 
 @dataclass(frozen=True)
 class Conflict:
-    """A declared pair found on one row, with the verdict `classify()` gives
-    that row: `bucket` and `why` (the rule that won)."""
+    """A declared pair (`name`) found on one row, with the row's `labels` of
+    that pair and the verdict `classify()` gives the row: `bucket` and `why`
+    (the rule that won)."""
     name: str
     labels: tuple
-    meaning: str
     bucket: str
     why: str
 
@@ -561,15 +561,17 @@ def conflicts(labels, box=None, facts=None):
     if not hits:
         return []
     bucket, why = classify({"labels": labels}, facts, box)
-    return [Conflict(pair.name, found, pair.meaning, bucket, why)
+    return [Conflict(pair.name, found, bucket, why)
             for pair, found in hits]
 
 
 def conflict_tally(buckets):
     """`(count, numbers)` of the conflicts across every row of a `bucketize`
     result (HIDDEN included): the footer cache fields (`cli_ticket_route
-    .record`). `count` counts conflicts (a row can carry several), the same
-    number as the `--conflicts` lines; `numbers` the distinct tickets."""
+    .record_conflicts`). `count` counts conflicts (a row can carry several),
+    the number of `conflict_lines` over the same buckets; `numbers` the
+    distinct tickets. The caller passes the rows it counted, the #948
+    supplement included."""
     count, numbers = 0, set()
     for rows in buckets.values():
         for number, row in (rows or {}).items():
@@ -580,23 +582,30 @@ def conflict_tally(buckets):
     return count, sorted(numbers)
 
 
-def conflict_lines(buckets, box, facts=None, supplement=()):
+def conflict_lines(buckets, box, facts=None):
     """The `conflict:` lines of a counted bucket set, by ticket number: what
     `--explain` prints after its row list and what `--conflicts` prints alone.
-    A #948 supplement row names the bucket it was counted in."""
+    Each names the bucket and rule `classify()` gives the row, a #948
+    supplement row included (it is admitted only when classify says U)."""
     facts = facts or TicketFacts()
-    supplement = set(supplement or ())
     counted = sorted(((number, bucket, row)
                       for bucket in BUCKETS + (HIDDEN,)
                       for number, row in (buckets.get(bucket) or {}).items()),
                      key=lambda item: int(item[0]))
     out = []
     for number, bucket, row in counted:
-        for c in conflicts(_labels_of(row), box, facts.of(number)):
-            if number in supplement:
-                c = replace(c, bucket=bucket, why=_SUPPLEMENT_REASON)
-            out.append(c.line(number))
+        out.extend(c.line(number)
+                   for c in conflicts(_labels_of(row), box, facts.of(number)))
     return out
+
+
+def stop_count(buckets):
+    """The `--count` / `/goal` stop-proof number (#1141 ROZHODNUTÉ ruling 2):
+    the I rows plus the C rows — "done, close me" is an action this box still
+    owes. P waits on a machine and stays out. The ONE definition:
+    `cli_ticket_route.count` and the `--explain` `count=` field both read
+    it."""
+    return len(buckets.get("I") or {}) + len(buckets.get("C") or {})
 
 
 _SUPPLEMENT_REASON = ("a pending question ping names this ticket, which the "
@@ -651,16 +660,16 @@ def explain_lines(buckets, box, facts=None, supplement=(), extras=()):
     for bucket, weight, reason, text in extras:
         out.append("-\t%s\t%s\t%s" % (bucket, reason, _cell(text)))
         totals[bucket] += weight
-    found = conflict_lines(buckets, box, facts, supplement)
+    found = conflict_lines(buckets, box, facts)
     out.extend(found)
     if facts.m_note:   # ruling 3: an accepted known limit, said out loud
         out.append("# note: the M set is partial (%s): a merged ticket may "
                    "count as I or C until the next refresh (#1141)"
                    % facts.m_note)
     shown = _ALWAYS_TOTALED + tuple(b for b in ("P", "C", HIDDEN) if totals[b])
-    # count = the `--count` / stop-proof number (`cli_ticket_route.count`):
-    # the I and C ROWS, never the footer extras (display terms)
-    count = len(buckets.get("I") or {}) + len(buckets.get("C") or {})
+    # count = the `--count` / stop-proof number: the I and C ROWS, never the
+    # footer extras (display terms)
+    count = stop_count(buckets)
     out.append("# explain: " + " ".join("%s=%d" % (b, totals[b])
                                         for b in shown)
                + " count=%d" % count

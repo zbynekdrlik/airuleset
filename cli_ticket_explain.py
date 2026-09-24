@@ -74,7 +74,7 @@ def _emit(buckets, box, facts=None, supplement=(), only_conflicts=False):
     """Print the `--explain` text, or with `only_conflicts` (`--conflicts`,
     #1141 slice 4) just its `conflict:` lines, for the gk review loop."""
     if only_conflicts:
-        lines = ts.conflict_lines(buckets, box, facts or None, supplement)
+        lines = ts.conflict_lines(buckets, box, facts or None)
     else:
         lines = ts.explain_lines(buckets, box, facts or None, supplement,
                                  extras=_footer_extras(_footer_cwd))
@@ -128,7 +128,7 @@ def _footer_cache_line(cwd):
            if isinstance(stamp, (int, float)) and not isinstance(stamp, bool)
            else "?")
     fields = ("open", "pipeline", "merged_unreleased", "done", "user_waiting",
-              "ops_wait", "gk")
+              "ops_wait", "gk", "conflicts")
     return "# footer cache (age %s): %s" % (age, " ".join(
         "%s=%s" % (f, "-" if entry.get(f) is None else entry.get(f))
         for f in fields))
