@@ -728,158 +728,22 @@ def _ops_wait_reason(labels):
 def _partition_workable(rows, own_stream=None):
     """Split a `_union_open_issues`/`_slice_mine_and_handed` rows dict
     (`{number: {"number","title","createdAt","labels"}}`) THREE ways:
-    `(workable, user_waiting, ops_wait)`. Both the user-waiting (#468) and the
-    ops-wait (#510) buckets LEAVE `workable` — they are parked (on the user's
-    answer / on an external event) and surface as the footer's `U N` / `W N`
-    buckets and `--waiting` / `--ops-wait`, never in the workable count.
+    `(workable, user_waiting, ops_wait)` — the footer's `I N` / `U N` / `W N`,
+    the /goal stop-proof's workable count and the lane guard (which runs
+    `core-quals`/`slice-quals --count`). ONE derivation of the SAME already-
+    fetched rows, never independent queries (#367/#468).
 
-    ONE derivation, never independent queries: all three halves come from the
-    SAME already-fetched rows, so the footer's `I N`/`U N`/`W N`, the /goal
-    stop-proof's workable count, and the lane guard (which runs `core-quals`/
-    `slice-quals --count`) cannot silently drift (#367/#468 lesson — the exact
-    reason a search-exclusion + separate positive query was rejected). Extends
-    the repo's own established client-side-partition pattern — no new mechanism.
-
-    PRECEDENCE (#526, ROZHODNUTÉ v3): a row carrying BOTH a user-waiting AND an
-    ops-wait label normally goes to `user_waiting` (a pending owner answer is the
-    more actionable of the two) — EXCEPT a `needs-acceptance`-ONLY user-waiting
-    row (reason == "acceptance": no needs-answer/needs-decision), which routes to
-    `ops_wait` (W) instead. Once the stream has SENT the client acceptance thread
-    and added `ops-wait`, the ticket is waiting on a THIRD PARTY, not a question
-    for the owner — U is "čo sa ťa Claude pýta / čo máš schváliť", W is
-    "odoslané, čaká tretia strana". needs-answer/needs-decision + ops-wait STAY
-    in U (a pending owner answer beats a sent thread), so the override is
-    acceptance-scoped. Both buckets leave `workable`, so the COUNT is identical
-    either way; the precedence only decides which DISPLAY bucket (U vs W) the row
-    lands in.
-
-    #622 (owner directive 2026-08-22): a BARE `needs-acceptance` (no `ops-wait`,
-    no gk-override) → U UNCONDITIONALLY. The code is merged and its only next step
-    is an owner-approved client message, so it is never dispatchable-now code work
-    (I = only that). This REVERSED #539's chained-I branch, which routed a bare
-    needs-acceptance with no DELIVERED draft to `workable` (I) using "no delivered
-    ping" as a proxy for "the stream's own chained work". #606 (2026-08-21) made
-    that proxy wrong for the common case: with owner-questions delivered ONE AT A
-    TIME, "no delivered ping" overwhelmingly means QUEUED-behind-others = waiting
-    on the owner (→ U). The genuinely-chained case collapses into "queued in U"
-    honestly (its dispatchable sibling work is its OWN ticket, still in I, so the
-    loop never falsely disarms). The delivered-vs-queued distinction is now a
-    DISPLAY tag only, computed on the on-demand `--waiting` path from
-    `_acceptance_present_set` (delivered → `acceptance`, undelivered → `queued`) —
-    it no longer routes, so this function is a PURE label partition again (no
-    question-map read on the hot footer/count path).
-
-    `needs-owner-action` (#601, the owner's own physical/manual step) routes to U
-    via the `else` branch below WHEN it is the HIGHEST-precedence user-waiting
-    label on the row — i.e. `_user_waiting_reason` reads `action` (no co-present
-    needs-answer/needs-decision/needs-acceptance, all of which outrank it). In
-    that normal case: (1) an owner-action + `ops-wait` row still lands in U
-    (owner beats third-party framing — the owner is not a third party); and (2)
-    it never enters the `ops_wait` bucket, so the #570 stale! W-freshness path can
-    never touch it. (Since #622 a bare needs-acceptance is ALSO always U, so
-    owner-action no longer differs from it on the I-vs-U axis — both are the
-    owner's court.)
-
-    Because `action` is the LOWEST precedence (deliberately, so needs-answer/
-    needs-decision/needs-acceptance stay byte-exact per #507/#526), a
-    PATHOLOGICAL row that ALSO carries a higher-precedence user-waiting label
-    follows THAT label's routing, not action's: e.g. `needs-acceptance` +
-    `needs-owner-action` + `ops-wait` reads reason `acceptance` and routes to W
-    by the acceptance-scoped override (and the #507 gk-override a co-present
-    `needs-acceptance` triggers applies too). Such a contradictory combo does not
-    occur in practice — the byte-exact preservation of the co-present label's
-    established semantics is the intended design, and a genuine owner-only-blocked
-    ticket never carries a competing acceptance/answer label. The
-    labelled-but-not-yet-announced defect is surfaced by the `no-action!` display
-    flag (`_no_question_flagged` + `_print_issue_rows`), not by a routing gate.
-
-    #943 (owner escalation 2026-09-08, odoo-erp #6294 APK): a NON-user-waiting
-    row carrying BOTH ops-wait AND a MAINTAINER_ACTION_LABELS label
-    (`needs-gatekeeper` / `ready-for-review`) routes to `workable` (action-only
-    I), NOT `ops_wait` (W). Only the full-authority box can action a hand-off,
-    so the hand-off label keeps the row visible in I — the #589/#636
-    over-count-safe direction. The `_gk_handoff_ops_wait_flagged` function (#636)
-    already DETECTED this contradictory shape and tagged it `gk_handoff!` in the
-    nudge text, but the partition itself routed it to W, making it invisible to
-    the gatekeeper's I count for 2 days. The override is unconditional (not
-    authority-gated) because this function is a pure label partition (#622),
-    and on a reduced-authority box these rows are structurally absent.
-
-    `own_stream` (#654): the box's OWN reduced-authority stream (its canonical
-    AUTHORITY_BY_USER key, `_current_user()`), or None for a full-authority box.
-    An ANSWER/DECISION/ACTION row owned by a FOREIGN stream (`_stream_owner_of`
-    != own_stream) is routed to `workable` (action-only), NOT `user_waiting` —
-    STREAM OWNERSHIP WINS for U routing (the ROZHODNUTÉ decision): a full-authority
-    (gk) box never fields another stream's owner-question, its owning box does.
-    Checked FIRST, so it beats the acceptance→W / U splits. A full box
-    (own_stream=None) drops every such foreign row into I; a slice box keeps its
-    OWN stream rows in its own U (owner == own_stream). SCOPED to answer/decision/
-    action (the enumerated ROZHODNUTÉ reasons): needs-acceptance keeps its own
-    #526/#622 routing (bare → U, sent-thread+ops-wait → W) — a foreign acceptance
-    is search-excluded from the obligation set anyway, so it never reaches this
-    branch on the gk box (the real leak path is answer/decision/action carrying a
-    gk queue label, which have no gk-override). `stream:core`/bare/unreadable →
-    `_stream_owner_of` == "" → not foreign → stays U (the box's own court)."""
-    workable, user_waiting, ops_wait = {}, {}, {}
+    #1141: a thin wrapper over `cli_ticket_state.classify(row, None, box)` —
+    the ONE total classifier, which holds the whole precedence (#468 #510 #526
+    #601 #622 #654 #943 #1053 #1056 #1130) and a one-line reason per branch
+    (printed by `--explain`). `own_stream` (#654): the box's OWN reduced-
+    authority stream, or None for a full-authority box."""
+    import cli_ticket_state
+    box = cli_ticket_state.Box(own_stream=own_stream)
+    out = {"I": {}, "U": {}, "W": {}}
     for number, row in rows.items():
-        labels = row.get("labels") if isinstance(row, dict) else None
-        if _row_is_user_waiting(labels):
-            reason = _user_waiting_reason(labels)
-            # #654: a FOREIGN stream:<user> answer/decision/action row NEVER
-            # enters THIS box's U — STREAM OWNERSHIP WINS (full contract + why
-            # SCOPED away from needs-acceptance in the `own_stream` docstring
-            # above). Checked FIRST, so it beats the acceptance→W / U splits.
-            owner = _stream_owner_of(labels)
-            if reason != "acceptance" and owner and owner != (own_stream or ""):
-                workable[number] = row
-            # #526: a needs-acceptance-ONLY user-waiting row (its acceptance
-            # thread already sent, marked by the stream's `ops-wait`) is waiting
-            # on the CLIENT, not the owner → route it to W. A pending owner
-            # answer (needs-answer/needs-decision → reason != "acceptance")
-            # keeps the row in U regardless of ops-wait. #622: every OTHER
-            # user-waiting row — incl. a bare needs-acceptance queued for owner
-            # approval, whether or not its draft was delivered — is the owner's
-            # court → U.
-            elif reason == "acceptance" and _row_is_ops_wait(labels):
-                ops_wait[number] = row
-            else:
-                user_waiting[number] = row
-        elif _row_is_ops_wait(labels):
-            # #943: a MAINTAINER_ACTION_LABELS label (needs-gatekeeper /
-            # ready-for-review) OVERRIDES ops-wait → workable (action-only I).
-            # Only the full-authority box can action a hand-off, so the hand-off
-            # label must keep the row visible in I, never hidden in W (the
-            # #589/#636 over-count-safe direction — the _gk_handoff_ops_wait_
-            # flagged function already DETECTS this shape, but the partition
-            # itself routed it to W for 2 days, odoo-erp #6294 APK). The
-            # override is unconditional (not authority-gated) because the
-            # function is a pure label partition (#622); on a reduced-authority
-            # box these rows are structurally absent from the obligation set
-            # anyway (_slice_mine_and_handed search-excludes foreign
-            # needs-gatekeeper rows). Additive partition-extension pattern
-            # (#601/#622).
-            names = {(lb or {}).get("name") for lb in (labels or [])
-                     if isinstance(lb, dict)}
-            # #1053: a SUBDEV_ACTION_LABELS label (`verify-on-copy`) overrides
-            # ops-wait the SAME way — only the owning stream can perform the
-            # post-deploy verify, so it stays action-only I, never hidden in W.
-            # #1056 L2 (i0): a `prio:bounce` label ALSO overrides ops-wait →
-            # workable. A returned bounce is the stream's own rework (the #313
-            # bounce override / #507 precedence extended into the W branch), so
-            # it is never "waiting on a third party" — the montalu1 read where
-            # three bounces sat in W (`prio:bounce`+`needs-acceptance`+
-            # `ops-wait`) as a false third-party wait. Label-only (the safe
-            # over-count direction); the precise verdict-vs-RFR classification
-            # is Job 8's / gk-watch's job, keeping this partition network-free.
-            if (_PARTITION_BOUNCE_LABEL in names
-                    or any(ml in names for ml in
-                           (MAINTAINER_ACTION_LABELS + SUBDEV_ACTION_LABELS))):
-                workable[number] = row
-            else:
-                ops_wait[number] = row
-        else:
-            workable[number] = row
-    return workable, user_waiting, ops_wait
+        out[cli_ticket_state.classify(row, None, box)[0]][number] = row
+    return out["I"], out["U"], out["W"]
 
 
 def _split_merged_unreleased(workable, ops_wait, merged_numbers):
@@ -905,6 +769,7 @@ def _split_merged_unreleased(workable, ops_wait, merged_numbers):
     `needs-acceptance`+`ops-wait` row (→ W by #526) must STAY in W, not be pulled
     into `M`. Returns `(workable, ops_wait, merged)` — all three fresh dicts;
     `user_waiting` is never touched (owner-court rows are out of scope here)."""
+    import cli_ticket_state
     merged_set = {int(n) for n in (merged_numbers or [])}
     if not merged_set:
         return dict(workable), dict(ops_wait), {}
@@ -912,11 +777,9 @@ def _split_merged_unreleased(workable, ops_wait, merged_numbers):
     for bucket, keep in ((workable, new_workable), (ops_wait, new_ops_wait)):
         for number, row in bucket.items():
             labels = row.get("labels") if isinstance(row, dict) else None
-            names = {(lb or {}).get("name") for lb in (labels or [])
-                     if isinstance(lb, dict)}
+            # #1141: the M rule is ONE predicate shared with classify().
             if (int(number) in merged_set
-                    and not _row_is_user_waiting(labels)
-                    and _PARTITION_BOUNCE_LABEL not in names):
+                    and cli_ticket_state.leaves_to_merged(labels)):
                 merged[number] = row
             else:
                 keep[number] = row
