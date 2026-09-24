@@ -25,10 +25,11 @@ One :class:`PollTimer` per ``run_disk_guard`` call:
 * ``over_budget(sink, remaining, next_label, ladder)`` is checked BETWEEN rungs
   by ``execute_drain``. The budget is :data:`DISK_GUARD_BUDGET_S`, capped by
   the caller's ``budget_s`` (the sweep's remaining soft-cap budget —
-  disk_guard may start late in the sweep). At least ONE rung of each ladder
-  runs per poll (the ``_SweepBudget`` first-op guarantee), so a poll whose
-  earlier steps spent the budget still makes progress. The first over-budget
-  check logs one ``budget exceeded`` line, sets ``cut_short``
+  disk_guard may start late in the sweep). Each ladder that runs this poll
+  runs at least ONE rung (the ``_SweepBudget`` first-op guarantee), so a poll
+  whose earlier steps spent the budget still makes progress. (A cut-short
+  quota pass skips the fs ladder for that poll — ``run_drain_passes``.) The
+  first over-budget check logs one ``budget exceeded`` line, sets ``cut_short``
   (``run_disk_guard`` then does not stamp the drain cadence marker, so the
   next due poll drains again) and records the first deferred rung as that
   LADDER's resume point (``drain-resume`` holds one entry per ladder:
@@ -209,8 +210,8 @@ class PollTimer:
         """True when the poll is past its budget and at least one rung of
         ``ladder`` already ran. The first True logs one line naming the last
         finished step, the poll's elapsed seconds (rounded up) and the
-        ``remaining`` rungs of that ladder, and records ``next_label`` as the
-        ladder's resume point; later calls on the same poll stay silent."""
+        ``remaining`` rungs of that ladder; later calls on the same poll stay
+        silent. Every True records ``next_label`` as the ladder's resume point."""
         if not self.rungs.get(ladder):
             return False
         elapsed = self.elapsed()
@@ -221,9 +222,9 @@ class PollTimer:
             sink.append("disk-guard: budget exceeded after %s (%ds) — %d rung(s) "
                         "deferred to next poll"
                         % (self.last_label, math.ceil(elapsed), remaining))
-            points = self._load(RESUME_NAME) or {}
-            points[ladder] = {"label": next_label, "ts": self.now}
-            self._put(RESUME_NAME, points)
+        points = self._load(RESUME_NAME) or {}
+        points[ladder] = {"label": next_label, "ts": self.now}
+        self._put(RESUME_NAME, points)
         return True
 
 

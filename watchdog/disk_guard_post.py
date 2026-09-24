@@ -79,6 +79,8 @@ def after_drain(status, home, now, dry_run, timer, planners_fn, scratch_rows,
             post["top_consumers_ts"] = now
             if "largest_live_scratch" in status:
                 post["largest_live_scratch"] = status["largest_live_scratch"]
+            # #980: keep the per-rung skip reasons _record_exhausted just wrote
+            post["drain_skipped_rungs"] = status.get("drain_skipped_rungs", [])
             dg.write_status_cache(dgq.carry_quota_fields(status, post), home=home)
         except Exception as e:
             logs.append("disk-guard: top-consumers post-drain write error: %r" % e)

@@ -3938,7 +3938,9 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     # cold-start non-drain poll) so downstream readers never see a missing key.
     if "top_consumers" not in status:   # #1067: a drain poll keeps the last walk's list
         _tc = _read_status_cache(home) if will_drain else None
-        status["top_consumers"] = _tc.get("top_consumers", []) if isinstance(_tc, dict) else []
+        _tc = _tc if isinstance(_tc, dict) else {}
+        status.update({k: _tc[k] for k in ("top_consumers", "top_consumers_ts") if k in _tc})
+        status.setdefault("top_consumers", [])
     try:
         write_status_cache(status, home=home)
     except Exception as e:
