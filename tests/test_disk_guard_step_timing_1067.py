@@ -277,3 +277,235 @@ def test_quota_then_fs_pass_logs_the_budget_line_once(tmp_path):
     assert calls == ["user-cache"]
     assert sum("budget exceeded" in ln for ln in logs) == 1
     assert dg._drain_due(str(tmp_path), 10_060.0) is True
+
+
+# --------------------------------------------------------------------------- #
+# review round 1 (#1067 slice 1e) — progress, sweep coupling, kill breadcrumb
+# --------------------------------------------------------------------------- #
+def test_next_poll_resumes_at_the_deferred_rung(tmp_path):
+    """Without a resume point every poll restarts at rung 0, so when the head
+    rungs alone exceed the budget the tail rungs never run."""
+    clock, calls = FakeClock(), []
+    planners = [_rung(clock, 30.0, calls, "a"), _rung(clock, 20.0, calls, "b"),
+                _rung(clock, 0.0, calls, "c"), _rung(clock, 0.0, calls, "d")]
+    _poll(tmp_path, clock, planners, now=10_000.0)
+    assert calls == ["a", "b"]
+    clock2, calls2 = FakeClock(), []
+    logs2 = _poll(tmp_path, clock2, [_rung(clock2, 0.0, calls2, x) for x in "abcd"],
+                  now=10_060.0)
+    assert calls2 == ["c", "d"], "the next poll starts at the first deferred rung"
+    assert "disk-guard: resuming ladder at c (deferred by the previous poll)" in logs2
+    # that drain completed → no resume point left; a later drain starts at rung 0
+    clock3, calls3 = FakeClock(), []
+    _poll(tmp_path, clock3, [_rung(clock3, 0.0, calls3, x) for x in "abcd"],
+          now=10_060.0 + 700)
+    assert calls3 == ["a", "b", "c", "d"]
+
+
+def test_stale_or_foreign_resume_point_is_ignored(tmp_path):
+    clock, calls = FakeClock(), []
+    _poll(tmp_path, clock, [_rung(clock, 50.0, calls, "a"), _rung(clock, 0.0, calls, "b")],
+          now=10_000.0)
+    # two hours later the resume point is stale: the ladder starts at rung 0
+    clock2, calls2 = FakeClock(), []
+    _poll(tmp_path, clock2, [_rung(clock2, 0.0, calls2, x) for x in "ab"],
+          now=10_000.0 + 7200)
+    assert calls2 == ["a", "b"]
+    # a resume label that is not in this ladder is ignored too
+    clock3, calls3 = FakeClock(), []
+    _poll(tmp_path, clock3, [_rung(clock3, 50.0, calls3, "a"), _rung(clock3, 0.0, calls3, "b")],
+          now=20_000.0)
+    clock4, calls4 = FakeClock(), []
+    _poll(tmp_path, clock4, [_rung(clock4, 0.0, calls4, x) for x in "xyz"], now=20_060.0)
+    assert calls4 == ["x", "y", "z"]
+
+
+def test_budget_is_capped_by_the_sweep_remaining_budget(tmp_path):
+    """disk_guard may start late in the sweep (its floor is 30 s of the 100 s
+    soft cap), so its own budget is the smaller of 45 s and what the sweep has
+    left — otherwise a late start still runs into the systemd kill."""
+    clock, calls = FakeClock(), []
+    planners = [_rung(clock, 12.0, calls, "a"), _rung(clock, 0.0, calls, "b")]
+    logs = _poll(tmp_path, clock, planners, budget_s=10)
+    assert calls == ["a"]
+    assert ("disk-guard: budget exceeded after a (12s) — 1 rung(s) deferred to next poll"
+            in logs)
+
+
+def test_run_once_passes_the_sweep_remaining_budget(tmp_path):
+    import unittest.mock as mock
+    import watchdog as wd
+    seen = {}
+
+    def _rec(*_a, **k):
+        seen.update(k)
+        return []
+
+    n = {"i": 0}
+
+    def _clock():
+        n["i"] += 1
+        return 5000.0 if n["i"] == 1 else 5020.0
+
+    with mock.patch.object(wd.disk_guard, "run_disk_guard", _rec):
+        wd.run_once(now=1_000_000, dry_run=True, run=lambda *a, **k: "",
+                    send_fn=lambda *a, **k: None, projects_dir=tmp_path / "proj",
+                    state_path=str(tmp_path / "state.json"), time_fn=_clock,
+                    disk_guard_enabled=True)
+    assert seen.get("budget_s") == wd.SWEEP_SOFT_CAP_S - 20
+
+
+def test_budget_line_rounds_elapsed_up(tmp_path):
+    clock, calls = FakeClock(), []
+    logs = _poll(tmp_path, clock, [_rung(clock, 45.4, calls, "a"), _rung(clock, 0.0, calls, "b")])
+    assert "disk-guard: budget exceeded after a (46s) — 1 rung(s) deferred to next poll" in logs
+
+
+def test_drain_step_is_named_when_slow(tmp_path):
+    clock, calls = FakeClock(), []
+    logs = _poll(tmp_path, clock, [_rung(clock, 3.0, calls, "a"), _rung(clock, 3.0, calls, "b")])
+    assert "disk-guard: step drain took 6.0s" in logs
+    assert not any("step a " in ln or "step b " in ln for ln in logs)
+
+
+def test_rung_actions_count_toward_the_rung_step(tmp_path):
+    clock = FakeClock()
+    timer = dgt.PollTimer(clock_fn=clock)
+
+    def _plan():
+        return [{"cls": "user-cache", "path": str(tmp_path / "c"), "bytes": 1,
+                 "kind": "delete", "reason": None}]
+
+    def _slow_action(_a):
+        clock.advance(6.0)
+        return 1
+
+    seq = iter([82, 82])
+    logs = dg.execute_drain(
+        {"worst_pct": 82, "dim": "bytes", "level": "drain"}, str(tmp_path),
+        [("user-cache", _plan)], recheck_fn=lambda: next(seq),
+        do_action_fn=_slow_action, geteuid_fn=lambda: 1000, log_path=None,
+        now=1.0, dry_run=True, timer=timer)
+    assert "disk-guard: step user-cache took 6.0s" in logs
+
+
+def test_slow_quota_read_is_named(tmp_path, monkeypatch):
+    clock = FakeClock()
+    monkeypatch.setattr(dg, "_prevention_planners", lambda _h, _n, scratch_rows=None: [])
+
+    def _slow_usage():
+        clock.advance(7.0)
+        return (100_000, 1_000_000)
+
+    logs = dg.run_disk_guard(
+        now=61.0, home=str(tmp_path), dry_run=True, statvfs_fn=_statvfs(40),
+        dev_fn=lambda _m: 1, mounts=("/",), geteuid_fn=lambda: 1000,
+        box_class_fn=lambda: "shared-stream", quota_usage_fn=_slow_usage,
+        du_fn=lambda _p: None, planners_fn=lambda _h, _n: [],
+        scratch_discover_fn=lambda _n, _h: [], clock_fn=clock)
+    assert "disk-guard: step quota-read took 7.0s" in logs
+
+
+def test_killed_step_is_named_on_the_next_poll(tmp_path):
+    """A step that spins until systemd kills the sweep never reaches its
+    `took` line — the journal must still name it: the next poll reports the
+    step the previous poll died in."""
+    clock = FakeClock()
+    timer = dgt.PollTimer(clock_fn=clock, state_dir=dg._guard_dir(str(tmp_path)),
+                          now=10_000.0)
+    outer = timer.step("drain", [])
+    outer.__enter__()
+    inner = timer.step("home-worktree", [])
+    inner.__enter__()               # never exits: the process was killed here
+    clock2, calls2 = FakeClock(), []
+    logs = _poll(tmp_path, clock2, [_rung(clock2, 0.0, calls2, "a")], now=10_060.0)
+    assert any(ln.startswith("disk-guard: previous poll") and "home-worktree" in ln
+               for ln in logs), logs
+    # reported once, then gone
+    logs3 = _poll(tmp_path, FakeClock(), [], now=10_060.0 + 700)
+    assert not any("previous poll" in ln for ln in logs3)
+    # `inner`/`outer` stay referenced as locals until here, so their generators
+    # are not closed (which would run the step's exit) before the polls above.
+
+
+def test_finished_steps_leave_no_breadcrumb(tmp_path):
+    clock, calls = FakeClock(), []
+    _poll(tmp_path, clock, [_rung(clock, 0.0, calls, "a")], now=10_000.0)
+    logs = _poll(tmp_path, FakeClock(), [], now=10_700.0)
+    assert not any("previous poll" in ln for ln in logs)
+
+
+def test_cut_short_drain_does_not_count_as_exhausted(tmp_path):
+    """A poll that deferred its rungs freed nothing — that is not the ladder
+    being exhausted, so the owner-facing exhausted streak must not grow."""
+    clock, calls = FakeClock(), []
+    _poll(tmp_path, clock, [_rung(clock, 50.0, calls, "a"), _rung(clock, 0.0, calls, "b")],
+          used_pct=86)
+    cache = dg._read_status_cache(str(tmp_path))
+    assert cache.get("drain_exhausted_streak", 0) == 0
+    assert cache.get("drain_exhausted") is not True
+    # control: a completed drain at the same pressure that frees nothing IS exhausted
+    clock2, calls2 = FakeClock(), []
+    _poll(tmp_path, clock2, [_rung(clock2, 0.0, calls2, x) for x in "ab"],
+          used_pct=86, now=10_060.0)
+    assert dg._read_status_cache(str(tmp_path)).get("drain_exhausted_streak") == 1
+
+
+def test_cut_short_quota_pass_is_not_exhausted(tmp_path):
+    from watchdog import disk_guard_quota as dgq
+    clock, calls = FakeClock(), []
+
+    def usage():
+        return (950_000, 1_000_000)
+
+    dg.run_disk_guard(
+        now=10_000.0, home=str(tmp_path), dry_run=False, statvfs_fn=_statvfs(40),
+        dev_fn=lambda _m: 1, mounts=("/",), geteuid_fn=lambda: 1000,
+        planners_fn=lambda _h, _n: [_rung(clock, 50.0, calls, "user-cache"),
+                                    _rung(clock, 0.0, calls, "scratch")],
+        sudo_probe_fn=lambda: False, box_class_fn=lambda: "shared-stream",
+        quota_usage_fn=usage, scratch_discover_fn=lambda _n, _h: [], clock_fn=clock)
+    assert calls == ["user-cache"]
+    q = dgq.quota_state({}, str(tmp_path), 10_060.0, True, usage_fn=usage)
+    assert q.exhausted is False
+
+
+def test_quota_then_fs_pass_plans_once_when_cut_short(tmp_path):
+    clock, calls, built = FakeClock(), [], []
+
+    def _planners(_h, _n):
+        built.append(1)
+        return [_rung(clock, 50.0, calls, "user-cache"), _rung(clock, 0.0, calls, "scratch")]
+
+    dg.run_disk_guard(
+        now=10_000.0, home=str(tmp_path), dry_run=False, statvfs_fn=_statvfs(82),
+        dev_fn=lambda _m: 1, mounts=("/",), geteuid_fn=lambda: 1000,
+        planners_fn=_planners, sudo_probe_fn=lambda: False,
+        box_class_fn=lambda: "shared-stream", quota_usage_fn=lambda: (950_000, 1_000_000),
+        scratch_discover_fn=lambda _n, _h: [], clock_fn=clock)
+    assert len(built) == 1, "the fs pass must not re-plan after a cut-short quota pass"
+
+
+def test_top_consumers_walk_is_timed_and_skipped_when_cut_short(tmp_path, monkeypatch):
+    clock, walks = FakeClock(), []
+
+    def _walk(_home, _now, limit=5, scratch_rows=None):
+        walks.append(limit)
+        clock.advance(6.0)
+        return []
+
+    monkeypatch.setattr(dg, "_collect_top_consumers", _walk)
+    calls = []
+    monkeypatch.setattr(dg, "_default_planners", lambda _h, _n, scratch_rows=None: [
+        _rung(clock, 50.0, calls, "a"), _rung(clock, 0.0, calls, "b")])
+    common = dict(home=str(tmp_path), dry_run=False, statvfs_fn=_statvfs(82),
+                  dev_fn=lambda _m: 1, mounts=("/",), geteuid_fn=lambda: 1000,
+                  sudo_probe_fn=lambda: False, box_class_fn=lambda: "workstation",
+                  scratch_discover_fn=lambda _n, _h: [])
+    dg.run_disk_guard(now=10_000.0, clock_fn=clock, **common)
+    assert walks == [], "a cut-short poll must not start the top-consumers walk"
+    monkeypatch.setattr(dg, "_default_planners", lambda _h, _n, scratch_rows=None: [
+        _rung(clock, 0.0, calls, "c")])
+    logs = dg.run_disk_guard(now=10_060.0, clock_fn=clock, **common)
+    assert walks == [3]
+    assert "disk-guard: step top-consumers took 6.0s" in logs
