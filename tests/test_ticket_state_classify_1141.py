@@ -99,11 +99,12 @@ _HANDOFF = ("needs-gatekeeper", "ready-for-review", "gk-processing")
 
 def _stream_has_live_box(owner):
     """Read from the fleet DATA (never pinned): a stream counts its own U only
-    on a box that runs — not a webterm observer, not a paused host."""
+    on a box that runs — not a webterm observer, and at least one host entry
+    that is not paused."""
     import cli_fleet
     return (owner not in cli_fleet.WEBTERM_OBSERVER_USERS
-            and not any(h.get("user") == owner and h.get("paused")
-                        for h in cli_fleet.REMOTE_HOSTS))
+            and any(h.get("user") == owner and not h.get("paused")
+                    for h in cli_fleet.REMOTE_HOSTS))
 
 
 def _slice2_move(row, own_stream):
