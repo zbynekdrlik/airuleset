@@ -61,6 +61,7 @@ class _Hermetic(TestCase):
             p = mock.patch.object(target, attr, value)
             p.start()
             self.addCleanup(p.stop)
+        cli_stream_priority._cache.update(key=None, value={})
 
     def write(self, content):
         self.path.write_text(content if isinstance(content, str)
@@ -82,9 +83,20 @@ class _Hermetic(TestCase):
 
 
 class TestShippedContract(TestCase):
-    def test_shipped_file_marks_montalu_high(self):
-        data = json.loads((REPO / "stream-priority.json").read_text())
-        self.assertEqual(data, {"montalu": "high"})
+    """The SHIPPED file is owner data (`set` rewrites it), so these assert it
+    is VALID and that `--list` prints exactly it — never pin its content, or
+    the owner's own `set` would fail the next push gate (review finding)."""
+
+    def test_shipped_file_is_valid(self):
+        data, err, dropped, present = cli_stream_priority._read(
+            REPO / "stream-priority.json")
+        self.assertTrue(present)
+        self.assertIsNone(err)
+        self.assertEqual(dropped, [])
+        self.assertTrue(data, "the registry ships with at least one entry")
+        self.assertLessEqual(set(data), cli_stream_priority.known_families())
+        self.assertLessEqual(set(data.values()),
+                             set(cli_stream_priority.PRIORITIES))
 
     def test_cli_list_prints_shipped_json(self):
         r = subprocess.run(
@@ -92,7 +104,9 @@ class TestShippedContract(TestCase):
              "--list"], capture_output=True, text=True, cwd=str(REPO),
             timeout=60)
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(r.stdout), {"montalu": "high"})
+        self.assertEqual(r.stderr, "")
+        self.assertEqual(json.loads(r.stdout), cli_stream_priority._read(
+            REPO / "stream-priority.json")[0])
 
     def test_subcommand_registered(self):
         self.assertIs(airuleset.SUBCOMMANDS["stream-priority"],
@@ -118,10 +132,25 @@ class TestList(_Hermetic):
         self.assertEqual(json.loads(out), {})
         self.assertIn("stream-priority", err)
 
-    def test_list_drops_invalid_values(self):
+    def test_list_drops_invalid_values_with_a_warning(self):
         self.write({"montalu": "high", "david": "urgent", "miva": 3})
+        rc, out, err = self.run_cmd(list_=True)
+        self.assertEqual(json.loads(out), {"montalu": "high"})
+        self.assertIn('david="urgent"', err)
+
+    def test_numbered_key_folds_into_its_family(self):
+        self.write({"montalu3": "high"})
         rc, out, _ = self.run_cmd(list_=True)
         self.assertEqual(json.loads(out), {"montalu": "high"})
+        self.assertEqual(cli_stream_priority.row_priority_rank(
+            _row("x", ["stream:montalu1"])), 0)
+
+    def test_list_warns_on_a_family_no_stream_carries(self):
+        self.write({"montlau": "high"})
+        rc, out, err = self.run_cmd(list_=True)
+        self.assertEqual(rc, 0)
+        self.assertEqual(json.loads(out), {"montlau": "high"})
+        self.assertIn("montlau", err)
 
     def test_bare_command_lists(self):
         self.write({"montalu": "high"})
@@ -186,6 +215,35 @@ class TestSet(_Hermetic):
         self.assertNotEqual(rc, 0)
         self.assertEqual(self.path.read_text(), "{not json")
 
+    def test_set_refuses_to_drop_unreadable_entries(self):
+        self.write({"montalu": "high", "david": "HIGH"})
+        before = self.path.read_text()
+        with redirect_stderr(io.StringIO()):
+            rc, _, err = self.run_cmd(sp_args=["set", "miva1", "high"])
+        self.assertNotEqual(rc, 0)
+        self.assertIn('david="HIGH"', err)
+        self.assertEqual(self.path.read_text(), before)
+
+    def test_set_normal_on_missing_file_creates_nothing(self):
+        rc, out, _ = self.run_cmd(sp_args=["set", "david", "normal"])
+        self.assertEqual(rc, 0)
+        self.assertIn("already normal", out)
+        self.assertFalse(self.path.exists())
+
+    def test_set_already_high_is_a_noop(self):
+        self.write({"montalu": "high"})
+        rc, out, _ = self.run_cmd(sp_args=["set", "montalu3", "high"])
+        self.assertEqual(rc, 0)
+        self.assertIn("already high", out)
+
+    def test_write_failure_is_rc1_not_a_traceback(self):
+        os.chmod(self._tmp.name, 0o500)
+        self.addCleanup(os.chmod, self._tmp.name, 0o700)
+        rc, _, err = self.run_cmd(sp_args=["set", "david", "high"])
+        self.assertEqual(rc, 1)
+        self.assertIn("could not write", err)
+        self.assertEqual(os.listdir(self._tmp.name), [])
+
     def test_set_bad_arity_is_usage_error(self):
         rc, _, _ = self.run_cmd(sp_args=["set", "david"])
         self.assertNotEqual(rc, 0)
@@ -227,14 +285,42 @@ class TestSetControllerOnly(_Hermetic):
         self.assertEqual(json.loads(self.path.read_text()),
                          {"montalu": "high"})
 
+    def test_unreadable_box_class_refuses(self):
+        def boom():
+            raise OSError("marker unreadable")
+        p = mock.patch.object(cli_stream_priority, "_box_class", boom)
+        p.start()
+        self.addCleanup(p.stop)
+        rc, _, _ = self.run_cmd(sp_args=["set", "david", "high"])
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(json.loads(self.path.read_text()),
+                         {"montalu": "high"})
+
     def test_controller_writes_and_commits(self):
         self._box("controller")
-        rc, _, _ = self.run_cmd(sp_args=["set", "david", "high"])
+        rc, out, _ = self.run_cmd(sp_args=["set", "david", "high"])
         self.assertEqual(rc, 0)
+        self.assertIn("airuleset.py push", out)
         self.assertEqual(json.loads(self.path.read_text()),
                          {"montalu": "high", "david": "high"})
         self.assertEqual(self.git("status", "--porcelain").strip(), "")
         self.assertIn("stream-priority", self.git("log", "-1", "--format=%s"))
+
+    def test_controller_noop_makes_no_commit(self):
+        self._box("controller")
+        before = self.git("rev-list", "--count", "HEAD")
+        rc, _, _ = self.run_cmd(sp_args=["set", "montalu", "high"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.git("rev-list", "--count", "HEAD"), before)
+
+    def test_controller_commit_failure_is_rc1(self):
+        self._box("controller")
+        lock = Path(self._tmp.name) / ".git" / "index.lock"
+        lock.write_text("")
+        self.addCleanup(lambda: lock.exists() and lock.unlink())
+        rc, _, err = self.run_cmd(sp_args=["set", "david", "high"])
+        self.assertEqual(rc, 1)
+        self.assertIn("NOT committed", err)
 
 
 class TestRowOrdering(_Hermetic):
@@ -265,6 +351,11 @@ class TestRowOrdering(_Hermetic):
             "20": _row("2026-09-01T00:00:00Z", ["stream:montalu"]),
         }
         self.assertEqual(self.emit(rows), ["20", "10"])
+
+    def test_any_high_stream_label_promotes_the_row(self):
+        self.write({"montalu": "high"})
+        row = _row("x", ["stream:david1", "stream:montalu1"])
+        self.assertEqual(cli_stream_priority.row_priority_rank(row), 0)
 
     def test_architecture_rework_still_leads_high_priority(self):
         self.write({"montalu": "high"})
