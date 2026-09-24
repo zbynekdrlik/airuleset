@@ -1,8 +1,8 @@
 """cli_ticket_explain — the `--explain` CLI wiring for the footer buckets (#1141).
 
 The pure classifier and the text renderer live in `cli_ticket_state`
-(`classify`, `conflicts`, `explain_lines`). This module is the I/O shell around
-them. It receives the buckets `core-quals`/`slice-quals` already COUNTED (so
+(`classify`, `conflicts`, `explain_lines`, `conflict_lines`). This module is
+the I/O shell around them; `--conflicts` prints only the conflict lines. It receives the buckets `core-quals`/`slice-quals` already COUNTED (so
 `--explain` can never re-derive a number), adds the footer-only contributions
 (ticketless ❓ pings in U, the task-hygiene A count in I), and prints.
 `tickets-status --explain` runs the same quals derivation from the session's
@@ -41,10 +41,11 @@ _ROLES = cli_ticket_route.ROLES
 _footer_cwd = None
 
 
-def _refuse_extra(extra):
+def _refuse_extra(extra, flag="--explain"):
     if extra:
-        print("--explain explains the footer buckets and does not combine "
-              "with --extra (that query skips the partition)", file=sys.stderr)
+        print("%s explains the footer buckets and does not combine "
+              "with --extra (that query skips the partition)" % flag,
+              file=sys.stderr)
         sys.exit(2)
 
 
@@ -69,37 +70,48 @@ def _footer_extras(cwd=None):
     return extras
 
 
-def _emit(buckets, box, facts=None, supplement=()):
-    for line in ts.explain_lines(buckets, box, facts or None, supplement,
-                                 extras=_footer_extras(_footer_cwd)):
+def _emit(buckets, box, facts=None, supplement=(), only_conflicts=False):
+    """Print the `--explain` text, or with `only_conflicts` (`--conflicts`,
+    #1141 slice 4) just its `conflict:` lines, for the gk review loop."""
+    if only_conflicts:
+        lines = ts.conflict_lines(buckets, box, facts or None, supplement)
+    else:
+        lines = ts.explain_lines(buckets, box, facts or None, supplement,
+                                 extras=_footer_extras(_footer_cwd))
+    for line in lines:
         print(line)
 
 
-def explain_core(extra, buckets, facts):
+def _flag(only_conflicts):
+    return "--conflicts" if only_conflicts else "--explain"
+
+
+def explain_core(extra, buckets, facts, only_conflicts=False):
     """`core-quals --explain`: the full-authority box (no gk bucket: it
     actions its own hand-offs). `buckets`/`facts` are the ONE route's result
     (`cli_ticket_route.quals`), the SAME `--count` uses — including the HIDDEN
     rows (a foreign stream's owner question, #1141 slice 2), listed with their
-    reason and counted in no bucket."""
-    _refuse_extra(extra)
-    _emit(buckets, ts.Box(), facts)
+    reason and counted in no bucket. `only_conflicts`: `--conflicts`."""
+    _refuse_extra(extra, _flag(only_conflicts))
+    _emit(buckets, ts.Box(), facts, only_conflicts=only_conflicts)
 
 
-def explain_slice(extra, root, rows, buckets, facts, box=None):
+def explain_slice(extra, root, rows, buckets, facts, box=None,
+                  only_conflicts=False):
     """`slice-quals --explain`: the reduced-authority box `box` (default: this
     account's stream, as `slice-quals` resolves it). `buckets`/`facts` are the
     ONE route's result (I = the unhandled rows `--count` counts, gk = the
     handed-off ones; every bucket role-filtered like the footer, since the
     role filter is a pre-filter, #1141 slice 3). U also carries the #948
-    question-map supplement the footer adds."""
-    _refuse_extra(extra)
+    question-map supplement the footer adds. `only_conflicts`: `--conflicts`."""
+    _refuse_extra(extra, _flag(only_conflicts))
     import airuleset
     import cli_quals_cmd
     box = box or ts.Box(own_stream=airuleset._current_user())
     extra_u = cli_quals._question_map_u_supplement(
         rows, root, cli_quals_cmd._slice_quals_runner(root))
     _emit({**buckets, "U": {**buckets["U"], **extra_u}}, box, facts,
-          supplement=extra_u)
+          supplement=extra_u, only_conflicts=only_conflicts)
 
 
 def _footer_cache_line(cwd):

@@ -9642,13 +9642,19 @@ def _add_dispatch_flags(parser):
              "the infra role/target (the per-role sequential mode is PENDING "
              "round 3, #993 — today this is the routing slice only).")
     parser.add_argument("--explain", action="store_true", help=_EXPLAIN_HELP)
+    parser.add_argument(
+        "--conflicts", action="store_true",
+        help="Print ONLY the `conflict:` lines of --explain: one per "
+             "contradictory label pair, with the bucket classify() gave the "
+             "ticket (#1141 slice 4)")
 
 
 # #1141: `--explain` on tickets-status / core-quals / slice-quals.
 _EXPLAIN_HELP = ("Print every counted ticket as number<TAB>bucket<TAB>reason"
                  "<TAB>title (bucket = I/M/U/W/gk, ONE reason from "
-                 "cli_ticket_state.classify), a `conflict:` line under a "
-                 "contradictory label set, and a `# explain:` totals line (#1141)")
+                 "cli_ticket_state.classify), a `conflict:` line per "
+                 "contradictory label pair, and a `# explain:` totals line "
+                 "with count=I+C (#1141)")
 
 
 def _add_tickets_status_flags(parser):

@@ -843,7 +843,8 @@ def cmd_slice_quals(args):
     want_count_dispatchable = getattr(args, "count_dispatchable", False)  # #993 item 3
     want_list_dispatchable = getattr(args, "list_dispatchable", False) is True  # #1078 item 1 (#1036 Mock-truthy guard)
     want_snapshot = getattr(args, "snapshot_json", False) is True  # #1067 1d (#1036 Mock-truthy guard)
-    want_explain = getattr(args, "explain", False) is True  # #1141 (#1036 Mock-truthy guard)
+    want_conflicts = getattr(args, "conflicts", False) is True  # #1141 slice 4 (#1036)
+    want_explain = getattr(args, "explain", False) is True or want_conflicts  # #1141 (#1036 Mock-truthy guard)
     if not (want_count or want_list or want_waiting or want_ops_wait
             or want_audit or want_bounces or want_dep_wait
             or want_count_dispatchable or want_list_dispatchable
@@ -938,7 +939,7 @@ def cmd_slice_quals(args):
     unhandled, waiting, ops_wait = _b["I"], _b["U"], _b["W"]
     if want_explain:   # #1141: the SAME buckets --count uses (__import__: size budget)
         return __import__("cli_ticket_explain").explain_slice(
-            extra, root, rows, _b, _facts, _box)
+            extra, root, rows, _b, _facts, _box, want_conflicts)
     if want_snapshot:
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition.
         import cli_quals_snapshot
@@ -1410,7 +1411,8 @@ def cmd_core_quals(args):
     want_count_dispatchable = getattr(args, "count_dispatchable", False)  # #993 item 3
     want_list_dispatchable = getattr(args, "list_dispatchable", False) is True  # #1078 item 1 (#1036 Mock-truthy guard)
     want_snapshot = getattr(args, "snapshot_json", False) is True  # #1067 1d (#1036 Mock-truthy guard)
-    want_explain = getattr(args, "explain", False) is True  # #1141 (#1036 Mock-truthy guard)
+    want_conflicts = getattr(args, "conflicts", False) is True  # #1141 slice 4 (#1036)
+    want_explain = getattr(args, "explain", False) is True or want_conflicts  # #1141 (#1036 Mock-truthy guard)
     if not (want_count or want_list or want_waiting or want_ops_wait or want_audit
             or want_dep_wait or want_count_dispatchable or want_list_dispatchable
             or want_snapshot or want_explain):
@@ -1519,7 +1521,7 @@ def cmd_core_quals(args):
                 file=sys.stderr)
             sys.exit(1)
     if want_explain:   # #1141: the SAME buckets --count uses (__import__: size budget)
-        return __import__("cli_ticket_explain").explain_core(extra, _b, _facts)
+        return __import__("cli_ticket_explain").explain_core(extra, _b, _facts, want_conflicts)
     if want_snapshot:
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition
         # (own_stream=None: a full-authority box owns no stream).
