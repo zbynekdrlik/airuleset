@@ -119,7 +119,9 @@ class TestRefreshRenderers(unittest.TestCase):
         quotacheck, and a SIGKILL (no EXIT trap) must not leave quota off."""
         svc = crg.render_quota_refresh_service()
         self.assertIn("After=airuleset-quota.service", svc)
-        self.assertIn("ExecStopPost=-/sbin/quotaon -u /", svc)
+        stop = [ln for ln in svc.splitlines() if ln.startswith("ExecStopPost=-")]
+        self.assertEqual(len(stop), 1, svc)
+        self.assertTrue(stop[0].endswith("/sbin/quotaon -u /"), stop[0])
 
     def test_refresh_and_apply_share_one_lock(self):
         """review: a push apply must never quotaon under a running recount."""
