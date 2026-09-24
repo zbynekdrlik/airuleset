@@ -175,7 +175,7 @@ def _set(stream, priority):
               % priority, file=sys.stderr)
         return 2
     path = Path(STREAM_PRIORITY_PATH)
-    data, err, dropped, present = _read(path)
+    data, err, dropped, _present = _read(path)
     if err or dropped:
         print("stream-priority: %s %s — refusing to rewrite it (fix or remove "
               "it first)" % (path, err or "has unreadable entries: "
@@ -186,7 +186,7 @@ def _set(stream, priority):
         new[family] = PRIORITY_HIGH
     else:
         new.pop(family, None)      # normal is the default: keep the file minimal
-    if new == data and (present or not new):
+    if new == data:                # a missing file reads {} -> a normal set is a no-op
         print("stream-priority: %s is already %s" % (family, priority))
         return 0
     tracked = cli_onboard._registry_is_tracked(path)
