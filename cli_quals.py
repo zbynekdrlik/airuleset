@@ -498,6 +498,10 @@ USER_WAITING_LABELS = ("needs-answer", "needs-decision", "needs-acceptance",
 #
 # Issue 1130: DERIVED from MAINTAINER_ACTION_LABELS, so `gk-processing` overrides
 # too (a foreign acceptance in gk-processing fell to the gk owner's U).
+# #1141 slice 2: for ROUTING the hand-off labels no longer override an UNSENT
+# needs-acceptance (`cli_ticket_state.waiting_kind`: the owner question beats
+# the hand-off); `prio:bounce` still does. This tuple keeps its #1083 M-veto and
+# `_ops_wait_reason` tag roles.
 NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS = MAINTAINER_ACTION_LABELS + (
     "prio:bounce",)
 
@@ -571,6 +575,11 @@ def _row_is_user_waiting(labels):
     user-waiting=True unconditionally (an owner-blocked physical step is always
     the owner's court; the acceptance-override applies to `needs-acceptance`
     only).
+
+    #1141 slice 2: the I/U/W ROUTING no longer reads this predicate directly.
+    `cli_ticket_state.waiting_kind` widens it (an UNSENT needs-acceptance beats
+    a hand-off label, owner ruling in the #1141 design comment); this
+    predicate still defines the #1083 M veto (`leaves_to_merged`), unchanged.
 
     A missing/unreadable `labels` value reads as NOT user-waiting (→ workable) —
     the SAFE side: never hide a ticket from THIS box's own responsibility because
@@ -737,13 +746,15 @@ def _partition_workable(rows, own_stream=None):
     the ONE total classifier, which holds the whole precedence (#468 #510 #526
     #601 #622 #654 #943 #1053 #1056 #1130) and a one-line reason per branch
     (printed by `--explain`). `own_stream` (#654): the box's OWN reduced-
-    authority stream, or None for a full-authority box."""
+    authority stream, or None for a full-authority box. A row classify() calls
+    HIDDEN (a foreign stream's owner question on the full-authority box,
+    #1141 slice 2) is in none of the three dicts."""
     import cli_ticket_state
     box = cli_ticket_state.Box(own_stream=own_stream)
-    out = {"I": {}, "U": {}, "W": {}}
+    out = {"I": {}, "U": {}, "W": {}, cli_ticket_state.HIDDEN: {}}
     for number, row in rows.items():
         out[cli_ticket_state.classify(row, None, box)[0]][number] = row
-    return out["I"], out["U"], out["W"]
+    return out["I"], out["U"], out["W"]   # HIDDEN: counted on its owner's box
 
 
 def _split_merged_unreleased(workable, ops_wait, merged_numbers):
@@ -814,12 +825,14 @@ def _acceptance_present_set(rows, cwd=None, home=None):
     needs-acceptance rows are considered — a needs-answer/needs-decision row (→ U
     by label) and a needs-acceptance+ops-wait row (→ W) are never in the returned
     set, so the display tag never touches them."""
+    import cli_ticket_state
     import statusbar
     bare = set()
     for number, row in rows.items():
         labels = row.get("labels") if isinstance(row, dict) else None
-        if (_row_is_user_waiting(labels)
-                and _user_waiting_reason(labels) == "acceptance"
+        # #1141 slice 2: the partition's own question predicate, so an
+        # unsent acceptance that beats a hand-off label is tagged too.
+        if (cli_ticket_state.waiting_kind(labels) == "acceptance"
                 and not _row_is_ops_wait(labels)):
             bare.add(number)
     try:
@@ -993,6 +1006,7 @@ def _question_map_u_supplement(rows, root, runner):
 
     ``runner(argv, cd)`` is the caller's ``_out`` (a subprocess wrapper); ``rows``
     is the ``_union_open_issues`` / ``_slice_mine_and_handed`` result dict."""
+    import cli_ticket_state
     import statusbar as _sb
     try:
         refs = _sb.question_map_ticket_refs(root)
@@ -1021,7 +1035,7 @@ def _question_map_u_supplement(rows, root, runner):
         if isinstance(state, str) and state.upper() != "OPEN":
             continue
         qlabels = obj.get("labels")
-        if _row_is_user_waiting(qlabels):
+        if cli_ticket_state.waiting_kind(qlabels):   # #1141 slice 2: the partition's predicate
             result[qn] = {
                 "labels": qlabels,
                 "title": obj.get("title", ""),

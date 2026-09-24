@@ -9,16 +9,20 @@ behind the sub-dev `gk` count. The `--explain` surfaces of `tickets-status`,
 ticket, so "why is I 5" is answered by the tool, not by a session decoding
 labels. This module stays pure: no I/O, no process state.
 
-Slice 1 (this module's first version) is a ZERO-behaviour-change refactor: the
-precedence below reproduces the pre-#1141 label partition exactly (locked by
-`tests/test_ticket_state_classify_1141.py`, a frozen-oracle parity test over
-every label combination). A contradictory label set is only REPORTED
-(`conflicts()`); it does not change the bucket. The precedence fixes, the P/C
-buckets and the machine facts are later slices of #1141.
+Slice 1 was a ZERO-behaviour-change refactor of the pre-#1141 label
+partition (locked by `tests/test_ticket_state_classify_1141.py`, a frozen-oracle
+parity test over every label combination). Slice 2 changed exactly two
+precedences (the oracle there lists the moved cases): an owner question beats a
+hand-off label, and a FOREIGN stream's owner question is `HIDDEN` on the
+full-authority box (`_question_route`). A contradictory label set is also
+REPORTED (`conflicts()`). The P/C buckets and the machine facts are later
+slices of #1141.
 
 Buckets (`BUCKETS`): `I` workable, `U` the owner's court, `W` a third party,
 `M` merged to the integration branch but not yet on main, `gk` handed off to
-the gatekeeper (a reduced-authority box only).
+the gatekeeper (a reduced-authority box only). `HIDDEN` is the one verdict
+outside BUCKETS: the row is counted in NO bucket on this box (it counts on the
+box of the stream that owns it).
 """
 
 from dataclasses import dataclass
@@ -31,6 +35,7 @@ from typing import Optional, Union
 import cli_quals
 
 BUCKETS = ("I", "M", "U", "W", "gk")
+HIDDEN = "hidden"   # #1141 slice 2: counted on the owning stream's box, not here
 
 # The owner-question labels (everything user-waiting except needs-acceptance,
 # which is a client-message approval with its own #526/#622 routing).
@@ -89,11 +94,80 @@ def leaves_to_merged(labels):
             and _BOUNCE not in _names(labels))
 
 
+def waiting_kind(labels):
+    """The owner's-court kind of a row — `answer` / `decision` / `acceptance` /
+    `action` — or "" (#1141 slice 2). It is `cli_quals._row_is_user_waiting`
+    with ONE change: an UNSENT `needs-acceptance` (no `ops-wait`, no
+    `prio:bounce`) is the owner's court even when a hand-off label
+    (`MAINTAINER_ACTION_LABELS`) is present — the owner question beats the
+    hand-off. `prio:bounce` still overrides it (the stream's own rework), and a
+    SENT acceptance with a hand-off keeps its hand-off route (#943). The
+    partition, the `--waiting` acceptance tag and the #948 question-map
+    supplement all read this ONE predicate."""
+    if cli_quals._row_is_user_waiting(labels):
+        return cli_quals._user_waiting_reason(labels)
+    names = _names(labels)
+    if ("needs-acceptance" in names and _BOUNCE not in names
+            and not cli_quals._row_is_ops_wait(labels)):
+        return "acceptance"
+    return ""
+
+
+def _question_route(labels, kind, box):
+    """Route a row whose `waiting_kind` is `kind` (#1141 slice 2), or None to
+    fall through to the rest of the partition.
+    - On a reduced-authority box a FOREIGN row keeps its slice-1 route: rule 2
+      is scoped to the full-authority box, and rule 1 puts a question in U on
+      the box of the stream that OWNS it. So a foreign answer/decision/action
+      stays #654 action-only I, and a foreign acceptance that is a question
+      only because it now beats a hand-off label falls through (None) to the
+      hand-off route it had.
+    - A SENT acceptance (`ops-wait`) is a third party's: W (#526).
+    - A FOREIGN stream's owner question on the full-authority box is HIDDEN:
+      that stream's own box counts it in its U (reverses #654 for questions).
+    - Everything else is the owner's court here: U, with the hand-off label it
+      beats named in the reason."""
+    owner = cli_quals._stream_owner_of(labels)
+    foreign = bool(owner) and owner != (box.own_stream or "")
+    if foreign and box.kind == "slice":
+        if not cli_quals._row_is_user_waiting(labels):
+            return None
+        if kind != "acceptance":
+            return ("I", "%s belongs to stream %s, whose own box asks the "
+                         "owner; here it is action-only work (#654)"
+                    % (_U_LABEL[kind], owner))
+    if kind == "acceptance" and cli_quals._row_is_ops_wait(labels):
+        return ("W", "needs-acceptance + ops-wait: the client thread was "
+                     "sent; waiting on the client (#526)")
+    if foreign and box.kind == "core":
+        return (HIDDEN, "%s is stream %s's owner question: counted in U on "
+                        "that stream's box, not on this full-authority box "
+                        "(#1141)" % (_U_LABEL[kind], owner))
+    beaten = [lb for lb in cli_quals.MAINTAINER_ACTION_LABELS
+              if lb in _names(labels)]
+    if beaten:
+        return ("U", "%s; the owner question beats the hand-off label %s "
+                     "(#1141)" % (_U_REASON[kind], beaten[0]))
+    return "U", _U_REASON[kind]
+
+
 def _partition(labels, box):
-    """The pre-#1141 label partition, one branch per rule, each with its
-    reason. Its precedence documentation below is the former
+    """The label partition, one branch per rule, each with its reason. Its
+    precedence documentation below is the former
     `cli_quals._partition_workable` docstring, moved VERBATIM (#1141) —
     that function is now a thin wrapper over `classify()`.
+
+    #1141 slice 2 SUPERSEDES two parts of that history (owner ruling in the
+    #1141 design comment; live cases odoo-erp 8058 and 8180):
+    - The #507/#1130 hand-off override no longer takes an UNSENT
+      needs-acceptance out of U: an owner question beats every hand-off label
+      (`waiting_kind`). `prio:bounce` still overrides it, and a sent
+      acceptance with a hand-off keeps the #943 route.
+    - The #654 paragraph at the end: on the FULL-authority box a foreign
+      stream's owner question (answer/decision/action AND an unsent
+      acceptance) is now `HIDDEN` — neither I nor U — because it counts in U
+      on that stream's own box. On a reduced-authority box #654 is unchanged.
+    See `_question_route`.
 
     --- moved verbatim from `_partition_workable` ---
 
@@ -191,17 +265,10 @@ def _partition(labels, box):
     branch on the gk box (the real leak path is answer/decision/action carrying a
     gk queue label, which have no gk-override). `stream:core`/bare/unreadable →
     `_stream_owner_of` == "" → not foreign → stays U (the box's own court)."""
-    if cli_quals._row_is_user_waiting(labels):
-        kind = cli_quals._user_waiting_reason(labels)
-        owner = cli_quals._stream_owner_of(labels)
-        if kind != "acceptance" and owner and owner != (box.own_stream or ""):
-            return ("I", "%s belongs to stream %s, whose own box asks the owner; "
-                         "here it is action-only work (#654)"
-                    % (_U_LABEL[kind], owner))
-        if kind == "acceptance" and cli_quals._row_is_ops_wait(labels):
-            return ("W", "needs-acceptance + ops-wait: the client thread was "
-                         "sent; waiting on the client (#526)")
-        return "U", _U_REASON[kind]
+    kind = waiting_kind(labels)
+    routed = kind and _question_route(labels, kind, box)
+    if routed:   # #1141 slice 2: the question is decided before any hand-off
+        return routed
     names = _names(labels)
     handoff = [lb for lb in cli_quals.MAINTAINER_ACTION_LABELS if lb in names]
     verify = [lb for lb in cli_quals.SUBDEV_ACTION_LABELS if lb in names]
@@ -239,7 +306,9 @@ def _partition(labels, box):
 def classify(row, facts=None, box=None):
     """Return `(bucket, reason)` for ONE ticket row (a gh `--json` dict with a
     `labels` list; any other shape is handled on the safe side). Total: every
-    input gets exactly one bucket from BUCKETS and a one-line reason.
+    input gets exactly one verdict — a bucket from BUCKETS, or `HIDDEN` (a
+    foreign stream's owner question on the full-authority box, counted on that
+    stream's box, #1141 slice 2) — and a one-line reason.
 
     Order (first match wins): the label partition (`_partition`, I/U/W) →
     `facts.merged` moves an I/W row that `leaves_to_merged` to M (#1083) →
@@ -266,7 +335,7 @@ def classify(row, facts=None, box=None):
 
 def conflicts(labels):
     """The contradictory label combinations on one ticket, one line each —
-    REPORTED by `--explain`, never used to re-classify (slice 1). These are
+    REPORTED by `--explain`, never used to re-classify. These are
     the four families the #1141 analysis measured as routinely open for hours:
     an owner question + a hand-off, ops-wait + a hand-off, verify-on-copy + a
     hand-off, and ops-wait + an owner question."""
@@ -305,13 +374,16 @@ def explain_lines(buckets, box, merged=(), handed=None, supplement=(),
     `supplement` = question-map U rows the slice search misses (#948).
     `extras` = `(bucket, weight, reason, text)` footer contributions that are
     not ticket rows (ticketless ❓ pings in U, the task-hygiene A count in I);
-    each prints as a `-` row and adds `weight` to its bucket's total."""
+    each prints as a `-` row and adds `weight` to its bucket's total.
+    `buckets[HIDDEN]` = rows this box counts NOWHERE (#1141 slice 2): each
+    prints with its reason, and the totals line gains ` hidden=N` when N > 0,
+    so a ticket is never silently missing from the explanation."""
     merged = {int(n) for n in (merged or ())}
     handed = handed or {}
     supplement = set(supplement or ())
     totals = {b: len(buckets.get(b) or {}) for b in BUCKETS}
     out = []
-    for bucket in BUCKETS:
+    for bucket in BUCKETS + (HIDDEN,):
         rows = buckets.get(bucket) or {}
         for number in sorted(rows, key=int):
             row = rows[number]
@@ -329,12 +401,16 @@ def explain_lines(buckets, box, merged=(), handed=None, supplement=(),
             if got != bucket:
                 out.append("  mismatch: classify() says %s — a parity break, "
                            "report it on #1141" % got)
+            where = ("not counted on this box" if bucket == HIDDEN
+                     else "counted as %s" % bucket)
             for line in conflicts(_labels_of(row)):
-                out.append("  conflict: %s; counted as %s by today's "
-                           "precedence" % (line, bucket))
+                out.append("  conflict: %s; %s by today's precedence"
+                           % (line, where))
     for bucket, weight, reason, text in extras:
         out.append("-\t%s\t%s\t%s" % (bucket, reason, _cell(text)))
         totals[bucket] += weight
+    hidden = len(buckets.get(HIDDEN) or {})
     out.append("# explain: " + " ".join(
-        "%s=%d" % (b, totals[b]) for b in BUCKETS))
+        "%s=%d" % (b, totals[b]) for b in BUCKETS)
+        + (" %s=%d" % (HIDDEN, hidden) if hidden else ""))
     return out

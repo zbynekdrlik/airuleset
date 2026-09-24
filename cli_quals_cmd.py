@@ -1549,7 +1549,7 @@ def cmd_core_quals(args):
     if want_explain:   # #1141: the SAME buckets --count uses (__import__: size budget)
         return __import__("cli_ticket_explain").explain_core(
             extra, workable=workable, merged_rows={} if extra else _merged_rows,
-            waiting=waiting, ops_wait=ops_wait, merged_set=_merged_set)
+            waiting=waiting, ops_wait=ops_wait, merged_set=_merged_set, rows=seen)
     if want_snapshot:
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition
         # (own_stream=None: a full-authority box owns no stream).
