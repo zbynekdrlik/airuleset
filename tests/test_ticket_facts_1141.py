@@ -684,6 +684,7 @@ class ReviewRound1(unittest.TestCase):
             path.parent.mkdir(parents=True)
             path.write_text(json.dumps({
                 "ts": 1000, "pipeline": [True, 5, "6"], "open_pr": [False, 5],
+                "reopened": [],
                 "on_main": {"\u00b2": "deployed", "7": "deployed",
                             "8": "bogus"}}))
             facts = self.f.load("/repo", home=home, now=1000)
