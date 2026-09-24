@@ -233,7 +233,7 @@ class TestStreamAnsweredRearm(unittest.TestCase):
         # tests never read the real /proc; a relaunched session has no child.
         self.children = []
         _p = unittest.mock.patch.object(
-            sm, "claude_children", lambda pane, run: self.children, create=True)
+            sm, "claude_children", lambda pane, run: self.children)
         _p.start()
         self.addCleanup(_p.stop)
 

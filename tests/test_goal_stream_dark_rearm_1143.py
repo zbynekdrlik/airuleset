@@ -105,7 +105,7 @@ class TestDarkStreamLoopRule(unittest.TestCase):
         # tests never read the real /proc; a relaunched session has no child.
         self.children = []
         _p = unittest.mock.patch.object(
-            sm, "claude_children", lambda pane, run: self.children, create=True)
+            sm, "claude_children", lambda pane, run: self.children)
         _p.start()
         self.addCleanup(_p.stop)
 
@@ -455,7 +455,7 @@ class TestDarkStreamLoopRule(unittest.TestCase):
         seen = []
         with unittest.mock.patch.object(
                 sm, "claude_children",
-                lambda pane, run: seen.append(pane) or [], create=True):
+                lambda pane, run: seen.append(pane) or []):
             reqs, _l, _s, _t = self._run(proj)
         self.assertEqual(reqs["l-pane"]["origin"], sm.ORIGIN)
         self.assertIn("%9", seen)
@@ -475,15 +475,31 @@ class TestDarkStreamLoopRule(unittest.TestCase):
         self._assert_rearmed(proj, "l-oldsub", state, reqs)
 
     def test_a_relaunch_has_no_live_sign_and_is_re_armed(self):
+        # the relaunched process: no children yet, the old session's lane
+        # transcripts long stale.
         proj = self._fixture("l-relaunch")
-        self.children = [("npm exec @playw", "npm exec @playwright/mcp@0.0.81")]
-        reqs, _l, state, _t = self._run(proj)
+        self.children = []
+        self._subagent(proj, "l-relaunch", 3600)
+        reqs, logs, state, _t = self._run(proj)
         self._assert_rearmed(proj, "l-relaunch", state, reqs)
+        self.assertTrue(any("no structured liveness" in ln for ln in logs), logs)
+        self.assertIn("no structured liveness", Path(self.syncp).read_text())
+
+    def test_an_execd_stream_wait_child_holds(self):
+        # a non-shell child running the waiter (an exec'd python) holds too
+        proj = self._fixture("l-exec")
+        self.children = [("python3", "python3 ~/devel/airuleset/airuleset.py "
+                                     "stream-wait --max 3600")]
+        reqs, logs, _s, _t = self._run(proj)
+        self.assertNotEqual((reqs.get("l-exec") or {}).get("origin"), sm.ORIGIN)
+        self.assertTrue(any("stream-wait waiter" in ln for ln in logs), logs)
 
     def test_a_bare_shell_pane_is_never_typed_into(self):
         # owner 24.9.2026: a pane at a bare shell = the OWNER stopped that
         # Claude -- never relaunch it, never type into it (dark-watch nor
-        # delivery), even with a forced stream-migrate request.
+        # delivery), even with a forced stream-migrate request. A LOCK on
+        # existing behaviour (dark-watch walks claude panes only, delivery
+        # resolves the session among claude panes only), kept with this rule.
         proj = self._fixture("l-shell")
         calls = []
         base = DeliverGoalFakeTmux([("%9", "bash", CWD, "111")], GOAL_IDLE_CAP)
@@ -604,6 +620,43 @@ class TestRuleGuardsDirect(unittest.TestCase):
         self.assertIsNone(sm.children_of(500, proc_root=str(root / "nope")))
         self.assertTrue(sm.live_signal(root / "t.jsonl", time.time(),
                                        lambda: kids)[0])
+
+    def test_claude_children_resolves_the_pane_then_scans(self):
+        from watchdog import tmux_io
+        argvs = []
+
+        def run(argv, timeout=8):
+            argvs.append(list(argv))
+            return "4242\n"
+        kids = [("bash", "/bin/bash -c x")]
+        with unittest.mock.patch.object(tmux_io, "_pane_claude_pid",
+                                        lambda p: "5000" if p == "4242" else None), \
+                unittest.mock.patch.object(sm, "children_of",
+                                           lambda pid: kids if pid == "5000" else None):
+            self.assertEqual(sm.claude_children("%9", run), kids)
+        self.assertEqual(argvs, [["tmux", "display-message", "-p", "-t", "%9",
+                                  "#{pane_pid}"]])
+
+    def test_claude_children_fails_closed(self):
+        from watchdog import tmux_io
+        with unittest.mock.patch.object(sm, "children_of",
+                                        lambda pid: self.fail("scanned")):
+            self.assertIsNone(sm.claude_children("%9", lambda a, timeout=8: "x"))
+            with unittest.mock.patch.object(tmux_io, "_pane_claude_pid",
+                                            lambda p: None):
+                self.assertIsNone(sm.claude_children("%9",
+                                                     lambda a, timeout=8: "42"))
+
+    def test_no_liveness_reader_never_records(self):
+        recorded = []
+        line, handled = sm.decide(
+            "g-nl", CWD, self._tpath(_relaunch_tail()), NEW_FORK, time.time(),
+            "loc", False, {}, lambda cwd: (NEW_FORK, "fork-no-merge"),
+            lambda s: False, lambda t, a: recorded.append(t), lambda: None,
+            mark_ts=500.0, confirm_fn=lambda: True)
+        self.assertTrue(handled)
+        self.assertEqual(recorded, [])
+        self.assertIn("liveness unprovable", line)
 
     def test_no_confirmation_run_never_records(self):
         recorded = []

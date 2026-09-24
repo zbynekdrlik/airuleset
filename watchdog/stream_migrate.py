@@ -36,7 +36,9 @@ The rule (ALL must hold, else a journalled skip):
      no subagent transcript written < 10 min and no shell / `stream-wait`
      child under the session's claude (a healthy stream loop idles armed in
      `stream-wait` for up to 1 h, so the dark footer is never the only
-     evidence); an unresolved claude fails CLOSED.
+     evidence); an unresolved claude fails CLOSED. A shell child has no age
+     cap (the ruling holds on ANY background shell): a dead loop kept alive
+     by a lingering shell is held, journalled once as its skip reason.
 `delivery_ok` re-checks 1, 5, 6, the subagent half of 9 and the session's
 own transcript at the moment of delivery -- the ONLY origin that passes the #1113 refusal. A full
 box is unchanged: a non-stream payload returns before any state is touched
@@ -303,7 +305,8 @@ def delivery_ok(origin, authority, mark_fn, tinfo_fn, now, sid=None):
     if _tx.subagent_active(tpath, now, IDLE_MIN_S):     # #1143 liveness (b)
         return False, ("a subagent transcript was written < %ds ago (a live "
                        "lane)" % IDLE_MIN_S)
-    return True, "dark stream loop not owner-ended, transcript idle"
+    return True, ("dark stream loop not owner-ended, transcript idle, "
+                  "no structured liveness (no subagent < %ds)" % IDLE_MIN_S)
 
 
 def _reap(store, now):
@@ -406,7 +409,7 @@ def decide(sid, cwd, tpath, payload, now, loc, dry_run, store, template_fn,
     return ("dark-watch %s sid=%s -> STREAM-MIGRATE: recording re-arm with the "
             "current stream template (authority=%s; dark stream loop not "
             "owner-ended, %s: #524-confirmed dark footer, transcript idle >= "
-            "%ds, no open ❓ NEEDS YOU; #1143)"
+            "%ds, no open ❓ NEEDS YOU, no structured liveness; #1143)"
             % (loc, sid, authority, case, IDLE_MIN_S)), True
 
 
