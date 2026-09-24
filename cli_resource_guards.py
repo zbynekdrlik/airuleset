@@ -112,9 +112,14 @@ from cli_resource_guards_quota import (  # noqa: E402, F401
     QUOTA_REFRESH_SCRIPT_PATH, QUOTA_REFRESH_SERVICE_PATH, QUOTA_REFRESH_TIMER_PATH,
     QUOTACHECK_BOOT_TIMEOUT_S, QUOTACHECK_REFRESH_TIMEOUT_S,
     QUOTA_LOCK_PATH, QUOTA_LOCK_WAIT_S, QUOTA_APPLY_LOCK_WAIT_S,
+    QUOTA_CEILING_SCRIPT_PATH, QUOTA_CEILING_SERVICE_PATH, QUOTA_CEILING_TIMER_PATH,
+    QUOTA_FS_AVAIL_BOUND_PCT,
     render_quota_unit, render_quota_refresh_script, render_quota_refresh_service,
-    render_quota_refresh_timer, _render_quota_kmod_block, _render_quota_limits_block,
+    render_quota_refresh_timer, render_quota_ceiling_script,
+    render_quota_ceiling_service, render_quota_ceiling_timer,
+    _render_quota_kmod_block, _render_quota_limits_block,
     _render_quota_apply_block, _render_quota_apply_lock_block,
+    _render_quota_timer_enable_block,
 )
 
 # Shared Playwright browser install path (#950-B)
@@ -241,6 +246,10 @@ def guard_files():
         (QUOTA_REFRESH_SCRIPT_PATH, render_quota_refresh_script()),
         (QUOTA_REFRESH_SERVICE_PATH, render_quota_refresh_service()),
         (QUOTA_REFRESH_TIMER_PATH, render_quota_refresh_timer()),
+        # #1140 D: hourly usage-aware ceilings (limits block only)
+        (QUOTA_CEILING_SCRIPT_PATH, render_quota_ceiling_script()),
+        (QUOTA_CEILING_SERVICE_PATH, render_quota_ceiling_service()),
+        (QUOTA_CEILING_TIMER_PATH, render_quota_ceiling_timer()),
     ]
 
 
