@@ -50,10 +50,12 @@ class PartitionHelpers(unittest.TestCase):
         self.assertTrue(airuleset._row_is_user_waiting(_labels("needs-acceptance")))
 
     def test_needs_acceptance_with_ready_for_review_is_not_user_waiting(self):
-        # #507 precedence preserved: a needs-acceptance ticket that is ALSO a
-        # genuine re-hand-off (ready-for-review / needs-gatekeeper) is back in the
-        # gatekeeper's court -> stays workable so the gk/handed logic counts it,
-        # NEVER U.
+        # The #507 PREDICATE still reads False for a needs-acceptance ticket
+        # that is ALSO a re-hand-off (ready-for-review / needs-gatekeeper); it
+        # now feeds only the #1083 M veto. The ROUTING moved to
+        # cli_ticket_state.waiting_kind, where #1141 slice 2 (owner ruling:
+        # "an owner question beats any hand-off label") puts this row in U —
+        # locked in test_ticket_state_precedence_1141.
         self.assertFalse(airuleset._row_is_user_waiting(
             _labels("needs-acceptance", "ready-for-review")))
         self.assertFalse(airuleset._row_is_user_waiting(
