@@ -154,9 +154,7 @@ class TestQuotaBlockExecution(unittest.TestCase):
     def _make_stubs(self, tmpdir, stubs):
         bin_dir = os.path.join(tmpdir, 'bin')
         os.makedirs(bin_dir, exist_ok=True)
-        # #1140 part D: the limits block reads the fs size — keep it hermetic
-        # (1 TiB free, so the fs bound never bites unless a test overrides it)
-        stubs = dict({'df': 'echo "  Avail"; echo "  1073741824"'}, **stubs)
+        stubs = {'df': 'echo " Avail"; echo " 1073741824"', **stubs}  # 1140-D: 1T free
         for name, content in stubs.items():
             path = os.path.join(bin_dir, name)
             with open(path, 'w') as f:
