@@ -132,7 +132,7 @@ class TestNoQuotacheckCreateOnExistingFile(unittest.TestCase):
 class TestRefreshScriptExecution(unittest.TestCase):
     """Run the rendered refresh script under stub binaries."""
 
-    def _setup(self, tmpdir, qoff_rc=0, qc_rc=0, qc_sleep=0):
+    def _setup(self, tmpdir, qoff_rc=0, qc_rc=0, qc_sleep=0, state="on"):
         log = os.path.join(tmpdir, "calls.log")
         bindir = os.path.join(tmpdir, "bin")
         os.makedirs(bindir)
@@ -145,7 +145,9 @@ class TestRefreshScriptExecution(unittest.TestCase):
             "quotaoff": 'echo "quotaoff $*" >> %s; exit %d' % (log, qoff_rc),
             "quotacheck": ('echo "quotacheck $*" >> %s; touch %s; sleep %d; exit %d'
                            % (log, marker, qc_sleep, qc_rc)),
-            "quotaon": 'echo "quotaon $*" >> %s; exit 0' % log,
+            # `quotaon -pu /` is the read-only state probe — answered, not logged
+            "quotaon": ('if [ "$1" = -pu ]; then echo "user quota on / is %s"; exit 0; fi\n'
+                        'echo "quotaon $*" >> %s; exit 0' % (state, log)),
             "setquota": 'echo "setquota $*" >> %s; exit 0' % log,
             "repquota": 'echo "u1  --  1048576  8388608 10485760  0 0 0"',
             "systemctl": "exit 0",
@@ -204,6 +206,17 @@ class TestRefreshScriptExecution(unittest.TestCase):
             self.assertNotIn("quotacheck", calls)
             self.assertIn("quotaon", calls)
             self.assertNotEqual(r.returncode, 0)
+
+    def test_quota_already_off_is_recounted_without_quotaoff(self):
+        """Boot unit failed → quota OFF: the recount is needed most, and
+        quotaoff would fail there — never let that skip the quotacheck."""
+        with tempfile.TemporaryDirectory() as td:
+            path, env, log, _m = self._setup(td, qoff_rc=1, state="off")
+            r = subprocess.run(["bash", path], env=env, capture_output=True,
+                               text=True, timeout=30)
+            calls = [c.split()[0] for c in self._calls(log)]
+            self.assertEqual(calls[:2], ["quotacheck", "quotaon"], calls)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
 
     def test_sigterm_mid_quotacheck_still_reenables_quota(self):
         with tempfile.TemporaryDirectory() as td:
