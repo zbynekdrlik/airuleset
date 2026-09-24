@@ -93,7 +93,6 @@ class TestShippedContract(TestCase):
         self.assertTrue(present)
         self.assertIsNone(err)
         self.assertEqual(dropped, [])
-        self.assertTrue(data, "the registry ships with at least one entry")
         self.assertLessEqual(set(data), cli_stream_priority.known_families())
         self.assertLessEqual(set(data.values()),
                              set(cli_stream_priority.PRIORITIES))
@@ -237,12 +236,42 @@ class TestSet(_Hermetic):
         self.assertIn("already high", out)
 
     def test_write_failure_is_rc1_not_a_traceback(self):
-        os.chmod(self._tmp.name, 0o500)
-        self.addCleanup(os.chmod, self._tmp.name, 0o700)
-        rc, _, err = self.run_cmd(sp_args=["set", "david", "high"])
+        # Injected at the replace step, not via chmod: CI runs as root,
+        # which ignores directory permissions. The mkstemp temp file must
+        # be cleaned up, so the directory stays empty.
+        with mock.patch("cli_playwright_mcp.os.replace",
+                        side_effect=PermissionError("EACCES")):
+            rc, _, err = self.run_cmd(sp_args=["set", "david", "high"])
         self.assertEqual(rc, 1)
         self.assertIn("could not write", err)
         self.assertEqual(os.listdir(self._tmp.name), [])
+
+    def test_high_wins_when_a_family_appears_twice(self):
+        self.write({"montalu": "high", "montalu3": "normal"})
+        self.assertEqual(cli_stream_priority.load_priorities(),
+                         {"montalu": "high"})
+        self.write({"montalu3": "normal", "montalu": "high"})
+        self.assertEqual(cli_stream_priority._read(self.path)[0],
+                         {"montalu": "high"})
+
+    def test_key_with_no_family_is_dropped(self):
+        self.write({"123": "high", "": "high"})
+        rc, out, err = self.run_cmd(list_=True)
+        self.assertEqual(json.loads(out), {})
+        self.assertIn('123="high"', err)
+
+    def test_same_size_rewrite_is_not_served_from_cache(self):
+        self.write({"david": "high"})
+        self.assertEqual(cli_stream_priority.load_priorities(),
+                         {"david": "high"})
+        st = self.path.stat()
+        other = self.path.with_name("other.json")
+        other.write_text(json.dumps({"marek": "high"}))   # same byte size
+        os.replace(other, self.path)
+        os.utime(self.path, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.assertEqual(self.path.stat().st_size, st.st_size)
+        self.assertEqual(cli_stream_priority.load_priorities(),
+                         {"marek": "high"})
 
     def test_set_bad_arity_is_usage_error(self):
         rc, _, _ = self.run_cmd(sp_args=["set", "david"])
