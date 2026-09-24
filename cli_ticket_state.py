@@ -51,6 +51,7 @@ _U_REASON = {
 }
 _U_LABEL = {"answer": "needs-answer", "decision": "needs-decision",
             "acceptance": "needs-acceptance", "action": "needs-owner-action"}
+_U_KIND = {label: kind for kind, label in _U_LABEL.items()}
 
 
 @dataclass(frozen=True)
@@ -94,57 +95,69 @@ def leaves_to_merged(labels):
             and _BOUNCE not in _names(labels))
 
 
-def waiting_kind(labels):
-    """The owner's-court kind of a row — `answer` / `decision` / `acceptance` /
-    `action` — or "" (#1141 slice 2). It is `cli_quals._row_is_user_waiting`
-    with ONE change: an UNSENT `needs-acceptance` (no `ops-wait`, no
-    `prio:bounce`) is the owner's court even when a hand-off label
-    (`MAINTAINER_ACTION_LABELS`) is present — the owner question beats the
-    hand-off. `prio:bounce` still overrides it (the stream's own rework), and a
-    SENT acceptance with a hand-off keeps its hand-off route (#943). The
-    partition, the `--waiting` acceptance tag and the #948 question-map
-    supplement all read this ONE predicate."""
-    if cli_quals._row_is_user_waiting(labels):
-        return cli_quals._user_waiting_reason(labels)
+def owner_question(labels):
+    """The owner question a row carries, or "" (#1141 slice 2) — the ONE
+    predicate the partition, the `--waiting` acceptance tag and the #948
+    question-map supplement share.
+
+    Found by the row's OWN labels, answer > decision > action first, so a
+    co-present `needs-acceptance` can never turn an owner question into a
+    "sent acceptance" (W). Then `acceptance` for an UNSENT `needs-acceptance`
+    (no `ops-wait`, no `prio:bounce`): the owner still has to approve the
+    client message, and that beats every hand-off label (owner ruling in the
+    #1141 design comment). `prio:bounce` still overrides it (the stream's own
+    rework, #507/#313); a SENT acceptance is a third party's (`_partition`)."""
     names = _names(labels)
+    for label in _OWNER_QUESTION_LABELS:
+        if label in names:
+            return _U_KIND[label]
     if ("needs-acceptance" in names and _BOUNCE not in names
             and not cli_quals._row_is_ops_wait(labels)):
         return "acceptance"
     return ""
 
 
+def _stream_has_live_box(owner):
+    """True when stream `owner` runs a box that counts its own U: not a
+    webterm observer account and not a paused host (fleet data)."""
+    import cli_fleet
+    return (owner not in cli_fleet.WEBTERM_OBSERVER_USERS
+            and not any(h.get("user") == owner and cli_fleet.is_paused(h)
+                        for h in cli_fleet.REMOTE_HOSTS))
+
+
 def _question_route(labels, kind, box):
-    """Route a row whose `waiting_kind` is `kind` (#1141 slice 2), or None to
-    fall through to the rest of the partition.
-    - On a reduced-authority box a FOREIGN row keeps its slice-1 route: rule 2
-      is scoped to the full-authority box, and rule 1 puts a question in U on
-      the box of the stream that OWNS it. So a foreign answer/decision/action
-      stays #654 action-only I, and a foreign acceptance that is a question
-      only because it now beats a hand-off label falls through (None) to the
-      hand-off route it had.
-    - A SENT acceptance (`ops-wait`) is a third party's: W (#526).
-    - A FOREIGN stream's owner question on the full-authority box is HIDDEN:
-      that stream's own box counts it in its U (reverses #654 for questions).
-    - Everything else is the owner's court here: U, with the hand-off label it
-      beats named in the reason."""
+    """Route a row carrying owner question `kind` (#1141 slice 2).
+    - Reduced-authority box, FOREIGN row: its slice-1 route. Rule 2 is scoped
+      to the full-authority box, and rule 1 puts a question in U on the box
+      of the stream that OWNS it: a foreign answer/decision/action is #654
+      action-only I; a foreign acceptance in a hand-off state stays in the
+      hand-off flow (I, counted gk when handed); a bare one stays U.
+    - Full-authority box, FOREIGN row: HIDDEN — counted in U on the owning
+      stream's box (reverses #654 for questions). If that stream has no live
+      box (paused, observer), nothing else would count it, so it stays U here.
+    - Everything else is the owner's court here: U, naming the hand-off label
+      the question beats."""
+    names = _names(labels)
     owner = cli_quals._stream_owner_of(labels)
     foreign = bool(owner) and owner != (box.own_stream or "")
+    beaten = [lb for lb in cli_quals.MAINTAINER_ACTION_LABELS if lb in names]
     if foreign and box.kind == "slice":
-        if not cli_quals._row_is_user_waiting(labels):
-            return None
         if kind != "acceptance":
             return ("I", "%s belongs to stream %s, whose own box asks the "
                          "owner; here it is action-only work (#654)"
                     % (_U_LABEL[kind], owner))
-    if kind == "acceptance" and cli_quals._row_is_ops_wait(labels):
-        return ("W", "needs-acceptance + ops-wait: the client thread was "
-                     "sent; waiting on the client (#526)")
-    if foreign and box.kind == "core":
+        if beaten:
+            return ("I", "needs-acceptance of stream %s in the hand-off state "
+                         "%s: on this box it stays in the hand-off flow "
+                         "(#507/#1130)" % (owner, beaten[0]))
+    elif foreign and _stream_has_live_box(owner):
         return (HIDDEN, "%s is stream %s's owner question: counted in U on "
                         "that stream's box, not on this full-authority box "
                         "(#1141)" % (_U_LABEL[kind], owner))
-    beaten = [lb for lb in cli_quals.MAINTAINER_ACTION_LABELS
-              if lb in _names(labels)]
+    elif foreign:
+        return ("U", "%s; stream %s has no live box to count it, so it is "
+                     "counted here (#1141)" % (_U_REASON[kind], owner))
     if beaten:
         return ("U", "%s; the owner question beats the hand-off label %s "
                      "(#1141)" % (_U_REASON[kind], beaten[0]))
@@ -161,12 +174,17 @@ def _partition(labels, box):
     #1141 design comment; live cases odoo-erp 8058 and 8180):
     - The #507/#1130 hand-off override no longer takes an UNSENT
       needs-acceptance out of U: an owner question beats every hand-off label
-      (`waiting_kind`). `prio:bounce` still overrides it, and a sent
-      acceptance with a hand-off keeps the #943 route.
+      (`owner_question`, which also ranks answer/decision/action above a
+      co-present acceptance). `prio:bounce` still overrides an acceptance,
+      and a sent acceptance with a hand-off keeps the #943 route.
     - The #654 paragraph at the end: on the FULL-authority box a foreign
       stream's owner question (answer/decision/action AND an unsent
       acceptance) is now `HIDDEN` — neither I nor U — because it counts in U
-      on that stream's own box. On a reduced-authority box #654 is unchanged.
+      on that stream's own box (a stream with no live box keeps it in U
+      here). On a reduced-authority box #654 is unchanged.
+    - The "PATHOLOGICAL row" paragraph: an answer/decision/action is now found
+      by its own label before a co-present acceptance (`owner_question`), so
+      needs-acceptance + needs-owner-action + ops-wait is U, not W.
     See `_question_route`.
 
     --- moved verbatim from `_partition_workable` ---
@@ -265,10 +283,9 @@ def _partition(labels, box):
     branch on the gk box (the real leak path is answer/decision/action carrying a
     gk queue label, which have no gk-override). `stream:core`/bare/unreadable →
     `_stream_owner_of` == "" → not foreign → stays U (the box's own court)."""
-    kind = waiting_kind(labels)
-    routed = kind and _question_route(labels, kind, box)
-    if routed:   # #1141 slice 2: the question is decided before any hand-off
-        return routed
+    kind = owner_question(labels)
+    if kind:   # #1141 slice 2: the question is decided before any hand-off
+        return _question_route(labels, kind, box)
     names = _names(labels)
     handoff = [lb for lb in cli_quals.MAINTAINER_ACTION_LABELS if lb in names]
     verify = [lb for lb in cli_quals.SUBDEV_ACTION_LABELS if lb in names]
@@ -279,6 +296,9 @@ def _partition(labels, box):
         if handoff:
             return ("I", "%s beats ops-wait: only the gatekeeper box can act "
                          "on a hand-off (#943)" % handoff[0])
+        if "needs-acceptance" in names:
+            return ("W", "needs-acceptance + ops-wait: the client thread was "
+                         "sent; waiting on the client (#526)")
         if verify:
             return ("I", "%s beats ops-wait: only the owning stream can verify "
                          "the deployed change (#1053)" % verify[0])
@@ -286,12 +306,10 @@ def _partition(labels, box):
     if not isinstance(labels, (list, tuple)):
         return "I", "labels unreadable: kept workable (the safe side)"
     if "needs-acceptance" in names:
-        # Not user-waiting ⇒ an override label is present today; the fallback
-        # keeps classify() total even if that predicate ever changes.
-        ov = [lb for lb in cli_quals.NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS
-              if lb in names] or ["an override label"]
-        return ("I", "needs-acceptance is overridden by %s: back in the "
-                     "hand-off/bounce flow (#507/#1130)" % ov[0])
+        # Not an owner question and not ops-wait ⇒ prio:bounce overrides it
+        # (#1141 slice 2: the hand-off labels no longer do).
+        return ("I", "needs-acceptance is overridden by prio:bounce: "
+                     "returned for the stream's rework (#507/#313)")
     if _BOUNCE in names:
         return "I", "prio:bounce: returned by the gatekeeper for rework (#313)"
     if handoff:

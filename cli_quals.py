@@ -451,10 +451,11 @@ def _ticket_is_stream_labeled(labels):
 # #512 supersedes #507's FOOTER placement of a BARE `needs-acceptance` ticket
 # (was the stream's own workable `I N`) — it now lands in `U N`. #507's gk
 # EXCLUSION mechanism (`GATEKEEPER_PROCESSED_LABELS`, the comment-fallback
-# suppression in `_slice_mine_and_handed`) is UNTOUCHED, and #507's precedence
+# suppression in `_slice_mine_and_handed`) is UNTOUCHED. #507's precedence
 # invariant "a `needs-acceptance` ticket that is ALSO a re-hand-off/bounce stays
-# gk/workable, never U" is preserved by the `needs-acceptance`-scoped override in
-# `_row_is_user_waiting` (see NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS below).
+# gk/workable, never U" was REVERSED for the re-hand-off half by #1141 slice 2
+# (an unsent acceptance beats a hand-off label → U, `cli_ticket_state.
+# owner_question`); the bounce half still holds.
 #
 # Deliberately DISTINCT from AUTOPILOT_SKIP_EXCL/ops-channel (which fully EXCLUDE
 # a ticket from every consideration): a user-waiting ticket stays tracked,
@@ -499,7 +500,7 @@ USER_WAITING_LABELS = ("needs-answer", "needs-decision", "needs-acceptance",
 # Issue 1130: DERIVED from MAINTAINER_ACTION_LABELS, so `gk-processing` overrides
 # too (a foreign acceptance in gk-processing fell to the gk owner's U).
 # #1141 slice 2: for ROUTING the hand-off labels no longer override an UNSENT
-# needs-acceptance (`cli_ticket_state.waiting_kind`: the owner question beats
+# needs-acceptance (`cli_ticket_state.owner_question`: the owner question beats
 # the hand-off); `prio:bounce` still does. This tuple keeps its #1083 M-veto and
 # `_ops_wait_reason` tag roles.
 NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS = MAINTAINER_ACTION_LABELS + (
@@ -576,10 +577,10 @@ def _row_is_user_waiting(labels):
     the owner's court; the acceptance-override applies to `needs-acceptance`
     only).
 
-    #1141 slice 2: the I/U/W ROUTING no longer reads this predicate directly.
-    `cli_ticket_state.waiting_kind` widens it (an UNSENT needs-acceptance beats
-    a hand-off label, owner ruling in the #1141 design comment); this
-    predicate still defines the #1083 M veto (`leaves_to_merged`), unchanged.
+    #1141 slice 2: the I/U/W ROUTING no longer reads this predicate; it reads
+    `cli_ticket_state.owner_question` (an UNSENT needs-acceptance beats a
+    hand-off label, owner ruling in the #1141 design comment). This predicate
+    still defines the #1083 M veto (`leaves_to_merged`), unchanged.
 
     A missing/unreadable `labels` value reads as NOT user-waiting (→ workable) —
     the SAFE side: never hide a ticket from THIS box's own responsibility because
@@ -832,8 +833,7 @@ def _acceptance_present_set(rows, cwd=None, home=None):
         labels = row.get("labels") if isinstance(row, dict) else None
         # #1141 slice 2: the partition's own question predicate, so an
         # unsent acceptance that beats a hand-off label is tagged too.
-        if (cli_ticket_state.waiting_kind(labels) == "acceptance"
-                and not _row_is_ops_wait(labels)):
+        if cli_ticket_state.owner_question(labels) == "acceptance":
             bare.add(number)
     try:
         refs = statusbar.question_map_ticket_refs(cwd, home)   # #539 MAJOR-1: cwd-scoped
@@ -1006,6 +1006,7 @@ def _question_map_u_supplement(rows, root, runner):
 
     ``runner(argv, cd)`` is the caller's ``_out`` (a subprocess wrapper); ``rows``
     is the ``_union_open_issues`` / ``_slice_mine_and_handed`` result dict."""
+    import airuleset
     import cli_ticket_state
     import statusbar as _sb
     try:
@@ -1014,6 +1015,7 @@ def _question_map_u_supplement(rows, root, runner):
         return {}
     if not refs:
         return {}
+    own_box = cli_ticket_state.Box(own_stream=airuleset._current_user())
     result = {}
     checked = 0
     for qn in refs:
@@ -1035,7 +1037,11 @@ def _question_map_u_supplement(rows, root, runner):
         if isinstance(state, str) and state.upper() != "OPEN":
             continue
         qlabels = obj.get("labels")
-        if cli_ticket_state.waiting_kind(qlabels):   # #1141 slice 2: the partition's predicate
+        # #1141 slice 2: add it to U exactly when this slice box's own
+        # classifier puts it there (a sent acceptance is W, a foreign
+        # question is #654 action-only here).
+        if cli_ticket_state.classify({"labels": qlabels}, None,
+                                     own_box)[0] == "U":
             result[qn] = {
                 "labels": qlabels,
                 "title": obj.get("title", ""),
