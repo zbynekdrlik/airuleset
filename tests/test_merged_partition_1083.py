@@ -1,8 +1,8 @@
-"""#1083 — `_split_merged_unreleased` pulls merged-to-develop tickets OUT of I/W
-into the `M` bucket, unless a U-class label (owner's court) or `prio:bounce`
-(rework) keeps them where they are.
-
-RED-first: `_split_merged_unreleased` does not exist on the base tree.
+"""#1083 — a merged-to-develop ticket leaves I/W for `M` unless `prio:bounce`
+keeps it in I; an owner question stays U. #1141 slice 3: the M step is part
+of the ONE route (`bucketize`), and the
+separate U-label veto is gone (an owner question is decided first), so a sent
+acceptance (needs-acceptance + ops-wait, W) that is merged now leaves for M.
 """
 import sys
 import unittest
@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cli_quals
+import cli_ticket_state as ts
 
 
 def _labels(*names):
@@ -27,9 +28,9 @@ def _rows(*specs):
 class SplitMergedUnreleased(unittest.TestCase):
     def _partition_then_split(self, merged, *specs):
         rows = _rows(*specs)
-        workable, waiting, ops_wait = cli_quals._partition_workable(rows)
-        w2, o2, m2 = cli_quals._split_merged_unreleased(workable, ops_wait, merged)
-        return w2, waiting, o2, m2
+        b = ts.bucketize(rows, ts.TicketFacts(merged=frozenset(merged)),
+                         ts.Box())
+        return b["I"], b["U"], b["W"], b["M"]
 
     def test_plain_merged_ticket_leaves_I_into_M(self):
         w, u, o, m = self._partition_then_split(
@@ -68,13 +69,13 @@ class SplitMergedUnreleased(unittest.TestCase):
         self.assertNotIn(40, m)
         self.assertNotIn(40, w)
 
-    def test_merged_needs_acceptance_plus_ops_wait_stays_W(self):
-        # needs-acceptance+ops-wait -> W by #526; U-class label -> NOT pulled
-        # into M -> stays in W (waiting on the client, not "ready for cut").
+    def test_merged_needs_acceptance_plus_ops_wait_leaves_W_into_M(self):
+        # #1141 slice 3 ruling: the U veto is gone — a sent acceptance is not
+        # an owner question, and a merged one waits for the release cut (M).
         w, u, o, m = self._partition_then_split(
             {50}, (50, "needs-acceptance", "ops-wait"))
-        self.assertIn(50, o)
-        self.assertNotIn(50, m)
+        self.assertIn(50, m)
+        self.assertNotIn(50, o)
         self.assertNotIn(50, u)
 
     def test_merged_needs_gatekeeper_leaves_I_into_M(self):
@@ -89,11 +90,10 @@ class SplitMergedUnreleased(unittest.TestCase):
         rows = _rows((70, "stream:montalu1"), (71, "ops-wait"),
                      (72, "needs-decision"))
         workable, waiting, ops_wait = cli_quals._partition_workable(rows)
-        w2, o2, m2 = cli_quals._split_merged_unreleased(
-            dict(workable), dict(ops_wait), set())
-        self.assertEqual(w2, workable)
-        self.assertEqual(o2, ops_wait)
-        self.assertEqual(m2, {})
+        b = ts.bucketize(rows, ts.TicketFacts(), ts.Box())
+        self.assertEqual(b["I"], workable)
+        self.assertEqual(b["W"], ops_wait)
+        self.assertEqual(b["M"], {})
 
     def test_merged_number_not_in_any_bucket_is_ignored(self):
         # a merged number that is not among the open rows contributes nothing
