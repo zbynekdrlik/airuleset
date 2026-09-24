@@ -231,7 +231,7 @@ def test_next_poll_is_still_allowed_to_drain_after_a_cut_short_poll(tmp_path):
     logs2 = _poll(tmp_path, clock2, [_rung(clock2, 0.0, calls2, "a"),
                                      _rung(clock2, 0.0, calls2, "b")], now=10_060.0)
     assert not any("cadence-gated" in ln for ln in logs2)
-    assert calls2 == ["a", "b"]
+    assert calls2 == ["b"], "the next poll drains, starting at the deferred rung"
 
 
 def test_completed_poll_still_stamps_and_gates_the_next(tmp_path):
