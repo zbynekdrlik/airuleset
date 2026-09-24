@@ -9576,7 +9576,10 @@ from cli_lane_overlap import cmd_lane_overlap as cmd_lane_overlap  # noqa: E402,
 from cli_labels import cmd_labels as cmd_labels  # noqa: E402, F401
 
 # --- #1138: owner-controlled stream-priority registry CLI leaf ---
-from cli_stream_priority import cmd_stream_priority as cmd_stream_priority  # noqa: E402, F401
+from cli_stream_priority import (  # noqa: E402, F401
+    cmd_stream_priority as cmd_stream_priority,
+    register_parser as _register_stream_priority_parser,
+)
 
 # --- #1062 L1: managed LiteLLM model gateway CLI leaf ---
 from cli_model_gateway import (  # noqa: E402, F401
@@ -10834,9 +10837,7 @@ def main():
                           help="run the mount + relocation via sudo -n "
                                "(gk-infra window, owner present)")
     p_vol.set_defaults(apply=False)
-    p_sp = sub.add_parser("stream-priority", help="#1138: [--list] = {family: high|normal} JSON | set <stream> high|normal")
-    p_sp.add_argument("sp_args", nargs="*", help="set <stream> high|normal")
-    p_sp.add_argument("--list", action="store_true", help="print the JSON map (default)")
+    _register_stream_priority_parser(sub)  # #1138
 
     args = parser.parse_args()
 
