@@ -138,7 +138,7 @@ DISK_GUARD_DIRNAME = "disk-guard"
 STATUS_CACHE_NAME = "status.json"
 LOG_NAME = "disk-guard.log"
 LAST_DRAIN_NAME = "last-drain"              # the FULL drain's cadence stamp only
-LAST_PREVENTION_NAME = "last-prevention"    # #1067 1f: the prevention pass's own
+LAST_PREVENTION_NAME = "last-prevention"    # #1067 1f: the prevention pass's own cadence stamp
 LOCK_NAME = ".lock"
 LOG_MAX_BYTES = 512 * 1024                  # self-bounding (#834 review-bite 7)
 MIN_DRAIN_INTERVAL_S = 10 * 60              # du-heavy ladder runs at most this often
@@ -3568,19 +3568,6 @@ def _stamp_due(home, name, now, min_interval_s=None):
     return (now - last) >= min_interval_s
 
 
-def _write_stamp(home, name, now):
-    """Record cadence stamp ``name`` atomically (temp + rename). Best-effort."""
-    p = _guard_dir(home) / name
-    tmp = p.with_name(p.name + ".tmp")
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text("%f" % now)
-        os.replace(tmp, p)
-    except OSError as e:
-        _dbg("could not record %s: %r" % (name, e))
-        _dgt._unlink(tmp)
-
-
 def _drain_due(home, now, min_interval_s=None):
     return _stamp_due(home, LAST_DRAIN_NAME, now, min_interval_s)
 
@@ -3603,11 +3590,11 @@ def _growth_detected(home, current_pct):
 
 
 def _mark_drained(home, now):
-    _write_stamp(home, LAST_DRAIN_NAME, now)
+    _dgt.put_text(_guard_dir(home) / LAST_DRAIN_NAME, "%f" % now)
 
 
 def _mark_prevented(home, now):
-    _write_stamp(home, LAST_PREVENTION_NAME, now)
+    _dgt.put_text(_guard_dir(home) / LAST_PREVENTION_NAME, "%f" % now)
 
 
 # Distinct from `None`: the lock file could not be CREATED (e.g. ENOSPC on a

@@ -92,17 +92,22 @@ def _load_json(path):
     return data if isinstance(data, dict) else None
 
 
-def _put_json(path, data):
+def put_text(path, text):
     """Atomic write (temp file + rename): a kill or ENOSPC mid-write never
-    leaves a truncated file behind."""
+    leaves a truncated file behind. Best-effort; also the guard's cadence
+    stamps (#1067 1f)."""
     tmp = path.with_name(path.name + ".tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(data))
+        tmp.write_text(text)
         os.replace(tmp, path)
     except OSError as e:
         _dbg("disk-guard timing: write %s failed: %r" % (path, e))
         _unlink(tmp)
+
+
+def _put_json(path, data):
+    put_text(path, json.dumps(data))
 
 
 def _pid_alive(pid):
