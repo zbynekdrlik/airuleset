@@ -909,24 +909,11 @@ def cmd_slice_quals(args):
     # workable slice, alongside #468's user-waiting split — both leave `--count`/
     # `--list` and surface via `--waiting`/`--ops-wait`. DEFAULT path only,
     # mirroring the `not extra`-scoping of `_slice_mine_and_handed`'s enrichment.
-    if extra:
-        workable_rows, waiting, ops_wait = rows, {}, {}
-    else:
-        # #622: a bare needs-acceptance → U unconditionally (queued for owner
-        # approval, never dispatchable-now I work). Pure label partition; the
-        # question map is read only on the on-demand `--waiting` display path
-        # below (#370). #654: own_stream=user keeps THIS box's OWN stream rows in U.
-        workable_rows, waiting, ops_wait = airuleset._partition_workable(rows, own_stream=user)
-    # #1083: pull merged-to-develop-not-main tickets OUT of I/W into M — a stream
-    # sees its merged tickets leave `--count`/dispatchable without pretending
-    # they are done. DEFAULT path only (a bounce-seed --extra query keeps its
-    # full set, like #468/#510 above). ONE derivation (#367): the same split the
-    # footer applies, so `--count` and `I N` cannot drift.
-    _merged_set = frozenset() if extra else _merged_unreleased(root)
-    if not extra:
-        workable_rows, ops_wait, _merged_rows = airuleset._split_merged_unreleased(
-            workable_rows, ops_wait, _merged_set)
-    unhandled = {n: v for n, v in workable_rows.items() if not handed.get(n)}
+    # #1141 slice 3: ONE route (`cli_ticket_route.quals`, the SAME `bucketize`
+    # the footer counts with): the --role PRE-filter (below), the label
+    # partition (#622 bare acceptance → U; #654 own_stream keeps THIS box's own
+    # stream rows in U), the cached P/M/C facts (#1083 merged → M) and the
+    # handed-off gk. A --extra bounce-seed query skips partition and facts.
     # #1065 REVERSES #1025: role-filter the workable `I` slice, the third-party
     # `W` (ops_wait) AND the owner-court `U` (waiting) — a question shows in the
     # ONE window whose role owns the ticket (`infra` → INFRA), never both. #1008
@@ -944,17 +931,14 @@ def cmd_slice_quals(args):
     # the filtered `ops_wait` feeds the `--ops-wait` rows AND the `# W-summary:
     # total=` line below (#367). `slug` already resolved above, reused. role None
     # = no-op (byte-identical, no slug touch); an empty slug fail-CLOSES (#993 r2b).
-    role = getattr(args, "role", None)  # #993 r2b / #1025 / #1045 / #1065
-    if role in ("review", "infra", "quality"):  # #1074
-        unhandled = _apply_role_filter(unhandled, root, role, slug=slug)
-        ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)  # #1045
-        waiting = _apply_role_filter(waiting, root, role, slug=slug)  # #1065
+    role = getattr(args, "role", None)  # #993 r2b / #1025 / #1045 / #1065 / #1074
+    _box = __import__("cli_ticket_state").Box(own_stream=user)
+    _b, _facts = __import__("cli_ticket_route").quals(
+        rows, root, _box, extra=extra, role=role, slug=slug, handed=handed)
+    unhandled, waiting, ops_wait = _b["I"], _b["U"], _b["W"]
     if want_explain:   # #1141: the SAME buckets --count uses (__import__: size budget)
         return __import__("cli_ticket_explain").explain_slice(
-            extra, root, user, role, slug, rows=rows, handed=handed,
-            workable=workable_rows, unhandled=unhandled, waiting=waiting,
-            ops_wait=ops_wait, merged_rows={} if extra else _merged_rows,
-            merged_set=_merged_set)
+            extra, root, rows, _b, _facts, _box)
     if want_snapshot:
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition.
         import cli_quals_snapshot
@@ -1022,10 +1006,9 @@ def cmd_slice_quals(args):
     _dep_map, _slug, _ok = _dep_wait_map_for(unhandled, root)
     print(_LIST_LEGEND)   # #1101: the obligation-column legend, ONE `#` line
     _print_issue_rows(unhandled, own_stream=user, dep_wait_map=_dep_map)
-    released_rows = {n: workable_rows[n] for n in workable_rows
+    # (the route already role-filtered them; with known facts they are C)
+    released_rows = {n: r for n, r in {**_b["gk"], **_b["C"]}.items()
                      if handed.get(n) == "released"}
-    if released_rows and role in ("review", "infra", "quality"):  # #1074
-        released_rows = _apply_role_filter(released_rows, root, role, slug=slug)
     if released_rows:
         _print_issue_rows(released_rows, own_stream=user,
                           released_numbers=set(released_rows))
@@ -1476,13 +1459,10 @@ def cmd_core_quals(args):
     # `--waiting`/`--ops-wait`, never the workable-0 stop-proof. ONE partition of
     # the SAME already-fetched rows; DEFAULT path only (a `--extra` bounce-seed
     # query is a different axis, keeping its full set, per the gates below).
-    if extra:
-        workable, waiting, ops_wait = seen, {}, {}
-    else:
-        # #622: bare needs-acceptance → U unconditionally (queued for owner
-        # approval, never dispatchable-now I). Pure label partition; the question
-        # map is read only on the on-demand `--waiting` display path (#370).
-        workable, waiting, ops_wait = airuleset._partition_workable(seen)
+    # #1141 slice 3: ONE route (`cli_ticket_route.quals`, the SAME `bucketize`
+    # the footer counts with): the --role PRE-filter, the label partition (#622
+    # bare acceptance → U), the cached P/M/C facts (#1083 merged → M). A --extra
+    # bounce-seed query keeps its full set (no partition, no facts).
     # #1065 REVERSES #1025: role-filter the workable `I` slice, `--ops-wait` (W)
     # AND `--waiting` (U) — a question shows in the ONE window whose role owns
     # the ticket (`infra` → INFRA window), never both. #1008 filtered all three;
@@ -1503,20 +1483,10 @@ def cmd_core_quals(args):
     # derivation: the filtered `ops_wait` feeds the `--ops-wait` rows AND the
     # `# W-summary: total=` line below (#367). role None = no-op (byte-identical,
     # no slug touch); an empty slug fail-CLOSES (#993 r2b).
-    role = getattr(args, "role", None)  # #993 r2b / #1025 / #1045 / #1065
-    if role in ("review", "infra", "quality"):  # #1074
-        slug = airuleset._repo_slug(cwd=root)
-        workable = _apply_role_filter(workable, root, role, slug=slug)
-        ops_wait = _apply_role_filter(ops_wait, root, role, slug=slug)  # #1045
-        waiting = _apply_role_filter(waiting, root, role, slug=slug)  # #1065
-    # #1083: split merged-to-develop-not-main tickets OUT of I/W into M, AFTER the
-    # role filter (M role-scoped by construction). DEFAULT path only (a bounce-
-    # seed --extra query keeps its full set). ONE derivation (#367): the same
-    # split the footer applies, so `--count` and the footer `I N` cannot drift.
-    _merged_set = frozenset() if extra else _merged_unreleased(root)
-    if not extra:
-        workable, ops_wait, _merged_rows = airuleset._split_merged_unreleased(
-            workable, ops_wait, _merged_set)
+    role = getattr(args, "role", None)  # #993 r2b / #1025 / #1045 / #1065 / #1074
+    _b, _facts = __import__("cli_ticket_route").quals(
+        seen, root, __import__("cli_ticket_state").Box(), extra=extra, role=role)
+    workable, waiting, ops_wait = _b["I"], _b["U"], _b["W"]
     if not seen:
         _refuse_unless_empty_is_trustworthy("core-quals", quals, cwd=root)
     if not seen and not extra:
@@ -1547,9 +1517,7 @@ def cmd_core_quals(args):
                 file=sys.stderr)
             sys.exit(1)
     if want_explain:   # #1141: the SAME buckets --count uses (__import__: size budget)
-        return __import__("cli_ticket_explain").explain_core(
-            extra, workable=workable, merged_rows={} if extra else _merged_rows,
-            waiting=waiting, ops_wait=ops_wait, merged_set=_merged_set, rows=seen)
+        return __import__("cli_ticket_explain").explain_core(extra, _b, _facts)
     if want_snapshot:
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition
         # (own_stream=None: a full-authority box owns no stream).

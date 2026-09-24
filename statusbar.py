@@ -240,6 +240,7 @@ def sweep_stale_cache(home=None, now=None, max_age_s=STALE_CACHE_MAX_AGE_S):
 _CARRY_FORWARD_KEYS = (
     "open", "gk", "bounce", "merged_unreleased", "user_waiting", "ops_wait",
     "skipped", "wdrain_over", "created_today", "closed_today", "name",
+    "pipeline", "done",       # #1141 slice 3
 )
 
 _ERROR_LOG_MAX_BYTES = 64 * 1024   # truncate refresh-errors.log beyond this
@@ -388,19 +389,20 @@ def _ops_wait_sfx(cache):
     return ""
 
 
-def _merged_sfx(cache):
-    """The '· M N' suffix (#1083) — open tickets whose fix PR is merged into
-    develop/staging but NOT yet in main, so they have LEFT `I N` (nothing for the
-    box to act on until the release cut) and count release readiness. Rendered
-    right after `I N` (before bounce/U/W/gk) in the gk COLOUR FAMILY (245 — a
-    parked-elsewhere bucket, not this box's urgent work), hidden at 0. Rendered on
-    BOTH scopes (a 3-branch project's stream sees its merged tickets leave I too).
-    Schema-compatible: a legacy cache without `merged_unreleased` → `.get(...)`
-    None → hidden (never a crash, never `M 0`)."""
-    m = cache.get("merged_unreleased")
-    if isinstance(m, int) and m > 0:
-        return " \033[38;5;245m· M %d\033[0m" % m
-    return ""
+def _fact_sfx(cache):
+    """The machine-fact suffixes right after `I N`, in lifecycle order (#1141
+    slice 3): `· P N` (`pipeline`: a linked PR in CI), `· M N`
+    (`merged_unreleased`, #1083: merged, not yet released / on PROD) and
+    `· C N` (`done`: the fix is live, close it). All three have LEFT `I N`, on
+    BOTH scopes, hidden at 0 (a legacy cache without the key too). P, M wait on
+    a machine (gk colour 245); C is an action someone must take (green 114)."""
+    out = ""
+    for key, tag, colour in (("pipeline", "P", 245), ("merged_unreleased", "M",
+                             245), ("done", "C", 114)):
+        n = cache.get(key)
+        if isinstance(n, int) and not isinstance(n, bool) and n > 0:
+            out += " \033[38;5;%dm· %s %d\033[0m" % (colour, tag, n)
+    return out
 
 
 def _bounce_sfx(cache):
@@ -538,7 +540,7 @@ def tickets_segment(cwd, now=None, home=None, spawn=True):
 
     return "\033[38;5;75mI %d%s\033[0m%s%s%s%s%s%s" % (
         shown_open, _drift_marker(cache),
-        _merged_sfx(cache),          # #1083: `· M N` right after `I N`
+        _fact_sfx(cache),            # #1083/#1141: `· P · M · C` after `I N`
         _bounce_sfx(cache),
         _user_waiting_sfx(cache, ping_count), _ops_wait_sfx(cache),
         _stream_split_sfx(cache), skip_sfx)

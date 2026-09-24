@@ -126,23 +126,23 @@ def _strip_odoo_prefix(raw):
     return raw
 
 
-def read_main_version(cwd, version_file):
-    """Read the version string from ``origin/main:<version_file>`` via git.
-
-    Falls back to reading the working-tree file if git show fails.
-    Returns None on any error (fail-safe).
-    """
+def read_main_version(cwd, version_file, ref="origin/main"):
+    """Read the version string from ``<ref>:<version_file>`` via git (#1141:
+    ``ref`` = a fix commit). Only ``origin/main`` falls back to the working
+    tree if git show fails. Returns None on any error (fail-safe)."""
     if not version_file:
         return None
     try:
         out = subprocess.run(
-            ["git", "show", "origin/main:%s" % version_file],
+            ["git", "show", "%s:%s" % (ref, version_file)],
             cwd=str(cwd), capture_output=True, text=True, timeout=10)
         content = out.stdout if out.returncode == 0 else None
     except Exception:
         log.debug("deploy_state: git show failed for %s", version_file,
                   exc_info=True)
         content = None
+    if content is None and ref != "origin/main":
+        return None
     if content is None:
         # Fallback: read from working tree
         try:

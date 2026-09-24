@@ -12,11 +12,9 @@ DEFAULT branch (the odoo-erp 3-branch model, develop → staging → main):
                                     ACT on until the release cut, so the ticket
                                     LEAVES `I` and counts release readiness.
 
-  merged_released_still_open(...) — the complementary END state: the fix's
-                                    introducing commit is now an ancestor of
-                                    origin/main (the release LANDED) yet the
-                                    ticket never closed — a release-hygiene
-                                    defect surfaced by `core-quals --audit`.
+  merged_released_oids(...)       — the END state: the fix's introducing
+                                    commit is on origin/main (the release
+                                    LANDED) yet the ticket is open: #1141 C/M.
 
 Both read the SAME append-only per-repo cache
 `~/.claude/tickets-status/pr-issues-<slug>.json`: a merged PR's issue refs and
@@ -460,7 +458,7 @@ def _compute_two_branch(root, git_full_fn, prefix, ref_exists_fn):
     so restricting to only the scoped `feat(#N):` forms would MISS most real
     commits. A subject that ALSO cites an unrelated `#N` for context, or a
     GitHub `Merge pull request #N` PR number, therefore enters this raw set — but
-    the harm is bounded at the consumer: `_split_merged_unreleased` intersects M
+    the harm is bounded at the consumer: `bucketize` (#1141) intersects M
     with the OPEN-WORKABLE set, so a number that is not an open workable ticket
     (a PR number, a closed/cross-repo ref) never surfaces in `M`. This mirrors
     the accepted trade-off the 3-branch title path already makes.
@@ -634,29 +632,32 @@ def merged_unreleased_issues(root, git_fn=None, pr_meta_fn=None,
     return result
 
 
-def merged_released_still_open(root, open_numbers, is_ancestor_fn=None,
-                               cache_path=None, slug=None, slug_fn=None):
-    """From the append-only PR cache, the OPEN tickets whose fix PR's introducing
-    commit is now reachable from origin/main (the release landed) — a
-    release-hygiene defect (the ticket should have closed at the cut). Sorted
-    ascending. Empty on a cold cache / no open set / any error.
+def merged_released_still_open(root, open_numbers, **kw):
+    """The `core-quals --audit` hygiene list: `merged_released_oids` numbers."""
+    return sorted(merged_released_oids(root, open_numbers, **kw))
 
-    ACCEPTED COVERAGE LIMIT (adversarial review #1083): only PRs the box OBSERVED
-    while they were in `main..develop` are cached, so a PR that transited
-    develop→main between two refreshes is never flagged — a best-effort hygiene
-    nag, not an exhaustive audit."""
+
+def merged_released_oids(root, open_numbers, is_ancestor_fn=None,
+                         cache_path=None, slug=None, slug_fn=None):
+    """From the append-only PR cache, `{ticket: [introducing commits]}` for the
+    OPEN tickets whose fix PR's introducing commit is reachable from
+    origin/main (the release landed). #1141 slice 3 turns them into C / M by
+    deploy state. Empty on a cold cache / no open set / any error. ACCEPTED
+    COVERAGE LIMIT (#1083 review): only PRs the box OBSERVED in `main..develop`
+    are cached, so one that transited develop→main between two refreshes is
+    never found (the ticket stays I — never falsely done)."""
     root = str(root or "").rstrip("/")
     open_set = {int(n) for n in (open_numbers or [])}
     if not root or not open_set:
-        return []
+        return {}
     if cache_path is None:
         cache_path = _default_cache_path(_resolve_slug(root, slug, slug_fn))
     cache = _load_cache(cache_path)
     if not isinstance(cache, dict) or not cache:
-        return []
+        return {}
     if is_ancestor_fn is None:
         is_ancestor_fn = _default_is_ancestor
-    out = set()
+    out = {}
     for entry in cache.values():
         if not isinstance(entry, dict):
             continue
@@ -665,9 +666,8 @@ def merged_released_still_open(root, open_numbers, is_ancestor_fn=None,
         # references a still-open ticket (a small, bounded set) — never once per
         # cached PR ever (the append-only cache grows unboundedly).
         open_hits = [int(n) for n in entry.get("issues", []) if int(n) in open_set]
-        if not open_hits:
-            continue
         oid = entry.get("oid")
-        if oid and is_ancestor_fn(oid, root):
-            out.update(open_hits)
-    return sorted(out)
+        if open_hits and oid and is_ancestor_fn(oid, root):
+            for n in open_hits:
+                out.setdefault(n, []).append(oid)
+    return out

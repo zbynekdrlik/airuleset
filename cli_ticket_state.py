@@ -1,13 +1,12 @@
 """cli_ticket_state — ONE total classifier for the footer buckets (#1141).
 
 `classify(row, facts, box) -> (bucket, reason)` puts every open ticket in this
-box's scope into EXACTLY one bucket and says WHY in one line. It is the single
-definition behind `_partition_workable` (I/U/W — a thin wrapper over this),
-behind the M step of `_split_merged_unreleased` (`leaves_to_merged`) and
-behind the sub-dev `gk` count. The `--explain` surfaces of `tickets-status`,
-`core-quals` and `slice-quals` (CLI wiring: `cli_ticket_explain`) print it per
-ticket, so "why is I 5" is answered by the tool, not by a session decoding
-labels. This module stays pure: no I/O, no process state.
+box's scope into EXACTLY one bucket and says WHY in one line. `bucketize(rows,
+facts, box)` runs it over a row set: the ONE route behind the footer, both
+quals commands (I/O wiring: `cli_ticket_route`) and `_partition_workable`
+(I/U/W, a thin wrapper). The `--explain` surfaces (`cli_ticket_explain`) print
+it per ticket, so "why is I 5" is answered by the tool, not by a session
+decoding labels. This module stays pure: no I/O, no process state.
 
 Slice 1 was a ZERO-behaviour-change refactor of the pre-#1141 label
 partition (locked by `tests/test_ticket_state_classify_1141.py`, a frozen-oracle
@@ -15,27 +14,36 @@ parity test over every label combination). Slice 2 changed exactly two
 precedences (the oracle there lists the moved cases): an owner question beats a
 hand-off label, and a FOREIGN stream's owner question is `HIDDEN` on the
 full-authority box (`_question_route`). A contradictory label set is also
-REPORTED (`conflicts()`). The P/C buckets and the machine facts are later
-slices of #1141.
+REPORTED (`conflicts()`). Slice 3 added the machine facts (`Facts`, read by
+`cli_ticket_facts`): P, M extended to "on main, not on PROD yet", C, and it
+dropped the M step's own U veto (an owner question is decided first).
 
-Buckets (`BUCKETS`): `I` workable, `U` the owner's court, `W` a third party,
-`M` merged to the integration branch but not yet on main, `gk` handed off to
-the gatekeeper (a reduced-authority box only). `HIDDEN` is the one verdict
-outside BUCKETS: the row is counted in NO bucket on this box (it counts on the
-box of the stream that owns it).
+Buckets (`BUCKETS`): `I` workable, `P` an open linked PR in CI, `M` merged but
+not yet released/deployed, `C` done (the fix is on main and live): close it,
+`U` the owner's court, `W` a third party, `gk` handed off to the gatekeeper (a
+reduced-authority box only). `HIDDEN` is the one verdict outside BUCKETS: the
+row is counted in NO bucket on this box (it counts on the box of the stream
+that owns it).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Union
 
 # The label predicates still live in cli_quals (re-exported by the airuleset
 # facade and used across the repo). cli_quals imports THIS module lazily inside
-# `_partition_workable`/`_split_merged_unreleased`, so there is no import-time
-# cycle; moving the predicates here is a later #1141 slice.
+# `_partition_workable`, so there is no import-time cycle.
 import cli_quals
 
-BUCKETS = ("I", "M", "U", "W", "gk")
+BUCKETS = ("I", "P", "M", "C", "U", "W", "gk")
 HIDDEN = "hidden"   # #1141 slice 2: counted on the owning stream's box, not here
+# `--explain` always totals these; P, C and HIDDEN only when > 0 (the footer
+# shows P and C only then too).
+_ALWAYS_TOTALED = ("I", "M", "U", "W", "gk")
+
+# `Facts.on_main` (#1141 slice 3): the fix is on main and ...
+DEPLOYED = "deployed"   # ... every declared PROD instance runs it → C
+RELEASED = "released"   # ... the repo declares no deploy state → C
+PENDING = "pending"     # ... a declared PROD instance does not run it yet → M
 
 # The owner-question labels (everything user-waiting except needs-acceptance,
 # which is a client-message approval with its own #526/#622 routing).
@@ -52,6 +60,22 @@ _U_REASON = {
 _U_LABEL = {"answer": "needs-answer", "decision": "needs-decision",
             "acceptance": "needs-acceptance", "action": "needs-owner-action"}
 _U_KIND = {label: kind for kind, label in _U_LABEL.items()}
+
+# C ("done, close me") is kept open by: a returned bounce (the gatekeeper
+# asked for rework), any needs-acceptance (the close waits for the client's
+# confirmation, #627/#891 close hook) and verify-on-copy (the post-deploy
+# check on a PROD copy is still owed, #1053). #1141 slice 3.
+_C_VETO = (_BOUNCE, "needs-acceptance") + tuple(cli_quals.SUBDEV_ACTION_LABELS)
+_C_REASON = {
+    DEPLOYED: ("the fix is on main and every PROD instance runs it: done, "
+               "close it (#1141)"),
+    RELEASED: ("the fix is on main and the repo declares no deploy state: "
+               "done, close it (#1141)"),
+}
+_M_MERGED = ("fix merged to the integration branch, not yet on main: waits "
+             "for the release cut (#1083)")
+_M_PENDING = ("the fix is on main but a PROD instance does not run it yet: "
+              "waits for the deploy (#1141)")
 
 
 @dataclass(frozen=True)
@@ -72,9 +96,37 @@ class Facts:
     integration branch but not yet on main (#1083, git-derived by
     `cli_release_state`). `handed`: the `_slice_mine_and_handed` state (#391) —
     False, True (handed off to the gatekeeper) or the truthy "released" (merged
-    and released, done for the stream, #1009); read it TRUTHY, never `is True`."""
+    and released, done for the stream, #1009); read it TRUTHY, never `is True`.
+    `pipeline`: an open linked PR's checks are still running (#1141 slice 3).
+    `on_main`: "" (not on main, or unknown), DEPLOYED, RELEASED or PENDING.
+    All defaults = the facts are unknown: the label route and nothing else."""
     merged: bool = False
     handed: Union[bool, str] = False
+    pipeline: bool = False
+    on_main: str = ""
+
+
+@dataclass(frozen=True)
+class TicketFacts:
+    """The facts of a whole row set, as `bucketize` reads them (#1141 slice
+    3): the merged numbers, the `handed` map (keyed like the rows), the numbers
+    with a linked PR in CI, and the on-main state by number. Empty = unknown,
+    which reproduces the label buckets (+ gk) of the earlier slices."""
+    merged: frozenset = frozenset()
+    handed: dict = field(default_factory=dict)
+    pipeline: frozenset = frozenset()
+    on_main: dict = field(default_factory=dict)
+
+    def of(self, number):
+        """The `Facts` of ticket `number` (a non-numeric key has none)."""
+        try:
+            n = int(number)
+        except (TypeError, ValueError):
+            return Facts()
+        return Facts(merged=n in self.merged,
+                     handed=self.handed.get(number) or False,
+                     pipeline=n in self.pipeline,
+                     on_main=self.on_main.get(n, ""))
 
 
 def _names(labels):
@@ -84,15 +136,6 @@ def _names(labels):
 
 def _labels_of(row):
     return row.get("labels") if isinstance(row, dict) else None
-
-
-def leaves_to_merged(labels):
-    """#1083: may a merged-unreleased ticket leave I/W for M? Not when it
-    carries a U-class label (the owner's court beats "waiting for the cut") or
-    `prio:bounce` (gk returned it for rework, it stays in I). The ONE
-    definition `_split_merged_unreleased` and `classify` share."""
-    return (not cli_quals._row_is_user_waiting(labels)
-            and _BOUNCE not in _names(labels))
 
 
 def owner_question(labels):
@@ -334,27 +377,59 @@ def classify(row, facts=None, box=None):
     foreign stream's owner question on the full-authority box, counted on that
     stream's box, #1141 slice 2) — and a one-line reason.
 
-    Order (first match wins): the label partition (`_partition`, I/U/W) →
-    `facts.merged` moves an I/W row that `leaves_to_merged` to M (#1083) →
-    on a reduced-authority box `facts.handed` moves a remaining I row to gk
-    (#391; a handed row parked in U/W stays there, as the footer counts it).
+    Order (first match wins, the #1141 design order):
+    1. the label partition (`_partition`): an owner question is decided here
+       FIRST (U, or HIDDEN on the full-authority box) and no fact moves it;
+    2. C — the fix is on main and live (`facts.on_main` DEPLOYED, or RELEASED
+       when the repo declares no deploy state), unless `_C_VETO` keeps it
+       (#1141 slice 3);
+    3. P — an open linked PR's checks are still running;
+    4. M — merged to the integration branch (#1083) or on main but not on
+       PROD yet (PENDING); `prio:bounce` keeps it in I (rework was asked for).
+       The old U-label veto is gone: step 1 already took every question;
+    5. on a reduced-authority box `facts.handed` moves a remaining I row to gk
+       (#391; a handed row parked in W stays there, as the footer counts it).
     `facts=None` stops after the label partition — the `_partition_workable`
-    contract."""
+    contract. `Facts()` (all unknown) reproduces the label buckets + gk."""
     box = box or Box()
     labels = _labels_of(row)
     bucket, reason = _partition(labels, box)
-    if facts is None:
+    if facts is None or bucket in ("U", HIDDEN):
         return bucket, reason
-    if facts.merged and bucket in ("I", "W"):
-        if leaves_to_merged(labels):
-            return ("M", "fix merged to the integration branch, not yet on "
-                         "main: waits for the release cut (#1083)")
-        reason += "; merged, but kept here by its owner/bounce label (#1083)"
+    names = _names(labels)
+    if facts.on_main in (DEPLOYED, RELEASED):
+        veto = [lb for lb in _C_VETO if lb in names]
+        if not veto:
+            return "C", _C_REASON[facts.on_main]
+        reason += ("; the fix is on main and live, but %s keeps it open "
+                   "(#1141)" % veto[0])
+    if facts.pipeline:
+        return ("P", "an open linked PR is in CI: waits for its checks "
+                     "(#1141)")
+    if facts.merged or facts.on_main == PENDING:
+        if _BOUNCE not in names:
+            return "M", (_M_MERGED if facts.merged else _M_PENDING)
+        reason += "; merged, but prio:bounce keeps it here (#1083)"
     if facts.handed and bucket == "I" and box.kind == "slice":
         if facts.handed == "released":
             return "gk", "released: done for the stream, counted in gk (#1009)"
         return "gk", "handed off to the gatekeeper: waiting on its review (#391)"
     return bucket, reason
+
+
+def bucketize(rows, facts=None, box=None):
+    """Classify a whole `{number: row}` set: `{bucket: {number: row}}` with a
+    key for every name in BUCKETS and for HIDDEN, each row in EXACTLY one.
+    The ONE route (#1141 slice 3) the footer, `core-quals` and `slice-quals`
+    count from (via `cli_ticket_route`), so a new fact is added in `classify`
+    once and every count moves with it. `facts` is a `TicketFacts`; None =
+    the label partition only (the `_partition_workable` contract)."""
+    box = box or Box()
+    out = {b: {} for b in BUCKETS + (HIDDEN,)}
+    for number, row in rows.items():
+        one = None if facts is None else facts.of(number)
+        out[classify(row, one, box)[0]][number] = row
+    return out
 
 
 def conflicts(labels):
@@ -386,26 +461,28 @@ def _cell(text):
     return " ".join(str(text or "").split())
 
 
-def explain_lines(buckets, box, merged=(), handed=None, supplement=(),
-                  extras=()):
+def explain_lines(buckets, box, facts=None, supplement=(), extras=()):
     """The `--explain` text (pure — the CLI wiring is `cli_ticket_explain`).
 
     `buckets` maps each bucket name to the rows the command actually COUNTED
-    there, so the totals line equals the counts; the per-row reason comes from
-    `classify()` with the same facts (`merged` numbers, `handed` map). A row
-    whose classify() bucket differs from where it was counted gets a
-    `mismatch:` line — a parity break that must never be printed.
+    there (the `bucketize` result), so the totals line equals the counts; the
+    per-row reason comes from `classify()` with the SAME `facts` (a
+    `TicketFacts`; None = unknown). A row whose classify() bucket differs from
+    where it was counted gets a `mismatch:` line — a parity break that must
+    never be printed.
     `supplement` = question-map U rows the slice search misses (#948).
     `extras` = `(bucket, weight, reason, text)` footer contributions that are
     not ticket rows (ticketless ❓ pings in U, the task-hygiene A count in I);
     each prints as a `-` row and adds `weight` to its bucket's total.
     `buckets[HIDDEN]` = rows this box counts NOWHERE (#1141 slice 2): each
-    prints with its reason, and the totals line gains ` hidden=N` when N > 0,
-    so a ticket is never silently missing from the explanation."""
-    merged = {int(n) for n in (merged or ())}
-    handed = handed or {}
+    prints with its reason, so a ticket is never silently missing from the
+    explanation. The totals line always names I M U W gk and adds ` P=N`,
+    ` C=N` and ` hidden=N` only when N > 0 (P and C show in the footer only
+    then too)."""
+    facts = facts or TicketFacts()
     supplement = set(supplement or ())
     totals = {b: len(buckets.get(b) or {}) for b in BUCKETS}
+    totals[HIDDEN] = len(buckets.get(HIDDEN) or {})
     out = []
     for bucket in BUCKETS + (HIDDEN,):
         rows = buckets.get(bucket) or {}
@@ -417,9 +494,7 @@ def explain_lines(buckets, box, merged=(), handed=None, supplement=(),
                                        "ticket, which the slice search "
                                        "misses (#948)")
             else:
-                got, reason = classify(
-                    row, Facts(merged=int(number) in merged,
-                               handed=handed.get(number) or False), box)
+                got, reason = classify(row, facts.of(number), box)
             out.append("%s\t%s\t%s\t%s" % (number, bucket, reason,
                                            _cell(title)))
             if got != bucket:
@@ -433,8 +508,7 @@ def explain_lines(buckets, box, merged=(), handed=None, supplement=(),
     for bucket, weight, reason, text in extras:
         out.append("-\t%s\t%s\t%s" % (bucket, reason, _cell(text)))
         totals[bucket] += weight
-    hidden = len(buckets.get(HIDDEN) or {})
-    out.append("# explain: " + " ".join(
-        "%s=%d" % (b, totals[b]) for b in BUCKETS)
-        + (" %s=%d" % (HIDDEN, hidden) if hidden else ""))
+    shown = _ALWAYS_TOTALED + tuple(b for b in ("P", "C", HIDDEN) if totals[b])
+    out.append("# explain: " + " ".join("%s=%d" % (b, totals[b])
+                                        for b in shown))
     return out
