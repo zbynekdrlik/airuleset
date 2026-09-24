@@ -106,7 +106,7 @@ def compose(status, hostname, top, human, target_pct, window=None):
     lines.append("")
     if owner:
         lines.append("## Owner: the `%s` window (role infra)" % owner)
-        lines.append("Owner ruling on airuleset #1136: disk problems on this "
+        lines.append("Owner ruling on zbynekdrlik/airuleset#1136: disk problems on this "
                      "box are infra work for `%s`, never for the review/FLOW "
                      "window. Move growing data off the root disk (the box "
                      "volume) or raise the capacity question to the owner."
