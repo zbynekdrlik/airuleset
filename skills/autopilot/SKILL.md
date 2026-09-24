@@ -151,9 +151,10 @@ grep -n "airuleset:authority=" CLAUDE.md || true                                
   automat:** `needs-acceptance` is a STATE MACHINE — while its client thread has NOT yet been
   approved+sent it sits in `U`/`--waiting` (above); once the stream SENDS the thread and adds
   `ops-wait` it moves to `W`/`--ops-wait` (below, tagged `acceptance` there) — now waiting on the
-  CLIENT/third party, not the owner. **#507 precedence:** a `needs-acceptance` ticket that is ALSO a
-  re-hand-off (`ready-for-review`/`needs-gatekeeper`) stays `gk`, or a returned bounce (`prio:bounce`)
-  stays workable — never `U`. A `W`/`ops-wait` ticket (a supervisor-set advisory state — open but blocked
+  CLIENT/third party, not the owner. **#1141 precedence (reverses #507 for an unsent acceptance):** an
+  owner question — incl. an UNSENT `needs-acceptance` — beats a hand-off label (`ready-for-review`/
+  `needs-gatekeeper`/`gk-processing`) → `U`; a returned bounce (`prio:bounce`) stays workable; on the
+  full-authority box a FOREIGN stream's question is hidden (it counts in that stream's `U`). A `W`/`ops-wait` ticket (a supervisor-set advisory state — open but blocked
   on an external event/evidence with no dispatchable code lane, OR a SENT `needs-acceptance` per the
   automat above) is the SAME surface-only case for a DIFFERENT reason: it leaves `I N` / `core-quals
   --count` and surfaces as `W N` / `core-quals --ops-wait` (each member tagged `acceptance` for a sent
