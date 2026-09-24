@@ -12,6 +12,13 @@ listed only `ready-for-review`/`needs-gatekeeper` (+ `prio:bounce`).
 Fix (Design-by: main, Approach 1): derive every copy of the gk hand-off label
 set ONCE from MAINTAINER_ACTION_LABELS, so a future hand-off label cannot
 drift the copies apart again.
+
+#1141 slice 2 (owner ruling in the #1141 design comment: "an owner question
+beats any hand-off label", and "on the full-authority box a FOREIGN stream's
+question is hidden") re-pins the routing locks below: the foreign unsent
+acceptance in a hand-off state is HIDDEN on the gk box (still never its U),
+and an own unsent acceptance in a hand-off state is U. The label-set
+derivation locks are unchanged.
 """
 import json
 import types
@@ -45,18 +52,21 @@ _FLEET = m.patch.dict(airuleset.AUTHORITY_BY_USER, {"david4": "fork-no-merge"})
 class FullBoxForeignAcceptance1130(unittest.TestCase):
 
     def test_foreign_acceptance_gk_processing_not_in_U(self):
-        workable, waiting, ops_wait = _full_box(FOREIGN_8002)
+        with _FLEET:
+            workable, waiting, ops_wait = _full_box(FOREIGN_8002)
         self.assertNotIn(8002, waiting,
                          "a foreign stream's acceptance in gk-processing is "
-                         "the gatekeeper's in-flight work, never the owner's U")
-        self.assertIn(8002, workable, "it stays action-only in I")
+                         "never the full-authority owner's U")
+        # RE-PINNED by #1141 slice 2: hidden (it counts in stream david4's U)
+        self.assertNotIn(8002, workable)
         self.assertNotIn(8002, ops_wait)
 
-    def test_foreign_acceptance_ready_for_review_unchanged(self):
+    def test_foreign_acceptance_ready_for_review_hidden(self):
         labels = ("tenant:slovnormal", "needs-acceptance", "stream:david4",
                   "ready-for-review")
-        workable, waiting, _ops = _full_box(labels)
-        self.assertIn(8002, workable)
+        with _FLEET:
+            workable, waiting, _ops = _full_box(labels)
+        self.assertNotIn(8002, workable)   # RE-PINNED by #1141 slice 2
         self.assertNotIn(8002, waiting)
 
     def test_foreign_acceptance_gk_processing_with_ops_wait_stays_I(self):
@@ -66,13 +76,13 @@ class FullBoxForeignAcceptance1130(unittest.TestCase):
         self.assertNotIn(8002, waiting)
         self.assertNotIn(8002, ops_wait)
 
-    def test_own_core_acceptance_in_gk_processing_is_I_not_U(self):
-        """The box's OWN acceptance re-hand-off in gk-processing is the gk
-        box's work in flight (like ready-for-review), never its owner's U."""
+    def test_own_core_acceptance_in_gk_processing_is_U(self):
+        """RE-PINNED by #1141 slice 2: the box's OWN unsent acceptance is an
+        owner question, and it beats the gk-processing hand-off label → U."""
         workable, waiting, _o = _full_box(("stream:core", "needs-acceptance",
                                            "gk-processing"))
-        self.assertIn(8002, workable)
-        self.assertNotIn(8002, waiting)
+        self.assertIn(8002, waiting)
+        self.assertNotIn(8002, workable)
 
     def test_own_core_row_with_gk_processing_unchanged(self):
         workable, waiting, ops_wait = _full_box(("stream:core",
@@ -125,7 +135,7 @@ class HandoffLabelSetsDeriveOnce1130(unittest.TestCase):
 
 SLUG = "zbynekdrlik/odoo-erp"
 ROOT = "/tmp/does-not-matter-1130"
-STREAM = "montalu"
+STREAM = "montalu1"   # the canonical key `_stream_owner_of` returns (#1141)
 QUALS = ["assignee:@me", "author:@me", "label:stream:montalu"]
 
 
@@ -155,20 +165,26 @@ def _drive_slice(number, labels):
 
 class OwningStreamSliceBox1130(unittest.TestCase):
     """On the owning stream's box, gk picking up a needs-acceptance
-    re-hand-off (ready-for-review → gk-processing) keeps it in `gk`, exactly
-    like the ready-for-review form (#507 precedence + #1053 intent)."""
+    re-hand-off (ready-for-review → gk-processing) treats both forms alike.
 
-    def test_acceptance_ready_for_review_is_gk(self):
+    RE-PINNED by #1141 slice 2 (owner ruling in the #1141 design comment: "an
+    owner question beats any hand-off label"): an UNSENT acceptance in either
+    hand-off state is the owner's court on its owning box → U, not gk. The
+    box's own stream is its canonical key (`montalu1`, what `_stream_owner_of`
+    resolves `stream:montalu` to): the former `montalu` spelling made the row
+    read as FOREIGN, so these tests never exercised the owning box."""
+
+    def test_acceptance_ready_for_review_is_U(self):
         r = _drive_slice(301, ["stream:montalu", "needs-acceptance",
                                "ready-for-review"])
-        self.assertEqual(r["gk"], 1)
-        self.assertNotIn(301, r["waiting"])
+        self.assertEqual(r["gk"], 0)
+        self.assertIn(301, r["waiting"])
 
-    def test_acceptance_gk_processing_is_gk(self):
+    def test_acceptance_gk_processing_is_U(self):
         r = _drive_slice(302, ["stream:montalu", "needs-acceptance",
                                "gk-processing"])
-        self.assertEqual(r["gk"], 1)
-        self.assertNotIn(302, r["waiting"])
+        self.assertEqual(r["gk"], 0)
+        self.assertIn(302, r["waiting"])
 
 
 if __name__ == "__main__":

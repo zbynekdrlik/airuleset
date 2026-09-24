@@ -22,6 +22,14 @@ These tests lock:
      label set;
   4. the reduced-authority slice mirror stays untouched — a stream box counting
      its OWN needs-decision into its OWN U still works.
+
+#1141 slice 2 REVERSES item 1 on the FULL-authority box (owner ruling in the
+#1141 design comment: "On the full-authority box a FOREIGN stream's question
+is hidden (it counts in that stream's U), which reverses #654 for questions";
+live cases odoo-erp 8058 and 8180): the foreign question row is no longer the
+gk box's workable I, it is in NO bucket there. Its owner question still never
+reaches the gk box's U. The tests below that locked "foreign → I" on the full
+box are re-pinned to that ruling; the slice-box tests are unchanged.
 """
 
 import json
@@ -51,14 +59,15 @@ class PartitionOwnershipCarveout(unittest.TestCase):
     full-authority box (owns no stream); `own_stream=<canonical user>` is a
     reduced-authority slice box."""
 
-    def test_foreign_stream_userwaiting_row_routes_to_workable_on_full_box(self):
+    def test_foreign_stream_userwaiting_row_is_hidden_on_full_box(self):
         # The 4607 case: stream:david + needs-gatekeeper + needs-decision on the
-        # gk box (own_stream=None) → workable I (action-only), NEVER gk U.
+        # gk box (own_stream=None) → NEVER gk U. RE-PINNED by #1141 slice 2:
+        # no longer workable I either — hidden, it counts in stream david's U.
         rows = {4607: {"number": 4607, "labels": _FOUR607}}
         workable, waiting, ops_wait = airuleset._partition_workable(
             rows, own_stream=None)
-        self.assertIn(4607, workable,
-                      "foreign stream:david row must be workable I, not gk U")
+        self.assertNotIn(4607, workable,
+                         "#1141 slice 2: a foreign question is not gk's I")
         self.assertNotIn(4607, waiting,
                          "foreign stream:david row must NOT be in gk U")
         self.assertNotIn(4607, ops_wait)
@@ -67,9 +76,10 @@ class PartitionOwnershipCarveout(unittest.TestCase):
         # No own_stream arg → default None → full-authority box: a foreign row
         # is workable, never U. Locks the default so a bare footer/core call
         # (which passes no own_stream) gets the carve-out.
+        # RE-PINNED by #1141 slice 2: the foreign question is hidden there.
         rows = {4607: {"number": 4607, "labels": _FOUR607}}
         workable, waiting, _ = airuleset._partition_workable(rows)
-        self.assertIn(4607, workable)
+        self.assertNotIn(4607, workable)
         self.assertNotIn(4607, waiting)
 
     def test_stream_core_and_bare_userwaiting_rows_stay_in_U_on_full_box(self):
@@ -109,36 +119,31 @@ class PartitionOwnershipCarveout(unittest.TestCase):
         self.assertIn(7, workable)
         self.assertNotIn(7, waiting)
 
-    def test_foreign_bare_needs_acceptance_stays_in_U_on_full_box(self):
-        # #654 is SCOPED to answer/decision/action (the enumerated ROZHODNUTÉ
-        # reasons). needs-acceptance keeps its own #526/#622 routing: a bare
-        # needs-acceptance is queued for owner approval → U, even a foreign one
-        # (it is search-excluded from the gk obligation set anyway, so it never
-        # reaches this branch on the gk box in practice — but the routing must
-        # not be disturbed). Mirrors test_gk_i_counting_audit_578's own lock.
+    def test_foreign_bare_needs_acceptance_is_hidden_on_full_box(self):
+        # #654 was SCOPED to answer/decision/action, so a bare foreign
+        # needs-acceptance used to stay in the gk box's U (#622). RE-PINNED by
+        # #1141 slice 2: an unsent acceptance is an owner question, and a
+        # FOREIGN stream's owner question is hidden on the full-authority box
+        # (it counts in that stream's U). Mirrors test_gk_i_counting_audit_578.
         rows = {4007: {"number": 4007,
                        "labels": _labels("needs-acceptance", "stream:montalu3")}}
         workable, waiting, ops_wait = airuleset._partition_workable(
             rows, own_stream=None)
-        self.assertEqual(set(waiting), {4007},
-                         "#654 must NOT touch needs-acceptance: a bare foreign "
-                         "acceptance stays in U (#622 routing intact)")
+        self.assertEqual(waiting, {},
+                         "#1141 slice 2: a foreign acceptance is not gk's U")
         self.assertEqual(workable, {})
         self.assertEqual(ops_wait, {})
 
-    def test_foreign_decision_plus_acceptance_row_is_carved_by_decision(self):
-        # A foreign row carrying BOTH needs-decision AND needs-acceptance: reason
-        # is `decision` (decision outranks acceptance in `_user_waiting_reason`),
-        # so the #654 carve-out fires (reason != "acceptance") → workable I
-        # action-only, never gk U. Correct + safe (a safe over-count per
-        # #589/#636 — the owning box still fields the acceptance in its own U).
-        # Locks the precedence so a future `_user_waiting_reason` tweak can't
-        # silently reroute it back into U.
+    def test_foreign_decision_plus_acceptance_row_is_hidden_on_full_box(self):
+        # A foreign row carrying BOTH needs-decision AND needs-acceptance and a
+        # hand-off label: never gk U. RE-PINNED by #1141 slice 2 (it used to be
+        # carved into workable I by the decision): every foreign owner
+        # question is hidden on the full-authority box, whichever label leads.
         rows = {30: {"number": 30, "labels": _labels(
             "stream:david", "needs-decision", "needs-acceptance", "needs-gatekeeper")}}
         workable, waiting, ops_wait = airuleset._partition_workable(
             rows, own_stream=None)
-        self.assertEqual(set(workable), {30})
+        self.assertEqual(workable, {})
         self.assertEqual(waiting, {})
         self.assertEqual(ops_wait, {})
 
@@ -213,16 +218,19 @@ class CoreQualsExcludesForeignStreamFromU(unittest.TestCase):
             'esac\n')
         gh.chmod(0o755)
 
-    def test_count_counts_foreign_stream_row_as_workable(self):
+    def test_count_excludes_the_hidden_foreign_question(self):
+        # RE-PINNED by #1141 slice 2: the foreign question 4607 is hidden on
+        # the gk box (it counts in stream david's U), so it leaves --count.
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
             self._fake_gh(bindir)
             r = _run_quals("core-quals", "--count", repo, home, bindir)
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(r.stdout.strip(), "2",
-                             "workable I = {4607 (foreign, action-only), 1}; "
-                             "#2 stream:core + #3 needs-answer are gk's own U")
+            self.assertEqual(r.stdout.strip(), "1",
+                             "workable I = {1}; 4607 is hidden (foreign "
+                             "question); #2 stream:core + #3 needs-answer are "
+                             "gk's own U")
 
     def test_waiting_lists_only_gk_own_U_not_the_foreign_row(self):
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
@@ -236,7 +244,9 @@ class CoreQualsExcludesForeignStreamFromU(unittest.TestCase):
                              "--waiting lists ONLY gk's own U (stream:core + bare), "
                              "NEVER the foreign stream:david row 4607")
 
-    def test_list_includes_foreign_row_as_action_only(self):
+    def test_list_omits_the_hidden_foreign_question(self):
+        # RE-PINNED by #1141 slice 2: 4607 is hidden on the gk box, so the
+        # workable --list no longer carries it (len(--list) == --count holds).
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -251,10 +261,8 @@ class CoreQualsExcludesForeignStreamFromU(unittest.TestCase):
                     continue
                 parts = ln.split("\t")
                 by_num[parts[0]] = parts[2]   # field 2 = action column
-            self.assertEqual(set(by_num), {"4607", "1"},
+            self.assertEqual(set(by_num), {"1"},
                              "--list is workable-only, so len(--list) == --count")
-            self.assertEqual(by_num["4607"], airuleset.ROW_ACTION_ONLY,
-                             "foreign stream:david row must render action-only")
             self.assertEqual(by_num["1"], airuleset.ROW_IMPLEMENT)
 
 

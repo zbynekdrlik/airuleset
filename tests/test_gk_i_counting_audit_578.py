@@ -22,9 +22,9 @@ Locks:
   3. the deliberate-`stream:core` decision is documented in the code (a #498
      content-lock so the reasoning can't be silently dropped).
   4. `_partition_workable` routes a bare needs-acceptance to `user_waiting` (U)
-     UNCONDITIONALLY (#622 reversed the #539 chained-I → I disposition), so a
-     leaked foreign one would inflate `U` — the search exclusion stays the ONE
-     guard that keeps it out of the obligation set for a full-authority box.
+     (#622 reversed the #539 chained-I → I disposition). Since #1141 slice 2 a
+     leaked FOREIGN one is hidden on the full-authority box (no bucket), so the
+     partition is now a second guard behind the search exclusion.
   5-6. END-TO-END (a filter-aware fake gh): the #4007-shaped foreign acceptance is
      ABSENT from `core-quals` `--list`/`--waiting`/`--ops-wait`/`--count` (excluded
      at the SEARCH layer, so its U-vs-I routing never even matters here), while the
@@ -104,23 +104,24 @@ class StreamCoreDocumentedLock(unittest.TestCase):
 
 
 class ForeignAcceptanceRoute(unittest.TestCase):
-    """Pure partition — the search exclusion stays load-bearing under #622. A bare
-    needs-acceptance routes to `user_waiting` (U) UNCONDITIONALLY now (#622 reversed
-    the #539 chained-I → I disposition), so a FOREIGN one leaking past the search
-    exclusion would inflate a full-authority `U` (not `I`). The search exclusion is
-    still the ONE guard that keeps it out of the gk obligation set entirely."""
+    """Pure partition. An own bare needs-acceptance routes to `user_waiting` (U)
+    (#622 reversed the #539 chained-I → I disposition). A FOREIGN one leaking past
+    the search exclusion is hidden on the full-authority box since #1141 slice 2
+    (it counts in its stream's U), so it inflates neither `U` nor `I` here."""
 
     def test_bare_needs_acceptance_no_draft_routes_to_user_waiting_U(self):
         rows = {4007: {"number": 4007,
                        "labels": _labels("needs-acceptance", "stream:montalu3")}}
         # #622: a bare needs-acceptance → U unconditionally (pure label partition,
-        # no acceptance_present routing param). A leaked foreign one inflates U.
+        # no acceptance_present routing param). RE-PINNED by #1141 slice 2
+        # (owner ruling in the #1141 design comment: "on the full-authority
+        # box a FOREIGN stream's question is hidden, it counts in that stream's
+        # U"): a FOREIGN one leaking past the search exclusion is now in NO
+        # bucket of the full-authority box — it no longer inflates U here.
         w, u, ow = airuleset._partition_workable(rows)
-        self.assertEqual(set(u), {4007},
-                         "#622: a bare needs-acceptance is queued for owner approval "
-                         "→ U; so a FOREIGN one leaking past the search exclusion "
-                         "would inflate a full-authority `U` (the exclusion is still "
-                         "the guard that keeps it out of the obligation set)")
+        self.assertEqual(u, {},
+                         "#1141 slice 2: a foreign acceptance is hidden on the "
+                         "full-authority box, never its U")
         self.assertEqual(w, {})
         self.assertEqual(ow, {})
 

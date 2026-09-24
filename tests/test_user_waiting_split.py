@@ -114,8 +114,11 @@ class PartitionHelpers(unittest.TestCase):
 
     def test_bare_needs_acceptance_partitions_into_user_waiting(self):
         # #512: the ONE derivation routes a bare needs-acceptance row to the
-        # user_waiting bucket (leaves workable), while a re-hand-off / bounce
-        # variant stays workable (#507 precedence).
+        # user_waiting bucket (leaves workable), while a bounce variant stays
+        # workable (#507 precedence). RE-PINNED by #1141 slice 2 (owner ruling
+        # in the #1141 design comment: "an owner question beats any hand-off
+        # label"): the UNSENT needs-acceptance + ready-for-review row #2 is now
+        # the owner's court too (U), no longer overridden into workable.
         rows = {
             1: {"number": 1, "labels": _labels("needs-acceptance")},
             2: {"number": 2, "labels": _labels("needs-acceptance", "ready-for-review")},
@@ -123,8 +126,8 @@ class PartitionHelpers(unittest.TestCase):
             4: {"number": 4, "labels": _labels("bug")},
         }
         workable, waiting = airuleset._partition_user_waiting(rows)
-        self.assertEqual(set(waiting), {1})
-        self.assertEqual(set(workable), {2, 3, 4})
+        self.assertEqual(set(waiting), {1, 2})
+        self.assertEqual(set(workable), {3, 4})
 
     def test_user_waiting_reason_maps_each_label(self):
         self.assertEqual(airuleset._user_waiting_reason(_labels("needs-answer")), "answer")
