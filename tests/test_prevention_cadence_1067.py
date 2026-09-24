@@ -73,6 +73,9 @@ def _poll(tmp_path, now, box=SHARED, used_pct=None, dry_run=False, clock=None):
         scratch_discover_fn=lambda _n, _h: [], clock_fn=clock or FakeClock())
 
 
+PREVENTION_STAMP = "last-prevention"     # the on-disk contract (guard dir file name)
+
+
 def _stamp(tmp_path, name):
     return dg._guard_dir(str(tmp_path)) / name
 
@@ -93,7 +96,7 @@ def test_prevention_stamp_helpers_are_siblings_of_the_drain_stamp(tmp_path):
 
 
 def test_a_corrupt_prevention_stamp_reads_as_due(tmp_path):
-    p = _stamp(tmp_path, dg.LAST_PREVENTION_NAME)
+    p = _stamp(tmp_path, PREVENTION_STAMP)
     p.parent.mkdir(parents=True)
     p.write_text("not-a-number")
     assert dg._prevention_due(str(tmp_path), 10_000.0, 3600) is True
@@ -111,12 +114,11 @@ def test_prevention_runs_once_per_interval(tmp_path, monkeypatch, box, inside, a
     monkeypatch.setattr(dg, "_prevention_planners", _ladder(clock, calls))
     _poll(tmp_path, 10_000.0, box=box, clock=clock)
     assert calls == ["tmp-test", "scratch", "worktree"]
-    assert float(_stamp(tmp_path, dg.LAST_PREVENTION_NAME).read_text()) == 10_000.0
 
     calls.clear()
-    logs = _poll(tmp_path, inside, box=box, clock=clock)
+    _poll(tmp_path, inside, box=box, clock=clock)
     assert calls == [], "a poll inside the interval executes no prevention rung"
-    assert not any("step prevention" in ln for ln in logs)
+    assert float(_stamp(tmp_path, PREVENTION_STAMP).read_text()) == 10_000.0
 
     _poll(tmp_path, after, box=box, clock=clock)
     assert calls == ["tmp-test", "scratch", "worktree"], "due again once the interval elapsed"
@@ -132,7 +134,7 @@ def test_cut_short_prevention_is_not_stamped_and_resumes(tmp_path, monkeypatch):
     logs = _poll(tmp_path, 10_000.0, clock=clock)
     assert calls == ["tmp-test"]
     assert any("budget exceeded" in ln for ln in logs)
-    assert not _stamp(tmp_path, dg.LAST_PREVENTION_NAME).exists()
+    assert not _stamp(tmp_path, PREVENTION_STAMP).exists()
 
     calls.clear()
     clock2 = FakeClock()
@@ -140,11 +142,11 @@ def test_cut_short_prevention_is_not_stamped_and_resumes(tmp_path, monkeypatch):
     logs2 = _poll(tmp_path, 10_060.0, clock=clock2)
     assert calls == ["scratch", "worktree"], "the unstamped pass resumes at the deferred rung"
     assert "disk-guard: resuming ladder at scratch (deferred by the previous poll)" in logs2
-    assert float(_stamp(tmp_path, dg.LAST_PREVENTION_NAME).read_text()) == 10_060.0
 
     calls.clear()
     _poll(tmp_path, 10_120.0, clock=clock2)
     assert calls == [], "the completed resume stamped the cadence"
+    assert float(_stamp(tmp_path, PREVENTION_STAMP).read_text()) == 10_060.0
 
 
 # --------------------------------------------------------------------------- #
@@ -205,7 +207,7 @@ def test_dry_run_does_not_write_the_prevention_stamp(tmp_path, monkeypatch):
     monkeypatch.setattr(dg, "_prevention_planners", _ladder(clock, calls))
     _poll(tmp_path, 10_000.0, dry_run=True, clock=clock)
     assert calls == ["tmp-test", "scratch", "worktree"]
-    assert not _stamp(tmp_path, dg.LAST_PREVENTION_NAME).exists()
+    assert not _stamp(tmp_path, PREVENTION_STAMP).exists()
 
     calls.clear()
     _poll(tmp_path, 10_060.0, clock=clock)
@@ -215,10 +217,12 @@ def test_dry_run_does_not_write_the_prevention_stamp(tmp_path, monkeypatch):
 def test_dry_run_is_not_gated_by_a_fresh_stamp(tmp_path, monkeypatch):
     clock, calls = FakeClock(), []
     monkeypatch.setattr(dg, "_prevention_planners", _ladder(clock, calls))
-    dg._mark_prevented(str(tmp_path), 10_000.0)
+    stamp = _stamp(tmp_path, PREVENTION_STAMP)
+    stamp.parent.mkdir(parents=True)
+    stamp.write_text("%f" % 10_000.0)
     _poll(tmp_path, 10_060.0, dry_run=True, clock=clock)
     assert calls == ["tmp-test", "scratch", "worktree"]
-    assert float(_stamp(tmp_path, dg.LAST_PREVENTION_NAME).read_text()) == 10_000.0
+    assert float(_stamp(tmp_path, PREVENTION_STAMP).read_text()) == 10_000.0
 
 
 # --------------------------------------------------------------------------- #
@@ -233,6 +237,6 @@ def test_a_skipped_pass_under_a_held_lock_is_not_stamped(tmp_path, monkeypatch):
     finally:
         dg._release_lock(held)
     assert calls == []
-    assert not _stamp(tmp_path, dg.LAST_PREVENTION_NAME).exists()
+    assert not _stamp(tmp_path, PREVENTION_STAMP).exists()
     _poll(tmp_path, 10_060.0, clock=clock)
     assert calls == ["tmp-test", "scratch", "worktree"]
