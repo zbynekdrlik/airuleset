@@ -21,6 +21,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -62,12 +63,36 @@ class NewBuckets(unittest.TestCase):
         reason = ts.classify(row, ts.Facts(on_main=ts.DEPLOYED), ts.Box())[1]
         self.assertIn("close", reason)
 
-    def test_c_beats_ops_wait_and_hand_off_labels(self):
-        # "waiting for the deploy" and a stale hand-off label: the fix is live
-        for extra in ("ops-wait", "ready-for-review", "needs-gatekeeper",
-                      "gk-processing"):
-            self.assertEqual(_bucket(_row(1, extra), on_main=ts.DEPLOYED),
-                             "C", extra)
+    def test_c_beats_ops_wait(self):
+        # "waiting for the deploy": the fix is live now
+        self.assertEqual(_bucket(_row(1, "ops-wait"), on_main=ts.DEPLOYED), "C")
+
+    def test_a_hand_off_label_keeps_c_open(self):
+        # review round 1: a fork-no-merge hand-off of a SECOND fix has no PR,
+        # so the hand-off label is the only sign; C would hide it from the
+        # gatekeeper's I (the #943 class)
+        for extra in ("ready-for-review", "needs-gatekeeper", "gk-processing"):
+            got = ts.classify(_row(1, extra), ts.Facts(on_main=ts.DEPLOYED),
+                              ts.Box())
+            self.assertEqual(got[0], "I", extra)
+            self.assertIn(extra, got[1])
+
+    def test_another_pending_fix_keeps_c_open(self):
+        # review round 1: one fix is live, another is merged-not-released, in
+        # CI, or an open PR (any state) — the ticket is not done
+        row = _row(1, "bug")
+        self.assertEqual(_bucket(row, on_main=ts.DEPLOYED, merged=True), "M")
+        self.assertEqual(_bucket(row, on_main=ts.DEPLOYED, pipeline=True), "P")
+        self.assertEqual(_bucket(row, on_main=ts.DEPLOYED, open_pr=True), "I")
+        self.assertIn("open", ts.classify(
+            row, ts.Facts(on_main=ts.DEPLOYED, open_pr=True), ts.Box())[1])
+
+    def test_unreadable_labels_never_read_as_done(self):
+        # review round 1: the C vetoes cannot be checked on unreadable labels
+        for row in ({"labels": None}, {"labels": "garbage"}, "not-a-row"):
+            self.assertNotEqual(
+                ts.classify(row, ts.Facts(on_main=ts.RELEASED), ts.Box())[0],
+                "C", row)
 
     def test_an_owner_question_beats_c(self):
         for q in ("needs-answer", "needs-decision", "needs-owner-action",
@@ -182,15 +207,23 @@ class Bucketize(unittest.TestCase):
             self.assertIn("cli_ticket_route", src, fn.__name__)
 
 
+_NOW = 1790244000.0                       # 2026-09-24T10:00:00Z
+_FRESH = "2026-09-24T09:30:00Z"           # a head commit 30 min old
+
+
 def _graphql(*prs):
-    """A GraphQL payload for open PRs: (number, title, body, rollup, closes)."""
+    """A GraphQL payload for open PRs: (number, title, body, rollup, closes)
+    plus optional (draft, head committedDate)."""
     nodes = []
-    for number, title, body, state, closes in prs:
+    for number, title, body, state, closes, *rest in prs:
+        draft = rest[0] if rest else False
+        date = rest[1] if len(rest) > 1 else _FRESH
         nodes.append({
-            "number": number, "title": title, "body": body,
+            "number": number, "title": title, "body": body, "isDraft": draft,
             "closingIssuesReferences": {"nodes": [{"number": c}
                                                   for c in closes]},
-            "commits": {"nodes": [{"commit": {"statusCheckRollup": (
+            "commits": {"nodes": [{"commit": {"committedDate": date,
+                                              "statusCheckRollup": (
                 {"state": state} if state else None)}}]}})
     return {"data": {"repository": {"pullRequests": {"nodes": nodes}}}}
 
@@ -203,31 +236,49 @@ class PipelineFact(unittest.TestCase):
     def test_running_checks_link_the_ticket(self):
         got = self.f.pipeline_numbers(_graphql(
             (50, "#5 fix the thing", "", "PENDING", ()),
-            (51, "docs", "Closes #7", "EXPECTED", ()),
+            (51, "docs", "Closes #7", "PENDING", ()),
             (52, "other", "", "PENDING", (9,)),
             (53, "#11 green", "", "SUCCESS", ()),
             (54, "#12 red", "", "FAILURE", ()),
             (55, "follow-up to #13", "see #14", "PENDING", ()),
-            (56, "#15 no checks", "", None, ())))
+            (56, "#15 no checks", "", None, ())), now=_NOW)
         self.assertEqual(got, frozenset({5, 7, 9, 13}))
+
+    def test_expected_draft_and_stuck_checks_are_not_p(self):
+        # review round 1: EXPECTED (a required check that never reported) and
+        # a head commit older than PIPELINE_MAX_AGE_S are stuck, not "in CI";
+        # a draft is still someone's work in progress
+        old = "2026-09-24T01:00:00Z"
+        payload = _graphql((60, "#20 expected", "", "EXPECTED", ()),
+                           (61, "#21 draft", "", "PENDING", (), True),
+                           (62, "#22 stuck", "", "PENDING", (), False, old),
+                           (63, "#23 no date", "", "PENDING", (), False, None))
+        self.assertEqual(self.f.pipeline_numbers(payload, now=_NOW),
+                         frozenset({23}))
+        # every linked open PR, in any state, is an open PR (the C veto)
+        self.assertEqual(set(self.f.open_pr_states(payload, now=_NOW)),
+                         {20, 21, 22, 23})
 
     def test_an_unreadable_payload_is_unknown(self):
         for bad in (None, [], "garbage", {"data": None},
                     {"errors": [{"message": "x"}]}, {"data": {"repository":
                                                              None}}):
             self.assertIsNone(self.f.pipeline_numbers(bad), bad)
+            self.assertIsNone(self.f.open_pr_states(bad), bad)
 
-    def test_read_pipeline_is_one_graphql_call(self):
+    def test_read_prs_is_one_graphql_call(self):
         calls = []
 
         def gh(args):
             calls.append(args)
-            return json.dumps(_graphql((50, "#5 x", "", "PENDING", ())))
-        self.assertEqual(self.f.read_pipeline("o/r", gh), frozenset({5}))
+            return json.dumps(_graphql((50, "#5 x", "", "PENDING", ()),
+                                       (51, "#6 y", "", "FAILURE", ())))
+        self.assertEqual(self.f.read_prs("o/r", gh, now=_NOW),
+                         {5: True, 6: False})
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][:2], ["api", "graphql"])
-        self.assertIsNone(self.f.read_pipeline("o/r", lambda a: ""))
-        self.assertIsNone(self.f.read_pipeline("", gh))
+        self.assertIsNone(self.f.read_prs("o/r", lambda a: ""))
+        self.assertIsNone(self.f.read_prs("", gh))
 
 
 class OnMainFact(unittest.TestCase):
@@ -273,7 +324,7 @@ class FactsCache(unittest.TestCase):
     def _refresh(self, home, now, gh=None, deploy=None, released=None):
         calls = {"deploy": 0}
 
-        def deploy_fn(root):
+        def deploy_fn(root, slug):
             calls["deploy"] += 1
             return deploy
 
@@ -396,7 +447,9 @@ class CliFacts(unittest.TestCase):
     reads the cache the refresh wrote — zero gh for the facts there."""
 
     def _fake_gh(self, bindir, log):
-        payload = json.dumps(_graphql((60, "#2 fix", "", "PENDING", ())))
+        payload = json.dumps(_graphql((60, "#2 fix", "", "PENDING", (), False,
+                                       time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                                     time.gmtime()))))
         gh = Path(bindir) / "gh"
         gh.write_text(
             "#!/usr/bin/env bash\n"
@@ -466,6 +519,14 @@ class CliFacts(unittest.TestCase):
                 capture_output=True, text=True, env=env, cwd=repo)
             self.assertIn("# explain: I=1 M=0 U=0 W=0 gk=0 P=1 C=1",
                           r.stdout.splitlines(), r.stdout + r.stderr)
+            # review round 1: C left I, so --list names it (someone closes it)
+            r = subprocess.run(
+                [sys.executable, str(airuleset.REPO_DIR / "airuleset.py"),
+                 "core-quals", "--list"],
+                capture_output=True, text=True, env=env, cwd=repo)
+            done = [ln for ln in r.stdout.splitlines() if ln.startswith("3\t")]
+            self.assertEqual(len(done), 1, r.stdout + r.stderr)
+            self.assertEqual(done[0].split("\t")[2], "released", done)
 
     def test_without_the_facts_cache_the_count_is_the_old_one(self):
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
@@ -479,6 +540,134 @@ class CliFacts(unittest.TestCase):
                 env={**os.environ, "HOME": home,
                      "PATH": f"{bindir}:{os.environ['PATH']}"})
             self.assertEqual(r.stdout.strip(), "3", r.stderr)
+
+
+def _git(repo, *args):
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}
+    return subprocess.run(["git", "-C", repo, *args], check=True, env=env,
+                          capture_output=True, text=True).stdout.strip()
+
+
+class ReviewRound1(unittest.TestCase):
+    """Review round 1 (two adversarial reviews): the facts must never read a
+    ticket as done too early, and a broken read must never crash a count."""
+
+    def setUp(self):
+        import cli_ticket_facts
+        self.f = cli_ticket_facts
+
+    def test_bump_at_cut_repo_reads_the_release_version(self):
+        # odoo-erp bumps its version only at the release cut: the version at
+        # the fix commit is the PREVIOUS release, so it must be read at the
+        # first main commit that contains the fix (the release merge)
+        with TemporaryDirectory() as repo:
+            _git(repo, "init", "-q", "-b", "main")
+            Path(repo, "VERSION").write_text("1.0.0\n")
+            _git(repo, "add", "VERSION")
+            _git(repo, "commit", "-q", "-m", "base 1.0.0")
+            _git(repo, "checkout", "-q", "-b", "develop")
+            Path(repo, "fix.txt").write_text("x\n")
+            _git(repo, "add", "fix.txt")
+            _git(repo, "commit", "-q", "-m", "fix #7")
+            fix = _git(repo, "rev-parse", "HEAD")
+            Path(repo, "VERSION").write_text("1.1.0\n")
+            _git(repo, "commit", "-q", "-am", "chore(release): cut 1.1.0")
+            _git(repo, "checkout", "-q", "main")
+            _git(repo, "merge", "-q", "--no-ff", "-m", "release 1.1.0",
+                 "develop")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            self.assertEqual(
+                self.f._default_version_at(repo, "VERSION", fix), "1.1.0")
+            # PROD still on 1.0.0 → the fix waits for the deploy (M), not C
+            self.assertEqual(self.f.on_main_states(
+                {7: fix}, [{"main_version": "1.1.0", "prod_version": "1.0.0"}],
+                lambda oid: self.f._default_version_at(repo, "VERSION", oid)),
+                {7: ts.PENDING})
+
+    def test_an_oid_that_is_not_a_hash_is_never_passed_to_git(self):
+        for bad in ("--output=/tmp/x", "HEAD", "", None, "abc g"):
+            self.assertIsNone(self.f._default_version_at("/", "VERSION", bad))
+
+    def test_a_partial_or_unreadable_deploy_read_is_unknown(self):
+        from unittest import mock
+        from watchdog import deploy_state as ds
+        decl = {"main_version_file": "V", "instances": [
+            {"name": "a"}, {"name": "b"}, {"name": "c"}]}
+        two = [{"main_version": "1", "prod_version": "1"}] * 2
+        with mock.patch.object(ds, "deploy_declaration",
+                               return_value=(decl, True)), \
+                mock.patch.object(ds, "fetch_deploy_state", return_value=two):
+            got = self.f._default_deploy("/r", "o/r")
+        self.assertEqual(got["instances"], [])        # fewer than declared
+        with mock.patch.object(ds, "deploy_declaration",
+                               return_value=(None, False)):
+            got = self.f._default_deploy("/r", "o/r")
+        self.assertEqual(got, {"instances": [], "version_file": None})
+        self.assertEqual(self.f.on_main_states({1: "a"}, got["instances"],
+                                               lambda o: "1"), {})
+
+    def test_the_declaration_matches_the_canonical_slug(self):
+        from watchdog import deploy_state as ds
+        with TemporaryDirectory() as tmp:
+            reg = Path(tmp, "projects-registry.json")
+            reg.write_text(json.dumps([{"path": "/elsewhere",
+                                        "github_repo": "Owner/Repo",
+                                        "deploy_state": {"instances": []}}]))
+            self.assertEqual(ds.deploy_declaration(tmp, str(reg), "owner/repo"),
+                             ({"instances": []}, True))
+            self.assertEqual(ds.deploy_declaration(tmp, str(reg), "a/b"),
+                             (None, True))
+            self.assertEqual(ds.deploy_declaration(
+                tmp, str(Path(tmp, "missing.json"))), (None, False))
+
+    def test_open_prs_flow_through_the_cache(self):
+        with TemporaryDirectory() as home:
+            stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            payload = json.dumps(_graphql(
+                (50, "#1 x", "", "FAILURE", ()),
+                (51, "#2 y", "", "PENDING", (), False, stamp)))
+
+            def gh(args):
+                return payload
+            facts = self.f.refresh("/repo", "o/r", {1, 2, 3}, home=home,
+                                   gh_fn=gh, released_fn=lambda *a: {},
+                                   deploy_fn=lambda r, s: None)
+            self.assertEqual((facts.pipeline, facts.open_pr),
+                             (frozenset({2}), frozenset({1, 2})))
+            loaded = self.f.load("/repo", home=home)
+            self.assertEqual(loaded.open_pr, frozenset({1, 2}))
+
+    def test_a_corrupt_cache_never_crashes_a_count(self):
+        with TemporaryDirectory() as home:
+            path = self.f.cache_path("/repo", home)
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({
+                "ts": 1000, "pipeline": [True, 5, "6"], "open_pr": [False, 5],
+                "on_main": {"\u00b2": "deployed", "7": "deployed",
+                            "8": "bogus"}}))
+            facts = self.f.load("/repo", home=home, now=1000)
+        self.assertEqual(facts.pipeline, frozenset({5}))
+        self.assertEqual(facts.open_pr, frozenset({5}))
+        self.assertEqual(facts.on_main, {7: ts.DEPLOYED})
+
+    def test_a_failed_refresh_forgets_the_old_facts(self):
+        from unittest import mock
+        import cli_ticket_route
+        with TemporaryDirectory() as home:
+            path = self.f.cache_path("/repo", home)
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({"ts": time.time(), "pipeline": [1],
+                                        "on_main": {}}))
+            with mock.patch.object(self.f, "refresh",
+                                   side_effect=RuntimeError("boom")), \
+                    mock.patch.object(self.f.statusbar, "cache_dir",
+                                      return_value=path.parent):
+                b, facts = cli_ticket_route.footer(
+                    {1: _row(1, "bug")}, "/repo", "o/r", ())
+            self.assertFalse(path.exists())
+            self.assertEqual(set(b["I"]), {1})
+            self.assertEqual(facts.pipeline, frozenset())
 
 
 if __name__ == "__main__":
