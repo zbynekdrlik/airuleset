@@ -229,7 +229,8 @@ def maybe_update_quota_drift(status, home, now, q, du_fn=None, logs=None):
         logs.append(line)
 
 
-def run_quota_pass(status, home, now, dry_run, planners, q, do_action, geteuid_fn):
+def run_quota_pass(status, home, now, dry_run, planners, q, do_action, geteuid_fn,
+                   timer=None):
     """The QUOTA drain pass: the existing ladder (minus
     ``QUOTA_PASS_EXCLUDED_RUNGS``) via the existing ``execute_drain``,
     rechecking the QUOTA against ``QUOTA_TARGET_PCT``. An unreadable quota
@@ -247,7 +248,7 @@ def run_quota_pass(status, home, now, dry_run, planners, q, do_action, geteuid_f
     logs = dg.execute_drain(status, home, own, recheck, do_action,
                             geteuid_fn=geteuid_fn, log_path=log_path, now=now,
                             dry_run=dry_run, target_pct=QUOTA_TARGET_PCT,
-                            pressure="quota")
+                            pressure="quota", timer=timer)
     after = recheck()
     rec = {"ts": now, "before_pct": q.pct, "after_pct": after,
            "trigger_pct": QUOTA_DRAIN_PCT, "target_pct": QUOTA_TARGET_PCT,
@@ -275,14 +276,16 @@ def run_quota_pass(status, home, now, dry_run, planners, q, do_action, geteuid_f
 
 
 def run_drain_passes(status, home, now, dry_run, planners, planners_fn, q,
-                      fs_pressure, statvfs_fn, dev_fn, mounts, geteuid_fn, sudo_probe_fn):
+                      fs_pressure, statvfs_fn, dev_fn, mounts, geteuid_fn, sudo_probe_fn,
+                      timer=None):
     """The full drain's passes, under the caller's lock (extracted from
     ``run_disk_guard``, #1140): the #1140 QUOTA pass first when the account's
     quota is under pressure (``disk_guard_quota.run_quota_pass``), then the
     filesystem pass when the box is. The fs pass after a quota pass gets FRESH
     planners — the quota pass consumed the shared scratch rows, and replaying
     them would journal deletions of already-gone paths (a second scratch walk,
-    only when BOTH pressures hold). Returns log lines."""
+    only when BOTH pressures hold). ``timer`` (#1067) is the poll's
+    ``disk_guard_timing.PollTimer``, shared by both passes. Returns log lines."""
     from watchdog import disk_guard as dg
     logs = []
 
@@ -297,14 +300,14 @@ def run_drain_passes(status, home, now, dry_run, planners, planners_fn, q,
     do_action = dg._make_do_action(dry_run, sudo_ok=sudo_ok, run_fn=None, now=now)
     if q.pressure:
         logs += run_quota_pass(status, home, now, dry_run, planners, q,
-                               do_action, geteuid_fn)
-        if fs_pressure:
+                               do_action, geteuid_fn, timer=timer)
+        if fs_pressure and not (timer and timer.cut_short):
             planners = (planners_fn(home, now) if planners_fn is not None
                         else dg._default_planners(home, now, scratch_rows=None))
     if fs_pressure:
         logs += dg.execute_drain(status, home, planners, recheck, do_action,
                                  geteuid_fn=geteuid_fn, log_path=dg._log_path(home),
-                                 now=now, dry_run=dry_run)
+                                 now=now, dry_run=dry_run, timer=timer)
     return logs
 
 

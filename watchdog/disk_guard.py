@@ -68,6 +68,8 @@ import sys
 import time
 from pathlib import Path
 
+from watchdog import disk_guard_timing as _dgt
+
 # --- thresholds (#834 req 1) ------------------------------------------------ #
 NOTICE_PCT = 75            # footer NOTICE band (footer render itself narrowed to >=90% by #854)
 PREVENTION_PCT = 70        # #920: cheapest age-out rungs fire from here (prevention, not just drain)
@@ -2972,7 +2974,7 @@ def _make_do_action(dry_run, sudo_ok=False, run_fn=None, scratch_live_fn=None, n
 
 def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                   geteuid_fn=None, log_path=None, now=None, dry_run=False,
-                  target_pct=None, pressure=None):
+                  target_pct=None, pressure=None, timer=None):
     """Run the drain ladder. Refuses as root (per-user deletion against root's
     fs view is #841). Between rungs, re-checks the worst mount and stops once
     it is back under ``target_pct`` (default :data:`TARGET_PCT`). Every action
@@ -2984,8 +2986,11 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
     ``pressure="quota"`` (the quota pass) labels what ``recheck_fn`` measures
     in the STOP/summary lines and the deletions journal; a recheck returning
     None (unmeasurable) STOPS the ladder — never delete on uncertainty.
+    #1067: ``timer`` (a ``disk_guard_timing.PollTimer``) times each planner and
+    defers the rest of the ladder once the poll is over its wall budget.
     Returns the log lines (also appended to `log_path`)."""
     target_pct = TARGET_PCT if target_pct is None else target_pct
+    timer = timer or _dgt.NULL_TIMER
     geteuid_fn = geteuid_fn or os.geteuid
     now = time.time() if now is None else now
     logs = []
@@ -3014,7 +3019,7 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
         logs.append(line)
         _append_log(log_path, [line])
 
-    for _label, planner in planners:
+    for i, (_label, planner) in enumerate(planners):
         worst = recheck_fn()
         if worst is None:                   # unmeasurable → stop, never guess
             line = _log_line(now, "STOP", "-", 0, "%s unreadable — ladder stopped, "
@@ -3033,6 +3038,8 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             logs.append(line)
             _append_log(log_path, [line])
             break
+        if timer.over_budget(logs, len(planners) - i):    # #1067: rest → next poll
+            break
         # #965 R3 fix: skip a rung that has freed < 1 MiB three times in a row
         if _should_skip_low_yield_rung(home, _label, now):
             line = _log_line(now, "SKIP-LOW-YIELD", "-", 0,
@@ -3042,7 +3049,8 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             _append_log(log_path, [line])
             continue
         try:
-            actions = planner()
+            with timer.step(_label, logs):
+                actions = planner()
         except Exception as e:
             line = _log_line(now, "ERROR", _label, 0, "planner error: %r" % e)
             logs.append(line)
@@ -3649,7 +3657,7 @@ def _largest_live_scratch(rows):
 
 def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
                          statvfs_fn=None, dev_fn=None, mounts=None,
-                         geteuid_fn=None, target_pct=None):
+                         geteuid_fn=None, target_pct=None, timer=None):
     """#920: extracted prevention helper — runs the cheapest age-out rungs
     at 70-79% pressure. Uses ``PREVENTION_PCT`` as the stop target (not
     ``TARGET_PCT=75``) so the ladder engages at 70-74%. Does NOT stamp
@@ -3676,7 +3684,7 @@ def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
         logs += execute_drain(status, home, prev_planners, prev_recheck,
                               do_action, geteuid_fn=geteuid_fn,
                               log_path=_log_path(home), now=now, dry_run=dry_run,
-                              target_pct=target_pct)
+                              target_pct=target_pct, timer=timer)
         # NOTE: intentionally NOT calling _mark_drained here — the prevention
         # pass has its own cadence check in run_disk_guard via _drain_due, and
         # stamping here would delay the real >=80% drain.
@@ -3784,7 +3792,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                    geteuid_fn=None, mounts=None, min_drain_interval_s=None,
                    planners_fn=None, sudo_probe_fn=None, scratch_discover_fn=None,
                    top_consumers_fn=None, severe_run_fn=None, box_class_fn=None,
-                   quota_usage_fn=None, du_fn=None):
+                   quota_usage_fn=None, du_fn=None, clock_fn=None):
     """Watchdog Job 40. Every poll: compute pressure + write the footer cache.
     Only at ≥80 % (and not as root, cadence-gated, single-instance): run the
     drain ladder over this user's own home; if still ≥90 % after, escalate. At
@@ -3808,7 +3816,10 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     (a test in particular) exercising the ≥95 % path MUST inject a recorder
     here; leaving it unset reaches the REAL ``subprocess.run`` default, which
     is exactly how the #896-899 duplicate tickets were filed. #1140: shared-
-    stream QUOTA pressure is a second drain source — see ``disk_guard_quota``."""
+    stream QUOTA pressure is a second drain source — see ``disk_guard_quota``.
+    #1067: every step is timed and the ladder honours a wall budget
+    (``disk_guard_timing``; ``clock_fn`` injectable)."""
+    timer = _dgt.PollTimer(clock_fn=clock_fn)
     now = time.time() if now is None else now
     home = home or os.path.expanduser("~")
     mounts = mounts or MOUNTS
@@ -3860,7 +3871,8 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         # scratch). Computed BEFORE write_status_cache so the footer cache
         # carries it.
         try:
-            scratch_rows = (scratch_discover_fn or _default_scratch_discover)(now, home)
+            with timer.step("scratch-discovery", logs):
+                scratch_rows = (scratch_discover_fn or _default_scratch_discover)(now, home)
             lls = _largest_live_scratch(scratch_rows)
             if lls:
                 status["largest_live_scratch"] = lls
@@ -3876,7 +3888,8 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     # (the every-poll status write would erase it otherwise). A drain poll writes
     # fresh top_consumers AFTER the drain (below).
     if not will_drain:
-        _dgq.maybe_update_quota_drift(status, home, now, q, du_fn, logs)  # never before a drain
+        with timer.step("quota-drift", logs):                      # never before a drain
+            _dgq.maybe_update_quota_drift(status, home, now, q, du_fn, logs)
         prior = _read_status_cache(home)
         if isinstance(prior, dict) and "top_consumers" in prior:
             status["top_consumers"] = prior["top_consumers"]
@@ -3935,10 +3948,11 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             and _cadence_allows_drain(status["worst_pct"],
                                       _drain_due(home, now, effective_interval) or growth_boost,
                                       dry_run=dry_run)):
-        logs += _run_prevention_pass(
-            status, home, now, dry_run, scratch_rows,
-            statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts,
-            geteuid_fn=geteuid_fn, target_pct=_prev_target)
+        with timer.step("prevention", logs):
+            logs += _run_prevention_pass(
+                status, home, now, dry_run, scratch_rows,
+                statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts,
+                geteuid_fn=geteuid_fn, target_pct=_prev_target, timer=timer)
         return logs
     if not fs_pressure and not q.pressure:
         return logs
@@ -3981,11 +3995,14 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         else:
             planners = _default_planners(home, now, scratch_rows=scratch_rows)
 
-        logs += _dgq.run_drain_passes(status, home, now, dry_run, planners, planners_fn,
-                                      q, fs_pressure, statvfs_fn, dev_fn, mounts,
-                                      geteuid_fn, sudo_probe_fn)
-        if not dry_run:
-            _mark_drained(home, now)        # never cadence-gate a REAL drain off a dry-run
+        with timer.step("drain", logs):
+            logs += _dgq.run_drain_passes(status, home, now, dry_run, planners, planners_fn,
+                                          q, fs_pressure, statvfs_fn, dev_fn, mounts,
+                                          geteuid_fn, sudo_probe_fn, timer=timer)
+        # never cadence-gate a REAL drain off a dry-run; #1067: nor off a drain the
+        # budget cut short — the next due poll must run the deferred rungs
+        if not dry_run and not timer.cut_short:
+            _mark_drained(home, now)
         # #863 review 6: after the drain, rmdir cwd-key dirs that HELD planned
         # dead-session candidates (reason=None + uuid). Safe because rmdir is
         # empty-only + uid-scoped: a not-actually-removed session (ladder stopped
@@ -4045,7 +4062,8 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         # _collect_top_consumers would re-discover scratch, doubling the du walk).
         if planners_fn is None:
             try:
-                top = _collect_top_consumers(home, now, limit=3, scratch_rows=scratch_rows)
+                with timer.step("top-consumers", logs):
+                    top = _collect_top_consumers(home, now, limit=3, scratch_rows=scratch_rows)
                 post["top_consumers"] = [{"path": p, "bytes": b} for p, b in top]
                 post["top_consumers_ts"] = now
                 # Carry forward largest_live_scratch if computed this poll
@@ -4063,8 +4081,9 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             # so any caller (every disk_guard test forcing >=95%) injecting
             # its own `planners_fn` silently filed a ticket body with
             # "Top consumers:\n(none)" (the #896-899 real-ticket evidence).
-            top_now = (top_consumers_fn(home, now, limit=5) if top_consumers_fn is not None
-                      else _collect_top_consumers(home, now, limit=5, scratch_rows=scratch_rows))
+            with timer.step("top-consumers", logs):
+                top_now = (top_consumers_fn(home, now, limit=5) if top_consumers_fn is not None
+                           else _collect_top_consumers(home, now, limit=5, scratch_rows=scratch_rows))
             logs += escalate(post, home, now, dry_run,
                              top_consumers_fn=lambda *_a, **_kw: top_now)
             # #895/#896-899: at >=95% file a gk-request ticket (dedup via
