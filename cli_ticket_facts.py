@@ -7,7 +7,7 @@ Facts no label can give (#1141 slice 3), read into a
   and the subset whose PR is in CI — PENDING checks on a non-draft PR whose
   head commit is at most PIPELINE_MAX_AGE_S old (an EXPECTED check that never
   reports, or a stuck run, is not "in CI": the ticket stays I). ONE GraphQL
-  query over the repo's open PRs (the 100 most recently updated). A PR is
+  query over the repo's open PRs (one page of 100; more = unknown). A PR is
   linked the same way M links a merged PR (`cli_release_state._issue_refs`: a
   `#N` in the title, a closing keyword or an `Issue: #N` line in the body),
   plus GitHub's own `closingIssuesReferences`. Any open linked PR keeps C open.
@@ -54,9 +54,9 @@ _OID_RE = re.compile(r"[0-9a-f]{7,40}")
 _PR_QUERY = (
     "query($owner:String!,$name:String!){repository(owner:$owner,name:$name)"
     "{pullRequests(states:OPEN,first:100,orderBy:{field:UPDATED_AT,"
-    "direction:DESC}){nodes{number title body isDraft closingIssuesReferences("
-    "first:20){nodes{number}} commits(last:1){nodes{commit{committedDate "
-    "statusCheckRollup{state}}}}}}}}")
+    "direction:DESC}){pageInfo{hasNextPage} nodes{number title body isDraft "
+    "closingIssuesReferences(first:20){nodes{number repository{nameWithOwner}}}"
+    " commits(last:1){nodes{commit{committedDate statusCheckRollup{state}}}}}}}}")
 
 
 def cache_path(root, home=None):
@@ -92,15 +92,18 @@ def _epoch(stamp):
         return None
 
 
-def open_pr_states(payload, now=None):
+def open_pr_states(payload, now=None, slug=None):
     """`{ticket: in_ci}` for every ticket an open PR in `payload` (the parsed
     `_PR_QUERY` answer) is linked to; `in_ci` is True when one such PR's head
     commit has PENDING checks, is not a draft and is at most
-    PIPELINE_MAX_AGE_S old (no date = fresh). None when the payload is not a
-    readable answer (unknown, never an empty "no PR")."""
+    PIPELINE_MAX_AGE_S old (no date = fresh). A `closingIssuesReferences`
+    entry of another repo than `slug` is ignored. None when the payload is not
+    a readable answer or more open PRs exist than one page holds (unknown,
+    never an empty "no PR")."""
     now = time.time() if now is None else now
-    nodes = _dig(payload, "data", "repository", "pullRequests", "nodes")
-    if not isinstance(nodes, list):
+    prs = _dig(payload, "data", "repository", "pullRequests")
+    nodes = _dig(prs, "nodes")
+    if not isinstance(nodes, list) or _dig(prs, "pageInfo", "hasNextPage"):
         return None
     out = {}
     for pr in nodes:
@@ -118,10 +121,16 @@ def open_pr_states(payload, now=None):
                                                number)
         closes = _dig(pr, "closingIssuesReferences", "nodes")
         linked |= {_dig(c, "number") for c in (closes or [])
-                   if isinstance(_dig(c, "number"), int)}
+                   if isinstance(_dig(c, "number"), int) and _same_repo(c, slug)}
         for ticket in linked:
             out[ticket] = out.get(ticket, False) or in_ci
     return out
+
+
+def _same_repo(ref, slug):
+    other = _dig(ref, "repository", "nameWithOwner")
+    return not (slug and isinstance(other, str)
+                and other.lower() != slug.lower())
 
 
 def pipeline_numbers(payload, now=None):
@@ -141,7 +150,7 @@ def read_prs(slug, gh_fn, now=None):
     raw = gh_fn(["api", "graphql", "-f", "query=" + _PR_QUERY,
                  "-f", "owner=" + owner, "-f", "name=" + name])
     try:
-        return open_pr_states(json.loads(raw), now)
+        return open_pr_states(json.loads(raw), now, slug)
     except (TypeError, ValueError):
         return None
 
@@ -211,6 +220,11 @@ def _ints(values):
 
 
 def _facts(merged, handed, prs, on_main):
+    """The TicketFacts. `prs` None = the open PRs are UNKNOWN, so no fix can
+    be proven the last one: a live (DEPLOYED/RELEASED) state is dropped and
+    the ticket keeps its label bucket (review round 2)."""
+    if prs is None:
+        on_main = {n: s for n, s in (on_main or {}).items() if s == ts.PENDING}
     prs = prs or {}
     return ts.TicketFacts(merged=frozenset(int(n) for n in (merged or ())),
                           handed=dict(handed or {}),
@@ -245,7 +259,7 @@ def refresh(root, slug, numbers, *, gh_fn, merged=(), handed=None, home=None,
         pr_ts = prev["pr_ts"]
     else:
         prs = read_prs(slug, gh_fn, now) if numbers else {}
-        pr_ts = now
+        pr_ts = now if numbers else None   # an empty row set is never reused
     oids = (released_fn or _default_released)(root, numbers, slug) or {}
     deploy = prev.get("deploy")
     if oids and not (isinstance(deploy, dict)
@@ -256,8 +270,6 @@ def refresh(root, slug, numbers, *, gh_fn, merged=(), handed=None, home=None,
         oids, None if decl is None else (decl.get("instances") or []),
         lambda oid: (version_at_fn or _default_version_at)(
             root, (decl or {}).get("version_file"), oid))
-    prs = None if prs is None else {n: c for n, c in prs.items()
-                                    if n in numbers}
     _write(path, {
         "ts": now, "root": str(root), "pr_ts": pr_ts,
         "pipeline": None if prs is None else sorted(n for n, c in prs.items()
@@ -265,7 +277,8 @@ def refresh(root, slug, numbers, *, gh_fn, merged=(), handed=None, home=None,
         "open_pr": None if prs is None else sorted(prs),
         "on_main": {str(n): s for n, s in sorted(states.items())},
         "deploy": deploy if isinstance(deploy, dict) else None})
-    return _facts(merged, handed, prs, states)
+    return _facts(merged, handed, None if prs is None else {
+        n: c for n, c in prs.items() if n in numbers}, states)
 
 
 def load(root, *, merged=(), handed=None, home=None, now=None):
@@ -280,7 +293,8 @@ def load(root, *, merged=(), handed=None, home=None, now=None):
             and -60 <= now - stamp <= FACTS_MAX_AGE_S):
         return _facts(merged, handed, {}, {})
     running = set(_ints(data.get("pipeline")))
-    prs = {n: n in running for n in _ints(data.get("open_pr")) + list(running)}
+    prs = ({n: n in running for n in _ints(data.get("open_pr")) + list(running)}
+           if isinstance(data.get("open_pr"), list) else None)
     on_main = {}
     raw = data.get("on_main")
     for key, state in (raw.items() if isinstance(raw, dict) else ()):
@@ -318,8 +332,9 @@ def _default_deploy(root, slug):
 def _default_version_at(root, version_file, oid):
     """The version that SHIPPED commit `oid`: the version file at the first
     commit on origin/main's first-parent chain that contains it (the release
-    merge), or at `oid` itself when it sits on that chain. None when the oid
-    is not a commit hash or git cannot tell."""
+    merge). None (unknown) when the fix sits ON that chain (a bump-at-cut
+    repo may have shipped it in a later fast-forwarded release), is not on
+    main, is not a commit hash, or git cannot tell (review round 2)."""
     if not version_file or not isinstance(oid, str) or not _OID_RE.fullmatch(oid):
         return None
     rng = "%s..origin/main" % oid
@@ -329,14 +344,16 @@ def _default_version_at(root, version_file, oid):
     if chain is None or after is None:
         return None
     descendants = set(after)
-    shipped = oid   # on the chain itself, or already main's tip
+    shipped = None
     for line in chain:
         commit, *parents = line.split()
         if parents and parents[0].startswith(oid):
-            break                    # the chain passes through the fix itself
+            break     # ON the chain: a later ff release may have shipped it
         if commit in descendants:
             shipped = commit         # the first main commit that contains it
             break
+    if shipped is None:
+        return None   # on the chain, main's tip, or not on main: unknown
     from watchdog import deploy_state as ds
     return ds.read_main_version(root, version_file, ref=shipped)
 
