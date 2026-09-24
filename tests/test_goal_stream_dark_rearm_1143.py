@@ -101,6 +101,13 @@ class TestDarkStreamLoopRule(unittest.TestCase):
     def setUp(self):
         self.reqp, self.syncp = _isolate_goal_state(self)
         self.now = float(int(time.time()))
+        # #1143 ruling (option 2): the process-tree read is an injected seam --
+        # tests never read the real /proc; a relaunched session has no child.
+        self.children = []
+        _p = unittest.mock.patch.object(
+            sm, "claude_children", lambda pane, run: self.children, create=True)
+        _p.start()
+        self.addCleanup(_p.stop)
 
     def _dir(self):
         d = TemporaryDirectory()
@@ -398,6 +405,107 @@ class TestDarkStreamLoopRule(unittest.TestCase):
                                         tmpl=gr.render("full"))
         self._assert_never(proj, "f-stream", state, reqs, "not a stream box",
                            authority="full")
+
+    # --- ROZHODNUTÉ option 2: structured liveness holds, never ◎ alone ------- #
+    _WAITER = ("bash", "/bin/bash -c source /home/d/.claude/shell-snapshots/s.sh "
+               "&& python3 ~/devel/airuleset/airuleset.py stream-wait --max 3600")
+
+    def _subagent(self, proj, sid, age_s):
+        tpath = next(proj.rglob(sid + ".jsonl"))
+        d = tpath.parent / tpath.stem / "subagents"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "agent-lane.jsonl"
+        p.write_text('{"type":"assistant"}\n', encoding="utf-8")
+        os.utime(p, (self.now - age_s, self.now - age_s))
+
+    def test_never_while_a_stream_wait_child_is_live(self):
+        # the healthy idle stream loop: dark-read footer, idle transcript, no
+        # ❓ -- only its live waiter under claude says it is alive.
+        proj = self._fixture("l-wait")
+        self.children = [self._WAITER]
+        reqs, logs, _s, _t = self._run(proj)
+        self.assertNotEqual((reqs.get("l-wait") or {}).get("origin"), sm.ORIGIN)
+        self.assertTrue(any("stream-wait" in ln and "SKIP" in ln for ln in logs),
+                        logs)
+
+    def test_never_while_a_background_shell_is_live(self):
+        proj = self._fixture("l-bash")
+        self.children = [("bash", "/bin/bash -c gh run view 123 --json status")]
+        reqs, logs, _s, _t = self._run(proj)
+        self.assertNotEqual((reqs.get("l-bash") or {}).get("origin"), sm.ORIGIN)
+
+    def test_an_mcp_server_child_is_not_liveness(self):
+        # every live claude has long-lived MCP-server children (live dev box:
+        # `npm exec @playwright/mcp`); they must never hold the rule forever.
+        proj = self._fixture("l-mcp")
+        self.children = [("npm exec @playw", "npm exec @playwright/mcp@0.0.81")]
+        reqs, _l, state, _t = self._run(proj)
+        self._assert_rearmed(proj, "l-mcp", state, reqs)
+
+    def test_an_unresolved_claude_process_holds(self):
+        # fail CLOSED: liveness unprovable -> never re-arm on ◎ alone
+        proj = self._fixture("l-none")
+        self.children = None
+        reqs, logs, _s, _t = self._run(proj)
+        self.assertNotEqual((reqs.get("l-none") or {}).get("origin"), sm.ORIGIN)
+        self.assertTrue(any("unresolved" in ln for ln in logs), logs)
+
+    def test_the_reader_is_asked_about_the_claude_pane(self):
+        proj = self._fixture("l-pane")
+        seen = []
+        with unittest.mock.patch.object(
+                sm, "claude_children",
+                lambda pane, run: seen.append(pane) or [], create=True):
+            reqs, _l, _s, _t = self._run(proj)
+        self.assertEqual(reqs["l-pane"]["origin"], sm.ORIGIN)
+        self.assertIn("%9", seen)
+
+    def test_never_while_a_subagent_transcript_is_fresh(self):
+        proj = self._fixture("l-sub")
+        self._subagent(proj, "l-sub", 120)
+        reqs, logs, state, _t = self._run(proj)
+        self.assertNotEqual((reqs.get("l-sub") or {}).get("origin"), sm.ORIGIN)
+        self.assertTrue(any("subagent" in ln for ln in logs), logs)
+        self._assert_never(proj, "l-sub", state, reqs, "subagent")
+
+    def test_a_stale_subagent_transcript_is_not_liveness(self):
+        proj = self._fixture("l-oldsub")
+        self._subagent(proj, "l-oldsub", 1500)
+        reqs, _l, state, _t = self._run(proj)
+        self._assert_rearmed(proj, "l-oldsub", state, reqs)
+
+    def test_a_relaunch_has_no_live_sign_and_is_re_armed(self):
+        proj = self._fixture("l-relaunch")
+        self.children = [("npm exec @playw", "npm exec @playwright/mcp@0.0.81")]
+        reqs, _l, state, _t = self._run(proj)
+        self._assert_rearmed(proj, "l-relaunch", state, reqs)
+
+    def test_a_bare_shell_pane_is_never_typed_into(self):
+        # owner 24.9.2026: a pane at a bare shell = the OWNER stopped that
+        # Claude -- never relaunch it, never type into it (dark-watch nor
+        # delivery), even with a forced stream-migrate request.
+        proj = self._fixture("l-shell")
+        calls = []
+        base = DeliverGoalFakeTmux([("%9", "bash", CWD, "111")], GOAL_IDLE_CAP)
+
+        def run(argv, timeout=8):
+            calls.append(list(argv))
+            return base(argv, timeout=timeout)
+        state = {}
+        for off in self.RUN:
+            goal.goal_dark_watch(
+                self.now + off, run=run, send_fn=lambda mm, **k: None,
+                projects_dir=proj, state=state, sleep_fn=lambda s: None,
+                obligation_fn=lambda cwd: (5, self.now + off),
+                rearm_fn=lambda cwd: (NEW_FORK, "fork-no-merge"),
+                requests_path=self.reqp)
+        word, live = self._deliver(proj, "l-shell", state, cmd="bash",
+                                   req=self._forced())
+        self.assertNotEqual(word, "sent")
+        self.assertEqual(live.sent, [])
+        bad = ("send-keys", "respawn-pane", "respawn-window", "new-window",
+               "kill-pane", "kill-session")
+        self.assertFalse([c for c in calls if any(b in c for b in bad)], calls)
 
     # --- review round 1: the fall-through, the reset, the legacy memo ---------- #
     def test_a_not_idle_or_open_question_pane_falls_through(self):

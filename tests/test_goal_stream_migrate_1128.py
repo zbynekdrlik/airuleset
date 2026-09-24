@@ -87,6 +87,13 @@ class TestStreamMigrate(unittest.TestCase):
     def setUp(self):
         self.reqp, self.syncp = _isolate_goal_state(self)
         self.now = float(int(time.time()))
+        # #1143 ruling (option 2): the process-tree read is an injected seam --
+        # tests never read the real /proc; a relaunched session has no child.
+        self.children = []
+        _p = unittest.mock.patch.object(
+            sm, "claude_children", lambda pane, run: self.children, create=True)
+        _p.start()
+        self.addCleanup(_p.stop)
 
     def _dir(self):
         d = TemporaryDirectory()
