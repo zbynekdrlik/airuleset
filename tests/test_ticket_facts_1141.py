@@ -220,8 +220,11 @@ def _graphql(*prs):
         date = rest[1] if len(rest) > 1 else _FRESH
         nodes.append({
             "number": number, "title": title, "body": body, "isDraft": draft,
-            "closingIssuesReferences": {"nodes": [{"number": c}
-                                                  for c in closes]},
+            "closingIssuesReferences": {"nodes": [
+                {"number": c, "repository": {"nameWithOwner": "o/r"}}
+                if isinstance(c, int) else
+                {"number": c[0], "repository": {"nameWithOwner": c[1]}}
+                for c in closes]},
             "commits": {"nodes": [{"commit": {"committedDate": date,
                                               "statusCheckRollup": (
                 {"state": state} if state else None)}}]}})
@@ -597,8 +600,11 @@ class ReviewRound1(unittest.TestCase):
             Path(repo, "VERSION").write_text("2.1.0\n")
             _git(repo, "commit", "-q", "-am", "bump 2.1.0")
             _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
-            self.assertEqual(
-                self.f._default_version_at(repo, "VERSION", fix), "2.0.0")
+            # review round 2: a fix ON the main chain may have shipped in a
+            # later fast-forwarded release (bump-at-cut): its version cannot
+            # be told from the chain, so it is unknown, never read at the fix
+            self.assertIsNone(
+                self.f._default_version_at(repo, "VERSION", fix))
 
     def test_an_oid_that_is_not_a_hash_is_never_passed_to_git(self):
         for bad in ("--output=/tmp/x", "HEAD", "", None, "abc g"):
@@ -683,6 +689,67 @@ class ReviewRound1(unittest.TestCase):
             self.assertFalse(path.exists())
             self.assertEqual(set(b["I"]), {1})
             self.assertEqual(facts.pipeline, frozenset())
+
+
+class ReviewRound2(unittest.TestCase):
+    """Review round 2: an UNKNOWN fact must never let C through."""
+
+    def setUp(self):
+        import cli_ticket_facts
+        self.f = cli_ticket_facts
+
+    def _released(self, home, gh, numbers=(5,), now=None):
+        return self.f.refresh("/repo", "o/r", set(numbers), home=home, now=now,
+                              gh_fn=gh, deploy_fn=lambda r, s: None,
+                              released_fn=lambda *a: {5: ["abc1234"]})
+
+    def test_a_failed_pr_read_never_gives_c(self):
+        with TemporaryDirectory() as home:
+            facts = self._released(home, lambda a: "")
+            self.assertNotEqual(
+                ts.classify(_row(5, "bug"), facts.of(5), ts.Box())[0], "C")
+            loaded = self.f.load("/repo", home=home)
+            self.assertNotEqual(
+                ts.classify(_row(5, "bug"), loaded.of(5), ts.Box())[0], "C")
+
+    def test_a_reused_pr_read_covers_a_new_ticket(self):
+        with TemporaryDirectory() as home:
+            payload = json.dumps(_graphql(
+                (90, "#6 still open", "", "FAILURE", ())))
+
+            def gh(args):
+                return payload
+            self._released(home, gh, numbers=(5,), now=1000)
+            facts = self.f.refresh(
+                "/repo", "o/r", {5, 6}, home=home, now=1030, gh_fn=gh,
+                deploy_fn=lambda r, s: None,
+                released_fn=lambda *a: {6: ["abc1234"]})
+            self.assertNotEqual(
+                ts.classify(_row(6, "bug"), facts.of(6), ts.Box())[0], "C")
+
+    def test_a_fix_not_on_main_reads_no_version(self):
+        with TemporaryDirectory() as repo:
+            _git(repo, "init", "-q", "-b", "main")
+            Path(repo, "VERSION").write_text("1.0.0\n")
+            _git(repo, "add", "VERSION")
+            _git(repo, "commit", "-q", "-m", "base")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            _git(repo, "checkout", "-q", "-b", "side")
+            _git(repo, "commit", "-q", "--allow-empty", "-m", "fix #3")
+            fix = _git(repo, "rev-parse", "HEAD")
+            _git(repo, "checkout", "-q", "main")
+            _git(repo, "commit", "-q", "--allow-empty", "-m", "later")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            self.assertIsNone(self.f._default_version_at(repo, "VERSION", fix))
+
+    def test_a_cross_repo_closing_ref_and_a_partial_page(self):
+        payload = _graphql((70, "other", "", "PENDING", ((12, "x/other"),)))
+        self.assertEqual(self.f.open_pr_states(payload, now=_NOW, slug="o/r"),
+                         {})
+        payload["data"]["repository"]["pullRequests"]["pageInfo"] = {
+            "hasNextPage": True}
+        self.assertIsNone(self.f.open_pr_states(payload, now=_NOW,
+                                                slug="o/r"))
 
 
 if __name__ == "__main__":
