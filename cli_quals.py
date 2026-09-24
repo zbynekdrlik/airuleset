@@ -1156,6 +1156,7 @@ def _no_question_flagged(rows, cwd=None, home=None, comment_state_fn=None):
     SHOULD carry a delivered question/notice); a DELIVERED acceptance is already
     ref-covered, so exempting the whole acceptance reason only spares the queued
     ones."""
+    import cli_ticket_state
     import statusbar
     try:
         refs = statusbar.question_map_ticket_refs(cwd, home)   # #539 MAJOR-1: cwd-scoped
@@ -1169,7 +1170,9 @@ def _no_question_flagged(rows, cwd=None, home=None, comment_state_fn=None):
         if number in refs:
             continue                             # delivered ping references it
         labels = row.get("labels") if isinstance(row, dict) else None
-        if _user_waiting_reason(labels) == "acceptance":
+        # #1141 slice 2: the partition's own question, so an owner action
+        # beside an acceptance is still flagged when it was never announced.
+        if cli_ticket_state.owner_question(labels) == "acceptance":
             continue                             # #622: queued acceptance is exempt
         try:
             state = check(number, cwd)

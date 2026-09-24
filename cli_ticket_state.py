@@ -97,8 +97,9 @@ def leaves_to_merged(labels):
 
 def owner_question(labels):
     """The owner question a row carries, or "" (#1141 slice 2) — the ONE
-    predicate the partition, the `--waiting` acceptance tag and the #948
-    question-map supplement share.
+    predicate the partition, the `--waiting` reason tag, the `queued` /
+    `no-question!` display flags and (via `classify`) the #948 question-map
+    supplement share.
 
     Found by the row's OWN labels, answer > decision > action first, so a
     co-present `needs-acceptance` can never turn an owner question into a
@@ -118,12 +119,14 @@ def owner_question(labels):
 
 
 def _stream_has_live_box(owner):
-    """True when stream `owner` runs a box that counts its own U: not a
-    webterm observer account and not a paused host (fleet data)."""
+    """True when stream `owner` runs a box that counts its own U (fleet
+    data): not a webterm observer account, and at least one host entry that
+    is not paused. A stream with no entry yet (or only paused ones) is not
+    live, so its question is never hidden and counted nowhere."""
     import cli_fleet
     return (owner not in cli_fleet.WEBTERM_OBSERVER_USERS
-            and not any(h.get("user") == owner and cli_fleet.is_paused(h)
-                        for h in cli_fleet.REMOTE_HOSTS))
+            and any(h.get("user") == owner and not cli_fleet.is_paused(h)
+                    for h in cli_fleet.REMOTE_HOSTS))
 
 
 def _question_route(labels, kind, box):
@@ -132,7 +135,10 @@ def _question_route(labels, kind, box):
       to the full-authority box, and rule 1 puts a question in U on the box
       of the stream that OWNS it: a foreign answer/decision/action is #654
       action-only I; a foreign acceptance in a hand-off state stays in the
-      hand-off flow (I, counted gk when handed); a bare one stays U.
+      hand-off flow (I, counted gk when handed); a bare one stays U. One
+      consequence of reading the question by its own labels: a foreign
+      needs-owner-action + needs-acceptance is now #654 I here (slice 1 read
+      it as an acceptance, which #654 exempted).
     - Full-authority box, FOREIGN row: HIDDEN — counted in U on the owning
       stream's box (reverses #654 for questions). If that stream has no live
       box (paused, observer), nothing else would count it, so it stays U here.
