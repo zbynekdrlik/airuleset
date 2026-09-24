@@ -10,6 +10,15 @@ byte-identical at 7513c2c8). It must never be
 "updated to match" the new code — slice 1's whole promise is that no number
 moves, and this copy is what proves it over every label combination the
 partition reads, both box kinds and own vs foreign stream.
+
+#1141 slice 2 moved EXACTLY two precedences, by the owner's ruling in the
+#1141 design comment (live cases odoo-erp 8058 and 8180):
+  "An owner question beats any hand-off label" and "On the full-authority box
+  a FOREIGN stream's question is hidden (it counts in that stream's U), which
+  reverses #654 for questions."
+The frozen copy stays verbatim. `_slice2_move` lists the moved cases on top
+of it, written from the ruling (not from the new code), so every OTHER label
+combination is still held at slice-1 parity.
 """
 
 import itertools
@@ -81,6 +90,53 @@ def _legacy_split_merged_unreleased(workable, ops_wait, merged_numbers):
     return new_workable, new_ops_wait, merged
 
 
+_HANDOFF = ("needs-gatekeeper", "ready-for-review", "gk-processing")
+
+
+def _slice2_move(row, own_stream):
+    """The slice-2 verdict for a row the ruling MOVES, or None (slice-1 parity).
+
+    - Rule 1: an UNSENT needs-acceptance (no ops-wait, no prio:bounce) that a
+      hand-off label used to override is now an owner question.
+    - Rule 2: on the full-authority box (own_stream None) a FOREIGN stream's
+      owner question (answer/decision/action, or an unsent acceptance) is
+      hidden. A sent acceptance (ops-wait) is not a question.
+    - On a reduced-authority box a foreign row keeps its slice-1 route; an own
+      (or unowned) rule-1 row goes to U."""
+    labels = row.get("labels") if isinstance(row, dict) else None
+    names = {(lb or {}).get("name") for lb in (labels or [])
+             if isinstance(lb, dict)}
+    old_uw = airuleset._row_is_user_waiting(labels)
+    sent = (old_uw and airuleset._user_waiting_reason(labels) == "acceptance"
+            and airuleset._row_is_ops_wait(labels))
+    unsent_over_handoff = (
+        not old_uw and "needs-acceptance" in names
+        and any(h in names for h in _HANDOFF)
+        and "prio:bounce" not in names and "ops-wait" not in names)
+    question = (old_uw and not sent) or unsent_over_handoff
+    owner = airuleset._stream_owner_of(labels)
+    foreign = bool(owner) and owner != (own_stream or "")
+    if own_stream is None and foreign and question:
+        return cli_ticket_state.HIDDEN
+    if unsent_over_handoff and not foreign:
+        return "U"
+    return None
+
+
+def _expected_partition(rows, own_stream=None):
+    """The frozen partition with the slice-2 moves applied (hidden = dropped)."""
+    w, u, o = _legacy_partition_workable(rows, own_stream=own_stream)
+    for number, row in rows.items():
+        move = _slice2_move(row, own_stream)
+        if move is None:
+            continue
+        for bucket in (w, u, o):
+            bucket.pop(number, None)
+        if move == "U":
+            u[number] = row
+    return w, u, o
+
+
 # --- The fixture matrix -------------------------------------------------------
 
 # Every label `_partition_workable` / `_split_merged_unreleased` reads.
@@ -117,11 +173,12 @@ def _matrix_rows():
 
 def _bucket_of(number, workable, waiting, ops_wait):
     return ("I" if number in workable else "U" if number in waiting
-            else "W" if number in ops_wait else None)
+            else "W" if number in ops_wait else cli_ticket_state.HIDDEN)
 
 
 class ClassifierParity(unittest.TestCase):
-    """The OLD partition and the NEW classifier agree on EVERY row."""
+    """The OLD partition (plus the listed slice-2 moves) and the NEW
+    classifier agree on EVERY row."""
 
     @classmethod
     def setUpClass(cls):
@@ -131,9 +188,24 @@ class ClassifierParity(unittest.TestCase):
         # 2^10 label subsets × 5 stream variants + malformed rows.
         self.assertGreater(len(self.rows), 5000)
 
+    def test_slice2_moves_only_the_ruled_cases(self):
+        # every moved row is one of the two ruled shapes, both kinds occur,
+        # and the rest of the matrix is untouched (the parity tests below)
+        moved = {own: [n for n, r in self.rows.items()
+                       if _slice2_move(r, own) is not None]
+                 for own in _BOXES}
+        self.assertTrue(moved[None] and moved[_OWN])
+        hidden = [n for n in moved[None]
+                  if _slice2_move(self.rows[n], None)
+                  == cli_ticket_state.HIDDEN]
+        self.assertTrue(hidden)
+        # the slice box never hides anything
+        self.assertTrue(all(_slice2_move(self.rows[n], _OWN) == "U"
+                            for n in moved[_OWN]))
+
     def test_classify_matches_the_frozen_partition_on_both_boxes(self):
         for own in _BOXES:
-            legacy = _legacy_partition_workable(self.rows, own_stream=own)
+            legacy = _expected_partition(self.rows, own_stream=own)
             box = cli_ticket_state.Box(own_stream=own)
             diffs = []
             for number, row in self.rows.items():
@@ -147,16 +219,16 @@ class ClassifierParity(unittest.TestCase):
         for own in _BOXES:
             self.assertEqual(
                 airuleset._partition_workable(self.rows, own_stream=own),
-                _legacy_partition_workable(self.rows, own_stream=own))
+                _expected_partition(self.rows, own_stream=own))
         # the default (no own_stream) is the full-authority box
         self.assertEqual(airuleset._partition_workable(self.rows),
-                         _legacy_partition_workable(self.rows))
+                         _expected_partition(self.rows))
 
     def test_merged_step_matches_the_frozen_split(self):
         rows = {n: r for n, r in self.rows.items() if isinstance(r, dict)}
         merged_all = set(rows)
         for own in _BOXES:
-            w, u, o = _legacy_partition_workable(rows, own_stream=own)
+            w, u, o = _expected_partition(rows, own_stream=own)
             lw, lo, lm = _legacy_split_merged_unreleased(w, o, merged_all)
             self.assertEqual(
                 airuleset._split_merged_unreleased(w, o, merged_all),
@@ -165,7 +237,8 @@ class ClassifierParity(unittest.TestCase):
             facts = cli_ticket_state.Facts(merged=True)
             for number, row in rows.items():
                 want = ("M" if number in lm else "I" if number in lw
-                        else "W" if number in lo else "U")
+                        else "W" if number in lo else "U" if number in u
+                        else cli_ticket_state.HIDDEN)
                 got, _ = cli_ticket_state.classify(row, facts, box)
                 self.assertEqual(got, want, (own, row))
 
@@ -183,16 +256,24 @@ class ClassifierTotality(unittest.TestCase):
                           cli_ticket_state.Facts(merged=True, handed=True)):
                 for row in rows.values():
                     bucket, reason = cli_ticket_state.classify(row, facts, box)
-                    self.assertIn(bucket, cli_ticket_state.BUCKETS)
+                    self.assertIn(bucket, cli_ticket_state.BUCKETS
+                                  + (cli_ticket_state.HIDDEN,))
                     self.assertTrue(reason and reason.strip(), row)
                     self.assertNotIn("\n", reason)
 
     def test_partition_is_disjoint_and_covers_every_row(self):
+        # every row is in exactly one of I/U/W, or HIDDEN (slice 2: counted
+        # on its owning stream's box) — never lost, never double-counted
         rows = _matrix_rows()
         for own in _BOXES:
+            box = cli_ticket_state.Box(own_stream=own)
+            hidden = {n for n, r in rows.items()
+                      if cli_ticket_state.classify(r, None, box)[0]
+                      == cli_ticket_state.HIDDEN}
             w, u, o = airuleset._partition_workable(rows, own_stream=own)
-            self.assertEqual(len(w) + len(u) + len(o), len(rows))
-            self.assertEqual(set(w) | set(u) | set(o), set(rows))
+            self.assertEqual(len(w) + len(u) + len(o) + len(hidden),
+                             len(rows))
+            self.assertEqual(set(w) | set(u) | set(o) | hidden, set(rows))
 
     def test_gk_only_for_a_handed_workable_row_on_a_slice_box(self):
         handed = cli_ticket_state.Facts(handed=True)
