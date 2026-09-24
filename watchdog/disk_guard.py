@@ -3474,25 +3474,37 @@ def _mark_severe_ticket_filed(state_path, now, issue=None):
 
 
 def file_severe_ticket(status, home, now, top, dry_run=False, run_fn=None,
-                       windows=None):
+                       windows=None, box_class=None):
     """#895/#1136: file the owner-actionable disk ticket -- at >= SEVERE_PCT,
-    or on ``drain_exhausted`` at >= 90 % (#925) -- with what the drain could
-    not free. The target comes from this box's fleet windows (``windows``;
-    ``None`` = own declaration): an ``infra`` window with a repo gets it there
-    with label ``infra`` (``disk_guard_escalation``), else ``gk-request`` to
-    airuleset. Deduped via `_severe_ticket_recently_filed` (durable per-box
-    state + in-memory within-run guard -- #896-899), NEVER a Discord ping.
-    ``run_fn`` is injectable for testing (default: subprocess.run) -- a test
-    exercising this path MUST inject a recorder; letting a test reach the
-    real default is exactly how the #896-899 duplicate tickets happened."""
+    or on ``drain_exhausted`` at >= 90 % (#925, not on a shared-stream box)
+    -- with what the drain could not free. The target comes from this box's
+    fleet windows (``windows``; ``None`` = own declaration): an ``infra``
+    window with a repo gets it there with label ``infra``
+    (``disk_guard_escalation``), else ``gk-request`` to airuleset. Deduped
+    via `_severe_ticket_recently_filed` (durable per-box state + in-memory
+    within-run guard -- #896-899) and, past that window, against the stored
+    ticket while it is still OPEN; NEVER a Discord ping. ``run_fn`` is
+    injectable for testing (default: subprocess.run) -- a test MUST inject a
+    recorder; under pytest the default is refused (#896-899, #1144-1151)."""
     from watchdog import disk_guard_escalation as _esc
-    if not _esc.should_file(status, SEVERE_PCT):
+    if box_class is None and status.get("worst_pct", 0) < SEVERE_PCT:
+        box_class = _default_box_class()
+    if not _esc.should_file(status, SEVERE_PCT, box_class):
         return []
     state_path = _severe_ticket_state_path(home)
     if _severe_ticket_recently_filed(state_path, now):
         return []
-    run_fn = run_fn or subprocess.run
     hostname = socket.gethostname()
+    if not dry_run and run_fn is None and _esc.default_filer_refused():
+        return [_log_line(now, "SEVERE-TICKET-FAIL", hostname, status["worst_pct"],
+                          "refused: default filer under pytest, inject run_fn")]
+    run_fn = run_fn or subprocess.run
+    if not dry_run:
+        ref = _esc.stored_issue(state_path)
+        if _esc.still_open(run_fn, ref):   # owner plan A: one open ticket
+            _mark_severe_ticket_filed(state_path, now, ref)
+            return [_log_line(now, "SEVERE-TICKET", hostname, status["worst_pct"],
+                              "not re-filed, still open: %s" % ref)]
     windows = _esc.own_windows() if windows is None else windows
     repo, label = _esc.resolve_target(windows)
     title, body = _esc.compose(status, hostname, top, _human, TARGET_PCT,

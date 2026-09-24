@@ -55,6 +55,7 @@ def _no_real_gh_no_network(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", _guarded_run)
     monkeypatch.setattr(urllib.request, "urlopen", _no_network)
+    monkeypatch.setattr(dg, "_default_box_class", lambda: None)  # hermetic
     yield leaked
     assert not leaked, "reached a REAL filer / network: %r" % (leaked,)
 
