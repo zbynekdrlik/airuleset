@@ -35,6 +35,14 @@ QUOTA_REFRESH_SERVICE_PATH = "/etc/systemd/system/airuleset-quota-refresh.servic
 QUOTA_REFRESH_TIMER_PATH = "/etc/systemd/system/airuleset-quota-refresh.timer"
 QUOTACHECK_BOOT_TIMEOUT_S = 300    # boot unit is Before=ssh.service — bounded
 QUOTACHECK_REFRESH_TIMEOUT_S = 1800
+# ONE quota writer at a time (#1140 review): the daily refresh and the push
+# apply both take this lock, so a push can never `quotaon` under a running
+# recount (quotacheck must never rewrite a file the kernel is using). The boot
+# unit needs none: it runs Before=ssh (no push yet) and the refresh service is
+# ordered After= it. The apply waits less than the push's 180 s ssh timeout.
+QUOTA_LOCK_PATH = "/run/airuleset-quota.lock"
+QUOTA_LOCK_WAIT_S = 600
+QUOTA_APPLY_LOCK_WAIT_S = 120
 
 
 def render_quota_unit():
@@ -80,7 +88,8 @@ def render_quota_refresh_script() -> str:
     """#1140 A+B: the daily ROOT refresh (bash) — true accounting, then
     usage-aware ceilings from the ONE ``_render_quota_limits_block()``.
 
-    Order: ``quotaoff -u /`` when the ``quotaon -pu`` probe says quota is on
+    Takes ``QUOTA_LOCK_PATH`` FIRST (shared with the push apply; busy →
+    exit 4 touching nothing). Order: ``quotaoff -u /`` when the ``quotaon -pu`` probe says quota is on
     → ``quotacheck -u -m /`` (skipped only when that quotaoff FAILED —
     quotacheck on an ACTIVE file damages it) → ``quotaon -u /``
     UNCONDITIONALLY → the limits block. An EXIT trap armed BEFORE quotaoff
@@ -98,6 +107,12 @@ def render_quota_refresh_script() -> str:
         "    echo \"  ⚠ quota-refresh: /aquota.user missing — quota not provisioned\" >&2\n"
         "    exit 3\n"
         "fi\n"
+        "# one quota writer at a time — the push apply takes the same lock\n"
+        "if ! { exec 9>>%s; } 2>/dev/null || ! flock -w %d 9; then\n"
+        "    echo \"  ⚠ quota-refresh: quota lock %s busy/unopenable\" \\\n"
+        "        \"(a push apply running?) — refresh SKIPPED, quota untouched\" >&2\n"
+        "    exit 4\n"
+        "fi\n"
         "rc=0\n"
         "# quota is NEVER left off: re-enable on ANY exit (a no-op EBUSY if on)\n"
         "trap 'quotaon -u / >/dev/null 2>&1 || true' EXIT\n"
@@ -109,7 +124,7 @@ def render_quota_refresh_script() -> str:
         "    *\"is on\"*|*\"are on\"*) qoff_err=$(quotaoff -u / 2>&1) || qoff_rc=$? ;;\n"
         "esac\n"
         "if [ \"$qoff_rc\" -eq 0 ]; then\n"
-        "    qc_err=$(nice -n19 ionice -c3 timeout %d quotacheck -u -m / 2>&1) \\\n"
+        "    qc_err=$(nice -n19 ionice -c2 -n7 timeout %d quotacheck -u -m / 2>&1) \\\n"
         "        && qc_rc=0 || qc_rc=$?\n"
         "    if [ \"$qc_rc\" -ne 0 ]; then\n"
         "        echo \"  ⚠ quota-refresh: quotacheck failed rc=$qc_rc — stderr: $qc_err\" >&2\n"
@@ -129,25 +144,30 @@ def render_quota_refresh_script() -> str:
         "%s\n"
         "if [ \"$qfail\" -ne 0 ]; then rc=1; fi\n"
         "exit \"$rc\"\n"
-        % (QUOTACHECK_REFRESH_TIMEOUT_S, _render_quota_limits_block())
+        % (QUOTA_LOCK_PATH, QUOTA_LOCK_WAIT_S, QUOTA_LOCK_PATH,
+           QUOTACHECK_REFRESH_TIMEOUT_S, _render_quota_limits_block())
     )
 
 
 def render_quota_refresh_service() -> str:
     """#1140: the oneshot the daily timer triggers — runs the refresh script.
     ``TimeoutStartSec`` exceeds the script's own quotacheck bound so systemd
-    never kills it mid-count (and if it ever did, the EXIT trap re-enables
-    quota)."""
+    never kills it mid-count. ``After=airuleset-quota.service``: a
+    ``Persistent=true`` catch-up at boot waits for the boot unit's recount.
+    ``ExecStopPost=-quotaon`` runs even after a SIGKILL/OOM kill the script's
+    EXIT trap cannot see — quota is never left off (EBUSY when on: ignored)."""
     return (
         "# Managed by airuleset (#1140) — quota accounting + ceiling refresh.\n"
         "[Unit]\n"
         "Description=airuleset quota accounting + usage-aware ceiling refresh (#1140)\n"
         "ConditionPathExists=/aquota.user\n"
+        "After=airuleset-quota.service\n"
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
         "TimeoutStartSec=%d\n"
         "ExecStart=/bin/bash %s\n"
+        "ExecStopPost=-/sbin/quotaon -u /\n"
         % (QUOTACHECK_REFRESH_TIMEOUT_S + 600, QUOTA_REFRESH_SCRIPT_PATH)
     )
 
@@ -216,6 +236,7 @@ def _render_quota_limits_block() -> str:
     blind (possibly too-low) limit."""
     return (
         '# --- #950: per-user usage-aware quota limits ---\n'
+        'qfail=0; expected=""\n'
         'setquota -t -u %d %d / 2>&1 || true\n'
         '# Y5: hoist repquota above the loop (one call for all users)\n'
         '# Y6: capture rc without letting the assignment itself trip -e\n'
@@ -257,8 +278,9 @@ def _render_quota_limits_block() -> str:
         '    else\n'
         '        soft_kib=$target_soft\n'
         '    fi\n'
+        '    expected="$expected $u=$hard_kib"\n'
         '    sq_err=$(setquota -u "$u" "$soft_kib" "$hard_kib" 0 0 / 2>&1) \\\n'
-        '        || echo "  ⚠ quota: setquota failed for $u — stderr: $sq_err" >&2\n'
+        '        || { echo "  ⚠ quota: setquota failed for $u — stderr: $sq_err" >&2; qfail=1; }\n'
         '    # Y4: warn whenever applied ceiling exceeds fleet target\n'
         '    if [ "$hard_kib" -gt "$target_hard" ]; then\n'
         '        used_g=$(( used_kib / 1048576 ))\n'
@@ -269,8 +291,7 @@ def _render_quota_limits_block() -> str:
         '    fi\n'
         'done\n'
         'systemctl enable airuleset-quota.service >/dev/null 2>&1 || true\n'
-        '# Read-back verify (per-user applied values, not constants)\n'
-        'qfail=0\n'
+        '# Read-back verify (per-user applied values = the ones computed above)\n'
         'rq_verify=$(repquota -u / 2>&1 || true)\n'
         'for home in /home/*; do\n'
         '    [ -d "$home" ] || continue\n'
@@ -280,8 +301,13 @@ def _render_quota_limits_block() -> str:
         '    # Re-read the applied hard limit for THIS user\n'
         '    applied_hard=$(echo "$rq_verify" | awk -v u="$u" \'$1==u{print $5}\')\n'
         '    applied_soft=$(echo "$rq_verify" | awk -v u="$u" \'$1==u{print $4}\')\n'
+        '    exp_hard=""\n'
+        '    for kv in $expected; do [ "${kv%%%%=*}" = "$u" ] && exp_hard="${kv#*=}"; done\n'
         '    if [ -z "$applied_hard" ] || [ "$applied_hard" = "0" ]; then\n'
         '        echo "  ⚠ QUOTA VERIFY FAIL: $u has no hard limit set" >&2\n'
+        '        qfail=1\n'
+        '    elif [ -n "$exp_hard" ] && [ "$applied_hard" != "$exp_hard" ]; then\n'
+        '        echo "  ⚠ QUOTA VERIFY FAIL: $u hard=$applied_hard, expected $exp_hard" >&2\n'
         '        qfail=1\n'
         '    else\n'
         '        ah_g=$(( applied_hard / 1048576 ))\n'
@@ -297,6 +323,28 @@ def _render_quota_limits_block() -> str:
         % (QUOTA_GRACE_S, QUOTA_GRACE_S,
            QUOTA_SOFT_KIB, QUOTA_HARD_KIB,
            QUOTA_GRACE_S)
+    )
+
+
+def _render_quota_apply_lock_block() -> str:
+    """#1140 review: ONE quota writer at a time. The push apply takes the SAME
+    lock as the daily refresh, so it never ``quotaon``s under a running
+    recount (busy → the quota part of this push is SKIPPED, LOUD). An
+    unopenable lock (non-root, never in production) proceeds unserialized,
+    LOUD. The fd is closed at the end of the apply block."""
+    return (
+        '    if [ "$quota_fail" -eq 0 ]; then\n'
+        '        if { exec 9>>%s; } 2>/dev/null; then\n'
+        '            if ! flock -w %d 9; then\n'
+        '                echo "  ⚠ quota: quota lock busy (a refresh recount running?)" \\\n'
+        '                    "— quota apply SKIPPED this push" >&2\n'
+        '                quota_fail=1\n'
+        '            fi\n'
+        '        else\n'
+        '            echo "  ⚠ quota: cannot open the quota lock — applying unserialized" >&2\n'
+        '        fi\n'
+        '    fi'
+        % (QUOTA_LOCK_PATH, QUOTA_APPLY_LOCK_WAIT_S)
     )
 
 
@@ -323,6 +371,7 @@ def _render_quota_apply_block() -> str:
         'if [ "$quota_fail" -eq 0 ] && [ "$fstype" = "ext4" ] && command -v quotaon >/dev/null 2>&1; then\n'
         + _render_quota_kmod_block() + '\n'
         '    if [ "$kmod_ok" -eq 0 ]; then quota_fail=1; fi\n'
+        + _render_quota_apply_lock_block() + '\n'
         '    # Check if quota is already on (D2: pipefail-safe, no | grep -q)\n'
         '    if [ "$quota_fail" -eq 0 ]; then\n'
         '        state=$(quotaon -pu / 2>&1 || true)\n'
@@ -341,6 +390,11 @@ def _render_quota_apply_block() -> str:
         '                        echo "  ⚠ quota: quotacheck failed — stderr: $qc_err" >&2\n'
         '                        quota_fail=1\n'
         '                    }\n'
+        # #1140: found OFF with an existing file → re-count before quotaon
+        # (never the create flag on an existing file: it drops every limit)
+        '                elif [ "$quota_fail" -eq 0 ]; then\n'
+        '                    qc_err=$(nice -n19 ionice -c2 -n7 timeout 1800 quotacheck -u -m / 2>&1) \\\n'
+        '                        || echo "  ⚠ quota: recount failed (non-fatal) — stderr: $qc_err" >&2\n'
         '                fi\n'
         '                if [ "$quota_fail" -eq 0 ]; then\n'
         '                    qon_err=$(quotaon -u / 2>&1) || {\n'
@@ -371,5 +425,6 @@ def _render_quota_apply_block() -> str:
         '            echo "  ⚠ QUOTA VERIFY FAIL: refresh timer is-enabled=$tmr_state" >&2\n'
         '        fi\n'
         '    fi\n'
+        '    exec 9>&-\n'
         'fi'
     )

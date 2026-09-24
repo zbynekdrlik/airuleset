@@ -2982,8 +2982,9 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
     (review 🟡). #920: ``target_pct`` is parametrized so the prevention pass
     can stop at ``PREVENTION_PCT`` instead of ``TARGET_PCT``. #1140:
     ``pressure="quota"`` (the quota pass) labels what ``recheck_fn`` measures
-    in the STOP/summary lines and the deletions journal. Returns the log
-    lines (also appended to `log_path`)."""
+    in the STOP/summary lines and the deletions journal; a recheck returning
+    None (unmeasurable) STOPS the ladder — never delete on uncertainty.
+    Returns the log lines (also appended to `log_path`)."""
     target_pct = TARGET_PCT if target_pct is None else target_pct
     geteuid_fn = geteuid_fn or os.geteuid
     now = time.time() if now is None else now
@@ -3015,6 +3016,13 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
 
     for _label, planner in planners:
         worst = recheck_fn()
+        if worst is None:                   # unmeasurable → stop, never guess
+            line = _log_line(now, "STOP", "-", 0, "%s unreadable — ladder stopped, "
+                             "nothing deleted on uncertainty" % measure)
+            logs.append(line)
+            _append_log(log_path, [line])
+            pending = None
+            break
         if pending is not None:
             _emit_summary(pending, worst)
             pending = None
@@ -3095,7 +3103,9 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             if not dry_run:
                 _record_rung_yield(home, _label, freed=rung_freed, now=now)
     if pending is not None:
-        _emit_summary(pending, recheck_fn())
+        after = recheck_fn()
+        if after is not None:
+            _emit_summary(pending, after)
     return logs
 
 
@@ -3838,11 +3848,11 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     cadence_due = _drain_due(home, now, effective_interval)
     # #1140: per-account quota (shared-stream only) — read BEFORE the decision
     q = _dgq.quota_state(status, home, now, _is_shared and not is_root,
-                         usage_fn=quota_usage_fn, du_fn=du_fn, logs=logs)
+                         usage_fn=quota_usage_fn)
     fs_pressure = status["level"] not in ("ok", "notice")
     will_drain = ((not is_root) and (fs_pressure or q.pressure)
                   and _cadence_allows_drain(
-                      max(status["worst_pct"], q.pct if q.pressure else 0),
+                      max(status["worst_pct"], q.pct if q.pressure and not q.exhausted else 0),
                       cadence_due or growth_boost or q.growth, dry_run=dry_run))
     scratch_rows = None
     if will_drain:
@@ -3866,6 +3876,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     # (the every-poll status write would erase it otherwise). A drain poll writes
     # fresh top_consumers AFTER the drain (below).
     if not will_drain:
+        _dgq.maybe_update_quota_drift(status, home, now, q, du_fn, logs)  # never before a drain
         prior = _read_status_cache(home)
         if isinstance(prior, dict) and "top_consumers" in prior:
             status["top_consumers"] = prior["top_consumers"]
@@ -3970,24 +3981,9 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         else:
             planners = _default_planners(home, now, scratch_rows=scratch_rows)
 
-        def recheck():
-            return disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn,
-                               mounts=mounts, now=now)["worst_pct"]
-
-        # #854: probe NOPASSWD sudo ONCE per drain — the root-owned rungs
-        # (apt/rotated-log/runner-*) delete via `sudo -n` where it exists, else
-        # the unprivileged attempt. Never probed in a dry-run (deletes nothing).
-        sudo_ok = _sudo_available(sudo_probe_fn) if not dry_run else False
-        do_action = _make_do_action(dry_run, sudo_ok=sudo_ok, run_fn=None, now=now)
-        if q.pressure:      # #1140 quota pass; fresh planners after (scratch rows consumed)
-            logs += _dgq.run_quota_pass(status, home, now, dry_run, planners, q,
-                                        do_action, geteuid_fn)
-            planners = (planners_fn(home, now) if planners_fn is not None
-                        else _default_planners(home, now, scratch_rows=None))
-        if fs_pressure:
-            logs += execute_drain(status, home, planners, recheck, do_action,
-                                  geteuid_fn=geteuid_fn, log_path=_log_path(home),
-                                  now=now, dry_run=dry_run)
+        logs += _dgq.run_drain_passes(status, home, now, dry_run, planners, planners_fn,
+                                      q, fs_pressure, statvfs_fn, dev_fn, mounts,
+                                      geteuid_fn, sudo_probe_fn)
         if not dry_run:
             _mark_drained(home, now)        # never cadence-gate a REAL drain off a dry-run
         # #863 review 6: after the drain, rmdir cwd-key dirs that HELD planned

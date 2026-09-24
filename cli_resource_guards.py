@@ -111,9 +111,10 @@ from cli_resource_guards_quota import (  # noqa: E402, F401
     QUOTA_SOFT_KIB, QUOTA_HARD_KIB, QUOTA_GRACE_S, QUOTA_UNIT_PATH,
     QUOTA_REFRESH_SCRIPT_PATH, QUOTA_REFRESH_SERVICE_PATH, QUOTA_REFRESH_TIMER_PATH,
     QUOTACHECK_BOOT_TIMEOUT_S, QUOTACHECK_REFRESH_TIMEOUT_S,
+    QUOTA_LOCK_PATH, QUOTA_LOCK_WAIT_S, QUOTA_APPLY_LOCK_WAIT_S,
     render_quota_unit, render_quota_refresh_script, render_quota_refresh_service,
     render_quota_refresh_timer, _render_quota_kmod_block, _render_quota_limits_block,
-    _render_quota_apply_block,
+    _render_quota_apply_block, _render_quota_apply_lock_block,
 )
 
 # Shared Playwright browser install path (#950-B)
