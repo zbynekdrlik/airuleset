@@ -16,8 +16,10 @@ owner-identity box, and adds the label with its own ``gh issue edit`` call,
 never baked into create (#221: create silently drops a label it cannot apply).
 
 The trigger is the footer's own owner-actionable state (#925): >= SEVERE_PCT,
-or the drain reported ``drain_exhausted`` at >= EXHAUSTED_FILE_PCT (not on a
-shared-stream box: each account's drain sees only its own data, and N stream
+or the drain reported ``drain_exhausted`` at >= the box's OWN effective
+drain-critical level (``disk_guard_worktrees.effective_critical_pct``: 85 % on
+a <= 64 GB root like gk, 90 % above; coordinator ruling on #1136 — never a
+fixed floor), not on a shared-stream box: each account's drain sees only its own data, and N stream
 accounts would file N tickets). The dedupe and the no-Discord rule
 (#693/#850) stay with the caller, ``disk_guard.file_severe_ticket``, which
 also asks :func:`still_open` about the stored ticket once its 24 h window
@@ -32,21 +34,28 @@ from pathlib import Path
 AIRULESET_REPO = "zbynekdrlik/airuleset"
 INFRA_ROLE = "infra"
 INFRA_LABEL = "infra"
-EXHAUSTED_FILE_PCT = 90     # #925: exhausted at >= 90 % is owner-actionable
 MAX_SKIPPED_ROWS = 10       # a body line per skipped rung, capped
 
 
 _ISSUE_URL_RE = re.compile(r"https://github\.com/([^/\s]+/[^/\s]+)/issues/(\d+)")
 
 
-def should_file(status, severe_pct, box_class=None):
+def default_critical_pct():
+    """The box's own effective drain-critical level, the SAME helper the
+    ``drain_exhausted`` bookkeeping (``disk_guard_post._record_exhausted``)
+    uses, so the ticket fires exactly where the drain reports exhaustion."""
+    from watchdog import disk_guard_worktrees as _dgw
+    return _dgw.effective_critical_pct()
+
+
+def should_file(status, severe_pct, critical_pct, box_class=None):
     """True at >= ``severe_pct``, or when the drain reported
-    ``drain_exhausted`` (strictly ``True``) at >= EXHAUSTED_FILE_PCT on a box
+    ``drain_exhausted`` (strictly ``True``) at >= ``critical_pct`` on a box
     that is not ``shared-stream``."""
     worst = status.get("worst_pct", 0)
     if worst >= severe_pct:
         return True
-    return (status.get("drain_exhausted") is True and worst >= EXHAUSTED_FILE_PCT
+    return (status.get("drain_exhausted") is True and worst >= critical_pct
             and box_class != "shared-stream")
 
 

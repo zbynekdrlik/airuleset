@@ -3474,9 +3474,10 @@ def _mark_severe_ticket_filed(state_path, now, issue=None):
 
 
 def file_severe_ticket(status, home, now, top, dry_run=False, run_fn=None,
-                       windows=None, box_class=None):
+                       windows=None, box_class=None, critical_pct=None):
     """#895/#1136: file the owner-actionable disk ticket -- at >= SEVERE_PCT,
-    or on ``drain_exhausted`` at >= 90 % (#925, not on a shared-stream box)
+    or on ``drain_exhausted`` at >= ``critical_pct`` (the box's effective
+    drain-critical level, #925; not on a shared-stream box)
     -- with what the drain could not free. The target comes from this box's
     fleet windows (``windows``; ``None`` = own declaration): an ``infra``
     window with a repo gets it there with label ``infra``
@@ -3487,9 +3488,12 @@ def file_severe_ticket(status, home, now, top, dry_run=False, run_fn=None,
     injectable for testing (default: subprocess.run) -- a test MUST inject a
     recorder; under pytest the default is refused (#896-899, #1144-1151)."""
     from watchdog import disk_guard_escalation as _esc
-    if box_class is None and status.get("worst_pct", 0) < SEVERE_PCT:
-        box_class = _default_box_class()
-    if not _esc.should_file(status, SEVERE_PCT, box_class):
+    if status.get("worst_pct", 0) < SEVERE_PCT:
+        if box_class is None:
+            box_class = _default_box_class()
+        if critical_pct is None:
+            critical_pct = _esc.default_critical_pct()
+    if not _esc.should_file(status, SEVERE_PCT, critical_pct, box_class):
         return []
     state_path = _severe_ticket_state_path(home)
     if _severe_ticket_recently_filed(state_path, now):
