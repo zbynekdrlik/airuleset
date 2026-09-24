@@ -9575,6 +9575,12 @@ from cli_lane_overlap import cmd_lane_overlap as cmd_lane_overlap  # noqa: E402,
 # --- #1053: gk state-machine label-ensure CLI leaf ---
 from cli_labels import cmd_labels as cmd_labels  # noqa: E402, F401
 
+# --- #1138: owner-controlled stream-priority registry CLI leaf ---
+from cli_stream_priority import (  # noqa: E402, F401
+    cmd_stream_priority as cmd_stream_priority,
+    register_parser as _register_stream_priority_parser,
+)
+
 # --- #1062 L1: managed LiteLLM model gateway CLI leaf ---
 from cli_model_gateway import (  # noqa: E402, F401
     cmd_model_gateway as cmd_model_gateway,
@@ -10831,6 +10837,7 @@ def main():
                           help="run the mount + relocation via sudo -n "
                                "(gk-infra window, owner present)")
     p_vol.set_defaults(apply=False)
+    _register_stream_priority_parser(sub)  # #1138
 
     args = parser.parse_args()
 
@@ -11379,6 +11386,7 @@ SUBCOMMANDS = {
     "volume": cmd_volume,
     "task-hygiene": cmd_task_hygiene,
     "labels": cmd_labels,
+    "stream-priority": cmd_stream_priority,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

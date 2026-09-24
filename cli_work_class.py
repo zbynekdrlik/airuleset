@@ -559,15 +559,15 @@ def dep_wait_map(rows, slug, runner, root, meta=None, merged_fn=None):
 def _sorted_row_keys(rows):
     """Row keys oldest-first with architecture-rework leading — the picker order
     (mirrors `cli_quals_cmd._row_sort_key`), so `dep_wait_map`'s cap keeps the
-    earliest rows. Falls back to insertion order if a row lacks createdAt."""
+    earliest rows, incl. the #1138 high-stream rank. Insertion order if no createdAt."""
+    from cli_stream_priority import row_priority_rank
+
     def key(k):
         row = rows.get(k) if isinstance(rows, dict) else None
         labels = row.get("labels") if isinstance(row, dict) else None
-        names = {(lb or {}).get("name") for lb in (labels or [])
-                 if isinstance(lb, dict)}
-        rank = 0 if ARCHITECTURE_REWORK_LABEL in names else 1
+        names = {(lb or {}).get("name") for lb in (labels or []) if isinstance(lb, dict)}
         created = row.get("createdAt") if isinstance(row, dict) else ""
-        return (rank, created or "")
+        return (0 if ARCHITECTURE_REWORK_LABEL in names else 1, row_priority_rank(row), created or "")
     return sorted(rows, key=key)
 
 

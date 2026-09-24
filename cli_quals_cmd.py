@@ -55,10 +55,10 @@ def _row_label_rank(row):
 
 
 def _row_sort_key(rows, k):
-    """(label-rank, createdAt) -- architecture-rework first, then oldest-first
-    within each rank. Shared by every seed/audit listing so priority and age
-    ordering can never drift between them (#993)."""
-    return (_row_label_rank(rows[k]), rows[k].get("createdAt") or "")
+    """(label-rank, stream-priority, createdAt) -- architecture-rework first (#993), then a `high` stream
+    family's rows (#1138, `stream-priority.json`), then oldest-first. Shared by every seed/audit listing."""
+    from cli_stream_priority import row_priority_rank
+    return (_row_label_rank(rows[k]), row_priority_rank(rows[k]), rows[k].get("createdAt") or "")
 
 
 def _row_action(row, own_stream=None):
