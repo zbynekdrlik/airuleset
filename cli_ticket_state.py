@@ -104,6 +104,7 @@ class Facts:
     and released, done for the stream, #1009); read it TRUTHY, never `is True`.
     `pipeline`: an open linked PR's checks are still running (#1141 slice 3).
     `open_pr`: any open linked PR, in any state (it keeps C open).
+    `reopened`: GitHub stateReason REOPENED (it keeps C open, ruling 1).
     `on_main`: "" (not on main, or unknown), DEPLOYED, RELEASED or PENDING.
     All defaults = the facts are unknown: the label route and nothing else."""
     merged: bool = False
@@ -111,6 +112,7 @@ class Facts:
     pipeline: bool = False
     on_main: str = ""
     open_pr: bool = False
+    reopened: bool = False
 
 
 @dataclass(frozen=True)
@@ -118,12 +120,16 @@ class TicketFacts:
     """The facts of a whole row set, as `bucketize` reads them (#1141 slice
     3): the merged numbers, the `handed` map (keyed like the rows), the numbers
     with a linked PR in CI, with any open linked PR, and the on-main state by
-    number. Empty = unknown: the label buckets (+ gk) of the earlier slices."""
+    number, the REOPENED numbers, and `m_note` (why the M set is partial, or
+    ""; ruling 3). Empty = unknown: the label buckets (+ gk) of the earlier
+    slices."""
     merged: frozenset = frozenset()
     handed: dict = field(default_factory=dict)
     pipeline: frozenset = frozenset()
     on_main: dict = field(default_factory=dict)
     open_pr: frozenset = frozenset()
+    reopened: frozenset = frozenset()
+    m_note: str = ""
 
     def of(self, number):
         """The `Facts` of ticket `number` (a non-numeric key has none)."""
@@ -135,7 +141,8 @@ class TicketFacts:
                      handed=self.handed.get(number) or False,
                      pipeline=n in self.pipeline,
                      on_main=self.on_main.get(n, ""),
-                     open_pr=n in self.open_pr)
+                     open_pr=n in self.open_pr,
+                     reopened=n in self.reopened)
 
 
 def _names(labels):
@@ -382,13 +389,15 @@ def _partition(labels, box):
 def _c_veto(labels, names, facts):
     """What keeps a live fix from reading "done, close it", or "" (#1141
     slice 3, review round 1): unreadable labels (the vetoes cannot be
-    checked), a `_C_VETO` label, or another fix still pending — merged but
-    not released, in CI, or any open linked PR."""
+    checked), a `_C_VETO` label, a reopened ticket (ruling 1), or another fix
+    still pending — merged but not released, in CI, or any open linked PR."""
     if not isinstance(labels, (list, tuple)):
         return "unreadable labels"
     for label in _C_VETO:
         if label in names:
             return label
+    if facts.reopened:
+        return "stateReason REOPENED (reopened after the fix went live)"
     if facts.merged:
         return "another fix merged, not yet released"
     if facts.pipeline or facts.open_pr:
@@ -535,6 +544,10 @@ def explain_lines(buckets, box, facts=None, supplement=(), extras=()):
     for bucket, weight, reason, text in extras:
         out.append("-\t%s\t%s\t%s" % (bucket, reason, _cell(text)))
         totals[bucket] += weight
+    if facts.m_note:   # ruling 3: an accepted known limit, said out loud
+        out.append("# note: the M set is partial (%s): a merged ticket may "
+                   "count as I or C until the next refresh (#1141)"
+                   % facts.m_note)
     shown = _ALWAYS_TOTALED + tuple(b for b in ("P", "C", HIDDEN) if totals[b])
     out.append("# explain: " + " ".join("%s=%d" % (b, totals[b])
                                         for b in shown))

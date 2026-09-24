@@ -17,6 +17,7 @@ The role filter is a per-row PRE-filter on all paths (the footer and the
 quals commands narrow every bucket the same way, #998/#1065).
 """
 
+import dataclasses
 import sys
 
 import cli_ticket_facts
@@ -62,7 +63,20 @@ def quals(rows, root, box, *, extra=None, role=None, slug=None, handed=None):
         return out, ts.TicketFacts(handed=dict(handed))
     facts = cli_ticket_facts.load(
         root, merged=cli_quals_cmd._merged_unreleased(root), handed=handed)
+    try:   # ruling 3: --explain says when the M sweep was truncated
+        import cli_release_state
+        note = cli_release_state.merged_unreleased_partial(root)
+    except Exception as e:  # noqa: BLE001 — a display note, never a count
+        note = "unknown (%s)" % type(e).__name__
+    facts = dataclasses.replace(facts, m_note=note)
     return ts.bucketize(rows, facts, box), facts
+
+
+def count(buckets):
+    """The `--count` / `/goal` stop-proof number (ROZHODNUTÉ ruling 2): I
+    plus C — "done, close me" is an action this box still owes. P waits on a
+    machine and stays out."""
+    return len(buckets["I"]) + len(buckets["C"])
 
 
 def record(entry, buckets):

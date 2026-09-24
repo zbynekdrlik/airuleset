@@ -78,11 +78,10 @@ def _load(path):
 def obligation_count(cwd, home=None):
     """The LIVE obligation-ticket count for `cwd`, read from the SAME
     machine-local tickets-status cache `tickets_segment` renders. Returns
-    `(open: int | None, ts: float | None)`: the cache's `open` field (which
-    is, by construction, `core-quals`/`slice-quals`'s own /goal stop-proof
-    count — `len(mine) - gk` for a reduced-authority stream) plus the cache
-    write time. `(None, None)` when the cache is absent/unparseable or
-    carries no int `open`. Reads only — never spawns a refresh, never
+    `(open: int | None, ts: float | None)`: the cache's `open` + `done` (C,
+    #1141 ruling 2) — by construction `core-quals`/`slice-quals --count`, the
+    /goal stop-proof — plus the cache write time. `(None, None)` when the
+    cache is absent/unparseable or has no int `open`. Never spawns, never
     touches the network. Callers: watchdog `goal_dark_watch` (#459 — its
     death-vs-achievement discriminator, `open > 0` = the goal's own
     SLICE-EMPTY stop condition is NOT met, a genuine stall) AND the #618
@@ -92,11 +91,12 @@ def obligation_count(cwd, home=None):
     cache = _load(cache_dir(home) / (cwd_key(cwd) + ".json"))
     if not isinstance(cache, dict):
         return None, None
-    open_n = cache.get("open")
+    open_n, done = cache.get("open"), cache.get("done")
     if not isinstance(open_n, int):
         return None, None
     ts = cache.get("ts")
-    return open_n, (ts if isinstance(ts, (int, float)) else None)
+    return (open_n + (done if type(done) is int else 0),
+            ts if isinstance(ts, (int, float)) else None)
 
 
 def obligation_partition(cwd, home=None):

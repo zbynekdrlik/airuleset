@@ -943,7 +943,8 @@ def cmd_slice_quals(args):
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition.
         import cli_quals_snapshot
         cli_quals_snapshot.emit_snapshot_json(
-            unhandled, ops_wait, root, quals, user, _emit_ops_wait, _dispatchable_fields)
+            unhandled, ops_wait, root, quals, user, _emit_ops_wait, _dispatchable_fields,
+            owed=_b["C"])
         return
     if want_ops_wait:
         # the W listing, tagged per member (`_emit_ops_wait` documents each tag)
@@ -973,7 +974,7 @@ def cmd_slice_quals(args):
         _print_ping_rows(_waiting_ping_entries())
         return
     if want_count:
-        print(len(unhandled))
+        print(__import__("cli_ticket_route").count(_b))   # I + C (ruling 2)
         return
     if want_count_dispatchable:
         # #993 item 3: the dispatchable-candidate count (NOT --count: dep-wait
@@ -1524,7 +1525,8 @@ def cmd_core_quals(args):
         # (own_stream=None: a full-authority box owns no stream).
         import cli_quals_snapshot
         cli_quals_snapshot.emit_snapshot_json(
-            workable, ops_wait, root, quals, None, _emit_ops_wait, _dispatchable_fields)
+            workable, ops_wait, root, quals, None, _emit_ops_wait, _dispatchable_fields,
+            owed=_b["C"])
         return
     if want_ops_wait:
         # own_stream=None: a full-authority box owns no stream, so EVERY
@@ -1548,7 +1550,7 @@ def cmd_core_quals(args):
         _print_ping_rows(_waiting_ping_entries())
         return
     if want_count:
-        print(len(workable))
+        print(__import__("cli_ticket_route").count(_b))   # I + C (ruling 2)
         return
     if want_count_dispatchable:
         # #993 item 3: the dispatchable-candidate count (NOT --count: dep-wait

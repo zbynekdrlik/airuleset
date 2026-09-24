@@ -21,6 +21,9 @@ Facts no label can give (#1141 slice 3), read into a
   when one does not yet (M), RELEASED when the repo declares no deploy state
   (C). An unreadable registry, a partial PROD read, an unreadable PROD
   version or an unparseable release version leaves the ticket out (unknown).
+- `reopened` (ruling 1): for the live (C) candidates only, ONE batched
+  GraphQL call reads `stateReason`; REOPENED keeps C open, and an unreadable
+  answer is unknown (no C).
 
 The #1067 lesson: no blocking gh call on the watchdog / footer render /
 `--count` path. Only `refresh()` reads the facts, and only the detached footer
@@ -155,6 +158,35 @@ def read_prs(slug, gh_fn, now=None):
         return None
 
 
+REOPENED_MAX = 100   # one batched stateReason call; more candidates = unknown
+
+
+def read_reopened(slug, gh_fn, numbers):
+    """ONE batched GraphQL call (`iN:issue(number:N){stateReason}` aliases,
+    ruling 1): the REOPENED subset of `numbers`. None (unknown) on a bad
+    slug, more than REOPENED_MAX numbers, any gh error or a missing issue."""
+    owner, _, name = (slug or "").partition("/")
+    numbers = sorted({int(n) for n in numbers or ()})
+    if not numbers:
+        return frozenset()
+    if not owner or not name or len(numbers) > REOPENED_MAX:
+        return None
+    query = ("query($owner:String!,$name:String!){repository(owner:$owner,"
+             "name:$name){%s}}" % " ".join(
+                 "i%d:issue(number:%d){stateReason}" % (n, n) for n in numbers))
+    raw = gh_fn(["api", "graphql", "-f", "query=" + query,
+                 "-f", "owner=" + owner, "-f", "name=" + name])
+    try:
+        repo = _dig(json.loads(raw), "data", "repository")
+    except (TypeError, ValueError):
+        return None
+    nodes = [_dig(repo, "i%d" % n) for n in numbers]
+    if not all(isinstance(node, dict) for node in nodes):
+        return None
+    return frozenset(n for n, node in zip(numbers, nodes)
+                     if node.get("stateReason") == "REOPENED")
+
+
 def on_main_states(oids, instances, version_at):
     """`{ticket: DEPLOYED|RELEASED|PENDING}` for the tickets whose fix is on
     main. `oids` maps a ticket to its fix commit (or a list of them: every
@@ -219,18 +251,19 @@ def _ints(values):
             ] if isinstance(values, list) else []
 
 
-def _facts(merged, handed, prs, on_main):
-    """The TicketFacts. `prs` None = the open PRs are UNKNOWN, so no fix can
-    be proven the last one: a live (DEPLOYED/RELEASED) state is dropped and
-    the ticket keeps its label bucket (review round 2)."""
-    if prs is None:
+def _facts(merged, handed, prs, on_main, reopened=frozenset()):
+    """The TicketFacts. `prs` or `reopened` None = UNKNOWN, so no ticket can
+    be proven done: a live (DEPLOYED/RELEASED) state is dropped and the
+    ticket keeps its label bucket (review round 2, ruling 1)."""
+    if prs is None or reopened is None:
         on_main = {n: s for n, s in (on_main or {}).items() if s == ts.PENDING}
     prs = prs or {}
     return ts.TicketFacts(merged=frozenset(int(n) for n in (merged or ())),
                           handed=dict(handed or {}),
                           pipeline=frozenset(n for n, c in prs.items() if c),
                           on_main=dict(on_main or {}),
-                          open_pr=frozenset(prs))
+                          open_pr=frozenset(prs),
+                          reopened=frozenset(reopened or ()))
 
 
 def _fresh(stamp, now, ttl):
@@ -270,15 +303,25 @@ def refresh(root, slug, numbers, *, gh_fn, merged=(), handed=None, home=None,
         oids, None if decl is None else (decl.get("instances") or []),
         lambda oid: (version_at_fn or _default_version_at)(
             root, (decl or {}).get("version_file"), oid))
+    live = {n for n, st in states.items() if st in (ts.DEPLOYED, ts.RELEASED)}
+    checked = set(_ints(prev.get("reopened_checked")))
+    if (live and _fresh(prev.get("reopened_ts"), now, PR_REUSE_S)
+            and isinstance(prev.get("reopened"), list) and live <= checked):
+        reopened, r_ts = frozenset(_ints(prev["reopened"])), prev["reopened_ts"]
+    else:
+        reopened = read_reopened(slug, gh_fn, live)
+        checked, r_ts = live, (now if live and reopened is not None else None)
     _write(path, {
         "ts": now, "root": str(root), "pr_ts": pr_ts,
         "pipeline": None if prs is None else sorted(n for n, c in prs.items()
                                                     if c),
         "open_pr": None if prs is None else sorted(prs),
         "on_main": {str(n): s for n, s in sorted(states.items())},
+        "reopened": None if reopened is None else sorted(reopened),
+        "reopened_checked": sorted(checked), "reopened_ts": r_ts,
         "deploy": deploy if isinstance(deploy, dict) else None})
     return _facts(merged, handed, None if prs is None else {
-        n: c for n, c in prs.items() if n in numbers}, states)
+        n: c for n, c in prs.items() if n in numbers}, states, reopened)
 
 
 def load(root, *, merged=(), handed=None, home=None, now=None):
@@ -303,7 +346,9 @@ def load(root, *, merged=(), handed=None, home=None, now=None):
                 on_main[int(key)] = state
             except ValueError:
                 continue
-    return _facts(merged, handed, prs, on_main)
+    reopened = data.get("reopened")
+    return _facts(merged, handed, prs, on_main, frozenset(_ints(reopened))
+                  if isinstance(reopened, list) else None)
 
 
 def _default_released(root, numbers, slug):

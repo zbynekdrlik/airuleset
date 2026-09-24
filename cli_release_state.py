@@ -84,46 +84,43 @@ _CLOSE_KW_RE = re.compile(
     r"(?i)\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s*:?\s+#(\d+)")
 _ISSUE_LINE_RE = re.compile(r"(?im)^\s*Issue:\s*#(\d+)")
 
-# Per-process memo (keyed ("mu", root) -> frozenset), the repo_identity shape.
+# Per-process memo (keyed ("mu", root) -> frozenset), the repo_identity shape;
+# `_PARTIAL[root]` = why this process's M set is partial ("" = complete).
 _MEMO = {}
+_PARTIAL = {}
 
 
 def _reset_memo():
     """Clear the per-process memo (tests / a long-lived process boundary)."""
     _MEMO.clear()
+    _PARTIAL.clear()
+
+
+def merged_unreleased_partial(root):
+    """Why the M set this process computed for `root` is partial, or "" —
+    `--explain` prints it (#1141 ruling 3: an accepted known limit)."""
+    return _PARTIAL.get(str(root or "").rstrip("/"), "")
 
 
 # #1090 INCIDENT GUARDS — the footer `M` sweep must be BOUNDED, FORK-AWARE and
-# QUOTA-SAFE. On the david1-4 fork clones (`origin` = the stale fork, 3 800+ PRs
-# in `origin/main..origin/develop`) each 120 s statusline refresh walked every
-# PR with one `gh api` call and never reached the end-of-loop cache write, so it
-# restarted at PR 1 every time and exhausted the shared stream App budget within
-# minutes of each hourly reset. Four guards below: canonical range (a), 60-PR
-# cap (b), 15-meta budget + incremental cache (c), quota stop (d).
+# QUOTA-SAFE (on the david1-4 fork clones each refresh walked 3 800+ PRs with one
+# `gh api` call each, never saved, and drained the stream App budget hourly):
+# canonical range (a), 60-PR cap (b), 15-meta budget + cache (c), quota stop (d).
 
-# (b) A healthy 3-branch repo between cuts holds a few dozen PRs at most (gk
-# today: 1-14). More than this many in range means stale/forked refs, not real
-# release readiness — hide `M`, make ZERO REST calls.
+# (b) A healthy 3-branch repo holds a few dozen PRs between cuts (gk: 1-14); more
+# means stale/forked refs, not release readiness — hide `M`, ZERO REST calls.
 MERGED_UNRELEASED_MAX_PRS = 60
 
-# (c) At most this many NEW (uncached) PR metas are fetched per refresh; the
-# cache is saved after EVERY new entry, so a killed/timed-out refresh keeps its
-# progress and the remainder fills on later refreshes.
+# (c) At most this many NEW PR metas per refresh; the cache is saved after EVERY
+# new entry, so a killed refresh keeps its progress (the rest fill later).
 MERGED_UNRELEASED_META_BUDGET = 15
 
-# #1112 — a SANITY cap on the two-branch `<main>..<prefix>/dev` commit walk. It
-# is NOT the (b) 60-PR cap's twin: that cap protects a REST BUDGET (each over-cap
-# PR = one `gh api` call, the #1090 quota incident), and the #1090 fork pathology
-# is ALREADY filtered upstream — a two-branch fork has no `upstream/develop`, so
-# `_canonical_ref_prefix` returns `(None, reason)` and hides M BEFORE this path.
-# The two-branch walk makes ZERO network calls and the git call is already bounded
-# by `_default_git_log_full`'s 15 s timeout, so this cap guards only a PATHOLOGICAL
-# range: a broken/unrelated-history `main..dev` (a rebased/re-created dev, an
-# accidental cross-repo graft) whose `git log` is tens of thousands of commits.
-# Set FAR above any real between-cuts backlog (even a long release gap — ~80
-# tickets × ~5 commits each ≈ 400 — must NOT be hidden, or the fix re-introduces
-# the very bug above the cap), so a legitimate backlog always derives; only a
-# genuinely broken range hides M with a journal reason (design Acceptance 1).
+# #1112 — a SANITY cap on the two-branch `<main>..<prefix>/dev` commit walk, NOT
+# the (b) cap's twin: (b) protects a REST budget, while this walk makes ZERO
+# network calls (the #1090 fork case is already hidden by `_canonical_ref_prefix`).
+# It guards only a PATHOLOGICAL range (a re-created dev, a cross-repo graft: tens
+# of thousands of commits), set FAR above any real backlog (~80 tickets × ~5
+# commits ≈ 400 must NOT be hidden); a broken range hides M with a journal line.
 MERGED_UNRELEASED_MAX_COMMITS = 2000
 
 
@@ -531,6 +528,7 @@ def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path
         root, slug, origin_slug, remote_fn, ref_exists_fn)
     if prefix is None:
         sys.stderr.write(reason + "\n")
+        _PARTIAL[root] = "M hidden: " + reason
         return frozenset()
     # #1112 — a TWO-BRANCH repo (dev -> main, no develop/staging): commits land
     # on `dev` directly carrying the ticket in the SUBJECT, no PR merge commits,
@@ -556,6 +554,7 @@ def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path
             "merged-unreleased: %d PRs in %s/main..%s/develop range "
             "(main %s, develop %s) — stale/forked refs, M hidden\n"
             % (len(pr_commits), prefix, prefix, d_main or "?", d_dev or "?"))
+        _PARTIAL[root] = "M hidden: %d PRs in range" % len(pr_commits)
         return frozenset()
     if cache_path is None:
         cache_path = _default_cache_path(slug)
@@ -567,6 +566,7 @@ def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path
     issues = set()
     new_metas = 0          # (c) new PR metas fetched THIS refresh
     quota_hit = False      # (d) gh reported a rate-limit / 403 / 429
+    unread = 0             # PRs left for a later refresh (#1141 ruling 3)
     for pr, oid in pr_commits.items():
         key = str(pr)
         entry = cache.get(key)
@@ -575,13 +575,15 @@ def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path
             # refresh; the rest fill on later refreshes. Cached PRs below still
             # contribute at zero cost.
             if new_metas >= MERGED_UNRELEASED_META_BUDGET:
+                unread += 1
                 continue
             meta = pr_meta_fn(pr)
             if meta is QUOTA:
                 quota_hit = True
                 break        # (d) stop hammering; M is partial this refresh
             if meta is None:
-                continue     # REST failed — leave uncached, retry next refresh
+                unread += 1  # REST failed — leave uncached, retry next refresh
+                continue
             title, body = meta
             entry = {"issues": sorted(_issue_refs(title, body, pr)), "oid": oid}
             cache[key] = entry
@@ -595,6 +597,8 @@ def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path
     if quota_hit:
         sys.stderr.write(
             "merged-unreleased: gh quota hit — M partial this refresh\n")
+    _PARTIAL[root] = ("gh quota hit" if quota_hit else "%d merged PRs not "
+                      "read yet" % unread if unread else "")
     return frozenset(issues)
 
 
@@ -603,16 +607,11 @@ def merged_unreleased_issues(root, git_fn=None, pr_meta_fn=None,
                              remote_fn=None, ref_exists_fn=None,
                              git_full_fn=None):
     """The set of issue numbers whose fix PR is merged into develop/staging but
-    NOT yet in main (`M`). `slug` names the canonical `owner/repo` for the
-    PR-meta REST read + the cache filename; `slug_fn` is an alternative resolver.
-    When neither is given the slug is resolved EAGERLY from the LOCAL `origin`
-    remote — a no-network read (#1090 resolves it before the git range, so a fork
-    clone can select the canonical branches; the hot `--count`/footer path still
-    pays zero gh). `now` is accepted for signature stability (the cache is
-    append-only; a merged PR never changes). `remote_fn`/`ref_exists_fn` (#1090)
-    are the fork-aware range seams (default = local git reads; injected in
-    tests). `git_full_fn` (#1112) is the TWO-BRANCH range seam reading
-    oid+subject+body (default `_default_git_log_full`). Memoised per process,
+    NOT yet in main (`M`). `slug` (or `slug_fn`) names the canonical owner/repo
+    for the PR-meta read + the cache file, else it is resolved from the LOCAL
+    remote before the range (#1090: zero gh on the hot path, fork-aware). `now`
+    is kept for signature stability. Seams: `remote_fn`/`ref_exists_fn` (#1090),
+    `git_full_fn` (#1112, two-branch oid+subject+body). Memoised per process,
     BYPASSED when any seam is injected (tests)."""
     root = str(root or "").rstrip("/")
     if not root:
