@@ -98,6 +98,29 @@ def render_quota_unit():
     )
 
 
+def _render_quota_script_preamble(tag: str, holders: str, what: str) -> str:
+    """#1140: the shared head of the root quota scripts (the daily refresh and
+    the hourly ceilings): ``set -euo pipefail``; ``/aquota.user`` missing →
+    exit 3; then ``QUOTA_LOCK_PATH`` on fd 9 — ONE quota writer at a time
+    (the refresh, the ceilings and the push apply all take it); busy or
+    unopenable → exit 4 touching nothing."""
+    return (
+        "set -euo pipefail\n"
+        "if [ ! -f /aquota.user ]; then\n"
+        "    echo \"  ⚠ %s: /aquota.user missing — quota not provisioned\" >&2\n"
+        "    exit 3\n"
+        "fi\n"
+        "# one quota writer at a time — shared with the other quota writers\n"
+        "if ! { exec 9>>%s; } 2>/dev/null || ! flock -w %d 9; then\n"
+        "    echo \"  ⚠ %s: quota lock %s busy/unopenable\" \\\n"
+        "        \"(%s running?) — %s SKIPPED, quota untouched\" >&2\n"
+        "    exit 4\n"
+        "fi\n"
+        % (tag, QUOTA_LOCK_PATH, QUOTA_LOCK_WAIT_S, tag, QUOTA_LOCK_PATH,
+           holders, what)
+    )
+
+
 def render_quota_refresh_script() -> str:
     """#1140 A+B: the daily ROOT refresh (bash) — true accounting, then
     usage-aware ceilings from the ONE ``_render_quota_limits_block()``.
@@ -116,18 +139,8 @@ def render_quota_refresh_script() -> str:
         "#!/bin/bash\n"
         "# Managed by airuleset (#1140) — daily quota accounting refresh +\n"
         "# usage-aware ceilings. NEVER re-create the quota file (drops every limit).\n"
-        "set -euo pipefail\n"
-        "if [ ! -f /aquota.user ]; then\n"
-        "    echo \"  ⚠ quota-refresh: /aquota.user missing — quota not provisioned\" >&2\n"
-        "    exit 3\n"
-        "fi\n"
-        "# one quota writer at a time — the push apply takes the same lock\n"
-        "if ! { exec 9>>%s; } 2>/dev/null || ! flock -w %d 9; then\n"
-        "    echo \"  ⚠ quota-refresh: quota lock %s busy/unopenable\" \\\n"
-        "        \"(a push apply running?) — refresh SKIPPED, quota untouched\" >&2\n"
-        "    exit 4\n"
-        "fi\n"
-        "rc=0\n"
+        + _render_quota_script_preamble("quota-refresh", "a push apply", "refresh")
+        + "rc=0\n"
         "# quota is NEVER left off: re-enable on ANY exit (a no-op EBUSY if on)\n"
         "trap 'quotaon -u / >/dev/null 2>&1 || true' EXIT\n"
         "trap 'exit 143' TERM INT HUP\n"
@@ -158,8 +171,7 @@ def render_quota_refresh_script() -> str:
         "%s\n"
         "if [ \"$qfail\" -ne 0 ]; then rc=1; fi\n"
         "exit \"$rc\"\n"
-        % (QUOTA_LOCK_PATH, QUOTA_LOCK_WAIT_S, QUOTA_LOCK_PATH,
-           QUOTACHECK_REFRESH_TIMEOUT_S, _render_quota_limits_block())
+        % (QUOTACHECK_REFRESH_TIMEOUT_S, _render_quota_limits_block())
     )
 
 
@@ -223,22 +235,11 @@ def render_quota_ceiling_script() -> str:
         "#!/bin/bash\n"
         "# Managed by airuleset (#1140 D) — hourly usage-aware quota ceilings.\n"
         "# Limits ONLY: no recount, no quota off/on toggle (the daily refresh owns them).\n"
-        "set -euo pipefail\n"
-        "if [ ! -f /aquota.user ]; then\n"
-        "    echo \"  ⚠ quota-ceiling: /aquota.user missing — quota not provisioned\" >&2\n"
-        "    exit 3\n"
-        "fi\n"
-        "# one quota writer at a time — the refresh and the push apply share it\n"
-        "if ! { exec 9>>%s; } 2>/dev/null || ! flock -w %d 9; then\n"
-        "    echo \"  ⚠ quota-ceiling: quota lock %s busy/unopenable\" \\\n"
-        "        \"(a refresh or push apply running?) — ceilings SKIPPED, quota untouched\" >&2\n"
-        "    exit 4\n"
-        "fi\n"
-        "%s\n"
+        + _render_quota_script_preamble(
+            "quota-ceiling", "a refresh or push apply", "ceilings")
+        + _render_quota_limits_block() + "\n"
         "if [ \"$qfail\" -ne 0 ]; then exit 1; fi\n"
         "exit 0\n"
-        % (QUOTA_LOCK_PATH, QUOTA_LOCK_WAIT_S, QUOTA_LOCK_PATH,
-           _render_quota_limits_block())
     )
 
 
@@ -342,14 +343,17 @@ def _render_quota_limits_block() -> str:
         '# #1140 D: fs bound — hard <= used + %d%% of the free space on /.\n'
         '# Unreadable -> LOUD + qfail, and the unbounded ceiling still applies\n'
         '# (a stale, lower ceiling IS the EDQUOT incident).\n'
-        'df_out=$(df --output=avail -k / 2>&1) && df_rc=0 || df_rc=$?\n'
+        '# stdout ONLY is parsed (a harmless stderr warning must not void it)\n'
+        'df_out=$(df --output=avail -k / 2>/dev/null) && df_rc=0 || df_rc=$?\n'
         'fs_avail_kib=$(echo "$df_out" | tail -n 1 | tr -d \' \')\n'
         'fs_bound_kib=""\n'
         'if [ "$df_rc" -eq 0 ] && [ -n "$fs_avail_kib" ] && [ -z "${fs_avail_kib//[0-9]/}" ]; then\n'
+        '    fs_avail_kib=$(( 10#$fs_avail_kib ))\n'
         '    fs_bound_kib=$(( fs_avail_kib * %d / 100 ))\n'
         'else\n'
-        '    echo "  ⚠ quota: df gave no free space for / (rc=$df_rc: $df_out)'
-        ' — fs bound SKIPPED, unbounded ceilings" >&2\n'
+        '    df_err=$(df --output=avail -k / 2>&1 >/dev/null || true)\n'
+        '    echo "  ⚠ quota: df gave no free space for / (rc=$df_rc out=$df_out'
+        ' err=$df_err) — fs bound SKIPPED, unbounded ceilings" >&2\n'
         '    qfail=1\n'
         'fi\n'
         'for home in /home/*; do\n'
@@ -371,6 +375,13 @@ def _render_quota_limits_block() -> str:
         ' — skipping setquota for $u" >&2\n'
         '        qfail=1; continue\n'
         '    fi\n'
+        '    # #1140 D: a non-numeric usage must never abort the loop or guess\n'
+        '    if [ -n "${used_kib//[0-9]/}" ]; then\n'
+        '        echo "  ⚠ quota: repquota gave non-numeric usage \'$used_kib\' for $u'
+        ' — skipping setquota for $u" >&2\n'
+        '        qfail=1; continue\n'
+        '    fi\n'
+        '    used_kib=$(( 10#$used_kib ))\n'
         '    # Target limits (KiB)\n'
         '    target_soft=%d\n'
         '    target_hard=%d\n'
