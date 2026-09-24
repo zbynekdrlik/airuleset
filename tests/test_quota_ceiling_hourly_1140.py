@@ -131,7 +131,7 @@ class TestCeilingScriptExecution(unittest.TestCase):
     own read-back verify is exercised against the value it computed."""
 
     def _setup(self, td, used_kib, avail_kib="default", df_rc=0,
-               with_aquota=True):
+               with_aquota=True, df_warn=False):
         log = os.path.join(td, "calls.log")
         state = os.path.join(td, "limits")
         bindir = os.path.join(td, "bin")
@@ -146,9 +146,12 @@ class TestCeilingScriptExecution(unittest.TestCase):
             "setquota": ('echo "setquota $*" >> %s\n'
                          '[ "$1" = -u ] && echo "$3 $4" > %s\nexit 0' % (log, state)),
             "repquota": ('lim=$(cat %s 2>/dev/null || echo "0 0")\n'
-                         'echo "u1  --  %d $lim  0 0 0"' % (state, used_kib)),
+                         'echo "u1  --  %s $lim  0 0 0"' % (state, used_kib)),
+            # df_warn: a harmless stderr line AFTER the value (rc 0)
             "df": ('[ %d -eq 0 ] || { echo "df: /: I/O error" >&2; exit %d; }\n'
-                   'echo "  Avail"; echo "  %s"' % (df_rc, df_rc, avail_kib)),
+                   'echo "  Avail"; echo "  %s"\n%s'
+                   % (df_rc, df_rc, avail_kib,
+                      'echo "df: /snap/x: Permission denied" >&2' if df_warn else '')),
             "systemctl": 'echo "systemctl $*" >> %s' % log,
             "quotaon": 'echo "quotaon $*" >> %s' % log,
             "quotaoff": 'echo "quotaoff $*" >> %s' % log,
@@ -256,6 +259,46 @@ class TestCeilingScriptExecution(unittest.TestCase):
             hard = (used * 120 + 99) // 100
             self.assertTrue(self._setquota_user_calls(log)[0].endswith(
                 " %d 0 0 /" % hard), self._setquota_user_calls(log))
+
+    def test_full_disk_never_turns_into_no_limit(self):
+        """setquota reads 0 as NO limit — used=0 on a full disk gets 1 KiB."""
+        with tempfile.TemporaryDirectory() as td:
+            path, env, log = self._setup(td, 0, avail_kib=0)
+            r = self._run(path, env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertEqual(self._setquota_user_calls(log),
+                             ["setquota -u u1 1 1 0 0 /"])
+
+    def test_df_stderr_warning_does_not_void_the_bound(self):
+        """review: only df's stdout is parsed — a warning on stderr (rc 0)
+        must not throw the fs bound away."""
+        used, avail = 20 * G, 2 * G
+        with tempfile.TemporaryDirectory() as td:
+            path, env, log = self._setup(td, used, avail_kib=avail, df_warn=True)
+            r = self._run(path, env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            bound = used + avail // 2
+            self.assertEqual(self._setquota_user_calls(log),
+                             ["setquota -u u1 %d %d 0 0 /" % (bound, bound)])
+
+    def test_leading_zero_avail_is_base_10(self):
+        """review: bash reads 08 as octal and errors — force base 10."""
+        used = 20 * G
+        with tempfile.TemporaryDirectory() as td:
+            path, env, log = self._setup(td, used, avail_kib="0%d" % (2 * G))
+            r = self._run(path, env)
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            bound = used + G
+            self.assertEqual(self._setquota_user_calls(log),
+                             ["setquota -u u1 %d %d 0 0 /" % (bound, bound)])
+
+    def test_non_numeric_usage_is_loud_and_skips_the_user(self):
+        with tempfile.TemporaryDirectory() as td:
+            path, env, log = self._setup(td, "12x4")
+            r = self._run(path, env)
+            self.assertNotEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn("non-numeric usage", r.stderr)
+            self.assertEqual(self._setquota_user_calls(log), [])
 
     def test_never_toggles_quota_or_recounts(self):
         with tempfile.TemporaryDirectory() as td:

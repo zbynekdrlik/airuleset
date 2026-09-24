@@ -377,7 +377,6 @@ class TestQuotaBlockExecution(unittest.TestCase):
                           "Expected: %s, Got: %s"
                           % (expected_sq, calls))
 
-
     # -- Y6: repquota failure must never be treated as zero usage --
 
     def test_repquota_failure_skips_user(self):
