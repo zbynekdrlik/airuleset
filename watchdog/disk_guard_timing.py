@@ -16,34 +16,43 @@ One :class:`PollTimer` per ``run_disk_guard`` call:
   poll adds no line. The line is written even when the step raises.
 * A step the process is KILLED in (systemd's timeout — the incident shape)
   never reaches its ``took`` line, so every step also leaves a breadcrumb file
-  (``step-inflight`` in the guard dir) naming the innermost running step; a
-  finished step restores the enclosing one or removes the file. The next
-  poll's timer reads a leftover breadcrumb and reports
-  ``disk-guard: previous poll (at <iso>) was killed inside step <label>``.
-* ``over_budget(sink, remaining, next_label)`` is checked BETWEEN rungs by
-  ``execute_drain``. The budget is :data:`DISK_GUARD_BUDGET_S`, capped by the
-  caller's ``budget_s`` (the sweep's remaining soft-cap budget — disk_guard
-  may start late in the sweep). At least ONE rung runs per poll (the
-  ``_SweepBudget`` first-op guarantee), so a poll whose earlier steps spent
-  the budget still makes progress. The first over-budget check logs one
-  ``budget exceeded`` line, sets ``cut_short`` (``run_disk_guard`` then does
-  not stamp the drain cadence marker, so the next due poll drains again) and
-  records the first deferred rung as a RESUME point (``drain-resume``).
-* ``resume_start(labels, sink)`` — the first ladder of the next poll starts at
-  that resume point (when it is in this ladder and younger than
+  (``step-inflight`` in the guard dir, with the writer's pid) naming the
+  innermost running step; a finished step restores the enclosing one or
+  removes the file. The next poll's timer reads a leftover breadcrumb and
+  reports ``disk-guard: previous poll (at <iso>) was killed inside step
+  <label>`` — unless the writer is still alive (a concurrent manual
+  ``watchdog --once``), whose breadcrumb is left alone.
+* ``over_budget(sink, remaining, next_label, ladder)`` is checked BETWEEN rungs
+  by ``execute_drain``. The budget is :data:`DISK_GUARD_BUDGET_S`, capped by
+  the caller's ``budget_s`` (the sweep's remaining soft-cap budget —
+  disk_guard may start late in the sweep). At least ONE rung of each ladder
+  runs per poll (the ``_SweepBudget`` first-op guarantee), so a poll whose
+  earlier steps spent the budget still makes progress. The first over-budget
+  check logs one ``budget exceeded`` line, sets ``cut_short``
+  (``run_disk_guard`` then does not stamp the drain cadence marker, so the
+  next due poll drains again) and records the first deferred rung as that
+  LADDER's resume point (``drain-resume`` holds one entry per ladder:
+  ``prevention`` / ``quota`` / ``fs`` — the ladders share rung labels, so a
+  point never crosses ladders).
+* ``resume_start(ladder, labels, sink)`` — the next run of that ladder starts
+  at its resume point (when it is in the ladder and 0 <= age <
   :data:`RESUME_TTL_S`), so tail rungs are never starved by slow head rungs.
-  The point is consumed on read.
+  The entry is consumed on read; other ladders' entries stay.
+
+A dry-run poll gets no ``state_dir``: it neither reads nor writes the resume
+points or the breadcrumb of the real guard.
 
 A single spinning step still cannot be interrupted here (that would need a
 child process — the design's rejected Approach 2); it now names itself.
 
 ``clock_fn`` is injectable (default ``time.monotonic``) so tests advance a fake
-clock — no real sleeps. File I/O is best-effort: a failure is logged through
-the guard's debug channel and never stops the guard.
+clock — no real sleeps. File I/O is best-effort (atomic temp+rename writes): a
+failure is logged through the guard's debug channel and never stops the guard.
 """
 
 import json
 import math
+import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -61,31 +70,48 @@ def _dbg(msg):
 
 
 def _unlink(path):
+    """Remove ``path``; False when it could not be removed."""
     try:
         path.unlink(missing_ok=True)
+        return True
     except OSError as e:
         _dbg("disk-guard timing: unlink %s failed: %r" % (path, e))
+        return False
 
 
-def _take_json(path):
-    """Read and remove a small JSON state file; None when absent or unreadable."""
+def _load_json(path):
+    """A small JSON state file as a dict; None when absent or unreadable."""
     if not path.exists():
         return None
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError) as e:
         _dbg("disk-guard timing: read %s failed: %r" % (path, e))
-        data = None
-    _unlink(path)
+        return None
     return data if isinstance(data, dict) else None
 
 
 def _put_json(path, data):
+    """Atomic write (temp file + rename): a kill or ENOSPC mid-write never
+    leaves a truncated file behind."""
+    tmp = path.with_name(path.name + ".tmp")
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data))
+        tmp.write_text(json.dumps(data))
+        os.replace(tmp, path)
     except OSError as e:
         _dbg("disk-guard timing: write %s failed: %r" % (path, e))
+        _unlink(tmp)
+
+
+def _pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True             # exists, not ours to signal
+    return True
 
 
 class PollTimer:
@@ -102,20 +128,32 @@ class PollTimer:
         self.start = self.clock()
         self.last_label = "start"
         self.cut_short = False
-        self.rungs = 0
+        self.rungs = {}                 # ladder -> rungs run this poll
         self._stack = []
-        self._resume_read = False
         self.lines = []
-        crumb = self._take(INFLIGHT_NAME)
-        if crumb and crumb.get("label"):
-            at = crumb.get("poll")
-            at = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at))
-                  if isinstance(at, (int, float)) else "?")
-            self.lines.append("disk-guard: previous poll (at %s) was killed inside "
-                              "step %s" % (at, crumb["label"]))
+        self._report_killed_step()
 
-    def _take(self, name):
-        return _take_json(self.state_dir / name) if self.state_dir is not None else None
+    def _report_killed_step(self):
+        """A breadcrumb left by a DEAD earlier poll names the step it was
+        killed in. A live writer's (a concurrent run) is left alone; one that
+        cannot be removed (unwritable dir) is not reported, or every poll
+        would repeat it."""
+        crumb = self._load(INFLIGHT_NAME)
+        if not crumb or not crumb.get("label"):
+            return
+        pid = crumb.get("pid")
+        if isinstance(pid, int) and pid != os.getpid() and _pid_alive(pid):
+            return
+        if not _unlink(self.state_dir / INFLIGHT_NAME):
+            return
+        at = crumb.get("poll")
+        at = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(at))
+              if isinstance(at, (int, float)) else "?")
+        self.lines.append("disk-guard: previous poll (at %s) was killed inside "
+                          "step %s" % (at, crumb["label"]))
+
+    def _load(self, name):
+        return _load_json(self.state_dir / name) if self.state_dir is not None else None
 
     def _put(self, name, data):
         if self.state_dir is None:
@@ -125,6 +163,9 @@ class PollTimer:
         else:
             _put_json(self.state_dir / name, data)
 
+    def _crumb(self, label):
+        return {"label": label, "poll": self.now, "pid": os.getpid()}
+
     def elapsed(self):
         return self.clock() - self.start
 
@@ -132,30 +173,30 @@ class PollTimer:
     def step(self, label, sink):
         t0 = self.clock()
         self._stack.append(label)
-        self._put(INFLIGHT_NAME, {"label": label, "poll": self.now})
+        self._put(INFLIGHT_NAME, self._crumb(label))
         try:
             yield
         finally:
             took = self.clock() - t0
             self._stack.pop()
-            self._put(INFLIGHT_NAME, {"label": self._stack[-1], "poll": self.now}
-                      if self._stack else None)
+            self._put(INFLIGHT_NAME, self._crumb(self._stack[-1]) if self._stack else None)
             self.last_label = label
             if took >= self.step_log_min_s:
                 sink.append("disk-guard: step %s took %.1fs" % (label, took))
 
-    def ran_rung(self):
-        self.rungs += 1
+    def ran_rung(self, ladder):
+        self.rungs[ladder] = self.rungs.get(ladder, 0) + 1
 
-    def resume_start(self, labels, sink):
-        """Index in ``labels`` to start this ladder at: the previous poll's
-        resume point when it is fresh and in this ladder, else 0. Only the
-        first ladder of a poll consults (and consumes) it."""
-        if self._resume_read:
+    def resume_start(self, ladder, labels, sink):
+        """Index in ``labels`` to start ``ladder`` at: its resume point when
+        fresh and in this ladder, else 0. The ladder's entry is consumed;
+        other ladders' entries stay."""
+        points = self._load(RESUME_NAME)
+        cur = points.pop(ladder, None) if points else None
+        if cur is None:
             return 0
-        self._resume_read = True
-        cur = self._take(RESUME_NAME)
-        if not cur or cur.get("label") not in labels:
+        self._put(RESUME_NAME, points or None)
+        if not isinstance(cur, dict) or cur.get("label") not in labels:
             return 0
         ts = cur.get("ts")
         if not isinstance(ts, (int, float)) or not 0 <= self.now - ts < RESUME_TTL_S:
@@ -164,14 +205,13 @@ class PollTimer:
                     % cur["label"])
         return labels.index(cur["label"])
 
-    def over_budget(self, sink, remaining, next_label):
-        """True when the poll is past its budget and at least one rung already
-        ran. The first True logs one line naming the last finished step, the
-        poll's elapsed seconds (rounded up) and the ``remaining`` rungs of the
-        ladder that asked, and records ``next_label`` as the resume point;
-        later calls on the same poll (the fs pass after a quota pass) stay
-        silent."""
-        if self.rungs == 0:
+    def over_budget(self, sink, remaining, next_label, ladder):
+        """True when the poll is past its budget and at least one rung of
+        ``ladder`` already ran. The first True logs one line naming the last
+        finished step, the poll's elapsed seconds (rounded up) and the
+        ``remaining`` rungs of that ladder, and records ``next_label`` as the
+        ladder's resume point; later calls on the same poll stay silent."""
+        if not self.rungs.get(ladder):
             return False
         elapsed = self.elapsed()
         if elapsed <= self.budget_s:
@@ -181,7 +221,9 @@ class PollTimer:
             sink.append("disk-guard: budget exceeded after %s (%ds) — %d rung(s) "
                         "deferred to next poll"
                         % (self.last_label, math.ceil(elapsed), remaining))
-            self._put(RESUME_NAME, {"label": next_label, "ts": self.now})
+            points = self._load(RESUME_NAME) or {}
+            points[ladder] = {"label": next_label, "ts": self.now}
+            self._put(RESUME_NAME, points)
         return True
 
 
@@ -195,13 +237,13 @@ class _NullTimer:
     def step(self, _label, _sink):
         yield
 
-    def ran_rung(self):
+    def ran_rung(self, _ladder):
         return None
 
-    def resume_start(self, _labels, _sink):
+    def resume_start(self, _ladder, _labels, _sink):
         return 0
 
-    def over_budget(self, _sink, _remaining, _next_label):
+    def over_budget(self, _sink, _remaining, _next_label, _ladder):
         return False
 
 

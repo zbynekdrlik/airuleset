@@ -68,6 +68,7 @@ import sys
 import time
 from pathlib import Path
 
+from watchdog import disk_guard_post as _dgp
 from watchdog import disk_guard_timing as _dgt
 
 # --- thresholds (#834 req 1) ------------------------------------------------ #
@@ -2974,7 +2975,7 @@ def _make_do_action(dry_run, sudo_ok=False, run_fn=None, scratch_live_fn=None, n
 
 def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                   geteuid_fn=None, log_path=None, now=None, dry_run=False,
-                  target_pct=None, pressure=None, timer=None):
+                  target_pct=None, pressure=None, timer=None, ladder="fs"):
     """Run the drain ladder. Refuses as root (per-user deletion against root's
     fs view is #841). Between rungs, re-checks the worst mount and stops once
     it is back under ``target_pct`` (default :data:`TARGET_PCT`). Every action
@@ -2986,8 +2987,8 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
     ``pressure="quota"`` (the quota pass) labels what ``recheck_fn`` measures
     in the STOP/summary lines and the deletions journal; a recheck returning
     None (unmeasurable) STOPS the ladder — never delete on uncertainty.
-    #1067: ``timer`` (a ``disk_guard_timing.PollTimer``) times each planner and
-    defers the rest of the ladder once the poll is over its wall budget.
+    #1067: ``timer`` (a ``disk_guard_timing.PollTimer``) times each rung and
+    defers the rest of ``ladder`` (prevention/quota/fs) past the poll budget.
     Returns the log lines (also appended to `log_path`)."""
     target_pct = TARGET_PCT if target_pct is None else target_pct
     timer = timer or _dgt.NULL_TIMER
@@ -3020,7 +3021,7 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
         _append_log(log_path, [line])
 
     planners = list(planners)               # #1067: resume at the deferred rung
-    planners = planners[timer.resume_start([lab for lab, _p in planners], logs):]
+    planners = planners[timer.resume_start(ladder, [lab for lab, _p in planners], logs):]
     for i, (_label, planner) in enumerate(planners):
         worst = recheck_fn()
         if worst is None:                   # unmeasurable → stop, never guess
@@ -3040,7 +3041,7 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             logs.append(line)
             _append_log(log_path, [line])
             break
-        if timer.over_budget(logs, len(planners) - i, _label):   # #1067: rest → next poll
+        if timer.over_budget(logs, len(planners) - i, _label, ladder):   # #1067: rest → next poll
             break
         # #965 R3 fix: skip a rung that has freed < 1 MiB three times in a row
         if _should_skip_low_yield_rung(home, _label, now):
@@ -3051,7 +3052,7 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             _append_log(log_path, [line])
             continue
         with timer.step(_label, logs):      # #1067: planner + its actions
-            timer.ran_rung()
+            timer.ran_rung(ladder)
             try:
                 actions = planner()
             except Exception as e:
@@ -3687,7 +3688,7 @@ def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
         logs += execute_drain(status, home, prev_planners, prev_recheck,
                               do_action, geteuid_fn=geteuid_fn,
                               log_path=_log_path(home), now=now, dry_run=dry_run,
-                              target_pct=target_pct, timer=timer)
+                              target_pct=target_pct, timer=timer, ladder="prevention")
         # NOTE: intentionally NOT calling _mark_drained here — the prevention
         # pass has its own cadence check in run_disk_guard via _drain_due, and
         # stamping here would delay the real >=80% drain.
@@ -3824,14 +3825,14 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     the sweep's ``budget_s`` (``disk_guard_timing``; ``clock_fn`` injectable)."""
     now = time.time() if now is None else now
     home = home or os.path.expanduser("~")
-    timer = _dgt.PollTimer(clock_fn=clock_fn, budget_s=budget_s,
-                           state_dir=_guard_dir(home), now=now)
+    timer = _dgt.PollTimer(clock_fn=clock_fn, budget_s=budget_s, now=now,
+                           state_dir=None if dry_run else _guard_dir(home))
     mounts = mounts or MOUNTS
     logs = list(timer.lines)
     try:
         status = disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts, now=now)
     except Exception as e:
-        return ["disk-guard: status error: %r" % e]
+        return logs + ["disk-guard: status error: %r" % e]
     geteuid_fn = geteuid_fn or os.geteuid
     is_root = geteuid_fn() == 0
     # #863 review 2 + #892: whether a per-user drain runs THIS poll. The
@@ -3935,8 +3936,9 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                 status["drain_exhausted_streak"] = _prior_ex["drain_exhausted_streak"]
     # #895: top_consumers must ALWAYS be present in status.json (even on a
     # cold-start non-drain poll) so downstream readers never see a missing key.
-    if "top_consumers" not in status:
-        status["top_consumers"] = []
+    if "top_consumers" not in status:   # #1067: a drain poll keeps the last walk's list
+        _tc = _read_status_cache(home) if will_drain else None
+        status["top_consumers"] = _tc.get("top_consumers", []) if isinstance(_tc, dict) else []
     try:
         write_status_cache(status, home=home)
     except Exception as e:
@@ -4024,81 +4026,9 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                     _append_log(_log_path(home), [ln])
             except Exception as e:
                 logs.append("disk-guard: empty-cwd-key rmdir error: %r" % e)
-        post = disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts, now=now)
-        # #925/#968: drain_exhausted + drain_exhausted_streak — the streak is
-        # the consecutive count of drains at >= effective critical that freed
-        # < 1 MiB. Badge shows at streak >= 2. #1067: a poll the budget cut short
-        # freed nothing because its rungs were DEFERRED, not exhausted.
-        if not dry_run and not timer.cut_short:
-            from watchdog.disk_guard_worktrees import effective_critical_pct as _ecp3
-            _eff_crit3 = _ecp3(statvfs_fn)
-            pre_pct = status.get("worst_pct", 0)
-            is_exhausted = (post["worst_pct"] >= _eff_crit3
-                            and post["worst_pct"] >= pre_pct)
-            post["drain_exhausted"] = is_exhausted
-            # #968: streak counter
-            _prior_streak = _read_status_cache(home)
-            _prev_streak = 0
-            if isinstance(_prior_streak, dict):
-                _prev_streak = _prior_streak.get("drain_exhausted_streak", 0)
-                if not isinstance(_prev_streak, int):
-                    _prev_streak = 0
-            if is_exhausted:
-                post["drain_exhausted_streak"] = _prev_streak + 1
-            else:
-                post["drain_exhausted_streak"] = 0
-            try:
-                _cur = _read_status_cache(home)
-                if isinstance(_cur, dict):
-                    _cur["drain_exhausted"] = post["drain_exhausted"]
-                    _cur["drain_exhausted_streak"] = post["drain_exhausted_streak"]
-                    # #980: carry per-rung skip reasons into status.json
-                    _cur["drain_skipped_rungs"] = status.get("drain_skipped_rungs", [])
-                    _cur["worst_pct"] = post["worst_pct"]
-                    _cur["level"] = post["level"]
-                    _cur["ts"] = post["ts"]
-                    write_status_cache(_cur, home=home)
-            except Exception as e:
-                _dbg("drain_exhausted cache write: %r" % e)
-        # #892: write top_consumers into the status cache AFTER the drain, so a
-        # stream user sees what to clean even before escalation. The pre-drain
-        # write_status_cache already ran; this is a SECOND write carrying
-        # top_consumers + its own ts. Non-drain polls carry it forward above.
-        # Only on the DEFAULT planners path (an injected planners_fn = test;
-        # _collect_top_consumers would re-discover scratch, doubling the du walk).
-        if planners_fn is None and not timer.cut_short:     # #1067: no walk past budget
-            try:
-                with timer.step("top-consumers", logs):
-                    top = _collect_top_consumers(home, now, limit=3, scratch_rows=scratch_rows)
-                post["top_consumers"] = [{"path": p, "bytes": b} for p, b in top]
-                post["top_consumers_ts"] = now
-                # Carry forward largest_live_scratch if computed this poll
-                if "largest_live_scratch" in status:
-                    post["largest_live_scratch"] = status["largest_live_scratch"]
-                write_status_cache(_dgq.carry_quota_fields(status, post), home=home)
-            except Exception as e:
-                logs.append("disk-guard: top-consumers post-drain write error: %r" % e)
-        if post["level"] == "critical":
-            # #896-899: compute top consumers ONCE here (the SAME injectable
-            # seam escalate() already exposes) and reuse the SAME list for
-            # BOTH the escalation log line and the severe-ticket body -- the
-            # OLD code instead read `post.get("top_consumers")`, populated
-            # ONLY on the real (`planners_fn is None`) path a few lines above,
-            # so any caller (every disk_guard test forcing >=95%) injecting
-            # its own `planners_fn` silently filed a ticket body with
-            # "Top consumers:\n(none)" (the #896-899 real-ticket evidence).
-            with timer.step("top-consumers", logs):
-                top_now = (top_consumers_fn(home, now, limit=5) if top_consumers_fn is not None
-                           else _collect_top_consumers(home, now, limit=5, scratch_rows=scratch_rows))
-            logs += escalate(post, home, now, dry_run,
-                             top_consumers_fn=lambda *_a, **_kw: top_now)
-            # #895/#896-899: at >=95% file a gk-request ticket (dedup via
-            # `_severe_ticket_recently_filed`, no ping). `severe_run_fn` is
-            # the injectable filer seam -- a caller exercising this path MUST
-            # inject a recorder; the unset default reaches the REAL `gh`.
-            if post["worst_pct"] >= SEVERE_PCT:
-                logs += file_severe_ticket(post, home, now, top_now,
-                                          dry_run=dry_run, run_fn=severe_run_fn)
+        # #925/#968 exhausted streak, #892 top consumers, #849/#895 escalation
+        logs += _dgp.after_drain(status, home, now, dry_run, timer, planners_fn, scratch_rows,
+                                 statvfs_fn, dev_fn, mounts, top_consumers_fn, severe_run_fn)
         # #968: swap warning — report when /swapfile > 2x MemTotal
         if not dry_run:
             try:

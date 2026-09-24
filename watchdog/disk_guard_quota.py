@@ -248,7 +248,7 @@ def run_quota_pass(status, home, now, dry_run, planners, q, do_action, geteuid_f
     logs = dg.execute_drain(status, home, own, recheck, do_action,
                             geteuid_fn=geteuid_fn, log_path=log_path, now=now,
                             dry_run=dry_run, target_pct=QUOTA_TARGET_PCT,
-                            pressure="quota", timer=timer)
+                            pressure="quota", timer=timer, ladder="quota")
     after = recheck()
     rec = {"ts": now, "before_pct": q.pct, "after_pct": after,
            "trigger_pct": QUOTA_DRAIN_PCT, "target_pct": QUOTA_TARGET_PCT,
@@ -303,7 +303,11 @@ def run_drain_passes(status, home, now, dry_run, planners, planners_fn, q,
     if q.pressure:
         logs += run_quota_pass(status, home, now, dry_run, planners, q,
                                do_action, geteuid_fn, timer=timer)
-        if fs_pressure and not (timer and timer.cut_short):
+        # #1067: a quota pass the poll budget cut short defers the fs pass too
+        # (the quota is the account's own hard limit; the next poll resumes it)
+        if timer is not None and timer.cut_short:
+            return logs
+        if fs_pressure:
             planners = (planners_fn(home, now) if planners_fn is not None
                         else dg._default_planners(home, now, scratch_rows=None))
     if fs_pressure:
