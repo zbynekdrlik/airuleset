@@ -346,7 +346,9 @@ class TestDiscordNotifyHooks(TestCase):
         # never hand-enumerate marker paths here again, or a FUTURE new
         # marker (like CARDCHK was) silently reopens this same leak.
         TestDiscordNotifyHooks._n += 1
-        sid = f"test-dn-{os.getpid()}-{TestDiscordNotifyHooks._n}"
+        # #1134: a uuid sid — a pid+counter sid made `*test-dn-<pid>-1*` also
+        # match `-10…-19`, so one test's sweep could remove another's marker.
+        sid = f"test-dn-{uuid.uuid4().hex[:12]}-{TestDiscordNotifyHooks._n}"
         p = f"/tmp/claude-discord-pending-{sid}"
         self.addCleanup(sweep_session_files, sid)
         return sid, p
@@ -1025,7 +1027,7 @@ class TestGoalArmedSuppressesIdlePing(TestCase):
         # (written by every ✅ turn) -- 430 + 681 real leftover files on
         # this box. Never hand-enumerate marker paths here again.
         TestGoalArmedSuppressesIdlePing._n += 1
-        sid = "test-ga-%d-%d" % (os.getpid(), TestGoalArmedSuppressesIdlePing._n)
+        sid = "test-ga-%s-%d" % (uuid.uuid4().hex[:12], TestGoalArmedSuppressesIdlePing._n)
         p = f"/tmp/claude-discord-pending-{sid}"
         self.addCleanup(sweep_session_files, sid)
         return sid, p
@@ -3562,7 +3564,7 @@ class TestSendMessageNarrationHook(TestCase):
 
     def _sid(self):
         TestSendMessageNarrationHook._n += 1
-        sid = f"test-smn-{os.getpid()}-{TestSendMessageNarrationHook._n}"
+        sid = f"test-smn-{uuid.uuid4().hex[:12]}-{TestSendMessageNarrationHook._n}"
         self.addCleanup(
             lambda: os.path.exists(f"/tmp/airuleset-sendmessage-narration-block-{sid}")
             and os.remove(f"/tmp/airuleset-sendmessage-narration-block-{sid}"))
