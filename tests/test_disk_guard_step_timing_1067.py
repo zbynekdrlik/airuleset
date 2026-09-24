@@ -179,7 +179,11 @@ def test_budget_exactly_reached_is_not_exceeded(tmp_path):
     assert not any("budget exceeded" in ln for ln in logs)
 
 
-def test_budget_spent_before_the_ladder_defers_every_rung(tmp_path):
+def test_budget_spent_before_the_ladder_still_runs_one_rung(tmp_path):
+    """Review finding (#1067 slice 1e): deferring EVERY rung when an earlier
+    step spent the budget means a poll whose scratch discovery alone is slow
+    never drains anything, forever. Each poll runs at least one rung (the
+    `_SweepBudget` first-op guarantee), then defers the rest."""
     clock, calls = FakeClock(), []
 
     def _slow_discover(_now, _home):
@@ -188,14 +192,15 @@ def test_budget_spent_before_the_ladder_defers_every_rung(tmp_path):
 
     planners = [_rung(clock, 0.0, calls, "a"), _rung(clock, 0.0, calls, "b")]
     logs = _poll(tmp_path, clock, planners, scratch_discover_fn=_slow_discover)
-    assert calls == []
-    assert ("disk-guard: budget exceeded after scratch-discovery (50s) — 2 rung(s) "
+    assert calls == ["a"]
+    assert ("disk-guard: budget exceeded after a (50s) — 1 rung(s) "
             "deferred to next poll" in logs)
 
 
 def test_ladder_that_reaches_target_is_never_reported_as_deferred(tmp_path):
     """A ladder that STOPS under target is complete — even over budget it must
-    not claim deferred rungs (and must stamp the drain as completed)."""
+    not claim deferred rungs, and the timer must not mark the poll cut short
+    (so run_disk_guard stamps the drain as completed)."""
     clock, calls = FakeClock(), []
     seq = iter([82, 70])       # rung a starts at 82 %; rung b starts under target
     status = {"worst_pct": 82, "dim": "bytes", "level": "drain",
