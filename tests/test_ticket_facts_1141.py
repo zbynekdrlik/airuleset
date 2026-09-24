@@ -934,5 +934,86 @@ class Rulings(unittest.TestCase):
             {"I": {1: _row(1, "bug")}}, ts.Box(), ts.TicketFacts())))
 
 
+class RulingsReview(unittest.TestCase):
+    """The re-review of the ruling delta: no reuse of a reopen answer, and
+    every ruling-3 path wired end to end."""
+
+    def setUp(self):
+        import cli_ticket_facts
+        self.f = cli_ticket_facts
+
+    def test_a_reopen_inside_a_minute_is_seen_at_the_next_refresh(self):
+        state = {"reopened": ()}
+        asked = []
+
+        def gh(args):
+            if any("stateReason" in a for a in args):
+                asked.append(1)
+                return json.dumps(_reasons((5,), state["reopened"]))
+            return json.dumps(_graphql())
+        with TemporaryDirectory() as home:
+            def run(now):
+                return self.f.refresh(
+                    "/repo", "o/r", {5}, home=home, now=now, gh_fn=gh,
+                    deploy_fn=lambda r, s: None,
+                    released_fn=lambda *a: {5: ["abc1234"]})
+            self.assertEqual(ts.classify(_row(5, "bug"), run(1000).of(5),
+                                         ts.Box())[0], "C")
+            state["reopened"] = (5,)          # the self-close guard reopened it
+            self.assertEqual(ts.classify(_row(5, "bug"), run(1010).of(5),
+                                         ts.Box())[0], "I")
+            self.assertEqual(len(asked), 2)   # never a reused answer
+
+    def test_an_old_cache_without_the_reopen_fact_is_no_c(self):
+        with TemporaryDirectory() as home:
+            path = self.f.cache_path("/repo", home)
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps({"ts": 1000, "open_pr": [],
+                                        "pipeline": [],
+                                        "on_main": {"5": "released"}}))
+            facts = self.f.load("/repo", home=home, now=1000)
+        self.assertEqual(facts.on_main, {})
+
+    def test_the_quals_route_carries_the_partial_m_note(self):
+        from unittest import mock
+        import cli_quals_cmd
+        import cli_release_state as rs
+        import cli_ticket_route
+        with mock.patch.object(cli_quals_cmd, "_merged_unreleased",
+                               return_value=frozenset()), \
+                mock.patch.object(rs, "merged_unreleased_partial",
+                                  return_value="gh quota hit"):
+            b, facts = cli_ticket_route.quals({1: _row(1, "bug")}, "/none",
+                                              ts.Box())
+        self.assertEqual(facts.m_note, "gh quota hit")
+        self.assertTrue(any("M set is partial" in ln
+                            for ln in ts.explain_lines(b, ts.Box(), facts)))
+
+    def _sweep(self, pr_count, meta):
+        import cli_release_state as rs
+        rs._reset_memo()
+
+        def git(root, rng):
+            if rng.endswith("origin/main..origin/develop"):
+                return [("o%d" % n, "Merge pull request #%d from s/x" % n)
+                        for n in range(1, pr_count + 1)]
+            return []
+        with TemporaryDirectory() as tmp:
+            rs.merged_unreleased_issues(
+                "/repo", git_fn=git, pr_meta_fn=meta,
+                cache_path=str(Path(tmp, "c.json")), slug="o/r")
+        return rs.merged_unreleased_partial("/repo")
+
+    def test_every_truncation_path_leaves_a_note(self):
+        import cli_release_state as rs
+        budget = rs.MERGED_UNRELEASED_META_BUDGET
+        self.assertIn("not read yet", self._sweep(
+            budget + 2, lambda pr: ("t", "Closes #%d" % (pr + 100))))
+        self.assertIn("not read yet", self._sweep(2, lambda pr: None))
+        self.assertIn("M hidden", self._sweep(
+            rs.MERGED_UNRELEASED_MAX_PRS + 1, lambda pr: ("t", "")))
+        self.assertEqual(self._sweep(2, lambda pr: ("t", "")), "")
+
+
 if __name__ == "__main__":
     unittest.main()
