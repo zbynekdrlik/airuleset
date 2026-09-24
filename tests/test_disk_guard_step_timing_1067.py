@@ -19,6 +19,7 @@ The clock is injected (``clock_fn``) and advanced by the fake steps — no real
 sleeps, no real deletion paths, no real ``gh``/``sudo``/``quota``/``du``.
 """
 
+import json
 import os
 import types
 
@@ -55,12 +56,12 @@ def _rung(clock, took, calls, label):
     return (label, _p)
 
 
-def _poll(tmp_path, clock, planners, now=10_000.0, used_pct=82, **kw):
+def _poll(tmp_path, clock, planners, now=10_000.0, used_pct=82, dry_run=False, **kw):
     """One workstation poll in the 80-89 % drain band with the drain's
     planners injected. Every external seam is faked."""
     kw.setdefault("scratch_discover_fn", lambda _now, _home: [])
     return dg.run_disk_guard(
-        now=now, home=str(tmp_path), dry_run=False,
+        now=now, home=str(tmp_path), dry_run=dry_run,
         statvfs_fn=_statvfs(used_pct), dev_fn=lambda _m: 1, mounts=("/",),
         geteuid_fn=lambda: 1000, planners_fn=lambda _h, _n: planners,
         sudo_probe_fn=lambda: False, box_class_fn=lambda: "workstation",
@@ -509,3 +510,136 @@ def test_top_consumers_walk_is_timed_and_skipped_when_cut_short(tmp_path, monkey
     logs = dg.run_disk_guard(now=10_060.0, clock_fn=clock, **common)
     assert walks == [3]
     assert "disk-guard: step top-consumers took 6.0s" in logs
+
+
+# --------------------------------------------------------------------------- #
+# review round 2 (#1067 slice 1e) — per-ladder resume, dry-run, live breadcrumb
+# --------------------------------------------------------------------------- #
+def _resume_file(tmp_path):
+    return dg._guard_dir(str(tmp_path)) / dgt.RESUME_NAME
+
+
+def _crumb_file(tmp_path):
+    return dg._guard_dir(str(tmp_path)) / dgt.INFLIGHT_NAME
+
+
+def test_cut_short_prevention_does_not_skip_rungs_of_the_next_drain(tmp_path, monkeypatch):
+    """Ladders share rung labels: a resume point written by the prevention
+    ladder must not make the next full drain start in its middle."""
+    clock, calls = FakeClock(), []
+    monkeypatch.setattr(dg, "_prevention_planners", lambda _h, _n, scratch_rows=None: [
+        _rung(clock, 50.0, calls, "tmp-test"), _rung(clock, 0.0, calls, "scratch")])
+    dg.run_disk_guard(
+        now=10_000.0, home=str(tmp_path), dry_run=False, statvfs_fn=_statvfs(72),
+        dev_fn=lambda _m: 1, mounts=("/",), geteuid_fn=lambda: 1000,
+        box_class_fn=lambda: "workstation", scratch_discover_fn=lambda _n, _h: [],
+        clock_fn=clock)
+    assert calls == ["tmp-test"]
+    clock2, calls2 = FakeClock(), []
+    _poll(tmp_path, clock2, [_rung(clock2, 0.0, calls2, x)
+                             for x in ("session-scratch", "scratch", "uploads")], now=10_060.0)
+    assert calls2 == ["session-scratch", "scratch", "uploads"]
+
+
+def test_fs_ladder_leaves_another_ladders_resume_point(tmp_path):
+    rf = _resume_file(tmp_path)
+    rf.parent.mkdir(parents=True)
+    rf.write_text(json.dumps({"quota": {"label": "scratch", "ts": 10_000.0}}))
+    clock, calls = FakeClock(), []
+    _poll(tmp_path, clock, [_rung(clock, 0.0, calls, x) for x in ("tmp-test", "scratch")],
+          now=10_060.0)
+    assert calls == ["tmp-test", "scratch"]
+    assert json.loads(rf.read_text())["quota"]["label"] == "scratch"
+
+
+def test_future_dated_resume_point_is_ignored(tmp_path):
+    rf = _resume_file(tmp_path)
+    rf.parent.mkdir(parents=True)
+    rf.write_text(json.dumps({"fs": {"label": "b", "ts": 99_999.0}}))
+    clock, calls = FakeClock(), []
+    _poll(tmp_path, clock, [_rung(clock, 0.0, calls, x) for x in "ab"], now=10_000.0)
+    assert calls == ["a", "b"]
+
+
+def test_dry_run_neither_writes_nor_consumes_the_resume_point(tmp_path):
+    clock, calls = FakeClock(), []
+    _poll(tmp_path, clock, [_rung(clock, 50.0, calls, "a"), _rung(clock, 0.0, calls, "b")],
+          dry_run=True)
+    assert not _resume_file(tmp_path).exists()
+    # a real cut-short poll writes it; a dry-run poll in between leaves it alone
+    clock2, calls2 = FakeClock(), []
+    _poll(tmp_path, clock2, [_rung(clock2, 50.0, calls2, "a"), _rung(clock2, 0.0, calls2, "b")],
+          now=20_000.0)
+    clock3, calls3 = FakeClock(), []
+    _poll(tmp_path, clock3, [_rung(clock3, 0.0, calls3, x) for x in "ab"],
+          now=20_030.0, dry_run=True)
+    assert calls3 == ["a", "b"]
+    clock4, calls4 = FakeClock(), []
+    _poll(tmp_path, clock4, [_rung(clock4, 0.0, calls4, x) for x in "ab"], now=20_060.0)
+    assert calls4 == ["b"]
+
+
+def test_kill_between_rungs_names_the_enclosing_step(tmp_path):
+    clock = FakeClock()
+    timer = dgt.PollTimer(clock_fn=clock, state_dir=dg._guard_dir(str(tmp_path)),
+                          now=10_000.0)
+    outer = timer.step("drain", [])
+    outer.__enter__()
+    with timer.step("tmp-test", []):
+        pass                        # the rung finished; the kill came after it
+    logs = _poll(tmp_path, FakeClock(), [], now=10_060.0)
+    assert any("killed inside step drain" in ln for ln in logs), logs
+
+
+def test_breadcrumb_of_a_live_other_process_is_left_alone(tmp_path):
+    cf = _crumb_file(tmp_path)
+    cf.parent.mkdir(parents=True)
+    cf.write_text(json.dumps({"label": "drain", "poll": 9_990.0, "pid": 1}))
+    logs = _poll(tmp_path, FakeClock(), [], now=10_000.0)
+    assert not any("previous poll" in ln for ln in logs)
+
+
+def test_status_error_keeps_the_killed_step_report(tmp_path, monkeypatch):
+    cf = _crumb_file(tmp_path)
+    cf.parent.mkdir(parents=True)
+    cf.write_text(json.dumps({"label": "scratch", "poll": 9_990.0}))
+
+    def _boom(**_kw):
+        raise OSError("statvfs failed")
+
+    monkeypatch.setattr(dg, "disk_status", _boom)
+    logs = dg.run_disk_guard(now=10_000.0, home=str(tmp_path), clock_fn=FakeClock())
+    assert any("killed inside step scratch" in ln for ln in logs), logs
+
+
+def test_cut_short_drain_keeps_top_consumers_and_post_drain_fields(tmp_path):
+    home = str(tmp_path)
+    dg.write_status_cache({"worst_pct": 81, "top_consumers": [{"path": "/x", "bytes": 5}],
+                           "top_consumers_ts": 1.0}, home=home)
+    clock, calls = FakeClock(), []
+
+    def _skip_then_slow():
+        calls.append("a")
+        clock.advance(50.0)
+        return [{"cls": "user-cache", "path": "/y", "bytes": 1, "kind": "skip",
+                 "reason": "in use"}]
+
+    _poll(tmp_path, clock, [("a", _skip_then_slow), _rung(clock, 0.0, calls, "b")])
+    cache = dg._read_status_cache(home)
+    assert cache["top_consumers"] == [{"path": "/x", "bytes": 5}]
+    assert cache["drain_skipped_rungs"][0]["path"] == "/y"
+
+
+def test_cut_short_critical_poll_escalates_without_a_new_walk(tmp_path, monkeypatch):
+    home = str(tmp_path)
+    dg.write_status_cache({"worst_pct": 91, "top_consumers": [{"path": "/x", "bytes": 5}]},
+                          home=home)
+    seen, walks = [], []
+    monkeypatch.setattr(dg, "escalate", lambda post, h, n, d, top_consumers_fn=None:
+                        seen.append(top_consumers_fn()) or [])
+    monkeypatch.setattr(dg, "_record_root_finding_or_warn", lambda *a, **k: [])
+    clock, calls = FakeClock(), []
+    _poll(tmp_path, clock, [_rung(clock, 50.0, calls, "a"), _rung(clock, 0.0, calls, "b")],
+          used_pct=92, top_consumers_fn=lambda *a, **k: walks.append(1) or [])
+    assert walks == [], "a cut-short poll must not start a new top-consumers walk"
+    assert seen == [[("/x", 5)]]
