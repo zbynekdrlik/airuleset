@@ -20,6 +20,11 @@ Every test drives the PRODUCTION sweep shape: `goal_dark_watch` then
 `deliver_goal` with the SAME sweep `state` (whose `goal_mark` is "set" — the
 #1113 structured-armed refusal the migration origin must pass, and every other
 origin must still hit).
+
+#1143 re-pin: the migration is now a CASE of the ONE stream rule (a dark,
+mark-"set", old payload), so it rides the #524 confirmation run like every
+other case -- the "fires" tests drive an 8-read run (`_run`), never one sweep,
+and a CURRENT-template dark loop is re-armed too (the relaunch shape).
 """
 
 import json
@@ -82,13 +87,24 @@ class TestStreamMigrate(unittest.TestCase):
     def setUp(self):
         self.reqp, self.syncp = _isolate_goal_state(self)
         self.now = float(int(time.time()))
+        # #1143 ruling (option 2): the process-tree read is an injected seam --
+        # tests never read the real /proc; a relaunched session has no child.
+        self.children = []
+        _p = unittest.mock.patch.object(
+            sm, "claude_children", lambda pane, run: self.children)
+        _p.start()
+        self.addCleanup(_p.stop)
 
     def _dir(self):
         d = TemporaryDirectory()
         self.addCleanup(d.cleanup)
         return Path(d.name)
 
-    def _fixture(self, sid, payload=OLD_FORK, last=_DONE, idle_s=1200,
+    # #1143: a dark-watch CONFIRMATION RUN (#524) -- 8 dark reads over >= 10
+    # min, the last at `self.now`; the transcript idle for the whole run.
+    RUN = [-630 + 90 * k for k in range(8)]
+
+    def _fixture(self, sid, payload=OLD_FORK, last=_DONE, idle_s=1500,
                  mark="Goal set: "):
         proj = self._dir()
         tpath = _write_marker_transcript(proj, CWD, sid, "warmup")
@@ -114,6 +130,17 @@ class TestStreamMigrate(unittest.TestCase):
             requests_path=self.reqp)
         return goal.load_goal_requests(self.reqp), logs, state, tmux
 
+    def _run(self, proj, base=0, state=None, **kw):
+        """#1143: the production cadence -- one sweep per RUN offset with the
+        SAME state. Returns (requests, all logs, state, last tmux)."""
+        state = {} if state is None else state
+        logs = []
+        for off in self.RUN:
+            reqs, lg, state, tmux = self._sweep(proj, state=state,
+                                                now=self.now + base + off, **kw)
+            logs += lg
+        return reqs, logs, state, tmux
+
     def _deliver(self, proj, sid, state, cap=GOAL_IDLE_CAP, cmd="claude",
                  req=None):
         req = req or goal.load_goal_requests(self.reqp)[sid]
@@ -135,7 +162,7 @@ class TestStreamMigrate(unittest.TestCase):
     # --- fires -------------------------------------------------------------- #
     def test_fires_on_an_idle_old_template_dark_stream_pane(self):
         proj = self._fixture("m-ok")
-        reqs, logs, state, tmux = self._sweep(proj)
+        reqs, logs, state, tmux = self._run(proj)
         req = reqs.get("m-ok")
         self.assertIsInstance(req, dict, logs)
         self.assertEqual(req["origin"], sm.ORIGIN)
@@ -149,20 +176,20 @@ class TestStreamMigrate(unittest.TestCase):
 
     def test_branch_merge_old_template_fires_too(self):
         proj = self._fixture("m-bm", payload=OLD_BRANCH)
-        reqs, _l, state, _t = self._sweep(proj, authority="branch-merge")
+        reqs, _l, state, _t = self._run(proj, authority="branch-merge")
         self.assertEqual(reqs["m-bm"]["origin"], sm.ORIGIN)
         self.assertEqual(self._deliver(proj, "m-bm", state)[0], "sent")
 
     def test_fires_whatever_the_obligation_cache_says(self):
         for sid, obl in (("m-open", (5, None)), ("m-none", (None, None))):
             proj = self._fixture(sid)
-            reqs, _l, _s, _t = self._sweep(proj, obl=obl)
+            reqs, _l, _s, _t = self._run(proj, obl=obl)
             self.assertEqual((reqs.get(sid) or {}).get("origin"), sm.ORIGIN, sid)
 
     # --- never fires -------------------------------------------------------- #
     def test_never_on_an_armed_pane(self):
         proj = self._fixture("m-armed")
-        reqs, _l, state, _t = self._sweep(proj, cap=GOAL_ARMED_CAP)
+        reqs, _l, state, _t = self._run(proj, cap=GOAL_ARMED_CAP)
         self.assertEqual(reqs, {})
         word, live = self._deliver(proj, "m-armed", state, cap=GOAL_ARMED_CAP,
                                    req=self._forced())
@@ -171,9 +198,9 @@ class TestStreamMigrate(unittest.TestCase):
 
     def test_never_on_a_busy_pane(self):
         proj = self._fixture("m-busy")
-        reqs, _l, state, _t = self._sweep(proj, cap=GOAL_BUSY_CAP)
+        reqs, _l, state, _t = self._run(proj, cap=GOAL_BUSY_CAP)
         self.assertEqual(reqs, {})
-        _r, _l, state, _t = self._sweep(proj)          # recorded while idle...
+        _r, _l, state, _t = self._run(proj)            # recorded while idle...
         word, live = self._deliver(proj, "m-busy", state, cap=GOAL_BUSY_CAP)
         self.assertTrue(word.startswith("skip:"), word)  # ...never typed busy
         self.assertEqual(live.sent, [])
@@ -187,7 +214,7 @@ class TestStreamMigrate(unittest.TestCase):
 
     def test_delivery_rechecks_the_idle_window(self):
         proj = self._fixture("m-toctou")
-        _r, _l, state, _t = self._sweep(proj)
+        _r, _l, state, _t = self._run(proj)
         tpath = next(proj.rglob("m-toctou.jsonl"))
         os.utime(tpath, (self.now - 60, self.now - 60))  # a turn ran since
         word, live = self._deliver(proj, "m-toctou", state)
@@ -196,24 +223,26 @@ class TestStreamMigrate(unittest.TestCase):
 
     def test_never_on_a_bare_shell(self):
         proj = self._fixture("m-shell")
-        reqs, _l, state, _t = self._sweep(proj, cmd="bash")
+        reqs, _l, state, _t = self._run(proj, cmd="bash")
         self.assertEqual(reqs, {})
-        _r, _l, state, _t = self._sweep(proj)
+        _r, _l, state, _t = self._run(proj)
         word, live = self._deliver(proj, "m-shell", state, cmd="bash")
         self.assertNotEqual(word, "sent")
         self.assertEqual(live.sent, [])
 
-    def test_never_on_a_new_template_goal(self):
+    def test_a_new_template_dark_loop_is_re_armed_too(self):
+        # #1143 re-pin: this locked "migration-only" (a CURRENT template was
+        # never touched). Under the one rule a dark, set, current-template
+        # loop the owner did not end IS re-armed (the relaunch shape).
         proj = self._fixture("m-new", payload=NEW_FORK)
-        reqs, _l, state, _t = self._sweep(proj)
-        self.assertNotEqual((reqs.get("m-new") or {}).get("origin"), sm.ORIGIN)
-        word, live = self._deliver(proj, "m-new", state, req=self._forced())
-        self.assertEqual(word, "drop:already-armed")
-        self.assertEqual(live.sent, [])
+        reqs, _l, state, _t = self._run(proj)
+        self.assertEqual(reqs["m-new"]["origin"], sm.ORIGIN)
+        word, live = self._deliver(proj, "m-new", state)
+        self.assertEqual(word, "sent", Path(self.syncp).read_text())
 
     def test_never_on_a_full_box(self):
         proj = self._fixture("m-full")
-        reqs, _l, state, _t = self._sweep(proj, authority="full")
+        reqs, _l, state, _t = self._run(proj, authority="full")
         self.assertNotEqual((reqs.get("m-full") or {}).get("origin"), sm.ORIGIN)
         word, live = self._deliver(proj, "m-full", state,
                                    req=self._forced("full"))
@@ -222,12 +251,12 @@ class TestStreamMigrate(unittest.TestCase):
 
     def test_never_on_an_owner_cleared_goal(self):
         proj = self._fixture("m-clr", mark="Goal cleared: ")
-        reqs, _l, _s, _t = self._sweep(proj)
+        reqs, _l, _s, _t = self._run(proj)
         self.assertEqual(reqs, {})
 
     def test_never_on_a_question_ended_loop(self):
         proj = self._fixture("m-q", last=_Q)
-        reqs, _l, _s, _t = self._sweep(proj)
+        reqs, _l, _s, _t = self._run(proj)
         self.assertEqual(reqs, {})
 
     def test_other_origins_are_still_refused_on_an_old_template(self):
@@ -241,14 +270,13 @@ class TestStreamMigrate(unittest.TestCase):
 
     # --- one attempt per session per hour; journalled once ------------------ #
     def test_one_attempt_per_session_per_hour(self):
-        proj = self._fixture("m-rate")
-        _r, _l, state, _t = self._sweep(proj)
+        proj = self._fixture("m-rate", idle_s=2000)
+        _r, _l, state, _t = self._run(proj)
         goal.clear_goal_request("m-rate", path=self.reqp)  # delivered/dropped
-        reqs, logs, state, _t = self._sweep(proj, state=state,
-                                            now=self.now + 1800)
+        reqs, logs, state, _t = self._run(proj, base=1800, state=state)
         self.assertEqual(reqs, {}, "a second attempt inside the hour")
         self.assertTrue(any("1/h" in ln for ln in logs), logs)
-        reqs, _l, _s, _t = self._sweep(proj, state=state, now=self.now + 3700)
+        reqs, _l, _s, _t = self._run(proj, base=3700, state=state)
         self.assertEqual(reqs["m-rate"]["origin"], sm.ORIGIN)
 
     def test_a_skip_is_journalled_once_not_every_sweep(self):
@@ -266,7 +294,7 @@ class TestStreamMigrate(unittest.TestCase):
         # staged, default-OFF `goal-sweep` kind -> every keystroke suppressed.
         # The owner-authorized migration rides the always-on `goal-arm` kind.
         proj = self._fixture("m-kind")
-        _r, _l, state, _t = self._sweep(proj)
+        _r, _l, state, _t = self._run(proj)
         home = self._dir()
         env = {k: v for k, v in os.environ.items()
                if k != "AIRULESET_TEST_IGNORE_DISABLE"}
@@ -298,8 +326,8 @@ class TestStreamMigrate(unittest.TestCase):
             f.write(json.dumps({"type": "assistant", "timestamp": _iso(700),
                                 "message": {"id": "m2", "content":
                                             "ďalšia práca ✅ DONE: x"}}) + "\n")
-        os.utime(tpath, (self.now - 1200, self.now - 1200))
-        reqs, logs, _s, _t = self._sweep(proj)
+        os.utime(tpath, (self.now - 1500, self.now - 1500))
+        reqs, logs, _s, _t = self._run(proj)
         self.assertEqual(reqs["m-later"]["origin"], sm.ORIGIN, logs)
         self.assertFalse(any("newest turn" in ln for ln in logs), logs)
 
@@ -321,7 +349,7 @@ class TestStreamMigrate(unittest.TestCase):
         goal.record_goal_request("m-pend", CWD, "/goal y", "fork-no-merge",
                                  now=self.now, path=self.reqp,
                                  origin="self-callback")
-        reqs, logs, _s, _t = self._sweep(proj)
+        reqs, logs, _s, _t = self._run(proj)
         self.assertEqual(reqs["m-pend"]["origin"], "self-callback")
         self.assertTrue(any("already pending" in ln for ln in logs), logs)
 
@@ -348,7 +376,7 @@ class TestStreamMigrate(unittest.TestCase):
 
     def test_recent_human_defers_the_delivery(self):
         proj = self._fixture("m-human")
-        _r, _l, state, _t = self._sweep(proj)
+        _r, _l, state, _t = self._run(proj)
         req = goal.load_goal_requests(self.reqp)["m-human"]
         live = DeliverGoalFakeTmux([("%9", "claude", CWD, "111")],
                                    GOAL_IDLE_CAP, model_type=True)
@@ -364,7 +392,7 @@ class TestStreamMigrate(unittest.TestCase):
 
     def test_delivery_journals_the_exemption_and_its_refusal_reason(self):
         proj = self._fixture("m-jr")
-        _r, _l, state, _t = self._sweep(proj)
+        _r, _l, state, _t = self._run(proj)
         self._deliver(proj, "m-jr", state)
         self.assertIn("PASS structured-armed", Path(self.syncp).read_text())
         tpath = next(proj.rglob("m-jr.jsonl"))

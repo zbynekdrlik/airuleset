@@ -15,6 +15,11 @@ hook/system record does NOT count), and that `❓` is at or after the current ar
 
 Every test drives the PRODUCTION sweep shape: `goal_dark_watch` then
 `deliver_goal` with the SAME sweep `state` (goal_mark "set").
+
+#1143 re-pin: the answered-A trigger is now a CASE of the ONE stream rule (no
+open `❓` after the arm), so an answered loop logs the rule's `STREAM-MIGRATE`
+label, a `❓` that predates the arm is not an open question (re-armed), and the
+memoized read is `open_question` (the unknown-arm fail-closed lives there).
 """
 
 import json
@@ -129,7 +134,8 @@ class TestStreamPayloadRecognition(unittest.TestCase):
 
 
 class TestAnsweredProof(unittest.TestCase):
-    """`answered_question(tpath, mark_ts)` — the trigger's OWN proof."""
+    """`question_state(tpath, mark_ts)` == "answered" -- the answer proof the
+    #1143 rule's open-question guard is built on."""
 
     def _t(self, entries, mark_ts=500):
         d = TemporaryDirectory()
@@ -137,7 +143,8 @@ class TestAnsweredProof(unittest.TestCase):
         p = Path(d.name) / "s.jsonl"
         p.write_text("".join(json.dumps(e) + "\n" for e in entries),
                      encoding="utf-8")
-        return sm.answered_question(p, mark_ts)
+        st, why = sm.question_state(p, mark_ts)
+        return st == "answered", why
 
     def test_a_human_answer_after_the_last_question_is_answered(self):
         self.assertEqual(self._t(_answered_tail())[0], True)
@@ -186,7 +193,14 @@ class TestAnsweredProof(unittest.TestCase):
         self.assertIn("arm", why)
 
     def test_fail_closed_on_an_unknown_arm_time(self):
-        self.assertFalse(self._t(_answered_tail(), mark_ts=None)[0])
+        # #1143 re-pin: the fail-closed moved to the rule's guard -- an unknown
+        # arm time makes the question OPEN (never re-arm over it).
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = Path(d.name) / "s.jsonl"
+        p.write_text("".join(json.dumps(e) + "\n" for e in _answered_tail()),
+                     encoding="utf-8")
+        self.assertTrue(sm.open_question(p, None)[0])
 
     def test_no_question_in_the_tail(self):
         self.assertFalse(self._t([_asst(600, _AFTER, "x")])[0])
@@ -215,6 +229,13 @@ class TestStreamAnsweredRearm(unittest.TestCase):
     def setUp(self):
         self.reqp, self.syncp = _isolate_goal_state(self)
         self.now = float(int(time.time()))
+        # #1143 ruling (option 2): the process-tree read is an injected seam --
+        # tests never read the real /proc; a relaunched session has no child.
+        self.children = []
+        _p = unittest.mock.patch.object(
+            sm, "claude_children", lambda pane, run: self.children)
+        _p.start()
+        self.addCleanup(_p.stop)
 
     def _dir(self):
         d = TemporaryDirectory()
@@ -301,7 +322,7 @@ class TestStreamAnsweredRearm(unittest.TestCase):
         self.assertEqual(req["origin"], sm.ORIGIN)
         self.assertEqual(req["text"], NEW_FORK)
         self.assertEqual(tmux.sent, [], "dark-watch only records")
-        self.assertTrue(any("STREAM-ANSWERED" in ln for ln in logs), logs)
+        self.assertTrue(any("STREAM-MIGRATE" in ln for ln in logs), logs)
         self.assertEqual(state["goal_mark"]["a-ok"]["mark"]["state"], "set")
         word, live = self._deliver(proj, "a-ok", state)
         self.assertEqual(word, "sent", Path(self.syncp).read_text())
@@ -388,10 +409,14 @@ class TestStreamAnsweredRearm(unittest.TestCase):
         reqs, _l, state, _t = self._run(proj)
         self._assert_never(proj, "u-hook", state, reqs, "is unanswered")
 
-    def test_never_when_the_answered_question_predates_the_arm(self):
+    def test_a_question_before_the_arm_is_not_an_open_question(self):
+        # #1143 re-pin: this locked the answered trigger's own proof ("the ❓
+        # must follow the arm"). Under the one rule a ❓ before the current arm
+        # is not an open question -- the owner re-armed after it -> re-armed.
         proj = self._fixture("u-pre", mark_ts=900)
         reqs, _l, state, _t = self._run(proj)
-        self._assert_never(proj, "u-pre", state, reqs, "predates the arm")
+        self.assertEqual(reqs["u-pre"]["origin"], sm.ORIGIN)
+        self.assertEqual(self._deliver(proj, "u-pre", state)[0], "sent")
 
     def _new_question_before_delivery(self, proj, sid):
         tpath = next(proj.rglob(sid + ".jsonl"))
@@ -496,13 +521,13 @@ class TestStreamAnsweredRearm(unittest.TestCase):
         proj = self._fixture("r-memo", tail=[_asst(600, _Q, "q"),
                                              _user(700, _TASK_NOTE),
                                              _asst(710, _AFTER, "n")])
-        real, calls = sm.answered_question, []
+        real, calls = sm.open_question, []
 
         def _count(*a):
             calls.append(a)
             return real(*a)
         state = {}
-        with unittest.mock.patch.object(sm, "answered_question", _count):
+        with unittest.mock.patch.object(sm, "open_question", _count):
             for k in range(3):
                 reqs, _l, state, _t = self._sweep(proj, state=state,
                                                   now=self.now + k * 60)
@@ -531,10 +556,12 @@ class TestStreamAnsweredRearm(unittest.TestCase):
             _asst(600, _Q, "q"), _user(650, _TASK_NOTE),
             _asst(700, "Hotovo.\n🏁 BACKLOG EMPTY: 0 open, released\n"
                        "✅ DONE: slice prázdny", "b")])
-        reqs, _l, state, _t = self._sweep(proj)
+        reqs, logs, state, _t = self._sweep(proj)
         self.assertNotEqual((reqs.get("m-q") or {}).get("origin"), sm.ORIGIN)
-        self.assertIn("stream-migrate SKIP: the last ❓ NEEDS YOU is unanswered",
-                      Path(self.syncp).read_text())
+        # #1143 re-pin: the one rule journals its skip in the dark-watch log
+        # (the migration's goal-sync side journal left with the migration block)
+        self.assertTrue(any("stream-migrate SKIP: the last ❓ NEEDS YOU is "
+                            "unanswered" in ln for ln in logs), logs)
         self._assert_never(proj, "m-q", state, reqs, "is unanswered")
 
     def test_dry_run_mutates_no_state(self):
