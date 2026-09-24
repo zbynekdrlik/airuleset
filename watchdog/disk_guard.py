@@ -77,7 +77,7 @@ PREVENTION_PCT = 70        # #920: cheapest age-out rungs fire from here (preven
 DRAIN_PCT = 80             # AUTO-DRAIN at/above this
 CRITICAL_PCT = 90          # machine-channel escalation at/above this (red footer)
 DISK_CRITICAL_PCT = 95     # #854: at/above this the drain runs EVERY poll (cadence gate bypassed)
-SEVERE_PCT = 95            # #895: at/above this, file a gk-request ticket with top_consumers
+SEVERE_PCT = 95            # #895: at/above this file the disk ticket (#1136: also drain_exhausted >= 90)
 TARGET_PCT = 75            # drain stops once the worst mount is back below this
 MOUNTS = ("/", "/home", "/tmp")
 
@@ -3473,63 +3473,75 @@ def _mark_severe_ticket_filed(state_path, now, issue=None):
         _dbg("severe ticket state write failed: %r" % e)
 
 
-def file_severe_ticket(status, home, now, top, dry_run=False, run_fn=None):
-    """#895: at >=95% after drain, file a gk-request ticket with
-    top_consumers detail. Deduped via `_severe_ticket_recently_filed` (durable
-    per-box state + in-memory within-run guard -- #896-899), NEVER a Discord
-    ping. ``run_fn`` is injectable for testing (default: subprocess.run) --
-    a test exercising this path MUST inject a recorder; letting a test reach
-    the real default is exactly how the #896-899 duplicate tickets happened."""
-    if status.get("worst_pct", 0) < SEVERE_PCT:
+def file_severe_ticket(status, home, now, top, dry_run=False, run_fn=None,
+                       windows=None):
+    """#895/#1136: file the owner-actionable disk ticket -- at >= SEVERE_PCT,
+    or on ``drain_exhausted`` at >= 90 % (#925) -- with what the drain could
+    not free. The target comes from this box's fleet windows (``windows``;
+    ``None`` = own declaration): an ``infra`` window with a repo gets it there
+    with label ``infra`` (``disk_guard_escalation``), else ``gk-request`` to
+    airuleset. Deduped via `_severe_ticket_recently_filed` (durable per-box
+    state + in-memory within-run guard -- #896-899), NEVER a Discord ping.
+    ``run_fn`` is injectable for testing (default: subprocess.run) -- a test
+    exercising this path MUST inject a recorder; letting a test reach the
+    real default is exactly how the #896-899 duplicate tickets happened."""
+    from watchdog import disk_guard_escalation as _esc
+    if not _esc.should_file(status, SEVERE_PCT):
         return []
     state_path = _severe_ticket_state_path(home)
     if _severe_ticket_recently_filed(state_path, now):
         return []
     run_fn = run_fn or subprocess.run
     hostname = socket.gethostname()
-    top_detail = "; ".join("%s=%s" % (p, _human(b)) for p, b in (top or []))
-    title = "Disk pressure >=95%% on %s (%d%%)" % (hostname, status["worst_pct"])
-    body = ("Auto-filed by disk-guard at %d%% (%s) on %s.\n\n"
-            "Top consumers:\n%s\n\nDrain ran but could not bring the box "
-            "under %d%%." % (
-                status["worst_pct"], status.get("dim", "bytes"), hostname,
-                top_detail or "(none)", TARGET_PCT))
+    windows = _esc.own_windows() if windows is None else windows
+    repo, label = _esc.resolve_target(windows)
+    title, body = _esc.compose(status, hostname, top, _human, TARGET_PCT,
+                               window=_esc.infra_window(windows))
+    how = "gk-request" if label is None else "%s [%s]" % (repo, label)
     logs = []
     line = _log_line(now, "SEVERE-TICKET", hostname, status["worst_pct"],
-                     "filing gk-request: %s" % title)
+                     "filing %s: %s" % (how, title))
     logs.append(line)
     _append_log(_log_path(home), [line])
-    if not dry_run:
-        try:
-            import airuleset as _ars
-            repo_dir = os.path.dirname(os.path.abspath(_ars.__file__))
-            argv = [
-                sys.executable, os.path.join(repo_dir, "airuleset.py"),
-                "gk-request",
-                "--title", title,
-                "--body", body,
-                "--repo", "zbynekdrlik/airuleset",
-            ]
-            r = run_fn(argv, capture_output=True, text=True, timeout=60)
-            if getattr(r, "returncode", 1) != 0:
-                _dbg("severe ticket gk-request failed rc=%s: %s"
-                     % (getattr(r, "returncode", None),
-                        (getattr(r, "stderr", "") or "").strip()[:200]))
-                logs.append(_log_line(now, "SEVERE-TICKET-FAIL", hostname,
-                                     status["worst_pct"],
-                                     "gk-request failed: %s" % (
-                                         getattr(r, "stderr", "") or "")[:200]))
-            else:
-                # #895 F5 / #896-899: mark filed ONLY on success — a transient
-                # failure must not suppress the retry. In-memory FIRST (holds
-                # for the rest of this process even if the durable write below
-                # fails on a full disk), durable state second (best-effort).
-                _mark_severe_ticket_filed(
-                    state_path, now, (getattr(r, "stdout", "") or "").strip() or None)
-        except Exception as e:
-            _dbg("severe ticket error: %r" % e)
+    if dry_run:
+        return logs
+    try:
+        if label is not None:
+            created, ref, errs = _esc.file_infra(run_fn, repo, label, title, body)
+            logs += [_log_line(now, "SEVERE-TICKET-FAIL", hostname,
+                               status["worst_pct"], e) for e in errs]
+            if created:   # the issue exists: a re-file would duplicate it
+                _mark_severe_ticket_filed(state_path, now, ref)
+            return logs
+        import airuleset as _ars
+        repo_dir = os.path.dirname(os.path.abspath(_ars.__file__))
+        argv = [
+            sys.executable, os.path.join(repo_dir, "airuleset.py"),
+            "gk-request",
+            "--title", title,
+            "--body", body,
+            "--repo", repo,
+        ]
+        r = run_fn(argv, capture_output=True, text=True, timeout=60)
+        if getattr(r, "returncode", 1) != 0:
+            _dbg("severe ticket gk-request failed rc=%s: %s"
+                 % (getattr(r, "returncode", None),
+                    (getattr(r, "stderr", "") or "").strip()[:200]))
             logs.append(_log_line(now, "SEVERE-TICKET-FAIL", hostname,
-                                 status["worst_pct"], "error: %r" % e))
+                                 status["worst_pct"],
+                                 "gk-request failed: %s" % (
+                                     getattr(r, "stderr", "") or "")[:200]))
+        else:
+            # #895 F5 / #896-899: mark filed ONLY on success — a transient
+            # failure must not suppress the retry. In-memory FIRST (holds
+            # for the rest of this process even if the durable write below
+            # fails on a full disk), durable state second (best-effort).
+            _mark_severe_ticket_filed(
+                state_path, now, (getattr(r, "stdout", "") or "").strip() or None)
+    except Exception as e:
+        _dbg("severe ticket error: %r" % e)
+        logs.append(_log_line(now, "SEVERE-TICKET-FAIL", hostname,
+                             status["worst_pct"], "error: %r" % e))
     return logs
 
 
