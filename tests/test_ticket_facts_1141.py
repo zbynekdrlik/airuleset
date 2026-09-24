@@ -282,7 +282,8 @@ class FactsCache(unittest.TestCase):
             home=home, now=now,
             gh_fn=gh or (lambda a: json.dumps(
                 _graphql((50, "#1 x", "", "PENDING", ())))),
-            released_fn=lambda root, nums, slug: released or {3: "abc"},
+            released_fn=lambda root, nums, slug: (
+                {3: "abc"} if released is None else released),
             deploy_fn=deploy_fn,
             version_at_fn=lambda root, vfile, oid: None)
 
