@@ -433,17 +433,17 @@ class TestSevereEscalation895(unittest.TestCase):
         # filer's default path -- ANY test here that forgets to inject
         # `run_fn` must hard-fail instead of silently filing a real ticket
         # (exactly how 4 real duplicate tickets were filed, evidence #896-899).
-        self._real_run = subprocess.run
+        self._real_run, self._leaked = subprocess.run, []  # #1136: record+fail
         patcher = mock.patch.object(subprocess, "run", self._guarded_run)
         patcher.start()
+        self.addCleanup(lambda: self.assertEqual(self._leaked, []))
         self.addCleanup(patcher.stop)
 
     def _guarded_run(self, argv, *a, **kw):
-        if isinstance(argv, (list, tuple)) and any("gk-request" == str(x) for x in argv):
-            raise AssertionError(
-                "TEST REACHED THE REAL subprocess.run WITH gk-request IN "
-                "ARGV (%r) -- inject run_fn instead (the #896-899 "
-                "duplicate-ticket incident)" % (argv,))
+        toks = [str(x) for x in argv] if isinstance(argv, (list, tuple)) else []
+        if "gk-request" in toks or toks[:2] == ["gh", "issue"]:
+            self._leaked.append(toks)  # the #896-899 / #1144-1151 class
+            return subprocess.CompletedProcess(argv, 1, "", "blocked by test")
         return self._real_run(argv, *a, **kw)
 
     def test_severe_pct_constant_exists(self):

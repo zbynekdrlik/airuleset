@@ -29,25 +29,34 @@ import watchdog.disk_guard_escalation as esc
 GK_WINDOWS = cli_fleet.box_windows("gatekeeper")
 
 
+def _is_filing_argv(argv):
+    toks = [str(x) for x in argv] if isinstance(argv, (list, tuple)) else []
+    return bool(toks) and ("gk-request" in toks or (
+        toks[0] == "gh" and toks[1:2] == ["issue"]))
+
+
 @pytest.fixture(autouse=True)
 def _no_real_gh_no_network(monkeypatch):
+    """RECORD a real filing/network attempt and fail at TEARDOWN: raising
+    inside the call would be swallowed by the filer's own `except` (review
+    round 1 of #1136 — exactly how 8 real tickets got filed)."""
     real_run = subprocess.run
+    leaked = []
 
     def _guarded_run(argv, *a, **kw):
-        if isinstance(argv, (list, tuple)) and argv and (
-                str(argv[0]) == "gh" or any(str(x) == "gk-request" for x in argv)):
-            raise AssertionError(
-                "TEST REACHED THE REAL subprocess.run WITH A FILING ARGV (%r) "
-                "-- inject run_fn (the #896-899 duplicate-ticket incident)"
-                % (argv,))
+        if _is_filing_argv(argv):
+            leaked.append(list(argv))
+            return subprocess.CompletedProcess(argv, 1, "", "blocked by test")
         return real_run(argv, *a, **kw)
 
     def _no_network(*a, **kw):
-        raise AssertionError("#693/#850: the disk escalation must never "
-                             "open a network connection (Discord) itself")
+        leaked.append(("urlopen", a))
+        raise OSError("blocked by test")
 
     monkeypatch.setattr(subprocess, "run", _guarded_run)
     monkeypatch.setattr(urllib.request, "urlopen", _no_network)
+    yield leaked
+    assert not leaked, "reached a REAL filer / network: %r" % (leaked,)
 
 
 class _Recorder:
@@ -55,14 +64,23 @@ class _Recorder:
     other call succeeds with empty output (or the configured failures)."""
 
     def __init__(self, create_rc=0, edit_rc=0,
-                 url="https://github.com/zbynekdrlik/odoo-erp/issues/7777"):
+                 url="https://github.com/zbynekdrlik/odoo-erp/issues/7777",
+                 raise_on=None, view_state="OPEN", view_rc=0):
         self.calls = []
         self.create_rc = create_rc
         self.edit_rc = edit_rc
         self.url = url
+        self.raise_on = raise_on
+        self.view_state = view_state
+        self.view_rc = view_rc
 
     def __call__(self, argv, **kw):
         self.calls.append(list(argv))
+        if self.raise_on and self.raise_on in argv:
+            raise subprocess.TimeoutExpired(argv, 60)
+        if "view" in argv:
+            return types.SimpleNamespace(returncode=self.view_rc,
+                                         stdout=self.view_state, stderr="")
         if "create" in argv:
             return types.SimpleNamespace(
                 returncode=self.create_rc,
@@ -130,7 +148,6 @@ def test_gk_files_into_odoo_erp_with_infra_label(tmp_path):
     create, edit = rec.calls
     assert create[:3] == ["gh", "issue", "create"]
     assert create[create.index("-R") + 1] == "zbynekdrlik/odoo-erp"
-    assert "--label" not in create, "#221: the label is never baked into create"
     assert edit[:4] == ["gh", "issue", "edit", "7777"]
     assert edit[edit.index("-R") + 1] == "zbynekdrlik/odoo-erp"
     assert edit[edit.index("--add-label") + 1] == "infra"
@@ -285,3 +302,106 @@ def test_escalation_module_never_imports_notify():
         s = ln.strip()
         if s.startswith(("import ", "from ")):
             assert "notify" not in s, s
+
+
+# --------------------------------------------------------------------------- #
+# review round 1 (#1136): label atomic with create, exception-safe, open-ticket
+# dedupe, shared-stream scope, pytest belt, markdown-safe body
+# --------------------------------------------------------------------------- #
+def test_create_carries_the_infra_label_and_edit_verifies_it(tmp_path):
+    """The label rides on create (no unlabelled window the review arrival
+    rider could see) AND the separate edit verifies it (#221: create drops a
+    label it cannot apply without failing)."""
+    rec = _Recorder()
+    dg.file_severe_ticket(_exhausted(91), str(tmp_path), 5000.0, [],
+                          dry_run=False, run_fn=rec, windows=GK_WINDOWS)
+    create, edit = rec.calls
+    assert create[create.index("--label") + 1] == "infra"
+    assert edit[edit.index("--add-label") + 1] == "infra"
+
+
+def test_label_edit_raising_still_marks_filed(tmp_path):
+    """An exception from the label step (a gh timeout) must not escape before
+    the dedupe mark: the issue exists, a re-file would duplicate it."""
+    rec = _Recorder(raise_on="edit")
+    logs = dg.file_severe_ticket(_exhausted(91), str(tmp_path), 5000.0, [],
+                                 dry_run=False, run_fn=rec, windows=GK_WINDOWS)
+    assert any("SEVERE-TICKET-FAIL" in ln for ln in logs), logs
+    rec2 = _Recorder()
+    assert dg.file_severe_ticket(_exhausted(91), str(tmp_path), 5060.0, [],
+                                 dry_run=False, run_fn=rec2,
+                                 windows=GK_WINDOWS) == []
+    assert rec2.calls == []
+
+
+def _after_window(tmp_path, view_state, view_rc=0):
+    """File once, then poll again past the 24h window with the stored issue
+    in ``view_state``; returns (logs, recorder of the second poll)."""
+    home = str(tmp_path)
+    dg.file_severe_ticket(_exhausted(91), home, 5000.0, [], dry_run=False,
+                          run_fn=_Recorder(), windows=GK_WINDOWS)
+    rec = _Recorder(view_state=view_state, view_rc=view_rc)
+    later = 5000.0 + dg.SEVERE_TICKET_REFILE_S + 60
+    logs = dg.file_severe_ticket(_exhausted(91), home, later, [],
+                                 dry_run=False, run_fn=rec, windows=GK_WINDOWS)
+    return logs, rec
+
+
+def test_still_open_ticket_is_not_filed_again_after_the_window(tmp_path):
+    """Deduped against the OPEN ticket (owner plan A), not only 24h."""
+    logs, rec = _after_window(tmp_path, "OPEN")
+    assert [c[:3] for c in rec.calls] == [["gh", "issue", "view"]]
+    view = rec.calls[0]
+    assert view[3] == "7777"
+    assert view[view.index("-R") + 1] == "zbynekdrlik/odoo-erp"
+    assert any("still open" in ln for ln in logs), logs
+
+
+def test_closed_ticket_is_filed_again_after_the_window(tmp_path):
+    logs, rec = _after_window(tmp_path, "CLOSED")
+    assert [c[:3] for c in rec.calls][1:2] == [["gh", "issue", "create"]]
+
+
+def test_unreadable_ticket_state_files_again(tmp_path):
+    """An unknown state never suppresses the escalation (fail toward filing)."""
+    logs, rec = _after_window(tmp_path, "", view_rc=1)
+    assert ["gh", "issue", "create"] in [c[:3] for c in rec.calls]
+
+
+def test_shared_stream_box_does_not_file_the_exhausted_band(tmp_path):
+    """One account's drain sees only its own data, and N stream accounts
+    would file N tickets: the 90-94 exhausted band stays off there."""
+    rec = _Recorder()
+    assert dg.file_severe_ticket(_exhausted(92), str(tmp_path), 5000.0, [],
+                                 dry_run=False, run_fn=rec, windows=[],
+                                 box_class="shared-stream") == []
+    assert rec.calls == []
+    dg.file_severe_ticket(_exhausted(96), str(tmp_path), 5000.0, [],
+                          dry_run=False, run_fn=rec, windows=[],
+                          box_class="shared-stream")
+    assert rec.calls, ">= 95 still files on a shared-stream box"
+
+
+def test_default_filer_is_refused_under_pytest(tmp_path, _no_real_gh_no_network):
+    """Belt for the #896-899 / #1144-1151 class: a test that forgets to inject
+    run_fn gets a logged refusal, never a real ticket, and no dedupe mark."""
+    logs = dg.file_severe_ticket(_exhausted(92), str(tmp_path), 5000.0, [],
+                                 dry_run=False, windows=[])
+    assert _no_real_gh_no_network == []
+    assert any("SEVERE-TICKET-FAIL" in ln and "pytest" in ln for ln in logs), logs
+    rec = _Recorder()
+    dg.file_severe_ticket(_exhausted(92), str(tmp_path), 5010.0, [],
+                          dry_run=False, run_fn=rec, windows=[])
+    assert rec.calls, "a refused default filing must not mark the ticket filed"
+
+
+def test_body_is_markdown_safe(tmp_path):
+    """Paths/reasons are local strings: no backtick may break out of the code
+    span (where @mentions and #refs would render)."""
+    rec = _Recorder()
+    st = _exhausted(91)
+    st["drain_skipped_rungs"] = [{"rung": "x", "path": "/a`@owner", "reason": "b`#1"}]
+    dg.file_severe_ticket(st, str(tmp_path), 5000.0, [("/c`@x", 1)],
+                          dry_run=False, run_fn=rec, windows=GK_WINDOWS)
+    body = rec.calls[0][rec.calls[0].index("--body") + 1]
+    assert "`/a'@owner`" in body and "`b'#1`" in body and "`/c'@x`" in body
