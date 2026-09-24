@@ -27,6 +27,7 @@ import watchdog.disk_guard_escalation as esc
 
 
 GK_WINDOWS = cli_fleet.box_windows("gatekeeper")
+_REAL_DEFAULT_CRIT = getattr(esc, "default_critical_pct", None)  # pre-pin
 
 
 def _is_filing_argv(argv):
@@ -56,6 +57,9 @@ def _no_real_gh_no_network(monkeypatch):
     monkeypatch.setattr(subprocess, "run", _guarded_run)
     monkeypatch.setattr(urllib.request, "urlopen", _no_network)
     monkeypatch.setattr(dg, "_default_box_class", lambda: None)  # hermetic
+    # a direct filer call with no critical_pct reads THIS box's disk size
+    # (85 % small / 90 % large): pin it; after_drain passes it explicitly
+    monkeypatch.setattr(esc, "default_critical_pct", lambda: 90, raising=False)
     yield leaked
     assert not leaked, "reached a REAL filer / network: %r" % (leaked,)
 
@@ -406,3 +410,78 @@ def test_body_is_markdown_safe(tmp_path):
                           dry_run=False, run_fn=rec, windows=GK_WINDOWS)
     body = rec.calls[0][rec.calls[0].index("--body") + 1]
     assert "`/a'@owner`" in body and "`b'#1`" in body and "`/c'@x`" in body
+
+
+# --------------------------------------------------------------------------- #
+# coordinator ruling (#1136): the exhausted floor is the box's OWN effective
+# drain-critical level (`effective_critical_pct`: 85 % on a <= 64 GB root like
+# gk, 90 % above), never a fixed 90 % — gk exhausted at 86 % must file
+# --------------------------------------------------------------------------- #
+def _guard_poll(tmp_path, monkeypatch, blocks, free):
+    """One real `run_disk_guard` poll on a gk-declared box whose only rung is
+    skipped; returns the `gh issue create` argvs it sent."""
+    monkeypatch.setattr(esc, "own_windows", lambda: GK_WINDOWS)
+    d = tmp_path / ".claude" / "disk-guard"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "last-drain").write_text("0")
+
+    def _skipping_planner():
+        return [{"cls": "docker-image", "path": "/var/lib/docker",
+                 "bytes": 500_000_000, "kind": "skip",
+                 "reason": "SKIP-CONTAINERS-RUNNING"}]
+
+    rec = _Recorder()
+    dg.run_disk_guard(
+        now=1000.0, home=str(tmp_path), dry_run=False,
+        statvfs_fn=lambda _m: types.SimpleNamespace(
+            f_blocks=blocks, f_bfree=free, f_bavail=free,
+            f_frsize=4096, f_files=100000, f_ffree=50000),
+        dev_fn=lambda _p: 1, geteuid_fn=lambda: 1000,
+        planners_fn=lambda _h, _n: [("docker-image", _skipping_planner)],
+        severe_run_fn=rec, top_consumers_fn=lambda *a, **kw: [])
+    return [c for c in rec.calls if c[:3] == ["gh", "issue", "create"]]
+
+
+def test_gk_small_disk_exhausted_at_86_files_once(tmp_path, monkeypatch):
+    """The #1136 state itself: 38 GB-class root at 86 %, drain exhausted."""
+    creates = _guard_poll(tmp_path, monkeypatch, blocks=1000, free=140)
+    assert len(creates) == 1, creates
+    assert creates[0][creates[0].index("-R") + 1] == "zbynekdrlik/odoo-erp"
+    title = creates[0][creates[0].index("--title") + 1]
+    assert "86%" in title and "drain exhausted" in title
+    # a second poll inside the dedupe window files nothing
+    assert _guard_poll(tmp_path, monkeypatch, blocks=1000, free=140) == []
+
+
+def test_large_disk_at_86_files_nothing(tmp_path, monkeypatch):
+    """A > 64 GB root keeps the 90 % critical level: 86 % is not exhausted."""
+    assert _guard_poll(tmp_path, monkeypatch, blocks=20_000_000,
+                       free=2_800_000) == []
+
+
+def test_exhausted_floor_is_the_passed_critical_level(tmp_path):
+    rec = _Recorder()
+    assert dg.file_severe_ticket(_exhausted(84), str(tmp_path), 5000.0, [],
+                                 dry_run=False, run_fn=rec, windows=GK_WINDOWS,
+                                 critical_pct=85) == []
+    assert rec.calls == []
+    dg.file_severe_ticket(_exhausted(86), str(tmp_path), 5000.0, [],
+                          dry_run=False, run_fn=rec, windows=GK_WINDOWS,
+                          critical_pct=85)
+    assert rec.calls and rec.calls[0][:3] == ["gh", "issue", "create"]
+    rec2 = _Recorder()
+    assert dg.file_severe_ticket(_exhausted(89), str(tmp_path / "b"), 5000.0,
+                                 [], dry_run=False, run_fn=rec2,
+                                 windows=GK_WINDOWS, critical_pct=90) == []
+    assert rec2.calls == []
+
+
+def test_default_floor_is_effective_critical_pct(monkeypatch):
+    """No critical_pct → the box's own `effective_critical_pct` (the helper the
+    `drain_exhausted` bookkeeping uses), never a fixed number."""
+    import watchdog.disk_guard_worktrees as dgw
+    assert _REAL_DEFAULT_CRIT is not None, "esc.default_critical_pct missing"
+    for pct in (85, 90):
+        monkeypatch.setattr(dgw, "effective_critical_pct", lambda *a, _p=pct, **k: _p)
+        assert _REAL_DEFAULT_CRIT() == pct
+    assert not hasattr(esc, "EXHAUSTED_FILE_PCT"), "no fixed 90 % floor left"
