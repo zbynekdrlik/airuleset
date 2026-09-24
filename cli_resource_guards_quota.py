@@ -155,7 +155,9 @@ def render_quota_refresh_service() -> str:
     never kills it mid-count. ``After=airuleset-quota.service``: a
     ``Persistent=true`` catch-up at boot waits for the boot unit's recount.
     ``ExecStopPost=-quotaon`` runs even after a SIGKILL/OOM kill the script's
-    EXIT trap cannot see — quota is never left off (EBUSY when on: ignored)."""
+    EXIT trap cannot see — quota is never left off (EBUSY when on: ignored).
+    It takes the SAME lock (bounded under ``TimeoutStopSec``): after a
+    busy-lock exit 4 the lock holder is mid-work and turns quota on itself."""
     return (
         "# Managed by airuleset (#1140) — quota accounting + ceiling refresh.\n"
         "[Unit]\n"
@@ -167,8 +169,9 @@ def render_quota_refresh_service() -> str:
         "Type=oneshot\n"
         "TimeoutStartSec=%d\n"
         "ExecStart=/bin/bash %s\n"
-        "ExecStopPost=-/sbin/quotaon -u /\n"
-        % (QUOTACHECK_REFRESH_TIMEOUT_S + 600, QUOTA_REFRESH_SCRIPT_PATH)
+        "ExecStopPost=-/usr/bin/flock -w 60 %s /sbin/quotaon -u /\n"
+        % (QUOTACHECK_REFRESH_TIMEOUT_S + 600, QUOTA_REFRESH_SCRIPT_PATH,
+           QUOTA_LOCK_PATH)
     )
 
 
@@ -250,7 +253,7 @@ def _render_quota_limits_block() -> str:
         '    if [ "$rq_rc" -ne 0 ]; then\n'
         '        echo "  ⚠ quota: repquota gave no usage for $u'
         ' — skipping setquota for $u" >&2\n'
-        '        continue\n'
+        '        qfail=1; continue\n'
         '    fi\n'
         '    # Read current usage in KiB from the hoisted repquota output\n'
         '    used_kib=$(echo "$rq_out" | awk -v u="$u" \'$1==u{print $3}\')\n'
@@ -258,7 +261,7 @@ def _render_quota_limits_block() -> str:
         '    if [ -z "$used_kib" ]; then\n'
         '        echo "  ⚠ quota: repquota gave no usage for $u'
         ' — skipping setquota for $u" >&2\n'
-        '        continue\n'
+        '        qfail=1; continue\n'
         '    fi\n'
         '    # Target limits (KiB)\n'
         '    target_soft=%d\n'
@@ -359,7 +362,7 @@ def _render_quota_apply_block() -> str:
     _render_quota_kmod_block and _render_quota_limits_block."""
     return (
         '# --- #950: per-user ext4 disk quota ---\n'
-        'quota_fail=0\n'
+        'quota_fail=0; quota_recount_due=0\n'
         'dev=$(findmnt -no SOURCE /); fstype=$(findmnt -no FSTYPE /)\n'
         'if [ "$fstype" != "ext4" ]; then\n'
         '    echo "  ⚠ quota: / is $fstype, not ext4 — skipped"\n'
@@ -390,11 +393,11 @@ def _render_quota_apply_block() -> str:
         '                        echo "  ⚠ quota: quotacheck failed — stderr: $qc_err" >&2\n'
         '                        quota_fail=1\n'
         '                    }\n'
-        # #1140: found OFF with an existing file → re-count before quotaon
-        # (never the create flag on an existing file: it drops every limit)
+        # #1140: found OFF with an existing file → the usage is stale; the
+        # recount is queued to the refresh service after this block (an inline
+        # recount could outlive the push's 180 s ssh budget)
         '                elif [ "$quota_fail" -eq 0 ]; then\n'
-        '                    qc_err=$(nice -n19 ionice -c2 -n7 timeout 1800 quotacheck -u -m / 2>&1) \\\n'
-        '                        || echo "  ⚠ quota: recount failed (non-fatal) — stderr: $qc_err" >&2\n'
+        '                    quota_recount_due=1\n'
         '                fi\n'
         '                if [ "$quota_fail" -eq 0 ]; then\n'
         '                    qon_err=$(quotaon -u / 2>&1) || {\n'
@@ -426,5 +429,10 @@ def _render_quota_apply_block() -> str:
         '        fi\n'
         '    fi\n'
         '    exec 9>&-\n'
+        '    if [ "${quota_recount_due:-0}" = 1 ]; then\n'
+        '        systemctl start --no-block airuleset-quota-refresh.service \\\n'
+        '            && echo "  quota: was off — recount queued (airuleset-quota-refresh)" \\\n'
+        '            || echo "  ⚠ quota: was off and the recount could not be queued" >&2\n'
+        '    fi\n'
         'fi'
     )

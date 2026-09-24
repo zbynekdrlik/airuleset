@@ -56,6 +56,10 @@ QUOTA_PASS_EXCLUDED_RUNGS = frozenset({
     "runner-checkout", "runner-diag", "docker-image", "journal", "home-worktree",
 })
 
+# A quota pass that could not lower the quota backs the drain off to the
+# hourly cadence — only while that record is REAL (not a dry-run) and recent.
+QUOTA_EXHAUSTED_TTL_S = 2 * 3600
+
 QuotaState = collections.namedtuple(
     "QuotaState", "pct pressure growth exhausted usage usage_fn")
 _INACTIVE = QuotaState(None, False, False, False, None, None)
@@ -146,8 +150,10 @@ def quota_state(status, home, now, active, usage_fn=None):
     prev = _num(prior, "quota_pct")
     pressure = pct >= QUOTA_DRAIN_PCT
     last = prior.get("quota_drain")
-    before, after = _num(last, "before_pct"), _num(last, "after_pct")
-    exhausted = pressure and before is not None and after is not None and after >= before
+    before, after, ts = _num(last, "before_pct"), _num(last, "after_pct"), _num(last, "ts")
+    exhausted = (pressure and before is not None and after is not None and after >= before
+                 and not last.get("dry_run") and ts is not None
+                 and 0 <= now - ts < QUOTA_EXHAUSTED_TTL_S)
     growth = pressure and prev is not None and pct > prev
     return QuotaState(pct, pressure, growth, exhausted, usage, usage_fn)
 
