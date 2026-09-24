@@ -34,7 +34,8 @@ The rule (ALL must hold, else a journalled skip):
      janitor, one typed attempt per request).
 `delivery_ok` re-checks 1, 5, 6 and the session's own transcript at the
 moment of delivery -- the ONLY origin that passes the #1113 refusal. A full
-box is unchanged: a non-stream payload returns before any state is touched.
+box is unchanged: a non-stream payload returns before any state is touched
+(a stream payload on a non-stream box only journals its skip, never records).
 
 Recognizers, the bounded transcript proof, and one decision function with
 injected `Seams` (store / template / pending / record / reset) plus the wiring
@@ -250,21 +251,23 @@ def decide(sid, cwd, tpath, payload, now, loc, dry_run, store, template_fn,
     `confirm_fn() -> bool` advances the #524 confirmation run (guard 4) --
     None fails CLOSED (never confirmed).
 
-    Order: the template's authority (a non-stream box returns at once and
-    touches no state); the idle window; the open question; the core + the
+    Order: the idle window and the open question first (a stat + a memoized
+    read, so the template -- `resolve_authority` + the template file -- is
+    resolved only for an idle pane with no open question, not every 60 s for
+    every dark stream pane); then the template's authority (a non-stream box
+    returns, touching nothing beyond a journalled skip reason); the core + the
     template; then the confirmation run -- advanced every sweep that gets this
     far, the 1 h gap included, and ONLY on a path that stays this rule's own
     (handled), so the caller's dead-loop path never advances it twice a sweep
-    -- then the gap and pending gates. `handled` is False -- the caller's
-    fulfilled / answer / dead-loop path applies -- for a non-stream box, an
-    unreadable or not-yet-idle transcript, an open question, a failed core and
-    an unresolvable template: none is this rule's own state, so the #459
+    -- then the gap and pending gates. `eligible()` re-checks the idle window
+    on purpose: it is the ONE core `delivery_ok` shares, so record and
+    delivery can never disagree. `handled` is False -- the caller's fulfilled
+    / answer / dead-loop path applies -- for a non-stream box, an unreadable or
+    not-yet-idle transcript, an open question, a failed core and an
+    unresolvable template: none is this rule's own state, so the #459
     visibility and the #890 answer rider stay. Every other outcome is
     rule-bound (True). A skip is journalled ONCE per (session, reason).
     Nothing is mutated on dry_run (the caller's `confirm_fn` included)."""
-    text, authority = template_fn(cwd)
-    if authority not in STREAM_AUTHORITIES:
-        return None, False
     if not dry_run:
         _reap(store, now)
     rec = store.get(sid) if isinstance(store.get(sid), dict) else {}
@@ -285,6 +288,9 @@ def decide(sid, cwd, tpath, payload, now, loc, dry_run, store, template_fn,
                      else open_question(tpath, mark_ts))
     if is_open:
         return _skip(owhy, False)
+    text, authority = template_fn(cwd)
+    if authority not in STREAM_AUTHORITIES:
+        return None, False
     cok, cwhy = eligible(authority, payload, tpath, now)
     if not cok:
         return _skip(cwhy, False)

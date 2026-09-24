@@ -182,7 +182,7 @@ class TestStreamMigrate(unittest.TestCase):
     # --- never fires -------------------------------------------------------- #
     def test_never_on_an_armed_pane(self):
         proj = self._fixture("m-armed")
-        reqs, _l, state, _t = self._sweep(proj, cap=GOAL_ARMED_CAP)
+        reqs, _l, state, _t = self._run(proj, cap=GOAL_ARMED_CAP)
         self.assertEqual(reqs, {})
         word, live = self._deliver(proj, "m-armed", state, cap=GOAL_ARMED_CAP,
                                    req=self._forced())
@@ -191,7 +191,7 @@ class TestStreamMigrate(unittest.TestCase):
 
     def test_never_on_a_busy_pane(self):
         proj = self._fixture("m-busy")
-        reqs, _l, state, _t = self._sweep(proj, cap=GOAL_BUSY_CAP)
+        reqs, _l, state, _t = self._run(proj, cap=GOAL_BUSY_CAP)
         self.assertEqual(reqs, {})
         _r, _l, state, _t = self._run(proj)            # recorded while idle...
         word, live = self._deliver(proj, "m-busy", state, cap=GOAL_BUSY_CAP)
@@ -235,7 +235,7 @@ class TestStreamMigrate(unittest.TestCase):
 
     def test_never_on_a_full_box(self):
         proj = self._fixture("m-full")
-        reqs, _l, state, _t = self._sweep(proj, authority="full")
+        reqs, _l, state, _t = self._run(proj, authority="full")
         self.assertNotEqual((reqs.get("m-full") or {}).get("origin"), sm.ORIGIN)
         word, live = self._deliver(proj, "m-full", state,
                                    req=self._forced("full"))
@@ -244,12 +244,12 @@ class TestStreamMigrate(unittest.TestCase):
 
     def test_never_on_an_owner_cleared_goal(self):
         proj = self._fixture("m-clr", mark="Goal cleared: ")
-        reqs, _l, _s, _t = self._sweep(proj)
+        reqs, _l, _s, _t = self._run(proj)
         self.assertEqual(reqs, {})
 
     def test_never_on_a_question_ended_loop(self):
         proj = self._fixture("m-q", last=_Q)
-        reqs, _l, _s, _t = self._sweep(proj)
+        reqs, _l, _s, _t = self._run(proj)
         self.assertEqual(reqs, {})
 
     def test_other_origins_are_still_refused_on_an_old_template(self):

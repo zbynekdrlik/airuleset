@@ -3000,8 +3000,10 @@ def _fulfilled_rearm_decide(sid, cwd, tpath, mark_ts, now, loc, dry_run,
     All state mutations are guarded on `not dry_run`. Never raises via the pure
     helpers it calls; a `record_goal_request` / rearm_fn / obligation_fn failure
     degrades to a fall-through (the safe, no-keystroke direction). A stream
-    loop (#1143) is decided by the ONE `stream_migrate` rule BEFORE this lane
-    (`_stream_rearm`), so an old-template 🏁 loop migrates whatever the cache."""
+    loop the ONE `stream_migrate` rule (#1143) HANDLES never reaches this lane
+    (`_stream_rearm` runs first), so an idle old-template 🏁 loop migrates
+    whatever the cache; one it does not handle (not idle, an open ❓, no
+    template) still falls through to here as before."""
     # #767 -- BACKWARD-scan the bounded tail (scan_back=True) so a genuine 🏁 is
     # not SHADOWED by later non-🏁 post-achieve chore turns (the live gk failure:
     # a completed loop kept working ~18 min after 🏁 and its newest turn hid the

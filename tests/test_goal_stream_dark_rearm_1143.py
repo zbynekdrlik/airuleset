@@ -22,8 +22,10 @@ template is re-armed when ALL of these hold:
 
 A full box is unchanged.
 
-Every test drives the PRODUCTION sweep shape: `goal_dark_watch` then
-`deliver_goal`, with the SAME sweep `state` (goal_mark "set").
+Every behaviour test drives the PRODUCTION sweep shape: `goal_dark_watch`
+then `deliver_goal`, with the SAME sweep `state` (goal_mark "set"). The
+fail-closed guards (`delivery_ok` on an unknown arm time, `open_question` on an
+untimed `❓`, `decide` with no confirmation run) are also called directly.
 """
 
 import json
@@ -397,6 +399,44 @@ class TestDarkStreamLoopRule(unittest.TestCase):
         self._assert_never(proj, "f-stream", state, reqs, "not a stream box",
                            authority="full")
 
+    # --- review round 1: the fall-through, the reset, the legacy memo ---------- #
+    def test_a_not_idle_or_open_question_pane_falls_through(self):
+        # handled=False keeps the #459 dead-loop / #890 lanes for states that
+        # are not this rule's own: they still see the pane (first observation).
+        for sid, kw in (("h-fresh", {"idle_s": 300}),
+                        ("h-open", {"tail": [
+                            _asst(600, _Q, "q"), _user(650, _TASK_NOTE),
+                            _asst(700, "Nič nové.\n✅ DONE: nič", "n")]})):
+            proj = self._fixture(sid, **kw)
+            _r, logs, _s, _t = self._sweep(proj, obl=(5, self.now))
+            self.assertTrue(any("first observation" in ln for ln in logs),
+                            (sid, logs))
+
+    def test_recording_ends_the_dead_loop_episode(self):
+        proj = self._fixture("h-reset")
+        ep = {"mark_ts": 500.0, "first_seen": self.now - 900, "last": self.now}
+        state = {"goal_dark_seen": {"h-reset": dict(ep)},
+                 "goal_dark_pinged": {"h-reset": dict(ep)}}
+        reqs, _l, state, _t = self._run(proj, state=state)
+        self.assertEqual(reqs["h-reset"]["origin"], sm.ORIGIN)
+        for key in ("goal_dark_seen", "goal_dark_pinged", "goal_dark_confirm"):
+            self.assertNotIn("h-reset", state.get(key) or {}, key)
+
+    def test_a_legacy_memo_entry_is_never_read_as_no_question(self):
+        # a pre-#1143 memo row ({key, ok, why, seen}) with a MATCHING key must
+        # be re-read, never taken as "no open question".
+        proj = self._fixture("h-memo", tail=[
+            _asst(600, _Q, "q"), _user(650, _TASK_NOTE),
+            _asst(700, "Nič nové.\n✅ DONE: nič", "n")])
+        tpath = next(proj.rglob("h-memo.jsonl"))
+        key = [500.0, os.stat(tpath).st_mtime_ns]
+        state = {"goal_stream_answered_memo": {"h-memo": {
+            "key": key, "ok": True, "why": "",
+            "seen": self.now + self.RUN[0] - 60}}}   # live at the first read
+        reqs, _l, state, _t = self._run(proj, state=state)
+        self.assertNotEqual((reqs.get("h-memo") or {}).get("origin"), sm.ORIGIN)
+        self.assertIs(state["goal_stream_answered_memo"]["h-memo"]["open"], True)
+
     def test_dry_run_mutates_no_state(self):
         proj = self._fixture("d-dry")
         state = {}
@@ -412,6 +452,38 @@ class TestDarkStreamLoopRule(unittest.TestCase):
         self.assertEqual(json.dumps({k: state.get(k) for k in keys},
                                     sort_keys=True), before)
         self.assertTrue(any("would record" in ln for ln in logs), logs)
+
+
+class TestRuleGuardsDirect(unittest.TestCase):
+    """The two fail-CLOSED guards, called directly (review round 1)."""
+
+    def _tpath(self, entries, idle_s=1500):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        p = Path(d.name) / "g.jsonl"
+        p.write_text("".join(json.dumps(e) + "\n" for e in entries),
+                     encoding="utf-8")
+        aged = time.time() - idle_s
+        os.utime(p, (aged, aged))
+        return p
+
+    def test_an_untimed_question_counts_as_open(self):
+        q = _asst(600, _Q, "q")
+        q.pop("timestamp")
+        is_open, why = sm.open_question(self._tpath([q]), 500.0)
+        self.assertTrue(is_open)
+        self.assertIn("unanswered", why)
+
+    def test_no_confirmation_run_never_records(self):
+        recorded = []
+        line, handled = sm.decide(
+            "g-nc", CWD, self._tpath(_relaunch_tail()), NEW_FORK, time.time(),
+            "loc", False, {}, lambda cwd: (NEW_FORK, "fork-no-merge"),
+            lambda s: False, lambda t, a: recorded.append(t), lambda: None,
+            mark_ts=500.0)
+        self.assertTrue(handled)
+        self.assertEqual(recorded, [])
+        self.assertIn("not yet confirmed", line)
 
 
 if __name__ == "__main__":
