@@ -675,16 +675,16 @@ def _is_controller_box(box_class_fn=None):
         return False
 
 
-def _auto_commit_registry(registry_path):
+def _auto_commit_registry(registry_path, filename=None, source="onboard-project"):
     """After a registry write on the controller, commit the file so the tree
-    is never left dirty (#946). Operates on the AIRULESET repo dir (where the
-    registry lives), not the project dir. A no-op when there is nothing to
-    commit (idempotent re-run). Returns a warning string on failure, None on
-    success — the caller folds it into the step detail."""
+    is never left dirty (#946; also the #1138 stream-priority writer). On the
+    AIRULESET repo dir (where the registry lives), not the project dir. A no-op
+    when there is nothing to commit (idempotent re-run). Returns a warning
+    string on failure, None on success — the caller folds it into its detail."""
     import subprocess
-    repo_dir = str(Path(registry_path).resolve().parent)
+    repo_dir, filename = str(Path(registry_path).resolve().parent), filename or REGISTRY_FILENAME
     add_r = subprocess.run(
-        ["git", "-C", repo_dir, "add", REGISTRY_FILENAME],
+        ["git", "-C", repo_dir, "add", filename],
         capture_output=True, text=True)
     if add_r.returncode != 0:
         return ("git add failed (rc=%d): %s"
@@ -692,14 +692,14 @@ def _auto_commit_registry(registry_path):
     # --allow-empty is NOT used — only commit when the file actually changed.
     r = subprocess.run(
         ["git", "-C", repo_dir, "diff", "--cached", "--quiet",
-         "--", REGISTRY_FILENAME],
+         "--", filename],
         capture_output=True, text=True)
     if r.returncode != 0:
         # There are staged changes — commit them.
         commit_r = subprocess.run(
             ["git", "-C", repo_dir, "commit", "-q", "-m",
-             "chore: [registry] update %s via onboard-project"
-             % REGISTRY_FILENAME, "--", REGISTRY_FILENAME],
+             "chore: [registry] update %s via %s"
+             % (filename, source), "--", filename],
             capture_output=True, text=True)
         if commit_r.returncode != 0:
             return ("git commit failed (rc=%d): %s"
