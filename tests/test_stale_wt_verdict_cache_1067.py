@@ -348,12 +348,19 @@ def test_vanished_worktree_entry_is_dropped(box):
 
 
 def test_real_git_end_to_end_reaches_zero_git_calls(box, monkeypatch):
-    """No fake git: the real ``git status`` may rewrite the index on the first
-    pass (not stored), but by the third pass nothing spawns git at all."""
+    """No fake git: the real ``git status`` refreshes the aged stat info and
+    rewrites the index on the first pass, so that verdict is not stored. The
+    second pass stores it, and by the third no git is spawned at all."""
     wt = box.wts["agent-one"]
     (wt / "b.txt").write_text("new")
     _git(wt, "add", "b.txt")
     _git(wt, "commit", "-q", "-m", "c3")            # HEAD not on origin → skip
+    # A finished worktree's files are older than its index. Files written in
+    # the index's own second are "racily clean", and git status then rewrites
+    # the index on EVERY call until the clock moves on.
+    for dp, _dn, fns in os.walk(wt):
+        for fn in fns:
+            os.utime(os.path.join(dp, fn), ns=(T0 * 10**9, T0 * 10**9))
     spawned = []
     real_run = subprocess.run
 
