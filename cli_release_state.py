@@ -642,10 +642,10 @@ def merged_released_oids(root, open_numbers, is_ancestor_fn=None,
     """From the append-only PR cache, `{ticket: [introducing commits]}` for the
     OPEN tickets whose fix PR's introducing commit is reachable from
     origin/main (the release landed). #1141 slice 3 turns them into C / M by
-    deploy state. Empty on a cold cache / no open set / any error. ACCEPTED
-    COVERAGE LIMIT (#1083 review): only PRs the box OBSERVED in `main..develop`
-    are cached, so one that transited develop→main between two refreshes is
-    never found (the ticket stays I — never falsely done)."""
+    deploy state. Empty on a cold cache / no open set / any error. COVERAGE
+    LIMIT: 3-branch repos only (the two-branch path caches no PR), and only
+    PRs OBSERVED in `main..develop` (#1083 review); anything else is never
+    found, so the ticket stays I — never falsely done."""
     root = str(root or "").rstrip("/")
     open_set = {int(n) for n in (open_numbers or [])}
     if not root or not open_set:

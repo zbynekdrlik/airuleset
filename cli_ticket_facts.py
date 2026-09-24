@@ -1,35 +1,42 @@
 """cli_ticket_facts — the machine facts behind the #1141 P / M / C buckets.
 
-Two facts no label can give (#1141 slice 3), read into a
+Facts no label can give (#1141 slice 3), read into a
 `cli_ticket_state.TicketFacts` for `bucketize`:
 
-- `pipeline` (P): the tickets an OPEN pull request is linked to while the
-  checks on its latest commit are still running. ONE GraphQL query over the
-  repo's open PRs (the 100 most recently updated). A PR is linked to a ticket
-  the same way M links a merged PR (`cli_release_state._issue_refs`: a `#N`
-  in the title, a closing keyword or an `Issue: #N` line in the body), plus
-  GitHub's own `closingIssuesReferences`.
+- `open_pr` / `pipeline` (P): the tickets an OPEN pull request is linked to,
+  and the subset whose PR is in CI — PENDING checks on a non-draft PR whose
+  head commit is at most PIPELINE_MAX_AGE_S old (an EXPECTED check that never
+  reports, or a stuck run, is not "in CI": the ticket stays I). ONE GraphQL
+  query over the repo's open PRs (the 100 most recently updated). A PR is
+  linked the same way M links a merged PR (`cli_release_state._issue_refs`: a
+  `#N` in the title, a closing keyword or an `Issue: #N` line in the body),
+  plus GitHub's own `closingIssuesReferences`. Any open linked PR keeps C open.
 - `on_main`: the OPEN tickets whose fix commit is already on main
-  (`cli_release_state.merged_released_oids`), split by the deploy state the
-  repo declares (`watchdog/deploy_state`): DEPLOYED when every declared PROD
-  instance runs a version at or above the one at that commit (C), PENDING
+  (`cli_release_state.merged_released_oids` — 3-branch repos only: only their
+  PR cache records the fix commit), split by the deploy state the repo
+  declares (`watchdog/deploy_state.deploy_declaration`): DEPLOYED when every
+  declared PROD instance runs at least the version of the first main commit
+  that contains the fix (the release merge — a bump-at-cut repo such as
+  odoo-erp carries the PREVIOUS release at the fix commit itself), PENDING
   when one does not yet (M), RELEASED when the repo declares no deploy state
-  (C). A PROD version that cannot be read, or a commit version that cannot be
-  parsed, leaves the ticket out (unknown).
+  (C). An unreadable registry, a partial PROD read, an unreadable PROD
+  version or an unparseable release version leaves the ticket out (unknown).
 
 The #1067 lesson: no blocking gh call on the watchdog / footer render /
 `--count` path. Only `refresh()` reads the facts, and only the detached footer
 refresher (`tickets-status --refresh`, via `cli_ticket_route.footer`) calls
 it. It writes one cache file per repo, which `load()` reads with zero gh, so
 `core-quals`/`slice-quals` count the same buckets as the footer. Every failure
-is "unknown", never a guess: `pipeline` None, an `on_main` ticket left out, a
-stale / missing / corrupt cache → empty facts → the ticket keeps the bucket
+is "unknown", never a guess: the PR facts None, an `on_main` ticket left out,
+a stale / missing / corrupt cache → empty facts → the ticket keeps the bucket
 the labels give it (the pre-slice-3 number).
 """
 
+import calendar
 import hashlib
 import json
 import os
+import re
 import subprocess
 import time
 
@@ -37,16 +44,18 @@ import cli_release_state
 import cli_ticket_state as ts
 import statusbar
 
-FACTS_MAX_AGE_S = 600   # the quals commands trust a cache at most this old
-DEPLOY_TTL_S = 600      # a deploy-state read (HTTP to PROD) is reused this long
+FACTS_MAX_AGE_S = 600       # the quals commands trust a cache at most this old
+DEPLOY_TTL_S = 600          # a deploy-state read (HTTP to PROD) is reused this long
+PR_REUSE_S = 60             # panes of one repo share one PR read this long
+PIPELINE_MAX_AGE_S = 3 * 3600   # a head commit older than this is stuck, not P
 
-_RUNNING = ("PENDING", "EXPECTED")   # statusCheckRollup states still in CI
 _ON_MAIN_STATES = (ts.DEPLOYED, ts.RELEASED, ts.PENDING)
+_OID_RE = re.compile(r"[0-9a-f]{7,40}")
 _PR_QUERY = (
     "query($owner:String!,$name:String!){repository(owner:$owner,name:$name)"
     "{pullRequests(states:OPEN,first:100,orderBy:{field:UPDATED_AT,"
-    "direction:DESC}){nodes{number title body closingIssuesReferences("
-    "first:20){nodes{number}} commits(last:1){nodes{commit{"
+    "direction:DESC}){nodes{number title body isDraft closingIssuesReferences("
+    "first:20){nodes{number}} commits(last:1){nodes{commit{committedDate "
     "statusCheckRollup{state}}}}}}}}")
 
 
@@ -59,6 +68,15 @@ def cache_path(root, home=None):
     return statusbar.cache_dir(home) / ("facts-%s.json" % key)
 
 
+def forget(root, home=None):
+    """Drop the cached facts (a failed refresh): the quals commands then read
+    "unknown" instead of facts that no longer match the footer."""
+    try:
+        cache_path(root, home).unlink()
+    except OSError:
+        pass   # already gone / unwritable: load() ages it out anyway
+
+
 def _dig(obj, *keys):
     for key in keys:
         if not isinstance(obj, dict):
@@ -67,40 +85,63 @@ def _dig(obj, *keys):
     return obj
 
 
-def pipeline_numbers(payload):
-    """The ticket numbers an open PR in `payload` (the parsed `_PR_QUERY`
-    answer) is linked to while its latest commit's checks run; None when the
-    payload is not a readable answer (unknown, never an empty "no PR")."""
+def _epoch(stamp):
+    try:
+        return calendar.timegm(time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ"))
+    except (TypeError, ValueError):
+        return None
+
+
+def open_pr_states(payload, now=None):
+    """`{ticket: in_ci}` for every ticket an open PR in `payload` (the parsed
+    `_PR_QUERY` answer) is linked to; `in_ci` is True when one such PR's head
+    commit has PENDING checks, is not a draft and is at most
+    PIPELINE_MAX_AGE_S old (no date = fresh). None when the payload is not a
+    readable answer (unknown, never an empty "no PR")."""
+    now = time.time() if now is None else now
     nodes = _dig(payload, "data", "repository", "pullRequests", "nodes")
     if not isinstance(nodes, list):
         return None
-    out = set()
+    out = {}
     for pr in nodes:
         number = pr.get("number") if isinstance(pr, dict) else None
-        if not isinstance(number, int):
+        if not isinstance(number, int) or isinstance(number, bool):
             continue
         commits = _dig(pr, "commits", "nodes")
-        last = commits[-1] if isinstance(commits, list) and commits else None
-        if _dig(last, "commit", "statusCheckRollup", "state") not in _RUNNING:
-            continue
-        out |= cli_release_state._issue_refs(pr.get("title"), pr.get("body"),
-                                             number)
+        head = _dig(commits[-1] if isinstance(commits, list) and commits
+                    else None, "commit")
+        born = _epoch(_dig(head, "committedDate"))
+        in_ci = (_dig(head, "statusCheckRollup", "state") == "PENDING"
+                 and pr.get("isDraft") is not True
+                 and (born is None or now - born <= PIPELINE_MAX_AGE_S))
+        linked = cli_release_state._issue_refs(pr.get("title"), pr.get("body"),
+                                               number)
         closes = _dig(pr, "closingIssuesReferences", "nodes")
-        out |= {_dig(c, "number") for c in (closes or [])
-                if isinstance(_dig(c, "number"), int)}
-    return frozenset(out)
+        linked |= {_dig(c, "number") for c in (closes or [])
+                   if isinstance(_dig(c, "number"), int)}
+        for ticket in linked:
+            out[ticket] = out.get(ticket, False) or in_ci
+    return out
 
 
-def read_pipeline(slug, gh_fn):
-    """ONE GraphQL call (`gh_fn(args) -> stdout`, "" on any error) → the P
-    numbers, or None when the slug or the answer is unusable."""
+def pipeline_numbers(payload, now=None):
+    """The P tickets of `payload` (linked to an open PR in CI); None when the
+    payload is unreadable."""
+    states = open_pr_states(payload, now)
+    return None if states is None else frozenset(
+        n for n, in_ci in states.items() if in_ci)
+
+
+def read_prs(slug, gh_fn, now=None):
+    """ONE GraphQL call (`gh_fn(args) -> stdout`, "" on any error) → the
+    `open_pr_states` map, or None when the slug or the answer is unusable."""
     owner, _, name = (slug or "").partition("/")
     if not owner or not name:
         return None
     raw = gh_fn(["api", "graphql", "-f", "query=" + _PR_QUERY,
                  "-f", "owner=" + owner, "-f", "name=" + name])
     try:
-        return pipeline_numbers(json.loads(raw))
+        return open_pr_states(json.loads(raw), now)
     except (TypeError, ValueError):
         return None
 
@@ -110,8 +151,9 @@ def on_main_states(oids, instances, version_at):
     main. `oids` maps a ticket to its fix commit (or a list of them: every
     one must be live); `instances` is None when the repo declares no deploy
     state, else the `fetch_deploy_state` rows (`main_version`/`prod_version`);
-    `version_at(oid)` reads the version at a commit (None = unknown). A ticket
-    whose state cannot be told is left out: it keeps its label bucket."""
+    `version_at(oid)` reads the version that shipped the commit (None =
+    unknown). A ticket whose state cannot be told is left out: it keeps its
+    label bucket."""
     if not oids:
         return {}
     if instances is None:
@@ -163,79 +205,91 @@ def _write(path, data):
         pass
 
 
-def _facts(merged, handed, pipeline, on_main):
+def _ints(values):
+    return [n for n in values if isinstance(n, int) and not isinstance(n, bool)
+            ] if isinstance(values, list) else []
+
+
+def _facts(merged, handed, prs, on_main):
+    prs = prs or {}
     return ts.TicketFacts(merged=frozenset(int(n) for n in (merged or ())),
                           handed=dict(handed or {}),
-                          pipeline=frozenset(pipeline or ()),
-                          on_main=dict(on_main or {}))
+                          pipeline=frozenset(n for n, c in prs.items() if c),
+                          on_main=dict(on_main or {}),
+                          open_pr=frozenset(prs))
 
 
-def refresh(root, slug, numbers, *, merged=(), handed=None, home=None,
-            now=None, gh_fn=None, released_fn=None, deploy_fn=None,
-            version_at_fn=None):
+def _fresh(stamp, now, ttl):
+    return (isinstance(stamp, (int, float)) and not isinstance(stamp, bool)
+            and 0 <= now - stamp <= ttl)
+
+
+def refresh(root, slug, numbers, *, gh_fn, merged=(), handed=None, home=None,
+            now=None, released_fn=None, deploy_fn=None, version_at_fn=None):
     """Read the facts for the open `numbers` of the repo at `root`, cache them
     for the quals commands, and return the `TicketFacts` (with the given
     `merged` numbers and `handed` map). Seams: `gh_fn(args) -> stdout`,
-    `released_fn(root, numbers, slug) -> {ticket: commits}`, `deploy_fn(root)
-    -> None | {"instances", "version_file"}`, `version_at_fn(root, file, oid)`.
-    The deploy read (HTTP to PROD) runs only when a released ticket exists
-    and is reused for DEPLOY_TTL_S."""
+    `released_fn(root, numbers, slug) -> {ticket: commits}`, `deploy_fn(root,
+    slug) -> None | {"instances", "version_file"}`, `version_at_fn(root,
+    file, oid)`. The PR read is shared by the panes of one repo for
+    PR_REUSE_S; the deploy read (HTTP to PROD) runs only when a released
+    ticket exists and is reused for DEPLOY_TTL_S."""
     now = time.time() if now is None else now
     numbers = {int(n) for n in (numbers or ())}
     path = cache_path(root, home)
     prev = _read(path)
-    pipeline = (read_pipeline(slug, gh_fn or _default_gh(root))
-                if numbers else frozenset())
+    if (_fresh(prev.get("pr_ts"), now, PR_REUSE_S)
+            and isinstance(prev.get("open_pr"), list)):
+        running = set(_ints(prev.get("pipeline")))
+        prs = {n: n in running for n in _ints(prev.get("open_pr"))}
+        pr_ts = prev["pr_ts"]
+    else:
+        prs = read_prs(slug, gh_fn, now) if numbers else {}
+        pr_ts = now
     oids = (released_fn or _default_released)(root, numbers, slug) or {}
     deploy = prev.get("deploy")
-    fresh = (isinstance(deploy, dict)
-             and isinstance(deploy.get("ts"), (int, float))
-             and 0 <= now - deploy["ts"] <= DEPLOY_TTL_S)
-    if oids and not fresh:
-        deploy = {"ts": now, "decl": (deploy_fn or _default_deploy)(root)}
+    if oids and not (isinstance(deploy, dict)
+                     and _fresh(deploy.get("ts"), now, DEPLOY_TTL_S)):
+        deploy = {"ts": now, "decl": (deploy_fn or _default_deploy)(root, slug)}
     decl = deploy.get("decl") if isinstance(deploy, dict) else None
     states = on_main_states(
         oids, None if decl is None else (decl.get("instances") or []),
         lambda oid: (version_at_fn or _default_version_at)(
             root, (decl or {}).get("version_file"), oid))
-    if pipeline is not None:
-        pipeline = frozenset(pipeline) & numbers
-    _write(path, {"ts": now, "root": str(root),
-                  "pipeline": None if pipeline is None else sorted(pipeline),
-                  "on_main": {str(n): s for n, s in sorted(states.items())},
-                  "deploy": deploy if isinstance(deploy, dict) else None})
-    return _facts(merged, handed, pipeline, states)
+    prs = None if prs is None else {n: c for n, c in prs.items()
+                                    if n in numbers}
+    _write(path, {
+        "ts": now, "root": str(root), "pr_ts": pr_ts,
+        "pipeline": None if prs is None else sorted(n for n, c in prs.items()
+                                                    if c),
+        "open_pr": None if prs is None else sorted(prs),
+        "on_main": {str(n): s for n, s in sorted(states.items())},
+        "deploy": deploy if isinstance(deploy, dict) else None})
+    return _facts(merged, handed, prs, states)
 
 
 def load(root, *, merged=(), handed=None, home=None, now=None):
     """The cached facts for the repo at `root` (zero gh), when the footer
     refresher wrote them at most FACTS_MAX_AGE_S ago; otherwise only the
-    given `merged` numbers and `handed` map (P and C unknown: old buckets)."""
+    given `merged` numbers and `handed` map (P and C unknown: old buckets).
+    A corrupt value is skipped, never raised into a count."""
     now = time.time() if now is None else now
     data = _read(cache_path(root, home))
     stamp = data.get("ts")
     if not (isinstance(stamp, (int, float)) and not isinstance(stamp, bool)
             and -60 <= now - stamp <= FACTS_MAX_AGE_S):
-        return _facts(merged, handed, (), {})
-    pipeline = data.get("pipeline")
-    pipeline = [n for n in pipeline if isinstance(n, int)] if isinstance(
-        pipeline, list) else ()
-    on_main = data.get("on_main")
-    on_main = {int(k): v for k, v in on_main.items()
-               if str(k).isdigit() and v in _ON_MAIN_STATES} if isinstance(
-        on_main, dict) else {}
-    return _facts(merged, handed, pipeline, on_main)
-
-
-def _default_gh(root):
-    def run(args):
-        try:
-            r = subprocess.run(["gh", *args], cwd=root or None,
-                               capture_output=True, text=True, timeout=20)
-        except (OSError, subprocess.SubprocessError):
-            return ""
-        return r.stdout if r.returncode == 0 else ""
-    return run
+        return _facts(merged, handed, {}, {})
+    running = set(_ints(data.get("pipeline")))
+    prs = {n: n in running for n in _ints(data.get("open_pr")) + list(running)}
+    on_main = {}
+    raw = data.get("on_main")
+    for key, state in (raw.items() if isinstance(raw, dict) else ()):
+        if str(key).isdecimal() and state in _ON_MAIN_STATES:
+            try:
+                on_main[int(key)] = state
+            except ValueError:
+                continue
+    return _facts(merged, handed, prs, on_main)
 
 
 def _default_released(root, numbers, slug):
@@ -243,22 +297,55 @@ def _default_released(root, numbers, slug):
                                                   slug=slug or None)
 
 
-def _default_deploy(root):
+def _default_deploy(root, slug):
     """None when the repo declares no deploy state (a local registry read, no
-    network); else the per-instance PROD read + the declared version file."""
+    network); else the per-instance PROD read + the declared version file.
+    An unreadable registry, or fewer PROD reads than declared instances
+    (the 20 s fetch budget, a fork clone the reader cannot place), gives no
+    instances: unknown, never a partial "every instance runs it"."""
     from watchdog import deploy_state as ds
-    registry = os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(ds.__file__))), ds._REGISTRY_FILENAME)
-    project = ds._find_project(ds._load_registry(registry), root)
-    decl = project.get("deploy_state") if isinstance(project, dict) else None
-    if not isinstance(decl, dict):
+    decl, known = ds.deploy_declaration(root, slug=slug or None)
+    if not known:
+        return {"instances": [], "version_file": None}
+    if decl is None:
         return None
-    return {"instances": ds.fetch_deploy_state(root) or [],
+    declared = [i for i in decl.get("instances") or [] if isinstance(i, dict)]
+    instances = ds.fetch_deploy_state(root) or []
+    return {"instances": instances if len(instances) >= len(declared) else [],
             "version_file": decl.get("main_version_file")}
 
 
 def _default_version_at(root, version_file, oid):
-    if not version_file or not oid:
+    """The version that SHIPPED commit `oid`: the version file at the first
+    commit on origin/main's first-parent chain that contains it (the release
+    merge), or at `oid` itself when it sits on that chain. None when the oid
+    is not a commit hash or git cannot tell."""
+    if not version_file or not isinstance(oid, str) or not _OID_RE.fullmatch(oid):
         return None
+    rng = "%s..origin/main" % oid
+    chain = _git_lines(root, "log", "--first-parent", "--reverse",
+                       "--format=%H %P", rng)
+    after = _git_lines(root, "rev-list", "--ancestry-path", rng)
+    if chain is None or after is None:
+        return None
+    descendants = set(after)
+    shipped = oid   # on the chain itself, or already main's tip
+    for line in chain:
+        commit, *parents = line.split()
+        if parents and parents[0].startswith(oid):
+            break                    # the chain passes through the fix itself
+        if commit in descendants:
+            shipped = commit         # the first main commit that contains it
+            break
     from watchdog import deploy_state as ds
-    return ds.read_main_version(root, version_file, ref=oid)
+    return ds.read_main_version(root, version_file, ref=shipped)
+
+
+def _git_lines(root, *args):
+    """The stdout lines of a bounded local git read, None on any failure."""
+    try:
+        r = subprocess.run(["git", "-C", str(root), *args],
+                           capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.splitlines() if r.returncode == 0 else None

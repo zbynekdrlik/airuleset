@@ -27,9 +27,10 @@ import sys
 import time
 
 import cli_quals
+import cli_ticket_route
 import cli_ticket_state as ts
 
-_ROLES = ("review", "infra", "quality")
+_ROLES = cli_ticket_route.ROLES
 
 # The session cwd `tickets-status --explain` explains. It is set only for the
 # duration of `explain_footer`, so the ping extras key on the RAW cwd string the

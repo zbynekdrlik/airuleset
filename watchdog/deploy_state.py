@@ -390,31 +390,31 @@ def clear_stale_dedup(repo_slug, main_version, home=None):
 # PRODUCER -- the public API
 # ---------------------------------------------------------------------------
 
+def deploy_declaration(cwd, registry_path=None, slug=None):
+    """``(deploy_state dict | None, known)`` for the repo at ``cwd`` (#1141).
+    ``known`` is False when the registry reads empty (unreadable), so a caller
+    reads "unknown", never "undeclared". ``slug`` (the canonical owner/repo)
+    also matches ``github_repo`` — a fork clone's path and origin do not."""
+    registry = _load_registry(registry_path or os.path.join(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__))), _REGISTRY_FILENAME))
+    if not registry:
+        return None, False
+    project = _find_project(registry, cwd) or next((
+        e for e in registry if slug and isinstance(e, dict)
+        and str(e.get("github_repo", "")).lower() == slug.lower()), None)
+    decl = project.get("deploy_state") if isinstance(project, dict) else None
+    return (decl if isinstance(decl, dict) else None), True
+
+
 def fetch_deploy_state(cwd, registry_path=None, home=None, now_dt=None,
                        time_fn=None, budget_s=None):
     """The deploy-state producer: reads the registry, fetches versions and
     windows, returns a list of per-instance dicts for ``_deploy_watch_classify``.
-
     Returns ``None`` when the project has no ``deploy_state`` declaration
-    (undeclared -> decision-log + no action).
-    Returns ``[]`` when declared but all instances fail (fail-safe).
-
-    Each returned dict:
-      ``{instance, main_version, prod_version, window_open, window_passed}``
-    """
-    if registry_path is None:
-        # Default: the registry in the airuleset repo
-        registry_path = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            _REGISTRY_FILENAME)
-
-    registry = _load_registry(registry_path)
-    project = _find_project(registry, cwd)
-    if project is None:
-        return None
-
-    ds_decl = project.get("deploy_state")
-    if not isinstance(ds_decl, dict):
+    (undeclared -> decision-log + no action); each returned dict is
+    ``{instance, main_version, prod_version, window_open, window_passed}``."""
+    ds_decl, _known = deploy_declaration(cwd, registry_path)
+    if ds_decl is None:
         return None
 
     instances = ds_decl.get("instances")

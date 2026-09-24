@@ -585,6 +585,21 @@ class ReviewRound1(unittest.TestCase):
                 lambda oid: self.f._default_version_at(repo, "VERSION", oid)),
                 {7: ts.PENDING})
 
+    def test_a_fix_on_the_main_chain_reads_its_own_version(self):
+        # a two-branch / direct-to-main fix: a later bump on main must not be
+        # read as the version that shipped it
+        with TemporaryDirectory() as repo:
+            _git(repo, "init", "-q", "-b", "main")
+            Path(repo, "VERSION").write_text("2.0.0\n")
+            _git(repo, "add", "VERSION")
+            _git(repo, "commit", "-q", "-m", "fix #9 at 2.0.0")
+            fix = _git(repo, "rev-parse", "HEAD")
+            Path(repo, "VERSION").write_text("2.1.0\n")
+            _git(repo, "commit", "-q", "-am", "bump 2.1.0")
+            _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+            self.assertEqual(
+                self.f._default_version_at(repo, "VERSION", fix), "2.0.0")
+
     def test_an_oid_that_is_not_a_hash_is_never_passed_to_git(self):
         for bad in ("--output=/tmp/x", "HEAD", "", None, "abc g"):
             self.assertIsNone(self.f._default_version_at("/", "VERSION", bad))

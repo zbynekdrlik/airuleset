@@ -1006,9 +1006,10 @@ def cmd_slice_quals(args):
     _dep_map, _slug, _ok = _dep_wait_map_for(unhandled, root)
     print(_LIST_LEGEND)   # #1101: the obligation-column legend, ONE `#` line
     _print_issue_rows(unhandled, own_stream=user, dep_wait_map=_dep_map)
-    # (the route already role-filtered them; with known facts they are C)
-    released_rows = {n: r for n, r in {**_b["gk"], **_b["C"]}.items()
-                     if handed.get(n) == "released"}
+    # #1141: the route already role-filtered them; every C row (fix live:
+    # close it) joins, and a released row the facts call M/P stays listed.
+    released_rows = {n: r for b in ("gk", "C", "M", "P") for n, r in
+                     _b[b].items() if b == "C" or handed.get(n) == "released"}
     if released_rows:
         _print_issue_rows(released_rows, own_stream=user,
                           released_numbers=set(released_rows))
@@ -1595,3 +1596,6 @@ def cmd_core_quals(args):
     _dep_map, _slug, _ok = _dep_wait_map_for(workable, root)
     print(_LIST_LEGEND)   # #1101: the obligation-column legend, ONE `#` line
     _print_issue_rows(workable, own_stream=None, dep_wait_map=_dep_map)
+    if _b["C"]:   # #1141: C left I (fix live: close it), so --list names it
+        _print_issue_rows(_b["C"], own_stream=None,
+                          released_numbers=set(_b["C"]))

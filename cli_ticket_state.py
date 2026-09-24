@@ -61,11 +61,16 @@ _U_LABEL = {"answer": "needs-answer", "decision": "needs-decision",
             "acceptance": "needs-acceptance", "action": "needs-owner-action"}
 _U_KIND = {label: kind for kind, label in _U_LABEL.items()}
 
-# C ("done, close me") is kept open by: a returned bounce (the gatekeeper
-# asked for rework), any needs-acceptance (the close waits for the client's
-# confirmation, #627/#891 close hook) and verify-on-copy (the post-deploy
-# check on a PROD copy is still owed, #1053). #1141 slice 3.
-_C_VETO = (_BOUNCE, "needs-acceptance") + tuple(cli_quals.SUBDEV_ACTION_LABELS)
+# C ("done, close me") is kept open by these labels (#1141 slice 3): a
+# returned bounce (the gatekeeper asked for rework), any needs-acceptance (the
+# close waits for the client's confirmation, #627/#891 close hook),
+# verify-on-copy (the post-deploy check on a PROD copy is owed, #1053) and a
+# hand-off label (a fork-no-merge hand-off of a SECOND fix has no PR, so the
+# label is its only sign; C would hide it from the gatekeeper's I, #943).
+# `_c_veto` adds the facts that keep it open: another fix still pending.
+_C_VETO = ((_BOUNCE, "needs-acceptance")
+           + tuple(cli_quals.SUBDEV_ACTION_LABELS)
+           + tuple(cli_quals.MAINTAINER_ACTION_LABELS))
 _C_REASON = {
     DEPLOYED: ("the fix is on main and every PROD instance runs it: done, "
                "close it (#1141)"),
@@ -98,24 +103,27 @@ class Facts:
     False, True (handed off to the gatekeeper) or the truthy "released" (merged
     and released, done for the stream, #1009); read it TRUTHY, never `is True`.
     `pipeline`: an open linked PR's checks are still running (#1141 slice 3).
+    `open_pr`: any open linked PR, in any state (it keeps C open).
     `on_main`: "" (not on main, or unknown), DEPLOYED, RELEASED or PENDING.
     All defaults = the facts are unknown: the label route and nothing else."""
     merged: bool = False
     handed: Union[bool, str] = False
     pipeline: bool = False
     on_main: str = ""
+    open_pr: bool = False
 
 
 @dataclass(frozen=True)
 class TicketFacts:
     """The facts of a whole row set, as `bucketize` reads them (#1141 slice
     3): the merged numbers, the `handed` map (keyed like the rows), the numbers
-    with a linked PR in CI, and the on-main state by number. Empty = unknown,
-    which reproduces the label buckets (+ gk) of the earlier slices."""
+    with a linked PR in CI, with any open linked PR, and the on-main state by
+    number. Empty = unknown: the label buckets (+ gk) of the earlier slices."""
     merged: frozenset = frozenset()
     handed: dict = field(default_factory=dict)
     pipeline: frozenset = frozenset()
     on_main: dict = field(default_factory=dict)
+    open_pr: frozenset = frozenset()
 
     def of(self, number):
         """The `Facts` of ticket `number` (a non-numeric key has none)."""
@@ -126,7 +134,8 @@ class TicketFacts:
         return Facts(merged=n in self.merged,
                      handed=self.handed.get(number) or False,
                      pipeline=n in self.pipeline,
-                     on_main=self.on_main.get(n, ""))
+                     on_main=self.on_main.get(n, ""),
+                     open_pr=n in self.open_pr)
 
 
 def _names(labels):
@@ -370,6 +379,23 @@ def _partition(labels, box):
     return "I", "no parking label: workable"
 
 
+def _c_veto(labels, names, facts):
+    """What keeps a live fix from reading "done, close it", or "" (#1141
+    slice 3, review round 1): unreadable labels (the vetoes cannot be
+    checked), a `_C_VETO` label, or another fix still pending — merged but
+    not released, in CI, or any open linked PR."""
+    if not isinstance(labels, (list, tuple)):
+        return "unreadable labels"
+    for label in _C_VETO:
+        if label in names:
+            return label
+    if facts.merged:
+        return "another fix merged, not yet released"
+    if facts.pipeline or facts.open_pr:
+        return "an open linked PR"
+    return ""
+
+
 def classify(row, facts=None, box=None):
     """Return `(bucket, reason)` for ONE ticket row (a gh `--json` dict with a
     `labels` list; any other shape is handled on the safe side). Total: every
@@ -381,8 +407,9 @@ def classify(row, facts=None, box=None):
     1. the label partition (`_partition`): an owner question is decided here
        FIRST (U, or HIDDEN on the full-authority box) and no fact moves it;
     2. C — the fix is on main and live (`facts.on_main` DEPLOYED, or RELEASED
-       when the repo declares no deploy state), unless `_C_VETO` keeps it
-       (#1141 slice 3);
+       when the repo declares no deploy state), unless `_c_veto` keeps it
+       open: a `_C_VETO` label, unreadable labels, or another fix still
+       pending (merged, in CI, or any open linked PR) (#1141 slice 3);
     3. P — an open linked PR's checks are still running;
     4. M — merged to the integration branch (#1083) or on main but not on
        PROD yet (PENDING); `prio:bounce` keeps it in I (rework was asked for).
@@ -398,11 +425,11 @@ def classify(row, facts=None, box=None):
         return bucket, reason
     names = _names(labels)
     if facts.on_main in (DEPLOYED, RELEASED):
-        veto = [lb for lb in _C_VETO if lb in names]
+        veto = _c_veto(labels, names, facts)
         if not veto:
             return "C", _C_REASON[facts.on_main]
         reason += ("; the fix is on main and live, but %s keeps it open "
-                   "(#1141)" % veto[0])
+                   "(#1141)" % veto)
     if facts.pipeline:
         return ("P", "an open linked PR is in CI: waits for its checks "
                      "(#1141)")

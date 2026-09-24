@@ -22,7 +22,7 @@ import sys
 import cli_ticket_facts
 import cli_ticket_state as ts
 
-_ROLES = ("review", "infra", "quality")
+ROLES = ("review", "infra", "quality")   # the --role windows (#998/#1074)
 
 
 def footer(rows, root, slug, merged, own_stream=None, *, handed=None,
@@ -30,12 +30,14 @@ def footer(rows, root, slug, merged, own_stream=None, *, handed=None,
     """The footer refresher's buckets and facts. The facts are read over the
     WHOLE row set (so the cache the quals commands read serves every role
     window of this repo), then `role_filter(rows) -> rows` narrows the rows.
-    A facts failure is logged and read as "unknown" (the old buckets)."""
+    A facts failure is logged and read as "unknown" (the old buckets), and
+    the cached facts are dropped so the quals commands read "unknown" too."""
     try:
         facts = cli_ticket_facts.refresh(root, slug, rows, merged=merged,
                                          handed=handed, gh_fn=gh_fn)
     except Exception as e:  # noqa: BLE001 — never break the footer refresh
         sys.stderr.write("tickets-status: ticket facts skipped (%s)\n" % e)
+        cli_ticket_facts.forget(root)
         facts = ts.TicketFacts(merged=frozenset(int(n) for n in merged or ()),
                                handed=dict(handed or {}))
     if role_filter is not None:
@@ -49,7 +51,7 @@ def quals(rows, root, box, *, extra=None, role=None, slug=None, handed=None):
     A `--extra` (bounce-seed) query is a different axis: no partition and no
     facts, its whole set is I (a handed row is gk on the slice box)."""
     import cli_quals_cmd
-    if role in _ROLES:
+    if role in ROLES:
         rows = cli_quals_cmd._apply_role_filter(rows, root, role, slug=slug)
     handed = handed or {}
     if extra:
