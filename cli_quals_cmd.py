@@ -774,10 +774,10 @@ def cmd_slice_quals(args):
              gatekeeper — `ready-for-review`/`needs-gatekeeper`, unless
              overridden by `prio:bounce` — no longer counts), via the SAME
              shared derivation (`_slice_mine_and_handed`) `cmd_tickets_
-             status`'s footer uses — the #367-established consistency guard,
-             so the footer's `I N` and this stop-proof cannot silently
-             drift apart. Only for the PLAIN (no `--extra`) query — see
-             `--extra` below.
+             status`'s footer uses — the #367-established consistency guard:
+             since #1141 it prints the footer's `I N` + `C N` (a live fix is
+             owed: close it), never a drifting second count. Only for the
+             PLAIN (no `--extra`) query — see `--extra` below.
     --list:  prints `number<TAB>createdAt<TAB>action<TAB>title`, one per open
              non-skip UNHANDLED issue in the slice, OLDEST first (the bounce
              lane picks the oldest — no client-side sort needed). `action` is
@@ -998,11 +998,11 @@ def cmd_slice_quals(args):
         _print_audit_rows(unhandled, own_stream=user, dep_wait_map=_dep_map)
         return
     # --list: OLDEST-first workable rows, dep-aware action column (#993 item 7),
-    # THEN the merged+released rows tagged `released` (#1009) — DONE for the
-    # stream (release/close are the gk's), out of the workable `--count`/I but
-    # surfaced so a stream misroute is visible. They left `unhandled` via the
-    # truthy `handed=="released"`, and the picker gates on `--count-dispatchable`
-    # (workable ∧ ¬dep-wait), so a released row can never be selected. Printed as
+    # THEN the rows tagged `released`: the C rows (#1141, fix live: owed, so
+    # they count in --count) and the #1009 gk-held released rows (not counted),
+    # surfaced so a stream misroute is visible. Neither is in `unhandled`, and
+    # the picker gates on `--count-dispatchable` (workable ∧ ¬dep-wait), so a
+    # released row is never selected as lane work. Printed as
     # a trailing block, not interleaved, so the workable candidates read first.
     _dep_map, _slug, _ok = _dep_wait_map_for(unhandled, root)
     print(_LIST_LEGEND)   # #1101: the obligation-column legend, ONE `#` line

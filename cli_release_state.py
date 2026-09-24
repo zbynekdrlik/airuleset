@@ -97,8 +97,7 @@ def _reset_memo():
 
 
 def merged_unreleased_partial(root):
-    """Why the M set this process computed for `root` is partial, or "" —
-    `--explain` prints it (#1141 ruling 3: an accepted known limit)."""
+    """Why this process's M set for `root` is partial, or "" (#1141 rule 3)."""
     return _PARTIAL.get(str(root or "").rstrip("/"), "")
 
 
@@ -484,6 +483,7 @@ def _compute_two_branch(root, git_full_fn, prefix, ref_exists_fn):
             "merged-unreleased: %d commits in %s..%s range "
             "(main %s, dev %s) — stale/oversized range, M hidden\n"
             % (len(commits), main_ref, dev_ref, d_main or "?", d_dev or "?"))
+        _PARTIAL[root] = "M hidden: %d commits in range" % len(commits)
         return frozenset()
     issues = set()
     for oid, subj, body in commits:
@@ -494,6 +494,7 @@ def _compute_two_branch(root, git_full_fn, prefix, ref_exists_fn):
 
 def _compute_merged_unreleased(root, git_fn, git_full_fn, pr_meta_fn, cache_path,
                                slug, slug_fn, remote_fn, ref_exists_fn):
+    _PARTIAL[root] = ""    # set below when this sweep is truncated
     if remote_fn is None:
         remote_fn = _default_remote_slug
     if ref_exists_fn is None:

@@ -22,8 +22,9 @@ Facts no label can give (#1141 slice 3), read into a
   (C). An unreadable registry, a partial PROD read, an unreadable PROD
   version or an unparseable release version leaves the ticket out (unknown).
 - `reopened` (ruling 1): for the live (C) candidates only, ONE batched
-  GraphQL call reads `stateReason`; REOPENED keeps C open, and an unreadable
-  answer is unknown (no C).
+  GraphQL call reads `stateReason` on every refresh (never reused); REOPENED
+  keeps C open, and an unreadable answer is unknown (no C). The quals path
+  sees a reopen at the next footer refresh (its cache is at most 10 min old).
 
 The #1067 lesson: no blocking gh call on the watchdog / footer render /
 `--count` path. Only `refresh()` reads the facts, and only the detached footer
@@ -303,14 +304,12 @@ def refresh(root, slug, numbers, *, gh_fn, merged=(), handed=None, home=None,
         oids, None if decl is None else (decl.get("instances") or []),
         lambda oid: (version_at_fn or _default_version_at)(
             root, (decl or {}).get("version_file"), oid))
-    live = {n for n, st in states.items() if st in (ts.DEPLOYED, ts.RELEASED)}
-    checked = set(_ints(prev.get("reopened_checked")))
-    if (live and _fresh(prev.get("reopened_ts"), now, PR_REUSE_S)
-            and isinstance(prev.get("reopened"), list) and live <= checked):
-        reopened, r_ts = frozenset(_ints(prev["reopened"])), prev["reopened_ts"]
-    else:
-        reopened = read_reopened(slug, gh_fn, live)
-        checked, r_ts = live, (now if live and reopened is not None else None)
+    # Read every refresh, never reused: a close+reopen by the self-close guard
+    # inside any reuse window would read C again (delta re-review). It runs
+    # only when a live (C) candidate exists.
+    reopened = read_reopened(
+        slug, gh_fn, [n for n, st in states.items()
+                      if st in (ts.DEPLOYED, ts.RELEASED)])
     _write(path, {
         "ts": now, "root": str(root), "pr_ts": pr_ts,
         "pipeline": None if prs is None else sorted(n for n, c in prs.items()
@@ -318,7 +317,6 @@ def refresh(root, slug, numbers, *, gh_fn, merged=(), handed=None, home=None,
         "open_pr": None if prs is None else sorted(prs),
         "on_main": {str(n): s for n, s in sorted(states.items())},
         "reopened": None if reopened is None else sorted(reopened),
-        "reopened_checked": sorted(checked), "reopened_ts": r_ts,
         "deploy": deploy if isinstance(deploy, dict) else None})
     return _facts(merged, handed, None if prs is None else {
         n: c for n, c in prs.items() if n in numbers}, states, reopened)

@@ -397,7 +397,8 @@ def _c_veto(labels, names, facts):
         if label in names:
             return label
     if facts.reopened:
-        return "stateReason REOPENED (reopened after the fix went live)"
+        return ("stateReason REOPENED (the ticket was reopened; GitHub keeps "
+                "that flag while it is open)")
     if facts.merged:
         return "another fix merged, not yet released"
     if facts.pipeline or facts.open_pr:
