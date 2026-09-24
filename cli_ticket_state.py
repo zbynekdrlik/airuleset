@@ -9,16 +9,20 @@ behind the sub-dev `gk` count. The `--explain` surfaces of `tickets-status`,
 ticket, so "why is I 5" is answered by the tool, not by a session decoding
 labels. This module stays pure: no I/O, no process state.
 
-Slice 1 (this module's first version) is a ZERO-behaviour-change refactor: the
-precedence below reproduces the pre-#1141 label partition exactly (locked by
-`tests/test_ticket_state_classify_1141.py`, a frozen-oracle parity test over
-every label combination). A contradictory label set is only REPORTED
-(`conflicts()`); it does not change the bucket. The precedence fixes, the P/C
-buckets and the machine facts are later slices of #1141.
+Slice 1 was a ZERO-behaviour-change refactor of the pre-#1141 label
+partition (locked by `tests/test_ticket_state_classify_1141.py`, a frozen-oracle
+parity test over every label combination). Slice 2 changed exactly two
+precedences (the oracle there lists the moved cases): an owner question beats a
+hand-off label, and a FOREIGN stream's owner question is `HIDDEN` on the
+full-authority box (`_question_route`). A contradictory label set is also
+REPORTED (`conflicts()`). The P/C buckets and the machine facts are later
+slices of #1141.
 
 Buckets (`BUCKETS`): `I` workable, `U` the owner's court, `W` a third party,
 `M` merged to the integration branch but not yet on main, `gk` handed off to
-the gatekeeper (a reduced-authority box only).
+the gatekeeper (a reduced-authority box only). `HIDDEN` is the one verdict
+outside BUCKETS: the row is counted in NO bucket on this box (it counts on the
+box of the stream that owns it).
 """
 
 from dataclasses import dataclass
@@ -31,6 +35,7 @@ from typing import Optional, Union
 import cli_quals
 
 BUCKETS = ("I", "M", "U", "W", "gk")
+HIDDEN = "hidden"   # #1141 slice 2: counted on the owning stream's box, not here
 
 # The owner-question labels (everything user-waiting except needs-acceptance,
 # which is a client-message approval with its own #526/#622 routing).
@@ -46,6 +51,7 @@ _U_REASON = {
 }
 _U_LABEL = {"answer": "needs-answer", "decision": "needs-decision",
             "acceptance": "needs-acceptance", "action": "needs-owner-action"}
+_U_KIND = {label: kind for kind, label in _U_LABEL.items()}
 
 
 @dataclass(frozen=True)
@@ -89,11 +95,103 @@ def leaves_to_merged(labels):
             and _BOUNCE not in _names(labels))
 
 
+def owner_question(labels):
+    """The owner question a row carries, or "" (#1141 slice 2) — the ONE
+    predicate the partition, the `--waiting` reason tag, the `queued` /
+    `no-question!` display flags and (via `classify`) the #948 question-map
+    supplement share.
+
+    Found by the row's OWN labels, answer > decision > action first, so a
+    co-present `needs-acceptance` can never turn an owner question into a
+    "sent acceptance" (W). Then `acceptance` for an UNSENT `needs-acceptance`
+    (no `ops-wait`, no `prio:bounce`): the owner still has to approve the
+    client message, and that beats every hand-off label (owner ruling in the
+    #1141 design comment). `prio:bounce` still overrides it (the stream's own
+    rework, #507/#313); a SENT acceptance is a third party's (`_partition`)."""
+    names = _names(labels)
+    for label in _OWNER_QUESTION_LABELS:
+        if label in names:
+            return _U_KIND[label]
+    if ("needs-acceptance" in names and _BOUNCE not in names
+            and not cli_quals._row_is_ops_wait(labels)):
+        return "acceptance"
+    return ""
+
+
+def _stream_has_live_box(owner):
+    """True when stream `owner` runs a box that counts its own U (fleet
+    data): not a webterm observer account, and at least one host entry that
+    is not paused. A stream with no entry yet (or only paused ones) is not
+    live, so its question is never hidden and counted nowhere."""
+    import cli_fleet
+    return (owner not in cli_fleet.WEBTERM_OBSERVER_USERS
+            and any(h.get("user") == owner and not cli_fleet.is_paused(h)
+                    for h in cli_fleet.REMOTE_HOSTS))
+
+
+def _question_route(labels, kind, box):
+    """Route a row carrying owner question `kind` (#1141 slice 2).
+    - Reduced-authority box, FOREIGN row: its slice-1 route. Rule 2 is scoped
+      to the full-authority box, and rule 1 puts a question in U on the box
+      of the stream that OWNS it: a foreign answer/decision/action is #654
+      action-only I; a foreign acceptance in a hand-off state stays in the
+      hand-off flow (I, counted gk when handed); a bare one stays U. One
+      consequence of reading the question by its own labels: a foreign
+      needs-owner-action + needs-acceptance is now #654 I here (slice 1 read
+      it as an acceptance, which #654 exempted).
+    - Full-authority box, FOREIGN row: HIDDEN — counted in U on the owning
+      stream's box (reverses #654 for questions). If that stream has no live
+      box (paused, observer), nothing else would count it, so it stays U here.
+    - Everything else is the owner's court here: U, naming the hand-off label
+      the question beats."""
+    names = _names(labels)
+    owner = cli_quals._stream_owner_of(labels)
+    foreign = bool(owner) and owner != (box.own_stream or "")
+    beaten = [lb for lb in cli_quals.MAINTAINER_ACTION_LABELS if lb in names]
+    if foreign and box.kind == "slice":
+        if kind != "acceptance":
+            return ("I", "%s belongs to stream %s, whose own box asks the "
+                         "owner; here it is action-only work (#654)"
+                    % (_U_LABEL[kind], owner))
+        if beaten:
+            return ("I", "needs-acceptance of stream %s in the hand-off state "
+                         "%s: on this box it stays in the hand-off flow "
+                         "(#507/#1130)" % (owner, beaten[0]))
+    elif foreign and _stream_has_live_box(owner):
+        return (HIDDEN, "%s is stream %s's owner question: counted in U on "
+                        "that stream's box, not on this full-authority box "
+                        "(#1141)" % (_U_LABEL[kind], owner))
+    elif foreign:
+        return ("U", "%s; stream %s has no live box to count it, so it is "
+                     "counted here (#1141)" % (_U_REASON[kind], owner))
+    if beaten:
+        return ("U", "%s; the owner question beats the hand-off label %s "
+                     "(#1141)" % (_U_REASON[kind], beaten[0]))
+    return "U", _U_REASON[kind]
+
+
 def _partition(labels, box):
-    """The pre-#1141 label partition, one branch per rule, each with its
-    reason. Its precedence documentation below is the former
+    """The label partition, one branch per rule, each with its reason. Its
+    precedence documentation below is the former
     `cli_quals._partition_workable` docstring, moved VERBATIM (#1141) —
     that function is now a thin wrapper over `classify()`.
+
+    #1141 slice 2 SUPERSEDES two parts of that history (owner ruling in the
+    #1141 design comment; live cases odoo-erp 8058 and 8180):
+    - The #507/#1130 hand-off override no longer takes an UNSENT
+      needs-acceptance out of U: an owner question beats every hand-off label
+      (`owner_question`, which also ranks answer/decision/action above a
+      co-present acceptance). `prio:bounce` still overrides an acceptance,
+      and a sent acceptance with a hand-off keeps the #943 route.
+    - The #654 paragraph at the end: on the FULL-authority box a foreign
+      stream's owner question (answer/decision/action AND an unsent
+      acceptance) is now `HIDDEN` — neither I nor U — because it counts in U
+      on that stream's own box (a stream with no live box keeps it in U
+      here). On a reduced-authority box #654 is unchanged.
+    - The "PATHOLOGICAL row" paragraph: an answer/decision/action is now found
+      by its own label before a co-present acceptance (`owner_question`), so
+      needs-acceptance + needs-owner-action + ops-wait is U, not W.
+    See `_question_route`.
 
     --- moved verbatim from `_partition_workable` ---
 
@@ -191,17 +289,9 @@ def _partition(labels, box):
     branch on the gk box (the real leak path is answer/decision/action carrying a
     gk queue label, which have no gk-override). `stream:core`/bare/unreadable →
     `_stream_owner_of` == "" → not foreign → stays U (the box's own court)."""
-    if cli_quals._row_is_user_waiting(labels):
-        kind = cli_quals._user_waiting_reason(labels)
-        owner = cli_quals._stream_owner_of(labels)
-        if kind != "acceptance" and owner and owner != (box.own_stream or ""):
-            return ("I", "%s belongs to stream %s, whose own box asks the owner; "
-                         "here it is action-only work (#654)"
-                    % (_U_LABEL[kind], owner))
-        if kind == "acceptance" and cli_quals._row_is_ops_wait(labels):
-            return ("W", "needs-acceptance + ops-wait: the client thread was "
-                         "sent; waiting on the client (#526)")
-        return "U", _U_REASON[kind]
+    kind = owner_question(labels)
+    if kind:   # #1141 slice 2: the question is decided before any hand-off
+        return _question_route(labels, kind, box)
     names = _names(labels)
     handoff = [lb for lb in cli_quals.MAINTAINER_ACTION_LABELS if lb in names]
     verify = [lb for lb in cli_quals.SUBDEV_ACTION_LABELS if lb in names]
@@ -212,6 +302,9 @@ def _partition(labels, box):
         if handoff:
             return ("I", "%s beats ops-wait: only the gatekeeper box can act "
                          "on a hand-off (#943)" % handoff[0])
+        if "needs-acceptance" in names:
+            return ("W", "needs-acceptance + ops-wait: the client thread was "
+                         "sent; waiting on the client (#526)")
         if verify:
             return ("I", "%s beats ops-wait: only the owning stream can verify "
                          "the deployed change (#1053)" % verify[0])
@@ -219,12 +312,10 @@ def _partition(labels, box):
     if not isinstance(labels, (list, tuple)):
         return "I", "labels unreadable: kept workable (the safe side)"
     if "needs-acceptance" in names:
-        # Not user-waiting ⇒ an override label is present today; the fallback
-        # keeps classify() total even if that predicate ever changes.
-        ov = [lb for lb in cli_quals.NEEDS_ACCEPTANCE_GK_OVERRIDE_LABELS
-              if lb in names] or ["an override label"]
-        return ("I", "needs-acceptance is overridden by %s: back in the "
-                     "hand-off/bounce flow (#507/#1130)" % ov[0])
+        # Not an owner question and not ops-wait ⇒ prio:bounce overrides it
+        # (#1141 slice 2: the hand-off labels no longer do).
+        return ("I", "needs-acceptance is overridden by prio:bounce: "
+                     "returned for the stream's rework (#507/#313)")
     if _BOUNCE in names:
         return "I", "prio:bounce: returned by the gatekeeper for rework (#313)"
     if handoff:
@@ -239,7 +330,9 @@ def _partition(labels, box):
 def classify(row, facts=None, box=None):
     """Return `(bucket, reason)` for ONE ticket row (a gh `--json` dict with a
     `labels` list; any other shape is handled on the safe side). Total: every
-    input gets exactly one bucket from BUCKETS and a one-line reason.
+    input gets exactly one verdict — a bucket from BUCKETS, or `HIDDEN` (a
+    foreign stream's owner question on the full-authority box, counted on that
+    stream's box, #1141 slice 2) — and a one-line reason.
 
     Order (first match wins): the label partition (`_partition`, I/U/W) →
     `facts.merged` moves an I/W row that `leaves_to_merged` to M (#1083) →
@@ -266,7 +359,7 @@ def classify(row, facts=None, box=None):
 
 def conflicts(labels):
     """The contradictory label combinations on one ticket, one line each —
-    REPORTED by `--explain`, never used to re-classify (slice 1). These are
+    REPORTED by `--explain`, never used to re-classify. These are
     the four families the #1141 analysis measured as routinely open for hours:
     an owner question + a hand-off, ops-wait + a hand-off, verify-on-copy + a
     hand-off, and ops-wait + an owner question."""
@@ -305,13 +398,16 @@ def explain_lines(buckets, box, merged=(), handed=None, supplement=(),
     `supplement` = question-map U rows the slice search misses (#948).
     `extras` = `(bucket, weight, reason, text)` footer contributions that are
     not ticket rows (ticketless ❓ pings in U, the task-hygiene A count in I);
-    each prints as a `-` row and adds `weight` to its bucket's total."""
+    each prints as a `-` row and adds `weight` to its bucket's total.
+    `buckets[HIDDEN]` = rows this box counts NOWHERE (#1141 slice 2): each
+    prints with its reason, and the totals line gains ` hidden=N` when N > 0,
+    so a ticket is never silently missing from the explanation."""
     merged = {int(n) for n in (merged or ())}
     handed = handed or {}
     supplement = set(supplement or ())
     totals = {b: len(buckets.get(b) or {}) for b in BUCKETS}
     out = []
-    for bucket in BUCKETS:
+    for bucket in BUCKETS + (HIDDEN,):
         rows = buckets.get(bucket) or {}
         for number in sorted(rows, key=int):
             row = rows[number]
@@ -329,12 +425,16 @@ def explain_lines(buckets, box, merged=(), handed=None, supplement=(),
             if got != bucket:
                 out.append("  mismatch: classify() says %s — a parity break, "
                            "report it on #1141" % got)
+            where = ("not counted on this box" if bucket == HIDDEN
+                     else "counted as %s" % bucket)
             for line in conflicts(_labels_of(row)):
-                out.append("  conflict: %s; counted as %s by today's "
-                           "precedence" % (line, bucket))
+                out.append("  conflict: %s; %s by today's precedence"
+                           % (line, where))
     for bucket, weight, reason, text in extras:
         out.append("-\t%s\t%s\t%s" % (bucket, reason, _cell(text)))
         totals[bucket] += weight
+    hidden = len(buckets.get(HIDDEN) or {})
     out.append("# explain: " + " ".join(
-        "%s=%d" % (b, totals[b]) for b in BUCKETS))
+        "%s=%d" % (b, totals[b]) for b in BUCKETS)
+        + (" %s=%d" % (HIDDEN, hidden) if hidden else ""))
     return out

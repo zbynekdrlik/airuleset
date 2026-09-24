@@ -73,13 +73,21 @@ def _emit(buckets, box, merged_set, handed=None, supplement=()):
 
 
 def explain_core(extra, *, workable, merged_rows, waiting, ops_wait,
-                 merged_set):
+                 merged_set, rows=None):
     """`core-quals --explain`: the full-authority box. It has no gk bucket,
     because it actions its own hand-offs. Receives the SAME buckets `--count`
-    uses, after the role filter and the M split."""
+    uses, after the role filter and the M split.
+
+    `rows` = the whole obligation set before the partition. The rows the
+    classifier HIDES on this box (a foreign stream's owner question, #1141
+    slice 2) are in no bucket, so they are picked from `rows` and listed with
+    their reason. They are not role-filtered: they count in no window here."""
     _refuse_extra(extra)
+    box = ts.Box()
+    hidden = {n: r for n, r in (rows or {}).items()
+              if ts.classify(r, None, box)[0] == ts.HIDDEN}
     _emit({"I": workable, "M": merged_rows, "U": waiting, "W": ops_wait,
-           "gk": {}}, ts.Box(), merged_set)
+           "gk": {}, ts.HIDDEN: hidden}, box, merged_set)
 
 
 def explain_slice(extra, root, user, role, slug, *, rows, handed, workable,

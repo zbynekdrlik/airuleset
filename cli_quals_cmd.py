@@ -341,7 +341,7 @@ def _queued_acceptance_numbers(waiting, root):
     import airuleset
     present = airuleset._acceptance_present_set(waiting, cwd=root)
     return {n for n, row in waiting.items()
-            if airuleset._user_waiting_reason(
+            if __import__("cli_ticket_state").owner_question(
                 row.get("labels") if isinstance(row, dict) else None) == "acceptance"
             and n not in present}
 
@@ -981,7 +981,7 @@ def cmd_slice_quals(args):
         _waiting_merged = dict(waiting)
         _waiting_merged.update(_qmap_extra)
         _print_issue_rows(_waiting_merged, own_stream=user,
-                          reason_fn=airuleset._user_waiting_reason,
+                          reason_fn=__import__("cli_ticket_state").owner_question,
                           flag_numbers=airuleset._no_question_flagged(
                               _waiting_merged, cwd=root),
                           queued_numbers=_queued_acceptance_numbers(
@@ -1549,7 +1549,7 @@ def cmd_core_quals(args):
     if want_explain:   # #1141: the SAME buckets --count uses (__import__: size budget)
         return __import__("cli_ticket_explain").explain_core(
             extra, workable=workable, merged_rows={} if extra else _merged_rows,
-            waiting=waiting, ops_wait=ops_wait, merged_set=_merged_set)
+            waiting=waiting, ops_wait=ops_wait, merged_set=_merged_set, rows=seen)
     if want_snapshot:
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition
         # (own_stream=None: a full-authority box owns no stream).
@@ -1573,7 +1573,7 @@ def cmd_core_quals(args):
         # #622: an undelivered bare acceptance is re-tagged `queued` and is
         # no-question!-exempt (the #606 queue is a legit reason for non-delivery).
         _print_issue_rows(waiting, own_stream=None,
-                          reason_fn=airuleset._user_waiting_reason,
+                          reason_fn=__import__("cli_ticket_state").owner_question,
                           flag_numbers=airuleset._no_question_flagged(waiting, cwd=root),
                           queued_numbers=_queued_acceptance_numbers(waiting, root))
         _print_ping_rows(_waiting_ping_entries())

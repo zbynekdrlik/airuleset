@@ -50,10 +50,12 @@ class PartitionHelpers(unittest.TestCase):
         self.assertTrue(airuleset._row_is_user_waiting(_labels("needs-acceptance")))
 
     def test_needs_acceptance_with_ready_for_review_is_not_user_waiting(self):
-        # #507 precedence preserved: a needs-acceptance ticket that is ALSO a
-        # genuine re-hand-off (ready-for-review / needs-gatekeeper) is back in the
-        # gatekeeper's court -> stays workable so the gk/handed logic counts it,
-        # NEVER U.
+        # The #507 PREDICATE still reads False for a needs-acceptance ticket
+        # that is ALSO a re-hand-off (ready-for-review / needs-gatekeeper); it
+        # now feeds only the #1083 M veto. The ROUTING moved to
+        # cli_ticket_state.owner_question, where #1141 slice 2 (owner ruling:
+        # "an owner question beats any hand-off label") puts this row in U —
+        # locked in test_ticket_state_precedence_1141.
         self.assertFalse(airuleset._row_is_user_waiting(
             _labels("needs-acceptance", "ready-for-review")))
         self.assertFalse(airuleset._row_is_user_waiting(
@@ -114,8 +116,11 @@ class PartitionHelpers(unittest.TestCase):
 
     def test_bare_needs_acceptance_partitions_into_user_waiting(self):
         # #512: the ONE derivation routes a bare needs-acceptance row to the
-        # user_waiting bucket (leaves workable), while a re-hand-off / bounce
-        # variant stays workable (#507 precedence).
+        # user_waiting bucket (leaves workable), while a bounce variant stays
+        # workable (#507 precedence). RE-PINNED by #1141 slice 2 (owner ruling
+        # in the #1141 design comment: "an owner question beats any hand-off
+        # label"): the UNSENT needs-acceptance + ready-for-review row #2 is now
+        # the owner's court too (U), no longer overridden into workable.
         rows = {
             1: {"number": 1, "labels": _labels("needs-acceptance")},
             2: {"number": 2, "labels": _labels("needs-acceptance", "ready-for-review")},
@@ -123,8 +128,8 @@ class PartitionHelpers(unittest.TestCase):
             4: {"number": 4, "labels": _labels("bug")},
         }
         workable, waiting = airuleset._partition_user_waiting(rows)
-        self.assertEqual(set(waiting), {1})
-        self.assertEqual(set(workable), {2, 3, 4})
+        self.assertEqual(set(waiting), {1, 2})
+        self.assertEqual(set(workable), {3, 4})
 
     def test_user_waiting_reason_maps_each_label(self):
         self.assertEqual(airuleset._user_waiting_reason(_labels("needs-answer")), "answer")

@@ -101,20 +101,18 @@ class OwnerActionRoutesToU(unittest.TestCase):
             self.assertEqual(set(ops_wait), set(),
                              "#601: %r must not land in W" % (combo,))
 
-    def test_acceptance_precedence_dominates_a_co_present_owner_action(self):
-        # The lowest-precedence design honestly documented (review A 🟡): a
-        # PATHOLOGICAL row carrying BOTH needs-acceptance AND needs-owner-action
-        # follows the higher-precedence acceptance routing, NOT action's — so
-        # needs-acceptance + needs-owner-action + ops-wait reads reason
-        # `acceptance` and routes to W by the acceptance-scoped override. This is
-        # the byte-exact preservation of #526 (action is additive, never a
-        # regression of an existing label's routing). The combo is contradictory
-        # and never occurs in practice; the test pins the documented behavior.
+    def test_owner_action_beats_a_co_present_sent_acceptance(self):
+        # RE-PINNED by #1141 slice 2 (owner ruling in the #1141 design
+        # comment: a row with needs-owner-action "lands in U"): the ROUTING
+        # finds the owner question by its own labels, so needs-acceptance +
+        # needs-owner-action + ops-wait is U, no longer W via the acceptance
+        # display precedence. `_user_waiting_reason` itself (below) still
+        # reads acceptance first; the `--waiting` tag reads owner_question.
         rows = {5: _row(5, "needs-acceptance", "needs-owner-action", "ops-wait")}
         workable, user_waiting, ops_wait = airuleset._partition_workable(rows)
-        self.assertEqual(set(ops_wait), {5},
-                         "acceptance (higher precedence) dominates a co-present "
-                         "owner-action → W, not U (#601 lowest-precedence design)")
+        self.assertEqual(set(user_waiting), {5},
+                         "#1141 slice 2: an owner action is the owner's "
+                         "court even beside a sent acceptance")
         self.assertEqual(
             airuleset._user_waiting_reason(
                 _labels("needs-acceptance", "needs-owner-action")), "acceptance",

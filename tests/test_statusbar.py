@@ -832,7 +832,13 @@ class RefreshCLI(unittest.TestCase):
                 cache.get("user_waiting"), 1,
                 "#622: #1 (bare needs-acceptance) is queued on the owner → U N")
 
-    def test_refresh_a_needs_acceptance_ticket_still_labeled_ready_for_review_stays_gk(self):
+    def test_refresh_unsent_acceptance_with_ready_for_review_is_U_not_gk(self):
+        # RE-PINNED by #1141 slice 2 (owner ruling in the #1141 design
+        # comment: "an owner question beats any hand-off label"): an UNSENT
+        # needs-acceptance that also carries ready-for-review is the owner's
+        # court (U) on its owning box, no longer gk. The #507 concern below
+        # still holds in its new form: the labeled hand-off is never DROPPED,
+        # it is counted in U and still recorded in gk_numbers.
         # #507 adversarial defense: the needs-acceptance suppression must
         # NEVER drop a ticket that is GENUINELY still parked with the
         # gatekeeper. A genuine (re-)hand-off carries the `ready-for-review`
@@ -872,17 +878,16 @@ class RefreshCLI(unittest.TestCase):
             cache = json.loads((statusbar.cache_dir(home) /
                                 (statusbar.cwd_key(repo) + ".json")).read_text())
             self.assertEqual(
-                cache["gk"], 1,
-                "a genuinely-parked ticket (ready-for-review label) must stay "
-                "gk even when it also carries needs-acceptance -- the "
-                "suppression must not drop a labeled hand-off")
+                cache["gk"], 0,
+                "#1141 slice 2: the unsent acceptance question beats the "
+                "ready-for-review label, so it is not counted in gk")
             self.assertEqual(cache["open"], 0)
-            # #512 negative control: the gk/bounce override keeps a
-            # needs-acceptance + ready-for-review ticket OUT of U — it is a
-            # genuine re-hand-off (gk), never "waiting on the owner's acceptance".
-            self.assertEqual(cache.get("user_waiting"), 0,
-                             "needs-acceptance + ready-for-review must stay gk, "
-                             "never fold into U (#507 precedence, #512)")
+            self.assertEqual(cache.get("user_waiting"), 1,
+                             "#1141 slice 2: needs-acceptance + "
+                             "ready-for-review is the owner's court (U)")
+            self.assertEqual(cache.get("gk_numbers"), [1],
+                             "the labeled hand-off is never dropped: it is "
+                             "still recorded as handed off")
 
     def test_refresh_processed_needs_acceptance_not_gk_on_the_shared_account_slice(self):
         # #507 review MINOR (test fidelity): the two tests above exercise the
@@ -1432,10 +1437,12 @@ class RefreshCLI(unittest.TestCase):
         # #654: the FOOTER core branch (cmd_tickets_status, own_stream=None) must
         # NOT count a FOREIGN stream:<user> answer/decision/action row into `U N`
         # even when it enters the obligation set via the needs-gatekeeper UNION
-        # arm — it routes to workable `I` (action-only). The gk box's OWN
-        # stream:core / bare user-waiting rows still surface as `U`. Direct footer
-        # assertion of the same 4607 label set the CLI tests lock (#367 hardening —
-        # the footer branch is hand-duplicated from the CLI partition path).
+        # arm. RE-PINNED by #1141 slice 2 (owner ruling in the #1141 design
+        # comment: a foreign stream's question is hidden on the full-authority
+        # box, it counts in that stream's U): it is no longer workable `I`
+        # either. The gk box's OWN stream:core / bare user-waiting rows still
+        # surface as `U`. Direct footer assertion of the same 4607 label set
+        # the CLI tests lock (#367 hardening).
         with TemporaryDirectory() as home, TemporaryDirectory() as repo, \
                 TemporaryDirectory() as bindir:
             subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
@@ -1473,9 +1480,9 @@ class RefreshCLI(unittest.TestCase):
                 "#654: only the gk's OWN stream:core+decision #2 is U; the "
                 "foreign stream:david row 4607 must NOT inflate U")
             self.assertEqual(
-                cache["open"], 2,
-                "#654: workable I = {#1 plain, 4607 foreign action-only}; "
-                "the foreign row is counted in I, not U")
+                cache["open"], 1,
+                "#1141 slice 2: workable I = {#1 plain}; the foreign question "
+                "4607 is hidden on the gk box, neither I nor U")
 
     def test_refresh_core_count_excludes_permanent_ops_channel_tickets(self):
         # #362: a self-declared PERMANENT `ops-channel` ticket (odoo-erp
