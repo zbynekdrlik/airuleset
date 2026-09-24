@@ -2972,7 +2972,7 @@ def _make_do_action(dry_run, sudo_ok=False, run_fn=None, scratch_live_fn=None, n
 
 def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                   geteuid_fn=None, log_path=None, now=None, dry_run=False,
-                  target_pct=None):
+                  target_pct=None, pressure=None):
     """Run the drain ladder. Refuses as root (per-user deletion against root's
     fs view is #841). Between rungs, re-checks the worst mount and stops once
     it is back under ``target_pct`` (default :data:`TARGET_PCT`). Every action
@@ -2980,8 +2980,11 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
     skip-fenced, never acted on. Under `dry_run` the action verbs are tagged
     `WOULD-…` so the audit log never records a deletion that did not happen
     (review 🟡). #920: ``target_pct`` is parametrized so the prevention pass
-    can stop at ``PREVENTION_PCT`` instead of ``TARGET_PCT``. Returns the log
-    lines (also appended to `log_path`)."""
+    can stop at ``PREVENTION_PCT`` instead of ``TARGET_PCT``. #1140:
+    ``pressure="quota"`` (the quota pass) labels what ``recheck_fn`` measures
+    in the STOP/summary lines and the deletions journal; a recheck returning
+    None (unmeasurable) STOPS the ladder — never delete on uncertainty.
+    Returns the log lines (also appended to `log_path`)."""
     target_pct = TARGET_PCT if target_pct is None else target_pct
     geteuid_fn = geteuid_fn or os.geteuid
     now = time.time() if now is None else now
@@ -2993,6 +2996,7 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
         _append_log(log_path, [line])
         return logs
     dim = status.get("dim", "bytes")
+    measure = "quota" if pressure == "quota" else "worst mount"
     # #854: a per-rung SUMMARY line `disk-guard: NN% → drain rung=<name>
     # freed=<bytes> → MM%`. To avoid a second recheck_fn() call per rung (which
     # would exhaust a finite injected-recheck test fixture), the summary is
@@ -3004,20 +3008,28 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
         label, before_pct, freed_total = summary
         verb = "WOULD-DRAIN" if dry_run else "DRAIN"
         line = _log_line(now, verb, "rung=" + label, freed_total,
-                         "disk-guard: %d%% → drain rung=%s freed=%s → %d%%"
-                         % (before_pct, label, _human(freed_total), after_pct))
+                         "disk-guard: %s%d%% → drain rung=%s freed=%s → %d%%"
+                         % ("quota " if pressure == "quota" else "", before_pct,
+                            label, _human(freed_total), after_pct))
         logs.append(line)
         _append_log(log_path, [line])
 
     for _label, planner in planners:
         worst = recheck_fn()
+        if worst is None:                   # unmeasurable → stop, never guess
+            line = _log_line(now, "STOP", "-", 0, "%s unreadable — ladder stopped, "
+                             "nothing deleted on uncertainty" % measure)
+            logs.append(line)
+            _append_log(log_path, [line])
+            pending = None
+            break
         if pending is not None:
             _emit_summary(pending, worst)
             pending = None
         if worst < target_pct:
             line = _log_line(now, "STOP", "-", 0,
-                             "worst mount %d%% < target %d%% (dim=%s) — drain complete"
-                             % (worst, target_pct, dim))
+                             "%s %d%% < target %d%% (dim=%s) — drain complete"
+                             % (measure, worst, target_pct, dim))
             logs.append(line)
             _append_log(log_path, [line])
             break
@@ -3080,7 +3092,7 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                 _append_deletion_journal(
                     home, now, rung=_label, path=path, nbytes=planned,
                     mtime=a.get("mtime", 0),
-                    level=status.get("level", "drain"))
+                    level=pressure or status.get("level", "drain"))
             rung_freed += (freed or 0)
             rung_acted += 1
         logs.extend(rung_lines)
@@ -3091,7 +3103,9 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             if not dry_run:
                 _record_rung_yield(home, _label, freed=rung_freed, now=now)
     if pending is not None:
-        _emit_summary(pending, recheck_fn())
+        after = recheck_fn()
+        if after is not None:
+            _emit_summary(pending, after)
     return logs
 
 
@@ -3523,37 +3537,11 @@ def _cadence_allows_drain(worst_pct, due, dry_run):
     return due
 
 
-def _read_quota_pct():
-    """#950: read this user's quota usage as a percentage of the hard limit.
-    Returns an int 0-100 (or higher if over-quota), or None if quota is not
-    enabled or the command fails. Uses ``quota -w -u -p`` (machine-parseable,
-    no name-wrap). Best-effort, never raises.
-
-    NOTE (review R1): ``quota`` exits 1 when the soft limit is exceeded
-    (``quota.c showquotas()`` returns ``over > 0 ? 1 : 0``), so rc=1 is a
-    VALID response with parseable stdout — only rc>1 or an exception is a
-    failure. The ``*`` suffix on the blocks field marks over-soft; it is
-    stripped before parsing."""
-    try:
-        r = subprocess.run(
-            ["quota", "-w", "-u", "-p"],
-            capture_output=True, text=True, timeout=10)
-        # rc=0 (under soft) and rc=1 (over soft) both produce valid stdout.
-        # rc>1 = genuine error (quota not enabled, no quota file, etc.).
-        if r.returncode > 1:
-            return None
-        # Parse the data line: "Filesystem  blocks  quota  limit  grace  ..."
-        lines = (r.stdout or "").strip().splitlines()
-        for line in lines:
-            parts = line.split()
-            if len(parts) >= 4 and parts[0].startswith("/"):
-                used_kb = int(parts[1].rstrip("*"))
-                hard_kb = int(parts[3])
-                if hard_kb > 0:
-                    return int(math.ceil(100.0 * used_kb / hard_kb))
-        return None
-    except Exception:
-        return None
+# #1140: the quota reader + the per-account quota drain/drift live in the
+# watchdog/disk_guard_quota.py leaf; re-exported here (#950 API).
+from watchdog.disk_guard_quota import (  # noqa: E402,F401
+    QUOTA_DRAIN_PCT, QUOTA_TARGET_PCT, read_quota_pct as _read_quota_pct)
+from watchdog import disk_guard_quota as _dgq  # noqa: E402
 
 
 def _drain_due(home, now, min_interval_s=None):
@@ -3795,7 +3783,8 @@ def root_guard_status_row(provisioned_fn=None):
 def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=None,
                    geteuid_fn=None, mounts=None, min_drain_interval_s=None,
                    planners_fn=None, sudo_probe_fn=None, scratch_discover_fn=None,
-                   top_consumers_fn=None, severe_run_fn=None, box_class_fn=None):
+                   top_consumers_fn=None, severe_run_fn=None, box_class_fn=None,
+                   quota_usage_fn=None, du_fn=None):
     """Watchdog Job 40. Every poll: compute pressure + write the footer cache.
     Only at ≥80 % (and not as root, cadence-gated, single-instance): run the
     drain ladder over this user's own home; if still ≥90 % after, escalate. At
@@ -3818,7 +3807,8 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     injectable filer seam forwarded to :func:`file_severe_ticket` — a caller
     (a test in particular) exercising the ≥95 % path MUST inject a recorder
     here; leaving it unset reaches the REAL ``subprocess.run`` default, which
-    is exactly how the #896-899 duplicate tickets were filed."""
+    is exactly how the #896-899 duplicate tickets were filed. #1140: shared-
+    stream QUOTA pressure is a second drain source — see ``disk_guard_quota``."""
     now = time.time() if now is None else now
     home = home or os.path.expanduser("~")
     mounts = mounts or MOUNTS
@@ -3856,12 +3846,14 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     # bypass the cadence gate (the drain has something new to act on).
     growth_boost = _is_shared and _growth_detected(home, status["worst_pct"])
     cadence_due = _drain_due(home, now, effective_interval)
-    will_drain = ((not is_root)
-                  and status["level"] not in ("ok", "notice")
+    # #1140: per-account quota (shared-stream only) — read BEFORE the decision
+    q = _dgq.quota_state(status, home, now, _is_shared and not is_root,
+                         usage_fn=quota_usage_fn)
+    fs_pressure = status["level"] not in ("ok", "notice")
+    will_drain = ((not is_root) and (fs_pressure or q.pressure)
                   and _cadence_allows_drain(
-                      status["worst_pct"],
-                      cadence_due or growth_boost,
-                      dry_run=dry_run))
+                      max(status["worst_pct"], q.pct if q.pressure and not q.exhausted else 0),
+                      cadence_due or growth_boost or q.growth, dry_run=dry_run))
     scratch_rows = None
     if will_drain:
         # visibility only, NEVER deleted, no ping (the session cleans its own
@@ -3884,6 +3876,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     # (the every-poll status write would erase it otherwise). A drain poll writes
     # fresh top_consumers AFTER the drain (below).
     if not will_drain:
+        _dgq.maybe_update_quota_drift(status, home, now, q, du_fn, logs)  # never before a drain
         prior = _read_status_cache(home)
         if isinstance(prior, dict) and "top_consumers" in prior:
             status["top_consumers"] = prior["top_consumers"]
@@ -3926,16 +3919,6 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     # cold-start non-drain poll) so downstream readers never see a missing key.
     if "top_consumers" not in status:
         status["top_consumers"] = []
-    # #950: per-user quota reading (shared-stream only). Best-effort: quota
-    # not enabled → field omitted, downstream readers (footer, drain) treat
-    # missing as "no quota".
-    if _is_shared:
-        try:
-            qpct = _read_quota_pct()
-            if qpct is not None:
-                status["quota_pct"] = qpct
-        except Exception as e:
-            _dbg("quota read: %r" % e)
     try:
         write_status_cache(status, home=home)
     except Exception as e:
@@ -3946,7 +3929,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     # cleanup runs proactively on the hourly cadence.
     _prev_threshold = 0 if _is_shared else PREVENTION_PCT
     _prev_target = 0 if _is_shared and status["worst_pct"] < PREVENTION_PCT else None
-    if (status["level"] in ("ok", "notice")
+    if (not fs_pressure and not q.pressure
             and status["worst_pct"] >= _prev_threshold
             and not is_root
             and _cadence_allows_drain(status["worst_pct"],
@@ -3957,7 +3940,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             statvfs_fn=statvfs_fn, dev_fn=dev_fn, mounts=mounts,
             geteuid_fn=geteuid_fn, target_pct=_prev_target)
         return logs
-    if status["level"] in ("ok", "notice"):
+    if not fs_pressure and not q.pressure:
         return logs
     if is_root:
         logs.append("disk-guard: %d%% but euid==0 — per-user drain refused (root leg #841)"
@@ -3977,8 +3960,9 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
     # #854: severity beats cadence — at CRITICAL pressure the drain runs EVERY
     # poll; only the 80-95 % band is cadence-gated (`will_drain`, above).
     if not will_drain:
-        logs.append("disk-guard: %d%% (%s) — drain cadence-gated this poll (< %d%% critical)"
-                    % (status["worst_pct"], status["dim"], DISK_CRITICAL_PCT))
+        logs.append("disk-guard: %d%% (%s)%s — drain cadence-gated this poll (< %d%% critical)"
+                    % (status["worst_pct"], status["dim"],
+                       " quota %d%%" % q.pct if q.pressure else "", DISK_CRITICAL_PCT))
         return logs
     lock = _acquire_lock(home)
     if lock is None:
@@ -3997,18 +3981,9 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         else:
             planners = _default_planners(home, now, scratch_rows=scratch_rows)
 
-        def recheck():
-            return disk_status(statvfs_fn=statvfs_fn, dev_fn=dev_fn,
-                               mounts=mounts, now=now)["worst_pct"]
-
-        # #854: probe NOPASSWD sudo ONCE per drain — the root-owned rungs
-        # (apt/rotated-log/runner-*) delete via `sudo -n` where it exists, else
-        # the unprivileged attempt. Never probed in a dry-run (deletes nothing).
-        sudo_ok = _sudo_available(sudo_probe_fn) if not dry_run else False
-        do_action = _make_do_action(dry_run, sudo_ok=sudo_ok, run_fn=None, now=now)
-        logs += execute_drain(status, home, planners, recheck, do_action,
-                              geteuid_fn=geteuid_fn, log_path=_log_path(home),
-                              now=now, dry_run=dry_run)
+        logs += _dgq.run_drain_passes(status, home, now, dry_run, planners, planners_fn,
+                                      q, fs_pressure, statvfs_fn, dev_fn, mounts,
+                                      geteuid_fn, sudo_probe_fn)
         if not dry_run:
             _mark_drained(home, now)        # never cadence-gate a REAL drain off a dry-run
         # #863 review 6: after the drain, rmdir cwd-key dirs that HELD planned
@@ -4076,7 +4051,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                 # Carry forward largest_live_scratch if computed this poll
                 if "largest_live_scratch" in status:
                     post["largest_live_scratch"] = status["largest_live_scratch"]
-                write_status_cache(post, home=home)
+                write_status_cache(_dgq.carry_quota_fields(status, post), home=home)
             except Exception as e:
                 logs.append("disk-guard: top-consumers post-drain write error: %r" % e)
         if post["level"] == "critical":
