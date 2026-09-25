@@ -125,6 +125,32 @@ class PendingHookSurvivesOneFailingCall(unittest.TestCase):
         self._shim("sed", "NEEDS")
         self.assert_recorded_loudly(self.stop(), "format")
 
+    def test_grep_failing_on_the_done_check_still_records_the_done(self):
+        # The ✅ condition was `printf | grep -qiE ...`: a failed grep read as
+        # "no marker" and took the branch that deletes the pending.
+        self._shim("grep", "work complete")
+        r = self.stop()
+        self.assertEqual(r.returncode, 0, r)
+        self.assertTrue(self.pending.exists(), r)
+
+    def test_sed_failing_on_the_done_line_still_records_the_done(self):
+        # The "✅ DONE:" prefix strip was a sed outside any guard.
+        self._shim("sed", "DONE:")
+        r = self.stop()
+        self.assertEqual(r.returncode, 0, r)
+        self.assertTrue(self.pending.exists(), r)
+        self.assertIn("zmergnuté", self.pending.read_text())
+
+    def test_a_huge_report_with_the_heading_first_still_records_the_done(self):
+        # `printf | grep -q` on >64 KiB: grep quits at the heading, printf
+        # takes SIGPIPE, pipefail makes the condition false (#190/#192/#194).
+        big = ("## ✅ Work Complete\n\n" + ("riadok správy\n" * 80000)
+               + "✅ DONE: #41 zmergnuté -> v1.2.3")
+        r = self.stop(big)
+        self.assertEqual(r.returncode, 0, r)
+        self.assertTrue(self.pending.exists(), r.stderr[-500:])
+        self.assertIn("zmergnuté", self.pending.read_text())
+
     def test_the_sid_defang_does_not_depend_on_an_external_tr(self):
         self._shim("tr", "A-Za-z0-9")
         r = self.stop()
