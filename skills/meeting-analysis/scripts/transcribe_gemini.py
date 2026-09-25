@@ -26,7 +26,8 @@ Two documented limits shape this adapter:
                        context is NOT sent; a WARN says so.
     vocab              the ERP vocabulary, no speakers: speaker_turns.json
                        carries one `?` turn per chunk with the chunk's times.
-  The A/B scores both (providers `gemini` and `gemini-vocab`).
+  The A/B scores both (providers `gemini` and `gemini-vocab`). The vocabulary
+  is the ERP list by default, or a terms file given as the context argument.
 
 The key comes ONLY from the environment (GEMINI_API_KEY), which the credential
 channel sets: `airuleset.py secret exec GEMINI_API_KEY -- python3
@@ -34,7 +35,8 @@ transcribe_gemini.py ...`. This script never reads a key file and never prints
 the key.
 
 Usage:
-  python3 transcribe_gemini.py <audio.wav> <out_dir> [lang=sk] [context=erp|none] [mode=diarize|vocab]
+  python3 transcribe_gemini.py <audio.wav> <out_dir> [lang=sk] [context=erp|none|<terms file>]
+      [mode=diarize|vocab]
 """
 from __future__ import annotations
 
@@ -49,7 +51,7 @@ from pathlib import Path
 from typing import Any
 
 from asr_chunks import plan_chunks, slice_wav, stitch_chunks, wav_duration
-from asr_contract import ERP_TERMS, fail, reset_markers, write_contract
+from asr_contract import context_terms, describe_error, fail, reset_markers, write_contract
 
 BASE = "https://generativelanguage.googleapis.com"
 MODEL = "gemini-3.5-transcribe"
@@ -78,6 +80,14 @@ def _call(method: str, url: str, api_key: str, *, data: bytes | None = None,
         return (json.loads(body) if body else {}), resp.headers
 
 
+def _delete(name: str, api_key: str) -> None:
+    """Best-effort server-side cleanup of an uploaded file."""
+    try:
+        _call("DELETE", f"{BASE}/v1beta/{name}", api_key)
+    except Exception as e:                                   # noqa: BLE001 — never fail the run on cleanup
+        print(f"WARN: could not delete {name}: {describe_error(e)}", flush=True)
+
+
 def _upload(path: Path, api_key: str) -> dict[str, Any]:
     """Files API resumable upload; returns the `file` object (name, uri, state)."""
     size = path.stat().st_size
@@ -101,6 +111,8 @@ def _upload(path: Path, api_key: str) -> dict[str, Any]:
         time.sleep(POLL_INTERVAL_S)
         f, _ = _call("GET", f"{BASE}/v1beta/{f['name']}", api_key)
     if f.get("state", "ACTIVE") != "ACTIVE" or not f.get("uri"):
+        if f.get("name"):
+            _delete(f["name"], api_key)
         raise RuntimeError(f"uploaded file not usable: state={f.get('state')}")
     return f
 
@@ -150,17 +162,18 @@ def parse_text(resp: dict[str, Any]) -> str:
                     for b in s.get("content") or [] if b.get("type") == "text").strip()
 
 
-def _config(lang: str, mode: str) -> dict[str, Any]:
+def _config(lang: str, mode: str, vocab: list[str] | None) -> dict[str, Any]:
     cfg: dict[str, Any] = {"language_codes": [bcp47(lang)]}
     if mode == "vocab":
-        cfg["custom_vocabulary"] = list(ERP_TERMS)
+        cfg["custom_vocabulary"] = list(vocab or [])
     else:
         cfg["mode"] = {"type": "verbatim", "diarization_mode": "speaker",
                        "timestamp_granularities": ["word"]}
     return cfg
 
 
-def transcribe(audio: Path, api_key: str, *, lang: str, mode: str) -> list[dict[str, Any]]:
+def transcribe(audio: Path, api_key: str, *, lang: str, mode: str,
+               vocab: list[str] | None = None) -> list[dict[str, Any]]:
     """Chunk, upload, transcribe, delete; return contract tokens."""
     dur = wav_duration(audio)
     plan = (plan_chunks(dur, VOCAB_CHUNK_S, 0.0) if mode == "vocab"
@@ -172,12 +185,9 @@ def transcribe(audio: Path, api_key: str, *, lang: str, mode: str) -> list[dict[
             part = slice_wav(audio, start, end, Path(tmp) / f"chunk{i:03d}.wav")
             f = _upload(part, api_key)
             try:
-                resp = _interaction(f["uri"], api_key, _config(lang, mode))
+                resp = _interaction(f["uri"], api_key, _config(lang, mode, vocab))
             finally:
-                try:                                       # best-effort server cleanup
-                    _call("DELETE", f"{BASE}/v1beta/{f['name']}", api_key)
-                except Exception as e:                     # noqa: BLE001 — never fail the run on cleanup
-                    print(f"WARN: could not delete {f.get('name')}: {e!r}", flush=True)
+                _delete(f["name"], api_key)
             print(f"chunk {i + 1}/{len(plan)} [{start:.0f}-{end:.0f}s] done", flush=True)
             results.append((start, end, resp))
     if mode == "vocab":
@@ -193,12 +203,13 @@ def transcribe(audio: Path, api_key: str, *, lang: str, mode: str) -> list[dict[
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if len(args) < 2:
-        print("usage: transcribe_gemini.py <audio.wav> <out_dir> [lang] [context=erp|none]"
+        print("usage: transcribe_gemini.py <audio.wav> <out_dir> [lang]"
+              " [context=erp|none|<terms file>]"
               " [mode=diarize|vocab]")
         return 2
     audio, out = Path(args[0]), Path(args[1])
     lang = args[2] if len(args) > 2 else "sk"
-    use_context = (args[3] if len(args) > 3 else "erp").lower() != "none"
+    ctx_arg = args[3] if len(args) > 3 else "erp"
     mode = (args[4] if len(args) > 4 else "diarize").lower()
     reset_markers(out)
 
@@ -214,17 +225,21 @@ def main(argv: list[str] | None = None) -> int:
             pass
     except (wave.Error, EOFError) as e:
         return fail(out, f"not a PCM wav (run extract.sh first): {audio}: {e}")
-    if mode == "vocab" and not use_context:
-        return fail(out, "mode=vocab needs context=erp (the vocabulary is the point)")
-    if mode == "diarize" and use_context:
+    try:
+        vocab = context_terms(ctx_arg)
+    except ValueError as e:
+        return fail(out, str(e))
+    if mode == "vocab" and vocab is None:
+        return fail(out, "mode=vocab needs a context (erp or a terms file); the vocabulary is the point")
+    if mode == "diarize" and vocab is not None:
         print("WARN: the ERP vocabulary is NOT sent — Gemini rejects custom_vocabulary"
               " together with diarization (use mode=vocab to test the vocabulary)", flush=True)
     try:
-        tokens = transcribe(audio, api_key, lang=lang, mode=mode)
+        tokens = transcribe(audio, api_key, lang=lang, mode=mode, vocab=vocab)
         write_contract(out, model=MODEL, language=lang, tokens=tokens)
         return 0
     except Exception as e:                                   # noqa: BLE001 — mark + surface, never hang
-        return fail(out, repr(e))
+        return fail(out, describe_error(e))
 
 
 if __name__ == "__main__":

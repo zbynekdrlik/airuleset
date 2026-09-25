@@ -15,7 +15,7 @@ vocabulary to CENTRUM bread terms and would BIAS a montalu/ERP meeting transcrip
 bakery words. This script ships its own optional Slovak-ERP context (Money/Odoo domain).
 
 Usage:
-  SONIOX_API_KEY=... python3 transcribe_soniox.py <audio.wav> <out_dir> [lang=sk] [context=erp|none]
+  SONIOX_API_KEY=... python3 transcribe_soniox.py <audio.wav> <out_dir> [lang=sk] [context=erp|none|<terms file>]
 
 Writes into <out_dir> (the shared contract, asr_contract.py — the ElevenLabs and Gemini
 adapters write the same files, #1155):
@@ -36,7 +36,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from asr_contract import ERP_TERMS, fail, reset_markers, write_contract
+from asr_contract import (ERP_TERMS, context_terms, describe_error, fail, reset_markers,
+                          write_contract)
 
 SONIOX_BASE = "https://api.soniox.com/v1"
 ASYNC_MODEL = "stt-async-v5"          # newest async model (verify against GET /v1/models)
@@ -82,7 +83,8 @@ def _upload(path: Path, api_key: str) -> str:
     return out["id"]
 
 
-def _create(file_id: str, api_key: str, *, lang: str, use_context: bool) -> str:
+def _create(file_id: str, api_key: str, *, lang: str,
+            context: dict[str, Any] | None) -> str:
     """Create the async transcription. Robust: if the API rejects the diarization flag or the
     context (400), retry without it rather than dying — a slightly poorer transcript beats none.
     """
@@ -93,8 +95,8 @@ def _create(file_id: str, api_key: str, *, lang: str, use_context: bool) -> str:
         "enable_speaker_diarization": True,
     }
     attempts = []
-    if use_context:
-        attempts.append({**base, "context": ERP_CONTEXT})
+    if context:
+        attempts.append({**base, "context": context})
     attempts.append(base)                                   # no context
     attempts.append({k: v for k, v in base.items()          # no diarization flag
                      if k != "enable_speaker_diarization"})
@@ -119,12 +121,13 @@ def _create(file_id: str, api_key: str, *, lang: str, use_context: bool) -> str:
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if len(args) < 2:
-        print("usage: transcribe_soniox.py <audio.wav> <out_dir> [lang] [context=erp|none]")
+        print("usage: transcribe_soniox.py <audio.wav> <out_dir> [lang]"
+              " [context=erp|none|<terms file>]")
         return 2
     audio = Path(args[0])
     out = Path(args[1])
     lang = args[2] if len(args) > 2 else "sk"
-    use_context = (args[3] if len(args) > 3 else "erp").lower() != "none"
+    ctx_arg = args[3] if len(args) > 3 else "erp"
     reset_markers(out)
 
     api_key = os.environ.get("SONIOX_API_KEY", "").strip()
@@ -132,13 +135,20 @@ def main(argv: list[str] | None = None) -> int:
         return fail(out, "SONIOX_API_KEY not set")
     if not audio.exists():
         return fail(out, f"audio missing: {audio}")
+    try:
+        terms = context_terms(ctx_arg)
+    except ValueError as e:
+        return fail(out, str(e))
+    # the built-in ERP context keeps its domain text; a term file sends terms only
+    context = (None if terms is None
+               else ERP_CONTEXT if ctx_arg.lower() == "erp" else {"terms": terms})
 
     try:
         print(f"uploading {audio.name} ({audio.stat().st_size/1e6:.1f} MB)…", flush=True)
         file_id = _upload(audio, api_key)
         print(f"file_id={file_id}; creating transcription ({ASYNC_MODEL}, diarization on)…",
               flush=True)
-        tid = _create(file_id, api_key, lang=lang, use_context=use_context)
+        tid = _create(file_id, api_key, lang=lang, context=context)
         print(f"transcription id={tid}; polling…", flush=True)
 
         status: dict[str, Any] = {}
@@ -152,7 +162,9 @@ def main(argv: list[str] | None = None) -> int:
             time.sleep(POLL_INTERVAL_S)
         if status.get("status") != "completed":
             msg = f"{status.get('status')} {status.get('error_message')}"
-            return fail(out, f"transcription did not complete: {msg}")
+            (out / "error").write_text(msg)
+            print(f"ERROR: transcription did not complete: {msg}", flush=True)
+            return 1
 
         transcript = _req("GET", f"/transcriptions/{tid}/transcript", api_key)
         tokens = list(transcript.get("tokens") or [])
@@ -166,7 +178,7 @@ def main(argv: list[str] | None = None) -> int:
         write_contract(out, model=ASYNC_MODEL, language=lang, tokens=tokens)
         return 0
     except Exception as e:                                   # noqa: BLE001 — mark + surface, never hang
-        return fail(out, repr(e))
+        return fail(out, describe_error(e))
 
 
 if __name__ == "__main__":

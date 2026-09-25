@@ -10,8 +10,11 @@ transcript, because every adapter writes the same files (`asr_contract.py`):
 | `transcribe_elevenlabs.py` | ElevenLabs Scribe v2 (`scribe_v2`), diarization + keyterms | `ELEVENLABS_API_KEY` |
 | `transcribe_gemini.py` | Google `gemini-3.5-transcribe`, sk-SK | `GEMINI_API_KEY` |
 
-Each adapter takes `<audio.wav> <out_dir> [lang=sk] [context=erp|none]`. The
-Gemini adapter takes a fifth argument, `[mode=diarize|vocab]`. Each writes
+Each adapter takes `<audio.wav> <out_dir> [lang=sk] [context=erp|none|<terms file>]`.
+The context is the biasing vocabulary: `erp` is the built-in montalu/Money/Odoo
+list, and a terms file (the same format as the scorer's, `#` comments and `re:`
+lines skipped) lets any other client bring its own. The Gemini adapter takes a
+fifth argument, `[mode=diarize|vocab]`. Each writes
 `transcript.txt`, `transcript.json`, `speaker_turns.json`, `summary.json` and
 `done` (or `error`).
 
@@ -33,7 +36,10 @@ Gemini adapter takes a fifth argument, `[mode=diarize|vocab]`. Each writes
 
 - **ERP-term error rate:** (misses + insertions) / reference occurrences, over
   a term list. The terms are case-insensitive whole words; a line starting
-  `re:` is a regex, for codes such as `re:ZAK[- ]?\d+`.
+  `re:` is a regex, for codes such as `re:ZAK[- ]?\d+`. Slovak inflects, and
+  `faktúra` does not match `faktúru` or `faktúry`. So list the forms, or use
+  a stem regex such as `re:faktúr\w*`. A regex that can match empty text is
+  refused.
 - **Speaker agreement:** the share of reference speech time attributed to the
   right speaker, under the best one-to-one label mapping.
 - **Cost per audio minute:** from the price table in `ab_asr.py`, dated with
@@ -59,8 +65,10 @@ python3 $SKILL/scripts/ab_asr.py cut --audio $WORK/audio.wav --at 600,1800,3000 
 
 # 2. by listening, fill each $AB/slice-*/reference.json:
 #    {"turns": [{"speaker": "<name>", "start_s": 0.0, "end_s": 12.5, "text": "<exact words>"}]}
-# 3. write $AB/terms.txt: one ERP term per line (Odoo, Money, zálohová faktúra, ...),
-#    plus `re:` lines for the order codes (OP / ZAK / PKO / IZOS)
+# 3. write $AB/terms.txt: one ERP term per line (Odoo, Money, ...), stem regexes for
+#    inflected words (re:faktúr\w*, re:zálohov\w+ faktúr\w*), and `re:` lines for
+#    the order codes (OP / ZAK / PKO / IZOS). `score` refuses a slice whose
+#    reference.json still has no turns.
 
 # 4. run each provider under its own key
 ( export SONIOX_API_KEY=${SONIOX_API_KEY:-$(grep -hoE 'SONIOX_API_KEY=[^[:space:]]+' "$HOME/.soniox.env" 2>/dev/null | head -1 | cut -d= -f2)}
@@ -80,7 +88,10 @@ Notes:
 - `secret exec` buffers the child's output until it exits, so the per-slice
   progress lines appear at the end.
 - Every adapter reads only its env var. None reads a key file or prints a key.
-- `run` exits 1 if any slice failed. Look in `$AB/slice-*/<provider>/error`.
+- `run` exits 1 if any slice failed. Look in `$AB/slice-*/<provider>/error`;
+  an HTTP failure there carries the provider's own error text.
+- Every provider gets the same built-in `erp` vocabulary. To bias all of them
+  with another list instead, add `--context <terms file>` to each `run`.
 - The contract tests (`tests/test_asr_adapter_contract_1155.py`) use fixture
   responses built from the documented response shapes, not live traffic. The
   first live run is the first real check of those shapes. If a provider's

@@ -22,6 +22,7 @@ Stdlib only, like the adapters.
 from __future__ import annotations
 
 import json
+import urllib.error
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,40 @@ ERP_TERMS: list[str] = [
     "sklad", "výroba", "artikel", "artikl", "stredisko", "cenník",
     "DPH", "platca DPH", "eKasa", "kalkulácia", "pergola", "žalúzia",
 ]
+
+
+def context_terms(arg: str) -> list[str] | None:
+    """The biasing vocabulary an adapter sends, from its `context` argument:
+    `erp` -> the built-in ERP_TERMS, `none` -> None (no biasing), anything else
+    -> a term-list FILE (the same format as `ab_asr.py --terms`; its `#`
+    comments and `re:` scorer patterns are skipped, providers take plain
+    terms). Raises ValueError, naming the context, when the file is unusable."""
+    if arg.lower() == "none":
+        return None
+    if arg.lower() == "erp":
+        return list(ERP_TERMS)
+    try:
+        text = Path(arg).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise ValueError(f"context file unreadable: {arg}: {e}") from None
+    terms = [s for s in (ln.strip() for ln in text.splitlines())
+             if s and not s.startswith(("#", "re:"))]
+    if not terms:
+        raise ValueError(f"context file has no plain terms: {arg}")
+    return terms
+
+
+def describe_error(e: BaseException) -> str:
+    """Error-marker text. An HTTP error carries its status and the first 300
+    chars of the provider's response body (the one clue on a request-shape
+    mismatch); never the request headers, so never the key."""
+    if isinstance(e, urllib.error.HTTPError):
+        try:
+            body = e.read().decode(errors="replace")[:300]
+        except Exception:                                    # noqa: BLE001 — body is a best-effort clue
+            body = ""
+        return f"HTTP {e.code} {e.reason}: {body}".rstrip(": ")
+    return repr(e)
 
 
 def reset_markers(out: Path) -> None:

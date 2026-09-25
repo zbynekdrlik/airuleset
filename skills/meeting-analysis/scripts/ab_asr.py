@@ -22,7 +22,8 @@ compared on the same slices of a real Slovak meeting with three measures:
 
 Subcommands (see AB_ASR.md for the full live procedure):
   cut    --audio audio.wav --at 600,1800,3000 --len 600 --out SLICES
-  run    --provider NAME [--lang sk] SLICE_DIR...      (under `secret exec` for its key)
+  run    --provider NAME [--lang sk] [--context erp|<terms file>] SLICE_DIR...
+                                                   (under `secret exec` for its key)
   score  --terms terms.txt --out report.md [--providers a,b] SLICE_DIR...
 
 A slice dir holds audio.wav, reference.json and one output dir per provider.
@@ -64,10 +65,10 @@ def cost_per_min(provider: str) -> float:
     return PROVIDERS[provider][2]
 
 
-def adapter_cmd(provider: str, slice_dir: Path, lang: str) -> list[str]:
+def adapter_cmd(provider: str, slice_dir: Path, lang: str, context: str = "erp") -> list[str]:
     script, extra, _, _ = PROVIDERS[provider]
     return [sys.executable, str(SCRIPTS / script), str(slice_dir / "audio.wav"),
-            str(slice_dir / provider), lang, "erp", *extra]
+            str(slice_dir / provider), lang, context, *extra]
 
 
 # --- ERP-term error rate ---------------------------------------------------------
@@ -82,6 +83,8 @@ def _nfc(text: str) -> str:
 
 
 def load_terms(path: Path) -> list[Term]:
+    """Raises ValueError naming the line for a broken regex or one that can
+    match empty text (it would count phantom hits everywhere)."""
     terms = []
     for raw in path.read_text(encoding="utf-8").splitlines():
         line = _nfc(raw.strip())
@@ -91,7 +94,13 @@ def load_terms(path: Path) -> list[Term]:
             pat = line[3:]
         else:
             pat = r"(?<!\w)" + r"\s+".join(map(re.escape, line.split())) + r"(?!\w)"
-        terms.append(Term(line, re.compile(pat, re.IGNORECASE)))
+        try:
+            rx = re.compile(pat, re.IGNORECASE)
+        except re.error as e:
+            raise ValueError(f"bad term line '{line}': {e}") from None
+        if rx.search("") is not None:
+            raise ValueError(f"bad term line '{line}': it can match empty text")
+        terms.append(Term(line, rx))
     return terms
 
 
@@ -110,11 +119,24 @@ def term_errors(ref_text: str, hyp_text: str, terms: list[Term]) -> dict[str, An
 
 # --- speaker-attribution agreement ---------------------------------------------------
 def _intervals(turns: list[dict[str, Any]], *, drop_unknown: bool) -> list[tuple[float, float, str]]:
-    out = []
+    """Per-label UNION of the turns, so one label's overlapping turns never
+    count their shared time twice."""
+    by_label: dict[str, list[tuple[float, float]]] = {}
     for t in turns:
         s, e, spk = float(t["start_s"]), float(t["end_s"]), str(t.get("speaker", "?"))
         if e > s and not (drop_unknown and spk == "?"):
-            out.append((s, e, spk))
+            by_label.setdefault(spk, []).append((s, e))
+    out = []
+    for spk, spans in by_label.items():
+        cur_s, cur_e = None, None
+        for s, e in sorted(spans):
+            if cur_e is not None and s <= cur_e:
+                cur_e = max(cur_e, e)
+                continue
+            if cur_e is not None:
+                out.append((cur_s, cur_e, spk))
+            cur_s, cur_e = s, e
+        out.append((cur_s, cur_e, spk))
     return out
 
 
@@ -177,6 +199,8 @@ def score_slice(slice_dir: Path, provider: str, terms: list[Term]) -> dict[str, 
         why = (out / "error").read_text()[:200] if (out / "error").exists() else "no output"
         return {**row, "missing": why}
     ref_turns = _read_json(slice_dir / "reference.json").get("turns") or []
+    if not ref_turns:
+        return {**row, "missing": "reference.json has no turns: fill it by listening first"}
     hyp_turns = _read_json(out / "speaker_turns.json")
     minutes = wav_duration(slice_dir / "audio.wav") / 60.0
     return {**row, "minutes": minutes, "cost": minutes * cost_per_min(provider),
@@ -256,11 +280,17 @@ REFERENCE_TEMPLATE = {
 def cmd_cut(a: argparse.Namespace) -> int:
     audio, out = Path(a.audio), Path(a.out)
     total = wav_duration(audio)
-    for at in (float(x) for x in a.at.split(",") if x.strip()):
-        if at >= total:
-            print(f"ERROR: slice start {at:.0f}s is past the end ({total:.0f}s)")
-            return 1
-        d = out / f"slice-{int(at):04d}s"
+    starts = [float(x) for x in a.at.split(",") if x.strip()]
+    names = [f"slice-{int(at):04d}s" for at in starts]
+    if len(set(names)) != len(names):
+        print(f"ERROR: two slice starts share a whole second ({a.at}); pick distinct seconds")
+        return 2
+    late = [at for at in starts if at >= total]
+    if late:
+        print(f"ERROR: slice start(s) {late} past the end ({total:.0f}s)")
+        return 2
+    for at, name in zip(starts, names):
+        d = out / name
         slice_wav(audio, at, min(at + a.len, total), d / "audio.wav")
         ref = d / "reference.json"
         if not ref.exists():
@@ -277,7 +307,8 @@ def cmd_run(a: argparse.Namespace) -> int:
             print(f"{d}: FAILED — no audio.wav")
             failed += 1
             continue
-        rc = subprocess.run(adapter_cmd(a.provider, d, a.lang), check=False).returncode
+        rc = subprocess.run(adapter_cmd(a.provider, d, a.lang, a.context),
+                            check=False).returncode
         print(f"{d} / {a.provider}: {'ok' if rc == 0 else f'FAILED rc={rc}'}")
         failed += rc != 0
     return 1 if failed else 0
@@ -289,7 +320,11 @@ def cmd_score(a: argparse.Namespace) -> int:
     if unknown:
         print(f"ERROR: unknown provider(s) {unknown}; known: {sorted(PROVIDERS)}")
         return 2
-    terms = load_terms(Path(a.terms))
+    try:
+        terms = load_terms(Path(a.terms))
+    except ValueError as e:
+        print(f"ERROR: {a.terms}: {e}")
+        return 2
     rows = [score_slice(Path(d), p, terms) for d in a.slices for p in providers]
     Path(a.out).write_text(render_report(rows, providers, Path(a.terms), len(terms)),
                            encoding="utf-8")
@@ -309,6 +344,8 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.add_parser("run", help="run one provider's adapter over the slices")
     r.add_argument("--provider", required=True, choices=sorted(PROVIDERS))
     r.add_argument("--lang", default="sk")
+    r.add_argument("--context", default="erp",
+                   help="biasing vocabulary: erp (built-in) or a terms file, same for every provider")
     r.add_argument("slices", nargs="+")
     s = sub.add_parser("score", help="score the provider outputs into a markdown report")
     s.add_argument("--terms", required=True)

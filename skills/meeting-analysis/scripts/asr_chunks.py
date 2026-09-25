@@ -11,6 +11,7 @@ The stitching rule (documented and tested — tests/test_asr_chunk_stitch_1155.p
    speaking time they share inside the overlap: the sum over word pairs of the
    intersection of their [start, end] intervals, where the g words are chunk
    k-1's words (already on global labels) and the l words are chunk k's words.
+   Words without a speaker (`?`) are no evidence and never take part.
 3. Pairs are assigned greedily by descending shared time, one-to-one, and only
    when the shared time is at least MIN_MATCH_S. Greedy is enough here: in the
    overlap a voice nearly always shares most of its time with exactly one label,
@@ -83,7 +84,7 @@ def _shared_time(a: list[dict[str, Any]], b: list[dict[str, Any]],
         out = []
         for w in ws:
             s, e = max(w["start_s"], lo), min(w["end_s"], hi)
-            if e > s:
+            if e > s and w["speaker"] != "?":          # no speaker = no evidence
                 out.append((s, e, w["speaker"]))
         return out
     weights: dict[tuple[str, str], float] = {}

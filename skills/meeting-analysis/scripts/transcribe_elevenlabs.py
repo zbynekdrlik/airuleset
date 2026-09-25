@@ -18,7 +18,7 @@ transcribe_elevenlabs.py ...`. This script never reads a key file and never
 prints the key.
 
 Usage:
-  python3 transcribe_elevenlabs.py <audio.wav> <out_dir> [lang=sk] [context=erp|none]
+  python3 transcribe_elevenlabs.py <audio.wav> <out_dir> [lang=sk] [context=erp|none|<terms file>]
 """
 from __future__ import annotations
 
@@ -31,8 +31,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from asr_contract import (ERP_TERMS, fail, relabel_by_first_appearance, reset_markers,
-                          write_contract)
+from asr_contract import (context_terms, describe_error, fail, relabel_by_first_appearance,
+                          reset_markers, write_contract)
 
 API_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 MODEL_ID = "scribe_v2"
@@ -61,13 +61,14 @@ def _post(fields: list[tuple[str, str]], audio: Path, api_key: str) -> dict[str,
         return json.loads(resp.read() or b"{}")
 
 
-def transcribe(audio: Path, api_key: str, *, lang: str, use_keyterms: bool) -> dict[str, Any]:
+def transcribe(audio: Path, api_key: str, *, lang: str,
+               keyterms: list[str] | None) -> dict[str, Any]:
     """POST the file; if the API rejects the keyterms (400/422), retry once without
     them rather than dying (the same degrade transcribe_soniox.py does for its
     context). Any other HTTP error propagates."""
     base = [("model_id", MODEL_ID), ("language_code", lang), ("diarize", "true"),
             ("timestamps_granularity", "word"), ("tag_audio_events", "false")]
-    terms = [("keyterms", t) for t in ERP_TERMS] if use_keyterms else []
+    terms = [("keyterms", t) for t in keyterms or []]
     try:
         return _post(base + terms, audio, api_key)
     except urllib.error.HTTPError as e:
@@ -98,11 +99,12 @@ def words_to_tokens(words: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     if len(args) < 2:
-        print("usage: transcribe_elevenlabs.py <audio.wav> <out_dir> [lang] [context=erp|none]")
+        print("usage: transcribe_elevenlabs.py <audio.wav> <out_dir> [lang]"
+              " [context=erp|none|<terms file>]")
         return 2
     audio, out = Path(args[0]), Path(args[1])
     lang = args[2] if len(args) > 2 else "sk"
-    use_keyterms = (args[3] if len(args) > 3 else "erp").lower() != "none"
+    ctx_arg = args[3] if len(args) > 3 else "erp"
     reset_markers(out)
 
     api_key = os.environ.get(KEY_ENV, "").strip()
@@ -111,15 +113,19 @@ def main(argv: list[str] | None = None) -> int:
     if not audio.exists():
         return fail(out, f"audio missing: {audio}")
     try:
+        keyterms = context_terms(ctx_arg)
+    except ValueError as e:
+        return fail(out, str(e))
+    try:
         print(f"transcribing {audio.name} ({audio.stat().st_size/1e6:.1f} MB) with {MODEL_ID}"
-              f" (diarize, keyterms={'on' if use_keyterms else 'off'})…", flush=True)
-        resp = transcribe(audio, api_key, lang=lang, use_keyterms=use_keyterms)
+              f" (diarize, keyterms={len(keyterms or [])})…", flush=True)
+        resp = transcribe(audio, api_key, lang=lang, keyterms=keyterms)
         tokens = words_to_tokens(list(resp.get("words") or []))
         print(f"provider language={resp.get('language_code')} words={len(tokens)}", flush=True)
         write_contract(out, model=MODEL_ID, language=lang, tokens=tokens)
         return 0
     except Exception as e:                                   # noqa: BLE001 — mark + surface, never hang
-        return fail(out, repr(e))
+        return fail(out, describe_error(e))
 
 
 if __name__ == "__main__":
