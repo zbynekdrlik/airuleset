@@ -143,6 +143,16 @@ class PipedProse(Base):
                     "git commit -C %s | tail -1" % KEY,
                     "gh pr edit 1 --recover %s | tail -1" % KEY])
 
+    def test_a_clustered_bool_flag_before_the_message(self):
+        # review B: `-sq` (all known no-arg short flags) ended the scan as an
+        # UNKNOWN option, so the `-m` after it was never read as prose
+        self.both(
+            allowed=["git commit -sq -m 'x %s'" % KEY,
+                     "git commit -qs -m 'x %s' | wc -l" % KEY],
+            denied=["git commit -sq -F %s" % KEY,
+                    "git commit -sqF %s" % KEY,
+                    "git commit -sC %s" % KEY])
+
     def test_the_inspect_pipeline_is_unchanged(self):
         # the SAME code path: slice 2's piped inspect twins still hold
         self.both(
