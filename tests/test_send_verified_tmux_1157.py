@@ -61,11 +61,11 @@ class RealPrivateTmuxBox(unittest.TestCase):
         r = self._tmux(*argv[1:])
         return r.stdout if r.returncode == 0 else ""
 
-    def _start(self, max_rows):
+    def _start(self, max_rows, width=None):
         cmd = "%s %s --max-rows %d --transcript %s" % (
             sys.executable, PANE_PROG, max_rows, self.tpath)
-        r = self._tmux("new-session", "-d", "-s", "t", "-x", str(self.WIDTH),
-                       "-y", "30", cmd)
+        r = self._tmux("new-session", "-d", "-s", "t", "-x",
+                       str(width or self.WIDTH), "-y", "30", cmd)
         self.assertEqual(r.returncode, 0, r.stderr)
         deadline = time.monotonic() + 10
         while time.monotonic() < deadline:
@@ -107,6 +107,25 @@ class RealPrivateTmuxBox(unittest.TestCase):
         self.assertTrue(res, logs)
         self.assertEqual(self._submitted(), [text], logs)
         self.assertEqual(wd._input_line_text(wd.capture_pane(pid, self._run)), "")
+
+    def test_nudge_with_a_hard_broken_long_token_submits(self):
+        # A token longer than a row (a URL) is hard-broken mid-token, so the
+        # row-joined reconstruction carries a spurious space: the scrolled
+        # acceptance must compare whitespace-insensitively (provenance=True)
+        # and the per-chunk verify must accept a row break with no space.
+        pid = self._start(max_rows=3, width=60)
+        url = ("https://github.com/zbynekdrlik/odoo-erp/issues/7887"
+               "#issuecomment-5839297264-and-a-long-anchor-tail")
+        text = ("nudge: [gk-request] gk-request backstop: odoo-erp caka na "
+                "supervizora, pozri tiket a vybav ziadost " + url
+                + " a potom pokracuj v slucke, nic nerob naslepo.")
+        self.assertGreater(len(url), 60 - 4)
+        logs = []
+        res = wd.send_verified(pid, text, self._run, self.tpath,
+                               sleep_fn=time.sleep, logs=logs,
+                               nudge="gk-request")
+        self.assertTrue(res, logs)
+        self.assertEqual(self._submitted(), [text], logs)
 
     def test_long_wrapped_nudge_submits_on_an_unscrolled_box(self):
         # CONTROL: the 4-row render that fits (a tall pane) — verified before

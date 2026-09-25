@@ -230,29 +230,29 @@ GOAL_TYPE_VERIFY_RETRIES = 2         # #670: first-byte-race undo+retype budget
 # the SAME 8x1s magnitude as tmux_io's SEND_TYPE_SETTLE_* the old send_verified
 # path (`_await_typed_landed`) carried: a ~700-char chunked type renders with
 # lag (#354/#176 F4), so a single immediate capture can read a genuinely-landed
-# type mid-render -- and reacting to that with a DESTRUCTIVE undo+retype is
-# worse than the bug this fixes. Duplicated here (not imported) to keep stash's
-# `import watchdog`-only module boundary, the same idiom the STASH_*_SETTLE
-# constants above already use.
+# type mid-render -- and a DESTRUCTIVE undo+retype on that is worse than the bug.
+# Duplicated (not imported) to keep stash's `import watchdog`-only boundary.
 TYPE_VERIFY_SETTLE_POLLS = 8
 TYPE_VERIFY_SETTLE_S = 1
 
-# #746/#1157 -- a payload at/above this length can WRAP past the input box's
-# visible height and CC SCROLLS it: the first VISIBLE row carries the `❯` glyph
-# mid-payload, so head-is-prefix is false for a perfect type, and
-# `_type_literal_verified` runs the two-phase HEAD-CHECKPOINT (below). #746 set
-# 1000 believing no nudge scrolls; #1157 measured live CC 2.1.281 scrolling a
-# 4-row ~720-char nudge in a 12-16-row pane, so every CHUNK-typed payload takes
-# it. Two-phase is safe for any payload: it never junk-submits (#720).
-GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD = GOAL_TYPE_CHUNK_THRESHOLD
+# #746 -- a payload at/above this length can WRAP past the input box's visible
+# height and CC SCROLLS it: the first VISIBLE row carries the `❯` glyph mid-
+# payload, so head-is-prefix is false for a perfect type, and the type runs the
+# two-phase HEAD-CHECKPOINT (below). The stash route and the goal arm keep this
+# 1000 proxy (every /goal scrolls; two-phase never junk-submits, #720).
+GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD = 1000
+# #1157 -- `send_verified`'s type (`verify_chunks=True`) takes the checkpoint for
+# every CHUNK-typed payload: live CC 2.1.281 scrolled a 4-row ~720-char nudge in
+# a 12-16-row pane. Each later chunk is verified as it lands, so the rows a
+# scrolled box hides are proven too (`send_outcome.type_rest_verified`).
+SEND_TYPE_CHECKPOINT_THRESHOLD = GOAL_TYPE_CHUNK_THRESHOLD
 # #746 -- the checkpoint types this many chars as the FIRST burst (a single
 # sub-`GOAL_TYPE_CHUNK_THRESHOLD` send-keys, so the first-byte race applies to
 # exactly this burst) into the still-UNSCROLLED box, then head-is-prefix proves
-# the leading `/` landed before the box ever scrolls. The proof assumes 120 chars
-# do NOT themselves scroll the box -- true at any realistic pane width; on a
-# pathologically narrow pane (<~10 cols) even the checkpoint could scroll, which
-# only DEGRADES to a safe denial (head-not-prefix -> CORRUPT -> undo+retry -> give
-# up, the goal simply not armed), NEVER a junk submit.
+# the leading char landed before the box ever scrolls. The proof assumes 120
+# chars do NOT themselves scroll the box: CC keeps >= 3 box rows (#1157), so that
+# holds above ~44 cols; a narrower pane DEGRADES to a safe denial (CORRUPT ->
+# undo+retry -> give up: goal not armed / nudge `typed-undone`), NEVER a junk submit.
 GOAL_TYPE_CHECKPOINT_CHARS = 120
 
 # #670-review R2 -- the three shapes `_type_verify_class` distinguishes so the
@@ -364,7 +364,8 @@ def _settle_type_verify(pid, run, text, sleep_fn, allow_scrolled=False):
 
 def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
                                     kind="type", user_authored=False, nudge=None,
-                                    state=None, out=None):
+                                    state=None, out=None, logs=None,
+                                    verify_rest=False):
     """#746/#747 -- the SHARED first-phase of a scroll-length two-phase type: type
     the short FIRST chunk (`GOAL_TYPE_CHECKPOINT_CHARS`) into the still-UNSCROLLED
     box and settle-verify head-is-prefix, then -- ONLY if that checkpoint LANDED
@@ -386,8 +387,9 @@ def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
       * `_TV_HOLD`    -- the box went unreadable / collapsed after the chunk; NO
                          further keystroke may follow (#233/#322/#372) -- both
                          callers abort with the head chunk left as CC rendered it.
-    Only ever called for a scroll-length payload (`len >= GOAL_TYPE_SCROLL_
-    CHECKPOINT_THRESHOLD`); a short payload never reaches here."""
+    Only called for a payload that may scroll (`len >=` the caller's checkpoint
+    threshold). `verify_rest` (#1157, the send path) verifies every later chunk
+    as it lands; a byte lost there returns `_TV_CORRUPT` (undo the whole text)."""
     head_chunk = text[:GOAL_TYPE_CHECKPOINT_CHARS]
     # #1002 -- forward `kind`+`user_authored` to `_type_literal` (which routes
     # through the gated `keys`). When the FIRST chunk is SUPPRESSED at OFF
@@ -396,43 +398,38 @@ def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
     # undo backspace into the owner's box), exactly as they do for a genuine HOLD.
     # An owner reply (`user_authored`) bypasses and types.
     if not _type_literal(pid, run, head_chunk, sleep_fn, kind=kind,
-                         user_authored=user_authored, nudge=nudge):
+                         user_authored=user_authored, nudge=nudge, logs=logs):
         return _TV_HOLD
     if isinstance(out, dict):
         out["typed"] = True                      # #1157: a keystroke reached the box
-    # #763 -- the verify REFERENCE is the chunk sans trailing whitespace: an
-    # arbitrary [:120] slice can end mid-whitespace (ALL three real templates
-    # do -- '...MY '), and `_input_line_text` STRIPS the box read, so verifying
-    # against the raw chunk fails `endswith` on a perfectly-typed box and the
-    # checkpoint settles CORRUPT forever (fleet-wide zero `SEND typed`). The
-    # TYPED text stays the exact `head_chunk` (the rest continues at the same
-    # offset); only what the settle-verify compares against is normalised.
-    # Inherent residual: a type dropping exactly the chunk's TRAILING space
-    # now reads LANDED (the stripped pane read renders "typed the space" and
-    # "dropped it" identically) — undetectable in principle at this layer,
-    # no known last-byte drop vector (#670's race is first-byte), and the
-    # pre-#763 code offered no protection either (it CORRUPTed even a
-    # perfect type).
+    # #763 -- the verify REFERENCE is the chunk sans trailing whitespace: a [:120]
+    # slice can end mid-whitespace ('...MY ') and `_input_line_text` STRIPS the box
+    # read, so the raw chunk would settle CORRUPT forever (fleet-wide zero `SEND
+    # typed`). The TYPED text stays the exact `head_chunk`. Inherent residual: a
+    # type dropping exactly the chunk's TRAILING space reads LANDED (undetectable
+    # on a stripped read; #670's race is first-byte, not last-byte).
     hc = _settle_type_verify(pid, run, head_chunk.rstrip(), sleep_fn)
     if hc != _TV_LANDED:
         return hc
-    # #1002 -- the REST chunk's return is intentionally NOT checked (unlike the
-    # FIRST chunk above, which bails _TV_HOLD keystroke-free): the head chunk is
-    # ALREADY typed, so a mid-delivery OFF-flip that suppresses the rest cannot be
-    # "bailed keystroke-free". We return _TV_LANDED so the caller's full-text
-    # settle-verify reads not-landed and runs its undo-and-recover path (backs the
-    # head chunk off + pops the parked draft) -- the correct response to a partial
-    # type. Bailing here would STRAND the typed head chunk instead.
-    _type_literal(pid, run, text[GOAL_TYPE_CHECKPOINT_CHARS:], sleep_fn,
-                  kind=kind, user_authored=user_authored, nudge=nudge)
-    # #1022 -- the inner `_type_literal` calls above type PARTIAL chunks
-    # (head_chunk, then the rest), so state is NEVER threaded to them (a partial
-    # record is useless to the wedge). Record the FULL `text` ONCE here, after the
-    # whole scroll-length payload has been typed -- otherwise a #923 batched
-    # `nudge:` machine nudge (1000-1400c takes this two-phase path AND matches
-    # `_own_nudge_submit_prefix`) would go UNrecorded and the wedge would submit
-    # it through the back door under the kill switch (the exact #1022 gap). Gated
-    # to a machine nudge; owner replies (`user_authored`) never recorded.
+    # #1002 -- a suppressed REST (a mid-delivery OFF-flip) is NOT bailed like the
+    # first chunk: the head chunk is ALREADY typed, so we return _TV_LANDED and the
+    # caller's full-text verify reads not-landed and runs its undo-and-recover
+    # path. Bailing here would STRAND the typed head chunk instead.
+    if verify_rest:
+        from watchdog import send_outcome as _so
+        rest = _so.type_rest_verified(pid, run, text, sleep_fn, kind=kind,
+                                      user_authored=user_authored, nudge=nudge,
+                                      logs=logs)
+        if rest != _TV_LANDED:
+            return rest
+    else:
+        _type_literal(pid, run, text[GOAL_TYPE_CHECKPOINT_CHARS:], sleep_fn,
+                      kind=kind, user_authored=user_authored, nudge=nudge, logs=logs)
+    # #1022 -- the inner types are PARTIAL chunks, so state is NEVER threaded to
+    # them. Record the FULL `text` ONCE here, after the whole payload is typed, or
+    # a batched `nudge:` machine nudge on this path would go UNrecorded and the
+    # wedge would submit it through the back door under the kill switch. Gated
+    # to a machine nudge; owner replies (`user_authored`) are never recorded.
     if state is not None and not user_authored:
         watchdog._record_machine_nudge(state, pid, text, nudge, time.time())
     return _TV_LANDED
@@ -440,7 +437,7 @@ def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
 
 def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
                            user_authored=False, logs=None, nudge=None, state=None,
-                           out=None):
+                           out=None, verify_chunks=False):
     """#670 -- type `text` into a BARE box and VERIFY the box holds it head+tail,
     retrying (undo + re-type) ONLY on a genuine first-byte swallow. This is
     `send_verified`'s verified typed path (all nudge kinds -- lane-check, job-1
@@ -464,8 +461,8 @@ def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
         stranded `ane-check...`).
 
     #746 -- for a SCROLL-length payload (`len >= GOAL_TYPE_SCROLL_CHECKPOINT_
-    THRESHOLD`, every chunk-typed payload since #1157) the type is TWO-PHASE: type a
-    short FIRST chunk (`GOAL_TYPE_CHECKPOINT_CHARS`) into the still-UNSCROLLED box
+    THRESHOLD`; with `verify_chunks`, #1157, every chunk-typed payload) the type
+    is TWO-PHASE: type a short FIRST chunk into the still-UNSCROLLED box
     and CHECKPOINT head-is-prefix (a cheap first-byte-swallow catch with a small
     120-char undo), THEN type the rest, THEN the FINAL verify runs with
     `allow_scrolled=True`. The checkpoint is what makes the scrolled-substring
@@ -474,8 +471,8 @@ def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
     identical own-substring) can never slip through to a junk submit (#720). A
     short payload skips the checkpoint entirely (`allow_scrolled` stays False,
     its head stays visible) -> byte-identical to pre-#746.
-    Returns True iff head+tail-verified within GOAL_TYPE_VERIFY_RETRIES retries;
-    `out["typed"]` (#1157) marks that a keystroke reached the box (undo it).
+    True iff head+tail-verified within GOAL_TYPE_VERIFY_RETRIES retries; `out
+    ["typed"]` (#1157) marks that a keystroke reached the box (undo it).
 
     #1002 -- `send_verified` / `_send_goal_verified` type through here, and the
     type goes through `_type_literal` -> the ONE gated `keys` primitive, so the
@@ -486,22 +483,23 @@ def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
     keystroke #994 forbids. `user_authored` (the owner's own Discord reply)
     bypasses, forwarded down through `_type_literal`."""
     sleep_fn = sleep_fn or time.sleep
-    two_phase = len(text) >= GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD
-    head_chunk = text[:GOAL_TYPE_CHECKPOINT_CHARS]
+    two_phase = len(text) >= (SEND_TYPE_CHECKPOINT_THRESHOLD if verify_chunks
+                              else GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD)
+    undo_chunk = text if verify_chunks else text[:GOAL_TYPE_CHECKPOINT_CHARS]
     for _attempt in range(GOAL_TYPE_VERIFY_RETRIES + 1):
         if two_phase:
             # #746/#747 -- the two-phase type + head-checkpoint is SHARED with
             # deliver_with_stash (`_type_two_phase_head_checkpoint`); only the
             # RECOVERY differs, and here it is undo-the-chunk + RETRY. #1002 -- a
             # suppressed first chunk returns _TV_HOLD (no keystroke -> no undo).
-            hc = _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
-                                                 kind=kind, nudge=nudge,
-                                                 user_authored=user_authored,
-                                                 state=state, out=out)
+            hc = _type_two_phase_head_checkpoint(
+                pid, run, text, sleep_fn, kind=kind, nudge=nudge,
+                user_authored=user_authored, state=state, out=out, logs=logs,
+                verify_rest=verify_chunks)
             if hc == _TV_HOLD:
                 return False                     # unreadable / collapsed / suppressed -> NO keystrokes
-            if hc == _TV_CORRUPT:                # head swallowed -> undo the chunk + retry
-                if not _undo_typed_text(pid, run, head_chunk, sleep_fn):
+            if hc == _TV_CORRUPT:                # a byte lost -> undo what we typed + retry
+                if not _undo_typed_text(pid, run, undo_chunk, sleep_fn):
                     return False
                 continue
         else:
@@ -1648,7 +1646,8 @@ def _box_is_own_leftover(captured, payload, min_chars, provenance=False,
     where it ends, never a mid-typing fragment). A foreign draft matches NEITHER
     (its tail is not the payload's, and its body is not a contiguous run of the
     payload with the spaces removed), so provenance is REQUIRED -- shape alone
-    never clears, the fail-safe (no proof -> untouched) still holds.
+    never clears, the fail-safe (no proof -> untouched) still holds. #1157: the
+    other provenance source is FIRST-PERSON (a box we verified bare, then typed).
 
     #1113 RECURRENCE -- a THIRD, provenance-FREE proof: `match_templates=True`
     accepts the box when its whitespace-STRIPPED body is a >= `min_chars`

@@ -1230,12 +1230,17 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
       - `not-typed`: nothing was typed (no tpath, box busy/raced, pane budget
         held, spinner, kill switch OFF);
       - `typed-undone` / `typed-stranded`: typed, the verify failed, and the ONE
-        own-provenance janitor undo cleared the box / could not (the janitor
-        watch is then armed and the exact text parked for the next sweep);
+        own-provenance janitor undo cleared the box / could not (for a box that
+        may still hold our text the janitor watch is armed and the exact text
+        recorded for the next sweep, `send_outcome.after_verify_failure`);
       - `swallowed`: the Enter was swallowed twice, own text backed out
         (`_undo_and_release_slot`; never a second Escape #35);
       - `delivered-unconfirmed`: the Enter cleared the box but the transcript
-        turn raced (a cycling armed loop, #594) -- no corrective Escape (#233);
+        turn raced (a cycling armed loop, #594). No corrective Escape: a bare box
+        after a submit may be a turn that STARTED (#233). A caller that must not
+        re-deliver reads `ok or out["delivered_unconfirmed"]` as delivered; the
+        #36 premise (the corrective Escape only deselects the strip) makes a
+        bare box after Escape+Enter a delivery too;
       - `unconfirmed`: Enter sent, the box is unreadable or holds content we do
         not recognise -- withheld (#193), logged honestly (#134/#360);
       - `submitted`.
@@ -1348,7 +1353,8 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     tv = {}
     typed_ok = watchdog._type_literal_verified(
         pane_id, run, text, sleep_fn, kind="send", nudge=nudge,
-        user_authored=user_authored, logs=logs, state=state, out=tv)
+        user_authored=user_authored, logs=logs, state=state, out=tv,
+        verify_chunks=True)                     # #1157: a scrolled box is proven
     # #1092 (c) / #1157 -- a type that reached the box IS a typing attempt, verified
     # or not: stamp the per-pane budget (only for a gated machine nudge) so a pane
     # whose verify keeps failing is not re-typed every sweep. A no-keystroke abort
@@ -1399,7 +1405,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
             # box, no stash to pop.
             watchdog._undo_and_release_slot(pane_id, run, text, False, _log,
                                             "send-verified swallowed",
-                                            sleep_fn=sleep_fn, state=state)
+                                            sleep_fn=sleep_fn)
             # #1092 (a)+(b) -- a SWALLOWED attempt IS a delivery attempt: the text
             # reached the pane (and is now backed out, the janitor UNDO). Stamp
             # the per-kind FLOOR for this kind so the SAME kind can never re-fire

@@ -5450,9 +5450,11 @@ def _deliver_batch(collect, pid, sid, loc, tpath, run, state, now, handled,
         if _kind in (_send_outcome.SWALLOWED, _send_outcome.UNCONFIRMED):
             _janitor_undo_if_own_stranded(pid, run, _bt, loc, sleep_fn, logs)
     else:
-        # #1092 (d) -- a PRE-TYPE abort (box busy / raced / withheld): no keystroke
-        # was typed, so never stamp the floor; retry next sweep. Explicit word.
-        logs.append("batch-nudge %s -> deferred (not typed: box busy/raced)" % loc)
+        # #1092 (d) -- a PRE-TYPE abort (box busy / raced / spinner / kill switch
+        # OFF): no keystroke was typed, so never stamp the floor; retry next sweep.
+        # The reason is the `send-verified abort: ...` line just above (#1157).
+        logs.append("batch-nudge %s -> deferred (not typed; reason in the "
+                    "send-verified line)" % loc)
 
 
 def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,

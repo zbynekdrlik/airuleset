@@ -417,15 +417,11 @@ def _send_bare_nudge_verified(state, pid, root, text, run, now, projects_dir,
     the residue backstop and the caller undoes its pre-send dedup and logs the
     outcome's `kind`. Bare-box only: the DRAFT branch is `_try_stash_nudge`.
 
-    Residual (round-2 review F4): the verify transcript is resolved by CWD
-    (`find_active_transcript(root)`), while the keystroke goes to a specific
-    pane pid; if TWO live claude sessions share the identical cwd, the resolver
-    can pick the OTHER session's newer transcript, so a genuinely-landed nudge
-    reads as unverified → a spurious retry (and, after `_VERIFY_FAIL_GIVEUP`, a
-    spurious give-up ping). This never produces a false 'delivered' (the exact
-    nudge text is typed ONLY into the target pane, so `_submit_confirmed` can
-    never false-CONFIRM off a sibling), and two sessions in one checkout is
-    unusual; the cwd-keyed resolver shape predates #497."""
+    Residual (round-2 F4): the verify transcript is resolved by CWD, the key to
+    a pane pid; TWO live sessions in one cwd can make a landed nudge read
+    unverified → a spurious retry (and, after `_VERIFY_FAIL_GIVEUP`, a spurious
+    give-up ping). Never a false 'delivered': the text is typed ONLY into the
+    target pane, so `_submit_confirmed` cannot false-CONFIRM off a sibling."""
     tinfo = watchdog.find_active_transcript(projects_dir, root)
     tpath = tinfo[0] if tinfo else None
     watchdog._janitor_mark_watch(state, pid, now)
@@ -470,26 +466,28 @@ def _clear_verify_fail(store, name):
 def _handle_unverified_nudge(store, name, tick_str, kind, send_fn, persist,
                              dry_run, now, logs, giveup_body, outcome=None):
     """#497 — the ONE place a bare-box nudge's UNVERIFIED submit is handled
-    (shared by bounce + gkreq). Bumps the consecutive-fail streak (persisted
-    BEFORE any ping, the #193 order), logs it, and once the streak reaches
+    (bounce + gkreq). Logs the `send_verified` outcome word (#1157; a
+    `not-typed` send is no failed submit and leaves the streak alone), bumps the
+    consecutive-fail streak (persisted BEFORE any ping, #193), and once it reaches
     `_VERIFY_FAIL_GIVEUP` fires the give-up ping so a pane that never ACCEPTS
-    the nudge escalates to the user instead of rotting on a journal line
-    (round-1 review F3a / playbook #442-F2). The caller has already `seen.pop`ed
-    the dedup so the swallowed nudge retries.
+    the nudge escalates instead of rotting on a journal line (F3a / #442-F2).
+    The caller has already `seen.pop`ed the dedup so the nudge retries.
 
     ONE ping per episode, gated on a `vpinged` flag set ONLY after a delivered
-    send (result != "error") — so a transient notify failure retries next sweep
-    instead of losing the escalation (round-2 review F2), and a still-failing
-    streak never re-pings until a verified send resets both via
-    `_clear_verify_fail`. The dedup key carries `int(now)` so it is FRESH per
-    episode: a content-stable key would be swallowed by notify's own 14-day
-    dedup TTL, silently killing a legitimate SECOND-episode escalation
-    (round-2 review F1 / the #360/#459 dedup-TTL class)."""
+    send (result != "error") — a transient notify failure retries next sweep
+    (round-2 F2); a still-failing streak never re-pings until a verified send
+    resets both via `_clear_verify_fail`. The dedup key carries `int(now)` so it
+    is FRESH per episode: a content-stable key would be swallowed by notify's
+    14-day dedup TTL (round-2 F1 / the #360/#459 dedup-TTL class)."""
+    verb = getattr(outcome, "kind", None) or "submit-unverified"   # #1157
+    if verb == "not-typed":        # raced / spinner / OFF / budget: no failed submit
+        logs.append("%s-nudge-failed %s %s (not-typed, streak unchanged)"
+                    % (kind, name, tick_str))
+        return
     nfail = _note_verify_fail(store, name)
     persist()
-    logs.append("%s-nudge-failed %s %s (%s %d/%d)"   # #1157: the real outcome word
-                % (kind, name, tick_str, getattr(outcome, "kind", None)
-                   or "submit-unverified", nfail, _VERIFY_FAIL_GIVEUP))
+    logs.append("%s-nudge-failed %s %s (%s %d/%d)"
+                % (kind, name, tick_str, verb, nfail, _VERIFY_FAIL_GIVEUP))
     pinged = (store.get("vpinged") or {}).get(name)
     if nfail >= _VERIFY_FAIL_GIVEUP and not pinged and not dry_run:
         from notify import stream_qualified

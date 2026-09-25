@@ -226,8 +226,9 @@ class TestBatchSwallowedFloorAndUndo(unittest.TestCase):
 
     def test_swallowed_attempt_stamps_floor_for_all_included(self):
         src = self._src()
-        # the swallow (attempted) branch stamps ALL included kinds + persists
-        self.assertIn('send_out.get("attempted")', src)
+        # the typed-not-delivered branch (a swallow, #1157 also a verify-failed
+        # type) stamps ALL included kinds + persists
+        self.assertIn("elif _kind in _send_outcome.TYPED_NOT_DELIVERED:", src)
         self.assertIn("_nudge_gate.mark_batch_sent(state, sid, _incl, now)", src)
 
     def test_pane_budget_refusal_is_not_treated_as_a_swallow(self):

@@ -38,6 +38,7 @@ import watchdog as wd  # noqa: E402
 from watchdog import goal  # noqa: E402
 from watchdog import nudge_gate  # noqa: E402
 from watchdog import ops_wait_recheck as owr  # noqa: E402
+from watchdog import send_outcome  # noqa: E402
 from watchdog import session_status as ss  # noqa: E402
 
 from _goal_arm_helpers import (  # noqa: E402
@@ -82,6 +83,49 @@ class _HoldAfterTypeFake(DeliverGoalFakeTmux):
         if "capture-pane" in j and self._typed and self.holds > 0:
             self.holds -= 1
             return UNREADABLE
+        return super().__call__(argv, timeout)
+
+
+class _DropRestFirstByteFake(DeliverGoalFakeTmux):
+    """Drops the first byte of the FIRST chunk typed into a non-empty box (the
+    rest after the head checkpoint) once: the #670 race on a later burst."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.dropped = 0
+
+    def __call__(self, argv, timeout=8):
+        if "send-keys" in " ".join(argv) and "-l" in argv and self.box \
+                and not self.dropped:
+            self.sent.append(argv)
+            self.dropped += 1
+            self.box += argv[-1][1:]
+            return ""
+        return super().__call__(argv, timeout)
+
+
+class _SpinnerAfterTypeFake(_HoldAfterTypeFake):
+    """After the type, a RUNNING-turn spinner renders above the box (a turn
+    started under the send), so the box is readable but the pane is busy."""
+
+    SPINNER = "✳ Baking… (2m 30s · esc to interrupt)"
+
+    def _render(self):
+        base = super()._render()
+        if not self._typed:
+            return base
+        return base.replace("● Predošlá práca hotová.\n",
+                            "● Predošlá práca hotová.\n%s\n" % self.SPINNER, 1)
+
+
+class _HumanAppendFake(_HoldAfterTypeFake):
+    """During the one-frame blip after our type, the owner types behind it."""
+
+    APPEND = " a este toto som dopisal ja"
+
+    def __call__(self, argv, timeout=8):
+        if ("capture-pane" in " ".join(argv) and self._typed and self.holds > 0):
+            self.box += self.APPEND
         return super().__call__(argv, timeout)
 
 
@@ -142,7 +186,30 @@ class VerifyFailedTypeIsUndone(unittest.TestCase):
         self.assertEqual(after, [], "no keystroke into an unreadable box: %r" % after)
         self.assertTrue(any("undo did not converge" in ln for ln in logs), logs)
         self.assertEqual(state.get("janitor_watch", {}).get(PID), NOW, state)
-        self.assertEqual(wd._janitor_park_typed(state, PID), text, state)
+        self.assertEqual(state["stranded_own"][PID]["typed"], text, state)
+        # a bare-box leak never becomes a stash park record (#488: that record
+        # would license popping a stash slot the owner may hold)
+        self.assertNotIn(PID, state.get("stash_parks", {}), state)
+        # a typed attempt books the per-pane typing budget (#1092 (c))
+        self.assertEqual(len(nudge_gate._pane_attempts(state, PID, NOW)), 1, state)
+
+    def test_busy_pane_after_a_failed_verify_gets_no_escape(self):
+        # A turn started under the send: the box still shows our text but a
+        # spinner runs above it. The clear's Escape would interrupt the turn
+        # (#233/#1104), so no keystroke; the text is recorded for the janitor.
+        text = partition_batch_text()
+        fake = _SpinnerAfterTypeFake([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
+                                     model_type=True, holds=1,
+                                     transcript_path=_tpath(self))
+        logs, state = [], {}
+        res = wd.send_verified(PID, text, fake, fake.transcript_path,
+                               sleep_fn=_noop, logs=logs, state=state,
+                               nudge="partition-audit", now=NOW)
+        self.assertEqual(_kind(res), "typed-stranded", logs)
+        last_type = max(i for i, a in enumerate(fake.sent) if "-l" in a)
+        self.assertEqual([a[-1] for a in fake.sent[last_type + 1:]], [], logs)
+        self.assertTrue(any("turn running under the box" in ln for ln in logs), logs)
+        self.assertEqual(state["stranded_own"][PID]["typed"], text, state)
 
     def test_a_suppressed_type_is_not_typed_and_never_undone(self):
         # Kill switch OFF: nothing typed -> `not-typed`, and no undo keystroke.
@@ -210,6 +277,31 @@ class ForeignDraftNeverCleared(unittest.TestCase):
         self.assertIn("a este toto som dopisal ja", fake.box)
 
 
+class HumanAppendIsNeverClearedLater(unittest.TestCase):
+    """A human typing behind our stranded text makes the box not ours: the
+    undo leaves it, arms NOTHING, and the next sweep's janitor leaves it too."""
+
+    def test_append_is_left_now_and_on_the_next_sweep(self):
+        text = partition_batch_text()
+        fake = _HumanAppendFake([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
+                                model_type=True, holds=1,
+                                transcript_path=_tpath(self))
+        logs, state = [], {}
+        res = wd.send_verified(PID, text, fake, fake.transcript_path,
+                               sleep_fn=_noop, logs=logs, state=state,
+                               nudge="partition-audit", now=NOW)
+        self.assertEqual(_kind(res), "typed-stranded", logs)
+        self.assertTrue(fake.box.endswith(_HumanAppendFake.APPEND))
+        self.assertNotIn(PID, state.get("janitor_watch", {}), state)
+        self.assertNotIn(PID, state.get("stranded_own", {}), state)
+        before = fake.box
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            wd._janitor_recover(fake, {}, PID, CWD, fake._render(), "loc", _noop,
+                                False, _noop, state=state, now=NOW + 60,
+                                own_payload=None)
+        self.assertEqual(fake.box, before)
+
+
 class LongWrappedNudgeVerifies(unittest.TestCase):
     """(c): the partition-audit batch nudge in a pane whose input box shows
     only 3 of its wrapped rows (the scrolled render measured live)."""
@@ -229,7 +321,7 @@ class LongWrappedNudgeVerifies(unittest.TestCase):
         self.assertEqual(turns[-1]["message"]["content"], text)
         self.assertEqual(fake.box, "")
 
-    def test_head_swallowed_scrolled_nudge_is_still_refused(self):
+    def test_head_swallow_on_a_scrolled_nudge_is_caught_and_retyped(self):
         # #670 stays: a first-byte swallow on the head chunk is caught by the
         # checkpoint (head-is-prefix on the still-unscrolled box) -> undone +
         # retyped; the submitted prompt is the exact text.
@@ -243,6 +335,25 @@ class LongWrappedNudgeVerifies(unittest.TestCase):
         res = wd.send_verified(PID, text, fake, fake.transcript_path,
                                sleep_fn=_noop, logs=[], nudge="partition-audit")
         self.assertTrue(res)
+        self.assertEqual(fake.swallow_budget, 0, "the swallow really happened")
+        turns = [json.loads(ln) for ln in
+                 fake.transcript_path.read_text().splitlines()]
+        self.assertEqual(turns[-1]["message"]["content"], text)
+
+    def test_a_byte_lost_in_the_rows_a_scrolled_box_hides_is_caught(self):
+        # #1157 review: the checkpoint proves the head, the final verify sees
+        # only the last 3 rows. A chunk whose first byte is dropped lands in the
+        # rows the box later hides; the per-chunk verify catches it while it is
+        # still on screen, so the corrupted prompt is never submitted.
+        text = partition_batch_text()
+        fake = _DropRestFirstByteFake([(PID, "claude", CWD, "111")],
+                                      GOAL_IDLE_CAP, model_type=True,
+                                      transcript_path=_tpath(self),
+                                      wrap_width=176, visible_rows=3)
+        res = wd.send_verified(PID, text, fake, fake.transcript_path,
+                               sleep_fn=_noop, logs=[], nudge="partition-audit")
+        self.assertTrue(res)
+        self.assertEqual(fake.dropped, 1)
         turns = [json.loads(ln) for ln in
                  fake.transcript_path.read_text().splitlines()]
         self.assertEqual(turns[-1]["message"]["content"], text)
@@ -262,14 +373,25 @@ class JanitorReclaimsARecordedStrandedPayload(unittest.TestCase):
         fake = self._fake(text)
         state = {}
         wd._janitor_mark_watch(state, PID, NOW)
-        wd._janitor_park_record(state, PID, NOW, text=text)
+        send_outcome.record_stranded(state, PID, text, NOW)
         with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
             jlogs = wd._janitor_recover(fake, {}, PID, CWD, fake._render(), "loc",
                                         _noop, False, _noop, state=state,
                                         now=NOW + 60, own_payload=None)
         self.assertEqual(fake.box, "", jlogs)
         self.assertTrue(any("RECOVERED (janitor)" in ln for ln in jlogs), jlogs)
-        self.assertIsNone(wd._janitor_park_typed(state, PID))
+        self.assertNotIn(PID, state.get("stranded_own", {}), state)
+
+    def test_record_is_dropped_once_the_text_is_gone(self):
+        text = partition_batch_text()
+        fake = self._fake("")               # the owner cleared it by hand
+        state = {}
+        send_outcome.record_stranded(state, PID, text, NOW)
+        wd._janitor_recover(fake, {}, PID, CWD, fake._render(), "loc", _noop,
+                            False, _noop, state=state, now=NOW + 60,
+                            own_payload=None)
+        self.assertNotIn(PID, state.get("stranded_own", {}), state)
+        self.assertEqual(fake.sent, [])
 
     def test_foreign_draft_with_a_record_is_left_untouched(self):
         text = partition_batch_text()
@@ -277,7 +399,7 @@ class JanitorReclaimsARecordedStrandedPayload(unittest.TestCase):
                           "sam a nema nic spolocne s watchdog nudge textom")
         state = {}
         wd._janitor_mark_watch(state, PID, NOW)
-        wd._janitor_park_record(state, PID, NOW, text=text)
+        send_outcome.record_stranded(state, PID, text, NOW)
         before = fake.box
         with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
             wd._janitor_recover(fake, {}, PID, CWD, fake._render(), "loc", _noop,
@@ -287,23 +409,36 @@ class JanitorReclaimsARecordedStrandedPayload(unittest.TestCase):
         self.assertNotIn("BSpace", fake.keys())
 
 
-class _GkreqOutcomeStub:
-    """A `send_verified` stand-in returning a falsy outcome that carries a
-    `kind`, like the #1157 primitive does."""
+class _GkreqPaneFake:
+    """One idle claude pane at `root` with a modelled input box (the
+    `_CrossStreamFakeTmux` shape plus typing): `-l` appends, `BSpace` trims, and
+    the first capture after the type reads UNREADABLE (a one-frame blip)."""
 
-    class _Out:
-        def __init__(self, kind):
-            self.kind = kind
+    IDLE = "● Predošlá práca hotová.\n❯ \n  ctx ███░  caveman:lite\n"
 
-        def __bool__(self):
-            return False
+    def __init__(self, root):
+        self.root, self.box, self.sent, self.blip = root, "", [], 1
 
-    def __init__(self, kind):
-        self.kind = kind
-
-    def __call__(self, pid, text, run=None, tpath=None, sleep_fn=None, logs=None,
-                 out=None, user_authored=False, nudge=None, state=None, **_kw):
-        return self._Out(self.kind)
+    def __call__(self, argv, timeout=8):
+        j = " ".join(argv)
+        if "list-panes" in j:
+            return "%1\tclaude\t" + self.root
+        if "display" in j:
+            return "0"
+        if "send-keys" in j:
+            self.sent.append(argv)
+            if "-l" in argv:
+                self.box += argv[-1]
+            elif argv[-1] == "BSpace":
+                self.box = self.box[:-sum(1 for k in argv if k == "BSpace")]
+            return ""
+        if "capture-pane" in j:
+            if self.box and self.blip:
+                self.blip -= 1
+                return UNREADABLE
+            shown = ("❯\xa0" + self.box) if self.box else "❯ "
+            return self.IDLE.replace("❯ ", shown)
+        return ""
 
 
 class TruthfulCallerVerbs(unittest.TestCase):
@@ -361,26 +496,28 @@ class TruthfulCallerVerbs(unittest.TestCase):
         self.assertFalse(any("not typed" in ln for ln in lines), lines)
         self.assertTrue(any("typed-undone" in ln for ln in lines), lines)
         self.assertEqual(fake.box, "")
+        # a typed attempt stamps the per-kind floor (never re-typed next sweep)
+        self.assertEqual(state["nudge_cadence"][self.sid]["queue-arrival"], NOW,
+                         state.get("nudge_cadence"))
 
     def test_gkreq_verb_names_the_outcome(self):
         import time as _t
-        from test_send_verified_adoption import (_CrossStreamFakeTmux,
-                                                 _write_transcript)
+        from test_send_verified_adoption import _write_transcript
         tmp = TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = str(Path(tmp.name) / "devel" / "odoo-erp")
         Path(root).mkdir(parents=True)
         projects = Path(tmp.name) / "projects"
         _write_transcript(projects, root)
-        with m.patch.object(wd, "send_verified", _GkreqOutcomeStub("typed-undone")), \
-                m.patch.object(wd, "_gkreq_supervisor_root", lambda cwd: cwd):
+        fake = _GkreqPaneFake(root)
+        with m.patch.object(wd, "_gkreq_supervisor_root", lambda cwd: cwd):
             logs = wd.gk_request_backstop(
-                _t.time(), _CrossStreamFakeTmux([("%1", root)]), {},
-                lambda *a, **k: "sent", home=tmp.name,
+                _t.time(), fake, {}, lambda *a, **k: "sent", home=tmp.name,
                 gh_fetch=lambda r: [7887], projects_dir=projects, sleep_fn=_noop)
         failed = [ln for ln in logs if "gkreq-nudge-failed" in ln]
         self.assertTrue(failed, logs)
         self.assertTrue(all("typed-undone" in ln for ln in failed), failed)
+        self.assertEqual(fake.box, "", logs)
 
 if __name__ == "__main__":
     unittest.main()

@@ -24,7 +24,6 @@ import argparse
 import codecs
 import json
 import os
-import shutil
 import signal
 import sys
 import termios
@@ -93,7 +92,9 @@ def main():
     dec = codecs.getincrementaldecoder("utf-8")()
 
     def draw(*_a):
-        cols = shutil.get_terminal_size((80, 24)).columns
+        # the pane's REAL size (ioctl), never shutil's $COLUMNS: a pytest run can
+        # export COLUMNS=80 into the pane's env and misdraw a 60-col pane.
+        cols = os.get_terminal_size(1).columns
         os.write(1, render(state["buf"], cols, args.max_rows).encode("utf-8"))
 
     signal.signal(signal.SIGWINCH, draw)

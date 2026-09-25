@@ -528,19 +528,21 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
         captured, own_payload, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
         provenance=_janitor_watch_seen(state, pid, now))
     # #1113 RECURRENCE -- a PROVENANCE-FREE template proof: the box is a verbatim
-    # run of ANY rendered /goal template variant, not only the single `own_payload`
-    # the caller handed in. The 23.9 `cleanup=declined` was a genuinely-ours
-    # fork-no-merge tail whose payload-specific proof missed (a different variant)
-    # AND whose `_janitor_watch_seen` mark had EXPIRED by the time this sweep ran
-    # ~6h later. Verbatim template text is un-forgeable, so it needs no provenance
-    # -- it BOTH satisfies the provenance gate below (a valid provenance
-    # substitute) AND, when it is the ONLY proof, gates the clear at most once per
-    # episode via the (c) lock. `captured` is always truthy here (the caller only
-    # reaches this after locating the box).
+    # run of ANY rendered /goal template variant (the 23.9 `cleanup=declined` tail
+    # was a different variant AND its watch mark had EXPIRED ~6h later). Verbatim
+    # template text is un-forgeable, so it substitutes for provenance below and,
+    # when it is the ONLY proof, clears at most once per episode (the (c) lock).
     own_tmpl = watchdog._box_is_own_leftover(
         captured, None, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
         match_templates=True)
-    own_leftover = own_prov or own_tmpl
+    # #1157 -- a `typed-stranded` send_verified recorded the EXACT text it left
+    # (send_outcome); the box still showing it (scrolled / wrap-joined, tail-
+    # anchored) is ours. Never with an occupied stash slot: a bare-box send never
+    # touched the slot, so its record licenses no pop of a slot the owner holds.
+    from watchdog import send_outcome as _so
+    own_rec = not occupied and _so.stranded_reclaimable(
+        state, pid, captured, now, dry_run)
+    own_leftover = own_prov or own_tmpl or own_rec
     # #852 C — the incident's `slane-check:` shape: a stray human char (the
     # owner's forgotten `s`) raced to the FRONT of our own swallowed nudge, so
     # the own prefix is at box-head position 1..3, not 0. A park record carrying
@@ -558,16 +560,11 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     own_typed = _janitor_park_typed(state, pid)
     stray_own = (own_typed is not None
                  and watchdog._box_own_with_short_prefix(captured, own_typed))
-    # #1157 -- the record IS the exact text we left: a whole box that is a run of it
-    # (scrolled / wrap-joined, the provenance proof) is ours even without its prefix.
-    own_rec = own_typed is not None and watchdog._box_is_own_leftover(
-        captured, own_typed, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR, provenance=True)
-    own_leftover = own_leftover or own_rec
     # A dict (leaked-text) record's LEAK is still visible when the box holds our
     # recorded text at any position -- used to keep the marker-gone backstop from
     # clearing the record before the leak is reclaimed (#852-review 🟡-4).
     leak_visible = own_typed is not None and (
-        stray_own or own_rec
+        stray_own
         or watchdog._typed_landed(own_typed, itext)
         or watchdog._looks_like_own_stuck_content(itext))
 
@@ -614,8 +611,8 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # licenses the non-occupied own-suffix reclaim below.
     prov_ok = (_janitor_watch_seen(state, pid, now)
                or (occupied and park_seen)
-               or stray_own or own_rec)
-    if not (prov_ok or own_tmpl):
+               or stray_own)
+    if not (prov_ok or own_tmpl or own_rec):
         return logs         # no watchdog job is known to have touched this
                             # pane recently, and it is not verbatim template
                             # text -- never act on content alone
@@ -626,7 +623,7 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # sweep. A provenance-backed clear is NOT gated by this lock (it carries its
     # own bounded ping/dedup). The lock is stamped BEFORE the clear so a failed /
     # non-converging attempt still consumes the one-per-episode slot.
-    if own_tmpl and not prov_ok:
+    if (own_tmpl and not prov_ok) or own_rec:   # #1157: a record clear too
         if _template_clear_locked(state, pid, now):
             logs.append("janitor %s -> skip:template-clear-locked "
                         "(#1113 once per episode)" % loc)
@@ -671,6 +668,7 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
 
     if recovered:
         _janitor_clear_park(state, pid)     # #488 -- our park is resolved
+        _so.clear_stranded(state, pid)      # #1157 -- our stranded text is gone
         rec["janitor_pinged"] = False
         logs.append("RECOVERED (janitor) %s -> stuck own delivery cleared"
                     % loc)
