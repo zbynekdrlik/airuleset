@@ -23,6 +23,10 @@ import zlib
 from collections import defaultdict
 from pathlib import Path
 
+from .host_detail import (FLEET_WEEKLY_CANDIDATE_MAX_AGE, SessionAgg,  # noqa: F401
+                          _weekly_candidate_is_fresh, session_id_of,
+                          snapshot_sessions, weekly_windows)
+
 
 class _SafeGzLines:
     """A context-manager line iterator over a `.jsonl.gz` that treats a corrupt
@@ -163,9 +167,11 @@ def scan(root, days=7, now=None):
     # the Bash:Agent ratio is the metric — counted here, in the pass that is
     # already walking every assistant entry, rather than by a second parser.
     by_hour_tools = defaultdict(lambda: [0, 0])       # hour -> [bash, agent]
+    sessions = SessionAgg()      # #1154: per-session split of the same requests
     files = 0
     lines = 0
-    for path, proj, _kind in _split_transcripts(root):
+    for path, proj, kind in _split_transcripts(root):
+        sid = session_id_of(path, root, proj)
         try:
             mt = datetime.datetime.fromtimestamp(
                 os.path.getmtime(path), datetime.timezone.utc)
@@ -191,6 +197,7 @@ def scan(root, days=7, now=None):
                     continue
                 msg = e.get("message") or {}
                 sc = bool(e.get("isSidechain"))
+                sessions.note_cwd(sid, e.get("cwd"), kind == "main")
                 # Tool-use counting sees every raw LINE (a request's blocks
                 # are spread across several lines) — independent of the
                 # per-request fold below.
@@ -249,6 +256,7 @@ def scan(root, days=7, now=None):
                     row[3] += o
                     row[4] += usd
                     row[5] += 1
+                sessions.add(hour, sid, proj, model, usd)
     return {
         "files_scanned": files,
         "usage_lines": lines,
@@ -258,6 +266,7 @@ def scan(root, days=7, now=None):
         "by_day_tier": dict(sorted(_dump(by_day_model).items())),
         "by_hour": dict(sorted(_dump(by_hour).items())),
         "by_hour_model": dict(sorted(_dump(by_hour_model).items())),
+        "by_hour_session": sessions.dump(),
         "by_project": _dump(by_proj, top=12),
         "main_vs_sidechain": _dump(side),
         "by_hour_main_tools": {k: {"bash": v[0], "agent": v[1]}
@@ -423,7 +432,11 @@ def hourly_snapshot(now, root=None, host=None, user=None, days=2,
     valid JSON but is NOT an object (e.g. a bare string/number/list) —
     `load_usage_cache()` only returns `None` on an unparseable file, so a
     JSON-valid-but-wrong-shape cache is caught HERE with its own
-    `isinstance` check, never passed through to `.get()`."""
+    `isinstance` check, never passed through to `.get()`.
+
+    #1154 (additive): `"sessions"` splits this hour's `usd` per session and
+    `"weekly_window"` lists every cached weekly window with its scope and a
+    `stale` verdict; see `burn/host_detail.py` for both shapes."""
     root = root or os.path.expanduser("~/.claude/projects")
     data = scan(root, days=days, now=now)
     end = now.astimezone().replace(minute=0, second=0, microsecond=0)
@@ -456,6 +469,9 @@ def hourly_snapshot(now, root=None, host=None, user=None, days=2,
         "main_bash": int(tools.get("bash", 0)),
         "main_agent": int(tools.get("agent", 0)),
         "account_email": (usage_cache or {}).get("account_email") or "",
+        # #1154: per-session split of THIS hour + every weekly window with scope.
+        "sessions": snapshot_sessions(data.get("by_hour_session"), hour_key),
+        "weekly_window": weekly_windows(usage_cache, now.timestamp()),
     }
 
 
@@ -792,6 +808,9 @@ def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
                           # uses it to refuse a stale candidate, mirroring
                           # `weekly_pct`'s own present-but-None convention.
                           "weekly_ts": row.get("weekly_ts")}
+        for k in ("sessions", "weekly_window"):      # #1154, additive
+            if k in row:
+                per_host[name][k] = row[k]
         total_usd += usd
         total_msgs += msgs
         weighted_ctx_sum += avg_ctx * msgs
@@ -840,33 +859,6 @@ def weekly_budget(cache, now=None):
     return {"weekly_pct": pct, "resets_at": resets_at,
             "remaining_days": round(remaining_days, 2),
             "budget_pct_per_day": round(budget, 2) if budget is not None else None}
-
-
-# #286-review — how STALE a cross-host weekly-window CANDIDATE may be before
-# `group_fleet_by_account()` refuses to trust it. Mirrors
-# `watchdog.usage.FABLE_GATE_MAX_AGE`'s own 6h staleness bound for this EXACT
-# same cache file (`~/.claude/airuleset-usage-cache.json`) — a deliberate MIRROR,
-# never a shared import: `burn` must never import `watchdog`, which already
-# imports `burn` (see `usage_cache_path()`'s own docstring for why).
-FLEET_WEEKLY_CANDIDATE_MAX_AGE = 6 * 3600
-
-
-def _weekly_candidate_is_fresh(ts, now_epoch):
-    """True iff `ts` (a host's own usage-cache WRITE time, unix epoch
-    seconds — see `_fleet_remote_row`'s `weekly_ts`) is within
-    `FLEET_WEEKLY_CANDIDATE_MAX_AGE` of `now_epoch`. Clock-skew-safe
-    staleness check for the usage cache file: age outside `[0, MAX]`
-    — including a FUTURE `ts`
-    (clock skew, a cache synced off another box), which a plain
-    `age > MAX` check would wrongly call "fresh" forever — is unknown,
-    never trusted. A missing/non-numeric `ts` (a legacy pre-#286 row that
-    never carried one) is never fresh by omission — excluded from the
-    candidate list, never guessed."""
-    try:
-        age = float(now_epoch) - float(ts)
-    except (TypeError, ValueError):
-        return False
-    return 0 <= age <= FLEET_WEEKLY_CANDIDATE_MAX_AGE
 
 
 def group_fleet_by_account(per_host, cache=None, now=None):
