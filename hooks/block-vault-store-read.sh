@@ -108,7 +108,15 @@ set -euo pipefail
 # inspect <path>` (format, hooks-free) and `secret exec`/a script (use).
 # Rule E's own gaps are the store's: a glob not anchored on 3 literal chars
 # (`~/.s*/k`), a computed path, a home-wide sweep (`grep -r x ~`) that never
-# names the root, and a symlink to a key under another name.
+# names the root, and a symlink to a key under another name. Its accepted
+# FALSE POSITIVE is wider than the store's, stated rather than implied:
+# `.secrets` is ordinary prose, so `echo "my .secrets"` or a `git commit -m`
+# naming the dir is refused (remedy as for the store: `-F <file>`). The
+# recursive checks (ssh remote command, ProxyCommand, rsync -e, `secret exec`
+# child) have no explicit depth cap; a pathological nesting ends in a
+# RecursionError, i.e. rc 1, i.e. fail_closed — a refusal, never an allow.
+# Each segment is now scanned twice (raw + quote-removed); measured worst
+# case at the ~128 KB argv ceiling ~2 s, inside the 5 s budget.
 #
 # BYPASS — env only, and always logged:
 #   AIRULESET_ALLOW_VAULT_READ=1   -> audits/vault-store-reads.log
@@ -455,7 +463,7 @@ if [ "$STORE" = 1 ]; then
     echo "  It hands the value to the child through the environment (or --stdin)," >&2
     echo "  captures fd 1/2 and filters the value out of them." >&2
     echo "" >&2
-    echo "  Metadata, without the value:  secret list  /  secret status <NAME>" >&2
+    echo "  Metadata, without the value:  secret list  /  secret status <NAME>  /  secret inspect <path>" >&2
     echo "  Remove it:                    secret forget <NAME>" >&2
     echo "  Get a NEW value from the user: secret request <NAME>  (never ask in chat)" >&2
     echo "" >&2

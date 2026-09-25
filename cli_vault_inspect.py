@@ -10,18 +10,26 @@ has without it: size, line count, trailing newline, CRLF, whether the file is
 Only a path under the home key-file root (`~/.secrets/`) or the credential
 store (`filedrop.vault.secrets_dir()`) is inspected, resolved through every
 symlink and `..` first, so the command cannot be pointed at an arbitrary file
-to learn anything about it. hooks/block-vault-store-read.sh names this command
-in its refusal and allows it on both roots.
+to learn anything about it; a root that is itself a SYMLINK is not a root
+(a `~/.secrets -> ~` link would otherwise open the whole home). The file is
+opened O_NOFOLLOW|O_NONBLOCK and re-checked on the open descriptor, so a swap
+for a symlink or a FIFO after the check neither escapes nor hangs.
+hooks/block-vault-store-read.sh names this command in its refusal and allows
+exactly `secret inspect <one path>` (unpiped) on both roots.
 
 What is printed is a function of the value (a hash prefix, a length) but never
 the value or any slice of it. The `NAME=` shape is decided conservatively so a
 bare value cannot be reported under the "names" label: a base64 value such as
 `QWxh…ZQ==` or `…Qo=` would otherwise read as a variable called `QWxh…ZQ`. So a
 line counts only when a real value follows the `=` (not `=`, not end of line),
-and names are printed only when EVERY meaningful line has the shape.
+and names are printed only when EVERY meaningful line has the shape. One
+residual follows from the design: a bare value that itself reads `IDENT=x…`
+is indistinguishable from an env line, so its part before `=` (at most 64
+identifier characters) is reported as a name.
 """
 
 import hashlib
+import os
 import pwd
 import re
 import stat
@@ -43,6 +51,8 @@ def _roots():
     from filedrop import vault
     roots = []
     for base in (Path.home() / KEY_ROOT_NAME, Path(vault.secrets_dir())):
+        if base.is_symlink():
+            continue             # review B finding 8: a linked root is no root
         try:
             roots.append(base.resolve(strict=True))
         except OSError:
@@ -102,7 +112,11 @@ def cmd_inspect(args):
         if extra:
             raise InspectError("secret inspect: takes exactly one PATH", 2)
         real, st = resolve_target(getattr(args, "name", None))
-        with open(real, "rb") as fh:
+        fd = os.open(str(real), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(fd, "rb") as fh:
+            st = os.fstat(fh.fileno())
+            if not stat.S_ISREG(st.st_mode):
+                raise InspectError("secret inspect: %s changed under the check" % real, 2)
             data = fh.read(MAX_BYTES + 1)
     except InspectError as e:
         print(str(e), file=sys.stderr)

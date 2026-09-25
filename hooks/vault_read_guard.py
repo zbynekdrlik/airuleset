@@ -611,6 +611,7 @@ SHELL_WORDS = {"do", "then", "else", "elif", "if", "while", "until", "!", "{",
 SECRET_CLI_FLAGS = {"--stdin", "--replace", "--allow-plain", "--public"}
 SECRET_CLI_ARGFLAGS = {"--ttl", "--keep", "--port", "--env", "--persist",
                        "--file", "--persist-map"}
+SECRET_PATH_FLAGS = {"--persist", "--file", "--persist-map"}
 
 
 def _dequoted(text):
@@ -780,25 +781,44 @@ def _secret_cli_start(tk, start):
     return i + 1 if i < len(tk) and tk[i] == "secret" else None
 
 
-def _secret_cli_child(tk, i):
-    """For `secret exec`, where the child argv starts (mirrors
-    cli_vault._secret_apply_remainder: our flags, the NAME, our flags, an
-    optional `--`); len(tk) when there is no child."""
-    seen_name = False
+def _secret_cli_args(tk, cli):
+    """(accounted token indices, child start) for `… airuleset.py secret <action>`.
+
+    Mirrors cli_vault._secret_apply_remainder: our flags, the NAME, our flags
+    again, an optional `--`; an int flag with a non-int value is NOT ours
+    (the CLI breaks there, and the rest becomes the `exec` child). Only the
+    VALUE of a path flag (--persist / --persist-map / --file) and inspect's
+    one positional are accounted — a root reference in any other flag value
+    or in a stray positional stays unaccounted (review A finding 1: a
+    blanket pre-child exemption let `exec N --ttl <root>/k cmd` through).
+    """
+    action = tk[cli] if cli < len(tk) else ""
+    ok, seen_name, i = set(), False, cli + 1
     while i < len(tk):
         t = tk[i]
+        key, eq, inline = t.partition("=")
         if t == "--":
-            return i + 1
-        key = t.partition("=")[0]
-        if t in SECRET_CLI_FLAGS or (key in SECRET_CLI_ARGFLAGS and "=" in t):
+            return ok, i + 1
+        if t in SECRET_CLI_FLAGS:
             i += 1
-        elif key in SECRET_CLI_ARGFLAGS:
-            i += 2
-        elif not seen_name:
+            continue
+        if key in SECRET_CLI_ARGFLAGS:
+            idx, value = (i, inline) if eq else (i + 1, tk[i + 1] if i + 1 < len(tk) else "")
+            if key in ("--ttl", "--keep", "--port") and not value.lstrip("-").isdigit():
+                return ok, i         # not a flag of ours after all
+            if key in SECRET_PATH_FLAGS:
+                ok.add(idx)
+            i = idx + 1
+            continue
+        if not seen_name:
+            if action == "inspect":
+                ok.add(i)
             seen_name, i = True, i + 1
-        else:
-            return i
-    return len(tk)
+            continue
+        if action == "exec":
+            return ok, i          # the REMAINDER child, without a `--`
+        i += 1                    # `request A B …`: more names, never accounted
+    return ok, len(tk)
 
 
 def _assignment_is_identity_only(tok):
@@ -844,19 +864,46 @@ def _accounted_command(tk, start, head, term):
     cli = _secret_cli_start(tk, start)
     if cli is None:
         return set()
-    if cli < len(tk) and tk[cli] == "exec":
-        child = _secret_cli_child(tk, cli + 1)
+    ok, child = _secret_cli_args(tk, cli)
+    if term == "|" and tk[cli:cli + 1] == ["inspect"]:
+        return set()             # its `path:` line is a name source when piped
+    if tk[cli:cli + 1] == ["exec"]:
         # The child runs with fd 1/2 filtered for the VAULT value only — a
         # plain key file it reads would print unfiltered, so the child is
         # accounted exactly like a command of its own.
-        sub = tk[child:]
-        return set(range(cli, child)) | {child + j for j in _accounted(sub, term)}
-    return set(range(cli, len(tk)))
+        return ok | {child + j for j in _accounted(tk[child:], term)}
+    return ok
 
 
 def _unaccounted(tk, term, cwd_hint=None):
     ok = _accounted(tk, term)
     return [t for i, t in enumerate(tk) if i not in ok and key_ref(t, cwd_hint)]
+
+
+KEY_AUDIT_RE = re.compile(r"\.secrets(?:/[A-Za-z0-9_.*?-]{1,64})?")
+
+
+def key_audit_ref(ref):
+    """The subset of a key-file reference safe to WRITE DOWN (#157 for rule E).
+
+    A stray is a whole shell token, and a value can sit in the same token as
+    the path (`printf <value>><root>/k`, `open("<root>/k","w").write(<value>)`
+    — review B finding 2). Only `.secrets/<one file component>` is kept; a
+    glob-only reference (no literal name) is logged as the fixed marker.
+    """
+    m = KEY_AUDIT_RE.search(ref or "")
+    return m.group(0) if m else KEY_DIR + "(glob)"
+
+
+def is_secret_inspect(segment):
+    """`… airuleset.py secret inspect <one path>` — metadata only, any root."""
+    try:
+        tk = shlex.split(segment)
+    except ValueError:
+        return False
+    start = _cmd_start(tk)
+    cli = None if start is None else _secret_cli_start(tk, start)
+    return cli is not None and tk[cli:cli + 1] == ["inspect"] and len(tk) == cli + 2
 
 
 def text_is_clean(text):
@@ -916,7 +963,7 @@ if not cmd:
         # so the store stayed shut and every block test passed while the real
         # refusal, the audit line and the user's env bypass were all gone.
         audit(tool, [r for k, _rs, v in bad
-                     for r in audit_refs(v)] + [r for _k, r, _v in keyed],
+                     for r in audit_refs(v)] + [key_audit_ref(r) for _k, r, _v in keyed],
               " ".join(v for _k, v in fields))
         sys.exit(2)
     sys.exit(0)
@@ -942,7 +989,7 @@ for seg, term in split_segments(cmd):
     if stray:
         hits.append("%s  ->  %s (key file %s)" % (
             head or "(redirection/substitution)", excerpt(seg), excerpt(stray)))
-        refs.append(stray)
+        refs.append(key_audit_ref(stray))
         roots.add("keyfile")
         # A segment can name BOTH roots; the store check below still runs so
         # its audit refs and guidance are not lost.
@@ -950,7 +997,7 @@ for seg, term in split_segments(cmd):
     if not seg_refs:
         cwd_hint = cd_target(seg, head) or cwd_hint
         continue
-    if head in ALLOW_HEADS and term != "|":
+    if (head in ALLOW_HEADS or is_secret_inspect(seg)) and term != "|":
         # Piped, an allowlisted head is just a name source for whatever
         # consumes it — `ls <store>/* | xargs cat` (review F5).
         continue

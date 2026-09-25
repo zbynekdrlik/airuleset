@@ -28,8 +28,10 @@ stderr carries only exception class names and counts.
 Honest limits: OpenTelemetry/analytics capture the original output before any
 hook runs (the docs' own warning); only STORE values are known here — a plain
 `~/.secrets/*` key file is guarded at READ time by block-vault-store-read.sh
-instead; a deliberately transformed value (reversed, double-encoded, one
-character per line) is not recognised — the same residual `secret exec` has.
+instead; a multi-line value is also matched LINE by line (lines of 16+ bytes),
+so a short line of it printed alone is not; a deliberately transformed value
+(reversed, double-encoded, one character per line) is not recognised — the
+same residual `secret exec` has.
 """
 
 import json
@@ -42,39 +44,58 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 MARKER = b"<<REDACTED>>"
-MAX_VALUE_BYTES = 64 * 1024
+# A LINE of a multi-line value (a PEM key body) is its own needle: Grep's
+# `path:N:` prefixes, `cat -n`, or an Edit patch's `+<line>` entries print the
+# value one line at a time, and a whole-value match then finds nothing
+# (review B finding 3). 16 bytes keeps `-----END …` banners' short
+# neighbours and ordinary words out of the needle set.
+MIN_LINE_BYTES = 16
 
 
 def store_values():
-    """Every stored value (bytes), longest first. Reads the files directly —
+    """(values, lines): every stored value (bytes) and every 16+-byte line of a
+    multi-line one, each longest first. Reads the files directly —
     `vault.read_value` would `ensure_dir()` (mkdir + chmod) on every call."""
     from filedrop import vault
 
     d = Path(vault.secrets_dir())
-    out = []
+    out, lines = [], []
     try:
         entries = list(d.iterdir())
     except OSError:
-        return out
+        return out, lines
+    cap = vault.MAX_SECRET_BYTES          # the store's own ceiling (review B 6)
     for p in entries:
         if p.suffix != ".secret" or not vault.NAME_RE.fullmatch(p.stem):
             continue
         try:
-            fd = os.open(str(p), os.O_RDONLY | os.O_NOFOLLOW)
+            fd = os.open(str(p), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except OSError:
             continue
         with os.fdopen(fd, "rb") as fh:
             if not stat.S_ISREG(os.fstat(fh.fileno()).st_mode):
                 continue
-            value = fh.read(MAX_VALUE_BYTES + 1)
-        if value and len(value) <= MAX_VALUE_BYTES:
-            out.append(value)
-    return sorted(set(out), key=len, reverse=True)
+            value = fh.read(cap + 1)
+        if not value or len(value) > cap:
+            continue
+        out.append(value)
+        if b"\n" in value.strip():
+            lines.extend(ln.strip() for ln in value.splitlines()
+                         if len(ln.strip()) >= MIN_LINE_BYTES)
+    return (sorted(set(out), key=len, reverse=True),
+            sorted(set(lines), key=len, reverse=True))
 
 
-def _scrub_bytes(blob, values, redact):
+def _scrub_bytes(blob, needles, redact):
+    """Whole values through the full `secret exec` filter (every rendering);
+    single lines of a multi-line value RAW only — a line is printed as-is by
+    a line-oriented tool, and ~20 renderings per line of a PEM body would cost
+    a pass over the output each."""
+    values, lines = needles
     for v in values:
         blob = redact(blob, v, MARKER)
+    for ln in lines:
+        blob = blob.replace(ln, MARKER)
     return blob
 
 
@@ -115,7 +136,7 @@ def main():
     if not isinstance(payload, dict) or "tool_response" not in payload:
         return 0
     values = store_values()
-    if not values:
+    if not values[0]:
         return 0
     response = payload["tool_response"]
     # Cheap pre-filter: every string of the response joined once, so the

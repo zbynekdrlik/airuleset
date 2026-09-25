@@ -163,6 +163,25 @@ class InspectRefuses(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertNotIn("bytes:", r.stdout)
 
+    def test_a_root_that_is_itself_a_symlink(self):
+        # Review B finding 8: `~/.secrets -> ~` must not open the whole home.
+        (self.home / DOT).rmdir()
+        (self.home / DOT).symlink_to(self.home)
+        other = self.home / "notes.txt"
+        other.write_text(FAKE)
+        r = inspect(self.home, str(self.home / DOT / "notes.txt"))
+        self.assertEqual(r.returncode, 2, r.stdout)
+        self.assertNotIn("bytes:", r.stdout)
+
+    def test_a_fifo_is_refused_without_hanging(self):
+        fifo = self.home / DOT / "pipe"
+        os.mkfifo(fifo)
+        r = subprocess.run(["timeout", "10", "python3", str(REPO / "airuleset.py"),
+                            "secret", "inspect", str(fifo)],
+                           capture_output=True, text=True,
+                           env={"PATH": "/usr/bin:/bin", "HOME": str(self.home)})
+        self.assertEqual(r.returncode, 2, r.stderr)
+
     def test_no_path(self):
         r = inspect(self.home)
         self.assertEqual(r.returncode, 2)

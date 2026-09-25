@@ -102,6 +102,34 @@ class Redaction(unittest.TestCase):
         r = self.run_hook("prefix %s" % FAKE, tool="mcp__x__y")
         self.assertEqual(self._updated(r), "prefix %s" % MARK)
 
+    def test_a_multi_line_value_printed_line_by_line(self):
+        # Review B finding 3: Grep's `path:N:` prefix, `cat -n`, an Edit
+        # patch's `+<line>` entries print a PEM-like value one line at a time.
+        body = ["fakeline1153AAAAbbbbCCCCdddd", "fakeline1153EEEEffffGGGGhhhh"]
+        value = ("-----BEGIN FAKE KEY-----\n%s\n%s\n-----END FAKE KEY-----\n"
+                 % tuple(body)).encode()
+        self._store("PEM", value)
+        grep = "k.pem:2:%s\nk.pem:3:%s\n" % tuple(body)
+        r = self.run_hook({"mode": "content", "content": grep, "numLines": 2})
+        out = self._updated(r)["content"]
+        for ln in body:
+            self.assertNotIn(ln, out)
+        self.assertIn("k.pem:2:%s" % MARK, out)
+        r = self.run_hook({"filePath": "/tmp/k", "structuredPatch": [
+            {"lines": ["+%s" % body[0], " unrelated"]}]}, tool="Edit")
+        self.assertEqual(self._updated(r)["structuredPatch"][0]["lines"],
+                         ["+%s" % MARK, " unrelated"])
+
+    def test_a_value_up_to_the_store_cap_is_used(self):
+        # Review B finding 6: the redactor's cap must be the store's own.
+        from filedrop import vault
+        big = (b"fake1153" * (vault.MAX_SECRET_BYTES // 8))[:vault.MAX_SECRET_BYTES - 10]
+        self.assertGreater(len(big), 64 * 1024)
+        self._store("BIG", big)
+        r = self.run_hook({"stdout": "x" + big.decode() + "y", "stderr": "",
+                           "interrupted": False, "isImage": False})
+        self.assertEqual(self._updated(r)["stdout"], "x%sy" % MARK)
+
     def test_several_values(self):
         self._store("A", FAKE.encode())
         self._store("B", b"another-fake-1153-value")

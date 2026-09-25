@@ -57,8 +57,14 @@ a token you may already have:**
 
 ```bash
 ls ~/.secrets/cloudflare-*
-CF_TOKEN=$(cat ~/.secrets/cloudflare-<project>)   # value stays in the var, never echoed
+python3 ~/devel/airuleset/airuleset.py secret inspect ~/.secrets/cloudflare-<project>  # format only
 ```
+
+The token is USED from a SCRIPT, never read inline: `block-vault-store-read.sh`
+refuses `cat`/`tr <`/`$(<…)` on `~/.secrets/` in a Bash tool call (#1153 — a
+lane's inline read put a PROD key in its transcript). Write the probe below to
+a file with the Write tool and run `bash <file>`; its text names the key, the
+Bash command does not.
 
 Then **verify the candidate against the ZONE it is FOR** (step 2) — a token can
 be present but dead; test it, never assume.
@@ -99,6 +105,7 @@ verdict and skip `/user/tokens/verify` unless you positively hold a
 User-level-scoped token:
 
 ```bash
+# cf-probe.sh — run as `bash cf-probe.sh` (see §1: never inline in a Bash call)
 # ✅ universal capability probe — TRUE for cfat_ account tokens AND zone/user tokens.
 # Trim first: a web-form / secret-channel paste carries a trailing newline that
 # breaks the Authorization header and looks exactly like a bad token.
@@ -162,15 +169,18 @@ never chat/scp (see `receive-files-via-upload-url.md`):
 #   file        ~/.secrets/cloudflare-spinbike
 #   dash label  spinbike-dns · claude
 
-# 1. Request a one-shot upload URL and hand it to the user:
-python3 ~/devel/airuleset/airuleset.py secret request cloudflare_<project>
+# 1. Request a one-shot upload URL and hand it to the user; --persist writes
+#    the durable mode-600 file the moment the user submits (#529):
+python3 ~/devel/airuleset/airuleset.py secret request cloudflare_<project> \
+  --persist ~/.secrets/cloudflare-<project>
 #    The URL is CONSUMED by a successful submit ("link na nahratie nefunguje" =
 #    it was already used). To re-issue: `secret forget cloudflare_<project>`
 #    first (or `secret request --replace` for a still-pending one), THEN re-request.
 
-# 2. Persist to disk WITHOUT the value ever hitting the transcript:
-python3 ~/devel/airuleset/airuleset.py secret exec cloudflare_<project> --stdin -- \
-  sh -c 'umask 077; cat > ~/.secrets/cloudflare-<project>'
+# 2. If it was requested WITHOUT --persist, self-heal the durable copy from
+#    the vault while the value is still there (never overwrites an existing file):
+python3 ~/devel/airuleset/airuleset.py secret exec cloudflare_<project> \
+  --persist ~/.secrets/cloudflare-<project> -- true
 ```
 
 Next time, step 1 finds it already there — no round trip.

@@ -158,6 +158,38 @@ class Denied(unittest.TestCase):
         self.assertDenied("%s exec N cat %s" % (CLI, KEY))
         self.assertDenied("%s exec N -- sh -c 'cat %s'" % (CLI, KEY))
 
+    def test_a_secret_cli_flag_value_is_not_blanket_accounted(self):
+        # Review A finding 1: only --persist/--persist-map/--file values (and
+        # inspect's one path) are key-file arguments of the CLI. An int flag
+        # with a non-int value is not the CLI's (it breaks there, and the rest
+        # becomes the child), and --env takes a NAME.
+        for flag in ("--ttl", "--keep", "--port", "--env"):
+            with self.subTest(flag=flag):
+                self.assertDenied("%s exec N %s %s realcmd" % (CLI, flag, KEY))
+        self.assertDenied("%s status %s" % (CLI, KEY))
+        self.assertDenied("%s inspect %s | xargs cat" % (CLI, KEY))
+
+    def test_the_audit_line_never_carries_a_value_glued_to_the_path(self):
+        # Review B finding 2 (#157 for rule E): the stray is a whole shell
+        # token, and a value can share it with the path.
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            log = Path(td) / "a.log"
+            env = {"PATH": "/usr/bin:/bin", "HOME": td,
+                   "AIRULESET_ALLOW_VAULT_READ": "1",
+                   "AIRULESET_VAULT_READ_AUDIT": str(log)}
+            for cmd in ("printf fakeval1153xyz>%s" % KEY,
+                        "python3 -c 'open(\"%s/k\",\"w\").write(\"fakeval1153xyz\")'" % RA):
+                with self.subTest(cmd=cmd):
+                    r = subprocess.run(["/bin/bash", str(HOOK)], env=env, text=True,
+                                       capture_output=True, input=json.dumps(
+                                           {"tool_name": "Bash",
+                                            "tool_input": {"command": cmd}}))
+                    self.assertEqual(r.returncode, 0, r.stderr)
+                    body = log.read_text()
+                    self.assertIn(DOT, body)
+                    self.assertNotIn("fakeval1153xyz", body)
+
     def test_a_lookalike_cli_invocation_is_not_the_cli(self):
         self.assertDenied("python3 evil.py airuleset.py secret inspect %s" % KEY)
         self.assertDenied("python3 -c 'print(1)' secret inspect %s" % KEY)
@@ -349,6 +381,17 @@ class StoreRootUnchanged(unittest.TestCase):
     def test_ssh_identity_exemption_does_not_extend_to_the_store(self):
         r = run("ssh -i ~/.claude/secrets/DB_PASS.secret host true")
         self.assertEqual(r.returncode, 2)
+
+    def test_secret_inspect_is_the_store_format_check_too(self):
+        # Review B finding 5: inspect accepts store paths, so the hook must
+        # let exactly that one metadata call through — unpiped, one path.
+        ok = run("%s inspect ~/.claude/secrets/DB_PASS.secret" % CLI)
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        for cmd in ("%s inspect ~/.claude/secrets/DB_PASS.secret | xargs cat" % CLI,
+                    "%s inspect ~/.claude/secrets/A.secret x" % CLI,
+                    "python3 evil.py airuleset.py secret inspect ~/.claude/secrets/A.secret"):
+            with self.subTest(cmd=cmd):
+                self.assertEqual(run(cmd).returncode, 2)
 
 
 if __name__ == "__main__":
