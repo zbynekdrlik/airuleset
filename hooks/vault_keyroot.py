@@ -476,6 +476,48 @@ def _reads_names(head, tok):
                                 for opt in NAME_READING_OPTS.get(head, ()))
 
 
+# A recursive grep walks the working directory, whatever it was piped (slice-5
+# review: `cd ~ && ls <root> | grep -d recurse PAT` printed a private key).
+# GNU grep permutes, so an option anywhere before `--` counts; a short
+# option that takes a value ends its cluster (`-e -r` is a pattern).
+GREP_HEADS = {"grep", "egrep", "fgrep"}
+GREP_VALUE_SHORT = "efmABCdD"
+GREP_WALK_LONG = ("--recursive", "--dereference-recursive")
+
+
+def _recurse_value(value):
+    return bool(value) and "recurse".startswith(value)
+
+
+def _grep_walks(args):
+    i = 0
+    while i < len(args):
+        t = args[i]
+        nxt = args[i + 1] if i + 1 < len(args) else ""
+        if t == "--":
+            return False
+        if t.startswith("--"):
+            key, eq, val = t.partition("=")
+            if len(key) > 2 and any(o.startswith(key) for o in GREP_WALK_LONG):
+                return True
+            if (len(key) > 3 and "--directories".startswith(key)
+                    and _recurse_value(val if eq else nxt)):
+                return True
+        elif t.startswith("-") and len(t) > 1:
+            for j, ch in enumerate(t[1:], start=1):
+                if ch in "rR":
+                    return True
+                if ch in GREP_VALUE_SHORT:
+                    value = t[j + 1:] or nxt
+                    if ch == "d" and _recurse_value(value):
+                        return True
+                    if not t[j + 1:]:
+                        i += 1             # the value is the next token
+                    break
+        i += 1
+    return False
+
+
 def _is_text_sink(seg):
     try:
         tk = shlex.split(seg)
@@ -484,6 +526,8 @@ def _is_text_sink(seg):
     if not tk or _cmd_start(tk) != 0 or "/" in tk[0]:
         return False
     if tk[0] not in INSPECT_SINKS:
+        return False
+    if tk[0] in GREP_HEADS and _grep_walks(tk[1:]):
         return False
     return not any(_reads_names(tk[0], t) for t in tk[1:])
 
