@@ -13,7 +13,9 @@ import contextlib
 import email.message
 import io
 import json
+import shutil
 import sys
+import tempfile
 import urllib.error
 import wave
 from pathlib import Path
@@ -29,6 +31,26 @@ FAKE_CRED = "FAKE-ASR-CRED-VALUE-1155-NEVER-REAL"
 
 CONTRACT_FILES = {"transcript.txt", "transcript.json", "speaker_turns.json",
                   "summary.json", "done"}
+
+
+_MODULE_TMP: list[Path] = []
+
+
+def new_tmp(testcase=None) -> Path:
+    """A fresh temp dir that is always removed: by `testcase.addCleanup`, or,
+    without a testcase, by `cleanup_module_tmp()` from the module's
+    `tearDownModule` (pytest's conftest tidies too, `unittest discover` not)."""
+    d = Path(tempfile.mkdtemp(prefix="asr1155-"))
+    if testcase is not None:
+        testcase.addCleanup(shutil.rmtree, d, True)
+    else:
+        _MODULE_TMP.append(d)
+    return d
+
+
+def cleanup_module_tmp() -> None:
+    while _MODULE_TMP:
+        shutil.rmtree(_MODULE_TMP.pop(), True)
 
 
 def import_script(name: str):

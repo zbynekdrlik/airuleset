@@ -14,12 +14,11 @@ from __future__ import annotations
 import contextlib
 import io
 import json
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from asr_testlib_1155 import import_script, write_wav
+from asr_testlib_1155 import import_script, new_tmp, write_wav
 
 
 def T(spk, a, b, text=""):
@@ -35,7 +34,7 @@ def terms_file(tmp: Path, lines) -> Path:
 class TermErrors(unittest.TestCase):
     def setUp(self):
         self.m = import_script("ab_asr")
-        self.tmp = Path(tempfile.mkdtemp(prefix="asr1155-"))
+        self.tmp = new_tmp(self)
 
     def _terms(self, *lines):
         return self.m.load_terms(terms_file(self.tmp, lines))
@@ -124,7 +123,7 @@ class Cost(unittest.TestCase):
 class AggregateAndReport(unittest.TestCase):
     def setUp(self):
         self.m = import_script("ab_asr")
-        self.tmp = Path(tempfile.mkdtemp(prefix="asr1155-"))
+        self.tmp = new_tmp(self)
 
     def _slice(self, name, ref_turns, outputs, seconds=60.0):
         d = self.tmp / name
@@ -189,7 +188,7 @@ class AggregateAndReport(unittest.TestCase):
 class RunAndCut(unittest.TestCase):
     def setUp(self):
         self.m = import_script("ab_asr")
-        self.tmp = Path(tempfile.mkdtemp(prefix="asr1155-"))
+        self.tmp = new_tmp(self)
 
     def test_adapter_commands(self):
         d = self.tmp / "s1"

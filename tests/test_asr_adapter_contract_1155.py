@@ -15,13 +15,13 @@ import io
 import json
 import os
 import re
-import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from asr_testlib_1155 import (CONTRACT_FILES, FAKE_CRED, FakeResponse, fake_http,
-                              fixture, import_script, write_wav)
+from asr_testlib_1155 import (CONTRACT_FILES, FAKE_CRED, FakeResponse,
+                              cleanup_module_tmp, fake_http, fixture, import_script,
+                              new_tmp, write_wav)
 
 EXPECTED_TURNS = [("1", "Pošli mi faktúru OP 12."),
                   ("2", "Áno, zálohová faktúra je v Odoo.")]
@@ -69,7 +69,7 @@ ADAPTERS = {
 def run_adapter(module, env_name, argv, routes, *, seconds=4.0, cred=FAKE_CRED):
     """Run an adapter's real main() in a temp dir; returns (rc, out_dir,
     captured stdout+stderr, FakeHttp)."""
-    tmp = Path(tempfile.mkdtemp(prefix="asr1155-"))
+    tmp = new_tmp()
     audio = write_wav(tmp / "audio.wav", seconds)
     out = tmp / "out"
     env = {k: v for k, v in os.environ.items()
@@ -261,7 +261,7 @@ class GeminiRequestShape(unittest.TestCase):
 
     def test_non_wav_input_fails_loud(self):
         mod = import_script("transcribe_gemini")
-        tmp = Path(tempfile.mkdtemp(prefix="asr1155-"))
+        tmp = new_tmp(self)
         bad = tmp / "audio.mp3"
         bad.write_bytes(b"not a wav")
         buf = io.StringIO()
@@ -272,6 +272,10 @@ class GeminiRequestShape(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertTrue((tmp / "out" / "error").exists())
         self.assertEqual(fake.calls, [])
+
+
+def tearDownModule():
+    cleanup_module_tmp()
 
 
 if __name__ == "__main__":

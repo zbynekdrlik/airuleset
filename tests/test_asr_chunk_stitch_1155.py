@@ -13,12 +13,10 @@ The stitching rule under test (documented in asr_chunks.py):
 """
 from __future__ import annotations
 
-import tempfile
 import unittest
 import wave
-from pathlib import Path
 
-from asr_testlib_1155 import import_script, write_wav
+from asr_testlib_1155 import import_script, new_tmp, write_wav
 
 
 def W(text, a, b, spk):
@@ -55,7 +53,7 @@ class PlanChunks(unittest.TestCase):
 class SliceWav(unittest.TestCase):
     def test_slice_has_the_right_frames_and_format(self):
         m = import_script("asr_chunks")
-        tmp = Path(tempfile.mkdtemp(prefix="asr1155-"))
+        tmp = new_tmp(self)
         src = write_wav(tmp / "a.wav", 5.0)
         self.assertAlmostEqual(m.wav_duration(src), 5.0)
         dst = m.slice_wav(src, 1.5, 3.5, tmp / "part.wav")
