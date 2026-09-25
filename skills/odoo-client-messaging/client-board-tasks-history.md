@@ -58,9 +58,11 @@ Moved VERBATIM out of the injected CORE so rule 16 fits the #1102 co-fire budget
 (CORE ≤ 6000 stripped chars, ≥ 500 headroom on the tightest co-fire fixture):
 owner quotes, ticket provenance, the one-time `res.users` rename scope note, the
 enforcing-hook citation and a sentence that repeated rule 13's own
-`body_is_html=True`. Every operative instruction stayed in the CORE (the
-owner-override sentence of rule 11 is what rule 12 already says: an owner
-correction changes the CORE rule itself).
+`body_is_html=True`. Every operative instruction stayed in the CORE: rule 11
+keeps the rename remedy as „(rename: own odoo-erp task)", and its
+owner-override sentence is what rule 12 already says (an owner correction
+changes the CORE rule itself). Rule 13 (a) below adds a note in parentheses;
+the rest is the original text.
 
 - **rule 7:** (owner: „preco do commentarov do odoo taskov vypisujes technicke veci o githube!!", #1018)
 - **rule 11 (a):** (the form the owner accepted when david3 renamed `res.users` 366 on slovnormal to „ZbynekAI 3"; odoo-erp #4624 / #4721)
@@ -70,6 +72,7 @@ correction changes the CORE rule itself).
 - **rule 11 (c):** The owner may override the fleet form; the `res.users` rename itself on each Odoo instance is that stream's OWN odoo-erp task, not this file.
 - **rule 13 (a):** hook `block-odoo-message-post-without-html.sh`, #1054 (enforces the stream-approved poster)
 - **rule 13 (b):** The `handover-compose.md` `body_is_html` rule applies to task chatter too.
+- **rule 12 (b):** (where the other streams never see it)
 
 ## Rule 16 — origin (#1156)
 
@@ -80,3 +83,12 @@ môžeš mať technické veci, ktoré rozumieš len ty, no nikto z nás im neroz
 Streams recorded meeting agreements only on GitHub issues, which the client and
 the owner do not read, so the agreements were lost for the people who share the
 Odoo tasks. GitHub keeps the technical record (file:line, tests, root cause).
+
+Review notes (#1156):
+- `mail.mt_note` is the Odoo log-note subtype: followers get no e-mail (an
+  @mention still notifies that one person). The client boards are the clients'
+  own Odoo instances, so their employees are internal users and see the note.
+  The repo poster in odoo-erp must offer that subtype; confirm it there.
+- Compose the note from the transcript or the ticket, not from a meeting-analysis
+  `NOTES.md`: that file writes `[redigované]` for customer names (its Hard
+  Rule 7), and a placeholder must never reach the client.

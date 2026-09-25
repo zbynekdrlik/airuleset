@@ -54,8 +54,9 @@ genuine edge case bypasses with `# airuleset:client-body-ok REASON` (logged).
 ### 9. ATOMIC tasks — one task = one topic
 
 One task = one topic; a task is NEVER a chat-of-everything. When the client
-opens a NEW topic inside an existing task, the stream IMMEDIATELY: (a) creates a NEW task for it (with its own GitHub
-`GitHub ticket: #N` marker note), (b) posts a one-line pointer in the source task
+opens a NEW topic inside an existing task, the stream IMMEDIATELY: (a) creates
+a NEW task for it (with its own GitHub `GitHub ticket: #N` marker note), (b)
+posts a one-line pointer in the source task
 — „téma X pokračuje v úlohe Y" — and (c) continues that topic ONLY in the new
 task. Never answer the second topic in place.
 
@@ -64,13 +65,14 @@ task. Never answer the second topic in place.
 Each stream's Odoo `res.users` display name, and its message signature, use ONE
 canonical form per stream: **`ZbynekAI <N>`** by default, where `<N>` is the
 stream number; a NAMED stream uses its stream name (e.g. `MarekAI <N>` for a
-marek-owned stream). Never „ZbynekAI - odovzdávky" or any ad-hoc variant.
+marek-owned stream). Never „ZbynekAI - odovzdávky" or any ad-hoc variant
+(rename: own odoo-erp task).
 
 ### 12. Owner corrections change THIS rule, not a per-stream memory
 
 An owner correction about board chatter / stages / addressing / "Done" NEVER
-goes into a per-stream `~/.claude/projects/*/memory/*.md` (where the other
-streams never see it). It changes THIS file, so every stream inherits it: propose the edit via
+goes into a per-stream `~/.claude/projects/*/memory/*.md`. It changes THIS
+file, so every stream inherits it: propose the edit via
 `python3 ~/devel/airuleset/airuleset.py gk-request --repo zbynekdrlik/airuleset`.
 A memory-write guard refuses a new per-stream client-board memory and points
 here; the #1028 doctrine-audit retires any that slip through.
@@ -91,10 +93,10 @@ so the edit is logged. Absent an owner order, a posted message stands.
 ### 16. Meeting / decision outcome → every affected Odoo task
 
 After every client meeting or decision, write what was agreed into EACH affected
-board task: plain Slovak, a **bold-keyword** structure, no ticket numbers, no code
-(rule 7's gate); an INTERNAL note (Odoo log note), no follower e-mail, via the
-repo poster (rule 13); the owner approves the text before posting.
-GitHub issues stay the technical record —
+board task (no task yet → new one, rule 9): plain Slovak, **bold-keyword**
+structure, no ticket numbers, no code (rule 7); an INTERNAL note (`mail.mt_note`),
+no follower e-mail, via the repo poster (rule 13); the owner approves the text
+before posting. GitHub issues stay the technical record —
 an agreement recorded ONLY on GitHub is NOT recorded.
 Owner, 25.9.2026: „chcel by som mať info o tom, čo sa dohodlo na meetingu aj v
 úlohách, lebo tu to zasa zabudneš a issues sú v princípe len pre teba. Tasky sú
