@@ -338,7 +338,7 @@ def cmd_burn(args):
         window = getattr(args, "window", None) or 6
         changes = burn.load_changes()
         results = burn.compare_changes(burn.load_snapshots(), changes, window_hours=window)
-        fleet_rows = burn.load_fleet(since=burn.compare_since(changes, window))
+        fleet_rows = burn.load_fleet(since=burn.compare_since(changes, window, burn.fleet_path()))
         fleet_results = None
         if fleet_rows:
             fleet_results = burn.compare_changes(burn.fleet_compare_rows(fleet_rows),

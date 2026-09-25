@@ -23,7 +23,8 @@ import zlib
 from collections import defaultdict
 from pathlib import Path
 
-from .fleet_tail import burn_alert_since, compare_since, read_rows_since  # noqa: F401
+from .fleet_tail import (_parse_ts, burn_alert_since, compare_since,  # noqa: F401
+                         read_rows_since)
 from .host_detail import (FLEET_WEEKLY_CANDIDATE_MAX_AGE, SessionAgg,  # noqa: F401
                           _weekly_candidate_is_fresh, session_id_of,
                           snapshot_sessions, weekly_windows)
@@ -516,13 +517,6 @@ def mark_change(text, path=None, host=None, now=None):
     with open(path, "a") as f:
         f.write(json.dumps(row) + "\n")
     return str(path)
-
-
-def _parse_ts(s):
-    try:
-        return datetime.datetime.fromisoformat(str(s).replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return None
 
 
 def hour_bucket_of_ts(ts_str):
