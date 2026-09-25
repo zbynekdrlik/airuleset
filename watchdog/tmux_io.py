@@ -1214,72 +1214,46 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
                   out=None, user_authored=False, nudge=None, state=None,
                   skip_confirm=False, now=None):
     """Type `text` + Enter into a BARE input box and VERIFY the submit landed
-    via the TRANSCRIPT (the #486 delivery bullet's structured proof), not the
-    pane render: after the send, the session jsonl at `tpath` must gain a new
-    `user` turn carrying `text` within a bounded window. This is the missing
-    transcript-proof member of the delivery family (`deliver_with_stash` /
-    `_send_goal_verified` / the compact submit-verify) — the piece a raw
-    `send_continue` (type + Enter, no post-send read) never had, so a swallowed
-    Enter (agent-strip selector #36, or a turn started under the send) used to
-    be booked "sent" with the text left hanging in the user's input box (#490).
+    via the TRANSCRIPT (#486/#490): after the send, the session jsonl at `tpath`
+    must gain a new `user` turn carrying `text` within a bounded window. A raw
+    `send_continue` never had this read, so a swallowed Enter (agent-strip
+    selector #36, a turn started under the send) left the text in the box.
 
-    The type half mirrors `_send_goal_verified`: a fresh bare re-check right
-    before typing, a strip-selector Escape (#36), `_type_literal` CHUNK-typing
-    (never a single multi-KB `-l` burst that CC would collapse into a paste,
-    #322 — the lane nudge texts run ~550–720 chars, well past the 200-char
-    threshold), and a pre-Enter TYPE verify that never submits a collapsed or
-    unrendered paste. Only the SUBMIT verify differs: the transcript, not the
-    pane render.
+    The type half: a fresh bare re-check right before typing, a strip-selector
+    Escape (#36), the head-inclusive verified type `_type_literal_verified`
+    (#670; chunk-typed, #322; two-phase head checkpoint for a box that may
+    scroll, #746/#1157), and never an Enter on an unverified type.
 
-    Returns True ONLY on a transcript-CONFIRMED submit. On failure:
-      - our text still PROVABLY stuck in the box -> ONE corrective Escape+Enter
-        (#36; never a second Escape #35, never a bare second Enter), re-verify;
-        if still stuck, `_undo_and_release_slot` backspaces exactly our own
-        text off the box (verified bare before we typed, so every char is ours);
-      - box bare but unconfirmed -> return False with NO corrective Escape (a
-        bare box after a submit may mean a turn genuinely STARTED — an Escape
-        there would interrupt it, the #233 harm) and nothing undone;
-      - box holds UNRECOGNIZED content (a truncated type, a collapsed hint) ->
-        withhold keystrokes (a blind backspace could eat a real draft, #193),
-        log the residue HONESTLY (never claim "bare" unread, #134/#360), and
-        let the caller's #372 janitor mark backstop it.
-    False means "not delivered, retryable next sweep" — the caller leaves its
-    own budget unconsumed.
+    Returns a `send_outcome.SendOutcome` (#1157). It is truthy ONLY on a
+    transcript-CONFIRMED submit and compares equal to the old bool, so a caller
+    that only needs success is unchanged; `.kind` names what happened:
+      - `not-typed`: nothing was typed (no tpath, box busy/raced, pane budget
+        held, spinner, kill switch OFF);
+      - `typed-undone` / `typed-stranded`: typed, the verify failed, and the ONE
+        own-provenance janitor undo cleared the box / could not (for a box that
+        may still hold our text the janitor watch is armed and the exact text
+        recorded for the next sweep, `send_outcome.after_verify_failure`);
+      - `swallowed`: the Enter was swallowed twice, own text backed out
+        (`_undo_and_release_slot`; never a second Escape #35);
+      - `delivered-unconfirmed`: the Enter cleared the box but the transcript
+        turn raced (a cycling armed loop, #594). No corrective Escape: a bare box
+        after a submit may be a turn that STARTED (#233). A caller that must not
+        re-deliver reads `ok or out["delivered_unconfirmed"]` as delivered; the
+        #36 premise (the corrective Escape only deselects the strip) makes a
+        bare box after Escape+Enter a delivery too;
+      - `unconfirmed`: Enter sent, the box is unreadable or holds content we do
+        not recognise -- withheld (#193), logged honestly (#134/#360);
+      - `submitted`.
+    `out` (#594, optional dict) keeps its flags for older callers:
+    `delivered_unconfirmed`, `swallowed`, `attempted` (a typing attempt was
+    stamped on the per-pane budget), `pane_budget_held`.
 
-    `out` (#594, optional): when a dict is passed, `send_verified` records the
-    ONE outcome a flat bool cannot express — a submit that was DELIVERED but the
-    transcript confirmation RACED. It sets `out["delivered_unconfirmed"] = True`
-    in the "box bare after our Enter, submit not proven" branch: the Enter
-    CLEARED the box (CC accepted/queued the submit), only the `user` turn was
-    not written inside the window (the normal case when injecting into an
-    actively-cycling armed `/goal` loop). The genuine-swallow path (text left
-    STUCK) returns ABOVE via `_undo_and_release_slot` — text backed out, never
-    accepted — so it never reaches this branch. TWO live paths DO reach it, both
-    delivery: the first-Enter path (box cleared straight away) and the corrective
-    Escape+Enter path (lines below) that ends bare; the latter's delivery-ness
-    rests on this module's #36 premise (the corrective Escape only DESELECTS the
-    agent strip, it never clears the composer), so a bare box after it means the
-    Enter, not the Escape, emptied it. A caller that must not re-deliver (job
-    20's re-check nudge, #594) reads `ok OR out.get("delivered_unconfirmed")` as
-    "delivered", while still retrying a genuine swallow (neither True nor the flag
-    set). Even in the theoretical over-claim (an Escape that DID clear a real
-    composer), the only cost is the caller advancing its cadence by one period
-    (job 20: ≥6h, ~daily) while the ticket stays OPEN + surfaced and job 20 is
-    itself the re-check backstop — bounded and self-healing, never a permanent
-    silence. Default None -> byte-identical for every existing caller.
-
-    `tpath` is REQUIRED (the transcript is the whole proof); a falsy or
-    unreadable `tpath` refuses to send rather than typing blind or reading from
-    byte 0. Bare-box ONLY: a pane holding a DRAFT is delivered via
-    `deliver_with_stash`; a draft that RACED into the box since the caller's own
-    check is rescued and the send aborted.
-
-    `user_authored` (#994): True ONLY for the owner's OWN Discord reply (set
-    solely by `discord_replies`). It BYPASSES the nudge kill switch -- the owner
-    speaking is never a machine nudge -- so an OFF box still delivers the owner's
-    answer. Every machine caller leaves it False and is suppressed when OFF. The
-    switch is enforced (and journalled) at the `_type_literal_verified` primitive
-    below (#994 REOPEN), forwarding this `user_authored`; no own gate here."""
+    `tpath` is REQUIRED (the transcript is the whole proof). Bare-box ONLY: a
+    DRAFT goes through `deliver_with_stash`; a draft that races into the box is
+    rescued and the send aborted. `user_authored` (#994): True ONLY for the
+    owner's own Discord reply; it bypasses the nudge kill switch, which is
+    enforced at the `keys` primitive (#1002)."""
+    from watchdog import send_outcome as _so
     run = run or watchdog._default_run
     sleep_fn = sleep_fn or time.sleep
 
@@ -1289,7 +1263,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
 
     if not tpath:
         _log("send-verified abort: no transcript path")
-        return False
+        return _so.OUT_NOT_TYPED
     # A FRESH capture right before typing (the sibling helpers' own race
     # guard): the caller proved the box bare a moment ago, but round-trips pass
     # before the real keystroke lands.
@@ -1297,7 +1271,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     if watchdog._input_line_text(cap) != "":
         watchdog._draft_rescue_persist(pane_id, cap, logs=logs)
         _log("send-verified abort: box not bare pre-send")
-        return False
+        return _so.OUT_NOT_TYPED
     # #1092 (c) -- the PER-PANE typing-attempt BUDGET, consulted BEFORE any
     # keystroke. A GATED machine nudge (a threaded `nudge=` that is not a RECOVERY
     # revival kind, with `state` to read/write, and NOT the owner's own reply) is
@@ -1330,7 +1304,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
                 state, pane_id, _pane_now))
             if isinstance(out, dict):
                 out["pane_budget_held"] = True
-            return False
+            return _so.OUT_NOT_TYPED
     # #1002 -- the strip-deselect Escape carries the delivery's "send" kind, so
     # the ONE `keys` primitive gates it: at OFF a machine caller fires ZERO
     # keystrokes (keys suppresses + returns False, this helper bails), while the
@@ -1338,7 +1312,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     if watchdog._strip_selected(cap):
         if not watchdog.keys(pane_id, "Escape", kind="send", nudge=nudge,
                              user_authored=user_authored, run=run, logs=logs):
-            return False
+            return _so.OUT_NOT_TYPED
     # Re-verify bare AFTER the strip-Escape and immediately before the type
     # keystroke — a draft racing into that gap would otherwise be typed over
     # (the same second bare-check `_send_goal_verified` does, #176-F3).
@@ -1346,7 +1320,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     if watchdog._input_line_text(fresh) != "":
         watchdog._draft_rescue_persist(pane_id, fresh, logs=logs)
         _log("send-verified abort: box raced busy pre-send")
-        return False
+        return _so.OUT_NOT_TYPED
     # #1104 -- a RUNNING-turn activity spinner rendered ABOVE the (bare) box is a
     # SUSPENDED turn: the box reads bare but the Enter is SWALLOWED (the montalu1
     # render race). `_input_line_text=="" ` alone misses it (the box IS bare) and
@@ -1357,14 +1331,14 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     # riders + the batch send) inherits it (#1104-review shared-benefit finding).
     if watchdog._pane_activity_spinner_above_box(fresh):
         _log("send-verified abort: activity spinner above box (suspended turn)")
-        return False
+        return _so.OUT_NOT_TYPED
     try:
         baseline = os.path.getsize(tpath)
     except OSError:
         # An unreadable transcript cannot verify a submit; refuse rather than
         # read from byte 0 (a prior identical nudge would false-confirm).
         _log("send-verified abort: transcript unreadable pre-send")
-        return False
+        return _so.OUT_NOT_TYPED
     # #670 -- HEAD-INCLUSIVE verified type + bounded settle/undo/retry, replacing
     # the old `_type_literal` + `_await_typed_landed(want=True)` pair that
     # verified only the TAIL (`_typed_landed`'s endswith) and was head-blind: a
@@ -1376,27 +1350,32 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     # box withholds every keystroke (#670-review R2) -- so a head-corrupted
     # prompt is NEVER submitted, and no keystroke is fired into a box we cannot
     # safely backspace.
-    if not watchdog._type_literal_verified(pane_id, run, text, sleep_fn,
-                                           kind="send", nudge=nudge,
-                                           user_authored=user_authored,
-                                           logs=logs, state=state):
+    tv = {}
+    typed_ok = watchdog._type_literal_verified(
+        pane_id, run, text, sleep_fn, kind="send", nudge=nudge,
+        user_authored=user_authored, logs=logs, state=state, out=tv,
+        verify_chunks=True)                     # #1157: a scrolled box is proven
+    # #1092 (c) / #1157 -- a type that reached the box IS a typing attempt, verified
+    # or not: stamp the per-pane budget (only for a gated machine nudge) so a pane
+    # whose verify keeps failing is not re-typed every sweep. A no-keystroke abort
+    # above never burns the budget.
+    if _gated_nudge and (typed_ok or tv.get("typed")):
+        from watchdog import nudge_gate as _ng
+        _ng.mark_pane_attempt(state, pane_id, _pane_now)
+        if isinstance(out, dict):
+            out["attempted"] = True
+    if not typed_ok:
         if watchdog._pane_shows_collapsed_paste(watchdog._input_line_text(
                 watchdog.capture_pane(pane_id, run, lines=40))):
             _log("send-verified abort: collapsed-paste, not submitted")
         else:
             _log("send-verified abort: type not head+tail-verified, not submitted")
-        return False
-    # #1092 (c) -- the type keystrokes landed (text is in the box), so a typing
-    # attempt has DEFINITIVELY been made: stamp the per-pane budget NOW, before
-    # the Enter, so it counts regardless of the submit outcome below (delivered,
-    # delivered-unconfirmed, OR swallowed). A pre-type abort (box busy / collapsed
-    # paste / withheld) returned above WITHOUT reaching here, so it never burns the
-    # budget. Only gated machine nudges are counted (see the consult above).
-    if _gated_nudge:
-        from watchdog import nudge_gate as _ng
-        _ng.mark_pane_attempt(state, pane_id, _pane_now)
-        if isinstance(out, dict):
-            out["attempted"] = True
+        if not tv.get("typed"):
+            return _so.OUT_NOT_TYPED            # suppressed / withheld: no keystroke
+        # #1157 -- our text reached the box: the ONE own-provenance undo, never a
+        # stranded payload that blocks every later delivery ("box not bare").
+        return _so.after_verify_failure(pane_id, run, text, sleep_fn, _log, logs,
+                                        state, _pane_now)
     watchdog.keys(pane_id, "Enter", kind="send", nudge=nudge,
                   user_authored=user_authored, run=run, logs=logs)
     # #1023 timeout-race — `skip_confirm` (budget too low for the ~10s
@@ -1407,7 +1386,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     # the floor), so the caller delivers+marks fast instead of polling into the
     # 2-min unit kill. The pre-Enter type-settle above keeps its real sleep.
     if not skip_confirm and _await_submit_confirmed(tpath, baseline, text, sleep_fn):
-        return True
+        return _so.OUT_SUBMITTED
     # Unconfirmed. Only act further when our text is PROVABLY still in the box.
     if not skip_confirm and watchdog._typed_landed(text, watchdog._input_line_text(
             watchdog.capture_pane(pane_id, run, lines=40))):
@@ -1418,7 +1397,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         watchdog.keys(pane_id, "Enter", kind="send", nudge=nudge,
                       user_authored=user_authored, run=run, logs=logs)
         if _await_submit_confirmed(tpath, baseline, text, sleep_fn):
-            return True
+            return _so.OUT_SUBMITTED
         if watchdog._typed_landed(text, watchdog._input_line_text(
                 watchdog.capture_pane(pane_id, run, lines=40))):
             # Genuinely stuck — back our own text off the bare-verified box so
@@ -1444,7 +1423,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
                 _sid = os.path.splitext(os.path.basename(str(tpath)))[0] or None
                 if _sid:
                     _ng.mark_sent(state, _sid, nudge, _pane_now)
-            return False
+            return _so.OUT_SWALLOWED
     # #1023 timeout-race — on the skip_confirm path we did NO post-Enter poll, so
     # the box may not have render-cleared yet; ONE short settle before the read
     # (far cheaper than the skipped ~10s confirm-wait) lets CC clear the box so
@@ -1471,10 +1450,11 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         # Surface it so a caller that must not re-deliver treats it as delivered.
         if isinstance(out, dict):
             out["delivered_unconfirmed"] = True
+        return _so.OUT_DELIVERED_UNCONFIRMED
     else:
         _log("send-verified unconfirmed: box holds unrecognized content, "
              "left in place (retryable)")
-    return False
+    return _so.OUT_UNCONFIRMED
 
 
 def submit_own_draft_verified(pane_id, draft, run=None, tpath=None,

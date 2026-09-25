@@ -203,6 +203,9 @@ from watchdog import resurrect as _resurrect                 # #804 (mode-5 rela
 from watchdog import goal_turn_liveness as _turn_liveness     # #1110 (transcript liveness)
 from watchdog import gk_stall_notice as _gk_stall_notice      # #1109 (gk role-pane stall notice)
 from watchdog import stream_migrate as _stream_migrate        # #1143 (dark stream loop re-arm)
+from watchdog import send_outcome as _send_outcome            # #1157 (delivery outcome)
+from watchdog.send_outcome import (  # noqa: E402 -- #1157: moved, ONE shared undo
+    janitor_undo_if_own_stranded as _janitor_undo_if_own_stranded)
 
 
 # --------------------------------------------------------------------------- #
@@ -5370,39 +5373,90 @@ def _lane_stuck_owner_alert(now, run, rec, glance, sid, cwd, pid, loc,
             "next sweep [stuckalert:%s:%d]" % (loc, status, sid, anchor)]
 
 
-def _janitor_undo_if_own_stranded(pid, run, own_text, loc, sleep_fn, logs):
-    """#1092 (b) -- after a SWALLOWED or DELIVERED-UNCONFIRMED keystroke, capture
-    the pane ONCE and, when it still shows OUR OWN nudge/goal text sitting unsent,
-    run the #372 janitor clear (backspace it away) so the owner never finds a
-    foreign paragraph in his prompt (the incident: a delivered-unconfirmed batch
-    whose text sat in the active gk-infra prompt). Provenance is the caller's own
-    `_janitor_mark_watch` (set before the send) PLUS the content-shape recognizers
-    (`_looks_like_own_stuck_content` -- own prefix / collapsed-paste placeholder --
-    or a >= GOAL_ARM_LEFTOVER_MIN_SUBSTR own-substring): a box that does NOT
-    provably hold our text is left COMPLETELY untouched (a foreign draft is never
-    a >=80-char substring of our own text, never carries our prefix). A bare box
-    (the submit was accepted, or send_verified already backed the text out) is a
-    no-op. Returns True only once a fresh capture confirms the clear converged.
-    Explicit journal verbs on EVERY branch (#1092 (d), #486)."""
-    cap = watchdog.capture_pane(pid, run, lines=40)
-    head = watchdog._input_box_head_text(cap)
-    itext = watchdog._input_line_text(cap)
-    own = (watchdog._looks_like_own_stuck_content(head)
-           or watchdog._looks_like_own_stuck_content(itext)
-           or watchdog._box_is_own_leftover(
-               cap, own_text, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR))
-    if not own:
-        logs.append("janitor-undo %s -> box clean (nothing stranded)" % loc)
-        return False
-
-    def _log(reason):
-        logs.append(reason)
-
-    cleared = watchdog._janitor_clear_box(pid, run, sleep_fn, _log)
-    logs.append("janitor-undo %s -> %s" % (
-        loc, "cleared stranded machine text" if cleared
-        else "clear did not converge (retry next sweep)"))
-    return cleared
+def _deliver_batch(collect, pid, sid, loc, tpath, run, state, now, handled,
+                   persist, sleep_fn, logs, budget_left_fn):
+    """#923 BATCH DELIVERY (moved out of `goal_lane_sweep` by #1157): compose the
+    collected rider texts into ONE prompt, deliver it via `send_verified`, and
+    journal the REAL outcome (#486): delivered / held / a typed attempt named by
+    its `send_outcome` kind (typed-undone, typed-stranded, swallowed, ...) /
+    `deferred (not typed ...)` only when no keystroke was typed."""
+    _bt, _incl = _nudge_gate.compose_batch(
+        [(c, t) for c, t, _ in collect], max_chars=_nudge_gate.BATCH_MAX_CHARS)
+    if not _bt:
+        return
+    watchdog._janitor_mark_watch(state, pid, now)
+    send_out = {}
+    # #1023 timeout-race — SWEEP-RELATIVE confirm budget: when too little sweep
+    # budget remains for send_verified's ~10s transcript confirm-wait, skip it
+    # (the keystroke still lands; `delivered-unconfirmed` is an accepted state that
+    # stamps the floor), so the confirm-wait never runs the sweep into the unit's
+    # TimeoutStartSec=2min kill. The pre-Enter type-settle keeps its real sleep.
+    _b_left = _queue_arrival._budget_left(budget_left_fn)
+    _b_skip_confirm = (_b_left is not None and
+                       _b_left < _queue_arrival.QUEUE_ARRIVAL_CONFIRM_MIN_BUDGET_S)
+    _bok = watchdog.send_verified(
+        pid, _bt, run, tpath, sleep_fn=sleep_fn, logs=logs, out=send_out,
+        nudge=(_incl[0] if _incl else None), state=state,
+        skip_confirm=_b_skip_confirm,
+        now=now)  # #1022 wedge / #1023 budget / #1092 one-clock pane budget
+    # #1157 -- the outcome word; a legacy bool stub that reports `attempted` is a
+    # swallow (the pre-#1157 contract).
+    _kind = getattr(_bok, "kind", None) or (
+        _send_outcome.SWALLOWED if send_out.get("attempted")
+        else _send_outcome.NOT_TYPED)
+    if _bok or send_out.get("delivered_unconfirmed"):
+        _incl_set = set(_incl)
+        # #1023 🔵6: queue-arrival's baseline advances ONLY on a CONFIRMED submit —
+        # on a delivered-unconfirmed batch skip its callback (baseline OLD, janitor
+        # watch LEFT SET) and re-confirm later; other kinds keep terminal-on-
+        # unconfirmed. The FLOOR (mark_batch_sent) stamps ALL included (🟡4).
+        _qa_unconfirmed = (not _bok) and "queue-arrival" in _incl_set
+        if not _qa_unconfirmed:
+            watchdog._janitor_clear_watch(state, pid)
+        _nudge_gate.mark_batch_sent(state, sid, _incl, now)
+        if handled is not None:
+            handled.add(sid)
+        for _bc, _, _bfn in collect:
+            if _bc not in _incl_set or _bfn is None:
+                continue
+            if _bc == "queue-arrival" and not _bok:
+                continue   # #1023 🔵6: non-terminal on unconfirmed
+            _bfn()
+        # #1023 timeout-race — WRITE-THROUGH: the batch floor mark + every advanced
+        # baseline are durable before a later systemd kill can un-record them.
+        _queue_arrival._persist(persist, logs)
+        logs.append("batch-nudge %s -> %d section(s): %s%s"
+                    % (loc, len(_incl), ", ".join(_incl),
+                       "" if _bok else " (delivered-unconfirmed)"))
+        # #1092 (b) -- a delivered-UNCONFIRMED submit may not have cleared the box:
+        # run the janitor UNDO so no stranded batch-nudge is left.
+        if not _bok:
+            _janitor_undo_if_own_stranded(pid, run, _bt, loc, sleep_fn, logs,
+                                          state=state)
+    elif send_out.get("pane_budget_held"):
+        # #1092 (c) -- the per-pane budget refused this BEFORE any keystroke: never
+        # stamp the floor or run the undo (the storm brake).
+        logs.append("batch-nudge %s -> held (pane-budget, not typed)" % loc)
+    elif _kind in _send_outcome.TYPED_NOT_DELIVERED:
+        # #1092 (a)+(b) / #1157 -- a TYPED attempt that was not delivered (a swallow,
+        # or a verify-failed type send_verified already undid / reported stranded)
+        # IS a delivery attempt: stamp the per-kind FLOOR for ALL included kinds +
+        # WRITE-THROUGH, so the SAME batch never re-types on the next ~70s sweep.
+        _nudge_gate.mark_batch_sent(state, sid, _incl, now)
+        _queue_arrival._persist(persist, logs)
+        logs.append("batch-nudge %s -> %s (%d section(s)); floor stamped for %s"
+                    % (loc, _kind, len(_incl), ", ".join(_incl)))
+        # send_verified already ran the undo for a verify-failed type; a swallow /
+        # an unconfirmed residue gets the janitor UNDO here.
+        if _kind in (_send_outcome.SWALLOWED, _send_outcome.UNCONFIRMED):
+            _janitor_undo_if_own_stranded(pid, run, _bt, loc, sleep_fn, logs,
+                                          state=state)
+    else:
+        # #1092 (d) -- a PRE-TYPE abort (box busy / raced / spinner / kill switch
+        # OFF): no keystroke was typed, so never stamp the floor; retry next sweep.
+        # The reason is the `send-verified abort: ...` line just above (#1157).
+        logs.append("batch-nudge %s -> deferred (not typed; reason in the "
+                    "send-verified line)" % loc)
 
 
 def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
@@ -5709,102 +5763,9 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 batch_collect=(_batch_collect if _batch_collect is not None
                                and "lane-reconcile" in _eligible else None))
         # #923 BATCH DELIVERY: compose + deliver all collected texts as ONE prompt.
-        if _batch_collect:
-            _items = [(c, t) for c, t, _ in _batch_collect]
-            _bt, _incl = _nudge_gate.compose_batch(
-                _items, max_chars=_nudge_gate.BATCH_MAX_CHARS)
-            if _bt and not dry_run:
-                watchdog._janitor_mark_watch(state, pid, now)
-                send_out = {}
-                # #1023 timeout-race — SWEEP-RELATIVE confirm budget: when too
-                # little sweep budget remains for send_verified's ~10s
-                # transcript confirm-wait, skip it (the keystroke still lands;
-                # `delivered-unconfirmed` is an accepted state that stamps the
-                # floor). This stops the confirm-wait running the sweep into the
-                # unit's TimeoutStartSec=2min kill AFTER a fetch already burned
-                # most of the budget. The pre-Enter type-settle keeps its real
-                # sleep (skipping IT could false-abort the delivery).
-                _b_left = _queue_arrival._budget_left(_budget_left_fn)
-                _b_skip_confirm = (
-                    _b_left is not None
-                    and _b_left < _queue_arrival.QUEUE_ARRIVAL_CONFIRM_MIN_BUDGET_S)
-                _bok = watchdog.send_verified(
-                    pid, _bt, run, tpath, sleep_fn=sleep_fn,
-                    logs=logs, out=send_out,
-                    nudge=(_incl[0] if _incl else None),
-                    state=state, skip_confirm=_b_skip_confirm,
-                    now=now)  # #1022 wedge / #1023 budget / #1092 one-clock pane budget
-                _bdeliv = _bok or bool(send_out.get("delivered_unconfirmed"))
-                if _bdeliv:
-                    _incl_set = set(_incl)
-                    # #1023 🔵6: queue-arrival's baseline advances ONLY on a
-                    # CONFIRMED submit — on a delivered-unconfirmed batch skip its
-                    # callback (baseline OLD, janitor watch LEFT SET) and re-confirm
-                    # later; other kinds keep terminal-on-unconfirmed. The FLOOR
-                    # (mark_batch_sent) stamps ALL included, bounding re-fire (🟡4).
-                    _qa_unconfirmed = (not _bok) and "queue-arrival" in _incl_set
-                    if not _qa_unconfirmed:
-                        watchdog._janitor_clear_watch(state, pid)
-                    _nudge_gate.mark_batch_sent(state, sid, _incl, now)
-                    if handled is not None:
-                        handled.add(sid)
-                    # Call per-rider post-delivery callbacks for included cats.
-                    for _bc, _, _bfn in _batch_collect:
-                        if _bc not in _incl_set or _bfn is None:
-                            continue
-                        if _bc == "queue-arrival" and not _bok:
-                            continue   # #1023 🔵6: non-terminal on unconfirmed
-                        _bfn()
-                    # #1023 timeout-race — WRITE-THROUGH: the batch floor mark +
-                    # every advanced baseline are now durable on disk, so a systemd
-                    # kill later this sweep can no longer un-record them (the exact
-                    # 08:50/08:52 re-delivery). Atomic via the existing save_state;
-                    # the end-of-sweep save stays as the backstop.
-                    _queue_arrival._persist(persist, logs)
-                    _bnote = ("" if _bok else
-                              " (delivered-unconfirmed)")
-                    logs.append("batch-nudge %s -> %d section(s): %s%s"
-                                % (loc, len(_incl),
-                                   ", ".join(_incl), _bnote))
-                    # #1092 (b) -- a delivered-UNCONFIRMED submit may not have
-                    # cleared the box (the incident: the text sat in the prompt);
-                    # run the janitor UNDO so no stranded batch-nudge is left. A
-                    # CONFIRMED submit (`_bok`) leaves the box genuinely bare, so
-                    # skip it (a capture is enough there).
-                    if not _bok:
-                        _janitor_undo_if_own_stranded(
-                            pid, run, _bt, loc, sleep_fn, logs)
-                elif send_out.get("pane_budget_held"):
-                    # #1092 (c) -- the per-pane budget refused this BEFORE any
-                    # keystroke (send_verified already logged `hold:pane-budget`):
-                    # nothing typed, so NEVER stamp the floor or run the undo. This
-                    # branch is the storm brake -- the 3rd typing attempt into a
-                    # pane in one hour is turned away, not swallowed-and-retried.
-                    logs.append("batch-nudge %s -> held (pane-budget, not typed)"
-                                % loc)
-                elif send_out.get("attempted"):
-                    # #1092 (a)+(b) -- a SWALLOWED attempt IS a delivery attempt:
-                    # the text reached the pane. Stamp the per-kind FLOOR for ALL
-                    # included kinds + WRITE-THROUGH persist (exactly like the
-                    # delivered branch), so the SAME batch can NEVER re-fire on the
-                    # next ~70s sweep -- the exact 10-attempts-in-12-min storm this
-                    # ticket fixes. Then run the janitor UNDO so no stranded
-                    # batch-nudge is left in the owner's prompt.
-                    _nudge_gate.mark_batch_sent(state, sid, _incl, now)
-                    _queue_arrival._persist(persist, logs)
-                    logs.append("batch-nudge %s -> swallowed (%d section(s)); "
-                                "floor stamped for %s"
-                                % (loc, len(_incl), ", ".join(_incl)))
-                    _janitor_undo_if_own_stranded(
-                        pid, run, _bt, loc, sleep_fn, logs)
-                else:
-                    # #1092 (d) -- a PRE-TYPE abort (box busy / raced / collapsed
-                    # paste): send_verified fired no type keystroke, so this is NOT
-                    # a swallow -- never stamp the floor for a box we could not type
-                    # into; retry next sweep from a clean prompt. Explicit word, no
-                    # silent branch (#486).
-                    logs.append("batch-nudge %s -> deferred (not typed: box "
-                                "busy/raced)" % loc)
+        if _batch_collect and not dry_run:
+            _deliver_batch(_batch_collect, pid, sid, loc, tpath, run, state, now,
+                           handled, persist, sleep_fn, logs, _budget_left_fn)
         # #1066 lane B -- BOUNCE-verdict rider for this armed REDUCED-authority
         # pane. Runs AFTER the batch delivery + every #733 rider so the shared
         # per-sweep `handled` set (at most ONE keystroke per pane per sweep) is

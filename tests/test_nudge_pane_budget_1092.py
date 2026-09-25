@@ -213,8 +213,8 @@ class TestSendVerifiedPaneBudget(unittest.TestCase):
 
 
 class TestBatchSwallowedFloorAndUndo(unittest.TestCase):
-    """#1092 (a)+(b) — the #923 batch delivery block (an inline block in
-    `goal.goal_lane_sweep`, so a source-lock, mutation-verified) must, on a
+    """#1092 (a)+(b) — the #923 batch delivery block (`goal._deliver_batch`
+    since #1157, a source-lock, mutation-verified) must, on a
     SWALLOWED-with-attempt outcome, stamp the per-kind floor for ALL included
     kinds + write-through persist + run the janitor UNDO — and must NOT mis-stamp
     a pane-budget refusal (no keystroke) as a swallow."""
@@ -222,12 +222,13 @@ class TestBatchSwallowedFloorAndUndo(unittest.TestCase):
     def _src(self):
         import inspect
         from watchdog import goal
-        return " ".join(inspect.getsource(goal.goal_lane_sweep).split())
+        return " ".join(inspect.getsource(goal._deliver_batch).split())
 
     def test_swallowed_attempt_stamps_floor_for_all_included(self):
         src = self._src()
-        # the swallow (attempted) branch stamps ALL included kinds + persists
-        self.assertIn('send_out.get("attempted")', src)
+        # the typed-not-delivered branch (a swallow, #1157 also a verify-failed
+        # type) stamps ALL included kinds + persists
+        self.assertIn("elif _kind in _send_outcome.TYPED_NOT_DELIVERED:", src)
         self.assertIn("_nudge_gate.mark_batch_sent(state, sid, _incl, now)", src)
 
     def test_pane_budget_refusal_is_not_treated_as_a_swallow(self):

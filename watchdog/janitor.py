@@ -440,12 +440,10 @@ def _janitor_prune_parks(state, live_pids):
     occupant_gate`)."""
     if state is None or not live_pids:
         return
-    parks = state.get("stash_parks")
-    if not parks:
-        return
     live = set(live_pids)
-    for pid in [p for p in parks if p not in live]:
-        parks.pop(pid, None)
+    for recs in (state.get("stash_parks"), state.get("stranded_own")):  # + #1157
+        for pid in [p for p in (recs or {}) if p not in live]:
+            recs.pop(pid, None)
 
 
 def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
@@ -511,17 +509,12 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # still left untouched (`_draft_rescue_persist` snapshots before any clear).
     itext = watchdog._input_box_head_text(captured)
     occupied = watchdog.STASH_MARKER in (captured or "")
-    # #737 -- a SCROLLED long own /goal renders only its TAIL rows, so its
-    # `/goal ` prefix is off-screen and `_looks_like_own_stuck_content(head)`
-    # (head/tail only) cannot recognize it -> occupied+scrolled reads as a
-    # foreign occupant and the stash slot never releases (the montalu6/montalu3
-    # `stash-abort-slot-occupied` livelock). When the CALLER supplies the
-    # candidate `own_payload` (the pending request's own text, or the current
-    # /goal template -- NEVER a rescue snapshot of the box, #737 design fork),
-    # the WHOLE visible box being a >= GOAL_ARM_LEFTOVER_MIN_SUBSTR contiguous
-    # SUBSTRING of it is the missing proof. A foreign draft is never a substring
-    # of our own /goal, so the fail-safe (no proof -> untouched) still holds; the
-    # provenance gate below is UNCHANGED and stays the ownership decision.
+    # #737 -- a SCROLLED long own /goal renders only its TAIL rows (prefix off-
+    # screen), so the head recognizer misses it and the stash slot never released
+    # (montalu6/montalu3 livelock). With the CALLER's candidate `own_payload` (the
+    # request's text or the /goal template, NEVER a box snapshot) the WHOLE box
+    # being a >= MIN_SUBSTR contiguous SUBSTRING of it is the proof; a foreign
+    # draft never is, and the provenance gate below stays the ownership decision.
     # #1113 -- a TRUNCATED / grid-wrapped own payload reconstructs to a
     # NON-substring (a mid-token wrap boundary inserts a spurious space), so the
     # #737 substring proof missed it and the janitor DECLINED its own leftover
@@ -533,19 +526,20 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
         captured, own_payload, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
         provenance=_janitor_watch_seen(state, pid, now))
     # #1113 RECURRENCE -- a PROVENANCE-FREE template proof: the box is a verbatim
-    # run of ANY rendered /goal template variant, not only the single `own_payload`
-    # the caller handed in. The 23.9 `cleanup=declined` was a genuinely-ours
-    # fork-no-merge tail whose payload-specific proof missed (a different variant)
-    # AND whose `_janitor_watch_seen` mark had EXPIRED by the time this sweep ran
-    # ~6h later. Verbatim template text is un-forgeable, so it needs no provenance
-    # -- it BOTH satisfies the provenance gate below (a valid provenance
-    # substitute) AND, when it is the ONLY proof, gates the clear at most once per
-    # episode via the (c) lock. `captured` is always truthy here (the caller only
-    # reaches this after locating the box).
+    # run of ANY rendered /goal template variant (the 23.9 `cleanup=declined` tail
+    # was a different variant AND its watch mark had EXPIRED ~6h later). Verbatim
+    # template text is un-forgeable, so it substitutes for provenance below and,
+    # when it is the ONLY proof, clears at most once per episode (the (c) lock).
     own_tmpl = watchdog._box_is_own_leftover(
         captured, None, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
         match_templates=True)
-    own_leftover = own_prov or own_tmpl
+    # #1157 -- a `typed-stranded` send recorded its EXACT text: the box still just
+    # that is ours; a recorded idle box that no longer is loses the record AND the
+    # janitor watch (a human typed there). Never with an occupied slot (#488).
+    from watchdog import send_outcome as _so
+    own_rec = not occupied and bool(_so.stranded_reclaimable(
+        state, pid, captured, now, dry_run))
+    own_leftover = own_prov or own_tmpl or own_rec
     # #852 C — the incident's `slane-check:` shape: a stray human char (the
     # owner's forgotten `s`) raced to the FRONT of our own swallowed nudge, so
     # the own prefix is at box-head position 1..3, not 0. A park record carrying
@@ -615,24 +609,21 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     prov_ok = (_janitor_watch_seen(state, pid, now)
                or (occupied and park_seen)
                or stray_own)
-    if not (prov_ok or own_tmpl):
+    if not (prov_ok or own_tmpl or own_rec):
         return logs         # no watchdog job is known to have touched this
                             # pane recently, and it is not verbatim template
                             # text -- never act on content alone
-    # #1113 recurrence (c) -- a TEMPLATE-ONLY recovery (recognised solely by the
-    # verbatim /goal template match, with NO janitor/park/stray provenance) is
-    # licensed by the un-forgeable template text, but cleared at MOST ONCE per
-    # episode: a non-converging grid-wrapped box must never be re-Escaped every
-    # sweep. A provenance-backed clear is NOT gated by this lock (it carries its
-    # own bounded ping/dedup). The lock is stamped BEFORE the clear so a failed /
-    # non-converging attempt still consumes the one-per-episode slot.
-    if own_tmpl and not prov_ok:
-        if _template_clear_locked(state, pid, now):
-            logs.append("janitor %s -> skip:template-clear-locked "
-                        "(#1113 once per episode)" % loc)
-            return logs
-        if not dry_run:
-            _mark_template_clear(state, pid, now)
+    # #1113 recurrence (c) -- a TEMPLATE-ONLY recovery (no janitor/park/stray
+    # provenance; licensed by the un-forgeable template text) clears at MOST ONCE
+    # per episode: a non-converging grid-wrapped box is never re-Escaped every
+    # sweep. A provenance-backed clear is NOT gated (its own ping/dedup bounds
+    # it). The lock is stamped right before the clear keystrokes (never on a
+    # busy hold, #1157), so a failed / non-converging attempt still consumes it.
+    once = bool(own_tmpl or own_rec) and not prov_ok   # #1157: record-only too
+    if once and _template_clear_locked(state, pid, now):
+        logs.append("janitor %s -> skip:template-clear-locked "
+                    "(#1113 once per episode)" % loc)
+        return logs
     if occupied:
         if itext == "":
             action = "pop"
@@ -646,7 +637,11 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
         action = "clear"                    # #737: scrolled own /goal counts
     else:
         return logs                         # nothing recognizable stuck
-
+    if action != "pop" and _so._pane_busy(captured):   # #1157: never Escape a turn
+        logs.append("janitor %s -> hold:busy (turn running under the box)" % loc)
+        return logs
+    if once and not dry_run:         # stamped only when a clear is really attempted
+        _mark_template_clear(state, pid, now)
     if dry_run:
         logs.append("READY (janitor) %s -> would attempt %s recovery"
                     % (loc, action))
@@ -671,6 +666,7 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
 
     if recovered:
         _janitor_clear_park(state, pid)     # #488 -- our park is resolved
+        _so.clear_stranded(state, pid)      # #1157 -- our stranded text is gone
         rec["janitor_pinged"] = False
         logs.append("RECOVERED (janitor) %s -> stuck own delivery cleared"
                     % loc)
