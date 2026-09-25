@@ -60,6 +60,9 @@ class TestMeetingOutcomeRule1156(TestCase):
         self.assertIn("After every client meeting or decision", self.rule)
         self.assertIn("write what was agreed into EACH affected board task",
                       self.rule)
+        # an agreement on a topic with no task yet gets a new task (rule 9),
+        # otherwise it stays GitHub-only = NOT recorded (review finding)
+        self.assertIn("no task yet → new one, rule 9", self.rule)
 
     # -- the note shape: plain Slovak, bold keywords, rule 7's jargon gate --
     def test_plain_slovak_bold_keywords_no_jargon(self):
@@ -69,7 +72,8 @@ class TestMeetingOutcomeRule1156(TestCase):
 
     # -- transport: internal note, no follower e-mail, the repo poster --
     def test_internal_note_no_follower_email_repo_poster(self):
-        self.assertIn("INTERNAL note", self.rule)
+        # the Odoo log-note subtype is what keeps the follower e-mail off
+        self.assertIn("INTERNAL note (`mail.mt_note`)", self.rule)
         self.assertIn("no follower e-mail", self.rule)
         self.assertIn("repo poster (rule 13)", self.rule)
 
@@ -104,7 +108,14 @@ class TestMeetingOutcomeRule1156(TestCase):
     def test_meeting_analysis_points_at_rule16(self):
         skill = _norm(MEETING_SKILL.read_text(encoding="utf-8"))
         self.assertIn("client-board-tasks.md` rule 16", skill)
-        self.assertIn("EACH affected Odoo board task", skill)
+        # "ALSO" is the operative token: GitHub tickets stay, the tasks are added
+        # (an "ONLY"/"instead" inversion must fail, #799)
+        self.assertIn("Agreements ALSO go into EACH affected Odoo board task",
+                      skill)
+
+    # -- rule 11 keeps its remedy after the #1156 budget move --
+    def test_rule11_rename_remedy_kept(self):
+        self.assertIn("rename: own odoo-erp task", _norm(self.core))
 
 
 if __name__ == "__main__":
