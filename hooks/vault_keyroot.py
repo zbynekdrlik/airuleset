@@ -30,7 +30,8 @@ from vault_guard_shell import (ASSIGN_RE, TOKEN_RE, can_be, path_candidates,
 # head, or a pre-child argument of the secret CLI — and since slice 2 the
 # VALUE of a prose option (gh/git table), the `-f` of a pure `ssh-keygen
 # -l/-y`, a literal `*.pub` path, and a one-path `secret inspect` piped only
-# into text filters. One unaccounted reference denies the segment. A parse
+# into text filters (since slice 3 a prose command pipes the same way). One
+# unaccounted reference denies the segment. A parse
 # that goes wrong can therefore only fail to account for something — i.e.
 # deny — never allow a stray reader.
 KEY_DIR = ".secrets"
@@ -299,28 +300,48 @@ def _scan_text_options(tk, i, text_opts, arg_opts, bool_opts, short_cluster=""):
     return ok
 
 
+def _prose_options_start(tk, start, head):
+    """Index where a gh/git prose command's own options begin, or None when
+    tk[start:] is not a command of the PROSE table (see above)."""
+    if head == "gh":
+        return start + 3 if tuple(tk[start + 1:start + 3]) in GH_PROSE_SUBCMDS else None
+    if head != "git":
+        return None
+    i = start + 1
+    while i < len(tk) and tk[i].startswith("-"):
+        key = tk[i].partition("=")[0]
+        if tk[i] in GIT_GLOBAL_ARG_OPTS:
+            i += 2
+        elif tk[i] in GIT_GLOBAL_BOOL_OPTS or key in ("--git-dir", "--work-tree"):
+            i += 1
+        else:
+            return None
+    return i + 1 if i < len(tk) and tk[i] == "commit" else None
+
+
 def _prose_args(tk, start, head):
     """Text-option VALUE indices of a gh/git prose command (see PROSE above)."""
+    i = _prose_options_start(tk, start, head)
+    if i is None:
+        return set()
     if head == "gh":
-        if tuple(tk[start + 1:start + 3]) not in GH_PROSE_SUBCMDS:
-            return set()
-        return _scan_text_options(tk, start + 3, GH_TEXT_OPTS, GH_ARG_OPTS,
-                                  GH_BOOL_OPTS)
-    if head == "git":
-        i = start + 1
-        while i < len(tk) and tk[i].startswith("-"):
-            key = tk[i].partition("=")[0]
-            if tk[i] in GIT_GLOBAL_ARG_OPTS:
-                i += 2
-            elif tk[i] in GIT_GLOBAL_BOOL_OPTS or key in ("--git-dir", "--work-tree"):
-                i += 1
-            else:
-                return set()
-        if i >= len(tk) or tk[i] != "commit":
-            return set()
-        return _scan_text_options(tk, i + 1, GIT_TEXT_OPTS, GIT_ARG_OPTS,
-                                  GIT_BOOL_OPTS, GIT_BOOL_SHORT)
-    return set()
+        return _scan_text_options(tk, i, GH_TEXT_OPTS, GH_ARG_OPTS, GH_BOOL_OPTS)
+    return _scan_text_options(tk, i, GIT_TEXT_OPTS, GIT_ARG_OPTS, GIT_BOOL_OPTS,
+                              GIT_BOOL_SHORT)
+
+
+def is_prose_command(segment):
+    """A BARE-name, assignment-free command of the PROSE table — the slice-3
+    pipe source (`gh issue comment N --body … | tail -1`). A path-named
+    `/tmp/x/gh` or a `PATH=/tmp/x gh` could be anything, exactly like a
+    path-named text filter (see INSPECT_SINKS below)."""
+    try:
+        tk = shlex.split(segment)
+    except ValueError:
+        return False
+    if not tk or _cmd_start(tk) != 0 or tk[0] not in ("gh", "git"):
+        return False
+    return _prose_options_start(tk, 0, tk[0]) is not None
 
 
 def _prose_token_is_quoted(segment, token):
@@ -427,6 +448,12 @@ def _pub_args(tk, start, head, term):
 # from its input, invoked by bare name with no assignment in front (a
 # `PATH=/x head` or `/tmp/x/head` could be anything), and nothing in the
 # command substitutes or groups (`$(…)`, backticks, `<(…)`, `{ …; }`).
+#
+# Slice 3 (#1153 issuecomment-5831733482): a PROSE command is the SAME kind of
+# source — its output (a URL, `git commit`'s subject line) can echo its text,
+# a NAME, but never a file's bytes — so it takes the same path and the same
+# sinks. Being a source only restores its plain term: every root reference in
+# it is still accounted token by token (`--body-file`/`-F`/`<` stay denied).
 INSPECT_SINKS = {"head", "tail", "grep", "egrep", "fgrep", "wc", "sort", "uniq",
                  "cut", "tr", "column", "nl", "cat", "fold"}
 FD_REMNANT_RE = re.compile(r"^\s*\d*-?\s*$")
@@ -444,16 +471,20 @@ def _is_text_sink(seg):
     return not any(t.startswith("--files0-from") for t in tk[1:])
 
 
-def inspect_pipeline_is_inert(segments):
-    """True when the command pipes a one-path `secret inspect` only into text
-    filters (see INSPECT_SINKS above)."""
-    if not any(is_secret_inspect(seg) for seg, _t in segments):
+def _is_inert_source(seg):
+    return is_secret_inspect(seg) or is_prose_command(seg)
+
+
+def pipeline_is_inert(segments):
+    """True when the command pipes a one-path `secret inspect` or a prose
+    command only into text filters (see INSPECT_SINKS above)."""
+    if not any(_is_inert_source(seg) for seg, _t in segments):
         return False
     prev = None
     for seg, term in segments:
         if term in ("$(", "`", "(", ")"):
             return False
-        if not seg.strip() or is_secret_inspect(seg):
+        if not seg.strip() or _is_inert_source(seg):
             prev = (seg, term)
             continue
         # `2>&1` is split at its `&`: the `1` after a `>`/`<` is not a command
@@ -572,6 +603,8 @@ def _accounted_command(tk, start, head, term):
     if head in ("gh", "git"):
         # Piped, a prose command's output can echo its text (`git commit`
         # prints the subject) into a consumer — a name source like `ls`.
+        # Piped only into text filters it keeps a plain term instead
+        # (effective_terms / pipeline_is_inert, slice 3).
         return ok if term == "|" else ok | _prose_args(tk, start, head)
     return ok | _accounted_head(tk, start, head, term)
 
@@ -669,10 +702,11 @@ def effective_terms(segments):
     conservative cut, since a stateless text check cannot follow a group.
     """
     piped = any(term == "|" for _seg, term in segments)
-    # Slice 2: a one-path `secret inspect` piped ONLY into text filters is not
-    # a flow (inspect_pipeline_is_inert) — its segment keeps a plain term.
-    inert = piped and inspect_pipeline_is_inert(segments)
-    return [(seg, "" if (inert and is_secret_inspect(seg))
+    # Slice 2/3: a one-path `secret inspect` or a prose command piped ONLY
+    # into text filters is not a flow (pipeline_is_inert) — its segment keeps
+    # a plain term.
+    inert = piped and pipeline_is_inert(segments)
+    return [(seg, "" if (inert and _is_inert_source(seg))
              else "|" if (piped or term in FLOW_TERMS) else term)
             for seg, term in segments]
 
