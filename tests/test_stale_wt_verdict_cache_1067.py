@@ -428,4 +428,153 @@ def test_dry_run_poll_never_uses_the_cache(tmp_path, monkeypatch, dry_run):
         severe_run_fn=lambda *a, **k: None)
     assert len(kws) == 2, kws
     assert all(kw.get("wt_cache") is (not dry_run) for kw in kws), kws
-    assert not (dg._guard_dir(str(tmp_path)) / "stale-wt-verdicts.json").exists()
+
+
+# --------------------------------------------------------------------------- #
+# review round 1 — the cache can never turn into an action, never pin an error
+# --------------------------------------------------------------------------- #
+def _plant(box, verdict, ts=NOW, refs="same"):
+    """Store a real pass's entry, then swap in ``verdict`` (and ``ts``)."""
+    _pass(box, FakeGit())
+    data = json.loads(box.cache.read_text())
+    [entry] = data["entries"].values()
+    entry.update(verdict=verdict, ts=ts)
+    box.cache.write_text(json.dumps(data))
+
+
+@pytest.mark.parametrize("verdict", [
+    {"kind": "delete", "cls": "scratch", "path": "/victim", "reason": None},
+    {"kind": "worktree-remove", "reason": None, "branch": "b", "contained_in": "origin/main"},
+    {"kind": "skip", "reason": None},
+])
+def test_a_non_skip_or_malformed_entry_is_never_reused(box, verdict):
+    _plant(box, verdict)
+    git = FakeGit()
+    rows, _ = _pass(box, git)
+    assert len(git.calls) == 3, "only a well-formed skip entry may be reused"
+    r = _row(rows)
+    assert (r["cls"], r["path"]) == ("stale-agent-worktree", str(box.wts["agent-one"]))
+
+
+def test_a_reused_row_takes_nothing_but_the_reason_from_the_file(box):
+    _plant(box, {"kind": "skip", "reason": "dirty worktree — kept", "cls": "scratch",
+                 "path": "/victim", "repo": "/victim", "bytes": 999})
+    git = FakeGit()
+    rows, _ = _pass(box, git)
+    assert git.calls == []
+    r = _row(rows)
+    assert (r["cls"], r["path"], r["repo"], r["bytes"], r["kind"]) == (
+        "stale-agent-worktree", str(box.wts["agent-one"]), str(box.repo), 0, "skip")
+
+
+def test_a_reclaimable_verdict_is_never_stored(box):
+    _pass(box, FakeGit(contains="  origin/main\n"))
+    entries = json.loads(box.cache.read_text())["entries"] if box.cache.exists() else {}
+    assert entries == {}
+
+
+def test_a_future_timestamp_is_not_trusted(box):
+    _plant(box, {"kind": "skip", "reason": "dirty worktree — kept"}, ts=NOW + 60)
+    git = FakeGit()
+    _pass(box, git)
+    assert len(git.calls) == 3
+
+
+@pytest.mark.parametrize("git", [
+    FakeGit(status=None),                      # git status failed / timed out
+    FakeGit(contains=None),                    # git branch --contains failed
+])
+def test_a_git_failure_is_never_cached(box, git):
+    rows, _ = _pass(box, git)
+    assert "unreadable" in _row(rows)["reason"]
+    again = FakeGit(status=git.answers[("status", "--porcelain")],
+                    contains=git.answers[("branch", "-r", "--contains", "HEAD")])
+    _pass(box, again)
+    assert len(again.calls) >= 2, "an error verdict must be re-checked next pass"
+
+
+def test_a_deeply_nested_cache_file_means_a_recompute(box):
+    box.cache.parent.mkdir(parents=True, exist_ok=True)
+    box.cache.write_text("[" * 200_000)
+    git = FakeGit()
+    rows, _ = _pass(box, git)
+    assert len(git.calls) == 3 and _row(rows)["kind"] == "skip"
+    git = FakeGit()
+    _pass(box, git)
+    assert git.calls == [], "the corrupt file is rewritten"
+
+
+def test_a_cache_path_that_is_a_directory_means_a_recompute(box):
+    box.cache.mkdir(parents=True)
+    git = FakeGit()
+    rows, _ = _pass(box, git)
+    assert len(git.calls) == 3 and _row(rows)["kind"] == "skip"
+
+
+def test_a_dirty_verdict_survives_a_remote_refs_change(box):
+    """Dirty/protected do not depend on containment: a lane's push or fetch
+    must not invalidate them (only the not-contained verdict is keyed on it)."""
+    _pass(box, FakeGit(status=" M a.txt\n"))
+    _git(box.repo, "update-ref", "refs/remotes/origin/new", box.c1)
+    git = FakeGit(status=" M a.txt\n")
+    _pass(box, git)
+    assert git.calls == []
+
+
+@pytest.mark.parametrize("change", ["packed-only", "other-remote"])
+def test_not_contained_verdict_sees_every_remote_and_packed_refs(box, change):
+    if change == "packed-only":
+        _git(box.repo, "pack-refs", "--all")
+        box.backdate()
+    _pass(box, FakeGit())
+    if change == "packed-only":
+        packed = box.repo / ".git" / "packed-refs"
+        os.utime(packed, ns=((T0 + 7) * 10**9, (T0 + 7) * 10**9))
+    else:
+        _git(box.repo, "update-ref", "refs/remotes/upstream/x", box.c2)
+    git = FakeGit()
+    _pass(box, git)
+    assert len(git.calls) == 3, change
+
+
+def test_a_symbolic_loose_ref_is_followed(box):
+    (box.repo / ".git" / "refs" / "heads" / "alias").write_text(
+        "ref: refs/heads/worktree-agent-one\n")
+    (box.gitdir() / "HEAD").write_text("ref: refs/heads/alias\n")
+    _pass(box, FakeGit())
+    git = FakeGit()
+    _pass(box, git)
+    assert git.calls == [], "a symbolic chain still gives a stable fingerprint"
+    _git(box.repo, "update-ref", "--no-deref", "refs/heads/worktree-agent-one", box.c1)
+    git = FakeGit()
+    _pass(box, git)
+    assert len(git.calls) == 3, "a move of the symref's target must invalidate"
+
+
+def test_remote_refs_are_walked_once_per_repo_per_pass(box, monkeypatch):
+    from watchdog import disk_guard_wt_cache as wtc
+    box.add_wt("agent-two")
+    walks = []
+    real = wtc._tree_mtime_ns
+    monkeypatch.setattr(wtc, "_tree_mtime_ns", lambda p: walks.append(p) or real(p))
+    _pass(box, FakeGit())
+    assert len(walks) == 1, walks
+
+
+def test_relative_gitdir_lock_is_honoured(tmp_path, monkeypatch):
+    """``worktree.useRelativePaths``: the ``locked`` file must be found
+    relative to the worktree, never the process cwd (was a fail-open)."""
+    home = tmp_path / "home"
+    repo = home / "devel" / "proj"
+    wt = repo / ".claude" / "worktrees" / "agent-rel"
+    gd = repo / ".git" / "worktrees" / "agent-rel"
+    gd.mkdir(parents=True)
+    wt.mkdir(parents=True)
+    (gd / "locked").write_text("held")
+    (wt / ".git").write_text("gitdir: ../../../.git/worktrees/agent-rel")
+    monkeypatch.chdir(tmp_path)
+    git = FakeGit()
+    rows = dgw.discover_stale_agent_worktrees(
+        home=str(home), now=NOW, git_run_fn=git, live_check_fn=lambda p: False)
+    assert _row(rows, "agent-rel")["reason"] == "locked worktree — kept"
+    assert git.calls == []
