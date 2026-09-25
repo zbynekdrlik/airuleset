@@ -511,17 +511,12 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # still left untouched (`_draft_rescue_persist` snapshots before any clear).
     itext = watchdog._input_box_head_text(captured)
     occupied = watchdog.STASH_MARKER in (captured or "")
-    # #737 -- a SCROLLED long own /goal renders only its TAIL rows, so its
-    # `/goal ` prefix is off-screen and `_looks_like_own_stuck_content(head)`
-    # (head/tail only) cannot recognize it -> occupied+scrolled reads as a
-    # foreign occupant and the stash slot never releases (the montalu6/montalu3
-    # `stash-abort-slot-occupied` livelock). When the CALLER supplies the
-    # candidate `own_payload` (the pending request's own text, or the current
-    # /goal template -- NEVER a rescue snapshot of the box, #737 design fork),
-    # the WHOLE visible box being a >= GOAL_ARM_LEFTOVER_MIN_SUBSTR contiguous
-    # SUBSTRING of it is the missing proof. A foreign draft is never a substring
-    # of our own /goal, so the fail-safe (no proof -> untouched) still holds; the
-    # provenance gate below is UNCHANGED and stays the ownership decision.
+    # #737 -- a SCROLLED long own /goal renders only its TAIL rows (prefix off-
+    # screen), so the head recognizer misses it and the stash slot never released
+    # (montalu6/montalu3 livelock). With the CALLER's candidate `own_payload` (the
+    # request's text or the /goal template, NEVER a box snapshot) the WHOLE box
+    # being a >= MIN_SUBSTR contiguous SUBSTRING of it is the proof; a foreign
+    # draft never is, and the provenance gate below stays the ownership decision.
     # #1113 -- a TRUNCATED / grid-wrapped own payload reconstructs to a
     # NON-substring (a mid-token wrap boundary inserts a spurious space), so the
     # #737 substring proof missed it and the janitor DECLINED its own leftover
@@ -563,11 +558,16 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     own_typed = _janitor_park_typed(state, pid)
     stray_own = (own_typed is not None
                  and watchdog._box_own_with_short_prefix(captured, own_typed))
+    # #1157 -- the record IS the exact text we left: a whole box that is a run of it
+    # (scrolled / wrap-joined, the provenance proof) is ours even without its prefix.
+    own_rec = own_typed is not None and watchdog._box_is_own_leftover(
+        captured, own_typed, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR, provenance=True)
+    own_leftover = own_leftover or own_rec
     # A dict (leaked-text) record's LEAK is still visible when the box holds our
     # recorded text at any position -- used to keep the marker-gone backstop from
     # clearing the record before the leak is reclaimed (#852-review 🟡-4).
     leak_visible = own_typed is not None and (
-        stray_own
+        stray_own or own_rec
         or watchdog._typed_landed(own_typed, itext)
         or watchdog._looks_like_own_stuck_content(itext))
 
@@ -614,7 +614,7 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # licenses the non-occupied own-suffix reclaim below.
     prov_ok = (_janitor_watch_seen(state, pid, now)
                or (occupied and park_seen)
-               or stray_own)
+               or stray_own or own_rec)
     if not (prov_ok or own_tmpl):
         return logs         # no watchdog job is known to have touched this
                             # pane recently, and it is not verbatim template

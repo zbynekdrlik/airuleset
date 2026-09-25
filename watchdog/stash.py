@@ -237,20 +237,14 @@ GOAL_TYPE_VERIFY_RETRIES = 2         # #670: first-byte-race undo+retype budget
 TYPE_VERIFY_SETTLE_POLLS = 8
 TYPE_VERIFY_SETTLE_S = 1
 
-# #746 -- a payload at/above this length can WRAP past the input box's visible
-# height and CC SCROLLS it, so the head row scrolls off-screen and head-is-prefix
-# becomes structurally unsatisfiable. `_type_literal_verified` runs the two-phase
-# HEAD-CHECKPOINT (below) only for such a payload. This is a scroll-length PROXY,
-# not an "is-a-/goal" test: it sits above EVERY current `send_verified` nudge
-# payload (all short by construction -- the #714 ops-wait cap is 700, the other
-# card/reply/cross_stream keystrokes are short fixed strings), and below the
-# ~3-4k /goal template that is the only shape that actually scrolls in practice,
-# so every nudge stays on the byte-identical pre-#746 single-phase path. If a
-# future nudge/card ever crossed 1000 it would harmlessly get the checkpoint too
-# -- two-phase is SAFE for any payload (it never junk-submits; a scrolled non-goal
-# nudge verifies identically), so a proxy-length switch degrades correctness in
-# no direction.
-GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD = 1000
+# #746/#1157 -- a payload at/above this length can WRAP past the input box's
+# visible height and CC SCROLLS it: the first VISIBLE row carries the `❯` glyph
+# mid-payload, so head-is-prefix is false for a perfect type, and
+# `_type_literal_verified` runs the two-phase HEAD-CHECKPOINT (below). #746 set
+# 1000 believing no nudge scrolls; #1157 measured live CC 2.1.281 scrolling a
+# 4-row ~720-char nudge in a 12-16-row pane, so every CHUNK-typed payload takes
+# it. Two-phase is safe for any payload: it never junk-submits (#720).
+GOAL_TYPE_SCROLL_CHECKPOINT_THRESHOLD = GOAL_TYPE_CHUNK_THRESHOLD
 # #746 -- the checkpoint types this many chars as the FIRST burst (a single
 # sub-`GOAL_TYPE_CHUNK_THRESHOLD` send-keys, so the first-byte race applies to
 # exactly this burst) into the still-UNSCROLLED box, then head-is-prefix proves
@@ -328,8 +322,8 @@ def _type_verify_class(pid, run, text, cap=None, allow_scrolled=False):
     if head and " ".join(text.split()).startswith(" ".join(head.split())):
         return _TV_LANDED
     if allow_scrolled and _box_is_own_leftover(
-            cap, text, GOAL_ARM_LEFTOVER_MIN_SUBSTR):
-        return _TV_LANDED                        # #746 scrolled own /goal (head off-screen)
+            cap, text, GOAL_ARM_LEFTOVER_MIN_SUBSTR, provenance=True):
+        return _TV_LANDED                        # #746/#1157 scrolled own text (head off-screen)
     return _TV_CORRUPT                            # head not a prefix -> swallowed first char
 
 
@@ -370,7 +364,7 @@ def _settle_type_verify(pid, run, text, sleep_fn, allow_scrolled=False):
 
 def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
                                     kind="type", user_authored=False, nudge=None,
-                                    state=None):
+                                    state=None, out=None):
     """#746/#747 -- the SHARED first-phase of a scroll-length two-phase type: type
     the short FIRST chunk (`GOAL_TYPE_CHECKPOINT_CHARS`) into the still-UNSCROLLED
     box and settle-verify head-is-prefix, then -- ONLY if that checkpoint LANDED
@@ -404,6 +398,8 @@ def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
     if not _type_literal(pid, run, head_chunk, sleep_fn, kind=kind,
                          user_authored=user_authored, nudge=nudge):
         return _TV_HOLD
+    if isinstance(out, dict):
+        out["typed"] = True                      # #1157: a keystroke reached the box
     # #763 -- the verify REFERENCE is the chunk sans trailing whitespace: an
     # arbitrary [:120] slice can end mid-whitespace (ALL three real templates
     # do -- '...MY '), and `_input_line_text` STRIPS the box read, so verifying
@@ -443,7 +439,8 @@ def _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
 
 
 def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
-                           user_authored=False, logs=None, nudge=None, state=None):
+                           user_authored=False, logs=None, nudge=None, state=None,
+                           out=None):
     """#670 -- type `text` into a BARE box and VERIFY the box holds it head+tail,
     retrying (undo + re-type) ONLY on a genuine first-byte swallow. This is
     `send_verified`'s verified typed path (all nudge kinds -- lane-check, job-1
@@ -467,7 +464,7 @@ def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
         stranded `ane-check...`).
 
     #746 -- for a SCROLL-length payload (`len >= GOAL_TYPE_SCROLL_CHECKPOINT_
-    THRESHOLD`, i.e. a long /goal, never a nudge) the type is TWO-PHASE: type a
+    THRESHOLD`, every chunk-typed payload since #1157) the type is TWO-PHASE: type a
     short FIRST chunk (`GOAL_TYPE_CHECKPOINT_CHARS`) into the still-UNSCROLLED box
     and CHECKPOINT head-is-prefix (a cheap first-byte-swallow catch with a small
     120-char undo), THEN type the rest, THEN the FINAL verify runs with
@@ -477,7 +474,8 @@ def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
     identical own-substring) can never slip through to a junk submit (#720). A
     short payload skips the checkpoint entirely (`allow_scrolled` stays False,
     its head stays visible) -> byte-identical to pre-#746.
-    Returns True iff head+tail-verified within GOAL_TYPE_VERIFY_RETRIES retries.
+    Returns True iff head+tail-verified within GOAL_TYPE_VERIFY_RETRIES retries;
+    `out["typed"]` (#1157) marks that a keystroke reached the box (undo it).
 
     #1002 -- `send_verified` / `_send_goal_verified` type through here, and the
     type goes through `_type_literal` -> the ONE gated `keys` primitive, so the
@@ -499,7 +497,7 @@ def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
             hc = _type_two_phase_head_checkpoint(pid, run, text, sleep_fn,
                                                  kind=kind, nudge=nudge,
                                                  user_authored=user_authored,
-                                                 state=state)
+                                                 state=state, out=out)
             if hc == _TV_HOLD:
                 return False                     # unreadable / collapsed / suppressed -> NO keystrokes
             if hc == _TV_CORRUPT:                # head swallowed -> undo the chunk + retry
@@ -516,6 +514,8 @@ def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
                                  user_authored=user_authored, logs=logs,
                                  nudge=nudge, state=state):
                 return False
+            if isinstance(out, dict):
+                out["typed"] = True              # #1157: a keystroke reached the box
         cls = _settle_type_verify(pid, run, text, sleep_fn,
                                   allow_scrolled=two_phase)
         if cls == _TV_LANDED:

@@ -213,8 +213,8 @@ class TestSendVerifiedPaneBudget(unittest.TestCase):
 
 
 class TestBatchSwallowedFloorAndUndo(unittest.TestCase):
-    """#1092 (a)+(b) — the #923 batch delivery block (an inline block in
-    `goal.goal_lane_sweep`, so a source-lock, mutation-verified) must, on a
+    """#1092 (a)+(b) — the #923 batch delivery block (`goal._deliver_batch`
+    since #1157, a source-lock, mutation-verified) must, on a
     SWALLOWED-with-attempt outcome, stamp the per-kind floor for ALL included
     kinds + write-through persist + run the janitor UNDO — and must NOT mis-stamp
     a pane-budget refusal (no keystroke) as a swallow."""
@@ -222,7 +222,7 @@ class TestBatchSwallowedFloorAndUndo(unittest.TestCase):
     def _src(self):
         import inspect
         from watchdog import goal
-        return " ".join(inspect.getsource(goal.goal_lane_sweep).split())
+        return " ".join(inspect.getsource(goal._deliver_batch).split())
 
     def test_swallowed_attempt_stamps_floor_for_all_included(self):
         src = self._src()

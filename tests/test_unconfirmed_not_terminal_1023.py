@@ -134,8 +134,8 @@ class TestBatchQaUnconfirmed1023(unittest.TestCase):
     (baseline stays OLD, re-confirmed later), while the per-kind floor
     (`mark_batch_sent`) is still stamped for ALL included kinds.
 
-    The batch delivery is an inline block (not a standalone function), so this is
-    a source-lock over `goal.goal_lane_sweep` — mutation-verified (revert the
+    The batch delivery lives in `goal._deliver_batch` (moved out of
+    `goal.goal_lane_sweep` by #1157), so this is a source-lock over it — mutation-verified (revert the
     guard -> RED). Its behavioral sibling (the single-path 🟡4 floor stamp +
     baseline skip) is covered by TestUnconfirmedNotTerminal above.
     """
@@ -143,7 +143,7 @@ class TestBatchQaUnconfirmed1023(unittest.TestCase):
     def _src(self):
         import inspect
         from watchdog import goal
-        return " ".join(inspect.getsource(goal.goal_lane_sweep).split())
+        return " ".join(inspect.getsource(goal._deliver_batch).split())
 
     def test_batch_skips_queue_arrival_callback_on_unconfirmed(self):
         src = self._src()
