@@ -10299,7 +10299,8 @@ def main():
     p_sec.add_argument("action", choices=list(SECRET_ACTIONS),
                        help="request NAME [NAME2 ...] (stand up the URL — several "
                             "names share ONE page with a field each, #603) | "
-                            "status | list | "
+                            "status | list | inspect PATH (a key file's "
+                            "format, never its value — #1153) | "
                             "exec NAME -- CMD (hand the value to a child; a "
                             "name LOCKED to a template ignores CMD and runs "
                             "its own command instead, #154) | "

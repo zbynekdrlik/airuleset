@@ -780,8 +780,8 @@ class AMalformedPayloadMustNotFailOpen(unittest.TestCase):
         # correct fix and legitimately contains that token. Forbidding the bare
         # token would be a lock that no correct implementation can satisfy.
         dead = "not cmd and not isinstance(payload, dict)"
-        offenders = [i for i, ln in enumerate(HOOK.read_text().splitlines(), 1)
-                     if dead in ln]
+        src = HOOK.read_text() + (HOOK.parent / "vault_read_guard.py").read_text()
+        offenders = [i for i, ln in enumerate(src.splitlines(), 1) if dead in ln]
         self.assertEqual(offenders, [],
                          "the unreachable fallback is back at line(s) %s"
                          % offenders)
