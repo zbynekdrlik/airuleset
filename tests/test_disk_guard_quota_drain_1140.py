@@ -301,7 +301,7 @@ def test_exhausted_quota_drain_backs_off_to_hourly_even_at_95(tmp_path, no_preve
 def test_real_path_post_drain_write_keeps_quota_fields(tmp_path, monkeypatch, no_prevention):
     """planners_fn=None: the post-drain `disk_status` rewrite must carry quota."""
     monkeypatch.setattr(dg, "_default_planners",
-                        lambda _h, _n, scratch_rows=None: [("r1", lambda: [])])
+                        lambda _h, _n, scratch_rows=None, **_kw: [("r1", lambda: [])])
     monkeypatch.setattr(dg, "_collect_top_consumers", lambda *a, **k: [])
     _run(tmp_path, box="shared-stream", fs=69, quota=_quota_seq(92), planners=None)
     cache = _cache(tmp_path)

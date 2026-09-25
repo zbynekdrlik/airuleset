@@ -157,7 +157,7 @@ def discover_scratch_worktrees(tmp_dir="/tmp", uid=None, now=None,
             try:
                 content = open(git_marker).read().strip()
                 if content.startswith("gitdir:"):
-                    gd = content.split(":", 1)[1].strip()
+                    gd = os.path.join(wt_path, content.split(":", 1)[1].strip())
                     is_locked = os.path.exists(os.path.join(gd, "locked"))
             except OSError:
                 is_locked = True  # can't read → assume locked (fail-safe)
@@ -194,21 +194,21 @@ def discover_scratch_worktrees(tmp_dir="/tmp", uid=None, now=None,
                 r = subprocess.run(
                     ["git", "-C", wt_path, "rev-list", "--count", "@{u}..HEAD"],
                     capture_output=True, text=True, timeout=10)
-                n_ahead = int(r.stdout.strip()) if r.returncode == 0 else 0
-            except Exception:
-                n_ahead = 0
-        if n_ahead and n_ahead > 0:
+                n_ahead = int(r.stdout.strip()) if r.returncode == 0 else None
+            except Exception:             # #1067 1g: unknown (no upstream) != 0 ahead
+                n_ahead = None
+        if n_ahead is None or n_ahead > 0:
             # #968: accept containment as alternative to zero-ahead
             is_contained = False
             if contained_fn is not None:
                 is_contained = contained_fn(wt_path)
-            elif n_ahead > 0:
+            else:
                 # Default: check via git branch -r --contains HEAD
                 from watchdog.disk_guard_worktrees import head_contained_in_origin_scratch
                 is_contained = head_contained_in_origin_scratch(wt_path)
             if not is_contained:
                 row.update(bytes=0, kind="skip",
-                           reason="%d commits ahead — kept" % n_ahead)
+                           reason="%s commits ahead — kept" % ("unknown" if n_ahead is None else n_ahead))
                 out.append(row)
                 continue
         # Reclaimable
