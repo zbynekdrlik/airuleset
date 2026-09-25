@@ -313,16 +313,20 @@ def test_reclaimable_verdict_reruns_every_check_and_the_size_walk(box):
 @pytest.mark.parametrize("garbage", [
     "{not json",
     "[]",
-    '{"v": 1, "entries": []}',
+    "ENTRY-LIST",
     '{"v": 999, "entries": {}}',
     "ENTRY-BAD-FP",
     "ENTRY-BAD-VERDICT",
 ])
 def test_corrupt_cache_means_full_recompute(box, garbage):
+    from watchdog import disk_guard_wt_cache as wtc
     wt = str(box.wts["agent-one"])
-    if garbage == "ENTRY-BAD-FP":
-        garbage = json.dumps({"v": 1, "entries": {wt: {"fp": "x", "ts": NOW,
-                                                       "verdict": {"kind": "skip"}}}})
+    if garbage == "ENTRY-LIST":                # right version, wrong shape
+        garbage = json.dumps({"v": wtc.CACHE_VERSION, "entries": []})
+    elif garbage == "ENTRY-BAD-FP":            # right version, bad entry
+        garbage = json.dumps({"v": wtc.CACHE_VERSION, "entries": {wt: {
+            "fp": "x", "refs": None, "ts": NOW,
+            "verdict": {"kind": "skip", "reason": "dirty worktree — kept"}}}})
     elif garbage == "ENTRY-BAD-VERDICT":
         _pass(box, FakeGit())
         data = json.loads(box.cache.read_text())
