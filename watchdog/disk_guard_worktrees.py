@@ -6,9 +6,9 @@ HEAD is preserved on origin (contained in some ``refs/remotes/origin/*``
 ref) and classifies them for reclaim.  Runs on EVERY box class (the gk
 case in the ticket).
 
-EACH function is a pure PLANNER returning action dicts
-``{cls, path, bytes, kind, reason}`` — the same contract as every other
-``discover_*`` in disk_guard.py.
+EACH function is a PLANNER returning action dicts ``{cls, path, bytes,
+kind, reason}`` (the contract of every ``discover_*`` in disk_guard.py);
+its one side effect is the #1067 1g verdict-cache file, never a delete.
 
 Also extends the #965 scratch-worktrees discovery with a containment
 criterion (HEAD on origin as an ALTERNATIVE to zero-ahead) so merged PRs
@@ -48,13 +48,14 @@ def _is_agent_worktree_dir(name: str) -> bool:
 
 
 def _worktree_gitdir(wt_path: str):
-    """Parse the gitdir path from a worktree's ``.git`` file. Returns None
-    on any error."""
+    """Parse the gitdir path from a worktree's ``.git`` file, a relative one
+    (``worktree.useRelativePaths``) resolved against the worktree, never the
+    process cwd. Returns None on any error."""
     git_marker = os.path.join(wt_path, ".git")
     try:
         content = Path(git_marker).read_text().strip()
         if content.startswith("gitdir:"):
-            return content.split(":", 1)[1].strip()
+            return os.path.join(wt_path, content.split(":", 1)[1].strip())
     except OSError:
         pass
     return None
@@ -90,25 +91,23 @@ def _is_clean(wt_path: str, git_run_fn=None) -> bool | None:
         return None
 
 
-def _head_contained_in_origin(wt_path: str, git_run_fn=None) -> str | None:
-    """Return the name of an ``origin/*`` ref that contains this worktree's
-    HEAD, or None when no origin ref does (work not preserved on origin).
-    Uses ``git branch -r --contains HEAD`` — the containment test the
-    ticket specifies."""
+def _origin_containment(wt_path: str, git_run_fn=None):
+    """``(ref, answered)``: the first remote ref containing HEAD per ``git
+    branch -r --contains HEAD`` (None = none does), and whether git answered
+    at all — an error (#1067 1g) is never the same as "not contained"."""
     if git_run_fn is not None:
         out = git_run_fn(["branch", "-r", "--contains", "HEAD"], wt_path)
-        if out and out.strip():
-            return out.strip().splitlines()[0].strip()
-        return None
-    try:
-        r = subprocess.run(
-            ["git", "-C", wt_path, "branch", "-r", "--contains", "HEAD"],
-            capture_output=True, text=True, timeout=30)
-        if r.returncode == 0 and r.stdout.strip():
-            return r.stdout.strip().splitlines()[0].strip()
-    except Exception:
-        pass
-    return None
+    else:
+        try:
+            r = subprocess.run(
+                ["git", "-C", wt_path, "branch", "-r", "--contains", "HEAD"],
+                capture_output=True, text=True, timeout=30)
+            out = r.stdout if r.returncode == 0 else None
+        except Exception:
+            out = None
+    if out is None:
+        return None, False
+    return (out.strip().splitlines()[0].strip() if out.strip() else None), True
 
 
 def _in_live_use(wt_path: str, live_check_fn=None) -> bool:
@@ -138,25 +137,31 @@ def _branch_name(wt_path: str, git_run_fn=None) -> str | None:
         return None
 
 
-def _skip(reason):
-    return {"bytes": 0, "kind": "skip", "reason": reason}
+_NOT_ON_ORIGIN = "HEAD not contained in any origin ref — kept"
+
+
+def _skip(reason, **extra):
+    return dict(bytes=0, kind="skip", reason=reason, **extra)
 
 
 def _classify(path, git_run_fn=None, dir_stats_fn=None):
     """The expensive checks — branch, (b) clean, (c) HEAD on origin, and the
     size walk of a reclaimable tree — as the row's verdict fields. The part
-    the #1067 1g verdict cache may skip; (a) and (d) are never in here."""
+    the #1067 1g verdict cache may skip; (a) and (d) are never in here. A
+    git failure carries ``error=True`` (never cached)."""
     branch = _branch_name(path, git_run_fn)
     if branch and branch in _PROTECTED_BRANCHES:        # never main/dev
         return _skip("protected branch %s — kept" % branch)
     clean = _is_clean(path, git_run_fn)
     if clean is None:
-        return _skip("git status unreadable — kept")
+        return _skip("git status unreadable — kept", error=True)
     if not clean:
         return _skip("dirty worktree — kept")
-    via = _head_contained_in_origin(path, git_run_fn)
+    via, answered = _origin_containment(path, git_run_fn)
+    if not answered:
+        return _skip("git branch --contains unreadable — kept", error=True)
     if via is None:
-        return _skip("HEAD not contained in any origin ref — kept")
+        return _skip(_NOT_ON_ORIGIN)
     return {"bytes": _safe_dir_size(path, dir_stats_fn), "kind": "worktree-remove",
             "reason": None, "branch": branch, "contained_in": via}
 
@@ -211,12 +216,13 @@ def discover_stale_agent_worktrees(home=None, now=None,
             elif cache is None:
                 row.update(_classify(path, git_run_fn, dir_stats_fn))
             else:
-                row.update(cache.classify(path, _worktree_gitdir(path), lambda p=path: (
-                    _classify(p, git_run_fn, dir_stats_fn))))
+                row.update(cache.classify(
+                    path, _worktree_gitdir(path),
+                    lambda p=path: _classify(p, git_run_fn, dir_stats_fn),
+                    refs_dep=lambda v: v.get("reason") == _NOT_ON_ORIGIN))
             out.append(row)
     if cache is not None:
         cache.save(seen)
-    return out
     return out
 
 
@@ -230,7 +236,7 @@ def head_contained_in_origin_scratch(wt_path: str, contained_fn=None) -> bool:
     HEAD is on origin (reclaimable even with commits ahead of upstream)."""
     if contained_fn is not None:
         return contained_fn(wt_path)
-    return _head_contained_in_origin(wt_path) is not None
+    return _origin_containment(wt_path)[0] is not None
 
 
 # --------------------------------------------------------------------------- #

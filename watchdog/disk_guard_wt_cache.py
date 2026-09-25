@@ -10,12 +10,15 @@ those slow even when nothing changed since the previous verdict.
 file in the guard dir (:data:`VERDICTS_NAME`). An entry holds a fingerprint
 built from cheap reads only, with NO git subprocess:
 
-* the gitdir ``HEAD`` text and the sha it resolves to (loose ref, then
-  ``packed-refs``), so a branch move shows even when the HEAD file does not
-  change;
-* the ``mtime_ns`` of the gitdir ``index``;
-* the ``mtime_ns`` of the main repo's ``packed-refs``, and the newest dir
-  ``mtime_ns`` under ``refs/remotes/origin``, so nested namespaces are covered.
+* core: the gitdir ``HEAD`` text and the sha it resolves to (loose ref,
+  following symbolic refs, then ``packed-refs``), so a branch move shows even
+  when the HEAD file does not change; and the ``mtime_ns`` of the gitdir
+  ``index``;
+* refs: the ``mtime_ns`` of the main repo's ``packed-refs`` and the newest dir
+  ``mtime_ns`` under ``refs/remotes`` (every remote, nested namespaces too —
+  ``git branch -r`` looks at all of them). Only a verdict that depends on
+  containment (the caller's ``refs_dep``) is keyed on it, so a lane's push or
+  fetch does not invalidate a dirty or protected verdict.
 
 A pass reuses the stored verdict while the fingerprint is unchanged and the
 entry is younger than :data:`VERDICT_TTL_S`. The TTL covers the one blind spot:
@@ -26,13 +29,21 @@ removal):
 
 * the caller runs the lock (a) and live-use (d) checks fresh before
   consulting the cache;
-* a ``worktree-remove`` verdict is never reused. It is always recomputed with
-  every fresh check;
-* a verdict is stored only when the fingerprint read BEFORE the fresh checks
-  equals the one read AFTER. A real ``git status`` may rewrite the index, or a
-  commit may race the check; such an entry is recomputed next pass;
-* an unreadable fingerprint, or a corrupt or foreign-version cache file,
-  means a full recompute, never a crash.
+* only a plain ``skip`` verdict is stored. A ``worktree-remove`` verdict, or
+  a git failure (``error``), is never stored, so it always gets every fresh
+  check;
+* a reused row is BUILT here as ``{bytes: 0, kind: "skip", reason, cached}``.
+  Nothing else is read from the file, so a tampered entry cannot turn a row
+  into an action on another path;
+* a verdict is stored only when the core fingerprint read BEFORE the fresh
+  checks equals the one read AFTER. A real ``git status`` may rewrite the
+  index, or a commit may race the check; such an entry is recomputed next
+  pass. The refs part is read once per repo per pass (memo), before any
+  check of that repo, so a stored refs value is never newer than the state
+  its verdict saw;
+* an unreadable fingerprint, or a corrupt, foreign-version or unreadable
+  cache file (any exception), means a full recompute, never a crash, and the
+  file is rewritten.
 
 Entries of worktrees not seen this pass are dropped on :meth:`save`. The file
 is written only when something changed, through the atomic
@@ -49,7 +60,7 @@ from pathlib import Path
 VERDICTS_NAME = "stale-wt-verdicts.json"
 VERDICT_TTL_S = 6 * 3600
 CACHE_VERSION = 1
-_VERDICT_KEYS = ("bytes", "kind", "reason", "branch", "contained_in")
+_SYMREF_DEPTH = 5
 
 
 def _dbg(msg):
@@ -88,14 +99,20 @@ def _common_dir(gitdir):
     return (gitdir / rel).resolve()
 
 
-def _resolve_ref(ref, gitdir, common):
-    """The sha ``ref`` points to — a loose ref file first, then
+def _resolve_ref(ref, gitdir, common, depth=0):
+    """The sha ``ref`` points to — a loose ref file first (a symbolic
+    ``ref:`` is followed up to :data:`_SYMREF_DEPTH` levels), then
     ``packed-refs``. Raises ValueError when it resolves nowhere."""
     for base in (gitdir, common):
         try:
-            return (base / ref).read_text().strip()
+            val = (base / ref).read_text().strip()
         except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
             continue
+        if not val.startswith("ref:"):
+            return val
+        if depth >= _SYMREF_DEPTH:
+            raise ValueError("symbolic ref chain too deep at %s" % ref)
+        return _resolve_ref(val[4:].strip(), gitdir, common, depth + 1)
     try:
         with open(common / "packed-refs") as f:
             for line in f:
@@ -107,10 +124,11 @@ def _resolve_ref(ref, gitdir, common):
     raise ValueError("ref %s resolves nowhere" % ref)
 
 
-def fingerprint(wt_path, gitdir):
-    """The cheap fingerprint of one worktree (see the module docstring), or
-    None when any required part (gitdir, HEAD, its sha, the index) is
-    unreadable — never an exception."""
+def fingerprint(wt_path, gitdir, memo=None):
+    """``[HEAD text, sha, index mtime, packed-refs mtime, remotes mtime]`` of
+    one worktree (see the module docstring), or None when any core part
+    (gitdir, HEAD, its sha, the index) is unreadable — never an exception.
+    ``memo`` (a dict) holds the refs part per repo for one pass."""
     if not gitdir:
         return None
     try:
@@ -119,21 +137,30 @@ def fingerprint(wt_path, gitdir):
             gd = Path(wt_path) / gd
         head = (gd / "HEAD").read_text().strip()
         common = _common_dir(gd)
-        sha = (_resolve_ref(head[5:].strip(), gd, common)
+        sha = (_resolve_ref(head[4:].strip(), gd, common)
                if head.startswith("ref:") else head)
         index = (gd / "index").stat().st_mtime_ns
-        return [head, sha, index, _mtime_ns(common / "packed-refs"),
-                _tree_mtime_ns(common / "refs" / "remotes" / "origin")]
+        memo = {} if memo is None else memo
+        key = str(common)
+        if key not in memo:
+            memo[key] = [_mtime_ns(common / "packed-refs"),
+                         _tree_mtime_ns(common / "refs" / "remotes")]
+        return [head, sha, index] + memo[key]
     except (OSError, ValueError) as e:
         _dbg("disk-guard wt-cache: fingerprint %s unreadable: %r" % (wt_path, e))
         return None
 
 
 def _valid_entry(entry):
-    return (isinstance(entry, dict) and isinstance(entry.get("fp"), list)
-            and isinstance(entry.get("ts"), (int, float))
-            and isinstance(entry.get("verdict"), dict)
-            and isinstance(entry["verdict"].get("kind"), str))
+    """Only a well-formed ``skip`` entry is ever trusted."""
+    if not isinstance(entry, dict):
+        return False
+    fp, refs, ts, v = entry.get("fp"), entry.get("refs"), entry.get("ts"), entry.get("verdict")
+    return (isinstance(fp, list) and len(fp) == 3
+            and (refs is None or (isinstance(refs, list) and len(refs) == 2))
+            and isinstance(ts, (int, float)) and not isinstance(ts, bool)
+            and isinstance(v, dict) and v.get("kind") == "skip"
+            and isinstance(v.get("reason"), str))
 
 
 class VerdictCache:
@@ -145,46 +172,53 @@ class VerdictCache:
         self.dirty = False              # a corrupt/pruned file is rewritten
         self.entries = self._load()
         self.hits = self.misses = 0
+        self._refs_memo = {}
 
     def _load(self):
-        if not self.path.exists():
-            return {}
+        """The trusted entries; ANY failure reading this untrusted file
+        (EACCES, bad JSON, a RecursionError on deep nesting, a foreign
+        shape) is a full recompute, never an exception."""
         try:
+            if not self.path.exists():
+                return {}
             data = json.loads(self.path.read_text())
-        except (OSError, ValueError) as e:
-            data = e
-        if (not isinstance(data, dict) or data.get("v") != CACHE_VERSION
-                or not isinstance(data.get("entries"), dict)):
-            _dbg("disk-guard wt-cache: %s unreadable or foreign, full recompute: %r"
-                 % (self.path, data if isinstance(data, Exception) else type(data)))
+            if (not isinstance(data, dict) or data.get("v") != CACHE_VERSION
+                    or not isinstance(data.get("entries"), dict)):
+                raise ValueError("foreign shape %s" % type(data).__name__)
+            entries = {k: v for k, v in data["entries"].items() if _valid_entry(v)}
+        except Exception as e:  # airuleset:script-ok untrusted file → recompute, logged
+            _dbg("disk-guard wt-cache: %s unreadable, full recompute: %r"
+                 % (self.path, e))
             self.dirty = True
             return {}
-        entries = {k: v for k, v in data["entries"].items() if _valid_entry(v)}
         self.dirty = len(entries) != len(data["entries"])
         return entries
 
     def _reusable(self, entry, fp):
-        # a reclaimable verdict is never STORED (classify); this re-check is
-        # the belt for a hand-edited or older file that carries one anyway
-        return (entry is not None and fp is not None and entry["fp"] == fp
-                and entry["verdict"]["kind"] != "worktree-remove"
+        return (entry is not None and fp is not None and entry["fp"] == fp[:3]
+                and (entry["refs"] is None or entry["refs"] == fp[3:])
                 and 0 <= self.now - entry["ts"] < VERDICT_TTL_S)
 
-    def classify(self, wt_path, gitdir, compute_fn):
-        """The verdict fields for ``wt_path``: the stored ones when reusable,
-        else ``compute_fn()`` (the fresh git checks), stored when the
-        fingerprint held still across it. Reused rows carry ``cached=True``."""
-        fp = fingerprint(wt_path, gitdir)
+    def classify(self, wt_path, gitdir, compute_fn, refs_dep=None):
+        """The verdict fields for ``wt_path``: a rebuilt ``skip`` row when the
+        stored entry is reusable, else ``compute_fn()`` (the fresh git checks),
+        stored when it is a plain ``skip`` and the core fingerprint held still
+        across it. ``refs_dep(verdict)`` says whether the verdict depends on
+        the remote refs (default: yes, the safe side)."""
+        fp = fingerprint(wt_path, gitdir, self._refs_memo)
         entry = self.entries.get(wt_path)
         if self._reusable(entry, fp):
             self.hits += 1
-            return dict(entry["verdict"], cached=True)
+            return {"bytes": 0, "kind": "skip", "reason": entry["verdict"]["reason"],
+                    "cached": True}
         self.misses += 1
         verdict = compute_fn()
-        if (fp is not None and verdict.get("kind") != "worktree-remove"
-                and fingerprint(wt_path, gitdir) == fp):
-            self.entries[wt_path] = {"fp": fp, "ts": self.now, "verdict": {
-                k: verdict[k] for k in _VERDICT_KEYS if k in verdict}}
+        stable = fp is not None and fingerprint(wt_path, gitdir, self._refs_memo) == fp
+        if stable and verdict.get("kind") == "skip" and not verdict.get("error"):
+            dep = refs_dep is None or refs_dep(verdict)
+            self.entries[wt_path] = {"fp": fp[:3], "refs": fp[3:] if dep else None,
+                                     "ts": self.now, "verdict": {
+                                         "kind": "skip", "reason": verdict["reason"]}}
             self.dirty = True
         elif self.entries.pop(wt_path, None) is not None:
             self.dirty = True
