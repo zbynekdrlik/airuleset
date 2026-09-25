@@ -34,11 +34,52 @@ set -euo pipefail
 
 INPUT=$(cat)
 
-MSG=$(printf '%s' "$INPUT" | jq -r '.last_assistant_message // empty' 2>/dev/null || echo "")
-SID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || echo "unknown")
-# Defang the session id so it can never escape the /tmp prefix (CC ids are uuids;
-# this is belt-and-suspenders against a crafted payload).
-SID=$(printf '%s' "$SID" | tr -cd 'A-Za-z0-9._-')
+# #1152: a failed step on the ✅ path used to be SILENT. A jq that failed on the
+# message read "no marker" and deleted the pending, a jq that failed on the
+# session id wrote the ✅ to the "unknown" session, and a failed strip/slice
+# aborted emit() under `set -e`. Each one lost the ✅ ping with rc 0 or 1 and
+# empty stderr (main CI run 36081710142, and issue 1134's twin). Every
+# degradation is now reported here, on stderr immediately (echo is a builtin,
+# so it cannot fail the same way) and in the delivery log at the end.
+DEGRADED=""
+_degraded() {   # $1 = reason token, $2 = what happened
+    DEGRADED="${DEGRADED:+$DEGRADED,}$1"
+    echo "notify-discord-pending: $2 (reason=$1, #1152)" >&2
+}
+# Payload fields: jq first, then a fork-free fallback parser (hooks/lib-json-field.sh).
+_LIB_JSON_FIELD="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)/lib-json-field.sh"
+# shellcheck source=hooks/lib-json-field.sh
+[ -r "$_LIB_JSON_FIELD" ] && . "$_LIB_JSON_FIELD"
+UNREADABLE=""
+_field() {   # $1 = variable name, $2 = payload key, $3 = "optional" or ""
+    local rc=0
+    if type json_str_field >/dev/null 2>&1; then
+        json_str_field "$INPUT" "$2" || rc=$?
+    else
+        # Partial install without the lib: the pre-#1152 jq read, still loud.
+        JSON_FIELD_VIA=jq
+        JSON_FIELD_VALUE=$(printf '%s' "$INPUT" | jq -r --arg k "$2" '.[$k] // empty' 2>/dev/null) \
+            || { rc=1; JSON_FIELD_VALUE=""; }
+    fi
+    printf -v "$1" '%s' "$JSON_FIELD_VALUE"
+    if [ "$rc" = 0 ]; then
+        [ "$JSON_FIELD_VIA" = jq ] \
+            || _degraded "jq-failed:$2" "jq could not read .$2 from the Stop payload; the built-in fallback parser read it"
+    elif [ "${3:-}" = optional ]; then
+        _degraded "unreadable:$2" "could not read .$2 from the Stop payload; continuing without it"
+    else
+        UNREADABLE="${UNREADABLE:+$UNREADABLE,}$2"
+    fi
+}
+_field MSG last_assistant_message
+_field SID session_id
+_field CWD cwd optional
+# Defang the session id so it can never escape the /tmp prefix (CC ids are
+# uuids; this is belt-and-suspenders against a crafted payload). A bash
+# expansion in the C locale, byte-for-byte what the sibling hooks' `tr -cd`
+# keeps, but never an external call that could fail the same way (#1152).
+_defang_sid() { local LC_ALL=C; SID="${SID//[!A-Za-z0-9._-]/}"; }
+_defang_sid
 [ -z "$SID" ] && SID="unknown"
 PENDING="/tmp/claude-discord-pending-${SID}"
 # #668: the ✅ RECORD-time cwd, carried to the idle DELIVERY. The idle hook
@@ -49,7 +90,6 @@ PENDING_CWD="/tmp/claude-discord-pending-cwd-${SID}"
 # Last-pinged ❓ content for this session — the dedup state. Cleared by
 # clear-question-dedup.sh (UserPromptSubmit) whenever the user actually types.
 LASTQ="/tmp/claude-discord-lastq-${SID}"
-CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty' 2>/dev/null || echo "")
 AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airuleset.py"
 
 # #486 G1 — structured session heartbeat (~/.claude/session-status/<sid>.json),
@@ -62,7 +102,41 @@ AIRULESET_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)/airul
 printf '%s' "$INPUT" | PYTHONPATH="${AIRULESET_PY%/airuleset.py}" \
     python3 -m watchdog.session_status --event stop >/dev/null 2>&1 || true
 
-LAST_LINE=$(printf '%s\n' "$MSG" | grep -vE '^[[:space:]]*$' | tail -1 || true)
+# #1152: ONE fork-free pass over the message lines finds the last non-blank
+# line, whether this is a ✅ done turn, the last "✅ DONE:" line and the first
+# "**What changed/Goal" line. It used to be `printf | grep` pipelines, and a
+# failed (or, past 64 KiB, SIGPIPE'd) grep read as "no marker", which sent a
+# ✅ turn to the branch that deletes the pending. Per line like grep, so no
+# match spans two lines; [[:space:]] keeps grep's locale-aware meaning. A
+# cheap glob screens each line before any regex runs.
+LAST_LINE="" IS_DONE=1 DLINE="" GLINE=""
+_scan_lines() {
+    local line
+    local re_done='✅[[:space:]]*DONE:|#+[[:space:]]*✅[[:space:]]*work complete|✅[[:space:]]*work complete'
+    local re_dline='✅[[:space:]]*DONE:' re_gline='^\*\*(What changed|Goal)\b'
+    local -a lines
+    if ! mapfile -t lines <<<"$MSG"; then
+        _degraded "line-split-failed" "could not split the message into lines; used the grep pipelines instead"
+        LAST_LINE=$(printf '%s\n' "$MSG" | grep -vE '^[[:space:]]*$' | tail -1 || true)
+        # No -q: a grep that quits early SIGPIPEs printf past 64 KiB.
+        printf '%s' "$MSG" | grep -iE "$re_done" >/dev/null && IS_DONE=0
+        DLINE=$(printf '%s\n' "$MSG" | grep -iE "$re_dline" | tail -1 || true)
+        GLINE=$(printf '%s\n' "$MSG" | grep -iE "$re_gline" | head -1 || true)
+        return 0
+    fi
+    shopt -s nocasematch
+    for line in "${lines[@]}"; do
+        [[ $line == *[![:space:]]* ]] && LAST_LINE=$line
+        if [[ $line == *✅* ]]; then
+            [[ $line =~ $re_done ]] && IS_DONE=0
+            [[ $line =~ $re_dline ]] && DLINE=$line
+        fi
+        [[ -z $GLINE && $line == \*\** && $line =~ $re_gline ]] && GLINE=$line
+    done
+    shopt -u nocasematch
+    return 0
+}
+_scan_lines
 
 # #466 fail-loud: send_q() sets this to 1 when it runs. A ❓-carrying turn that
 # never reaches send_q (marker not on the last line → the `else` branch; the
@@ -157,12 +231,30 @@ card_delivered_since_last_boundary() {
         "$newest" "$since" 2>/dev/null
 }
 
+# _clip250 <text> -> _CLIP: its first 250 characters, counted under C.UTF-8
+# whatever the hook's own locale is (emit()'s fallback for jq's slice, #1152).
+_clip250() { local LC_ALL=C.UTF-8; _CLIP="${1:0:250}"; }
+
 emit() {
     # $1 = emoji, $2 = raw content; clean + truncate to keep the device line
     # short. ✅ stays ONE short line (only the ❓ question carries a full block);
     # jq slices by CODEPOINTS so multi-byte Slovak never gets chopped mid-char.
     local c
-    c=$(strip_md "$2" | jq -Rrs 'rtrimstr("\n") | .[0:250]')
+    if ! c=$(strip_md "$2" | jq -Rrs 'rtrimstr("\n") | .[0:250]'); then
+        # #1152: never lose the ✅ to a failed sed/jq. Clean and clip it with
+        # bash builtins instead, mirroring strip_md on the one-line ✅ text;
+        # the clip counts characters under C.UTF-8, like jq's slice.
+        _degraded "format-fallback" "could not format the ✅ line (strip_md/jq failed); recorded it via the built-in fallback"
+        local label='^[[:space:]]*(NEEDS[[:space:]]+YOU|Question|DONE)[[:space:]]*:?[[:space:]]*'
+        c="${2//\*\*/}"
+        shopt -s nocasematch
+        [[ $c =~ $label ]] && c="${c:${#BASH_REMATCH[0]}}"
+        shopt -u nocasematch
+        c="${c#"${c%%[![:space:]]*}"}"
+        c="${c%$'\n'}"
+        _clip250 "$c"
+        c="$_CLIP"
+    fi
     # #668: record the reliable Stop-time cwd so the idle delivery resolves the
     # real project even when the idle event carries none. Sibling FIRST, trigger
     # (the pending) LAST — a hook killed between the two must never pair a FRESH
@@ -171,7 +263,9 @@ emit() {
     # denied" to stderr or abort the ✅ branch under `set -e` (#492), which would
     # skip the CARDCHK boundary write below.
     { printf '%s' "$CWD" > "$PENDING_CWD"; } 2>/dev/null || true
-    printf '%s %s' "$1" "$c" > "$PENDING"
+    if ! { printf '%s %s' "$1" "$c" > "$PENDING"; } 2>/dev/null; then
+        _degraded "write-failed" "could not write $PENDING, so this ✅ ping is lost"
+    fi
 }
 
 extract_block() {
@@ -467,6 +561,22 @@ send_q() {
     fi
 }
 
+# #1152: the delivery-log half of _degraded(), one line per turn.
+_flush_degraded() {
+    [ -n "$DEGRADED" ] && _pending_log "degraded" "$DEGRADED" ""
+    return 0
+}
+
+# #1152: a payload neither jq nor the fallback could read. Leave every pending
+# as it is: an unreadable turn is "don't know", and the no-marker branch below
+# would delete a real ✅. Without a session id nothing may be written either,
+# because the "unknown" bucket belongs to no session.
+if [ -n "$UNREADABLE" ]; then
+    _degraded "payload-unreadable:$UNREADABLE" "the Stop payload is unreadable ($UNREADABLE); nothing recorded, no pending touched"
+    _flush_degraded
+    exit 0
+fi
+
 # A genuine question to the user ALWAYS fires the device ping — NO suppression,
 # ever. Two honest forms (message-status-marker.md):
 #   ❓ ASKED: <q>      — a body line; the turn ENDS ⏳ WORKING because you keep
@@ -524,7 +634,7 @@ elif printf '%s' "$LAST_LINE" | grep -qE '^[[:space:]]*[*_>~-]*[[:space:]]*⏳';
     # any stale pending so nothing fires while Claude keeps working. Same
     # line-START anchoring as the ❓ branch — a ⏳ mid-sentence is prose.
     rm -f "$PENDING" "$PENDING_CWD" 2>/dev/null || true
-elif printf '%s' "$MSG" | grep -qiE '✅[[:space:]]*DONE:|#+[[:space:]]*✅[[:space:]]*work complete|✅[[:space:]]*work complete'; then
+elif [ "$IS_DONE" = 0 ]; then
     # Fully-done state. A per-ticket/per-batch ✅ DONE inside an autopilot
     # loop must not queue a SECOND idle ping when the sanctioned per-ticket
     # run-card ALREADY gave phone visibility for THIS ticket — that second
@@ -544,14 +654,21 @@ elif printf '%s' "$MSG" | grep -qiE '✅[[:space:]]*DONE:|#+[[:space:]]*✅[[:sp
         SUPPRESSED=0
         # Prefer an explicit "✅ DONE: <outcome>" line; else the report's
         # "What changed" / "Goal" one-liner; else a generic Slovak fallback.
-        DLINE=$(printf '%s\n' "$MSG" | grep -iE '✅[[:space:]]*DONE:' | tail -1 || true)
+        # DLINE/GLINE come from _scan_lines. The prefixes go with bash regexes
+        # (the old seds, same patterns): an unguarded sed that failed aborted
+        # the hook under `set -e` and lost the ✅ (#1152).
+        shopt -s nocasematch
         if [ -n "$DLINE" ]; then
-            C=$(printf '%s' "$DLINE" | sed -E 's/.*✅[[:space:]]*DONE:[[:space:]]*//I')
+            # Everything up to the LAST "✅ DONE:" goes (the old greedy sed).
+            C="$DLINE"
+            [[ $C =~ ^.*✅[[:space:]]*DONE:[[:space:]]* ]] && C="${C:${#BASH_REMATCH[0]}}"
         else
-            C=$(printf '%s\n' "$MSG" | grep -iE '^\*\*(What changed|Goal)\b' | head -1 \
-                | sed -E 's/^\*\*(What changed|Goal):?\*\*:?[[:space:]]*//I' || true)
+            C="$GLINE"
+            [[ $C =~ ^\*\*(What\ changed|Goal):?\*\*:?[[:space:]]* ]] \
+                && C="${C:${#BASH_REMATCH[0]}}"
             [ -z "$C" ] && C="práca dokončená"
         fi
+        shopt -u nocasematch
         emit "✅" "$C"
     fi
     # Move the boundary anchor forward whichever way it went, so THIS ticket's
@@ -588,4 +705,5 @@ if [ "${SENDQ_CALLED:-0}" = "0" ] \
     _pending_log "unhandled" "question-marker-not-dispatched" "$(_qhash "$MSG")"
 fi
 
+_flush_degraded
 exit 0

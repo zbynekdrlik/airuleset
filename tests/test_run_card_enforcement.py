@@ -1233,16 +1233,16 @@ class TestSuppressionIsConditionalOnDelivery(unittest.TestCase):
                          "the card gave phone visibility — no second ping")
 
     def test_armed_goal_with_NO_card_lets_the_ping_through(self):
-        self.stop(self.DONE)
+        r = self.stop(self.DONE)
         self.assertTrue(self.pending.exists(),
                         "this is the whole ticket: a suppression that defers "
-                        "to an unenforced action is a silence generator")
+                        "to an unenforced action is a silence generator %r" % (r,))
         self.assertIn("zmergnuté", self.pending.read_text())
 
     def test_armed_goal_with_a_FAILED_card_lets_the_ping_through(self):
         self.mark("parovanie-produktov#41", "error")
-        self.stop(self.DONE)
-        self.assertTrue(self.pending.exists())
+        r = self.stop(self.DONE)
+        self.assertTrue(self.pending.exists(), r)
 
     def test_a_card_older_than_the_previous_boundary_does_not_suppress(self):
         # ticket 1 delivered, so its ✅ is suppressed; ticket 2 delivers
@@ -1250,21 +1250,21 @@ class TestSuppressionIsConditionalOnDelivery(unittest.TestCase):
         self.mark("parovanie-produktov#41", "sent")
         self.stop(self.DONE)
         self.assertFalse(self.pending.exists())
-        self.stop("✅ DONE: #42 zmergnuté")
+        r = self.stop("✅ DONE: #42 zmergnuté")
         self.assertTrue(self.pending.exists(),
-                        "a previous ticket's card cannot cover this one")
+                        "a previous ticket's card cannot cover this one %r" % (r,))
 
     def test_an_unresolvable_repo_never_suppresses(self):
         d = Path(tempfile.mkdtemp(prefix="airuleset-supp-nogit-"))
         self.addCleanup(shutil.rmtree, d, True)
-        self.stop(self.DONE, cwd=d)
+        r = self.stop(self.DONE, cwd=d)
         self.assertTrue(self.pending.exists(),
-                        "cannot prove delivery -> never suppress")
+                        "cannot prove delivery -> never suppress %r" % (r,))
 
     def test_no_goal_armed_still_queues_the_ping(self):
         self.mark("parovanie-produktov#41", "sent")
-        self.stop(self.DONE, pane="ctx 50K\n")
-        self.assertTrue(self.pending.exists())
+        r = self.stop(self.DONE, pane="ctx 50K\n")
+        self.assertTrue(self.pending.exists(), r)
 
     def test_a_question_still_pings_regardless(self):
         r = self.stop("❓ NEEDS YOU: schváliš merge PR #5?")
