@@ -696,7 +696,9 @@ def is_secret_inspect(segment):
     return cli is not None and tk[cli:cli + 1] == ["inspect"] and len(tk) == cli + 2
 
 
-FLOW_TERMS = {"|", ")", "`"}
+# `(` too (slice-4 review): a segment ending at the `(` of `>(…)` writes its
+# output INTO the reader inside (`stat <root>/k > >(xargs cat)`).
+FLOW_TERMS = {"|", "(", ")", "`"}
 # Slice 4 (#1153 issuecomment-5832682152, ROZHODNUTÉ): "piped" is judged per
 # PIPELINE. These terms end one; `&` ends one only as a real background
 # operator (see _ends_pipeline). Any GROUPING keeps the whole-command cut:
