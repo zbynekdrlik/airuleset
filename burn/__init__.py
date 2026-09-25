@@ -23,6 +23,7 @@ import zlib
 from collections import defaultdict
 from pathlib import Path
 
+from .fleet_tail import burn_alert_since, compare_since, read_rows_since  # noqa: F401
 from .host_detail import (FLEET_WEEKLY_CANDIDATE_MAX_AGE, SessionAgg,  # noqa: F401
                           _weekly_candidate_is_fresh, session_id_of,
                           snapshot_sessions, weekly_windows)
@@ -685,8 +686,13 @@ def fleet_path():
     return burn_history_dir() / "fleet.jsonl"
 
 
-def load_fleet(path=None):
-    return _read_jsonl(path or fleet_path())
+def load_fleet(path=None, since=None):
+    """Every row, or with an aware `since` only rows with `ts >= since`, read
+    backwards from the end (#1154 part 2: `fleet_tail`; the file is never
+    trimmed — claudy reads it as history)."""
+    if since is None:
+        return _read_jsonl(path or fleet_path())
+    return read_rows_since(path or fleet_path(), since)
 
 
 def usage_cache_path():
