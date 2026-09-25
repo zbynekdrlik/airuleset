@@ -185,7 +185,7 @@ class PublicMaterial(Base):
     def test_pub_reads(self):
         self.both(
             allowed=["cat %s" % PUB,
-                     "cp %s /tmp/" % PUB,
+                     "wc -c %s" % PUB,
                      "ssh-copy-id -i %s host" % PUB,
                      "cat %s | ssh host 'cat >> .ssh/authorized_keys'" % PUB,
                      "ssh host 'cat >> .ssh/authorized_keys' < %s" % PUB],
@@ -197,6 +197,15 @@ class PublicMaterial(Base):
                     "echo %s" % PUB,
                     "awk '{system(\"cat \" substr(FILENAME,1,length(FILENAME)-4))}' %s" % PUB,
                     "cat %s/*.pub" % R,
+                    # review C: only READ-only heads, never an option token or
+                    # an output-redirect target (a hand-written key file)
+                    "cp %s /tmp/" % PUB,
+                    "cp /tmp/x %s" % PUB,
+                    "cat /tmp/x > %s" % PUB,
+                    "sort -o %s /tmp/x" % PUB,
+                    "sort -o%s /tmp/x" % PUB,
+                    "wc --files0-from=%s" % PUB,
+                    "sha256sum -c %s" % PUB,
                     "cat %s.bak" % PUB,
                     "cat %s/k.pu*" % R,
                     "cat %s/{k.pub,k}" % R,

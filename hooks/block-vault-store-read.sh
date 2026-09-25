@@ -119,11 +119,12 @@ set -euo pipefail
 # substitution stay refused; brackets count as text only when quoted); (f)
 # the `-f` value of `ssh-keygen` in a pure `-l`/`-y` (+`-E`, `-q`) call —
 # fingerprint and public half only; (g) a LITERAL single `*.pub` path (no
-# glob, `$`, braces, brackets or `..`) as the operand of a known CONTENT
-# reader (cat/head/tail/cut/grep/wc/diff/cp/ssh-copy-id/…) or a `<` redirect
-# target — never of a head that binds or rewrites the NAME, which is one
-# `${f%.pub}` from the private key (review A: `for f in <root>/*.pub; do cat
-# "${f%.pub}"; done`); piped, only as a `cat` operand; and
+# glob, `$`, braces, brackets or `..`, never an option token) as the operand
+# of a known READ-ONLY content reader (cat/head/tail/cut/grep/diff/
+# ssh-copy-id/…, not cp/sort/uniq/xxd, which can write) or a `<` redirect
+# target, never an output-redirect target — and never of a head that binds or
+# rewrites the NAME, which is one `${f%.pub}` from the private key (review A:
+# `for f in <root>/*.pub; do cat "${f%.pub}"; done`); piped, only `cat`; and
 # (h) `secret exec --file <path>`, whose CLI mirror now follows argparse
 # exactly (NAME only right after the action, so the child is never shifted).
 # Rule E's own gaps are the store's: a glob not anchored on 3 literal chars

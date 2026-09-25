@@ -108,19 +108,33 @@ class ExecFile(unittest.TestCase):
         r = self._refused("--file", str(k), "--stdin")
         self.assertIn("ssh", r.stderr)
         self.assertNotIn("fakepem1153", r.stdout + r.stderr)
+        # review C: the SSH2 (4-dash) and PuTTY formats too, and a CRLF file
+        priv = "PRIV" + "ATE KEY"
+        for name, text in (
+                ("k2", "---- BEGIN SSH2 ENCRYPTED %s ----\r\n%s\r\n" % (priv, line)),
+                ("k3.ppk", "PuTTY-User-Key-File-3: ssh-ed25519\nPrivate-Lines: 1\n%s\n" % line),
+                ("k4", "  -----BEGIN RSA %s-----\r\n%s\r\n" % (priv, line))):
+            with self.subTest(fmt=name):
+                self._refused("--file", str(self._key(name, text.encode())), "--stdin")
 
     def test_a_printed_slice_of_the_value_is_filtered(self):
         # Review B finding 1: `cut -c`, `head -c`, `fold` print a PART of a
         # line, which neither a whole-value nor a whole-line needle matches.
         p = self._key("tok", (FAKE + "\n").encode())
-        for child in ("cut -c1-15", "cut -c9-", "head -c 20", "fold -w 13"):
+        # review C: a value re-wrapped into short lines (`fold -w11`) or an
+        # 11-byte slice got past a per-line 12-byte window.
+        for child in ("cut -c1-15", "cut -c9-", "head -c 20", "fold -w 13",
+                      "cut -c1-11", "fold -w11", "fold -w8"):
             with self.subTest(child=child):
                 r = secret(self.home, "exec", "--file", str(p), "--stdin", "--",
                            "sh", "-c", child)
                 self.assertEqual(r.returncode, 0, r.stderr)
                 self.assertIn(MARK, r.stdout)
-                for i in range(len(FAKE) - 11):
-                    self.assertNotIn(FAKE[i:i + 12], r.stdout)
+                flat = r.stdout.replace("\n", "")
+                for i in range(len(FAKE) - 7):
+                    self.assertNotIn(FAKE[i:i + 8], flat)
+        r = secret(self.home, "exec", "--file", str(p), "--stdin", "--", "fold", "-w11")
+        self.assertEqual(r.stdout.count("\n"), r.stdout.count(MARK))   # lines kept
 
     def test_a_single_line_env_file_value_is_filtered(self):
         p = self._key("svc.env", b"export SVC_ENDPOINT_ID=\"fake-1153-single-line-value\"\n")
@@ -136,6 +150,8 @@ class ExecFile(unittest.TestCase):
         self.assertEqual(r.returncode, 7)
 
     def _refused(self, *args, rc=2):
+        if self.ran.exists():
+            self.ran.unlink()            # one call's child must not taint the next
         r = secret(self.home, "exec", *args, "--", "sh", "-c", "touch %s" % self.ran)
         self.assertEqual(r.returncode, rc, r.stdout + r.stderr)
         self.assertFalse(self.ran.exists(), "the child ran on a refused call")

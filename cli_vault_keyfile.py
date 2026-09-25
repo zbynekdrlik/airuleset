@@ -28,9 +28,12 @@ needles; slice 2: a PEM/OpenSSH block inside a value is ALSO a whole needle,
 so a printed block is replaced as one block, banners included.
 
 `exec --file` adds a FRAGMENT filter for its own child's output only
-(`scrub_fragments`): any 12+-byte run of the value's lines is replaced, so a
-child that prints a slice (`cut -c1-30`, `head -c 120`, `fold`) does not
-print it in the clear (review B finding 1). It is too slow for every tool
+(`scrub_fragments`): any run of 8+ bytes of the value's lines is replaced,
+also when the child breaks it across output lines (the scan skips line
+breaks), so a child that prints a slice (`cut -c1-30`, `head -c 120`) or
+re-wraps the value (`fold -w11`) does not print it in the clear (reviews B
+finding 1 and C finding 1). Residual: a slice of 7 bytes or fewer, or a
+value interleaved with other characters. It is too slow for every tool
 call, so the redactor does not use it.
 
 What is deliberately NOT a needle: a `*.pub` file (public material —
@@ -57,10 +60,14 @@ MAX_PLAIN_FILES = 128        # regular files READ per redactor call (cost bound)
 MIN_LINE_BYTES = 16
 MAX_LINE_LENGTHS = 64
 MAX_PEM_BLOCKS = 64
-FRAGMENT_BYTES = 12
+FRAGMENT_BYTES = 8
 PEM_BANNER_RE = re.compile(rb"^-----(BEGIN|END) ([A-Z0-9 ]{1,64})-----$")
+# PEM/PKCS#1/PKCS#8/OpenSSH, SSH2 (RFC 4716 style) and PuTTY private keys.
 # Split so a secret scanner reading this source does not see a key banner.
-PRIVATE_KEY_RE = re.compile(rb"-----BEGIN [A-Z0-9 ]{0,32}PRIV" + rb"ATE KEY-----")
+_PRIV = rb"PRIV" + rb"ATE KEY"
+PRIVATE_KEY_RE = re.compile(rb"-----BEGIN [A-Z0-9 ]{0,32}" + _PRIV + rb"-----"
+                            rb"|---- BEGIN SSH2 [A-Z ]{0,32}" + _PRIV + rb" ----"
+                            rb"|PuTTY-User-Key-File-\d")
 ENV_LINE_RE = re.compile(rb"^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=(.*)$")
 
 
@@ -214,25 +221,40 @@ def fragment_grams(value):
 
 
 def scrub_fragments(blob, grams):
-    """`blob` with every run covered by a known FRAGMENT_BYTES window marked."""
+    """`blob` with every run covered by a known FRAGMENT_BYTES window replaced.
+
+    The windows are matched on the bytes with CR/LF removed, so a value the
+    child re-wrapped (`fold -w11`) is still one run; each maximal marked run
+    WITHIN a line becomes one MARKER and the line breaks are kept."""
     if not grams:
         return blob
-    n, out = FRAGMENT_BYTES, []
-    for row in blob.split(b"\n"):
-        spans, i = [], 0
-        while i + n <= len(row):
-            if row[i:i + n] in grams:
-                end = i + n
-                while end < len(row) and row[end - n + 1:end + 1] in grams:
-                    end += 1
-                spans.append((i, end))
-                i = end
-            else:
-                i += 1
-        for a, b in reversed(spans):
-            row = row[:a] + MARKER + row[b:]
-        out.append(row)
-    return b"\n".join(out)
+    n = FRAGMENT_BYTES
+    keep = [i for i, c in enumerate(blob) if c not in (10, 13)]
+    flat = bytes(blob[i] for i in keep)
+    marked = bytearray(len(blob))
+    i = 0
+    while i + n <= len(flat):
+        if flat[i:i + n] in grams:
+            end = i + n
+            while end < len(flat) and flat[end - n + 1:end + 1] in grams:
+                end += 1
+            for j in range(i, end):
+                marked[keep[j]] = 1
+            i = end
+        else:
+            i += 1
+    if not any(marked):
+        return blob
+    out, in_run = bytearray(), False
+    for idx, c in enumerate(blob):
+        if marked[idx]:
+            if not in_run:
+                out += MARKER
+            in_run = True
+        else:
+            out.append(c)
+            in_run = False
+    return bytes(out)
 
 
 def resolve_key_file(raw):

@@ -390,12 +390,18 @@ def _keygen_args(tk, start):
 # that uses the file's bytes, never its name (not `for`/`select`/`set`/
 # `echo`/`awk`, which can bind or rewrite the name). Piped, even a content
 # reader's name headers (`head a b`) are a name source, so only `cat` keeps
-# it; a `< <path>` redirect feeds content, never a name, to any head.
-PUB_PATH_RE = re.compile(r"^[A-Za-z0-9_.~/+@%,:=-]*/[A-Za-z0-9_.+@%,:=-]+\.pub$")
-PUB_HEADS = {"cat", "head", "tail", "cut", "grep", "wc", "diff", "cmp", "cp",
-             "sha256sum", "md5sum", "ssh-copy-id", "nl", "tac", "fold", "sort",
-             "uniq", "base64", "xxd", "od"}
+# it; a `< <path>` redirect feeds content, never a name, to any head. Review
+# C: the heads are READ-ONLY ones (no `cp`/`sort -o`/`uniq IN OUT`/`xxd -r`
+# that can WRITE a `.pub`), an option token (`--files0-from=<p>.pub`,
+# `-o<p>.pub`) is never a path, and an output-redirect target is never
+# accounted — a hand-written key file is refused like any other write.
+PUB_PATH_RE = re.compile(r"^[A-Za-z0-9_.~/+@%,:=][A-Za-z0-9_.~/+@%,:=-]*/"
+                         r"[A-Za-z0-9_.+@%,:=-]+\.pub$")
+# (wc/sha256sum are metadata heads already, with their own option checks.)
+PUB_HEADS = {"cat", "head", "tail", "cut", "grep", "diff", "cmp",
+             "ssh-copy-id", "nl", "tac", "fold", "base64", "od"}
 PUB_FLOW_HEADS = {"cat"}
+OUT_REDIRECT_RE = re.compile(r"^\d*(?:>>?|>\||&>>?)$")
 
 
 def is_pub_path(tok):
@@ -409,7 +415,8 @@ def _pub_args(tk, start, head, term):
     ok = {i for i in range(start + 1, len(tk))
           if tk[i - 1] in ("<", "0<") and is_pub_path(tk[i])}
     if head in (PUB_FLOW_HEADS if term == "|" else PUB_HEADS):
-        ok |= {i for i in range(start + 1, len(tk)) if is_pub_path(tk[i])}
+        ok |= {i for i in range(start + 1, len(tk))
+               if is_pub_path(tk[i]) and not OUT_REDIRECT_RE.match(tk[i - 1])}
     return ok
 
 
