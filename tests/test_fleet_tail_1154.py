@@ -357,12 +357,71 @@ class BurnAlertJobWindow(unittest.TestCase):
                              burn.hour_bucket_of_ts(rows[-1]["ts"]))
 
 
-class FullHistoryCallers(unittest.TestCase):
-    """Job 16 and `burn --fleet` both reach `observed_pct_per_day(rows)`, which
-    takes the OLDEST weekly sample across ALL rows; job 35's `_scan` keeps
-    `last_fresh` unbounded on purpose (#543 F3). All three keep `since=None`."""
+def _cache(resets_at, pct=50):
+    return {"windows": [{"group": "weekly", "percent": pct, "model": None,
+                         "resets_at": resets_at}]}
 
-    def test_job16_fleet_burn_reads_full_history(self):
+
+RESET_A = T0 + datetime.timedelta(days=7)        # week A: T0 .. T0+7d
+RESET_B = T0 + datetime.timedelta(days=14)       # week B: T0+7d .. T0+14d
+
+
+def _two_weeks():
+    """Week A climbs 10 -> 94 %; the reset; week B climbs 0 -> 20 % in 24 h.
+    A full-history pace spans the reset (oldest A sample -> newest B sample);
+    the in-window pace is 20 %/day."""
+    rows = []
+    for h in range(0, 168, 12):
+        rows.append(_row(h, weekly_pct=10 + h // 2, resets_at=RESET_A.isoformat()))
+    rows.append(_row(168, weekly_pct=0, resets_at=RESET_B.isoformat()))
+    # stale usage cache right after the reset: ts is in week B, but the row
+    # still carries week A's reset and pct -> must not count as a B sample
+    rows.append(_row(169, weekly_pct=95, resets_at=RESET_A.isoformat()))
+    rows.append(_row(192, weekly_pct=20, resets_at=(RESET_B + datetime.timedelta(
+        seconds=0.4)).isoformat()))   # live resets_at jitters by < 1 s
+    return rows
+
+
+class WeeklyWindowPace(unittest.TestCase):
+    """ROZHODNUTE (coordinator ruling): the pace is measured inside the
+    CURRENT weekly window only; -0.51 %/day across a reset is impossible."""
+
+    NOW = RESET_B - datetime.timedelta(days=5)
+
+    def test_pace_is_the_in_window_rate_not_the_cross_reset_rate(self):
+        rows = _two_weeks()
+        cross = burn.observed_pct_per_day(rows)          # unscoped, as before
+        self.assertAlmostEqual(cross, (20 - 10) / 192 * 24)
+        s = burn.fleet_sustainability(rows, _cache(RESET_B.isoformat(), 20), now=self.NOW)
+        self.assertEqual(s["observed_pct_per_day"], 20.0)
+        self.assertEqual(s["verdict"], "prekracuje rozpocet")
+
+    def test_weekly_window_start(self):
+        self.assertEqual(burn.weekly_window_start(RESET_B.isoformat()),
+                         RESET_B - datetime.timedelta(days=7))
+        self.assertEqual(burn.weekly_window_start("2026-07-15T00:00:00Z"),
+                         datetime.datetime(2026, 7, 8, tzinfo=UTC))
+        self.assertEqual(burn.weekly_window_start("2026-07-15T00:00:00"),   # naive = UTC
+                         datetime.datetime(2026, 7, 8, tzinfo=UTC))
+        for bad in (None, "", "garbage", 5):
+            self.assertIsNone(burn.weekly_window_start(bad))
+
+    def test_budget_alert_reads_the_window_and_matches_the_full_read(self):
+        with TemporaryDirectory() as d:
+            p = Path(d) / "fleet.jsonl"
+            rows = _two_weeks()
+            _write_lines(p, [json.dumps(r) for r in rows])
+            cache = _cache(RESET_B.isoformat(), 20)
+            since = burn.weekly_window_start(RESET_B.isoformat())
+            bounded = burn.load_fleet(p, since=since)
+            self.assertLess(len(bounded), len(rows))
+            self.assertEqual(burn.fleet_budget_alert(bounded, cache, now=self.NOW),
+                             burn.fleet_budget_alert(rows, cache, now=self.NOW))
+            self.assertIsNotNone(burn.fleet_budget_alert(rows, cache, now=self.NOW))
+
+
+class Job16Window(unittest.TestCase):
+    def _run(self, cache):
         with TemporaryDirectory() as d:
             fleet = Path(d) / "fleet.jsonl"
             snap = Path(d) / "snapshots.jsonl"
@@ -374,8 +433,20 @@ class FullHistoryCallers(unittest.TestCase):
             with m.patch.object(burn, "load_fleet", spy):
                 wd.fleet_burn_job(now, {}, [], lambda *a, **k: None,
                                   fetch=lambda hs, hb: {}, local_snapshot_path=snap,
-                                  fleet_path=fleet, usage_cache={})
-            self.assertEqual([c["since"] for c in calls], [None])
+                                  fleet_path=fleet, usage_cache=cache)
+            return [c["since"] for c in calls]
+
+    def test_job16_reads_the_current_weekly_window(self):
+        self.assertEqual(self._run(_cache("2026-07-30T10:00:00+00:00")),
+                         [datetime.datetime(2026, 7, 23, 10, tzinfo=UTC)])
+
+    def test_job16_unknown_reset_keeps_the_full_read(self):
+        self.assertEqual(self._run({}), [None])
+        self.assertEqual(self._run(_cache("garbage")), [None])
+
+
+class HeartbeatFullHistory(unittest.TestCase):
+    """Job 35's `_scan` keeps `last_fresh` unbounded on purpose (#543 F3)."""
 
     def test_heartbeat_reads_full_history(self):
         calls, spy = _spy_load_fleet()
@@ -474,14 +545,45 @@ class CliBurnWindows(unittest.TestCase):
             for ch in (self._changes(), late, []):
                 self.assertEqual(self._cmd_compare(p, ch), self._cmd_compare(p, ch, full=True))
 
-    def test_cmd_burn_fleet_reads_full_history(self):
-        calls = []
-        with m.patch.object(burn, "load_fleet",
-                            lambda path=None, since=None: calls.append(since) or []), \
-                m.patch.object(burn, "load_usage_cache", lambda: {}), \
-                contextlib.redirect_stdout(io.StringIO()):
-            cli_burn.cmd_burn(_args(fleet=True, hours=24))
-        self.assertEqual(calls, [None])
+    def test_fleet_view_since(self):
+        with TemporaryDirectory() as d:
+            p = Path(d) / "fleet.jsonl"
+            rows = [_row(i) for i in range(200)]
+            _write_lines(p, [json.dumps(r) for r in rows])
+            newest = T0 + datetime.timedelta(hours=199)
+            reset = (newest + datetime.timedelta(days=7) - datetime.timedelta(hours=10))
+            cache = _cache(reset.isoformat())
+            ws = newest - datetime.timedelta(hours=10)
+            # 24 shown hours reach further back than the window start
+            self.assertEqual(burn.fleet_view_since(p, cache, 24),
+                             burn._parse_ts(rows[-24]["ts"]))
+            # 2 hours: the trend's 4 rows and the window start; the window wins
+            self.assertEqual(burn.fleet_view_since(p, cache, 2), ws)
+            self.assertIsNone(burn.fleet_view_since(p, {}, 24))
+            self.assertIsNone(burn.fleet_view_since(p, cache, 500))  # fewer rows than shown
+
+    def test_cmd_burn_fleet_output_matches_the_full_read(self):
+        with TemporaryDirectory() as d:
+            p = Path(d) / "fleet.jsonl"
+            rows = _two_weeks()
+            _write_lines(p, [json.dumps(r) for r in rows])
+            for cache in (_cache(RESET_B.isoformat(), 20), {}):
+                outs = []
+                for full in (False, True):
+                    real = burn.load_fleet
+                    calls = []
+                    buf = io.StringIO()
+                    with m.patch.object(burn, "fleet_path", lambda: p), \
+                            m.patch.object(burn, "load_usage_cache", lambda c=cache: c), \
+                            m.patch.object(burn, "load_fleet", lambda path=None, since=None, f=full:
+                                           calls.append(since) or real(path, since=None if f else since)), \
+                            contextlib.redirect_stdout(buf):
+                        cli_burn.cmd_burn(_args(fleet=True, hours=2))
+                    outs.append(buf.getvalue())
+                self.assertEqual(outs[0], outs[1])
+                self.assertEqual(calls, [burn.fleet_view_since(p, cache, 2)])
+                if cache:
+                    self.assertIn("aktualne tempo: 20.00 %/den", outs[0])
 
 
 if __name__ == "__main__":
