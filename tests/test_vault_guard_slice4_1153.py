@@ -172,11 +172,12 @@ class PerPipeline(Base):
 
     def test_metadata_heads_per_pipeline(self):
         # an unpiped listing beside an unrelated pipeline is a listing again;
-        # a piped one is still a name source
+        # a piped one is still a name source for a CONSUMER (slice 5 lets it
+        # feed text filters, tests/test_vault_guard_slice5_1153.py)
         self.both(
             allowed=["ls -la %s; echo x | tail -1" % R,
                      "stat %s/k && git log --oneline -1 | cat" % R],
-            denied=["ls %s | tail -1; echo x" % R,
+            denied=["ls %s | sh; echo x" % R,
                     "echo x; ls %s | xargs cat" % R])
 
 
