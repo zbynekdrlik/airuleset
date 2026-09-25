@@ -121,6 +121,28 @@ class PipedProse(Base):
                     "git -c commit.template=%s commit -m x | tail -1" % KEY,
                     "git log -m %s | tail -1" % KEY])
 
+    def test_adversarial_shapes_stay_denied(self):
+        # the in-context adversarial pass: a wrapper or a redefinition in front
+        # of gh is not the prose source, and a cd/heredoc/<(…) around the pipe
+        # never launders a relative or fed read
+        self.both(
+            allowed=["gh issue comment 1 --body '%s'|tail -1" % KEY,
+                     "git commit -m x -m'%s' | tail -1" % KEY],
+            denied=["env gh issue comment 1 --body '%s' | tail -1" % KEY,
+                    "nohup gh issue comment 1 --body '%s' | tail -1" % KEY,
+                    "! gh issue comment 1 --body '%s' | tail -1" % KEY,
+                    "gh(){ cat \"$@\"; }; gh issue comment 1 --body %s | tail -1" % KEY,
+                    "alias gh=cat; gh issue comment 1 --body %s | tail -1" % KEY,
+                    "cd %s && %s | tail -1 k" % (R, PROSE),
+                    "pushd %s; %s | head k" % (R, PROSE),
+                    "cat <<EOF | gh issue comment 1 -F - | tail -1\n%s\nEOF" % KEY,
+                    "gh issue comment 1 --body-file - <<< %s | tail -1" % KEY,
+                    PROSE + " | tail -1 <(cat %s)" % KEY,
+                    PROSE + " || cat %s | tail" % KEY,
+                    "git -C %s commit -m x | tail -1" % R,
+                    "git commit -C %s | tail -1" % KEY,
+                    "gh pr edit 1 --recover %s | tail -1" % KEY])
+
     def test_the_inspect_pipeline_is_unchanged(self):
         # the SAME code path: slice 2's piped inspect twins still hold
         self.both(
