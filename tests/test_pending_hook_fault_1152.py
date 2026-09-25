@@ -72,10 +72,11 @@ class PendingHookSurvivesOneFailingCall(unittest.TestCase):
             "exec %s \"$@\"\n" % (cond, tool, real))
         (self.bin / tool).chmod(0o755)
 
-    def stop(self, msg=DONE, stdin=None):
+    def stop(self, msg=DONE, stdin=None, **env_extra):
         env = {**os.environ, "HOME": str(self.home), "TMUX_PANE": "",
                "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
-               "AIRULESET_NOTIFY_OWNER": "", "ND_BLOCK_SETTLE": "0"}
+               "AIRULESET_NOTIFY_OWNER": "", "ND_BLOCK_SETTLE": "0",
+               **env_extra}
         # Not DRYRUN: the delivery-log line is part of the contract, and
         # `_pending_log` writes nothing under DRYRUN. HOME is private and
         # holds no Discord credentials; curl is shimmed to fail.
@@ -106,12 +107,8 @@ class PendingHookSurvivesOneFailingCall(unittest.TestCase):
         self.assert_recorded_loudly(self.stop(), "last_assistant_message")
 
     def test_jq_failing_on_the_session_id_never_misroutes_the_done(self):
-        # Before the fix the ✅ went to /tmp/claude-discord-pending-unknown.
-        # Remove the misrouted files only if THIS run created them.
-        for pre in ("pending", "pending-cwd", "cardchk"):
-            p = Path("/tmp/claude-discord-%s-unknown" % pre)
-            if not p.exists():
-                self.addCleanup(lambda p=p: p.unlink(missing_ok=True))
+        # Before the fix the ✅ went to /tmp/claude-discord-pending-unknown;
+        # the pending under the RIGHT sid proves it no longer does.
         self._shim("jq", "session_id")
         self.assert_recorded_loudly(self.stop(), "session_id")
 
@@ -170,12 +167,49 @@ class PendingHookSurvivesOneFailingCall(unittest.TestCase):
         self.assertTrue(Path("/tmp/claude-discord-pending-..%sxy"
                              % self.sid).exists(), r)
 
-    def test_an_unreadable_payload_is_loud_and_touches_no_pending(self):
+    def test_an_unreadable_payload_is_loud(self):
         r = self.stop(stdin="this is not json")
         self.assertEqual(r.returncode, 0, r)
         self.assertIn("notify-discord-pending", r.stderr, r)
         self.assertIn("unreadable", r.stderr, r)
         self.assertIn("unreadable", self.dlog())
+
+    def test_an_unreadable_message_leaves_the_pending_alone(self):
+        # "Don't know" must not delete a real ✅: before the fix an unread
+        # message read as "no marker", and that branch removes the pending.
+        self.pending.write_text("✅ the previous turn")
+        self._shim("jq", "last_assistant_message")
+        r = self.stop(stdin=json.dumps({"session_id": self.sid, "cwd": "",
+                                        "last_assistant_message": 42}))
+        self.assertEqual(r.returncode, 0, r)
+        self.assertEqual(self.pending.read_text(), "✅ the previous turn", r)
+        self.assertIn("unreadable", r.stderr, r)
+
+    def test_a_missing_cwd_does_not_drop_the_done_when_jq_fails(self):
+        # cwd is optional everywhere downstream; without jq it must not turn
+        # the whole payload "unreadable".
+        self._shim("jq", "", fail_always=True)
+        r = self.stop(stdin=json.dumps({"session_id": self.sid,
+                                        "last_assistant_message": DONE}))
+        self.assertEqual(r.returncode, 0, r)
+        self.assertTrue(self.pending.exists(), r)
+        self.assertIn("zmergnuté", self.pending.read_text())
+        self.assertIn("cwd", r.stderr, r)
+
+    def test_grep_failing_on_the_done_line_keeps_the_real_text(self):
+        # The "✅ DONE:" line was found with `grep | tail || true`: a failed
+        # grep silently replaced the outcome with the generic fallback text.
+        self._shim("grep", "DONE:")
+        r = self.stop()
+        self.assertEqual(r.returncode, 0, r)
+        self.assertIn("zmergnuté", self.pending.read_text())
+
+    def test_unicode_space_before_done_still_counts_in_a_utf8_locale(self):
+        # grep's [[:space:]] is locale-aware; the builtin match must agree.
+        r = self.stop("✅\u2003DONE: #41 zmergnuté", LC_ALL="C.UTF-8")
+        self.assertEqual(r.returncode, 0, r)
+        self.assertTrue(self.pending.exists(), r)
+        self.assertIn("#41 zmergnuté", self.pending.read_text())
 
     def test_the_happy_path_stays_silent(self):
         r = self.stop()

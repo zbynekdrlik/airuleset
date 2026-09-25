@@ -86,22 +86,47 @@ class JsonStrField(unittest.TestCase):
         self.assertEqual(self.read(payload, "session_id"),
                          (0, "fallback", "real"))
 
-    def test_an_unreadable_payload_reports_rc_1(self):
-        self.assertEqual(self.read("this is not json", "session_id"),
-                         (1, "fallback", ""))
+    def test_null_reads_as_empty_like_jq(self):
+        payload = json.dumps({"cwd": None, "session_id": "s-1"})
+        self.assertEqual(self.read(payload, "cwd"), (0, "fallback", ""))
+        self.assertEqual(self.read(payload, "cwd", jq_fails=False),
+                         (0, "jq", ""))
 
-    def test_a_large_report_decodes_in_linear_time(self):
-        # 300 KB with 50 000 escapes: about 2 s idle on a 2-core box. The
-        # quadratic `${s//…}` replacements this replaced needed about 30 s,
-        # so the bound catches a regression and still leaves 10x headroom
-        # for a loaded CI runner.
+    def test_a_non_string_value_is_unreadable_rc_1(self):
+        payload = json.dumps({"cwd": 42, "session_id": "s-1"})
+        self.assertEqual(self.read(payload, "cwd"), (1, "fallback", ""))
+
+    def test_a_missing_key_is_absent_rc_2(self):
+        self.assertEqual(self.read("this is not json", "session_id"),
+                         (2, "fallback", ""))
+        self.assertEqual(self.read(json.dumps({"x": "y"}), "session_id"),
+                         (2, "fallback", ""))
+
+    def test_a_key_that_is_not_a_plain_name_is_refused(self):
+        # The key goes into a regex; `a.b` must not match `axb`.
+        payload = json.dumps({"axb": "v"})
+        self.assertEqual(self.read(payload, "a.b", jq_fails=False),
+                         (1, "jq", ""))
+
+    def test_a_lone_surrogate_becomes_the_replacement_char(self):
+        # Invalid UTF-16 (jq 1.7 rejects it outright); never crash on it.
+        payload = '{"m": "a\\ud83cb and \\udfab"}'
+        rc, via, value = self.read(payload, "m")
+        self.assertEqual((rc, via), (0, "fallback"))
+        self.assertEqual(value, "a\ufffdb and \ufffd")
+
+    def test_a_large_report_decodes_within_the_hook_timeout(self):
+        # 300 KB with 50 000 escapes: about 1.5 s idle on a 2-core box. The
+        # bound is the Stop hook's own 15 s timeout (settings/hooks.json):
+        # a slower fallback would get the hook killed and lose the ✅. The
+        # quadratic `${s//…}` replacements this replaced needed about 30 s.
         text = ("riadok č. %d ✅ \"ok\"\n" * 10000) % tuple(range(10000))
         payload = json.dumps({"last_assistant_message": text})
         t = time.monotonic()
         rc, via, value = self.read(payload, "last_assistant_message")
         self.assertEqual((rc, via), (0, "fallback"))
         self.assertEqual(value, text.rstrip("\n"))
-        self.assertLess(time.monotonic() - t, 20.0)
+        self.assertLess(time.monotonic() - t, 15.0)
 
 
 if __name__ == "__main__":
