@@ -346,8 +346,8 @@ def cmd_burn(args):
         print(burn.render_compare(results, window_hours=window, fleet_results=fleet_results))
         return
     if getattr(args, "fleet", False):
-        hours = getattr(args, "hours", None) or 24
-        print(burn.render_fleet(burn.load_fleet(), hours=hours, cache=burn.load_usage_cache()))  # full: pace (fleet_tail)
+        hours, cache = getattr(args, "hours", None) or 24, burn.load_usage_cache()
+        print(burn.render_fleet(burn.load_fleet(since=burn.fleet_view_since(burn.fleet_path(), cache, hours)), hours=hours, cache=cache))
         return
     days = getattr(args, "days", None) or 7
     reports = [burn.local_report(days=days)]

@@ -267,7 +267,7 @@ def fleet_burn_job(now, state, hosts, send_fn, fetch=None, local_snapshot_path=N
     state["fleet_burn_hour"] = hour_bucket
     logs = ["fleet-burn ts=%s total=$%.2f hosts=%d -> %s"
            % (ts, row["total_usd"], len(host_rows), path)]
-    all_rows = burn_mod.load_fleet(path)  # full history: observed_pct_per_day (fleet_tail)
+    all_rows = burn_mod.load_fleet(path, since=burn_mod.weekly_window_start(resets_at))
     alert = burn_mod.fleet_budget_alert(
         all_rows, cache,
         now=datetime.datetime.fromtimestamp(now, datetime.timezone.utc))

@@ -24,7 +24,8 @@ from collections import defaultdict
 from pathlib import Path
 
 from .fleet_tail import (_parse_ts, burn_alert_since, compare_since,  # noqa: F401
-                         read_rows_since)
+                         fleet_view_since, in_weekly_window, read_rows_since,
+                         shared_weekly_window, weekly_window_start)
 from .host_detail import (FLEET_WEEKLY_CANDIDATE_MAX_AGE, SessionAgg,  # noqa: F401
                           _weekly_candidate_is_fresh, session_id_of,
                           snapshot_sessions, weekly_windows)
@@ -710,23 +711,6 @@ def load_usage_cache(path=None):
         return None
 
 
-def shared_weekly_window(cache):
-    """(percent, resets_at) for the ACCOUNT-WIDE weekly window (model is
-    falsy — the per-model weekly windows, e.g. Fable's, are a DIFFERENT
-    number) — or None when no such window is present. Across multiple
-    matching entries takes the MAX percent (the binding window decides)."""
-    best = None
-    for w in (cache or {}).get("windows") or []:
-        if w.get("group") != "weekly" or w.get("model"):
-            continue
-        pct = w.get("percent")
-        if isinstance(pct, bool) or not isinstance(pct, (int, float)):
-            continue
-        if best is None or pct > best[0]:
-            best = (pct, w.get("resets_at"))
-    return best
-
-
 def merge_fleet_row(ts, host_rows, weekly_pct=None, resets_at=None):
     """Pure merge of one collection cycle's per-host rows into the single
     fleet.jsonl row shape: `{ts, per_host, total_usd, total_msgs,
@@ -1047,15 +1031,18 @@ def fleet_trend(rows, n_prev=3):
     return out
 
 
-def observed_pct_per_day(rows):
+def observed_pct_per_day(rows, resets_at=None):
     """Observed weekly-% consumption rate (%/day), from the OLDEST and NEWEST
     fleet rows that carry a `weekly_pct` sample (each hourly collection
     stamps the CURRENT usage-cache percent onto its own row — a genuine
-    hourly time series with no separate history file). None when fewer than
-    2 such samples exist yet, their timestamps don't parse, or they collapse
-    to the same instant."""
+    hourly time series with no separate history file). With `resets_at`
+    only samples of THAT weekly window count (`in_weekly_window`, #1154 — a
+    pace across a reset is meaningless, live it read -0.51 %/day). None when
+    fewer than 2 such samples exist yet, their timestamps don't parse, or
+    they collapse to the same instant."""
     samples = [(r.get("ts"), r.get("weekly_pct")) for r in rows
-              if r.get("weekly_pct") is not None and _parse_ts(r.get("ts")) is not None]
+              if r.get("weekly_pct") is not None and _parse_ts(r.get("ts")) is not None
+              and (resets_at is None or in_weekly_window(r, resets_at))]
     if len(samples) < 2:
         return None
     samples.sort(key=lambda s: _parse_ts(s[0]))
@@ -1077,7 +1064,7 @@ def fleet_sustainability(rows, cache, now=None):
     if not budget:
         return {"budget": None, "observed_pct_per_day": None,
                 "verdict": "chyba usage cache (este nie je zapisana)"}
-    observed = observed_pct_per_day(rows)
+    observed = observed_pct_per_day(rows, budget.get("resets_at"))
     if observed is None:
         return {"budget": budget, "observed_pct_per_day": None,
                 "verdict": "zatial nedostatok hodinovych vzoriek na odhad tempa"}

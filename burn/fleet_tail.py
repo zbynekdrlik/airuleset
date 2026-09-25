@@ -33,11 +33,20 @@ caller a one-line change and makes the windows unit-testable:
   change the report is empty whatever the rows, so nothing is read. A naive
   change ts returns None: `compare_changes` already compares it with aware
   rows, so the full-read path is kept.
-- Full history (`since=None`) is kept by job 16 (`fleet_budget_alert`) and
-  `burn --fleet` (`render_fleet`), because both reach
-  `observed_pct_per_day(rows)`, which takes the OLDEST weekly sample across
-  ALL rows. It is also kept by job 35 (conformance heartbeat), whose
-  `last_fresh` is unbounded on purpose (#543 F3).
+- `weekly_window_start` — job 16 (`fleet_budget_alert`) and the pace in
+  `burn --fleet`. Both reach `fleet_sustainability`, which (ROZHODNUTE,
+  #1154) measures the pace INSIDE the current weekly window only
+  (`in_weekly_window`: `ts >= resets_at - 7d`, and a row carrying its own
+  `resets_at` must be within 1 h of the current one, which drops a
+  stale-cache row that still reports the previous week). So job 16 passes
+  `since = resets_at - 7d`. An unknown or unparseable `resets_at` keeps the
+  full read.
+- `fleet_view_since` — `burn --fleet` also shows the last `hours` rows and a
+  trend over the last 4, so its bound is the older of the window start and
+  the `max(hours, 4)`-th newest row. Fewer rows than that keeps the full
+  read. Its output is identical to a full read.
+- Full history (`since=None`) is kept by job 35 (conformance heartbeat),
+  whose `last_fresh` is unbounded on purpose (#543 F3).
 
 This is a sibling of `burn/__init__.py`, which is at its size-ratchet ceiling.
 It must never import `burn`, because `burn` imports FROM here. It is stdlib
@@ -48,6 +57,8 @@ import json
 
 BLOCK_SIZE = 1 << 16
 COMPARE_SINCE_MARGIN = datetime.timedelta(hours=1)
+WEEK = datetime.timedelta(days=7)
+RESET_MATCH = datetime.timedelta(hours=1)    # live resets_at jitters by < 1 s
 _READS_NOTHING = datetime.datetime.max.replace(tzinfo=datetime.timezone.utc)
 
 
@@ -165,3 +176,67 @@ def compare_since(changes, window_hours, path=None):
     if newest:
         since = min(since, datetime.datetime.fromtimestamp(newest[0][1], datetime.timezone.utc))
     return since
+
+
+def shared_weekly_window(cache):
+    """(percent, resets_at) for the ACCOUNT-WIDE weekly window (model is
+    falsy — the per-model weekly windows, e.g. Fable's, are a DIFFERENT
+    number) — or None when no such window is present. Across multiple
+    matching entries takes the MAX percent (the binding window decides).
+    Moved here from `burn/__init__.py` (#1154), which re-exports it."""
+    best = None
+    for w in (cache or {}).get("windows") or []:
+        if w.get("group") != "weekly" or w.get("model"):
+            continue
+        pct = w.get("percent")
+        if isinstance(pct, bool) or not isinstance(pct, (int, float)):
+            continue
+        if best is None or pct > best[0]:
+            best = (pct, w.get("resets_at"))
+    return best
+
+
+def _reset_dt(resets_at):
+    t = _parse_ts(resets_at) if isinstance(resets_at, str) else None
+    if t is not None and (t.tzinfo is None or t.utcoffset() is None):
+        t = t.replace(tzinfo=datetime.timezone.utc)   # as weekly_budget() reads it
+    return t
+
+
+def weekly_window_start(resets_at):
+    """Start of the weekly window ending at `resets_at` (reset - 7 d, aware),
+    or None when `resets_at` is missing or unparseable."""
+    t = _reset_dt(resets_at)
+    return t - WEEK if t is not None else None
+
+
+def in_weekly_window(row, resets_at):
+    """True iff `row` is a sample of the window ending at `resets_at` (see
+    module doc). An unknown `resets_at` scopes nothing (True)."""
+    reset = _reset_dt(resets_at)
+    if reset is None:
+        return True
+    t = _ts_of(row)
+    if t is None or t < (reset - WEEK).timestamp():
+        return False
+    own = _reset_dt(row.get("resets_at"))
+    return own is None or abs(own - reset) <= RESET_MATCH
+
+
+def fleet_view_since(path, cache, hours):
+    """`burn --fleet`'s bound (see module doc), or None for a full read."""
+    wk = shared_weekly_window(cache) if isinstance(cache, dict) else None
+    start = weekly_window_start(wk[1]) if wk else None
+    if start is None:
+        return None
+    n = max(int(hours or 0), 4)
+    count = [0]
+
+    def nth(_row, _t):
+        count[0] += 1
+        return count[0] >= n
+
+    got = _scan(path, nth)
+    if not got or len(got) < n:
+        return None
+    return min(start, datetime.datetime.fromtimestamp(got[-1][1], datetime.timezone.utc))
