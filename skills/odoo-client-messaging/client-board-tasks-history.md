@@ -51,3 +51,32 @@ The injected rule 15 keeps the three source calls inline; the reasoning for that
 (the recipe companion defers on a `project.task` write) is: (plný recept +
 `res_field`/fence caveaty v `read-with-attachments.md`, ktorý sa na
 `project.task` write nemusí injektnúť — preto minimálne volania INLINE)
+
+## Rules 7, 9, 11, 12, 13 — provenance + side notes (moved for rule 16, #1156)
+
+Moved VERBATIM out of the injected CORE so rule 16 fits the #1102 co-fire budget
+(CORE ≤ 6000 stripped chars, ≥ 500 headroom on the tightest co-fire fixture):
+owner quotes, ticket provenance, the one-time `res.users` rename scope note, the
+enforcing-hook citation and a sentence that repeated rule 13's own
+`body_is_html=True`. Every operative instruction stayed in the CORE (the
+owner-override sentence of rule 11 is what rule 12 already says: an owner
+correction changes the CORE rule itself).
+
+- **rule 7:** (owner: „preco do commentarov do odoo taskov vypisujes technicke veci o githube!!", #1018)
+- **rule 11 (a):** (the form the owner accepted when david3 renamed `res.users` 366 on slovnormal to „ZbynekAI 3"; odoo-erp #4624 / #4721)
+- **rule 11 (b):** (owner: „tvoj účet sa volá ZbynekAI - odovzdávky, čo je zle", #1024)
+- **rule 12:** — the „ako keby som už jedného neinštruoval" drift, #1014
+- **rule 9:** (otherwise nothing ever closes, #1024)
+- **rule 11 (c):** The owner may override the fleet form; the `res.users` rename itself on each Odoo instance is that stream's OWN odoo-erp task, not this file.
+- **rule 13 (a):** hook `block-odoo-message-post-without-html.sh`, #1054 (enforces the stream-approved poster)
+- **rule 13 (b):** The `handover-compose.md` `body_is_html` rule applies to task chatter too.
+
+## Rule 16 — origin (#1156)
+
+Owner, 25.9.2026 (montalu stream), verbatim: „chcel by som mať info o tom, čo sa
+dohodlo na meetingu aj v úlohách, lebo tu to zasa zabudneš a issues sú v princípe
+len pre teba. Tasky sú zdieľaný stav medzi nimi, mnou a tebou." — „a v issues
+môžeš mať technické veci, ktoré rozumieš len ty, no nikto z nás im nerozumie."
+Streams recorded meeting agreements only on GitHub issues, which the client and
+the owner do not read, so the agreements were lost for the people who share the
+Odoo tasks. GitHub keeps the technical record (file:line, tests, root cause).
