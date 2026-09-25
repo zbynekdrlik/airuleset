@@ -291,6 +291,9 @@ def _scan_text_options(tk, i, text_opts, arg_opts, bool_opts, short_cluster=""):
             if i + 1 < len(tk):
                 ok.add(i + 1)              # `-am TEXT`
             i += 2
+        elif (short_cluster and not t.startswith("--") and len(t) > 2
+              and all(c in short_cluster for c in t[1:])):
+            i += 1                         # `-sq`: known no-arg flags only
         elif key in arg_opts:
             i += 1 if "=" in t else 2      # its value is NOT text
         elif key in bool_opts:
@@ -477,7 +480,12 @@ def _is_inert_source(seg):
 
 def pipeline_is_inert(segments):
     """True when the command pipes a one-path `secret inspect` or a prose
-    command only into text filters (see INSPECT_SINKS above)."""
+    command only into text filters (see INSPECT_SINKS above).
+
+    This decides ONLY the source's term; it is not the read check. A sink
+    that names the root (`… | cat <root>/k`) still passes `_is_text_sink`
+    here and is denied by its own `key_violation` pass, like every segment.
+    """
     if not any(_is_inert_source(seg) for seg, _t in segments):
         return False
     prev = None
