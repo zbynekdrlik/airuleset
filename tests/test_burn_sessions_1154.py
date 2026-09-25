@@ -4,12 +4,13 @@ burn snapshot (for claudy's per-group accounting on shared machines).
 `scan()` gains a `by_hour_session` breakdown keyed `hour|session_id` (the
 same per-line pass, no second parser); `hourly_snapshot()` emits
 `sessions: [{project, session_id, usd, msgs, by_model}]` for the previous
-full hour plus `weekly_window: [{scope, kind, pct, resets_at, read_ts,
+full hour plus `weekly_window: [{scope, kind, pct, resets_at, is_active, read_ts,
 stale}]` from the box's usage cache; `merge_fleet_row()` passes both through
 additively. Every test uses synthetic transcripts / caches in temp dirs —
 never this box's real `~/.claude/projects` or usage cache, never ssh/network.
 """
 import datetime
+import gzip
 import json
 import os
 import sys
@@ -132,6 +133,47 @@ class TestSnapshotSessions(unittest.TestCase):
             row = _snapshot(tmp)
             self.assertEqual(row["sessions"][0]["project"], "/home/z/devel/b")
 
+    def test_the_main_transcripts_first_cwd_is_the_project(self):
+        # a session that later cds elsewhere keeps its LAUNCH dir as project
+        with TemporaryDirectory() as tmp:
+            _write(Path(tmp) / "-home-z-a" / "s.jsonl", [
+                _line("claude-opus-5", cr=1000000, cwd="/home/z/a"),
+                _line("claude-opus-5", cr=1000000, cwd="/home/z/elsewhere",
+                      ts=PREV + datetime.timedelta(minutes=9))])
+            self.assertEqual(_snapshot(tmp)["sessions"][0]["project"], "/home/z/a")
+
+    def test_a_main_cwd_beats_a_subagent_cwd_noted_earlier(self):
+        agg = burn.SessionAgg()
+        agg.note_cwd("s", "/home/z/a/.claude/worktrees/agent-1", False)
+        agg.note_cwd("s", "/home/z/a", True)
+        agg.note_cwd("s", "/home/z/later", True)
+        self.assertEqual(agg.project_of("s"), "/home/z/a")
+
+    def test_an_orphan_worktree_lane_cwd_maps_back_to_its_project(self):
+        with TemporaryDirectory() as tmp:
+            pdir = Path(tmp) / "-home-z-p"
+            _write(pdir / "p" / "subagents" / "agent-1.jsonl", [
+                _line("claude-opus-5", cr=1000000, sidechain=True,
+                      cwd="/home/z/p/.claude/worktrees/agent-1")])
+            s = _snapshot(tmp)["sessions"]
+            self.assertEqual([(x["session_id"], x["project"]) for x in s],
+                             [("p", "/home/z/p")])
+
+    def test_gzipped_main_and_subagent_transcripts_are_one_session(self):
+        with TemporaryDirectory() as tmp:
+            pdir = Path(tmp) / "-home-z-gz"
+            (pdir / "g" / "subagents").mkdir(parents=True)
+            with gzip.open(pdir / "g.jsonl.gz", "wt", encoding="utf-8") as fh:
+                fh.write(_line("claude-opus-5", cr=1000000, cwd="/home/z/gz") + "\n")
+            with gzip.open(pdir / "g" / "subagents" / "agent-1.jsonl.gz", "wt",
+                           encoding="utf-8") as fh:
+                fh.write(_line("claude-opus-5", cr=1000000, sidechain=True) + "\n")
+            row = _snapshot(tmp)
+            self.assertEqual(len(row["sessions"]), 1)
+            self.assertEqual(row["sessions"][0]["session_id"], "g")
+            self.assertEqual(row["sessions"][0]["project"], "/home/z/gz")
+            self.assertEqual(row["sessions"][0]["msgs"], 2)
+
     def test_a_one_session_box_yields_a_one_entry_list(self):
         with TemporaryDirectory() as tmp:
             _write(Path(tmp) / "-home-z-x" / "only.jsonl", [
@@ -177,11 +219,11 @@ class TestSnapshotWeeklyWindow(unittest.TestCase):
             ww = _snapshot(tmp, cp)["weekly_window"]
             self.assertEqual(ww, [
                 {"scope": "all-models", "kind": "weekly", "pct": 40,
-                 "resets_at": "2026-07-28T10:00:00+00:00", "read_ts": read_ts,
-                 "stale": False},
+                 "resets_at": "2026-07-28T10:00:00+00:00", "is_active": True,
+                 "read_ts": read_ts, "stale": False},
                 {"scope": "Fable", "kind": "weekly_scoped", "pct": 61,
-                 "resets_at": "2026-07-29T08:00:00+00:00", "read_ts": read_ts,
-                 "stale": False},
+                 "resets_at": "2026-07-29T08:00:00+00:00", "is_active": True,
+                 "read_ts": read_ts, "stale": False},
             ])
 
     def test_a_cache_older_than_its_ttl_is_marked_stale(self):
@@ -210,6 +252,20 @@ class TestSnapshotWeeklyWindow(unittest.TestCase):
                 json.dump({"ts": 1, "windows": ["x", {"group": "weekly",
                                                       "percent": True}]}, f)
             self.assertEqual(_snapshot(tmp, cp)["weekly_window"], [])
+
+    def test_scope_rule_agrees_with_shared_weekly_window(self):
+        # review finding: a truthy non-string `model` is malformed — skipped,
+        # never labelled account-wide (shared_weekly_window treats any truthy
+        # model as model-scoped, so the two readers must never disagree).
+        cache = {"ts": int(NOW.timestamp()), "windows": [
+            {"kind": "weekly_scoped", "group": "weekly", "percent": 90,
+             "model": {"display_name": "Fable"}, "resets_at": "x"},
+            {"kind": "weekly", "group": "weekly", "percent": 10, "model": None,
+             "resets_at": "y", "is_active": False}]}
+        ww = burn.weekly_windows(cache, NOW.timestamp())
+        self.assertEqual([(w["scope"], w["pct"]) for w in ww], [("all-models", 10)])
+        self.assertIs(ww[0]["is_active"], False)
+        self.assertEqual(burn.shared_weekly_window(cache), (10, "y"))
 
     def test_existing_fields_are_unchanged(self):
         with TemporaryDirectory() as tmp:
@@ -249,6 +305,9 @@ class TestFleetPassThrough(unittest.TestCase):
         self.assertEqual(row["total_msgs"], 5)
 
     def test_remote_row_carries_the_new_fields_over_the_one_ssh_round_trip(self):
+        # The `_fleet_remote_row` half is a CHARACTERIZATION check (it already
+        # passes the whole row through); the merge half is the behaviour under
+        # test.
         ts = "2026-07-25T17:00:00+00:00"
         snap = {"ts": ts, "host": "dev2", "usd": 1.0, "msgs": 2, "avg_ctx": 1,
                 "by_model": {}, "account_email": "z@example.com",
