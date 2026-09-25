@@ -34,7 +34,7 @@ import sys
 from vault_guard_shell import (ASSIGN_RE, TOKEN_RE, can_be,
                                path_candidates,
                                split_segments)
-from vault_keyroot import (effective_terms, is_secret_inspect,
+from vault_keyroot import (effective_terms, is_pub_path, is_secret_inspect,
                            key_audit_ref, key_ref, key_violation)
 
 raw = sys.argv[1]
@@ -414,8 +414,12 @@ if not cmd:
             fields.append(("pattern", val))
     bad = [(k, store_refs(v), v) for k, v in fields if store_refs(v)]
     # #1153: a file TOOL reading the key-file root has no head to exempt it —
-    # every field reference is a read (or a write) of a key.
-    keyed = [(k, key_ref(v), v) for k, v in fields if key_ref(v)]
+    # every field reference is a read (or a write) of a key. Slice 2: a
+    # READ of one literal `*.pub` path is public material (Read/Grep only —
+    # a Write/Edit there, or a Glob listing names, stays refused).
+    keyed = [(k, key_ref(v), v) for k, v in fields if key_ref(v)
+             and not (tool in ("Read", "Grep") and k in ("file_path", "path")
+                      and is_pub_path(v))]
     if bad or keyed:
         print("\n".join("  %s %s -> %s" % (tool or "tool", k, excerpt(v))
                         for k, _refs, v in bad + keyed))

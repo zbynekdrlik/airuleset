@@ -10301,7 +10301,7 @@ def main():
                             "names share ONE page with a field each, #603) | "
                             "status | list | inspect PATH (a key file's "
                             "format, never its value — #1153) | "
-                            "exec NAME -- CMD (hand the value to a child; a "
+                            "exec NAME|--file PATH -- CMD (hand the value to a child; a "
                             "name LOCKED to a template ignores CMD and runs "
                             "its own command instead, #154) | "
                             "forget NAME | purge (drop everything past its TTL) | "
@@ -10348,8 +10348,9 @@ def main():
                             "mutually exclusive with --persist (#603)")
     p_sec.add_argument("--file", default=None,
                        help="show: render a mode-600 file (e.g. ~/.secrets/"
-                            "<name>) instead of a vault NAME — the file must be "
-                            "owner-only and outside any git repo (#580)")
+                            "<name>) instead of a vault NAME — owner-only, outside "
+                            "any git repo (#580) | exec: hand a file under ~/.secrets/ "
+                            "to the child instead of a vault NAME (--env KEY or --stdin, #1153)")
     p_sec.add_argument("cmd", nargs=argparse.REMAINDER,
                        help="exec: the command to run, after `--`")
 
