@@ -24,8 +24,8 @@ from collections import defaultdict
 from pathlib import Path
 
 from .fleet_tail import (_parse_ts, burn_alert_since, compare_since,  # noqa: F401
-                         fleet_view_since, in_weekly_window, read_rows_since,
-                         shared_weekly_window, weekly_window_start)
+                         _reset_dt, fleet_view_since, in_weekly_window,
+                         read_rows_since, shared_weekly_window, weekly_window_start)
 from .host_detail import (FLEET_WEEKLY_CANDIDATE_MAX_AGE, SessionAgg,  # noqa: F401
                           _weekly_candidate_is_fresh, session_id_of,
                           snapshot_sessions, weekly_windows)
@@ -832,12 +832,10 @@ def weekly_budget(cache, now=None):
     if not wk:
         return None
     pct, resets_at = wk
-    reset_dt = _parse_ts(resets_at)
+    reset_dt = _reset_dt(resets_at)       # naive = UTC; one parser (#1154)
     if reset_dt is None:
         return {"weekly_pct": pct, "resets_at": resets_at,
                 "remaining_days": None, "budget_pct_per_day": None}
-    if reset_dt.tzinfo is None:
-        reset_dt = reset_dt.replace(tzinfo=datetime.timezone.utc)
     remaining_days = max((reset_dt - now).total_seconds() / 86400.0, 0.0)
     budget = ((100.0 - pct) / remaining_days) if remaining_days > 0 else None
     return {"weekly_pct": pct, "resets_at": resets_at,
@@ -1031,15 +1029,19 @@ def fleet_trend(rows, n_prev=3):
     return out
 
 
+MIN_PACE_SPAN_H = 12   # hours of in-window samples before a pace is given
+
+
 def observed_pct_per_day(rows, resets_at=None):
     """Observed weekly-% consumption rate (%/day), from the OLDEST and NEWEST
     fleet rows that carry a `weekly_pct` sample (each hourly collection
     stamps the CURRENT usage-cache percent onto its own row — a genuine
     hourly time series with no separate history file). With `resets_at`
     only samples of THAT weekly window count (`in_weekly_window`, #1154 — a
-    pace across a reset is meaningless, live it read -0.51 %/day). None when
+    pace across a reset is meaningless, live it read -0.38 %/day). None when
     fewer than 2 such samples exist yet, their timestamps don't parse, or
-    they collapse to the same instant."""
+    they span less than MIN_PACE_SPAN_H (the cache percent is an integer, so
+    one 1 % tick over 1 h would read 24 %/day)."""
     samples = [(r.get("ts"), r.get("weekly_pct")) for r in rows
               if r.get("weekly_pct") is not None and _parse_ts(r.get("ts")) is not None
               and (resets_at is None or in_weekly_window(r, resets_at))]
@@ -1050,7 +1052,7 @@ def observed_pct_per_day(rows, resets_at=None):
     t1, p1 = samples[-1]
     d0, d1 = _parse_ts(t0), _parse_ts(t1)
     hours = (d1 - d0).total_seconds() / 3600.0
-    if hours <= 0:
+    if hours < MIN_PACE_SPAN_H:
         return None
     return (p1 - p0) / hours * 24.0
 

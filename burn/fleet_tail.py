@@ -37,14 +37,16 @@ caller a one-line change and makes the windows unit-testable:
   `burn --fleet`. Both reach `fleet_sustainability`, which (ROZHODNUTE,
   #1154) measures the pace INSIDE the current weekly window only
   (`in_weekly_window`: `ts >= resets_at - 7d`, and a row carrying its own
-  `resets_at` must be within 1 h of the current one, which drops a
+  `resets_at` must be within 5 min of the current one, which drops a
   stale-cache row that still reports the previous week). So job 16 passes
   `since = resets_at - 7d`. An unknown or unparseable `resets_at` keeps the
   full read.
 - `fleet_view_since` — `burn --fleet` also shows the last `hours` rows and a
   trend over the last 4, so its bound is the older of the window start and
   the `max(hours, 4)`-th newest row. Fewer rows than that keeps the full
-  read. Its output is identical to a full read.
+  read, and so does a non-positive or non-int `hours` (`render_fleet`
+  then shows all rows or a slice). For rows with a parseable `ts` its
+  output is identical to a full read.
 - Full history (`since=None`) is kept by job 35 (conformance heartbeat),
   whose `last_fresh` is unbounded on purpose (#543 F3).
 
@@ -53,12 +55,15 @@ It must never import `burn`, because `burn` imports FROM here. It is stdlib
 only. A naive `since` is a caller bug and raises ValueError.
 """
 import datetime
+import itertools
 import json
 
 BLOCK_SIZE = 1 << 16
 COMPARE_SINCE_MARGIN = datetime.timedelta(hours=1)
 WEEK = datetime.timedelta(days=7)
-RESET_MATCH = datetime.timedelta(hours=1)    # live resets_at jitters by < 1 s
+# live resets_at jitters by < 1 s; a reset minutes apart is another account's
+# series (review F5: 1 h mixed two accounts 50 min apart into 1440 %/day)
+RESET_MATCH = datetime.timedelta(minutes=5)
 _READS_NOTHING = datetime.datetime.max.replace(tzinfo=datetime.timezone.utc)
 
 
@@ -227,16 +232,10 @@ def fleet_view_since(path, cache, hours):
     """`burn --fleet`'s bound (see module doc), or None for a full read."""
     wk = shared_weekly_window(cache) if isinstance(cache, dict) else None
     start = weekly_window_start(wk[1]) if wk else None
-    if start is None:
+    if start is None or isinstance(hours, bool) or not isinstance(hours, int) or hours <= 0:
         return None
-    n = max(int(hours or 0), 4)
-    count = [0]
-
-    def nth(_row, _t):
-        count[0] += 1
-        return count[0] >= n
-
-    got = _scan(path, nth)
+    n = max(hours, 4)
+    got = _scan(path, lambda _row, _t, c=itertools.count(1): next(c) >= n)
     if not got or len(got) < n:
         return None
     return min(start, datetime.datetime.fromtimestamp(got[-1][1], datetime.timezone.utc))
