@@ -156,6 +156,20 @@ class PerPipeline(Base):
                 "exec 1>/tmp/o; ", "trap x EXIT; ", "builtin alias gh=cat; ",
                 "command hash -p /bin/cat gh; ", "unalias -a; ")])
 
+    def test_output_process_substitution_is_a_flow(self):
+        # review finding (pre-existing on base too): a segment ending at the
+        # `(` of `>(…)` writes its output into the reader inside — a metadata
+        # listing or a prose echo there is a name source like `| xargs cat`
+        self.both(
+            allowed=["stat %s/k > /dev/null" % R,
+                     "ls -la %s; diff <(echo a) <(echo b)" % R],
+            denied=["stat %s/k > >(xargs cat)" % R,
+                    "ls %s/* > >(xargs cat)" % R,
+                    "ls %s/* >>(xargs cat)" % R,
+                    "stat %s/k 2> >(xargs cat) >&2" % R,
+                    COMMIT + " > >(xargs cat)",
+                    "true; " + PROSE + " > >(xargs cat)"])
+
     def test_metadata_heads_per_pipeline(self):
         # an unpiped listing beside an unrelated pipeline is a listing again;
         # a piped one is still a name source
