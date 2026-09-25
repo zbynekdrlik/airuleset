@@ -1571,7 +1571,7 @@ class TestFleetSustainability(unittest.TestCase):
     def test_pace_within_budget_is_sedi(self):
         now = datetime.datetime(2026, 7, 25, 0, 0, tzinfo=datetime.timezone.utc)
         cache = {"windows": [{"group": "weekly", "percent": 10, "model": None,
-                              "resets_at": "2026-08-01T00:00:00+00:00"}]}  # 7 days left, budget 90/7=12.86%/day
+                              "resets_at": "2026-07-31T00:00:00+00:00"}]}  # 6 days left, budget 90/6=15%/day (#1154: the window must hold the samples)
         rows = [
             {"ts": "2026-07-24T00:00:00+00:00", "weekly_pct": 8},
             {"ts": "2026-07-25T00:00:00+00:00", "weekly_pct": 10},  # +2%/day
@@ -1582,7 +1582,7 @@ class TestFleetSustainability(unittest.TestCase):
     def test_pace_over_budget_is_prekracuje(self):
         now = datetime.datetime(2026, 7, 25, 0, 0, tzinfo=datetime.timezone.utc)
         cache = {"windows": [{"group": "weekly", "percent": 90, "model": None,
-                              "resets_at": "2026-08-01T00:00:00+00:00"}]}  # budget 10/7=1.43%/day
+                              "resets_at": "2026-07-31T00:00:00+00:00"}]}  # budget 10/6=1.67%/day (#1154)
         rows = [
             {"ts": "2026-07-24T00:00:00+00:00", "weekly_pct": 80},
             {"ts": "2026-07-25T00:00:00+00:00", "weekly_pct": 90},  # +10%/day
@@ -1605,7 +1605,7 @@ class TestFleetBudgetAlert(unittest.TestCase):
     def test_alert_names_top_host_and_model_when_over_budget(self):
         now = datetime.datetime(2026, 7, 25, 0, 0, tzinfo=datetime.timezone.utc)
         cache = {"windows": [{"group": "weekly", "percent": 90, "model": None,
-                              "resets_at": "2026-08-01T00:00:00+00:00"}]}
+                              "resets_at": "2026-07-31T00:00:00+00:00"}]}
         rows = [
             {"ts": "2026-07-24T00:00:00+00:00", "weekly_pct": 80, "per_host": {}},
             {"ts": "2026-07-25T00:00:00+00:00", "weekly_pct": 90, "per_host": {
