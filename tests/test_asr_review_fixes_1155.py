@@ -82,7 +82,7 @@ class CustomContextFile(unittest.TestCase):
                                              ["sk", terms_path(self)], elevenlabs_routes())
         self.assertEqual(rc, 0, printed)
         (call,) = fake.find("POST", "/v1/speech-to-text")
-        body = call["data"].decode("utf-8")
+        body = call["data"].decode("utf-8", errors="replace")   # the wav part is binary
         self.assertEqual(re.findall(r'name="keyterms"\r\n\r\n([^\r]*)\r\n', body), PLAIN_TERMS)
 
     def test_gemini_vocabulary_comes_from_the_file(self):
