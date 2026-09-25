@@ -518,7 +518,8 @@ if [ "$KEYFILE" = 1 ]; then
     echo "      python3 ~/devel/airuleset/airuleset.py secret exec --file <path> --env KEY -- <cmd>" >&2
     echo "    (the value reaches the child as \$KEY, or on stdin with --stdin; fd 1/2" >&2
     echo "    are filtered). Public material: ssh-keygen -l|-y -f <key>, a *.pub file." >&2
-    echo "    Metadata heads, unpiped: ls / stat / test / wc -c / sha256sum." >&2
+    echo "    Metadata heads, unpiped: ls / stat / test / wc -c / sha256sum" >&2
+    echo "    (ls / stat also piped only into a text filter: ls <dir> | grep x)." >&2
     echo "    Naming a path in PROSE: gh issue|pr … --body/--title, git commit -m." >&2
     echo "" >&2
 fi
