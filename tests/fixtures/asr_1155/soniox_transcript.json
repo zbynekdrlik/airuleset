@@ -1,0 +1,118 @@
+{
+ "id": "tr_1",
+ "text": "Pošli mi faktúru OP 12. Áno, zálohová faktúra je v Odoo.",
+ "tokens": [
+  {
+   "text": "Pošli",
+   "start_ms": 100,
+   "end_ms": 400,
+   "confidence": 0.97,
+   "speaker": "1",
+   "language": "sk"
+  },
+  {
+   "text": " mi",
+   "start_ms": 420,
+   "end_ms": 560,
+   "confidence": 0.97,
+   "speaker": "1",
+   "language": "sk"
+  },
+  {
+   "text": " faktúru",
+   "start_ms": 580,
+   "end_ms": 1100,
+   "confidence": 0.97,
+   "speaker": "1",
+   "language": "sk"
+  },
+  {
+   "text": " OP",
+   "start_ms": 1120,
+   "end_ms": 1300,
+   "confidence": 0.97,
+   "speaker": "1",
+   "language": "sk"
+  },
+  {
+   "text": " 12",
+   "start_ms": 1320,
+   "end_ms": 1600,
+   "confidence": 0.97,
+   "speaker": "1",
+   "language": "sk"
+  },
+  {
+   "text": ".",
+   "start_ms": 1600,
+   "end_ms": 1610,
+   "confidence": 0.97,
+   "speaker": "1",
+   "language": "sk"
+  },
+  {
+   "text": " Áno",
+   "start_ms": 1900,
+   "end_ms": 2150,
+   "confidence": 0.97,
+   "speaker": "2",
+   "language": "sk"
+  },
+  {
+   "text": ",",
+   "start_ms": 2150,
+   "end_ms": 2160,
+   "confidence": 0.97,
+   "speaker": "2",
+   "language": "sk"
+  },
+  {
+   "text": " zálohová",
+   "start_ms": 2200,
+   "end_ms": 2700,
+   "confidence": 0.97,
+   "speaker": "2",
+   "language": "sk"
+  },
+  {
+   "text": " faktúra",
+   "start_ms": 2720,
+   "end_ms": 3100,
+   "confidence": 0.97,
+   "speaker": "2",
+   "language": "sk"
+  },
+  {
+   "text": " je",
+   "start_ms": 3120,
+   "end_ms": 3250,
+   "confidence": 0.97,
+   "speaker": "2",
+   "language": "sk"
+  },
+  {
+   "text": " v",
+   "start_ms": 3260,
+   "end_ms": 3300,
+   "confidence": 0.97,
+   "speaker": "2",
+   "language": "sk"
+  },
+  {
+   "text": " Odoo",
+   "start_ms": 3320,
+   "end_ms": 3700,
+   "confidence": 0.97,
+   "speaker": "2",
+   "language": "sk"
+  },
+  {
+   "text": ".",
+   "start_ms": 3700,
+   "end_ms": 3710,
+   "confidence": 0.97,
+   "speaker": "2",
+   "language": "sk"
+  }
+ ]
+}

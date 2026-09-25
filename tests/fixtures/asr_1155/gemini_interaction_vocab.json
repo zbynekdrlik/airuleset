@@ -1,0 +1,17 @@
+{
+ "id": "interactions/v1",
+ "status": "completed",
+ "output_text": "Pošli mi faktúru OP 12. Áno, zálohová faktúra je v Odoo.",
+ "steps": [
+  {
+   "id": "step_001",
+   "type": "model_output",
+   "content": [
+    {
+     "type": "text",
+     "text": "Pošli mi faktúru OP 12. Áno, zálohová faktúra je v Odoo."
+    }
+   ]
+  }
+ ]
+}

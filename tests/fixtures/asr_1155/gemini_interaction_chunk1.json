@@ -1,0 +1,57 @@
+{
+ "id": "interactions/c1",
+ "status": "completed",
+ "output_text": "Pošli mi faktúru Áno, zálohová",
+ "steps": [
+  {
+   "id": "step_001",
+   "type": "model_output",
+   "content": [
+    {
+     "type": "text",
+     "text": "Pošli mi faktúru Áno, zálohová",
+     "annotations": [
+      {
+       "type": "word_info",
+       "text": "Pošli",
+       "speaker": "spk_1",
+       "start_offset": "0.100s",
+       "end_offset": "0.400s"
+      },
+      {
+       "type": "word_info",
+       "text": "mi",
+       "speaker": "spk_1",
+       "start_offset": "0.420s",
+       "end_offset": "0.560s"
+      },
+      {
+       "type": "word_info",
+       "text": "faktúru",
+       "speaker": "spk_1",
+       "start_offset": "0.580s",
+       "end_offset": "1.100s"
+      },
+      {
+       "type": "word_info",
+       "text": "Áno,",
+       "speaker": "spk_2",
+       "start_offset": "1.600s",
+       "end_offset": "1.750s"
+      },
+      {
+       "type": "word_info",
+       "text": "zálohová",
+       "speaker": "spk_2",
+       "start_offset": "1.780s",
+       "end_offset": "1.980s"
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "usage": {
+  "total_input_tokens": 100
+ }
+}
