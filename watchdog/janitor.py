@@ -533,13 +533,12 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     own_tmpl = watchdog._box_is_own_leftover(
         captured, None, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
         match_templates=True)
-    # #1157 -- a `typed-stranded` send_verified recorded the EXACT text it left
-    # (send_outcome); the box still showing it (scrolled / wrap-joined, tail-
-    # anchored) is ours. Never with an occupied stash slot: a bare-box send never
-    # touched the slot, so its record licenses no pop of a slot the owner holds.
+    # #1157 -- a `typed-stranded` send recorded its EXACT text: the box still just
+    # that is ours; a recorded idle box that no longer is loses the record AND the
+    # janitor watch (a human typed there). Never with an occupied slot (#488).
     from watchdog import send_outcome as _so
-    own_rec = not occupied and _so.stranded_reclaimable(
-        state, pid, captured, now, dry_run)
+    own_rec = not occupied and bool(_so.stranded_reclaimable(
+        state, pid, captured, now, dry_run))
     own_leftover = own_prov or own_tmpl or own_rec
     # #852 C — the incident's `slane-check:` shape: a stray human char (the
     # owner's forgotten `s`) raced to the FRONT of our own swallowed nudge, so
@@ -614,20 +613,17 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
         return logs         # no watchdog job is known to have touched this
                             # pane recently, and it is not verbatim template
                             # text -- never act on content alone
-    # #1113 recurrence (c) -- a TEMPLATE-ONLY recovery (recognised solely by the
-    # verbatim /goal template match, with NO janitor/park/stray provenance) is
-    # licensed by the un-forgeable template text, but cleared at MOST ONCE per
-    # episode: a non-converging grid-wrapped box must never be re-Escaped every
-    # sweep. A provenance-backed clear is NOT gated by this lock (it carries its
-    # own bounded ping/dedup). The lock is stamped BEFORE the clear so a failed /
-    # non-converging attempt still consumes the one-per-episode slot.
-    if (own_tmpl or own_rec) and not prov_ok:   # #1157: a record-only clear too
-        if _template_clear_locked(state, pid, now):
-            logs.append("janitor %s -> skip:template-clear-locked "
-                        "(#1113 once per episode)" % loc)
-            return logs
-        if not dry_run:
-            _mark_template_clear(state, pid, now)
+    # #1113 recurrence (c) -- a TEMPLATE-ONLY recovery (no janitor/park/stray
+    # provenance; licensed by the un-forgeable template text) clears at MOST ONCE
+    # per episode: a non-converging grid-wrapped box is never re-Escaped every
+    # sweep. A provenance-backed clear is NOT gated (its own ping/dedup bounds
+    # it). The lock is stamped right before the clear keystrokes (never on a
+    # busy hold, #1157), so a failed / non-converging attempt still consumes it.
+    once = bool(own_tmpl or own_rec) and not prov_ok   # #1157: record-only too
+    if once and _template_clear_locked(state, pid, now):
+        logs.append("janitor %s -> skip:template-clear-locked "
+                    "(#1113 once per episode)" % loc)
+        return logs
     if occupied:
         if itext == "":
             action = "pop"
@@ -644,6 +640,8 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     if action != "pop" and _so._pane_busy(captured):   # #1157: never Escape a turn
         logs.append("janitor %s -> hold:busy (turn running under the box)" % loc)
         return logs
+    if once and not dry_run:         # stamped only when a clear is really attempted
+        _mark_template_clear(state, pid, now)
     if dry_run:
         logs.append("READY (janitor) %s -> would attempt %s recovery"
                     % (loc, action))

@@ -352,6 +352,45 @@ class UndoRecognition(unittest.TestCase):
         self.assertEqual(fake.box, "")
 
 
+class UndoRecognitionMore(unittest.TestCase):
+    def test_a_short_payload_without_prefix_is_undone(self):
+        # `continue` (the resume nudge) is 8 chars with no own prefix: a box that
+        # is exactly our text is ours at any length.
+        fake = _HoldAfterTypeFake([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
+                                  model_type=True, holds=1,
+                                  transcript_path=_tpath(self))
+        logs = []
+        res = wd.send_verified(PID, "continue", fake, fake.transcript_path,
+                               sleep_fn=_noop, logs=logs, nudge="resume")
+        self.assertEqual(_kind(res), "typed-undone", logs)
+        self.assertEqual(fake.box, "")
+
+    def test_spinner_with_a_tip_row_above_a_wrapped_box_is_busy(self):
+        text = partition_batch_text()
+        fake = DeliverGoalFakeTmux([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
+                                   model_type=True, initial_box=text,
+                                   wrap_width=176, visible_rows=3)
+        lines = fake._render().split("\n")
+        at = next(i for i, ln in enumerate(lines) if ln.startswith("─"))
+        lines[at:at] = ["✳ Baking… (2m 30s · esc to interrupt)",
+                        "  ⎿  Tip: press ctrl+b to run in the background"]
+        self.assertTrue(send_outcome._pane_busy("\n".join(lines)))
+
+    def test_the_one_undo_drops_the_watch_on_a_not_own_box(self):
+        # the batch caller's `unconfirmed` path: the pre-marked watch must not
+        # license a later own-prefix clear of the owner's appended words.
+        own = partition_batch_text()
+        fake = DeliverGoalFakeTmux([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
+                                   model_type=True,
+                                   initial_box=own + " a este toto som dopisal ja")
+        state = {}
+        wd._janitor_mark_watch(state, PID, NOW)
+        cleared = goal._janitor_undo_if_own_stranded(
+            PID, fake, own, "loc", _noop, [], state=state)
+        self.assertFalse(cleared)
+        self.assertNotIn(PID, state.get("janitor_watch", {}))
+
+
 class HumanAppendIsNeverClearedLater(unittest.TestCase):
     """A human typing behind our stranded text makes the box not ours: the
     undo leaves it, arms NOTHING, and the next sweep's janitor leaves it too."""
@@ -556,11 +595,17 @@ class JanitorReclaimsARecordedStrandedPayload(unittest.TestCase):
         self.assertFalse(send_outcome.stranded_reclaimable(
             state, PID, bare._render(), NOW + 60, dry_run=True))
         self.assertIn(PID, state["stranded_own"])
-        # tail anchor: a box showing only a PREFIX of the record is not it
+        # a head-anchored PREFIX of the record is a partly-undone remnant: ours
         prefix = self._fake(text[:300])
-        self.assertFalse(send_outcome.stranded_reclaimable(
+        self.assertTrue(send_outcome.stranded_reclaimable(
             state, PID, prefix._render(), NOW + 60))
+        # our text PLUS a human append is not ours: record AND watch dropped
+        wd._janitor_mark_watch(state, PID, NOW)
+        mixed = self._fake(text + " a este toto som dopisal ja")
+        self.assertIs(send_outcome.stranded_reclaimable(
+            state, PID, mixed._render(), NOW + 60), False)
         self.assertNotIn(PID, state["stranded_own"])
+        self.assertNotIn(PID, state.get("janitor_watch", {}))
         # TTL: a day-old record is dropped unread
         send_outcome.record_stranded(state, PID, text, NOW)
         own = self._fake(text)
@@ -571,6 +616,41 @@ class JanitorReclaimsARecordedStrandedPayload(unittest.TestCase):
         send_outcome.record_stranded(state, "%77", text, NOW)
         wd._janitor_prune_parks(state, ["%9"])
         self.assertNotIn("%77", state["stranded_own"])
+
+    def test_a_recorded_pane_with_a_later_human_append_is_never_cleared(self):
+        # typed-stranded (busy), the turn ended, the owner typed behind our text
+        # before the next sweep: the record says the box is no longer ours, so
+        # even the watched own-prefix generic clear must not run.
+        text = partition_batch_text()
+        fake = self._fake(text + " a este toto som dopisal ja")
+        state = {}
+        wd._janitor_mark_watch(state, PID, NOW)
+        send_outcome.record_stranded(state, PID, text, NOW)
+        before = fake.box
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            wd._janitor_recover(fake, {}, PID, CWD, fake._render(), "loc", _noop,
+                                False, _noop, state=state, now=NOW + 60,
+                                own_payload=None)
+        self.assertEqual(fake.box, before)
+        self.assertEqual(fake.sent, [])
+
+    def test_a_busy_hold_never_burns_the_once_per_episode_lock(self):
+        # a provenance-free template leftover on a BUSY pane: held with no key,
+        # and the one-per-episode clear slot is NOT consumed by the hold.
+        import goal_registry
+        tmpl = list(goal_registry.all_goal_line_variants())[0]
+        busy = _SpinnerAfterTypeFake([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
+                                     model_type=True, initial_box=tmpl,
+                                     wrap_width=176, visible_rows=3)
+        busy._typed = True
+        state = {}
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            jlogs = wd._janitor_recover(busy, {}, PID, CWD, busy._render(), "loc",
+                                        _noop, False, _noop, state=state,
+                                        now=NOW + 60, own_payload=None)
+        self.assertTrue(any("hold:busy" in ln for ln in jlogs), jlogs)
+        self.assertEqual(busy.sent, [])
+        self.assertNotIn(PID, state.get("goal_template_clear", {}), state)
 
     def test_foreign_draft_with_a_record_is_left_untouched(self):
         text = partition_batch_text()

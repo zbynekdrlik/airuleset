@@ -104,10 +104,10 @@ def _spinner_above_box(cap):
     if not heads:
         return False
     from watchdog import pane_text as _pt
-    for ln in reversed(lines[:heads[-1]]):
+    for ln in list(reversed(lines[:heads[-1]]))[:25]:   # bounded, like #1104
         if (watchdog._is_separator_line(ln) or watchdog._is_border_rule(ln)
                 or watchdog._GOAL_HEADER_INDICATOR_RX.match(ln)
-                or ln.startswith("❯")):
+                or ln.startswith(("❯", "⎿"))):   # queued rows / Tip / todo rows
             continue
         return bool(_pt._ACTIVITY_SPINNER_RX.search(ln))
     return False
@@ -132,13 +132,15 @@ def _box_is_ours(cap, own_text):
     head = watchdog._input_box_head_text(cap)
     if head and watchdog._PASTED_PLACEHOLDER_RX.match(head.strip()):
         return True
+    if watchdog._box_norm_from_capture(cap) == " ".join((own_text or "").split()):
+        return True          # exactly our text, any length (`continue`, a card)
     floor = (1 if watchdog._looks_like_own_payload(head)
              else watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR)
     return watchdog._box_is_own_leftover(cap, own_text, floor, provenance=True)
 
 
 def janitor_undo_if_own_stranded(pid, run, own_text, loc, sleep_fn, logs,
-                                 out=None):
+                                 out=None, state=None):
     """#1092 (b) / #1157 — capture the pane ONCE and, when it still shows OUR
     OWN text (`_box_is_ours`), run the #372 janitor clear so the owner never
     finds a machine paragraph in his prompt. Every caller calls this right
@@ -146,7 +148,9 @@ def janitor_undo_if_own_stranded(pid, run, own_text, loc, sleep_fn, logs,
     NO keystroke goes into an UNREADABLE box or a BUSY pane (a running /
     waiting turn: the clear's first Escape would interrupt it), and a box that
     is not provably ours (a foreign draft, our text plus a human's append) is
-    left untouched. Returns True only once the clear converged; `out["box"]`
+    left untouched — and with `state` the caller's pre-send janitor watch is
+    dropped, so the generic own-prefix clear can never eat the human's words on
+    a later sweep. Returns True only once the clear converged; `out["box"]`
     (optional dict) gets the status: bare / cleared / busy / not-own /
     not-converged / unreadable. Explicit journal verbs on every branch (#486)."""
     cap = watchdog.capture_pane(pid, run, lines=40)
@@ -159,6 +163,8 @@ def janitor_undo_if_own_stranded(pid, run, own_text, loc, sleep_fn, logs,
         status, line = "busy", "turn running under the box, no keystroke"
     elif not _box_is_ours(cap, own_text):
         status, line = "not-own", "box not provably ours, left untouched"
+        if state is not None:
+            state.get("janitor_watch", {}).pop(pid, None)
     elif watchdog._janitor_clear_box(pid, run, sleep_fn, logs.append):
         status, line = "cleared", "cleared stranded machine text"
     else:
@@ -233,28 +239,34 @@ def clear_stranded(state, pid):
 
 
 def stranded_reclaimable(state, pid, captured, now, dry_run=False):
-    """#1157 — True when `pid` holds the exact text a `typed-stranded` send
-    recorded: the box TAIL row ends where the record ends and the whole visible
-    box is a run of it (`_box_is_ours`, wrap- and scroll-safe), on a pane that
-    is not busy. A record that is past `STRANDED_TTL_S`, or whose text a
-    readable idle box no longer shows, is dropped (the record bounds itself)."""
+    """#1157 — the janitor's verdict on a pane a `typed-stranded` send recorded.
+    True: the box is still just our text — its TAIL row ends where the record
+    ends and the whole box is a run of it (`_box_is_ours`, wrap- and scroll-
+    safe), or it is a head-anchored PREFIX of it (a partly-undone remnant).
+    False: a readable, idle box that is neither (a human typed there): the
+    record AND the janitor watch are dropped, so nothing clears the human's
+    words. None: no record, a busy / unreadable pane (record kept), or a record
+    past `STRANDED_TTL_S` (dropped)."""
     rec = (state or {}).get(STRANDED_KEY, {}).get(pid)
     ts = rec.get("ts") if isinstance(rec, dict) else None
     text = rec.get("typed") if isinstance(rec, dict) else None
     if not isinstance(ts, (int, float)) or not isinstance(text, str) or not text:
-        return False
+        return None
     if not 0 <= now - ts < STRANDED_TTL_S:
         if not dry_run:
             clear_stranded(state, pid)
-        return False
+        return None
     if watchdog._input_line_text(captured) is None or _pane_busy(captured):
-        return False                          # cannot judge now; keep the record
+        return None                           # cannot judge now; keep the record
     from watchdog import stash as _stash
     tail = _stash._box_tail_row_norm(captured)
-    own = (bool(tail) and " ".join(text.split()).endswith(tail)
-           and _box_is_ours(captured, text))
+    box_ns = "".join(watchdog._box_norm_from_capture(captured).split())
+    own = ((bool(tail) and " ".join(text.split()).endswith(tail)
+            and _box_is_ours(captured, text))
+           or (bool(box_ns) and "".join(text.split()).startswith(box_ns)))
     if not own and not dry_run:
-        clear_stranded(state, pid)            # our text is gone from the box
+        clear_stranded(state, pid)            # our text alone is gone from the box
+        state.get("janitor_watch", {}).pop(pid, None)
     return own
 
 
@@ -269,7 +281,8 @@ def after_verify_failure(pid, run, text, sleep_fn, log_fn, logs, state, now):
     `_janitor_recover` itself holds while the pane is busy)."""
     jlogs, box = [], {}
     loc = watchdog._pane_location(pid, run) or pid
-    janitor_undo_if_own_stranded(pid, run, text, loc, sleep_fn, jlogs, out=box)
+    janitor_undo_if_own_stranded(pid, run, text, loc, sleep_fn, jlogs, out=box,
+                                 state=state)
     if isinstance(logs, list):
         logs.extend(jlogs)
     status = box.get("box")
@@ -277,11 +290,7 @@ def after_verify_failure(pid, run, text, sleep_fn, log_fn, logs, state, now):
         clear_stranded(state, pid)
         log_fn("send-verified abort: typed then undone")
         return SendOutcome(TYPED_UNDONE)
-    if status == "not-own":
-        # the caller's own pre-send watch mark would license the janitor's generic
-        # own-prefix clear next sweep, eating the human's words: drop it.
-        if state is not None:
-            state.get("janitor_watch", {}).pop(pid, None)
+    if status == "not-own":                  # the undo already dropped the watch
         log_fn("send-verified abort: typed, box holds more than our text -- "
                "left untouched, janitor watch dropped")
         return SendOutcome(TYPED_STRANDED)

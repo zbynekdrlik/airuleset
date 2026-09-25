@@ -5431,7 +5431,8 @@ def _deliver_batch(collect, pid, sid, loc, tpath, run, state, now, handled,
         # #1092 (b) -- a delivered-UNCONFIRMED submit may not have cleared the box:
         # run the janitor UNDO so no stranded batch-nudge is left.
         if not _bok:
-            _janitor_undo_if_own_stranded(pid, run, _bt, loc, sleep_fn, logs)
+            _janitor_undo_if_own_stranded(pid, run, _bt, loc, sleep_fn, logs,
+                                          state=state)
     elif send_out.get("pane_budget_held"):
         # #1092 (c) -- the per-pane budget refused this BEFORE any keystroke: never
         # stamp the floor or run the undo (the storm brake).
@@ -5448,7 +5449,8 @@ def _deliver_batch(collect, pid, sid, loc, tpath, run, state, now, handled,
         # send_verified already ran the undo for a verify-failed type; a swallow /
         # an unconfirmed residue gets the janitor UNDO here.
         if _kind in (_send_outcome.SWALLOWED, _send_outcome.UNCONFIRMED):
-            _janitor_undo_if_own_stranded(pid, run, _bt, loc, sleep_fn, logs)
+            _janitor_undo_if_own_stranded(pid, run, _bt, loc, sleep_fn, logs,
+                                          state=state)
     else:
         # #1092 (d) -- a PRE-TYPE abort (box busy / raced / spinner / kill switch
         # OFF): no keystroke was typed, so never stamp the floor; retry next sweep.
