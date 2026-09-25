@@ -15,7 +15,9 @@ to learn anything about it; a root that is itself a SYMLINK is not a root
 opened O_NOFOLLOW|O_NONBLOCK and re-checked on the open descriptor, so a swap
 for a symlink or a FIFO after the check neither escapes nor hangs.
 hooks/block-vault-store-read.sh names this command in its refusal and allows
-exactly `secret inspect <one path>` (unpiped) on both roots.
+exactly `secret inspect <one path>` on both roots — unpiped, or piped only
+into pure text filters (the `path:` line below is a NAME, so never into
+xargs/sh/awk; #1153 slice 2).
 
 What is printed is a function of the value (a hash prefix, a length) but never
 the value or any slice of it. The `NAME=` shape is decided conservatively so a

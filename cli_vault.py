@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 from cli_vault_inspect import cmd_inspect as _secret_inspect
+from cli_vault_keyfile import cmd_exec_file as _secret_exec_file
 
 REPO_DIR = Path(__file__).resolve().parent
 
@@ -946,8 +947,8 @@ def cmd_secret(args):
             sys.exit(2)
         return name
 
-    if action in ("show", "inspect"):   # inspect: a key file's format, never its value (#1153)
-        return (_secret_show if action == "show" else _secret_inspect)(args)
+    if action in ("show", "inspect") or (action == "exec" and getattr(args, "file", None)):
+        return {"show": _secret_show, "inspect": _secret_inspect}.get(action, _secret_exec_file)(args)  # #1153: inspect = a key file's format; exec --file = inline use
 
     if action == "purge":
         print("purged: %s" % (", ".join(expired) if expired else "nothing"))

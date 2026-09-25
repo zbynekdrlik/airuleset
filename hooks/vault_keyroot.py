@@ -27,9 +27,12 @@ from vault_guard_shell import (ASSIGN_RE, TOKEN_RE, can_be, path_candidates,
 # segment is tokenized (shlex, quotes removed — which also defeats a spliced
 # `.secret"s"`) and EVERY token naming the root must be accounted for: an
 # identity-file argument of a key consumer, an operand of an unpiped metadata
-# head, or a pre-child argument of the secret CLI. One unaccounted reference
-# denies the segment. A parse that goes wrong can therefore only fail to
-# account for something — i.e. deny — never allow a stray reader.
+# head, or a pre-child argument of the secret CLI — and since slice 2 the
+# VALUE of a prose option (gh/git table), the `-f` of a pure `ssh-keygen
+# -l/-y`, a literal `*.pub` path, and a one-path `secret inspect` piped only
+# into text filters. One unaccounted reference denies the segment. A parse
+# that goes wrong can therefore only fail to account for something — i.e.
+# deny — never allow a stray reader.
 KEY_DIR = ".secrets"
 KEY_DIR_RE = re.compile(r"(?<![A-Za-z0-9_.-])\.secrets(?![A-Za-z0-9_-])")
 # Unpiped metadata heads. The per-head option checks exist because `wc
@@ -207,6 +210,245 @@ def _meta_options_safe(head, args):
     return True
 
 
+# --- slice 2: per-head allowances (#1153 issuecomment-5830067896) -----------
+# Each is an explicit table, never a heuristic about quoting: Approach 2 of the
+# design ("any quoted argument is prose") was rejected because `python3 -c
+# '…open("<root>/x")…'` is a quoted argument that DOES open the file.
+#
+# PROSE: a (head, option) pair whose VALUE the program uses as TEXT and never
+# opens. gh (pflag) and git (parse-options) both take a required option value
+# from the NEXT token even when it starts with `-`, so the value is exactly
+# the token after the option. Every OTHER option must be known — one that
+# takes a value is skipped with its value (a root path there stays
+# unaccounted, so `-F <root>/x` / `--body-file` / `git commit -F` deny); an
+# UNKNOWN option ends the scan (`git commit --fil -m <root>/x` is `--file -m`
+# by abbreviation), and `--` ends it too (pathspecs follow). A positional is
+# never accounted.
+GH_PROSE_SUBCMDS = {("issue", "comment"), ("issue", "create"), ("issue", "edit"),
+                    ("pr", "comment"), ("pr", "create"), ("pr", "edit")}
+GH_TEXT_OPTS = {"--body", "-b", "--title", "-t"}
+GH_ARG_OPTS = {"-F", "--body-file", "-R", "--repo", "-a", "--assignee", "-l",
+               "--label", "-m", "--milestone", "-p", "--project", "-T", "--template",
+               "-r", "--reviewer", "-B", "--base", "-H", "--head", "--add-label",
+               "--remove-label", "--add-assignee", "--remove-assignee",
+               "--add-project", "--remove-project", "--add-reviewer",
+               "--remove-reviewer", "--recover"}
+GH_BOOL_OPTS = {"-e", "--editor", "-w", "--web", "--edit-last", "--delete-last",
+                "--create-if-none", "-d", "--draft", "-f", "--fill", "--fill-first",
+                "--fill-verbose", "--no-maintainer-edit", "--dry-run",
+                "--remove-milestone", "--yes"}
+GIT_GLOBAL_ARG_OPTS = {"-C", "-c"}
+GIT_GLOBAL_BOOL_OPTS = {"--no-pager", "-P", "--no-replace-objects", "--bare",
+                        "--literal-pathspecs", "--no-optional-locks"}
+GIT_TEXT_OPTS = {"-m", "--message"}
+GIT_ARG_OPTS = {"-F", "--file", "-C", "--reuse-message", "-c", "--reedit-message",
+                "-t", "--template", "--author", "--date", "--cleanup", "--fixup",
+                "--squash", "--trailer", "--pathspec-from-file"}
+GIT_BOOL_OPTS = {"-a", "--all", "-s", "--signoff", "-v", "--verbose", "-q",
+                 "--quiet", "-n", "--no-verify", "--amend", "--no-edit", "-e",
+                 "--edit", "--allow-empty", "--allow-empty-message", "-p", "--patch",
+                 "-i", "--include", "-o", "--only", "--dry-run", "--reset-author",
+                 "--no-status", "--status", "--no-gpg-sign", "--no-post-rewrite"}
+GIT_BOOL_SHORT = "asvqneiop"        # short no-arg flags that may cluster before -m
+REDIRECT_OP_RE = re.compile(r"^\d*(?:>>?|<<?<?|>&|<&|&>>?|>\|)$")
+
+
+def _skip_redirect(tk, i):
+    """Index past a redirection operator token and its target, or None."""
+    if REDIRECT_OP_RE.match(tk[i]):
+        return i + 2
+    return None
+
+
+def _scan_text_options(tk, i, text_opts, arg_opts, bool_opts, short_cluster=""):
+    """Indices of the VALUE tokens of `text_opts` in tk[i:] (see PROSE above)."""
+    ok = set()
+    while i < len(tk):
+        t = tk[i]
+        nxt = _skip_redirect(tk, i)
+        if nxt is not None:
+            i = nxt                        # its target is never accounted here
+            continue
+        if t == "--":
+            break
+        if not t.startswith("-") or t == "-":
+            i += 1                         # a positional: never accounted
+            continue
+        key = t.partition("=")[0] if t.startswith("--") else t
+        if key in text_opts and "=" in t and t.startswith("--"):
+            ok.add(i)
+            i += 1
+        elif key in text_opts:
+            if i + 1 < len(tk):
+                ok.add(i + 1)
+            i += 2
+        elif (not t.startswith("--") and len(t) > 2 and t[:2] in text_opts):
+            ok.add(i)                      # `-mTEXT` / `-bTEXT`: attached value
+            i += 1
+        elif (short_cluster and not t.startswith("--") and len(t) > 2
+              and t[-1] == "m" and all(c in short_cluster for c in t[1:-1])):
+            if i + 1 < len(tk):
+                ok.add(i + 1)              # `-am TEXT`
+            i += 2
+        elif key in arg_opts:
+            i += 1 if "=" in t else 2      # its value is NOT text
+        elif key in bool_opts:
+            i += 1
+        else:
+            break                          # unknown: stop, deny what follows
+    return ok
+
+
+def _prose_args(tk, start, head):
+    """Text-option VALUE indices of a gh/git prose command (see PROSE above)."""
+    if head == "gh":
+        if tuple(tk[start + 1:start + 3]) not in GH_PROSE_SUBCMDS:
+            return set()
+        return _scan_text_options(tk, start + 3, GH_TEXT_OPTS, GH_ARG_OPTS,
+                                  GH_BOOL_OPTS)
+    if head == "git":
+        i = start + 1
+        while i < len(tk) and tk[i].startswith("-"):
+            key = tk[i].partition("=")[0]
+            if tk[i] in GIT_GLOBAL_ARG_OPTS:
+                i += 2
+            elif tk[i] in GIT_GLOBAL_BOOL_OPTS or key in ("--git-dir", "--work-tree"):
+                i += 1
+            else:
+                return set()
+        if i >= len(tk) or tk[i] != "commit":
+            return set()
+        return _scan_text_options(tk, i + 1, GIT_TEXT_OPTS, GIT_ARG_OPTS,
+                                  GIT_BOOL_OPTS, GIT_BOOL_SHORT)
+    return set()
+
+
+def _prose_token_is_quoted(segment, token):
+    """True when `token` holds no `<`/`>` the shell would read as a redirect.
+
+    shlex drops quotes, so `--body 'a <root>/<n>'` and `--body a>(root)/k` both
+    come back as one token carrying `>`. A punctuation-aware tokenizer splits
+    an UNQUOTED `<`/`>` into its own token and keeps a quoted one inside the
+    word — so the token survives verbatim there only if its brackets were
+    quoted text.
+    """
+    if "<" not in token and ">" not in token:
+        return True
+    try:
+        lex = shlex.shlex(segment, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        return token in list(lex)
+    except ValueError:
+        return False
+
+
+# ssh-keygen's PUBLIC views: `-l` prints a fingerprint, `-y` the public half.
+# Only these flags may appear (plus `-E <hash>`, `-q`); any other mode (`-p`
+# rewrites, `-e` exports, `-P` puts a passphrase in argv, `-v` debugs) or an
+# operand leaves the `-f` value unaccounted.
+KEYGEN_VIEW_FLAGS = set("lyq")
+
+
+def _keygen_args(tk, start):
+    ok, modes, i = set(), set(), start + 1
+    while i < len(tk):
+        t = tk[i]
+        nxt = _skip_redirect(tk, i)
+        if nxt is not None:
+            i = nxt
+            continue
+        if not t.startswith("-") or t in ("-", "--"):
+            return set()                   # an operand: not a view call
+        j, i_next = 1, i + 1
+        while j < len(t):
+            ch = t[j]
+            if ch in KEYGEN_VIEW_FLAGS:
+                modes.add(ch)
+                j += 1
+                continue
+            if ch in ("f", "E"):
+                idx = i if j + 1 < len(t) else i + 1
+                if idx >= len(tk):
+                    return set()
+                if ch == "f":
+                    ok.add(idx)
+                i_next = idx + 1
+                break
+            return set()                   # any other option
+        i = i_next
+    return ok if modes & {"l", "y"} else set()
+
+
+# A `.pub` file is public material. Only a LITERAL path counts: no `$`/`` ` ``
+# (word splitting turns `<root>/$X.pub` into `<root>/k` + `.pub`), no braces
+# or brackets, no `..`; a `*` or `?` inside the final name still ends in
+# `.pub` after globbing. Piped, a path is a NAME SOURCE (`ls <root>/*.pub |
+# sed s/.pub// | xargs cat`), so there only `cat` — whose output is the file
+# CONTENT, never a name — keeps the allowance.
+PUB_PATH_RE = re.compile(r"^[A-Za-z0-9_.~/*?+@%,:=-]*/[A-Za-z0-9_.*?+@%,:=-]+\.pub$")
+PUB_FLOW_HEADS = {"cat"}
+
+
+def is_pub_path(tok):
+    """A literal path whose final component is a `*.pub` public-key file."""
+    if not PUB_PATH_RE.match(tok or ""):
+        return False
+    return ".." not in tok.split("/")
+
+
+def _pub_args(tk, start, head, term):
+    if term == "|" and head not in PUB_FLOW_HEADS:
+        return set()
+    return {i for i in range(start + 1, len(tk)) if is_pub_path(tk[i])}
+
+
+# Piped `secret inspect` (design change 1). Inspect never prints a value, but
+# its `path:` line IS a name — `inspect <root>/k | sed -n 's/^path: //p' |
+# xargs cat` reads the key. So a pipeline keeps inspect's exemption only when
+# EVERY other command in it is a pure text filter that cannot open a name
+# from its input, invoked by bare name with no assignment in front (a
+# `PATH=/x head` or `/tmp/x/head` could be anything), and nothing in the
+# command substitutes or groups (`$(…)`, backticks, `<(…)`, `{ …; }`).
+INSPECT_SINKS = {"head", "tail", "grep", "egrep", "fgrep", "wc", "sort", "uniq",
+                 "cut", "tr", "column", "nl", "cat", "fold"}
+FD_REMNANT_RE = re.compile(r"^\s*\d*-?\s*$")
+
+
+def _is_text_sink(seg):
+    try:
+        tk = shlex.split(seg)
+    except ValueError:
+        return False
+    if not tk or _cmd_start(tk) != 0 or "/" in tk[0]:
+        return False
+    if tk[0] not in INSPECT_SINKS:
+        return False
+    return not any(t.startswith("--files0-from") for t in tk[1:])
+
+
+def inspect_pipeline_is_inert(segments):
+    """True when the command pipes a one-path `secret inspect` only into text
+    filters (see INSPECT_SINKS above)."""
+    if not any(is_secret_inspect(seg) for seg, _t in segments):
+        return False
+    prev = None
+    for seg, term in segments:
+        if term in ("$(", "`", "(", ")"):
+            return False
+        if not seg.strip() or is_secret_inspect(seg):
+            prev = (seg, term)
+            continue
+        # `2>&1` is split at its `&`: the `1` after a `>`/`<` is not a command
+        if (prev and prev[1] == "&" and prev[0].rstrip().endswith((">", "<"))
+                and FD_REMNANT_RE.match(seg)):
+            prev = (seg, term)
+            continue
+        if not _is_text_sink(seg):
+            return False
+        prev = (seg, term)
+    return True
+
+
 def _secret_cli_start(tk, start):
     """Index just past `… airuleset.py secret`, or None if this is not it."""
     head = tk[start].rsplit("/", 1)[-1]
@@ -232,16 +474,27 @@ def _is_int(value):
 def _secret_cli_args(tk, cli):
     """(accounted token indices, child start) for `… airuleset.py secret <action>`.
 
-    Mirrors cli_vault._secret_apply_remainder: our flags, the NAME, our flags
-    again, an optional `--`; an int flag with a non-int value is NOT ours
-    (the CLI breaks there, and the rest becomes the `exec` child). Only the
-    VALUE of a path flag (--persist / --persist-map / --file) and inspect's
-    one positional are accounted — a root reference in any other flag value
-    or in a stray positional stays unaccounted (review A finding 1: a
-    blanket pre-child exemption let `exec N --ttl <root>/k cmd` through).
+    Mirrors argparse + cli_vault._secret_apply_remainder EXACTLY: argparse
+    binds the optional NAME only to the token right after the action (and
+    only when it does not start with `-`); everything after that is the
+    REMAINDER, where the CLI consumes its own flags from the head, stops at
+    `--`, and the first token that is not its flag starts the `exec` child.
+    An int flag with a non-int value is NOT ours (the CLI breaks there).
+    Only the VALUE of a path flag (--persist / --persist-map / --file) and
+    inspect's NAME are accounted — a root reference in any other flag value
+    or in a stray positional stays unaccounted (review A finding 1).
+
+    Slice 2: `exec --file <path>` runs a child with NO name, so a mirror that
+    took the first free token anywhere as the NAME would shift the child by
+    one token (`exec --file <root>/a cat ls <root>/k` read as NAME=cat,
+    child `ls <root>/k` — an allowed listing — while the CLI runs `cat ls …`).
     """
     action = tk[cli] if cli < len(tk) else ""
-    ok, seen_name, i = set(), False, cli + 1
+    ok, i = set(), cli + 1
+    if i < len(tk) and not tk[i].startswith("-"):     # argparse's `name`
+        if action == "inspect":
+            ok.add(i)
+        i += 1
     while i < len(tk):
         t = tk[i]
         key, eq, inline = t.partition("=")
@@ -251,17 +504,14 @@ def _secret_cli_args(tk, cli):
             i += 1
             continue
         if key in SECRET_CLI_ARGFLAGS:
-            idx, value = (i, inline) if eq else (i + 1, tk[i + 1] if i + 1 < len(tk) else "")
+            if not eq and i + 1 >= len(tk):
+                return ok, i         # a dangling flag: the CLI leaves it
+            idx, value = (i, inline) if eq else (i + 1, tk[i + 1])
             if key in ("--ttl", "--keep", "--port") and not _is_int(value):
                 return ok, i         # not a flag of ours after all
             if key in SECRET_PATH_FLAGS:
                 ok.add(idx)
             i = idx + 1
-            continue
-        if not seen_name:
-            if action == "inspect":
-                ok.add(i)
-            seen_name, i = True, i + 1
             continue
         if action == "exec":
             return ok, i          # the REMAINDER child, without a `--`
@@ -298,6 +548,17 @@ def _accounted(tk, term):
 
 
 def _accounted_command(tk, start, head, term):
+    ok = _pub_args(tk, start, head, term)
+    if head == "ssh-keygen":
+        return ok | _keygen_args(tk, start)
+    if head in ("gh", "git"):
+        # Piped, a prose command's output can echo its text (`git commit`
+        # prints the subject) into a consumer — a name source like `ls`.
+        return ok if term == "|" else ok | _prose_args(tk, start, head)
+    return ok | _accounted_head(tk, start, head, term)
+
+
+def _accounted_head(tk, start, head, term):
     rest = range(start + 1, len(tk))
     if head in KEY_META_HEADS:
         # Piped, a metadata head is a NAME SOURCE for whatever consumes it
@@ -323,12 +584,24 @@ def _accounted_command(tk, start, head, term):
     return ok
 
 
-def _unaccounted(tk, term, cwd_hint=None):
+def _unaccounted(tk, term, cwd_hint=None, segment=None):
     # A redirection glued into one word (`ls <root>/k><root>/j`) is a WRITE
     # riding on an allowed argument (review C finding 7): a token naming the
-    # root that also carries `<`/`>` is never accounted.
-    ok = {i for i in _accounted(tk, term) if "<" not in tk[i] and ">" not in tk[i]}
+    # root that also carries `<`/`>` is never accounted — unless it is PROSE
+    # whose brackets were quoted text (`--body 'a <root>/<name>'`, slice 2).
+    prose = _prose_indices(tk, term)
+    ok = {i for i in _accounted(tk, term)
+          if ("<" not in tk[i] and ">" not in tk[i])
+          or (i in prose and segment is not None
+              and _prose_token_is_quoted(segment, tk[i]))}
     return [t for i, t in enumerate(tk) if i not in ok and key_ref(t, cwd_hint)]
+
+
+def _prose_indices(tk, term):
+    start = _cmd_start(tk)
+    if start is None or term == "|":
+        return set()
+    return _prose_args(tk, start, tk[start].rsplit("/", 1)[-1].lower())
 
 
 KEY_AUDIT_RE = re.compile(
@@ -347,10 +620,16 @@ def key_audit_ref(ref):
     return m.group(0) if m else KEY_DIR + "(glob)"
 
 
+# Redirections that cannot write anywhere that matters: an fd dup (`2>&1`,
+# and the `2>` a `&`-split leaves behind) or a discard to /dev/null. Any other
+# redirect target stays a token, so `inspect <p> > <file>` is not one path.
+SAFE_REDIRECT_RE = re.compile(r"^\d*(?:>&\d*-?|>|>>?/dev/null)$")
+
+
 def is_secret_inspect(segment):
     """`… airuleset.py secret inspect <one path>` — metadata only, any root."""
     try:
-        tk = shlex.split(segment)
+        tk = [t for t in shlex.split(segment) if not SAFE_REDIRECT_RE.match(t)]
     except ValueError:
         return False
     start = _cmd_start(tk)
@@ -372,7 +651,11 @@ def effective_terms(segments):
     conservative cut, since a stateless text check cannot follow a group.
     """
     piped = any(term == "|" for _seg, term in segments)
-    return [(seg, "|" if (piped or term in FLOW_TERMS) else term)
+    # Slice 2: a one-path `secret inspect` piped ONLY into text filters is not
+    # a flow (inspect_pipeline_is_inert) — its segment keeps a plain term.
+    inert = piped and inspect_pipeline_is_inert(segments)
+    return [(seg, "" if (inert and is_secret_inspect(seg))
+             else "|" if (piped or term in FLOW_TERMS) else term)
             for seg, term in segments]
 
 
@@ -391,7 +674,7 @@ def key_violation(segment, term, cwd_hint=None):
         tk = shlex.split(segment)
     except ValueError:
         return ref                # unbalanced quoting around a reference
-    stray = _unaccounted(tk, term, cwd_hint)
+    stray = _unaccounted(tk, term, cwd_hint, segment)
     if stray:
         return stray[0]
     # The segment names the root but no single argument does (a reference

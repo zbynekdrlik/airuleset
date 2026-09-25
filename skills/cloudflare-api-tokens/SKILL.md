@@ -64,7 +64,8 @@ The token is USED from a SCRIPT, never read inline: `block-vault-store-read.sh`
 refuses `cat`/`tr <`/`$(<…)` on `~/.secrets/` in a Bash tool call (#1153 — a
 lane's inline read put a PROD key in its transcript). Write the probe below to
 a file with the Write tool and run `bash <file>`; its text names the key, the
-Bash command does not.
+Bash command does not. Or use it inline, filtered:
+`python3 ~/devel/airuleset/airuleset.py secret exec --file ~/.secrets/cloudflare-<project> --env CF_TOKEN -- <cmd reading $CF_TOKEN>`.
 
 Then **verify the candidate against the ZONE it is FOR** (step 2) — a token can
 be present but dead; test it, never assume.

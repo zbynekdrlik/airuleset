@@ -1,7 +1,10 @@
 """The PostToolUse redactor behind hooks/redact-vault-output.sh (#1153 part c).
 
 Reads the PostToolUse payload on stdin. When a credential-store value
-(`<store>/<NAME>.secret`, the `airuleset.py secret` channel) appears in the
+(`<store>/<NAME>.secret`, the `airuleset.py secret` channel) or — since slice
+2 — the value of a regular file directly under the plain key-file root
+(`~/.secrets/<name>`, loaded by cli_vault_keyfile.plain_root_values: no
+symlinks, no subdirs, no `*.pub`, size-capped, 8+ bytes) appears in the
 tool's output, prints `hookSpecificOutput.updatedToolOutput`: the SAME
 structure with every string that carried a value rewritten through
 `cli_vault._secret_redact` — the filter `secret exec` already applies to its
@@ -26,18 +29,18 @@ as feedback. It never prints a value: stdout carries only redacted text, and
 stderr carries only exception class names and counts.
 
 Honest limits: OpenTelemetry/analytics capture the original output before any
-hook runs (the docs' own warning); only STORE values are known here — a plain
-`~/.secrets/*` key file is guarded at READ time by block-vault-store-read.sh
-instead; a multi-line value is also matched LINE by line (16+ byte lines,
-anchored at the end or start of an output line), so a short line of it, or
-one embedded mid-line, is not; a deliberately transformed value
+hook runs (the docs' own warning); a key file in a SUBDIR of the plain root,
+behind a symlink, or under another name elsewhere is not known (the READ guard
+block-vault-store-read.sh is the first line there); a multi-line value is
+matched LINE by line (16+ byte lines, anchored at the end or start of an
+output line) and a PEM block whole, so a short line of it, or one embedded
+mid-line, is not; a deliberately transformed value
 (reversed, double-encoded, one character per line) is not recognised — the
 same residual `secret exec` has.
 """
 
 import json
 import os
-import re
 import stat
 import sys
 from pathlib import Path
@@ -45,34 +48,25 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-MARKER = b"<<REDACTED>>"
-# A LINE of a multi-line value (a PEM key body) is its own needle: Grep's
-# `path:N:` prefixes, `cat -n`, a Read's `N→` gutter, or an Edit patch's
-# `+<line>` entries print the value one line at a time, and a whole-value
-# match then finds nothing (review B finding 3). Such tools put a PREFIX in
-# front of the line, so a line needle is matched at the END (or the start) of
-# an output line by a set lookup — one pass, never a replace per needle
-# (review C finding 2: a 64 KB value of 16-byte lines cost 19.7 s and would
-# time the hook out, i.e. fail open). Not needles (review C finding 3): a PEM
-# banner, and the NAME half of a `NAME=value` line — only its value counts.
-MIN_LINE_BYTES = 16
-MAX_LINE_LENGTHS = 64
-PEM_BANNER_RE = re.compile(rb"^-----(?:BEGIN|END) [A-Z0-9 ]+-----$")
-ENV_LINE_RE = re.compile(rb"^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=(.*)$")
+# The needle rules (whole values through `_secret_redact`, 16+-byte LINES of
+# a multi-line value matched end/start-anchored in one pass, PEM banners and
+# `NAME=` halves never needles, a PEM block whole) live in cli_vault_keyfile
+# since slice 2 of #1153 — `secret exec --file` filters with the SAME code.
+from cli_vault_keyfile import (MARKER, needles_for,  # noqa: E402
+                               plain_root_values, scrub_bytes)
 
 
 def store_values():
-    """(values, lines): every stored value (bytes) and every 16+-byte line of a
-    multi-line one, each longest first. Reads the files directly —
+    """Every stored value (bytes). Reads the files directly —
     `vault.read_value` would `ensure_dir()` (mkdir + chmod) on every call."""
     from filedrop import vault
 
     d = Path(vault.secrets_dir())
-    out, lines = [], []
+    out = []
     try:
         entries = list(d.iterdir())
     except OSError:
-        return out, lines
+        return out
     cap = vault.MAX_SECRET_BYTES          # the store's own ceiling (review B 6)
     for p in entries:
         if p.suffix != ".secret" or not vault.NAME_RE.fullmatch(p.stem):
@@ -88,45 +82,7 @@ def store_values():
         if not value or len(value) > cap:
             continue
         out.append(value)
-        if b"\n" in value.strip():
-            lines.extend(_line_needles(value))
-    return (sorted(set(out), key=len, reverse=True), set(lines))
-
-
-def _line_needles(value):
-    for ln in value.splitlines():
-        ln = ln.strip()
-        env = ENV_LINE_RE.match(ln)
-        if env:
-            ln = env.group(1).strip().strip(b"\"'")
-        if len(ln) >= MIN_LINE_BYTES and not PEM_BANNER_RE.match(ln):
-            yield ln
-
-
-def _scrub_bytes(blob, needles, redact):
-    """Whole values through the full `secret exec` filter (every rendering);
-    single lines of a multi-line value by an end/start-anchored set lookup per
-    output line (see MIN_LINE_BYTES)."""
-    values, lines = needles
-    for v in values:
-        blob = redact(blob, v, MARKER)
-    if not lines:
-        return blob
-    lengths = sorted({len(n) for n in lines}, reverse=True)[:MAX_LINE_LENGTHS]
-    out = []
-    for row in blob.split(b"\n"):
-        body = row.rstrip(b"\r \t")
-        for n in lengths:
-            if len(body) < n:
-                continue
-            if body[-n:] in lines:
-                row = body[:-n] + MARKER + row[len(body):]
-                break
-            if body[:n] in lines:
-                row = MARKER + row[n:]
-                break
-        out.append(row)
-    return b"\n".join(out)
+    return out
 
 
 def strings(obj):
@@ -145,7 +101,7 @@ def scrub(obj, values, redact):
     """`obj` with every string rewritten; the structure is never changed."""
     if isinstance(obj, str):
         raw = obj.encode("utf-8", "surrogatepass")
-        new = _scrub_bytes(raw, values, redact)
+        new = scrub_bytes(raw, values, redact)
         return obj if new == raw else new.decode("utf-8", "replace")
     if isinstance(obj, dict):
         return {k: scrub(v, values, redact) for k, v in obj.items()}
@@ -165,7 +121,7 @@ def main():
         return 1
     if not isinstance(payload, dict) or "tool_response" not in payload:
         return 0
-    values = store_values()
+    values = needles_for(store_values() + plain_root_values())
     if not values[0]:
         return 0
     response = payload["tool_response"]
@@ -176,7 +132,7 @@ def main():
     # missed. Joined by NEWLINE so the line-anchored needles see each string
     # as its own row; a match spanning a joint is re-checked per string below.
     joined = b"\n".join(s.encode("utf-8", "surrogatepass") for s in strings(response))
-    if _scrub_bytes(joined, values, _secret_redact) == joined:
+    if scrub_bytes(joined, values, _secret_redact) == joined:
         return 0
     redacted = scrub(response, values, _secret_redact)
     if redacted == response:
@@ -187,10 +143,12 @@ def main():
         "hookEventName": "PostToolUse",
         "updatedToolOutput": redacted,
         "additionalContext": (
-            "redact-vault-output (#1153): %d occurrence(s) of a stored credential "
-            "value were replaced with %s in this tool's output before it reached "
-            "you. Do not try to recover the value; use `airuleset.py secret exec "
-            "<NAME> -- <cmd>` to use it." % (hits, MARKER.decode())),
+            "redact-vault-output (#1153): %d occurrence(s) of a credential value "
+            "(the store or a plain key file) were replaced with %s in this tool's "
+            "output before it reached you. Do not try to recover the value; use "
+            "`airuleset.py secret exec <NAME> -- <cmd>` (a stored value) or "
+            "`secret exec --file <path> --env KEY -- <cmd>` (a plain key file)."
+            % (hits, MARKER.decode())),
     }}))
     return 0
 

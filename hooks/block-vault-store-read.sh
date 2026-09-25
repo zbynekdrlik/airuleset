@@ -103,15 +103,36 @@ set -euo pipefail
 # script invoked by path is allowed because its text never names the file —
 # the sanctioned way stream code consumes a key. Measured side effects of
 # deny-by-default here, on purpose: `for f in <root>/*`, `export K=$(tr … <
-# <root>/k)`, `mkdir`/`chmod` on the root, `ssh-keygen -f`, and a `.pub` read
-# are refused like any other unlisted head. The refusal names `secret
-# inspect <path>` (format, hooks-free) and `secret exec`/a script (use).
+# <root>/k)` and `mkdir`/`chmod` on the root are refused like any other
+# unlisted head. The refusal names `secret inspect <path>` (format,
+# hooks-free) and `secret exec [--file <path>]`/a script (use).
+# SLICE 2 (issuecomment-5830067896) — five more accounted shapes, each an
+# explicit table with a DENY twin in tests/test_vault_guard_slice2_1153.py:
+# (d) a one-path `secret inspect` piped ONLY into pure text filters
+# (head/tail/grep/wc/sort/uniq/cut/tr/column/nl/cat/fold, by bare name, no
+# `--files0-from`, no substitution/group anywhere) — its `path:` line is a
+# name, so `| xargs cat` / `| sh` / `| awk` stay refused; (e) PROSE: the
+# VALUE of `gh issue|pr comment|create|edit --body/-b/--title/-t` and of
+# `git commit -m/--message`, unpiped, found by an option scan that knows
+# every other option of those commands (an unknown option or `--` ends it;
+# `--body-file`, `-F`, `gh api -F body=@`, `git commit -F`, a redirect and a
+# substitution stay refused; brackets count as text only when quoted); (f)
+# the `-f` value of `ssh-keygen` in a pure `-l`/`-y` (+`-E`, `-q`) call —
+# fingerprint and public half only; (g) a LITERAL `*.pub` path (no `$`,
+# braces, brackets or `..`) — piped, only as a `cat` operand, since a piped
+# path is a name source (`ls <root>/*.pub | sed s/.pub// | xargs cat`); and
+# (h) `secret exec --file <path>`, whose CLI mirror now follows argparse
+# exactly (NAME only right after the action, so the child is never shifted).
 # Rule E's own gaps are the store's: a glob not anchored on 3 literal chars
 # (`~/.s*/k`), a computed path, a home-wide sweep (`grep -r x ~`) that never
-# names the root, and a symlink to a key under another name. Its accepted
-# FALSE POSITIVE is wider than the store's, stated rather than implied:
-# `.secrets` is ordinary prose, so `echo "my .secrets"` or a `git commit -m`
-# naming the dir is refused (remedy as for the store: `-F <file>`). The
+# names the root, a symlink to a key under another name, a `*.pub` that is
+# itself a symlink to the private key (the `.pub` test is textual), and a
+# listing or commit subject written to a FILE and read back by a later
+# segment (only pipes/substitutions are followed). Its accepted FALSE
+# POSITIVE is wider than the store's, stated rather than implied: `.secrets`
+# is ordinary prose, so `echo "my .secrets"`, a heredoc body or any text
+# option outside the (e) table naming the dir is refused (remedy: a body
+# file outside the root, `-F <file>`). The
 # recursive checks (ssh remote command, ProxyCommand, rsync -e, `secret exec`
 # child) have no explicit depth cap; a pathological nesting ends in a
 # RecursionError, i.e. rc 1, i.e. fail_closed — a refusal, never an allow.
@@ -480,10 +501,14 @@ if [ "$KEYFILE" = 1 ]; then
     echo "    check its FORMAT (bytes, lines, trailing newline, NAME= names, hash," >&2
     echo "    owner, mode) without the value:" >&2
     echo "      python3 ~/devel/airuleset/airuleset.py secret inspect <path>" >&2
+    echo "    (piped only into a text filter: ... 2>&1 | head)" >&2
     echo "    USE it without printing it: as a key argument (ssh/scp/sftp -i <path>," >&2
-    echo "    rsync -e 'ssh -i <path>'), through secret exec, or from a script" >&2
-    echo "    invoked by path — its text never names the file." >&2
+    echo "    rsync -e 'ssh -i <path>'), from a script invoked by path, or inline:" >&2
+    echo "      python3 ~/devel/airuleset/airuleset.py secret exec --file <path> --env KEY -- <cmd>" >&2
+    echo "    (the value reaches the child as \$KEY, or on stdin with --stdin; fd 1/2" >&2
+    echo "    are filtered). Public material: ssh-keygen -l|-y -f <key>, a *.pub file." >&2
     echo "    Metadata heads, unpiped: ls / stat / test / wc -c / sha256sum." >&2
+    echo "    Naming a path in PROSE: gh issue|pr … --body/--title, git commit -m." >&2
     echo "" >&2
 fi
 echo "  HONEST LIMIT: this is a GUARDRAIL, not a security boundary. The agent's" >&2
