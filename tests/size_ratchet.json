@@ -49,7 +49,7 @@
     "cli_target_purge.py": 892,
     "cli_task_hygiene.py": 415,
     "cli_tmux_provisioning.py": 2543,
-    "cli_vault.py": 1094,
+    "cli_vault.py": 1096,
     "cli_wdrain.py": 274,
     "cli_webterm.py": 1882,
     "cli_webterm_access.py": 389,
