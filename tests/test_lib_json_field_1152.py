@@ -13,10 +13,15 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 LIB = ROOT / "hooks" / "lib-json-field.sh"
@@ -52,7 +57,7 @@ class JsonStrField(unittest.TestCase):
             path = str(self.bin) + os.pathsep + path
         r = subprocess.run(["bash", "-c", READ, "x", str(LIB), key],
                            input=payload.encode("utf-8"), capture_output=True,
-                           env={**os.environ, "PATH": path})
+                           env=hermetic_hook_env(self, PATH=path))
         self.assertEqual(r.returncode, 0, r)
         rc, via, value = r.stdout.split(b"\x01", 2)
         return int(rc), via.decode(), value.decode("utf-8")
