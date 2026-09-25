@@ -3395,12 +3395,12 @@ class TestFleetBurnJob(unittest.TestCase):
             f.write(json.dumps({
                 "ts": "2026-07-24T12:00:00+00:00", "per_host": {}, "total_usd": 0.0,
                 "total_msgs": 0, "weighted_avg_ctx": 0, "weekly_pct": 80,
-                "resets_at": "2026-08-01T00:00:00+00:00",
+                "resets_at": "2026-07-31T12:00:00+00:00",
             }) + "\n")
-        # weekly at 90%, reset in 6.5 days -> budget (100-90)/6.5 = 1.54%/day;
+        # weekly 90%, reset in ~6 days (seed = window start, #1154) -> budget 1.67%/day;
         # observed (90-80)/24h*24 = 10%/day -> way over budget.
         cache = {"windows": [{"group": "weekly", "percent": 90, "model": None,
-                              "resets_at": "2026-08-01T00:00:00+00:00"}]}
+                              "resets_at": "2026-07-31T12:00:00+00:00"}]}
         sent = []
         wd.fleet_burn_job(now, {}, [], lambda body, **k: sent.append((body, k)) or "sent",
                           fetch=lambda hs, hb: {}, fleet_path=fleet_path, usage_cache=cache)

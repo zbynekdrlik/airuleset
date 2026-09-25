@@ -267,7 +267,7 @@ def fleet_burn_job(now, state, hosts, send_fn, fetch=None, local_snapshot_path=N
     state["fleet_burn_hour"] = hour_bucket
     logs = ["fleet-burn ts=%s total=$%.2f hosts=%d -> %s"
            % (ts, row["total_usd"], len(host_rows), path)]
-    all_rows = burn_mod.load_fleet(path)
+    all_rows = burn_mod.load_fleet(path, since=burn_mod.weekly_window_start(resets_at))
     alert = burn_mod.fleet_budget_alert(
         all_rows, cache,
         now=datetime.datetime.fromtimestamp(now, datetime.timezone.utc))
@@ -333,7 +333,10 @@ def burn_alert_job(now, state, send_fn, fleet_path=None, owner=None,
     catch, same as every other job."""
     import burn as burn_mod
     fleet_path = fleet_path or burn_mod.fleet_path()
-    rows = burn_mod.load_fleet(fleet_path)
+    if rel_window is None:
+        rel_window = _env_num("AIRULESET_BURN_ALERT_REL_WINDOW",
+                              burn_mod.BURN_ALERT_REL_WINDOW, cast=int)
+    rows = burn_mod.load_fleet(fleet_path, since=burn_mod.burn_alert_since(fleet_path, rel_window))
     if not rows:
         return []
     hb = burn_mod.hour_bucket_of_ts(rows[-1].get("ts"))
@@ -343,9 +346,6 @@ def burn_alert_job(now, state, send_fn, fleet_path=None, owner=None,
         abs_usd = _env_num("AIRULESET_BURN_ALERT_ABS_USD", burn_mod.BURN_ALERT_ABS_USD)
     if rel_mult is None:
         rel_mult = _env_num("AIRULESET_BURN_ALERT_REL_MULT", burn_mod.BURN_ALERT_REL_MULT)
-    if rel_window is None:
-        rel_window = _env_num("AIRULESET_BURN_ALERT_REL_WINDOW",
-                              burn_mod.BURN_ALERT_REL_WINDOW, cast=int)
     if weekly_step_pct is None:
         weekly_step_pct = _env_num("AIRULESET_BURN_ALERT_WEEKLY_STEP_PCT",
                                    burn_mod.BURN_ALERT_WEEKLY_STEP_PCT)
