@@ -287,10 +287,11 @@ FIRST-line stamp from `cli_authorship.stamp_line("Analysed", cwd)` (the full `An
   represented?"; it returns a list, never writes a deliverable. Loop MAIN until it comes back dry.
 - Capture EVERYTHING identified-but-not-done as tracked items (e.g. GitHub issues) — never drop a
   requirement silently (`no-dropped-work.md`).
+- Agreements ALSO go into EACH affected Odoo board task (`client-board-tasks.md` rule 16).
 
 **Every generated ticket MUST cite its evidence** — the transcript timestamp + speaker, the
-screen file (`frames_kept/scr_*.jpg`), and/or the `*_verbatim.md` line. A ticket with no citation
-is an unverifiable hallucinated requirement — the user must be able to trace each one back to the call.
+screen file (`frames_kept/scr_*.jpg`), and/or the `*_verbatim.md` line. An uncited ticket is an
+unverifiable, hallucinated requirement the user cannot trace back to the call.
 
 **Delivered-vs-broken cross-check (mandatory for a complaint call).** When the meeting exists
 because previously-"delivered" things are called non-functional / unclear / wrong (the montalu/Peto
