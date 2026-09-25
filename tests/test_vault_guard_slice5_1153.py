@@ -114,5 +114,34 @@ class MetaSource(Base):
                     "ls %s | grep -f %s" % (R, KEY)])
 
 
+class SinkOptions(Base):
+    """A sink option that turns piped NAMES into a read or a program run.
+
+    GNU getopt takes any unambiguous abbreviation of a long option, and
+    `sort --fil=-` reads NUL-separated names from stdin and prints each
+    file's CONTENT (checked in real bash on a fake file). The literal-only
+    `--files0-from` check let it through, on base already after `secret
+    inspect`, and with `ls` a clean name list feeds it directly.
+    `--compress-program` hands the sorted stream to a program.
+    """
+    INSPECT = "python3 ~/devel/airuleset/airuleset.py secret inspect %s" % KEY
+
+    def test_name_reading_abbreviations_are_not_sinks(self):
+        nul = " | tr '\\n' '\\0' | "
+        self.both(
+            allowed=["ls %s | sort --reverse" % R,
+                     "ls %s | sort -t, -k2" % R,
+                     "ls %s | wc --lines" % R,
+                     "ls %s | grep --file=/tmp/pats" % R,
+                     self.INSPECT + " | sort | head -3"],
+            denied=["ls -d %s" % KEY + nul + "sort --fil=-",
+                    "ls -d %s" % KEY + nul + "sort --files0=-",
+                    "ls -d %s" % KEY + nul + "wc --f=-",
+                    "ls -d %s" % KEY + nul + "wc --files0-f -",
+                    "ls %s | sort -S1 --compress-program=/tmp/x" % R,
+                    "ls %s | sort --compress=/tmp/x" % R,
+                    self.INSPECT + " | cut -c7-" + nul + "sort --fil=-"])
+
+
 if __name__ == "__main__":
     unittest.main()
