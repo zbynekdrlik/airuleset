@@ -144,7 +144,10 @@ class StitchChunks(unittest.TestCase):
 
     def test_shared_time_below_the_threshold_is_not_a_match(self):
         chunks = [
-            {"start_s": 0.0, "end_s": 10.0, "words": [W("g", 9.9, 10.0, "s1")]},
+            # "early" keeps global "1" in the output, so an unmatched s9 must
+            # surface as "2" (labels number by first appearance)
+            {"start_s": 0.0, "end_s": 10.0, "words": [
+                W("early", 1.0, 2.0, "s1"), W("g", 9.9, 10.0, "s1")]},
             {"start_s": 8.0, "end_s": 18.0, "words": [
                 W("g", 1.9, 2.0, "s9"), W("h", 5.0, 6.0, "s9")]},
         ]
