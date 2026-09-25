@@ -142,6 +142,20 @@ class PerPipeline(Base):
                     COMMIT + " 2>&1 | xargs cat",
                     "true; " + COMMIT + " >&2 | xargs cat"])
 
+    def test_a_rebinding_command_keeps_the_whole_command_rule(self):
+        # a command that can change what a LATER `gh`/`git` means keeps the
+        # whole-command cut, exactly as before slice 4 (in-lane finding: the
+        # slice-3 `alias gh=cat` lock)
+        self.both(
+            allowed=[],
+            denied=[pre + PROSE + " | tail -1" for pre in (
+                "alias gh=cat; ", "hash -p /bin/cat gh; ", "enable -n echo; ",
+                "PATH=/tmp/x; ", "PATH=/tmp/x GH_X=1; ", "export PATH=/tmp/x; ",
+                "declare -x PATH=/tmp/x; ", ". /tmp/rc; ", "source /tmp/rc; ",
+                "eval x; ", "set -o posix; ", "shopt -s expand_aliases; ",
+                "exec 1>/tmp/o; ", "trap x EXIT; ", "builtin alias gh=cat; ",
+                "command hash -p /bin/cat gh; ", "unalias -a; ")])
+
     def test_metadata_heads_per_pipeline(self):
         # an unpiped listing beside an unrelated pipeline is a listing again;
         # a piped one is still a name source

@@ -143,9 +143,16 @@ set -euo pipefail
 # Each segment is now scanned twice (raw + quote-removed); measured worst
 # case at the ~128 KB argv ceiling ~2 s, inside the 5 s budget.
 # A metadata head's output is a NAME SOURCE whenever it can flow into
-# another command — a pipe anywhere in the command, `$(…)`, backticks,
-# `<(…)`, a subshell — so for BOTH roots the metadata exemption holds only
-# when nothing can consume its output (review C, `cat $(ls -d <root>/*)`).
+# another command — a pipe in its pipeline, `$(…)`, backticks, `<(…)`, a
+# subshell — so for BOTH roots the metadata exemption holds only when
+# nothing can consume its output (review C, `cat $(ls -d <root>/*)`).
+# SLICE 4 (issuecomment-5832682152): "piped" is judged per PIPELINE (split at
+# top-level `;` `&&` `||` `&` newline; not at `|&`, `&>`, `2>&1`, an escaped
+# separator, or a separator right after `|`), so `cd X && gh … --body
+# "<prose>" | tail -1` keeps (e). A command with ANY grouping (`( )`, `$(`,
+# backticks, `{ }`, a compound keyword) or a name-rebinding command
+# (alias/hash/enable/PATH=…/export/source/eval/set/shopt/exec/trap) stays ONE
+# unit and is promoted whole, exactly as before.
 # The secret-CLI allowance trusts any file NAMED `airuleset.py`: planting a
 # lookalike is the same deliberate, pre-authored step as a reader script run
 # by path, and stays outside this hook's reflex claim.
