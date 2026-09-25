@@ -460,6 +460,20 @@ def _pub_args(tk, start, head, term):
 INSPECT_SINKS = {"head", "tail", "grep", "egrep", "fgrep", "wc", "sort", "uniq",
                  "cut", "tr", "column", "nl", "cat", "fold"}
 FD_REMNANT_RE = re.compile(r"^\s*\d*-?\s*$")
+# Sink options that turn the piped NAMES into a read (`--files0-from=-`
+# opens every listed file; sort prints the content) or hand the stream to a
+# program. GNU getopt takes ANY unambiguous abbreviation (`sort --fil=-`),
+# so a token is refused when it is a prefix of one of these (slice 5).
+NAME_READING_OPTS = {"wc": ("--files0-from",),
+                     "sort": ("--files0-from", "--compress-program")}
+
+
+def _reads_names(head, tok):
+    key = tok.partition("=")[0]
+    if tok.startswith("--files0-from"):
+        return True
+    return len(key) > 2 and any(opt.startswith(key)
+                                for opt in NAME_READING_OPTS.get(head, ()))
 
 
 def _is_text_sink(seg):
@@ -471,7 +485,7 @@ def _is_text_sink(seg):
         return False
     if tk[0] not in INSPECT_SINKS:
         return False
-    return not any(t.startswith("--files0-from") for t in tk[1:])
+    return not any(_reads_names(tk[0], t) for t in tk[1:])
 
 
 # Slice 5 (#1153 issuecomment-5836170974): a metadata head prints NAMES and
