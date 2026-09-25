@@ -1,0 +1,183 @@
+{
+ "language_code": "slk",
+ "language_probability": 0.98,
+ "text": "Pošli mi faktúru OP 12. Áno, zálohová faktúra je v Odoo.",
+ "words": [
+  {
+   "text": "Pošli",
+   "type": "word",
+   "start": 0.1,
+   "end": 0.4,
+   "speaker_id": "speaker_0",
+   "logprob": -0.1
+  },
+  {
+   "text": " ",
+   "type": "spacing",
+   "start": 0.4,
+   "end": 0.42,
+   "speaker_id": "speaker_0",
+   "logprob": -0.1
+  },
+  {
+   "text": "mi",
+   "type": "word",
+   "start": 0.42,
+   "end": 0.56,
+   "speaker_id": "speaker_0",
+   "logprob": -0.1
+  },
+  {
+   "text": " ",
+   "type": "spacing",
+   "start": 0.56,
+   "end": 0.58,
+   "speaker_id": "speaker_0",
+   "logprob": -0.1
+  },
+  {
+   "text": "faktúru",
+   "type": "word",
+   "start": 0.58,
+   "end": 1.1,
+   "speaker_id": "speaker_0",
+   "logprob": -0.1
+  },
+  {
+   "text": " ",
+   "type": "spacing",
+   "start": 1.1,
+   "end": 1.12,
+   "speaker_id": "speaker_0",
+   "logprob": -0.1
+  },
+  {
+   "text": "OP",
+   "type": "word",
+   "start": 1.12,
+   "end": 1.3,
+   "speaker_id": "speaker_0",
+   "logprob": -0.1
+  },
+  {
+   "text": " ",
+   "type": "spacing",
+   "start": 1.3,
+   "end": 1.32,
+   "speaker_id": "speaker_0",
+   "logprob": -0.1
+  },
+  {
+   "text": "12.",
+   "type": "word",
+   "start": 1.32,
+   "end": 1.61,
+   "speaker_id": "speaker_0",
+   "logprob": -0.1
+  },
+  {
+   "text": " ",
+   "type": "spacing",
+   "start": 1.61,
+   "end": 1.9,
+   "speaker_id": "speaker_0",
+   "logprob": -0.1
+  },
+  {
+   "text": "Áno,",
+   "type": "word",
+   "start": 1.9,
+   "end": 2.16,
+   "speaker_id": "speaker_1",
+   "logprob": -0.1
+  },
+  {
+   "text": " ",
+   "type": "spacing",
+   "start": 2.16,
+   "end": 2.2,
+   "speaker_id": "speaker_1",
+   "logprob": -0.1
+  },
+  {
+   "text": "zálohová",
+   "type": "word",
+   "start": 2.2,
+   "end": 2.7,
+   "speaker_id": "speaker_1",
+   "logprob": -0.1
+  },
+  {
+   "text": " ",
+   "type": "spacing",
+   "start": 2.7,
+   "end": 2.72,
+   "speaker_id": "speaker_1",
+   "logprob": -0.1
+  },
+  {
+   "text": "faktúra",
+   "type": "word",
+   "start": 2.72,
+   "end": 3.1,
+   "speaker_id": "speaker_1",
+   "logprob": -0.1
+  },
+  {
+   "text": " ",
+   "type": "spacing",
+   "start": 3.1,
+   "end": 3.12,
+   "speaker_id": "speaker_1",
+   "logprob": -0.1
+  },
+  {
+   "text": "je",
+   "type": "word",
+   "start": 3.12,
+   "end": 3.25,
+   "speaker_id": "speaker_1",
+   "logprob": -0.1
+  },
+  {
+   "text": " ",
+   "type": "spacing",
+   "start": 3.25,
+   "end": 3.26,
+   "speaker_id": "speaker_1",
+   "logprob": -0.1
+  },
+  {
+   "text": "v",
+   "type": "word",
+   "start": 3.26,
+   "end": 3.3,
+   "speaker_id": "speaker_1",
+   "logprob": -0.1
+  },
+  {
+   "text": " ",
+   "type": "spacing",
+   "start": 3.3,
+   "end": 3.32,
+   "speaker_id": "speaker_1",
+   "logprob": -0.1
+  },
+  {
+   "text": "Odoo.",
+   "type": "word",
+   "start": 3.32,
+   "end": 3.71,
+   "speaker_id": "speaker_1",
+   "logprob": -0.1
+  },
+  {
+   "text": "(smiech)",
+   "type": "audio_event",
+   "start": 3.8,
+   "end": 4.0,
+   "speaker_id": "speaker_1",
+   "logprob": -0.1
+  }
+ ]
+}

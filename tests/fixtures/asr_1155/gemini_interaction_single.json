@@ -1,0 +1,99 @@
+{
+ "id": "interactions/one",
+ "status": "completed",
+ "output_text": "Pošli mi faktúru OP 12. Áno, zálohová faktúra je v Odoo.",
+ "steps": [
+  {
+   "id": "step_001",
+   "type": "model_output",
+   "content": [
+    {
+     "type": "text",
+     "text": "Pošli mi faktúru OP 12. Áno, zálohová faktúra je v Odoo.",
+     "annotations": [
+      {
+       "type": "word_info",
+       "text": "Pošli",
+       "speaker": "spk_1",
+       "start_offset": "0.100s",
+       "end_offset": "0.400s"
+      },
+      {
+       "type": "word_info",
+       "text": "mi",
+       "speaker": "spk_1",
+       "start_offset": "0.420s",
+       "end_offset": "0.560s"
+      },
+      {
+       "type": "word_info",
+       "text": "faktúru",
+       "speaker": "spk_1",
+       "start_offset": "0.580s",
+       "end_offset": "1.100s"
+      },
+      {
+       "type": "word_info",
+       "text": "OP",
+       "speaker": "spk_1",
+       "start_offset": "1.120s",
+       "end_offset": "1.300s"
+      },
+      {
+       "type": "word_info",
+       "text": "12.",
+       "speaker": "spk_1",
+       "start_offset": "1.320s",
+       "end_offset": "1.610s"
+      },
+      {
+       "type": "word_info",
+       "text": "Áno,",
+       "speaker": "spk_2",
+       "start_offset": "1.900s",
+       "end_offset": "2.160s"
+      },
+      {
+       "type": "word_info",
+       "text": "zálohová",
+       "speaker": "spk_2",
+       "start_offset": "2.200s",
+       "end_offset": "2.700s"
+      },
+      {
+       "type": "word_info",
+       "text": "faktúra",
+       "speaker": "spk_2",
+       "start_offset": "2.720s",
+       "end_offset": "3.100s"
+      },
+      {
+       "type": "word_info",
+       "text": "je",
+       "speaker": "spk_2",
+       "start_offset": "3.120s",
+       "end_offset": "3.250s"
+      },
+      {
+       "type": "word_info",
+       "text": "v",
+       "speaker": "spk_2",
+       "start_offset": "3.260s",
+       "end_offset": "3.300s"
+      },
+      {
+       "type": "word_info",
+       "text": "Odoo.",
+       "speaker": "spk_2",
+       "start_offset": "3.320s",
+       "end_offset": "3.710s"
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "usage": {
+  "total_input_tokens": 100
+ }
+}

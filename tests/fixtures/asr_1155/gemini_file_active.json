@@ -1,0 +1,8 @@
+{
+ "file": {
+  "name": "files/abc123",
+  "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc123",
+  "mimeType": "audio/wav",
+  "state": "ACTIVE"
+ }
+}

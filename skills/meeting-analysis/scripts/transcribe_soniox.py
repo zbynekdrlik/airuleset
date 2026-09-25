@@ -15,11 +15,12 @@ vocabulary to CENTRUM bread terms and would BIAS a montalu/ERP meeting transcrip
 bakery words. This script ships its own optional Slovak-ERP context (Money/Odoo domain).
 
 Usage:
-  SONIOX_API_KEY=... python3 transcribe_soniox.py <audio.wav> <out_dir> [lang=sk] [context=erp|none]
+  SONIOX_API_KEY=... python3 transcribe_soniox.py <audio.wav> <out_dir> [lang=sk] [context=erp|none|<terms file>]
 
-Writes into <out_dir>:
+Writes into <out_dir> (the shared contract, asr_contract.py — the ElevenLabs and Gemini
+adapters write the same files, #1155):
   transcript.txt      — human-readable, "[mm:ss] Speaker N: text" per segment
-  transcript.json     — {tokens, segments, meta}
+  transcript.json     — {model, language, tokens, segments}
   speaker_turns.json  — [{speaker, start_s, end_s, text}]  (Phase 3 consumes this directly)
   summary.json        — {duration_s, n_tokens, n_segments, speakers, model}
   done | error        — terminal markers (same crash-aware watch pattern as transcribe.py)
@@ -35,11 +36,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from asr_contract import (ERP_TERMS, context_terms, describe_error, fail, reset_markers,
+                          write_contract)
+
 SONIOX_BASE = "https://api.soniox.com/v1"
 ASYNC_MODEL = "stt-async-v5"          # newest async model (verify against GET /v1/models)
 POLL_INTERVAL_S = 5.0
 POLL_MAX = 600                        # ~50 min ceiling for a long meeting
-SEG_GAP_S = 0.9                       # a silence gap this long starts a new segment
 
 
 # --- optional Slovak ERP context (Money/Odoo). NOT the bakery context. -------------------
@@ -47,12 +50,7 @@ ERP_CONTEXT: dict[str, Any] = {
     "general": [
         {"key": "domain", "value": "Odoo ERP + Money — obchodné oddelenie, slovenčina"},
     ],
-    "terms": [
-        "Odoo", "Money", "montalu", "ponuka", "cenová ponuka", "objednávka",
-        "faktúra", "zálohová faktúra", "dobropis", "materiál", "dodávateľ",
-        "sklad", "výroba", "artikel", "artikl", "stredisko", "cenník",
-        "DPH", "platca DPH", "eKasa", "kalkulácia", "pergola", "žalúzia",
-    ],
+    "terms": ERP_TERMS,
     "text": (
         "Pracovná porada o obchodnom oddelení firmy montalu. Hovorí sa o prenose dát "
         "z programu Money do Odoo: ponuky, objednávky, faktúry, zálohové faktúry, "
@@ -85,7 +83,8 @@ def _upload(path: Path, api_key: str) -> str:
     return out["id"]
 
 
-def _create(file_id: str, api_key: str, *, lang: str, use_context: bool) -> str:
+def _create(file_id: str, api_key: str, *, lang: str,
+            context: dict[str, Any] | None) -> str:
     """Create the async transcription. Robust: if the API rejects the diarization flag or the
     context (400), retry without it rather than dying — a slightly poorer transcript beats none.
     """
@@ -96,8 +95,8 @@ def _create(file_id: str, api_key: str, *, lang: str, use_context: bool) -> str:
         "enable_speaker_diarization": True,
     }
     attempts = []
-    if use_context:
-        attempts.append({**base, "context": ERP_CONTEXT})
+    if context:
+        attempts.append({**base, "context": context})
     attempts.append(base)                                   # no context
     attempts.append({k: v for k, v in base.items()          # no diarization flag
                      if k != "enable_speaker_diarization"})
@@ -119,63 +118,37 @@ def _create(file_id: str, api_key: str, *, lang: str, use_context: bool) -> str:
     raise RuntimeError(f"soniox create failed on all attempts: {last_err}")
 
 
-def _tokens_to_speaker_segments(tokens: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Group tokens into segments, breaking on a speaker change OR a long silence gap.
-    Token `text` carries its own leading spaces/punctuation → segment text is a plain join."""
-    segs: list[dict[str, Any]] = []
-    cur: dict[str, Any] | None = None
-    for t in tokens:
-        spk = t.get("speaker")
-        spk = str(spk) if spk is not None else "?"
-        start_s = float(t.get("start_ms", 0)) / 1000.0
-        end_s = float(t.get("end_ms", t.get("start_ms", 0))) / 1000.0
-        text = t.get("text", "")
-        if cur is None:
-            cur = {"speaker": spk, "start_s": start_s, "end_s": end_s, "text": text}
-        elif spk != cur["speaker"] or start_s - cur["end_s"] > SEG_GAP_S:
-            segs.append(cur)
-            cur = {"speaker": spk, "start_s": start_s, "end_s": end_s, "text": text}
-        else:
-            cur["text"] += text
-            cur["end_s"] = end_s
-    if cur is not None:
-        segs.append(cur)
-    return [{**s, "text": s["text"].strip()} for s in segs if s["text"].strip()]
-
-
-def _mmss(sec: float) -> str:
-    m, s = divmod(int(sec), 60)
-    return f"{m:02d}:{s:02d}"
-
-
-def main() -> int:
-    if len(sys.argv) < 3:
-        print("usage: transcribe_soniox.py <audio.wav> <out_dir> [lang] [context=erp|none]")
+def main(argv: list[str] | None = None) -> int:
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) < 2:
+        print("usage: transcribe_soniox.py <audio.wav> <out_dir> [lang]"
+              " [context=erp|none|<terms file>]")
         return 2
-    audio = Path(sys.argv[1])
-    out = Path(sys.argv[2])
-    lang = sys.argv[3] if len(sys.argv) > 3 else "sk"
-    use_context = (sys.argv[4] if len(sys.argv) > 4 else "erp").lower() != "none"
-    out.mkdir(parents=True, exist_ok=True)
-    (out / "done").unlink(missing_ok=True)
-    (out / "error").unlink(missing_ok=True)
+    audio = Path(args[0])
+    out = Path(args[1])
+    lang = args[2] if len(args) > 2 else "sk"
+    ctx_arg = args[3] if len(args) > 3 else "erp"
+    reset_markers(out)
 
     api_key = os.environ.get("SONIOX_API_KEY", "").strip()
     if not api_key:
-        (out / "error").write_text("SONIOX_API_KEY not set")
-        print("ERROR: SONIOX_API_KEY not set", flush=True)
-        return 1
+        return fail(out, "SONIOX_API_KEY not set")
     if not audio.exists():
-        (out / "error").write_text(f"audio missing: {audio}")
-        print(f"ERROR: audio missing: {audio}", flush=True)
-        return 1
+        return fail(out, f"audio missing: {audio}")
+    try:
+        terms = context_terms(ctx_arg)
+    except ValueError as e:
+        return fail(out, str(e))
+    # the built-in ERP context keeps its domain text; a term file sends terms only
+    context = (None if terms is None
+               else ERP_CONTEXT if ctx_arg.lower() == "erp" else {"terms": terms})
 
     try:
         print(f"uploading {audio.name} ({audio.stat().st_size/1e6:.1f} MB)…", flush=True)
         file_id = _upload(audio, api_key)
         print(f"file_id={file_id}; creating transcription ({ASYNC_MODEL}, diarization on)…",
               flush=True)
-        tid = _create(file_id, api_key, lang=lang, use_context=use_context)
+        tid = _create(file_id, api_key, lang=lang, context=context)
         print(f"transcription id={tid}; polling…", flush=True)
 
         status: dict[str, Any] = {}
@@ -202,30 +175,10 @@ def main() -> int:
             except Exception:
                 pass
 
-        segs = _tokens_to_speaker_segments(tokens)
-        speakers = sorted({s["speaker"] for s in segs})
-        dur = max((s["end_s"] for s in segs), default=0.0)
-
-        (out / "transcript.txt").write_text(
-            "\n".join(f"[{_mmss(s['start_s'])}] Speaker {s['speaker']}: {s['text']}"
-                      for s in segs),
-            encoding="utf-8")
-        (out / "transcript.json").write_text(
-            json.dumps({"model": ASYNC_MODEL, "language": lang,
-                        "tokens": tokens, "segments": segs}, ensure_ascii=False, indent=1),
-            encoding="utf-8")
-        (out / "speaker_turns.json").write_text(
-            json.dumps(segs, ensure_ascii=False, indent=1), encoding="utf-8")
-        summary = {"duration_s": round(dur, 1), "n_tokens": len(tokens),
-                   "n_segments": len(segs), "speakers": speakers, "model": ASYNC_MODEL}
-        (out / "summary.json").write_text(json.dumps(summary, ensure_ascii=False), encoding="utf-8")
-        (out / "done").write_text("ok")
-        print("DONE:", json.dumps(summary, ensure_ascii=False), flush=True)
+        write_contract(out, model=ASYNC_MODEL, language=lang, tokens=tokens)
         return 0
     except Exception as e:                                   # noqa: BLE001 — mark + surface, never hang
-        (out / "error").write_text(repr(e))
-        print(f"ERROR: {e!r}", flush=True)
-        return 1
+        return fail(out, describe_error(e))
 
 
 if __name__ == "__main__":

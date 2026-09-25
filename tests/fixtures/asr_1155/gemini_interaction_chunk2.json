@@ -1,0 +1,50 @@
+{
+ "id": "interactions/c2",
+ "status": "completed",
+ "output_text": "Áno, zálohová faktúra Dobre.",
+ "steps": [
+  {
+   "id": "step_001",
+   "type": "model_output",
+   "content": [
+    {
+     "type": "text",
+     "text": "Áno, zálohová faktúra Dobre.",
+     "annotations": [
+      {
+       "type": "word_info",
+       "text": "Áno,",
+       "speaker": "spk_1",
+       "start_offset": "0.100s",
+       "end_offset": "0.250s"
+      },
+      {
+       "type": "word_info",
+       "text": "zálohová",
+       "speaker": "spk_1",
+       "start_offset": "0.280s",
+       "end_offset": "0.480s"
+      },
+      {
+       "type": "word_info",
+       "text": "faktúra",
+       "speaker": "spk_1",
+       "start_offset": "0.500s",
+       "end_offset": "0.900s"
+      },
+      {
+       "type": "word_info",
+       "text": "Dobre.",
+       "speaker": "spk_2",
+       "start_offset": "1.200s",
+       "end_offset": "1.600s"
+      }
+     ]
+    }
+   ]
+  }
+ ],
+ "usage": {
+  "total_input_tokens": 100
+ }
+}
