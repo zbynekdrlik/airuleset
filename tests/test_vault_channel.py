@@ -673,9 +673,8 @@ class TestCliSurface(TestCase):
         # implies printing the value to stdout.
         for banned in ("cat", "print", "get", "read", "reveal"):
             self.assertNotIn(banned, airuleset.SECRET_ACTIONS)
-        self.assertEqual(
-            sorted(airuleset.SECRET_ACTIONS),
-            ["exec", "forget", "list", "purge", "request", "show", "status"])
+        self.assertEqual(sorted(airuleset.SECRET_ACTIONS),  # inspect: #1153, value-free
+                         ["exec", "forget", "inspect", "list", "purge", "request", "show", "status"])
         # Teeth for `show`: the CLI PARENT never CALLS a value-reader — the
         # value-returning paths (read_value / read_show_file) are called only
         # by filedrop/show_server.py on the reveal POST — so `secret show` cannot

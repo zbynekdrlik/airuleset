@@ -626,9 +626,9 @@ def read_value(name):
 # for REPEATED future use must ALSO be written to durable storage at receipt,
 # or it is lost when the vault ages out. The fleet-standard durable home is a
 # mode-600 file under `~/.secrets/<name>` (raw value + one trailing newline;
-# READ it, never `source` it) — a SEPARATE tree from the vault store
-# `~/.claude/secrets/`, so `hooks/block-vault-store-read.sh` (which guards the
-# vault store) does not touch it, and — deliberately — the vault lifecycle
+# READ it from a script, never `source` it; block-vault-store-read.sh refuses an
+# inline read since #1153, `secret inspect` checks its format) — a SEPARATE tree
+# from the vault store `~/.claude/secrets/`, and — deliberately — the vault lifecycle
 # (`forget`/`purge`) NEVER deletes it: the durable copy is the whole point, it
 # outlives the delivery buffer. Opt-in per credential (`secret request/exec
 # --persist PATH`); a one-shot secret (a rotation bootstrap used once) is never

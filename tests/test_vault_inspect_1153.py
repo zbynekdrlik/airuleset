@@ -106,10 +106,19 @@ class InspectReports(unittest.TestCase):
                 self.assertNoValue(r, val, val[:10])
 
     def test_a_store_value_file_is_accepted(self):
+        # A REAL store entry (value + metadata with an expiry): `cmd_secret`
+        # sweeps on every invocation, and a bare `.secret` with no metadata
+        # is purged as "a credential with no deletion date" before inspect
+        # ever runs.
+        from unittest import mock
+
+        from filedrop import vault
         store = Path(tempfile.mkdtemp(dir=self._td.name))
-        (store / "DB_PASS.secret").write_bytes(FAKE.encode())
-        r = inspect(self.home, str(store / "DB_PASS.secret"),
-                    extra_env={"AIRULESET_SECRETS_DIR": str(store)})
+        env = {"AIRULESET_SECRETS_DIR": str(store),
+               "AIRULESET_SECRET_LOG_DIR": str(store / "log")}
+        with mock.patch.dict(os.environ, env):
+            vault.store_value("DB_PASS", FAKE.encode())
+        r = inspect(self.home, str(store / "DB_PASS.secret"), extra_env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNoValue(r, FAKE)
         self.assertIn("bytes: %d" % len(FAKE), r.stdout)

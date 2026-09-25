@@ -22,6 +22,8 @@ import os
 import sys
 from pathlib import Path
 
+from cli_vault_inspect import cmd_inspect as _secret_inspect
+
 REPO_DIR = Path(__file__).resolve().parent
 
 
@@ -63,7 +65,7 @@ def _pick_free_port(ips, ports):
     return None
 
 
-SECRET_ACTIONS = ("request", "status", "list", "exec", "forget", "purge", "show")
+SECRET_ACTIONS = ("request", "status", "list", "exec", "forget", "purge", "show", "inspect")
 # Both lifetimes are CLAMPED, not merely defaulted. `int(args.ttl or DEFAULT)`
 # let a negative value through (0 is falsy and fell back; -1 is truthy), and the
 # server armed its shutdown timer only for a positive TTL — so `--ttl -1` gave a
@@ -944,8 +946,8 @@ def cmd_secret(args):
             sys.exit(2)
         return name
 
-    if action == "show":
-        return _secret_show(args)
+    if action in ("show", "inspect"):   # inspect: a key file's format, never its value (#1153)
+        return (_secret_show if action == "show" else _secret_inspect)(args)
 
     if action == "purge":
         print("purged: %s" % (", ".join(expired) if expired else "nothing"))

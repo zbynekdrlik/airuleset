@@ -102,6 +102,20 @@ class Denied(unittest.TestCase):
 
     def test_an_assignment_naming_the_root(self):
         self.assertDenied("K=%s; cat \"$K\"" % KEY)
+        self.assertDenied("export K=%s" % KEY)
+        # A variable holding an ssh call is allowed only when that call is
+        # identity-only; one that also runs a remote read is not.
+        self.assertDenied("S=\"ssh -i %s/k host cat %s/x\"; $S" % (R, R))
+        self.assertDenied("O=\"-i %s/k host cat %s/x\"" % (R, R))
+
+    def test_a_proxycommand_that_reads_is_not_an_identity(self):
+        # ssh echoes a bad banner line back in its error text.
+        self.assertDenied("ssh -o ProxyCommand='cat %s/x' host" % R)
+        self.assertDenied(
+            "ssh -o ProxyCommand='ssh -i %s/k jump cat %s/x' host" % (R, R))
+
+    def test_a_line_continuation_does_not_launder_a_reader(self):
+        self.assertDenied("cat \\\n  %s" % KEY)
 
     def test_ssh_remote_read_of_the_root(self):
         self.assertDenied("ssh host 'cat %s/x'" % R)
@@ -197,6 +211,26 @@ class Allowed(unittest.TestCase):
             with self.subTest(cmd=cmd):
                 self.assertAllowed(cmd)
 
+    def test_measured_fleet_shapes_beyond_the_plain_call(self):
+        # From the controller corpus replay: a line-continued ssh call, a
+        # ProxyCommand that is itself an identity-only ssh, and the option
+        # list / command kept in a variable. None of them names the root
+        # anywhere but as an identity argument.
+        for cmd in (
+            "ssh -o BatchMode=yes \\\n  -i %s/k host uptime" % RA,
+            "ssh -o ProxyCommand='ssh -i %s/k -W %%h:%%p jump' -i %s/k host true"
+            % (R, R),
+            "JUMP=\"ssh -i %s/k -o BatchMode=yes -W %%h:%%p\"" % R,
+            "O=\"-i %s/k -o ConnectTimeout=5\"; ssh $O host true" % RA,
+            "SSH=\"ssh -i %s/k -o BatchMode=yes\"; $SSH host uptime" % RH,
+            "export GK=\"ssh -i %s/k gk@100.1.2.3\"" % RH,
+            # The remote box using ITS OWN key as an identity, one hop on.
+            "ssh -i %s/k hop 'ssh -i %s/k2 -o BatchMode=yes inner uptime'" % (R, R),
+            "ssh -i %s/k hop ls -la %s/" % (R, R),
+        ):
+            with self.subTest(cmd=cmd):
+                self.assertAllowed(cmd)
+
     def test_scp_sftp_rsync_with_an_identity_argument(self):
         for cmd in (
             "scp -i %s/k ./file host:/tmp/" % R,
@@ -277,6 +311,31 @@ class FileTools(unittest.TestCase):
         r = run_payload({"tool_name": "Read",
                          "tool_input": {"file_path": "/home/newlevel/.ssh/config"}})
         self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class MatcherFile(unittest.TestCase):
+    """#1153 moved the matcher out of a heredoc into hooks/vault_read_guard.py."""
+
+    def test_a_missing_matcher_fails_closed_not_open(self):
+        # `python3 <absent file>` exits 2 — the SAME code a real hit uses — so
+        # without an explicit presence check a missing matcher would read as a
+        # hit, and the env bypass would turn "cannot check" into an ALLOW.
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            lone = Path(td) / HOOK.name
+            lone.write_text(HOOK.read_text())
+            payload = json.dumps({"tool_name": "Bash",
+                                  "tool_input": {"command": "ls -la /tmp"}})
+            bypass = {"AIRULESET_ALLOW_VAULT_READ": "1",
+                      "AIRULESET_VAULT_READ_AUDIT": str(Path(td) / "a.log")}
+            for extra in ({}, bypass):
+                with self.subTest(env=sorted(extra)):
+                    env = {"PATH": "/usr/bin:/bin", "HOME": td, **extra}
+                    r = subprocess.run(["/bin/bash", str(lone)], input=payload,
+                                       capture_output=True, text=True, env=env)
+                    self.assertEqual(r.returncode, 2, r.stderr)
+                    self.assertIn("fail-closed", r.stderr)
+                    self.assertIn("vault_read_guard.py", r.stderr)
 
 
 class StoreRootUnchanged(unittest.TestCase):

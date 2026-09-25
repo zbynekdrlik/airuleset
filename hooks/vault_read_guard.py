@@ -431,6 +431,13 @@ def split_segments(text):
             buf.append(c)
             i += 1
             continue
+        if two == "\\\n":
+            # A line continuation is whitespace to the shell, never a command
+            # separator (#1153: a wrapped `ssh … \<nl> -i <key> host` was
+            # split into a second segment headed by `-i`).
+            buf.append(" ")
+            i += 2
+            continue
         if two in ("&&", "||"):
             segs.append(("".join(buf), two))
             buf = []
@@ -565,6 +572,317 @@ def audit(tool_name, refs, subject):
           % (tool_name or "Bash", safe, digest))
 
 
+# --- E. the plain key-file root, `~/.secrets/` (#1153) ----------------------
+# Legacy/durable credentials live as PLAIN files there (a bare value, or
+# `NAME=value` lines; the #529 `--persist` copies of vault values too), and
+# the odoo-erp 8236 lane printed one twice in an hour with an inline
+# `cat`/`python3 -c 'print(open(...))'` "format check". Same engine, same
+# deny-by-default stance, ONE difference in what counts as safe: this root
+# also holds the fleet's SSH keys, so a head that takes the path as a KEY
+# ARGUMENT and never prints it (`ssh -i`, `rsync -e 'ssh -i …'`, the secret
+# CLI) is allowed alongside the metadata heads.
+#
+# THE ACCOUNTING RULE. The store's check is per SEGMENT (an allowlisted head
+# exempts the whole segment). That is too coarse here: `ssh -i <root>/k host
+# 'cat <root>/x'` has an allowed head and a read in the SAME segment. So each
+# segment is tokenized (shlex, quotes removed — which also defeats a spliced
+# `.secret"s"`) and EVERY token naming the root must be accounted for: an
+# identity-file argument of a key consumer, an operand of an unpiped metadata
+# head, or a pre-child argument of the secret CLI. One unaccounted reference
+# denies the segment. A parse that goes wrong can therefore only fail to
+# account for something — i.e. deny — never allow a stray reader.
+KEY_DIR = ".secrets"
+KEY_DIR_RE = re.compile(r"(?<![A-Za-z0-9_.-])\.secrets(?![A-Za-z0-9_-])")
+# Unpiped metadata heads. The per-head option checks exist because `wc
+# --files0-from=F` and `sha256sum -c F` ingest F as a LIST and echo its lines
+# back in their own error text — the #153 `file -f` lesson again.
+KEY_META_HEADS = {"ls", "stat", "test", "[", "wc", "sha256sum"}
+KEY_CONSUMERS = {  # head -> its getopt short options that take an argument
+    "ssh": "BbcDEeFIiJLlmOoPpQRSWw",
+    "scp": "cDFiJlMoPSX",
+    "sftp": "BbcDFiJlmoPRSsX",
+}
+RSYNC_ARGOPTS = "eBfMT@"
+IDENTITY_OPT_RE = re.compile(r"(?i)^\s*identityfile\s*[=\s]")
+PROXY_OPT_RE = re.compile(r"(?i)^\s*proxycommand\s*[=\s]\s*(.+)$", re.S)
+DECLARE_HEADS = {"export", "local", "declare", "readonly", "typeset"}
+SHELL_WORDS = {"do", "then", "else", "elif", "if", "while", "until", "!", "{",
+               "time"}
+SECRET_CLI_FLAGS = {"--stdin", "--replace", "--allow-plain", "--public"}
+SECRET_CLI_ARGFLAGS = {"--ttl", "--keep", "--port", "--env", "--persist",
+                       "--file", "--persist-map"}
+
+
+def _dequoted(text):
+    """`text` as the shell will see it once quoting is removed."""
+    try:
+        return " ".join(shlex.split(text))
+    except ValueError:
+        return re.sub(r"[\"'\\]", "", text)
+
+
+def key_ref(text, cwd_hint=None):
+    """The first way `text` can name the key-file root, or None.
+
+    Literal (`~/`, `$HOME/`, `/home/<u>/`, bare after a `cd ~`), quote-spliced
+    (`.secret"s"`), and every #156 expansion layer via `path_candidates`
+    (globs anchored on a 3-char literal prefix, braces, `.`/`..` noise). Any
+    `.secrets` path COMPONENT counts, not only the one under $HOME: a relative
+    read after an earlier-call `cd ~` is invisible to a stateless hook
+    otherwise, and a `.secrets` directory anywhere is a credential dir.
+    """
+    for variant in (text, _dequoted(text)):
+        if KEY_DIR_RE.search(variant):
+            toks = [t for t in TOKEN_RE.findall(variant) if KEY_DIR_RE.search(t)]
+            return toks[0] if toks else KEY_DIR
+        for t, comps in path_candidates(variant, cwd_hint):
+            if any(can_be(c, KEY_DIR) for c in comps):
+                return t
+    return None
+
+
+def _cmd_start(tk):
+    """Index of the real command word, past wrappers/keywords/assignments."""
+    i, n = 0, len(tk)
+    while i < n:
+        t = tk[i]
+        if t in SHELL_WORDS or ASSIGN_RE.match(t) or t in (
+                "env", "time", "command", "builtin", "nohup"):
+            i += 1
+        elif t == "timeout":
+            i += 1
+            while i < n and tk[i].startswith("-"):
+                i += 2 if tk[i] in ("-k", "-s", "--kill-after", "--signal") else 1
+            i += 1                                # the DURATION
+        elif t in ("sudo", "nice", "ionice", "exec"):
+            i += 1
+            while i < n and tk[i].startswith("-"):
+                i += 2 if tk[i] in ("-u", "-g", "-n", "-c", "-C", "-D", "-p",
+                                    "-r", "-t", "-U", "-h", "-a") else 1
+        else:
+            return i
+    return None
+
+
+def _getopt(tk, i, argopts):
+    """Parse the option token tk[i] -> (next index, [(opt, value, idx)]).
+
+    `idx` is the token index holding the value (the same token for an
+    inline `-ifile` / `-oX=y`, the next one otherwise), so the caller can mark
+    exactly that token as accounted for.
+    """
+    tok, found = tk[i], []
+    for j, ch in enumerate(tok[1:], start=1):
+        if ch in argopts:
+            if tok[j + 1:]:
+                return i + 1, found + [(ch, tok[j + 1:], i)]
+            if i + 1 < len(tk):
+                return i + 2, found + [(ch, tk[i + 1], i + 1)]
+            return i + 1, found
+    return i + 1, found
+
+
+def _identity_args(tk, start, head):
+    """Token indices that are identity-file arguments of an ssh/scp/sftp call.
+
+    ssh re-enters option parsing after the destination (OpenSSH `goto again`),
+    so options are read until the SECOND bare word — where the remote command
+    starts and nothing is an option any more (`ssh h cat -i <root>/x` is a
+    remote read, not an identity). scp/sftp permute (glibc getopt): every
+    option token is read, and every operand stays unaccounted.
+    """
+    argopts, ok, seen_host = KEY_CONSUMERS[head], set(), False
+    i = start + 1
+    while i < len(tk):
+        t = tk[i]
+        if t == "--":
+            break
+        if t.startswith("-") and len(t) > 1:
+            i, found = _getopt(tk, i, argopts)
+            for opt, val, idx in found:
+                if opt == "i" or (opt == "o" and IDENTITY_OPT_RE.match(val)):
+                    ok.add(idx)
+                elif opt == "o":
+                    # A ProxyCommand's stdout feeds the connection, but ssh
+                    # echoes a bad banner line back in its error — so it is
+                    # accounted only when it is itself an identity-only ssh.
+                    proxy = PROXY_OPT_RE.match(val)
+                    if proxy and _rsh_is_identity_only(proxy.group(1)):
+                        ok.add(idx)
+            continue
+        if head == "ssh":
+            if seen_host:
+                # The REMOTE command: ssh joins it with spaces and hands it to
+                # the remote shell, so it is judged as shell text with the
+                # SAME rules — `h 'cat <root>/x'` is a remote read (its output
+                # comes back here), `h 'ssh -i <root>/k h2 uptime'` is the
+                # remote box using its own key. Accounted all-or-nothing.
+                if text_is_clean(" ".join(tk[i:])):
+                    ok.update(range(i, len(tk)))
+                break
+            seen_host = True
+        i += 1
+    return ok
+
+
+def _rsync_rsh_args(tk, start):
+    """Token indices of an rsync `-e`/`--rsh` value that is an ssh identity
+    call — and nothing else: `--password-file=<root>/x` or a key-file operand
+    stays unaccounted."""
+    ok = set()
+    i = start + 1
+    while i < len(tk):
+        t, found = tk[i], []
+        if t.startswith("--rsh="):
+            found, i = [("e", t[len("--rsh="):], i)], i + 1
+        elif t == "--rsh" and i + 1 < len(tk):
+            found, i = [("e", tk[i + 1], i + 1)], i + 2
+        elif t.startswith("-") and not t.startswith("--") and len(t) > 1:
+            i, found = _getopt(tk, i, RSYNC_ARGOPTS)
+        else:
+            i += 1
+        for opt, val, idx in found:
+            if opt == "e" and _rsh_is_identity_only(val):
+                ok.add(idx)
+    return ok
+
+
+def _rsh_is_identity_only(val):
+    try:
+        sub = shlex.split(val)
+    except ValueError:
+        return False
+    s = _cmd_start(sub)
+    if s is None or sub[s].rsplit("/", 1)[-1] != "ssh":
+        return False
+    return not _unaccounted(sub, "")
+
+
+def _meta_options_safe(head, args):
+    if head == "wc":
+        return not any(a.startswith("--files0-from") for a in args)
+    if head == "sha256sum":
+        return not any(a == "--check" or (a.startswith("-") and not a.startswith("--")
+                                          and "c" in a[1:]) for a in args)
+    return True
+
+
+def _secret_cli_start(tk, start):
+    """Index just past `… airuleset.py secret`, or None if this is not it."""
+    head = tk[start].rsplit("/", 1)[-1]
+    i = start + 1
+    if re.fullmatch(r"python3?(\.\d+)?", head):
+        if i >= len(tk) or tk[i].rsplit("/", 1)[-1] != "airuleset.py":
+            return None
+        i += 1
+    elif head != "airuleset.py":
+        return None
+    return i + 1 if i < len(tk) and tk[i] == "secret" else None
+
+
+def _secret_cli_child(tk, i):
+    """For `secret exec`, where the child argv starts (mirrors
+    cli_vault._secret_apply_remainder: our flags, the NAME, our flags, an
+    optional `--`); len(tk) when there is no child."""
+    seen_name = False
+    while i < len(tk):
+        t = tk[i]
+        if t == "--":
+            return i + 1
+        key = t.partition("=")[0]
+        if t in SECRET_CLI_FLAGS or (key in SECRET_CLI_ARGFLAGS and "=" in t):
+            i += 1
+        elif key in SECRET_CLI_ARGFLAGS:
+            i += 2
+        elif not seen_name:
+            seen_name, i = True, i + 1
+        else:
+            return i
+    return len(tk)
+
+
+def _assignment_is_identity_only(tok):
+    """`SSH="ssh -i <key> …"` / `O="-i <key> -o …"` holds a CALL, not a path.
+
+    A bare `K=<root>/k` is never accounted: a later `cat "$K"` names nothing
+    this hook could see. A value that is an identity-only ssh-family call (or
+    an ssh option list, checked as `ssh <value>`) cannot be turned into a read
+    by reflex — `cat $O` is `cat -i …`, an option error.
+    """
+    value = tok.split("=", 1)[1]
+    if value.lstrip().startswith("-"):
+        value = "ssh " + value
+    return _rsh_is_identity_only(value)
+
+
+def _accounted(tk, term):
+    """Indices of tokens whose root reference is a sanctioned, non-printing use."""
+    start = _cmd_start(tk)
+    assigns = {i for i in range(len(tk) if start is None else start)
+               if ASSIGN_RE.match(tk[i]) and _assignment_is_identity_only(tk[i])}
+    if start is None:
+        return assigns
+    head = tk[start].rsplit("/", 1)[-1].lower()
+    if head in DECLARE_HEADS:
+        return assigns | {i for i in range(start + 1, len(tk))
+                          if ASSIGN_RE.match(tk[i]) and _assignment_is_identity_only(tk[i])}
+    return assigns | _accounted_command(tk, start, head, term)
+
+
+def _accounted_command(tk, start, head, term):
+    rest = range(start + 1, len(tk))
+    if head in KEY_META_HEADS:
+        # Piped, a metadata head is a NAME SOURCE for whatever consumes it
+        # (`ls <root>/* | xargs cat`) — the store's review-F5 rule.
+        if term == "|" or not _meta_options_safe(head, tk[start + 1:]):
+            return set()
+        return set(rest)
+    if head in KEY_CONSUMERS:
+        return _identity_args(tk, start, head)
+    if head == "rsync":
+        return _rsync_rsh_args(tk, start)
+    cli = _secret_cli_start(tk, start)
+    if cli is None:
+        return set()
+    if cli < len(tk) and tk[cli] == "exec":
+        child = _secret_cli_child(tk, cli + 1)
+        # The child runs with fd 1/2 filtered for the VAULT value only — a
+        # plain key file it reads would print unfiltered, so the child is
+        # accounted exactly like a command of its own.
+        sub = tk[child:]
+        return set(range(cli, child)) | {child + j for j in _accounted(sub, term)}
+    return set(range(cli, len(tk)))
+
+
+def _unaccounted(tk, term, cwd_hint=None):
+    ok = _accounted(tk, term)
+    return [t for i, t in enumerate(tk) if i not in ok and key_ref(t, cwd_hint)]
+
+
+def text_is_clean(text):
+    """No segment of shell `text` uses the key-file root unsafely."""
+    return not any(key_violation(seg, term) for seg, term in split_segments(text))
+
+
+def key_violation(segment, term, cwd_hint=None):
+    """None when `segment` is clean or only uses the root safely, else the ref."""
+    ref = key_ref(segment, cwd_hint)
+    if not ref:
+        return None
+    try:
+        tk = shlex.split(segment)
+    except ValueError:
+        return ref                # unbalanced quoting around a reference
+    stray = _unaccounted(tk, term, cwd_hint)
+    if stray:
+        return stray[0]
+    # The segment names the root but no single argument does (a reference
+    # only an expansion across tokens produces): nothing accounts for it.
+    if not any(key_ref(t, cwd_hint) for t in tk):
+        return ref
+    return None
+
+
 # --- a file-reading TOOL rather than a shell command (review F1) ------------
 # Bash was never the most reflexive route to the store: an agent asked what is
 # in it reaches for `Read` long before `cat`, and a prompt-injected one has a
@@ -584,16 +902,21 @@ if not cmd:
         if val:
             fields.append(("pattern", val))
     bad = [(k, store_refs(v), v) for k, v in fields if store_refs(v)]
-    if bad:
+    # #1153: a file TOOL reading the key-file root has no head to exempt it —
+    # every field reference is a read (or a write) of a key.
+    keyed = [(k, key_ref(v), v) for k, v in fields if key_ref(v)]
+    if bad or keyed:
         print("\n".join("  %s %s -> %s" % (tool or "tool", k, excerpt(v))
-                        for k, _refs, v in bad))
+                        for k, _refs, v in bad + keyed))
+        print("#ROOTS# %s" % ",".join(
+            r for r, hit in (("store", bad), ("keyfile", keyed)) if hit))
         # `fields` holds (key, value) PAIRS while `bad` holds triples — the
         # two are not interchangeable, and unpacking one as the other threw
         # inside this branch. It still exited 2 because fail_closed does too,
         # so the store stayed shut and every block test passed while the real
         # refusal, the audit line and the user's env bypass were all gone.
         audit(tool, [r for k, _rs, v in bad
-                     for r in audit_refs(v)],
+                     for r in audit_refs(v)] + [r for _k, r, _v in keyed],
               " ".join(v for _k, v in fields))
         sys.exit(2)
     sys.exit(0)
@@ -606,13 +929,23 @@ refs = []
 # cannot (the Bash tool's cwd persists and this hook is stateless), which is
 # why `cd` INTO the store is refused outright and stays a stated gap.
 cwd_hint = None
+roots = set()
 for seg, term in split_segments(cmd):
     head = head_of(seg)
     sweep = sweeps_the_parent(seg, head)
     if sweep:
         hits.append("%s  ->  %s (%s)" % (head or "?", excerpt(seg), sweep))
         refs.append(globbed_parent_ref(seg) or ".claude")
+        roots.add("store")
         continue
+    stray = key_violation(seg, term, cwd_hint)
+    if stray:
+        hits.append("%s  ->  %s (key file %s)" % (
+            head or "(redirection/substitution)", excerpt(seg), excerpt(stray)))
+        refs.append(stray)
+        roots.add("keyfile")
+        # A segment can name BOTH roots; the store check below still runs so
+        # its audit refs and guidance are not lost.
     seg_refs = store_refs(seg, cwd_hint)
     if not seg_refs:
         cwd_hint = cd_target(seg, head) or cwd_hint
@@ -624,9 +957,11 @@ for seg, term in split_segments(cmd):
     hits.append("%s  ->  %s" % (head or "(redirection/substitution)",
                                 excerpt(seg)))
     refs.extend(audit_refs(seg, cwd_hint))
+    roots.add("store")
 
 if hits:
     print("\n".join("  " + h for h in dict.fromkeys(hits)))
+    print("#ROOTS# %s" % ",".join(sorted(roots)))
     audit(tool, refs, cmd)
     sys.exit(2)
 sys.exit(0)

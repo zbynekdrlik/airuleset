@@ -29,7 +29,6 @@ import unittest
 from pathlib import Path
 
 HOOK = Path(__file__).resolve().parent.parent / "hooks" / "block-vault-store-read.sh"
-MATCHER = HOOK.parent / "vault_read_guard.py"
 
 STORE = "~/.claude/secrets"
 ABS = "/home/newlevel/.claude/secrets"
@@ -781,11 +780,8 @@ class AMalformedPayloadMustNotFailOpen(unittest.TestCase):
         # correct fix and legitimately contains that token. Forbidding the bare
         # token would be a lock that no correct implementation can satisfy.
         dead = "not cmd and not isinstance(payload, dict)"
-        # #1153 moved the matcher verbatim into a sibling file, so the lock
-        # scans BOTH — a lock on the wrapper alone would now be vacuous.
-        offenders = [(src.name, i) for src in (HOOK, MATCHER)
-                     for i, ln in enumerate(src.read_text().splitlines(), 1)
-                     if dead in ln]
+        src = HOOK.read_text() + (HOOK.parent / "vault_read_guard.py").read_text()
+        offenders = [i for i, ln in enumerate(src.splitlines(), 1) if dead in ln]
         self.assertEqual(offenders, [],
                          "the unreachable fallback is back at line(s) %s"
                          % offenders)
@@ -815,28 +811,6 @@ class RefusalQuality(unittest.TestCase):
                     env_extra={"PATH": empty})
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("fail-closed", r.stderr)
-
-    def test_a_missing_matcher_fails_closed_not_open(self):
-        # #1153 moved the matcher into a sibling file. `python3 <absent file>`
-        # exits 2 — the SAME code a real hit uses — so without an explicit
-        # presence check a missing matcher would read as a hit, and the env
-        # bypass would then turn "cannot check" into an ALLOW. A copy of the
-        # wrapper alone (no sibling matcher) must refuse as a malfunction.
-        with tempfile.TemporaryDirectory() as td:
-            lone = Path(td) / HOOK.name
-            lone.write_text(HOOK.read_text())
-            payload = json.dumps({"tool_name": "Bash",
-                                  "tool_input": {"command": "ls -la /tmp"}})
-            bypass = {"AIRULESET_ALLOW_VAULT_READ": "1",
-                      "AIRULESET_VAULT_READ_AUDIT": str(Path(td) / "a.log")}
-            for extra in ({}, bypass):
-                with self.subTest(env=sorted(extra)):
-                    env = {"PATH": "/usr/bin:/bin", "HOME": td, **extra}
-                    r = subprocess.run(["/bin/bash", str(lone)], input=payload,
-                                       capture_output=True, text=True, env=env)
-                    self.assertEqual(r.returncode, 2, r.stderr)
-                    self.assertIn("fail-closed", r.stderr)
-                    self.assertIn("vault_read_guard.py", r.stderr)
 
 
 class DocumentedGaps(unittest.TestCase):

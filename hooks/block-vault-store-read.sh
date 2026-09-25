@@ -82,6 +82,34 @@ set -euo pipefail
 # hosts foreign uids by design, and `secret forget` is the honest deletion
 # path). `ls -l` and `stat` answer every legitimate metadata question.
 #
+# SECOND ROOT — plain key files under `~/.secrets/` (#1153, rule E in the
+# matcher). odoo-erp 8236: a stream lane printed a PROD API key into its
+# transcript twice in one hour with an inline "format check" (`cat`, `head`,
+# `python3 -c 'print(open(...))'`) of a legacy plain key file — a root this
+# hook did not know. Same engine, same deny-by-default, same #156 resolution
+# (globs anchored on a 3-char literal prefix, braces, `.`/`..` noise, an
+# in-command `cd`), plus a quote-removed pass so `.secret"s"` is seen. Any
+# `.secrets` path COMPONENT counts, wherever it sits. The one difference: this
+# root also holds the fleet's SSH keys (2,279 of 2,532 real commands naming it
+# on the controller were `ssh -i`), so the accounting is per ARGUMENT, not per
+# segment: every token naming the root must be (a) the identity-file argument
+# of ssh/scp/sftp (`-i`, `-oIdentityFile=`), or an rsync `-e`/`--rsh` value
+# that is itself such an ssh call; (b) an operand of an UNPIPED metadata head
+# (ls, stat, test, [, wc without --files0-from, sha256sum without -c); or (c)
+# a pre-child argument of `airuleset.py secret` (inspect/exec --persist/
+# request --persist/show --file) — a `secret exec` CHILD is accounted like a
+# command of its own, since the CLI filters only the vault value it injects.
+# One unaccounted reference denies (`ssh -i <root>/k h 'cat <root>/x'`). A
+# script invoked by path is allowed because its text never names the file —
+# the sanctioned way stream code consumes a key. Measured side effects of
+# deny-by-default here, on purpose: `for f in <root>/*`, `export K=$(tr … <
+# <root>/k)`, `mkdir`/`chmod` on the root, `ssh-keygen -f`, and a `.pub` read
+# are refused like any other unlisted head. The refusal names `secret
+# inspect <path>` (format, hooks-free) and `secret exec`/a script (use).
+# Rule E's own gaps are the store's: a glob not anchored on 3 literal chars
+# (`~/.s*/k`), a computed path, a home-wide sweep (`grep -r x ~`) that never
+# names the root, and a symlink to a key under another name.
+#
 # BYPASS — env only, and always logged:
 #   AIRULESET_ALLOW_VAULT_READ=1   -> audits/vault-store-reads.log
 # There is DELIBERATELY no inline `# airuleset:*-ok <reason>` marker, unlike
@@ -382,7 +410,9 @@ fi
 # even if a future edit reopened that channel the real fingerprint still wins.
 AUDIT_FIELDS=$(printf '%s\n' "$VIOLATION" | grep '^#AUDIT# ' | tail -1 || true)
 AUDIT_FIELDS=${AUDIT_FIELDS#\#AUDIT\# }
-VIOLATION=$(printf '%s\n' "$VIOLATION" | grep -v '^#AUDIT# ' || true)
+ROOTS=$(printf '%s\n' "$VIOLATION" | grep '^#ROOTS# ' | tail -1 || true)
+ROOTS=${ROOTS#\#ROOTS\# }
+VIOLATION=$(printf '%s\n' "$VIOLATION" | grep -v '^#AUDIT# \|^#ROOTS# ' || true)
 
 if [ "${AIRULESET_ALLOW_VAULT_READ:-}" = "1" ]; then
     AUDIT_LOG="${AIRULESET_VAULT_READ_AUDIT:-$HOME/devel/airuleset/audits/vault-store-reads.log}"
@@ -399,8 +429,19 @@ if [ "${AIRULESET_ALLOW_VAULT_READ:-}" = "1" ]; then
     exit 0
 fi
 
+# Which root(s) the matcher hit decides the guidance (#1153): the store is
+# used through `secret exec <NAME>`, a plain key file through `secret inspect`
+# (format) and a key argument or a script (use). A missing #ROOTS# line reads
+# as the store, the only root a pre-#1153 matcher knew.
+case ",$ROOTS," in *,keyfile,*) KEYFILE=1 ;; *) KEYFILE=0 ;; esac
+case ",$ROOTS," in *,store,*|,,) STORE=1 ;; *) STORE=0 ;; esac
+
 echo "" >&2
-echo "🚫 BLOCKED: the credential store is not read (or written) by hand." >&2
+if [ "$KEYFILE" = 1 ] && [ "$STORE" = 0 ]; then
+    echo "🚫 BLOCKED: a plain key file under ~/.secrets/ is not read (or written) by hand." >&2
+else
+    echo "🚫 BLOCKED: the credential store is not read (or written) by hand." >&2
+fi
 echo "" >&2
 echo "$VIOLATION" >&2
 echo "" >&2
@@ -408,15 +449,28 @@ echo "  A value read this way lands in the session transcript, survives" >&2
 echo "  compaction, and cannot be revoked — the exact leak the credential" >&2
 echo "  channel exists to prevent." >&2
 echo "" >&2
-echo "  Use the value WITHOUT seeing it:" >&2
-echo "    python3 ~/devel/airuleset/airuleset.py secret exec <NAME> -- <cmd>" >&2
-echo "  It hands the value to the child through the environment (or --stdin)," >&2
-echo "  captures fd 1/2 and filters the value out of them." >&2
-echo "" >&2
-echo "  Metadata, without the value:  secret list  /  secret status <NAME>" >&2
-echo "  Remove it:                    secret forget <NAME>" >&2
-echo "  Get a NEW value from the user: secret request <NAME>  (never ask in chat)" >&2
-echo "" >&2
+if [ "$STORE" = 1 ]; then
+    echo "  Use a STORED value WITHOUT seeing it:" >&2
+    echo "    python3 ~/devel/airuleset/airuleset.py secret exec <NAME> -- <cmd>" >&2
+    echo "  It hands the value to the child through the environment (or --stdin)," >&2
+    echo "  captures fd 1/2 and filters the value out of them." >&2
+    echo "" >&2
+    echo "  Metadata, without the value:  secret list  /  secret status <NAME>" >&2
+    echo "  Remove it:                    secret forget <NAME>" >&2
+    echo "  Get a NEW value from the user: secret request <NAME>  (never ask in chat)" >&2
+    echo "" >&2
+fi
+if [ "$KEYFILE" = 1 ]; then
+    echo "  A plain key file (~/.secrets/<name>):" >&2
+    echo "    check its FORMAT (bytes, lines, trailing newline, NAME= names, hash," >&2
+    echo "    owner, mode) without the value:" >&2
+    echo "      python3 ~/devel/airuleset/airuleset.py secret inspect <path>" >&2
+    echo "    USE it without printing it: as a key argument (ssh/scp/sftp -i <path>," >&2
+    echo "    rsync -e 'ssh -i <path>'), through secret exec, or from a script" >&2
+    echo "    invoked by path — its text never names the file." >&2
+    echo "    Metadata heads, unpiped: ls / stat / test / wc -c / sha256sum." >&2
+    echo "" >&2
+fi
 echo "  HONEST LIMIT: this is a GUARDRAIL, not a security boundary. The agent's" >&2
 echo "  uid holds NOPASSWD sudo on these boxes, so no store location is beyond" >&2
 echo "  its reach; what this guarantees is that the unsafe path is refused by" >&2
