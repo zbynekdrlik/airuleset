@@ -696,19 +696,93 @@ def is_secret_inspect(segment):
     return cli is not None and tk[cli:cli + 1] == ["inspect"] and len(tk) == cli + 2
 
 
-FLOW_TERMS = {"|", ")", "`"}
+# `(` too (slice-4 review): a segment ending at the `(` of `>(…)` writes its
+# output INTO the reader inside (`stat <root>/k > >(xargs cat)`).
+FLOW_TERMS = {"|", "(", ")", "`"}
+# Slice 4 (#1153 issuecomment-5832682152, ROZHODNUTÉ): "piped" is judged per
+# PIPELINE. These terms end one; `&` ends one only as a real background
+# operator (see _ends_pipeline). Any GROUPING keeps the whole-command cut:
+# a group or compound command can carry one pipeline's output into another.
+PIPELINE_BREAKS = {";", "&&", "||", "\n", ""}
+GROUP_TERMS = {"(", ")", "$(", "`"}
+COMPOUND_WORDS = {"if", "then", "else", "elif", "fi", "for", "while", "until",
+                  "do", "done", "case", "esac", "select", "coproc", "function"}
+# A command that can change what a LATER command name means (an alias, a
+# hashed path, a disabled builtin, PATH or another variable, sourced/evaled
+# code, shell options, fd redirection for the rest of the shell). The
+# whole-command cut judged `alias gh=cat; gh … | tail -1` denied because the
+# alias was not a text filter; a per-pipeline view would lose that, so such a
+# command keeps the whole-command rule too.
+REBIND_HEADS = {"alias", "unalias", "hash", "enable", "source", ".", "eval",
+                "export", "declare", "typeset", "readonly", "local", "set",
+                "shopt", "exec", "trap"}
+_LEAD_WORDS = {"!", "time", "-p", "command", "builtin"}
 
 
-def effective_terms(segments):
-    """Each segment's terminator, promoted to `|` when its output can FLOW.
+def _whole_command_only(segments):
+    """True when the command groups/compounds anything or rebinds a name —
+    then it stays ONE unit for pipe promotion (see above)."""
+    for seg, term in segments:
+        if term in GROUP_TERMS:
+            return True
+        try:
+            tk = shlex.split(seg)
+        except ValueError:
+            return True               # unparseable: keep the conservative cut
+        if "{" in tk or "}" in tk:
+            return True
+        i = 0
+        while i < len(tk) and tk[i] in _LEAD_WORDS:
+            i += 1
+        rest = tk[i:]
+        if rest and rest[0] in COMPOUND_WORDS:
+            return True
+        words = [t for t in rest if not ASSIGN_RE.match(t)]
+        if rest and not words:
+            return True               # a bare assignment (`PATH=/x`)
+        if words and words[0].rsplit("/", 1)[-1] in REBIND_HEADS:
+            return True
+    return False
 
-    Review C finding 1: `|` alone missed `cat $(ls -d <root>/*)` (the inner
-    segment ends at `)`), a backtick, `<(…)`, and a GROUP that is piped
-    (`{ ls <root>/*; } | xargs cat`, `for …; do ls …; done | …`). A segment
-    ending in `)`/backtick is inside a substitution or subshell; and when the
-    command pipes ANYWHERE, no metadata listing in it is trusted — the
-    conservative cut, since a stateless text check cannot follow a group.
+
+def _ends_pipeline(segments, k):
+    """Does segment k's terminator end its pipeline?
+
+    Not when the segment is empty (`a |\\n b`, `a |& b` — the separator right
+    after a `|` continues the same pipeline), nor when the separator is
+    escaped (`a \\; | b` is ONE pipeline whose argument is `;`). An `&` is a
+    background operator only when it is not part of a redirection: not the
+    `&` of `2>&1`/`>&2` (the segment ends in `>`/`<`), not the `&` of
+    `&>`/`&>>` (the next segment starts with `>`).
     """
+    seg, term = segments[k]
+    if not seg.strip():
+        return False
+    trail = len(seg) - len(seg.rstrip("\\"))
+    if trail % 2:
+        return False
+    if term == "&":
+        nxt = segments[k + 1][0] if k + 1 < len(segments) else ""
+        return not (seg.rstrip().endswith((">", "<")) or nxt.startswith(">"))
+    return term in PIPELINE_BREAKS
+
+
+def _pipelines(segments):
+    """`segments` cut into pipelines, in order (see _ends_pipeline)."""
+    out, cur = [], []
+    for k, item in enumerate(segments):
+        cur.append(item)
+        if _ends_pipeline(segments, k):
+            out.append(cur)
+            cur = []
+    if cur:
+        out.append(cur)
+    return out
+
+
+def _pipeline_terms(segments):
+    """The pre-slice-4 promotion, applied to one unit (a pipeline, or the
+    whole command when it groups anything)."""
     piped = any(term == "|" for _seg, term in segments)
     # Slice 2/3: a one-path `secret inspect` or a prose command piped ONLY
     # into text filters is not a flow (pipeline_is_inert) — its segment keeps
@@ -717,6 +791,25 @@ def effective_terms(segments):
     return [(seg, "" if (inert and _is_inert_source(seg))
              else "|" if (piped or term in FLOW_TERMS) else term)
             for seg, term in segments]
+
+
+def effective_terms(segments):
+    """Each segment's terminator, promoted to `|` when its output can FLOW.
+
+    Review C finding 1: `|` alone missed `cat $(ls -d <root>/*)` (the inner
+    segment ends at `)`), a backtick, `<(…)`, and a GROUP that is piped
+    (`{ ls <root>/*; } | xargs cat`, `for …; do ls …; done | …`). A segment
+    ending in `)`/backtick is inside a substitution or subshell.
+
+    Slice 4: without any grouping, a pipe's data cannot leave its own
+    pipeline, so each pipeline is promoted on its own — `cd X && gh … --body
+    "<prose>" | tail -1` keeps the prose table. With grouping the whole
+    command stays one unit: when it pipes ANYWHERE, no listing in it is
+    trusted (a stateless text check cannot follow a group).
+    """
+    if _whole_command_only(segments):
+        return _pipeline_terms(segments)
+    return [item for pl in _pipelines(segments) for item in _pipeline_terms(pl)]
 
 
 def text_is_clean(text):
