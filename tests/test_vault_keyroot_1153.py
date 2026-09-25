@@ -395,6 +395,23 @@ class MatcherFile(unittest.TestCase):
                     self.assertIn("vault_read_guard.py", r.stderr)
 
 
+    def test_a_missing_sibling_module_fails_closed(self):
+        # The engine imports vault_guard_shell / vault_keyroot; a partial
+        # copy (engine without siblings) must refuse, never allow.
+        import shutil
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            for name in (HOOK.name, "vault_read_guard.py"):
+                shutil.copy(HOOK.parent / name, Path(td) / name)
+            payload = json.dumps({"tool_name": "Bash",
+                                  "tool_input": {"command": "ls -la /tmp"}})
+            r = subprocess.run(["/bin/bash", str(Path(td) / HOOK.name)], input=payload,
+                               capture_output=True, text=True,
+                               env={"PATH": "/usr/bin:/bin", "HOME": td})
+            self.assertEqual(r.returncode, 2, r.stderr)
+            self.assertIn("fail-closed", r.stderr)
+
+
 class StoreRootUnchanged(unittest.TestCase):
     """The second root must not relax the first."""
 
