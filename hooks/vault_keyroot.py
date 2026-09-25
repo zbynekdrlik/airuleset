@@ -355,6 +355,8 @@ def _keygen_args(tk, start):
         t = tk[i]
         nxt = _skip_redirect(tk, i)
         if nxt is not None:
+            if t.endswith(">") and nxt - 1 < len(tk) and is_pub_path(tk[nxt - 1]):
+                ok.add(nxt - 1)            # `-y -f k > k.pub`: public output
             i = nxt
             continue
         if not t.startswith("-") or t in ("-", "--"):
@@ -379,13 +381,20 @@ def _keygen_args(tk, start):
     return ok if modes & {"l", "y"} else set()
 
 
-# A `.pub` file is public material. Only a LITERAL path counts: no `$`/`` ` ``
-# (word splitting turns `<root>/$X.pub` into `<root>/k` + `.pub`), no braces
-# or brackets, no `..`; a `*` or `?` inside the final name still ends in
-# `.pub` after globbing. Piped, a path is a NAME SOURCE (`ls <root>/*.pub |
-# sed s/.pub// | xargs cat`), so there only `cat` — whose output is the file
-# CONTENT, never a name — keeps the allowance.
-PUB_PATH_RE = re.compile(r"^[A-Za-z0-9_.~/*?+@%,:=-]*/[A-Za-z0-9_.*?+@%,:=-]+\.pub$")
+# A `.pub` file is public material — but its NAME is one `${f%.pub}` away
+# from the private key beside it (review A: `for f in <root>/*.pub; do cat
+# "${f%.pub}"; done` read the key while the loop header was accounted). So:
+# only a LITERAL single file (no glob `*`/`?`, no `$`/`` ` `` — word
+# splitting turns `<root>/$X.pub` into `<root>/k` + `.pub` — no braces,
+# brackets or `..`), and only as an operand of a known CONTENT reader: a head
+# that uses the file's bytes, never its name (not `for`/`select`/`set`/
+# `echo`/`awk`, which can bind or rewrite the name). Piped, even a content
+# reader's name headers (`head a b`) are a name source, so only `cat` keeps
+# it; a `< <path>` redirect feeds content, never a name, to any head.
+PUB_PATH_RE = re.compile(r"^[A-Za-z0-9_.~/+@%,:=-]*/[A-Za-z0-9_.+@%,:=-]+\.pub$")
+PUB_HEADS = {"cat", "head", "tail", "cut", "grep", "wc", "diff", "cmp", "cp",
+             "sha256sum", "md5sum", "ssh-copy-id", "nl", "tac", "fold", "sort",
+             "uniq", "base64", "xxd", "od"}
 PUB_FLOW_HEADS = {"cat"}
 
 
@@ -397,9 +406,11 @@ def is_pub_path(tok):
 
 
 def _pub_args(tk, start, head, term):
-    if term == "|" and head not in PUB_FLOW_HEADS:
-        return set()
-    return {i for i in range(start + 1, len(tk)) if is_pub_path(tk[i])}
+    ok = {i for i in range(start + 1, len(tk))
+          if tk[i - 1] in ("<", "0<") and is_pub_path(tk[i])}
+    if head in (PUB_FLOW_HEADS if term == "|" else PUB_HEADS):
+        ok |= {i for i in range(start + 1, len(tk)) if is_pub_path(tk[i])}
+    return ok
 
 
 # Piped `secret inspect` (design change 1). Inspect never prints a value, but

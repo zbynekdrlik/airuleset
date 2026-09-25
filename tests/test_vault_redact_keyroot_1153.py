@@ -144,6 +144,40 @@ class PlainRoot(unittest.TestCase):
         self.root.rmdir()
         self._untouched(self.run_hook(bash_resp("anything %s" % FAKE)))
 
+    def test_a_root_holding_only_dotfiles_is_still_loaded(self):
+        # Review B finding 3: the wrapper's cheap precheck skipped dotfiles
+        # while the loader reads them, so the hook exited before python.
+        self._key(".tok", FAKE.encode())
+        r = self.run_hook(bash_resp("curl says %s" % FAKE))
+        self.assertEqual(self._updated(r)["stdout"], "curl says %s" % MARK)
+
+    def test_a_single_line_env_file_value_is_a_needle(self):
+        # Review B finding 4: line needles (and the NAME= split) were built
+        # only for a MULTI-line value.
+        self._key("svc.env", b'export SVC_ENDPOINT_ID="fake1153-one-line-env-token"\n')
+        r = self.run_hook(bash_resp("Authorization: Bearer fake1153-one-line-env-token\n"))
+        self.assertEqual(self._updated(r)["stdout"], "Authorization: Bearer %s\n" % MARK)
+
+    def test_skipped_entries_do_not_use_up_the_file_cap(self):
+        # Review B finding 6: the cap was taken BEFORE .pub/dir filtering.
+        for i in range(140):
+            self._key("a%03d.pub" % i, b"ssh-ed25519 fake1153pub%03d x\n" % i)
+        self._key("zz_token", FAKE.encode())
+        r = self.run_hook(bash_resp(FAKE))
+        self.assertEqual(self._updated(r)["stdout"], MARK)
+
+    def test_a_crafted_banner_file_stays_fast(self):
+        # Review B finding 5: a lazy-dot PEM regex from every BEGIN banner took
+        # 29.5 s on this file — past the hook timeout, i.e. fail open.
+        from filedrop import vault
+        banner = b"-----BEGIN A-----\n"
+        self._key("crafted", banner * (vault.MAX_SECRET_BYTES // len(banner)))
+        self._key("tok", FAKE.encode())
+        t0 = time.monotonic()
+        r = self.run_hook(bash_resp(FAKE))
+        self.assertLess(time.monotonic() - t0, 5.0)
+        self.assertEqual(self._updated(r)["stdout"], MARK)
+
     def test_store_values_are_still_redacted_alongside(self):
         (self.store / "DB.secret").write_bytes(b"fake1153-store-value-alongside")
         self._key("tok", FAKE.encode())

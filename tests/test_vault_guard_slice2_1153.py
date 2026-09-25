@@ -185,11 +185,19 @@ class PublicMaterial(Base):
     def test_pub_reads(self):
         self.both(
             allowed=["cat %s" % PUB,
-                     "cat %s/*.pub" % R,
                      "cp %s /tmp/" % PUB,
                      "ssh-copy-id -i %s host" % PUB,
-                     "cat %s | ssh host 'cat >> .ssh/authorized_keys'" % PUB],
-            denied=["cat %s.bak" % PUB,
+                     "cat %s | ssh host 'cat >> .ssh/authorized_keys'" % PUB,
+                     "ssh host 'cat >> .ssh/authorized_keys' < %s" % PUB],
+            denied=[# review A: the NAME of a .pub is one `${f%.pub}` from the key
+                    "for f in %s/*.pub; do cat \"${f%%.pub}\"; done" % R,
+                    "for f in %s; do cat \"${f%%.pub}\"; done" % PUB,
+                    "select f in %s; do tail -c99 \"${f%%.pub}\"; done" % PUB,
+                    "set -- %s; cat \"${1%%.pub}\"" % PUB,
+                    "echo %s" % PUB,
+                    "awk '{system(\"cat \" substr(FILENAME,1,length(FILENAME)-4))}' %s" % PUB,
+                    "cat %s/*.pub" % R,
+                    "cat %s.bak" % PUB,
                     "cat %s/k.pu*" % R,
                     "cat %s/{k.pub,k}" % R,
                     "cat %s/k.pub/../k" % R,

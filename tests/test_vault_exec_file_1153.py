@@ -84,17 +84,50 @@ class ExecFile(unittest.TestCase):
                    "sh", "-c", "grep PASS | cut -d= -f2")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.strip(), MARK)
+        # A non-private PEM bundle (a private key is refused, see below).
         body = ["fakepem1153AAAAbbbbCCCCddddEEEE", "fakepem1153ffffGGGGhhhhIIIIjjjj"]
-        pem = "-----BEGIN %s-----\n%s\n%s\n-----END %s-----\n" % (KIND, body[0], body[1], KIND)
-        k = self._key("id_fake", ("# comment\n" + pem).encode())
+        kind = "FAKE TOKEN BUNDLE"
+        pem = "-----BEGIN %s-----\n%s\n%s\n-----END %s-----\n" % (kind, body[0], body[1], kind)
+        k = self._key("bundle", ("# comment\n" + pem).encode())
         r = secret(self.home, "exec", "--file", str(k), "--stdin", "--",
                    "sh", "-c", "sed -n '2,5p'; echo; cat -n %s >&2" % k)
         self.assertEqual(r.returncode, 0, r.stderr)
-        for ln in body + ["BEGIN " + KIND]:
+        for ln in body + ["BEGIN " + kind]:
             self.assertNotIn(ln, r.stdout)
         for ln in body:
             self.assertNotIn(ln, r.stderr)
         self.assertIn(MARK, r.stdout)
+
+    def test_a_private_key_is_refused(self):
+        # Review B finding 1: a private key's uses are `ssh -i` and
+        # `ssh-keygen -y`; handing its text to an arbitrary child was a read
+        # path slice 1 had closed.
+        line = "fakepem1153" + "AAAAbbbb" + "CCCCddddEEEE"
+        pem = "-----BEGIN %s-----\n%s\n-----END %s-----\n" % (KIND, line, KIND)
+        k = self._key("id_fake", pem.encode())
+        r = self._refused("--file", str(k), "--stdin")
+        self.assertIn("ssh", r.stderr)
+        self.assertNotIn("fakepem1153", r.stdout + r.stderr)
+
+    def test_a_printed_slice_of_the_value_is_filtered(self):
+        # Review B finding 1: `cut -c`, `head -c`, `fold` print a PART of a
+        # line, which neither a whole-value nor a whole-line needle matches.
+        p = self._key("tok", (FAKE + "\n").encode())
+        for child in ("cut -c1-15", "cut -c9-", "head -c 20", "fold -w 13"):
+            with self.subTest(child=child):
+                r = secret(self.home, "exec", "--file", str(p), "--stdin", "--",
+                           "sh", "-c", child)
+                self.assertEqual(r.returncode, 0, r.stderr)
+                self.assertIn(MARK, r.stdout)
+                for i in range(len(FAKE) - 11):
+                    self.assertNotIn(FAKE[i:i + 12], r.stdout)
+
+    def test_a_single_line_env_file_value_is_filtered(self):
+        p = self._key("svc.env", b"export SVC_ENDPOINT_ID=\"fake-1153-single-line-value\"\n")
+        r = secret(self.home, "exec", "--file", str(p), "--stdin", "--",
+                   "sh", "-c", "sed 's/.*=//; s/\"//g; s/^/Bearer /'")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "Bearer %s" % MARK)
 
     def test_the_child_exit_code_is_returned(self):
         p = self._key("tok", FAKE.encode())
@@ -152,6 +185,8 @@ class ExecFile(unittest.TestCase):
 
     def test_usage_errors(self):
         p = self._key("tok", FAKE.encode())
+        # --persist is for a vault NAME; the file already IS the durable copy
+        self._refused("--file", str(p), "--env", "T", "--persist", str(p))
         # a NAME and --file together is ambiguous
         self._refused("N", "--file", str(p), "--env", "T")
         # no NAME to default the env key to: --env or --stdin is required

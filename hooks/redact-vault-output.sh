@@ -42,7 +42,8 @@ has_values() {
 has_plain_keys() {
     local root="${HOME:-}/.secrets" f
     { [ -n "${HOME:-}" ] && [ -d "$root" ] && [ ! -L "$root" ]; } || return 1
-    for f in "$root"/*; do
+    # Dotfiles too: the loader reads them (review B finding 3).
+    for f in "$root"/* "$root"/.[!.]* "$root"/..?*; do
         if [ -f "$f" ] && [ ! -L "$f" ] && [ "${f%.pub}" = "$f" ]; then
             return 0
         fi

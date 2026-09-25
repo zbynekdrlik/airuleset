@@ -947,8 +947,8 @@ def cmd_secret(args):
             sys.exit(2)
         return name
 
-    if action in ("show", "inspect") or (action == "exec" and getattr(args, "file", None)):
-        return {"show": _secret_show, "inspect": _secret_inspect}.get(action, _secret_exec_file)(args)  # #1153: inspect = a key file's format; exec --file = inline use
+    if action in ("show", "inspect") or (action == "exec" and getattr(args, "file", None)):  # #1153
+        return {"show": _secret_show, "inspect": _secret_inspect, "exec": _secret_exec_file}[action](args)
 
     if action == "purge":
         print("purged: %s" % (", ".join(expired) if expired else "nothing"))
