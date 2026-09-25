@@ -9,12 +9,13 @@ The design (issue 1067, Approach 1) pinned here:
 
 * a per-account verdict cache keyed by the worktree path, reused while a cheap
   fingerprint (HEAD sha with ref resolution, the gitdir ``index`` mtime, the
-  main repo's ``packed-refs`` and ``refs/remotes/origin`` mtimes) is
-  unchanged — a second pass over an unchanged worktree makes ZERO git calls;
+  main repo's ``packed-refs`` and ``refs/remotes`` mtimes; the refs part only
+  for the not-contained verdict) is unchanged — a second pass over an
+  unchanged worktree makes ZERO git calls;
 * the lock check (a) and the live-use check (d) always run fresh;
-* a cached reclaimable (``worktree-remove``) verdict is never reused — it is
-  re-validated with the full fresh checks, so the cache can only skip work,
-  never cause a removal;
+* a reclaimable (``worktree-remove``) or error verdict is never stored, so it
+  always gets the full fresh checks; the cache can only skip work, never
+  cause a removal;
 * a corrupt cache is a full recompute; vanished worktrees' entries drop;
 * a dry-run poll neither reads nor writes the cache.
 
@@ -81,8 +82,8 @@ class Box:
         """Every fingerprint mtime to a fixed past value, so a later real git
         write is always a visible change (coarse fs clocks)."""
         paths = [self.gitdir(n) / "index" for n in self.wts]
-        origin = self.repo / ".git" / "refs" / "remotes" / "origin"
-        paths += [Path(dp) for dp, _dn, _fn in os.walk(origin)]
+        remotes = self.repo / ".git" / "refs" / "remotes"
+        paths += [Path(dp) for dp, _dn, _fn in os.walk(remotes)]
         packed = self.repo / ".git" / "packed-refs"
         if packed.exists():
             paths.append(packed)
@@ -433,7 +434,7 @@ def test_dry_run_poll_never_uses_the_cache(tmp_path, monkeypatch, dry_run):
 # --------------------------------------------------------------------------- #
 # review round 1 — the cache can never turn into an action, never pin an error
 # --------------------------------------------------------------------------- #
-def _plant(box, verdict, ts=NOW, refs="same"):
+def _plant(box, verdict, ts=NOW):
     """Store a real pass's entry, then swap in ``verdict`` (and ``ts``)."""
     _pass(box, FakeGit())
     data = json.loads(box.cache.read_text())
@@ -578,3 +579,90 @@ def test_relative_gitdir_lock_is_honoured(tmp_path, monkeypatch):
         home=str(home), now=NOW, git_run_fn=git, live_check_fn=lambda p: False)
     assert _row(rows, "agent-rel")["reason"] == "locked worktree — kept"
     assert git.calls == []
+
+
+# --------------------------------------------------------------------------- #
+# review round 2 — memo order, untracked config, unknown branch, scratch rung
+# --------------------------------------------------------------------------- #
+def test_refs_read_before_the_checks_so_a_mid_check_fetch_invalidates(box):
+    """The refs part is memoized BEFORE any check of the repo: a remote ref
+    landing during ``git branch --contains`` leaves an OLDER stored refs value,
+    so the next pass recomputes (never trusts a verdict newer refs never saw)."""
+    def _fetch(cmd, _wt):
+        if cmd[0] == "branch":
+            _git(box.repo, "update-ref", "refs/remotes/origin/landed", box.c2)
+    _pass(box, FakeGit(on_call=_fetch))
+    git = FakeGit()
+    _pass(box, git)
+    assert len(git.calls) == 3
+
+
+def _real_git(monkeypatch):
+    real_run = subprocess.run
+    monkeypatch.setattr(subprocess, "run",
+                        lambda cmd, *a, **k: real_run(cmd, *a, **dict(k, env=_GIT_ENV)))
+
+
+def test_untracked_files_count_as_dirty_whatever_the_status_config(box, monkeypatch):
+    """``status.showUntrackedFiles=no`` hid an untracked file from ``git status
+    --porcelain``: the tree read clean + contained → ``worktree remove
+    --force`` would delete it. The real status call must ask for untracked."""
+    _git(box.repo, "config", "status.showUntrackedFiles", "no")
+    (box.wts["agent-one"] / "precious-untracked.txt").write_text("keep me")
+    _real_git(monkeypatch)                      # HEAD c2 is on origin/main
+    rows, _ = _pass(box, None, cache=False)
+    r = _row(rows)
+    assert (r["kind"], r["reason"]) == ("skip", "dirty worktree — kept")
+
+
+def test_an_unreadable_branch_is_an_error_skip_never_a_reclaim(box):
+    git = FakeGit(branch=None, contains="  origin/main\n")
+    rows, _ = _pass(box, git)
+    r = _row(rows)
+    assert r["kind"] == "skip" and "unreadable" in r["reason"], r
+    again = FakeGit(branch=None, contains="  origin/main\n")
+    _pass(box, again)
+    assert again.calls, "an error verdict is never cached"
+
+
+def _scratch_wt(tmp_path, box, name="wt1"):
+    """A real detached worktree under the scratchpad layout the scratch rung
+    scans (the caller ages it past the 2 h gate after its last write)."""
+    wt = tmp_path / ("claude-%d" % os.getuid()) / "key" / "sess" / "scratchpad" / name
+    wt.parent.mkdir(parents=True)
+    _git(box.repo, "worktree", "add", "-q", "--detach", str(wt), box.c2)
+    return wt
+
+
+def test_scratch_rung_unknown_ahead_count_is_not_zero(tmp_path, box, monkeypatch):
+    """A detached HEAD with a local commit has no upstream: ``rev-list
+    @{u}..HEAD`` fails. That is UNKNOWN, never "0 ahead" — the commit lives
+    only in this worktree, so it must go through the containment check."""
+    from watchdog import disk_guard_shared_stream as dgs
+    wt = _scratch_wt(tmp_path, box)
+    (wt / "c.txt").write_text("local only")
+    _git(wt, "add", "c.txt")
+    _git(wt, "commit", "-q", "-m", "local")
+    os.utime(wt, (NOW - 10**6, NOW - 10**6))
+    _real_git(monkeypatch)
+    rows = dgs.discover_scratch_worktrees(tmp_dir=str(tmp_path), now=NOW)
+    [r] = [r for r in rows if r["path"] == str(wt)]
+    assert r["kind"] == "skip" and "ahead" in r["reason"], r
+
+
+def test_scratch_rung_relative_gitdir_lock_is_honoured(tmp_path, monkeypatch):
+    from watchdog import disk_guard_shared_stream as dgs
+    wt = tmp_path / ("claude-%d" % os.getuid()) / "key" / "sess" / "scratchpad" / "wt2"
+    gd = tmp_path / "repo" / ".git" / "worktrees" / "wt2"
+    gd.mkdir(parents=True)
+    wt.mkdir(parents=True)
+    (gd / "locked").write_text("held")
+    (wt / ".git").write_text("gitdir: %s" % os.path.relpath(gd, wt))
+    os.utime(wt, (NOW - 10**6, NOW - 10**6))
+    monkeypatch.chdir(tmp_path)
+    rows = dgs.discover_scratch_worktrees(
+        tmp_dir=str(tmp_path), now=NOW, branch_fn=lambda p: "wt-branch",
+        git_run_fn=lambda cmd, timeout=30: "", ahead_fn=lambda p: 0,
+        dir_stats_fn=lambda p: (1, 0))
+    [r] = [r for r in rows if r["path"] == str(wt)]
+    assert (r["kind"], r["reason"]) == ("skip", "locked"), r
