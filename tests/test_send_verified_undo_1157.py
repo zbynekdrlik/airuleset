@@ -224,7 +224,9 @@ class LongWrappedNudgeVerifies(unittest.TestCase):
                                sleep_fn=_noop, logs=logs,
                                nudge="partition-audit")
         self.assertTrue(res, logs)
-        self.assertIn(text, fake.transcript_path.read_text())
+        turns = [json.loads(ln) for ln in
+                 fake.transcript_path.read_text().splitlines()]
+        self.assertEqual(turns[-1]["message"]["content"], text)
         self.assertEqual(fake.box, "")
 
     def test_head_swallowed_scrolled_nudge_is_still_refused(self):
