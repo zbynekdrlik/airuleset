@@ -2,7 +2,7 @@
 
 Extracted from disk_guard.py to stay under the size ratchet ceiling.
 Discovers finished ``<repo>/.claude/worktrees/agent-*`` worktrees whose
-HEAD is preserved on origin (contained in some ``refs/remotes/origin/*``
+HEAD is preserved on a remote (contained in some ``refs/remotes/*/*``
 ref) and classifies them for reclaim.  Runs on EVERY box class (the gk
 case in the ticket).
 
@@ -40,6 +40,7 @@ def _safe_dir_size(path, dir_stats_fn=None):
 
 # Protected branches — never removed by the agent-worktree rung.
 _PROTECTED_BRANCHES = frozenset({"main", "dev", "master", "develop"})
+_NOT_ON_ORIGIN = "HEAD not contained in any origin ref — kept"
 
 
 def _is_agent_worktree_dir(name: str) -> bool:
@@ -74,7 +75,8 @@ def _is_locked(wt_path: str) -> bool:
 
 
 def _is_clean(wt_path: str, git_run_fn=None) -> bool | None:
-    """True when ``git status --porcelain`` is empty. None on error."""
+    """True when ``git status --porcelain`` is empty; None on error. Untracked forced ON (#1067
+    1g): ``showUntrackedFiles=no`` would hide what ``worktree remove --force`` deletes."""
     if git_run_fn is not None:
         out = git_run_fn(["status", "--porcelain"], wt_path)
         if out is None:
@@ -82,7 +84,7 @@ def _is_clean(wt_path: str, git_run_fn=None) -> bool | None:
         return not out.strip()
     try:
         r = subprocess.run(
-            ["git", "-C", wt_path, "status", "--porcelain"],
+            ["git", "-C", wt_path, "status", "--porcelain", "--untracked-files=normal"],
             capture_output=True, text=True, timeout=30)
         if r.returncode != 0:
             return None
@@ -137,9 +139,6 @@ def _branch_name(wt_path: str, git_run_fn=None) -> str | None:
         return None
 
 
-_NOT_ON_ORIGIN = "HEAD not contained in any origin ref — kept"
-
-
 def _skip(reason, **extra):
     return dict(bytes=0, kind="skip", reason=reason, **extra)
 
@@ -150,7 +149,9 @@ def _classify(path, git_run_fn=None, dir_stats_fn=None):
     the #1067 1g verdict cache may skip; (a) and (d) are never in here. A
     git failure carries ``error=True`` (never cached)."""
     branch = _branch_name(path, git_run_fn)
-    if branch and branch in _PROTECTED_BRANCHES:        # never main/dev
+    if not branch:
+        return _skip("git rev-parse unreadable — kept", error=True)
+    if branch in _PROTECTED_BRANCHES:                   # never main/dev
         return _skip("protected branch %s — kept" % branch)
     clean = _is_clean(path, git_run_fn)
     if clean is None:
@@ -174,7 +175,7 @@ def discover_stale_agent_worktrees(home=None, now=None,
 
     (a) unlocked (no ``locked`` file in gitdir),
     (b) ``git status --porcelain`` clean,
-    (c) HEAD contained in some ``refs/remotes/origin/*`` ref
+    (c) HEAD contained in some remote-tracking ``refs/remotes/*`` ref
         (``git branch -r --contains HEAD`` non-empty),
     (d) no live process with cwd inside the worktree.
 

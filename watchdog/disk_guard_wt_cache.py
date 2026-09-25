@@ -21,8 +21,9 @@ built from cheap reads only, with NO git subprocess:
   fetch does not invalidate a dirty or protected verdict.
 
 A pass reuses the stored verdict while the fingerprint is unchanged and the
-entry is younger than :data:`VERDICT_TTL_S`. The TTL covers the one blind spot:
-removing untracked files leaves the index untouched.
+entry is younger than :data:`VERDICT_TTL_S`. The TTL bounds the blind spots of
+a keep-only verdict: removing untracked files, or reverting a working-tree
+edit without git, leaves the index untouched (a stale ``dirty`` for <= 6 h).
 
 Safety (the design's invariant — the cache can only SKIP work, never cause a
 removal):
@@ -59,7 +60,7 @@ from pathlib import Path
 
 VERDICTS_NAME = "stale-wt-verdicts.json"
 VERDICT_TTL_S = 6 * 3600
-CACHE_VERSION = 1
+CACHE_VERSION = 2               # 2: fp split into core (3) + refs (#1067 1g review)
 _SYMREF_DEPTH = 5
 
 
