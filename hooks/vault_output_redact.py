@@ -28,14 +28,16 @@ stderr carries only exception class names and counts.
 Honest limits: OpenTelemetry/analytics capture the original output before any
 hook runs (the docs' own warning); only STORE values are known here — a plain
 `~/.secrets/*` key file is guarded at READ time by block-vault-store-read.sh
-instead; a multi-line value is also matched LINE by line (lines of 16+ bytes),
-so a short line of it printed alone is not; a deliberately transformed value
+instead; a multi-line value is also matched LINE by line (16+ byte lines,
+anchored at the end or start of an output line), so a short line of it, or
+one embedded mid-line, is not; a deliberately transformed value
 (reversed, double-encoded, one character per line) is not recognised — the
 same residual `secret exec` has.
 """
 
 import json
 import os
+import re
 import stat
 import sys
 from pathlib import Path
@@ -45,11 +47,18 @@ sys.path.insert(0, str(REPO))
 
 MARKER = b"<<REDACTED>>"
 # A LINE of a multi-line value (a PEM key body) is its own needle: Grep's
-# `path:N:` prefixes, `cat -n`, or an Edit patch's `+<line>` entries print the
-# value one line at a time, and a whole-value match then finds nothing
-# (review B finding 3). 16 bytes keeps `-----END …` banners' short
-# neighbours and ordinary words out of the needle set.
+# `path:N:` prefixes, `cat -n`, a Read's `N→` gutter, or an Edit patch's
+# `+<line>` entries print the value one line at a time, and a whole-value
+# match then finds nothing (review B finding 3). Such tools put a PREFIX in
+# front of the line, so a line needle is matched at the END (or the start) of
+# an output line by a set lookup — one pass, never a replace per needle
+# (review C finding 2: a 64 KB value of 16-byte lines cost 19.7 s and would
+# time the hook out, i.e. fail open). Not needles (review C finding 3): a PEM
+# banner, and the NAME half of a `NAME=value` line — only its value counts.
 MIN_LINE_BYTES = 16
+MAX_LINE_LENGTHS = 64
+PEM_BANNER_RE = re.compile(rb"^-----(?:BEGIN|END) [A-Z0-9 ]+-----$")
+ENV_LINE_RE = re.compile(rb"^\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=(.*)$")
 
 
 def store_values():
@@ -80,23 +89,44 @@ def store_values():
             continue
         out.append(value)
         if b"\n" in value.strip():
-            lines.extend(ln.strip() for ln in value.splitlines()
-                         if len(ln.strip()) >= MIN_LINE_BYTES)
-    return (sorted(set(out), key=len, reverse=True),
-            sorted(set(lines), key=len, reverse=True))
+            lines.extend(_line_needles(value))
+    return (sorted(set(out), key=len, reverse=True), set(lines))
+
+
+def _line_needles(value):
+    for ln in value.splitlines():
+        ln = ln.strip()
+        env = ENV_LINE_RE.match(ln)
+        if env:
+            ln = env.group(1).strip().strip(b"\"'")
+        if len(ln) >= MIN_LINE_BYTES and not PEM_BANNER_RE.match(ln):
+            yield ln
 
 
 def _scrub_bytes(blob, needles, redact):
     """Whole values through the full `secret exec` filter (every rendering);
-    single lines of a multi-line value RAW only — a line is printed as-is by
-    a line-oriented tool, and ~20 renderings per line of a PEM body would cost
-    a pass over the output each."""
+    single lines of a multi-line value by an end/start-anchored set lookup per
+    output line (see MIN_LINE_BYTES)."""
     values, lines = needles
     for v in values:
         blob = redact(blob, v, MARKER)
-    for ln in lines:
-        blob = blob.replace(ln, MARKER)
-    return blob
+    if not lines:
+        return blob
+    lengths = sorted({len(n) for n in lines}, reverse=True)[:MAX_LINE_LENGTHS]
+    out = []
+    for row in blob.split(b"\n"):
+        body = row.rstrip(b"\r \t")
+        for n in lengths:
+            if len(body) < n:
+                continue
+            if body[-n:] in lines:
+                row = body[:-n] + MARKER + row[len(body):]
+                break
+            if body[:n] in lines:
+                row = MARKER + row[n:]
+                break
+        out.append(row)
+    return b"\n".join(out)
 
 
 def strings(obj):
@@ -143,8 +173,9 @@ def main():
     # common no-hit case costs one redaction pass instead of one per string.
     # NOT a json.dumps — that re-escapes the strings, and a value whose own
     # JSON rendering sits inside a string would then be escaped TWICE and
-    # missed. A match spanning the NUL joint is re-checked per string below.
-    joined = b"\0".join(s.encode("utf-8", "surrogatepass") for s in strings(response))
+    # missed. Joined by NEWLINE so the line-anchored needles see each string
+    # as its own row; a match spanning a joint is re-checked per string below.
+    joined = b"\n".join(s.encode("utf-8", "surrogatepass") for s in strings(response))
     if _scrub_bytes(joined, values, _secret_redact) == joined:
         return 0
     redacted = scrub(response, values, _secret_redact)

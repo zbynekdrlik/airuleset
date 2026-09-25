@@ -169,6 +169,30 @@ class Denied(unittest.TestCase):
         self.assertDenied("%s status %s" % (CLI, KEY))
         self.assertDenied("%s inspect %s | xargs cat" % (CLI, KEY))
 
+    def test_a_listing_that_flows_into_another_command(self):
+        # Review C finding 1: `|` was the only flow the metadata exemption
+        # checked; substitution, backticks, process substitution and a piped
+        # GROUP feed the names to a reader just the same.
+        for cmd in ("cat $(ls -d %s/*)" % R,
+                    "cat `ls -d %s/*`" % R,
+                    "xargs cat < <(ls -d %s/*)" % R,
+                    "(ls -d %s/*) | xargs cat" % R,
+                    "{ ls -d %s/*; } | xargs cat" % R,
+                    "for d in x; do ls -d %s/*; done | xargs cat" % R,
+                    "cat $(%s inspect %s)" % (CLI, KEY),
+                    "cat $(%s inspect ~/.claude/secrets/X.secret)" % CLI):
+            with self.subTest(cmd=cmd):
+                self.assertDenied(cmd)
+
+    def test_a_redirection_glued_to_an_allowed_argument(self):
+        # Review C finding 7: a write riding on an accounted token.
+        self.assertDenied("ls %s/k>%s/j" % (R, R))
+        self.assertDenied("%s inspect %s>%s/j" % (CLI, KEY, R))
+
+    def test_an_int_flag_the_cli_would_not_take(self):
+        # Review C finding 5: the CLI tests `int(value)`, not isdigit().
+        self.assertDenied("%s exec N --ttl --5 --file %s x" % (CLI, KEY))
+
     def test_the_audit_line_never_carries_a_value_glued_to_the_path(self):
         # Review B finding 2 (#157 for rule E): the stray is a whole shell
         # token, and a value can share it with the path.
@@ -179,6 +203,7 @@ class Denied(unittest.TestCase):
                    "AIRULESET_ALLOW_VAULT_READ": "1",
                    "AIRULESET_VAULT_READ_AUDIT": str(log)}
             for cmd in ("printf fakeval1153xyz>%s" % KEY,
+                        "printf fakeval1153xyz%s/k>%s" % (DOT, KEY),
                         "python3 -c 'open(\"%s/k\",\"w\").write(\"fakeval1153xyz\")'" % RA):
                 with self.subTest(cmd=cmd):
                     r = subprocess.run(["/bin/bash", str(HOOK)], env=env, text=True,

@@ -60,6 +60,15 @@ def _roots():
     return roots
 
 
+def _in_store(real):
+    from filedrop import vault
+    try:
+        store = Path(vault.secrets_dir()).resolve(strict=True)
+    except OSError:
+        return False
+    return real.is_relative_to(store)
+
+
 def resolve_target(raw):
     """The real path to inspect, or raise InspectError (rc 2 = refused)."""
     if not raw:
@@ -81,8 +90,13 @@ def resolve_target(raw):
     return real, st
 
 
-def describe(data):
-    """The format facts about `data`, as (key, value) pairs — no value slice."""
+def describe(data, hashed=True):
+    """The format facts about `data`, as (key, value) pairs — no value slice.
+
+    `hashed=False` for a credential-STORE file (review C finding 4): its
+    values can be short passwords, and an unsalted 48-bit prefix next to the
+    byte count lets anyone confirm a guess offline. A plain key file keeps the
+    prefix (the design's "do two copies match" check on long random keys)."""
     lines = data.split(b"\n")
     if lines and lines[-1] == b"":
         lines = lines[:-1]
@@ -101,7 +115,8 @@ def describe(data):
         facts.append(("names", ", ".join(dict.fromkeys(names))))
     else:
         facts.append(("name_shape", "no"))
-    facts.append(("sha256_12", hashlib.sha256(data).hexdigest()[:12]))
+    facts.append(("sha256_12", hashlib.sha256(data).hexdigest()[:12] if hashed
+                   else "omitted (credential store — use `secret status`)"))
     return facts
 
 
@@ -129,7 +144,8 @@ def cmd_inspect(args):
     except KeyError:
         owner = str(st.st_uid)
     print("path: %s" % real)
-    for key, val in describe(data):
+    in_store = _in_store(real)
+    for key, val in describe(data, hashed=not in_store):
         print("%s: %s" % (key, val))
     print("owner: %s" % owner)
     print("mode: %04o" % stat.S_IMODE(st.st_mode))

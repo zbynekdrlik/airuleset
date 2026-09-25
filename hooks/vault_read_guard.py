@@ -781,6 +781,15 @@ def _secret_cli_start(tk, start):
     return i + 1 if i < len(tk) and tk[i] == "secret" else None
 
 
+def _is_int(value):
+    """The CLI's own test (`int(value)` in _secret_apply_remainder)."""
+    try:
+        int(value)
+    except ValueError:
+        return False
+    return True
+
+
 def _secret_cli_args(tk, cli):
     """(accounted token indices, child start) for `… airuleset.py secret <action>`.
 
@@ -804,7 +813,7 @@ def _secret_cli_args(tk, cli):
             continue
         if key in SECRET_CLI_ARGFLAGS:
             idx, value = (i, inline) if eq else (i + 1, tk[i + 1] if i + 1 < len(tk) else "")
-            if key in ("--ttl", "--keep", "--port") and not value.lstrip("-").isdigit():
+            if key in ("--ttl", "--keep", "--port") and not _is_int(value):
                 return ok, i         # not a flag of ours after all
             if key in SECRET_PATH_FLAGS:
                 ok.add(idx)
@@ -876,11 +885,15 @@ def _accounted_command(tk, start, head, term):
 
 
 def _unaccounted(tk, term, cwd_hint=None):
-    ok = _accounted(tk, term)
+    # A redirection glued into one word (`ls <root>/k><root>/j`) is a WRITE
+    # riding on an allowed argument (review C finding 7): a token naming the
+    # root that also carries `<`/`>` is never accounted.
+    ok = {i for i in _accounted(tk, term) if "<" not in tk[i] and ">" not in tk[i]}
     return [t for i, t in enumerate(tk) if i not in ok and key_ref(t, cwd_hint)]
 
 
-KEY_AUDIT_RE = re.compile(r"\.secrets(?:/[A-Za-z0-9_.*?-]{1,64})?")
+KEY_AUDIT_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])\.secrets(?:/[A-Za-z0-9_.*?-]{1,64})?")
 
 
 def key_audit_ref(ref):
@@ -906,9 +919,28 @@ def is_secret_inspect(segment):
     return cli is not None and tk[cli:cli + 1] == ["inspect"] and len(tk) == cli + 2
 
 
+FLOW_TERMS = {"|", ")", "`"}
+
+
+def effective_terms(segments):
+    """Each segment's terminator, promoted to `|` when its output can FLOW.
+
+    Review C finding 1: `|` alone missed `cat $(ls -d <root>/*)` (the inner
+    segment ends at `)`), a backtick, `<(…)`, and a GROUP that is piped
+    (`{ ls <root>/*; } | xargs cat`, `for …; do ls …; done | …`). A segment
+    ending in `)`/backtick is inside a substitution or subshell; and when the
+    command pipes ANYWHERE, no metadata listing in it is trusted — the
+    conservative cut, since a stateless text check cannot follow a group.
+    """
+    piped = any(term == "|" for _seg, term in segments)
+    return [(seg, "|" if (piped or term in FLOW_TERMS) else term)
+            for seg, term in segments]
+
+
 def text_is_clean(text):
     """No segment of shell `text` uses the key-file root unsafely."""
-    return not any(key_violation(seg, term) for seg, term in split_segments(text))
+    return not any(key_violation(seg, term)
+                   for seg, term in effective_terms(split_segments(text)))
 
 
 def key_violation(segment, term, cwd_hint=None):
@@ -977,7 +1009,7 @@ refs = []
 # why `cd` INTO the store is refused outright and stays a stated gap.
 cwd_hint = None
 roots = set()
-for seg, term in split_segments(cmd):
+for seg, term in effective_terms(split_segments(cmd)):
     head = head_of(seg)
     sweep = sweeps_the_parent(seg, head)
     if sweep:

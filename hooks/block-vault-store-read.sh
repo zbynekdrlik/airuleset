@@ -117,6 +117,13 @@ set -euo pipefail
 # RecursionError, i.e. rc 1, i.e. fail_closed — a refusal, never an allow.
 # Each segment is now scanned twice (raw + quote-removed); measured worst
 # case at the ~128 KB argv ceiling ~2 s, inside the 5 s budget.
+# A metadata head's output is a NAME SOURCE whenever it can flow into
+# another command — a pipe anywhere in the command, `$(…)`, backticks,
+# `<(…)`, a subshell — so for BOTH roots the metadata exemption holds only
+# when nothing can consume its output (review C, `cat $(ls -d <root>/*)`).
+# The secret-CLI allowance trusts any file NAMED `airuleset.py`: planting a
+# lookalike is the same deliberate, pre-authored step as a reader script run
+# by path, and stays outside this hook's reflex claim.
 #
 # BYPASS — env only, and always logged:
 #   AIRULESET_ALLOW_VAULT_READ=1   -> audits/vault-store-reads.log

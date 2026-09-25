@@ -122,6 +122,10 @@ class InspectReports(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertNoValue(r, FAKE)
         self.assertIn("bytes: %d" % len(FAKE), r.stdout)
+        # Review C finding 4: no unsalted hash of a (possibly short) stored
+        # password — a store file's hash is omitted.
+        self.assertNotIn(hashlib.sha256(FAKE.encode()).hexdigest()[:12], r.stdout)
+        self.assertIn("sha256_12: omitted", r.stdout)
 
 
 class InspectRefuses(unittest.TestCase):

@@ -120,6 +120,35 @@ class Redaction(unittest.TestCase):
         self.assertEqual(self._updated(r)["structuredPatch"][0]["lines"],
                          ["+%s" % MARK, " unrelated"])
 
+    def test_line_needles_skip_banners_and_env_names(self):
+        # Review C finding 3: a PEM banner or the NAME half of `NAME=value`
+        # is ordinary text in other files and must not be redacted there.
+        kind = "OPENSSH " + "PRIV" + "ATE KEY"      # split: the staging scanner
+        begin, end = "-----BEGIN %s-----" % kind, "-----END %s-----" % kind
+        self._store("PEM", ("%s\nfakebody1153AAAAbbbbCCCC\n%s\n" % (begin, end)).encode())
+        self._store("ENV", b"DB_USER=application_user\nDB_PASS=fakepass1153-long-value\n")
+        doc = "%s\nDB_USER=application_user\npw fakepass1153-long-value\n" % begin
+        r = self.run_hook({"type": "text", "file": {"filePath": "/tmp/d", "content": doc}},
+                          tool="Read")
+        out = self._updated(r)["file"]["content"]
+        self.assertIn(begin, out)
+        # The NAME half survives; the value half of a stored env line is
+        # itself part of the stored credential, so it may be redacted.
+        self.assertIn("DB_USER=", out)
+        self.assertIn("pw %s" % MARK, out)
+
+    def test_many_short_lines_stay_fast(self):
+        # Review C finding 2: one replace per line needle cost 19.7 s here,
+        # past the hook timeout — i.e. the hook failed OPEN.
+        lines = ["fk%014d" % i for i in range(4000)]          # 16-byte lines
+        self._store("BIGPEM", ("\n".join(lines) + "\n").encode())
+        big = ("y" * 99 + "\n") * 100000 + "k.pem:7:" + lines[7] + "\n"
+        t0 = time.monotonic()
+        r = self.run_hook({"stdout": big, "stderr": "", "interrupted": False,
+                           "isImage": False})
+        self.assertLess(time.monotonic() - t0, 5.0)
+        self.assertIn("k.pem:7:%s" % MARK, self._updated(r)["stdout"])
+
     def test_a_value_up_to_the_store_cap_is_used(self):
         # Review B finding 6: the redactor's cap must be the store's own.
         from filedrop import vault
