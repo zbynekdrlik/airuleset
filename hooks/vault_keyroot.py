@@ -30,10 +30,10 @@ from vault_guard_shell import (ASSIGN_RE, TOKEN_RE, can_be, path_candidates,
 # head, or a pre-child argument of the secret CLI — and since slice 2 the
 # VALUE of a prose option (gh/git table), the `-f` of a pure `ssh-keygen
 # -l/-y`, a literal `*.pub` path, and a one-path `secret inspect` piped only
-# into text filters (since slice 3 a prose command pipes the same way). One
-# unaccounted reference denies the segment. A parse
-# that goes wrong can therefore only fail to account for something — i.e.
-# deny — never allow a stray reader.
+# into text filters (since slice 3 a prose command pipes the same way, since
+# slice 5 a bare `ls`/`stat`). One unaccounted reference denies the segment.
+# A parse that goes wrong can therefore only fail to account for something —
+# i.e. deny — never allow a stray reader.
 KEY_DIR = ".secrets"
 KEY_DIR_RE = re.compile(r"(?<![A-Za-z0-9_.-])\.secrets(?![A-Za-z0-9_-])")
 # Unpiped metadata heads. The per-head option checks exist because `wc
@@ -460,6 +460,62 @@ def _pub_args(tk, start, head, term):
 INSPECT_SINKS = {"head", "tail", "grep", "egrep", "fgrep", "wc", "sort", "uniq",
                  "cut", "tr", "column", "nl", "cat", "fold"}
 FD_REMNANT_RE = re.compile(r"^\s*\d*-?\s*$")
+# Sink options that turn the piped NAMES into a read (`--files0-from=-`
+# opens every listed file; sort prints the content) or hand the stream to a
+# program. GNU getopt takes ANY unambiguous abbreviation (`sort --fil=-`),
+# so a token is refused when it is a prefix of one of these (slice 5).
+NAME_READING_OPTS = {"wc": ("--files0-from",),
+                     "sort": ("--files0-from", "--compress-program")}
+
+
+def _reads_names(head, tok):
+    key = tok.partition("=")[0]
+    if tok.startswith("--files0-from"):
+        return True
+    return len(key) > 2 and any(opt.startswith(key)
+                                for opt in NAME_READING_OPTS.get(head, ()))
+
+
+# A recursive grep walks the working directory, whatever it was piped (slice-5
+# review: `cd ~ && ls <root> | grep -d recurse PAT` printed a private key).
+# GNU grep permutes, so an option anywhere before `--` counts; a short
+# option that takes a value ends its cluster (`-e -r` is a pattern).
+GREP_HEADS = {"grep", "egrep", "fgrep"}
+GREP_VALUE_SHORT = "efmABCdD"
+GREP_WALK_LONG = ("--recursive", "--dereference-recursive")
+
+
+def _recurse_value(value):
+    return bool(value) and "recurse".startswith(value)
+
+
+def _grep_walks(args):
+    i = 0
+    while i < len(args):
+        t = args[i]
+        nxt = args[i + 1] if i + 1 < len(args) else ""
+        if t == "--":
+            return False
+        if t.startswith("--"):
+            key, eq, val = t.partition("=")
+            if len(key) > 2 and any(o.startswith(key) for o in GREP_WALK_LONG):
+                return True
+            if (len(key) > 3 and "--directories".startswith(key)
+                    and _recurse_value(val if eq else nxt)):
+                return True
+        elif t.startswith("-") and len(t) > 1:
+            for j, ch in enumerate(t[1:], start=1):
+                if ch in "rR":
+                    return True
+                if ch in GREP_VALUE_SHORT:
+                    value = t[j + 1:] or nxt
+                    if ch == "d" and _recurse_value(value):
+                        return True
+                    if not t[j + 1:]:
+                        i += 1             # the value is the next token
+                    break
+        i += 1
+    return False
 
 
 def _is_text_sink(seg):
@@ -471,22 +527,47 @@ def _is_text_sink(seg):
         return False
     if tk[0] not in INSPECT_SINKS:
         return False
-    return not any(t.startswith("--files0-from") for t in tk[1:])
+    if tk[0] in GREP_HEADS and _grep_walks(tk[1:]):
+        return False
+    return not any(_reads_names(tk[0], t) for t in tk[1:])
+
+
+# Slice 5 (#1153 issuecomment-5836170974): a metadata head prints NAMES and
+# metadata, never a value — the same kind of source. Only `ls` and `stat`
+# (`wc -c`/`sha256sum`/`test` stay unpiped: nobody pipes them). Its output is
+# a CLEAN name list, the one thing a consumer needs to read the keys, so it
+# may feed ONLY text filters: no second source may sit in its pipeline (`ls
+# -d <root>/* | git commit --pathspec-from-file=-` would take the names).
+META_SOURCES = {"ls", "stat"}
+
+
+def is_meta_source(segment):
+    """A bare-name, assignment-free `ls`/`stat` at command position (a
+    `/tmp/x/ls` or `PATH=/x ls` could be anything, like a path-named sink)."""
+    try:
+        tk = shlex.split(segment)
+    except ValueError:
+        return False
+    return bool(tk) and _cmd_start(tk) == 0 and tk[0] in META_SOURCES
 
 
 def _is_inert_source(seg):
-    return is_secret_inspect(seg) or is_prose_command(seg)
+    return is_secret_inspect(seg) or is_prose_command(seg) or is_meta_source(seg)
 
 
 def pipeline_is_inert(segments):
-    """True when the command pipes a one-path `secret inspect` or a prose
-    command only into text filters (see INSPECT_SINKS above).
+    """True when the command pipes a one-path `secret inspect`, a prose
+    command, or a bare `ls`/`stat` only into text filters (see INSPECT_SINKS
+    and META_SOURCES above).
 
     This decides ONLY the source's term; it is not the read check. A sink
     that names the root (`… | cat <root>/k`) still passes `_is_text_sink`
     here and is denied by its own `key_violation` pass, like every segment.
     """
-    if not any(_is_inert_source(seg) for seg, _t in segments):
+    sources = [seg for seg, _t in segments if _is_inert_source(seg)]
+    if not sources:
+        return False
+    if len(sources) > 1 and any(is_meta_source(seg) for seg in sources):
         return False
     prev = None
     for seg, term in segments:
@@ -621,7 +702,8 @@ def _accounted_head(tk, start, head, term):
     rest = range(start + 1, len(tk))
     if head in KEY_META_HEADS:
         # Piped, a metadata head is a NAME SOURCE for whatever consumes it
-        # (`ls <root>/* | xargs cat`) — the store's review-F5 rule.
+        # (`ls <root>/* | xargs cat`) — the store's review-F5 rule. Piped
+        # only into text filters, `ls`/`stat` keep a plain term (slice 5).
         if term == "|" or not _meta_options_safe(head, tk[start + 1:]):
             return set()
         return set(rest)
