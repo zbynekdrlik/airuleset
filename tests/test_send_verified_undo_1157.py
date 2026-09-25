@@ -114,8 +114,18 @@ class _SpinnerAfterTypeFake(_HoldAfterTypeFake):
         base = super()._render()
         if not self._typed:
             return base
-        return base.replace("● Predošlá práca hotová.\n",
-                            "● Predošlá práca hotová.\n%s\n" % self.SPINNER, 1)
+        lines = base.split("\n")
+        at = next((i for i, ln in enumerate(lines)
+                   if ln.startswith("❯") or ln.startswith("─")), 1)
+        lines.insert(at, self.SPINNER)     # the row right above the box
+        return "\n".join(lines)
+
+
+class _StashedFake(DeliverGoalFakeTmux):
+    """The owner's own draft sits in the single stash slot (the marker shows)."""
+
+    def _render(self):
+        return super()._render() + "  › stashed\n"
 
 
 class _HumanAppendFake(_HoldAfterTypeFake):
@@ -184,7 +194,7 @@ class VerifyFailedTypeIsUndone(unittest.TestCase):
         last_type = max(i for i, a in enumerate(fake.sent) if "-l" in a)
         after = [a[-1] for a in fake.sent[last_type + 1:]]
         self.assertEqual(after, [], "no keystroke into an unreadable box: %r" % after)
-        self.assertTrue(any("undo did not converge" in ln for ln in logs), logs)
+        self.assertTrue(any("undo withheld (unreadable)" in ln for ln in logs), logs)
         self.assertEqual(state.get("janitor_watch", {}).get(PID), NOW, state)
         self.assertEqual(state["stranded_own"][PID]["typed"], text, state)
         # a bare-box leak never becomes a stash park record (#488: that record
@@ -210,6 +220,46 @@ class VerifyFailedTypeIsUndone(unittest.TestCase):
         self.assertEqual([a[-1] for a in fake.sent[last_type + 1:]], [], logs)
         self.assertTrue(any("turn running under the box" in ln for ln in logs), logs)
         self.assertEqual(state["stranded_own"][PID]["typed"], text, state)
+        # the NEXT sweep's janitor (watch armed, own `nudge:` head) must not
+        # Escape the still-running turn either
+        sent_before, box_before = len(fake.sent), fake.box
+        self.assertTrue(box_before)
+        with m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            jlogs = wd._janitor_recover(fake, {}, PID, CWD, fake._render(), "loc",
+                                        _noop, False, _noop, state=state,
+                                        now=NOW + 60, own_payload=None)
+        self.assertEqual(fake.sent[sent_before:], [], jlogs)
+        self.assertTrue(any("hold:busy" in ln for ln in jlogs), jlogs)
+        self.assertEqual(fake.box, box_before)
+
+    def test_stateless_caller_is_told_nothing_was_recorded(self):
+        fake = _HoldAfterTypeFake([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
+                                  model_type=True, holds=10_000,
+                                  transcript_path=_tpath(self))
+        logs = []
+        res = wd.send_verified(PID, partition_batch_text(), fake,
+                               fake.transcript_path, sleep_fn=_noop, logs=logs,
+                               nudge="partition-audit")
+        self.assertEqual(_kind(res), "typed-stranded", logs)
+        self.assertTrue(any("no state threaded, nothing recorded" in ln
+                            for ln in logs), logs)
+
+    def test_an_off_flip_after_the_head_chunk_is_journalled(self):
+        # #994/#1002: the rest chunk suppressed mid-delivery writes the kill
+        # switch journal line into the caller's logs (threaded per chunk).
+        flips = iter([True] + [False] * 200)
+        fake = DeliverGoalFakeTmux([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
+                                   model_type=True, transcript_path=_tpath(self))
+        logs, text = [], partition_batch_text()
+        with m.patch.object(wd, "nudges_enabled", lambda kind=None: next(flips)):
+            res = wd.send_verified(PID, text, fake, fake.transcript_path,
+                                   sleep_fn=_noop, logs=logs,
+                                   nudge="partition-audit")
+        self.assertFalse(res)
+        rest = text[120:150]           # the first suppressed chunk is the REST
+        self.assertTrue(any(ln.startswith("nudges OFF: suppressed") and rest in ln
+                            for ln in logs), logs)
+        self.assertNotIn("Enter", fake.keys())
 
     def test_a_suppressed_type_is_not_typed_and_never_undone(self):
         # Kill switch OFF: nothing typed -> `not-typed`, and no undo keystroke.
@@ -277,6 +327,31 @@ class ForeignDraftNeverCleared(unittest.TestCase):
         self.assertIn("a este toto som dopisal ja", fake.box)
 
 
+class UndoRecognition(unittest.TestCase):
+    """The busy and ownership branches of the ONE undo."""
+
+    def test_waiting_for_background_agents_is_busy(self):
+        cap = ("● Hotovo.\n✻ Waiting for 2 background agents to finish\n"
+               "❯ nudge: [x] our text\n  ctx ███░  caveman:lite\n")
+        fake = DeliverGoalFakeTmux([(PID, "claude", CWD, "111")], cap)
+        logs, out = [], {}
+        cleared = goal._janitor_undo_if_own_stranded(
+            PID, fake, "nudge: [x] our text", "loc", _noop, logs, out=out)
+        self.assertFalse(cleared)
+        self.assertEqual(out["box"], "busy", logs)
+        self.assertEqual(fake.sent, [])
+
+    def test_collapsed_placeholder_is_ours(self):
+        fake = DeliverGoalFakeTmux([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
+                                   model_type=True,
+                                   initial_box="[Pasted text #1 +3 lines]")
+        logs = []
+        cleared = goal._janitor_undo_if_own_stranded(
+            PID, fake, partition_batch_text(), "loc", _noop, logs)
+        self.assertTrue(cleared, logs)
+        self.assertEqual(fake.box, "")
+
+
 class HumanAppendIsNeverClearedLater(unittest.TestCase):
     """A human typing behind our stranded text makes the box not ours: the
     undo leaves it, arms NOTHING, and the next sweep's janitor leaves it too."""
@@ -287,6 +362,7 @@ class HumanAppendIsNeverClearedLater(unittest.TestCase):
                                 model_type=True, holds=1,
                                 transcript_path=_tpath(self))
         logs, state = [], {}
+        wd._janitor_mark_watch(state, PID, NOW)   # every production caller does
         res = wd.send_verified(PID, text, fake, fake.transcript_path,
                                sleep_fn=_noop, logs=logs, state=state,
                                nudge="partition-audit", now=NOW)
@@ -359,6 +435,44 @@ class LongWrappedNudgeVerifies(unittest.TestCase):
         self.assertEqual(turns[-1]["message"]["content"], text)
 
 
+class ScrolledProvenanceIsSendPathOnly(unittest.TestCase):
+    """The whitespace-insensitive scrolled acceptance (`provenance`) belongs to
+    the send path, whose every byte was proven per chunk. The goal arm and the
+    stash route keep the strict #737 substring proof (a dropped space inside a
+    visible row stays CORRUPT there)."""
+
+    def _grid_cap(self, text, cols=40, rows=4):
+        # a character-grid wrap (hard breaks mid-token) of the payload's tail
+        grid = [text[i:i + cols] for i in range(0, len(text), cols)][-rows:]
+        body = ["❯\xa0" + grid[0]] + ["  " + r for r in grid[1:]]
+        return "\n".join(["● Hotovo.", "─" * 60] + body
+                         + ["─" * 60, "  ctx ███░"]) + "\n"
+
+    def test_default_is_strict_and_the_send_path_accepts(self):
+        from watchdog import stash
+        text = partition_batch_text()
+        cap = self._grid_cap(text)
+        self.assertEqual(stash._type_verify_class(
+            PID, None, text, cap=cap, allow_scrolled=True), stash._TV_CORRUPT)
+        self.assertEqual(stash._type_verify_class(
+            PID, None, text, cap=cap, allow_scrolled=True, provenance=True),
+            stash._TV_LANDED)
+
+
+class NudgeAlphabetRoundTrips(unittest.TestCase):
+    """The per-chunk verify compares rows exactly, so a nudge must not carry a
+    code point a terminal cell does not round-trip (a variation selector or a
+    zero-width joiner would read as a lost byte, a systematic CORRUPT)."""
+
+    def test_partition_audit_nudge_with_every_clause(self):
+        w = [{"number": n, "labels": ["ops-wait"]} for n in range(100, 112)]
+        t = owr._nudge_text(7, w, discuss_audit=True, unpark_audit_n=3,
+                            deploy_window=[1], deploy_miss=[2],
+                            stagnation_count=9, release_landed=[5, 6, 7, 8])
+        for bad in ("\ufe0f", "\u200d", "\u200b"):
+            self.assertNotIn(bad, t)
+
+
 class JanitorReclaimsARecordedStrandedPayload(unittest.TestCase):
     """A `typed-stranded` outcome records the exact text; the next sweep's
     janitor recognises that text in ANY pane render, scrolled included."""
@@ -392,6 +506,71 @@ class JanitorReclaimsARecordedStrandedPayload(unittest.TestCase):
                             own_payload=None)
         self.assertNotIn(PID, state.get("stranded_own", {}), state)
         self.assertEqual(fake.sent, [])
+
+    def test_record_alone_clears_once_per_episode(self):
+        # the 6 h watch has expired: the record alone licenses the clear, but at
+        # most once per episode (a non-converging box is never re-Escaped).
+        text = partition_batch_text()
+        fake = self._fake(text)
+        state = {}
+        send_outcome.record_stranded(state, PID, text, NOW)
+        from watchdog import janitor as _jan
+        with m.patch.object(_jan, "_janitor_clear_box", return_value=False), \
+                m.patch.object(wd, "_draft_rescue_persist", return_value=None):
+            first = wd._janitor_recover(fake, {}, PID, CWD, fake._render(), "loc",
+                                        _noop, False, _noop, state=state,
+                                        now=NOW + 60, own_payload=None)
+            second = wd._janitor_recover(fake, {}, PID, CWD, fake._render(),
+                                         "loc", _noop, False, _noop, state=state,
+                                         now=NOW + 120, own_payload=None)
+        self.assertTrue(any("ESCALATED (janitor)" in ln for ln in first), first)
+        self.assertTrue(any("clear-locked" in ln for ln in second), second)
+
+    def test_an_occupied_stash_slot_is_never_popped_on_a_record(self):
+        text = partition_batch_text()
+        fake = _StashedFake([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
+                            model_type=True, initial_box=text,
+                            wrap_width=176, visible_rows=3)
+        state = {}
+        send_outcome.record_stranded(state, PID, text, NOW)
+        wd._janitor_recover(fake, {}, PID, CWD, fake._render(), "loc", _noop,
+                            False, _noop, state=state, now=NOW + 60,
+                            own_payload=None)
+        self.assertEqual(fake.sent, [])
+        self.assertIn(PID, state["stranded_own"], "record kept for later")
+
+    def test_record_lifecycle(self):
+        text = partition_batch_text()
+        busy = _SpinnerAfterTypeFake([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
+                                     model_type=True, initial_box=text,
+                                     wrap_width=176, visible_rows=3)
+        busy._typed = True
+        state = {}
+        send_outcome.record_stranded(state, PID, text, NOW)
+        # busy pane: cannot judge, record KEPT
+        self.assertFalse(send_outcome.stranded_reclaimable(
+            state, PID, busy._render(), NOW + 60))
+        self.assertIn(PID, state["stranded_own"])
+        # dry run never mutates, even when the text is gone
+        bare = self._fake("")
+        self.assertFalse(send_outcome.stranded_reclaimable(
+            state, PID, bare._render(), NOW + 60, dry_run=True))
+        self.assertIn(PID, state["stranded_own"])
+        # tail anchor: a box showing only a PREFIX of the record is not it
+        prefix = self._fake(text[:300])
+        self.assertFalse(send_outcome.stranded_reclaimable(
+            state, PID, prefix._render(), NOW + 60))
+        self.assertNotIn(PID, state["stranded_own"])
+        # TTL: a day-old record is dropped unread
+        send_outcome.record_stranded(state, PID, text, NOW)
+        own = self._fake(text)
+        self.assertFalse(send_outcome.stranded_reclaimable(
+            state, PID, own._render(), NOW + send_outcome.STRANDED_TTL_S + 1))
+        self.assertNotIn(PID, state["stranded_own"])
+        # dead panes are pruned with the park records
+        send_outcome.record_stranded(state, "%77", text, NOW)
+        wd._janitor_prune_parks(state, ["%9"])
+        self.assertNotIn("%77", state["stranded_own"])
 
     def test_foreign_draft_with_a_record_is_left_untouched(self):
         text = partition_batch_text()
@@ -499,6 +678,18 @@ class TruthfulCallerVerbs(unittest.TestCase):
         # a typed attempt stamps the per-kind floor (never re-typed next sweep)
         self.assertEqual(state["nudge_cadence"][self.sid]["queue-arrival"], NOW,
                          state.get("nudge_cadence"))
+
+    def test_not_typed_never_counts_toward_the_give_up_ping(self):
+        from watchdog import cross_stream
+        store, logs, pings = {}, [], []
+        for _ in range(5):
+            cross_stream._handle_unverified_nudge(
+                store, "odoo-erp", "#7887", "gkreq",
+                lambda *a, **k: pings.append(a) or "sent", lambda: None, False,
+                NOW, logs, "give up", outcome=send_outcome.OUT_NOT_TYPED)
+        self.assertEqual(store.get("vfail", {}), {}, store)
+        self.assertEqual(pings, [])
+        self.assertTrue(all("not-typed, streak unchanged" in ln for ln in logs), logs)
 
     def test_gkreq_verb_names_the_outcome(self):
         import time as _t

@@ -440,12 +440,10 @@ def _janitor_prune_parks(state, live_pids):
     occupant_gate`)."""
     if state is None or not live_pids:
         return
-    parks = state.get("stash_parks")
-    if not parks:
-        return
     live = set(live_pids)
-    for pid in [p for p in parks if p not in live]:
-        parks.pop(pid, None)
+    for recs in (state.get("stash_parks"), state.get("stranded_own")):  # + #1157
+        for pid in [p for p in (recs or {}) if p not in live]:
+            recs.pop(pid, None)
 
 
 def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
@@ -623,7 +621,7 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # sweep. A provenance-backed clear is NOT gated by this lock (it carries its
     # own bounded ping/dedup). The lock is stamped BEFORE the clear so a failed /
     # non-converging attempt still consumes the one-per-episode slot.
-    if (own_tmpl and not prov_ok) or own_rec:   # #1157: a record clear too
+    if (own_tmpl or own_rec) and not prov_ok:   # #1157: a record-only clear too
         if _template_clear_locked(state, pid, now):
             logs.append("janitor %s -> skip:template-clear-locked "
                         "(#1113 once per episode)" % loc)
@@ -643,7 +641,9 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
         action = "clear"                    # #737: scrolled own /goal counts
     else:
         return logs                         # nothing recognizable stuck
-
+    if action != "pop" and _so._pane_busy(captured):   # #1157: never Escape a turn
+        logs.append("janitor %s -> hold:busy (turn running under the box)" % loc)
+        return logs
     if dry_run:
         logs.append("READY (janitor) %s -> would attempt %s recovery"
                     % (loc, action))

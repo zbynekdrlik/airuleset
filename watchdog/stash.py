@@ -264,7 +264,8 @@ _TV_HOLD = "hold"
 _TV_CORRUPT = "corrupt"
 
 
-def _type_verify_class(pid, run, text, cap=None, allow_scrolled=False):
+def _type_verify_class(pid, run, text, cap=None, allow_scrolled=False,
+                       provenance=False):
     """#670 -- classify the box after a type into LANDED / HOLD / CORRUPT.
 
     LANDED: the HEAD row (`_input_box_head_text`) is a whitespace-normalised,
@@ -277,22 +278,17 @@ def _type_verify_class(pid, run, text, cap=None, allow_scrolled=False):
     on the head, and the mid-chunk drop vector was closed by #322's `--`.)
 
     #746 -- `allow_scrolled` (default False) is the SCROLLED-LANDED escape hatch:
-    a long own /goal WRAPS past the box's visible height and CC scrolls it, so
-    the head row is MID-payload and head-is-prefix is STRUCTURALLY unsatisfiable
-    even for a perfectly-typed box. When `allow_scrolled` AND the tail already
-    landed AND the head is not a prefix, LANDED is granted iff the WHOLE VISIBLE
-    box is a >=`GOAL_ARM_LEFTOVER_MIN_SUBSTR`-char contiguous substring of `text`
-    (the #737 own-leftover signature). This is gated -- NOT the default -- on
-    purpose: a HEAD-SWALLOWED long payload has the SAME visible tail (the dropped
-    `/` is off-screen at the head), so substring alone cannot tell scrolled-
-    landed from head-swallowed, and would submit a ~3700-char junk prompt (#720).
-    Only `_type_literal_verified`, AFTER a first-chunk head-checkpoint has proven
-    the leading char landed, passes `allow_scrolled=True`; every other caller
-    (deliver_with_stash's bare branch, the stranded path, the nudge send path)
-    keeps the default and stays byte-identical to pre-#746 -- a scrolled box is
-    CORRUPT for them, exactly as before. A short (non-scrolling) payload never
-    reaches this branch (its head stays visible -> head-is-prefix), so the flag
-    is a no-op there.
+    a payload that WRAPS past the box's visible height is scrolled by CC, so the
+    head row is MID-payload and head-is-prefix is STRUCTURALLY unsatisfiable. With
+    `allow_scrolled`, the tail landed and a non-prefix head, LANDED is granted iff
+    the WHOLE VISIBLE box is a >=`GOAL_ARM_LEFTOVER_MIN_SUBSTR`-char contiguous
+    substring of `text` (the #737 signature). Never the default: a HEAD-SWALLOWED
+    payload has the SAME visible tail, so only a caller whose head checkpoint
+    already proved the leading char (`_type_literal_verified`, `deliver_with_
+    stash` #747) passes it -- else a junk prompt is submitted (#720).
+    `provenance` (#1157, the send path only) also accepts a whitespace-insensitive
+    run + tail (`_box_is_own_leftover`): a hard-broken token longer than a row
+    inserts a spurious join space; every byte there was already proven per chunk.
 
     HOLD: the box is UNREADABLE (`_input_line_text` None -- a turn/dialog started
     mid-type) OR shows the `paste again to expand` collapse hint. NO keystrokes
@@ -322,7 +318,7 @@ def _type_verify_class(pid, run, text, cap=None, allow_scrolled=False):
     if head and " ".join(text.split()).startswith(" ".join(head.split())):
         return _TV_LANDED
     if allow_scrolled and _box_is_own_leftover(
-            cap, text, GOAL_ARM_LEFTOVER_MIN_SUBSTR, provenance=True):
+            cap, text, GOAL_ARM_LEFTOVER_MIN_SUBSTR, provenance=provenance):
         return _TV_LANDED                        # #746/#1157 scrolled own text (head off-screen)
     return _TV_CORRUPT                            # head not a prefix -> swallowed first char
 
@@ -345,7 +341,8 @@ def _type_verify_landed(pid, run, text, cap=None, allow_scrolled=False):
         pid, run, text, cap=cap, allow_scrolled=allow_scrolled) == _TV_LANDED
 
 
-def _settle_type_verify(pid, run, text, sleep_fn, allow_scrolled=False):
+def _settle_type_verify(pid, run, text, sleep_fn, allow_scrolled=False,
+                        provenance=False):
     """#670-review R1 -- `_type_verify_class` behind the bounded render-SETTLE
     poll (`TYPE_VERIFY_SETTLE_*`, the 8x1s magnitude the old `_await_typed_landed`
     carried): return the FIRST non-CORRUPT verdict, so a genuinely-landed type
@@ -354,7 +351,8 @@ def _settle_type_verify(pid, run, text, sleep_fn, allow_scrolled=False):
     unchanged (#746)."""
     cls = _TV_HOLD
     for i in range(TYPE_VERIFY_SETTLE_POLLS):
-        cls = _type_verify_class(pid, run, text, allow_scrolled=allow_scrolled)
+        cls = _type_verify_class(pid, run, text, allow_scrolled=allow_scrolled,
+                                 provenance=provenance)
         if cls != _TV_CORRUPT:                    # LANDED or a stable HOLD -> stop settling
             break
         if i < TYPE_VERIFY_SETTLE_POLLS - 1:
@@ -514,8 +512,8 @@ def _type_literal_verified(pid, run, text, sleep_fn=None, kind="type",
                 return False
             if isinstance(out, dict):
                 out["typed"] = True              # #1157: a keystroke reached the box
-        cls = _settle_type_verify(pid, run, text, sleep_fn,
-                                  allow_scrolled=two_phase)
+        cls = _settle_type_verify(pid, run, text, sleep_fn, allow_scrolled=two_phase,
+                                  provenance=verify_chunks)   # #1157: send path only
         if cls == _TV_LANDED:
             return True
         if cls == _TV_HOLD:
@@ -1646,8 +1644,8 @@ def _box_is_own_leftover(captured, payload, min_chars, provenance=False,
     where it ends, never a mid-typing fragment). A foreign draft matches NEITHER
     (its tail is not the payload's, and its body is not a contiguous run of the
     payload with the spaces removed), so provenance is REQUIRED -- shape alone
-    never clears, the fail-safe (no proof -> untouched) still holds. #1157: the
-    other provenance source is FIRST-PERSON (a box we verified bare, then typed).
+    never clears, the fail-safe (no proof -> untouched) still holds. #1157 adds a
+    FIRST-PERSON source: a box we verified bare, then typed and proved per chunk.
 
     #1113 RECURRENCE -- a THIRD, provenance-FREE proof: `match_templates=True`
     accepts the box when its whitespace-STRIPPED body is a >= `min_chars`

@@ -49,6 +49,12 @@ SUBMITTED = "submitted"                    # transcript-confirmed user turn
 TYPED_NOT_DELIVERED = frozenset({TYPED_UNDONE, TYPED_STRANDED, SWALLOWED,
                                  UNCONFIRMED})
 
+# The per-chunk verify poll: a chunk renders within milliseconds, so a short
+# bounded settle (8 x 0.25 s = 2 s per chunk at worst) keeps a 1400-char batch
+# well inside the sweep budget; a genuine loss returns at the first bad chunk.
+CHUNK_VERIFY_POLLS = 8
+CHUNK_VERIFY_S = 0.25
+
 STRANDED_KEY = "stranded_own"
 STRANDED_TTL_S = 24 * 3600      # a record older than a day is dropped unread
 
@@ -86,10 +92,31 @@ OUT_UNCONFIRMED = SendOutcome(UNCONFIRMED)
 OUT_DELIVERED_UNCONFIRMED = SendOutcome(DELIVERED_UNCONFIRMED)
 
 
+def _spinner_above_box(cap):
+    """#1104's running-turn spinner, found above a WRAPPED box too. The shared
+    `_pane_activity_spinner_above_box` walks up from the box's LAST row, which
+    for a wrapped box (our long nudge) is the box's own text, so a spinner above
+    it is missed. Walk up from the box HEAD row instead, past spacers, borders,
+    the `◎ /goal` indicator and queued `❯` rows, to the first content row."""
+    rows = watchdog._input_box_rows_raw(cap)
+    lines = [ln.strip() for ln in (cap or "").splitlines() if ln.strip()]
+    heads = [i for i, ln in enumerate(lines) if rows and ln == rows[0]]
+    if not heads:
+        return False
+    from watchdog import pane_text as _pt
+    for ln in reversed(lines[:heads[-1]]):
+        if (watchdog._is_separator_line(ln) or watchdog._is_border_rule(ln)
+                or watchdog._GOAL_HEADER_INDICATOR_RX.match(ln)
+                or ln.startswith("❯")):
+            continue
+        return bool(_pt._ACTIVITY_SPINNER_RX.search(ln))
+    return False
+
+
 def _pane_busy(cap):
     """True when a turn runs (or waits on background agents) under the box: an
     Escape there would interrupt it (#233/#1104), so no clear may start."""
-    if watchdog._classify_boundary(cap)[0] != "input":
+    if watchdog._classify_boundary(cap)[0] != "input" or _spinner_above_box(cap):
         return True
     from watchdog import ops_wait_recheck as _owr
     return _owr._pane_busy_waiting(cap)
@@ -180,7 +207,7 @@ def type_rest_verified(pid, run, text, sleep_fn, kind, user_authored, nudge,
                                  nudge=nudge):
             return _st._TV_LANDED
         sleep_fn(_st.GOAL_TYPE_CHUNK_DELAY_S)
-        for poll in range(_st.TYPE_VERIFY_SETTLE_POLLS):
+        for poll in range(CHUNK_VERIFY_POLLS):
             cap = watchdog.capture_pane(pid, run, lines=40)
             tail = watchdog._input_line_text(cap)
             if tail is None or _st._pane_shows_collapsed_paste(tail):
@@ -188,9 +215,9 @@ def type_rest_verified(pid, run, text, sleep_fn, kind, user_authored, nudge,
             if _rows_end_with(watchdog._input_box_rows_raw(cap), text[:end]) \
                     or _st._PASTED_PLACEHOLDER_RX.match(tail.strip()):
                 break
-            if poll == _st.TYPE_VERIFY_SETTLE_POLLS - 1:
+            if poll == CHUNK_VERIFY_POLLS - 1:
                 return _st._TV_CORRUPT
-            sleep_fn(_st.TYPE_VERIFY_SETTLE_S)
+            sleep_fn(CHUNK_VERIFY_S)
     return _st._TV_LANDED
 
 
@@ -235,12 +262,14 @@ def after_verify_failure(pid, run, text, sleep_fn, log_fn, logs, state, now):
     """`send_verified`'s verify-failed branch (our keystrokes DID reach the
     box). Undo our own text; a clean box is `typed-undone`. Otherwise it is
     `typed-stranded`: a box that is not provably ours (a human typed behind our
-    text) is left alone and NOTHING is armed, so no later clear can eat the
-    human's words; a busy / unreadable / non-converging box may still hold our
-    text, so the janitor watch is armed and the exact text recorded for the
-    next sweep's reclaim (`stranded_reclaimable`)."""
+    text) is left alone and the caller's pre-send janitor watch is DROPPED, so
+    no later own-prefix clear can eat the human's words; a busy / unreadable /
+    non-converging box may still hold our text, so the watch is armed and the
+    exact text recorded for the next sweep's reclaim (`stranded_reclaimable`;
+    `_janitor_recover` itself holds while the pane is busy)."""
     jlogs, box = [], {}
-    janitor_undo_if_own_stranded(pid, run, text, pid, sleep_fn, jlogs, out=box)
+    loc = watchdog._pane_location(pid, run) or pid
+    janitor_undo_if_own_stranded(pid, run, text, loc, sleep_fn, jlogs, out=box)
     if isinstance(logs, list):
         logs.extend(jlogs)
     status = box.get("box")
@@ -249,16 +278,22 @@ def after_verify_failure(pid, run, text, sleep_fn, log_fn, logs, state, now):
         log_fn("send-verified abort: typed then undone")
         return SendOutcome(TYPED_UNDONE)
     if status == "not-own":
+        # the caller's own pre-send watch mark would license the janitor's generic
+        # own-prefix clear next sweep, eating the human's words: drop it.
+        if state is not None:
+            state.get("janitor_watch", {}).pop(pid, None)
         log_fn("send-verified abort: typed, box holds more than our text -- "
-               "left untouched, nothing armed")
+               "left untouched, janitor watch dropped")
         return SendOutcome(TYPED_STRANDED)
     now = time.time() if now is None else now
+    verb = ("undo did not converge" if status == "not-converged"
+            else "undo withheld (%s)" % status)
     if state is None:
-        log_fn("send-verified abort: typed, undo did not converge (%s) -- no "
-               "state threaded, nothing recorded for the janitor" % status)
+        log_fn("send-verified abort: typed, %s -- no state threaded, nothing "
+               "recorded for the janitor" % verb)
     else:
-        log_fn("send-verified abort: typed, undo did not converge (%s) -- "
-               "janitor retries next sweep" % status)
+        log_fn("send-verified abort: typed, %s -- janitor retries next sweep"
+               % verb)
         watchdog._janitor_mark_watch(state, pid, now)
         record_stranded(state, pid, text, now)
     _log.warning("send-verified: own text left in box pane=%s status=%s typed=%s",
