@@ -143,5 +143,38 @@ class SinkOptions(Base):
                     self.INSPECT + " | cut -c7-" + nul + "sort --fil=-"])
 
 
+class GrepWalk(Base):
+    """A recursive grep is not a text filter: it walks the working directory
+    (review finding: `cd ~ && ls <root> | grep -d recurse PAT` printed a fake
+    private key in real bash). The walk does not need the piped names at all,
+    so a command that never names the root stays the hook's honest limit;
+    what closes here is the grep that sits behind an allowed source."""
+    INSPECT = "python3 ~/devel/airuleset/airuleset.py secret inspect %s" % KEY
+
+    def test_recursive_grep_is_not_a_sink(self):
+        self.both(
+            allowed=["ls %s | grep -i key" % R,
+                     "ls %s | grep -e -r" % R,
+                     "ls %s | grep -c -- -R" % R,
+                     "ls %s | grep -vn root" % R,
+                     "ls %s | grep -d skip x" % R],
+            denied=["ls %s | grep -r SUPER" % R,
+                    "ls %s | grep -R SUPER" % R,
+                    "ls %s | grep -inr SUPER" % R,
+                    "ls %s | egrep -Hr SUPER" % R,
+                    "ls %s | fgrep -r SUPER" % R,
+                    "ls %s | grep --recursive SUPER" % R,
+                    "ls %s | grep --rec SUPER" % R,
+                    "ls %s | grep --dereference-recursive SUPER" % R,
+                    "ls %s | grep -d recurse SUPER" % R,
+                    "ls %s | grep -drecurse SUPER" % R,
+                    "ls %s | grep --directories=recurse SUPER" % R,
+                    "ls %s | grep --dir rec SUPER" % R,
+                    "ls %s | grep SUPER -r" % R,
+                    "cd ~ && ls %s | grep -d recurse SUPER" % DOT,
+                    "stat %s | grep -r SUPER" % KEY,
+                    self.INSPECT + " | grep -r SUPER"])
+
+
 if __name__ == "__main__":
     unittest.main()
