@@ -373,11 +373,12 @@ def _two_weeks():
     rows = []
     for h in range(0, 168, 12):
         rows.append(_row(h, weekly_pct=10 + h // 2, resets_at=RESET_A.isoformat()))
-    rows.append(_row(168, weekly_pct=0, resets_at=RESET_B.isoformat()))
-    # stale usage cache right after the reset: ts is in week B, but the row
-    # still carries week A's reset and pct -> must not count as a B sample
-    rows.append(_row(169, weekly_pct=95, resets_at=RESET_A.isoformat()))
-    rows.append(_row(192, weekly_pct=20, resets_at=(RESET_B + datetime.timedelta(
+    # stale usage cache right after the reset: ts is the window start, but the
+    # row still carries week A's reset and pct. It is the OLDEST in-window
+    # row, so counting it would turn the pace negative (review F1).
+    rows.append(_row(168, weekly_pct=94, resets_at=RESET_A.isoformat()))
+    rows.append(_row(169, weekly_pct=0, resets_at=RESET_B.isoformat()))
+    rows.append(_row(193, weekly_pct=20, resets_at=(RESET_B + datetime.timedelta(
         seconds=0.4)).isoformat()))   # live resets_at jitters by < 1 s
     return rows
 
@@ -391,10 +392,44 @@ class WeeklyWindowPace(unittest.TestCase):
     def test_pace_is_the_in_window_rate_not_the_cross_reset_rate(self):
         rows = _two_weeks()
         cross = burn.observed_pct_per_day(rows)          # unscoped, as before
-        self.assertAlmostEqual(cross, (20 - 10) / 192 * 24)
+        self.assertAlmostEqual(cross, (20 - 10) / 193 * 24)
         s = burn.fleet_sustainability(rows, _cache(RESET_B.isoformat(), 20), now=self.NOW)
         self.assertEqual(s["observed_pct_per_day"], 20.0)
         self.assertEqual(s["verdict"], "prekracuje rozpocet")
+
+    def test_in_weekly_window(self):
+        reset = RESET_B.isoformat()
+        ws = RESET_B - datetime.timedelta(days=7)
+
+        def row(ts, own=None):
+            r = {"ts": ts.isoformat(), "weekly_pct": 1}
+            if own is not None:
+                r["resets_at"] = own
+            return r
+        self.assertTrue(burn.in_weekly_window(row(ws), reset))
+        self.assertFalse(burn.in_weekly_window(row(ws - datetime.timedelta(seconds=1)), reset))
+        self.assertTrue(burn.in_weekly_window(row(ws, (RESET_B + datetime.timedelta(
+            seconds=0.4)).isoformat()), reset))
+        self.assertFalse(burn.in_weekly_window(row(ws, RESET_A.isoformat()), reset))
+        # another account's window 50 min apart is a different series (review F5)
+        self.assertFalse(burn.in_weekly_window(row(ws, (RESET_B + datetime.timedelta(
+            minutes=50)).isoformat()), reset))
+        self.assertTrue(burn.in_weekly_window(row(ws, (RESET_B + datetime.timedelta(
+            minutes=4)).isoformat()), reset))
+        self.assertFalse(burn.in_weekly_window({"ts": "garbage"}, reset))
+        self.assertTrue(burn.in_weekly_window(row(ws - datetime.timedelta(days=30)), None))
+
+    def test_a_short_in_window_span_gives_no_pace_yet(self):
+        # review F2: the cache percent is an integer, so 0 -> 1 % within one
+        # hour would read 24 %/day; below MIN_PACE_SPAN_H there is no pace.
+        self.assertEqual(burn.MIN_PACE_SPAN_H, 12)
+        rows = [_row(169, weekly_pct=0, resets_at=RESET_B.isoformat()),
+                _row(170, weekly_pct=1, resets_at=RESET_B.isoformat())]
+        s = burn.fleet_sustainability(rows, _cache(RESET_B.isoformat(), 1), now=self.NOW)
+        self.assertIsNone(s["observed_pct_per_day"])
+        self.assertIn("vzoriek", s["verdict"])
+        rows.append(_row(181, weekly_pct=5, resets_at=RESET_B.isoformat()))
+        self.assertEqual(burn.observed_pct_per_day(rows, RESET_B.isoformat()), 10.0)
 
     def test_weekly_window_start(self):
         self.assertEqual(burn.weekly_window_start(RESET_B.isoformat()),
@@ -561,6 +596,8 @@ class CliBurnWindows(unittest.TestCase):
             self.assertEqual(burn.fleet_view_since(p, cache, 2), ws)
             self.assertIsNone(burn.fleet_view_since(p, {}, 24))
             self.assertIsNone(burn.fleet_view_since(p, cache, 500))  # fewer rows than shown
+            for hours in (0, None, -3, True, "24"):     # render_fleet shows ALL / a slice
+                self.assertIsNone(burn.fleet_view_since(p, cache, hours), hours)
 
     def test_cmd_burn_fleet_output_matches_the_full_read(self):
         with TemporaryDirectory() as d:
