@@ -226,8 +226,8 @@ def _isolate_goal_roster():
         # box happened to have the opt-in flag set); a test that needs it ON
         # overrides with its own nested patch.dict.
         with mock.patch.dict(os.environ,
-                             {"AIRULESET_GOAL_ROSTER_PATH":
-                              str(Path(d) / "goal-roster.json"),
+                             {"AIRULESET_GOAL_ROSTER_PATH": str(Path(d) / "goal-roster.json"),
+                              "AIRULESET_NUDGE_FILE_DIR": str(Path(d) / "nudges"),  # #1157 s3
                               "AIRULESET_RESURRECT_ACTION": "",
                               # #858 re-review: cadence job owns its state file;
                               # isolate it so a test never writes the developer's

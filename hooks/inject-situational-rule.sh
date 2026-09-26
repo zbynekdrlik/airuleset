@@ -89,9 +89,33 @@ def strip_carried_text(cmd):
     return "".join(out)
 
 
+def nudge_file_text(prompt):
+    """#1157 slice 3 -- a machine nudge arrives as ONE pointer row
+    (`nudge: [kind] ... — celý text: ~/.claude/nudges/<file>`), so the
+    triggers must also see the text the session will read from that file.
+    Only a regular file directly in the nudge dir, with our name shape;
+    never a link, never a foreign path. "" otherwise."""
+    m = re.match(r"^nudge: .*— celý text: (\S+)$", prompt.strip())
+    if not m:
+        return ""
+    ndir = os.path.abspath(os.environ.get("AIRULESET_NUDGE_FILE_DIR") or os.path.join(
+        os.path.expanduser("~"), ".claude", "nudges"))
+    path = os.path.abspath(os.path.expanduser(m.group(1)))
+    if (os.path.dirname(path) != ndir or os.path.islink(path)
+            or not os.path.isfile(path) or not re.fullmatch(
+                r"[a-z0-9][a-z0-9-]*-\d{12}-[0-9a-f]{4}\.md", os.path.basename(path))):
+        return ""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return "\n" + fh.read(64000)
+    except (OSError, UnicodeDecodeError):
+        return ""
+
+
 if event == "UserPromptSubmit" or (not tool and payload.get("prompt")):
     surface = "UserPromptSubmit"
     haystack = str(payload.get("prompt") or "")
+    haystack += nudge_file_text(haystack)
     raw_haystack = haystack
     out_event = "UserPromptSubmit"
 else:

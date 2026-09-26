@@ -771,7 +771,7 @@ class TestDoneParkedLoopIsNudged(unittest.TestCase):
         tmux = self._go(parked_with_input, model_stash=True)
         self.assertTrue(tmux.typed(), tmux.sent)
         self.assertEqual(len(tmux.submitted), 1, tmux.sent)
-        self.assertIn("bounce-backstop:", tmux.submitted[0])
+        self.assertIn("bounce-backstop:", wd.nudge_file.expand(tmux.submitted[0]) if wd.nudge_file.is_pointer_line(tmux.submitted[0], require_file=True) else "")  # #1157 s3: ONE pointer row, its file holds the nudge
         self.assertNotIn("chekni ci nemas nieco nove", tmux.submitted[0])
         self.assertEqual(tmux.stash, "chekni ci nemas nieco nove",
                          "the user's draft stays parked for CC to auto-restore")

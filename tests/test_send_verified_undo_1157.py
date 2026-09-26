@@ -38,6 +38,7 @@ import watchdog as wd  # noqa: E402
 from watchdog import goal  # noqa: E402
 from watchdog import nudge_gate  # noqa: E402
 from watchdog import ops_wait_recheck as owr  # noqa: E402
+from watchdog import nudge_file  # noqa: E402
 from watchdog import send_outcome  # noqa: E402
 from watchdog import session_status as ss  # noqa: E402
 
@@ -196,7 +197,8 @@ class VerifyFailedTypeIsUndone(unittest.TestCase):
         self.assertEqual(after, [], "no keystroke into an unreadable box: %r" % after)
         self.assertTrue(any("undo withheld (unreadable)" in ln for ln in logs), logs)
         self.assertEqual(state.get("janitor_watch", {}).get(PID), NOW, state)
-        self.assertEqual(state["stranded_own"][PID]["typed"], text, state)
+        self.assertEqual(nudge_file.expand(state["stranded_own"][PID]["typed"]),
+                         text, state)     # #1157 s3: the pointer is recorded
         # a bare-box leak never becomes a stash park record (#488: that record
         # would license popping a stash slot the owner may hold)
         self.assertNotIn(PID, state.get("stash_parks", {}), state)
@@ -219,7 +221,8 @@ class VerifyFailedTypeIsUndone(unittest.TestCase):
         last_type = max(i for i, a in enumerate(fake.sent) if "-l" in a)
         self.assertEqual([a[-1] for a in fake.sent[last_type + 1:]], [], logs)
         self.assertTrue(any("turn running under the box" in ln for ln in logs), logs)
-        self.assertEqual(state["stranded_own"][PID]["typed"], text, state)
+        self.assertEqual(nudge_file.expand(state["stranded_own"][PID]["typed"]),
+                         text, state)     # #1157 s3: the pointer is recorded
         # the NEXT sweep's janitor (watch armed, own `nudge:` head) must not
         # Escape the still-running turn either
         sent_before, box_before = len(fake.sent), fake.box
@@ -244,9 +247,11 @@ class VerifyFailedTypeIsUndone(unittest.TestCase):
         self.assertTrue(any("no state threaded, nothing recorded" in ln
                             for ln in logs), logs)
 
-    def test_an_off_flip_after_the_head_chunk_is_journalled(self):
-        # #994/#1002: the rest chunk suppressed mid-delivery writes the kill
-        # switch journal line into the caller's logs (threaded per chunk).
+    def test_an_off_flip_before_the_pointer_type_is_journalled(self):
+        # #994/#1002: a flip to OFF mid-delivery writes the kill switch journal
+        # line into the caller's logs. Since #1157 slice 3 a machine nudge is no
+        # longer chunk-typed: the flip lands between the pointer decision and
+        # the ONE pointer type, which is suppressed, so nothing reaches the box.
         flips = iter([True] + [False] * 200)
         fake = DeliverGoalFakeTmux([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
                                    model_type=True, transcript_path=_tpath(self))
@@ -256,6 +261,27 @@ class VerifyFailedTypeIsUndone(unittest.TestCase):
                                    sleep_fn=_noop, logs=logs,
                                    nudge="partition-audit")
         self.assertFalse(res)
+        self.assertEqual(_kind(res), "not-typed", logs)
+        self.assertTrue(any(ln.startswith("nudges OFF: suppressed partition-audit "
+                                          "nudge: ") for ln in logs), logs)
+        self.assertEqual(fake.typed_texts(), [], "no literal reached the box")
+        self.assertNotIn("Enter", fake.keys())
+
+    def test_an_off_flip_after_the_head_chunk_of_a_long_slash_text(self):
+        # #994/#1002: the partial-type path is still reachable for a long text
+        # typed in full under a machine kind (a slash text is never a pointer):
+        # the head chunk lands, the rest is suppressed and journalled per chunk,
+        # the verify fails and nothing is submitted.
+        flips = iter([True] + [False] * 200)
+        fake = DeliverGoalFakeTmux([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
+                                   model_type=True, transcript_path=_tpath(self))
+        logs = []
+        text = "/goal " + " ".join("podmienka-%d splnena" % i for i in range(40))
+        with m.patch.object(wd, "nudges_enabled", lambda kind=None: next(flips)):
+            res = wd.send_verified(PID, text, fake, fake.transcript_path,
+                                   sleep_fn=_noop, logs=logs, nudge="goal-sweep")
+        self.assertFalse(res)
+        self.assertEqual(fake.typed_texts()[0], text[:120], "the head chunk landed")
         rest = text[120:150]           # the first suppressed chunk is the REST
         self.assertTrue(any(ln.startswith("nudges OFF: suppressed") and rest in ln
                             for ln in logs), logs)
@@ -418,8 +444,12 @@ class HumanAppendIsNeverClearedLater(unittest.TestCase):
 
 
 class LongWrappedNudgeVerifies(unittest.TestCase):
-    """(c): the partition-audit batch nudge in a pane whose input box shows
-    only 3 of its wrapped rows (the scrolled render measured live)."""
+    """(c): a long payload in a pane whose input box shows only 3 of its
+    wrapped rows (the scrolled render measured live). Since #1157 slice 3 a
+    MACHINE nudge is a one-row pointer (tests/test_nudge_pointer_1157.py); the
+    per-chunk row verify still carries every long text that is typed in full,
+    i.e. the owner's own Discord reply (`user_authored`), so it is proven here
+    with the same incident-sized payload."""
 
     def test_scrolled_long_nudge_is_submitted(self):
         text = partition_batch_text()
@@ -429,7 +459,7 @@ class LongWrappedNudgeVerifies(unittest.TestCase):
         logs = []
         res = wd.send_verified(PID, text, fake, fake.transcript_path,
                                sleep_fn=_noop, logs=logs,
-                               nudge="partition-audit")
+                               user_authored=True)
         self.assertTrue(res, logs)
         turns = [json.loads(ln) for ln in
                  fake.transcript_path.read_text().splitlines()]
@@ -448,7 +478,7 @@ class LongWrappedNudgeVerifies(unittest.TestCase):
                                      wrap_width=176, visible_rows=3,
                                      swallow_budget=1)
         res = wd.send_verified(PID, text, fake, fake.transcript_path,
-                               sleep_fn=_noop, logs=[], nudge="partition-audit")
+                               sleep_fn=_noop, logs=[], user_authored=True)
         self.assertTrue(res)
         self.assertEqual(fake.swallow_budget, 0, "the swallow really happened")
         turns = [json.loads(ln) for ln in
@@ -466,7 +496,7 @@ class LongWrappedNudgeVerifies(unittest.TestCase):
                                       transcript_path=_tpath(self),
                                       wrap_width=176, visible_rows=3)
         res = wd.send_verified(PID, text, fake, fake.transcript_path,
-                               sleep_fn=_noop, logs=[], nudge="partition-audit")
+                               sleep_fn=_noop, logs=[], user_authored=True)
         self.assertTrue(res)
         self.assertEqual(fake.dropped, 1)
         turns = [json.loads(ln) for ln in

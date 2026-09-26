@@ -31,6 +31,7 @@ sys.path.insert(0, str(REPO))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import watchdog as wd  # noqa: E402
+from watchdog import nudge_file  # noqa: E402
 from watchdog import nudge_gate  # noqa: E402
 from watchdog import ops_wait_recheck as owr  # noqa: E402
 from _cc_box_pane import wrap_rows  # noqa: E402
@@ -67,7 +68,15 @@ class PreSendOwnLeftoverOnRealTmux(unittest.TestCase):
         self.tpath.write_text(json.dumps(
             {"type": "assistant", "message": {"content": "predosla praca"}}) + "\n")
         self.keys_sent = []
+        self.addCleanup(self._unlink_socket)       # after kill-server (LIFO)
         self.addCleanup(self._tmux, "kill-server")
+
+    def _unlink_socket(self):
+        # kill-server leaves the socket file behind (#548: never litter /tmp)
+        sock = Path(os.environ.get("TMUX_TMPDIR", "/tmp"),
+                    "tmux-%d" % os.getuid(), self.sock)
+        if sock.is_socket():
+            sock.unlink()
 
     def _tmux(self, *args):
         return subprocess.run(["tmux", "-L", self.sock, "-f", "/dev/null", *args],
@@ -112,6 +121,14 @@ class PreSendOwnLeftoverOnRealTmux(unittest.TestCase):
         turns = [json.loads(ln) for ln in self.tpath.read_text().splitlines()]
         return [t["message"]["content"] for t in turns if t["type"] == "user"]
 
+    def _assert_delivered(self, text, logs):
+        # #1157 s3: the next sweep types ONE pointer row; its file holds `text`
+        subs = self._submitted()
+        self.assertEqual(len(subs), 1, logs)
+        self.assertTrue(nudge_file.is_pointer_line(subs[0], require_file=True),
+                        subs)
+        self.assertEqual(nudge_file.expand(subs[0]), text, logs)
+
     def _send(self, pid, text, state):
         logs = []
         res = wd.send_verified(pid, text, self._run, self.tpath,
@@ -144,7 +161,7 @@ class PreSendOwnLeftoverOnRealTmux(unittest.TestCase):
         nxt = _next_batch_text()
         res2, logs2 = self._send(pid, nxt, state)
         self.assertTrue(res2, logs2)
-        self.assertEqual(self._submitted(), [nxt], logs2)
+        self._assert_delivered(nxt, logs2)
 
     def test_scrolled_recorded_leftover_is_cleared_then_delivered(self):
         # a short pane: CC shows 3 of the 5 rows. Slice 1 recorded the text.
@@ -160,7 +177,7 @@ class PreSendOwnLeftoverOnRealTmux(unittest.TestCase):
         nxt = _next_batch_text()
         res2, logs2 = self._send(pid, nxt, state)
         self.assertTrue(res2, logs2)
-        self.assertEqual(self._submitted(), [nxt], logs2)
+        self._assert_delivered(nxt, logs2)
 
     def test_owner_draft_is_untouched_with_the_truthful_verb(self):
         pid = self._start_with_box(OWNER_DRAFT)

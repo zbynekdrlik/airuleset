@@ -23,6 +23,9 @@ later delivery aborted `box not bare pre-send`. This module holds:
   idle pane whose readable box PROVABLY holds only our own stale machine text
   (a leftover typed before any record existed) is cleared, nothing is typed in
   that call, and the next sweep delivers. Anything else is held untouched.
+* `machine_pointer` / `single_row_verified` — slice 3 (the structural fix):
+  a MACHINE nudge is written to a file (`watchdog/nudge_file.py`) and only a
+  one-row pointer line is typed, verified by one exact row compare;
 * the STRANDED record (`state["stranded_own"]`): the exact text a
   `typed-stranded` send left, so the next sweep's janitor (`_janitor_recover`)
   reclaims it from ANY render, scrolled included. It is deliberately NOT the
@@ -35,6 +38,7 @@ import logging
 import time
 
 import watchdog
+from watchdog import nudge_file
 
 _log = logging.getLogger(__name__)
 
@@ -141,8 +145,12 @@ def _box_is_ours(cap, own_text):
     head = watchdog._input_box_head_text(cap)
     if head and watchdog._PASTED_PLACEHOLDER_RX.match(head.strip()):
         return True
-    if watchdog._box_norm_from_capture(cap) == " ".join((own_text or "").split()):
+    box = watchdog._box_norm_from_capture(cap)
+    if box == " ".join((own_text or "").split()):
         return True          # exactly our text, any length (`continue`, a card)
+    if nudge_file.is_pointer_line(box, require_file=True):
+        return True          # slice 3: our one-line pointer (the caller may hold
+                             # the long original text, e.g. the batch undo)
     floor = (1 if watchdog._looks_like_own_payload(head)
              else watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR)
     return watchdog._box_is_own_leftover(cap, own_text, floor, provenance=True)
@@ -238,6 +246,94 @@ def type_rest_verified(pid, run, text, sleep_fn, kind, user_authored, nudge,
     return _st._TV_LANDED
 
 
+# #1157 slice 3 — the kinds whose text is a SLASH COMMAND and stays typed in
+# full: the `/goal` arm (the evaluator reads only the transcript, so the
+# condition must be typed whole), the `/goal clear` disarm and `/compact`.
+POINTER_EXEMPT_KINDS = frozenset({"goal-arm", "goal-disarm", "compact"})
+
+
+def pane_width(pid, run):
+    """The pane's real width from tmux `#{pane_width}`, or None."""
+    out = run(["tmux", "display-message", "-p", "-t", pid, "#{pane_width}"])
+    try:
+        width = int((out or "").strip())
+    except ValueError:
+        return None
+    return width if width > 0 else None
+
+
+def machine_pointer(pid, run, text, nudge, user_authored, log_fn):
+    """#1157 slice 3 — the text `send_verified` actually types. A MACHINE nudge
+    (a `nudge=` identity, not the owner's own reply, not a slash command, not a
+    `POINTER_EXEMPT_KINDS` kind) is written in full to a 0600 file first
+    (`nudge_file.write`) and replaced by ONE pointer line sized to the pane's
+    real width. A RECOVERY revival whose text already is ONE short row (the
+    `continue` of `resume` / `wake-parked`) is typed as it is, with no file:
+    it cannot wrap, and reviving a dead session must not depend on a disk
+    write (a full disk is exactly when it fails). Returns `(typed_text, one_row)`:
+    `one_row` is True only when tmux reported the width and the line fits one
+    row, so the caller verifies it by an exact single-row compare; otherwise
+    the caller keeps the wrap-aware verify. Returns None when the file cannot
+    be written: nothing is typed (never the long paragraph this slice
+    removes), logged; a RECOVERY kind types `continue` instead, so a full
+    disk never leaves a dead session unrevived. A kind the kill switch
+    withholds writes no file."""
+    if (user_authored or not nudge or nudge in POINTER_EXEMPT_KINDS
+            or (text or "").lstrip().startswith("/")
+            or watchdog._keystroke_suppressed("send", user_authored, nudge)):
+        return text, False
+    width = pane_width(pid, run)
+    budget = nudge_file.row_budget(width)
+    if (nudge in watchdog.RECOVERY_NUDGE_KINDS and text and "\n" not in text
+            and nudge_file.cells(text) <= budget):
+        return text, width is not None       # a one-row revival: no file
+    try:
+        path = nudge_file.write(nudge, text)
+    except OSError as e:
+        _log.warning("send-verified: nudge file write failed pane=%s kind=%s: %s",
+                     pid, nudge, e)
+        if nudge in watchdog.RECOVERY_NUDGE_KINDS:   # a dead session still revives
+            log_fn("nudge-file: nudge file not written (%s) -- the revival types "
+                   "`%s` instead" % (e, watchdog.NUDGE_TEXT))
+            return watchdog.NUDGE_TEXT, width is not None
+        log_fn("nudge-file abort: nudge file not written (%s) -- nothing typed" % e)
+        return None
+    line = nudge_file.pointer_line(nudge, text, nudge_file.display_path(path),
+                                   width)
+    one_row = width is not None and nudge_file.cells(line) <= budget
+    log_fn("nudge-file %s -> %s (%d chars); pointer %d cells, pane width "
+           "%s%s" % (nudge, path, len(text or ""), nudge_file.cells(line),
+                     width if width is not None else "unknown",
+                     "" if one_row else " -- not one row, wrap-aware verify"))
+    return line, one_row
+
+
+def stash_pointer(pid, run, text, nudge, logs):
+    """#1157 slice 3 — the text `cross_stream._try_stash_nudge` hands to
+    `deliver_with_stash` (bounce / gk-request / card into a pane holding the
+    owner's draft), the same `machine_pointer` decision as `send_verified`.
+    None when the file could not be written: the caller types nothing."""
+    def _log(line):
+        if isinstance(logs, list):
+            logs.append(line)
+    ptr = machine_pointer(pid, run, text, nudge, False, _log)
+    return None if ptr is None else ptr[0]
+
+
+def single_row_verified(pid, run, line, sleep_fn):
+    """#1157 slice 3 — the one-row pointer's read-back: the input box must be
+    EXACTLY one row equal to `line` (bounded settle poll, the per-chunk
+    budget). No wrap, no scroll, no substring heuristic."""
+    for poll in range(CHUNK_VERIFY_POLLS):
+        rows = watchdog._input_box_rows_raw(watchdog.capture_pane(pid, run,
+                                                                  lines=40))
+        if len(rows) == 1 and rows[0].lstrip("❯").strip() == line:
+            return True
+        if poll < CHUNK_VERIFY_POLLS - 1:
+            sleep_fn(CHUNK_VERIFY_S)
+    return False
+
+
 def record_stranded(state, pid, text, now):
     """Remember the exact text a `typed-stranded` send left in `pid` (#1157)."""
     if state is not None:
@@ -328,7 +424,10 @@ def _presend_own(pid, cap, state, now):
       * the existing own recogniser `_looks_like_own_stuck_content` on the HEAD
         row, narrowed to the one shape a human never types: the batch composer's
         own head `nudge: [<known category>] ` (#923, registered machine-only) on
-        a box no longer than a batch (`BATCH_MAX_CHARS`). `/goal ` and
+        a box no longer than a batch (`BATCH_MAX_CHARS`), or (slice 3) a box
+        that is exactly one of our pointer lines whose file exists
+        (`nudge_file.is_pointer_line`: the whole line must match, so words
+        appended after it never pass). `/goal ` and
         `/compact` (human-typeable) never qualify, and neither does CC's
         collapsed-paste placeholder: a human paste renders the identical
         placeholder, and every delivering caller stamps this pane's
@@ -345,8 +444,12 @@ def _presend_own(pid, cap, state, now):
     head = (watchdog._input_box_head_text(cap) or "").strip()
     if not watchdog._looks_like_own_stuck_content(head):
         return None
+    box = watchdog._box_norm_from_capture(cap)
+    if nudge_file.LABEL in box:   # slice 3: a pointer is proven EXACTLY or not
+        return "shape" if nudge_file.is_pointer_line(box, require_file=True) \
+            else None             # (appended words never reach the head rule)
     from watchdog import nudge_gate as _ng
-    ok = (len(watchdog._box_norm_from_capture(cap)) <= _ng.BATCH_MAX_CHARS
+    ok = (len(box) <= _ng.BATCH_MAX_CHARS
           and any((head + " ").startswith("%s [%s] " % (_ng.BATCH_PREFIX, cat))
                   for cat in _ng.GATED_CATEGORIES))    # a row may end at `]`
     return "shape" if ok else None

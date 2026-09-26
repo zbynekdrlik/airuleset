@@ -301,7 +301,7 @@ class TestOrchestratorStagnation(_OrchestratorBase):
             "stagnation_count": 1,
         }}
         logs = self._run(wrecs, lambda cwd: [41, 43], self._tmux())
-        nudge_logs = [ln for ln in logs if "nudge" in ln]
+        nudge_logs = [ln for ln in logs if "ops-wait-recheck nudge" in ln]
         self.assertTrue(nudge_logs, "expected a nudge log line")
         self.assertIn("stag=", nudge_logs[0])
         self.assertIn("cadence=", nudge_logs[0])

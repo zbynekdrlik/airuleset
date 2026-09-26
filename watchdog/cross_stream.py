@@ -71,6 +71,7 @@ import time
 from pathlib import Path
 
 import watchdog
+from watchdog import send_outcome as _send_outcome
 
 
 _GITHUB_REMOTE_RE = re.compile(
@@ -400,7 +401,8 @@ def _try_stash_nudge(pid, captured, text, run, dry_run, logs=None, nudge=None,
     make `--dry-run` accuse a repo whose real sweep would have succeeded."""
     if dry_run:
         return False
-    return watchdog.deliver_with_stash(pid, text, run, captured=captured,
+    text = _send_outcome.stash_pointer(pid, run, text, nudge, logs)  # #1157 s3
+    return text is not None and watchdog.deliver_with_stash(pid, text, run, captured=captured,
                                        logs=logs, nudge=nudge,
                                        state=state)  # #1022: record for the wedge
 
