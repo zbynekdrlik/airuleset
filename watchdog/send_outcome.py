@@ -168,6 +168,7 @@ def janitor_undo_if_own_stranded(pid, run, own_text, loc, sleep_fn, logs,
         status, line = "unreadable", "box unreadable, no keystroke"
     elif itext == "":
         status, line = "bare", "box clean (nothing stranded)"
+        note_bare(state, pid)
     elif _pane_busy(cap):
         status, line = "busy", "turn running under the box, no keystroke"
     elif not _box_is_ours(cap, own_text):
@@ -252,11 +253,16 @@ def stranded_reclaimable(state, pid, captured, now, dry_run=False):
     """#1157 — the janitor's verdict on a pane a `typed-stranded` send recorded.
     True: the box is still just our text — its TAIL row ends where the record
     ends and the whole box is a run of it (`_box_is_ours`, wrap- and scroll-
-    safe), or it is a head-anchored PREFIX of it (a partly-undone remnant).
+    safe), or it is a head-anchored PREFIX of it (a partly-undone remnant) at
+    least `GOAL_ARM_LEFTOVER_MIN_SUBSTR` non-space chars long.
     False: a readable, idle box that is neither (a human typed there): the
-    record AND the janitor watch are dropped, so nothing clears the human's
-    words. None: no record, a busy / unreadable pane (record kept), or a record
-    past `STRANDED_TTL_S` (dropped)."""
+    record AND the janitor watch are dropped and the pane is marked not-own
+    (slice 2), so nothing clears the human's words; a BARE box drops them too
+    (our text is gone) but is no human draft, so it clears the mark instead.
+    None: no record, a busy / unreadable pane (record kept), a record past
+    `STRANDED_TTL_S` (dropped), or a SHORT head-prefix of the record (kept,
+    undecided): a few chars like `nud` or `/goal all` are as likely the owner
+    starting a draft as our remnant, so the record alone never clears them."""
     rec = (state or {}).get(STRANDED_KEY, {}).get(pid)
     ts = rec.get("ts") if isinstance(rec, dict) else None
     text = rec.get("typed") if isinstance(rec, dict) else None
@@ -271,13 +277,20 @@ def stranded_reclaimable(state, pid, captured, now, dry_run=False):
     from watchdog import stash as _stash
     tail = _stash._box_tail_row_norm(captured)
     box_ns = "".join(watchdog._box_norm_from_capture(captured).split())
-    own = ((bool(tail) and " ".join(text.split()).endswith(tail)
-            and _box_is_ours(captured, text))
-           or (bool(box_ns) and "".join(text.split()).startswith(box_ns)))
+    whole = (bool(tail) and " ".join(text.split()).endswith(tail)
+             and _box_is_ours(captured, text))
+    prefix = bool(box_ns) and "".join(text.split()).startswith(box_ns)
+    if not whole and prefix \
+            and len(box_ns) < watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR:
+        return None                           # too short to tell from a draft
+    own = whole or prefix
     if not own and not dry_run:
         clear_stranded(state, pid)            # our text alone is gone from the box
         state.get("janitor_watch", {}).pop(pid, None)
-        mark_not_own(state, pid, now)
+        if box_ns:
+            mark_not_own(state, pid, now)
+        else:
+            note_bare(state, pid)
     return own
 
 
@@ -297,17 +310,21 @@ def note_bare(state, pid):
 def _presend_own(pid, cap, state, now):
     """#1157 slice 2 — True only when the (readable, idle) box provably holds
     OUR OWN stale machine text and nothing else. In order:
-      * a `stranded_own` record decides ALONE (`stranded_reclaimable`): our
-        exact text is ours; a box that is no longer just it is not, and never
-        falls through to the prefix proof below;
+      * a `stranded_own` record decides ALONE when it can
+        (`stranded_reclaimable`): our exact text is ours, a box that is no
+        longer just it is not, and neither falls through to the shape check;
       * a standing not-own mark (`mark_not_own`) refuses;
       * the existing own recogniser `_looks_like_own_stuck_content` on the HEAD
-        row, narrowed to the shapes a human never produces alone: the batch
-        composer's own head `nudge: [<known category>] ` (registered
-        machine-only, #923 — `/goal ` and `/compact` are human-typeable and
-        never qualify here), or CC's collapsed-paste placeholder as the WHOLE
-        box AND this pane's own `janitor_watch` mark (a human paste collapses
-        into the identical placeholder, `_janitor_watch_seen`)."""
+        row, narrowed to the one shape a human never types: the batch composer's
+        own head `nudge: [<known category>] ` (#923, registered machine-only) on
+        a box no longer than a batch (`BATCH_MAX_CHARS`). `/goal ` and
+        `/compact` (human-typeable) never qualify, and neither does CC's
+        collapsed-paste placeholder: a human paste renders the identical
+        placeholder, and every delivering caller stamps this pane's
+        `janitor_watch` right before the send, so the watch proves nothing.
+    Residual, stated: with no record and no mark, our batch head followed by
+    words a human appended is not told apart; the gate's draft-rescue snapshot
+    holds them, and the clear never reaches past the visible, proven text."""
     rec = stranded_reclaimable(state, pid, cap, now)
     if rec is not None:
         return rec
@@ -316,45 +333,88 @@ def _presend_own(pid, cap, state, now):
     head = (watchdog._input_box_head_text(cap) or "").strip()
     if not watchdog._looks_like_own_stuck_content(head):
         return False
-    if watchdog._PASTED_PLACEHOLDER_RX.match(head):
-        return (len(watchdog._input_box_rows_raw(cap) or []) == 1
-                and watchdog._janitor_watch_seen(state, pid, now))
     from watchdog import nudge_gate as _ng
-    return any(head.startswith("%s [%s] " % (_ng.BATCH_PREFIX, cat))
-               for cat in _ng.GATED_CATEGORIES)
+    return (len(watchdog._box_norm_from_capture(cap)) <= _ng.BATCH_MAX_CHARS
+            and any(head.startswith("%s [%s] " % (_ng.BATCH_PREFIX, cat))
+                    for cat in _ng.GATED_CATEGORIES))
 
 
-def presend_reclaim(pid, run, cap, sleep_fn, log_fn, state, now):
+def _ns(cap):
+    return "".join(watchdog._box_norm_from_capture(cap).split())
+
+
+def _clear_proven_own(pid, run, proven_ns, sleep_fn):
+    """Backspace the box down to bare, never past the text proven ours: every
+    pass the visible box must still be a (whitespace-free) prefix of
+    `proven_ns`, readable and idle, and a pass removes at most the current TAIL
+    row's length, which lies wholly inside that proven text. So hidden rows of
+    a scrolled box, or words typed during the clear, stop the loop instead of
+    being deleted. No Escape (never a double-Escape into a draft, #35).
+    Returns `(status, removed)`: bare / changed / unreadable / busy /
+    not-converged, and how many chars were backspaced."""
+    removed = 0
+    for _ in range(watchdog.JANITOR_CLEAR_MAX_ITER):
+        cap = watchdog.capture_pane(pid, run, lines=40)
+        tail = watchdog._input_line_text(cap)
+        if tail == "":
+            return "bare", removed
+        if tail is None:
+            return "unreadable", removed
+        if _pane_busy(cap) or watchdog.STASH_MARKER in (cap or ""):
+            return "busy", removed
+        if not proven_ns.startswith(_ns(cap)):
+            return "changed", removed
+        batch = min(len(tail), watchdog.JANITOR_CLEAR_BATCH_MAX)
+        watchdog.keys(pid, *(["BSpace"] * batch), kind="janitor", run=run)
+        removed += batch
+        sleep_fn(watchdog.JANITOR_CLEAR_SETTLE_S)
+    return "not-converged", removed
+
+
+def presend_reclaim(pid, run, cap, sleep_fn, state, now):
     """#1157 slice 2 — `send_verified`'s pre-send gate found the box not bare.
-    Clear it ONLY when the pane is idle (no running / waiting turn: the clear's
-    Escape would interrupt it), the box is readable, the stash slot is free and
-    the box provably holds only our own stale text (`_presend_own`); a fresh
-    capture right before the first key must show the same box, still idle.
+    Clear it ONLY when state is threaded (the not-own mark and the records live
+    there; a stateless caller, the owner's own Discord reply among them, never
+    clears), the pane is idle (no running / waiting turn), the box is readable,
+    the stash slot is free, the agent strip is not selected, and the box
+    provably holds only our own stale text (`_presend_own`). A fresh capture
+    right before the first key must show the same box; the clear itself
+    (`_clear_proven_own`) never reaches past that proven text. A box that
+    changed, before or during the clear, is marked not-own: a human is typing.
     The caller types NOTHING in this call either way (the next sweep delivers
-    into the bare box). Returns the verdict the gate logs (#486)."""
+    into the bare box). The clear is recovery (`kind="janitor"`, ungated by the
+    #994 switch, #1002), like every other janitor clear of our own text.
+    Returns the verdict the gate logs (#486)."""
+    if state is None:
+        return "no state threaded — held"
     if watchdog._input_line_text(cap) is None:
         return "box unreadable — held"
     if watchdog.STASH_MARKER in (cap or ""):
         return "stash slot occupied — held (the janitor pops it)"
     if _pane_busy(cap) or watchdog._pane_activity_spinner_above_box(cap):
         return "turn running under the box — held"
+    if watchdog._strip_selected(cap):          # keys would go to the strip
+        return "agent strip selected — held"
     now = time.time() if now is None else now
     if not _presend_own(pid, cap, state, now):
         return HELD_DRAFT
-    box = watchdog._box_norm_from_capture(cap)
+    proven = _ns(cap)
     fresh = watchdog.capture_pane(pid, run, lines=40)
-    if (watchdog._box_norm_from_capture(fresh) != box
-            or watchdog.STASH_MARKER in (fresh or "") or _pane_busy(fresh)
-            or watchdog._pane_activity_spinner_above_box(fresh)):
+    if _ns(fresh) != proven:
+        mark_not_own(state, pid, now)
         return "box changed under the check — held"
-    if not watchdog._janitor_clear_box(pid, run, sleep_fn, log_fn):
-        return ("pre-send: clearing stale own machine text did not converge "
-                "(%d chars) — held" % len(box))
+    status, removed = _clear_proven_own(pid, run, proven, sleep_fn)
+    if status == "changed":
+        mark_not_own(state, pid, now)
+    if status != "bare":
+        return ("pre-send: stopped clearing stale own machine text (%s, %d "
+                "chars removed) — held" % (status, removed))
     clear_stranded(state, pid)
+    note_bare(state, pid)
     _log.warning("send-verified: pre-send cleared own stale text pane=%s "
-                 "chars=%d", pid, len(box))
+                 "chars=%d", pid, removed)
     return ("pre-send: cleared stale own machine text (%d chars); nothing "
-            "typed this call, the next sweep delivers" % len(box))
+            "typed this call, the next sweep delivers" % removed)
 
 
 def after_verify_failure(pid, run, text, sleep_fn, log_fn, logs, state, now):

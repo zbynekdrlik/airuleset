@@ -1273,7 +1273,7 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         # #1157 slice 2 -- our OWN stale text (idle pane, readable box, proven)
         # is cleared here; the next sweep delivers. Anything else is held.
         _log("send-verified abort: box not bare pre-send -- " + _so.presend_reclaim(
-            pane_id, run, cap, sleep_fn, _log, state, now))
+            pane_id, run, cap, sleep_fn, state, now))
         return _so.OUT_NOT_TYPED
     _so.note_bare(state, pane_id)
     # #1092 (c) -- the PER-PANE typing-attempt BUDGET, consulted BEFORE any
