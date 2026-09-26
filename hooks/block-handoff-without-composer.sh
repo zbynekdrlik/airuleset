@@ -118,7 +118,7 @@ body_hash = hashlib.sha256(body.encode()).hexdigest()
 gate_dir = os.path.join(os.path.expanduser("~"), ".claude/handoff-gate")
 now = time.time()
 
-found = False
+found = None
 if os.path.isdir(gate_dir):
     for fn in os.listdir(gate_dir):
         if not fn.endswith(".json"):
@@ -128,12 +128,17 @@ if os.path.isdir(gate_dir):
             with open(fp) as f:
                 r = json.loads(f.read())
             if r.get("sha256") == body_hash and now - r.get("ts", 0) <= 600:
-                found = True; break
+                found = r; break
         except (OSError, ValueError, TypeError):
             continue
 
-if found:
-    print("ALLOW receipt-match"); sys.exit(0)
+if found is not None:
+    # #1161: the receipt records the epic-rehearsal gate outcome; log it.
+    ep, gate = found.get("epic"), found.get("epic_gate")
+    print("ALLOW receipt-match" + (" epic=#%s rehearsal=%s gate=%s" % (
+        ep, found.get("epic_rehearsal"), gate) if ep else
+        (" epic-gate=%s" % gate if gate else "")))
+    sys.exit(0)
 
 print("BLOCK READY-FOR-REVIEW comment must be composed via "
       "'python3 airuleset.py handoff' (no matching fresh receipt)")

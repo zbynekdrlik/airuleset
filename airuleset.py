@@ -5026,6 +5026,22 @@ def _handoff_prod_transfer_preflight(body, *, cwd=None, scan_text=None,
         return None
 
 
+def _handoff_epic_preflight(issue, repo, head_sha=None, cwd=None, body=None):
+    """#1161 part 2 (c) -- the epic-rehearsal hand-off gate for ALL three
+    composer paths (compose, --sign-only, --body-file). The logic lives in
+    gates.epic_rehearsal. Returns `(block_reason | None, receipt_fields)`. A
+    sub-ticket declaring `Epic: #N` needs an `Epic-rehearsal:` on #N newer than
+    its HEAD commit that lists it. Warn mode (the rollout default) prints and
+    allows. Enforce refuses. On any exception it fails open: (None, {})."""
+    try:
+        import gates.epic_rehearsal as _er
+        return _er.composer_check(issue, repo, head_sha, cwd=cwd, body=body)
+    except Exception as e:  # noqa: BLE001 -- a gate crash must never block
+        sys.stderr.write("handoff: epic-rehearsal pre-flight skipped (%s) -- "
+                         "fail-open\n" % e)
+        return None, {}
+
+
 def _handoff_gk_preflight(issue, repo, body, *, branch=None, cwd=None,
                           watch_result=None, commits_since=None, journal=None):
     """The composer hand-off gk-watch pre-flight (#1056 L2 (f)).
@@ -5300,6 +5316,11 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
               "branch '%s' tip %s — push first / re-declare a fresh HEAD"
               % (body_head[:12], branch, remote_sha[:12]))
         return 1
+    # #1161: the epic-rehearsal gate (warn by default, enforce refuses).
+    _epblk, _ep = _handoff_epic_preflight(issue, repo, remote_sha, _repo_root())
+    if _epblk:
+        print(_epblk)
+        return 1
 
     # Write receipt BEFORE posting (the hook verifies the body hash).
     gate_dir = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_DIR)
@@ -5312,7 +5333,7 @@ def _cmd_handoff_post_body_file(repo, issue, branch, body_file):
                           "issue": int(issue),
                           "branch": branch,
                           "round": rnd,
-                          "body_file": True})
+                          "body_file": True, **_ep})
     try:
         with open(receipt_path, "w") as f:
             f.write(receipt)
@@ -5420,6 +5441,11 @@ def cmd_handoff(args):
         if err:
             print(err)
             return 1
+        _epblk, _ep = _handoff_epic_preflight(issue, repo, None, _repo_root(),
+                                              body)  # #1161: the body's HEAD:
+        if _epblk:
+            print(_epblk)
+            return 1
         body_hash = hashlib.sha256(body.encode()).hexdigest()
         gate_dir = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_DIR)
         os.makedirs(gate_dir, exist_ok=True)
@@ -5429,7 +5455,7 @@ def cmd_handoff(args):
         receipt = json.dumps({"sha256": body_hash,
                               "ts": _time.time(),
                               "issue": int(issue),
-                              "sign_only": True})
+                              "sign_only": True, **_ep})
         try:
             with open(receipt_path, "w") as f:
                 f.write(receipt)
@@ -5633,6 +5659,10 @@ def cmd_handoff(args):
     if _ptblk:
         print(_ptblk)
         return 1
+    _epblk, _ep = _handoff_epic_preflight(issue, repo, head_sha, target_root)
+    if _epblk:  # #1161 epic-rehearsal gate (warn by default, enforce refuses)
+        print(_epblk)
+        return 1
 
     # Write receipt BEFORE posting (the hook checks the receipt).
     gate_dir = os.path.join(os.path.expanduser("~"), HANDOFF_GATE_DIR)
@@ -5645,7 +5675,7 @@ def cmd_handoff(args):
                           "ts": _time.time(),
                           "issue": int(issue),
                           "branch": branch,
-                          "round": rnd})
+                          "round": rnd, **_ep})
     try:
         with open(receipt_path, "w") as f:
             f.write(receipt)
@@ -9646,6 +9676,13 @@ def _add_dispatch_flags(parser):
              "the infra role/target (the per-role sequential mode is PENDING "
              "round 3, #993 — today this is the routing slice only).")
     parser.add_argument("--explain", action="store_true", help=_EXPLAIN_HELP)
+    parser.add_argument(
+        "--post-release", type=int, nargs="?", const=30, default=None,
+        metavar="DAYS",
+        help="Count post-release loops (reopen / rework / follow-up after a "
+             "PROD release) per ticket, epic and stream over the last DAYS "
+             "(default 30); core-quals = the whole repo. Prints `unknown` and "
+             "exits 1 on a gh failure (#1161)")
     parser.add_argument(
         "--conflicts", action="store_true",
         help="Print ONLY the `conflict:` lines of --explain: one per "

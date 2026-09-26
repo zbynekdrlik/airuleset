@@ -699,6 +699,17 @@ def _print_bounce_unhandled(quals, root, user):
         print("%d\t%s" % (e["number"], e.get("verdict_ts")))
 
 
+def _post_release(args, quals, root):
+    """#1161 part 2 (d): `--post-release [DAYS]` -- post-release loops per
+    ticket, epic and stream (logic in cli_post_release; `quals` None = the whole
+    repo, the full-authority FLEET view). Exits 1 when the count is unknown (a
+    gh failure) -- never a false 0."""
+    import cli_post_release
+    rc = cli_post_release.run(quals, root, days=args.post_release)
+    if rc:
+        sys.exit(rc)
+
+
 def _merged_unreleased(root):
     """#1083 — the git-derived merged-unreleased issue set for `root` (fix in
     develop/staging, not yet main). The slug is resolved from the LOCAL git
@@ -832,6 +843,8 @@ def cmd_slice_quals(args):
     except airuleset.SliceUnresolved as exc:
         print("slice-quals: %s" % exc, file=sys.stderr)
         sys.exit(1)
+    if isinstance(getattr(args, "post_release", None), int):   # #1161 (d)
+        return _post_release(args, quals, root)
     want_count = getattr(args, "count", False)
     want_list = getattr(args, "list", False)
     want_waiting = getattr(args, "waiting", False)
@@ -1401,6 +1414,8 @@ def cmd_core_quals(args):
             file=sys.stderr)
         sys.exit(1)
 
+    if isinstance(getattr(args, "post_release", None), int):   # #1161 (d)
+        return _post_release(args, None, root)
     quals = airuleset._obligation_quals()
     want_count = getattr(args, "count", False)
     want_list = getattr(args, "list", False)
