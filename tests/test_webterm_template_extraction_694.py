@@ -35,11 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 REPO = Path(__file__).resolve().parent.parent
 
-# #1159: + the touch key bar's two sentinels (its CSS in the head <style>, its
-# markup+script after the main script). The bar lives in the sibling leaf
-# cli_webterm_keybar.py and is substituted in the same single pass.
-_SENTINELS = {"@@BUTTONS@@", "@@CFG_JSON@@", "@@THEME_JSON@@",
-              "@@KEYBAR_CSS@@", "@@KEYBAR_HTML@@"}
+_SENTINELS = {"@@BUTTONS@@", "@@CFG_JSON@@", "@@THEME_JSON@@", "@@KEYBAR_CSS@@", "@@KEYBAR_HTML@@"}  # KEYBAR: #1159
 
 
 def _inv():
