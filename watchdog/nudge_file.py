@@ -61,10 +61,11 @@ _SENTENCE_END_RX = re.compile(r"[.!?](?=\s|$)")
 
 
 def nudge_dir():
-    """The per-account nudge-file directory (absolute)."""
-    d = os.environ.get(DIR_ENV)
-    return os.path.abspath(d) if d else os.path.join(
+    """The per-account nudge-file directory (absolute, normalised: a HOME with
+    a trailing or double slash must still compare equal to a parsed path)."""
+    d = os.environ.get(DIR_ENV) or os.path.join(
         os.path.expanduser("~"), ".claude", "nudges")
+    return os.path.abspath(d)
 
 
 def cells(s):
@@ -90,7 +91,7 @@ def safe_kind(kind):
 
 def display_path(path):
     """`path` as the typed line shows it: `~/…` when under the home dir."""
-    home = os.path.expanduser("~").rstrip("/")
+    home = os.path.abspath(os.path.expanduser("~")).rstrip("/")
     if home and path.startswith(home + "/"):
         return "~" + path[len(home):]
     return path
@@ -166,7 +167,9 @@ def is_pointer_line(text, require_file=False):
     """True when `text` (whitespace-normalised) is EXACTLY one of our pointer
     lines. A human never types this shape: it ends in a path to a file in our
     own nudge dir, so words appended after it break the match. With
-    `require_file` the file must also exist as a regular file (not a link)."""
+    `require_file` the file must also exist as a regular file (not a link);
+    a leftover pointer whose file was already pruned (7 d) is then no longer
+    provably ours, and the owner clears it like any other text."""
     path = _pointer_target(text)
     if path is None:
         return False
@@ -226,7 +229,8 @@ def write(kind, text, now=None):
     atomically: a temp file in the same dir is fsynced, then hard-linked to the
     final name (a link never overwrites, so a name collision just retries with
     new random hex). Prunes old files first. Returns the absolute path; raises
-    OSError when the file cannot be written (the caller then types nothing)."""
+    OSError when the file cannot be written (the caller then types nothing).
+    A file whose type is later suppressed or aborted stays until the prune."""
     now = time.time() if now is None else now
     d = nudge_dir()
     os.makedirs(d, mode=0o700, exist_ok=True)
@@ -247,10 +251,15 @@ def write(kind, text, now=None):
                 os.link(tmp, path)
             except FileExistsError:
                 continue                      # name taken: new random hex
+            except OSError:                   # a filesystem without hard links
+                if os.path.lexists(path):
+                    continue
+                os.rename(tmp, path)          # random name: the race is moot
             return path
         raise OSError("no free nudge file name in %s" % d)
     finally:
-        try:
-            os.unlink(tmp)
-        except OSError as e:                  # the next prune reaps it
-            _log.warning("nudge-file: temp file left %s (%s)", tmp, e)
+        if os.path.lexists(tmp):              # gone after the no-link rename
+            try:
+                os.unlink(tmp)
+            except OSError as e:              # the next prune reaps it
+                _log.warning("nudge-file: temp file left %s (%s)", tmp, e)

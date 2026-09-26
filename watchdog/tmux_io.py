@@ -1311,6 +1311,12 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
             if isinstance(out, dict):
                 out["pane_budget_held"] = True
             return _so.OUT_NOT_TYPED
+    # #1157 slice 3 -- a MACHINE nudge goes to a file; ONE pointer row is typed.
+    # Decided before the first keystroke: a failed write sends none at all.
+    ptr = _so.machine_pointer(pane_id, run, text, nudge, user_authored, _log)
+    if ptr is None:
+        return _so.OUT_NOT_TYPED                # file not written: nothing typed
+    text, one_row = ptr
     # #1002 -- the strip-deselect Escape carries the delivery's "send" kind, so
     # the ONE `keys` primitive gates it: at OFF a machine caller fires ZERO
     # keystrokes (keys suppresses + returns False, this helper bails), while the
@@ -1345,11 +1351,6 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         # read from byte 0 (a prior identical nudge would false-confirm).
         _log("send-verified abort: transcript unreadable pre-send")
         return _so.OUT_NOT_TYPED
-    # #1157 slice 3 -- a MACHINE nudge goes to a file; ONE pointer row is typed.
-    ptr = _so.machine_pointer(pane_id, run, text, nudge, user_authored, _log)
-    if ptr is None:
-        return _so.OUT_NOT_TYPED                # file not written: nothing typed
-    text, one_row = ptr
     # #670 -- HEAD-INCLUSIVE verified type + bounded settle/undo/retry, replacing
     # the old `_type_literal` + `_await_typed_landed(want=True)` pair that
     # verified only the TAIL (`_typed_landed`'s endswith) and was head-blind: a

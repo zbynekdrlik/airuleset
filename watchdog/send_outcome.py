@@ -267,17 +267,24 @@ def machine_pointer(pid, run, text, nudge, user_authored, log_fn):
     (a `nudge=` identity, not the owner's own reply, not a slash command, not a
     `POINTER_EXEMPT_KINDS` kind) is written in full to a 0600 file first
     (`nudge_file.write`) and replaced by ONE pointer line sized to the pane's
-    real width. Returns `(typed_text, one_row)`: `one_row` is True only when
-    tmux reported the width and the line fits one row, so the caller verifies
-    it by an exact single-row compare; otherwise the caller keeps the
-    wrap-aware verify. Returns None when the file cannot be written: nothing
-    is typed (never the long paragraph this slice removes), logged. A kind the
-    kill switch withholds writes no file (its type is suppressed anyway)."""
+    real width. A RECOVERY revival whose text already is ONE short row (the
+    `continue` of `resume` / `wake-parked`) is typed as it is, with no file:
+    it cannot wrap, and reviving a dead session must not depend on a disk
+    write (a full disk is exactly when it fails). Returns `(typed_text, one_row)`:
+    `one_row` is True only when tmux reported the width and the line fits one
+    row, so the caller verifies it by an exact single-row compare; otherwise
+    the caller keeps the wrap-aware verify. Returns None when the file cannot
+    be written: nothing is typed (never the long paragraph this slice
+    removes), logged. A kind the kill switch withholds writes no file."""
     if (user_authored or not nudge or nudge in POINTER_EXEMPT_KINDS
             or (text or "").lstrip().startswith("/")
             or watchdog._keystroke_suppressed("send", user_authored, nudge)):
         return text, False
     width = pane_width(pid, run)
+    budget = nudge_file.row_budget(width)
+    if (nudge in watchdog.RECOVERY_NUDGE_KINDS and text and "\n" not in text
+            and nudge_file.cells(text) <= budget):
+        return text, width is not None       # a one-row revival: no file
     try:
         path = nudge_file.write(nudge, text)
     except OSError as e:
@@ -288,13 +295,24 @@ def machine_pointer(pid, run, text, nudge, user_authored, log_fn):
         return None
     line = nudge_file.pointer_line(nudge, text, nudge_file.display_path(path),
                                    width)
-    one_row = (width is not None
-               and nudge_file.cells(line) <= nudge_file.row_budget(width))
-    log_fn("nudge-file %s -> %s (%d chars); typing a %d-cell pointer, pane "
-           "width %s%s" % (nudge, path, len(text or ""), nudge_file.cells(line),
-                           width if width is not None else "unknown",
-                           "" if one_row else " -- not one row, wrap-aware verify"))
+    one_row = width is not None and nudge_file.cells(line) <= budget
+    log_fn("nudge-file %s -> %s (%d chars); pointer %d cells, pane width "
+           "%s%s" % (nudge, path, len(text or ""), nudge_file.cells(line),
+                     width if width is not None else "unknown",
+                     "" if one_row else " -- not one row, wrap-aware verify"))
     return line, one_row
+
+
+def stash_pointer(pid, run, text, nudge, logs):
+    """#1157 slice 3 — the text `cross_stream._try_stash_nudge` hands to
+    `deliver_with_stash` (bounce / gk-request / card into a pane holding the
+    owner's draft), the same `machine_pointer` decision as `send_verified`.
+    None when the file could not be written: the caller types nothing."""
+    def _log(line):
+        if isinstance(logs, list):
+            logs.append(line)
+    ptr = machine_pointer(pid, run, text, nudge, False, _log)
+    return None if ptr is None else ptr[0]
 
 
 def single_row_verified(pid, run, line, sleep_fn):
@@ -422,8 +440,9 @@ def _presend_own(pid, cap, state, now):
     if not watchdog._looks_like_own_stuck_content(head):
         return None
     box = watchdog._box_norm_from_capture(cap)
-    if nudge_file.is_pointer_line(box, require_file=True):
-        return "shape"       # slice 3: the WHOLE box is our pointer line
+    if nudge_file.LABEL in box:   # slice 3: a pointer is proven EXACTLY or not
+        return "shape" if nudge_file.is_pointer_line(box, require_file=True) \
+            else None             # (appended words never reach the head rule)
     from watchdog import nudge_gate as _ng
     ok = (len(box) <= _ng.BATCH_MAX_CHARS
           and any((head + " ").startswith("%s [%s] " % (_ng.BATCH_PREFIX, cat))
