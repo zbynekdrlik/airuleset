@@ -225,7 +225,7 @@ terms[0].modes.applicationCursorKeysMode = true;
 for (const k of KEYS) { terms[0].sent = []; ctx.keybarPress(k); out.app[k] = terms[0].sent; }
 terms[0].sent = [];
 ctx.current = 1; ctx.keybarPress('sessions');
-out.activeOnly = terms.map(t => t.sent);
+out.activeOnly = terms.map(t => t.sent.slice());   // snapshot: the next press appends
 ctx.current = 2; ctx.keybarPress('windows');
 out.core = terms[2].sent;
 out.pasted = terms.map(t => t.pasted.length);
