@@ -26,7 +26,7 @@ from collections import namedtuple
 from datetime import datetime
 from pathlib import Path
 
-from watchdog import _SENTINELS
+from watchdog import _SENTINELS, nudge_file
 
 
 def encode_project_dir(cwd):
@@ -973,7 +973,7 @@ def supervisor_responded_to_nudge(path, nudge_signature, max_lines=200):
             if isinstance(content, list) and any(
                     isinstance(b, dict) and b.get("type") == "tool_result" for b in content):
                 continue
-            if nudge_signature and nudge_signature in (_entry_text(entry) or ""):
+            if nudge_signature and nudge_signature in nudge_file.expand(_entry_text(entry) or ""):  # #1157 s3
                 seen_nudge = True
             continue
         if etype == "assistant" and seen_nudge:

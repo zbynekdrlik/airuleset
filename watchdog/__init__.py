@@ -887,7 +887,7 @@ _MACHINE_PROMPT_PREFIXES = (
     # in _MACHINE_PROMPT_EXACT).
     "oauth-resume:",
     "stuck-check:", "Priorita: prio:bounce", "bounce-backstop:",
-    "gk-request backstop:", "/goal ",
+    "gk-request backstop:", "/goal ", "nudge:",  # #1157 s3: every machine nudge
     "Odpoveď z Discordu:", "Odpoveď užívateľa na tvoju otázku",
     "<task-notification>", "<local-command", "<command-", "<system-reminder",
     # #339 adversarial-review MINOR: a Stop-hook-rejected turn is ALSO

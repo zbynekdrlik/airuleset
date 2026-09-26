@@ -1222,7 +1222,9 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     The type half: a fresh bare re-check right before typing, a strip-selector
     Escape (#36), the head-inclusive verified type `_type_literal_verified`
     (#670; chunk-typed, #322; two-phase head checkpoint for a box that may
-    scroll, #746/#1157), and never an Enter on an unverified type.
+    scroll, #746/#1157), and never an Enter on an unverified type. A MACHINE
+    nudge (#1157 slice 3) is written to a file and typed as ONE pointer row,
+    verified by an exact single-row compare (`send_outcome.machine_pointer`).
 
     Returns a `send_outcome.SendOutcome` (#1157). It is truthy ONLY on a
     transcript-CONFIRMED submit and compares equal to the old bool, so a caller
@@ -1343,6 +1345,11 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
         # read from byte 0 (a prior identical nudge would false-confirm).
         _log("send-verified abort: transcript unreadable pre-send")
         return _so.OUT_NOT_TYPED
+    # #1157 slice 3 -- a MACHINE nudge goes to a file; ONE pointer row is typed.
+    ptr = _so.machine_pointer(pane_id, run, text, nudge, user_authored, _log)
+    if ptr is None:
+        return _so.OUT_NOT_TYPED                # file not written: nothing typed
+    text, one_row = ptr
     # #670 -- HEAD-INCLUSIVE verified type + bounded settle/undo/retry, replacing
     # the old `_type_literal` + `_await_typed_landed(want=True)` pair that
     # verified only the TAIL (`_typed_landed`'s endswith) and was head-blind: a
@@ -1358,7 +1365,10 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     typed_ok = watchdog._type_literal_verified(
         pane_id, run, text, sleep_fn, kind="send", nudge=nudge,
         user_authored=user_authored, logs=logs, state=state, out=tv,
-        verify_chunks=True)                     # #1157: a scrolled box is proven
+        verify_chunks=not one_row)              # #1157: a scrolled box is proven
+    if typed_ok and one_row and not _so.single_row_verified(pane_id, run, text,
+                                                            sleep_fn):
+        typed_ok = False                        # slice 3: one exact row, or undo
     # #1092 (c) / #1157 -- a type that reached the box IS a typing attempt, verified
     # or not: stamp the per-pane budget (only for a gated machine nudge) so a pane
     # whose verify keeps failing is not re-typed every sweep. A no-keystroke abort
