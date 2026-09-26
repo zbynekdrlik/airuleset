@@ -60,6 +60,29 @@ class _AppendOnSecondCaptureFake(DeliverGoalFakeTmux):
         return super().__call__(argv, timeout)
 
 
+class _AppendDuringClearFake(DeliverGoalFakeTmux):
+    """The owner types behind the box right after the first backspace batch."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._bs = 0
+
+    def __call__(self, argv, timeout=8):
+        out = super().__call__(argv, timeout)
+        if "send-keys" in argv and "BSpace" in argv:
+            self._bs += 1
+            if self._bs == 1:
+                self.box += APPEND
+        return out
+
+
+class _StripSelectedFake(DeliverGoalFakeTmux):
+    """The agent strip holds focus (`❯ ● main`): keys would go to the strip."""
+
+    def _render(self):
+        return super()._render() + "  ❯ ● main\n"
+
+
 class PreSendGate(unittest.TestCase):
 
     def _fake(self, box, cls=DeliverGoalFakeTmux):
@@ -121,12 +144,87 @@ class PreSendGate(unittest.TestCase):
         self._assert_held(fake, PLACEHOLDER, res, logs,
                           "box holds a non-machine draft — held")
 
-    def test_placeholder_under_our_own_watch_is_cleared(self):
+    def test_placeholder_is_held_even_under_our_own_watch(self):
+        # every delivering caller stamps this pane's janitor watch right before
+        # the send, so the watch proves nothing about a human paste's placeholder
         fake = self._fake(PLACEHOLDER)
-        res, logs = self._send(fake, {"janitor_watch": {PID: NOW - 60}})
-        self.assertEqual(fake.box, "", logs)
-        self.assertTrue(any("pre-send: cleared stale own machine text" in ln
+        state = {}
+        wd._janitor_mark_watch(state, PID, NOW)
+        res, logs = self._send(fake, state)
+        self._assert_held(fake, PLACEHOLDER, res, logs,
+                          "box holds a non-machine draft — held")
+
+    def test_stateless_caller_never_clears(self):
+        # the owner's own Discord reply threads no state: no record, no not-own
+        # mark to consult, so nothing may be cleared on shape alone
+        box = partition_batch_text() + APPEND
+        fake = self._fake(box)
+        res, logs = self._send(fake, None)
+        self._assert_held(fake, box, res, logs, "no state threaded — held")
+
+    def test_short_draft_that_prefixes_the_record_is_held(self):
+        # the owner cleared our stranded text and started typing: `nud` is a
+        # prefix of our record, but far too short to be told from a draft
+        text = partition_batch_text()
+        state = {"stranded_own": {PID: {"ts": NOW - 60, "typed": text}}}
+        fake = self._fake("nud")
+        res, logs = self._send(fake, state)
+        self._assert_held(fake, "nud", res, logs,
+                          "box holds a non-machine draft — held")
+        self.assertIn(PID, state["stranded_own"], "the record is kept")
+
+    def test_long_remnant_of_the_record_is_cleared(self):
+        text = partition_batch_text()
+        state = {"stranded_own": {PID: {"ts": NOW - 60, "typed": text}}}
+        fake = self._fake(text[:300])
+        self._send(fake, state)
+        self.assertEqual(fake.box, "")
+
+    def test_owner_text_scrolled_above_our_nudge_is_never_deleted(self):
+        # the box scrolled: its visible head row starts with our batch head, but
+        # the owner's own line sits above it, off-screen. The clear must stop at
+        # the proven visible text and never reach the hidden line.
+        note = "toto je moja poznamka k tej sprave nizsie, neodstranovat"
+        fake = self._fake(note + " " + partition_batch_text())
+        rows = fake._render_wrapped().splitlines()[3:-2]
+        self.assertTrue(rows[1].lstrip().startswith("nudge: [partition-audit] "),
+                        rows[:2])
+        fake.visible_rows = len(rows) - 1
+        self.assertTrue(wd._input_box_head_text(fake._render()).startswith(
+            "nudge: [partition-audit] "))
+        state = {}
+        res, logs = self._send(fake, state)
+        self.assertFalse(res, logs)
+        self.assertTrue(fake.box.startswith(note), fake.box)
+        self.assertTrue(any("stopped clearing" in ln and "changed" in ln
                             for ln in logs), logs)
+        self.assertIn(PID, state.get(send_outcome.NOT_OWN_KEY, {}))
+        self._send(fake, state)                       # the next sweep holds too
+        self.assertTrue(fake.box.startswith(note), fake.box)
+
+    def test_words_typed_during_the_clear_stop_it(self):
+        box = partition_batch_text()
+        fake = self._fake(box, cls=_AppendDuringClearFake)
+        state = {}
+        res, logs = self._send(fake, state)
+        self.assertFalse(res, logs)
+        self.assertTrue(fake.box.endswith(APPEND), fake.box)
+        self.assertIn(PID, state.get(send_outcome.NOT_OWN_KEY, {}))
+
+    def test_selected_agent_strip_is_held(self):
+        box = partition_batch_text()
+        fake = self._fake(box, cls=_StripSelectedFake)
+        res, logs = self._send(fake, {})
+        self._assert_held(fake, box, res, logs, "agent strip selected — held")
+
+    def test_a_bare_box_leaves_no_not_own_mark(self):
+        state = {"stranded_own": {PID: {"ts": NOW - 60, "typed": "abc"}},
+                 send_outcome.NOT_OWN_KEY: {PID: NOW - 120}}
+        fake = self._fake("")
+        self.assertFalse(send_outcome.stranded_reclaimable(
+            state, PID, fake._render(), NOW))
+        self.assertNotIn(PID, state[send_outcome.NOT_OWN_KEY])
+        self.assertNotIn(PID, state["stranded_own"])
 
     def test_recorded_stranded_text_is_cleared_and_the_record_dropped(self):
         text = partition_batch_text()
