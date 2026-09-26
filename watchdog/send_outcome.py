@@ -275,7 +275,9 @@ def machine_pointer(pid, run, text, nudge, user_authored, log_fn):
     row, so the caller verifies it by an exact single-row compare; otherwise
     the caller keeps the wrap-aware verify. Returns None when the file cannot
     be written: nothing is typed (never the long paragraph this slice
-    removes), logged. A kind the kill switch withholds writes no file."""
+    removes), logged; a RECOVERY kind types `continue` instead, so a full
+    disk never leaves a dead session unrevived. A kind the kill switch
+    withholds writes no file."""
     if (user_authored or not nudge or nudge in POINTER_EXEMPT_KINDS
             or (text or "").lstrip().startswith("/")
             or watchdog._keystroke_suppressed("send", user_authored, nudge)):
@@ -288,10 +290,13 @@ def machine_pointer(pid, run, text, nudge, user_authored, log_fn):
     try:
         path = nudge_file.write(nudge, text)
     except OSError as e:
-        log_fn("send-verified abort: nudge file not written (%s) -- nothing typed"
-               % e)
         _log.warning("send-verified: nudge file write failed pane=%s kind=%s: %s",
                      pid, nudge, e)
+        if nudge in watchdog.RECOVERY_NUDGE_KINDS:   # a dead session still revives
+            log_fn("nudge-file: nudge file not written (%s) -- the revival types "
+                   "`%s` instead" % (e, watchdog.NUDGE_TEXT))
+            return watchdog.NUDGE_TEXT, width is not None
+        log_fn("nudge-file abort: nudge file not written (%s) -- nothing typed" % e)
         return None
     line = nudge_file.pointer_line(nudge, text, nudge_file.display_path(path),
                                    width)

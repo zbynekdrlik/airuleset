@@ -30,6 +30,7 @@ import logging
 import os
 import re
 import secrets
+import stat
 import tempfile
 import time
 import unicodedata
@@ -223,12 +224,38 @@ def prune(now=None, dir_path=None, ttl_s=TTL_S):
     return removed
 
 
+def _same_file(d, kind, data):
+    """An existing regular file of ours for `kind` holding exactly `data`, or
+    None: a nudge re-sent unchanged (a delivery that aborted after its file was
+    written, retried next sweep) reuses its file instead of minting a new one."""
+    try:
+        names = os.listdir(d)
+    except OSError:
+        return None
+    for name in names:
+        nm = NAME_RX.match(name)
+        if not nm or nm.group(1) != kind:
+            continue
+        p = os.path.join(d, name)
+        try:
+            st = os.lstat(p)
+            if not stat.S_ISREG(st.st_mode) or st.st_size != len(data):
+                continue
+            with open(p, "rb") as f:
+                if f.read() == data:
+                    return p
+        except OSError as e:
+            _log.info("nudge-file: reuse check skipped %s (%s)", p, e)
+    return None
+
+
 def write(kind, text, now=None):
     """Write `text` byte-identically (UTF-8) to a NEW 0600 file
     `<kind>-<yymmddHHMMSS UTC>-<4 hex>.md` in `nudge_dir()` (created 0700),
     atomically: a temp file in the same dir is fsynced, then hard-linked to the
     final name (a link never overwrites, so a name collision just retries with
-    new random hex). Prunes old files first. Returns the absolute path; raises
+    new random hex). Prunes old files first; the same kind with the same bytes
+    reuses its existing file (mtime refreshed). Returns the absolute path; raises
     OSError when the file cannot be written (the caller then types nothing).
     A file whose type is later suppressed or aborted stays until the prune."""
     now = time.time() if now is None else now
@@ -236,6 +263,10 @@ def write(kind, text, now=None):
     os.makedirs(d, mode=0o700, exist_ok=True)
     prune(now, d)
     data = (text or "").encode("utf-8")
+    same = _same_file(d, safe_kind(kind), data)
+    if same is not None:
+        os.utime(same, (now, now))
+        return same
     ts = time.strftime(_TS_FMT, time.gmtime(now))
     fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=".md")
     try:
