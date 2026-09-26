@@ -146,6 +146,22 @@ class PreSendOwnLeftoverOnRealTmux(unittest.TestCase):
         self.assertTrue(res2, logs2)
         self.assertEqual(self._submitted(), [nxt], logs2)
 
+    def test_scrolled_recorded_leftover_is_cleared_then_delivered(self):
+        # a short pane: CC shows 3 of the 5 rows. Slice 1 recorded the text.
+        leftover = partition_batch_text()
+        pid = self._start_with_box(leftover, "--max-rows", "3")
+        self.assertFalse(wd._input_box_head_text(self._cap()).startswith(
+            "nudge:"), "the fixture must be scrolled")
+        state = {"stranded_own": {pid: {"ts": time.time() - 60,
+                                        "typed": leftover}}}
+        res, logs = self._send(pid, _next_batch_text(), state)
+        self.assertEqual(wd._input_line_text(self._cap()), "", logs)
+        self.assertNotIn(pid, state.get("box_not_own", {}), logs)
+        nxt = _next_batch_text()
+        res2, logs2 = self._send(pid, nxt, state)
+        self.assertTrue(res2, logs2)
+        self.assertEqual(self._submitted(), [nxt], logs2)
+
     def test_owner_draft_is_untouched_with_the_truthful_verb(self):
         pid = self._start_with_box(OWNER_DRAFT)
         before = wd._box_norm_from_capture(self._cap())

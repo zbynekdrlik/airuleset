@@ -309,6 +309,38 @@ class PreSendGate(unittest.TestCase):
                             False, _noop, state=state, now=NOW)
         self.assertNotIn(PID, state[send_outcome.NOT_OWN_KEY])
 
+    def test_scrolled_recorded_leftover_is_cleared_whole(self):
+        # slice 1 recorded this stranded text; the box is SCROLLED, so as it
+        # shrinks the window shifts to our own earlier rows. The record proves
+        # the whole box: it is cleared like the janitor would, never marked
+        # not-own and stranded half-way.
+        text = partition_batch_text()
+        state = {"stranded_own": {PID: {"ts": NOW - 60, "typed": text}}}
+        fake = self._fake(text)
+        fake.visible_rows = 3
+        res, logs = self._send(fake, state)
+        self.assertEqual(fake.box, "", logs)
+        self.assertNotIn(PID, state.get(send_outcome.NOT_OWN_KEY, {}))
+        self.assertNotIn(PID, state.get("stranded_own", {}))
+
+    def test_one_clear_attempt_per_pane_per_episode(self):
+        box = partition_batch_text()
+        fake = self._fake(box, cls=_StuckBackspaceFake)
+        state = {}
+        self._send(fake, state)
+        sent = len(fake.sent)
+        res, logs = self._send(fake, state)
+        self.assertEqual(len(fake.sent), sent, "no second clear this episode")
+        self.assertTrue(any("already tried this episode" in ln for ln in logs),
+                        logs)
+
+    def test_a_box_longer_than_any_batch_is_held(self):
+        box = "nudge: [partition-audit] " + "slovo " * 300
+        fake = self._fake(box)
+        res, logs = self._send(fake, {})
+        self._assert_held(fake, box, res, logs,
+                          "box holds a non-machine draft — held")
+
     def test_a_bare_box_leaves_no_not_own_mark(self):
         state = {"stranded_own": {PID: {"ts": NOW - 60, "typed": "abc"}},
                  send_outcome.NOT_OWN_KEY: {PID: NOW - 120}}
