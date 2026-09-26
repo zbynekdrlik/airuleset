@@ -440,5 +440,43 @@ class ReviewRoundOne(_Base):
         self.assertIn("statusline-vocabulary-deep/DEEP-2.md", run("s-file"))
 
 
+class CallersTypeOnlyThePointer(_Base):
+    """Review round 1 (🟡5): `typed_texts()` in the shared fake expands a
+    pointer to its file, so the rider tests read the renderer's words. These
+    locks read the RAW literals the real callers put into the pane."""
+
+    def test_the_batch_caller_types_one_pointer_row(self):
+        from watchdog import goal, nudge_gate
+        text = partition_batch_text()
+        fake = self._fake(width=176, visible_rows=3)
+        logs, state = [], {}
+        goal._deliver_batch([("partition-audit", text.split("] ", 1)[1], None)],
+                            PID, "sid-1", "loc", self.tpath, fake, state, NOW,
+                            set(), None, lambda _s: None, logs, None)
+        composed = nudge_gate.compose_batch(
+            [("partition-audit", text.split("] ", 1)[1])],
+            max_chars=nudge_gate.BATCH_MAX_CHARS)[0]
+        self.assertEqual(len(fake.literals()), 1, logs)
+        line = fake.literals()[0]
+        self.assertTrue(_nf().is_pointer_line(line, require_file=True), line)
+        self.assertEqual(_nf().expand(line), composed)
+        self.assertTrue(any("batch-nudge loc -> 1 section(s)" in ln for ln in logs),
+                        logs)
+
+    def test_the_card_caller_types_one_pointer_row(self):
+        from watchdog import card_flags
+        text = ("report-owed: #41 (money gate) — napíš ## ✅ Work Complete a "
+                "pošli kartu; " + _long_text("card"))
+        fake = self._fake(width=176)
+        logs = []
+        ok = card_flags._send_flag_verified({}, PID, text, fake, self.tpath, NOW,
+                                            lambda _s: None, logs)
+        self.assertTrue(ok, logs)
+        self.assertEqual(len(fake.literals()), 1, fake.literals())
+        self.assertTrue(_nf().is_pointer_line(fake.literals()[0],
+                                              require_file=True))
+        self.assertEqual(_nf().expand(fake.literals()[0]), text)
+
+
 if __name__ == "__main__":
     unittest.main()
