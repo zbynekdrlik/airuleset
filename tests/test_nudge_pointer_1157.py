@@ -440,6 +440,98 @@ class ReviewRoundOne(_Base):
         self.assertIn("statusline-vocabulary-deep/DEEP-2.md", run("s-file"))
 
 
+class ReviewRoundTwo(_Base):
+    """The confirmation review: locks for the round-1 fixes that had no teeth,
+    and the two changes it asked for (a revival never dies on a full disk; an
+    aborted delivery does not mint a new file every sweep)."""
+
+    STRIP_CAP = ("● Hotovo.\n" + "─" * 60 + "\n❯ \n" + "─" * 60 +
+                 "\n  ctx ███░  caveman:lite\n  ↑/↓ to select · Enter to view\n"
+                 "\n❯ ● main\n")
+
+    def test_a_failed_write_on_the_stash_route_types_nothing(self):
+        from test_bounce_backstop import FakeTmux
+        cap = "● Hotovo.\n❯ moj rozpisany draft\n  ctx ███░  caveman:lite\n"
+        tmux = FakeTmux([(PID, CWD)], cap, model_stash=True)
+        with m.patch.object(_nf(), "write", side_effect=OSError(28, "No space")):
+            ok = wd._try_stash_nudge(PID, cap, _long_text("bounce"), tmux, False,
+                                     logs=[], nudge="bounce")
+        self.assertFalse(ok)
+        self.assertEqual(tmux.typed(), [])
+        self.assertEqual([a for a in tmux.sent if "send-keys" in a], [])
+        self.assertIsNone(tmux.stash)
+
+    def test_a_failed_write_sends_no_strip_escape_either(self):
+        fake = _WidthFake([(PID, "claude", CWD, "111")], self.STRIP_CAP,
+                          model_type=True, transcript_path=self.tpath, width=176)
+        self.assertTrue(wd._strip_selected(self.STRIP_CAP))
+        with m.patch.object(_nf(), "write", side_effect=OSError(28, "No space")):
+            res, logs = self._send(fake, _long_text("card"), nudge="card",
+                                   state={}, now=NOW)
+        self.assertEqual(getattr(res, "kind", None), "not-typed", logs)
+        self.assertEqual(fake.keys(), [], "not even the strip-deselect Escape")
+
+    def test_a_home_with_a_dot_segment_still_recognises_its_pointer(self):
+        os.environ["HOME"] = str(self.home) + "/."
+        nf = _nf()
+        path = nf.write("card", "obsah")
+        line = nf.pointer_line("card", "obsah", nf.display_path(path), 176)
+        self.assertTrue(nf.is_pointer_line(line, require_file=True), line)
+        self.assertEqual(nf.expand(line), "obsah")
+
+    def _hook(self, prompt, session):
+        import subprocess
+        hook = Path(__file__).resolve().parent.parent / "hooks" / \
+            "inject-situational-rule.sh"
+        env = {k: v for k, v in os.environ.items()
+               if k != "AIRULESET_NUDGE_FILE_DIR"}
+        env["TMPDIR"] = str(self.home)
+        payload = json.dumps({"session_id": session, "prompt": prompt,
+                              "hook_event_name": "UserPromptSubmit"})
+        return subprocess.run(["bash", str(hook)], input=payload, text=True,
+                              capture_output=True, env=env, timeout=30).stdout
+
+    def test_the_hook_never_reads_a_link_a_foreign_path_or_bad_bytes(self):
+        body = "stuck-check: over ops-wait tikety a W=12 parked."
+        self.ndir.mkdir(parents=True)
+        outside = self.home / "partition-audit-260926182600-a1b2.md"
+        outside.write_text(body)
+        link = self.ndir / "partition-audit-260926182600-b2c3.md"
+        os.symlink(outside, link)
+        bad = self.ndir / "partition-audit-260926182600-c3d4.md"
+        bad.write_bytes(b"ops-wait \xff\xfe W=12")
+        cases = {"link": "~/.claude/nudges/" + link.name,
+                 "outside": str(outside),
+                 "bad-bytes": "~/.claude/nudges/" + bad.name}
+        for name, path in cases.items():
+            with self.subTest(case=name):
+                out = self._hook("nudge: [partition-audit] — celý text: " + path,
+                                 "s-" + name)
+                self.assertNotIn("DEEP-2.md", out)
+
+    def test_a_long_revival_falls_back_to_continue_when_the_write_fails(self):
+        fake = self._fake(width=176)
+        with m.patch.object(_nf(), "write", side_effect=OSError(28, "No space")):
+            res, logs = self._send(fake, _long_text("resume"), nudge="resume",
+                                   state={}, now=NOW)
+        self.assertTrue(res, logs)
+        self.assertEqual(fake.literals(), ["continue"])
+        self.assertTrue(any("nudge file not written" in ln and "continue" in ln
+                            for ln in logs), logs)
+
+    def test_an_identical_nudge_reuses_its_file(self):
+        nf = _nf()
+        first = nf.write("card", "rovnaky text", now=NOW - 300)
+        os.utime(first, (NOW - 300, NOW - 300))
+        second = nf.write("card", "rovnaky text", now=NOW)
+        self.assertEqual(second, first)
+        self.assertEqual(len(self._files()), 1)
+        self.assertGreaterEqual(os.stat(first).st_mtime, NOW - 1, "mtime refreshed")
+        other = nf.write("bounce", "rovnaky text", now=NOW)
+        self.assertNotEqual(other, first)       # another kind is another file
+        self.assertNotEqual(nf.write("card", "iny text", now=NOW), first)
+
+
 class CallersTypeOnlyThePointer(_Base):
     """Review round 1 (🟡5): `typed_texts()` in the shared fake expands a
     pointer to its file, so the rider tests read the renderer's words. These
