@@ -123,12 +123,20 @@ class TestKeybarStructure1159(unittest.TestCase):
         self.assertEqual(self.html.count('id="keybar"'), 1)
         bar = self.html[self.html.index('<div id="keybar"'):]
         bar = bar[:bar.index("</div>")]
-        keys = re.findall(r'<button type="button" data-k="([a-z]+)">', bar)
+        keys = re.findall(r'<button type="button" data-k="([a-z]+)"[^>]*>', bar)
         self.assertEqual(keys, KEY_ORDER)
         import html as _h
         labels = [_h.unescape(x) for x in
-                  re.findall(r'data-k="[a-z]+">([^<]*)</button>', bar)]
+                  re.findall(r'data-k="[a-z]+"[^>]*>([^<]*)</button>', bar)]
         self.assertEqual(labels, LABELS)
+
+    def test_glyph_only_buttons_carry_an_invisible_aria_label(self):
+        bar = self.html[self.html.index('<div id="keybar"'):]
+        bar = bar[:bar.index("</div>")]
+        named = dict(re.findall(r'data-k="([a-z]+)" aria-label="([^"]+)"', bar))
+        self.assertEqual(named, {"up": "up", "down": "down", "left": "left",
+                                 "right": "right", "prevwin": "previous window",
+                                 "nextwin": "next window"})
 
     def test_no_explanatory_text_in_the_bar(self):
         # #671 ruling: no hints. The bar holds ONLY its buttons (no title=
@@ -185,11 +193,17 @@ class TestKeybarStructure1159(unittest.TestCase):
         self.assertIn("made[current]", press)
         self.assertIn("focusTerminal(f, current)", press)
 
-    def test_viewport_meta_keeps_the_bar_above_the_phone_keyboard(self):
-        # Android Chrome overlays the keyboard by default (resizes-visual), which
-        # would hide a bottom bar exactly when focusTerminal raises the keyboard.
-        self.assertIn('content="width=device-width, initial-scale=1, '
-                      'interactive-widget=resizes-content"', self.html)
+    def test_viewport_meta_is_untouched(self):
+        # The keyboard overlay is handled by keybarFitViewport, not by the
+        # `interactive-widget` viewport key: iOS Safari does not support it and
+        # WebKit logs an unrecognized viewport key as a console error.
+        self.assertIn('<meta name="viewport" content="width=device-width, '
+                      'initial-scale=1">', self.html)
+        self.assertNotIn("interactive-widget", self.html)
+
+    def test_viewport_fit_follows_the_visual_viewport_resize(self):
+        js = _keybar_script(self.html)
+        self.assertIn("visualViewport.addEventListener('resize', keybarFitViewport)", js)
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +244,19 @@ ctx.current = 2; ctx.keybarPress('windows');
 out.core = terms[2].sent;
 out.pasted = terms.map(t => t.pasted.length);
 out.focus = focus;
+// keybarFitViewport: [pointerCoarseNoHover, vv (or null), innerHeight] -> body height
+out.fit = [];
+for (const [touch, vv, ih] of [
+    [true, { height: 400.4, scale: 1 }, 800],   // keyboard up -> page = visual viewport
+    [true, { height: 800, scale: 1 }, 800],     // keyboard down -> natural height
+    [true, { height: 400, scale: 2 }, 800],     // pinch-zoom, not a keyboard -> untouched
+    [false, { height: 400, scale: 1 }, 800],    // desktop -> untouched
+    [true, null, 800]]) {                       // no visualViewport -> untouched
+  ctx.window = { visualViewport: vv, innerHeight: ih, matchMedia: (q) => ({ matches: touch && q === '(pointer: coarse) and (hover: none)' }) };
+  ctx.document.body = { style: { height: 'stale' } };
+  ctx.keybarFitViewport();
+  out.fit.push(ctx.document.body.style.height);
+}
 process.stdout.write(JSON.stringify(out));
 """
 
@@ -269,6 +296,9 @@ class TestKeybarNodeHarness1159(unittest.TestCase):
     def test_never_pastes(self):
         self.assertEqual(self.out["pasted"], [0, 0, 0])
 
+    def test_page_follows_the_visual_viewport_only_under_a_phone_keyboard(self):
+        self.assertEqual(self.out["fit"], ["400px", "", "", "", "stale"])
+
     def test_focus_returns_to_the_active_terminal_after_every_press(self):
         focus = self.out["focus"]
         self.assertEqual(len(focus), 2 * len(KEY_ORDER) + 2)
@@ -284,8 +314,9 @@ _STUB_TTYD = """<!DOCTYPE html>
 <body><textarea class="xterm-helper-textarea" aria-label="t"></textarea>
 <script>
 const arg = new URLSearchParams(location.search).get('arg');
-window.__sent = []; window.__focus = 0; window.__pasted = 0;
+window.__sent = []; window.__focus = 0; window.__pasted = 0; window.__blur = 0;
 const ta = document.querySelector('textarea');
+ta.addEventListener('blur', () => { window.__blur++; });
 const t = { options: {}, modes: { applicationCursorKeysMode: false },
   resize() {}, paste() { window.__pasted++; },
   focus() { window.__focus++; ta.focus(); } };
@@ -333,7 +364,7 @@ const KEYS = JSON.parse(KEYS_JSON);
   out.phone = await layout(p);
   const frameState = (i) => p.evaluate((i) => {
     const f = document.querySelectorAll('#frames iframe')[i], fw = f.contentWindow;
-    return { sent: fw.__sent.slice(), focus: fw.__focus, pasted: fw.__pasted,
+    return { sent: fw.__sent.slice(), focus: fw.__focus, pasted: fw.__pasted, blur: fw.__blur,
              parentActive: document.activeElement === f,
              innerActive: fw.document.activeElement && fw.document.activeElement.tagName };
   }, i);
@@ -343,6 +374,7 @@ const KEYS = JSON.parse(KEYS_JSON);
     await p.tap(sel);
   };
   out.normal = {}; out.focusAfter = {};
+  const blur0 = (await frameState(0)).blur;
   for (const k of KEYS) {
     const before = await frameState(0);
     await tap(k);
@@ -350,6 +382,7 @@ const KEYS = JSON.parse(KEYS_JSON);
     out.normal[k] = after.sent.slice(before.sent.length);
     out.focusAfter[k] = { refocused: after.focus > before.focus, parentActive: after.parentActive, innerActive: after.innerActive };
   }
+  out.blurDuringKeys = (await frameState(0)).blur - blur0;   // a tap must never blur the terminal
   await p.evaluate(() => { document.querySelectorAll('#frames iframe')[0].contentWindow.term.modes.applicationCursorKeysMode = true; });
   out.app = {};
   for (const k of ['up', 'down', 'left', 'right']) {
@@ -478,6 +511,11 @@ class TestKeybarBrowser1159(unittest.TestCase):
 
     def test_never_pastes(self):
         self.assertEqual(self.out["pasted"], [0, 0, 0])
+
+    def test_a_tap_never_blurs_the_terminal(self):
+        # the mousedown preventDefault: without it every tap blurs the terminal
+        # (drops the phone keyboard) before focusTerminal refocuses it.
+        self.assertEqual(self.out["blurDuringKeys"], 0)
 
     def test_focus_returns_to_the_terminal(self):
         for k, st in self.out["focusAfter"].items():
