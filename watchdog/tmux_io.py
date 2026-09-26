@@ -1270,8 +1270,12 @@ def send_verified(pane_id, text, run=None, tpath=None, sleep_fn=None, logs=None,
     cap = watchdog.capture_pane(pane_id, run, lines=40)
     if watchdog._input_line_text(cap) != "":
         watchdog._draft_rescue_persist(pane_id, cap, logs=logs)
-        _log("send-verified abort: box not bare pre-send")
+        # #1157 slice 2 -- our OWN stale text (idle pane, readable box, proven)
+        # is cleared here; the next sweep delivers. Anything else is held.
+        _log("send-verified abort: box not bare pre-send -- " + _so.presend_reclaim(
+            pane_id, run, cap, sleep_fn, _log, state, now))
         return _so.OUT_NOT_TYPED
+    _so.note_bare(state, pane_id)
     # #1092 (c) -- the PER-PANE typing-attempt BUDGET, consulted BEFORE any
     # keystroke. A GATED machine nudge (a threaded `nudge=` that is not a RECOVERY
     # revival kind, with `state` to read/write, and NOT the owner's own reply) is
