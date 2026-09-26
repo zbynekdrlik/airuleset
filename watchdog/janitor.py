@@ -441,7 +441,8 @@ def _janitor_prune_parks(state, live_pids):
     if state is None or not live_pids:
         return
     live = set(live_pids)
-    for recs in (state.get("stash_parks"), state.get("stranded_own")):  # + #1157
+    for recs in (state.get("stash_parks"), state.get("stranded_own"),  # + #1157
+                 state.get("box_not_own")):                         # slice 2
         for pid in [p for p in (recs or {}) if p not in live]:
             recs.pop(pid, None)
 

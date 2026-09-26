@@ -173,6 +173,11 @@ class PreSendGate(unittest.TestCase):
         self.assertTrue(res, logs)
         self.assertNotIn(PID, state.get(send_outcome.NOT_OWN_KEY, {}), state)
 
+    def test_a_dead_panes_not_own_mark_is_pruned(self):
+        state = {send_outcome.NOT_OWN_KEY: {PID: NOW, "%1": NOW}}
+        wd._janitor_prune_parks(state, ["%1"])
+        self.assertEqual(state[send_outcome.NOT_OWN_KEY], {"%1": NOW})
+
     def test_occupied_stash_slot_is_held(self):
         box = partition_batch_text()
         fake = self._fake(box, cls=_StashedFake)
