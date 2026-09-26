@@ -83,6 +83,38 @@ class _StripSelectedFake(DeliverGoalFakeTmux):
         return super()._render() + "  ❯ ● main\n"
 
 
+class _ChangesAfterGateFake(DeliverGoalFakeTmux):
+    """From the SECOND capture on (after the gate's read) a spinner renders
+    above the box (a turn started) or the stash marker shows."""
+
+    def __init__(self, *a, extra="", **kw):
+        super().__init__(*a, **kw)
+        self._caps, self.extra = 0, extra
+
+    def __call__(self, argv, timeout=8):
+        if "capture-pane" in " ".join(argv):
+            self._caps += 1
+        return super().__call__(argv, timeout)
+
+    def _render(self):
+        base = super()._render()
+        if self._caps < 2:
+            return base
+        if self.extra == "stash":
+            return base + "  › stashed\n"
+        return base.replace("● Hotovo.", "✳ Baking… (2m 30s · esc to interrupt)")
+
+
+class _StuckBackspaceFake(DeliverGoalFakeTmux):
+    """BSpace never lands: the clear cannot converge."""
+
+    def __call__(self, argv, timeout=8):
+        if "send-keys" in argv and "BSpace" in argv:
+            self.sent.append(argv)
+            return ""
+        return super().__call__(argv, timeout)
+
+
 class PreSendGate(unittest.TestCase):
 
     def _fake(self, box, cls=DeliverGoalFakeTmux):
@@ -216,6 +248,66 @@ class PreSendGate(unittest.TestCase):
         fake = self._fake(box, cls=_StripSelectedFake)
         res, logs = self._send(fake, {})
         self._assert_held(fake, box, res, logs, "agent strip selected — held")
+
+    def test_turn_starting_after_the_gate_read_is_never_keyed(self):
+        box = partition_batch_text()
+        fake = self._fake(box, cls=_ChangesAfterGateFake)
+        res, logs = self._send(fake, {})
+        self._assert_held(fake, box, res, logs, "stopped clearing")
+        self.assertTrue(any("(busy, 0 chars removed)" in ln for ln in logs), logs)
+
+    def test_stash_marker_after_the_gate_read_is_never_keyed(self):
+        box = partition_batch_text()
+        fake = self._fake(box, cls=_ChangesAfterGateFake)
+        fake.extra = "stash"
+        res, logs = self._send(fake, {})
+        self.assertEqual(fake.keys(), [], logs)
+        self.assertTrue(any("(stash-occupied, 0 chars removed)" in ln
+                            for ln in logs), logs)
+
+    def test_a_clear_that_does_not_converge_is_not_logged_cleared(self):
+        box = partition_batch_text()
+        fake = self._fake(box, cls=_StuckBackspaceFake)
+        res, logs = self._send(fake, {})
+        self.assertFalse(res, logs)
+        self.assertFalse(any("cleared stale own machine text" in ln
+                             for ln in logs), logs)
+        self.assertTrue(any("stopped clearing" in ln and "not-converged" in ln
+                            for ln in logs), logs)
+
+    def test_batch_head_row_ending_at_the_bracket_is_ours(self):
+        # a narrow pane wraps right after `[partition-audit]`
+        box = partition_batch_text()
+        fake = self._fake(box)
+        fake.wrap_width = 30
+        self.assertEqual(wd._input_box_head_text(fake._render()),
+                         "nudge: [partition-audit]")
+        self._send(fake, {})
+        self.assertEqual(fake.box, "")
+
+    def test_janitor_honours_the_not_own_mark_despite_a_fresh_watch(self):
+        # every delivering caller re-stamps the watch right before its send; a
+        # not-own verdict must still keep the janitor's prefix clear away
+        box = partition_batch_text() + APPEND
+        fake = self._fake(box)
+        state = {send_outcome.NOT_OWN_KEY: {PID: NOW - 60}}
+        wd._janitor_mark_watch(state, PID, NOW)
+        wd._janitor_recover(fake, {}, PID, CWD, fake._render(), "loc", None,
+                            False, _noop, state=state, now=NOW)
+        self.assertEqual(fake.keys(), [])
+        self.assertEqual(fake.box, box)
+        # control: without the mark the same janitor call clears it
+        state[send_outcome.NOT_OWN_KEY] = {}
+        wd._janitor_recover(fake, {}, PID, CWD, fake._render(), "loc", None,
+                            False, _noop, state=state, now=NOW)
+        self.assertEqual(fake.box, "")
+
+    def test_janitor_seeing_a_bare_box_drops_the_mark(self):
+        fake = self._fake("")
+        state = {send_outcome.NOT_OWN_KEY: {PID: NOW - 60}}
+        wd._janitor_recover(fake, {}, PID, CWD, fake._render(), "loc", None,
+                            False, _noop, state=state, now=NOW)
+        self.assertNotIn(PID, state[send_outcome.NOT_OWN_KEY])
 
     def test_a_bare_box_leaves_no_not_own_mark(self):
         state = {"stranded_own": {PID: {"ts": NOW - 60, "typed": "abc"}},
