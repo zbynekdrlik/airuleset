@@ -53,10 +53,10 @@ from pathlib import Path
 
 import cli_aliases  # #592: the shared fleet target-alias derivation (stdlib-only)
 import cli_webterm_profiles as profiles  # #612: doména -> session set + auth realm
-# #694: the dashboard HTML/CSS/JS template extracted to a sibling
-# pure-constant leaf; the `@@…@@` single-pass substitution contract stays
-# in render_dashboard_html below.
+# #694/#1159: dashboard template + touch key bar = sibling pure-constant leaves;
+# the `@@…@@` single-pass substitution contract stays in render_dashboard_html.
 from cli_webterm_dash_template import DASHBOARD_TEMPLATE as _DASHBOARD_TEMPLATE
+from cli_webterm_keybar import KEYBAR_CSS, KEYBAR_HTML
 
 REPO_DIR = Path(__file__).resolve().parent
 CLAUDE_DIR = Path.home() / ".claude"
@@ -1116,15 +1116,15 @@ def render_dashboard_html(inventory, ttyd_base=None, term_grid=None, human=None,
     cfg = {"ttyd_base": ttyd_base, "sessions": tabs,
            "term_cols": term_cols, "term_rows": term_rows,
            "u_status": human == WEBTERM_LOGIN_USER or bool(lane_u_status)}
-    # #694: vestigial @@COUNT@@ dropped (absent from template since #671/#674).
     subst = {"@@BUTTONS@@": buttons, "@@CFG_JSON@@": _json_for_script(cfg),
              # #643: the Campbell palette as an xterm.js theme object literal.
-             "@@THEME_JSON@@": _json_for_script(CAMPBELL_THEME)}
+             "@@THEME_JSON@@": _json_for_script(CAMPBELL_THEME),
+             "@@KEYBAR_CSS@@": KEYBAR_CSS, "@@KEYBAR_HTML@@": KEYBAR_HTML}  # #1159
     # SINGLE PASS over the TEMPLATE — inserted content (an inventory label in a
     # button, the config JSON, the theme object) is never re-scanned, so a label
     # that happens to equal a `@@…@@` sentinel can't splice a later substitution
     # into itself.
-    return re.sub(r"@@(?:BUTTONS|CFG_JSON|THEME_JSON)@@",
+    return re.sub(r"@@(?:BUTTONS|CFG_JSON|THEME_JSON|KEYBAR_CSS|KEYBAR_HTML)@@",
                   lambda mo: subst[mo.group(0)], _DASHBOARD_TEMPLATE)
 
 

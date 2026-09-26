@@ -93,7 +93,7 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
    pracovnu plochu nie tvoje blbe vysvetlivky"): the copy/paste footer hint strip
    is removed entirely so the terminal reclaims the height. The select/copy/paste
    FUNCTIONALITY (attachClipboard) stays; only the visible strip is gone. */
-</style>
+@@KEYBAR_CSS@@</style>
 </head>
 <body>
 <div id="tabbar">
@@ -149,7 +149,7 @@ function themeTerminal(term) {           // idempotent: applied once per termina
   term.__wtThemed = true;
 }
 const frames = document.getElementById('frames');
-const made = {};
+const made = {};                          // #1159: made/current/focusTerminal are also read by the key bar (cli_webterm_keybar.py)
 let current = 0;                          // the active tab index (tab click / Ctrl+Alt+1..9)
 function ttydSrc(s) { return CFG.ttyd_base + '/?arg=' + encodeURIComponent(s.id); }
 function makeFrame(idx, s) {                // #586: create + CONNECT one iframe ONCE, hidden.
@@ -1006,6 +1006,7 @@ CFG.sessions.forEach(function (s, i) {
   if (f) monitorConnection(f, i);
 });
 </script>
+@@KEYBAR_HTML@@
 </body>
 </html>
 """

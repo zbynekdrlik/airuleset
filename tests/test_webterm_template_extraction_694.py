@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 REPO = Path(__file__).resolve().parent.parent
 
-_SENTINELS = {"@@BUTTONS@@", "@@CFG_JSON@@", "@@THEME_JSON@@"}
+_SENTINELS = {"@@BUTTONS@@", "@@CFG_JSON@@", "@@THEME_JSON@@", "@@KEYBAR_CSS@@", "@@KEYBAR_HTML@@"}  # KEYBAR: #1159
 
 
 def _inv():
