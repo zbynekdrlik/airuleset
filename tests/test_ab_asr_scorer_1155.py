@@ -209,7 +209,7 @@ class RunAndCut(unittest.TestCase):
 
         def fake_run(cmd, **kw):
             seen.append(cmd)
-            return mock.Mock(returncode=0 if "s1" in cmd[2] else 1)
+            return mock.Mock(returncode=0 if Path(cmd[2]).parent.name == "s1" else 1)
 
         buf = io.StringIO()
         with mock.patch("subprocess.run", fake_run), contextlib.redirect_stdout(buf):
