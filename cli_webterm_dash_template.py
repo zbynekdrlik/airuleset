@@ -85,12 +85,6 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
    vysvetlivky". */
 .tab.wt-offline .ico { color: #666666; }
 .tab .al { overflow: hidden; text-overflow: ellipsis; }
-#nav { position: sticky; left: 0; z-index: 1; display: inline-flex; gap: 2px;
-  padding-right: 4px; margin-right: 2px; background: #0C0C0C; flex: 0 0 auto; }
-.cyc { cursor: pointer; border: 1px solid #2b2b2b; border-radius: 6px;
-  background: #1b1b1b; color: #9a9a9a; font: inherit; line-height: 1;
-  padding: 6px 9px; }
-.cyc:hover { background: #262626; color: #CCCCCC; }
 #frames { position: relative; flex: 1 1 auto; overflow: hidden; /* #700: clips the stretch spill */ }
 #frames iframe.term { position: absolute; inset: 0; width: 100%; height: 100%;
   border: 0; background: #0C0C0C; }
@@ -103,7 +97,6 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
 </head>
 <body>
 <div id="tabbar">
-<span id="nav"><button class="cyc" id="fs" title="Fullscreen — Ctrl+W pôjde do terminálu (Keyboard Lock)">&#9974;</button></span>
 @@BUTTONS@@
 </div>
 <div id="frames"></div>
@@ -773,8 +766,8 @@ function applyFixedGrid(f) {                     // poll for window.term, fit, t
 }
 document.querySelectorAll('.tab').forEach((t) =>
   t.addEventListener('click', () => activate(+t.dataset.idx)));
-// #674: the prev/next cycle arrows and the ? help toggle are removed (owner: keep
-// only fullscreen); tab switching stays via tab clicks + Ctrl+Alt+1..9 (onHotkey).
+// #674: the prev/next cycle arrows and the ? help toggle are removed; #1158 then
+// removed fullscreen too. Tab switching stays via tab clicks + Ctrl+Alt+1..9 (onHotkey).
 // #671 REWORK (owner ruling 2026-08-25): the copy/paste footer hint strip + its
 // isSecureContext honesty-rewrite are removed entirely (owner: "potrebujem hlavne
 // pracovnu plochu nie tvoje blbe vysvetlivky"). The copy bridge (attachClipboard)
@@ -790,38 +783,8 @@ window.addEventListener('beforeunload', (e) => {
   e.preventDefault();
   e.returnValue = '';                     // Chrome's standard leave-page confirm
 });
-// Layer 2 — a Fullscreen button that requests fullscreen + Keyboard Lock, so
-// Chrome delivers Ctrl+W (and Ctrl+T/N) to the PAGE => the terminal as
-// delete-word, not the browser. Feature-detected + gated on a SECURE CONTEXT:
-// the Keyboard Lock API is only exposed on HTTPS/localhost, so over the plain-HTTP
-// tailnet `navigator.keyboard` is undefined and the button is disabled — with a
-// title that names the REAL reason (needs HTTPS) rather than a false "browser
-// unsupported". Layer 1 (the close-confirm) still protects Ctrl+W there.
-const KB_LOCK_KEYS = ['KeyW', 'KeyT', 'KeyN'];
-function keyboardLockSupported() {
-  return !!(document.documentElement.requestFullscreen
-            && window.isSecureContext
-            && navigator.keyboard && navigator.keyboard.lock);
-}
-async function goFullscreen() {
-  try {
-    await document.documentElement.requestFullscreen();
-    if (navigator.keyboard && navigator.keyboard.lock) {
-      await navigator.keyboard.lock(KB_LOCK_KEYS);
-    }
-  } catch (err) { /* denied/unsupported — the hint documents the fallbacks */ }
-}
-const fsBtn = document.getElementById('fs');
-if (fsBtn) {
-  if (keyboardLockSupported()) {
-    fsBtn.addEventListener('click', goFullscreen);
-  } else {
-    fsBtn.disabled = true;
-    fsBtn.title = !window.isSecureContext
-      ? 'Keyboard Lock vyžaduje HTTPS/localhost — cez HTTP tailnet Ctrl+W chráni potvrdenie pri zatváraní'
-      : 'Fullscreen + Keyboard Lock nie je v tomto prehliadači podporený';
-  }
-}
+// #1158 (owner 26.9.2026): the Layer-2 Fullscreen + Keyboard Lock button is
+// removed ("len zavadzia"); Layer 1 above still guards a stray Ctrl+W.
 window.addEventListener('keydown', onHotkey);   // Ctrl+Alt+1..9 when the bar is focused
 preloadAll();                           // #586: connect every tab up front (instant switching)
 if (CFG.sessions.length) activate(0);   // land in the first terminal, not a landing page
