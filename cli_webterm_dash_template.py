@@ -22,7 +22,7 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 <html lang="sk">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content"><!-- #1159: a phone keyboard shrinks the layout, so the key bar stays above it -->
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>fleet terminal</title><!-- #655: real domain set client-side from location.hostname (below) -->
 <!-- #644: installable PWA — standalone window, no browser chrome. The manifest
      (per-domain name), icons and service worker are served by the gateway from
@@ -149,7 +149,7 @@ function themeTerminal(term) {           // idempotent: applied once per termina
   term.__wtThemed = true;
 }
 const frames = document.getElementById('frames');
-const made = {};
+const made = {};                          // #1159: made/current/focusTerminal are also read by the key bar (cli_webterm_keybar.py)
 let current = 0;                          // the active tab index (tab click / Ctrl+Alt+1..9)
 function ttydSrc(s) { return CFG.ttyd_base + '/?arg=' + encodeURIComponent(s.id); }
 function makeFrame(idx, s) {                // #586: create + CONNECT one iframe ONCE, hidden.

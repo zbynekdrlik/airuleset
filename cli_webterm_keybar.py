@@ -12,7 +12,10 @@ core `triggerDataEvent(data, true)` (ttyd 1.7.4's xterm has no public
 `input`). Never `term.paste()`: bracketed paste would wrap the bytes and tmux
 would never see its prefix key. Arrows follow xterm's application-cursor mode
 (`ESC O A` vs `ESC [ A`). After each press focus returns to the terminal via
-the dashboard's own `focusTerminal`, so the phone keyboard stays up.
+the dashboard's own `focusTerminal`, so the phone keyboard stays up; while it
+is up, `keybarFitViewport` sizes the page to the visual viewport so the
+keyboard never covers the bar (the viewport meta stays untouched: iOS ignores
+`interactive-widget` and WebKit logs it as a console error).
 
 PURE CONSTANT LEAF (same contract as `cli_webterm_dash_template`, locked by
 `tests/test_webterm_keybar_1159.py`): zero imports, zero defs. The dashboard
@@ -44,16 +47,16 @@ KEYBAR_CSS = """/* #1159: the touch-only key bar. Hidden (inert) unless the prim
 KEYBAR_HTML = r"""<div id="keybar">
 <button type="button" data-k="esc">Esc</button>
 <button type="button" data-k="tab">Tab</button>
-<button type="button" data-k="up">&#8593;</button>
-<button type="button" data-k="down">&#8595;</button>
-<button type="button" data-k="left">&#8592;</button>
-<button type="button" data-k="right">&#8594;</button>
+<button type="button" data-k="up" aria-label="up">&#8593;</button>
+<button type="button" data-k="down" aria-label="down">&#8595;</button>
+<button type="button" data-k="left" aria-label="left">&#8592;</button>
+<button type="button" data-k="right" aria-label="right">&#8594;</button>
 <button type="button" data-k="ctrlc">^C</button>
 <span class="kb-gap"></span>
 <button type="button" data-k="sessions">sessions</button>
 <button type="button" data-k="windows">windows</button>
-<button type="button" data-k="prevwin">&#9664; win</button>
-<button type="button" data-k="nextwin">win &#9654;</button>
+<button type="button" data-k="prevwin" aria-label="previous window">&#9664; win</button>
+<button type="button" data-k="nextwin" aria-label="next window">win &#9654;</button>
 <button type="button" data-k="scroll">scroll</button>
 </div>
 <script>
@@ -91,6 +94,19 @@ function keybarPress(k) {            // the ACTIVE tab only; hidden tabs never r
   } catch (e) { /* iframe realm gone / term not ready: drop the key */ }
   focusTerminal(f, current);          // keep the terminal (and phone keyboard) focused
 }
+// A phone keyboard OVERLAYS the page (Android Chrome's default, iOS Safari), so
+// it would cover a bottom bar. While the visual viewport is shorter than the
+// layout viewport (keyboard up), size the page to the visual viewport so the
+// bar sits just above the keyboard. Touch-only, and never under a pinch-zoom
+// (scale != 1 shrinks the visual viewport too, but that is not a keyboard).
+function keybarFitViewport() {
+  const vv = window.visualViewport;
+  if (!vv) return;
+  const touch = !!(window.matchMedia && window.matchMedia('(pointer: coarse) and (hover: none)').matches);
+  const h = Math.round(vv.height);
+  const keyboard = touch && Math.abs(vv.scale - 1) < 0.01 && h < window.innerHeight - 1;
+  document.body.style.height = keyboard ? h + 'px' : '';
+}
 (function () {
   const bar = document.getElementById('keybar');
   if (!bar) return;
@@ -101,5 +117,6 @@ function keybarPress(k) {            // the ACTIVE tab only; hidden tabs never r
     const b = e.target && e.target.closest ? e.target.closest('button[data-k]') : null;
     if (b) keybarPress(b.dataset.k);
   });
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', keybarFitViewport);
 })();
 </script>"""
