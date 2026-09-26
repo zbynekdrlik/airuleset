@@ -317,11 +317,13 @@ def watch_provenance(state, pid, now):
 
 
 def _presend_own(pid, cap, state, now):
-    """#1157 slice 2 — True only when the (readable, idle) box provably holds
-    OUR OWN stale machine text and nothing else. In order:
+    """#1157 slice 2 — which proof shows the (readable, idle) box holds only
+    OUR OWN stale machine text: "record", "shape", or None (not provably ours).
+    In order:
       * a `stranded_own` record decides ALONE when it can
-        (`stranded_reclaimable`): our exact text is ours, a box that is no
-        longer just it is not, and neither falls through to the shape check;
+        (`stranded_reclaimable`): our exact text is "record" (the record proves
+        the WHOLE box, scrolled renders included), a box that is no longer just
+        it is not ours, and neither falls through to the shape check;
       * a standing not-own mark (`mark_not_own`) refuses;
       * the existing own recogniser `_looks_like_own_stuck_content` on the HEAD
         row, narrowed to the one shape a human never types: the batch composer's
@@ -332,21 +334,22 @@ def _presend_own(pid, cap, state, now):
         placeholder, and every delivering caller stamps this pane's
         `janitor_watch` right before the send, so the watch proves nothing.
     Residual, stated: with no record and no mark, our batch head followed by
-    words a human appended is not told apart; the gate's draft-rescue snapshot
-    holds them, and the clear never reaches past the visible, proven text."""
+    words a human appended is not told apart (nor a batch head the owner quoted
+    at the top of a SCROLLED draft); the gate's draft-rescue snapshot holds
+    them, and the clear never reaches past the visible, proven text."""
     rec = stranded_reclaimable(state, pid, cap, now)
     if rec is not None:
-        return rec
+        return "record" if rec else None
     if (state or {}).get(NOT_OWN_KEY, {}).get(pid) is not None:
-        return False
+        return None
     head = (watchdog._input_box_head_text(cap) or "").strip()
     if not watchdog._looks_like_own_stuck_content(head):
-        return False
+        return None
     from watchdog import nudge_gate as _ng
-    return (len(watchdog._box_norm_from_capture(cap)) <= _ng.BATCH_MAX_CHARS
-            and any((head + " ").startswith("%s [%s] " % (_ng.BATCH_PREFIX,
-                                                            cat))
-                    for cat in _ng.GATED_CATEGORIES))   # a row may end at `]`
+    ok = (len(watchdog._box_norm_from_capture(cap)) <= _ng.BATCH_MAX_CHARS
+          and any((head + " ").startswith("%s [%s] " % (_ng.BATCH_PREFIX, cat))
+                  for cat in _ng.GATED_CATEGORIES))    # a row may end at `]`
+    return "shape" if ok else None
 
 
 def _ns(cap):
@@ -385,16 +388,21 @@ def _clear_proven_own(pid, run, proven_ns, sleep_fn):
     return "not-converged", removed
 
 
-def presend_reclaim(pid, run, cap, sleep_fn, state, now):
+def presend_reclaim(pid, run, cap, sleep_fn, state, now, log_fn):
     """#1157 slice 2 — `send_verified`'s pre-send gate found the box not bare.
     Clear it ONLY when state is threaded (the not-own mark and the records live
     there; a stateless caller, the owner's own Discord reply among them, never
     clears), the pane is idle (no running / waiting turn), the box is readable,
     the stash slot is free, the agent strip is not selected, and the box
     provably holds only our own stale text (`_presend_own`). A fresh capture
-    right before the first key must show the same box; the clear itself
-    (`_clear_proven_own`) never reaches past that proven text. A box that
-    changed, before or during the clear, is marked not-own: a human is typing.
+    right before the first key must show the same box. A RECORD-proven box
+    gets the janitor's own full clear (`_janitor_clear_box`, exactly what
+    `_janitor_recover` does for that record: a scrolled own box shifts its
+    window as it shrinks, which the bounded clear would misread as a change);
+    a SHAPE-proven box gets `_clear_proven_own`, which never reaches past the
+    visible proven text. A shape-proven box that changed, before or during the
+    clear, is marked not-own: a human is typing. One clear attempt per pane per
+    episode (the #1113 (c) lock the janitor's provenance-free clears share).
     The caller types NOTHING in this call either way (the next sweep delivers
     into the bare box). The clear is recovery (`kind="janitor"`, ungated by the
     #994 switch, #1002), like every other janitor clear of our own text.
@@ -410,16 +418,28 @@ def presend_reclaim(pid, run, cap, sleep_fn, state, now):
     if watchdog._strip_selected(cap):          # keys would go to the strip
         return "agent strip selected — held"
     now = time.time() if now is None else now
-    if not _presend_own(pid, cap, state, now):
+    mode = _presend_own(pid, cap, state, now)
+    if mode is None:
         return HELD_DRAFT
     proven = _ns(cap)
     fresh = watchdog.capture_pane(pid, run, lines=40)
     if _ns(fresh) != proven:
         mark_not_own(state, pid, now)
-        return "box changed under the check — held"
-    status, removed = _clear_proven_own(pid, run, proven, sleep_fn)
+        return "box changed under the check — held, pane marked not-own"
+    from watchdog import janitor as _jan
+    if _jan._template_clear_locked(state, pid, now):
+        return "pre-send clear already tried this episode — held"
+    _jan._mark_template_clear(state, pid, now)
+    if mode == "record":
+        status = ("bare" if watchdog._janitor_clear_box(pid, run, sleep_fn,
+                                                        log_fn)
+                  else "not-converged")
+        removed = len(watchdog._box_norm_from_capture(cap))
+    else:
+        status, removed = _clear_proven_own(pid, run, proven, sleep_fn)
     if status == "changed":
         mark_not_own(state, pid, now)
+        status = "changed, pane marked not-own"
     if status != "bare":
         return ("pre-send: stopped clearing stale own machine text (%s, %d "
                 "chars removed) — held" % (status, removed))
