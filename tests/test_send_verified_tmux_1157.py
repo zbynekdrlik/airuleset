@@ -53,7 +53,15 @@ class RealPrivateTmuxBox(unittest.TestCase):
         self.tpath = Path(tmp.name) / "sess.jsonl"
         self.tpath.write_text(json.dumps(
             {"type": "assistant", "message": {"content": "predosla praca"}}) + "\n")
+        self.addCleanup(self._unlink_socket)       # after kill-server (LIFO)
         self.addCleanup(self._tmux, "kill-server")
+
+    def _unlink_socket(self):
+        # kill-server leaves the socket file behind (#548: never litter /tmp)
+        sock = Path(os.environ.get("TMUX_TMPDIR", "/tmp"),
+                    "tmux-%d" % os.getuid(), self.sock)
+        if sock.is_socket():
+            sock.unlink()
 
     def _tmux(self, *args):
         return subprocess.run(["tmux", "-L", self.sock, "-f", "/dev/null", *args],

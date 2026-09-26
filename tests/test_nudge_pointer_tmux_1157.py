@@ -55,7 +55,15 @@ class PointerRowOnRealTmux(unittest.TestCase):
         self.tpath.write_text(json.dumps(
             {"type": "assistant", "message": {"content": "predosla praca"}}) + "\n")
         self.literals, self.max_rows_seen = [], 0
+        self.addCleanup(self._unlink_socket)       # after kill-server (LIFO)
         self.addCleanup(self._tmux, "kill-server")
+
+    def _unlink_socket(self):
+        # kill-server leaves the socket file behind (#548: never litter /tmp)
+        sock = Path(os.environ.get("TMUX_TMPDIR", "/tmp"),
+                    "tmux-%d" % os.getuid(), self.sock)
+        if sock.is_socket():
+            sock.unlink()
 
     def _tmux(self, *args):
         return subprocess.run(["tmux", "-L", self.sock, "-f", "/dev/null", *args],
@@ -123,7 +131,7 @@ class PointerRowOnRealTmux(unittest.TestCase):
         self.assertGreater(len(wrap_rows(text, 176)), 3,
                            "the paragraph itself would have scrolled")
         self._assert_one_row_delivery(text, res, logs, 176)
-        self.assertTrue(any("typing a" in ln and "pane width 176" in ln
+        self.assertTrue(any("pointer" in ln and "pane width 176" in ln
                             for ln in logs), logs)
 
     def test_narrow_80_column_pane_still_gets_one_row(self):

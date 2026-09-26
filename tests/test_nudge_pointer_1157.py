@@ -294,5 +294,151 @@ class RecognisersAcceptThePointer(_Base):
             str(self.tpath), tmux_io._subagent_nudge_signature(wid)))
 
 
+class ReviewRoundOne(_Base):
+    """Findings of the two fresh-context reviews of slice 3."""
+
+    def test_the_stash_route_types_the_pointer_too(self):
+        # bounce / gk-request / card into a pane holding an owner draft go
+        # through `_try_stash_nudge` -> `deliver_with_stash`, not send_verified
+        from test_bounce_backstop import FakeTmux
+        cap = "● Hotovo.\n❯ moj rozpisany draft\n  ctx ███░  caveman:lite\n"
+        tmux = FakeTmux([(PID, CWD)], cap, model_stash=True)
+        text = _long_text("gk-request")
+        logs = []
+        ok = wd._try_stash_nudge(PID, cap, text, tmux, False, logs=logs,
+                                 nudge="gk-request")
+        self.assertTrue(ok, logs)
+        self.assertEqual(len(tmux.typed()), 1, tmux.typed())
+        line = tmux.typed()[0]
+        self.assertTrue(_nf().is_pointer_line(line, require_file=True), line)
+        self.assertEqual(_nf().expand(line), text)
+        self.assertEqual(tmux.submitted, [line])
+        self.assertEqual(tmux.stash, "moj rozpisany draft")
+
+    def test_presend_refuses_a_gated_pointer_with_appended_words(self):
+        nf = _nf()
+        text = partition_batch_text()
+        path = nf.write("partition-audit", text)
+        line = nf.pointer_line("partition-audit", text, nf.display_path(path), 176)
+        cap = ("● Hotovo.\n\n" + "─" * 176 + "\n❯\xa0" + line
+               + " a toto som dopisal ja\n" + "─" * 176 + "\n  ⏸ manual mode on\n")
+        self.assertIsNone(send_outcome._presend_own(PID, cap, {}, time.time()))
+
+    def test_a_pointer_rendered_on_two_rows_is_undone_never_submitted(self):
+        # tmux reports 176 columns, the box wraps at 40: the exact one-row
+        # compare fails, so the type is backed out and Enter never sent
+        fake = self._fake(width=176, wrap_width=40)
+        res, logs = self._send(fake, _long_text("card"), nudge="card", state={},
+                               now=NOW)
+        self.assertEqual(getattr(res, "kind", None), "typed-undone", logs)
+        self.assertNotIn("Enter", fake.keys())
+        self.assertEqual(fake.box, "")
+        self.assertEqual(self._submitted(), [])
+
+    def test_a_failed_file_write_types_nothing(self):
+        fake = self._fake(width=176)
+        with m.patch.object(_nf(), "write", side_effect=OSError(28, "No space")):
+            res, logs = self._send(fake, _long_text("card"), nudge="card",
+                                   state={}, now=NOW)
+        self.assertEqual(getattr(res, "kind", None), "not-typed", logs)
+        self.assertEqual(fake.literals(), [])
+        self.assertEqual([k for k in fake.keys() if k == "Escape"], [])
+        self.assertTrue(any("nudge file not written" in ln for ln in logs), logs)
+
+    def test_unknown_width_falls_back_to_the_wrap_aware_verify(self):
+        fake = self._fake(width=176)
+        fake.width = 0                      # tmux gives no usable width
+        res, logs = self._send(fake, _long_text("card"), nudge="card", state={},
+                               now=NOW)
+        self.assertTrue(res, logs)
+        self.assertTrue(any("pane width unknown -- not one row" in ln
+                            for ln in logs), logs)
+        self.assertLessEqual(_nf().cells(self._submitted()[-1]), 80 - 6)
+
+    def test_a_short_one_row_revival_is_typed_as_is_without_a_file(self):
+        fake = self._fake(width=176)
+        with m.patch.object(_nf(), "write", side_effect=OSError(28, "No space")):
+            res, logs = self._send(fake, "continue", nudge="resume", state={},
+                                   now=NOW)
+        self.assertTrue(res, logs)
+        self.assertEqual(fake.literals(), ["continue"])
+        self.assertEqual(self._files(), [])
+
+    def test_the_pointer_log_does_not_claim_the_type(self):
+        fake = self._fake(width=176)
+        res, logs = self._send(fake, _long_text("card"), nudge="card", state={},
+                               now=NOW)
+        line = next(ln for ln in logs if ln.startswith("nudge-file card ->"))
+        self.assertNotIn("typing", line)
+        self.assertIn("pointer", line)
+
+    def test_a_symlink_named_like_our_file_is_never_ours(self):
+        nf = _nf()
+        real = nf.write("card", "skutocny obsah")
+        link = self.ndir / "card-260926182600-abcd.md"
+        os.symlink(real, link)
+        line = "nudge: [card] — celý text: ~/.claude/nudges/" + link.name
+        self.assertTrue(nf.is_pointer_line(line))
+        self.assertFalse(nf.is_pointer_line(line, require_file=True))
+        self.assertEqual(nf.expand(line), line)
+
+    def test_prune_removes_links_and_stale_temp_files_only(self):
+        nf = _nf()
+        self.ndir.mkdir(parents=True)
+        tmp = self.ndir / ".tmp-crash.md"
+        tmp.write_text("x")
+        os.utime(tmp, (NOW - 7200, NOW - 7200))
+        young = self.ndir / ".tmp-young.md"
+        young.write_text("x")
+        os.utime(young, (NOW - 60, NOW - 60))
+        target = self.home / "keep.txt"
+        target.write_text("moje")
+        os.symlink(target, self.ndir / "card-260926182600-0000.md")
+        removed = nf.prune(now=NOW)
+        self.assertEqual(sorted(removed),
+                         [".tmp-crash.md", "card-260926182600-0000.md"])
+        self.assertTrue(young.exists())
+        self.assertEqual(target.read_text(), "moje")
+
+    def test_a_home_with_a_double_slash_still_recognises_its_pointer(self):
+        os.environ["HOME"] = str(self.home) + "//"
+        nf = _nf()
+        path = nf.write("card", "obsah")
+        line = nf.pointer_line("card", "obsah", nf.display_path(path), 176)
+        self.assertTrue(nf.is_pointer_line(line, require_file=True), line)
+        self.assertEqual(nf.expand(line), "obsah")
+
+    def test_a_box_without_hard_links_still_gets_the_file(self):
+        nf = _nf()
+        with m.patch.object(os, "link", side_effect=PermissionError(1, "no links")):
+            path = nf.write("card", "obsah bez linkov")
+        with open(path, encoding="utf-8") as f:
+            self.assertEqual(f.read(), "obsah bez linkov")
+        self.assertEqual([p.name for p in self.ndir.iterdir()
+                          if p.name.startswith(".tmp-")], [])
+
+    def test_the_situational_hook_matches_the_file_behind_a_pointer(self):
+        import subprocess
+        hook = Path(__file__).resolve().parent.parent / "hooks" / \
+            "inject-situational-rule.sh"
+        self.ndir.mkdir(parents=True)
+        name = "partition-audit-260926182600-a1b2.md"
+        prompt = "nudge: [partition-audit] — celý text: ~/.claude/nudges/" + name
+        env = {k: v for k, v in os.environ.items()
+               if k != "AIRULESET_NUDGE_FILE_DIR"}
+        env["TMPDIR"] = str(self.home)
+
+        def run(session):
+            payload = json.dumps({"session_id": session, "prompt": prompt,
+                                  "hook_event_name": "UserPromptSubmit"})
+            return subprocess.run(["bash", str(hook)], input=payload, text=True,
+                                  capture_output=True, env=env, timeout=30).stdout
+
+        self.assertNotIn("DEEP-2.md", run("s-none"))    # no file: nothing to read
+        (self.ndir / name).write_text("stuck-check: partition-audit — over "
+                                      "ops-wait tikety a W=12 parked.")
+        self.assertIn("statusline-vocabulary-deep/DEEP-2.md", run("s-file"))
+
+
 if __name__ == "__main__":
     unittest.main()

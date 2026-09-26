@@ -267,6 +267,26 @@ class VerifyFailedTypeIsUndone(unittest.TestCase):
         self.assertEqual(fake.typed_texts(), [], "no literal reached the box")
         self.assertNotIn("Enter", fake.keys())
 
+    def test_an_off_flip_after_the_head_chunk_of_a_long_slash_text(self):
+        # #994/#1002: the partial-type path is still reachable for a long text
+        # typed in full under a machine kind (a slash text is never a pointer):
+        # the head chunk lands, the rest is suppressed and journalled per chunk,
+        # the verify fails and nothing is submitted.
+        flips = iter([True] + [False] * 200)
+        fake = DeliverGoalFakeTmux([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
+                                   model_type=True, transcript_path=_tpath(self))
+        logs = []
+        text = "/goal " + " ".join("podmienka-%d splnena" % i for i in range(40))
+        with m.patch.object(wd, "nudges_enabled", lambda kind=None: next(flips)):
+            res = wd.send_verified(PID, text, fake, fake.transcript_path,
+                                   sleep_fn=_noop, logs=logs, nudge="goal-sweep")
+        self.assertFalse(res)
+        self.assertEqual(fake.typed_texts()[0], text[:120], "the head chunk landed")
+        rest = text[120:150]           # the first suppressed chunk is the REST
+        self.assertTrue(any(ln.startswith("nudges OFF: suppressed") and rest in ln
+                            for ln in logs), logs)
+        self.assertNotIn("Enter", fake.keys())
+
     def test_a_suppressed_type_is_not_typed_and_never_undone(self):
         # Kill switch OFF: nothing typed -> `not-typed`, and no undo keystroke.
         fake = DeliverGoalFakeTmux([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
