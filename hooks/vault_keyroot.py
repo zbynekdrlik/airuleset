@@ -657,6 +657,61 @@ def _secret_cli_args(tk, cli):
     return ok, len(tk)
 
 
+# #1160 (design issuecomment-5848134350): repo scripts that take a key file by
+# PATH. The Odoo stream contract posts with `python3 scripts/odoo_post.py …
+# --key-file <root>/<key>` — odoo-erp binds the key-file PATH to the account,
+# so `secret exec --file … /dev/stdin` cannot serve it. ONLY the value of the
+# exact `--key-file X` / `--key-file=X` (before any `--`) is accounted, like
+# `ssh -i`. Never a consumer: a path-named interpreter, an interpreter option
+# that runs other code (`-c`/`-m`/`-i`, anything unknown), an assignment or
+# `env` in front (PYTHONINSPECT/PYTHONPATH), stdin fed to the segment, a piped
+# segment. Guardrail limit: whatever file sits at a matching path is trusted,
+# as for any script invoked by path.
+REPO_KEY_CONSUMERS = ("scripts/odoo_post.py", "scripts/odoo-task-sync.py")
+PY_FLAGS = {"-u", "-B", "-E", "-s", "-S", "-I", "-P", "-O", "-OO"}
+PY_ARG_FLAGS = {"-W", "-X"}
+
+
+def _is_repo_consumer(path):
+    return any(path == s or path.endswith("/" + s) for s in REPO_KEY_CONSUMERS)
+
+
+def _feeds_stdin(segment):
+    """True when `segment` has an UNQUOTED input redirect (`<`, `<<`, `<<<`,
+    `<&`, `<(`): an interpreter reading stdin could run the fed code."""
+    try:
+        lex = shlex.shlex(segment, posix=True, punctuation_chars=True)
+        lex.whitespace_split = True
+        return any("<" in t and not t.strip("();<>|&") for t in lex)
+    except ValueError:
+        return True
+
+
+def _repo_key_args(tk, start, head, term, segment):
+    """The `--key-file` value index of a REPO_KEY_CONSUMERS call (see above)."""
+    if (segment is None or term == "|" or _feeds_stdin(segment)
+            or any(ASSIGN_RE.match(t) or t == "env" for t in tk[:start])):
+        return set()
+    i = start
+    if not _is_repo_consumer(tk[start]):
+        if "/" in tk[start] or not re.fullmatch(r"python3?(\.\d+)?", head):
+            return set()
+        i += 1
+        while i < len(tk) and tk[i] in PY_FLAGS | PY_ARG_FLAGS:
+            i += 2 if tk[i] in PY_ARG_FLAGS else 1
+        if i >= len(tk) or not _is_repo_consumer(tk[i]):
+            return set()
+    ok = set()
+    for j in range(i + 1, len(tk)):
+        if tk[j] == "--":
+            break
+        if tk[j].startswith("--key-file="):
+            ok.add(j)
+        elif tk[j - 1] == "--key-file" and j - 1 > i and j - 1 not in ok:
+            ok.add(j)
+    return ok
+
+
 def _assignment_is_identity_only(tok):
     """`SSH="ssh -i <key> …"` / `O="-i <key> -o …"` holds a CALL, not a path.
 
@@ -671,7 +726,7 @@ def _assignment_is_identity_only(tok):
     return _rsh_is_identity_only(value)
 
 
-def _accounted(tk, term):
+def _accounted(tk, term, segment=None):
     """Indices of tokens whose root reference is a sanctioned, non-printing use."""
     start = _cmd_start(tk)
     assigns = {i for i in range(len(tk) if start is None else start)
@@ -682,10 +737,10 @@ def _accounted(tk, term):
     if head in DECLARE_HEADS:
         return assigns | {i for i in range(start + 1, len(tk))
                           if ASSIGN_RE.match(tk[i]) and _assignment_is_identity_only(tk[i])}
-    return assigns | _accounted_command(tk, start, head, term)
+    return assigns | _accounted_command(tk, start, head, term, segment)
 
 
-def _accounted_command(tk, start, head, term):
+def _accounted_command(tk, start, head, term, segment=None):
     ok = _pub_args(tk, start, head, term)
     if head == "ssh-keygen":
         return ok | _keygen_args(tk, start)
@@ -695,10 +750,10 @@ def _accounted_command(tk, start, head, term):
         # Piped only into text filters it keeps a plain term instead
         # (effective_terms / pipeline_is_inert, slice 3).
         return ok if term == "|" else ok | _prose_args(tk, start, head)
-    return ok | _accounted_head(tk, start, head, term)
+    return ok | _accounted_head(tk, start, head, term, segment)
 
 
-def _accounted_head(tk, start, head, term):
+def _accounted_head(tk, start, head, term, segment=None):
     rest = range(start + 1, len(tk))
     if head in KEY_META_HEADS:
         # Piped, a metadata head is a NAME SOURCE for whatever consumes it
@@ -713,7 +768,7 @@ def _accounted_head(tk, start, head, term):
         return _rsync_rsh_args(tk, start)
     cli = _secret_cli_start(tk, start)
     if cli is None:
-        return set()
+        return _repo_key_args(tk, start, head, term, segment)
     ok, child = _secret_cli_args(tk, cli)
     if term == "|" and tk[cli:cli + 1] == ["inspect"]:
         return set()             # its `path:` line is a name source when piped
@@ -731,7 +786,7 @@ def _unaccounted(tk, term, cwd_hint=None, segment=None):
     # root that also carries `<`/`>` is never accounted — unless it is PROSE
     # whose brackets were quoted text (`--body 'a <root>/<name>'`, slice 2).
     prose = _prose_indices(tk, term)
-    ok = {i for i in _accounted(tk, term)
+    ok = {i for i in _accounted(tk, term, segment)
           if ("<" not in tk[i] and ">" not in tk[i])
           or (i in prose and segment is not None
               and _prose_token_is_quoted(segment, tk[i]))}
