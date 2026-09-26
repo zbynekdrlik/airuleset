@@ -29,7 +29,10 @@ print. Every gh read goes through the `gates.ghread` runner seam
 failed listing prints `unknown`, and an unreadable timeline turns the total into
 `unknown (lower bound N ...)`. Both exit 1, never a false 0. The follow-up count
 is a LOWER bound: a follow-up whose cited ticket fell outside the window is not
-seen.
+seen. The timelines are read through `cli_parallel.run_parallel` (#1067), the
+same bounded per-ticket walk `cli_quals` uses. Accepted residual: a defect that
+is BOTH reopened on its ticket and filed as a `Defect-of:` follow-up counts
+twice (each is a separate trip back to work).
 """
 import json
 import re
@@ -38,38 +41,29 @@ import time
 from datetime import datetime, timezone
 
 from gates import ghread
+from gates.epic_rehearsal import iso_epoch as _epoch
+from gates.epic_rehearsal import parse_epic_ref as _epic_of
 
 RELEASE_LABEL = "verify-on-copy"
 REENTRY_LABELS = frozenset({"ready-for-review", "prio:bounce"})
 DEFAULT_DAYS = 30
 DEFAULT_LIMIT = 1000
 
-# A gk live-on-PROD comment. "live on PROD" must carry a VERSION on the same line
-# (a bug report "reproduced it live on PROD" is not a release).
+# A gk live-on-PROD comment. "live on PROD" must be FOLLOWED by a version (a bug
+# report "reproduced it live on PROD", or "live on PROD since 12.9", is not one).
 _LIVE_RE = re.compile(
-    r"(?i)\blive on prod\b[^\n]{0,40}?\b\d+\.\d+"
+    r"(?i)\blive on prod[ \t:(,-]*v?\d+\.\d+"
     r"|\bprod one-shot done\b"
     r"|(?:→|->)[ \t]*`?verify-on-copy\b")
-_RFR_RE = re.compile(r"^\s*([#*_-]+\s*)?READY-FOR-REVIEW", re.MULTILINE)
+_RFR_RE = re.compile(r"^\s*([#*_-]+\s*)?READY-FOR-REVIEW"
+                     r"|Ready for gatekeeper cross-fork review", re.MULTILINE)
 _DEFECT_OF_RE = re.compile(
     r"(?im)^[ \t]*(?:[-*][ \t]+)?\**Defect-of\**[ \t]*:[ \t]*((?:#\d+[ ,]*)+)")
 _DEFECT_WORD_RE = re.compile(
-    r"(?i)\b(?:regres\w*|defect\w*|broken|bug\w*|nefunguj\w*|chyb\w*|"
+    r"(?i)\b(?:regres\w*|defect\w*|broken|bug\w*|nefunguj\w*|chybn\w*|"
     r"zabudl\w*|forgot\w*|pokazen\w*|rozbit\w*)")
 # A same-repo `#N` (never `owner/repo#N`, never inside a longer word).
 _CITE_RE = re.compile(r"(?<![\w/#-])#(\d+)\b")
-
-
-def _epoch(iso):
-    if not isinstance(iso, str) or not iso:
-        return None
-    try:
-        dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.timestamp()
 
 
 def _event_kind(ev):
@@ -113,11 +107,6 @@ def classify_timeline(events, since_ts=None):
             if since_ts is None or ts >= since_ts:
                 counts["reopen" if kind == "reopen" else "rework"] += 1
     return {"released_at": first, **counts}
-
-
-def _epic_of(body):
-    import gates.epic_rehearsal as _er
-    return _er.parse_epic_ref(body)
 
 
 def _cited_defects(issue):
@@ -203,7 +192,7 @@ def _group(rows, key):
     return out
 
 
-def render(rows, unreadable, scope, since_date):
+def render(rows, unreadable, scope, since_date, truncated=False):
     """The printable table lines (TSV) + per-epic + per-stream + TOTAL."""
     lines = ["# post-release loops since %s (scope: %s)" % (since_date, scope),
              "ticket\tepic\tstream\treopen\trework\tfollowup\tloops\ttitle"]
@@ -226,7 +215,8 @@ def render(rows, unreadable, scope, since_date):
         lines.append("TOTAL\tunknown (lower bound %d; %d timelines unreadable)"
                      % (total, len(unreadable)))
     else:
-        lines.append("TOTAL\t%d" % total)
+        lines.append("TOTAL\t%d%s" % (total, " (lower bound: population capped)"
+                                        if truncated else ""))
     return lines
 
 
@@ -281,7 +271,10 @@ def run(quals, root, days=DEFAULT_DAYS, runner=None, now=None, slug=None,
         out=None, limit=DEFAULT_LIMIT):
     """Print the metric; return 0, or 1 when the count is unknown."""
     out = out or sys.stdout
-    days = days if isinstance(days, int) and days > 0 else DEFAULT_DAYS
+    if not isinstance(days, int) or days <= 0:
+        print("post-release loops: DAYS must be a positive integer (got %r)"
+              % (days,), file=out)
+        return 2
     now = time.time() if now is None else now
     since_ts = now - days * 86400
     since_date = datetime.fromtimestamp(since_ts, tz=timezone.utc).strftime("%Y-%m-%d")
@@ -297,17 +290,17 @@ def run(quals, root, days=DEFAULT_DAYS, runner=None, now=None, slug=None,
         print("post-release loops: unknown -- %s" % err, file=out)
         print("TOTAL\tunknown", file=out)
         return 1
+    import cli_parallel
+    got = cli_parallel.run_parallel(
+        sorted(issues), lambda n: fetch_timeline(slug, n, root, runner))
     timelines, unreadable = {}, []
     for n in sorted(issues):
-        events, terr = fetch_timeline(slug, n, root, runner)
+        events, terr = got.get(n, (None, "raised"))
         if terr:
             unreadable.append(n)
         else:
             timelines[n] = events
     rows = compute(issues, timelines, since_ts)
-    if truncated:
-        print("# note: population capped at %d tickets per query -- a lower bound"
-              % limit, file=out)
-    for line in render(rows, unreadable, scope, since_date):
+    for line in render(rows, unreadable, scope, since_date, truncated):
         print(line, file=out)
     return 1 if unreadable else 0

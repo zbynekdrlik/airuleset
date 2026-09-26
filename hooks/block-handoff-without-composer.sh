@@ -134,9 +134,10 @@ if os.path.isdir(gate_dir):
 
 if found is not None:
     # #1161: the receipt records the epic-rehearsal gate outcome; log it.
-    ep = found.get("epic")
+    ep, gate = found.get("epic"), found.get("epic_gate")
     print("ALLOW receipt-match" + (" epic=#%s rehearsal=%s gate=%s" % (
-        ep, found.get("epic_rehearsal"), found.get("epic_gate")) if ep else ""))
+        ep, found.get("epic_rehearsal"), gate) if ep else
+        (" epic-gate=%s" % gate if gate else "")))
     sys.exit(0)
 
 print("BLOCK READY-FOR-REVIEW comment must be composed via "

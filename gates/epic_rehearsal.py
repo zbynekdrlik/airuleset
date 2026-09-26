@@ -38,17 +38,29 @@ MODE_ENV = "AIRULESET_EPIC_REHEARSAL_GATE"
 DEFAULT_MODE = "warn"
 MODES = ("warn", "enforce")
 
-_FENCE_RE = re.compile(r'^[ \t]*```')
-# `Epic: #N` -- line-anchored, an optional bullet / bold, the colon DIRECTLY
-# after the word (so `Epic-rehearsal:` and prose "the epic: #N" never match).
+_FENCE_RE = re.compile(r'^[ \t]*(?:```|~~~)')
+# The optional line prefix every marker tolerates: a bullet, a numbered item or
+# an ATX heading, then optional bold. Never a `>` quote.
+_PREFIX = r'^[ \t]*(?:(?:[-*]|\d+[.)])[ \t]+)?(?:#{1,6}[ \t]+)?\**'
+# `Epic: #N` -- line-anchored, the colon DIRECTLY after the word (so
+# `Epic-rehearsal:` and prose "the epic: #N" never match); `[#N](url)` allowed.
 _EPIC_LINE_RE = re.compile(
-    r'^[ \t]*(?:[-*][ \t]+)?\**Epic\**[ \t]*:\**[ \t]*#(\d+)\b', re.IGNORECASE)
+    _PREFIX + r'Epic\**[ \t]*:\**[ \t]*\[?#(\d+)\b', re.IGNORECASE)
 # `Epic-rehearsal:` -- line-anchored (bullet / heading / bold allowed), never a
 # `>` quote and never mid-sentence: a reply QUOTING an old rehearsal must not
 # satisfy the gate (the #818 / #1053 marker lesson).
 _REHEARSAL_LINE_RE = re.compile(
-    r'^[ \t]*(?:[-*][ \t]+)?(?:#{1,6}[ \t]+)?\**Epic-rehearsal\**[ \t]*:',
-    re.IGNORECASE)
+    _PREFIX + r'Epic-rehearsal\**[ \t]*:', re.IGNORECASE)
+# The rehearsal's evidence (#1161 review): a comment that merely CARRIES the
+# marker -- a gk instruction "Epic-rehearsal: still missing", or a run with a
+# failing acceptance row -- must not pass. It needs the copy it ran on, at least
+# one PASS row, and no FAIL row (the #1053 Verified-on-copy fingerprint lesson).
+_COPY_RE = re.compile(r'(?i)REFRESH-DEV-BOX-FROM-PROD|\brefresh\b|\berp-test\b')
+# A result CELL is read by its LEADING token (`FAIL (#42 still broken)` fails,
+# `pass (was fail before the fix)` passes); a header row is skipped.
+_FAIL_CELL_RE = re.compile(r'(?i)\**(?:fail(?:ed|s)?\b|\u274c|\u2717|nok\b)')
+_PASS_CELL_RE = re.compile(r'(?i)\**(?:pass(?:ed|es)?\b|\u2705|\u2713|ok\b)')
+_SEPARATOR_ROW_RE = re.compile(r'^[ \t|:\-]+$')
 
 _WHAT = ("the copy (REFRESH-DEV-BOX-FROM-PROD id + date, refreshed after the "
          "last commit of every included sub-ticket), the release-shaped run "
@@ -97,11 +109,60 @@ def is_rehearsal_comment(body):
 
 
 def lists_ticket(body, number):
-    """True iff `body` names `#<number>` exactly (`#42`, never `#420`)."""
-    return bool(re.search(r'#%d(?!\d)' % int(number), body or ""))
+    """True iff `body` names `#<number>` exactly (`#42`, never `#420`, never a
+    cross-repo `other/repo#42`) on a line outside fences and `>` quotes."""
+    rx = re.compile(r'(?<![\w/#-])#%d(?!\d)' % int(number))
+    return any(rx.search(ln) for ln in _content_lines(body)
+               if not ln.lstrip().startswith(">"))
 
 
-def _epoch(iso):
+def rehearsal_evidence(body):
+    """`(ok, missing)` -- the rehearsal comment names the copy it ran on, has at
+    least one PASS table row and no FAIL table row. `missing` says what is not
+    there (a FAIL row is quoted back)."""
+    verdicts = _table_verdicts(body)
+    failed = [row for v, row in verdicts if v == "fail"]
+    if failed:
+        return False, "an acceptance row FAILED (%s)" % failed[0][:120]
+    missing = []
+    if not _COPY_RE.search(body or ""):
+        missing.append("the fresh copy it ran on (REFRESH-DEV-BOX-FROM-PROD "
+                       "refresh id + date)")
+    if not verdicts:
+        missing.append("a pass/fail table row per epic acceptance item")
+    return (not missing), "; ".join(missing)
+
+
+def _table_verdicts(body):
+    """`[("pass"|"fail", row)]` for each markdown table DATA row whose first
+    result cell (any cell after the first) leads with a pass/fail token."""
+    lines = [ln.strip() for ln in _content_lines(body)]
+    out = []
+    for i, row in enumerate(lines):
+        if not row.startswith("|") or _SEPARATOR_ROW_RE.match(row):
+            continue
+        nxt = lines[i + 1] if i + 1 < len(lines) else ""
+        if nxt.startswith("|") and _SEPARATOR_ROW_RE.match(nxt):
+            continue                              # the header row
+        for cell in (c.strip() for c in row.strip("|").split("|")[1:]):
+            if _FAIL_CELL_RE.match(cell):
+                out.append(("fail", row))
+                break
+            if _PASS_CELL_RE.match(cell):
+                out.append(("pass", row))
+                break
+    return out
+
+
+def head_from_body(body):
+    """The `HEAD: <sha>` a hand-off body declares (>= 8 hex, the same shape the
+    --body-file path verifies), or None."""
+    m = re.search(r'(?im)^[ \t]*[-*]?[ \t]*\**HEAD\**[ \t]*:[ \t]*\**[ \t]*'
+                  r'`?([0-9a-fA-F]{8,40})`?', body or "")
+    return m.group(1).lower() if m else None
+
+
+def iso_epoch(iso):
     """GitHub ISO-8601 UTC -> epoch seconds, or None."""
     if not isinstance(iso, str) or not iso:
         return None
@@ -159,7 +220,8 @@ def head_commit_ts(sha, cwd=None, runner=None):
 
 def evaluate(ticket, epic, comments, head_ts, head_sha=""):
     """Classify the epic's comments for `ticket`. Returns a dict:
-    `verdict` (`pass` | `missing` | `unlisted` | `stale`), `rehearsal` (the
+    `verdict` (`pass` | `missing` | `unlisted` | `stale` | `incomplete`),
+    `rehearsal` (the
     comment the verdict rests on, or None), `reason` (the exact missing item,
     None on pass) and `fresh_unverified` (True when head_ts is unknown)."""
     rehearsals = [c for c in comments or [] if is_rehearsal_comment(c.get("body"))]
@@ -180,12 +242,10 @@ def evaluate(ticket, epic, comments, head_ts, head_sha=""):
                           "comment." % (epic, newest.get("id"),
                                         newest.get("created_at"), ticket, ticket)}
     if head_ts is None:
-        return {"verdict": "pass", "rehearsal": listing[-1], "reason": None,
-                "fresh_unverified": True}
-    fresh = [c for c in listing if (_epoch(c.get("created_at")) or 0) > head_ts]
+        return _with_evidence(listing[-1], epic, ticket, True)
+    fresh = [c for c in listing if (iso_epoch(c.get("created_at")) or 0) > head_ts]
     if fresh:
-        return {"verdict": "pass", "rehearsal": fresh[-1], "reason": None,
-                "fresh_unverified": False}
+        return _with_evidence(fresh[-1], epic, ticket, False)
     newest = listing[-1]
     from datetime import datetime, timezone
     head_iso = datetime.fromtimestamp(head_ts, tz=timezone.utc).strftime(
@@ -199,14 +259,31 @@ def evaluate(ticket, epic, comments, head_ts, head_sha=""):
                          (head_sha or "?")[:12], head_iso)}
 
 
+def _with_evidence(comment, epic, ticket, fresh_unverified):
+    """`pass` when the chosen rehearsal carries its evidence, else
+    `incomplete` naming exactly what is missing (or the FAIL row)."""
+    ok, missing = rehearsal_evidence(comment.get("body"))
+    if ok:
+        return {"verdict": "pass", "rehearsal": comment, "reason": None,
+                "fresh_unverified": fresh_unverified}
+    return {"verdict": "incomplete", "rehearsal": comment,
+            "fresh_unverified": fresh_unverified,
+            "reason": "the `Epic-rehearsal:` on epic #%d that lists #%d (comment "
+                      "%s, %s) is not a passing rehearsal: %s. Fix it on the copy, "
+                      "re-run, and post a new `Epic-rehearsal:` comment."
+                      % (epic, ticket, comment.get("id"), comment.get("created_at"),
+                         missing)}
+
+
 def composer_check(issue, repo, head_sha=None, *, cwd=None, runner=None,
-                   env=None, authority=None, out=None):
+                   env=None, authority=None, out=None, body=None):
     """The composer pre-flight. Returns `(block_reason | None, receipt_fields)`.
 
     `receipt_fields` is merged into the hand-off receipt: `{}` for a non-epic
     ticket (unchanged), else `epic`, `epic_rehearsal` (comment id or None) and
     `epic_gate` (`pass` | `warn` | `enforce` | `unknown`). Warn mode and every
-    fail-open notice print to `out` (default stdout)."""
+    fail-open notice print to `out` (default stdout). With no `head_sha`, the
+    HEAD is the hand-off `body`'s `HEAD:` line, else the local checkout's HEAD."""
     out = out or sys.stdout
     mode = gate_mode(env)
     if authority is None:
@@ -234,7 +311,7 @@ def composer_check(issue, repo, head_sha=None, *, cwd=None, runner=None,
         fields["epic_gate"] = "unknown"
         return None, fields
     if not head_sha:
-        head_sha = head_sha_of(cwd, runner)
+        head_sha = head_from_body(body) or head_sha_of(cwd, runner)
     res = evaluate(int(issue), epic, comments,
                    head_commit_ts(head_sha, cwd, runner), head_sha or "")
     if res["rehearsal"] is not None:
@@ -242,7 +319,7 @@ def composer_check(issue, repo, head_sha=None, *, cwd=None, runner=None,
     if res["verdict"] == "pass":
         if res["fresh_unverified"]:
             print("handoff: epic-rehearsal freshness unverifiable (HEAD commit "
-                  "time unknown) -- accepted comment %s on the listing alone "
+                  "time unknown) -- accepted comment %s without the freshness check "
                   "(#1161)" % fields["epic_rehearsal"], file=out)
         fields["epic_gate"] = "pass"
         return None, fields

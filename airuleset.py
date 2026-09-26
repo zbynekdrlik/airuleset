@@ -5026,7 +5026,7 @@ def _handoff_prod_transfer_preflight(body, *, cwd=None, scan_text=None,
         return None
 
 
-def _handoff_epic_preflight(issue, repo, head_sha=None, cwd=None):
+def _handoff_epic_preflight(issue, repo, head_sha=None, cwd=None, body=None):
     """#1161 part 2 (c) -- the epic-rehearsal hand-off gate for ALL three
     composer paths (compose, --sign-only, --body-file). The logic lives in
     gates.epic_rehearsal. Returns `(block_reason | None, receipt_fields)`. A
@@ -5035,7 +5035,7 @@ def _handoff_epic_preflight(issue, repo, head_sha=None, cwd=None):
     allows. Enforce refuses. On any exception it fails open: (None, {})."""
     try:
         import gates.epic_rehearsal as _er
-        return _er.composer_check(issue, repo, head_sha, cwd=cwd)
+        return _er.composer_check(issue, repo, head_sha, cwd=cwd, body=body)
     except Exception as e:  # noqa: BLE001 -- a gate crash must never block
         sys.stderr.write("handoff: epic-rehearsal pre-flight skipped (%s) -- "
                          "fail-open\n" % e)
@@ -5441,8 +5441,9 @@ def cmd_handoff(args):
         if err:
             print(err)
             return 1
-        _epblk, _ep = _handoff_epic_preflight(issue, repo, None, _repo_root())
-        if _epblk:  # #1161 epic-rehearsal gate (local HEAD)
+        _epblk, _ep = _handoff_epic_preflight(issue, repo, None, _repo_root(),
+                                              body)  # #1161: the body's HEAD:
+        if _epblk:
             print(_epblk)
             return 1
         body_hash = hashlib.sha256(body.encode()).hexdigest()
