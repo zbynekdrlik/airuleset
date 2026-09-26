@@ -307,6 +307,15 @@ def note_bare(state, pid):
         state.get(NOT_OWN_KEY, {}).pop(pid, None)
 
 
+def watch_provenance(state, pid, now):
+    """The janitor's generic 6 h watch as provenance, VETOED while the pane
+    carries a not-own mark: every delivering caller re-stamps the watch right
+    before its send, so after a not-own verdict the fresh watch would license
+    the janitor's prefix `clear` to eat the human's words one sweep later."""
+    return (watchdog._janitor_watch_seen(state, pid, now)
+            and (state or {}).get(NOT_OWN_KEY, {}).get(pid) is None)
+
+
 def _presend_own(pid, cap, state, now):
     """#1157 slice 2 — True only when the (readable, idle) box provably holds
     OUR OWN stale machine text and nothing else. In order:
@@ -335,8 +344,9 @@ def _presend_own(pid, cap, state, now):
         return False
     from watchdog import nudge_gate as _ng
     return (len(watchdog._box_norm_from_capture(cap)) <= _ng.BATCH_MAX_CHARS
-            and any(head.startswith("%s [%s] " % (_ng.BATCH_PREFIX, cat))
-                    for cat in _ng.GATED_CATEGORIES))
+            and any((head + " ").startswith("%s [%s] " % (_ng.BATCH_PREFIX,
+                                                            cat))
+                    for cat in _ng.GATED_CATEGORIES))   # a row may end at `]`
 
 
 def _ns(cap):
@@ -346,12 +356,13 @@ def _ns(cap):
 def _clear_proven_own(pid, run, proven_ns, sleep_fn):
     """Backspace the box down to bare, never past the text proven ours: every
     pass the visible box must still be a (whitespace-free) prefix of
-    `proven_ns`, readable and idle, and a pass removes at most the current TAIL
-    row's length, which lies wholly inside that proven text. So hidden rows of
-    a scrolled box, or words typed during the clear, stop the loop instead of
-    being deleted. No Escape (never a double-Escape into a draft, #35).
+    `proven_ns`, readable and idle, and a pass removes at most the visible
+    box's NON-SPACE char count: the buffer behind the visible rows holds at
+    least that many chars, so a pass never reaches past them into hidden rows
+    of a scrolled box, and words typed during the clear stop the loop instead
+    of being deleted. No Escape (never a double-Escape into a draft, #35).
     Returns `(status, removed)`: bare / changed / unreadable / busy /
-    not-converged, and how many chars were backspaced."""
+    stash-occupied / not-converged, and how many chars were backspaced."""
     removed = 0
     for _ in range(watchdog.JANITOR_CLEAR_MAX_ITER):
         cap = watchdog.capture_pane(pid, run, lines=40)
@@ -360,11 +371,14 @@ def _clear_proven_own(pid, run, proven_ns, sleep_fn):
             return "bare", removed
         if tail is None:
             return "unreadable", removed
-        if _pane_busy(cap) or watchdog.STASH_MARKER in (cap or ""):
+        if _pane_busy(cap):
             return "busy", removed
-        if not proven_ns.startswith(_ns(cap)):
+        if watchdog.STASH_MARKER in (cap or ""):
+            return "stash-occupied", removed
+        visible = _ns(cap)
+        if not proven_ns.startswith(visible):
             return "changed", removed
-        batch = min(len(tail), watchdog.JANITOR_CLEAR_BATCH_MAX)
+        batch = min(len(visible), watchdog.JANITOR_CLEAR_BATCH_MAX)
         watchdog.keys(pid, *(["BSpace"] * batch), kind="janitor", run=run)
         removed += batch
         sleep_fn(watchdog.JANITOR_CLEAR_SETTLE_S)

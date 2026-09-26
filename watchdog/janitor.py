@@ -523,9 +523,12 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # payload tail + whitespace-stripped body substring) recognises it, gated on
     # THIS pane's own `_janitor_watch_seen` mark -- the SAME provenance the
     # destructive `clear` below requires -- so a foreign draft is never cleared.
+    from watchdog import send_outcome as _so   # + #1157 slice 2 not-own veto
+    if itext == "" and not dry_run:
+        _so.note_bare(state, pid)           # the not-own text is gone
     own_prov = bool(own_payload) and watchdog._box_is_own_leftover(
         captured, own_payload, watchdog.GOAL_ARM_LEFTOVER_MIN_SUBSTR,
-        provenance=_janitor_watch_seen(state, pid, now))
+        provenance=_so.watch_provenance(state, pid, now))
     # #1113 RECURRENCE -- a PROVENANCE-FREE template proof: the box is a verbatim
     # run of ANY rendered /goal template variant (the 23.9 `cleanup=declined` tail
     # was a different variant AND its watch mark had EXPIRED ~6h later). Verbatim
@@ -537,7 +540,6 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # #1157 -- a `typed-stranded` send recorded its EXACT text: the box still just
     # that is ours; a recorded idle box that no longer is loses the record AND the
     # janitor watch (a human typed there). Never with an occupied slot (#488).
-    from watchdog import send_outcome as _so
     own_rec = not occupied and bool(_so.stranded_reclaimable(
         state, pid, captured, now, dry_run))
     own_leftover = own_prov or own_tmpl or own_rec
@@ -607,7 +609,7 @@ def _janitor_recover(run, rec, pid, cwd, captured, loc, send_fn,
     # #852 C — a stray-prefix leftover's park record (carrying the typed string)
     # is age-unbounded provenance exactly like the #488 stash record, so it also
     # licenses the non-occupied own-suffix reclaim below.
-    prov_ok = (_janitor_watch_seen(state, pid, now)
+    prov_ok = (_so.watch_provenance(state, pid, now)
                or (occupied and park_seen)
                or stray_own)
     if not (prov_ok or own_tmpl or own_rec):
