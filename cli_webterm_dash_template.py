@@ -22,7 +22,7 @@ DASHBOARD_TEMPLATE = """<!DOCTYPE html>
 <html lang="sk">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content"><!-- #1159: a phone keyboard shrinks the layout, so the key bar stays above it -->
 <title>fleet terminal</title><!-- #655: real domain set client-side from location.hostname (below) -->
 <!-- #644: installable PWA — standalone window, no browser chrome. The manifest
      (per-domain name), icons and service worker are served by the gateway from
@@ -93,7 +93,7 @@ body { display: flex; flex-direction: column; background: #0C0C0C; color: #CCCCC
    pracovnu plochu nie tvoje blbe vysvetlivky"): the copy/paste footer hint strip
    is removed entirely so the terminal reclaims the height. The select/copy/paste
    FUNCTIONALITY (attachClipboard) stays; only the visible strip is gone. */
-</style>
+@@KEYBAR_CSS@@</style>
 </head>
 <body>
 <div id="tabbar">
@@ -1006,6 +1006,7 @@ CFG.sessions.forEach(function (s, i) {
   if (f) monitorConnection(f, i);
 });
 </script>
+@@KEYBAR_HTML@@
 </body>
 </html>
 """
