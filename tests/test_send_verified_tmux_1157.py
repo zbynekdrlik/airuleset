@@ -10,6 +10,11 @@ REAL `capture-pane`; only the socket differs. Every tmux call carries
 the server is killed in tearDown. TMUX/TMUX_PANE are stripped so nothing can
 fall back to the live server.
 
+Since #1157 slice 3 a MACHINE nudge is typed as a one-row pointer (its own
+real-tmux proof: tests/test_nudge_pointer_tmux_1157.py). The long wrapped
+payloads below are therefore sent as the owner's own reply (`user_authored`),
+the one long text that is still typed in full through the row-by-row verify.
+
 Box-bound: the hermetic CI container has no tmux, so this file is listed in
 .github/box-bound-tests.txt. A missing tmux binary FAILS here and never skips.
 """
@@ -103,7 +108,7 @@ class RealPrivateTmuxBox(unittest.TestCase):
         logs = []
         res = wd.send_verified(pid, text, self._run, self.tpath,
                                sleep_fn=time.sleep, logs=logs,
-                               nudge="partition-audit")
+                               user_authored=True)   # #1157 s3, see header
         self.assertTrue(res, logs)
         self.assertEqual(self._submitted(), [text], logs)
         self.assertEqual(wd._input_line_text(wd.capture_pane(pid, self._run)), "")
@@ -123,7 +128,7 @@ class RealPrivateTmuxBox(unittest.TestCase):
         logs = []
         res = wd.send_verified(pid, text, self._run, self.tpath,
                                sleep_fn=time.sleep, logs=logs,
-                               nudge="gk-request")
+                               user_authored=True)   # #1157 s3, see header
         self.assertTrue(res, logs)
         self.assertEqual(self._submitted(), [text], logs)
 
@@ -135,7 +140,7 @@ class RealPrivateTmuxBox(unittest.TestCase):
         logs = []
         res = wd.send_verified(pid, text, self._run, self.tpath,
                                sleep_fn=time.sleep, logs=logs,
-                               nudge="partition-audit")
+                               user_authored=True)   # #1157 s3, see header
         self.assertTrue(res, logs)
         self.assertEqual(self._submitted(), [text], logs)
 

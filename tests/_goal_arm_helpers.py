@@ -17,7 +17,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 import watchdog as wd
-from watchdog import goal
+from watchdog import goal, nudge_file
 
 def _encode(cwd):
     return wd.encode_project_dir(cwd)
@@ -308,8 +308,8 @@ class DeliverGoalFakeTmux:
             return self.cap_seq[idx]
         return ""
 
-    def typed_texts(self):
-        return [a[-1] for a in self.sent if "-l" in a]
+    def typed_texts(self):  # #1157 s3: a pointer row reads as the text its file holds
+        return [nudge_file.expand(a[-1]) for a in self.sent if "-l" in a]
 
     def keys(self):
         return [a[-1] for a in self.sent]
