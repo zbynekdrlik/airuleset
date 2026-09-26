@@ -27,6 +27,7 @@ tests/test_airuleset.py::TestClaudeHistoryPopupScript::test_real_execution_falls
 tests/test_controller_window_name_tmux_1124.py
 # #1157: drives a private `-L` tmux server running tests/_cc_box_pane.py
 tests/test_send_verified_tmux_1157.py
+tests/test_send_verified_presend_tmux_1157.py
 #
 # --- git/tmux session-state dependent ---
 tests/test_airuleset.py::TestSessionStartFetchHook::test_unmeasurable_status_refuses_rather_than_guesses_clean
