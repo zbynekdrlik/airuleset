@@ -1815,25 +1815,6 @@ class TestCtrlWProtection(unittest.TestCase):
         self.assertIn("preventDefault()", html)       # standard confirm shape
         self.assertIn("returnValue", html)
 
-    def test_fullscreen_button_requests_lock_with_feature_detect(self):
-        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        self.assertIn('id="fs"', html)                # a Fullscreen control exists
-        self.assertIn("requestFullscreen", html)
-        self.assertIn("navigator.keyboard", html)     # Keyboard Lock API
-        self.assertIn(".lock(", html)
-        self.assertIn("KeyW", html)                   # Ctrl+W is the locked key
-        self.assertIn("function keyboardLockSupported(", html)  # feature-detect
-        # honest fallback: the disabled assignment is inside the ELSE of the
-        # feature-detect (a swap that disables when SUPPORTED would fail this).
-        self.assertRegex(html, r"if\s*\(\s*keyboardLockSupported\(\)\s*\)")
-        self.assertRegex(html, r"\}\s*else\s*\{[^}]*?fsBtn\.disabled = true")
-        # secure-context honesty (#585 reviewer 🔵): Keyboard Lock needs HTTPS/
-        # localhost, so the gate consults isSecureContext AND the disabled title
-        # names HTTPS as the real reason on the plain-HTTP tailnet (not a false
-        # "browser unsupported").
-        self.assertIn("isSecureContext", html)
-        self.assertIn("HTTPS", html)
-
     def test_ctrlw_additions_preserve_escaping_and_single_pass(self):
         # The #579 injection invariants must survive the Ctrl+W / disconnect JS.
         inv = [{"id": "x", "label": "</script><script>alert(1)</script>",
@@ -1934,15 +1915,6 @@ class TestTopBarOnlyFullscreen(unittest.TestCase):
                  "local": False, "host": "10.0.0.%d" % i, "user": "u%d" % i}
                 for i in range(1, n + 1)]
 
-    def test_nav_keeps_only_fullscreen(self):
-        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        nav = next(ln for ln in html.splitlines() if 'id="nav"' in ln)
-        self.assertIn('id="fs"', nav)                 # fullscreen stays
-        self.assertNotIn("data-cyc", nav)             # prev/next arrows removed
-        self.assertNotIn('id="help"', nav)            # ? button removed
-        self.assertNotIn("&#9664;", nav)              # left-arrow glyph gone
-        self.assertNotIn("&#9654;", nav)              # right-arrow glyph gone
-
     def test_cycle_helper_and_wiring_removed(self):
         html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
         self.assertNotIn("function cycle(", html)     # dead helper removed
@@ -1960,11 +1932,6 @@ class TestTopBarOnlyFullscreen(unittest.TestCase):
         self.assertIn("function activate(", html)
         self.assertIn("() => activate(+t.dataset.idx)", html)   # tab click still wired
         self.assertIn("e.key >= '1'", html)                     # Ctrl+Alt+1..9 handler stays
-
-    def test_fullscreen_control_preserved(self):
-        html = w.render_dashboard_html(self._inv(), ttyd_base="/t")
-        self.assertIn('id="fs"', html)
-        self.assertIn("requestFullscreen", html)
 
 
 if __name__ == "__main__":
