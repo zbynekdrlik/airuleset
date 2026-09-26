@@ -1,0 +1,190 @@
+"""#1157 slice 2 — which non-bare boxes the pre-send gate may clear (fakes).
+
+`send_verified`'s pre-send gate used to abort on ANY non-bare box, so our own
+leftover from before slice 1 (no `stranded_own` record, no janitor watch)
+blocked every delivery forever. It now clears a box that PROVABLY holds only
+our own machine text, on an idle pane with a readable box, and types nothing in
+that call. These tests pin the proof from the owner-draft side: every shape
+that is not provably ours is left untouched, with no keystroke at all.
+The real-tmux render is covered by tests/test_send_verified_presend_tmux_1157.py.
+
+Fakes only (no tmux, no gh, no Discord): the stateful `DeliverGoalFakeTmux`.
+"""
+import json
+import sys
+import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import airuleset  # noqa: E402,F401
+import watchdog as wd  # noqa: E402
+from watchdog import send_outcome  # noqa: E402
+
+from _goal_arm_helpers import DeliverGoalFakeTmux, GOAL_IDLE_CAP  # noqa: E402
+from test_send_verified_undo_1157 import partition_batch_text  # noqa: E402
+
+PID = "%9"
+NOW = 1_000_000
+CWD = "/home/gatekeeper/devel/odoo/odoo-erp-infra"
+PLACEHOLDER = "[Pasted text #1 +42 lines]"
+APPEND = " a este toto som dopisal ja"
+NEXT = "nudge: [u-freshness] u-freshness: skontroluj U a zavri co je vybavene."
+
+
+def _noop(*_a, **_k):
+    return None
+
+
+class _StashedFake(DeliverGoalFakeTmux):
+    """The owner's own draft sits in the single stash slot (the marker shows)."""
+
+    def _render(self):
+        return super()._render() + "  › stashed\n"
+
+
+class _AppendOnSecondCaptureFake(DeliverGoalFakeTmux):
+    """The owner types behind the box between the gate's read and the clear."""
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self._caps = 0
+
+    def __call__(self, argv, timeout=8):
+        if "capture-pane" in " ".join(argv):
+            self._caps += 1
+            if self._caps == 2:
+                self.box += APPEND
+        return super().__call__(argv, timeout)
+
+
+class PreSendGate(unittest.TestCase):
+
+    def _fake(self, box, cls=DeliverGoalFakeTmux):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        tp = Path(d.name) / "sess.jsonl"
+        tp.write_text(json.dumps({"type": "assistant",
+                                  "message": {"content": "x"}}) + "\n")
+        return cls([(PID, "claude", CWD, "111")], GOAL_IDLE_CAP,
+                   model_type=True, initial_box=box, wrap_width=60,
+                   transcript_path=tp)
+
+    def _send(self, fake, state, text=NEXT):
+        logs = []
+        res = wd.send_verified(PID, text, fake, fake.transcript_path,
+                               sleep_fn=_noop, logs=logs, state=state,
+                               nudge="u-freshness", now=NOW)
+        return res, logs
+
+    def _assert_held(self, fake, box, res, logs, reason):
+        self.assertFalse(res, logs)
+        self.assertEqual(getattr(res, "kind", None), "not-typed", logs)
+        self.assertEqual(fake.keys(), [], "no keystroke: %r" % logs)
+        self.assertEqual(fake.box, box, logs)
+        self.assertTrue(any(reason in ln for ln in logs), logs)
+
+    def test_legacy_own_batch_leftover_is_cleared_without_a_record(self):
+        box = partition_batch_text()
+        fake = self._fake(box)
+        res, logs = self._send(fake, {})
+        self.assertEqual(getattr(res, "kind", None), "not-typed", logs)
+        self.assertEqual(fake.box, "", logs)
+        self.assertTrue(any("pre-send: cleared stale own machine text (%d chars)"
+                            % len(box) in ln for ln in logs), logs)
+        self.assertEqual(fake.typed_texts(), [], "never typed in the same call")
+        res2, logs2 = self._send(fake, {})
+        self.assertTrue(res2, logs2)
+
+    def test_owner_goal_draft_is_held(self):
+        # `/goal ` is an own payload prefix the OWNER also types (the manual
+        # arming flow): the prefix alone never licenses a clear here
+        box = "/goal all tickets closed AND CI green -- or stop after 30 turns"
+        fake = self._fake(box)
+        res, logs = self._send(fake, {})
+        self._assert_held(fake, box, res, logs,
+                          "box holds a non-machine draft — held")
+
+    def test_unknown_batch_category_is_held(self):
+        box = "nudge: [moja-poznamka] toto som si sem napisal ja"
+        fake = self._fake(box)
+        res, logs = self._send(fake, {})
+        self._assert_held(fake, box, res, logs,
+                          "box holds a non-machine draft — held")
+
+    def test_placeholder_without_our_watch_is_held(self):
+        # a human's long paste collapses into the IDENTICAL placeholder
+        fake = self._fake(PLACEHOLDER)
+        res, logs = self._send(fake, {})
+        self._assert_held(fake, PLACEHOLDER, res, logs,
+                          "box holds a non-machine draft — held")
+
+    def test_placeholder_under_our_own_watch_is_cleared(self):
+        fake = self._fake(PLACEHOLDER)
+        res, logs = self._send(fake, {"janitor_watch": {PID: NOW - 60}})
+        self.assertEqual(fake.box, "", logs)
+        self.assertTrue(any("pre-send: cleared stale own machine text" in ln
+                            for ln in logs), logs)
+
+    def test_recorded_stranded_text_is_cleared_and_the_record_dropped(self):
+        text = partition_batch_text()
+        state = {"stranded_own": {PID: {"ts": NOW - 60, "typed": text}}}
+        fake = self._fake(text)
+        self._send(fake, state)
+        self.assertEqual(fake.box, "")
+        self.assertNotIn(PID, state.get("stranded_own", {}))
+
+    def test_recorded_text_with_a_human_append_is_held(self):
+        # the record decides alone: our recorded text plus the owner's words is
+        # NOT ours, even though its head still reads `nudge: [partition-audit]`
+        text = partition_batch_text()
+        state = {"stranded_own": {PID: {"ts": NOW - 60, "typed": text}},
+                 "janitor_watch": {PID: NOW - 60}}
+        fake = self._fake(text + APPEND)
+        res, logs = self._send(fake, state)
+        self._assert_held(fake, text + APPEND, res, logs,
+                          "box holds a non-machine draft — held")
+        self.assertNotIn(PID, state.get("janitor_watch", {}), state)
+        # and the NEXT sweep (record gone) still never clears it
+        res, logs = self._send(fake, state)
+        self._assert_held(fake, text + APPEND, res, logs,
+                          "box holds a non-machine draft — held")
+
+    def test_a_slice1_not_own_verdict_blocks_the_prefix_clear(self):
+        # slice 1's undo judged the box "not ours" (our text + the owner's
+        # words): no record is written, the watch is dropped, and the pre-send
+        # prefix check must not eat the owner's words on a later sweep
+        text = partition_batch_text()
+        state = {"janitor_watch": {PID: NOW - 60}}
+        fake = self._fake(text + APPEND)
+        jl, out = [], {}
+        send_outcome.janitor_undo_if_own_stranded(PID, fake, text, "loc",
+                                                  _noop, jl, out=out,
+                                                  state=state)
+        self.assertEqual(out["box"], "not-own", jl)
+        res, logs = self._send(fake, state)
+        self._assert_held(fake, text + APPEND, res, logs,
+                          "box holds a non-machine draft — held")
+        # once the owner empties the box, the mark is gone and delivery works
+        fake.box = ""
+        res, logs = self._send(fake, state)
+        self.assertTrue(res, logs)
+        self.assertNotIn(PID, state.get(send_outcome.NOT_OWN_KEY, {}), state)
+
+    def test_occupied_stash_slot_is_held(self):
+        box = partition_batch_text()
+        fake = self._fake(box, cls=_StashedFake)
+        res, logs = self._send(fake, {})
+        self._assert_held(fake, box, res, logs, "stash slot occupied")
+
+    def test_box_changed_before_the_clear_is_held(self):
+        box = partition_batch_text()
+        fake = self._fake(box, cls=_AppendOnSecondCaptureFake)
+        res, logs = self._send(fake, {})
+        self._assert_held(fake, box + APPEND, res, logs, "box changed")
+
+
+if __name__ == "__main__":
+    unittest.main()

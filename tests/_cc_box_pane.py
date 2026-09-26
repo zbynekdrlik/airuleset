@@ -71,12 +71,14 @@ def wrap_rows(text, cols):
     return rows
 
 
-def render(buf, cols, max_rows):
+def render(buf, cols, max_rows, above="● Hotovo.", cut_bottom=False):
     rows = wrap_rows(buf, cols) if buf else [""]
     if max_rows and len(rows) > max_rows:
         rows = rows[-max_rows:]
     box = ["❯\xa0" + rows[0] if rows[0] else "❯"] + ["  " + r for r in rows[1:]]
-    lines = ["● Hotovo.", "", "─" * cols] + box + ["─" * cols, "  ⏸ manual mode on"]
+    lines = [above, "", "─" * cols] + box + ["─" * cols, "  ⏸ manual mode on"]
+    if cut_bottom:           # the live h=10 render: the box is taller than the
+        lines = lines[:-2]   # pane and its bottom rule is off-screen (unreadable)
     return "\x1b[H\x1b[2J" + "\r\n".join(lines)
 
 
@@ -84,6 +86,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--max-rows", type=int, default=0)
     ap.add_argument("--transcript", default="")
+    # the row drawn above the box: the idle history line by default, or a
+    # RUNNING-turn spinner (`✻ Pondering… (12s · esc to interrupt)`) for a busy pane
+    ap.add_argument("--above", default="● Hotovo.")
+    ap.add_argument("--cut-bottom", action="store_true")
     args = ap.parse_args()
     state = {"buf": ""}
     fd = sys.stdin.fileno()
@@ -95,7 +101,8 @@ def main():
         # the pane's REAL size (ioctl), never shutil's $COLUMNS: a pytest run can
         # export COLUMNS=80 into the pane's env and misdraw a 60-col pane.
         cols = os.get_terminal_size(1).columns
-        os.write(1, render(state["buf"], cols, args.max_rows).encode("utf-8"))
+        os.write(1, render(state["buf"], cols, args.max_rows, args.above,
+                                  args.cut_bottom).encode("utf-8"))
 
     signal.signal(signal.SIGWINCH, draw)
     draw()
