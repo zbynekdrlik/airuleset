@@ -17,7 +17,7 @@ ceilings), injected by two new sentinels in the same single substitution pass.
 
 Three tiers:
 * STRUCTURAL -- the leaf is pure, the markup/order/labels ship once, the CSS is
-  gated by `(pointer: coarse) and (hover: none)`, the byte table literals are
+  touch-only gated (#1164: + `(any-hover: none)`), the byte table literals are
   exact, the send path never pastes, placement is after the main script.
 * NODE harness -- runs the REAL shipped keybar script in a vm context against
   stub terms: exact bytes per key in both cursor modes, ACTIVE tab only, the
@@ -153,7 +153,8 @@ class TestKeybarStructure1159(unittest.TestCase):
         outside, media = _css_blocks(kb.KEYBAR_CSS)
         self.assertRegex(outside, r"#keybar\s*\{\s*display:\s*none;")
         self.assertNotRegex(outside, r"display:\s*flex")
-        gate = "(pointer: coarse) and (hover: none)"
+        # #1164: touch-only -- a touchscreen laptop with a hover pointer gets no bar
+        gate = "(pointer: coarse) and (hover: none) and (any-hover: none)"
         self.assertEqual(list(media), [gate])
         inner = media[gate]
         self.assertRegex(inner, r"#keybar\s*\{[^}]*display:\s*flex")
@@ -252,7 +253,7 @@ for (const [touch, vv, ih] of [
     [true, { height: 400, scale: 2 }, 800],     // pinch-zoom, not a keyboard -> untouched
     [false, { height: 400, scale: 1 }, 800],    // desktop -> untouched
     [true, null, 800]]) {                       // no visualViewport -> untouched
-  ctx.window = { visualViewport: vv, innerHeight: ih, matchMedia: (q) => ({ matches: touch && q === '(pointer: coarse) and (hover: none)' }) };
+  ctx.window = { visualViewport: vv, innerHeight: ih, matchMedia: (q) => ({ matches: touch && q === '(pointer: coarse) and (hover: none) and (any-hover: none)' }) };
   ctx.document.body = { style: { height: 'stale' } };
   ctx.keybarFitViewport();
   out.fit.push(ctx.document.body.style.height);
