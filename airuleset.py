@@ -2511,7 +2511,10 @@ def goal_status_probe(cwd, run=None, pane_env=None, projects_dir=None):
     import cli_concurrency
     from watchdog import compact as _compact_mod
     from watchdog import goal as _goal_mod
+    import time
+    from watchdog import watch_triggers as _wt
     import watchdog as _wd
+    _watch = _wt.watch_window_for(cwd)
     armed = None
     pending = False
     pane_found = False
@@ -2526,6 +2529,11 @@ def goal_status_probe(cwd, run=None, pane_env=None, projects_dir=None):
         armed = _wd.pane_goal_armed(_wd.capture_pane(pid, run))
         if sid:
             pending = bool(_goal_mod.load_goal_requests().get(sid))
+    if _watch is not None:      # #1163 — a steer=watch window: its watch, never a /goal
+        return _wt.status_row(_watch, time.time(), _wt.load_watchdog_state(),
+                              kind_on=_wd.nudges_enabled(_wt.NUDGE_KIND),
+                              armed=_wt.read_armed().get(_watch.get("name")),
+                              goal_armed=armed)
     return cli_concurrency.goal_status_row(cwd, armed, pending,
                                            pane_found=pane_found)
 
@@ -8492,6 +8500,7 @@ def cmd_watchdog(args):
                     # so an unconfigured box costs one config-file read per
                     # sweep and never touches the network.
                     task_hygiene_enabled=True,
+                    watch_triggers_enabled=True,  # #1163 Job 52; gated on a steer=watch window
                     # #1040 — one shared gh-rate reading per sweep: refreshes the
                     # 60s-cached `gh api rate_limit` (the FREE, non-counting
                     # endpoint), records the once-per-episode exhaustion alert,
@@ -8547,6 +8556,19 @@ def cmd_goal_arm(args):
               file=sys.stderr)
         sys.exit(1)
     pane_id, cwd, sid = _compact_mod.resolve_self_pane()
+    # #1163 — a steer=watch window arms NO /goal: its declared triggers are
+    # delivered by watchdog Job 52; acknowledge + record the watch instead.
+    import time
+    from watchdog import watch_triggers as _wt
+    _watch = _wt.watch_window_for(cwd or os.getcwd())
+    if _watch is not None:
+        _now = time.time()
+        if sid:     # only the window's own session acknowledges its watch
+            _wt.record_armed(_watch.get("name"), sid, _now)
+        print(_wt.arm_line(_watch, _now,
+                           kind_on=__import__("watchdog").nudges_enabled(_wt.NUDGE_KIND)))
+        print(_wt.ARM_GUIDANCE)
+        return
     if not sid:
         print("goal-arm --self: could not resolve this session's own "
               "pane/transcript (not running inside a recognized tmux "

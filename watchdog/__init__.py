@@ -2322,6 +2322,7 @@ from watchdog import task_hygiene as task_hygiene  # noqa: E402,F401  (#1036 Job
 # → no cycle; imports NO notify (machine-channel journal only — the gk-side relay
 # owns box-level alerting). `watchdog/erp_heartbeat.py`'s docstring is the SSOT.
 from watchdog import erp_heartbeat as erp_heartbeat  # noqa: E402,F401
+from watchdog import watch_triggers as watch_triggers  # noqa: E402,F401  (#1163 Job 52)
 
 
 # #535 — job 34, per-box cross-target conformance check. Extracted to
@@ -2601,8 +2602,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              health_probes=None, health_probe_fetch=None,
              task_hygiene_enabled=False, gh_rate_fetch=None,
              bounceflip_fetch=None, cred_mtime_fn=None, proc_start_fn=None,
-             erp_heartbeat_enabled=False):
-    """Scan every `claude` pane once. 51 numbered jobs per poll — 44 LIVE and 7
+             erp_heartbeat_enabled=False, watch_triggers_enabled=False):
+    """Scan every `claude` pane once. 52 numbered jobs per poll — 45 LIVE and 7
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402; 14 in
     #1084 — the slot stays registered as a journal-only tombstone), whose
     numbers are kept addressable so historical log lines and code comments
@@ -3481,6 +3482,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           owns box-level alerting, analyze-not-ping #693/#704). `min_budget` = the
           wrapper-call class (`_BUDGET_MIN_ERP_HEARTBEAT_S`=25s timeout+5; #959 sized
           down from 65s ssh-fleet that overran the budget). `erp_heartbeat.py`=SSOT.
+      (52) WATCH TRIGGERS (#1163) — gated on `watch_triggers_enabled` + a declared
+          `steer=watch` window: each due cron slot → ONE `watch-trigger` pointer via
+          `send_verified` into THAT window's idle pane; fired/held/missed per slot in
+          `state["watch_triggers"]`. `watchdog/watch_triggers.py` is the SSOT.
 
     PAUSED BOX (#851/#1032): when `box_paused` is True — the box's OWN fleet entry
     carries `paused` (a stream the owner froze), resolved once in `cmd_watchdog`
@@ -5800,6 +5805,14 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
                                  erp_heartbeat.ERP_HEARTBEAT_INTERVAL_S)),
          _job_erp_heartbeat, "erp-heartbeat error",
          min_budget=_BUDGET_MIN_ERP_HEARTBEAT_S)
+
+    _add("watch_triggers",   # Job 52 (#1163); watchdog/watch_triggers.py = SSOT
+         lambda: watch_triggers_enabled and bool(watch_triggers.box_watch_windows()),
+         lambda: watch_triggers.run_job(
+             now, state, panes, run=run, sleep_fn=sleep_fn, projects_dir=projects_dir,
+             dry_run=dry_run, handled=compact_handled_this_sweep,
+             budget_left=remaining_budget_s),
+         "watch-trigger error", min_budget=watch_triggers.MIN_BUDGET_S)
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with

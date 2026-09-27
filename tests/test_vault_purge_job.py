@@ -361,10 +361,12 @@ class TheUnwiredGuardHasTeeth(unittest.TestCase):
                # proc_start_fn=None, so the closing `):` moved off that line onto
                # the new one; the anchor grew a last line, the mutation target
                # vault_purge=None is untouched.
+               # #1163 re-pin: watch_triggers_enabled=False joined the last line.
                "             task_hygiene_enabled=False, gh_rate_fetch=None,\n"
                "             bounceflip_fetch=None, cred_mtime_fn=None, "
                "proc_start_fn=None,\n"
-               "             erp_heartbeat_enabled=False):")
+               "             erp_heartbeat_enabled=False, "
+               "watch_triggers_enabled=False):")
         self.assertIn(old, src, "the mutation target moved; re-pin it")
         # Mutate ONLY the guard's default (`vault_purge=None` ->
         # `vault_purge=lambda: []`) and keep every other param intact — a

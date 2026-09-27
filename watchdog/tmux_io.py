@@ -127,6 +127,9 @@ MACHINE_NUDGE_KINDS = frozenset({
     # nudge_gate GATED_CATEGORY (its floor is 15 min, below the 60-min GATED floor
     # lock) — its cadence is decided by gate_ok("infra-priority") directly.
     "infra-priority",
+    # #1163 Job 52 — a DECLARED watch trigger slot (steer=watch window), staged
+    # like infra-priority and cap-exempt with it (nudge_gate), 60-min floor kept.
+    "watch-trigger",
 })
 
 # #1023 addendum (owner, 2026-09-14) — RECOVERY revivals: identities that REVIVE a

@@ -123,9 +123,23 @@ REMOTE_HOSTS = [
             # declared-window mechanism as gk-infra (session-created create
             # body, session-start-fetch FF of its own cwd, resurrect relaunch
             # by cwd) — no hardcoded install step.
+            # #1163 — steered by a WATCH (Job 52, watchdog/watch_triggers.py),
+            # never a /goal: scheduled work, owner cadence 25.9. (odoo-erp 7924).
             {"name": "gk-quality", "cwd": "~/devel/odoo/odoo-erp-quality",
              "repo": "zbynekdrlik/odoo-erp", "branch": "develop",
-             "role": "quality", "mode": "sequential"},
+             "role": "quality", "mode": "sequential",
+             "steer": "watch", "tz": "Europe/Bratislava", "triggers": [
+                 {"name": "watch", "cron": "17 7,19 * * *",
+                  "prompt": "Spusti gk-quality watch: prejdi nové bounce, "
+                  "fix-forward a release triedy od posledného behu a každú "
+                  "novú triedu zapíš ako jednu jednotku na odoo-erp 7924 "
+                  "(dizajn → worker → review → merge); bez novej triedy "
+                  "nerob nič."},
+                 {"name": "weekly-review", "cron": "17 8 * * 1",
+                  "prompt": "Spusti týždenný post-release review: `python3 "
+                  "~/devel/airuleset/airuleset.py core-quals --post-release "
+                  "7` a výsledok zverejni do odoo-erp ops kanála podľa "
+                  "odoo-erp 8376 (aj odoo-erp 6383)."}]},
         ],
         # #999 — attached-but-unmounted 20 GB Hetzner volume gk-vol1 (id
         # 106853757, ext4, /dev/disk/by-id/scsi-0HC_Volume_106853757). The
@@ -759,6 +773,11 @@ def validate_windows(windows):
         if branch is not None and not _branch_ok(branch):
             errs.append("window[%d] branch %r is not a safe ref token"
                         % (i, branch))
+        # #1163 OPTIONAL steer=watch + its triggers (contents: watch_triggers.validate_watch)
+        steer, trigs = w.get("steer"), w.get("triggers")
+        if steer not in (None, "watch") or (steer == "watch") != bool(
+                isinstance(trigs, list) and trigs):
+            errs.append("window[%d] steer %r needs non-empty triggers iff 'watch'" % (i, steer))
     return errs
 
 
