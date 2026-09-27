@@ -722,10 +722,12 @@ function attachBlockSelect(win) {                // idempotent: attach once per 
 // PAUSES its renderer while its element is not intersecting and QUEUES every resize
 // until shown, so a hidden or just-shown frame still reports its OLD box (measured:
 // the 560x360 boot grid -> font 29 instead of 17, then the #798 over-fit shrink).
-// fitShown is the ONE fit entry: on a frame not yet shown it only sets a dirty flag;
+// fitShown is the ONE fitFixedGrid entry: on a frame not yet shown it only sets a dirty flag;
 // watchShown's IntersectionObserver consumes it one animation frame after the frame
 // is shown -- xterm's own observer runs in that same notification task, so by then
 // it has unpaused and applied its queued resize. false = shown but not fittable yet.
+// (scheduleFill's later passes may still run on a since-hidden frame; they bail on a
+// zero box, and the next show re-fits from scratch.)
 function fitShown(f) {
   const win = f && f.contentWindow;
   if (!win || !win.term) return false;
@@ -815,7 +817,9 @@ if (CFG.sessions.length) activate(0);   // land in the first terminal, not a lan
 // tab-bar height change fires it.
 try {
   if (window.ResizeObserver) {
-    new ResizeObserver(() => { if (made[current]) fitShown(made[current]); }).observe(frames);  // #1164: also the key bar's height
+    // #1164: also the key bar's height; via the attach poll, so a tab whose poll gave
+    // up before its terminal existed is still attached, then fitted through fitShown
+    new ResizeObserver(() => { if (made[current]) applyFixedGrid(made[current]); }).observe(frames);
   }
 } catch (e) {}
 // #644: register the minimal NETWORK-ONLY service worker (Chromium

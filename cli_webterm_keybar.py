@@ -27,9 +27,9 @@ the same single pass by `cli_webterm.render_dashboard_html`.
 """
 
 # #1164: the ONE touch-only gate (CSS + keybarFitViewport). A coarse primary
-# pointer alone is not enough: Chrome on a touchscreen laptop can report a coarse,
-# non-hovering primary pointer even with a mouse/trackpad attached, so no
-# available pointer may hover either. NOT `(any-hover: none)`: Chromium matches
+# pointer alone is not enough: the owner's desktop Chrome (a touchscreen laptop)
+# matched the old gate, i.e. it reported a coarse, non-hovering primary pointer,
+# so no available pointer may hover either. NOT `(any-hover: none)`: Chromium matches
 # that as soon as ANY pointer (the touchscreen) cannot hover (measured). Level-4
 # `not` (Chrome 104+, Safari 16.4+); an older browser just never shows the bar.
 KEYBAR_MEDIA = "(pointer: coarse) and (hover: none) and (not (any-hover: hover))"
