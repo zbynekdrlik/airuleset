@@ -15,7 +15,9 @@ Fix (the main's Approach 1): one fit entry `fitShown(f)` that never measures a
 hidden or not-yet-unpaused frame (it keeps a dirty flag instead), and a per-frame
 IntersectionObserver show signal `watchShown(f)` that consumes the flag one
 animation frame after the frame is really shown. The bar is gated on a
-touch-only device: coarse pointer AND `(hover: none)` AND `(any-hover: none)`.
+touch-only device: coarse pointer AND `(hover: none)` AND no available pointer
+can hover, `(not (any-hover: hover))` -- Chromium matches `(any-hover: none)` as
+soon as ANY pointer (the touchscreen) cannot hover, so that form is not enough.
 
 Three tiers:
 * STRUCTURAL -- the gate string (one source, CSS + JS), the single fit entry,
@@ -52,7 +54,7 @@ from test_webterm import _extract_js_function  # noqa: E402
 from test_webterm_keybar_1159 import _find_chromium, _find_node_playwright  # noqa: E402
 
 REPO = Path(__file__).resolve().parent.parent
-TOUCH_ONLY = "(pointer: coarse) and (hover: none) and (any-hover: none)"
+TOUCH_ONLY = "(pointer: coarse) and (hover: none) and (not (any-hover: hover))"
 NTABS = 5
 
 
