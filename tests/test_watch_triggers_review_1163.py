@@ -438,6 +438,9 @@ class VerifyRound(unittest.TestCase):
         self.assertTrue(any("floor" in e for e in wt.validate_watch(dense)))
         self.assertEqual(wt.validate_watch(_win()), [])
 
+    def test_the_slot_gap_floor_is_the_nudge_gate_floor(self):
+        self.assertEqual(wt.MIN_SLOT_GAP_S, nudge_gate.NUDGE_MIN_INTERVAL_S)
+
     def test_the_guidance_asks_the_owner_to_clear_the_goal(self):
         self.assertIn("ask the owner to type /goal clear", wt.ARM_GUIDANCE)
 

@@ -657,7 +657,8 @@ class StatusRow(unittest.TestCase):
         row = wt.status_row(_window(), now, state)
         self.assertEqual(
             row, "goal: watch armed (2 triggers; next watch 19:17; last "
-                 "weekly-review 08:17 missed; missed weekly-review 08:17)")
+                 "weekly-review 08:17 missed (busy-pane); missed weekly-review "
+                 "08:17)")
 
     def test_status_row_with_no_history_and_kind_off(self):
         row = _wt().status_row(_window(), _at(2026, 9, 27, 20, 0), {},
