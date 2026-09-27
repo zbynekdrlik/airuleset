@@ -41,6 +41,7 @@ import cli_fleet  # noqa: E402
 import watchdog as wd  # noqa: E402
 from watchdog import goal  # noqa: E402
 from watchdog import nudge_gate  # noqa: E402
+from watchdog import send_outcome  # noqa: E402
 from watchdog import watch_triggers as wt  # noqa: E402
 
 from _goal_arm_helpers import (  # noqa: E402
@@ -338,6 +339,119 @@ class FleetAndWiring(unittest.TestCase):
         self.assertIn("handled", calls[0])
         self.assertIn("budget_left", calls[0])
         self.assertIn("watch-trigger: probe", logs)
+
+
+class VerifyRound(unittest.TestCase):
+    """The third (verification) review's findings on the fix round."""
+
+    def _run_job(self, home, cap, now, state, win=None, tp_age=None, **kw):
+        proj = Path(home) / "p"
+        tp = _write_marker_transcript(proj, CWD, "sess-q",
+                                      transcript_age_s=tp_age)
+        fake = DeliverGoalFakeTmux([(PID, "claude", CWD, "111")], cap,
+                                   model_type=True, transcript_path=tp)
+        with m.patch.object(cli_fleet, "box_windows",
+                            return_value=[win or _win()]):
+            logs = wt.run_job(now, state, [(PID, CWD)], run=fake,
+                              sleep_fn=lambda _s: None, projects_dir=proj, **kw)
+        return fake, logs
+
+    def test_live_turn_is_judged_on_the_wall_clock_not_the_sweep_start(self):
+        # Job 52 runs late in the sweep: the transcript was written AFTER the
+        # sweep's frozen `now`, so an age against `now` is negative (not live).
+        with TemporaryDirectory() as home, \
+                m.patch.dict(os.environ, {"HOME": home}):
+            now = datetime.datetime.now().timestamp() - 40
+            win = _win([{"name": "watch", "cron": "* * * * *", "prompt": "W."}])
+            state = {"watch_triggers": {"since": {"gk-quality/watch": {
+                "ts": now - 600, "sig": "* * * * *|Europe/Bratislava"}}}}
+            fake, logs = self._run_job(home, GOAL_IDLE_CAP, now, state, win=win)
+        self.assertEqual([a for a in fake.sent if "send-keys" in a], [], logs)
+        whys = {v.get("why") for v in state["watch_triggers"]["slots"].values()}
+        self.assertIn("live-turn", whys, logs)
+
+    def test_a_short_budget_skips_the_confirm_and_marks_the_janitor(self):
+        seen = {}
+
+        def _send(pid, text, run, tpath, **kw):
+            seen.update(kw)
+            return types.SimpleNamespace(kind="delivered-unconfirmed")
+
+        with TemporaryDirectory() as home, \
+                m.patch.dict(os.environ, {"HOME": home}), \
+                m.patch.object(wd, "send_verified", side_effect=_send), \
+                m.patch.object(wd, "_janitor_mark_watch") as mark:
+            now = _at(2026, 9, 27, 19, 18)
+            state = {"watch_triggers": {"since": {"gk-quality/watch": {
+                "ts": now - 3600, "sig": "17 7,19 * * *|Europe/Bratislava"}}}}
+            self._run_job(home, GOAL_IDLE_CAP, now, state, tp_age=None,
+                          budget_left=lambda: 5)
+        self.assertTrue(seen.get("skip_confirm"), seen)
+        self.assertEqual(mark.call_count, 1)
+
+    def test_a_not_typed_send_releases_the_janitor_mark(self):
+        with TemporaryDirectory() as home, \
+                m.patch.dict(os.environ, {"HOME": home}), \
+                m.patch.object(wd, "send_verified",
+                               return_value=send_outcome.OUT_NOT_TYPED), \
+                m.patch.object(wd, "_janitor_clear_watch") as clear:
+            now = _at(2026, 9, 27, 19, 18)
+            state = {"watch_triggers": {"since": {"gk-quality/watch": {
+                "ts": now - 3600, "sig": "17 7,19 * * *|Europe/Bratislava"}}}}
+            self._run_job(home, GOAL_IDLE_CAP, now, state)
+        self.assertEqual(clear.call_count, 1)
+
+    def test_a_raising_delivery_still_fires_the_slot_once(self):
+        state, fake = {}, _Fake()
+
+        def boom(pid, tpath, text):
+            fake.sent.append(text)
+            raise RuntimeError("tmux vanished mid-send")
+
+        _job(_at(2026, 9, 27, 18, 0), state, fake)
+        logs = _job(_at(2026, 9, 27, 19, 18), state, fake, deliver=boom)
+        _job(_at(2026, 9, 27, 20, 30), state, fake, deliver=boom)
+        self.assertEqual(len(fake.sent), 1, logs)
+        rec = _slot(state, "gk-quality/watch@2026-09-27T19:17")
+        self.assertEqual((rec["s"], rec["why"]), ("fired", "error"))
+
+    def test_status_names_an_unconfirmed_fire(self):
+        now = _at(2026, 9, 27, 20, 0)
+        state = {"watch_triggers": {"slots": {
+            "gk-quality/watch@2026-09-27T19:17": {
+                "s": "fired", "why": "unconfirmed",
+                "slot": _at(2026, 9, 27, 19, 17)}}}}
+        self.assertIn("last watch 19:17 fired (unconfirmed)",
+                      wt.status_row(_win(), now, state))
+
+    def test_a_held_slot_left_behind_by_a_schedule_edit_becomes_missed(self):
+        state, fake = {}, _Fake(cap="✳ busy")
+        _job(_at(2026, 9, 27, 18, 0), state, fake)
+        _job(_at(2026, 9, 27, 19, 18), state, fake)
+        edited = _win([{"name": "watch", "cron": "0 21 * * *", "prompt": "W."}])
+        _job(_at(2026, 9, 27, 19, 30), state, fake, win=edited)
+        rec = _slot(state, "gk-quality/watch@2026-09-27T19:17")
+        self.assertEqual((rec["s"], rec["why"]), ("missed", "abandoned"))
+
+    def test_a_cron_denser_than_the_nudge_floor_is_rejected(self):
+        dense = _win([{"name": "watch", "cron": "*/30 * * * *", "prompt": "W."}])
+        self.assertTrue(any("floor" in e for e in wt.validate_watch(dense)))
+        self.assertEqual(wt.validate_watch(_win()), [])
+
+    def test_the_guidance_asks_the_owner_to_clear_the_goal(self):
+        self.assertIn("ask the owner to type /goal clear", wt.ARM_GUIDANCE)
+
+    def test_job9_drops_a_pending_goal_request_for_a_watch_window(self):
+        reqp, _ = _isolate_goal_state(self)
+        goal.record_goal_request("sess-old", CWD, "/goal STOP CONDITIONS q",
+                                 "full", now=1000, path=reqp)
+        with m.patch.object(cli_fleet, "box_windows", return_value=[_win()]), \
+                m.patch.object(goal, "deliver_goal",
+                               side_effect=AssertionError("no /goal")):
+            logs = goal.goal_sweep(1100, run=lambda *a, **k: "",
+                                   requests_path=reqp, state={})
+        self.assertEqual(goal.load_goal_requests(reqp), {})
+        self.assertTrue(any("drop:watch-window" in ln for ln in logs), logs)
 
 
 if __name__ == "__main__":
