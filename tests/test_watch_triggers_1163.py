@@ -432,8 +432,12 @@ class DeliveryThroughThePrimitive(unittest.TestCase):
         lits = fake.literals()
         self.assertEqual(len(lits), 1, (lits, logs))
         line = lits[0]
-        self.assertTrue(line.startswith("nudge: [watch-trigger] Spusti "
-                                        "gk-quality watch."), line)
+        self.assertTrue(line.startswith("nudge: [watch-trigger] "), line)
+        # the headline is the declared prompt, cut to the one-row budget
+        head = line[len("nudge: [watch-trigger] "):line.index(" — celý text:")]
+        self.assertTrue(head, line)
+        self.assertTrue("Spusti gk-quality watch.".startswith(head.rstrip("…")),
+                        head)
         self.assertNotIn("\n", line)
         self.assertIn("— celý text: ~/.claude/nudges/watch-trigger-", line)
         files = sorted((self.home / ".claude" / "nudges").glob("*.md"))
@@ -510,7 +514,7 @@ class Steering(unittest.TestCase):
             self.assertTrue(goal.goal_template_for("full", WATCH_CWD))
 
     def _virgin_sweep(self, win):
-        proj = self.home / "proj-%s" % (win.get("steer") or "none")
+        proj = self.home / ("proj-%s" % (win.get("steer") or "none"))
         _write_marker_transcript(proj, WATCH_CWD, "sess-v")
         reqp = str(self.home / ("req-%s.json" % (win.get("steer") or "none")))
         tmux = DeliverGoalFakeTmux([(PID, "claude", WATCH_CWD, "111")],
