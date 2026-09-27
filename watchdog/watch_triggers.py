@@ -317,7 +317,8 @@ def _num(v):
 def _prune(st, now, live_ids):
     for k in [k for k, v in st["slots"].items()
               if not isinstance(v, dict) or _num(v.get("slot")) is None
-              or now - v["slot"] > KEEP_S]:
+              or now - v["slot"] > KEEP_S
+              or k.split("@", 1)[0] not in live_ids]:     # trigger undeclared
         st["slots"].pop(k, None)
     for k in [k for k in st["since"] if k not in live_ids]:
         st["since"].pop(k, None)
