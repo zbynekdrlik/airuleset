@@ -254,7 +254,8 @@ class SlotTransitions(unittest.TestCase):
         self.assertEqual(len(pane.delivered), 1, logs)
         pid, _tp, text = pane.delivered[0]
         self.assertEqual(pid, PID)
-        self.assertTrue(text.startswith("Spusti gk-quality watch."), text)
+        self.assertTrue(text.startswith("19:17 watch. Spusti gk-quality watch."),
+                        text)
         self.assertIn("2026-09-27 19:17", text)
         rec = self._slots(state)["gk-quality/watch@2026-09-27T19:17"]
         self.assertEqual(rec["s"], "fired")
@@ -367,8 +368,8 @@ class SlotTransitions(unittest.TestCase):
 
     def test_dry_run_mutates_and_types_nothing(self):
         pane = _Pane()
-        state = {"watch_triggers": {"since": {
-            "gk-quality/watch": _at(2026, 9, 27, 18, 0)}, "slots": {}}}
+        state = {}
+        self._run(_at(2026, 9, 27, 18, 0), state, pane)          # watermark
         before = json.dumps(state, sort_keys=True)
         logs = self._run(_at(2026, 9, 27, 19, 18), state, pane, dry_run=True)
         self.assertEqual(json.dumps(state, sort_keys=True), before)
@@ -413,18 +414,18 @@ class DeliveryThroughThePrimitive(unittest.TestCase):
         self.proj = self.home / "projects"
         self.tpath = _write_marker_transcript(self.proj, WATCH_CWD, "sess-q")
         self.now = _at(2026, 9, 27, 19, 18)
-        self.state = {"watch_triggers": {"since": {
-            "gk-quality/watch": self.now - 3600,
-            "gk-quality/weekly-review": self.now - 3600}, "slots": {}}}
+        os.utime(self.tpath, (self.now - 600, self.now - 600))   # idle, on OUR clock
+        self.state = {}
 
     def _run(self, cap):
         fake = _WidthPane([(PID, "claude", WATCH_CWD, "111")], cap,
                           model_type=True, transcript_path=self.tpath)
         with m.patch.object(cli_fleet, "box_windows",
                             return_value=[_window()]):
-            logs = _wt().run_job(self.now, self.state, [(PID, WATCH_CWD)],
-                                 run=fake, sleep_fn=lambda _s: None,
-                                 projects_dir=self.proj)
+            for now in (self.now - 3600, self.now):     # watermark, then due
+                logs = _wt().run_job(now, self.state, [(PID, WATCH_CWD)],
+                                     run=fake, sleep_fn=lambda _s: None,
+                                     projects_dir=self.proj)
         return fake, logs
 
     def test_an_idle_pane_receives_one_pointer_line(self):
@@ -433,17 +434,17 @@ class DeliveryThroughThePrimitive(unittest.TestCase):
         self.assertEqual(len(lits), 1, (lits, logs))
         line = lits[0]
         self.assertTrue(line.startswith("nudge: [watch-trigger] "), line)
-        # the headline is the declared prompt, cut to the one-row budget
+        # the headline is the slot time + trigger, cut to the one-row budget
         head = line[len("nudge: [watch-trigger] "):line.index(" — celý text:")]
         self.assertTrue(head, line)
-        self.assertTrue("Spusti gk-quality watch.".startswith(head.rstrip("…")),
-                        head)
+        self.assertTrue("19:17 watch.".startswith(head.rstrip("…")), head)
         self.assertNotIn("\n", line)
         self.assertIn("— celý text: ~/.claude/nudges/watch-trigger-", line)
         files = sorted((self.home / ".claude" / "nudges").glob("*.md"))
         self.assertEqual(len(files), 1)
         body = files[0].read_text(encoding="utf-8")
-        self.assertTrue(body.startswith("Spusti gk-quality watch."), body)
+        self.assertTrue(body.startswith("19:17 watch. Spusti gk-quality "
+                                        "watch."), body)
         self.assertIn("2026-09-27 19:17", body)
         rec = self.state["watch_triggers"]["slots"][
             "gk-quality/watch@2026-09-27T19:17"]
@@ -662,8 +663,9 @@ class StatusRow(unittest.TestCase):
         row = _wt().status_row(_window(), _at(2026, 9, 27, 20, 0), {},
                                kind_on=False)
         self.assertEqual(
-            row, "goal: watch armed (2 triggers; next watch Mon 07:17; nudge "
-                 "kind OFF — stage: nudges on --kind watch-trigger)")
+            row, "goal: watch armed (2 triggers; next watch Mon 07:17; "
+                 "delivery OFF — stage: airuleset.py nudges on --kind "
+                 "watch-trigger)")
 
     def test_status_probe_renders_the_watch_row(self):
         with m.patch.object(cli_fleet, "box_windows", return_value=[_window()]), \
