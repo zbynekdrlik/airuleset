@@ -27,17 +27,22 @@ MECHANISM
     twice fires ONCE (slots are keyed by local wall time, `slot_key`).
   * STATE — per slot, in the watchdog state store under `state["watch_
     triggers"]`: `slots[<window>/<trigger>@<local key>] = {"s": held|fired|
-    missed, "slot", "at", "why"}` plus a `since` watermark per trigger (first
-    sight = now, so a fresh declaration never fires retroactively). A due slot
-    is `held` while the pane is not ready, `fired` once delivered, and
-    `missed` when it could not be delivered within `GRACE_S`; a slot that fell
-    inside a watchdog outage (≤ `LOOKBACK_S`) is also recorded `missed`, never
-    silently skipped. Slots older than `KEEP_S` are pruned.
+    missed, "slot", "at", "why"}` plus a `since` watermark `{ts, sig}` per
+    trigger: set to now at first sight AND when the trigger's cron/tz changes
+    (so a new or edited schedule never fires retroactively), clamped to now if
+    the clock stepped back. A due slot is `held` while the pane is not ready,
+    `fired` once an Enter went in (at-most-once, even when the submit could
+    not be confirmed), and `missed` when it could not be delivered within
+    `GRACE_S`; a slot that fell inside a watchdog outage (≤ `LOOKBACK_S`) is
+    also recorded `missed`, never silently skipped. Slots older than `KEEP_S`
+    or of an undeclared trigger are pruned.
   * DELIVERY — through the ONE keystroke primitive `send_verified(nudge=
     "watch-trigger")`, so a slot arrives as ONE pointer line with the full text
     in `~/.claude/nudges/` (#1157 slice 3). Only into the pane whose cwd IS the
     window's own cwd (never a sub-pane), and only when that pane is at an idle
-    prompt, not in copy-mode, with no recent human input, past the nudge-gate
+    prompt, not in copy-mode, not "Waiting for N background agents" (its own
+    worker), with no recent human input, no live turn in its transcript
+    (#1110), not typed by another job this sweep, and past the nudge-gate
     floor. `watch-trigger` is a stageable MACHINE kind (default OFF — the
     supervisor stages it `nudges on --kind watch-trigger`); it is exempt from
     the cross-kind TOTAL cap (the owner's declared schedule is its rate bound —
@@ -52,6 +57,7 @@ MECHANISM
 
 MACHINE-CHANNEL only: this job never pings the owner.
 """
+import copy
 import datetime
 import json
 import os
@@ -68,10 +74,11 @@ ARMED_FILE = "watch-armed.json"
 PROMPT_MAX_CHARS = 400
 TERMINAL = ("fired", "missed")
 # `send_outcome` kinds (kept as literals: this leaf imports no watchdog module
-# at import time). Typed but not delivered -> the floor is stamped, retried.
-_DELIVERED = ("submitted", "delivered-unconfirmed")
-_TYPED_NOT_DELIVERED = ("typed-undone", "typed-stranded", "swallowed",
-                        "unconfirmed")
+# at import time). An Enter went in -> the slot is FIRED (at-most-once: a
+# scheduled prompt must never run twice); keys typed but backed out -> the
+# floor is stamped and the slot retried within its grace.
+_DELIVERED = ("submitted", "delivered-unconfirmed", "unconfirmed")
+_TYPED_NOT_DELIVERED = ("typed-undone", "typed-stranded", "swallowed")
 _DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 # (lo, hi) per field: minute hour day-of-month month day-of-week (7 == 0).
 _BOUNDS = ((0, 59), (0, 23), (1, 31), (1, 12), (0, 7))
@@ -284,6 +291,8 @@ def _specs(window):
     return out, tz, errs
 
 
+
+
 # --------------------------------------------------------------------------- #
 # Slot state
 # --------------------------------------------------------------------------- #
@@ -292,10 +301,9 @@ def _store(state):
     st = state.get(STATE_KEY) if isinstance(state, dict) else None
     if not isinstance(st, dict):
         st = {}
-    if not isinstance(st.get("since"), dict):
-        st["since"] = {}
-    if not isinstance(st.get("slots"), dict):
-        st["slots"] = {}
+    for key in ("since", "slots", "errs"):
+        if not isinstance(st.get(key), dict):
+            st[key] = {}
     return st
 
 
@@ -314,6 +322,32 @@ def _num(v):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
+def _sig(trigger, tz_name):
+    """The schedule identity of a trigger: a cron or tz edit is a NEW schedule
+    whose past slots were never scheduled, so it restarts the watermark."""
+    return "%s|%s" % (trigger.get("cron"), tz_name or "")
+
+
+def _watermark(st, tid, sig, now, dry_run, logs):
+    """The trigger's `since` (slots before it are never evaluated), or None on
+    first sight / a changed schedule (the watermark is (re)set to `now`, so a
+    new or edited declaration never fires retroactively). A FUTURE watermark
+    (the box clock was stepped back) is clamped to `now`, never a silent gap."""
+    rec = st["since"].get(tid)
+    ts = _num(rec.get("ts")) if isinstance(rec, dict) else None
+    why = ("first sight" if ts is None else
+           "schedule changed" if rec.get("sig") != sig else
+           "clock stepped back" if ts > now else "")
+    if not why:
+        return ts
+    logs.append("watch-trigger: %s watermark %s (%s)%s"
+                % (tid, "set" if ts is None else "reset", why,
+                   " [dry-run]" if dry_run else ""))
+    if not dry_run:
+        st["since"][tid] = {"ts": now, "sig": sig}
+    return None if ts is None or why == "schedule changed" else now
+
+
 def _prune(st, now, live_ids):
     for k in [k for k, v in st["slots"].items()
               if not isinstance(v, dict) or _num(v.get("slot")) is None
@@ -329,19 +363,22 @@ def _prune(st, now, live_ids):
 # --------------------------------------------------------------------------- #
 
 def compose_text(window_name, trigger, key, tzname):
-    """The full nudge text. Its first sentence is the declared prompt, so the
-    typed pointer line's headline IS the instruction (#1157 slice 3)."""
-    return ("%s Plánovaný spúšťač `%s` okna %s, slot %s (%s), deklarovaný v "
+    """The full nudge text (it lands in the pointer's file). Its first
+    sentence is `<HH:MM> <trigger>.`: the typed pointer line has room for only
+    a short headline (#1157 slice 3), so the slot time + trigger name lead, and
+    the declared prompt follows as the instruction."""
+    return ("%s %s. %s Plánovaný spúšťač okna %s, slot %s (%s), deklarovaný v "
             "cli_fleet (airuleset #1163, steer=watch) — po dokončení skonči "
             "turn, ďalší slot príde sám."
-            % (trigger["prompt"].strip(), trigger["name"], window_name,
-               key.replace("T", " "), tzname or "lokálny čas boxu"))
+            % (key[11:], trigger["name"], trigger["prompt"].strip(),
+               window_name, key.replace("T", " "), tzname or "lokálny čas boxu"))
 
 
 def _readiness(window, panes, *, projects_dir, find_transcript, capture,
-               in_mode, at_idle, recent_human, gate_ok, nudges_enabled, state,
-               now):
-    """`(ready, why, pid, sid, tpath)` for the window's OWN pane."""
+               in_mode, at_idle, busy_waiting, turn_live, recent_human,
+               gate_ok, nudges_enabled, handled, state, now):
+    """`(ready, why, pid, sid, tpath)` for the window's OWN pane (never a
+    sub-pane): every gate a sibling idle-pane rider applies, cheapest first."""
     import cli_concurrency
     if nudges_enabled is not None and not nudges_enabled(NUDGE_KIND):
         return False, "kind-off", None, None, None
@@ -359,12 +396,19 @@ def _readiness(window, panes, *, projects_dir, find_transcript, capture,
         return False, "no-transcript", pid, None, None
     sid = os.path.basename(str(tpath))
     sid = sid[:-len(".jsonl")] if sid.endswith(".jsonl") else sid
+    if handled is not None and sid in handled:
+        return False, "handled-this-sweep", pid, sid, tpath
     if in_mode(pid):
         return False, "in-mode", pid, sid, tpath
-    if not at_idle(capture(pid)):
+    captured = capture(pid)
+    if not at_idle(captured):
         return False, "busy-pane", pid, sid, tpath
+    if busy_waiting(captured):
+        return False, "busy-waiting", pid, sid, tpath   # waiting on its own worker
     if recent_human(sid, cwd, tpath, pid):
         return False, "recent-human", pid, sid, tpath
+    if turn_live(tpath):
+        return False, "live-turn", pid, sid, tpath      # #1110 transcript liveness
     if not gate_ok(state, sid, NUDGE_KIND, now):
         return False, "floor", pid, sid, tpath
     return True, "", pid, sid, tpath
@@ -373,7 +417,8 @@ def _readiness(window, panes, *, projects_dir, find_transcript, capture,
 def _set(st, sid_key, slot_ts, status, why, now, logs, label, dry_run):
     """Record a slot transition (never on a dry-run); journal it only when
     the status or reason changed, so a held slot is not one line per sweep."""
-    prev = st["slots"].get(sid_key) or {}
+    prev = st["slots"].get(sid_key)
+    prev = prev if isinstance(prev, dict) else {}
     if prev.get("s") == status and prev.get("why") == why:
         if not dry_run:
             prev["at"] = now
@@ -386,42 +431,61 @@ def _set(st, sid_key, slot_ts, status, why, now, logs, label, dry_run):
                                 "why": why}
 
 
-def _window_sweep(window, st, state, now, panes, deps, grace_s, dry_run, logs,
-                  live_ids):
+def _declaration_errors(st, wname, errs, logs):
+    """Journal a window's declaration errors once per change, not per sweep."""
+    if st["errs"].get(wname) != errs:
+        for e in errs:
+            logs.append("watch-trigger: %s declaration error: %s" % (wname, e))
+    if errs:
+        st["errs"][wname] = errs
+    else:
+        st["errs"].pop(wname, None)
+
+
+def _due(window, st, now, grace_s, dry_run, logs, live_ids):
+    """Record every past-grace slot `missed`; return the pending (still within
+    grace, not terminal) slots of all the window's triggers, OLDEST first."""
     wname = window.get("name", "?")
     specs, tz, errs = _specs(window)
-    for e in errs:
-        logs.append("watch-trigger: %s declaration error: %s" % (wname, e))
+    _declaration_errors(st, wname, errs, logs)
     pending = []
     for trig, spec in specs:
         tid = "%s/%s" % (wname, trig.get("name"))
         live_ids.add(tid)
-        since = _num(st["since"].get(tid))
+        since = _watermark(st, tid, _sig(trig, window.get("tz")), now, dry_run,
+                           logs)
         if since is None:
-            if not dry_run:
-                st["since"][tid] = now
-            continue                       # first sight: never retro-fire
+            continue
         for slot_ts, key in due_slots(spec, max(since, now - LOOKBACK_S),
                                       now, tz):
             k = "%s@%s" % (tid, key)
             rec = st["slots"].get(k)
+            rec = rec if isinstance(rec, dict) else None
             verdict = decide_slot(rec, slot_ts, now, grace_s, ready=False)
             if verdict == "miss":
-                why = (rec or {}).get("why") or "not-delivered"
-                _set(st, k, slot_ts, "missed", why, now, logs,
+                _set(st, k, slot_ts, "missed",
+                     (rec or {}).get("why") or "not-delivered", now, logs,
                      "%s %s" % (tid, key), dry_run)
             elif verdict == "hold":
-                pending.append((slot_ts, key, k, trig))
+                pending.append((slot_ts, key, k, trig, rec))
+    pending.sort(key=lambda p: p[0])
+    return pending
+
+
+def _window_sweep(window, st, state, now, panes, deps, grace_s, dry_run, logs,
+                  live_ids):
+    wname = window.get("name", "?")
+    pending = _due(window, st, now, grace_s, dry_run, logs, live_ids)
     if not pending:
         return
     ready, why, pid, sid, tpath = _readiness(window, panes, state=state,
                                              now=now, **deps["ready"])
-    slot_ts, key, k, trig = pending[0]     # oldest first; one per sweep
-    for s_ts, s_key, s_k, _t in pending[1:]:
+    slot_ts, key, k, trig, rec = pending[0]     # oldest first; one per sweep
+    for s_ts, s_key, s_k, s_trig, _r in pending[1:]:
         _set(st, s_k, s_ts, "held", "queued", now, logs,
-             "%s/%s %s" % (wname, _t.get("name"), s_key), dry_run)
+             "%s/%s %s" % (wname, s_trig.get("name"), s_key), dry_run)
     label = "%s/%s %s" % (wname, trig.get("name"), key)
-    if not ready:
+    if decide_slot(rec, slot_ts, now, grace_s, ready) != "fire":
         _set(st, k, slot_ts, "held", why, now, logs, label, dry_run)
         return
     if dry_run:
@@ -429,23 +493,27 @@ def _window_sweep(window, st, state, now, panes, deps, grace_s, dry_run, logs,
                     % (label, pid))
         return
     text = compose_text(wname, trig, key, window.get("tz"))
+    if deps["handled"] is not None:
+        deps["handled"].add(sid)
     outcome = deps["deliver"](pid, tpath, text)
     kind = getattr(outcome, "kind", None) or ("submitted" if outcome
                                               else "not-typed")
-    if kind in _DELIVERED:
+    if kind in _DELIVERED:           # at-most-once: an Enter went in
         deps["mark_sent"](state, sid, NUDGE_KIND, now)
         _set(st, k, slot_ts, "fired", "" if kind == "submitted" else kind,
              now, logs, "%s -> %s" % (label, pid), dry_run)
-    else:
-        if kind in _TYPED_NOT_DELIVERED:
-            deps["mark_sent"](state, sid, NUDGE_KIND, now)
-        _set(st, k, slot_ts, "held", kind, now, logs, label, dry_run)
+        return
+    if kind in _TYPED_NOT_DELIVERED:   # keys reached the pane: floor the retry
+        deps["mark_sent"](state, sid, NUDGE_KIND, now)
+    _set(st, k, slot_ts, "held", kind, now, logs, label, dry_run)
 
 
 def watch_trigger_job(now, state, panes, *, windows, projects_dir,
                       find_transcript, capture, in_mode, at_idle,
                       recent_human, gate_ok, mark_sent, nudges_enabled,
-                      deliver, dry_run=False, grace_s=GRACE_S):
+                      deliver, busy_waiting=lambda cap: False,
+                      turn_live=lambda tpath: False, handled=None,
+                      dry_run=False, grace_s=GRACE_S):
     """One sweep over this box's watch windows; returns journal lines.
 
     Injected deps (production wiring in `run_job`):
@@ -453,19 +521,25 @@ def watch_trigger_job(now, state, panes, *, windows, projects_dir,
       gate_ok / mark_sent(state, sid, kind, now)          nudge_gate floor
       find_transcript(projects_dir, cwd) -> (tpath, mtime) | tpath | None
       capture(pid) -> str; in_mode(pid) -> bool; at_idle(captured) -> bool
+      busy_waiting(captured) -> bool     "Waiting for N background agents"
+      turn_live(tpath) -> bool           the transcript says a turn is running
       recent_human(sid, cwd, tpath, pid) -> bool          VETO
       nudges_enabled(kind) -> bool                        per-kind staging
+      handled                            the sweep's typed-this-sweep sid set
     A dry-run mutates nothing and types nothing."""
     logs = []
     if not windows:
         return logs
+    if dry_run:
+        state = copy.deepcopy(state) if isinstance(state, dict) else {}
     st = _store(state)
-    deps = {"deliver": deliver, "mark_sent": mark_sent,
+    deps = {"deliver": deliver, "mark_sent": mark_sent, "handled": handled,
             "ready": {"projects_dir": projects_dir,
                       "find_transcript": find_transcript, "capture": capture,
                       "in_mode": in_mode, "at_idle": at_idle,
+                      "busy_waiting": busy_waiting, "turn_live": turn_live,
                       "recent_human": recent_human, "gate_ok": gate_ok,
-                      "nudges_enabled": nudges_enabled}}
+                      "nudges_enabled": nudges_enabled, "handled": handled}}
     live_ids = set()
     for w in windows:
         _window_sweep(w, st, state, now, panes, deps, grace_s, dry_run, logs,
@@ -476,32 +550,52 @@ def watch_trigger_job(now, state, panes, *, windows, projects_dir,
     return logs
 
 
-def run_job(now, state, panes, *, run, sleep_fn, projects_dir, dry_run=False):
+def run_job(now, state, panes, *, run, sleep_fn, projects_dir, dry_run=False,
+            handled=None, budget_left=None):
     """The production wiring: the real primitives, resolved at call time
     through the `watchdog` package (the back-reference convention, so every
-    `watchdog.<name>` test seam stays effective)."""
+    `watchdog.<name>` test seam stays effective). The delivery closure is the
+    sibling-rider contract: janitor watch mark, journal + outcome threading, and
+    a skipped confirm wait when the sweep budget is short."""
     import watchdog
     from watchdog import goal as _goal
+    from watchdog import goal_turn_liveness as _live
     from watchdog import nudge_gate
+    from watchdog import ops_wait_recheck as _owr
+    from watchdog import queue_arrival_recheck as _qa
+    jl = []
 
     def _deliver(pid, tpath, text):
-        return watchdog.send_verified(pid, text, run, tpath, sleep_fn=sleep_fn,
-                                      nudge=NUDGE_KIND, state=state, now=now)
+        watchdog._janitor_mark_watch(state, pid, now)
+        left = budget_left() if budget_left is not None else None
+        outcome = watchdog.send_verified(
+            pid, text, run, tpath, sleep_fn=sleep_fn, logs=jl, out={},
+            nudge=NUDGE_KIND, state=state, now=now,
+            skip_confirm=(left is not None
+                          and left < _qa.QUEUE_ARRIVAL_CONFIRM_MIN_BUDGET_S))
+        if outcome:
+            watchdog._janitor_clear_watch(state, pid)
+        return outcome
 
     def _recent_human(sid, cwd, tpath, pid):
         return _goal._recovery_recent_human(sid, cwd, tpath, now, pid=pid,
                                             run=run)
 
-    return watch_trigger_job(
+    lines = watch_trigger_job(
         now, state, panes, windows=box_watch_windows(),
         projects_dir=projects_dir,
         find_transcript=watchdog.find_active_transcript,
         capture=lambda pid: watchdog.capture_pane(pid, run),
         in_mode=lambda pid: watchdog.pane_in_mode(pid, run),
-        at_idle=watchdog.pane_at_idle_prompt, recent_human=_recent_human,
+        at_idle=watchdog.pane_at_idle_prompt,
+        busy_waiting=_owr._pane_busy_waiting,
+        turn_live=lambda tpath: _live.turn_live(
+            _live.transcript_age_s(tpath, now)),
+        recent_human=_recent_human,
         gate_ok=nudge_gate.gate_ok, mark_sent=nudge_gate.mark_sent,
         nudges_enabled=watchdog.nudges_enabled, deliver=_deliver,
-        dry_run=dry_run)
+        handled=handled, dry_run=dry_run)
+    return lines + jl
 
 
 # --------------------------------------------------------------------------- #
@@ -512,7 +606,9 @@ def _when(ts, now, tz):
     d, n = _local(ts, tz), _local(now, tz)
     if d.date() == n.date():
         return d.strftime("%H:%M")
-    return "%s %s" % (_DAYS[d.weekday()], d.strftime("%H:%M"))
+    if abs(now - ts) < 6 * 86400:
+        return "%s %s" % (_DAYS[d.weekday()], d.strftime("%H:%M"))
+    return d.strftime("%d.%m. %H:%M")
 
 
 def _next(window, now):
@@ -526,14 +622,25 @@ def _next(window, now):
     return best, tz
 
 
-def arm_line(window, now):
+_KIND_OFF = "delivery OFF — stage: airuleset.py nudges on --kind %s" % NUDGE_KIND
+
+
+def arm_line(window, now, kind_on=True):
     """`watch armed (N triggers, next <name> <when>)` — what `/autopilot` /
-    `goal-arm --self` print in a watch window instead of arming a `/goal`."""
+    `goal-arm --self` print in a watch window instead of arming a `/goal`,
+    naming a delivery that is staged OFF instead of hiding it."""
     n = len(window.get("triggers") or [])
     best, tz = _next(window, now)
     nxt = ("next %s %s" % (best[0], _when(best[1], now, tz)) if best
            else "no upcoming slot")
-    return "watch armed (%d trigger%s, %s)" % (n, "" if n == 1 else "s", nxt)
+    return "watch armed (%d trigger%s, %s)%s" % (
+        n, "" if n == 1 else "s", nxt, "" if kind_on else " — " + _KIND_OFF)
+
+
+ARM_GUIDANCE = ("this window is steered by its declared watch (#1163): arm NO "
+                "/goal here — if one is armed, clear it (/goal clear), and "
+                "delete this session's own cron triggers (CronDelete); watchdog "
+                "Job 52 delivers each slot into this pane.")
 
 
 def armed_path(home=None):
@@ -552,7 +659,7 @@ def read_armed(home=None):
 
 def record_armed(window_name, sid, now, home=None):
     """Record that the window's session acknowledged its watch (the `/goal`
-    arm's counterpart). Atomic write; never raises."""
+    arm's counterpart; `status_row` shows it). Atomic write; never raises."""
     data = read_armed(home)
     data[str(window_name)] = {"ts": now, "sid": sid or ""}
     path = armed_path(home)
@@ -578,9 +685,11 @@ def load_watchdog_state():
         return {}
 
 
-def status_row(window, now, state, kind_on=True):
+def status_row(window, now, state, kind_on=True, armed=None, goal_armed=None):
     """The `status` `goal:` row of a watch window: next slot, last slot with
-    its outcome, a slot held now, and every missed slot still in history."""
+    its outcome, a slot held now, every missed slot still in history, the
+    session's acknowledgement (`armed`, a `record_armed` entry), and a `/goal`
+    still armed in the window (`goal_armed` True: the cost the watch replaces)."""
     wname = window.get("name", "?")
     best, tz = _next(window, now)
     n = len(window.get("triggers") or [])
@@ -605,6 +714,11 @@ def status_row(window, now, state, kind_on=True):
               for ts, name, v in done if v.get("s") == "missed"]
     if missed:
         parts.append("missed " + ", ".join(missed[-3:]))
+    ack = _num(armed.get("ts")) if isinstance(armed, dict) else None
+    if ack is not None:
+        parts.append("acknowledged %s" % _when(ack, now, tz))
+    if goal_armed is True:
+        parts.append("/goal STILL ARMED — clear it (/goal clear)")
     if not kind_on:
-        parts.append("nudge kind OFF — stage: nudges on --kind %s" % NUDGE_KIND)
+        parts.append(_KIND_OFF)
     return "goal: watch armed (%s)" % "; ".join(parts)

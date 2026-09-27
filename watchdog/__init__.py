@@ -5808,8 +5808,10 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
 
     _add("watch_triggers",   # Job 52 (#1163); watchdog/watch_triggers.py = SSOT
          lambda: watch_triggers_enabled and bool(watch_triggers.box_watch_windows()),
-         lambda: watch_triggers.run_job(now, state, panes, run=run, sleep_fn=sleep_fn,
-                                        projects_dir=projects_dir, dry_run=dry_run),
+         lambda: watch_triggers.run_job(
+             now, state, panes, run=run, sleep_fn=sleep_fn, projects_dir=projects_dir,
+             dry_run=dry_run, handled=compact_handled_this_sweep,
+             budget_left=remaining_budget_s),
          "watch-trigger error", min_budget=watch_triggers.MIN_BUDGET_S)
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
