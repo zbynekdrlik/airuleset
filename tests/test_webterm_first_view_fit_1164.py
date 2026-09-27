@@ -290,6 +290,7 @@ const NOISE = [/\[ttyd\] maybe unknown option: arg=/, /GL Driver Message/, /GPU 
   // iframe an explicit box, so its own 'resize' never fires on a slot change and
   // only the parent #frames observer can re-fit it when the bar's height goes away
   await run('phoneland', { viewport: { width: 844, height: 390 }, hasTouch: true, isMobile: true }, [], async (p, r) => {
+    await sleep(2500);      // past scheduleFill's last timed pass (2000 ms), which would re-fit on its own
     await p.evaluate(() => { document.getElementById('keybar').style.display = 'none'; });
     r.barGone = await settle(p);
   });
