@@ -92,6 +92,7 @@ EXPECTED_STANDALONE = [
     "parked_wake_job",                  # (48) — #1034 wake a parked session after a claudy account switch
     "task_hygiene_job",                 # (49) — #1036 Odoo task-hygiene overseer
     "erp_heartbeat",                    # (51) — #959 erp-test box heartbeat
+    "watch_triggers",                   # (52) — #1163 watch-steered window triggers
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at
