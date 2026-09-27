@@ -344,10 +344,16 @@ class FleetAndWiring(unittest.TestCase):
 class VerifyRound(unittest.TestCase):
     """The third (verification) review's findings on the fix round."""
 
-    def _run_job(self, home, cap, now, state, win=None, tp_age=None, **kw):
+    def _run_job(self, home, cap, now, state, win=None, tp_age=None,
+                 idle_at=None, **kw):
         proj = Path(home) / "p"
         tp = _write_marker_transcript(proj, CWD, "sess-q",
                                       transcript_age_s=tp_age)
+        if idle_at is not None:
+            # An IDLE session on the INJECTED clock: the liveness gate judges age
+            # at max(now, wall clock), so a transcript written at wall-clock time
+            # reads as a live turn once the wall clock passes the fixed `now`.
+            os.utime(tp, (idle_at, idle_at))
         fake = DeliverGoalFakeTmux([(PID, "claude", CWD, "111")], cap,
                                    model_type=True, transcript_path=tp)
         with m.patch.object(cli_fleet, "box_windows",
@@ -385,7 +391,7 @@ class VerifyRound(unittest.TestCase):
             state = {"watch_triggers": {"since": {"gk-quality/watch": {
                 "ts": now - 3600, "sig": "17 7,19 * * *|Europe/Bratislava"}}}}
             self._run_job(home, GOAL_IDLE_CAP, now, state, tp_age=None,
-                          budget_left=lambda: 5)
+                          idle_at=now - 600, budget_left=lambda: 5)
         self.assertTrue(seen.get("skip_confirm"), seen)
         self.assertEqual(mark.call_count, 1)
 
@@ -398,7 +404,7 @@ class VerifyRound(unittest.TestCase):
             now = _at(2026, 9, 27, 19, 18)
             state = {"watch_triggers": {"since": {"gk-quality/watch": {
                 "ts": now - 3600, "sig": "17 7,19 * * *|Europe/Bratislava"}}}}
-            self._run_job(home, GOAL_IDLE_CAP, now, state)
+            self._run_job(home, GOAL_IDLE_CAP, now, state, idle_at=now - 600)
         self.assertEqual(clear.call_count, 1)
 
     def test_a_raising_delivery_still_fires_the_slot_once(self):
