@@ -98,9 +98,10 @@ def resolve(cwd=None, *, apply_branch_override=False):
     per-branch override so a line already on the destination (rode in via
     ``git merge origin/develop``) can be excluded. When ``apply_branch_override``
     (block-test-skips only), ``base_ref`` is narrowed to ``origin/<branch>`` for
-    a re-push when that ref exists; ``dest_ref`` is never narrowed. The whole
-    case-block + #909 fallbacks are the SHARED logic the two push hooks used to
-    keep byte-identical."""
+    a re-push when that ref exists; ``dest_ref`` is never narrowed. A two-branch
+    ``dev`` (no ``origin/develop``) resolves to ``origin/<default>``, its PR
+    target (#1162). The whole case-block + #909 fallbacks are the SHARED logic
+    the two push hooks used to keep byte-identical."""
     default = default_branch(cwd)
     cur = current_branch(cwd)
     base_ref = "origin/%s" % default
@@ -108,12 +109,9 @@ def resolve(cwd=None, *, apply_branch_override=False):
 
     if cur in ("HEAD", default, "staging"):
         pass
-    elif cur == "dev":
-        # #1162 -- two-branch integration branch: its PR is dev -> <default>,
-        # so the range is origin/<default>..HEAD. Resolved here so the #909
-        # tracking fallback never narrows it to origin/dev (which hid an
-        # already-pushed RED commit from the RED-before-GREEN gate).
-        case_resolved = True
+    elif cur == "dev" and not _ref_exists("origin/develop", cwd):
+        # #1162 -- never the tracking origin/dev (it hid a pushed RED commit).
+        case_resolved = _ref_exists(base_ref, cwd)
     elif cur == "develop":
         if _ref_exists("origin/staging", cwd):
             base_ref = "origin/staging"
