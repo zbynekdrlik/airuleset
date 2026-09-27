@@ -54,7 +54,9 @@ def scan(base_ref, stdout_fn, project):
             bypassed[sha] = m.group(0)
         else:
             normal.append(sha)
-    exempt = set().union(*[_touched(s, stdout_fn) for s in bypassed])
+    if not bypassed:  # the common push: no per-commit diff-tree calls at all
+        return set(), set()
+    exempt =set().union(*[_touched(s, stdout_fn) for s in bypassed])
     exempt -= set().union(*[_touched(s, stdout_fn) for s in normal])
     for sha, marker in bypassed.items():
         if not _already_logged(sha):
