@@ -16,6 +16,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -36,6 +37,9 @@ class _TwoBranchRepo(unittest.TestCase):
     """A work repo on ``dev`` whose origin is a local bare repo holding main +
     dev, with ``dev`` tracking ``origin/dev`` (the real two-branch shape)."""
 
+    DEFAULT = "main"
+    SET_HEAD = True
+
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="pushscope1162-")
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
@@ -45,14 +49,15 @@ class _TwoBranchRepo(unittest.TestCase):
         self.origin = os.path.join(self.tmp, "origin.git")
         self.work = os.path.join(self.tmp, "work")
         os.makedirs(self.work)
-        self._git(self.tmp, "init", "-q", "--bare", "-b", "main", self.origin)
-        self.g("init", "-q", "-b", "main")
+        self._git(self.tmp, "init", "-q", "--bare", "-b", self.DEFAULT, self.origin)
+        self.g("init", "-q", "-b", self.DEFAULT)
         self.g("remote", "add", "origin", self.origin)
         self._write("app.py", "def f():\n    return 1\n")
         self.g("add", "app.py")
         self.g("commit", "-qm", "base")
-        self.g("push", "-q", "origin", "main")
-        self.g("remote", "set-head", "origin", "main")
+        self.g("push", "-q", "origin", self.DEFAULT)
+        if self.SET_HEAD:
+            self.g("remote", "set-head", "origin", self.DEFAULT)
         self.g("checkout", "-qb", "dev")
         self.g("push", "-q", "-u", "origin", "dev")
 
@@ -84,6 +89,11 @@ class _TwoBranchRepo(unittest.TestCase):
         self.g("add", "app.py")
         self.g("commit", "-qm", "fix: f returns 2\n\nCloses #7")
 
+    def resolve(self, **kw):
+        # Hermetic in-process call: no inherited GIT_* / real HOME gitconfig.
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            return pushscope.resolve(self.work, **kw)
+
     def run_hook(self, command="git push origin dev"):
         import json
         payload = json.dumps({"tool_input": {"command": command}})
@@ -97,7 +107,7 @@ class TestResolveTwoBranchDev1162(_TwoBranchRepo):
         self.red_commit()
         self.g("push", "-q", "origin", "dev")
         self.green_commit()
-        base, dest, cur, default = pushscope.resolve(self.work)
+        base, dest, cur, default = self.resolve()
         self.assertEqual((cur, default), ("dev", "main"))
         self.assertEqual(base, "origin/main",
                          "two-branch dev must measure the dev->main PR range")
@@ -106,8 +116,7 @@ class TestResolveTwoBranchDev1162(_TwoBranchRepo):
     def test_branch_override_still_narrows_dev(self):
         # block-test-skips' per-added-line semantics (#909 F1) keep the
         # origin/<branch> range; only the destination follows the fix.
-        base, dest, _cur, _default = pushscope.resolve(
-            self.work, apply_branch_override=True)
+        base, dest, _cur, _default = self.resolve(apply_branch_override=True)
         self.assertEqual(base, "origin/dev")
         self.assertEqual(dest, "origin/main")
 
@@ -133,6 +142,37 @@ class TestPrePushHookTwoBranchDev1162(_TwoBranchRepo):
         # its test is a GREEN-without-RED, even when a later test exists.
         self.green_commit()
         self.g("push", "-q", "origin", "dev")
+        self.red_commit()
+        r = self.run_hook()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("Bug-fix commit appears BEFORE", r.stdout + r.stderr)
+
+
+class TestDevAlongsideDevelop1162(_TwoBranchRepo):
+    def test_three_branch_repo_with_a_dev_branch_keeps_develop(self):
+        # A develop-based repo that also has a `dev` branch is NOT the
+        # two-branch shape: its PR target stays origin/develop (pre-#1162).
+        self.g("push", "-q", "origin", "dev:develop")
+        self.g("fetch", "-q", "origin")
+        base, dest, _cur, _default = self.resolve()
+        self.assertEqual((base, dest), ("origin/develop", "origin/develop"))
+
+
+class TestUnresolvedMasterDefault1162(_TwoBranchRepo):
+    """origin/HEAD unset and the default is `master`: default_branch() falls
+    back to "main", whose origin ref does not exist. The dev arm must not pin
+    that phantom range (Gate 2 would silently see no commits)."""
+
+    DEFAULT = "master"
+    SET_HEAD = False
+
+    def test_phantom_default_falls_back_to_tracking_ref(self):
+        base, _dest, cur, default = self.resolve()
+        self.assertEqual((cur, default), ("dev", "main"))
+        self.assertEqual(base, "origin/dev")
+
+    def test_fix_before_test_still_blocks(self):
+        self.green_commit()
         self.red_commit()
         r = self.run_hook()
         self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
