@@ -199,23 +199,8 @@ function activate(idx) {
     if (on) t.scrollIntoView?.({ inline: 'nearest', block: 'nearest' });
   });
   current = idx;
-  // #886: force xterm to re-measure cell metrics on a hidden->visible transition.
-  // A preloaded tab (display:none) has xterm with stale zero-layout metrics. On
-  // first activation, term.resize(176,51) may be a no-op (same dimensions) and
-  // fontSize=F may be a no-op (same value), so xterm never re-measures its stale
-  // metrics and the fill pipeline runs on stale dimensions. A genuine fontSize
-  // option change (fs+1 then fs) is xterm's public, version-stable re-measure
-  // trigger; it forces fresh cell metrics + resizes .xterm-screen, which fires
-  // the existing per-child ResizeObserver -> the full 4-layer pass runs on honest
-  // dimensions. Guarded: only kick when the tab has a connected term.
-  try {
-    const _f = made[idx], _w = _f && _f.contentWindow;
-    if (_w && _w.term && typeof _w.term.options === 'object') {
-      const _fs = _w.term.options.fontSize || 13;
-      _w.term.options.fontSize = _fs + 1;
-      _w.term.options.fontSize = _fs;
-    }
-  } catch (e) { /* cross-origin or term not ready — applyFixedGrid retries */ }
+  // #1164 superseded the #886 fontSize kick: xterm stays paused until shown, so the
+  // fit waits for the show signal instead (fitShown / watchShown below).
   made[idx].__wtFitDirty = true;             // #1164: every activation re-fits, once SHOWN
   applyFixedGrid(made[idx]);                 // #613 REOPEN-2: fit the now-VISIBLE tab
   focusTerminal(made[idx], idx);             // #661: type immediately after a switch
