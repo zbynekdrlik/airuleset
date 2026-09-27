@@ -117,8 +117,11 @@ class TestArmParagraphResolvedVariant(TestCase):
 # --------------------------------------------------------------------------- #
 class TestDeclaredWindowExample(TestCase):
     def test_gk_quality_named_in_the_1038_declared_window_example(self):
-        # #1038 example was "gk review, gk-infra, d3 today" -> add gk-quality
-        self.assertIn("gk review, gk-infra, gk-quality", _norm(_text()))
+        # #1038 example was "gk review, gk-infra, d3 today" -> add gk-quality;
+        # #1163 made gk-quality watch-steered (no /goal, never re-armed), so the
+        # re-arm example names the /goal windows and states the watch exception.
+        self.assertIn("gk review, gk-infra, d3 today; a watch-steered window "
+                      "is never re-armed, #1163", _norm(_text()))
 
 
 # --------------------------------------------------------------------------- #
