@@ -41,9 +41,9 @@ Two problems this fixes, both reported by the owner:
    BOTH bounds and never count as "another kind delivered" for the cap — a
    revival into a dead/blocked session is not a prompt interruption.
 
-   #1109 — PRIORITY_CAP_EXEMPT_KINDS (`infra-priority`) are exempt from the
-   cross-kind TOTAL cap ONLY (they neither block via it nor count toward it) but
-   KEEP their own per-kind floor (15 min) — a release-blocking infra hand-off must
+   #1109/#1163 — PRIORITY_CAP_EXEMPT_KINDS (`infra-priority`, `watch-trigger`) are
+   exempt from the cross-kind TOTAL cap ONLY (neither block via it nor count) but
+   KEEP their own per-kind floor (15 min / 60 min) — a release-blocking hand-off must
    reach the gk-infra window even while an ordinary priority kind holds the 3 h
    cap, yet is still a floored, staged prompt interruption (NOT a recovery kind).
 
@@ -358,7 +358,7 @@ def _total_cap_block(sess, now):
     while the per-kind floor stayed 1 h: a pane dominated by one kind delivered
     hourly. `gate_ok` still checks the per-kind floor FIRST, so a sub-60-min
     same-kind repeat is reported as `hold:floor`, not `hold:total-cap`.
-    RECOVERY kinds AND #1109 PRIORITY_CAP_EXEMPT_KINDS (`infra-priority`) are
+    RECOVERY kinds AND PRIORITY_CAP_EXEMPT_KINDS (infra-priority, watch-trigger) are
     skipped: a recovery revival is not a prompt interruption and never counts
     toward the cap (recovery kinds never call `mark_sent` in production either, so
     that is a defensive belt on top of that), and a release-blocking infra-priority
@@ -405,7 +405,7 @@ def gate_ok(state, sid, category, now):
     if last_cat is not None and now - last_cat < _category_floor(category):
         return False                              # per-kind floor
     if category in PRIORITY_CAP_EXEMPT_KINDS:
-        # #1109 — a release-blocking infra-priority nudge KEEPS its per-kind floor
+        # #1109/#1163 — a cap-exempt kind (infra-priority, watch-trigger) KEEPS its floor
         # (checked above) but is EXEMPT from the cross-kind total cap, so it can
         # reach the pane even while an ordinary priority kind holds the cap.
         return True
