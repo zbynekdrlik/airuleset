@@ -41,6 +41,16 @@
     "onboarded": null
   },
   {
+    "name": "fohmixer",
+    "host": "dev1",
+    "path": "~/devel/fohmixer",
+    "branch_model": "2-branch",
+    "default_branch": "master",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-09-27"
+  },
+  {
     "name": "iemmixer",
     "host": "dev1",
     "path": "~/devel/iemmixer",
