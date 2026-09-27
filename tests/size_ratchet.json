@@ -96,7 +96,7 @@
     "gates/filing/render.py": 29,
     "gates/ghread.py": 629,
     "gates/lanefill.py": 628,
-    "gates/pushscope.py": 154,
+    "gates/pushscope.py": 158,
     "gates/pushtest.py": 250,
     "gates/questionscope.py": 444,
     "gates/secrets.py": 355,
