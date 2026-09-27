@@ -2421,12 +2421,15 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
         cwd = entry.get("cwd", "")
         text = entry.get("text", "")
         authority = entry.get("authority", "")
-        if not text:
-            # malformed/legacy entry -- nothing to type; drop rather than
-            # retry forever on an empty payload. #624 -- name the drop, never
-            # a SILENT branch (no pane resolved -> the cwd-derived label).
-            logs.append("DROP (goal-sweep) %s sid=%s -> drop:malformed-empty "
-                        "(no text)" % (watchdog.project_label(cwd), sid))
+        _drop = ("drop:malformed-empty (no text)" if not text else
+                 "drop:watch-window (steer=watch arms no /goal, #1163)"
+                 if _wt.watch_window_for(cwd) is not None else "")
+        if _drop:
+            # malformed/legacy entry, or a request recorded before its window
+            # became watch-steered -- drop rather than retry forever. #624 --
+            # name the drop, never a SILENT branch (the cwd-derived label).
+            logs.append("DROP (goal-sweep) %s sid=%s -> %s"
+                        % (watchdog.project_label(cwd), sid, _drop))
             aborts.pop(sid, None)
             clear_goal_request(sid, path=requests_path)
             continue

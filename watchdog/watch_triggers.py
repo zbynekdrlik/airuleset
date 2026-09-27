@@ -61,6 +61,7 @@ import copy
 import datetime
 import json
 import os
+import time
 
 NUDGE_KIND = "watch-trigger"
 STEER = "watch"
@@ -70,6 +71,7 @@ LOOKBACK_S = 24 * 3600        # a slot missed during an outage is still recorded
 KEEP_S = 9 * 24 * 3600        # slot history kept (> one weekly period)
 NEXT_HORIZON_S = 8 * 24 * 3600
 MIN_BUDGET_S = 30             # one verified keystroke delivery (polls ~20 s)
+MIN_SLOT_GAP_S = 3600         # == nudge_gate.NUDGE_MIN_INTERVAL_S (drift-locked)
 ARMED_FILE = "watch-armed.json"
 PROMPT_MAX_CHARS = 400
 TERMINAL = ("fired", "missed")
@@ -77,7 +79,7 @@ TERMINAL = ("fired", "missed")
 # at import time). An Enter went in -> the slot is FIRED (at-most-once: a
 # scheduled prompt must never run twice); keys typed but backed out -> the
 # floor is stamped and the slot retried within its grace.
-_DELIVERED = ("submitted", "delivered-unconfirmed", "unconfirmed")
+_DELIVERED = ("submitted", "delivered-unconfirmed", "unconfirmed", "error")
 _TYPED_NOT_DELIVERED = ("typed-undone", "typed-stranded", "swallowed")
 _DAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 # (lo, hi) per field: minute hour day-of-month month day-of-week (7 == 0).
@@ -271,7 +273,28 @@ def validate_watch(window):
                 or len(prompt) > PROMPT_MAX_CHARS):
             errs.append("trigger[%d] prompt must be one non-empty line of at "
                         "most %d chars" % (i, PROMPT_MAX_CHARS))
-    return errs
+    return errs or _spacing_errors(window)
+
+
+def _spacing_errors(window, floor_s=MIN_SLOT_GAP_S):
+    """The window's slots (all triggers share ONE pane and ONE nudge kind) must
+    be at least the per-kind nudge floor apart, or every other slot is held by
+    the floor until it is `missed`. Checked over one week from a fixed Monday;
+    the floor is `nudge_gate`'s default (an env-raised floor is not assumed)."""
+    try:
+        tz = zone(window.get("tz"))
+        start = datetime.datetime(2026, 1, 5, tzinfo=tz or datetime.timezone.utc
+                                  ).timestamp()
+        ts = sorted({t for trig in window.get("triggers") or []
+                     for t, _k in due_slots(parse_cron(trig.get("cron")), start,
+                                            start + 7 * 86400, tz)})
+    except (CronError, AttributeError):
+        return []                  # reported by the per-trigger checks above
+    gaps = [b - a for a, b in zip(ts, ts[1:])]
+    if gaps and min(gaps) < floor_s:
+        return ["slots only %d min apart: below the %d-min per-kind nudge floor"
+                % (min(gaps) // 60, floor_s // 60)]
+    return []
 
 
 def _specs(window):
@@ -431,6 +454,18 @@ def _set(st, sid_key, slot_ts, status, why, now, logs, label, dry_run):
                                 "why": why}
 
 
+def _abandon(st, tid, start, now, dry_run, logs):
+    """A held slot older than the evaluation window (a schedule edit restarted
+    the watermark, or an outage longer than the lookback) is never revisited:
+    record it `missed (abandoned)` instead of leaving it `held` for KEEP_S."""
+    for k, v in list(st["slots"].items()):
+        if (k.startswith(tid + "@") and isinstance(v, dict)
+                and v.get("s") == "held" and _num(v.get("slot")) is not None
+                and v["slot"] < start):
+            _set(st, k, v["slot"], "missed", "abandoned", now, logs,
+                 "%s %s" % (tid, k.split("@", 1)[1]), dry_run)
+
+
 def _declaration_errors(st, wname, errs, logs):
     """Journal a window's declaration errors once per change, not per sweep."""
     if st["errs"].get(wname) != errs:
@@ -454,10 +489,11 @@ def _due(window, st, now, grace_s, dry_run, logs, live_ids):
         live_ids.add(tid)
         since = _watermark(st, tid, _sig(trig, window.get("tz")), now, dry_run,
                            logs)
+        start = now if since is None else max(since, now - LOOKBACK_S)
+        _abandon(st, tid, start, now, dry_run, logs)
         if since is None:
             continue
-        for slot_ts, key in due_slots(spec, max(since, now - LOOKBACK_S),
-                                      now, tz):
+        for slot_ts, key in due_slots(spec, start, now, tz):
             k = "%s@%s" % (tid, key)
             rec = st["slots"].get(k)
             rec = rec if isinstance(rec, dict) else None
@@ -495,9 +531,14 @@ def _window_sweep(window, st, state, now, panes, deps, grace_s, dry_run, logs,
     text = compose_text(wname, trig, key, window.get("tz"))
     if deps["handled"] is not None:
         deps["handled"].add(sid)
-    outcome = deps["deliver"](pid, tpath, text)
-    kind = getattr(outcome, "kind", None) or ("submitted" if outcome
-                                              else "not-typed")
+    try:
+        outcome = deps["deliver"](pid, tpath, text)
+    except Exception as e:  # noqa: BLE001 -- keys may already be in: at-most-once
+        logs.append("watch-trigger: %s delivery raised %r" % (label, e))
+        outcome = None
+    kind = (getattr(outcome, "kind", None)
+            or ("error" if outcome is None else
+                "submitted" if outcome else "not-typed"))
     if kind in _DELIVERED:           # at-most-once: an Enter went in
         deps["mark_sent"](state, sid, NUDGE_KIND, now)
         _set(st, k, slot_ts, "fired", "" if kind == "submitted" else kind,
@@ -573,8 +614,8 @@ def run_job(now, state, panes, *, run, sleep_fn, projects_dir, dry_run=False,
             nudge=NUDGE_KIND, state=state, now=now,
             skip_confirm=(left is not None
                           and left < _qa.QUEUE_ARRIVAL_CONFIRM_MIN_BUDGET_S))
-        if outcome:
-            watchdog._janitor_clear_watch(state, pid)
+        if outcome or getattr(outcome, "kind", "") == "not-typed":
+            watchdog._janitor_clear_watch(state, pid)    # nothing left to watch
         return outcome
 
     def _recent_human(sid, cwd, tpath, pid):
@@ -589,8 +630,10 @@ def run_job(now, state, panes, *, run, sleep_fn, projects_dir, dry_run=False,
         in_mode=lambda pid: watchdog.pane_in_mode(pid, run),
         at_idle=watchdog.pane_at_idle_prompt,
         busy_waiting=_owr._pane_busy_waiting,
+        # the WALL clock, never the sweep-start `now`: Job 52 runs late in the
+        # sweep, so a transcript written after `now` would read as not live
         turn_live=lambda tpath: _live.turn_live(
-            _live.transcript_age_s(tpath, now)),
+            _live.transcript_age_s(tpath, max(now, time.time()))),
         recent_human=_recent_human,
         gate_ok=nudge_gate.gate_ok, mark_sent=nudge_gate.mark_sent,
         nudges_enabled=watchdog.nudges_enabled, deliver=_deliver,
@@ -638,7 +681,8 @@ def arm_line(window, now, kind_on=True):
 
 
 ARM_GUIDANCE = ("this window is steered by its declared watch (#1163): arm NO "
-                "/goal here — if one is armed, clear it (/goal clear), and "
+                "/goal here — if one is armed, ask the owner to type /goal clear (a "
+                "session cannot type a slash command), and "
                 "delete this session's own cron triggers (CronDelete); watchdog "
                 "Job 52 delivers each slot into this pane.")
 
@@ -705,7 +749,9 @@ def status_row(window, now, state, kind_on=True, armed=None, goal_armed=None):
     done = [r for r in recs if r[2].get("s") in TERMINAL]
     if done:
         ts, name, v = done[-1]
-        parts.append("last %s %s %s" % (name, _when(ts, now, tz), v["s"]))
+        parts.append("last %s %s %s%s" % (name, _when(ts, now, tz), v["s"],
+                                          " (%s)" % v["why"] if v.get("why")
+                                          else ""))
     for ts, name, v in recs:
         if v.get("s") == "held":
             parts.append("held %s %s (%s)" % (name, _when(ts, now, tz),
