@@ -199,23 +199,9 @@ function activate(idx) {
     if (on) t.scrollIntoView?.({ inline: 'nearest', block: 'nearest' });
   });
   current = idx;
-  // #886: force xterm to re-measure cell metrics on a hidden->visible transition.
-  // A preloaded tab (display:none) has xterm with stale zero-layout metrics. On
-  // first activation, term.resize(176,51) may be a no-op (same dimensions) and
-  // fontSize=F may be a no-op (same value), so xterm never re-measures its stale
-  // metrics and the fill pipeline runs on stale dimensions. A genuine fontSize
-  // option change (fs+1 then fs) is xterm's public, version-stable re-measure
-  // trigger; it forces fresh cell metrics + resizes .xterm-screen, which fires
-  // the existing per-child ResizeObserver -> the full 4-layer pass runs on honest
-  // dimensions. Guarded: only kick when the tab has a connected term.
-  try {
-    const _f = made[idx], _w = _f && _f.contentWindow;
-    if (_w && _w.term && typeof _w.term.options === 'object') {
-      const _fs = _w.term.options.fontSize || 13;
-      _w.term.options.fontSize = _fs + 1;
-      _w.term.options.fontSize = _fs;
-    }
-  } catch (e) { /* cross-origin or term not ready — applyFixedGrid retries */ }
+  // #1164 superseded the #886 fontSize kick: xterm stays paused until shown, so the
+  // fit waits for the show signal instead (fitShown / watchShown below).
+  made[idx].__wtFitDirty = true;             // #1164: every activation re-fits, once SHOWN
   applyFixedGrid(made[idx]);                 // #613 REOPEN-2: fit the now-VISIBLE tab
   focusTerminal(made[idx], idx);             // #661: type immediately after a switch
   reviveTerminal(made[idx], idx);            // #673: auto-reconnect a slept tab, no manual Enter
@@ -732,7 +718,42 @@ function attachBlockSelect(win) {                // idempotent: attach once per 
     }, true);                                     // CAPTURE: run before xterm's own selection listener
   } catch (e) { /* addEventListener unavailable -> no translation, page stays alive */ }
 }
-function applyFixedGrid(f) {                     // poll for window.term, fit, then watch resize
+// #1164 FIT LIFECYCLE: never measure a hidden frame, always measure on show. xterm
+// PAUSES its renderer while its element is not intersecting and QUEUES every resize
+// until shown, so a hidden or just-shown frame still reports its OLD box (measured:
+// the 560x360 boot grid -> font 29 instead of 17, then the #798 over-fit shrink).
+// fitShown is the ONE fitFixedGrid entry: on a frame not yet shown it only sets a dirty flag;
+// watchShown's IntersectionObserver consumes it one animation frame after the frame
+// is shown -- xterm's own observer runs in that same notification task, so by then
+// it has unpaused and applied its queued resize. false = shown but not fittable yet.
+// (scheduleFill's later passes may still run on a since-hidden frame; they bail on a
+// zero box, and the next show re-fits from scratch.)
+function fitShown(f) {
+  const win = f && f.contentWindow;
+  if (!win || !win.term) return false;
+  if (f.style.display === 'none' || !f.__wtShown) { f.__wtFitDirty = true; return true; }
+  if (!fitFixedGrid(win)) { f.__wtFitDirty = true; return false; }
+  f.__wtFitDirty = false;
+  scheduleFill(win);                             // deferred FILL passes (above)
+  return true;
+}
+function watchShown(f) {                         // idempotent: one observer per frame
+  const win = f && f.contentWindow;
+  if (!win || f.__wtShowIO !== undefined) return;
+  const el = win.document && win.document.querySelector('.xterm-screen');
+  if (!el) return;
+  if (!win.IntersectionObserver) { f.__wtShowIO = null; f.__wtShown = true; return; }  // xterm never pauses then
+  f.__wtShowIO = new win.IntersectionObserver((es) => {
+    if (!es[es.length - 1].isIntersecting) { f.__wtShown = false; return; }
+    requestAnimationFrame(() => {
+      if (f.style.display === 'none') return;    // hidden again before the frame
+      f.__wtShown = true;
+      if (f.__wtFitDirty) fitShown(f);
+    });
+  });
+  f.__wtShowIO.observe(el);
+}
+function applyFixedGrid(f) {                     // poll for window.term, attach, fit once shown
   if (!f) return;
   const win = f.contentWindow;
   if (!win) return;
@@ -741,8 +762,8 @@ function applyFixedGrid(f) {                     // poll for window.term, fit, t
     themeTerminal(win.term);                     // #643: Campbell palette + font, once term exists
     attachClipboard(win);                        // #671: OSC 52 + copy-on-select -> browser clipboard
     attachBlockSelect(win);                      // #1016: plain Alt+drag -> column (block) selection
-    if (fitFixedGrid(win)) {
-      scheduleFill(win);                           // deferred FILL passes (below)
+    watchShown(f);                               // #1164: the show signal
+    if (fitShown(f) && f.__wtShowIO !== undefined) {
       if (!win.__wtResize) {                       // re-fit + re-fill on window resize
         win.__wtResize = true;
         try {
@@ -754,7 +775,7 @@ function applyFixedGrid(f) {                     // poll for window.term, fit, t
             // grown is driven by the parent #frames ResizeObserver instead).
             const b = win.__wtSetBox;
             if (b && Math.abs(win.innerWidth - b.w) <= 1 && Math.abs(win.innerHeight - b.h) <= 1) return;
-            fitFixedGrid(win); scheduleFill(win);
+            fitShown(f);
           });
         } catch (e) {}
       }
@@ -796,10 +817,9 @@ if (CFG.sessions.length) activate(0);   // land in the first terminal, not a lan
 // tab-bar height change fires it.
 try {
   if (window.ResizeObserver) {
-    new ResizeObserver(() => {
-      const f = made[current], win = f && f.contentWindow;
-      if (win && win.term) { fitFixedGrid(win); scheduleFill(win); }
-    }).observe(frames);
+    // #1164: also the key bar's height; via the attach poll, so a tab whose poll gave
+    // up before its terminal existed is still attached, then fitted through fitShown
+    new ResizeObserver(() => { if (made[current]) applyFixedGrid(made[current]); }).observe(frames);
   }
 } catch (e) {}
 // #644: register the minimal NETWORK-ONLY service worker (Chromium
