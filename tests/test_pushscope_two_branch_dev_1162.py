@@ -179,5 +179,55 @@ class TestUnresolvedMasterDefault1162(_TwoBranchRepo):
         self.assertIn("Bug-fix commit appears BEFORE", r.stdout + r.stderr)
 
 
+class TestInRangeNoTestBypass1162(_TwoBranchRepo):
+    """Ruling (b): a commit whose OWN message carries [no-test: <reason>] is
+    exempt from both checks wherever it sits in the PR range, logged once."""
+
+    def bypass_commit(self):
+        self._write("app.py", "def f():\n    return 3\n")
+        self.g("add", "app.py")
+        self.g("commit", "-qm", "fix(ci): f tweak\n\n"
+               "[no-test: ci-yaml conditional logic, not unit-testable]")
+
+    def log_lines(self):
+        log = Path(self.home, "devel", "airuleset", "audits", "no-test-skips.log")
+        text = log.read_text() if log.exists() else ""
+        return [ln for ln in text.splitlines() if "(in-range commit, #1162)" in ln]
+
+    def test_pushed_bypassed_fix_then_normal_commit_passes(self):
+        self.bypass_commit()
+        self.g("push", "-q", "origin", "dev")
+        self._write("README.md", "# docs\n")
+        self.g("add", "README.md")
+        self.g("commit", "-qm", "docs: readme")
+        r = self.run_hook()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(len(self.log_lines()), 1, self.log_lines())
+        self.assertIn("[no-test: ci-yaml", self.log_lines()[0])
+        self.assertEqual(self.run_hook().returncode, 0)
+        self.assertEqual(len(self.log_lines()), 1, "re-push must not re-log")
+
+    def test_unbypassed_fix_before_test_still_blocks_alongside(self):
+        self.bypass_commit()
+        self.g("push", "-q", "origin", "dev")
+        self.green_commit()
+        self.red_commit()
+        r = self.run_hook()
+        out = r.stdout + r.stderr
+        self.assertEqual(r.returncode, 2, out)
+        self.assertIn("fix: f returns 2", out)
+        self.assertNotIn("fix(ci): f tweak", out)
+
+    def test_file_a_normal_commit_touched_stays_gated(self):
+        self.bypass_commit()
+        self.g("push", "-q", "origin", "dev")
+        self._write("app.py", "def f():\n    return 4\n")
+        self.g("add", "app.py")
+        self.g("commit", "-qm", "feat: extend f")
+        r = self.run_hook()
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("NO test files modified", r.stdout + r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
