@@ -204,6 +204,7 @@ from watchdog import goal_turn_liveness as _turn_liveness     # #1110 (transcrip
 from watchdog import gk_stall_notice as _gk_stall_notice      # #1109 (gk role-pane stall notice)
 from watchdog import stream_migrate as _stream_migrate        # #1143 (dark stream loop re-arm)
 from watchdog import send_outcome as _send_outcome            # #1157 (delivery outcome)
+from watchdog import watch_triggers as _wt                    # #1163 (steer=watch windows)
 from watchdog.send_outcome import (  # noqa: E402 -- #1157: moved, ONE shared undo
     janitor_undo_if_own_stranded as _janitor_undo_if_own_stranded)
 
@@ -626,6 +627,11 @@ def goal_template_for(authority, cwd, role=None, mode=None, path=None,
     wrong-authority / oversize arm), logged LOUD like the sibling."""
     authority = str(authority or "").strip()
     if not authority:
+        return None
+    if _wt.watch_window_for(cwd) is not None:   # #1163: steer=watch arms NO /goal
+        if isinstance(logs, list):
+            logs.append("goal-template none: %s is a watch-steered window (#1163)"
+                        % cwd)
         return None
     if mode is None or role is None:
         try:
@@ -2290,6 +2296,8 @@ def _declared_virgin_scan(now, run=None, dry_run=False, projects_dir=None,
                 continue
             if not cli_concurrency.is_exact_declared_window(cwd, windows=box_wins):
                 continue                      # a SUBDIR of a declared window -> never virgin-arm (only THE window's own pane)
+            if _wt.watch_window_for(cwd, box_wins) is not None:
+                continue                      # #1163 steer=watch: Job 52 delivers its triggers, never a /goal
             tinfo = watchdog.find_active_transcript(projects_dir, cwd)
             if not tinfo:
                 continue
@@ -3159,6 +3167,23 @@ def _fulfilled_silent_veto(sid, mark_ts, loc, dry_run,
     return None
 
 
+def _dark_watch_window_skip(logs, sid, cwd, loc, seen_state, pinged_state,
+                            confirm_state):
+    """#1163 -- True when `cwd` is a steer=watch window: dark-watch must neither
+    re-arm its /goal nor treat its dark goal as a dead loop (no confirmation run,
+    no #459 ping) -- its triggers are Job 52's. Journals ONE line per episode
+    (the `seen_state` watch mark) and clears the dead-loop bookkeeping."""
+    if _wt.watch_window_for(cwd) is None:
+        return False
+    if not (seen_state.get(sid) or {}).get("watch"):
+        logs.append("dark-watch %s sid=%s -> skip:watch-window (steer=watch; its "
+                    "triggers are Job 52's, #1163)" % (loc, sid))
+    seen_state[sid] = {"watch": True}
+    pinged_state.pop(sid, None)
+    confirm_state.pop(sid, None)
+    return True
+
+
 def _dark_awaiting_user_veto(tpath):
     """#737 C -- True when the session's LAST real assistant turn ended with a
     ❓ marker: it is PARKED on a question to the owner, ALIVE-waiting, not a dead
@@ -3926,6 +3951,8 @@ def goal_dark_watch(now, run=None, state=None, send_fn=None, dry_run=False,
         mark = new_mark if new_mark is not None else prior_mark
         off_state[sid] = {"off": new_off, "mark": mark, "tmtime": tmtime,
                           "pv": _GOAL_MARK_PARSER_VERSION}   # #675 reseed stamp
+        if _dark_watch_window_skip(logs, sid, cwd, loc, seen_state, pinged_state, confirm_state):
+            continue   # #1163 steer=watch: a dark goal is that window's normal state
 
         # #522 -- honour the disarm-on-question veto (see `_qdisarm_veto`): never
         # re-arm / accumulate / ping a loop just deliberately cleared for a stuck ❓.

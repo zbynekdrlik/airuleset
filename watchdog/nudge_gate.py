@@ -208,7 +208,7 @@ RECOVERY_NUDGE_KINDS = frozenset(
 # kind (`_total_cap_block` skips it in the scan) — exactly like the recovery
 # kinds are skipped in the scan, but WITHOUT the floor exemption. This set MUST
 # be disjoint from RECOVERY_NUDGE_KINDS (a kind is one OR the other, never both).
-PRIORITY_CAP_EXEMPT_KINDS = frozenset({"infra-priority"})
+PRIORITY_CAP_EXEMPT_KINDS = frozenset({"infra-priority", "watch-trigger"})  # #1163 Job 52 slot: schedule = its bound
 
 # #1109 — the `infra-priority` per-kind floor: a release-blocking infra hand-off
 # may reach the pane at most once every 15 min (well under the owner's default
