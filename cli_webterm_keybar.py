@@ -3,7 +3,8 @@
 A phone keyboard has no Ctrl chord, no arrows and no Esc, so on a phone the
 owner could not send `Ctrl+B w/s` (tmux window/session switch) or `Up` (prompt
 history). This bar supplies those keys. It is shown ONLY on a coarse pointer
-with no hover (phones, tablets); on a desktop it stays `display: none`, inert.
+with no hover anywhere (phones, tablets; #1164: `KEYBAR_MEDIA`); on a desktop
+or a touchscreen laptop it stays `display: none`, inert.
 
 Each button feeds its exact byte sequence into the ACTIVE tab's xterm through
 the same-origin `window.term` bridge (#613/#643/#671), exactly as if typed:
@@ -25,12 +26,21 @@ reads the main script's `made` / `current` / `focusTerminal`) — substituted in
 the same single pass by `cli_webterm.render_dashboard_html`.
 """
 
-KEYBAR_CSS = """/* #1159: the touch-only key bar. Hidden (inert) unless the primary pointer is
-   coarse and cannot hover, i.e. a phone or tablet; the desktop layout is
-   unchanged. One bottom row, horizontally scrollable, 44px touch targets, no
-   hint text (the #671 ruling). */
+# #1164: the ONE touch-only gate (CSS + keybarFitViewport). A coarse primary
+# pointer alone is not enough: Chrome on a touchscreen laptop can report a coarse,
+# non-hovering primary pointer even with a mouse/trackpad attached, so no
+# available pointer may hover either. NOT `(any-hover: none)`: Chromium matches
+# that as soon as ANY pointer (the touchscreen) cannot hover (measured). Level-4
+# `not` (Chrome 104+, Safari 16.4+); an older browser just never shows the bar.
+KEYBAR_MEDIA = "(pointer: coarse) and (hover: none) and (not (any-hover: hover))"
+
+KEYBAR_CSS = """/* #1159: the touch-only key bar. Hidden (inert) unless NO pointer can
+   hover and the primary one is coarse, i.e. a phone or tablet (#1164: never a
+   touchscreen laptop with a mouse); the desktop layout is unchanged. One
+   bottom row, horizontally scrollable, 44px touch targets, no hint text (the
+   #671 ruling). */
 #keybar { display: none; }
-@media (pointer: coarse) and (hover: none) {
+@media """ + KEYBAR_MEDIA + """ {
   #keybar { display: flex; flex: 0 0 auto; gap: 4px; padding: 4px 6px;
     overflow-x: auto; overflow-y: hidden; white-space: nowrap;
     background: #0C0C0C; border-top: 1px solid #2b2b2b; }
@@ -60,6 +70,7 @@ KEYBAR_HTML = r"""<div id="keybar">
 <button type="button" data-k="scroll">scroll</button>
 </div>
 <script>
+const KEYBAR_MEDIA = '""" + KEYBAR_MEDIA + r"""';
 // #1159: the touch key bar (see cli_webterm_keybar.py). Fixed byte sequences;
 // the tmux group is the prefix Ctrl+B (0x02) + the command key.
 const KEYBAR_KEYS = {
@@ -102,7 +113,7 @@ function keybarPress(k) {            // the ACTIVE tab only; hidden tabs never r
 function keybarFitViewport() {
   const vv = window.visualViewport;
   if (!vv) return;
-  const touch = !!(window.matchMedia && window.matchMedia('(pointer: coarse) and (hover: none)').matches);
+  const touch = !!(window.matchMedia && window.matchMedia(KEYBAR_MEDIA).matches);
   const h = Math.round(vv.height);
   const keyboard = touch && Math.abs(vv.scale - 1) < 0.01 && h < window.innerHeight - 1;
   document.body.style.height = keyboard ? h + 'px' : '';
