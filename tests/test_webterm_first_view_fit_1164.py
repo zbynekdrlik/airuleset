@@ -29,7 +29,8 @@ Three tiers:
   SKIPS where absent) -- the real dashboard behind the real gateway in front of
   a throwaway loopback ttyd (real xterm.js): the first-activation grid box equals
   the second and fills the slot for every tab, on desktop and on phone/tablet
-  profiles; a hidden bar re-fits the active tab; a touchscreen laptop with a
+  profiles; a hidden bar re-fits the active tab (landscape phone, over-fit
+  path); a touchscreen laptop with a
   hover pointer shows no bar; zero console errors/warnings.
 """
 import json
@@ -112,7 +113,9 @@ class TestFitLifecycleStructure1164(unittest.TestCase):
         self.assertIn("fitShown(f)", apply_fn)
         ro = self.js[self.js.index("new ResizeObserver(() => {"):]
         ro = ro[:ro.index("observe(frames)")]
-        self.assertIn("fitShown(", ro)
+        # through the attach poll, so a tab whose poll gave up before its
+        # terminal existed is still attached and fitted on a slot change
+        self.assertIn("applyFixedGrid(made[current])", ro)
         self.assertNotIn("fitFixedGrid(", ro)
 
     def test_show_signal_is_an_intersection_observer_then_one_frame(self):
@@ -150,7 +153,9 @@ fitShown(a.f); out.shownBeforeSignal = [fits, !!a.f.__wtFitDirty];
 a.io(true); out.afterSignalBeforeFrame = fits;
 flush(); out.afterFrame = [fits, fills, !!a.f.__wtFitDirty];
 fitShown(a.f); out.whileShown = [fits, fills];
-a.io(false); a.f.style.display = 'none';
+a.io(false);                       // not intersecting any more, display still block
+fitShown(a.f); out.notIntersecting = [fits, !!a.f.__wtFitDirty];
+a.f.style.display = 'none';
 fitShown(a.f); out.afterHide = [fits, !!a.f.__wtFitDirty];
 a.f.style.display = 'block'; a.io(true); a.f.style.display = 'none'; flush();
 out.hiddenAgainBeforeFrame = [fits, !!a.f.__wtFitDirty];
@@ -200,6 +205,9 @@ class TestFitLifecycleNode1164(unittest.TestCase):
     def test_a_visible_frame_fits_immediately(self):
         self.assertEqual(self.out["whileShown"], [2, 2])
 
+    def test_a_not_intersecting_signal_alone_rearms_the_deferral(self):
+        self.assertEqual(self.out["notIntersecting"], [2, True])
+
     def test_a_hide_rearms_the_deferral(self):
         self.assertEqual(self.out["afterHide"], [2, True])
         self.assertEqual(self.out["hiddenAgainBeforeFrame"], [2, True])
@@ -238,7 +246,7 @@ const NOISE = [/\[ttyd\] maybe unknown option: arg=/, /GL Driver Message/, /GPU 
     const r = (x) => Math.round(x * 10) / 10;
     return { slotW: frames.clientWidth, slotH: frames.clientHeight,
       left: r(m.e + m.a * g.left), top: r(m.f + m.d * g.top), w: r(m.a * g.width), h: r(m.d * g.height),
-      font: w.term.options.fontSize, framesBottom: fr.bottom, vh: innerHeight };
+      font: w.term.options.fontSize, framesBottom: fr.bottom, vh: innerHeight, boxExplicit: !!f.style.height };
   });
   const settle = async (p) => {       // until the grid box is unchanged for 600 ms
     await sleep(800);
@@ -249,7 +257,7 @@ const NOISE = [/\[ttyd\] maybe unknown option: arg=/, /GL Driver Message/, /GPU 
       if (now === last) { await sleep(300); if (JSON.stringify(await grid(p)) === now) return JSON.parse(now); }
       last = now;
     }
-    return JSON.parse(last);
+    return Object.assign(JSON.parse(last), { unsettled: true });   // never converged: fails the test
   };
   const run = async (name, ctxOpts, launchArgs, extra) => {
     const b = await chromium.launch({ executablePath: CH, headless: true, args: ['--no-sandbox'].concat(launchArgs || []) });
@@ -277,8 +285,12 @@ const NOISE = [/\[ttyd\] maybe unknown option: arg=/, /GL Driver Message/, /GPU 
   };
   await run('desktop', { viewport: { width: 1920, height: 1080 } });
   await run('phone', { viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, deviceScaleFactor: 2 });
-  await run('tablet', { viewport: { width: 1280, height: 800 }, hasTouch: true, isMobile: true }, [], async (p, r) => {
-    await p.evaluate(() => { document.getElementById('keybar').style.display = 'none'; });   // the bar's height goes away
+  await run('tablet', { viewport: { width: 1280, height: 800 }, hasTouch: true, isMobile: true });
+  // a landscape phone is too short for the grid: the #798 over-fit path gives the
+  // iframe an explicit box, so its own 'resize' never fires on a slot change and
+  // only the parent #frames observer can re-fit it when the bar's height goes away
+  await run('phoneland', { viewport: { width: 844, height: 390 }, hasTouch: true, isMobile: true }, [], async (p, r) => {
+    await p.evaluate(() => { document.getElementById('keybar').style.display = 'none'; });
     r.barGone = await settle(p);
   });
   // a touchscreen laptop: the PRIMARY pointer is coarse and cannot hover, but a
@@ -358,13 +370,15 @@ class TestFirstViewFitRealBrowser1164(unittest.TestCase):
         cls.out = json.loads(r.stdout.strip().splitlines()[-1])
 
     def _assert_fills(self, g, tag):
-        # inside the slot, and the tighter axis fills it (the #678 native-cell
-        # residual is removed by the #700/#798 frame layers; allow ~1 phone cell)
+        # settled, inside the slot, and the tighter axis fills it (the #678
+        # native-cell residual is removed by the #700 stretch; the #798 over-fit
+        # path keeps its +16 px box slack, a few % on a short phone)
+        self.assertFalse(g.get("unsettled"), tag)
         self.assertGreaterEqual(g["left"], -1.5, tag)
         self.assertGreaterEqual(g["top"], -1.5, tag)
         self.assertLessEqual(g["left"] + g["w"], g["slotW"] + 1.5, tag)
         self.assertLessEqual(g["top"] + g["h"], g["slotH"] + 1.5, tag)
-        self.assertGreaterEqual(max(g["w"] / g["slotW"], g["h"] / g["slotH"]), 0.97, tag)
+        self.assertGreaterEqual(max(g["w"] / g["slotW"], g["h"] / g["slotH"]), 0.95, tag)
 
     def _assert_first_equals_second(self, name):
         r = self.out[name]
@@ -388,9 +402,13 @@ class TestFirstViewFitRealBrowser1164(unittest.TestCase):
     def test_tablet_first_view_equals_second_and_fills(self):
         self._assert_first_equals_second("tablet")
 
+    def test_landscape_phone_first_view_equals_second_and_fills(self):
+        self._assert_first_equals_second("phoneland")
+
     def test_the_bar_height_change_refits_the_active_tab(self):
-        r = self.out["tablet"]
+        r = self.out["phoneland"]
         before, after = r["second"][-1], r["barGone"]
+        self.assertTrue(before["boxExplicit"], before)   # the path only the slot observer re-fits
         self.assertGreater(after["slotH"], before["slotH"] + 20)
         self._assert_fills(after, "after the bar went away: %s" % after)
 
@@ -402,6 +420,7 @@ class TestFirstViewFitRealBrowser1164(unittest.TestCase):
     def test_touch_devices_show_the_bar(self):
         self.assertEqual(self.out["phone"]["bar"], "flex")
         self.assertEqual(self.out["tablet"]["bar"], "flex")
+        self.assertEqual(self.out["phoneland"]["bar"], "flex")
 
     def test_touchscreen_laptop_with_a_hover_pointer_shows_no_bar(self):
         r = self.out["touchlaptop"]
