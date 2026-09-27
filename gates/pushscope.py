@@ -108,6 +108,12 @@ def resolve(cwd=None, *, apply_branch_override=False):
 
     if cur in ("HEAD", default, "staging"):
         pass
+    elif cur == "dev":
+        # #1162 -- two-branch integration branch: its PR is dev -> <default>,
+        # so the range is origin/<default>..HEAD. Resolved here so the #909
+        # tracking fallback never narrows it to origin/dev (which hid an
+        # already-pushed RED commit from the RED-before-GREEN gate).
+        case_resolved = True
     elif cur == "develop":
         if _ref_exists("origin/staging", cwd):
             base_ref = "origin/staging"
