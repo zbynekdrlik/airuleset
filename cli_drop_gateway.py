@@ -45,6 +45,7 @@ import cli_fleet
 # cycle; the wrappers below inject the lane-shape primitives; names re-exported).
 import cli_drop_lanes
 from cli_drop_lanes import (  # noqa: F401 — re-exported for cli_drop_gateway.X callers
+    DROP_HOST_DAVID, DROP_HOST_GK, DROP_HOST_SPINBIKE,
     DROP_LANES_CACHE, _is_tailscale_host, _nodename_for_entry, drop_lanes_cache_key,
     filedrop_port_probe_snippet, parse_filedrop_port, persist_measured_filedrop_ports,
     read_drop_lanes_cache, write_drop_lanes_cache)
@@ -70,9 +71,7 @@ DROP_PORT_MAX = 8909
 # .newlevel.media) is single-level, confirming the cert shape.
 # Naming: `drop-<box>.newlevel.media` on single-account boxes,
 # `drop-<box>-<account>.newlevel.media` on shared boxes (#889).
-DROP_HOST_SPINBIKE = "drop-spinbike.newlevel.media"
-DROP_HOST_DAVID = "drop-david.newlevel.media"  # grandfathered for david1
-DROP_HOST_GK = "drop-gk.newlevel.media"  # gatekeeper box (#1111)
+# DROP_HOST_SPINBIKE / _DAVID / _GK live in the cli_drop_lanes leaf (#1170).
 
 # The go-live marker a `drop-gateway --apply` writes once a box's drop lane is
 # LIVE (ingress reconciled + tunnel restarted). The CLI's public channel is

@@ -16,12 +16,16 @@ a needle is public when, lower-cased, it occurs inside one of
   entry of the effective uid) and home (`$HOME`, the passwd home),
 - this box's host name (`socket.gethostname()`, `os.uname().nodename`),
 - every `name`/`host`/`user` of `cli_fleet.REMOTE_HOSTS`,
-- the fleet's drop hosts: built with the SAME builder the drop gateway uses
-  (`cli_drop_lanes._generated_drop_host`, which alone carries the public zone)
-  for every fleet account and for this box, plus the controller's local drop
-  host; the hand-authored seed hosts (`cli_drop_gateway.DROP_LANES`) are read
-  lazily — that import costs ~45 ms, so only for a needle the cheap set did
-  not already settle and that could be part of a host name at all.
+- the fleet's drop hosts: `cli_drop_lanes.public_drop_hosts`, built with the
+  SAME builder the drop gateway uses (`_generated_drop_host`, which alone
+  carries the public zone) plus the grandfathered hosts that leaf owns — a
+  superset of `cli_drop_gateway.DROP_LANES`, locked by a test, without that
+  module's ~45 ms import on every tool call (review finding 4).
+
+`trust_env=False` (every `secret exec` path) ignores `$USER`/`$LOGNAME`/
+`$HOME` and `getpass`: there the CALLER sets the environment, so an env var
+must not be able to make a genuine value "public" (review finding 5). The
+PostToolUse hook runs in Claude Code's own environment and trusts it.
 
 What can never exempt a needle (the adversarial cases): a needle under 8
 bytes (a short value inside a long host name is a coincidence, not a public
@@ -29,9 +33,11 @@ word — it keeps its old behaviour), a needle spanning a line break (identity
 strings have none), a value that merely SHARES a prefix with a host name (the
 test is needle-inside-identity, never the reverse), an empty or 1-byte
 identity string such as `$HOME=/` (nothing 8+ bytes fits inside it), and an
-identity string over MAX_IDENTITY_BYTES (an oversize env var is ignored). A
-failing lane registry keeps the needle — every error path fails toward
-redaction.
+identity string over MAX_IDENTITY_BYTES (an oversize env var is ignored).
+Every error path fails toward redaction: the callers build the identity via
+`cli_vault_keyfile.public_identity`, which falls back to an EMPTY identity
+(keep every needle) when anything here raises — the hook fails OPEN, so a
+crash would leak every value (review finding 1).
 
 Each dropped needle is recorded ONCE per (name, kind) in
 `~/.claude/secret-logs/public-identity.log` — the key file or store NAME and
@@ -39,6 +45,7 @@ the reason, never the value — so a weak credential is visible, not silent.
 """
 
 import getpass
+import hashlib
 import os
 import pwd
 import re
@@ -49,7 +56,6 @@ from datetime import datetime, timezone
 MIN_PUBLIC_NEEDLE = 8        # = cli_vault_keyfile.MIN_PLAIN_VALUE
 MAX_IDENTITY_BYTES = 1024    # a longer "identity" (a crafted env var) is ignored
 LOG_NAME = "public-identity.log"
-_HOSTNAME_BYTES = re.compile(rb"[a-z0-9.-]+")
 _LABEL_RE = re.compile(r"[^A-Za-z0-9_.:-]")
 
 
@@ -75,78 +81,52 @@ def _passwd_entry():
     return (pw.pw_name, pw.pw_dir)
 
 
-def local_identity():
-    """This account's names and homes and this box's host names."""
-    out = []
-    for fn in (getpass.getuser, socket.gethostname, lambda: os.uname().nodename):
+def local_identity(trust_env=True):
+    """This account's names and homes and this box's host names; the
+    environment-derived ones only with `trust_env`."""
+    out = list(_passwd_entry())
+    sources = [socket.gethostname, lambda: os.uname().nodename]
+    if trust_env:
+        sources.append(getpass.getuser)
+        out += [os.environ.get(var, "") for var in ("USER", "LOGNAME", "HOME")]
+    for fn in sources:
         try:
             out.append(fn())
-        except (OSError, KeyError, ImportError):
-            continue
-    for var in ("USER", "LOGNAME", "HOME"):
-        out.append(os.environ.get(var, ""))
-    return out + list(_passwd_entry())
-
-
-def fleet_identity(remote_hosts, nodename=None, username=None):
-    """Every fleet name/host/user and every generated drop host (both the
-    single-account and the shared form, so the zone and each box stem are in)."""
-    import cli_drop_lanes as lanes
-
-    out = [lanes.CONTROLLER_LOCAL_DROP_HOST]
-    pairs = [(nodename, username)] if nodename and username else []
-    for e in remote_hosts or ():
-        if not isinstance(e, dict):
-            continue
-        out += [e.get(k) for k in ("name", "host", "user")]
-        user = e.get("user")
-        if isinstance(user, str) and isinstance(e.get("name"), str):
-            pairs.append((lanes._nodename_for_entry(e), user))
-    for node, user in pairs:
-        if node and isinstance(user, str) and user:
-            out.append(lanes._generated_drop_host(node, user, False))
-            out.append(lanes._generated_drop_host(node, user, True))
+        except (OSError, KeyError, ImportError) as exc:
+            sys.stderr.write("vault-public: identity source skipped (%s)\n"
+                             % exc.__class__.__name__)
     return out
 
 
-def _lane_hosts():
-    """The concrete drop hosts of the lane registry (the hand-authored seeds)."""
-    import cli_drop_gateway
+def fleet_identity(remote_hosts, nodename=None, username=None):
+    """Every fleet name/host/user and every drop host the fleet can print."""
+    import cli_drop_lanes
 
-    return [lane.host for lane in cli_drop_gateway.DROP_LANES.values()]
+    out = []
+    for e in remote_hosts or ():
+        if isinstance(e, dict):
+            out += [e.get(k) for k in ("name", "host", "user")]
+    return out + cli_drop_lanes.public_drop_hosts(remote_hosts, nodename, username)
 
 
-def default_identity():
+def default_identity(trust_env=True):
     import cli_fleet
 
     entry = _passwd_entry()
-    node = os.uname().nodename
     user = entry[0] if entry else None
-    return local_identity() + fleet_identity(cli_fleet.REMOTE_HOSTS, node, user)
+    return (local_identity(trust_env)
+            + fleet_identity(cli_fleet.REMOTE_HOSTS, os.uname().nodename, user))
 
 
 class PublicIdentity:
     """`contains(needle)` — is this needle a substring of a public identity?
+    `windows(n)` — every n-byte run of one (the `exec --file` fragment
+    filter's public grams). `strings` defaults to `default_identity()`."""
 
-    `strings` defaults to `default_identity()`; `lazy_hosts` (a no-arg
-    callable) defaults to the lane registry and is called at most once."""
-
-    def __init__(self, strings=None, lazy_hosts=None):
-        base = default_identity() if strings is None else strings
-        self._blob = b"\n".join(_norm(base))
-        self._lazy = _lane_hosts if lazy_hosts is None else lazy_hosts
-        self._lazy_blob = None
-
-    def _extra(self):
-        if self._lazy_blob is None:
-            try:
-                self._lazy_blob = b"\n".join(_norm(self._lazy()))
-            except Exception as exc:  # noqa: BLE001 — fail toward redaction
-                sys.stderr.write("vault-public: lane registry unavailable (%s) — "
-                                 "seed drop hosts not exempted\n"
-                                 % exc.__class__.__name__)
-                self._lazy_blob = b""
-        return self._lazy_blob
+    def __init__(self, strings=None, trust_env=True):
+        base = default_identity(trust_env) if strings is None else strings
+        self._parts = _norm(base)
+        self._blob = b"\n".join(self._parts)
 
     def contains(self, needle):
         n = bytes(needle).strip().lower()
@@ -154,9 +134,13 @@ class PublicIdentity:
             return False
         if b"\n" in n or b"\r" in n:
             return False
-        if n in self._blob:
-            return True
-        return bool(_HOSTNAME_BYTES.fullmatch(n)) and n in self._extra()
+        return n in self._blob
+
+    def windows(self, n):
+        if n < MIN_PUBLIC_NEEDLE:
+            return set()
+        return {part[i:i + n] for part in self._parts
+                for i in range(len(part) - n + 1)}
 
 
 def log_path():
@@ -170,13 +154,21 @@ def note_dropped(label, kind):
 
     Value-free by signature: only the NAME (sanitised) and the needle kind
     travel here. Never fatal — a failed note must not break the redactor."""
-    label = _LABEL_RE.sub("_", str(label))[:96] or "<unnamed>"
+    raw = str(label)
+    label = _LABEL_RE.sub("_", raw) or "<unnamed>"
+    if len(label) > 96:     # a hash of the NAME keeps two long names apart
+        digest = hashlib.sha256(raw.encode("utf-8", "surrogateescape")).hexdigest()
+        label = "%s~%s" % (label[:80], digest[:12])
     kind = re.sub(r"[^a-z]", "", str(kind))[:16] or "whole"
     key = "reason=public-identity name=%s kind=%s\n" % (label, kind)
     p = log_path()
     try:
         from filedrop import vault
 
+        if p.parent.is_symlink():
+            sys.stderr.write("vault-public: %s is a symlink — not noting %s\n"
+                             % (p.parent, label))
+            return
         p.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(str(p.parent), 0o700)
         if p.exists():

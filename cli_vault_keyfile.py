@@ -182,30 +182,81 @@ def needles_for(items, public=None):
     redactor and `secret exec --file` build needles, and noted once by name.
     A whole value that is public takes its lines along (they are substrings
     of it); otherwise each line needle is judged on its own. `public` is a
-    `PublicIdentity` (injected by tests, built lazily otherwise — only when
-    there is a needle to judge)."""
-    whole, lines = set(), set()
+    `PublicIdentity` (injected by tests, built otherwise — only when there is
+    a needle to judge — by `public_identity`, which never raises). Each
+    dropped (name, kind) is noted ONCE per call, never once per line."""
+    whole, lines, dropped = set(), set(), set()
     for label, v in items:
         v = v.rstrip(b"\r\n") or v
         if public is None:
-            import cli_vault_public
-            public = cli_vault_public.PublicIdentity()
+            public = public_identity()
         if public.contains(v):
-            _note_public(label, "whole")
+            dropped.add((label, "whole"))
             continue
         whole.add(v)
         whole.update(pem_blocks(v))
         for ln in line_needles(v):
             if public.contains(ln):
-                _note_public(label, "line")
+                dropped.add((label, "line"))
             else:
                 lines.add(ln)
+    for label, kind in sorted(dropped):
+        _note_public(label, kind)
     return sorted(whole, key=len, reverse=True), lines
 
 
+class _NoPublic:
+    """The identity used when building the real one failed: nothing is public,
+    so every needle is kept (the redactor fails OPEN — a crash would leak)."""
+
+    def contains(self, needle):
+        return False
+
+    def windows(self, n):
+        return set()
+
+
+def public_identity(trust_env=True):
+    """`cli_vault_public.PublicIdentity`, or `_NoPublic()` if building it raised
+    (review finding 1). `trust_env=False` for every `secret exec` path."""
+    try:
+        import cli_vault_public
+        return cli_vault_public.PublicIdentity(trust_env=trust_env)
+    except Exception as exc:  # noqa: BLE001 — fail toward redaction, loudly
+        sys.stderr.write("vault: public-identity filter unavailable (%s) — every "
+                         "credential value stays a needle\n" % exc.__class__.__name__)
+        return _NoPublic()
+
+
+def is_public_value(label, value, public=None):
+    """True (and noted by name) when a whole value is part of the box's public
+    identity — `secret exec NAME` then passes it through (#1170, review 6)."""
+    public = public_identity(trust_env=False) if public is None else public
+    if not public.contains(value.rstrip(b"\r\n") or value):
+        return False
+    _note_public(label, "whole")
+    return True
+
+
+def emit_store_exec(res, label, value):
+    """Write a `secret exec NAME` child's captured fd 1/2 through the value
+    filter — unfiltered only when the whole value is public (#1170)."""
+    from cli_vault import _secret_redact
+
+    public = is_public_value(label, value)
+    for stream, data in ((sys.stdout, res.stdout), (sys.stderr, res.stderr)):
+        if data:
+            stream.buffer.write(data if public else _secret_redact(data, value))
+            stream.flush()
+
+
 def _note_public(label, kind):
-    import cli_vault_public
-    cli_vault_public.note_dropped(label, kind)
+    try:
+        import cli_vault_public
+        cli_vault_public.note_dropped(label, kind)
+    except Exception as exc:  # noqa: BLE001 — a note never breaks redaction
+        sys.stderr.write("vault: could not note a public value (%s)\n"
+                         % exc.__class__.__name__)
 
 
 def scrub_bytes(blob, needles, redact):
@@ -377,11 +428,16 @@ def cmd_exec_file(args):
                              input=value if use_stdin else None)
     except OSError as e:
         fail("secret exec: cannot run %s: %s" % (cmd[0], e.strerror), 127)
-    # #1170: the SAME public-identity filter as the redactor; a value that is
-    # public in whole has no needle and no fragment either (every fragment of
-    # it is itself public), a genuine value keeps all of them.
-    needles = needles_for([("file:" + real.name, value)])
-    grams = fragment_grams(value) if needles[0] else set()
+    # #1170: the SAME public-identity filter as the redactor, without the
+    # caller's env (it sets it). A value public in whole has no needle and no
+    # fragment; otherwise only the fragments that are themselves public (the
+    # `<word>` of a `USER=<word>` line) are dropped (review finding 3).
+    public = public_identity(trust_env=False)
+    needles = needles_for([("file:" + real.name, value)], public=public)
+    grams = set()
+    if needles[0]:
+        wins = public.windows(FRAGMENT_BYTES)
+        grams = {g for g in fragment_grams(value) if g.lower() not in wins}
     for stream, data in ((sys.stdout, res.stdout), (sys.stderr, res.stderr)):
         if data:
             data = scrub_bytes(data, needles, _secret_redact)
