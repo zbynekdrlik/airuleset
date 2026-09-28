@@ -35,7 +35,7 @@
     "cli_onboard_exec.py": 157,
     "cli_owner_keys.py": 233,
     "cli_owner_vps.py": 168,
-    "cli_playwright_mcp.py": 949,
+    "cli_playwright_mcp.py": 959,
     "cli_privileges.py": 938,
     "cli_push_gate.py": 218,
     "cli_quals.py": 3429,

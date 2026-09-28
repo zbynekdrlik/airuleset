@@ -292,6 +292,8 @@ def _iter_chromium_pair_builds(listing):
     family filter are never duplicated (#993 no-patchwork). `listing` is the
     caller's already-sorted `base.iterdir()` — the caller owns the scan + its
     error handling, so a scan failure stays the caller's concern (both guard it)."""
+    import cli_playwright_registry
+    needed, read = set(), False
     for entry in listing:
         # `is_symlink` FIRST: a symlink is never followed nor removed (matches the
         # disk-guard #892 stance); `is_dir()` follows links, so order matters.
@@ -299,6 +301,14 @@ def _iter_chromium_pair_builds(listing):
             continue
         m = _BUILD_DIR_RE.match(entry.name)
         if m is None or m.group(1) not in _PINNED_EXACT_FAMILIES:
+            continue
+        if not read:  # #1175: the cache is shared; playwright's .links registry wins
+            needed, read = cli_playwright_registry.needed_build_dirs(entry.parent), True
+        if needed is None:
+            print("    Playwright cleanup: kept every build — the .links registry is unreadable")
+            return
+        if entry.name in needed:
+            print("    Playwright cleanup: kept %s — a live project needs it" % entry.name)
             continue
         yield entry, m.group(2)
 
