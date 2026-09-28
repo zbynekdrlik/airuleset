@@ -101,8 +101,13 @@ class TestHandoverContentRule1166(TestCase):
         # Discuss / any other channel: the same content rule, pointing at
         # rule 3 where the owner quote lives.
         self.assertIn("only what the reader can use NOW", self.compose)
-        self.assertIn("never-delivered", self.compose)
+        self.assertIn("no never-delivered removals", self.compose)
         self.assertIn("`client-board-stages.md` rule 3", self.compose)
+
+    def test_compose_closure_carve_out_for_montalu(self):
+        # the #799 tacit closure must not run beside the #8507 auto-close
+        self.assertIn("Montalu úlohy: NAHRÁDZA ho odoo-erp#8507 auto-close",
+                      self.compose)
 
     def test_compose_keeps_the_already_live_lock(self):
         self.assertIn("Announce ONLY functions that are ALREADY LIVE on the "
@@ -142,6 +147,11 @@ class TestMontaluAddresseeTagged1166(TestCase):
         # needs one for the addressed person (rule 5).
         self.assertIn("on **montalu** ONE mention anchor for the addressed "
                       "person (rule 5)", self.rule3)
+        # ...while the base negation for every other profile stays
+        self.assertIn("no `@`-mention anchors", self.rule3)
+
+    def test_montalu_addressee_is_defined(self):
+        self.assertIn("the employee the note is written for", self.rule5)
 
     def test_core_montalu_row_names_the_assignee(self):
         row = _profile_row(self.core, "montalu")
@@ -152,6 +162,7 @@ class TestMontaluAddresseeTagged1166(TestCase):
     def test_core_miva_row_unchanged_no_assignee(self):
         row = _profile_row(self.core, "miva")
         self.assertIn("NONE — `user_ids` empty", row)
+        self.assertIn("a question: ONLY ONE person (rule 4)", row)
         self.assertNotIn("as montalu", row,
                          "miva must not inherit the new montalu addressee")
 
@@ -183,7 +194,10 @@ class TestMontaluAutoClose1167(TestCase):
     def test_auto_close_timing(self):
         self.assertIn("ONE reminder after 14 days without a reaction", self.rule6)
         self.assertIn("at ≥ 21 days and ≥ 7 days after the reminder", self.rule6)
-        self.assertIn("a client reaction cancels the countdown", self.rule6)
+        # odoo-erp#8507 rule 5: a reaction is a chatter message from anyone
+        # but the streams/OdooBot, or a move out of Verifikácia (not an emoji)
+        self.assertIn("any non-stream chatter message or a move out of "
+                      "Verifikácia cancels the countdown", self.rule6)
 
     def test_stream_never_moves_to_hotovo_itself(self):
         self.assertIn("never the stream by hand", self.rule6)
