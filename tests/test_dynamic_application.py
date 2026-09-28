@@ -129,13 +129,13 @@ class TestModelCombinationFixes(TestCase):
         self.assertNotIn("The primary Claude Code agent runs **Opus 4.8**", t)
 
     def test_subagent_model_is_native_default_not_a_pinned_tier(self):
-        # #991: agents carry NO model: frontmatter (the env default carries it,
-        # main overrides natively). The exact-id allowlist lives in MODEL_TIERS.
+        # #991/#1173: agents pin NO tier; only `model: inherit` (the main's
+        # model) is allowed. The exact-id allowlist lives in MODEL_TIERS.
         import re
         tv = read("agents/ticket-validator.md")
         m = re.match(r"^---\n(.*?)\n---\n", tv, re.S)
         fm = m.group(1) if m else ""
-        self.assertNotRegex(fm, r"(?m)^\s*model:")
+        self.assertNotRegex(fm, r"(?m)^\s*model:(?!\s*inherit\s*$)")
 
 
 if __name__ == "__main__":

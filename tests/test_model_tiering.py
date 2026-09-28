@@ -115,10 +115,10 @@ class TestSubagentModelDefault(TestCase):
 
 
 class TestNoModelFrontmatter(TestCase):
-    """Lock 2 — no agent definition pins a model; unpinned, Claude Code runs it on
-    the main's model natively (#1173 step-3 evidence on the ticket)."""
+    """Lock 2 — no agent definition pins a TIER; `model: inherit` (run on the
+    main's model, #1173) is the only allowed value."""
 
-    def test_no_agent_md_has_model_frontmatter(self):
+    def test_no_agent_md_pins_a_tier(self):
         adir = os.path.join(REPO, "agents")
         for fn in sorted(os.listdir(adir)):
             if not fn.endswith(".md"):
@@ -126,8 +126,8 @@ class TestNoModelFrontmatter(TestCase):
             text = open(os.path.join(adir, fn), encoding="utf-8").read()
             m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
             fm = m.group(1) if m else ""
-            self.assertNotRegex(fm, r"(?m)^\s*model:",
-                                "%s carries a model: frontmatter" % fn)
+            self.assertNotRegex(fm, r"(?m)^\s*model:(?!\s*inherit\s*$)",
+                                "%s pins a model tier" % fn)
 
 
 class TestTieringTokenScan(TestCase):
