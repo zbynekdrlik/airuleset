@@ -124,10 +124,16 @@ ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 # A command substitution's result becomes an ARGUMENT of the OUTER command, so
 # the outer text is kept WHOLE with the whole `$(…)` / `…` replaced by this
-# inert bareword (#1168). It carries no separator, no key/store path, and no
-# `.` — so it tokenizes to one harmless word wherever it lands (inside quotes
-# or bare) and can never be mistaken for a path or a redirection.
-SUBST_PLACEHOLDER = "__airulesetsubst__"
+# placeholder (#1168). It is a bare `*`: unquoted or alone it is an unanchored
+# glob (literal prefix length 0), so `can_be` never lets it stand for a store
+# component on its own — `echo "$(date)"` stays allowed. But when the
+# substitution is SPLICED INTO a path word that also names a root
+# (`cat ~/.secrets$(x)/k` -> `cat ~/.secrets*/k`), the `*` keeps the real
+# `.secrets` boundary VISIBLE to the glob layer, which still resolves it to the
+# store and BLOCKS — an inert word there (`~/.secrets__x__/k`) would have
+# masked the boundary and leaked the read (review, #1168). A separator-free
+# token cannot become a redirection or a second word.
+SUBST_PLACEHOLDER = "*"
 _SUBST_MAX_DEPTH = 8
 
 

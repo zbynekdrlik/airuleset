@@ -147,6 +147,16 @@ class Denied(Case):
         self.assertDenied('cat "%s/$(echo k)"' % R)
         self.assertDenied("cat %s$(true)" % FLAT)
 
+    def test_substitution_spliced_before_the_root_boundary(self):
+        # `cat ~/.secrets$(true)/k` expands to `cat ~/.secrets/k` and reads a
+        # key. The placeholder must keep the `.secrets` boundary visible to the
+        # glob layer — an inert WORD there masked it and leaked the read
+        # (review finding, #1168).
+        self.assertDenied("cat %s$(true)/k" % R)
+        self.assertDenied("cat %s`true`/k" % R)
+        self.assertDenied("cat $(echo ~)/%s/k" % DOT)
+        self.assertDenied('cat ~/.cla%s$(x)/sec%s/k' % ("ude", "rets"))
+
     def test_substitution_computing_the_key_file_value(self):
         self.assertDenied('%s --key-file "$(cat %s/path)"' % (POST, R))
 
