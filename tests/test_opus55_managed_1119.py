@@ -50,17 +50,20 @@ class TestSelfHeal(TestCase):
     def test_model_healed_to_opus_5_5_1m(self):
         self.assertEqual(self._settings()["model"], "claude-opus-5-5[1m]")
 
-    def test_subagent_default_is_opus_5_5(self):
+    def test_no_forced_subagent_model(self):
+        # #1173 (owner 2026-09-28) superseded the #1119 forced subagent default:
+        # a bare dispatch now inherits this Opus 5.5 main natively.
         env = self._settings()["env"]
-        self.assertEqual(env["CLAUDE_CODE_SUBAGENT_MODEL"], "claude-opus-5-5")
+        self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL", env)
 
     def test_heals_a_contaminated_fable_and_48_input(self):
-        # A box a prior session left on the OLD managed lineup self-heals to the
-        # new one on the next install/push.
+        # A box a prior session left on the OLD managed lineup self-heals on the
+        # next install/push: main -> Opus 5.5, and the old managed subagent value
+        # (airuleset's own write) is removed (#1173).
         out = self._settings({"model": "claude-fable-5-1[1m]",
                               "env": {"CLAUDE_CODE_SUBAGENT_MODEL": "claude-opus-4-8"}})
         self.assertEqual(out["model"], "claude-opus-5-5[1m]")
-        self.assertEqual(out["env"]["CLAUDE_CODE_SUBAGENT_MODEL"], "claude-opus-5-5")
+        self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL", out["env"])
 
 
 class TestLauncherModel(TestCase):

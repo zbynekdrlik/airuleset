@@ -9,10 +9,10 @@ spravne, uz mam dost tvojich patchworkov".
 The choice of a subagent's TYPE, MODEL and COUNT is the working model's, resolved
 by Claude Code natively. airuleset contributes exactly two things:
 
-  1. a fleet DEFAULT subagent model via the native env
-     CLAUDE_CODE_SUBAGENT_MODEL = MODEL_TIERS["opus5"] (claude-opus-5-5, #1119), no
-     _FORCE — the native precedence (per-dispatch model -> agent frontmatter ->
-     env -> main) stays, so main overrides by its own judgment;
+  1. NO forced subagent model (#1173, owner 2026-09-28 — was the #991/#1119
+     CLAUDE_CODE_SUBAGENT_MODEL fleet default): Claude Code's native precedence
+     (per-dispatch model -> agent frontmatter -> main) decides, so a bare
+     dispatch inherits the main (MANAGED_MODEL);
   2. a BAN of Opus 5 (BANNED_MODELS) enforced by one small dispatch hook
      (block-banned-model.sh) + settings self-heal + Job 41 audit.
 
@@ -37,11 +37,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class TestModelTiers(TestCase):
-    def test_five_exact_tiers(self):
+    def test_six_exact_tiers(self):
         # #1119: opus5 (claude-opus-5-5) added as the MAIN tier; fable + opus
-        # (4-8) stay as ALLOWED non-default dispatch ids.
+        # (4-8) stay as ALLOWED non-default dispatch ids. #1173: sonnet is now
+        # claude-sonnet-5-5 and claude-sonnet-5 stays allowed as sonnet5.
         self.assertEqual(set(airuleset.MODEL_TIERS),
-                         {"opus5", "fable", "opus", "sonnet", "haiku"})
+                         {"opus5", "fable", "opus", "sonnet", "sonnet5", "haiku"})
 
     def test_opus_tier_is_4_8(self):
         # #1119: opus (4-8) is no longer the subagent default but stays an
@@ -93,31 +94,29 @@ class TestAgentNames(TestCase):
 
 
 class TestSubagentModelDefault(TestCase):
-    """Lock 1 — the native fleet default, without a _FORCE variant."""
+    """Lock 1 — no forced subagent model (#1173, owner 2026-09-28: fewer
+    airuleset interventions, Claude Code's native choice)."""
 
     def _settings(self):
         import cli_config
         return cli_config.apply_managed_settings_defaults({})
 
-    def test_env_subagent_model_is_main_tier(self):
-        # #1119: the subagent default is now the opus5 (Opus 5.5) tier.
+    def test_no_env_subagent_model(self):
         env = self._settings()["env"]
-        self.assertEqual(env["CLAUDE_CODE_SUBAGENT_MODEL"],
-                         airuleset.MODEL_TIERS["opus5"])
+        self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL", env)
 
     def test_no_force_variant(self):
         env = self._settings()["env"]
         self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL_FORCE", env)
 
-    def test_coexists_with_max_subagents(self):
+    def test_max_subagents_still_managed(self):
         env = self._settings()["env"]
         self.assertIn("CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION", env)
-        self.assertIn("CLAUDE_CODE_SUBAGENT_MODEL", env)
 
 
 class TestNoModelFrontmatter(TestCase):
-    """Lock 2 — no agent definition pins a model; the env default carries it and
-    main overrides natively."""
+    """Lock 2 — no agent definition pins a model; unpinned, Claude Code runs it on
+    the main's model natively (#1173 step-3 evidence on the ticket)."""
 
     def test_no_agent_md_has_model_frontmatter(self):
         adir = os.path.join(REPO, "agents")
