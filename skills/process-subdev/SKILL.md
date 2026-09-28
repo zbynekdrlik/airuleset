@@ -154,7 +154,7 @@ repo's own CLAUDE.md / playbook is what names the command.
    (Workflow) and adversarially verify findings.
 1b. **Review at HIGH effort — maximum scrutiny on sub-dev submissions before anything
    approaches prod (user directive 2026-07-24).** The review runs at high/xhigh effort;
-   the model is the working model's native choice (the subagent default is `claude-opus-4-8`,
+   the model is the working model's native choice (a bare subagent inherits the main, #1173;
    a per-dispatch `model` may override it, only Opus 5 is banned — `model-awareness.md`).
    ADVISOR shape adapted for review: cheap grounding stages GROUND (collect the pinned diff,
    ticket claims, CI evidence into digests); the review stage receives the digest + THE DIFF

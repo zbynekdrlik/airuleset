@@ -24,25 +24,10 @@ from pathlib import Path
 # in the same repo dir), not test-patched -> safe to duplicate (L-B precedent).
 REPO_DIR = Path(__file__).resolve().parent
 
-# #1060 L3a self-heal (review B 🔴): the env keys + managed apiKeyHelper the
-# DELETED #1062 L2 branch used to write into a flipped box's settings.json.
-# apply_managed_settings_defaults now pops these UNCONDITIONALLY so a box that
-# was flipped under L2 (its shared settings.json still carrying them) is healed
-# back to the Anthropic OAuth main on its next install — otherwise the fix would
-# not fix its own incident. A never-flipped box has none of these keys, so the
-# pop is a no-op (byte-identical to today). These are a frozen MIGRATION list —
-# the values match the old cli_model_backend.BACKEND_ENV_KEYS + APIKEY_HELPER_PATH.
-_L2_STALE_ENV_KEYS = (
-    "ANTHROPIC_BASE_URL",
-    "ANTHROPIC_MODEL",
-    "ANTHROPIC_DEFAULT_OPUS_MODEL",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL",
-    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING",
-    "API_TIMEOUT_MS",
-)
-_L2_MANAGED_APIKEY_HELPER = str(Path.home() / ".claude"
-                               / "airuleset-model-gateway-apikey.sh")
+# #1060 L3a / #1173: the frozen migration lists + their self-heal live in the
+# stdlib leaf cli_settings_migrations (re-exported for tests: F401).
+from cli_settings_migrations import (  # noqa: E402,F401
+    _L2_MANAGED_APIKEY_HELPER, heal_retired_managed_settings)
 
 
 def parse_profile(profile_path: Path) -> list[str]:
@@ -364,14 +349,15 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       feature that also needs an `env` key does not silently clobber this
       one (or vice versa).
 
-    - `env["CLAUDE_CODE_SUBAGENT_MODEL"] = MODEL_TIERS["opus5"]` (#991/#1119) is
-      the fleet DEFAULT subagent model — the native env var Claude Code applies to a
-      dispatched subagent that carries no per-dispatch `model` param and whose
-      agent definition pins no model. The native precedence order stays intact
-      (per-dispatch model -> agent frontmatter -> this env -> main), so the
-      working model overrides per dispatch by its own judgment; removing this
-      one key turns the default off. No `_FORCE` variant — a DEFAULT, not an
-      override.
+    - `env["CLAUDE_CODE_SUBAGENT_MODEL"]` is NOT managed any more (#1173, owner
+      2026-09-28: fewer airuleset interventions in model choice, no quality
+      loss). Unset, Claude Code resolves a subagent's model natively:
+      per-dispatch model -> agent frontmatter (`inherit` = main) -> main
+      (docs "Choose a model"; the 2.1.283 resolver — evidence on #1173), so a
+      bare dispatch runs on the main's MANAGED_MODEL. The self-heal REMOVES a
+      value airuleset itself wrote (`_RETIRED_MANAGED_SUBAGENT_MODELS`, or the
+      #1062 L2 gateway alias, by the L2 managed apiKeyHelper) and KEEPS + reports
+      any other value — a foreign value is never deleted.
 
     - `cleanupPeriodDays = MANAGED_CLEANUP_PERIOD_DAYS` (#376) overrides
       Claude Code's OWN native transcript-retention auto-cleanup (default
@@ -437,16 +423,6 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
             print("settings: removed unmanaged env key %s=%s (the launcher owns "
                   "it, #1116)" % (_drop_key, _drop_val), file=sys.stderr)
     result["env"]["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"] = airuleset.MANAGED_MAX_SUBAGENTS_PER_SESSION
-    # #991/#1119: the fleet DEFAULT subagent model — the native env var Claude
-    # Code reads for a dispatched subagent with no per-dispatch `model` param and
-    # no agent-frontmatter model. Set to the main tier (claude-opus-5-5, #1119 —
-    # was claude-opus-4-8) so a bare dispatch runs on the current top tier by
-    # default, while the native precedence (per-dispatch model -> agent
-    # frontmatter -> this env -> main) is untouched: the working model still
-    # overrides per dispatch by its own judgment, and REMOVING this one key turns
-    # the whole default off. No _FORCE variant — this is a DEFAULT, not an
-    # override.
-    result["env"]["CLAUDE_CODE_SUBAGENT_MODEL"] = airuleset.MODEL_TIERS["opus5"]
     # #950/#1058: set PLAYWRIGHT_BROWSERS_PATH in the settings.json env (inherited
     # by interactive `playwright` and every Claude-Code-spawned tool) on
     # shared-stream boxes. #1058 (area review of #1048) routes this through the ONE
@@ -484,13 +460,10 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
     # fix its own incident. So POP the L2-era keys UNCONDITIONALLY (a no-op on a
     # never-flipped box — popping an absent key is byte-identical), and pop the
     # apiKeyHelper ONLY when it points at the L2 managed script (never a user's
-    # own). CLAUDE_CODE_SUBAGENT_MODEL self-heals for free: the fleet default set
-    # above already re-sets it to the opus tier. This keeps the marker byte-
-    # identity (both marker/no-marker paths pop the same keys → identical).
-    for _k in _L2_STALE_ENV_KEYS:
-        result["env"].pop(_k, None)
-    if result.get("apiKeyHelper") == _L2_MANAGED_APIKEY_HELPER:
-        result.pop("apiKeyHelper", None)
+    # own). #1173 heals the retired CLAUDE_CODE_SUBAGENT_MODEL in the same call
+    # (before the L2 pop, which erases the fingerprint it reads). This keeps the
+    # marker byte-identity (both marker/no-marker paths pop the same keys).
+    heal_retired_managed_settings(result, sys.stderr)
     # #1060 L3a: BOTH managed sessions (main window 0 + impl window 1) accept
     # cross-session SendMessage so the L3b dispatch channel (main -> impl wake-up)
     # works. Unconditional (per-user setting), so it never breaks the marker

@@ -215,7 +215,7 @@ def _block_message(reason):
         "\n"
         "  A meeting/call recording is INTERPRETED by the managed main, never a "
         "subagent\n"
-        "  (`CLAUDE_CODE_SUBAGENT_MODEL=claude-opus-5-5`). Hard Rule 0 in\n"
+        "  (whatever model a subagent runs on). Hard Rule 0 in\n"
         "  skills/meeting-analysis/SKILL.md: a subagent may do ONLY the "
         "mechanical\n"
         "  phases -- ffmpeg extraction, the ASR API call, frame dedup (phases "

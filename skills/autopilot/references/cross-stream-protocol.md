@@ -13,10 +13,10 @@
 
 Multi-stream development on one project (gatekeeper reviews + merges to prod; sub-devs deliver
 slices) follows THIS protocol. Repo-local commands (e.g. odoo-erp `/process-subdev`) MUST conform
-to it — they never define their own variant. Every sub-dev hand-off review verdict runs FABLE through the budget gate
-(CLOSED → claude-opus-4-8, never lower and never the banned `opus` alias; grounding on cheap
-stages; the tier never degrades across re-reviews) — canonical tiering in the
-`process-subdev` skill, step 3.1b.
+to it — they never define their own variant. Every sub-dev hand-off review verdict runs at HIGH
+effort on the working model's native choice (#991/#1173: no budget gate, a bare dispatch inherits
+the main, never the banned Opus 5; grounding on cheap stages; the review never degrades across
+re-reviews) — the `process-subdev` skill, step 3.1b.
 Origin: odoo-erp #1599 bounce lane + the 2026-07-19
 stall incident (both sides' loops ended mid-ping-pong; 4 re-handed-off tickets sat with no
 re-review and no pickup).

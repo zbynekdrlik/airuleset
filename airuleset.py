@@ -64,17 +64,19 @@ MANAGED_EFFORT_LEVEL = "high"
 # family, so an exact id never floats. A new model version joins the fleet
 # ONLY by an owner-approved edit of this table, never by an alias float.
 MODEL_TIERS = {
-    "opus5": "claude-opus-5-5",       # main session model (MANAGED_MODEL) AND fleet subagent default (CLAUDE_CODE_SUBAGENT_MODEL) — owner directive 2026-09-23, #1119
+    "opus5": "claude-opus-5-5",       # main session model (MANAGED_MODEL) — owner directive 2026-09-23, #1119
     "fable": "claude-fable-5-1",      # allowed dispatch choice (former main, pre-#1119)
-    "opus": "claude-opus-4-8",        # allowed dispatch choice (former subagent default, pre-#1119)
-    "sonnet": "claude-sonnet-5",      # allowed dispatch choice
+    "opus": "claude-opus-4-8",        # allowed dispatch choice
+    "sonnet": "claude-sonnet-5-5",    # allowed dispatch choice — Sonnet 5.5 (owner 2026-09-28, #1173)
+    "sonnet5": "claude-sonnet-5",     # allowed dispatch choice (older pinned dispatches, pre-#1173)
     "haiku": "claude-haiku-4-5",      # allowed dispatch choice (trivial reads)
 }
 
 # Managed default MAIN-session model (user directive 2026-08-13: **Opus 5 is
 # BANNED**; 2026-09-05: Fable 5.1 @ medium replaces 5.0, #894; 2026-09-23:
-# **Opus 5.5 replaces Fable 5.1 as the main AND Opus 4.8 as the subagent
-# default**, #1119) — Opus 5.5 (`claude-opus-5-5`), derived from MODEL_TIERS so
+# **Opus 5.5 replaces Fable 5.1 as the main**, #1119; since #1173 a subagent
+# with no per-dispatch model and no `model:` pin natively INHERITS this main)
+# — Opus 5.5 (`claude-opus-5-5`), derived from MODEL_TIERS so
 # the lineup has ONE source. The `[1m]` suffix is a DELIBERATE part of the id,
 # not a typo: it is how Claude Code's own usage tracking keys the 1M-context
 # variant (verified — `lastModelUsage` entries in ~/.claude.json store ids
@@ -93,14 +95,15 @@ MANAGED_MODEL = MODEL_TIERS["opus5"] + "[1m]"
 # Models BANNED as a DISPATCH value fleet-wide (owner directive 2026-08-13,
 # reaffirmed #991 2026-09-11): Opus 5 (the exact id `claude-opus-5`) is
 # off-lineup. NB (#1119): `claude-opus-5-5` is a DISTINCT exact id that is NOW
-# the allowlisted main + subagent default — it is never matched by the exact-id
+# the allowlisted main model — it is never matched by the exact-id
 # `claude-opus-5` ban. The bare `opus`/`opusplan` alias still FLOATS to whatever
 # the latest Opus ships (an exact-id-only lineup, #871), so it stays banned too.
 # This is the
 # ban-list source of truth for the DISPATCH surface (hooks/block-banned-model.sh)
 # AND the read-only Job-41 model-float AUDIT — the ONLY thing airuleset forbids
-# on a subagent's model now that the working model chooses its subagents' models
-# natively (env CLAUDE_CODE_SUBAGENT_MODEL default + native precedence). Every
+# on a subagent's model now that Claude Code resolves its subagents' models
+# natively (per-dispatch model -> agent frontmatter -> main; #1173 removed the
+# forced CLAUDE_CODE_SUBAGENT_MODEL default). Every
 # other family alias (sonnet/haiku/fable) and every allowlisted tier id is a
 # LEGITIMATE dispatch value. NB: the MAIN-session model is a SEPARATE, stricter
 # surface — it is pinned to MANAGED_MODEL and self-heals against the exact-id
@@ -500,9 +503,9 @@ from cli_deployer_glue import (  # noqa: E402
 CAVEMAN_STATUSLINE_COMMAND = f'bash "{CAVEMAN_SHIM_DEST}"'
 
 # Subagent definitions (single .md files) symlinked into ~/.claude/agents/.
-# Only the two worker agents survive (#991): the subagent MODEL default is the
-# native env CLAUDE_CODE_SUBAGENT_MODEL (claude-opus-5-5, #1119), and the working model
-# chooses TYPE/MODEL/COUNT natively — the old pinned tier-agent types are removed.
+# Only the two worker agents survive (#991). They carry NO `model:` pin, so Claude
+# Code runs them on the main's model natively (#1173 — no forced subagent env);
+# the working model chooses TYPE/MODEL/COUNT natively.
 AGENT_NAMES = ["autopilot-worker", "ticket-validator"]
 
 HOOKS_JSON = REPO_DIR / "settings" / "hooks.json"

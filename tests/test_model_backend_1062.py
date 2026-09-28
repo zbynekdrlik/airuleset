@@ -203,8 +203,7 @@ class TestApplyManagedSettings(unittest.TestCase):
             self.assertNotIn(k, out["env"], "%s must never leak into settings" % k)
         self.assertNotIn("apiKeyHelper", out)
         self.assertEqual(out["model"], airuleset.MANAGED_MODEL)
-        self.assertEqual(out["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
-                         airuleset.MODEL_TIERS["opus5"])  # #1119: subagent default = Opus 5.5
+        self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL", out["env"])  # #1173: not forced
 
     def test_cross_session_inbound_accept(self):
         # #1060 L3a item 2: both sessions accept cross-session SendMessage (the
@@ -253,8 +252,7 @@ class TestApplyManagedSettings(unittest.TestCase):
         self.assertNotIn("apiKeyHelper", out,
                          "the managed L2 apiKeyHelper must be healed away")
         self.assertEqual(out["model"], airuleset.MANAGED_MODEL)
-        self.assertEqual(out["env"]["CLAUDE_CODE_SUBAGENT_MODEL"],
-                         airuleset.MODEL_TIERS["opus5"])  # #1119: subagent default = Opus 5.5
+        self.assertNotIn("CLAUDE_CODE_SUBAGENT_MODEL", out["env"])  # #1173: L2 alias healed
         self.assertEqual(out["env"].get("USER_OWN_KEY"), "keep-me",
                          "a user's own env key must survive the self-heal")
 
@@ -265,9 +263,10 @@ class TestApplyManagedSettings(unittest.TestCase):
 _IMPL_ENV_KEYS = (
     "ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_MODEL",
     "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL",
-    "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "API_TIMEOUT_MS",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL", "CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING", "API_TIMEOUT_MS",
 )
+# #1173 (owner 2026-09-28): not exported any more; dumped to prove it arrives unset.
+_IMPL_DUMP_KEYS = _IMPL_ENV_KEYS + ("CLAUDE_CODE_SUBAGENT_MODEL",)
 
 
 def _enc_project(path):
@@ -320,7 +319,7 @@ def _run_impl_launcher(home, with_marker=True, key_content="tok-XYZ-123",
     binp.mkdir()
     fake = binp / "claude"
     fake.write_text("#!/usr/bin/env bash\n"
-                    "for v in " + " ".join(_IMPL_ENV_KEYS) + " AIRULESET_ROLE; do\n"
+                    "for v in " + " ".join(_IMPL_DUMP_KEYS) + " AIRULESET_ROLE; do\n"
                     '  printf "%s=%s\\n" "$v" "${!v:-}"\n'
                     "done\n"
                     'printf "PWD=%s\\n" "$PWD"\n'
@@ -329,6 +328,7 @@ def _run_impl_launcher(home, with_marker=True, key_content="tok-XYZ-123",
     env = dict(os.environ)
     env["HOME"] = str(home)
     env["PATH"] = str(binp) + os.pathsep + env.get("PATH", "")
+    env.pop("CLAUDE_CODE_SUBAGENT_MODEL", None)  # hermetic: the runner may carry it
     # Run from a NEUTRAL cwd (home) so the launcher's OWN cd is what sets PWD.
     r = subprocess.run(["bash", str(script)], env=env, cwd=str(home),
                        capture_output=True, text=True, timeout=30)
@@ -414,7 +414,7 @@ class TestImplLauncher(unittest.TestCase):
         self.assertEqual(kv["ANTHROPIC_DEFAULT_OPUS_MODEL"], "impl-main")
         self.assertEqual(kv["ANTHROPIC_DEFAULT_SONNET_MODEL"], "impl-sub")
         self.assertEqual(kv["ANTHROPIC_DEFAULT_HAIKU_MODEL"], "impl-fast")
-        self.assertEqual(kv["CLAUDE_CODE_SUBAGENT_MODEL"], "impl-sub")
+        self.assertEqual(kv["CLAUDE_CODE_SUBAGENT_MODEL"], "")  # #1173: unset -> inherits main
         self.assertEqual(kv["CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING"], "1")
         self.assertEqual(kv["API_TIMEOUT_MS"], "900000")
         self.assertEqual(kv["ANTHROPIC_AUTH_TOKEN"], "tok-XYZ-123")

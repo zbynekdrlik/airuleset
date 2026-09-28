@@ -905,8 +905,8 @@ gap in either.
      comment`, mechanically checked at its SubagentStop (`design_gate.py`) — so validation coverage
      no longer depends on your Step 1b prose actually having run for this specific dispatch.
    - **Model / type / count is your NATIVE decision (#991).** Dispatch the implementation to a
-     `subagent_type: "autopilot-worker"` — its model is the fleet subagent default
-     (`claude-opus-4-8`, env `CLAUDE_CODE_SUBAGENT_MODEL`); a per-dispatch `model` param is a
+     `subagent_type: "autopilot-worker"` — it inherits the main's model natively (no forced
+     subagent default, #1173); a per-dispatch `model` param is a
      legitimate override, and the ONLY banned dispatch value is Opus 5 (`hooks/block-banned-model.sh`,
      `model-awareness.md`). There is no per-phase tiering doctrine and no budget gate — you do NOT
      run a budget gate and you do NOT pick a tier agent. **The REVIEW of the worker's work is the MAIN
