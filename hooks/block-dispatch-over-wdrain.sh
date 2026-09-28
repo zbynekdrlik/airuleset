@@ -63,12 +63,28 @@ CWD_KEY=$(printf '%s' "$CWD" | sha1sum | cut -c1-12)
 # allows + logs, exactly like WDRAIN-BYPASS below.
 OVERLAP_TTL=1800
 PROMPT=$(printf '%s' "$INPUT" | jq -r '.tool_input.prompt // empty' 2>/dev/null || echo "")
-# Extract EVERY issue number on the "issue(s) #…" line (the autopilot dispatch
-# shape "Work issue #N" / "Work issues #A #B #C" / "#A, #B and #C") — the whole
-# line, not a space-only run, so a comma/"and"-separated batch is fully covered
-# (#993-review: a truncated span left later members independence-unchecked).
-ISSUE_LINE=$(printf '%s' "$PROMPT" | grep -oiE '(work[[:space:]]+)?issues?[[:space:]]+#[0-9].*' | head -1 || true)
-ISSUES=$(printf '%s' "$ISSUE_LINE" | grep -oE '#[0-9]+' | tr -d '#' || true)
+REPO_DIR=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || echo "")
+# The prompt's tickets come from the ONE shared parser, gates/ticketrefs.py
+# (#1165 round 2) — the same lead line the design-dispatch gate reads: `#N`
+# and the fleet's bare `issue N` / `issues A, B and C`, 1-6 digits, every batch
+# member covered (#993-review), and a `PR #N` / `pull request #N` is never a
+# ticket (no receipt demanded for a PR). This hook had its own grep that saw
+# only `issues? #N` (so `Work issue 4` skipped the receipt check) and counted
+# PR numbers. A parser MALFUNCTION fails open like the rest of this hook
+# (#539/#570), logged to ~/.claude/lane-overlap/parse-error.log.
+ISSUES=""
+if [ -n "$PROMPT" ]; then
+    # shellcheck disable=SC2016  # the python source is single-quoted on purpose
+    if ! ISSUES=$(printf '%s' "$PROMPT" | PYTHONPATH="$REPO_DIR" python3 -P -c \
+'import sys
+from gates.ticketrefs import issue_numbers
+print("\n".join(str(n) for n in issue_numbers(sys.stdin.read())))' 2>/dev/null); then
+        ISSUES=""
+        mkdir -p "$HOME/.claude/lane-overlap" 2>/dev/null || true
+        printf '%s\t%s\tticketrefs parse failed (fail-open)\n' "$(date -Iseconds)" \
+            "$CWD_KEY" >> "$HOME/.claude/lane-overlap/parse-error.log" 2>/dev/null || true
+    fi
+fi
 if [ -n "$ISSUES" ]; then
     # OVERLAP-BYPASS escape (line-anchored, logged)
     if printf '%s' "$PROMPT" | grep -qE '^OVERLAP-BYPASS:'; then
@@ -134,7 +150,6 @@ fi
 # fail-OPEN: today's behaviour, never a false block. The verdict is computed in
 # python (cli_concurrency.dispatch_gate_line) — the single resolver + the
 # post-#998 live-lane count (merged lanes excluded).
-REPO_DIR=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || echo "")
 if [ -n "$REPO_DIR" ]; then
     SEQ_LINE=$(AIRULESET_GATE_CWD="$CWD" PYTHONPATH="$REPO_DIR" python3 -P -c \
 'import os, cli_concurrency; print(cli_concurrency.dispatch_gate_line(os.environ.get("AIRULESET_GATE_CWD","")))' \
