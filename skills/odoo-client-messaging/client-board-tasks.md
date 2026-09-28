@@ -8,9 +8,9 @@ Always-injected CORE for a `project.task` write; background: `client-board-tasks
 
 | Board / instance | Stage vocabulary (in order) | Assignee | Addressee / @mention | Moves a task to "Done" |
 |---|---|---|---|---|
-| **montalu** (montaluN) | ToDo → Potrebuje ujasniť → Realizácia → Verifikácia → Hotovo | NONE — `user_ids` empty (rule 5) | no standing addressee; mention ONLY the one person who must answer a question (rule 4) | the **OWNER** only, after client confirmation (rule 6) |
+| **montalu** (montaluN) | ToDo → Potrebuje ujasniť → Realizácia → Verifikácia → Hotovo | the handover addressee (rule 5) | addressee @mentioned (rule 5); a question: ONLY ONE person (rule 4) | the OWNER after confirmation, or the odoo-erp#8507 auto-close (rule 6) |
 | **slovnormal** (davidN) | Nové → V práci → Na overenie → Hotové | **Dávid Greňa** (CEO, Granč) | every message ADDRESSES Dávid Greňa | **Dávid Greňa** moves it to **Hotové** himself (owner ruling #1018) |
-| **miva** (mivaN) | Nové → Požadujú sa zmeny → V riešení → Čaká → Hotové → Zrušené | NONE — `user_ids` empty | as montalu | the OWNER only, after client confirmation |
+| **miva** (mivaN) | Nové → Požadujú sa zmeny → V riešení → Čaká → Hotové → Zrušené | NONE — `user_ids` empty | a question: ONLY ONE person (rule 4) | the OWNER only, after client confirmation |
 
 ---
 

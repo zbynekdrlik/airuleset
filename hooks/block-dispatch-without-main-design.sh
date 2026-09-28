@@ -8,9 +8,9 @@ set -euo pipefail
 # NEWEST `Design-by:` comment on every issue in the prompt is
 # `Design-by: main <Fable id>` (the owner's standing #871 rule -- the design is
 # authored by the Fable MAIN, the worker only implements). FAIL-CLOSED on an
-# unreadable comment thread (gh error); ALLOWS a prompt with no parseable issue
-# (cannot verify -- the ticket's design comment is the durable authority) and any
-# non-autopilot-worker dispatch. Bypass: `airuleset:design-by-ok <reason>` in the
+# unreadable comment thread (gh error) AND on a prompt naming no ticket (`#N` /
+# `issue N`, N = 1-6 digits since #1165); ALLOWS any non-autopilot-worker
+# dispatch. Bypass: `airuleset:design-by-ok <reason>` in the
 # prompt (logged to ~/.claude/design-by-gate.log).
 #
 # Exit 2 = block; the reason is on STDERR (the model-visible deny channel). A

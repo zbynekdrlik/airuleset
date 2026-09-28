@@ -2233,7 +2233,7 @@ if [ "$VERIF_REPORT" = "1" ]; then
     VERIF_SKUSIT=$(LC_ALL=C.UTF-8 msg_has "$MSG" -qiE '[Čč]o sk[úu]si' && echo 1 || echo 0)
     VERIF_STACI=$(msg_has "$MSG" -qE '👍' && echo 1 || echo 0)
     if [ "$VERIF_UNVERIFIED" = "0" ] && { [ "$VERIF_KDE" = "0" ] || [ "$VERIF_SKUSIT" = "0" ] || [ "$VERIF_STACI" = "0" ]; }; then
-        echo "VIOLATION: Your message reports moving a client task to Verifikácia / Na overenie and posting the handover note, but the note is missing the mandatory sections. A Verifikácia handover note MUST carry all four, in order: 'Čo' (what was delivered), 'Kde' (menu path + a functional https:// deep link, verified 200), 'Čo skúsiť' (what to try), and the literal closing line 'stačí 👍'. Include the note's four sections in your message (or write 'UNVERIFIED: <why>'). See skills/odoo-client-messaging/client-board-tasks.md rule 3 (#1018)." >&2
+        echo "VIOLATION: Your message reports moving a client task to Verifikácia / Na overenie and posting the handover note, but the note is missing the mandatory sections. A Verifikácia handover note MUST carry all four, in order: 'Čo' (what was delivered), 'Kde' (menu path + a functional https:// deep link, verified 200), 'Čo skúsiť' (what to try), and the literal closing line 'stačí 👍'. Include the note's four sections in your message (or write 'UNVERIFIED: <why>'). See skills/odoo-client-messaging/client-board-stages.md rule 3 (#1018)." >&2
         add_hard "Verifikácia handover note reported without the Čo/Kde/Čo skúsiť/stačí 👍 sections (#1018)"
     fi
 fi

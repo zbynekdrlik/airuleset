@@ -528,9 +528,9 @@ class TestHistoryFileRelocation(unittest.TestCase):
         # size_ratchet.json tracks only .py / functions / .claude/rules/*.md — a
         # skills/*.md is NOT in its measured set, so this is the ENFORCED bloat
         # guard for the non-injected history file (its size is otherwise harmless
-        # — it never injects). Currently ~3.1 KB; the cap leaves generous room.
+        # — it never injects). 7500 since #1166/#1167: the 28.9. owner quotes live here.
         n = len(HISTORY.read_text(encoding="utf-8"))
-        self.assertLess(n, 6000,
+        self.assertLess(n, 7500,
                         "history file grew to %d codepoints — keep it a lean "
                         "relocation of rationale, not a dumping ground (#1098)" % n)
 

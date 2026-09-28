@@ -122,15 +122,136 @@ def path_candidates(segment, cwd_hint=None):
 
 ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
+# A command substitution's result becomes an ARGUMENT of the OUTER command, so
+# the outer text is kept WHOLE with the whole `$(…)` / `…` replaced by this
+# placeholder (#1168). It is a bare `*`: unquoted or alone it is an unanchored
+# glob (literal prefix length 0), so `can_be` never lets it stand for a store
+# component on its own — `echo "$(date)"` stays allowed. But when the
+# substitution is SPLICED INTO a path word that also names a root
+# (`cat ~/.secrets$(x)/k` -> `cat ~/.secrets*/k`), the `*` keeps the real
+# `.secrets` boundary VISIBLE to the glob layer, which still resolves it to the
+# store and BLOCKS — an inert word there (`~/.secrets__x__/k`) would have
+# masked the boundary and leaked the read (review, #1168). A separator-free
+# token cannot become a redirection or a second word.
+SUBST_PLACEHOLDER = "*"
+_SUBST_MAX_DEPTH = 8
 
-def split_segments(text):
+
+def _match_cmdsubst(text, k):
+    """Index of the `)` closing the `$(` at text[k:k+2], or -1 if unmatched.
+
+    A context STACK, not a paren counter: inside a `$(…)` a `"…"` string makes
+    `)` literal, but a `$(` nested INSIDE that string reopens a command
+    context whose own `)` must be matched. `'…'`, backticks and `\\` escapes
+    are honoured the same way the main splitter honours them, so a `)` sitting
+    in a quoted body is never taken for the close.
+    """
+    n, i = len(text), k + 2
+    stack = ["("]                       # the initial `$(`
+    while i < n and stack:
+        c, two = text[i], text[i:i + 2]
+        top = stack[-1]
+        if top == "'":
+            if c == "'":
+                stack.pop()
+            i += 1
+        elif top == "`":
+            if c == "\\":
+                i += 2
+            elif c == "`":
+                stack.pop()
+                i += 1
+            else:
+                i += 1
+        elif top == '"':
+            if c == "\\":
+                i += 2
+            elif two == "$(":
+                stack.append("(")
+                i += 2
+            elif c == "`":
+                stack.append("`")
+                i += 1
+            elif c == '"':
+                stack.pop()
+                i += 1
+            else:
+                i += 1
+        else:                            # a command context
+            if c == "\\":
+                i += 2
+            elif two == "$(":
+                stack.append("(")
+                i += 2
+            elif c == "'":
+                stack.append("'")
+                i += 1
+            elif c == '"':
+                stack.append('"')
+                i += 1
+            elif c == "`":
+                stack.append("`")
+                i += 1
+            elif c == "(":
+                stack.append("(")
+                i += 1
+            elif c == ")":
+                stack.pop()
+                if not stack:
+                    return i
+                i += 1
+            else:
+                i += 1
+    return -1
+
+
+def _match_backtick(text, k):
+    """Index of the backtick closing the one at text[k], or -1 if unmatched."""
+    n, i = len(text), k + 1
+    while i < n:
+        if text[i] == "\\":
+            i += 2
+            continue
+        if text[i] == "`":
+            return i
+        i += 1
+    return -1
+
+
+def _subst_body(body, closer, depth):
+    """A substitution BODY as its own segment(s), with its LAST one marked flow.
+
+    The body is a real command judged by its OWN operands (a key/store read
+    there stays blocked, a `cat /tmp/x` does not), but its OUTPUT flows into
+    the outer command as the substitution's value — exactly like a listing
+    piped into a consumer (review C: a metadata head's output is a NAME SOURCE
+    whenever it can flow into another command, `$(…)`/backticks included). So
+    the LAST body segment carries the `)` / backtick terminator, which
+    `effective_terms` promotes to a flow (`|`) — restoring the pre-#1168
+    treatment of an UNQUOTED `cat $(ls <store>)` and extending it to the
+    quoted form the old splitter left inconsistent. An empty body contributes
+    nothing.
+    """
+    sub = split_segments(body, depth + 1)
+    if sub:
+        sub[-1] = (sub[-1][0], closer)
+    return sub
+
+
+def split_segments(text, _depth=0):
     """Quote-aware split on shell separators -> [(segment, terminator), ...].
 
-    Command substitutions become their OWN segments — `$(` and backticks are
-    separators even inside double quotes, where the shell really does expand
-    them — so a read nested inside an allowlisted head is not laundered by it.
-    Inside SINGLE quotes nothing is a separator, which keeps a `python3 -c
-    '...'` body intact as one segment headed by python3.
+    A command substitution's BODY is emitted as its own segment(s) — headed by
+    the real command inside it, so a read there is judged by its OWN operands
+    (a key/store read stays blocked, a `cat /tmp/x` does not) — while the OUTER
+    command stays ONE balanced segment with the whole `$(…)` / `…` replaced by
+    SUBST_PLACEHOLDER (#1168). Before #1168 the splitter cut the outer command
+    AT the `$(`, leaving the consumer as the unbalanced fragment
+    `python3 … --key-file <k> --body "` that shlex could not read, so the
+    documented Odoo posting form fell into fail-closed. An UNMATCHED
+    substitution keeps that old cut (still fail-closed). Inside SINGLE quotes
+    nothing is a separator, which keeps a `python3 -c '...'` body intact as one
+    segment headed by python3.
 
     The TERMINATOR is returned because it changes what an allowlisted head
     means: piped, `ls` is not a listing, it is a name source for whatever
@@ -149,14 +270,26 @@ def split_segments(text):
             i += 1
             continue
         if two == "$(":
-            segs.append(("".join(buf), "$("))
-            buf = []
-            i += 2
+            close = -1 if _depth >= _SUBST_MAX_DEPTH else _match_cmdsubst(text, i)
+            if close < 0:
+                segs.append(("".join(buf), "$("))   # unmatched: the old cut
+                buf = []
+                i += 2
+                continue
+            segs.extend(_subst_body(text[i + 2:close], ")", _depth))
+            buf.append(SUBST_PLACEHOLDER)
+            i = close + 1
             continue
         if c == "`":
-            segs.append(("".join(buf), "`"))
-            buf = []
-            i += 1
+            close = -1 if _depth >= _SUBST_MAX_DEPTH else _match_backtick(text, i)
+            if close < 0:
+                segs.append(("".join(buf), "`"))     # unmatched: the old cut
+                buf = []
+                i += 1
+                continue
+            segs.extend(_subst_body(text[i + 1:close], "`", _depth))
+            buf.append(SUBST_PLACEHOLDER)
+            i = close + 1
             continue
         if in_dq:
             if c == "\\" and i + 1 < n:
