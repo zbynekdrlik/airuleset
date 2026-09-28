@@ -347,10 +347,10 @@ class TestCliAndBoundaries(_Base):
         code = textwrap.dedent("""
             import sys
             sys.path.insert(0, %r)
-            import time, cli_box_queue as bq
+            import cli_box_queue as bq
             tag, pid = sys.argv[1], int(sys.argv[2])
             for i in range(25):
-                bq.enqueue(%r, "%%s-%%02d" %% (tag, i), pid, now=time.time())
+                bq.enqueue(%r, "%%s-%%02d" %% (tag, i), pid)
         """) % (str(REPO), BOX)
         procs = [subprocess.Popen([sys.executable, "-c", code, tag, str(self.me)],
                                   env=self.env) for tag in ("x", "y", "z")]
