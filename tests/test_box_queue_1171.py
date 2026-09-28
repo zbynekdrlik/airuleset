@@ -33,6 +33,15 @@ def dead_pid():
     return p.pid
 
 
+def _alive(pid):
+    """True while `pid` exists and is not a zombie."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
 def run_cli(args, env):
     return subprocess.run(
         [sys.executable, str(REPO / "airuleset.py"), "box-queue"] + args,
@@ -280,17 +289,111 @@ class TestRefresh(_Base):
         self.assertFalse(marker.exists())
         self.assertEqual(self.state()["state"], "held:a")
 
-    def test_take_refused_while_refreshing(self):
+    def _refreshing(self, cli_pid):
         raw = {"version": 1, "box": BOX, "state": "refreshing", "queue": [],
                "holder": None,
-               "refresh": {"token": "t", "pid": self.me, "started_at": 1000.0,
+               "refresh": {"token": "t", "pid": cli_pid, "started_at": 1000.0,
                            "deadline": 99999.0, "from": "dirty:a"},
                "reason": "", "updated_at": 1000.0}
-        self.dir.mkdir(parents=True)
+        self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / f"{BOX}.json").write_text(json.dumps(raw))
+
+    def _orphan_holding_refresh_lock(self):
+        """A process that holds <box>.refresh.lock the way a still-running
+        refresh command (which inherited the fd) does after its CLI died."""
+        code = ("import fcntl, os, sys\n"
+                "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                "print('locked', flush=True)\n"
+                "sys.stdin.read()\n")
+        self.dir.mkdir(parents=True, exist_ok=True)
+        p = subprocess.Popen([sys.executable, "-c", code,
+                              str(self.dir / f"{BOX}.refresh.lock")],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.assertEqual(p.stdout.readline().strip(), "locked")
+
+        def stop():
+            p.stdin.close()
+            p.wait(timeout=30)
+            p.stdout.close()
+
+        self.addCleanup(lambda: p.poll() is None and stop())
+        return stop
+
+    def test_take_refused_while_refreshing(self):
+        self._orphan_holding_refresh_lock()
+        self._refreshing(self.me)
         r = bq.take(BOX, "b", self.me, now_fn=lambda: 1001.0)
         self.assertFalse(r["ok"])
         self.assertIn("refreshing", r["msg"])
+
+    def test_orphaned_refresh_command_keeps_the_box_refreshing(self):
+        """The supervisor's refresh CLI died (e.g. a 10-min foreground Bash
+        cap) but its refresh command still runs: the box must stay
+        `refreshing` — never dirty — so no second refresh and no take can
+        start on top of it."""
+        self.write_config(refresh="true")
+        stop = self._orphan_holding_refresh_lock()
+        self._refreshing(dead_pid())
+        self.assertEqual(bq.status(BOX, now=1001.0)["state"], "refreshing")
+        r = bq.refresh(BOX, now_fn=lambda: 1002.0)
+        self.assertFalse(r["ok"])
+        self.assertIn("still", r["msg"])
+        self.assertEqual(self.state()["state"], "refreshing")
+        stop()
+        st = bq.status(BOX, now=1003.0)
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIn("refresh", st["reason"])
+
+    def test_refresh_timeout_kills_the_whole_command_group(self):
+        pidfile = Path(self._tmp.name) / "grandchild.pid"
+        refresh = self.script("refresh.sh", f"sleep 60 &\necho $! > {pidfile}\nsleep 60\n")
+        self.write_config(refresh=[refresh], refresh_timeout_s=1)
+        self._refreshing_from_dirty()
+        r = bq.refresh(BOX, now_fn=time.time)
+        self.assertFalse(r["ok"])
+        self.assertIn("timed out", self.state()["reason"])
+        self.assertEqual(self.state()["state"], "dirty:a")
+        grandchild = int(pidfile.read_text())
+        for _ in range(100):
+            if not _alive(grandchild):
+                break
+            time.sleep(0.05)
+        self.assertFalse(_alive(grandchild), "orphaned refresh grandchild survived")
+
+    def test_sigterm_during_refresh_records_dirty_and_kills_the_command(self):
+        started = Path(self._tmp.name) / "started"
+        pidfile = Path(self._tmp.name) / "child.pid"
+        refresh = self.script("refresh.sh",
+                              f"echo $$ > {pidfile}\ntouch {started}\nsleep 60\n")
+        self.write_config(refresh=[refresh])
+        self._refreshing_from_dirty()
+        p = subprocess.Popen([sys.executable, str(REPO / "airuleset.py"), "box-queue",
+                              "refresh", "--box", BOX], env=self.env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for _ in range(400):
+            if started.exists():
+                break
+            time.sleep(0.05)
+        self.assertTrue(started.exists(), "refresh command never started")
+        p.terminate()
+        p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 1)
+        st = self.state()
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIn("signal", st["reason"])
+        child = int(pidfile.read_text())
+        for _ in range(100):
+            if not _alive(child):
+                break
+            time.sleep(0.05)
+        self.assertFalse(_alive(child), "refresh command survived the CLI's SIGTERM")
+
+    def _refreshing_from_dirty(self):
+        raw = {"version": 1, "box": BOX, "state": "dirty:a", "queue": [],
+               "holder": None, "refresh": None, "reason": "x", "updated_at": 1.0}
+        self.dir.mkdir(parents=True, exist_ok=True)
+        (self.dir / f"{BOX}.json").write_text(json.dumps(raw))
 
     def test_interrupted_refresh_is_reclaimed_as_dirty(self):
         raw = {"version": 1, "box": BOX, "state": "refreshing", "queue": [],
