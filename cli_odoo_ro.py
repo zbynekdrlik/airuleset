@@ -15,7 +15,7 @@ HARD invariants:
     (`search_read` / `search_count` / `read`) BEFORE any request is built, so a
     mutating call can never be dispatched through this client.
   * The API KEY never leaves the auth header. It is read from the stream's
-    `~/.secrets/<file>` env file (config carries the PATH only), lives in one
+    `~/.secrets/<file>` key file (config carries the PATH only), lives in one
     private attribute, and appears in NO repr / str / error message / log line.
   * Every failure is a structured `OdooError` (never a silent None from a
     network/HTTP/JSON fault) — the config LOADER is the one documented
@@ -230,20 +230,20 @@ def client_confirm_days(cfg):
 
 
 def read_api_key(env_file, var=DEFAULT_API_KEY_VAR):
-    """Read `var`'s value from a `KEY=value` env file (path expanded). Tolerates
-    a leading `export `, surrounding quotes, and `#` comment lines. Raises
-    `OdooError` when the file is unreadable or `var` is absent. NEVER logs the
-    value."""
+    """Read the key from the config-named file (path expanded). RAW file (ONLY
+    non-comment line has no `=`, the stream shape, #1172) → that stripped line,
+    `var` ignored; else a `KEY=value` env file (`export `/quotes/`#` ok) → `var`.
+    `OdooError` if unreadable or absent; NEVER logs/echoes the value."""
     path = os.path.expanduser(str(env_file or ""))
     try:
         with open(path, encoding="utf-8") as h:
             lines = h.readlines()
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         raise OdooError("cannot read API-key env file (path from config)")
-    for line in lines:
-        s = line.strip()
-        if not s or s.startswith("#"):
-            continue
+    content = [s for s in map(str.strip, lines) if s and not s.startswith("#")]
+    if len(content) == 1 and "=" not in content[0]:
+        return content[0]
+    for s in content:
         if s.startswith("export "):
             s = s[len("export "):].strip()
         if "=" not in s:
@@ -259,8 +259,7 @@ def read_api_key(env_file, var=DEFAULT_API_KEY_VAR):
 
 
 def client_from_config(cfg, transport=None):
-    """Build a read-only client from `cfg`, reading the key from the env file
-    named by config (`api_key_env_file` + optional `api_key_var`)."""
+    """Read-only client from `cfg`; key via `read_api_key(api_key_env_file)`."""
     var = (cfg or {}).get("api_key_var") or DEFAULT_API_KEY_VAR
     key = read_api_key(cfg["api_key_env_file"], var)
     return OdooReadOnlyClient(cfg["instance_url"], key, transport=transport)
@@ -278,7 +277,8 @@ def config_template():
         "# session on the box), so a box that also does non-Odoo work would\n"
         "# see unrelated turns blocked/nudged. The API KEY itself lives in the\n"
         "# ~/.secrets/<file> named by api_key_env_file below — NEVER put the\n"
-        "# key value in this file. The values below are the montalu EXAMPLE.\n"
+        "# key value in this file. That file is EITHER raw (one line = the key,\n"
+        "# as stream key files are) OR NAME=value (api_key_var). montalu EXAMPLE:\n"
         "{\n"
         '  "instance_url": "https://erp.montalu.cloud",\n'
         '  "api_key_env_file": "~/.secrets/odoo-montalu.env",\n'
