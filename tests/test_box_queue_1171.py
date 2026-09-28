@@ -42,6 +42,28 @@ def _alive(pid):
         return False
 
 
+def _lock_holder_pids(lock):
+    """Pids with an open fd on `lock` (same inode), via /proc."""
+    st = os.stat(lock)
+    out = []
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            fds = os.listdir(f"/proc/{pid}/fd")
+        except OSError:
+            continue
+        for fd in fds:
+            try:
+                fst = os.stat(f"/proc/{pid}/fd/{fd}")
+            except OSError:
+                continue
+            if (fst.st_dev, fst.st_ino) == (st.st_dev, st.st_ino):
+                out.append(int(pid))
+                break
+    return out
+
+
 def run_cli(args, env):
     return subprocess.run(
         [sys.executable, str(REPO / "airuleset.py"), "box-queue"] + args,
@@ -390,11 +412,12 @@ class TestRefresh(_Base):
         self.assertFalse(_alive(child), "refresh command survived the CLI's SIGTERM")
 
     def test_a_leftover_background_process_holding_the_lock_is_reported(self):
-        """A refresh that leaves a local background process running keeps the
+        """A refresh that leaves a local daemon running in its OWN session
+        (setsid, so the command-group kill cannot reach it) keeps the
         inherited refresh lock held; the next refresh is refused. That must
         be LOUD (a LOCK-LEAK decision line naming the lock), never silent."""
         pidfile = Path(self._tmp.name) / "daemon.pid"
-        refresh = self.script("refresh.sh", f"sleep 60 &\necho $! > {pidfile}\n")
+        refresh = self.script("refresh.sh", f"setsid sleep 60 &\necho $! > {pidfile}\n")
         self.write_config(refresh=[refresh])
         self._refreshing_from_dirty()
         r = bq.refresh(BOX, now_fn=time.time)
@@ -434,6 +457,132 @@ class TestRefresh(_Base):
         with self.assertRaises(bq.BoxQueueError):
             bq.refresh(BOX, now_fn=time.time)
         self.assertEqual(self.state()["state"], "dirty:a")
+
+
+class TestReviewFindings(_Base):
+    """Adversarial review 1 (#1171): every production branch it found
+    untested, plus the two ways a refresh could block the box forever."""
+
+    def _raw(self, **over):
+        raw = {"version": 1, "box": BOX, "state": "pristine", "queue": [],
+               "holder": None, "refresh": None, "reason": "", "updated_at": 1.0}
+        raw.update(over)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        (self.dir / f"{BOX}.json").write_text(json.dumps(raw))
+
+    def _lock_holder(self):
+        return TestRefresh._orphan_holding_refresh_lock(self)
+
+    def test_refresh_stuck_past_its_deadline_is_killed_and_reclaimed(self):
+        self._lock_holder()
+        holder = [p for p in _lock_holder_pids(self.dir / f"{BOX}.refresh.lock")]
+        self.assertEqual(len(holder), 1)
+        self._raw(state="refreshing",
+                  refresh={"token": "t", "pid": dead_pid(), "started_at": 1000.0,
+                           "deadline": 1100.0, "from": "dirty:a"})
+        self.assertEqual(bq.status(BOX, now=1050.0)["state"], "refreshing")
+        st = bq.status(BOX, now=1101.0)
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIn("deadline", st["reason"])
+        for _ in range(100):
+            if not _alive(holder[0]):
+                break
+            time.sleep(0.05)
+        self.assertFalse(_alive(holder[0]), "stuck refresh process survived")
+
+    def test_refresh_kills_background_leftovers_in_its_own_group(self):
+        pidfile = Path(self._tmp.name) / "bg.pid"
+        refresh = self.script("refresh.sh", f"sleep 60 &\necho $! > {pidfile}\n")
+        self.write_config(refresh=[refresh])
+        self._raw(state="dirty:a")
+        self.assertTrue(bq.refresh(BOX, now_fn=time.time)["ok"])
+        bg = int(pidfile.read_text())
+        for _ in range(100):
+            if not _alive(bg):
+                break
+            time.sleep(0.05)
+        self.assertFalse(_alive(bg), "a leftover in the refresh group survived")
+        self.assertFalse(any("LOCK-LEAK" in ln for ln in self.log_lines()))
+        self.assertTrue(bq.refresh(BOX, force=True, now_fn=time.time)["ok"])
+
+    def test_refresh_over_a_stale_refreshing_record_proceeds(self):
+        self.write_config(refresh="true")
+        self._raw(state="refreshing",
+                  refresh={"token": "old", "pid": self.me, "started_at": 1.0,
+                           "deadline": 9e12, "from": "dirty:a"})
+        r = bq.refresh(BOX, now_fn=time.time)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.state()["state"], "pristine")
+        self.assertTrue(any("REFRESH-LOST" in ln for ln in self.log_lines()))
+
+    def test_refresh_lock_released_without_a_result_goes_dirty(self):
+        self._raw(state="refreshing",
+                  refresh={"token": "t", "pid": self.me, "started_at": 1.0,
+                           "deadline": 9e12, "from": "dirty:a"})
+        st = bq.status(BOX, now=1000.0)
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIn("without a result", st["reason"])
+
+    def test_future_timestamps_never_extend_a_hold_or_a_queue_slot(self):
+        self._raw(state="held:a",
+                  holder={"lane": "a", "pid": self.me, "taken_at": 1000.0,
+                          "lease_until": 1e9},
+                  queue=[{"lane": "b", "pid": self.me, "enqueued_at": 1000.0,
+                          "seen_at": 1e9}])
+        st = bq.status(BOX, now=1001.0)
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIn("future", st["reason"])
+        self.assertEqual(st["queue"], [])
+
+    def test_inconsistent_state_is_dirty(self):
+        self._raw(state="held:a", holder=None)
+        self.assertEqual(bq.status(BOX, now=1.0)["state"], "dirty:unknown")
+
+    def test_forged_lane_in_state_file_is_corruption(self):
+        self._raw(queue=[{"lane": "a\nFORGED", "pid": self.me,
+                          "enqueued_at": 1.0, "seen_at": 1.0}])
+        self.assertEqual(bq.status(BOX, now=2.0)["state"], "dirty:unknown")
+
+    def test_withdraw_leaves_the_queue(self):
+        bq.enqueue(BOX, "a", self.me, now=1.0)
+        bq.enqueue(BOX, "b", self.me, now=1.0)
+        r = bq.release(BOX, "b", now=2.0)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual([e["lane"] for e in self.state()["queue"]], ["a"])
+        self.assertTrue(any("WITHDRAW" in ln for ln in self.log_lines()))
+
+    def test_config_validation(self):
+        self.dir.mkdir(parents=True)
+        cfg = self.dir / f"{BOX}.config.json"
+        for bad in ('{"lease_s": NaN}', '{"lease_s": true}', '{"lease_s": 0}',
+                    '{"lease_s": 100, "max_hold_s": 50}', '{"refresh": ""}',
+                    '{"refresh": []}', '[1]', '{not json'):
+            cfg.write_text(bad)
+            with self.assertRaises(bq.BoxQueueError, msg=bad):
+                bq.load_config(BOX)
+        cfg.write_text('{"refresh": "true"}')
+        cfg.chmod(0o666)
+        with self.assertRaises(bq.BoxQueueError):
+            bq.load_config(BOX)
+        cfg.chmod(0o600)
+        self.assertEqual(bq.load_config(BOX)["refresh"], "true")
+
+    def test_wait_lease_poll_and_pid_bounds(self):
+        for kw in ({"wait_s": -1}, {"wait_s": bq.MAX_WAIT_S + 1},
+                   {"lease_s": bq.DEFAULTS["max_hold_s"] + 1}, {"poll_s": 0}):
+            with self.assertRaises(bq.BoxQueueError, msg=kw):
+                bq.take(BOX, "a", self.me, **kw)
+        for pid in (-1, 0, 1):
+            with self.assertRaises(bq.BoxQueueError, msg=pid):
+                bq.enqueue(BOX, "a", pid)
+        r = run_cli(["take", "--box", BOX, "--lane", "a", "--pid", "-1"], self.env)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_defaults_bound_a_dead_in_session_lane(self):
+        """Every in-session lane records the SAME long-lived claude pid, so
+        for a lane the lease — not the pid — is the liveness signal."""
+        self.assertLessEqual(bq.DEFAULTS["lease_s"], 900)
+        self.assertLessEqual(bq.DEFAULTS["queue_ttl_s"], 300)
 
 
 class TestCliAndBoundaries(_Base):
