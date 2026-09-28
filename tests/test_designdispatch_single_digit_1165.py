@@ -131,6 +131,48 @@ class TestPrefixlessNumbersAreNotTickets(unittest.TestCase):
         self.assertIn("names no ticket", r)
 
 
+class TestWeakHashNeverOutranks(unittest.TestCase):
+    """Review of 1165: a 1-digit `#N` is weak evidence (step/bounce/PR prose)."""
+
+    def test_earlier_prose_hash_line_does_not_steal_the_lead(self):
+        for first in ("Step #1: read the brief", "This batch rides PR #7.",
+                      "Resume from step #2 of the plan."):
+            with self.subTest(first=first):
+                self.assertEqual(
+                    dd.issue_numbers(first + "\nWork issue 1165"), [1165])
+
+    def test_prose_hash_on_the_issue_line_is_not_an_extra_ticket(self):
+        for prompt in ("Work issue 1165 (bounce #2)",
+                       "Work issue 1165, round #3 after review",
+                       "Work issue 1165 (#1: primary)"):
+            with self.subTest(prompt=prompt):
+                self.assertEqual(dd.issue_numbers(prompt), [1165])
+
+    def test_html_entity_is_not_a_ticket(self):
+        self.assertEqual(dd.issue_numbers("Work issue 1165 &#8; x"), [1165])
+        self.assertEqual(dd.issue_numbers("see &#8212; here"), [])
+
+    def test_space_separated_hash_batch_is_a_run(self):
+        self.assertEqual(dd.issue_numbers("Work issues #4 #7 in fohmixer"), [4, 7])
+        self.assertEqual(
+            dd.issue_numbers("Work issues #41 #43 #47 in camera-box"), [41, 43, 47])
+
+    def test_hash_only_line_is_the_lead_when_nothing_stronger(self):
+        self.assertEqual(dd.issue_numbers("Fix #4 and #7"), [4, 7])
+        self.assertEqual(dd.issue_numbers("Work zbynekdrlik/fohmixer#4"), [4])
+
+    def test_step_prose_hash_line_blocks_as_no_design_rather_than_pr_skip(self):
+        # the fail-open path: a weak `PR #7` lead would be skipped as a PR and
+        # the dispatch ALLOWED with issue 1165 never design-checked.
+        v, r = dd.evaluate(
+            _payload("This batch rides PR #7.\nWork issue 1165"),
+            fetch=lambda slug, n, cwd: {1165: ["no design"]}.get(n),
+            resolve_slug=lambda cwd: "owner/repo",
+            is_pr=lambda n, slug, cwd: (n == 7, None), fable_id=FABLE)
+        self.assertEqual(v, "block")
+        self.assertIn("#1165", r)
+
+
 class TestEvaluateSingleDigit(unittest.TestCase):
     def test_fohmixer_main_design_allows(self):
         # RED on the pre-#1165 code: the prompt parsed to [] -> "names no ticket".
