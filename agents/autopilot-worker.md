@@ -563,8 +563,10 @@ push / PR / merge / deploy, never that backup.
    and there is no `TaskOutput`/status tool for an Agent dispatch. Use bounded `inotifywait -e
    close_write -t <secs> <task.output>` event-waits on the dispatch result's own `output_file` (one
    path per outstanding dispatch), and read "done" ONLY by PARSING the LAST JSON object of that file —
-   `tail -n 1 <task.output>` piped to a one-line `python3 -c` that prints its `type` + content-block
-   types: a final `assistant ['text']` = DONE, a trailing `user ['tool_result']` / `assistant
+   `tail -n 20 <task.output>` piped to a one-line `python3 -c` that walks the lines BACKWARDS, skips
+   every `type: "attachment"` record (a finished agent's last line is usually one, e.g.
+   `total_tokens_reminder` — read literally it makes a DONE review look running, #874) and prints
+   the first remaining record's `type` + content-block types: a final `assistant ['text']` = DONE, a trailing `user ['tool_result']` / `assistant
    ['thinking'|'tool_use']` = still running (never trust the file's `stat` size/mtime — they read
    stale, #569). Do NOT wholesale-Read or tail the `.output` JSONL content (context overflow — the
    dispatch metadata itself warns of it). The real completion notification also lands between your tool calls, exactly
