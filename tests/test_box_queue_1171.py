@@ -389,6 +389,25 @@ class TestRefresh(_Base):
             time.sleep(0.05)
         self.assertFalse(_alive(child), "refresh command survived the CLI's SIGTERM")
 
+    def test_a_leftover_background_process_holding_the_lock_is_reported(self):
+        """A refresh that leaves a local background process running keeps the
+        inherited refresh lock held; the next refresh is refused. That must
+        be LOUD (a LOCK-LEAK decision line naming the lock), never silent."""
+        pidfile = Path(self._tmp.name) / "daemon.pid"
+        refresh = self.script("refresh.sh", f"sleep 60 &\necho $! > {pidfile}\n")
+        self.write_config(refresh=[refresh])
+        self._refreshing_from_dirty()
+        r = bq.refresh(BOX, now_fn=time.time)
+        daemon = int(pidfile.read_text())
+        self.addCleanup(lambda: _alive(daemon) and os.kill(daemon, 9))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.state()["state"], "pristine")
+        self.assertTrue(any("LOCK-LEAK" in ln and "refresh.lock" in ln
+                            for ln in self.log_lines()), self.log_lines())
+        again = bq.refresh(BOX, force=True, now_fn=time.time)
+        self.assertFalse(again["ok"])
+        self.assertIn("fuser", again["msg"])
+
     def _refreshing_from_dirty(self):
         raw = {"version": 1, "box": BOX, "state": "dirty:a", "queue": [],
                "holder": None, "refresh": None, "reason": "x", "updated_at": 1.0}
