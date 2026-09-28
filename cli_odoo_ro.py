@@ -236,10 +236,10 @@ def read_api_key(env_file, var=DEFAULT_API_KEY_VAR):
     `OdooError` if unreadable or absent; NEVER logs/echoes the value."""
     path = os.path.expanduser(str(env_file or ""))
     try:
-        with open(path, encoding="utf-8") as h:
+        with open(path, encoding="utf-8-sig") as h:  # a BOM is never key bytes
             lines = h.readlines()
-    except (OSError, UnicodeDecodeError):
-        raise OdooError("cannot read API-key env file (path from config)")
+    except (OSError, UnicodeDecodeError):  # `from None`: .object = file bytes
+        raise OdooError("cannot read API-key env file (path from config)") from None
     content = [s for s in map(str.strip, lines) if s and not s.startswith("#")]
     if len(content) == 1 and "=" not in content[0]:
         return content[0]
