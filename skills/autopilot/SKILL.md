@@ -608,6 +608,23 @@ in live worktrees (see Step 3.2 below) and prints per-resource occupancy.
 
 **Box serialisation (one PROD copy per shared box) applies to the TAIL only — PROD-copy test, E2E, hand-off; implementation lanes run in parallel up to the lane cap.** The `"box": 1` cap serialises ONLY the lanes that actually need the shared PROD copy (their `.lane-needs` carries `box`); every other implementation lane (code, CI, RFR, review, docs) runs concurrently up to `max_lanes`. "One PROD copy" is NOT "one lane at a time" — a session that ends a turn with one lane while dispatchable, box-free tickets sit without lanes and slots are free is under-filled (the Stop-time lane-fill gate `gates.lanefill` flags exactly this on parallel boxes, #1078).
 
+**Box phase — ONLY through `airuleset.py box-queue` (#1171).** A lane touches the stream's shared
+test box ONLY between `box-queue take` and `box-queue release` — never a hand-rolled lock, priority
+file or prose lane contract (montalu4, 2026-09-28: six improvised patches in one day, a 90-min
+non-FIFO starvation, a 3-h hold, an out-of-turn take, a refresh that rewrote `~/.ssh/config`).
+Coding, unit tests and CI stay parallel; only the box phase serializes, strict FIFO (head of queue +
+pristine box only):
+
+- **lane:** `python3 ~/devel/airuleset/airuleset.py box-queue take --box <box> --lane <branch> --wait 540`
+  (exit 1 = not your turn yet → re-run it, your place is kept while you keep polling), `box-queue
+  renew` before the lease lapses, then `box-queue release` — `--dirty` whenever it deployed or
+  changed anything on the box, and never before its own E2E ran.
+- **supervisor:** `box-queue status --box <box>`; a `dirty:*` box → `box-queue refresh --box <box>`,
+  which runs the project's own refresh + health commands from `~/.claude/box-queue/<box>.config.json`
+  (the project owns what REFRESH means; the tool writes nothing outside its state dir, never
+  `~/.ssh/config`). A held box is never refreshed; a dead or lapsed holder is reclaimed as dirty on
+  the next call, a lane that stops polling drops out of the queue.
+
 **Dispatch marker — `.lane-needs`.** At dispatch, when a ticket needs a declared resource
 (e.g. its shadow/E2E test needs the erp-test box), the supervisor writes a `lane-needs` marker
 file into the lane worktree's PRIVATE gitdir (not the working tree — a working-tree file would

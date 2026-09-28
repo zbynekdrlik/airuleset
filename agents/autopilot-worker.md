@@ -368,6 +368,14 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   on a resource the supervisor over-dispatched (the box lock you waited on is held by another
   lane), report `blocked: box` in your evidence block — the supervisor treats this as its own
   scheduling defect and does not redispatch a box ticket until usage is under cap.
+- **Shared test box = `box-queue` ONLY (#1171).** If your ticket deploys to / E2E-tests on the
+  stream's shared erp-test box, finish everything else first (code, unit tests), then enter the box
+  phase ONLY via `python3 ~/devel/airuleset/airuleset.py box-queue take --box <box> --lane <your
+  branch> --wait 540` (exit 1 = not your turn: re-run it; exit 0 = you hold the box), `box-queue
+  renew` before the lease lapses, and `box-queue release` when done — `--dirty` if you deployed or
+  changed anything on the box, and only after your own E2E ran. Never touch the box outside take …
+  release, never write your own lock / priority file, never run `box-queue refresh` (the supervisor
+  refreshes a dirty box).
 - **The serial-fallback (single-worker, no `isolation:`) shape is UNCHANGED** — if your dispatch
   prompt does not mention a worktree/isolation and your `cwd` is the repo's ordinary main
   checkout, you are running the old fully self-contained cycle: push, open, merge, deploy, and

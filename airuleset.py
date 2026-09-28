@@ -9609,6 +9609,19 @@ from cli_stream_priority import (  # noqa: E402, F401
     register_parser as _register_stream_priority_parser,
 )
 
+# --- #1171: shared erp-test box FIFO queue + lease CLI leaf ---
+from cli_box_queue import (  # noqa: E402, F401
+    cmd_box_queue as cmd_box_queue,
+    register_parser as _register_box_queue_parser,
+)
+
+
+def _register_leaf_parsers(sub):
+    """Leaf modules that own their argparse subparser (#1138, #1171) — one
+    call from main() keeps main() from growing per leaf."""
+    for register in (_register_stream_priority_parser, _register_box_queue_parser):
+        register(sub)
+
 # --- #1062 L1: managed LiteLLM model gateway CLI leaf ---
 from cli_model_gateway import (  # noqa: E402, F401
     cmd_model_gateway as cmd_model_gateway,
@@ -10896,7 +10909,7 @@ def main():
                           help="run the mount + relocation via sudo -n "
                                "(gk-infra window, owner present)")
     p_vol.set_defaults(apply=False)
-    _register_stream_priority_parser(sub)  # #1138
+    _register_leaf_parsers(sub)  # #1138, #1171
 
     args = parser.parse_args()
 
@@ -11423,6 +11436,7 @@ SUBCOMMANDS = {
     "gk-watch": cmd_gk_watch,
     "handoff": cmd_handoff,
     "autopilot-lock": cmd_autopilot_lock,
+    "box-queue": cmd_box_queue,
     "onboard-project": cmd_onboard_project,
     "goal-inventory": cmd_goal_inventory,
     "gh-rate": cmd_gh_rate,
