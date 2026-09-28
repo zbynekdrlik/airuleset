@@ -109,10 +109,43 @@ class TestReadApiKeyRawFile(unittest.TestCase):
         self.assertEqual(val, self.FAKE)
         self.assertEqual(captured, "")
 
-    def test_empty_file_raises(self):
+    def test_comment_only_file_raises(self):
         p = self._env("# only a comment\n\n")
         with self.assertRaises(ro.OdooError):
             ro.read_api_key(p, "ODOO_API_KEY")
+
+    def test_zero_byte_file_raises(self):
+        p = self._env("")
+        with self.assertRaises(ro.OdooError):
+            ro.read_api_key(p, "ODOO_API_KEY")
+
+    def _env_bytes(self, data):
+        p = self._env("")
+        with open(p, "wb") as h:
+            h.write(data)
+        return p
+
+    def test_utf8_bom_is_not_part_of_the_raw_key(self):
+        p = self._env_bytes(b"\xef\xbb\xbf" + self.FAKE.encode() + b"\n")
+        self.assertEqual(ro.read_api_key(p, "ODOO_API_KEY"), self.FAKE)
+
+    def test_utf8_bom_env_file_reads_named_var(self):
+        line = "%s=%s\n" % (ro.DEFAULT_API_KEY_VAR, self.FAKE)
+        p = self._env_bytes(b"\xef\xbb\xbf" + line.encode())
+        self.assertEqual(ro.read_api_key(p, "ODOO_API_KEY"), self.FAKE)
+
+    def test_undecodable_file_raises_structured_error_without_content(self):
+        p = self._env_bytes(self.FAKE.encode() + b"\xff\xfe-tail\n")
+        val, exc, captured = self._read_capturing(p)
+        self.assertIsNone(val)
+        self.assertIsInstance(exc, ro.OdooError)
+        self.assertIn("cannot read", str(exc))
+        self.assertNotIn(self.FAKE, str(exc))
+        self.assertNotIn(self.FAKE, repr(exc))
+        self.assertNotIn(self.FAKE, captured)
+        # the decode error (whose .object holds the file bytes) is not chained
+        self.assertIsNone(exc.__cause__)
+        self.assertTrue(exc.__suppress_context__)
 
     def test_template_documents_both_key_file_shapes(self):
         tmpl = ro.config_template()
@@ -126,7 +159,6 @@ class TestReadApiKeyRawFile(unittest.TestCase):
             h.write(tmpl)
         ok, missing = ro.config_valid(ro.load_config(cp))
         self.assertTrue(ok, missing)
-
 
 
 if __name__ == "__main__":
