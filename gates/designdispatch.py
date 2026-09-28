@@ -10,9 +10,9 @@ design was authored by the managed MAIN session, per the owner's standing #871
 rule. FAIL-CLOSED: an unreadable comment
 thread (gh error / no network / auth) REFUSES with an honest reason (the owner's
 rule -- never dispatch a worker onto an unverifiable design). A prompt with no
-parseable issue number can't be checked and is ALLOWED (the same documented
-fail-open the sibling overlap gate takes -- the design comment on the ticket is
-the durable authority); the realistic autopilot dispatch always carries `#N`.
+parseable ticket number is REFUSED too (#1061 review-3: an autopilot-worker
+always works a ticket, so "names no ticket" is fail-closed); a ticket is
+`#N` or `issue N` with N of 1-6 digits (#1165 -- a young repo's `issue 4`).
 
 Bypass: `airuleset:design-by-ok <reason>` in the dispatch prompt -- allowed and
 logged to ~/.claude/design-by-gate.log.
@@ -28,26 +28,13 @@ import time
 
 from gates import read_payload, field_of, emit_block_stderr, allow
 from gates import ghread
+from gates import ticketrefs
 
 DESIGN_BY_LOG = "design-by-gate.log"
 
-# Ticket references in a dispatch prompt. The fleet's real prompts on this
-# controller write the ticket WITHOUT `#` ("Work airuleset issue 1061 …") because
-# the lane-overlap dispatch hook refuses `#N` mentions outside its receipt, so a
-# `#N`-only extractor was VACUOUS — every real dispatch parsed to [] and the gate
-# fail-opened (the #1028 vacuous-classifier class; #1061 supervisor review-3).
-# Now parse `#N` AND bare `issue N` / `issues N, M` / `issue #N` / `issue-N` /
-# `issue: N`. Require the `issue`/`#` PREFIX + 2-6 digits so a version string
-# (0.1.326), a date (2026-09-17), a git sha, or an "items 1, 2, 3" run is NEVER
-# mistaken for a ticket. Scoped to the FIRST ticket-bearing LINE (the dispatch's
-# lead), mirroring the sibling block-dispatch-over-wdrain gate, so a folded /
-# related "issue N" on a LATER body line ("5b. folded from issue 1046") never
-# triggers a false precondition check on a ticket the worker is not working.
-_TICKET_ANY_RE = re.compile(r"(?:issues?\s*[#:-]?\s*|#)\d{2,6}\b", re.IGNORECASE)
-_HASH_RE = re.compile(r"#(\d{2,6})\b")
-_TICKET_RUN_RE = re.compile(
-    r"issues?\s*[#:-]?\s*(\d{2,6}(?:\s*(?:,|and)\s*#?\d{2,6})*)", re.IGNORECASE)
-_NUM_RE = re.compile(r"\d{2,6}")
+# Ticket-number parsing of the dispatch prompt lives in gates/ticketrefs.py
+# (#1165 split); `issue_numbers` is re-exported for callers + tests.
+issue_numbers = ticketrefs.issue_numbers
 
 _BYPASS_RE = re.compile(r"airuleset:design-by-ok\s*(?P<reason>.*)", re.IGNORECASE)
 
@@ -74,33 +61,6 @@ def _log(line):
             fh.write(line + "\n")
     except OSError:
         return
-
-
-def issue_numbers(prompt):
-    """Ticket numbers named in the dispatch's LEAD line (`#N` and bare `issue N`),
-    de-duped, first-seen order. Empty when no line names a ticket."""
-    text = prompt or ""
-    lead = None
-    for line in text.splitlines():
-        if _TICKET_ANY_RE.search(line):
-            lead = line
-            break
-    if lead is None:
-        return []
-    found = []  # (position, number) so #N and issue-N keep left-to-right order
-    for m in _HASH_RE.finditer(lead):
-        found.append((m.start(), int(m.group(1))))
-    for m in _TICKET_RUN_RE.finditer(lead):
-        base = m.start(1)
-        for nm in _NUM_RE.finditer(m.group(1)):
-            found.append((base + nm.start(), int(nm.group())))
-    found.sort(key=lambda t: t[0])
-    out, seen = [], set()
-    for _, n in found:
-        if n not in seen:
-            seen.add(n)
-            out.append(n)
-    return out
 
 
 def _norm_model(m):
