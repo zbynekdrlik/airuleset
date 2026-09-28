@@ -39,7 +39,8 @@ _L2_MANAGED_APIKEY_HELPER = str(Path.home() / ".claude"
 # apart from airuleset's old write, so it is removed too (documented on #1173).
 # L2 also wrote its marker's gateway alias there; that one is recognised by
 # airuleset's own L2 apiKeyHelper path instead of by value — never by the
-# generic env keys, which an owner may set for their own reasons.
+# generic L2 env keys, which prove nothing about who wrote the subagent model
+# (they are popped regardless, #1060).
 _RETIRED_MANAGED_SUBAGENT_MODELS = frozenset({"claude-opus-4-8", "claude-opus-5-5"})
 _SUBAGENT_MODEL_KEY = "CLAUDE_CODE_SUBAGENT_MODEL"
 
