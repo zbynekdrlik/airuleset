@@ -27,11 +27,13 @@ Model (per box, `~/.claude/box-queue/<box>.json`):
            runs (fenced by the `refreshing` state + a token instead). The
            refresh holds `<box>.refresh.lock` for its whole run and its
            commands INHERIT that fd, so "a refresh is running" means "that
-           lock is held" — true even after the CLI itself died (a 10-min
-           foreground Bash cap) while its command still runs; the box then
+           lock is held" — true even after the CLI itself was SIGKILLed
+           (OOM, a tree kill) while its command still runs; the box then
            stays `refreshing`, never dirty, and no second refresh starts.
-           A timeout or SIGTERM/SIGHUP/SIGINT kills the command's whole
-           process group and records dirty.
+           A timeout or a caught SIGTERM/SIGHUP/SIGINT kills the command's
+           process group and records dirty; after EVERY command, any other
+           process still owning the lock (a step that left the group:
+           GNU `timeout`, a setsid daemon) is SIGKILLed too.
   status   report (applies pending reclaims)
 
 Liveness, applied on EVERY call before the action (so nothing can hold the box
@@ -40,8 +42,10 @@ max_hold_s is reclaimed as dirty:<lane> (it may have left the box half-
 deployed); a queue entry whose pid died or that has not polled for
 queue_ttl_s is dropped (so a vanished lane cannot block the head); a refresh
 whose lock is no longer held (every process of it gone) returns the box to
-dirty, and one still holding it past its deadline has every holder of the
-lock's inode SIGKILLed first (a hung command, or a leftover it spawned).
+dirty, and one still owning it past its deadline has every OWNER of the
+lock SIGKILLed first (a hung command, or a leftover it spawned) — owner =
+an fd whose open file description holds the flock (`/proc/<pid>/fdinfo`
+`lock:` line), never a process that merely opened the file.
 For an in-session lane the pid is the SHARED long-lived `claude` process,
 so the lease (default 900 s, renewed between steps) is its real liveness.
 
@@ -73,7 +77,6 @@ import json
 import math
 import os
 import re
-import signal
 import subprocess
 import sys
 import time
@@ -82,6 +85,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from cli_autopilot_lock import _campaign_pid, _pid_alive
+from cli_box_queue_proc import (
+    _argv, _cmdline, _exited_unreaped, _Interrupted, _kill_group,
+    _kill_lock_owners, _lock_owners, _signals_interrupt, _tail_line,
+    lock_held,
+)
 
 _BOX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _LANE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._#@+/-]{0,127}$")
@@ -290,8 +298,12 @@ def _load_state(paths, box, now, events):
     if not p.exists():
         return _fresh_state(box, now), False
     try:
-        st = json.loads(p.read_text())
-    except (OSError, ValueError):
+        text = p.read_text()
+    except OSError as e:
+        raise BoxQueueError(f"cannot read {p}: {e} — left untouched") from e
+    try:
+        st = json.loads(text)
+    except ValueError:
         st = None
     if _valid(st, box):
         return st, False
@@ -319,82 +331,24 @@ def _save_state(path, st):
             tmp.unlink()
 
 
-def _refresh_lock_held(paths):
-    """True while some process (the refresh CLI or a command that inherited
-    its fd) holds `<box>.refresh.lock`. flock, not a pid: immune to pid
-    reuse and to the CLI dying before its command."""
-    try:
-        fd = os.open(str(paths["refresh_lock"]), os.O_RDWR)
-    except FileNotFoundError:
-        return False
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return True
-    else:
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
-    finally:
-        os.close(fd)
-
-
-def _lock_holders(path):
-    """Pids (of this uid — others' /proc fds are unreadable) holding an open
-    fd on `path`'s inode. Matching the INODE of an fd a process holds right
-    now cannot hit a recycled pid, unlike a recorded pid."""
-    try:
-        want = os.stat(path)
-    except OSError:
-        return []
-    out = []
-    for name in os.listdir("/proc"):
-        if not name.isdigit():
-            continue
-        try:
-            fds = os.listdir(f"/proc/{name}/fd")
-        except OSError:
-            continue   # another uid's process, or it just exited
-        for fd in fds:
-            try:
-                got = os.stat(f"/proc/{name}/fd/{fd}")
-            except OSError:
-                continue   # fd closed between listdir and stat
-            if (got.st_dev, got.st_ino) == (want.st_dev, want.st_ino):
-                out.append(int(name))
-                break
-    return out
-
-
 def _kill_stuck_refresh(paths):
-    """A refresh past its deadline whose lock is still held: its CLI died
+    """A refresh past its deadline whose lock is still owned: its CLI died
     (SIGKILL/OOM) and its command hangs, or a leftover kept the inherited
-    fd. SIGKILL every holder (except this process — a finishing refresh CLI
-    records its own result) and return (why, note): `why` when the lock is
-    now free (the caller reaps the box to dirty), else a `note`."""
-    me = os.getpid()
-    victims = [p for p in _lock_holders(paths["refresh_lock"]) if p != me]
-    if not victims:
-        return None, (f"past its deadline — {paths['refresh_lock'].name} is "
-                      f"still held by the refresh finishing now")
-    for pid in victims:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            continue   # exited on its own meanwhile — the goal anyway
-        except PermissionError as e:
-            print(f"box-queue: cannot kill stuck refresh pid {pid}: {e}",
-                  file=sys.stderr)
-    for _ in range(40):
-        if not _refresh_lock_held(paths):
-            return (f"refresh deadline passed — killed stuck refresh "
-                    f"process(es) {victims}"), ""
-        time.sleep(0.05)
+    fd. Kill every owner and return (why, note): `why` when the lock is now
+    free (the caller reaps the box to dirty), else a `note`."""
+    killed, left = _kill_lock_owners(paths["refresh_lock"])
+    if not left and not lock_held(paths["refresh_lock"]):
+        return (f"refresh deadline passed — killed stuck refresh "
+                f"process(es) {killed}"), ""
     return None, (f"past its deadline — {paths['refresh_lock'].name} still "
-                  f"held after killing {victims}")
+                  f"owned by {left or 'an unreadable process'}")
 
 
-def _reap(st, now, cfg, box, events, paths):
-    """Apply every liveness rule. Returns True when anything changed."""
+def _reap(st, now, cfg, box, events, paths, own_refresh=False):
+    """Apply every liveness rule. Returns True when anything changed.
+    `own_refresh`: the caller is a refresh CLI that holds the refresh lock
+    itself — it retires a stale record / records its own result, so the
+    lock-based refresh liveness (which would see its own lock) is skipped."""
     changed = False
     h = st["holder"]
     if h is not None:
@@ -413,9 +367,9 @@ def _reap(st, now, cfg, box, events, paths):
             _event(events, now, box, "RECLAIM", h["lane"], frm, st["state"], why)
             changed = True
     r = st["refresh"]
-    if r is not None:
+    if r is not None and not own_refresh:
         why = None
-        if not _refresh_lock_held(paths):
+        if not lock_held(paths["refresh_lock"]):
             why = (f"refresh process {r['pid']} died" if not _pid_alive(r["pid"])
                    else "refresh lock released without a result")
         elif now >= r["deadline"]:
@@ -460,7 +414,7 @@ def _locked(paths):
         os.close(fd)
 
 
-def _transact(box, cfg, now_fn, fn):
+def _transact(box, cfg, now_fn, fn, own_refresh=False):
     """Lock, load, reap, apply `fn(st, events, now) -> (result, changed)`,
     save when anything changed, log every event. The clock is read INSIDE
     the lock so FIFO stamps are monotonic across racing writers."""
@@ -469,7 +423,7 @@ def _transact(box, cfg, now_fn, fn):
         now = now_fn()
         events = []
         st, changed = _load_state(paths, box, now, events)
-        changed = _reap(st, now, cfg, box, events, paths) or changed
+        changed = _reap(st, now, cfg, box, events, paths, own_refresh) or changed
         result, touched = fn(st, events, now)
         if changed or touched:
             st["updated_at"] = now
@@ -478,6 +432,14 @@ def _transact(box, cfg, now_fn, fn):
             _append(paths["decisions"], events)
     result.setdefault("state", st["state"])
     return result
+
+
+def _require_box_config(box, cfg):
+    if not cfg.get("refresh"):
+        raise BoxQueueError(
+            f"unknown box {box!r}: no {_paths(box)['config']} with a "
+            f"\"refresh\" command. The project writes it; lanes use exactly "
+            f"that --box name (a mistyped name would get a queue of its own)")
 
 
 def _clock(now):
@@ -507,6 +469,7 @@ def enqueue(box, lane, pid, now=None):
     _check_lane(lane)
     _check_pid(pid)
     cfg = load_config(box)
+    _require_box_config(box, cfg)
 
     def fn(st, events, t):
         h = st["holder"]
@@ -588,6 +551,11 @@ def take(box, lane, pid, wait_s=0.0, lease_s=None, poll_s=5.0,
     if not poll_s > 0:
         raise BoxQueueError("--poll must be positive")
     cfg = load_config(box)
+    _require_box_config(box, cfg)
+    if poll_s > cfg["queue_ttl_s"] / 2:
+        raise BoxQueueError(
+            f"--poll must be <= queue_ttl_s/2 ({cfg['queue_ttl_s'] / 2:.0f}s), "
+            f"or the lane's own queue entry lapses between polls")
     lease = _lease(cfg, lease_s)
     deadline = now_fn() + wait_s
     while True:
@@ -648,78 +616,20 @@ def release(box, lane, dirty=False, reason="", now=None):
     return _transact(box, cfg, _clock(now), fn)
 
 
-def _argv(cmd):
-    return ["/bin/sh", "-c", cmd] if isinstance(cmd, str) else list(cmd)
+def _sweep_leftovers(lock_path, log_path):
+    """After a command, kill any OTHER process still owning the refresh lock:
+    a step that left the process group (GNU `timeout`, a setsid daemon)
+    would otherwise keep changing the box — and keep the lock — after the
+    refresh is recorded done. Returns the owners that could not be killed."""
+    killed, left = _kill_lock_owners(lock_path)
+    if killed or left:
+        _append(log_path, [f"--- killed leftover process(es) {killed} still "
+                           f"owning the refresh lock"
+                           + (f"; STILL OWNED by {left}" if left else "")])
+    return left
 
 
-def _tail_line(path):
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            f.seek(max(0, f.tell() - 400))
-            lines = [ln for ln in f.read().decode("utf-8", "replace").splitlines()
-                     if ln.strip()]
-        return lines[-1].strip()[:160] if lines else ""
-    except OSError as e:
-        return f"(refresh log unreadable: {e})"
-
-
-class _Interrupted(Exception):
-    def __init__(self, signum):
-        super().__init__(signum)
-        self.signum = signum
-
-
-def _raise_interrupted(signum, _frame):
-    raise _Interrupted(signum)
-
-
-@contextlib.contextmanager
-def _signals_interrupt():
-    """While a refresh runs, SIGTERM/SIGHUP/SIGINT raise _Interrupted so the
-    command group is killed and the box recorded dirty — never left running
-    unattended. A signal the caller IGNORES (nohup) stays ignored."""
-    old = {}
-    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
-        try:
-            if signal.getsignal(sig) is not signal.SIG_IGN:
-                old[sig] = signal.signal(sig, _raise_interrupted)
-        except ValueError:
-            break   # not the main thread: signals stay as they are
-    try:
-        yield
-    finally:
-        for sig, handler in old.items():
-            signal.signal(sig, handler)
-
-
-def _exited_unreaped(proc, timeout):
-    """Wait up to `timeout` for the leader to exit WITHOUT reaping it: while
-    it is an unreaped zombie its pid — the group id — cannot be recycled, so
-    the group kill that follows can never hit an unrelated process group."""
-    deadline = time.monotonic() + timeout
-    while True:
-        if os.waitid(os.P_PID, proc.pid,
-                     os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
-            return True
-        if time.monotonic() >= deadline:
-            return False
-        time.sleep(0.1)
-
-
-def _kill_group(proc):
-    """SIGKILL the command's whole process group (leader still unreaped, so
-    the group id is its own), then reap the leader. Kills any background
-    leftover of the refresh too, so none keeps the inherited lock."""
-    try:
-        os.killpg(proc.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        print(f"box-queue: refresh process group {proc.pid} already gone",
-              file=sys.stderr)
-    return proc.wait()
-
-
-def _run(cmd, timeout, cfg, box, log_path, label, lock_fd):
+def _run(cmd, timeout, cfg, box, log_path, label, lock_fd, lock_path):
     """(rc | None, error-or-empty). The command runs in its OWN process group
     (killed whole on timeout or interruption) and inherits `lock_fd`, so the
     refresh lock stays held for as long as any part of it lives. Output goes
@@ -738,19 +648,23 @@ def _run(cmd, timeout, cfg, box, log_path, label, lock_fd):
             exited = _exited_unreaped(proc, timeout)
         except BaseException:
             _kill_group(proc)
+            _sweep_leftovers(lock_path, log_path)
             raise
         rc = _kill_group(proc)   # exited: only sweeps leftovers; else: the timeout kill
+        left = _sweep_leftovers(lock_path, log_path)
         if not exited:
             return None, f"{label} timed out after {timeout:.0f}s"
+        if left:
+            return None, f"{label}: leftover process(es) {left} could not be killed"
         return rc, ""
 
 
 def _run_refresh(box, cfg, now_fn, sleep_fn, lock_fd):
     """(ok, why). The refresh command once, then the health command polled
     until it passes or health_timeout_s runs out."""
-    log_path = _paths(box)["refresh_log"]
+    log_path, lock_path = _paths(box)["refresh_log"], _paths(box)["refresh_lock"]
     rc, err = _run(cfg["refresh"], cfg["refresh_timeout_s"], cfg, box, log_path,
-                   "refresh", lock_fd)
+                   "refresh", lock_fd, lock_path)
     if rc != 0:
         tail = _tail_line(log_path)
         why = err or f"refresh command rc={rc}"
@@ -765,7 +679,7 @@ def _run_refresh(box, cfg, now_fn, sleep_fn, lock_fd):
             return False, (f"health check never passed within "
                            f"{cfg['health_timeout_s']:.0f}s ({last})")
         rc, err = _run(cfg["health"], max(remaining, 1.0), cfg, box, log_path,
-                       "health", lock_fd)
+                       "health", lock_fd, lock_path)
         if rc == 0:
             return True, ""
         last = err or f"health rc={rc}"
@@ -815,10 +729,8 @@ def refresh(box, force=False, now_fn=time.time, sleep_fn=time.sleep):
     lock_fd = os.open(str(paths["refresh_lock"]), os.O_CREAT | os.O_RDWR, 0o600)
     try:
         if not _grab_refresh_lock(lock_fd):
-            return {"ok": False, "msg": f"a refresh of {box} still runs (a process "
-                    f"holds {paths['refresh_lock']}; `fuser` names it); not "
-                    f"starting a second one"}
-        res = _transact(box, cfg, now_fn, start)
+            return _grab_refused(box, cfg, now_fn, paths)
+        res = _transact(box, cfg, now_fn, start, own_refresh=True)
         if not res.get("started"):
             return res
         with _signals_interrupt():
@@ -826,12 +738,13 @@ def refresh(box, force=False, now_fn=time.time, sleep_fn=time.sleep):
                 ok, why = _run_refresh(box, cfg, now_fn, sleep_fn, lock_fd)
             except _Interrupted as e:
                 ok, why = False, f"refresh interrupted by signal {e.signum}"
-        result = _transact(box, cfg, now_fn, _finisher(box, token, ok, why))
+        result = _transact(box, cfg, now_fn, _finisher(box, token, ok, why),
+                           own_refresh=True)
     finally:
         # Closing our fd drops the lock unless a command that inherited it
         # still runs — exactly the liveness signal the reaper reads.
         os.close(lock_fd)
-    if _refresh_lock_held(paths):
+    if lock_held(paths["refresh_lock"]):
         leak = (f"a background process started by the refresh command still "
                 f"holds {paths['refresh_lock']} (it inherited the fd; `fuser` "
                 f"names it) — the next refresh waits for it. Start local "
@@ -841,6 +754,23 @@ def refresh(box, force=False, now_fn=time.time, sleep_fn=time.sleep):
         _event(events, now_fn(), box, "LOCK-LEAK", reason=leak)
         _append(paths["decisions"], events)
     return result
+
+
+def _grab_refused(box, cfg, now_fn, paths):
+    """The refresh lock is owned by someone else. With a live `refreshing`
+    record that is a running refresh; without one it is a leftover of an
+    earlier refresh whose CLI was SIGKILLed — named, so the supervisor can
+    kill it (a refresh that just took the lock but has not yet recorded
+    itself looks the same, so the tool does not kill it on its own)."""
+    state = _transact(box, cfg, now_fn, lambda st, _e, _t: ({}, False))["state"]
+    if state == "refreshing":
+        return {"ok": False, "msg": f"a refresh of {box} still runs; not "
+                                    f"starting a second one"}
+    owners = _lock_owners(paths["refresh_lock"])
+    named = ", ".join(f"{pid} ({_cmdline(pid)})" for pid in owners) or "unknown"
+    return {"ok": False, "msg": f"{box} is {state} but process(es) {named} still "
+            f"own {paths['refresh_lock']} with no refresh recorded — a leftover "
+            f"of an earlier refresh; kill it, then refresh again"}
 
 
 def _grab_refresh_lock(lock_fd):

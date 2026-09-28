@@ -600,7 +600,9 @@ number. **#970 resource-aware cap (per-resource):** the project's
 ```
 
 `max_lanes` (1..5) is the TOTAL lane ceiling. `resources` (optional) maps per-resource concurrency
-caps — a project with ONE shared test box declares `"box": 1`. Absent file = the flat 5
+caps — a project with ONE shared test box declares `"box": 1` (box-queue, #1171, serializes the box
+phase itself, so `"box"` may be raised above 1: box lanes then code in parallel and queue only for
+the box). Absent file = the flat 5
 (backward compatible). **Refill doctrine with resources:** box-needing lanes fill up to
 `resources.box` slots; box-FREE lanes (code, CI, RFR, review, docs) fill the remaining slots up
 to `max_lanes`. The watchdog nudge counts live lanes per resource by reading `.lane-needs` files
@@ -612,23 +614,31 @@ in live worktrees (see Step 3.2 below) and prints per-resource occupancy.
 test box ONLY between `box-queue take` and `box-queue release` — never a hand-rolled lock, priority
 file or prose lane contract (montalu4, 2026-09-28: six improvised patches in one day, a 90-min
 non-FIFO starvation, a 3-h hold, an out-of-turn take, a refresh that rewrote `~/.ssh/config`).
-Coding, unit tests and CI stay parallel; only the box phase serializes, strict FIFO (head of queue +
-pristine box only):
+The queue itself serializes the box phase (strict FIFO: queue head + pristine box only); coding,
+unit tests and CI stay parallel.
 
-- **lane:** `python3 ~/devel/airuleset/airuleset.py box-queue take --box <box> --lane <branch> --wait 540`
-  (exit 1 = not your turn yet → re-run it, your place is kept while you keep polling), `box-queue
-  renew` between steps (the lease — 900 s by default — is a lane's liveness, since every in-session
-  lane records the same `claude` pid), then `box-queue release` — `--dirty` whenever it deployed or
-  changed anything on the box (a plain `release` declares the box untouched), never before its own
-  E2E ran. A failed `renew` means the box was reclaimed: stop touching it at once.
-- **supervisor:** on every turn with a box lane live, and whenever a lane returns `blocked: box`,
-  `box-queue status --box <box>`; a `dirty:*` box → `box-queue refresh --box <box>`
-  (`run_in_background` — a PROD-copy refresh can outlast a 10-min foreground call; if the call dies
-  the box stays `refreshing` until its command ends, never refreshed twice at once),
-  which runs the project's own refresh + health commands from `~/.claude/box-queue/<box>.config.json`
-  (the project owns what REFRESH means; the tool writes nothing outside its state dir, never
-  `~/.ssh/config`). A held box is never refreshed; a dead or lapsed holder is reclaimed as dirty on
-  the next call, a lane that stops polling drops out of the queue.
+- **setup (the project session, once per box):** it writes `~/.claude/box-queue/<box>.config.json`
+  — the `refresh` (+ ideally `health`) commands, owned by the stream user, not world-writable; the
+  project owns what REFRESH means. `enqueue`/`take` refuse (exit 2) a box without it, so a mistyped
+  name never gets a queue of its own. The supervisor names the exact `--box <box>` in every box
+  lane's dispatch prompt.
+- **lane:** the box phase comes LAST. `python3 ~/devel/airuleset/airuleset.py box-queue take --box
+  <box> --lane <branch> --wait 540` — exit 0 = you hold it; exit 1 = not your turn, re-run (your
+  place is kept while you poll); exit 2 = config/usage error, return `blocked: box (config)`.
+  `box-queue renew` between steps: the lease (900 s default) is a lane's liveness, since every
+  in-session lane records the same `claude` pid. A failed `renew` = the box was reclaimed: stop
+  touching it, `take` again, redo the box phase. Finish with `box-queue release --dirty` whenever
+  the lane deployed or changed anything (a plain `release` declares the box untouched), never
+  before its own E2E ran — then RETURN promptly, the supervisor refreshes on the return. `take`
+  still refused on a `dirty:*` box after ~20 min → return `blocked: box (refresh owed)`.
+- **supervisor:** EVERY turn and every lane return: `box-queue status --box <box>`; `dirty:*` →
+  `box-queue refresh --box <box>` via `run_in_background` (a PROD-copy refresh can outlast a
+  10-min foreground call; a hard-killed CLI leaves the box `refreshing` until its command ends,
+  never two refreshes at once; a step that escaped the command's group is killed when it ends).
+  refresh exit 0 = pristine; exit 1 = still running (wait), failed (reason in `status` /
+  `decisions.log`: fix, re-run) or a named leftover pid (kill it, re-run); exit 2 = config error
+  (the project fixes the config). A held box is never refreshed; a dead or lapsed holder becomes
+  dirty on the next call; a lane that stops polling leaves the queue.
 
 **Dispatch marker — `.lane-needs`.** At dispatch, when a ticket needs a declared resource
 (e.g. its shadow/E2E test needs the erp-test box), the supervisor writes a `lane-needs` marker
@@ -643,9 +653,9 @@ The `Agent` tool return gives the agent id; the gitdir is `.git/worktrees/agent-
 is plain text, one resource name per line. A box-free ticket gets no marker (fails OPEN toward
 "box-free" in the nudge — the nudge still pushes refill). The watchdog's
 `count_resource_usage(cwd, evidence)` reads these files from live worktrees to count per-resource
-usage. A worker that is blocked on a resource the supervisor over-dispatched should report
-`blocked: box` in its evidence block — the supervisor treats this as its own scheduling defect
-and does not redispatch a box ticket until usage is under cap. Across all live lanes a SECOND, account-wide bound
+usage. `box-queue take` exit 1 (another lane holds the box) is NOT a block — the lane re-runs it; a
+lane returns `blocked: box (config|refresh owed)` only per the Box-phase rules above, and the
+supervisor then fixes the config or refreshes before it redispatches. Across all live lanes a SECOND, account-wide bound
 still applies: the live worker lanes PLUS the read-only `ticket-validator`
 dispatches Step 1b fires for EVERY member PLUS anything a
 DIFFERENT concurrent lane or session under this account runs are all the SAME kind of Claude-API
