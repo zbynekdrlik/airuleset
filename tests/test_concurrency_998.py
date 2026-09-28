@@ -314,9 +314,25 @@ class TestDavid3Sequential1031(TestCase):
                                        windows=w, home="/home/%s" % u),
                 ("sequential", None, "role"))
 
+    def test_montalu4_declared_sequential_20260928(self):
+        # Owner directive 2026-09-28 („prepni montalu4 do sekvencneho modu",
+        # issue 1169): montalu4 declares the SAME single sequential window
+        # shape as d1-d4/miva (window name = its tmux window `m4`).
+        w = cli_fleet.box_windows("montalu4")
+        self.assertEqual([x["name"] for x in w], ["m4"])
+        self.assertEqual(w[0]["cwd"], "~/devel/odoo/odoo-erp")
+        self.assertIsNone(w[0]["role"])
+        self.assertEqual(w[0]["mode"], "sequential")
+        self.assertEqual(cli_fleet.validate_windows(w), [])
+        self.assertEqual(
+            cc.resolve_concurrency("/home/montalu4/devel/odoo/odoo-erp",
+                                   windows=w, home="/home/montalu4"),
+            ("sequential", None, "role"))
+
     def test_montalu_streams_still_default_parallel(self):
-        # the flip is scoped to the david family + miva1; montalu* keep the
-        # parallel default (owner 2026-09-21: gk + montalu1 run full throttle).
+        # the flip is scoped to the david family + miva1 + montalu4; the other
+        # montalu* keep the parallel default (owner 2026-09-21: gk + montalu1
+        # run full throttle).
         for u in ("montalu1", "montalu2", "montalu5"):
             self.assertEqual(cli_fleet.box_windows(u), [],
                              "%s must NOT declare a window" % u)
