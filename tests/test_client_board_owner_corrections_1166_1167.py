@@ -77,6 +77,7 @@ class TestHandoverContentRule1166(TestCase):
     def setUpClass(cls):
         cls.rule3 = _section(_read(STAGES), RULE3)
         cls.compose = _norm(_read(COMPOSE))
+        cls.history = _norm(_read(HISTORY))
 
     def test_rule3_lists_only_usable_now_plus_changes_to_used(self):
         self.assertIn("only what the reader can use NOW", self.rule3)
@@ -90,9 +91,11 @@ class TestHandoverContentRule1166(TestCase):
     def test_rule3_content_rule_holds_on_every_profile(self):
         self.assertIn("every profile", self.rule3)
 
-    def test_rule3_quotes_owner_verbatim_with_date(self):
-        self.assertIn(QUOTE_1166_CONTENT, self.rule3)
-        self.assertIn("28.9.2026", self.rule3)
+    def test_rule3_dated_and_owner_quote_in_history(self):
+        # The verbatim quote lives in the provenance file (the #1156
+        # precedent): the STAGES companion has no co-fire budget left for it.
+        self.assertIn("owner 28.9.2026, #1166", self.rule3)
+        self.assertIn(QUOTE_1166_CONTENT, self.history)
 
     def test_compose_carries_the_operative_rule(self):
         # Discuss / any other channel: the same content rule, pointing at
@@ -115,6 +118,7 @@ class TestMontaluAddresseeTagged1166(TestCase):
         cls.rule3 = _section(stages, RULE3)
         cls.rule5 = _section(stages, RULE5)
         cls.core = _read(CORE)
+        cls.history = _norm(_read(HISTORY))
 
     def test_montalu_no_longer_grouped_with_miva_as_no_assignee(self):
         self.assertNotIn("On the **montalu** and **miva** profiles a client "
@@ -129,9 +133,9 @@ class TestMontaluAddresseeTagged1166(TestCase):
                       "addresses is @mentioned in the message AND set as the "
                       "task's assignee (`user_ids`)", self.rule5)
 
-    def test_rule5_quotes_owner_verbatim_with_date(self):
-        self.assertIn(QUOTE_1166_TAG, self.rule5)
-        self.assertIn("28.9.2026", self.rule5)
+    def test_rule5_dated_and_owner_quote_in_history(self):
+        self.assertIn("owner 28.9.2026, #1166", self.rule5)
+        self.assertIn(QUOTE_1166_TAG, self.history)
 
     def test_rule3_note_mentions_the_montalu_addressee(self):
         # rule 3 used to ban every @-mention anchor in the note; montalu now
