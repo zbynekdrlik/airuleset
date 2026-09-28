@@ -373,9 +373,10 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   box-queue take --box <box> --lane <your branch> --wait 540`: exit 0 = you hold the box; exit 1 =
   not your turn, re-run it; exit 2 = config/usage error, return `blocked: box (config)`. `box-queue
   renew` between steps (the lease is your liveness). A failed `renew` = the box was reclaimed: stop
-  touching it at once, `take` again and redo the box phase. Finish with `box-queue release` —
-  `--dirty` if you deployed or changed anything on the box (a plain release declares it untouched),
-  only after your own E2E ran — then return promptly (the supervisor refreshes on your return).
+  touching it at once, `take` again and redo the box phase. Finish with `box-queue release` — it
+  leaves the box DIRTY by default (a refresh is owed); `box-queue release --clean` ONLY if you
+  changed nothing on the box — only after your own E2E ran, then return promptly (the supervisor
+  refreshes on your return).
   Never touch the box outside take … release, never write your own lock / priority file, never run
   `box-queue refresh`. If `take` keeps refusing because the box is `dirty:*` (a refresh is owed)
   for ~20 min, return with `blocked: box (refresh owed)` — the supervisor refreshes and resumes you

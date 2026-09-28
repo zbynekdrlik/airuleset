@@ -627,9 +627,10 @@ unit tests and CI stay parallel.
   place is kept while you poll); exit 2 = config/usage error, return `blocked: box (config)`.
   `box-queue renew` between steps: the lease (900 s default) is a lane's liveness, since every
   in-session lane records the same `claude` pid. A failed `renew` = the box was reclaimed: stop
-  touching it, `take` again, redo the box phase. Finish with `box-queue release --dirty` whenever
-  the lane deployed or changed anything (a plain `release` declares the box untouched), never
-  before its own E2E ran — then RETURN promptly, the supervisor refreshes on the return. `take`
+  touching it, `take` again, redo the box phase. Finish with `box-queue release` — it leaves the
+  box DIRTY by default (fail-safe: a refresh is owed), `box-queue release --clean` ONLY when the lane
+  changed nothing on the box; never before its own E2E ran — then RETURN promptly, the supervisor
+  refreshes on the return. `take`
   still refused on a `dirty:*` box after ~20 min → return `blocked: box (refresh owed)`.
 - **supervisor:** EVERY turn and every lane return: `box-queue status --box <box>`; `dirty:*` →
   `box-queue refresh --box <box>` via `run_in_background` (a PROD-copy refresh can outlast a

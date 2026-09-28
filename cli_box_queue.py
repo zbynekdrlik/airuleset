@@ -19,8 +19,10 @@ Model (per box, `~/.claude/box-queue/<box>.json`):
   take     succeeds ONLY for the queue head AND only on a pristine box; auto-
            enqueues a lane that did not; `--wait S` polls, bounded
   renew    extends the holder's lease, never past taken_at + max_hold_s
-  release  holder -> pristine, or `--dirty` -> dirty:<lane> (a refresh is
-           owed); a queued non-holder withdraws
+  release  holder -> dirty:<lane> by DEFAULT (a refresh is owed — a lane
+           that deployed and forgot a flag must never hand back a box
+           marked pristine), or `--clean` -> pristine for a lane that
+           changed nothing; a queued non-holder withdraws
   refresh  dirty -> refreshing -> run the project's refresh + health
            commands -> pristine; a failure leaves dirty with the reason.
            REFUSED on a held box; the state flock is NOT held while it
@@ -587,7 +589,9 @@ def renew(box, lane, lease_s=None, now=None):
     return _transact(box, cfg, _clock(now), fn)
 
 
-def release(box, lane, dirty=False, reason="", now=None):
+def release(box, lane, clean=False, reason="", now=None):
+    """Hand the box back: dirty:<lane> unless `clean` (the lane's explicit
+    claim it changed nothing). Fail-safe default = dirty (#1171)."""
     _check_box(box)
     _check_lane(lane)
     cfg = load_config(box)
@@ -597,11 +601,11 @@ def release(box, lane, dirty=False, reason="", now=None):
         if h is not None and h["lane"] == lane:
             st["holder"] = None
             frm = st["state"]
-            if dirty:
+            if clean:
+                st["state"], st["reason"] = "pristine", ""
+            else:
                 st["state"] = f"dirty:{lane}"
                 st["reason"] = reason or f"released dirty by {lane}"
-            else:
-                st["state"], st["reason"] = "pristine", ""
             _event(events, t, box, "RELEASE", lane, frm, st["state"], reason)
             return {"ok": True, "msg": f"{lane} released {box} -> "
                                        f"{st['state']}"}, True
@@ -874,9 +878,10 @@ def register_parser(sub):
     p.add_argument("--poll", type=float, default=5.0, help="take: poll interval")
     p.add_argument("--lease", type=float, default=None,
                    help="take/renew: lease seconds (default from config)")
-    p.add_argument("--dirty", action="store_true",
-                   help="release: the box was changed — a refresh is owed")
-    p.add_argument("--reason", default="", help="release --dirty: why")
+    p.add_argument("--clean", action="store_true",
+                   help="release: this lane changed NOTHING on the box — hand it "
+                        "back pristine (default: dirty, a refresh is owed)")
+    p.add_argument("--reason", default="", help="release: why the box is dirty")
     p.add_argument("--force", action="store_true",
                    help="refresh: also refresh a box that reads pristine")
     p.add_argument("--json", action="store_true", help="status: JSON output")
@@ -899,7 +904,7 @@ def _dispatch(args):
                     lease_s=args.lease, poll_s=args.poll)
     if action == "renew":
         return renew(args.box, args.lane, lease_s=args.lease)
-    return release(args.box, args.lane, dirty=args.dirty, reason=args.reason)
+    return release(args.box, args.lane, clean=args.clean, reason=args.reason)
 
 
 def cmd_box_queue(args):
