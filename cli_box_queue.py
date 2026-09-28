@@ -40,7 +40,10 @@ max_hold_s is reclaimed as dirty:<lane> (it may have left the box half-
 deployed); a queue entry whose pid died or that has not polled for
 queue_ttl_s is dropped (so a vanished lane cannot block the head); a refresh
 whose lock is no longer held (every process of it gone) returns the box to
-dirty.
+dirty, and one still holding it past its deadline has every holder of the
+lock's inode SIGKILLed first (a hung command, or a leftover it spawned).
+For an in-session lane the pid is the SHARED long-lived `claude` process,
+so the lease (default 900 s, renewed between steps) is its real liveness.
 
 Concurrency: every read-modify-write runs under an exclusive `fcntl.flock`
 on `<box>.lock` (the `cli_autopilot_lock` sibling-mutex idiom, whose
@@ -53,7 +56,10 @@ validated so no path escapes it). What REFRESH means belongs to the project:
 it writes `<box>.config.json` next to the state, e.g.
 
   {"refresh": ["/path/to/refresh-erp-test.sh"], "health": "curl -fsS ...",
-   "lease_s": 1800, "max_hold_s": 7200}
+   "lease_s": 900, "max_hold_s": 7200}
+
+(the file must be owned by the invoking user and not world-writable — the
+tool executes what it names).
 
 The tool runs those commands (cwd = the state dir unless `cwd` is set) and
 edits nothing else — never `~/.ssh/config`.
@@ -81,9 +87,13 @@ _BOX_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _LANE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._#@+/-]{0,127}$")
 
 DEFAULTS = {
-    "lease_s": 1800.0,          # a holder must renew within this
+    # Every in-session lane records the SAME long-lived `claude` pid
+    # (_campaign_pid), so for a lane the LEASE is the liveness signal: a lane
+    # renews between steps (a foreground step is <= 10 min) and a dead lane
+    # is reclaimed within lease_s; a dead queue head blocks <= queue_ttl_s.
+    "lease_s": 900.0,           # a holder must renew within this
     "max_hold_s": 7200.0,       # hard cap on one hold, renewals included
-    "queue_ttl_s": 600.0,       # a queued lane must poll within this
+    "queue_ttl_s": 300.0,       # a queued lane must poll within this
     "refresh_timeout_s": 3600.0,
     "health_timeout_s": 900.0,
     "health_interval_s": 15.0,
@@ -117,8 +127,20 @@ def _check_box(box):
     return box
 
 
+def _is_lane(lane):
+    return isinstance(lane, str) and bool(_LANE_RE.match(lane))
+
+
+def _check_pid(pid):
+    """A real liveness pid: >1 (0, 1 and negatives would make `os.kill(pid, 0)`
+    probe a process group or init — never dead)."""
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 1:
+        raise BoxQueueError(f"invalid pid {pid!r}: must be an integer > 1")
+    return pid
+
+
 def _check_lane(lane):
-    if not isinstance(lane, str) or not _LANE_RE.match(lane):
+    if not _is_lane(lane):
         raise BoxQueueError(
             f"invalid lane name {lane!r}: letters, digits and ._#@+/- only "
             f"(max 128, no whitespace)")
@@ -156,6 +178,11 @@ def load_config(box):
     path = _paths(box)["config"]
     raw = {}
     if path.exists():
+        st = path.stat()
+        if st.st_uid != os.getuid() or st.st_mode & 0o002:
+            raise BoxQueueError(
+                f"{path} must be owned by you and not world-writable — the "
+                f"tool executes the commands it names")
         try:
             raw = json.loads(path.read_text())
         except (OSError, ValueError) as e:
@@ -212,14 +239,14 @@ def _valid(st, box):
         return False
     lanes = set()
     for e in q:
-        if not (isinstance(e, dict) and isinstance(e.get("lane"), str)
+        if not (isinstance(e, dict) and _is_lane(e.get("lane"))
                 and isinstance(e.get("pid"), int) and _num(e.get("enqueued_at"))
                 and _num(e.get("seen_at")) and e["lane"] not in lanes):
             return False
         lanes.add(e["lane"])
     h, r, s = st.get("holder"), st.get("refresh"), st["state"]
     if h is not None:
-        if not (isinstance(h, dict) and isinstance(h.get("lane"), str)
+        if not (isinstance(h, dict) and _is_lane(h.get("lane"))
                 and isinstance(h.get("pid"), int) and _num(h.get("taken_at"))
                 and _num(h.get("lease_until")) and s == f"held:{h['lane']}"):
             return False
@@ -268,7 +295,7 @@ def _load_state(paths, box, now, events):
         st = None
     if _valid(st, box):
         return st, False
-    aside = p.with_name(f"{p.name}.corrupt-{int(now)}")
+    aside = p.with_name(f"{p.name}.corrupt-{int(now)}-{os.getpid()}")
     try:
         os.replace(p, aside)
         kept = f"kept as {aside.name}"
@@ -311,6 +338,61 @@ def _refresh_lock_held(paths):
         os.close(fd)
 
 
+def _lock_holders(path):
+    """Pids (of this uid — others' /proc fds are unreadable) holding an open
+    fd on `path`'s inode. Matching the INODE of an fd a process holds right
+    now cannot hit a recycled pid, unlike a recorded pid."""
+    try:
+        want = os.stat(path)
+    except OSError:
+        return []
+    out = []
+    for name in os.listdir("/proc"):
+        if not name.isdigit():
+            continue
+        try:
+            fds = os.listdir(f"/proc/{name}/fd")
+        except OSError:
+            continue   # another uid's process, or it just exited
+        for fd in fds:
+            try:
+                got = os.stat(f"/proc/{name}/fd/{fd}")
+            except OSError:
+                continue   # fd closed between listdir and stat
+            if (got.st_dev, got.st_ino) == (want.st_dev, want.st_ino):
+                out.append(int(name))
+                break
+    return out
+
+
+def _kill_stuck_refresh(paths):
+    """A refresh past its deadline whose lock is still held: its CLI died
+    (SIGKILL/OOM) and its command hangs, or a leftover kept the inherited
+    fd. SIGKILL every holder (except this process — a finishing refresh CLI
+    records its own result) and return (why, note): `why` when the lock is
+    now free (the caller reaps the box to dirty), else a `note`."""
+    me = os.getpid()
+    victims = [p for p in _lock_holders(paths["refresh_lock"]) if p != me]
+    if not victims:
+        return None, (f"past its deadline — {paths['refresh_lock'].name} is "
+                      f"still held by the refresh finishing now")
+    for pid in victims:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue   # exited on its own meanwhile — the goal anyway
+        except PermissionError as e:
+            print(f"box-queue: cannot kill stuck refresh pid {pid}: {e}",
+                  file=sys.stderr)
+    for _ in range(40):
+        if not _refresh_lock_held(paths):
+            return (f"refresh deadline passed — killed stuck refresh "
+                    f"process(es) {victims}"), ""
+        time.sleep(0.05)
+    return None, (f"past its deadline — {paths['refresh_lock'].name} still "
+                  f"held after killing {victims}")
+
+
 def _reap(st, now, cfg, box, events, paths):
     """Apply every liveness rule. Returns True when anything changed."""
     changed = False
@@ -337,11 +419,10 @@ def _reap(st, now, cfg, box, events, paths):
             why = (f"refresh process {r['pid']} died" if not _pid_alive(r["pid"])
                    else "refresh lock released without a result")
         elif now >= r["deadline"]:
-            late = (f"past its deadline — a refresh process still holds "
-                    f"{paths['refresh_lock'].name}")
-            if st["reason"] != late:
-                st["reason"] = late
-                _event(events, now, box, "REFRESH-LATE", reason=late)
+            why, note = _kill_stuck_refresh(paths)
+            if note and st["reason"] != note:
+                st["reason"] = note
+                _event(events, now, box, "REFRESH-LATE", reason=note)
                 changed = True
         if why:
             st["state"] = r["from"] if r["from"].startswith("dirty:") else "dirty:refresh"
@@ -424,6 +505,7 @@ def _lost_detail(st, lane):
 def enqueue(box, lane, pid, now=None):
     _check_box(box)
     _check_lane(lane)
+    _check_pid(pid)
     cfg = load_config(box)
 
     def fn(st, events, t):
@@ -500,6 +582,7 @@ def take(box, lane, pid, wait_s=0.0, lease_s=None, poll_s=5.0,
     by `wait_s` itself."""
     _check_box(box)
     _check_lane(lane)
+    _check_pid(pid)
     if not (0 <= wait_s <= MAX_WAIT_S):
         raise BoxQueueError(f"--wait must be within 0..{MAX_WAIT_S:.0f}s")
     if not poll_s > 0:
@@ -610,13 +693,30 @@ def _signals_interrupt():
             signal.signal(sig, handler)
 
 
+def _exited_unreaped(proc, timeout):
+    """Wait up to `timeout` for the leader to exit WITHOUT reaping it: while
+    it is an unreaped zombie its pid — the group id — cannot be recycled, so
+    the group kill that follows can never hit an unrelated process group."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if os.waitid(os.P_PID, proc.pid,
+                     os.WEXITED | os.WNOHANG | os.WNOWAIT) is not None:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.1)
+
+
 def _kill_group(proc):
+    """SIGKILL the command's whole process group (leader still unreaped, so
+    the group id is its own), then reap the leader. Kills any background
+    leftover of the refresh too, so none keeps the inherited lock."""
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except ProcessLookupError:
         print(f"box-queue: refresh process group {proc.pid} already gone",
               file=sys.stderr)
-    proc.wait()
+    return proc.wait()
 
 
 def _run(cmd, timeout, cfg, box, log_path, label, lock_fd):
@@ -635,13 +735,14 @@ def _run(cmd, timeout, cfg, box, log_path, label, lock_fd):
         except OSError as e:
             return None, f"{label} could not start: {e}"
         try:
-            return proc.wait(timeout=timeout), ""
-        except subprocess.TimeoutExpired:
-            _kill_group(proc)
-            return None, f"{label} timed out after {timeout:.0f}s"
+            exited = _exited_unreaped(proc, timeout)
         except BaseException:
             _kill_group(proc)
             raise
+        rc = _kill_group(proc)   # exited: only sweeps leftovers; else: the timeout kill
+        if not exited:
+            return None, f"{label} timed out after {timeout:.0f}s"
+        return rc, ""
 
 
 def _run_refresh(box, cfg, now_fn, sleep_fn, lock_fd):
@@ -689,8 +790,14 @@ def refresh(box, force=False, now_fn=time.time, sleep_fn=time.sleep):
     def start(st, events, t):
         s = st["state"]
         if s == "refreshing":
-            return {"ok": False, "started": False,
-                    "msg": f"{box} is already refreshing"}, False
+            # We hold the refresh lock EXCLUSIVELY (taken before this
+            # transaction), so no process of the recorded refresh is alive:
+            # the record is stale. Retire it and refresh on top of it.
+            old = st["refresh"]
+            s = old["from"] if old["from"].startswith("dirty:") else "dirty:refresh"
+            st["refresh"], st["state"] = None, s
+            _event(events, t, box, "REFRESH-LOST", frm="refreshing", to=s,
+                   reason="stale refreshing record — its refresh lock was free")
         if s.startswith("held:"):
             return {"ok": False, "started": False,
                     "msg": f"{box} is {s} — a held box is never refreshed"}, False

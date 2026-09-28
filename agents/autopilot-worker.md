@@ -372,10 +372,13 @@ dispatch prompt naming it explicitly. This changes what "done" looks like for yo
   stream's shared erp-test box, finish everything else first (code, unit tests), then enter the box
   phase ONLY via `python3 ~/devel/airuleset/airuleset.py box-queue take --box <box> --lane <your
   branch> --wait 540` (exit 1 = not your turn: re-run it; exit 0 = you hold the box), `box-queue
-  renew` before the lease lapses, and `box-queue release` when done — `--dirty` if you deployed or
-  changed anything on the box, and only after your own E2E ran. Never touch the box outside take …
-  release, never write your own lock / priority file, never run `box-queue refresh` (the supervisor
-  refreshes a dirty box).
+  renew` between steps (the lease is your liveness), and `box-queue release` when done — `--dirty`
+  if you deployed or changed anything on the box (a plain release declares it untouched), and only
+  after your own E2E ran. A failed `renew` = the box was reclaimed: stop touching it at once. Never
+  touch the box outside take … release, never write your own lock / priority file, never run
+  `box-queue refresh` (the supervisor refreshes a dirty box). If `take` keeps refusing because the
+  box is `dirty:*` (a refresh is owed) for ~20 min, return with `blocked: box (refresh owed)` —
+  the supervisor refreshes and resumes you from your branch.
 - **The serial-fallback (single-worker, no `isolation:`) shape is UNCHANGED** — if your dispatch
   prompt does not mention a worktree/isolation and your `cwd` is the repo's ordinary main
   checkout, you are running the old fully self-contained cycle: push, open, merge, deploy, and

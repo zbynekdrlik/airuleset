@@ -617,9 +617,12 @@ pristine box only):
 
 - **lane:** `python3 ~/devel/airuleset/airuleset.py box-queue take --box <box> --lane <branch> --wait 540`
   (exit 1 = not your turn yet → re-run it, your place is kept while you keep polling), `box-queue
-  renew` before the lease lapses, then `box-queue release` — `--dirty` whenever it deployed or
-  changed anything on the box, and never before its own E2E ran.
-- **supervisor:** `box-queue status --box <box>`; a `dirty:*` box → `box-queue refresh --box <box>`
+  renew` between steps (the lease — 900 s by default — is a lane's liveness, since every in-session
+  lane records the same `claude` pid), then `box-queue release` — `--dirty` whenever it deployed or
+  changed anything on the box (a plain `release` declares the box untouched), never before its own
+  E2E ran. A failed `renew` means the box was reclaimed: stop touching it at once.
+- **supervisor:** on every turn with a box lane live, and whenever a lane returns `blocked: box`,
+  `box-queue status --box <box>`; a `dirty:*` box → `box-queue refresh --box <box>`
   (`run_in_background` — a PROD-copy refresh can outlast a 10-min foreground call; if the call dies
   the box stays `refreshing` until its command ends, never refreshed twice at once),
   which runs the project's own refresh + health commands from `~/.claude/box-queue/<box>.config.json`
