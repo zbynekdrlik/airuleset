@@ -417,7 +417,14 @@ class TestRefresh(_Base):
         inherited refresh lock held; the next refresh is refused. That must
         be LOUD (a LOCK-LEAK decision line naming the lock), never silent."""
         pidfile = Path(self._tmp.name) / "daemon.pid"
-        refresh = self.script("refresh.sh", f"setsid sleep 60 &\necho $! > {pidfile}\n")
+        # Wait until the daemon really leads its own session before exiting,
+        # else the group sweep can race setsid() and kill it (no leak).
+        refresh = self.script("refresh.sh", (
+            "setsid sleep 60 &\npid=$!\n"
+            'for _ in $(seq 200); do\n'
+            '  [ "$(ps -o sid= -p "$pid" | tr -d " ")" = "$pid" ] && break; sleep 0.05\n'
+            'done\n'
+            f"echo $pid > {pidfile}\n"))
         self.write_config(refresh=[refresh])
         self._refreshing_from_dirty()
         r = bq.refresh(BOX, now_fn=time.time)
