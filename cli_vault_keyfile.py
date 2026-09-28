@@ -113,10 +113,11 @@ def _read_regular(path, cap, expect=None):
     return data if len(data) <= cap else None
 
 
-def plain_root_values():
-    """Values of the regular, non-`.pub` files DIRECTLY under the root —
-    dotfiles included, at most MAX_PLAIN_FILES of them READ (review B 6: the
-    cap counts files that are actually candidates, not skipped entries)."""
+def plain_root_items():
+    """(label `file:<name>`, value) of the regular, non-`.pub` files DIRECTLY
+    under the root — dotfiles included, at most MAX_PLAIN_FILES of them READ
+    (review B 6: the cap counts files that are actually candidates, not
+    skipped entries). The label is the NAME only (#1170 logs it)."""
     root = key_root()
     if root is None:
         return []
@@ -131,8 +132,13 @@ def plain_root_values():
     for e in entries[:MAX_PLAIN_FILES]:
         value = _read_regular(e.path, cap)
         if value and len(value.strip()) >= MIN_PLAIN_VALUE:
-            out.append(value)
+            out.append(("file:" + e.name, value))
     return out
+
+
+def plain_root_values():
+    """The values of `plain_root_items()`."""
+    return [v for _, v in plain_root_items()]
 
 
 def line_needles(value):
@@ -165,15 +171,41 @@ def pem_blocks(value):
     return out
 
 
-def needles_for(values):
-    """(whole needles longest first, line needles) for `values` (bytes)."""
+def needles_for(items, public=None):
+    """(whole needles longest first, line needles) for `items` — (label,
+    value bytes) pairs; the label is a NAME, only ever logged.
+
+    #1170: a needle inside the box's PUBLIC identity (the account word, a
+    host name, the public zone — `cli_vault_public.PublicIdentity`) is not a
+    needle: it is printed by design, so redacting it only masks every URL
+    and path that carries it. It is dropped here, the ONE place both the
+    redactor and `secret exec --file` build needles, and noted once by name.
+    A whole value that is public takes its lines along (they are substrings
+    of it); otherwise each line needle is judged on its own. `public` is a
+    `PublicIdentity` (injected by tests, built lazily otherwise — only when
+    there is a needle to judge)."""
     whole, lines = set(), set()
-    for v in values:
+    for label, v in items:
         v = v.rstrip(b"\r\n") or v
+        if public is None:
+            import cli_vault_public
+            public = cli_vault_public.PublicIdentity()
+        if public.contains(v):
+            _note_public(label, "whole")
+            continue
         whole.add(v)
         whole.update(pem_blocks(v))
-        lines.update(line_needles(v))
+        for ln in line_needles(v):
+            if public.contains(ln):
+                _note_public(label, "line")
+            else:
+                lines.add(ln)
     return sorted(whole, key=len, reverse=True), lines
+
+
+def _note_public(label, kind):
+    import cli_vault_public
+    cli_vault_public.note_dropped(label, kind)
 
 
 def scrub_bytes(blob, needles, redact):
@@ -345,7 +377,11 @@ def cmd_exec_file(args):
                              input=value if use_stdin else None)
     except OSError as e:
         fail("secret exec: cannot run %s: %s" % (cmd[0], e.strerror), 127)
-    needles, grams = needles_for([value]), fragment_grams(value)
+    # #1170: the SAME public-identity filter as the redactor; a value that is
+    # public in whole has no needle and no fragment either (every fragment of
+    # it is itself public), a genuine value keeps all of them.
+    needles = needles_for([("file:" + real.name, value)])
+    grams = fragment_grams(value) if needles[0] else set()
     for stream, data in ((sys.stdout, res.stdout), (sys.stderr, res.stderr)):
         if data:
             data = scrub_bytes(data, needles, _secret_redact)
