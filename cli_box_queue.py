@@ -709,7 +709,8 @@ def refresh(box, force=False, now_fn=time.time, sleep_fn=time.sleep):
     try:
         if not _grab_refresh_lock(lock_fd):
             return {"ok": False, "msg": f"a refresh of {box} still runs (a process "
-                    f"holds {paths['refresh_lock'].name}); not starting a second one"}
+                    f"holds {paths['refresh_lock']}; `fuser` names it); not "
+                    f"starting a second one"}
         res = _transact(box, cfg, now_fn, start)
         if not res.get("started"):
             return res
@@ -718,11 +719,21 @@ def refresh(box, force=False, now_fn=time.time, sleep_fn=time.sleep):
                 ok, why = _run_refresh(box, cfg, now_fn, sleep_fn, lock_fd)
             except _Interrupted as e:
                 ok, why = False, f"refresh interrupted by signal {e.signum}"
-        return _transact(box, cfg, now_fn, _finisher(box, token, ok, why))
+        result = _transact(box, cfg, now_fn, _finisher(box, token, ok, why))
     finally:
         # Closing our fd drops the lock unless a command that inherited it
         # still runs — exactly the liveness signal the reaper reads.
         os.close(lock_fd)
+    if _refresh_lock_held(paths):
+        leak = (f"a background process started by the refresh command still "
+                f"holds {paths['refresh_lock']} (it inherited the fd; `fuser` "
+                f"names it) — the next refresh waits for it. Start local "
+                f"daemons with their fds closed.")
+        print(f"box-queue: WARNING {leak}", file=sys.stderr)
+        events = []
+        _event(events, now_fn(), box, "LOCK-LEAK", reason=leak)
+        _append(paths["decisions"], events)
+    return result
 
 
 def _grab_refresh_lock(lock_fd):

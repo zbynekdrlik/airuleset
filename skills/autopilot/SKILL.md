@@ -619,7 +619,9 @@ pristine box only):
   (exit 1 = not your turn yet → re-run it, your place is kept while you keep polling), `box-queue
   renew` before the lease lapses, then `box-queue release` — `--dirty` whenever it deployed or
   changed anything on the box, and never before its own E2E ran.
-- **supervisor:** `box-queue status --box <box>`; a `dirty:*` box → `box-queue refresh --box <box>`,
+- **supervisor:** `box-queue status --box <box>`; a `dirty:*` box → `box-queue refresh --box <box>`
+  (`run_in_background` — a PROD-copy refresh can outlast a 10-min foreground call; if the call dies
+  the box stays `refreshing` until its command ends, never refreshed twice at once),
   which runs the project's own refresh + health commands from `~/.claude/box-queue/<box>.config.json`
   (the project owns what REFRESH means; the tool writes nothing outside its state dir, never
   `~/.ssh/config`). A held box is never refreshed; a dead or lapsed holder is reclaimed as dirty on
