@@ -42,26 +42,17 @@ def _alive(pid):
         return False
 
 
-def _lock_holder_pids(lock):
-    """Pids with an open fd on `lock` (same inode), via /proc."""
-    st = os.stat(lock)
-    out = []
-    for pid in os.listdir("/proc"):
-        if not pid.isdigit():
-            continue
-        try:
-            fds = os.listdir(f"/proc/{pid}/fd")
-        except OSError:
-            continue
-        for fd in fds:
-            try:
-                fst = os.stat(f"/proc/{pid}/fd/{fd}")
-            except OSError:
-                continue
-            if (fst.st_dev, fst.st_ino) == (st.st_dev, st.st_ino):
-                out.append(int(pid))
-                break
-    return out
+def _lock_owned(lock):
+    """True while some process holds the flock (a non-blocking probe)."""
+    import fcntl
+    fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+    return False
 
 
 def run_cli(args, env):
@@ -79,6 +70,7 @@ class _Base(TestCase):
         os.environ["AIRULESET_BOX_QUEUE_DIR"] = str(self.dir)
         self.me = os.getpid()
         self.env = dict(os.environ)
+        self.write_config(refresh="true")
 
     def tearDown(self):
         if self._old is None:
@@ -245,7 +237,7 @@ class TestLeaseAndLiveness(_Base):
         self.assertTrue(r["ok"], r)
 
     def test_corrupt_state_file_is_treated_as_dirty_never_pristine(self):
-        self.dir.mkdir(parents=True)
+        self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / f"{BOX}.json").write_text("{not json")
         st = bq.status(BOX, now=1000.0)
         self.assertTrue(st["state"].startswith("dirty:"), st)
@@ -340,6 +332,7 @@ class TestRefresh(_Base):
             p.stdout.close()
 
         self.addCleanup(lambda: p.poll() is None and stop())
+        stop.pid = p.pid
         return stop
 
     def test_take_refused_while_refreshing(self):
@@ -411,14 +404,12 @@ class TestRefresh(_Base):
             time.sleep(0.05)
         self.assertFalse(_alive(child), "refresh command survived the CLI's SIGTERM")
 
-    def test_a_leftover_background_process_holding_the_lock_is_reported(self):
-        """A refresh that leaves a local daemon running in its OWN session
-        (setsid, so the command-group kill cannot reach it) keeps the
-        inherited refresh lock held; the next refresh is refused. That must
-        be LOUD (a LOCK-LEAK decision line naming the lock), never silent."""
+    def test_a_setsid_leftover_is_killed_so_the_next_refresh_runs(self):
+        """A refresh that leaves a daemon in its OWN session (setsid — the
+        command-group kill cannot reach it) still holds the inherited lock.
+        It must be killed when the command ends, never leaked: a leaked
+        holder makes every later refresh refuse, forever (review 2)."""
         pidfile = Path(self._tmp.name) / "daemon.pid"
-        # Wait until the daemon really leads its own session before exiting,
-        # else the group sweep can race setsid() and kill it (no leak).
         refresh = self.script("refresh.sh", (
             "setsid sleep 60 &\npid=$!\n"
             'for _ in $(seq 200); do\n'
@@ -432,11 +423,22 @@ class TestRefresh(_Base):
         self.addCleanup(lambda: _alive(daemon) and os.kill(daemon, 9))
         self.assertTrue(r["ok"], r)
         self.assertEqual(self.state()["state"], "pristine")
-        self.assertTrue(any("LOCK-LEAK" in ln and "refresh.lock" in ln
-                            for ln in self.log_lines()), self.log_lines())
-        again = bq.refresh(BOX, force=True, now_fn=time.time)
-        self.assertFalse(again["ok"])
-        self.assertIn("fuser", again["msg"])
+        self.assertFalse(_alive(daemon), "setsid leftover survived the refresh")
+        self.assertFalse(_lock_owned(self.dir / f"{BOX}.refresh.lock"))
+        self.assertTrue(bq.refresh(BOX, force=True, now_fn=time.time)["ok"])
+
+    def test_a_timed_out_step_in_its_own_group_is_killed_too(self):
+        """GNU `timeout` moves itself into a new process group, so a group
+        kill misses it and its child keeps changing the box while the state
+        already says dirty (review 2, experiment 4)."""
+        refresh = self.script("refresh.sh", "timeout 120 sleep 120\n")
+        self.write_config(refresh=[refresh], refresh_timeout_s=1)
+        self._refreshing_from_dirty()
+        r = bq.refresh(BOX, now_fn=time.time)
+        self.assertFalse(r["ok"])
+        self.assertEqual(self.state()["state"], "dirty:a")
+        self.assertFalse(_lock_owned(self.dir / f"{BOX}.refresh.lock"),
+                         "a timed-out step still holds the refresh lock")
 
     def _refreshing_from_dirty(self):
         raw = {"version": 1, "box": BOX, "state": "dirty:a", "queue": [],
@@ -450,16 +452,16 @@ class TestRefresh(_Base):
                "refresh": {"token": "t", "pid": dead_pid(), "started_at": 1000.0,
                            "deadline": 99999.0, "from": "dirty:a"},
                "reason": "", "updated_at": 1000.0}
-        self.dir.mkdir(parents=True)
+        self.dir.mkdir(parents=True, exist_ok=True)
         (self.dir / f"{BOX}.json").write_text(json.dumps(raw))
         st = bq.status(BOX, now=1001.0)
         self.assertEqual(st["state"], "dirty:a")
         self.assertIn("refresh", st["reason"])
 
     def test_refresh_without_config_is_a_usage_error(self):
+        (self.dir / f"{BOX}.config.json").unlink()
         raw = {"version": 1, "box": BOX, "state": "dirty:a", "queue": [],
                "holder": None, "refresh": None, "reason": "", "updated_at": 1.0}
-        self.dir.mkdir(parents=True)
         (self.dir / f"{BOX}.json").write_text(json.dumps(raw))
         with self.assertRaises(bq.BoxQueueError):
             bq.refresh(BOX, now_fn=time.time)
@@ -481,9 +483,7 @@ class TestReviewFindings(_Base):
         return TestRefresh._orphan_holding_refresh_lock(self)
 
     def test_refresh_stuck_past_its_deadline_is_killed_and_reclaimed(self):
-        self._lock_holder()
-        holder = [p for p in _lock_holder_pids(self.dir / f"{BOX}.refresh.lock")]
-        self.assertEqual(len(holder), 1)
+        holder = [self._lock_holder().pid]
         self._raw(state="refreshing",
                   refresh={"token": "t", "pid": dead_pid(), "started_at": 1000.0,
                            "deadline": 1100.0, "from": "dirty:a"})
@@ -559,7 +559,7 @@ class TestReviewFindings(_Base):
         self.assertTrue(any("WITHDRAW" in ln for ln in self.log_lines()))
 
     def test_config_validation(self):
-        self.dir.mkdir(parents=True)
+        self.dir.mkdir(parents=True, exist_ok=True)
         cfg = self.dir / f"{BOX}.config.json"
         for bad in ('{"lease_s": NaN}', '{"lease_s": true}', '{"lease_s": 0}',
                     '{"lease_s": 100, "max_hold_s": 50}', '{"refresh": ""}',
@@ -590,6 +590,88 @@ class TestReviewFindings(_Base):
         for a lane the lease — not the pid — is the liveness signal."""
         self.assertLessEqual(bq.DEFAULTS["lease_s"], 900)
         self.assertLessEqual(bq.DEFAULTS["queue_ttl_s"], 300)
+
+
+class TestReviewTwo(_Base):
+    """Adversarial review 2 (#1171)."""
+
+    def _raw(self, **over):
+        TestReviewFindings._raw(self, **over)
+
+    def _opener(self):
+        """A process that merely OPENED the lock file (a concurrent refresh
+        in its grab-retry loop) — it owns no lock and must never be killed."""
+        code = ("import os, sys\n"
+                "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+                "print('open', flush=True)\n"
+                "sys.stdin.read()\n")
+        p = subprocess.Popen([sys.executable, "-c", code,
+                              str(self.dir / f"{BOX}.refresh.lock")],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.assertEqual(p.stdout.readline().strip(), "open")
+
+        def stop():
+            if p.poll() is None:
+                p.stdin.close()
+                p.wait(timeout=30)
+            p.stdout.close()
+
+        self.addCleanup(stop)
+        return p
+
+    def test_deadline_kill_spares_a_process_that_only_opened_the_lock(self):
+        owner = TestRefresh._orphan_holding_refresh_lock(self)
+        opener = self._opener()
+        self._raw(state="refreshing",
+                  refresh={"token": "t", "pid": dead_pid(), "started_at": 1000.0,
+                           "deadline": 1100.0, "from": "dirty:a"})
+        st = bq.status(BOX, now=1101.0)
+        self.assertEqual(st["state"], "dirty:a")
+        for _ in range(100):
+            if not _alive(owner.pid):
+                break
+            time.sleep(0.05)
+        self.assertFalse(_alive(owner.pid))
+        self.assertIsNone(opener.poll(), "a mere opener of the lock was killed")
+
+    def test_refresh_over_a_stale_record_past_its_deadline_is_clean(self):
+        """The refresh CLI itself owns the lock while it reaps; it must not
+        kill itself nor log a false REFRESH-LATE (review 2, finding 3)."""
+        self._raw(state="refreshing",
+                  refresh={"token": "t", "pid": dead_pid(), "started_at": 1.0,
+                           "deadline": 2.0, "from": "dirty:a"})
+        r = run_cli(["refresh", "--box", BOX], self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.state()["state"], "pristine")
+        self.assertFalse(any("REFRESH-LATE" in ln for ln in self.log_lines()),
+                         self.log_lines())
+
+    def test_enqueue_and_take_refuse_an_unconfigured_box(self):
+        """A mistyped / unconfigured box name must not silently get its own
+        fresh queue (two lanes, two names = no serialisation at all)."""
+        for call in (lambda: bq.enqueue("erp-test-typo", "a", self.me),
+                     lambda: bq.take("erp-test-typo", "a", self.me)):
+            with self.assertRaises(bq.BoxQueueError):
+                call()
+        self.assertFalse((self.dir / "erp-test-typo.json").exists())
+        r = run_cli(["take", "--box", "erp-test-typo", "--lane", "a",
+                     "--pid", str(self.me)], self.env)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_poll_longer_than_half_the_queue_ttl_is_refused(self):
+        with self.assertRaises(bq.BoxQueueError):
+            bq.take(BOX, "a", self.me, wait_s=10,
+                    poll_s=bq.DEFAULTS["queue_ttl_s"] / 2 + 1)
+
+    def test_an_unreadable_state_file_is_an_error_not_corruption(self):
+        bq.enqueue(BOX, "a", self.me, now=1.0)
+        path = self.dir / f"{BOX}.json"
+        path.chmod(0)
+        self.addCleanup(lambda: path.exists() and path.chmod(0o600))
+        with self.assertRaises(bq.BoxQueueError):
+            bq.status(BOX, now=2.0)
+        path.chmod(0o600)
+        self.assertEqual([e["lane"] for e in self.state()["queue"]], ["a"])
 
 
 class TestCliAndBoundaries(_Base):
