@@ -6,6 +6,8 @@ paths:
   - "cli_stream_priority.py"
   - "cli_ticket_state.py"
   - "cli_ticket_explain.py"
+  - "cli_task_hygiene.py"
+  - "cli_odoo_board.py"
 ---
 
 ### airuleset internals — quals derivation (footer I/U/W + /goal stop-proof)
@@ -228,3 +230,4 @@ can drift). Lessons for anyone touching this partition:
   - `count=` on the totals line is `stop_count()`, the one stop-proof definition (`cli_ticket_route.count` is the same function). It counts I and C ROWS, never the footer extras, so `I=5 … count=2` is correct when the A count adds to I.
   - `modules/core/statusline-vocabulary.md` is byte-capped by `tests/test_vocab_merged_1083.py` (9962 B), not only by `context-baseline`. A sentence that passes `context-baseline --check` can still fail that test, so the doctrine sentence lives in DEEP-1.
   - Lane gotcha: a review subagent that checks out the RED/GREEN commits in YOUR worktree to prove the order leaves HEAD DETACHED. Your next commits then land off the branch, and the branch ref stays at the old tip. Check `git symbolic-ref --short HEAD` before every commit after a review. To recover without rewriting history, commit on the detached HEAD, `git checkout <branch>`, `git merge --ff-only <lost commit>`, then `git cherry-pick` the rest.
+- **#1167 — a W-tag EXEMPTION fed by another job's per-home status file (Job 49 `verif_wait` → skip `stale!`/`converge!`/`no-target!`, tag `auto-close-wait`) needs FOUR guards; the adversarial review found every one.** (1) Record the repo slug and honour it only for the quals checkout's canonical repo (`gates.ghread.canonical_slug`, local git, called only when a live entry hits the W rows) — bare ticket numbers collide across repos. (2) A freshness bound on the status `ts` AND a per-entry until-ts, so a dead producer or an expired wait restores the tags. (3) Exempt a ticket only when EVERY open task naming it waits (a sibling in another stage keeps it reported); a truncated task read exempts nothing. (4) Map ticket numbers only from the canonical `(GitHub #N)` trailer, never a prose mention. Also: the odoo-erp#8507 "reaction" author set is the STREAMS + OdooBot, NOT `own_author_names` (it holds the owner and humans, whose comments ARE reactions). `cli_task_hygiene.py`/`cli_quals_cmd.py` sit at their ratchet ceilings: grow by moving shared helpers into the new module (`cli_odoo_board`), and keep `_ops_wait_flag_sets`' 9-tuple (six tests unpack it) by computing the new set inside it for subtraction and again in `_emit_ops_wait` for the tag. RED proof for review tests written after an uncommitted fix: `git archive HEAD | tar -x -C <scratch>`, copy the test in, run it there.

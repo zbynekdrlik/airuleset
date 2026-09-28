@@ -1876,7 +1876,12 @@ def _compute_net_stale_w(ops_wait, cwd=None, ages_fn=None, now=None,
                                     now=now)
     tacit_wait, tacit_close = _tacit_window_flagged(ops_wait, cwd=cwd,
                                                     ages_fn=ages_fn, now=now)
-    net_stale = stale - (tacit_wait | tacit_close)
+    # #1167: a ticket whose Odoo task sits inside its Verifikácia auto-close
+    # wait (the Job 49 status, `cli_odoo_board`) is not stale — the SAME
+    # exemption `cli_quals_cmd._ops_wait_flag_sets` applies to the listing.
+    import cli_odoo_board
+    auto_close = cli_odoo_board.auto_close_wait_numbers(ops_wait, cwd, now=now)
+    net_stale = stale - (tacit_wait | tacit_close) - auto_close
     return len(net_stale)
 
 

@@ -13,6 +13,8 @@ import json
 import os
 import sys
 
+import cli_odoo_board
+
 # #993 -- the top lane-priority label. A row carrying it sorts BEFORE every
 # other row in every seed listing (rank 0), so the /goal loop's oldest-picks-
 # first selection takes an architecture-rework ticket ahead of any other lane
@@ -105,7 +107,8 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                       unpark_numbers=None, tacit_wait_numbers=None,
                       tacit_close_numbers=None, converge_numbers=None,
                       no_target_numbers=None, deploy_target_numbers=None,
-                      dep_wait_map=None, released_numbers=None):
+                      dep_wait_map=None, released_numbers=None,
+                      auto_close_numbers=None):
     """`number<TAB>createdAt<TAB>action<TAB>title`, OLDEST first (the bounce
     lane picks the oldest — no client-side sort needed downstream).
 
@@ -174,7 +177,8 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
     ` tacit-close?` (window elapsed: a session-verify CANDIDATE, the `?` like
     `unpark?`) is APPENDED LAST. The caller already SUBTRACTED these from
     stale!/recheck! (a tacit member is never nudged for a second reminder), so
-    the two are mutually exclusive per member and never co-render with stale!."""
+    the two are mutually exclusive per member and never co-render with stale!.
+    `auto_close_numbers` (#1167): ` auto-close-wait` — in the auto-close wait."""
     flag_numbers = flag_numbers or set()
     stale_numbers = stale_numbers or set()
     queued_numbers = queued_numbers or set()
@@ -239,6 +243,8 @@ def _print_issue_rows(rows, own_stream=None, reason_fn=None, flag_numbers=None,
                 reason = (reason + " tacit-wait").strip()
             if n in tacit_close_numbers:
                 reason = (reason + " tacit-close?").strip()
+            if n in (auto_close_numbers or ()):
+                reason = (reason + " auto-close-wait").strip()
             # #881: convergence tags. converge! is the verdict mandate;
             # no-target! is the missing-marker surface.
             if n in converge_numbers:
@@ -599,7 +605,9 @@ def _ops_wait_flag_sets(ops_wait, root, member_quals=None):
     tacit_wait, tacit_close = airuleset._tacit_window_flagged(
         ops_wait, ages_fn=_ages)
     tacit = tacit_wait | tacit_close
-    stale = stale - tacit                        # #818: no 2nd-reminder nudge
+    # #1167: a task inside its Verifikácia auto-close wait = verdict in flight.
+    auto_close = cli_odoo_board.auto_close_wait_numbers(ops_wait, root)
+    stale = stale - tacit - auto_close           # #818: no 2nd-reminder nudge
     recheck = recheck - tacit
     try:
         authority = airuleset.resolve_authority(root)
@@ -617,7 +625,7 @@ def _ops_wait_flag_sets(ops_wait, root, member_quals=None):
     # (a tacit-close/unpark/gk-handoff member already has a verdict in
     # flight — demanding "set a target" on a ticket whose verdict is
     # close/unpark is noise).
-    verdict_in_flight = unpark | gk_handoff | tacit
+    verdict_in_flight = unpark | gk_handoff | tacit | auto_close
     converge = converge - verdict_in_flight
     no_target = no_target - verdict_in_flight - converge
     # converge! suppresses stale! — the verdict is strictly stronger
@@ -1289,7 +1297,8 @@ def _emit_ops_wait(ops_wait, root, quals, own_stream):
                       gk_handoff_numbers=_gkh, unpark_numbers=_unpark,
                       tacit_wait_numbers=_tw, tacit_close_numbers=_tc,
                       converge_numbers=_conv, no_target_numbers=_nt,
-                      deploy_target_numbers=_dt)
+                      deploy_target_numbers=_dt, auto_close_numbers=(
+                          cli_odoo_board.auto_close_wait_numbers(ops_wait, root)))
     # #754: aggregate W-summary (`#`-comment, skipped by the member parser).
     _summary = _ops_wait_summary_line(ops_wait, _stale, _recheck, _gkh,
                                       unpark_numbers=_unpark,

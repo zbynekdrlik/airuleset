@@ -13,6 +13,9 @@ defect the local scripts had):
       carry a stream handover message").
   C — a task in Verifikácia older than `client_confirm_days` whose last message
       is a stream handover with no client confirmation yet (a reminder is due).
+      With a Verifikácia AUTO-CLOSE wait (`cli_odoo_board`, #1167, montalu) C
+      flags only a task OVERDUE for the mechanism; a waiting one goes to
+      `verif_wait` (read by quals); bot authors never count as a client (A).
 
 All Odoo access is via the injected `call(model, method, **body)` seam
 (`cli_odoo_ro.OdooReadOnlyClient.call` in production, a fake in tests) — this
@@ -26,7 +29,9 @@ import datetime
 import json
 import os
 
+import cli_odoo_board as board
 import cli_odoo_ro as ro
+from cli_odoo_board import m2o as _m2o, parse_dt as _parse_dt
 
 # Deep-URL shape — the FUNCTIONAL project.task action URL (never the raw model
 # form), per deliver-files-as-urls.md's functional-URL rule.
@@ -49,30 +54,6 @@ _NUDGE_MAX_CHARS = 700
 def status_path(home=None):
     base = home if home is not None else os.path.expanduser("~")
     return os.path.join(base, ".claude", _STATUS_DIRNAME, _STATUS_BASENAME)
-
-
-def _m2o(value):
-    """Odoo many2one → `(id, name)`; `(None, "")` for a False/empty value."""
-    if isinstance(value, (list, tuple)) and value:
-        vid = value[0] if isinstance(value[0], int) else None
-        name = value[1] if len(value) > 1 and isinstance(value[1], str) else ""
-        return vid, name
-    if isinstance(value, int):
-        return value, ""
-    return None, ""
-
-
-def _parse_dt(s):
-    """Odoo naive-UTC datetime string → aware UTC datetime, or None."""
-    if not isinstance(s, str) or not s:
-        return None
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
-        try:
-            return datetime.datetime.strptime(s, fmt).replace(
-                tzinfo=datetime.timezone.utc)
-        except ValueError:
-            continue
-    return None
 
 
 def _is_stream_author(author_value, own_names, stream_partner_ids):
@@ -146,13 +127,16 @@ def compute_hygiene(call, cfg, now=None):
     tracked = _tracked_stage_ids(cfg)
     closed = _closed_stage_ids(cfg)
     confirm_days = ro.client_confirm_days(cfg)
+    tracker = board.AutoCloseTracker(cfg)      # #1167 auto-close wait
+    prof = tracker.prof                        # None → no auto-close wait
     project_ids = list(cfg.get("project_ids", []))
 
     domain = [["project_id", "in", project_ids]]
     if closed:
         domain.append(["stage_id", "not in", sorted(closed)])
     tasks = call("project.task", "search_read", domain=domain,
-                 fields=["id", "name", "stage_id"], order="id", limit=_TASK_LIMIT)
+                 fields=["id", "name", "stage_id"] + (list(board.TASK_FIELDS) if prof else []),
+                 order="id", limit=_TASK_LIMIT)
     tasks = tasks or []
     # #1036 review 🟡 CORRECTNESS-1: `order="id"` keeps the OLDEST tasks (the
     # A>24h Stop-gate targets) but a board with > _TASK_LIMIT open tasks silently
@@ -172,7 +156,8 @@ def compute_hygiene(call, cfg, now=None):
             "mail.message", "search_read",
             domain=[["model", "=", "project.task"],
                     ["res_id", "in", [t.get("id") for t in tasks]],
-                    ["message_type", "=", "comment"]],
+                    (["message_type", "in", list(board.MESSAGE_TYPES)] if prof
+                     else ["message_type", "=", "comment"])],
             fields=["id", "author_id", "date", "reaction_ids", "res_id"],
             order="res_id, date desc, id desc", limit=_MSG_LIMIT) or []
         # #1036 review 🟡 CORRECTNESS-2: if the batched read hit the cap it is
@@ -194,7 +179,8 @@ def compute_hygiene(call, cfg, now=None):
         tname = t.get("name") or ""
         stage_id, stage_name = _m2o(t.get("stage_id"))
         msgs = by_res.get(tid, [])
-        last = msgs[0] if msgs else None
+        counted = board.counted(msgs, prof)    # bot authors dropped on auto-close
+        last = counted[0] if counted else None
 
         base = {"task_id": tid, "task_name": tname, "stage": stage_name}
 
@@ -217,9 +203,17 @@ def compute_hygiene(call, cfg, now=None):
             if not has_stream:
                 b_items.append(dict(base))
 
-        # C — Verifikácia, last message is a stale stream handover, no client
-        # reply after it (a client reply would be an A candidate instead).
-        if stage_id is not None and stage_id == verif and last is not None:
+        # C — Verifikácia. An auto-close board waits for the mechanism and
+        # flags only an OVERDUE task (None = no wait / a reaction cancelled it);
+        # else a stale stream handover with no client reply after it (a client
+        # reply would be an A candidate instead).
+        in_verif = stage_id is not None and stage_id == verif
+        ac = tracker.observe(t, msgs, now, in_verif and not (
+            msgs_truncated and not msgs))      # truncated → indeterminate
+        if ac is not None:
+            if ac["auto_close"] == "overdue":
+                c_items.append(dict(base, **ac))
+        elif in_verif and last is not None:
             if _is_stream_author(last.get("author_id"), own_names, stream_pids):
                 dt = _parse_dt(last.get("date"))
                 if dt is not None:
@@ -232,6 +226,8 @@ def compute_hygiene(call, cfg, now=None):
     if tasks_truncated or msgs_truncated:
         summary += " (truncated: raise _TASK_LIMIT/_MSG_LIMIT — result under-counts)"
     return {"A": a_items, "B": b_items, "C": c_items, "summary": summary,
+            "verif_wait": tracker.waiting,
+            "verif_wait_status": tracker.status(tasks_truncated),
             "truncated": bool(tasks_truncated or msgs_truncated)}
 
 
@@ -263,8 +259,10 @@ def format_report(result, cfg):
             continue
         lines.append("%s (%s):" % (key, label))
         for it in items:
-            lines.append("  #%s %s — %s" % (
-                it["task_id"], _short(it.get("task_name")), task_url(cfg, it)))
+            lines.append("  #%s %s — %s%s" % (
+                it["task_id"], _short(it.get("task_name")), task_url(cfg, it),
+                " (auto-close ju po lehote nezavrel — over mechanizmus)"
+                if it.get("auto_close") == "overdue" else ""))
     return "\n".join(lines)
 
 
@@ -320,6 +318,8 @@ def persist_status(result, home=None, now=None):
                     for it in a[:10]],
         "b_items": ["#%s %s" % (it["task_id"], _short(it.get("task_name"), 40))
                     for it in b_verif_items[:10]],
+        # #1167: tickets whose task sits inside its auto-close wait → quals.
+        "verif_wait": result.get("verif_wait_status"),
     }
     path = status_path(home)
     os.makedirs(os.path.dirname(path), exist_ok=True)
