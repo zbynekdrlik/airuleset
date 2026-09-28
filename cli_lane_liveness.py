@@ -14,13 +14,15 @@ stays in ``cli_lane_overlap`` and is imported at the BOTTOM of this module (a
 deferred import that breaks the load-time cycle with the overlap module's own
 bottom-placed back-compat re-exports ``classify_lanes`` etc.; it resolves in
 either import order). Pure, dependency-injected (a ``run`` callable for git),
-stdlib-only.
+stdlib-only apart from the stdlib leaf gates.ticketrefs and the bottom import.
 """
 import json
 import os
 import re
 import sys
 import time
+
+from gates import ticketrefs
 
 # The Claude Code `isolation: worktree` directory — EVERY dispatched lane is a
 # checkout under `<repo>/.claude/worktrees/`, whatever its branch is named (the
@@ -383,24 +385,20 @@ def _lane_ticket_numbers(repo_root, branch, run):
     finished off a handed-off #7000 while its own #7184 is live (that would
     erode the ``idle-unmerged`` fail-safe). A branch with NO leading number
     (e.g. ``diag/searchmore-2314``) falls back to the ``#N`` in its recent
-    commit subjects — the only ticket signal it has. Never raises."""
-    seg = (branch or "").rsplit("/", 1)[-1]
-    if seg.startswith("worktree-"):
-        seg = seg[len("worktree-"):]
-    if seg.startswith("issue-"):
-        seg = seg[len("issue-"):]
-    m = re.match(r"(\d{2,7})", seg)
-    if m:
-        return {int(m.group(1))}          # the branch's own number — do not widen
-    nums = set()
+    commit subjects — the only ticket signal it has. Never raises.
+    #1165 round 2: both reads go through gates/ticketrefs.py (the one ticket
+    parser) — a single-digit ticket counts, and a `PR #N` / `Merge pull
+    request #N` subject is never a ticket."""
+    own = ticketrefs.branch_ticket_number(branch)
+    if own is not None:                   # the branch's own number — do not widen
+        return {own} if own else set()    # 0 = leading digits, not a ticket
     try:
         r = run(["git", "-C", repo_root, "log", "--format=%s", "-20", branch])
     except Exception:  # noqa: BLE001 — subjects unavailable => no number
-        return nums
+        return set()
     if getattr(r, "returncode", 1) == 0:
-        for mm in re.finditer(r"#(\d{2,7})", r.stdout or ""):
-            nums.add(int(mm.group(1)))
-    return nums
+        return ticketrefs.text_ticket_numbers(r.stdout or "")
+    return set()
 
 
 def _handoff_numbers(cwd, home=None):

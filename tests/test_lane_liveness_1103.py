@@ -39,7 +39,7 @@ _MOVED_FUNCS = [
     "_lane_is_merged", "_parse_worktree_records", "_pick_most_advanced_ref",
     "_resolve_base_branch", "_is_lane_worktree", "_ref_exists", "_lane_target",
     "_worktree_process_cwds", "_path_has_proc", "_live_worker_agent_ids",
-    "_lane_ticket_numbers", "_handoff_numbers", "classify_lanes",
+    "_handoff_numbers", "classify_lanes",  # _lane_ticket_numbers: changed, #1165
     "state_summary", "gather_live_lanes",
 ]
 

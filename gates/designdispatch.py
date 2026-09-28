@@ -264,7 +264,10 @@ def evaluate(payload, fetch=None, resolve_slug=None, fable_id=None, is_pr=None):
             cwd, mb.group("reason").strip()))
         return "allow", "design-by-ok bypass (logged)"
 
-    issues = issue_numbers(prompt)
+    # #1165 round 2: a `PR #N` is never a ticket (ticketrefs drops it), so a
+    # dispatch that only rides a PR (#1070 item 2) falls back to its PR numbers;
+    # the is_pr check below still verifies each one IS a PR before allowing.
+    issues = issue_numbers(prompt) or ticketrefs.pr_numbers(prompt)
     if not issues:
         # FAIL-CLOSED (#1061 review-3, owner's rule): an autopilot-worker ALWAYS
         # works a ticket, so a dispatch that names none is refused — name it as
