@@ -1046,11 +1046,10 @@ def _write_box_class_marker():
         # `controller` — the push-origin guard, hook RULE C and the heavy-build
         # gates all read this file, and a writer without this branch demoted it
         # to `workstation` on the first in-process install (Fable review RED-1).
-        # "gatekeeper" = the gk box (#998): Claude-only class `gk`.
-        box_class = ("controller" if u == "airuleset"
-                     else "gk" if u == "gatekeeper"
-                     else "shared-stream" if u in AUTHORITY_BY_USER
-                     else "workstation")
+        # "gatekeeper" = the gk box (#998): Claude-only class `gk`. ONE classifier
+        # (cli_box_class) shared with the #1174 nudge-profile resolver.
+        import cli_box_class
+        box_class = cli_box_class.box_class_for_user(u, AUTHORITY_BY_USER)
         marker = CLAUDE_DIR / "airuleset-box-class"
         if not marker.exists() or marker.read_text().strip() != box_class:
             marker.write_text(box_class + "\n", encoding="utf-8")
@@ -11104,8 +11103,11 @@ def _print_nudges_status(home=None):
         print("nudges: OFF (all %d kinds off)" % len(kinds))
     else:
         print("nudges: ON %d/%d — %s" % (len(on), len(kinds), ", ".join(sorted(on))))
-    import cli_nudge_profiles   # #1174: the declared profile + deviations
-    print("\n".join(cli_nudge_profiles.status_lines(home)))
+    try:   # #1174: the declared profile + deviations; never fail the status
+        import cli_nudge_profiles
+        print("\n".join(cli_nudge_profiles.status_lines(home)))
+    except Exception as e:  # noqa: BLE001
+        print("profile: <unreadable: %r>" % (e,))
     for k in kinds:
         print("  %s: %s" % (k, "on" if k in on else "off"))
     # #1023 addendum: recovery revivals are always-on (never suppressed) and not
@@ -11331,8 +11333,15 @@ def cmd_nudges(args, run=None):
         for k in (kinds if kinds else all_kinds):
             _wd.set_nudge_kind(k, False, by=by)
     elif action == "reset":   # #1174: deliberate realign to the declared profile
+        if kinds or want_all:
+            print("`nudges reset` takes no --kind/--all: it realigns EVERY kind to "
+                  "this box's declared profile.")
+            return 2
         import cli_nudge_profiles
-        cli_nudge_profiles.reset_to_profile(by=by)
+        r = cli_nudge_profiles.reset_to_profile(by=by)
+        print("reset to profile %s; dropped: %s" % (
+            r["profile"], cli_nudge_profiles.kind_list(r["dropped_plus"],
+                                                      r["dropped_minus"]) or "none"))
     _print_nudges_status()
     return 0
 

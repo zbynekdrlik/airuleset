@@ -20,40 +20,38 @@ reset:
 Per-kind gating and delivery are unchanged: they read ``on`` exactly as before.
 """
 import datetime
-import os
 import sys
 
 
+#: box class (``cli_box_class``) → nudge profile. A webterm OBSERVER account is
+#: classed ``shared-stream`` (it lives on subdev) but runs no Claude stream of its
+#: own, so ``resolve_profile`` maps it to ``workstation`` explicitly.
+PROFILE_BY_BOX_CLASS = {"controller": "controller", "gk": "gk",
+                        "shared-stream": "stream", "workstation": "workstation"}
+
+
 def _current_user():
-    """The invoking UNIX account (pw_name from the uid, the #839 identity
-    source); ``""`` when unresolvable. Patched in tests."""
-    try:
-        import pwd
-        return pwd.getpwuid(os.getuid()).pw_name
-    except (ImportError, KeyError):
-        return ""
+    """The invoking UNIX account — the #839 un-spoofable identity source
+    (``cli_concurrency._current_user``); ``""`` when unresolvable."""
+    import cli_concurrency
+    return cli_concurrency._current_user()
 
 
 def resolve_profile(user, entry=None):
     """The profile NAME for UNIX ``user`` (plus its ``REMOTE_HOSTS`` ``entry``
     when known). An entry's explicit ``nudge_profile`` wins; otherwise the box
-    type follows the SAME user-keyed classification as the box-class marker
-    (``airuleset._write_box_class_marker``): ``gatekeeper`` → gk, ``airuleset``
-    → controller, a webterm observer (runs no stream of its own) → workstation,
-    a reduced-authority stream account → stream, anything else → workstation."""
+    class from the ONE shared classifier (``cli_box_class``, the same one the
+    box-class marker uses) maps via ``PROFILE_BY_BOX_CLASS``, with the webterm
+    observer carve-out (→ workstation)."""
+    import cli_box_class
     import cli_fleet
     explicit = (entry or {}).get("nudge_profile")
     if explicit:
         return explicit
-    if user == "gatekeeper":
-        return "gk"
-    if user == "airuleset":
-        return "controller"
     if user in cli_fleet.WEBTERM_OBSERVER_USERS:
         return "workstation"
-    if user in cli_fleet.AUTHORITY_BY_USER:
-        return "stream"
-    return "workstation"
+    return PROFILE_BY_BOX_CLASS[cli_box_class.box_class_for_user(
+        user, cli_fleet.AUTHORITY_BY_USER)]
 
 
 def box_profile(user=None, hostname=None):
@@ -98,9 +96,11 @@ def footer_label(state, on):
 
 
 def plan_apply(state, on, kinds):
-    """Pure 3-way merge → ``(new_on, added, removed)`` (see module docstring)."""
-    if not state.get("profile"):
-        return set(on), set(), set()          # first adoption: never change `on`
+    """Pure 3-way merge → ``(new_on, added, removed)`` (see module docstring).
+    A state with no recorded profile — or a malformed ``profile_kinds`` — is a
+    FIRST ADOPTION: ``on`` is never changed (never a mass-enable from ∅)."""
+    if not state.get("profile") or not isinstance(state.get("profile_kinds"), list):
+        return set(on), set(), set()
     prev = _as_kinds(state.get("profile_kinds"))
     added, removed = set(kinds) - prev, prev - set(kinds)
     return (set(on) - removed) | added, added, removed
@@ -142,20 +142,25 @@ def apply_profile(home=None, user=None, hostname=None, by="install"):
 
 
 def reset_to_profile(home=None, user=None, hostname=None, by=None):
-    """The deliberate realign (``nudges reset``): ``on`` := the profile set,
-    dropping every runtime deviation."""
+    """The deliberate realign (``nudges reset``): ``on`` := the profile set.
+    The result's ``dropped_plus``/``dropped_minus`` name the runtime deviations
+    it discarded, so the caller reports them (never a silent wipe)."""
     import cli_fleet
     from watchdog import tmux_io
     name = box_profile(user, hostname)
     kinds = set(cli_fleet.NUDGE_PROFILES[name])
+    dropped_plus, dropped_minus = deviations(tmux_io.nudges_on_kinds(home), kinds)
     payload = dict(tmux_io.read_nudges_kinds(home))
     payload.update(profile=name, profile_kinds=sorted(kinds), on=sorted(kinds),
                    since=_now(), by=by or "")
     tmux_io.write_nudges_kinds(payload, home)
-    return _result(name, kinds, kinds, written=True)
+    result = _result(name, kinds, kinds, written=True)
+    result.update(dropped_plus=dropped_plus, dropped_minus=dropped_minus)
+    return result
 
 
-def _kind_list(plus, minus):
+def kind_list(plus, minus):
+    """``+a +b -c`` — the long (per-kind) deviation form."""
     return " ".join(["+" + k for k in plus] + ["-" + k for k in minus])
 
 
@@ -163,9 +168,9 @@ def summary(result):
     """One human line for an apply/reset result."""
     line = "%s (%d kinds)" % (result["profile"], len(result["kinds"]))
     if result["added"] or result["removed"]:
-        line += "; profile change applied: %s" % _kind_list(
+        line += "; profile change applied: %s" % kind_list(
             result["added"], result["removed"])
-    dev = _kind_list(result["plus"], result["minus"])
+    dev = kind_list(result["plus"], result["minus"])
     return line + ("; deviation kept: %s" % dev if dev else "; no deviation")
 
 
@@ -200,7 +205,7 @@ def status_lines(home=None):
         kinds = set(cli_fleet.NUDGE_PROFILES[declared])
         lines = ["profile: %s (%d kinds) — not recorded yet (the next "
                  "install/push records it)" % (declared, len(kinds))]
-    dev = _kind_list(*deviations(on, kinds))
+    dev = kind_list(*deviations(on, kinds))
     lines.append("deviation: %s" % (
         dev + " (runtime override, kept until `nudges reset` or a profile "
         "change)" if dev else "none"))

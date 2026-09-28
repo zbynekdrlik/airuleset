@@ -116,6 +116,34 @@ class TestResolution(unittest.TestCase):
                          "workstation")
 
 
+class TestSharedClassifier(unittest.TestCase):
+    """Review F2: the box-class marker and the nudge profile come from ONE
+    classifier (cli_box_class), so they can never drift apart."""
+
+    def test_profile_follows_the_marker_class_for_every_account(self):
+        import cli_box_class
+        users = {e.get("user") for e in cli_fleet.REMOTE_HOSTS} | {"airuleset"}
+        for user in users:
+            if user in cli_fleet.WEBTERM_OBSERVER_USERS:
+                continue                     # the one explicit carve-out
+            cls = cli_box_class.box_class_for_user(user,
+                                                   cli_fleet.AUTHORITY_BY_USER)
+            self.assertEqual(np.resolve_profile(user),
+                             np.PROFILE_BY_BOX_CLASS[cls], user)
+
+    def test_marker_writer_uses_the_shared_classifier(self):
+        with TemporaryDirectory() as td, \
+                m.patch.object(airuleset, "CLAUDE_DIR", Path(td)), \
+                m.patch.object(airuleset, "_current_user",
+                               return_value="montalu9"), \
+                m.patch.object(airuleset, "AUTHORITY_BY_USER",
+                               {"montalu9": "branch-merge"}), \
+                redirect_stdout(io.StringIO()):
+            airuleset._write_box_class_marker()
+            self.assertEqual((Path(td) / "airuleset-box-class").read_text()
+                             .strip(), "shared-stream")
+
+
 class TestApply(unittest.TestCase):
     def test_first_adoption_matching_live_set_records_profile_no_change(self):
         with TemporaryDirectory() as home:
@@ -171,6 +199,21 @@ class TestApply(unittest.TestCase):
             self.assertNotIn("card", set(_state(home)["on"]))
             self.assertEqual(r["removed"], ["card"])
 
+    def test_malformed_profile_kinds_is_a_first_adoption(self):
+        # Review F8: a recorded profile with a non-list profile_kinds must never
+        # read as "previous profile = empty" and mass-enable every kind.
+        with TemporaryDirectory() as home:
+            _write_state(home, {"on": ["card"], "profile": "stream",
+                                "profile_kinds": "garbage"})
+            np.apply_profile(home=home, user="montalu1")
+            self.assertEqual(set(_state(home)["on"]), {"card"})
+
+    def test_write_is_atomic_no_tmp_left(self):
+        with TemporaryDirectory() as home:
+            np.apply_profile(home=home, user="gatekeeper")
+            self.assertEqual(os.listdir(os.path.join(home, ".claude")),
+                             ["nudges-kinds.json"])
+
     def test_apply_is_idempotent(self):
         with TemporaryDirectory() as home:
             _write_state(home, {"on": sorted(LIVE_GK)})
@@ -197,6 +240,9 @@ class TestApply(unittest.TestCase):
             r = np.reset_to_profile(home=home, user="montalu1", by="owner")
             self.assertEqual(wd.nudges_on_kinds(home), LIVE_STREAM)
             self.assertEqual((r["plus"], r["minus"]), ([], []))
+            # Review F4: the discarded runtime deviations are REPORTED.
+            self.assertEqual(r["dropped_plus"], ["card"])
+            self.assertEqual(r["dropped_minus"], sorted(LIVE_STREAM))
 
     def test_install_step_prints_and_never_raises(self):
         with TemporaryDirectory() as home:
@@ -286,6 +332,42 @@ class TestStatus(unittest.TestCase):
             out = self._status(home, "montalu1")
             self.assertIn("+card", out)
             self.assertIn("-bounce", out)
+
+    def test_status_names_a_pending_profile_change(self):
+        # Review F3: a recorded profile differing from the fleet's declaration
+        # says so (the next install/push applies it).
+        with TemporaryDirectory() as home:
+            _write_state(home, {"on": [], "profile": "workstation",
+                                "profile_kinds": []})
+            out = self._status(home, "montalu1")
+            self.assertIn("profile: workstation (0 kinds)", out)
+            self.assertIn("fleet declares 'stream'", out)
+
+    def test_status_survives_a_profile_read_error(self):
+        with TemporaryDirectory() as home, \
+                m.patch.object(np, "status_lines",
+                               side_effect=RuntimeError("boom")):
+            out = self._status(home, "montalu1")
+            self.assertIn("nudges: OFF", out)
+            self.assertIn("profile: <unreadable", out)
+
+    def test_reset_rejects_kind_and_reports_dropped(self):
+        with TemporaryDirectory() as home:
+            _write_state(home, {"on": sorted(LIVE_STREAM | {"card"})})
+            np.apply_profile(home=home, user="montalu1")
+            args = m.Mock(nudges_action="reset", kind="card", all=False,
+                          fleet=False)
+            buf = io.StringIO()
+            with m.patch("os.path.expanduser",
+                         side_effect=lambda p: p.replace("~", home, 1)), \
+                    m.patch.object(np, "_current_user", return_value="montalu1"), \
+                    redirect_stdout(buf):
+                self.assertEqual(airuleset.cmd_nudges(args), 2)
+                self.assertIn("card", wd.nudges_on_kinds(home))   # untouched
+                args.kind = None
+                self.assertEqual(airuleset.cmd_nudges(args), 0)
+            self.assertIn("dropped: +card", buf.getvalue())
+            self.assertEqual(wd.nudges_on_kinds(home), LIVE_STREAM)
 
     def test_status_before_first_apply_names_the_declared_profile(self):
         with TemporaryDirectory() as home:
