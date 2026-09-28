@@ -88,6 +88,64 @@ class TestParserPrRefsAreNeverTickets(unittest.TestCase):
         self.assertEqual(ticketrefs.issue_numbers("Work #45 (prod #46)"), [45, 46])
 
 
+class TestReviewFindings(unittest.TestCase):
+    """Adversarial review of round 2 (old = pre-fix HEAD behaviour)."""
+
+    def test_singular_pr_does_not_swallow_a_following_ticket(self):
+        # a SINGULAR `PR #50` owns one number; the tickets after it stay tickets.
+        self.assertEqual(ticketrefs.issue_numbers("Work issues #41, PR #50, #43"),
+                         [41, 43])
+        self.assertEqual(
+            ticketrefs.issue_numbers("Work issues #41 #43, rides PR #50, #1177"),
+            [41, 43, 1177])
+        # a PLURAL marker owns its run
+        self.assertEqual(
+            ticketrefs.issue_numbers("Work issue 5 (PRs #201, #202 open)"), [5])
+
+    def test_pr_separator_variants_are_prs(self):
+        for prompt in ("Work issue 5, PRs: #201", "Work issue 5, PR:#7 open",
+                       "Work issue 5, PR - #12 open", "Work issue 5 (PR: 7)"):
+            with self.subTest(prompt=prompt):
+                self.assertEqual(ticketrefs.issue_numbers(prompt), [5])
+        self.assertEqual(ticketrefs.pr_numbers("Work PRs: #201"), [201])
+
+    def test_work_template_line_leads_over_a_context_line(self):
+        self.assertEqual(ticketrefs.issue_numbers(
+            "Context: follow-up of #1100 (merged).\nWork issue #1165"), [1165])
+        self.assertEqual(ticketrefs.issue_numbers(
+            "Context: see issue 1100\nWork airuleset issue 4 now"), [4])
+
+    def test_path_segment_is_not_an_issue_run(self):
+        self.assertEqual(ticketrefs.issue_numbers(
+            "Scratch: /tmp/x/scratchpad/issues-41-43-47 ready\n"
+            "Work issues #41 #43 #47"), [41, 43, 47])
+        self.assertEqual(ticketrefs.issue_numbers(
+            "notes in /tmp/s/issue-1165-r2/"), [])
+
+    def test_design_gate_checks_a_ticket_after_a_singular_pr(self):
+        payload = json.dumps({
+            "tool_name": "Agent", "cwd": "/repo",
+            "tool_input": {"subagent_type": "autopilot-worker",
+                           "prompt": "Work issues #41, PR #50, #43"}})
+        design = "Design-by: main claude-fable-5-1"
+        v, r = dd.evaluate(
+            payload, fetch=lambda slug, n, cwd: {41: [design], 43: []}.get(n),
+            resolve_slug=lambda cwd: "owner/repo",
+            is_pr=lambda n, slug, cwd: (n == 50, None), fable_id=FABLE)
+        self.assertEqual(v, "block")
+        self.assertIn("#43", r)
+
+    def test_branch_with_non_ticket_leading_digits_never_widens(self):
+        # `git log -20 <branch>` includes base history; a branch that LEADS with
+        # digits must not fall back to it (fail-safe toward live).
+        subj = "Merge #1166 + #1167\n"
+        for branch in ("fohmixer/07-x", "20260928-foo", "worktree-12345678-x",
+                       "1.5-fix"):
+            with self.subTest(branch=branch):
+                self.assertEqual(ll._lane_ticket_numbers(
+                    "/repo", branch, lambda cmd: _R(subj)), set())
+
+
 class TestDesignGateSeesPastAPrLead(unittest.TestCase):
     def test_pr_lead_no_longer_fail_opens_the_ticket(self):
         # pre-fix: lead = the PR line -> [201] -> skipped as a PR -> ALLOW with
@@ -183,6 +241,11 @@ class TestWdrainReceiptUsesTheSharedParser(unittest.TestCase):
         r = self._run("Review PR #201 fixes first\nWork issue 1165")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("1165", r.stderr)
+
+    def test_context_line_does_not_steal_the_receipt_lead(self):
+        self._seed([1165])
+        r = self._run("Context: follow-up of #1100 (merged).\nWork issue #1165")
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_parser_malfunction_fails_open_and_is_logged(self):
         # a hook copy with no gates/ package beside it: the import fails, the
