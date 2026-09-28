@@ -574,7 +574,7 @@ push / PR / merge / deploy, never that backup.
    locally before returning your branch, and deferring it onto the supervisor's serial integration
    mutex moves review off the parallel lanes the fleet model exists to keep.
    **MODEL for the review dispatch (#991): dispatch it model-less** — a `general-purpose` review
-   dispatch inherits the native subagent-model default (`claude-opus-4-8`); never pass a `model`
+   dispatch inherits the main's model natively (#1173); never pass a `model`
    param (a banned model is refused by `hooks/block-banned-model.sh`). There is no budget gate and
    no tier choice — the same for every diff, trivial or not.
    **The reviewer's brief MUST additionally REFUTE the diff on STRUCTURAL grounds (#414 — SOTA
