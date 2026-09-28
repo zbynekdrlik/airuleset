@@ -153,8 +153,12 @@ class TestVocabularyClause(unittest.TestCase):
     an H1/whole-file substring."""
 
     def _bullet(self):
+        # #1174 (owner decision 28.9.2026): the badge now names the box's DECLARED
+        # nudge profile (`nudges <profile> · recovery on`), not the N/M count —
+        # the clause bullet moved with it; the recovery + no-OFF locks stay.
         lines = VOCAB.read_text(encoding="utf-8").splitlines()
-        return [ln for ln in lines if ln.startswith("- `nudges N/M · recovery on`")]
+        return [ln for ln in lines
+                if ln.startswith("- `nudges <profile> · recovery on`")]
 
     def test_clause_bullet_present(self):
         bullets = self._bullet()
