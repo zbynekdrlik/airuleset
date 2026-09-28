@@ -184,6 +184,13 @@ REMOTE_HOSTS = [
         "host": "100.118.174.27",
         "user": "montalu4",
         "repo_path": "~/devel/airuleset",
+        # owner 2026-09-28 („prepni montalu4 do sekvencneho modu", issue 1169): the
+        # SAME #998/#1031 declared-window mechanism as d1-d4/miva — ONE
+        # autopilot-worker lane at a time, no refill. The other montalu* stay parallel.
+        "windows": [
+            {"name": "m4", "cwd": "~/devel/odoo/odoo-erp",
+             "role": None, "mode": "sequential"},
+        ],
     },
     {
         # marek@subdev — webterm OBSERVER lane account (#882 scope correction,
