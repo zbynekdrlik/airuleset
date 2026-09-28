@@ -253,18 +253,20 @@ def set_nudge_kind(kind, enabled, home=None, by=None):
     else:
         on.discard(kind)
     import datetime
+    payload = dict(read_nudges_kinds(home))   # #1174: keep the profile keys
+    payload.update(on=sorted(on), by=by or "", since=datetime.datetime.now(
+        datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    write_nudges_kinds(payload, home)
+    return on
+
+
+def write_nudges_kinds(payload, home=None):
+    """#1174: persist the WHOLE per-kind state dict (on/since/by + profile)."""
     import json
     path = nudges_kinds_path(home)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    payload = {
-        "on": sorted(on),
-        "since": datetime.datetime.now(datetime.timezone.utc)
-        .strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "by": by or "",
-    }
     with open(path, "w", encoding="utf-8") as h:
         json.dump(payload, h)
-    return on
 
 
 def nudges_enabled(kind=None, home=None):

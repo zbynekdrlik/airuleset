@@ -668,6 +668,19 @@ def box_paused_reason(user, hostname=None):
     return paused_reason(remote) if remote else ""
 
 
+# #1174 — DECLARED machine-nudge PROFILES per box type (owner 28.9.2026). The
+# baseline = each type's LIVE set read on 28.9 (the rollout changes nothing).
+# cli_nudge_profiles resolves a box's profile (an entry's `nudge_profile` wins).
+_NUDGE_CORE = ("goal-guard", "lane-occupancy", "lane-reconcile", "partition-audit",
+               "queue-arrival", "release-gap", "task-hygiene", "u-freshness")
+NUDGE_PROFILES = {
+    "gk": frozenset(_NUDGE_CORE + ("infra-priority", "watch-trigger")),
+    "stream": frozenset(_NUDGE_CORE + ("bounce",)),
+    "controller": frozenset({"queue-arrival"}),
+    "workstation": frozenset(),
+}
+
+
 # ---------------------------------------------------------------------------
 # #998 — DECLARED managed windows (owner directive 2026-09-12)
 # ---------------------------------------------------------------------------
@@ -1170,11 +1183,7 @@ def _is_github_ci_runner(user) -> bool:
 # re-export), NEVER `cli_fleet.STREAM_RENAME_ALIASES` directly, so a
 # `patch.object(airuleset, "STREAM_RENAME_ALIASES", ...)` in a test is honoured
 # (the same L-E rule AUTHORITY_BY_USER above follows).
-STREAM_RENAME_ALIASES = {
-    "montalu": "montalu1",
-    "david": "david1",
-    "simap": "simap1",
-}
+STREAM_RENAME_ALIASES = {"montalu": "montalu1", "david": "david1", "simap": "simap1"}
 
 
 # --- #775: shared-stream resource-guard apply targets ----------------------
@@ -1198,12 +1207,8 @@ STREAM_RENAME_ALIASES = {
 # `tests/test_resource_guards.py` drift-locks that (a new shared-stream host
 # cannot be added to REMOTE_HOSTS without a matching guard entry here).
 SHARED_STREAM_GUARD_HOSTS = [
-    {
-        "name": "subdev",
-        "host": "100.118.174.27",
-        "admin_user": "root",
-        "identity": "~/.secrets/gatekeeper_access_ed25519",
-    },
+    {"name": "subdev", "host": "100.118.174.27", "admin_user": "root",
+     "identity": "~/.secrets/gatekeeper_access_ed25519"},
 ]
 
 
@@ -1224,18 +1229,10 @@ SHARED_STREAM_GUARD_HOSTS = [
 # report timer + the machine-channel escalation are the standing backstops.
 # `host` is each box's TAILSCALE IP (stable across LAN switches, #1).
 DISK_GUARD_ROOT_HOSTS = [
-    {
-        "name": "subdev",
-        "host": "100.118.174.27",
-        "admin_user": "root",
-        "identity": "~/.secrets/gatekeeper_access_ed25519",
-    },
-    {
-        "name": "gatekeeper",
-        "host": "100.90.94.41",
-        "admin_user": "root",
-        "identity": "~/.secrets/gatekeeper_access_ed25519",
-    },
+    {"name": "subdev", "host": "100.118.174.27", "admin_user": "root",
+     "identity": "~/.secrets/gatekeeper_access_ed25519"},
+    {"name": "gatekeeper", "host": "100.90.94.41", "admin_user": "root",
+     "identity": "~/.secrets/gatekeeper_access_ed25519"},
 ]
 
 # #982: owner break-glass SSH access to the controller — specific device IPs

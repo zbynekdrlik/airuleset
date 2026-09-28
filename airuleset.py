@@ -1548,9 +1548,9 @@ def cmd_install(args):
     if _compact_flag_line:
         print("  " + _compact_flag_line)
 
-    # --- Box class marker (#778): shared-stream (subdev) vs workstation. Read
-    # by the heavy-build reaper (Job 38) + block-heavy-build-toolchain.sh hook.
+    # --- Box class marker (#778, read by Job 38 + the heavy-build hook) + #1174 nudge profile.
     _write_box_class_marker()
+    _nudge_profile_install_step()
 
     # --- #971: shared fleet data dir for cross-account consumers (claudy).
     # Created only on the controller (box-class `controller`) when passwordless
@@ -10823,10 +10823,10 @@ def main():
         help="Owner nudge kill switch (per-kind): on|off|status "
              "[--kind <k>[,<k>]] [--all] [--fleet]")
     p_nudges.add_argument("nudges_action", nargs="?", default="status",
-                          choices=["off", "on", "status"],
-                          help="on --kind <k> = enable a kind; off [--kind <k>] "
-                               "= disable a kind (bare/--all = all off); "
-                               "status = report per kind (default)")
+                          choices=["off", "on", "status", "reset"],
+                          help="on/off --kind <k> = runtime override (bare/--all "
+                               "off = all off); reset = realign to the declared "
+                               "profile (#1174); status = report (default)")
     p_nudges.add_argument("--kind", default=None,
                           help="Machine-nudge kind(s) to enable/disable "
                                "(comma-separated)")
@@ -11104,6 +11104,8 @@ def _print_nudges_status(home=None):
         print("nudges: OFF (all %d kinds off)" % len(kinds))
     else:
         print("nudges: ON %d/%d — %s" % (len(on), len(kinds), ", ".join(sorted(on))))
+    import cli_nudge_profiles   # #1174: the declared profile + deviations
+    print("\n".join(cli_nudge_profiles.status_lines(home)))
     for k in kinds:
         print("  %s: %s" % (k, "on" if k in on else "off"))
     # #1023 addendum: recovery revivals are always-on (never suppressed) and not
@@ -11137,6 +11139,14 @@ def _print_nudges_status(home=None):
               "rides goal-sweep and DOES follow the switch. Both type via the "
               "per-pane budget + human-active guard "
               "(~/.claude/watchdog-disable-goal: absent)")
+
+
+def _nudge_profile_install_step():
+    """#1174: apply this box's DECLARED nudge profile into the per-kind switch
+    store (cli_nudge_profiles — first adoption records it without changing the
+    live set; a runtime deviation is kept and printed). Never raises."""
+    import cli_nudge_profiles
+    return cli_nudge_profiles.install_step(home=str(CLAUDE_DIR.parent))
 
 
 def _nudges_fleet(verb, runner=None):
@@ -11320,6 +11330,9 @@ def cmd_nudges(args, run=None):
         # a bare `nudges off` (or --all) turns EVERYTHING off — off is safe.
         for k in (kinds if kinds else all_kinds):
             _wd.set_nudge_kind(k, False, by=by)
+    elif action == "reset":   # #1174: deliberate realign to the declared profile
+        import cli_nudge_profiles
+        cli_nudge_profiles.reset_to_profile(by=by)
     _print_nudges_status()
     return 0
 
