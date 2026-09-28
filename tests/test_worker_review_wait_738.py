@@ -131,6 +131,17 @@ class TestWorkerReviewWaitDoctrine(unittest.TestCase):
             "the doctrine must explain TaskStop is refused for your OWN "
             "dispatch (\"owned by\")")
 
+    def test_done_check_skips_trailing_attachment_records(self):
+        # #874 finding (songplayer, 28.9.2026): the last line of a finished
+        # subagent's task.output is usually an `attachment` record
+        # (total_tokens_reminder), so a literal "last line" read sees a DONE
+        # review as still running. The recipe must skip attachment records.
+        self.assertRegex(
+            self.window,
+            r"(?i)skip[^.]{0,80}attachment",
+            "the done-check must skip trailing `attachment` records and read "
+            "the last assistant/user record")
+
     def test_reads_done_from_the_last_json_object_not_the_whole_transcript(self):
         # Never wholesale-Read the dispatch's JSONL (context overflow) --
         # read done from the LAST object only.
