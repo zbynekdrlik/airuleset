@@ -40,5 +40,5 @@ Recognised by the close gate (`discuss_close_guard.py`):
 - The cross-stream rules for COMPOSE + APPROVAL (what a message must contain;
   owner-approved before posting): `handover-compose.md`.
 - Client board `project.task` formatting (name language, description,
-  Verifikácia notes, stage discipline, no assignee/@mention):
+  Verifikácia notes, stages, assignee/@mention):
   `client-board-tasks.md`.

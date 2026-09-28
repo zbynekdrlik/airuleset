@@ -78,8 +78,8 @@ class TestClientBoardTasksDoctrine949(TestCase):
         self.assertIn("moves it to", self.normed)
         self.assertIn("himself", self.normed)
 
-    # Rule 5: no assignee on montalu/miva profiles
-    def test_montalu_no_assignee(self):
+    # Rule 5: no assignee on miva (montalu assigns the addressee, owner 28.9.2026, #1166)
+    def test_miva_no_assignee(self):
         self.assertIn("NO assignee", self.normed)
         self.assertIn("`user_ids` empty", self.body)
 
