@@ -19,8 +19,10 @@ import json
 import os
 import subprocess
 import tempfile
+import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import cli_drop_lanes
 import cli_fleet
@@ -161,10 +163,10 @@ class Identity(unittest.TestCase):
     FLEET = [{"name": "u9@fakebox", "host": "fakebox.example.net", "user": "u9"},
              {"name": "lonebox", "host": "100.64.9.9", "user": "svcacct9x"}]
 
-    def ident(self, strings=None, lazy=()):
+    def ident(self, strings=None):
         import cli_vault_public as pub
         base = pub.fleet_identity(self.FLEET) if strings is None else strings
-        return pub.PublicIdentity(strings=base, lazy_hosts=lambda: list(lazy))
+        return pub.PublicIdentity(strings=base)
 
     def test_a_fleet_hostname_user_and_generated_drop_host_are_public(self):
         ident = self.ident()
@@ -191,44 +193,110 @@ class Identity(unittest.TestCase):
         ident = self.ident(strings=["alpha.example.org", "beta.example.org"])
         self.assertFalse(ident.contains(b"alpha.example.org\nbeta.example.org"))
 
-    def test_lazy_hosts_are_consulted_only_for_a_hostname_shaped_needle(self):
-        calls = []
-
-        def lazy():
-            calls.append(1)
-            return ["drop-seedbox.example.org"]
-
-        import cli_vault_public as pub
-        ident = pub.PublicIdentity(strings=["unrelated.example.org"], lazy_hosts=lazy)
-        self.assertFalse(ident.contains(b"Pa$$w0rd!!xyz"))
-        self.assertEqual(calls, [], "a non-hostname needle loaded the lane registry")
-        self.assertTrue(ident.contains(b"drop-seedbox"))
-        self.assertTrue(ident.contains(b"seedbox.example"))
-        self.assertEqual(len(calls), 1, "the lane registry must load at most once")
-
-    def test_a_failing_lane_registry_keeps_the_needle(self):
-        import cli_vault_public as pub
-
-        def boom():
-            raise RuntimeError("registry broken")
-
-        ident = pub.PublicIdentity(strings=[], lazy_hosts=boom)
-        self.assertFalse(ident.contains(b"drop-seedbox"))
-
     def test_the_default_identity_carries_the_zone_and_this_account(self):
         import cli_vault_public as pub
-        old = os.environ.get("USER")
-        os.environ["USER"] = ACCOUNT
-        try:
-            ident = pub.PublicIdentity(lazy_hosts=lambda: [])
-        finally:
-            if old is None:
-                del os.environ["USER"]
-            else:
-                os.environ["USER"] = old
+        with mock.patch.dict(os.environ, {"USER": ACCOUNT}):
+            ident = pub.PublicIdentity()
         self.assertTrue(ident.contains(ZONE.encode()))
         self.assertTrue(ident.contains(ACCOUNT.encode()))
         self.assertFalse(ident.contains(GENUINE.encode()))
+
+
+class ReviewFindings(Base):
+    """The adversarial review of the first GREEN (see the #1170 review comment)."""
+
+    def test_every_lane_host_is_public_without_loading_the_gateway(self):
+        # Review 4: the lane registry costs ~28 ms per tool call; the cheap
+        # identity must already cover every host it holds (drift lock).
+        import cli_drop_gateway
+        import cli_vault_public as pub
+        ident = pub.PublicIdentity(strings=pub.fleet_identity(cli_fleet.REMOTE_HOSTS))
+        hosts = {lane.host for lane in cli_drop_gateway.DROP_LANES.values()}
+        hosts |= set(cli_drop_gateway.DROP_ACCESS_APPS)
+        for host in sorted(hosts):
+            self.assertTrue(ident.contains(host.encode()), host)
+
+    def test_building_the_identity_never_imports_the_gateway(self):
+        code = ("import sys, cli_vault_public as p; "
+                "p.PublicIdentity().contains(b'lowercase-genuine-value'); "
+                "print('cli_drop_gateway' in sys.modules)")
+        r = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
+                           cwd=str(REPO), env={"PATH": "/usr/bin:/bin",
+                                               "HOME": str(self.home)}, timeout=30)
+        self.assertEqual((r.returncode, r.stdout.strip()), (0, "False"), r.stderr)
+
+    def test_a_broken_identity_source_keeps_every_needle(self):
+        # Review 1: the hook fails OPEN, so a crash here would leak every value.
+        import cli_vault_keyfile as kf
+        with mock.patch.dict(sys.modules, {"cli_drop_lanes": None}):
+            whole, _ = kf.needles_for([("file:x", GENUINE.encode())])
+        self.assertIn(GENUINE.encode(), whole)
+
+    def test_many_public_lines_are_noted_once_per_name(self):
+        # Review 2: one note per dropped LINE made a big public file time out.
+        import cli_vault_keyfile as kf
+        import cli_vault_public as pub
+        value = "\n".join(["drop-dev1.%s" % ZONE] * 500).encode()
+        with mock.patch.object(pub, "note_dropped") as note:
+            kf.needles_for([("file:many", value)], public=pub.PublicIdentity())
+        self.assertLessEqual(note.call_count, 2, note.call_args_list[:3])
+
+    def test_exec_file_env_file_keeps_urls_and_redacts_the_credential(self):
+        # Review 3: the fragment filter still masked the public word of a
+        # `USER=<word>` line.
+        p = self.key("svc.env", "USER=%s\nPASS=%s" % (ZONE_WORD, GENUINE))
+        r = subprocess.run(["python3", str(REPO / "airuleset.py"), "secret", "exec",
+                            "--file", str(p), "--env", "CFG", "--", "sh", "-c",
+                            'echo "%s /home/%s"; echo "$CFG"' % (DROP_URL, ZONE_WORD)],
+                           capture_output=True, text=True, env=self.env(),
+                           cwd=str(self.home), timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        first = r.stdout.splitlines()[0]
+        self.assertEqual(first, "%s /home/%s" % (DROP_URL, ZONE_WORD))
+        self.assertNotIn(GENUINE, r.stdout + r.stderr)
+
+    def test_exec_ignores_a_caller_env_identity(self):
+        # Review 5: `secret exec` runs with the CALLER's env; $USER there must
+        # not make a genuine value public.
+        import cli_vault_public as pub
+        with mock.patch.dict(os.environ, {"USER": GENUINE, "LOGNAME": GENUINE,
+                                          "HOME": "/x/" + GENUINE}):
+            ident = pub.PublicIdentity(trust_env=False)
+        self.assertFalse(ident.contains(GENUINE.encode()))
+
+    def test_store_exec_uses_the_same_filter(self):
+        # Review 6: `secret exec NAME` is the third caller.
+        from filedrop import vault
+        with mock.patch.dict(os.environ, {"AIRULESET_SECRETS_DIR": str(self.store),
+                                          "HOME": str(self.home)}):
+            vault.store_value("NET_PW", ZONE_WORD.encode(), keep_s=60)
+        r = subprocess.run(["python3", str(REPO / "airuleset.py"), "secret", "exec",
+                            "NET_PW", "--", "echo", DROP_URL],
+                           capture_output=True, text=True, env=self.env(),
+                           cwd=str(self.home), timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout, DROP_URL + "\n")
+        self.assertIn("store:NET_PW", self.log_text())
+
+    def test_long_names_are_not_merged_in_the_log(self):
+        # Review 7: a truncated label dropped the second note.
+        import cli_vault_public as pub
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            pub.note_dropped("file:" + "a" * 200 + "1", "whole")
+            pub.note_dropped("file:" + "a" * 200 + "2", "whole")
+        self.assertEqual(len(self.log_text().splitlines()), 2)
+
+    def test_a_symlinked_log_dir_is_refused(self):
+        # Review 8: mkdir+chmod followed a planted `secret-logs` symlink.
+        import cli_vault_public as pub
+        target = self.home / "elsewhere"
+        target.mkdir(mode=0o755)
+        (self.home / ".claude").mkdir()
+        (self.home / ".claude" / "secret-logs").symlink_to(target)
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            pub.note_dropped("file:x", "whole")
+        self.assertEqual(target.stat().st_mode & 0o777, 0o755)
+        self.assertEqual(list(target.iterdir()), [])
 
 
 if __name__ == "__main__":
