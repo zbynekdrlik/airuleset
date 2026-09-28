@@ -113,10 +113,20 @@ class TestNoForcedSubagentEnv(TestCase):
         self.assertNotIn(KEY, out["env"])
         self.assertNotIn("ANTHROPIC_BASE_URL", out["env"])
 
+    def test_retired_value_with_whitespace_removed(self):
+        out, _ = _apply({"env": {KEY: " claude-opus-5-5 "}})
+        self.assertNotIn(KEY, out["env"])
+
+    def test_owner_own_apikeyhelper_does_not_mark_l2(self):
+        out, _ = _apply({"apiKeyHelper": "/usr/bin/user-own",
+                         "env": {KEY: "claude-sonnet-5-5"}})
+        self.assertEqual(out["env"][KEY], "claude-sonnet-5-5")
+        self.assertEqual(out["apiKeyHelper"], "/usr/bin/user-own")
+
     def test_hand_set_value_next_to_generic_env_keys_kept(self):
-        # API_TIMEOUT_MS / ANTHROPIC_BASE_URL alone are keys an owner may set
-        # for their own reasons; without airuleset's managed L2 apiKeyHelper
-        # they prove nothing, so the owner's subagent model must survive.
+        # API_TIMEOUT_MS / ANTHROPIC_BASE_URL prove nothing about who wrote the
+        # subagent model (they are popped regardless, #1060); only airuleset's
+        # own L2 apiKeyHelper does, so the owner's subagent model must survive.
         out, err = _apply({"env": {"API_TIMEOUT_MS": "600000",
                                    "ANTHROPIC_BASE_URL": "https://proxy.example",
                                    KEY: "claude-sonnet-5-5"}})
@@ -157,21 +167,20 @@ class TestLaunchScriptsDoNotExport(TestCase):
 
 
 class TestOwnAgentsInheritMain(TestCase):
-    """Step 3 lock: the native default for an agent with no `model:` is the main
-    conversation's model, so airuleset's own quality-critical agents carry NO
-    model pin (a pin to anything weaker would silently drop a worker's
-    quality). `model: inherit` would be equivalent and is also accepted."""
+    """Quality floor: airuleset's own workers carry `model: inherit`, which
+    Claude Code resolves to the main's model BEFORE it reads a (kept, hand-set)
+    CLAUDE_CODE_SUBAGENT_MODEL; a per-dispatch `model` still overrides it. With
+    no `model:` line a kept env value would silently re-model them."""
 
-    def test_no_weaker_pin(self):
+    def test_agents_pin_inherit(self):
         for name in airuleset.AGENT_NAMES:
             path = os.path.join(REPO, "agents", name + ".md")
             text = open(path, encoding="utf-8").read()
             m = re.match(r"^---\n(.*?)\n---\n", text, re.S)
             self.assertIsNotNone(m, "%s has frontmatter" % name)
-            pin = re.search(r"(?m)^\s*model:\s*(\S+)", m.group(1))
-            if pin:
-                self.assertEqual(pin.group(1).strip("'\""), "inherit",
-                                 "%s must inherit the main model" % name)
+            pin = re.search(r"(?m)^\s*model:\s*(\S+)\s*$", m.group(1))
+            self.assertIsNotNone(pin, "%s has no model: inherit" % name)
+            self.assertEqual(pin.group(1), "inherit")
 
 
 if __name__ == "__main__":
