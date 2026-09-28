@@ -606,7 +606,7 @@ def _ops_wait_flag_sets(ops_wait, root, member_quals=None):
         ops_wait, ages_fn=_ages)
     tacit = tacit_wait | tacit_close
     # #1167: a task inside its Verifikácia auto-close wait = verdict in flight.
-    auto_close = cli_odoo_board.auto_close_wait_numbers(ops_wait)
+    auto_close = cli_odoo_board.auto_close_wait_numbers(ops_wait, root)
     stale = stale - tacit - auto_close           # #818: no 2nd-reminder nudge
     recheck = recheck - tacit
     try:
@@ -1298,7 +1298,7 @@ def _emit_ops_wait(ops_wait, root, quals, own_stream):
                       tacit_wait_numbers=_tw, tacit_close_numbers=_tc,
                       converge_numbers=_conv, no_target_numbers=_nt,
                       deploy_target_numbers=_dt, auto_close_numbers=(
-                          cli_odoo_board.auto_close_wait_numbers(ops_wait)))
+                          cli_odoo_board.auto_close_wait_numbers(ops_wait, root)))
     # #754: aggregate W-summary (`#`-comment, skipped by the member parser).
     _summary = _ops_wait_summary_line(ops_wait, _stale, _recheck, _gkh,
                                       unpark_numbers=_unpark,
