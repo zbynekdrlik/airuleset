@@ -7,8 +7,10 @@ ticket" even though `design-record` had posted a valid main design on issue 4.
 
 The fix accepts 1-6 digits wherever the number is anchored by an
 `issue`/`issues`/`#` prefix. A prefix-less number (a version `0.1.5`, `v2`, a
-count `3 lanes`) is still never a ticket, and a 1-digit count trailing a
-SINGULAR `issue N,` (`issue 1061, 3 lanes`) is not read as a second ticket.
+count `3 lanes`) is still never a ticket. A follower in an `issue` run is a
+ticket at any width (`issue 4, 7` -> [4, 7]): over-checking blocks, the safe
+direction for a fail-closed gate. A 1-digit `#N` outside an `issue` run
+(`step #1`, `bounce #2`, `PR #7`) never outranks a stronger reference.
 """
 import json
 import os
@@ -99,10 +101,11 @@ class TestPrefixlessNumbersAreNotTickets(unittest.TestCase):
         self.assertEqual(
             dd.issue_numbers("bump to 0.1.5, deploy v2, run 3 lanes"), [])
 
-    def test_singular_issue_then_count_is_not_a_second_ticket(self):
-        # a 1-digit COUNT after a singular `issue N,` must not become ticket 3.
-        self.assertEqual(
-            dd.issue_numbers("Work issue 1061, 3 lanes in parallel"), [1061])
+    def test_singular_issue_run_follower_is_checked_not_dropped(self):
+        # review of 1165: dropping `7` as a "count" would FAIL OPEN on a real
+        # batch member; the run is read at any width, like the pre-fix 2-digit run.
+        self.assertEqual(dd.issue_numbers("Work issue 4, 7 in fohmixer"), [4, 7])
+        self.assertEqual(dd.issue_numbers("Work issue 4 and 7"), [4, 7])
 
     def test_items_after_issue_not_captured(self):
         self.assertEqual(
