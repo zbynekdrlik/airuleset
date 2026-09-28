@@ -242,9 +242,8 @@ def nudges_on_kinds(home=None):
 
 
 def set_nudge_kind(kind, enabled, home=None, by=None):
-    """Enable/disable ONE machine-nudge `kind` in the per-kind state file, then
-    return the resulting on-set. Creates `~/.claude/` if missing; a no-op write is
-    still idempotent. Unknown kinds are ignored (never persisted)."""
+    """Enable/disable ONE machine-nudge `kind` (unknown kinds ignored, never
+    persisted), keeping every other state key; returns the resulting on-set."""
     if kind not in MACHINE_NUDGE_KINDS:
         return nudges_on_kinds(home)
     on = nudges_on_kinds(home)
@@ -253,18 +252,21 @@ def set_nudge_kind(kind, enabled, home=None, by=None):
     else:
         on.discard(kind)
     import datetime
+    payload = dict(read_nudges_kinds(home))   # #1174: keep the profile keys
+    payload.update(on=sorted(on), by=by or "", since=datetime.datetime.now(
+        datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+    write_nudges_kinds(payload, home)
+    return on
+
+
+def write_nudges_kinds(payload, home=None):
+    """#1174: persist the WHOLE state dict ATOMICALLY (tmp + os.replace)."""
     import json
     path = nudges_kinds_path(home)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    payload = {
-        "on": sorted(on),
-        "since": datetime.datetime.now(datetime.timezone.utc)
-        .strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "by": by or "",
-    }
-    with open(path, "w", encoding="utf-8") as h:
+    with open(path + ".%d.tmp" % os.getpid(), "w", encoding="utf-8") as h:
         json.dump(payload, h)
-    return on
+    os.replace(path + ".%d.tmp" % os.getpid(), path)
 
 
 def nudges_enabled(kind=None, home=None):

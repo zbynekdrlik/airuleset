@@ -152,9 +152,9 @@ class TestVocabularyClause(unittest.TestCase):
     """STATEMENT lock (#498/#500 family) — assert the actual clause bullet, never
     an H1/whole-file substring."""
 
-    def _bullet(self):
+    def _bullet(self):  # #1174: the bullet names the declared profile now
         lines = VOCAB.read_text(encoding="utf-8").splitlines()
-        return [ln for ln in lines if ln.startswith("- `nudges N/M · recovery on`")]
+        return [ln for ln in lines if ln.startswith("- `nudges <profile> · recovery on`")]
 
     def test_clause_bullet_present(self):
         bullets = self._bullet()
