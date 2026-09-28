@@ -42,9 +42,6 @@ _MOVED_FUNCS = [
     "_handoff_numbers", "classify_lanes",
     "state_summary", "gather_live_lanes",
 ]
-# `_lane_ticket_numbers` left this verbatim-move pin on purpose (#1165 round 2):
-# it now reads ticket numbers through gates/ticketrefs.py (1-digit tickets, PR
-# refs excluded); its behaviour is locked by test_ticketrefs_consumers_1165.py.
 
 _ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
