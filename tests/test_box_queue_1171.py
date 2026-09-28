@@ -664,13 +664,20 @@ class TestReviewTwo(_Base):
                     poll_s=bq.DEFAULTS["queue_ttl_s"] / 2 + 1)
 
     def test_an_unreadable_state_file_is_an_error_not_corruption(self):
+        # Unreadable = the read raises OSError. A directory at the state path
+        # raises it for every uid; chmod 0 does not stop root, and the CI
+        # runner is root (main CI 36455976727 went red on the chmod form).
         bq.enqueue(BOX, "a", self.me, now=1.0)
         path = self.dir / f"{BOX}.json"
-        path.chmod(0)
-        self.addCleanup(lambda: path.exists() and path.chmod(0o600))
+        saved = path.read_bytes()
+        path.unlink()
+        path.mkdir()
+        self.addCleanup(lambda: path.is_dir() and path.rmdir())
         with self.assertRaises(bq.BoxQueueError):
             bq.status(BOX, now=2.0)
-        path.chmod(0o600)
+        self.assertTrue(path.is_dir(), "the tool must not replace an unreadable state")
+        path.rmdir()
+        path.write_bytes(saved)
         self.assertEqual([e["lane"] for e in self.state()["queue"]], ["a"])
 
 
