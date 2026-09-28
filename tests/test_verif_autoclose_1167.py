@@ -76,9 +76,20 @@ def _bot(mid, days_ago, now=NOW):
             "date": _ts(days_ago, now), "reaction_ids": []}
 
 
+def _owner(mid, days_ago, now=NOW):
+    return {"id": mid, "author_id": [9, "Zbynek Drlik"],
+            "date": _ts(days_ago, now), "reaction_ids": []}
+
+
+def _client_mail(mid, days_ago, now=NOW):
+    return dict(_client(mid, days_ago, now), message_type="email")
+
+
 class Fake:
-    """Minimal Odoo: tasks as given; messages newest-first per res_id (the
-    production `order="res_id, date desc, id desc"` contract)."""
+    """Minimal Odoo: tasks projected onto the requested `fields` (a field the
+    code forgets to request is absent, as on a real instance); messages
+    filtered by the `message_type` domain, newest-first per res_id (the
+    production `order="res_id, date desc, id desc"` contract), cut at `limit`."""
 
     def __init__(self, tasks, messages):
         self.tasks = tasks
@@ -86,25 +97,32 @@ class Fake:
 
     def call(self, model, method, **body):
         if model == "project.task" and method == "search_read":
-            return [dict(t) for t in self.tasks]
+            fields = body.get("fields") or []
+            return [{k: v for k, v in t.items() if k in fields}
+                    for t in self.tasks]
         if model == "mail.message" and method == "search_read":
+            types = {"comment"}
+            for cond in body.get("domain", []):
+                if cond[0] == "message_type":
+                    types = {cond[2]} if cond[1] == "=" else set(cond[2])
             rows = []
             for rid, msgs in self.messages.items():
-                rows.extend(dict(m, res_id=rid) for m in msgs)
+                rows.extend(dict(m, res_id=rid) for m in msgs
+                            if m.get("message_type", "comment") in types)
             rows.sort(key=lambda m: m["id"], reverse=True)
             rows.sort(key=lambda m: m["date"], reverse=True)
             rows.sort(key=lambda m: m["res_id"])
-            return rows
+            return rows[:body["limit"]] if body.get("limit") else rows
         if model == "mail.message" and method == "message_reactions_guarded":
             return []
         raise AssertionError("unexpected call %s/%s" % (model, method))
 
 
-def _verif_task(tid, entered_days_ago, ticket=None, now=NOW):
+def _verif_task(tid, entered_days_ago, ticket=None, now=NOW, stage=None):
     desc = "<p>Hotovo pre vás.</p><p>Je nasadené. (GitHub #%d)</p>" % ticket \
         if ticket else "<p>Je nasadené.</p>"
     return {"id": tid, "name": "Úloha %d" % tid,
-            "stage_id": [VERIF, "Verifikácia"],
+            "stage_id": stage or [VERIF, "Verifikácia"],
             "date_last_stage_update": _ts(entered_days_ago, now),
             "description": desc}
 
@@ -176,6 +194,81 @@ class ClassCMontaluWait(unittest.TestCase):
         self.assertEqual([4321], waits[0]["tickets"])
 
 
+class ReviewFindings(unittest.TestCase):
+    """The #1167 round-2 adversarial review: each test pins one finding."""
+
+    def _status(self, tasks, messages, **kw):
+        return _compute(MONTALU, tasks, messages, **kw)["verif_wait_status"]
+
+    def test_owner_comment_is_a_reaction(self):
+        cfg = dict(MONTALU, own_author_names=["ZbynekAI", "Zbynek Drlik"])
+        res = _compute(cfg, [_verif_task(7, 10, ticket=100)],
+                       {7: [_owner(71, 6), _stream(70, 10)]})
+        self.assertEqual([], res["verif_wait"])       # countdown cancelled
+        self.assertEqual([7], _c_ids(res))           # stream owns it (3-day C)
+
+    def test_client_email_reply_is_a_reaction_and_unanswered(self):
+        res = _compute(MONTALU, [_verif_task(7, 10, ticket=100)],
+                       {7: [_client_mail(71, 5), _stream(70, 10)]})
+        self.assertEqual([], res["verif_wait"])
+        self.assertEqual([7], [it["task_id"] for it in res["A"]])
+
+    def test_truncated_message_read_is_not_a_wait(self):
+        tasks = [_verif_task(3, 10, ticket=99), _verif_task(7, 10, ticket=100)]
+        msgs = {3: [_stream(31, 9), _stream(30, 10)], 7: [_stream(70, 10)]}
+        with mock.patch.object(th, "_MSG_LIMIT", 2):
+            res = _compute(MONTALU, tasks, msgs)
+        self.assertNotIn(7, [w["task_id"] for w in res["verif_wait"]])
+        self.assertNotIn("100", res["verif_wait_status"]["tickets"])
+
+    def test_truncated_task_read_exempts_nothing(self):
+        with mock.patch.object(th, "_TASK_LIMIT", 1):
+            st = self._status([_verif_task(7, 10, ticket=100)],
+                              {7: [_stream(70, 10)]})
+        self.assertIsNone(st)
+
+    def test_a_live_sibling_task_keeps_the_ticket_reported(self):
+        tasks = [_verif_task(7, 10, ticket=100),
+                 _verif_task(8, 1, ticket=100, stage=[2879, "Realizácia"])]
+        st = self._status(tasks, {7: [_stream(70, 10)], 8: [_stream(80, 1)]})
+        self.assertEqual({}, st["tickets"])
+
+    def test_an_overdue_sibling_keeps_the_ticket_reported(self):
+        tasks = [_verif_task(7, 10, ticket=100), _verif_task(8, 25, ticket=100)]
+        st = self._status(tasks, {7: [_stream(70, 10)], 8: [_stream(80, 25)]})
+        self.assertEqual({}, st["tickets"])
+
+    def test_waiting_ticket_is_recorded_for_its_repo(self):
+        st = self._status([_verif_task(7, 10, ticket=100)], {7: [_stream(70, 10)]})
+        self.assertEqual("zbynekdrlik/odoo-erp", st["repo"])
+        self.assertEqual(["100"], list(st["tickets"]))
+
+    def test_prose_mention_does_not_map_a_ticket(self):
+        task = _verif_task(7, 10)
+        task["description"] = ("<p>Nadväzuje na GitHub #800.</p>"
+                               "<p>Je nasadené. (GitHub #100)</p>")
+        res = _compute(MONTALU, [task], {7: [_stream(70, 10)]})
+        self.assertEqual([100], res["verif_wait"][0]["tickets"])
+
+    def test_a_later_bot_post_does_not_extend_the_wait(self):
+        res = _compute(MONTALU, [_verif_task(7, 25)],
+                       {7: [_bot(72, 1), _bot(71, 11), _stream(70, 25)]})
+        self.assertEqual([7], _c_ids(res))
+        self.assertEqual("overdue", res["C"][0]["auto_close"])
+
+    def test_missing_stage_clock_falls_back_to_the_3_day_rule(self):
+        task = _verif_task(7, 5)
+        task["date_last_stage_update"] = False
+        res = _compute(MONTALU, [task], {7: [_stream(70, 5)]})
+        self.assertEqual([7], _c_ids(res))
+        self.assertIsNone(res["C"][0].get("auto_close"))
+
+    def test_partial_config_override_means_no_wait(self):
+        cfg = dict(MONTALU, verif_auto_close={"close_days": 21})
+        res = _compute(cfg, [_verif_task(7, 5)], {7: [_stream(70, 5)]})
+        self.assertEqual([7], _c_ids(res))
+
+
 class ClassCOtherBoardsUnchanged(unittest.TestCase):
     def test_miva_5_day_handover_is_still_reminder_due(self):
         res = _compute(MIVA, [_verif_task(7, 5)], {7: [_stream(70, 5)]})
@@ -236,6 +329,12 @@ class QualsRespectTheWait(unittest.TestCase):
         self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, True))
         self.now = time.time()
         self.now_dt = datetime.datetime.fromtimestamp(self.now, tz=UTC)
+        import cli_odoo_board
+        self.slug = "zbynekdrlik/odoo-erp"
+        patcher = mock.patch.object(cli_odoo_board, "_repo_slug",
+                                    lambda root: self.slug)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _persist(self, cfg, entered_days_ago, ticket, status_age_s=0):
         res = _compute(cfg, [_verif_task(7, entered_days_ago, ticket,
@@ -291,6 +390,23 @@ class QualsRespectTheWait(unittest.TestCase):
         stale, _rc, _gk, _up, _tw, _tc, converge, _nt, _dt = self._flag_sets()
         self.assertIn(100, stale | converge)
         self.assertEqual(2, self._net_stale())
+
+    def test_another_repo_gets_no_exemption(self):
+        self._persist(MONTALU, 10, ticket=100)
+        self.slug = "zbynekdrlik/airuleset"
+        stale, _rc, _gk, _up, _tw, _tc, converge, _nt, _dt = self._flag_sets()
+        self.assertIn(100, stale | converge)
+        self.assertEqual(2, self._net_stale())
+
+    def test_expired_entry_in_a_fresh_status_gets_no_exemption(self):
+        import json
+        path = th.status_path(self.tmp)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as h:
+            json.dump({"ts": self.now, "verif_wait": {
+                "repo": self.slug, "tickets": {"100": self.now - 60}}}, h)
+        stale, _rc, _gk, _up, _tw, _tc, converge, _nt, _dt = self._flag_sets()
+        self.assertIn(100, stale | converge)
 
     def test_ops_wait_listing_names_the_wait(self):
         import io
