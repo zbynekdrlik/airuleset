@@ -26,8 +26,8 @@ CONTROLLER_CUTOVER_DONE = True
 # The API floor quoted in the 400 error: "Claude Code 2.1.236 does not support
 # this model; version 2.1.251 or newer is required." Bump this deliberately
 # when Anthropic raises the floor again.
-# #1121: the floor must also cover every MANAGED model (MANAGED_MODEL + the
-# subagent default). claude-opus-5-5 (#1119) is refused by the API from a CLI
+# #1121: the floor must also cover every MANAGED model (MANAGED_MODEL; #1173
+# removed the forced subagent default). claude-opus-5-5 (#1119) is refused by the API from a CLI
 # older than 2.1.280 ("version 2.1.280 or newer required"). A lineup swap adds
 # its id to MODEL_MIN_CLAUDE_VERSION and raises the floor in the same commit;
 # tests/test_claude_version_floor_975.py fails until both hold.

@@ -11,9 +11,10 @@ while you work; your clarifying questions and permission prompts STILL reach the
 surfaces background-subagent prompts in the user's main session). You appear in the agent strip as
 `autopilot-worker`. All global and project rules apply to you.
 
-**Your model is chosen natively (#991).** The fleet default for a dispatched subagent is
-`claude-opus-4-8` (the env `CLAUDE_CODE_SUBAGENT_MODEL` default); the supervisor may override it per
-dispatch by its own judgment, and Opus 5 is the ONLY banned dispatch value. There is no per-phase
+**Your model is chosen natively (#991, #1173).** airuleset forces no subagent model: with no
+per-dispatch `model` and no `model:` in this file, Claude Code runs you on the main session's model;
+the supervisor may override it per dispatch by its own judgment, and Opus 5 is the ONLY banned
+dispatch value. There is no per-phase
 tiering doctrine and no budget gate: you do NOT pick or switch a tier, and you do NOT dispatch a
 worker-internal review consult. Hold quality at HIGH effort throughout. **Review of your work is
 done by the MAIN session (Fable) before integration** — it reads `git diff main...<your branch>` +
