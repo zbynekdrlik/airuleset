@@ -377,9 +377,7 @@ export ANTHROPIC_MODEL="$_mb_main"
 export ANTHROPIC_DEFAULT_OPUS_MODEL="$_mb_main"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="$_mb_sub"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="$_mb_fast"
-# No forced subagent model (#1173): a subagent with no model inherits this
-# window's main ($_mb_main) natively; a `sonnet`/`haiku` dispatch maps to
-# $_mb_sub/$_mb_fast through the two DEFAULT_* exports above.
+# No forced subagent model (#1173): a bare subagent inherits $_mb_main natively.
 export CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING=1
 export API_TIMEOUT_MS=900000
 export AIRULESET_ROLE=implementer
