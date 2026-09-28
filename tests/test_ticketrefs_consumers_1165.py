@@ -104,6 +104,31 @@ class TestDesignGateSeesPastAPrLead(unittest.TestCase):
         self.assertIn("#1165", r)
 
 
+class TestDesignGatePrOnlyFallback(unittest.TestCase):
+    """#1070 item 2 stays: a dispatch that only rides a PR is allowed once gh
+    confirms it IS a PR; a `PR #N` that is really an issue is design-checked."""
+
+    def _ev(self, prompt, is_pr, fetch):
+        payload = json.dumps({
+            "tool_name": "Agent", "cwd": "/repo",
+            "tool_input": {"subagent_type": "autopilot-worker", "prompt": prompt}})
+        return dd.evaluate(payload, fetch=fetch,
+                           resolve_slug=lambda cwd: "owner/repo",
+                           is_pr=is_pr, fable_id=FABLE)
+
+    def test_single_digit_pr_only_prompt_allows_when_gh_says_pr(self):
+        def fetch(slug, n, cwd):
+            raise AssertionError("a PR must never be design-checked")
+        v, r = self._ev("update PR #7 title/body", lambda n, s, c: (True, None), fetch)
+        self.assertEqual(v, "allow", r)
+
+    def test_pr_ref_that_is_an_issue_is_design_checked(self):
+        v, r = self._ev("update PR #7 title/body", lambda n, s, c: (False, None),
+                        lambda slug, n, cwd: {7: ["no design"]}.get(n))
+        self.assertEqual(v, "block")
+        self.assertIn("#7", r)
+
+
 class TestWdrainReceiptUsesTheSharedParser(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="a1165r2-home-")
@@ -158,6 +183,24 @@ class TestWdrainReceiptUsesTheSharedParser(unittest.TestCase):
         r = self._run("Review PR #201 fixes first\nWork issue 1165")
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("1165", r.stderr)
+
+    def test_parser_malfunction_fails_open_and_is_logged(self):
+        # a hook copy with no gates/ package beside it: the import fails, the
+        # receipt check is skipped (this hook's fail-open doctrine) and logged.
+        d = tempfile.mkdtemp(prefix="a1165r2-nogates-")
+        self.addCleanup(shutil.rmtree, d, True)
+        (Path(d) / "hooks").mkdir()
+        shutil.copy(HOOK, Path(d) / "hooks" / HOOK.name)
+        payload = json.dumps({
+            "tool_name": "Agent", "cwd": self.cwd,
+            "tool_input": {"subagent_type": "autopilot-worker",
+                           "prompt": "Work issue 4 in fohmixer"}})
+        r = subprocess.run(["bash", str(Path(d) / "hooks" / HOOK.name)],
+                           input=payload, capture_output=True, text=True,
+                           timeout=60, env={**os.environ, "HOME": self.home})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        log = Path(self.home) / ".claude" / "lane-overlap" / "parse-error.log"
+        self.assertIn("ticketrefs parse failed", log.read_text())
 
 
 class _R:
