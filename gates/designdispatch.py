@@ -10,9 +10,9 @@ design was authored by the managed MAIN session, per the owner's standing #871
 rule. FAIL-CLOSED: an unreadable comment
 thread (gh error / no network / auth) REFUSES with an honest reason (the owner's
 rule -- never dispatch a worker onto an unverifiable design). A prompt with no
-parseable issue number can't be checked and is ALLOWED (the same documented
-fail-open the sibling overlap gate takes -- the design comment on the ticket is
-the durable authority); the realistic autopilot dispatch always carries `#N`.
+parseable ticket number is REFUSED too (#1061 review-3: an autopilot-worker
+always works a ticket, so "names no ticket" is fail-closed); a ticket is
+`#N` or `issue N` with N of 1-6 digits (#1165 -- a young repo's `issue 4`).
 
 Bypass: `airuleset:design-by-ok <reason>` in the dispatch prompt -- allowed and
 logged to ~/.claude/design-by-gate.log.
@@ -37,17 +37,29 @@ DESIGN_BY_LOG = "design-by-gate.log"
 # `#N`-only extractor was VACUOUS — every real dispatch parsed to [] and the gate
 # fail-opened (the #1028 vacuous-classifier class; #1061 supervisor review-3).
 # Now parse `#N` AND bare `issue N` / `issues N, M` / `issue #N` / `issue-N` /
-# `issue: N`. Require the `issue`/`#` PREFIX + 2-6 digits so a version string
-# (0.1.326), a date (2026-09-17), a git sha, or an "items 1, 2, 3" run is NEVER
-# mistaken for a ticket. Scoped to the FIRST ticket-bearing LINE (the dispatch's
+# `issue: N`. Require the `issue`/`#` PREFIX so a version string (0.1.326), a
+# date (2026-09-17), a git sha, or an "items 1, 2, 3" run is NEVER mistaken for
+# a ticket. Scoped to the FIRST ticket-bearing LINE (the dispatch's
 # lead), mirroring the sibling block-dispatch-over-wdrain gate, so a folded /
 # related "issue N" on a LATER body line ("5b. folded from issue 1046") never
 # triggers a false precondition check on a ticket the worker is not working.
-_TICKET_ANY_RE = re.compile(r"(?:issues?\s*[#:-]?\s*|#)\d{2,6}\b", re.IGNORECASE)
-_HASH_RE = re.compile(r"#(\d{2,6})\b")
+#
+# #1165: the number is 1-6 digits (it was 2-6, so a young repo's `issue 4` /
+# `#4` parsed to NO ticket and a correct dispatch was refused "names no
+# ticket"). The PREFIX is what disambiguates, never the width. `_TICKET_NUM`
+# also refuses a leading zero (no ticket 0 / 007) and a trailing `.<digit>`
+# (`issue 4.2`, `#1.5` read as versions), and `\bissues?` refuses a word that
+# merely ends in "issue" (`tissue 5`). In a comma/`and` RUN, a 1-digit member
+# with no `#` after a SINGULAR `issue` is a count, not a ticket
+# (`issue 1061, 3 lanes`) -- see `issue_numbers`.
+_TICKET_NUM = r"[1-9]\d{0,5}\b(?!\.\d)"
+_TICKET_ANY_RE = re.compile(
+    r"(?:\bissues?\s*[#:-]?\s*|#)" + _TICKET_NUM, re.IGNORECASE)
+_HASH_RE = re.compile(r"#(" + _TICKET_NUM + r")")
 _TICKET_RUN_RE = re.compile(
-    r"issues?\s*[#:-]?\s*(\d{2,6}(?:\s*(?:,|and)\s*#?\d{2,6})*)", re.IGNORECASE)
-_NUM_RE = re.compile(r"\d{2,6}")
+    r"\b(issues?)\s*[#:-]?\s*(" + _TICKET_NUM
+    + r"(?:\s*(?:,|and)\s*#?" + _TICKET_NUM + r")*)", re.IGNORECASE)
+_RUN_MEMBER_RE = re.compile(r"(#?)(" + _TICKET_NUM + r")")
 
 _BYPASS_RE = re.compile(r"airuleset:design-by-ok\s*(?P<reason>.*)", re.IGNORECASE)
 
@@ -91,9 +103,17 @@ def issue_numbers(prompt):
     for m in _HASH_RE.finditer(lead):
         found.append((m.start(), int(m.group(1))))
     for m in _TICKET_RUN_RE.finditer(lead):
-        base = m.start(1)
-        for nm in _NUM_RE.finditer(m.group(1)):
-            found.append((base + nm.start(), int(nm.group())))
+        singular = m.group(1).lower() == "issue"
+        base = m.start(2)
+        for i, nm in enumerate(_RUN_MEMBER_RE.finditer(m.group(2))):
+            num = nm.group(2)
+            # #1165: `issue 1061, 3 lanes` -- a bare 1-digit follower of a
+            # SINGULAR `issue` is a count; the plural (`issues 4, 7`) or an
+            # explicit `#` (`issue 4, #7`) marks a real batch member. A >= 2-digit
+            # follower keeps its pre-#1165 reading (never narrowed).
+            if i and singular and not nm.group(1) and len(num) < 2:
+                continue
+            found.append((base + nm.start(2), int(num)))
     found.sort(key=lambda t: t[0])
     out, seen = [], set()
     for _, n in found:
