@@ -101,14 +101,32 @@ class TestNoForcedSubagentEnv(TestCase):
 
     def test_l2_gateway_write_removed(self):
         # #1062 L2 wrote marker["sub"] (a gateway alias) next to the gateway
-        # keys into the SHARED settings.json. That alias is airuleset's own write;
-        # left behind it would point the MAIN window's subagents at a model the
+        # keys into the SHARED settings.json, together with airuleset's own
+        # managed apiKeyHelper path. That alias is airuleset's own write; left
+        # behind it would point the MAIN window's subagents at a model the
         # Anthropic API does not serve.
-        out, _ = _apply({"env": {"ANTHROPIC_BASE_URL": "http://gw:4000",
+        import cli_config
+        out, _ = _apply({"apiKeyHelper": cli_config._L2_MANAGED_APIKEY_HELPER,
+                         "env": {"ANTHROPIC_BASE_URL": "http://gw:4000",
                                  "ANTHROPIC_MODEL": "impl-main",
                                  KEY: "impl-sub"}})
         self.assertNotIn(KEY, out["env"])
         self.assertNotIn("ANTHROPIC_BASE_URL", out["env"])
+
+    def test_hand_set_value_next_to_generic_env_keys_kept(self):
+        # API_TIMEOUT_MS / ANTHROPIC_BASE_URL alone are keys an owner may set
+        # for their own reasons; without airuleset's managed L2 apiKeyHelper
+        # they prove nothing, so the owner's subagent model must survive.
+        out, err = _apply({"env": {"API_TIMEOUT_MS": "600000",
+                                   "ANTHROPIC_BASE_URL": "https://proxy.example",
+                                   KEY: "claude-sonnet-5-5"}})
+        self.assertEqual(out["env"][KEY], "claude-sonnet-5-5")
+        self.assertIn("kept hand-set", err)
+
+    def test_non_string_value_kept_without_crash(self):
+        out, err = _apply({"env": {KEY: ["claude-opus-5-5"]}})
+        self.assertEqual(out["env"][KEY], ["claude-opus-5-5"])
+        self.assertIn("kept hand-set", err)
 
     def test_foreign_hand_set_value_kept_and_reported(self):
         out, err = _apply({"env": {KEY: "claude-sonnet-5-5"}})
