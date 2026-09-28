@@ -121,7 +121,7 @@ class TestFifoTake(_Base):
         for lane in ("a", "b", "c"):
             bq.enqueue(BOX, lane, self.me, now=1000.0)
         self.assertTrue(bq.take(BOX, "a", self.me, now_fn=lambda: 1001.0)["ok"])
-        self.assertTrue(bq.release(BOX, "a", now=1002.0)["ok"])
+        self.assertTrue(bq.release(BOX, "a", clean=True, now=1002.0)["ok"])
         self.assertFalse(bq.take(BOX, "c", self.me, now_fn=lambda: 1003.0)["ok"])
         self.assertTrue(bq.take(BOX, "b", self.me, now_fn=lambda: 1004.0)["ok"])
 
@@ -135,7 +135,7 @@ class TestFifoTake(_Base):
         bq.enqueue(BOX, "a", self.me, now=1000.0)
         bq.enqueue(BOX, "b", self.me, now=1000.0)
         bq.take(BOX, "a", self.me, now_fn=lambda: 1001.0)
-        bq.release(BOX, "a", dirty=True, reason="deployed a branch", now=1002.0)
+        bq.release(BOX, "a", reason="deployed a branch", now=1002.0)
         self.assertEqual(self.state()["state"], "dirty:a")
         r = bq.take(BOX, "b", self.me, now_fn=lambda: 1003.0)
         self.assertFalse(r["ok"])
@@ -171,7 +171,7 @@ class TestFifoTake(_Base):
         def sleep(s):
             clock[0] += s
             if clock[0] >= 1020.0 and self.state()["state"] == "held:a":
-                bq.release(BOX, "a", now=clock[0])
+                bq.release(BOX, "a", clean=True, now=clock[0])
 
         r = bq.take(BOX, "b", self.me, wait_s=60, poll_s=10,
                     now_fn=lambda: clock[0], sleep_fn=sleep)
@@ -199,7 +199,7 @@ class TestLeaseAndLiveness(_Base):
         bq.enqueue(BOX, "a", self.me, now=1000.0)
         bq.take(BOX, "a", self.me, lease_s=60, now_fn=lambda: 1000.0)
         self.assertFalse(bq.renew(BOX, "a", now=1100.0)["ok"])
-        r = bq.release(BOX, "a", now=1101.0)
+        r = bq.release(BOX, "a", clean=True, now=1101.0)
         self.assertFalse(r["ok"])
         self.assertEqual(self.state()["state"], "dirty:a")
 
@@ -251,7 +251,7 @@ class TestRefresh(_Base):
         self.write_config(refresh=[refresh], health=[health])
         bq.enqueue(BOX, "a", self.me, now=1000.0)
         bq.take(BOX, "a", self.me, now_fn=lambda: 1000.0)
-        bq.release(BOX, "a", dirty=True, now=1001.0)
+        bq.release(BOX, "a", now=1001.0)
         r = bq.refresh(BOX, now_fn=time.time)
         self.assertTrue(r["ok"], r)
         self.assertEqual(marker.read_text(), "ran\n")
@@ -267,7 +267,7 @@ class TestRefresh(_Base):
         self.write_config(refresh=[refresh])
         bq.enqueue(BOX, "a", self.me, now=1000.0)
         bq.take(BOX, "a", self.me, now_fn=lambda: 1000.0)
-        bq.release(BOX, "a", dirty=True, now=1001.0)
+        bq.release(BOX, "a", now=1001.0)
         r = bq.refresh(BOX, now_fn=time.time)
         self.assertFalse(r["ok"])
         st = self.state()
@@ -674,6 +674,52 @@ class TestReviewTwo(_Base):
         self.assertEqual([e["lane"] for e in self.state()["queue"]], ["a"])
 
 
+class TestReleaseDefaultsDirty(_Base):
+    """Supervisor decision on #1171 (review 1's finding): a lane that deploys
+    and forgets a flag must never hand back a box marked pristine — the
+    fail-safe direction is dirty. Plain `release` = dirty; `--clean` is the
+    explicit claim that the lane changed nothing; `--dirty` is gone."""
+
+    def _held(self, lane="a"):
+        bq.enqueue(BOX, lane, self.me, now=1000.0)
+        self.assertTrue(bq.take(BOX, lane, self.me, now_fn=lambda: 1000.0)["ok"])
+
+    def test_plain_release_leaves_the_box_dirty(self):
+        self._held()
+        self.assertTrue(bq.release(BOX, "a", now=1001.0)["ok"])
+        st = self.state()
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIn("a", st["reason"])
+
+    def test_release_clean_hands_back_pristine(self):
+        self._held()
+        self.assertTrue(bq.release(BOX, "a", clean=True, now=1001.0)["ok"])
+        self.assertEqual(self.state()["state"], "pristine")
+
+    def test_cli_plain_release_is_dirty_and_clean_is_pristine(self):
+        pid = str(self.me)
+        for lane, extra, want in (("a", [], "dirty:a"), ("b", ["--clean"], "pristine")):
+            raw = {"version": 1, "box": BOX, "state": "pristine", "queue": [],
+                   "holder": None, "refresh": None, "reason": "", "updated_at": 1.0}
+            (self.dir / f"{BOX}.json").write_text(json.dumps(raw))
+            self.assertEqual(run_cli(["take", "--box", BOX, "--lane", lane,
+                                      "--pid", pid], self.env).returncode, 0)
+            r = run_cli(["release", "--box", BOX, "--lane", lane] + extra, self.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(self.state()["state"], want, extra)
+
+    def test_the_dirty_flag_is_gone(self):
+        r = run_cli(["release", "--box", BOX, "--lane", "a", "--dirty"], self.env)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_skill_and_worker_text_follow_the_dirty_default(self):
+        for rel in ("skills/autopilot/SKILL.md", "agents/autopilot-worker.md"):
+            text = (REPO / rel).read_text()
+            self.assertIn("release --clean", text, rel)
+            self.assertNotIn("release --dirty", text, rel)
+            self.assertNotIn("`--dirty`", text, rel)
+
+
 class TestCliAndBoundaries(_Base):
     def test_box_name_path_traversal_refused(self):
         r = run_cli(["enqueue", "--box", "../../evil", "--lane", "a",
@@ -698,8 +744,8 @@ class TestCliAndBoundaries(_Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         st = json.loads(r.stdout)
         self.assertEqual(st["state"], "held:a")
-        self.assertEqual(run_cli(["release", "--box", BOX, "--lane", "a",
-                                  "--dirty"], self.env).returncode, 0)
+        self.assertEqual(run_cli(["release", "--box", BOX, "--lane", "a"],
+                             self.env).returncode, 0)
         self.assertEqual(json.loads(run_cli(["status", "--box", BOX, "--json"],
                                             self.env).stdout)["state"], "dirty:a")
 
@@ -771,7 +817,7 @@ class TestCliAndBoundaries(_Base):
         for args in (["enqueue", "--box", BOX, "--lane", "a", "--pid", pid],
                      ["take", "--box", BOX, "--lane", "a", "--pid", pid],
                      ["renew", "--box", BOX, "--lane", "a"],
-                     ["release", "--box", BOX, "--lane", "a", "--dirty"],
+                     ["release", "--box", BOX, "--lane", "a"],
                      ["refresh", "--box", BOX],
                      ["status", "--box", BOX],
                      ["status"]):
