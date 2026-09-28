@@ -108,6 +108,17 @@ class TestPrefixlessNumbersAreNotTickets(unittest.TestCase):
         self.assertEqual(
             dd.issue_numbers("Work issue 4 with items 1, 2, 3, 5"), [4])
 
+    def test_leading_zero_is_not_a_ticket(self):
+        # no ticket 0 / 007 -- `issue 0` must not become a check on issue 0.
+        self.assertEqual(dd.issue_numbers("see issue 0 and #007 notes"), [])
+
+    def test_prefixed_version_is_not_a_ticket(self):
+        # a dotted number after a prefix reads as a version, not ticket 1 / 4.
+        self.assertEqual(dd.issue_numbers("changelog #1.5 and issue 4.2"), [])
+
+    def test_versioned_follower_does_not_hide_the_lead_ticket(self):
+        self.assertEqual(dd.issue_numbers("Work issue 4 (ships 0.1.5)"), [4])
+
     def test_word_containing_issue_is_not_a_prefix(self):
         self.assertEqual(dd.issue_numbers("tissue 5 sample"), [])
 
