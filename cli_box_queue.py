@@ -23,8 +23,15 @@ Model (per box, `~/.claude/box-queue/<box>.json`):
            owed); a queued non-holder withdraws
   refresh  dirty -> refreshing -> run the project's refresh + health
            commands -> pristine; a failure leaves dirty with the reason.
-           REFUSED on a held box; the flock is NOT held while it runs
-           (fenced by the `refreshing` state + a token instead)
+           REFUSED on a held box; the state flock is NOT held while it
+           runs (fenced by the `refreshing` state + a token instead). The
+           refresh holds `<box>.refresh.lock` for its whole run and its
+           commands INHERIT that fd, so "a refresh is running" means "that
+           lock is held" — true even after the CLI itself died (a 10-min
+           foreground Bash cap) while its command still runs; the box then
+           stays `refreshing`, never dirty, and no second refresh starts.
+           A timeout or SIGTERM/SIGHUP/SIGINT kills the command's whole
+           process group and records dirty.
   status   report (applies pending reclaims)
 
 Liveness, applied on EVERY call before the action (so nothing can hold the box
@@ -32,7 +39,8 @@ forever): a holder whose pid died, whose lease expired, or who passed
 max_hold_s is reclaimed as dirty:<lane> (it may have left the box half-
 deployed); a queue entry whose pid died or that has not polled for
 queue_ttl_s is dropped (so a vanished lane cannot block the head); a refresh
-whose process died or passed its deadline returns the box to dirty.
+whose lock is no longer held (every process of it gone) returns the box to
+dirty.
 
 Concurrency: every read-modify-write runs under an exclusive `fcntl.flock`
 on `<box>.lock` (the `cli_autopilot_lock` sibling-mutex idiom, whose
@@ -59,6 +67,7 @@ import json
 import math
 import os
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -124,6 +133,7 @@ def _paths(box):
         "lock": d / f"{box}.lock",
         "config": d / f"{box}.config.json",
         "refresh_log": d / f"{box}.refresh.log",
+        "refresh_lock": d / f"{box}.refresh.lock",
         "decisions": d / "decisions.log",
     }
 
@@ -282,7 +292,26 @@ def _save_state(path, st):
             tmp.unlink()
 
 
-def _reap(st, now, cfg, box, events):
+def _refresh_lock_held(paths):
+    """True while some process (the refresh CLI or a command that inherited
+    its fd) holds `<box>.refresh.lock`. flock, not a pid: immune to pid
+    reuse and to the CLI dying before its command."""
+    try:
+        fd = os.open(str(paths["refresh_lock"]), os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    else:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        return False
+    finally:
+        os.close(fd)
+
+
+def _reap(st, now, cfg, box, events, paths):
     """Apply every liveness rule. Returns True when anything changed."""
     changed = False
     h = st["holder"]
@@ -304,10 +333,16 @@ def _reap(st, now, cfg, box, events):
     r = st["refresh"]
     if r is not None:
         why = None
-        if not _pid_alive(r["pid"]):
-            why = f"refresh process {r['pid']} died"
+        if not _refresh_lock_held(paths):
+            why = (f"refresh process {r['pid']} died" if not _pid_alive(r["pid"])
+                   else "refresh lock released without a result")
         elif now >= r["deadline"]:
-            why = "refresh deadline passed"
+            late = (f"past its deadline — a refresh process still holds "
+                    f"{paths['refresh_lock'].name}")
+            if st["reason"] != late:
+                st["reason"] = late
+                _event(events, now, box, "REFRESH-LATE", reason=late)
+                changed = True
         if why:
             st["state"] = r["from"] if r["from"].startswith("dirty:") else "dirty:refresh"
             st["refresh"], st["reason"] = None, f"refresh interrupted: {why}"
@@ -353,7 +388,7 @@ def _transact(box, cfg, now_fn, fn):
         now = now_fn()
         events = []
         st, changed = _load_state(paths, box, now, events)
-        changed = _reap(st, now, cfg, box, events) or changed
+        changed = _reap(st, now, cfg, box, events, paths) or changed
         result, touched = fn(st, events, now)
         if changed or touched:
             st["updated_at"] = now
@@ -546,29 +581,75 @@ def _tail_line(path):
         return f"(refresh log unreadable: {e})"
 
 
-def _run(cmd, timeout, cfg, box, log_path, label):
-    """(rc | None, error-or-empty). Output goes to the state-dir refresh log."""
+class _Interrupted(Exception):
+    def __init__(self, signum):
+        super().__init__(signum)
+        self.signum = signum
+
+
+def _raise_interrupted(signum, _frame):
+    raise _Interrupted(signum)
+
+
+@contextlib.contextmanager
+def _signals_interrupt():
+    """While a refresh runs, SIGTERM/SIGHUP/SIGINT raise _Interrupted so the
+    command group is killed and the box recorded dirty — never left running
+    unattended. A signal the caller IGNORES (nohup) stays ignored."""
+    old = {}
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        try:
+            if signal.getsignal(sig) is not signal.SIG_IGN:
+                old[sig] = signal.signal(sig, _raise_interrupted)
+        except ValueError:
+            break   # not the main thread: signals stay as they are
+    try:
+        yield
+    finally:
+        for sig, handler in old.items():
+            signal.signal(sig, handler)
+
+
+def _kill_group(proc):
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        print(f"box-queue: refresh process group {proc.pid} already gone",
+              file=sys.stderr)
+    proc.wait()
+
+
+def _run(cmd, timeout, cfg, box, log_path, label, lock_fd):
+    """(rc | None, error-or-empty). The command runs in its OWN process group
+    (killed whole on timeout or interruption) and inherits `lock_fd`, so the
+    refresh lock stays held for as long as any part of it lives. Output goes
+    to the state-dir refresh log."""
     env = dict(os.environ, BOX_QUEUE_BOX=box)
     cwd = cfg.get("cwd") or str(state_dir())
     _append(log_path, [f"--- {datetime.now(timezone.utc).isoformat()} {label}: {cmd}"])
-    try:
-        with open(log_path, "a") as logf:
-            proc = subprocess.run(_argv(cmd), stdout=logf, stderr=subprocess.STDOUT,
-                                  stdin=subprocess.DEVNULL, timeout=timeout,
-                                  cwd=cwd, env=env)
-        return proc.returncode, ""
-    except subprocess.TimeoutExpired:
-        return None, f"{label} timed out after {timeout:.0f}s"
-    except OSError as e:
-        return None, f"{label} could not start: {e}"
+    with open(log_path, "a") as logf:
+        try:
+            proc = subprocess.Popen(_argv(cmd), stdout=logf, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.DEVNULL, cwd=cwd, env=env,
+                                    start_new_session=True, pass_fds=(lock_fd,))
+        except OSError as e:
+            return None, f"{label} could not start: {e}"
+        try:
+            return proc.wait(timeout=timeout), ""
+        except subprocess.TimeoutExpired:
+            _kill_group(proc)
+            return None, f"{label} timed out after {timeout:.0f}s"
+        except BaseException:
+            _kill_group(proc)
+            raise
 
 
-def _run_refresh(box, cfg, now_fn, sleep_fn):
+def _run_refresh(box, cfg, now_fn, sleep_fn, lock_fd):
     """(ok, why). The refresh command once, then the health command polled
     until it passes or health_timeout_s runs out."""
     log_path = _paths(box)["refresh_log"]
     rc, err = _run(cfg["refresh"], cfg["refresh_timeout_s"], cfg, box, log_path,
-                   "refresh")
+                   "refresh", lock_fd)
     if rc != 0:
         tail = _tail_line(log_path)
         why = err or f"refresh command rc={rc}"
@@ -583,7 +664,7 @@ def _run_refresh(box, cfg, now_fn, sleep_fn):
             return False, (f"health check never passed within "
                            f"{cfg['health_timeout_s']:.0f}s ({last})")
         rc, err = _run(cfg["health"], max(remaining, 1.0), cfg, box, log_path,
-                       "health")
+                       "health", lock_fd)
         if rc == 0:
             return True, ""
         last = err or f"health rc={rc}"
@@ -622,11 +703,42 @@ def refresh(box, force=False, now_fn=time.time, sleep_fn=time.sleep):
         _event(events, t, box, "REFRESH-START", frm=s, to="refreshing")
         return {"ok": True, "started": True}, True
 
-    res = _transact(box, cfg, now_fn, start)
-    if not res.get("started"):
-        return res
-    ok, why = _run_refresh(box, cfg, now_fn, sleep_fn)
+    paths = _paths(box)
+    paths["dir"].mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(str(paths["refresh_lock"]), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        if not _grab_refresh_lock(lock_fd):
+            return {"ok": False, "msg": f"a refresh of {box} still runs (a process "
+                    f"holds {paths['refresh_lock'].name}); not starting a second one"}
+        res = _transact(box, cfg, now_fn, start)
+        if not res.get("started"):
+            return res
+        with _signals_interrupt():
+            try:
+                ok, why = _run_refresh(box, cfg, now_fn, sleep_fn, lock_fd)
+            except _Interrupted as e:
+                ok, why = False, f"refresh interrupted by signal {e.signum}"
+        return _transact(box, cfg, now_fn, _finisher(box, token, ok, why))
+    finally:
+        # Closing our fd drops the lock unless a command that inherited it
+        # still runs — exactly the liveness signal the reaper reads.
+        os.close(lock_fd)
 
+
+def _grab_refresh_lock(lock_fd):
+    """Non-blocking; a few short retries ride out a reaper's momentary probe
+    of the same lock. False = a refresh (or its orphaned command) runs."""
+    for attempt in range(10):
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except BlockingIOError:
+            if attempt < 9:
+                time.sleep(0.1)
+    return False
+
+
+def _finisher(box, token, ok, why):
     def finish(st, events, t):
         r = st["refresh"]
         if st["state"] != "refreshing" or r is None or r["token"] != token:
@@ -645,7 +757,7 @@ def refresh(box, force=False, now_fn=time.time, sleep_fn=time.sleep):
         return {"ok": False, "msg": f"refresh of {box} FAILED ({why}); box "
                                     f"stays {st['state']}"}, True
 
-    return _transact(box, cfg, now_fn, finish)
+    return finish
 
 
 def status(box=None, now=None):
