@@ -99,7 +99,7 @@ Task 1102 handover draft announced a removed feature the client never had.
 Owner: „preco spamujes so zrusenym nahravanim cenika ved to nedostal nikdy tak
 preco ma vediet ze si to zrusil?" (rule 3) — „a musi byt oznaceny v spravach a
 taskoch patrik" (rule 5; the odoo-erp `scripts/odoo-task-sync.py` lint still
-FAILs a non-empty `user_ids`, aligning it is odoo-erp work).
+FAILs a non-empty `user_ids`; its alignment is relayed to odoo-erp from #1166).
 
 Rule 6: „Pochopil som, ze klient odmieta prechadzat tasky vo odo na verifikaciu
 takze budeme musiet zvolit nejaky autoclose rezim. Napr tak ktory je starsi nez

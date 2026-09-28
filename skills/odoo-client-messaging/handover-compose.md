@@ -3,8 +3,8 @@
 **This is the SINGLE canonical handover-proposal rule for EVERY sub-dev stream.**
 Keep no private per-stream notes (montalu5 2026-08-16). SEND mechanics live in the PROJECT's own rules (odoo-erp: `.claude/rules/odoo-task-sync.md`);
 `SKILL.md` is the channel-agnostic pointer (airuleset issue 891).
-THIS file is the COMPOSE — what a message must contain — and EVERY message, opening
-AND follow-up, is presented to the OWNER for approval BEFORE posting.
+THIS file is the COMPOSE — what a message must contain; EVERY message is
+owner-approved BEFORE posting.
 
 - **The owner must APPROVE the exact text of EVERY client-facing Discuss message
   BEFORE it is posted — the OPENING message AND every follow-up reply / question /
@@ -83,7 +83,7 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
 - **The message body MUST carry a direct deep-link URL to the LIVE feature** on
   the client's PROD — the actual route/record/page URL the client clicks to SEE
   it, never a menu path ("Predaj → Objednávky → …") and never the bare homepage.
-  Open it and confirm it loads before putting it in the proposal. **This applies
+  **This applies
   to EVERY openable reference in the message, not only the handed-over feature:**
   each such reference gets its OWN functional URL, verified live before sending,
   never a prose menu path (airuleset #595: msg 1723308, rejected). This generalizes completion-report.md's 🌐-line
@@ -191,7 +191,8 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   okno beží → reaguj (#625); potvrdzuje → #755, NOVÁ téma → #728 redirect.
   **STANDING template grant:** finálna pripomienka + closing nóta citujú
   `airuleset:owner-approved template:final-reminder` / `template:closing-note`;
-  nesankcionovaný `template:<iný>` NEudelí — hook #628/#799.
+  nesankcionovaný `template:<iný>` NEudelí — hook #628/#799. Montalu úlohy:
+  NAHRÁDZA ho odoo-erp#8507 auto-close (`client-board-stages.md` rule 6).
 - **Prod-transfer gate (#1105) — NEPOSIELAJ akceptačnú/odovzdávaciu správu, kým
   je ktorákoľvek `Prod-transfer:` položka `pending`.** Vývojárom dodané erp-test
   vstupy musia byť na PROD odškrtnuté (`Prod-transfer-status:` =

@@ -1,6 +1,6 @@
 # Client Board Tasks — Stages, Assignee & "Done" (#1102)
 
-Topic companion of `client-board-tasks.md` (CORE): its profile table holds each board's stages (a new board = a new row + its GitHub `needs-answer` mirror). Auto-loads on a `project.task` stage move; these rules govern MOVING a task between stages.
+Topic companion of `client-board-tasks.md` (CORE): its profile table holds each board's stages (a new board = a new row). Auto-loads on a `project.task` stage move; these rules govern MOVING a task between stages.
 
 The profile's "awaiting client verification" stage is **Verifikácia** (montalu) or **Na overenie** (slovnormal) — rule 3's handover note fires on the transition INTO it. The "blocked on a client question" stage is **Potrebuje ujasniť** (montalu); slovnormal has no dedicated question stage, so a question stays in **V práci** with the chatter question of rule 4 (`client-board-questions.md`).
 
@@ -38,28 +38,31 @@ the four sections is blocked.
 
 On the **montalu** profile the person the handover addresses is @mentioned in
 the message AND set as the task's assignee (`user_ids`) when the rule 3 note is
-posted (owner 28.9.2026, #1166). On the **miva** profile a client task
-carries **NO assignee** (`user_ids` empty): every assignee triggers an Odoo
-notification mail, and the stage column already IS the status. On the
-**slovnormal** profile the assignee is **Dávid Greňa** (owner ruling #1018) — the
-profile row governs; never add an assignee a profile does not name.
+posted — the employee the note is written for (e.g. Patrik Javorský; owner
+28.9.2026, #1166). On the **miva** profile a client task carries **NO assignee**
+(`user_ids` empty): every assignee triggers an Odoo notification mail, and the
+stage column already IS the status. On the **slovnormal** profile the assignee
+is **Dávid Greňa** (owner ruling #1018) — the profile row governs; never add an
+assignee a profile does not name.
 
 ### 6. "Done" stage — per profile
 
 A task reaches the profile's terminal stage (**Hotovo** / **Hotové**) ONLY after
 the client confirms acceptance — a 👍 reaction, a reply, or an explicit "OK" —
-never on the stream's own judgment — except the montalu auto-close below. WHO moves it is the profile's call: the **OWNER** on miva and, after a
-confirmation, on montalu (#924); **Dávid Greňa himself** on slovnormal. The
-confirmation is recorded on the GitHub issue as
+never on the stream's own judgment (except the montalu auto-close below). WHO
+moves it is the profile's call: the **OWNER** on miva and, after a confirmation,
+on montalu (#924); **Dávid Greňa himself** on slovnormal. The confirmation is
+recorded on the GitHub issue as
 `Acceptance-cited: msg <message_id> task <task_id>` (the `handover-compose.md`
 family-acceptance doctrine applies — one task per capability family, one
 confirmation closes the family).
 
 On **montalu** a task in Verifikácia also reaches Hotovo by the odoo-erp#8507
-auto-close, without the owner (owner ROZHODNUTÉ 28.9.2026, #1167): ONE reminder after 14 days without a reaction,
-then Hotovo at ≥ 21 days and ≥ 7 days after the reminder; a client reaction
-cancels the countdown. The mechanism moves the task, never the stream by hand,
-and replaces the #799 tacit closure on montalu tasks. The GitHub ticket then closes with
+auto-close (owner ROZHODNUTÉ 28.9.2026, #1167): ONE reminder after 14 days
+without a reaction, then Hotovo at ≥ 21 days and ≥ 7 days after the reminder;
+any non-stream chatter message or a move out of Verifikácia cancels the
+countdown. The mechanism moves the task, never the stream by hand, and replaces
+#799's tacit closure there. The GitHub ticket then closes with
 `Acceptance-cited: auto-close after 21 days without reaction (owner ROZHODNUTÉ 28.9., odoo-erp#8507) msg <auto-close note id> task <task_id>`.
 
 ### 14. Udalosť → fáza (#1036)
