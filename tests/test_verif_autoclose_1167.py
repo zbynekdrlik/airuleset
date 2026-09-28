@@ -16,7 +16,6 @@ Every Odoo read goes through an in-memory fake `call(model, method, **body)`;
 every clock is injected. No network, no live Odoo.
 """
 import datetime
-import json
 import os
 import sys
 import tempfile
