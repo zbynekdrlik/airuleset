@@ -35,16 +35,20 @@ _L2_MANAGED_APIKEY_HELPER = str(Path.home() / ".claude"
 
 # #1173: the exact CLAUDE_CODE_SUBAGENT_MODEL values airuleset wrote (#991:
 # MODEL_TIERS["opus"] = claude-opus-4-8; #1119: MODEL_TIERS["opus5"] =
-# claude-opus-5-5). L2 also wrote its marker's gateway alias there; that one is
-# recognised by the L2 fingerprint keys above instead of by value.
+# claude-opus-5-5). An owner who hand-sets one of these exact ids cannot be told
+# apart from airuleset's old write, so it is removed too (documented on #1173).
+# L2 also wrote its marker's gateway alias there; that one is recognised by
+# airuleset's own L2 apiKeyHelper path instead of by value — never by the
+# generic env keys, which an owner may set for their own reasons.
 _RETIRED_MANAGED_SUBAGENT_MODELS = frozenset({"claude-opus-4-8", "claude-opus-5-5"})
 _SUBAGENT_MODEL_KEY = "CLAUDE_CODE_SUBAGENT_MODEL"
 
 
-def _heal_subagent_model(env, err):
+def _heal_subagent_model(env, l2_box, err):
     """Remove `CLAUDE_CODE_SUBAGENT_MODEL` when airuleset wrote it (a retired
     managed value, or any value on an L2-flipped box); otherwise keep it and
-    report it on `err`. Must run BEFORE the L2 pop erases the fingerprint."""
+    report it on `err` — on every install, deliberately, so an override of
+    Claude Code's native choice stays visible."""
     if _SUBAGENT_MODEL_KEY not in env:
         return
     value = env[_SUBAGENT_MODEL_KEY]
@@ -52,7 +56,6 @@ def _heal_subagent_model(env, err):
     # reported, and never hashed (an unhashable list must not crash install).
     retired = (isinstance(value, str)
                and value.strip() in _RETIRED_MANAGED_SUBAGENT_MODELS)
-    l2_box = any(k in env for k in _L2_STALE_ENV_KEYS)
     if retired or l2_box:
         env.pop(_SUBAGENT_MODEL_KEY)
         print("settings: removed managed env key %s=%s (subagent models are "
@@ -70,8 +73,9 @@ def heal_retired_managed_settings(result, err):
     L2 managed apiKeyHelper (a user's own helper is kept). Reports go to `err`
     (stderr), so cmd_diff's stdout diff stays clean."""
     env = result["env"]
-    _heal_subagent_model(env, err)
+    l2_box = result.get("apiKeyHelper") == _L2_MANAGED_APIKEY_HELPER
+    _heal_subagent_model(env, l2_box, err)
     for key in _L2_STALE_ENV_KEYS:
         env.pop(key, None)
-    if result.get("apiKeyHelper") == _L2_MANAGED_APIKEY_HELPER:
+    if l2_box:
         result.pop("apiKeyHelper", None)

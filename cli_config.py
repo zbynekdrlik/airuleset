@@ -356,8 +356,8 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
       (docs "Choose a model"; the 2.1.283 resolver — evidence on #1173), so a
       bare dispatch runs on the main's MANAGED_MODEL. The self-heal REMOVES a
       value airuleset itself wrote (`_RETIRED_MANAGED_SUBAGENT_MODELS`, or the
-      #1062 L2 gateway alias next to the L2 fingerprint keys) and KEEPS + reports
-      any other value — a hand-set owner choice is never deleted.
+      #1062 L2 gateway alias, by the L2 managed apiKeyHelper) and KEEPS + reports
+      any other value — a foreign value is never deleted.
 
     - `cleanupPeriodDays = MANAGED_CLEANUP_PERIOD_DAYS` (#376) overrides
       Claude Code's OWN native transcript-retention auto-cleanup (default
