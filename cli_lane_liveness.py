@@ -14,7 +14,7 @@ stays in ``cli_lane_overlap`` and is imported at the BOTTOM of this module (a
 deferred import that breaks the load-time cycle with the overlap module's own
 bottom-placed back-compat re-exports ``classify_lanes`` etc.; it resolves in
 either import order). Pure, dependency-injected (a ``run`` callable for git),
-stdlib-only (its one repo import, gates.ticketrefs, is a stdlib leaf).
+stdlib-only apart from the stdlib leaf gates.ticketrefs and the bottom import.
 """
 import json
 import os
@@ -390,8 +390,8 @@ def _lane_ticket_numbers(repo_root, branch, run):
     parser) — a single-digit ticket counts, and a `PR #N` / `Merge pull
     request #N` subject is never a ticket."""
     own = ticketrefs.branch_ticket_number(branch)
-    if own is not None:
-        return {own}                      # the branch's own number — do not widen
+    if own is not None:                   # the branch's own number — do not widen
+        return {own} if own else set()    # 0 = leading digits, not a ticket
     try:
         r = run(["git", "-C", repo_root, "log", "--format=%s", "-20", branch])
     except Exception:  # noqa: BLE001 — subjects unavailable => no number
