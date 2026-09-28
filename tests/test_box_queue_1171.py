@@ -1,0 +1,847 @@
+"""#1171: `airuleset.py box-queue` — the ONE tested mechanism by which the
+parallel autopilot lanes of one stream share that stream's single erp-test
+PROD-copy box (montalu4, 2026-09-28: six improvised prose patches in one day —
+non-FIFO flock starvation, a 3-hour hold, an out-of-turn take, a refresh
+script that rewrote `~/.ssh/config`).
+
+Real temp dirs, real `fcntl.flock`, real pid liveness, a fake clock for lease
+expiry, fake refresh/health scripts, and real subprocesses for concurrency.
+"""
+
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import textwrap
+import time
+from pathlib import Path
+from unittest import TestCase, main
+
+REPO = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(REPO))
+
+import cli_box_queue as bq  # noqa: E402
+
+BOX = "erp-test-demo"
+
+
+def dead_pid():
+    """A pid that WAS valid and is now guaranteed dead (reaped)."""
+    p = subprocess.Popen([sys.executable, "-c", "pass"])
+    p.wait()
+    return p.pid
+
+
+def _alive(pid):
+    """True while `pid` exists and is not a zombie."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except OSError:
+        return False
+
+
+def _lock_owned(lock):
+    """True while some process holds the flock (a non-blocking probe)."""
+    import fcntl
+    fd = os.open(str(lock), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)
+    return False
+
+
+def run_cli(args, env):
+    return subprocess.run(
+        [sys.executable, str(REPO / "airuleset.py"), "box-queue"] + args,
+        capture_output=True, text=True, timeout=60, env=env,
+    )
+
+
+class _Base(TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self._tmp.name) / "box-queue"
+        self._old = os.environ.get("AIRULESET_BOX_QUEUE_DIR")
+        os.environ["AIRULESET_BOX_QUEUE_DIR"] = str(self.dir)
+        self.me = os.getpid()
+        self.env = dict(os.environ)
+        self.write_config(refresh="true")
+
+    def tearDown(self):
+        if self._old is None:
+            os.environ.pop("AIRULESET_BOX_QUEUE_DIR", None)
+        else:
+            os.environ["AIRULESET_BOX_QUEUE_DIR"] = self._old
+        self._tmp.cleanup()
+
+    def state(self):
+        return json.loads((self.dir / f"{BOX}.json").read_text())
+
+    def write_config(self, **cfg):
+        self.dir.mkdir(parents=True, exist_ok=True)
+        (self.dir / f"{BOX}.config.json").write_text(json.dumps(cfg))
+
+    def script(self, name, body):
+        p = Path(self._tmp.name) / name
+        p.write_text("#!/bin/bash\nset -euo pipefail\n" + textwrap.dedent(body))
+        p.chmod(0o755)
+        return str(p)
+
+    def log_lines(self):
+        p = self.dir / "decisions.log"
+        return p.read_text().splitlines() if p.exists() else []
+
+
+class TestFifoTake(_Base):
+    def test_fresh_box_is_pristine_and_empty(self):
+        st = bq.status(BOX, now=1000.0)
+        self.assertEqual(st["state"], "pristine")
+        self.assertEqual(st["queue"], [])
+        self.assertIsNone(st["holder"])
+
+    def test_take_refused_for_non_head_lane(self):
+        for lane in ("a", "b", "c"):
+            self.assertTrue(bq.enqueue(BOX, lane, self.me, now=1000.0)["ok"])
+        r = bq.take(BOX, "b", self.me, now_fn=lambda: 1001.0)
+        self.assertFalse(r["ok"])
+        self.assertIn("head", r["msg"])
+        self.assertEqual(self.state()["state"], "pristine")
+        r = bq.take(BOX, "a", self.me, now_fn=lambda: 1002.0)
+        self.assertTrue(r["ok"], r)
+        st = self.state()
+        self.assertEqual(st["state"], "held:a")
+        self.assertEqual([e["lane"] for e in st["queue"]], ["b", "c"])
+
+    def test_strict_fifo_order_across_releases(self):
+        for lane in ("a", "b", "c"):
+            bq.enqueue(BOX, lane, self.me, now=1000.0)
+        self.assertTrue(bq.take(BOX, "a", self.me, now_fn=lambda: 1001.0)["ok"])
+        self.assertTrue(bq.release(BOX, "a", clean=True, now=1002.0)["ok"])
+        self.assertFalse(bq.take(BOX, "c", self.me, now_fn=lambda: 1003.0)["ok"])
+        self.assertTrue(bq.take(BOX, "b", self.me, now_fn=lambda: 1004.0)["ok"])
+
+    def test_enqueue_is_idempotent(self):
+        bq.enqueue(BOX, "a", self.me, now=1000.0)
+        bq.enqueue(BOX, "b", self.me, now=1001.0)
+        bq.enqueue(BOX, "a", self.me, now=1002.0)
+        self.assertEqual([e["lane"] for e in self.state()["queue"]], ["a", "b"])
+
+    def test_take_refused_for_non_pristine_box(self):
+        bq.enqueue(BOX, "a", self.me, now=1000.0)
+        bq.enqueue(BOX, "b", self.me, now=1000.0)
+        bq.take(BOX, "a", self.me, now_fn=lambda: 1001.0)
+        bq.release(BOX, "a", reason="deployed a branch", now=1002.0)
+        self.assertEqual(self.state()["state"], "dirty:a")
+        r = bq.take(BOX, "b", self.me, now_fn=lambda: 1003.0)
+        self.assertFalse(r["ok"])
+        self.assertIn("dirty:a", r["msg"])
+
+    def test_take_auto_enqueues_at_the_tail(self):
+        bq.enqueue(BOX, "a", self.me, now=1000.0)
+        r = bq.take(BOX, "z", self.me, now_fn=lambda: 1001.0)
+        self.assertFalse(r["ok"])
+        self.assertEqual([e["lane"] for e in self.state()["queue"]], ["a", "z"])
+
+    def test_bounded_wait_polls_then_gives_up(self):
+        bq.enqueue(BOX, "a", self.me, now=1000.0)
+        clock = [1000.0]
+        sleeps = []
+
+        def sleep(s):
+            sleeps.append(s)
+            clock[0] += s
+
+        r = bq.take(BOX, "b", self.me, wait_s=30, poll_s=10,
+                    now_fn=lambda: clock[0], sleep_fn=sleep)
+        self.assertFalse(r["ok"])
+        self.assertEqual(sum(sleeps), 30)
+        self.assertLessEqual(clock[0], 1030.0 + 1e-9)
+
+    def test_wait_succeeds_when_head_releases(self):
+        bq.enqueue(BOX, "a", self.me, now=1000.0)
+        bq.take(BOX, "a", self.me, now_fn=lambda: 1000.0)
+        bq.enqueue(BOX, "b", self.me, now=1000.0)
+        clock = [1000.0]
+
+        def sleep(s):
+            clock[0] += s
+            if clock[0] >= 1020.0 and self.state()["state"] == "held:a":
+                bq.release(BOX, "a", clean=True, now=clock[0])
+
+        r = bq.take(BOX, "b", self.me, wait_s=60, poll_s=10,
+                    now_fn=lambda: clock[0], sleep_fn=sleep)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.state()["state"], "held:b")
+
+
+class TestLeaseAndLiveness(_Base):
+    def test_expired_lease_is_reclaimed_as_dirty(self):
+        bq.enqueue(BOX, "a", self.me, now=1000.0)
+        bq.take(BOX, "a", self.me, lease_s=60, now_fn=lambda: 1000.0)
+        st = bq.status(BOX, now=1061.0)
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIsNone(st["holder"])
+        self.assertIn("lease expired", st["reason"])
+        self.assertTrue(any("RECLAIM" in ln for ln in self.log_lines()))
+
+    def test_renew_extends_lease(self):
+        bq.enqueue(BOX, "a", self.me, now=1000.0)
+        bq.take(BOX, "a", self.me, lease_s=60, now_fn=lambda: 1000.0)
+        self.assertTrue(bq.renew(BOX, "a", lease_s=60, now=1050.0)["ok"])
+        self.assertEqual(bq.status(BOX, now=1100.0)["state"], "held:a")
+
+    def test_renew_after_expiry_fails_and_release_cannot_launder_it(self):
+        bq.enqueue(BOX, "a", self.me, now=1000.0)
+        bq.take(BOX, "a", self.me, lease_s=60, now_fn=lambda: 1000.0)
+        self.assertFalse(bq.renew(BOX, "a", now=1100.0)["ok"])
+        r = bq.release(BOX, "a", clean=True, now=1101.0)
+        self.assertFalse(r["ok"])
+        self.assertEqual(self.state()["state"], "dirty:a")
+
+    def test_max_hold_bounds_a_renew_loop(self):
+        self.write_config(refresh="true", lease_s=60, max_hold_s=300)
+        bq.enqueue(BOX, "a", self.me, now=1000.0)
+        bq.take(BOX, "a", self.me, now_fn=lambda: 1000.0)
+        t = 1000.0
+        while t < 1250.0:
+            t += 50.0
+            self.assertTrue(bq.renew(BOX, "a", now=t)["ok"], t)
+        self.assertFalse(bq.renew(BOX, "a", now=1301.0)["ok"])
+        self.assertEqual(self.state()["state"], "dirty:a")
+        self.assertIn("max hold", self.state()["reason"])
+
+    def test_dead_holder_pid_is_reclaimed_as_dirty(self):
+        dead = dead_pid()
+        bq.enqueue(BOX, "a", dead, now=1000.0)
+        st = bq.status(BOX, now=1000.0)
+        self.assertEqual(st["queue"], [])   # a dead-pid queue entry is dropped
+        bq.enqueue(BOX, "a", self.me, now=1000.0)
+        bq.take(BOX, "a", self.me, now_fn=lambda: 1000.0)
+        raw = self.state()
+        raw["holder"]["pid"] = dead
+        (self.dir / f"{BOX}.json").write_text(json.dumps(raw))
+        st = bq.status(BOX, now=1001.0)
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIn("pid", st["reason"])
+
+    def test_stale_queue_entry_is_dropped_so_it_cannot_block_the_head(self):
+        self.write_config(refresh="true", queue_ttl_s=100)
+        bq.enqueue(BOX, "a", self.me, now=1000.0)
+        bq.enqueue(BOX, "b", self.me, now=1150.0)
+        r = bq.take(BOX, "b", self.me, now_fn=lambda: 1160.0)
+        self.assertTrue(r["ok"], r)
+
+    def test_corrupt_state_file_is_treated_as_dirty_never_pristine(self):
+        self.dir.mkdir(parents=True, exist_ok=True)
+        (self.dir / f"{BOX}.json").write_text("{not json")
+        st = bq.status(BOX, now=1000.0)
+        self.assertTrue(st["state"].startswith("dirty:"), st)
+
+
+class TestRefresh(_Base):
+    def test_release_dirty_then_refresh_runs_config_and_goes_pristine(self):
+        marker = Path(self._tmp.name) / "refreshed"
+        refresh = self.script("refresh.sh", f"echo ran >> {marker}\n")
+        health = self.script("health.sh", "exit 0\n")
+        self.write_config(refresh=[refresh], health=[health])
+        bq.enqueue(BOX, "a", self.me, now=1000.0)
+        bq.take(BOX, "a", self.me, now_fn=lambda: 1000.0)
+        bq.release(BOX, "a", now=1001.0)
+        r = bq.refresh(BOX, now_fn=time.time)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(marker.read_text(), "ran\n")
+        st = self.state()
+        self.assertEqual(st["state"], "pristine")
+        self.assertEqual(st["reason"], "")
+        events = " ".join(self.log_lines())
+        self.assertIn("REFRESH-START", events)
+        self.assertIn("REFRESH-OK", events)
+
+    def test_failing_refresh_stays_dirty_with_logged_reason(self):
+        refresh = self.script("refresh.sh", "echo boom >&2\nexit 3\n")
+        self.write_config(refresh=[refresh])
+        bq.enqueue(BOX, "a", self.me, now=1000.0)
+        bq.take(BOX, "a", self.me, now_fn=lambda: 1000.0)
+        bq.release(BOX, "a", now=1001.0)
+        r = bq.refresh(BOX, now_fn=time.time)
+        self.assertFalse(r["ok"])
+        st = self.state()
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIn("rc=3", st["reason"])
+        self.assertTrue(any("REFRESH-FAIL" in ln and "rc=3" in ln
+                            for ln in self.log_lines()))
+
+    def test_failing_health_stays_dirty(self):
+        refresh = self.script("refresh.sh", "exit 0\n")
+        health = self.script("health.sh", "exit 1\n")
+        self.write_config(refresh=[refresh], health=[health],
+                          health_timeout_s=1, health_interval_s=0.2)
+        raw = {"version": 1, "box": BOX, "state": "dirty:a", "queue": [],
+               "holder": None, "refresh": None, "reason": "x",
+               "updated_at": 1000.0}
+        self.dir.mkdir(parents=True, exist_ok=True)
+        (self.dir / f"{BOX}.json").write_text(json.dumps(raw))
+        r = bq.refresh(BOX, now_fn=time.time)
+        self.assertFalse(r["ok"])
+        self.assertEqual(self.state()["state"], "dirty:a")
+        self.assertIn("health", self.state()["reason"])
+
+    def test_refresh_refused_while_held(self):
+        marker = Path(self._tmp.name) / "refreshed"
+        refresh = self.script("refresh.sh", f"touch {marker}\n")
+        self.write_config(refresh=[refresh])
+        bq.enqueue(BOX, "a", self.me, now=time.time())
+        bq.take(BOX, "a", self.me, now_fn=time.time)
+        r = bq.refresh(BOX, force=True, now_fn=time.time)
+        self.assertFalse(r["ok"])
+        self.assertIn("held", r["msg"])
+        self.assertFalse(marker.exists())
+        self.assertEqual(self.state()["state"], "held:a")
+
+    def _refreshing(self, cli_pid):
+        raw = {"version": 1, "box": BOX, "state": "refreshing", "queue": [],
+               "holder": None,
+               "refresh": {"token": "t", "pid": cli_pid, "started_at": 1000.0,
+                           "deadline": 99999.0, "from": "dirty:a"},
+               "reason": "", "updated_at": 1000.0}
+        self.dir.mkdir(parents=True, exist_ok=True)
+        (self.dir / f"{BOX}.json").write_text(json.dumps(raw))
+
+    def _orphan_holding_refresh_lock(self):
+        """A process that holds <box>.refresh.lock the way a still-running
+        refresh command (which inherited the fd) does after its CLI died."""
+        code = ("import fcntl, os, sys\n"
+                "fd = os.open(sys.argv[1], os.O_CREAT | os.O_RDWR, 0o600)\n"
+                "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+                "print('locked', flush=True)\n"
+                "sys.stdin.read()\n")
+        self.dir.mkdir(parents=True, exist_ok=True)
+        p = subprocess.Popen([sys.executable, "-c", code,
+                              str(self.dir / f"{BOX}.refresh.lock")],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.assertEqual(p.stdout.readline().strip(), "locked")
+
+        def stop():
+            p.stdin.close()
+            p.wait(timeout=30)
+            p.stdout.close()
+
+        self.addCleanup(lambda: p.poll() is None and stop())
+        stop.pid = p.pid
+        return stop
+
+    def test_take_refused_while_refreshing(self):
+        self._orphan_holding_refresh_lock()
+        self._refreshing(self.me)
+        r = bq.take(BOX, "b", self.me, now_fn=lambda: 1001.0)
+        self.assertFalse(r["ok"])
+        self.assertIn("refreshing", r["msg"])
+
+    def test_orphaned_refresh_command_keeps_the_box_refreshing(self):
+        """The supervisor's refresh CLI died (e.g. a 10-min foreground Bash
+        cap) but its refresh command still runs: the box must stay
+        `refreshing` — never dirty — so no second refresh and no take can
+        start on top of it."""
+        self.write_config(refresh="true")
+        stop = self._orphan_holding_refresh_lock()
+        self._refreshing(dead_pid())
+        self.assertEqual(bq.status(BOX, now=1001.0)["state"], "refreshing")
+        r = bq.refresh(BOX, now_fn=lambda: 1002.0)
+        self.assertFalse(r["ok"])
+        self.assertIn("still", r["msg"])
+        self.assertEqual(self.state()["state"], "refreshing")
+        stop()
+        st = bq.status(BOX, now=1003.0)
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIn("refresh", st["reason"])
+
+    def test_refresh_timeout_kills_the_whole_command_group(self):
+        pidfile = Path(self._tmp.name) / "grandchild.pid"
+        refresh = self.script("refresh.sh", f"sleep 60 &\necho $! > {pidfile}\nsleep 60\n")
+        self.write_config(refresh=[refresh], refresh_timeout_s=1)
+        self._refreshing_from_dirty()
+        r = bq.refresh(BOX, now_fn=time.time)
+        self.assertFalse(r["ok"])
+        self.assertIn("timed out", self.state()["reason"])
+        self.assertEqual(self.state()["state"], "dirty:a")
+        grandchild = int(pidfile.read_text())
+        for _ in range(100):
+            if not _alive(grandchild):
+                break
+            time.sleep(0.05)
+        self.assertFalse(_alive(grandchild), "orphaned refresh grandchild survived")
+
+    def test_sigterm_during_refresh_records_dirty_and_kills_the_command(self):
+        started = Path(self._tmp.name) / "started"
+        pidfile = Path(self._tmp.name) / "child.pid"
+        refresh = self.script("refresh.sh",
+                              f"echo $$ > {pidfile}\ntouch {started}\nsleep 60\n")
+        self.write_config(refresh=[refresh])
+        self._refreshing_from_dirty()
+        p = subprocess.Popen([sys.executable, str(REPO / "airuleset.py"), "box-queue",
+                              "refresh", "--box", BOX], env=self.env,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        for _ in range(400):
+            if started.exists():
+                break
+            time.sleep(0.05)
+        self.assertTrue(started.exists(), "refresh command never started")
+        p.terminate()
+        p.communicate(timeout=30)
+        self.assertEqual(p.returncode, 1)
+        st = self.state()
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIn("signal", st["reason"])
+        child = int(pidfile.read_text())
+        for _ in range(100):
+            if not _alive(child):
+                break
+            time.sleep(0.05)
+        self.assertFalse(_alive(child), "refresh command survived the CLI's SIGTERM")
+
+    def test_a_setsid_leftover_is_killed_so_the_next_refresh_runs(self):
+        """A refresh that leaves a daemon in its OWN session (setsid — the
+        command-group kill cannot reach it) still holds the inherited lock.
+        It must be killed when the command ends, never leaked: a leaked
+        holder makes every later refresh refuse, forever (review 2)."""
+        pidfile = Path(self._tmp.name) / "daemon.pid"
+        refresh = self.script("refresh.sh", (
+            "setsid sleep 60 &\npid=$!\n"
+            'for _ in $(seq 200); do\n'
+            '  [ "$(ps -o sid= -p "$pid" | tr -d " ")" = "$pid" ] && break; sleep 0.05\n'
+            'done\n'
+            f"echo $pid > {pidfile}\n"))
+        self.write_config(refresh=[refresh])
+        self._refreshing_from_dirty()
+        r = bq.refresh(BOX, now_fn=time.time)
+        daemon = int(pidfile.read_text())
+        self.addCleanup(lambda: _alive(daemon) and os.kill(daemon, 9))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.state()["state"], "pristine")
+        self.assertFalse(_alive(daemon), "setsid leftover survived the refresh")
+        self.assertFalse(_lock_owned(self.dir / f"{BOX}.refresh.lock"))
+        self.assertTrue(bq.refresh(BOX, force=True, now_fn=time.time)["ok"])
+
+    def test_a_timed_out_step_in_its_own_group_is_killed_too(self):
+        """GNU `timeout` moves itself into a new process group, so a group
+        kill misses it and its child keeps changing the box while the state
+        already says dirty (review 2, experiment 4)."""
+        refresh = self.script("refresh.sh", "timeout 120 sleep 120\n")
+        self.write_config(refresh=[refresh], refresh_timeout_s=1)
+        self._refreshing_from_dirty()
+        r = bq.refresh(BOX, now_fn=time.time)
+        self.assertFalse(r["ok"])
+        self.assertEqual(self.state()["state"], "dirty:a")
+        self.assertFalse(_lock_owned(self.dir / f"{BOX}.refresh.lock"),
+                         "a timed-out step still holds the refresh lock")
+
+    def _refreshing_from_dirty(self):
+        raw = {"version": 1, "box": BOX, "state": "dirty:a", "queue": [],
+               "holder": None, "refresh": None, "reason": "x", "updated_at": 1.0}
+        self.dir.mkdir(parents=True, exist_ok=True)
+        (self.dir / f"{BOX}.json").write_text(json.dumps(raw))
+
+    def test_interrupted_refresh_is_reclaimed_as_dirty(self):
+        raw = {"version": 1, "box": BOX, "state": "refreshing", "queue": [],
+               "holder": None,
+               "refresh": {"token": "t", "pid": dead_pid(), "started_at": 1000.0,
+                           "deadline": 99999.0, "from": "dirty:a"},
+               "reason": "", "updated_at": 1000.0}
+        self.dir.mkdir(parents=True, exist_ok=True)
+        (self.dir / f"{BOX}.json").write_text(json.dumps(raw))
+        st = bq.status(BOX, now=1001.0)
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIn("refresh", st["reason"])
+
+    def test_refresh_without_config_is_a_usage_error(self):
+        (self.dir / f"{BOX}.config.json").unlink()
+        raw = {"version": 1, "box": BOX, "state": "dirty:a", "queue": [],
+               "holder": None, "refresh": None, "reason": "", "updated_at": 1.0}
+        (self.dir / f"{BOX}.json").write_text(json.dumps(raw))
+        with self.assertRaises(bq.BoxQueueError):
+            bq.refresh(BOX, now_fn=time.time)
+        self.assertEqual(self.state()["state"], "dirty:a")
+
+
+class TestReviewFindings(_Base):
+    """Adversarial review 1 (#1171): every production branch it found
+    untested, plus the two ways a refresh could block the box forever."""
+
+    def _raw(self, **over):
+        raw = {"version": 1, "box": BOX, "state": "pristine", "queue": [],
+               "holder": None, "refresh": None, "reason": "", "updated_at": 1.0}
+        raw.update(over)
+        self.dir.mkdir(parents=True, exist_ok=True)
+        (self.dir / f"{BOX}.json").write_text(json.dumps(raw))
+
+    def _lock_holder(self):
+        return TestRefresh._orphan_holding_refresh_lock(self)
+
+    def test_refresh_stuck_past_its_deadline_is_killed_and_reclaimed(self):
+        holder = [self._lock_holder().pid]
+        self._raw(state="refreshing",
+                  refresh={"token": "t", "pid": dead_pid(), "started_at": 1000.0,
+                           "deadline": 1100.0, "from": "dirty:a"})
+        self.assertEqual(bq.status(BOX, now=1050.0)["state"], "refreshing")
+        st = bq.status(BOX, now=1101.0)
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIn("deadline", st["reason"])
+        for _ in range(100):
+            if not _alive(holder[0]):
+                break
+            time.sleep(0.05)
+        self.assertFalse(_alive(holder[0]), "stuck refresh process survived")
+
+    def test_refresh_kills_background_leftovers_in_its_own_group(self):
+        pidfile = Path(self._tmp.name) / "bg.pid"
+        refresh = self.script("refresh.sh", f"sleep 60 &\necho $! > {pidfile}\n")
+        self.write_config(refresh=[refresh])
+        self._raw(state="dirty:a")
+        self.assertTrue(bq.refresh(BOX, now_fn=time.time)["ok"])
+        bg = int(pidfile.read_text())
+        for _ in range(100):
+            if not _alive(bg):
+                break
+            time.sleep(0.05)
+        self.assertFalse(_alive(bg), "a leftover in the refresh group survived")
+        self.assertFalse(any("LOCK-LEAK" in ln for ln in self.log_lines()))
+        self.assertTrue(bq.refresh(BOX, force=True, now_fn=time.time)["ok"])
+
+    def test_refresh_over_a_stale_refreshing_record_proceeds(self):
+        self.write_config(refresh="true")
+        self._raw(state="refreshing",
+                  refresh={"token": "old", "pid": self.me, "started_at": 1.0,
+                           "deadline": 9e12, "from": "dirty:a"})
+        r = bq.refresh(BOX, now_fn=time.time)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(self.state()["state"], "pristine")
+        self.assertTrue(any("REFRESH-LOST" in ln for ln in self.log_lines()))
+
+    def test_refresh_lock_released_without_a_result_goes_dirty(self):
+        self._raw(state="refreshing",
+                  refresh={"token": "t", "pid": self.me, "started_at": 1.0,
+                           "deadline": 9e12, "from": "dirty:a"})
+        st = bq.status(BOX, now=1000.0)
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIn("without a result", st["reason"])
+
+    def test_future_timestamps_never_extend_a_hold_or_a_queue_slot(self):
+        self._raw(state="held:a",
+                  holder={"lane": "a", "pid": self.me, "taken_at": 1000.0,
+                          "lease_until": 1e9},
+                  queue=[{"lane": "b", "pid": self.me, "enqueued_at": 1000.0,
+                          "seen_at": 1e9}])
+        st = bq.status(BOX, now=1001.0)
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIn("future", st["reason"])
+        self.assertEqual(st["queue"], [])
+
+    def test_inconsistent_state_is_dirty(self):
+        self._raw(state="held:a", holder=None)
+        self.assertEqual(bq.status(BOX, now=1.0)["state"], "dirty:unknown")
+
+    def test_forged_lane_in_state_file_is_corruption(self):
+        self._raw(queue=[{"lane": "a\nFORGED", "pid": self.me,
+                          "enqueued_at": 1.0, "seen_at": 1.0}])
+        self.assertEqual(bq.status(BOX, now=2.0)["state"], "dirty:unknown")
+
+    def test_withdraw_leaves_the_queue(self):
+        bq.enqueue(BOX, "a", self.me, now=1.0)
+        bq.enqueue(BOX, "b", self.me, now=1.0)
+        r = bq.release(BOX, "b", now=2.0)
+        self.assertTrue(r["ok"], r)
+        self.assertEqual([e["lane"] for e in self.state()["queue"]], ["a"])
+        self.assertTrue(any("WITHDRAW" in ln for ln in self.log_lines()))
+
+    def test_config_validation(self):
+        self.dir.mkdir(parents=True, exist_ok=True)
+        cfg = self.dir / f"{BOX}.config.json"
+        for bad in ('{"lease_s": NaN}', '{"lease_s": true}', '{"lease_s": 0}',
+                    '{"lease_s": 100, "max_hold_s": 50}', '{"refresh": ""}',
+                    '{"refresh": []}', '[1]', '{not json'):
+            cfg.write_text(bad)
+            with self.assertRaises(bq.BoxQueueError, msg=bad):
+                bq.load_config(BOX)
+        cfg.write_text('{"refresh": "true"}')
+        cfg.chmod(0o666)
+        with self.assertRaises(bq.BoxQueueError):
+            bq.load_config(BOX)
+        cfg.chmod(0o600)
+        self.assertEqual(bq.load_config(BOX)["refresh"], "true")
+
+    def test_wait_lease_poll_and_pid_bounds(self):
+        for kw in ({"wait_s": -1}, {"wait_s": bq.MAX_WAIT_S + 1},
+                   {"lease_s": bq.DEFAULTS["max_hold_s"] + 1}, {"poll_s": 0}):
+            with self.assertRaises(bq.BoxQueueError, msg=kw):
+                bq.take(BOX, "a", self.me, **kw)
+        for pid in (-1, 0, 1):
+            with self.assertRaises(bq.BoxQueueError, msg=pid):
+                bq.enqueue(BOX, "a", pid)
+        r = run_cli(["take", "--box", BOX, "--lane", "a", "--pid", "-1"], self.env)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_defaults_bound_a_dead_in_session_lane(self):
+        """Every in-session lane records the SAME long-lived claude pid, so
+        for a lane the lease — not the pid — is the liveness signal."""
+        self.assertLessEqual(bq.DEFAULTS["lease_s"], 900)
+        self.assertLessEqual(bq.DEFAULTS["queue_ttl_s"], 300)
+
+
+class TestReviewTwo(_Base):
+    """Adversarial review 2 (#1171)."""
+
+    def _raw(self, **over):
+        TestReviewFindings._raw(self, **over)
+
+    def _opener(self):
+        """A process that merely OPENED the lock file (a concurrent refresh
+        in its grab-retry loop) — it owns no lock and must never be killed."""
+        code = ("import os, sys\n"
+                "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+                "print('open', flush=True)\n"
+                "sys.stdin.read()\n")
+        p = subprocess.Popen([sys.executable, "-c", code,
+                              str(self.dir / f"{BOX}.refresh.lock")],
+                             stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.assertEqual(p.stdout.readline().strip(), "open")
+
+        def stop():
+            if p.poll() is None:
+                p.stdin.close()
+                p.wait(timeout=30)
+            p.stdout.close()
+
+        self.addCleanup(stop)
+        return p
+
+    def test_deadline_kill_spares_a_process_that_only_opened_the_lock(self):
+        owner = TestRefresh._orphan_holding_refresh_lock(self)
+        opener = self._opener()
+        self._raw(state="refreshing",
+                  refresh={"token": "t", "pid": dead_pid(), "started_at": 1000.0,
+                           "deadline": 1100.0, "from": "dirty:a"})
+        st = bq.status(BOX, now=1101.0)
+        self.assertEqual(st["state"], "dirty:a")
+        for _ in range(100):
+            if not _alive(owner.pid):
+                break
+            time.sleep(0.05)
+        self.assertFalse(_alive(owner.pid))
+        self.assertIsNone(opener.poll(), "a mere opener of the lock was killed")
+
+    def test_refresh_over_a_stale_record_past_its_deadline_is_clean(self):
+        """The refresh CLI itself owns the lock while it reaps; it must not
+        kill itself nor log a false REFRESH-LATE (review 2, finding 3)."""
+        self._raw(state="refreshing",
+                  refresh={"token": "t", "pid": dead_pid(), "started_at": 1.0,
+                           "deadline": 2.0, "from": "dirty:a"})
+        r = run_cli(["refresh", "--box", BOX], self.env)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.state()["state"], "pristine")
+        self.assertFalse(any("REFRESH-LATE" in ln for ln in self.log_lines()),
+                         self.log_lines())
+
+    def test_enqueue_and_take_refuse_an_unconfigured_box(self):
+        """A mistyped / unconfigured box name must not silently get its own
+        fresh queue (two lanes, two names = no serialisation at all)."""
+        for call in (lambda: bq.enqueue("erp-test-typo", "a", self.me),
+                     lambda: bq.take("erp-test-typo", "a", self.me)):
+            with self.assertRaises(bq.BoxQueueError):
+                call()
+        self.assertFalse((self.dir / "erp-test-typo.json").exists())
+        r = run_cli(["take", "--box", "erp-test-typo", "--lane", "a",
+                     "--pid", str(self.me)], self.env)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_poll_longer_than_half_the_queue_ttl_is_refused(self):
+        with self.assertRaises(bq.BoxQueueError):
+            bq.take(BOX, "a", self.me, wait_s=10,
+                    poll_s=bq.DEFAULTS["queue_ttl_s"] / 2 + 1)
+
+    def test_an_unreadable_state_file_is_an_error_not_corruption(self):
+        bq.enqueue(BOX, "a", self.me, now=1.0)
+        path = self.dir / f"{BOX}.json"
+        path.chmod(0)
+        self.addCleanup(lambda: path.exists() and path.chmod(0o600))
+        with self.assertRaises(bq.BoxQueueError):
+            bq.status(BOX, now=2.0)
+        path.chmod(0o600)
+        self.assertEqual([e["lane"] for e in self.state()["queue"]], ["a"])
+
+
+class TestReleaseDefaultsDirty(_Base):
+    """Supervisor decision on #1171 (review 1's finding): a lane that deploys
+    and forgets a flag must never hand back a box marked pristine — the
+    fail-safe direction is dirty. Plain `release` = dirty; `--clean` is the
+    explicit claim that the lane changed nothing; `--dirty` is gone."""
+
+    def _held(self, lane="a"):
+        bq.enqueue(BOX, lane, self.me, now=1000.0)
+        self.assertTrue(bq.take(BOX, lane, self.me, now_fn=lambda: 1000.0)["ok"])
+
+    def test_plain_release_leaves_the_box_dirty(self):
+        self._held()
+        self.assertTrue(bq.release(BOX, "a", now=1001.0)["ok"])
+        st = self.state()
+        self.assertEqual(st["state"], "dirty:a")
+        self.assertIn("a", st["reason"])
+
+    def test_release_clean_hands_back_pristine(self):
+        self._held()
+        self.assertTrue(bq.release(BOX, "a", clean=True, now=1001.0)["ok"])
+        self.assertEqual(self.state()["state"], "pristine")
+
+    def test_cli_plain_release_is_dirty_and_clean_is_pristine(self):
+        pid = str(self.me)
+        for lane, extra, want in (("a", [], "dirty:a"), ("b", ["--clean"], "pristine")):
+            raw = {"version": 1, "box": BOX, "state": "pristine", "queue": [],
+                   "holder": None, "refresh": None, "reason": "", "updated_at": 1.0}
+            (self.dir / f"{BOX}.json").write_text(json.dumps(raw))
+            self.assertEqual(run_cli(["take", "--box", BOX, "--lane", lane,
+                                      "--pid", pid], self.env).returncode, 0)
+            r = run_cli(["release", "--box", BOX, "--lane", lane] + extra, self.env)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(self.state()["state"], want, extra)
+
+    def test_the_dirty_flag_is_gone(self):
+        r = run_cli(["release", "--box", BOX, "--lane", "a", "--dirty"], self.env)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_skill_and_worker_text_follow_the_dirty_default(self):
+        for rel in ("skills/autopilot/SKILL.md", "agents/autopilot-worker.md"):
+            text = (REPO / rel).read_text()
+            self.assertIn("release --clean", text, rel)
+            self.assertNotIn("release --dirty", text, rel)
+            self.assertNotIn("`--dirty`", text, rel)
+
+
+class TestCliAndBoundaries(_Base):
+    def test_box_name_path_traversal_refused(self):
+        r = run_cli(["enqueue", "--box", "../../evil", "--lane", "a",
+                     "--pid", str(self.me)], self.env)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertFalse((Path(self._tmp.name) / "evil.json").exists())
+
+    def test_lane_with_newline_refused(self):
+        r = run_cli(["enqueue", "--box", BOX, "--lane", "a\nFORGED",
+                     "--pid", str(self.me)], self.env)
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+
+    def test_cli_exit_codes_and_status_json(self):
+        pid = str(self.me)
+        self.assertEqual(run_cli(["enqueue", "--box", BOX, "--lane", "a",
+                                  "--pid", pid], self.env).returncode, 0)
+        self.assertEqual(run_cli(["take", "--box", BOX, "--lane", "b",
+                                  "--pid", pid], self.env).returncode, 1)
+        self.assertEqual(run_cli(["take", "--box", BOX, "--lane", "a",
+                                  "--pid", pid], self.env).returncode, 0)
+        r = run_cli(["status", "--box", BOX, "--json"], self.env)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        st = json.loads(r.stdout)
+        self.assertEqual(st["state"], "held:a")
+        self.assertEqual(run_cli(["release", "--box", BOX, "--lane", "a"],
+                             self.env).returncode, 0)
+        self.assertEqual(json.loads(run_cli(["status", "--box", BOX, "--json"],
+                                            self.env).stdout)["state"], "dirty:a")
+
+    def test_three_concurrent_enqueues_lose_nothing_and_keep_fifo(self):
+        code = textwrap.dedent("""
+            import sys
+            sys.path.insert(0, %r)
+            import cli_box_queue as bq
+            tag, pid = sys.argv[1], int(sys.argv[2])
+            for i in range(25):
+                bq.enqueue(%r, "%%s-%%02d" %% (tag, i), pid)
+        """) % (str(REPO), BOX)
+        procs = [subprocess.Popen([sys.executable, "-c", code, tag, str(self.me)],
+                                  env=self.env) for tag in ("x", "y", "z")]
+        for p in procs:
+            self.assertEqual(p.wait(timeout=60), 0)
+        q = self.state()["queue"]
+        lanes = [e["lane"] for e in q]
+        self.assertEqual(len(lanes), 75)
+        self.assertEqual(len(set(lanes)), 75)
+        for tag in ("x", "y", "z"):
+            mine = [ln for ln in lanes if ln.startswith(tag)]
+            self.assertEqual(mine, sorted(mine))  # each writer's own order kept
+        stamps = [e["enqueued_at"] for e in q]
+        self.assertEqual(stamps, sorted(stamps))
+
+    def test_concurrent_takes_on_a_pristine_box_have_exactly_one_winner(self):
+        pid = str(self.me)
+        procs = [subprocess.Popen(
+            [sys.executable, str(REPO / "airuleset.py"), "box-queue", "take",
+             "--box", BOX, "--lane", f"lane{i}", "--pid", pid],
+            env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            for i in range(3)]
+        rcs = [p.wait(timeout=60) for p in procs]
+        for p in procs:
+            p.stdout.close()
+            p.stderr.close()
+        self.assertEqual(sorted(rcs), [0, 1, 1])
+        self.assertTrue(self.state()["state"].startswith("held:lane"))
+
+    def test_tool_never_writes_outside_its_state_dir(self):
+        home = Path(self._tmp.name) / "home"
+        (home / ".ssh").mkdir(parents=True)
+        (home / ".ssh" / "config").write_text(
+            "Host dev2\n  HostName 100.82.64.27\nHost mac-mini\n  HostName 10.0.0.9\n")
+        (home / ".claude").mkdir()
+        (home / ".claude" / "settings.json").write_text("{}")
+        outside = Path(self._tmp.name) / "outside"
+        outside.mkdir()
+        refresh = self.script("refresh.sh", f"echo ok > {outside}/ran\n")
+        env = dict(self.env)
+        env.pop("AIRULESET_BOX_QUEUE_DIR", None)
+        env["HOME"] = str(home)
+        qdir = home / ".claude" / "box-queue"
+        qdir.mkdir()
+        (qdir / f"{BOX}.config.json").write_text(json.dumps({"refresh": [refresh]}))
+
+        def snapshot():
+            out = {}
+            for p in sorted(home.rglob("*")):
+                if qdir in p.parents or p == qdir:
+                    continue
+                st = p.lstat()
+                out[str(p)] = (st.st_mtime_ns, p.read_bytes() if p.is_file() else None)
+            return out
+
+        before = snapshot()
+        pid = str(self.me)
+        for args in (["enqueue", "--box", BOX, "--lane", "a", "--pid", pid],
+                     ["take", "--box", BOX, "--lane", "a", "--pid", pid],
+                     ["renew", "--box", BOX, "--lane", "a"],
+                     ["release", "--box", BOX, "--lane", "a"],
+                     ["refresh", "--box", BOX],
+                     ["status", "--box", BOX],
+                     ["status"]):
+            r = run_cli(args, env)
+            self.assertIn(r.returncode, (0,), f"{args}: {r.stdout}{r.stderr}")
+        self.assertEqual(snapshot(), before)
+        self.assertEqual((outside / "ran").read_text(), "ok\n")
+        self.assertEqual(json.loads((qdir / f"{BOX}.json").read_text())["state"],
+                         "pristine")
+
+
+class TestSkillContract(TestCase):
+    def test_worker_contract_and_skill_name_box_queue(self):
+        for rel in ("skills/autopilot/SKILL.md", "agents/autopilot-worker.md"):
+            text = (REPO / rel).read_text()
+            for needle in ("box-queue take", "box-queue release"):
+                self.assertIn(needle, text, rel)
+        self.assertIn("box-queue refresh",
+                      (REPO / "skills/autopilot/SKILL.md").read_text())
+
+    def test_subcommand_registered(self):
+        import airuleset
+        self.assertIs(airuleset.SUBCOMMANDS["box-queue"], bq.cmd_box_queue)
+
+
+if __name__ == "__main__":
+    main()
