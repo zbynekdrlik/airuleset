@@ -8,8 +8,7 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
 
 - **The owner must APPROVE the exact text of EVERY client-facing Discuss message
   BEFORE it is posted — the OPENING message AND every follow-up reply / question /
-  reminder into an EXISTING thread, without exception.** Not limited to a handover
-  proposal or a new thread — whatever goes to a client is approved first (owner ruling 2026-08-22, montalu6 thread 283 — irreversible). A stream reading the
+  reminder into an EXISTING thread, without exception.** (Owner ruling 2026-08-22, montalu6 thread 283 — irreversible.) A stream reading the
   approval rule as applying only to thread CREATION is exactly what caused it; it
   applies to every message. Jediná výnimka: dva mechanické closure typy (final
   reminder + closing note) majú #799 STANDING template grant (Closure bullet
@@ -90,11 +89,12 @@ AND follow-up, is presented to the OWNER for approval BEFORE posting.
   never a prose menu path (airuleset #595: msg 1723308, rejected). This generalizes completion-report.md's 🌐-line
   rule to Discuss messages.
 - **State the owner's thread membership EXPLICITLY in the proposal.** The recipe
-  already puts the owner on `partner_ids` (control ping) — but the PROPOSAL text
-  must SAY so ("teba pridám do vlákna ako člena"), so the owner knows they will
-  see the thread and can catch a broken delivery.
+  puts the owner on `partner_ids` (control ping); the PROPOSAL text must SAY so ("teba pridám do vlákna ako člena"), so the owner can catch a
+  broken delivery.
 - **Announce ONLY functions that are ALREADY LIVE on the client's PROD.** Never a
-  merged-but-undeployed or scheduled feature; confirm it is live first.
+  merged-but-undeployed or scheduled feature; confirm it is live first. List
+  only what the reader can use NOW + changes to what they already used; no
+  rework history, no never-delivered removals (`client-board-stages.md` rule 3).
 - **Len minulé, overené udalosti — klientska správa sa NIKDY neodvoláva na to,
   čo sa LEN STANE (airuleset #696, owner ruling 2026-08-25; incident „od
   zajtrajšieho e-mailu").** Keď je výstup plánovaný ARTEFAKT (digest, report,

@@ -92,3 +92,17 @@ Review notes (#1156):
 - Compose the note from the transcript or the ticket, not from a meeting-analysis
   `NOTES.md`: that file writes `[redigované]` for customer names (its Hard
   Rule 7), and a placeholder must never reach the client.
+
+## Rules 3, 5, 6 — owner quotes of 28.9.2026 (montalu, #1166, #1167)
+
+Task 1102 handover draft announced a removed feature the client never had.
+Owner: „preco spamujes so zrusenym nahravanim cenika ved to nedostal nikdy tak
+preco ma vediet ze si to zrusil?" (rule 3) — „a musi byt oznaceny v spravach a
+taskoch patrik" (rule 5; the odoo-erp `scripts/odoo-task-sync.py` lint still
+FAILs a non-empty `user_ids`, aligning it is odoo-erp work).
+
+Rule 6: „Pochopil som, ze klient odmieta prechadzat tasky vo odo na verifikaciu
+takze budeme musiet zvolit nejaky autoclose rezim. Napr tak ktory je starsi nez
+3 tyzdne a je na verifikacii pojde automaticky do zavretia. S tym ze sa tam da
+este napr raz pripomenutie ze dochadza k auto zatvoreniu kedze bol bez reakcie
+a pousnie sa do hotovo" — mechanism + numbers on odoo-erp#8507.
