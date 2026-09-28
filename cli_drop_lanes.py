@@ -53,6 +53,14 @@ _NODENAME_OVERRIDE = {"gatekeeper": "odoo-gatekeeper", "spinbike-vps": "spinbike
 CONTROLLER_NODENAME = _NODENAME_OVERRIDE["claudy@controller"]
 CONTROLLER_LOCAL_DROP_HOST = "drop-controller.newlevel.media"
 
+# The GRANDFATHERED hand-authored drop hosts a pure derivation cannot produce
+# (re-exported by cli_drop_gateway, whose seed lanes use them). They live in
+# this leaf so `public_drop_hosts` can name every drop host without importing
+# cli_drop_gateway (~45 ms — the #1170 redactor runs on every tool call).
+DROP_HOST_SPINBIKE = "drop-spinbike.newlevel.media"
+DROP_HOST_DAVID = "drop-david.newlevel.media"  # grandfathered for david1
+DROP_HOST_GK = "drop-gk.newlevel.media"  # gatekeeper box (#1111)
+
 # #1115: the FIXED per-account drop-port allocation for the GENERATED lanes
 # (the 14 fleet accounts with no seed lane). Keyed by the REAL (nodename,
 # username) — controller is keyed `airuleset` per _NODENAME_OVERRIDE. Packed
@@ -97,6 +105,26 @@ def _generated_drop_host(nodename, username, shared):
     `*.newlevel.media` one-level Universal SSL cert."""
     stem = "drop-%s-%s" % (nodename, username) if shared else "drop-%s" % nodename
     return "%s.newlevel.media" % stem
+
+
+def public_drop_hosts(remote_hosts, nodename=None, username=None):
+    """Every drop hostname the fleet can print (#1170): the generated form of
+    every `remote_hosts` account (single-account AND shared, since both carry
+    the public zone and the box stem), the same for (`nodename`, `username`)
+    when given, the controller's local host and the grandfathered hosts.
+    A superset of the hosts in cli_drop_gateway.DROP_LANES (a lock test holds
+    that), cheap: no cli_drop_gateway import."""
+    out = [CONTROLLER_LOCAL_DROP_HOST, DROP_HOST_SPINBIKE, DROP_HOST_DAVID,
+           DROP_HOST_GK]
+    pairs = [(nodename, username)]
+    for e in remote_hosts or ():
+        if isinstance(e, dict) and isinstance(e.get("name"), str):
+            pairs.append((_nodename_for_entry(e), e.get("user")))
+    for node, user in pairs:
+        if isinstance(node, str) and node and isinstance(user, str) and user:
+            out += [_generated_drop_host(node, user, False),
+                    _generated_drop_host(node, user, True)]
+    return out
 
 
 def _is_tailscale_host(host):

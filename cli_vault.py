@@ -24,6 +24,7 @@ from pathlib import Path
 
 from cli_vault_inspect import cmd_inspect as _secret_inspect
 from cli_vault_keyfile import cmd_exec_file as _secret_exec_file
+from cli_vault_keyfile import emit_store_exec as _emit_store_exec
 
 REPO_DIR = Path(__file__).resolve().parent
 
@@ -1083,10 +1084,8 @@ def cmd_secret(args):
                       file=sys.stderr)
                 sys.exit(1)
             res = subprocess.run(cmd, env=env, capture_output=True)
-        for stream, data in ((sys.stdout, res.stdout), (sys.stderr, res.stderr)):
-            if data:
-                stream.buffer.write(_secret_redact(data, value))
-                stream.flush()
+        # #1170: filtered like every `secret exec`; a public-identity value passes.
+        _emit_store_exec(res, "store:" + nm, value)
         sys.exit(res.returncode)
 
     # --- request -----------------------------------------------------------

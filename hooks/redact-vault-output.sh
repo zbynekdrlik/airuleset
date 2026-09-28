@@ -24,7 +24,10 @@ set -euo pipefail
 # exits after builtin globs, without starting python. A box that keeps key
 # files under ~/.secrets pays one python start per tool call: ~60 ms median
 # with 20 files and a 20 KB output, 2 ms with none (measured on the slice-2
-# lane); the redactor reads at most MAX_PLAIN_FILES files. Fail-OPEN by
+# lane); the redactor reads at most MAX_PLAIN_FILES files. #1170 adds the
+# public-identity filter (a value inside the account name, a host name or the
+# public zone is no needle); it imports only the cli_fleet/cli_drop_lanes
+# leaves, measured within noise of the pre-#1170 median. Fail-OPEN by
 # design (a PostToolUse hook has nothing left to block): any malfunction exits
 # 1 with a one-line, value-free reason on stderr and the original output
 # passes through.

@@ -12,6 +12,12 @@ child's fd 1/2 (raw bytes, the stripped value, and the encoded/escaped
 renderings a dump produces). Prints NOTHING when there is nothing to redact,
 so Claude Code keeps the original output untouched.
 
+#1170: a value that is part of the box's PUBLIC identity (the account name,
+$HOME, a host name, the fleet's public zone and drop hosts —
+cli_vault_public) is no needle: it is printed by design, and treating it as
+one masked every drop/share/secret URL and /home path on dev1. needles_for
+drops it and notes the NAME once in ~/.claude/secret-logs/public-identity.log.
+
 Why this works for BUILT-IN tools (verified 2026-09-25 on Claude Code 2.1.281,
 ticket comment 5828264462): `updatedToolOutput` "replaces the tool's output
 with the provided value before it is sent to Claude", and the session jsonl
@@ -53,12 +59,13 @@ sys.path.insert(0, str(REPO))
 # `NAME=` halves never needles, a PEM block whole) live in cli_vault_keyfile
 # since slice 2 of #1153 — `secret exec --file` filters with the SAME code.
 from cli_vault_keyfile import (MARKER, needles_for,  # noqa: E402
-                               plain_root_values, scrub_bytes)
+                               plain_root_items, scrub_bytes)
 
 
-def store_values():
-    """Every stored value (bytes). Reads the files directly —
-    `vault.read_value` would `ensure_dir()` (mkdir + chmod) on every call."""
+def store_items():
+    """(label `store:<NAME>`, value bytes) of every stored value. Reads the
+    files directly — `vault.read_value` would `ensure_dir()` (mkdir + chmod)
+    on every call. The label is the NAME only (#1170 logs it)."""
     from filedrop import vault
 
     d = Path(vault.secrets_dir())
@@ -81,7 +88,7 @@ def store_values():
             value = fh.read(cap + 1)
         if not value or len(value) > cap:
             continue
-        out.append(value)
+        out.append(("store:" + p.stem, value))
     return out
 
 
@@ -121,7 +128,9 @@ def main():
         return 1
     if not isinstance(payload, dict) or "tool_response" not in payload:
         return 0
-    values = needles_for(store_values() + plain_root_values())
+    # #1170: needles_for drops (and notes by name) a value that is part of
+    # the box's public identity — the account word, a host, the public zone.
+    values = needles_for(store_items() + plain_root_items())
     if not values[0]:
         return 0
     response = payload["tool_response"]
