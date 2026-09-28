@@ -166,8 +166,11 @@ class Segments(unittest.TestCase):
                               % POST)
         outer = [s for s, _t in segs if s.startswith(POST)]
         self.assertEqual(len(outer), 1, segs)
+        # the outer command is balanced: the substitution is one inert word.
         self.assertEqual(outer[0].count('"') % 2, 0, segs)
         self.assertIn("--x y", outer[0])
+        # the body is emitted as its OWN segment, headed by the real command,
+        # with the flow terminator that makes its output a name source.
         self.assertIn(("cat /tmp/m.html", ")"), segs)
 
     def test_backtick_body_keeps_its_closer(self):
