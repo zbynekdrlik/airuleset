@@ -251,7 +251,9 @@ def classify_lane_return_comment(body):
 # all-digit shorthand (`#333`, RGBA `#3338`) stays extracted: by shape it
 # IS a plausible ref, and any rule dropping it would open a real-ref
 # bypass; #206 handles the real-and-closed case.
-ISSUE_REF_RE = re.compile(r"(?:^|[\s(/\"'\[])#([0-9]{1,5})\b")
+# A HYPHEN is in the boundary class too: `pre-#1189` names issue 1189, and a
+# hyphen must not hide a ref from the gate (push Pass A corpus audit, 29.9.).
+ISSUE_REF_RE = re.compile(r"(?:^|[\s(/\"'\[-])#([0-9]{1,5})\b")
 
 
 def issue_refs(text):
