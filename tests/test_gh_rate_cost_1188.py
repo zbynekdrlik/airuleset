@@ -169,8 +169,11 @@ class OwnedQueriesCarryAndRecordCost(_Tmp):
             if rel.parts[0] in ("tests", ".claude", ".git") or rel.name in skip:
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")
-            if call.search(text) and "record_query_cost" not in text:
-                offenders.append(str(rel))
+            calls = len(call.findall(text))
+            records = len(re.findall(r"record_query_cost\(", text))
+            if calls > records:   # one recorder per owned call site
+                offenders.append("%s (%d calls, %d records)"
+                                 % (rel, calls, records))
         self.assertEqual(offenders, [])
 
 
@@ -211,6 +214,22 @@ class ExhaustedLineRanksByCost(_Tmp):
         with open(cli_gh_rate.journal_path(), encoding="utf-8") as fh:
             text = fh.read()
         self.assertIn("top cost: q:ops-wait-prefetch 40pt", text)
+
+    def test_sampled_residual_never_displaces_an_exact_spender(self):
+        # review 1188 🔵: a `~` row is an identity-wide residual; exact q:
+        # rows rank first, the residual is its own labelled group.
+        self._seed()
+        data = {"14": {"~issue list|poller": {"cost": 900, "n": 9},
+                       "~unattributed": {"cost": 500, "n": 0}}}
+        cli_gh_rate_cost.locked_json_update(
+            cli_gh_rate_cost.cost_path(_T0), lambda d: d.update(data))
+        line = cli_gh_rate_cost.current_hour_cost_suffix(_T0)
+        self.assertIn("top cost: q:ops-wait-prefetch 40pt, "
+                      "q:ticket-facts-prs 4pt", line)
+        self.assertIn("≈residual: ~issue list|poller ≈900pt, "
+                      "~unattributed ≈500pt", line)
+        self.assertLess(line.index("q:ticket-facts-prs"),
+                        line.index("≈residual:"))
 
     def test_gh_rate_top_prints_costs(self):
         self._seed()
@@ -293,13 +312,46 @@ class SampledAttribution(_Tmp):
         self.assertEqual(est, {"api graphql|poller": 10.0,
                                "issue list|poller": 10.0})
 
-    def test_new_reset_window_counts_used_from_zero(self):
+    def test_new_reset_window_is_booked_unattributed(self):
+        # review 1188 🟡: after a reset the spend since the reset spans
+        # time this box never windowed — never blame this box's few calls.
         fr = _FakeRateLimit()
         self.note(self.ISSUE_LIST, "poller", _T0, fr)
         fr.reset += 3600
         fr.remaining = 4990                      # 10 used in the new window
         est = self.note(self.ISSUE_LIST, "poller", _T0 + 61, fr)
-        self.assertEqual(est, {"issue list|poller": 10.0})
+        self.assertEqual(est, {"unattributed": 10.0})
+        costs = self.costs(_T0)
+        self.assertAlmostEqual(costs["~unattributed"], 10.0)
+        self.assertNotIn("~issue list|poller", costs)
+
+    def test_idle_gap_is_booked_unattributed(self):
+        # review 1188 🟡: 45 idle minutes while OTHER boxes spent 2500 — one
+        # sporadic human call must not be named as the spender.
+        fr = _FakeRateLimit()
+        self.note(self.ISSUE_LIST, "poller", _T0, fr)
+        fr.remaining -= 2500
+        est = self.note(["issue", "view", "5"], "human", _T0 + 45 * 60, fr)
+        self.assertEqual(est, {"unattributed": 2500.0})
+        self.assertNotIn("~issue view|human", self.costs(_T0))
+
+    def test_self_reporting_owned_calls_stay_out_of_the_window(self):
+        # review 1188 🔴: owned queries go through the shim too; they are
+        # counted exactly (q:), so the residual must land on the foreign call.
+        fr = _FakeRateLimit()
+        self.note(self.ISSUE_LIST, "poller", _T0, fr)
+        owned = ["api", "graphql", "-f",
+                 "query={ search { x } rateLimit { cost remaining } }"]
+        compact = ["api", "graphql", "-f", "query={a rateLimit{cost remaining}}"]
+        for i in range(20):
+            self.assertIsNone(self.note(owned if i % 2 else compact, "poller",
+                                        _T0 + 1 + i, fr))
+            cli_gh_rate_cost.record_query_cost(
+                "ops-wait-prefetch", {"data": {"rateLimit": {"cost": 1}}},
+                now=_T0 + 1 + i)
+        fr.remaining -= 120                      # 20 owned + 100 foreign
+        est = self.note(["issue", "list", "--json", "n"], "human", _T0 + 61, fr)
+        self.assertEqual(est, {"issue list|human": 100.0})
 
     def test_rest_core_call_is_not_windowed(self):
         fr = _FakeRateLimit()
@@ -326,7 +378,7 @@ class SampledAttribution(_Tmp):
         self.assertEqual(nc.call_args[0][0], self.ISSUE_LIST)
 
 
-class CappedByCost(unittest.TestCase):
+class CappedByCost(_Tmp):   # _Tmp: read_prs records cost (#1136 hermeticity)
     """dryRun on odoo-erp (2026-09-29): `_PR_QUERY` cost 2 at first:100 and 1
     at first:<=60; the prefetch costs 1 per page for any first <= 99."""
 
@@ -366,6 +418,14 @@ class CappedByCost(unittest.TestCase):
         self.assertIsNone(cli_ticket_facts.read_prs("o/r", gh, now=_NOW))
         self.assertEqual(len(calls), 2)
 
+    def test_next_page_without_cursor_is_unknown(self):
+        def gh(args):
+            payload = _graphql((50, "#5 x", "", "PENDING", ()))
+            payload["data"]["repository"]["pullRequests"]["pageInfo"] = {
+                "hasNextPage": True, "endCursor": None}
+            return json.dumps(payload)
+        self.assertIsNone(cli_ticket_facts.read_prs("o/r", gh, now=_NOW))
+
     def test_prefetch_page_amortises_the_flat_page_cost(self):
         size = cli_quals.OPS_WAIT_PREFETCH_PAGE_SIZE
         self.assertGreaterEqual(size, 25)
@@ -373,6 +433,66 @@ class CappedByCost(unittest.TestCase):
         self.assertIn("first: %d," % size, cli_quals._OPS_WAIT_PREFETCH_GQL)
         # the per-issue comment window is unchanged (identical results)
         self.assertIn("comments(last: 100)", cli_quals._OPS_WAIT_PREFETCH_GQL)
+
+
+class RefreshBudgetReadsTheObject(_Tmp):
+    """review 1188 🟡: the #370 footer floor read only REST `rate_limit`,
+    blind to GraphQL-endpoint spend; the POLLER-marked refresh had no #1041
+    hold. Both now read the shim's cached status (zero gh calls)."""
+
+    def setUp(self):
+        super().setUp()
+        p = mock.patch.object(cli_gh_rate, "status_path",
+                              lambda: os.path.join(self.tmp, "status.json"))
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _cache(self, age, **resources):
+        with open(cli_gh_rate.status_path(), "w", encoding="utf-8") as fh:
+            json.dump({"fetched_at": time.time() - age,
+                       "resources": resources}, fh)
+
+    @staticmethod
+    def _rest(remaining):
+        return lambda *a, **k: json.dumps({"resources": {"graphql": {
+            "remaining": remaining, "limit": 5000}}})
+
+    def test_floor_takes_the_lower_cached_object_reading(self):
+        self._cache(10, graphql={"remaining": 150, "limit": 5000,
+                                 "source": "graphql-object"})
+        self.assertEqual(airuleset._graphql_budget_ok(
+            1000, runner=self._rest(4982)), (False, 150))
+
+    def test_floor_ignores_a_stale_or_rest_sourced_cache(self):
+        self._cache(3600, graphql={"remaining": 150, "limit": 5000,
+                                   "source": "graphql-object"})
+        self.assertEqual(airuleset._graphql_budget_ok(
+            1000, runner=self._rest(4982)), (True, 4982))
+        self._cache(10, graphql={"remaining": 150, "limit": 5000,
+                                 "source": "rest"})
+        self.assertEqual(airuleset._graphql_budget_ok(
+            1000, runner=self._rest(4982)), (True, 4982))
+
+    def test_poller_refresh_holds_on_a_low_cached_budget(self):
+        self._cache(10, core={"remaining": 100, "limit": 5000})
+        with mock.patch.dict(os.environ, {"AIRULESET_GH_POLLER": "1"}):
+            self.assertTrue(airuleset._gh_poller_hold())
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("AIRULESET_GH_POLLER", None)
+            self.assertFalse(airuleset._gh_poller_hold())   # a human: never
+
+    def test_poller_hold_is_fail_open(self):
+        with mock.patch.dict(os.environ, {"AIRULESET_GH_POLLER": "1"}):
+            self.assertFalse(airuleset._gh_poller_hold())      # no cache
+            self._cache(3600, core={"remaining": 100, "limit": 5000})
+            self.assertFalse(airuleset._gh_poller_hold())      # stale cache
+
+    def test_refresh_serves_stale_cache_while_held(self):
+        import inspect
+        src = inspect.getsource(airuleset.cmd_tickets_status)
+        self.assertIn("_gh_poller_hold()", src)
+        self.assertLess(src.index("_gh_poller_hold()"),
+                        src.index('"repo", "view"'))
 
 
 class PollersCarryPollerEnv(unittest.TestCase):
