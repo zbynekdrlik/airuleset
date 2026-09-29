@@ -95,10 +95,12 @@ def apply_digest(config_text: str, unit_text: str, creds_bytes: bytes) -> str:
     return h.hexdigest()
 
 
-def render_overlap_unit(description, config_path, cloudflared_bin) -> str:
+def render_overlap_unit(description, config_path, cloudflared_bin, user=None) -> str:
     """The on-demand overlap connector: the SAME tunnel + config as the main unit,
     its own pidfile, a short grace. No `[Install]` — it is never enabled, only
-    started for the restart window, and `Restart=no` so a crash never lingers."""
+    started for the restart window, and `Restart=no` so a crash never lingers.
+    `user` (#1191): a SYSTEM main unit's `User=`, mirrored so the overlap never
+    runs with more privilege than the connector it stands in for."""
     return (
         "# airuleset-managed cloudflared OVERLAP connector (#1189) — started only\n"
         "# while the main tunnel unit restarts, so the tunnel never goes dark.\n"
@@ -106,13 +108,14 @@ def render_overlap_unit(description, config_path, cloudflared_bin) -> str:
         "Description=%s — overlap connector (#1189)\n"
         "\n"
         "[Service]\n"
+        "%s"
         "Type=simple\n"
         "Environment=TUNNEL_PIDFILE=%s\n"
         "Environment=TUNNEL_GRACE_PERIOD=%s\n"
         "ExecStart=%s tunnel --no-autoupdate --config %s run\n"
         "Restart=no\n"
-        % (description, overlap_pidfile(config_path), OVERLAP_GRACE,
-           cloudflared_bin, config_path))
+        % (description, "User=%s\n" % user if user else "",
+           overlap_pidfile(config_path), OVERLAP_GRACE, cloudflared_bin, config_path))
 
 
 def _read_text(path):

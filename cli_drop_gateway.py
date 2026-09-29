@@ -221,20 +221,20 @@ _SEED_DROP_LANES = {
         topology="controller", origin_host=_SUBDEV_TAILSCALE,
         filedrop_port=8798),  # measured 22.9.2026
 
-    # --- subdev / marek tunnel ---
+    # --- subdev / marek tunnel (config = the one its unit runs, #1191) ---
     ("subdev", "marek"): DropLane(
         host="drop-subdev-marek.newlevel.media", port=8874,
         tunnel_uuid="1e9555d1-4d19-4e86-8064-361506fbc2cd",
-        tunnel_config=_CFDIR / "config.yml",
+        tunnel_config=_CFDIR / "webterm-marek.yml",
         tunnel_service="webterm-marek-tunnel.service",
         tunnel_system_unit=False, access=False,
         gateway_account="marek"),
 
-    # --- subdev / dominika tunnel ---
+    # --- subdev / dominika tunnel (config = the one its unit runs, #1191) ---
     ("subdev", "dominika"): DropLane(
         host="drop-subdev-dominika.newlevel.media", port=8875,
         tunnel_uuid="7792f710-16fb-41da-b46d-1d7b1cd0f8a6",
-        tunnel_config=_CFDIR / "config.yml",
+        tunnel_config=_CFDIR / "webterm-dominika.yml",
         tunnel_service="webterm-dominika-tunnel.service",
         tunnel_system_unit=False, access=True,
         gateway_account="dominika",
@@ -654,6 +654,14 @@ def _restart_env(lane):
     return _xdg_runtime_env()
 
 
+def _restart_lane_tunnel(lane, run):
+    """Load an ingress edit via the #1189 overlap, LOUD plain `_restart_argv`
+    fallback (#1191, `cli_drop_tunnel_restart`). Returns `(ok, shape, detail)`."""
+    import cli_drop_tunnel_restart
+    return cli_drop_tunnel_restart.restart_lane_tunnel(
+        lane, run, plain_argv=_restart_argv(lane), env=_restart_env(lane))
+
+
 def _config_tunnel_uuid(config_text):
     """The `tunnel:` UUID declared in a cloudflared config, or None."""
     m = re.search(r"(?m)^\s*tunnel:\s*(\S+)\s*$", config_text)
@@ -867,20 +875,12 @@ def cmd_drop_gateway(args):
     # restarts, instead of writing the LIVE marker over a tunnel that never
     # reloaded (#664 review C1).
     if changed or read_drop_marker(marker_path) is None:
-        argv = _restart_argv(my_lane)
-        try:
-            r = run(argv, capture_output=True, text=True, env=_restart_env(my_lane))
-            rc = getattr(r, "returncode", 1)
-        except Exception as e:                         # pragma: no cover - defensive
-            print("  tunnel restart errored (%s) — config written; restart %s "
-                  "by hand" % (e, my_lane.tunnel_service), file=sys.stderr)
+        ok, shape, detail = _restart_lane_tunnel(my_lane, run)
+        if not ok:
+            print("  tunnel restart FAILED (%s, %s): %s"
+                  % (my_lane.tunnel_service, shape, detail), file=sys.stderr)
             return 1
-        if rc != 0:
-            print("  tunnel restart FAILED (%s): %s"
-                  % (" ".join(argv), (getattr(r, "stderr", "") or "").strip()),
-                  file=sys.stderr)
-            return 1
-        print("  restarted %s" % my_lane.tunnel_service)
+        print("  restarted %s (%s)" % (my_lane.tunnel_service, shape))
 
     # Reconcile Access for access-gated lanes sharing this tunnel.
     access_failed = False
@@ -1038,16 +1038,16 @@ def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None,
         if augmented == config_text:
             return True                         # all ingresses already present — no restart
         Path(lane.tunnel_config).write_text(augmented, encoding="utf-8")
-        argv = _restart_argv(lane)
-        r = run(argv, capture_output=True, text=True, env=_restart_env(lane))
-        if getattr(r, "returncode", 1) != 0:
-            print("  drop-gateway: re-added the drop ingress to %s but restart "
-                  "FAILED (%s) — restart %s by hand"
-                  % (lane.tunnel_config, (getattr(r, "stderr", "") or "").strip(),
-                     lane.tunnel_service), file=sys.stderr)
+        ok, shape, detail = _restart_lane_tunnel(lane, run)
+        if not ok:
+            print("  drop-gateway: re-added the drop ingress to %s but the %s "
+                  "restart FAILED (%s) — restart %s by hand"
+                  % (lane.tunnel_config, shape, detail, lane.tunnel_service),
+                  file=sys.stderr)
             return False
-        print("  drop-gateway: re-asserted the drop ingress into %s + restarted %s"
-              % (lane.tunnel_config, lane.tunnel_service), file=sys.stderr)
+        print("  drop-gateway: re-asserted the drop ingress into %s + restarted "
+              "%s — applied (%s)" % (lane.tunnel_config, lane.tunnel_service, shape),
+              file=sys.stderr)
         return True
     except Exception as e:                             # pragma: no cover - defensive
         print("  drop-gateway: ingress re-assert errored (%r) — skipped" % e,
