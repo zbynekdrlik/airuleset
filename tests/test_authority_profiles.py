@@ -132,7 +132,8 @@ class TestAuthorityResolution(TestCase):
         # for accounts that must NOT enter the reduced-stream AUTHORITY_BY_USER.
         self.assertEqual(
             set(airuleset.FULL_AUTHORITY_USERS),
-            {"newlevel", "gatekeeper", "admin", "stepan", "airuleset", "claudy"})
+            {"newlevel", "gatekeeper", "admin", "stepan", "airuleset", "claudy",
+             "fohmixer"})
 
     def test_full_authority_users_disjoint_from_stream_table(self):
         # airuleset#827: the two registries must be DISJOINT — a full account is
