@@ -33,7 +33,7 @@ Pôvodný 973 KB monolit bol rozbitý (#482) — dotyk súboru už neinjektuje ~
 - `watchdog/**` → `.claude/rules/internals-watchdog.md`
 - `hooks/**` → `.claude/rules/internals-hooks.md`
 - `notify/**` → `.claude/rules/internals-notify.md`
-- `filedrop/**` → `.claude/rules/internals-filedrop.md`
+- `filedrop/** cli_drop_*.py` → `.claude/rules/internals-filedrop.md`
 - `burn/**` → `.claude/rules/internals-burn.md`
 - `tests/**` → `.claude/rules/internals-tests.md`
 - `scripts/**` → `.claude/rules/internals-scripts.md`
