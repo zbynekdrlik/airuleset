@@ -16,13 +16,14 @@ unchanged:
     `airuleset._watchdog_queue_fetch` as `[{"id", "title"}]` records.
     `review_ids` normalises them (legacy int lists still work), `nudge_text`
     names each new ticket with its title.
-(b) `ended_pane_recheck` — a NON-armed FLOW (review / undeclared) pane whose
-    goal is DEFINITELY cleared by the STRUCTURED goal_mark (`goal_armed is
-    False` from `src == "goal_mark"`: this session HAD a /goal; a pane that never
-    had one is an interactive session, not a supervisor) and whose last turn
-    ended `✅` is a target too. (An ACHIEVED loop — the 🏁 line sits directly
-    above `✅ DONE:` — keeps its mark "set" because CC writes no cleared marker,
-    so it already rides the armed path, #1128.)
+(b) `ended_pane_recheck` — a NON-armed FLOW (review / undeclared) pane is a
+    target ONLY when its goal ended because the backlog was PROVEN empty: its
+    last assistant turn carries the `🏁 BACKLOG EMPTY` line (stop condition B)
+    and NOTHING the owner typed follows it — no `/goal clear`, no `/goal`, no
+    prompt (supervisor decision on #1178, respecting #1143: a goal the owner
+    cleared deliberately is never nudged). An interactive session never writes
+    that line. (An achieved loop whose mark stays "set" — CC writes no cleared
+    marker — already rides the armed path, #1128.)
     The rider seeds and tracks it like any pane; DELIVERY is held
     (`deliver_hold`) unless the pane sits at a bare idle `❯`, its transcript is
     not a live turn (#1110) and no human touched it recently (the #731/#566
@@ -270,20 +271,67 @@ def status_lines(home=None, now=None, state=None):
 
 # --- (b) an idle supervisor pane whose goal ENDED -------------------------
 
-def ended_candidate(glance):
-    """True when a NON-armed pane may be watched for arrivals: its goal is
-    DEFINITELY cleared by the STRUCTURED goal_mark (`goal_armed is False` with
-    `src == "goal_mark"` — review F1: the heartbeat's False alone means only "no
-    goal marker in the tail", i.e. an interactive session that never had a
-    /goal; the armed-unknown None fails closed, #486 G6), its last turn ended
-    `✅` (marker "done"), and the `queue-arrival` kind is ON on this box
-    (checked BEFORE any fetch, so a box whose profile keeps the kind off never
-    spawns a refresher for a goal-less pane)."""
+# a bounded transcript tail for the 🏁 proof: the 🏁 turn is the LAST real
+# assistant turn, so only the newest entries matter (never a whole-file read).
+FLAG_TAIL_BYTES = 512 * 1024
+FLAG_TAIL_ENTRIES = 200
+_OWNER_CLEAR_MARKS = ("<command-name>/goal", "Goal cleared")
+
+
+def _owner_touched(entry):
+    """True when a transcript entry AFTER the 🏁 turn is the owner's own act:
+    a `/goal` slash command (a `/goal clear` too), a `Goal cleared` record, or
+    a genuine human prompt (typed or Discord-relayed). Machine injections
+    (`stuck-check:`/`nudge:` pointers, `continue`, task notifications) and
+    tool results are not the owner's."""
+    from watchdog import transcripts as _tx
+    from watchdog import questions as _q
+    if not isinstance(entry, dict):
+        return False
+    text = _tx._entry_text(entry) or ""
+    if not text and isinstance(entry.get("content"), str):
+        text = entry["content"]            # a `system` local-command record
+    if any(m in text for m in _OWNER_CLEAR_MARKS):
+        return True
+    return _q._is_genuine_human_prompt(entry)
+
+
+def ended_on_flag(tpath):
+    """True iff the session's LAST real assistant turn carries the `🏁 BACKLOG
+    EMPTY` proof and no owner act follows it (`_owner_touched`). Fail-closed:
+    an unreadable transcript, an api-error last turn or a 🏁-less last turn is
+    False (never nudged)."""
+    from watchdog import transcripts as _tx
+    import watchdog
+    if not tpath:
+        return False
+    after = []
+    for entry in reversed(_tx._read_jsonl_byte_tail(
+            tpath, FLAG_TAIL_BYTES, FLAG_TAIL_ENTRIES)):
+        if isinstance(entry, dict) and entry.get("type") == "assistant":
+            if entry.get("isApiErrorMessage") is True:
+                return False
+            text = (_tx._entry_text(entry) or "").strip()
+            if text in watchdog._SENTINELS:
+                continue                   # a tool-only / synthetic entry
+            return (bool(_tx._BACKLOG_EMPTY_RX.search(text))
+                    and not any(_owner_touched(e) for e in after))
+        after.append(entry)
+    return False
+
+
+def ended_candidate(glance, tpath=None):
+    """True when a NON-armed pane may be watched for arrivals: `goal_armed is
+    False` (the armed-unknown None fails closed, #486 G6), its last turn ended
+    `✅` (marker "done"), the `queue-arrival` kind is ON on this box (checked
+    BEFORE any read, so a box whose profile keeps the kind off never spawns a
+    refresher), and — supervisor decision on #1178 — the goal ended on a PROVEN
+    empty backlog with nothing the owner typed after it (`ended_on_flag`)."""
     import watchdog
     return (getattr(glance, "goal_armed", None) is False
-            and getattr(glance, "src", None) == "goal_mark"   # review F1
             and getattr(glance, "marker", None) == "done"
-            and watchdog.nudges_enabled("queue-arrival"))
+            and watchdog.nudges_enabled("queue-arrival")
+            and ended_on_flag(tpath))
 
 
 def ended_hold_reason(captured, sid, cwd, tpath, pid, run, now):
@@ -306,7 +354,7 @@ def ended_pane_recheck(glance, now, run, qrecs, sid, cwd, pid, tpath, loc,
     """Run the #733 rider on an ENDED supervisor pane (see `ended_candidate`),
     holding delivery on `ended_hold_reason`. Returns the rider's log lines, or
     [] when the pane is not a candidate (no fetch, no state)."""
-    if queue_fetch is None or not ended_candidate(glance):
+    if queue_fetch is None or not ended_candidate(glance, tpath):
         return []
     role_fn = kw.get("resolve_role_fn")
     try:   # review F1: only the FLOW supervisor is told to run /autopilot
