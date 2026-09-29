@@ -1716,7 +1716,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                                         re-types at most that many times before
                                         goal_sweep drops it; `skip:client-
                                         active` (an attached human typing NOW)
-                                        is a zero-keystroke defer, never counted.
+                                        is a zero-keystroke defer, never counted;
+                                        so is #1181 `skip:nudge-off` (kind OFF).
       "skip:busy-transcript"        -- #1110: the session TRANSCRIPT was written
                                         within GOAL_TURN_LIVE_WINDOW_S (the turn
                                         is running), so the render's bare box is
