@@ -169,15 +169,19 @@ class TestLanReachRender(unittest.TestCase):
         cam = 'meta skuid "projx" ip daddr 10.77.9.61 tcp dport { 22, 8898 } accept'
         foh = 'meta skuid "projx" ip daddr 10.77.7.30 tcp dport { 22 } accept'
         rej = 'meta skuid "projx" tcp dport 22 ct state new reject with tcp reset'
-        for line in (cam, foh, rej):
+        # review 1: ssh to ANY address of this host is refused in the kernel on
+        # every re-apply, even after a LAN address drifts onto a declared /32
+        loc = ('meta skuid "projx" fib daddr type local tcp dport 22 reject '
+               'with tcp reset')
+        for line in (loc, cam, foh, rej):
             self.assertIn(line, rules)
         self.assertLess(rules.index(cam), rules.index(rej))
         self.assertLess(rules.index(foh), rules.index(rej))
         # the reject is the LAST rule; nothing but the declared hosts accepted
         body = [ln.strip() for ln in rules.splitlines()
                 if ln.strip().startswith("meta skuid")]
-        self.assertEqual(body, [cam, foh, rej])
-        self.assertEqual(set(re.findall(r"daddr (\S+)", rules)),
+        self.assertEqual(body, [loc, cam, foh, rej])
+        self.assertEqual(set(re.findall(r"ip daddr (\S+)", rules)),
                          {"10.77.9.61", "10.77.7.30"})
         # every reason is carried as a comment, never inside a rule
         self.assertIn("# cam1", rules)
@@ -282,9 +286,11 @@ class TestCommandScopedSudo(unittest.TestCase):
         body = _sudoers_body(script).splitlines()
         self.assertEqual(len(body), 2, body)
         self.assertTrue(body[0].startswith("# airuleset:managed"), body)
-        self.assertEqual(body[1], "projx ALL=(root) NOPASSWD: "
-                                  "/usr/local/sbin/projx-upgrade, "
-                                  "/usr/local/sbin/projx-log-install")
+        # review 1: `""` = no arguments, so argument parsing is never root
+        # attack surface
+        self.assertEqual(body[1], 'projx ALL=(root) NOPASSWD: '
+                                  '/usr/local/sbin/projx-upgrade "", '
+                                  '/usr/local/sbin/projx-log-install ""')
         self.assertIn("dev1-side root installs", body[0])
         self.assertIn('visudo -cf "$SUDOERS_TMP"', script)
         self.assertIn('*" sudo "*', script)   # root-equivalent group check stays
@@ -328,6 +334,52 @@ class TestCommandScopedSudo(unittest.TestCase):
         self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
         self.assertIn("symlink", r.stderr)
 
+    def _run_stubbed(self, stat_map, writable=()):
+        """Run the checks on /usr/bin/true with `stat` answering from
+        ``stat_map`` ({path: "owner mode"}, default a root-owned 0755) and
+        `runuser … test -w` answering yes for ``writable`` paths."""
+        cases = "".join('        %s) echo "%s" ;;\n' % (k, v)
+                        for k, v in stat_map.items())
+        stubs = ("stat() {\n    case \"${@: -1}\" in\n%s"
+                 "        /*) echo \"root drwxr-xr-x\" ;;\n    esac\n}\n"
+                 "runuser() {\n    case \"${@: -1}\" in\n%s"
+                 "        *) echo no ;;\n    esac\n}\n") % (
+            cases, "".join("        %s) echo yes ;;\n" % w for w in writable))
+        snippet = hardening.render_sudo_path_checks(["/usr/bin/true"])
+        return subprocess.run(
+            ["bash", "-c", "set -euo pipefail\nACCOUNT=projx\n" + stubs + snippet],
+            capture_output=True, text=True)
+
+    def test_a_clean_root_owned_path_passes(self):
+        r = self._run_stubbed({})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_every_ancestor_dir_is_checked(self):
+        for anc in ("/usr/bin", "/usr", "/"):
+            r = self._run_stubbed({anc: "root drwxrwxrwx"})
+            self.assertEqual(r.returncode, 1, (anc, r.stdout + r.stderr))
+            self.assertIn("ERROR: %s (sudo command /usr/bin/true) is not "
+                          "root-owned" % anc, r.stderr)
+            r = self._run_stubbed({anc: "projx drwxr-xr-x"})
+            self.assertEqual(r.returncode, 1, (anc, r.stdout + r.stderr))
+
+    def test_a_group_or_other_writable_file_is_refused(self):
+        for mode in ("root -rwxrwxr-x", "root -rwxr-xrwx"):
+            r = self._run_stubbed({"/usr/bin/true": mode})
+            self.assertEqual(r.returncode, 1, (mode, r.stdout + r.stderr))
+
+    def test_a_path_the_account_can_write_is_refused(self):
+        for w in ("/usr/bin/true", "/usr/bin", "/usr"):
+            r = self._run_stubbed({}, writable=(w,))
+            self.assertEqual(r.returncode, 1, (w, r.stdout + r.stderr))
+            self.assertIn("%s (sudo command /usr/bin/true) is writable by projx"
+                          % w, r.stderr)
+
+    def test_commands_reason_has_no_control_characters(self):
+        errs = bootstrap.validate_account("projx", self._spec(
+            sudo_reason="installs\x1b[2Jx"))
+        self.assertTrue(any("sudo_reason" in e for e in errs), errs)
+
     def test_account_writability_is_checked_fail_closed(self):
         checks = hardening.render_sudo_path_checks(self.CMDS)
         self.assertIn('runuser -u "$ACCOUNT" --', checks)
@@ -357,7 +409,6 @@ CAMERA_BOX_HOSTS = {
     **{"10.77.9.%d" % (60 + n): {22, 8898} for n in range(1, 8)},
     "10.77.9.202": {22, 4455, 8898},   # strih-lx (obs-fleet.sh)
     "10.77.9.204": {22, 4455, 8898},   # stream OBS (obs-fleet.sh)
-    "10.77.9.201": {22, 4455, 8898},   # resolume.lan current lease (obs-fleet.sh)
     "10.77.7.232": {22, 8898},         # mbc (dantesync-fleet.sh)
     "10.77.7.30": {22, 8898},          # fohabl (dantesync-fleet.sh)
     "10.77.8.1": {22},                 # MikroTik RB4011 (netcfg facet)
@@ -402,16 +453,16 @@ class TestCameraBoxDeclaration(unittest.TestCase):
             want = 'meta skuid "camera-box" ip daddr %s tcp dport { %s } accept' % (
                 ip, ", ".join(str(p) for p in sorted(ports)))
             self.assertIn(want, rules)
-        self.assertEqual(set(re.findall(r"daddr (\S+)", rules)),
+        self.assertEqual(set(re.findall(r"ip daddr (\S+)", rules)),
                          set(CAMERA_BOX_HOSTS))
-        self.assertNotIn("/", "".join(re.findall(r"daddr (\S+)", rules)))
+        self.assertNotIn("/", "".join(re.findall(r"ip daddr (\S+)", rules)))
         last = [ln.strip() for ln in rules.splitlines()
                 if ln.strip().startswith("meta skuid")][-1]
         self.assertEqual(last, 'meta skuid "camera-box" tcp dport 22 ct state '
                                'new reject with tcp reset')
         body = _sudoers_body(script).splitlines()
         self.assertEqual(body[1], "camera-box ALL=(root) NOPASSWD: "
-                         + ", ".join(CAMERA_BOX_SUDO))
+                         + ", ".join('%s ""' % p for p in CAMERA_BOX_SUDO))
         self.assertEqual(len(body), 2)
         for broad in ("NOPASSWD: ALL", "(ALL)", "ALL, ", "*"):
             self.assertNotIn(broad, "\n".join(body))
@@ -443,7 +494,8 @@ class TestAccountsStatusShowsReachAndSudo(unittest.TestCase):
         out = self._run(False)
         self.assertRegex(out, r"camera-box\s+host=dev1\s+sudo=commands")
         self.assertIn("10.77.9.61/32 tcp 22,8898", out)
-        self.assertIn("10.77.9.202/32 tcp 22,4455,8898", out)
+        self.assertIn("10.77.9.202/32 tcp 22,4455,8898 (only 22 enforced)", out)
+        self.assertIn("10.77.8.1/32 tcp 22 — ", out)   # nothing to qualify
         for path in CAMERA_BOX_SUDO:
             self.assertIn("sudo " + path, out)
         # the fohmixer/claudy lines keep their shape
