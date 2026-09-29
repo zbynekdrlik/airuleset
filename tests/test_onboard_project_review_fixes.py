@@ -23,9 +23,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # tests/ helpers (#1184)
 
 import cli_onboard as ob
-from test_onboard_project import FakeRunner, init_repo, tracked_files
+from _onboard_gate_open import setUpModule, tearDownModule  # noqa: E402,F401  (#1184)
+
+from test_onboard_project import FakeRunner, init_repo, tracked_files  # noqa: E402
 
 
 REMOTE = "https://github.com/zbynekdrlik/foo.git"

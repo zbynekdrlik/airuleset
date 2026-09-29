@@ -38,6 +38,17 @@ MANAGED_RECORDS = [
         "requires_access_hostname": "claudy.newlevel.media",
     },
     {
+        # #1183: the timo webterm lane, fronted by the SHARED controller
+        # tunnel; gated on its Access app like claudy (never world-readable).
+        "zone": "newlevel.media",
+        "name": "timo.newlevel.media",
+        "type": "CNAME",
+        "content": "f85ea304-920b-4ba4-96bc-a68001ce6fb4.cfargotunnel.com",
+        "proxied": True,
+        "comment": "airuleset-managed (#1183) — timo webterm lane",
+        "requires_access_hostname": "timo.newlevel.media",
+    },
+    {
         "zone": "newlevel.media",
         "name": "ar.newlevel.media",
         "type": "A",

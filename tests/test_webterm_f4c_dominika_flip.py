@@ -143,11 +143,12 @@ class TestPairwiseConsistency(_BoxClassPinned):
                 "ttyd socket basename doesn't contain 'dominika'")
 
     def test_controller_lane_set_is_exactly_four(self):
-        """The controller must host exactly the four humans in LANE_HOST."""
+        """The controller hosts exactly the humans in LANE_HOST — five since
+        #1183 added timo (the name keeps its #870 history)."""
         lanes = p.profile_for_host_set("controller", "airuleset")
         self.assertEqual(
-            len(lanes), 4,
-            "controller lane set should be 4 (owner+david+marek+dominika), "
+            len(lanes), 5,
+            "controller lane set should be 5 (owner+david+marek+dominika+timo), "
             "got %d: %s" % (len(lanes), lanes))
 
 

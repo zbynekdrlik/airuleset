@@ -248,11 +248,11 @@ class TestWiring4ZbynekSpec(unittest.TestCase):
 
 
 class TestWiring4RuleOfN(unittest.TestCase):
-    """Rule-of-N=4 lock: LANE_HOST has exactly 4 humans."""
+    """Rule-of-N=5 lock: LANE_HOST has exactly 5 humans (#1183 added timo)."""
 
     def test_lane_host_count(self):
         import cli_webterm_profiles as profiles
-        self.assertEqual(len(profiles.LANE_HOST), 4)
+        self.assertEqual(len(profiles.LANE_HOST), 5)
 
     def test_all_lane_host_keys_have_spec_factories(self):
         """Every human in LANE_HOST must have a corresponding thin module
@@ -263,6 +263,7 @@ class TestWiring4RuleOfN(unittest.TestCase):
             "david": "cli_webterm_david",
             "marek": "cli_webterm_marek",
             "dominika": "cli_webterm_dominika",
+            "timo": "cli_webterm_timo",
         }
         for human in profiles.LANE_HOST:
             mod_name = _HUMAN_TO_MODULE.get(human)
@@ -312,6 +313,12 @@ class TestWiring6Privileges(unittest.TestCase):
         import cli_privileges as p
         names = {priv.name for priv in p.PRIVILEGES}
         self.assertIn("webterm_dominika_ed25519", names)
+
+    def test_webterm_timo_key_entry(self):
+        # #1183: the timo LANE key lives on the controller (never Timo's own).
+        import cli_privileges as p
+        names = {priv.name for priv in p.PRIVILEGES}
+        self.assertIn("webterm_timo_ed25519", names)
 
     def test_controller_tunnel_creds_entry(self):
         import cli_privileges as p
