@@ -3430,7 +3430,10 @@ def _graphql_budget_ok(floor, cwd=None, runner=None, status_fn=None):
     """`(ok, remaining)` for the shared GraphQL rate-limit bucket — whether it
     has at least `floor` calls left, read from GitHub's FREE `rate_limit`
     endpoint (`gh api rate_limit` does NOT count against any bucket — measured:
-    graphql.remaining is unchanged across the call).
+    graphql.remaining is unchanged across the call). #1188: REST cannot see
+    GraphQL-endpoint spend, so the LOWER of it and the shim's cached GraphQL
+    object reading (`status_fn`, default the real cache; zero gh calls) wins.
+    An injected `runner` is the whole reading unless `status_fn` is too.
 
     Fails OPEN: on ANY probe failure or unparseable payload it returns
     `(True, None)` so the caller proceeds EXACTLY as it does today. The guard

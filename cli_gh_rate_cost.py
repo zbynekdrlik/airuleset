@@ -29,6 +29,10 @@ spender. This module adds the cost next to the call counts, from two sources:
   shim samples in parallel with the call it records, so an owned cost can
   land in ``used`` a moment before it lands in ``owned`` (a small, one-sided
   over-attribution of that window — acceptable for an ``≈`` figure).
+  Blind spots, also ``≈``: an owned query that fails before its cost is
+  recorded, and a FOREIGN query that asks for ``rateLimit { cost … }`` itself,
+  are neither recorded exactly nor windowed, so their spend lands on the
+  window's other shapes.
 
 The GraphQL cost formula (measured with ``rateLimit(dryRun: true)`` on
 odoo-erp, 2026-09-29): each connection costs the product of its PARENTS'
@@ -172,7 +176,9 @@ def _attribute(state, used, reset, now):
     if isinstance(prev_used, bool) or not isinstance(prev_used, int):
         return {}
     same_window = abs(_num(prev_reset) - reset) <= RESET_TOLERANCE_S
-    delta = (used - prev_used if same_window else used) - owned
+    # After a reset `used` counts only the new window; owned cost booked since
+    # the last reading may belong to the OLD one, so it is not subtracted.
+    delta = used - prev_used - owned if same_window else used
     total = sum(int(_num(n)) for n in window.values())
     if delta <= 0:
         return {}

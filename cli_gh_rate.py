@@ -28,7 +28,7 @@ Design (see #1040 design comment):
 
 stdlib only (repo policy). Pure logic + wrapper-script template + a tiny
 ``--wrapper-backoff`` ``__main__`` entry the shim calls (imports only this
-module, so its startup stays cheap on the poll hot path).
+module and the stdlib leaf cli_locked_json, so startup stays cheap).
 """
 import json
 import os
