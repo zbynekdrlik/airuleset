@@ -101,7 +101,9 @@ def _is_claude(comm, cmdline, exe=""):
     ``claude`` and ``node …/claude`` / ``node …/claude-code/…``. On top of it
     come comm ``claude`` and an exe under ``…/claude/versions/`` (a versioned
     binary launched by its own path). The bash guard in ``_SCRIPT`` mirrors
-    this, and a test runs both over the same fixtures."""
+    this, and a test runs both over the same fixtures. One known asymmetry:
+    bash reads the real argv, so an argv element containing a space (which
+    this whitespace-joined check splits) can only make bash STRICTER."""
     from watchdog.erp_heartbeat import _cmdline_is_claude_cli
     args = cmdline.decode("utf-8", "replace").split("\0")
     return (comm == "claude" or "/claude/versions/" in exe
@@ -422,7 +424,8 @@ for p in "$PROC"/[0-9]*; do
         if [ "$a0" = claude ]; then claude=1; fi
         if [ "$a0" = node ] || [ "$a0" = nodejs ]; then
             for t in "${{argv[@]:1}}"; do
-                if [ "${{t##*/}}" = claude ] || [[ "$t" == */claude-code/* ]]; then claude=1; fi
+                if [ "${{t##*/}}" = claude ] || [[ "$t" == */claude-code/* ]] \\
+                        || [[ "$t" == *claude-code/cli.js ]]; then claude=1; fi
             done
         fi
     fi
@@ -456,20 +459,35 @@ for stale in "$DST"/.airuleset-transfer-1190.*; do
     fi
 done
 
-# From here on, any failure names what was already placed and how to recover.
+# From here on, any failure (a signal included) names what was already placed
+# and how to recover. "Placed" is read from the tree, never from a counter: an
+# item is placed when it left the temp dir AND is in the target, so an mv that
+# completed right before a signal is still reported.
 TMPD=""
 PLACED=()
 on_exit() {{
     rc=$?
-    if [ -n "$TMPD" ]; then runuser -u "$ACCOUNT" -- rm -rf -- "$TMPD" || true; fi
+    placed=()
+    if [ -n "$TMPD" ]; then
+        for item in "${{ITEMS[@]}}"; do
+            if [ ! -e "$TMPD/$item" ] && [ ! -L "$TMPD/$item" ] \\
+                    && {{ [ -e "$DST/$item" ] || [ -L "$DST/$item" ]; }}; then
+                placed+=("$item")
+            fi
+        done
+        runuser -u "$ACCOUNT" -- rm -rf -- "$TMPD" || true
+    fi
     if [ "$rc" -ne 0 ]; then
         echo "FAILED (rc=$rc) — nothing was overwritten (#1190)." >&2
-        echo "  Placed before the failure: ${{PLACED[*]:-none}}" >&2
+        echo "  Placed before the failure: ${{placed[*]:-none}}" >&2
         echo "  Recover: as $ACCOUNT remove exactly those from $DST, then re-run." >&2
     fi
     exit "$rc"
 }}
 trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 
 # 3. Read the source AS its owner and unpack it AS the account into a private
 #    temp dir inside the target (same filesystem: step 4 only renames).
