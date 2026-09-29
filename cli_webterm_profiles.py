@@ -49,6 +49,7 @@ OWNER = "owner"
 DAVID = "david"
 MAREK = "marek"
 DOMINIKA = "dominika"
+TIMO = "timo"
 
 # --------------------------------------------------------------------------- #
 # Box -> profile mapping (provisioning selects the profile by hostname + the
@@ -66,6 +67,7 @@ LANE_HOST = {
     "david": "controller",      # F4c step 3: flipped from "subdev"
     "marek": "controller",      # F4c step 2: flipped from "subdev"
     "dominika": "controller",   # F4c step 1: flipped from "subdev"
+    "timo": "controller",       # #1183: born on the controller (never subdev)
 }
 
 
@@ -124,6 +126,7 @@ def profile_for_host_set(box_class, account=None):
     lane on the old host."""
     _HUMAN_TO_PROFILE = {
         "zbynek": OWNER, "david": DAVID, "marek": MAREK, "dominika": DOMINIKA,
+        "timo": TIMO,
     }
     if box_class == "controller":
         return frozenset(_HUMAN_TO_PROFILE.values())
@@ -430,6 +433,7 @@ def marek_inventory():
             # STREAM_DEV_CWD_CHAIN.
             "start_dir_chain": ["devel/claudy"],
         },
+        fohmixer_entry(WEBTERM_MAREK_IDENTITY),   # #1183 project account
         {
             "id": "dev1",
             "label": "dev1 (marek sessions)",
@@ -563,6 +567,57 @@ def dominika_inventory():
 
 
 # --------------------------------------------------------------------------- #
+# #1183 fohmixer@dev1 project account (#1184 policy) + the timo lane.
+# --------------------------------------------------------------------------- #
+
+# dev1's tailscale IP, DUPLICATED from cli_fleet's `dev1` REMOTE_HOSTS entry
+# (zero-import leaf); drift-locked by tests/test_webterm_timo_1183.py.
+FOHMIXER_HOST = "100.104.8.125"
+
+
+def fohmixer_entry(identity, kind="stream"):
+    """#1183: the tab to the `fohmixer@dev1` PROJECT account — the SAME entry
+    for every human that the ONE declaration (cli_account_bootstrap
+    SERVICE_ACCOUNTS["fohmixer"]) grants, differing only in the human's own
+    dedicated lane key. Everyone attaches the ONE shared project session
+    `fohmixer` (owner: people share the project's session). NO u_tenant: the
+    project account is not any lane's own tenant (#703), and its forced-command
+    key could not run the U reader anyway."""
+    return {
+        "id": "fohmixer",
+        "label": "fohmixer (dev1)",
+        "kind": kind,
+        "local": False,
+        "host": FOHMIXER_HOST,
+        "user": "fohmixer",
+        "identity": identity,
+        "preferred": "fohmixer",
+        "start_dir_chain": ["devel/fohmixer"],
+    }
+
+
+# The timo lane runs on the CONTROLLER under the `airuleset` account (the #870
+# F4c topology) — Timo himself has NO unix account, NO ssh key and NO password
+# anywhere (webterm-only, #869): his whole authorization is the Cloudflare
+# Access allow-list. `TIMO_GATEWAY_USER` is the lane/policy key only.
+TIMO_GATEWAY_USER = "timo"
+
+# The LANE's dedicated key on the controller (never Timo's, never a fleet key),
+# authorized ONLY as a forced-command line in fohmixer@dev1's authorized_keys
+# (rendered by `account-bootstrap --render fohmixer`). Minted at go-live
+# (cli_webterm_timo._TIMO_GO_LIVE).
+WEBTERM_TIMO_IDENTITY = "~/.secrets/webterm_timo_ed25519"
+
+
+def timo_inventory():
+    """Timo's SCOPED session set (#1183, owner request 2026-09-29: "nech ma len
+    z dev1 pristup na fohmixer tmux projekt") — exactly ONE entry, the
+    fohmixer@dev1 project account. This — and ONLY this — is his connect
+    allowlist: no owner-realm box, no stream, no other person's account."""
+    return [fohmixer_entry(WEBTERM_TIMO_IDENTITY)]
+
+
+# --------------------------------------------------------------------------- #
 # zbynek (owner) profile — DECLARATIVE session set (#870 F4a D4).
 # --------------------------------------------------------------------------- #
 
@@ -642,6 +697,7 @@ def zbynek_inventory():
             # STREAM_DEV_CWD_CHAIN.
             "start_dir_chain": ["devel/claudy"],
         },
+        fohmixer_entry(WEBTERM_ZBYNEK_IDENTITY, kind="owner"),   # #1183
         {
             "id": "dev1",
             "label": "dev1",
@@ -829,6 +885,8 @@ def profile_inventory(profile, fleet_inventory):
         return marek_inventory()
     if profile == DOMINIKA:
         return dominika_inventory()
+    if profile == TIMO:
+        return timo_inventory()
     if profile == OWNER:
         return zbynek_inventory()
     return list(fleet_inventory)

@@ -8,7 +8,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": null
+    "onboarded": null,
+    "account": "claudy"
   },
   {
     "name": "akcie",
@@ -18,7 +19,8 @@
     "default_branch": "master",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": "2026-09-29"
+    "onboarded": "2026-09-29",
+    "account": "newlevel"
   },
   {
     "name": "camera-box",
@@ -28,7 +30,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": "2026-06-08"
+    "onboarded": "2026-06-08",
+    "account": "newlevel"
   },
   {
     "name": "dantetimesync",
@@ -38,7 +41,8 @@
     "default_branch": "master",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": null
+    "onboarded": null,
+    "account": "newlevel"
   },
   {
     "name": "devbridge",
@@ -48,7 +52,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": null
+    "onboarded": null,
+    "account": "newlevel"
   },
   {
     "name": "fohmixer",
@@ -58,7 +63,8 @@
     "default_branch": "master",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": "2026-09-27"
+    "onboarded": "2026-09-27",
+    "account": "newlevel"
   },
   {
     "name": "iemmixer",
@@ -68,7 +74,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": "2026-09-24"
+    "onboarded": "2026-09-24",
+    "account": "newlevel"
   },
   {
     "name": "obsytplayer",
@@ -78,7 +85,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": null
+    "onboarded": null,
+    "account": "newlevel"
   },
   {
     "name": "odoo-slovnormal",
@@ -90,7 +98,8 @@
     "overrides": [
       "3-branch"
     ],
-    "onboarded": null
+    "onboarded": null,
+    "account": "newlevel"
   },
   {
     "name": "random-ip-vpn",
@@ -100,7 +109,8 @@
     "default_branch": "master",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": "2026-09-02"
+    "onboarded": "2026-09-02",
+    "account": "newlevel"
   },
   {
     "name": "reaperiem",
@@ -110,7 +120,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": null
+    "onboarded": null,
+    "account": "newlevel"
   },
   {
     "name": "remoteos-mcp",
@@ -120,7 +131,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": null
+    "onboarded": null,
+    "account": "newlevel"
   },
   {
     "name": "restreamer",
@@ -130,7 +142,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": null
+    "onboarded": null,
+    "account": "newlevel"
   },
   {
     "name": "songplayer",
@@ -140,7 +153,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": null
+    "onboarded": null,
+    "account": "newlevel"
   },
   {
     "name": "spinbike",
@@ -150,7 +164,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": null
+    "onboarded": null,
+    "account": "newlevel"
   },
   {
     "name": "tv-manager",
@@ -160,7 +175,8 @@
     "default_branch": "master",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": "2026-09-02"
+    "onboarded": "2026-09-02",
+    "account": "newlevel"
   },
   {
     "name": "voiceagent",
@@ -170,7 +186,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": "2026-06-03"
+    "onboarded": "2026-06-03",
+    "account": "newlevel"
   },
   {
     "name": "automatizacie-montalu",
@@ -180,7 +197,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": "2026-07-02"
+    "onboarded": "2026-07-02",
+    "account": "newlevel"
   },
   {
     "name": "bakerion-ai",
@@ -192,7 +210,8 @@
     "overrides": [
       "local-builds=allowed"
     ],
-    "onboarded": null
+    "onboarded": null,
+    "account": "newlevel"
   },
   {
     "name": "codex-bridge",
@@ -202,7 +221,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": null
+    "onboarded": null,
+    "account": "newlevel"
   },
   {
     "name": "email-extractor",
@@ -212,7 +232,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": "2026-06-25"
+    "onboarded": "2026-06-25",
+    "account": "newlevel"
   },
   {
     "name": "forecasting-storage",
@@ -222,7 +243,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": "2026-07-14"
+    "onboarded": "2026-07-14",
+    "account": "newlevel"
   },
   {
     "name": "montalu-n8n",
@@ -232,7 +254,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": "2026-07-14"
+    "onboarded": "2026-07-14",
+    "account": "newlevel"
   },
   {
     "name": "montalu-vyuctovanie",
@@ -242,7 +265,8 @@
     "default_branch": "master",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": "2026-08-19"
+    "onboarded": "2026-08-19",
+    "account": "newlevel"
   },
   {
     "name": "presenter",
@@ -252,7 +276,8 @@
     "default_branch": "main",
     "work_branch": "dev",
     "overrides": [],
-    "onboarded": null
+    "onboarded": null,
+    "account": "newlevel"
   },
   {
     "name": "odoo-erp",
@@ -304,6 +329,7 @@
           }
         }
       ]
-    }
+    },
+    "account": "gatekeeper"
   }
 ]

@@ -1,16 +1,32 @@
-"""Root bootstrap renderer for service accounts on the controller (#960).
+"""Project-account declaration + root bootstrap renderer (#960, #1184).
 
-Renders an IDEMPOTENT bash script that root runs ONCE to create a service
-account (e.g. ``claudy``) on the controller box.  The script creates the unix
-user, sets permissions, installs authorized_keys (fleet push keys + per-human
-webterm forced-command keys), and enables loginctl linger — everything a
-sudo-less controller box cannot do itself.
+#1184 (owner ROZHODNUTÉ 2026-09-29): every project and its Claude session run in
+a DEDICATED unix account named after the project, never under the shared
+``newlevel`` account (weak shared password, NOPASSWD sudo, every fleet key in
+its home). ``SERVICE_ACCOUNTS`` below is THE declaration of those project
+accounts: for each one, its host, whether it has sudo (default NO), exactly
+where it may reach (default nowhere), which named credentials it receives
+(default none) and which humans get a webterm tab to it. ``validate_account``
+refuses anything the declaration does not state explicitly, so a project
+account can never end up with sudo, reach or a secret nobody declared.
 
-ZERO outbound imports by design (the L-E leaf convention); constants are
-imported LAZILY inside render functions so the module loads with no side effects.
+``render_root_bootstrap`` renders an IDEMPOTENT bash script that root runs ONCE
+on the declared host. It creates the unix user, sets permissions, and installs
+authorized_keys: the fleet push keys, the owner keys, and one forced-command
+line per declared webterm human (``restrict,pty,command=`` attaching the
+project's tmux session, nothing else). It enables loginctl linger. It installs
+the declared sudo policy: a sudo-less account gets NO sudoers entry, and the
+bootstrap FAILS LOUD if any sudo route exists; ``sudo: True`` writes a scoped,
+``visudo``-checked ``/etc/sudoers.d/<acct>``. Finally it clones the project
+repo and creates the project tmux session.
+
+ZERO outbound imports at module level (the L-E leaf convention); fleet/webterm
+constants are imported LAZILY inside functions so the module loads with no
+side effects.
 """
 
 import re
+import shlex
 import sys
 import textwrap
 
@@ -20,17 +36,54 @@ import textwrap
 # space/quote/metachar fails LOUD instead of silently breaking the script.
 _PACKAGE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.+\-]+$")
 
+# #1184 declaration grammar — every value the renderer interpolates into a root
+# script is validated against one of these first.
+_ACCOUNT_RE = re.compile(r"^[a-z_][a-z0-9_-]{1,31}$")
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")   # tmux rewrites '.'
+_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+_REL_DIR_RE = re.compile(r"^(?!/)(?!.*(^|/)\.\.(/|$))[A-Za-z0-9_./-]+$")
+# A scoped sudo command: an ABSOLUTE path plus optional plain arguments — never
+# `ALL`, a wildcard, a list separator or an alias/escape character.
+_SUDO_CMD_RE = re.compile(r"^/[A-Za-z0-9_./-]+( [A-Za-z0-9_./+-]+)*$")
+_ONE_LINE_RE = re.compile(r"^[^\n\r]+$")
+
+# Accounts that are NEVER a project account: the shared legacy account, root,
+# and the control/maintainer accounts.
+_NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
+                                     "gatekeeper"})
+
+_ALLOWED_KEYS = frozenset({
+    "host", "sudo", "sudo_reason", "sudo_commands", "reach", "secrets",
+    "webterm_sessions", "system_packages", "repo", "project_dir",
+    "tmux_session",
+})
+
+# The defaults every declaration inherits. They are the SAFE direction: no
+# sudo, no reach, no secrets. `host` defaults to the controller, where the
+# pre-#1184 renderer ran.
+_DEFAULTS = {
+    "host": "controller",
+    "sudo": False,
+    "reach": (),
+    "secrets": (),
+    "webterm_sessions": {},
+}
+
 
 # ---------------------------------------------------------------------------
-# Service account registry — which accounts this renderer knows about
+# THE project-account declaration (#960 claudy, #1184 policy)
 # ---------------------------------------------------------------------------
 
-# Each entry defines the per-human tmux session names that webterm connects to.
-# The keys of `webterm_sessions` are the humans whose webterm key gets a
-# forced-command line in authorized_keys; the values are the tmux session
-# `preferred` names those forced commands target.
+# Each entry declares ONE project account. `webterm_sessions` maps each human
+# whose webterm key gets a forced-command line in authorized_keys to the tmux
+# session (`preferred`) and start dir chain that forced command targets.
 SERVICE_ACCOUNTS = {
     "claudy": {
+        "host": "controller",
+        "sudo": False,
+        "reach": [],
+        "secrets": [],
         "webterm_sessions": {
             # human → {preferred, start_dir_chain} — the forced command
             # opens in the project dir, not the default STREAM_DEV_CWD_CHAIN.
@@ -50,7 +103,175 @@ SERVICE_ACCOUNTS = {
             "fonts-liberation", "fontconfig",
         ],
     },
+    # #1183: the first project account built on the #1184 policy. The owner,
+    # Marek and Timo each get a tab to the SAME account and share ONE project
+    # tmux session (owner ROZHODNUTÉ 2026-09-29: the account is per PROJECT and
+    # people share the project's session — never a per-person account).
+    "fohmixer": {
+        "host": "dev1",
+        "sudo": False,
+        "reach": [],
+        "secrets": [],
+        "repo": "zbynekdrlik/fohmixer",
+        "project_dir": "devel/fohmixer",
+        "tmux_session": "fohmixer",
+        "webterm_sessions": {
+            human: {"preferred": "fohmixer", "start_dir_chain": ["devel/fohmixer"]}
+            for human in ("zbynek", "marek", "timo")
+        },
+    },
 }
+
+
+def account_spec(account):
+    """The declaration of ``account`` with every default filled in. Raises
+    ValueError for an unknown account."""
+    if account not in SERVICE_ACCOUNTS:
+        raise ValueError("unknown project account: %r" % account)
+    spec = dict(_DEFAULTS)
+    spec.update(SERVICE_ACCOUNTS[account])
+    return spec
+
+
+def fleet_boxes():
+    """{box: address} for every box the fleet knows — the namespace a
+    declaration's ``host`` and ``reach`` must live in. Derived from the ONE
+    fleet source (``cli_fleet.REMOTE_HOSTS``): a ``<user>@<box>`` entry names
+    ``<box>``, a bare entry name IS the box (dev1, dev2, gatekeeper, ...)."""
+    import cli_fleet
+    boxes = {}
+    for h in cli_fleet.REMOTE_HOSTS:
+        box = h["name"].split("@")[-1]
+        boxes.setdefault(box, h["host"])
+    return boxes
+
+
+def _webterm_humans():
+    from cli_webterm_profiles import LANE_HOST
+    return frozenset(LANE_HOST)
+
+
+def _validate_sudo(spec):
+    errs = []
+    sudo = spec.get("sudo")
+    if not isinstance(sudo, bool):
+        return ["sudo must be True or False, got %r" % (sudo,)]
+    reason = spec.get("sudo_reason")
+    cmds = spec.get("sudo_commands")
+    if not sudo:
+        if reason is not None or cmds is not None:
+            errs.append("sudo_reason/sudo_commands declared on a sudo: False "
+                        "account — a grant never hides behind sudo: False")
+        return errs
+    if not isinstance(reason, str) or not _ONE_LINE_RE.match(reason.strip() or ""):
+        errs.append("sudo: True needs a one-line sudo_reason")
+    if not isinstance(cmds, (list, tuple)) or not cmds:
+        errs.append("sudo: True needs a non-empty scoped sudo_commands list")
+    else:
+        for c in cmds:
+            if not isinstance(c, str) or not _SUDO_CMD_RE.match(c):
+                errs.append("sudo_commands entry %r is not a scoped absolute "
+                            "command (never ALL / a wildcard / a list)" % (c,))
+    return errs
+
+
+def _validate_reach(reach, boxes):
+    errs = []
+    if not isinstance(reach, (list, tuple)):
+        return ["reach must be a list, got %r" % (reach,)]
+    for target in reach:
+        if not isinstance(target, str):
+            errs.append("reach target %r is not a string" % (target,))
+            continue
+        user, _, box = target.rpartition("@")
+        if box not in boxes or (user and not _TOKEN_RE.match(user)):
+            errs.append("reach target %r is not a fleet box (known: %s)"
+                        % (target, ", ".join(sorted(boxes))))
+    return errs
+
+
+def _validate_webterm(sessions):
+    errs = []
+    if not isinstance(sessions, dict):
+        return ["webterm_sessions must be a dict"]
+    humans = _webterm_humans()
+    for human, sess in sessions.items():
+        if human not in humans:
+            errs.append("webterm human %r is not a webterm lane (known: %s)"
+                        % (human, ", ".join(sorted(humans))))
+            continue
+        if not isinstance(sess, dict) or not _SESSION_RE.match(
+                str(sess.get("preferred") or "")):
+            errs.append("webterm_sessions[%r] needs a plain `preferred` "
+                        "session name" % human)
+            continue
+        for rel in sess.get("start_dir_chain") or []:
+            if not isinstance(rel, str) or not _REL_DIR_RE.match(rel):
+                errs.append("webterm_sessions[%r] start dir %r is not a "
+                            "HOME-relative path" % (human, rel))
+    return errs
+
+
+def validate_account(account, raw):
+    """Every problem with one declaration, as a list of strings ([] = valid).
+    Fail-closed on every axis: an unknown host, sudo without a reason or
+    without scoped commands, a reach target outside the fleet, a malformed
+    secret name, an unknown webterm human or an unknown key is an ERROR —
+    nothing the declaration does not state explicitly is ever rendered."""
+    errs = []
+    if not _ACCOUNT_RE.match(account or "") or account in _NEVER_PROJECT_ACCOUNTS:
+        errs.append("%r is not a valid project account name (shared/control "
+                    "accounts are never a project account)" % (account,))
+    if not isinstance(raw, dict):
+        return errs + ["declaration must be a dict"]
+    for key in sorted(set(raw) - _ALLOWED_KEYS):
+        errs.append("unknown declaration key %r" % key)
+    spec = dict(_DEFAULTS)
+    spec.update(raw)
+    boxes = fleet_boxes()
+    if spec["host"] not in boxes:
+        errs.append("host %r is not a fleet box (known: %s)"
+                    % (spec["host"], ", ".join(sorted(boxes))))
+    errs += _validate_sudo(spec)
+    errs += _validate_reach(spec["reach"], boxes)
+    secrets = spec["secrets"]
+    if not isinstance(secrets, (list, tuple)):
+        errs.append("secrets must be a list")
+    else:
+        errs += ["secrets entry %r is not a plain credential name" % (s,)
+                 for s in secrets
+                 if not isinstance(s, str) or not _TOKEN_RE.match(s)]
+    errs += _validate_webterm(spec["webterm_sessions"])
+    if "repo" in spec and not _REPO_RE.match(str(spec["repo"])):
+        errs.append("repo %r is not owner/name" % (spec["repo"],))
+    if "project_dir" in spec and not _REL_DIR_RE.match(str(spec["project_dir"])):
+        errs.append("project_dir %r is not a HOME-relative path"
+                    % (spec["project_dir"],))
+    if "repo" in spec and "project_dir" not in spec:
+        errs.append("repo declared without project_dir")
+    if "tmux_session" in spec and not _SESSION_RE.match(str(spec["tmux_session"])):
+        errs.append("tmux_session %r is not a plain name" % (spec["tmux_session"],))
+    return errs
+
+
+def validate_all():
+    """{account: [errors]} for every INVALID declaration ({} = all clean)."""
+    out = {}
+    for account, raw in SERVICE_ACCOUNTS.items():
+        errs = validate_account(account, raw)
+        if errs:
+            out[account] = errs
+    return out
+
+
+def _checked_spec(account):
+    """The filled-in declaration, or ValueError naming every problem."""
+    spec = account_spec(account)
+    errs = validate_account(account, SERVICE_ACCOUNTS[account])
+    if errs:
+        raise ValueError("invalid declaration for %r: %s"
+                         % (account, "; ".join(errs)))
+    return spec
 
 
 def _forced_command_key_line(preferred, pubkey, start_dir_chain=None):
@@ -67,10 +288,11 @@ def _forced_command_key_line(preferred, pubkey, start_dir_chain=None):
 
 
 def desired_keys_for_service_account(account):
-    """Return the list of authorized_keys lines for a service account.
-    Raises ValueError for an unknown account."""
-    if account not in SERVICE_ACCOUNTS:
-        raise ValueError("unknown service account: %r" % account)
+    """Return the list of authorized_keys lines for a project account.
+    Raises ValueError for an unknown/invalid account, or when a declared
+    webterm human has no controller lane key yet (#1184: a declared tab is
+    never dropped silently — mint the key first)."""
+    spec = _checked_spec(account)
 
     from cli_webterm_only import FLEET_PUSH_PUBKEYS, WEBTERM_CONTROLLER_LANE_PUBKEYS
     from cli_owner_keys import OWNER_PUBKEYS
@@ -79,23 +301,25 @@ def desired_keys_for_service_account(account):
     keys.extend(OWNER_PUBKEYS)
 
     # Per-human webterm forced-command keys
-    spec = SERVICE_ACCOUNTS[account]
     for human in sorted(spec["webterm_sessions"]):
         sess = spec["webterm_sessions"][human]
-        preferred = sess["preferred"]
-        chain = sess.get("start_dir_chain")
         pubkey = WEBTERM_CONTROLLER_LANE_PUBKEYS.get(human)
-        if pubkey:
-            keys.append(_forced_command_key_line(preferred, pubkey,
-                                                start_dir_chain=chain))
+        if not pubkey:
+            raise ValueError(
+                "declared webterm human %r of account %r has no controller "
+                "lane pubkey — mint ~/.secrets/webterm_%s_ed25519 on the "
+                "controller and add it to WEBTERM_CONTROLLER_LANE_PUBKEYS "
+                "before rendering" % (human, account, human))
+        keys.append(_forced_command_key_line(
+            sess["preferred"], pubkey, start_dir_chain=sess.get("start_dir_chain")))
 
     return keys
 
 
 def render_authorized_keys(account):
-    """Render the full authorized_keys content for a service account."""
+    """Render the full authorized_keys content for a project account."""
     header = (
-        "# airuleset:managed — service account %s (#960); "
+        "# airuleset:managed — project account %s (#960/#1184); "
         "re-run bootstrap to refresh\n" % account
     )
     lines = desired_keys_for_service_account(account)
@@ -165,14 +389,81 @@ def _render_system_packages_readback(packages):
     """).format(pkg_list=pkg_list)
 
 
+def _render_sudo_step(account, spec):
+    """#1184 step 9: the DECLARED sudo policy. ``sudo: False`` renders NO
+    sudoers entry and FAILS the bootstrap if the account has any sudo route (a
+    stray file, an admin group, a `%group` rule) — never a silent grant, never
+    a silent delete. ``sudo: True`` writes a scoped, ``visudo -cf``-checked
+    ``/etc/sudoers.d/<acct>`` (a dot-prefixed temp file, which sudo's
+    includedir ignores, then an atomic ``mv``)."""
+    if not spec["sudo"]:
+        return textwrap.dedent("""\
+
+            # 9. Sudo policy — declared sudo: NO (#1184). Never grant; fail LOUD
+            #    if any route exists (remove it by hand, then re-run).
+            if [ -e "/etc/sudoers.d/$ACCOUNT" ]; then
+                echo "ERROR: /etc/sudoers.d/$ACCOUNT exists but the declaration says declared sudo: NO" >&2
+                exit 1
+            fi
+            case " $(id -nG "$ACCOUNT") " in
+                *" sudo "*|*" admin "*|*" wheel "*)
+                    echo "ERROR: $ACCOUNT is in an admin group but declared sudo: NO" >&2
+                    exit 1 ;;
+            esac
+            SUDO_L=$(sudo -n -l -U "$ACCOUNT" 2>&1 || true)
+            case "$SUDO_L" in
+                *"may run the following"*)
+                    echo "ERROR: $ACCOUNT has a sudo route but declared sudo: NO" >&2
+                    exit 1 ;;
+            esac
+            echo "  sudo: none (declared sudo: NO)"
+        """)
+    rule = "%s ALL=(root) NOPASSWD: %s" % (account, ", ".join(spec["sudo_commands"]))
+    header = "# airuleset:managed — project account %s (#1184): %s" % (
+        account, spec["sudo_reason"].strip())
+    return (
+        "\n# 9. Sudo policy — declared SCOPED sudo (#1184), visudo-checked\n"
+        'SUDOERS_TMP=$(mktemp /etc/sudoers.d/.airuleset-"$ACCOUNT".XXXXXX)\n'
+        "cat > \"$SUDOERS_TMP\" << 'SUDOERS_EOF'\n"
+        "%s\n%s\nSUDOERS_EOF\n"
+        'chmod 0440 "$SUDOERS_TMP"\n'
+        'visudo -cf "$SUDOERS_TMP"\n'
+        'mv "$SUDOERS_TMP" "/etc/sudoers.d/$ACCOUNT"\n'
+        'echo "  sudo: scoped rule installed in /etc/sudoers.d/$ACCOUNT"\n'
+        % (header, rule))
+
+
+def _render_project_step(spec):
+    """#1184 steps 10-11: clone the project repo (idempotent — an existing
+    checkout is left alone) and create the project tmux session, both AS the
+    account. Returns '' for a declaration with neither."""
+    out = ""
+    if spec.get("repo"):
+        url = "https://github.com/%s.git" % spec["repo"]
+        dest = "$HOME/" + spec["project_dir"]
+        clone = ("if [ -d %s/.git ]; then echo \"  checkout exists — skipping "
+                 "clone\"; else GIT_TERMINAL_PROMPT=0 git clone %s %s; fi"
+                 % (dest, shlex.quote(url), dest))
+        out += ("\n# 10. Project checkout (idempotent, as the account) — #1184\n"
+                "runuser -l \"$ACCOUNT\" -c %s\n" % shlex.quote(clone))
+    if spec.get("tmux_session"):
+        sess = spec["tmux_session"]
+        start = "$HOME/" + spec["project_dir"] if spec.get("project_dir") else "$HOME"
+        tmux = ("tmux has-session -t =%s 2>/dev/null || "
+                "tmux new-session -d -s %s -c %s" % (sess, sess, start))
+        out += ("\n# 11. Project tmux session (idempotent, as the account) — #1184\n"
+                "runuser -l \"$ACCOUNT\" -c %s\n" % shlex.quote(tmux))
+    return out
+
+
 def render_root_bootstrap(account):
-    """Render an idempotent bash script for root that creates the service
-    account on the controller.  Returns the script as a string."""
-    if account not in SERVICE_ACCOUNTS:
-        raise ValueError("unknown service account: %r" % account)
+    """Render an idempotent bash script for root that creates the project
+    account on its DECLARED host.  Returns the script as a string."""
+    spec = _checked_spec(account)
+    host = spec["host"]
+    address = fleet_boxes()[host]
 
     ak_content = render_authorized_keys(account)
-    spec = SERVICE_ACCOUNTS[account]
     packages = spec.get("system_packages", [])
 
     # Shell-escape the authorized_keys content for a heredoc
@@ -181,13 +472,14 @@ def render_root_bootstrap(account):
         #!/usr/bin/env bash
         set -euo pipefail
 
-        # airuleset root bootstrap for service account '{account}' (#960)
+        # airuleset root bootstrap for project account '{account}' (#960/#1184)
         # Generated by: python3 airuleset.py account-bootstrap --render {account}
-        # Run as root on the controller box. Idempotent.
+        # Run as root on {host}. Idempotent.
+        # Declared: sudo={sudo} reach={reach} secrets={secrets}
 
         ACCOUNT='{account}'
 
-        echo "=== airuleset root bootstrap: $ACCOUNT ==="
+        echo "=== airuleset root bootstrap: $ACCOUNT on {host} ==="
 
         # 1. Create user (idempotent)
         if id "$ACCOUNT" &>/dev/null; then
@@ -222,10 +514,16 @@ def render_root_bootstrap(account):
 
         # 7. Create devel directory for the repo clone
         install -d -m 0755 -o "$ACCOUNT" -g "$ACCOUNT" "/home/$ACCOUNT/devel"
-    """).format(account=account, ak_content=ak_content)
+    """).format(account=account, ak_content=ak_content, host=host,
+                sudo="yes" if spec["sudo"] else "no",
+                reach=",".join(spec["reach"]) or "none",
+                secrets=",".join(spec["secrets"]) or "none")
 
     # 8. System packages — only when the account declares them (#973)
     script += _render_system_packages_step(packages)
+    # 9. The declared sudo policy; 10-11 project checkout + tmux (#1184)
+    script += _render_sudo_step(account, spec)
+    script += _render_project_step(spec)
 
     # Read-back section
     readback = textwrap.dedent("""\
@@ -246,8 +544,8 @@ def render_root_bootstrap(account):
         echo "=== Next steps (as $ACCOUNT) ==="
         echo "  1. git clone https://github.com/zbynekdrlik/airuleset.git ~/devel/airuleset"
         echo "  2. python3 ~/devel/airuleset/airuleset.py install"
-        echo "  3. Verify: ssh -i ~/.secrets/airuleset_push_ed25519 $ACCOUNT@100.101.214.103 true"
-    """)
+        echo "  3. Verify: ssh -i ~/.secrets/airuleset_push_ed25519 $ACCOUNT@{address} true"
+    """).format(address=address)
     script += readback
     return script
 

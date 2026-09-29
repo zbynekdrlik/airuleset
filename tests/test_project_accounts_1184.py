@@ -26,7 +26,9 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic HOME)
 import cli_account_bootstrap as bootstrap  # noqa: E402
 import cli_accounts as accounts  # noqa: E402
 import cli_onboard as ob  # noqa: E402
@@ -181,7 +183,7 @@ class TestFohmixerRender(unittest.TestCase):
     def test_is_host_generic_not_controller_bound(self):
         self.assertIn("Run as root on dev1", self.script)
         self.assertNotIn("100.101.214.103", self.script)
-        self.assertIn("fohmixer@100.104.8.125", self.script)
+        self.assertIn("$ACCOUNT@100.104.8.125", self.script)
 
     def test_no_sudoers_for_a_sudo_less_account(self):
         self.assertNotIn("NOPASSWD", self.script)
@@ -437,8 +439,7 @@ class TestLegacyNotice(unittest.TestCase):
         r = subprocess.run(["bash", str(ROOT / "hooks" /
                                         "inject-situational-rule.sh")],
                            input=payload, capture_output=True, text=True,
-                           env={"PATH": "/usr/bin:/bin",
-                                "TMPDIR": self._tmp.name})
+                           env=hermetic_hook_env(self, TMPDIR=self._tmp.name))
         return r.stdout
 
     def test_editing_a_newlevel_project_injects_the_notice(self):

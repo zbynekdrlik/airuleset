@@ -204,6 +204,18 @@ PRIVILEGES: List[Privilege] = [
         used_by=("cli_webterm_profiles.py:397 (WEBTERM_DOMINIKA_IDENTITY)",),
     ),
     Privilege(
+        name="webterm_timo_ed25519",
+        kind=KIND_SSH_KEY,
+        local_path="~/.secrets/webterm_timo_ed25519",
+        reach="dedicated webterm LANE key for the timo lane's single tab — a "
+              "forced-command line on fohmixer@dev1 ONLY (#1183; Timo himself "
+              "holds no key)",
+        rotation="#1183 go-live: minted on the controller, pubkey into "
+                 "WEBTERM_CONTROLLER_LANE_PUBKEYS, re-render fohmixer bootstrap.",
+        must_move=True,
+        used_by=("cli_webterm_profiles.py (WEBTERM_TIMO_IDENTITY)",),
+    ),
+    Privilege(
         name="controller_tunnel_creds",
         kind=KIND_STORE,
         local_path="~/.cloudflared/controller-webterm.json",

@@ -2,7 +2,6 @@
 
 - **Never commit credentials, API keys, passwords, or tokens** to version control.
 - Ensure `.gitignore` covers: `.env`, `*.env.local`, `TARGETS.md`, `credentials.json`, `*.pem`, `*.key`.
-- Store secrets in environment variables or external files referenced by `.gitignore`.
-- When referencing secrets in documentation, use placeholders (e.g., `YOUR_API_KEY`).
-- CI secrets go in GitHub Secrets, never in workflow files.
-- If you accidentally stage a secret, remove it from git history, not just the latest commit.
+- Secrets live in env vars or `.gitignore`d files; docs use placeholders (`YOUR_API_KEY`); CI uses GitHub Secrets.
+- A staged secret is purged from git history, not just HEAD.
+- **One unix account per project (#1184):** never a new project under `newlevel`; sudo/reach/secrets declared per account (`onboard-project`).

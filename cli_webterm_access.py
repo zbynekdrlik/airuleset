@@ -119,6 +119,15 @@ WEBTERM_ACCESS_APPS = {
         "allowed_emails": ["nika.sarikova@gmail.com"],   # owner-provided, #867
         "session_duration": "720h",
     },
+    # timo.newlevel.media — the FIFTH webterm gateway (#1183, owner request
+    # 2026-09-29, e-mail owner-provided verbatim). Timo is webterm-only: this
+    # allow-list IS his whole authorization (one tab: fohmixer@dev1).
+    "timo": {
+        "hostname": "timo.newlevel.media",
+        "name": "webterm — timo",
+        "allowed_emails": ["timotej.kam@gmail.com"],   # owner-provided, #1183
+        "session_duration": "720h",
+    },
     # claudy.newlevel.media — the claudy dashboard public hostname (#983,
     # owner request 2026-09-10: "pristup na web claudy ... chraneny cloudflare
     # prihlasenim cez email ... marek a zbynek"). Origin is the controller's

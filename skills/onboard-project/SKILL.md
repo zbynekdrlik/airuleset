@@ -43,6 +43,7 @@ python3 ~/devel/airuleset/airuleset.py onboard-project <path> --audit   # one pr
 
 ## Rules
 
+- **Own account per project (#1184, owner 2026-09-29).** A new project is never onboarded into the shared `newlevel` account — the CLI refuses it (`--legacy-ok <ticket>` is migration bookkeeping only). Declare the project account in `cli_account_bootstrap.SERVICE_ACCOUNTS` (host; sudo — default NO; reach and secrets — default none; webterm humans), have root run `airuleset.py account-bootstrap --render <acct>` on that host, then onboard the account's path. `airuleset.py accounts status` lists the frozen legacy inventory (a count that only goes down).
 - Never re-implement onboarding steps in this skill body — the CLI owns all logic.
 - Never overwrite an existing file, never auto-generate CI, never mass-fix in audit mode.
 - Deploying the tooling: `python3 airuleset.py push` (never bare `git push`).

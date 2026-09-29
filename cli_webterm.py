@@ -232,6 +232,8 @@ def webterm_inventory(profile=profiles.OWNER):
         return profiles.marek_inventory()
     if profile == profiles.DOMINIKA:
         return profiles.dominika_inventory()
+    if profile == profiles.TIMO:
+        return profiles.timo_inventory()
     if profile == profiles.OWNER:
         return profiles.zbynek_inventory()
     raise ValueError(
@@ -680,7 +682,7 @@ WEBTERM_DASHBOARD_TABS = {
     # EXCLUDES montalu7/8, simap1, marek@subdev, stepan@forestshop-dev,
     # admin@forestshop-dev.
     "zbynek": [
-        "ar", "claudy",
+        "ar", "claudy", "fohmixer",
         "dev1", "dev2", "gatekeeper",
         "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
         "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
@@ -698,7 +700,7 @@ WEBTERM_DASHBOARD_TABS = {
     "marek": [
         "montalu1-subdev", "montalu2-subdev",
         "miva1-subdev", "montalu4-subdev",
-        "ar", "claudy", "dev1", "dev2", "gatekeeper", "forestshop",
+        "ar", "claudy", "fohmixer", "dev1", "dev2", "gatekeeper", "forestshop",
     ],
     # david.newlevel.media -- David's working accounts. The david GATEWAY renders
     # its own physically-scoped inventory (cli_webterm_profiles.david_inventory,
@@ -714,6 +716,9 @@ WEBTERM_DASHBOARD_TABS = {
     # tabs (loopback ssh into montalu5/miva1's own tmux group via the dedicated
     # dominika key) — no local attach, no other stream, no owner-realm box.
     "dominika": ["montalu5-subdev", "miva1-subdev"],
+    # timo.newlevel.media -- #1183 (owner 2026-09-29): ONE tab, the fohmixer@dev1
+    # project account; fohmixer is also on the owner's and marek's lists (#1184).
+    "timo": ["fohmixer"],
 }
 
 
@@ -1726,6 +1731,7 @@ _HUMAN_TO_MODULE = {
     "david": "cli_webterm_david",
     "marek": "cli_webterm_marek",
     "dominika": "cli_webterm_dominika",
+    "timo": "cli_webterm_timo",
 }
 
 

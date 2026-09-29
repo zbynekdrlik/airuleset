@@ -9588,10 +9588,18 @@ from cli_box_queue import (  # noqa: E402, F401
 )
 
 
+# --- #1184: per-project account policy (legacy inventory + onboarding gate) ---
+from cli_accounts import (  # noqa: E402, F401
+    cmd_accounts as cmd_accounts,
+    register_parser as _register_accounts_parser,
+)
+
+
 def _register_leaf_parsers(sub):
-    """Leaf modules that own their argparse subparser (#1138, #1171) — one
-    call from main() keeps main() from growing per leaf."""
-    for register in (_register_stream_priority_parser, _register_box_queue_parser):
+    """Leaf modules that own their argparse subparser (#1138, #1171, #1184) —
+    one call from main() keeps main() from growing per leaf."""
+    for register in (_register_stream_priority_parser, _register_box_queue_parser,
+                     _register_accounts_parser):
         register(sub)
 
 # --- #1062 L1: managed LiteLLM model gateway CLI leaf ---
@@ -11461,6 +11469,7 @@ SUBCOMMANDS = {
     "task-hygiene": cmd_task_hygiene,
     "labels": cmd_labels,
     "stream-priority": cmd_stream_priority,
+    "accounts": cmd_accounts,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS

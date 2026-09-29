@@ -39,8 +39,8 @@ class TestEnumerateStatusUnits(unittest.TestCase):
         with patch("cli_webterm_reconcile._box_class", return_value="controller"):
             rendered = rec.enumerate_status_units()
 
-        # All 4 profiles: zbynek, david, marek, dominika — each with ttyd + gateway
-        expected_profiles = {"zbynek", "david", "marek", "dominika"}
+        # All 5 profiles (#1183 added timo) — each with ttyd + gateway
+        expected_profiles = {"zbynek", "david", "marek", "dominika", "timo"}
         found_profiles = set()
         for unit_name in rendered:
             for profile in expected_profiles:
@@ -49,9 +49,9 @@ class TestEnumerateStatusUnits(unittest.TestCase):
                     break
 
         self.assertEqual(found_profiles, expected_profiles,
-                         "Must enumerate all 4 profiles")
-        self.assertEqual(len(rendered), 8,
-                         "Must have 8 entries (4 profiles x 2 unit types)")
+                         "Must enumerate all 5 profiles")
+        self.assertEqual(len(rendered), 10,
+                         "Must have 10 entries (5 profiles x 2 unit types)")
 
         # Each ttyd entry should point to a launch script (.sh)
         for unit_name, path in rendered.items():
@@ -94,7 +94,7 @@ class TestEnumerateStatusUnits(unittest.TestCase):
 
         # Check exact unit names from the _spec() derivation
         expected_units = set()
-        for profile in ["zbynek", "david", "marek", "dominika"]:
+        for profile in ["zbynek", "david", "marek", "dominika", "timo"]:
             expected_units.add("webterm-%s-ttyd.service" % profile)
             expected_units.add("webterm-%s-gateway.service" % profile)
 

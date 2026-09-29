@@ -81,6 +81,7 @@ from cli_onboard_exec import (  # noqa: E402
     _read_file as _read_file,
     _write_file as _write_file,
 )
+import cli_accounts  # noqa: E402  (#1184 per-project account gate)
 
 
 # --------------------------------------------------------------------------- #
@@ -354,7 +355,7 @@ def _registry_display_path(orig_path, target_path, host):
 
 
 def build_registry_entry(orig_path, target_path, host, name, overrides,
-                         existing, onboarded_date=None, run=None):
+                         existing, onboarded_date=None, run=None, account=None):
     """Build the registry entry. `overrides` is the EFFECTIVE set (the caller
     has already merged in the existing entry's overrides), and `host`/
     `onboarded` fall back to the existing entry so a BARE re-onboard is a
@@ -374,6 +375,7 @@ def build_registry_entry(orig_path, target_path, host, name, overrides,
         "work_branch": model["work_branch"],
         "overrides": list(overrides or []),
         "onboarded": onboarded,
+        "account": account or (existing or {}).get("account"),   # #1184
     }
 
 
@@ -787,7 +789,7 @@ def _remote_preflight(orig_path, host, run=None):
 
 def onboard_project(path, host=None, name=None, overrides=None,
                     registry_path=None, run=None, dry_run=False,
-                    onboarded_date=None):
+                    onboarded_date=None, legacy_ok=None):
     orig_path = str(path)
     registry_path = registry_path or default_registry_path()
     entries = load_registry(registry_path)
@@ -806,6 +808,9 @@ def onboard_project(path, host=None, name=None, overrides=None,
     # reachability BEFORE any detection. A failure REFUSES (never a local
     # false-negative); the error is surfaced in dry-run too.
     target_path, err = _remote_preflight(orig_path, host, run=run)
+    # #1184: never onboard into the shared legacy account (--legacy-ok only).
+    account = cli_accounts.account_for_target(target_path, host, run) if not err else None
+    err = err or cli_accounts.onboard_account_gate(account, legacy_ok)
     if err:
         return {"name": name, "stack": None, "steps": [], "entry": None,
                 "error": err}
@@ -828,7 +833,8 @@ def onboard_project(path, host=None, name=None, overrides=None,
     ]
     entry = build_registry_entry(orig_path, target_path, host, name,
                                  eff_overrides, existing,
-                                 onboarded_date=onboarded_date, run=run)
+                                 onboarded_date=onboarded_date, run=run,
+                                 account=account)
     steps.append(step_registry(target_path, entry, registry_path, host, run,
                                dry_run))
     return {"name": name, "stack": stack, "steps": steps, "entry": entry,
@@ -1004,7 +1010,8 @@ def cmd_onboard_project(args):
             name=getattr(args, "name", None),
             overrides=getattr(args, "override", None) or [],
             registry_path=registry_path,
-            dry_run=getattr(args, "dry_run", False))
+            dry_run=getattr(args, "dry_run", False),
+            legacy_ok=getattr(args, "legacy_ok", None))
     except ValueError as e:
         print("onboard-project: %s" % e, file=sys.stderr)
         return 2

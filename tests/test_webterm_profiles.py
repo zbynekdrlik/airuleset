@@ -270,7 +270,7 @@ class TestProfileForHostReturnSet870(unittest.TestCase):
         profile_for_host returns the full set of all human lanes."""
         result = p.profile_for_host_set("controller", "airuleset")
         self.assertIsInstance(result, (set, frozenset))
-        self.assertEqual(result, {p.OWNER, p.DAVID, p.MAREK, p.DOMINIKA})
+        self.assertEqual(result, {p.OWNER, p.DAVID, p.MAREK, p.DOMINIKA, p.TIMO})
 
     def test_dev1_returns_empty_after_zbynek_flip(self):
         # #870 F4c-zbynek: zbynek moved to controller -- dev1 no longer hosts

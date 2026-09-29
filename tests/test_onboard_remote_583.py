@@ -175,7 +175,7 @@ class TestRemoteDetectionOverSsh(unittest.TestCase):
             run = RemoteRunner()
             r = ob.onboard_project(local_missing, host=REMOTE_HOST, name="foo583",
                                    registry_path=str(Path(rd) / "r.json"),
-                                   run=run, dry_run=True)
+                                   run=run, dry_run=True, legacy_ok="#1184")
             self.assertIsNone(r.get("error"), r.get("error"))
             st = {s["step"]: s["status"] for s in r["steps"]}
             for step in ("git_init", "remote", "branches", "gitignore",
@@ -200,7 +200,7 @@ class TestNoLocalWritesForRemote(unittest.TestCase):
             run = RemoteRunner(claude_present=False, gitignore_present=False)
             r = ob.onboard_project(str(localdir), host=REMOTE_HOST, name="foo583",
                                    registry_path=str(Path(rd) / "r.json"),
-                                   run=run, dry_run=False)
+                                   run=run, dry_run=False, legacy_ok="#1184")
             self.assertIsNone(r.get("error"), r.get("error"))
             st = {s["step"]: s["status"] for s in r["steps"]}
             self.assertEqual(st["claude_md"], "applied")
@@ -358,7 +358,7 @@ class TestDev1IsRemoteFromController1123(unittest.TestCase):
                 r = ob.onboard_project("~/devel/foo1123", host="dev1",
                                        name="foo1123",
                                        registry_path=str(Path(rd) / "r.json"),
-                                       run=run, dry_run=True)
+                                       run=run, dry_run=True, legacy_ok="#1184")
             self.assertFalse(r.get("error"), r.get("error"))
             joined = " || ".join(run.ssh_cmd_strings())
             self.assertIn("/home/newlevel/devel/foo1123", joined,
