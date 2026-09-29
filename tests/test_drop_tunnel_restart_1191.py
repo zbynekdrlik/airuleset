@@ -47,7 +47,8 @@ class FakeSystemd:
     and the restarted main 'register' synchronously by writing their pidfiles."""
 
     def __init__(self, config_path, unit, *, env_pidfile=True, user="",
-                 exec_config=None, grant=True, binary="/opt/cf/cloudflared"):
+                 exec_config=None, grant=True, binary="/opt/cf/cloudflared",
+                 env_line=None, env_files="", main_registers=True):
         self.config_path = Path(config_path)
         self.unit = unit
         self.overlap = ta.overlap_service_name(unit)
@@ -56,6 +57,10 @@ class FakeSystemd:
         self.exec_config = exec_config or str(config_path)
         self.grant = grant
         self.binary = binary
+        self.env_line = env_line            # overrides the Environment= value
+        self.env_files = env_files
+        self.main_registers = main_registers
+        self.overlap_active = False
         self.calls = []          # (argv, kw)
         self.main_pid = 0
 
@@ -88,20 +93,27 @@ class FakeSystemd:
         if args[:1] == ["show"] and "ExecStart" in args:
             env = ("TUNNEL_PIDFILE=%s" % ta.tunnel_pidfile(self.config_path)
                    if self.env_pidfile else "")
+            if self.env_line is not None:
+                env = self.env_line
             ok.stdout = (
                 "ExecStart={ path=%s ; argv[]=%s tunnel --no-autoupdate --config %s "
                 "run ; ignore_errors=no ; start_time=[n/a] ; pid=0 ; code=(null) }\n"
-                "Environment=%s\nUser=%s\n"
-                % (self.binary, self.binary, self.exec_config, env, self.user))
+                "Environment=%s\nEnvironmentFiles=%s\nUser=%s\n"
+                % (self.binary, self.binary, self.exec_config, env, self.env_files,
+                   self.user))
         elif args[:3] == ["show", "-p", "ActiveState"]:
-            ok.stdout = "inactive\n"
+            ok.stdout = "active\n" if self.overlap_active else "inactive\n"
         elif args[:3] == ["show", "-p", "MainPID"]:
             ok.stdout = "%d\n" % self.main_pid
         elif args[:3] == ["start", "--no-block", self.overlap]:
+            self.overlap_active = True
             ta.overlap_pidfile(self.config_path).write_text("111\n")
+        elif args[:1] == ["stop"] and self.overlap in args:
+            self.overlap_active = False
         elif args[:3] == ["restart", "--no-block", self.unit]:
             self.main_pid = 222
-            ta.tunnel_pidfile(self.config_path).write_text("222\n")
+            if self.main_registers:
+                ta.tunnel_pidfile(self.config_path).write_text("222\n")
         return ok
 
 
@@ -202,6 +214,58 @@ class TestUserLaneReassertOverlaps(_LaneCase):
                          "no overlap unit is written when the precondition fails")
 
 
+    def test_other_pidfile_in_the_unit_falls_back_loud(self):
+        fake = FakeSystemd(self.cfg, self.lane.tunnel_service,
+                           env_line="TUNNEL_PIDFILE=/elsewhere/x.pid")
+        ok, err = self._reconcile(fake)
+        self.assertTrue(ok, err)
+        self.assertIn("LOUD", err)
+        self.assertIn("TUNNEL_PIDFILE", err)
+        self.assertNotIn(["start", "--no-block",
+                          ta.overlap_service_name(self.lane.tunnel_service)],
+                         fake.systemctl_calls())
+
+    def test_user_unit_without_pidfile_gets_no_dropin_and_falls_back_loud(self):
+        # airuleset renders the --user lane units itself and never writes their
+        # drop-ins (cli_webterm_marek/dominika) — a missing pidfile is LOUD.
+        fake = FakeSystemd(self.cfg, self.lane.tunnel_service, env_pidfile=False)
+        ok, err = self._reconcile(fake)
+        self.assertTrue(ok, err)
+        self.assertIn("LOUD", err)
+        self.assertEqual(list(self.home.rglob("*.conf")), [])
+        self.assertIn(["restart", self.lane.tunnel_service], fake.systemctl_calls())
+
+    def test_non_cloudflared_exec_falls_back_loud(self):
+        fake = FakeSystemd(self.cfg, self.lane.tunnel_service, binary="/bin/sh")
+        ok, err = self._reconcile(fake)
+        self.assertTrue(ok, err)
+        self.assertIn("LOUD", err)
+        self.assertIn("cloudflared", err)
+
+    def test_failed_overlap_is_retried_by_the_next_install(self):
+        # 1st install: the new main never re-registers → "failed", overlap left
+        # serving, install fails LOUD.
+        first = FakeSystemd(self.cfg, self.lane.tunnel_service, main_registers=False)
+        with mock.patch("cli_tunnel_apply.MAIN_READY_TIMEOUT_S", 0):
+            ok, _err = self._reconcile(first)
+        self.assertFalse(ok)
+        self.assertTrue(ta.overlap_pidfile(self.cfg).exists())
+        # 2nd install: the ingress is already in the config, but the restart it
+        # carried never applied — it must be retried, not skipped.
+        second = FakeSystemd(self.cfg, self.lane.tunnel_service)
+        second.overlap_active = True
+        ok, err = self._reconcile(second)
+        self.assertTrue(ok, err)
+        self.assertIn(["restart", "--no-block", self.lane.tunnel_service],
+                      second.systemctl_calls())
+        self.assertIn("applied (overlap)", err)
+        # 3rd install: applied, unchanged → touches nothing.
+        third = FakeSystemd(self.cfg, self.lane.tunnel_service)
+        ok, _err = self._reconcile(third)
+        self.assertTrue(ok)
+        self.assertEqual(third.calls, [])
+
+
 class TestMarekApplyOverlaps(_LaneCase):
     KEY = ("subdev", "marek")
 
@@ -221,12 +285,42 @@ class TestMarekApplyOverlaps(_LaneCase):
         self.assertIsNotNone(dg.read_drop_marker(self.marker))
 
 
+    def _apply(self, fake):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = dg.cmd_drop_gateway(types.SimpleNamespace(
+                apply=True, _nodename="subdev", _username="marek",
+                _marker_path=self.marker, _run=fake,
+                _is_worktree_fn=lambda: False))
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_apply_with_a_failed_overlap_is_rc1_and_not_live(self):
+        self.cfg.write_text(_config(MAREK_UUID, "marek.newlevel.media"))
+        fake = FakeSystemd(self.cfg, self.lane.tunnel_service, main_registers=False)
+        with mock.patch("cli_tunnel_apply.MAIN_READY_TIMEOUT_S", 0):
+            rc, _out, err = self._apply(fake)
+        self.assertEqual(rc, 1)
+        self.assertIn("FAILED", err)
+        self.assertIsNone(dg.read_drop_marker(self.marker))
+
+    def test_an_exception_in_the_overlap_is_rc1_not_a_crash(self):
+        self.cfg.write_text(_config(MAREK_UUID, "marek.newlevel.media"))
+        fake = FakeSystemd(self.cfg, self.lane.tunnel_service)
+        with mock.patch("cli_tunnel_apply.overlap_restart",
+                        side_effect=PermissionError("pidfile")):
+            rc, _out, err = self._apply(fake)
+        self.assertEqual(rc, 1)
+        self.assertIn("pidfile", err)
+        self.assertIsNone(dg.read_drop_marker(self.marker))
+
+
 class TestSystemLane(_LaneCase):
     KEY = ("spinbike", "newlevel")
 
     def setUp(self):
         super().setUp()
         self.unit_dir = self.tmp / "etc-systemd-system"
+        self.unit_dir.mkdir()            # as /etc/systemd/system always exists
         self._ud = mock.patch("cli_drop_tunnel_restart.SYSTEM_UNIT_DIR", self.unit_dir)
         self._ud.start()
         self.cfg.write_text(_config(SPINBIKE_UUID, "spinbike.sk"))
@@ -264,6 +358,46 @@ class TestSystemLane(_LaneCase):
                        "spinbike-tunnel-overlap.service"], probed)
         self.assertIn(["tee", overlap_path], probed)
 
+    def _sudo_executed_and_probed(self, fake):
+        executed = {tuple(a[2:]) for a, _ in fake.calls
+                    if a[:2] == ["sudo", "-n"] and a[2:3] != ["-l"]}
+        probed = {tuple(a[3:]) for a, _ in fake.calls if a[:3] == ["sudo", "-n", "-l"]}
+        return executed, probed
+
+    def test_every_executed_sudo_command_was_probed_first(self):
+        for env_pidfile in (False, True):
+            with self.subTest(env_pidfile=env_pidfile):
+                for f in sorted(self.unit_dir.rglob("*"), reverse=True):
+                    if f.is_file():
+                        f.unlink()
+                self.cfg.write_text(_config(SPINBIKE_UUID, "spinbike.sk"))
+                fake = FakeSystemd(self.cfg, "spinbike-tunnel.service",
+                                   env_pidfile=env_pidfile, user="newlevel")
+                ok, err = self._reconcile(fake)
+                self.assertTrue(ok, err)
+                executed, probed = self._sudo_executed_and_probed(fake)
+                self.assertTrue(executed)
+                self.assertLessEqual(executed, probed,
+                                     "unprobed: %s" % sorted(executed - probed))
+
+    def test_pidfile_already_set_writes_no_dropin(self):
+        fake = FakeSystemd(self.cfg, "spinbike-tunnel.service", env_pidfile=True)
+        ok, err = self._reconcile(fake)
+        self.assertTrue(ok, err)
+        self.assertIn("applied (overlap)", err)
+        self.assertEqual(list(self._tee_inputs(fake)),
+                         [str(self.unit_dir / "spinbike-tunnel-overlap.service")])
+        self.assertFalse(any(a[2:3] == ["mkdir"] for a, _ in fake.calls))
+
+    def test_environment_file_without_pidfile_falls_back_loud(self):
+        fake = FakeSystemd(self.cfg, "spinbike-tunnel.service", env_pidfile=False,
+                           env_files="/etc/default/cloudflared (ignore_errors=no)")
+        ok, err = self._reconcile(fake)
+        self.assertTrue(ok, err)
+        self.assertIn("LOUD", err)
+        self.assertIn("EnvironmentFile", err)
+        self.assertEqual(self._tee_inputs(fake), {})
+
     def test_uncovered_grant_falls_back_to_a_loud_plain_restart(self):
         fake = FakeSystemd(self.cfg, "spinbike-tunnel.service", grant=False)
         ok, err = self._reconcile(fake)
@@ -299,6 +433,30 @@ class TestLaneConfigMatchesTheRenderedUnit(unittest.TestCase):
 
     def test_marek_lane_edits_the_config_its_unit_runs(self):
         self._check(("subdev", "marek"), "cli_webterm_marek", "MAREK")
+
+
+class TestSingleWriterOfTheLaneConfig(unittest.TestCase):
+    """A local drop lane that edits a webterm lane's config (`webterm-<name>.yml`)
+    relies on that webterm lane NOT being rendered on the same box: the webterm
+    render rewrites the file without the drop ingress, so an install would restart
+    the tunnel twice (render, then re-assert) with a 404 window in between. Today
+    those lanes are controller-hosted (#870 F4c). Flipping one back to its box
+    must first make the webterm render carry the drop ingress."""
+
+    def test_webterm_lanes_behind_local_drop_lanes_are_not_rendered_on_the_box(self):
+        import cli_webterm_profiles as profiles
+        checked = 0
+        for (node, user), lane in dg.DROP_LANES.items():
+            name = Path(lane.tunnel_config or "").name
+            if lane.topology != "local" or not name.startswith("webterm-"):
+                continue
+            checked += 1
+            human = name[len("webterm-"):-len(".yml")]
+            self.assertNotEqual(profiles.LANE_HOST.get(human), node,
+                                "%s@%s: its webterm lane renders %s on this box "
+                                "— make that render carry the drop ingress first"
+                                % (user, node, name))
+        self.assertEqual(checked, 2, "marek + dominika are the webterm-config lanes")
 
 
 class TestOverlapUnitUser(unittest.TestCase):
