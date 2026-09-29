@@ -11,6 +11,16 @@
     "onboarded": null
   },
   {
+    "name": "akcie",
+    "host": "dev1",
+    "path": "~/devel/akcie",
+    "branch_model": "2-branch",
+    "default_branch": "master",
+    "work_branch": "dev",
+    "overrides": [],
+    "onboarded": "2026-09-29"
+  },
+  {
     "name": "camera-box",
     "host": "dev1",
     "path": "~/devel/camera-box",

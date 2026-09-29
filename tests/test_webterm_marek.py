@@ -105,7 +105,7 @@ class TestMarekInventory(unittest.TestCase):
         inv = p.marek_inventory()
         self.assertEqual([e["id"] for e in inv],
                          ["montalu1-subdev", "montalu2-subdev", "miva1-subdev",
-                          "montalu4-subdev", "claudy", "dev1", "dev2",
+                          "montalu4-subdev", "ar", "claudy", "dev1", "dev2",
                           "gatekeeper", "forestshop"])
 
     def test_montalu2_entry_is_ssh_with_dedicated_key(self):
@@ -238,6 +238,17 @@ class TestMarekInventory(unittest.TestCase):
         self.assertEqual(e["user"], fleet_e["user"])
         self.assertEqual(list(e["host_keys"]), list(fleet_e["host_keys"]))
 
+    def test_ar_tab_is_the_local_controller_airuleset_session(self):
+        # owner request 2026-09-29 ("pridaj ar marekovi do webtermu"): marek's
+        # gateway runs AS airuleset on the controller, so `ar` is a LOCAL attach
+        # of the owner's airuleset session group, exactly the owner's ar tab.
+        e = {x["id"]: x for x in p.marek_inventory()}["ar"]
+        self.assertTrue(e["local"])
+        self.assertIsNone(e["host"])
+        self.assertIsNone(e["identity"])
+        self.assertEqual(e["preferred"], "zbynek")
+        self.assertEqual(e["start_dir_chain"], ["devel/airuleset"])
+
     def test_every_ssh_entry_uses_the_dedicated_marek_identity(self):
         # NEVER identity=None on an ssh entry (that would take the sshpass
         # shared-password branch from marek's gateway) and NEVER the fleet
@@ -357,7 +368,7 @@ class TestMarekConnectAllowlistScoped(unittest.TestCase):
         # #960: claudy tab added.
         self.assertEqual(marek_ids, {"montalu1-subdev", "montalu2-subdev",
                                      "miva1-subdev", "montalu4-subdev",
-                                     "claudy", "dev1",
+                                     "ar", "claudy", "dev1",
                                      "dev2", "gatekeeper", "forestshop"})
         for foreign in ("gk", "montalu-subdev", "david1",
                         "codex-bridge", "stepan-forestshop-dev",
@@ -517,7 +528,7 @@ class TestMarekArtifactsWrite(unittest.TestCase):
             # #960: claudy tab added before dev1.
             self.assertEqual([e["id"] for e in inv],
                              ["montalu1-subdev", "montalu2-subdev", "miva1-subdev",
-                              "montalu4-subdev", "claudy", "dev1", "dev2",
+                              "montalu4-subdev", "ar", "claudy", "dev1", "dev2",
                               "gatekeeper", "forestshop"])
             launcher = (claude / "airuleset-webterm-marek-ttyd.sh").read_text(
                 encoding="utf-8")
