@@ -205,6 +205,7 @@ from watchdog import goal_turn_liveness as _turn_liveness     # #1110 (transcrip
 from watchdog import gk_stall_notice as _gk_stall_notice      # #1109 (gk role-pane stall notice)
 from watchdog import stream_migrate as _stream_migrate        # #1143 (dark stream loop re-arm)
 from watchdog import send_outcome as _send_outcome            # #1157 (delivery outcome)
+from watchdog import goal_arm_failure as _arm_failure         # #1181 (visible failed arm)
 from watchdog import watch_triggers as _wt                    # #1163 (steer=watch windows)
 from watchdog.send_outcome import (  # noqa: E402 -- #1157: moved, ONE shared undo
     janitor_undo_if_own_stranded as _janitor_undo_if_own_stranded)
@@ -1206,7 +1207,7 @@ def _clear_stranded_truncated_goal(sid, cwd, captured, tpath, pid, run, state,
     return logs, False
 
 
-def _recovery_pane_ready(sid, cwd, run, projects_dir, now, pid=None):
+def _recovery_pane_ready(sid, cwd, run, projects_dir, now, pid=None, human_gate=True):
     """#731 -- the SHARED guard core extracted from `_resolve_stash_abort_livelock`
     (#566) so the attempt-cap drop cleanup reuses the IDENTICAL pre-keystroke
     guards, never a parallel set. Resolves the pane (unless `pid` given) and, in
@@ -1214,7 +1215,8 @@ def _recovery_pane_ready(sid, cwd, run, projects_dir, now, pid=None):
     fail-closed recent-human gate (which now ALSO carries the #731 tmux-client-
     input signal 3), an open dialog. Returns `(pid, captured, loc)` when the pane
     is safe to act on, or `(None, <reason-str>, None)` when a guard vetoes
-    (`reason` in {no-pane,in-mode,recent-human,dialog-open}). A CLEAN idle input
+    (`reason` in {no-pane,in-mode,recent-human,dialog-open}; `human_gate=False`
+    skips recent-human -- the #1181 owner-arm notice, #752). A CLEAN idle input
     BOUNDARY (`_classify_boundary=="input"`, not the "Waiting for N agents"
     swallowed-submit render) is the CALLER's responsibility -- the #566 caller
     orders `_janitor_recover` (which no-ops on an unreadable box), the #731 cap-
@@ -1228,7 +1230,7 @@ def _recovery_pane_ready(sid, cwd, run, projects_dir, now, pid=None):
         return None, "in-mode", None
     tinfo = watchdog.find_active_transcript(projects_dir, cwd)
     tpath = tinfo[0] if tinfo else None
-    if _recovery_recent_human(sid, cwd, tpath, now, pid=pid, run=run):
+    if human_gate and _recovery_recent_human(sid, cwd, tpath, now, pid=pid, run=run):
         return None, "recent-human", None
     captured = watchdog.capture_pane(pid, run, lines=40)
     if watchdog.pane_waiting_on_user(captured):
@@ -1621,6 +1623,7 @@ def _structured_goal_mark_state(sid, state, with_mark=False):
 
 _GOAL_TERMINAL_WORDS = frozenset((
     "sent", "expired", "drop:cleared-after-request", "drop:already-armed",
+    "drop:nudge-off",     # #1181 -- the owner's per-kind switch withholds it
     "drop:stale-rearm",   # #524 -- a dark-rearm too old to type (delivery gate)
     "drop:stale-rearm-retired",  # #1113 -- a leftover stale-rearm request, never
                                  # typed (the origin is retired); cleared in one
@@ -1648,20 +1651,19 @@ def _verify_fail_word(tpath, age_before, now):
     return "skip:verify-failed"
 
 
-def _declared_window_nudge(cwd):
-    """#1038 -- the keystroke NUDGE identity for arming `cwd`'s pane, derived from
-    WHETHER `cwd` is a DECLARED managed window (gk review, gk-infra, d3 today —
-    any box that declares `windows` in cli_fleet), NOT from the origin. A
-    declared window is a session-
-    revival surface, so ANY arm delivered into it (a fresh `declared-virgin`
-    bootstrap, a manual `self-callback`, or a `dark-rearm`) rides the ALWAYS-ON
-    `goal-arm` recovery nudge and is never suppressed by the #1023 machine-nudge
-    OFF switch -- the owner's declared windows come back armed after a reboot
-    with zero staging. Every OTHER (non-declared) box keeps the staged PRIORITY
-    `goal-sweep` identity, byte-identical to before. `source == "role"` is the
-    ONE declared-window signal (`_match_window` matched the pane cwd to a
-    box_windows entry). Fail-safe toward `goal-sweep` on any resolver error --
-    never a wrongly-always-on non-declared pane."""
+def _declared_window_nudge(cwd, origin=None):
+    """The keystroke NUDGE identity of a `/goal` arm into `cwd`'s pane. The
+    ALWAYS-ON `goal-arm` recovery kind (never withheld by the #1023 per-kind
+    switch) for: a DECLARED managed window (#1038 -- `source == "role"`, a
+    session-revival surface, so ANY arm into it; declared windows re-arm after a
+    reboot with zero staging); the owner's OWN `self-callback` arm on ANY pane
+    (#1181 -- they just typed /autopilot, #752; the staged kind, OFF on every box,
+    withheld every keystroke of it on dev1 iemmixer/fohmixer 29.9.); the
+    owner-authorized `stream-migrate` watcher (#1128). Every other watchdog
+    re-arm keeps the staged PRIORITY `goal-sweep`. Fail-safe toward `goal-sweep`
+    on a resolver error -- never a wrongly-always-on non-declared pane."""
+    if origin in (_GOAL_SELF_CALLBACK_ORIGIN, _stream_migrate.ORIGIN):
+        return "goal-arm"
     try:
         import cli_concurrency
         source = cli_concurrency.resolve_concurrency(cwd)[2]
@@ -1715,6 +1717,7 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                                         goal_sweep drops it; `skip:client-
                                         active` (an attached human typing NOW)
                                         is a zero-keystroke defer, never counted.
+      "drop:nudge-off" (#1181): the kind is OFF; nothing typed, one attempt.
       "skip:busy-transcript"        -- #1110: the session TRANSCRIPT was written
                                         within GOAL_TURN_LIVE_WINDOW_S (the turn
                                         is running), so the render's bare box is
@@ -1808,13 +1811,9 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         _log_goal_sync("PASS structured-armed sid=%s cwd=%s origin=%s (%s)"
                        % (sid, cwd, origin, _mig_why))
 
-    # #1038 -- the keystroke NUDGE identity, derived from WHETHER this cwd is a
-    # DECLARED managed window (see `_declared_window_nudge`): a declared window
-    # rides the ALWAYS-ON `goal-arm` recovery nudge (never suppressed by the
-    # #1023 machine-nudge switch) regardless of origin; every other box keeps
-    # the staged PRIORITY `goal-sweep`, byte-identical to before.
-    _nudge = ("goal-arm" if origin == _stream_migrate.ORIGIN  # #1128: owner-
-              else _declared_window_nudge(cwd))  # authorized always-on watcher
+    # #1038/#1128/#1181 -- the keystroke NUDGE identity: always-on `goal-arm` for a declared
+    # window / the owner's own arm / the stream watcher, else the staged `goal-sweep`.
+    _nudge = _declared_window_nudge(cwd, origin)
 
     # Hard age cap -- checked first, no pane resolution needed. Unlike
     # compact, an expired goal-arm is not harmless: PING once (deduped on
@@ -1867,6 +1866,9 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     # #675 -- the tighter dark-rearm freshness gate (#524) moved BELOW the
     # recent-human check (see its new position after that check).
 
+    if watchdog._keystroke_suppressed("goal", False, _nudge):   # #1181: no pane read
+        return _arm_failure.nudge_off(sid, cwd, text, _nudge, logs, out, _log_goal_sync, None
+                                      if dry_run else lambda: _record_delivered_attempt(state, origin, sid, now))
     pid = _compact._find_pane_for_session(sid, cwd, run=run, projects_dir=projects_dir)
     if not pid:
         _log_goal_sync("SKIP no-pane sid=%s cwd=%s" % (sid, cwd))
@@ -2055,7 +2057,6 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     if _ops_wait_recheck._pane_busy_waiting(captured):
         _log_goal_sync("SKIP busy sid=%s cwd=%s" % (sid, cwd))
         return "skip:busy"
-
     if draft:
         # Mark provenance BEFORE the attempt (regardless of outcome) so
         # the shared janitor (#372) can recover a stuck stash send for
@@ -2479,6 +2480,10 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             logs.append("DROP (goal-sweep) %s sid=%s -> drop:attempt-cap "
                         "(%d keystroke deliveries failed, last=%s; leftover=%s)"
                         % (loc, sid, _dl_count, dl_last, leftover))
+            if entry.get("origin") == _GOAL_SELF_CALLBACK_ORIGIN:   # #1181 (c)
+                logs += _arm_failure.on_self_arm_capped(
+                    sid, cwd, dl_last, _dl_count, run, projects_dir, state, now,
+                    sleep_fn)
             if handled is not None:
                 handled.add(sid)
             continue
@@ -2527,6 +2532,7 @@ def goal_sweep(now, run=None, dry_run=False, projects_dir=None,
             # *_attempts state dict. Only "sent" deliveries count — an
             # undelivered attempt (skip:busy etc.) never fills the cap.
             _record_delivered_attempt(state, entry.get("origin"), sid, now)
+            _arm_failure.clear(state, sid)                     # #1181: armed now
             logs.append("OK (goal-sweep) %s sid=%s -> sent" % (loc, sid))
             if handled is not None:
                 handled.add(sid)
