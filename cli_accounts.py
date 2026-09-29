@@ -199,8 +199,9 @@ def transfer_session(account, from_dir, *, from_home=None, render=False,
                      apply=False, target_home=None, target_cwd=None,
                      proc_root="/proc"):
     """#1190: copy the Claude conversation of the old checkout ``from_dir`` into
-    the declared project account. Default = dry run (the listing); ``render``
-    prints the root script; ``apply`` runs it and needs root. The target is
+    the declared project account. Default = dry run (the listing, on
+    stderr); ``render`` prints the root script (the only stdout output);
+    ``apply`` runs it and needs root. The target is
     the declaration's ``/home/<acct>/<project_dir>`` (tests pass fake roots)."""
     import cli_account_session as session
     declared = _declared_accounts()
@@ -245,7 +246,9 @@ def transfer_session(account, from_dir, *, from_home=None, render=False,
             return 1
         return subprocess.run(["bash", "-s"], input=session.render_script(plan),
                               text=True, check=False).returncode
-    print(session.format_plan(plan))
+    # the listing is diagnostic: stdout only ever carries a rendered script,
+    # so a dry run mistakenly piped into `sudo bash` runs nothing
+    print(session.format_plan(plan), file=sys.stderr)
     return 0
 
 
