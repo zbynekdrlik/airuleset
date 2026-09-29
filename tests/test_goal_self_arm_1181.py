@@ -18,8 +18,9 @@ Locked here:
   1. a `self-callback` arm on a non-declared pane with every staged kind OFF
      TYPES the /goal and arms (the root fix: the owner's own arm rides the
      always-on `goal-arm` recovery kind, like the #1128 stream watcher);
-  2. a watchdog re-arm the owner's switch withholds is reported as
-     `skip:nudge-off` (nothing typed), never as `skip:verify-failed`;
+  2. a watchdog re-arm the owner's switch withholds is dropped as
+     `drop:nudge-off` (nothing typed, no pane read, one attempt booked), never
+     reported as `skip:verify-failed`;
   3. a `self-callback` arm dropped at the strict attempt cap leaves ONE pointer
      line in the pane and a `goal: arm failed (...)` status row.
 """
@@ -53,7 +54,9 @@ def _real_kill_switch(testcase):
     suite exercises the all-on shortcut, not the switch)."""
     home = TemporaryDirectory()
     testcase.addCleanup(home.cleanup)
-    for p in (m.patch.dict(os.environ, {"HOME": home.name}),):
+    statep = Path(home.name) / ".claude" / "api-watchdog-state.json"
+    for p in (m.patch.dict(os.environ, {"HOME": home.name}),
+              m.patch.object(wd, "STATE_PATH", statep)):   # never the box's file
         p.start()
         testcase.addCleanup(p.stop)
     saved = os.environ.pop("AIRULESET_TEST_IGNORE_DISABLE", None)
@@ -116,46 +119,47 @@ class TestWithheldRearmIsNamedNotVerifyFailed(unittest.TestCase):
         self.reqp, self.syncp = _isolate_goal_state(self)
         _real_kill_switch(self)
 
-    def test_off_rearm_is_skip_nudge_off_with_zero_keystrokes(self):
+    def test_off_rearm_is_drop_nudge_off_with_zero_keystrokes(self):
         sid = "sess-1181-off"
         proj, tmux = _pane(self, sid)
-        logs = []
+        calls, logs = [], []
         now = 100000
-        with m.patch.object(wd, "_goal_autoarm_recent_human_activity",
-                            return_value=(False, "test")):
-            word = goal.deliver_goal(sid, CWD, PAYLOAD, "full", run=tmux,
-                                     projects_dir=proj, now=now, request_ts=now,
-                                     state={}, sleep_fn=lambda s: None,
-                                     logs=logs, origin="dark-rearm")
-        self.assertEqual(word, "skip:nudge-off", logs)
+
+        def run(argv, timeout=8):
+            calls.append(argv)
+            return tmux(argv, timeout)
+        word = goal.deliver_goal(sid, CWD, PAYLOAD, "full", run=run,
+                                 projects_dir=proj, now=now, request_ts=now,
+                                 state={}, sleep_fn=lambda s: None,
+                                 logs=logs, origin="dark-rearm")
+        self.assertEqual(word, "drop:nudge-off", logs)
         self.assertEqual(tmux.keys(), [], "nothing may be typed at OFF")
+        self.assertFalse(any("capture-pane" in a for a in calls), calls)
         self.assertTrue(any("nudges OFF: suppressed goal-sweep" in ln
                             for ln in logs), logs)
         sync = self.syncp.read_text() if self.syncp.exists() else ""
         self.assertNotIn("ARM-CONFIRM-FAIL", sync,
                          "a withheld keystroke is not a failed arm confirm")
-        self.assertIn("SKIP nudge-off(goal-sweep)", sync)
+        self.assertIn("DROP nudge-off(goal-sweep)", sync)
 
-    def test_nudge_off_is_a_zero_keystroke_defer_not_a_counted_attempt(self):
-        # like skip:busy (#611): the request stays pending, nothing is counted
-        # toward the keystroke cap, and it never drops as `attempt-cap`
+    def test_nudge_off_is_terminal_and_bounded_by_the_origin_attempt_cap(self):
+        # one sweep: cleared, never re-typed, no misleading attempt-cap ping, and
+        # ONE booked dark-rearm attempt so dark-watch stays under its 24 h cap
         sid = "sess-1181-off-sweep"
         proj, tmux = _pane(self, sid)
         goal.record_goal_request(sid, CWD, PAYLOAD, "full", now=100000,
                                  path=self.reqp, origin="dark-rearm")
-        logs = []
-        with m.patch.object(wd, "_goal_autoarm_recent_human_activity",
-                            return_value=(False, "test")):
-            for t in range(goal.GOAL_DELIVERY_ATTEMPT_CAP + 2):
-                logs += goal.goal_sweep(100000 + t, run=tmux, projects_dir=proj,
-                                        requests_path=self.reqp, state={},
-                                        sleep_fn=lambda s: None)
+        state, pings = {}, []
+        logs = goal.goal_sweep(100010, run=tmux, projects_dir=proj,
+                               requests_path=self.reqp, state=state,
+                               send_fn=lambda msg, **k: pings.append(msg),
+                               sleep_fn=lambda s: None)
         self.assertEqual(tmux.keys(), [])
-        entry = goal.load_goal_requests(self.reqp).get(sid)
-        self.assertIsNotNone(entry, "the request stays pending (expires later)")
-        self.assertFalse(entry.get("dl_fails"), entry)
-        self.assertFalse(any("attempt-cap" in ln for ln in logs), logs)
-        self.assertTrue(any("skip:nudge-off" in ln for ln in logs), logs)
+        self.assertNotIn(sid, goal.load_goal_requests(self.reqp))
+        self.assertTrue(any("drop:nudge-off" in ln for ln in logs), logs)
+        self.assertEqual(pings, [])
+        key = goal._GOAL_ATTEMPTS_STATE_KEYS["dark-rearm"]
+        self.assertEqual(len(state.get(key, {}).get(sid, [])), 1, state)
 
 
 QUIET = (False, "")
@@ -205,7 +209,7 @@ class TestCappedSelfArmIsVisible(unittest.TestCase):
         self.assertEqual(len(notices), 1, "exactly one pointer line: %r"
                          % tmux.typed_texts())
         self.assertIn("/autopilot", notices[0])
-        self.assertIn("take no action", notices[0])
+        self.assertIn("Claude: no action", notices[0])
         self.assertNotIn(PAYLOAD, tmux.typed_texts(), "never a new /goal type")
         rec = state.get("goal_arm_failed", {}).get(sid)
         self.assertIsNotNone(rec, state)
@@ -216,6 +220,21 @@ class TestCappedSelfArmIsVisible(unittest.TestCase):
         line = gaf.NOTICE.format(attempts=goal.GOAL_DELIVERY_LIVE_ATTEMPT_CAP)
         self.assertLessEqual(nudge_file.cells(line), nudge_file.LINE_MAX_CELLS)
         self.assertFalse(line.lstrip().startswith("/"))
+
+    def test_the_notice_is_machine_text_never_an_owner_answer(self):
+        # #1133: an answer / human-presence detector must reject our own line
+        from watchdog import goal_arm_failure as gaf, questions, stream_migrate
+        line = gaf.NOTICE.format(attempts=3)
+        entry = {"type": "user", "message": {"content": line}}
+        self.assertFalse(questions._is_genuine_human_prompt(entry))
+        self.assertTrue(stream_migrate._own_keystroke(line))
+
+    def test_no_notice_into_a_box_holding_a_draft(self):
+        draft = "● Hotovo.\n❯ rozpisany draft\n  ctx ███░  caveman:lite\n"
+        tmux, _state, logs = self._sweep("sess-1181-draft", "self-callback",
+                                         captured=draft)
+        self.assertEqual(self._notices(tmux), [])
+        self.assertTrue(any("not an empty idle input" in ln for ln in logs), logs)
 
     def test_no_notice_into_a_copy_mode_pane(self):
         tmux, state, logs = self._sweep("sess-1181-mode", "self-callback",
@@ -249,6 +268,8 @@ class TestCappedSelfArmIsVisible(unittest.TestCase):
         self.assertEqual(len(self._notices(first)), 1)
         self.assertEqual(self._notices(second), [], "a re-arm loop is bounded")
         self.assertTrue(any("notice already typed" in ln for ln in logs), logs)
+        self.assertEqual(state["goal_arm_failed"][sid]["ts"], 100500,
+                         "the status row is refreshed by the later cap")
 
     def test_a_watchdog_rearm_at_the_cap_gets_no_pane_line(self):
         sid = "sess-1181-rearm-cap"
@@ -280,8 +301,8 @@ class TestCappedSelfArmIsVisible(unittest.TestCase):
         sid = "sess-1181-status"
         self.assertEqual(
             self._status(sid, self._failed(sid)),
-            "goal: arm failed (skip:verify-failed x3) — paste the line above or "
-            "re-run /autopilot")
+            "goal: arm failed (skip:verify-failed x3) — paste the /goal line "
+            "/autopilot printed, or re-run /autopilot")
 
     def test_an_armed_pane_never_shows_a_stale_failure(self):
         from _goal_arm_helpers import GOAL_ARMED_CAP

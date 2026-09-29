@@ -2285,7 +2285,8 @@ class TestGoalDeliveryAttemptCap731(unittest.TestCase):
         # AFTER the fix: at most `cap` /goal types (+ #1181: at most ONE notice).
         goals = [t for t in tmux.typed_texts() if t.startswith("/goal")]
         self.assertLessEqual(len(goals), cap, "retype bound; typed %d" % len(goals))
-        self.assertLessEqual(len(tmux.typed_texts()) - len(goals), 1, tmux.typed_texts())
+        others = [t for t in tmux.typed_texts() if not t.startswith("/goal")]
+        self.assertTrue(len(others) <= 1 and all("arm failed" in t for t in others), others)
         self.assertTrue(any("drop:attempt-cap" in ln for ln in last_logs),
                         last_logs)
         self.assertEqual(goal.load_goal_requests(self.reqp), {},
