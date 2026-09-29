@@ -161,6 +161,13 @@ class TestTimoHasNoSshIdentity(unittest.TestCase):
         self.assertEqual(app["hostname"], "timo.newlevel.media")
         self.assertEqual(app["allowed_emails"], ["timotej.kam@gmail.com"])
 
+    def test_timo_is_a_drop_reader_of_exactly_his_tabs(self):
+        # #1115: readers derive from the dashboards — timo's is {fohmixer}
+        import cli_drop_gateway as dg
+        rows = [(emails, [e["id"] for e in inv]) for emails, inv
+                in dg._webterm_readers() if "timotej.kam@gmail.com" in emails]
+        self.assertEqual(rows, [(["timotej.kam@gmail.com"], ["fohmixer"])])
+
     def test_timo_email_is_on_no_other_app(self):
         for name, app in access.WEBTERM_ACCESS_APPS.items():
             if name != "timo":
