@@ -32,7 +32,7 @@ person (rule 5), its partner in `partner_ids` (#702); the TRANSPORT uses `body_i
 `handover-compose.md` posting rules. The shape is Stop-checked (#1018).
 
 **ONE step (#1180):** post a task handover ONLY via `odoo_post.py --handover`
-(odoo-erp#8606: post + rule-5 assignee + covered tasks moved here + read-back).
+(odoo-erp#8606: post + rule-5 assignee + move + read-back).
 A task handover without it, or an `Acceptance-thread:` naming an unmoved task,
 is Stop-blocked.
 
@@ -70,7 +70,7 @@ countdown. The mechanism moves the task, never the stream by hand, and replaces
 
 👷 ACK + presun fázy = OKAMŽITÉ na každý komentár klienta; text pre klienta čaká na schválenie ownera (#606 U flow).
 
-Montalu phase names — map each to YOUR profile's stages (miva: **V riešení** / **Požadujú sa zmeny** / **Čaká**; slovnormal: **V práci** / **Na overenie**).
+The phase names below are the montalu vocabulary — map each to YOUR profile's stages (miva: **V riešení** / **Požadujú sa zmeny** / **Čaká**; slovnormal: **V práci** / **Na overenie**).
 
 | Udalosť klienta | Fáza + akcia |
 |---|---|
