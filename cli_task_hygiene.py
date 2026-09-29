@@ -215,14 +215,14 @@ def compute_hygiene(call, cfg, now=None):
 
     if not reactions_ok and a_items and not hh.guarded_reactions_ok(call, all_msgs):
         a_items = [dict(it, reaction_unknown=True) for it in a_items]  # #1180
-    h_items, h_error = hh.compute_h(call, tasks, cfg, lambda a: _is_stream_author(
-        a, own_names, stream_pids), now)
+    hres = hh.compute_h(call, tasks, cfg, lambda a: _is_stream_author(
+        a, own_names, stream_pids), now, hh.own_signature_rx())
     summary = "task-hygiene: A=%d B=%d C=%d" % (
-        len(a_items), len(b_items), len(c_items)) + (" H=%d" % len(h_items) if h_items else "")
+        len(a_items), len(b_items), len(c_items)) + (" H=%d" % len(hres["H"]) if hres["H"] else "")
     if tasks_truncated or msgs_truncated:
         summary += " (truncated: raise _TASK_LIMIT/_MSG_LIMIT — result under-counts)"
-    return {"A": a_items, "B": b_items, "C": c_items, "H": h_items, "summary": summary,
-            "reactions_unavailable": not reactions_ok, "h_error": h_error,
+    return {"A": a_items, "B": b_items, "C": c_items, "summary": summary, **hres,
+            "reactions_unavailable": not reactions_ok,
             "verif_wait": tracker.waiting,
             "verif_wait_status": tracker.status(tasks_truncated),
             "truncated": bool(tasks_truncated or msgs_truncated)}
@@ -266,7 +266,7 @@ def format_report(result, cfg):
 
 def compose_nudge(result, cfg):
     """The bounded (<= 700 char) keystroke nudge for watchdog Job 49. Empty
-    string when A ∪ B ∪ C is empty (nothing to nudge)."""
+    string when A ∪ B ∪ C ∪ H is empty (nothing to nudge)."""
     a, b, c = result.get("A", []), result.get("B", []), result.get("C", [])
     h = result.get("H", [])
     if not (a or b or c or h):
@@ -304,22 +304,21 @@ def persist_status(result, home=None, now=None):
     b = result.get("B", [])
     c = result.get("C", [])
     a_ts = [it["ts"] for it in a if isinstance(it.get("ts"), (int, float))
-            and not it.get("reaction_unknown")]    # #1180: never Stop-gate an unknown
+            and not it.get("reaction_unknown")]    # #1180: unknown → 72 h (extras)
     # b_items = ONLY the Verifikácia B members (#1036 review 🔵), matching b_verif.
     b_verif_items = [it for it in b if _is_verif_stage_name(it.get("stage"))]
     payload = {
         "ts": now,
-        "a": len(a), "b": len(b), "c": len(c), "h": len(result.get("H", [])),
+        "a": len(a), "b": len(b), "c": len(c),
         "a_oldest_ts": (min(a_ts) if a_ts else None),
         "b_verif": len(b_verif_items),
         "a_items": ["#%s %s" % (it["task_id"], _short(it.get("task_name"), 40))
                     for it in a[:10]],
         "b_items": ["#%s %s" % (it["task_id"], _short(it.get("task_name"), 40))
                     for it in b_verif_items[:10]],
-        "h_items": ["#%s %s" % (it["task_id"], _short(it.get("task_name"), 40))
-                    for it in result.get("H", [])[:10]],
-        "reactions_unavailable": bool(result.get("reactions_unavailable")),
         "verif_wait": result.get("verif_wait_status"),   # #1167 → quals
+        **hh.status_extras(result, lambda it: "#%s %s" % (
+            it["task_id"], _short(it.get("task_name"), 40))),   # #1180 H / 403
     }
     path = status_path(home)
     os.makedirs(os.path.dirname(path), exist_ok=True)

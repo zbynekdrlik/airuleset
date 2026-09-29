@@ -35,6 +35,7 @@ montalu4 29.9.).
   ``gates.handover`` Stop check covers it through ``Acceptance-thread:``.
 """
 import datetime
+import getpass
 import re
 
 import cli_odoo_ro as ro
@@ -111,14 +112,25 @@ def daily_notes(result, state, now):
     return out
 
 
-def compute_h(call, tasks, cfg, is_stream, now):
-    """``(items, error)`` — class H members, or an error string when the read
-    failed (H then reports nothing; A/B/C are unaffected)."""
+def own_signature_rx(user=None):
+    """This box's stream signature (``ZbynekAI 4`` for ``montalu4``), from the
+    trailing digits of the account name; None when the name carries none (then
+    every stream handover counts as this box's own, the pre-#1180-r2 behaviour)."""
+    m = re.search(r"(\d+)$", user if user is not None else getpass.getuser())
+    return re.compile(r"\b\w+AI(?:\s|&nbsp;|&#160;)+%s\b" % m.group(1)) if m else None
+
+
+def compute_h(call, tasks, cfg, is_stream, now, own_rx=None):
+    """Class H → ``{"H": this box's items, "H_foreign": other streams' / the
+    owner's items, "h_error": str|None}``. Only ``H`` nudges and Stop-gates: a
+    shared board must not block every sibling stream for one stream's miss, and
+    a handover the owner posted by hand is not a stream's debt."""
     verif = (cfg.get("stage_ids") or {}).get("verifikacia")
     cand = {t.get("id"): t for t in tasks
             if m2o(t.get("stage_id"))[0] != verif and t.get("id") is not None}
+    out = {"H": [], "H_foreign": [], "h_error": None}
     if not cand:
-        return [], None
+        return out
     try:
         rows = call("mail.message", "search_read",
                     domain=[["model", "=", "project.task"],
@@ -128,9 +140,10 @@ def compute_h(call, tasks, cfg, is_stream, now):
                     fields=["id", "author_id", "date", "res_id", "body"],
                     order="res_id, date desc, id desc", limit=_H_LIMIT) or []
     except ro.OdooError as e:
-        return [], "class H read failed: %s" % e
-    err = ("class H read truncated at %d rows (raise _H_LIMIT)" % _H_LIMIT
-           if len(rows) >= _H_LIMIT else None)
+        out["h_error"] = "class H read failed: %s" % e
+        return out
+    if len(rows) >= _H_LIMIT:
+        out["h_error"] = "class H read truncated at %d rows (raise _H_LIMIT)" % _H_LIMIT
     newest = {}
     for m in rows:
         rid = m.get("res_id")
@@ -139,16 +152,31 @@ def compute_h(call, tasks, cfg, is_stream, now):
         if (rid not in cand or dt is None or not is_stream(m.get("author_id"))
                 or not is_handover_body(m.get("body"))):
             continue
-        if rid not in newest or dt > newest[rid]:
-            newest[rid] = dt
-    items = []
+        if rid not in newest or dt > newest[rid][0]:
+            newest[rid] = (dt, m.get("body") or "")
     for rid in sorted(newest):
-        posted, t = newest[rid], cand[rid]
+        (posted, body), t = newest[rid], cand[rid]
         age_s = (now - posted).total_seconds()
         moved = parse_dt(t.get("date_last_stage_update"))
         if age_s < H_GRACE_S or (moved is not None and moved > posted):
             continue
-        items.append({"task_id": rid, "task_name": t.get("name") or "",
-                      "stage": m2o(t.get("stage_id"))[1],
-                      "minutes": int(age_s // 60)})
-    return items, err
+        mine = own_rx is None or bool(own_rx.search(body))
+        out["H" if mine else "H_foreign"].append(
+            {"task_id": rid, "task_name": t.get("name") or "",
+             "stage": m2o(t.get("stage_id"))[1], "minutes": int(age_s // 60)})
+    return out
+
+
+def status_extras(result, line_of):
+    """The #1180 fields of ``status.json`` (``line_of(item)`` renders one item):
+    this box's H, the foreign H count, the H read error, the reaction 403 flag,
+    and the oldest A whose reaction state is unknown (the Stop gate holds it to
+    a longer deadline instead of never)."""
+    a_unknown = [it["ts"] for it in result.get("A", []) if it.get("reaction_unknown")
+                 and isinstance(it.get("ts"), (int, float))]
+    return {"h": len(result.get("H", [])),
+            "h_items": [line_of(it) for it in result.get("H", [])[:10]],
+            "h_foreign": len(result.get("H_foreign", [])),
+            "h_error": result.get("h_error"),
+            "reactions_unavailable": bool(result.get("reactions_unavailable")),
+            "a_unknown_oldest_ts": min(a_unknown) if a_unknown else None}

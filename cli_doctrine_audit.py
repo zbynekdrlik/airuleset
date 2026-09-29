@@ -288,6 +288,8 @@ SUPERSEDED_MEMORY = [
         "pattern": (r"\b(?:no|bez|žiadn\w*|nikdy\s+nenastav\w*)\s+"
                     r"(?:assignee|user_ids)"
                     r"|\b(?:assignee|user_ids)\s*[:=]?\s*(?:none|empty|prázdn\w*|\[\])"),
+        # a line already carrying the new rule is up to date, not stale
+        "current_markers": ("#1166", "addressee", "adresát", "adresat"),
         "superseded_by": ("skills/odoo-client-messaging/client-board-stages.md rule 5 "
                           "(#1166, owner 28.9.2026: on montalu the handover addressee "
                           "IS the task assignee)"),
@@ -313,17 +315,32 @@ def scan_superseded_memory(home, table=None):
         except (OSError, UnicodeDecodeError):
             continue
         for row in rows:
-            if not (re.search(row["scope"], path, re.IGNORECASE)
-                    or re.search(row["scope"], text, re.IGNORECASE)):
-                continue
-            m = re.search(row["pattern"], text, re.IGNORECASE)
-            if m:
-                s = text.rfind("\n", 0, m.start()) + 1
-                e = text.find("\n", m.end())
-                out.append({"path": path, "id": row["id"],
-                            "superseded_by": row["superseded_by"],
-                            "line": text[s:e if e != -1 else None].strip()[:160]})
+            in_path = bool(re.search(row["scope"], path, re.IGNORECASE))
+            for line in text.splitlines():
+                m = re.search(row["pattern"], line, re.IGNORECASE)
+                if m and (in_path or re.search(row["scope"], line, re.IGNORECASE)) \
+                        and _states_superseded_rule(line, m, row):
+                    out.append({"path": path, "id": row["id"],
+                                "superseded_by": row["superseded_by"],
+                                "line": line.strip()[:160]})
+                    break
     return out
+
+
+_NEG_BEFORE_RX = re.compile(r"(?:never|nikdy|nie|not|don't|nenech\w*)\W+(?:\w+\W+){0,4}$",
+                            re.IGNORECASE)
+_NEG_AFTER_RX = re.compile(r"^\W{0,3}(?:never|nikdy|nie)\b", re.IGNORECASE)
+
+
+def _states_superseded_rule(line, m, row):
+    """True iff the matched LINE still STATES the old rule: not negated right
+    before/after the match ("never no assignee", "bez assignee NIKDY") and not
+    already citing the superseding rule. (Scope — the memory's PATH or the line
+    itself names the tenant — is checked by the caller.)"""
+    if any(tok in line for tok in row.get("current_markers", ())):
+        return False
+    return not (_NEG_BEFORE_RX.search(line[:m.start()])
+                or _NEG_AFTER_RX.search(line[m.end():]))
 
 
 def format_superseded(findings):

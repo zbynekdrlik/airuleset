@@ -109,9 +109,9 @@ def task_hygiene_job(now, state, panes, projects_dir, *, cfg, compute, persist,
     # #1036 review 🔵 — an HONEST OFF-box skip while the kind is not staged (no
     # misleading "submit-unverified"); the footer I + Stop hook carry it meanwhile.
     if nudges_enabled is not None and not nudges_enabled(NUDGE_KIND):
-        out.append("task-hygiene: A=%d B=%d — nudge kind OFF (stage via "
+        out.append("task-hygiene: A=%d B=%d H=%d — nudge kind OFF (stage via "
                    "`nudges on --kind task-hygiene`); footer/Stop carry it"
-                   % (len(a), len(b)))
+                   % (len(a), len(b), len(h)))
         return out
 
     from cli_task_hygiene import compose_nudge

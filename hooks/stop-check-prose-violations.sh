@@ -2249,7 +2249,7 @@ fi
 # non-zero = infra hiccup → fail OPEN (never a fabricated block).
 HANDOVER_TP=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")
 if [ -n "$HANDOVER_TP" ] && [ -f "$HANDOVER_TP" ] \
-        && LC_ALL=C grep -qE 'odoo_post|Acceptance-thread' <(tail -c 4000000 "$HANDOVER_TP" 2>/dev/null); then
+        && LC_ALL=C grep -qE 'odoo_post|post-message|Acceptance-thread' <(tail -c 4000000 "$HANDOVER_TP" 2>/dev/null); then
     HANDOVER_RC=0
     HANDOVER_REASON=$(printf '%s' "$INPUT" | env PYTHONPATH="${_PROSE_REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m gates.handover 2>&1) || HANDOVER_RC=$?
     if [ "$HANDOVER_RC" = "2" ]; then
