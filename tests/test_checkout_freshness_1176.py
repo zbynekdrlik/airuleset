@@ -382,6 +382,7 @@ class TestDiscoveryAndWiring(unittest.TestCase):
         home = tempfile.mkdtemp(prefix="t1176-disc-")
         self.addCleanup(shutil.rmtree, home, True)
         os.makedirs(os.path.join(home, "devel/odoo/odoo-erp/.git"))
+        os.makedirs(os.path.join(home, "devel/other/.git"))  # registry = existing paths only
         reg = os.path.join(home, "reg.json")
         with open(reg, "w") as fh:
             json.dump([
