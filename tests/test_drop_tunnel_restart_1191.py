@@ -48,7 +48,7 @@ class FakeSystemd:
 
     def __init__(self, config_path, unit, *, env_pidfile=True, user="",
                  exec_config=None, grant=True, binary="/opt/cf/cloudflared",
-                 env_line=None, env_files="", main_registers=True):
+                 env_line=None, env_files="", main_registers=True, stop_rc=0):
         self.config_path = Path(config_path)
         self.unit = unit
         self.overlap = ta.overlap_service_name(unit)
@@ -60,6 +60,7 @@ class FakeSystemd:
         self.env_line = env_line            # overrides the Environment= value
         self.env_files = env_files
         self.main_registers = main_registers
+        self.stop_rc = stop_rc
         self.overlap_active = False
         self.calls = []          # (argv, kw)
         self.main_pid = 0
@@ -109,6 +110,9 @@ class FakeSystemd:
             self.overlap_active = True
             ta.overlap_pidfile(self.config_path).write_text("111\n")
         elif args[:1] == ["stop"] and self.overlap in args:
+            if self.stop_rc:
+                return types.SimpleNamespace(returncode=self.stop_rc, stdout="",
+                                             stderr="refused")
             self.overlap_active = False
         elif args[:3] == ["restart", "--no-block", self.unit]:
             self.main_pid = 222
@@ -275,6 +279,28 @@ class TestUserLaneReassertOverlaps(_LaneCase):
                         calls.index(["stop", "--no-block", overlap]),
                         "the leftover overlap bridges the plain restart, then stops")
         self.assertFalse(ta.overlap_pidfile(self.cfg).exists())
+
+    def test_refused_overlap_stop_keeps_the_leftover_and_is_loud(self):
+        ta.overlap_pidfile(self.cfg).write_text("111\n")
+        fake = FakeSystemd(self.cfg, self.lane.tunnel_service, binary="/bin/sh",
+                           stop_rc=1)
+        ok, err = self._reconcile(fake)
+        self.assertTrue(ok, "the plain restart itself succeeded")
+        self.assertIn("still running", err)
+        self.assertTrue(ta.overlap_pidfile(self.cfg).exists(),
+                        "a refused stop must leave the leftover visible for a retry")
+
+    def test_a_file_error_after_the_restart_never_escapes(self):
+        import cli_drop_tunnel_restart as dtr
+        fake = FakeSystemd(self.cfg, self.lane.tunnel_service, binary="/bin/sh")
+        err = io.StringIO()
+        with mock.patch("pathlib.Path.unlink", side_effect=PermissionError("ro")), \
+                contextlib.redirect_stderr(err):
+            result = dtr.restart_lane_tunnel(
+                self.lane, fake, plain_argv=dg._restart_argv(self.lane),
+                env=dg._restart_env(self.lane))
+        self.assertEqual(len(result), 3)
+        self.assertIn("ro", err.getvalue())
 
     def test_a_death_between_config_write_and_restart_is_retried(self):
         fake = FakeSystemd(self.cfg, self.lane.tunnel_service)
