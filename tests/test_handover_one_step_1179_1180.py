@@ -810,6 +810,35 @@ class TestStopGateReview2(unittest.TestCase):
         self.assertIn((handover.AUDIT_LOG, ()), audit.CLI_BYPASS_LOGS)
 
 
+class TestStopGateReview2b(unittest.TestCase):
+    """The review-2 probe corpus re-run after the fix: four shapes still slipped."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.note = _note(self.tmp)
+
+    def test_remaining_body_shapes(self):
+        from gates import handover
+        base = "python3 scripts/odoo_post.py --model project.task --res-id 1192 "
+        for cmd in ("cat %s | %s--body -" % (self.note, base),
+                    "%s--body-file %s" % (base, self.note),
+                    "python3 - <<'EOF'\nimport subprocess\nsubprocess.run(['python3', "
+                    "'scripts/odoo_post.py', '--model', 'project.task', '--res-id', '1192', "
+                    "'--body', open('%s').read()])\nEOF" % self.note,
+                    base + "--body 'Čo skúsiť: export. Stačí len 👍'"):
+            with self.subTest(cmd=cmd[:40]):
+                self.assertEqual(handover.evaluate(_calls(cmd), "ok", self.tmp)[0], "block")
+
+    def test_shape_and_argv_parsing_stay_linear(self):
+        from gates import handover
+
+        from cli_handover_hygiene import is_handover_body
+        t0 = time.monotonic()
+        is_handover_body("Čo skúsiť " + "stačí a" * 50000)
+        handover._py_argv_calls("odoo_post.py' '--model', " * 20000)
+        self.assertLess(time.monotonic() - t0, 3.0)
+
+
 class TestJob49Review2(unittest.TestCase):
     def test_h_is_this_boxs_own_signature_only(self):
         import cli_handover_hygiene as hh
