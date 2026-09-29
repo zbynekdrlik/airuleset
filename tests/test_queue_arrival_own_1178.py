@@ -25,6 +25,7 @@ import contextlib
 import io
 import json
 import os
+import time
 import unittest
 import unittest.mock as m
 from pathlib import Path
@@ -244,14 +245,17 @@ class TestUndeterminedIsVisible(unittest.TestCase):
             sleep_fn=lambda *a, **k: None)
 
     def test_persistent_undetermined_warns_once_per_hour_and_shows_in_status(self):
+        # a WALL-clock base: `nudges status` shows only a record seen within the
+        # last hour of the real clock (a dead pane's record must fade out).
+        t0 = int(time.time()) - 3 * HOUR - 60
         state = {}
         lines = []
         for i in range(0, 70):          # one sweep a minute for 70 minutes
-            lines += self._sweep(state, NOW + i * 60)
+            lines += self._sweep(state, t0 + i * 60)
         warns = [ln for ln in lines if ln.startswith("WARN queue-arrival")]
         self.assertEqual(len(warns), 1, warns)
         self.assertIn("undetermined since", warns[0])
-        lines = self._sweep(state, NOW + 3 * HOUR)
+        lines = self._sweep(state, t0 + 3 * HOUR)
         self.assertEqual(
             len([ln for ln in lines if ln.startswith("WARN queue-arrival")]), 1)
         with TemporaryDirectory() as home:
@@ -387,7 +391,9 @@ class TestEndedSupervisorPane(unittest.TestCase):
         self.assertTrue(any("queue-arrival" in ln and "hold:floor" in ln
                             for ln in logs), logs)
         self._sweep(NOW + 20 * 60, [10, 11, 12, 13])
-        logs, typed = self._sweep(NOW + 62 * 60, [10, 11, 12, 13])
+        # the binding hold for a pane with ONE kind is the owner's 3 h cross-kind
+        # total cap (#913/#1023), which sits above the 60-min per-kind floor.
+        logs, typed = self._sweep(NOW + 60 + 3 * HOUR, [10, 11, 12, 13])
         self.assertEqual(len(typed), 1, logs)
         self.assertIn("#12", typed[0])
         self.assertIn("#13", typed[0])
