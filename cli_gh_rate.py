@@ -36,6 +36,8 @@ import subprocess
 import sys
 import time
 
+import cli_locked_json
+
 
 def _ghql_mod():
     """#1087: import the GraphQL rateLimit-object reader LAZILY. Only the
@@ -970,7 +972,7 @@ def record_call(argv, env=None, now=None):
                 bucket = data[hour] = {}
             bucket[key] = int(bucket.get(key, 0) or 0) + 1
         # flock'd read-modify-write shared with the #1188 cost file.
-        _cost_mod().locked_json_update(calls_path(now), _bump)
+        cli_locked_json.locked_json_update(calls_path(now), _bump)
     except Exception as e:   # noqa: BLE001 — accounting must never break gh
         _diag("record-call", e)
 

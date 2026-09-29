@@ -3426,7 +3426,7 @@ def _gh_graphql_floor():
         return GH_GRAPHQL_REFRESH_FLOOR
 
 
-def _graphql_budget_ok(floor, cwd=None, runner=None):
+def _graphql_budget_ok(floor, cwd=None, runner=None, status_fn=None):
     """`(ok, remaining)` for the shared GraphQL rate-limit bucket — whether it
     has at least `floor` calls left, read from GitHub's FREE `rate_limit`
     endpoint (`gh api rate_limit` does NOT count against any bucket — measured:
@@ -3448,8 +3448,45 @@ def _graphql_budget_ok(floor, cwd=None, runner=None):
     try:
         remaining = int(json.loads(raw)["resources"]["graphql"]["remaining"])
     except (ValueError, TypeError, KeyError):
+        remaining = None
+    # #1188: the REST bucket does not see GraphQL-endpoint spend (live: used 18
+    # vs the rateLimit object's 777), so the shim's CACHED object reading
+    # (watchdog-fresh, zero gh calls) wins when it is lower. An injected
+    # `runner` is the whole reading unless `status_fn` is injected too.
+    try:
+        import time
+        import cli_gh_rate
+        if status_fn is None and runner is None:
+            status_fn = cli_gh_rate._load_cache
+        obj = None if status_fn is None else cli_gh_rate._ghql_mod(
+            ).cached_object_remaining(status_fn(), time.time(),
+                                      2 * cli_gh_rate.CACHE_TTL_S)
+    except Exception as e:   # airuleset:script-ok fail-open: REST reading stands
+        sys.stderr.write("graphql floor: cached object read skipped (%s)\n" % e)
+        obj = None
+    if obj is not None and (remaining is None or obj < remaining):
+        remaining = obj
+    if remaining is None:
         return (True, None)
     return (remaining >= floor, remaining)
+
+
+def _gh_poller_hold():
+    """#1188 + #1041: a POLLER-marked footer refresh (the statusline spawn)
+    skips the whole run while the shim would back its calls off — a per-call
+    15-60 s sleep outlives the refresh's own 8-20 s subprocess timeouts and
+    stacks refreshes behind the 30 s spawn guard. A human run never holds.
+    Cache-only (zero gh calls); fail-open on a missing/stale cache or error."""
+    if os.environ.get("AIRULESET_GH_POLLER") != "1":
+        return False
+    try:
+        import cli_gh_rate
+        status = cli_gh_rate._load_cache() if cli_gh_rate._cache_is_fresh() else {}
+        return cli_gh_rate.should_hold_gh_poller(
+            cli_gh_rate.current_gh_backoff(status=status))
+    except Exception as e:   # airuleset:script-ok fail-open: never block a refresh
+        sys.stderr.write("tickets-status: poller hold skipped (%s)\n" % e)
+        return False
 
 
 def _repo_slug(cwd=None):
@@ -4129,6 +4166,9 @@ def cmd_tickets_status(args):
         if not budget_ok:
             print("skipped: graphql budget low (remaining=%s < floor=%s) — "
                   "served stale cache" % (remaining, floor))
+            return
+        if _gh_poller_hold():   # #1188: a held poller never sleeps per call
+            print("skipped: gh budget backoff (poller hold) — served stale cache")
             return
         slug = _out(["gh", "repo", "view", "--json", "nameWithOwner",
                      "-q", ".nameWithOwner"], root)
