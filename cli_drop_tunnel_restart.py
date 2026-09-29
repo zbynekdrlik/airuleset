@@ -225,6 +225,16 @@ def _pending_path(lane) -> Path:
     return Path(lane.tunnel_config).with_suffix(".restart-pending")
 
 
+def _clear(path):
+    """Remove a state file after a SUCCESSFUL restart. A failure is LOUD, never
+    raised: the restart already applied, the worst case is one extra restart."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as e:
+        print("  drop-gateway: LOUD — cannot remove %s (%s); the next install may "
+              "restart once more (#1191)." % (path, e), file=sys.stderr)
+
+
 def _mark_pending(lane):
     try:
         _pending_path(lane).touch()
@@ -259,8 +269,7 @@ def _restart(lane, run, plain_argv, env, unit_dir, sleep, clock):
                 systemctl, lane.tunnel_service, lane.tunnel_config, sleep=sleep,
                 clock=clock, lane="(drop %s)" % lane.host)
             if ok:      # the overlap is stopped — no leftover for a later run
-                cli_tunnel_apply.overlap_pidfile(lane.tunnel_config).unlink(
-                    missing_ok=True)
+                _clear(cli_tunnel_apply.overlap_pidfile(lane.tunnel_config))
             return ok, shape, "" if ok else "see the LOUD line above"
     except Exception as e:
         print("  drop-gateway: LOUD — overlap restart of %s errored (%r); the "
@@ -272,13 +281,31 @@ def _restart(lane, run, plain_argv, env, unit_dir, sleep, clock):
           % (lane.tunnel_service, reason), file=sys.stderr)
     # Blocking, and it drains the full 30 s grace: no subprocess timeout.
     rc, _o, err = _call(run, list(plain_argv), env, timeout=None)
-    leftover = cli_tunnel_apply.overlap_pidfile(lane.tunnel_config)
-    if rc == 0 and leftover.exists():
-        # A failed earlier run left its overlap serving; it bridged this restart.
-        systemctl(["stop", "--no-block",
-                   cli_tunnel_apply.overlap_service_name(lane.tunnel_service)])
-        leftover.unlink(missing_ok=True)
+    if rc == 0:
+        _stop_leftover_overlap(lane, systemctl)
     return rc == 0, "plain", err.strip()
+
+
+def _stop_leftover_overlap(lane, systemctl):
+    """After a successful plain restart, stop an overlap a failed earlier run left
+    serving. It kept the tunnel up through the restart's drain; the new main may
+    still be registering when it goes, so this is best-effort, not gap-free. A
+    refused stop keeps the pidfile, so the leftover stays visible — never hidden."""
+    leftover = cli_tunnel_apply.overlap_pidfile(lane.tunnel_config)
+    try:
+        if not leftover.exists():
+            return
+        overlap = cli_tunnel_apply.overlap_service_name(lane.tunnel_service)
+        rc, _o, err = systemctl(["stop", "--no-block", overlap])
+        if rc != 0:
+            print("  drop-gateway: LOUD — leftover overlap %s is still running; its "
+                  "stop was refused (%s) (#1191)." % (overlap, err.strip()),
+                  file=sys.stderr)
+            return
+        leftover.unlink(missing_ok=True)
+    except OSError as e:
+        print("  drop-gateway: LOUD — cannot clear the leftover overlap pidfile "
+              "%s (%s) (#1191)." % (leftover, e), file=sys.stderr)
 
 
 def restart_lane_tunnel(lane, run, *, plain_argv, env, unit_dir=None,
@@ -292,5 +319,5 @@ def restart_lane_tunnel(lane, run, *, plain_argv, env, unit_dir=None,
     _mark_pending(lane)
     ok, shape, detail = _restart(lane, run, plain_argv, env, unit_dir, sleep, clock)
     if ok:
-        _pending_path(lane).unlink(missing_ok=True)
+        _clear(_pending_path(lane))
     return ok, shape, detail
