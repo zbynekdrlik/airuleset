@@ -26,9 +26,13 @@ the one-member set {fohmixer} — timo's connect allowlist can never resolve an
 owner-realm box, a stream, or another person's account. Timo has NO unix
 account, NO ssh key and NO password anywhere (webterm-only, #869): his whole
 authorization is the Access allow-list. The fohmixer account is a separate uid
-with NO sudo, NO outbound reach and NO secrets (its declaration), so the tmux
-shell he gets is bounded by that uid, never the owner's `newlevel` realm. The
-gateway runs under the controller's `airuleset` account (the accepted #870 F4c
+with NO sudo and NO secrets (its declaration). Its bootstrap also closes the
+routes by which that uid could become the owner's `newlevel` account through
+its weak shared password: a uid-keyed nftables rule rejects every new outbound
+ssh (loopback included), and pam_wheel/polkit bar su/pkexec. These are
+enforced by the bootstrap and verified at go-live step 5 — not assumed. It
+does NOT stop other outbound traffic (https for the repo and the Claude API).
+The gateway runs under the controller's `airuleset` account (the accepted #870 F4c
 B1 residue shared by every lane); its 0700 runtime-dir UNIX sockets are the
 local boundary (#663).
 """
@@ -78,13 +82,18 @@ _TIMO_GO_LIVE = (
     "       Push fohmixer `dev` first; retire the newlevel checkout afterwards.\n"
     "    3. Registry: flip projects-registry.json fohmixer -> account fohmixer,\n"
     "       path /home/fohmixer/devel/fohmixer; lower cli_accounts.LEGACY_CEILING\n"
-    "       24 -> 23 in the same change.\n"
+    "       25 -> 24 in the same change; add the fohmixer@dev1 REMOTE_HOSTS\n"
+    "       entry (claudy shape) so push manages its airuleset. The Claude\n"
+    "       login goes through the claudy lease, never a hand-copied\n"
+    "       .credentials.json; a push credential is a NEW declared secret.\n"
     "    4. AUTH: NO password. `airuleset.py webterm-access --apply` creates the\n"
     "       Access app for timo.newlevel.media (allow-list timotej.kam@gmail.com);\n"
     "       the next controller install then upserts the managed DNS CNAME\n"
     "       (it is gated on that Access app) onto the shared controller tunnel.\n"
     "    5. Verify: all three dashboards (zbynek/marek/timo) open the fohmixer\n"
-    "       tab (Playwright), and `sudo -n true` FAILS as fohmixer.\n"
+    "       tab (Playwright), and AS fohmixer each of these FAILS: `sudo -n true`,\n"
+    "       `su - newlevel`, `pkexec true`, `ssh -o BatchMode=yes\n"
+    "       newlevel@127.0.0.1 true` (connection reset).\n"
     % profiles.WEBTERM_TIMO_IDENTITY)
 
 

@@ -15,38 +15,46 @@ on the declared host. It creates the unix user, sets permissions, and installs
 authorized_keys: the fleet push keys, the owner keys, and one forced-command
 line per declared webterm human (``restrict,pty,command=`` attaching the
 project's tmux session, nothing else). It enables loginctl linger. It installs
-the declared sudo policy: a sudo-less account gets NO sudoers entry, and the
-bootstrap FAILS LOUD if any sudo route exists; ``sudo: True`` writes a scoped,
-``visudo``-checked ``/etc/sudoers.d/<acct>``. Finally it clones the project
-repo and creates the project tmux session.
+the privilege boundary (``cli_account_hardening``): the declared sudo policy
+(none, failing LOUD on any route, or ONE scoped visudo-checked rule), the
+declared reach as a uid-keyed nftables ssh egress rule, and a su/polkit
+lockout — so the uid cannot become ``newlevel`` via its shared password.
+Only then does it clone the project repo and create the project tmux session.
 
-ZERO outbound imports at module level (the L-E leaf convention); fleet/webterm
-constants are imported LAZILY inside functions so the module loads with no
-side effects.
+Module-level imports are stdlib plus the pure-render sibling
+``cli_account_hardening`` (the L-E leaf convention); fleet/webterm constants
+are imported LAZILY inside functions so the module loads with no side effects.
 """
 
+import copy
 import re
 import shlex
 import sys
 import textwrap
 
+import cli_account_hardening as hardening
+
 
 # Debian package name grammar (Policy §5.6.1): [a-z0-9][a-z0-9.+\-]+
 # with minimum length 2.  We validate at render time so a stray
 # space/quote/metachar fails LOUD instead of silently breaking the script.
-_PACKAGE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9.+\-]+$")
+_PACKAGE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9.+\-]+")
 
 # #1184 declaration grammar — every value the renderer interpolates into a root
-# script is validated against one of these first.
-_ACCOUNT_RE = re.compile(r"^[a-z_][a-z0-9_-]{1,31}$")
-_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")   # tmux rewrites '.'
-_REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
-_REL_DIR_RE = re.compile(r"^(?!/)(?!.*(^|/)\.\.(/|$))[A-Za-z0-9_./-]+$")
-# A scoped sudo command: an ABSOLUTE path plus optional plain arguments — never
-# `ALL`, a wildcard, a list separator or an alias/escape character.
-_SUDO_CMD_RE = re.compile(r"^/[A-Za-z0-9_./-]+( [A-Za-z0-9_./+-]+)*$")
-_ONE_LINE_RE = re.compile(r"^[^\n\r]+$")
+# script is validated against one of these first, ALWAYS with `fullmatch` (a
+# `$` anchor would accept a trailing newline and split an authorized_keys or
+# sudoers line).
+_ACCOUNT_RE = re.compile(r"[a-z_][a-z0-9_-]{1,31}")
+_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+_SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")   # tmux rewrites '.'
+_REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+_REL_DIR_RE = re.compile(r"(?!/)(?!.*(^|/)\.\.(/|$))[A-Za-z0-9_./-]+")
+# A scoped sudo command: an ABSOLUTE path plus explicit plain arguments — never
+# `ALL`, a wildcard, a list separator or an alias/escape character (the
+# root-equivalent basenames are refused by cli_account_hardening).
+_SUDO_CMD_RE = re.compile(r"/[A-Za-z0-9_./-]+( [A-Za-z0-9_./+-]+)*")
+_ONE_LINE_RE = re.compile(r"[^\n\r]+")
+_IP_RE = re.compile(r"[0-9.]+|[0-9A-Fa-f:]+")
 
 # Accounts that are NEVER a project account: the shared legacy account, root,
 # and the control/maintainer accounts.
@@ -123,13 +131,28 @@ SERVICE_ACCOUNTS = {
 }
 
 
+def _fleet_account_conflict(account, host):
+    """Why ``account`` may not be declared as a NEW project account, or None:
+    a stream / webterm-only / reduced-authority account, or a REMOTE_HOSTS
+    account on another box, already belongs to someone — rendering a bootstrap
+    for it would replace that account's authorized_keys."""
+    import cli_fleet
+    if account in cli_fleet.AUTHORITY_BY_USER or account in cli_fleet.WEBTERM_ONLY_USERS:
+        return "%r is an existing stream/webterm account" % account
+    for h in cli_fleet.REMOTE_HOSTS:
+        if h.get("user") == account and h["name"].split("@")[-1] != host:
+            return "%r is an existing fleet account on %r" % (
+                account, h["name"].split("@")[-1])
+    return None
+
+
 def account_spec(account):
     """The declaration of ``account`` with every default filled in. Raises
     ValueError for an unknown account."""
     if account not in SERVICE_ACCOUNTS:
         raise ValueError("unknown project account: %r" % account)
-    spec = dict(_DEFAULTS)
-    spec.update(SERVICE_ACCOUNTS[account])
+    spec = copy.deepcopy(_DEFAULTS)
+    spec.update(copy.deepcopy(SERVICE_ACCOUNTS[account]))
     return spec
 
 
@@ -163,15 +186,18 @@ def _validate_sudo(spec):
             errs.append("sudo_reason/sudo_commands declared on a sudo: False "
                         "account — a grant never hides behind sudo: False")
         return errs
-    if not isinstance(reason, str) or not _ONE_LINE_RE.match(reason.strip() or ""):
+    if not isinstance(reason, str) or not _ONE_LINE_RE.fullmatch(reason.strip() or ""):
         errs.append("sudo: True needs a one-line sudo_reason")
     if not isinstance(cmds, (list, tuple)) or not cmds:
         errs.append("sudo: True needs a non-empty scoped sudo_commands list")
     else:
         for c in cmds:
-            if not isinstance(c, str) or not _SUDO_CMD_RE.match(c):
+            if not isinstance(c, str) or not _SUDO_CMD_RE.fullmatch(c):
                 errs.append("sudo_commands entry %r is not a scoped absolute "
                             "command (never ALL / a wildcard / a list)" % (c,))
+            elif hardening.sudo_command_problem(c):
+                errs.append("sudo_commands entry %r: %s"
+                            % (c, hardening.sudo_command_problem(c)))
     return errs
 
 
@@ -184,9 +210,15 @@ def _validate_reach(reach, boxes):
             errs.append("reach target %r is not a string" % (target,))
             continue
         user, _, box = target.rpartition("@")
-        if box not in boxes or (user and not _TOKEN_RE.match(user)):
+        if box not in boxes or (user and not _TOKEN_RE.fullmatch(user)):
             errs.append("reach target %r is not a fleet box (known: %s)"
                         % (target, ", ".join(sorted(boxes))))
+        elif user in _NEVER_PROJECT_ACCOUNTS:
+            errs.append("reach target %r names a shared/control account — a "
+                        "project account never reaches into it" % (target,))
+        elif not _IP_RE.fullmatch(boxes[box]):
+            errs.append("reach target %r: box address %r is not an IP, so the "
+                        "egress rule cannot enforce it" % (target, boxes[box]))
     return errs
 
 
@@ -200,13 +232,13 @@ def _validate_webterm(sessions):
             errs.append("webterm human %r is not a webterm lane (known: %s)"
                         % (human, ", ".join(sorted(humans))))
             continue
-        if not isinstance(sess, dict) or not _SESSION_RE.match(
+        if not isinstance(sess, dict) or not _SESSION_RE.fullmatch(
                 str(sess.get("preferred") or "")):
             errs.append("webterm_sessions[%r] needs a plain `preferred` "
                         "session name" % human)
             continue
         for rel in sess.get("start_dir_chain") or []:
-            if not isinstance(rel, str) or not _REL_DIR_RE.match(rel):
+            if not isinstance(rel, str) or not _REL_DIR_RE.fullmatch(rel):
                 errs.append("webterm_sessions[%r] start dir %r is not a "
                             "HOME-relative path" % (human, rel))
     return errs
@@ -219,15 +251,18 @@ def validate_account(account, raw):
     secret name, an unknown webterm human or an unknown key is an ERROR —
     nothing the declaration does not state explicitly is ever rendered."""
     errs = []
-    if not _ACCOUNT_RE.match(account or "") or account in _NEVER_PROJECT_ACCOUNTS:
+    if not _ACCOUNT_RE.fullmatch(account or "") or account in _NEVER_PROJECT_ACCOUNTS:
         errs.append("%r is not a valid project account name (shared/control "
                     "accounts are never a project account)" % (account,))
     if not isinstance(raw, dict):
         return errs + ["declaration must be a dict"]
     for key in sorted(set(raw) - _ALLOWED_KEYS):
         errs.append("unknown declaration key %r" % key)
-    spec = dict(_DEFAULTS)
+    spec = copy.deepcopy(_DEFAULTS)
     spec.update(raw)
+    conflict = _fleet_account_conflict(account, spec["host"])
+    if conflict:
+        errs.append(conflict)
     boxes = fleet_boxes()
     if spec["host"] not in boxes:
         errs.append("host %r is not a fleet box (known: %s)"
@@ -240,17 +275,24 @@ def validate_account(account, raw):
     else:
         errs += ["secrets entry %r is not a plain credential name" % (s,)
                  for s in secrets
-                 if not isinstance(s, str) or not _TOKEN_RE.match(s)]
+                 if not isinstance(s, str) or not _TOKEN_RE.fullmatch(s)]
     errs += _validate_webterm(spec["webterm_sessions"])
-    if "repo" in spec and not _REPO_RE.match(str(spec["repo"])):
+    if "repo" in spec and not _REPO_RE.fullmatch(str(spec["repo"])):
         errs.append("repo %r is not owner/name" % (spec["repo"],))
-    if "project_dir" in spec and not _REL_DIR_RE.match(str(spec["project_dir"])):
+    if "project_dir" in spec and not _REL_DIR_RE.fullmatch(str(spec["project_dir"])):
         errs.append("project_dir %r is not a HOME-relative path"
                     % (spec["project_dir"],))
     if "repo" in spec and "project_dir" not in spec:
         errs.append("repo declared without project_dir")
-    if "tmux_session" in spec and not _SESSION_RE.match(str(spec["tmux_session"])):
+    if "tmux_session" in spec and not _SESSION_RE.fullmatch(str(spec["tmux_session"])):
         errs.append("tmux_session %r is not a plain name" % (spec["tmux_session"],))
+    elif "tmux_session" in spec and isinstance(spec["webterm_sessions"], dict):
+        # a declared project session is THE session every tab attaches
+        for human, sess in spec["webterm_sessions"].items():
+            if isinstance(sess, dict) and sess.get("preferred") != spec["tmux_session"]:
+                errs.append("webterm_sessions[%r] preferred %r is not the declared "
+                            "tmux_session %r" % (human, sess.get("preferred"),
+                                                 spec["tmux_session"]))
     return errs
 
 
@@ -333,7 +375,7 @@ def _validate_package_names(packages):
     a typo / metachar fails LOUD instead of silently producing a broken
     script (#973 Fable review BLUE)."""
     for name in packages:
-        if not _PACKAGE_NAME_RE.match(name):
+        if not _PACKAGE_NAME_RE.fullmatch(name):
             raise ValueError(
                 "invalid Debian package name in system_packages: %r" % name)
 
@@ -389,50 +431,6 @@ def _render_system_packages_readback(packages):
     """).format(pkg_list=pkg_list)
 
 
-def _render_sudo_step(account, spec):
-    """#1184 step 9: the DECLARED sudo policy. ``sudo: False`` renders NO
-    sudoers entry and FAILS the bootstrap if the account has any sudo route (a
-    stray file, an admin group, a `%group` rule) — never a silent grant, never
-    a silent delete. ``sudo: True`` writes a scoped, ``visudo -cf``-checked
-    ``/etc/sudoers.d/<acct>`` (a dot-prefixed temp file, which sudo's
-    includedir ignores, then an atomic ``mv``)."""
-    if not spec["sudo"]:
-        return textwrap.dedent("""\
-
-            # 9. Sudo policy — declared sudo: NO (#1184). Never grant; fail LOUD
-            #    if any route exists (remove it by hand, then re-run).
-            if [ -e "/etc/sudoers.d/$ACCOUNT" ]; then
-                echo "ERROR: /etc/sudoers.d/$ACCOUNT exists but the declaration says declared sudo: NO" >&2
-                exit 1
-            fi
-            case " $(id -nG "$ACCOUNT") " in
-                *" sudo "*|*" admin "*|*" wheel "*)
-                    echo "ERROR: $ACCOUNT is in an admin group but declared sudo: NO" >&2
-                    exit 1 ;;
-            esac
-            SUDO_L=$(sudo -n -l -U "$ACCOUNT" 2>&1 || true)
-            case "$SUDO_L" in
-                *"may run the following"*)
-                    echo "ERROR: $ACCOUNT has a sudo route but declared sudo: NO" >&2
-                    exit 1 ;;
-            esac
-            echo "  sudo: none (declared sudo: NO)"
-        """)
-    rule = "%s ALL=(root) NOPASSWD: %s" % (account, ", ".join(spec["sudo_commands"]))
-    header = "# airuleset:managed — project account %s (#1184): %s" % (
-        account, spec["sudo_reason"].strip())
-    return (
-        "\n# 9. Sudo policy — declared SCOPED sudo (#1184), visudo-checked\n"
-        'SUDOERS_TMP=$(mktemp /etc/sudoers.d/.airuleset-"$ACCOUNT".XXXXXX)\n'
-        "cat > \"$SUDOERS_TMP\" << 'SUDOERS_EOF'\n"
-        "%s\n%s\nSUDOERS_EOF\n"
-        'chmod 0440 "$SUDOERS_TMP"\n'
-        'visudo -cf "$SUDOERS_TMP"\n'
-        'mv "$SUDOERS_TMP" "/etc/sudoers.d/$ACCOUNT"\n'
-        'echo "  sudo: scoped rule installed in /etc/sudoers.d/$ACCOUNT"\n'
-        % (header, rule))
-
-
 def _render_project_step(spec):
     """#1184 steps 10-11: clone the project repo (idempotent — an existing
     checkout is left alone) and create the project tmux session, both AS the
@@ -444,14 +442,14 @@ def _render_project_step(spec):
         clone = ("if [ -d %s/.git ]; then echo \"  checkout exists — skipping "
                  "clone\"; else GIT_TERMINAL_PROMPT=0 git clone %s %s; fi"
                  % (dest, shlex.quote(url), dest))
-        out += ("\n# 10. Project checkout (idempotent, as the account) — #1184\n"
+        out += ("\n# 12. Project checkout (idempotent, as the account) — #1184\n"
                 "runuser -l \"$ACCOUNT\" -c %s\n" % shlex.quote(clone))
     if spec.get("tmux_session"):
         sess = spec["tmux_session"]
         start = "$HOME/" + spec["project_dir"] if spec.get("project_dir") else "$HOME"
         tmux = ("tmux has-session -t =%s 2>/dev/null || "
                 "tmux new-session -d -s %s -c %s" % (sess, sess, start))
-        out += ("\n# 11. Project tmux session (idempotent, as the account) — #1184\n"
+        out += ("\n# 13. Project tmux session (idempotent, as the account) — #1184\n"
                 "runuser -l \"$ACCOUNT\" -c %s\n" % shlex.quote(tmux))
     return out
 
@@ -482,12 +480,16 @@ def render_root_bootstrap(account):
         echo "=== airuleset root bootstrap: $ACCOUNT on {host} ==="
 
         # 1. Create user (idempotent)
+        CREATED=0
         if id "$ACCOUNT" &>/dev/null; then
             echo "  user $ACCOUNT already exists — skipping useradd"
         else
             useradd -m -s /bin/bash -U "$ACCOUNT"
+            CREATED=1
             echo "  created user $ACCOUNT"
         fi
+
+        {marker}
 
         # 2. Home permissions
         chmod 0750 "/home/$ACCOUNT"
@@ -515,14 +517,21 @@ def render_root_bootstrap(account):
         # 7. Create devel directory for the repo clone
         install -d -m 0755 -o "$ACCOUNT" -g "$ACCOUNT" "/home/$ACCOUNT/devel"
     """).format(account=account, ak_content=ak_content, host=host,
+                marker=hardening.render_account_marker_step().strip("\n"),
                 sudo="yes" if spec["sudo"] else "no",
                 reach=",".join(spec["reach"]) or "none",
                 secrets=",".join(spec["secrets"]) or "none")
 
     # 8. System packages — only when the account declares them (#973)
     script += _render_system_packages_step(packages)
-    # 9. The declared sudo policy; 10-11 project checkout + tmux (#1184)
-    script += _render_sudo_step(account, spec)
+    # 9 the declared sudo policy, 10 the declared reach, 11 the su/polkit
+    # lockout (#1184, cli_account_hardening) — all BEFORE 12-13 give the
+    # account a checkout + a live tmux shell, so it is never unbounded.
+    script += hardening.render_sudo_step(account, spec)
+    boxes = fleet_boxes()
+    reach_ips = sorted({boxes[t.rpartition("@")[2]] for t in spec["reach"]})
+    script += hardening.render_reach_step(account, reach_ips)
+    script += hardening.render_lockout_step()
     script += _render_project_step(spec)
 
     # Read-back section

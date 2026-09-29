@@ -2,23 +2,28 @@
 
 Owner ROZHODNUTÉ 2026-09-29: new projects are NEVER created under the shared
 ``newlevel`` account (weak shared password, NOPASSWD sudo, every fleet key in
-its home). Every project gets its own declared account
+its home). Every project gets its OWN declared account
 (``cli_account_bootstrap.SERVICE_ACCOUNTS`` + ``account-bootstrap --render``).
-The current newlevel projects are FROZEN as legacy and migrated when touched,
-so the fleet converges one project at a time.
+Projects that live anywhere else are FROZEN as legacy and migrated when
+touched, so the fleet converges one project at a time.
 
 This leaf owns the three mechanical halves of that policy:
 
   * ``account_for_target`` + ``onboard_account_gate`` — the ``onboard-project``
-    gate: a target owned by a legacy shared account is REFUSED unless
-    ``--legacy-ok <ticket>`` is given (migration bookkeeping only);
-  * ``legacy_inventory`` + ``LEGACY_CEILING`` — the frozen inventory from
-    ``projects-registry.json`` rows whose ``account`` is legacy, locked
-    DOWN-ONLY by tests/test_project_accounts_1184.py;
+    gate. It is an ALLOW-list: only a DECLARED project account on its declared
+    host passes. Anything else (``newlevel``, the control accounts, a stream
+    account, an undeclared account) is REFUSED, unless ``--legacy-ok <ticket>``
+    names a ticket AND the project already has a registry row (migration
+    bookkeeping only — never a new project). The owner is read from the
+    RESOLVED directory on the target (``realpath -e`` + ``stat``), never from
+    the typed path, and onboarding writes only as that owner;
+  * ``legacy_inventory`` + ``LEGACY_CEILING`` — every registry row not in a
+    declared project account, locked DOWN-ONLY by
+    tests/test_project_accounts_1184.py;
   * ``cmd_accounts`` — ``airuleset.py accounts status [--json]``.
 
-Stdlib only; ``cli_account_bootstrap`` / ``cli_onboard_exec`` are imported
-lazily inside functions (no import cycle with cli_onboard).
+Stdlib only; ``cli_account_bootstrap`` / ``cli_onboard_exec`` / ``cli_onboard``
+are imported lazily inside functions (no import cycle with cli_onboard).
 """
 import json
 import os
@@ -26,75 +31,109 @@ import pwd
 import re
 import sys
 
-# The shared accounts no NEW project may live in. `newlevel` is the owner's
-# dev1/dev2 maintainer account; any future legacy-shared account joins here.
-LEGACY_SHARED_ACCOUNTS = frozenset({"newlevel"})
-
 # The freeze day (owner ROZHODNUTÉ 2026-09-29). No legacy row may be onboarded
 # after it (test-locked).
 LEGACY_FREEZE_DATE = "2026-09-29"
 
-# DOWN-ONLY ratchet: the legacy newlevel project count. It must EQUAL the live
-# count (test-locked), so a migration lowers it in the same change; raising it
-# is a visible, reviewable edit that the freeze forbids.
-LEGACY_CEILING = 24
+# DOWN-ONLY ratchet: the legacy project count (every registry row outside a
+# declared project account: the 24 `newlevel` rows + odoo-erp in `gatekeeper`).
+# It must EQUAL the live count (test-locked), so a migration lowers it in the
+# same change; raising it is a visible, reviewable edit that the freeze forbids.
+LEGACY_CEILING = 25
 
 # `--legacy-ok` must name the ticket that carries the migration bookkeeping:
 # `#N`, `N`, or `owner/repo#N`.
-_TICKET_RE = re.compile(r"^(#?\d+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+)$")
-_HOME_RE = re.compile(r"^/home/([^/]+)(/|$)")
+_TICKET_RE = re.compile(r"(#?\d+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+)")
+
+
+def _declared_accounts():
+    import cli_account_bootstrap as bootstrap
+    return bootstrap.SERVICE_ACCOUNTS
+
+
+def is_legacy_account(account):
+    """True for every account that is NOT a declared project account."""
+    return account not in _declared_accounts()
 
 
 def account_for_target(target_path, host=None, run=None):
-    """The unix account a project directory lives in. A path under
-    ``/home/<user>/`` names ``<user>`` directly (``/root/...`` -> ``root``);
-    anything else is the OWNER of the directory (``stat -c %U``, run on the
-    target host). Falls back to the host's REMOTE_HOSTS user (remote) or this
-    process's user (local) when stat gives nothing."""
-    path = str(target_path)
-    m = _HOME_RE.match(path)
-    if m:
-        return m.group(1)
-    if path == "/root" or path.startswith("/root/"):
-        return "root"
-    from cli_onboard_exec import _exec, resolve_remote
+    """The unix account that OWNS the project directory, read on the target
+    (``realpath -e`` then ``stat -c %U`` of the resolved path, over ssh for a
+    remote host) — never inferred from the typed path, so ``..``/``.``/symlink
+    tricks resolve to the real owner. None when it cannot be determined (the
+    gate then refuses)."""
+    from cli_onboard_exec import _exec
     try:
-        r = _exec(["stat", "-c", "%U", path], host=host, run=run)
+        r = _exec(["realpath", "-e", str(target_path)], host=host, run=run)
+        resolved = (r.stdout or "").strip() if r.returncode == 0 else ""
+        if not resolved.startswith("/"):
+            return None
+        r = _exec(["stat", "-c", "%U", resolved], host=host, run=run)
         owner = (r.stdout or "").strip() if r.returncode == 0 else ""
     except Exception as e:  # never raise from the gate's probe
-        print("accounts: stat of %s failed (%s)" % (path, e), file=sys.stderr)
-        owner = ""
-    if owner:
-        return owner
+        print("accounts: owner probe of %s failed (%s)" % (target_path, e),
+              file=sys.stderr)
+        return None
+    return owner if re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", owner) else None
+
+
+def login_user_for_host(host):
+    """The unix user onboarding runs AS: the REMOTE_HOSTS entry user for a
+    remote host, else this process's own user (pwd-based, env-spoof-proof)."""
+    from cli_onboard_exec import resolve_remote
     remote = resolve_remote(host)
     if remote is not None:
         return remote.get("user")
     return pwd.getpwuid(os.getuid()).pw_name
 
 
-def is_legacy_account(account):
-    return account in LEGACY_SHARED_ACCOUNTS
+def _host_box(host):
+    """The fleet box a `--host` value names (`dev1`, `claudy@controller` ->
+    `controller`); a local/None host is this box's own name."""
+    from cli_onboard_exec import is_local_host, _local_hostname
+    if is_local_host(host):
+        name = _local_hostname() or ""
+        return "controller" if name == "airuleset" else name
+    return str(host).split("@")[-1]
 
 
-def onboard_account_gate(account, legacy_ok):
+def onboard_account_gate(account, legacy_ok, *, host=None, login_user=None,
+                         existing=None):
     """None when onboarding into ``account`` is allowed, else the refusal text.
-    A legacy shared account is refused unless ``legacy_ok`` names a ticket."""
-    if not is_legacy_account(account):
+
+    Allowed: a DECLARED project account whose declared host is the target box.
+    Everything else is refused, unless ``legacy_ok`` names a ticket AND
+    ``existing`` (the project's registry row) exists — migration bookkeeping,
+    never a new project. Onboarding also writes (git, CLAUDE.md), so it must
+    run AS the owner: a ``login_user`` that differs from ``account`` refuses."""
+    if not account:
+        return ("cannot determine which unix account owns the target "
+                "directory (realpath/stat failed) — refusing (#1184)")
+    if login_user and login_user != account:
+        return ("the target is owned by %r but onboarding would run as %r — "
+                "onboard as the owner (`--host %s@<box>`, its REMOTE_HOSTS entry) "
+                "(#1184)" % (account, login_user, account))
+    declared = _declared_accounts()
+    if account in declared:
+        want = declared[account].get("host", "controller")
+        if host is None or _host_box(host) == want:
+            return None
+        return ("project account %r is declared on %r, not on %r (#1184)"
+                % (account, want, _host_box(host)))
+    if legacy_ok and _TICKET_RE.fullmatch(str(legacy_ok).strip()) and existing:
         return None
-    if legacy_ok and _TICKET_RE.match(str(legacy_ok).strip()):
-        return None
-    why = ("--legacy-ok %r does not name a ticket (#N or owner/repo#N)"
-           % legacy_ok) if legacy_ok else "no --legacy-ok <ticket> given"
-    return ("target lives in the shared legacy account %r — new projects get "
-            "their OWN account (#1184): declare it in "
+    why = ("--legacy-ok needs a ticket (#N or owner/repo#N) AND an existing "
+           "registry row" if legacy_ok else "no --legacy-ok <ticket> given")
+    return ("target lives in %r, which is not a declared project account — new "
+            "projects get their OWN account (#1184): declare it in "
             "cli_account_bootstrap.SERVICE_ACCOUNTS, run `airuleset.py "
-            "account-bootstrap --render <acct>` as root on the host, then "
-            "onboard the project account path. (%s; --legacy-ok is for "
-            "migration bookkeeping only.)" % (account, why))
+            "account-bootstrap --render <acct>` as root on the host, then onboard "
+            "the project account path. (%s; --legacy-ok is for migration "
+            "bookkeeping of an already-registered project only.)" % (account, why))
 
 
 def legacy_inventory(entries):
-    """The registry rows that still live in a legacy shared account, as
+    """The registry rows NOT in a declared project account, as
     [{name, host, account, path, onboarded}] sorted by host then name."""
     rows = [{"name": e.get("name"), "host": e.get("host"),
              "account": e.get("account"), "path": e.get("path"),
@@ -128,7 +167,7 @@ def _status(registry_path=None):
 
 def cmd_accounts(args):
     """``airuleset.py accounts status [--json]`` — the project accounts (their
-    declaration) and the frozen legacy newlevel inventory with its count."""
+    declaration) and the frozen legacy inventory with its count."""
     action = getattr(args, "action", None) or "status"
     if action != "status":
         print("usage: airuleset.py accounts status [--json]", file=sys.stderr)
@@ -144,10 +183,12 @@ def cmd_accounts(args):
                  ",".join(a["reach"]) or "none",
                  ",".join(a["secrets"]) or "none",
                  ",".join(a["webterm"]) or "none"))
-    print("legacy newlevel projects: %d (ceiling %d, down-only — migrate "
-          "on touch)" % (data["legacy_count"], data["legacy_ceiling"]))
+    print("legacy projects (no declared project account): %d (ceiling %d, "
+          "down-only — migrate on touch)" % (data["legacy_count"],
+                                             data["legacy_ceiling"]))
     for r in data["legacy"]:
-        print("  %-24s %-5s %s" % (r["name"], r["host"], r["path"]))
+        print("  %-24s %-5s %-10s %s" % (r["name"], r["host"], r["account"],
+                                         r["path"]))
     return 0
 
 
@@ -159,12 +200,12 @@ def register_parser(sub):
     if onboard is not None:
         onboard.add_argument(
             "--legacy-ok", dest="legacy_ok", metavar="TICKET",
-            help="#1184: allow a target in the shared legacy newlevel account "
-                 "(migration bookkeeping only)")
+            help="#1184: bookkeeping for an ALREADY-registered project outside "
+                 "a declared project account (never a new project)")
     p = sub.add_parser(
         "accounts",
         help="#1184: per-project accounts — `status` lists the declared project "
-             "accounts and the frozen legacy newlevel inventory + count")
+             "accounts and the frozen legacy inventory + count")
     p.add_argument("action", nargs="?", default="status", choices=["status"])
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--registry", default=None,

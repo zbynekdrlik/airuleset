@@ -21,7 +21,7 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cli_onboard as ob
-
+from _onboard_gate_open import setUpModule, tearDownModule  # noqa: E402,F401  (#1184)
 
 # --------------------------------------------------------------------------- #
 # Test runner: git runs for real on the tmp fixture; gh/ssh are intercepted so

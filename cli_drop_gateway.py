@@ -337,7 +337,8 @@ def _webterm_readers():
     return [(_wa.WEBTERM_ACCESS_APPS[name]["allowed_emails"], inv())
             for name, inv in (("david", _wp.david_inventory),
                               ("marek", _wp.marek_inventory),
-                              ("dominika", _wp.dominika_inventory))]
+                              ("dominika", _wp.dominika_inventory),
+                              ("timo", _wp.timo_inventory))]
 
 
 cli_drop_lanes.add_webterm_readers(DROP_ACCESS_APPS, DROP_LANES,
