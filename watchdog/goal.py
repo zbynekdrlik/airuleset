@@ -823,12 +823,9 @@ GOAL_DELIVERY_LIVE_ATTEMPT_CAP = 6
 # `skip:stash-abort-slot-occupied` (owned by #566's own counter + janitor
 # escalation) or any zero-keystroke defer (`undeterminable`/`busy`/`recent-
 # human`/`client-active`/`in-mode`/... -- counting those would starve a
-# legitimate delivery, #611). A structured return word, never a log-string match.
-# #1181 -- `skip:nudge-off` (the switch withheld it, nothing typed) replaces the
-# verify-failed that refusal used to be misreported as; counted the same, so the
-# cap drop, its ping and the re-record bounds are unchanged for a re-arm origin.
-_GOAL_KEYSTROKE_SKIPS = frozenset(("skip:verify-failed", "skip:stash-abort",
-                                   "skip:nudge-off"))
+# legitimate delivery, #611; #1181 `skip:nudge-off` is such a defer). A structured
+# return word, never a log-string match.
+_GOAL_KEYSTROKE_SKIPS = frozenset(("skip:verify-failed", "skip:stash-abort"))
 
 # REMOVED (#403-review CRITICAL C1): `_GOAL_NON_BOUNDARY_MARKERS` used to
 # refuse to arm while the session's last transcript marker was a question
@@ -1211,7 +1208,7 @@ def _clear_stranded_truncated_goal(sid, cwd, captured, tpath, pid, run, state,
     return logs, False
 
 
-def _recovery_pane_ready(sid, cwd, run, projects_dir, now, pid=None):
+def _recovery_pane_ready(sid, cwd, run, projects_dir, now, pid=None, human_gate=True):
     """#731 -- the SHARED guard core extracted from `_resolve_stash_abort_livelock`
     (#566) so the attempt-cap drop cleanup reuses the IDENTICAL pre-keystroke
     guards, never a parallel set. Resolves the pane (unless `pid` given) and, in
@@ -1219,7 +1216,8 @@ def _recovery_pane_ready(sid, cwd, run, projects_dir, now, pid=None):
     fail-closed recent-human gate (which now ALSO carries the #731 tmux-client-
     input signal 3), an open dialog. Returns `(pid, captured, loc)` when the pane
     is safe to act on, or `(None, <reason-str>, None)` when a guard vetoes
-    (`reason` in {no-pane,in-mode,recent-human,dialog-open}). A CLEAN idle input
+    (`reason` in {no-pane,in-mode,recent-human,dialog-open}; `human_gate=False`
+    skips recent-human -- the #1181 owner-arm notice, #752). A CLEAN idle input
     BOUNDARY (`_classify_boundary=="input"`, not the "Waiting for N agents"
     swallowed-submit render) is the CALLER's responsibility -- the #566 caller
     orders `_janitor_recover` (which no-ops on an unreadable box), the #731 cap-
@@ -1233,7 +1231,7 @@ def _recovery_pane_ready(sid, cwd, run, projects_dir, now, pid=None):
         return None, "in-mode", None
     tinfo = watchdog.find_active_transcript(projects_dir, cwd)
     tpath = tinfo[0] if tinfo else None
-    if _recovery_recent_human(sid, cwd, tpath, now, pid=pid, run=run):
+    if human_gate and _recovery_recent_human(sid, cwd, tpath, now, pid=pid, run=run):
         return None, "recent-human", None
     captured = watchdog.capture_pane(pid, run, lines=40)
     if watchdog.pane_waiting_on_user(captured):
