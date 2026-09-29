@@ -823,8 +823,7 @@ GOAL_DELIVERY_LIVE_ATTEMPT_CAP = 6
 # `skip:stash-abort-slot-occupied` (owned by #566's own counter + janitor
 # escalation) or any zero-keystroke defer (`undeterminable`/`busy`/`recent-
 # human`/`client-active`/`in-mode`/... -- counting those would starve a
-# legitimate delivery, #611; #1181 `skip:nudge-off` is such a defer). A structured
-# return word, never a log-string match.
+# legitimate delivery, #611). A structured return word, never a log-string match.
 _GOAL_KEYSTROKE_SKIPS = frozenset(("skip:verify-failed", "skip:stash-abort"))
 
 # REMOVED (#403-review CRITICAL C1): `_GOAL_NON_BOUNDARY_MARKERS` used to
@@ -1624,6 +1623,7 @@ def _structured_goal_mark_state(sid, state, with_mark=False):
 
 _GOAL_TERMINAL_WORDS = frozenset((
     "sent", "expired", "drop:cleared-after-request", "drop:already-armed",
+    "drop:nudge-off",     # #1181 -- the owner's per-kind switch withholds it
     "drop:stale-rearm",   # #524 -- a dark-rearm too old to type (delivery gate)
     "drop:stale-rearm-retired",  # #1113 -- a leftover stale-rearm request, never
                                  # typed (the origin is retired); cleared in one
@@ -1716,8 +1716,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
                                         re-types at most that many times before
                                         goal_sweep drops it; `skip:client-
                                         active` (an attached human typing NOW)
-                                        is a zero-keystroke defer, never counted;
-                                        so is #1181 `skip:nudge-off` (kind OFF).
+                                        is a zero-keystroke defer, never counted.
+      "drop:nudge-off" (#1181): the kind is OFF; nothing typed, one attempt.
       "skip:busy-transcript"        -- #1110: the session TRANSCRIPT was written
                                         within GOAL_TURN_LIVE_WINDOW_S (the turn
                                         is running), so the render's bare box is
@@ -1811,9 +1811,8 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
         _log_goal_sync("PASS structured-armed sid=%s cwd=%s origin=%s (%s)"
                        % (sid, cwd, origin, _mig_why))
 
-    # #1038/#1128/#1181 -- the keystroke NUDGE identity (`_declared_window_nudge`):
-    # always-on `goal-arm` for a declared window / the owner's own arm / the
-    # stream watcher; every other watchdog re-arm keeps the staged `goal-sweep`.
+    # #1038/#1128/#1181 -- the keystroke NUDGE identity: always-on `goal-arm` for a declared
+    # window / the owner's own arm / the stream watcher, else the staged `goal-sweep`.
     _nudge = _declared_window_nudge(cwd, origin)
 
     # Hard age cap -- checked first, no pane resolution needed. Unlike
@@ -1867,6 +1866,9 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     # #675 -- the tighter dark-rearm freshness gate (#524) moved BELOW the
     # recent-human check (see its new position after that check).
 
+    if watchdog._keystroke_suppressed("goal", False, _nudge):   # #1181: no pane read
+        return _arm_failure.nudge_off(sid, cwd, text, _nudge, logs, out, _log_goal_sync, None
+                                      if dry_run else lambda: _record_delivered_attempt(state, origin, sid, now))
     pid = _compact._find_pane_for_session(sid, cwd, run=run, projects_dir=projects_dir)
     if not pid:
         _log_goal_sync("SKIP no-pane sid=%s cwd=%s" % (sid, cwd))
@@ -2055,8 +2057,6 @@ def deliver_goal(sid, cwd, text, authority, run=None, projects_dir=None,
     if _ops_wait_recheck._pane_busy_waiting(captured):
         _log_goal_sync("SKIP busy sid=%s cwd=%s" % (sid, cwd))
         return "skip:busy"
-    if watchdog._keystroke_suppressed("goal", False, _nudge):   # #1181: name it
-        return _arm_failure.nudge_off(sid, cwd, text, _nudge, logs, out, _log_goal_sync)
     if draft:
         # Mark provenance BEFORE the attempt (regardless of outcome) so
         # the shared janitor (#372) can recover a stuck stash send for

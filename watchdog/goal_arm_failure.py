@@ -11,17 +11,25 @@ own arm rides the always-on `goal-arm` kind); this leaf owns the two things
 that keep ANY remaining failure visible:
 
   * `nudge_off` -- a delivery the owner's per-kind switch withholds is reported
-    as what it is (`skip:nudge-off`, nothing typed): a zero-keystroke DEFER like
-    `skip:busy`, never counted toward the keystroke cap, never a failed verify
-    with a misleading `ARM-CONFIRM-FAIL box=empty` diagnostic;
+    as what it is: `drop:nudge-off`, decided BEFORE any pane read, nothing typed,
+    never a failed verify with a misleading `ARM-CONFIRM-FAIL box=empty`. It is
+    TERMINAL and books ONE origin attempt (`_record_delivered_attempt`), so a
+    watchdog re-arm recorder stays bounded by its own 24 h attempt cap and then
+    falls through to its keystroke-free ping -- the same bound the old
+    three-sweep verify-failed drop gave, without typing or a misleading ping;
   * the SELF-CALLBACK failure record + notice -- when a `self-callback` arm is
     dropped at the strict attempt cap, the failure is kept in the watchdog state
     (`airuleset.py status` shows `goal: arm failed (<reason> xN) — paste the
-    line above or re-run /autopilot` until the session arms, a new request is
-    pending, or `SHOW_S` passes) and ONE pointer line is typed into the pane.
+    /goal line /autopilot printed, or re-run /autopilot` until the session arms,
+    a new request is pending, or `SHOW_S` passes) and ONE pointer line is typed
+    into the pane.
 
-A watchdog re-arm origin is NOT covered by the notice: it is the watchdog's own
-guess, bounded by its own caps and pings. The notice never types a `/goal`.
+A watchdog re-arm origin is NOT covered by the notice (its failures are bounded
+by its own attempt caps and pings). The notice never types a `/goal`, and it
+starts with the watchdog's own `stuck-check: ` prefix, so every reader of human
+prompts (`_MACHINE_PROMPT_PREFIXES`: the U-count / answered-question prune, the
+recent-human gates; `stream_migrate._own_keystroke`: the #1133 answer detector;
+the janitor's own-content proof) reads it as machine text, never an answer.
 
 Keystroke safety of the notice. It is typed ONLY into a pane at rest, checked
 right before the keystroke with the SAME primitives the arm path uses: not in
@@ -34,8 +42,10 @@ gate it does not take is the 30-min recent-human window: the owner typed
 ruling that makes the owner's own arm immune to it (the notice is that arm's
 failure report). A refused gate types nothing; the status row still carries it.
 The notice is typed ONCE per session and failure window (a later re-arm that
-also caps gets the status row only), and it addresses the owner and tells the
-session to take no action, so it cannot start a re-arm loop.
+also caps refreshes the status row only), and it addresses the owner and tells
+the session to take no action, so it cannot start a re-arm loop. It rides the
+always-on `goal-arm` kind of the arm it reports on (the design's "one pointer
+line in the pane"), bounded by that once-per-window rule instead of a nudge cap.
 """
 
 import time
@@ -45,20 +55,23 @@ import watchdog
 STATE_KEY = "goal_arm_failed"
 SHOW_S = 24 * 3600                  # the status row stops naming a day-old failure
 NOTICE_NUDGE = "goal-arm"           # always-on recovery kind, same as the arm itself
-NOTICE = ("goal arm failed {attempts}x: owner, paste the /goal line above or "
-          "re-run /autopilot. Claude: take no action")   # <= 100 cells (#1157)
+NOTICE = ("stuck-check: goal arm failed {attempts}x. Owner: paste /goal above or "
+          "re-run /autopilot. Claude: no action")   # <= 100 cells (#1157)
 
 
-def nudge_off(sid, cwd, text, nudge, logs, out, log_fn):
+def nudge_off(sid, cwd, text, nudge, logs, out, log_fn, record_fn=None):
     """The honest disposition of a delivery the per-kind switch withholds: the
     SAME `nudges OFF: suppressed <kind>` journal line the `keys` primitive
-    writes, a `SKIP nudge-off(<kind>)` goal-sync line, and `skip:nudge-off`.
-    Zero keystrokes, zero pane reads."""
+    writes, a `DROP nudge-off(<kind>)` goal-sync line, ONE booked origin attempt
+    (`record_fn`, None on a dry run) and the terminal `drop:nudge-off`. Zero
+    keystrokes, zero pane reads."""
     watchdog._suppress_nudge(nudge, text, logs)
-    log_fn("SKIP nudge-off(%s) sid=%s cwd=%s (nothing typed)" % (nudge, sid, cwd))
+    log_fn("DROP nudge-off(%s) sid=%s cwd=%s (nothing typed)" % (nudge, sid, cwd))
+    if record_fn is not None:
+        record_fn()
     if out is not None:
         out["detail"] = "nudge kind %s is OFF, nothing typed" % nudge
-    return "skip:nudge-off"
+    return "drop:nudge-off"
 
 
 def _ts(v):
@@ -69,8 +82,9 @@ def _ts(v):
         return None
 
 
-def record(state, sid, cwd, reason, attempts, now):
-    """Keep the failure for the status row; prune records past `SHOW_S` (or
+def record(state, sid, cwd, reason, attempts, now, notice_ts=None):
+    """Keep (refresh) the failure for the status row, carrying `notice_ts` (when
+    the pane notice was typed this window); prune records past `SHOW_S` (or
     corrupt) so the map stays bounded. A no-op without a state dict."""
     if not isinstance(state, dict) or not sid:
         return
@@ -81,7 +95,7 @@ def record(state, sid, cwd, reason, attempts, now):
               if _ts(v) is None or now - _ts(v) > SHOW_S]:
         recs.pop(k, None)
     recs[sid] = {"ts": now, "cwd": cwd, "reason": reason or "?",
-                 "attempts": int(attempts)}
+                 "attempts": int(attempts), "notice_ts": notice_ts}
 
 
 def clear(state, sid):
@@ -117,8 +131,8 @@ def failure(sid, now, state=None):
 
 def status_row(rec):
     """The `status` `goal:` row for a failed owner arm."""
-    return ("goal: arm failed (%s x%s) — paste the line above or re-run "
-            "/autopilot" % (rec.get("reason", "?"), rec.get("attempts", "?")))
+    return ("goal: arm failed (%s x%s) — paste the /goal line /autopilot printed, "
+            "or re-run /autopilot" % (rec.get("reason", "?"), rec.get("attempts", "?")))
 
 
 def _pane_at_rest(sid, cwd, run, projects_dir, now):
@@ -152,9 +166,10 @@ def on_self_arm_capped(sid, cwd, reason, attempts, run, projects_dir, state,
     outcome is named (#486)."""
     head = "ARM-FAILED (goal-sweep) %s sid=%s -> " % (watchdog.project_label(cwd),
                                                       sid)
-    if failure(sid, now, state if state is not None else {}) is not None:
-        return [head + "notice already typed this window; status row kept"]
-    record(state, sid, cwd, reason, attempts, now)
+    prev = failure(sid, now, state if state is not None else {}) or {}
+    record(state, sid, cwd, reason, attempts, now, notice_ts=prev.get("notice_ts"))
+    if prev.get("notice_ts") is not None:
+        return [head + "notice already typed this window; status row refreshed"]
     pdir = projects_dir or watchdog.PROJECTS_DIR
     pid, tpath, gate = _pane_at_rest(sid, cwd, run, pdir, now)
     if pid is None:
@@ -164,5 +179,7 @@ def on_self_arm_capped(sid, cwd, reason, attempts, run, projects_dir, state,
         pid, NOTICE.format(attempts=attempts), run=run, tpath=tpath,
         sleep_fn=sleep_fn or time.sleep, logs=slog, nudge=NOTICE_NUDGE,
         state=state, now=now)
-    return [head + "pane notice %s; status row set"
-            % getattr(res, "kind", res)] + slog
+    kind = getattr(res, "kind", res)
+    if kind != "not-typed":                          # a key reached the pane
+        record(state, sid, cwd, reason, attempts, now, notice_ts=now)
+    return [head + "pane notice %s; status row set" % kind] + slog
