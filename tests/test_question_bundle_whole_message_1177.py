@@ -111,6 +111,25 @@ IN_BLOCK_INDEXED_SIGS = (
     "> ZbynekAI 4\n\n"
     "❓ NEEDS YOU: schváliš odoslanie oboch textov klientovi?")
 
+# Unsigned bundle named only by explicit target LINES (markdown-decorated, no
+# URL) and approved with „odoslať" — the per-draft target count must catch it.
+UNSIGNED_TARGET_LINES_ONLY = (
+    "**Úloha:** „Montáž Patrik 4\"\n\n"
+    "> Dobrý deň Patrik, montáž je naplánovaná na piatok 3.10. od 8:00.\n\n"
+    "- Vlákno: „Cenník Patrik 4\"\n\n"
+    "> Dobrý deň, cenník sme aktualizovali podľa vašej požiadavky.\n\n"
+    + QBLOCK_TWO.replace("môžem poslať", "môžem odoslať"))
+
+# The client's own (unsigned) message quoted under a header carrying the
+# thread URL, then OUR one signed reply into the same thread — one message.
+CLIENT_QUOTE_THEN_ONE_REPLY = (
+    "Patrik napísal vo vlákne „Montáž Patrik 4\" (" + THREAD_783 + "):\n\n"
+    "> Kedy príde montážna skupina? Potrebujem vedieť do štvrtka.\n\n"
+    "Vlákno: „Montáž Patrik 4\" — " + THREAD_783 + "\n\n"
+    "> Dobrý deň Patrik, montáž je naplánovaná na piatok 3.10. od 8:00.\n"
+    "> ZbynekAI 4\n\n"
+    + QBLOCK_ONE)
+
 # A NON-approval question whose message quotes two ALREADY-SENT signed replies
 # as a report — no client-approval intent in the ❓ block, so the whole-message
 # scope does not apply and it must pass.
@@ -160,6 +179,11 @@ class BundledDraftsBlocked(_GateBase):
         self.assertEqual(r.returncode, 2, (r.returncode, r.stdout, r.stderr))
         self.assertIn("JEDEN", r.stderr, r.stderr)
 
+    def test_unsigned_target_lines_only_blocked(self):
+        r = self._run(UNSIGNED_TARGET_LINES_ONLY, self._sid())
+        self.assertEqual(r.returncode, 2, (r.returncode, r.stdout, r.stderr))
+        self.assertIn("vlákno/úloha: 2", r.stderr, r.stderr)
+
     def test_in_block_indexed_signatures_blocked(self):
         r = self._run(IN_BLOCK_INDEXED_SIGS, self._sid())
         self.assertEqual(r.returncode, 2, (r.returncode, r.stdout, r.stderr))
@@ -176,6 +200,9 @@ class SingleDraftPasses(_GateBase):
 
     def test_one_draft_briefing_mentions_other_thread_passes(self):
         self.assertPasses(ONE_DRAFT_BRIEFING_OTHER_THREAD)
+
+    def test_client_quote_then_one_reply_passes(self):
+        self.assertPasses(CLIENT_QUOTE_THEN_ONE_REPLY)
 
     def test_report_of_sent_messages_with_unrelated_question_passes(self):
         self.assertPasses(REPORT_THEN_UNRELATED_QUESTION)
