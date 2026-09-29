@@ -252,5 +252,45 @@ class TestDoctrine(TestCase):
                       "nastavené streamom nie je akceptácia (#1185)", text)
 
 
+class TestReviewFindings(TestCase):
+    """Fresh-context review of the #1185 lane (F2/F3/F5/F6)."""
+
+    def test_real_spellings_count_as_a_msg_reference(self):
+        # F5: spellings seen on real odoo-erp closes, now accepted
+        for line in ("Acceptance-cited: message 1742799",
+                     "Acceptance-cited: msg. 1742799",
+                     "Acceptance-cited: msg-1742799",
+                     "Acceptance-cited: msgs 1742799, 1742800",
+                     "Acceptance-cited: msg ids 1742799 1742800",
+                     "Acceptance-cited: mail.message(1742799)",
+                     "Acceptance-cited: message_id 1742799",
+                     "Acceptance-cited: mail_message 1818093",
+                     "Acceptance-cited: msg 1742799"):
+            with self.subTest(line=line):
+                self.assertTrue(g.has_disposition(line))
+
+    def test_a_date_is_not_a_msg_reference(self):
+        # F6: a date right after the word is not a message id
+        for line in ("Acceptance-cited: Hotovo, správa klienta message 29.9.",
+                     "Acceptance-cited: msg 29.9.2026 task 1102 v Hotovo"):
+            with self.subTest(line=line):
+                self.assertFalse(g.has_disposition(line))
+
+    def test_stages_rule6_names_the_clients_own_move(self):
+        # F2: slovnormal's client moves the task himself — cite its tracking msg
+        sec = _norm(_section(STAGES.read_text(encoding="utf-8"),
+                             '### 6. "Done" stage'))
+        self.assertIn("or the client's own move (its tracking `msg <id>`)", sec)
+
+    def test_hook_cited_text_rejects_stream_authored_evidence(self):
+        # F3: a msg/move authored by a stream account is not acceptance either
+        r = TestHook._run(TestHook(), ["Acceptance-cited: stage Hotovo"])
+        self.assertEqual(r.returncode, 2, r.stderr)
+        err = _norm(r.stderr)
+        self.assertIn("carries no msg <id> (e.g. it cites only a stage", err)
+        self.assertIn("a message or stage move a STREAM account authored is "
+                      "not acceptance either", err)
+
+
 if __name__ == "__main__":
     main()
