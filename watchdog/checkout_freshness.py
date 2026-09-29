@@ -270,10 +270,12 @@ def _fetch(path, remote, prev, dry_run, fetch_timeout, budget_left):
     left = budget_left() if budget_left is not None else None
     if prev.get("fetch_rc") == 124 and (left is None or left >= FETCH_TIMEOUT_LONG_S + 10):
         timeout = FETCH_TIMEOUT_LONG_S
-    rc, _ = cf.run_git(path, ["-c", "gc.auto=0", "-c", "maintenance.auto=false",
-                              "fetch", "--quiet", "--no-tags",
-                              "--no-recurse-submodules", remote],
-                       timeout=timeout, env_extra=cf.ssh_batch_env(path))
+    env = cf.ssh_batch_env(path)
+    with cf.deadline(timeout + 1):   # its own bound, not the per-checkout one
+        rc, _ = cf.run_git(path, ["-c", "gc.auto=0", "-c", "maintenance.auto=false",
+                                  "fetch", "--quiet", "--no-tags",
+                                  "--no-recurse-submodules", remote],
+                           timeout=timeout, env_extra=env)
     return rc, timeout
 
 

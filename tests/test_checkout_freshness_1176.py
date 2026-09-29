@@ -615,6 +615,14 @@ class TestReviewOneProcessSafety(_Repos):
         logs = self.run_job(T0, checkouts=two, clock=lambda: next(ticks))
         self.assertTrue(any("hold:budget — 1 of 2" in ln for ln in logs), logs)
 
+    def test_timed_out_fetch_gets_the_longer_retry(self):
+        job = _job()
+        with _cf().deadline(job.PER_CHECKOUT_S - 5):
+            e = job.check_checkout({"path": self.clone, "bases": ["develop"],
+                                    "source": "t"}, T0, prev={"fetch_rc": 124})
+        self.assertEqual(e["fetch_timeout"], job.FETCH_TIMEOUT_LONG_S)
+        self.assertEqual(e["fetch_rc"], 0)
+
     def test_budget_constants_value_lock(self):
         job, cf = _job(), _cf()
         self.assertGreaterEqual(job.PER_CHECKOUT_S,
