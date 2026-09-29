@@ -1680,7 +1680,7 @@ GOAL_INDICATOR = "◎ /goal"          # CC's own armed-goal footer indicator
 # never a divergent copy; ALL its separators confirmed plain 0x20 — NOT
 # nbsp U+00A0 — by hexdump of the raw byte-faithful gk capture, where
 # `·` survived as c2 b7 so an nbsp would equally have shown as c2 a0)
-# and the age unit class `[hm]` -> `[hmd]`. The tail stays
+# and the age unit class `[hm]` -> `[hmd]` (#1181: + `s`, a fresh arm's "(8s)"). The tail stays
 # exactly " active"/" active (<1-3 digits><h|m|d>)", so every #393
 # wrapped-prose false-positive control (with/without punctuation, prefix
 # or not) is still rejected. A fractional-hour/nbsp render remains the
@@ -1706,7 +1706,7 @@ GOAL_INDICATOR = "◎ /goal"          # CC's own armed-goal footer indicator
 # alternative on the banner's own LINE-START shape instead — the CC glyph +
 # `Update installed · Restart to (update|apply)` — so ordinary prose that
 # merely quotes the phrase mid-line no longer matches. The tail stays the SAME
-# CLOSED form (` active`/` active (<1-3 digits><h|m|d>)` then `$`), so every
+# CLOSED form (` active`/` active (<1-3 digits><s|m|h|d>)` then `$`), so every
 # #393 wrapped-prose control is still rejected. ACCEPTED RESIDUALS (the #393
 # MINOR-2 "fix what failed in production, widen on a real render" discipline):
 # (1) a DIFFERENT CC banner in the same chrome slot — the theorised
@@ -1719,7 +1719,7 @@ _GOAL_HEADER_INDICATOR_RX = re.compile(
     + r"|(?:[✔✓]\s*)?Update installed\s*·\s*Restart to (?:update|apply)"
     + r")?"
     + re.escape(GOAL_INDICATOR)
-    + r"( active(\s\(\d{1,3}[hmd]\))?)?$")
+    + r"( active(\s\(\d{1,3}[smhd]\))?)?$")
 _GOAL_LCS_OPEN = "<local-command-stdout>"
 _GOAL_LCS_CLOSE = "</local-command-stdout>"
 
