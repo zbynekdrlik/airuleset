@@ -48,3 +48,6 @@ design-*.png
 # The tracked non-log audit docs in this dir (mdreview-*.md) are unaffected
 # since the glob only matches *.log.
 audits/*.log
+
+# Local scratch of the manual live checks (scripts/repro_goal_arm_1181.py, #1181)
+/tmp/
