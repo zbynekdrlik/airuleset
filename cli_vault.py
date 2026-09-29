@@ -25,6 +25,8 @@ from pathlib import Path
 from cli_vault_inspect import cmd_inspect as _secret_inspect
 from cli_vault_keyfile import cmd_exec_file as _secret_exec_file
 from cli_vault_keyfile import emit_store_exec as _emit_store_exec
+import cli_vault_delivery
+from cli_vault_delivery import public_lane as _secret_public_lane
 
 REPO_DIR = Path(__file__).resolve().parent
 
@@ -194,29 +196,6 @@ def _secret_select_ips(ips, allow_plain=False):
     if allow_plain:
         return enc + plain, []
     return enc, plain
-
-
-def _secret_public_lane(args):
-    """(public_host, port, bind_ip) for the public-TLS drop lane, or
-    (None, None, None).
-
-    #889: public HTTPS is the DEFAULT for every account. Delegates to
-    `cli_drop_gateway.resolve_public_lane_full` which returns the lane whenever
-    a registered lane + live marker exist. #931: bind_ip is "127.0.0.1" for
-    local-topology lanes (tunnel on this box) or the tailscale IP for
-    controller-topology lanes (tunnel on the controller).
-    """
-    import cli_drop_gateway as _dg
-    lane = _dg.resolve_public_lane_full()
-    if lane:
-        return lane[0], lane[1], lane[2]
-    return None, None, None
-
-
-def _secret_public_url_line(host, token):
-    """The advertised public HTTPS URL line (delegates to cli_drop_gateway)."""
-    import cli_drop_gateway as _dg
-    return _dg.public_url_line(host, token)
 
 
 def _secret_url_line(ip, port, token, iface=None):
@@ -516,7 +495,8 @@ def _secret_show(args):
             print("secret show: public drop lane — ignoring --port/--allow-plain "
                   "(fixed port %d, TLS via the tunnel)" % port,
                   file=sys.stderr)
-        ips, dropped = [bind_ip], []
+        ips, dropped = cli_vault_delivery.public_bind_ips(  # #1189 fallback
+            bind_ip, _secret_partition_ips(private)[0]), []
         if _pick_free_port(ips, [port]) is None:
             print("secret show: public drop port %d is busy — another drop "
                   "endpoint (secret/upload) holds it; wait for it to close" % port,
@@ -575,14 +555,12 @@ def _secret_show(args):
               file=sys.stderr)
         sys.exit(1)
 
-    for ip in ips:
-        if _live(_secret_health_url(ip, port)):
-            print(_secret_public_url_line(public_host, token) if public_host
-                  else _secret_url_line(ip, port, token))
-    if not public_host:
-        import cli_drop_lanes as _dl
-        print(_dl.channel_fallback_line(_fallback_reason or _dl.CHANNEL_NO_LANE,
-                                        prog="secret show"), file=sys.stderr)
+    cli_vault_delivery.emit_urls(       # #1189: probe public, private fallback
+        "secret show", public_host, token, ips,
+        lambda ip: _secret_url_line(ip, port, token),
+        lambda ip: _live(_secret_health_url(ip, port)),
+        origin_ip=bind_ip, fallback_reason=_fallback_reason,
+        log=lambda ev: st.log_event(ev, label))
     if dropped:
         print("(skipped %s — cleartext; --allow-plain offers them too)"
               % ", ".join(dropped))
@@ -775,7 +753,8 @@ def _secret_request(args):
             print("secret: public drop lane — ignoring --port/--allow-plain "
                   "(fixed port %d, TLS via the tunnel)" % port,
                   file=sys.stderr)
-        ips, dropped = [bind_ip], []
+        ips, dropped = cli_vault_delivery.public_bind_ips(  # #1189 fallback
+            bind_ip, _secret_partition_ips(private)[0]), []
         if _pick_free_port(ips, [port]) is None:
             print("secret: public drop port %d is busy — another drop endpoint "
                   "(secret/upload) holds it; wait for it to close" % port,
@@ -842,14 +821,12 @@ def _secret_request(args):
               file=sys.stderr)
         sys.exit(1)
 
-    for ip in ips:
-        if _live(_secret_health_url(ip, port)):
-            print(_secret_public_url_line(public_host, token) if public_host
-                  else _secret_url_line(ip, port, token))
-    if not public_host:
-        import cli_drop_lanes as _dl
-        print(_dl.channel_fallback_line(_fallback_reason or _dl.CHANNEL_NO_LANE,
-                                        prog="secret"), file=sys.stderr)
+    cli_vault_delivery.emit_urls(       # #1189: probe public, private fallback
+        "secret", public_host, token, ips,
+        lambda ip: _secret_url_line(ip, port, token),
+        lambda ip: _live(_secret_health_url(ip, port)),
+        origin_ip=bind_ip, fallback_reason=_fallback_reason,
+        log=lambda ev: [st.log_event(ev, n) for n in names])
     if dropped:
         print("(skipped %s — cleartext; --allow-plain offers them too)"
               % ", ".join(dropped))
