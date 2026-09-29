@@ -225,15 +225,69 @@ class TestUserLaneReassertOverlaps(_LaneCase):
                           ta.overlap_service_name(self.lane.tunnel_service)],
                          fake.systemctl_calls())
 
-    def test_user_unit_without_pidfile_gets_no_dropin_and_falls_back_loud(self):
-        # airuleset renders the --user lane units itself and never writes their
-        # drop-ins (cli_webterm_marek/dominika) — a missing pidfile is LOUD.
+    def test_user_unit_without_pidfile_gets_the_dropin_and_overlaps(self):
+        # Review round 2 (replaces the round-1 "no drop-in for --user" test): the
+        # live marek/dominika units on subdev predate #1189 and are no longer
+        # rendered there (LANE_HOST = controller), so a re-render can never add
+        # the pidfile. The #638 "never write drop-ins" invariant is about the
+        # ttyd unit's PATH, not the tunnel unit — the drop-in is the fix.
         fake = FakeSystemd(self.cfg, self.lane.tunnel_service, env_pidfile=False)
         ok, err = self._reconcile(fake)
         self.assertTrue(ok, err)
+        self.assertIn("applied (overlap)", err)
+        dropin = (self.home / ".config" / "systemd" / "user"
+                  / (self.lane.tunnel_service + ".d") / "airuleset-tunnel-pidfile.conf")
+        self.assertIn("Environment=TUNNEL_PIDFILE=%s" % ta.tunnel_pidfile(self.cfg),
+                      dropin.read_text())
+
+    def test_environment_file_overrides_even_a_matching_pidfile_loud(self):
+        # An EnvironmentFile overrides Environment= (systemd.exec), so a matching
+        # Environment= value proves nothing when one is present.
+        fake = FakeSystemd(self.cfg, self.lane.tunnel_service,
+                           env_files="/etc/default/cf (ignore_errors=no)")
+        ok, err = self._reconcile(fake)
+        self.assertTrue(ok, err)
         self.assertIn("LOUD", err)
-        self.assertEqual(list(self.home.rglob("*.conf")), [])
-        self.assertIn(["restart", self.lane.tunnel_service], fake.systemctl_calls())
+        self.assertIn("EnvironmentFile", err)
+
+    def test_plain_restart_is_not_cut_off_by_a_timeout(self):
+        # A blocking plain restart drains cloudflared's full 30 s grace; a 30 s
+        # subprocess timeout would fail it and repeat the dark restart each push.
+        import subprocess
+        fake = FakeSystemd(self.cfg, self.lane.tunnel_service, binary="/bin/sh")
+
+        def run(argv, **kw):
+            if argv[-2:] == ["restart", self.lane.tunnel_service] and kw.get("timeout"):
+                raise subprocess.TimeoutExpired(argv, kw["timeout"])
+            return fake(argv, **kw)
+        ok, err = self._reconcile(run)
+        self.assertTrue(ok, err)
+        self.assertFalse(dg.cli_drop_tunnel_restart.retry_pending(self.lane))
+
+    def test_plain_fallback_stops_an_overlap_left_serving(self):
+        ta.overlap_pidfile(self.cfg).write_text("111\n")     # a failed run's leftover
+        fake = FakeSystemd(self.cfg, self.lane.tunnel_service, binary="/bin/sh")
+        ok, err = self._reconcile(fake)
+        self.assertTrue(ok, err)
+        calls = fake.systemctl_calls()
+        overlap = ta.overlap_service_name(self.lane.tunnel_service)
+        self.assertLess(calls.index(["restart", self.lane.tunnel_service]),
+                        calls.index(["stop", "--no-block", overlap]),
+                        "the leftover overlap bridges the plain restart, then stops")
+        self.assertFalse(ta.overlap_pidfile(self.cfg).exists())
+
+    def test_a_death_between_config_write_and_restart_is_retried(self):
+        fake = FakeSystemd(self.cfg, self.lane.tunnel_service)
+        with mock.patch.object(dg, "_restart_lane_tunnel",
+                               side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self._reconcile(fake)
+        self.assertIn("- hostname: %s" % self.lane.host, self.cfg.read_text())
+        self.assertTrue(dg.cli_drop_tunnel_restart.retry_pending(self.lane),
+                        "the written-but-unapplied ingress must be retried")
+        ok, err = self._reconcile(FakeSystemd(self.cfg, self.lane.tunnel_service))
+        self.assertTrue(ok, err)
+        self.assertIn("applied (overlap)", err)
 
     def test_non_cloudflared_exec_falls_back_loud(self):
         fake = FakeSystemd(self.cfg, self.lane.tunnel_service, binary="/bin/sh")
