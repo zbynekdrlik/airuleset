@@ -808,10 +808,12 @@ def onboard_project(path, host=None, name=None, overrides=None,
     # reachability BEFORE any detection. A failure REFUSES (never a local
     # false-negative); the error is surfaced in dry-run too.
     target_path, err = _remote_preflight(orig_path, host, run=run)
-    # #1184: only a DECLARED project account, onboarded AS its owner.
-    account = cli_accounts.account_for_target(target_path, host, run) if not err else None
+    # #1184: only a DECLARED project account's own dir, onboarded AS its owner.
+    resolved, account = (cli_accounts.resolve_target(target_path, host, run)
+                         if not err else (None, None))
     err = err or cli_accounts.onboard_account_gate(
-        account, legacy_ok, host=host, existing=existing,
+        account, legacy_ok, host=host, resolved=resolved,
+        existing=registry_entry_for_path_in(entries, orig_path),
         login_user=cli_accounts.login_user_for_host(host))
     if err:
         return {"name": name, "stack": None, "steps": [], "entry": None,

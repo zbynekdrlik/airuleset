@@ -10,13 +10,14 @@ touched, so the fleet converges one project at a time.
 This leaf owns the three mechanical halves of that policy:
 
   * ``account_for_target`` + ``onboard_account_gate`` — the ``onboard-project``
-    gate. It is an ALLOW-list: only a DECLARED project account on its declared
-    host passes. Anything else (``newlevel``, the control accounts, a stream
-    account, an undeclared account) is REFUSED, unless ``--legacy-ok <ticket>``
-    names a ticket AND the project already has a registry row (migration
-    bookkeeping only — never a new project). The owner is read from the
-    RESOLVED directory on the target (``realpath -e`` + ``stat``), never from
-    the typed path, and onboarding writes only as that owner;
+    gate. It is an ALLOW-list: only a DECLARED project account's OWN project
+    directory on its declared host passes (one account per project). Anything
+    else (``newlevel``, the control accounts, a stream account, an undeclared
+    account) is REFUSED, unless ``--legacy-ok <ticket>`` names a ticket AND the
+    exact path already has a registry row on that host (migration bookkeeping
+    only — never a new project). The directory and its owner are read on the
+    target (``realpath -e`` + ``stat``), never from the typed path, and
+    onboarding writes only as that owner;
   * ``legacy_inventory`` + ``LEGACY_CEILING`` — every registry row not in a
     declared project account, locked DOWN-ONLY by
     tests/test_project_accounts_1184.py;
@@ -42,8 +43,11 @@ LEGACY_FREEZE_DATE = "2026-09-29"
 LEGACY_CEILING = 25
 
 # `--legacy-ok` must name the ticket that carries the migration bookkeeping:
-# `#N`, `N`, or `owner/repo#N`.
-_TICKET_RE = re.compile(r"(#?\d+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+)")
+# `#N` or `owner/repo#N` (a bare number is ambiguous — refused).
+_TICKET_RE = re.compile(r"(#\d+|[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#\d+)")
+# projects-registry.json spells the gatekeeper box `gk` (its fleet name is
+# `gatekeeper`); compare the two in the fleet namespace.
+_REGISTRY_HOST_ALIASES = {"gk": "gatekeeper"}
 
 
 def _declared_accounts():
@@ -56,25 +60,32 @@ def is_legacy_account(account):
     return account not in _declared_accounts()
 
 
-def account_for_target(target_path, host=None, run=None):
-    """The unix account that OWNS the project directory, read on the target
+def resolve_target(target_path, host=None, run=None):
+    """(resolved_path, owner) of the project directory, read ON the target
     (``realpath -e`` then ``stat -c %U`` of the resolved path, over ssh for a
     remote host) — never inferred from the typed path, so ``..``/``.``/symlink
-    tricks resolve to the real owner. None when it cannot be determined (the
-    gate then refuses)."""
+    tricks resolve to the real directory and its real owner. (None, None) when
+    it cannot be determined (the gate then refuses)."""
     from cli_onboard_exec import _exec
     try:
         r = _exec(["realpath", "-e", str(target_path)], host=host, run=run)
         resolved = (r.stdout or "").strip() if r.returncode == 0 else ""
         if not resolved.startswith("/"):
-            return None
+            return None, None
         r = _exec(["stat", "-c", "%U", resolved], host=host, run=run)
         owner = (r.stdout or "").strip() if r.returncode == 0 else ""
     except Exception as e:  # never raise from the gate's probe
         print("accounts: owner probe of %s failed (%s)" % (target_path, e),
               file=sys.stderr)
-        return None
-    return owner if re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", owner) else None
+        return None, None
+    if not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", owner):
+        return resolved, None
+    return resolved, owner
+
+
+def account_for_target(target_path, host=None, run=None):
+    """The unix account that OWNS the project directory (``resolve_target``)."""
+    return resolve_target(target_path, host, run)[1]
 
 
 def login_user_for_host(host):
@@ -98,12 +109,14 @@ def _host_box(host):
 
 
 def onboard_account_gate(account, legacy_ok, *, host=None, login_user=None,
-                         existing=None):
+                         existing=None, resolved=None):
     """None when onboarding into ``account`` is allowed, else the refusal text.
 
-    Allowed: a DECLARED project account whose declared host is the target box.
-    Everything else is refused, unless ``legacy_ok`` names a ticket AND
-    ``existing`` (the project's registry row) exists — migration bookkeeping,
+    Allowed: a DECLARED project account on its declared host, and only ITS OWN
+    project directory (``resolved`` == ``/home/<acct>/<project_dir>``) — one
+    account per project, never a second project sharing its uid. Everything
+    else is refused, unless ``legacy_ok`` names a ticket AND ``existing`` is
+    the registry row matched by PATH on this host — migration bookkeeping,
     never a new project. Onboarding also writes (git, CLAUDE.md), so it must
     run AS the owner: a ``login_user`` that differs from ``account`` refuses."""
     if not account:
@@ -116,14 +129,23 @@ def onboard_account_gate(account, legacy_ok, *, host=None, login_user=None,
     declared = _declared_accounts()
     if account in declared:
         want = declared[account].get("host", "controller")
-        if host is None or _host_box(host) == want:
-            return None
-        return ("project account %r is declared on %r, not on %r (#1184)"
-                % (account, want, _host_box(host)))
-    if legacy_ok and _TICKET_RE.fullmatch(str(legacy_ok).strip()) and existing:
+        if _host_box(host) != want:
+            return ("project account %r is declared on %r, not on %r (#1184)"
+                    % (account, want, _host_box(host)))
+        project_dir = declared[account].get("project_dir")
+        if not project_dir or resolved != "/home/%s/%s" % (account, project_dir):
+            return ("%r is not the declared project directory of %r "
+                    "(/home/%s/%s) — one account per project (#1184)"
+                    % (resolved, account, account, project_dir))
         return None
-    why = ("--legacy-ok needs a ticket (#N or owner/repo#N) AND an existing "
-           "registry row" if legacy_ok else "no --legacy-ok <ticket> given")
+    row_box = _REGISTRY_HOST_ALIASES.get((existing or {}).get("host"),
+                                         (existing or {}).get("host"))
+    if (legacy_ok and _TICKET_RE.fullmatch(str(legacy_ok).strip()) and existing
+            and row_box == _host_box(host)):
+        return None
+    why = ("--legacy-ok needs a ticket (#N or owner/repo#N) AND the registry "
+           "row of this exact path on this host" if legacy_ok
+           else "no --legacy-ok <ticket> given")
     return ("target lives in %r, which is not a declared project account — new "
             "projects get their OWN account (#1184): declare it in "
             "cli_account_bootstrap.SERVICE_ACCOUNTS, run `airuleset.py "

@@ -7,8 +7,10 @@ its home). ``SERVICE_ACCOUNTS`` below is THE declaration of those project
 accounts: for each one, its host, whether it has sudo (default NO), exactly
 where it may reach (default nowhere), which named credentials it receives
 (default none) and which humans get a webterm tab to it. ``validate_account``
-refuses anything the declaration does not state explicitly, so a project
-account can never end up with sudo, reach or a secret nobody declared.
+refuses anything the declaration does not state explicitly. sudo and reach
+are ENFORCED by the bootstrap (``cli_account_hardening``); ``secrets`` is a
+declarative inventory (nothing here provisions a credential, so none arrives
+undeclared through this path).
 
 ``render_root_bootstrap`` renders an IDEMPOTENT bash script that root runs ONCE
 on the declared host. It creates the unix user, sets permissions, and installs
@@ -27,6 +29,7 @@ are imported LAZILY inside functions so the module loads with no side effects.
 """
 
 import copy
+import ipaddress
 import re
 import shlex
 import sys
@@ -49,12 +52,8 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")   # tmux rewrites '.'
 _REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _REL_DIR_RE = re.compile(r"(?!/)(?!.*(^|/)\.\.(/|$))[A-Za-z0-9_./-]+")
-# A scoped sudo command: an ABSOLUTE path plus explicit plain arguments — never
-# `ALL`, a wildcard, a list separator or an alias/escape character (the
-# root-equivalent basenames are refused by cli_account_hardening).
-_SUDO_CMD_RE = re.compile(r"/[A-Za-z0-9_./-]+( [A-Za-z0-9_./+-]+)*")
+# (a scoped sudo command is checked by cli_account_hardening.sudo_command_problem)
 _ONE_LINE_RE = re.compile(r"[^\n\r]+")
-_IP_RE = re.compile(r"[0-9.]+|[0-9A-Fa-f:]+")
 
 # Accounts that are NEVER a project account: the shared legacy account, root,
 # and the control/maintainer accounts.
@@ -62,9 +61,9 @@ _NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
                                      "gatekeeper"})
 
 _ALLOWED_KEYS = frozenset({
-    "host", "sudo", "sudo_reason", "sudo_commands", "reach", "secrets",
-    "webterm_sessions", "system_packages", "repo", "project_dir",
-    "tmux_session",
+    "host", "sudo", "sudo_reason", "sudo_commands", "reach", "reach_enforced",
+    "reach_reason", "secrets", "webterm_sessions", "system_packages", "repo",
+    "project_dir", "tmux_session",
 })
 
 # The defaults every declaration inherits. They are the SAFE direction: no
@@ -74,6 +73,7 @@ _DEFAULTS = {
     "host": "controller",
     "sudo": False,
     "reach": (),
+    "reach_enforced": True,
     "secrets": (),
     "webterm_sessions": {},
 }
@@ -90,8 +90,18 @@ SERVICE_ACCOUNTS = {
     "claudy": {
         "host": "controller",
         "sudo": False,
-        "reach": [],
-        "secrets": [],
+        # claudy is the fleet Claude-credential manager (#960): its service
+        # ssh-probes / refreshes / switches EVERY fleet account (claudy repo
+        # ssh_serialize.py, resync.py, vault.py). An egress rule would cut the
+        # fleet token refresh, so its reach is DECLARED but not enforced —
+        # narrowing it is a follow-up, never a silent cut.
+        "reach": ["controller", "dev1", "dev2", "gatekeeper", "subdev",
+                  "spinbike-vps", "forestshop-dev"],
+        "reach_enforced": False,
+        "reach_reason": "fleet credential manager: ssh to every fleet account "
+                        "is its job (#960)",
+        "secrets": ["claudy-vault"],   # the credential vault it manages (vault.py)
+        "project_dir": "devel/claudy",
         "webterm_sessions": {
             # human → {preferred, start_dir_chain} — the forced command
             # opens in the project dir, not the default STREAM_DEV_CWD_CHAIN.
@@ -192,16 +202,34 @@ def _validate_sudo(spec):
         errs.append("sudo: True needs a non-empty scoped sudo_commands list")
     else:
         for c in cmds:
-            if not isinstance(c, str) or not _SUDO_CMD_RE.fullmatch(c):
-                errs.append("sudo_commands entry %r is not a scoped absolute "
-                            "command (never ALL / a wildcard / a list)" % (c,))
-            elif hardening.sudo_command_problem(c):
-                errs.append("sudo_commands entry %r: %s"
-                            % (c, hardening.sudo_command_problem(c)))
+            problem = (hardening.sudo_command_problem(c) if isinstance(c, str)
+                       else "not a string")
+            if problem:
+                errs.append("sudo_commands entry %r is not a scoped command "
+                            "(never ALL / a wildcard / a list): %s" % (c, problem))
     return errs
 
 
-def _validate_reach(reach, boxes):
+def _password_shared_boxes():
+    """Boxes still running a PASSWORD-authenticated shared account: the legacy
+    `newlevel` (fleet-shared password) boxes and the controller (`airuleset`
+    break-glass password, #985). An ENFORCED reach to one of them would reopen
+    the very escape the account exists to close (#1184 review 2)."""
+    import cli_fleet
+    boxes = {h["name"].split("@")[-1] for h in cli_fleet.REMOTE_HOSTS
+             if h.get("user") == "newlevel"}
+    return boxes | {"controller"}
+
+
+def _is_ip(value):
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _validate_reach(reach, boxes, enforced=True):
     errs = []
     if not isinstance(reach, (list, tuple)):
         return ["reach must be a list, got %r" % (reach,)]
@@ -216,9 +244,13 @@ def _validate_reach(reach, boxes):
         elif user in _NEVER_PROJECT_ACCOUNTS:
             errs.append("reach target %r names a shared/control account — a "
                         "project account never reaches into it" % (target,))
-        elif not _IP_RE.fullmatch(boxes[box]):
+        elif enforced and not _is_ip(boxes[box]):
             errs.append("reach target %r: box address %r is not an IP, so the "
                         "egress rule cannot enforce it" % (target, boxes[box]))
+        elif enforced and box in _password_shared_boxes():
+            errs.append("reach target %r: %r still has a password-authenticated "
+                        "shared account — an ssh route there reopens the escape"
+                        % (target, box))
     return errs
 
 
@@ -268,7 +300,15 @@ def validate_account(account, raw):
         errs.append("host %r is not a fleet box (known: %s)"
                     % (spec["host"], ", ".join(sorted(boxes))))
     errs += _validate_sudo(spec)
-    errs += _validate_reach(spec["reach"], boxes)
+    enforced = spec.get("reach_enforced")
+    if not isinstance(enforced, bool):
+        errs.append("reach_enforced must be True or False")
+        enforced = True
+    elif not enforced and not _ONE_LINE_RE.fullmatch(str(spec.get("reach_reason") or "")):
+        errs.append("reach_enforced: False needs a one-line reach_reason")
+    elif enforced and "reach_reason" in spec:
+        errs.append("reach_reason declared on an enforced reach")
+    errs += _validate_reach(spec["reach"], boxes, enforced)
     secrets = spec["secrets"]
     if not isinstance(secrets, (list, tuple)):
         errs.append("secrets must be a list")
@@ -442,16 +482,39 @@ def _render_project_step(spec):
         clone = ("if [ -d %s/.git ]; then echo \"  checkout exists — skipping "
                  "clone\"; else GIT_TERMINAL_PROMPT=0 git clone %s %s; fi"
                  % (dest, shlex.quote(url), dest))
-        out += ("\n# 12. Project checkout (idempotent, as the account) — #1184\n"
+        out += ("\n# 9. Project checkout (idempotent, as the account) — #1184\n"
                 "runuser -l \"$ACCOUNT\" -c %s\n" % shlex.quote(clone))
     if spec.get("tmux_session"):
         sess = spec["tmux_session"]
         start = "$HOME/" + spec["project_dir"] if spec.get("project_dir") else "$HOME"
         tmux = ("tmux has-session -t =%s 2>/dev/null || "
                 "tmux new-session -d -s %s -c %s" % (sess, sess, start))
-        out += ("\n# 13. Project tmux session (idempotent, as the account) — #1184\n"
+        out += ("\n# 10. Project tmux session (idempotent, as the account) — #1184\n"
                 "runuser -l \"$ACCOUNT\" -c %s\n" % shlex.quote(tmux))
     return out
+
+
+# Steps 4-7 (rendered AFTER the 3a-3d boundary): ssh dir, authorized_keys (an
+# atomic write), and the .claude / devel dirs.
+_KEYS_TEMPLATE = """\
+        # 4. SSH directory
+        install -d -m 0700 -o "$ACCOUNT" -g "$ACCOUNT" "/home/$ACCOUNT/.ssh"
+
+        # 5. authorized_keys (atomic write)
+        AK_TEMP=$(mktemp "/home/$ACCOUNT/.ssh/authorized_keys.XXXXXX")
+        cat > "$AK_TEMP" << 'AUTHORIZED_KEYS_EOF'
+        {ak_content}AUTHORIZED_KEYS_EOF
+        chmod 0600 "$AK_TEMP"
+        chown "$ACCOUNT":"$ACCOUNT" "$AK_TEMP"
+        mv "$AK_TEMP" "/home/$ACCOUNT/.ssh/authorized_keys"
+        echo "  authorized_keys: $(wc -l < /home/$ACCOUNT/.ssh/authorized_keys) lines"
+
+        # 6. Create .claude directory for airuleset markers
+        install -d -m 0755 -o "$ACCOUNT" -g "$ACCOUNT" "/home/$ACCOUNT/.claude"
+
+        # 7. Create devel directory for the repo clone
+        install -d -m 0755 -o "$ACCOUNT" -g "$ACCOUNT" "/home/$ACCOUNT/devel"
+"""
 
 
 def render_root_bootstrap(account):
@@ -484,7 +547,11 @@ def render_root_bootstrap(account):
         if id "$ACCOUNT" &>/dev/null; then
             echo "  user $ACCOUNT already exists — skipping useradd"
         else
-            useradd -m -s /bin/bash -U "$ACCOUNT"
+            if getent group "$ACCOUNT" >/dev/null; then
+                useradd -m -s /bin/bash -g "$ACCOUNT" "$ACCOUNT"
+            else
+                useradd -m -s /bin/bash -U "$ACCOUNT"
+            fi
             CREATED=1
             echo "  created user $ACCOUNT"
         fi
@@ -499,39 +566,28 @@ def render_root_bootstrap(account):
         loginctl enable-linger "$ACCOUNT"
         echo "  linger: $(loginctl show-user "$ACCOUNT" -p Linger --value 2>/dev/null || echo 'enabled')"
 
-        # 4. SSH directory
-        install -d -m 0700 -o "$ACCOUNT" -g "$ACCOUNT" "/home/$ACCOUNT/.ssh"
-
-        # 5. authorized_keys (atomic write)
-        AK_TEMP=$(mktemp "/home/$ACCOUNT/.ssh/authorized_keys.XXXXXX")
-        cat > "$AK_TEMP" << 'AUTHORIZED_KEYS_EOF'
-        {ak_content}AUTHORIZED_KEYS_EOF
-        chmod 0600 "$AK_TEMP"
-        chown "$ACCOUNT":"$ACCOUNT" "$AK_TEMP"
-        mv "$AK_TEMP" "/home/$ACCOUNT/.ssh/authorized_keys"
-        echo "  authorized_keys: $(wc -l < /home/$ACCOUNT/.ssh/authorized_keys) lines"
-
-        # 6. Create .claude directory for airuleset markers
-        install -d -m 0755 -o "$ACCOUNT" -g "$ACCOUNT" "/home/$ACCOUNT/.claude"
-
-        # 7. Create devel directory for the repo clone
-        install -d -m 0755 -o "$ACCOUNT" -g "$ACCOUNT" "/home/$ACCOUNT/devel"
-    """).format(account=account, ak_content=ak_content, host=host,
+    """).format(account=account, host=host,
                 marker=hardening.render_account_marker_step().strip("\n"),
                 sudo="yes" if spec["sudo"] else "no",
                 reach=",".join(spec["reach"]) or "none",
                 secrets=",".join(spec["secrets"]) or "none")
 
-    # 8. System packages — only when the account declares them (#973)
-    script += _render_system_packages_step(packages)
-    # 9 the declared sudo policy, 10 the declared reach, 11 the su/polkit
-    # lockout (#1184, cli_account_hardening) — all BEFORE 12-13 give the
-    # account a checkout + a live tmux shell, so it is never unbounded.
+    # 3a-3d: the privilege boundary (#1184, cli_account_hardening) lands
+    # BEFORE step 5 installs any key, so a failed step never leaves a
+    # loginable, unbounded account.
     script += hardening.render_sudo_step(account, spec)
     boxes = fleet_boxes()
     reach_ips = sorted({boxes[t.rpartition("@")[2]] for t in spec["reach"]})
-    script += hardening.render_reach_step(account, reach_ips)
+    script += hardening.render_reach_step(account, reach_ips,
+                                          enforced=spec["reach_enforced"],
+                                          reason=spec.get("reach_reason", ""))
     script += hardening.render_lockout_step()
+    script += hardening.render_isolation_check_step()
+    # 4-7: keys + dirs (4 space-indented template → dedent)
+    script += "\n" + textwrap.dedent(_KEYS_TEMPLATE).format(ak_content=ak_content)
+    # 8. System packages — only when the account declares them (#973)
+    script += _render_system_packages_step(packages)
+    # 9-10: the project checkout + its tmux session (#1184)
     script += _render_project_step(spec)
 
     # Read-back section

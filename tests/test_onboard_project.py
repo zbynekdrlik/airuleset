@@ -19,6 +19,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # tests/ helpers (#1184)
 
 import cli_onboard as ob
 from _onboard_gate_open import setUpModule, tearDownModule  # noqa: E402,F401  (#1184)
