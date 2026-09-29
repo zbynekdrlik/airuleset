@@ -196,5 +196,23 @@ class TestVaultRequest(_Harness):
         self.assertIn("záloha", lines[1])
 
 
+
+class TestNoPublicLaneKeepsLoopback(unittest.TestCase):
+    """No public lane and no tailscale (a CI runner, a bare box): the pre-#1189
+    private path printed the loopback URL; #1189's fallback filter must not
+    turn that into ZERO URLs (main CI e9954d17: test_vault_channel
+    `test_a_real_request_prints_at_least_one_url`)."""
+
+    def test_loopback_only_box_still_prints_its_url(self):
+        import cli_vault_delivery
+        out, err = io.StringIO(), io.StringIO()
+        channel = cli_vault_delivery.emit_urls(
+            "secret", None, "TOK", ["127.0.0.1"],
+            lambda ip: "http://%s:8830/TOK/   [loopback]" % ip,
+            lambda ip: True, out=out, err=err)
+        self.assertEqual(channel, "private")
+        self.assertIn("http://127.0.0.1:8830/TOK/", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()
