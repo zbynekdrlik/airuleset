@@ -10,5 +10,6 @@ As part of THIS ticket, plan the migration unless the ticket says otherwise:
    - add its `<acct>@<box>` `REMOTE_HOSTS` entry;
    - flip the registry row's `account`;
    - lower `cli_accounts.LEGACY_CEILING` by one.
+4. Carry the Claude conversation over (#1190). After no claude runs in the old checkout any more, run `airuleset.py accounts transfer-session <acct> --from-dir <old checkout>` on the host. The dry run lists what moves. Then run it with `--render | sudo bash`. Resume with the printed `claude --resume <uuid>` in the account's tab.
 
 Never add a new project, a new credential or new access to `newlevel`. `airuleset.py accounts status` lists what is still legacy.

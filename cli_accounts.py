@@ -21,7 +21,10 @@ This leaf owns the three mechanical halves of that policy:
   * ``legacy_inventory`` + ``LEGACY_CEILING`` — every registry row not in a
     declared project account, locked DOWN-ONLY by
     tests/test_project_accounts_1184.py;
-  * ``cmd_accounts`` — ``airuleset.py accounts status [--json]``.
+  * ``cmd_accounts`` — ``airuleset.py accounts status [--json]``;
+  * ``transfer_session`` — ``accounts transfer-session <acct> --from-dir <old
+    checkout> [--render | --apply]`` (#1190): the migration step that carries
+    the Claude conversation into the account (``cli_account_session``).
 
 Stdlib only; ``cli_account_bootstrap`` / ``cli_account_policy`` /
 ``cli_onboard_exec`` / ``cli_onboard`` are imported lazily inside functions (no
@@ -31,6 +34,7 @@ import json
 import os
 import pwd
 import re
+import subprocess
 import sys
 
 # The freeze day (owner ROZHODNUTÉ 2026-09-29). No legacy row may be onboarded
@@ -191,12 +195,76 @@ def _status(registry_path=None):
             "project_accounts": _project_accounts()}
 
 
+def transfer_session(account, from_dir, *, from_home=None, render=False,
+                     apply=False, target_home=None, target_cwd=None,
+                     proc_root="/proc", stage_base="/tmp"):
+    """#1190: copy the Claude conversation of the old checkout ``from_dir`` into
+    the declared project account. Default = dry run (the listing); ``render``
+    prints the root script; ``apply`` runs it and needs root. The target is
+    the declaration's ``/home/<acct>/<project_dir>`` (tests pass fake roots)."""
+    import cli_account_session as session
+    declared = _declared_accounts()
+    if account not in declared:
+        print("transfer-session: %r is not a declared project account (#1184 "
+              "SERVICE_ACCOUNTS)" % (account,), file=sys.stderr)
+        return 1
+    import cli_account_bootstrap as bootstrap
+    project_dir = bootstrap.account_spec(account).get("project_dir")
+    if not project_dir:
+        print("transfer-session: %r declares no project_dir" % account,
+              file=sys.stderr)
+        return 1
+    target_home = target_home or "/home/%s" % account
+    target_cwd = target_cwd or "%s/%s" % (target_home, project_dir)
+    from_home = from_home or session.default_from_home(from_dir or "")
+    if not from_home:
+        print("transfer-session: cannot tell whose home %r is — pass --from-home"
+              % (from_dir,), file=sys.stderr)
+        return 1
+    try:
+        plan = session.build_plan(account, from_dir, from_home=from_home,
+                                  target_home=target_home, target_cwd=target_cwd,
+                                  proc_root=proc_root, stage_base=stage_base)
+    except ValueError as e:
+        print("transfer-session: %s" % e, file=sys.stderr)
+        return 1
+    if plan["refusals"]:
+        print(session.format_plan(plan))
+        for r in plan["refusals"]:
+            print("REFUSED: %s" % r, file=sys.stderr)
+        return 1
+    if render:
+        print(session.render_script(plan))
+        return 0
+    if apply:
+        if os.geteuid() != 0:
+            print("transfer-session --apply runs the root script: run it as root "
+                  "(sudo), or pipe --render into `sudo bash`", file=sys.stderr)
+            return 1
+        return subprocess.run(["bash", "-s"], input=session.render_script(plan),
+                              text=True, check=False).returncode
+    print(session.format_plan(plan))
+    return 0
+
+
 def cmd_accounts(args):
     """``airuleset.py accounts status [--json]`` — the project accounts (their
-    declaration) and the frozen legacy inventory with its count."""
+    declaration) and the frozen legacy inventory with its count;
+    ``accounts transfer-session <acct> --from-dir <dir>`` (#1190)."""
     action = getattr(args, "action", None) or "status"
+    if action == "transfer-session":
+        if not getattr(args, "account", None) or not getattr(args, "from_dir", None):
+            print("usage: airuleset.py accounts transfer-session <account> "
+                  "--from-dir <old checkout> [--from-home DIR] [--render | --apply]",
+                  file=sys.stderr)
+            return 2
+        return transfer_session(args.account, args.from_dir,
+                                from_home=getattr(args, "from_home", None),
+                                render=bool(getattr(args, "render", False)),
+                                apply=bool(getattr(args, "apply", False)))
     if action != "status":
-        print("usage: airuleset.py accounts status [--json]", file=sys.stderr)
+        print("usage: airuleset.py accounts status [--json] | transfer-session "
+              "<account> --from-dir <old checkout>", file=sys.stderr)
         return 2
     data = _status(getattr(args, "registry", None))
     if getattr(args, "json", False):
@@ -238,8 +306,23 @@ def register_parser(sub):
     p = sub.add_parser(
         "accounts",
         help="#1184: per-project accounts — `status` lists the declared project "
-             "accounts and the frozen legacy inventory + count")
-    p.add_argument("action", nargs="?", default="status", choices=["status"])
+             "accounts and the frozen legacy inventory + count; "
+             "`transfer-session` carries a Claude conversation into one (#1190)")
+    p.add_argument("action", nargs="?", default="status",
+                   choices=["status", "transfer-session"])
+    p.add_argument("account", nargs="?", default=None,
+                   help="transfer-session: the declared project account")
+    p.add_argument("--from-dir", dest="from_dir", default=None,
+                   help="transfer-session: the OLD checkout the session ran in")
+    p.add_argument("--from-home", dest="from_home", default=None,
+                   help="transfer-session: the old account's home (default: "
+                        "/home/<user> of --from-dir)")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--render", action="store_true",
+                      help="transfer-session: print the root script")
+    mode.add_argument("--apply", action="store_true",
+                      help="transfer-session: run the root script (as root); "
+                           "default is a dry run")
     p.add_argument("--json", action="store_true", help="machine-readable output")
     p.add_argument("--registry", default=None,
                    help="registry path (default: the repo's projects-registry.json)")
