@@ -272,6 +272,8 @@ def main():
         if not a.keep:
             subprocess.run(["tmux", "-S", sock, "kill-server"],
                            capture_output=True, timeout=10)
+            if os.path.exists(sock):        # tmux 3.x may leave the socket file
+                os.unlink(sock)
         shutil.rmtree(bindir, ignore_errors=True)
 
 
