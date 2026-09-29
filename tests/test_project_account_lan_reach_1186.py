@@ -112,6 +112,7 @@ class TestLanReachValidator(unittest.TestCase):
     def test_only_single_canonical_ipv4_hosts(self):
         # a range could silently include a password-shared box's LAN address
         for cidr in ("10.77.9.0/24", "10.0.0.0/8", "0.0.0.0/0", "10.77.9.60/30",
+                     "10.77.9.60/31", "10.77.9.61/31",
                      "10.77.9.61", "10.77.9.61/32 ", " 10.77.9.61/32",
                      "10.77.9.61/032", "fd7a:115c:a1e0::1/128", "::/0",
                      "10.77.9.61/32\n", "cam1.lan/32", "", None, 42):
@@ -271,6 +272,15 @@ class TestCommandScopedSudo(unittest.TestCase):
             errs = bootstrap.validate_account("projx", self._spec(sudo_commands=[bad]))
             self.assertTrue(any("sudo_commands" in e for e in errs), (bad, errs))
 
+    def test_a_path_of_a_longer_named_account_is_refused(self):
+        # review 2: `projx` must never grant a declared `projx-box`'s script
+        spec = self._spec(sudo_commands=["/usr/local/sbin/projx-box-upgrade"])
+        with mock.patch.dict(bootstrap.SERVICE_ACCOUNTS, {"projx-box": {}}):
+            errs = bootstrap.validate_account("projx", spec)
+        self.assertTrue(any("projx-box" in e and "sudo_commands" in e
+                            for e in errs), errs)
+        self.assertEqual(bootstrap.validate_account("projx", spec), [])
+
     def test_duplicate_paths_are_refused(self):
         errs = bootstrap.validate_account("projx", self._spec(
             sudo_commands=[self.CMDS[0], self.CMDS[0]]))
@@ -407,8 +417,8 @@ class TestCommandScopedSudo(unittest.TestCase):
 CAMERA_BOX_HOSTS = {
     # cam1-7 (ticket), dantesync on every camera
     **{"10.77.9.%d" % (60 + n): {22, 8898} for n in range(1, 8)},
-    "10.77.9.202": {22, 4455, 8898},   # strih-lx (obs-fleet.sh)
-    "10.77.9.204": {22, 4455, 8898},   # stream OBS (obs-fleet.sh)
+    "10.77.9.202": {22, 4455, 8898, 8899},   # strih-lx (obs-fleet.sh)
+    "10.77.9.204": {22, 4455, 8898, 8899},   # stream OBS (obs-fleet.sh)
     "10.77.7.232": {22, 8898},         # mbc (dantesync-fleet.sh)
     "10.77.7.30": {22, 8898},          # fohabl (dantesync-fleet.sh)
     "10.77.8.1": {22},                 # MikroTik RB4011 (netcfg facet)
@@ -494,7 +504,8 @@ class TestAccountsStatusShowsReachAndSudo(unittest.TestCase):
         out = self._run(False)
         self.assertRegex(out, r"camera-box\s+host=dev1\s+sudo=commands")
         self.assertIn("10.77.9.61/32 tcp 22,8898", out)
-        self.assertIn("10.77.9.202/32 tcp 22,4455,8898 (only 22 enforced)", out)
+        self.assertIn("10.77.9.202/32 tcp 22,4455,8898,8899 (only 22 enforced)",
+                      out)
         self.assertIn("10.77.8.1/32 tcp 22 — ", out)   # nothing to qualify
         for path in CAMERA_BOX_SUDO:
             self.assertIn("sudo " + path, out)
