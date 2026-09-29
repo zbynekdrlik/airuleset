@@ -155,3 +155,23 @@ def graphql_reading_authoritative(status):
     authoritative (a manually-built status keeps the pre-#1052 behaviour)."""
     block = (status or {}).get("resources", {}).get("graphql") or {}
     return bool(block.get("object_seen", True))
+
+
+def cached_object_remaining(status, now, max_age):
+    """#1188: the graphql ``remaining`` of a CACHED status (``cli_gh_rate``'s
+    ``status.json``, kept warm by the watchdog's per-sweep read) when that
+    reading came from the authoritative GraphQL object and is at most
+    ``max_age`` seconds old; else None. Zero gh calls — for a cosmetic
+    consumer (the footer refresh floor) that must not trust the REST bucket,
+    which does not see GraphQL-endpoint spend (live 2026-09-29: REST used 18,
+    object used 777, same identity, same minute)."""
+    try:
+        fetched = float((status or {}).get("fetched_at"))
+        block = status["resources"]["graphql"]
+        if block.get("source") != "graphql-object":
+            return None
+        if not 0 <= now - fetched <= max_age:
+            return None
+        return int(block["remaining"])
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
