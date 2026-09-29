@@ -17,8 +17,9 @@ account (#1184 review 2):
     route, incl. a root-equivalent group), ONE scoped, ``NOEXEC``,
     ``visudo``-checked ``/etc/sudoers.d/<acct>`` rule over root-owned binaries
     (``sudo: True``), or (#1186, ``sudo: "commands"``) ONE rule naming exactly
-    the declared ``/usr/local/sbin/<acct>-*`` project scripts, each proven
-    root-owned and not writable by the account (``render_sudo_path_checks``);
+    the declared ``/usr/local/sbin/<acct>-*`` project scripts with no
+    arguments, each proven root-owned and not writable by the account
+    (``render_sudo_path_checks``);
   * ``render_reach_step`` — the declared ``reach`` as an nftables egress rule
     keyed on the account's uid: new outbound ssh (tcp/22, loopback included)
     is rejected except to the declared boxes and (#1186) the declared private
@@ -34,7 +35,12 @@ account (#1184 review 2):
 
 What this does NOT close (honest residual, a follow-up in the lane return):
 non-ssh traffic from the uid (https for the repo and the Claude API) and any
-password-authenticated NON-22 service on loopback or the tailnet.
+password-authenticated NON-22 service on loopback or the tailnet. #1186 adds
+two: a declared LAN host's non-22 ports are declared, not restricted (the
+reject is tcp/22 only); and a declared LAN host the account can log into is a
+possible HOP — from there, ssh to a password-shared box's LAN address is
+outside this uid's rule, so an account's LAN credentials must never also open
+the shared legacy account (checked at migration, not here).
 
 Pure string renderers (stdlib only). ``cli_account_bootstrap`` validates every
 interpolated value before calling them.
@@ -85,8 +91,8 @@ def sudo_command_problem(cmd):
 
 # #1186: a command-scoped sudo rule names ONLY a project script the migration
 # installs root-owned under this dir, prefixed with the account name, so a
-# generic system tool (systemctl, apt, docker) can never be granted path-wide
-# (a path-only sudoers entry allows ANY arguments).
+# generic system tool (systemctl, apt, docker) can never be granted; the rule
+# then allows each script with NO arguments (`""`).
 SUDO_SCRIPT_DIR = "/usr/local/sbin"
 
 
@@ -187,7 +193,8 @@ def render_sudo_step(account, spec):
     group/other-writable binaries, ``visudo -cf``-checked in a dot-prefixed
     temp file (sudo's includedir ignores it; removed on a failed check).
     ``sudo: "commands"`` (#1186) writes ONE ``NOPASSWD:`` rule naming exactly
-    the declared project script paths, after ``render_sudo_path_checks``."""
+    the declared project script paths, each with NO arguments (``""``), after
+    ``render_sudo_path_checks``."""
     groups = "|".join('*" %s "*' % g for g in PRIVILEGED_GROUPS)
     out = textwrap.dedent("""\
 
@@ -218,7 +225,10 @@ def render_sudo_step(account, spec):
         # script must run its child commands), so each path is proven
         # root-owned and account-unwritable before the rule lands.
         paths = list(spec["sudo_commands"])
-        rule = "%s ALL=(root) NOPASSWD: %s" % (account, ", ".join(paths))
+        # `""` = the command may run with NO arguments (sudoers(5)), so a
+        # script's argument parsing is never root attack surface.
+        rule = "%s ALL=(root) NOPASSWD: %s" % (
+            account, ", ".join('%s ""' % p for p in paths))
         header = "# airuleset:managed — project account %s (#1184/#1186): %s" % (
             account, spec["sudo_reason"].strip())
         return out + (
@@ -271,8 +281,15 @@ def render_reach_self_address_check(lan_ips):
 
 def _lan_accept_rules(account, lan_rules):
     """One commented nft accept per declared LAN host: exactly that address
-    (a /32 — the validator allows nothing wider) on exactly its ports."""
-    out = ""
+    (a /32 — the validator allows nothing wider) on exactly its ports. They
+    are preceded by a kernel-side reject of ssh to ANY address of this host
+    (``fib daddr type local``): the render-time own-address check sees the
+    addresses of the bootstrap moment only, while this rule holds on every
+    re-apply even after a LAN address drifts onto a declared /32."""
+    if not lan_rules:
+        return ""
+    out = ('\t\tmeta skuid "%s" fib daddr type local tcp dport 22 reject with '
+           "tcp reset\n" % account)
     for ip, ports, why in lan_rules:
         out += ("\t\t# %s\n\t\tmeta skuid \"%s\" ip daddr %s tcp dport { %s } "
                 "accept\n" % (why, account, ip, ", ".join(str(p) for p in ports)))

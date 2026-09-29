@@ -56,12 +56,12 @@ _PACKAGE_NAME_RE = re.compile(r"[a-z0-9][a-z0-9.+\-]+")
 # `$` anchor would accept a trailing newline and split an authorized_keys or
 # sudoers line).
 _ACCOUNT_RE = re.compile(r"[a-z_][a-z0-9_-]{1,31}")
-_TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+_TOKEN_RE = policy.TOKEN_RE
 _SESSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")   # tmux rewrites '.'
 _REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _REL_DIR_RE = re.compile(r"(?!/)(?!.*(^|/)\.\.(/|$))[A-Za-z0-9_./-]+")
 # (a scoped sudo command is checked by cli_account_hardening.sudo_command_problem)
-_ONE_LINE_RE = re.compile(r"[^\n\r]+")
+_ONE_LINE_RE = policy.ONE_LINE_RE
 # (sudo + reach entries — incl. the #1186 LAN hosts — are cli_account_policy's)
 _is_ip = policy.is_ip
 
@@ -152,7 +152,10 @@ SERVICE_ACCOUNTS = {
     # the rig inventory read from the camera-box repo itself (obs-fleet.sh,
     # dantesync-fleet.sh, the netcfg facet) — every host ONE private /32 with
     # its reason; ssh (22) is what the reject enforces, OBS WebSocket (4455) and
-    # dantesync (8898) are declared with it. Its sudo is exactly two root-owned
+    # dantesync (8898) are declared with it. resolume is NOT declared: its only
+    # address is a drifting DHCP lease (resolume.lan, today 10.77.9.201, which
+    # obs-fleet.sh records colliding with `bridge`) — an allowlist entry needs a
+    # stable address (a DHCP reservation) first. Its sudo is exactly two root-owned
     # dev1 installer scripts the live migration installs (main ROZHODNUTÉ
     # 2026-09-29: a narrow rule, never an admin account); webterm is the owner.
     "camera-box": {
@@ -172,9 +175,6 @@ SERVICE_ACCOUNTS = {
              "reason": "strih-lx, production strih + fleet NTP master (obs-fleet.sh)"},
             {"cidr": "10.77.9.204/32", "ports": [22, 4455, 8898],
              "reason": "stream OBS box, Windows (obs-fleet.sh)"},
-            {"cidr": "10.77.9.201/32", "ports": [22, 4455, 8898],
-             "reason": "resolume.lan OBS box, current DHCP lease (obs-fleet.sh); "
-                       "re-declare if the lease moves"},
             {"cidr": "10.77.7.232/32", "ports": [22, 8898],
              "reason": "mbc, Master Broadcast Console, audio VLAN (dantesync-fleet.sh)"},
             {"cidr": "10.77.7.30/32", "ports": [22, 8898],

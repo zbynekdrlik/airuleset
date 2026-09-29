@@ -11,10 +11,12 @@ validated here, fail-closed, before anything is rendered into a root script:
     never a shared/control account, never a password-shared box when enforced)
     or (#1186) a LAN host ``{"cidr": "<ipv4>/32", "ports": [..], "reason": ".."}``:
     ONE canonical private (RFC1918 / tailscale 100.64.0.0/10) host that is not
-    a fleet box, on explicit distinct ports, with a one-line reason. Only single
-    hosts: the venue LAN also carries the password-shared dev boxes, which the
-    fleet table knows only by tailscale IP, so a range could silently include
-    one.
+    a fleet box address, on explicit distinct ports, with a one-line reason.
+    Only single hosts: the venue LAN also carries the password-shared dev
+    boxes, which the fleet table knows only by tailscale IP, so a range could
+    silently include one. What a declared host's own login opens (a possible
+    hop to such a box) is the migration's check, stated in
+    ``cli_account_hardening``'s residual.
 
 Plus the small read helpers the renderer and ``accounts status`` share
 (``reach_parts`` / ``reach_summary`` / ``lan_label`` / ``lan_rules`` /
@@ -27,8 +29,9 @@ import re
 
 import cli_account_hardening as hardening
 
-_ONE_LINE_RE = re.compile(r"[^\n\r]+")
-_USER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")    # the `user@` of a box
+# Shared with cli_account_bootstrap (it aliases these; one definition each).
+ONE_LINE_RE = re.compile(r"[^\n\r]+")
+TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")    # names, `user@` of a box
 _LAN_KEYS = frozenset({"cidr", "ports", "reason"})
 _LAN_CIDR_RE = re.compile(r"\d{1,3}(\.\d{1,3}){3}/32")
 _PRIVATE_NETS = tuple(ipaddress.ip_network(n) for n in (
@@ -44,8 +47,10 @@ def _validate_sudo_commands(account, reason, cmds):
     """#1186 ``sudo: "commands"``: a one-line reason plus a non-empty list of
     distinct exact ``/usr/local/sbin/<account>-<name>`` script paths."""
     errs = []
-    if not isinstance(reason, str) or not _ONE_LINE_RE.fullmatch(reason.strip() or ""):
-        errs.append('sudo: "commands" needs a one-line sudo_reason')
+    if (not isinstance(reason, str) or not reason.strip()
+            or not _REASON_RE.fullmatch(reason)):
+        errs.append('sudo: "commands" needs a one-line sudo_reason (no '
+                    'control characters — it is a sudoers comment line)')
     if not isinstance(cmds, (list, tuple)) or not cmds:
         return errs + ['sudo: "commands" needs a non-empty sudo_commands list '
                        'of exact script paths']
@@ -75,7 +80,7 @@ def validate_sudo(spec, account):
             errs.append("sudo_reason/sudo_commands declared on a sudo: False "
                         "account — a grant never hides behind sudo: False")
         return errs
-    if not isinstance(reason, str) or not _ONE_LINE_RE.fullmatch(reason.strip() or ""):
+    if not isinstance(reason, str) or not ONE_LINE_RE.fullmatch(reason.strip() or ""):
         errs.append("sudo: True needs a one-line sudo_reason")
     if not isinstance(cmds, (list, tuple)) or not cmds:
         errs.append("sudo: True needs a non-empty scoped sudo_commands list")
@@ -167,7 +172,7 @@ def _validate_lan_entry(n, entry, boxes):
 def _validate_box_target(target, boxes, enforced, shared_accounts):
     """The problem with ONE ``[user@]box`` reach target, or None."""
     user, _, box = target.rpartition("@")
-    if box not in boxes or (user and not _USER_RE.fullmatch(user)):
+    if box not in boxes or (user and not TOKEN_RE.fullmatch(user)):
         return ("reach target %r is not a fleet box (known: %s)"
                 % (target, ", ".join(sorted(boxes))))
     if user in shared_accounts:
@@ -223,9 +228,12 @@ def reach_summary(spec):
 
 
 def lan_label(entry):
-    """``10.77.9.61/32 tcp 22,8898`` — one LAN reach entry, human-readable."""
-    return "%s tcp %s" % (entry["cidr"],
-                          ",".join(str(p) for p in sorted(entry["ports"])))
+    """``10.77.9.61/32 tcp 22,8898 (only 22 enforced)`` — one LAN reach entry,
+    human-readable; the suffix is honest that the uid reject covers tcp/22
+    only, so any other declared port is declared, not restricted."""
+    ports = sorted(entry["ports"])
+    note = " (only 22 enforced)" if ports != [22] else ""
+    return "%s tcp %s%s" % (entry["cidr"], ",".join(str(p) for p in ports), note)
 
 
 def lan_rules(lan):
