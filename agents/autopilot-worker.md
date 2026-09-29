@@ -62,8 +62,16 @@ Closing a foreign ticket yourself removes the hand-off event and bypasses the re
 exists to enforce. **A ticket that BOUND a client acceptance thread may be closed ONLY after the thread's
 closing note is posted** — record the binding `Acceptance-thread: <ref>` (or legacy `Discuss-thread: <channel-id>`) on the ticket when you
 open/first-post-into the thread, and before ANY close of a thread-bound ticket record
-`Acceptance-cited: msg <id>` (the closing note was posted — the LAST ticket of the thread) or
-`Acceptance-defer: <siblings #A #B still open>` (a non-last sibling); legacy `Discuss-closed:`/`Discuss-defer:` are also accepted.
+`Acceptance-cited:` with the ACCEPTANCE evidence on that same line — `msg <id>` (the client's
+message/reaction, an owner/client stage move's tracking message, or the auto-close note), `meeting
+<recording id>`/`nahrávka <recording id>` (a recorded call), or an owner ROZHODNUTÉ
+`issuecomment-<id>` (the hook verifies its author online), or a Discord message URL
+(`https://discord.com/channels/<g>/<c>/<m>`); a session-only confirmation, a stream-bot comment or a
+payment is never acceptance, nor is a stage a stream set (#1185) — once the closing
+note is posted (the LAST ticket of the thread), or
+`Acceptance-defer: <siblings #A #B still open>` (a non-last sibling); legacy `Discuss-closed:`/`Discuss-defer:` are also accepted;
+the `needs-acceptance` label also binds the ticket, even once removed (a task link alone does not); a
+`--reason "not planned"` close is never checked.
 `block-fork-no-merge-issue-close.sh`
 enforces this for EVERY authority (airuleset #627/#891), the obligation follows the ticket's current owner
 never the author, and you compose the note per `skills/odoo-client-messaging/handover-compose.md`.

@@ -50,6 +50,8 @@ OUTPUT PROTOCOL (stdout, one per line; the leading `OK` proves a clean analysis)
     HAS_PATCH_CLOSE=<0|1>    a `gh api ... PATCH` close form is present
     D_REPO_ARG=<owner/repo|> the first close segment's -R value, GLUED-TOLERANT (Discuss)
     D_NUMS=<space-sep|>      every clean top-level close number (Discuss gate)
+    D_NOTPLANNED=<space-sep|> the D_NUMS closed with `--reason "not planned"` (#1185:
+                             never acceptance-checked)
 """
 
 import os
@@ -160,6 +162,20 @@ def _is_patch_close(cmd):
     return bool(_PATCH_STATE_VISIBLE_RE.search(cmd)
                 or _PATCH_INPUT_RE.search(cmd)
                 or _PATCH_FIELD_FILE_RE.search(cmd))
+
+
+def _is_not_planned(args):
+    """#1185: this close segment carries `--reason`/`-r` "not planned"
+    (also `not_planned`/`not-planned`, and the glued `--reason=` form)."""
+    for i, t in enumerate(args):
+        val = None
+        if t in ("--reason", "-r") and i + 1 < len(args):
+            val = args[i + 1]
+        elif t.startswith(("--reason=", "-r=")):
+            val = t.split("=", 1)[1]
+        if val is not None and re.sub(r"[_-]", " ", val.strip().lower()) == "not planned":
+            return True
+    return False
 
 
 def _parse_gh_args(args):
@@ -335,6 +351,7 @@ def analyze(cmd):
     repo_flag_present = False
     d_repo_arg = ""
     d_nums = []
+    d_notplanned = []
     has_interp = False
     suspicious = False
     first_close_seen = False
@@ -385,6 +402,8 @@ def analyze(cmd):
                         num = m.group(1)
                 if num:
                     d_nums.append(num)
+                    if _is_not_planned(args):
+                        d_notplanned.append(num)
                 if not first_close_seen:
                     first_close_seen = True
                     issue_num = num
@@ -438,6 +457,7 @@ def analyze(cmd):
         "HAS_PATCH_CLOSE": "1" if has_patch else "0",
         "D_REPO_ARG": d_repo_arg,
         "D_NUMS": " ".join(d_nums),
+        "D_NOTPLANNED": " ".join(d_notplanned),
     }
 
 
@@ -454,7 +474,7 @@ def main():
         return
     out = ["OK"]
     for key in ("IS_CLOSE", "N_CLOSE", "ISSUE_NUM", "REPO_ARG", "REPO_FLAG_PRESENT",
-                "HAS_INTERP", "HAS_PATCH_CLOSE", "D_REPO_ARG", "D_NUMS"):
+                "HAS_INTERP", "HAS_PATCH_CLOSE", "D_REPO_ARG", "D_NUMS", "D_NOTPLANNED"):
         out.append("%s=%s" % (key, result[key]))
     sys.stdout.write("\n".join(out) + "\n")
 

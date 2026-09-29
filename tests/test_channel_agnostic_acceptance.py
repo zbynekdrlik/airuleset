@@ -117,7 +117,7 @@ class TestCloseGuardMarkerExactSet(TestCase):
         for name in self.EXPECTED_DISPOSITION_MARKERS:
             with self.subTest(name=name):
                 self.assertTrue(
-                    g.has_disposition(f"{name}: test-value"),
+                    g.has_disposition(f"{name}: msg 1731999"),
                     f"{name}: must be recognised as a disposition",
                 )
 

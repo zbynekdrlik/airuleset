@@ -17,6 +17,10 @@ it ALSO carries a disposition line:
     is DEFERRED to the LAST ticket because sibling tickets bound to the same
     thread are still open (the note goes once, at the last close, never N
     times).
+  * `Acceptance-cited: … msg <id>` / `Acceptance-defer: <reason>` (#891; the
+    cited value needs `msg <id>`, `meeting <recording id>` or an owner
+    `issuecomment-<id>` the hook verifies online, #1185).
+#1185 also binds a ticket with the `needs-acceptance` label.
 
 Target property (owner): the LAST message in the thread is ALWAYS from the
 sub-dev, written when the LAST ticket bound to the thread closes. WHO writes
@@ -67,9 +71,9 @@ gh-fetch error and an unextractable issue number (fall through = allow).
 
 INTERFACE. `evaluate_close(issue_json_text) -> None | str` — None ALLOWS the
 close, a short reason string BLOCKS it. `issue_json_text` is the raw output
-of `gh issue view <N> --json body,comments`. The CLI (`python3
-discuss_close_guard.py`, stdin → stdout) prints "OK" or "BLOCK", which the
-hook branches on. Stdlib only (this repo's convention).
+of `gh issue view <N> --json body,comments,labels`. The CLI (`python3
+discuss_close_guard.py`, stdin → stdout) prints "OK", "BLOCK" or (#1185)
+"BLOCK-CITED", which the hook branches on. Stdlib only (this repo's convention).
 """
 
 import json
@@ -105,6 +109,30 @@ _DEFER_RE = re.compile(_MARK_OPEN + r"Discuss-defer" + _MARK_TAIL)
 _ACC_THREAD_RE = re.compile(_MARK_OPEN + r"Acceptance-thread" + _MARK_TAIL)
 _ACC_CITED_RE = re.compile(_MARK_OPEN + r"Acceptance-cited" + _MARK_TAIL)
 _ACC_DEFER_RE = re.compile(_MARK_OPEN + r"Acceptance-defer" + _MARK_TAIL)
+
+# #1185 — a stage a STREAM set is never acceptance; acceptance is always an Odoo
+# `mail.message` (client msg/reaction, owner/client move, odoo-erp#8507 note),
+# so a cited value needs `msg <id>` (also `msg #N`, `message_id=N`, `mail.message
+# **N**`); a placeholder or a date (`msg 29.9.`) never counts.
+_ACC_CITED_VALUE_RE = re.compile(_MARK_OPEN + r"Acceptance-cited[ \t*]*:[ \t]*(\S[^\n]*)")
+# #1185 ROZHODNUTÉ (issuecomment-5894541407 + -5894862095): a recorded call counts
+# with its recording named (`meeting mdq-bvtq-aku`, the meet-code shape); an owner
+# ruling cited by its GitHub comment counts only once the HOOK has verified the
+# author online (`owner_refs` → CLI `OWNER-CHECK`); `needs-acceptance` binds.
+OWNER_LOGIN = "zbynekdrlik"  # == airuleset.MAINTAINER_GH_LOGIN (test-locked)
+# final ROZHODNUTÉ (issuecomment-5895570572): a Discord message URL is durable,
+# linkable evidence; a session-only confirmation / bot comment / payment is not.
+_DISCORD_REF_RE = re.compile(
+    r"(?<![\w./-])https://(?:discord|discordapp)\.com/channels/[0-9]+/[0-9]+/[0-9]+(?![\w/])")
+_MEETING_REF_RE = re.compile(
+    r"(?i)(?:\bmeeting|nahr[áa]vk[ay])[ \t:]+`?[a-z]{3}-[a-z]{4}-[a-z]{3}(?![\w-])")
+_OWNER_REF_RE = re.compile(
+    r"(?i)(?:github\.com/([\w.-]+/[\w.-]+)/(?:issues|pull)/[0-9]+)?#?"
+    r"\bissuecomment-([0-9]+)(?![\w-])")
+_MSG_REF_RE = re.compile(
+    r"(?i)(?<![\w.])(?:msgs?|messages?|mail[._]message)(?:[ \t]*_?ids?)?"
+    r"[ \t\u00a0*#:=.(-]*[0-9]+(?!\w|\.[0-9])"
+)
 
 # #695 — SECOND binding recognition: the `discuss.channel_<N>` deep-link token.
 # The manual `Discuss-thread:` mark is opt-in, and the exact stream that forgot
@@ -156,24 +184,52 @@ def is_thread_bound(text):
     )
 
 
+def is_acceptance_bound(data):
+    """#1185: thread-bound OR the `needs-acceptance` label (a task link alone
+    does not bind). Malformed `labels` fall back to the text signal."""
+    labels = data.get("labels")
+    names = [x.get("name") for x in labels if isinstance(x, dict)] if isinstance(labels, list) else []
+    return is_thread_bound(collect_text(data)) or "needs-acceptance" in names
+
+
+def has_cited_evidence(text):
+    """True iff SOME `Acceptance-cited:` line carries offline-checkable evidence
+    — `msg <id>`, `meeting <recording id>` or a Discord message URL (#1185)."""
+    return any(_MSG_REF_RE.search(v) or _MEETING_REF_RE.search(v) or _DISCORD_REF_RE.search(v)
+               for v in _ACC_CITED_VALUE_RE.findall(text))
+
+
+def owner_refs(issue_json_text):
+    """`<owner/repo|>:<comment id>` for every owner `issuecomment-<id>` on an
+    `Acceptance-cited:` line (repo empty = the closing ticket's repo)."""
+    data = json.loads(issue_json_text)
+    return [f"{m.group(1) or ''}:{m.group(2)}"
+            for v in _ACC_CITED_VALUE_RE.findall(collect_text(data))
+            for m in _OWNER_REF_RE.finditer(v)]
+
+
 def has_disposition(text):
     """True iff the ticket carries a disposition line with a real value —
     either the legacy `Discuss-closed:`/`Discuss-defer:` OR the
-    channel-agnostic `Acceptance-cited:`/`Acceptance-defer:` (#891)."""
+    channel-agnostic `Acceptance-defer:` (#891), each value-blind, OR an
+    `Acceptance-cited:` whose value carries evidence (#1185)."""
     return bool(
         _CLOSED_RE.search(text)
         or _DEFER_RE.search(text)
-        or _ACC_CITED_RE.search(text)
         or _ACC_DEFER_RE.search(text)
+        or has_cited_evidence(text)
     )
 
 
-def evaluate_close(issue_json_text):
+def evaluate_close(issue_json_text, force_bound=False):
     """Return None to ALLOW the close, or a short reason string to BLOCK it.
 
-    Blocks IFF the ticket is thread-bound AND carries no disposition. Every
-    unverifiable input (bad JSON, non-object payload) returns None (ALLOW) —
-    the gate's safe default."""
+    Blocks IFF the ticket is acceptance-bound AND has no disposition (reason
+    `acceptance-cited-without-msg` when only evidence-less citations exist;
+    `owner-check` when an owner `issuecomment-` must be verified online, #1185).
+    Every unverifiable input (bad JSON, non-object payload) returns None
+    (ALLOW) — the gate's safe default. `force_bound` = the hook found a
+    `needs-acceptance` `labeled` event in the issue history (#1185)."""
     try:
         data = json.loads(issue_json_text)
     except Exception:
@@ -181,20 +237,34 @@ def evaluate_close(issue_json_text):
     if not isinstance(data, dict):
         return None
     text = collect_text(data)
-    if is_thread_bound(text) and not has_disposition(text):
+    if (force_bound or is_acceptance_bound(data)) and not has_disposition(text):
+        if owner_refs(issue_json_text):
+            return "owner-check"
+        if _ACC_CITED_RE.search(text):
+            return "acceptance-cited-without-msg"
         return "thread-bound-no-closing-note"
     return None
 
 
-def main():
+def main(argv=()):
+    """`--bound`: the label history binds it; `--report-unbound`: print
+    UNBOUND for a parseable ticket that is not bound (the hook then reads the
+    label history). Default output (OK/BLOCK/...) is unchanged."""
     try:
         raw = sys.stdin.read()
-        reason = evaluate_close(raw)
+        reason = evaluate_close(raw, force_bound="--bound" in argv)
+        if (reason is None and "--report-unbound" in argv
+                and not is_acceptance_bound(json.loads(raw))):
+            print("UNBOUND")
+            return 0
+        if reason == "owner-check":
+            print(" ".join(["OWNER-CHECK", OWNER_LOGIN] + owner_refs(raw)))
+            return 0
     except Exception:
         reason = None
-    print("BLOCK" if reason else "OK")
+    print({None: "OK", "acceptance-cited-without-msg": "BLOCK-CITED"}.get(reason, "BLOCK"))
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

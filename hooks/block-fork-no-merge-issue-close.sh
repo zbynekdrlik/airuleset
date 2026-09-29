@@ -339,7 +339,7 @@ _SEG_OUT=$(python3 "$_SEG" <<< "$CMD" 2>/dev/null || true)
 # The first line is `OK` iff the analysis completed cleanly; anything else (a crash,
 # no output) → fail CLOSED, never a silent allow.
 IS_CLOSE=0; N_CLOSE=0; ISSUE_NUM=""; REPO_ARG=""; REPO_FLAG_PRESENT=0
-HAS_INTERP=0; HAS_PATCH_CLOSE=0; D_REPO_ARG=""; D_NUMS=""
+HAS_INTERP=0; HAS_PATCH_CLOSE=0; D_REPO_ARG=""; D_NUMS=""; D_NOTPLANNED=""
 _SEG_OK=0
 while IFS= read -r _line; do
     case "$_line" in
@@ -353,6 +353,7 @@ while IFS= read -r _line; do
         HAS_PATCH_CLOSE=*)   HAS_PATCH_CLOSE="${_line#HAS_PATCH_CLOSE=}" ;;
         D_REPO_ARG=*)        D_REPO_ARG="${_line#D_REPO_ARG=}" ;;
         D_NUMS=*)            D_NUMS="${_line#D_NUMS=}" ;;
+        D_NOTPLANNED=*)      D_NOTPLANNED="${_line#D_NOTPLANNED=}" ;;
     esac
 done <<< "$_SEG_OUT"
 
@@ -432,89 +433,12 @@ fi
 command -v python3 >/dev/null 2>&1 || _d_run_gate=0
 [ -f "$_DREPO/discuss_close_guard.py" ] || _d_run_gate=0
 
+[ -f "$_DHERE/lib-discuss-close-gate.sh" ] || _d_run_gate=0
 if [ "$_d_run_gate" = "1" ]; then
-    # #837: EVERY clean top-level `gh issue close <N>` number (D_NUMS) + the first
-    # close segment's -R (D_REPO_ARG, GLUED-tolerant — `-Rx` reads `x`), both from the
-    # segmenter, which reads each close segment's own tokens quote/backslash-aware (a
-    # `gh issue close N` mentioned inside a comment value is not a real close; a
-    # `-R x/y` inside a quoted argument is never the repo). A compound batch-close of
-    # one thread's sibling tickets has EACH target in D_NUMS.
-    _D_NUMS="$D_NUMS"
-    _D_REPO_ARG="$D_REPO_ARG"
-    if [ -n "$_D_NUMS" ]; then
-        # odoo-erp repo-scope (Odoo Discuss threads are an odoo-erp / client
-        # thing): a non-odoo-erp close never engages the gate, killing the
-        # cross-repo meta false-positive (e.g. this very airuleset ticket #627,
-        # whose prose names these markers). Resolve the repo from _D_REPO_ARG
-        # (this gate's OWN glued-tolerant -R extraction above), else the cwd git
-        # remote, via the shared #760 _repo_owner_repo_of helper, then take the
-        # BASENAME and compare case-insensitively.
-        _D_REPONAME=$(_repo_owner_repo_of "$_D_REPO_ARG")
-        _D_REPONAME="${_D_REPONAME##*/}"
-        if [ "${_D_REPONAME,,}" = "odoo-erp" ]; then
-            # Check EACH close target (numbers are pure digits — safe to word-split).
-            # Block on the FIRST bound-no-disposition target found.
-            _D_BLOCK_NUM=""
-            for _D_NUM in $_D_NUMS; do
-                _D_JSON=""
-                if [ -n "${AIRULESET_DISCUSS_CLOSE_FIXTURE:-}" ] && [ -f "${AIRULESET_DISCUSS_CLOSE_FIXTURE}" ]; then
-                    _D_JSON=$(cat "${AIRULESET_DISCUSS_CLOSE_FIXTURE}" 2>/dev/null || echo "")
-                elif [ -n "$_D_REPO_ARG" ]; then
-                    _D_JSON=$(gh issue view "$_D_NUM" -R "$_D_REPO_ARG" --json body,comments 2>/dev/null || echo "")
-                else
-                    _D_JSON=$(gh issue view "$_D_NUM" --json body,comments 2>/dev/null || echo "")
-                fi
-                if [ -n "$_D_JSON" ]; then
-                    _D_VERDICT=$(printf '%s' "$_D_JSON" | python3 "$_DREPO/discuss_close_guard.py" 2>/dev/null || echo "OK")
-                    if [ "$_D_VERDICT" = "BLOCK" ]; then
-                        _D_BLOCK_NUM="$_D_NUM"
-                        break
-                    fi
-                fi
-            done
-            if [ -n "$_D_BLOCK_NUM" ]; then
-                cat >&2 <<MSG
-
-🚫 BLOCKED: this ticket has a bound client acceptance thread
-(a Discuss-thread:/Acceptance-thread: line, or a discuss.channel_<N> deep URL
-on the ticket — the URL alone binds, #695) but carries no closing-note
-evidence — closing it now would leave the client thread with our message (or
-their question) as the LAST message, then silence (airuleset #627/#891).
-
-Whoever closes the ticket carries the obligation — it FOLLOWS THE TICKET to
-its current owner, never the author. Before this ticket is closed, post a
-closing note via the project's own client channel mechanism, then record the
-evidence on THIS ticket. Add ONE of:
-
-  • the closing note was posted (this is the LAST ticket bound to the thread):
-      gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: msg <message-id>"
-    (legacy: Discuss-closed: msg <message-id> also accepted)
-
-  • the thread STAYS OPEN because sibling tickets remain (the closing note goes
-    at the LAST close, not here — name the still-open siblings):
-      gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-defer: siblings #<A> #<B> still open"
-    (legacy: Discuss-defer: also accepted)
-
-Then re-run the close.
-
-Both paths:
-  • a sub-dev closing its own ticket: YOU post the note + record the line + close.
-  • the gatekeeper closing a branch-merge ticket after the release pipeline: the
-    OWNING stream posts the note + records Discuss-closed: at hand-off; the
-    gatekeeper's close then finds the evidence. The gatekeeper does NOT post to
-    the client thread — the stream that owns the thread does.
-
-How to compose + post the closing note (identity signature, owner approval,
-per project channel — odoo-erp: task chatter per .claude/rules/odoo-task-sync.md):
-skills/odoo-client-messaging/handover-compose.md.
-
-Bypass (rare, logged, ONLY a genuine non-client / meta ticket that merely names
-these markers in prose): put  airuleset:discuss-close-ok  in the close command.
-MSG
-                exit 2
-            fi
-        fi
-    fi
+    # #1185: the gate body (per-close guard run, owner-comment check, block
+    # texts) lives in the sourced lib; it `exit 2`s on a block.
+    # shellcheck source=lib-discuss-close-gate.sh
+    . "$_DHERE/lib-discuss-close-gate.sh"
 fi
 # ---- end #627 Discuss gate; fall through to the authority logic below ----
 
