@@ -14,11 +14,17 @@ account (#1184 review 2):
   * ``render_account_marker_step`` — root-only ownership marker, so a
     re-render can never rewrite a FOREIGN pre-existing account;
   * ``render_sudo_step`` — the declared sudo policy: none (fail LOUD on any
-    route, incl. a root-equivalent group) or ONE scoped, ``NOEXEC``,
-    ``visudo``-checked ``/etc/sudoers.d/<acct>`` rule over root-owned binaries;
+    route, incl. a root-equivalent group), ONE scoped, ``NOEXEC``,
+    ``visudo``-checked ``/etc/sudoers.d/<acct>`` rule over root-owned binaries
+    (``sudo: True``), or (#1186, ``sudo: "commands"``) ONE rule naming exactly
+    the declared ``/usr/local/sbin/<acct>-*`` project scripts, each proven
+    root-owned and not writable by the account (``render_sudo_path_checks``);
   * ``render_reach_step`` — the declared ``reach`` as an nftables egress rule
     keyed on the account's uid: new outbound ssh (tcp/22, loopback included)
-    is rejected except to the declared boxes; applied now, enabled, and
+    is rejected except to the declared boxes and (#1186) the declared private
+    LAN hosts, each accepted on exactly its declared ports BEFORE the reject;
+    a LAN host that is an address of the bootstrap host itself is refused
+    (``render_reach_self_address_check``); applied now, enabled, and
     re-applied whenever nftables.service restarts or reloads;
   * ``render_lockout_step`` — the account joins ``airuleset-project``, which
     ``pam_wheel`` (deny) and a polkit rule bar from ``su`` and polkit admin;
@@ -77,6 +83,79 @@ def sudo_command_problem(cmd):
     return None
 
 
+# #1186: a command-scoped sudo rule names ONLY a project script the migration
+# installs root-owned under this dir, prefixed with the account name, so a
+# generic system tool (systemctl, apt, docker) can never be granted path-wide
+# (a path-only sudoers entry allows ANY arguments).
+SUDO_SCRIPT_DIR = "/usr/local/sbin"
+
+
+def sudo_script_problem(account, path):
+    """None when ``path`` is an acceptable ``sudo: "commands"`` entry for
+    ``account`` (exactly ``/usr/local/sbin/<account>-<name>``: one lowercase
+    ``[a-z0-9._-]`` component, no argument, wildcard or sudoers metachar),
+    else why not."""
+    want = (re.escape(SUDO_SCRIPT_DIR + "/" + account + "-")
+            + r"[a-z0-9][a-z0-9._-]*")
+    if not re.fullmatch(want, path) or ".." in path:
+        return ("%r is not exactly %s/%s-<name> (one lowercase component, no "
+                "arguments or wildcards)" % (path, SUDO_SCRIPT_DIR, account))
+    return None
+
+
+def render_sudo_path_checks(paths):
+    """#1186: refuse a declared sudo command path that is missing, a symlink,
+    not an executable file, or on a path (the file and EVERY ancestor dir up
+    to ``/``) that is not root-owned, is group/other-writable, or is writable
+    by the account itself (ACLs included: asked AS the account via
+    ``runuser``). Fail-CLOSED: a ``runuser`` that cannot answer is a refusal,
+    never read as "not writable"."""
+    return (
+        "for P in %s; do\n"
+        '    if [ -L "$P" ]; then\n'
+        '        echo "ERROR: sudo command $P is a symlink — declare the real '
+        'root-owned path" >&2\n'
+        "        exit 1\n"
+        "    fi\n"
+        '    if [ ! -f "$P" ] || [ ! -x "$P" ]; then\n'
+        '        echo "ERROR: sudo command $P is missing or not an executable '
+        'file — install it root-owned first" >&2\n'
+        "        exit 1\n"
+        "    fi\n"
+        '    D="$P"\n'
+        "    while :; do\n"
+        '        case "$(stat -c \'%%U %%A\' "$D")" in\n'
+        '            "root "?????-??-?) ;;\n'
+        '            *) echo "ERROR: $D (sudo command $P) is not root-owned + '
+        'non-group/other-writable" >&2; exit 1 ;;\n'
+        "        esac\n"
+        '        W=$(runuser -u "$ACCOUNT" -- sh -c \'if [ -w "$1" ]; then '
+        'echo yes; else echo no; fi\' _ "$D" 2>/dev/null || true)\n'
+        '        case "$W" in\n'
+        "            no) ;;\n"
+        '            yes) echo "ERROR: $D (sudo command $P) is writable by '
+        '$ACCOUNT" >&2; exit 1 ;;\n'
+        '            *) echo "ERROR: cannot verify that $ACCOUNT cannot write '
+        '$D (sudo command $P) — refusing" >&2; exit 1 ;;\n'
+        "        esac\n"
+        '        [ "$D" = "/" ] && break\n'
+        '        D=$(dirname "$D")\n'
+        "    done\n"
+        "done\n" % " ".join(paths))
+
+
+# One visudo-checked /etc/sudoers.d/<acct> rule, written through a dot-prefixed
+# temp file (sudo's includedir ignores it; removed on a failed check).
+_SUDOERS_INSTALL = (
+    'SUDOERS_TMP=$(mktemp /etc/sudoers.d/.airuleset-"$ACCOUNT".XXXXXX)\n'
+    "cat > \"$SUDOERS_TMP\" << 'SUDOERS_EOF'\n"
+    "%s\n%s\nSUDOERS_EOF\n"
+    'chmod 0440 "$SUDOERS_TMP"\n'
+    'if ! visudo -cf "$SUDOERS_TMP"; then rm -f "$SUDOERS_TMP"; exit 1; fi\n'
+    'mv "$SUDOERS_TMP" "/etc/sudoers.d/$ACCOUNT"\n'
+    'echo "  sudo: scoped rule installed in /etc/sudoers.d/$ACCOUNT"\n')
+
+
 def render_account_marker_step():
     """Refuse to touch a PRE-EXISTING account that airuleset never created (a
     stream / webterm-only / owner account whose authorized_keys a later step
@@ -106,7 +185,9 @@ def render_sudo_step(account, spec):
     silent delete. ``sudo: True`` writes ONE scoped ``NOPASSWD:NOEXEC`` rule
     (NOEXEC blocks a pager/editor shell escape) over root-owned, not
     group/other-writable binaries, ``visudo -cf``-checked in a dot-prefixed
-    temp file (sudo's includedir ignores it; removed on a failed check)."""
+    temp file (sudo's includedir ignores it; removed on a failed check).
+    ``sudo: "commands"`` (#1186) writes ONE ``NOPASSWD:`` rule naming exactly
+    the declared project script paths, after ``render_sudo_path_checks``."""
     groups = "|".join('*" %s "*' % g for g in PRIVILEGED_GROUPS)
     out = textwrap.dedent("""\
 
@@ -132,6 +213,18 @@ def render_sudo_step(account, spec):
             esac
             echo "  sudo: none (declared sudo: NO)"
         """)
+    if spec["sudo"] == "commands":
+        # #1186: exactly the declared project scripts. NOT NOEXEC (an installer
+        # script must run its child commands), so each path is proven
+        # root-owned and account-unwritable before the rule lands.
+        paths = list(spec["sudo_commands"])
+        rule = "%s ALL=(root) NOPASSWD: %s" % (account, ", ".join(paths))
+        header = "# airuleset:managed — project account %s (#1184/#1186): %s" % (
+            account, spec["sudo_reason"].strip())
+        return out + (
+            "# declared COMMAND-SCOPED sudo (#1186) — exactly these root-owned "
+            "project scripts, one visudo-checked rule\n"
+            + render_sudo_path_checks(paths) + _SUDOERS_INSTALL % (header, rule))
     binaries = sorted({c.split(" ")[0] for c in spec["sudo_commands"]})
     rule = "%s ALL=(root) NOPASSWD:NOEXEC: %s" % (
         account, ", ".join(spec["sudo_commands"]))
@@ -144,22 +237,50 @@ def render_sudo_step(account, spec):
         '        "root "?????-??-?) ;;\n'
         '        *) echo "ERROR: $BIN is not root-owned + non-group/other-writable" >&2; exit 1 ;;\n'
         "    esac\n"
-        "done\n"
-        'SUDOERS_TMP=$(mktemp /etc/sudoers.d/.airuleset-"$ACCOUNT".XXXXXX)\n'
-        "cat > \"$SUDOERS_TMP\" << 'SUDOERS_EOF'\n"
-        "%s\n%s\nSUDOERS_EOF\n"
-        'chmod 0440 "$SUDOERS_TMP"\n'
-        'if ! visudo -cf "$SUDOERS_TMP"; then rm -f "$SUDOERS_TMP"; exit 1; fi\n'
-        'mv "$SUDOERS_TMP" "/etc/sudoers.d/$ACCOUNT"\n'
-        'echo "  sudo: scoped rule installed in /etc/sudoers.d/$ACCOUNT"\n'
-        % (" ".join(binaries), header, rule))
+        "done\n" % " ".join(binaries)) + _SUDOERS_INSTALL % (header, rule)
 
 
 def nft_table_name(account):
     return "airuleset_reach_" + account.replace("-", "_")
 
 
-def render_reach_step(account, reach_ips, enforced=True, reason=""):
+def render_reach_self_address_check(lan_ips):
+    """#1186: a declared LAN host must never be an address of the bootstrap
+    host ITSELF. Its shared legacy account (``newlevel``, weak shared
+    password) is reachable over ssh on every one of its own addresses, and the
+    fleet table knows it only by its tailscale IP, so the validator cannot
+    catch its LAN address; this render-time check can."""
+    return (
+        "# the declared LAN hosts must never be an address of THIS host (#1186)\n"
+        "if ! command -v ip >/dev/null; then\n"
+        '    echo "ERROR: ip not found — cannot check the declared LAN reach of '
+        '$ACCOUNT against this host\'s own addresses" >&2\n'
+        "    exit 1\n"
+        "fi\n"
+        "LOCAL_IPS=\" $(ip -4 -o addr show | awk '{split($4, a, \"/\"); "
+        "printf \"%%s \", a[1]}') \"\n"
+        "for IP in %s; do\n"
+        '    case "$LOCAL_IPS" in\n'
+        '        *" $IP "*)\n'
+        '            echo "ERROR: declared reach $IP is an address of this host '
+        '— an ssh route to it reopens the shared-account escape" >&2\n'
+        "            exit 1 ;;\n"
+        "    esac\n"
+        "done\n" % " ".join(lan_ips))
+
+
+def _lan_accept_rules(account, lan_rules):
+    """One commented nft accept per declared LAN host: exactly that address
+    (a /32 — the validator allows nothing wider) on exactly its ports."""
+    out = ""
+    for ip, ports, why in lan_rules:
+        out += ("\t\t# %s\n\t\tmeta skuid \"%s\" ip daddr %s tcp dport { %s } "
+                "accept\n" % (why, account, ip, ", ".join(str(p) for p in ports)))
+    return out
+
+
+def render_reach_step(account, reach_ips, enforced=True, reason="",
+                      lan_rules=()):
     """Step 3b: the DECLARED reach, enforced for the account's uid by nftables:
     a NEW outbound tcp/22 connection (loopback included) is rejected unless it
     goes to a declared box (``reach_ips``); INBOUND sessions (the webterm tabs)
@@ -170,7 +291,14 @@ def render_reach_step(account, reach_ips, enforced=True, reason=""):
     whenever nftables.service restarts (PartOf) or reloads
     (ReloadPropagatedFrom) — both flush the ruleset. An account whose reach is
     declared ``reach_enforced: False`` (a pre-#1184 service account whose
-    fleet-wide ssh is its job) gets NO rule and the stated reason instead."""
+    fleet-wide ssh is its job) gets NO rule and the stated reason instead.
+
+    #1186 ``lan_rules`` — ``(ip, ports, reason)`` per declared private LAN
+    host — each become ONE commented accept for exactly that address on
+    exactly its ports, rendered after the fleet accepts and BEFORE the reject
+    (which stays tcp/22 only: a non-22 port is declared, not restricted — the
+    honest residual in the module docstring), and the render refuses a LAN
+    host that is one of this host's own addresses."""
     if not enforced:
         return ("\n# 3b. Declared reach (#1184) — NOT enforced for this account: "
                 "%s\necho \"  reach: NOT enforced (declared reach_enforced: False)\"\n"
@@ -185,6 +313,9 @@ def render_reach_step(account, reach_ips, enforced=True, reason=""):
     if v6:
         allow += ('\t\tmeta skuid "%s" tcp dport 22 ip6 daddr { %s } accept\n'
                   % (account, ", ".join(v6)))
+    allow += _lan_accept_rules(account, lan_rules)
+    lan_ips = [ip for ip, _ports, _why in lan_rules]
+    self_check = render_reach_self_address_check(lan_ips) if lan_ips else ""
     ruleset = (
         "table inet {t}\n"
         "delete table inet {t}\n"
@@ -204,6 +335,7 @@ def render_reach_step(account, reach_ips, enforced=True, reason=""):
         '$ACCOUNT (install the nftables package)" >&2\n'
         '    exit 1\n'
         'fi\n'
+        '%s'
         'REACH_NFT="/etc/airuleset/reach-$ACCOUNT.nft"\n'
         "cat > \"$REACH_NFT\" << 'REACH_EOF'\n"
         "%sREACH_EOF\n"
@@ -231,7 +363,8 @@ def render_reach_step(account, reach_ips, enforced=True, reason=""):
         'systemctl restart "airuleset-reach-$ACCOUNT.service"\n'
         '"$NFT" list table inet %s >/dev/null\n'
         'echo "  reach: ssh egress limited to %s"\n'
-        % (ruleset, table, ", ".join(reach_ips) or "none"))
+        % (self_check, ruleset, table,
+           ", ".join(list(reach_ips) + lan_ips) or "none"))
 
 
 def render_lockout_step():

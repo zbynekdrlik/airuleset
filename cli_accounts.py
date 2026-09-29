@@ -23,8 +23,9 @@ This leaf owns the three mechanical halves of that policy:
     tests/test_project_accounts_1184.py;
   * ``cmd_accounts`` — ``airuleset.py accounts status [--json]``.
 
-Stdlib only; ``cli_account_bootstrap`` / ``cli_onboard_exec`` / ``cli_onboard``
-are imported lazily inside functions (no import cycle with cli_onboard).
+Stdlib only; ``cli_account_bootstrap`` / ``cli_account_policy`` /
+``cli_onboard_exec`` / ``cli_onboard`` are imported lazily inside functions (no
+import cycle with cli_onboard).
 """
 import json
 import os
@@ -166,12 +167,15 @@ def legacy_inventory(entries):
 
 
 def _project_accounts():
-    """{account: {host, sudo, reach, secrets, webterm}} from THE declaration."""
+    """{account: {host, sudo, sudo_commands, reach, secrets, webterm}} from THE
+    declaration. ``reach`` keeps each entry as declared: a fleet box name, or
+    a #1186 LAN host ``{cidr, ports, reason}``."""
     import cli_account_bootstrap as bootstrap
     out = {}
     for name in sorted(bootstrap.SERVICE_ACCOUNTS):
         spec = bootstrap.account_spec(name)
         out[name] = {"host": spec["host"], "sudo": spec["sudo"],
+                     "sudo_commands": list(spec.get("sudo_commands") or []),
                      "reach": list(spec["reach"]),
                      "secrets": list(spec["secrets"]),
                      "webterm": sorted(spec["webterm_sessions"])}
@@ -198,13 +202,20 @@ def cmd_accounts(args):
     if getattr(args, "json", False):
         print(json.dumps(data, indent=2, sort_keys=True))
         return 0
+    import cli_account_policy as policy
     print("project accounts (#1184 declaration):")
     for name, a in data["project_accounts"].items():
+        lan = policy.reach_parts(a)[1]
         print("  %-12s host=%-10s sudo=%-3s reach=%s secrets=%s webterm=%s"
-              % (name, a["host"], "yes" if a["sudo"] else "no",
-                 ",".join(a["reach"]) or "none",
+              % (name, a["host"], policy.sudo_label(a["sudo"]),
+                 policy.reach_summary(a),
                  ",".join(a["secrets"]) or "none",
                  ",".join(a["webterm"]) or "none"))
+        for entry in lan:   # #1186: every LAN host + its ports + its reason
+            print("      reach %s — %s" % (policy.lan_label(entry),
+                                          entry["reason"]))
+        for path in a["sudo_commands"] if a["sudo"] == "commands" else ():
+            print("      sudo %s" % path)
     print("legacy projects (no declared project account): %d (ceiling %d, "
           "down-only — migrate on touch)" % (data["legacy_count"],
                                              data["legacy_ceiling"]))

@@ -12,6 +12,14 @@ are ENFORCED by the bootstrap (``cli_account_hardening``); ``secrets`` is a
 declarative inventory (nothing here provisions a credential, so none arrives
 undeclared through this path).
 
+#1186 widens the declaration for a project with LAN hardware (camera-box)
+without widening what it may do implicitly. A ``reach`` entry is a fleet box
+name OR ``{"cidr": "<ipv4>/32", "ports": [..], "reason": ".."}``: one private
+(RFC1918 / tailscale 100.64.0.0/10) host that is not a fleet box, with its
+reason. ``sudo`` may also be ``"commands"``: ``sudo_commands`` then lists
+exact ``/usr/local/sbin/<account>-<name>`` scripts, and the bootstrap proves
+each one root-owned and account-unwritable before the rule lands.
+
 ``render_root_bootstrap`` renders an IDEMPOTENT bash script that root runs ONCE
 on the declared host. It creates the unix user, sets permissions, and installs
 authorized_keys: the fleet push keys, the owner keys, and one forced-command
@@ -29,13 +37,13 @@ are imported LAZILY inside functions so the module loads with no side effects.
 """
 
 import copy
-import ipaddress
 import re
 import shlex
 import sys
 import textwrap
 
 import cli_account_hardening as hardening
+import cli_account_policy as policy
 
 
 # Debian package name grammar (Policy §5.6.1): [a-z0-9][a-z0-9.+\-]+
@@ -54,6 +62,8 @@ _REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _REL_DIR_RE = re.compile(r"(?!/)(?!.*(^|/)\.\.(/|$))[A-Za-z0-9_./-]+")
 # (a scoped sudo command is checked by cli_account_hardening.sudo_command_problem)
 _ONE_LINE_RE = re.compile(r"[^\n\r]+")
+# (sudo + reach entries — incl. the #1186 LAN hosts — are cli_account_policy's)
+_is_ip = policy.is_ip
 
 # Accounts that are NEVER a project account: the shared legacy account, root,
 # and the control/maintainer accounts.
@@ -138,6 +148,54 @@ SERVICE_ACCOUNTS = {
             for human in ("zbynek", "marek", "timo")
         },
     },
+    # #1186: the first project with LAN hardware (the stream rig). Its reach is
+    # the rig inventory read from the camera-box repo itself (obs-fleet.sh,
+    # dantesync-fleet.sh, the netcfg facet) — every host ONE private /32 with
+    # its reason; ssh (22) is what the reject enforces, OBS WebSocket (4455) and
+    # dantesync (8898) are declared with it. Its sudo is exactly two root-owned
+    # dev1 installer scripts the live migration installs (main ROZHODNUTÉ
+    # 2026-09-29: a narrow rule, never an admin account); webterm is the owner.
+    "camera-box": {
+        "host": "dev1",
+        "sudo": "commands",
+        "sudo_reason": "dev1-side root installs only: the dev1 dantesync "
+                       "self-upgrade and the dev1 remote-log receiver install "
+                       "(#1186)",
+        "sudo_commands": [
+            "/usr/local/sbin/camera-box-dev1-dantesync-upgrade",
+            "/usr/local/sbin/camera-box-dev1-remote-log-install",
+        ],
+        "reach": [
+            *({"cidr": "10.77.9.%d/32" % (60 + n), "ports": [22, 8898],
+               "reason": "cam%d (camera box)" % n} for n in range(1, 8)),
+            {"cidr": "10.77.9.202/32", "ports": [22, 4455, 8898],
+             "reason": "strih-lx, production strih + fleet NTP master (obs-fleet.sh)"},
+            {"cidr": "10.77.9.204/32", "ports": [22, 4455, 8898],
+             "reason": "stream OBS box, Windows (obs-fleet.sh)"},
+            {"cidr": "10.77.9.201/32", "ports": [22, 4455, 8898],
+             "reason": "resolume.lan OBS box, current DHCP lease (obs-fleet.sh); "
+                       "re-declare if the lease moves"},
+            {"cidr": "10.77.7.232/32", "ports": [22, 8898],
+             "reason": "mbc, Master Broadcast Console, audio VLAN (dantesync-fleet.sh)"},
+            {"cidr": "10.77.7.30/32", "ports": [22, 8898],
+             "reason": "fohabl, FOH Ableton PC, audio VLAN (dantesync-fleet.sh)"},
+            {"cidr": "10.77.8.1/32", "ports": [22],
+             "reason": "MikroTik RB4011 router_snv, read-only admin@ netcfg audit"},
+            *({"cidr": "10.77.9.%d/32" % n, "ports": [22],
+               "reason": "MikroTik CRS310 switch, read-only admin@ netcfg audit"}
+              for n in range(2, 6)),
+        ],
+        "secrets": ["av-soak.env", "dantesync-fleet.env", "netcfg-drift.env",
+                    "obs-ws-pass", "obs-burn-reconcile-watchdog.conf",
+                    "fleet-ssh-password", "gh-token"],
+        "repo": "zbynekdrlik/camera-box",
+        "project_dir": "devel/camera-box",
+        "tmux_session": "camera-box",
+        "webterm_sessions": {
+            "zbynek": {"preferred": "camera-box",
+                       "start_dir_chain": ["devel/camera-box"]},
+        },
+    },
 }
 
 
@@ -182,76 +240,6 @@ def fleet_boxes():
 def _webterm_humans():
     from cli_webterm_profiles import LANE_HOST
     return frozenset(LANE_HOST)
-
-
-def _validate_sudo(spec):
-    errs = []
-    sudo = spec.get("sudo")
-    if not isinstance(sudo, bool):
-        return ["sudo must be True or False, got %r" % (sudo,)]
-    reason = spec.get("sudo_reason")
-    cmds = spec.get("sudo_commands")
-    if not sudo:
-        if reason is not None or cmds is not None:
-            errs.append("sudo_reason/sudo_commands declared on a sudo: False "
-                        "account — a grant never hides behind sudo: False")
-        return errs
-    if not isinstance(reason, str) or not _ONE_LINE_RE.fullmatch(reason.strip() or ""):
-        errs.append("sudo: True needs a one-line sudo_reason")
-    if not isinstance(cmds, (list, tuple)) or not cmds:
-        errs.append("sudo: True needs a non-empty scoped sudo_commands list")
-    else:
-        for c in cmds:
-            problem = (hardening.sudo_command_problem(c) if isinstance(c, str)
-                       else "not a string")
-            if problem:
-                errs.append("sudo_commands entry %r is not a scoped command "
-                            "(never ALL / a wildcard / a list): %s" % (c, problem))
-    return errs
-
-
-def _password_shared_boxes():
-    """Boxes still running a PASSWORD-authenticated shared account: the legacy
-    `newlevel` (fleet-shared password) boxes and the controller (`airuleset`
-    break-glass password, #985). An ENFORCED reach to one of them would reopen
-    the very escape the account exists to close (#1184 review 2)."""
-    import cli_fleet
-    boxes = {h["name"].split("@")[-1] for h in cli_fleet.REMOTE_HOSTS
-             if h.get("user") == "newlevel"}
-    return boxes | {"controller"}
-
-
-def _is_ip(value):
-    try:
-        ipaddress.ip_address(value)
-        return True
-    except ValueError:
-        return False
-
-
-def _validate_reach(reach, boxes, enforced=True):
-    errs = []
-    if not isinstance(reach, (list, tuple)):
-        return ["reach must be a list, got %r" % (reach,)]
-    for target in reach:
-        if not isinstance(target, str):
-            errs.append("reach target %r is not a string" % (target,))
-            continue
-        user, _, box = target.rpartition("@")
-        if box not in boxes or (user and not _TOKEN_RE.fullmatch(user)):
-            errs.append("reach target %r is not a fleet box (known: %s)"
-                        % (target, ", ".join(sorted(boxes))))
-        elif user in _NEVER_PROJECT_ACCOUNTS:
-            errs.append("reach target %r names a shared/control account — a "
-                        "project account never reaches into it" % (target,))
-        elif enforced and not _is_ip(boxes[box]):
-            errs.append("reach target %r: box address %r is not an IP, so the "
-                        "egress rule cannot enforce it" % (target, boxes[box]))
-        elif enforced and box in _password_shared_boxes():
-            errs.append("reach target %r: %r still has a password-authenticated "
-                        "shared account — an ssh route there reopens the escape"
-                        % (target, box))
-    return errs
 
 
 def _validate_webterm(sessions):
@@ -299,7 +287,7 @@ def validate_account(account, raw):
     if spec["host"] not in boxes:
         errs.append("host %r is not a fleet box (known: %s)"
                     % (spec["host"], ", ".join(sorted(boxes))))
-    errs += _validate_sudo(spec)
+    errs += policy.validate_sudo(spec, account)
     enforced = spec.get("reach_enforced")
     if not isinstance(enforced, bool):
         errs.append("reach_enforced must be True or False")
@@ -308,7 +296,8 @@ def validate_account(account, raw):
         errs.append("reach_enforced: False needs a one-line reach_reason")
     elif enforced and "reach_reason" in spec:
         errs.append("reach_reason declared on an enforced reach")
-    errs += _validate_reach(spec["reach"], boxes, enforced)
+    errs += policy.validate_reach(spec["reach"], boxes, enforced,
+                                  _NEVER_PROJECT_ACCOUNTS)
     secrets = spec["secrets"]
     if not isinstance(secrets, (list, tuple)):
         errs.append("secrets must be a list")
@@ -523,6 +512,7 @@ def render_root_bootstrap(account):
     spec = _checked_spec(account)
     host = spec["host"]
     address = fleet_boxes()[host]
+    names, lan = policy.reach_parts(spec)
 
     ak_content = render_authorized_keys(account)
     packages = spec.get("system_packages", [])
@@ -568,8 +558,8 @@ def render_root_bootstrap(account):
 
     """).format(account=account, host=host,
                 marker=hardening.render_account_marker_step().strip("\n"),
-                sudo="yes" if spec["sudo"] else "no",
-                reach=",".join(spec["reach"]) or "none",
+                sudo=policy.sudo_label(spec["sudo"]),
+                reach=policy.reach_summary(spec),
                 secrets=",".join(spec["secrets"]) or "none")
 
     # 3a-3d: the privilege boundary (#1184, cli_account_hardening) lands
@@ -577,10 +567,11 @@ def render_root_bootstrap(account):
     # loginable, unbounded account.
     script += hardening.render_sudo_step(account, spec)
     boxes = fleet_boxes()
-    reach_ips = sorted({boxes[t.rpartition("@")[2]] for t in spec["reach"]})
+    reach_ips = sorted({boxes[t.rpartition("@")[2]] for t in names})
     script += hardening.render_reach_step(account, reach_ips,
                                           enforced=spec["reach_enforced"],
-                                          reason=spec.get("reach_reason", ""))
+                                          reason=spec.get("reach_reason", ""),
+                                          lan_rules=policy.lan_rules(lan))
     script += hardening.render_lockout_step()
     script += hardening.render_isolation_check_step()
     # 4-7: keys + dirs (4 space-indented template → dedent)
