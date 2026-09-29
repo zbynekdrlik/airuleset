@@ -208,3 +208,31 @@ until the ratchet cap, then the oldest move to `.claude/rules-reference/internal
     only from target HEADERS and merge groups sharing a thread/task/name key with a signed draft.
   - The review's probe messages became `tests/fixtures/draftbundle_1177/*.txt` (fb* pass, st* block)
     driven through the real hook: a review's reproductions are the cheapest regression corpus.
+
+- **#1179/#1180 — a Stop gate that judges THIS TURN's tool calls (`gates/handover.py`); two fresh
+  adversarial reviews found every trap below.**
+  - **Turn = after the last genuine prompt.** Stop-hook feedback is `isMeta: true` and a
+    `<task-notification>` is a user entry too; neither may reset the turn, or a blocked turn loses
+    its own evidence. Pair every `tool_use` with its `tool_result.is_error`: a failed call never
+    SETTLES, but a post inside a failed chained call still OWES when its own success line
+    (`OK: mail.message N posted`, `issuecomment-`) is in the result.
+  - **Reuse the family's shell primitives** — `gates.selfservice` `_capture_heredocs`/
+    `_strip_prefix`/`_tokens_of`/`_apply_cd`/`_resolve_body` (as `gates.labeledit` does) +
+    `split_top_level`. Resolve bodies from `$(cat F)`, `$VAR` assignments, stdin (`<`, `cat F |`,
+    heredoc), `--body-file`, and files written earlier IN THE TURN (Write / `cat > f <<EOF`) — a
+    deleted temp body file stays readable.
+  - **Evidence must be an ACTION shape, never a keyword.** Round 1 let mentions settle debts
+    (echo, grep, `# comment`, TodoWrite, an Agent prompt, the comment itself). Evidence = a task-CLI
+    `move`/`--stage` token set, a python/curl script writing `stage_id` bound to the verification
+    target (word or configured id), or an `mcp__*` write; shlex `comments=True` drops `#` tails.
+  - **Scope content matches to a record LINE** (`^Acceptance-thread:`) so a LANE-RETURN / review
+    quoting the token creates no debt. **Bound every gap regex**: a nested `(?:\w+GAP){0,2}` took
+    35 s on 20 KB and one DOTALL lazy `.*?…​.*?` over a script went quadratic — keep a timing lock.
+  - **Read the foreign contract live first** (read-only `gh api …/contents`): odoo-erp develop's
+    poster already refuses a project.task post without `--handover`/`--no-stage-move` (odoo-erp
+    8606), so the gate is the backstop for what the poster cannot see (a Discuss handover naming
+    tasks, `Acceptance-thread:`, the `post()` API).
+  - **The #1102 co-fire budget left `client-board-stages.md` ~6 B headroom**: new rule text is paid
+    byte-for-byte by condensing unlocked prose — grep every `assertIn` lock (`montalu vocabulary`)
+    first. A commit whose Bash text names a foreign `#N` is refused by the design gate; write the
+    lesson with the Edit tool and cite foreign tickets without the hash.

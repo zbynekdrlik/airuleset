@@ -110,7 +110,7 @@ CLI_BYPASS_LOGS = (
     ("stream-merge-bypasses.log", ()),
     ("subdev-ssh-bypasses.log", ()),
     ("vault-store-reads.log", ()),
-    ("script-check-bypasses.log", ()),
+    ("script-check-bypasses.log", ()), ("handover-bypasses.log", ()),  # (#1180)
     # tier0 logs `blocked` (a real block) in the SAME file as `inline-bypass`/
     # `env-bypass`. The block tag is always immediately followed by the `cmd=`
     # field (`  blocked  cmd=...`), so `  blocked  cmd=` precisely excludes the

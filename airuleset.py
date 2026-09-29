@@ -972,9 +972,14 @@ def _run_doctrine_audit_step(home=None, repo_dir=_DOCTRINE_STEP_UNSET, today=Non
         repo_dir = str(REPO_DIR)
     try:
         _matches, results = _da.audit(home, repo_dir=repo_dir, fix=True, today=today)
+        superseded = _da.scan_superseded_memory(home)   # #1179, report-only
     except Exception as e:                      # never fail install
         return ["  doctrine-audit step error (non-fatal): %s" % e]
     lines = []
+    if superseded:
+        lines.append("  doctrine-drift: %d memory line(s) contradict a newer rule "
+                     "(report-only, #1179 — run: python3 airuleset.py doctrine-audit)"
+                     % len(superseded))
     for p in results.get("rewritten", []):
         lines.append("  doctrine-drift: reduced %s to a fleet pointer "
                      "(original archived under ~/.claude/doctrine-archive)"
@@ -10944,6 +10949,7 @@ def cmd_doctrine_audit(args):
     print()
     print("Summary: %d HIGH (auto-fixable), %d MEDIUM (human review); "
           "owner-preference/keep excluded." % (counts["high"], counts["medium"]))
+    print(da.format_superseded(da.scan_superseded_memory(home)))  # #1179 report-only
     if getattr(args, "fix", False):
         for p in results.get("rewritten", []):
             print("  rewritten → fleet pointer: %s" % p)

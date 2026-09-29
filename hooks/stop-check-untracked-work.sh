@@ -26,8 +26,10 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || ech
 # A turn ending ✅ DONE / ⏳ WORKING on a CONFIGURED box (a fresh
 # ~/.claude/task-hygiene/status.json, written by watchdog Job 49) is blocked when
 # a client Odoo obligation is overdue: A > 0 older than 24 h (unanswered client
-# comment), or B > 0 for Verifikácia (a task in Verifikácia with no stream
-# message). Fail-OPEN when the status file is absent/stale (a dead watchdog).
+# comment), B > 0 for Verifikácia (a task in Verifikácia with no stream
+# message), H > 0 (#1180: this box's handover on a task never moved to
+# Verifikácia), or an A whose reactions are unreadable older than 72 h.
+# Fail-OPEN when the status file is absent/stale (a dead watchdog).
 if echo "$MSG" | grep -qE '✅ DONE|⏳ WORKING'; then
     TH_STATUS="${HOME}/.claude/task-hygiene/status.json"
     TH_RETRY="/tmp/airuleset-task-hygiene-block-${SESSION_ID}"
@@ -67,6 +69,17 @@ if isinstance(b_verif, int) and b_verif > 0:
     items = st.get("b_items") or []
     lines.append("Verifikácia bez správy streamu je zakázaná (%d): %s"
                  % (b_verif, ", ".join(items[:8])))
+a_unknown = st.get("a_unknown_oldest_ts")   # #1180: reactions unreadable (403)
+if isinstance(a_unknown, (int, float)) and (now - a_unknown) > 3 * DAY:
+    lines.append("Komentár klienta > 72 h bez odpovede streamu (reakcie sa nedajú "
+                 "prečítať — 👷 sa neráta, odpovedz správou): %s"
+                 % ", ".join((st.get("a_items") or [])[:8]))
+h = st.get("h", 0)                  # #1180 class H (this box's own handovers)
+if isinstance(h, int) and not isinstance(h, bool) and h > 0:
+    items = st.get("h_items") or []
+    lines.append("Odovzdávacia správa bez presunu do Verifikácie (H, %d) — presuň "
+                 "úlohu + assignee, ďalšie odovzdanie cez odoo_post.py --handover: %s"
+                 % (h, ", ".join(items[:8])))
 if lines:
     print("\n".join(lines))
 sys.exit(0)

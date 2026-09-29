@@ -1,6 +1,6 @@
 # Client Board Tasks — Stages, Assignee & "Done" (#1102)
 
-Topic companion of `client-board-tasks.md` (CORE): its profile table holds each board's stages (a new board = a new row). Auto-loads on a `project.task` stage move; these rules govern MOVING a task between stages.
+Topic companion of `client-board-tasks.md` (CORE): its profile table holds each board's stages (a new board = a new row). Auto-loads on a `project.task` stage move and at the hand-off (#1179).
 
 The profile's "awaiting client verification" stage is **Verifikácia** (montalu) or **Na overenie** (slovnormal) — rule 3's handover note fires on the transition INTO it. The "blocked on a client question" stage is **Potrebuje ujasniť** (montalu); slovnormal has no dedicated question stage, so a question stays in **V práci** with the chatter question of rule 4 (`client-board-questions.md`).
 
@@ -16,12 +16,11 @@ Moving a task to the profile's **awaiting-client-verification** stage
 
 1. **Čo** — one sentence: what was delivered
 2. **Kde** — the menu path AND a functional `https://` deep-link URL to the exact
-   page/record/action on the client's PROD, verified 200 before posting (the
-   `handover-compose.md` URL rule applies — never a bare menu path, never the
-   instance homepage)
+   page/record/action on the client's PROD, verified 200 before posting
+   (`handover-compose.md` URL rule — never a bare menu path or the homepage)
 3. **Čo skúsiť** — one sentence: what the employee should try / verify
-4. **`stačí 👍`** — literal closing line (a 👍 reaction confirms acceptance; the
-   `read-reactions.md` companion detects the reaction)
+4. **`stačí 👍`** — literal closing line (a 👍 reaction confirms acceptance;
+   `read-reactions.md` detects it)
 
 **Content — every profile (owner 28.9.2026, #1166):** list only what the reader
 can use NOW, plus changes to what they ALREADY used; internal rework history and
@@ -30,9 +29,11 @@ the removal of a never-delivered feature stay OUT.
 The note CONTENT is **PLAIN PROSE** (no rich formatting, no `@`-mention anchors,
 no `partner_ids`) — except on **montalu** ONE mention anchor for the addressed
 person (rule 5), its partner in `partner_ids` (#702); the TRANSPORT uses `body_is_html=True` per the
-`handover-compose.md` posting rules. This four-section shape is ENFORCED by a
-Stop-hook check (#1018) — a turn that reports posting a verification note without
-the four sections is blocked.
+`handover-compose.md` posting rules. The shape is Stop-checked (#1018).
+
+**ONE step (#1180):** post it via `odoo_post.py --handover` (odoo-erp#8606:
+post + rule-5 assignee + move; until it ships, move + assign by hand, same
+turn). A handover or `Acceptance-thread:` leaving a task unmoved is Stop-blocked.
 
 ### 5. Assignee — per profile
 
@@ -53,9 +54,8 @@ never on the stream's own judgment (except the montalu auto-close below). WHO
 moves it is the profile's call: the **OWNER** on miva and, after a confirmation,
 on montalu (#924); **Dávid Greňa himself** on slovnormal. The confirmation is
 recorded on the GitHub issue as
-`Acceptance-cited: msg <message_id> task <task_id>` (the `handover-compose.md`
-family-acceptance doctrine applies — one task per capability family, one
-confirmation closes the family).
+`Acceptance-cited: msg <message_id> task <task_id>` (`handover-compose.md`
+family acceptance — one task per capability family, one confirmation closes it).
 
 On **montalu** a task in Verifikácia also reaches Hotovo by the odoo-erp#8507
 auto-close (owner ROZHODNUTÉ 28.9.2026, #1167): ONE reminder after 14 days
@@ -69,7 +69,7 @@ countdown. The mechanism moves the task, never the stream by hand, and replaces
 
 👷 ACK + presun fázy = OKAMŽITÉ na každý komentár klienta; text pre klienta čaká na schválenie ownera (#606 U flow).
 
-The phase names below are the montalu vocabulary — map each to YOUR board's own profile stages (miva: **V riešení** / **Požadujú sa zmeny** / **Čaká**; slovnormal: **V práci** / **Na overenie**).
+The phase names below are the montalu vocabulary — map each to YOUR profile's stages (miva: **V riešení** / **Požadujú sa zmeny** / **Čaká**; slovnormal: **V práci** / **Na overenie**).
 
 | Udalosť klienta | Fáza + akcia |
 |---|---|

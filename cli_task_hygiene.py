@@ -17,18 +17,18 @@ defect the local scripts had):
       flags only a task OVERDUE for the mechanism; a waiting one goes to
       `verif_wait` (read by quals); bot authors never count as a client (A).
 
-All Odoo access is via the injected `call(model, method, **body)` seam
-(`cli_odoo_ro.OdooReadOnlyClient.call` in production, a fake in tests) — this
-module makes NO network call of its own, so the whole computation is unit-tested
-against a fake. Reactions are read via the GUARDED method
-`message_reactions_guarded` (never the 403-by-design raw reaction model, #784);
-an instance that has not released it degrades to the `reaction_ids`-presence
-fallback (the ticket's else-branch), the safe direction.
+  H — a stream handover on a task NOT in Verifikácia 10 min later (#1180,
+      `cli_handover_hygiene`, which also degrades a `reaction_ids` 403).
+
+All Odoo access is via the injected `call(model, method, **body)` seam (a fake in
+tests) — NO network call of its own. Reactions are read via the GUARDED method
+`message_reactions_guarded` (#784), degrading to `reaction_ids` presence.
 """
 import datetime
 import json
 import os
 
+import cli_handover_hygiene as hh
 import cli_odoo_board as board
 import cli_odoo_ro as ro
 from cli_odoo_board import m2o as _m2o, parse_dt as _parse_dt
@@ -40,10 +40,8 @@ _TASK_URL_FMT = "%s/odoo/project/%s/tasks/%s"
 _STATUS_BASENAME = "status.json"
 _STATUS_DIRNAME = "task-hygiene"
 
-# board-wide comment fetch cap for the ONE batched read (#1036 review 🟡): a
-# client board is dozens of open tasks with a handful of comments each, so a few
-# thousand is generous headroom; truncation beyond it under-counts (fail-safe:
-# fewer flags), never a hard failure.
+# board-wide comment cap for the ONE batched read (#1036 review 🟡): generous for
+# dozens of open tasks; truncation under-counts (fewer flags), never a failure.
 _MSG_LIMIT = 5000
 # open-task fetch cap — a stream board is dozens of open tasks, not hundreds.
 _TASK_LIMIT = 200
@@ -134,32 +132,26 @@ def compute_hygiene(call, cfg, now=None):
     domain = [["project_id", "in", project_ids]]
     if closed:
         domain.append(["stage_id", "not in", sorted(closed)])
-    tasks = call("project.task", "search_read", domain=domain,
-                 fields=["id", "name", "stage_id"] + (list(board.TASK_FIELDS) if prof else []),
-                 order="id", limit=_TASK_LIMIT)
-    tasks = tasks or []
-    # #1036 review 🟡 CORRECTNESS-1: `order="id"` keeps the OLDEST tasks (the
-    # A>24h Stop-gate targets) but a board with > _TASK_LIMIT open tasks silently
-    # drops the newest — an A/C UNDER-count (the safe direction: a miss, never a
-    # false flag). Surface it so the limit can be raised rather than fail silent.
+    tasks = call("project.task", "search_read", domain=domain, order="id",
+                 fields=hh.task_fields(board.TASK_FIELDS if prof else ()),
+                 limit=_TASK_LIMIT) or []
+    # #1036 review 🟡: `order="id"` keeps the OLDEST tasks; > _TASK_LIMIT drops the
+    # newest (an UNDER-count, never a false flag) — surfaced so the limit is raised.
     tasks_truncated = len(tasks) >= _TASK_LIMIT
 
-    # BATCH the comment read (#1036 review 🟡): ONE search_read over EVERY open
-    # task's comments (`res_id in [...]`) instead of one call per task, then
-    # group by res_id in Python — turning an N+1 fan-out (which under a slow
-    # board could overrun the 120s watchdog timeout) into a single call. Each
-    # group stays newest-first via the `res_id, date desc` order.
+    # BATCH the comment read (#1036 review 🟡): ONE search_read over every open
+    # task's comments, grouped by res_id (no N+1 fan-out past the 120s watchdog
+    # timeout); each group stays newest-first via the `res_id, date desc` order.
     by_res = {}
-    msgs_truncated = False
-    if tasks:
-        all_msgs = call(
-            "mail.message", "search_read",
-            domain=[["model", "=", "project.task"],
+    msgs_truncated, reactions_ok = False, True
+    if tasks:                                # #1180: a reaction_ids 403 degrades
+        all_msgs, reactions_ok = hh.read_messages(
+            call, domain=[["model", "=", "project.task"],
                     ["res_id", "in", [t.get("id") for t in tasks]],
                     (["message_type", "in", list(board.MESSAGE_TYPES)] if prof
                      else ["message_type", "=", "comment"])],
             fields=["id", "author_id", "date", "reaction_ids", "res_id"],
-            order="res_id, date desc, id desc", limit=_MSG_LIMIT) or []
+            order="res_id, date desc, id desc", limit=_MSG_LIMIT)
         # #1036 review 🟡 CORRECTNESS-2: if the batched read hit the cap it is
         # INCOMPLETE (ordered res_id ASC, so the highest-res_id tasks lose their
         # messages). A task with NO messages in a TRUNCATED batch is then
@@ -221,11 +213,16 @@ def compute_hygiene(call, cfg, now=None):
                     if age_days > confirm_days:
                         c_items.append(dict(base, days=int(age_days)))
 
+    if not reactions_ok and a_items and not hh.guarded_reactions_ok(call, all_msgs):
+        a_items = [dict(it, reaction_unknown=True) for it in a_items]  # #1180
+    hres = hh.compute_h(call, tasks, cfg, lambda a: _is_stream_author(
+        a, own_names, stream_pids), now, hh.own_signature_rx())
     summary = "task-hygiene: A=%d B=%d C=%d" % (
-        len(a_items), len(b_items), len(c_items))
+        len(a_items), len(b_items), len(c_items)) + (" H=%d" % len(hres["H"]) if hres["H"] else "")
     if tasks_truncated or msgs_truncated:
         summary += " (truncated: raise _TASK_LIMIT/_MSG_LIMIT — result under-counts)"
-    return {"A": a_items, "B": b_items, "C": c_items, "summary": summary,
+    return {"A": a_items, "B": b_items, "C": c_items, "summary": summary, **hres,
+            "reactions_unavailable": not reactions_ok,
             "verif_wait": tracker.waiting,
             "verif_wait_status": tracker.status(tasks_truncated),
             "truncated": bool(tasks_truncated or msgs_truncated)}
@@ -247,11 +244,12 @@ def _short(name, n=48):
 def format_report(result, cfg):
     """Human-readable multi-line report with a deep-URL per flagged task and the
     one-line summary — what `airuleset.py task-hygiene` prints."""
-    lines = [result["summary"]]
+    lines = [result["summary"]] + [hh.REACTIONS_403_LOG] * bool(result.get("reactions_unavailable"))
     labels = [
         ("A", "nezodpovedaný komentár klienta"),
         ("B", "Verifikácia/Realizácia/Potrebuje ujasniť bez správy streamu"),
         ("C", "Verifikácia > lehota bez potvrdenia klienta"),
+        ("H", "odovzdávacia správa, úloha nie je vo Verifikácii"),
     ]
     for key, label in labels:
         items = result.get(key, [])
@@ -268,9 +266,10 @@ def format_report(result, cfg):
 
 def compose_nudge(result, cfg):
     """The bounded (<= 700 char) keystroke nudge for watchdog Job 49. Empty
-    string when A ∪ B ∪ C is empty (nothing to nudge)."""
+    string when A ∪ B ∪ C ∪ H is empty (nothing to nudge)."""
     a, b, c = result.get("A", []), result.get("B", []), result.get("C", [])
-    if not (a or b or c):
+    h = result.get("H", [])
+    if not (a or b or c or h):
         return ""
     head = "%s — klientske úlohy čakajú na teba." % result["summary"]
 
@@ -284,6 +283,8 @@ def compose_nudge(result, cfg):
         parts.append("B (fáza bez správy streamu): %s" % _ids(b))
     if c:
         parts.append("C (Verifikácia bez potvrdenia > lehota): %s" % _ids(c))
+    if h:
+        parts.append("H (odovzdané, úloha nie je vo Verifikácii): %s" % _ids(h))
     parts.append("Akcia: 👷 reakcia na komentár, presun fázy, ticket + lane, "
                  "draft do U (po schválení ownerom).")
     txt = "\n".join(parts)
@@ -293,21 +294,18 @@ def compose_nudge(result, cfg):
 
 
 def persist_status(result, home=None, now=None):
-    """Write the LAST-run A/B/C summary to `~/.claude/task-hygiene/status.json`
-    for the footer, the quals `--task-hygiene` flag, and the Stop hook (never a
-    live Odoo call in any of those paths). Records `a`/`b`/`c` counts, the
-    oldest A comment ts (for the Stop hook's >24h gate), `b_verif` (B members in
-    Verifikácia, for the "Verifikácia bez správy" Stop block), and short
-    item lines."""
+    """Write the LAST-run summary to `~/.claude/task-hygiene/status.json` for the
+    footer, quals `--task-hygiene` and the Stop hook (never a live Odoo call
+    there): a/b/c/h counts, the oldest A ts (>24h gate), `b_verif` (B members in
+    Verifikácia), `h` (#1180 handover not in Verifikácia) + short item lines."""
     now = now if now is not None else datetime.datetime.now(
         datetime.timezone.utc).timestamp()
     a = result.get("A", [])
     b = result.get("B", [])
     c = result.get("C", [])
-    a_ts = [it["ts"] for it in a if isinstance(it.get("ts"), (int, float))]
-    # b_items lists ONLY the Verifikácia B members (#1036 review 🔵) so the Stop
-    # hook's "Verifikácia bez správy streamu (b_verif): <b_items>" message shows
-    # exactly the b_verif tasks, never a Realizácia/Potrebuje-ujasniť member.
+    a_ts = [it["ts"] for it in a if isinstance(it.get("ts"), (int, float))
+            and not it.get("reaction_unknown")]    # #1180: unknown → 72 h (extras)
+    # b_items = ONLY the Verifikácia B members (#1036 review 🔵), matching b_verif.
     b_verif_items = [it for it in b if _is_verif_stage_name(it.get("stage"))]
     payload = {
         "ts": now,
@@ -318,8 +316,9 @@ def persist_status(result, home=None, now=None):
                     for it in a[:10]],
         "b_items": ["#%s %s" % (it["task_id"], _short(it.get("task_name"), 40))
                     for it in b_verif_items[:10]],
-        # #1167: tickets whose task sits inside its auto-close wait → quals.
-        "verif_wait": result.get("verif_wait_status"),
+        "verif_wait": result.get("verif_wait_status"),   # #1167 → quals
+        **hh.status_extras(result, lambda it: "#%s %s" % (
+            it["task_id"], _short(it.get("task_name"), 40))),   # #1180 H / 403
     }
     path = status_path(home)
     os.makedirs(os.path.dirname(path), exist_ok=True)
