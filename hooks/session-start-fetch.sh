@@ -62,11 +62,12 @@ if ! git remote get-url origin &>/dev/null; then
 fi
 
 # Fetch latest from origin (suppress output to avoid noise). Bounded (#1176):
-# it now runs on every `claude -c` too, and must leave time inside Claude
+# it now runs on every `claude -c` too, and must leave room inside Claude
 # Code's 30 s hook budget for the fast-forward and the EXIT-trap directives
-# step; `-k` stops a fetch that ignores the TERM.
+# step (its own upstream fetch is bounded at 10 s); `-k` stops a fetch that
+# ignores the TERM. A slow fetch cut here is caught up by watchdog Job 53.
 _ORIGIN_FETCHED=origin
-GIT_TERMINAL_PROMPT=0 timeout -k 3 15 git fetch origin --quiet 2>/dev/null || true
+GIT_TERMINAL_PROMPT=0 timeout -k 2 8 git fetch origin --quiet 2>/dev/null || true
 
 # The ONE shared safety predicate + the fast-forward step (#1176): an
 # in-progress operation, a detached HEAD, a dirty or unmeasurable tree, a

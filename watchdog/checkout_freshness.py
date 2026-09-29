@@ -25,23 +25,29 @@ CHECKOUT SET (versioned data, this box + this unix account only;
   Deduplicated by real path.
 
 PER CHECKOUT (`check_checkout`), at most once per INTERVAL_S, oldest first,
-under a per-checkout DEADLINE (`cli_checkout_freshness.deadline`):
-  1. remote = the tracking remote of the branch in question (`branch.<b>.
-     remote`: the checked-out base, or for a work branch the local base
-     branch), else `upstream` when it already carries a base ref (the #847
-     evidence rule), else `origin`. A bounded `git fetch` of that remote
-     (own process group, SIGTERM then SIGKILL; BatchMode ssh unless the repo
-     sets `core.sshCommand`; a fetch that timed out gets FETCH_TIMEOUT_LONG_S
-     next time when the sweep budget allows).
+under a per-checkout DEADLINE (`cli_checkout_freshness.deadline`; nested
+deadlines only shorten it):
+  0. The path must be a checkout ROOT (`--show-toplevel`), never a plain
+     directory inside some parent repository.
+  1. remote = `cli_checkout_freshness.pick_remote` — the SAME rule the hook
+     uses: `upstream` when it carries the base (a fork stream's real base,
+     never the fork's copy — as session-start-stream-directives.sh
+     resolves it), else the tracking remote, else `origin`. A bounded
+     `git fetch --no-write-fetch-head` (never clobbers the session's own
+     FETCH_HEAD; own process group, SIGTERM then SIGKILL; BatchMode ssh
+     unless the repo sets `core.sshCommand`; a fetch that timed out gets
+     FETCH_TIMEOUT_LONG_S next time when the sweep budget allows, and the
+     per-checkout deadline grows by the same amount).
   2. On a BASE branch: the SHARED safety predicate
      `cli_checkout_freshness.ff_verdict` (the SAME function the SessionStart
      hook runs — one definition of "provably safe") → `git merge --ff-only`
-     with the repo's merge hooks OFF, started only while the sweep has
-     MERGE_RESERVE_S left (else deferred, due again next sweep), bounded by
-     MERGE_TIMEOUT_S with SIGTERM first so git removes its own locks. Refused
-     states (dirty, unmeasurable tree, diverged, an in-progress operation or
-     a held `index.lock`, a path collision) are NEVER touched — only recorded
-     with their commits behind and reason.
+     with the repo's merge hooks OFF. The merge is NEVER bounded or
+     signalled once started (git does not roll back files a checkout already
+     wrote, so a stopped merge leaves a half-applied tree): it starts only
+     while the sweep has MERGE_RESERVE_S left, else it is deferred and due
+     again next sweep. Refused states (dirty, unmeasurable tree, diverged,
+     an in-progress operation or a held `index.lock`, a path collision) are
+     NEVER touched — only recorded with their commits behind and reason.
   3. On a WORK branch (or detached): no fast-forward. The rule-file lag is
      measured — `CLAUDE.md` / `.claude/` files (root and nested) the base
      changed since the fork point (`git diff --name-only HEAD...<base>`); a
@@ -62,9 +68,17 @@ ping (#693). Not run on a paused box (the registry gate).
 BUDGET: `MIN_BUDGET_S` gates the start (registry `hold:budget`); a new
 checkout starts only while `budget_left()` >= PER_CHECKOUT_S and the job's
 own wall clock is under JOB_WALL_S; its reads + fetch are clipped to the
-per-checkout deadline and the merge has its own reserve — the rest are due
-next sweep, so a box with many checkouts rotates instead of blowing the
-120 s unit budget. The value lock test pins these relations.
+per-checkout deadline, the long fetch retry needs LONG_RETRY_RESERVE_S and
+the unbounded merge MERGE_RESERVE_S of sweep budget (measured to the 100 s
+soft cap, so a merge has >= 80 s before the unit's 120 s kill) — the rest
+are due next sweep, so a box with many checkouts rotates instead of blowing
+the unit budget. A held sweep still refreshes the status `ts` (a held job
+is alive, never read as a dead watchdog). The value lock test pins these.
+
+ACCEPTED RESIDUALS: an ignored file created in the milliseconds between the
+collision check and the merge is overwritten by git (the #314 hook had the
+same window); assume-unchanged / skip-worktree files are invisible to
+`git status`.
 """
 import json
 import os
@@ -76,9 +90,9 @@ import cli_checkout_freshness as cf
 INTERVAL_S = 15 * 60          # per-checkout cadence
 FETCH_TIMEOUT_S = 15          # one bounded fetch (the #172 per-repo bound)
 FETCH_TIMEOUT_LONG_S = 45     # the retry after a timed-out fetch
+LONG_RETRY_RESERVE_S = FETCH_TIMEOUT_LONG_S + 2 * cf.TERM_GRACE_S + 5
 PER_CHECKOUT_S = 25           # the per-checkout deadline (reads + fetch)
-MERGE_TIMEOUT_S = 30          # the fast-forward itself (then SIGTERM)
-MERGE_RESERVE_S = MERGE_TIMEOUT_S + cf.TERM_GRACE_S + 10   # sweep budget to start it
+MERGE_RESERVE_S = 60          # sweep budget to START the (unbounded) merge
 MIN_BUDGET_S = 30             # registry min_budget: one checkout + margin
 JOB_WALL_S = 40               # the job's own ceiling per sweep
 DEFAULT_BASES = ("develop", "dev", "main", "master")
@@ -173,29 +187,6 @@ def discover_checkouts(home=None, user=None, hostname=None, windows=None,
 # one checkout
 # --------------------------------------------------------------------------- #
 
-def _configured_remotes(path):
-    rc, out = cf.run_git(path, ["remote"])
-    return set(out.split()) if rc == 0 else set()
-
-
-def pick_remote(path, branch, bases=()):
-    """The remote the checkout's base lives on (see the module docstring):
-    the tracking remote of `branch` when it is a base, else of the first
-    local base branch that tracks one; else `upstream` carrying a base ref;
-    else `origin`; else None."""
-    remotes = _configured_remotes(path)
-    for b in ([branch] if branch in bases else []) + list(bases):
-        rc, out = cf.run_git(path, ["config", "--get", "branch.%s.remote" % b])
-        if rc == 0 and out.strip() in remotes:
-            return out.strip()
-    if "upstream" in remotes and any(
-            cf.ref_exists(path, cf.remote_ref("upstream", b)) for b in bases):
-        return "upstream"
-    if "origin" in remotes:
-        return "origin"
-    return sorted(remotes)[0] if remotes else None
-
-
 def _oldest_ct(path, rev_range, paths=()):
     """Committer time of the OLDEST first-parent commit in `rev_range`
     (optionally limited to `paths`), or None. INFORMATION for `status` only:
@@ -228,8 +219,7 @@ def _base_branch_result(path, remote, entry, dry_run, budget_left):
         if left is not None and left < MERGE_RESERVE_S:
             return ("lagging", "fast-forward deferred (%.0fs of sweep budget "
                     "left)" % left, v.behind, True)
-        with cf.deadline(MERGE_TIMEOUT_S):
-            ok = cf.fast_forward(path, v, timeout=MERGE_TIMEOUT_S, run_hooks=False)
+        ok = cf.fast_forward(path, v, run_hooks=False)   # unbounded once started
         if ok:
             entry["ff"] = {"at": entry["checked"], "commits": v.behind}
             return "current", "fast-forwarded %d commit(s)" % v.behind, 0, False
@@ -262,43 +252,60 @@ def _work_branch_result(path, branch, remote, base):
     return "current", label + ": rule files current", behind
 
 
-def _fetch(path, remote, prev, dry_run, fetch_timeout, budget_left):
-    """(rc, used timeout). Dry-run mutates nothing, not even remote refs."""
-    if dry_run:
-        return 0, 0
-    timeout = fetch_timeout
+def fetch_timeout_for(prev, budget_left, fetch_timeout=FETCH_TIMEOUT_S):
+    """The fetch bound for this check: FETCH_TIMEOUT_LONG_S after a timed-out
+    fetch when the sweep can afford it (LONG_RETRY_RESERVE_S), else normal."""
     left = budget_left() if budget_left is not None else None
-    if prev.get("fetch_rc") == 124 and (left is None or left >= FETCH_TIMEOUT_LONG_S + 10):
-        timeout = FETCH_TIMEOUT_LONG_S
+    if (prev or {}).get("fetch_rc") == 124 and (left is None or left >= LONG_RETRY_RESERVE_S):
+        return FETCH_TIMEOUT_LONG_S
+    return fetch_timeout
+
+
+def _fetch(path, remote, dry_run, timeout):
+    """rc of ONE bounded fetch. Dry-run mutates nothing, not even remote
+    refs; `--no-write-fetch-head` never clobbers the session's own
+    FETCH_HEAD (a `git pull` of its own in flight)."""
+    if dry_run:
+        return 0
     env = cf.ssh_batch_env(path)
-    with cf.deadline(timeout + 1):   # its own bound, not the per-checkout one
-        rc, _ = cf.run_git(path, ["-c", "gc.auto=0", "-c", "maintenance.auto=false",
-                                  "fetch", "--quiet", "--no-tags",
-                                  "--no-recurse-submodules", remote],
-                           timeout=timeout, env_extra=env)
-    return rc, timeout
+    rc, _ = cf.run_git(path, ["-c", "gc.auto=0", "-c", "maintenance.auto=false",
+                              "fetch", "--quiet", "--no-tags",
+                              "--no-write-fetch-head", "--no-recurse-submodules",
+                              remote], timeout=timeout, env_extra=env)
+    return rc
+
+
+def _is_checkout_root(path):
+    rc, out = cf.run_git(path, ["rev-parse", "--show-toplevel"])
+    return rc == 0 and os.path.realpath(out.strip()) == os.path.realpath(path)
 
 
 def check_checkout(c, now, prev=None, dry_run=False,
                    fetch_timeout=FETCH_TIMEOUT_S, budget_left=None):
-    """Fetch + fast-forward-when-safe + measure ONE checkout; returns its
-    status entry (never raises for a git failure)."""
+    """Fetch + fast-forward-when-safe + measure ONE checkout under its own
+    deadline; returns its status entry (never raises for a git failure)."""
+    prev = prev if isinstance(prev, dict) else {}
+    used = fetch_timeout_for(prev, budget_left, fetch_timeout)
+    with cf.deadline(PER_CHECKOUT_S - 5 + (used - fetch_timeout)):
+        return _check(c, now, prev, dry_run, used, budget_left)
+
+
+def _check(c, now, prev, dry_run, used, budget_left):
     path = c["path"]
     entry = {"source": c.get("source"), "checked": now}
-    prev = prev if isinstance(prev, dict) else {}
     bases = list(c.get("bases") or ())
     if not os.path.isdir(path):
         entry.update(state="absent", reason="path absent")
         return entry
-    if cf.run_git(path, ["rev-parse", "--is-inside-work-tree"])[0] != 0:
-        entry.update(state="absent", reason="not a git checkout")
+    if not _is_checkout_root(path):
+        entry.update(state="absent", reason="not a git checkout root")
         return entry
     branch = cf.current_branch(path)
-    remote = pick_remote(path, branch, bases)
+    remote = cf.pick_remote(path, branch, bases)
     if not remote:
         entry.update(state="untracked", reason="no git remote")
         return entry
-    frc, used = _fetch(path, remote, prev, dry_run, fetch_timeout, budget_left)
+    frc = _fetch(path, remote, dry_run, used)
     on_remote = [b for b in bases if cf.ref_exists(path, cf.remote_ref(remote, b))]
     base = branch if branch in bases else (on_remote[0] if on_remote else None)
     entry.update(remote=remote, branch=branch, base=base, fetch_rc=frc)
@@ -377,11 +384,12 @@ def run_job(now, *, dry_run=False, budget_left=None, home=None,
                 clock() - started > JOB_WALL_S:
             logs.append("checkout-freshness: hold:budget — %d of %d due "
                         "checkout(s) left for the next sweep" % (len(due) - done, len(due)))
+            if not dry_run and not done:   # held, yet alive: refresh ts
+                write_status({"ts": now, "checkouts": cos}, home)
             break
         try:
-            with cf.deadline(PER_CHECKOUT_S - 5):
-                e = check_checkout(c, now, cos.get(c["path"]), dry_run,
-                                   fetch_timeout, budget_left)
+            e = check_checkout(c, now, cos.get(c["path"]), dry_run,
+                               fetch_timeout, budget_left)
         except Exception as exc:  # noqa: BLE001 -- one checkout never kills the rest
             e = {"source": c.get("source"), "checked": now, "state": "lagging",
                  "reason": "check error: %s" % exc,

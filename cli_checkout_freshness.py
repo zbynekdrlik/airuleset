@@ -79,9 +79,12 @@ def git_env(extra=None):
 
 @contextlib.contextmanager
 def deadline(seconds):
-    """Clip every `run_git` inside the block to `seconds` from now."""
+    """Clip every `run_git` inside the block to `seconds` from now — or to an
+    enclosing deadline when that one is sooner (a nested block can only
+    SHORTEN the budget, never extend it)."""
     prev = _DEADLINE[0]
-    _DEADLINE[0] = time.monotonic() + seconds
+    mine = time.monotonic() + seconds
+    _DEADLINE[0] = mine if prev is None else min(prev, mine)
     try:
         yield
     finally:
@@ -105,6 +108,14 @@ def _record(wall):
             _log("subprocess budget record failed: %s" % exc)
 
 
+def _verb(args):
+    """The git subcommand for a log line (skips leading `-c k=v` pairs)."""
+    rest = list(args)
+    while rest[:1] == ["-c"]:
+        rest = rest[2:]
+    return rest[0] if rest else "?"
+
+
 def _stop_group(proc, args, cwd):
     """SIGTERM the child's process group (git removes its lock files), wait
     TERM_GRACE_S, then SIGKILL whatever is left."""
@@ -117,17 +128,20 @@ def _stop_group(proc, args, cwd):
             proc.communicate(timeout=wait)
             return
         except subprocess.TimeoutExpired:
-            _log("git %s in %s still alive %ss after %s" % (args[0], cwd, wait, sig))
+            _log("git %s in %s still alive %ss after %s" % (_verb(args), cwd, wait, sig))
 
 
-def run_git(cwd, args, timeout=GIT_LOCAL_TIMEOUT_S, env_extra=None):
+def run_git(cwd, args, timeout=GIT_LOCAL_TIMEOUT_S, env_extra=None,
+            honor_deadline=True):
     """Run `git <args>` in `cwd`; returns `(rc, stdout)`. `timeout=None` =
-    unbounded (still clipped by an active `deadline()`). Own process group;
-    on timeout the WHOLE group is stopped (SIGTERM, then SIGKILL), so a
-    `git fetch` whose ssh / https helper holds the pipe open can never outlive
-    the bound. A timeout returns rc 124, a spawn failure rc 127; never
-    raises."""
-    left = time_left()
+    unbounded, still clipped by an active `deadline()` unless
+    `honor_deadline=False` (the one caller: a started fast-forward, which
+    must never be signalled half-way — git does not roll back the files it
+    already wrote). Own process group; on timeout the WHOLE group is stopped
+    (SIGTERM, then SIGKILL), so a `git fetch` whose ssh / https helper holds
+    the pipe open can never outlive the bound. A timeout returns rc 124, a
+    spawn failure rc 127; never raises."""
+    left = time_left() if honor_deadline else None
     if left is not None:
         timeout = max(1.0, left) if timeout is None else max(1.0, min(timeout, left))
     started = time.monotonic()
@@ -137,13 +151,13 @@ def run_git(cwd, args, timeout=GIT_LOCAL_TIMEOUT_S, env_extra=None):
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             env=git_env(env_extra), start_new_session=True)
     except OSError as exc:
-        _log("git %s in %s could not start: %s" % (args[0], cwd, exc))
+        _log("git %s in %s could not start: %s" % (_verb(args), cwd, exc))
         return 127, ""
     try:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         _log("git %s in %s timed out after %.0fs — stopping its process group"
-             % (args[0], cwd, timeout))
+             % (_verb(args), cwd, timeout))
         _stop_group(proc, args, cwd)
         _record(time.monotonic() - started)
         return 124, ""
@@ -182,6 +196,34 @@ def remote_ref(remote, branch):
 def ref_exists(cwd, ref):
     rc, _ = run_git(cwd, ["rev-parse", "--verify", "--quiet", ref + "^{commit}"])
     return rc == 0
+
+
+def configured_remotes(cwd):
+    rc, out = run_git(cwd, ["remote"])
+    return set(out.split()) if rc == 0 else set()
+
+
+def pick_remote(cwd, branch, bases=()):
+    """The remote the checkout's BASE lives on — ONE rule for the hook and
+    the job: `upstream` when configured and it carries the base (the
+    checked-out base branch, else the first of `bases` it has) — a fork
+    stream's real base, never the fork's own copy, exactly as
+    session-start-stream-directives.sh resolves it; else the tracking
+    remote of the branch / of a local base branch; else `origin`; else any
+    remote; else None."""
+    remotes = configured_remotes(cwd)
+    candidates = ([branch] if branch in bases else []) + [b for b in bases if b != branch]
+    if "upstream" in remotes:
+        for b in candidates[:1] if branch in bases else candidates:
+            if ref_exists(cwd, remote_ref("upstream", b)):
+                return "upstream"
+    for b in candidates:
+        rc, out = run_git(cwd, ["config", "--get", "branch.%s.remote" % b])
+        if rc == 0 and out.strip() in remotes:
+            return out.strip()
+    if "origin" in remotes:
+        return "origin"
+    return sorted(remotes)[0] if remotes else None
 
 
 def count_behind(cwd, ref):
@@ -312,17 +354,19 @@ def ff_verdict(cwd, remote="origin"):
     return Verdict("ff", "safe", branch, target, ref, behind)
 
 
-def fast_forward(cwd, verdict, timeout=None, run_hooks=True):
+def fast_forward(cwd, verdict, run_hooks=True):
     """Apply a `ff` verdict with `git merge --ff-only` (a hard net of its own:
     it only ever moves the ref along its own history and refuses rather than
-    overwrite a file edited since the check). `timeout` ends in SIGTERM first
-    (git removes its locks); `run_hooks=False` skips the repo's merge hooks
-    for an unattended caller. True on success."""
+    overwrite a file edited since the check). NEVER bounded or signalled once
+    started: git does not roll back the files a checkout already wrote, so a
+    stopped merge would leave a half-applied tree (review 2). The CALLER
+    decides whether it can afford to start one. `run_hooks=False` skips the
+    repo's merge hooks for an unattended caller. True on success."""
     if verdict.action != "ff":
         return False
     pre = [] if run_hooks else ["-c", "core.hooksPath=/dev/null"]
     rc, _ = run_git(cwd, pre + ["merge", "--ff-only", "--quiet", verdict.ref],
-                    timeout=timeout)
+                    timeout=None, honor_deadline=False)
     return rc == 0
 
 
@@ -331,6 +375,9 @@ def hook_line(verdict, applied=None):
     wording is the hook's historical contract (tests assert it)."""
     b, t, n = verdict.branch, verdict.target, verdict.behind
     r = verdict.reason
+    if r == "in-progress" and verdict.detail == "index.lock":
+        return ("WARNING: another git process holds the index lock "
+                "(.git/index.lock) — leaving the repository untouched")
     if r == "in-progress":
         return ("WARNING: repository has an in-progress git operation "
                 "(merge/rebase/cherry-pick/revert/bisect) — leaving it untouched")
@@ -358,7 +405,9 @@ def hook_line(verdict, applied=None):
 def hook_main(cwd=None):
     """The SessionStart hook's ff step (the caller already fetched origin)."""
     cwd = cwd or os.getcwd()
-    v = ff_verdict(cwd, "origin")
+    branch = current_branch(cwd)
+    remote = pick_remote(cwd, branch, [branch]) if branch else None
+    v = ff_verdict(cwd, remote or "origin")
     applied = fast_forward(cwd, v) if v.action == "ff" else None
     line = hook_line(v, applied)
     if line:
