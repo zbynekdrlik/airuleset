@@ -39,6 +39,7 @@ from pathlib import Path
 # so importing it here creates no cycle — the #433 rule explicitly permits a new
 # leaf to import cli_fleet directly.
 import cli_fleet
+import cli_drop_tunnel_restart  # #1191 leaf (imports only cli_tunnel_apply)
 
 # #1115 (#993 area-review split): the GENERATED-registry engine + cache + harvest
 # helpers live in the cli_drop_lanes leaf (imports ONLY cli_fleet — no cross-import
@@ -657,7 +658,6 @@ def _restart_env(lane):
 def _restart_lane_tunnel(lane, run):
     """Load an ingress edit via the #1189 overlap, LOUD plain `_restart_argv`
     fallback (#1191, `cli_drop_tunnel_restart`). Returns `(ok, shape, detail)`."""
-    import cli_drop_tunnel_restart
     return cli_drop_tunnel_restart.restart_lane_tunnel(
         lane, run, plain_argv=_restart_argv(lane), env=_restart_env(lane))
 
@@ -870,11 +870,11 @@ def cmd_drop_gateway(args):
         print("  wrote %s (drop ingress added, existing entries preserved)"
               % my_lane.tunnel_config)
 
-    # Restart whenever the config changed OR the invoking account's lane is not
-    # yet LIVE (marker absent) — so a re-run AFTER a failed restart still
-    # restarts, instead of writing the LIVE marker over a tunnel that never
-    # reloaded (#664 review C1).
-    if changed or read_drop_marker(marker_path) is None:
+    # Restart when the config changed, the lane is not yet LIVE (marker absent —
+    # never mark LIVE over a tunnel that never reloaded, #664 review C1), or a
+    # previous restart never succeeded (#1191).
+    if (changed or read_drop_marker(marker_path) is None
+            or cli_drop_tunnel_restart.retry_pending(my_lane)):
         ok, shape, detail = _restart_lane_tunnel(my_lane, run)
         if not ok:
             print("  tunnel restart FAILED (%s, %s): %s"
@@ -1035,8 +1035,8 @@ def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None,
                       "%s:%d) (#927)"
                       % (username or "this account", marker_host, marker_port,
                          lane.host, lane.port), file=sys.stderr)
-        if augmented == config_text:
-            return True                         # all ingresses already present — no restart
+        if augmented == config_text and not cli_drop_tunnel_restart.retry_pending(lane):
+            return True                         # present + applied (#1191) — no restart
         Path(lane.tunnel_config).write_text(augmented, encoding="utf-8")
         ok, shape, detail = _restart_lane_tunnel(lane, run)
         if not ok:

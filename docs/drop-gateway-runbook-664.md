@@ -51,10 +51,13 @@ go-live.
    #1189 overlap (#1191, `cli_drop_tunnel_restart.py`): a second connector for
    the same tunnel serves while the main unit restarts, so the tunnel never goes
    dark. On spinbike (SYSTEM unit) this runs `sudo -n systemctl` and needs the
-   grant to cover the overlap unit + a `TUNNEL_PIDFILE` drop-in (the owner-VPS
-   `NOPASSWD:ALL` grant does; it is checked with `sudo -n -l`); a `--user` lane
-   runs `systemctl --user`. Any unmet precondition prints a LOUD line and falls
-   back to the plain `systemctl restart` (dark for the grace period).
+   grant to cover every command of the overlap (the owner-VPS `NOPASSWD:ALL`
+   grant does; each is checked with `sudo -n -l`), plus a `TUNNEL_PIDFILE`
+   drop-in when the hand-managed unit lacks it; a `--user` lane runs
+   `systemctl --user` against its rendered unit. Any unmet precondition prints a
+   LOUD line and falls back to the plain `systemctl restart` (dark for the grace
+   period). A restart that did not succeed leaves `<config>.restart-pending`,
+   so the next install retries it.
 
 4. **Sibling accounts (subdev only)** — the marker (`~/.cloudflared/airuleset-drop.conf`)
    is per-unix-account, but the loopback origin `127.0.0.1:8828` is box-wide. So a

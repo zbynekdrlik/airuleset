@@ -85,8 +85,8 @@ def _unit_props(lane, run, env):
     narrow grant is reported as a grant gap, never as an unreadable unit."""
     prefix = ["systemctl"] if lane.tunnel_system_unit else ["systemctl", "--user"]
     rc, out, _err = _call(run, prefix + ["show", "-p", "ExecStart", "-p",
-                                         "Environment", "-p", "User",
-                                         lane.tunnel_service], env)
+                                         "Environment", "-p", "EnvironmentFiles",
+                                         "-p", "User", lane.tunnel_service], env)
     if rc != 0:
         return None
     props = {}
@@ -98,8 +98,30 @@ def _unit_props(lane, run, env):
 
 
 def _exec_binary(exec_start):
+    """The unit's cloudflared binary, or None unless it runs `cloudflared … tunnel`
+    directly (a wrapper such as `/bin/sh -c` is never copied into the overlap)."""
     m = re.search(r"\bpath=(\S+)", exec_start or "")
-    return m.group(1) if m else None
+    if m is None or Path(m.group(1)).name != "cloudflared":
+        return None
+    return m.group(1) if re.search(r"\btunnel\b", exec_start) else None
+
+
+def _pidfile_gap(lane, props, want):
+    """Why the main unit's `TUNNEL_PIDFILE` cannot be relied on (a reason), "" when
+    it is set to `want`, or None when a drop-in may add it. Only a SYSTEM unit gets
+    a drop-in: airuleset renders the `--user` lane units itself and never writes
+    their drop-ins (cli_webterm_marek/dominika) — their render carries it."""
+    have = [e for e in props.get("Environment", "").split()
+            if e.startswith("TUNNEL_PIDFILE=")]
+    if have:
+        return "" if have[-1] == want else (
+            "%s sets %s, not %s" % (lane.tunnel_service, have[-1], want))
+    if not lane.tunnel_system_unit:
+        return "%s lacks %s (re-render the lane unit)" % (lane.tunnel_service, want)
+    if props.get("EnvironmentFiles"):
+        return ("%s reads an EnvironmentFile, which would override a TUNNEL_PIDFILE "
+                "drop-in" % lane.tunnel_service)
+    return None
 
 
 def _runs_config(exec_start, config) -> bool:
@@ -108,22 +130,24 @@ def _runs_config(exec_start, config) -> bool:
     return re.search(pat, exec_start or "") is not None
 
 
-def _grant_probes(lane, overlap, overlap_path, dropin_path):
-    """Every privileged argv the system-lane overlap runs (`sudo -n -l` checks each)."""
+def _grant_probes(lane, overlap, write_paths):
+    """Every privileged argv the system-lane overlap runs (`sudo -n -l` checks
+    each): the unit-file writes (a `mkdir` only for a missing parent — exactly
+    what `_write_unit_file` runs), then every systemctl call of `overlap_restart`."""
     unit = lane.tunnel_service
-    cmds = [["tee", str(overlap_path)],
-            ["systemctl", "daemon-reload"],
-            ["systemctl", "show", "-p", "ActiveState", "--value", overlap],
-            ["systemctl", "show", "-p", "MainPID", "--value", unit],
-            ["systemctl", "stop", overlap],
-            ["systemctl", "reset-failed", overlap],
-            ["systemctl", "start", "--no-block", overlap],
-            ["systemctl", "stop", "--no-block", overlap],
-            ["systemctl", "restart", "--no-block", unit]]
-    if dropin_path is not None:
-        cmds[1:1] = [["mkdir", "-p", str(dropin_path.parent)],
-                     ["tee", str(dropin_path)]]
-    return cmds
+    cmds = []
+    for path in write_paths:
+        if not path.parent.is_dir():
+            cmds.append(["mkdir", "-p", str(path.parent)])
+        cmds.append(["tee", str(path)])
+    return cmds + [["systemctl", "daemon-reload"],
+                   ["systemctl", "show", "-p", "ActiveState", "--value", overlap],
+                   ["systemctl", "show", "-p", "MainPID", "--value", unit],
+                   ["systemctl", "stop", overlap],
+                   ["systemctl", "reset-failed", overlap],
+                   ["systemctl", "start", "--no-block", overlap],
+                   ["systemctl", "stop", "--no-block", overlap],
+                   ["systemctl", "restart", "--no-block", unit]]
 
 
 def _read(path):
@@ -138,7 +162,9 @@ def _write_unit_file(lane, run, env, path, text):
     if _read(path) == text:
         return False, None
     if lane.tunnel_system_unit:
-        rc, _o, err = _call(run, ["sudo", "-n", "mkdir", "-p", str(path.parent)], env)
+        rc, err = 0, ""
+        if not path.parent.is_dir():
+            rc, _o, err = _call(run, ["sudo", "-n", "mkdir", "-p", str(path.parent)], env)
         if rc == 0:
             rc, _o, err = _call(run, ["sudo", "-n", "tee", str(path)], env, stdin=text)
         return True, (None if rc == 0 else "sudo write of %s failed: %s"
@@ -164,24 +190,25 @@ def prepare_overlap(lane, run, env, systemctl, unit_dir=None):
                 "tunnel" % (unit, config))
     binary = _exec_binary(props.get("ExecStart"))
     if binary is None:
-        return "cannot read the cloudflared binary from %s ExecStart" % unit
+        return "%s does not run `cloudflared … tunnel` directly" % unit
+    gap = _pidfile_gap(lane, props, "TUNNEL_PIDFILE=%s"
+                       % cli_tunnel_apply.tunnel_pidfile(config))
+    if gap:
+        return gap
     unit_dir = Path(unit_dir) if unit_dir is not None else lane_unit_dir(lane)
     overlap = cli_tunnel_apply.overlap_service_name(unit)
-    overlap_path = unit_dir / overlap
-    want_pid = "TUNNEL_PIDFILE=%s" % cli_tunnel_apply.tunnel_pidfile(config)
-    dropin_path = (None if want_pid in props.get("Environment", "").split()
-                   else unit_dir / (unit + ".d") / PIDFILE_DROPIN)
+    user = props.get("User") if lane.tunnel_system_unit else None
+    writes = [(unit_dir / overlap, cli_tunnel_apply.render_overlap_unit(
+        unit, config, binary, user=user or None))]
+    if gap is None:
+        writes.append((unit_dir / (unit + ".d") / PIDFILE_DROPIN,
+                       render_pidfile_dropin(config)))
     if lane.tunnel_system_unit:
-        for cmd in _grant_probes(lane, overlap, overlap_path, dropin_path):
+        for cmd in _grant_probes(lane, overlap, [p for p, _t in writes]):
             rc, _o, _e = _call(run, ["sudo", "-n", "-l"] + cmd, env)
             if rc != 0:
                 return ("the sudo grant does not cover `%s` — the overlap needs it "
                         "(gap: ticket #1191)" % " ".join(cmd))
-    user = props.get("User") if lane.tunnel_system_unit else None
-    writes = [(overlap_path, cli_tunnel_apply.render_overlap_unit(
-        unit, config, binary, user=user or None))]
-    if dropin_path is not None:
-        writes.append((dropin_path, render_pidfile_dropin(config)))
     changed = False
     for path, text in writes:
         wrote, err = _write_unit_file(lane, run, env, path, text)
@@ -195,21 +222,54 @@ def prepare_overlap(lane, run, env, systemctl, unit_dir=None):
     return None
 
 
-def restart_lane_tunnel(lane, run, *, plain_argv, env, unit_dir=None,
-                        sleep=time.sleep, clock=time.monotonic):
-    """Restart `lane`'s local tunnel to load an ingress edit. Returns
-    `(ok, shape, detail)`: shape `"overlap"` (no dark window), `"plain"` (a LOUD
-    stop-then-start) or `"failed"` (the new main never re-registered; the
-    overlap is LEFT SERVING — `cli_tunnel_apply.overlap_restart`)."""
+def _pending_path(lane) -> Path:
+    return Path(lane.tunnel_config).with_suffix(".restart-pending")
+
+
+def retry_pending(lane) -> bool:
+    """True when a previous restart of `lane`'s tunnel did not succeed (its
+    pending marker, written before every restart and removed only on success, is
+    still there), so an UNCHANGED ingress must still be re-applied: the config
+    already carries it, the running connector may not."""
+    return _pending_path(lane).exists()
+
+
+def _restart(lane, run, plain_argv, env, unit_dir, sleep, clock):
     systemctl = lane_systemctl(lane, run, env)
-    reason = prepare_overlap(lane, run, env, systemctl, unit_dir=unit_dir)
-    if reason is None:
-        ok, shape = cli_tunnel_apply.overlap_restart(
-            systemctl, lane.tunnel_service, lane.tunnel_config, sleep=sleep,
-            clock=clock, lane="(drop %s)" % lane.host)
-        return ok, shape, "" if ok else "see the LOUD line above"
+    try:
+        reason = prepare_overlap(lane, run, env, systemctl, unit_dir=unit_dir)
+        if reason is None:
+            ok, shape = cli_tunnel_apply.overlap_restart(
+                systemctl, lane.tunnel_service, lane.tunnel_config, sleep=sleep,
+                clock=clock, lane="(drop %s)" % lane.host)
+            return ok, shape, "" if ok else "see the LOUD line above"
+    except Exception as e:
+        print("  drop-gateway: LOUD — overlap restart of %s errored (%r); the "
+              "next install retries (#1191)." % (lane.tunnel_service, e),
+              file=sys.stderr)
+        return False, "failed", repr(e)
     print("  drop-gateway: LOUD — no overlap for %s (%s); PLAIN restart — the "
           "tunnel is DARK for its grace period (#1191)."
           % (lane.tunnel_service, reason), file=sys.stderr)
     rc, _o, err = _call(run, list(plain_argv), env)
     return rc == 0, "plain", err.strip()
+
+
+def restart_lane_tunnel(lane, run, *, plain_argv, env, unit_dir=None,
+                        sleep=time.sleep, clock=time.monotonic):
+    """Restart `lane`'s local tunnel to load an ingress edit. Returns
+    `(ok, shape, detail)`: shape `"overlap"` (no dark window), `"plain"` (a LOUD
+    stop-then-start) or `"failed"` (the new main never re-registered — the
+    overlap is LEFT SERVING, `cli_tunnel_apply.overlap_restart` — or the restart
+    errored). Anything but success leaves the `retry_pending` marker, so the next
+    install retries even though the config is unchanged. Never raises."""
+    pending = _pending_path(lane)
+    try:
+        pending.touch()
+    except OSError as e:
+        print("  drop-gateway: LOUD — cannot write %s (%s); a failed restart "
+              "will not be retried automatically." % (pending, e), file=sys.stderr)
+    ok, shape, detail = _restart(lane, run, plain_argv, env, unit_dir, sleep, clock)
+    if ok:
+        pending.unlink(missing_ok=True)
+    return ok, shape, detail
