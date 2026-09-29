@@ -197,7 +197,7 @@ def _status(registry_path=None):
 
 def transfer_session(account, from_dir, *, from_home=None, render=False,
                      apply=False, target_home=None, target_cwd=None,
-                     proc_root="/proc", stage_base="/tmp"):
+                     proc_root="/proc"):
     """#1190: copy the Claude conversation of the old checkout ``from_dir`` into
     the declared project account. Default = dry run (the listing); ``render``
     prints the root script; ``apply`` runs it and needs root. The target is
@@ -224,12 +224,14 @@ def transfer_session(account, from_dir, *, from_home=None, render=False,
     try:
         plan = session.build_plan(account, from_dir, from_home=from_home,
                                   target_home=target_home, target_cwd=target_cwd,
-                                  proc_root=proc_root, stage_base=stage_base)
+                                  proc_root=proc_root)
     except ValueError as e:
         print("transfer-session: %s" % e, file=sys.stderr)
         return 1
     if plan["refusals"]:
-        print(session.format_plan(plan))
+        # stderr ONLY: `--render | sudo bash` must never feed a listing (raw,
+        # owner-chosen file names) to root bash
+        print(session.format_plan(plan), file=sys.stderr)
         for r in plan["refusals"]:
             print("REFUSED: %s" % r, file=sys.stderr)
         return 1
@@ -262,7 +264,11 @@ def cmd_accounts(args):
                                 from_home=getattr(args, "from_home", None),
                                 render=bool(getattr(args, "render", False)),
                                 apply=bool(getattr(args, "apply", False)))
-    if action != "status":
+    stray = (isinstance(getattr(args, "account", None), str)
+             or isinstance(getattr(args, "from_dir", None), str)
+             or getattr(args, "render", None) is True
+             or getattr(args, "apply", None) is True)
+    if action != "status" or stray:
         print("usage: airuleset.py accounts status [--json] | transfer-session "
               "<account> --from-dir <old checkout>", file=sys.stderr)
         return 2

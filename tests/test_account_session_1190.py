@@ -3,17 +3,18 @@ project account (the #1184 migration used to leave it behind in newlevel).
 
 Every test builds a FAKE home tree (old home, new home, a fake /proc) under a
 temp dir; nothing touches a real ~/.claude. The rendered root script is run
-with `runuser`/`chown` replaced by PATH stubs (no root needed): the stubs log
-their argv and `runuser -u X -- cmd` just runs `cmd`, so the test sees every
-ownership step AND the real copy, modes and mtimes.
+with `runuser` replaced by a PATH stub (no root needed): it logs its argv and
+`runuser -u X -- cmd` just runs `cmd`, so the test sees which uid every read
+and write runs as, AND the real copy, modes and mtimes.
 
 Covers the design acceptance:
   * a live claude cwd under the old dir (or one of its worktrees) -> refused;
   * an existing target uuid -> refused (and a memory file name collision);
   * the dry run lists the jsonl + session dir + memory, excludes the
     worktree-lane keys and writes nothing;
-  * the rendered script copies with the account as owner, 0600/0700 modes and
-    preserved mtimes, via a root-owned stage and writes as the account;
+  * the rendered script reads the source AS its owner and writes the target
+    AS the account (so the account owns every file), 0600/0700 modes,
+    preserved mtimes, no-clobber placement;
   * the jsonl is NOT rewritten (Claude Code resolves a session by the projects
     DIRECTORY, never by the jsonl `cwd` field — evidence on the ticket);
   * the `claude --resume <uuid>` line and the path-move note are printed.
@@ -21,6 +22,8 @@ Covers the design acceptance:
 import io
 import json
 import os
+import pwd
+import shutil
 import stat
 import subprocess
 import sys
@@ -49,7 +52,7 @@ def _line(uuid, cwd, text):
 
 
 class _Tree:
-    """old home + new home + fake /proc + stage dir under one temp root."""
+    """old home + new home + fake /proc under one temp root."""
 
     def __init__(self, base):
         self.base = Path(base)
@@ -58,8 +61,7 @@ class _Tree:
         self.old_dir = str(self.old_home / "devel" / "fohmixer")
         self.new_cwd = str(self.new_home / "devel" / "fohmixer")
         self.proc = self.base / "proc"
-        self.stage = self.base / "stage"
-        for d in (self.proc, self.stage, Path(self.old_dir), Path(self.new_cwd)):
+        for d in (self.proc, Path(self.old_dir), Path(self.new_cwd)):
             d.mkdir(parents=True, exist_ok=True)
         self.src = (self.old_home / ".claude" / "projects"
                     / sess.project_key(self.old_dir))
@@ -91,18 +93,20 @@ class _Tree:
         # U2 is the NEWEST session (the one `--resume` should name first)
         os.utime(self.src / (U2 + ".jsonl"), (OLD_MTIME + 60, OLD_MTIME + 60))
 
-    def proc_entry(self, pid, comm, cwd, argv0=None):
+    def proc_entry(self, pid, comm, cwd, argv0=None, exe=None):
         d = self.proc / str(pid)
         d.mkdir()
         (d / "comm").write_text(comm + "\n")
         (d / "cmdline").write_bytes((argv0 or comm).encode() + b"\0--x\0")
         os.symlink(cwd, d / "cwd")
+        if exe:
+            os.symlink(exe, d / "exe")
 
     def plan(self, **kw):
         return sess.build_plan(
             "fohmixer", self.old_dir, from_home=str(self.old_home),
             target_home=str(self.new_home), target_cwd=self.new_cwd,
-            proc_root=str(self.proc), stage_base=str(self.stage), **kw)
+            proc_root=str(self.proc), **kw)
 
 
 class TestProjectKey(unittest.TestCase):
@@ -111,13 +115,24 @@ class TestProjectKey(unittest.TestCase):
         # measured on Claude Code 2.1.284: `.../x/a.b_c d` -> `...-x-a-b-c-d`
         self.assertEqual(sess.project_key("/home/newlevel/devel/fohmixer"),
                          "-home-newlevel-devel-fohmixer")
-        self.assertEqual(sess.project_key("/tmp/x/a.b_c d"), "-tmp-x-a-b-c-d")
+        self.assertEqual(sess.project_key("/tmp/x/a.b_c"), "-tmp-x-a-b-c")
         self.assertEqual(sess.project_key("/h/website-bakerion.ai"),
                          "-h-website-bakerion-ai")
 
     def test_relative_path_is_refused(self):
         with self.assertRaises(ValueError):
             sess.project_key("devel/fohmixer")
+
+    def test_it_is_the_fleet_encoder(self):
+        from watchdog.transcripts import encode_project_dir
+        path = "/home/newlevel/devel/website-newlevel.media/a_b"
+        self.assertEqual(sess.project_key(path), encode_project_dir(path))
+
+    def test_a_char_the_fleet_encoder_does_not_map_is_refused(self):
+        # Claude Code maps a space to '-', encode_project_dir keeps it: refuse
+        for bad in ("/tmp/x/a b", "/tmp/x/a+b", "/tmp/x/a@b"):
+            with self.assertRaises(ValueError, msg=bad):
+                sess.project_key(bad)
 
 
 class TestLiveGuard(unittest.TestCase):
@@ -193,7 +208,7 @@ class TestPlanAndDryRun(unittest.TestCase):
         plan = sess.build_plan(
             "fohmixer", str(self.t.base / "nope"), from_home=str(self.t.old_home),
             target_home=str(self.t.new_home), target_cwd=self.t.new_cwd,
-            proc_root=str(self.t.proc), stage_base=str(self.t.stage))
+            proc_root=str(self.t.proc))
         self.assertTrue(plan["refusals"])
 
     def _dry_run(self, **kw):
@@ -202,7 +217,7 @@ class TestPlanAndDryRun(unittest.TestCase):
             rc = accounts.transfer_session(
                 "fohmixer", self.t.old_dir, from_home=str(self.t.old_home),
                 target_home=str(self.t.new_home), target_cwd=self.t.new_cwd,
-                proc_root=str(self.t.proc), stage_base=str(self.t.stage), **kw)
+                proc_root=str(self.t.proc), **kw)
         return rc, out.getvalue(), err.getvalue()
 
     def test_dry_run_prints_the_listing_and_the_resume_line_and_writes_nothing(self):
@@ -217,12 +232,29 @@ class TestPlanAndDryRun(unittest.TestCase):
     def test_dry_run_with_a_refusal_exits_1(self):
         self.t.proc_entry(4242, "claude", self.t.old_dir)
         rc, out, err = self._dry_run()
-        self.assertEqual(rc, 1)
+        self.assertEqual((rc, out), (1, ""))     # a refusal writes stderr only
         self.assertIn("4242", err)
         # a refused plan never reads like a go: no DRY RUN banner, no resume line
-        self.assertIn("REFUSED", out)
-        self.assertNotIn("DRY RUN", out)
-        self.assertNotIn("claude --resume", out)
+        self.assertIn("REFUSED", err)
+        self.assertNotIn("DRY RUN", err)
+        self.assertNotIn("claude --resume", err)
+
+    def test_refused_render_prints_nothing_on_stdout(self):
+        # `--render | sudo bash` must never feed the listing to root bash
+        (self.t.src / "memory" / "$(touch PWNED)").write_text("x")
+        self.t.proc_entry(4242, "claude", self.t.old_dir)
+        rc, out, err = self._dry_run(render=True)
+        self.assertEqual((rc, out), (1, ""))
+        self.assertIn("4242", err)
+
+    def test_unreadable_source_says_so(self):
+        os.chmod(self.t.src, 0)
+        try:
+            plan = self.t.plan()
+        finally:
+            os.chmod(self.t.src, 0o755)
+        self.assertTrue(any("cannot read" in r for r in plan["refusals"]),
+                        plan["refusals"])
 
     def test_apply_needs_root(self):
         with mock.patch("os.geteuid", return_value=1000):
@@ -241,14 +273,11 @@ class TestRenderedScript(unittest.TestCase):
         self.bin = self.t.base / "bin"
         self.bin.mkdir()
         self.log = self.t.base / "stub.log"
-        (self.bin / "chown").write_text(
-            '#!/usr/bin/env bash\necho "chown $*" >> %s\n' % self.log)
         (self.bin / "runuser").write_text(
             '#!/usr/bin/env bash\nset -euo pipefail\n'
             'echo "runuser $*" >> %s\n'
             'while [ "$1" != "--" ]; do shift; done; shift; exec "$@"\n' % self.log)
-        for f in ("chown", "runuser"):
-            os.chmod(self.bin / f, 0o755)
+        os.chmod(self.bin / "runuser", 0o755)
 
     def tearDown(self):
         self._tmp.cleanup()
@@ -281,12 +310,23 @@ class TestRenderedScript(unittest.TestCase):
         self.assertEqual(int((dst / (U2 + ".jsonl")).stat().st_mtime), OLD_MTIME + 60)
         for p in [dst / U1, dst / U1 / "subagents"]:
             self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o700, p)
-        # ownership: the staged copy is chowned to the account, and every
-        # write into the account's home runs AS the account
-        log = self._log()
-        self.assertIn("chown -R fohmixer:fohmixer", log)
-        self.assertIn("runuser -u fohmixer --", log)
-        self.assertEqual(list(self.t.stage.iterdir()), [], "stage not cleaned")
+        # ownership: the source is read AS its owner, every write into the
+        # account's home runs AS the account (so the account owns the files),
+        # and each of the 5 items is placed by the account's no-clobber rename
+        log = self._log().splitlines()
+        owner = pwd.getpwuid(os.stat(self.t.src).st_uid).pw_name
+        self.assertTrue(any(ln.startswith("runuser -u %s -- tar -C %s -cf -"
+                                          % (owner, self.t.src)) for ln in log), log)
+        self.assertTrue(any(ln.startswith("runuser -u fohmixer -- tar -C ")
+                            and ln.endswith(" -xpf -") for ln in log), log)
+        placed = [ln for ln in log if ln.startswith("runuser -u fohmixer -- mv -n -T")]
+        self.assertEqual(len(placed), 5, placed)
+        # every command that is not the source read runs as the account
+        self.assertEqual([ln for ln in log if not ln.startswith(
+            ("runuser -u fohmixer -- ", "runuser -u %s -- tar -C %s -cf -"
+             % (owner, self.t.src)))], [])
+        self.assertEqual([p.name for p in dst.iterdir() if p.name.startswith(".")],
+                         [], "temp dir not cleaned")
         # the source is untouched
         self.assertTrue((self.t.src / (U1 + ".jsonl")).is_file())
         self.assertIn("claude --resume " + U2, r.stdout)
@@ -299,6 +339,76 @@ class TestRenderedScript(unittest.TestCase):
         self.assertEqual(r.returncode, 1)
         self.assertIn("4242", r.stderr)
         self.assertFalse(self.t.dst.exists())
+
+    def _guard_cases(self):
+        old = self.t.old_dir
+        wt = old + "/.claude/worktrees/agent-zz"
+        return [
+            ("native claude", dict(comm="claude", cwd=old), True),
+            ("npm claude in a worktree",
+             dict(comm="node", cwd=wt,
+                  argv0="/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"),
+             True),
+            ("versioned binary", dict(comm="2.1.284", cwd=old, argv0="2.1.284",
+                                      exe="/home/x/.local/share/claude/versions/2.1.284"),
+             True),
+            ("deleted cwd", dict(comm="claude", cwd=old + " (deleted)"), True),
+            ("sibling prefix", dict(comm="claude", cwd=old + "-other"), False),
+            ("a shell", dict(comm="bash", cwd=old), False),
+            ("claude-code-log tool", dict(comm="python3", cwd=old,
+                                          argv0="/home/x/claude-code-log/run.py"),
+             False),
+        ]
+
+    def test_bash_guard_matches_the_python_guard(self):
+        for n, (name, kw, refuse) in enumerate(self._guard_cases()):
+            with self.subTest(name):
+                script = sess.render_script(self.t.plan())      # rendered clean
+                pid = 5000 + n
+                self.t.proc_entry(pid, **kw)
+                py = any(str(pid) in r for r in self.t.plan()["refusals"])
+                r = self._run(script)
+                self.assertEqual(py, refuse, "python guard")
+                self.assertEqual(r.returncode == 1 and str(pid) in r.stderr, refuse,
+                                 r.stderr)
+                shutil.rmtree(self.t.proc / str(pid))
+                if self.t.dst.exists():
+                    shutil.rmtree(self.t.dst)
+
+    def test_symlinked_old_checkout_guards_its_real_path(self):
+        link = str(self.t.base / "link-fohmixer")
+        os.symlink(self.t.old_dir, link)
+        shutil.copytree(self.t.src, self.t.src.parent / sess.project_key(link))
+        plan = sess.build_plan(
+            "fohmixer", link, from_home=str(self.t.old_home),
+            target_home=str(self.t.new_home), target_cwd=self.t.new_cwd,
+            proc_root=str(self.t.proc))
+        script = sess.render_script(plan)
+        self.t.proc_entry(4244, "claude", self.t.old_dir)   # /proc shows the real path
+        replan = sess.build_plan(
+            "fohmixer", link, from_home=str(self.t.old_home),
+            target_home=str(self.t.new_home), target_cwd=self.t.new_cwd,
+            proc_root=str(self.t.proc))
+        self.assertTrue(any("4244" in r for r in replan["refusals"]))
+        r = self._run(script)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("4244", r.stderr)
+
+    def test_an_item_that_appears_meanwhile_is_never_overwritten(self):
+        script = sess.render_script(self.t.plan())
+        # a file that appears between step 2 and step 4 (simulated: the
+        # account's `mkdir` of memory/ is where it lands) must not be clobbered
+        (self.bin / "runuser").write_text(
+            '#!/usr/bin/env bash\nset -euo pipefail\n'
+            'echo "runuser $*" >> %s\n'
+            'while [ "$1" != "--" ]; do shift; done; shift\n'
+            'if [ "$1" = mv ] && [ "${@: -1}" = %s ]; then echo mine > "${@: -1}"; fi\n'
+            'exec "$@"\n' % (self.log, self.t.dst / "memory" / "x.md"))
+        r = self._run(script)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("FAILED", r.stderr)
+        self.assertIn("memory/MEMORY.md", r.stderr)    # named as already placed
+        self.assertEqual((self.t.dst / "memory" / "x.md").read_text(), "mine\n")
 
     def test_script_rechecks_an_existing_target_uuid_at_run_time(self):
         script = sess.render_script(self.t.plan())
@@ -328,6 +438,15 @@ class TestCliWiring(unittest.TestCase):
                          ("transfer-session", "fohmixer",
                           "/home/newlevel/devel/fohmixer", False, False))
         self.assertEqual(p.parse_args(["accounts"]).action, "status")
+
+    def test_status_rejects_transfer_arguments(self):
+        import argparse
+        p = argparse.ArgumentParser()
+        sub = p.add_subparsers(dest="cmd")
+        accounts.register_parser(sub)
+        a = p.parse_args(["accounts", "status", "fohmixer"])
+        with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+            self.assertEqual(accounts.cmd_accounts(a), 2)
 
     def test_undeclared_account_is_refused(self):
         err = io.StringIO()

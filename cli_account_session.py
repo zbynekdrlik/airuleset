@@ -12,22 +12,29 @@ Code keeps that under ``~/.claude/projects/<cwd-key>/``:
 The project account cannot read ``/home/newlevel`` (0700), and loosening that
 would defeat #1184, so root COPIES those files into the account's own key dir.
 ``accounts transfer-session`` (``cli_accounts``) is the CLI. This leaf is the
-pure half: the key encoder, the live-process guard, the plan, and the root
-script it renders (the ``account-bootstrap --render`` shape).
+pure half: the live-process guard, the plan, and the root script it renders
+(the ``account-bootstrap --render`` shape). The script runs as root but never
+reads or writes through a path an account controls. The source is read AS its
+owner (``runuser … tar -c``) and unpacked AS the target account into a private
+temp dir inside the target. Each item is then placed with a no-clobber rename.
 
 Not copied, on purpose:
 
   * the worktree-lane keys (``<key>--claude-worktrees-*``). Those are the
     supervisor's dead lanes, not the owner's conversation;
-  * ``file-history``/``todos``. ``--resume`` does not need them (proved on
-    2.1.284 below), and a rewind of file edits recorded under the old path
-    would restore files into a checkout that no longer exists.
+  * ``file-history``/``todos``. The resume in point 2 below ran from a
+    scratch HOME that had neither, so ``--resume`` does not need them. A
+    rewind of file edits recorded under the old path would also restore
+    files into a checkout that no longer exists.
 
 The jsonl ``cwd`` field is NOT rewritten. Evidence: Claude Code 2.1.284,
 throwaway runs under a scratch HOME (#1190 issuecomment-5898853002):
 
   1. The key is the cwd with EVERY non-``[A-Za-z0-9]`` char turned into ``-``:
-     ``.../a.b_c d`` -> ``...-a-b-c-d``.
+     ``.../a.b_c d`` -> ``...-a-b-c-d``. The fleet's one encoder,
+     ``watchdog.transcripts.encode_project_dir``, maps only ``/``, ``.`` and
+     ``_``. ``project_key`` reuses it and REFUSES any other character, so the
+     two agree on every path this accepts.
   2. ``claude -p --resume <uuid>`` found a session copied into the NEW cwd's
      key whose lines still said ``cwd: <old path>``, and also one where that
      path did not exist. The new turn chained onto the old leaf and was
@@ -47,9 +54,12 @@ import stat
 import time
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
-# Claude Code shortens (hashes) keys longer than this; our project paths never
-# are, so a longer one is refused instead of guessing the hash.
+# Claude Code shortens very long keys (a hash suffix — not measured here). Our
+# project paths are far shorter, so a longer key is refused, never guessed.
 MAX_KEY_LEN = 200
+# Path characters on which `encode_project_dir` (maps `/._` only) and Claude
+# Code (maps every non-alphanumeric char, measured on 2.1.284) agree.
+_SAFE_PATH_RE = re.compile(r"/[A-Za-z0-9/._-]*")
 # A worktree lane's cwd is `<checkout>/.claude/worktrees/<name>`, so its key is
 # `<checkout key>--claude-worktrees-<name>`.
 WORKTREE_KEY_INFIX = "--claude-worktrees-"
@@ -59,7 +69,12 @@ def project_key(cwd):
     """Claude Code's ``~/.claude/projects`` directory name for ``cwd``."""
     if not isinstance(cwd, str) or not cwd.startswith("/"):
         raise ValueError("not an absolute path: %r" % (cwd,))
-    key = "".join(c if c.isascii() and c.isalnum() else "-" for c in cwd)
+    if not _SAFE_PATH_RE.fullmatch(cwd):
+        raise ValueError("%r has a character outside [A-Za-z0-9/._-]: Claude Code "
+                         "maps it to '-', the fleet encoder does not — refused "
+                         "(#1190)" % (cwd,))
+    from watchdog.transcripts import encode_project_dir
+    key = encode_project_dir(cwd)
     if len(key) > MAX_KEY_LEN:
         raise ValueError("project key for %r is longer than %d chars (Claude "
                          "Code hashes those) — not supported" % (cwd, MAX_KEY_LEN))
@@ -74,10 +89,14 @@ def default_from_home(from_dir):
     return None
 
 
-def _is_claude(comm, cmdline):
+def _is_claude(comm, cmdline, exe=""):
+    """A Claude Code process: the native binary (comm / argv0 ``claude``, or an
+    exe under ``…/claude/versions/``) or the npm build (``node …/@anthropic-ai/
+    claude-code/cli.js``). The bash guard in ``_SCRIPT`` mirrors this."""
     argv0 = cmdline.split(b"\0", 1)[0].decode("utf-8", "replace")
     return (comm == "claude" or os.path.basename(argv0) == "claude"
-            or b"claude-code" in cmdline)
+            or "/claude/versions/" in exe
+            or b"@anthropic-ai/claude-code/" in cmdline)
 
 
 def _read(path, mode="r"):
@@ -88,10 +107,15 @@ def _read(path, mode="r"):
         return b"" if "b" in mode else ""
 
 
-def live_claude_processes(old_dir, proc_root="/proc", self_pid=None):
-    """([(pid, cwd)] of claude processes whose cwd is ``old_dir`` or below it
-    (its worktrees included), number of processes whose cwd was unreadable).
-    A non-root caller cannot read other users' cwd; the root script re-checks."""
+def _under(cwd, dirs):
+    return any(cwd == d or cwd.startswith(d.rstrip("/") + "/") for d in dirs)
+
+
+def live_claude_processes(old_dirs, proc_root="/proc", self_pid=None):
+    """([(pid, cwd)] of claude processes whose cwd is one of ``old_dirs`` (the
+    typed and the resolved old checkout) or below it, worktrees included;
+    number of processes whose cwd was unreadable). A non-root caller cannot
+    read other users' cwd; the root script re-checks."""
     hits, unreadable = [], 0
     try:
         pids = sorted((p for p in os.listdir(proc_root) if p.isdigit()), key=int)
@@ -110,10 +134,14 @@ def live_claude_processes(old_dir, proc_root="/proc", self_pid=None):
             continue
         if cwd.endswith(" (deleted)"):
             cwd = cwd[:-len(" (deleted)")]
-        if cwd != old_dir and not cwd.startswith(old_dir.rstrip("/") + "/"):
+        if not _under(cwd, old_dirs):
             continue
+        try:
+            exe = os.readlink(os.path.join(base, "exe"))
+        except OSError:
+            exe = ""
         if _is_claude(_read(os.path.join(base, "comm")).strip(),
-                      _read(os.path.join(base, "cmdline"), "rb")):
+                      _read(os.path.join(base, "cmdline"), "rb"), exe):
             hits.append((int(pid), cwd))
     return hits, unreadable
 
@@ -204,8 +232,24 @@ def _target_conflicts(dst_dir, sessions, memory):
     return refusals, True
 
 
+def _source_problem(src_dir, from_dir):
+    """Why the source key dir cannot be listed here, or None."""
+    try:
+        os.listdir(src_dir)
+    except FileNotFoundError:
+        return "no Claude sessions for %s (%s is missing)" % (from_dir, src_dir)
+    except NotADirectoryError:
+        return "%s is not a directory" % src_dir
+    except PermissionError:
+        return ("cannot read %s as uid %d — run the dry run as that home's owner "
+                "or as root" % (src_dir, os.geteuid()))
+    if not _is_real_dir(src_dir):
+        return "%s is a symlink, not the key dir — refused" % src_dir
+    return None
+
+
 def build_plan(account, from_dir, *, from_home, target_home, target_cwd,
-               proc_root="/proc", stage_base="/tmp", self_pid=None):
+               proc_root="/proc", self_pid=None):
     """What a transfer of ``from_dir``'s conversation into ``account`` would
     copy, and every reason it must not (``refusals``, empty = go)."""
     for label, path in (("--from-dir", from_dir), ("target cwd", target_cwd),
@@ -215,19 +259,21 @@ def build_plan(account, from_dir, *, from_home, target_home, target_cwd,
             raise ValueError("%s must be an absolute path without control "
                              "characters: %r" % (label, path))
     from_dir = os.path.normpath(from_dir)
+    # /proc/<pid>/cwd is the RESOLVED path: guard the typed and the real one
+    old_dirs = sorted({from_dir, os.path.realpath(from_dir)})
     src_dir = os.path.join(from_home, ".claude", "projects", project_key(from_dir))
     dst_dir = os.path.join(target_home, ".claude", "projects", project_key(target_cwd))
     plan = {"account": account, "from_dir": from_dir, "from_home": from_home,
             "target_cwd": target_cwd, "src_dir": src_dir, "dst_dir": dst_dir,
-            "proc_root": proc_root, "stage_base": stage_base, "sessions": [],
+            "old_dirs": old_dirs, "proc_root": proc_root, "sessions": [],
             "memory": [], "memory_bytes": 0, "other": [], "excluded_keys": [],
             "refusals": [], "target_checked": True, "unreadable_procs": 0}
     if src_dir == dst_dir:
         plan["refusals"].append("source and target are the same key dir %s" % src_dir)
         return plan
-    if not _is_real_dir(src_dir):
-        plan["refusals"].append("no Claude sessions for %s (%s is missing)"
-                                % (from_dir, src_dir))
+    problem = _source_problem(src_dir, from_dir)
+    if problem:
+        plan["refusals"].append(problem)
         return plan
     (plan["sessions"], plan["memory"], plan["memory_bytes"],
      plan["other"]) = _scan_source(src_dir)
@@ -240,7 +286,7 @@ def build_plan(account, from_dir, *, from_home, target_home, target_cwd,
         dst_dir, plan["sessions"], plan["memory"])
     plan["refusals"] += conflicts
     hits, plan["unreadable_procs"] = live_claude_processes(
-        from_dir, proc_root, self_pid=os.getpid() if self_pid is None else self_pid)
+        old_dirs, proc_root, self_pid=os.getpid() if self_pid is None else self_pid)
     plan["refusals"] += ["claude pid %d runs in %s — end that session first "
                          "(#1190)" % hit for hit in hits]
     return plan
@@ -311,29 +357,40 @@ set -euo pipefail
 
 # airuleset session transfer into project account {account} (#1190)
 # Generated by: python3 airuleset.py accounts transfer-session {account} --from-dir {from_dir} --render
-# Run as root on the account's host. COPIES (the source stays); refuses on a
-# live claude in the old checkout or on a session/memory file already present.
+# Run as root on the account's host. COPIES (the source stays). Root never
+# reads or writes through a path an account controls: the source is read AS
+# its owner, the target is written AS the account. Refuses on a live claude in
+# the old checkout, or on a session or memory file the target already has.
 
 ACCOUNT={account}
-OLD_DIR={from_dir}
+OLD_DIRS=({old_dirs})
 SRC={src}
 DST={dst}
 PROC={proc}
 SESSIONS=({sessions})
 MEMORY_FILES=({memory})
+ITEMS=({items})
 
 echo "=== airuleset session transfer: $SRC -> $DST ==="
 
 # 1. Live guard: no claude may run in the old checkout or one of its worktrees
+#    (the same test as cli_account_session._is_claude)
 for p in "$PROC"/[0-9]*; do
     [ "${{p##*/}}" = "$$" ] && continue
     cwd=$(readlink "$p/cwd" 2>/dev/null) || continue
     cwd=${{cwd% (deleted)}}
-    case "$cwd" in "$OLD_DIR"|"$OLD_DIR"/*) ;; *) continue ;; esac
+    under=0
+    for d in "${{OLD_DIRS[@]}}"; do
+        case "$cwd" in "$d"|"$d"/*) under=1 ;; esac
+    done
+    [ "$under" = 1 ] || continue
     comm=$(cat "$p/comm" 2>/dev/null || true)
+    exe=$(readlink "$p/exe" 2>/dev/null || true)
     argv0=$(tr '\\0' '\\n' < "$p/cmdline" 2>/dev/null | head -n 1 || true)
     cmdline=$(tr '\\0' ' ' < "$p/cmdline" 2>/dev/null || true)
-    if [ "$comm" = claude ] || [ "${{argv0##*/}}" = claude ] || [[ "$cmdline" == *claude-code* ]]; then
+    if [ "$comm" = claude ] || [ "${{argv0##*/}}" = claude ] \\
+            || [[ "$exe" == */claude/versions/* ]] \\
+            || [[ "$cmdline" == *@anthropic-ai/claude-code/* ]]; then
         echo "REFUSED: claude pid ${{p##*/}} runs in $cwd — end that session first (#1190)" >&2
         exit 1
     fi
@@ -353,65 +410,69 @@ for f in "${{MEMORY_FILES[@]}}"; do
     fi
 done
 
-# 3. Stage a copy root-side. Modes are set while it is still root-owned, then
-#    it is chowned: the account never owns a path a root chmod later follows.
-STAGE=$(mktemp -d {stage_base}/airuleset-session-1190.XXXXXX)
-trap 'rm -rf -- "$STAGE"' EXIT
-chmod 0711 "$STAGE"
-mkdir -m 0700 "$STAGE/copy"
-for u in "${{SESSIONS[@]}}"; do
-    cp -a -- "$SRC/$u.jsonl" "$STAGE/copy/"
-    if [ -d "$SRC/$u" ]; then cp -a -- "$SRC/$u" "$STAGE/copy/"; fi
-done
-if [ "${{#MEMORY_FILES[@]}}" -gt 0 ]; then
-    mkdir -m 0700 "$STAGE/copy/memory"
-    for f in "${{MEMORY_FILES[@]}}"; do
-        mkdir -p -- "$STAGE/copy/memory/$(dirname -- "$f")"
-        cp -a -- "$SRC/memory/$f" "$STAGE/copy/memory/$f"
-    done
-fi
-find "$STAGE/copy" -type d -exec chmod 0700 {{}} +
-find "$STAGE/copy" -type f -exec chmod 0600 {{}} +
-chown -R "$ACCOUNT:$ACCOUNT" "$STAGE/copy"
-
-# 4. Place it AS the account: every write into its home runs with its uid
+# 3. Read the source AS its owner and unpack it AS the account into a private
+#    temp dir inside the target (same filesystem: step 4 only renames).
+#    tar keeps the mtimes; the modes are set by the account on its own copy.
+SRC_OWNER=$(stat -c %U -- "$SRC")
 runuser -u "$ACCOUNT" -- mkdir -p -m 0700 -- "$DST"
-for u in "${{SESSIONS[@]}}"; do
-    runuser -u "$ACCOUNT" -- cp -a -- "$STAGE/copy/$u.jsonl" "$DST/"
-    if [ -d "$STAGE/copy/$u" ]; then
-        runuser -u "$ACCOUNT" -- cp -a -- "$STAGE/copy/$u" "$DST/"
+TMPD=$(runuser -u "$ACCOUNT" -- mktemp -d "$DST/.airuleset-transfer-1190.XXXXXX")
+trap 'runuser -u "$ACCOUNT" -- rm -rf -- "$TMPD"' EXIT
+runuser -u "$SRC_OWNER" -- tar -C "$SRC" -cf - -- "${{ITEMS[@]}}" \\
+    | runuser -u "$ACCOUNT" -- tar -C "$TMPD" -xpf -
+runuser -u "$ACCOUNT" -- find "$TMPD" -type d -exec chmod 0700 {{}} +
+runuser -u "$ACCOUNT" -- find "$TMPD" -type f -exec chmod 0600 {{}} +
+
+# 4. Place each item with a no-clobber rename, as the account. An item that
+#    appeared in the target meanwhile stops the run; nothing is overwritten.
+PLACED=()
+for item in "${{ITEMS[@]}}"; do
+    runuser -u "$ACCOUNT" -- mkdir -p -m 0700 -- "$DST/$(dirname -- "$item")"
+    runuser -u "$ACCOUNT" -- mv -n -T -- "$TMPD/$item" "$DST/$item" || true
+    if [ -e "$TMPD/$item" ] || [ -L "$TMPD/$item" ]; then
+        echo "FAILED: $DST/$item exists or could not be placed — nothing was overwritten (#1190)." >&2
+        echo "  Placed before the failure: ${{PLACED[*]:-none}}" >&2
+        echo "  Recover: as $ACCOUNT remove exactly those from $DST, then re-run." >&2
+        exit 1
     fi
+    PLACED+=("$item")
 done
-if [ "${{#MEMORY_FILES[@]}}" -gt 0 ]; then
-    for f in "${{MEMORY_FILES[@]}}"; do
-        runuser -u "$ACCOUNT" -- mkdir -p -m 0700 -- "$DST/memory/$(dirname -- "$f")"
-        runuser -u "$ACCOUNT" -- cp -a -- "$STAGE/copy/memory/$f" "$DST/memory/$f"
-    done
-fi
 
 # 5. Read-back
 echo ""
 echo "=== Read-back ==="
 for u in "${{SESSIONS[@]}}"; do
-    stat -c '  %U %a %y %n' "$DST/$u.jsonl"
+    stat -c '  %U %a %y %n' -- "$DST/$u.jsonl"
 done
-echo "  memory files: ${{#MEMORY_FILES[@]}}"
+echo "  placed items: ${{#PLACED[@]}}"
 echo ""
 echo "=== Resume ==="
 {hint}
 """
 
 
+def _items(plan):
+    """The source-relative paths the script copies, in placement order."""
+    items = []
+    for s in plan["sessions"]:
+        items.append(s["uuid"] + ".jsonl")
+        if s["has_dir"]:
+            items.append(s["uuid"])
+    return items + ["memory/" + m for m in plan["memory"]]
+
+
 def render_script(plan):
-    """The idempotent-by-refusal root script for ``plan``. Raises ValueError
-    for a plan with refusals — a refused transfer is never rendered."""
+    """The root script for ``plan``. Raises ValueError for a plan with
+    refusals — a refused transfer is never rendered. Not idempotent: a
+    finished (or half-finished) run leaves files a re-run refuses, and the
+    failure message names every item already placed."""
     if plan["refusals"]:
         raise ValueError("; ".join(plan["refusals"]))
     q = shlex.quote
     return _SCRIPT.format(
         account=q(plan["account"]), from_dir=q(plan["from_dir"]),
-        src=q(plan["src_dir"]), dst=q(plan["dst_dir"]),
-        proc=q(plan["proc_root"]), stage_base=q(plan["stage_base"]),
+        old_dirs=" ".join(q(d) for d in plan["old_dirs"]),
+        src=q(plan["src_dir"]), dst=q(plan["dst_dir"]), proc=q(plan["proc_root"]),
         sessions=" ".join(q(s["uuid"]) for s in plan["sessions"]),
         memory=" ".join(q(m) for m in plan["memory"]),
+        items=" ".join(q(i) for i in _items(plan)),
         hint="\n".join("echo %s" % q("  " + ln) for ln in resume_hint(plan)))
