@@ -462,17 +462,28 @@ class RefreshBudgetReadsTheObject(_Tmp):
         self._cache(10, graphql={"remaining": 150, "limit": 5000,
                                  "source": "graphql-object"})
         self.assertEqual(airuleset._graphql_budget_ok(
-            1000, runner=self._rest(4982)), (False, 150))
+            1000, runner=self._rest(4982), status_fn=cli_gh_rate._load_cache),
+            (False, 150))
+
+    def test_injected_runner_alone_never_reads_the_real_cache(self):
+        # an injected runner is the whole reading (the #370 tests' seam); the
+        # box's real status.json must not leak into it
+        self._cache(10, graphql={"remaining": 150, "limit": 5000,
+                                 "source": "graphql-object"})
+        self.assertEqual(airuleset._graphql_budget_ok(
+            1000, runner=self._rest(4982)), (True, 4982))
 
     def test_floor_ignores_a_stale_or_rest_sourced_cache(self):
         self._cache(3600, graphql={"remaining": 150, "limit": 5000,
                                    "source": "graphql-object"})
         self.assertEqual(airuleset._graphql_budget_ok(
-            1000, runner=self._rest(4982)), (True, 4982))
+            1000, runner=self._rest(4982), status_fn=cli_gh_rate._load_cache),
+            (True, 4982))
         self._cache(10, graphql={"remaining": 150, "limit": 5000,
                                  "source": "rest"})
         self.assertEqual(airuleset._graphql_budget_ok(
-            1000, runner=self._rest(4982)), (True, 4982))
+            1000, runner=self._rest(4982), status_fn=cli_gh_rate._load_cache),
+            (True, 4982))
 
     def test_poller_refresh_holds_on_a_low_cached_budget(self):
         self._cache(10, core={"remaining": 100, "limit": 5000})
