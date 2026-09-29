@@ -247,7 +247,7 @@
   {
     "name": "odoo-erp",
     "host": "gk",
-    "path": "~/devel/odoo-erp",
+    "path": "~/devel/odoo/odoo-erp",
     "github_repo": "zbynekdrlik/odoo-erp",
     "branch_model": "3-branch",
     "default_branch": "main",
