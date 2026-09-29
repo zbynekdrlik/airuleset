@@ -106,3 +106,15 @@ takze budeme musiet zvolit nejaky autoclose rezim. Napr tak ktory je starsi nez
 3 tyzdne a je na verifikacii pojde automaticky do zavretia. S tym ze sa tam da
 este napr raz pripomenutie ze dochadza k auto zatvoreniu kedze bol bez reakcie
 a pousnie sa do hotovo" — mechanism + numbers on odoo-erp#8507.
+
+## Stages companion — provenance moved out for #1185 (29.9.2026)
+
+Provenance moved out of `client-board-stages.md` to pay for the #1185 rule 6
+sentence (stream-set Hotovo is never acceptance): miva stage names = the
+canonical set, odoo-erp #7101; miva NO assignee because every assignee triggers
+an Odoo notification mail, and the stage column already IS the status;
+slovnormal assignee = owner ruling #1018; montalu owner move = #924; a new
+board = a new profile-table row; mention partner in `partner_ids` = #702;
+the note shape is Stop-checked by #1018; montalu assignee e.g. Patrik
+Javorský; the companion auto-loads on a `project.task` stage move and at the
+hand-off (#1179).

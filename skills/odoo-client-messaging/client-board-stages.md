@@ -1,10 +1,10 @@
 # Client Board Tasks — Stages, Assignee & "Done" (#1102)
 
-Topic companion of `client-board-tasks.md` (CORE): its profile table holds each board's stages (a new board = a new row). Auto-loads on a `project.task` stage move and at the hand-off (#1179).
+Topic companion of `client-board-tasks.md` (CORE): its profile table holds each board's stages.
 
 The profile's "awaiting client verification" stage is **Verifikácia** (montalu) or **Na overenie** (slovnormal) — rule 3's handover note fires on the transition INTO it. The "blocked on a client question" stage is **Potrebuje ujasniť** (montalu); slovnormal has no dedicated question stage, so a question stays in **V práci** with the chatter question of rule 4 (`client-board-questions.md`).
 
-On the **miva** profile the stage names differ (canonical set, odoo-erp #7101): awaiting client verification = **Čaká** (rule 3's handover note posts there), the client-question stage = **Požadujú sa zmeny** (rule 4/8 answers), **Hotové** moved by the OWNER only after client confirmation (rule 6), **Zrušené** never set by a stream.
+On the **miva** profile the stage names differ: awaiting client verification = **Čaká** (rule 3's handover note posts there), the client-question stage = **Požadujú sa zmeny** (rule 4/8 answers), **Hotové** moved by the OWNER only after client confirmation (rule 6), **Zrušené** never set by a stream.
 
 ---
 
@@ -28,8 +28,8 @@ the removal of a never-delivered feature stay OUT.
 
 The note CONTENT is **PLAIN PROSE** (no rich formatting, no `@`-mention anchors,
 no `partner_ids`) — except on **montalu** ONE mention anchor for the addressed
-person (rule 5), its partner in `partner_ids` (#702); the TRANSPORT uses `body_is_html=True` per the
-`handover-compose.md` posting rules. The shape is Stop-checked (#1018).
+person (rule 5), its partner in `partner_ids`; the TRANSPORT uses `body_is_html=True` per the
+`handover-compose.md` posting rules. The shape is Stop-checked.
 
 **ONE step (#1180):** post it via `odoo_post.py --handover` (odoo-erp#8606:
 post + rule-5 assignee + move; until it ships, move + assign by hand, same
@@ -39,11 +39,10 @@ turn). A handover or `Acceptance-thread:` leaving a task unmoved is Stop-blocked
 
 On the **montalu** profile the person the handover addresses is @mentioned in
 the message AND set as the task's assignee (`user_ids`) when the rule 3 note is
-posted — the employee the note is written for (e.g. Patrik Javorský; owner
+posted — the employee the note is written for (owner
 28.9.2026, #1166). On the **miva** profile a client task carries **NO assignee**
-(`user_ids` empty): every assignee triggers an Odoo notification mail, and the
-stage column already IS the status. On the **slovnormal** profile the assignee
-is **Dávid Greňa** (owner ruling #1018) — the profile row governs; never add an
+(`user_ids` empty). On the **slovnormal** profile the assignee
+is **Dávid Greňa** — the profile row governs; never add an
 assignee a profile does not name.
 
 ### 6. "Done" stage — per profile
@@ -52,10 +51,14 @@ A task reaches the profile's terminal stage (**Hotovo** / **Hotové**) ONLY afte
 the client confirms acceptance — a 👍 reaction, a reply, or an explicit "OK" —
 never on the stream's own judgment (except the montalu auto-close below). WHO
 moves it is the profile's call: the **OWNER** on miva and, after a confirmation,
-on montalu (#924); **Dávid Greňa himself** on slovnormal. The confirmation is
+on montalu; **Dávid Greňa himself** on slovnormal. The confirmation is
 recorded on the GitHub issue as
 `Acceptance-cited: msg <message_id> task <task_id>` (`handover-compose.md`
 family acceptance — one task per capability family, one confirmation closes it).
+A Hotovo/Hotové a STREAM account set is never acceptance evidence — acceptance
+is a client message or reaction (`msg <id>`), the owner's own move after a
+confirmation, or the odoo-erp#8507 auto-close note below; the close gate
+rejects an `Acceptance-cited:` with no `msg <id>` (#1185).
 
 On **montalu** a task in Verifikácia also reaches Hotovo by the odoo-erp#8507
 auto-close (owner ROZHODNUTÉ 28.9.2026, #1167): ONE reminder after 14 days

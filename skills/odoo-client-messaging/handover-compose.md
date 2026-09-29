@@ -234,23 +234,25 @@ owner-approved BEFORE posting.
   closing note lands in that thread — the LAST message in the thread is ALWAYS
   the sub-dev's (airuleset #627, owner directive 2026-08-22).** When you open or
   first post into a client thread, record the binding `Discuss-thread: <channel-id>`
-  (the id cited as "vlákno N") — a durable group key, orthogonal to `stream:`.
+  — a durable key, orthogonal to `stream:`.
   Before close, whoever CURRENTLY owns the thread posts a closing note ("Dobrý deň / Ahoj `<mená>`, téma vyriešená, vlákno
   uzatváram"; still `partner_ids` incl. the owner + the `ZbynekAI <N>`
   signature) and records `Discuss-closed: msg <message-id>`. **N tickets, one
   thread:** the note goes ONCE at the LAST ticket; a non-last ticket closes with
   `Discuss-defer: siblings #<A> #<B> still open — note goes at the last close`
-  (self-declare last vs non-last, naming the siblings). **The obligation FOLLOWS
+  (self-declare, name the siblings). **The obligation FOLLOWS
   THE TICKET to its current owner, never the author** — sub-dev: YOU post the
   note + line + close; branch-merge: the OWNING stream posts the note +
   `Discuss-closed:` at hand-off, the gatekeeper's later release-close finds it
   (the gatekeeper never posts to the client thread). HOOK-ENFORCED:
   `hooks/block-fork-no-merge-issue-close.sh` BLOCKS a `gh issue close` of a
   thread-bound odoo-erp ticket with no such disposition, for any authority.
+  `Acceptance-cited:` bez `msg <id>` BLOKUJE — Hotovo nastavené streamom nie je
+  akceptácia (#1185).
   Bypass a genuine non-client/meta ticket: `airuleset:discuss-close-ok`.
 
 - **Rodinná (capability-group) akceptácia — jedno vlákno zavrie N ticketov
-  (airuleset #755, owner-request 2026-08-30).** Tickety JEDNEJ capability rodiny
+  (#755).** Tickety JEDNEJ capability rodiny
   (jedna dodaná vec z pohľadu klienta; rodina je **ĽUDSKÝ ÚSUDOK** v návrhu,
   **NIKDY kódová detekcia** — anti-heuristic `discuss_close_guard.py`) smú zdieľať
   JEDNO akceptačné vlákno; klientovo potvrdenie (správa ALEBO #745 emoji reakcia)
