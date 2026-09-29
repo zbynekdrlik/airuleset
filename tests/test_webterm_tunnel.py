@@ -102,9 +102,9 @@ class TestOwnerTunnelProvision(_TunnelIsolate, unittest.TestCase):
             unit = pt["WEBTERM_OWNER_TUNNEL_SERVICE_DEST"].read_text()
             self.assertIn("--config", unit)
             self.assertIn(str(pt["WEBTERM_OWNER_TUNNEL_CONFIG"]), unit)
-            # enabled + restarted (managed, reboot-durable)
+            # enabled; a not-yet-running unit is STARTED, never restarted (#1189)
             self.assertIn(["enable", "--now", "webterm-owner-tunnel.service"], self.sysctl)
-            self.assertIn(["restart", "webterm-owner-tunnel.service"], self.sysctl)
+            self.assertNotIn("restart", [c[0] for c in self.sysctl])
 
 
 class _DavidTunnelIsolate:
