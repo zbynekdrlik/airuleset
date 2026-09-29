@@ -135,7 +135,7 @@ class TestExclusiveTabListMechanism(unittest.TestCase):
         self.assertEqual(got, [
             "montalu1-subdev", "montalu2-subdev",
             "miva1-subdev", "montalu4-subdev",
-            "claudy", "dev1", "dev2", "gatekeeper", "forestshop",
+            "ar", "claudy", "dev1", "dev2", "gatekeeper", "forestshop",
         ])
         html = w.render_dashboard_html(
             profiles.marek_inventory(), ttyd_base="/t", human="marek",
