@@ -108,7 +108,26 @@ class TestDeclarationValidator(unittest.TestCase):
 
     def test_reach_inside_the_fleet_passes(self):
         self.assertEqual(bootstrap.validate_account(
-            "proj", _valid_spec(reach=["dev2", "david1@subdev"])), [])
+            "proj", _valid_spec(reach=["gatekeeper", "david1@subdev"])), [])
+
+    def test_enforced_reach_never_to_a_password_shared_box(self):
+        # review 2: newlevel's shared password still logs in on dev1/dev2/
+        # spinbike, airuleset's break-glass password on the controller
+        for box in ("dev1", "dev2", "spinbike-vps", "controller", "x@dev2"):
+            errs = bootstrap.validate_account("proj", _valid_spec(reach=[box]))
+            self.assertTrue(any("password" in e for e in errs), (box, errs))
+
+    def test_unenforced_reach_needs_a_reason(self):
+        errs = bootstrap.validate_account("proj", _valid_spec(
+            reach=["dev2"], reach_enforced=False))
+        self.assertTrue(any("reach_reason" in e for e in errs), errs)
+        self.assertEqual(bootstrap.validate_account("proj", _valid_spec(
+            reach=["dev2"], reach_enforced=False, reach_reason="x")), [])
+
+    def test_ip_check_is_a_real_ip_parse(self):
+        self.assertFalse(bootstrap._is_ip("cafe"))
+        self.assertFalse(bootstrap._is_ip("..."))
+        self.assertTrue(bootstrap._is_ip("100.118.174.27"))
 
     def test_reach_into_a_shared_account_fails(self):
         # review 1: `reach` never points INTO newlevel/root/control accounts
@@ -138,7 +157,9 @@ class TestDeclarationValidator(unittest.TestCase):
     def test_root_equivalent_sudo_commands_are_refused(self):
         for bad in ("/bin/bash -c true", "/usr/bin/env ls", "/usr/bin/vim /etc/x",
                     "/usr/bin/python3.12 x.py", "/usr/bin/find / -name x",
-                    "/usr/bin/less /var/log/syslog", "/usr/bin/systemctl"):
+                    "/usr/bin/less /var/log/syslog", "/usr/bin/systemctl",
+                    "/usr/bin/../../home/proj/x arg", "/opt/tool/x arg",
+                    "/home/proj/bin/x arg"):
             errs = bootstrap.validate_account("proj", _valid_spec(
                 sudo=True, sudo_reason="x", sudo_commands=[bad]))
             self.assertTrue(any("sudo_commands" in e for e in errs), (bad, errs))
@@ -191,11 +212,18 @@ class TestDeclarationValidator(unittest.TestCase):
                 bootstrap.render_root_bootstrap("_bad")
 
     def test_claudy_declaration_is_explicit(self):
+        # review 2 🔴: claudy's live service ssh-probes every fleet account, so
+        # its reach is DECLARED fleet-wide and explicitly NOT enforced (an
+        # egress rule would cut the fleet token refresh)
         spec = bootstrap.account_spec("claudy")
         self.assertEqual(spec["host"], "controller")
         self.assertIs(spec["sudo"], False)
-        self.assertEqual(list(spec["reach"]), [])
-        self.assertEqual(list(spec["secrets"]), [])
+        self.assertIs(spec["reach_enforced"], False)
+        self.assertTrue(spec["reach_reason"])
+        self.assertEqual(set(spec["reach"]), set(bootstrap.fleet_boxes()))
+        script = bootstrap.render_root_bootstrap("claudy")
+        self.assertNotIn("meta skuid", script)
+        self.assertIn("reach: NOT enforced", script)
 
     def test_fohmixer_declaration(self):
         spec = bootstrap.account_spec("fohmixer")
@@ -270,13 +298,30 @@ class TestFohmixerRender(unittest.TestCase):
         self.assertIn('usermod -aG airuleset-project "$ACCOUNT"', self.script)
         self.assertIn('subject.isInGroup("airuleset-project")', self.script)
 
-    def test_boundary_lands_before_the_account_gets_a_shell(self):
-        for step in ("# 9. Sudo policy", "# 10. Declared reach",
-                     "# 11. su / polkit lockout"):
-            self.assertLess(self.script.index(step),
-                            self.script.index("# 12. Project checkout"), step)
-            self.assertLess(self.script.index(step),
-                            self.script.index("# 13. Project tmux session"), step)
+    def test_boundary_lands_before_any_key_or_shell(self):
+        # review 2: a failed boundary step must never leave a loginable account
+        for step in ("# 3a. Sudo policy", "# 3b. Declared reach",
+                     "# 3c. su / polkit lockout", "# 3d. Isolation checks"):
+            for later in ("# 4. SSH directory", "# 5. authorized_keys",
+                          "# 9. Project checkout", "# 10. Project tmux session"):
+                self.assertLess(self.script.index(step), self.script.index(later),
+                                (step, later))
+
+    def test_reach_rule_is_applied_now_and_survives_nftables_reloads(self):
+        for needle in ('systemctl restart "airuleset-reach-$ACCOUNT.service"',
+                       "PartOf=nftables.service",
+                       "ReloadPropagatedFrom=nftables.service",
+                       "ExecReload=$NFT -f $REACH_NFT",
+                       '"$NFT" list table inet airuleset_reach_fohmixer'):
+            self.assertIn(needle, self.script)
+
+    def test_other_homes_must_be_closed(self):
+        self.assertIn('*r??|*??[xt])', self.script)
+        self.assertIn("chmod o-rx it first", self.script)
+
+    def test_pam_backups_live_outside_pam_d(self):
+        self.assertIn("/etc/airuleset/backup/$(basename", self.script)
+        self.assertNotIn('"$f.airuleset-prev', self.script)
 
     def test_clones_the_project_repo(self):
         self.assertIn("https://github.com/zbynekdrlik/fohmixer.git", self.script)
@@ -332,6 +377,8 @@ class TestSudoRender(unittest.TestCase):
         self.assertIn("visudo -cf", script)
         self.assertIn("projx ALL=(root) NOPASSWD:NOEXEC: "
                       "/usr/bin/systemctl restart proj.service", script)
+        self.assertIn("for BIN in /usr/bin/systemctl; do", script)
+        self.assertIn('then rm -f "$SUDOERS_TMP"; exit 1; fi', script)
         self.assertIn('*" sudo "*', script)   # group check in BOTH branches
         self.assertIn("restart its own unit", script)
         self.assertNotIn("declared sudo: NO", script)
@@ -345,11 +392,11 @@ class TestSudoRender(unittest.TestCase):
         self.assertIn("declared sudo: NO", script)
 
     def test_declared_reach_is_the_only_ssh_egress(self):
-        spec = _valid_spec(reach=["dev2", "david1@subdev"])
+        spec = _valid_spec(reach=["gatekeeper", "david1@subdev"])
         with mock.patch.dict(bootstrap.SERVICE_ACCOUNTS, {"projx": spec}):
             script = bootstrap.render_root_bootstrap("projx")
         self.assertIn('meta skuid "projx" tcp dport 22 ip daddr '
-                      '{ 100.118.174.27, 100.82.64.27 } accept', script)
+                      '{ 100.118.174.27, 100.90.94.41 } accept', script)
         self.assertIn('meta skuid "projx" tcp dport 22 ct state new reject', script)
 
 
@@ -389,7 +436,8 @@ class TestAccountForTarget(unittest.TestCase):
 
 class TestOnboardGate(unittest.TestCase):
 
-    ROW = {"name": "camera-box", "account": "newlevel"}
+    ROW = {"name": "camera-box", "account": "newlevel", "host": "dev1"}
+    FOH = "/home/fohmixer/devel/fohmixer"
 
     def test_newlevel_target_is_refused(self):
         err = accounts.onboard_account_gate("newlevel", None, host="dev1")
@@ -413,21 +461,42 @@ class TestOnboardGate(unittest.TestCase):
         # a brand-new project never passes, whatever the ticket
         self.assertIsNotNone(accounts.onboard_account_gate(
             "newlevel", "#1184", host="dev1", existing=None))
+        # nor a registered row on ANOTHER host
+        self.assertIsNotNone(accounts.onboard_account_gate(
+            "newlevel", "#1184", host="dev2", existing=self.ROW))
+        # the registry spells gatekeeper `gk`
+        self.assertIsNone(accounts.onboard_account_gate(
+            "gatekeeper", "#1184", host="gatekeeper",
+            existing={"name": "odoo-erp", "host": "gk"}))
 
     def test_legacy_ok_must_name_a_ticket(self):
-        for bad in ("yes", "#12x", "12 13"):
+        for bad in ("yes", "#12x", "12 13", "1184"):
             self.assertIsNotNone(accounts.onboard_account_gate(
                 "newlevel", bad, host="dev1", existing=self.ROW), bad)
 
     def test_declared_project_account_on_its_host_is_allowed(self):
         self.assertIsNone(accounts.onboard_account_gate(
-            "fohmixer", None, host="fohmixer@dev1", login_user="fohmixer"))
+            "fohmixer", None, host="fohmixer@dev1", login_user="fohmixer",
+            resolved=self.FOH))
         self.assertIsNotNone(accounts.onboard_account_gate(
-            "fohmixer", None, host="dev2", login_user="fohmixer"))
+            "fohmixer", None, host="dev2", login_user="fohmixer",
+            resolved=self.FOH))
+        # a missing host is THIS box, never a skipped check
+        with mock.patch("cli_onboard_exec._local_hostname", return_value="airuleset"):
+            self.assertIsNotNone(accounts.onboard_account_gate(
+                "fohmixer", None, host=None, login_user="fohmixer",
+                resolved=self.FOH))
+
+    def test_one_account_per_project(self):
+        # review 2: a second project in the same account is refused
+        err = accounts.onboard_account_gate(
+            "fohmixer", None, host="fohmixer@dev1", login_user="fohmixer",
+            resolved="/home/fohmixer/devel/otherproj")
+        self.assertIn("one account per project", err)
 
     def test_onboarding_must_run_as_the_owner(self):
         err = accounts.onboard_account_gate("fohmixer", None, host="dev1",
-                                            login_user="newlevel")
+                                            login_user="newlevel", resolved=self.FOH)
         self.assertIn("run as 'newlevel'", err)
 
     def test_unknown_owner_is_refused(self):
@@ -443,6 +512,43 @@ class TestOnboardGate(unittest.TestCase):
         self.assertIsNotNone(r["error"])
         self.assertIn("newlevel", r["error"])
         self.assertEqual(r["steps"], [])
+
+    def test_legacy_ok_never_admits_a_new_dir_by_name_match(self):
+        # review 2: `~/devel/scratch/camera-box` derives the registered NAME
+        # camera-box, but it is NOT the registered path
+        typed = "~/devel/scratch/camera-box"
+        target = "/home/newlevel/devel/scratch/camera-box"
+        with tempfile.TemporaryDirectory() as d:
+            reg = Path(d) / "r.json"
+            reg.write_text(json.dumps([{
+                "name": "camera-box", "host": "dev1", "path": "~/devel/camera-box",
+                "account": "newlevel", "branch_model": "2-branch",
+                "default_branch": "main", "work_branch": "dev", "overrides": [],
+                "onboarded": None}]), encoding="utf-8")
+            with mock.patch.object(ob, "_remote_preflight", return_value=(target, None)):
+                r = ob.onboard_project(typed, host="dev1", registry_path=str(reg),
+                                       legacy_ok="#1184", dry_run=True,
+                                       run=_fs_runner(target, "newlevel"))
+        self.assertIsNotNone(r["error"])
+
+    def test_the_declared_owner_flow_passes_end_to_end(self):
+        import cli_fleet
+        entry = {"name": "fohmixer@dev1", "host": "100.104.8.125",
+                 "user": "fohmixer", "repo_path": "~/devel/airuleset",
+                 "identity": "~/.secrets/airuleset_push_ed25519"}
+        base = _fs_runner(self.FOH, "fohmixer")
+
+        def run(argv, **kw):
+            r = base(argv, **kw)
+            return r if r.returncode == 0 else subprocess.CompletedProcess(argv, 0, "", "")
+        with mock.patch.object(cli_fleet, "REMOTE_HOSTS",
+                               cli_fleet.REMOTE_HOSTS + [entry]), \
+                mock.patch.object(ob, "_remote_preflight", return_value=(self.FOH, None)):
+            r = ob.onboard_project(self.FOH, host="fohmixer@dev1",
+                                   registry_path="/nonexistent/r.json",
+                                   dry_run=True, run=run)
+        self.assertIsNone(r["error"], r["error"])
+        self.assertEqual(r["entry"]["account"], "fohmixer")
 
     def test_onboard_project_refuses_a_dotdot_escape(self):
         typed = "/home/fohmixer/../newlevel/devel/new"
@@ -501,10 +607,13 @@ class TestRegistryAccounts(unittest.TestCase):
             self.assertIn("account", e, e["name"])
             self.assertTrue(e["account"], e["name"])
 
-    def test_dev_box_rows_are_legacy_newlevel(self):
+    def test_dev_box_rows_are_newlevel_or_a_migrated_project_account(self):
+        # review 2: a migration flips a row to its DECLARED account on that host
         for e in self.entries:
             if e["host"] in ("dev1", "dev2"):
-                self.assertEqual(e["account"], "newlevel", e["name"])
+                spec = bootstrap.SERVICE_ACCOUNTS.get(e["account"])
+                self.assertTrue(e["account"] == "newlevel"
+                                or (spec and spec["host"] == e["host"]), e["name"])
 
     def test_known_project_accounts(self):
         by = {e["name"]: e for e in self.entries}
