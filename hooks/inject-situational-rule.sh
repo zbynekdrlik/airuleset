@@ -163,7 +163,9 @@ MAX_TOTAL = 14000
 # calls it from inside a quoted string, the quote-stripping erased the URL, the
 # skill never loaded). So the cloudflare row -- the one shape that most needs
 # the skill (a script actually touching the API) -- matches the raw command.
-RAW_BASH_MATCH_TOPICS = {"cloudflare-api-tokens"}
+# #1179: odoo-client-board-stages joins -- an `Acceptance-thread:` line lives in
+# the QUOTED/heredoc `gh issue comment` body, which the stripped haystack drops.
+RAW_BASH_MATCH_TOPICS = {"cloudflare-api-tokens", "odoo-client-board-stages"}
 
 
 def strip_frontmatter(text):

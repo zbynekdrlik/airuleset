@@ -2238,6 +2238,28 @@ if [ "$VERIF_REPORT" = "1" ]; then
     fi
 fi
 
+# #1179/#1180 — a client handover on a project.task is ONE step (`odoo_post.py
+# --handover`, odoo-erp#8606: post + assignee + move). The #1018 check above
+# reads only the final prose; the incidents (montalu1 28.9., montalu4 29.9.)
+# posted handovers and never moved the tasks, reporting nothing. gates.handover
+# reads THIS TURN's tool calls from transcript_path (see its docstring). Cheap
+# prefilter: the gate runs only when the transcript tail carries a poster call or
+# an Acceptance-thread line (process substitution, NOT `tail | grep -q` — under
+# pipefail a SIGPIPE'd tail would read as "no match"). rc 2 = block, any other
+# non-zero = infra hiccup → fail OPEN (never a fabricated block).
+HANDOVER_TP=$(echo "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || echo "")
+if [ -n "$HANDOVER_TP" ] && [ -f "$HANDOVER_TP" ] \
+        && LC_ALL=C grep -qE 'odoo_post|Acceptance-thread' <(tail -c 4000000 "$HANDOVER_TP" 2>/dev/null); then
+    HANDOVER_RC=0
+    HANDOVER_REASON=$(printf '%s' "$INPUT" | env PYTHONPATH="${_PROSE_REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" python3 -P -m gates.handover 2>&1) || HANDOVER_RC=$?
+    if [ "$HANDOVER_RC" = "2" ]; then
+        printf '%s\n' "$HANDOVER_REASON" >&2
+        add_hard "$(printf '%s' "$HANDOVER_REASON" | tr '\n' ' ')"
+    elif [ "$HANDOVER_RC" != "0" ]; then
+        printf 'stop-check-prose-violations: handover gate infra rc=%s — fail-open (#1180)\n' "$HANDOVER_RC" >&2
+    fi
+fi
+
 # #1042/#1073 — client-guide (Návody) link on a client-acceptance hand-off.
 # Owner directive (montalu6, 15.9.2026): every client handover delivers ONE
 # startup „Introduction / Začíname" page IN the product (the Návody section),
