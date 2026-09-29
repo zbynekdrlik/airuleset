@@ -13,17 +13,13 @@ per-box memory rule + a local script; nothing fleet-wide checked the invariant
 "a task in Verifikácia MUST carry a stream message", so the owner re-taught it to
 every subdev Claude by hand. This is the one fleet overseer.
 
-DESIGN (the parked_wake / model_float_audit Job-48/41 template): MACHINE-CHANNEL
-only (never pings the owner — no `notify` import), dependency-injected for a
-tmux/network-free unit test, and the keystroke path reuses
-`send_verified(nudge="task-hygiene")` (a member of `tmux_io.MACHINE_NUDGE_KINDS`,
-OFF by default — the supervisor stages it with `nudges on --kind task-hygiene`)
-so the per-kind staging switch governs it and `nudge_gate` bounds it to the
-owner's 1×/hour per-kind floor + cross-kind total cap. It is NOT in
-`GATED_CATEGORIES` (like `bounce`/`card`/`goal-sweep`) — its cadence is decided
-by `gate_ok("task-hygiene")` directly, so goal.py's shared batch never has to
-compose a section it has no text for.
+DESIGN (the Job-48/41 template): MACHINE-CHANNEL only (never pings the owner),
+dependency-injected for a tmux/network-free test; the keystroke path reuses
+`send_verified(nudge="task-hygiene")` (a `MACHINE_NUDGE_KINDS` member, OFF by
+default — staged with `nudges on --kind task-hygiene`), bounded by `nudge_gate`'s
+1×/hour per-kind floor + total cap via `gate_ok` directly (not `GATED_CATEGORIES`).
 """
+import datetime
 import os
 
 # The nudge identity for this job's keystrokes (a MACHINE_NUDGE_KINDS member,
@@ -100,21 +96,24 @@ def task_hygiene_job(now, state, panes, projects_dir, *, cfg, compute, persist,
         return out
 
     persist(result)
-    a = result.get("A", [])
-    b = result.get("B", [])
-    c = result.get("C", [])
-    out.append("task-hygiene: A=%d B=%d C=%d" % (len(a), len(b), len(c)))
+    a, b, c = result.get("A", []), result.get("B", []), result.get("C", [])
+    h = result.get("H", [])                   # #1180 handover not in Verifikácia
+    out.append("task-hygiene: A=%d B=%d C=%d" % (len(a), len(b), len(c))
+               + (" H=%d" % len(h) if h else ""))
+    day = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).date().isoformat()
+    if result.get("reactions_unavailable") and state.get("task_hygiene_r403_day") != day:
+        state["task_hygiene_r403_day"] = day  # once per UTC day, never per sweep
+        from cli_handover_hygiene import REACTIONS_403_LOG
+        out.append("task-hygiene: " + REACTIONS_403_LOG)
+    if result.get("h_error"):
+        out.append("task-hygiene: " + result["h_error"])
 
-    # Nudge only while A ∪ B is non-empty (C alone is a soft reminder, not a
-    # stop-the-session obligation).
-    if not (a or b):
+    # Nudge only while A ∪ B ∪ H is non-empty (C alone is a soft reminder).
+    if not (a or b or h):
         return out
 
-    # #1036 review 🔵 — an HONEST OFF-box skip: when the kind is not staged on
-    # (the default), skip the whole per-pane delivery loop rather than call
-    # send_verified into each pane (which suppresses silently at the keys layer
-    # with logs=None and misleadingly logs "submit-unverified"). The footer I +
-    # the Stop hook carry the obligation while the nudge is OFF.
+    # #1036 review 🔵 — an HONEST OFF-box skip while the kind is not staged (no
+    # misleading "submit-unverified"); the footer I + Stop hook carry it meanwhile.
     if nudges_enabled is not None and not nudges_enabled(NUDGE_KIND):
         out.append("task-hygiene: A=%d B=%d — nudge kind OFF (stage via "
                    "`nudges on --kind task-hygiene`); footer/Stop carry it"

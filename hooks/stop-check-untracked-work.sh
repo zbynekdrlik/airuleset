@@ -26,8 +26,9 @@ SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // "unknown"' 2>/dev/null || ech
 # A turn ending ✅ DONE / ⏳ WORKING on a CONFIGURED box (a fresh
 # ~/.claude/task-hygiene/status.json, written by watchdog Job 49) is blocked when
 # a client Odoo obligation is overdue: A > 0 older than 24 h (unanswered client
-# comment), or B > 0 for Verifikácia (a task in Verifikácia with no stream
-# message). Fail-OPEN when the status file is absent/stale (a dead watchdog).
+# comment), B > 0 for Verifikácia (a task in Verifikácia with no stream
+# message), or H > 0 (#1180: a stream handover on a task that was never moved to
+# Verifikácia). Fail-OPEN when the status file is absent/stale (a dead watchdog).
 if echo "$MSG" | grep -qE '✅ DONE|⏳ WORKING'; then
     TH_STATUS="${HOME}/.claude/task-hygiene/status.json"
     TH_RETRY="/tmp/airuleset-task-hygiene-block-${SESSION_ID}"
@@ -67,6 +68,12 @@ if isinstance(b_verif, int) and b_verif > 0:
     items = st.get("b_items") or []
     lines.append("Verifikácia bez správy streamu je zakázaná (%d): %s"
                  % (b_verif, ", ".join(items[:8])))
+h = st.get("h", 0)                  # #1180 class H
+if isinstance(h, int) and not isinstance(h, bool) and h > 0:
+    items = st.get("h_items") or []
+    lines.append("Odovzdávacia správa bez presunu do Verifikácie (H, %d) — presuň "
+                 "úlohu + assignee, ďalšie odovzdanie cez odoo_post.py --handover: %s"
+                 % (h, ", ".join(items[:8])))
 if lines:
     print("\n".join(lines))
 sys.exit(0)
