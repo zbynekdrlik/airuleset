@@ -33,6 +33,7 @@ import sys
 PUBLIC_REACHED_CODES = (200, 204)     # the request reached the endpoint itself
 PUBLIC_ACCESS_CODE = 302              # Access login redirect — edge only
 FALLBACK_LABEL = "   ← záloha, ak verejná URL nejde"
+LAST_RESORT_LABEL = "   [POSLEDNÁ MOŽNOSŤ — tunel neodpovedá]"
 
 
 def public_lane(args=None):
@@ -137,13 +138,14 @@ def emit_urls(prog, public_host, token, ips, private_line, is_live, *,
     for line in private:
         print(line, file=out)
     if not private:                      # never zero URLs: the last resort
-        print(public_url_line(public_host, token), file=out)
+        print(public_url_line(public_host, token) + LAST_RESORT_LABEL, file=out)
     print("%s: !!! DEGRADED — public URL https://%s/ is DEAD (%s); %s (#1189)."
           % (prog, public_host, detail, "use the private URL instead" if private
              else "NO private URL on this box, public printed as a last resort"),
           file=err)
-    print(_dl.channel_fallback_line(_dl.CHANNEL_UNREACHABLE, prog=prog,
-                                    detail=detail), file=err)
+    if private:                          # the #1115 line says "private URLs only"
+        print(_dl.channel_fallback_line(_dl.CHANNEL_UNREACHABLE, prog=prog,
+                                        detail=detail), file=err)
     if log is not None:
         log("public-lane-dead")
     return "degraded"
