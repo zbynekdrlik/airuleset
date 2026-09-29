@@ -326,6 +326,20 @@ class SampledAttribution(_Tmp):
         self.assertAlmostEqual(costs["~unattributed"], 10.0)
         self.assertNotIn("~issue list|poller", costs)
 
+    def test_owned_cost_of_the_previous_window_never_eats_a_reset(self):
+        # review 1188 round 2 🔵: owned cost booked before a reset belongs to
+        # the old window; subtracting it from the new window's `used` would
+        # silently drop that spend
+        fr = _FakeRateLimit()
+        self.note(self.ISSUE_LIST, "poller", _T0, fr)
+        cli_gh_rate_cost.record_query_cost(
+            "ops-wait-prefetch", {"data": {"rateLimit": {"cost": 30}}},
+            now=_T0 + 5)
+        fr.reset += 3600
+        fr.remaining = 4990                      # 10 used in the new window
+        est = self.note(self.ISSUE_LIST, "poller", _T0 + 61, fr)
+        self.assertEqual(est, {"unattributed": 10.0})
+
     def test_idle_gap_is_booked_unattributed(self):
         # review 1188 🟡: 45 idle minutes while OTHER boxes spent 2500 — one
         # sporadic human call must not be named as the spender.
@@ -499,12 +513,40 @@ class RefreshBudgetReadsTheObject(_Tmp):
             self._cache(3600, core={"remaining": 100, "limit": 5000})
             self.assertFalse(airuleset._gh_poller_hold())      # stale cache
 
+    def test_production_floor_reads_the_real_cache_by_default(self):
+        # review 1188 round 2 🟡: the no-seam production call path
+        self._cache(10, graphql={"remaining": 150, "limit": 5000,
+                                 "source": "graphql-object"})
+        rest = json.dumps({"resources": {"graphql": {"remaining": 4982,
+                                                     "limit": 5000}}})
+        with mock.patch.object(airuleset, "_gh_out", lambda *a, **k: rest):
+            self.assertEqual(airuleset._graphql_budget_ok(1000), (False, 150))
+
     def test_refresh_serves_stale_cache_while_held(self):
-        import inspect
-        src = inspect.getsource(airuleset.cmd_tickets_status)
-        self.assertIn("_gh_poller_hold()", src)
-        self.assertLess(src.index("_gh_poller_hold()"),
-                        src.index('"repo", "view"'))
+        # review 1188 round 2 🟡: behavioural, not a source-text check
+        self._cache(10, core={"remaining": 100, "limit": 5000})
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return mock.Mock(returncode=0, stdout="")
+
+        class A:
+            refresh, explain, cwd = True, False, "/r"
+        cache = Path(self.tmp) / "tickets"
+        buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"AIRULESET_GH_POLLER": "1"}), \
+                mock.patch.object(statusbar, "cache_dir", lambda home=None: cache), \
+                mock.patch.object(statusbar, "sweep_stale_cache", lambda: None), \
+                mock.patch.object(airuleset, "_repo_root",
+                                  lambda cwd, runner=None: "/r"), \
+                mock.patch.object(airuleset, "_graphql_budget_ok",
+                                  lambda *a, **k: (True, None)), \
+                mock.patch("subprocess.run", run), redirect_stdout(buf):
+            airuleset.cmd_tickets_status(A())
+        self.assertIn("poller hold", buf.getvalue())
+        self.assertFalse(any("view" in argv for argv in calls), calls)
+        self.assertFalse(cache.exists())         # the cache is not rewritten
 
 
 class PollersCarryPollerEnv(unittest.TestCase):
