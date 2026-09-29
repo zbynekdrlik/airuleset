@@ -255,6 +255,12 @@ class SampledAttribution(_Tmp):
     RAW_GQL = ["api", "graphql", "-f", "query={viewer{login}}"]
     PR_VIEW = ["pr", "view", "5", "--json", "title"]
 
+    def setUp(self):
+        super().setUp()   # a plain (PAT) box, whatever box runs the suite
+        p = mock.patch.object(cli_gh_rate, "is_app_shim_box", lambda: False)
+        p.start()
+        self.addCleanup(p.stop)
+
     def note(self, argv, kind, now, run):
         return cli_gh_rate_cost.note_call(argv, kind=kind, now=now, run=run,
                                           real_gh="/fake/gh")
@@ -300,6 +306,12 @@ class SampledAttribution(_Tmp):
         self.assertIsNone(self.note(["api", "repos/o/r/issues"], "poller",
                                     _T0, fr))
         self.assertIsNone(self.note(["run", "list"], "poller", _T0, fr))
+        self.assertEqual(fr.calls, 0)
+
+    def test_app_token_box_never_samples(self):
+        fr = _FakeRateLimit()
+        with mock.patch.object(cli_gh_rate, "is_app_shim_box", lambda: True):
+            self.assertIsNone(self.note(self.ISSUE_LIST, "poller", _T0, fr))
         self.assertEqual(fr.calls, 0)
 
     def test_fetch_failure_is_fail_open(self):

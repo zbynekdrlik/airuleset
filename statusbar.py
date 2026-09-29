@@ -168,10 +168,10 @@ def _spawn_refresh(cwd, home=None):
     except OSError:
         return
     script = Path(__file__).resolve().parent / "airuleset.py"
-    try:
+    try:   # #1188: a background POLL — its gh calls back off on a low budget
         subprocess.Popen(
             [sys.executable, str(script), "tickets-status", "--refresh",
-             "--cwd", str(cwd)],
+             "--cwd", str(cwd)], env={**os.environ, "AIRULESET_GH_POLLER": "1"},
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL, start_new_session=True)
     except Exception:

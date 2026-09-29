@@ -6894,6 +6894,7 @@ query($owner: String!, $name: String!) {
       }
     }
   }
+  rateLimit { cost remaining }
 }
 """
 
@@ -6947,6 +6948,8 @@ def _watchdog_closed_fetch(root, since_ts):
         if r.returncode != 0:
             return None
         data = json.loads(r.stdout or "{}")
+        import cli_gh_rate_cost
+        cli_gh_rate_cost.record_query_cost("closed-fetch", data)   # #1188
         if data.get("errors"):
             return None
         repo_data = (data.get("data") or {}).get("repository") or {}

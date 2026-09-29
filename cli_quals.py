@@ -687,7 +687,12 @@ OPS_WAIT_PREFETCH_COMMENT_CAP = 100
 # odoo-erp trying to pull up to 100 issues × 100 comments at once). The pager
 # stops at `hasNextPage == false` OR after `ceil(OPS_WAIT_PREFETCH_LIMIT /
 # page-size)` pages, whichever comes first.
-OPS_WAIT_PREFETCH_PAGE_SIZE = 10
+# #1188: GraphQL bills this query per PAGE — dryRun on odoo-erp measured 1
+# point for any `first` <= 99 (a connection costs its PARENTS' page size / 100;
+# the leaf `comments(last: 100)` adds nothing). 25 turns the 191 odoo-erp W
+# members from 20 pages/points into 8 (measured 2.2 s / 2.4 MB per page vs
+# 1.5 s / 1.2 MB at 10 — far from the 100-issue 502), results unchanged.
+OPS_WAIT_PREFETCH_PAGE_SIZE = 25
 
 
 def _row_is_ops_wait(labels):
@@ -1539,7 +1544,8 @@ _OPS_WAIT_PREFETCH_GQL = (
     " pageInfo { hasNextPage endCursor }"
     " nodes { ... on Issue { number"
     " comments(last: %d) { totalCount nodes {"
-    " author { login } createdAt body } } } } } }"
+    " author { login } createdAt body } } } } }"
+    " rateLimit { cost remaining } }"
 ) % (OPS_WAIT_PREFETCH_PAGE_SIZE, OPS_WAIT_PREFETCH_COMMENT_CAP)
 
 
@@ -1591,6 +1597,7 @@ def _ops_wait_prefetch_comments(member_quals, root, limit=None):
     (a qual that also matches non-W tickets) is harmless: only members present in
     the `ops_wait` set are ever consumed."""
     import airuleset
+    import cli_gh_rate_cost
     from gates import ghread
     out = {}
     if not member_quals:
@@ -1634,6 +1641,7 @@ def _ops_wait_prefetch_comments(member_quals, root, limit=None):
                 data = json.loads(raw)
             except (ValueError, TypeError):
                 break
+            cli_gh_rate_cost.record_query_cost("ops-wait-prefetch", data)
             if not isinstance(data, dict) or data.get("errors"):
                 break                             # GraphQL error -> keep earlier
             search_res = (data.get("data") or {}).get("search")
@@ -2737,7 +2745,8 @@ def _last_origin_owner(numbers, cwd=None):
         "{ label { name } } } } }" % (int(n), int(n))
         for n in numbers)
     query = ("query($owner: String!, $name: String!) { repository(owner: "
-             "$owner, name: $name) { %s } }" % aliases)
+             "$owner, name: $name) { %s } rateLimit { cost remaining } }"
+             % aliases)
     raw = airuleset._gh_out("api", "graphql", "-f", "query=" + query,
                   "-F", "owner={owner}", "-F", "name={repo}",
                   cwd=cwd, timeout=20)
@@ -2745,6 +2754,8 @@ def _last_origin_owner(numbers, cwd=None):
         data = json.loads(raw or "{}")
     except (ValueError, TypeError):
         return {}
+    import cli_gh_rate_cost
+    cli_gh_rate_cost.record_query_cost("origin-owner", data)   # #1188
     if not isinstance(data, dict) or data.get("errors"):
         return {}
     repo = (data.get("data") or {}).get("repository")

@@ -6,8 +6,9 @@ Facts no label can give (#1141 slice 3), read into a
 - `open_pr` / `pipeline` (P): the tickets an OPEN pull request is linked to,
   and the subset whose PR is in CI — PENDING checks on a non-draft PR whose
   head commit is at most PIPELINE_MAX_AGE_S old (an EXPECTED check that never
-  reports, or a stuck run, is not "in CI": the ticket stays I). ONE GraphQL
-  query over the repo's open PRs (one page of 100; more = unknown). A PR is
+  reports, or a stuck run, is not "in CI": the ticket stays I). A GraphQL
+  query over the repo's open PRs (pages of 50, at most 100; more = unknown —
+  #1188 cost cap: 1 point per 50-PR page vs 2 for one 100-PR page). A PR is
   linked the same way M links a merged PR (`cli_release_state._issue_refs`: a
   `#N` in the title, a closing keyword or an `Issue: #N` line in the body),
   plus GitHub's own `closingIssuesReferences`. Any open linked PR keeps C open.
@@ -55,12 +56,21 @@ PIPELINE_MAX_AGE_S = 3 * 3600   # a head commit older than this is stuck, not P
 
 _ON_MAIN_STATES = (ts.DEPLOYED, ts.RELEASED, ts.PENDING)
 _OID_RE = re.compile(r"[0-9a-f]{7,40}")
+# #1188: GraphQL bills a connection by its PARENTS' page size (/100): dryRun on
+# odoo-erp measured 2 points at pullRequests(first:100) and 1 at first:<=60,
+# and the leaf limits change nothing. So page PR_PAGE_SIZE PRs at a time, up to
+# PR_MAX_PAGES (the same 100-PR horizon as before: more = unknown), ordered by
+# the immutable CREATED_AT so a PR updated mid-read cannot shift pages.
+PR_PAGE_SIZE = 50
+PR_MAX_PAGES = 2
 _PR_QUERY = (
-    "query($owner:String!,$name:String!){repository(owner:$owner,name:$name)"
-    "{pullRequests(states:OPEN,first:100,orderBy:{field:UPDATED_AT,"
-    "direction:DESC}){pageInfo{hasNextPage} nodes{number title body isDraft "
+    "query($owner:String!,$name:String!,$cursor:String){repository(owner:"
+    "$owner,name:$name){pullRequests(states:OPEN,first:%d,after:$cursor,"
+    "orderBy:{field:CREATED_AT,direction:ASC}){pageInfo{hasNextPage endCursor}"
+    " nodes{number title body isDraft "
     "closingIssuesReferences(first:20){nodes{number repository{nameWithOwner}}}"
-    " commits(last:1){nodes{commit{committedDate statusCheckRollup{state}}}}}}}}")
+    " commits(last:1){nodes{commit{committedDate statusCheckRollup{state}}}}}}}"
+    " rateLimit{cost remaining}}" % PR_PAGE_SIZE)
 
 
 def cache_path(root, home=None):
@@ -146,17 +156,35 @@ def pipeline_numbers(payload, now=None):
 
 
 def read_prs(slug, gh_fn, now=None):
-    """ONE GraphQL call (`gh_fn(args) -> stdout`, "" on any error) → the
-    `open_pr_states` map, or None when the slug or the answer is unusable."""
+    """The open PRs in pages of PR_PAGE_SIZE (`gh_fn(args) -> stdout`, "" on
+    any error), merged into one payload → the `open_pr_states` map. None when
+    the slug or any page is unusable, or more than PR_MAX_PAGES pages exist
+    (unknown, exactly as the former single 100-PR page). Each page's GraphQL
+    cost is recorded (#1188)."""
+    import cli_gh_rate_cost
     owner, _, name = (slug or "").partition("/")
     if not owner or not name:
         return None
-    raw = gh_fn(["api", "graphql", "-f", "query=" + _PR_QUERY,
-                 "-f", "owner=" + owner, "-f", "name=" + name])
-    try:
-        return open_pr_states(json.loads(raw), now, slug)
-    except (TypeError, ValueError):
-        return None
+    nodes, cursor, more = [], None, False
+    for _page in range(PR_MAX_PAGES):
+        args = ["api", "graphql", "-f", "query=" + _PR_QUERY,
+                "-f", "owner=" + owner, "-f", "name=" + name]
+        raw = gh_fn(args + (["-f", "cursor=" + cursor] if cursor else []))
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            return None
+        cli_gh_rate_cost.record_query_cost("ticket-facts-prs", payload)
+        prs = _dig(payload, "data", "repository", "pullRequests")
+        if not isinstance(_dig(prs, "nodes"), list):
+            return None                     # an unreadable page: unknown
+        nodes += prs["nodes"]
+        more = bool(_dig(prs, "pageInfo", "hasNextPage"))
+        cursor = _dig(prs, "pageInfo", "endCursor")
+        if not more or not cursor:
+            break
+    return open_pr_states({"data": {"repository": {"pullRequests": {
+        "pageInfo": {"hasNextPage": more}, "nodes": nodes}}}}, now, slug)
 
 
 REOPENED_MAX = 100   # one batched stateReason call; more candidates = unknown
@@ -173,14 +201,17 @@ def read_reopened(slug, gh_fn, numbers):
     if not owner or not name or len(numbers) > REOPENED_MAX:
         return None
     query = ("query($owner:String!,$name:String!){repository(owner:$owner,"
-             "name:$name){%s}}" % " ".join(
+             "name:$name){%s} rateLimit{cost remaining}}" % " ".join(
                  "i%d:issue(number:%d){stateReason}" % (n, n) for n in numbers))
     raw = gh_fn(["api", "graphql", "-f", "query=" + query,
                  "-f", "owner=" + owner, "-f", "name=" + name])
     try:
-        repo = _dig(json.loads(raw), "data", "repository")
+        payload = json.loads(raw)
     except (TypeError, ValueError):
         return None
+    import cli_gh_rate_cost
+    cli_gh_rate_cost.record_query_cost("ticket-facts-reopened", payload)
+    repo = _dig(payload, "data", "repository")
     nodes = [_dig(repo, "i%d" % n) for n in numbers]
     if not all(isinstance(node, dict) for node in nodes):
         return None

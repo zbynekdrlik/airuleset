@@ -46,6 +46,12 @@ def _ghql_mod():
     import cli_gh_rate_graphql as _ghql
     return _ghql
 
+
+def _cost_mod():
+    """#1188: the GraphQL COST accounting (cli_gh_rate_cost), imported lazily."""
+    import cli_gh_rate_cost as _cost
+    return _cost
+
 # --------------------------------------------------------------------------- #
 # Tunables (module constants so tests reference them, not magic numbers).
 # --------------------------------------------------------------------------- #
@@ -72,7 +78,7 @@ _FETCH_TIMEOUT_S = 15            # a single `gh api rate_limit` / `graphql rateL
 _RESOURCES = ("core", "graphql")
 
 # Env markers.
-POLLER_ENV = "AIRULESET_GH_POLLER"      # set by the watchdog: this call is a background poll
+POLLER_ENV = "AIRULESET_GH_POLLER"      # watchdog + footer refresh (#1188): a background poll
 INTERNAL_ENV = "AIRULESET_GH_RATE_INTERNAL"  # set by the refresh: never recurse/throttle
 
 
@@ -730,7 +736,7 @@ def record_alerts(status):
     try:
         os.makedirs(gh_rate_dir(), exist_ok=True)
         _cap_journal()
-        burners = current_hour_burner_suffix()   # #1087 (a): top-3 of this hour
+        burners = exhausted_burners()   # #1188: by COST, then #1087 calls
         with open(journal_path(), "a", encoding="utf-8") as fh:
             for name in fired:
                 fh.write("%s\t%s\n" % (
@@ -957,39 +963,14 @@ def record_call(argv, env=None, now=None):
             return
         key = _call_key(argv, kind)
         hour = time.strftime("%H", time.localtime(now))
-        path = calls_path(now)
-        os.makedirs(gh_rate_dir(), exist_ok=True)
-        import fcntl
-        fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o644)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            # Read the WHOLE file (#1087 review 🔵: a fixed 1 MB cap would
-            # truncate an oversized day file -> json parse fail -> the day's
-            # counters reset). Loop until EOF so no size assumption is made.
-            chunks = []
-            while True:
-                chunk = os.read(fd, 1 << 20)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-            raw = b"".join(chunks).decode("utf-8", "replace")
-            try:
-                data = json.loads(raw) if raw.strip() else {}
-                if not isinstance(data, dict):
-                    data = {}
-            except (ValueError, TypeError):
-                data = {}
-            bucket = data.setdefault(hour, {})
+
+        def _bump(data):
+            bucket = data.get(hour)
             if not isinstance(bucket, dict):
                 bucket = data[hour] = {}
             bucket[key] = int(bucket.get(key, 0) or 0) + 1
-            payload = json.dumps(data).encode("utf-8")
-            os.lseek(fd, 0, os.SEEK_SET)
-            os.ftruncate(fd, 0)
-            os.write(fd, payload)
-        finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+        # flock'd read-modify-write shared with the #1188 cost file.
+        _cost_mod().locked_json_update(calls_path(now), _bump)
     except Exception as e:   # noqa: BLE001 — accounting must never break gh
         _diag("record-call", e)
 
@@ -1031,6 +1012,14 @@ def hour_top3(data, hour):
 
 def day_total(data):
     return sum(_flatten_calls(data).values())
+
+
+def exhausted_burners(now=None):
+    """The EXHAUSTED line's spender suffix: the current hour's top spenders by
+    GraphQL COST first (#1188 — GraphQL is billed per cost, not per call),
+    then the #1087 top-3 by call count as context."""
+    return _cost_mod().current_hour_cost_suffix(now) + \
+        current_hour_burner_suffix(now)
 
 
 def current_hour_burner_suffix(now=None):
@@ -1548,12 +1537,15 @@ def _cmd_gh_rate_top(args):
         now = time.time()
     data = load_calls(now)
     total = day_total(data)
+    limit = getattr(args, "limit", 15) or 15
     if not total:
         print("gh-rate: no calls recorded for %s" % _day_str(now))
-        return 0
-    print("gh-rate top burners for %s (total %d):" % (_day_str(now), total))
-    for key, count in top_burners(data, limit=getattr(args, "limit", 15) or 15):
-        print("  %6d  %s" % (count, key))
+    else:
+        print("gh-rate top burners for %s (total %d):" % (_day_str(now), total))
+        for key, count in top_burners(data, limit=limit):
+            print("  %6d  %s" % (count, key))
+    for line in _cost_mod().top_lines(now, limit=limit):   # #1188
+        print(line)
     return 0
 
 
@@ -1626,7 +1618,9 @@ def _record_main(argv):
     """`cli_gh_rate.py --record -- <gh args>` — the shim's backgrounded call-
     accounting entry (#1087 a). `record_call` is itself fully fail-open (logs to
     the diag journal, never raises), so this is a thin pass-through."""
-    record_call(_gh_args_after_dashdash(argv))
+    gh_args = _gh_args_after_dashdash(argv)
+    record_call(gh_args)
+    _cost_mod().note_call(gh_args)   # #1188: GraphQL used-delta sampler
     return 0
 
 
@@ -1688,6 +1682,7 @@ if __name__ == "__main__":
     # membership — a gh arg literally equal to a sentinel (e.g. `gh issue
     # comment 5 --body "--record"`, passed after `--`) must not mis-dispatch.
     _mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    sys.modules.setdefault("cli_gh_rate", sys.modules[__name__])  # #1188: one copy
     if _mode == "--wrapper-backoff":
         sys.exit(_wrapper_backoff_main(sys.argv[1:]))
     if _mode == "--record":
