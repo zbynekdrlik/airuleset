@@ -93,15 +93,15 @@ acceptance either.
 
 Cite the Odoo message that IS the acceptance, on the Acceptance-cited line:
   • a client message or reaction, or the owner's/client's own stage move (its
-chatter tracking message) — name its author:
-  gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: msg <message-id> task <task-id>"
+    chatter tracking message) — name its author:
+      gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: msg <message-id> task <task-id>"
   • the owner accepted on the client's behalf (an owner ROZHODNUTÉ comment):
-  gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: owner ROZHODNUTÉ issuecomment-<id>"
+      gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: owner ROZHODNUTÉ issuecomment-<id>"
   • the client confirmed in a RECORDED meeting (name the recording):
-  gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: meeting <recording id> [mm:ss] <who>"
+      gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: meeting <recording id> [mm:ss] <who>"
   • the odoo-erp#8507 auto-close (montalu): the full line from
-skills/odoo-client-messaging/client-board-stages.md rule 6, ending
-"msg <auto-close note id> task <task-id>".
+    skills/odoo-client-messaging/client-board-stages.md rule 6, ending
+    "msg <auto-close note id> task <task-id>".
 No such message yet → the task is not accepted: leave the ticket open (move
 the task back to the verification stage if a stream set Hotovo).
 
@@ -125,24 +125,24 @@ closing note via the project's own client channel mechanism, then record the
 evidence on THIS ticket. Add ONE of:
 
   • the client's acceptance is on record and the closing note was posted (this
-is the LAST ticket bound to the thread) — cite the ACCEPTANCE message:
-  gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: msg <message-id>"
-(legacy: Discuss-closed: msg <message-id> also accepted); the owner
-accepted on the client's behalf → "Acceptance-cited: owner ROZHODNUTÉ issuecomment-<id>"
+    is the LAST ticket bound to the thread) — cite the ACCEPTANCE message:
+      gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: msg <message-id>"
+    (legacy: Discuss-closed: msg <message-id> also accepted); the owner
+    accepted on the client's behalf → "Acceptance-cited: owner ROZHODNUTÉ issuecomment-<id>"
 
   • the thread STAYS OPEN because sibling tickets remain (the closing note goes
-at the LAST close, not here — name the still-open siblings):
-  gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-defer: siblings #<A> #<B> still open"
-(legacy: Discuss-defer: also accepted)
+    at the LAST close, not here — name the still-open siblings):
+      gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-defer: siblings #<A> #<B> still open"
+    (legacy: Discuss-defer: also accepted)
 
 Then re-run the close.
 
 Both paths:
   • a sub-dev closing its own ticket: YOU post the note + record the line + close.
   • the gatekeeper closing a branch-merge ticket after the release pipeline: the
-OWNING stream posts the note + records Discuss-closed: at hand-off; the
-gatekeeper's close then finds the evidence. The gatekeeper does NOT post to
-the client thread — the stream that owns the thread does.
+    OWNING stream posts the note + records Discuss-closed: at hand-off; the
+    gatekeeper's close then finds the evidence. The gatekeeper does NOT post to
+    the client thread — the stream that owns the thread does.
 
 How to compose + post the closing note (identity signature, owner approval,
 per project channel — odoo-erp: task chatter per .claude/rules/odoo-task-sync.md):
