@@ -9,7 +9,7 @@ not name the spender. Locked here:
   and its consumer records the cost under its label (`q:<label>`) in the daily
   `gql-cost-<day>.json` next to the call counts;
 - a foreign/raw GraphQL-shaped call opens a sampling window; at most once per
-  minute the free `GET /rate_limit` is read and the graphql `used` delta (minus
+  minute the free GraphQL `rateLimit` object is read and the graphql `used` delta (minus
   the exact owned cost) is attributed pro rata to the window's call shapes
   (`~<shape>`, approximate);
 - the EXHAUSTED line ranks the top spenders by COST;
@@ -226,7 +226,10 @@ class ExhaustedLineRanksByCost(_Tmp):
 
 
 class _FakeRateLimit:
-    """A fake `subprocess.run` answering `gh api rate_limit`."""
+    """A fake `subprocess.run` answering the authoritative GraphQL rateLimit
+    OBJECT read. Not REST `gh api rate_limit`: measured live 2026-09-29, the
+    REST graphql bucket said used 18 while the object said used 777 (the #1052
+    mis-report), so a REST delta would attribute nothing."""
 
     def __init__(self):
         self.calls = 0
@@ -235,17 +238,17 @@ class _FakeRateLimit:
 
     def __call__(self, argv, **kw):
         self.calls += 1
-        assert argv[1:] == ["api", "rate_limit"], argv
+        assert argv[1:3] == ["api", "graphql"], argv
+        assert "rateLimit" in argv[-1], argv
         assert kw["env"][cli_gh_rate.INTERNAL_ENV] == "1"   # never counted
-        g = {"limit": 5000, "remaining": self.remaining, "reset": self.reset,
-             "used": 5000 - self.remaining}
-        return mock.Mock(returncode=0, stdout=json.dumps({"resources": {
-            "core": {"limit": 5000, "remaining": 4999, "reset": self.reset},
-            "graphql": g}}))
+        reset_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.reset))
+        return mock.Mock(returncode=0, stdout=json.dumps({"data": {"rateLimit": {
+            "limit": 5000, "remaining": self.remaining, "resetAt": reset_at,
+            "used": 5000 - self.remaining}}}))
 
 
 class SampledAttribution(_Tmp):
-    """Foreign/raw GraphQL-shaped calls: the free /rate_limit `used` delta is
+    """Foreign/raw GraphQL-shaped calls: the rateLimit-object `used` delta is
     attributed to the window's call shapes (approximate, `~` keys)."""
 
     ISSUE_LIST = ["issue", "list", "--json", "number"]
