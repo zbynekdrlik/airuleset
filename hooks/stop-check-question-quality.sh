@@ -417,31 +417,29 @@ if [ -n "$BLOCK" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
     fi
 fi
 
-# --- #1006 (montalu, repeated escalation 2026-09-12): ONE ❓ block = ONE
-# client text. A ❓ approval block that bundled TWO client-message drafts
-# (Text úloha 638 + Text úloha 881, each signed `ZbynekAI`) with ONE decision
-# line passed the gate — Check 2 catches a (1)/(2) multi-QUESTION pile, never
-# multiple client TEXTS. Owner rule: JEDNA otázka = JEDEN klientsky text —
-# queue the rest. Deterministic detectors on the delivered BLOCK (any signal
-# >= 2 ⇒ bundle): >=2 `ZbynekAI` signatures (each proposed reply is signed
-# once — the client's own quoted message is never signed ZbynekAI), >=2
-# `Text úloha`/`Text pre`-style draft headers, or >=2 `❓ (NEEDS YOU|ASKED)`
-# decision markers. Runs BEFORE the present-user bypass (like the #740
-# repeat-block) so a bundled block is caught even when the owner is present in
-# the webterm — the exact montalu shape that slipped through. exit 2 + the
-# split instruction; RETRY_FILE cap like the shape checks so it never wedges.
-if [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
-    # #1006 review 🔵: count only signature LINES (ending with ZbynekAI), never
-    # a mid-line prose mention ("…podpíšem ho ako ZbynekAI podľa dohody):"), so a
-    # single draft that names its own signature is not miscounted as two texts.
-    N_SIG=$(grep -cE 'ZbynekAI[[:space:]]*$' <<<"$BLOCK" || true)
-    # #1006 review 🔵: alternation (ú|u), not a multibyte bracket class, so the
-    # "Text úloha" arm survives even on a box with no C.UTF-8 locale.
-    N_TEXTHDR=$(LC_ALL=C.UTF-8 grep -cE '^[[:space:]]*\**[[:space:]]*Text[[:space:]]+((ú|u)loh|pre[[:space:]]|pro[[:space:]]|[0-9])' <<<"$BLOCK" || true)
-    N_DEC=$(grep -cE '❓[[:space:]]*\**[[:space:]]*(NEEDS[[:space:]]+YOU|ASKED)' <<<"$BLOCK" || true)
-    if [ "${N_SIG:-0}" -ge 2 ] || [ "${N_TEXTHDR:-0}" -ge 2 ] || [ "${N_DEC:-0}" -ge 2 ]; then
+# --- #1006 / #1177 (montalu 2026-09-12, montalu4 2026-09-29): ONE ❓ approval
+# question = ONE client text. Owner rule „jedna správa / jedna otázka a potom
+# ďalšia, nie naraz": show the FIRST draft, queue the rest on their tickets
+# (needs-answer), show the next one after the answer. #1006 counted signatures /
+# `Text …` headers / ❓ markers inside `$BLOCK` only; the 29.9 montalu4 message
+# evaded it by putting both drafts ABOVE the `**Otázka —` head (the phone view is
+# capped) and signing them `ZbynekAI 4`. The counting now lives in
+# `gates/draftbundle.py` (pure functions, unit-tested; module docstring = the
+# counting rules): with client-approval intent it reads the WHOLE message `$MSG`
+# (stdin; the block via AIRULESET_QQ_BLOCK), counts signature-only lines and
+# target-headed unsigned quote runs, and skips sent / incoming context. THIN
+# ADAPTER like #1106/#1025: exit 2 + the split instruction on the module's rc 2;
+# any other rc = FAIL-OPEN. Runs BEFORE the present-user bypass (the owner in the
+# webterm sees the bundle too) and under the shared RETRY_FILE cap (never wedges).
+if [ -n "$BLOCK" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
+    _DB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    _DB_REPO_ROOT="$(dirname "$_DB_DIR")"
+    _DB_REASON=$(env AIRULESET_QQ_BLOCK="$BLOCK" \
+        PYTHONPATH="${_DB_REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -P -m gates.draftbundle <<<"$MSG" 2>/dev/null) && _DB_RC=0 || _DB_RC=$?
+    if [ "$_DB_RC" = 2 ] && [ -n "$_DB_REASON" ]; then
         echo "$((RETRIES+1))" > "$RETRY_FILE"
-        printf '%s\n' "Tvoj ❓ blok bundluje VIAC než jeden klientsky text / rozhodnutie (podpisy ZbynekAI: ${N_SIG:-0}, „Text …\" hlavičky: ${N_TEXTHDR:-0}, ❓ rozhodnutia: ${N_DEC:-0}). Owner pravidlo: JEDNA otázka = JEDEN klientsky text — pošli PRVÝ teraz vo vlastnom bloku, zvyšné ZARAĎ DO FRONTY (na ich ticketoch, label needs-answer) a spýtaj sa až po odpovedi. Rodinné batchovanie (#755) zoskupuje TIKETY deklaratívne, NIKDY viac klientskych textov v jednom bloku (#1006)." >&2
+        printf '%s\n' "$_DB_REASON" >&2
         exit 2
     fi
 fi

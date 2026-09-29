@@ -1,0 +1,16 @@
+Včera odišli tieto dve odpovede:
+
+> Dobrý deň Patrik, montáž je naplánovaná na piatok 3.10. od 8:00.
+> ZbynekAI 4
+
+Druhá:
+
+> Dobrý deň, cenník sme aktualizovali podľa vašej požiadavky.
+> ZbynekAI 4
+
+**Otázka — projekt montalu4 (klientsky Odoo systém):** Tester je zelený a klient zmenu schválil, čakám na rozhodnutie o nasadení.
+
+- Nasadiť teraz (odporúčam) — pôjde na prod
+- Počkať — nič sa nestane
+
+❓ NEEDS YOU: nasadiť verziu 0.4.2 na produkčný server teraz?
