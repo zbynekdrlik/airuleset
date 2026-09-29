@@ -2536,6 +2536,13 @@ def goal_status_probe(cwd, run=None, pane_env=None, projects_dir=None):
                               kind_on=_wd.nudges_enabled(_wt.NUDGE_KIND),
                               armed=_wt.read_armed().get(_watch.get("name")),
                               goal_armed=armed)
+    # #1181 (c) -- a self-callback arm dropped at the attempt cap stays VISIBLE
+    # here until the pane arms, a new request is pending, or the record ages out.
+    if pane_found and armed is not True and not pending and sid:
+        from watchdog import goal_arm_failure as _gaf
+        _fail = _gaf.failure(sid, time.time())
+        if _fail:
+            return _gaf.status_row(_fail)
     return cli_concurrency.goal_status_row(cwd, armed, pending,
                                            pane_found=pane_found)
 
