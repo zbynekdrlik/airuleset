@@ -222,7 +222,8 @@ class ExhaustedLineRanksByCost(_Tmp):
         data = {"14": {"~issue list|poller": {"cost": 900, "n": 9},
                        "~unattributed": {"cost": 500, "n": 0}}}
         cli_gh_rate_cost.locked_json_update(
-            cli_gh_rate_cost.cost_path(_T0), lambda d: d.update(data))
+            cli_gh_rate_cost.cost_path(_T0),
+            lambda d: d.setdefault("14", {}).update(data["14"]))
         line = cli_gh_rate_cost.current_hour_cost_suffix(_T0)
         self.assertIn("top cost: q:ops-wait-prefetch 40pt, "
                       "q:ticket-facts-prs 4pt", line)
