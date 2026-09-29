@@ -17,6 +17,8 @@ it ALSO carries a disposition line:
     is DEFERRED to the LAST ticket because sibling tickets bound to the same
     thread are still open (the note goes once, at the last close, never N
     times).
+  * `Acceptance-cited: … msg <id>` / `Acceptance-defer: <reason>` (#891; the
+    cited value needs a `msg <id>`, #1185 — see `_MSG_REF_RE`).
 
 Target property (owner): the LAST message in the thread is ALWAYS from the
 sub-dev, written when the LAST ticket bound to the thread closes. WHO writes
@@ -68,8 +70,8 @@ gh-fetch error and an unextractable issue number (fall through = allow).
 INTERFACE. `evaluate_close(issue_json_text) -> None | str` — None ALLOWS the
 close, a short reason string BLOCKS it. `issue_json_text` is the raw output
 of `gh issue view <N> --json body,comments`. The CLI (`python3
-discuss_close_guard.py`, stdin → stdout) prints "OK" or "BLOCK", which the
-hook branches on. Stdlib only (this repo's convention).
+discuss_close_guard.py`, stdin → stdout) prints "OK", "BLOCK" or (#1185)
+"BLOCK-CITED", which the hook branches on. Stdlib only (this repo's convention).
 """
 
 import json
@@ -105,6 +107,18 @@ _DEFER_RE = re.compile(_MARK_OPEN + r"Discuss-defer" + _MARK_TAIL)
 _ACC_THREAD_RE = re.compile(_MARK_OPEN + r"Acceptance-thread" + _MARK_TAIL)
 _ACC_CITED_RE = re.compile(_MARK_OPEN + r"Acceptance-cited" + _MARK_TAIL)
 _ACC_DEFER_RE = re.compile(_MARK_OPEN + r"Acceptance-defer" + _MARK_TAIL)
+
+# #1185 — an `Acceptance-cited:` VALUE counts only with a message reference ON
+# that line: a stage a STREAM set („task 1102 v Hotovo") is never acceptance.
+# Acceptance (client message/reaction, an owner/client stage move's tracking
+# message, the odoo-erp#8507 auto-close note) is always a `mail.message`, so it
+# is checkable offline. Spellings: `msg 1742799`, `msg #1904`, `msg_id=1`,
+# `mail.message **1941**`; a placeholder `msg <id>` never counts. Legacy
+# `Discuss-*` and `Acceptance-defer:` stay value-blind.
+_ACC_CITED_VALUE_RE = re.compile(_MARK_OPEN + r"Acceptance-cited[ \t*]*:[ \t]*(\S[^\n]*)")
+_MSG_REF_RE = re.compile(
+    r"(?i)(?<![\w.])(?:msg|mail\.message)(?:[ \t]*_?id)?[ \t*#:=]*[0-9]+(?!\w)"
+)
 
 # #695 — SECOND binding recognition: the `discuss.channel_<N>` deep-link token.
 # The manual `Discuss-thread:` mark is opt-in, and the exact stream that forgot
@@ -156,24 +170,32 @@ def is_thread_bound(text):
     )
 
 
+def has_msg_citation(text):
+    """True iff SOME `Acceptance-cited:` line carries a `msg <id>` on that
+    same line (#1185); a msg id elsewhere on the ticket is not the evidence."""
+    return any(_MSG_REF_RE.search(v) for v in _ACC_CITED_VALUE_RE.findall(text))
+
+
 def has_disposition(text):
     """True iff the ticket carries a disposition line with a real value —
     either the legacy `Discuss-closed:`/`Discuss-defer:` OR the
-    channel-agnostic `Acceptance-cited:`/`Acceptance-defer:` (#891)."""
+    channel-agnostic `Acceptance-defer:` (#891), each value-blind, OR an
+    `Acceptance-cited:` whose value carries a `msg <id>` (#1185)."""
     return bool(
         _CLOSED_RE.search(text)
         or _DEFER_RE.search(text)
-        or _ACC_CITED_RE.search(text)
         or _ACC_DEFER_RE.search(text)
+        or has_msg_citation(text)
     )
 
 
 def evaluate_close(issue_json_text):
     """Return None to ALLOW the close, or a short reason string to BLOCK it.
 
-    Blocks IFF the ticket is thread-bound AND carries no disposition. Every
-    unverifiable input (bad JSON, non-object payload) returns None (ALLOW) —
-    the gate's safe default."""
+    Blocks IFF the ticket is thread-bound AND carries no disposition (reason
+    `acceptance-cited-without-msg` when only msg-less citations exist, #1185).
+    Every unverifiable input (bad JSON, non-object payload) returns None
+    (ALLOW) — the gate's safe default."""
     try:
         data = json.loads(issue_json_text)
     except Exception:
@@ -182,6 +204,8 @@ def evaluate_close(issue_json_text):
         return None
     text = collect_text(data)
     if is_thread_bound(text) and not has_disposition(text):
+        if _ACC_CITED_RE.search(text):
+            return "acceptance-cited-without-msg"
         return "thread-bound-no-closing-note"
     return None
 
@@ -192,7 +216,7 @@ def main():
         reason = evaluate_close(raw)
     except Exception:
         reason = None
-    print("BLOCK" if reason else "OK")
+    print({None: "OK", "acceptance-cited-without-msg": "BLOCK-CITED"}.get(reason, "BLOCK"))
     return 0
 
 

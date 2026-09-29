@@ -455,6 +455,7 @@ if [ "$_d_run_gate" = "1" ]; then
             # Check EACH close target (numbers are pure digits — safe to word-split).
             # Block on the FIRST bound-no-disposition target found.
             _D_BLOCK_NUM=""
+            _D_BLOCK_KIND=""
             for _D_NUM in $_D_NUMS; do
                 _D_JSON=""
                 if [ -n "${AIRULESET_DISCUSS_CLOSE_FIXTURE:-}" ] && [ -f "${AIRULESET_DISCUSS_CLOSE_FIXTURE}" ]; then
@@ -466,12 +467,37 @@ if [ "$_d_run_gate" = "1" ]; then
                 fi
                 if [ -n "$_D_JSON" ]; then
                     _D_VERDICT=$(printf '%s' "$_D_JSON" | python3 "$_DREPO/discuss_close_guard.py" 2>/dev/null || echo "OK")
-                    if [ "$_D_VERDICT" = "BLOCK" ]; then
+                    # #1185: BLOCK-CITED = an Acceptance-cited line exists but
+                    # none carries a msg <id> (a stage-only citation).
+                    if [ "$_D_VERDICT" = "BLOCK" ] || [ "$_D_VERDICT" = "BLOCK-CITED" ]; then
                         _D_BLOCK_NUM="$_D_NUM"
+                        _D_BLOCK_KIND="$_D_VERDICT"
                         break
                     fi
                 fi
             done
+            if [ "$_D_BLOCK_KIND" = "BLOCK-CITED" ]; then
+                cat >&2 <<MSG
+
+🚫 BLOCKED: this ticket's Acceptance-cited: line carries no msg <id> — it
+cites only a stage (e.g. "task in Hotovo"), and a Hotovo/Hotové a STREAM account
+set is never acceptance evidence (airuleset #1185): the stream cannot be its
+own acceptance.
+
+Cite the Odoo message that IS the acceptance, on the Acceptance-cited line:
+  • a client message or reaction, or the owner's/client's own stage move (its
+    chatter tracking message):
+      gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: msg <message-id> task <task-id>"
+  • the odoo-erp#8507 auto-close (montalu): the full line from
+    skills/odoo-client-messaging/client-board-stages.md rule 6, ending
+    "msg <auto-close note id> task <task-id>".
+No such message yet → the task is not accepted: leave the ticket open (move
+the task back to the verification stage if a stream set Hotovo).
+
+Then re-run the close.
+MSG
+                exit 2
+            fi
             if [ -n "$_D_BLOCK_NUM" ]; then
                 cat >&2 <<MSG
 
