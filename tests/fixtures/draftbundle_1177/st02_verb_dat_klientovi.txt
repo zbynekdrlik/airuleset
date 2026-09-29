@@ -1,0 +1,16 @@
+Návrh 1 — do úlohy „Montáž Patrik 4" (https://erp.montalu.cloud/odoo/project/4/tasks/1192):
+
+> Dobrý deň Patrik, montáž je naplánovaná na piatok 3.10. od 8:00.
+> ZbynekAI 4
+
+Návrh 2 — vlákno „Cenník Patrik 4" (https://erp.montalu.cloud/odoo/discuss?active_id=discuss.channel_783):
+
+> Dobrý deň, cenník sme aktualizovali podľa vašej požiadavky.
+> ZbynekAI 4
+
+**Otázka — projekt montalu4 (klientsky Odoo systém montalu):** Patrik sa pýtal na termín montáže. Pripravil som text vyššie.
+
+- Áno (odporúčam) — odídu tak, ako sú
+- Nie — napíš zmeny
+
+❓ NEEDS YOU: môžem to dať klientovi takto?

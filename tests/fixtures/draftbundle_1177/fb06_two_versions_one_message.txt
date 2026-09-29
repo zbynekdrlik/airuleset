@@ -1,0 +1,18 @@
+Vlákno: „Montáž Patrik 4" — https://erp.montalu.cloud/odoo/discuss?active_id=discuss.channel_783
+
+Verzia A:
+
+> Dobrý deň Patrik, montáž je naplánovaná na piatok 3.10. od 8:00.
+> ZbynekAI 4
+
+Verzia B (kratšia):
+
+> Dobrý deň, montáž v piatok 3.10. o 8:00.
+> ZbynekAI 4
+
+**Otázka — projekt montalu4 (klientsky Odoo systém montalu):** Patrik sa pýtal na termín montáže. Pripravil som text vyššie.
+
+- Verzia A (odporúčam) — podrobnejšia
+- Verzia B — stručná
+
+❓ NEEDS YOU: ktorú verziu mám poslať Patrikovi?
