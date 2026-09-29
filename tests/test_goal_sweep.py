@@ -2282,11 +2282,10 @@ class TestGoalDeliveryAttemptCap731(unittest.TestCase):
                                         requests_path=self.reqp,
                                         send_fn=lambda m, **k: None,
                                         sleep_fn=lambda *a, **k: None)
-        # AFTER the fix: at most `cap` /goal deliveries, then a terminal drop
-        # (#1181: + ONE non-/goal notice line). BEFORE: cap+1, never cleared.
+        # AFTER the fix: at most `cap` /goal types (+ #1181: at most ONE notice).
         goals = [t for t in tmux.typed_texts() if t.startswith("/goal")]
-        self.assertLessEqual(len(goals), cap, "retype must be bounded by the "
-                             "attempt cap; typed %d times" % len(goals))
+        self.assertLessEqual(len(goals), cap, "retype bound; typed %d" % len(goals))
+        self.assertLessEqual(len(tmux.typed_texts()) - len(goals), 1, tmux.typed_texts())
         self.assertTrue(any("drop:attempt-cap" in ln for ln in last_logs),
                         last_logs)
         self.assertEqual(goal.load_goal_requests(self.reqp), {},
