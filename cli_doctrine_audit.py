@@ -286,7 +286,7 @@ SUPERSEDED_MEMORY = [
         "id": "board-tasks-no-assignee",
         "scope": r"montalu",
         "pattern": (r"\b(?:no|bez|žiadn\w*|nikdy\s+nenastav\w*)\s+"
-                    r"(?:assignee|user_ids|priraden\w*)"
+                    r"(?:assignee|user_ids)"
                     r"|\b(?:assignee|user_ids)\s*[:=]?\s*(?:none|empty|prázdn\w*|\[\])"),
         "superseded_by": ("skills/odoo-client-messaging/client-board-stages.md rule 5 "
                           "(#1166, owner 28.9.2026: on montalu the handover addressee "

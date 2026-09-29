@@ -40,10 +40,8 @@ _TASK_URL_FMT = "%s/odoo/project/%s/tasks/%s"
 _STATUS_BASENAME = "status.json"
 _STATUS_DIRNAME = "task-hygiene"
 
-# board-wide comment fetch cap for the ONE batched read (#1036 review 🟡): a
-# client board is dozens of open tasks with a handful of comments each, so a few
-# thousand is generous headroom; truncation beyond it under-counts (fail-safe:
-# fewer flags), never a hard failure.
+# board-wide comment cap for the ONE batched read (#1036 review 🟡): generous for
+# dozens of open tasks; truncation under-counts (fewer flags), never a failure.
 _MSG_LIMIT = 5000
 # open-task fetch cap — a stream board is dozens of open tasks, not hundreds.
 _TASK_LIMIT = 200
@@ -215,6 +213,8 @@ def compute_hygiene(call, cfg, now=None):
                     if age_days > confirm_days:
                         c_items.append(dict(base, days=int(age_days)))
 
+    if not reactions_ok and a_items and not hh.guarded_reactions_ok(call, all_msgs):
+        a_items = [dict(it, reaction_unknown=True) for it in a_items]  # #1180
     h_items, h_error = hh.compute_h(call, tasks, cfg, lambda a: _is_stream_author(
         a, own_names, stream_pids), now)
     summary = "task-hygiene: A=%d B=%d C=%d" % (
@@ -303,7 +303,8 @@ def persist_status(result, home=None, now=None):
     a = result.get("A", [])
     b = result.get("B", [])
     c = result.get("C", [])
-    a_ts = [it["ts"] for it in a if isinstance(it.get("ts"), (int, float))]
+    a_ts = [it["ts"] for it in a if isinstance(it.get("ts"), (int, float))
+            and not it.get("reaction_unknown")]    # #1180: never Stop-gate an unknown
     # b_items = ONLY the Verifikácia B members (#1036 review 🔵), matching b_verif.
     b_verif_items = [it for it in b if _is_verif_stage_name(it.get("stage"))]
     payload = {

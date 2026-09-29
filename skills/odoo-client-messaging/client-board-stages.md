@@ -31,10 +31,9 @@ no `partner_ids`) — except on **montalu** ONE mention anchor for the addressed
 person (rule 5), its partner in `partner_ids` (#702); the TRANSPORT uses `body_is_html=True` per the
 `handover-compose.md` posting rules. The shape is Stop-checked (#1018).
 
-**ONE step (#1180):** post a task handover ONLY via `odoo_post.py --handover`
-(odoo-erp#8606: post + rule-5 assignee + move + read-back).
-A task handover without it, or an `Acceptance-thread:` naming an unmoved task,
-is Stop-blocked.
+**ONE step (#1180):** post it via `odoo_post.py --handover` (odoo-erp#8606:
+post + rule-5 assignee + move; until it ships, move + assign by hand, same
+turn). A handover or `Acceptance-thread:` leaving a task unmoved is Stop-blocked.
 
 ### 5. Assignee — per profile
 

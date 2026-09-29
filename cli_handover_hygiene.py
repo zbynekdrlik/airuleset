@@ -20,9 +20,13 @@ CLASS H: a STREAM-authored HANDOVER message on an open task that is NOT in the
 verification stage ``H_GRACE_S`` (10 min) after it was posted, with no stage move
 since. That is the post-without-move the owner escalated twice (montalu1 28.9.,
 montalu4 29.9.).
-- Handover shape: the rule-3 markers ``Čo skúsiť`` + ``stačí`` (client-board-
-  stages.md rule 3). The approval ref is a poster-side argument, not part of the
-  posted body.
+- Handover shape: the rule-3 ``Čo skúsiť`` heading + the literal ``stačí 👍``
+  (client-board-stages.md rule 3; ``is_handover_body``, shared with
+  ``gates.handover``). The approval ref is a poster-side argument, not part of
+  the posted body. The server filter is the loose ``👍`` alone; Python decides.
+- Degraded A: with ``reaction_ids`` 403'd AND the guarded method unavailable, A
+  items carry ``reaction_unknown`` (listed + counted, never Stop-gated — a 👷 ack
+  cannot be seen, so the Stop gate must not demand one).
 - A stage move AFTER the handover (``date_last_stage_update`` newer than the
   message) is a deliberate later decision, e.g. a client rejection back to
   Realizácia, so it is not H.
@@ -30,6 +34,7 @@ montalu4 29.9.).
   task's chatter, a Discuss thread) has no message of its own. The
   ``gates.handover`` Stop check covers it through ``Acceptance-thread:``.
 """
+import datetime
 import re
 
 import cli_odoo_ro as ro
@@ -39,8 +44,13 @@ H_GRACE_S = 600
 REACTIONS_403_LOG = ("reactions unavailable (403) — A/C run without the "
                      "reaction_ids signal (guarded reactions still read)")
 _H_LIMIT = 1000
-_SHAPE_RX = (re.compile(r"sk[úu]si", re.IGNORECASE),
-             re.compile(r"sta[čc][íi]", re.IGNORECASE))
+# The rule-3 handover SHAPE, shared with gates.handover (ONE definition): the
+# "Čo skúsiť" section heading AND the literal closing "stačí 👍" — two loose words
+# ("Skúsili ste…? Stačí napísať") are a client question, never a handover.
+_GAP = r"(?:\s|&nbsp;|&#160;|<[^>]{0,40}>)*"
+_SHAPE_RX = (re.compile(r"[ČčCc]o" + _GAP + r"sk[úu]si", re.IGNORECASE),
+             re.compile(r"sta[čc][íi]" + _GAP + r"(?:👍|&#128077;|:\+1:|:thumbsup:)",
+                        re.IGNORECASE))
 _TASK_BASE_FIELDS = ("id", "name", "stage_id", "date_last_stage_update")
 
 
@@ -66,7 +76,39 @@ def read_messages(call, **body):
 
 
 def is_handover_body(body):
+    """True iff ``body`` carries the rule-3 handover shape (see ``_SHAPE_RX``)."""
     return isinstance(body, str) and all(rx.search(body) for rx in _SHAPE_RX)
+
+
+def guarded_reactions_ok(call, msgs):
+    """True iff the guarded reaction method answers on this instance (probed
+    with ONE message id). With ``reaction_ids`` 403'd AND this False, a client
+    comment the stream already 👷-acked is indistinguishable from an unanswered
+    one, so its A item is marked ``reaction_unknown`` (listed, never Stop-gated)."""
+    mid = next((m.get("id") for m in msgs if isinstance(m.get("id"), int)), None)
+    if mid is None:
+        return False
+    try:
+        call("mail.message", "message_reactions_guarded", ids=[mid])
+    except ro.OdooError:
+        return False
+    return True
+
+
+def daily_notes(result, state, now):
+    """Job-49 log lines that must appear ONCE per UTC day, never per sweep: the
+    reaction 403 degrade and a failed/truncated class-H read."""
+    if not isinstance(state, dict):
+        return []
+    day = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).date().isoformat()
+    out = []
+    for key, text in (("task_hygiene_r403_day",
+                       REACTIONS_403_LOG if result.get("reactions_unavailable") else ""),
+                      ("task_hygiene_herr_day", result.get("h_error") or "")):
+        if text and state.get(key) != day:
+            state[key] = day
+            out.append("task-hygiene: " + text)
+    return out
 
 
 def compute_h(call, tasks, cfg, is_stream, now):
@@ -82,11 +124,13 @@ def compute_h(call, tasks, cfg, is_stream, now):
                     domain=[["model", "=", "project.task"],
                             ["res_id", "in", sorted(cand)],
                             ["message_type", "=", "comment"],
-                            ["body", "ilike", "skúsi"], ["body", "ilike", "stačí"]],
+                            ["body", "ilike", "👍"]],   # loose; _SHAPE_RX decides
                     fields=["id", "author_id", "date", "res_id", "body"],
                     order="res_id, date desc, id desc", limit=_H_LIMIT) or []
     except ro.OdooError as e:
         return [], "class H read failed: %s" % e
+    err = ("class H read truncated at %d rows (raise _H_LIMIT)" % _H_LIMIT
+           if len(rows) >= _H_LIMIT else None)
     newest = {}
     for m in rows:
         rid = m.get("res_id")
@@ -107,4 +151,4 @@ def compute_h(call, tasks, cfg, is_stream, now):
         items.append({"task_id": rid, "task_name": t.get("name") or "",
                       "stage": m2o(t.get("stage_id"))[1],
                       "minutes": int(age_s // 60)})
-    return items, None
+    return items, err

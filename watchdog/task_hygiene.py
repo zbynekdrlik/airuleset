@@ -19,7 +19,6 @@ dependency-injected for a tmux/network-free test; the keystroke path reuses
 default — staged with `nudges on --kind task-hygiene`), bounded by `nudge_gate`'s
 1×/hour per-kind floor + total cap via `gate_ok` directly (not `GATED_CATEGORIES`).
 """
-import datetime
 import os
 
 # The nudge identity for this job's keystrokes (a MACHINE_NUDGE_KINDS member,
@@ -100,13 +99,8 @@ def task_hygiene_job(now, state, panes, projects_dir, *, cfg, compute, persist,
     h = result.get("H", [])                   # #1180 handover not in Verifikácia
     out.append("task-hygiene: A=%d B=%d C=%d" % (len(a), len(b), len(c))
                + (" H=%d" % len(h) if h else ""))
-    day = datetime.datetime.fromtimestamp(now, datetime.timezone.utc).date().isoformat()
-    if result.get("reactions_unavailable") and state.get("task_hygiene_r403_day") != day:
-        state["task_hygiene_r403_day"] = day  # once per UTC day, never per sweep
-        from cli_handover_hygiene import REACTIONS_403_LOG
-        out.append("task-hygiene: " + REACTIONS_403_LOG)
-    if result.get("h_error"):
-        out.append("task-hygiene: " + result["h_error"])
+    from cli_handover_hygiene import daily_notes   # 403 degrade + H read error
+    out.extend(daily_notes(result, state, now))    # once per UTC day each
 
     # Nudge only while A ∪ B ∪ H is non-empty (C alone is a soft reminder).
     if not (a or b or h):
