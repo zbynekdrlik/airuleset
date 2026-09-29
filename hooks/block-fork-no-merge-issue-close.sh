@@ -479,14 +479,15 @@ if [ "$_d_run_gate" = "1" ]; then
             if [ "$_D_BLOCK_KIND" = "BLOCK-CITED" ]; then
                 cat >&2 <<MSG
 
-🚫 BLOCKED: this ticket's Acceptance-cited: line carries no msg <id> — it
-cites only a stage (e.g. "task in Hotovo"), and a Hotovo/Hotové a STREAM account
+🚫 BLOCKED: this ticket's Acceptance-cited: line carries no msg <id> (e.g. it
+cites only a stage, "task in Hotovo") — and a Hotovo/Hotové a STREAM account
 set is never acceptance evidence (airuleset #1185): the stream cannot be its
-own acceptance.
+own acceptance; a message or stage move a STREAM account authored is not
+acceptance either.
 
 Cite the Odoo message that IS the acceptance, on the Acceptance-cited line:
   • a client message or reaction, or the owner's/client's own stage move (its
-    chatter tracking message):
+    chatter tracking message) — name its author:
       gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: msg <message-id> task <task-id>"
   • the odoo-erp#8507 auto-close (montalu): the full line from
     skills/odoo-client-messaging/client-board-stages.md rule 6, ending
@@ -512,7 +513,8 @@ its current owner, never the author. Before this ticket is closed, post a
 closing note via the project's own client channel mechanism, then record the
 evidence on THIS ticket. Add ONE of:
 
-  • the closing note was posted (this is the LAST ticket bound to the thread):
+  • the client's acceptance is on record and the closing note was posted (this
+    is the LAST ticket bound to the thread) — cite the ACCEPTANCE message:
       gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: msg <message-id>"
     (legacy: Discuss-closed: msg <message-id> also accepted)
 

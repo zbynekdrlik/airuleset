@@ -240,7 +240,7 @@ owner-approved BEFORE posting.
   signature) and records `Discuss-closed: msg <message-id>`. **N tickets, one
   thread:** the note goes ONCE at the LAST ticket; a non-last ticket closes with
   `Discuss-defer: siblings #<A> #<B> still open — note goes at the last close`
-  (self-declare, name the siblings). **The obligation FOLLOWS
+  (self-declare last/non-last, name siblings). **The obligation FOLLOWS
   THE TICKET to its current owner, never the author** — sub-dev: YOU post the
   note + line + close; branch-merge: the OWNING stream posts the note +
   `Discuss-closed:` at hand-off, the gatekeeper's later release-close finds it

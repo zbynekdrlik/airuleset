@@ -108,16 +108,14 @@ _ACC_THREAD_RE = re.compile(_MARK_OPEN + r"Acceptance-thread" + _MARK_TAIL)
 _ACC_CITED_RE = re.compile(_MARK_OPEN + r"Acceptance-cited" + _MARK_TAIL)
 _ACC_DEFER_RE = re.compile(_MARK_OPEN + r"Acceptance-defer" + _MARK_TAIL)
 
-# #1185 — an `Acceptance-cited:` VALUE counts only with a message reference ON
-# that line: a stage a STREAM set („task 1102 v Hotovo") is never acceptance.
-# Acceptance (client message/reaction, an owner/client stage move's tracking
-# message, the odoo-erp#8507 auto-close note) is always a `mail.message`, so it
-# is checkable offline. Spellings: `msg 1742799`, `msg #1904`, `msg_id=1`,
-# `mail.message **1941**`; a placeholder `msg <id>` never counts. Legacy
-# `Discuss-*` and `Acceptance-defer:` stay value-blind.
+# #1185 — a stage a STREAM set is never acceptance; acceptance is always an Odoo
+# `mail.message` (client msg/reaction, owner/client move, odoo-erp#8507 note),
+# so a cited value needs `msg <id>` (also `msg #N`, `message_id=N`, `mail.message
+# **N**`); a placeholder or a date (`msg 29.9.`) never counts.
 _ACC_CITED_VALUE_RE = re.compile(_MARK_OPEN + r"Acceptance-cited[ \t*]*:[ \t]*(\S[^\n]*)")
 _MSG_REF_RE = re.compile(
-    r"(?i)(?<![\w.])(?:msg|mail\.message)(?:[ \t]*_?id)?[ \t*#:=]*[0-9]+(?!\w)"
+    r"(?i)(?<![\w.])(?:msgs?|messages?|mail[._]message)(?:[ \t]*_?ids?)?"
+    r"[ \t\u00a0*#:=.(-]*[0-9]+(?!\w|\.[0-9])"
 )
 
 # #695 — SECOND binding recognition: the `discuss.channel_<N>` deep-link token.
