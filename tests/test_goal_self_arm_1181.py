@@ -226,5 +226,28 @@ class TestCappedSelfArmIsVisible(unittest.TestCase):
         self.assertTrue(row.startswith("goal: armed"), row)
 
 
+class TestFreshArmSecondsAgeReadsArmed(unittest.TestCase):
+    """4. Found by the post-fix live repro (CC 2.1.284): for its first minute a
+    freshly armed goal renders a SECONDS age in the box header, and the
+    header regex accepted only h/m/d, so `_await_goal_armed` read a real arm as
+    dark (`not-armed-after-submit` -> `skip:verify-failed-live`)."""
+
+    # the pane frame captured live right after the arm (pane width 200)
+    FRAME = ("· Whatchamacalliting… (8s · ↓ 355 tokens · thinking)\n"
+             "  ⎿  Tip: Use /voice to enable push-to-talk dictation\n"
+             + " " * 179 + "◎ /goal active (8s)\n"
+             + "─" * 200 + "\n❯ \n" + "─" * 200 + "\n"
+             "  ⏵⏵ auto mode on (shift+tab to cycle) · install gh for PR "
+             "status · esc to interrupt · ← for agents\n")
+
+    def test_the_live_fresh_arm_frame_reads_armed(self):
+        self.assertIs(wd.pane_goal_armed(self.FRAME), True)
+
+    def test_the_closed_form_still_rejects_prose(self):
+        for line in ("◎ /goal active (8 s)", "◎ /goal active (8sec)",
+                     "◎ /goal active (8s) and more"):
+            self.assertIsNone(wd._GOAL_HEADER_INDICATOR_RX.match(line), line)
+
+
 if __name__ == "__main__":
     unittest.main()
