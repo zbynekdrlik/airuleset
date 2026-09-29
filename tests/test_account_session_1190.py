@@ -374,6 +374,31 @@ class TestRenderedScript(unittest.TestCase):
             refused = self.t.plan()
         self.assertTrue(any("owned by root" in r for r in refused["refusals"]))
 
+    def test_a_signal_mid_placement_still_names_what_was_placed(self):
+        # SIGTERM to the script while the 5th item (memory/x.md) is moved:
+        # the report must list every item already in the target, x.md included
+        (self.bin / "runuser").write_text(
+            '#!/usr/bin/env bash\nset -euo pipefail\n'
+            'echo "runuser $*" >> %s\n'
+            'while [ "$1" != "--" ]; do shift; done; shift\n'
+            'if [ "$1" = mv ] && [[ "${@: -1}" == */memory/x.md ]]; then kill -TERM "$PPID"; fi\n'
+            'exec "$@"\n' % self.log)
+        r = self._run(sess.render_script(self.t.plan()))
+        self.assertEqual(r.returncode, 143, r.stderr)
+        placed = r.stderr.split("Placed before the failure:", 1)[-1].splitlines()[0]
+        for item in (U2 + ".jsonl", U1 + ".jsonl", U1, "memory/MEMORY.md",
+                     "memory/x.md"):
+            self.assertIn(item, placed.split(), r.stderr)
+
+    def test_script_rechecks_the_source_owner_at_run_time(self):
+        script = sess.render_script(self.t.plan())
+        lines = [ln if not ln.startswith("SRC_OWNER=") else "SRC_OWNER=nobody-1190"
+                 for ln in script.splitlines()]
+        r = self._run("\n".join(lines) + "\n")
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("no longer owned by nobody-1190", r.stderr)
+        self.assertFalse(self.t.dst.exists())
+
     def test_new_target_dirs_are_0700(self):
         r = self._run(sess.render_script(self.t.plan()))
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -400,6 +425,8 @@ class TestRenderedScript(unittest.TestCase):
              True),
             ("npm bin shim", dict(comm="node", cwd=old, argv=["node", "/usr/bin/claude"]),
              True),
+            ("npm relative cli.js", dict(comm="node", cwd=old,
+                                         argv=["node", "claude-code/cli.js"]), True),
             ("versioned binary", dict(comm="2.1.284", cwd=old, argv=["2.1.284"],
                                       exe="/home/x/.local/share/claude/versions/2.1.284"),
              True),
