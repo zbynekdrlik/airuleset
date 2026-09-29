@@ -132,11 +132,16 @@ Cite the Odoo message that IS the acceptance, on the Acceptance-cited line:
   • the client confirmed in a RECORDED meeting (name the recording):
       gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: meeting <recording id> [mm:ss] <who>"
     (the spelling "nahrávka <recording id>" counts the same; the id is mandatory)
+  • the client confirmed on Discord (the message's own URL, all digits):
+      gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: https://discord.com/channels/<guild>/<channel>/<message>"
   • the odoo-erp#8507 auto-close (montalu): the full line from
     skills/odoo-client-messaging/client-board-stages.md rule 6, ending
     "msg <auto-close note id> task <task-id>".
-No such message yet → the task is not accepted: leave the ticket open (move
-the task back to the verification stage if a stream set Hotovo).
+A confirmation said only inside a webterm/Claude session is not evidence: ask
+the client to confirm in a durable channel (a 👍/message on the Odoo task, or
+Discord) and cite that; a stream-bot comment or a payment event is never
+acceptance. No such message yet → the task is not accepted: leave the ticket
+open (move the task back to the verification stage if a stream set Hotovo).
 
 Then re-run the close.
 MSG

@@ -120,6 +120,10 @@ _ACC_CITED_VALUE_RE = re.compile(_MARK_OPEN + r"Acceptance-cited[ \t*]*:[ \t]*(\
 # ruling cited by its GitHub comment counts only once the HOOK has verified the
 # author online (`owner_refs` → CLI `OWNER-CHECK`); `needs-acceptance` binds.
 OWNER_LOGIN = "zbynekdrlik"  # == airuleset.MAINTAINER_GH_LOGIN (test-locked)
+# final ROZHODNUTÉ (issuecomment-5895570572): a Discord message URL is durable,
+# linkable evidence; a session-only confirmation / bot comment / payment is not.
+_DISCORD_REF_RE = re.compile(
+    r"(?<![\w./-])https://(?:discord|discordapp)\.com/channels/[0-9]+/[0-9]+/[0-9]+(?![\w/])")
 _MEETING_REF_RE = re.compile(
     r"(?i)(?:\bmeeting|nahr[áa]vk[ay])[ \t:]+`?[a-z]{3}-[a-z]{4}-[a-z]{3}(?![\w-])")
 _OWNER_REF_RE = re.compile(
@@ -190,8 +194,8 @@ def is_acceptance_bound(data):
 
 def has_cited_evidence(text):
     """True iff SOME `Acceptance-cited:` line carries offline-checkable evidence
-    — `msg <id>` or `meeting <recording id>` — on that same line (#1185)."""
-    return any(_MSG_REF_RE.search(v) or _MEETING_REF_RE.search(v)
+    — `msg <id>`, `meeting <recording id>` or a Discord message URL (#1185)."""
+    return any(_MSG_REF_RE.search(v) or _MEETING_REF_RE.search(v) or _DISCORD_REF_RE.search(v)
                for v in _ACC_CITED_VALUE_RE.findall(text))
 
 

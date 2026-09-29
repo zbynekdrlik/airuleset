@@ -12,7 +12,7 @@ On the **miva** profile the stage names differ: awaiting client verification = *
 
 Moving a task to the profile's **awaiting-client-verification** stage
 (**Verifikácia** / **Na overenie** / **Čaká**) REQUIRES a chatter note
-(`message_post`) with exactly these sections, in this order:
+(`message_post`) with exactly these sections, in order:
 
 1. **Čo** — one sentence: what was delivered
 2. **Kde** — the menu path AND a functional `https://` deep-link URL to the exact
@@ -42,8 +42,8 @@ the message AND set as the task's assignee (`user_ids`) when the rule 3 note is
 posted — the employee the note is written for (owner
 28.9.2026, #1166). On the **miva** profile a client task carries **NO assignee**
 (`user_ids` empty). On the **slovnormal** profile the assignee
-is **Dávid Greňa** — the profile row governs; never add an
-assignee a profile does not name.
+is **Dávid Greňa** — never add an assignee a profile does
+not name.
 
 ### 6. "Done" stage — per profile
 
@@ -59,8 +59,8 @@ A Hotovo/Hotové a STREAM account set is never acceptance evidence — acceptanc
 is a client message or reaction (`msg <id>`), the owner's own move after a
 confirmation or the client's own move (its tracking `msg <id>`), or the
 odoo-erp#8507 auto-close note below; the close gate rejects an
-`Acceptance-cited:` with no `msg <id>`, `meeting <recording id>` or owner
-`issuecomment-<id>` (#1185).
+`Acceptance-cited:` with no `msg <id>`, `meeting <recording id>`, owner
+`issuecomment-<id>` or Discord message URL (#1185).
 
 On **montalu** a task in Verifikácia also reaches Hotovo by the odoo-erp#8507
 auto-close (owner ROZHODNUTÉ 28.9.2026, #1167): ONE reminder after 14 days
