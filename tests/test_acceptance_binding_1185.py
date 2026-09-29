@@ -40,6 +40,16 @@ from _hook_state_cleanup import hermetic_hook_env  # noqa: E402  (#1046 hermetic
 
 MODULE = ROOT / "discuss_close_guard.py"
 HOOK = ROOT / "hooks" / "block-fork-no-merge-issue-close.sh"
+GATE_LIB = ROOT / "hooks" / "lib-discuss-close-gate.sh"
+
+
+def _gate_src():
+    """The hook source plus the Discuss/acceptance gate lib it sources (when
+    split out), so a source lock follows the code wherever it lives."""
+    parts = [HOOK.read_text(encoding="utf-8")]
+    if GATE_LIB.exists():
+        parts.append(GATE_LIB.read_text(encoding="utf-8"))
+    return "\n".join(parts)
 AGENT = ROOT / "agents" / "autopilot-worker.md"
 MSGDIR = ROOT / "skills" / "odoo-client-messaging"
 STAGES = MSGDIR / "client-board-stages.md"
@@ -230,7 +240,7 @@ class TestCliAndHook(TestCase):
         self.assertEqual(g.OWNER_LOGIN, airuleset.MAINTAINER_GH_LOGIN)
 
     def test_hook_fetches_labels(self):
-        src = HOOK.read_text(encoding="utf-8")
+        src = _gate_src()
         self.assertEqual(src.count("--json body,comments,labels"), 2)
         self.assertNotIn("--json body,comments ", src)
 
@@ -357,7 +367,7 @@ class TestCliAndHook(TestCase):
         self.assertNotIn("issues/comments", self._calls())
 
     def test_hook_uses_a_bounded_timeout(self):
-        src = HOOK.read_text(encoding="utf-8")
+        src = _gate_src()
         self.assertRegex(src, r'timeout \d+ gh api "repos/')
 
 
