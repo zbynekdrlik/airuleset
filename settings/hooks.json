@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash ~/devel/airuleset/hooks/session-start-stream-directives.sh",
+            "command": "bash ~/devel/airuleset/hooks/session-start-fetch.sh",
             "timeout": 30
           }
         ]

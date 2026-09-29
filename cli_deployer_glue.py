@@ -316,16 +316,20 @@ try:
     seg = statusbar.tickets_segment(cwd)   # I/U/W/gk/skip; #512 folds the old
     if seg:                                # standalone `Q` ❓ badge into `U N`
         segs.append(seg)
-    # --- disk pressure: 'disk NN%' (#834, narrowed #854) — shown ONLY at >= 90%
-    # (red), hidden otherwise; reads the machine-local disk-guard cache watchdog
-    # Job 40 writes, hidden when that cache is stale (a dead watchdog never
-    # paints a frozen %).
+    # --- 'disk NN%' (#834/#854/#925): only when actionable, from the watchdog
+    # Job 40 cache; hidden when that cache is stale (a dead watchdog). ---
     dsk = statusbar.disk_segment()
     if dsk:
         segs.append(dsk)
-    # #994: 'nudges OFF' badge — shown while the owner has turned machine nudges
-    # OFF (the ~/.claude/nudges-off marker), so OFF is never silent. Placed after
-    # disk in the width-budget order.
+    try:  # #1176 'stale N' (Job 53): its own try, so a failure never blanks the line
+        import cli_checkout_freshness
+        stl = cli_checkout_freshness.footer_segment()
+    except Exception as _e:  # logged, never silent
+        stl = ""
+        _shim_log("stale-segment %s" % _e)
+    if stl:
+        segs.append(stl)
+    # #994/#1174: the nudges profile badge, after disk in the width order.
     noff = statusbar.nudges_off_segment()
     if noff:
         segs.append(noff)
@@ -362,13 +366,9 @@ try:
     # tmux missing, any failure) never trims -- a statusline segment must
     # never guess. ---
     width = statusbar.pane_width()
-    # adversarial review MINOR-3 (round 1: `width` measured as `0` must
-    # count as MEASURED, `is not None` not truthiness) + round-2 THEORETICAL
-    # follow-up: clamp the reserve subtraction at 0 -- an unclamped
-    # `width - RESERVE` on a genuinely tiny/degenerate measured width would
-    # otherwise go negative, which `fit_statusline` would then treat as
-    # "trim everything, and the line still overflows anyway" rather than
-    # the more honest "nothing fits, so just don't add the reserve on top."
+    # A measured `0` counts as MEASURED (`is not None`, not truthiness); the
+    # reserve subtraction is clamped at 0 so a degenerate width never goes
+    # negative (review MINOR-3 + its round-2 follow-up).
     budget = max(0, width - statusbar.STATUSLINE_RESERVE_COLS) \
         if width is not None else None
     line = statusbar.fit_statusline(segs, identity, cm_tag, cc_full, cc_short, budget)

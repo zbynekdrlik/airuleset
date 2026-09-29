@@ -204,19 +204,37 @@ class TestStartupDelivery(_RepoFixture):
         """Claude Code's timeout kill (SIGTERM) must not launch the step
         (and its fetch) after the hook was already given up on."""
         repo, _ = self.base_repo()
+        # Deterministic handshake (no fixed sleep): the fake ssh runs only
+        # INSIDE the hook's `git fetch origin`, i.e. after every trap is set.
+        # It announces itself with a READY file, then holds the fetch open
+        # until the test has delivered SIGTERM and written RELEASE — so the
+        # signal always lands while the hook is blocked in its fetch, never
+        # before the traps exist or after the fetch already finished.
+        ready = os.path.join(self.root, "ssh-ready")
+        release = os.path.join(self.root, "ssh-release")
         fake_ssh = os.path.join(self.root, "slow-ssh.sh")
         with open(fake_ssh, "w") as fh:
-            fh.write("#!/usr/bin/env bash\nsleep 3\nexit 1\n")
+            fh.write("#!/usr/bin/env bash\n: > %s\n"
+                     "for _ in $(seq 1200); do [ -e %s ] && exit 1; sleep 0.05; done\n"
+                     "exit 1\n" % (ready, release))
         os.chmod(fake_ssh, 0o755)
         self.ok(repo, "remote", "set-url", "origin", "ssh://example.invalid/x.git")
         env = dict(self.env)
         env.update({"GIT_TRACE": self.trace, "GIT_SSH_COMMAND": fake_ssh})
-        proc = subprocess.Popen(["bash", str(FETCH_HOOK)], cwd=repo,
-                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, env=env)
-        time.sleep(1.0)
+        proc = subprocess.Popen(
+            ["bash", str(FETCH_HOOK)], cwd=repo, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+            # a push runs under `setsid nohup`: never inherit an ignored signal
+            preexec_fn=lambda: [signal.signal(s, signal.SIG_DFL)
+                                for s in (signal.SIGTERM, signal.SIGHUP)])
+        deadline = time.monotonic() + 60
+        while not os.path.exists(ready):
+            self.assertIsNone(proc.poll(), "the hook ended before its fetch reached ssh")
+            self.assertLess(time.monotonic(), deadline, "the fetch never reached ssh")
+            time.sleep(0.02)
         proc.send_signal(signal.SIGTERM)
-        out, _ = proc.communicate(timeout=30)
+        open(release, "w").close()
+        out, _ = proc.communicate(timeout=60)
         self.assertEqual(proc.returncode, 143)
         self.assertEqual(out, "")
         self.assertFalse(self.trace_has("get-url upstream"),
@@ -668,18 +686,24 @@ class TestHookConventions(TestCase):
         for grp in groups:
             cmds = [h["command"] for h in grp["hooks"]]
             by_matcher.setdefault(grp["matcher"], []).extend(cmds)
-        for source in ("compact", "resume", "clear"):
+        for source in ("compact", "clear"):
             self.assertTrue(any("session-start-stream-directives.sh" in c
                                 for c in by_matcher.get(source, [])),
                             (source, by_matcher))
-            # the fetch hook (fast-forward + session_start heartbeat) must
-            # never run mid-session
+            # compact / clear are mid-session events: no fetch hook there
             self.assertFalse(any("session-start-fetch.sh" in c
                                  for c in by_matcher.get(source, [])), source)
-        # startup reaches the step through the fetch hook's EXIT trap (after
-        # its fetch), never as a racing parallel sibling
-        self.assertFalse(any("session-start-stream-directives.sh" in c
-                             for c in by_matcher.get("startup", [])))
+        # #1176 (reverses the #1127 "never on resume" pin, main-session design
+        # issuecomment-5885152361 (d)): every managed session starts with
+        # `claude -c` = source `resume`, so the fetch hook runs there too.
+        # startup AND resume reach the directives step through the fetch
+        # hook's EXIT trap (after its fetch), never as a racing parallel
+        # sibling.
+        for source in ("startup", "resume"):
+            self.assertTrue(any("session-start-fetch.sh" in c
+                                for c in by_matcher.get(source, [])), source)
+            self.assertFalse(any("session-start-stream-directives.sh" in c
+                                 for c in by_matcher.get(source, [])), source)
         self.assertIn("session-start-stream-directives.sh", FETCH_HOOK.read_text())
 
 
