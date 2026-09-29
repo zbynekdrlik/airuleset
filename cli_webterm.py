@@ -698,7 +698,7 @@ WEBTERM_DASHBOARD_TABS = {
     "marek": [
         "montalu1-subdev", "montalu2-subdev",
         "miva1-subdev", "montalu4-subdev",
-        "claudy", "dev1", "dev2", "gatekeeper", "forestshop",
+        "ar", "claudy", "dev1", "dev2", "gatekeeper", "forestshop",
     ],
     # david.newlevel.media -- David's working accounts. The david GATEWAY renders
     # its own physically-scoped inventory (cli_webterm_profiles.david_inventory,
