@@ -7,19 +7,22 @@ renders the config + unit and hands the SYSTEMD half to `apply_managed_tunnel`.
 
 Incident (#1189, 29.9.2026 18:25:51Z): the provisioner restarted the controller
 tunnel on EVERY install/push. A systemd restart is stop-then-start, and a
-SIGTERMed cloudflared waits its FULL `--grace-period` (default 30 s) before it
-exits — `waitToShutdown` in cloudflared `cmd/cloudflared/tunnel/cmd.go` blocks on
-`time.NewTicker(gracePeriod)` after `graceShutdownC`, whether or not requests
-are still in flight — so the tunnel had ZERO registered connections for ~30 s
-and Cloudflare answered 1033 for every hostname on it (a `secret show` URL the
-owner opened at 18:26:22Z included).
+SIGTERMed cloudflared unregisters its connections, then waits up to its
+`--grace-period` (default 30 s) for in-flight requests (`waitToShutdown` in
+cloudflared `cmd/cloudflared/tunnel/cmd.go`: a `time.NewTicker(gracePeriod)`
+select after `graceShutdownC`). Webterm's long-lived websockets never finish, so
+it waits the whole 30 s (journal: SIGTERM 18:25:51Z, new pid at 18:26:21Z) —
+ZERO registered connections, Cloudflare answered 1033 for every hostname on it
+(a `secret show` URL the owner opened at 18:26:22Z included).
 
 Two fixes, both here:
 
 1. **Change-gated.** Restart ONLY when the rendered config, the rendered unit or
    the credentials JSON differ from what was last APPLIED (a sha256 stamp next to
-   the config, written only after a successful apply). A byte-identical render is
-   a no-op — the steady-state push never touches the connector.
+   the config, written only after a successful apply), or the ON-DISK config/unit
+   differ from the render (another writer drifted them — the file is rewritten,
+   so the running process must be too). A byte-identical render is a no-op — the
+   steady-state push never touches the connector.
 2. **Blue/green overlap when a restart IS needed** (chosen over a short
    `--grace-period`). Cloudflare's own tunnel-availability doc: every replica of
    a tunnel "establishes four new connections to Cloudflare ... All replicas
@@ -160,10 +163,17 @@ def overlap_restart(systemctl, service_name, config_path, *, sleep=time.sleep,
     LEFT SERVING so the tunnel stays up, and the next install retries)."""
     overlap = overlap_service_name(service_name)
     ov_pid, main_pid = overlap_pidfile(config_path), tunnel_pidfile(config_path)
-    systemctl(["stop", overlap])                     # a leftover from a dead install
-    systemctl(["reset-failed", overlap])
-    ov_pid.unlink(missing_ok=True)
-    rc, _o, err = systemctl(["start", "--no-block", overlap])
+    rc, err = 0, ""
+    if _unit_active(systemctl, overlap) and _read_pid(ov_pid) is not None:
+        # A registered leftover (a previous install's "failed" path left it
+        # serving): reuse it as the bridge — stopping it first would go dark.
+        print("  webterm%s: reusing the registered overlap %s as the bridge."
+              % (lane, overlap), file=sys.stderr)
+    else:
+        systemctl(["stop", overlap])                 # a dead/unregistered leftover
+        systemctl(["reset-failed", overlap])
+        ov_pid.unlink(missing_ok=True)
+        rc, _o, err = systemctl(["start", "--no-block", overlap])
     ready = rc == 0 and _wait(lambda: _read_pid(ov_pid) is not None,
                               OVERLAP_READY_TIMEOUT_S, sleep, clock)
     if not ready:
@@ -175,7 +185,12 @@ def overlap_restart(systemctl, service_name, config_path, *, sleep=time.sleep,
         rc, _o, err = systemctl(["restart", "--no-block", service_name])
         return rc == 0, "plain"
     main_pid.unlink(missing_ok=True)
-    systemctl(["restart", "--no-block", service_name])
+    rc, _o, err = systemctl(["restart", "--no-block", service_name])
+    if rc != 0:
+        print("  webterm%s: LOUD — restart of %s REFUSED (%s); overlap %s LEFT "
+              "SERVING (#1189)." % (lane, service_name, (err or "").strip(),
+                                    overlap), file=sys.stderr)
+        return False, "failed"
 
     def _main_registered():
         pid = _main_pid(systemctl, service_name)
@@ -199,7 +214,9 @@ def apply_managed_tunnel(creds_path, cloudflared_bin, config_path, config_text,
     config_path, unit_path = Path(config_path), Path(unit_path)
     stamp_path = applied_stamp_path(config_path)
     digest = apply_digest(config_text, unit_text, Path(creds_path).read_bytes())
-    changed = _read_text(stamp_path) != digest
+    drifted = (_read_text(config_path) != config_text
+               or _read_text(unit_path) != unit_text)
+    changed = drifted or _read_text(stamp_path) != digest
     was_active = _unit_active(systemctl, service_name)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     unit_path.parent.mkdir(parents=True, exist_ok=True)
@@ -229,6 +246,9 @@ def apply_managed_tunnel(creds_path, cloudflared_bin, config_path, config_text,
               "no restart (#1189)." % (lane, service_name), file=sys.stderr)
         return True
     else:
+        print("  webterm%s: %s %s — restarting via the overlap (#1189)."
+              % (lane, service_name, "on-disk config/unit drifted from the render"
+                 if drifted else "render or credentials changed"), file=sys.stderr)
         ok, shape = overlap_restart(systemctl, service_name, config_path,
                                     sleep=sleep, clock=clock, lane=lane)
     if ok:
