@@ -10937,6 +10937,7 @@ def cmd_doctrine_audit(args):
     print()
     print("Summary: %d HIGH (auto-fixable), %d MEDIUM (human review); "
           "owner-preference/keep excluded." % (counts["high"], counts["medium"]))
+    print(da.format_superseded(da.scan_superseded_memory(home)))  # #1179 report-only
     if getattr(args, "fix", False):
         for p in results.get("rewritten", []):
             print("  rewritten → fleet pointer: %s" % p)

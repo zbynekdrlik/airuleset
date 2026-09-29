@@ -271,6 +271,74 @@ ALLOWLIST = [
 
 
 # --------------------------------------------------------------------------- #
+# #1179 — SUPERSEDED memory: a stream memory that CONTRADICTS a newer fleet rule
+# (the montalu4 29.9.2026 incident: a 9.7. „board tasks: no assignee" memory
+# outlived #1166, which makes the handover addressee the task assignee). The
+# ALLOWLIST above finds RESTATEMENTS; this table finds CONTRADICTIONS. It is
+# REPORT-ONLY: a contradiction needs the stream (or the owner) to decide what the
+# memory should say, so the audit never rewrites it. Each row: `pattern` (regex
+# over the memory text), `scope` (regex the file path OR text must match — the
+# rule it contradicts is tenant-specific; miva keeps NO assignee by design),
+# `superseded_by` (the rule + its origin). Extend with a row per new ruling.
+# --------------------------------------------------------------------------- #
+SUPERSEDED_MEMORY = [
+    {
+        "id": "board-tasks-no-assignee",
+        "scope": r"montalu",
+        "pattern": (r"\b(?:no|bez|žiadn\w*|nikdy\s+nenastav\w*)\s+"
+                    r"(?:assignee|user_ids|priraden\w*)"
+                    r"|\b(?:assignee|user_ids)\s*[:=]?\s*(?:none|empty|prázdn\w*|\[\])"),
+        "superseded_by": ("skills/odoo-client-messaging/client-board-stages.md rule 5 "
+                          "(#1166, owner 28.9.2026: on montalu the handover addressee "
+                          "IS the task assignee)"),
+    },
+]
+
+
+def scan_superseded_memory(home, table=None):
+    """Report-only findings ``[{path, id, superseded_by, line}]`` for every
+    auto-memory file under ``home`` that contradicts a row of
+    ``SUPERSEDED_MEMORY``. Reads only; symlinks (fleet-installed) are skipped;
+    the ``MEMORY.md`` index is scanned too (a stale index line misleads just as
+    much). Never raises on an unreadable file."""
+    home = os.path.abspath(os.path.expanduser(home))
+    rows = table if table is not None else SUPERSEDED_MEMORY
+    out = []
+    pattern = os.path.join(home, ".claude", "projects", "*", "memory", "*.md")
+    for path in sorted(glob.glob(pattern)):
+        if os.path.islink(path):
+            continue
+        try:
+            text = _read(path)
+        except (OSError, UnicodeDecodeError):
+            continue
+        for row in rows:
+            if not (re.search(row["scope"], path, re.IGNORECASE)
+                    or re.search(row["scope"], text, re.IGNORECASE)):
+                continue
+            m = re.search(row["pattern"], text, re.IGNORECASE)
+            if m:
+                s = text.rfind("\n", 0, m.start()) + 1
+                e = text.find("\n", m.end())
+                out.append({"path": path, "id": row["id"],
+                            "superseded_by": row["superseded_by"],
+                            "line": text[s:e if e != -1 else None].strip()[:160]})
+    return out
+
+
+def format_superseded(findings):
+    """The report-only section the CLI prints after the graduated-rule table."""
+    if not findings:
+        return "superseded memory: none (report-only check, #1179)."
+    lines = ["superseded memory (report-only, never auto-edited — update or delete "
+             "it by hand, #1179): %d" % len(findings)]
+    for f in findings:
+        lines.append("  %s — %s\n    says: %s\n    superseded by: %s" % (
+            f["path"], f["id"], f["line"], f["superseded_by"]))
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
 # Parsing helpers (pure)
 # --------------------------------------------------------------------------- #
 def split_frontmatter(text):
