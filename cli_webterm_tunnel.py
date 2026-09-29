@@ -94,7 +94,9 @@ def render_cloudflared_tunnel_unit(description, config_path, cloudflared_bin,
     """A systemd --user unit running `cloudflared tunnel --config <cfg> run`,
     byte-mirroring the proven webterm-david-tunnel.service: outbound-only (no open
     port, no sudo), `Restart=always`, `WantedBy=default.target` so linger makes it
-    reboot-durable. `cloudflared_bin`/`config_path`/`after` are per-lane."""
+    reboot-durable. `cloudflared_bin`/`config_path`/`after` are per-lane. #1189:
+    `TUNNEL_PIDFILE` is the registration signal the no-dark-window restart waits on."""
+    from cli_tunnel_apply import tunnel_pidfile
     return (
         "# airuleset-managed cloudflared tunnel unit (webterm, #635). airuleset OWNS\n"
         "# + reconciles this on every install — it is NOT a hand-managed unit.\n"
@@ -108,13 +110,15 @@ def render_cloudflared_tunnel_unit(description, config_path, cloudflared_bin,
         "\n"
         "[Service]\n"
         "Type=simple\n"
+        "Environment=TUNNEL_PIDFILE=%s\n"
         "ExecStart=%s tunnel --no-autoupdate --config %s run\n"
         "Restart=always\n"
         "RestartSec=5\n"
         "\n"
         "[Install]\n"
         "WantedBy=default.target\n"
-        % (description, after, cloudflared_bin, config_path))
+        % (description, after, tunnel_pidfile(config_path), cloudflared_bin,
+           config_path))
 
 
 def resolve_cloudflared_bin(fallback):
@@ -131,15 +135,16 @@ def _provision_managed_tunnel(creds_path, cloudflared_bin, config_path, config_t
     david (subdev) both call this, so the two lanes can NEVER drift (the review
     found the copy-paste twin was the source of several parity gaps). The CALLER
     renders `config_text`/`unit_text` (each lane resolves its own cloudflared_bin +
-    ports + `After=`); this owns the identical write + linger + systemd enable/restart.
+    ports + `After=`); `cli_tunnel_apply.apply_managed_tunnel` owns the write +
+    linger + enable and the CHANGE-GATED, no-dark-window restart (#1189).
 
     PREREQUISITE-GATED on `creds_path` (the per-tunnel secret JSON) — a safe no-op
     printing the go-live step otherwise; the whole body is try-wrapped so it NEVER
-    raises (returns False on any skip/failure). Idempotent (`enable --now` no-ops a
-    running unit, so an explicit `restart` applies a changed config/unit). Returns
-    True only when the unit is written + enabled + restarted."""
+    raises (returns False on any skip/failure). Returns True only when the unit is
+    enabled and the current render is live."""
     run = run or subprocess.run
     try:
+        import cli_tunnel_apply
         from cli_filedrop_watchdog import _run_systemctl, _whoami
         if not creds_path.exists():
             print("  webterm%s: tunnel creds %s absent — tunnel NO-OP until go-live.%s"
@@ -150,32 +155,18 @@ def _provision_managed_tunnel(creds_path, cloudflared_bin, config_path, config_t
                   "loopback gateway still serves for the tunnel to front)." % lane,
                   file=sys.stderr)
             return False
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(config_text, encoding="utf-8")
-        unit_path.parent.mkdir(parents=True, exist_ok=True)
-        unit_path.write_text(unit_text, encoding="utf-8")
-        # linger makes the --user unit reboot-durable (the whole point of #635) even
-        # when this provisioner is reached standalone, not only via a caller that
-        # already lingered.
-        try:
-            run(["loginctl", "enable-linger", _whoami()], capture_output=True, text=True)
-        except Exception as e:
-            print("  webterm%s: tunnel enable-linger skipped (%s)" % (lane, e),
-                  file=sys.stderr)
-        _run_systemctl(["daemon-reload"])
-        rc, _o, err = _run_systemctl(["enable", "--now", service_name])
-        if rc != 0:
-            print("  webterm%s: enable %s FAILED: %s"
-                  % (lane, service_name, (err or "").strip()), file=sys.stderr)
-            return False
-        _run_systemctl(["restart", service_name])
+        ok = cli_tunnel_apply.apply_managed_tunnel(
+            creds_path, cloudflared_bin, config_path, config_text, unit_path,
+            service_name, unit_text, run=run, whoami=_whoami,
+            systemctl=_run_systemctl, lane=lane)
     except Exception as e:
         print("  webterm%s: tunnel provisioning errored (%r) — left un-provisioned."
               % (lane, e), file=sys.stderr)
         return False
-    print("  webterm%s: tunnel live + MANAGED (%s)." % (lane, service_name),
-          file=sys.stderr)
-    return True
+    if ok:
+        print("  webterm%s: tunnel live + MANAGED (%s)." % (lane, service_name),
+              file=sys.stderr)
+    return ok
 
 
 def setup_webterm_owner_tunnel(run=None):
