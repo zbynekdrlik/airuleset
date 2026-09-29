@@ -20,6 +20,11 @@ call counts when the line names the recording (`meeting <meet-code>`); an owner
 `issuecomment-<id>` is verified ONLINE by the hook (author must be the owner,
 fetch failure or any other author blocks).
 
+THIRD ROZHODNUTÉ (issuecomment-5895276580): `nahrávka <id>` counts exactly like
+`meeting <id>` (id mandatory); a ticket that EVER carried `needs-acceptance` is
+bound too — the hook reads the issue events online (bounded timeout) only when
+the ticket is not already bound, and a failed read blocks with the reason.
+
 The fixtures below are modelled on the real sweep tickets (task link and/or
 `needs-acceptance` + a stage-only prose citation); client data is omitted.
 """
@@ -179,7 +184,11 @@ class TestEvidenceShapes(TestCase):
     def test_meeting_citation_with_recording_id_passes(self):
         for line in ("Acceptance-cited: call výroba 29.9.2026, meeting zrc-vxqy-bqe [06:36–07:42]",
                      "Acceptance-cited: meeting `mdq-bvtq-aku` 12:30 Patrik: „sedí“",
-                     "Acceptance-cited: Meeting: mdq-bvtq-aku"):
+                     "Acceptance-cited: Meeting: mdq-bvtq-aku",
+                     "Acceptance-cited: call výroba 29.9.2026 (nahrávka `zrc-vxqy-bqe "
+                     "(2026-09-29 09_57 GMT_2).mp4`) [06:36–07:42] Patrik",
+                     "Acceptance-cited: nahrávka zrc-vxqy-bqe 12:30",
+                     "Acceptance-cited: Nahrávka: `mdq-bvtq-aku`"):
             with self.subTest(line=line):
                 self.assertIsNone(g.evaluate_close(_issue(
                     body="x", labels=("needs-acceptance",), comments=[line])))
@@ -188,7 +197,9 @@ class TestEvidenceShapes(TestCase):
         for line in ("Acceptance-cited: call výroba 29.9.2026 — Patrik: „plne funkčné“",
                      "Acceptance-cited: meeting 29.9.2026 s výrobou",
                      "Acceptance-cited: meeting <recording id>",
-                     "Acceptance-cited: nahrávka zrc-vxqy-bqe (without the meeting word)"):
+                     "Acceptance-cited: nahrávka z callu 29.9. (bez id)",
+                     "Acceptance-cited: nahrávka <id>",
+                     "Acceptance-cited: zrc-vxqy-bqe (id without meeting/nahrávka)"):
             with self.subTest(line=line):
                 self.assertEqual(g.evaluate_close(_issue(
                     body="x", labels=("needs-acceptance",), comments=[line])),
@@ -235,6 +246,19 @@ class TestCliAndHook(TestCase):
                              comments=[f"Acceptance-cited: owner {OWNER_URL}"])),
             "OWNER-CHECK zbynekdrlik zbynekdrlik/odoo-erp:5874238532")
 
+    def test_cli_report_unbound_and_forced_binding(self):
+        def cli(payload, *flags):
+            return subprocess.run([sys.executable, str(MODULE), *flags], input=payload,
+                                  capture_output=True, text=True).stdout.strip()
+        unbound = LINK_ONLY["odoo-erp#7371"]
+        self.assertEqual(cli(unbound), "OK")                      # default contract unchanged
+        self.assertEqual(cli(unbound, "--report-unbound"), "UNBOUND")
+        self.assertEqual(cli(unbound, "--bound"), "BLOCK-CITED")  # history-bound → checked
+        self.assertEqual(cli(SWEEP["odoo-erp#6885"], "--report-unbound"), "BLOCK-CITED")
+        self.assertEqual(cli(_issue(body="x", labels=("needs-acceptance",),
+                                    comments=["Acceptance-cited: msg 1"]),
+                             "--report-unbound"), "OK")
+
     def test_owner_login_matches_the_maintainer_constant(self):
         import airuleset
         self.assertEqual(g.OWNER_LOGIN, airuleset.MAINTAINER_GH_LOGIN)
@@ -244,10 +268,13 @@ class TestCliAndHook(TestCase):
         self.assertEqual(src.count("--json body,comments,labels"), 2)
         self.assertNotIn("--json body,comments ", src)
 
-    def _hook(self, payload, cmd=None, gh_login=None, gh_fail=False):
+    def _hook(self, payload, cmd=None, gh_login=None, gh_fail=False,
+              events=0, events_fail=False):
         """Drive the REAL hook. A fake `gh` on PATH answers the owner-comment
-        lookup: prints ``gh_login`` or exits 1 (``gh_fail``); it records every
-        call so a test can assert the lookup happened (or did not)."""
+        lookup (prints ``gh_login`` or exits 1 on ``gh_fail``) and the label
+        history read (prints the ``events`` count of needs-acceptance
+        `labeled` events, or exits 1 on ``events_fail``); it records every call
+        so a test can assert a lookup happened (or did not)."""
         fd = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False,
                                          encoding="utf-8")
         fd.write(payload)
@@ -265,6 +292,9 @@ class TestCliAndHook(TestCase):
             f'echo "$*" >> "{self.gh_log}"\n'
             'case "$*" in *issues/comments/*)\n'
             + answer
+            + "  *issues/*/events*)\n"
+            + ("  echo 'HTTP 502: Bad Gateway' >&2; exit 1 ;;\n" if events_fail
+               else f"  echo '{events}'; exit 0 ;;\n")
             + "esac\nexit 1\n")
         fake.chmod(0o755)
         env = hermetic_hook_env(self)
@@ -304,8 +334,41 @@ class TestCliAndHook(TestCase):
         self.assertNotIn("/odoo/project/<pid>/tasks/<tid>", err)
 
     def test_hook_task_link_only_is_not_checked(self):
-        r = self._hook(LINK_ONLY["odoo-erp#7371"])
+        # never carried needs-acceptance (odoo-erp#7173 shape) → not bound
+        for name in LINK_ONLY:
+            with self.subTest(ticket=name):
+                r = self._hook(LINK_ONLY[name], events=0)
+                self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_hook_label_once_carried_binds(self):
+        # odoo-erp#7371: needs-acceptance was removed on 21.9. → still bound
+        r = self._hook(LINK_ONLY["odoo-erp#7371"], events=1,
+                       cmd="gh issue close 7371 -R zbynekdrlik/odoo-erp")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("repos/zbynekdrlik/odoo-erp/issues/7371/events", self._calls())
+
+    def test_hook_label_history_fetch_failure_blocks(self):
+        r = self._hook(LINK_ONLY["odoo-erp#7173"], events_fail=True,
+                       cmd="gh issue close 7173 -R zbynekdrlik/odoo-erp")
+        self.assertEqual(r.returncode, 2, r.stderr)
+        err = " ".join(r.stderr.split())
+        self.assertIn("the needs-acceptance label history of #7173 could not be read", err)
+        self.assertIn("airuleset:discuss-close-ok", err)
+
+    def test_hook_currently_bound_skips_the_history_read(self):
+        r = self._hook(_issue(body="x", labels=("needs-acceptance",),
+                              comments=["Acceptance-cited: msg 1742799"]),
+                       events_fail=True)
         self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertNotIn("/events", self._calls())
+
+    def test_hook_history_bound_with_evidence_passes(self):
+        r = self._hook(_issue(body="x", comments=["Acceptance-cited: nahrávka zrc-vxqy-bqe 06:36"]),
+                       events=2)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_hook_history_read_is_bounded(self):
+        self.assertRegex(_gate_src(), r'timeout \d+ gh api "repos/[^"]*/issues/[^"]*/events"')
 
     def test_hook_not_planned_close_is_never_checked(self):
         for reason in ('--reason "not planned"', "-r 'not planned'",
@@ -378,12 +441,13 @@ class TestDoctrine(TestCase):
             "`Acceptance-cited:` with the ACCEPTANCE evidence on that same line — "
             "`msg <id>` (the client's message/reaction, an owner/client stage "
             "move's tracking message, or the auto-close note), `meeting <recording "
-            "id>` (a recorded call), or an owner ROZHODNUTÉ `issuecomment-<id>` "
+            "id>`/`nahrávka <recording id>` (a recorded call), or an owner ROZHODNUTÉ "
+            "`issuecomment-<id>` "
             "(the hook verifies its author online); a stage a stream set is never "
             "acceptance (#1185)", text)
-        self.assertIn("the `needs-acceptance` label also binds the ticket (a task "
-                      "link alone does not); a `--reason \"not planned\"` close is "
-                      "never checked", text)
+        self.assertIn("the `needs-acceptance` label also binds the ticket, even "
+                      "once removed (a task link alone does not); a `--reason \"not "
+                      "planned\"` close is never checked", text)
 
     def test_stages_rule6_names_the_owner_exit(self):
         text = " ".join(STAGES.read_text(encoding="utf-8").split())
