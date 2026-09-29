@@ -417,122 +417,29 @@ if [ -n "$BLOCK" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
     fi
 fi
 
-# --- #1006 (montalu, repeated escalation 2026-09-12): ONE ❓ block = ONE
-# client text. A ❓ approval block that bundled TWO client-message drafts
-# (Text úloha 638 + Text úloha 881, each signed `ZbynekAI`) with ONE decision
-# line passed the gate — Check 2 catches a (1)/(2) multi-QUESTION pile, never
-# multiple client TEXTS. Owner rule: JEDNA otázka = JEDEN klientsky text —
-# queue the rest. Deterministic detectors on the delivered BLOCK (any signal
-# >= 2 ⇒ bundle): >=2 `ZbynekAI` signatures (each proposed reply is signed
-# once — the client's own quoted message is never signed ZbynekAI), >=2
-# `Text úloha`/`Text pre`-style draft headers, or >=2 `❓ (NEEDS YOU|ASKED)`
-# decision markers. Runs BEFORE the present-user bypass (like the #740
-# repeat-block) so a bundled block is caught even when the owner is present in
-# the webterm — the exact montalu shape that slipped through. exit 2 + the
-# split instruction; RETRY_FILE cap like the shape checks so it never wedges.
-#
-# #1177 (owner, montalu4 29.9.2026: „zasa mi davas naraz spravy!!!") — the
-# SAME check, widened on two evasion paths the 29.9 message took:
-#   (a) SCOPE — the stream put both drafts ABOVE the `**Otázka —` head (the
-#       phone view is capped), so `$BLOCK` held only the decision „môžem
-#       poslať … tieto dve správy?". When the ❓ block carries client-APPROVAL
-#       intent (a send/approve verb, CLIENT_APPROVAL_RX), the draft counters
-#       read the WHOLE final message `$MSG` — the same payload field `$BLOCK`
-#       was cut from, no second parser. Without approval intent the scope
-#       stays `$BLOCK`, so a status turn that QUOTES already-sent replies and
-#       asks something unrelated is not miscounted.
-#   (b) SIGNATURE — streams sign `ZbynekAI 1`, `ZbynekAI 4` (odoo_post
-#       `--signature`), which `ZbynekAI[[:space:]]*$` never matched; SIG_RX
-#       takes the optional stream index (and trailing markdown emphasis).
-#   (c) PER-DRAFT TARGETS — an UNSIGNED bundle is caught by the awk
-#       segmenter below. A run = consecutive `>`-quote / ``` fence lines
-#       (blank lines inside absorbed); its HEADER = the last <= 3 lines of the
-#       paragraph directly above it. A run is a DRAFT when it is signed (a
-#       SIG_RX line inside it or right after it) OR its header carries an
-#       explicit target line (`Vlákno:`/`Úloha:`/`Task:`); a draft whose
-#       header names a target (that line, a discuss.channel_<N> or a
-#       /odoo/project/<pid>/tasks/<tid> URL) counts once; >= 2 is a bundle.
-#       Targets are read ONLY from a draft's header — never the free briefing
-#       prose, never a draft BODY (a client text may link another record), and
-#       an unsigned CLIENT quote headed „Patrik napísal (<url>):" is not a
-#       draft — so ONE draft with its own task URL + thread URL of the same
-#       conversation, a briefing that mentions another thread, or a quoted
-#       client message above the reply stay ONE message
-#       (tests/test_question_bundle_whole_message_1177.py).
-#   A separate "quote runs each followed by a signature" counter (design) is
-#   NOT added: every such run contributes a signature line, so N_SIG already
-#   counts it — a second counter would only restate N_SIG.
-# Accepted residuals: an approval turn that ALSO quotes an already-SENT signed
-# reply for context counts that signature too (the block text tells the model
-# to cite it without the signature line); unsigned drafts with no target LINE
-# (only a URL in prose headers) are not counted (under-block, rare — the
-# stream's drafts carry the signature).
-if [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
-    # #1006 review 🔵: count only signature LINES (ending with the signature),
-    # never a mid-line prose mention ("…podpíšem ho ako ZbynekAI podľa
-    # dohody):"), so a single draft that names its own signature is not
-    # miscounted as two texts.
-    SIG_RX='ZbynekAI([[:space:]]+[0-9]+)?[[:space:]]*[*_]*[[:space:]]*$'
-    # Approval intent — alternation, never multibyte bracket classes (#735).
-    CLIENT_APPROVAL_RX='schv(á|a)(ľ|l)|po(š|s)l|odo(š|s)l|posiel|odosiel|zverejn'
-    DRAFT_SCOPE="$BLOCK"
-    APPROVAL_Q=""
-    if LC_ALL=C.UTF-8 grep -qiE "$CLIENT_APPROVAL_RX" <<<"$BLOCK"; then
-        DRAFT_SCOPE="$MSG"
-        APPROVAL_Q=1
-    fi
-    N_SIG=$(grep -cE "$SIG_RX" <<<"$DRAFT_SCOPE" || true)
-    # #1006 review 🔵: alternation (ú|u), not a multibyte bracket class, so the
-    # "Text úloha" arm survives even on a box with no C.UTF-8 locale.
-    N_TEXTHDR=$(LC_ALL=C.UTF-8 grep -cE '^[[:space:]]*\**[[:space:]]*Text[[:space:]]+((ú|u)loh|pre[[:space:]]|pro[[:space:]]|[0-9])' <<<"$DRAFT_SCOPE" || true)
-    N_DEC=$(grep -cE '❓[[:space:]]*\**[[:space:]]*(NEEDS[[:space:]]+YOU|ASKED)' <<<"$BLOCK" || true)
-    N_TGT=0
-    if [ -n "$APPROVAL_Q" ]; then
-        # LC_ALL=C + byte-escaped alternations for á/Ú/ú (the $BLOCK awk's
-        # convention); SIG_RX has no backslash, so -v passes it verbatim.
-        N_TGT=$(printf '%s\n' "$MSG" | LC_ALL=C awk -v sigrx="$SIG_RX" '
-            function tline(s) {
-                return s ~ /^[[:space:]]*[*_-]*[[:space:]]*([Vv]l(\303\241|a)kno|(\303\232|\303\272|[Uu])loha|[Tt]ask)[[:space:]]*[*_]*[[:space:]]*:/
-            }
-            function turl(s) {
-                return s ~ /discuss\.channel_[0-9]+|\/odoo\/project\/[0-9]+\/tasks\/[0-9]+/
-            }
-            function close_run() {
-                if (inrun && hastgt && (signed || hasline)) n++
-                inrun = 0
-            }
-            {
-                fdelim = ($0 ~ /^[[:space:]]*```/)
-                body = fence || fdelim || ($0 ~ /^[[:space:]]*>/)
-                if (fdelim) fence = !fence
-                if (body) {
-                    if (!inrun) {
-                        inrun = 1; signed = 0; hastgt = 0; hasline = 0
-                        for (i = 1; i <= nh; i++) {
-                            if (tline(H[i])) { hasline = 1; hastgt = 1 }
-                            if (turl(H[i])) hastgt = 1
-                        }
-                        nh = 0
-                    }
-                    if ($0 ~ sigrx) signed = 1
-                    next
-                }
-                if ($0 ~ /^[[:space:]]*$/) { gap = 1; next }
-                # A non-blank, non-body line: a signature right after the run
-                # still belongs to it; any such line ends the run and starts
-                # (or continues) the header paragraph of the NEXT run.
-                if (inrun) { if ($0 ~ sigrx) signed = 1; close_run(); nh = 0 }
-                else if (gap) nh = 0
-                gap = 0
-                if (nh == 3) { H[1] = H[2]; H[2] = H[3]; nh = 2 }
-                H[++nh] = $0
-            }
-            END { close_run(); print n + 0 }' || echo 0)
-    fi
-    if [ "${N_SIG:-0}" -ge 2 ] || [ "${N_TEXTHDR:-0}" -ge 2 ] || [ "${N_DEC:-0}" -ge 2 ] \
-        || [ "${N_TGT:-0}" -ge 2 ]; then
+# --- #1006 / #1177 (montalu 2026-09-12, montalu4 2026-09-29): ONE ❓ approval
+# question = ONE client text. Owner rule „jedna správa / jedna otázka a potom
+# ďalšia, nie naraz": show the FIRST draft, queue the rest on their tickets
+# (needs-answer), show the next one after the answer. #1006 counted signatures /
+# `Text …` headers / ❓ markers inside `$BLOCK` only; the 29.9 montalu4 message
+# evaded it by putting both drafts ABOVE the `**Otázka —` head (the phone view is
+# capped) and signing them `ZbynekAI 4`. The counting now lives in
+# `gates/draftbundle.py` (pure functions, unit-tested; module docstring = the
+# counting rules): with client-approval intent it reads the WHOLE message `$MSG`
+# (stdin; the block via AIRULESET_QQ_BLOCK), counts signature-only lines and
+# target-headed unsigned quote runs, and skips sent / incoming context. THIN
+# ADAPTER like #1106/#1025: exit 2 + the split instruction on the module's rc 2;
+# any other rc = FAIL-OPEN. Runs BEFORE the present-user bypass (the owner in the
+# webterm sees the bundle too) and under the shared RETRY_FILE cap (never wedges).
+if [ -n "$BLOCK" ] && [ "$RETRIES" -lt "$MAX_RETRIES" ]; then
+    _DB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)"
+    _DB_REPO_ROOT="$(dirname "$_DB_DIR")"
+    _DB_REASON=$(env AIRULESET_QQ_BLOCK="$BLOCK" \
+        PYTHONPATH="${_DB_REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \
+        python3 -P -m gates.draftbundle <<<"$MSG" 2>/dev/null) && _DB_RC=0 || _DB_RC=$?
+    if [ "$_DB_RC" = 2 ] && [ -n "$_DB_REASON" ]; then
         echo "$((RETRIES+1))" > "$RETRY_FILE"
-        printf '%s\n' "Tvoja ❓ správa bundluje VIAC než jeden klientsky text / rozhodnutie (podpisy ZbynekAI: ${N_SIG:-0}, „Text …\" hlavičky: ${N_TEXTHDR:-0}, drafty s cieľom vlákno/úloha: ${N_TGT:-0}, ❓ rozhodnutia: ${N_DEC:-0}) — počíta sa CELÁ správa, aj drafty NAD blokom. Owner pravidlo: JEDNA otázka = JEDEN klientsky text — ukáž PRVÝ draft teraz (jeden cieľ), zvyšné ZARAĎ DO FRONTY (na ich ticketoch, label needs-answer) a ďalší ukáž až po odpovedi. Už ODOSLANÚ správu cituj bez podpisového riadku. Rodinné batchovanie (#755) zoskupuje TIKETY deklaratívne, NIKDY viac klientskych textov v jednej otázke (#1006/#1177)." >&2
+        printf '%s\n' "$_DB_REASON" >&2
         exit 2
     fi
 fi
