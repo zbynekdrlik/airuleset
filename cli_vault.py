@@ -559,7 +559,8 @@ def _secret_show(args):
         "secret show", public_host, token, ips,
         lambda ip: _secret_url_line(ip, port, token),
         lambda ip: _live(_secret_health_url(ip, port)),
-        fallback_reason=_fallback_reason, log=lambda ev: st.log_event(ev, label))
+        origin_ip=bind_ip, fallback_reason=_fallback_reason,
+        log=lambda ev: st.log_event(ev, label))
     if dropped:
         print("(skipped %s — cleartext; --allow-plain offers them too)"
               % ", ".join(dropped))
@@ -824,7 +825,7 @@ def _secret_request(args):
         "secret", public_host, token, ips,
         lambda ip: _secret_url_line(ip, port, token),
         lambda ip: _live(_secret_health_url(ip, port)),
-        fallback_reason=_fallback_reason,
+        origin_ip=bind_ip, fallback_reason=_fallback_reason,
         log=lambda ev: [st.log_event(ev, n) for n in names])
     if dropped:
         print("(skipped %s — cleartext; --allow-plain offers them too)"

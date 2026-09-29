@@ -17,8 +17,11 @@ conformance use (`cli_drop_lanes._probe_public_status`):
 - 302 -> Cloudflare Access answered at the EDGE, before the tunnel, so a dead
   tunnel still looks like this (review finding): public first + fallback, AND a
   stderr note that the tunnel is NOT verified from here;
-- anything else (530 = error 1033, a 502 origin failure, a connection error) ->
-  the private URLs ONLY, a LOUD degradation line, the shared #1115 line.
+- anything else (530 = error 1033, a 502 origin failure, a connection error),
+  or the tunnel-origin address itself not answering locally -> the private URLs
+  ONLY, a LOUD degradation line, the shared #1115 line. With NO private URL the
+  public one is still printed as the last resort (a one-shot 3 s probe can be a
+  false negative; zero URLs is never better).
 
 The token is the SAME on every line — one endpoint, one value, served once.
 A stdlib leaf; the probe is injectable so tests never touch the network.
@@ -95,12 +98,14 @@ def _dead_detail(code) -> str:
 
 
 def emit_urls(prog, public_host, token, ips, private_line, is_live, *,
-              fallback_reason=None, log=None, probe=None, out=None, err=None):
+              origin_ip=None, fallback_reason=None, log=None, probe=None,
+              out=None, err=None):
     """Print the URLs for a live endpoint and return the channel used:
     `"public"` | `"public-unverified"` | `"degraded"` | `"private"`.
 
     `private_line(ip)` labels one private URL, `is_live(ip)` health-checks it
-    (loopback is never offered — the owner cannot reach it). No public lane ->
+    (loopback is never offered — the owner cannot reach it); `origin_ip` is the
+    tunnel-origin bind, which must answer before the public URL is offered. No public lane ->
     the private URLs plus the #1115 reason line (`fallback_reason`). `log(event)`
     records a degradation in the vault log (a bare event word, never a value)."""
     import cli_drop_lanes as _dl
@@ -114,8 +119,9 @@ def emit_urls(prog, public_host, token, ips, private_line, is_live, *,
         print(_dl.channel_fallback_line(fallback_reason or _dl.CHANNEL_NO_LANE,
                                         prog=prog), file=err)
         return "private"
-    code = (probe or _probe)(public_probe_url(public_host))
-    if code in PUBLIC_REACHED_CODES or code == PUBLIC_ACCESS_CODE:
+    origin_ok = origin_ip is None or is_live(origin_ip)
+    code = (probe or _probe)(public_probe_url(public_host)) if origin_ok else None
+    if origin_ok and (code in PUBLIC_REACHED_CODES or code == PUBLIC_ACCESS_CODE):
         print(public_url_line(public_host, token), file=out)
         for line in private:
             print(line + FALLBACK_LABEL, file=out)
@@ -127,14 +133,17 @@ def emit_urls(prog, public_host, token, ips, private_line, is_live, *,
               % (prog, "use the tailscale URL" if private else
                  "NO private fallback exists on this box"), file=err)
         return "public-unverified"
+    detail = _dead_detail(code) if origin_ok else "tunnel origin %s down" % origin_ip
     for line in private:
         print(line, file=out)
-    print("%s: !!! DEGRADED — public URL https://%s/ is DEAD (%s); NOT printed. "
-          "Use the private URL%s instead (#1189)."
-          % (prog, public_host, _dead_detail(code),
-             "" if private else " — NONE available on this box"), file=err)
+    if not private:                      # never zero URLs: the last resort
+        print(public_url_line(public_host, token), file=out)
+    print("%s: !!! DEGRADED — public URL https://%s/ is DEAD (%s); %s (#1189)."
+          % (prog, public_host, detail, "use the private URL instead" if private
+             else "NO private URL on this box, public printed as a last resort"),
+          file=err)
     print(_dl.channel_fallback_line(_dl.CHANNEL_UNREACHABLE, prog=prog,
-                                    detail=_dead_detail(code)), file=err)
+                                    detail=detail), file=err)
     if log is not None:
         log("public-lane-dead")
     return "degraded"
