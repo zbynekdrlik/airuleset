@@ -358,10 +358,13 @@ class TestFohmixerRender(unittest.TestCase):
                             or k in allowed_plain, k)
 
     def test_render_refuses_a_declared_human_without_a_key(self):
-        # timo's controller key is minted at go-live; until then the render
-        # FAILS LOUD instead of silently dropping his tab
-        self.assertNotIn("timo", wo.WEBTERM_CONTROLLER_LANE_PUBKEYS)
-        with self.assertRaises(ValueError) as cm:
+        # a declared human whose controller key is missing makes the render
+        # FAIL LOUD instead of silently dropping his tab (timo's key was
+        # minted at the #1183 go-live, so remove it for this check)
+        keys = dict(wo.WEBTERM_CONTROLLER_LANE_PUBKEYS)
+        keys.pop("timo", None)
+        with mock.patch.dict(wo.WEBTERM_CONTROLLER_LANE_PUBKEYS, keys, clear=True), \
+                self.assertRaises(ValueError) as cm:
             bootstrap.render_root_bootstrap("fohmixer")
         self.assertIn("timo", str(cm.exception))
 
