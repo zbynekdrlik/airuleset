@@ -2682,6 +2682,16 @@ def cmd_status(args):
     except Exception as e:
         print(f"\nwindow: error ({e})", file=sys.stderr)
 
+    # --- Checkout freshness (#1176): Job 53's per-checkout lag + reason, the
+    # rows behind the footer `stale N`. Empty until the job ran on this box. ---
+    try:
+        import cli_checkout_freshness
+        _cf_lines = cli_checkout_freshness.status_lines()
+        if _cf_lines:
+            print("\n" + "\n".join(_cf_lines))
+    except Exception as e:
+        print(f"\ncheckout-freshness: error ({e})", file=sys.stderr)
+
     # --- /goal armed state (#1038 + follow-up) ---
     # goal_status_probe reads the SAME truth the arm machinery uses -- the
     # tri-state pane_goal_armed of the RESOLVED pane -- inside a pane (via
@@ -8502,7 +8512,7 @@ def cmd_watchdog(args):
                     # so an unconfigured box costs one config-file read per
                     # sweep and never touches the network.
                     task_hygiene_enabled=True,
-                    watch_triggers_enabled=True,  # #1163 Job 52; gated on a steer=watch window
+                    watch_triggers_enabled=True, checkout_freshness_enabled=True,  # #1163 Job 52 (steer=watch window) + #1176 Job 53 (managed checkouts)
                     # #1040 — one shared gh-rate reading per sweep: refreshes the
                     # 60s-cached `gh api rate_limit` (the FREE, non-counting
                     # endpoint), records the once-per-episode exhaustion alert,

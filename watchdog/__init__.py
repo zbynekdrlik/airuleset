@@ -2323,6 +2323,7 @@ from watchdog import task_hygiene as task_hygiene  # noqa: E402,F401  (#1036 Job
 # owns box-level alerting). `watchdog/erp_heartbeat.py`'s docstring is the SSOT.
 from watchdog import erp_heartbeat as erp_heartbeat  # noqa: E402,F401
 from watchdog import watch_triggers as watch_triggers  # noqa: E402,F401  (#1163 Job 52)
+from watchdog import checkout_freshness as checkout_freshness  # noqa: E402,F401  (#1176 Job 53)
 
 
 # #535 — job 34, per-box cross-target conformance check. Extracted to
@@ -2602,8 +2603,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              health_probes=None, health_probe_fetch=None,
              task_hygiene_enabled=False, gh_rate_fetch=None,
              bounceflip_fetch=None, cred_mtime_fn=None, proc_start_fn=None,
-             erp_heartbeat_enabled=False, watch_triggers_enabled=False):
-    """Scan every `claude` pane once. 52 numbered jobs per poll — 45 LIVE and 7
+             erp_heartbeat_enabled=False, watch_triggers_enabled=False, checkout_freshness_enabled=False):
+    """Scan every `claude` pane once. 53 numbered jobs per poll — 46 LIVE and 7
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402; 14 in
     #1084 — the slot stays registered as a journal-only tombstone), whose
     numbers are kept addressable so historical log lines and code comments
@@ -2797,14 +2798,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           `deliver_compact`, the whole request store, and the `compact-request`
           CLI command — `watchdog/compact.py` now holds only the pane resolvers +
           the observation helpers the other jobs read.
-      (15) COMPACT OVERGROWN IDLE SESSIONS — REMOVED (#102, 2026-07-27). Used
-          to fire `/compact` purely off CONTEXT SIZE + IDLE DURATION, with
-          no regard for what marker the session's last turn ended on — the
-          user's corrected agreement: compaction fires ONLY at a completed-
-          ticket boundary (14), nothing else. See the removed section
-          comment above `_pane_compacting` for the full audit of what
-          survived. Number retained (not reused) for historical
-          addressability of prior comments/logs referencing "job 15".
+      (15) COMPACT OVERGROWN IDLE SESSIONS — REMOVED (#102, 2026-07-27). Fired
+          `/compact` off CONTEXT SIZE + IDLE DURATION alone (audit: the removed
+          section comment above `_pane_compacting`). Number retained.
       (16) (only when `fleet_fetch` is given) HOURLY FLEET BURN (#55) —
           coordinator-only (cmd_watchdog wires this ONLY on the controller,
           box-class `controller` — #971, was hostname `dev1`): merges every
@@ -2815,13 +2811,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           weekly-%/day pace exceeds the budget implied by the usage cache.
           When `shared_fleet_path` is given (#971), the same row is ALSO
           written to a world-readable path for cross-account consumers.
-      (17) HARD CONTEXT CEILING BACKSTOP — REMOVED (#102, 2026-07-27). Used
-          to fire `/compact` purely off CONTEXT SIZE (a fixed ceiling),
-          regardless of idle duration and even into a BUSY pane — the same
-          #102 correction as (15): compaction fires ONLY at a completed-
-          ticket boundary (14). See the removed section comment above
-          `_pane_compacting` for the full audit. Number retained for
-          historical addressability.
+      (17) HARD CONTEXT CEILING BACKSTOP — REMOVED (#102, 2026-07-27). Fired
+          `/compact` off a fixed CONTEXT SIZE ceiling, even into a busy pane
+          (the same #102 correction as (15)). Number retained.
       (18) HOOKS RECONCILE — REMOVED (#132, 2026-07-28). Existed on the
           premise that Claude Code snapshots its hook set at process start and
           never re-reads it, so only a restart could pick up a newly deployed
@@ -3486,6 +3478,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           `steer=watch` window: each due cron slot → ONE `watch-trigger` pointer via
           `send_verified` into THAT window's idle pane; fired/held/missed per slot in
           `state["watch_triggers"]`. `watchdog/watch_triggers.py` is the SSOT.
+      (53) CHECKOUT FRESHNESS (#1176) — gated on `checkout_freshness_enabled`: every managed checkout
+          fetched + fast-forwarded when provably safe each ~15 min; the rest reported (footer `stale N`,
+          `status`). Never a ping. `watchdog/checkout_freshness.py` is the SSOT.
 
     PAUSED BOX (#851/#1032): when `box_paused` is True — the box's OWN fleet entry
     carries `paused` (a stream the owner froze), resolved once in `cmd_watchdog`
@@ -5813,6 +5808,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              dry_run=dry_run, handled=compact_handled_this_sweep,
              budget_left=remaining_budget_s),
          "watch-trigger error", min_budget=watch_triggers.MIN_BUDGET_S)
+    _add("checkout_freshness", lambda: checkout_freshness_enabled,   # Job 53 (#1176); leaf = SSOT
+         lambda: checkout_freshness.run_job(now, dry_run=dry_run, budget_left=remaining_budget_s),
+         "checkout-freshness error", min_budget=checkout_freshness.MIN_BUDGET_S)
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with
