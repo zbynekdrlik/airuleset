@@ -241,14 +241,16 @@ class TestDoctrine(TestCase):
             "a client message or reaction (`msg <id>`)",
             "the owner's own move after a confirmation",
             "the odoo-erp#8507 auto-close note",
-            "the close gate rejects an `Acceptance-cited:` with no `msg <id>` (#1185)",
+            # ROZHODNUTÉ issuecomment-5894541407: the owner-ruling exit joins msg <id>
+            "the close gate rejects an `Acceptance-cited:` with neither `msg <id>` "
+            "nor an owner-ruling `issuecomment-<id>` (#1185)",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, sec)
 
     def test_compose_close_line_states_the_rule(self):
         text = _norm(COMPOSE.read_text(encoding="utf-8"))
-        self.assertIn("`Acceptance-cited:` bez `msg <id>` BLOKUJE — Hotovo "
+        self.assertIn("`Acceptance-cited:` bez `msg <id>`/`issuecomment-<id>` BLOKUJE — Hotovo "
                       "nastavené streamom nie je akceptácia (#1185)", text)
 
 
