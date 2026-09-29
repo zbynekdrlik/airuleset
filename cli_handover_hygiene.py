@@ -50,8 +50,8 @@ _H_LIMIT = 1000
 # ("Skúsili ste…? Stačí napísať") are a client question, never a handover.
 _GAP = r"(?:\s|&nbsp;|&#160;|<[^>]{0,40}>)*"
 _SHAPE_RX = (re.compile(r"[ČčCc]o" + _GAP + r"sk[úu]si", re.IGNORECASE),
-             re.compile(r"sta[čc][íi]" + _GAP + r"(?:👍|&#128077;|:\+1:|:thumbsup:)",
-                        re.IGNORECASE))
+             re.compile(r"sta[čc][íi][^\n]{0,60}?(?:👍|&#128077;|:\+1:|:thumbsup:)",
+                        re.IGNORECASE))       # bounded gap: linear, never nested
 _TASK_BASE_FIELDS = ("id", "name", "stage_id", "date_last_stage_update")
 
 

@@ -79,6 +79,9 @@ _VAR_RX = re.compile(r"\$\{?([A-Za-z_]\w*)\}?")
 _OPEN_RX = re.compile(r"open\(\s*['\"]([^'\"]+)['\"]")
 _PY_POST_RX = re.compile(
     r"\bpost\(\s*(?:model\s*=\s*)?['\"]([\w.]+)['\"]\s*,\s*(?:res_id\s*=\s*)?(\d+)")
+_ARGV_MODEL_RX = re.compile(r"['\"]--model['\"],\s*['\"]([\w.]+)['\"]")
+_ARGV_RES_RX = re.compile(r"['\"]--res-id['\"],\s*['\"]?(\d+)")
+_PIPE_CAT_RX = re.compile(r"\bcat\s+([^\s|;&<>]+)\s*\|")
 _TID_OPT_RX = re.compile(r"^--(?:res-ids?|tasks?|task-ids?|also-tasks?)$")
 _WRAPPERS = {"timeout", "nice", "nohup", "stdbuf", "time", "command", "exec", "env"}
 _PY_RX = re.compile(r"^python[\d.]*$")
@@ -203,6 +206,19 @@ def _gh_comment_argv(tk):
     return None
 
 
+def _py_argv_calls(code):
+    """``[(model, res_id)]`` of ``subprocess`` argv lists naming the poster
+    script: a bounded window after each ``odoo_post.py`` (linear, never one
+    DOTALL lazy regex over the whole script -- that one went quadratic)."""
+    out = []
+    for m in list(re.finditer(r"odoo_post\.py", code))[:50]:
+        win = code[m.end():m.end() + 2000]
+        mm, rr = _ARGV_MODEL_RX.search(win), _ARGV_RES_RX.search(win)
+        if mm and rr:
+            out.append((mm.group(1), rr.group(1)))
+    return out
+
+
 def _flags(args):
     return {a.split("=", 1)[0] for a in args if a.startswith("-")}
 
@@ -277,14 +293,16 @@ class _Turn:
         for t in ids:
             self.owed.setdefault(t, why)
 
-    def poster(self, args, doc, cwd, env, posted, ok):
+    def poster(self, args, doc, cwd, env, posted, ok, piped=""):
         flags = _flags(args)
         if flags & _NOT_DONE:
             return                                # nothing was posted or moved
         body = " ".join(self.value(a, doc, cwd, env) for a in args)
-        if "-" in args:                           # --body - : stdin
-            body += "\n" + doc + "".join(self.read(args[i + 1], cwd) for i, a in
-                                         enumerate(args[:-1]) if a == "<")
+        body += "".join("\n" + self.read(v, cwd) for v in _all_values(args, ("--body-file",))
+                        + [a for a in args if a.startswith("@")])
+        if "-" in args:                           # --body - : stdin (<, heredoc, pipe)
+            body += "\n" + doc + piped + "".join(self.read(args[i + 1], cwd) for i, a in
+                                                 enumerate(args[:-1]) if a == "<")
         on_task = _flag_value(args, ("--model",)) == "project.task"
         if "--handover" in flags:
             if ok:
@@ -295,11 +313,13 @@ class _Turn:
                      "handover note posted without --handover")
 
     def py_post(self, code, cwd, posted, ok):
-        """The ``odoo_post.post()`` Python API inside a heredoc / ``-c`` script."""
+        """The ``odoo_post.post()`` Python API -- or a ``subprocess`` call of the
+        poster script -- inside a heredoc / ``-c`` script."""
         body = code + "\n".join(self.read(p, cwd) for p in _OPEN_RX.findall(code))
-        for model, res_id in _PY_POST_RX.findall(code):
+        calls = _PY_POST_RX.findall(code) + _py_argv_calls(code)
+        for model, res_id in calls:
             ids = set(_TASK_URL_RX.findall(body)) | ({res_id} if model == "project.task" else set())
-            if "plan_handover" in code or "HandoverPlan" in code:
+            if re.search(r"plan_handover|HandoverPlan|['\"]--handover['\"]", code):
                 if ok:
                     self.settled |= ids
             elif posted and "no-stage-move" not in code and is_handover_body(body):
@@ -367,7 +387,8 @@ def _scan_bash(turn, cmd, ok, result, depth=0):
         argv = _script_argv(tk)
         script = os.path.basename(argv[0]) if argv else ""
         if script in ("odoo_post.py", "odoo_post"):
-            turn.poster(argv[1:], doc, cwd, env, posted, ok)
+            turn.poster(argv[1:], doc, cwd, env, posted, ok, "".join(
+                "\n" + turn.read(f, cwd) for f in _PIPE_CAT_RX.findall(skeleton)))
             continue
         if script.endswith(".py") and "post-message" in argv[1:3]:
             args = argv[argv.index("post-message") + 1:]
