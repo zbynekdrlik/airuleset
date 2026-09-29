@@ -399,6 +399,21 @@ def marek_inventory():
             "u_tenant": True,
         },
         {
+            # owner request 2026-09-29 ("pridaj ar marekovi do webtermu"): marek's
+            # gateway runs AS airuleset on the controller, so `ar` is a LOCAL
+            # attach of the owner's airuleset session group — the owner's own ar
+            # tab shape. NO u_tenant — owner-realm account (#703 boundary).
+            "id": "ar",
+            "label": "airuleset (controller)",
+            "kind": "stream",
+            "local": True,
+            "host": None,
+            "user": None,
+            "identity": None,
+            "preferred": "zbynek",
+            "start_dir_chain": ["devel/airuleset"],
+        },
+        {
             # #960: claudy project — SSH to the `claudy` account on the
             # controller. `preferred: "marek"` targets marek's OWN tmux session
             # on the claudy account (R1 Fable review: per-human sessions).
