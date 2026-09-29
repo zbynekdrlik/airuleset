@@ -18,7 +18,6 @@ RED on base: the TTL constants are still 60/300, `_watchdog_queue_fetch` makes 3
 calls, there is no reopen TTL, and `_add` has no `max_subprocess`.
 """
 
-import json
 import sys
 import unittest
 from pathlib import Path
@@ -50,44 +49,9 @@ class TestTTLConstants(unittest.TestCase):
             self.assertEqual(qa._fetch_ttl(), 900)
 
 
-class TestQueueFetchCollapse(unittest.TestCase):
-    FIXTURE = json.dumps([
-        {"number": 5177, "labels": [{"name": "ready-for-review"}]},
-        {"number": 42, "labels": [{"name": "needs-gatekeeper"}, {"name": "x"}]},
-        {"number": 3073, "labels": [{"name": "prio:bounce"}]},
-        {"number": 99, "labels": [{"name": "unrelated"}]},
-        {"number": 42, "labels": [{"name": "ready-for-review"}]},  # dup number
-    ])
-
-    def _fetch(self, gh_out):
-        with mock.patch.object(airuleset, "resolve_authority",
-                               lambda cwd=None: "full"), \
-             mock.patch.object(airuleset, "_repo_root", lambda cwd=None: "/r"):
-            return airuleset._watchdog_queue_fetch("/r", gh_out=gh_out)
-
-    def test_one_call_and_correct_union(self):
-        calls = []
-
-        def gh_out(*args, **kw):
-            calls.append(args)
-            return self.FIXTURE
-
-        out = self._fetch(gh_out)
-        self.assertEqual(out, [42, 3073, 5177])
-        self.assertEqual(len(calls), 1, "collapsed to ONE gh issue list call")
-
-    def test_non_full_authority_is_none(self):
-        with mock.patch.object(airuleset, "resolve_authority",
-                               lambda cwd=None: "fork-no-merge"), \
-             mock.patch.object(airuleset, "_repo_root", lambda cwd=None: "/r"):
-            self.assertIsNone(
-                airuleset._watchdog_queue_fetch("/r", gh_out=lambda *a, **k: "[]"))
-
-    def test_empty_stdout_is_empty_union(self):
-        self.assertEqual(self._fetch(lambda *a, **k: ""), [])
-
-    def test_bad_json_is_none(self):
-        self.assertIsNone(self._fetch(lambda *a, **k: "not json"))
+# (d) `TestQueueFetchCollapse` was REMOVED by #1178: `_watchdog_queue_fetch` no
+# longer shells gh at all (it reads the per-repo quals snapshot), so ZERO calls
+# is locked in test_queue_arrival_own_1178 (`..._never_shells_gh`).
 
 
 class TestReopenFetchTTL(unittest.TestCase):

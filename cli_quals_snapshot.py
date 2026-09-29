@@ -51,13 +51,38 @@ def parse_ops_wait_members(stdout):
     return members
 
 
+def _titles(rows):
+    """#1178 — `{"<number>": "<title>"}` for the I rows, so the queue-arrival
+    nudge can name each new ticket without a gh call of its own. A row without a
+    string title maps to "" (never raises: titles are display only)."""
+    out = {}
+    for n, row in rows.items():
+        title = row.get("title") if isinstance(row, dict) else None
+        out[str(int(n))] = title if isinstance(title, str) else ""
+    return out
+
+
+def _bounce_numbers(rows):
+    """#1178 review F3 — the I rows carrying `prio:bounce`: on a stream the
+    returned bounce is announced by job 8 / the #1066 bounce-verdict rider, so
+    the queue-arrival rider leaves them out there (labels as dicts or names)."""
+    out = []
+    for n, row in rows.items():
+        labels = row.get("labels") if isinstance(row, dict) else None
+        names = {(lb.get("name") if isinstance(lb, dict) else lb)
+                 for lb in (labels if isinstance(labels, list) else [])}
+        if "prio:bounce" in names:
+            out.append(int(n))
+    return sorted(out)
+
+
 def emit_snapshot_json(rows, ops_wait, root, quals, own_stream, emit_ops_wait,
                        dispatchable_fields, owed=()):
     """`--snapshot-json` (#1067 slice 1d): ONE JSON object carrying every quals
     fact the watchdog reads, all from the caller's ONE `_partition_workable`
     pass (#367): `open_count` (the `--count` number: I plus the owed C rows
-    `owed`, #1141 ruling 2; `i_members` the I numbers —
-    no watchdog reader today, #714 removed the #578 I-member fetch),
+    `owed`, #1141 ruling 2; `i_members` the I numbers and `i_titles` their
+    titles — the #1178 queue-arrival rider's own workable set),
     `dispatchable_count`/`dispatchable_reason` (the caller's
     `dispatchable_fields`, the SAME derivation `--count-dispatchable` prints)
     and `ops_wait_members` (the caller's `emit_ops_wait` listing — the SAME
@@ -92,6 +117,8 @@ def emit_snapshot_json(rows, ops_wait, root, quals, own_stream, emit_ops_wait,
         count, reason = None, "snapshot part failed"
     print(json.dumps({"open_count": len(rows) + len(owed or ()),
                       "i_members": sorted(int(n) for n in rows),
+                      "i_titles": _titles(rows),   # #1178 the arrival nudge names them
+                      "i_bounce": _bounce_numbers(rows),   # #1178 F3
                       "dispatchable_count": count,
                       "dispatchable_reason": reason,
                       "ops_wait_members": members}))

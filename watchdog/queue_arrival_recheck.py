@@ -1,6 +1,6 @@
-"""gk queue-ARRIVAL nudge (#733) — wake an armed FULL-authority `/goal`
-supervisor that is parked on a long background waiter the moment a NEW hand-off
-lands in the gk queue.
+"""Queue-ARRIVAL nudge (#733, own-set since #1178) — wake a `/goal` supervisor
+parked on a long background waiter (or, #1178, one whose goal ENDED) the moment
+a NEW ticket enters its workable set. #733 watched only the gk hand-off union.
 
 INCIDENT (odoo-erp gk box, 2026-08-26 evening): the gk autopilot session waited
 on a release tail (a `run_in_background` shadow-CI waiter + a slovnormal
@@ -28,8 +28,9 @@ arrival-triggered, in-session wake on a new gk hand-off.
 
 WHAT THIS DOES: a 4th rider on `goal_lane_sweep`'s EXISTING armed-candidate-pane
 loop (ZERO new pane walk / capture), the faithful sibling of #547/#578 (ops-wait)
-and #616 (release-gap). Per repo it snapshots the gk queue UNION
-`ready-for-review ∪ needs-gatekeeper ∪ prio:bounce` (open issue numbers). The
+and #616 (release-gap). Per repo it snapshots THIS box's own workable set (#1178:
+the quals snapshot "I"; #733 diffed the gk hand-off label union, which an
+owner-filed ticket never entered — see `queue_arrival_own`). The
 signal is a SET DELTA, not presence or cadence: the FIRST observation seeds a
 baseline (no nudge — we don't know what was already there); a LATER snapshot that
 ADDS a member (`cur − base ≠ ∅`) delivers ONE verified `stuck-check:` nudge
@@ -45,11 +46,9 @@ floor window, naming every wave accumulated in it — the fast wake the incident
 needed (the FIRST arrival after a seed fires at once), rate-limited — while the
 persistent-unprocessed-queue case stays covered by jobs 8/11.
 
-FULL-authority gate (full-only, the SAME gate as `release_gap` (#616); the
-INVERSE of #618's WIDENED lane gate): only a gk/full box PROCESSES this
-cross-stream union; a reduced-authority stream HANDS OFF to gk and its own
-returned `prio:bounce` is already job-8's concern. Cheap, before any fetch. An
-unresolvable authority fails safe to skip (never a false nudge).
+AUTHORITY (#1178): no gate — every box watches its OWN set (`core-quals` on a
+full box, which already unions every gk hand-off; `slice-quals` on a stream).
+The #733 full-only gate existed because the gk union was a gk-only concern.
 
 DESIGN (#486 reuse, ZERO new delivery/fetch/keystroke primitives): reuses
 `watchdog.send_verified` (transcript-proof submit, with the #594
@@ -86,6 +85,7 @@ import re
 import watchdog
 from watchdog import ops_wait_recheck as _ops_wait_recheck
 from watchdog import nudge_gate as _nudge_gate   # #797 shared cadence gate
+from watchdog import queue_arrival_own as _own     # #1178 own-set / ended pane / health
 
 # #1109 — the PRIORITY classification of an infra arrival. A release-blocking
 # hand-off is EITHER a tagged STOP:/GATEKEEPER-ACTION (INFRA) COMMENT (the
@@ -163,8 +163,9 @@ def _wave_has_priority(arrivals, id_map):
         return False
     return any(_is_priority_record(id_map.get(a)) for a in arrivals)
 
-# env AIRULESET_QUEUE_ARRIVAL_FETCH_TTL_S — how long a queue-union snapshot is
-# CACHED per repo (`state["queue_arrival_cache"]`, keyed by cwd). #1055 P2:
+# env AIRULESET_QUEUE_ARRIVAL_FETCH_TTL_S — how long an INFRA-queue snapshot is
+# cached per repo (#1178: the review role's own-set read is a local snapshot
+# file and uses `queue_arrival_own.FETCH_TTL_S`). #1055 P2:
 # 300->600. A gk hand-off is a LABEL event humans file minutes apart, and this
 # rider only nudges an already-PARKED full-authority pane -- a 10-min arrival
 # latency there is invisible (the pane is waiting anyway), while halving the
@@ -293,7 +294,7 @@ def _cached_queue(cwd, fetch, state, now, cache_key="queue_arrival_cache",
 
 # --- PURE DECIDER ----------------------------------------------------------
 # rec (persisted per-sid state: {"base": [ints], "first_seen": ts, ...}) + cur
-# (the current queue-union list, or None) -> (action, new_rec, reason, arrivals):
+# (the current arrival-set ids, or None) -> (action, new_rec, reason, arrivals):
 #   "skip"  -- cur is None / not a list (undetermined) -> NEVER a nudge, NEVER a
 #              state change (safe direction);
 #   "seed"  -- FIRST observation (no prior baseline) -> record base=cur, no nudge
@@ -309,8 +310,8 @@ def _cached_queue(cwd, fetch, state, now, cache_key="queue_arrival_cache",
 def _queue_decision(rec, cur, now, classify_fn=None):
     """Pure verdict for ONE armed session's gk-queue snapshot. `rec` is the
     persisted per-sid dict (or None/malformed for a fresh session). `cur` is the
-    fetched queue-union list, or None when UNDETERMINED (a gh error) — None fails
-    safe to `skip`.
+    fetched arrival-set id list, or None when UNDETERMINED — None fails safe to
+    `skip`.
 
     The baseline (`rec["base"]`) is the set of queue members this session has
     already been told about. A NEW member (`cur - base`) is an arrival the parked
@@ -390,29 +391,12 @@ def _fmt_arrivals(arrivals):
     return txt
 
 
-def _nudge_text(arrivals, cur_count):
-    """The queue-arrival keystroke injected into the armed loop. Carries the
-    shared `stuck-check: ` prefix (own-payload recognition + machine-prompt
-    exclusion — see the module docstring). Names the NEW arrivals and points at
-    the session's own gk backlog re-derivation, without hardcoding one repo's
-    pipeline (generic over full-authority repos). Hard-capped at NUDGE_MAX_CHARS
-    (a genuine over-cap only from a pathological wave -> truncate on a word
-    boundary)."""
-    text = (
-        "stuck-check: gk queue arrival — do fronty hand-offov pribudli NOVÉ "
-        "tickety %s (union ready-for-review ∪ needs-gatekeeper ∪ prio:bounce, "
-        "spolu %d otvorených), kým si čakal na dlhý background waiter. Session "
-        "čakajúca na waiter je slepá na nové hand-offy — re-deriv svoj gk "
-        "backlog (core-quals --count / tvoj /goal stop-proof) a spracuj nové "
-        "tickety: reviewni ready-for-review, konaj needs-gatekeeper, vezmi späť "
-        "prio:bounce. Poradie riešenia riadi priorita dohodnutá v tejto session "
-        "(architektúra > architecture-rework > prio:bounce > backlog, #993), nie "
-        "tento nudge. NEdispatchni dep-wait jednotku (otvorené Depends-on). "
-        "Ak už na nich robíš, potvrď."
-        % (_fmt_arrivals(arrivals), cur_count))
-    if len(text) <= NUDGE_MAX_CHARS:
-        return text
-    return text[:NUDGE_MAX_CHARS - 1].rsplit(" ", 1)[0] + "…"
+def _nudge_text(arrivals, cur_count, titles=None):
+    """The review-role keystroke (#1178: the box's own workable set, each new
+    ticket named with its title) — `queue_arrival_own.nudge_text`, capped at
+    NUDGE_MAX_CHARS. Kept under this name for the #733 callers/tests."""
+    return _own.nudge_text(arrivals, cur_count, titles, NUDGE_MAX_CHARS,
+                           MAX_NAMED_ARRIVALS)
 
 
 # --- ROLE-AWARE (#1029) ----------------------------------------------------
@@ -432,14 +416,16 @@ def _nudge_text(arrivals, cur_count):
 
 def _role_queue_config(role, queue_fetch, infra_queue_fetch, classify_builder):
     """Role-dependent `(fetch, cache_key, skip_sequential, classify_builder)`
-    for the rider. review = today's union (byte-identical: queue_fetch,
-    `queue_arrival_cache`, sequential-skip ON, the #993 dep classify); infra =
+    for the rider. review = the box's own workable set (#1178: queue_fetch,
+    `queue_arrival_own_cache` — a NEW namespace so a pre-#1178 cached gk-union
+    list is never diffed against the own set — sequential-skip ON, the #993
+    dep classify); infra =
     the INFRA queue (infra_queue_fetch, `queue_arrival_infra_cache`,
     sequential-skip OFF — awareness not refill, and NO dep-wait classify). The
     infra-unwired short-circuit stays in the caller (it must `return`)."""
     if role == "infra":
         return infra_queue_fetch, "queue_arrival_infra_cache", False, None
-    return queue_fetch, "queue_arrival_cache", True, classify_builder
+    return queue_fetch, "queue_arrival_own_cache", True, classify_builder
 
 
 def _resolve_role(cwd, resolve_role_fn):
@@ -700,7 +686,7 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
                                batch_collect=None, classify_builder=None,
                                infra_queue_fetch=None, resolve_role_fn=None,
                                persist=None, budget_left_fn=None,
-                               receipt_post_fn=None):
+                               receipt_post_fn=None, deliver_hold=None):
     """Audit ONE armed candidate pane's gk-queue snapshot and, on a NEW arrival,
     deliver ONE verified nudge into that session. Called from
     `goal.goal_lane_sweep`'s existing armed-pane loop with the already-resolved
@@ -709,16 +695,16 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     verdict logged, never a silent skip). `dry_run` mutates no persistent state
     and sends nothing.
 
-    FULL-authority gate (full-only, the SAME gate as `release_gap` (#616); the
-    INVERSE of #618's widened lane gate): only a gk/full box PROCESSES this
-    cross-stream union. Cheap, BEFORE any fetch. An unresolvable authority fails
-    safe to skip (never a false nudge into a reduced-authority stream box).
+    #1178: NO authority gate any more — the review union is THIS box's own
+    workable set (`core-quals` on a full box, `slice-quals` on a stream), so
+    every box watches its own backlog; the infra fetch self-gates full.
 
     `queue_fetch(cwd)` is the injected seam (network kept out of run_once unit
-    tests, exactly like `ops_wait_fetch`): returns the queue-union member numbers
-    (a `list` of ints) or None when unmeasurable — None fails safe to `skip`. It
-    is read through `_cached_queue` (per-repo TTL cache) so the gh union fires at
-    most once per repo per TTL, never every sweep per pane.
+    tests): the own-set `[{"id","title"}]` records (or ints) or None when
+    unmeasurable — None fails safe to `skip`, tracked by `_own.note_fetch` (a
+    persistent undetermined WARNs hourly). Read through `_cached_queue`.
+    `deliver_hold()` (#1178, the ended-supervisor pane) returns a hold reason
+    or None, consulted before any keystroke; a hold keeps base OLD.
 
     `captured` (#714): the pane capture the caller already read for the lane
     nudge (ZERO new capture) — the BUSY-PANE GATE. When it shows CC's "Waiting
@@ -738,19 +724,6 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     so a pane those already typed is deferred to next sweep, and a nudge WE send
     claims the sid)."""
     logs = []
-    # FULL-authority gate (full-only, same gate as release_gap #616; the INVERSE
-    # of #618's widened lane gate), cheap, before any fetch.
-    try:
-        import airuleset
-        authority = airuleset.resolve_authority(cwd)
-    except Exception as e:
-        logs.append("queue-arrival %s -> skip:authority-unresolved (%r)"
-                    % (loc, e))
-        return logs
-    if authority != "full":
-        logs.append("queue-arrival %s -> skip:not-full-authority (%s)"
-                    % (loc, authority))
-        return logs
     # #1029 — resolve the pane ROLE. review (default / unwired) = today's union,
     # byte-identical; infra = the INFRA queue (open infra tickets ∪ tagged
     # STOP:/GATEKEEPER-ACTION (INFRA) comments), an infra nudge text, the #998
@@ -762,6 +735,10 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     if role == "infra" and _fetch is None:
         logs.append("queue-arrival %s -> skip:infra-unwired (role=infra but "
                     "no infra_queue_fetch wired)" % loc)
+        return logs
+    _why = _own.infra_authority_skip(cwd) if role == "infra" else None
+    if _why:   # the infra queue stays a gk (full-authority) concern (#1029)
+        logs.append("queue-arrival %s -> skip:%s" % (loc, _why))
         return logs
 
     # #998 — a SEQUENTIAL-mode REVIEW pane never gets a refill/queue-arrival
@@ -797,32 +774,33 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # CACHED per-repo, role-NAMESPACED: the fetch fires at most once per repo per
     # TTL. A cache/fetch error reads as None -> skip.
     try:
-        cur = _cached_queue(cwd, _fetch, state, now, cache_key=_cache_key)
+        cur = _cached_queue(cwd, _fetch, state, now, cache_key=_cache_key,
+                            ttl=None if role == "infra" else _own.FETCH_TTL_S)
     except Exception as e:
         logs.append("queue-arrival %s -> skip:fetch-error (%r) — undetermined, "
                     "no nudge" % (loc, e))
         return logs
 
-    # #1029 — the decider + baseline diff INT ids. The review union already IS a
-    # list of ints (`id_map` None); the infra fetch is rich records that
-    # normalise to `(ids, id_map)` — `id_map` maps an arrival id back to its
-    # record for the infra nudge text. `cur_ids` is what the whole shared body
-    # below counts / advances (never `cur`).
-    if role == "infra":
-        cur_ids, id_map = _infra_ids_and_map(cur)
-    else:
-        cur_ids, id_map = cur, None
-
-    rec = qrecs.get(sid)
-    if not isinstance(rec, dict):
-        rec = {}
-    # #993 item 4: build the DEPENDENCY classify_fn for this cwd (per-issue
-    # Depends-on read). `classify_builder(cwd)` is the injected seam (network
-    # kept out of run_once unit tests, exactly like `queue_fetch`); None
-    # (unwired / infra role / legacy tests) = every arrival dispatchable.
-    classify_fn = _classify_builder(cwd) if _classify_builder is not None else None
+    # #1029/#1178 — the decider diffs INT ids: `id_map` maps an id to its infra
+    # record (infra) or its title (review, the own set); `cur_ids` is what the
+    # shared body below counts / advances (never `cur`). Fetch health is noted.
+    cur_ids, id_map = (_infra_ids_and_map(cur) if role == "infra"
+                       else _own.review_ids(cur))
+    logs += _own.note_fetch(state, cwd + (" (infra)" if role == "infra" else ""),
+                            cur_ids is not None, now, loc, dry_run=dry_run,
+                            reason=None if cur_ids is not None
+                            else _own.undetermined_reason(cwd))
+    rec = _own.current_rec(qrecs.get(sid), role)   # #1178 F2: legacy base → seed
+    # #993 item 4: the DEPENDENCY classify_fn for this cwd (per-issue Depends-on
+    # read) via the injected `classify_builder(cwd)`; None = every arrival
+    # dispatchable. #1178 F5: memoised per number + capped per sweep.
+    classify_fn = _own.memo_classify(
+        state, _classify_builder(cwd) if _classify_builder is not None else None,
+        now, scope=cwd)
     action, new_rec, reason, arrivals = _queue_decision(rec, cur_ids, now,
                                                         classify_fn=classify_fn)
+    if role != "infra" and new_rec is not rec:
+        new_rec["src"] = _own.REC_SRC   # #1178 F2: an own-set base
 
     # #1109 — a wave carrying a RELEASE-BLOCKING infra arrival (a STOP:/
     # GATEKEEPER-ACTION (INFRA) comment, or a prio:*/release-block infra ticket)
@@ -885,6 +863,11 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # watchdog package-init ordering; fail-safe False on any error (writer proceeds
     # as pre-#741).
     # #923 BATCH MODE: common delivery guards handled once by the caller.
+    _held = deliver_hold() if deliver_hold is not None else None
+    if _held:   # #1178 ended pane: not idle / live turn / human active
+        logs.append("queue-arrival %s -> hold:%s (%d new, base kept; delivers "
+                    "when the pane is idle and human-quiet)" % (loc, _held, len(arrivals)))
+        return logs
     if batch_collect is None:
         if not watchdog.nudges_enabled(nudge_kind):   # #1023/#1109 per-kind switch
             logs.append("queue-arrival %s -> skip:kind-off (%s, %d new)"
@@ -927,7 +910,7 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
         text = _nudge_text_infra([id_map[a] for a in arrivals if a in id_map],
                                  len(cur_ids))
     else:
-        text = _nudge_text(arrivals, len(cur_ids))
+        text = _nudge_text(arrivals, len(cur_ids), id_map)
     # #923 BATCH COLLECT: contribute text, defer delivery+state to caller.
     if batch_collect is not None:
         def _on_deliver(_nr=new_rec, _q=qrecs, _s=sid, _n=now, _h=handled,
