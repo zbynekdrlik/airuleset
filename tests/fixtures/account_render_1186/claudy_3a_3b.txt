@@ -1,0 +1,22 @@
+# 3a. Sudo policy (#1184) — no root-equivalent group, ever
+case " $(id -nG "$ACCOUNT") " in
+    *" sudo "*|*" admin "*|*" wheel "*|*" root "*|*" docker "*|*" lxd "*|*" disk "*|*" shadow "*|*" adm "*)
+        echo "ERROR: $ACCOUNT is in a root-equivalent group (sudo admin wheel root docker lxd disk shadow adm)" >&2
+        exit 1 ;;
+esac
+# declared sudo: NO — never grant; fail LOUD if any route exists
+if [ -e "/etc/sudoers.d/$ACCOUNT" ]; then
+    echo "ERROR: /etc/sudoers.d/$ACCOUNT exists but the declaration says declared sudo: NO" >&2
+    exit 1
+fi
+SUDO_L=$(LC_ALL=C sudo -n -l -U "$ACCOUNT" 2>&1 || true)
+case "$SUDO_L" in
+    *"may run the following"*)
+        echo "ERROR: $ACCOUNT has a sudo route but declared sudo: NO" >&2
+        exit 1 ;;
+esac
+echo "  sudo: none (declared sudo: NO)"
+
+# 3b. Declared reach (#1184) — NOT enforced for this account: fleet credential manager: ssh to every fleet account is its job (#960)
+echo "  reach: NOT enforced (declared reach_enforced: False)"
+

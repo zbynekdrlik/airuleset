@@ -1,0 +1,61 @@
+# 3a. Sudo policy (#1184) — no root-equivalent group, ever
+case " $(id -nG "$ACCOUNT") " in
+    *" sudo "*|*" admin "*|*" wheel "*|*" root "*|*" docker "*|*" lxd "*|*" disk "*|*" shadow "*|*" adm "*)
+        echo "ERROR: $ACCOUNT is in a root-equivalent group (sudo admin wheel root docker lxd disk shadow adm)" >&2
+        exit 1 ;;
+esac
+# declared sudo: NO — never grant; fail LOUD if any route exists
+if [ -e "/etc/sudoers.d/$ACCOUNT" ]; then
+    echo "ERROR: /etc/sudoers.d/$ACCOUNT exists but the declaration says declared sudo: NO" >&2
+    exit 1
+fi
+SUDO_L=$(LC_ALL=C sudo -n -l -U "$ACCOUNT" 2>&1 || true)
+case "$SUDO_L" in
+    *"may run the following"*)
+        echo "ERROR: $ACCOUNT has a sudo route but declared sudo: NO" >&2
+        exit 1 ;;
+esac
+echo "  sudo: none (declared sudo: NO)"
+
+# 3b. Declared reach (#1184) — ssh egress for this uid only to the declared boxes
+NFT=$(command -v nft || true)
+if [ -z "$NFT" ]; then
+    echo "ERROR: nft not found — cannot enforce the declared reach of $ACCOUNT (install the nftables package)" >&2
+    exit 1
+fi
+REACH_NFT="/etc/airuleset/reach-$ACCOUNT.nft"
+cat > "$REACH_NFT" << 'REACH_EOF'
+table inet airuleset_reach_fohmixer
+delete table inet airuleset_reach_fohmixer
+table inet airuleset_reach_fohmixer {
+	chain output {
+		type filter hook output priority 0; policy accept;
+		meta skuid "fohmixer" tcp dport 22 ct state new reject with tcp reset
+	}
+}
+REACH_EOF
+"$NFT" -c -f "$REACH_NFT"
+cat > "/etc/systemd/system/airuleset-reach-$ACCOUNT.service" << UNIT_EOF
+[Unit]
+Description=airuleset #1184 declared ssh reach for $ACCOUNT
+DefaultDependencies=no
+After=nftables.service
+Before=network-pre.target shutdown.target
+Wants=network-pre.target
+Conflicts=shutdown.target
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=$NFT -f $REACH_NFT
+ExecReload=$NFT -f $REACH_NFT
+[Install]
+WantedBy=sysinit.target
+UNIT_EOF
+systemctl daemon-reload
+systemctl enable "airuleset-reach-$ACCOUNT.service"
+systemctl restart "airuleset-reach-$ACCOUNT.service"
+"$NFT" list table inet airuleset_reach_fohmixer >/dev/null
+echo "  reach: ssh egress limited to none"
+
