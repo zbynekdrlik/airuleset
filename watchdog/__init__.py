@@ -3478,9 +3478,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
           `steer=watch` window: each due cron slot → ONE `watch-trigger` pointer via
           `send_verified` into THAT window's idle pane; fired/held/missed per slot in
           `state["watch_triggers"]`. `watchdog/watch_triggers.py` is the SSOT.
-      (53) CHECKOUT FRESHNESS (#1176) — gated on `checkout_freshness_enabled`: every managed checkout
-          fetched + fast-forwarded when provably safe each ~15 min; the rest reported (footer `stale N`,
-          `status`). Never a ping. `watchdog/checkout_freshness.py` is the SSOT.
+      (53) CHECKOUT FRESHNESS (#1176) — `checkout_freshness_enabled`, not on a paused box: every managed
+          checkout fetched + fast-forwarded when provably safe each ~15 min; the rest reported (footer
+          `stale N`, `status`). Never a ping. `watchdog/checkout_freshness.py` is the SSOT.
 
     PAUSED BOX (#851/#1032): when `box_paused` is True — the box's OWN fleet entry
     carries `paused` (a stream the owner froze), resolved once in `cmd_watchdog`
@@ -5808,7 +5808,7 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              dry_run=dry_run, handled=compact_handled_this_sweep,
              budget_left=remaining_budget_s),
          "watch-trigger error", min_budget=watch_triggers.MIN_BUDGET_S)
-    _add("checkout_freshness", lambda: checkout_freshness_enabled,   # Job 53 (#1176); leaf = SSOT
+    _add("checkout_freshness", lambda: checkout_freshness_enabled and not box_paused,   # Job 53 (#1176)
          lambda: checkout_freshness.run_job(now, dry_run=dry_run, budget_left=remaining_budget_s),
          "checkout-freshness error", min_budget=checkout_freshness.MIN_BUDGET_S)
 

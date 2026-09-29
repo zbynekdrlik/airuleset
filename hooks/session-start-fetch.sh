@@ -21,11 +21,14 @@ set -euo pipefail
 # as it boots — before the first turn ends. Reads the SessionStart payload from
 # stdin (nothing else in this hook consumes stdin). Placed BEFORE the git checks
 # so it fires regardless of whether the cwd is a git repo. Best-effort +
-# non-blocking; no consumer yet (G1).
+# non-blocking. A `resume` start (#1176 added that matcher) writes NO
+# heartbeat, exactly as before: the heartbeat semantics stay startup-only.
 _HB_INPUT=$(cat 2>/dev/null || echo "")
 _HB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd || true)"
-printf '%s' "$_HB_INPUT" | PYTHONPATH="$_HB_DIR" \
-    python3 -m watchdog.session_status --event session_start >/dev/null 2>&1 || true
+if ! [[ $_HB_INPUT =~ \"source\"[[:space:]]*:[[:space:]]*\"resume\" ]]; then
+    printf '%s' "$_HB_INPUT" | PYTHONPATH="$_HB_DIR" \
+        python3 -m watchdog.session_status --event session_start >/dev/null 2>&1 || true
+fi
 
 # issue 1127 — on EVERY exit path below, deliver the project's stream
 # directives from the BASE ref via session-start-stream-directives.sh. An EXIT
@@ -58,9 +61,12 @@ if ! git remote get-url origin &>/dev/null; then
     exit 0
 fi
 
-# Fetch latest from origin (suppress output to avoid noise)
+# Fetch latest from origin (suppress output to avoid noise). Bounded (#1176):
+# it now runs on every `claude -c` too, and must leave time inside Claude
+# Code's 30 s hook budget for the fast-forward and the EXIT-trap directives
+# step; `-k` stops a fetch that ignores the TERM.
 _ORIGIN_FETCHED=origin
-git fetch origin --quiet 2>/dev/null || true
+GIT_TERMINAL_PROMPT=0 timeout -k 3 15 git fetch origin --quiet 2>/dev/null || true
 
 # The ONE shared safety predicate + the fast-forward step (#1176): an
 # in-progress operation, a detached HEAD, a dirty or unmeasurable tree, a
