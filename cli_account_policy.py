@@ -65,14 +65,32 @@ def _validate_sudo_commands(account, reason, cmds):
     return errs
 
 
-def validate_sudo(spec, account):
-    """Every problem with the declaration's sudo policy ([] = valid)."""
+def _foreign_script_paths(account, cmds, declared):
+    """#1186: a ``/usr/local/sbin/<acct>-<name>`` script belongs to the LONGEST
+    declared account name it matches — ``camera`` never grants
+    ``camera-box``'s ``/usr/local/sbin/camera-box-*`` script."""
+    errs = []
+    for path in cmds if isinstance(cmds, (list, tuple)) else ():
+        owners = [a for a in declared if isinstance(path, str) and path.startswith(
+            "%s/%s-" % (hardening.SUDO_SCRIPT_DIR, a))]
+        owner = max(owners, key=len, default=account)
+        if owner != account:
+            errs.append("sudo_commands entry %r belongs to the declared account "
+                        "%r, not %r" % (path, owner, account))
+    return errs
+
+
+def validate_sudo(spec, account, declared=()):
+    """Every problem with the declaration's sudo policy ([] = valid).
+    ``declared`` are all declared account names (a script path belongs to the
+    longest one it matches)."""
     errs = []
     sudo = spec.get("sudo")
     reason = spec.get("sudo_reason")
     cmds = spec.get("sudo_commands")
     if isinstance(sudo, str) and sudo == "commands":
-        return _validate_sudo_commands(account, reason, cmds)
+        return (_validate_sudo_commands(account, reason, cmds)
+                + _foreign_script_paths(account, cmds, declared))
     if not isinstance(sudo, bool):
         return ['sudo must be True, False or "commands", got %r' % (sudo,)]
     if not sudo:

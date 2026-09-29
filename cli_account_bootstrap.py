@@ -151,13 +151,15 @@ SERVICE_ACCOUNTS = {
     # #1186: the first project with LAN hardware (the stream rig). Its reach is
     # the rig inventory read from the camera-box repo itself (obs-fleet.sh,
     # dantesync-fleet.sh, the netcfg facet) — every host ONE private /32 with
-    # its reason; ssh (22) is what the reject enforces, OBS WebSocket (4455) and
-    # dantesync (8898) are declared with it. resolume is NOT declared: its only
-    # address is a drifting DHCP lease (resolume.lan, today 10.77.9.201, which
-    # obs-fleet.sh records colliding with `bridge`) — an allowlist entry needs a
-    # stable address (a DHCP reservation) first. Its sudo is exactly two root-owned
-    # dev1 installer scripts the live migration installs (main ROZHODNUTÉ
-    # 2026-09-29: a narrow rule, never an admin account); webterm is the owner.
+    # its reason; ssh (22) is what the reject enforces, OBS WebSocket (4455),
+    # dantesync (8898) and the bundle-state JSON (8899) are declared with it.
+    # resolume is NOT declared: its only address is a drifting DHCP lease
+    # (resolume.lan, today 10.77.9.201, which obs-fleet.sh records colliding
+    # with `bridge`) — an allowlist entry needs a stable address (a DHCP
+    # reservation) first. Its sudo is exactly two root-owned dev1 installer
+    # scripts the live migration installs (main's design, #1186
+    # issuecomment-5894645187: a narrow rule, never an admin account); webterm
+    # is the owner.
     "camera-box": {
         "host": "dev1",
         "sudo": "commands",
@@ -171,9 +173,9 @@ SERVICE_ACCOUNTS = {
         "reach": [
             *({"cidr": "10.77.9.%d/32" % (60 + n), "ports": [22, 8898],
                "reason": "cam%d (camera box)" % n} for n in range(1, 8)),
-            {"cidr": "10.77.9.202/32", "ports": [22, 4455, 8898],
+            {"cidr": "10.77.9.202/32", "ports": [22, 4455, 8898, 8899],
              "reason": "strih-lx, production strih + fleet NTP master (obs-fleet.sh)"},
-            {"cidr": "10.77.9.204/32", "ports": [22, 4455, 8898],
+            {"cidr": "10.77.9.204/32", "ports": [22, 4455, 8898, 8899],
              "reason": "stream OBS box, Windows (obs-fleet.sh)"},
             {"cidr": "10.77.7.232/32", "ports": [22, 8898],
              "reason": "mbc, Master Broadcast Console, audio VLAN (dantesync-fleet.sh)"},
@@ -287,7 +289,7 @@ def validate_account(account, raw):
     if spec["host"] not in boxes:
         errs.append("host %r is not a fleet box (known: %s)"
                     % (spec["host"], ", ".join(sorted(boxes))))
-    errs += policy.validate_sudo(spec, account)
+    errs += policy.validate_sudo(spec, account, declared=SERVICE_ACCOUNTS)
     enforced = spec.get("reach_enforced")
     if not isinstance(enforced, bool):
         errs.append("reach_enforced must be True or False")

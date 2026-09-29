@@ -38,9 +38,13 @@ non-ssh traffic from the uid (https for the repo and the Claude API) and any
 password-authenticated NON-22 service on loopback or the tailnet. #1186 adds
 two: a declared LAN host's non-22 ports are declared, not restricted (the
 reject is tcp/22 only); and a declared LAN host the account can log into is a
-possible HOP — from there, ssh to a password-shared box's LAN address is
-outside this uid's rule, so an account's LAN credentials must never also open
-the shared legacy account (checked at migration, not here).
+possible HOP (``ssh -J``/``-L`` through it) — the next connection leaves from
+THAT host, outside this uid's rule, so it can reach any password-shared box's
+LAN address, the bootstrap host's own ``newlevel`` included (NOPASSWD sudo).
+Neither the own-address check nor the ``fib`` rule sees it. So an account with
+a LAN login is a GO-LIVE GATE of its migration, never of this render: the
+host's shared ``newlevel`` must refuse password ssh from the LAN, or its
+password must be proven different from every credential the account holds.
 
 Pure string renderers (stdlib only). ``cli_account_bootstrap`` validates every
 interpolated value before calling them.
