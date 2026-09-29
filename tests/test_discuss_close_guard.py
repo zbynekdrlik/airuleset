@@ -348,7 +348,7 @@ class TestHookIntegrationCompound(TestCase):
     HOOK = ROOT / "hooks" / "block-fork-no-merge-issue-close.sh"
 
     # Returns a bound-no-disposition ticket for $FAKE_BOUND_NUM, else an
-    # ordinary (unbound) ticket. Only `gh issue view` is exercised.
+    # ordinary (unbound) ticket; `gh issue view` + the #1185 label-history read.
     _FAKE_GH = (
         "#!/usr/bin/env bash\n"
         'if [ "$1 $2" = "issue view" ]; then\n'
@@ -363,6 +363,10 @@ class TestHookIntegrationCompound(TestCase):
         "  fi\n"
         "  exit 0\n"
         "fi\n"
+        # #1185: the gate also reads an unbound ticket's needs-acceptance label
+        # history (`gh api repos/<r>/issues/<n>/events --jq … | length`); these
+        # tickets never carried the label → 0.
+        'case "$*" in *issues/*/events*) echo 0; exit 0 ;; esac\n'
         "exit 0\n"
     )
 
