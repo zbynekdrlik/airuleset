@@ -460,11 +460,16 @@ class PrefetchMaxPagesCap(unittest.TestCase):
 
     def test_cap_bounds_pages_when_has_next_never_false(self):
         # 100 members, page_size 10, limit 25 → ceil(25/10)=3 pages, then stop.
+        # The cap is ceil(limit / OPS_WAIT_PREFETCH_PAGE_SIZE); pin the module
+        # page size to the fake's 10 so this test checks the cap formula, not
+        # the tuning value (#1188 raised the production page size by cost).
+        import cli_quals
         nums = list(range(101, 201))
         c = {n: [{"author": {"login": "me"}, "createdAt": _FRESH, "body": "x"}]
              for n in nums}
         rec = _GhRecorder(c, page_size=10, force_has_next=True)
-        out = _run_prefetch(rec, ["label:stream:x"], limit=25)
+        with mock.patch.object(cli_quals, "OPS_WAIT_PREFETCH_PAGE_SIZE", 10):
+            out = _run_prefetch(rec, ["label:stream:x"], limit=25)
         self.assertEqual(3, rec.graphql_calls)   # capped at ceil(25/10)
         # only the first 30 members (3 pages of 10) are in the map…
         self.assertIn(101, out)
