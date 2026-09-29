@@ -158,6 +158,8 @@ class TestBindSet(_Harness):
         self.assertTrue(self.url_lines(out)[0].startswith("https://%s/" % HOST))
         self.assertIn("last resort", err)
         self.assertIn("DEGRADED", err)
+        self.assertIn("POSLEDNÁ MOŽNOSŤ", self.url_lines(out)[0])   # honestly labelled
+        self.assertNotIn("private URLs only", err)                  # none exist here
 
     def test_dead_tunnel_origin_is_dead_even_when_the_edge_answers(self):
         out, err = self.run_cmd(302, bind_ip="100.99.0.9", dead_ips=("100.99.0.9",))
