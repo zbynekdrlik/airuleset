@@ -93,11 +93,12 @@ class _Tree:
         # U2 is the NEWEST session (the one `--resume` should name first)
         os.utime(self.src / (U2 + ".jsonl"), (OLD_MTIME + 60, OLD_MTIME + 60))
 
-    def proc_entry(self, pid, comm, cwd, argv0=None, exe=None):
+    def proc_entry(self, pid, comm, cwd, argv=None, exe=None):
         d = self.proc / str(pid)
         d.mkdir()
         (d / "comm").write_text(comm + "\n")
-        (d / "cmdline").write_bytes((argv0 or comm).encode() + b"\0--x\0")
+        (d / "cmdline").write_bytes(
+            b"".join(a.encode() + b"\0" for a in (argv or [comm, "--x"])))
         os.symlink(cwd, d / "cwd")
         if exe:
             os.symlink(exe, d / "exe")
@@ -154,7 +155,7 @@ class TestLiveGuard(unittest.TestCase):
         wt = Path(self.t.old_dir) / ".claude" / "worktrees" / "agent-zz"
         wt.mkdir(parents=True)
         self.t.proc_entry(4243, "node", str(wt),
-                          argv0="/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js")
+                          argv=["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"])
         plan = self.t.plan()
         self.assertTrue(any("4243" in r for r in plan["refusals"]), plan["refusals"])
 
@@ -221,12 +222,13 @@ class TestPlanAndDryRun(unittest.TestCase):
         return rc, out.getvalue(), err.getvalue()
 
     def test_dry_run_prints_the_listing_and_the_resume_line_and_writes_nothing(self):
-        rc, out, _ = self._dry_run()
-        self.assertEqual(rc, 0)
+        rc, out, err = self._dry_run()
+        # stdout only ever carries a rendered script: the listing is on stderr
+        self.assertEqual((rc, out), (0, ""))
         for needle in (U1 + ".jsonl", U1 + "/", U2 + ".jsonl", "memory/MEMORY.md",
                        str(self.t.dst), "--claude-worktrees-agent-zz",
                        "claude --resume " + U2, "DRY RUN", self.t.new_cwd):
-            self.assertIn(needle, out)
+            self.assertIn(needle, err)
         self.assertFalse(self.t.dst.exists())
 
     def test_dry_run_with_a_refusal_exits_1(self):
@@ -332,6 +334,53 @@ class TestRenderedScript(unittest.TestCase):
         self.assertIn("claude --resume " + U2, r.stdout)
         self.assertIn(self.t.new_cwd, r.stdout)
 
+    def test_runs_from_a_cwd_the_account_cannot_enter(self):
+        # `sudo bash` keeps the operator's cwd (under the 0700 old home);
+        # find must not need to return there
+        locked = self.t.base / "locked-cwd"
+        locked.mkdir()
+        env = dict(os.environ, PATH="%s:%s" % (self.bin, os.environ["PATH"]))
+        try:
+            r = subprocess.run(
+                ["bash", "-c", 'cd "$1" && chmod 000 "$1" && exec bash -s', "_",
+                 str(locked)], input=sess.render_script(self.t.plan()), env=env,
+                capture_output=True, text=True, timeout=60)
+        finally:
+            os.chmod(locked, 0o755)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue((self.t.dst / (U1 + ".jsonl")).is_file())
+
+    def test_a_failure_outside_mv_still_names_what_was_placed(self):
+        script = sess.render_script(self.t.plan())
+        self.t.dst.mkdir(parents=True)
+        (self.t.dst / "memory").write_text("a FILE where memory/ must go\n")
+        r = self._run(script)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("Placed before the failure: none", r.stderr)
+
+    def test_source_owner_is_fixed_at_render_time(self):
+        plan = self.t.plan()
+        self.assertEqual(plan["src_owner"],
+                         pwd.getpwuid(os.stat(self.t.src).st_uid).pw_name)
+        real = os.lstat
+
+        def as_root(p, *a, **k):            # the key dir reads as root-owned
+            st = real(p, *a, **k)
+            if str(p) == str(self.t.src):
+                return os.stat_result((st.st_mode, st.st_ino, st.st_dev,
+                                       st.st_nlink, 0, 0) + tuple(st)[6:])
+            return st
+        with mock.patch("os.lstat", side_effect=as_root):
+            refused = self.t.plan()
+        self.assertTrue(any("owned by root" in r for r in refused["refusals"]))
+
+    def test_new_target_dirs_are_0700(self):
+        r = self._run(sess.render_script(self.t.plan()))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        for p in (self.t.new_home / ".claude", self.t.dst.parent, self.t.dst,
+                  self.t.dst / "memory"):
+            self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o700, p)
+
     def test_script_rechecks_a_live_claude_at_run_time(self):
         script = sess.render_script(self.t.plan())      # rendered while clean
         self.t.proc_entry(4242, "claude", self.t.old_dir)
@@ -347,16 +396,18 @@ class TestRenderedScript(unittest.TestCase):
             ("native claude", dict(comm="claude", cwd=old), True),
             ("npm claude in a worktree",
              dict(comm="node", cwd=wt,
-                  argv0="/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"),
+                  argv=["node", "/usr/lib/node_modules/@anthropic-ai/claude-code/cli.js"]),
              True),
-            ("versioned binary", dict(comm="2.1.284", cwd=old, argv0="2.1.284",
+            ("npm bin shim", dict(comm="node", cwd=old, argv=["node", "/usr/bin/claude"]),
+             True),
+            ("versioned binary", dict(comm="2.1.284", cwd=old, argv=["2.1.284"],
                                       exe="/home/x/.local/share/claude/versions/2.1.284"),
              True),
             ("deleted cwd", dict(comm="claude", cwd=old + " (deleted)"), True),
             ("sibling prefix", dict(comm="claude", cwd=old + "-other"), False),
             ("a shell", dict(comm="bash", cwd=old), False),
             ("claude-code-log tool", dict(comm="python3", cwd=old,
-                                          argv0="/home/x/claude-code-log/run.py"),
+                                          argv=["/home/x/claude-code-log/run.py"]),
              False),
         ]
 
@@ -366,14 +417,16 @@ class TestRenderedScript(unittest.TestCase):
                 script = sess.render_script(self.t.plan())      # rendered clean
                 pid = 5000 + n
                 self.t.proc_entry(pid, **kw)
-                py = any(str(pid) in r for r in self.t.plan()["refusals"])
-                r = self._run(script)
-                self.assertEqual(py, refuse, "python guard")
-                self.assertEqual(r.returncode == 1 and str(pid) in r.stderr, refuse,
-                                 r.stderr)
-                shutil.rmtree(self.t.proc / str(pid))
-                if self.t.dst.exists():
-                    shutil.rmtree(self.t.dst)
+                try:
+                    py = any(str(pid) in r for r in self.t.plan()["refusals"])
+                    r = self._run(script)
+                    self.assertEqual(py, refuse, "python guard")
+                    self.assertEqual(r.returncode == 1 and str(pid) in r.stderr,
+                                     refuse, r.stderr)
+                finally:
+                    shutil.rmtree(self.t.proc / str(pid))
+                    if self.t.dst.exists():
+                        shutil.rmtree(self.t.dst)
 
     def test_symlinked_old_checkout_guards_its_real_path(self):
         link = str(self.t.base / "link-fohmixer")
