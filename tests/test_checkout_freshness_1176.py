@@ -616,21 +616,37 @@ class TestReviewOneProcessSafety(_Repos):
         self.assertTrue(any("hold:budget — 1 of 2" in ln for ln in logs), logs)
 
     def test_timed_out_fetch_gets_the_longer_retry(self):
-        job = _job()
-        with _cf().deadline(job.PER_CHECKOUT_S - 5):
+        # review 2 (M10): the effective bound of the fetch call itself — its
+        # timeout AND the deadline it runs under — not only the recorded value
+        job, cf = _job(), _cf()
+        seen, real = [], cf.run_git
+
+        def spy(cwd, args, timeout=10, env_extra=None, honor_deadline=True):
+            if "fetch" in args:
+                seen.append((timeout, cf.time_left()))
+            return real(cwd, args, timeout, env_extra, honor_deadline)
+
+        with mock.patch.object(cf, "run_git", spy):
             e = job.check_checkout({"path": self.clone, "bases": ["develop"],
                                     "source": "t"}, T0, prev={"fetch_rc": 124})
         self.assertEqual(e["fetch_timeout"], job.FETCH_TIMEOUT_LONG_S)
-        self.assertEqual(e["fetch_rc"], 0)
+        (timeout, left), = seen
+        self.assertEqual(timeout, job.FETCH_TIMEOUT_LONG_S)
+        self.assertGreaterEqual(left, job.FETCH_TIMEOUT_LONG_S - 2,
+                                "the per-checkout deadline must not clip the long retry")
 
     def test_budget_constants_value_lock(self):
         job, cf = _job(), _cf()
         self.assertGreaterEqual(job.PER_CHECKOUT_S,
                                 job.FETCH_TIMEOUT_S + cf.TERM_GRACE_S + 5)
-        self.assertGreaterEqual(job.MERGE_RESERVE_S,
-                                job.MERGE_TIMEOUT_S + cf.TERM_GRACE_S + 5)
+        self.assertGreaterEqual(job.LONG_RETRY_RESERVE_S,
+                                job.FETCH_TIMEOUT_LONG_S + 2 * cf.TERM_GRACE_S + 5)
         self.assertGreaterEqual(job.MIN_BUDGET_S, job.PER_CHECKOUT_S)
+        # review 2: the merge is unbounded once started, so its reserve must
+        # leave the unit's 120 s kill >= 80 s away (reserve counts to the 100 s soft cap)
+        self.assertGreaterEqual(job.MERGE_RESERVE_S, 60)
         self.assertLess(job.MERGE_RESERVE_S, 100)
+        self.assertFalse(hasattr(job, "MERGE_TIMEOUT_S"), "a started merge is never bounded")
 
 
 class TestReviewOneSurfaces(unittest.TestCase):
@@ -692,6 +708,140 @@ class TestReviewOneSurfaces(unittest.TestCase):
         self.assertEqual([c["source"] for c in got], ["registry:claudy"])
         self.assertEqual(len(skipped), 1)
         self.assertIn("registry:other", skipped[0])
+
+
+class TestReviewTwo(_Repos):
+    """Review 2: a started merge is never signalled, fork streams compare
+    against the project, nested deadlines only shorten, the session's
+    FETCH_HEAD is never clobbered, the hook and the job share the remote
+    rule, and the round-1 fixes get job-level locks."""
+
+    def _fork_layout(self):
+        """self.bare = the PROJECT (upstream); the clone's origin = a stale
+        fork of it; upstream fetched once (the box can read it)."""
+        fork = os.path.join(self.root, "fork.git")
+        self.g(self.root, "clone", "-q", "--bare", self.bare, fork)
+        self.g(self.clone, "remote", "rename", "origin", "upstream")
+        self.g(self.clone, "remote", "add", "origin", fork)
+        self.g(self.clone, "fetch", "-q", "origin")
+        self.g(self.clone, "branch", "-q", "--set-upstream-to=origin/develop")
+        return fork
+
+    def test_started_merge_is_never_signalled(self):
+        cf, calls, real = _cf(), [], _cf().run_git
+
+        def spy(cwd, args, timeout=10, env_extra=None, honor_deadline=True):
+            if "merge" in args:
+                calls.append((timeout, honor_deadline))
+            return real(cwd, args, timeout, env_extra, honor_deadline)
+
+        self.advance_origin()
+        with mock.patch.object(cf, "run_git", spy):
+            self.run_job(T0)
+        self.assertEqual(calls, [(None, False)])
+        self.assertEqual(self.head(), self.origin_head())
+
+    def test_fork_stream_work_branch_compares_against_the_project(self):
+        self._fork_layout()
+        self.g(self.clone, "checkout", "-q", "-b", "feature/x")
+        self.advance_origin(rel=".claude/streams/me.md", text="directive\n")
+        self.g(self.clone, "fetch", "-q", "upstream")   # the job's evidence rule
+        self.run_job(T0, checkouts=[{"path": self.clone, "source": "t",
+                                     "bases": list(_job().DEFAULT_BASES)}])
+        e = self.entry()
+        self.assertEqual((e["state"], e["remote"]), ("lagging", "upstream"), e)
+        self.assertIn("1 rule file(s) behind upstream/develop", e["reason"])
+
+    def test_hook_and_job_share_the_remote_rule(self):
+        self._fork_layout()
+        self.advance_origin()                             # the PROJECT moves
+        self.g(self.clone, "fetch", "-q", "upstream")
+        subprocess.run(["bash", str(FETCH_HOOK)], cwd=self.clone, env=self.env,
+                       input="{}", capture_output=True, text=True, timeout=60)
+        self.assertEqual(self.head(), self.origin_head(),
+                         "the hook fast-forwards to the project, like the job")
+
+    def test_nested_deadline_only_shortens(self):
+        cf = _cf()
+        with cf.deadline(10):
+            with cf.deadline(100):
+                self.assertLessEqual(cf.time_left(), 10)
+            with cf.deadline(1):
+                self.assertLessEqual(cf.time_left(), 1)
+
+    def test_session_fetch_head_is_never_clobbered(self):
+        self.g(self.clone, "fetch", "-q", "origin")
+        gd = self.g(self.clone, "rev-parse", "--absolute-git-dir").stdout.strip()
+        fh = Path(gd, "FETCH_HEAD")
+        before = fh.read_text()
+        self.advance_origin()
+        self.write(self.clone, "notes.txt", "dirty, so no merge\n")
+        self.run_job(T0)
+        self.assertEqual(fh.read_text(), before)
+        self.assertEqual(self.entry()["behind"], 1, "the fetch itself still happened")
+
+    def test_since_is_kept_across_lagging_sweeps(self):
+        self.advance_origin()
+        self.write(self.clone, "notes.txt", "dirty\n")
+        self.run_job(T0)
+        self.run_job(T0 + _job().INTERVAL_S)
+        self.assertEqual(self.entry()["since"], T0)
+
+    def test_status_entries_of_gone_checkouts_are_pruned(self):
+        self.run_job(T0, checkouts=[{"path": self.clone, "bases": ["develop"], "source": "a"},
+                                    {"path": self.other, "bases": ["develop"], "source": "b"}])
+        self.run_job(T0 + 60)
+        self.assertEqual(set(_cf().read_status(self.home)["checkouts"]), {self.clone})
+
+    def test_unreadable_git_dir_fails_closed(self):
+        self.advance_origin()
+        before = self.head()
+        with mock.patch.object(_cf(), "_git_dir", return_value=None):
+            self.run_job(T0)
+        self.assertEqual(self.head(), before)
+        self.assertEqual(self.entry()["reason"], "git-dir-unmeasurable")
+
+    def test_nested_claude_md_counts_as_a_rule_file(self):
+        self.g(self.clone, "checkout", "-q", "-b", "feature/n")
+        self.advance_origin(rel="sub/CLAUDE.md", text="nested rules\n")
+        self.run_job(T0)
+        self.assertIn("1 rule file(s) behind", self.entry()["reason"])
+
+    def test_directory_inside_a_parent_repo_is_not_a_checkout(self):
+        sub = os.path.join(self.clone, "subdir")
+        os.makedirs(sub)
+        self.run_job(T0, checkouts=[{"path": sub, "bases": ["develop"], "source": "t"}])
+        e = _cf().read_status(self.home)["checkouts"][sub]
+        self.assertEqual((e["state"], e["reason"]), ("absent", "not a git checkout root"))
+
+    def test_held_sweep_refreshes_the_alive_stamp(self):
+        self.run_job(T0)
+        self.run_job(T0 + _job().INTERVAL_S, budget_left=lambda: 1)
+        self.assertEqual(_cf().read_status(self.home)["ts"], T0 + _job().INTERVAL_S)
+
+    def test_hook_names_a_held_index_lock(self):
+        self.advance_origin()
+        self.g(self.clone, "fetch", "-q", "origin")
+        gd = self.g(self.clone, "rev-parse", "--absolute-git-dir").stdout.strip()
+        Path(gd, "index.lock").write_text("")
+        self.addCleanup(lambda: Path(gd, "index.lock").unlink(missing_ok=True))
+        r = subprocess.run(["bash", str(FETCH_HOOK)], cwd=self.clone, env=self.env,
+                           input="{}", capture_output=True, text=True, timeout=60)
+        self.assertIn("holds the index lock", r.stdout)
+
+    def test_hook_fetch_leaves_the_directives_step_room(self):
+        # review 2 finding 4: fetch + ff + the directives step must fit in
+        # Claude Code's 30 s hook budget on resume
+        self.assertIn("timeout -k 2 8 git fetch origin", FETCH_HOOK.read_text())
+
+    def test_paused_box_never_runs_the_job(self):
+        from test_run_once_characterization import _drive
+        import watchdog as wd
+        calls = []
+        with mock.patch.object(wd.checkout_freshness, "run_job",
+                               side_effect=lambda *a, **k: calls.append(1) or []):
+            _drive({"checkout_freshness_enabled": True, "box_paused": True})
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":
