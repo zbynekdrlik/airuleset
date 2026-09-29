@@ -192,3 +192,19 @@ until the ratchet cap, then the oldest move to `.claude/rules-reference/internal
   - For a fail-closed gate, an ambiguous follower (`issue 4, 7`) is over-checked, never dropped: dropping it fails OPEN.
   - Round 2: ONE parser for every consumer. `ticketrefs` drops each `PR #N` / `PRs #A, #B` / `pull request #N` run BEFORE the lead line is picked (a `PR #201` lead used to be skipped as a PR, so the ticket went unchecked). `hooks/block-dispatch-over-wdrain.sh` reads the receipt tickets via `python3 -P -c … ticketrefs.issue_numbers` (fail-open + `parse-error.log`, the hook's doctrine), `cli_lane_liveness` via `branch_ticket_number` / `text_ticket_numbers`. A consumer that must still ALLOW a PR-only dispatch (#1070 item 2) falls back to `pr_numbers` and verifies each is a PR — dropping PR refs from the parser alone turned that allow into a "names no ticket" false block (caught by `test_gate_calibration_1070`). A SINGULAR `PR #50` owns ONE number (a run-owning PR regex swallowed `#43` in `issues #41, PR #50, #43` = design-gate fail-open); the `Work issue N` line leads over an earlier `follow-up of #1100` line; `(?<!/)issues?` so a scratch path is no run. Diff old vs new over a prompt battery before trusting a parser change.
   - Before changing a function a verbatim-move pin (`_MOVED_FUNCS`, #1107) covers, release it in its OWN test commit; `tests/size_ratchet.json` is never raised by a lane, so keep that edit line-neutral.
+
+- **#1177 — a bundle detector scoped to the DELIVERED block misses what the model moves OUT of it;
+  count client drafts in `gates/draftbundle.py`, the hook is a thin adapter.**
+  - The 29.9 montalu4 stream put two client drafts ABOVE the `**Otázka —` head (the phone view is
+    capped), so the #1006 counters on `$BLOCK` saw only the decision, and `ZbynekAI 4` missed the
+    bare-signature regex. With approval intent in the block, the module reads the whole `$MSG`
+    (stdin; block via `AIRULESET_QQ_BLOCK`), fail-open on any error.
+  - The first cut (an inline awk in the hook) was refuted on 32 shapes by one fresh review. Four
+    traps: a verb list is too narrow (`odpovedať`, `dať klientovi`, `súhlasíš`, `OK`) AND too broad
+    (`po[sš]l` hits `poslednú`, `schv` hits past-tense `schválil`) — widen by CLIENT/DRAFT nouns and
+    anchor verb suffixes; a line ENDING in the signature is prose (option bullet, `✅ Výstup:` line)
+    — count signature-ONLY lines; a client quote or an already-sent message is context — skip runs
+    headed by an incoming (`napísal`) or sent (`odoslaná včera`, `odišli`) cue; count unsigned drafts
+    only from target HEADERS and merge groups sharing a thread/task/name key with a signed draft.
+  - The review's probe messages became `tests/fixtures/draftbundle_1177/*.txt` (fb* pass, st* block)
+    driven through the real hook: a review's reproductions are the cheapest regression corpus.
