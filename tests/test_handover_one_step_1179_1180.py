@@ -346,7 +346,10 @@ class TestReaction403(unittest.TestCase):
         fake = Fake([_task(1, 2879), _task(2, 2880, moved_min_ago=6 * 1440)],
                     [_m(10, 1, CLIENT, 60), _m(20, 2, STREAM, 5 * 1440, HANDOVER_BODY)],
                     deny_reactions=True)
-        r = th.compute_hygiene(fake.call, CFG, now=NOW)
+        # classic C (a non-montalu host): the montalu #1167 auto-close wait
+        # replaces the 3-day C reminder, so it would never flag task 2 here
+        cfg = dict(CFG, instance_url="https://erp.example.test")
+        r = th.compute_hygiene(fake.call, cfg, now=NOW)
         self.assertEqual([x["task_id"] for x in r["A"]], [1])
         self.assertEqual([x["task_id"] for x in r["C"]], [2])
         self.assertTrue(r["reactions_unavailable"])
