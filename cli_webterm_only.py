@@ -89,6 +89,12 @@ WEBTERM_CONTROLLER_LANE_PUBKEYS = {
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDlZU9FysGrJT5FF9LwP69gEoLc+"
         "Mtt+EwyBl0iv9+Lp webterm-dominika-controller"
     ),
+    # #1183 go-live 2026-09-29: minted on the controller
+    # (~/.secrets/webterm_timo_ed25519); his only tab is fohmixer@dev1.
+    "timo": (
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGkDFpFljP1a7eMt9mZa/iWXxKNq"
+        "3b8ZBAeR8DlYjoEz webterm-timo-controller"
+    ),
 }
 
 # #870 incident 2 fix: which webterm-only user accounts each human's

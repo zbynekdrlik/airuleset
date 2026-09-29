@@ -588,6 +588,19 @@ REMOTE_HOSTS.append({
     "pending": False,
 })
 
+# #1183/#1184 (2026-09-29): the first PROJECT account — fohmixer@dev1, declared in
+# cli_account_bootstrap.SERVICE_ACCOUNTS (no sudo, no reach, no secrets). Push
+# manages its airuleset through the push key the bootstrap installed.
+REMOTE_HOSTS.append({
+    "name": "fohmixer@dev1",
+    "host": "100.104.8.125",
+    "user": "fohmixer",
+    "repo_path": "~/devel/airuleset",
+    "identity": "~/.secrets/airuleset_push_ed25519",
+    "pending": False,
+    "drop": {"disabled": "project account (#1184): no file-drop lane declared"},
+})
+
 
 def is_paused(remote):
     """True if a REMOTE_HOSTS entry carries a `"paused": "<why + date>"`
@@ -1039,7 +1052,8 @@ AUTHORITY_BY_USER = {
 # `gatekeeper`, deliberately NOT in AUTHORITY_BY_USER (a stream-registry row
 # would misclassify the controller as a sub-dev stream downstream).
 FULL_AUTHORITY_USERS = frozenset(
-    {"newlevel", "gatekeeper", "admin", "stepan", "airuleset", "claudy"})
+    {"newlevel", "gatekeeper", "admin", "stepan", "airuleset", "claudy",
+     "fohmixer"})
 
 
 # Webterm OBSERVER accounts (airuleset#867). An account that exists ONLY to run a

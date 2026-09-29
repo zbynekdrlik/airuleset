@@ -95,7 +95,8 @@ class TestEveryFleetAccountHasALane(unittest.TestCase):
     def test_every_non_paused_account_has_a_lane(self):
         lanes = dg.build_drop_lanes(cli_fleet.REMOTE_HOSTS)
         for entry in cli_fleet.REMOTE_HOSTS:
-            if cli_fleet.is_paused(entry):
+            # #1183: a project account may declare `drop.disabled` (no lane yet)
+            if cli_fleet.is_paused(entry) or (entry.get("drop") or {}).get("disabled"):
                 continue
             key = (dg._nodename_for_entry(entry), entry["user"])
             self.assertIn(key, lanes,

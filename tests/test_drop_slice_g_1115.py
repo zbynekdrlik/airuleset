@@ -171,7 +171,8 @@ class TestExistingLanesByteIdentical(unittest.TestCase):
     def test_only_the_controller_local_key_is_added(self):
         fleet_keys = set()
         for e in cli_fleet.REMOTE_HOSTS:
-            if cli_fleet.is_paused(e):
+            # #1183: a `drop.disabled` project account gets no lane by design
+            if cli_fleet.is_paused(e) or (e.get("drop") or {}).get("disabled"):
                 continue
             fleet_keys.add((dl._nodename_for_entry(e), e.get("user", "")))
         expected = fleet_keys | set(dg._SEED_DROP_LANES) | {CONTROLLER_KEY}

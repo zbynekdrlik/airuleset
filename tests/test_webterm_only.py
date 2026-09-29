@@ -867,7 +867,7 @@ class TestOptionsAwareParser870(unittest.TestCase):
 class TestControllerLanePubkeys(unittest.TestCase):
     """#870 F4b: the WEBTERM_CONTROLLER_LANE_PUBKEYS table is filled."""
 
-    EXPECTED_HUMANS = {"zbynek", "david", "marek", "dominika"}
+    EXPECTED_HUMANS = {"zbynek", "david", "marek", "dominika", "timo"}
 
     def test_all_four_humans_present(self):
         self.assertEqual(
