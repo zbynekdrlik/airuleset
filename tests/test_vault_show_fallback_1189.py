@@ -31,7 +31,8 @@ PORT = 8870
 
 
 class _Harness(unittest.TestCase):
-    def run_cmd(self, probe_code, bind_ip=TS_IP, lane_access=True, request=False):
+    def run_cmd(self, probe_code, bind_ip=TS_IP, lane_access=True, request=False,
+                names=("X",), dead_ips=()):
         self.probed = []
         self.popen_argv = None
 
@@ -52,14 +53,17 @@ class _Harness(unittest.TestCase):
             st.register_request.return_value = "NONCEVALUE"
             st.log_path.return_value = Path(td) / "vault.log"
             self.st = st
-            opener = types.SimpleNamespace(
-                open=lambda u, timeout=2: types.SimpleNamespace(status=204))
+            def _open(u, timeout=2):
+                if any("//%s:" % ip in u for ip in dead_ips):
+                    raise OSError("refused")
+                return types.SimpleNamespace(status=204)
+            opener = types.SimpleNamespace(open=_open)
             with mock.patch.object(filedrop, "bind_ips", lambda: [TS_IP]), \
                  mock.patch.object(filedrop, "vault", st, create=True), \
                  mock.patch.object(cli_vault, "_secret_show_source",
                                    lambda args, s: ("env", "X", "X")), \
                  mock.patch.object(cli_vault, "_secret_request_names",
-                                   lambda args: ["X"]), \
+                                   lambda args: list(names)), \
                  mock.patch.object(cli_vault, "_secret_parse_persist_map",
                                    lambda args, names: {}), \
                  mock.patch.object(cli_vault, "_secret_bindable", lambda ip: True), \
@@ -146,11 +150,21 @@ class TestBindSet(_Harness):
         self.assertNotIn("127.0.0.1", out)               # loopback is never offered
 
     def test_local_access_lane_stays_loopback_only(self):
-        # a tailnet bind there would be a way in that skips Cloudflare Access
+        # a tailnet bind there would be a way in that skips Cloudflare Access;
+        # with no private URL the public one is the last resort, never zero URLs
         out, err = self.run_cmd(530, bind_ip="127.0.0.1", lane_access=True)
         self.assertEqual(self.popen_argv[3], "127.0.0.1")
-        self.assertEqual(self.url_lines(out), [])
-        self.assertIn("NONE available", err)
+        self.assertEqual(len(self.url_lines(out)), 1, out)
+        self.assertTrue(self.url_lines(out)[0].startswith("https://%s/" % HOST))
+        self.assertIn("last resort", err)
+        self.assertIn("DEGRADED", err)
+
+    def test_dead_tunnel_origin_is_dead_even_when_the_edge_answers(self):
+        out, err = self.run_cmd(302, bind_ip="100.99.0.9", dead_ips=("100.99.0.9",))
+        self.assertNotIn("https://%s" % HOST, out)
+        self.assertIn("http://%s:%d/" % (TS_IP, PORT), out)
+        self.assertIn("tunnel origin 100.99.0.9 down", err)
+        self.assertEqual(self.probed, [])                # no probe of a dead origin
 
     def test_lane_lookup_error_fails_closed(self):
         def boom():
@@ -166,6 +180,12 @@ class TestVaultRequest(_Harness):
         self.assertIn("http://%s:%d/" % (TS_IP, PORT), out)
         self.assertIn("secret: !!! DEGRADED", err)
         self.assertNotIn("secret show", err)
+
+    def test_request_several_names_logs_each(self):
+        self.run_cmd(530, request=True, names=("A", "B"))
+        calls = [c.args for c in self.st.log_event.call_args_list
+                 if c.args and c.args[0] == "public-lane-dead"]
+        self.assertEqual(calls, [("public-lane-dead", "A"), ("public-lane-dead", "B")])
 
     def test_request_live_lane_public_first(self):
         out, _ = self.run_cmd(204, request=True)
