@@ -101,6 +101,17 @@ class TestSnapshotCarriesTitles(unittest.TestCase):
         self.assertEqual(snap["i_titles"], {"1176": "Checkout freshness",
                                             "1177": "Money gate tunel"})
 
+    def test_emit_snapshot_json_marks_bounce_rows(self):
+        rows = {7: {"number": 7, "title": "x",
+                    "labels": [{"name": "prio:bounce"}, {"name": "stream:m"}]},
+                8: {"number": 8, "title": "y", "labels": [{"name": "bug"}]}}
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            cli_quals_snapshot.emit_snapshot_json(
+                rows, {}, "/r", [], None,
+                lambda *a, **k: None, lambda r, root: (2, None))
+        self.assertEqual(json.loads(buf.getvalue())["i_bounce"], [7])
+
     def test_parse_snapshot_keeps_valid_titles_drops_malformed(self):
         base = {"open_count": 1, "i_members": [7], "dispatchable_count": 1,
                 "dispatchable_reason": None, "ops_wait_members": []}
@@ -138,6 +149,13 @@ class TestWorkableRecords(_Home):
         out = owref.workable_records(CWD, "core-quals", now=NOW,
                                      spawn_fn=m.Mock(), alive_fn=lambda c: False)
         self.assertEqual(out, _recs((1176, "a"), (1177, "b")))
+
+    def test_bounce_rows_are_flagged(self):
+        self._write(self._good(i_bounce=[1177]))
+        out = owref.workable_records(CWD, "core-quals", now=NOW,
+                                     spawn_fn=m.Mock(), alive_fn=lambda c: False)
+        self.assertEqual(out, [{"id": 1176, "title": "a"},
+                               {"id": 1177, "title": "b", "bounce": True}])
 
     def test_missing_titles_still_yield_ids(self):
         self._write(self._good(i_titles=None))
@@ -203,6 +221,17 @@ class TestProductionFetchReadsTheSnapshot(unittest.TestCase):
         self.assertEqual(out, _recs((1176, "a")))
         self.assertEqual(seen["args"], ("/r", "slice-quals"))
 
+    def test_a_stream_drops_its_bounce_rows_a_full_box_keeps_them(self):
+        # review F3: on a stream a returned bounce is announced by job 8 /
+        # the #1066 bounce-verdict rider; a second generic nudge for the same
+        # event would double-interrupt (and eat the 3 h total cap).
+        recs = [{"id": 1, "title": "a", "bounce": True}, {"id": 2, "title": "b"}]
+        with m.patch.object(owref, "workable_records", lambda *a, **k: list(recs)):
+            with m.patch("airuleset._watchdog_quals_cmd", return_value="slice-quals"):
+                self.assertEqual([r["id"] for r in airuleset._watchdog_queue_fetch("/r")], [2])
+            with m.patch("airuleset._watchdog_quals_cmd", return_value="core-quals"):
+                self.assertEqual([r["id"] for r in airuleset._watchdog_queue_fetch("/r")], [1, 2])
+
     def test_unresolvable_authority_is_none(self):
         with m.patch("airuleset._watchdog_quals_cmd",
                      side_effect=RuntimeError("x")):
@@ -216,7 +245,8 @@ class TestProductionFetchReadsTheSnapshot(unittest.TestCase):
 class TestWatchdogPath(unittest.TestCase):
     def test_path_fix_puts_user_local_bin_first(self):
         with TemporaryDirectory() as home, m.patch.dict(
-                os.environ, {"HOME": home, "PATH": "/usr/local/bin:/usr/bin:/bin"}):
+                os.environ, {"HOME": home, "PATH": "/usr/local/bin:/usr/bin:/bin"}), \
+                m.patch("shutil.which", return_value=None):
             airuleset._watchdog_path_fix()
             parts = os.environ["PATH"].split(":")
         self.assertEqual(parts[0], os.path.join(home, ".local", "bin"))
@@ -225,9 +255,19 @@ class TestWatchdogPath(unittest.TestCase):
     def test_path_fix_is_idempotent(self):
         with TemporaryDirectory() as home:
             lb = os.path.join(home, ".local", "bin")
-            with m.patch.dict(os.environ, {"HOME": home, "PATH": lb + ":/bin"}):
+            with m.patch.dict(os.environ, {"HOME": home, "PATH": lb + ":/bin"}), \
+                    m.patch("shutil.which", return_value=None):
                 airuleset._watchdog_path_fix()
                 self.assertEqual(os.environ["PATH"], lb + ":/bin")
+
+    def test_a_resolvable_gh_leaves_path_alone(self):
+        # review F6: only a box whose PATH cannot find gh (the controller) is
+        # changed; every other box keeps today's gh resolution.
+        with TemporaryDirectory() as home, m.patch.dict(
+                os.environ, {"HOME": home, "PATH": "/usr/bin:/bin"}), \
+                m.patch("shutil.which", return_value="/usr/bin/gh"):
+            airuleset._watchdog_path_fix()
+            self.assertEqual(os.environ["PATH"], "/usr/bin:/bin")
 
     def test_cmd_watchdog_applies_it_before_run_once(self):
         import inspect
@@ -275,12 +315,52 @@ class TestUndeterminedIsVisible(unittest.TestCase):
         self._sweep(state, NOW + 30 * 60, fetch=lambda cwd: [1])
         self.assertNotIn(CWD, state.get("queue_arrival_health", {}))
 
+    def test_a_specific_reason_is_not_overwritten_by_the_generic_one(self):
+        from watchdog import queue_arrival_own as qao
+        state = {}
+        qao.note_fetch(state, CWD, False, NOW, "b:0", reason="gh not on PATH")
+        qao.note_fetch(state, CWD, False, NOW + 60, "b:0", reason=None)
+        self.assertEqual(state[qao.HEALTH_KEY][CWD]["reason"], "gh not on PATH")
+        other = {}
+        qao.note_fetch(other, CWD, False, NOW, "b:0", reason=None)
+        self.assertIn("fetch returned None", other[qao.HEALTH_KEY][CWD]["reason"])
+
     def test_a_short_blip_never_warns(self):
         state = {}
         lines = []
         for i in range(0, 3):
             lines += self._sweep(state, NOW + i * 60)
         self.assertFalse([ln for ln in lines if ln.startswith("WARN")])
+
+
+class TestClassifyMemo(unittest.TestCase):
+    """review F5: the #993 dep classify costs >= 1 gh call per arrival and runs
+    every sweep while a wave is HELD (floor / total cap / human-active). It is
+    memoised per number and capped per sweep; an unclassified number past the
+    cap reads `dep-wait` (held, retried next sweep — never a guessed dispatch)."""
+
+    def test_capped_per_sweep_and_memoised(self):
+        from watchdog import queue_arrival_own as qao
+        calls = []
+
+        def fn(n):
+            calls.append(n)
+            return "dispatchable"
+        state = {}
+        memo = qao.memo_classify(state, fn, NOW, cap=2)
+        got = [memo(n) for n in (1, 2, 3)]
+        self.assertEqual(got, ["dispatchable", "dispatchable", "dep-wait"])
+        self.assertEqual(calls, [1, 2])
+        memo = qao.memo_classify(state, fn, NOW + 60, cap=2)
+        self.assertEqual([memo(n) for n in (1, 2, 3)], ["dispatchable"] * 3)
+        self.assertEqual(calls, [1, 2, 3])          # 1, 2 served from the memo
+        memo = qao.memo_classify(state, fn, NOW + 2 * HOUR, cap=5)
+        memo(1)
+        self.assertEqual(calls, [1, 2, 3, 1])       # past the TTL: re-read
+
+    def test_none_builder_stays_none(self):
+        from watchdog import queue_arrival_own as qao
+        self.assertIsNone(qao.memo_classify({}, None, NOW))
 
 
 # --------------------------------------------------------------------------- #
@@ -320,6 +400,26 @@ class TestRiderOwnSet(unittest.TestCase):
         self.assertIn("/autopilot", typed)
         self.assertFalse(typed.lstrip().startswith("/"))   # never types /goal
 
+    def test_a_legacy_gk_union_base_reseeds_instead_of_a_false_wave(self):
+        # review F2: a base a pre-#1178 sweep wrote (it carries `lts`, no
+        # `src`) holds the gk hand-off union; the first own-set read must SEED,
+        # not announce the whole backlog as new.
+        qrecs = {self.sid: {"base": [5177], "first_seen": NOW - HOUR,
+                            "lts": 1_790_000_000}}
+        recs = _recs((5177, "a"), (4001, "b"), (4002, "c"))
+        logs, tmux = self._run(qrecs, lambda c: recs, "full")
+        self.assertEqual(tmux.typed_texts(), [])
+        self.assertTrue(any("seed" in ln for ln in logs), logs)
+        logs, tmux = self._run(qrecs, lambda c: recs + _recs((4003, "d")), "full")
+        typed = "".join(tmux.typed_texts())
+        self.assertIn("#4003", typed)
+        self.assertNotIn("#4001", typed)
+
+    def test_nudge_wording_covers_a_re_entry(self):
+        # review F4: a ticket coming BACK into I (an answered U, a red CI P) is
+        # work entering the backlog too — the wording says so honestly.
+        self.assertIn("nové alebo vrátené", qa._nudge_text([5], 3, {}))
+
     def test_nudge_text_is_capped(self):
         many = list(range(1, 80))
         titles = {n: "dlhý názov ticketu číslo %d " % n * 3 for n in many}
@@ -354,10 +454,13 @@ class TestEndedSupervisorPane(unittest.TestCase):
             encoding="utf-8")
 
     def _sweep(self, now, members, *, marker="done", mark="cleared",
-               human=False, cap=GOAL_IDLE_CAP):
+               human=False, cap=GOAL_IDLE_CAP, role=None):
         self._heartbeat(marker)
-        self.state.setdefault("goal_mark", {})[self.sid] = {
-            "off": 0, "mark": {"state": mark, "ts": NOW - 5 * HOUR}}
+        if mark is not None:
+            self.state.setdefault("goal_mark", {})[self.sid] = {
+                "off": 0, "mark": {"state": mark, "ts": NOW - 5 * HOUR}}
+        roles = ({"resolve_role_fn": lambda c: role,
+                  "infra_queue_fetch": lambda c: []} if role else {})
         tmux = DeliverGoalFakeTmux([("%9", "claude", CWD, "111")], cap,
                                    model_type=True, transcript_path=self.tpath)
         with m.patch("airuleset.resolve_authority", return_value="full"), \
@@ -368,8 +471,33 @@ class TestEndedSupervisorPane(unittest.TestCase):
                 now, run=tmux, projects_dir=Path(self._proj.name),
                 state=self.state, handled=set(), backlog_fetch=lambda cwd: 0,
                 queue_fetch=lambda cwd: _recs(*[(n, "t%d" % n) for n in members]),
-                sleep_fn=lambda *a, **k: None)
+                sleep_fn=lambda *a, **k: None, **roles)
         return logs, tmux.typed_texts()
+
+    def test_a_pane_that_never_had_a_goal_is_not_a_target(self):
+        # review F1: no goal_mark verdict → the heartbeat's goal_armed False
+        # only means "no marker in the tail" (an interactive session), never
+        # "a supervisor whose goal ended".
+        self._sweep(NOW, [10], mark=None)
+        logs, typed = self._sweep(NOW + 120, [10, 11], mark=None)
+        self.assertEqual(typed, [])
+        self.assertNotIn(self.sid, self.state.get("queue_arrival", {}))
+
+    def test_a_quality_window_is_not_a_target(self):
+        # review F1: only the FLOW (review) supervisor is told to run /autopilot
+        self._sweep(NOW, [10], role="quality")
+        logs, typed = self._sweep(NOW + 120, [10, 11], role="quality")
+        self.assertEqual(typed, [])
+        self.assertNotIn(self.sid, self.state.get("queue_arrival", {}))
+
+    def test_waiting_for_background_agents_holds(self):
+        self._sweep(NOW, [10])
+        logs, typed = self._sweep(
+            NOW + 60, [10, 11],
+            cap="Waiting for 2 background agents to finish\n❯ \n  ctx ███░\n")
+        self.assertEqual(typed, [])
+        self.assertTrue(any("queue-arrival" in ln and "hold:" in ln
+                            for ln in logs), logs)
 
     def test_after_goal_end_a_new_ticket_gets_exactly_one_nudge(self):
         logs, typed = self._sweep(NOW, [10])
