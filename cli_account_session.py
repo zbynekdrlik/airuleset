@@ -268,9 +268,13 @@ def _when(ts):
 
 
 def format_plan(plan):
-    """The dry-run listing."""
-    out = ["DRY RUN — nothing copied (#1190). `--render` prints the root "
-           "script, `--apply` runs it (as root).",
+    """The dry-run listing. A refused plan says so and prints no resume line
+    (the reasons go to stderr, ``cli_accounts.transfer_session``)."""
+    head = ("REFUSED — nothing will be copied (#1190); the reasons follow."
+            if plan["refusals"] else
+            "DRY RUN — nothing copied (#1190). `--render` prints the root "
+            "script, `--apply` runs it (as root).")
+    out = [head,
            "source: %s" % plan["src_dir"],
            "target: %s  (cwd %s, owner %s, files 0600 / dirs 0700, mtimes kept)"
            % (plan["dst_dir"], plan["target_cwd"], plan["account"]),
@@ -295,8 +299,9 @@ def format_plan(plan):
     if plan["unreadable_procs"]:
         out.append("%d processes not inspectable here — the root script re-runs "
                    "the live-claude guard" % plan["unreadable_procs"])
-    out.append("after the copy:")
-    out += ["  " + ln for ln in resume_hint(plan)]
+    if not plan["refusals"]:
+        out.append("after the copy:")
+        out += ["  " + ln for ln in resume_hint(plan)]
     return "\n".join(out)
 
 

@@ -216,9 +216,13 @@ class TestPlanAndDryRun(unittest.TestCase):
 
     def test_dry_run_with_a_refusal_exits_1(self):
         self.t.proc_entry(4242, "claude", self.t.old_dir)
-        rc, _, err = self._dry_run()
+        rc, out, err = self._dry_run()
         self.assertEqual(rc, 1)
         self.assertIn("4242", err)
+        # a refused plan never reads like a go: no DRY RUN banner, no resume line
+        self.assertIn("REFUSED", out)
+        self.assertNotIn("DRY RUN", out)
+        self.assertNotIn("claude --resume", out)
 
     def test_apply_needs_root(self):
         with mock.patch("os.geteuid", return_value=1000):
