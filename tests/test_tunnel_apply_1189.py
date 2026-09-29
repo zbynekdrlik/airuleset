@@ -30,13 +30,15 @@ class FakeSystemd:
     """Records every systemctl argv; simulates units + pidfile registration."""
 
     def __init__(self, cfg, active=True, overlap_registers=True,
-                 main_registers=True):
+                 main_registers=True, restart_rc=0, stale_pid_on_restart=False):
         self.cfg = Path(cfg)
         self.calls = []
         self.active = {SVC: active}
         self.main_pid = 111 if active else 0
         self.overlap_registers = overlap_registers
         self.main_registers = main_registers
+        self.restart_rc = restart_rc
+        self.stale_pid_on_restart = stale_pid_on_restart
         # snapshot: was the overlap REGISTERED at the moment main was restarted?
         self.overlap_registered_at_restart = None
 
@@ -53,11 +55,15 @@ class FakeSystemd:
             if self.overlap_registers:
                 ta.overlap_pidfile(self.cfg).write_text("555")
         if verb == "restart" and args[-1] == SVC:
+            if self.restart_rc:
+                return self.restart_rc, "", "Job refused"
             self.overlap_registered_at_restart = (
                 ta.overlap_pidfile(self.cfg).exists() and self.active.get(OVERLAP))
             self.main_pid = 222
             if self.main_registers:
                 ta.tunnel_pidfile(self.cfg).write_text("222")
+            elif self.stale_pid_on_restart:       # the OLD process's pid lingers
+                ta.tunnel_pidfile(self.cfg).write_text("111")
         if verb == "enable" and not self.active.get(SVC):
             self.active[SVC] = True
             self.main_pid = 333
@@ -127,6 +133,17 @@ class TestChangeGate(_Base):
         self.assertTrue(ok)
         self.assertIn(["restart", "--no-block", SVC], sysd.calls)
 
+    def test_on_disk_drift_restarts_even_with_matching_stamp(self):
+        # another writer edited the config: the file is rewritten to the render,
+        # so the running process must be restarted onto it too.
+        self.apply(FakeSystemd(self.cfg))
+        self.cfg.write_text(self.cfg_text + "# hand edit\n")
+        sysd = FakeSystemd(self.cfg)
+        _, err = self.apply(sysd)
+        self.assertIn(["restart", "--no-block", SVC], sysd.calls)
+        self.assertEqual(self.cfg.read_text(), self.cfg_text)
+        self.assertIn("drifted", err)
+
     def test_changed_credentials_alone_restart(self):
         self.apply(FakeSystemd(self.cfg))
         self.creds.write_text('{"TunnelID":"rotated"}')
@@ -181,13 +198,32 @@ class TestNoDarkWindow(_Base):
         self.assertIn("LEFT SERVING", err)
 
     def test_stale_main_pidfile_is_not_mistaken_for_registration(self):
-        # the OLD process wrote its pidfile long ago; after the restart the new
-        # MainPID differs, so only a fresh write by the NEW process counts.
-        ta.tunnel_pidfile(self.cfg).parent.mkdir(parents=True, exist_ok=True)
-        ta.tunnel_pidfile(self.cfg).write_text("111")
-        sysd = FakeSystemd(self.cfg, main_registers=False)
+        # a pidfile holding the OLD pid after the restart must not count: only
+        # the NEW MainPID written by the new process means it registered.
+        sysd = FakeSystemd(self.cfg, main_registers=False, stale_pid_on_restart=True)
         ok, _ = self.apply(sysd)
         self.assertFalse(ok)
+        self.assertEqual(ta.tunnel_pidfile(self.cfg).read_text(), "111")
+
+    def test_refused_restart_leaves_overlap_serving(self):
+        sysd = FakeSystemd(self.cfg, restart_rc=1)
+        ok, err = self.apply(sysd)
+        self.assertFalse(ok)
+        self.assertTrue(sysd.active[OVERLAP])
+        self.assertIn("REFUSED", err)
+        self.assertFalse(ta.applied_stamp_path(self.cfg).exists())
+
+    def test_registered_leftover_overlap_is_reused_not_stopped_first(self):
+        self.apply(FakeSystemd(self.cfg, main_registers=False))   # leaves it serving
+        sysd = FakeSystemd(self.cfg)
+        sysd.active[OVERLAP] = True
+        ok, err = self.apply(sysd)
+        self.assertTrue(ok)
+        order = [tuple(c) for c in sysd.calls if c[0] != "show"]
+        i_restart = order.index(("restart", "--no-block", SVC))
+        self.assertNotIn(("stop", OVERLAP), order[:i_restart])
+        self.assertTrue(sysd.overlap_registered_at_restart)
+        self.assertIn("reusing", err)
 
 
 class TestRenderedUnits(_Base):
