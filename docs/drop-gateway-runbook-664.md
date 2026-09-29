@@ -47,9 +47,17 @@ go-live.
    ```
    The augmentation inserts the drop ingress BEFORE the config's catch-all `404`,
    preserving every existing entry (spinbike's config also serves the live
-   `spinbike.sk` website — it is never clobbered). On spinbike the restart is
-   `sudo -n systemctl restart spinbike-tunnel.service` (SYSTEM unit); on subdev
-   it is `systemctl --user restart webterm-david-tunnel.service`.
+   `spinbike.sk` website — it is never clobbered). The restart goes through the
+   #1189 overlap (#1191, `cli_drop_tunnel_restart.py`): a second connector for
+   the same tunnel serves while the main unit restarts, so the tunnel never goes
+   dark. On spinbike (SYSTEM unit) this runs `sudo -n systemctl` and needs the
+   grant to cover every command of the overlap (the owner-VPS `NOPASSWD:ALL`
+   grant does; each is checked with `sudo -n -l`); a `--user` lane runs
+   `systemctl --user`. Either kind gets a `TUNNEL_PIDFILE` drop-in when its
+   unit lacks it. Any unmet precondition prints a
+   LOUD line and falls back to the plain `systemctl restart` (dark for the grace
+   period). A restart that did not succeed leaves `<config>.restart-pending`,
+   so the next install retries it.
 
 4. **Sibling accounts (subdev only)** — the marker (`~/.cloudflared/airuleset-drop.conf`)
    is per-unix-account, but the loopback origin `127.0.0.1:8828` is box-wide. So a
