@@ -246,8 +246,8 @@ owner-approved BEFORE posting.
   `Discuss-closed:` at hand-off, the gatekeeper's later release-close finds it
   (the gatekeeper never posts to the client thread). HOOK-ENFORCED:
   `hooks/block-fork-no-merge-issue-close.sh` BLOCKS a `gh issue close` of a
-  thread-bound odoo-erp ticket with no such disposition, for any authority.
-  `Acceptance-cited:` bez `msg <id>`/`issuecomment-<id>` BLOKUJE — Hotovo nastavené streamom nie je
+  bound odoo-erp ticket with no such disposition, for any authority.
+  `Acceptance-cited:` bez `msg <id>`/`meeting <id>`/`issuecomment-<id>` BLOKUJE — Hotovo nastavené streamom nie je
   akceptácia (#1185).
   Bypass a genuine non-client/meta ticket: `airuleset:discuss-close-ok`.
 

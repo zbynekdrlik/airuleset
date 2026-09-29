@@ -339,7 +339,7 @@ _SEG_OUT=$(python3 "$_SEG" <<< "$CMD" 2>/dev/null || true)
 # The first line is `OK` iff the analysis completed cleanly; anything else (a crash,
 # no output) → fail CLOSED, never a silent allow.
 IS_CLOSE=0; N_CLOSE=0; ISSUE_NUM=""; REPO_ARG=""; REPO_FLAG_PRESENT=0
-HAS_INTERP=0; HAS_PATCH_CLOSE=0; D_REPO_ARG=""; D_NUMS=""
+HAS_INTERP=0; HAS_PATCH_CLOSE=0; D_REPO_ARG=""; D_NUMS=""; D_NOTPLANNED=""
 _SEG_OK=0
 while IFS= read -r _line; do
     case "$_line" in
@@ -353,6 +353,7 @@ while IFS= read -r _line; do
         HAS_PATCH_CLOSE=*)   HAS_PATCH_CLOSE="${_line#HAS_PATCH_CLOSE=}" ;;
         D_REPO_ARG=*)        D_REPO_ARG="${_line#D_REPO_ARG=}" ;;
         D_NUMS=*)            D_NUMS="${_line#D_NUMS=}" ;;
+        D_NOTPLANNED=*)      D_NOTPLANNED="${_line#D_NOTPLANNED=}" ;;
     esac
 done <<< "$_SEG_OUT"
 
@@ -423,6 +424,21 @@ _repo_unparseable_signal() { [ "$REPO_FLAG_PRESENT" = "1" ] && [ -z "$REPO_ARG" 
 # ---------------------------------------------------------------------------
 _DHERE="$(cd "$(dirname "$0")" 2>/dev/null && pwd || true)"
 _DREPO="$(dirname "$_DHERE")"
+# #1185: verify an owner `issuecomment-<id>` citation ONLINE (the guard prints
+# `OWNER-CHECK <login> <repo|>:<id>...`). Prints nothing when ONE cited comment is
+# the owner's; else the per-ref reasons (a fetch failure or another author).
+_d_owner_check() {
+    local _login _ref _repo _id _got _rc _why=""
+    set -- $1; shift; _login="$1"; shift
+    for _ref in "$@"; do
+        _repo="${_ref%%:*}"; _id="${_ref##*:}"; [ -n "$_repo" ] || _repo="$_D_REPOFULL"
+        _rc=0; _got=$(timeout 10 gh api "repos/$_repo/issues/comments/$_id" --jq .user.login 2>&1) || _rc=$?
+        [ "$_rc" = 0 ] && [ "$_got" = "$_login" ] && return 0
+        if [ "$_rc" != 0 ]; then _why+=" issuecomment-$_id could not be fetched (rc $_rc: ${_got:0:120});"
+        else _why+=" issuecomment-$_id is authored by ${_got:-?}, not $_login;"; fi
+    done
+    printf '%s' "$_why"
+}
 _d_run_gate=1
 if grep -q 'airuleset:discuss-close-ok' <<< "$CMD"; then   # #824: here-string; bypass token DETECTION on original $CMD
     _DLOG="/tmp/airuleset-discuss-close-bypass-${EUID:-$(id -u)}.log"
@@ -449,14 +465,16 @@ if [ "$_d_run_gate" = "1" ]; then
         # (this gate's OWN glued-tolerant -R extraction above), else the cwd git
         # remote, via the shared #760 _repo_owner_repo_of helper, then take the
         # BASENAME and compare case-insensitively.
-        _D_REPONAME=$(_repo_owner_repo_of "$_D_REPO_ARG")
-        _D_REPONAME="${_D_REPONAME##*/}"
+        _D_REPOFULL=$(_repo_owner_repo_of "$_D_REPO_ARG")
+        _D_REPONAME="${_D_REPOFULL##*/}"
         if [ "${_D_REPONAME,,}" = "odoo-erp" ]; then
             # Check EACH close target (numbers are pure digits — safe to word-split).
             # Block on the FIRST bound-no-disposition target found.
             _D_BLOCK_NUM=""
             _D_BLOCK_KIND=""
             for _D_NUM in $_D_NUMS; do
+                # #1185: a `--reason "not planned"` close is never acceptance-checked.
+                case " $D_NOTPLANNED " in *" $_D_NUM "*) continue ;; esac
                 _D_JSON=""
                 if [ -n "${AIRULESET_DISCUSS_CLOSE_FIXTURE:-}" ] && [ -f "${AIRULESET_DISCUSS_CLOSE_FIXTURE}" ]; then
                     _D_JSON=$(cat "${AIRULESET_DISCUSS_CLOSE_FIXTURE}" 2>/dev/null || echo "")
@@ -467,15 +485,30 @@ if [ "$_d_run_gate" = "1" ]; then
                 fi
                 if [ -n "$_D_JSON" ]; then
                     _D_VERDICT=$(printf '%s' "$_D_JSON" | python3 "$_DREPO/discuss_close_guard.py" 2>/dev/null || echo "OK")
-                    # #1185: BLOCK-CITED = an Acceptance-cited line exists but
-                    # none carries a msg <id> (a stage-only citation).
-                    if [ "$_D_VERDICT" = "BLOCK" ] || [ "$_D_VERDICT" = "BLOCK-CITED" ]; then
-                        _D_BLOCK_NUM="$_D_NUM"
-                        _D_BLOCK_KIND="$_D_VERDICT"
-                        break
-                    fi
+                    # #1185: BLOCK-CITED = citations without evidence; OWNER-CHECK =
+                    # only an owner issuecomment- cited → verify it online first.
+                    case "$_D_VERDICT" in
+                        BLOCK|BLOCK-CITED) _D_BLOCK_NUM="$_D_NUM"; _D_BLOCK_KIND="$_D_VERDICT"; break ;;
+                        "OWNER-CHECK "*)
+                            _D_OWNER_WHY=$(_d_owner_check "$_D_VERDICT")
+                            if [ -n "$_D_OWNER_WHY" ]; then
+                                _D_BLOCK_NUM="$_D_NUM"; _D_BLOCK_KIND="OWNER"; break
+                            fi ;;
+                    esac
                 fi
             done
+            if [ "$_D_BLOCK_KIND" = "OWNER" ]; then
+                cat >&2 <<MSG
+
+🚫 BLOCKED (airuleset #1185): ticket ${_D_BLOCK_NUM} cites an owner ruling that
+could not be verified —${_D_OWNER_WHY}
+An Acceptance-cited: issuecomment-<id> counts only when that GitHub comment is
+the owner's own ROZHODNUTÉ (checked online at close). Cite the owner's comment,
+or another evidence form (msg <id> / meeting <recording id>). A GitHub read
+failure: retry, or the logged bypass  airuleset:discuss-close-ok  in the close.
+MSG
+                exit 2
+            fi
             if [ "$_D_BLOCK_KIND" = "BLOCK-CITED" ]; then
                 cat >&2 <<MSG
 
@@ -491,6 +524,8 @@ Cite the Odoo message that IS the acceptance, on the Acceptance-cited line:
       gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: msg <message-id> task <task-id>"
   • the owner accepted on the client's behalf (an owner ROZHODNUTÉ comment):
       gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: owner ROZHODNUTÉ issuecomment-<id>"
+  • the client confirmed in a RECORDED meeting (name the recording):
+      gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: meeting <recording id> [mm:ss] <who>"
   • the odoo-erp#8507 auto-close (montalu): the full line from
     skills/odoo-client-messaging/client-board-stages.md rule 6, ending
     "msg <auto-close note id> task <task-id>".
@@ -506,10 +541,10 @@ MSG
 
 🚫 BLOCKED: this ticket is bound to client acceptance
 (a Discuss-thread:/Acceptance-thread: line, a discuss.channel_<N> deep URL —
-the URL alone binds, #695 — or, #1185, an Odoo task link
-(/odoo/project/<pid>/tasks/<tid>) or the needs-acceptance label) but it
+the URL alone binds, #695 — or, #1185, the needs-acceptance label) but it
 carries no closing-note or acceptance evidence — closing it now would leave
-the client thread with our message (or their question) as the LAST message, then silence (airuleset #627/#891).
+the client thread with our message (or their question) as the LAST message,
+then silence (airuleset #627/#891).
 
 Whoever closes the ticket carries the obligation — it FOLLOWS THE TICKET to
 its current owner, never the author. Before this ticket is closed, post a

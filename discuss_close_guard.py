@@ -18,9 +18,9 @@ it ALSO carries a disposition line:
     thread are still open (the note goes once, at the last close, never N
     times).
   * `Acceptance-cited: … msg <id>` / `Acceptance-defer: <reason>` (#891; the
-    cited value needs a `msg <id>` or an owner `issuecomment-<id>`, #1185).
-#1185 ROZHODNUTÉ also binds a ticket with an Odoo task link or the
-`needs-acceptance` label (`is_acceptance_bound`).
+    cited value needs `msg <id>`, `meeting <recording id>` or an owner
+    `issuecomment-<id>` the hook verifies online, #1185).
+#1185 also binds a ticket with the `needs-acceptance` label.
 
 Target property (owner): the LAST message in the thread is ALWAYS from the
 sub-dev, written when the LAST ticket bound to the thread closes. WHO writes
@@ -115,11 +115,15 @@ _ACC_DEFER_RE = re.compile(_MARK_OPEN + r"Acceptance-defer" + _MARK_TAIL)
 # so a cited value needs `msg <id>` (also `msg #N`, `message_id=N`, `mail.message
 # **N**`); a placeholder or a date (`msg 29.9.`) never counts.
 _ACC_CITED_VALUE_RE = re.compile(_MARK_OPEN + r"Acceptance-cited[ \t*]*:[ \t]*(\S[^\n]*)")
-# ROZHODNUTÉ issuecomment-5894541407: an owner ruling cited by its GitHub comment
-# (`…#issuecomment-5874238532`, the odoo-erp#3171 shape) also counts; the task
-# link / `needs-acceptance` label bind like a thread (the 29.9 sweep shape).
-_OWNER_REF_RE = re.compile(r"(?i)\bissuecomment-[0-9]+(?![\w-])")
-_TASK_URL_RE = re.compile(r"/odoo/project/[0-9]+/tasks/[0-9]+")
+# #1185 ROZHODNUTÉ (issuecomment-5894541407 + -5894862095): a recorded call counts
+# with its recording named (`meeting mdq-bvtq-aku`, the meet-code shape); an owner
+# ruling cited by its GitHub comment counts only once the HOOK has verified the
+# author online (`owner_refs` → CLI `OWNER-CHECK`); `needs-acceptance` binds.
+OWNER_LOGIN = "zbynekdrlik"  # == airuleset.MAINTAINER_GH_LOGIN (test-locked)
+_MEETING_REF_RE = re.compile(r"(?i)\bmeeting[ \t:]+`?[a-z]{3}-[a-z]{4}-[a-z]{3}(?![\w-])")
+_OWNER_REF_RE = re.compile(
+    r"(?i)(?:github\.com/([\w.-]+/[\w.-]+)/(?:issues|pull)/[0-9]+)?#?"
+    r"\bissuecomment-([0-9]+)(?![\w-])")
 _MSG_REF_RE = re.compile(
     r"(?i)(?<![\w.])(?:msgs?|messages?|mail[._]message)(?:[ \t]*_?ids?)?"
     r"[ \t\u00a0*#:=.(-]*[0-9]+(?!\w|\.[0-9])"
@@ -176,19 +180,27 @@ def is_thread_bound(text):
 
 
 def is_acceptance_bound(data):
-    """#1185: thread-bound, OR an Odoo task link, OR the `needs-acceptance`
-    label. Malformed `labels` fall back to the text signals."""
+    """#1185: thread-bound OR the `needs-acceptance` label (a task link alone
+    does not bind). Malformed `labels` fall back to the text signal."""
     labels = data.get("labels")
     names = [x.get("name") for x in labels if isinstance(x, dict)] if isinstance(labels, list) else []
-    text = collect_text(data)
-    return is_thread_bound(text) or bool(_TASK_URL_RE.search(text)) or "needs-acceptance" in names
+    return is_thread_bound(collect_text(data)) or "needs-acceptance" in names
 
 
 def has_cited_evidence(text):
-    """True iff SOME `Acceptance-cited:` line carries a `msg <id>` or an owner
-    `issuecomment-<id>` on that same line (#1185); elsewhere does not count."""
-    return any(_MSG_REF_RE.search(v) or _OWNER_REF_RE.search(v)
+    """True iff SOME `Acceptance-cited:` line carries offline-checkable evidence
+    — `msg <id>` or `meeting <recording id>` — on that same line (#1185)."""
+    return any(_MSG_REF_RE.search(v) or _MEETING_REF_RE.search(v)
                for v in _ACC_CITED_VALUE_RE.findall(text))
+
+
+def owner_refs(issue_json_text):
+    """`<owner/repo|>:<comment id>` for every owner `issuecomment-<id>` on an
+    `Acceptance-cited:` line (repo empty = the closing ticket's repo)."""
+    data = json.loads(issue_json_text)
+    return [f"{m.group(1) or ''}:{m.group(2)}"
+            for v in _ACC_CITED_VALUE_RE.findall(collect_text(data))
+            for m in _OWNER_REF_RE.finditer(v)]
 
 
 def has_disposition(text):
@@ -208,7 +220,8 @@ def evaluate_close(issue_json_text):
     """Return None to ALLOW the close, or a short reason string to BLOCK it.
 
     Blocks IFF the ticket is acceptance-bound AND has no disposition (reason
-    `acceptance-cited-without-msg` when only msg-less citations exist, #1185).
+    `acceptance-cited-without-msg` when only evidence-less citations exist;
+    `owner-check` when an owner `issuecomment-` must be verified online, #1185).
     Every unverifiable input (bad JSON, non-object payload) returns None
     (ALLOW) — the gate's safe default."""
     try:
@@ -219,6 +232,8 @@ def evaluate_close(issue_json_text):
         return None
     text = collect_text(data)
     if is_acceptance_bound(data) and not has_disposition(text):
+        if owner_refs(issue_json_text):
+            return "owner-check"
         if _ACC_CITED_RE.search(text):
             return "acceptance-cited-without-msg"
         return "thread-bound-no-closing-note"
@@ -229,6 +244,9 @@ def main():
     try:
         raw = sys.stdin.read()
         reason = evaluate_close(raw)
+        if reason == "owner-check":
+            print(" ".join(["OWNER-CHECK", OWNER_LOGIN] + owner_refs(raw)))
+            return 0
     except Exception:
         reason = None
     print({None: "OK", "acceptance-cited-without-msg": "BLOCK-CITED"}.get(reason, "BLOCK"))

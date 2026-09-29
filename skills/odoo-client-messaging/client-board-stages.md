@@ -51,15 +51,15 @@ A task reaches the profile's terminal stage (**Hotovo** / **Hotové**) ONLY afte
 the client confirms acceptance — a 👍 reaction, a reply, or an explicit "OK" —
 never on the stream's own judgment (except the montalu auto-close below). WHO
 moves it: the **OWNER** on miva and, after a confirmation,
-on montalu; **Dávid Greňa himself** on slovnormal. Record the confirmation on
-the GitHub issue as
+on montalu; **Dávid Greňa himself** on slovnormal. Record it on the GitHub
+issue as
 `Acceptance-cited: msg <message_id> task <task_id>` (`handover-compose.md`
 family acceptance: one confirmation closes the family).
 A Hotovo/Hotové a STREAM account set is never acceptance evidence — acceptance
 is a client message or reaction (`msg <id>`), the owner's own move after a
 confirmation or the client's own move (its tracking `msg <id>`), or the
 odoo-erp#8507 auto-close note below; the close gate rejects an
-`Acceptance-cited:` with neither `msg <id>` nor an owner-ruling
+`Acceptance-cited:` with no `msg <id>`, `meeting <recording id>` or owner
 `issuecomment-<id>` (#1185).
 
 On **montalu** a task in Verifikácia also reaches Hotovo by the odoo-erp#8507
