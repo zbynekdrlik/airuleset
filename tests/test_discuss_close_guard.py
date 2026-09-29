@@ -546,7 +546,7 @@ class TestMarkerExactSet(TestCase):
             with self.subTest(marker=marker):
                 self.assertIsNone(
                     g.evaluate_close(
-                        _issue(body=bound, comments=[f"{marker} evidence"])
+                        _issue(body=bound, comments=[f"{marker} msg 1731999"])
                     ),
                     f"{marker} must be recognised as a disposition",
                 )
