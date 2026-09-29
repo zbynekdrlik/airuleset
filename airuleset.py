@@ -7214,7 +7214,12 @@ def _watchdog_queue_fetch(cwd):
         cmd_name = _watchdog_quals_cmd(cwd)
     except Exception:
         return None
-    return _owref.workable_records(cwd, cmd_name, argv0=os.path.abspath(__file__))
+    recs = _owref.workable_records(cwd, cmd_name, argv0=os.path.abspath(__file__))
+    if recs is None or cmd_name == "core-quals":
+        return recs
+    # review F3: on a stream a returned bounce is job 8's / the #1066
+    # bounce-verdict rider's announcement — never a second, generic nudge.
+    return [r for r in recs if not r.get("bounce")]
 
 
 def _watchdog_queue_classify(cwd):
@@ -7223,7 +7228,8 @@ def _watchdog_queue_classify(cwd):
     `"dep-wait"` (the `workable ∧ deps satisfied` gate; the class-based infra
     branch was removed in round 2b — infra serialisation is ROUTING via
     `--role`, not a live-lane gate). FULL-authority only (a reduced box returns
-    None; the rider also gates). The repo slug is computed LAZILY on the first
+    None, so a stream's arrivals are all dispatchable; #1178 dropped the
+    rider's own authority gate for the own set). The repo slug is computed LAZILY on the first
     arrival and memoized in the closure, so a no-arrival sweep (the common case)
     costs nothing beyond the cheap authority check; each classify call then does
     a bounded per-issue `Depends-on:` gh fetch. Any error fails safe to
@@ -8132,8 +8138,11 @@ def _watchdog_path_fix():
     snapshot refresher, which inherits this PATH — died with FileNotFoundError
     and every rider read `skip:undetermined` for weeks. Fixed here, the single
     entry point, so no unit reinstall is needed; reuses the SAME idempotent
-    prepend the install path uses (`_claude_cli_env`)."""
-    os.environ["PATH"] = _claude_cli_env()["PATH"]
+    prepend the install path uses (`_claude_cli_env`). ONLY when gh does not
+    resolve at all (review F6): a box that already finds gh keeps today's gh
+    resolution, so no other box's watchdog starts going through a shim."""
+    if shutil.which("gh") is None:
+        os.environ["PATH"] = _claude_cli_env()["PATH"]
 
 
 def cmd_watchdog(args):

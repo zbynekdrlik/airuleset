@@ -16,9 +16,13 @@ unchanged:
     `airuleset._watchdog_queue_fetch` as `[{"id", "title"}]` records.
     `review_ids` normalises them (legacy int lists still work), `nudge_text`
     names each new ticket with its title.
-(b) `ended_pane_recheck` — a NON-armed pane whose goal is DEFINITELY cleared
-    (`goal_armed is False`, never the armed-unknown None) and whose last turn
-    ended `✅` (the 🏁 line sits directly above `✅ DONE:`) is a target too.
+(b) `ended_pane_recheck` — a NON-armed FLOW (review / undeclared) pane whose
+    goal is DEFINITELY cleared by the STRUCTURED goal_mark (`goal_armed is
+    False` from `src == "goal_mark"`: this session HAD a /goal; a pane that never
+    had one is an interactive session, not a supervisor) and whose last turn
+    ended `✅` is a target too. (An ACHIEVED loop — the 🏁 line sits directly
+    above `✅ DONE:` — keeps its mark "set" because CC writes no cleared marker,
+    so it already rides the armed path, #1128.)
     The rider seeds and tracks it like any pane; DELIVERY is held
     (`deliver_hold`) unless the pane sits at a bare idle `❯`, its transcript is
     not a live turn (#1110) and no human touched it recently (the #731/#566
@@ -49,6 +53,15 @@ HEALTH_DROP_S = 24 * 3600
 # only needs to dedupe the panes of one sweep: detection latency stays bounded
 # by the snapshot's own 5-min refresh, not snapshot TTL + a 10-min outer TTL.
 FETCH_TTL_S = 60
+# review F2: the per-sid record tag of an own-set base. A record a pre-#1178
+# sweep wrote (it carries `lts`) without it holds the gk hand-off union and is
+# RESEEDED once instead of announcing the whole backlog as new.
+REC_SRC = "own-i"
+# review F5: the #993 dep classify costs >= 1 gh call per arrival and runs every
+# sweep while a wave is held; memoise per number and cap the calls per sweep.
+CLASSIFY_TTL_S = 30 * 60
+CLASSIFY_MAX_PER_SWEEP = 10
+CLASSIFY_KEY = "queue_arrival_classify"
 # how many new tickets are named WITH their title before the rest are listed
 # as bare numbers (the nudge is hard-capped at NUDGE_MAX_CHARS).
 MAX_TITLED = 4
@@ -99,7 +112,8 @@ def nudge_text(arrivals, cur_count, titles=None, max_chars=700, max_named=12):
     pointer row shows it), then the how-to. Never starts with `/` (never a slash
     command). Capped at `max_chars` on a word boundary."""
     text = (
-        "stuck-check: nové tickety v tvojom I: %s — spracuj ich; ak tvoj /goal "
+        "stuck-check: do tvojho I pribudli tickety (nové alebo vrátené): %s — "
+        "spracuj ich; ak tvoj /goal "
         "už skončil, spusti /autopilot. Spolu %d v I (tvoj workable backlog, "
         "ten istý set ako core-quals/slice-quals --list a /goal stop-proof). "
         "Poradie riadi priorita dohodnutá v tejto session (architektúra > "
@@ -109,6 +123,49 @@ def nudge_text(arrivals, cur_count, titles=None, max_chars=700, max_named=12):
     if len(text) <= max_chars:
         return text
     return text[:max_chars - 1].rsplit(" ", 1)[0] + "…"
+
+
+def current_rec(rec, role):
+    """The persisted per-sid record the decider may trust: a malformed one is
+    {} (seed), and — review F2 — a review-role record a pre-#1178 sweep wrote
+    (`lts` present, no `src` tag: its base is the gk hand-off union) is {} too,
+    so the first own-set read SEEDS. The caller stamps `src` on every record it
+    persists for the review role."""
+    if not isinstance(rec, dict):
+        return {}
+    if role != "infra" and "lts" in rec and rec.get("src") != REC_SRC:
+        return {}
+    return rec
+
+
+def memo_classify(state, classify_fn, now, cap=CLASSIFY_MAX_PER_SWEEP, scope=""):
+    """Wrap the #993 per-arrival classify (review F5): a class read within
+    CLASSIFY_TTL_S is reused from `state[CLASSIFY_KEY]`, at most `cap` fresh
+    reads happen per wrapper (one wrapper per rider call), and a number past the
+    cap reads "dep-wait" — HELD and retried next sweep, never a guessed
+    dispatch. Keys are `<scope>#<number>` (scope = the cwd: two repos on one
+    box never share a class). None stays None (unwired = all dispatchable)."""
+    if classify_fn is None:
+        return None
+    memo = state.setdefault(CLASSIFY_KEY, {}) if isinstance(state, dict) else {}
+    for k in [k for k, v in memo.items()
+              if not (isinstance(v, list) and len(v) == 2
+                      and now - _num(v[1]) < CLASSIFY_TTL_S)]:
+        memo.pop(k, None)
+    left = [cap]
+
+    def _fn(number):
+        key = "%s#%s" % (scope, number)
+        hit = memo.get(key)
+        if hit:
+            return hit[0]
+        if left[0] <= 0:
+            return "dep-wait"
+        left[0] -= 1
+        cls = classify_fn(number)
+        memo[key] = [cls, now]
+        return cls
+    return _fn
 
 
 def infra_authority_skip(cwd):
@@ -125,15 +182,18 @@ def infra_authority_skip(cwd):
 
 # --- (c) undetermined health ------------------------------------------------
 
+GENERIC_REASON = "fetch returned None (cached failure or unresolvable authority)"
+
+
 def undetermined_reason(cwd):
-    """Why the own-set read for `cwd` came back None this process, or a
-    generic reason (a cached failure / an unresolvable authority)."""
+    """Why the own-set read for `cwd` came back None THIS process, or None when
+    this process has no specific reason (a sweep served the cached None);
+    `note_fetch` then keeps the earlier specific reason (review F8)."""
     try:
         from watchdog import ops_wait_refresh
-        why = ops_wait_refresh.problem(cwd)
+        return ops_wait_refresh.problem(cwd)
     except Exception:  # noqa: BLE001 — a reason is display only
-        why = None
-    return why or "fetch returned None (cached failure or unresolvable authority)"
+        return None
 
 
 def _num(v, default=0):
@@ -168,8 +228,8 @@ def note_fetch(state, key, determined, now, loc, reason=None, dry_run=False):
         rec = dict(recs.get(key) or {})
         rec.update(since=_num(rec.get("since"), now), n=_num(rec.get("n")) + 1,
                    last=now, loc=loc)
-        if reason:
-            rec["reason"] = reason
+        if reason or not rec.get("reason"):
+            rec["reason"] = reason or GENERIC_REASON
         out = []
         warned = rec.get("warned")
         if _persistent(rec, now) and (not isinstance(warned, (int, float))
@@ -212,13 +272,16 @@ def status_lines(home=None, now=None, state=None):
 
 def ended_candidate(glance):
     """True when a NON-armed pane may be watched for arrivals: its goal is
-    DEFINITELY cleared (`goal_armed is False` — never the armed-unknown None,
-    the #486 G6 fail-closed direction), its last turn ended `✅` (marker
-    "done"), and the `queue-arrival` kind is ON on this box (checked BEFORE any
-    fetch, so a box whose profile keeps the kind off never spawns a refresher
-    for a goal-less pane)."""
+    DEFINITELY cleared by the STRUCTURED goal_mark (`goal_armed is False` with
+    `src == "goal_mark"` — review F1: the heartbeat's False alone means only "no
+    goal marker in the tail", i.e. an interactive session that never had a
+    /goal; the armed-unknown None fails closed, #486 G6), its last turn ended
+    `✅` (marker "done"), and the `queue-arrival` kind is ON on this box
+    (checked BEFORE any fetch, so a box whose profile keeps the kind off never
+    spawns a refresher for a goal-less pane)."""
     import watchdog
     return (getattr(glance, "goal_armed", None) is False
+            and getattr(glance, "src", None) == "goal_mark"   # review F1
             and getattr(glance, "marker", None) == "done"
             and watchdog.nudges_enabled("queue-arrival"))
 
@@ -244,6 +307,13 @@ def ended_pane_recheck(glance, now, run, qrecs, sid, cwd, pid, tpath, loc,
     holding delivery on `ended_hold_reason`. Returns the rider's log lines, or
     [] when the pane is not a candidate (no fetch, no state)."""
     if queue_fetch is None or not ended_candidate(glance):
+        return []
+    role_fn = kw.get("resolve_role_fn")
+    try:   # review F1: only the FLOW supervisor is told to run /autopilot
+        role = role_fn(cwd) if role_fn is not None else None
+    except Exception:  # noqa: BLE001 — a resolver fault never guesses
+        return []
+    if role not in (None, "review"):
         return []
     from watchdog import queue_arrival_recheck as _qa
     captured = kw.get("captured")

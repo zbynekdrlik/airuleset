@@ -5677,7 +5677,7 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             # #1178 (b) — a supervisor whose /goal ENDED (cleared, last turn ✅)
             # learns of new tickets in its own I; delivery held unless idle +
             # human-quiet. A resolver fault never guesses (skip).
-            if _pane_role in (None, "review", "quality"):
+            if _pane_role != "infra":   # role re-checked in ended_pane_recheck
                 logs += _queue_own.ended_pane_recheck(
                     glance, now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run,
                     handled, queue_fetch, state, captured=captured,
@@ -5775,8 +5775,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                 sleep_fn=sleep_fn, captured=captured,
                 batch_collect=(_batch_collect if _batch_collect is not None
                                and "release-gap" in _eligible else None))
-        # #733 -- gk queue-ARRIVAL watcher for this armed pane (#1029: also an
-        # armed INFRA pane, when only infra_queue_fetch is wired).
+        # #733/#1178 -- queue-ARRIVAL watcher (own workable set) for this armed
+        # pane (#1029: also an armed INFRA pane, the infra queue).
         if queue_fetch is not None or infra_queue_fetch is not None:
             logs += _queue_arrival.goal_queue_arrival_recheck(
                 now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run, handled,
@@ -5813,8 +5813,8 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
         # per-sweep `handled` set (at most ONE keystroke per pane per sweep) is
         # honoured: a pane any earlier rider/batch already typed this sweep is
         # deferred (base kept OLD, re-detects next sweep). Direct-send (not
-        # batched); its own authority gate skips FULL-authority panes, so it
-        # never collides with the full-only queue-arrival rider.
+        # batched); its own authority gate skips FULL-authority panes; the
+        # #1178 queue-arrival own set drops a stream's bounce rows (no double).
         if bounce_unhandled_fetch is not None:
             logs += _bounce_verdict.goal_bounce_verdict_recheck(
                 now, run, brecs, sid, cwd, pid, tpath, loc, dry_run, handled,

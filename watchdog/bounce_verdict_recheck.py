@@ -10,7 +10,8 @@ differences from #733:
   * AUTHORITY — the INVERSE gate: this rider runs on a REDUCED-authority stream
     pane (branch-merge / fork-no-merge). A full/gk box's bounce awareness is
     job 8 + the queue-arrival rider; a returned `prio:bounce` is the reduced
-    STREAM's own obligation.
+    STREAM's own obligation (#1178: queue-arrival watches every box's own set
+    but DROPS a stream's bounce rows, so this rider stays their one wake).
   * SIGNAL SOURCE — ZERO gh: it reads `entry["bounce_unhandled"]`
     (`[{"number": N, "verdict_ts": <epoch>}, ...]`) from the per-cwd
     tickets-status cache lane A (#1066) already computes at footer refresh
@@ -189,8 +190,8 @@ def goal_bounce_verdict_recheck(now, run, brecs, sid, cwd, pid, tpath, loc,
     `brecs[sid]`; returns decision-log lines (#486 — every verdict logged, never
     a silent skip). `dry_run` mutates no persistent state and sends nothing."""
     logs = []
-    # REDUCED-authority gate (the INVERSE of queue-arrival's full-only gate):
-    # only a reduced STREAM box acts on its own returned bounce; a full/gk box's
+    # REDUCED-authority gate (#1178: queue-arrival has no gate now, but drops a
+    # stream's bounce rows): only a reduced STREAM box acts on its own returned bounce; a full/gk box's
     # bounce awareness is job 8 + queue-arrival. Cheap, BEFORE any read. An
     # unresolvable authority fails safe to skip (never a false nudge).
     try:

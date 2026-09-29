@@ -80,7 +80,8 @@ CHILD_MAX_AGE_S = CHILD_TIMEOUT_S + 120
 SNAPSHOT_VERSION = 2
 # every field a success writes and a failure carries forward (never partially)
 _SNAPSHOT_FIELDS = ("v", "members", "members_ts", "open_count", "i_members",
-                    "i_titles", "dispatchable_count", "dispatchable_reason")
+                    "i_titles", "i_bounce", "dispatchable_count",
+                    "dispatchable_reason")
 # in-process single-flight across the readers of ONE sweep: {cache path: ts}.
 # A just-launched child has not written its pidfile yet, so without this the
 # 2nd and 3rd reader of the same sweep would each spawn again.
@@ -172,6 +173,9 @@ def parse_snapshot(stdout):
     if "i_titles" in snap and not (isinstance(titles, dict) and all(
             isinstance(k, str) and isinstance(v, str) for k, v in titles.items())):
         snap["i_titles"] = None
+    if "i_bounce" in snap and not (isinstance(snap["i_bounce"], list)
+                                   and all(map(_is_int, snap["i_bounce"]))):
+        snap["i_bounce"] = None
     return snap
 
 
@@ -377,7 +381,12 @@ def workable_records(cwd, cmd_name, argv0=None, now=None, spawn_fn=None,
         return None
     _PROBLEMS.pop(cwd, None)
     titles = good.get("i_titles") if isinstance(good.get("i_titles"), dict) else {}
-    return [{"id": n, "title": titles.get(str(n), "")} for n in sorted(members)]
+    bounce = set(good.get("i_bounce") or ())
+    out = [{"id": n, "title": titles.get(str(n), "")} for n in sorted(members)]
+    for rec in out:
+        if rec["id"] in bounce:   # #1178 F3: a stream's own returned bounce
+            rec["bounce"] = True
+    return out
 
 
 def _refresh_unit_name(cwd):
@@ -610,6 +619,7 @@ def run_refresh_child(target, cmd_name, cache, pid_file, argv0, run_fn=None,
                 "open_count": snap["open_count"],
                 "i_members": snap["i_members"],
                 "i_titles": snap.get("i_titles"),
+                "i_bounce": snap.get("i_bounce"),
                 "dispatchable_count": snap["dispatchable_count"],
                 "dispatchable_reason": snap["dispatchable_reason"]})
         else:                              # "timeout" | "error" | "rate_hold"

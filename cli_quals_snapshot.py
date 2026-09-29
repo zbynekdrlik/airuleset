@@ -62,6 +62,20 @@ def _titles(rows):
     return out
 
 
+def _bounce_numbers(rows):
+    """#1178 review F3 — the I rows carrying `prio:bounce`: on a stream the
+    returned bounce is announced by job 8 / the #1066 bounce-verdict rider, so
+    the queue-arrival rider leaves them out there (labels as dicts or names)."""
+    out = []
+    for n, row in rows.items():
+        labels = row.get("labels") if isinstance(row, dict) else None
+        names = {(lb.get("name") if isinstance(lb, dict) else lb)
+                 for lb in (labels if isinstance(labels, list) else [])}
+        if "prio:bounce" in names:
+            out.append(int(n))
+    return sorted(out)
+
+
 def emit_snapshot_json(rows, ops_wait, root, quals, own_stream, emit_ops_wait,
                        dispatchable_fields, owed=()):
     """`--snapshot-json` (#1067 slice 1d): ONE JSON object carrying every quals
@@ -104,6 +118,7 @@ def emit_snapshot_json(rows, ops_wait, root, quals, own_stream, emit_ops_wait,
     print(json.dumps({"open_count": len(rows) + len(owed or ()),
                       "i_members": sorted(int(n) for n in rows),
                       "i_titles": _titles(rows),   # #1178 the arrival nudge names them
+                      "i_bounce": _bounce_numbers(rows),   # #1178 F3
                       "dispatchable_count": count,
                       "dispatchable_reason": reason,
                       "ops_wait_members": members}))
