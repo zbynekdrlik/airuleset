@@ -88,10 +88,23 @@ class _Tree:
         wt = self.src.parent / (self.src.name + "--claude-worktrees-agent-zz")
         wt.mkdir()
         (wt / "33333333-2222-4333-8444-555555555555.jsonl").write_text("{}\n")
+        self.own_as_box(self.old_home)
         for p in [self.src, *self.src.rglob("*")]:
             os.utime(p, (OLD_MTIME, OLD_MTIME))
         # U2 is the NEWEST session (the one `--resume` should name first)
         os.utime(self.src / (U2 + ".jsonl"), (OLD_MTIME + 60, OLD_MTIME + 60))
+
+    @staticmethod
+    def own_as_box(root):
+        """CI runs as root, so a seeded tree would read as root-owned and the
+        transfer rightly refuses it (the source is read as its owner, never
+        as root). Give a fake tree a real non-root owner, as on a box (main
+        CI 8162623e). A no-op for a non-root run."""
+        if os.geteuid() != 0:
+            return
+        nobody = pwd.getpwnam("nobody")
+        for p in [Path(root), *Path(root).rglob("*")]:
+            os.lchown(p, nobody.pw_uid, nobody.pw_gid)
 
     def proc_entry(self, pid, comm, cwd, argv=None, exe=None):
         d = self.proc / str(pid)
@@ -250,11 +263,16 @@ class TestPlanAndDryRun(unittest.TestCase):
         self.assertIn("4242", err)
 
     def test_unreadable_source_says_so(self):
-        os.chmod(self.t.src, 0)
-        try:
+        # a PermissionError on the listing, not chmod 0: root (CI) reads a
+        # mode-0 dir anyway, so the chmod premise only held for a user run
+        real = os.listdir
+
+        def denied(p):
+            if str(p) == str(self.t.src):
+                raise PermissionError(13, "Permission denied", str(p))
+            return real(p)
+        with mock.patch("os.listdir", side_effect=denied):
             plan = self.t.plan()
-        finally:
-            os.chmod(self.t.src, 0o755)
         self.assertTrue(any("cannot read" in r for r in plan["refusals"]),
                         plan["refusals"])
 
@@ -459,6 +477,7 @@ class TestRenderedScript(unittest.TestCase):
         link = str(self.t.base / "link-fohmixer")
         os.symlink(self.t.old_dir, link)
         shutil.copytree(self.t.src, self.t.src.parent / sess.project_key(link))
+        self.t.own_as_box(self.t.src.parent / sess.project_key(link))
         plan = sess.build_plan(
             "fohmixer", link, from_home=str(self.t.old_home),
             target_home=str(self.t.new_home), target_cwd=self.t.new_cwd,
