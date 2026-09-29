@@ -275,16 +275,18 @@ class _OrchBase(unittest.TestCase):
 
 
 class TestOrchestrator(_OrchBase):
-    def test_reduced_authority_skips_without_fetch(self):
+    def test_reduced_authority_watches_its_own_slice(self):
+        # #1178 REVERSES the #733 full-only gate: the union is now the box's
+        # OWN workable set (slice-quals on a stream), so a stream box seeds too.
         called = []
         qrecs = {}
-        logs = self._run(qrecs, lambda cwd: called.append(cwd),
+        logs = self._run(qrecs, lambda cwd: called.append(cwd) or [1],
                          self._tmux(), authority="fork-no-merge")
-        self.assertTrue(any("skip:not-full-authority" in ln for ln in logs))
-        self.assertEqual(called, [])
-        self.assertEqual(qrecs, {})
+        self.assertTrue(any("seed" in ln for ln in logs), logs)
+        self.assertEqual(called, [self.CWD])
 
-    def test_authority_unresolved_skips(self):
+    def test_authority_is_not_consulted(self):
+        # #1178: no authority gate — a raising resolver never blocks the rider
         qrecs = {}
         with m.patch("airuleset.resolve_authority",
                      side_effect=RuntimeError("boom")):
@@ -292,7 +294,7 @@ class TestOrchestrator(_OrchBase):
                 NOW, self._tmux(), qrecs, self.sid, self.CWD, "%9", self.tpath,
                 "sess:0", False, set(), queue_fetch=lambda cwd: [1],
                 state={}, sleep_fn=lambda *a, **k: None)
-        self.assertTrue(any("skip:authority-unresolved" in ln for ln in logs))
+        self.assertTrue(any("seed" in ln for ln in logs), logs)
 
     def test_none_fetch_undetermined_no_mutation(self):
         qrecs = {self.sid: {"base": [1, 2]}}
@@ -491,12 +493,13 @@ class TestLaneSweepWiring(unittest.TestCase):
         self.assertEqual(tmux.typed_texts(), [])
         self.assertEqual(state["queue_arrival"][sid]["base"], [1, 2])
 
-    def test_reduced_authority_box_not_nudged(self):
+    def test_reduced_authority_box_is_nudged_on_its_own_slice(self):
+        # #1178 (was `..._not_nudged` under #733's full-only gate)
         state = {"queue_arrival": {
             "sess-733-lane": {"base": [1], "first_seen": NOW - DAY}}}
         sid, tmux = self._armed_sweep(
             state, authority="fork-no-merge", queue_fetch=lambda cwd: [1, 9])
-        self.assertEqual(tmux.typed_texts(), [])
+        self.assertIn("#9", "".join(tmux.typed_texts()))
 
     def test_no_queue_fetch_is_a_noop(self):
         state = {}
@@ -539,50 +542,8 @@ class TestRunOnceWiring(unittest.TestCase):
         src = inspect.getsource(airuleset.cmd_watchdog)
         self.assertIn("queue_fetch=_watchdog_queue_fetch", src)
 
-    def test_real_fetch_unions_the_three_labels(self):
-        # #1055 P2 (d): ONE `gh issue list --json number,labels` filtered
-        # LOCALLY for the three labels, unioned + deduped + sorted.
-        seen = {"n": 0}
-        fixture = (
-            '[{"number": 5177, "labels": [{"name": "ready-for-review"},'
-            ' {"name": "prio:bounce"}]},'
-            ' {"number": 5310, "labels": [{"name": "needs-gatekeeper"}]},'
-            ' {"number": 3073, "labels": [{"name": "prio:bounce"}]},'
-            ' {"number": 99, "labels": [{"name": "unrelated"}]}]')
-
-        class R:
-            def __init__(self, out):
-                self.returncode = 0
-                self.stdout = out
-                self.stderr = ""
-
-        def fake_run(cmd, **kw):
-            seen["n"] += 1
-            return R(fixture)
-
-        with m.patch("airuleset._repo_root", return_value="/r"), \
-                m.patch("airuleset.resolve_authority", return_value="full"), \
-                m.patch("subprocess.run", side_effect=fake_run):
-            out = airuleset._watchdog_queue_fetch("/r")
-        self.assertEqual(out, [3073, 5177, 5310])   # sorted union, deduped
-        self.assertEqual(seen["n"], 1)              # ONE call, not three
-
-    def test_real_fetch_non_full_authority_returns_none(self):
-        with m.patch("airuleset._repo_root", return_value="/r"), \
-                m.patch("airuleset.resolve_authority",
-                        return_value="fork-no-merge"):
-            self.assertIsNone(airuleset._watchdog_queue_fetch("/r"))
-
-    def test_real_fetch_query_error_is_none(self):
-        class R:
-            returncode = 1
-            stdout = ""
-            stderr = "boom"
-
-        with m.patch("airuleset._repo_root", return_value="/r"), \
-                m.patch("airuleset.resolve_authority", return_value="full"), \
-                m.patch("subprocess.run", return_value=R()):
-            self.assertIsNone(airuleset._watchdog_queue_fetch("/r"))
+    # #1178: the three `_watchdog_queue_fetch` gh-union tests were REMOVED —
+    # the fetch reads the quals snapshot now (test_queue_arrival_own_1178).
 
 
 # Re-homed from the deleted tests/test_riders_floor_latch_780.py (#1084 L2):

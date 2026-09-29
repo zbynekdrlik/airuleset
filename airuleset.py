@@ -7197,84 +7197,24 @@ def _watchdog_ops_wait_fetch(cwd):
                                    argv0=os.path.abspath(__file__))
 
 
-def _watchdog_queue_fetch(cwd, gh_out=None):
-    """#733 — the gk QUEUE UNION (`ready-for-review ∪ needs-gatekeeper ∪
-    prio:bounce`) open issue numbers for the repo at `cwd`, or None on any
-    failure/refusal. The job-20 queue-arrival rider reads this to detect a NEW
-    hand-off landing while an armed FULL-authority session is parked on a waiter.
-
-    FULL-authority ONLY: only a gk/full box PROCESSES this cross-stream union (a
-    reduced stream hands off to gk; its own returned `prio:bounce` is job 8's).
-    Resolved against `_repo_root(cwd=cwd)` so the authority matches what the
-    session's own pane would resolve — a non-full box returns None (the rider
-    also gates, so this is belt-and-suspenders).
-
-    #1055 P2 (d): ONE `gh issue list --json number,labels -L 500` filtered
-    LOCALLY for the three labels, replacing the former THREE per-label queries
-    (never a `label:a,b,c` search string — `prio:bounce` carries a colon that a
-    search qualifier mis-parses; a local set-membership filter has no such
-    problem). Same sorted union, one subprocess instead of three.
-
-    WINDOW CAVEAT (adversarial-review F1, honesty-bar): this ONE `-L 500` window
-    is the newest-CREATED 500 open issues, then locally filtered — NOT the same
-    as the old THREE `-L 200`-PER-LABEL windows. Queue labels
-    (ready-for-review/needs-gatekeeper/prio:bounce) are low-cardinality transient
-    work-queue labels applied to tickets under ACTIVE review, so in practice they
-    sit well inside the newest window and the union is equivalent. The ONE case
-    it is NOT: on a repo with > 500 open issues, a queue label freshly applied to
-    an OLD (low-created-date) ticket falls outside the window and its arrival is
-    not detected until the ticket re-enters the newest 500 — a delayed/missed
-    NUDGE (the rider only wakes an already-parked full-authority pane, which is
-    waiting anyway), never a lost ticket or a wrong keystroke. Accepted as the
-    2-subprocess-saving trade for this lane; `-L 500` (up from the design's 300)
-    widens the headroom. Any query error → None (the #181 fail-safe: an
-    auth/network hiccup must never look like 'no queue'). Wired HERE, like every
-    other network call in this file, so run_once's unit tests stay network-free.
-    `gh_out(cwd)` (injectable for tests) returns the raw stdout string, or None
-    on a gh failure (so an error stays distinguishable from an empty queue)."""
+def _watchdog_queue_fetch(cwd):
+    """#1178 — the box's OWN workable set ("I") for the repo at `cwd`, for the
+    job-20 queue-arrival rider: `[{"id": n, "title": t}]`, or None when
+    unmeasurable. It is the SAME `bucketize` "I" bucket `core-quals --list` (a
+    full-authority box) / `slice-quals --list` (a stream) and the footer count,
+    read from the #1067 per-repo quals snapshot (`ops_wait_refresh.
+    workable_records`, NON-blocking, no gh on the sweep path). A full-authority
+    set already unions every gk hand-off (`ready-for-review` / `needs-gatekeeper`
+    / `gk-processing`, `cli_quals._obligation_quals`), so #733's case stays
+    covered; a bare `prio:bounce` is a stream's own rework (#307) and arrives in
+    that stream's slice instead. Replaces #733's gk-label union, which an
+    owner-filed ticket never entered (#1176/#1177 on 29.9)."""
+    import watchdog.ops_wait_refresh as _owref
     try:
-        root = _repo_root(cwd=cwd) or cwd
-        authority = resolve_authority(cwd=root)
+        cmd_name = _watchdog_quals_cmd(cwd)
     except Exception:
         return None
-    if authority != "full":
-        return None
-    raw = (gh_out or _watchdog_queue_gh)(cwd)
-    if raw is None:                      # #181 fail-safe: gh error, not 'no queue'
-        return None
-    try:
-        rows = json.loads(raw or "[]")
-    except (ValueError, TypeError):
-        return None
-    if not isinstance(rows, list):
-        return None
-    want = {"ready-for-review", "needs-gatekeeper", "prio:bounce"}
-    nums = set()
-    try:
-        for row in rows:
-            labels = {lbl.get("name") for lbl in (row.get("labels") or [])
-                      if isinstance(lbl, dict)}
-            if labels & want:
-                nums.add(int(row["number"]))
-    except (ValueError, KeyError, TypeError, AttributeError):
-        return None
-    return sorted(nums)
-
-
-def _watchdog_queue_gh(cwd):
-    """The default gh runner for `_watchdog_queue_fetch` (#1055 P2): ONE
-    `gh issue list --json number,labels`, counted in the per-sweep subprocess
-    budget. Returns stdout on success, None on any failure/timeout — so the
-    caller keeps the #181 error-vs-empty distinction."""
-    from watchdog.subprocess_budget import run_counted
-    try:
-        r = run_counted(
-            ["gh", "issue", "list", "--state", "open",
-             "--json", "number,labels", "-L", "500"],
-            label="gh", cwd=cwd, capture_output=True, text=True, timeout=15)
-    except Exception:
-        return None
-    return r.stdout if r.returncode == 0 else None
+    return _owref.workable_records(cwd, cmd_name, argv0=os.path.abspath(__file__))
 
 
 def _watchdog_queue_classify(cwd):
@@ -8184,6 +8124,18 @@ def _watchdog_health_probe_fetch(url, timeout=8):
         return resp.status, body
 
 
+def _watchdog_path_fix():
+    """#1178 (c) — put `~/.local/bin` first on the watchdog's PATH. The
+    `api-watchdog.service` unit runs with the systemd user-manager PATH, which
+    has no `~/.local/bin`; on the controller `gh` lives ONLY there (the #1040
+    rate shim + `gh-upstream`), so every watchdog gh call — and the #1067 quals
+    snapshot refresher, which inherits this PATH — died with FileNotFoundError
+    and every rider read `skip:undetermined` for weeks. Fixed here, the single
+    entry point, so no unit reinstall is needed; reuses the SAME idempotent
+    prepend the install path uses (`_claude_cli_env`)."""
+    os.environ["PATH"] = _claude_cli_env()["PATH"]
+
+
 def cmd_watchdog(args):
     """One poll cycle: scan `claude` tmux panes, auto-`continue` the ones stalled
     on an API error, ping on stall + give-up + on a session waiting on the user,
@@ -8254,6 +8206,7 @@ def cmd_watchdog(args):
     # process without this env — is never affected. Set once here (the single
     # wiring point for all enumerated watchdog pollers) rather than per-call.
     os.environ["AIRULESET_GH_POLLER"] = "1"
+    _watchdog_path_fix()   # #1178 (c): gh in ~/.local/bin (the controller)
     # Job 16 (#55) is coordinator-only: every OTHER managed box already writes
     # its own local hourly row via job 13, so only the controller fans out
     # over ssh to merge them. #971: gated on box-class `controller` (was
@@ -8373,10 +8326,8 @@ def cmd_watchdog(args):
                     # release-landed escalation (nudge-branch-only, shared
                     # cache) — TWO job-20 consumers, one fetch.
                     release_state_fetch=_watchdog_release_state_fetch,
-                    # #733 — job 20's gk queue-arrival rider reads the queue
-                    # union per repo (3 exact-label `gh` queries), cached per
-                    # repo per TTL (~5 min) inside the module, FULL-authority
-                    # only. Wired on EVERY box; the rider self-gates authority.
+                    # #733/#1178 — job 20's queue-arrival rider reads THIS box's
+                    # own workable set from the per-repo quals snapshot (no gh).
                     queue_fetch=_watchdog_queue_fetch,
                     # #1029 — the ROLE-AWARE half: on an INFRA-role pane
                     # (gk-infra, role=infra) the rider reads the INFRA queue
@@ -11113,6 +11064,12 @@ def _print_nudges_status(home=None):
         print("profile: <unreadable: %r>" % (e,))
     for k in kinds:
         print("  %s: %s" % (k, "on" if k in on else "off"))
+    try:   # #1178 (c): a persistently blind arrival fetch is never silent
+        from watchdog import queue_arrival_own as _qao
+        for line in _qao.status_lines(home):
+            print(line)
+    except Exception as e:  # noqa: BLE001 — never fail the status
+        print("queue-arrival: <health unreadable: %r>" % (e,))
     # #1023 addendum: recovery revivals are always-on (never suppressed) and not
     # stageable — listed separately so `nudges status` is honest about them.
     recovery = sorted(_wd.RECOVERY_NUDGE_KINDS)

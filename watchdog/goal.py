@@ -194,6 +194,7 @@ from watchdog import session_status as _session_status  # #486 G3 (reaper)
 from watchdog import ops_wait_recheck as _ops_wait_recheck  # #547 (W re-check)
 from watchdog import release_gap as _release_gap             # #616 (release gap)
 from watchdog import queue_arrival_recheck as _queue_arrival  # #733 (gk arrival)
+from watchdog import queue_arrival_own as _queue_own  # #1178 (ended supervisor pane)
 from watchdog import bounce_verdict_recheck as _bounce_verdict  # #1066 (bounce)
 from watchdog import u_freshness as _u_freshness             # #797 (U reconcile)
 from watchdog import lane_reconcile as _lane_reconcile       # #844 (post-compact lane reconcile)
@@ -5658,11 +5659,12 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
             # role gate here keeps the review path untouched — a non-armed
             # review pane must NOT get a review nudge (that is for parked-armed
             # sessions only).
+            _pane_role = None
             if infra_queue_fetch is not None and resolve_role_fn is not None:
                 try:
                     _pane_role = resolve_role_fn(cwd)
                 except Exception:  # noqa: BLE001 — resolver fault => skip (safe)
-                    _pane_role = None
+                    _pane_role = "unresolved"
                 if _pane_role == "infra":
                     logs += _queue_arrival.goal_queue_arrival_recheck(
                         now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run,
@@ -5672,6 +5674,16 @@ def goal_lane_sweep(now, run=None, dry_run=False, projects_dir=None,
                         sleep_fn=sleep_fn, captured=captured,
                         persist=persist, budget_left_fn=_budget_left_fn,  # #1023 timeout-race
                         receipt_post_fn=_queue_arrival._default_hub_receipt_post(cwd))  # #1109
+            # #1178 (b) — a supervisor whose /goal ENDED (cleared, last turn ✅)
+            # learns of new tickets in its own I; delivery held unless idle +
+            # human-quiet. A resolver fault never guesses (skip).
+            if _pane_role in (None, "review", "quality"):
+                logs += _queue_own.ended_pane_recheck(
+                    glance, now, run, qrecs, sid, cwd, pid, tpath, loc, dry_run,
+                    handled, queue_fetch, state, captured=captured,
+                    sleep_fn=sleep_fn, classify_builder=queue_classify,
+                    resolve_role_fn=resolve_role_fn, persist=persist,
+                    budget_left_fn=_budget_left_fn)
             continue
         # #804 -- this stream is CONFIRMED armed this sweep (the STRUCTURED
         # one-glance verdict, not a render guess): refresh its durable roster

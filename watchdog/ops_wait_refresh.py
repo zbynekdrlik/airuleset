@@ -80,7 +80,7 @@ CHILD_MAX_AGE_S = CHILD_TIMEOUT_S + 120
 SNAPSHOT_VERSION = 2
 # every field a success writes and a failure carries forward (never partially)
 _SNAPSHOT_FIELDS = ("v", "members", "members_ts", "open_count", "i_members",
-                    "dispatchable_count", "dispatchable_reason")
+                    "i_titles", "dispatchable_count", "dispatchable_reason")
 # in-process single-flight across the readers of ONE sweep: {cache path: ts}.
 # A just-launched child has not written its pidfile yet, so without this the
 # 2nd and 3rd reader of the same sweep would each spawn again.
@@ -149,7 +149,7 @@ def parse_snapshot(stdout):
     one never costs the backlog count (#1067 1d review F3/F4):
     `ops_wait_members` may be null (that part failed → the ops-wait reader reads
     undetermined), `dispatchable_count` may be None only WITH a reason (#1021),
-    and a malformed `i_members` (no watchdog reader today) is dropped to None."""
+    and a malformed `i_members` / `i_titles` (#1178) is dropped to None."""
     try:
         snap = json.loads(stdout or "")
     except ValueError:
@@ -168,6 +168,10 @@ def parse_snapshot(stdout):
     i_members = snap.get("i_members")
     if not (isinstance(i_members, list) and all(map(_is_int, i_members))):
         snap["i_members"] = None
+    titles = snap.get("i_titles")   # #1178 (absent in an older producer: left absent)
+    if "i_titles" in snap and not (isinstance(titles, dict) and all(
+            isinstance(k, str) and isinstance(v, str) for k, v in titles.items())):
+        snap["i_titles"] = None
     return snap
 
 
@@ -329,6 +333,53 @@ def dispatchable(cwd, cmd_name, argv0=None, now=None, spawn_fn=None,
     return [{"count": count, "reason": reason}]
 
 
+# #1178 — why the LAST `workable_records` read for a cwd came back None, kept
+# in-process for the sweep that asked (the rider copies it into its persisted
+# health record). Pure dict, no filesystem.
+_PROBLEMS = {}
+
+
+def problem(cwd):
+    """The reason the last `workable_records(cwd)` read was undetermined, or
+    None when it was determined (or never read this process)."""
+    return _PROBLEMS.get(cwd)
+
+
+def _snapshot_problem(entry, now):
+    """Plain words for WHY a snapshot entry serves no workable set."""
+    if not isinstance(entry, dict):
+        return "no quals snapshot yet (a refresh was spawned)"
+    detail = entry.get("error_detail")
+    if _failed(entry):
+        kind = next(k for k in ("error", "timeout", "rate_hold") if entry.get(k))
+        return "quals snapshot %s x%s%s" % (
+            kind, entry.get("fail_streak", 1), (": %s" % detail) if detail else "")
+    mts = entry.get("members_ts")
+    if isinstance(mts, (int, float)) and now - mts > MAX_SERVE_AGE_S:
+        return "quals snapshot stale (last good %d min ago)" % ((now - mts) // 60)
+    return "quals snapshot has no I members (older schema)"
+
+
+def workable_records(cwd, cmd_name, argv0=None, now=None, spawn_fn=None,
+                     alive_fn=None):
+    """#1178 — NON-BLOCKING reader of the box's OWN workable set ("I", the SAME
+    `bucketize` bucket `--count`/`--list` and the footer use): the snapshot's
+    `i_members` as `[{"id": n, "title": t}]` (title "" when absent), or None
+    when there is no good snapshot / no `i_members` — never an empty list the
+    caller could read as "the backlog emptied". The reason for a None is kept
+    for `problem(cwd)`."""
+    now = time.time() if now is None else now
+    entry = read_snapshot(cwd, cmd_name, argv0, now, spawn_fn, alive_fn)
+    good = _good_snapshot(entry, now)
+    members = good.get("i_members") if good else None
+    if not (isinstance(members, list) and all(map(_is_int, members))):
+        _PROBLEMS[cwd] = _snapshot_problem(entry, now)
+        return None
+    _PROBLEMS.pop(cwd, None)
+    titles = good.get("i_titles") if isinstance(good.get("i_titles"), dict) else {}
+    return [{"id": n, "title": titles.get(str(n), "")} for n in sorted(members)]
+
+
 def _refresh_unit_name(cwd):
     """The transient systemd unit name for this repo's refresher — the cache key
     makes it per-repo and stable, so `--collect` cleans a finished run and a
@@ -480,15 +531,23 @@ def _spawn_via_popen(repo_root, child_argv, popen_fn, log):
 
 def _default_run(target, cmd_name, argv0):
     """Run ``<cmd_name> --snapshot-json`` for ``target`` with the child's own
-    hard timeout; return ``(returncode, stdout)``. Raises ``_Timeout`` on
-    overrun."""
+    hard timeout; return ``(returncode, stdout, stderr)`` (#1178: the stderr
+    names WHY a derivation failed — the controller's `gh` not on PATH was
+    invisible for weeks). Raises ``_Timeout`` on overrun."""
     try:
         r = subprocess.run(
             [sys.executable, argv0, cmd_name, "--snapshot-json"],
             cwd=target, capture_output=True, text=True, timeout=CHILD_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         raise _Timeout()
-    return r.returncode, r.stdout
+    return r.returncode, r.stdout, r.stderr
+
+
+def _last_line(text):
+    """The last non-blank line of a child's stderr, capped (the snapshot entry
+    stays small), or "" — the one line that says why the derivation failed."""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    return lines[-1][:200] if lines else ""
 
 
 def _default_gh_backoff():
@@ -516,11 +575,13 @@ def _derive(target, cmd_name, argv0, run_fn=None, backoff_fn=None):
         return {"kind": "rate_hold"}
     run = run_fn or _default_run
     try:
-        rc, out = run(target, cmd_name, argv0)
+        got = run(target, cmd_name, argv0)
     except _Timeout:
         return {"kind": "timeout"}
+    rc, out = got[0], got[1]   # a 2-tuple seam (no stderr) stays valid
     if rc != 0:
-        return {"kind": "error"}
+        err = _last_line(got[2]) if len(got) > 2 else ""
+        return {"kind": "error", "detail": err} if err else {"kind": "error"}
     snap = parse_snapshot(out)
     if snap is None:
         return {"kind": "error"}   # malformed output -> undetermined
@@ -548,10 +609,13 @@ def run_refresh_child(target, cmd_name, cache, pid_file, argv0, run_fn=None,
                 "members_ts": entry["ts"],        # last SUCCESSFUL derivation
                 "open_count": snap["open_count"],
                 "i_members": snap["i_members"],
+                "i_titles": snap.get("i_titles"),
                 "dispatchable_count": snap["dispatchable_count"],
                 "dispatchable_reason": snap["dispatchable_reason"]})
         else:                              # "timeout" | "error" | "rate_hold"
             entry[result["kind"]] = True
+            if result.get("detail"):   # #1178: why it failed, for `problem()`
+                entry["error_detail"] = result["detail"]
             streak = prior.get("fail_streak") if _failed(prior) else 0
             entry["fail_streak"] = (streak if _is_int(streak) else 0) + 1
             entry.update({k: prior[k] for k in _SNAPSHOT_FIELDS
