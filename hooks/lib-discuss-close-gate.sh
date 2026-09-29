@@ -22,6 +22,13 @@ _d_owner_check() {
     printf '%s' "$_why"
 }
 
+# #1185: did the ticket EVER carry `needs-acceptance` (a removed label is no
+# escape)? Prints one labeled-event count per page; rc != 0 on a failed read.
+_d_label_history() {
+    timeout 10 gh api "repos/$_D_REPOFULL/issues/$1/events" --paginate \
+        --jq '[.[]|select(.event=="labeled" and .label.name=="needs-acceptance")]|length' 2>&1
+}
+
 # #837: EVERY clean top-level `gh issue close <N>` number (D_NUMS) + the first
 # close segment's -R (D_REPO_ARG, GLUED-tolerant — `-Rx` reads `x`), both from the
 # segmenter, which reads each close segment's own tokens quote/backslash-aware (a
@@ -57,7 +64,21 @@ if [ -n "$_D_NUMS" ]; then
                 _D_JSON=$(gh issue view "$_D_NUM" --json body,comments,labels 2>/dev/null || echo "")
             fi
             if [ -n "$_D_JSON" ]; then
-                _D_VERDICT=$(printf '%s' "$_D_JSON" | python3 "$_DREPO/discuss_close_guard.py" 2>/dev/null || echo "OK")
+                _D_VERDICT=$(printf '%s' "$_D_JSON" | python3 "$_DREPO/discuss_close_guard.py" --report-unbound 2>/dev/null || echo "OK")
+                if [ "$_D_VERDICT" = "UNBOUND" ]; then
+                    # #1185: not bound by a thread / the current label → read the label
+                    # history; a ticket that ever carried needs-acceptance is bound.
+                    _D_RC=0; _D_HIST=$(_d_label_history "$_D_NUM") || _D_RC=$?
+                    if [ "$_D_RC" != 0 ] || ! [[ "$_D_HIST" =~ ^[0-9[:space:]]+$ ]]; then
+                        _D_HIST_WHY="rc $_D_RC: ${_D_HIST:0:120}"
+                        _D_BLOCK_NUM="$_D_NUM"; _D_BLOCK_KIND="HISTORY"; break
+                    fi
+                    _D_SUM=0; for _c in $_D_HIST; do _D_SUM=$((_D_SUM + _c)); done
+                    _D_VERDICT="OK"
+                    if [ "$_D_SUM" -gt 0 ]; then
+                        _D_VERDICT=$(printf '%s' "$_D_JSON" | python3 "$_DREPO/discuss_close_guard.py" --bound 2>/dev/null || echo "OK")
+                    fi
+                fi
                 # #1185: BLOCK-CITED = citations without evidence; OWNER-CHECK =
                 # only an owner issuecomment- cited → verify it online first.
                 case "$_D_VERDICT" in
@@ -70,6 +91,17 @@ if [ -n "$_D_NUMS" ]; then
                 esac
             fi
         done
+        if [ "$_D_BLOCK_KIND" = "HISTORY" ]; then
+            cat >&2 <<MSG
+
+🚫 BLOCKED (airuleset #1185): the needs-acceptance label history of #${_D_BLOCK_NUM}
+could not be read (${_D_HIST_WHY}). A ticket that EVER carried needs-acceptance is
+acceptance-bound (removing the label is no escape), so an unreadable history
+cannot be allowed. Retry once GitHub reads recover, or use the logged bypass
+airuleset:discuss-close-ok  in the close command.
+MSG
+            exit 2
+        fi
         if [ "$_D_BLOCK_KIND" = "OWNER" ]; then
             cat >&2 <<MSG
 
@@ -99,6 +131,7 @@ Cite the Odoo message that IS the acceptance, on the Acceptance-cited line:
       gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: owner ROZHODNUTÉ issuecomment-<id>"
   • the client confirmed in a RECORDED meeting (name the recording):
       gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: meeting <recording id> [mm:ss] <who>"
+    (the spelling "nahrávka <recording id>" counts the same; the id is mandatory)
   • the odoo-erp#8507 auto-close (montalu): the full line from
     skills/odoo-client-messaging/client-board-stages.md rule 6, ending
     "msg <auto-close note id> task <task-id>".

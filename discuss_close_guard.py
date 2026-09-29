@@ -120,7 +120,8 @@ _ACC_CITED_VALUE_RE = re.compile(_MARK_OPEN + r"Acceptance-cited[ \t*]*:[ \t]*(\
 # ruling cited by its GitHub comment counts only once the HOOK has verified the
 # author online (`owner_refs` → CLI `OWNER-CHECK`); `needs-acceptance` binds.
 OWNER_LOGIN = "zbynekdrlik"  # == airuleset.MAINTAINER_GH_LOGIN (test-locked)
-_MEETING_REF_RE = re.compile(r"(?i)\bmeeting[ \t:]+`?[a-z]{3}-[a-z]{4}-[a-z]{3}(?![\w-])")
+_MEETING_REF_RE = re.compile(
+    r"(?i)(?:\bmeeting|nahr[áa]vk[ay])[ \t:]+`?[a-z]{3}-[a-z]{4}-[a-z]{3}(?![\w-])")
 _OWNER_REF_RE = re.compile(
     r"(?i)(?:github\.com/([\w.-]+/[\w.-]+)/(?:issues|pull)/[0-9]+)?#?"
     r"\bissuecomment-([0-9]+)(?![\w-])")
@@ -216,14 +217,15 @@ def has_disposition(text):
     )
 
 
-def evaluate_close(issue_json_text):
+def evaluate_close(issue_json_text, force_bound=False):
     """Return None to ALLOW the close, or a short reason string to BLOCK it.
 
     Blocks IFF the ticket is acceptance-bound AND has no disposition (reason
     `acceptance-cited-without-msg` when only evidence-less citations exist;
     `owner-check` when an owner `issuecomment-` must be verified online, #1185).
     Every unverifiable input (bad JSON, non-object payload) returns None
-    (ALLOW) — the gate's safe default."""
+    (ALLOW) — the gate's safe default. `force_bound` = the hook found a
+    `needs-acceptance` `labeled` event in the issue history (#1185)."""
     try:
         data = json.loads(issue_json_text)
     except Exception:
@@ -231,7 +233,7 @@ def evaluate_close(issue_json_text):
     if not isinstance(data, dict):
         return None
     text = collect_text(data)
-    if is_acceptance_bound(data) and not has_disposition(text):
+    if (force_bound or is_acceptance_bound(data)) and not has_disposition(text):
         if owner_refs(issue_json_text):
             return "owner-check"
         if _ACC_CITED_RE.search(text):
@@ -240,10 +242,17 @@ def evaluate_close(issue_json_text):
     return None
 
 
-def main():
+def main(argv=()):
+    """`--bound`: the label history binds it; `--report-unbound`: print
+    UNBOUND for a parseable ticket that is not bound (the hook then reads the
+    label history). Default output (OK/BLOCK/...) is unchanged."""
     try:
         raw = sys.stdin.read()
-        reason = evaluate_close(raw)
+        reason = evaluate_close(raw, force_bound="--bound" in argv)
+        if (reason is None and "--report-unbound" in argv
+                and not is_acceptance_bound(json.loads(raw))):
+            print("UNBOUND")
+            return 0
         if reason == "owner-check":
             print(" ".join(["OWNER-CHECK", OWNER_LOGIN] + owner_refs(raw)))
             return 0
@@ -254,4 +263,4 @@ def main():
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))
