@@ -52,6 +52,8 @@ from _goal_arm_helpers import (  # noqa: E402
 
 NOW = 1_000_000
 HOUR = 3600
+FLAG_TURN = ("Backlog je prázdny.\n🏁 BACKLOG EMPTY: 0 open, main green\n"
+             "✅ DONE: backlog prázdny, main zelený")
 CWD = "/home/newlevel/devel/qa1178"
 
 
@@ -441,9 +443,17 @@ class TestEndedSupervisorPane(unittest.TestCase):
         self.addCleanup(p.stop)
         self._proj = TemporaryDirectory()
         self.addCleanup(self._proj.cleanup)
-        self.tpath = _write_marker_transcript(self._proj.name, CWD, "sess-1178-end")
+        # the supervisor's goal ended on stop condition (B): its LAST turn
+        # carries the `🏁 BACKLOG EMPTY` proof (supervisor decision on #1178)
+        self.tpath = _write_marker_transcript(self._proj.name, CWD, "sess-1178-end",
+                                              marker_text=FLAG_TURN)
         self.sid = self.tpath.stem
         self.state = {}
+
+    def _append(self, *entries):
+        with open(self.tpath, "a", encoding="utf-8") as f:
+            for e in entries:
+                f.write(json.dumps(e) + "\n")
 
     def _heartbeat(self, marker, armed=False):
         pth = ss.status_path(self.sid)
@@ -478,10 +488,41 @@ class TestEndedSupervisorPane(unittest.TestCase):
         # review F1: no goal_mark verdict → the heartbeat's goal_armed False
         # only means "no marker in the tail" (an interactive session), never
         # "a supervisor whose goal ended".
+        self.tpath = _write_marker_transcript(self._proj.name, CWD, self.sid,
+                                              marker_text="✅ DONE: hotovo")
         self._sweep(NOW, [10], mark=None)
         logs, typed = self._sweep(NOW + 120, [10, 11], mark=None)
         self.assertEqual(typed, [])
         self.assertNotIn(self.sid, self.state.get("queue_arrival", {}))
+
+    def test_flag_last_turn_with_no_user_message_after_gets_the_nudge(self):
+        # supervisor decision: the 🏁 BACKLOG EMPTY last turn IS the proof the
+        # goal ended on stop condition (B) — even when the goal marker itself is
+        # no longer structurally known (no goal_mark record, heartbeat False).
+        self._sweep(NOW, [10], mark=None)
+        logs, typed = self._sweep(NOW + 120, [10, 1176], mark=None)
+        self.assertEqual(len(typed), 1, logs)
+        self.assertIn("#1176", typed[0])
+
+    def test_owner_goal_clear_after_the_flag_gets_nothing(self):
+        # #1143: a goal the owner cleared deliberately is NEVER nudged.
+        self._append(
+            {"type": "user", "message": {"role": "user", "content":
+                "<command-name>/goal</command-name>\n<command-message>goal"
+                "</command-message>\n<command-args>clear</command-args>"}},
+            {"type": "system", "subtype": "local_command", "content":
+                "<local-command-stdout>Goal cleared: backlog</local-command-stdout>"})
+        self._sweep(NOW, [10])
+        logs, typed = self._sweep(NOW + 120, [10, 11])
+        self.assertEqual(typed, [])
+        self.assertNotIn(self.sid, self.state.get("queue_arrival", {}))
+
+    def test_owner_prompt_after_the_flag_gets_nothing(self):
+        self._append({"type": "user", "message": {
+            "role": "user", "content": "pozri ešte ten deploy"}})
+        self._sweep(NOW, [10])
+        logs, typed = self._sweep(NOW + 120, [10, 11])
+        self.assertEqual(typed, [])
 
     def test_a_quality_window_is_not_a_target(self):
         # review F1: only the FLOW (review) supervisor is told to run /autopilot
