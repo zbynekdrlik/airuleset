@@ -127,6 +127,15 @@ def public_drop_hosts(remote_hosts, nodename=None, username=None):
     return out
 
 
+def _drop_disabled(entry):
+    """True iff the entry's `drop` block carries a non-empty `disabled` reason
+    (#1183): a PROJECT account gets no file-drop lane until one is declared, and
+    it must not turn its box into a SHARED drop box (which would rename the
+    existing account's `drop-<box>` host)."""
+    drop = entry.get("drop") if isinstance(entry, dict) else None
+    return isinstance(drop, dict) and bool(drop.get("disabled"))
+
+
 def _is_tailscale_host(host):
     """True iff `host` is a tailscale CGNAT IPv4 (100.64.0.0/10 → 100.64-127.x.x).
 
@@ -203,7 +212,7 @@ def build_drop_lanes(remote_hosts, *, seed, drop_lane_cls,
     # next-free-port fallback is stable regardless of REMOTE_HOSTS ordering.
     pending = []
     for entry in remote_hosts:
-        if cli_fleet.is_paused(entry):
+        if cli_fleet.is_paused(entry) or _drop_disabled(entry):
             continue
         key = (_nodename_for_entry(entry), entry.get("user", ""))
         if key in lanes:
@@ -214,7 +223,7 @@ def build_drop_lanes(remote_hosts, *, seed, drop_lane_cls,
     # Which nodenames host >1 non-paused account (→ shared-box hostnames).
     node_counts = {}
     for entry in remote_hosts:
-        if cli_fleet.is_paused(entry):
+        if cli_fleet.is_paused(entry) or _drop_disabled(entry):
             continue
         node_counts[_nodename_for_entry(entry)] = \
             node_counts.get(_nodename_for_entry(entry), 0) + 1
