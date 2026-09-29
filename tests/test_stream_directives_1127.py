@@ -668,18 +668,24 @@ class TestHookConventions(TestCase):
         for grp in groups:
             cmds = [h["command"] for h in grp["hooks"]]
             by_matcher.setdefault(grp["matcher"], []).extend(cmds)
-        for source in ("compact", "resume", "clear"):
+        for source in ("compact", "clear"):
             self.assertTrue(any("session-start-stream-directives.sh" in c
                                 for c in by_matcher.get(source, [])),
                             (source, by_matcher))
-            # the fetch hook (fast-forward + session_start heartbeat) must
-            # never run mid-session
+            # compact / clear are mid-session events: no fetch hook there
             self.assertFalse(any("session-start-fetch.sh" in c
                                  for c in by_matcher.get(source, [])), source)
-        # startup reaches the step through the fetch hook's EXIT trap (after
-        # its fetch), never as a racing parallel sibling
-        self.assertFalse(any("session-start-stream-directives.sh" in c
-                             for c in by_matcher.get("startup", [])))
+        # #1176 (reverses the #1127 "never on resume" pin, main-session design
+        # issuecomment-5885152361 (d)): every managed session starts with
+        # `claude -c` = source `resume`, so the fetch hook runs there too.
+        # startup AND resume reach the directives step through the fetch
+        # hook's EXIT trap (after its fetch), never as a racing parallel
+        # sibling.
+        for source in ("startup", "resume"):
+            self.assertTrue(any("session-start-fetch.sh" in c
+                                for c in by_matcher.get(source, [])), source)
+            self.assertFalse(any("session-start-stream-directives.sh" in c
+                                 for c in by_matcher.get(source, [])), source)
         self.assertIn("session-start-stream-directives.sh", FETCH_HOOK.read_text())
 
 

@@ -93,6 +93,7 @@ EXPECTED_STANDALONE = [
     "task_hygiene_job",                 # (49) — #1036 Odoo task-hygiene overseer
     "erp_heartbeat",                    # (51) — #959 erp-test box heartbeat
     "watch_triggers",                   # (52) — #1163 watch-steered window triggers
+    "checkout_freshness",               # (53) — #1176 checkout freshness enforcement
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at
