@@ -97,7 +97,7 @@ class _Repos(unittest.TestCase):
         self.g(self.other, "pull", "-q", "--ff-only")
         for i in range(n):
             self.write(self.other, rel, text or "origin change %d\n" % i)
-            self.g(self.other, "add", "-A")
+            self.g(self.other, "add", "-f", "--", rel)   # -f: an ignored rel too
             r = self.g(self.other, "commit", "-qm", "origin %s %d" % (rel, i))
             assert r.returncode == 0, r.stderr
         r = self.g(self.other, "push", "-q", "origin", "develop")
@@ -339,14 +339,14 @@ class TestFooterAndStatus(unittest.TestCase):
         seg = cf.footer_segment(self.home, now=T0)
         self.assertIn("stale 2.6k", seg)
 
-    def test_old_missing_commit_counts_after_one_observed_period(self):
+    def test_stale_is_measured_from_first_observed_lag_only(self):
+        # review 1 finding 8: an old COMMIT date says nothing about when the
+        # checkout fell behind — a week-old commit pushed now must not turn a
+        # 15-min dirty snapshot into `stale`.
         cf = _cf()
         week = T0 - 7 * 86400
-        self._write({"/c": self._lag(since=T0 - 60, behind_since=week)})
-        self.assertEqual(cf.footer_segment(self.home, now=T0), "",
-                         "a single snapshot is never an alarm")
         self._write({"/c": self._lag(since=T0 - 1000, behind_since=week)})
-        self.assertIn("stale 2.6k", cf.footer_segment(self.home, now=T0))
+        self.assertEqual(cf.footer_segment(self.home, now=T0), "")
 
     def test_hidden_when_current_or_watchdog_dead(self):
         cf = _cf()
@@ -435,6 +435,254 @@ class TestDiscoveryAndWiring(unittest.TestCase):
     def test_status_command_prints_the_rows(self):
         import airuleset
         self.assertIn("cli_checkout_freshness", inspect.getsource(airuleset.cmd_status))
+
+
+class TestReviewOneCollisions(_Repos):
+    """Review 1 (🔴 2): ignored local files the old A-only, quoted, full-path
+    collision check let `--ff-only` overwrite."""
+
+    def _ignored(self, rel, text="MY LOCAL DATA\n"):
+        self.write(self.clone, ".gitignore", "%s\n" % rel.split("/")[0])
+        self.g(self.clone, "add", ".gitignore")
+        self.g(self.clone, "commit", "-qm", "ignore")
+        self.g(self.clone, "push", "-q", "origin", "develop")
+        self.write(self.clone, rel, text)
+
+    def _assert_untouched(self, rel):
+        before = self.head()
+        self.run_job(T0)
+        self.assertEqual(self.head(), before)
+        with open(os.path.join(self.clone, rel)) as fh:
+            self.assertEqual(fh.read(), "MY LOCAL DATA\n")
+        self.assertTrue(self.entry()["reason"].startswith("collision"), self.entry())
+
+    def test_rename_onto_an_ignored_file(self):
+        self._ignored("new.txt")
+        self.g(self.other, "pull", "-q", "--ff-only")
+        self.g(self.other, "mv", "notes.txt", "new.txt")
+        self.g(self.other, "commit", "-qm", "rename")
+        self.g(self.other, "push", "-q", "origin", "develop")
+        self._assert_untouched("new.txt")
+
+    def test_non_ascii_path_onto_an_ignored_file(self):
+        self._ignored("déjà.txt")
+        self.advance_origin(rel="déjà.txt", text="origin\n")
+        self._assert_untouched("déjà.txt")
+
+    def test_directory_over_an_ignored_file(self):
+        self._ignored("cfg")
+        self.advance_origin(rel="cfg/settings.ini", text="origin\n")
+        self._assert_untouched("cfg")
+
+    def test_held_index_lock_is_never_raced(self):
+        self.advance_origin()
+        gd = self.g(self.clone, "rev-parse", "--absolute-git-dir").stdout.strip()
+        Path(gd, "index.lock").write_text("")
+        self.addCleanup(lambda: Path(gd, "index.lock").unlink(missing_ok=True))
+        before = self.head()
+        self.run_job(T0)
+        self.assertEqual(self.head(), before)
+        self.assertEqual(self.entry()["reason"], "in-progress (index.lock)")
+
+
+class TestReviewOneRemotes(_Repos):
+    """Review 1 (🔴 3 / 🟡 4): the remote is the branch's own, and a checkout
+    that cannot be proven current is never recorded `current`."""
+
+    def _second_remote(self, name, branches=("develop",)):
+        bare = os.path.join(self.root, "%s.git" % name)
+        self.g(self.root, "clone", "-q", "--bare", self.bare, bare)
+        self.g(self.clone, "remote", "add", name, bare)
+        self.g(self.clone, "fetch", "-q", name)
+        return bare
+
+    def test_tracking_remote_wins_over_an_upstream_without_the_base(self):
+        up = self._second_remote("upstream")
+        self.g(self.clone, "push", "-q", "upstream", "develop:main")
+        self.g(up, "symbolic-ref", "HEAD", "refs/heads/main")
+        self.g(up, "branch", "-D", "develop")    # upstream carries only main
+        self.g(self.clone, "fetch", "-q", "--prune", "upstream")
+        self.g(self.clone, "branch", "-q", "--set-upstream-to=origin/develop")
+        self.advance_origin(n=2)
+        self.run_job(T0, checkouts=[{"path": self.clone, "source": "t",
+                                     "bases": ["develop", "main"]}])
+        self.assertEqual(self.head(), self.origin_head())
+        self.assertEqual(self.entry()["remote"], "origin")
+
+    def test_upstream_tracked_base_is_followed(self):
+        up = self._second_remote("upstream")
+        self.g(self.clone, "branch", "-q", "--set-upstream-to=upstream/develop")
+        work = os.path.join(self.root, "upwork")
+        self.g(self.root, "clone", "-q", "--branch", "develop", up, work)
+        self._ident(work)
+        self.write(work, "app.py", "upstream only\n")
+        self.g(work, "commit", "-qam", "up")
+        self.g(work, "push", "-q", "origin", "develop")
+        self.advance_origin(text="origin only\n")   # origin moves elsewhere
+        self.run_job(T0)
+        with open(os.path.join(self.clone, "app.py")) as fh:
+            self.assertEqual(fh.read(), "upstream only\n")
+        self.assertEqual(self.entry()["remote"], "upstream")
+
+    def test_no_remote_branch_is_lagging_not_current(self):
+        self.g(self.clone, "checkout", "-q", "-b", "dev")
+        self.run_job(T0, checkouts=[{"path": self.clone, "bases": ["dev"],
+                                     "source": "t"}])
+        e = self.entry()
+        self.assertEqual((e["state"], e["reason"]),
+                         ("lagging", "no origin/dev to compare with"))
+
+    def test_failed_fetch_on_an_up_to_date_checkout_is_lagging(self):
+        self.g(self.clone, "remote", "set-url", "origin",
+               os.path.join(self.root, "gone.git"))
+        self.run_job(T0)
+        e = self.entry()
+        self.assertEqual(e["state"], "lagging")
+        self.assertIn("fetch origin failed", e["reason"])
+
+    def test_repo_ssh_command_is_respected(self):
+        cf = _cf()
+        with mock.patch.dict(os.environ, {"GIT_SSH_COMMAND": "", "GIT_SSH": ""}):
+            self.assertIn("BatchMode", cf.ssh_batch_env(self.clone)["GIT_SSH_COMMAND"])
+            self.g(self.clone, "config", "core.sshCommand", "ssh -i deploykey")
+            self.assertEqual(cf.ssh_batch_env(self.clone), {})
+
+
+class TestReviewOneProcessSafety(_Repos):
+    """Review 1 (🔴 1 / 🟡 5-6 / 🟡 12 / 🟡 13): bounded calls end in SIGTERM
+    first, a pipe-holding grandchild cannot hang the call, reads take no
+    optional index lock, merge hooks do not run, the budget holds."""
+
+    def _fake_git(self, body):
+        d = os.path.join(self.root, "fakebin")
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, "git")
+        with open(p, "w") as fh:
+            fh.write("#!/bin/bash\n" + body)
+        os.chmod(p, 0o755)
+        return {"PATH": d + os.pathsep + os.environ["PATH"]}
+
+    def test_pipe_holding_grandchild_cannot_hang_a_call(self):
+        # a background child inherits OUR stdout pipe: a plain
+        # subprocess.run(timeout=) kills `git` and then blocks on the pipe
+        with mock.patch.dict(os.environ, self._fake_git("sleep 60 &\nsleep 60\n")):
+            started = time.monotonic()
+            rc, _ = _cf().run_git(self.clone, ["fetch"], timeout=2)
+        self.assertEqual(rc, 124)
+        self.assertLess(time.monotonic() - started, 15)
+
+    def test_timeout_sends_sigterm_first(self):
+        marker = os.path.join(self.root, "got-term")
+        body = "trap 'touch %s; exit 143' TERM\nsleep 60 & wait\n" % marker
+        with mock.patch.dict(os.environ, self._fake_git(body)):
+            rc, _ = _cf().run_git(self.clone, ["merge"], timeout=1)
+        self.assertEqual(rc, 124)
+        self.assertTrue(os.path.exists(marker), "git must get SIGTERM to clean its locks")
+
+    def test_reads_take_no_optional_index_lock(self):
+        self.assertEqual(_cf().git_env()["GIT_OPTIONAL_LOCKS"], "0")
+
+    def test_merge_hooks_do_not_run(self):
+        hooks = os.path.join(self.root, "hooks")
+        os.makedirs(hooks)
+        marker = os.path.join(self.root, "post-merge-ran")
+        with open(os.path.join(hooks, "post-merge"), "w") as fh:
+            fh.write("#!/bin/sh\ntouch %s\n" % marker)
+        os.chmod(os.path.join(hooks, "post-merge"), 0o755)
+        self.g(self.clone, "config", "core.hooksPath", hooks)
+        self.advance_origin()
+        self.run_job(T0)
+        self.assertEqual(self.head(), self.origin_head())
+        self.assertFalse(os.path.exists(marker))
+
+    def test_merge_deferred_when_the_sweep_cannot_afford_it(self):
+        self.advance_origin()
+        before = self.head()
+        job = _job()
+        self.run_job(T0, budget_left=lambda: job.PER_CHECKOUT_S + 1)
+        self.assertEqual(self.head(), before)
+        e = self.entry()
+        self.assertIn("deferred", e["reason"])
+        self.assertEqual(e["checked"], 0, "due again next sweep")
+        self.run_job(T0 + 60)
+        self.assertEqual(self.head(), self.origin_head())
+
+    def test_job_wall_clock_holds_the_rest(self):
+        ticks = iter([0, 0, 10 ** 6, 10 ** 6])
+        two = [{"path": self.clone, "bases": ["develop"], "source": "a"},
+               {"path": self.other, "bases": ["develop"], "source": "b"}]
+        logs = self.run_job(T0, checkouts=two, clock=lambda: next(ticks))
+        self.assertTrue(any("hold:budget — 1 of 2" in ln for ln in logs), logs)
+
+    def test_budget_constants_value_lock(self):
+        job, cf = _job(), _cf()
+        self.assertGreaterEqual(job.PER_CHECKOUT_S,
+                                job.FETCH_TIMEOUT_S + cf.TERM_GRACE_S + 5)
+        self.assertGreaterEqual(job.MERGE_RESERVE_S,
+                                job.MERGE_TIMEOUT_S + cf.TERM_GRACE_S + 5)
+        self.assertGreaterEqual(job.MIN_BUDGET_S, job.PER_CHECKOUT_S)
+        self.assertLess(job.MERGE_RESERVE_S, 100)
+
+
+class TestReviewOneSurfaces(unittest.TestCase):
+    """Review 1 (🟡 9-11): the footer never blanks the line, resume writes no
+    heartbeat, the registry is scoped to this account."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="t1176-s-")
+        self.addCleanup(shutil.rmtree, self.home, True)
+
+    def test_broken_footer_module_never_blanks_the_statusline(self):
+        import airuleset
+        fake_repo = os.path.join(self.home, "repo")
+        os.makedirs(fake_repo)
+        for name in os.listdir(REPO):
+            if name != "cli_checkout_freshness.py" and not name.startswith("."):
+                os.symlink(os.path.join(REPO, name), os.path.join(fake_repo, name))
+        Path(fake_repo, "cli_checkout_freshness.py").write_text(
+            "raise RuntimeError('boom')\n")
+        shim = os.path.join(self.home, "shim.sh")
+        Path(shim).write_text(airuleset.CAVEMAN_SHIM_CONTENT
+                              .replace("{{REPO_DIR}}", fake_repo)
+                              .replace("{{MANAGED_MODEL}}", airuleset.MANAGED_MODEL))
+        Path(self.home, ".claude.json").write_text(json.dumps(
+            {"oauthAccount": {"emailAddress": "t1176@example.test"}}))
+        env = dict(os.environ, HOME=self.home)
+        env.pop("TMUX_PANE", None)
+        r = subprocess.run(["bash", shim], input=json.dumps({"workspace": {
+            "current_dir": "/tmp/nowhere"}}), capture_output=True, text=True,
+            env=env, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("t1176@example.test", r.stdout)
+        log = Path(self.home, ".claude", "tickets-status", "shim-errors.log")
+        self.assertIn("stale-segment", log.read_text())
+
+    def test_resume_start_writes_no_heartbeat(self):
+        from _hook_state_cleanup import hermetic_hook_env as _env
+        status_dir = os.path.join(self.home, "hb")
+        for source, expect in (("resume", 0), ("startup", 1)):
+            env = _env(self, AIRULESET_SESSION_STATUS_DIR=status_dir)
+            subprocess.run(["bash", str(FETCH_HOOK)], cwd=self.home, env=env,
+                           input=json.dumps({"session_id": "hb-%s" % source,
+                                             "source": source}),
+                           capture_output=True, text=True, timeout=60)
+            got = os.listdir(status_dir) if os.path.isdir(status_dir) else []
+            self.assertEqual(len([f for f in got if source in f]), expect, got)
+
+    def test_registry_scoped_to_this_accounts_home(self):
+        os.makedirs(os.path.join(self.home, "devel/claudy/.git"))
+        reg = os.path.join(self.home, "reg.json")
+        Path(reg).write_text(json.dumps([
+            {"name": "claudy", "host": "controller", "path": "~/devel/claudy",
+             "work_branch": "dev", "default_branch": "main"},
+            {"name": "other", "host": "controller", "path": "~/devel/other"}]))
+        skipped = []
+        got = _job().discover_checkouts(home=self.home, user="claudy",
+                                        hostname="airuleset", windows=[],
+                                        registry_path=reg, skipped=skipped)
+        self.assertEqual([c["source"] for c in got], ["registry:claudy"])
+        self.assertEqual(len(skipped), 1)
+        self.assertIn("registry:other", skipped[0])
 
 
 if __name__ == "__main__":
