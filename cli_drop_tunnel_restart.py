@@ -18,10 +18,11 @@ Before the overlap it checks, from the live unit (`systemctl show`), that the
 unit really runs the config drop-gateway edits (else restarting it could never
 serve the new ingress — the #1191 dominika/marek config-path class), renders
 the overlap unit next to the lane's unit, and makes sure the main unit carries
-`TUNNEL_PIDFILE` (the registration signal the overlap waits on). A unit whose
-text the repo renders already sets it (`cli_webterm_tunnel.
-render_cloudflared_tunnel_unit`); a hand-managed unit (spinbike) gets it as a
-systemd drop-in. Any unmet precondition = a LOUD plain restart, never a guess.
+`TUNNEL_PIDFILE` (the registration signal the overlap waits on). A unit the
+repo renders today sets it (`cli_webterm_tunnel.render_cloudflared_tunnel_unit`);
+one that lacks it — spinbike's hand-managed unit, or the marek/dominika units
+rendered before #1189 and no longer rendered on subdev — gets it as a systemd
+drop-in. Any unmet precondition = a LOUD plain restart, never a guess.
 
 Stdlib-only leaf: every command goes through the injected `run` (the
 `subprocess.run` seam drop-gateway's tests already fake).
@@ -52,10 +53,10 @@ def _prefix(lane):
         else ["systemctl", "--user"]
 
 
-def _call(run, argv, env, stdin=None):
+def _call(run, argv, env, stdin=None, timeout=_RUN_TIMEOUT_S):
     """`run(argv)` → (rc, stdout, stderr). Never raises (an exception is rc 1
     with its text as stderr, which every caller prints)."""
-    kw = dict(capture_output=True, text=True, env=env, timeout=_RUN_TIMEOUT_S)
+    kw = dict(capture_output=True, text=True, env=env, timeout=timeout)
     if stdin is not None:
         kw["input"] = stdin
     try:
@@ -108,19 +109,17 @@ def _exec_binary(exec_start):
 
 def _pidfile_gap(lane, props, want):
     """Why the main unit's `TUNNEL_PIDFILE` cannot be relied on (a reason), "" when
-    it is set to `want`, or None when a drop-in may add it. Only a SYSTEM unit gets
-    a drop-in: airuleset renders the `--user` lane units itself and never writes
-    their drop-ins (cli_webterm_marek/dominika) — their render carries it."""
+    it is set to `want`, or None when a drop-in must add it — for a `--user` lane
+    too: the live marek/dominika units predate the #1189 render and are no longer
+    rendered on their box (LANE_HOST = controller), so nothing else ever will."""
+    if props.get("EnvironmentFiles"):     # overrides Environment= (systemd.exec)
+        return ("%s reads an EnvironmentFile, which can override TUNNEL_PIDFILE"
+                % lane.tunnel_service)
     have = [e for e in props.get("Environment", "").split()
             if e.startswith("TUNNEL_PIDFILE=")]
     if have:
         return "" if have[-1] == want else (
             "%s sets %s, not %s" % (lane.tunnel_service, have[-1], want))
-    if not lane.tunnel_system_unit:
-        return "%s lacks %s (re-render the lane unit)" % (lane.tunnel_service, want)
-    if props.get("EnvironmentFiles"):
-        return ("%s reads an EnvironmentFile, which would override a TUNNEL_PIDFILE "
-                "drop-in" % lane.tunnel_service)
     return None
 
 
@@ -226,6 +225,23 @@ def _pending_path(lane) -> Path:
     return Path(lane.tunnel_config).with_suffix(".restart-pending")
 
 
+def _mark_pending(lane):
+    try:
+        _pending_path(lane).touch()
+    except OSError as e:
+        print("  drop-gateway: LOUD — cannot write %s (%s); a failed restart will "
+              "not be retried automatically." % (_pending_path(lane), e),
+              file=sys.stderr)
+
+
+def write_config(lane, text):
+    """Write `lane`'s edited tunnel config, marking its restart PENDING first, so
+    a death between this write and the restart is retried by the next install
+    instead of leaving an ingress that is on disk but never loaded."""
+    _mark_pending(lane)
+    Path(lane.tunnel_config).write_text(text, encoding="utf-8")
+
+
 def retry_pending(lane) -> bool:
     """True when a previous restart of `lane`'s tunnel did not succeed (its
     pending marker, written before every restart and removed only on success, is
@@ -242,6 +258,9 @@ def _restart(lane, run, plain_argv, env, unit_dir, sleep, clock):
             ok, shape = cli_tunnel_apply.overlap_restart(
                 systemctl, lane.tunnel_service, lane.tunnel_config, sleep=sleep,
                 clock=clock, lane="(drop %s)" % lane.host)
+            if ok:      # the overlap is stopped — no leftover for a later run
+                cli_tunnel_apply.overlap_pidfile(lane.tunnel_config).unlink(
+                    missing_ok=True)
             return ok, shape, "" if ok else "see the LOUD line above"
     except Exception as e:
         print("  drop-gateway: LOUD — overlap restart of %s errored (%r); the "
@@ -251,7 +270,14 @@ def _restart(lane, run, plain_argv, env, unit_dir, sleep, clock):
     print("  drop-gateway: LOUD — no overlap for %s (%s); PLAIN restart — the "
           "tunnel is DARK for its grace period (#1191)."
           % (lane.tunnel_service, reason), file=sys.stderr)
-    rc, _o, err = _call(run, list(plain_argv), env)
+    # Blocking, and it drains the full 30 s grace: no subprocess timeout.
+    rc, _o, err = _call(run, list(plain_argv), env, timeout=None)
+    leftover = cli_tunnel_apply.overlap_pidfile(lane.tunnel_config)
+    if rc == 0 and leftover.exists():
+        # A failed earlier run left its overlap serving; it bridged this restart.
+        systemctl(["stop", "--no-block",
+                   cli_tunnel_apply.overlap_service_name(lane.tunnel_service)])
+        leftover.unlink(missing_ok=True)
     return rc == 0, "plain", err.strip()
 
 
@@ -263,13 +289,8 @@ def restart_lane_tunnel(lane, run, *, plain_argv, env, unit_dir=None,
     overlap is LEFT SERVING, `cli_tunnel_apply.overlap_restart` — or the restart
     errored). Anything but success leaves the `retry_pending` marker, so the next
     install retries even though the config is unchanged. Never raises."""
-    pending = _pending_path(lane)
-    try:
-        pending.touch()
-    except OSError as e:
-        print("  drop-gateway: LOUD — cannot write %s (%s); a failed restart "
-              "will not be retried automatically." % (pending, e), file=sys.stderr)
+    _mark_pending(lane)
     ok, shape, detail = _restart(lane, run, plain_argv, env, unit_dir, sleep, clock)
     if ok:
-        pending.unlink(missing_ok=True)
+        _pending_path(lane).unlink(missing_ok=True)
     return ok, shape, detail

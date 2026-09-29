@@ -52,9 +52,9 @@ go-live.
    the same tunnel serves while the main unit restarts, so the tunnel never goes
    dark. On spinbike (SYSTEM unit) this runs `sudo -n systemctl` and needs the
    grant to cover every command of the overlap (the owner-VPS `NOPASSWD:ALL`
-   grant does; each is checked with `sudo -n -l`), plus a `TUNNEL_PIDFILE`
-   drop-in when the hand-managed unit lacks it; a `--user` lane runs
-   `systemctl --user` against its rendered unit. Any unmet precondition prints a
+   grant does; each is checked with `sudo -n -l`); a `--user` lane runs
+   `systemctl --user`. Either kind gets a `TUNNEL_PIDFILE` drop-in when its
+   unit lacks it. Any unmet precondition prints a
    LOUD line and falls back to the plain `systemctl restart` (dark for the grace
    period). A restart that did not succeed leaves `<config>.restart-pending`,
    so the next install retries it.

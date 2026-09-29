@@ -866,7 +866,7 @@ def cmd_drop_gateway(args):
         return 0
 
     if changed:
-        Path(my_lane.tunnel_config).write_text(augmented, encoding="utf-8")
+        cli_drop_tunnel_restart.write_config(my_lane, augmented)  # marks pending (#1191)
         print("  wrote %s (drop ingress added, existing entries preserved)"
               % my_lane.tunnel_config)
 
@@ -1037,7 +1037,7 @@ def reconcile_drop_ingress_on_install(run=None, nodename=None, marker_path=None,
                          lane.host, lane.port), file=sys.stderr)
         if augmented == config_text and not cli_drop_tunnel_restart.retry_pending(lane):
             return True                         # present + applied (#1191) — no restart
-        Path(lane.tunnel_config).write_text(augmented, encoding="utf-8")
+        cli_drop_tunnel_restart.write_config(lane, augmented)  # marks pending (#1191)
         ok, shape, detail = _restart_lane_tunnel(lane, run)
         if not ok:
             print("  drop-gateway: re-added the drop ingress to %s but the %s "
