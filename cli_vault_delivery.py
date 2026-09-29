@@ -112,11 +112,14 @@ def emit_urls(prog, public_host, token, ips, private_line, is_live, *,
     import cli_drop_lanes as _dl
     out = out or sys.stdout
     err = err or sys.stderr
-    private = [private_line(ip) for ip in ips
-               if not str(ip).startswith("127.") and is_live(ip)]
+    live = [ip for ip in ips if is_live(ip)]
+    # Loopback is never offered as a FALLBACK beside a public URL (the owner
+    # cannot reach it). With no public lane it is the pre-#1189 private path,
+    # unchanged: every live bind prints, loopback included, never zero URLs.
+    private = [private_line(ip) for ip in live if not str(ip).startswith("127.")]
     if not public_host:
-        for line in private:
-            print(line, file=out)
+        for ip in live:
+            print(private_line(ip), file=out)
         print(_dl.channel_fallback_line(fallback_reason or _dl.CHANNEL_NO_LANE,
                                         prog=prog), file=err)
         return "private"
