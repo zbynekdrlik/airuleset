@@ -193,6 +193,40 @@ class TestEvidenceShapes(TestCase):
                 self.assertIsNone(g.evaluate_close(_issue(
                     body="x", labels=("needs-acceptance",), comments=[line])))
 
+    def test_discord_message_url_passes(self):
+        # FINAL ROZHODNUTÉ (issuecomment-5895570572): a Discord message URL is
+        # durable, linkable evidence
+        for line in ("Acceptance-cited: CEO David na Discorde „sedí“ "
+                     "https://discord.com/channels/1234567890/2345678901/3456789012",
+                     "Acceptance-cited: <https://discord.com/channels/1/2/3>",
+                     "Acceptance-cited: https://discordapp.com/channels/11/22/33 👍"):
+            with self.subTest(line=line):
+                self.assertIsNone(g.evaluate_close(_issue(
+                    body="x", labels=("needs-acceptance",), comments=[line])))
+
+    def test_malformed_discord_url_blocks(self):
+        for line in ("Acceptance-cited: https://discord.com/channels/abc/2/3",
+                     "Acceptance-cited: https://discord.com/channels/1/2",
+                     "Acceptance-cited: https://discord.com/channels/1/2/3x",
+                     "Acceptance-cited: https://evil.example/discord.com/channels/1/2/3",
+                     "Acceptance-cited: https://discord.com.evil.example/channels/1/2/3",
+                     "Acceptance-cited: http://discord.com/channels/1/2/3",
+                     "Acceptance-cited: CEO David, Discord 2026-09-23: „sedi“"):
+            with self.subTest(line=line):
+                self.assertEqual(g.evaluate_close(_issue(
+                    body="x", labels=("needs-acceptance",), comments=[line])),
+                    "acceptance-cited-without-msg")
+
+    def test_session_only_and_payment_citations_stay_blocked(self):
+        for line in ("Acceptance-cited: CEO David, 2026-09-28 (session david2, webterm) "
+                     "— odpoveď „sedi“",
+                     "Acceptance-cited: client David confirmed in-session on 2026-09-28",
+                     "Acceptance-cited: Stripe LIVE pi_3UIoxlH… (Apple Pay, 0,50 €, succeeded)"):
+            with self.subTest(line=line):
+                self.assertEqual(g.evaluate_close(_issue(
+                    body="x", labels=("needs-acceptance",), comments=[line])),
+                    "acceptance-cited-without-msg")
+
     def test_meeting_citation_without_recording_id_blocks(self):
         for line in ("Acceptance-cited: call výroba 29.9.2026 — Patrik: „plne funkčné“",
                      "Acceptance-cited: meeting 29.9.2026 s výrobou",
@@ -318,6 +352,15 @@ class TestCliAndHook(TestCase):
                 r = self._hook(payload)
                 self.assertEqual(r.returncode, 2, r.stderr)
 
+    def test_hook_cited_block_names_the_forms_and_the_durable_ask(self):
+        r = self._hook(SWEEP["odoo-erp#6885"])
+        self.assertEqual(r.returncode, 2, r.stderr)
+        err = " ".join(r.stderr.split())
+        self.assertIn('"Acceptance-cited: https://discord.com/channels/<guild>/<channel>/<message>"', err)
+        self.assertIn("A confirmation said only inside a webterm/Claude session is not "
+                      "evidence: ask the client to confirm in a durable channel", err)
+        self.assertIn("a stream-bot comment or a payment event is never acceptance", err)
+
     def test_hook_cited_block_names_the_three_exits(self):
         r = self._hook(SWEEP["odoo-erp#6885"])
         self.assertEqual(r.returncode, 2, r.stderr)
@@ -442,9 +485,10 @@ class TestDoctrine(TestCase):
             "`msg <id>` (the client's message/reaction, an owner/client stage "
             "move's tracking message, or the auto-close note), `meeting <recording "
             "id>`/`nahrávka <recording id>` (a recorded call), or an owner ROZHODNUTÉ "
-            "`issuecomment-<id>` "
-            "(the hook verifies its author online); a stage a stream set is never "
-            "acceptance (#1185)", text)
+            "`issuecomment-<id>` (the hook verifies its author online), or a Discord "
+            "message URL (`https://discord.com/channels/<g>/<c>/<m>`); a session-only "
+            "confirmation, a stream-bot comment or a payment is never acceptance, nor "
+            "is a stage a stream set (#1185)", text)
         self.assertIn("the `needs-acceptance` label also binds the ticket, even "
                       "once removed (a task link alone does not); a `--reason \"not "
                       "planned\"` close is never checked", text)
@@ -452,13 +496,13 @@ class TestDoctrine(TestCase):
     def test_stages_rule6_names_the_owner_exit(self):
         text = " ".join(STAGES.read_text(encoding="utf-8").split())
         self.assertIn("the close gate rejects an `Acceptance-cited:` with no `msg "
-                      "<id>`, `meeting <recording id>` or owner `issuecomment-<id>` "
-                      "(#1185)", text)
+                      "<id>`, `meeting <recording id>`, owner `issuecomment-<id>` or "
+                      "Discord message URL (#1185)", text)
 
     def test_compose_close_line_names_the_owner_exit(self):
         text = " ".join(COMPOSE.read_text(encoding="utf-8").split())
         self.assertIn("`Acceptance-cited:` bez `msg <id>`/`meeting <id>`/"
-                      "`issuecomment-<id>` BLOKUJE", text)
+                      "`issuecomment-<id>`/Discord URL BLOKUJE", text)
 
 
 if __name__ == "__main__":
