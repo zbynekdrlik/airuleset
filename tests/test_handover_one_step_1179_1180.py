@@ -141,14 +141,16 @@ def _entry_user(text, meta=False):
     return e
 
 
-def _entry_tool(cmd, name="Bash", tid=None):
+def _entry_tool(cmd, name="Bash", tid=None, error=False):
     tid = tid or ("t" + uuid.uuid4().hex[:8])
     inp = {"command": cmd} if name == "Bash" else cmd
+    res = {"type": "tool_result", "tool_use_id": tid, "content": "ok"}
+    if error:
+        res.update(is_error=True, content="Exit code 2")
     return [
         {"type": "assistant", "message": {"role": "assistant", "content": [
             {"type": "tool_use", "id": tid, "name": name, "input": inp}]}},
-        {"type": "user", "message": {"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": tid, "content": "ok"}]}},
+        {"type": "user", "message": {"role": "user", "content": [res]}},
     ]
 
 
@@ -513,6 +515,160 @@ class TestSupersededMemory(unittest.TestCase):
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("superseded", p.stdout.lower())
         self.assertIn("#1166", p.stdout)
+
+
+# --------------------------------------------------------------------------- #
+# Review-1 regressions (fresh-context adversarial review, 29.9.2026) — every case
+# below was a reproduced false block / slip-through / hidden failure.
+# --------------------------------------------------------------------------- #
+QUESTION_BODY = "<p>Skúsili ste 20 mm? Stačí napísať číslo.</p>"
+ACC = 'gh issue comment 8606 --body "Acceptance-thread: %s"'
+
+
+class TestStopGateReview1(unittest.TestCase):
+    def test_question_with_both_loose_words_is_not_a_handover(self):
+        self.assertEqual(_verdict(_turn(_post(1192, QUESTION_BODY))), "allow")
+
+    def test_no_stage_move_post_is_not_a_handover(self):
+        self.assertEqual(_verdict(_turn(_post(1192, HANDOVER_BODY,
+                                              extra=" --no-stage-move"))), "allow")
+
+    def test_heredoc_reply_allowed_heredoc_handover_blocked(self):
+        cmd = ("python3 scripts/odoo_post.py --model project.task --res-id 1192 "
+               "--body \"$(cat <<'EOF'\n%s\nEOF\n)\"")
+        self.assertEqual(_verdict(_turn(cmd % REPLY_BODY)), "allow")
+        self.assertEqual(_verdict(_turn(cmd % HANDOVER_BODY)), "block")
+
+    def test_also_tasks_are_settled_by_the_handover_run(self):
+        cmds = (_post(981, HANDOVER_BODY, extra=" --handover --also-tasks 979 980"),
+                ACC % (TASK_URL % 979))
+        self.assertEqual(_verdict(_turn(*cmds)), "allow")
+
+    def test_chained_post_and_comment_are_judged_per_segment(self):
+        post = _post(1192, HANDOVER_BODY)
+        self.assertEqual(_verdict(_turn(post + " && gh issue comment 7 --body posted")),
+                         "block")
+        hand = _post(1192, HANDOVER_BODY, extra=" --handover")
+        self.assertEqual(_verdict(_turn(hand + " && " + ACC % (TASK_URL % 1192))), "allow")
+
+    def test_wrapped_invocations_are_posts(self):
+        body = json.dumps(HANDOVER_BODY, ensure_ascii=False)
+        for cmd in ("timeout 60 python3 scripts/odoo_post.py --model project.task "
+                    "--res-id 1192 --body %s" % body,
+                    "python3 -m scripts.odoo_post --model project.task --res-id 1192 "
+                    "--body %s" % body,
+                    "bash -c %s" % json.dumps(
+                        "python3 scripts/odoo_post.py --model project.task --res-id 1192 "
+                        "--body '%s'" % HANDOVER_BODY, ensure_ascii=False)):
+            with self.subTest(cmd=cmd[:40]):
+                self.assertEqual(_verdict(_turn(cmd)), "block")
+
+    def test_other_comment_shapes_are_acceptance_comments(self):
+        d = tempfile.mkdtemp()
+        f = os.path.join(d, "acc.md")
+        Path(f).write_text("Acceptance-thread: %s\n" % (TASK_URL % 1192), encoding="utf-8")
+        for cmd in ("gh issue close 8606 --comment 'Acceptance-thread: %s'" % (TASK_URL % 1192),
+                    "gh api repos/o/r/issues/8606/comments -F body=@%s" % f,
+                    "gh api repos/o/r/issues/8606/comments -f body='Acceptance-thread: %s'"
+                    % (TASK_URL % 1192)):
+            with self.subTest(cmd=cmd[:30]):
+                self.assertEqual(_verdict(_turn(cmd)), "block")
+
+    def test_a_stage_id_read_or_grep_is_not_a_move(self):
+        read = ("python3 - <<'EOF'\nprint(m.execute_kw(db, uid, k, 'project.task', "
+                "'read', [[1192]], {'fields': ['stage_id']}))\nEOF")
+        for ev in (read, "grep -rn stage_id notes/1192.md"):
+            with self.subTest(ev=ev[:20]):
+                self.assertEqual(_verdict(_turn(ev, ACC % (TASK_URL % 1192))), "block")
+
+    def test_a_heredoc_write_to_verification_is_a_move(self):
+        write = ("python3 - <<'EOF'\nm.execute_kw(db, uid, k, 'project.task', 'write', "
+                 "[[1192], {'stage_id': VERIF}])\nEOF")
+        self.assertEqual(_verdict(_turn(write, ACC % (TASK_URL % 1192))), "allow")
+
+    def test_a_failed_or_dry_handover_run_settles_nothing(self):
+        entries = [_entry_user("owner: pošli")]
+        entries.extend(_entry_tool(_post(1192, HANDOVER_BODY, extra=" --handover"), error=True))
+        entries.extend(_entry_tool(ACC % (TASK_URL % 1192)))
+        self.assertEqual(_verdict(_transcript(entries)), "block")
+        dry = _post(1192, HANDOVER_BODY, extra=" --handover --dry-run")
+        self.assertEqual(_verdict(_turn(dry, ACC % (TASK_URL % 1192))), "block")
+
+    def test_a_failed_post_owes_nothing(self):
+        entries = [_entry_user("owner: pošli")]
+        entries.extend(_entry_tool(_post(1192, HANDOVER_BODY), error=True))
+        self.assertEqual(_verdict(_transcript(entries)), "allow")
+
+    def test_discuss_handover_naming_tasks_owes_their_move(self):
+        body = HANDOVER_BODY + "<p>Úlohy: %s</p>" % (TASK_URL % 644)
+        post = _post(783, body, model="discuss.channel")
+        self.assertEqual(_verdict(_turn(post)), "block")
+        move = "python3 scripts/odoo-task-sync.py move --task 644 --stage Verifikácia"
+        self.assertEqual(_verdict(_turn(post, move)), "allow")
+
+    def test_mcp_write_with_configured_verification_id_is_a_move(self):
+        from gates import handover
+        entries = [_entry_user("owner: pošli")]
+        entries.extend(_entry_tool({"model": "project.task", "method": "write",
+                                    "ids": [644], "values": {"stage_id": 2880}},
+                                   name="mcp__odoo__call"))
+        entries.extend(_entry_tool(ACC % (TASK_URL % 644)))
+        tp = _transcript(entries)
+        self.assertEqual(handover.evaluate(tp, "ok", "/tmp", verif_id=2880)[0], "allow")
+        self.assertEqual(handover.evaluate(tp, "ok", "/tmp", verif_id=2879)[0], "block")
+
+    def test_bypass_must_be_its_own_line_with_a_reason(self):
+        t = _turn(_post(1192, HANDOVER_BODY))
+        self.assertEqual(_verdict(t, msg="Escape je `airuleset:handover-ok <reason>`.\n✅ DONE"),
+                         "block")
+        self.assertEqual(_verdict(t, msg="airuleset:handover-ok x\n✅ DONE"), "block")
+
+
+class TestJob49Review1(unittest.TestCase):
+    def test_degraded_without_guarded_marks_a_unknown_and_never_stop_gates_it(self):
+        fake = Fake([_task(1, 2879)], [_m(10, 1, CLIENT, 3 * 1440)], deny_reactions=True)
+        r = th.compute_hygiene(fake.call, CFG, now=NOW)
+        self.assertEqual([x["task_id"] for x in r["A"]], [1])
+        self.assertTrue(r["A"][0]["reaction_unknown"])
+        st = th.persist_status(r, home=tempfile.mkdtemp())
+        self.assertEqual(st["a"], 1)
+        self.assertIsNone(st["a_oldest_ts"])
+
+    def test_degraded_with_guarded_keeps_a_gateable(self):
+        class Guarded(Fake):
+            def call(self, model, method, **body):
+                if method == "message_reactions_guarded":
+                    return []
+                return super().call(model, method, **body)
+        fake = Guarded([_task(1, 2879)], [_m(10, 1, CLIENT, 3 * 1440)], deny_reactions=True)
+        r = th.compute_hygiene(fake.call, CFG, now=NOW)
+        self.assertNotIn("reaction_unknown", r["A"][0])
+
+    def test_unaccented_handover_is_h(self):
+        body = "<p>Co skusit: export</p><p>staci 👍</p>"
+        fake = Fake([_task(1192, 2879)], [_m(1, 1192, STREAM, 30, body)])
+        self.assertEqual([x["task_id"] for x in
+                          th.compute_hygiene(fake.call, CFG, now=NOW)["H"]], [1192])
+
+    def test_h_read_error_logged_once_per_day(self):
+        import cli_handover_hygiene as hh
+        state, res = {}, {"h_error": "class H read failed: boom"}
+        day1 = datetime.datetime(2026, 9, 29, 8, tzinfo=datetime.timezone.utc).timestamp()
+        self.assertEqual(len(hh.daily_notes(res, state, day1)), 1)
+        self.assertEqual(hh.daily_notes(res, state, day1 + 3600), [])
+        self.assertEqual(len(hh.daily_notes(res, state, day1 + 86400)), 1)
+
+
+class TestInstallStepReportsSupersededMemory(unittest.TestCase):
+    def test_install_step_line(self):
+        import airuleset
+        home = tempfile.mkdtemp()
+        d = os.path.join(home, ".clau" + "de", "projects",
+                         "-home-montalu4-devel-odoo-odoo-erp", "memory")
+        os.makedirs(d)
+        Path(d, "b.md").write_text("Board tasks: no assignee.\n", encoding="utf-8")
+        lines = airuleset._run_doctrine_audit_step(home=home, repo_dir=None)
+        self.assertTrue(any("#1179" in ln and "contradict" in ln for ln in lines), lines)
 
 
 if __name__ == "__main__":
