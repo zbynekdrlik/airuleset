@@ -18,7 +18,9 @@ it ALSO carries a disposition line:
     thread are still open (the note goes once, at the last close, never N
     times).
   * `Acceptance-cited: … msg <id>` / `Acceptance-defer: <reason>` (#891; the
-    cited value needs a `msg <id>`, #1185 — see `_MSG_REF_RE`).
+    cited value needs a `msg <id>` or an owner `issuecomment-<id>`, #1185).
+#1185 ROZHODNUTÉ also binds a ticket with an Odoo task link or the
+`needs-acceptance` label (`is_acceptance_bound`).
 
 Target property (owner): the LAST message in the thread is ALWAYS from the
 sub-dev, written when the LAST ticket bound to the thread closes. WHO writes
@@ -69,7 +71,7 @@ gh-fetch error and an unextractable issue number (fall through = allow).
 
 INTERFACE. `evaluate_close(issue_json_text) -> None | str` — None ALLOWS the
 close, a short reason string BLOCKS it. `issue_json_text` is the raw output
-of `gh issue view <N> --json body,comments`. The CLI (`python3
+of `gh issue view <N> --json body,comments,labels`. The CLI (`python3
 discuss_close_guard.py`, stdin → stdout) prints "OK", "BLOCK" or (#1185)
 "BLOCK-CITED", which the hook branches on. Stdlib only (this repo's convention).
 """
@@ -113,6 +115,11 @@ _ACC_DEFER_RE = re.compile(_MARK_OPEN + r"Acceptance-defer" + _MARK_TAIL)
 # so a cited value needs `msg <id>` (also `msg #N`, `message_id=N`, `mail.message
 # **N**`); a placeholder or a date (`msg 29.9.`) never counts.
 _ACC_CITED_VALUE_RE = re.compile(_MARK_OPEN + r"Acceptance-cited[ \t*]*:[ \t]*(\S[^\n]*)")
+# ROZHODNUTÉ issuecomment-5894541407: an owner ruling cited by its GitHub comment
+# (`…#issuecomment-5874238532`, the odoo-erp#3171 shape) also counts; the task
+# link / `needs-acceptance` label bind like a thread (the 29.9 sweep shape).
+_OWNER_REF_RE = re.compile(r"(?i)\bissuecomment-[0-9]+(?![\w-])")
+_TASK_URL_RE = re.compile(r"/odoo/project/[0-9]+/tasks/[0-9]+")
 _MSG_REF_RE = re.compile(
     r"(?i)(?<![\w.])(?:msgs?|messages?|mail[._]message)(?:[ \t]*_?ids?)?"
     r"[ \t\u00a0*#:=.(-]*[0-9]+(?!\w|\.[0-9])"
@@ -168,29 +175,39 @@ def is_thread_bound(text):
     )
 
 
-def has_msg_citation(text):
-    """True iff SOME `Acceptance-cited:` line carries a `msg <id>` on that
-    same line (#1185); a msg id elsewhere on the ticket is not the evidence."""
-    return any(_MSG_REF_RE.search(v) for v in _ACC_CITED_VALUE_RE.findall(text))
+def is_acceptance_bound(data):
+    """#1185: thread-bound, OR an Odoo task link, OR the `needs-acceptance`
+    label. Malformed `labels` fall back to the text signals."""
+    labels = data.get("labels")
+    names = [x.get("name") for x in labels if isinstance(x, dict)] if isinstance(labels, list) else []
+    text = collect_text(data)
+    return is_thread_bound(text) or bool(_TASK_URL_RE.search(text)) or "needs-acceptance" in names
+
+
+def has_cited_evidence(text):
+    """True iff SOME `Acceptance-cited:` line carries a `msg <id>` or an owner
+    `issuecomment-<id>` on that same line (#1185); elsewhere does not count."""
+    return any(_MSG_REF_RE.search(v) or _OWNER_REF_RE.search(v)
+               for v in _ACC_CITED_VALUE_RE.findall(text))
 
 
 def has_disposition(text):
     """True iff the ticket carries a disposition line with a real value —
     either the legacy `Discuss-closed:`/`Discuss-defer:` OR the
     channel-agnostic `Acceptance-defer:` (#891), each value-blind, OR an
-    `Acceptance-cited:` whose value carries a `msg <id>` (#1185)."""
+    `Acceptance-cited:` whose value carries evidence (#1185)."""
     return bool(
         _CLOSED_RE.search(text)
         or _DEFER_RE.search(text)
         or _ACC_DEFER_RE.search(text)
-        or has_msg_citation(text)
+        or has_cited_evidence(text)
     )
 
 
 def evaluate_close(issue_json_text):
     """Return None to ALLOW the close, or a short reason string to BLOCK it.
 
-    Blocks IFF the ticket is thread-bound AND carries no disposition (reason
+    Blocks IFF the ticket is acceptance-bound AND has no disposition (reason
     `acceptance-cited-without-msg` when only msg-less citations exist, #1185).
     Every unverifiable input (bad JSON, non-object payload) returns None
     (ALLOW) — the gate's safe default."""
@@ -201,7 +218,7 @@ def evaluate_close(issue_json_text):
     if not isinstance(data, dict):
         return None
     text = collect_text(data)
-    if is_thread_bound(text) and not has_disposition(text):
+    if is_acceptance_bound(data) and not has_disposition(text):
         if _ACC_CITED_RE.search(text):
             return "acceptance-cited-without-msg"
         return "thread-bound-no-closing-note"

@@ -461,9 +461,9 @@ if [ "$_d_run_gate" = "1" ]; then
                 if [ -n "${AIRULESET_DISCUSS_CLOSE_FIXTURE:-}" ] && [ -f "${AIRULESET_DISCUSS_CLOSE_FIXTURE}" ]; then
                     _D_JSON=$(cat "${AIRULESET_DISCUSS_CLOSE_FIXTURE}" 2>/dev/null || echo "")
                 elif [ -n "$_D_REPO_ARG" ]; then
-                    _D_JSON=$(gh issue view "$_D_NUM" -R "$_D_REPO_ARG" --json body,comments 2>/dev/null || echo "")
+                    _D_JSON=$(gh issue view "$_D_NUM" -R "$_D_REPO_ARG" --json body,comments,labels 2>/dev/null || echo "")
                 else
-                    _D_JSON=$(gh issue view "$_D_NUM" --json body,comments 2>/dev/null || echo "")
+                    _D_JSON=$(gh issue view "$_D_NUM" --json body,comments,labels 2>/dev/null || echo "")
                 fi
                 if [ -n "$_D_JSON" ]; then
                     _D_VERDICT=$(printf '%s' "$_D_JSON" | python3 "$_DREPO/discuss_close_guard.py" 2>/dev/null || echo "OK")
@@ -489,6 +489,8 @@ Cite the Odoo message that IS the acceptance, on the Acceptance-cited line:
   • a client message or reaction, or the owner's/client's own stage move (its
     chatter tracking message) — name its author:
       gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: msg <message-id> task <task-id>"
+  • the owner accepted on the client's behalf (an owner ROZHODNUTÉ comment):
+      gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: owner ROZHODNUTÉ issuecomment-<id>"
   • the odoo-erp#8507 auto-close (montalu): the full line from
     skills/odoo-client-messaging/client-board-stages.md rule 6, ending
     "msg <auto-close note id> task <task-id>".
@@ -502,11 +504,12 @@ MSG
             if [ -n "$_D_BLOCK_NUM" ]; then
                 cat >&2 <<MSG
 
-🚫 BLOCKED: this ticket has a bound client acceptance thread
-(a Discuss-thread:/Acceptance-thread: line, or a discuss.channel_<N> deep URL
-on the ticket — the URL alone binds, #695) but carries no closing-note
-evidence — closing it now would leave the client thread with our message (or
-their question) as the LAST message, then silence (airuleset #627/#891).
+🚫 BLOCKED: this ticket is bound to client acceptance
+(a Discuss-thread:/Acceptance-thread: line, a discuss.channel_<N> deep URL —
+the URL alone binds, #695 — or, #1185, an Odoo task link
+(/odoo/project/<pid>/tasks/<tid>) or the needs-acceptance label) but it
+carries no closing-note or acceptance evidence — closing it now would leave
+the client thread with our message (or their question) as the LAST message, then silence (airuleset #627/#891).
 
 Whoever closes the ticket carries the obligation — it FOLLOWS THE TICKET to
 its current owner, never the author. Before this ticket is closed, post a
@@ -516,7 +519,8 @@ evidence on THIS ticket. Add ONE of:
   • the client's acceptance is on record and the closing note was posted (this
     is the LAST ticket bound to the thread) — cite the ACCEPTANCE message:
       gh issue comment ${_D_BLOCK_NUM} --body "Acceptance-cited: msg <message-id>"
-    (legacy: Discuss-closed: msg <message-id> also accepted)
+    (legacy: Discuss-closed: msg <message-id> also accepted); the owner
+    accepted on the client's behalf → "Acceptance-cited: owner ROZHODNUTÉ issuecomment-<id>"
 
   • the thread STAYS OPEN because sibling tickets remain (the closing note goes
     at the LAST close, not here — name the still-open siblings):

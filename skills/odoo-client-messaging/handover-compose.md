@@ -247,7 +247,7 @@ owner-approved BEFORE posting.
   (the gatekeeper never posts to the client thread). HOOK-ENFORCED:
   `hooks/block-fork-no-merge-issue-close.sh` BLOCKS a `gh issue close` of a
   thread-bound odoo-erp ticket with no such disposition, for any authority.
-  `Acceptance-cited:` bez `msg <id>` BLOKUJE — Hotovo nastavené streamom nie je
+  `Acceptance-cited:` bez `msg <id>`/`issuecomment-<id>` BLOKUJE — Hotovo nastavené streamom nie je
   akceptácia (#1185).
   Bypass a genuine non-client/meta ticket: `airuleset:discuss-close-ok`.
 
@@ -262,7 +262,7 @@ owner-approved BEFORE posting.
   — NIKDY nečaká na per-ticket udalosť. Každý close nesie **`Acceptance-cited: vlákno „<meno>"
   (discuss.channel_<N>) / msg <id>`**; **`Acceptance-cited:` je DÔKAZ aj
   dispozícia (#891 channel-agnostic reversal)** — channel-agnostic close marker
-  (nahrádza `Discuss-closed:` pre task-chatter). Rodina STÁLE nesie citáciu na
+  (aj pre task-chatter). Rodina STÁLE nesie citáciu na
   VŠETKÝCH ticketoch; `Acceptance-defer:` pre ne-posledný. Batchovanie draftov
   rodiny: `modules/core/statusline-vocabulary.md` (#755/#606).
 

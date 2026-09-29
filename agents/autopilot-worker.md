@@ -62,8 +62,12 @@ Closing a foreign ticket yourself removes the hand-off event and bypasses the re
 exists to enforce. **A ticket that BOUND a client acceptance thread may be closed ONLY after the thread's
 closing note is posted** — record the binding `Acceptance-thread: <ref>` (or legacy `Discuss-thread: <channel-id>`) on the ticket when you
 open/first-post-into the thread, and before ANY close of a thread-bound ticket record
-`Acceptance-cited: msg <id>` (the closing note was posted — the LAST ticket of the thread) or
-`Acceptance-defer: <siblings #A #B still open>` (a non-last sibling); legacy `Discuss-closed:`/`Discuss-defer:` are also accepted.
+`Acceptance-cited:` with the ACCEPTANCE evidence on that same line — `msg <id>` (the client's
+message/reaction, an owner/client stage move's tracking message, or the auto-close note) or an owner
+ROZHODNUTÉ `issuecomment-<id>`; a stage a stream set is never acceptance (#1185) — once the closing
+note is posted (the LAST ticket of the thread), or
+`Acceptance-defer: <siblings #A #B still open>` (a non-last sibling); legacy `Discuss-closed:`/`Discuss-defer:` are also accepted;
+an Odoo task link or the `needs-acceptance` label also binds the ticket.
 `block-fork-no-merge-issue-close.sh`
 enforces this for EVERY authority (airuleset #627/#891), the obligation follows the ticket's current owner
 never the author, and you compose the note per `skills/odoo-client-messaging/handover-compose.md`.

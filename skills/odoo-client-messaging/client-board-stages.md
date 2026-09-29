@@ -12,12 +12,12 @@ On the **miva** profile the stage names differ: awaiting client verification = *
 
 Moving a task to the profile's **awaiting-client-verification** stage
 (**Verifikácia** / **Na overenie** / **Čaká**) REQUIRES a chatter note
-(`message_post` on the task) with exactly these sections, in this order:
+(`message_post`) with exactly these sections, in this order:
 
 1. **Čo** — one sentence: what was delivered
 2. **Kde** — the menu path AND a functional `https://` deep-link URL to the exact
    page/record/action on the client's PROD, verified 200 before posting
-   (`handover-compose.md` URL rule — never a bare menu path or the homepage)
+   (`handover-compose.md`: never a bare menu path or homepage)
 3. **Čo skúsiť** — one sentence: what the employee should try / verify
 4. **`stačí 👍`** — literal closing line (a 👍 reaction confirms acceptance;
    `read-reactions.md` detects it)
@@ -28,8 +28,8 @@ the removal of a never-delivered feature stay OUT.
 
 The note CONTENT is **PLAIN PROSE** (no rich formatting, no `@`-mention anchors,
 no `partner_ids`) — except on **montalu** ONE mention anchor for the addressed
-person (rule 5), its partner in `partner_ids`; the TRANSPORT uses `body_is_html=True` per the
-`handover-compose.md` posting rules. The shape is Stop-checked.
+person (rule 5), its partner in `partner_ids`; the TRANSPORT uses `body_is_html=True` per
+`handover-compose.md`. The shape is Stop-checked.
 
 **ONE step (#1180):** post it via `odoo_post.py --handover` (odoo-erp#8606:
 post + rule-5 assignee + move; until it ships, move + assign by hand, same
@@ -58,8 +58,9 @@ family acceptance: one confirmation closes the family).
 A Hotovo/Hotové a STREAM account set is never acceptance evidence — acceptance
 is a client message or reaction (`msg <id>`), the owner's own move after a
 confirmation or the client's own move (its tracking `msg <id>`), or the
-odoo-erp#8507 auto-close note below; the close gate
-rejects an `Acceptance-cited:` with no `msg <id>` (#1185).
+odoo-erp#8507 auto-close note below; the close gate rejects an
+`Acceptance-cited:` with neither `msg <id>` nor an owner-ruling
+`issuecomment-<id>` (#1185).
 
 On **montalu** a task in Verifikácia also reaches Hotovo by the odoo-erp#8507
 auto-close (owner ROZHODNUTÉ 28.9.2026, #1167): ONE reminder after 14 days
