@@ -352,6 +352,11 @@ class TestIssueRefs(unittest.TestCase):
     def test_none_text_is_empty(self):
         self.assertEqual(dg.issue_refs(None), [])
 
+    def test_hyphen_prefixed_ref_is_a_ref(self):
+        # `pre-#1189` names issue 1189: a hyphen before `#` must not hide the
+        # ref (push Pass A, commit corpus audit, 29.9.2026).
+        self.assertEqual(dg.issue_refs("keeps the pre-#1189 private path"), [1189])
+
     def test_prose_issue_n_is_deliberately_not_a_ref(self):
         # #122 -- "issue N" prose (no `#`) is the SANCTIONED way to mention a
         # historical/context ticket in a commit message WITHOUT triggering
