@@ -91,15 +91,38 @@ class _Resp:
         return False
 
 
-class FakeGitHub:
-    """A fake `urlopen`: records every request, answers the two endpoints."""
+AIR_REPO = "zbynekdrlik/airuleset"
+AIR_TOKEN = GHS + "Fake1199Airuleset" * 3
+AIR_EXPIRES = "2026-09-30T12:05:00Z"
+AIR_PERMS = {"issues": "write", "metadata": "read"}
 
-    def __init__(self, installed=True, scoped_to=None, token=TOKEN):
+
+class FakeGitHub:
+    """A fake `urlopen`: records every request, answers the two endpoints.
+    #1199: the second mint (``repositories: ["airuleset"]``) is answered per
+    ``air``: "ok", "wide" (extra permissions), "scope" (extra repo) or an HTTP
+    status int. The default 422 is the live state before the owner adds
+    airuleset to the App installation."""
+
+    def __init__(self, installed=True, scoped_to=None, token=TOKEN, air=422):
         self.installed = installed
         self.scoped_to = scoped_to or [REPO]
         self.token = token
+        self.air = air
         self.requests = []
         self.ctypes = []
+
+    def _air(self, url):
+        if isinstance(self.air, int):
+            raise urllib.error.HTTPError(url, self.air, "err", {}, io.BytesIO(
+                b'{"message":"There is at least one repository that does not '
+                b'exist or is not accessible to the parent installation."}'))
+        perms = dict(AIR_PERMS, contents="write") if self.air == "wide" else AIR_PERMS
+        repos = [AIR_REPO] + ([REPO] if self.air == "scope" else [])
+        return _Resp(201, {"token": AIR_TOKEN, "expires_at": AIR_EXPIRES,
+                           "permissions": perms,
+                           "repositories": [{"name": r.split("/")[1], "full_name": r}
+                                            for r in repos]})
 
     def __call__(self, req, timeout=None):
         body = json.loads(req.data.decode()) if req.data else None
@@ -116,6 +139,8 @@ class FakeGitHub:
             return _Resp(200, {"id": INSTALLATION, "app_slug": pgt.APP_SLUG})
         if url == ("https://api.github.com/app/installations/%d/access_tokens"
                    % INSTALLATION):
+            if (body or {}).get("repositories") == ["airuleset"]:
+                return self._air(url)
             return _Resp(201, {
                 "token": self.token, "expires_at": EXPIRES,
                 "permissions": {"contents": "write"},
@@ -727,7 +752,8 @@ class TestReviewMint(_Base):
     def test_the_mint_post_is_json(self):
         rc, out, err, gh, ssh = self.mint()
         self.assertEqual(rc, 0, err)
-        self.assertEqual(gh.ctypes, [None, "application/json"])
+        # #1199: the second (airuleset) mint is a JSON POST too
+        self.assertEqual(gh.ctypes, [None, "application/json", "application/json"])
 
     def test_a_failed_dry_run_records_nothing(self):
         rc, out, err, gh, ssh = self.mint(gh=FakeGitHub(installed=False),
@@ -742,6 +768,16 @@ class TestReviewMint(_Base):
         self.assertIn("(in 30 min)", line)
         line = pgt.status_line("fohmixer", now=exp + 600, directory=self.state)
         self.assertIn("(EXPIRED 10 min ago)", line)
+
+
+def verify_out(repos=(REPO,), gh="/home/fohmixer/.local/bin/gh", issues=422,
+               pulls=403):
+    """The `verify` probe's stdout (#1199 format): the gh path, the primary
+    token's repos, then the airuleset write probe (issues) + its control
+    (pulls), each section ending in its exit code."""
+    return ("%s\n@@primary\n%s@@rc 0\n@@issues\ngh: probe (HTTP %s)\n@@rc 1\n"
+            "@@pulls\ngh: probe (HTTP %s)\n@@rc 1\n"
+            % (gh, "".join(r + "\n" for r in repos), issues, pulls))
 
 
 class TestReviewVerify(unittest.TestCase):
@@ -760,8 +796,7 @@ class TestReviewVerify(unittest.TestCase):
         return got, calls, out.getvalue() + err.getvalue()
 
     def test_ok_when_gh_is_the_chain_and_answers_the_repo(self):
-        got, calls, text = self.run_verify(
-            "/home/fohmixer/.local/bin/gh\nzbynekdrlik/fohmixer\n")
+        got, calls, text = self.run_verify(verify_out())
         self.assertEqual(got, 0, text)
         argv = calls[0]
         self.assertIn("fohmixer@100.104.8.125", argv)
@@ -770,11 +805,10 @@ class TestReviewVerify(unittest.TestCase):
         self.assertIn("gh api installation/repositories", argv[-1])
 
     def test_fails_on_another_repo_or_a_gh_off_the_chain(self):
-        for stdout in ("/home/fohmixer/.local/bin/gh\nzbynekdrlik/other\n",
-                       "/usr/bin/gh\nzbynekdrlik/fohmixer\n", ""):
+        for stdout in (verify_out(repos=("zbynekdrlik/other",)),
+                       verify_out(gh="/usr/bin/gh"), ""):
             self.assertEqual(self.run_verify(stdout)[0], 1, stdout)
-        self.assertEqual(self.run_verify(
-            "/home/fohmixer/.local/bin/gh\nzbynekdrlik/fohmixer\n", rc=1)[0], 1)
+        self.assertEqual(self.run_verify(verify_out(), rc=1)[0], 1)
 
     def test_cli_verify_needs_one_account(self):
         with redirect_stderr(io.StringIO()):
@@ -850,8 +884,7 @@ class TestRound2Verify(unittest.TestCase):
     run_verify = TestReviewVerify.run_verify
 
     def test_probe_is_one_login_shell_argument_listing_the_installation(self):
-        got, calls, text = self.run_verify(
-            "/home/fohmixer/.local/bin/gh\nzbynekdrlik/fohmixer\n")
+        got, calls, text = self.run_verify(verify_out())
         self.assertEqual(got, 0, text)
         import shlex
         words = shlex.split(calls[0][-1])
@@ -861,8 +894,7 @@ class TestRound2Verify(unittest.TestCase):
 
     def test_a_token_that_sees_more_repos_fails(self):
         self.assertEqual(self.run_verify(
-            "/home/fohmixer/.local/bin/gh\nzbynekdrlik/fohmixer\n"
-            "zbynekdrlik/other\n")[0], 1)
+            verify_out(repos=(REPO, "zbynekdrlik/other")))[0], 1)
 
 
 
