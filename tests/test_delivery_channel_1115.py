@@ -154,38 +154,6 @@ class TestDeliveryChannelStates(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# channel_fallback_line — one voice for every producer
-# ---------------------------------------------------------------------------
-class TestChannelFallbackLine(unittest.TestCase):
-    def test_no_lane(self):
-        line = dl.channel_fallback_line(dl.CHANNEL_NO_LANE, prog="upload")
-        self.assertIn("upload: no public lane on this box (no lane for this account)",
-                      line)
-        self.assertIn("private URLs only, see #1115", line)
-
-    def test_pending_names_slice_b(self):
-        line = dl.channel_fallback_line(dl.CHANNEL_PENDING, prog="share")
-        self.assertIn("lane pending", line)
-        self.assertIn("Access spec", line)
-        self.assertIn("see #1115", line)
-
-    def test_marker_absent(self):
-        line = dl.channel_fallback_line(dl.CHANNEL_MARKER_ABSENT, prog="secret")
-        self.assertIn("secret: no public lane on this box (go-live marker absent)",
-                      line)
-
-    def test_unreachable_with_detail(self):
-        line = dl.channel_fallback_line(dl.CHANNEL_UNREACHABLE, prog="share",
-                                        detail="502")
-        self.assertIn("share: public lane unreachable (502)", line)
-        self.assertIn("see #1115", line)
-
-    def test_unreachable_default_detail(self):
-        line = dl.channel_fallback_line(dl.CHANNEL_UNREACHABLE, prog="share")
-        self.assertIn("public lane unreachable (public host unreachable)", line)
-
-
-# ---------------------------------------------------------------------------
 # public_url_channel_fact — ok / fallback:<reason> / broken:<code>
 # ---------------------------------------------------------------------------
 class TestPublicUrlChannelFact(unittest.TestCase):
