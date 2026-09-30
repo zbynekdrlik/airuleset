@@ -871,9 +871,9 @@ _I_ACTION_ONLY_CLAUSE = (
 # (members + stale!/recheck!/gk-handoff! tags live in `slice-quals --ops-wait`).
 # `%d` = W count. #1197: waiting on the OWNER = U (`needs-owner-action`), never W.
 _W_TRIGGER = (
-    "W=%d: `slice-quals --ops-wait`, Discuss 1×/hod (#607), over blockery "
-    "(release = #588 deployed-state, nie run-terminal), zlož `ops-wait` s dôkazom; "
-    "čaká na OWNERA → U needs-owner-action, nikdy W (#601/#1197); gk #636.")
+    "W=%d: `slice-quals --ops-wait`, Discuss 1×/hod #607, over blockery (#588 "
+    "deployed-state, nie run-terminal), zlož `ops-wait` s dôkazom; čaká na "
+    "OWNERA → U needs-owner-action, nikdy W #601/#1197; gk → hand-off #636.")
 
 
 def _flag_items(w_members, release_landed, stagnation_count=0,

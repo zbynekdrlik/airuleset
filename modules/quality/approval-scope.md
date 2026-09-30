@@ -20,7 +20,7 @@ This is the rule the user has repeated more than any other, with growing anger. 
 
 The USER — and ONLY the user — decides when prod is live and stops Claude in the moment. Claude does not reason about it, raise it, plan around it, or warn about it. "This is a live-streaming / broadcast / hardware project, so I'll be careful about prod" is the EXACT banned inference, in any wording or language.
 
-**Reconciliation with U (#1197):** this ban covers asking about event TIMING and deferring rig/prod work Claude can do itself (SSH/MCP); it never authorizes parking owner-only real-world completion (an owner-run event, a physical step, a consent) in `W` — that is `U` (`needs-owner-action`) per #601.
+**Reconciliation with U (#1197):** this ban covers asking about event TIMING and deferring rig/prod work Claude can do itself (SSH/MCP); it never authorizes parking owner-only real-world completion (an owner-run event, a physical step) in `W` — that is `U` (`needs-owner-action`) per #601.
 
 #### Automatic by default (no approval) — the WHOLE flow
 
