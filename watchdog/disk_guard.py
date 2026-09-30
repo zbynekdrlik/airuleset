@@ -3528,7 +3528,12 @@ def file_severe_ticket(status, home, now, top, dry_run=False, run_fn=None,
     repo, label = _esc.resolve_target(windows)
     title, body = _esc.compose(status, hostname, top, _human, TARGET_PCT,
                                window=_esc.infra_window(windows))
-    how = "gk-request" if label is None else "%s [%s]" % (repo, label)
+    import airuleset as _ars
+    argv = None if label is not None else _esc.airuleset_filer_argv(
+        repo, title, body, os.path.dirname(os.path.abspath(_ars.__file__)),
+        sys.executable)   # gk-request, or (#1199) native `gh` on a project account
+    via = "gk-request" if argv is None or "gk-request" in argv else "gh issue create"
+    how = via if label is None else "%s [%s]" % (repo, label)
     logs = []
     line = _log_line(now, "SEVERE-TICKET", hostname, status["worst_pct"],
                      "filing %s: %s" % (how, title))
@@ -3544,12 +3549,6 @@ def file_severe_ticket(status, home, now, top, dry_run=False, run_fn=None,
             if created:   # the issue exists: a re-file would duplicate it
                 _mark_severe_ticket_filed(state_path, now, ref)
             return logs
-        import airuleset as _ars
-        repo_dir = os.path.dirname(os.path.abspath(_ars.__file__))
-        # gk-request, or (#1199) a native `gh issue create` on a project account
-        argv = _esc.airuleset_filer_argv(repo, title, body, repo_dir,
-                                         sys.executable)
-        via = "gk-request" if "gk-request" in argv else "gh issue create"
         r = run_fn(argv, capture_output=True, text=True, timeout=60)
         if getattr(r, "returncode", 1) != 0:
             _dbg("severe ticket %s failed rc=%s: %s"

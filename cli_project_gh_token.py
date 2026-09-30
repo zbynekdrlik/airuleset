@@ -546,10 +546,10 @@ _SHIM = r"""#!/usr/bin/env bash
 set -u
 _dir="$HOME/.config/gh-app-tokens"
 # #1199: a call that targets zbynekdrlik/airuleset (a -R/--repo value, or a
-# `gh api` path under repos/zbynekdrlik/airuleset, or a whole-argument
-# airuleset issue/PR URL) uses the issues-only airuleset token; everything
-# else uses primary. Only a flag's VALUE, an api path or a whole URL argument
-# decides, so ordinary title/body prose never routes.
+# `gh api` path under repos/zbynekdrlik/airuleset, or a POSITIONAL airuleset
+# issue/PR URL) uses the issues-only airuleset token; everything else uses
+# primary. Only a -R/--repo VALUE, an api path or a positional URL decides,
+# so title/body text (a URL included) never routes.
 _is_air() {
   local v="${1,,}"
   v="${v#https://}"; v="${v#http://}"; v="${v#www.}"; v="${v#github.com/}"
@@ -565,9 +565,12 @@ for _a in "$@"; do
     --repo=*) _is_air "${_a#--repo=}" && _tok="zbynekdrlik__airuleset" ;;
     -R?*) _is_air "${_a#-R}" && _tok="zbynekdrlik__airuleset" ;;
   esac
-  case "${_a,,}" in
-    https://github.com/zbynekdrlik/airuleset/issues/*|https://github.com/zbynekdrlik/airuleset/pull/*)
-      _tok="zbynekdrlik__airuleset" ;;
+  case "$_prev" in
+    -*) ;;    # a flag's value (--body/--title <url>) never routes
+    *) case "${_a,,}" in
+         https://github.com/zbynekdrlik/airuleset/issues/*|https://github.com/zbynekdrlik/airuleset/pull/*)
+           _tok="zbynekdrlik__airuleset" ;;
+       esac ;;
   esac
   if [ "$_sub" = api ]; then
     _p="${_a,,}"; _p="${_p#https://api.github.com}"; _p="${_p#/}"
@@ -893,7 +896,8 @@ def refresh_shim(path=None):
     0755. An already-live account otherwise keeps the old shim, which routes
     every call to ``primary``, until a root re-bootstrap. Returns True when it
     rewrote. Any other file (an odoo-style App shim, no shim) is left alone."""
-    if path is None and os.environ.get("PYTEST_CURRENT_TEST"):
+    from watchdog.disk_guard_escalation import running_under_pytest
+    if path is None and running_under_pytest():
         return False    # a test driving cmd_install never rewrites a real home
     path = path or os.path.expanduser("~/.local/bin/gh-app-shim")
     if not is_project_shim(path):
@@ -902,10 +906,15 @@ def refresh_shim(path=None):
         if fh.read() == _SHIM:
             return False
     tmp = "%s.tmp.%d" % (path, os.getpid())
-    with open(tmp, "w", encoding="utf-8") as fh:
-        fh.write(_SHIM)
-    os.chmod(tmp, 0o755)
-    os.replace(tmp, path)
+    try:
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(_SHIM)
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, path)       # a concurrent exec sees old or new, never half
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)          # ENOSPC etc.: never leave a temp in ~/.local/bin
+        raise
     print("  gh-app-shim refreshed (#1199: routes zbynekdrlik/airuleset to its "
           "issues token)")
     return True
