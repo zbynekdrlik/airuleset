@@ -24,14 +24,13 @@ A recording / audio / video, an image or screenshot, a PDF, a CSV / dataset / ex
 python3 ~/devel/airuleset/airuleset.py share <path-to-file>
 ```
 
-It copies the file into the always-on file-drop server (systemd `--user`, runs on dev1 AND dev2) and prints **one clickable URL per private interface** — the tailscale IP AND the LAN IP — because the user switches networks (sometimes on tailscale, sometimes on the LAN); a single-IP link kept being unreachable on the network he was NOT on:
+It copies the file into the always-on file-drop server (systemd `--user`) and prints **ONE public HTTPS URL** — `https://drop-<box>.newlevel.media/s/<token>/<name>`, TLS (+ Cloudflare Access on an Access lane) via the box's drop tunnel — after checking that the local origin answers and the public URL answers 200/302:
 
 ```
-http://100.104.8.125:8788/<token>/<name>   ← tailscale
-http://10.77.9.165:8788/<token>/<name>     ← LAN
+https://drop-dev1.newlevel.media/s/<token>/<name>   [verejné cez Cloudflare tunnel — šifrované (TLS), Access]
 ```
 
-The unguessable token IS the link's authorization (click-to-open, no login). The command auto-prunes old files, binds every private interface (never the box's PUBLIC IP), and 200-checks each URL before printing it. Present ALL printed URLs to the user — they open whichever their current network reaches. If it errors, fix the file-drop service (it's yours — `airuleset.py filedrop status`), do not fall back to a path.
+The unguessable token IS the link's authorization. When the public lane is missing or dead the command prints **NO URL** and exits 1 with a line naming `--private` — fix the lane (`airuleset.py drop-gateway`), never fall back. **Tailscale/LAN URLs are NEVER handed to the owner by default** (owner 30.9.2026, #1192: tailscale gives access to machines that must not be openly reachable); `share --private` prints them only when he explicitly asks. If it errors, fix the file-drop service (it's yours — `airuleset.py filedrop status`), do not fall back to a path.
 
 #### Banned (intent — all rewordings and semantic equivalents)
 
@@ -40,4 +39,4 @@ The unguessable token IS the link's authorization (click-to-open, no login). The
 - Relying ONLY on a file-attachment tool (it can fail — e.g. `Invalid tool parameters`) and giving up to a `/tmp` path → **WRONG.** The URL is mandatory; an attachment may be sent IN ADDITION, never instead.
 - Presenting the URL without it returning 200, or using `localhost`/`127.0.0.1` → **WRONG** (`no-localhost-urls.md`).
 
-The intent: every file the user needs lands in their hands as one clickable LAN link — never a path they can't reach, never a "can't be linked" excuse. Applies to all file types and all rewordings.
+The intent: every file the user needs lands in their hands as one clickable public link — never a path they can't reach, never a "can't be linked" excuse. Applies to all file types and all rewordings.

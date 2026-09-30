@@ -346,7 +346,8 @@ def _secret_apply_remainder(args):
         if tok == "--":
             rest.pop(0)
             break
-        if tok in ("--stdin", "--replace", "--allow-plain", "--public"):
+        if tok in ("--stdin", "--replace", "--allow-plain", "--public",
+                   "--private"):
             setattr(args, tok[2:].replace("-", "_"), True)
             rest.pop(0)
             continue
@@ -487,9 +488,9 @@ def _secret_show(args):
     ips, dropped = _secret_select_ips(private,
                                       allow_plain=getattr(args, "allow_plain", False))
 
-    # Public-TLS drop lane (#664): same tailscale -> public fallback as request.
-    public_host, port, bind_ip = _secret_public_lane(args)
-    _fallback_reason = None            # #1115 Slice C: WHY the private fallback
+    # #1192: the public lane ONLY; --private = the tailscale path; no lane = exit 1.
+    public_host, port, bind_ip = cli_vault_delivery.select_lane(
+        "secret show", _secret_public_lane(args), getattr(args, "private", False))
     if public_host:
         if getattr(args, "port", None) or getattr(args, "allow_plain", False):
             print("secret show: public drop lane — ignoring --port/--allow-plain "
@@ -503,8 +504,6 @@ def _secret_show(args):
                   file=sys.stderr)
             sys.exit(1)
     else:
-        import cli_drop_lanes as _dl
-        _, _fallback_reason = _dl.delivery_channel()
         if not ips:
             print("secret show: only unencrypted interfaces are available (%s). A "
                   "credential would cross the LAN in cleartext — re-run with "
@@ -555,12 +554,14 @@ def _secret_show(args):
               file=sys.stderr)
         sys.exit(1)
 
-    cli_vault_delivery.emit_urls(       # #1189: probe public, private fallback
-        "secret show", public_host, token, ips,
-        lambda ip: _secret_url_line(ip, port, token),
-        lambda ip: _live(_secret_health_url(ip, port)),
-        origin_ip=bind_ip, fallback_reason=_fallback_reason,
-        log=lambda ev: st.log_event(ev, label))
+    if cli_vault_delivery.emit_urls(    # #1192: ONE public URL, or none
+            "secret show", public_host, token, ips,
+            lambda ip: _secret_url_line(ip, port, token),
+            lambda ip: _live(_secret_health_url(ip, port)),
+            private=getattr(args, "private", False), origin_ip=bind_ip,
+            log=lambda ev: st.log_event(ev, label)) == "refused":
+        child.terminate()                   # never leave an unprinted endpoint up
+        sys.exit(1)
     if dropped:
         print("(skipped %s — cleartext; --allow-plain offers them too)"
               % ", ".join(dropped))
@@ -586,7 +587,7 @@ def _secret_request_names(args):
     ints = {"--ttl": "ttl", "--keep": "keep", "--port": "port"}
     strs = {"--persist": "persist", "--persist-map": "persist_map"}
     bools = {"--allow-plain": "allow_plain", "--replace": "replace",
-             "--public": "public"}
+             "--public": "public", "--private": "private"}
     toks = ([args.name] if getattr(args, "name", None) else []) \
         + list(getattr(args, "cmd", None) or [])
     names, i = [], 0
@@ -742,12 +743,11 @@ def _secret_request(args):
     ips, dropped = _secret_select_ips(private,
                                       allow_plain=getattr(args, "allow_plain", False))
 
-    # Public-TLS drop lane (#664): channel order is tailscale -> public. When
-    # this box has a LIVE drop lane AND (--public OR no tailscale), bind loopback
-    # on the fixed drop port that a managed cloudflared tunnel fronts and
-    # advertise ONE public HTTPS URL — never an ssh -L instruction.
-    public_host, port, bind_ip = _secret_public_lane(args)
-    _fallback_reason = None            # #1115 Slice C: WHY the private fallback
+    # Public-TLS drop lane (#664): bind the lane origin on the fixed drop port a
+    # managed cloudflared tunnel fronts and advertise ONE public HTTPS URL. #1192:
+    # --private = the tailscale path; no lane = exit 1 before anything registers.
+    public_host, port, bind_ip = cli_vault_delivery.select_lane(
+        "secret", _secret_public_lane(args), getattr(args, "private", False))
     if public_host:
         if getattr(args, "port", None) or getattr(args, "allow_plain", False):
             print("secret: public drop lane — ignoring --port/--allow-plain "
@@ -761,8 +761,6 @@ def _secret_request(args):
                   file=sys.stderr)
             sys.exit(1)
     else:
-        import cli_drop_lanes as _dl
-        _, _fallback_reason = _dl.delivery_channel()
         if not ips:
             print("secret: only unencrypted interfaces are available (%s). A "
                   "credential would cross the LAN in cleartext — re-run with "
@@ -821,12 +819,15 @@ def _secret_request(args):
               file=sys.stderr)
         sys.exit(1)
 
-    cli_vault_delivery.emit_urls(       # #1189: probe public, private fallback
-        "secret", public_host, token, ips,
-        lambda ip: _secret_url_line(ip, port, token),
-        lambda ip: _live(_secret_health_url(ip, port)),
-        origin_ip=bind_ip, fallback_reason=_fallback_reason,
-        log=lambda ev: [st.log_event(ev, n) for n in names])
+    if cli_vault_delivery.emit_urls(    # #1192: ONE public URL, or none
+            "secret", public_host, token, ips,
+            lambda ip: _secret_url_line(ip, port, token),
+            lambda ip: _live(_secret_health_url(ip, port)),
+            private=getattr(args, "private", False), origin_ip=bind_ip,
+            log=lambda ev: [st.log_event(ev, n) for n in names]) == "refused":
+        for n in names:
+            st.forget(n)                    # revoke: stops the endpoint too
+        sys.exit(1)
     if dropped:
         print("(skipped %s — cleartext; --allow-plain offers them too)"
               % ", ".join(dropped))

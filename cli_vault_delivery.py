@@ -1,30 +1,23 @@
-"""airuleset vault — which URL(s) a one-shot vault endpoint hands out (#1189).
+"""airuleset — which URL a one-shot drop endpoint hands out (#1189, #1192).
 
-Incident (#1189, 29.9.2026): `secret show` on dev2 printed ONLY the public
-`https://drop-dev2.newlevel.media/<token>/` URL, never probed. The controller's
-shared tunnel was mid-restart, Cloudflare answered 1033 (tunnel not connected),
-and the owner had nothing else to open — the tailscale URL that would have
-worked was never printed (public-by-default since #889 dropped it).
+#1192 (owner ROZHODNUTÉ 30.9.2026): owner-facing links are PUBLIC ONLY. „vadi
+mi ze stale vsade pchas tailscale ktore je bezpecnostne riziko“ — so the #1189
+always-printed tailscale fallback line is gone, back to the #1115 ruling (ONE
+public TLS channel). `secret show`, `secret request` and `upload` go through
+`emit_urls`; `share` uses `select_lane` + `refusal_line` for the same contract:
 
-Both vault endpoints (`secret show` and `secret request`, same defect, same
-shape) now go through `emit_urls`. AFTER the endpoint is up it probes the
-public lane's token-free `/healthz` (the endpoint's one unauthenticated route —
-a probe never touches the one-shot) with the SAME no-redirect GET `share`/
-conformance use (`cli_drop_lanes._probe_public_status`):
+- the public lane answers (its token-free `/healthz`, probed with the no-redirect
+  GET of `cli_drop_lanes._probe_public_status`, gets 200/204) -> ONE https line;
+- 302 -> Cloudflare Access answered at the EDGE (its `/healthz` bypass app is
+  not applied yet), so the tunnel is not verified: the https line + a note;
+- no lane, 530 (error 1033), a 5xx, a timeout, or the tunnel origin not
+  answering locally -> NO URL, a loud Slovak+English line naming `--private`,
+  exit non-zero (the caller stops its endpoint);
+- `--private` -> the pre-existing tailscale/LAN path, and only then.
 
-- 200/204 -> the tunnel reached the endpoint: public URL FIRST, then the private
-  (tailscale / encrypted-tunnel) URLs as a LABELLED fallback — the #1114 shape;
-- 302 -> Cloudflare Access answered at the EDGE, before the tunnel, so a dead
-  tunnel still looks like this (review finding): public first + fallback, AND a
-  stderr note that the tunnel is NOT verified from here;
-- anything else (530 = error 1033, a 502 origin failure, a connection error),
-  or the tunnel-origin address itself not answering locally -> the private URLs
-  ONLY, a LOUD degradation line, the shared #1115 line. With NO private URL the
-  public one is still printed as the last resort (a one-shot 3 s probe can be a
-  false negative; zero URLs is never better).
-
-The token is the SAME on every line — one endpoint, one value, served once.
-A stdlib leaf; the probe is injectable so tests never touch the network.
+The #1189 incident (a dead tunnel, a dead link handed out unprobed) stays fixed
+by the probe; a dead link is never handed out, and neither is tailscale by
+default. A stdlib leaf; the probe is injectable so tests never touch the network.
 """
 from __future__ import annotations
 
@@ -32,8 +25,6 @@ import sys
 
 PUBLIC_REACHED_CODES = (200, 204)     # the request reached the endpoint itself
 PUBLIC_ACCESS_CODE = 302              # Access login redirect — edge only
-FALLBACK_LABEL = "   ← záloha, ak verejná URL nejde"
-LAST_RESORT_LABEL = "   [POSLEDNÁ MOŽNOSŤ — tunel neodpovedá]"
 
 
 def public_lane(args=None):
@@ -61,7 +52,9 @@ def public_url_line(host, token):
 
 def public_bind_ips(bind_ip, encrypted_private, lane_lookup=None):
     """The addresses a PUBLIC-lane endpoint binds: the tunnel origin `bind_ip`
-    plus the encrypted private IPs, so the tailscale URL works as the fallback.
+    plus the encrypted private IPs (the #1189 bind set, left untouched by #1192
+    — only what is PRINTED changed; a tailscale URL is printed only on the
+    separate `--private` path).
 
     Exception: a LOCAL-topology (loopback origin) lane behind Cloudflare Access.
     There loopback is the endpoint's whole exposure and Access its outer gate;
@@ -90,7 +83,7 @@ def public_probe_url(public_host: str) -> str:
     return "https://%s/healthz" % public_host
 
 
-def _dead_detail(code) -> str:
+def dead_detail(code) -> str:
     if code is None:
         return "no answer (connection error / timeout)"
     if code == 530:
@@ -98,60 +91,74 @@ def _dead_detail(code) -> str:
     return "HTTP %s" % code
 
 
-def emit_urls(prog, public_host, token, ips, private_line, is_live, *,
-              origin_ip=None, fallback_reason=None, log=None, probe=None,
-              out=None, err=None):
-    """Print the URLs for a live endpoint and return the channel used:
-    `"public"` | `"public-unverified"` | `"degraded"` | `"private"`.
+def refusal_line(prog, why):
+    """The ONE loud line a producer prints when it hands out NO URL (#1192)."""
+    return ("%s: !!! ŽIADNA URL — verejný odkaz nefunguje (%s). Tailscale/LAN "
+            "odkaz sa sám nevypisuje (bezpečnostné riziko); ak ho naozaj treba, "
+            "spusti znova s --private. / NO URL printed — the public lane is "
+            "unusable (%s); tailscale/LAN URLs are opt-in only: re-run with "
+            "--private (#1192)." % (prog, why, why))
 
-    `private_line(ip)` labels one private URL, `is_live(ip)` health-checks it
-    (loopback is never offered — the owner cannot reach it); `origin_ip` is the
-    tunnel-origin bind, which must answer before the public URL is offered. No public lane ->
-    the private URLs plus the #1115 reason line (`fallback_reason`). `log(event)`
-    records a degradation in the vault log (a bare event word, never a value)."""
+
+def select_lane(prog, lane, private):
+    """The lane a producer delivers on (#1192). `--private` -> no public lane
+    (the pre-existing tailscale/LAN path, opt-in only). No lane and no
+    `--private` -> the loud refusal and exit 1 BEFORE any endpoint starts."""
+    if private:
+        return None, None, None
+    if lane and lane[0]:
+        return lane
     import cli_drop_lanes as _dl
+    _, reason = _dl.delivery_channel()
+    phrase = _dl._CHANNEL_FALLBACK_PHRASE.get(reason, reason)
+    print(refusal_line(prog, "no public lane on this box: %s" % phrase),
+          file=sys.stderr)
+    raise SystemExit(1)
+
+
+def emit_urls(prog, public_host, token, ips, private_line, is_live, *,
+              private=False, origin_ip=None, log=None, probe=None,
+              out=None, err=None):
+    """Print the URL(s) for a live endpoint and return the channel used:
+    `"public"` | `"public-unverified"` | `"private"` | `"refused"`.
+
+    #1192: ONE public URL, or nothing. `private=True` (`--private`) prints the
+    live private URLs (`private_line(ip)`, health-checked by `is_live(ip)`) and
+    never probes. Otherwise the public lane must be alive: `origin_ip` (the
+    tunnel-origin bind) answers locally AND the `/healthz` probe gets 200/204
+    (302 = Access answered at the edge: printed with a note). A missing or dead
+    lane prints NO URL and returns `"refused"` — the caller stops its endpoint
+    and exits non-zero. `log(event)` records the dead lane (a bare event word)."""
     out = out or sys.stdout
     err = err or sys.stderr
-    live = [ip for ip in ips if is_live(ip)]
-    # Loopback is never offered as a FALLBACK beside a public URL (the owner
-    # cannot reach it). With no public lane it is the pre-#1189 private path,
-    # unchanged: every live bind prints, loopback included, never zero URLs.
-    private = [private_line(ip) for ip in live if not str(ip).startswith("127.")]
+    if private:
+        lines = [private_line(ip) for ip in ips if is_live(ip)]
+        for line in lines:
+            print(line, file=out)
+        if lines:
+            return "private"
+        print(refusal_line(prog, "no private address answers"), file=err)
+        return "refused"
     if not public_host:
-        for ip in live:
-            print(private_line(ip), file=out)
-        print(_dl.channel_fallback_line(fallback_reason or _dl.CHANNEL_NO_LANE,
-                                        prog=prog), file=err)
-        return "private"
+        print(refusal_line(prog, "no public lane on this box"), file=err)
+        return "refused"
     origin_ok = origin_ip is None or is_live(origin_ip)
     code = (probe or _probe)(public_probe_url(public_host)) if origin_ok else None
     if origin_ok and (code in PUBLIC_REACHED_CODES or code == PUBLIC_ACCESS_CODE):
         print(public_url_line(public_host, token), file=out)
-        for line in private:
-            print(line + FALLBACK_LABEL, file=out)
         if code in PUBLIC_REACHED_CODES:
             return "public"
-        print("%s: public lane is behind Cloudflare Access — its tunnel is NOT "
-              "verified from here (Access answers before the tunnel). If it "
-              "shows error 1033: %s (#1189)."
-              % (prog, "use the tailscale URL" if private else
-                 "NO private fallback exists on this box"), file=err)
+        print("%s: public lane is behind Cloudflare Access and its /healthz is "
+              "not bypassed yet — the tunnel is NOT verified from here. If the "
+              "link shows error 1033, re-run with --private (#1189/#1192)."
+              % prog, file=err)
         return "public-unverified"
-    detail = _dead_detail(code) if origin_ok else "tunnel origin %s down" % origin_ip
-    for line in private:
-        print(line, file=out)
-    if not private:                      # never zero URLs: the last resort
-        print(public_url_line(public_host, token) + LAST_RESORT_LABEL, file=out)
-    print("%s: !!! DEGRADED — public URL https://%s/ is DEAD (%s); %s (#1189)."
-          % (prog, public_host, detail, "use the private URL instead" if private
-             else "NO private URL on this box, public printed as a last resort"),
-          file=err)
-    if private:                          # the #1115 line says "private URLs only"
-        print(_dl.channel_fallback_line(_dl.CHANNEL_UNREACHABLE, prog=prog,
-                                        detail=detail), file=err)
+    detail = dead_detail(code) if origin_ok else "tunnel origin %s down" % origin_ip
+    print(refusal_line(prog, "public URL https://%s/ is DEAD — %s"
+                       % (public_host, detail)), file=err)
     if log is not None:
         log("public-lane-dead")
-    return "degraded"
+    return "refused"
 
 
 def _probe(url):
