@@ -1230,7 +1230,7 @@ class TestTokenIsNotInArgv(_StoreCase):
         env.update(self._env)
         out = subprocess.run(
             [sys.executable, str(ROOT / "airuleset.py"), "secret", "request",
-             name, "--ttl", ttl, "--keep", "60"],
+             name, "--ttl", ttl, "--keep", "60", "--private"],
             capture_output=True, text=True, timeout=120, env=env)
         self.assertEqual(out.returncode, 0, out.stderr)
         url = out.stdout.splitlines()[0].split()[0]
