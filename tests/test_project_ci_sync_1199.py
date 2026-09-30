@@ -79,9 +79,10 @@ class FakeWorld:
     read (the remote command runs locally under ``home``)."""
 
     def __init__(self, home, issues=(), *, ssh_rc=None, set_rc=0,
-                 set_stderr=b"", list_rc=0, noise=b""):
+                 set_stderr=b"", list_rc=0, noise=b"", err_noise=b""):
         self.home = Path(home)
         self.noise = noise
+        self.err_noise = err_noise
         self.issues = list(issues)
         self.ssh_rc = ssh_rc
         self.set_rc = set_rc
@@ -109,7 +110,8 @@ class FakeWorld:
             env = {"HOME": str(self.home), "PATH": os.environ.get("PATH", "")}
             r = subprocess.run(["bash", "-c", argv[-1]], input=b"", env=env,
                                capture_output=True, timeout=30)
-            return self._out(argv, r.returncode, self.noise + r.stdout, r.stderr, kw)
+            return self._out(argv, r.returncode, self.noise + r.stdout,
+                             self.err_noise + r.stderr, kw)
         if argv[:3] == ["gh", "label", "list"]:
             if self.list_rc:
                 return self._out(argv, self.list_rc, "", "boom", kw)
@@ -662,6 +664,94 @@ class TestReviewRound1(_RefusalBase):
                                                        directory=self.state))
         self.sync(FakeWorld(self.home, [_issue()]), dry_run=True)
         self.assertFalse((self.state / "fohmixer.ci-sync.json").exists())
+
+
+# --------------------------------------------------------------------------- #
+# review round 2
+# --------------------------------------------------------------------------- #
+class TestReviewRound2(_RefusalBase):
+
+    def test_labels_are_listed_whole_and_matched_case_insensitively(self):
+        world = FakeWorld(self.home, [_issue(label="Secret-Sync:DENYLIST")])
+        rc, out, err = self.sync(world)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(world.secrets.get("DENYLIST"), VALUE)
+        argv = world.of("gh", "label", "list")[0]["argv"]
+        self.assertNotIn("--search", argv)
+        self.assertEqual(argv[argv.index("--limit") + 1], "1000")
+
+    def test_the_label_loop_honours_the_deadline(self):
+        world = FakeWorld(self.home, [_issue(number=7),
+                                      _issue(number=8, label="secret-sync:OTHER")])
+        ticks = iter([0, 0, 500, 500, 500, 500])
+        rc, out, err = self.sync(world, deadline=100, clock=lambda: next(ticks))
+        self.assertEqual(rc, 1)
+        self.assertIn("deferred", err)
+        self.assertEqual(len(world.of("gh", "issue", "list")), 1)
+
+    def test_the_deadline_is_anchored_at_the_process_start(self):
+        with mock.patch.object(_sync(), "sync_account", return_value=0) as s:
+            _sync().sync_all(run=lambda *a, **k: None, clock=lambda: 1000,
+                             started=900)
+        self.assertEqual(s.call_args.kwargs.get("deadline"),
+                         900 + _sync().SYNC_BUDGET_S)
+        with mock.patch.object(pgt, "mint_account", return_value=0), \
+                mock.patch.object(_sync(), "sync_all", return_value=0) as s:
+            pgt.cmd_project_gh_token(mock.Mock(action="mint", account=None,
+                                               all=True, dry_run=False, key=None))
+        self.assertIsInstance(s.call_args.kwargs.get("started"), float)
+
+    def test_stderr_noise_never_replaces_the_account_side_reason(self):
+        noise = b"bash: warning: setlocale: LC_ALL: cannot change locale\n"
+        world = FakeWorld(self.home, [_issue(body="File: devel/nope\n")],
+                          err_noise=noise)
+        rc, out, err = self.sync(world)
+        self.assertEqual(rc, 0, err)
+        reason, comment = self.closing(world)
+        self.assertIn("no such file", comment)
+        self.assertNotIn("setlocale", comment)
+
+    def test_a_bare_slug_login_is_not_the_app(self):
+        self.refused(_issue(author="newlevel-project-accounts"), "author")
+
+    def test_the_owner_login_is_matched_case_insensitively(self):
+        world = FakeWorld(self.home, [_issue(author="ZbynekDrlik")])
+        rc, out, err = self.sync(world)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(world.secrets.get("DENYLIST"), VALUE)
+
+    def test_cloudflared_is_protected(self):
+        self.refused(_issue(body="File: .cloudflared/cert.pem\n"), ".cloudflared")
+
+    def test_an_account_without_repo_secrets_is_never_polled(self):
+        world = FakeWorld(self.home, [_issue()])
+        raw = dict(bootstrap.SERVICE_ACCOUNTS["fohmixer"])
+        raw.pop("repo_secrets")
+        with mock.patch.dict(bootstrap.SERVICE_ACCOUNTS, {"fohmixer": raw}):
+            rc, out, err = self.sync(world)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(world.calls, [])
+
+    def test_a_repo_is_declared_by_one_account_only(self):
+        spec = {"github_app": True, "repo": REPO, "repo_secrets": ["DENYLIST"]}
+        other = {"github_app": True, "repo": REPO.upper()}
+        errs = policy.validate_github_app(spec, "fohmixer",
+                                          {"fohmixer": spec, "twin": other})
+        self.assertTrue(any("twin" in e for e in errs), errs)
+        self.assertEqual(policy.validate_github_app(spec, "fohmixer",
+                                                    {"fohmixer": spec}), [])
+
+    def test_the_last_set_survives_a_later_empty_run(self):
+        self.sync(FakeWorld(self.home, [_issue()]))
+        self.sync(FakeWorld(self.home, []))
+        line = _sync().status_line("fohmixer", directory=self.state)
+        self.assertIn("DENYLIST", line)
+        self.assertIn(NOW_ISO, line)
+
+    def test_a_long_raw_path_is_truncated_in_the_comment(self):
+        comment = self.refused(_issue(body="File: %s\n" % ("a/" * 4000)),
+                               "not a plain path")
+        self.assertLess(len(comment), 1500)
 
 
 if __name__ == "__main__":
