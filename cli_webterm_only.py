@@ -207,7 +207,7 @@ def _controller_lane_key_line(user, pubkey, start_dir_chain=None):
     forced command opens in the correct project dir (e.g. ``devel/claudy``
     for the claudy tab), not the default ``STREAM_DEV_CWD_CHAIN``."""
     from cli_webterm import _remote_command
-    cmd = _remote_command(user, start_dir_chain=start_dir_chain)
+    cmd = _remote_command(user, start_dir_chain=start_dir_chain, user=user)
     # Escape for authorized_keys command="..." format
     escaped_cmd = cmd.replace("\\", "\\\\").replace('"', '\\"')
     return 'restrict,pty,command="%s" %s' % (escaped_cmd, pubkey)

@@ -566,7 +566,6 @@ from cli_bashrc_appliers import (  # noqa: E402, F401
     apply_ultracode_launcher as apply_ultracode_launcher,
     STREAM_DEV_CWD_REL as STREAM_DEV_CWD_REL,
     STREAM_DEV_CWD_CHAIN as STREAM_DEV_CWD_CHAIN,
-    STREAM_DEV_CWD_FALLBACK_REL as STREAM_DEV_CWD_FALLBACK_REL,
     STREAM_DEV_CWD_NO_REPO_MSG as STREAM_DEV_CWD_NO_REPO_MSG,
     resolve_stream_cwd as resolve_stream_cwd,
     render_stream_cwd_chain_shell as render_stream_cwd_chain_shell,
@@ -2585,6 +2584,10 @@ def cmd_status(args):
         print("\nnudges: OFF (all %d kinds off)" % _total)
     else:
         print("\nnudges: ON %d/%d — %s" % (len(_on), _total, ", ".join(sorted(_on))))
+
+    # --- #1202: first stream pane vs its DECLARED window cwd (never the footer)
+    import cli_session_cwd
+    cli_session_cwd.print_status(_current_user(), Path.home(), _tmux_session_pane_cwd)
 
     # --- CLAUDE.md ---
     print("\n~/.claude/CLAUDE.md:")
@@ -8708,7 +8711,7 @@ from cli_fleet import (  # noqa: E402, F401
 
 
 # --- #263: subdev stream dev-env bootstrap (claude tmux session + gap report) --
-def _stream_session_cwd() -> Path:
+def _stream_session_cwd(user=None) -> Path:
     """The convention working directory for the #263 tmux bootstrap of a
     subdev STREAM account (see STREAM_DEV_CWD_CHAIN's own comment, above
     apply_ultracode_launcher). Its only caller, ensure_stream_tmux_session(),
@@ -8718,13 +8721,12 @@ def _stream_session_cwd() -> Path:
     not here. #1088: a REPO-AWARE chain -- the first STREAM_DEV_CWD_CHAIN
     candidate that is a git WORK TREE (`<dir>/.git`) wins (odoo-erp, then
     odoo-slovnormal, then a bare devel/odoo repo), else the LOUD last resort
-    `devel/odoo` (plain folder) or $HOME. #563's `-d`-only chain dropped montalu1
-    (checkout `odoo-slovnormal`, ~/devel/odoo a plain folder) into the non-repo
-    parent. Delegates to the shared resolver so the Python bootstrap and the
-    bash attach block cannot drift; the no_repo flag (surfaced loudly at the
-    creation site) is dropped here since callers that compare against a live
-    pane cwd only need the directory."""
-    return resolve_stream_cwd(Path.home())[0]
+    $HOME, never the bare parent; `user` declaring a managed window -> its cwd
+    (#1202, the ONE source every creator uses). Delegates to the shared
+    resolver so the Python bootstrap and the bash attach block cannot drift; the
+    no_repo flag (surfaced loudly at the creation site) is dropped here since
+    callers that compare against a live pane cwd only need the directory."""
+    return resolve_stream_cwd(Path.home(), user=user)[0]
 
 
 def _tmux_session_exists(name, run=None):
@@ -8867,7 +8869,7 @@ def ensure_stream_tmux_session(user=None, run=None, launch_script=None,
         # JUST this probe, no matching pane) stays quiet -- an inconclusive
         # read must never manufacture a false WARNING. #309: unconditional
         # now -- runs whether or not `bootstrapped` is true.
-        expected = _stream_session_cwd()
+        expected = _stream_session_cwd(user)
         actual = _tmux_session_pane_cwd(user, run)
         if actual is not None:
             # #308 review MAJOR: a raw string compare false-positives on a
@@ -8899,9 +8901,9 @@ def ensure_stream_tmux_session(user=None, run=None, launch_script=None,
     if bootstrapped:
         return ("already bootstrapped once for '%s' -- never re-created "
                  "(a since-stopped session stays stopped)" % user)
-    cwd, no_repo = resolve_stream_cwd(Path.home())
+    cwd, no_repo = resolve_stream_cwd(Path.home(), user=user)
     if no_repo:
-        # #1088: the loud last resort (no git work tree under ~/devel/odoo).
+        # #1088/#1202: the loud last resort (no git work tree found).
         # Mirrors the ssh attach block's echo so a missing checkout is visible
         # at bootstrap too, never a silent non-repo session start.
         print("  ⚠ %s" % (STREAM_DEV_CWD_NO_REPO_MSG % cwd), file=sys.stderr)
