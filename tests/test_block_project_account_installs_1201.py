@@ -54,6 +54,19 @@ BLOCKED = [
     "sudo -E pipx install ruff",
     "FOO=1 timeout 60 npx playwright install",
     "echo $(pipx install ruff)",
+    # review round 1: a heredoc fed to a shell IS a script; braces; wrapper
+    # value flags; +toolchain; PIP_USER; the home-caching runners
+    "bash <<'EOF'\nrustup toolchain install nightly\nEOF",
+    "sh -s <<EOF\ncargo install x\nEOF",
+    "{ cargo install x; }",
+    "env -u FOO cargo install x",
+    "sudo -u bob pipx install ruff",
+    "rustup +nightly component add rust-src",
+    "PIP_USER=1 pip install ruff",
+    "uvx ruff check .",
+    "uv tool run ruff",
+    "pipx run ruff check .",
+    "npx @playwright/mcp install-browser chrome",
 ]
 
 ALLOWED = [
@@ -77,6 +90,10 @@ ALLOWED = [
     "git commit -m 'block cargo install and npx playwright install'",
     "gh issue comment 1 --body-file - <<'EOF'\ncargo install x\npipx install y\nEOF",
     "grep -rn 'pip install --user' docs/",
+    "cargo install --list",
+    "cat > notes.md <<'EOF'\ncargo install x\nEOF",
+    "PIP_USER=0 .venv/bin/pip install -r requirements-dev.txt",
+    "{ cargo fmt --all; }",
 ]
 
 

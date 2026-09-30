@@ -14,6 +14,7 @@ bootstrap provisioned no toolchain. Covers:
     rustup / npx), twice (idempotent), and failing LOUD when an install fails;
   * the env file and the account rc wiring, proven by a real ``bash -lc``.
 """
+import os
 import stat
 import subprocess
 import sys
@@ -133,12 +134,17 @@ class TestBootstrapRender(unittest.TestCase):
                                capture_output=True)
             self.assertEqual(r.returncode, 0, (account, r.stderr))
 
-    def test_toolchain_steps_precede_the_checkout_and_the_tmux_session(self):
+    def test_env_step_precedes_the_session_and_installs_run_last(self):
+        """The env wiring lands before the tmux session; the downloads (which
+        fail loud on a box without pipx/npx) run after the checkout, the tmux
+        session and the gh shim, so those never depend on them."""
         s = self.script
-        self.assertLess(s.index("# 8b. Shared project toolchain"),
-                        s.index("# 8c. Shell env of the shared toolchain"))
-        self.assertLess(s.index("# 8c. Shell env"), s.index("# 9. Project checkout"))
-        self.assertLess(s.index("# 8c. Shell env"), s.index("# 10. Project tmux"))
+        env = s.index("# 8b. Shell env of the shared toolchain")
+        self.assertLess(env, s.index("# 9. Project checkout"))
+        self.assertLess(env, s.index("# 10. Project tmux"))
+        installs = s.index("# 12. Shared project toolchain")
+        self.assertLess(s.index("# 11. Project-account GitHub App token shim"), installs)
+        self.assertLess(installs, s.index("=== Read-back ==="))
 
     def test_system_installs_are_rendered(self):
         s = self.script
@@ -153,24 +159,34 @@ class TestBootstrapRender(unittest.TestCase):
                 "llvm-tools-preview --target wasm32-unknown-unknown",
                 "rustup default stable",
                 "chmod -R a+rX,go-w /opt/rust",
-                "PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright npx -y playwright@1.58.2"
-                " install --with-deps chromium webkit",
+                "PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright PLAYWRIGHT_SKIP_BROWSER_GC=1"
+                " npx -y playwright@1.58.2 install --with-deps chromium webkit",
                 "npx -y playwright@%s install --with-deps chromium"
                 % pw.PLAYWRIGHT_PW_VERSION,
-                "chromium_headless_shell-%s/INSTALLATION_COMPLETE"
-                % pw.PLAYWRIGHT_CHROMIUM_BUILD,
+                "chmod -R a+rX,go-w /opt/ms-playwright",
                 "mv -f \"$t\" /etc/airuleset/project-toolchain.sh"):
             self.assertIn(needle, s)
+        for marker in pw.pinned_build_markers():   # the resolver's own predicate
+            self.assertIn("/opt/ms-playwright/%s" % marker, s)
+
+    def test_root_parts_run_from_root_dir_with_isolated_python(self):
+        """#1190 lesson: root never runs code from the invoker's cwd."""
+        steps = self.script[self.script.index("# 8b."):]
+        parts = steps.count("\n(\numask 022\n")
+        self.assertEqual(parts, 4)
+        self.assertEqual(steps.count("\n(\numask 022\ncd /\n"), parts)
+        self.assertIn("python3 -I -c", steps)
+        self.assertNotRegex(steps, r"python3 -c")
 
     def test_never_a_per_account_install_path(self):
-        step = self.script[self.script.index("# 8b."):self.script.index("# 8c.")]
+        step = self.script[self.script.index("# 12."):self.script.index("=== Read-back")]
         for bad in ("~/.cargo", "$HOME/.cargo", "~/.rustup", "$HOME/.rustup",
                     ".cache/ms-playwright", "--user"):
             self.assertNotIn(bad, step)
 
     def test_every_project_account_gets_the_baseline(self):
         s = _render("claudy")
-        self.assertIn("# 8b. Shared project toolchain", s)
+        self.assertIn("# 12. Shared project toolchain", s)
         self.assertIn("pipx install ruff", s)
         self.assertIn("rustup toolchain install stable", s)
 
@@ -205,6 +221,8 @@ mkdir -p "$STATE"; echo "$ver" > "$STATE/$pkg"
 mkdir -p "$PIPX_BIN_DIR"; touch "$PIPX_BIN_DIR/$pkg"
 """
 
+# The fake rustup-init leaves its tree world-writable, like a sloppy installer
+# would; the step's chmod must take that back.
 _CURL_STUB = """#!/usr/bin/env bash
 # fake curl: the downloaded rustup-init creates a logging rustup proxy
 echo "curl $*" >> "$LOG"
@@ -213,17 +231,21 @@ cat > "$out" << 'EOF'
 echo "rustup-init $*" >> "$LOG"
 mkdir -p "$CARGO_HOME/bin"
 printf '#!/usr/bin/env bash\\necho "rustup $*" >> "$LOG"\\n' > "$CARGO_HOME/bin/rustup"
-chmod 0755 "$CARGO_HOME/bin/rustup"
+chmod 0777 "$CARGO_HOME/bin/rustup" "$CARGO_HOME/bin"
 EOF
 """
 
 _NPX_STUB = """#!/usr/bin/env bash
-# fake npx: `playwright install` fills $PLAYWRIGHT_BROWSERS_PATH
-echo "npx PWB=$PLAYWRIGHT_BROWSERS_PATH $*" >> "$LOG"
+# fake npx: `playwright install` fills $PLAYWRIGHT_BROWSERS_PATH (world-writable)
+echo "npx PWB=$PLAYWRIGHT_BROWSERS_PATH GC=${PLAYWRIGHT_SKIP_BROWSER_GC:-} $*" >> "$LOG"
+echo "npx cwd=$PWD" >> "$LOG"
 [ -n "${NPX_FAIL:-}" ] && exit 1
-d="$PLAYWRIGHT_BROWSERS_PATH/chromium_headless_shell-%s"
-mkdir -p "$d"; touch "$d/INSTALLATION_COMPLETE"
-""" % pw.PLAYWRIGHT_CHROMIUM_BUILD
+for n in chromium-%(b)s chromium_headless_shell-%(b)s; do
+  [ -n "${NPX_HALF:-}" ] && [ "$n" = chromium_headless_shell-%(b)s ] && continue
+  mkdir -p "$PLAYWRIGHT_BROWSERS_PATH/$n"; touch "$PLAYWRIGHT_BROWSERS_PATH/$n/INSTALLATION_COMPLETE"
+  chmod 0777 "$PLAYWRIGHT_BROWSERS_PATH/$n"
+done
+""" % {"b": pw.PLAYWRIGHT_CHROMIUM_BUILD}
 
 
 class TestSystemStepRuns(unittest.TestCase):
@@ -231,28 +253,33 @@ class TestSystemStepRuns(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="tc-1201-"))
         self.addCleanup(subprocess.run, ["rm", "-rf", str(self.tmp)])
-        stub = self.tmp / "bin"
-        stub.mkdir()
+        self.stub = self.tmp / "bin"
+        self.stub.mkdir()
         for name, body in (("pipx", _PIPX_STUB), ("curl", _CURL_STUB),
                            ("npx", _NPX_STUB)):
-            (stub / name).write_text(body)
-            (stub / name).chmod(0o755)
+            (self.stub / name).write_text(body)
+            (self.stub / name).chmod(0o755)
         self.log = self.tmp / "log"
         self.root = self.tmp / "root"
+        self.scratch = self.tmp / "tmpdir"
+        self.scratch.mkdir()
         self.step = tc.render_system_step(
             bootstrap.account_spec("fohmixer"),
             rust_root=str(self.root / "opt/rust"),
             pipx_home=str(self.root / "opt/pipx"),
             pipx_bin=str(self.root / "usr/local/bin"),
-            pw_dir=str(self.root / "opt/ms-playwright"),
-            env_file=str(self.root / "etc/airuleset/project-toolchain.sh"))
-        self.env = {"PATH": "%s:/usr/bin:/bin" % stub, "LOG": str(self.log),
-                    "STATE": str(self.tmp / "pipx-state"), "HOME": str(self.tmp)}
+            pw_dir=str(self.root / "opt/ms-playwright"))
+        self.env = {"PATH": "%s:/usr/bin:/bin" % self.stub, "LOG": str(self.log),
+                    "STATE": str(self.tmp / "pipx-state"), "HOME": str(self.tmp),
+                    "TMPDIR": str(self.scratch)}
 
-    def _run(self, **extra):
-        return subprocess.run(["bash", "-c", "set -euo pipefail\n" + self.step],
-                              text=True, capture_output=True,
-                              env=dict(self.env, **extra))
+    def _run(self, path=None, **extra):
+        env = dict(self.env, **extra)
+        if path:
+            env["PATH"] = path
+        return subprocess.run(["/bin/bash", "-c", "set -euo pipefail\n" + self.step],
+                              text=True, capture_output=True, env=env,
+                              cwd=str(self.tmp))
 
     def test_installs_everything_once_then_is_idempotent(self):
         r = self._run()
@@ -262,12 +289,9 @@ class TestSystemStepRuns(unittest.TestCase):
         self.assertEqual(log.count("rustup-init -y --no-modify-path"), 1)
         self.assertIn("rustup toolchain install 1.98.1", log)
         self.assertIn("rustup target add --toolchain 1.98.1 wasm32-unknown-unknown", log)
-        self.assertIn("npx PWB=%s -y playwright@1.58.2 install --with-deps chromium "
-                      "webkit" % (self.root / "opt/ms-playwright"), log)
-        env_file = self.root / "etc/airuleset/project-toolchain.sh"
-        self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o644)
-        self.assertIn("RUSTUP_HOME=%s" % (self.root / "opt/rust/rustup"),
-                      env_file.read_text())
+        self.assertIn("npx PWB=%s GC=1 -y playwright@1.58.2 install --with-deps "
+                      "chromium webkit" % (self.root / "opt/ms-playwright"), log)
+        self.assertIn("npx cwd=/\n", log)             # never the invoker's cwd
         self.log.write_text("")
         r = self._run()
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
@@ -275,6 +299,20 @@ class TestSystemStepRuns(unittest.TestCase):
         self.assertNotIn("rustup-init", again)          # rustup kept
         self.assertNotIn("pipx install", again)         # the pinned version holds
         self.assertIn("pipx ruff: 0.16.2", r.stdout)
+
+    def test_the_shared_trees_end_read_only_for_accounts(self):
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        for tree in ("opt/rust", "opt/ms-playwright"):
+            for path in [self.root / tree, *(self.root / tree).rglob("*")]:
+                mode = stat.S_IMODE(path.stat().st_mode)
+                self.assertEqual(mode & 0o022, 0, (path, oct(mode)))
+                self.assertEqual(mode & 0o004, 0o004, (path, oct(mode)))
+
+    def test_the_rustup_installer_is_removed(self):
+        r = self._run()
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(list(self.scratch.iterdir()), [])
 
     def test_a_drifted_pin_is_reinstalled(self):
         state = self.tmp / "pipx-state"
@@ -287,7 +325,47 @@ class TestSystemStepRuns(unittest.TestCase):
     def test_a_failed_install_fails_the_script(self):
         r = self._run(NPX_FAIL="1")
         self.assertNotEqual(r.returncode, 0)
-        self.assertFalse((self.root / "etc/airuleset/project-toolchain.sh").exists())
+
+    def test_a_half_chromium_build_fails_the_script(self):
+        r = self._run(NPX_HALF="1")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("no complete pinned chromium build", r.stderr)
+
+    def test_a_box_without_pipx_fails_loud(self):
+        bare = self.tmp / "bare"
+        bare.mkdir()
+        for name in ("curl", "npx"):
+            (bare / name).symlink_to(self.stub / name)
+        r = self._run(path=str(bare))     # nothing else: no pipx anywhere
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("pipx is missing", r.stderr)
+
+
+class TestEnvStepRuns(unittest.TestCase):
+    """Step 8b as rendered: the root env file, then the account's rc wiring
+    through a PATH `runuser` stub (runs the body under a temp HOME)."""
+
+    def test_writes_the_env_file_and_wires_the_account(self):
+        tmp = Path(tempfile.mkdtemp(prefix="tc-env-1201-"))
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(tmp)])
+        home, stub = tmp / "home", tmp / "bin"
+        home.mkdir()
+        stub.mkdir()
+        (stub / "runuser").write_text(
+            '#!/usr/bin/env bash\n[ "$1" = -l ] && [ "$3" = -c ] || exit 99\n'
+            'HOME="$STEP_HOME" exec bash -c "$4"\n')
+        (stub / "runuser").chmod(0o755)
+        env_file = tmp / "etc/airuleset/project-toolchain.sh"
+        step = tc.render_account_env_step(bootstrap.account_spec("fohmixer"),
+                                          env_file=str(env_file))
+        r = subprocess.run(["bash", "-c", "set -euo pipefail\nACCOUNT=projx\n" + step],
+                           text=True, capture_output=True,
+                           env={"PATH": "%s:/usr/bin:/bin" % stub, "HOME": str(tmp),
+                                "STEP_HOME": str(home)})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(stat.S_IMODE(env_file.stat().st_mode), 0o644)
+        self.assertEqual(env_file.read_text(), tc.render_env_file())
+        self.assertIn(str(env_file), (home / ".profile").read_text())
 
 
 # --------------------------------------------------------------------------- #
@@ -351,6 +429,41 @@ class TestAccountShells(unittest.TestCase):
         step = tc.render_account_env_step(bootstrap.account_spec("fohmixer"))
         self.assertIn('runuser -l "$ACCOUNT" -c', step)
         self.assertIn(tc.ENV_FILE, step)
+
+
+class TestNoPerAccountBrowsers(unittest.TestCase):
+    """A project account's own `airuleset.py install` never downloads a
+    per-user chromium when /opt lacks the pinned build (a pin bump): that is
+    the duplication the owner forbade; it asks for the root bootstrap instead."""
+
+    def _ensure(self, project_account):
+        cache = Path(tempfile.mkdtemp(prefix="tc-pw-1201-")) / ".cache" / "ms-playwright"
+        self.addCleanup(subprocess.run, ["rm", "-rf", str(cache.parent.parent)])
+        calls = []
+        with mock.patch("subprocess.run", side_effect=lambda *a, **k: calls.append(a)
+                        or subprocess.CompletedProcess(a, 1, "", "")), \
+                mock.patch.object(pw.shutil, "which", return_value="/usr/bin/npx"), \
+                mock.patch("sys.stderr") as err:
+            pw.ensure_playwright_browsers(cache_dir=cache, project_account=project_account,
+                                          sleep=lambda s: None, sudo_ok=lambda: False,
+                                          probe_rc=lambda p: None)
+        return calls, "".join(c.args[0] for c in err.write.call_args_list)
+
+    def test_a_project_account_refuses_the_per_user_install(self):
+        calls, err = self._ensure(True)
+        self.assertEqual(calls, [])
+        self.assertIn("re-run the root account bootstrap", err)
+
+    def test_any_other_account_still_installs(self):
+        calls, _ = self._ensure(False)
+        self.assertTrue(any("install" in c[0] for c in calls), calls)
+
+    def test_the_default_reads_the_declaration(self):
+        import pwd
+        user = pwd.getpwuid(os.getuid()).pw_name
+        with mock.patch.dict(bootstrap.SERVICE_ACCOUNTS, {user: {}}):
+            self.assertTrue(pw._is_project_account())
+        self.assertEqual(pw._is_project_account(), user in bootstrap.SERVICE_ACCOUNTS)
 
 
 if __name__ == "__main__":
