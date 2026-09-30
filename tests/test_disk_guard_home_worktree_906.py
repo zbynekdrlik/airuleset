@@ -96,143 +96,40 @@ class TestStaleHomeWorktreeDiscovery(unittest.TestCase):
         self.assertIsInstance(result, list)
         self.assertEqual(len(result), 0)
 
-    def test_skip_active_process_cwd(self):
-        """A worktree with an active process cwd inside it must be SKIPPED."""
-        fn = getattr(dg, "discover_stale_home_worktrees", None)
-        if fn is None:
-            self.fail("#906: discover_stale_home_worktrees not found")
+    def test_old_clean_worktree_is_report_only(self):
+        """#1195 item 2 (owner 30.9.): another account's worktree — even an old,
+        clean, idle one — is never a delete action, only a report row. Each
+        account's own disk-guard reclaims its own worktrees behind the #1193
+        live-lane gate. (Replaces the #906 reclaimable / active-cwd / dirty /
+        too-recent cases: none of those checks runs on a foreign home now.)"""
         import tempfile
         with tempfile.TemporaryDirectory() as td:
-            # Build fake /home/user1/devel/repo/.claude/worktrees/agent-1
             wt = Path(td) / "user1" / "devel" / "repo" / ".claude" / "worktrees" / "agent-1"
             wt.mkdir(parents=True)
-            # Write .git FIRST, then set old mtime (writing .git updates dir mtime)
             (wt / ".git").write_text("gitdir: /fake")
             old_time = _NOW - 2 * 86400
             os.utime(str(wt), (old_time, old_time))
-
-            def fake_proc_cwds():
-                return ({str(wt)}, set())
-
-            result = fn(
-                now=_NOW,
-                home_glob=str(Path(td) / "*"),
-                proc_cwd_fn=fake_proc_cwds,
-                git_run_fn=lambda *a, **k: "",  # clean
-                dir_size_fn=lambda p: 1000,
-            )
-            skipped = [r for r in result if r.get("reason") and "active" in r["reason"].lower()]
-            self.assertTrue(len(skipped) > 0,
-                            "#906: worktree with active process cwd must be SKIPPED")
-
-    def test_skip_dirty_worktree(self):
-        """A worktree with non-empty porcelain must be SKIPPED."""
-        fn = getattr(dg, "discover_stale_home_worktrees", None)
-        if fn is None:
-            self.fail("#906: discover_stale_home_worktrees not found")
-        import tempfile
-        with tempfile.TemporaryDirectory() as td:
-            wt = Path(td) / "user1" / "devel" / "repo" / ".claude" / "worktrees" / "agent-1"
-            wt.mkdir(parents=True)
-            # Write .git FIRST, then set old mtime
-            (wt / ".git").write_text("gitdir: /fake")
-            old_time = _NOW - 2 * 86400
-            os.utime(str(wt), (old_time, old_time))
-
-            def fake_git_run(args, **kw):
-                # Return dirty status for porcelain checks
-                return " M file.py"
-
-            result = fn(
-                now=_NOW,
-                home_glob=str(Path(td) / "*"),
-                proc_cwd_fn=lambda: (set(), set()),
-                git_run_fn=fake_git_run,
-                dir_size_fn=lambda p: 1000,
-            )
-            skipped = [r for r in result if r.get("reason") and "dirty" in r["reason"].lower()]
-            self.assertTrue(len(skipped) > 0,
-                            "#906: dirty worktree must be SKIPPED")
-
-    def test_skip_too_recent(self):
-        """A worktree with mtime < 24h must be SKIPPED (age guard)."""
-        fn = getattr(dg, "discover_stale_home_worktrees", None)
-        if fn is None:
-            self.fail("#906: discover_stale_home_worktrees not found")
-        import tempfile
-        with tempfile.TemporaryDirectory() as td:
-            wt = Path(td) / "user1" / "devel" / "repo" / ".claude" / "worktrees" / "agent-1"
-            wt.mkdir(parents=True)
-            # Write .git FIRST, then set RECENT mtime (< 24h)
-            (wt / ".git").write_text("gitdir: /fake")
-            recent_time = _NOW - 3600  # 1 hour ago
-            os.utime(str(wt), (recent_time, recent_time))
-
-            result = fn(
-                now=_NOW,
-                home_glob=str(Path(td) / "*"),
-                proc_cwd_fn=lambda: (set(), set()),
-                git_run_fn=lambda *a, **k: "",
-                dir_size_fn=lambda p: 1000,
-            )
-            skipped = [r for r in result if r.get("reason") and "recent" in r["reason"].lower()]
-            self.assertTrue(len(skipped) > 0,
-                            "#906: worktree younger than 24h must be SKIPPED")
-
-    def test_reclaimable_worktree_returned(self):
-        """A clean, old, inactive worktree must be returned as reclaimable."""
-        fn = getattr(dg, "discover_stale_home_worktrees", None)
-        if fn is None:
-            self.fail("#906: discover_stale_home_worktrees not found")
-        import tempfile
-        with tempfile.TemporaryDirectory() as td:
-            wt = Path(td) / "user1" / "devel" / "repo" / ".claude" / "worktrees" / "agent-1"
-            wt.mkdir(parents=True)
-            # Write .git FIRST, then set old mtime
-            (wt / ".git").write_text("gitdir: /fake")
-            old_time = _NOW - 2 * 86400
-            os.utime(str(wt), (old_time, old_time))
-
-            result = fn(
-                now=_NOW,
-                home_glob=str(Path(td) / "*"),
-                proc_cwd_fn=lambda: (set(), set()),
-                git_run_fn=lambda *a, **k: "",  # clean porcelain
-                dir_size_fn=lambda p: 935_000_000,
-            )
-            reclaimable = [r for r in result if r.get("reason") is None]
-            self.assertTrue(len(reclaimable) > 0,
-                            "#906: clean, old, inactive worktree must be reclaimable")
-            row = reclaimable[0]
+            with patch.object(dg.subprocess, "run",
+                              side_effect=AssertionError("no sudo on a foreign home")):
+                result = dg.discover_stale_home_worktrees(
+                    now=_NOW, home_glob=str(Path(td) / "*"))
+            self.assertEqual(len(result), 1, result)
+            row = result[0]
             self.assertEqual(row["cls"], "home-worktree")
-            self.assertEqual(row["kind"], "home-worktree-remove")
-            self.assertIn("owner", row)
-            self.assertIn("repo", row)
+            self.assertEqual(row["kind"], "report")
+            self.assertIsNotNone(row["reason"])
+            self.assertEqual(row["repo"], str(Path(td) / "user1" / "devel" / "repo"))
 
     def test_owner_derived_from_path(self):
         """The owner must be derived from the /home/<user>/... path."""
-        fn = getattr(dg, "discover_stale_home_worktrees", None)
-        if fn is None:
-            self.fail("#906: discover_stale_home_worktrees not found")
         import tempfile
         with tempfile.TemporaryDirectory() as td:
             wt = Path(td) / "david3" / "devel" / "odoo" / "odoo-erp" / ".claude" / "worktrees" / "agent-42"
             wt.mkdir(parents=True)
-            # Write .git FIRST, then set old mtime
             (wt / ".git").write_text("gitdir: /fake")
-            old_time = _NOW - 2 * 86400
-            os.utime(str(wt), (old_time, old_time))
-
-            result = fn(
-                now=_NOW,
-                home_glob=str(Path(td) / "*"),
-                proc_cwd_fn=lambda: (set(), set()),
-                git_run_fn=lambda *a, **k: "",
-                dir_size_fn=lambda p: 1000,
-            )
-            reclaimable = [r for r in result if r.get("reason") is None]
-            self.assertTrue(len(reclaimable) > 0)
-            self.assertEqual(reclaimable[0]["owner"], "david3",
+            result = dg.discover_stale_home_worktrees(
+                now=_NOW, home_glob=str(Path(td) / "*"))
+            self.assertEqual(result[0]["owner"], "david3",
                              "#906: owner must be derived from /home/<user> path")
 
 
@@ -257,10 +154,10 @@ class TestDrainLadderHasHomeWorktreeRung(unittest.TestCase):
         self.assertIn("home-worktree", dg.RECLAIMABLE_CLASSES,
                       "#906: 'home-worktree' must be in RECLAIMABLE_CLASSES")
 
-    def test_home_worktree_in_sudo_classes(self):
-        """'home-worktree' must be in SUDO_CLASSES (cross-user ops need sudo)."""
-        self.assertIn("home-worktree", dg.SUDO_CLASSES,
-                      "#906: 'home-worktree' must be in SUDO_CLASSES")
+    def test_home_worktree_not_in_sudo_classes(self):
+        """#1195 item 2: the cross-user rung is report-only, so it never runs a
+        sudo operation against another account."""
+        self.assertNotIn("home-worktree", dg.SUDO_CLASSES)
 
     def test_home_worktree_rung_before_per_user_worktree(self):
         """The home-worktree rung should come BEFORE the per-user worktree rung
