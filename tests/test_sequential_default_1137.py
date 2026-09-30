@@ -137,6 +137,18 @@ class TestNaturalDoctrine(TestCase):
         body = (REPO / gr.SKILL_REL).read_text(encoding="utf-8")
         self.assertIn(gr._SEQUENTIAL_SATURATION, body)
         self.assertNotIn("One `autopilot-worker` unit is dispatched", body)
+        # review round 2: no stale quote of the old dispatch-per-unit clause.
+        self.assertNotIn("ONE unit at a time: dispatch", body)
+        self.assertNotIn("Main session stays thin** — it holds only", body)
+        self.assertIn("the main may implement a unit itself, #1137", body)
+
+    def test_always_on_autopilot_pointer_does_not_force_a_worker(self):
+        tooling = (REPO / "modules/core/claude-code-tooling.md").read_text(
+            encoding="utf-8")
+        self.assertNotIn("dispatches each issue to an **in-session background", tooling)
+        self.assertIn("works each issue itself or, where that naturally helps, "
+                      "through an **in-session background", tooling)
+        self.assertNotIn("no push)", tooling)
 
     def test_always_on_modules_state_the_sequential_default(self):
         tooling = [ln for ln in (REPO / "modules/core/claude-code-tooling.md")
