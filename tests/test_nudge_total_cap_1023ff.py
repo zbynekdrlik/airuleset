@@ -130,11 +130,13 @@ class TestRecoveryExempt(unittest.TestCase):
         # (waking a session parked on the usage-limit auto-continue banner after
         # a claudy account switch — the same session-revival class). #1063 adds
         # `goal-disarm` (the `/goal clear` #522 question-repoke backstop — a
-        # damage-control action exempt from the switch/floor/total cap).
+        # damage-control action exempt from the switch/floor/total cap). #1203
+        # adds `model-restore` (typing `/model <managed>` after a Claude Code model
+        # fallback — a session revival).
         self.assertEqual(
             ng.RECOVERY_NUDGE_KINDS,
             frozenset({"resume", "compact", "goal-arm", "wake-parked",
-                       "goal-disarm"}))
+                       "goal-disarm", "model-restore"}))
         self.assertEqual(ng.RECOVERY_NUDGE_KINDS, tio.RECOVERY_NUDGE_KINDS)
 
     def test_recovery_does_not_count_for_the_total_cap(self):

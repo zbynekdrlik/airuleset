@@ -94,6 +94,7 @@ EXPECTED_STANDALONE = [
     "erp_heartbeat",                    # (51) — #959 erp-test box heartbeat
     "watch_triggers",                   # (52) — #1163 watch-steered window triggers
     "checkout_freshness",               # (53) — #1176 checkout freshness enforcement
+    "model_restore",                    # (54) — #1203 undo a Claude Code model fallback
 ]
 
 # The one non-job registry entry: emits the owner kill-switch DISABLED lines at

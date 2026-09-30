@@ -177,8 +177,8 @@ MACHINE_NUDGE_KINDS = frozenset({
 # disjoint/union invariants + the drift-lock with nudge_gate stable across the
 # test files that hardcode this frozenset; it is not a placeholder for a
 # comeback (the owner's ruling is "vôbec").
-RECOVERY_NUDGE_KINDS = frozenset(
-    {"resume", "compact", "goal-arm", "wake-parked", "goal-disarm"})
+RECOVERY_NUDGE_KINDS = frozenset(  # #1203 model-restore: watchdog/model_restore.py
+    {"resume", "compact", "goal-arm", "wake-parked", "goal-disarm", "model-restore"})
 
 # Every threaded nudge identity — the stageable PRIORITY set plus the always-on
 # RECOVERY set. A `nudge=` threaded by any delivery site is one of these.
@@ -273,7 +273,7 @@ def nudges_enabled(kind=None, home=None):
     """True iff a machine nudge of `kind` may be delivered (#1023 per-kind
     staging). PRIORITY kinds (every MACHINE_NUDGE_KINDS member) default OFF (state
     file absent / a kind not enabled) — the owner enables them one at a time.
-    RECOVERY kinds (RECOVERY_NUDGE_KINDS = resume/compact/goal-arm/wake-parked/goal-disarm) are
+    RECOVERY kinds (RECOVERY_NUDGE_KINDS = resume/compact/goal-arm/wake-parked/goal-disarm/model-restore) are
     ALWAYS-ON: they revive a dead/blocked session (a 401/limit revival, /compact),
     so the kill switch never suppresses them. `kind=None` (a gated keystroke fired
     with NO nudge identity — a programming error the AST contract test catches)
@@ -332,7 +332,7 @@ def _keystroke_suppressed(kind, user_authored, nudge=None):
     nudge) always passes. Only a GATED (machine-nudge delivery) keystroke is
     withheld, and only when `nudges_enabled(nudge)` is False: a PRIORITY nudge the
     owner has NOT staged on (#1023 per-kind staging) — a RECOVERY nudge identity
-    (RECOVERY_NUDGE_KINDS = resume/compact/goal-arm/wake-parked/goal-disarm) is always-on and never
+    (RECOVERY_NUDGE_KINDS = resume/compact/goal-arm/wake-parked/goal-disarm/model-restore) is always-on and never
     withheld. A gated keystroke with NO `nudge` identity (a programming error the
     contract test catches) FAILS SAFE to SUPPRESS (`nudges_enabled(None)` is
     False, BLOCKER-2) — never any-kind-on. Goes through `watchdog.nudges_enabled()`

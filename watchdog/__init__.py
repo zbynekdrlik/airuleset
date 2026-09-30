@@ -2324,6 +2324,7 @@ from watchdog import task_hygiene as task_hygiene  # noqa: E402,F401  (#1036 Job
 from watchdog import erp_heartbeat as erp_heartbeat  # noqa: E402,F401
 from watchdog import watch_triggers as watch_triggers  # noqa: E402,F401  (#1163 Job 52)
 from watchdog import checkout_freshness as checkout_freshness  # noqa: E402,F401  (#1176 Job 53)
+from watchdog import model_restore as model_restore  # noqa: E402,F401  (#1203 Job 54)
 
 
 # #535 — job 34, per-box cross-target conformance check. Extracted to
@@ -2603,8 +2604,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
              health_probes=None, health_probe_fetch=None,
              task_hygiene_enabled=False, gh_rate_fetch=None,
              bounceflip_fetch=None, cred_mtime_fn=None, proc_start_fn=None,
-             erp_heartbeat_enabled=False, watch_triggers_enabled=False, checkout_freshness_enabled=False):
-    """Scan every `claude` pane once. 53 numbered jobs per poll — 46 LIVE and 7
+             erp_heartbeat_enabled=False, watch_triggers_enabled=False, checkout_freshness_enabled=False,
+             model_restore_enabled=False):
+    """Scan every `claude` pane once. 54 numbered jobs per poll — 47 LIVE and 7
     RETIRED (12, 18, 23 removed in #132; 15, 17 in #102; 26 in #402; 14 in
     #1084 — the slot stays registered as a journal-only tombstone), whose
     numbers are kept addressable so historical log lines and code comments
@@ -3481,6 +3483,9 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
       (53) CHECKOUT FRESHNESS (#1176) — `checkout_freshness_enabled`, not on a paused box: every managed
           checkout fetched + fast-forwarded (a stale clean detached/merged one reattached) when provably safe
           each ~15 min; the rest in `status` + a `checkout-lag` notice to the stream's own pane. `checkout_freshness.py` SSOT.
+      (54) MODEL RESTORE (#1203) — `model_restore_enabled`, not on a paused box: a pane on a Claude Code model
+          FALLBACK gets `/model <MANAGED_MODEL>` (always-on `model-restore` kind), one resume line, and ONE
+          re-review ticket in its repo after the confirmed restore. `model_restore.run_job` SSOT.
 
     PAUSED BOX (#851/#1032): when `box_paused` is True — the box's OWN fleet entry
     carries `paused` (a stream the owner froze), resolved once in `cmd_watchdog`
@@ -5811,6 +5816,8 @@ def run_once(now=None, dry_run=False, run=None, send_fn=None, box_paused=False,
     _add("checkout_freshness", lambda: checkout_freshness_enabled and not box_paused,   # Job 53 (#1176)
          lambda: checkout_freshness.run_job(now, dry_run=dry_run, budget_left=remaining_budget_s, state=state, panes=panes, run=run, sleep_fn=sleep_fn, projects_dir=projects_dir, handled=compact_handled_this_sweep),
          "checkout-freshness error", min_budget=checkout_freshness.MIN_BUDGET_S)
+    _add("model_restore", lambda: model_restore_enabled and not box_paused, lambda: model_restore.run_job(now, state, panes, run=run, sleep_fn=sleep_fn, projects_dir=projects_dir, dry_run=dry_run, handled=compact_handled_this_sweep, budget_left=remaining_budget_s),   # Job 54 (#1203); full sweeps only
+         "model-restore error", min_budget=model_restore.MIN_BUDGET_S)
 
     # --- EXECUTE THE STANDALONE REGISTRY (#433 step 16) — literal order. ONE
     # try/except = the SAME per-job isolation boundary; `err` logs a raise with
