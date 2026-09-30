@@ -120,6 +120,37 @@ class TestGoalRendererDefault(TestCase):
                             for ln in logs), logs)
 
 
+class TestNaturalDoctrine(TestCase):
+    """The default clause and the always-on doctrine state the natural mode:
+    the main may implement a unit itself (no forced worker per unit), and
+    parallel lanes are an explicit declaration only."""
+
+    def test_default_clause_does_not_force_a_worker_per_unit(self):
+        clause = gr._SEQUENTIAL_SATURATION
+        self.assertIn("one theme with focus", clause)
+        self.assertIn("implement it yourself or with one worker", clause)
+        self.assertNotIn("ONE unit at a time: dispatch", clause)
+        for p in gr.PROFILES:
+            self.assertIn(clause, gr.render(p))
+
+    def test_skill_body_unit_is_not_forced_through_a_worker(self):
+        body = (REPO / gr.SKILL_REL).read_text(encoding="utf-8")
+        self.assertIn(gr._SEQUENTIAL_SATURATION, body)
+        self.assertNotIn("One `autopilot-worker` unit is dispatched", body)
+
+    def test_always_on_modules_state_the_sequential_default(self):
+        tooling = [ln for ln in (REPO / "modules/core/claude-code-tooling.md")
+                   .read_text(encoding="utf-8").splitlines()
+                   if "Parallelism is the working model" in ln][0]
+        self.assertIn("DEFAULT is `sequential` on every box (#1137", tooling)
+        self.assertIn("declares `mode: parallel`", tooling)
+        branch = (REPO / "modules" / "git" / "two-branch-workflow.md").read_text(
+            encoding="utf-8")
+        self.assertNotIn("parallel DISPATCH via `isolation: \"worktree\"` is "
+                         "the `autopilot` skill's DEFAULT", branch)
+        self.assertIn("the `autopilot` skill's DEFAULT is SEQUENTIAL", branch)
+
+
 class TestSequentialReviewVariant(TestCase):
     """The gk review window arms the SEQUENTIAL review variant: the one-unit
     clause instead of the refill clause, and review clause (d) in its one-unit

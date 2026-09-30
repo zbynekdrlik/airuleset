@@ -391,9 +391,11 @@ class TestDavid3Sequential1031(TestCase):
     def test_goal_renderer_forknomerge_sequential_variant(self):
         import goal_registry as gr
         line = gr.render_goal_line("fork-no-merge", "sequential", None)
+        # #1137 review: the clause no longer forces a worker per unit.
         self.assertIn(
-            "SEQUENTIAL — ONE unit at a time: dispatch → main review → "
-            "integrate → verify → next; no refill;", line)
+            "SEQUENTIAL — ONE unit at a time, one theme with focus: implement "
+            "it yourself or with one worker → main review → integrate → verify "
+            "→ next; no refill;", line)
         self.assertNotIn("CONTINUOUS REFILL", line)
 
 
