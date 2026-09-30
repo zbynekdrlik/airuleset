@@ -1396,9 +1396,9 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
         # binary — that would bypass the installation token. Checked BEFORE the
         # wrap-in-place cases so a chained box is never mis-repointed by Case 3.
         app_dest = app_shim_path()
-        # #1190: an App shim staged at gh-app-shim is chained at once (A/2/4).
-        chain = app_dest if _is_app_token_shim(app_dest) else None
-        if shim_is_ours and chain:
+        from cli_project_gh_token import is_project_shim   # #1190
+        chain = app_dest if is_project_shim(app_dest) else None   # Cases 2/4
+        if shim_is_ours and _is_app_token_shim(app_dest):
             desired = wrapper_script(app_dest, python_exe, module,
                                      upstream=app_dest, observe=True)
             try:
@@ -1488,8 +1488,8 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
             # (gh-app-shim) has vanished must NOT be repointed at the bare binary
             # — that would exec the real gh with NO installation token
             # (unauthenticated → 403s), silently. Remove our shim instead so the
-            # box falls back cleanly to PATH gh; odoo-erp's timer re-installs its
-            # App shim at gh, which our next install re-chains.
+            # box falls back cleanly to PATH gh; the odoo-erp timer (or, on a
+            # project account, `account-bootstrap`, #1190) restores the App shim.
             if _wrapper_is_observe(shim):
                 try:
                     os.remove(shim)

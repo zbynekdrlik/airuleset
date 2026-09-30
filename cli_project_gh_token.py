@@ -43,9 +43,11 @@ Stdlib only; ``cli_account_bootstrap`` / ``cli_fleet`` / ``cli_remote`` /
 """
 import base64
 import calendar
+import http.client
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -165,7 +167,8 @@ def _api(method, path, jwt, *, body=None, urlopen=None):
             status, raw = resp.status, resp.read()
     except urllib.error.HTTPError as e:
         status, raw = e.code, e.read() or b""
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except (urllib.error.URLError, http.client.HTTPException, OSError,
+            ValueError) as e:
         raise MintError("GitHub API %s %s unreachable (%s)"
                         % (method, path, type(e).__name__)) from None
     try:
@@ -354,6 +357,20 @@ def _minutes_left(expires, now):
 # --------------------------------------------------------------------------- #
 # the mint for one account
 # --------------------------------------------------------------------------- #
+def _fail(account, repo, error, now, dry_run, directory):
+    """Loud on stderr; recorded (a dry run records nothing). Returns 1."""
+    print("project-gh-token: %s: FAILED — %s" % (account, error), file=sys.stderr)
+    if not dry_run:
+        prev = read_state(account, directory) or {}
+        _write_state(account, {
+            "ok": False, "account": account, "repo": repo, "at": _iso(now),
+            "error": error,
+            "last_ok_expires_at": (prev.get("expires_at") if prev.get("ok")
+                                   else prev.get("last_ok_expires_at"))},
+            directory)
+    return 1
+
+
 def mint_account(account, *, key_path=None, dry_run=False, now=None, run=None,
                  urlopen=None, state_dir=None):
     """Mint + deliver one account's token. Returns 0/1; every failure is loud
@@ -388,16 +405,11 @@ def mint_account(account, *, key_path=None, dry_run=False, now=None, run=None,
         minted = mint_token(installation, repo, jwt, urlopen=urlopen)
         deliver(remote, repo, minted["token"], minted["expires_at"], run=run)
     except MintError as e:
-        print("project-gh-token: %s: FAILED — %s" % (account, e), file=sys.stderr)
-        if not dry_run:
-            prev = read_state(account, directory) or {}
-            _write_state(account, {
-                "ok": False, "account": account, "repo": repo, "at": _iso(now),
-                "error": str(e),
-                "last_ok_expires_at": (prev.get("expires_at") if prev.get("ok")
-                                       else prev.get("last_ok_expires_at"))},
-                directory)
-        return 1
+        return _fail(account, repo, str(e), now, dry_run, directory)
+    except Exception as e:  # noqa: BLE001 — the unattended timer records it, never dies
+        # the class only: an exception's text may carry a request or a response
+        return _fail(account, repo, "unexpected %s" % type(e).__name__, now,
+                     dry_run, directory)
     _write_state(account, {"ok": True, "account": account, "repo": repo,
                            "installation_id": installation,
                            "expires_at": minted["expires_at"],
@@ -412,6 +424,11 @@ def mint_account(account, *, key_path=None, dry_run=False, now=None, run=None,
 # --------------------------------------------------------------------------- #
 # the account-side consumer (installed by the #1184 bootstrap)
 # --------------------------------------------------------------------------- #
+# The rate-guard installer (cli_gh_rate Cases 2/4) chains at once ONLY over
+# this shim, because it execs the real binary itself; an odoo-style App shim
+# re-resolves `gh` on PATH and keeps its #1087 Case A path.
+PROJECT_SHIM_MARKER = "airuleset project-account GitHub App token shim (#1190)"
+
 _SHIM = r"""#!/usr/bin/env bash
 # airuleset project-account GitHub App token shim (#1190) — MANAGED by the
 # #1184 account bootstrap (cli_project_gh_token.render_gh_app_shim); do not
@@ -454,6 +471,16 @@ def render_gh_app_shim():
     return _SHIM
 
 
+def is_project_shim(path):
+    """True iff ``path`` is this module's shim (its marker in a small head);
+    any read error is False."""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return PROJECT_SHIM_MARKER in fh.read(4096)
+    except (OSError, ValueError):
+        return False
+
+
 # The #1184 bootstrap's step 11, run AS the account (root never writes through
 # a path the account controls): the token dir and the shim, placed atomically.
 _BOOTSTRAP_BODY = """set -euo pipefail
@@ -475,9 +502,9 @@ def render_bootstrap_step(spec):
     if spec.get("github_app") is not True:
         return ""
     return ("\n# 11. Project-account GitHub App token shim (as the account) — #1190\n"
-            "runuser -l \"$ACCOUNT\" -c '%s' "
+            "runuser -l \"$ACCOUNT\" -c %s "
             "<< 'GH_APP_SHIM_EOF'\n%sGH_APP_SHIM_EOF\n"
-            % (_BOOTSTRAP_BODY, _SHIM))
+            % (shlex.quote(_BOOTSTRAP_BODY), _SHIM))
 
 
 # --------------------------------------------------------------------------- #
@@ -541,8 +568,11 @@ def setup_timer(*, box_class_fn=None, user=None, systemctl=None, unit_dir=None):
         from cli_filedrop_watchdog import _run_systemctl as systemctl
     unit_dir = Path(unit_dir or Path.home() / ".config" / "systemd" / "user")
     unit_dir.mkdir(parents=True, exist_ok=True)
-    (unit_dir / SERVICE_UNIT).write_text(_SERVICE.format(repo_dir=REPO_DIR))
-    (unit_dir / TIMER_UNIT).write_text(_TIMER.format(service=SERVICE_UNIT))
+    for name, text in ((SERVICE_UNIT, _SERVICE.format(repo_dir=REPO_DIR)),
+                       (TIMER_UNIT, _TIMER.format(service=SERVICE_UNIT))):
+        tmp = unit_dir / (".%s.%d" % (name, os.getpid()))
+        tmp.write_text(text)
+        os.replace(tmp, unit_dir / name)      # never a half-written unit
     for args in (["daemon-reload"], ["enable", "--now", TIMER_UNIT]):
         rc, _out, err = systemctl(args)
         if rc != 0:
@@ -551,6 +581,51 @@ def setup_timer(*, box_class_fn=None, user=None, systemctl=None, unit_dir=None):
             return False
     print("  project-gh-token timer active (mints every 30 min, #1190)")
     return True
+
+
+def verify_account(account, *, run=None):
+    """The go-live acceptance (the #1183 gap): AS the account, in a login
+    shell, `gh` must resolve to the rate-guard chain and `gh api repos/<repo>`
+    must answer with exactly that repo. Returns 0/1."""
+    import cli_account_bootstrap as bootstrap
+    import cli_remote
+    run = run or subprocess.run
+    repo = bootstrap.account_spec(account).get("repo") if (
+        account in bootstrap.SERVICE_ACCOUNTS) else None
+    try:
+        token_file_name(repo)
+        remote = account_target(account)
+    except MintError as e:
+        print("project-gh-token verify: %s: FAILED — %s" % (account, e),
+              file=sys.stderr)
+        return 1
+    prefix, _why = cli_remote._ssh_prefix(remote, True)
+    if prefix is None:
+        print("project-gh-token verify: %s has no pinned ssh identity" % account,
+              file=sys.stderr)
+        return 1
+    probe = "command -v gh; gh api repos/%s --jq .full_name" % repo
+    try:
+        r = run(prefix + ["%s@%s" % (remote["user"], remote["host"]),
+                          "bash -lc %s" % shlex.quote(probe)],
+                input="", capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        print("project-gh-token verify: %s: ssh failed (%s)"
+              % (account, type(e).__name__), file=sys.stderr)
+        return 1
+    lines = (r.stdout or "").strip().splitlines()
+    gh_path = lines[0] if lines else ""
+    got = lines[-1] if len(lines) > 1 else ""
+    if (r.returncode == 0 and gh_path.endswith("/.local/bin/gh")
+            and got.lower() == repo.lower()):
+        print("project-gh-token verify: %s OK — gh = %s, gh api repos/%s -> %s"
+              % (account, gh_path, repo, got))
+        return 0
+    print("project-gh-token verify: %s FAILED (rc=%d) — gh resolves to %r, "
+          "`gh api repos/%s` answered %r: %s" % (
+              account, r.returncode, gh_path, repo, got,
+              (r.stderr or "").strip()[:300]), file=sys.stderr)
+    return 1
 
 
 def maybe_setup_timer():
@@ -566,12 +641,16 @@ def maybe_setup_timer():
 # CLI
 # --------------------------------------------------------------------------- #
 def cmd_project_gh_token(args):
-    """``airuleset.py project-gh-token mint <acct>|--all [--dry-run] [--key P]``."""
+    """``airuleset.py project-gh-token mint <acct>|--all [--dry-run] [--key P]``
+    and ``project-gh-token verify <acct>``."""
     account = getattr(args, "account", None)
     every = getattr(args, "all", False) is True
-    if getattr(args, "action", None) != "mint" or bool(account) == every:
+    action = getattr(args, "action", None)
+    if action == "verify" and account and not every:
+        return verify_account(account)
+    if action != "mint" or bool(account) == every:
         print("usage: airuleset.py project-gh-token mint <account> | --all "
-              "[--dry-run] [--key PATH]", file=sys.stderr)
+              "[--dry-run] [--key PATH] | verify <account>", file=sys.stderr)
         return 2
     targets = github_app_accounts() if every else [account]
     if not targets:
@@ -590,7 +669,7 @@ def register_parser(sub):
         "project-gh-token",
         help="#1190: mint a 1-hour GitHub token scoped to a project account's "
              "repo (App newlevel-project-accounts) and deliver it over ssh")
-    p.add_argument("action", choices=["mint"])
+    p.add_argument("action", choices=["mint", "verify"])
     p.add_argument("account", nargs="?", default=None,
                    help="the declared project account (or --all)")
     p.add_argument("--all", action="store_true",

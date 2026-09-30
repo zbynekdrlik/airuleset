@@ -2161,9 +2161,9 @@ def cmd_install(args):
     # --- 5. api-watchdog timer: every machine (auto-resume API-error stalls) ---
     try:
         maybe_setup_watchdog()
-        maybe_setup_project_gh_token_timer()   # #1190: controller-only, never raises
     except Exception as e:
         print(f"  watchdog setup error (non-fatal): {e}", file=sys.stderr)
+    maybe_setup_project_gh_token_timer()   # #1190: controller-only, never raises
 
     # --- 5b. web terminal gateway (#555/#612): dispatch by (nodename, account) —
     # dev1->owner, subdev+marek->marek, subdev(david1/default)->david; else no-op. ---
