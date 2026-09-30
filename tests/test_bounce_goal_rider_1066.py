@@ -174,7 +174,8 @@ class TestVariantHeadroom(unittest.TestCase):
         # #1137 (owner ROZHODNUTÉ 2026-09-30) deliberately rewords the
         # sequential clause, so the */sequential/* variants leave this
         # vs-main lock (their exact text is golden-locked in
-        # test_goal_variants_998); the parallel ones stay byte-identical.
+        # test_goal_variants_998 and test_stream_no_done_state_1128); the
+        # parallel ones stay byte-identical.
         main_gr = _load_main_goal_registry()
         untouched = [("full", "parallel", None),
                      ("full", "parallel", "review")]

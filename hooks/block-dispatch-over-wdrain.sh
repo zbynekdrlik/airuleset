@@ -143,11 +143,11 @@ fi
 
 # ---------------------------------------------------------------------------
 # #998 — SEQUENTIAL-MODE dispatch gate. When the pane's resolved concurrency
-# mode is `sequential` (a declared sequential window like gk-infra, or a
-# project `.claude/lane-resources.json` `{"mode":"sequential"}` like airuleset),
-# the lane cap is total=1 — so a 2nd LIVE autopilot-worker dispatch is REFUSED,
-# with a message naming the mode. `parallel` (and any resolver error) is
-# fail-OPEN: today's behaviour, never a false block. The verdict is computed in
+# mode is `sequential` (the DEFAULT of every box since #1137; also a declared
+# window like gk-infra or a project `.claude/lane-resources.json` mode), the
+# lane cap is total=1 — so a 2nd LIVE autopilot-worker dispatch is REFUSED,
+# with a message naming the mode. `parallel` (an explicit declaration) and any
+# resolver error ALLOW: this gate fails OPEN, never a false block. The verdict is computed in
 # python (cli_concurrency.dispatch_gate_line) — the single resolver + the
 # post-#998 live-lane count (merged lanes excluded).
 if [ -n "$REPO_DIR" ]; then
@@ -163,12 +163,11 @@ if [ -n "$REPO_DIR" ]; then
             echo "  A live autopilot-worker lane is already running for this box, and"
             echo "  '$SEQ_MODE' mode means ONE unit at a time: implement it (yourself or with"
             echo "  one worker) -> main review -> integrate -> verify -> next, with NO refill."
-            echo "  Wait for the live lane to"
-            echo "  return and integrate before dispatching the next unit."
+            echo "  Wait for the live lane to return and integrate before the next unit."
             echo ""
-            echo "  (Mode is set by the declared window / project .claude/lane-resources.json,"
-            echo "  default sequential (#1137);"
-            echo "  see cli_concurrency.resolve_concurrency. Subagents/consults are NOT gated —"
+            echo "  (Mode: the declared window / project .claude/lane-resources.json, else the"
+            echo "  default sequential (#1137); see cli_concurrency.resolve_concurrency."
+            echo "  Subagents/consults are NOT gated —"
             echo "  only a 2nd concurrent autopilot-worker.)"
         } >&2
         exit 2

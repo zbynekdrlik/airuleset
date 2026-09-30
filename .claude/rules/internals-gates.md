@@ -1,6 +1,8 @@
 ---
 paths:
   - "gates/**"
+  - "cli_concurrency.py"
+  - "goal_registry.py"
 ---
 
 ### airuleset internals — gates/
@@ -275,7 +277,7 @@ until the ratchet cap, then the oldest move to `.claude/rules-reference/internal
   silenced an AWARENESS nudge (#1178 ended-supervisor queue-arrival) on every box — audit each
   consumer's PURPOSE, not just its mode check; the fix exempts the `deliver_hold` path like the
   infra role. (2) resolver-ERROR fallbacks hard-coded the old default ("treating as
-  non-sequential") — flip every error branch to the new default too. (3) ~15 suites drive the
+  non-sequential") — flip every error branch to the new default too. (3) 15 test files drive the
   parallel machinery on a FAKE cwd (`/home/newlevel/devel/x`, no project file possible) and
   silently depended on the default; pin them with ONE shared one-line class decorator
   (`tests/_parallel_mode_pin.PARALLEL_PIN` = `patch.object(cli_concurrency, "DEFAULT_MODE",
