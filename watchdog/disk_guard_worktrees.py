@@ -175,8 +175,8 @@ def discover_stale_agent_worktrees(home=None, now=None,
     (a fresh unfinished transcript named like it, or a live child whose meta
     names it; unreadable transcript evidence keeps it, fail-safe).
 
-    NO idle age gate — a FINISHED lane is immediately reclaimable once its
-    work is on origin. #1067 1g: with ``cache_path`` (the guard dir's verdict
+    (e) also keeps a FINISHED lane for the 6 h resume grace (#1195; waived
+    at ``critical``). #1067 1g: with ``cache_path`` (the guard dir's verdict
     file; None on a dry-run poll) an unchanged worktree reuses its last
     non-reclaimable verdict without any git call (``disk_guard_wt_cache``);
     (a), (d) and (e) always run fresh, before the cache.
