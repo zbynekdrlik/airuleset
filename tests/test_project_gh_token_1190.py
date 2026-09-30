@@ -750,7 +750,7 @@ class TestReviewVerify(unittest.TestCase):
         self.assertIn("fohmixer@100.104.8.125", argv)
         self.assertIn("-i", argv)
         self.assertTrue(argv[-1].startswith("bash -lc "), argv[-1])
-        self.assertIn("gh api repos/zbynekdrlik/fohmixer", argv[-1])
+        self.assertIn("gh api installation/repositories", argv[-1])
 
     def test_fails_on_another_repo_or_a_gh_off_the_chain(self):
         for stdout in ("/home/fohmixer/.local/bin/gh\nzbynekdrlik/other\n",
