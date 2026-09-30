@@ -5,6 +5,7 @@ paths:
   - "cli_autopilot_lock.py"
   - "cli_worktree_*.py"
   - "cli_lane_target_reclaim.py"
+  - "cli_reclaim_guard.py"
 ---
 
 ### airuleset internals — airuleset.py CLI (install/push/plugins)
@@ -104,3 +105,4 @@ Staršie/hlbšie airuleset.py CLI (install/push/plugins) lekcie (archív) sú v 
   A missed seam in a CLI wiring test runs the LIVE command against the real `~/.claude`. Here a real `sweep_stale_worktrees(dry_run=False)` ran: all 200 rows were SKIP and it stamped the cadence state.
   So retarget the seams in the SAME commit as the split, or run the red phase with home, log and state injected. `test_worktree_sweep_facade_1194` bans facade patches and pins the 58-name surface.
   Split method (#830 kit): a generator reads the pinned base with `git show`, slices line ranges, and derives imports with `symtable`. Prove the move is verbatim by comparing `ast.get_source_segment`.
+- **#1195 — a reclaimer with real-home defaults refuses them under pytest (`cli_reclaim_guard`), and the refusal is its own leaf.** Both reclaimers call `refuse_real_paths_under_pytest` right after resolving their paths, before the cadence gate. It raises when `home` is the real home or an ancestor of it, or when a path is inside its `.claude`. Real home = the passwd home + `CLAUDE_DIR.parent`, so a $HOME repointed to tmp passes. The detection is `disk_guard_escalation.running_under_pytest` (#1136). A new top-level name in a split leaf breaks the #1194 exact-surface lock, so shared additions go in a new leaf, imported lazily. A RED test that calls a reclaimer with real defaults must also make discovery raise and mock the log writer; then the unguarded run fails before any write. To find hidden callers, run the full suite with a `-p` plugin that records each exception `__init__` (placed in the worktree root: a PYTHONPATH prefix is refused).
