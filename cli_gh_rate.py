@@ -1396,7 +1396,9 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
         # binary — that would bypass the installation token. Checked BEFORE the
         # wrap-in-place cases so a chained box is never mis-repointed by Case 3.
         app_dest = app_shim_path()
-        if shim_is_ours and _is_app_token_shim(app_dest):
+        # #1190: an App shim staged at gh-app-shim is chained at once (A/2/4).
+        chain = app_dest if _is_app_token_shim(app_dest) else None
+        if shim_is_ours and chain:
             desired = wrapper_script(app_dest, python_exe, module,
                                      upstream=app_dest, observe=True)
             try:
@@ -1474,9 +1476,10 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
             if not (os.path.isfile(upstream) and os.access(upstream, os.X_OK)):
                 _say("⚠ upstream copy failed — leaving real gh untouched")
                 return "error: upstream copy failed"
-            _write_wrapper_file(shim, upstream, python_exe, module)
+            _write_wrapper_file(shim, upstream, python_exe, module,
+                                upstream=chain, observe=bool(chain))
             _say("wrapped real gh in place (real -> %s)" % upstream)
-            return "wrapped-in-place"
+            return "wrapped-in-place" + (" (chain -> %s)" % chain if chain else "")
 
         # Case 3: shim already ours but upstream vanished (a gh self-update
         # overwrote our shim, or upstream was deleted). Re-resolve a real gh.
@@ -1512,9 +1515,10 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
         real = real_gh_path()
         if not real:
             return "skip: no gh on this box"
-        _write_wrapper_file(shim, real, python_exe, module)
-        _say("shim installed (-> %s)" % real)
-        return "installed"
+        _write_wrapper_file(shim, real, python_exe, module, upstream=chain,
+                            observe=bool(chain))
+        _say("shim installed (-> %s)" % (chain or real))
+        return "installed" + (" (chain -> %s)" % chain if chain else "")
     except Exception as e:  # noqa: BLE001 — non-fatal, fail-open
         _diag("ensure-wrapper", e)
         _say("⚠ install skipped (%r) — gh left untouched" % e)

@@ -182,7 +182,8 @@ def _project_accounts():
                      "sudo_commands": list(spec.get("sudo_commands") or []),
                      "reach": list(spec["reach"]),
                      "secrets": list(spec["secrets"]),
-                     "webterm": sorted(spec["webterm_sessions"])}
+                     "webterm": sorted(spec["webterm_sessions"]),
+                     "github_app": spec.get("github_app") is True}
     return out
 
 
@@ -190,9 +191,12 @@ def _status(registry_path=None):
     from cli_onboard import default_registry_path, load_registry
     entries = load_registry(registry_path or default_registry_path())
     legacy = legacy_inventory(entries)
+    accounts = _project_accounts()
+    import cli_project_gh_token as gh_token
+    for name, a in accounts.items():   # #1190: the controller's token record
+        a["gh_token"] = gh_token.read_state(name) if a["github_app"] else None
     return {"legacy": legacy, "legacy_count": len(legacy),
-            "legacy_ceiling": LEGACY_CEILING,
-            "project_accounts": _project_accounts()}
+            "legacy_ceiling": LEGACY_CEILING, "project_accounts": accounts}
 
 
 def transfer_session(account, from_dir, *, from_home=None, render=False,
@@ -293,6 +297,9 @@ def cmd_accounts(args):
                                           entry["reason"]))
         for path in a["sudo_commands"] if a["sudo"] == "commands" else ():
             print("      sudo %s" % path)
+        if a["github_app"]:   # #1190: the controller-minted repo-scoped token
+            import cli_project_gh_token as gh_token
+            print("      %s" % gh_token.status_line(name))
     print("legacy projects (no declared project account): %d (ceiling %d, "
           "down-only — migrate on touch)" % (data["legacy_count"],
                                              data["legacy_ceiling"]))

@@ -506,8 +506,8 @@ def report_live_claude_processes(targets, run=None, control_opts=None,
 def _deliver_secret_to_hosts(targets, value, remote_write_cmd, noun, run,
                              control_opts=None, require_identity=False,
                              timeout=20):
-    """Shared per-host secret DELIVERY loop (#659 extraction) -- the surviving
-    caller is `provision_subdev_soniox_key` (the Soniox key), a generic,
+    """Shared per-host secret DELIVERY loop (#659 extraction) -- callers: the
+    Soniox key + cli_project_gh_token.deliver (#1190), a generic,
     reviewed facility kept for any future owner-secret delivery. (The #659
     headless-token caller was removed in #669 per the owner auth-boundary
     ruling.) Delivers `value` to each already-filtered host in `targets` by
