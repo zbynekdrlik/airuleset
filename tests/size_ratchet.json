@@ -258,7 +258,7 @@
     "tests/test_doctrine_audit_1028.py": 1083,
     "tests/test_doctrine_worker_design_1061.py": 91,
     "tests/test_draft_rescue.py": 441,
-    "tests/test_drop_gateway.py": 967,
+    "tests/test_drop_gateway.py": 974,
     "tests/test_drop_gateway_controller_931.py": 396,
     "tests/test_durable_decisions.py": 110,
     "tests/test_dynamic_application.py": 142,
