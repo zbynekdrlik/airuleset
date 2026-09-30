@@ -147,18 +147,45 @@ class TestNoFacadePatchSeams(unittest.TestCase):
                 if isinstance(node, ast.Import):
                     aliases |= {a.asname or a.name for a in node.names
                                 if a.name == "cli_worktree_sweep"}
+                elif (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)
+                        and getattr(node.value.func, "attr", "") == "import_module"
+                        and node.value.args
+                        and isinstance(node.value.args[0], ast.Constant)
+                        and node.value.args[0].value == "cli_worktree_sweep"):
+                    aliases |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+            def _is_alias(n):
+                return isinstance(n, ast.Name) and n.id in aliases
+
+            def _facade_string(n):
+                if isinstance(n, ast.Constant) and isinstance(n.value, str):
+                    return n.value.startswith("cli_worktree_sweep.")
+                if isinstance(n, ast.JoinedStr) and n.values:
+                    head = n.values[0]
+                    return (isinstance(head, ast.Constant)
+                            and str(head.value).startswith("cli_worktree_sweep."))
+                return False
+
             for node in ast.walk(tree):
-                if not isinstance(node, ast.Call) or not node.args:
+                # `ws.X = ...` / `ws.X += ...` rebinds a facade attribute directly.
+                if isinstance(node, (ast.Assign, ast.AugAssign)):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    if any(isinstance(t, ast.Attribute) and _is_alias(t.value) for t in targets):
+                        offenders.append(f"{path.name}:{node.lineno}")
+                    continue
+                if not isinstance(node, ast.Call):
                     continue
                 fn = node.func
                 fname = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
-                first = node.args[0]
-                if (fname in ("object", "setattr") and isinstance(first, ast.Name)
-                        and first.id in aliases):
+                kw = {k.arg: k.value for k in node.keywords if k.arg}
+                first = node.args[0] if node.args else kw.get("target")
+                if first is None:
+                    continue
+                if fname in ("object", "setattr", "multiple") and _is_alias(first):
                     offenders.append(f"{path.name}:{node.lineno}")
-                if (fname in ("patch", "setattr") and isinstance(first, ast.Constant)
-                        and isinstance(first.value, str)
-                        and first.value.startswith("cli_worktree_sweep.")):
+                elif fname in ("patch", "setattr") and _facade_string(first):
+                    offenders.append(f"{path.name}:{node.lineno}")
+                elif (fname == "dict" and isinstance(first, ast.Attribute)
+                        and first.attr == "__dict__" and _is_alias(first.value)):
                     offenders.append(f"{path.name}:{node.lineno}")
         self.assertEqual(offenders, [], "patch the defining leaf, not the facade")
 
