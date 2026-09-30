@@ -202,10 +202,11 @@ class TestRecoveryAlwaysOn(unittest.TestCase):
         # #1063 adds `goal-disarm` (the `/goal clear` #522 question-repoke
         # backstop) — a damage-control action that must fire with machine kinds
         # OFF; before #1063 it rode the machine kind `goal-sweep` and was dead.
+        # #1203 adds `model-restore` (undo a Claude Code model fallback) — a revival.
         self.assertEqual(
             wd.RECOVERY_NUDGE_KINDS,
             frozenset({"resume", "compact", "goal-arm", "wake-parked",
-                       "goal-disarm"}))
+                       "goal-disarm", "model-restore"}))
         self.assertTrue(wd.MACHINE_NUDGE_KINDS.isdisjoint(wd.RECOVERY_NUDGE_KINDS))
         # ALL_NUDGE_KINDS is the union — every threaded identity is known
         self.assertEqual(wd.ALL_NUDGE_KINDS,
