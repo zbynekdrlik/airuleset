@@ -15,6 +15,12 @@ last-resort fallback; and a `no-repo` footer marker driven by a
 `reason: "no-repo"` cache field the refresh writes for a non-repo cwd.
 
 These tests are RED against the pre-#1088 code.
+
+#1202 (regression of #1088/#961) REVERSED #1088's last resort: when no chain
+candidate is a work tree the session starts in $HOME, NEVER the bare parent
+`devel/odoo` (resuming there picked a stale transcript copy under the parent's
+project key). The fallback tests below were updated accordingly; the full
+#1202 suite is tests/test_session_cwd_single_source_1202.py.
 """
 import json
 import os
@@ -86,13 +92,14 @@ class TestResolveStreamCwd(unittest.TestCase):
         self.assertEqual(chosen, d / "devel" / "odoo" / "odoo-slovnormal")
         self.assertFalse(no_repo)
 
-    def test_no_work_tree_falls_back_loudly_to_devel_odoo(self):
+    def test_no_work_tree_falls_back_loudly_to_home_never_the_parent(self):
         # ~/devel/odoo exists as a PLAIN folder, no checkout is a work tree ->
-        # last resort is devel/odoo, flagged no_repo (loud + footer no-repo).
+        # #1202: last resort is $HOME (never the bare parent), flagged no_repo
+        # (loud + footer no-repo).
         d = self._home()
         (d / "devel" / "odoo").mkdir(parents=True)
         chosen, no_repo = cli_bashrc_appliers.resolve_stream_cwd(d)
-        self.assertEqual(chosen, d / "devel" / "odoo")
+        self.assertEqual(chosen, d)
         self.assertTrue(no_repo)
 
     def test_no_work_tree_no_parent_falls_back_to_home(self):
@@ -115,9 +122,8 @@ class TestResolveStreamCwd(unittest.TestCase):
         d = self._home()
         (d / "devel" / "odoo" / "odoo-erp").mkdir(parents=True)   # plain
         with m.patch.object(Path, "home", return_value=d):
-            # only devel/odoo exists as a plain folder -> fallback there
-            self.assertEqual(airuleset._stream_session_cwd(),
-                             d / "devel" / "odoo")
+            # only plain folders exist -> #1202 fallback is $HOME
+            self.assertEqual(airuleset._stream_session_cwd(), d)
 
 
 # --------------------------------------------------------------------------- #
@@ -146,8 +152,10 @@ class TestChainAndAttachBlock(unittest.TestCase):
 
     def test_attach_block_has_loud_no_repo_fallback_line(self):
         block = cli_bashrc_appliers.STREAM_SSH_ATTACH_BLOCK
-        self.assertIn("no git checkout under ~/devel/odoo", block)
+        self.assertIn("no git checkout found", block)
         self.assertIn("tickets footer will show no-repo", block)
+        # #1202: the default block's last resort is $HOME, never devel/odoo
+        self.assertNotIn('__airuleset_cwd="$HOME/devel/odoo"', block)
 
 
 # --------------------------------------------------------------------------- #
@@ -212,11 +220,12 @@ class TestAttachBlockCwdResolution(unittest.TestCase):
         self.assertIn(
             "new-session -A -s montalu1 -c %s/devel/odoo/odoo-erp" % home, log)
 
-    def test_loud_fallback_to_devel_odoo_when_no_repo(self):
+    def test_loud_fallback_to_home_when_no_repo(self):
+        # #1202: the plain parent devel/odoo is never the session dir.
         home, log, r = self._run([("devel/odoo", False)])
         self.assertIn(
-            "new-session -A -s montalu1 -c %s/devel/odoo" % home, log)
-        self.assertIn("no git checkout under ~/devel/odoo", r.stderr)
+            "new-session -A -s montalu1 -c %s\n" % home, log)
+        self.assertIn("no git checkout found", r.stderr)
         self.assertIn("tickets footer will show no-repo", r.stderr)
 
 

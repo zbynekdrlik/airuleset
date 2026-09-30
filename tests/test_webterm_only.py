@@ -988,12 +988,12 @@ class TestControllerLaneKeyDesiredSet(unittest.TestCase):
         self.fail("david controller key not found in desired set")
 
     def test_forced_command_uses_remote_command(self):
-        """The forced command must match _remote_command(user)."""
+        """The forced command must match _remote_command(user, user=user) (#1202)."""
         from cli_webterm import _remote_command
         keys = cli_webterm_only.desired_keys_for_user("david1")
         david_ctrl_blob = cli_webterm_only._key_blob(
             cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["david"])
-        cmd = _remote_command("david1")
+        cmd = _remote_command("david1", user="david1")
         for key_line in keys:
             if cli_webterm_only._key_blob(key_line) == david_ctrl_blob:
                 # The command= value must contain the remote command body

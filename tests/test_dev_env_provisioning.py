@@ -174,14 +174,12 @@ class TestStreamSessionCwd(TestCase):
     # key = no history/memory). #1088: no chain candidate is a work tree here,
     # so devel/odoo is the LOUD last resort (still returned, now loud).
 
-    def test_returns_devel_odoo_when_only_that_exists(self):
+    def test_never_returns_the_bare_parent_devel_odoo(self):
         d = Path(tempfile.mkdtemp())
         (d / "devel" / "odoo").mkdir(parents=True)   # plain folder, no .git
         with m.patch.object(Path, "home", return_value=d):
-            # #1088: the loud last resort — devel/odoo exists but is not a work
-            # tree, so it is still chosen (the checkout is what would win).
-            self.assertEqual(airuleset._stream_session_cwd(),
-                             d / "devel" / "odoo")
+            # #1202: a non-repo parent is NEVER chosen; last resort is $HOME.
+            self.assertEqual(airuleset._stream_session_cwd(), d)
 
     def test_odoo_erp_wins_when_both_dirs_exist(self):
         # priority preserved: odoo-erp is first in the chain, so an account
@@ -776,13 +774,14 @@ class TestApplyStreamSshAttach(TestCase):
         self.assertIn(airuleset.STREAM_SSH_ATTACH_MARK_END, text)
         self.assertIn("exec tmux new-session -A -s", text)
 
-    def test_gatekeeper_block_is_the_byte_identical_stream_block(self):
-        # #562 is an ELIGIBILITY-only widening -- the block content added for
-        # the gatekeeper account must be byte-identical to the reviewed
-        # #264/#284 stream block, never a gk-specific variant.
+    def test_gatekeeper_block_is_the_stream_block_at_its_declared_cwd(self):
+        # #562: the reviewed #264/#284 stream block, never a gk variant; #1202:
+        # rendered at gk's DECLARED window cwd (the single cwd source).
         p = self._tmp("# existing content\n")
         airuleset.apply_stream_ssh_attach(p, user="gatekeeper")
-        self.assertIn(airuleset.STREAM_SSH_ATTACH_BLOCK, p.read_text())
+        self.assertIn(airuleset.render_ssh_attach_block(
+            '"$(whoami)"', ("devel/odoo/odoo-erp",),
+            fallback_rel="devel/odoo/odoo-erp"), p.read_text())
 
     def test_idempotent_second_call_for_gatekeeper_is_a_no_op(self):
         p = self._tmp("# existing content\n")
@@ -1054,14 +1053,14 @@ class TestControllerSshAttach(TestCase):
         # here, not derived from the code under test. #1088 changed the cwd
         # chain loop to the repo-aware `.git` predicate + the loud last-resort
         # line, so the hash was deliberately recomputed (was
-        # 42fe3ea8...891755, the pre-#985/pre-#1088 value).
+        # 42fe3ea8...891755, pre-#985/#1088; #1202 (last resort $HOME): f09b01...).
         import hashlib
         h = hashlib.sha256(
             airuleset.STREAM_SSH_ATTACH_BLOCK.encode()).hexdigest()
         self.assertEqual(
-            h, "f09b01629a6dd96adc1086"
-               "ac7305f8d9fa2a69cbc4ab"
-               "19c0bfee4b6f62c4c4c3")
+            h, "fa7ff40fe735da33cd4f70"
+               "1bcab690db19b1cf2c2171"
+               "5edfefc9ced6068a9f0a")
 
     def test_controller_does_not_regress_sibling_consumers(self):
         # RED-1 from fable review: widening is_single_session_box_user
