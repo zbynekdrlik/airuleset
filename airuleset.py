@@ -4548,6 +4548,26 @@ def _ensure_origin_label_usable(gh_fn, label, R):
     return True
 
 
+def _refused_on_project_accounts(cmd):
+    """#1199 precondition of `gk-request`: on a project account (a declared
+    #1184 account that is not an Odoo stream) there is no gatekeeper, so the
+    command prints the one-line pointer to the native
+    `gh issue create -R zbynekdrlik/airuleset`, touches no ticket and exits 1
+    before any gh call."""
+    import functools
+
+    @functools.wraps(cmd)
+    def guarded(args):
+        import cli_project_gh_token
+        msg = cli_project_gh_token.gk_request_refusal(_current_user())
+        if msg:
+            print(msg, file=sys.stderr)
+            return 1
+        return cmd(args)
+    return guarded
+
+
+@_refused_on_project_accounts
 def cmd_gk_request(args):
     """Stream→supervisor action request (#30): file (or mark) the ticket that
     asks the gatekeeper/supervisor for an action the stream cannot perform
