@@ -899,7 +899,7 @@ def audit_project(entry, host=None, run=None):
     elif "## Playbook router" not in cm_content:
         drift.append({"kind": "missing-router",
                       "detail": "CLAUDE.md has no Playbook router"})
-    if tray := _tray.audit_drift(path, host=host, run=run):
+    if tray := _tray.audit_drift(path, host=host, run=run, claude_md=cm_content or ""):
         drift.append(tray)
     return drift
 

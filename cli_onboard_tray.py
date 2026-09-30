@@ -22,11 +22,12 @@ never the local disk.
 
 import glob
 import os
+import re
 import sys
 import tomllib
 from pathlib import Path
 
-from cli_onboard_exec import _exec
+from cli_onboard_exec import _exec, _read_file
 
 FOUNDATION_TRAY_TITLE = "foundation: tray ikona pre webovú Rust appku"
 
@@ -55,6 +56,9 @@ _PRUNE_DIRS = ("target", "node_modules", "vendor", ".*", "examples",
 # apps/<x>/src-tauri/Cargo.toml and crates/<x>/assets/index.html.
 _SCAN_DEPTH = "4"
 # ONE runner call prints every manifest as NUL <path> NUL <content>.
+# A server-only (VPS) app opts out in its CLAUDE.md with a stated reason:
+# `<!-- airuleset:tray=n/a <reason> -->`. A bare marker is no opt-out.
+_NA_MARKER_RE = re.compile(r"<!--\s*airuleset:tray=n/a\s+[^\s>-][^>]*-->")
 _CAT_WITH_NAMES = 'for f; do printf "\\0%s\\0" "$f"; cat "$f"; done'
 
 
@@ -77,8 +81,9 @@ def _or_names(names):
 
 def _pruned_find(root, match):
     """find argv over `root` (never the root itself: a checkout named `web`
-    must not match) that skips `_PRUNE_DIRS`, then applies `match`."""
-    return (["find", root, "-mindepth", "1", "-maxdepth", _SCAN_DEPTH,
+    must not match; `-H` follows a symlinked root) that skips `_PRUNE_DIRS`,
+    then applies `match`."""
+    return (["find", "-H", root, "-mindepth", "1", "-maxdepth", _SCAN_DEPTH,
              "(", "-type", "d", "(", *_or_names(_PRUNE_DIRS), ")", ")",
              "-prune", "-o"] + match)
 
@@ -217,23 +222,39 @@ def foundation_tray_body(name, reason):
         "ukončí len tray (služba beží ďalej). Tray sa spúšťa pri prihlásení "
         "desktop používateľa vedľa služby. Referencia: iemmixer "
         "`crates/iem-tray`. Ak appka beží len na serveri (VPS) bez desktopu, "
-        "tray sa jej netýka — ticket zavri ako n/a s odôvodnením. Onboarding "
+        "tray sa jej netýka — pridaj do projektového CLAUDE.md "
+        "`<!-- airuleset:tray=n/a <dôvod> -->` a ticket zavri ako n/a s "
+        "odôvodnením. Onboarding "
         "tento ticket LEN zakladá.\n\n"
         "Scope-gate: planned-work"
     ) % (name, reason)
 
 
+def opted_out(path, claude_md=None, host=None, run=None):
+    """True when the project CLAUDE.md (given, or read from the target)
+    carries the tray n/a marker with a reason."""
+    if claude_md is None:
+        claude_md = _read_file(Path(str(path)) / "CLAUDE.md", host=host,
+                               run=run)
+    return bool(claude_md and _NA_MARKER_RE.search(claude_md))
+
+
 def foundation_gap(path, name, host=None, run=None):
-    """The ("tray", title, body) gap for `step_foundation_tickets`, or None."""
+    """The ("tray", title, body) gap for `step_foundation_tickets`, or None
+    (no Rust web app, a tray exists, or the project opted out)."""
     reason = rust_web_tray_gap(path, host=host, run=run)
-    if not reason:
+    if not reason or opted_out(path, host=host, run=run):
         return None
     return ("tray", FOUNDATION_TRAY_TITLE, foundation_tray_body(name, reason))
 
 
-def audit_drift(path, host=None, run=None):
+def audit_drift(path, host=None, run=None, claude_md=None):
     """The `--audit` drift row: `missing-tray`, `unverified-tray` when the
-    target could not be read (never shown as clean), or None."""
+    target could not be read (never shown as clean), or None (incl. a
+    project that opted out; `claude_md` is the content the audit already
+    read)."""
+    if opted_out(path, claude_md=claude_md, host=host, run=run):
+        return None
     try:
         reason = tray_check(path, host=host, run=run)
     except TrayCheckUnverified as e:
