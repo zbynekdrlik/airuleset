@@ -155,7 +155,7 @@ def visibility(slug, cache, run=None, now=None):
     now = time.time() if now is None else now
     seen = _section(cache, "visibility")
     hit = seen.get(slug)
-    if (isinstance(hit, list) and len(hit) == 2
+    if (isinstance(hit, list) and len(hit) == 2 and hit[0] in _VISIBILITIES
             and isinstance(hit[1], (int, float)) and now - hit[1] < VISIBILITY_TTL_S):
         return hit[0]
     r = _gh(["repo", "view", slug, "--json", "visibility", "-q",
