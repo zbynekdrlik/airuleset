@@ -43,7 +43,7 @@ Pôvodný 973 KB monolit bol rozbitý (#482) — dotyk súboru už neinjektuje ~
 - `.github/** scripts/ci_*.py tests/test_ci_*.py` → `.claude/rules/internals-ci.md`
 - `gates/**` → `.claude/rules/internals-gates.md`
 - `cli_resource_guards*.py tests/test_quota*.py` → `.claude/rules/internals-quota.md`
-- `cli_account*.py cli_accounts.py cli_project_gh_token.py cli_project_ci_sync.py tests/test_project_account*.py tests/test_project_gh_token*.py tests/test_project_ci_sync*.py` → `.claude/rules/internals-accounts.md`
+- `cli_account*.py cli_accounts.py cli_project_gh_token.py cli_project_ci_sync.py cli_project_toolchain.py hooks/*project*account* tests/test_project_account*.py tests/test_project_gh_token*.py tests/test_project_ci_sync*.py tests/test_*1201.py` → `.claude/rules/internals-accounts.md`
 - **hlbší archív / staré lekcie (on-demand, grep):** `.claude/rules-reference/internals-archive.md`
 
 **Playbook (nová lekcia po tickete):** pridaj ju do príslušného `internals-<area>.md` (nie do archívu, nie sem). Keď ten súbor prekročí ~50 KB ratchet strop, presuň jeho najstaršie lekcie do archívu a nechaj inline len tie aktuálne.
