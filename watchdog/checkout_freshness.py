@@ -431,7 +431,8 @@ def _notice(entry, path, branch, remote, base):
     if files:
         entry["rule_lag"] = len(files)
         entry["notice"] = cf.notice_line(branch, len(files), remote, base,
-                                         entry.get("refusal"))
+                                         entry.get("refusal"),
+                                         sha=None if branch else cf.head_short(path))
 
 
 def fetch_timeout_for(prev, budget_left, fetch_timeout=FETCH_TIMEOUT_S):

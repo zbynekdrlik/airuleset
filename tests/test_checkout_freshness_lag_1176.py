@@ -221,9 +221,13 @@ class TestItem3Notice(_Lag):
         self.assertNotIn("notice", self.entry())
 
     def test_the_detached_notice_says_detached(self):
-        line = _cf().notice_line(None, 3, "upstream", "develop")
-        self.assertIn("detached HEAD", line)
-        self.assertIn("zmerguj upstream/develop", line)
+        # #1176 montalu1 (30.9.): a detached checkout is told the exact way
+        # back to the base, and to stop restoring an old SHA after tests
+        line = _cf().notice_line(None, 3, "upstream", "develop", sha="d8a7e00b1")
+        self.assertIn("detached na d8a7e00b1", line)
+        self.assertIn("`git checkout develop && git merge --ff-only upstream/develop`", line)
+        self.assertIn("neobnovuj", line)
+        self.assertIn("vráť sa na develop", line)
 
     def test_the_job_hands_panes_to_the_notice_delivery(self):
         self._wip()
@@ -360,7 +364,9 @@ class TestItem4SessionStart(_Lag):
         self.g(self.clone, "checkout", "-q", "--detach", "HEAD")
         self.advance_origin(rel="CLAUDE.md", text="rules v2\n")
         r = self._hook()
-        self.assertIn(_cf().notice_line(None, 1, "origin", "develop"), r.stdout)
+        sha = self.g(self.clone, "rev-parse", "--short", "HEAD").stdout.strip()
+        self.assertIn(_cf().notice_line(None, 1, "origin", "develop", sha=sha), r.stdout)
+        self.assertIn("detached na %s" % sha, r.stdout)
 
     def test_the_hook_is_silent_without_rule_lag(self):
         self.g(self.clone, "checkout", "-q", "-b", "feature/z")
@@ -614,6 +620,46 @@ class TestCensusReview2(_Lag):
         line = _cf().notice_line("develop", 1, "origin", "develop", why="diverged")
         self.assertNotIn("odlož", line)
         self.assertIn("zmerguj origin/develop", line)
+
+
+class TestDetachedLiveSession(TestCensusReview2):
+    """#1176 montalu1 (30.9.): the session keeps RE-DETACHING its checkout
+    (`checkout box/develop`, then back to a SHA it remembered from 2 days
+    ago, 1208 commits / 45 rule files behind). Items 1/2 correctly never move
+    it under the live session — it must be TOLD instead, with the exact way
+    back and "do not restore old SHAs after tests"."""
+
+    def _redetached_live(self):
+        old_sha = self.head()
+        self.advance_origin(rel="CLAUDE.md", text="rules v2\n")
+        self.g(self.clone, "pull", "-q", "--ff-only")               # develop, current
+        self.g_at(LONG_AGO, self.clone, "checkout", "-q", "--detach", old_sha)  # old SHA
+        os.utime(self.tpath, None)                                  # the session is live
+        return self.g(self.clone, "rev-parse", "--short", "HEAD").stdout.strip()
+
+    def test_a_live_redetached_checkout_is_left_alone_and_told(self):
+        sha = self._redetached_live()
+        before = self.head()
+        self.job_with_pane(unit_run=self.recorder)
+        self.assertEqual(self.launches(), [])
+        self.assertEqual(self.head(), before)
+        e = self.entry()
+        self.assertEqual(e["refusal"], "session-active")
+        self.assertEqual(e["notice"],
+                         _cf().notice_line(None, 1, "origin", "develop", sha=sha))
+
+    def test_the_notice_reaches_the_pane_through_the_same_channel(self):
+        self._redetached_live()
+        self.job_with_pane(unit_run=self.recorder)
+        sent = []
+        n = _notice()
+        n.notice_job(T0, {}, [("%1", self.clone)], status=_cf().read_status(self.home),
+                     ready=lambda pid, cwd: (True, "", "sid1", self.tpath),
+                     deliver=lambda pid, tpath, text: sent.append(text) or True,
+                     mark_sent=lambda *a: None,
+                     nudges_enabled=lambda kind: kind == n.NUDGE_KIND)
+        self.assertEqual(len(sent), 1)
+        self.assertIn("neobnovuj", sent[0])
 
 
 class TestNoticeReview2(TestNoticeDelivery):

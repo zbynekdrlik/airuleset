@@ -410,18 +410,32 @@ def base_on_remote(cwd, remote, branch, bases=DEFAULT_BASES):
     return None
 
 
-def notice_line(branch, n, remote, base, why=None):
+def head_short(cwd):
+    """The abbreviated HEAD sha, or None."""
+    rc, out = run_git(cwd, ["rev-parse", "--short", "HEAD"])
+    return out.strip() if rc == 0 and out.strip() else None
+
+
+def notice_line(branch, n, remote, base, why=None, sha=None):
     """The ONE rule-lag notice (#1176 census item 3/4): the SessionStart hook
     prints it and Job 53 types it into the stream's own pane — same words.
     `why` is the refusal that keeps a BASE branch behind (it cannot switch to
     itself): a dirty tree is told to commit / stash first, a diverged one or a
-    path collision only to merge."""
-    on = "vetve %s" % branch if branch else "detached HEAD (bez vetvy)"
+    path collision only to merge. A DETACHED checkout (`branch` None, `sha` its
+    HEAD) is told the exact way back and not to restore an old SHA after tests
+    (montalu1 30.9.: the session kept re-detaching onto a 2-day-old SHA)."""
     noun, verb = (("súbor", "je") if n == 1 else ("súbory", "sú") if 2 <= n <= 4
                   else ("súborov", "je"))
-    if branch and branch == base and why in (None, "dirty", "unmeasurable"):
+    if not branch:
+        return ("checkout-freshness: tvoj checkout je detached na %s (bez vetvy), %d %s "
+                "s pravidlami (CLAUDE.md / .claude/) %s pozadu za %s/%s — spusti "
+                "`git checkout %s && git merge --ff-only %s/%s` a po testoch "
+                "neobnovuj staré SHA, vráť sa na %s." % (
+                    sha or "?", n, noun, verb, remote, base, base, remote, base, base))
+    on = "vetve %s" % branch
+    if branch == base and why in (None, "dirty", "unmeasurable"):
         fix = "commitni alebo odlož lokálne zmeny a zmerguj %s/%s" % (remote, base)
-    elif branch and branch == base:
+    elif branch == base:
         fix = "zmerguj %s/%s (vlastné commity alebo lokálne súbory v ceste)" % (
             remote, base)
     else:
@@ -695,7 +709,10 @@ def hook_notice(cwd, branch, why=None):
     if not base or not ref_exists(cwd, remote_ref(remote, base)):
         return ""
     files = rule_lag(cwd, remote_ref(remote, base))
-    return notice_line(branch, len(files), remote, base, why) if files else ""
+    if not files:
+        return ""
+    return notice_line(branch, len(files), remote, base, why,
+                       sha=None if branch else head_short(cwd))
 
 
 # --------------------------------------------------------------------------- #
