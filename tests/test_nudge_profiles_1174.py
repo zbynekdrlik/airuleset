@@ -43,7 +43,7 @@ LIVE_GK = {"goal-guard", "infra-priority", "lane-occupancy", "lane-reconcile",
            "u-freshness", "watch-trigger"}
 LIVE_STREAM = {"bounce", "goal-guard", "lane-occupancy", "lane-reconcile",
                "partition-audit", "queue-arrival", "release-gap", "task-hygiene",
-               "u-freshness"}
+               "u-freshness", "checkout-lag"}   # + checkout-lag: #1176 census 30.9.
 LIVE_CONTROLLER = {"queue-arrival"}
 LIVE_WORKSTATION = set()
 
