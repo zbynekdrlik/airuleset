@@ -58,10 +58,11 @@ class TestAllLanesOnController(_BoxClassPinned):
                 "LANE_HOST[%r] = %r, expected 'controller'" % (human, host))
 
     def test_lane_host_has_exactly_four_humans(self):
-        """The expected set: zbynek, david, marek, dominika, timo (#1183)."""
+        """The expected set: zbynek, david, marek, dominika, timo (#1183),
+        palo (#1205)."""
         self.assertEqual(
             set(p.LANE_HOST.keys()),
-            {"zbynek", "david", "marek", "dominika", "timo"})
+            {"zbynek", "david", "marek", "dominika", "timo", "palo"})
 
 
 # ── subdev and dev1 webterm install is a no-op ─────────────────────────
@@ -99,7 +100,8 @@ class TestControllerGetsAllLanes(_BoxClassPinned):
 
     def test_profile_for_host_set_controller(self):
         result = p.profile_for_host_set("controller")
-        expected = frozenset({p.OWNER, p.DAVID, p.MAREK, p.DOMINIKA, p.TIMO})
+        expected = frozenset({p.OWNER, p.DAVID, p.MAREK, p.DOMINIKA, p.TIMO,
+                              p.PALO})
         self.assertEqual(result, expected)
 
 
