@@ -37,6 +37,7 @@ DEFAULT_ENV_KEYS = ("PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL",
                     "GITHUB_TOKEN")
 DEFAULT_ENV_PREFIXES = ("GH_",)
 CLIENT_TIMEOUT_S = 10   # the systemd-run CLIENT call; the unit itself is detached
+TIMEOUT_WHY = "systemd-run error: TimeoutExpired"   # outcome UNKNOWN, not "not started"
 
 
 def setenv_args(source, keys=DEFAULT_ENV_KEYS, prefixes=DEFAULT_ENV_PREFIXES):
@@ -95,6 +96,10 @@ def launch(unit, workdir, child_argv, runtime_max_s, run_fn=None,
                 env=src)
     except FileNotFoundError:
         return False, "systemd-run absent"
+    except subprocess.TimeoutExpired:
+        # the bus may still have accepted the unit: a caller whose fallback
+        # would RACE the unit (the #1176 merge) must treat this as unknown
+        return False, TIMEOUT_WHY
     except Exception as e:  # noqa: BLE001 — any spawn error: the caller falls back
         return False, "systemd-run error: %s" % type(e).__name__
     if r.returncode == 0:

@@ -370,6 +370,8 @@ def fast_forward(cwd, verdict, run_hooks=True):
     pre = [] if run_hooks else ["-c", "core.hooksPath=/dev/null"]
     rc, _ = run_git(cwd, pre + ["merge", "--ff-only", "--quiet", verdict.ref],
                     timeout=None, honor_deadline=False)
+    if rc != 0:
+        _log("merge --ff-only of %s in %s failed (rc %d)" % (verdict.ref, cwd, rc))
     return rc == 0
 
 

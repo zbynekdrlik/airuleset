@@ -56,7 +56,13 @@ deadlines only shorten it):
      starts only while the sweep has MERGE_RESERVE_S left, else it is
      deferred and due again next sweep — and a checkout deferred
      DEFER_PRIORITY_AFTER sweeps in a row is processed FIRST in the next
-     sweep. Refused states (dirty, unmeasurable tree, diverged,
+     sweep. That priority helps only when OTHER checkouts eat the budget:
+     `budget_left` is the whole sweep's, so a job that STARTS below the
+     reserve (the dev1 shape) still defers — only the detached path fixes
+     that, and every managed box runs the watchdog as a `--user` service,
+     so `systemd-run --user` is there. A client timeout is UNKNOWN (the
+     bus may have started the unit), so it is recorded as pending, never
+     raced by the in-unit merge. Refused states (dirty, unmeasurable tree, diverged,
      an in-progress operation or a held `index.lock`, a path collision) are
      NEVER touched — only recorded with their commits behind and reason.
   3. On a WORK branch (or detached): no fast-forward. The rule-file lag is
@@ -247,16 +253,21 @@ def ff_result_path(path, home=None):
 
 
 def _pending_live(pending, now):
-    """A launched detached merge that may still report (`ff_pending`)."""
+    """A launched detached merge that may still report (`ff_pending`). A
+    `launched` stamp in the future (a clock stepped back) is NOT live, or it
+    would block the checkout forever."""
     t = pending.get("launched") if isinstance(pending, dict) else None
-    return isinstance(t, (int, float)) and now - t <= FF_PENDING_MAX_S
+    return isinstance(t, (int, float)) and 0 <= now - t <= FF_PENDING_MAX_S
 
 
 def _launch_ff_unit(path, remote, branch, home, unit_run):
     """Start the detached merge (`cli_checkout_freshness.py ff`) as a transient
     `--user` unit via the ONE shared launcher. `(launched, why)`; `why` is
     `started`/`exists` or the reason the caller must fall back. The default
-    launcher is never used from a test process (the #1136/#1195 guard)."""
+    launcher is never used from a test process (the #1136/#1195 guard). An
+    older result file is left alone: the collector ignores a result that
+    finished before this launch, so a unit still exiting ('exists') keeps its
+    answer."""
     if unit_run is None:
         from watchdog.disk_guard_escalation import running_under_pytest
         if running_under_pytest():
@@ -264,8 +275,6 @@ def _launch_ff_unit(path, remote, branch, home, unit_run):
     repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     result = ff_result_path(path, home)
     os.makedirs(os.path.dirname(result), exist_ok=True)
-    if os.path.lexists(result):   # an uncollected older result must not answer this run
-        os.remove(result)
     child = [sys.executable, os.path.join(repo_root, "cli_checkout_freshness.py"),
              "ff", "--path", path, "--remote", remote, "--branch", branch,
              "--result", result]
@@ -291,12 +300,17 @@ def _base_branch_result(path, remote, entry, dry_run, budget_left, prev=None,
             return ("lagging", "fast-forward running in unit %s" % pending.get("unit"),
                     v.behind, False)
         launched, why = _launch_ff_unit(path, remote, v.branch, home, unit_run)
-        if launched:
+        if launched or why == user_unit.TIMEOUT_WHY:
+            # a client timeout is UNKNOWN (the bus may have started the unit):
+            # never race it with an in-unit merge — wait for its result instead
             unit = ff_unit_name(path)
             entry["ff_pending"] = {"unit": unit, "launched": entry["checked"],
                                    "behind": v.behind}
-            return ("lagging", "fast-forward running in unit %s%s" % (
-                unit, " (already running)" if why == "exists" else ""), v.behind, False)
+            note = {"exists": " (already running)",
+                    user_unit.TIMEOUT_WHY: " (launch unconfirmed: systemd-run client "
+                                           "timed out)"}.get(why, "")
+            return ("lagging", "fast-forward running in unit %s%s" % (unit, note),
+                    v.behind, False)
         left = budget_left() if budget_left is not None else None
         if left is not None and left < MERGE_RESERVE_S:
             entry["deferrals"] = int(prev.get("deferrals") or 0) + 1
@@ -305,8 +319,9 @@ def _base_branch_result(path, remote, entry, dry_run, budget_left, prev=None,
         ok = cf.fast_forward(path, v, run_hooks=False)   # unbounded once started
         if ok:
             entry["ff"] = {"at": entry["checked"], "commits": v.behind}
-            return "current", "fast-forwarded %d commit(s)" % v.behind, 0, False
-        return "lagging", "fast-forward failed", v.behind, False
+            return ("current", "fast-forwarded %d commit(s) in-unit (%s)" % (v.behind, why),
+                    0, False)
+        return "lagging", "fast-forward failed in-unit (%s)" % why, v.behind, False
     if v.action == "noop" and v.reason == "up-to-date":
         return "current", "up-to-date", 0, False
     if v.action == "noop":
@@ -472,25 +487,47 @@ def collect_ff_results(cos, now, home=None):
     """Fold every finished detached merge (`ff_pending` + its result file) into
     `cos` — every sweep, never only when the checkout is due, so a merge is
     reported one sweep after it ran. A pending unit with no result after
-    FF_PENDING_MAX_S is `fast-forward failed` and may be launched again.
-    Returns the journal lines; `cos` is updated in place."""
-    logs = []
+    FF_PENDING_MAX_S is `fast-forward failed` and may be launched again; a
+    result that finished BEFORE the launch is an older run's, never this
+    one's answer. Returns `(journal lines, result files to remove)` — the
+    caller removes them only AFTER the status that absorbed them is written,
+    so a sweep killed in between loses nothing. `cos` is updated in place."""
+    logs, consumed = [], []
     for path, e in cos.items():
         pending = e.get("ff_pending") if isinstance(e, dict) else None
         if not isinstance(pending, dict):
             continue
         rpath = ff_result_path(path, home)
         res = _read_result(rpath)
+        fin, launched = (res or {}).get("finished"), pending.get("launched")
+        if isinstance(fin, (int, float)) and isinstance(launched, (int, float)) \
+                and fin < launched:
+            consumed.append(rpath)       # stale: an older run's result
+            res = None
         if res is None:
             if _pending_live(pending, now):
                 continue
-            res = {"ok": False, "reason": "unit %s left no result within %ds" % (
-                pending.get("unit"), FF_PENDING_MAX_S)}
+            res = {"ok": False, "reason": (
+                "unit %s left no result within %ds (if systemd stopped it mid-merge "
+                "the tree may be half-applied; the next check reports it)" % (
+                    pending.get("unit"), FF_PENDING_MAX_S))}
         elif os.path.lexists(rpath):
-            os.remove(rpath)
+            consumed.append(rpath)
         del e["ff_pending"]
         _apply_result(e, res, pending.get("unit"), now)
         logs.append(decision_line(path, e))
+    return logs, consumed
+
+
+def _remove_results(paths):
+    """Remove collected result files; a failure is logged, never raised — one
+    bad file must not stop the job every sweep."""
+    logs = []
+    for p in paths:
+        try:
+            os.remove(p)
+        except OSError as exc:
+            logs.append("checkout-freshness: could not remove result %s: %s" % (p, exc))
     return logs
 
 
@@ -511,8 +548,11 @@ def run_job(now, *, dry_run=False, budget_left=None, home=None,
     live = {c["path"] for c in checkouts}
     cos = {p: e for p, e in prev_all.items() if p in live}
     pruned = len(cos) != len(prev_all)
-    collected = [] if dry_run else collect_ff_results(cos, now, home)
+    collected, consumed = ([], []) if dry_run else collect_ff_results(cos, now, home)
     logs += collected
+    if collected or consumed:
+        write_status({"ts": now, "checkouts": cos}, home)   # absorbed first ...
+        logs += _remove_results(consumed)                   # ... then removed
 
     def _last(c):
         t = (cos.get(c["path"]) or {}).get("checked")
@@ -548,6 +588,6 @@ def run_job(now, *, dry_run=False, budget_left=None, home=None,
         logs.append(decision_line(c["path"], e))
         if not dry_run:
             write_status({"ts": now, "checkouts": cos}, home)
-    if (pruned or collected) and not done and not dry_run:
+    if pruned and not collected and not done and not dry_run:
         write_status({"ts": status.get("ts", now), "checkouts": cos}, home)
     return logs
