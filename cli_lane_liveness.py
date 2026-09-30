@@ -339,7 +339,7 @@ def _live_worker_agent_ids(repo_root, projects_dir=None, now=None,
     WHETHER it could tell (a worktree reclaimer must fail safe on that)."""
     import cli_lane_live_gate
     return cli_lane_live_gate.live_worker_agent_ids_checked(
-        repo_root, projects_dir, now, freshness_s)[0]
+        repo_root, projects_dir, now, freshness_s, strict=False)[0]
 
 
 def _lane_ticket_numbers(repo_root, branch, run):

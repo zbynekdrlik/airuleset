@@ -1073,7 +1073,7 @@ def discover_reclaimable_worktrees(home=None, git_run=None, now=None,
                 if _is_orphan_gitdir(str(d)):
                     out.append(_worktree_reclaimable(
                         root, str(d), None, base, git_run, now,
-                        min_idle_s=min_idle_s, in_live_use=in_live_use))
+                        min_idle_s=min_idle_s, in_live_use=in_live_use, live_gate=gate))
     return out
 
 

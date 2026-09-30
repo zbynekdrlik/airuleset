@@ -22,6 +22,7 @@ is always fresh (never served from ``disk_guard_wt_cache``).
 # airuleset:script-ok helper module, errors are returned as data and logged
 from __future__ import annotations
 
+import json
 import os
 import stat
 import sys
@@ -40,8 +41,49 @@ def _is_dir(path):
         return False
 
 
+_META_SUFFIX = ".meta.json"
+_META_WORKTREE_KEYS = ("worktreePath", "inheritedWorktreePath")
+
+
+def _meta_paths(subagents_dir, warn):
+    """``{agent_id: meta path}`` for every ``<agent_id>.meta.json`` Claude Code
+    keeps beside a subagent transcript (nested dirs too). A directory that
+    cannot be listed is reported through ``warn``: ``count_live_workers`` walks
+    with ``Path.rglob``, which swallows that error and would read an unreadable
+    dir as "no live lane" (#1193 review)."""
+    metas = {}
+    for dp, _dn, fns in os.walk(subagents_dir, onerror=lambda e: warn(
+            "subagents dir unlistable (%s): %s" % (e.filename, e))):
+        for fn in fns:
+            if fn.endswith(_META_SUFFIX):
+                metas[fn[:-len(_META_SUFFIX)]] = os.path.join(dp, fn)
+    return metas
+
+
+def _meta_worktrees(meta_path, warn):
+    """Basenames of the worktrees a live agent's meta ties it to: its own
+    ``worktreePath`` and, for a child dispatched by a lane, the lane's
+    ``inheritedWorktreePath`` — a lane blocked on a long foreground child
+    writes nothing itself, so the live child keeps it. No meta = none."""
+    if not meta_path:
+        return set()
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            meta = json.load(f)
+    except FileNotFoundError:
+        return set()
+    except (OSError, ValueError) as e:
+        warn("subagent meta unreadable (%s): %s" % (meta_path, e))
+        return set()
+    if not isinstance(meta, dict):
+        return set()
+    return {os.path.basename(v.rstrip(os.sep)) for v in
+            (meta.get(k) for k in _META_WORKTREE_KEYS)
+            if isinstance(v, str) and v.strip(os.sep + " ")}
+
+
 def live_worker_agent_ids_checked(repo_root, projects_dir=None, now=None,
-                                  freshness_s=None):
+                                  freshness_s=None, strict=True):
     """``(ids, err)``: the agent-ids (``agent-<hash>``) with a FRESH LIVE
     subagent transcript under the repo's project dir, and ``err`` — None when
     the read was complete, else why it was not (``ids`` is then a lower bound).
@@ -49,8 +91,12 @@ def live_worker_agent_ids_checked(repo_root, projects_dir=None, now=None,
     Live = not ``stale``/``finished`` (the #565/#587 partition): a WEDGED or
     UNREADABLE fresh lane is a worker still in flight, so it counts. No project
     dir for the repo at all is a confident empty (no transcript = no lane). A
-    ``count_live_workers`` warning (an unreadable subagents dir, a stat or
-    content-scan failure) or any exception sets ``err``. Never raises."""
+    ``count_live_workers`` warning (a stat or content-scan failure) or any
+    exception sets ``err``. ``strict`` (the reclaimer mode) also lists each
+    ``subagents`` dir itself (an unlistable one sets ``err``) and adds the
+    worktree basenames a live agent's meta names (its parent lane's too).
+    ``strict=False`` is the pre-#1193 set ``_live_worker_agent_ids`` returns.
+    Never raises."""
     ids, errs = set(), []
     try:
         import watchdog
@@ -71,9 +117,11 @@ def live_worker_agent_ids_checked(repo_root, projects_dir=None, now=None,
             return ids, None
         not_live = getattr(T, "_LANE_NOT_LIVE_STATES", frozenset())
         for name in os.listdir(proj):
+            sub = os.path.join(proj, name, "subagents")
             try:
-                if not _is_dir(os.path.join(proj, name, "subagents")):
+                if not _is_dir(sub):
                     continue
+                metas = _meta_paths(sub, _warn) if strict else {}
                 _count, evidence = watchdog.count_live_workers(
                     projects_dir, repo_root, name, now, freshness_s,
                     on_warn=_warn)
@@ -85,6 +133,7 @@ def live_worker_agent_ids_checked(repo_root, projects_dir=None, now=None,
                 is_live = (st not in not_live) if not_live else (st == "live")
                 if st is not None and is_live:
                     ids.add(lane.agent_id)
+                    ids |= _meta_worktrees(metas.get(lane.agent_id), _warn)
     except Exception as e:  # noqa: BLE001
         errs.append(repr(e))
         print("lane-overlap: worker-transcript evidence unavailable (%s)" % e,
@@ -128,8 +177,11 @@ class LiveLaneGate:
 
     def keep_reason(self, repo_root, wt_path):
         """Why ``wt_path`` must be kept (a skip reason), or None when the gate
-        does not object: a live lane, or a repo whose evidence was unreadable."""
+        does not object: a live lane, or an ``agent-*`` worktree of a repo
+        whose evidence was unreadable (transcript evidence can only ever name
+        an ``agent-*`` dir, so it never pins any other worktree)."""
         ids, err = self.evidence(repo_root)
-        if os.path.basename(str(wt_path).rstrip(os.sep)) in ids:
+        base = os.path.basename(str(wt_path).rstrip(os.sep))
+        if base in ids:
             return LIVE_LANE_KEPT
-        return LIVENESS_UNKNOWN_KEPT if err else None
+        return LIVENESS_UNKNOWN_KEPT if err and base.startswith("agent-") else None
