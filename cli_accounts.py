@@ -301,6 +301,8 @@ def cmd_accounts(args):
             import cli_project_gh_token as gh_token
             print("      %s" % gh_token.status_line(name))
             print("      %s" % gh_token.airuleset_status_line(name))   # #1199
+            import cli_project_ci_sync as ci_sync   # #1199: the CI secret relay
+            print("      %s" % ci_sync.status_line(name))
     print("legacy projects (no declared project account): %d (ceiling %d, "
           "down-only — migrate on touch)" % (data["legacy_count"],
                                              data["legacy_ceiling"]))
