@@ -24,6 +24,7 @@ Covers the design acceptance:
   * the rendered App shim exports GH_TOKEN from `primary` and, chained by
     the rate-guard installer, gives `gh` the token with no exec loop.
 """
+import http.client
 import io
 import json
 import os
@@ -98,9 +99,11 @@ class FakeGitHub:
         self.scoped_to = scoped_to or [REPO]
         self.token = token
         self.requests = []
+        self.ctypes = []
 
     def __call__(self, req, timeout=None):
         body = json.loads(req.data.decode()) if req.data else None
+        self.ctypes.append(req.get_header("Content-type"))
         self.requests.append({"method": req.get_method(), "url": req.full_url,
                               "auth": req.get_header("Authorization"),
                               "body": body})
@@ -403,7 +406,9 @@ class TestDeclaration(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # the consumer: the App shim, chained by the rate-guard installer
 # --------------------------------------------------------------------------- #
-class TestConsumerShim(_Base):
+class _ShimBase(_Base):
+    """A temp account home with a delivered token, the rendered App shim at
+    ~/.local/bin/gh-app-shim and a real gh BINARY (printenv) on PATH."""
 
     def setUp(self):
         super().setUp()
@@ -426,6 +431,17 @@ class TestConsumerShim(_Base):
         return subprocess.run([str(path), *args], env=self.env,
                               capture_output=True, text=True, timeout=30)
 
+    def _ensure(self):
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}), \
+                redirect_stdout(io.StringIO()):
+            return cli_gh_rate.ensure_gh_rate_wrapper(
+                shim=str(self.bin / "gh"), upstream=str(self.bin / "gh-upstream"),
+                python_exe=sys.executable,
+                module=str(ROOT / "cli_gh_rate.py"), verbose=False)
+
+
+class TestConsumerShim(_ShimBase):
+
     def test_shim_exports_the_primary_token_and_execs_the_real_gh(self):
         r = self.run_gh(self.shim, "GH_TOKEN")
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -447,14 +463,6 @@ class TestConsumerShim(_Base):
         shutil.rmtree(self.home / ".config" / "gh-app-tokens")
         r = self.run_gh(self.shim, "GH_TOKEN")
         self.assertIn("project-gh-token mint", r.stderr)
-
-    def _ensure(self):
-        with mock.patch.dict(os.environ, {"HOME": str(self.home)}), \
-                redirect_stdout(io.StringIO()):
-            return cli_gh_rate.ensure_gh_rate_wrapper(
-                shim=str(self.bin / "gh"), upstream=str(self.bin / "gh-upstream"),
-                python_exe=sys.executable,
-                module=str(ROOT / "cli_gh_rate.py"), verbose=False)
 
     def test_fresh_account_install_chains_the_wrapper_over_the_app_shim(self):
         with mock.patch.dict(os.environ, {"PATH": self.env["PATH"]}):
@@ -609,6 +617,176 @@ class TestTimer(unittest.TestCase):
             self.assertIsNone(self.setup(box, user), (box, user))
         self.assertEqual(list(self.units.iterdir()), [])
         self.assertEqual(self.calls, [])
+
+
+
+# --------------------------------------------------------------------------- #
+# review round 1 (all fixed on the branch)
+# --------------------------------------------------------------------------- #
+ODOO_STYLE_SHIM = ("#!/usr/bin/env bash\n# odoo-erp issue 3281 App shim\n"
+                   'export GH_TOKEN="$(gh-app-token)"\nexec gh "$@"\n')
+
+
+class TestReviewChain(_ShimBase):
+    """Cases 2/4 chain at once ONLY over the project shim: an odoo-style App
+    shim at gh-app-shim re-resolves `gh` on PATH, and chaining under it in
+    Case 2 left gh at exit 127 (the review's repro)."""
+
+    def stage_odoo_shim(self):
+        self.shim.write_text(ODOO_STYLE_SHIM)
+
+    def test_recogniser(self):
+        self.assertTrue(pgt.is_project_shim(str(self.shim)))
+        self.stage_odoo_shim()
+        self.assertFalse(pgt.is_project_shim(str(self.shim)))
+        self.assertFalse(pgt.is_project_shim(str(self.base / "absent")))
+
+    def test_odoo_style_shim_is_not_chained_on_a_fresh_account(self):
+        self.stage_odoo_shim()
+        with mock.patch.dict(os.environ, {"PATH": self.env["PATH"]}):
+            status = self._ensure()
+        self.assertNotIn("chain", status)
+        self.assertIn("_UPSTREAM='%s'" % (self.realbin / "gh"),
+                      (self.bin / "gh").read_text())
+
+    def test_odoo_style_shim_is_not_chained_on_wrap_in_place(self):
+        self.stage_odoo_shim()
+        shutil.copy2(self.realbin / "gh", self.bin / "gh")
+        with mock.patch.dict(os.environ, {"PATH": self.env["PATH"]}):
+            self._ensure()
+        self.assertIn("_UPSTREAM='%s'" % (self.bin / "gh-upstream"),
+                      (self.bin / "gh").read_text())
+        r = self.run_gh(self.bin / "gh", "HOME")          # gh still runs
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestReviewMint(_Base):
+
+    def test_http_exception_is_recorded_not_raised(self):
+        class Broken(FakeGitHub):
+            def __call__(self, req, timeout=None):
+                raise http.client.IncompleteRead(b"")
+        rc, out, err, gh, ssh = self.mint(gh=Broken())
+        self.assertEqual(rc, 1)
+        self.assertIn("IncompleteRead", err)
+        state = json.loads((self.state / "fohmixer.json").read_text())
+        self.assertFalse(state["ok"])
+        self.assertIn("IncompleteRead", state["error"])
+
+    def test_an_unexpected_exception_is_recorded_by_class_only(self):
+        class Boom(FakeGitHub):
+            def __call__(self, req, timeout=None):
+                raise RuntimeError("secret-looking text " + TOKEN)
+        rc, out, err, gh, ssh = self.mint(gh=Boom())
+        self.assertEqual(rc, 1)
+        self.assertIn("unexpected RuntimeError", err)
+        self.assertNotIn(TOKEN, out + err)
+        self.assertNotIn(TOKEN, (self.state / "fohmixer.json").read_text())
+
+    def test_a_target_without_a_pinned_identity_is_refused(self):
+        remote = dict(pgt.account_target("fohmixer"))
+        remote.pop("identity")
+        with mock.patch.object(pgt, "account_target", return_value=remote):
+            rc, out, err, gh, ssh = self.mint()
+        self.assertEqual(rc, 1)
+        self.assertEqual(ssh.calls, [])
+        self.assertIn("refused-no-identity", err)
+
+    def test_a_pending_target_is_refused(self):
+        import cli_fleet
+        entry = next(h for h in cli_fleet.REMOTE_HOSTS
+                     if h["name"] == "fohmixer@dev1")
+        with mock.patch.dict(entry, {"pending": True}):
+            rc, out, err, gh, ssh = self.mint()
+        self.assertEqual(rc, 1)
+        self.assertIn("pending", err)
+        self.assertEqual(gh.requests, [])
+
+    def test_a_key_path_that_is_a_directory_is_refused(self):
+        with self.assertRaises(pgt.MintError) as cm:
+            pgt.build_jwt(str(self.base), now=NOW)
+        self.assertIn("not a regular file", str(cm.exception))
+
+    def test_the_mint_post_is_json(self):
+        rc, out, err, gh, ssh = self.mint()
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(gh.ctypes, [None, "application/json"])
+
+    def test_a_failed_dry_run_records_nothing(self):
+        rc, out, err, gh, ssh = self.mint(gh=FakeGitHub(installed=False),
+                                          dry_run=True)
+        self.assertEqual(rc, 1)
+        self.assertFalse((self.state / "fohmixer.json").exists())
+
+    def test_status_counts_minutes_both_ways(self):
+        self.assertEqual(self.mint()[0], 0)       # expires EXPIRES
+        exp = pgt.calendar.timegm(pgt.time.strptime(EXPIRES, "%Y-%m-%dT%H:%M:%SZ"))
+        line = pgt.status_line("fohmixer", now=exp - 1800, directory=self.state)
+        self.assertIn("(in 30 min)", line)
+        line = pgt.status_line("fohmixer", now=exp + 600, directory=self.state)
+        self.assertIn("(EXPIRED 10 min ago)", line)
+
+
+class TestReviewVerify(unittest.TestCase):
+    """`project-gh-token verify <acct>`: the go-live acceptance, run AS the
+    account in a login shell (the #1183 gap the design names)."""
+
+    def run_verify(self, stdout, rc=0):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return subprocess.CompletedProcess(argv, rc, stdout, "")
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            got = pgt.verify_account("fohmixer", run=run)
+        return got, calls, out.getvalue() + err.getvalue()
+
+    def test_ok_when_gh_is_the_chain_and_answers_the_repo(self):
+        got, calls, text = self.run_verify(
+            "/home/fohmixer/.local/bin/gh\nzbynekdrlik/fohmixer\n")
+        self.assertEqual(got, 0, text)
+        argv = calls[0]
+        self.assertIn("fohmixer@100.104.8.125", argv)
+        self.assertIn("-i", argv)
+        self.assertTrue(argv[-1].startswith("bash -lc "), argv[-1])
+        self.assertIn("gh api repos/zbynekdrlik/fohmixer", argv[-1])
+
+    def test_fails_on_another_repo_or_a_gh_off_the_chain(self):
+        for stdout in ("/home/fohmixer/.local/bin/gh\nzbynekdrlik/other\n",
+                       "/usr/bin/gh\nzbynekdrlik/fohmixer\n", ""):
+            self.assertEqual(self.run_verify(stdout)[0], 1, stdout)
+        self.assertEqual(self.run_verify(
+            "/home/fohmixer/.local/bin/gh\nzbynekdrlik/fohmixer\n", rc=1)[0], 1)
+
+    def test_cli_verify_needs_one_account(self):
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(pgt.cmd_project_gh_token(
+                mock.Mock(action="verify", account=None, all=False)), 2)
+        with mock.patch.object(pgt, "verify_account", return_value=0) as v:
+            self.assertEqual(pgt.cmd_project_gh_token(
+                mock.Mock(action="verify", account="fohmixer", all=False)), 0)
+        v.assert_called_once_with("fohmixer")
+
+
+class TestReviewTimerWiring(unittest.TestCase):
+
+    def test_pytest_guard_writes_no_real_unit(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(pgt.Path, "home", return_value=Path(tmp)), \
+                mock.patch("cli_filedrop_watchdog._run_systemctl",
+                           side_effect=lambda a: calls.append(a) or (0, "", "")):
+            got = pgt.setup_timer(box_class_fn=lambda: "controller",
+                                  user="airuleset")
+            self.assertIsNone(got)
+            self.assertEqual(list(Path(tmp).rglob("*")), [])
+        self.assertEqual(calls, [])
+
+    def test_install_calls_the_timer_outside_the_watchdog_try(self):
+        import inspect
+        src = inspect.getsource(airuleset.cmd_install)
+        self.assertIn("\n    maybe_setup_project_gh_token_timer()", src)
 
 
 if __name__ == "__main__":
