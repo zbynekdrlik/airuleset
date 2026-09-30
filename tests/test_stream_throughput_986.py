@@ -39,17 +39,17 @@ def _ci_poll_payload(command, session="sess-986", agent_id=None,
 
 
 def _long_foreground_loop(run_id, sleep_s=120, iters=45):
-    """The sanctioned long foreground wait shape."""
+    """The sanctioned long foreground wait shape (#1200 split poll)."""
     return (
         'DEADLINE=$((SECONDS + %d))\n'
         'for i in $(seq 1 %d); do\n'
-        '  s=$(gh run view %s --json status,conclusion,jobs '
-        '--jq \'if .status=="completed" then "TERMINAL "+.status+" "'
-        '+(.conclusion//"") else "PENDING "+.status end\')\n'
-        '  case "$s" in "TERMINAL "*) echo "TERMINAL: ${s#TERMINAL }"; break;; esac\n'
+        '  s=$(gh run view %s --json status,conclusion '
+        '--jq \'.status+" "+(.conclusion//"")\') || s="ERROR"\n'
+        '  [ $((i %% 3)) -eq 0 ] && j=$(gh run view %s --json jobs)\n'
+        '  case "$s" in completed*) echo "TERMINAL: $s"; break;; esac\n'
         '  if [ "$SECONDS" -ge "$DEADLINE" ]; then echo "BUDGET"; break; fi\n'
         '  sleep %d\n'
-        'done' % (sleep_s * iters, iters, run_id, sleep_s)
+        'done' % (sleep_s * iters, iters, run_id, run_id, sleep_s)
     )
 
 
