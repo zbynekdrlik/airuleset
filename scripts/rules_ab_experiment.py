@@ -685,6 +685,9 @@ def run_condition(root: Path, task: Task, cond: str, budget: float, model: str,
     env["GH_TOKEN"] = ""
     env["GITHUB_TOKEN"] = ""
     env.pop("CLAUDE_PROJECT_DIR", None)
+    # #1203: the arm deliberately runs `--model <model>` (not MANAGED_MODEL) with
+    # the managed hooks copied in, so the model-fallback gate must not stop it.
+    env["AIRULESET_MODEL_GUARD"] = "off"
 
     cmd = [
         claude_binary(),

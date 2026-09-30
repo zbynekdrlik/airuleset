@@ -44,6 +44,7 @@ import textwrap
 
 import cli_account_hardening as hardening
 import cli_account_policy as policy
+import cli_project_toolchain as toolchain
 
 
 # Debian package name grammar (Policy §5.6.1): [a-z0-9][a-z0-9.+\-]+
@@ -73,7 +74,7 @@ _NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
 _ALLOWED_KEYS = frozenset({
     "host", "sudo", "sudo_reason", "sudo_commands", "reach", "reach_enforced",
     "reach_reason", "secrets", "webterm_sessions", "system_packages", "repo",
-    "project_dir", "tmux_session", "github_app", "repo_secrets",
+    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools",
 })
 
 # The defaults every declaration inherits. They are the SAFE direction: no
@@ -145,6 +146,10 @@ SERVICE_ACCOUNTS = {
         # by the newlevel-project-accounts App (cli_project_gh_token).
         "github_app": True,
         "repo_secrets": ["DENYLIST"],   # CI secrets it may sync (#1199)
+        # #1201: its repo's pins (rust-toolchain.toml, CI ruff, the e2e lockfile)
+        "tools": ["rust-toolchain:1.98.1", "rust-component:llvm-tools-preview",
+                  "rust-target:wasm32-unknown-unknown", "pipx:ruff==0.16.2",
+                  "playwright:1.58.2/chromium", "playwright:1.58.2/webkit"],
         "project_dir": "devel/fohmixer",
         "tmux_session": "fohmixer",
         "webterm_sessions": {
@@ -320,6 +325,7 @@ def validate_account(account, raw):
     if "repo" in spec and "project_dir" not in spec:
         errs.append("repo declared without project_dir")
     errs += policy.validate_github_app(spec, account, SERVICE_ACCOUNTS)
+    errs += toolchain.validate_tools(spec, account, SERVICE_ACCOUNTS)   # #1201
     if "tmux_session" in spec and not _SESSION_RE.fullmatch(str(spec["tmux_session"])):
         errs.append("tmux_session %r is not a plain name" % (spec["tmux_session"],))
     elif "tmux_session" in spec and isinstance(spec["webterm_sessions"], dict):
@@ -483,8 +489,8 @@ def _render_project_step(spec):
     if spec.get("tmux_session"):
         sess = spec["tmux_session"]
         start = "$HOME/" + spec["project_dir"] if spec.get("project_dir") else "$HOME"
-        tmux = ("tmux has-session -t =%s 2>/dev/null || "
-                "tmux new-session -d -s %s -c %s" % (sess, sess, start))
+        tmux = ("tmux has-session -t =%s 2>/dev/null || tmux new-session -d -s %s -c "
+                "%s %s" % (sess, sess, start, toolchain.TMUX_LOGIN_SHELL))  # #1201
         out += ("\n# 10. Project tmux session (idempotent, as the account) — #1184\n"
                 "runuser -l \"$ACCOUNT\" -c %s\n" % shlex.quote(tmux))
     return out
@@ -585,10 +591,12 @@ def render_root_bootstrap(account):
     script += "\n" + textwrap.dedent(_KEYS_TEMPLATE).format(ak_content=ak_content)
     # 8. System packages — only when the account declares them (#973)
     script += _render_system_packages_step(packages)
+    script += toolchain.render_account_env_step(spec)   # 8b: #1201
     # 9-10: the project checkout + its tmux session (#1184)
     script += _render_project_step(spec)
     import cli_project_gh_token   # 11: the gh token shim (#1190)
     script += cli_project_gh_token.render_bootstrap_step(spec)
+    script += toolchain.render_system_step(spec)   # 12 (LAST): #1201
 
     # Read-back section
     readback = textwrap.dedent("""\
@@ -611,7 +619,7 @@ def render_root_bootstrap(account):
         echo "  2. python3 ~/devel/airuleset/airuleset.py install"
         echo "  3. Verify: ssh -i ~/.secrets/airuleset_push_ed25519 $ACCOUNT@{address} true"
     """).format(address=address) + cli_project_gh_token.render_next_steps(spec)
-    script += readback
+    script += readback + toolchain.render_next_steps(spec)   # #1201: verify is LAST
     return script
 
 

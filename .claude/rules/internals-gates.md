@@ -236,3 +236,30 @@ until the ratchet cap, then the oldest move to `.claude/rules-reference/internal
     byte-for-byte by condensing unlocked prose — grep every `assertIn` lock (`montalu vocabulary`)
     first. A commit whose Bash text names a foreign `#N` is refused by the design gate; write the
     lesson with the Edit tool and cite foreign tickets without the hash.
+
+- **#1203 — a Claude Code model FALLBACK is read from the transcript, never the payload, and one
+  shared reader (`model_fallback.py`) serves the footer, the gate and the watchdog.** The live shape:
+  an ASSISTANT entry whose `message.content` holds `{"type":"fallback","from":{"model":..},"to":
+  {"model":..}}` and whose `message.model` is already the fallback model; every later reply carries
+  that model; the statusline payload's `model.id` keeps naming the configured one. A typed `/model
+  <id>` is a `user` entry with the `<command-name>/model</command-name> ... <command-args>` composite
+  (a raw-text match never confirms a slash command: `watchdog/slash_command.py`). Skip `<synthetic>`
+  and sidechain entries. `gates/modelfallback.py` (hook `block-model-fallback.sh`, matcher `*`) runs
+  on EVERY tool call, so it must stay cheap: a bounded tail read and the lineup from the stdlib
+  `model_lineup.py` (re-exported by airuleset.py) instead of `import airuleset` (~0.13 s). It fails
+  OPEN on every read error (logged), exempts `agent_id` subagents and `AIRULESET_ROLE=implementer`,
+  and a `/model <managed>` typed after the last reply reads as restored so the next reply's first
+  tool call is never blocked. The CLI's own switch: `CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1` in the
+  managed settings env (2.1.284 `iL()`), not the broader `CLAUDE_CODE_NO_MODEL_FALLBACK`. Watchdog
+  Job 54 (`watchdog/model_restore.py`, kind `model-restore`) skips only the transcript-liveness gate
+  when typing `/model` (the blocked session's /goal loop never goes quiet; `/model` is idempotent,
+  so the #855 type-ahead double-drain harm does not apply), never touches a non-Claude model, and
+  files its re-review ticket with the pane's native `gh` in the pane cwd (fakes in tests).
+  **Two review rounds, reusable:** (1) a plain model MISMATCH is not a fallback — an old-lineup
+  session looks identical — so the word "fallback" and any ticket need a marker STILL IN FORCE (no
+  later reply on another model; `find_marker(stop_model=managed)` stops at a later managed reply),
+  else it is OFF-LINEUP: restore, journal, no ticket. (2) the #1060 implementer window shares the
+  main's cwd, so a cwd→newest-transcript mapping can hand both panes the same sid: skip the
+  implementer BEFORE `seen.add(sid)` and exclude its session id from the lookup, or the main pane is
+  silently dropped. (3) watchdog state that gates a gh WRITE is written through into `state` as it
+  changes, and the write first searches for its own episode id: a killed sweep must not file twice.

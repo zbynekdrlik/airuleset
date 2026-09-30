@@ -56,41 +56,10 @@ EXTERNAL_BLOCK_MARKERS = [("<!-- CODEGRAPH_START -->", "<!-- CODEGRAPH_END -->")
 # User can still raise per session with `/effort`, or opt into ultracode by hand.
 MANAGED_EFFORT_LEVEL = "high"
 
-# --------------------------------------------------------------------------- #
-# Model lineup — an ALLOWLIST of EXACT ids, the single source of truth (owner
-# directive 2026-09-04, #871: "chcem pouzivat by default vzdy sonnet-5,
-# opus-4.6, fable-5.0"). The float vector this closes: a bare alias
-# (`fable`/`opus`/`sonnet`/`haiku`) resolves to the LATEST model of that
-# family, so an exact id never floats. A new model version joins the fleet
-# ONLY by an owner-approved edit of this table, never by an alias float.
-MODEL_TIERS = {
-    "opus5": "claude-opus-5-5",       # main session model (MANAGED_MODEL) — owner directive 2026-09-23, #1119
-    "fable": "claude-fable-5-1",      # allowed dispatch choice (former main, pre-#1119)
-    "opus": "claude-opus-4-8",        # allowed dispatch choice
-    "sonnet": "claude-sonnet-5-5",    # allowed dispatch choice — Sonnet 5.5 (owner 2026-09-28, #1173)
-    "sonnet5": "claude-sonnet-5",     # allowed dispatch choice (older pinned dispatches, pre-#1173)
-    "haiku": "claude-haiku-4-5",      # allowed dispatch choice (trivial reads)
-}
-
-# Managed default MAIN-session model (user directive 2026-08-13: **Opus 5 is
-# BANNED**; 2026-09-05: Fable 5.1 @ medium replaces 5.0, #894; 2026-09-23:
-# **Opus 5.5 replaces Fable 5.1 as the main**, #1119; since #1173 a subagent
-# with no per-dispatch model and no `model:` pin natively INHERITS this main)
-# — Opus 5.5 (`claude-opus-5-5`), derived from MODEL_TIERS so
-# the lineup has ONE source. The `[1m]` suffix is a DELIBERATE part of the id,
-# not a typo: it is how Claude Code's own usage tracking keys the 1M-context
-# variant (verified — `lastModelUsage` entries in ~/.claude.json store ids
-# exactly like `claude-opus-5-5[1m]`) — kept so this does NOT shrink the context
-# window. The unconditional-managed-default treatment
-# (cli_config.apply_managed_settings_defaults) is what makes the lineup
-# self-healing: any settings.json `model` != MANAGED_MODEL is overwritten on the
-# next install/push. burn.tier("claude-opus-5-5[1m]") → "opus" (substring), so
-# the statusline highlight keeps working. NB: `claude-opus-5-5` is a DISTINCT
-# exact id from the BANNED `claude-opus-5` — it is on the allowlist
-# (MODEL_TIERS) and never matched by the exact-id ban (see is_banned_model /
-# block-banned-model.sh below). Full policy history:
-# .claude/rules-reference/model-awareness-history.md.
-MANAGED_MODEL = MODEL_TIERS["opus5"] + "[1m]"
+# Model lineup (MODEL_TIERS) + the managed main-session model (MANAGED_MODEL)
+# live in model_lineup.py (#1203: a per-tool-call hook reads them without
+# importing this module); re-exported here unchanged.
+from model_lineup import MODEL_TIERS, MANAGED_MODEL  # noqa: E402,F401
 
 # Models BANNED as a DISPATCH value fleet-wide (owner directive 2026-08-13,
 # reaffirmed #991 2026-09-11): Opus 5 (the exact id `claude-opus-5`) is
@@ -166,8 +135,9 @@ def is_banned_model(value):
 # Bedrock/Vertex provider prefix (`us.anthropic.` / `anthropic.`), so both are
 # tolerated before the ban-list comparison. The DISPATCH hook (block-banned-
 # model.sh) enforces the SAME ban-list on the outgoing dispatch value.
-_SERVED_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
-_PROVIDER_PREFIX_RE = re.compile(r"^(?:us|eu|apac)?\.?anthropic\.")
+from model_fallback import (  # noqa: E402  (#1203: ONE provider/date pair)
+    PROVIDER_PREFIX_RE as _PROVIDER_PREFIX_RE,
+    SERVED_DATE_SUFFIX_RE as _SERVED_DATE_SUFFIX_RE)
 
 
 def _strip_served_date_suffix(value):
@@ -8562,6 +8532,7 @@ def cmd_watchdog(args):
                     # sweep and never touches the network.
                     task_hygiene_enabled=True,
                     watch_triggers_enabled=True, checkout_freshness_enabled=True,  # #1163 Job 52 (steer=watch window) + #1176 Job 53 (managed checkouts)
+                    model_restore_enabled=True,  # #1203 Job 54 (undo a Claude Code model fallback)
                     # #1040 — one shared gh-rate reading per sweep: refreshes the
                     # 60s-cached `gh api rate_limit` (the FREE, non-counting
                     # endpoint), records the once-per-episode exhaustion alert,

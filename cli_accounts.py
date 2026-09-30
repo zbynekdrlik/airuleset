@@ -24,7 +24,9 @@ This leaf owns the three mechanical halves of that policy:
   * ``cmd_accounts`` — ``airuleset.py accounts status [--json]``;
   * ``transfer_session`` — ``accounts transfer-session <acct> --from-dir <old
     checkout> [--render | --apply]`` (#1190): the migration step that carries
-    the Claude conversation into the account (``cli_account_session``).
+    the Claude conversation into the account (``cli_account_session``);
+  * ``accounts verify <acct> [--no-transfer]`` (#1201): the go-live gate, the
+    LAST migration step (``cli_account_verify``).
 
 Stdlib only; ``cli_account_bootstrap`` / ``cli_account_policy`` /
 ``cli_onboard_exec`` / ``cli_onboard`` are imported lazily inside functions (no
@@ -261,6 +263,14 @@ def cmd_accounts(args):
     declaration) and the frozen legacy inventory with its count;
     ``accounts transfer-session <acct> --from-dir <dir>`` (#1190)."""
     action = getattr(args, "action", None) or "status"
+    if action == "verify":   # #1201: the go-live gate
+        if not isinstance(getattr(args, "account", None), str):
+            print("usage: airuleset.py accounts verify <account> [--no-transfer]",
+                  file=sys.stderr)
+            return 2
+        import cli_account_verify
+        return cli_account_verify.verify_account(
+            args.account, no_transfer=getattr(args, "no_transfer", False) is True)
     if action == "transfer-session":
         if not getattr(args, "account", None) or not getattr(args, "from_dir", None):
             print("usage: airuleset.py accounts transfer-session <account> "
@@ -326,11 +336,15 @@ def register_parser(sub):
         "accounts",
         help="#1184: per-project accounts — `status` lists the declared project "
              "accounts and the frozen legacy inventory + count; "
-             "`transfer-session` carries a Claude conversation into one (#1190)")
+             "`transfer-session` carries a Claude conversation into one (#1190); "
+             "`verify` is the go-live gate, run AS the account (#1201)")
     p.add_argument("action", nargs="?", default="status",
-                   choices=["status", "transfer-session"])
+                   choices=["status", "transfer-session", "verify"])
     p.add_argument("account", nargs="?", default=None,
-                   help="transfer-session: the declared project account")
+                   help="transfer-session / verify: the declared project account")
+    p.add_argument("--no-transfer", dest="no_transfer", action="store_true",
+                   help="verify: the project was born in its account (no "
+                        "Claude conversation to carry over)")
     p.add_argument("--from-dir", dest="from_dir", default=None,
                    help="transfer-session: the OLD checkout the session ran in")
     p.add_argument("--from-home", dest="from_home", default=None,

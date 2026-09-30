@@ -26,7 +26,7 @@ from collections import namedtuple
 from datetime import datetime
 from pathlib import Path
 
-from watchdog import _SENTINELS, nudge_file
+from watchdog import _SENTINELS, nudge_file, slash_command
 
 
 def encode_project_dir(cwd):
@@ -551,7 +551,7 @@ def _submit_confirmed(tpath, baseline_size, text):
         if _entry_has_tool_result(e):
             continue            # a harness tool-result feed, not a typed submit
         et = (_entry_text(e) or "").strip()
-        if et and want in et:
+        if et and (want in et or slash_command.matches(et, want)):
             return True
     return False
 
