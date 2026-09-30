@@ -789,5 +789,54 @@ class TestReviewTimerWiring(unittest.TestCase):
         self.assertIn("\n    maybe_setup_project_gh_token_timer()", src)
 
 
+
+# --------------------------------------------------------------------------- #
+# review round 2 (all fixed on the branch)
+# --------------------------------------------------------------------------- #
+class TestRound2Chain(_ShimBase):
+
+    def test_odoo_shim_on_wrap_in_place_survives_repeated_installs(self):
+        """Case A re-chains ANY App shim on the next install; at depth 2 the
+        wrapper must then find the relocated real gh (gh-upstream), not exit
+        127 (round 2 repro: no other gh on PATH)."""
+        self.shim.write_text(ODOO_STYLE_SHIM)
+        shutil.copy2(self.realbin / "gh", self.bin / "gh")   # a real gh binary
+        path = "%s:/usr/bin:/bin" % self.bin                 # realbin OFF PATH
+        self.env["PATH"] = path
+        with mock.patch.dict(os.environ, {"PATH": path}):
+            for _ in range(3):
+                self._ensure()
+        self.assertIn("_UPSTREAM='%s'" % self.shim, (self.bin / "gh").read_text())
+        r = self.run_gh(self.bin / "gh", "HOME")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), str(self.home))
+
+    def test_the_installer_recognises_the_project_shim_by_the_same_marker(self):
+        self.assertEqual(pgt.PROJECT_SHIM_MARKER, cli_gh_rate.PROJECT_APP_SHIM_MARKER)
+        self.assertIn(pgt.PROJECT_SHIM_MARKER, pgt.render_gh_app_shim())
+
+
+class TestRound2Verify(unittest.TestCase):
+    """verify proves the App token itself: only a repo-scoped installation
+    token answers `installation/repositories` with exactly the one repo."""
+
+    run_verify = TestReviewVerify.run_verify
+
+    def test_probe_is_one_login_shell_argument_listing_the_installation(self):
+        got, calls, text = self.run_verify(
+            "/home/fohmixer/.local/bin/gh\nzbynekdrlik/fohmixer\n")
+        self.assertEqual(got, 0, text)
+        import shlex
+        words = shlex.split(calls[0][-1])
+        self.assertEqual(words[:2], ["bash", "-lc"])
+        self.assertEqual(len(words), 3)
+        self.assertIn("gh api installation/repositories", words[2])
+
+    def test_a_token_that_sees_more_repos_fails(self):
+        self.assertEqual(self.run_verify(
+            "/home/fohmixer/.local/bin/gh\nzbynekdrlik/fohmixer\n"
+            "zbynekdrlik/other\n")[0], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
