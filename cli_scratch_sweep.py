@@ -46,6 +46,7 @@ from cli_target_purge import (
     _dir_stats,
     _min_age_days_env,
 )
+from cli_scratch_use import scratch_use_stat
 
 CLAUDE_DIR = Path.home() / ".claude"
 
@@ -356,11 +357,13 @@ SCRATCHPAD_CHILD_MIN_AGE_DAYS = 2
 def discover_stale_scratchpad_children(session_path, now, min_age_days=None,
                                        proc_dir=None):
     """Per-child aging INSIDE a live session's ``scratchpad/`` (#849 ask 2).
-    Each top-level child of ``<session>/scratchpad/`` is aged independently:
-    if its newest mtime exceeds ``min_age_days`` AND ``_target_in_live_use``
-    is False, it is a genuine candidate (reason=None). Returns
-    ``[{path, size, reason, cls}]``. Symlinks never followed. A missing or
-    unreadable ``scratchpad/`` is simply nothing to do."""
+    Each top-level child of ``<session>/scratchpad/`` is aged independently by
+    its LAST USE -- newest max(mtime, atime) of its files (#1195 item 5,
+    ``cli_scratch_use``): a script read daily but never rewritten is in use.
+    Past ``min_age_days`` with ``_target_in_live_use`` False it is a genuine
+    candidate (reason=None); old by mtime but recently read -> a kept row.
+    Returns ``[{path, size, reason, cls}]``. Symlinks never followed. A missing
+    or unreadable ``scratchpad/`` is simply nothing to do."""
     min_age_days = min_age_days if min_age_days is not None else SCRATCHPAD_CHILD_MIN_AGE_DAYS
     sp = Path(session_path) / "scratchpad"
     if not sp.is_dir() or sp.is_symlink():
@@ -378,13 +381,15 @@ def discover_stale_scratchpad_children(session_path, now, min_age_days=None,
                         "reason": "symlink -- never followed"})
             continue
         try:
-            size_bytes, newest_mtime = _scratch_stat(child)
+            size_bytes, newest_mtime, last_use = scratch_use_stat(child)
         except OSError as e:
             out.append({"path": str(child), "size": 0, "cls": "scratch",
                         "reason": "could not stat: %s" % e})
             continue
-        age = now - newest_mtime
-        if age < cutoff:
+        if now - last_use < cutoff:
+            if now - newest_mtime >= cutoff:
+                out.append({"path": str(child), "size": size_bytes, "cls": "scratch",
+                            "reason": "read within %sd (atime) -- in use, kept" % min_age_days})
             continue
         if _target_in_live_use(child, proc_dir=proc_dir):
             out.append({"path": str(child), "size": size_bytes, "cls": "scratch",
@@ -419,6 +424,7 @@ def _classify_scratch_session(cp, cwd_key, uuid, now, min_age_days, proc_dir, ho
         entry["reason"] = "could not stat: %s" % e
         return entry
     entry["size"] = size_bytes
+    # #1195 item 5: mtime only (not atime) -- this age decides only a DEAD session
     entry["age_days"] = (now - newest_mtime) / 86400.0
     liveness = _session_liveness(cp, cwd_key, uuid, home, now, proc_dir)
     if liveness == _SESS_LIVE:
