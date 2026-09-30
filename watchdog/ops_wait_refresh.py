@@ -53,6 +53,8 @@ import subprocess
 import sys
 import time
 
+from watchdog import user_unit
+
 # #1067 slice 1d: ONE snapshot TTL for every consumer — the SHORTEST any of them
 # needs (the lane nudge's dispatchable count was cached 5 min; the backlog 10;
 # ops-wait 30). The watchdog's outer per-consumer caches keep their own TTLs on
@@ -442,88 +444,32 @@ def spawn_refresher(cwd, cmd_name, argv0=None, run_fn=None, popen_fn=None,
     _spawn_via_popen(repo_root, child_argv, popen_fn, log)
 
 
-# #1067 slice 1c review F1: a `systemd-run --user` transient unit inherits the
-# USER MANAGER's environment, NOT the caller's — so the derivation's env is NOT
-# forwarded unless we ask for it. The child shells `gh`/`git` by BARE NAME, so it
-# needs, and ONLY needs, the following (each justified — least privilege):
-#   PATH           resolve `gh` (incl. the ~/.local/bin app-token shim, #888) + git
-#   HOME           ~/.claude cache dir + ~/.config/gh
-#   XDG_CONFIG_HOME gh's config dir when relocated off ~/.config
-#   LANG, LC_ALL   gh/git output encoding (avoids the #1108 UnicodeEncode class)
-#   GITHUB_TOKEN   gh honours it for auth
-#   GH_* prefix    gh's OWN namespace (GH_TOKEN / GH_CONFIG_DIR / GH_HOST / …) —
-#                  all legitimately gh's; forwarding the whole namespace keeps the
-#                  child's gh behaving identically to the watchdog's.
-# The broad `GITHUB_` prefix and XDG_RUNTIME_DIR were REMOVED (review: narrow to
-# need — the unit gets XDG_RUNTIME_DIR from its manager, and CI `GITHUB_*` vars
-# are not the derivation's business).
-_UNIT_ENV_KEYS = ("PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL",
-                  "GITHUB_TOKEN")
-_UNIT_ENV_PREFIXES = ("GH_",)
+# #1067 slice 1c review F1 + #1176: the env forwarding and the systemd-run argv
+# live in the ONE shared launcher `watchdog/user_unit.py` (the #1176 detached
+# fast-forward uses it too). These names stay importable here for callers/tests.
+_UNIT_ENV_KEYS = user_unit.DEFAULT_ENV_KEYS
+_UNIT_ENV_PREFIXES = user_unit.DEFAULT_ENV_PREFIXES
 
 
 def _unit_setenv_args(source):
-    """`--setenv=NAME` args (NAME ONLY — no `=VALUE`) telling systemd-run to
-    IMPORT each var's value from its OWN client environment into the unit
-    (systemd 255: "When = and VALUE are omitted, the value of the variable with
-    the same name in the program environment will be used").
-
-    Emitting NAME-only keeps credential VALUES (GH_TOKEN / GITHUB_TOKEN / any
-    GH_* secret) OUT of the systemd-run ARGV — on a shared-stream box (subdev,
-    ~15 accounts) `/proc/<pid>/cmdline` / `ps aux` is readable by every other
-    account, and a `--setenv=NAME=VALUE` would ALSO persist the value in the
-    transient unit's properties (review: cross-account credential leak). The
-    values ride the systemd-run client's `env=` dict instead (in-process memory,
-    never argv). `source` is the watchdog process env; only vars PRESENT in it are
-    forwarded, so every emitted NAME resolves in the client env."""
-    return ["--setenv=%s" % k for k in sorted(source)
-            if k in _UNIT_ENV_KEYS or k.startswith(_UNIT_ENV_PREFIXES)]
+    """`--setenv=NAME` args (NAME ONLY, never a value in argv) — see
+    `user_unit.setenv_args`."""
+    return user_unit.setenv_args(source)
 
 
 def _spawn_via_systemd_run(cwd, repo_root, child_argv, run_fn, log):
-    """Launch the refresher as a transient ``--user`` unit in its own cgroup.
-    Returns True when the unit is running (or already running — the unit name is
-    the atomic single-flight backstop), False when the caller must fall back.
-    The unit captures the child's stdout/stderr to its own journal
-    (``journalctl --user -u airuleset-opswait-*``), so a child failure is visible
-    there in addition to the ``error`` cache entry it writes."""
-    run = run_fn or subprocess.run
-    try:
-        from cli_filedrop_watchdog import _xdg_runtime_env
-        env = _xdg_runtime_env()
-    except Exception:
-        # xdg helper unavailable: the systemd-run CLIENT still inherits
-        # os.environ (a live user-bus in a --user service), and _unit_setenv_args
-        # forwards from os.environ below — so this is NOT a forced fall-back.
-        env = None
-    src = env if env is not None else os.environ
-    argv = ["systemd-run", "--user", "--collect", "--quiet",
-            "--unit", _refresh_unit_name(cwd),
-            "--working-directory", repo_root,
-            "--property", "RuntimeMaxSec=%d" % (CHILD_TIMEOUT_S + 30),
-            *_unit_setenv_args(src),
-            "--", *child_argv]
-    try:
-        # a short client-call ceiling: systemd-run returns in ms once the unit is
-        # started; 10 s bounds a bus hang without re-adding real latency to the
-        # sweep (the derivation itself runs detached, off the sweep path). Pass
-        # `env=src` (the SAME dict the `--setenv=NAME` list was derived from) so
-        # every imported NAME always resolves in the client env — the by-name
-        # import can never reference a var absent from what run() receives
-        # (review F1 robustness: no implicit src/env divergence).
-        r = run(argv, capture_output=True, text=True, timeout=10, env=src)
-    except FileNotFoundError:
-        log("popen-fallback (systemd-run absent)")
-        return False
-    except Exception as e:  # noqa: BLE001 — any spawn error falls back, logged
-        log("popen-fallback (systemd-run error: %s)" % type(e).__name__)
-        return False
-    if r.returncode == 0:
-        return True
-    if "exists" in (r.stderr or "").lower():
-        return True   # single-flight: a unit of this name is already running
-    log("popen-fallback (systemd-run rc=%d)" % r.returncode)
-    return False
+    """Launch the refresher as a transient ``--user`` unit in its own cgroup
+    (the shared `user_unit.launch`). Returns True when the unit is running (or
+    already running — the unit name is the atomic single-flight backstop),
+    False when the caller must fall back. The unit captures the child's
+    stdout/stderr to its own journal (``journalctl --user -u
+    airuleset-opswait-*``), so a child failure is visible there in addition to
+    the ``error`` cache entry it writes."""
+    ok, why = user_unit.launch(_refresh_unit_name(cwd), repo_root, child_argv,
+                               CHILD_TIMEOUT_S + 30, run_fn=run_fn)
+    if not ok:
+        log("popen-fallback (%s)" % why)
+    return ok
 
 
 def _spawn_via_popen(repo_root, child_argv, popen_fn, log):

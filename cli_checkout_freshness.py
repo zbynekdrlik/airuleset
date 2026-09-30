@@ -9,7 +9,10 @@ Two callers, one definition of "provably safe to fast-forward":
     `ff_verdict` / `fast_forward` for every managed checkout of the box on a
     15-min cadence, so freshness no longer depends on a session-start event
     (the #1127 recurrence: every managed session starts with `claude -c`, a
-    `resume` source, and a session can live for days).
+    `resume` source, and a session can live for days). Its fast-forward runs
+    DETACHED — `python3 cli_checkout_freshness.py ff ...` (`ff_child`) in a
+    transient `systemd-run --user` unit, outside the watchdog unit's kill
+    window (the #1176 reopen: a sweep-budget reserve starved it forever).
 
 The same module also READS the job's status file for the two visibility
 surfaces, so the per-prompt footer never imports the 390 KB `watchdog`
@@ -370,6 +373,59 @@ def fast_forward(cwd, verdict, run_hooks=True):
     return rc == 0
 
 
+def write_json_atomic(path, data):
+    """Atomic JSON write (temp + os.replace) — a reader never sees half a file."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=1, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def ff_child(path, remote, branch, result_path):
+    """The DETACHED fast-forward (#1176 reopen): what the watchdog's transient
+    `systemd-run --user` unit runs, outside the watchdog unit's 120 s kill, so
+    no sweep reserve is needed. The job already proved the `ff` verdict; this
+    re-checks it right before the merge (the checkout may have changed in
+    between — a branch switch, an edit), merges with hooks OFF, and writes
+    `{ok, reason, commits, branch, started, finished}` to `result_path` for
+    the next sweep to collect. rc 0 on success, 1 otherwise; never raises."""
+    started = time.time()
+    commits = None
+    try:
+        now_on = current_branch(path)
+        if now_on != branch:
+            ok, reason = False, "branch changed since the verdict (on %s, expected %s)" % (
+                now_on or "detached HEAD", branch)
+        else:
+            v = ff_verdict(path, remote)
+            commits = v.behind
+            if v.action == "noop" and v.reason == "up-to-date":
+                ok, reason = True, "already up-to-date"
+            elif v.action != "ff":
+                ok, reason = False, "re-check refused: %s" % v.reason
+            else:
+                ok = fast_forward(path, v, run_hooks=False)
+                reason = "fast-forwarded" if ok else "merge --ff-only failed"
+    except Exception as exc:  # noqa: BLE001 -- recorded in the result, never lost
+        ok, reason = False, "child error: %s" % exc
+    _log("%s [%s] detached fast-forward: %s (%s)" % (
+        path, branch, "ok" if ok else "FAILED", reason))
+    write_json_atomic(result_path, {"ok": ok, "reason": reason, "commits": commits,
+                                    "branch": branch, "started": started,
+                                    "finished": time.time()})
+    return 0 if ok else 1
+
+
+def _ff_main(argv):
+    import argparse
+    ap = argparse.ArgumentParser(prog="cli_checkout_freshness.py ff")
+    for opt in ("--path", "--remote", "--branch", "--result"):
+        ap.add_argument(opt, required=True)
+    a = ap.parse_args(argv)
+    return ff_child(a.path, a.remote, a.branch, a.result)
+
+
 def hook_line(verdict, applied=None):
     """The #314 SessionStart line for a verdict (empty = print nothing). The
     wording is the hook's historical contract (tests assert it)."""
@@ -536,5 +592,8 @@ def status_lines(home=None, now=None):
 if __name__ == "__main__":
     if sys.argv[1:] == ["hook"]:
         sys.exit(hook_main())
-    print("usage: python3 cli_checkout_freshness.py hook", file=sys.stderr)
+    if sys.argv[1:2] == ["ff"]:
+        sys.exit(_ff_main(sys.argv[2:]))
+    print("usage: python3 cli_checkout_freshness.py hook | ff --path P --remote R "
+          "--branch B --result F", file=sys.stderr)
     sys.exit(2)

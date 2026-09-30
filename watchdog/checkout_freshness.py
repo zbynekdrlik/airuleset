@@ -42,10 +42,21 @@ deadlines only shorten it):
      `cli_checkout_freshness.ff_verdict` (the SAME function the SessionStart
      hook runs — one definition of "provably safe") → `git merge --ff-only`
      with the repo's merge hooks OFF. The merge is NEVER bounded or
-     signalled once started (git does not roll back files a checkout already
-     wrote, so a stopped merge leaves a half-applied tree): it starts only
-     while the sweep has MERGE_RESERVE_S left, else it is deferred and due
-     again next sweep. Refused states (dirty, unmeasurable tree, diverged,
+     signalled by the sweep once started (git does not roll back files a
+     checkout already wrote, so a stopped merge leaves a half-applied tree).
+     It runs DETACHED (#1176 reopen — a sweep-budget reserve starved it: dev1
+     spinbike 52 commits behind for 16 h, the job never had 60 s left): a
+     transient `systemd-run --user --collect` unit (the ONE launcher,
+     `watchdog/user_unit.py`) runs `cli_checkout_freshness.py ff`, which
+     re-checks the verdict, merges and writes a result file; the NEXT sweep
+     collects it (`collect_ff_results`: `current`, or `lagging` with
+     `fast-forward failed: <why>`). A pending unit (`ff_pending`) blocks a
+     second launch until it reports or FF_PENDING_MAX_S passes. FALLBACK
+     where `systemd-run --user` is unavailable: the old in-unit merge, which
+     starts only while the sweep has MERGE_RESERVE_S left, else it is
+     deferred and due again next sweep — and a checkout deferred
+     DEFER_PRIORITY_AFTER sweeps in a row is processed FIRST in the next
+     sweep. Refused states (dirty, unmeasurable tree, diverged,
      an in-progress operation or a held `index.lock`, a path collision) are
      NEVER touched — only recorded with their commits behind and reason.
   3. On a WORK branch (or detached): no fast-forward. The rule-file lag is
@@ -69,8 +80,9 @@ BUDGET: `MIN_BUDGET_S` gates the start (registry `hold:budget`); a new
 checkout starts only while `budget_left()` >= PER_CHECKOUT_S and the job's
 own wall clock is under JOB_WALL_S; its reads + fetch are clipped to the
 per-checkout deadline, the long fetch retry needs LONG_RETRY_RESERVE_S and
-the unbounded merge MERGE_RESERVE_S of sweep budget (measured to the 100 s
-soft cap, so a merge has >= 80 s before the unit's 120 s kill) — the rest
+the FALLBACK in-unit merge MERGE_RESERVE_S of sweep budget (measured to the
+100 s soft cap, so a merge has >= 80 s before the unit's 120 s kill; the
+detached merge needs no reserve, only the <= 10 s systemd-run client) — the rest
 are due next sweep, so a box with many checkouts rotates instead of blowing
 the unit budget. A held sweep still refreshes the status `ts` (a held job
 is alive, never read as a dead watchdog). The value lock test pins these.
@@ -78,23 +90,33 @@ is alive, never read as a dead watchdog). The value lock test pins these.
 ACCEPTED RESIDUALS: an ignored file created in the milliseconds between the
 collision check and the merge is overwritten by git (the #314 hook had the
 same window); assume-unchanged / skip-worktree files are invisible to
-`git status`.
+`git status`; a merge wedged past FF_UNIT_MAX_S is stopped by systemd
+(`RuntimeMaxSec`) — the one case a started merge is signalled, chosen over a
+unit that could block its checkout's fast-forward forever.
 """
+import hashlib
 import json
 import os
 import socket
+import sys
 import time
 
 import cli_checkout_freshness as cf
+from watchdog import user_unit
 
 INTERVAL_S = 15 * 60          # per-checkout cadence
 FETCH_TIMEOUT_S = 15          # one bounded fetch (the #172 per-repo bound)
 FETCH_TIMEOUT_LONG_S = 45     # the retry after a timed-out fetch
 LONG_RETRY_RESERVE_S = FETCH_TIMEOUT_LONG_S + 2 * cf.TERM_GRACE_S + 5
 PER_CHECKOUT_S = 25           # the per-checkout deadline (reads + fetch)
-MERGE_RESERVE_S = 60          # sweep budget to START the (unbounded) merge
+MERGE_RESERVE_S = 60          # FALLBACK: sweep budget to START the in-unit merge
 MIN_BUDGET_S = 30             # registry min_budget: one checkout + margin
 JOB_WALL_S = 40               # the job's own ceiling per sweep
+FF_UNIT_MAX_S = 30 * 60       # the detached merge unit's RuntimeMaxSec (wedge only)
+FF_PENDING_MAX_S = FF_UNIT_MAX_S + 120   # a pending unit with no result = failed
+DEFER_PRIORITY_AFTER = 3      # FALLBACK: deferred this many sweeps -> goes first
+# the detached merge runs only local git: no gh auth, no GH_* namespace
+FF_UNIT_ENV_KEYS = ("PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL")
 DEFAULT_BASES = ("develop", "dev", "main", "master")
 RULE_PATHS = ("CLAUDE.md", ".claude", ":(glob)**/CLAUDE.md",
               ":(glob)**/.claude/**")
@@ -207,18 +229,79 @@ def rule_lag(path, ref):
     return [p for p in out.splitlines() if p] if rc == 0 else None
 
 
-def _base_branch_result(path, remote, entry, dry_run, budget_left):
-    """A checkout ON a base branch: the shared predicate decides; fast-forward
-    only when provably safe and the sweep can afford the merge. Returns
-    (state, reason, behind, deferred)."""
+def _ff_key(path):
+    return hashlib.sha1(os.path.realpath(path).encode("utf-8")).hexdigest()[:16]
+
+
+def ff_unit_name(path):
+    """The transient unit of this checkout's detached merge — stable per
+    checkout, so a concurrent second start fails atomically ('already
+    exists')."""
+    return "airuleset-ff-%s" % _ff_key(path)
+
+
+def ff_result_path(path, home=None):
+    """Where this checkout's detached merge writes its result."""
+    return os.path.join(os.path.dirname(cf.status_path(home)), "ff",
+                        _ff_key(path) + ".json")
+
+
+def _pending_live(pending, now):
+    """A launched detached merge that may still report (`ff_pending`)."""
+    t = pending.get("launched") if isinstance(pending, dict) else None
+    return isinstance(t, (int, float)) and now - t <= FF_PENDING_MAX_S
+
+
+def _launch_ff_unit(path, remote, branch, home, unit_run):
+    """Start the detached merge (`cli_checkout_freshness.py ff`) as a transient
+    `--user` unit via the ONE shared launcher. `(launched, why)`; `why` is
+    `started`/`exists` or the reason the caller must fall back. The default
+    launcher is never used from a test process (the #1136/#1195 guard)."""
+    if unit_run is None:
+        from watchdog.disk_guard_escalation import running_under_pytest
+        if running_under_pytest():
+            return False, "systemd-run not used under test"
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    result = ff_result_path(path, home)
+    os.makedirs(os.path.dirname(result), exist_ok=True)
+    if os.path.lexists(result):   # an uncollected older result must not answer this run
+        os.remove(result)
+    child = [sys.executable, os.path.join(repo_root, "cli_checkout_freshness.py"),
+             "ff", "--path", path, "--remote", remote, "--branch", branch,
+             "--result", result]
+    return user_unit.launch(ff_unit_name(path), repo_root, child, FF_UNIT_MAX_S,
+                            run_fn=unit_run, env_keys=FF_UNIT_ENV_KEYS,
+                            env_prefixes=())
+
+
+def _base_branch_result(path, remote, entry, dry_run, budget_left, prev=None,
+                        home=None, unit_run=None):
+    """A checkout ON a base branch: the shared predicate decides; a provably
+    safe fast-forward runs DETACHED (a transient unit, collected next sweep),
+    or — without systemd-run — in-unit only when the sweep can afford the
+    merge. Returns (state, reason, behind, deferred)."""
+    prev = prev or {}
     v = cf.ff_verdict(path, remote)
     if v.action == "ff":
         if dry_run:
             return "lagging", "would fast-forward (dry-run)", v.behind, False
+        pending = prev.get("ff_pending")
+        if _pending_live(pending, entry["checked"]):
+            entry["ff_pending"] = pending    # never a second launch
+            return ("lagging", "fast-forward running in unit %s" % pending.get("unit"),
+                    v.behind, False)
+        launched, why = _launch_ff_unit(path, remote, v.branch, home, unit_run)
+        if launched:
+            unit = ff_unit_name(path)
+            entry["ff_pending"] = {"unit": unit, "launched": entry["checked"],
+                                   "behind": v.behind}
+            return ("lagging", "fast-forward running in unit %s%s" % (
+                unit, " (already running)" if why == "exists" else ""), v.behind, False)
         left = budget_left() if budget_left is not None else None
         if left is not None and left < MERGE_RESERVE_S:
+            entry["deferrals"] = int(prev.get("deferrals") or 0) + 1
             return ("lagging", "fast-forward deferred (%.0fs of sweep budget "
-                    "left)" % left, v.behind, True)
+                    "left; %s)" % (left, why), v.behind, True)
         ok = cf.fast_forward(path, v, run_hooks=False)   # unbounded once started
         if ok:
             entry["ff"] = {"at": entry["checked"], "commits": v.behind}
@@ -281,18 +364,22 @@ def _is_checkout_root(path):
 
 
 def check_checkout(c, now, prev=None, dry_run=False,
-                   fetch_timeout=FETCH_TIMEOUT_S, budget_left=None):
+                   fetch_timeout=FETCH_TIMEOUT_S, budget_left=None, home=None,
+                   unit_run=None):
     """Fetch + fast-forward-when-safe + measure ONE checkout under its own
-    deadline; returns its status entry (never raises for a git failure)."""
+    deadline; returns its status entry (never raises for a git failure).
+    `unit_run` is the systemd-run client seam (tests)."""
     prev = prev if isinstance(prev, dict) else {}
     used = fetch_timeout_for(prev, budget_left, fetch_timeout)
     with cf.deadline(PER_CHECKOUT_S - 5 + (used - fetch_timeout)):
-        return _check(c, now, prev, dry_run, used, budget_left)
+        return _check(c, now, prev, dry_run, used, budget_left, home, unit_run)
 
 
-def _check(c, now, prev, dry_run, used, budget_left):
+def _check(c, now, prev, dry_run, used, budget_left, home=None, unit_run=None):
     path = c["path"]
     entry = {"source": c.get("source"), "checked": now}
+    if _pending_live(prev.get("ff_pending"), now):   # collected by a later sweep
+        entry["ff_pending"] = prev["ff_pending"]
     bases = list(c.get("bases") or ())
     if not os.path.isdir(path):
         entry.update(state="absent", reason="path absent")
@@ -312,7 +399,7 @@ def _check(c, now, prev, dry_run, used, budget_left):
     deferred = False
     if branch and branch in bases:
         state, reason, behind, deferred = _base_branch_result(
-            path, remote, entry, dry_run, budget_left)
+            path, remote, entry, dry_run, budget_left, prev, home, unit_run)
     else:
         state, reason, behind = _work_branch_result(path, branch, remote, base)
     if frc != 0:
@@ -341,12 +428,7 @@ def _check(c, now, prev, dry_run, used, budget_left):
 
 def write_status(status, home=None):
     """Atomic write of the status file (temp + os.replace)."""
-    path = cf.status_path(home)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = "%s.tmp.%d" % (path, os.getpid())
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(status, fh, indent=1, sort_keys=True)
-    os.replace(tmp, path)
+    cf.write_json_atomic(cf.status_path(home), status)
 
 
 def decision_line(path, e):
@@ -356,11 +438,69 @@ def decision_line(path, e):
         e.get("state"), e.get("reason"), e.get("behind"))
 
 
+def _read_result(path):
+    """A detached merge's result dict, None when not written yet, or a failed
+    result when the file is unreadable (never guessed ok)."""
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as exc:
+        return {"ok": False, "reason": "unreadable result: %s" % exc}
+    return data if isinstance(data, dict) else {"ok": False, "reason": "malformed result"}
+
+
+def _apply_result(e, res, unit, now):
+    """Fold one collected result into its status entry."""
+    if res.get("ok"):
+        commits = res.get("commits")
+        if not isinstance(commits, int) or isinstance(commits, bool):
+            commits = e.get("behind")
+        e.update(state="current", behind=0,
+                 reason="fast-forwarded %s commit(s) in unit %s" % (commits, unit))
+        fin = res.get("finished")
+        e["ff"] = {"at": fin if isinstance(fin, (int, float)) else now, "commits": commits}
+        e.pop("since", None)
+        e.pop("behind_since", None)
+    else:
+        e.update(state="lagging", reason="fast-forward failed: %s" % res.get("reason"))
+        e.setdefault("since", now)
+
+
+def collect_ff_results(cos, now, home=None):
+    """Fold every finished detached merge (`ff_pending` + its result file) into
+    `cos` — every sweep, never only when the checkout is due, so a merge is
+    reported one sweep after it ran. A pending unit with no result after
+    FF_PENDING_MAX_S is `fast-forward failed` and may be launched again.
+    Returns the journal lines; `cos` is updated in place."""
+    logs = []
+    for path, e in cos.items():
+        pending = e.get("ff_pending") if isinstance(e, dict) else None
+        if not isinstance(pending, dict):
+            continue
+        rpath = ff_result_path(path, home)
+        res = _read_result(rpath)
+        if res is None:
+            if _pending_live(pending, now):
+                continue
+            res = {"ok": False, "reason": "unit %s left no result within %ds" % (
+                pending.get("unit"), FF_PENDING_MAX_S)}
+        elif os.path.lexists(rpath):
+            os.remove(rpath)
+        del e["ff_pending"]
+        _apply_result(e, res, pending.get("unit"), now)
+        logs.append(decision_line(path, e))
+    return logs
+
+
 def run_job(now, *, dry_run=False, budget_left=None, home=None,
             checkouts=None, clock=time.monotonic,
-            fetch_timeout=FETCH_TIMEOUT_S):
-    """Check every DUE checkout (oldest first) within the budget; returns the
-    journal lines. `checkouts` / `home` / `clock` are test seams."""
+            fetch_timeout=FETCH_TIMEOUT_S, unit_run=None):
+    """Collect finished detached merges, then check every DUE checkout
+    (repeatedly-deferred first, then oldest first) within the budget; returns
+    the journal lines. `checkouts` / `home` / `clock` / `unit_run` are test
+    seams."""
     logs = []
     if checkouts is None:
         skipped = []
@@ -371,12 +511,19 @@ def run_job(now, *, dry_run=False, budget_left=None, home=None,
     live = {c["path"] for c in checkouts}
     cos = {p: e for p, e in prev_all.items() if p in live}
     pruned = len(cos) != len(prev_all)
+    collected = [] if dry_run else collect_ff_results(cos, now, home)
+    logs += collected
 
     def _last(c):
         t = (cos.get(c["path"]) or {}).get("checked")
         return t if isinstance(t, (int, float)) and t <= now else 0
 
-    due = sorted((c for c in checkouts if now - _last(c) >= INTERVAL_S), key=_last)
+    def _starved(c):
+        n = (cos.get(c["path"]) or {}).get("deferrals")
+        return isinstance(n, int) and n >= DEFER_PRIORITY_AFTER
+
+    due = sorted((c for c in checkouts if now - _last(c) >= INTERVAL_S),
+                 key=lambda c: (not _starved(c), _last(c)))
     started, done = clock(), 0
     for c in due:
         left = budget_left() if budget_left is not None else None
@@ -389,16 +536,18 @@ def run_job(now, *, dry_run=False, budget_left=None, home=None,
             break
         try:
             e = check_checkout(c, now, cos.get(c["path"]), dry_run,
-                               fetch_timeout, budget_left)
+                               fetch_timeout, budget_left, home, unit_run)
         except Exception as exc:  # noqa: BLE001 -- one checkout never kills the rest
+            old = cos.get(c["path"]) or {}
             e = {"source": c.get("source"), "checked": now, "state": "lagging",
-                 "reason": "check error: %s" % exc,
-                 "since": (cos.get(c["path"]) or {}).get("since", now)}
+                 "reason": "check error: %s" % exc, "since": old.get("since", now)}
+            if _pending_live(old.get("ff_pending"), now):
+                e["ff_pending"] = old["ff_pending"]
         cos[c["path"]] = e
         done += 1
         logs.append(decision_line(c["path"], e))
         if not dry_run:
             write_status({"ts": now, "checkouts": cos}, home)
-    if pruned and not done and not dry_run:
+    if (pruned or collected) and not done and not dry_run:
         write_status({"ts": status.get("ts", now), "checkouts": cos}, home)
     return logs
