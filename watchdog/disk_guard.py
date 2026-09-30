@@ -2000,7 +2000,7 @@ def discover_stale_tmp_test_dirs(tmp_dir="/tmp", now=None,
     The dir's ``st_mtime`` is bumped whenever entries are added/removed FROM
     the dir (e.g. a background process creating temp files), making a genuinely
     stale dir appear fresh. The recursive walk matches the safety discipline of
-    ``discover_claude_scratch_candidates`` (``_scratch_stat`` → ``_dir_stats``).
+    ``discover_claude_scratch_candidates`` (``_scratch_stat`` → ``scratch_use_stat``).
     """
     now = time.time() if now is None else now
     uid = os.getuid() if uid is None else uid
@@ -2890,7 +2890,7 @@ def _sudo_available(probe_fn=None):
 
 def _default_scratch_live(path, now):
     """The real #863 per-session TOCTOU liveness re-check for the drain executor
-    (real ~/.claude sessions registry + real /proc)."""
+    (real ~/.claude sessions registry + real /proc), and #1195 per-child use."""
     from cli_scratch_sweep import scratch_session_live_recheck
     return scratch_session_live_recheck(path, now=now)
 
@@ -3102,9 +3102,13 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                     continue
                 # #863 Fable review 2: a TOCTOU safety REFUSE (the session became
                 # live since plan) is logged as REFUSE, not as a success or FAIL.
+                # #1195 item 5: a scratchpad child is refused when used/held since.
                 if freed is not None and freed < 0:
+                    why = ("scratchpad child used/held/unstatable since plan (#1195)"
+                           if Path(path).parent.name == "scratchpad"
+                           else "session live/undeterminable since plan (#863)")
                     rung_lines.append(_log_line(now, "REFUSE", path, planned,
-                                                "TOCTOU: session live/undeterminable since plan (#863)"))
+                                                "TOCTOU: " + why))
                     continue
                 verb = ("WOULD-" + kind.upper()) if dry_run else kind.upper()
                 rung_lines.append(_log_line(now, verb, path, planned,
