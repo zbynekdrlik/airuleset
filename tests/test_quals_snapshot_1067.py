@@ -37,6 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import airuleset  # noqa: E402
 import cli_quals_cmd  # noqa: E402
 from watchdog import ops_wait_refresh as owref  # noqa: E402
+from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 NOW = 1_000_000
 CWD = "/repo/a"
@@ -207,6 +208,7 @@ class RefreshChildSnapshot(_HomeCase):
         self.assertEqual(run.call_args[1]["timeout"], owref.CHILD_TIMEOUT_S)
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class WatchdogFetchesNeverBlock(_HomeCase):
     """The three airuleset fetches, driven through job 20's per-pane body
     (`goal_lane_occupancy_nudge`, the `goal_lane_sweep` loop body) with a

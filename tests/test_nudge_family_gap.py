@@ -34,6 +34,7 @@ from _goal_arm_helpers import (  # noqa: E402
     GOAL_ARMED_CAP,
     _write_marker_transcript,
 )
+from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 NOW = 1_000_000
 DAY = 24 * 3600
@@ -132,6 +133,7 @@ class TestReleaseGapGate(_Base):
         self.assertEqual(state["nudge_cadence"][self.sid]["release-gap"], NOW)
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestQueueArrivalGate(_Base):
     def _run(self, tmux, state):
         with m.patch("airuleset.resolve_authority", return_value="full"):
@@ -164,6 +166,7 @@ class TestQueueArrivalGate(_Base):
         self.assertEqual(state["nudge_cadence"][self.sid]["queue-arrival"], NOW)
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestLaneOccupancyGate(_Base):
     def _run(self, tmux, state):
         with m.patch("airuleset.resolve_authority", return_value="full"):

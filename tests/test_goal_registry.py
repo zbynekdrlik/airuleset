@@ -320,11 +320,24 @@ class TestShippedSkillMatchesRegistry(TestCase):
                          "SKILL.md /goal lines drifted from the registry: %r"
                          % [p for p, _, _ in d])
 
-    def test_every_shipped_goal_line_carries_the_continuous_refill_directive(self):
+    def test_every_shipped_goal_line_is_the_sequential_default_1137(self):
+        # #1137 (owner ROZHODNUTÉ 2026-09-30): the SHIPPED (default) lines are
+        # the SEQUENTIAL variant — one unit at a time, no refill push.
         import re
         lines = re.findall(r"^/goal STOP CONDITIONS.*$", skill_text(), re.MULTILINE)
         self.assertEqual(len(lines), 3)
         for line in lines:
+            self.assertIn(gr._SEQUENTIAL_SATURATION, line)
+            self.assertNotIn("CONTINUOUS REFILL", line)
+            # TEETH: no batch wording survives in the shipped lines.
+            self.assertNotIn("BATCH MODE", line)
+            self.assertNotIn("NO refill while a batch runs", line)
+
+    def test_parallel_variant_carries_the_continuous_refill_directive(self):
+        # The PARALLEL variant (explicit declaration only since #1137) keeps the
+        # #993 r2b dispatchable-only refill wording.
+        for p in gr.PROFILES:
+            line = gr.render_goal_line(p, "parallel", None)
             self.assertIn("CONTINUOUS REFILL", line)
             self.assertIn("isolation:worktree", line)
             # #993 r2b: refill is dispatchable-only (deps closed); the infra-serial
@@ -333,7 +346,6 @@ class TestShippedSkillMatchesRegistry(TestCase):
             self.assertIn("refill ONLY with a DISPATCHABLE unit", line)
             self.assertNotIn("infra units are SERIAL", line)
             self.assertNotIn("returned lane's slot IMMEDIATELY", line)
-            # TEETH: no batch wording survives in the shipped lines.
             self.assertNotIn("BATCH MODE", line)
             self.assertNotIn("NO refill while a batch runs", line)
 

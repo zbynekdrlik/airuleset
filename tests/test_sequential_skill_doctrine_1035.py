@@ -49,6 +49,12 @@ PUSH_RE = re.compile(
 )
 
 
+# #1137 (owner ROZHODNUTÉ 2026-09-30): sequential is the DEFAULT of every box,
+# so the Step 3 parallel-doctrine heading reads "explicit declaration only"
+# (was "PARALLEL mode (default)").
+PARALLEL_ANCHOR = "PARALLEL mode (explicit declaration only"
+
+
 def read(rel):
     return (ROOT / rel).read_text(encoding="utf-8")
 
@@ -112,6 +118,33 @@ class TestStep30ModeGate(TestCase):
         self.assertIn("whether or not a `/goal` is armed", w)
 
 
+class TestSequentialIsTheDefault1137(TestCase):
+    """#1137 (owner ROZHODNUTÉ 2026-09-30) — the skill body states sequential /
+    natural as the DEFAULT: one theme's tickets with focus, subagents where they
+    naturally help, never saturating slots; parallel only by declaration."""
+
+    def test_header_blurb_names_sequential_the_default(self):
+        w = window(read(AUTOPILOT), "Solves the **ENTIRE**", "Each unit is handed")
+        self.assertIn("by DEFAULT in **SEQUENTIAL / natural mode**", w)
+        self.assertIn("ONE theme's tickets with focus", w)
+        self.assertIn("subagents where they naturally help", w)
+        self.assertIn("never saturates lane", w)  # blockquote-wrapped
+        self.assertIn("explicitly declares `mode: parallel`", w)
+
+    def test_gate_resolves_the_sequential_default(self):
+        w = window(read(AUTOPILOT), "Concurrency MODE gate",
+                   "SEQUENTIAL dispatch block")
+        self.assertIn("else the default `sequential`", w)
+        self.assertNotIn("else the default `parallel`", w)
+        self.assertNotIn("the DEFAULT for full-authority / gk boxes", w)
+
+    def test_goal_blocks_are_described_as_the_sequential_default(self):
+        t = read(AUTOPILOT)
+        self.assertIn("The blocks BELOW are the DEFAULT (sequential since #1137, "
+                      "no role) form", t)
+        self.assertNotIn("The blocks BELOW are the DEFAULT (parallel", t)
+
+
 class TestSequentialBlockHasNoPushDoctrine(TestCase):
     """(2b) The SEQUENTIAL dispatch block carries NONE of the parallel-push
     tokens (the canonical clause's own "no refill" is exempted — it is the
@@ -119,7 +152,7 @@ class TestSequentialBlockHasNoPushDoctrine(TestCase):
 
     def test_block_has_no_parallel_push_words(self):
         block = window(read(AUTOPILOT), "SEQUENTIAL dispatch block",
-                       "PARALLEL mode (default)")
+                       PARALLEL_ANCHOR)
         scan = block.replace(gr._SEQUENTIAL_SATURATION, "")
         m = PUSH_RE.search(scan)
         self.assertIsNone(
@@ -128,13 +161,13 @@ class TestSequentialBlockHasNoPushDoctrine(TestCase):
 
     def test_block_says_more_than_one_subagent_is_fine(self):
         block = window(read(AUTOPILOT), "SEQUENTIAL dispatch block",
-                       "PARALLEL mode (default)")
+                       PARALLEL_ANCHOR)
         self.assertIn("NOT a hard subagent count", block)
         self.assertIn("ticket-validator", block)
 
     def test_block_names_the_998_backstop(self):
         block = window(read(AUTOPILOT), "SEQUENTIAL dispatch block",
-                       "PARALLEL mode (default)")
+                       PARALLEL_ANCHOR)
         self.assertIn("block-dispatch-over-wdrain.sh", block)
 
 
@@ -167,7 +200,7 @@ class TestParallelPushAnchorsAreModeScoped(TestCase):
 
     def test_step3_parallel_doctrine_is_headed_parallel_mode(self):
         self._assert_mode_scoped(
-            window(read(AUTOPILOT), "PARALLEL mode (default)",
+            window(read(AUTOPILOT), PARALLEL_ANCHOR,
                    "Each loop turn works the backlog"))
 
     def test_guardrails_summary_is_mode_scoped(self):

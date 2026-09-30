@@ -41,6 +41,7 @@ from _goal_arm_helpers import (  # noqa: E402
     GOAL_ARMED_CAP,
     _write_marker_transcript,
 )
+from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 NOW = 1_000_000
 DAY = 24 * 3600
@@ -274,6 +275,7 @@ class _OrchBase(unittest.TestCase):
                 classify_builder=classify_builder)
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestOrchestrator(_OrchBase):
     def test_reduced_authority_watches_its_own_slice(self):
         # #1178 REVERSES the #733 full-only gate: the union is now the box's
@@ -427,6 +429,7 @@ class TestOrchestrator(_OrchBase):
 # 6. Integration — the wiring into goal_lane_sweep.
 # --------------------------------------------------------------------------- #
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestLaneSweepWiring(unittest.TestCase):
     """RED against the pre-wiring tree: `goal_lane_sweep` produces NO
     queue-arrival nudge for an armed FULL-authority pane whose gk queue GREW.

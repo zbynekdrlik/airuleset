@@ -34,6 +34,7 @@ import watchdog.one_glance as og  # noqa: E402
 import watchdog.nudge_gate as ng  # noqa: E402
 from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux, GOAL_ARMED_CAP, _write_marker_transcript)
+from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 
 # The delivery-cadence symbols #1089 orphaned — must be GONE (goal.py).
@@ -130,6 +131,7 @@ class TestKeptSurface(unittest.TestCase):
                             "observation helper %s must be kept" % name)
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestDeliveryRetiredDecisionLineStillJournals(unittest.TestCase):
     """The lane-occupancy DECISION line survives the deletion: an idle, armed,
     under-filled pane with a workable backlog journals the

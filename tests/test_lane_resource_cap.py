@@ -13,7 +13,10 @@ import unittest
 from watchdog import goal
 from watchdog import lane_resources
 
+from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
+
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestLaneResourceCap(unittest.TestCase):
     """Unit tests for lane_resource_cap() backward compat — (cap, reason)."""
 
@@ -132,6 +135,7 @@ class TestLaneResourceCap(unittest.TestCase):
             self.assertIn("bool", reason)
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestLaneResourceCaps(unittest.TestCase):
     """Tests for lane_resource_caps() — per-resource caps (#970 fix-forward)."""
 
@@ -224,6 +228,7 @@ class TestLaneResourceCaps(unittest.TestCase):
         self.assertIs(goal.lane_resource_caps, lane_resources.lane_resource_caps)
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestLaneResourceGuardConstants(unittest.TestCase):
     """Guard tests for the constants and file path."""
 
@@ -243,6 +248,7 @@ class TestLaneResourceGuardConstants(unittest.TestCase):
         self.assertEqual(goal.GOAL_LANE_SATURATION_WORKERS, 5)
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestIntegrationNudgeWithResources(unittest.TestCase):
     """MEDIUM finding fix: integration test that goal_lane_occupancy_nudge
     respects lane-resources.json caps end-to-end.

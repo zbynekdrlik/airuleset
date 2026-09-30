@@ -32,6 +32,7 @@ from _goal_arm_helpers import (  # noqa: E402
     _write_goal_marker,
     _write_marker_transcript,
 )
+from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 
 def _rearm_ok(cwd):
@@ -1519,6 +1520,7 @@ class TestGoalLaneSweep(unittest.TestCase):
         self.assertTrue(any("budget-exceeded" in ln for ln in logs), logs)
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestGoalLaneOccupancyNudge(unittest.TestCase):
     CWD = "/home/newlevel/devel/lanenudge"
     SID = "sess-lane-nudge-1"

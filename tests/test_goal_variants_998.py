@@ -20,15 +20,20 @@ from watchdog import goal  # noqa: E402
 class TestRenderGoalLine(TestCase):
     def test_default_variant_equals_the_shipped_skill_line(self):
         # #998-review: NOT tautological (render delegates to render_goal_line, so
-        # comparing the two proves nothing) — assert the DEFAULT (parallel,
-        # no-role) variant byte-equals the line SHIPPED in SKILL.md, the real
-        # drift target: if render_goal_line's default path ever diverges from the
-        # shipped artifact the watchdog arms, this fails.
+        # comparing the two proves nothing) — assert the DEFAULT (no-role)
+        # variant byte-equals the line SHIPPED in SKILL.md, the real drift
+        # target: if render_goal_line's default path ever diverges from the
+        # shipped artifact the watchdog arms, this fails. #1137 (owner
+        # ROZHODNUTÉ 2026-09-30): the DEFAULT is the SEQUENTIAL variant.
         with open(gr.skill_path(), encoding="utf-8") as fh:
             shipped = gr.shipped_lines(fh.read())
         self.assertEqual(set(shipped), set(gr.PROFILES))
+        self.assertEqual(gr.DEFAULT_MODE, "sequential")
         for p in gr.PROFILES:
-            self.assertEqual(gr.render_goal_line(p, "parallel", None), shipped[p])
+            self.assertEqual(gr.render_goal_line(p, "sequential", None), shipped[p])
+            self.assertEqual(gr.render_goal_line(p), shipped[p])
+            self.assertIn("ONE unit at a time", shipped[p])
+            self.assertNotIn("CONTINUOUS REFILL", shipped[p])
 
     def test_sequential_substitutes_refill(self):
         for p in gr.PROFILES:
@@ -71,15 +76,19 @@ class TestGoalTemplateFor(TestCase):
             got = goal.goal_template_for("full", d)
             self.assertEqual(got, goal.goal_template_for_authority("full"))
 
-    def test_sequential_project_uses_variant_renderer(self):
+    def test_sequential_project_serves_the_default_skill_line(self):
+        # #1137 (owner ROZHODNUTÉ 2026-09-30): sequential IS the default, so a
+        # sequential pane is served the shipped SKILL.md default line (read
+        # from the repo SKILL here, hermetic — never the box's installed copy).
         with tempfile.TemporaryDirectory() as d:
             claude = Path(d) / ".claude"
             claude.mkdir()
             (claude / "lane-resources.json").write_text(
                 json.dumps({"mode": "sequential"}))
-            got = goal.goal_template_for("full", d)
+            got = goal.goal_template_for("full", d, path=gr.skill_path())
             self.assertIn("ONE unit at a time", got)
             self.assertNotIn("CONTINUOUS REFILL", got)
+            self.assertEqual(got, gr.render_goal_line("full", "sequential"))
 
     def test_explicit_mode_role_override(self):
         got = goal.goal_template_for("full", "/x", role="infra", mode="sequential")
