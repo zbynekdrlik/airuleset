@@ -79,7 +79,7 @@ class Harness:
     def sweep(self, state, now, dry_run=False, panes=None):
         return mr.restore_job(
             now, state, panes if panes is not None else [("%1", self.cwd)],
-            managed=MANAGED, find_transcript=lambda cwd: self.tpath,
+            managed=MANAGED, find_transcript=lambda cwd, ex=None: self.tpath,
             read_state=mf.tail_state, verdict=mf.verdict, short_name=mf.short_name,
             ready=self.ready, deliver=self.deliver, file_ticket=self.file_ticket,
             outcome_kind=idle_pane.outcome_kind, delivered=idle_pane.DELIVERED,
@@ -247,6 +247,7 @@ class TicketComposition(unittest.TestCase):
         self.assertNotIn("^..", body)                  # never a cross-branch range claim
         self.assertIn("- `bbb222` second", body)
         self.assertIn("airuleset#1203", body)
+        self.assertIn(mr.EPISODE_TAG + "marker:m1", body)   # the dedup search key
 
     def test_inexact_start_is_labelled(self):
         rec = dict(self.REC, since_exact=False)
@@ -284,6 +285,26 @@ class TicketComposition(unittest.TestCase):
         body = calls[2][0][calls[2][0].index("--body") + 1]
         self.assertIn("oldest `aaa111`, newest `bbb222`", body)
 
+    def test_file_ticket_reuses_an_already_filed_episode(self):
+        d = tempfile.mkdtemp(prefix="mr1203-cwd-")
+        self.addCleanup(shutil.rmtree, d, True)
+        calls = []
+
+        class R:
+            def __init__(self, rc, out=""):
+                self.returncode, self.stdout, self.stderr = rc, out, ""
+
+        def fake(argv, **kw):
+            calls.append(argv)
+            if argv[:3] == ["gh", "issue", "list"]:
+                return R(0, "https://github.com/o/r/issues/5\n")
+            return R(0, "")
+
+        ok, ref, _err = mr.file_ticket(dict(self.REC, cwd=d), MANAGED, NOW, sub_run=fake)
+        self.assertTrue(ok)
+        self.assertEqual(ref, "https://github.com/o/r/issues/5")
+        self.assertFalse(any(a[:3] == ["gh", "issue", "create"] for a in calls))
+
     def test_file_ticket_reports_gh_failure(self):
         d = tempfile.mkdtemp(prefix="mr1203-cwd-")
         self.addCleanup(shutil.rmtree, d, True)
@@ -302,11 +323,180 @@ class TicketComposition(unittest.TestCase):
         self.assertIn("gone", err)
 
 
+class ProofAndImplementer(unittest.TestCase):
+    """#1203 review: a ticket (and the word "fallback") needs a marker; the
+    #1060 implementer window is never typed into; a not-typed resume keeps its
+    slot."""
+
+    def setUp(self):
+        self.h = Harness(self)
+
+    def _sweep(self, state, now, **kw):
+        return mr.restore_job(
+            now, state, [("%1", self.h.cwd)], managed=MANAGED,
+            find_transcript=lambda cwd, ex=None: self.h.tpath, read_state=mf.tail_state,
+            verdict=mf.verdict, short_name=mf.short_name, ready=self.h.ready,
+            deliver=self.h.deliver, file_ticket=self.h.file_ticket,
+            outcome_kind=idle_pane.outcome_kind, delivered=idle_pane.DELIVERED,
+            typed_not_delivered=idle_pane.TYPED_NOT_DELIVERED, handled=set(), **kw)
+
+    def test_off_lineup_restores_but_never_files(self):
+        self.h.write([_assistant("claude-fable-5-1")])
+        state = {}
+        logs = self._sweep(state, NOW, find_marker=lambda t, m=None: None)
+        self.assertEqual(self.h.typed, ["/model " + MANAGED])
+        self.assertTrue(any("OFF-LINEUP runs claude-fable-5-1" in ln for ln in logs), logs)
+        self.assertFalse(any("FALLBACK" in ln for ln in logs), logs)
+        self.h.append([_model_cmd(), _assistant("claude-opus-5-5", uuid="n")])
+        logs = self._sweep(state, NOW + 300)
+        self.assertTrue(any("off-lineup" in ln for ln in logs), logs)
+        self.assertEqual(self.h.filed, [])
+
+    def test_deep_marker_proves_an_old_fallback(self):
+        self.h.write([_assistant("claude-opus-4-8", uuid="late")])
+        deep = {"from": "claude-opus-5-5", "to": "claude-opus-4-8", "uuid": "old",
+                "timestamp": "2026-09-28T14:51:50Z"}
+        state = {}
+        self._sweep(state, NOW, find_marker=lambda t, m=None: deep)
+        rec = state["model_restore"]["sid1"]
+        self.assertTrue(rec["proven"])
+        self.assertEqual(rec["episode"], "marker:old")
+        self.assertEqual(rec["since"], "2026-09-28T14:51:50Z")
+
+    def test_implementer_session_and_pane_are_never_touched(self):
+        self.h.write([_marker()])
+        logs = self._sweep({}, NOW, implementer_sid=lambda: "sid1")
+        self.assertEqual(self.h.typed, [])
+        self.assertTrue(any("implementer session" in ln for ln in logs), logs)
+        logs = self._sweep({}, NOW, implementer_sid=lambda: "other",
+                           pane_is_implementer=lambda pid: True)
+        self.assertEqual(self.h.typed, [])
+        self.assertTrue(any("implementer pane" in ln for ln in logs), logs)
+        logs = self._sweep({}, NOW, implementer_sid=lambda: "other",
+                           pane_is_implementer=lambda pid: None)
+        self.assertEqual(self.h.typed, [])
+        self.assertTrue(any("role unknown" in ln for ln in logs), logs)
+        self._sweep({}, NOW, implementer_sid=lambda: "other",
+                    pane_is_implementer=lambda pid: False)
+        self.assertEqual(self.h.typed, ["/model " + MANAGED])
+
+    def test_not_typed_resume_keeps_the_slot(self):
+        self.h.write([_marker()])
+        state = {}
+        self._sweep(state, NOW)
+        self.h.append([_model_cmd()])
+        self._sweep(state, NOW + 60)
+        self.h.outcome = SendOutcome("not-typed")
+        self._sweep(state, NOW + 60 + mr.RESUME_GRACE_S)
+        self.assertIsNone(state["model_restore"]["sid1"]["resumed_at"])
+        self.h.outcome = SendOutcome("submitted")
+        self._sweep(state, NOW + 60 + 2 * mr.RESUME_GRACE_S)
+        self.assertIsNotNone(state["model_restore"]["sid1"]["resumed_at"])
+
+    def test_state_is_written_through_before_a_crash(self):
+        self.h.write([_marker()])
+        state = {}
+
+        def boom(rec, managed, now):
+            raise KeyboardInterrupt  # a killed sweep, past the typing
+
+        with self.assertRaises(KeyboardInterrupt):
+            self.h.file_ticket = boom
+            self._sweep(state, NOW)
+            self.h.append([_model_cmd(), _assistant("claude-opus-5-5", uuid="n")])
+            self._sweep(state, NOW + 300)
+        self.assertEqual(state["model_restore"]["sid1"]["attempts"], 1)
+        self.assertEqual(state["model_restore"]["sid1"]["file_tries"], 1)
+
+
+class RoundTwo(unittest.TestCase):
+    """#1203 review round 2."""
+
+    def setUp(self):
+        self.h = Harness(self)
+
+    def _sweep(self, state, now, panes=None, **kw):
+        return mr.restore_job(
+            now, state, panes or [("%1", self.h.cwd)], managed=MANAGED,
+            find_transcript=lambda cwd, ex=None: self.h.tpath, read_state=mf.tail_state,
+            verdict=mf.verdict, short_name=mf.short_name, ready=self.h.ready,
+            deliver=self.h.deliver, file_ticket=self.h.file_ticket,
+            outcome_kind=idle_pane.outcome_kind, delivered=idle_pane.DELIVERED,
+            typed_not_delivered=idle_pane.TYPED_NOT_DELIVERED, handled=set(), **kw)
+
+    def test_an_implementer_pane_never_takes_the_main_panes_slot(self):
+        self.h.write([_marker()])
+        logs = self._sweep({}, NOW, panes=[("%impl", self.h.cwd), ("%main", self.h.cwd)],
+                           implementer_sid=lambda: "impl-sid",
+                           pane_is_implementer=lambda pid: pid == "%impl")
+        self.assertEqual(self.h.typed, ["/model " + MANAGED])
+        self.assertTrue(any("%impl implementer pane" in ln for ln in logs), logs)
+
+    def test_the_deep_scan_is_told_the_managed_model(self):
+        self.h.write([_assistant("claude-opus-4-8")])
+        asked = []
+        self._sweep({}, NOW, find_marker=lambda t, m=None: asked.append(m))
+        self.assertEqual(asked, [MANAGED])
+
+    def test_no_managed_reply_in_reach_is_no_restore(self):
+        self.h.write([_marker()])
+        state = {}
+        self._sweep(state, NOW)
+        self.h.write([{"type": "user", "message": {"content": "hi"}}])  # no reply in the tail
+        logs = self._sweep(state, NOW + 300)
+        self.assertIsNone(state["model_restore"]["sid1"]["restored_at"])
+        self.assertEqual(self.h.filed, [])
+        self.assertFalse(any("RESTORED" in ln for ln in logs), logs)
+
+    def test_a_restored_off_lineup_episode_is_done(self):
+        self.assertTrue(mr._done({"restored_at": NOW, "proven": False}))
+        self.assertFalse(mr._done({"restored_at": NOW, "proven": True, "file_tries": 1}))
+
+    def test_newest_transcript_skips_the_implementer_session(self):
+        import watchdog
+        d = tempfile.mkdtemp(prefix="mr1203-proj-")
+        self.addCleanup(shutil.rmtree, d, True)
+        main, impl = os.path.join(d, "main.jsonl"), os.path.join(d, "impl.jsonl")
+        for i, p in enumerate((main, impl)):
+            with open(p, "w") as fh:
+                fh.write("{}\n")
+            os.utime(p, (NOW + i, NOW + i))          # the implementer's is newest
+        with unittest.mock.patch.object(watchdog, "find_active_transcript",
+                                        lambda pd, cwd: (impl, NOW + 1)):
+            self.assertEqual(mr.newest_transcript("/pd", "/cwd", "impl"), main)
+            self.assertEqual(mr.newest_transcript("/pd", "/cwd", None), impl)
+
+
 class RunJobWiring(unittest.TestCase):
     def test_holds_on_a_short_budget(self):
         logs = mr.run_job(NOW, {}, [("%1", "/x")], run=None, sleep_fn=None,
                           projects_dir="/nonexistent", budget_left=lambda: 5)
         self.assertEqual(logs, ["model-restore: hold:budget (5s left)"])
+
+    def test_turn_liveness_is_skipped_only_for_the_model_command(self):
+        # the design exception: /model ignores the #1110 transcript liveness (a
+        # blocked /goal loop never goes quiet), the resume line keeps it.
+        seen = {}
+
+        def fake_restore_job(now, state, panes, **kw):
+            seen["ready"] = kw["ready"]
+            return []
+
+        captured = []
+
+        def fake_pane_ready(pid, cwd, kind, **deps):
+            captured.append(deps["turn_live"]("/t.jsonl"))
+            return (True, "", "sid", "/t.jsonl")
+
+        fake_deps = {"turn_live": lambda tpath: True}
+        with unittest.mock.patch.object(mr, "restore_job", fake_restore_job), \
+                unittest.mock.patch.object(idle_pane, "production_deps",
+                                           lambda *a, **k: (fake_deps, None, None)), \
+                unittest.mock.patch.object(idle_pane, "pane_ready", fake_pane_ready):
+            mr.run_job(NOW, {}, [], run=None, sleep_fn=None, projects_dir="/x")
+            seen["ready"]("%1", "/cwd", True)
+            seen["ready"]("%1", "/cwd", False)
+        self.assertEqual(captured, [False, True])
 
     def test_registered_in_run_once_behind_its_flag(self):
         import inspect

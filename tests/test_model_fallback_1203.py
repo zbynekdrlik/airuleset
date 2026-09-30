@@ -157,6 +157,70 @@ class TailState(unittest.TestCase):
         self.assertIsNone(mf.verdict(mf.tail_state(p), ""))
 
 
+class DeepMarker(unittest.TestCase):
+    def test_finds_a_marker_far_outside_the_tail(self):
+        filler = (json.dumps(_assistant("claude-opus-4-8", uuid="f")) + "\n") * 20000
+        p = _write(self, [_assistant("claude-opus-4-8", uuid="late")],
+                   prefix=json.dumps(_marker(uuid="deep")) + "\n" + filler)
+        self.assertGreater(os.path.getsize(p), 3 * mf.TAIL_BYTES)
+        self.assertIsNone(mf.tail_state(p)["marker"])
+        self.assertEqual(mf.find_marker(p)["uuid"], "deep")
+
+    def test_last_marker_wins_and_bound_is_respected(self):
+        filler = ("x" * 1000 + "\n") * 3000
+        p = _write(self, [_marker(uuid="new")], prefix=json.dumps(_marker(uuid="old")) + "\n" + filler)
+        self.assertEqual(mf.find_marker(p)["uuid"], "new")
+        q = _write(self, [_assistant("claude-opus-4-8")],
+                   prefix=json.dumps(_marker(uuid="old")) + "\n" + filler)
+        self.assertIsNone(mf.find_marker(q, max_bytes=1024 * 1024))
+        self.assertEqual(mf.find_marker(q)["uuid"], "old")
+
+    def test_quoted_marker_in_a_tool_result_is_not_a_marker(self):
+        quoted = {"type": "user", "message": {"content": [{"type": "tool_result",
+                  "content": '{"type":"fallback","from":{"model":"a"}}'}]}}
+        p = _write(self, [quoted, _assistant("claude-opus-5-5")])
+        self.assertIsNone(mf.find_marker(p))
+
+    def test_a_marker_line_straddling_a_chunk_boundary_is_found(self):
+        line = json.dumps(_marker(uuid="edge")) + "\n"
+        post = "y" * (mf._CHUNK - len(line) // 2 - 1) + "\n"
+        p = _write(self, [], prefix=("z" * 5000 + "\n") + line + post)
+        size = os.path.getsize(p)
+        start = size - len(post) - len(line)
+        self.assertLess(start, size - mf._CHUNK)                  # really straddles
+        self.assertGreater(start + len(line), size - mf._CHUNK)
+        self.assertEqual(mf.find_marker(p)["uuid"], "edge")
+
+    def test_a_sidechain_marker_is_not_a_main_fallback(self):
+        side = dict(_marker(uuid="side"), isSidechain=True)
+        p = _write(self, [side, _assistant("claude-opus-4-8")])
+        self.assertIsNone(mf.find_marker(p))
+
+    def test_an_undone_marker_is_no_proof(self):
+        # the round-2 finding: marker -> 4.8 -> back on 5.5 -> the owner's sonnet
+        p = _write(self, [_marker(uuid="old"), _assistant("claude-opus-4-8"),
+                          _assistant("claude-opus-5-5"), _assistant("claude-sonnet-5")])
+        v = mf.verdict(mf.tail_state(p), MANAGED)
+        self.assertEqual(v["kind"], "model")
+        self.assertFalse(v["proven"])
+        self.assertIsNone(mf.find_marker(p, stop_model=MANAGED))
+        self.assertEqual(mf.find_marker(p)["uuid"], "old")         # without the stop
+
+    def test_a_marker_still_in_force_is_proof(self):
+        p = _write(self, [_assistant("claude-opus-5-5"), _marker(uuid="now"),
+                          _assistant("claude-opus-4-8")])
+        self.assertTrue(mf.verdict(mf.tail_state(p), MANAGED)["proven"])
+        self.assertEqual(mf.find_marker(p, stop_model=MANAGED)["uuid"], "now")
+
+    def test_bedrock_global_prefix_is_the_same_model(self):
+        self.assertEqual(mf.short_name("global.anthropic.claude-opus-5-5"), "opus5.5")
+        self.assertTrue(mf.same_model("global.anthropic.claude-opus-5-5", MANAGED))
+
+    def test_airuleset_shares_the_provider_and_date_patterns(self):
+        self.assertIs(airuleset._PROVIDER_PREFIX_RE, mf.PROVIDER_PREFIX_RE)
+        self.assertIs(airuleset._SERVED_DATE_SUFFIX_RE, mf.SERVED_DATE_SUFFIX_RE)
+
+
 class ModelLineup(unittest.TestCase):
     def test_airuleset_re_exports_the_one_source(self):
         self.assertIs(airuleset.MODEL_TIERS, model_lineup.MODEL_TIERS)
@@ -197,6 +261,13 @@ class StatuslineTranscriptWins(unittest.TestCase):
             {"model": {"id": "claude-opus-4-8"}, "transcript_path": "/nope/x.jsonl"},
             managed_model=MANAGED)
         self.assertEqual(seg, "\033[38;5;196mopus4.8 FALLBACK\033[0m")
+
+    def test_a_reader_crash_keeps_the_footer(self):
+        with unittest.mock.patch.object(mf, "tail_state", side_effect=RecursionError):
+            seg = statusbar.model_segment(
+                {"model": {"id": "claude-opus-5-5"}, "transcript_path": "/x.jsonl"},
+                managed_model=MANAGED)
+        self.assertEqual(seg, "\033[38;5;40mopus5.5\033[0m")
 
     def test_implementer_window_never_shows_fallback(self):
         with unittest.mock.patch.dict(os.environ, {"AIRULESET_ROLE": "implementer"}):
@@ -251,6 +322,35 @@ class GateDecide(unittest.TestCase):
                                        env={"AIRULESET_ROLE": "implementer"}),
                          (None, None, ""))
 
+    def test_only_a_proven_fallback_claims_claude_code_switched(self):
+        p = _write(self, [_marker()])
+        msg, _k, _e = self.g.decide(self._payload(p), env=self.env)
+        self.assertIn("Claude Code prepol model sám", msg)
+        q = _write(self, [_assistant("claude-fable-5-1")])
+        msg, kind, _e = self.g.decide(self._payload(q), env=self.env)
+        self.assertEqual(kind, "block")
+        self.assertNotIn("Claude Code prepol model sám", msg)
+        self.assertIn("Session nebeží na spravovanom modeli", msg)
+
+    def test_headless_run_on_its_own_model_is_allowed_but_a_fallback_is_not(self):
+        env = {"CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}
+        q = _write(self, [_assistant("claude-haiku-4-5")])
+        self.assertEqual(self.g.decide(self._payload(q), env=env)[:2],
+                         (None, "headless-allow"))
+        p = _write(self, [_marker()])
+        self.assertEqual(self.g.decide(self._payload(p), env=env)[1], "block")
+
+    def test_log_is_capped(self):
+        home = tempfile.mkdtemp(prefix="mf1203-home-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(home, True))
+        log = Path(home, ".claude", self.g.LOG_NAME)
+        log.parent.mkdir(parents=True)
+        log.write_text("x" * (self.g.LOG_MAX_BYTES + 10))
+        with unittest.mock.patch.dict(os.environ, {"HOME": home}):
+            self.g._log("block", "y")
+        self.assertLess(log.stat().st_size, 200)
+        self.assertTrue(Path(str(log) + ".1").exists())
+
     def test_guard_off_bypasses_and_logs(self):
         p = _write(self, [_assistant("claude-sonnet-5-5")])
         msg, kind, _ = self.g.decide(self._payload(p), env={"AIRULESET_MODEL_GUARD": "off"})
@@ -295,6 +395,19 @@ class HookEndToEnd(unittest.TestCase):
         p = _write(self, [_marker()])
         r, _ = self._run({"tool_name": "Bash", "transcript_path": p, "agent_id": "x"})
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_a_gate_crash_fails_open_and_is_logged(self):
+        # a crashing interpreter stand-in: python3 on PATH that exits 1
+        bindir = tempfile.mkdtemp(prefix="mf1203-bin-")
+        self.addCleanup(lambda: __import__("shutil").rmtree(bindir, True))
+        fake = Path(bindir, "python3")
+        fake.write_text("#!/bin/sh\nexit 1\n")
+        fake.chmod(0o755)
+        r, home = self._run({"tool_name": "Read", "transcript_path": "/x"},
+                            PATH=bindir + os.pathsep + os.environ.get("PATH", ""))
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("adapter-crash\trc=1",
+                      Path(home, ".claude", "model-fallback-gate.log").read_text())
 
     def test_registered_for_every_tool(self):
         cfg = json.loads((REPO / "settings" / "hooks.json").read_text())
