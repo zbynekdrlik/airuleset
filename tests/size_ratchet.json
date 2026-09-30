@@ -32,7 +32,7 @@
     "cli_mdreview_audit.py": 827,
     "cli_model_audit.py": 154,
     "cli_odoo_ro.py": 297,
-    "cli_onboard.py": 1030,
+    "cli_onboard.py": 1036,
     "cli_onboard_exec.py": 157,
     "cli_owner_keys.py": 233,
     "cli_owner_vps.py": 168,
