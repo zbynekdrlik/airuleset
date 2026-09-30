@@ -164,7 +164,8 @@ grep -n "airuleset:authority=" CLAUDE.md || true                                
   čaká tretia strana"). The canonical `W` workflow: ask a THIRD PARTY (e.g. "zisti X od človeka Y cez
   Odoo discussion") → post the question in that thread, label the ticket `ops-wait` (it leaves `I N`
   into `W N`), check the thread as you work others, and CLEAR the label when they reply so the ticket
-  re-enters `I N`. **#539 acceptance SIDE-BRANCHES — name them so a bare `needs-acceptance` never rots
+  re-enters `I N`. **Before ANY `ops-wait` park (incl. a drained backlog's leftovers):** completion
+  needs the owner → U (`needs-owner-action`), not W (#1197). **#539 acceptance SIDE-BRANCHES — name them so a bare `needs-acceptance` never rots
   in `U`.** Besides that main "compose → owner approve → send → W" thread path, TWO real acceptance
   branches skip the thread and belong in `W` immediately: (1) **fix-class** — an owner-ruled NO-THREAD
   close waiting on an EXTERNAL event (e.g. a foreign-repo fix); the supervisor adds `ops-wait` WITH

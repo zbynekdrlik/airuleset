@@ -867,13 +867,13 @@ _I_ACTION_ONLY_CLAUSE = (
     "action-only = tvoja povinnosť (review→merge→release), stále TVOJE I; "
     "infra? → presuň label infra (#1101).")
 
-# The W→I trigger (#547/#588/#607): re-check the parked external events. COUNT
-# only -- the members + their stale!/recheck!/gk-handoff! tags are in the
-# `slice-quals --ops-wait` OUTPUT, never the keystroke. `%d` = the W count.
+# The W→I trigger (#547/#588/#607): re-check parked external events; COUNT only
+# (members + stale!/recheck!/gk-handoff! tags live in `slice-quals --ops-wait`).
+# `%d` = W count. #1197: waiting on the OWNER = U (`needs-owner-action`), never W.
 _W_TRIGGER = (
-    "W=%d parknutých: spusti `slice-quals --ops-wait`, Discuss 1×/hod (#607), "
-    "over blockery (release = #588 deployed-state, nie run-terminal), zlož "
-    "`ops-wait` s dôkazom; mis-shape → owner needs-owner-action U #601 / gk #636.")
+    "W=%d: `slice-quals --ops-wait`, Discuss 1×/hod (#607), over blockery "
+    "(release = #588 deployed-state, nie run-terminal), zlož `ops-wait` s dôkazom; "
+    "čaká na OWNERA → U needs-owner-action, nikdy W (#601/#1197); gk #636.")
 
 
 def _flag_items(w_members, release_landed, stagnation_count=0,
