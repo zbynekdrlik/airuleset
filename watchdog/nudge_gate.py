@@ -37,7 +37,7 @@ Two problems this fixes, both reported by the owner:
        shared batch delivers later in the hour). So the cap is RESTORED, under a
        NEW name (the old `NUDGE_FAMILY_GAP_S`/`_family_gap` stay deleted).
 
-   RECOVERY identities (`RECOVERY_NUDGE_KINDS` = resume/compact/goal-arm/wake-parked/goal-disarm) are EXEMPT from
+   RECOVERY identities (`RECOVERY_NUDGE_KINDS` = resume/compact/goal-arm/wake-parked/goal-disarm/model-restore) are EXEMPT from
    BOTH bounds and never count as "another kind delivered" for the cap — a
    revival into a dead/blocked session is not a prompt interruption.
 
@@ -192,8 +192,8 @@ NUDGE_TOTAL_GAP_MIN_S = 3 * 3600
 # `nudge="compact"`); the inert `compact` identity is left here in lockstep with
 # tmux_io only to keep the drift-lock + the hardcoding test files stable — not a
 # placeholder for a comeback.
-RECOVERY_NUDGE_KINDS = frozenset(
-    {"resume", "compact", "goal-arm", "wake-parked", "goal-disarm"})
+RECOVERY_NUDGE_KINDS = frozenset(  # #1203 model-restore: watchdog/model_restore.py
+    {"resume", "compact", "goal-arm", "wake-parked", "goal-disarm", "model-restore"})
 
 # #1109 — PRIORITY kinds that are EXEMPT from the cross-kind TOTAL cap while
 # KEEPING their own per-kind floor. UNLIKE a RECOVERY kind (which is a session

@@ -815,58 +815,38 @@ def _managed_model():
 
 
 def model_segment(payload, managed_model=None):
-    """'<tier>' -- a short alias of the CURRENT session's model (#133: the
-    passive replacement for the #37 model-cost signal, after #132 removed
-    the restart-based watchdog jobs that used to nudge a stale session).
+    """'<model>' -- the versioned short name of the session's CURRENT model
+    (#1203; #133 introduced the segment as a bare family word): `opus5.5`,
+    `opus4.8`, `fable5.1` (`model_fallback.short_name`; an unrecognised id
+    falls back to its `burn.tier()` word, an unknown one renders ""). Source:
+    the payload's `model.id` (fallback `display_name`, every JSON scalar
+    `str()`-coerced, #133), overridden by the transcript tail when it names
+    another model -- a Claude Code fallback is written only there.
 
-    Source: the statusline stdin payload's `model.id` (fallback
-    `display_name`) -- the SAME field `context_cost_segment` already reads
-    for pricing, never guessed from config/settings. Mapped to a tier
-    (fable/opus/sonnet/haiku) via the existing `burn.tier()`; an
-    empty/unrecognized model ("other") renders "" -- graceful n/a, mirroring
-    `context_cost_segment`'s own unknown-tier behavior.
-
-    Highlighted yellow when the session's tier differs from this box's
-    MANAGED_MODEL default (a passive, no-ping reminder that a long-lived
-    session is coasting on a different tier -- the original #37 intent);
-    green when it matches, and ALSO green when the comparison itself is
-    unresolvable (managed_model not given and the lazy `import airuleset`
-    fails, or an explicit empty override) -- never manufacture a false
-    alarm from an unresolvable comparison.
-
-    Deliberately compares TIER, never the raw model string: MANAGED_MODEL
-    carries a `[1m]` launch-flag suffix that never appears in what a
-    session reports back for its own model id (the exact bug the removed
-    watchdog job 23 hit, #132) -- `burn.tier()` is already suffix-agnostic
-    (substring match), so comparing tiers sidesteps that regression by
-    construction.
-
-    Two failure surfaces closed by adversarial review (#133): (1) a truthy
-    NON-STRING `id`/`display_name` (int/float/list/dict/bool -- all valid
-    JSON scalars a hostile/malformed payload can carry) used to reach
-    `burn.tier()`'s `.lower()` uncaught; coerced to `str()` first, since
-    every JSON scalar stringifies safely. (2) an UNRECOGNIZED managed_model
-    (burn.tier() -> "other", e.g. a future MANAGED_MODEL value with no tier
-    word) used to stand in as a real tier and compare as a genuine
-    mismatch -- "other" is now treated the same as an unresolvable
-    comparison (never a manufactured false alarm), matching how the
-    session's OWN "other" tier already renders "" above."""
+    GREEN on the managed model (short-name compare, so the `[1m]` tag never
+    false-alarms) or an unresolvable comparison; RED + `FALLBACK` otherwise, so
+    the owner SEES a silent switch. The #1060 implementer window pilots a
+    gateway model on purpose and never shows FALLBACK."""
     if not isinstance(payload, dict):
         return ""
     model = payload.get("model")
     if not isinstance(model, dict):
         return ""
+    import model_fallback
     model_id = str(model.get("id") or model.get("display_name") or "")
-    tier = burn.tier(model_id)
-    if tier == "other":
+    t_model = model_fallback.transcript_model(payload.get("transcript_path"))
+    if t_model and not model_fallback.same_model(t_model, model_id):
+        model_id = t_model
+    label = model_fallback.short_name(model_id) or burn.tier(model_id)
+    if label == "other":
         return ""
     if managed_model is None:
         managed_model = _managed_model()
-    managed_tier = burn.tier(managed_model) if managed_model else None
-    if managed_tier == "other":
-        managed_tier = None
-    color = 40 if (managed_tier is None or tier == managed_tier) else 220
-    return "\033[38;5;%dm%s\033[0m" % (color, tier)
+    if (not model_fallback.short_name(managed_model)
+            or os.environ.get("AIRULESET_ROLE") == "implementer"
+            or model_fallback.same_model(model_id, managed_model)):
+        return "\033[38;5;40m%s\033[0m" % label
+    return "\033[38;5;196m%s FALLBACK\033[0m" % label
 
 
 # #512: a ticket reference inside a ❓ ping's own text — a `#<digits>` token.

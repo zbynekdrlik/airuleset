@@ -423,6 +423,15 @@ def apply_managed_settings_defaults(settings: dict) -> dict:
             print("settings: removed unmanaged env key %s=%s (the launcher owns "
                   "it, #1116)" % (_drop_key, _drop_val), file=sys.stderr)
     result["env"]["CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION"] = airuleset.MANAGED_MAX_SUBAGENTS_PER_SESSION
+    # #1203: turn off Claude Code's silent REFUSAL fallback (a safeguard stop on
+    # the managed model otherwise continues the session on another model — the
+    # iemmixer 2-day Opus 4.8 incident). Evidence (installed 2.1.284 binary): the
+    # refusal-fallback arm is `iL(){return!a.CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK
+    # &&!vne()}`, the var declared `M.bool()`. The broader CLAUDE_CODE_NO_MODEL_
+    # FALLBACK is NOT used: it also disables compaction's model swap. The footer,
+    # the block-model-fallback hook and watchdog Job 54 stay the net for any
+    # fallback path this variable does not cover.
+    result["env"]["CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK"] = "1"
     # #950/#1058: set PLAYWRIGHT_BROWSERS_PATH in the settings.json env (inherited
     # by interactive `playwright` and every Claude-Code-spawned tool) on
     # shared-stream boxes. #1058 (area review of #1048) routes this through the ONE
