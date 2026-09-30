@@ -304,6 +304,130 @@ class TestFallbackWithoutSystemdRun(_Detached):
         self.assertEqual(self.head(), self.origin_head())
 
 
+class TestReviewOne(_Detached):
+    """Review 1: the pending survives every non-ff check, dry-run mutates
+    nothing, the unit gets no gh credentials, a bad result file never stops
+    the job, a stale result never answers a new launch, a client timeout is
+    never a concurrent in-unit merge, and every outcome names its path."""
+
+    def _launch(self):
+        self.advance_origin()
+        self.run_job(T0, unit_run=self.recording_unit)
+        (argv,) = self.systemd_calls()
+        return argv
+
+    def _run_child(self, argv):
+        child = argv[argv.index("--") + 1:]
+        r = subprocess.run(child, cwd=argv[argv.index("--working-directory") + 1],
+                           env=self.env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_pending_survives_a_due_check_that_is_not_ff(self):
+        argv = self._launch()
+        self.write(self.clone, "notes.txt", "session edit\n")      # due check: dirty
+        self.run_job(T0 + _job().INTERVAL_S, unit_run=self.recording_unit)
+        self.assertIn("ff_pending", self.entry())
+        self.write(self.clone, "notes.txt", "tracked\n")           # the unit then runs
+        self._run_child(argv)
+        self.run_job(T0 + _job().INTERVAL_S + 60, unit_run=self.recording_unit)
+        e = self.entry()
+        self.assertEqual(e["state"], "current")
+        self.assertNotIn("ff_pending", e)
+
+    def test_pending_survives_a_check_error(self):
+        self._launch()
+        with mock.patch.object(_cf(), "pick_remote", side_effect=RuntimeError("boom")):
+            self.run_job(T0 + _job().INTERVAL_S, unit_run=self.recording_unit)
+        e = self.entry()
+        self.assertIn("check error", e["reason"])
+        self.assertIn("ff_pending", e)
+
+    def test_dry_run_collects_nothing_and_removes_nothing(self):
+        argv = self._launch()
+        self._run_child(argv)
+        result = argv[argv.index("--result") + 1]
+        before = _cf().read_status(self.home)
+        self.run_job(T0 + 60, dry_run=True, unit_run=self.recording_unit)
+        self.assertTrue(os.path.exists(result))
+        self.assertEqual(_cf().read_status(self.home), before)
+
+    def test_the_merge_unit_gets_no_gh_credentials(self):
+        self.advance_origin()
+        with mock.patch.dict(os.environ, {"GH_TOKEN": "x1", "GITHUB_TOKEN": "x2",
+                                          "GH_CONFIG_DIR": "/c"}):
+            self.run_job(T0, unit_run=self.recording_unit)
+        (argv,) = self.systemd_calls()
+        self.assertIn("--setenv=PATH", argv)
+        self.assertIn("--setenv=HOME", argv)
+        self.assertFalse([a for a in argv if a.startswith(("--setenv=GH_", "--setenv=GITHUB_"))],
+                         argv)
+
+    def test_an_unremovable_result_never_stops_the_job(self):
+        argv = self._launch()
+        result = argv[argv.index("--result") + 1]
+        os.makedirs(os.path.join(result, "blocker"))    # not a file: unreadable + unremovable
+        logs = self.run_job(T0 + 60, unit_run=self.recording_unit)
+        self.assertTrue(any("could not remove" in ln for ln in logs), logs)
+        self.assertEqual(self.entry()["state"], "lagging")
+
+    def test_a_stale_result_never_answers_a_new_launch(self):
+        job, cf = _job(), _cf()
+        self.advance_origin()
+        stale = job.ff_result_path(self.clone, self.home)
+        cf.write_json_atomic(stale, {"ok": True, "reason": "fast-forwarded",
+                                     "commits": 9, "finished": T0 - 100})
+        self.run_job(T0, unit_run=self.recording_unit)
+        self.run_job(T0 + 60, unit_run=self.recording_unit)
+        e = self.entry()
+        self.assertIn("ff_pending", e, "an older result is not this launch's answer")
+        self.assertNotEqual(e["state"], "current")
+
+    def test_collect_clears_the_lag_markers(self):
+        argv = self._launch()
+        self.assertIn("since", self.entry())
+        self._run_child(argv)
+        self.run_job(T0 + 60, unit_run=self.recording_unit)
+        e = self.entry()
+        self.assertNotIn("since", e)
+        self.assertNotIn("behind_since", e)
+        self.assertEqual(e["ff"]["commits"], 1)
+
+    def test_a_client_timeout_is_never_a_concurrent_in_unit_merge(self):
+        self.advance_origin()
+        before = self.head()
+
+        def slow(argv, **kw):
+            self.calls.append(list(argv))
+            raise subprocess.TimeoutExpired(argv, 10)
+
+        self.run_job(T0, unit_run=slow)
+        self.assertEqual(self.head(), before, "the bus may have accepted the unit")
+        e = self.entry()
+        self.assertIn("ff_pending", e)
+        self.assertIn("unconfirmed", e["reason"])
+
+    def test_the_in_unit_fallback_names_why(self):
+        self.advance_origin()
+        self.run_job(T0, unit_run=self.absent_unit)
+        e = self.entry()
+        self.assertEqual(e["state"], "current")
+        self.assertIn("in-unit", e["reason"])
+        self.assertIn("systemd-run absent", e["reason"])
+
+    def test_a_pending_stamped_in_the_future_is_not_live_forever(self):
+        job = _job()
+        self.assertFalse(job._pending_live({"launched": T0 + 3600}, T0))
+        self.assertTrue(job._pending_live({"launched": T0}, T0 + 60))
+
+    def test_an_expired_unit_says_the_tree_may_be_half_applied(self):
+        job = _job()
+        self._launch()
+        self.run_job(T0 + job.FF_PENDING_MAX_S + 1, checkouts=[
+            {"path": self.clone, "bases": ["develop"], "source": "test"}],
+            budget_left=lambda: 1, unit_run=self.recording_unit)   # collect only
+        self.assertIn("half-applied", self.entry()["reason"])
+
+
 class TestOneSharedLauncher(unittest.TestCase):
 
     def test_one_systemd_run_argv_builder_in_the_watchdog(self):
