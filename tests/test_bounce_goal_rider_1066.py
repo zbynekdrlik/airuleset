@@ -162,7 +162,7 @@ class TestVariantHeadroom(unittest.TestCase):
 
     def test_the_three_skill_md_lines_keep_150_headroom(self):
         for prof in gr.PROFILES:
-            hr = self.CAP - len(gr.render(prof))   # render() == parallel/no-role
+            hr = self.CAP - len(gr.render(prof))   # render() == sequential/no-role (#1137)
             self.assertGreaterEqual(
                 hr, self.MIN_SKILL_HEADROOM,
                 "%s SKILL.md /goal line headroom %d < %d"
@@ -171,9 +171,12 @@ class TestVariantHeadroom(unittest.TestCase):
     def test_variants_item_1_and_2_never_touch_are_byte_identical_to_main(self):
         # the variants that carry NEITHER the reduced proof (item 1) NOR the
         # infra substitution (item 2) must render byte-for-byte as main did.
+        # #1137 (owner ROZHODNUTÉ 2026-09-30) deliberately rewords the
+        # sequential clause, so the */sequential/* variants leave this
+        # vs-main lock (their exact text is golden-locked in
+        # test_goal_variants_998); the parallel ones stay byte-identical.
         main_gr = _load_main_goal_registry()
-        untouched = [("full", "parallel", None), ("full", "sequential", None),
-                     ("full", "sequential", "quality"),
+        untouched = [("full", "parallel", None),
                      ("full", "parallel", "review")]
         for a, mode, role in untouched:
             self.assertEqual(
