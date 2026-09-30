@@ -27,6 +27,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 import cli_lane_target_reclaim as ltr  # noqa: E402
+import cli_reclaim_guard as rg  # noqa: E402
 import cli_worktree_common as wc  # noqa: E402
 import cli_worktree_stale as ws  # noqa: E402
 from watchdog import disk_guard_escalation as esc  # noqa: E402
@@ -61,7 +62,7 @@ def test_running_under_pytest_is_the_1136_detection(monkeypatch):
 
 def test_the_guard_calls_the_1136_detection():
     with mock.patch.object(esc, "running_under_pytest", return_value=False) as det:
-        wc.refuse_real_paths_under_pytest("x", False, home=None,
+        rg.refuse_real_paths_under_pytest("x", False, home=None,
                                           state_path=ws.STALE_WORKTREE_STATE_PATH)
     det.assert_called_once_with()
 
@@ -71,8 +72,8 @@ def test_the_guard_calls_the_1136_detection():
 # --------------------------------------------------------------------------- #
 
 def test_real_default_paths_are_refused():
-    with pytest.raises(wc.RealPathUnderPytest, match=REFUSED) as ei:
-        wc.refuse_real_paths_under_pytest(
+    with pytest.raises(rg.RealPathUnderPytest, match=REFUSED) as ei:
+        rg.refuse_real_paths_under_pytest(
             "sweep_stale_worktrees", False, home=None,
             log_path=ws.STALE_WORKTREE_LOG_PATH,
             state_path=ws.STALE_WORKTREE_STATE_PATH)
@@ -83,16 +84,16 @@ def test_real_default_paths_are_refused():
 @pytest.mark.parametrize("name", ["LANE_TARGET_LOG_PATH", "LANE_TARGET_STATE_PATH",
                                   "LANE_TARGET_TIER0_BYPASS_STATE_PATH"])
 def test_every_lane_target_default_is_real(name):
-    with pytest.raises(wc.RealPathUnderPytest):
-        wc.refuse_real_paths_under_pytest("purge", False, **{"p": getattr(ltr, name)})
+    with pytest.raises(rg.RealPathUnderPytest):
+        rg.refuse_real_paths_under_pytest("purge", False, **{"p": getattr(ltr, name)})
 
 
 def test_real_home_and_its_ancestors_are_refused(tmp_path):
     for home in (wc.CLAUDE_DIR.parent, wc.CLAUDE_DIR.parent.parent):
-        with pytest.raises(wc.RealPathUnderPytest):
-            wc.refuse_real_paths_under_pytest("x", False, home=home)
+        with pytest.raises(rg.RealPathUnderPytest):
+            rg.refuse_real_paths_under_pytest("x", False, home=home)
     # a tmp home is fine, and so are tmp files
-    wc.refuse_real_paths_under_pytest("x", False, home=tmp_path,
+    rg.refuse_real_paths_under_pytest("x", False, home=tmp_path,
                                       state_path=tmp_path / "s", log_path=tmp_path / "l")
 
 
@@ -113,10 +114,10 @@ def test_home_env_repointed_to_tmp_is_not_the_real_home(tmp_path, monkeypatch):
 
 
 def test_dry_run_and_non_pytest_are_never_refused(monkeypatch):
-    wc.refuse_real_paths_under_pytest("x", True, home=wc.CLAUDE_DIR.parent,
+    rg.refuse_real_paths_under_pytest("x", True, home=wc.CLAUDE_DIR.parent,
                                       state_path=ws.STALE_WORKTREE_STATE_PATH)
     monkeypatch.delenv("PYTEST_CURRENT_TEST")
-    wc.refuse_real_paths_under_pytest("x", False, home=wc.CLAUDE_DIR.parent,
+    rg.refuse_real_paths_under_pytest("x", False, home=wc.CLAUDE_DIR.parent,
                                       state_path=ws.STALE_WORKTREE_STATE_PATH)
 
 
