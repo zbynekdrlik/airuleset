@@ -84,6 +84,32 @@ class TestUpdate(unittest.TestCase):
         repos = dgl.update({}, {"/r": "x"}, NOW, exists_fn=lambda p: True)
         self.assertEqual(dgl.update(repos, {}, NOW + 1, exists_fn=lambda p: False), {})
 
+    def test_two_records_in_one_poll_count_once(self):
+        """run_drain_passes can run the rung twice in one poll (quota pass +
+        fs pass, same ``now``): that is one pass, not two (review 🟡1)."""
+        repos = dgl.update({}, {"/r": "x"}, NOW, exists_fn=lambda p: True)
+        repos = dgl.update(repos, {"/r": "y"}, NOW, exists_fn=lambda p: True)
+        self.assertEqual(repos["/r"]["passes"], 1)
+        repos = dgl.update(repos, {"/r": None}, NOW, exists_fn=lambda p: True)
+        self.assertEqual(repos["/r"]["passes"], 1, "unreadable earlier in the poll wins")
+
+    def test_default_liveness_check_drops_a_repo_with_no_agent_worktree_left(self):
+        """Its agent-* worktrees removed some other way: the gate is never asked
+        again, so the entry must not pin `status` forever (review 🟡2)."""
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp, True)
+        lane = tmp / ".claude" / "worktrees" / "agent-x"
+        lane.mkdir(parents=True)
+        repos = dgl.update({}, {str(tmp): "x"}, NOW)
+        self.assertIn(str(tmp), dgl.update(repos, {}, NOW + 1))
+        lane.rmdir()
+        self.assertEqual(dgl.update(repos, {}, NOW + 1), {})
+
+    def test_entry_not_refreshed_for_a_day_is_stale(self):
+        repos = {"/r": {"passes": 5, "since": NOW, "last": NOW, "err": "e"}}
+        self.assertEqual(dgl.update(repos, {}, NOW + dgl.STALE_S + 1,
+                                    exists_fn=lambda p: True), {})
+
     def test_malformed_prior_entry_restarts(self):
         repos = dgl.update({"/r": {"passes": "many"}, "/q": 7}, {"/r": "x"}, NOW,
                            exists_fn=lambda p: True)
@@ -116,6 +142,11 @@ class TestStatusLines(unittest.TestCase):
             "lane liveness unreadable for /home/x/devel/proj since 2027-01-15T08:00:00Z"),
             line)
         self.assertIn("3 consecutive", line)
+
+    def test_stale_entry_is_not_printed(self):
+        self._write(dgl.ALERT_PASSES)
+        self.assertEqual(dgl.status_lines(path=self.path, now=NOW + 600 + dgl.STALE_S + 1), [])
+        self.assertEqual(len(dgl.status_lines(path=self.path, now=NOW + 700)), 1)
 
     def test_missing_or_corrupt_file_prints_nothing_and_never_raises(self):
         self.assertEqual(dgl.status_lines(path=self.path), [])
