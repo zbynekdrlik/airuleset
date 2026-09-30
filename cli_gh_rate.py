@@ -175,13 +175,13 @@ def is_app_shim_box():
             or _is_app_token_shim(shim_path()))
 
 
-def _is_our_wrapper(path):
-    """True iff `path` is our managed shim (carries WRAPPER_SENTINEL), read
-    defensively (a real gh binary is large/binary — read only a small text
-    head, treat any error as "not ours")."""
+def _is_our_wrapper(path, marker=None):
+    """True iff `path` is our managed shim (carries WRAPPER_SENTINEL, or
+    `marker`: the #1190 project App shim), read defensively (a real gh binary
+    is large/binary — read only a small text head, any error = "not ours")."""
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            return WRAPPER_SENTINEL in fh.read(4096)
+            return (marker or WRAPPER_SENTINEL) in fh.read(4096)
     except (OSError, ValueError):
         return False
 
@@ -1114,6 +1114,7 @@ def current_gh_backoff(status=None, now=None, run=None):
 # The gh PATH shim script (installed by cmd_install / ensure_gh_rate_wrapper).
 # --------------------------------------------------------------------------- #
 WRAPPER_SENTINEL = "airuleset gh rate-guard shim (#1040)"
+PROJECT_APP_SHIM_MARKER = "airuleset project-account GitHub App token shim (#1190)"
 
 
 def wrapper_script(real_gh, python_exe, module_path, upstream=None,
@@ -1135,7 +1136,8 @@ def wrapper_script(real_gh, python_exe, module_path, upstream=None,
     the App shim re-enters us (``AIRULESET_GH_SHIM_DEPTH`` > 1, the token already
     in the env), we SKIP our baked upstream (re-exec'ing the App shim would loop)
     and exec the REAL gh binary directly — re-resolved on PATH, skipping our own
-    sentinel. The App shim now lives at ``gh-app-shim`` (not a ``gh`` on PATH),
+    sentinel, else the relocated ``gh-upstream`` binary (a wrap-in-place box,
+    #1190). The App shim now lives at ``gh-app-shim`` (not a ``gh`` on PATH),
     so this resolves the real binary in one hop: ``gh -> gh-app-shim -> real gh``.
 
     #1087 L1b exhaustion observation: on an ``observe`` box the depth-1 hop runs
@@ -1163,8 +1165,8 @@ fi
 _OBSERVE={observe}
 _UPSTREAM={upstream}
 # Resolve the REAL gh BINARY on PATH, skipping THIS shim's own dir and any copy
-# of our own shim (sentinel). Used for the #1087 L1b depth>1 App-shim re-entry
-# and as the fallback when the baked upstream vanished.
+# of our own shim (sentinel), else the relocated gh-upstream binary (#1190).
+# Used for the #1087 L1b depth>1 App-shim re-entry and the vanished-upstream fallback.
 _resolve_real_gh() {{
   _shimdir="$(cd "$(dirname "$0")" && pwd)"
   IFS=':' read -ra _parts <<< "$PATH"
@@ -1175,6 +1177,7 @@ _resolve_real_gh() {{
       printf '%s' "$_d/gh"; return 0
     fi
   done
+  [ -f {upstream_reloc} ] && [ -s {upstream_reloc} ] && [ -x {upstream_reloc} ] && [ "$(head -c2 {upstream_reloc} 2>/dev/null)" != "#!" ] && {{ printf '%s' {upstream_reloc}; return 0; }}
   return 1
 }}
 # #1087 L1b: re-entered by the App shim (depth>1) on an observe box — the token
@@ -1396,6 +1399,7 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
         # binary — that would bypass the installation token. Checked BEFORE the
         # wrap-in-place cases so a chained box is never mis-repointed by Case 3.
         app_dest = app_shim_path()
+        chain = app_dest if _is_our_wrapper(app_dest, PROJECT_APP_SHIM_MARKER) else None  # #1190
         if shim_is_ours and _is_app_token_shim(app_dest):
             desired = wrapper_script(app_dest, python_exe, module,
                                      upstream=app_dest, observe=True)
@@ -1474,9 +1478,10 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
             if not (os.path.isfile(upstream) and os.access(upstream, os.X_OK)):
                 _say("⚠ upstream copy failed — leaving real gh untouched")
                 return "error: upstream copy failed"
-            _write_wrapper_file(shim, upstream, python_exe, module)
+            _write_wrapper_file(shim, upstream, python_exe, module,
+                                upstream=chain, observe=bool(chain))
             _say("wrapped real gh in place (real -> %s)" % upstream)
-            return "wrapped-in-place"
+            return "wrapped-in-place" + (" (chain -> %s)" % chain if chain else "")
 
         # Case 3: shim already ours but upstream vanished (a gh self-update
         # overwrote our shim, or upstream was deleted). Re-resolve a real gh.
@@ -1485,8 +1490,8 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
             # (gh-app-shim) has vanished must NOT be repointed at the bare binary
             # — that would exec the real gh with NO installation token
             # (unauthenticated → 403s), silently. Remove our shim instead so the
-            # box falls back cleanly to PATH gh; odoo-erp's timer re-installs its
-            # App shim at gh, which our next install re-chains.
+            # box falls back cleanly to PATH gh; the odoo-erp timer (or, on a
+            # project account, `account-bootstrap`, #1190) restores the App shim.
             if _wrapper_is_observe(shim):
                 try:
                     os.remove(shim)
@@ -1512,9 +1517,10 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
         real = real_gh_path()
         if not real:
             return "skip: no gh on this box"
-        _write_wrapper_file(shim, real, python_exe, module)
-        _say("shim installed (-> %s)" % real)
-        return "installed"
+        _write_wrapper_file(shim, real, python_exe, module, upstream=chain,
+                            observe=bool(chain))
+        _say("shim installed (-> %s)" % (chain or real))
+        return "installed" + (" (chain -> %s)" % chain if chain else "")
     except Exception as e:  # noqa: BLE001 — non-fatal, fail-open
         _diag("ensure-wrapper", e)
         _say("⚠ install skipped (%r) — gh left untouched" % e)

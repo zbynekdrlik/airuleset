@@ -73,7 +73,7 @@ _NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
 _ALLOWED_KEYS = frozenset({
     "host", "sudo", "sudo_reason", "sudo_commands", "reach", "reach_enforced",
     "reach_reason", "secrets", "webterm_sessions", "system_packages", "repo",
-    "project_dir", "tmux_session",
+    "project_dir", "tmux_session", "github_app",
 })
 
 # The defaults every declaration inherits. They are the SAFE direction: no
@@ -141,6 +141,9 @@ SERVICE_ACCOUNTS = {
         "reach": [],
         "secrets": [],
         "repo": "zbynekdrlik/fohmixer",
+        # #1190: a 1-hour token scoped to this repo, minted on the controller
+        # by the newlevel-project-accounts App (cli_project_gh_token).
+        "github_app": True,
         "project_dir": "devel/fohmixer",
         "tmux_session": "fohmixer",
         "webterm_sessions": {
@@ -315,6 +318,7 @@ def validate_account(account, raw):
                     % (spec["project_dir"],))
     if "repo" in spec and "project_dir" not in spec:
         errs.append("repo declared without project_dir")
+    errs += policy.validate_github_app(spec)
     if "tmux_session" in spec and not _SESSION_RE.fullmatch(str(spec["tmux_session"])):
         errs.append("tmux_session %r is not a plain name" % (spec["tmux_session"],))
     elif "tmux_session" in spec and isinstance(spec["webterm_sessions"], dict):
@@ -582,6 +586,8 @@ def render_root_bootstrap(account):
     script += _render_system_packages_step(packages)
     # 9-10: the project checkout + its tmux session (#1184)
     script += _render_project_step(spec)
+    import cli_project_gh_token   # 11: the gh token shim (#1190)
+    script += cli_project_gh_token.render_bootstrap_step(spec)
 
     # Read-back section
     readback = textwrap.dedent("""\

@@ -258,3 +258,13 @@ def lan_rules(lan):
     """(ip, sorted ports, reason) per VALIDATED LAN entry, for the nft render."""
     return [(str(ipaddress.ip_network(e["cidr"]).network_address),
              tuple(sorted(e["ports"])), e["reason"].strip()) for e in lan]
+
+
+def validate_github_app(spec):
+    """#1190: ``github_app`` is a bool, and True needs the ``repo`` its
+    controller-minted token is scoped to."""
+    if "github_app" in spec and not isinstance(spec["github_app"], bool):
+        return ["github_app must be True or False"]
+    if spec.get("github_app") and "repo" not in spec:
+        return ["github_app: True needs the repo the token is scoped to"]
+    return []

@@ -2163,6 +2163,7 @@ def cmd_install(args):
         maybe_setup_watchdog()
     except Exception as e:
         print(f"  watchdog setup error (non-fatal): {e}", file=sys.stderr)
+    maybe_setup_project_gh_token_timer()   # #1190: controller-only, never raises
 
     # --- 5b. web terminal gateway (#555/#612): dispatch by (nodename, account) —
     # dev1->owner, subdev+marek->marek, subdev(david1/default)->david; else no-op. ---
@@ -9658,13 +9659,19 @@ from cli_accounts import (  # noqa: E402, F401
     cmd_accounts as cmd_accounts,
     register_parser as _register_accounts_parser,
 )
+# --- #1190: controller-minted, repo-scoped GitHub tokens for project accounts ---
+from cli_project_gh_token import (  # noqa: E402, F401
+    cmd_project_gh_token as cmd_project_gh_token,
+    maybe_setup_timer as maybe_setup_project_gh_token_timer,
+    register_parser as _register_project_gh_token_parser,
+)
 
 
 def _register_leaf_parsers(sub):
     """Leaf modules that own their argparse subparser (#1138, #1171, #1184) —
     one call from main() keeps main() from growing per leaf."""
     for register in (_register_stream_priority_parser, _register_box_queue_parser,
-                     _register_accounts_parser):
+                     _register_accounts_parser, _register_project_gh_token_parser):
         register(sub)
 
 # --- #1062 L1: managed LiteLLM model gateway CLI leaf ---
@@ -11536,6 +11543,7 @@ SUBCOMMANDS = {
     "labels": cmd_labels,
     "stream-priority": cmd_stream_priority,
     "accounts": cmd_accounts,
+    "project-gh-token": cmd_project_gh_token,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS
