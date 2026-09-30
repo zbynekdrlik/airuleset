@@ -35,40 +35,16 @@ class TestTopConsumersHomeTreeCoverage(unittest.TestCase):
         patch("watchdog.reaper.default_box_class", return_value="workstation").start()
         self.addCleanup(patch.stopall)
 
-    def test_collect_top_consumers_includes_home_worktree_class(self):
-        """_collect_top_consumers must include a 'home-worktree' planner so
-        cross-user worktree trees appear in the report.  This fails RED
-        before #906 because the planner list has no home-worktree entry."""
-        # Verify the function at least TRIES to include home-worktree data.
-        # We look at the planner labels inside _collect_top_consumers.
+    def test_cross_user_sizes_are_no_longer_walked(self):
+        """#1195 item 2 (owner 30.9.): root reads nothing from foreign accounts,
+        so the #906 fix-1 cross-user size report is removed (its
+        ``discover_home_worktree_consumers`` walker had no production caller;
+        ``_ranked_consumers``/``_collect_top_consumers`` no longer list the
+        report-only rung). Each account's own guard reports its own trees."""
         import inspect
-        src = inspect.getsource(dg._collect_top_consumers)
-        self.assertIn("home-worktree", src,
-                      "#906: _collect_top_consumers must include a 'home-worktree' "
-                      "planner to cover /home/*/devel worktree trees")
-
-    def test_ranked_consumers_includes_home_worktree_class(self):
-        """_ranked_consumers must include a 'home-worktree' class so the
-        escalation summary covers cross-user worktree trees."""
-        import inspect
-        src = inspect.getsource(dg._ranked_consumers)
-        self.assertIn("home-worktree", src,
-                      "#906: _ranked_consumers must include a 'home-worktree' "
-                      "class to cover /home/* trees in the escalation summary")
-
-    def test_discover_home_worktree_consumers_exists(self):
-        """The discovery function for cross-user home worktree trees must exist."""
-        self.assertTrue(hasattr(dg, "discover_home_worktree_consumers"),
-                        "#906: disk_guard must expose discover_home_worktree_consumers")
-
-    def test_discover_home_worktree_consumers_returns_list(self):
-        """discover_home_worktree_consumers returns a list of action dicts."""
-        fn = getattr(dg, "discover_home_worktree_consumers", None)
-        if fn is None:
-            self.fail("#906: discover_home_worktree_consumers not found")
-        # With a non-existent glob, returns empty list
-        result = fn(home_glob="/nonexistent-path-906-*")
-        self.assertIsInstance(result, list)
+        self.assertFalse(hasattr(dg, "discover_home_worktree_consumers"))
+        for fn in (dg._collect_top_consumers, dg._ranked_consumers):
+            self.assertNotIn("home-worktree", inspect.getsource(fn), fn.__name__)
 
 
 # ============================================================================

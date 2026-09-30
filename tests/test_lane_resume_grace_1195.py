@@ -88,6 +88,22 @@ class TestGateResumeGrace(unittest.TestCase):
         _transcript(self.home, self.root, "agent-s1", age_s=2 * H)
         self.assertIsNone(self._reason("agent-s1"))
 
+    def test_settled_text_tail_without_stop_reason_is_kept(self):
+        """~18 % of real finished transcripts end with ``stop_reason: None``.
+        Past the 15 min window such a tail is long settled (> FINISH_SETTLE_S),
+        and the grace decides a KEEP, so it counts as finished (review r1)."""
+        _transcript(self.home, self.root, "agent-st1", settling=True, age_s=H)
+        self.assertEqual(self._reason("agent-st1"), GRACE_REASON)
+
+    def test_critical_reads_no_transcript_content(self):
+        """At ``critical`` the grace is waived before any tail read (review r1)."""
+        import watchdog.transcripts as T
+        _transcript(self.home, self.root, "agent-cr1", finished=True, age_s=H)
+        with mock.patch.object(T, "transcript_worker_finished",
+                               return_value="terminal") as read:
+            self.assertIsNone(self._reason("agent-cr1", level="critical"))
+        self.assertEqual(read.call_count, 0, "content read at critical")
+
     def test_finished_child_never_extends_the_parent_lane(self):
         wt = self.root + "/.claude/worktrees/agent-p1"
         _transcript(self.home, self.root, "agent-p1", age_s=7 * H)
@@ -195,14 +211,39 @@ class TestDiskGuardPassesTheLevel(unittest.TestCase):
     def test_drain_pressure_keeps_the_grace(self):
         self.assertEqual(self._run(85).get("level"), "drain")
 
-    def test_quota_near_full_counts_as_critical(self):
+    def test_grace_level(self):
+        """A quota drain (the account's own hard limit at >= CRITICAL_PCT)
+        and the fs critical level waive the grace; so does the #968 small-disk
+        critical threshold (85 % on a root fs <= 64 GB, e.g. gk cx23)."""
         from watchdog import disk_guard_quota as dgq
+        big = lambda _p: types.SimpleNamespace(f_frsize=4096, f_blocks=10 ** 9)  # noqa: E731
+        small = lambda _p: types.SimpleNamespace(f_frsize=4096, f_blocks=10 ** 6)  # noqa: E731
+        drain = {"level": "drain", "worst_pct": 86}
         q = dgq.QuotaState(dg.CRITICAL_PCT, True, False, False, None, None)
-        self.assertEqual(dg._lane_grace_level({"level": "drain"}, q), "critical")
-        q = dgq.QuotaState(dg.DRAIN_PCT, True, False, False, None, None)
-        self.assertEqual(dg._lane_grace_level({"level": "drain"}, q), "drain")
-        self.assertEqual(dg._lane_grace_level({"level": "critical"}, dgq._INACTIVE),
+        self.assertEqual(dg._lane_grace_level(drain, q, statvfs_fn=big), "critical")
+        self.assertEqual(dg._lane_grace_level(drain, dgq._INACTIVE, statvfs_fn=big), "drain")
+        self.assertEqual(dg._lane_grace_level(drain, dgq._INACTIVE, statvfs_fn=small),
                          "critical")
+        self.assertEqual(dg._lane_grace_level({"level": "critical", "worst_pct": 91},
+                                              dgq._INACTIVE, statvfs_fn=big), "critical")
+
+    def test_fs_pass_after_a_quota_pass_keeps_the_level(self):
+        """Both pressures: the fs pass rebuilds its planners — with the level."""
+        from watchdog import disk_guard_quota as dgq
+        seen = []
+
+        def _planners(home, now, **kw):
+            seen.append(kw.get("level"))
+            return []
+
+        q = dgq.QuotaState(92, True, False, False, None, None)
+        status = {"level": "critical", "worst_pct": 96}
+        with mock.patch.object(dg, "_default_planners", side_effect=_planners), \
+                mock.patch.object(dgq, "run_quota_pass", return_value=[]), \
+                mock.patch.object(dg, "execute_drain", return_value=[]):
+            dgq.run_drain_passes(status, "/nonexistent-1195", 1.0, True, [], None, q,
+                                 True, None, None, None, lambda: 1000, None)
+        self.assertEqual(seen, ["critical"])
 
     def test_default_planners_thread_the_level(self):
         with mock.patch.object(dg, "_plan_stale_agent_worktrees",
@@ -235,13 +276,22 @@ class TestCrossUserRungIsReportOnly(unittest.TestCase):
                                    side_effect=AssertionError("no sudo/git on a foreign home")):
                 rows = dg.discover_stale_home_worktrees(
                     now=time.time(), home_glob=str(Path(td) / "*"))
-        self.assertEqual(len(rows), 2, rows)
-        for row in rows:
-            self.assertEqual(row["kind"], "report", row)
-            self.assertEqual(row["cls"], "home-worktree")
-            self.assertEqual(row["owner"], "otheruser")
-            self.assertIn("own disk-guard", row["reason"])
-            self.assertEqual(row["bytes"], 0)
+        self.assertEqual(len(rows), 1, rows)      # one row per foreign owner
+        row = rows[0]
+        self.assertEqual(row["kind"], "report", row)
+        self.assertEqual(row["cls"], "home-worktree")
+        self.assertEqual(row["owner"], "otheruser")
+        self.assertIn("2 worktree(s)", row["reason"])
+        self.assertIn("own disk-guard", row["reason"])
+        self.assertEqual(row["bytes"], 0)
+
+    def test_no_foreign_size_walk_remains(self):
+        """Root reads nothing from foreign accounts: the #906 cross-user size
+        report is gone, and the escalation reports no longer ask for it."""
+        import inspect
+        self.assertFalse(hasattr(dg, "discover_home_worktree_consumers"))
+        for fn in (dg._ranked_consumers, dg._collect_top_consumers):
+            self.assertNotIn("home-worktree", inspect.getsource(fn), fn.__name__)
 
     def test_planner_never_yields_a_delete(self):
         with tempfile.TemporaryDirectory() as td:
