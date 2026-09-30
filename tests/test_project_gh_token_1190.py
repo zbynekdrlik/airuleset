@@ -503,14 +503,43 @@ class TestBootstrapRender(unittest.TestCase):
     def test_fohmixer_render_installs_the_app_shim_as_the_account(self):
         script = self._render("fohmixer")
         self.assertIn(pgt.render_gh_app_shim(), script)
-        step = script[script.index("GitHub App token shim"):]
-        self.assertIn('runuser -u "$ACCOUNT" --', step)
-        self.assertIn(".local/bin/gh-app-shim", step)
-        self.assertIn("gh-app-tokens", step)
-        self.assertNotIn("gh-upstream", step)   # #1051: never the upstream slot
+        start = script.index("# 11. Project-account GitHub App token shim")
+        end = script.index("GH_APP_SHIM_EOF\n", script.index("<< 'GH_APP_SHIM_EOF'")
+                           + 20) + len("GH_APP_SHIM_EOF\n")
+        step = script[start:end]
+        install = step[:step.index("<< 'GH_APP_SHIM_EOF'")]
+        self.assertIn('runuser -l "$ACCOUNT" -c', install)   # as the account
+        self.assertIn(".local/bin/gh-app-shim", install)
+        # #1051: the shim may READ gh-upstream (a wrap-in-place real binary),
+        # but the step never INSTALLS into that slot
+        self.assertNotIn("gh-upstream", install)
         r = subprocess.run(["bash", "-n"], input=script, text=True,
                            capture_output=True)
         self.assertEqual(r.returncode, 0, r.stderr)
+        self.run_step(step)
+
+    def run_step(self, step):
+        """Run the rendered step with a PATH `runuser` stub (`-l acct -c cmd`
+        runs `cmd` under a temp HOME, no root): the shim lands 0755 and
+        byte-identical, the token dir 0700."""
+        with tempfile.TemporaryDirectory() as tmp:
+            home, stub = Path(tmp) / "home", Path(tmp) / "bin"
+            home.mkdir()
+            stub.mkdir()
+            (stub / "runuser").write_text(
+                '#!/usr/bin/env bash\n[ "$1" = -l ] && [ "$3" = -c ] || exit 99\n'
+                'HOME="$STEP_HOME" exec bash -c "$4"\n')
+            (stub / "runuser").chmod(0o755)
+            r = subprocess.run(["bash", "-c", "set -euo pipefail\nACCOUNT=projx\n"
+                                + step], text=True, capture_output=True,
+                               env={"PATH": "%s:%s" % (stub, os.environ["PATH"]),
+                                    "HOME": str(home), "STEP_HOME": str(home)})
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            shim = home / ".local/bin/gh-app-shim"
+            self.assertEqual(shim.read_text(), pgt.render_gh_app_shim())
+            self.assertEqual(stat.S_IMODE(shim.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE((home / ".config/gh-app-tokens")
+                                          .stat().st_mode), 0o700)
 
     def test_claudy_render_has_no_app_shim(self):
         self.assertNotIn("gh-app-shim", self._render("claudy"))
