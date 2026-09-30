@@ -394,6 +394,95 @@ class TestTrayRemote(unittest.TestCase):
             self.assertEqual(run.local_calls, [])
             self.assertEqual(len(run.ssh_calls), 1, run.ssh_calls)
 
+    def test_ssh_failure_is_loud_not_silent(self):
+        # an unreachable box must never read as "not a Rust app" in silence
+        import contextlib
+        import io
+
+        def dead_ssh(argv, **kw):
+            if argv and argv[0] == "ssh":
+                return subprocess.CompletedProcess(argv, 255, "",
+                                                   "ssh: connect refused")
+            raise AssertionError("local call %r" % (argv,))
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.assertIsNone(ob._tray.rust_web_tray_gap(
+                "/srv/fohmixer", host="dev2", run=dead_ssh))
+        self.assertIn("tray check", err.getvalue())
+        self.assertIn("255", err.getvalue())
+
+
+# --------------------------------------------------------------------------- #
+# 5) Review round 2: source/doc dirs, scan scope, onboarding == audit, rule.
+# --------------------------------------------------------------------------- #
+class TestTrayReviewRound2(unittest.TestCase):
+    def test_rust_source_module_dirs_are_not_web_assets(self):
+        # an API-only axum service with src/web + src/ui handler modules
+        with TemporaryDirectory() as d:
+            _write(d, "Cargo.toml", AXUM_PKG)
+            _write(d, "src/main.rs", "mod web; mod ui;\nfn main() {}\n")
+            _write(d, "src/web/mod.rs", "\n")
+            _write(d, "src/ui/mod.rs", "\n")
+            step, _run = _foundation(d)
+            self.assertNotIn("tray", step["detail"])
+
+    def test_doc_output_is_not_a_web_ui(self):
+        with TemporaryDirectory() as d:
+            _write(d, "Cargo.toml", AXUM_PKG)
+            _write(d, "src/main.rs", "fn main() {}\n")
+            _write(d, "docs/index.html", "<html></html>\n")
+            step, _run = _foundation(d)
+            self.assertNotIn("tray", step["detail"])
+
+    def test_example_crate_does_not_make_a_library_a_web_app(self):
+        with TemporaryDirectory() as d:
+            _write(d, "Cargo.toml", "[package]\nname = \"lib\"\n\n"
+                   "[dependencies]\nserde = \"1\"\n")
+            _write(d, "examples/demo/Cargo.toml", "[package]\nname = \"demo\"\n\n"
+                   "[dependencies]\naxum = \"0.8\"\n")
+            _write(d, "examples/demo/static/index.html", "<html></html>\n")
+            step, _run = _foundation(d)
+            self.assertNotIn("tray", step["detail"])
+
+    def test_hidden_dir_copies_are_never_read(self):
+        # a stale .claude/worktrees/<id> checkout must not lend its deps
+        with TemporaryDirectory() as d:
+            _write(d, "Cargo.toml", "[package]\nname = \"lib\"\n\n"
+                   "[dependencies]\nserde = \"1\"\n")
+            _write(d, "static/app.css", "\n")
+            _write(d, ".claude/worktrees/x/Cargo.toml", AXUM_PKG)
+            step, _run = _foundation(d)
+            self.assertNotIn("tray", step["detail"])
+
+    def test_tauri_tray_four_levels_deep_counts(self):
+        with TemporaryDirectory() as d:
+            _rust_web_workspace(d)
+            _write(d, "apps/desktop/src-tauri/Cargo.toml",
+                   "[package]\nname = \"desk\"\n\n[dependencies]\n"
+                   "tauri = { version = \"2\", features = [\"tray-icon\"] }\n")
+            step, _run = _foundation(d)
+            self.assertNotIn("tray", step["detail"])
+
+    def test_onboarding_and_audit_agree_without_a_root_manifest(self):
+        with TemporaryDirectory() as d:
+            init_repo(d, remote="https://github.com/zbynekdrlik/fohmixer.git")
+            _write(d, "package.json", "{}\n")
+            _write(d, "server/Cargo.toml", "[package]\nname = \"srv\"\n\n"
+                   "[dependencies]\naxum = \"0.8\"\n")
+            _write(d, "public/index.html", "<html></html>\n")
+            step, _run = _foundation(d)
+            self.assertIn("tray", step["detail"])
+            drift = ob.audit_project({"name": "fohmixer", "host": "dev1",
+                                      "path": d, "default_branch": "main"})
+            self.assertIn("missing-tray", {x["kind"] for x in drift})
+
+    def test_rule_names_every_accepted_tray_shape(self):
+        text = RULE.read_text()
+        for name in ("tray-icon", "tray-item", "ksni", "trayicon", "systray",
+                     "system-tray", "tauri"):
+            self.assertIn(name, text, name)
+
 
 if __name__ == "__main__":
     unittest.main()
