@@ -72,7 +72,7 @@ SERVICE_UNIT = "project-gh-token.service"
 REPO_DIR = Path(__file__).resolve().parent
 
 _REPO_RE = re.compile(r"([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)")
-_TOKEN_RE = re.compile(r"[A-Za-z0-9_]{20,255}")
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_.-]{20,2048}")
 _EXPIRES_RE = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z")
 
 
@@ -235,7 +235,7 @@ d="$HOME/%(dir)s"
 n='%(name)s'
 IFS= read -r tok || true
 case "$tok" in
-  ''|*[!A-Za-z0-9_]*) echo "project-gh-token: empty or malformed token on stdin — nothing written" >&2; exit 3;;
+  ''|*[!A-Za-z0-9_.-]*) echo "project-gh-token: empty or malformed token on stdin — nothing written" >&2; exit 3;;
 esac
 mkdir -p "$d"
 chmod 700 "$d"
