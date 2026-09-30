@@ -14,12 +14,10 @@ bootstrap provisioned no toolchain. Covers:
     rustup / npx), twice (idempotent), and failing LOUD when an install fails;
   * the env file and the account rc wiring, proven by a real ``bash -lc``.
 """
-import os
 import stat
 import subprocess
 import sys
 import tempfile
-import textwrap
 import unittest
 from pathlib import Path
 from unittest import mock
