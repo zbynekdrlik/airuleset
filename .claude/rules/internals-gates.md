@@ -286,3 +286,7 @@ until the ratchet cap, then the oldest move to `.claude/rules-reference/internal
   keeps the size-ratchet raises small. Put brand-new locks in a NEW test file (default 1000-line
   ceiling) rather than growing capped files. Also: the airuleset checkout's own
   `.claude/lane-resources.json` is resolver SOURCE 2 and overrides the default for the controller.
+  Rewording a canonical `/goal` clause (`_SEQUENTIAL_SATURATION`) moves THREE hash/byte locks —
+  `test_goal_variants_998._GOLDEN`, `test_stream_no_done_state_1128.FULL_GOLDEN` and the vs-`main`
+  compare in `test_bounce_goal_rider_1066` — grep them BEFORE the RED commit, or the GREEN commit
+  lands red.
