@@ -66,7 +66,7 @@
     "cli_webterm_tunnel.py": 205,
     "cli_webterm_zbynek.py": 154,
     "cli_work_class.py": 638,
-    "cli_worktree_sweep.py": 2002,
+    "cli_worktree_sweep.py": 102,
     "close_trigger.py": 477,
     "design_gate.py": 26,
     "discuss_close_guard.py": 270,
@@ -247,7 +247,7 @@
     "tests/test_disk_guard_root_finding.py": 298,
     "tests/test_disk_guard_uploads_861.py": 331,
     "tests/test_disk_guard_worktree_939.py": 235,
-    "tests/test_disk_hygiene_513.py": 500,
+    "tests/test_disk_hygiene_513.py": 501,
     "tests/test_dispatch_floor.py": 601,
     "tests/test_dispatch_sequential_gate_998.py": 86,
     "tests/test_doctrine_audit_1028.py": 1083,
@@ -354,7 +354,7 @@
     "tests/test_lane_overlap_1103.py": 137,
     "tests/test_lane_overlap_993.py": 295,
     "tests/test_lane_resource_cap.py": 370,
-    "tests/test_lane_target_reclaim.py": 637,
+    "tests/test_lane_target_reclaim.py": 638,
     "tests/test_launch_model_ban.py": 181,
     "tests/test_lib_presence.py": 88,
     "tests/test_local_poll_repeat_block.py": 607,
@@ -728,7 +728,13 @@
     "watchdog/usage.py": 316,
     "watchdog/wedge.py": 390,
     "watchdog/wip_ref_sweep.py": 347,
-    "working_time.py": 78
+    "working_time.py": 78,
+    "cli_worktree_common.py": 321,
+    "cli_worktree_stale.py": 724,
+    "cli_worktree_orphans.py": 137,
+    "cli_worktree_reclaim.py": 271,
+    "cli_lane_target_reclaim.py": 654,
+    "tests/test_worktree_sweep_facade_1194.py": 194
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,
@@ -749,8 +755,6 @@
     "cli_tmux_provisioning.py::apply_tmux_history_limit": 229,
     "cli_vault.py::cmd_secret": 228,
     "cli_webterm_profiles.py::zbynek_inventory": 221,
-    "cli_worktree_sweep.py::purge_merged_lane_targets": 219,
-    "cli_worktree_sweep.py::sweep_stale_worktrees": 203,
     "gates/filing/__main__.py::classify_command": 315,
     "watchdog/__init__.py::run_once": 3466,
     "watchdog/cards.py::card_reconcile": 329,
@@ -767,7 +771,9 @@
     "watchdog/queue_arrival_recheck.py::goal_queue_arrival_recheck": 316,
     "watchdog/release_gap.py::goal_release_gap_recheck": 237,
     "watchdog/stash.py::deliver_with_stash": 299,
-    "watchdog/wedge.py::prompt_wedge_check": 294
+    "watchdog/wedge.py::prompt_wedge_check": 294,
+    "cli_lane_target_reclaim.py::purge_merged_lane_targets": 219,
+    "cli_worktree_stale.py::sweep_stale_worktrees": 203
   },
   "rule_bytes": {
     ".claude/rules/airuleset-internals.md": 8192,
