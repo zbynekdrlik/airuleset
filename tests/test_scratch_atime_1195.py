@@ -248,3 +248,57 @@ class TestFullDiscoveryPath:
             proc_dir=_empty_proc(tmp_path), home=str(tmp_path))
         sess_row = next(r for r in rows if r.get("uuid") == _DEAD_UUID)
         assert sess_row["reason"] is None, sess_row
+
+
+class TestActTimeRecheckAndPlan:
+    """Review of 73b306c9: the drain deletes children one by one after the plan
+    (1876 of them in the incident), so a child read DURING the drain must be
+    refused at act time, exactly like a session that went live."""
+
+    def _child(self, tmp_path, now, atime_days):
+        uid = os.getuid()
+        sess = tmp_path / ("claude-%d" % uid) / "-home-x-devel-y" / _LIVE_UUID
+        return _mkfile(sess / "scratchpad" / "tool.sh", now, mtime_days=10,
+                       atime_days=atime_days)
+
+    def test_recheck_refuses_a_child_read_since_the_plan(self, tmp_path):
+        now = time.time()
+        child = self._child(tmp_path, now, atime_days=0.01)
+        assert cs.scratch_session_live_recheck(
+            str(child), home=str(tmp_path), now=now,
+            proc_dir=_empty_proc(tmp_path)) is True
+
+    def test_recheck_refuses_a_child_held_open(self, tmp_path):
+        now = time.time()
+        child = self._child(tmp_path, now, atime_days=10)
+        proc = Path(tmp_path) / "proc"
+        (proc / "7" / "fd").mkdir(parents=True)
+        os.symlink(str(child.resolve()), proc / "7" / "fd" / "3")
+        assert cs.scratch_session_live_recheck(
+            str(child), home=str(tmp_path), now=now, proc_dir=str(proc)) is True
+
+    def test_recheck_allows_a_child_still_unused(self, tmp_path):
+        now = time.time()
+        child = self._child(tmp_path, now, atime_days=10)
+        assert cs.scratch_session_live_recheck(
+            str(child), home=str(tmp_path), now=now,
+            proc_dir=_empty_proc(tmp_path)) is False
+
+    def test_kept_row_becomes_a_skip_action_in_the_plan(self, tmp_path):
+        import watchdog.disk_guard as dg
+        now = time.time()
+        sess = tmp_path / "sess"
+        _mkfile(sess / "scratchpad" / "merge-one.sh", now, mtime_days=10,
+                atime_days=0.1)
+        children = cs.discover_stale_scratchpad_children(
+            sess, now, proc_dir=_empty_proc(tmp_path))
+        rows = [{"path": str(sess), "reason": "live session -- kept", "uuid": _LIVE_UUID,
+                 "live": True, "size": 1, "stale_children": children}]
+        actions = dg._plan_scratch(str(tmp_path), now, scratch_rows=rows)
+        child = next(a for a in actions if a["path"].endswith("merge-one.sh"))
+        assert child["kind"] == "skip" and "atime" in child["reason"], child
+
+    def test_child_floor_covers_the_relatime_lag(self):
+        """relatime trails a read by < 24 h, so a child read at least once every
+        24 h has atime < 48 h old; the child floor must stay >= 2 days."""
+        assert cs.SCRATCHPAD_CHILD_MIN_AGE_DAYS >= 2
