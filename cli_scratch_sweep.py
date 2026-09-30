@@ -46,7 +46,7 @@ from cli_target_purge import (
     _dir_stats,
     _min_age_days_env,
 )
-from cli_scratch_use import scratch_use_stat
+from cli_scratch_use import child_in_use, scratch_use_stat
 
 CLAUDE_DIR = Path.home() / ".claude"
 
@@ -332,23 +332,10 @@ def _session_liveness(cp, cwd_key, uuid, home, now, proc_dir) -> str:
 
 def _scratch_stat(p):
     """(size_bytes, newest_mtime) with the #355 empty-tree mtime fallback --
-    shared by the whole-entry and per-session classifiers. Raises OSError on a
-    stat failure (the caller turns that into a KEEP row)."""
-    if p.is_dir():
-        size_bytes, newest_mtime = _dir_stats(p)
-        if newest_mtime is None:
-            # #355 adversarial-review finding 1 (MAJOR, live-confirmed on
-            # dev1): the harness pre-creates <cwd>/<session>/scratchpad EMPTY
-            # at session start, before a live session has written anything --
-            # an empty tree must NEVER read as "infinitely stale" (unlike
-            # #315's target/ purge, where an empty target/ genuinely has zero
-            # bytes to protect). Fall back to the DIRECTORY's OWN mtime so a
-            # tree created seconds ago stays protected by the age floor.
-            newest_mtime = os.lstat(p).st_mtime
-    else:
-        st = os.lstat(p)
-        size_bytes, newest_mtime = st.st_size, st.st_mtime
-    return size_bytes, newest_mtime
+    the mtime half of the ONE scratch walk, ``cli_scratch_use.scratch_use_stat``
+    (#1195 item 5). Callers reject a symlink first. Raises OSError on a stat
+    failure (the caller turns that into a KEEP row)."""
+    return scratch_use_stat(p)[:2]
 
 
 SCRATCHPAD_CHILD_MIN_AGE_DAYS = 2
@@ -453,11 +440,16 @@ def scratch_session_live_recheck(path, home=None, now=None, proc_dir=None) -> bo
     (a `claude --resume <uuid>`) since plan time. A path that is NOT a
     per-session uuid dir returns False (a whole-cwd-key / loose-file / wt-* /
     tmp-stray delete is out of scope here and proceeds). Fail-safe: for a uuid
-    path, any error -> True (KEEP)."""
+    path, any error -> True (KEEP). #1195 item 5: a `<uuid>/scratchpad/<child>`
+    is refused when it was read/written within the child floor or is held open
+    since the plan (`cli_scratch_use.child_in_use`)."""
     import time as _time
     now = _time.time() if now is None else now
     try:
         p = Path(path)
+        if p.parent.name == "scratchpad" and _SESSION_UUID_RE.match(p.parent.parent.name):
+            return child_in_use(p, now, SCRATCHPAD_CHILD_MIN_AGE_DAYS * 86400,
+                                lambda c: _target_in_live_use(c, proc_dir=proc_dir))
         if not _SESSION_UUID_RE.match(p.name):
             return False
     except Exception:

@@ -2000,7 +2000,7 @@ def discover_stale_tmp_test_dirs(tmp_dir="/tmp", now=None,
     The dir's ``st_mtime`` is bumped whenever entries are added/removed FROM
     the dir (e.g. a background process creating temp files), making a genuinely
     stale dir appear fresh. The recursive walk matches the safety discipline of
-    ``discover_claude_scratch_candidates`` (``_scratch_stat`` → ``_dir_stats``).
+    ``discover_claude_scratch_candidates`` (``_scratch_stat`` → ``scratch_use_stat``).
     """
     now = time.time() if now is None else now
     uid = os.getuid() if uid is None else uid
