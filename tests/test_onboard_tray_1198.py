@@ -623,5 +623,46 @@ class TestTrayReviewRound4(unittest.TestCase):
             self.assertTrue(ob._tray.tray_check(str(link), run=FakeRunner()))
 
 
+# --------------------------------------------------------------------------- #
+# 7) Review round 5: the marker regex, the remote opt-out read, the docs.
+# --------------------------------------------------------------------------- #
+class TestTrayReviewRound5(unittest.TestCase):
+    def test_malformed_markers_are_no_opt_out(self):
+        for text in ("<!-- airuleset:tray=n/a --->",
+                     "<!-- airuleset:tray=n/a > -->",
+                     "<!-- airuleset:tray=n/a x\n<!-- other -->"):
+            with self.subTest(text=text):
+                self.assertFalse(ob._tray.opted_out("/x", claude_md=text))
+
+    def test_marker_regex_is_linear_on_many_unclosed_markers(self):
+        import time
+        text = "<!-- airuleset:tray=n/a reason " * 20000
+        t0 = time.monotonic()
+        self.assertFalse(ob._tray.opted_out("/x", claude_md=text))
+        self.assertLess(time.monotonic() - t0, 2.0)
+
+    def test_remote_opt_out_reads_claude_md_over_ssh(self):
+        with TemporaryDirectory() as d, mock.patch(
+                "cli_onboard_exec._local_hostname",
+                return_value="test-box-1198"):
+            _write(d, "CLAUDE.md", NA_MARKER)
+            run = SshShellRunner()
+            self.assertTrue(ob._tray.opted_out(d, host="dev2", run=run))
+            self.assertEqual(run.local_calls, [])
+            self.assertEqual(len(run.ssh_calls), 1)
+            self.assertIn("CLAUDE.md", run.ssh_calls[0])
+
+    def test_missing_tray_detail_names_the_opt_out(self):
+        with TemporaryDirectory() as d:
+            _rust_web_single(d)
+            row = ob._tray.audit_drift(d, run=FakeRunner(), claude_md="")
+            self.assertEqual(row["kind"], "missing-tray")
+            self.assertIn("airuleset:tray=n/a", row["detail"])
+
+    def test_onboard_skill_names_the_opt_out(self):
+        skill = (REPO / "skills" / "onboard-project" / "SKILL.md").read_text()
+        self.assertIn("airuleset:tray=n/a", skill)
+
+
 if __name__ == "__main__":
     unittest.main()
