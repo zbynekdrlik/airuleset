@@ -70,18 +70,21 @@ fi
 # anywhere proved useless (review rounds 1-4). The owner's identity must be LINKED to
 # the commits INSIDE ONE CLAUSE (no . ? ! between; grep is per line). A missed phrasing
 # only means the question gets asked; install already sets the identity. Blocks when:
-#   GI_LINKED  — commit(s) … carry/authored/under/leaked/nesú … a personal/student/
-#                university e-mail or name, or "my e-mail/Gmail"; or commit(s) … show/
+#   GI_LINKED  — PLURAL commits (history, never one commit's content: GI_HIST) …
+#                carry/authored/under/leaked/nesú … a personal/student/
+#                university e-mail or name, or "my e-mail/Gmail"; or commits … show/
 #                with/keep/majú/s … "my/môj/mojím + personal|student|… + e-mail|name" or
 #                an AUTHOR e-mail ("personal author e-mail", "osobný e-mail autora").
-#                Commit CONTENT never counts (review round 5): "commit the config with
-#                Gmail", "template with my address", "show the student email" pass;
+#                Commit CONTENT is not the author (review rounds 5-6): "commit the config
+#                with Gmail", "show the student email", "a commit leaked my e-mail into
+#                config.py" pass;
 #   or GI_AUTHID (author/committer e-mail|identity, e-mail/identita autora, git identity,
-#                noreply, user.email) within one clause of "commit", plus a GI_CONTEXT
-#                (old/past commits, a public repo, a rewrite/change, from now on/odteraz);
+#                noreply e-mail/identity, user.email) within one clause of "commit", plus a GI_CONTEXT
+#                (old/past commits, a public repo, a rewrite, from now on/odteraz);
 #   or GI_WHICH ("which e-mail/identity should … commit") plus from now on/odteraz;
 #   and never GI_EXCLUDE (secrets, customer/client/GDPR/fixture data, bots, CI, signing,
-#                external developers, his/her/their): "never rewrite" is wrong there.
+#                external developers, his/her/their, a value IN/INTO a file): "never
+#                rewrite" is wrong there.
 # LC_ALL=C.UTF-8 so -i folds Slovak capitals (STARÉ, MÔJ) in any caller locale.
 GI_ADJ='(personal|private|student|university|osobn[^ ]*|súkromn[^ ]*|študentsk[^ ]*|univerzitn[^ ]*)'
 GI_POSS='(my|môj|moj[^ ]*)'
@@ -89,13 +92,14 @@ GI_OWN="$GI_POSS +$GI_ADJ +(e-?mail[^ ]*|name|meno|menom)|$GI_ADJ +(author|autor
 GI_IDENT="$GI_OWN|$GI_ADJ +(e-?mail[^ ]*|name|meno|menom)|$GI_POSS +(e-?mail[^ ]*|gmail)"
 GI_LINK_AUTH='(carry|carries|carried|nesú|nesie|authored|under|pod|leak|leaks|leaked)'
 GI_LINK_SOFT='(show|shows|showing|majú|obsahujú|with|keep|keeps|ostať|ostanú|s)'
-GI_LINKED='\bcommit[^.?!]{0,25} '"$GI_LINK_AUTH"' [^.?!]{0,30}('"$GI_IDENT"')|\bcommit[^.?!]{0,25} '"$GI_LINK_SOFT"' [^.?!]{0,30}('"$GI_OWN"')'
-GI_AUTHID='\b(author|committer) +(e-?mail[^ ]*|identit[^ ]*)|\be-?mail[^ ]* +autora|\bidentit[^ ]* +autora|\bgit +identit[^ ]*|\bnoreply\b|user\.email'
+GI_HIST='\bcommit(s|y|ov|och|mi|ami)\b'
+GI_LINKED="$GI_HIST"'[^.?!]{0,25} '"$GI_LINK_AUTH"' [^.?!]{0,30}('"$GI_IDENT"')|'"$GI_HIST"'[^.?!]{0,25} '"$GI_LINK_SOFT"' [^.?!]{0,30}('"$GI_OWN"')'
+GI_AUTHID='\b(author|committer) +(e-?mail[^ ]*|identit[^ ]*)|\be-?mail[^ ]* +autora|\bidentit[^ ]* +autora|\bgit +identit[^ ]*|\bnoreply +(e-?mail|identit[^ ]*|address|adres[ua])|users\.noreply|user\.email'
 GI_AUTHNEAR='\bcommit[^.?!]{0,60}('"$GI_AUTHID"')|('"$GI_AUTHID"')[^.?!]{0,60}\bcommit'
 GI_CONTEXT='\b(old|older|past|previous|earlier|existing) +commits?\b|\bstar(é|ých|ych|e|ej|ú|ými) +commit|\bpublic +(git +)?(repo|github)|\bverejn[^ ]* +(repo|rep[ae]|repozit)|\brewrite\b|prepísať|prepisovať|from now on|going forward|odteraz|force.?push'
 GI_WHICH='\b(which|what|aký|akým|akú|ktorý|ktorým|ktorú) +(e-?mail|identit[^ ]*) +(should|shall|do|mám|by|will|must|to)\b[^.?!]{0,40}\bcommit'
 GI_FUTURE='from now on|going forward|odteraz'
-GI_EXCLUDE='secret|token|password|passwd|heslo|credential|api.?key|private key|kľúč|kluc|customer|client|zákazn|klient|gdpr|fixture|test data|testovac|\bbots?\b|\b(ci|cd)\b|github actions|pipeline|\bsign(ing|ed)?\b|gpg|external|extern|third.?party|contributor|another developer|iný vývojár|\b(his|her|their)\b|readme|phone|telef|dotfile|seed data|template|šablón'
+GI_EXCLUDE='secret|token|password|passwd|heslo|credential|api.?key|private key|kľúč|kluc|customer|client|zákazn|klient|gdpr|fixture|test data|testovac|\bbots?\b|\b(ci|cd)\b|github actions|pipeline|\bsign(ing|ed)?\b|gpg|external|extern|third.?party|contributor|another developer|iný vývojár|\b(his|her|their)\b|\b(in|into|v|do) +(the +)?[^ ]*\.[a-z0-9]{1,6}\b|\b(file|header|súbor|súbore)\b|phone|telef|dotfile|seed data|template|šablón'
 gi_has() { LC_ALL=C.UTF-8 grep -qiE "$1" <<<"$TOOL_INPUT"; }
 if ! gi_has "$GI_EXCLUDE" \
     && { gi_has "$GI_LINKED" \
