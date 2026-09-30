@@ -75,12 +75,12 @@ def _rust_web_workspace(root, with_tray_crate=False):
     members = '"crates/server", "crates/web"'
     if with_tray_crate:
         members += ', "crates/fohmixer-tray"'
+    # axum lives ONLY in crates/server, so the gap proves crates/* is read.
     _write(root, "Cargo.toml", "[workspace]\nmembers = [%s]\n"
-           "resolver = \"2\"\n\n[workspace.dependencies]\n"
-           "axum = \"0.8\"\n" % members)
+           "resolver = \"2\"\n" % members)
     _write(root, "crates/server/Cargo.toml",
            "[package]\nname = \"fohmixer-server\"\nversion = \"0.1.0\"\n\n"
-           "[dependencies]\naxum = { workspace = true }\n")
+           "[dependencies]\naxum = \"0.8\"\n")
     _write(root, "crates/web/Cargo.toml",
            "[package]\nname = \"fohmixer-web\"\nversion = \"0.1.0\"\n\n"
            "[dependencies]\nleptos = \"0.8\"\n")
@@ -256,6 +256,143 @@ class TestTrayAudit(unittest.TestCase):
             drift = ob.audit_project(self._entry(d))
             kinds = {x["kind"] for x in drift}
             self.assertNotIn("missing-tray", kinds)
+
+
+
+# --------------------------------------------------------------------------- #
+# 4) Review round 1: real fleet layouts, wider name sets, the remote path.
+# --------------------------------------------------------------------------- #
+def _songplayer_like(root, tauri_features='["tray-icon"]'):
+    """songplayer / restreamer layout: axum in crates/sp-server, a Trunk UI in
+    sp-ui/, and the tray in src-tauri/ (outside crates/, excluded from the
+    workspace) as the tauri `tray-icon` feature."""
+    _write(root, "Cargo.toml", "[workspace]\nmembers = [\"crates/sp-server\"]\n"
+           "exclude = [\"src-tauri\"]\n")
+    _write(root, "crates/sp-server/Cargo.toml",
+           "[package]\nname = \"sp-server\"\n\n[dependencies]\naxum = \"0.8\"\n")
+    _write(root, "sp-ui/Trunk.toml", "[build]\n")
+    _write(root, "sp-ui/index.html", "<html></html>\n")
+    _write(root, "src-tauri/Cargo.toml",
+           "[package]\nname = \"songplayer\"\n\n[dependencies]\n"
+           "tauri = { version = \"2\", features = %s }\n" % tauri_features)
+
+
+class TestTrayReviewRound1(unittest.TestCase):
+    def test_tauri_tray_icon_feature_outside_crates_counts(self):
+        with TemporaryDirectory() as d:
+            _songplayer_like(d)
+            step, _run = _foundation(d)
+            self.assertNotIn("tray", step["detail"])
+
+    def test_tauri_v1_system_tray_feature_counts(self):
+        with TemporaryDirectory() as d:
+            _songplayer_like(d, tauri_features='["system-tray"]')
+            step, _run = _foundation(d)
+            self.assertNotIn("tray", step["detail"])
+
+    def test_tauri_without_tray_feature_is_still_a_gap(self):
+        with TemporaryDirectory() as d:
+            _songplayer_like(d, tauri_features='["devtools"]')
+            step, _run = _foundation(d)
+            self.assertIn("tray", step["detail"])
+
+    def test_workspace_member_outside_crates_is_read(self):
+        with TemporaryDirectory() as d:
+            _write(d, "Cargo.toml", "[workspace]\nmembers = [\"server\"]\n")
+            _write(d, "server/Cargo.toml", "[package]\nname = \"server\"\n\n"
+                   "[dependencies]\nsalvo = \"0.70\"\n")
+            _write(d, "server/static/app.js", "//\n")
+            step, _run = _foundation(d)
+            self.assertIn("tray", step["detail"])
+
+    def test_tray_crate_outside_crates_counts(self):
+        with TemporaryDirectory() as d:
+            _rust_web_workspace(d)
+            _write(d, "apps/fohmixer-tray/Cargo.toml",
+                   "[package]\nname = \"fohmixer-tray\"\n")
+            step, _run = _foundation(d)
+            self.assertNotIn("tray", step["detail"])
+
+    def test_more_tray_crates_count(self):
+        for dep in ("trayicon", "systray"):
+            with self.subTest(dep=dep), TemporaryDirectory() as d:
+                _rust_web_single(d, extra_deps='%s = "0.1"\n' % dep)
+                step, _run = _foundation(d)
+                self.assertNotIn("tray", step["detail"])
+
+    def test_more_http_servers_count(self):
+        for dep in ("axum-server", "salvo", "tide", "ntex"):
+            with self.subTest(dep=dep), TemporaryDirectory() as d:
+                _write(d, "Cargo.toml", "[package]\nname = \"x\"\n\n"
+                       "[dependencies]\n%s = \"1\"\n" % dep)
+                _write(d, "static/index.html", "<html></html>\n")
+                step, _run = _foundation(d)
+                self.assertIn("tray", step["detail"])
+
+    def test_web_assets_at_depth_four_are_found(self):
+        with TemporaryDirectory() as d:
+            _write(d, "Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\n")
+            _write(d, "crates/srv/Cargo.toml", "[package]\nname = \"srv\"\n\n"
+                   "[dependencies]\naxum = \"0.8\"\n")
+            _write(d, "crates/x-web/assets/index.html", "<html></html>\n")
+            step, _run = _foundation(d)
+            self.assertIn("tray", step["detail"])
+
+    def test_build_output_never_counts_as_a_manifest(self):
+        with TemporaryDirectory() as d:
+            _rust_web_single(d)
+            # a vendored/built tray crate under target/ is not the project's tray
+            _write(d, "target/foo-tray/Cargo.toml", "[package]\nname = \"foo-tray\"\n")
+            step, _run = _foundation(d)
+            self.assertIn("tray", step["detail"])
+
+
+class SshShellRunner:
+    """A remote box modeled by the local tmp tree: every ssh payload runs via
+    `sh -c` locally; any NON-ssh, non-gh call is recorded as a local access."""
+
+    def __init__(self):
+        self.ssh_calls, self.local_calls = [], []
+
+    def __call__(self, argv, **kw):
+        if argv and argv[0] == "gh":
+            return subprocess.CompletedProcess(argv, 0, "[]", "")
+        if argv and argv[0] == "ssh":
+            self.ssh_calls.append(argv[-1])
+            return subprocess.run(["sh", "-c", argv[-1]], **kw)
+        self.local_calls.append(list(argv))
+        return subprocess.run(argv, **kw)
+
+
+class TestTrayRemote(unittest.TestCase):
+    def setUp(self):
+        from unittest import mock
+        p = mock.patch("cli_onboard_exec._local_hostname",
+                       return_value="test-box-1198")
+        p.start()
+        self.addCleanup(p.stop)
+
+    def test_remote_check_reads_over_ssh_only_and_batches(self):
+        with TemporaryDirectory() as d:
+            _rust_web_workspace(d)
+            for i in range(5):
+                _write(d, "crates/extra%d/Cargo.toml" % i,
+                       "[package]\nname = \"extra%d\"\n" % i)
+            run = SshShellRunner()
+            reason = ob._tray.rust_web_tray_gap(d, host="dev2", run=run)
+            self.assertTrue(reason)
+            self.assertIn("axum", reason)
+            self.assertEqual(run.local_calls, [])
+            # manifests in one call + the asset probe: never one call per crate
+            self.assertLessEqual(len(run.ssh_calls), 2, run.ssh_calls)
+
+    def test_remote_non_rust_project_costs_one_call(self):
+        with TemporaryDirectory() as d:
+            _write(d, "package.json", "{}\n")
+            run = SshShellRunner()
+            self.assertIsNone(ob._tray.rust_web_tray_gap(d, host="dev2", run=run))
+            self.assertEqual(run.local_calls, [])
+            self.assertEqual(len(run.ssh_calls), 1, run.ssh_calls)
 
 
 if __name__ == "__main__":
