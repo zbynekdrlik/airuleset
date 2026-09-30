@@ -2663,12 +2663,12 @@ def _plan_stale_agent_worktrees(home, now, wt_cache=False):
     """#968 — stale agent worktrees (every box class, before journal).
     #1067 1g: ``wt_cache`` (``not dry_run``) = the guard dir's verdict cache;
     #1195: a real pass also records the per-repo unreadable-liveness streak."""
-    from cli_lane_live_gate import LiveLaneGate
-    from watchdog import disk_guard_worktrees as dgw, disk_guard_wt_cache as wtc
-    from watchdog import disk_guard_lane_unknown as dgl
-    cache = _guard_dir(home) / wtc.VERDICTS_NAME if wt_cache else None
-    gate = LiveLaneGate(home=home, now=now)
+    gate = None
     try:
+        from cli_lane_live_gate import LiveLaneGate
+        from watchdog import disk_guard_worktrees as dgw, disk_guard_wt_cache as wtc
+        cache = _guard_dir(home) / wtc.VERDICTS_NAME if wt_cache else None
+        gate = LiveLaneGate(home=home, now=now)
         return dgw.discover_stale_agent_worktrees(home=home, now=now, cache_path=cache,
                                                   live_gate=gate)
     except Exception as e:
@@ -2676,7 +2676,8 @@ def _plan_stale_agent_worktrees(home, now, wt_cache=False):
                  "kind": "skip",
                  "reason": "stale-agent-worktree discovery error: %r" % e}]
     finally:
-        if wt_cache:
+        if wt_cache and gate is not None:
+            from watchdog import disk_guard_lane_unknown as dgl
             dgl.record_pass(gate.outcomes(), home=home, now=now)
 
 

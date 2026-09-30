@@ -18,6 +18,12 @@ It RAISES (never a silent return), so a direct call fails its test. An
 `except Exception` wrapper such as the cmd_install step still catches it, but
 by then nothing has been read, walked or written.
 
+Scope (the decided design: the real HOME DEFAULTS): a `home` BELOW the real
+home (e.g. `~/devel`) is not refused, because a TMPDIR may legitimately sit
+under the home. The push gate's `unittest discover` pass never sets
+`PYTEST_CURRENT_TEST`, so this guard is inert there; that pass runs under its
+own per-run isolated HOME (#972), which covers it.
+
 Its own leaf, not `cli_worktree_common`: the #1194 facade lock pins the split
 leaves to exactly the pre-split names. Stdlib only at module level.
 """

@@ -2669,10 +2669,15 @@ def cmd_status(args):
     # #1195: + any repo whose lane liveness stayed unreadable >= 3 drain passes. ---
     try:
         from watchdog.disk_guard import root_guard_status_row
-        from watchdog.disk_guard_lane_unknown import status_lines as _lane_unknown
-        print("\n" + "\n".join([root_guard_status_row()] + _lane_unknown()))
+        print("\n" + root_guard_status_row())
     except Exception as e:
         print(f"\nroot disk-guard: error ({e})", file=sys.stderr)
+    try:
+        from watchdog.disk_guard_lane_unknown import status_lines as _lane_unknown
+        for _ln in _lane_unknown():
+            print(_ln)
+    except Exception as e:
+        print(f"lane liveness: error ({e})", file=sys.stderr)
 
     # --- Concurrency mode/role (#998) ---
     try:

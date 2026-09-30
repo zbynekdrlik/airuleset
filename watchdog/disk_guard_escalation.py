@@ -63,7 +63,7 @@ def running_under_pytest():
     """True under pytest (``PYTEST_CURRENT_TEST``, set by pytest for every
     test and never in production). The one detection every "refuse the real
     default under pytest" guard reuses: the filer below, and the worktree
-    reclaimers' real-home refusal (#1195, ``cli_worktree_common``)."""
+    reclaimers' real-home refusal (#1195, ``cli_reclaim_guard``)."""
     return bool(os.environ.get("PYTEST_CURRENT_TEST"))
 
 

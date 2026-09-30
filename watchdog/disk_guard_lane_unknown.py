@@ -15,11 +15,15 @@ scratch on every 60 s poll, while this one changes only on a drain pass.
 Per repo, per pass:
 
 * evidence unreadable → ``passes`` + 1; ``since`` stays the first
-  unreadable pass of the streak;
+  unreadable pass of the streak. A second record in the SAME poll (the quota
+  pass and the fs pass of ``run_drain_passes`` share one ``now``) is the same
+  pass: it never increments, and a readable read cannot reset it;
 * evidence readable → the streak is dropped (reset);
 * not consulted (every ``agent-*`` worktree was locked or in live use, so the
   gate was never asked) → unchanged, it is no evidence either way;
-* the checkout no longer exists → dropped.
+* the repo has no ``agent-*`` worktree left, or the entry was not refreshed
+  for :data:`STALE_S` (pressure dropped, so the rung stopped running) →
+  dropped, so an old alert never pins ``status``.
 
 From :data:`ALERT_PASSES` consecutive passes on, ``airuleset.py status``
 prints ``lane liveness unreadable for <repo> since <ts>`` next to the
@@ -37,9 +41,10 @@ from pathlib import Path
 STATE_NAME = "lane-liveness-unknown.json"
 # One or two unreadable passes can be a read race (a transcript rotated or
 # deleted mid-walk is a count_live_workers stat warning). Three consecutive
-# drain passes span >= 3 drain cadences (>= 3 min at the every-poll >= 95 %
-# tier, ~30 min at the 600 s tier), which is a persistent condition.
+# drain passes span two drain intervals (>= 2 min at the every-poll >= 95 %
+# tier, ~20 min at the 600 s tier), which is a persistent condition.
 ALERT_PASSES = 3
+STALE_S = 24 * 3600
 _ERR_MAX = 200
 
 
@@ -66,20 +71,38 @@ def _passes(entry):
     return n if ok else None
 
 
-def update(prior, outcomes, now, exists_fn=os.path.isdir):
+def has_agent_worktree(repo):
+    """True when ``<repo>/.claude/worktrees`` still holds an ``agent-*`` dir."""
+    try:
+        with os.scandir(os.path.join(repo, ".claude", "worktrees")) as it:
+            return any(e.name.startswith("agent-") and e.is_dir() for e in it)
+    except OSError:
+        return False
+
+
+def _fresh(entry, now):
+    last = entry.get("last")
+    return isinstance(last, (int, float)) and now - last <= STALE_S
+
+
+def update(prior, outcomes, now, exists_fn=has_agent_worktree):
     """The new ``{repo: {passes, since, last, err}}`` from ``prior`` and one
     pass's ``{repo: err_or_None}`` outcomes. Pure apart from ``exists_fn``."""
+    prior = {r: e for r, e in (prior or {}).items() if _passes(e)}
     repos = {}
-    for repo, entry in (prior or {}).items():
-        if repo not in outcomes and _passes(entry) and exists_fn(repo):
+    for repo, entry in prior.items():
+        same_poll = entry.get("last") == now
+        if same_poll or (repo not in outcomes and _fresh(entry, now) and exists_fn(repo)):
             repos[repo] = entry
     for repo, err in outcomes.items():
         if not err:
             continue
-        entry = (prior or {}).get(repo)
-        n = _passes(entry)
-        repos[repo] = {"passes": (n or 0) + 1,
-                       "since": entry["since"] if n else now,
+        entry = prior.get(repo)
+        if entry and entry.get("last") == now:
+            repos[repo] = dict(entry, err=str(err)[:_ERR_MAX])
+            continue
+        repos[repo] = {"passes": entry["passes"] + 1 if entry else 1,
+                       "since": entry["since"] if entry else now,
                        "last": now, "err": str(err)[:_ERR_MAX]}
     return repos
 
@@ -109,15 +132,17 @@ def _iso(ts):
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
 
 
-def status_lines(home=None, path=None):
+def status_lines(home=None, path=None, now=None):
     """``airuleset.py status`` lines for every repo at or past
-    :data:`ALERT_PASSES`; empty when none (or the file is missing/corrupt)."""
+    :data:`ALERT_PASSES` and refreshed within :data:`STALE_S`; empty when none
+    (or the file is missing/corrupt)."""
     try:
+        now = time.time() if now is None else now
         repos = _load(path or state_path(home))
         out = []
         for repo, e in sorted(repos.items()):
             n = _passes(e)
-            if n and n >= ALERT_PASSES:
+            if n and n >= ALERT_PASSES and _fresh(e, now):
                 last = e.get("last")
                 out.append("lane liveness unreadable for %s since %s "
                            "(%d consecutive drain passes%s; agent worktrees kept)"
