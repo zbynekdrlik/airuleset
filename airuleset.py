@@ -1558,6 +1558,7 @@ def cmd_install(args):
     # --- Box class marker (#778, read by Job 38 + the heavy-build hook) + #1174 nudge profile.
     _write_box_class_marker()
     _nudge_profile_install_step()
+    _git_identity_install_step()  # #1196: public repos → owner's noreply identity
 
     # --- #971: shared fleet data dir for cross-account consumers (claudy).
     # Created only on the controller (box-class `controller`) when passwordless
@@ -11209,6 +11210,16 @@ def _nudge_profile_install_step():
     live set; a runtime deviation is kept and printed). Never raises."""
     import cli_nudge_profiles
     return cli_nudge_profiles.install_step(home=str(CLAUDE_DIR.parent))
+
+
+def _git_identity_install_step():
+    """#1196: every checkout whose origin is a PUBLIC GitHub repo gets the
+    owner's noreply identity as its LOCAL user.name/user.email (global config,
+    private repos and history untouched). Never raises."""
+    import cli_git_identity
+    home = str(CLAUDE_DIR.parent)
+    return cli_git_identity.install_step(
+        home=home, roots=lambda: _checkout_roots(home))
 
 
 def _nudges_fleet(verb, runner=None):

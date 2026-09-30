@@ -57,7 +57,7 @@ FOUNDATION_VERSION_TITLE = "foundation: version label na dashboarde"
 
 STEP_ORDER = [
     "git_init", "gitignore", "claude_md", "remote", "branches",
-    "foundation_tickets", "notification_ticket", "registry",
+    "foundation_tickets", "notification_ticket", "git_identity", "registry",
 ]
 
 
@@ -82,6 +82,7 @@ from cli_onboard_exec import (  # noqa: E402
     _write_file as _write_file,
 )
 import cli_accounts  # noqa: E402  (#1184 per-project account gate)
+import cli_git_identity  # noqa: E402  (#1196 public repo → noreply identity)
 
 
 # --------------------------------------------------------------------------- #
@@ -834,6 +835,7 @@ def onboard_project(path, host=None, name=None, overrides=None,
         step_foundation_tickets(target_path, name, host, run, dry_run,
                                 stack=stack),
         step_notification_ticket(target_path, name, host, run, dry_run),
+        cli_git_identity.onboard_step(target_path, host, run, dry_run),
     ]
     entry = build_registry_entry(orig_path, target_path, host, name,
                                  eff_overrides, existing,
