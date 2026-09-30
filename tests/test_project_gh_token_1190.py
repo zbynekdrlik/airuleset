@@ -668,7 +668,7 @@ class TestReviewMint(_Base):
                 raise http.client.IncompleteRead(b"")
         rc, out, err, gh, ssh = self.mint(gh=Broken())
         self.assertEqual(rc, 1)
-        self.assertIn("IncompleteRead", err)
+        self.assertIn("unreachable (IncompleteRead)", err)   # _api maps it
         state = json.loads((self.state / "fohmixer.json").read_text())
         self.assertFalse(state["ok"])
         self.assertIn("IncompleteRead", state["error"])
