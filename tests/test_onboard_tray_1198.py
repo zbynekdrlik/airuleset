@@ -22,6 +22,7 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
@@ -555,6 +556,71 @@ class TestTrayReviewRound2(unittest.TestCase):
         for name in ("tray-icon", "tray-item", "ksni", "trayicon", "systray",
                      "system-tray", "tauri"):
             self.assertIn(name, text, name)
+
+
+# --------------------------------------------------------------------------- #
+# 6) Review round 4: the n/a marker, -path teeth, a symlinked root.
+# --------------------------------------------------------------------------- #
+NA_MARKER = "<!-- airuleset:tray=n/a server-only VPS app -->\n"
+
+
+class TestTrayReviewRound4(unittest.TestCase):
+    def test_na_marker_silences_the_audit(self):
+        with TemporaryDirectory() as d:
+            init_repo(d, remote="https://github.com/zbynekdrlik/fohmixer.git")
+            _rust_web_single(d)
+            _write(d, "CLAUDE.md", "## Playbook router\n" + NA_MARKER)
+            drift = ob.audit_project({"name": "fohmixer", "host": "dev1",
+                                      "path": d, "default_branch": "main"})
+            self.assertNotIn("missing-tray", {x["kind"] for x in drift})
+
+    def test_na_marker_stops_the_foundation_ticket(self):
+        with TemporaryDirectory() as d:
+            _rust_web_single(d)
+            _write(d, "CLAUDE.md", NA_MARKER)
+            step, _run = _foundation(d)
+            self.assertNotIn("tray", step["detail"])
+
+    def test_marker_must_name_a_reason(self):
+        # a bare marker with no reason is not an opt-out
+        with TemporaryDirectory() as d:
+            _rust_web_single(d)
+            _write(d, "CLAUDE.md", "<!-- airuleset:tray=n/a -->\n")
+            step, _run = _foundation(d)
+            self.assertIn("tray", step["detail"])
+
+    def test_ticket_body_names_the_marker(self):
+        body = ob._tray.foundation_tray_body("x", "reason")
+        self.assertIn("airuleset:tray=n/a", body)
+
+    def test_glob_special_root_keeps_the_src_module_rule(self):
+        # glob.escape(root) is load-bearing: `[a]` in the root must not turn
+        # the src/ exclusion into a pattern that matches nothing
+        with TemporaryDirectory() as base:
+            d = str(Path(base) / "br[a]ck*et s?p")
+            _write(d, "Cargo.toml", AXUM_PKG)
+            _write(d, "src/web/mod.rs", "\n")
+            self.assertIsNone(ob._tray.tray_check(d, run=FakeRunner()))
+            with mock.patch("cli_onboard_exec._local_hostname",
+                            return_value="test-box-1198"):
+                self.assertIsNone(ob._tray.tray_check(d, host="dev2",
+                                                      run=SshShellRunner()))
+
+    def test_nested_crate_src_module_is_not_an_asset(self):
+        with TemporaryDirectory() as d:
+            _write(d, "Cargo.toml", "[workspace]\nmembers = [\"crates/srv\"]\n")
+            _write(d, "crates/srv/Cargo.toml", "[package]\nname = \"srv\"\n\n"
+                   "[dependencies]\naxum = \"0.8\"\n")
+            _write(d, "crates/srv/src/web/mod.rs", "\n")
+            self.assertIsNone(ob._tray.tray_check(d, run=FakeRunner()))
+
+    def test_symlinked_project_root_is_read(self):
+        with TemporaryDirectory() as base:
+            real = Path(base) / "real"
+            _rust_web_single(real)
+            link = Path(base) / "link"
+            link.symlink_to(real)
+            self.assertTrue(ob._tray.tray_check(str(link), run=FakeRunner()))
 
 
 if __name__ == "__main__":
