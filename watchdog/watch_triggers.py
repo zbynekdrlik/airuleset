@@ -61,7 +61,6 @@ import copy
 import datetime
 import json
 import os
-import time
 
 NUDGE_KIND = "watch-trigger"
 STEER = "watch"
@@ -401,8 +400,10 @@ def _readiness(window, panes, *, projects_dir, find_transcript, capture,
                in_mode, at_idle, busy_waiting, turn_live, recent_human,
                gate_ok, nudges_enabled, handled, state, now):
     """`(ready, why, pid, sid, tpath)` for the window's OWN pane (never a
-    sub-pane): every gate a sibling idle-pane rider applies, cheapest first."""
+    sub-pane): every gate a sibling idle-pane rider applies, cheapest first —
+    the ONE shared set `watchdog.idle_pane.pane_ready` (#1176 reuses it)."""
     import cli_concurrency
+    from watchdog import idle_pane
     if nudges_enabled is not None and not nudges_enabled(NUDGE_KIND):
         return False, "kind-off", None, None, None
     own = [(pid, cwd) for pid, cwd in panes
@@ -413,28 +414,13 @@ def _readiness(window, panes, *, projects_dir, find_transcript, capture,
     if len(own) > 1:
         return False, "ambiguous-pane(%d)" % len(own), None, None, None
     pid, cwd = own[0]
-    tinfo = find_transcript(projects_dir, cwd)
-    tpath = tinfo[0] if isinstance(tinfo, (tuple, list)) else tinfo
-    if not tpath:
-        return False, "no-transcript", pid, None, None
-    sid = os.path.basename(str(tpath))
-    sid = sid[:-len(".jsonl")] if sid.endswith(".jsonl") else sid
-    if handled is not None and sid in handled:
-        return False, "handled-this-sweep", pid, sid, tpath
-    if in_mode(pid):
-        return False, "in-mode", pid, sid, tpath
-    captured = capture(pid)
-    if not at_idle(captured):
-        return False, "busy-pane", pid, sid, tpath
-    if busy_waiting(captured):
-        return False, "busy-waiting", pid, sid, tpath   # waiting on its own worker
-    if recent_human(sid, cwd, tpath, pid):
-        return False, "recent-human", pid, sid, tpath
-    if turn_live(tpath):
-        return False, "live-turn", pid, sid, tpath      # #1110 transcript liveness
-    if not gate_ok(state, sid, NUDGE_KIND, now):
-        return False, "floor", pid, sid, tpath
-    return True, "", pid, sid, tpath
+    ready, why, sid, tpath = idle_pane.pane_ready(
+        pid, cwd, NUDGE_KIND, projects_dir=projects_dir,
+        find_transcript=find_transcript, capture=capture, in_mode=in_mode,
+        at_idle=at_idle, busy_waiting=busy_waiting, turn_live=turn_live,
+        recent_human=recent_human, gate_ok=gate_ok, handled=handled,
+        state=state, now=now)
+    return ready, why, pid, sid, tpath
 
 
 def _set(st, sid_key, slot_ts, status, why, now, logs, label, dry_run):
@@ -593,51 +579,22 @@ def watch_trigger_job(now, state, panes, *, windows, projects_dir,
 
 def run_job(now, state, panes, *, run, sleep_fn, projects_dir, dry_run=False,
             handled=None, budget_left=None):
-    """The production wiring: the real primitives, resolved at call time
-    through the `watchdog` package (the back-reference convention, so every
-    `watchdog.<name>` test seam stays effective). The delivery closure is the
-    sibling-rider contract: janitor watch mark, journal + outcome threading, and
-    a skipped confirm wait when the sweep budget is short."""
+    """The production wiring: the real primitives through the ONE shared
+    `watchdog.idle_pane.production_deps` (the sibling-rider contract: janitor
+    watch mark/clear, journal + outcome threading, a skipped confirm wait when
+    the sweep budget is short), resolved at call time so every
+    `watchdog.<name>` test seam stays effective."""
     import watchdog
-    from watchdog import goal as _goal
-    from watchdog import goal_turn_liveness as _live
-    from watchdog import nudge_gate
-    from watchdog import ops_wait_recheck as _owr
-    from watchdog import queue_arrival_recheck as _qa
+    from watchdog import idle_pane
     jl = []
-
-    def _deliver(pid, tpath, text):
-        watchdog._janitor_mark_watch(state, pid, now)
-        left = budget_left() if budget_left is not None else None
-        outcome = watchdog.send_verified(
-            pid, text, run, tpath, sleep_fn=sleep_fn, logs=jl, out={},
-            nudge=NUDGE_KIND, state=state, now=now,
-            skip_confirm=(left is not None
-                          and left < _qa.QUEUE_ARRIVAL_CONFIRM_MIN_BUDGET_S))
-        if outcome or getattr(outcome, "kind", "") == "not-typed":
-            watchdog._janitor_clear_watch(state, pid)    # nothing left to watch
-        return outcome
-
-    def _recent_human(sid, cwd, tpath, pid):
-        return _goal._recovery_recent_human(sid, cwd, tpath, now, pid=pid,
-                                            run=run)
-
+    ready_deps, deliver, mark_sent = idle_pane.production_deps(
+        now, state, NUDGE_KIND, run=run, sleep_fn=sleep_fn,
+        budget_left=budget_left, journal=jl)
     lines = watch_trigger_job(
         now, state, panes, windows=box_watch_windows(),
-        projects_dir=projects_dir,
-        find_transcript=watchdog.find_active_transcript,
-        capture=lambda pid: watchdog.capture_pane(pid, run),
-        in_mode=lambda pid: watchdog.pane_in_mode(pid, run),
-        at_idle=watchdog.pane_at_idle_prompt,
-        busy_waiting=_owr._pane_busy_waiting,
-        # the WALL clock, never the sweep-start `now`: Job 52 runs late in the
-        # sweep, so a transcript written after `now` would read as not live
-        turn_live=lambda tpath: _live.turn_live(
-            _live.transcript_age_s(tpath, max(now, time.time()))),
-        recent_human=_recent_human,
-        gate_ok=nudge_gate.gate_ok, mark_sent=nudge_gate.mark_sent,
-        nudges_enabled=watchdog.nudges_enabled, deliver=_deliver,
-        handled=handled, dry_run=dry_run)
+        projects_dir=projects_dir, mark_sent=mark_sent,
+        nudges_enabled=watchdog.nudges_enabled, deliver=deliver,
+        handled=handled, dry_run=dry_run, **ready_deps)
     return lines + jl
 
 

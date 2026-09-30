@@ -9,7 +9,10 @@ Two callers, one definition of "provably safe to fast-forward":
     `ff_verdict` / `fast_forward` for every managed checkout of the box on a
     15-min cadence, so freshness no longer depends on a session-start event
     (the #1127 recurrence: every managed session starts with `claude -c`, a
-    `resume` source, and a session can live for days).
+    `resume` source, and a session can live for days). Its fast-forward runs
+    DETACHED — `python3 cli_checkout_freshness.py ff ...` (`ff_child`) in a
+    transient `systemd-run --user` unit, outside the watchdog unit's kill
+    window (the #1176 reopen: a sweep-budget reserve starved it forever).
 
 The same module also READS the job's status file for its one visibility
 surface, `status_lines` (`airuleset.py status`). The footer shows nothing
@@ -24,7 +27,13 @@ target (diverged), and an incoming path that would land on an existing
 untracked or ignored file — the path itself OR any of its parent
 directories, with renames off and NUL-separated names (#314 F1). `--ff-only`
 itself also refuses to overwrite a file edited between the check and the
-merge.
+merge. The ONE move of a detached HEAD / merged work branch onto its base
+(`reattach_verdict` / `reattach`, #1176 census) keeps every one of these
+refusals and adds its own (commits outside the base, a local base ahead, the
+base checked out in another worktree, a long-lived branch, HEAD moved within
+REATTACH_IDLE_S); it is a local fast-forward fetch + a plain checkout, never
+a reset, and the old branch ref is kept. Job 53 alone runs it (with its
+session-liveness gate); the hook only prints the notice.
 
 PROCESS SAFETY: every git child runs in its own process group. Reads run
 with GIT_OPTIONAL_LOCKS=0 (a `git status` never rewrites the index a live
@@ -55,6 +64,16 @@ STALE_AFTER_H_DEFAULT = 6     # a lag counts as `stale` in status past this many
 STATUS_DEAD_S = 2 * 3600      # status older than this = dead watchdog, hide
 UNMEASURABLE = object()
 _DEADLINE = [None]            # monotonic deadline set by `deadline()`, or None
+DEFAULT_BASES = ("develop", "dev", "main", "master")
+RULE_PATHS = ("CLAUDE.md", ".claude", ":(glob)**/CLAUDE.md",
+              ":(glob)**/.claude/**")
+REATTACH_IDLE_S = 3600        # HEAD unmoved this long before a reattach (#1176 census)
+# a session mid-operation (merge / rebase / bisect …) or an unreadable git dir
+# is never told to merge the base (#1176 census review)
+NO_NOTICE_REASONS = ("in-progress", "git-dir-unmeasurable")
+# long-lived branches that are never "a work branch" to switch away from, even
+# when a checkout's declared base is another one (gk-infra declares develop)
+LONG_LIVED_BRANCHES = DEFAULT_BASES + ("staging",)
 
 
 # --------------------------------------------------------------------------- #
@@ -366,7 +385,253 @@ def fast_forward(cwd, verdict, run_hooks=True):
     pre = [] if run_hooks else ["-c", "core.hooksPath=/dev/null"]
     rc, _ = run_git(cwd, pre + ["merge", "--ff-only", "--quiet", verdict.ref],
                     timeout=None, honor_deadline=False)
+    if rc != 0:
+        _log("merge --ff-only of %s in %s failed (rc %d)" % (verdict.ref, cwd, rc))
     return rc == 0
+
+
+def rule_lag(cwd, ref):
+    """Rule files (`CLAUDE.md`, `.claude/`, nested too) `ref` changed since
+    HEAD forked from it — `[paths]`, or None when unmeasurable."""
+    rc, out = run_git(cwd, ["diff", "--name-only", "HEAD..." + ref, "--"]
+                      + list(RULE_PATHS))
+    return [p for p in out.splitlines() if p] if rc == 0 else None
+
+
+def base_on_remote(cwd, remote, branch, bases=DEFAULT_BASES):
+    """The base a checkout on `branch` (None = detached) compares with: the
+    branch itself when it is a base, else the first of `bases` the remote
+    carries; None when there is none."""
+    if branch in bases:
+        return branch
+    for b in bases:
+        if ref_exists(cwd, remote_ref(remote, b)):
+            return b
+    return None
+
+
+def notice_line(branch, n, remote, base, why=None):
+    """The ONE rule-lag notice (#1176 census item 3/4): the SessionStart hook
+    prints it and Job 53 types it into the stream's own pane — same words.
+    `why` is the refusal that keeps a BASE branch behind (it cannot switch to
+    itself): a dirty tree is told to commit / stash first, a diverged one or a
+    path collision only to merge."""
+    on = "vetve %s" % branch if branch else "detached HEAD (bez vetvy)"
+    noun, verb = (("súbor", "je") if n == 1 else ("súbory", "sú") if 2 <= n <= 4
+                  else ("súborov", "je"))
+    if branch and branch == base and why in (None, "dirty", "unmeasurable"):
+        fix = "commitni alebo odlož lokálne zmeny a zmerguj %s/%s" % (remote, base)
+    elif branch and branch == base:
+        fix = "zmerguj %s/%s (vlastné commity alebo lokálne súbory v ceste)" % (
+            remote, base)
+    else:
+        fix = "zmerguj %s/%s do vetvy alebo prejdi na %s" % (remote, base, base)
+    return ("checkout-freshness: tvoj checkout je na %s, %d %s s pravidlami "
+            "(CLAUDE.md / .claude/) %s pozadu za %s/%s — %s." % (
+                on, n, noun, verb, remote, base, fix))
+
+
+def reattach_line(branch, base):
+    """What Job 53 tells the session after it moved the checkout onto `base`
+    (#1176 census review: a reattach is never silent)."""
+    was = "vetvy %s (tá ostala zachovaná)" % branch if branch else "detached HEAD"
+    return ("checkout-freshness: presunul som tvoj checkout z %s na %s a posunul ho "
+            "na aktuálne pravidlá — ďalšie commity pôjdu na %s, na vlastnú prácu "
+            "si vytvor vetvu." % (was, base, base))
+
+
+def base_in_other_worktree(cwd, base):
+    """True when `refs/heads/<base>` is checked out in ANOTHER worktree of the
+    same repository (git refuses both the local fetch into it and the checkout
+    — a reattach there could only fail, forever); None when unmeasurable."""
+    rc, out = run_git(cwd, ["worktree", "list", "--porcelain"])
+    if rc != 0:
+        return None
+    here, path = os.path.realpath(cwd), None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            path = os.path.realpath(line[len("worktree "):])
+        elif line == "branch refs/heads/%s" % base and path != here:
+            return True
+    return False
+
+
+def _head_moved_at(cwd):
+    """When HEAD last moved (checkout / commit / reset): the time of its newest
+    REFLOG entry (`%gd` with `--date=unix` -> `HEAD@{<epoch>}`; `%ct` would be
+    the commit's own date); None when unmeasurable (no reflog)."""
+    rc, out = run_git(cwd, ["log", "-g", "-1", "--date=unix", "--format=%gd", "HEAD"])
+    sel = out.strip()
+    if rc != 0 or not (sel.endswith("}") and "@{" in sel):
+        return None
+    try:
+        return int(sel[sel.rindex("@{") + 2:-1])
+    except ValueError:
+        return None
+
+
+def reattach_verdict(cwd, remote, base, now=None, idle_s=REATTACH_IDLE_S):
+    """Is moving a DETACHED HEAD or a WORK branch onto `base` and
+    fast-forwarding it provably safe (#1176 census items 1+2)? The `ff_verdict`
+    refusals (in-progress, dirty / unmeasurable tree, collision) plus: HEAD is
+    an ancestor of `<remote>/<base>` (no commit outside the base: nothing is
+    left behind), the local base is not ahead of it (a local fetch can
+    fast-forward it), and HEAD has been idle for `idle_s` (a session that just
+    ran `checkout -b` is never switched back under its feet). Action
+    "reattach" (`detail` = the base), "noop" or "refuse"."""
+    state = in_progress_state(cwd)
+    if state is UNMEASURABLE:
+        return Verdict("refuse", "git-dir-unmeasurable")
+    if state:
+        return Verdict("refuse", "in-progress", detail=state)
+    branch = current_branch(cwd)
+    target, ref = "%s/%s" % (remote, base), remote_ref(remote, base)
+    if branch == base:
+        return Verdict("noop", "on-base", branch, target, ref)
+    if branch in LONG_LIVED_BRANCHES:
+        return Verdict("refuse", "long-lived-branch", branch, target, ref,
+                       detail="%s is never switched away from" % branch)
+    if not ref_exists(cwd, ref):
+        return Verdict("noop", "no-target", branch, target, ref)
+    behind = count_behind(cwd, ref)
+    if not behind:
+        return Verdict("noop", "up-to-date" if behind == 0 else "behind-unmeasurable",
+                       branch, target, ref, behind)
+    status = worktree_status(cwd)
+    if status is UNMEASURABLE or status.strip():
+        return Verdict("refuse", "dirty" if status is not UNMEASURABLE else "unmeasurable",
+                       branch, target, ref, behind)
+    rc, out = run_git(cwd, ["rev-list", "--count", ref + "..HEAD"])
+    if rc != 0 or out.strip() != "0":
+        return Verdict("refuse", "unmerged", branch, target, ref, behind,
+                       detail="%s commit(s) outside %s" % (out.strip() or "?", target))
+    local = "refs/heads/" + base
+    if ref_exists(cwd, local):
+        rc, out = run_git(cwd, ["rev-list", "--count", ref + ".." + local])
+        if rc != 0 or out.strip() != "0":
+            return Verdict("refuse", "local-base-ahead", branch, target, ref, behind,
+                           detail="local %s is ahead of %s" % (base, target))
+    other = base_in_other_worktree(cwd, base)
+    if other is not False:
+        return Verdict("refuse", "base-in-other-worktree", branch, target, ref, behind,
+                       detail="%s is checked out in another worktree" % base
+                       if other else "worktree list unmeasurable")
+    collide = colliding_paths(cwd, ref)
+    if collide:
+        return Verdict("refuse", "collision", branch, target, ref, behind, detail=collide)
+    moved = _head_moved_at(cwd)
+    if moved is None:
+        return Verdict("refuse", "head-activity-unmeasurable", branch, target, ref, behind,
+                       detail="no HEAD reflog")
+    now = time.time() if now is None else now
+    if now - moved < idle_s:
+        return Verdict("refuse", "recently-active", branch, target, ref, behind,
+                       detail="HEAD moved %ds ago" % (now - moved))
+    return Verdict("reattach", "safe", branch, target, ref, behind, detail=base)
+
+
+def reattach(cwd, verdict):
+    """Apply a `reattach` verdict: fast-forward the LOCAL base to the remote
+    base with a local fetch (`git fetch . <ref>:refs/heads/<base>` refuses
+    anything but a fast-forward), then `git checkout <base>` with hooks off.
+    The old branch ref is kept. Never bounded or signalled once started (the
+    `fast_forward` rule). True on success."""
+    if verdict.action != "reattach":
+        return False
+    base = verdict.detail
+    rc, _ = run_git(cwd, ["-c", "gc.auto=0", "-c", "maintenance.auto=false",
+                          "-c", "core.hooksPath=/dev/null", "fetch", "--quiet",
+                          "--no-write-fetch-head", "--no-recurse-submodules", ".",
+                          "%s:refs/heads/%s" % (verdict.ref, base)],
+                    timeout=None, honor_deadline=False)
+    if rc != 0:
+        _log("local fast-forward of %s to %s in %s failed (rc %d)" % (base, verdict.ref, cwd, rc))
+        return False
+    rc, _ = run_git(cwd, ["-c", "core.hooksPath=/dev/null", "checkout", "--quiet", base, "--"],
+                    timeout=None, honor_deadline=False)
+    if rc != 0:
+        _log("checkout of %s in %s failed (rc %d)" % (base, cwd, rc))
+        return False
+    rc, _ = run_git(cwd, ["config", "--get", "branch.%s.remote" % base])
+    if rc != 0 and verdict.ref.startswith("refs/remotes/origin/"):
+        # a base the local fetch just created tracks origin; never another
+        # remote (a fork's `upstream` would make a bare push target the project)
+        run_git(cwd, ["branch", "--quiet", "--set-upstream-to=%s" % verdict.ref, base])
+    return True
+
+
+def write_json_atomic(path, data):
+    """Atomic JSON write (temp + os.replace) — a reader never sees half a file;
+    a failed replace removes its temp file and re-raises."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=1, sort_keys=True)
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        os.unlink(tmp)
+        raise
+
+
+def _child_apply(path, remote, mode, base):
+    """Re-check + apply for `ff_child`: `(ok, reason, commits)`."""
+    v = reattach_verdict(path, remote, base) if mode == "reattach" \
+        else ff_verdict(path, remote)
+    if v.action == "noop" and v.reason == "up-to-date" and mode == "ff":
+        return True, "already up-to-date", 0
+    if v.action != ("reattach" if mode == "reattach" else "ff"):
+        return False, "re-check refused: %s" % v.reason, v.behind
+    if mode == "reattach":
+        ok = reattach(path, v)
+        return ok, ("reattached to %s" % base) if ok else "reattach failed", v.behind
+    ok = fast_forward(path, v, run_hooks=False)
+    return ok, "fast-forwarded" if ok else "merge --ff-only failed", v.behind
+
+
+def ff_child(path, remote, branch, result_path, mode="ff", base=None):
+    """The DETACHED fast-forward (#1176 reopen): what the watchdog's transient
+    `systemd-run --user` unit runs, outside the watchdog unit's 120 s kill, so
+    no sweep reserve is needed. The job already proved the verdict; this
+    re-checks it right before acting (the checkout may have changed in
+    between — a branch switch, an edit). `mode` "ff" merges the checked-out
+    base with hooks OFF; "reattach" (#1176 census) moves a detached HEAD
+    (`branch` "") or a merged work branch onto `base`. Writes `{ok, reason,
+    commits, branch, mode, base, started, finished}` to `result_path` for the
+    next sweep to collect. rc 0 on success, 1 otherwise; never raises."""
+    started = time.time()
+    commits = None
+    base = base or branch
+    try:
+        now_on = current_branch(path)
+        if (now_on or "") != (branch or ""):
+            ok, reason = False, "branch changed since the verdict (on %s, expected %s)" % (
+                now_on or "detached HEAD", branch or "detached HEAD")
+        else:
+            ok, reason, commits = _child_apply(path, remote, mode, base)
+    except Exception as exc:  # noqa: BLE001 -- recorded in the result, never lost
+        ok, reason = False, "child error: %s" % exc
+    _log("%s [%s] detached %s: %s (%s)" % (
+        path, branch or "detached HEAD", mode, "ok" if ok else "FAILED", reason))
+    try:
+        write_json_atomic(result_path, {"ok": ok, "reason": reason, "commits": commits,
+                                        "branch": branch, "mode": mode, "base": base,
+                                        "started": started, "finished": time.time()})
+    except OSError as exc:   # the sweep then reports "left no result"
+        _log("could not write the result %s: %s" % (result_path, exc))
+        return 1
+    return 0 if ok else 1
+
+
+def _ff_main(argv):
+    import argparse
+    ap = argparse.ArgumentParser(prog="cli_checkout_freshness.py ff")
+    for opt in ("--path", "--remote", "--branch", "--result"):
+        ap.add_argument(opt, required=True)
+    ap.add_argument("--mode", choices=("ff", "reattach"), default="ff")
+    ap.add_argument("--base", default=None)
+    a = ap.parse_args(argv)
+    return ff_child(a.path, a.remote, a.branch, a.result, a.mode, a.base)
 
 
 def hook_line(verdict, applied=None):
@@ -402,7 +667,10 @@ def hook_line(verdict, applied=None):
 
 
 def hook_main(cwd=None):
-    """The SessionStart hook's ff step (the caller already fetched origin)."""
+    """The SessionStart hook's ff step (the caller already fetched origin),
+    then — whenever the checkout is still not on a current base (a work
+    branch, a detached HEAD, a refused fast-forward) — the #1176 census
+    rule-lag notice, the SAME line Job 53 types into the stream's pane."""
     cwd = cwd or os.getcwd()
     branch = current_branch(cwd)
     remote = pick_remote(cwd, branch, [branch]) if branch else None
@@ -411,7 +679,23 @@ def hook_main(cwd=None):
     line = hook_line(v, applied)
     if line:
         print(line)
+    if not applied and v.reason not in NO_NOTICE_REASONS:
+        notice = hook_notice(cwd, branch, v.reason if v.action == "refuse" else None)
+        if notice:
+            print(notice)
     return 0
+
+
+def hook_notice(cwd, branch, why=None):
+    """The rule-lag notice for this checkout, or "" (no remote / no base /
+    no rule file behind / unmeasurable)."""
+    bases = ([branch] if branch in DEFAULT_BASES else []) + list(DEFAULT_BASES)
+    remote = pick_remote(cwd, branch, bases)
+    base = base_on_remote(cwd, remote, branch) if remote else None
+    if not base or not ref_exists(cwd, remote_ref(remote, base)):
+        return ""
+    files = rule_lag(cwd, remote_ref(remote, base))
+    return notice_line(branch, len(files), remote, base, why) if files else ""
 
 
 # --------------------------------------------------------------------------- #
@@ -506,5 +790,8 @@ def status_lines(home=None, now=None):
 if __name__ == "__main__":
     if sys.argv[1:] == ["hook"]:
         sys.exit(hook_main())
-    print("usage: python3 cli_checkout_freshness.py hook", file=sys.stderr)
+    if sys.argv[1:2] == ["ff"]:
+        sys.exit(_ff_main(sys.argv[2:]))
+    print("usage: python3 cli_checkout_freshness.py hook | ff --path P --remote R "
+          "--branch B --result F", file=sys.stderr)
     sys.exit(2)

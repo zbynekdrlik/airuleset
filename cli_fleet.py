@@ -694,7 +694,7 @@ _NUDGE_CORE = ("goal-guard", "lane-occupancy", "lane-reconcile", "partition-audi
                "queue-arrival", "release-gap", "task-hygiene", "u-freshness")
 NUDGE_PROFILES = {
     "gk": frozenset(_NUDGE_CORE + ("infra-priority", "watch-trigger")),
-    "stream": frozenset(_NUDGE_CORE + ("bounce",)),
+    "stream": frozenset(_NUDGE_CORE + ("bounce", "checkout-lag")),   # + #1176 census
     "controller": frozenset({"queue-arrival"}),
     "workstation": frozenset(),
 }
