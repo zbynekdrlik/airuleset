@@ -20,7 +20,7 @@ Adaptive thinking with five tiers: `low`, `medium`, `high`, `xhigh`, `max`. **Th
 
 **ultracode** mode = `xhigh` + permission to launch multi-agent workflows (not a separate API tier); NO LONGER a managed launch flag (owner directive 2026-08-30) — sessions launch at effort `high`, ultracode is a per-session opt-in.
 
-**Parallelism is the working model's decision** — run parallel lanes where the task allows, UNLESS the pane is `sequential` (#1035, ONE lane, no push), sized to box and backlog (`cli_resource_guards`). Workflows: companion `skills/claude-code-workflows/DEEP.md` (#859).
+**Parallelism is the working model's decision** — the DEFAULT is `sequential` on every box (#1137: one theme with focus, subagents where they naturally help; #1035, ONE lane, no push); parallel lanes only in a pane that declares `mode: parallel`, sized to box and backlog (`cli_resource_guards`). Workflows: companion `skills/claude-code-workflows/DEEP.md` (#859).
 
 #### Autonomous Goals (`/goal`)
 

@@ -205,9 +205,12 @@ DEFAULT_MODE = "sequential"  # #1137 — mirrors cli_concurrency.DEFAULT_MODE
 ROLES = (None, "review", "infra", "quality")  # #1074 — the gk-quality window
 
 # The sequential clause that REPLACES `saturation-core` (the refill clause).
+# #1137 review: the main may implement the unit itself — no forced worker per
+# unit ("subagents where they naturally help", owner ROZHODNUTÉ 2026-09-30).
 _SEQUENTIAL_SATURATION = (
-    "SEQUENTIAL — ONE unit at a time: dispatch → main review → integrate → "
-    "verify → next; no refill;")
+    "SEQUENTIAL — ONE unit at a time, one theme with focus: implement it "
+    "yourself or with one worker → main review → integrate → verify → next; "
+    "no refill;")
 
 # #1060 L3b — the DUAL dispatch-CHANNEL clause. This is ORTHOGONAL to the
 # parallel/sequential MODE: it swaps HOW a unit is dispatched (a cross-session

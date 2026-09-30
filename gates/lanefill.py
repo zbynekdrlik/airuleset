@@ -297,7 +297,7 @@ def _goal_armed(payload, *, state_path=None, out=None):
 def _mode(cwd):
     """The pane's EFFECTIVE concurrency mode via the single resolver
     (`cli_concurrency.resolve_mode` — declared window / project lane-resources /
-    default parallel; the #1031/#1035 seam)."""
+    default sequential (#1137); the #1031/#1035 seam)."""
     import cli_concurrency
     return cli_concurrency.resolve_mode(cwd)
 
