@@ -38,6 +38,7 @@ from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux,
     _write_marker_transcript,
 )
+from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 # A pane whose FOOTER is off the captured view (the `◎ /goal` statusline row
 # scrolled past the bottom behind a worker strip / chrome redraw) so
@@ -101,6 +102,7 @@ class TestG6StructuredArmedGate(unittest.TestCase):
                                         backlog_fetch=lambda cwd: backlog)
         return logs, tmux
 
+    @PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: declared-parallel pane
     def test_obscured_footer_with_structured_arm_reaches_the_refill_decision(self):
         # THE #486 G6 CASE (RED against pre-G6): footer obscured
         # (pane_goal_armed -> None), heartbeat reads NOT-armed (the 4 MB-tail

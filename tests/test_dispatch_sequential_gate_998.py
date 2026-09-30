@@ -75,11 +75,27 @@ class TestSequentialDispatchGate(unittest.TestCase):
         r = _run_hook(self.repo, "Do the infra work", self.home)
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def _make_parallel(self):
+        claude = self.repo / ".claude"
+        claude.mkdir(exist_ok=True)
+        (claude / "lane-resources.json").write_text(
+            json.dumps({"mode": "parallel"}))
+
     def test_parallel_repo_never_blocked_by_sequential_gate(self):
-        # no lane-resources.json -> parallel; even with a live lane, allowed.
+        # #1137 (owner ROZHODNUTÉ 2026-09-30): parallel is an EXPLICIT
+        # declaration now; a declared-parallel repo is never gated.
+        self._make_parallel()
         self._add_live_lane()
         r = _run_hook(self.repo, "Do the work", self.home)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_undeclared_repo_is_sequential_by_default_1137(self):
+        # #1137: no lane-resources.json -> the sequential DEFAULT -> the 2nd
+        # concurrent autopilot-worker is refused like a declared-sequential one.
+        self._add_live_lane()
+        r = _run_hook(self.repo, "Do the work", self.home)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("sequential", r.stderr.lower())
 
 
 if __name__ == "__main__":

@@ -31,10 +31,12 @@ IDLE = ("keep exactly ONE background "
 # sha256[:24] of every FULL-authority variant as rendered BEFORE #1128 (the
 # design's acceptance: "the full profiles are byte-unchanged").
 FULL_GOLDEN = {
+    # #1137 re-golden (owner ROZHODNUTÉ 2026-09-30): the sequential clause no
+    # longer forces a worker per unit; full/*/sequential changed, parallel not.
     ("full", "parallel", None): "2d9a5539f472a22cda96177c",
-    ("full", "sequential", None): "6920ca09926869d6679eb0cc",
-    ("full", "sequential", "infra"): "e3836d97e467eafe428a92ec",
-    ("full", "sequential", "quality"): "77c5cb76bf02783ad940d6bb",
+    ("full", "sequential", None): "5aa6169676175202824de5f1",
+    ("full", "sequential", "infra"): "19aef76411deb3e9b6dda220",
+    ("full", "sequential", "quality"): "09daaec5f321536a649f20f6",
     ("full", "parallel", "review"): "a3b487a9e9cf0c9fd5ddd8a8",
 }
 

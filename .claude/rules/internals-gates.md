@@ -1,6 +1,8 @@
 ---
 paths:
   - "gates/**"
+  - "cli_concurrency.py"
+  - "goal_registry.py"
 ---
 
 ### airuleset internals — gates/
@@ -263,3 +265,28 @@ until the ratchet cap, then the oldest move to `.claude/rules-reference/internal
   implementer BEFORE `seen.add(sid)` and exclude its session id from the lookup, or the main pane is
   silently dropped. (3) watchdog state that gates a gh WRITE is written through into `state` as it
   changes, and the write first searches for its own episode id: a killed sweep must not file twice.
+
+- **#1137 — flipping the ONE concurrency resolver's default (`cli_concurrency.DEFAULT_MODE`
+  parallel→sequential) re-routes EVERY consumer at once: lane caps (sequential = total 1), the
+  #998 dispatch gate (2nd `autopilot-worker` refused), the refill + queue-arrival nudge skips,
+  the lane-fill Stop gate (`gates/lanefill.py` exempts non-parallel), `_dispatchable_for_cache`,
+  and the `/goal` renderer (SKILL.md's shipped lines ARE `render()` = the default variant, so
+  `goal-inventory --write` regenerates them and `goal_template_for` must route the NEW default
+  to SKILL.md and the old one to the renderer).** Three things the design list missed, found by
+  running the WHOLE suite, not the symbol-grep subset: (1) a skip written for "no refill" also
+  silenced an AWARENESS nudge (#1178 ended-supervisor queue-arrival) on every box — audit each
+  consumer's PURPOSE, not just its mode check; the fix exempts the `deliver_hold` path like the
+  infra role. (2) resolver-ERROR fallbacks hard-coded the old default ("treating as
+  non-sequential") — flip every error branch to the new default too. (3) 15 test files drive the
+  parallel machinery on a FAKE cwd (`/home/newlevel/devel/x`, no project file possible) and
+  silently depended on the default; pin them with ONE shared one-line class decorator
+  (`tests/_parallel_mode_pin.PARALLEL_PIN` = `patch.object(cli_concurrency, "DEFAULT_MODE",
+  "parallel")`, effective because consumers import `cli_concurrency` lazily and read the global
+  at call time) instead of per-class `setUp` blocks — a decorator costs 1 line per class, which
+  keeps the size-ratchet raises small. Put brand-new locks in a NEW test file (default 1000-line
+  ceiling) rather than growing capped files. Also: the airuleset checkout's own
+  `.claude/lane-resources.json` is resolver SOURCE 2 and overrides the default for the controller.
+  Rewording a canonical `/goal` clause (`_SEQUENTIAL_SATURATION`) moves THREE hash/byte locks —
+  `test_goal_variants_998._GOLDEN`, `test_stream_no_done_state_1128.FULL_GOLDEN` and the vs-`main`
+  compare in `test_bounce_goal_rider_1066` — grep them BEFORE the RED commit, or the GREEN commit
+  lands red.

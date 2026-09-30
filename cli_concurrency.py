@@ -13,10 +13,17 @@ Resolution order (owner directive 2026-09-12, item 1c):
      first — by containment, the LONGEST declared cwd the pane is in wins —
      else by exact window NAME; #998 addendum: cwd wins so a mis-named window
      in the infra cwd still resolves to role infra) -> ``(window.mode or
-     "parallel", window.role, "role")``
+     DEFAULT_MODE, window.role, "role")``
   2. the project's ``.claude/lane-resources.json`` ``mode`` ->
      ``(mode, None, "project")``
-  3. default -> ``("parallel", None, "default")``
+  3. default -> ``(DEFAULT_MODE, None, "default")``
+
+``DEFAULT_MODE`` is ``sequential`` on EVERY box (#1137, owner ROZHODNUTÉ
+2026-09-30: "seqvencny normal mod nech je default stav vsetkych targetov" --
+the natural mode: the main works one theme's tickets with focus, uses subagents
+where they naturally help, never saturates lane slots). A pane runs ``parallel``
+ONLY through an explicit ``mode: parallel`` declaration (a declared window or a
+project ``lane-resources.json``); none is declared.
 
 Scoping to the box's OWN entry (via ``cli_fleet.box_windows(user)``) is what
 stops a montalu box at ``~/devel/odoo/odoo-erp`` being mis-classified as the
@@ -32,7 +39,7 @@ import os
 
 import cli_fleet
 
-DEFAULT_MODE = "parallel"
+DEFAULT_MODE = "sequential"
 LANE_RESOURCE_FILE = os.path.join(".claude", "lane-resources.json")
 
 
@@ -87,7 +94,7 @@ def _match_window(cwd, window_name, windows, home):
     CWD wins over name (#998 addendum, owner 2026-09-12 "prečo mám dva gk"):
     the install's window-namer renamed EVERY window to the box alias, so the
     infra window is live-named ``gk`` too — resolving by name would then
-    classify it as the parallel review lane. Matching by cwd first pins it to
+    classify it as the review lane. Matching by cwd first pins it to
     role ``infra`` regardless of the (mis-)name, and the same matcher gives the
     namer each window's DECLARED name from its cwd. Containment (not bare
     equality) keeps a pane cd'd into a subdirectory of the checkout resolving
@@ -175,8 +182,8 @@ def dispatch_gate_line(cwd, repo_root=None, run=None, live_count=None):
     ``block`` ONLY when the pane's mode is ``sequential`` AND at least one live
     worktree lane already exists for the repo containing ``cwd`` (the total cap
     is 1, so the 2nd concurrent ``autopilot-worker`` is refused). ``parallel``
-    (and any resolver error) always allows — fail-safe toward today's
-    behaviour, never a false block. ``live_count``/``run`` are test seams."""
+    (and any resolver error) always allows — this PreToolUse gate fails OPEN,
+    never a false block. ``live_count``/``run`` are test seams."""
     try:
         mode = resolve_mode(cwd)
     except Exception:  # noqa: BLE001
@@ -208,9 +215,9 @@ def concurrency_status_row(cwd, window_name=None, user=None, home=None,
 
 def goal_variant_label(mode, role):
     """#1038 -- the owner-facing name of a pane's `/goal` VARIANT: ``<role>/<mode>``
-    when a role is resolved (``review/parallel``, ``infra/sequential`` -- the
-    owner's own ticket examples), else just ``<mode>`` (``sequential`` for d3,
-    ``parallel`` for the default). ONE label shared by the watchdog virgin-arm
+    when a role is resolved (``review/sequential``, ``infra/sequential`` -- the
+    owner's own ticket examples), else just ``<mode>`` (``sequential`` for the
+    default since #1137, ``parallel`` only for an explicit declaration). ONE label shared by the watchdog virgin-arm
     journal line AND the ``airuleset.py status`` goal row so the two never drift."""
     return "%s/%s" % (role, mode) if role else "%s" % mode
 

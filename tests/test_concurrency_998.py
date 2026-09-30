@@ -4,7 +4,9 @@
 DECLARED managed tmux windows; `cli_concurrency.resolve_concurrency` is the
 single (mode, role, source) resolver every consumer (footer, quals, goal
 renderer, dispatch hook, lane caps) reads. Three-source chain: declared window
-(name or cwd) -> project lane-resources.json `mode` -> default parallel.
+(name or cwd) -> project lane-resources.json `mode` -> default (sequential
+since #1137, owner ROZHODNUTÉ 2026-09-30: "seqvencny normal mod nech je default
+stav vsetkych targetov"; parallel only by an explicit declaration).
 """
 import json
 import os
@@ -139,11 +141,14 @@ class TestResolveConcurrency(TestCase):
                 json.dumps({"max_lanes": 5, "mode": "sequential"}))
             self.assertEqual(cc.read_project_mode(d), "sequential")
 
-    def test_default_parallel_when_nothing_declared(self):
+    def test_default_sequential_when_nothing_declared(self):
+        # #1137 (owner ROZHODNUTÉ 2026-09-30): the undeclared default is
+        # sequential on every box (was parallel).
+        self.assertEqual(cc.DEFAULT_MODE, "sequential")
         with tempfile.TemporaryDirectory() as d:
             mode, role, src = cc.resolve_concurrency(d, windows=[],
                                                      home=self.HOME)
-            self.assertEqual((mode, role, src), ("parallel", None, "default"))
+            self.assertEqual((mode, role, src), ("sequential", None, "default"))
 
     def test_malformed_project_file_falls_to_default(self):
         with tempfile.TemporaryDirectory() as d:
@@ -151,7 +156,8 @@ class TestResolveConcurrency(TestCase):
             claude.mkdir()
             (claude / "lane-resources.json").write_text("{not json")
             self.assertIsNone(cc.read_project_mode(d))
-            self.assertEqual(cc.resolve_mode(d, windows=[]), "parallel")
+            # #1137: the default is sequential (owner ROZHODNUTÉ 2026-09-30).
+            self.assertEqual(cc.resolve_mode(d, windows=[]), "sequential")
 
     def test_unknown_project_mode_ignored(self):
         with tempfile.TemporaryDirectory() as d:
@@ -172,7 +178,8 @@ class TestResolveConcurrency(TestCase):
     def test_status_row_default(self):
         with tempfile.TemporaryDirectory() as d:
             row = cc.concurrency_status_row(d, windows=[], home=self.HOME)
-            self.assertIn("concurrency: parallel (source: default)", row)
+            # #1137: the default is sequential (owner ROZHODNUTÉ 2026-09-30).
+            self.assertIn("concurrency: sequential (source: default)", row)
 
 
 class TestSequentialCaps(TestCase):
@@ -200,18 +207,21 @@ class TestSequentialCaps(TestCase):
             self.assertEqual(caps, {"total": 1})
 
     def test_parallel_is_byte_identical_to_file_caps(self):
+        # #1137: parallel is an EXPLICIT declaration now (default sequential).
         from watchdog import lane_resources as lr
         with tempfile.TemporaryDirectory() as d:
-            self._write(d, {"max_lanes": 3})
+            self._write(d, {"max_lanes": 3, "mode": "parallel"})
             self.assertEqual(lr.lane_resource_caps(d), lr._file_caps(d))
             self.assertEqual(lr.lane_resource_caps(d)[0], {"total": 3})
 
-    def test_no_file_default_parallel_unchanged(self):
+    def test_no_file_default_is_sequential_total_1(self):
+        # #1137 (owner ROZHODNUTÉ 2026-09-30): an undeclared pane resolves the
+        # sequential default, so its lane total is 1 (was the parallel 5).
         from watchdog import lane_resources as lr
         with tempfile.TemporaryDirectory() as d:
             caps, reason = lr.lane_resource_caps(d)
-            self.assertEqual(caps, {"total": lr.GOAL_LANE_SATURATION_WORKERS})
-            self.assertIsNone(reason)
+            self.assertEqual(caps, {"total": 1})
+            self.assertEqual(reason, "sequential-mode")
 
 
 class TestDispatchGateLine(TestCase):
@@ -225,7 +235,12 @@ class TestDispatchGateLine(TestCase):
         return d
 
     def test_parallel_always_allows(self):
+        # #1137: parallel only by explicit declaration (default sequential).
         with tempfile.TemporaryDirectory() as d:
+            claude = Path(d) / ".claude"
+            claude.mkdir()
+            (claude / "lane-resources.json").write_text(
+                json.dumps({"mode": "parallel"}))
             line = cc.dispatch_gate_line(d, live_count=99)
             self.assertTrue(line.startswith("allow|"))
 
@@ -288,12 +303,14 @@ class TestDavid3Sequential1031(TestCase):
         self.assertEqual(cli_fleet.validate_windows(self._windows()), [])
 
     # (2) regression — the change is scoped to the david3 account ONLY.
-    def test_gk_review_window_still_parallel(self):
+    def test_gk_review_window_is_sequential_1137(self):
+        # #1137 (owner ROZHODNUTÉ 2026-09-30): the gk review window runs
+        # sequential too; no declared window is parallel any more.
         gk = cli_fleet.box_windows("gatekeeper")
         self.assertEqual(
             cc.resolve_concurrency("/home/gatekeeper/devel/odoo/odoo-erp",
                                    windows=gk, home="/home/gatekeeper"),
-            ("parallel", "review", "role"))
+            ("sequential", "review", "role"))
 
     def test_sibling_streams_declared_sequential_20260921(self):
         # Owner directive 2026-09-21 („prepni david1 až david4 aby nemali multi
@@ -344,9 +361,10 @@ class TestDavid3Sequential1031(TestCase):
                                    windows=w, home="/home/montalu1"),
             ("sequential", None, "role"))
 
-    def test_montalu_streams_still_default_parallel(self):
-        # the flip is scoped to the david family + miva1 + montalu4 + montalu1
-        # (owner 2026-09-30); the other montalu* keep the parallel default.
+    def test_montalu_streams_resolve_the_sequential_default(self):
+        # The david family + miva1 + montalu4 + montalu1 declare sequential
+        # windows; the other montalu* declare none and, since #1137 (owner
+        # ROZHODNUTÉ 2026-09-30), resolve the SEQUENTIAL default too.
         for u in ("montalu2", "montalu5"):
             self.assertEqual(cli_fleet.box_windows(u), [],
                              "%s must NOT declare a window" % u)
@@ -354,7 +372,7 @@ class TestDavid3Sequential1031(TestCase):
                 cc.resolve_concurrency("/home/%s/devel/odoo/odoo-slovnormal" % u,
                                        windows=cli_fleet.box_windows(u),
                                        home="/home/%s" % u),
-                ("parallel", None, "default"))
+                ("sequential", None, "default"))
 
     # (3) dispatch gate: d3's 2nd concurrent autopilot-worker is refused. The
     # real `dispatch_gate_line` resolves the mode itself via `_current_user`, so
@@ -373,9 +391,11 @@ class TestDavid3Sequential1031(TestCase):
     def test_goal_renderer_forknomerge_sequential_variant(self):
         import goal_registry as gr
         line = gr.render_goal_line("fork-no-merge", "sequential", None)
+        # #1137 review: the clause no longer forces a worker per unit.
         self.assertIn(
-            "SEQUENTIAL — ONE unit at a time: dispatch → main review → "
-            "integrate → verify → next; no refill;", line)
+            "SEQUENTIAL — ONE unit at a time, one theme with focus: implement "
+            "it yourself or with one worker → main review → integrate → verify "
+            "→ next; no refill;", line)
         self.assertNotIn("CONTINUOUS REFILL", line)
 
 

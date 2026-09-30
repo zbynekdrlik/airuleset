@@ -41,7 +41,7 @@ Pôvodný 973 KB monolit bol rozbitý (#482) — dotyk súboru už neinjektuje ~
 - `airuleset.py` (install/push/plugins), `cli_onboard*.py` → `.claude/rules/internals-cli.md`
 - `skills/** agents/** profiles/** modules/** rules/**` → `.claude/rules/internals-skills-modules.md`
 - `.github/** scripts/ci_*.py tests/test_ci_*.py` → `.claude/rules/internals-ci.md`
-- `gates/**` → `.claude/rules/internals-gates.md`
+- `gates/** cli_concurrency.py goal_registry.py` → `.claude/rules/internals-gates.md`
 - `cli_resource_guards*.py tests/test_quota*.py` → `.claude/rules/internals-quota.md`
 - `cli_account*.py cli_accounts.py cli_project_gh_token.py cli_project_ci_sync.py cli_project_toolchain.py hooks/*project*account* tests/test_project_account*.py tests/test_project_gh_token*.py tests/test_project_ci_sync*.py tests/test_*1201.py` → `.claude/rules/internals-accounts.md`
 - **hlbší archív / staré lekcie (on-demand, grep):** `.claude/rules-reference/internals-archive.md`

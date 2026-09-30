@@ -42,6 +42,7 @@ from _goal_arm_helpers import (  # noqa: E402
     _encode,
     _write_marker_transcript,
 )
+from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 SKILL = "skills/autopilot/SKILL.md"
 SKILL_MASTER = "skills/autopilot-master/SKILL.md"
@@ -94,8 +95,10 @@ class TestRegistryClausesAreContinuous(TestCase):
             self.assertNotIn("do NOT dispatch the next", cb)
 
     def test_every_rendered_goal_line_carries_continuous_refill(self):
+        # #1137 (owner ROZHODNUTÉ 2026-09-30): the DEFAULT render is sequential,
+        # so the continuous-refill lock targets the explicit PARALLEL variant.
         for p in gr.PROFILES:
-            line = gr.render(p)
+            line = gr.render_goal_line(p, "parallel", None)
             self.assertIn("CONTINUOUS REFILL", line)
             self.assertIn("REMOVED", line)   # #1084 machine compacts removed
             self.assertNotIn("BATCH MODE", line)
@@ -206,6 +209,7 @@ class TestToolingModuleReconciled(TestCase):
         self.assertNotIn("BOUNDED BATCHES", body)
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestWatchdogLaneNudgeIsContinuous(TestCase):
     """#848 -- the job-20 lane-check nudge (`watchdog/goal.py`) carries the
     CONTINUOUS REFILL doctrine, not the retired #723/#726 batch mode. Two

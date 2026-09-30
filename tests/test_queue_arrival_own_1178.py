@@ -49,6 +49,7 @@ from _goal_arm_helpers import (  # noqa: E402
     GOAL_IDLE_CAP,
     _write_marker_transcript,
 )
+from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 NOW = 1_000_000
 HOUR = 3600
@@ -279,6 +280,7 @@ class TestWatchdogPath(unittest.TestCase):
                         src.index("logs = run_once("))
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestUndeterminedIsVisible(unittest.TestCase):
     def _sweep(self, state, now, fetch=lambda cwd: None):
         return qa.goal_queue_arrival_recheck(
@@ -369,6 +371,7 @@ class TestClassifyMemo(unittest.TestCase):
 # the rider on the own-workable set (any authority, titled nudge).
 # --------------------------------------------------------------------------- #
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestRiderOwnSet(unittest.TestCase):
     def setUp(self):
         self._proj = TemporaryDirectory()

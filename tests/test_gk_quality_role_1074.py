@@ -75,11 +75,13 @@ class TestGkDeclaresThreeWindows(TestCase):
             windows=self._gk(), home=GK_HOME)
         self.assertEqual((mode, role, src), ("sequential", "quality", "role"))
 
-    def test_review_window_still_parallel(self):
+    def test_review_window_is_sequential_1137(self):
+        # #1137 (owner ROZHODNUTÉ 2026-09-30): the review window runs
+        # sequential like every other target (was parallel).
         mode, role, src = cli_concurrency.resolve_concurrency(
             GK_HOME + "/devel/odoo/odoo-erp",
             windows=self._gk(), home=GK_HOME)
-        self.assertEqual((mode, role, src), ("parallel", "review", "role"))
+        self.assertEqual((mode, role, src), ("sequential", "review", "role"))
 
     def test_infra_window_unchanged(self):
         mode, role, src = cli_concurrency.resolve_concurrency(

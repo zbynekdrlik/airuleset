@@ -20,15 +20,20 @@ from watchdog import goal  # noqa: E402
 class TestRenderGoalLine(TestCase):
     def test_default_variant_equals_the_shipped_skill_line(self):
         # #998-review: NOT tautological (render delegates to render_goal_line, so
-        # comparing the two proves nothing) — assert the DEFAULT (parallel,
-        # no-role) variant byte-equals the line SHIPPED in SKILL.md, the real
-        # drift target: if render_goal_line's default path ever diverges from the
-        # shipped artifact the watchdog arms, this fails.
+        # comparing the two proves nothing) — assert the DEFAULT (no-role)
+        # variant byte-equals the line SHIPPED in SKILL.md, the real drift
+        # target: if render_goal_line's default path ever diverges from the
+        # shipped artifact the watchdog arms, this fails. #1137 (owner
+        # ROZHODNUTÉ 2026-09-30): the DEFAULT is the SEQUENTIAL variant.
         with open(gr.skill_path(), encoding="utf-8") as fh:
             shipped = gr.shipped_lines(fh.read())
         self.assertEqual(set(shipped), set(gr.PROFILES))
+        self.assertEqual(gr.DEFAULT_MODE, "sequential")
         for p in gr.PROFILES:
-            self.assertEqual(gr.render_goal_line(p, "parallel", None), shipped[p])
+            self.assertEqual(gr.render_goal_line(p, "sequential", None), shipped[p])
+            self.assertEqual(gr.render_goal_line(p), shipped[p])
+            self.assertIn("ONE unit at a time", shipped[p])
+            self.assertNotIn("CONTINUOUS REFILL", shipped[p])
 
     def test_sequential_substitutes_refill(self):
         for p in gr.PROFILES:
@@ -71,15 +76,19 @@ class TestGoalTemplateFor(TestCase):
             got = goal.goal_template_for("full", d)
             self.assertEqual(got, goal.goal_template_for_authority("full"))
 
-    def test_sequential_project_uses_variant_renderer(self):
+    def test_sequential_project_serves_the_default_skill_line(self):
+        # #1137 (owner ROZHODNUTÉ 2026-09-30): sequential IS the default, so a
+        # sequential pane is served the shipped SKILL.md default line (read
+        # from the repo SKILL here, hermetic — never the box's installed copy).
         with tempfile.TemporaryDirectory() as d:
             claude = Path(d) / ".claude"
             claude.mkdir()
             (claude / "lane-resources.json").write_text(
                 json.dumps({"mode": "sequential"}))
-            got = goal.goal_template_for("full", d)
+            got = goal.goal_template_for("full", d, path=gr.skill_path())
             self.assertIn("ONE unit at a time", got)
             self.assertNotIn("CONTINUOUS REFILL", got)
+            self.assertEqual(got, gr.render_goal_line("full", "sequential"))
 
     def test_explicit_mode_role_override(self):
         got = goal.goal_template_for("full", "/x", role="infra", mode="sequential")
@@ -197,15 +206,18 @@ class TestReviewRoleVariant1000(TestCase):
         # their (B) done-state and gained the stream-idle clause, so every
         # branch-merge/fork-no-merge variant changed. full/* are UNTOUCHED.
         # Regenerated deliberately.
+        # #1137 re-golden (owner ROZHODNUTÉ 2026-09-30): the sequential clause
+        # no longer forces a worker per unit, so every */sequential/* variant
+        # changed; */parallel/* are UNTOUCHED.
         "full/parallel/None": "2d9a5539f472a22cda96177c",
-        "full/sequential/None": "6920ca09926869d6679eb0cc",
-        "full/sequential/infra": "e3836d97e467eafe428a92ec",
+        "full/sequential/None": "5aa6169676175202824de5f1",
+        "full/sequential/infra": "19aef76411deb3e9b6dda220",
         "branch-merge/parallel/None": "baeaa60a576d206e5e031d3d",
-        "branch-merge/sequential/None": "50ea6ffa33954088695a7978",
-        "branch-merge/sequential/infra": "14ec8214eff9cae5330a9eb3",
+        "branch-merge/sequential/None": "18e1e9ce2e3fef9a952e9f11",
+        "branch-merge/sequential/infra": "9dfce54370b4b9c2800930df",
         "fork-no-merge/parallel/None": "adf7e0904676c259633645cc",
-        "fork-no-merge/sequential/None": "0d82b098f66601de3038235f",
-        "fork-no-merge/sequential/infra": "a34c388830fba45ecc5ab6ab",
+        "fork-no-merge/sequential/None": "680c351e1f87a0be532c5dde",
+        "fork-no-merge/sequential/infra": "92b74d96321574fbc8a7b8dd",
     }
 
     def test_nonreview_variants_byte_identical_snapshot(self):

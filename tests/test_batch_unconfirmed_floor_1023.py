@@ -41,6 +41,7 @@ from _goal_arm_helpers import (  # noqa: E402
     GOAL_ARMED_CAP,
     _write_marker_transcript,
 )
+from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 NOW = 1_000_000
 DAY = 24 * 3600
@@ -158,6 +159,7 @@ class TestBatchDeliveredUnconfirmedStampsFloor(_Base):
             "gate_ok must be False for queue-arrival within the floor")
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestDirectDeliveredUnconfirmedStampsFloor(_Base):
     """The direct rider path (a non-armed infra pane / the floor-eligible-single
     path): a delivered-unconfirmed send stamps the floor, both gates hold."""

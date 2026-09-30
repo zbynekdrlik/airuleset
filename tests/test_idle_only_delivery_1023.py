@@ -24,6 +24,7 @@ from watchdog import ops_wait_recheck as ow  # noqa: E402
 from watchdog import goal as goal  # noqa: E402
 from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux, GOAL_ARMED_CAP, _encode, _write_marker_transcript)
+from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 NOW = 1_000_000
 DAY = 24 * 3600
@@ -47,6 +48,7 @@ class TestBusyWaitingHasNoAgedOverride(unittest.TestCase):
         self.assertFalse(hasattr(ow, "BUSY_WAITING_AGE_BOUND_S"))
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestQueueArrivalIdleOnly(unittest.TestCase):
     CWD = "/home/newlevel/devel/idleonly"
 
@@ -86,6 +88,7 @@ class TestQueueArrivalIdleOnly(unittest.TestCase):
         self.assertTrue(any("hold:busy" in ln for ln in logs), logs)
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestLaneOccupancyIdleOnly(unittest.TestCase):
     """#1023 🔴 (review #2): the lane-occupancy REFILL rider must ALSO defer on a
     busy-waiting pane — it had NO `_pane_busy_waiting` gate (every sibling rider

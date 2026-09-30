@@ -18,6 +18,10 @@ set -euo pipefail
 # FAIL-OPEN by construction: the module journals + allows on any read error, and
 # a missing jq / python here just exits 0. This hook adds pressure, never guards
 # a write.
+#
+# #1137: sequential is the DEFAULT mode of every box, so this gate is a no-op
+# (allow, no `Lane-fill:` line demanded) unless a pane explicitly declares
+# `mode: parallel`.
 
 command -v jq >/dev/null 2>&1 || exit 0
 

@@ -32,6 +32,7 @@ import watchdog as wd  # noqa: E402
 from watchdog import queue_arrival_recheck as qa  # noqa: E402
 from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux, GOAL_ARMED_CAP, _write_marker_transcript)
+from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 NOW = 1_000_000
 DAY = 24 * 3600
@@ -56,6 +57,7 @@ class _SV:
         return self.result
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestUnconfirmedNotTerminal(unittest.TestCase):
     CWD = "/home/newlevel/devel/unconf"
 

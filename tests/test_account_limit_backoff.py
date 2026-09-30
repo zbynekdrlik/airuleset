@@ -26,6 +26,7 @@ from _goal_arm_helpers import (  # noqa: E402
     DeliverGoalFakeTmux,
     _write_marker_transcript,
 )
+from _parallel_mode_pin import PARALLEL_PIN  # noqa: E402  (#1137)
 
 # #875 Pass B: remove the repo root from sys.path after imports complete so
 # later test modules under `unittest discover` don't re-import cli_remote as a
@@ -161,6 +162,7 @@ class TestAccountLimitDecisionHelper(unittest.TestCase):
         self.assertGreater(skips, 700)      # the vast majority of sweeps back off
 
 
+@PARALLEL_PIN  # #1137 owner ROZHODNUTÉ 2026-09-30: sequential default; declared-parallel suite
 class TestAccountLimitBackoff(unittest.TestCase):
     CWD = "/home/newlevel/devel/lanenudge-alim"
     SID = "sess-lane-alim-1"

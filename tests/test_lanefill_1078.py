@@ -232,7 +232,9 @@ class _Env:
         self.cwd = os.path.join(self.tmp, "repo")
         os.makedirs(os.path.join(self.cwd, ".claude"), exist_ok=True)
         os.makedirs(self.home, exist_ok=True)
-        lr = {"mode": mode, "max_lanes": max_lanes}
+        lr = {"max_lanes": max_lanes}
+        if mode is not None:       # None = UNDECLARED (the #1137 default path)
+            lr["mode"] = mode
         Path(self.cwd, ".claude", "lane-resources.json").write_text(json.dumps(lr))
         self.sid = "sess-1078"
         self.transcript = os.path.join(self.tmp, "t.jsonl")
@@ -299,6 +301,21 @@ class TestModuleSubprocess(unittest.TestCase):
             self.assertIn("#%d" % i, r.stderr)
         self.assertNotIn("#106", r.stderr)      # only five of the six named
         self.assertIn("a ďalších 1", r.stderr)
+
+    def test_undeclared_box_is_sequential_by_default_never_blocks_1137(self):
+        # #1137 (owner ROZHODNUTÉ 2026-09-30): an UNDECLARED box resolves the
+        # sequential default, so an armed, under-filled ⏳/✅ turn with six
+        # dispatchable tickets and free slots is NEVER blocked and never asked
+        # for a `Lane-fill:` line.
+        for msg in (WORKING, "hotovo\n✅ DONE: ticket integrovaný"):
+            box = _Env(mode=None, max_lanes=4, goal="set")
+            try:
+                r = self._run(box, msg)
+            finally:
+                box.cleanup()
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertNotIn("LANE-FILL", r.stderr)
+            self.assertNotIn("Lane-fill:", r.stderr)
 
     def test_sequential_box_is_exempt_exit_0(self):
         box = _Env(mode="sequential", goal="set")
@@ -668,6 +685,10 @@ class TestDispatchableForCacheWriter(unittest.TestCase):
     def setUp(self):
         import airuleset
         self.airuleset = airuleset
+        # #1137 (owner ROZHODNUTÉ 2026-09-30): the default is sequential now and
+        # a sequential pane skips this writer; these lock the PARALLEL path.
+        from _parallel_mode_pin import pin_parallel
+        pin_parallel(self)
         self.rows = {5: {"title": "alpha", "createdAt": "2026-01-02"},
                      3: {"title": "beta", "createdAt": "2026-01-01"}}
 
