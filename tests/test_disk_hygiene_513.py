@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import airuleset                       # noqa: E402
 import cli_worktree_sweep              # noqa: E402
+import cli_worktree_stale              # noqa: E402  # #1194: sweep seams live here now
 import cli_scratch_sweep               # noqa: E402
 
 DAY = 86400.0
@@ -143,7 +144,7 @@ class TestLiveWorkerGuard(unittest.TestCase):
         repo = _mkrepo(self.root)
         wt = _add_worktree(repo, "worktree-agent-inuse")
         now = time.time() + IDLE + DAY
-        with m.patch.object(cli_worktree_sweep, "_worktree_in_live_use", return_value=True):
+        with m.patch.object(cli_worktree_stale, "_worktree_in_live_use", return_value=True):
             results = self._sweep(dry_run=False, now=now)
         row = next(r for r in results if r.get("branch") == "worktree-agent-inuse")
         self.assertFalse(row["removed"])
@@ -358,16 +359,16 @@ class TestWiring(unittest.TestCase):
         """A plain `sweep-worktrees` (no --salvage) must NOT trigger the
         fleet-wide + network salvage scan -- keeps the default path fast and
         the existing wiring tests hermetic."""
-        with m.patch.object(cli_worktree_sweep, "sweep_stale_worktrees", return_value=[]):
-            with m.patch.object(cli_worktree_sweep, "discover_salvage_worktrees") as sal:
+        with m.patch.object(cli_worktree_stale, "sweep_stale_worktrees", return_value=[]):
+            with m.patch.object(cli_worktree_stale, "discover_salvage_worktrees") as sal:
                 from io import StringIO
                 with m.patch("sys.stdout", StringIO()):
                     airuleset.cmd_sweep_worktrees(SimpleNamespace(dry_run=True))   # no salvage attr
         sal.assert_not_called()
 
     def test_salvage_flag_runs_the_report(self):
-        with m.patch.object(cli_worktree_sweep, "sweep_stale_worktrees", return_value=[]):
-            with m.patch.object(cli_worktree_sweep, "discover_salvage_worktrees",
+        with m.patch.object(cli_worktree_stale, "sweep_stale_worktrees", return_value=[]):
+            with m.patch.object(cli_worktree_stale, "discover_salvage_worktrees",
                                 return_value=[{"path": "/r/wt", "branch": "b", "repo": "/r",
                                                "ahead": 2, "dirty": 0, "size": 1024,
                                                "age_s": 20 * 3600.0, "wip_backup": False}]) as sal:
