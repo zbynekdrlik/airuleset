@@ -283,15 +283,14 @@ class TestPrivateFlagParsing(unittest.TestCase):
         self.assertEqual(cli_vault._secret_request_names(args), ["A", "B"])
         self.assertTrue(args.private)
 
-    def test_argparse_accepts_private_on_all_four(self):
-        for argv in (["secret", "show", "X", "--private"],
-                     ["secret", "request", "X", "--private"],
-                     ["share", "/tmp/f", "--private"],
-                     ["upload", "--private"]):
-            r = subprocess.run([sys.executable, str(ROOT / "airuleset.py")] + argv
-                               + ["--help"], capture_output=True, text=True)
-            self.assertEqual(r.returncode, 0, (argv, r.stderr))
-            self.assertIn("--private", r.stdout, argv)
+    def test_argparse_offers_private_on_all_four(self):
+        # `secret` covers both show and request (one parser); its REMAINDER
+        # would swallow a trailing --help, so ask each subcommand's own help.
+        for sub in ("secret", "share", "upload"):
+            r = subprocess.run([sys.executable, str(ROOT / "airuleset.py"), sub,
+                                "--help"], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, (sub, r.stderr))
+            self.assertIn("--private", r.stdout, sub)
 
 
 # --------------------------------------------------------------------------- #
