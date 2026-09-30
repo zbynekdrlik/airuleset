@@ -65,11 +65,13 @@ if echo "$TOOL_INPUT" | grep -qiE "(should|shall|can|may) (i|we) merge (it\b|thi
 fi
 
 # Commit author identity / email in a public repo's (old) history — pre-answered (#1196).
+# ADVISORY: a match ALLOWS the question and injects the fixed answer as context; it
+# never exits 2 (area-review verdict after six review rounds of regex false positives).
 # Owner 30.9.2026: keep the old history, noreply from now on, never ask. PRECISION over
 # recall: the hook greps the WHOLE tool_input JSON (question + options), so terms found
 # anywhere proved useless (review rounds 1-4). The owner's identity must be LINKED to
 # the commits INSIDE ONE CLAUSE (no . ? ! between; grep is per line). A missed phrasing
-# only means the question gets asked; install already sets the identity. Blocks when:
+# only means the question gets asked; install already sets the identity. Advises when:
 #   GI_LINKED  — PLURAL commits (history, never one commit's content: GI_HIST) …
 #                carry/authored/under/leaked/nesú … a personal/student/
 #                university e-mail or name, or "my e-mail/Gmail"; or commits … show/
@@ -105,8 +107,12 @@ if ! gi_has "$GI_EXCLUDE" \
     && { gi_has "$GI_LINKED" \
          || { gi_has "$GI_AUTHNEAR" && gi_has "$GI_CONTEXT"; } \
          || { gi_has "$GI_WHICH" && gi_has "$GI_FUTURE"; }; }; then
-    echo "BLOCKED: Commit author identity / e-mail in a public repo is pre-answered (#1196): keep the OLD history exactly as it is (never rewrite, never force-push) and commit under the owner's GitHub noreply identity from now on. airuleset install / onboard-project sets that local identity on every public checkout automatically. Do not ask. See ask-before-assuming-deep pre-answered table." >&2
-    exit 2
+    # ADVISORY, never a block (#1196 area review): a wrongly blocked real question is
+    # worse than a repeated harmless one. Same non-blocking PreToolUse context shape
+    # as inject-situational-rule.sh / nudge-poll-loop-timeout.sh.
+    jq -cn --arg c "Pre-answered (#1196): keep old history as is, noreply from now on — do not ask the owner; proceed. (airuleset install / onboard-project already set the noreply identity on every public checkout; never rewrite or force-push old history.)" \
+        '{hookSpecificOutput: {hookEventName: "PreToolUse", additionalContext: $c}}'
+    exit 0
 fi
 
 exit 0
