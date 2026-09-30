@@ -92,14 +92,15 @@ Staršie/hlbšie airuleset.py CLI (install/push/plugins) lekcie (archív) sú v 
 - **#1171 box-queue (`cli_box_queue.py` + `cli_box_queue_proc.py`) — three reusable process/lock lessons.** (1) "Is a detached job still running?" = an flock its children INHERIT (`pass_fds`), probed non-blocking — never a recorded pid: the CLI can be SIGKILLed while its command runs, and pids recycle. (2) Kill targets = lock OWNERS from `/proc/<pid>/fdinfo/<fd>` `lock:` lines (only the locking open file description and its inherited copies carry one; a process that merely opened the file does not); kill via `os.pidfd_open` + an ownership re-check after the pidfd is open; `killpg` a command's group only while its leader is an unreaped zombie (`os.waitid(..., WNOWAIT)`) so the group id cannot be recycled; then sweep other owners too — GNU `timeout` and setsid daemons leave the group. (3) A setsid test fixture must wait (bounded) until the daemon leads its own session (`ps -o sid=`) before the script exits, else the group sweep races setsid() (2/7 flakes under `-n 8`); every in-session lane records the SAME `claude` pid, so a lease — not the pid — is a lane's liveness.
 - **#1174 — a declared per-box policy laid over an existing runtime toggle store needs a recorded "last applied" set, and every writer must keep keys it does not own.** Nudge profiles (`cli_nudge_profiles`, table `cli_fleet.NUDGE_PROFILES`) store `profile` + `profile_kinds` next to `on` in `nudges-kinds.json`. Apply is a 3-way merge: first adoption only records (never changes `on`, so rollout is behaviour-neutral), a later table change applies only its delta, and runtime overrides survive and show as `+N`/`-N`. `set_nudge_kind` rewrote the whole payload as `{on,since,by}` and would have erased the profile, so all writers go through `tmux_io.write_nudges_kinds` (atomic). Box type comes from ONE classifier (`cli_box_class`), shared with the box-class marker.
 - **#1194 — `cli_worktree_sweep.py` is a FACADE; the reclaimers live in stdlib leaves.** Module map:
-  - `cli_worktree_common` = shared plumbing: git runner, porcelain, base-branch, lock/pid, locked-dead classify, recency/live-use;
-  - `cli_worktree_stale` = #345 sweep + #513 salvage + `cmd_sweep_worktrees`;
+  - `cli_worktree_common` = shared plumbing: git runner, porcelain, base-branch, admin-dir, recency/live-use, #348/#513 gates;
+  - `cli_worktree_stale` = #345 sweep + #348 locked-dead classification + #513 salvage + `cmd_sweep_worktrees`;
   - `cli_worktree_orphans` = #348 orphan branches;
   - `cli_worktree_reclaim` = #834/#939 disk-guard rung;
   - `cli_lane_target_reclaim` = #545 `target/` purge + `cmd_purge_lane_targets`.
 
   Put a fix in the leaf that defines the function, not in the facade.
   Patch seams follow the code: `patch.object(cli_worktree_sweep, X)` no longer intercepts a call made inside a leaf.
-  During the split, six tests went red. A seventh went GREEN silently, because the real `sweep_stale_worktrees` ran against the real home.
-  So patch the leaf that makes the call. `test_worktree_sweep_facade_1194` bans facade patches and pins the 58-name surface.
+  During the split, 8 test functions patched the facade. 7 went red and 1 went GREEN silently.
+  A missed seam in a CLI wiring test runs the LIVE command against the real `~/.claude`. Here a real `sweep_stale_worktrees(dry_run=False)` ran: all 200 rows were SKIP and it stamped the cadence state.
+  So retarget the seams in the SAME commit as the split, or run the red phase with home, log and state injected. `test_worktree_sweep_facade_1194` bans facade patches and pins the 58-name surface.
   Split method (#830 kit): a generator reads the pinned base with `git show`, slices line ranges, and derives imports with `symtable`. Prove the move is verbatim by comparing `ast.get_source_segment`.
