@@ -330,7 +330,7 @@ class TestSelectionSeam(_StoreCase):
     are mocked so no real endpoint is spawned."""
 
     def _drive(self, name, cmd):
-        args = _Args(name=name, cmd=cmd, port=_free_port())
+        args = _Args(name=name, cmd=cmd, port=_free_port(), private=True)
         fake_proc = m.Mock(pid=13579)
         with m.patch("filedrop.bind_ips", return_value=["127.0.0.1"]), \
                 m.patch("subprocess.Popen", return_value=fake_proc) as popen, \

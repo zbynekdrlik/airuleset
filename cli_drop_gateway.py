@@ -669,36 +669,17 @@ def _config_tunnel_uuid(config_text):
 
 
 def _reconcile_access(lane, dry_run):
-    """Reconcile the Cloudflare Access app for an access-gated drop lane, reusing
-    cli_webterm_access.apply_profile (imported LAZILY to keep this a leaf). No-op
-    for a token-only lane. Returns `(ok, msg)` — `ok` is False on a real reconcile
-    failure OR when the Access layer could not be applied for an access lane (so
-    the caller can refuse to mark an access-gated lane LIVE without its promised
-    Access protection). `msg` never contains the token. A DRY-RUN that only reads
-    is `ok=True` (nothing to fail)."""
-    if not lane.access:
-        return True, "no Access (token-only TLS lane)"
-    spec = DROP_ACCESS_APPS.get(lane.host)
-    if spec is None:
-        return False, "Access lane but no DROP_ACCESS_APPS spec for %s" % lane.host
-    try:
-        import cli_webterm_access as acc
-    except Exception as e:                             # pragma: no cover - defensive
-        return False, "Access reconcile skipped (cannot import cli_webterm_access: %s)" % e
-    try:
-        token = acc._load_token()
-    except OSError as e:
-        return False, ("Access token %s unreadable (%s); run `airuleset.py "
-                       "webterm-access` prerequisites first"
-                       % (acc.WEBTERM_ACCESS_TOKEN_FILE, e))
-    if not token:
-        return False, "Access token file empty"
-    client = acc.AccessClient(acc.WEBTERM_ACCESS_ACCOUNT_ID, token=token)
-    res = acc.apply_profile(client, spec, dry_run=dry_run)
-    if res.get("error"):
-        return False, "Access ERROR: %s" % res["error"]
-    return True, "Access %s: %s" % ("(dry-run)" if dry_run else "applied",
-                                    "; ".join(res.get("actions") or []) or "-")
+    """Reconcile the Cloudflare Access app (+ its #1192 `/healthz` bypass app)
+    for an access-gated drop lane. Delegates to the ONE lane reconcile,
+    `cli_drop_golive.reconcile_access_for_lane` (lazy import keeps this a leaf),
+    with THIS module's DROP_ACCESS_APPS. No-op for a token-only lane. Returns
+    `(ok, msg)` — `ok` False on a real failure or when the Access layer could
+    not be applied (the caller then refuses to mark the lane LIVE). `msg` never
+    contains the token; a live apply from a worktree checkout is refused."""
+    import cli_drop_golive as _gl
+    ok, _action, msg = _gl.reconcile_access_for_lane(
+        lane, dry_run=dry_run, access_specs=DROP_ACCESS_APPS)
+    return ok, msg
 
 
 def _lanes_for_box(nodename):

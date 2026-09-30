@@ -20,6 +20,8 @@ This is the rule the user has repeated more than any other, with growing anger. 
 
 The USER — and ONLY the user — decides when prod is live and stops Claude in the moment. Claude does not reason about it, raise it, plan around it, or warn about it. "This is a live-streaming / broadcast / hardware project, so I'll be careful about prod" is the EXACT banned inference, in any wording or language.
 
+**Reconciliation with U (#1197):** this ban covers asking about event TIMING and deferring rig/prod work Claude can do itself (SSH/MCP); it never authorizes parking owner-only real-world completion (an owner-run event, a physical step) in `W` — that is `U` (`needs-owner-action`) per #601.
+
 #### Automatic by default (no approval) — the WHOLE flow
 
 - Merging a fully green dev→main PR (`pr-merge-policy.md`).
@@ -41,8 +43,6 @@ The gate is for HARM that cannot be undone — NOT for "it touches prod / hardwa
 - Rollbacks that overwrite newer production state with older bytes.
 - Stopping / killing a prod service or process that is **UNRELATED to the work in hand** — i.e. NOT the app/service/device you're developing or testing, and NOT a deploy's restart.
 - Anything in a foreign / third-party repo or outside the two-branch flow.
-
-NOT in the gated set (these ARE the work; the user guards live-timing): restarting / driving the app/service/device/rig you're building or testing, the deploy + its restart to load a new version, and testing on prod.
 
 #### One approval ≈ one action (for the gated set)
 

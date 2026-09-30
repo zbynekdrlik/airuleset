@@ -1,15 +1,18 @@
 """#1189 — the vault endpoints (`secret show`, `secret request`) probe the public
-lane BEFORE handing out its URL and always give a working private (tailscale)
-fallback.
+lane BEFORE handing out its URL; #1192 then made that URL the ONLY one.
 
 Incident (29.9.2026): `secret show` on dev2 printed ONLY
 `https://drop-dev2.newlevel.media/<token>/`, unprobed; the controller tunnel was
 mid-restart, Cloudflare answered 1033, and the owner had nothing else to open.
+#1189 added a probe + an always-printed tailscale fallback line; the owner
+reversed the fallback on 30.9. (#1192: „vadi mi ze stale vsade pchas
+tailscale“). What stays locked here: the probe (token-free, skipped for a dead
+origin), a dead link is never handed out, and the #1189 BIND set (only what is
+PRINTED changed). A dead lane now prints NO URL and exits 1.
 
 The harness mirrors `test_delivery_channel_1115.TestSecretShowFallbackLabelled`
 (everything outside the command is patched; nothing binds, nothing reaches the
-network). `_secret_url_line` / the public URL line stay REAL so the same
-one-shot token is visible on every printed line.
+network). `_secret_url_line` / the public URL line stay REAL.
 """
 import contextlib
 import io
@@ -42,7 +45,8 @@ class _Harness(unittest.TestCase):
 
         def popen(argv, **kw):
             self.popen_argv = argv
-            return types.SimpleNamespace(pid=4321, poll=lambda: None)
+            return types.SimpleNamespace(pid=4321, poll=lambda: None,
+                                         terminate=lambda: None)
 
         lane = types.SimpleNamespace(access=lane_access)
         with tempfile.TemporaryDirectory() as td:
@@ -80,8 +84,13 @@ class _Harness(unittest.TestCase):
                     name="X", file=None, cmd=[], ttl=30, keep=None, port=None,
                     allow_plain=False, public=False, replace=False,
                     persist=None, persist_map=None)
+                self.exit_code = None
                 with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                    (cli_vault._secret_request if request else cli_vault._secret_show)(args)
+                    try:
+                        (cli_vault._secret_request if request
+                         else cli_vault._secret_show)(args)
+                    except SystemExit as e:
+                        self.exit_code = e.code
                 return out.getvalue(), err.getvalue()
 
     @staticmethod
@@ -90,81 +99,74 @@ class _Harness(unittest.TestCase):
 
 
 class TestPublicLaneDead(_Harness):
-    def test_1033_prints_tailscale_url_and_loud_degradation(self):
+    def test_1033_prints_no_url_and_exits_loudly(self):
         out, err = self.run_cmd(530)
-        lines = self.url_lines(out)
-        self.assertTrue(lines, out)
-        self.assertNotIn("https://%s" % HOST, out)       # a dead URL is never handed out
-        self.assertIn("http://%s:%d/" % (TS_IP, PORT), lines[0])
-        self.assertIn("secret show: !!! DEGRADED", err)
+        self.assertEqual(self.exit_code, 1)
+        self.assertEqual(self.url_lines(out), [], out)   # a dead URL is never handed out
+        self.assertIn("secret show: !!! ŽIADNA URL", err)
         self.assertIn("1033", err)
-        self.assertIn("public lane unreachable", err)    # the shared #1115 voice
+        self.assertIn("--private", err)
         self.st.log_event.assert_any_call("public-lane-dead", "X")
 
     def test_connection_error_is_dead_too(self):
         out, err = self.run_cmd(None)
-        self.assertNotIn("https://%s" % HOST, out)
-        self.assertIn("http://%s:%d/" % (TS_IP, PORT), out)
-        self.assertIn("DEGRADED", err)
+        self.assertEqual(self.exit_code, 1)
+        self.assertEqual(self.url_lines(out), [])
+        self.assertIn("no answer", err)
 
     def test_probe_is_token_free(self):
-        out, _ = self.run_cmd(530)
+        out, _ = self.run_cmd(204)
         token = self.url_lines(out)[0].split("/")[3]
         self.assertEqual(self.probed, ["https://%s/healthz" % HOST])
         self.assertNotIn(token, self.probed[0])
 
 
 class TestPublicLaneAlive(_Harness):
-    def test_origin_204_public_first_then_labelled_private(self):
+    def test_origin_204_is_the_one_public_line(self):
         out, err = self.run_cmd(204)
         lines = self.url_lines(out)
-        self.assertEqual(len(lines), 2, out)
+        self.assertEqual(len(lines), 1, out)
         self.assertTrue(lines[0].startswith("https://%s/" % HOST), lines)
-        self.assertIn("http://%s:%d/" % (TS_IP, PORT), lines[1])
-        self.assertIn("záloha", lines[1])
-        self.assertNotIn("DEGRADED", err)
+        self.assertNotIn(TS_IP, out)
         self.assertNotIn("NOT verified", err)
-        # ONE endpoint, ONE token: both lines carry the same one-shot token
-        self.assertEqual(lines[0].split("/")[3], lines[1].split("/")[3])
 
     def test_access_302_does_not_claim_the_tunnel_is_up(self):
         # Access answers at the edge, before the tunnel: a dead tunnel looks
-        # exactly like this, so the fallback is printed AND the gap is named.
+        # exactly like this, so the gap is named and --private is the way out.
         out, err = self.run_cmd(302)
         lines = self.url_lines(out)
+        self.assertEqual(len(lines), 1, out)
         self.assertTrue(lines[0].startswith("https://%s/" % HOST), lines)
-        self.assertIn("záloha", lines[1])
         self.assertIn("NOT verified", err)
-        self.assertIn("use the tailscale URL", err)
+        self.assertIn("--private", err)
 
 
 class TestBindSet(_Harness):
+    """#1192 changed only what is PRINTED; the #1189 bind set is locked as-is."""
+
     def test_controller_topology_binds_origin_plus_tailscale(self):
         self.run_cmd(204, bind_ip="100.99.0.9")
         self.assertEqual(self.popen_argv[3], "100.99.0.9,%s" % TS_IP)
 
-    def test_local_token_only_lane_adds_the_tailscale_fallback(self):
+    def test_local_token_only_lane_binds_loopback_plus_tailscale(self):
         out, _ = self.run_cmd(204, bind_ip="127.0.0.1", lane_access=False)
         self.assertEqual(self.popen_argv[3], "127.0.0.1,%s" % TS_IP)
-        self.assertEqual(len(self.url_lines(out)), 2, out)
+        self.assertEqual(len(self.url_lines(out)), 1, out)
         self.assertNotIn("127.0.0.1", out)               # loopback is never offered
+        self.assertNotIn(TS_IP, out)
 
     def test_local_access_lane_stays_loopback_only(self):
-        # a tailnet bind there would be a way in that skips Cloudflare Access;
-        # with no private URL the public one is the last resort, never zero URLs
+        # a tailnet bind there would be a way in that skips Cloudflare Access
         out, err = self.run_cmd(530, bind_ip="127.0.0.1", lane_access=True)
         self.assertEqual(self.popen_argv[3], "127.0.0.1")
-        self.assertEqual(len(self.url_lines(out)), 1, out)
-        self.assertTrue(self.url_lines(out)[0].startswith("https://%s/" % HOST))
-        self.assertIn("last resort", err)
-        self.assertIn("DEGRADED", err)
-        self.assertIn("POSLEDNÁ MOŽNOSŤ", self.url_lines(out)[0])   # honestly labelled
-        self.assertNotIn("private URLs only", err)                  # none exist here
+        self.assertEqual(self.url_lines(out), [], out)   # no "last resort" URL
+        self.assertEqual(self.exit_code, 1)
+        self.assertIn("ŽIADNA URL", err)
 
     def test_dead_tunnel_origin_is_dead_even_when_the_edge_answers(self):
         out, err = self.run_cmd(302, bind_ip="100.99.0.9", dead_ips=("100.99.0.9",))
-        self.assertNotIn("https://%s" % HOST, out)
-        self.assertIn("http://%s:%d/" % (TS_IP, PORT), out)
+        self.assertEqual(self.url_lines(out), [])
+        self.assertEqual(self.exit_code, 1)
         self.assertIn("tunnel origin 100.99.0.9 down", err)
         self.assertEqual(self.probed, [])                # no probe of a dead origin
 
@@ -176,11 +178,11 @@ class TestBindSet(_Harness):
 
 
 class TestVaultRequest(_Harness):
-    def test_request_dead_lane_prints_tailscale_with_its_own_prog(self):
+    def test_request_dead_lane_refuses_with_its_own_prog(self):
         out, err = self.run_cmd(530, request=True)
-        self.assertNotIn("https://%s" % HOST, out)
-        self.assertIn("http://%s:%d/" % (TS_IP, PORT), out)
-        self.assertIn("secret: !!! DEGRADED", err)
+        self.assertEqual(self.exit_code, 1)
+        self.assertEqual(self.url_lines(out), [])
+        self.assertIn("secret: !!! ŽIADNA URL", err)
         self.assertNotIn("secret show", err)
 
     def test_request_several_names_logs_each(self):
@@ -189,27 +191,25 @@ class TestVaultRequest(_Harness):
                  if c.args and c.args[0] == "public-lane-dead"]
         self.assertEqual(calls, [("public-lane-dead", "A"), ("public-lane-dead", "B")])
 
-    def test_request_live_lane_public_first(self):
+    def test_request_live_lane_is_the_one_public_line(self):
         out, _ = self.run_cmd(204, request=True)
         lines = self.url_lines(out)
+        self.assertEqual(len(lines), 1, out)
         self.assertTrue(lines[0].startswith("https://%s/" % HOST), lines)
-        self.assertIn("záloha", lines[1])
 
 
-
-class TestNoPublicLaneKeepsLoopback(unittest.TestCase):
-    """No public lane and no tailscale (a CI runner, a bare box): the pre-#1189
-    private path printed the loopback URL; #1189's fallback filter must not
-    turn that into ZERO URLs (main CI e9954d17: test_vault_channel
+class TestPrivateKeepsLoopback(unittest.TestCase):
+    """`--private` on a box with no tailscale (a CI runner, a bare box) prints
+    the loopback URL — the pre-#1189 private path must never print ZERO URLs
+    (main CI e9954d17: test_vault_channel
     `test_a_real_request_prints_at_least_one_url`)."""
 
     def test_loopback_only_box_still_prints_its_url(self):
-        import cli_vault_delivery
         out, err = io.StringIO(), io.StringIO()
-        channel = cli_vault_delivery.emit_urls(
+        channel = vd.emit_urls(
             "secret", None, "TOK", ["127.0.0.1"],
             lambda ip: "http://%s:8830/TOK/   [loopback]" % ip,
-            lambda ip: True, out=out, err=err)
+            lambda ip: True, private=True, out=out, err=err)
         self.assertEqual(channel, "private")
         self.assertIn("http://127.0.0.1:8830/TOK/", out.getvalue())
 

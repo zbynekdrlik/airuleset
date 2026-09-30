@@ -423,24 +423,38 @@ def _public_share_status(url, timeout=3):
         return None                              # timeout / connection refused / DNS
 
 
+# /healthz codes only the tunnel side gives (endpoint, or no listener) #1192
+_TUNNEL_SIDE_CODES = (200, 204, 404, 502, 504)
+
+
 def cmd_share(args):
     """Copy a file into the file-drop server and print its clickable URL.
 
-    On a drop-lane account the PUBLIC HTTPS URL (`https://<host>/s/<token>/<name>`,
-    TLS + Access via the Cloudflare tunnel) is printed FIRST — reachable from the
-    internet — and the tailscale/LAN URLs become the labelled fallback below it
-    (#1114, the david4 regression 22.9.2026: `share` used to print only tailscale
-    URLs, unreachable from David's laptop). The public URL is live-checked (200 or
-    302 Access-redirect); on a 5xx/timeout, or when no lane exists, the private URLs
-    are printed WITH a labelled fallback line — never a silent private-only output.
+    #1192 (owner 30.9.): ONE public HTTPS URL (`https://<host>/s/<token>/<name>`,
+    TLS + Access via the Cloudflare tunnel), printed only after its origin
+    answers locally and the /s/ URL answers 200 or 302 (Access redirect; then
+    the bypassed /healthz decides) — or NO URL, a loud line naming `--private`,
+    exit 1. A missing lane refuses before the file is copied; reachability (a
+    5xx, a timeout, a dead tunnel or origin) needs the token so is checked
+    after (the unshared copy ages out with the file-drop's prune). `--private`
+    alone prints the tailscale/LAN URLs instead.
 
     Prints URLs on stdout (easy to copy); diagnostics go to stderr. The local
     file-drop service must be up (both channels proxy to it) — if it is down, one
     restart is attempted before refusing to print a dead URL (no-localhost-urls)."""
     from urllib.parse import urlsplit
 
+    import cli_drop_gateway as _dg
+    import cli_vault_delivery as _vd
     from filedrop import advertise_urls
     from filedrop.share import ShareError, share
+    private = bool(getattr(args, "private", False))
+    if not private:                 # #1192: refuse BEFORE any side effect
+        try:
+            lane_full = _dg.resolve_public_lane_full()
+        except Exception:
+            lane_full = None        # select_lane names the reason, loudly
+        public_host, _drop_port, bind_ip = _vd.select_lane("share", lane_full, False)
     try:
         url, dest = share(args.path)
     except ShareError as e:
@@ -456,37 +470,18 @@ def cmd_share(args):
               file=sys.stderr)
         _restart_filedrop_service()
         if not _wait_filedrop_live(url):
-            print(f"share: file copied to {dest} but the file-drop server is DOWN at "
-                  f"{filedrop_url()} — start it with "
+            print(f"share: file copied to {dest} but the local file-drop service "
+                  f"is DOWN — start it with "
                   f"`systemctl --user start filedrop.service`.", file=sys.stderr)
             sys.exit(1)
 
-    # The private (tailscale + LAN) URLs that actually answer — the labelled
-    # fallback, and the ONLY output on a box with no public lane.
     sp = urlsplit(url)
-    private = [u for u in advertise_urls(port=sp.port, path=sp.path)
-               if _filedrop_is_live(u)] or [url]
-    token_name = sp.path.lstrip("/")             # "<token>/<name>" for the /s/ URL
-
-    # Public-TLS drop lane (#1114): public HTTPS is the DEFAULT on a drop-lane
-    # account. Resolve the lane; when it + a live marker exist AND the public /s/
-    # URL answers (200 or 302 Access-redirect), print it FIRST.
-    import cli_drop_gateway as _dg
-    import cli_drop_lanes as _dl
-    try:
-        lane_full = _dg.resolve_public_lane_full()
-    except Exception:
-        lane_full = None            # never lose ALL output — fall to private URLs
-    if lane_full is None:
-        # #1115 Slice C: name WHY we fell back (no-lane / pending / marker-absent)
-        # through the ONE resolver, and print the ONE shared labelled line.
-        _, _reason = _dl.delivery_channel()
-        for u in private:
+    if private:                     # #1192: tailscale/LAN on explicit request only
+        for u in [u for u in advertise_urls(port=sp.port, path=sp.path)
+                  if _filedrop_is_live(u)] or [url]:
             print(u)
-        print(_dl.channel_fallback_line(_reason, prog="share"), file=sys.stderr)
         return
-
-    public_host, _drop_port, bind_ip = lane_full
+    token_name = sp.path.lstrip("/")             # "<token>/<name>" for the /s/ URL
     public_url = f"https://{public_host}/s/{token_name}"
     # The /s/ route reaches the PERSISTENT filedrop service at the ingress origin
     # `bind_ip:<this box's filedrop port>`. VERIFY that origin actually answers
@@ -495,25 +490,30 @@ def cmd_share(args):
     # LOCAL-topology lane whose origin is loopback is dead unless the filedrop
     # service also binds loopback (#1114 review MAJOR: dominika's 127.0.0.1 origin
     # is not bound on a tailscale box, so its /s/ would 502 — never advertise it).
-    # sp.port is this box's actual filedrop port; bind_ip is where the ingress points.
     origin_live = _filedrop_is_live(f"http://{bind_ip}:{sp.port}/")
     status = _public_share_status(public_url) if origin_live else None
-    if origin_live and status in (200, 302):
-        try:                        # label the transport by the lane's real Access mode
-            _lane = _dg.drop_lane_for_account()
-            _access = bool(getattr(_lane, "access", True))
-        except Exception:
-            _access = True
-        print(_dg.public_share_url_line(public_host, token_name, access=_access))
-        for u in private:                                          # labelled fallback
-            print(u)
-    else:
-        for u in private:
-            print(u)
-        detail = ("origin down" if not origin_live
-                  else (status if status is not None else "timeout"))
-        print(_dl.channel_fallback_line(_dl.CHANNEL_UNREACHABLE, prog="share",
-                                        detail=detail), file=sys.stderr)
+    unverified = False
+    if origin_live and status == 302:
+        # Access answered at the EDGE: ask the tunnel itself via the token-free
+        # /healthz its path-scoped bypass app lets through (#1192). 530/no answer
+        # = dead tunnel; a tunnel-side code = verified; anything else (302 = no
+        # bypass yet, a WAF 403, a 429) = the edge again -> the URL + the note.
+        hz = _public_share_status(_vd.public_probe_url(public_host))
+        unverified = hz not in (None, 530) + _TUNNEL_SIDE_CODES
+        status = hz if hz in (None, 530) else status
+    if not (origin_live and status in (200, 302)):
+        why = ("tunnel origin %s down" % bind_ip if not origin_live
+               else _vd.dead_detail(status))
+        print(_vd.refusal_line("share", "public URL https://%s/ is DEAD — %s"
+                               % (public_host, why)), file=sys.stderr)
+        sys.exit(1)
+    try:                            # label the transport by the lane's real Access mode
+        _access = bool(getattr(_dg.drop_lane_for_account(), "access", True))
+    except Exception:
+        _access = True
+    print(_dg.public_share_url_line(public_host, token_name, access=_access))
+    if unverified:
+        print(_vd.access_unverified_note("share"), file=sys.stderr)
 
 
 def _filedrop_status():

@@ -115,7 +115,7 @@ NEW_SKILLS = {
             "receive-files-via-upload-url",
             "python3 ~/devel/airuleset/airuleset.py share <path-to-file>",
             "The intent: every file the user needs lands in their hands as "
-            "one clickable LAN link",
+            "one clickable public link",
         ],
     ),
 }

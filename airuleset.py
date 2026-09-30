@@ -1558,6 +1558,7 @@ def cmd_install(args):
     # --- Box class marker (#778, read by Job 38 + the heavy-build hook) + #1174 nudge profile.
     _write_box_class_marker()
     _nudge_profile_install_step()
+    _git_identity_install_step()  # #1196: public repos → owner's noreply identity
 
     # --- #971: shared fleet data dir for cross-account consumers (claudy).
     # Created only on the controller (box-class `controller`) when passwordless
@@ -9416,6 +9417,13 @@ def _upload_log_path(port):
     return Path(base) / f"upload-{port}.log"
 
 
+PUBLIC_FLAG_HELP = ("#664: the public-TLS drop URL — the default and the only "
+                    "one printed since #1192; kept so older call lines still parse")
+PRIVATE_FLAG_HELP = ("#1192: print the tailscale/LAN URLs instead of the public "
+                     "one — opt-in only (tailscale reaches boxes that must not be "
+                     "open, owner 30.9.)")
+
+
 def cmd_upload(args):
     """Stand up a web UPLOAD endpoint the user opens in their own browser.
 
@@ -9423,17 +9431,14 @@ def cmd_upload(args):
     receiving a file FROM them is ALWAYS a drag-drop web URL, NEVER an scp/sftp
     ask (modules/core/receive-files-via-upload-url.md; incident david@gk
     2026-07-10). Spawns filedrop/upload_server.py DETACHED with an unguessable
-    token, binds every PRIVATE interface (tailscale + LAN — bind_ips(); never the
-    public IP, since this is a WRITE endpoint) and advertises ONE URL per interface
-    so the user has a working link whether they are on tailscale or the LAN. Each
-    URL is verified to answer 200 BEFORE printing (no-localhost-urls); the endpoint
-    self-expires after --ttl seconds.
+    token that self-expires after --ttl seconds.
 
-    #664 public-TLS drop lane: on a box with a LIVE drop lane AND (--public OR no
-    tailscale), it instead binds 127.0.0.1 on the fixed drop port that the box's
-    cloudflared tunnel fronts and advertises ONE public HTTPS URL (TLS at the
-    edge, the token unchanged) — never an scp / ssh -L ask. --port/--allow-plain
-    do not apply on that lane."""
+    #1192 (owner 30.9.): the owner gets ONE public HTTPS URL — the drop lane's
+    origin bind, fronted by the cloudflared tunnel (TLS at the edge, the token
+    unchanged), printed only after its token-free /healthz answers — or NO URL
+    and exit 1 when the lane is missing or dead. `--private` is the only way to
+    the old private path (every private interface, tailscale + LAN, never the
+    public IP since this is a WRITE endpoint, one URL per live interface)."""
     import secrets as _secrets
     import subprocess
     import time
@@ -9449,16 +9454,16 @@ def cmd_upload(args):
     # FRESH here (unsandboxed) so it always reflects the current network.
     ips = bind_ips()
 
-    # Public-TLS drop lane (#889/#931): public HTTPS is the DEFAULT for every
-    # account. When a registered lane + live marker exist, bind on the lane's
-    # origin IP (127.0.0.1 for local topology, tailscale IP for controller
-    # topology) at the per-account drop port and advertise ONE public HTTPS URL.
+    # Public-TLS drop lane (#889/#931): bind the lane's origin IP (127.0.0.1 for
+    # local topology, the tailscale IP for controller topology) at the per-account
+    # drop port and advertise ONE public HTTPS URL. #1192: --private = the
+    # tailscale/LAN path; no lane and no --private = exit 1 before anything starts.
     import cli_drop_gateway as _dg
-    import cli_drop_lanes as _dl
-    public_lane = _dg.resolve_public_lane_full()
-    _fallback_reason = None            # #1115 Slice C: WHY the private fallback
-    if public_lane:
-        public_host, port, bind_ip = public_lane
+    import cli_vault_delivery as _vd
+    private = bool(getattr(args, "private", False))
+    public_host, port, bind_ip = _vd.select_lane(
+        "upload", _dg.resolve_public_lane_full(), private)
+    if public_host:
         if getattr(args, "port", None):
             print("upload: public drop lane — ignoring --port (fixed "
                   "port %d, TLS via the tunnel)" % port, file=sys.stderr)
@@ -9469,8 +9474,6 @@ def cmd_upload(args):
                   file=sys.stderr)
             sys.exit(1)
     else:
-        public_host = None
-        _, _fallback_reason = _dl.delivery_channel()
         port = int(getattr(args, "port", None) or 0) or None
         if port is None:
             # Probe the addresses the server is ABOUT TO BIND, not loopback (#115).
@@ -9489,7 +9492,7 @@ def cmd_upload(args):
         print(f"upload: cannot open log {log}: {e}", file=sys.stderr)
         sys.exit(1)
     with lf:
-        subprocess.Popen(
+        child = subprocess.Popen(
             [sys.executable, str(REPO_DIR / "filedrop" / "upload_server.py"),
              token, str(port), ",".join(ips), str(dest), str(ttl)],
             stdout=lf, stderr=lf, stdin=subprocess.DEVNULL,
@@ -9513,26 +9516,14 @@ def cmd_upload(args):
     else:
         print(f"upload: endpoint failed to come up — see {log}", file=sys.stderr)
         sys.exit(1)
-    if public_host:
-        # The loopback bind is the origin; the tunnel fronts it under TLS. Print
-        # the ONE public URL (its reachability is a go-live property gated by the
-        # marker the reconciler wrote), not the un-routable loopback address.
-        print(_dg.public_url_line(public_host, token))
-    else:
-        reachable = [u for u in urls if _live(u)] or [urls[0]]
-        for u in reachable:   # one URL per interface — open whichever your network reaches
-            print(u)
-        # #1115 Slice C: the private URLs (stdout) are always accompanied by ONE
-        # labelled line (stderr, keeping stdout URL-clean) naming why there is no
-        # public lane — never a silent private-only output.
-        print(_dl.channel_fallback_line(_fallback_reason or _dl.CHANNEL_NO_LANE,
-                                        prog="upload"), file=sys.stderr)
+    if _vd.emit_urls("upload", public_host, token, ips,     # #1192: ONE URL
+                     lambda ip: f"http://{ip}:{port}/{token}/",
+                     lambda ip: _live(f"http://{ip}:{port}/{token}/"),
+                     private=private, origin_ip=bind_ip) == "refused":
+        child.terminate()                   # never leave an unprinted endpoint up
+        sys.exit(1)
     print(f"dest={dest}  ttl={ttl}s  log={log}")
-    if public_host:
-        print("Otvor URL v prehliadači. Po nahratí over: grep SAVED " + str(log))
-    else:
-        print("Otvor ktorúkoľvek URL v prehliadači (podľa siete). Po nahratí over: "
-              "grep SAVED " + str(log))
+    print("Otvor URL v prehliadači. Po nahratí over: grep SAVED " + str(log))
 
 
 # --- #433 cluster H: the whole `secret` (credential-vault) CLI cluster +
@@ -9903,6 +9894,7 @@ def main():
     p_share = sub.add_parser(
         "share", help="Copy a file into the file-drop server and print its LAN URL")
     p_share.add_argument("path", help="Path to the file to serve to the user")
+    p_share.add_argument("--private", action="store_true", help=PRIVATE_FLAG_HELP)
 
     p_filedrop = sub.add_parser("filedrop", help="File-drop service control")
     p_filedrop.add_argument("filedrop_action", nargs="?", default=None,
@@ -10411,10 +10403,8 @@ def main():
                       help="Endpoint self-shutdown after N seconds (default 7200)")
     p_up.add_argument("--port", type=int, default=None,
                       help="Port (default: first free in 8799-8819)")
-    p_up.add_argument("--public", action="store_true",
-                      help="#664: force the public-TLS drop URL (loopback fronted "
-                           "by the box's cloudflared tunnel) — auto-used anyway on "
-                           "a box with no tailscale; needs `drop-gateway --apply` first")
+    p_up.add_argument("--public", action="store_true", help=PUBLIC_FLAG_HELP)
+    p_up.add_argument("--private", action="store_true", help=PRIVATE_FLAG_HELP)
 
     p_sec = sub.add_parser(
         "secret",
@@ -10449,10 +10439,8 @@ def main():
     p_sec.add_argument("--allow-plain", action="store_true",
                        help="request: also offer UNENCRYPTED LAN URLs (a "
                             "credential would cross the network in cleartext)")
-    p_sec.add_argument("--public", action="store_true",
-                       help="#664: request/show over the public-TLS drop URL "
-                            "(loopback fronted by the box's cloudflared tunnel) — "
-                            "auto-used on a no-tailscale box; go-live: `drop-gateway`")
+    p_sec.add_argument("--public", action="store_true", help=PUBLIC_FLAG_HELP)
+    p_sec.add_argument("--private", action="store_true", help=PRIVATE_FLAG_HELP)
     p_sec.add_argument("--replace", action="store_true",
                        help="request: cancel an existing pending request for "
                             "this name (stopping its endpoint) and issue a new URL")
@@ -11209,6 +11197,16 @@ def _nudge_profile_install_step():
     live set; a runtime deviation is kept and printed). Never raises."""
     import cli_nudge_profiles
     return cli_nudge_profiles.install_step(home=str(CLAUDE_DIR.parent))
+
+
+def _git_identity_install_step():
+    """#1196: every checkout whose origin is a PUBLIC GitHub repo gets the
+    owner's noreply identity as its LOCAL user.name/user.email (global config,
+    private repos and history untouched). Never raises."""
+    import cli_git_identity
+    home = str(CLAUDE_DIR.parent)
+    return cli_git_identity.install_step(
+        home=home, roots=lambda: _checkout_roots(home))
 
 
 def _nudges_fleet(verb, runner=None):

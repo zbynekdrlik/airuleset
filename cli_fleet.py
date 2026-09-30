@@ -519,6 +519,12 @@ REMOTE_HOSTS = [
         "host": "100.118.174.27",
         "user": "montalu1",
         "repo_path": "~/devel/airuleset",
+        # owner 2026-09-30 („Prepni m1 do seqvencneho modu"): the SAME #998/#1031
+        # declared-window shape as m4 — ONE autopilot-worker lane at a time.
+        "windows": [
+            {"name": "m1", "cwd": "~/devel/odoo/odoo-slovnormal",
+             "role": None, "mode": "sequential"},
+        ],
     },
     {
         # simap1 — the renamed 4th sub-dev stream (was `simap`; #537 live
