@@ -56,6 +56,7 @@ live change.
 """
 import json
 import os
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -180,6 +181,8 @@ def reconcile_access_for_lane(lane, dry_run=True, access_client=None,
 
 
 HEALTHZ_BYPASS_POLICY = "drop healthz probe bypass (#1192)"
+# Lower-case DNS labels only: no wildcard (a zone-wide bypass), no port, no path.
+_BARE_HOSTNAME = re.compile(r"(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}")
 
 
 def healthz_bypass_payload(host):
@@ -188,9 +191,10 @@ def healthz_bypass_payload(host):
     token-free `/healthz` (204 live, 530/1033 dead) instead of the edge's 302
     login redirect. Only that path: Cloudflare matches the more specific app
     first, the host's own app + Allow policy stay as they are, and a `/healthz`
-    route never carries a token (tokens are the FIRST path segment). A host with
-    a path or a space would widen the bypass, so it is refused."""
-    if not host or "/" in host or " " in host:
+    route never carries a token (tokens are the FIRST path segment). Anything but
+    a strict bare hostname (a wildcard, a port, a path) would widen the bypass,
+    so it is refused."""
+    if not _BARE_HOSTNAME.fullmatch(host or ""):
         raise ValueError("healthz bypass needs a bare hostname, got %r" % host)
     return {
         "name": "drop healthz — %s" % host,
@@ -208,19 +212,22 @@ def apply_healthz_bypass(client, host, dry_run=True):
     (stderr + the summary) but never un-lives the lane: Access itself is in
     place, and without the bypass the probe keeps today's 302 note."""
     import cli_webterm_access as acc
-    payload = healthz_bypass_payload(host)
-    app, (st, body) = client.find_app_by_domain(payload["domain"])
-    verb = "create" if app is None else "update"
-    if st != 200:
-        msg = "cannot read Access apps (HTTP %s): %s" % (st, acc._first_err(body))
-    elif dry_run:
-        return "healthz bypass (dry-run): would %s %s" % (verb, payload["domain"])
-    else:
-        st, body = (client.create_app(payload) if app is None
-                    else client.update_app(app["id"], payload))
-        if acc._ok(st, body):
-            return "healthz bypass %sd %s" % (verb, payload["domain"])
-        msg = "%s failed (HTTP %s): %s" % (verb, st, acc._first_err(body))
+    try:
+        payload = healthz_bypass_payload(host)
+        app, (st, body) = client.find_app_by_domain(payload["domain"])
+        verb = "create" if app is None else "update"
+        if st != 200:
+            msg = "cannot read Access apps (HTTP %s): %s" % (st, acc._first_err(body))
+        elif dry_run:
+            return "healthz bypass (dry-run): would %s %s" % (verb, payload["domain"])
+        else:
+            st, body = (client.create_app(payload) if app is None
+                        else client.update_app(app["id"], payload))
+            if acc._ok(st, body):
+                return "healthz bypass %sd %s" % (verb, payload["domain"])
+            msg = "%s failed (HTTP %s): %s" % (verb, st, acc._first_err(body))
+    except Exception as e:           # a transport/timeout error must not un-live
+        msg = "%s: %s" % (type(e).__name__, e)   # the lane — loud, below
     print("drop-lanes: %s healthz bypass FAILED: %s" % (host, msg), file=sys.stderr)
     return "!!! healthz bypass FAILED: %s" % msg
 

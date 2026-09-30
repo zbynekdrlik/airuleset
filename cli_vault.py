@@ -716,6 +716,12 @@ def _secret_request(args):
 
     # Validate durable targets NOW (fail fast, before any endpoint).
     persist_map = _secret_parse_persist_map(args, names)
+    # Public-TLS drop lane (#664): bind the lane origin on the fixed drop port a
+    # managed cloudflared tunnel fronts and advertise ONE public HTTPS URL. #1192:
+    # --private = the tailscale path; no lane = exit 1 before --replace cancels
+    # anything or a name registers.
+    public_host, port, bind_ip = cli_vault_delivery.select_lane(
+        "secret", _secret_public_lane(args), getattr(args, "private", False))
 
     ready = [n for n in names if st.state(n) == "ready"]
     if ready:
@@ -743,11 +749,6 @@ def _secret_request(args):
     ips, dropped = _secret_select_ips(private,
                                       allow_plain=getattr(args, "allow_plain", False))
 
-    # Public-TLS drop lane (#664): bind the lane origin on the fixed drop port a
-    # managed cloudflared tunnel fronts and advertise ONE public HTTPS URL. #1192:
-    # --private = the tailscale path; no lane = exit 1 before anything registers.
-    public_host, port, bind_ip = cli_vault_delivery.select_lane(
-        "secret", _secret_public_lane(args), getattr(args, "private", False))
     if public_host:
         if getattr(args, "port", None) or getattr(args, "allow_plain", False):
             print("secret: public drop lane — ignoring --port/--allow-plain "

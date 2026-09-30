@@ -428,17 +428,27 @@ def cmd_share(args):
 
     #1192 (owner 30.9.): ONE public HTTPS URL (`https://<host>/s/<token>/<name>`,
     TLS + Access via the Cloudflare tunnel), printed only after its origin
-    answers locally and the /s/ URL answers 200 or 302 (Access redirect) — or NO
-    URL, a loud line naming `--private`, exit 1 (no lane, a 5xx, a timeout, a
-    dead origin). `--private` alone prints the tailscale/LAN URLs instead.
+    answers locally and the /s/ URL answers 200 or 302 (Access redirect; then
+    the bypassed /healthz decides) — or NO URL, a loud line naming `--private`,
+    exit 1 (no lane, a 5xx, a timeout, a dead tunnel or origin), decided before
+    the file is copied. `--private` alone prints the tailscale/LAN URLs instead.
 
     Prints URLs on stdout (easy to copy); diagnostics go to stderr. The local
     file-drop service must be up (both channels proxy to it) — if it is down, one
     restart is attempted before refusing to print a dead URL (no-localhost-urls)."""
     from urllib.parse import urlsplit
 
+    import cli_drop_gateway as _dg
+    import cli_vault_delivery as _vd
     from filedrop import advertise_urls
     from filedrop.share import ShareError, share
+    private = bool(getattr(args, "private", False))
+    if not private:                 # #1192: refuse BEFORE any side effect
+        try:
+            lane_full = _dg.resolve_public_lane_full()
+        except Exception:
+            lane_full = None        # select_lane names the reason, loudly
+        public_host, _drop_port, bind_ip = _vd.select_lane("share", lane_full, False)
     try:
         url, dest = share(args.path)
     except ShareError as e:
@@ -454,26 +464,18 @@ def cmd_share(args):
               file=sys.stderr)
         _restart_filedrop_service()
         if not _wait_filedrop_live(url):
-            print(f"share: file copied to {dest} but the file-drop server is DOWN at "
-                  f"{filedrop_url()} — start it with "
+            print(f"share: file copied to {dest} but the local file-drop service "
+                  f"is DOWN — start it with "
                   f"`systemctl --user start filedrop.service`.", file=sys.stderr)
             sys.exit(1)
 
     sp = urlsplit(url)
-    if getattr(args, "private", False):     # #1192: tailscale/LAN on request only
+    if private:                     # #1192: tailscale/LAN on explicit request only
         for u in [u for u in advertise_urls(port=sp.port, path=sp.path)
                   if _filedrop_is_live(u)] or [url]:
             print(u)
         return
     token_name = sp.path.lstrip("/")             # "<token>/<name>" for the /s/ URL
-
-    import cli_drop_gateway as _dg
-    import cli_vault_delivery as _vd
-    try:
-        lane_full = _dg.resolve_public_lane_full()
-    except Exception:
-        lane_full = None            # select_lane names the reason, loudly
-    public_host, _drop_port, bind_ip = _vd.select_lane("share", lane_full, False)
     public_url = f"https://{public_host}/s/{token_name}"
     # The /s/ route reaches the PERSISTENT filedrop service at the ingress origin
     # `bind_ip:<this box's filedrop port>`. VERIFY that origin actually answers
@@ -484,6 +486,14 @@ def cmd_share(args):
     # is not bound on a tailscale box, so its /s/ would 502 — never advertise it).
     origin_live = _filedrop_is_live(f"http://{bind_ip}:{sp.port}/")
     status = _public_share_status(public_url) if origin_live else None
+    unverified = False
+    if origin_live and status == 302:
+        # Access answered at the EDGE: ask the tunnel itself via the token-free
+        # /healthz its path-scoped bypass app lets through (#1192). 530/no answer
+        # = dead tunnel; 302 = bypass not applied yet; anything else = it answered.
+        hz = _public_share_status(_vd.public_probe_url(public_host))
+        unverified = hz == 302
+        status = hz if hz in (None, 530) else status
     if not (origin_live and status in (200, 302)):
         why = ("tunnel origin %s down" % bind_ip if not origin_live
                else _vd.dead_detail(status))
@@ -495,6 +505,8 @@ def cmd_share(args):
     except Exception:
         _access = True
     print(_dg.public_share_url_line(public_host, token_name, access=_access))
+    if unverified:
+        print(_vd.access_unverified_note("share"), file=sys.stderr)
 
 
 def _filedrop_status():

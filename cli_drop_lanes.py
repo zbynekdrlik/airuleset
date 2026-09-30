@@ -815,7 +815,7 @@ CHANNEL_PENDING = "pending"
 CHANNEL_MARKER_ABSENT = "marker-absent"
 CHANNEL_UNREACHABLE = "unreachable"
 # #1115 slice D: the fail-safe branch's reason family. The resolver never raises
-# (a producer must still print its private URLs), but a REAL breakage must not
+# (a producer must still name WHY it refuses, #1192), but a REAL breakage must not
 # hide behind a benign "no-lane" on the conformance surface (slice-C review B).
 # The reason carries the exception CLASS name only — never the message, which can
 # carry a path / host / credential — as "error:<ClassName>".
@@ -858,12 +858,12 @@ def delivery_channel(*, marker_path=None, nodename=None, username=None,
     Every gateway seam is dependency-injectable for tests: ``lane_lookup``
     (``drop_lane_for_account``), ``resolve`` (``resolve_public_lane_full``),
     ``access_specs`` (``DROP_ACCESS_APPS``). ``probe(host) -> bool`` is OPTIONAL —
-    ``share`` passes its origin+HEAD reachability check; ``upload``/``secret`` omit
-    it and trust the go-live marker (their pre-#1115 behaviour).
+    no producer passes it since #1192: each probes its own public URL AFTER
+    resolving the lane (``cli_vault_delivery.emit_urls`` / ``cmd_share``).
 
     Fail-safe: any unexpected error resolving the gateway seams degrades to
     ``(None, "error:<ExceptionClassName>")`` — never a raise (a producer must
-    still print its private URLs) and never a wrong public URL. The reason carries
+    still name why it prints NO URL, #1192) and never a wrong public URL. The reason carries
     the exception CLASS name only (never its message, which can leak a
     path/host/secret); conformance collapses it to ``broken:error`` (#1115 slice
     D) so a real resolver breakage is visible instead of a benign ``no-lane``.
@@ -898,21 +898,10 @@ def delivery_channel(*, marker_path=None, nodename=None, username=None,
         return None, "%s:%s" % (CHANNEL_ERROR, type(exc).__name__)
 
 
-def channel_fallback_line(reason, prog="share", detail=None):
-    """The single labelled line a producer prints (to stderr, above its private
-    URLs on stdout) when it falls back off the public channel (#1115 Slice C).
-
-    Matches what ``share`` printed before this slice — English, a ``<prog>:``
-    prefix, the ``see #1115`` pointer — so ``share`` / ``upload`` / ``secret``
-    all speak with one voice. ``detail`` overrides the phrase for the unreachable
-    case (share passes the concrete `origin down` / `<http code>` / `timeout`)."""
-    if reason == CHANNEL_UNREACHABLE:
-        why = detail if detail is not None else _CHANNEL_FALLBACK_PHRASE[reason]
-        return ("%s: public lane unreachable (%s) — private URLs only, see #1115"
-                % (prog, why))
-    phrase = _CHANNEL_FALLBACK_PHRASE.get(reason, reason)
-    return ("%s: no public lane on this box (%s) — private URLs only, see #1115"
-            % (prog, phrase))
+def fallback_phrase(reason):
+    """The plain phrase for a non-live ``delivery_channel`` reason — what a
+    producer's #1192 refusal line names (an unknown reason reads as itself)."""
+    return _CHANNEL_FALLBACK_PHRASE.get(reason, reason)
 
 
 def _probe_public_status(url, timeout=3, user_agent="airuleset-conformance"):

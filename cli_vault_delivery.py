@@ -100,6 +100,14 @@ def refusal_line(prog, why):
             "--private (#1192)." % (prog, why, why))
 
 
+def access_unverified_note(prog):
+    """The note beside a public URL whose lane answered only Cloudflare Access's
+    edge 302: its `/healthz` bypass app is not applied yet (#1189/#1192)."""
+    return ("%s: public lane is behind Cloudflare Access and its /healthz is not "
+            "bypassed yet — the tunnel is NOT verified from here. If the link "
+            "shows error 1033, re-run with --private (#1189/#1192)." % prog)
+
+
 def select_lane(prog, lane, private):
     """The lane a producer delivers on (#1192). `--private` -> no public lane
     (the pre-existing tailscale/LAN path, opt-in only). No lane and no
@@ -110,9 +118,8 @@ def select_lane(prog, lane, private):
         return lane
     import cli_drop_lanes as _dl
     _, reason = _dl.delivery_channel()
-    phrase = _dl._CHANNEL_FALLBACK_PHRASE.get(reason, reason)
-    print(refusal_line(prog, "no public lane on this box: %s" % phrase),
-          file=sys.stderr)
+    print(refusal_line(prog, "no public lane on this box: %s"
+                       % _dl.fallback_phrase(reason)), file=sys.stderr)
     raise SystemExit(1)
 
 
@@ -148,10 +155,7 @@ def emit_urls(prog, public_host, token, ips, private_line, is_live, *,
         print(public_url_line(public_host, token), file=out)
         if code in PUBLIC_REACHED_CODES:
             return "public"
-        print("%s: public lane is behind Cloudflare Access and its /healthz is "
-              "not bypassed yet — the tunnel is NOT verified from here. If the "
-              "link shows error 1033, re-run with --private (#1189/#1192)."
-              % prog, file=err)
+        print(access_unverified_note(prog), file=err)
         return "public-unverified"
     detail = dead_detail(code) if origin_ok else "tunnel origin %s down" % origin_ip
     print(refusal_line(prog, "public URL https://%s/ is DEAD — %s"
