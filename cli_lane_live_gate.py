@@ -226,6 +226,12 @@ class LiveLaneGate:
                       % (key, got[1]), file=sys.stderr)
         return self._memo[key]
 
+    def outcomes(self):
+        """``{repo_root: err}`` for every repo this pass consulted: ``err`` is
+        None when its evidence was readable. The disk guard persists the
+        unreadable streak from this (#1195, ``disk_guard_lane_unknown``)."""
+        return {repo: got[1] for repo, got in self._memo.items()}
+
     def keep_reason(self, repo_root, wt_path):
         """Why ``wt_path`` must be kept (a skip reason), or None when the gate
         does not object: a live lane, or an ``agent-*`` worktree of a repo

@@ -489,6 +489,9 @@ def sweep_stale_worktrees(home=None, dry_run: bool = False, now=None, log_path=N
     log_path = Path(log_path) if log_path else STALE_WORKTREE_LOG_PATH
     state_path = Path(state_path) if state_path else STALE_WORKTREE_STATE_PATH
     git_run = git_run or _worktree_git
+    from cli_reclaim_guard import refuse_real_paths_under_pytest as _refuse  # #1195
+    _refuse("sweep_stale_worktrees", dry_run, log_path=log_path, state_path=state_path,
+            home=None if candidates is not None else (home or os.path.expanduser("~")))
 
     if not force and not dry_run:
         try:
