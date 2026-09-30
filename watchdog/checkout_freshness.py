@@ -136,6 +136,7 @@ FF_UNIT_ENV_KEYS = ("PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL")
 DEFAULT_BASES = cf.DEFAULT_BASES      # shared with the SessionStart hook
 RULE_PATHS = cf.RULE_PATHS
 REATTACH_IDLE_S = cf.REATTACH_IDLE_S  # #1176 census: HEAD idle before a reattach
+REATTACH_RETRY_S = 24 * 3600   # a failed reattach of the same HEAD is not relaunched sooner
 rule_lag = cf.rule_lag
 
 
@@ -288,41 +289,51 @@ def _launch_ff_unit(path, remote, branch, home, unit_run, mode="ff", base=None):
                             env_prefixes=())
 
 
-def _run_fix(path, remote, entry, v, mode, dry_run, budget_left, prev, home, unit_run):
+def _run_fix(path, remote, entry, v, mode, ctx):
     """Carry out a proven `ff` / `reattach` verdict: DETACHED in a transient
     unit (collected next sweep), or — without systemd-run — in-unit only when
-    the sweep can afford it. Returns (state, reason, behind, deferred)."""
+    the sweep can afford it. Returns (state, reason, behind, deferred); a fix
+    that is not happening now sets the structured `entry["fix_hold"]`."""
     what = "fast-forward" if mode == "ff" else "reattach to %s" % v.detail
-    if dry_run:
+    prev = ctx["prev"]
+    if ctx["dry_run"]:
+        entry["fix_hold"] = "dry-run"
         return "lagging", "would %s (dry-run)" % what, v.behind, False
     pending = prev.get("ff_pending")
     if _pending_live(pending, entry["checked"]):
         entry["ff_pending"] = pending    # never a second launch
         return ("lagging", "%s running in unit %s" % (what, pending.get("unit")),
                 v.behind, False)
-    launched, why = _launch_ff_unit(path, remote, v.branch, home, unit_run, mode,
-                                    v.detail if mode == "reattach" else None)
+    launched, why = _launch_ff_unit(path, remote, v.branch, ctx["home"], ctx["unit_run"],
+                                    mode, v.detail if mode == "reattach" else None)
     if launched or why == user_unit.TIMEOUT_WHY:
         # a client timeout is UNKNOWN (the bus may have started the unit):
         # never race it with an in-unit merge — wait for its result instead
         unit = ff_unit_name(path)
         entry["ff_pending"] = {"unit": unit, "launched": entry["checked"],
-                               "behind": v.behind, "mode": mode}
+                               "behind": v.behind, "mode": mode,
+                               "from": v.branch, "head": _head_sha(path)}
         note = {"exists": " (already running)",
                 user_unit.TIMEOUT_WHY: " (launch unconfirmed: systemd-run client "
                                        "timed out)"}.get(why, "")
         return ("lagging", "%s running in unit %s%s" % (what, unit, note),
                 v.behind, False)
-    left = budget_left() if budget_left is not None else None
+    left = ctx["budget_left"]() if ctx["budget_left"] is not None else None
     if left is not None and left < MERGE_RESERVE_S:
         entry["deferrals"] = int(prev.get("deferrals") or 0) + 1
+        entry["fix_hold"] = "deferred"
         return ("lagging", "%s deferred (%.0fs of sweep budget left; %s)" % (
             what, left, why), v.behind, True)
     if mode == "reattach":
+        head = _head_sha(path)
         ok = cf.reattach(path, v)             # unbounded once started
         done = "reattached to %s, fast-forwarded %d commit(s)" % (v.detail, v.behind)
         if ok:
             entry["branch"] = v.detail
+            entry["notice"] = cf.reattach_line(v.branch, v.detail)
+        else:
+            entry["reattach_failed"] = {"head": head, "base": v.detail,
+                                        "at": entry["checked"]}
     else:
         ok = cf.fast_forward(path, v, run_hooks=False)   # unbounded once started
         done = "fast-forwarded %d commit(s)" % v.behind
@@ -332,41 +343,66 @@ def _run_fix(path, remote, entry, v, mode, dry_run, budget_left, prev, home, uni
     return "lagging", "%s failed in-unit (%s)" % (what, why), v.behind, False
 
 
-def _base_branch_result(path, remote, entry, dry_run, budget_left, prev=None,
-                        home=None, unit_run=None):
+def _head_sha(path):
+    rc, out = cf.run_git(path, ["rev-parse", "--verify", "-q", "HEAD"])
+    return out.strip() if rc == 0 else None
+
+
+def _base_branch_result(path, remote, entry, ctx):
     """A checkout ON a base branch: the shared predicate decides; a provably
     safe fast-forward runs through `_run_fix`. Returns (state, reason, behind,
-    deferred)."""
-    prev = prev or {}
+    deferred); a refusal is also recorded as the structured `refusal`."""
     v = cf.ff_verdict(path, remote)
     if v.action == "ff":
-        return _run_fix(path, remote, entry, v, "ff", dry_run, budget_left, prev,
-                        home, unit_run)
+        return _run_fix(path, remote, entry, v, "ff", ctx)
     if v.action == "noop" and v.reason == "up-to-date":
         return "current", "up-to-date", 0, False
     if v.action == "noop":
         why = {"no-target": "no %s to compare with" % v.target,
                "behind-unmeasurable": "behind count unmeasurable"}.get(v.reason, v.reason)
         return "lagging", why, v.behind, False
+    entry["refusal"] = v.reason
     detail = v.detail if isinstance(v.detail, str) or v.detail is None \
         else " ".join(v.detail)
     return "lagging", v.reason + (" (%s)" % detail if detail else ""), v.behind, False
 
 
-def _work_branch_result(path, branch, remote, base, entry, dry_run, budget_left,
-                        prev=None, home=None, unit_run=None):
+def _recent_reattach_failure(prev, path, base, now):
+    """The last reattach of THIS HEAD onto THIS base failed less than
+    REATTACH_RETRY_S ago — never relaunch it every period (#1176 census
+    review); the session is told instead."""
+    f = prev.get("reattach_failed")
+    at = f.get("at") if isinstance(f, dict) else None
+    return (isinstance(at, (int, float)) and 0 <= now - at < REATTACH_RETRY_S
+            and f.get("base") == base and f.get("head") == _head_sha(path))
+
+
+def _work_branch_result(path, branch, remote, base, entry, ctx):
     """A checkout on a WORK branch (or detached). A clean detached HEAD / fully
-    merged work branch that `cf.reattach_verdict` proves safe is reattached to
-    the base through `_run_fix` (#1176 census items 1+2); anything else is
-    never moved — its rule-file lag against the base is measured, and a
-    refusal is named. Returns (state, reason, behind, deferred)."""
+    merged work branch that `cf.reattach_verdict` proves safe — and whose
+    session is not live in it, and whose last reattach of this HEAD did not
+    just fail — is reattached to the base through `_run_fix` (#1176 census
+    items 1+2); anything else is never moved: its rule-file lag against the
+    base is measured and the refusal is named (and recorded as the structured
+    `refusal`). Returns (state, reason, behind, deferred)."""
     if not base:
         return "untracked", "no base branch on %s" % remote, None, False
     ref = cf.remote_ref(remote, base)
     rv = cf.reattach_verdict(path, remote, base, now=entry["checked"])
     if rv.action == "reattach":
-        return _run_fix(path, remote, entry, rv, "reattach", dry_run, budget_left,
-                        prev or {}, home, unit_run)
+        active = ctx["session_active"](path) if ctx["session_active"] else False
+        if _recent_reattach_failure(ctx["prev"], path, base, entry["checked"]):
+            rv = cf.Verdict("refuse", "reattach-failed-recently", detail="retry after %dh"
+                            % (REATTACH_RETRY_S // 3600))
+            entry["reattach_failed"] = ctx["prev"]["reattach_failed"]
+        elif active is not False:
+            rv = cf.Verdict("refuse", "session-active", detail=(
+                "a live claude session works in this checkout" if active
+                else "session liveness unmeasurable"))
+        else:
+            return _run_fix(path, remote, entry, rv, "reattach", ctx)
+    if rv.action == "refuse":
+        entry["refusal"] = rv.reason
     behind = cf.count_behind(path, ref)
     files = rule_lag(path, ref)
     label = "work branch '%s'" % branch if branch else "detached HEAD"
@@ -382,11 +418,11 @@ def _work_branch_result(path, branch, remote, base, entry, dry_run, budget_left,
 
 def _notice(entry, path, branch, remote, base):
     """#1176 census item 3: a lagging checkout that nothing is fixing gets the
-    rule-lag notice (`checkout_notice` types it into the stream's own pane)."""
+    rule-lag notice (`checkout_notice` types it into the stream's own pane).
+    Decided on STRUCTURED fields only, never the reason prose (review: a branch
+    named `*deferred*` was silenced, a mid-rebase session told to merge)."""
     if entry.get("state") != "lagging" or "ff_pending" in entry or not base \
-            or str(entry.get("reason", "")).startswith(
-                ("in-progress", "git-dir-unmeasurable", "would ")) \
-            or "deferred" in str(entry.get("reason", "")):
+            or entry.get("fix_hold") or entry.get("refusal") in cf.NO_NOTICE_REASONS:
         return
     files = rule_lag(path, cf.remote_ref(remote, base))
     if files:
@@ -424,17 +460,23 @@ def _is_checkout_root(path):
 
 def check_checkout(c, now, prev=None, dry_run=False,
                    fetch_timeout=FETCH_TIMEOUT_S, budget_left=None, home=None,
-                   unit_run=None):
+                   unit_run=None, session_active=None):
     """Fetch + fast-forward-when-safe + measure ONE checkout under its own
     deadline; returns its status entry (never raises for a git failure).
-    `unit_run` is the systemd-run client seam (tests)."""
+    `unit_run` is the systemd-run client seam (tests); `session_active(path)`
+    says whether a live claude session works in the checkout (True / False /
+    None = unmeasurable), None = no pane information (the reflog idle guard
+    alone decides)."""
     prev = prev if isinstance(prev, dict) else {}
     used = fetch_timeout_for(prev, budget_left, fetch_timeout)
+    ctx = {"prev": prev, "dry_run": dry_run, "budget_left": budget_left,
+           "home": home, "unit_run": unit_run, "session_active": session_active}
     with cf.deadline(PER_CHECKOUT_S - 5 + (used - fetch_timeout)):
-        return _check(c, now, prev, dry_run, used, budget_left, home, unit_run)
+        return _check(c, now, used, ctx)
 
 
-def _check(c, now, prev, dry_run, used, budget_left, home=None, unit_run=None):
+def _check(c, now, used, ctx):
+    prev = ctx["prev"]
     path = c["path"]
     entry = {"source": c.get("source"), "checked": now}
     if _pending_live(prev.get("ff_pending"), now):   # collected by a later sweep
@@ -451,17 +493,16 @@ def _check(c, now, prev, dry_run, used, budget_left, home=None, unit_run=None):
     if not remote:
         entry.update(state="untracked", reason="no git remote")
         return entry
-    frc = _fetch(path, remote, dry_run, used)
+    frc = _fetch(path, remote, ctx["dry_run"], used)
     on_remote = [b for b in bases if cf.ref_exists(path, cf.remote_ref(remote, b))]
     base = branch if branch in bases else (on_remote[0] if on_remote else None)
     entry.update(remote=remote, branch=branch, base=base, fetch_rc=frc)
     deferred = False
     if branch and branch in bases:
-        state, reason, behind, deferred = _base_branch_result(
-            path, remote, entry, dry_run, budget_left, prev, home, unit_run)
+        state, reason, behind, deferred = _base_branch_result(path, remote, entry, ctx)
     else:
         state, reason, behind, deferred = _work_branch_result(
-            path, branch, remote, base, entry, dry_run, budget_left, prev, home, unit_run)
+            path, branch, remote, base, entry, ctx)
     if frc != 0:
         note = "fetch %s failed (rc %d)" % (remote, frc)
         state, reason = ("lagging", note) if state == "current" else (
@@ -479,6 +520,9 @@ def _check(c, now, prev, dry_run, used, budget_left, home=None, unit_run=None):
             prev.get("checked"), (int, float)) else 0
     if prev.get("ff") and "ff" not in entry:
         entry["ff"] = prev["ff"]
+    if "reattach_failed" not in entry and _recent_reattach_failure(
+            prev, path, base, now):
+        entry["reattach_failed"] = prev["reattach_failed"]
     _notice(entry, path, entry.get("branch"), remote, base)
     return entry
 
@@ -512,19 +556,24 @@ def _read_result(path):
     return data if isinstance(data, dict) else {"ok": False, "reason": "malformed result"}
 
 
-def _apply_result(e, res, unit, now):
-    """Fold one collected result into its status entry."""
+def _apply_result(e, res, unit, now, pending=None):
+    """Fold one collected result into its status entry. A reattach is never
+    silent: success leaves the `reattach_line` notice for the session, a
+    failure records `reattach_failed` for THIS HEAD (no relaunch loop)."""
+    pending = pending if isinstance(pending, dict) else {}
+    reattach = res.get("mode") == "reattach" or pending.get("mode") == "reattach"
+    for k in ("notice", "rule_lag"):
+        e.pop(k, None)
     if res.get("ok"):
         commits = res.get("commits")
         if not isinstance(commits, int) or isinstance(commits, bool):
             commits = e.get("behind")
         e.update(state="current", behind=0)
-        if res.get("mode") == "reattach" and res.get("base"):
+        if reattach and res.get("base"):
             e.update(branch=res["base"], base=res["base"])
+            e["notice"] = cf.reattach_line(pending.get("from"), res["base"])
         done = "reattached to %s, fast-forwarded" % res.get("base") \
-            if res.get("mode") == "reattach" else "fast-forwarded"
-        for k in ("notice", "rule_lag"):
-            e.pop(k, None)
+            if reattach else "fast-forwarded"
         if commits == 0:   # a no-op run (e.g. a session start merged it first)
             e["reason"] = "%s (unit %s)" % (res.get("reason") or "already up-to-date", unit)
         else:
@@ -536,9 +585,11 @@ def _apply_result(e, res, unit, now):
         e.pop("behind_since", None)
     else:
         e.update(state="lagging", reason="%s failed: %s" % (
-            "reattach" if res.get("mode") == "reattach" else "fast-forward",
-            res.get("reason")))
+            "reattach" if reattach else "fast-forward", res.get("reason")))
         e.setdefault("since", now)
+        if reattach:
+            e["reattach_failed"] = {"head": pending.get("head"), "at": now,
+                                    "base": res.get("base") or e.get("base")}
 
 
 def collect_ff_results(cos, now, home=None):
@@ -572,7 +623,7 @@ def collect_ff_results(cos, now, home=None):
         elif os.path.lexists(rpath):
             consumed.append(rpath)
         del e["ff_pending"]
-        _apply_result(e, res, pending.get("unit"), now)
+        _apply_result(e, res, pending.get("unit"), now, pending)
         logs.append(decision_line(path, e))
     return logs, consumed
 
@@ -598,8 +649,9 @@ def run_job(now, *, dry_run=False, budget_left=None, home=None,
     when the sweep hands over its `panes` — deliver the rule-lag notices
     (`checkout_notice`, #1176 census item 3); returns the journal lines.
     `checkouts` / `home` / `clock` / `unit_run` are test seams."""
+    active = None if panes is None else _session_active_fn(panes, projects_dir, now)
     logs = _run_checks(now, dry_run, budget_left, home, checkouts, clock,
-                       fetch_timeout, unit_run)
+                       fetch_timeout, unit_run, active)
     if panes is not None:
         from watchdog import checkout_notice
         logs += checkout_notice.run_job(
@@ -610,8 +662,37 @@ def run_job(now, *, dry_run=False, budget_left=None, home=None,
     return logs
 
 
+def _session_active_fn(panes, projects_dir, now):
+    """`session_active(path)` from the sweep's claude panes (#1176 census
+    review: git idleness is not session idleness — a session reading code or
+    waiting on an answer on a deliberately detached HEAD must never be moved
+    under its feet): True when a pane whose cwd is inside the checkout has a
+    transcript written within REATTACH_IDLE_S (wall clock), None when such a
+    pane's transcript cannot be resolved (fail safe: never move), else
+    False."""
+    import watchdog
+    from watchdog import checkout_notice
+
+    def active(path):
+        own = [cwd for _pid, cwd in panes if cwd and checkout_notice.inside(cwd, path)]
+        verdict = False
+        for cwd in own:
+            try:
+                tinfo = watchdog.find_active_transcript(projects_dir, cwd)
+                tpath = tinfo[0] if isinstance(tinfo, (tuple, list)) else tinfo
+                age = max(now, time.time()) - os.stat(tpath).st_mtime if tpath else None
+            except (OSError, TypeError, ValueError):
+                age = None
+            if age is None:
+                verdict = None
+            elif age < REATTACH_IDLE_S:
+                return True
+        return verdict
+    return active
+
+
 def _run_checks(now, dry_run, budget_left, home, checkouts, clock, fetch_timeout,
-                unit_run):
+                unit_run, session_active=None):
     """The checkout pass of `run_job`."""
     logs = []
     if checkouts is None:
@@ -651,7 +732,8 @@ def _run_checks(now, dry_run, budget_left, home, checkouts, clock, fetch_timeout
             break
         try:
             e = check_checkout(c, now, cos.get(c["path"]), dry_run,
-                               fetch_timeout, budget_left, home, unit_run)
+                               fetch_timeout, budget_left, home, unit_run,
+                               session_active)
         except Exception as exc:  # noqa: BLE001 -- one checkout never kills the rest
             old = cos.get(c["path"]) or {}
             e = {"source": c.get("source"), "checked": now, "state": "lagging",

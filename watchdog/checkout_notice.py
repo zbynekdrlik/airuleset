@@ -29,11 +29,17 @@ STATE_KEY = "checkout_notice"
 REPEAT_S = 24 * 3600          # the same (checkout, branch, base) again at most daily
 KEEP_S = 7 * 24 * 3600        # a record whose checkout stopped lagging is pruned
 MIN_BUDGET_S = 30             # one verified keystroke delivery (polls ~20 s)
+KIND_OFF_LOG_S = 3600         # the kind-off decision line at most hourly
+_LANE_DIR = os.sep + os.path.join(".claude", "worktrees") + os.sep
 
 
-def _inside(cwd, path):
-    c, p = os.path.realpath(cwd), os.path.realpath(path)
-    return c == p or c.startswith(p.rstrip(os.sep) + os.sep)
+def inside(cwd, path):
+    """`cwd` is the checkout `path` or a directory in it — but never one of its
+    `.claude/worktrees/*` lane checkouts (a lane pane is not the session)."""
+    c, p = os.path.realpath(cwd), os.path.realpath(path).rstrip(os.sep)
+    if c == p:
+        return True
+    return c.startswith(p + os.sep) and not (c + os.sep).startswith(p + _LANE_DIR)
 
 
 def _num(v):
@@ -67,8 +73,12 @@ def notice_job(now, state, panes, *, status, ready, deliver, mark_sent,
     if not entries:
         return logs
     if not nudges_enabled(NUDGE_KIND):
-        logs.append("checkout-notice: skip:kind-off (%d checkout(s) with rule lag; "
-                    "stage: airuleset.py nudges on --kind %s)" % (len(entries), NUDGE_KIND))
+        last = _num(state.get(STATE_KEY + "_kindoff"))
+        if last is None or last > now or now - last >= KIND_OFF_LOG_S:
+            logs.append("checkout-notice: skip:kind-off (%d checkout(s) with rule lag; "
+                        "stage: airuleset.py nudges on --kind %s)" % (len(entries), NUDGE_KIND))
+            if not dry_run:
+                state[STATE_KEY + "_kindoff"] = now
         return logs
     store = state.get(STATE_KEY) if isinstance(state.get(STATE_KEY), dict) else {}
     store = dict(store)
@@ -78,7 +88,7 @@ def notice_job(now, state, panes, *, status, ready, deliver, mark_sent,
         if hold:
             logs.append("checkout-notice: %s hold:repeat (%s)" % (path, hold))
             continue
-        own = [(pid, cwd) for pid, cwd in panes if cwd and _inside(cwd, path)]
+        own = [(pid, cwd) for pid, cwd in panes if cwd and inside(cwd, path)]
         if len(own) != 1:
             logs.append("checkout-notice: %s skip:%s" % (
                 path, "no-pane" if not own else "ambiguous-pane(%d)" % len(own)))

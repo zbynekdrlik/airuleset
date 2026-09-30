@@ -62,6 +62,9 @@ DEFAULT_BASES = ("develop", "dev", "main", "master")
 RULE_PATHS = ("CLAUDE.md", ".claude", ":(glob)**/CLAUDE.md",
               ":(glob)**/.claude/**")
 REATTACH_IDLE_S = 3600        # HEAD unmoved this long before a reattach (#1176 census)
+# a session mid-operation (merge / rebase / bisect …) or an unreadable git dir
+# is never told to merge the base (#1176 census review)
+NO_NOTICE_REASONS = ("in-progress", "git-dir-unmeasurable")
 
 
 # --------------------------------------------------------------------------- #
@@ -404,10 +407,38 @@ def notice_line(branch, n, remote, base):
     on = "vetve %s" % branch if branch else "detached HEAD (bez vetvy)"
     noun, verb = (("súbor", "je") if n == 1 else ("súbory", "sú") if 2 <= n <= 4
                   else ("súborov", "je"))
+    if branch and branch == base:   # a dirty / diverged base: it cannot switch to itself
+        fix = "commitni alebo odlož lokálne zmeny a zmerguj %s/%s" % (remote, base)
+    else:
+        fix = "zmerguj %s/%s do vetvy alebo prejdi na %s" % (remote, base, base)
     return ("checkout-freshness: tvoj checkout je na %s, %d %s s pravidlami "
-            "(CLAUDE.md / .claude/) %s pozadu za %s/%s — zmerguj %s/%s do vetvy "
-            "alebo prejdi na %s." % (on, n, noun, verb, remote, base, remote,
-                                     base, base))
+            "(CLAUDE.md / .claude/) %s pozadu za %s/%s — %s." % (
+                on, n, noun, verb, remote, base, fix))
+
+
+def reattach_line(branch, base):
+    """What Job 53 tells the session after it moved the checkout onto `base`
+    (#1176 census review: a reattach is never silent)."""
+    was = "vetvy %s (tá ostala zachovaná)" % branch if branch else "detached HEAD"
+    return ("checkout-freshness: presunul som tvoj checkout z %s na %s a posunul ho "
+            "na aktuálne pravidlá — ďalšie commity pôjdu na %s, na vlastnú prácu "
+            "si vytvor vetvu." % (was, base, base))
+
+
+def base_in_other_worktree(cwd, base):
+    """True when `refs/heads/<base>` is checked out in ANOTHER worktree of the
+    same repository (git refuses both the local fetch into it and the checkout
+    — a reattach there could only fail, forever); None when unmeasurable."""
+    rc, out = run_git(cwd, ["worktree", "list", "--porcelain"])
+    if rc != 0:
+        return None
+    here, path = os.path.realpath(cwd), None
+    for line in out.splitlines():
+        if line.startswith("worktree "):
+            path = os.path.realpath(line[len("worktree "):])
+        elif line == "branch refs/heads/%s" % base and path != here:
+            return True
+    return False
 
 
 def _head_moved_at(cwd):
@@ -462,15 +493,22 @@ def reattach_verdict(cwd, remote, base, now=None, idle_s=REATTACH_IDLE_S):
         if rc != 0 or out.strip() != "0":
             return Verdict("refuse", "local-base-ahead", branch, target, ref, behind,
                            detail="local %s is ahead of %s" % (base, target))
+    other = base_in_other_worktree(cwd, base)
+    if other is not False:
+        return Verdict("refuse", "base-in-other-worktree", branch, target, ref, behind,
+                       detail="%s is checked out in another worktree" % base
+                       if other else "worktree list unmeasurable")
     collide = colliding_paths(cwd, ref)
     if collide:
         return Verdict("refuse", "collision", branch, target, ref, behind, detail=collide)
     moved = _head_moved_at(cwd)
+    if moved is None:
+        return Verdict("refuse", "head-activity-unmeasurable", branch, target, ref, behind,
+                       detail="no HEAD reflog")
     now = time.time() if now is None else now
-    if moved is None or now - moved < idle_s:
+    if now - moved < idle_s:
         return Verdict("refuse", "recently-active", branch, target, ref, behind,
-                       detail="HEAD moved %s" % ("at an unknown time" if moved is None
-                                                 else "%ds ago" % (now - moved)))
+                       detail="HEAD moved %ds ago" % (now - moved))
     return Verdict("reattach", "safe", branch, target, ref, behind, detail=base)
 
 
@@ -483,8 +521,9 @@ def reattach(cwd, verdict):
     if verdict.action != "reattach":
         return False
     base = verdict.detail
-    rc, _ = run_git(cwd, ["-c", "gc.auto=0", "-c", "maintenance.auto=false", "fetch",
-                          "--quiet", "--no-write-fetch-head", ".",
+    rc, _ = run_git(cwd, ["-c", "gc.auto=0", "-c", "maintenance.auto=false",
+                          "-c", "core.hooksPath=/dev/null", "fetch", "--quiet",
+                          "--no-write-fetch-head", "--no-recurse-submodules", ".",
                           "%s:refs/heads/%s" % (verdict.ref, base)],
                     timeout=None, honor_deadline=False)
     if rc != 0:
@@ -496,7 +535,9 @@ def reattach(cwd, verdict):
         _log("checkout of %s in %s failed (rc %d)" % (base, cwd, rc))
         return False
     rc, _ = run_git(cwd, ["config", "--get", "branch.%s.remote" % base])
-    if rc != 0:   # a base the local fetch just created: track the remote base
+    if rc != 0 and verdict.ref.startswith("refs/remotes/origin/"):
+        # a base the local fetch just created tracks origin; never another
+        # remote (a fork's `upstream` would make a bare push target the project)
         run_git(cwd, ["branch", "--quiet", "--set-upstream-to=%s" % verdict.ref, base])
     return True
 
@@ -620,7 +661,7 @@ def hook_main(cwd=None):
     line = hook_line(v, applied)
     if line:
         print(line)
-    if not applied:
+    if not applied and v.reason not in NO_NOTICE_REASONS:
         notice = hook_notice(cwd, branch)
         if notice:
             print(notice)
