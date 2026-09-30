@@ -719,7 +719,9 @@ def _secret_request(args):
     # Public-TLS drop lane (#664): bind the lane origin on the fixed drop port a
     # managed cloudflared tunnel fronts and advertise ONE public HTTPS URL. #1192:
     # --private = the tailscale path; no lane = exit 1 before --replace cancels
-    # anything or a name registers.
+    # anything or a name registers. (A DEAD lane is known only after the new
+    # endpoint answers, so --replace has already cancelled by then: the old
+    # endpoint holds the fixed drop port.)
     public_host, port, bind_ip = cli_vault_delivery.select_lane(
         "secret", _secret_public_lane(args), getattr(args, "private", False))
 

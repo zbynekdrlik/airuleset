@@ -423,6 +423,10 @@ def _public_share_status(url, timeout=3):
         return None                              # timeout / connection refused / DNS
 
 
+# /healthz codes only the tunnel side gives (endpoint, or no listener) #1192
+_TUNNEL_SIDE_CODES = (200, 204, 404, 502, 504)
+
+
 def cmd_share(args):
     """Copy a file into the file-drop server and print its clickable URL.
 
@@ -430,8 +434,10 @@ def cmd_share(args):
     TLS + Access via the Cloudflare tunnel), printed only after its origin
     answers locally and the /s/ URL answers 200 or 302 (Access redirect; then
     the bypassed /healthz decides) — or NO URL, a loud line naming `--private`,
-    exit 1 (no lane, a 5xx, a timeout, a dead tunnel or origin), decided before
-    the file is copied. `--private` alone prints the tailscale/LAN URLs instead.
+    exit 1. A missing lane refuses before the file is copied; reachability (a
+    5xx, a timeout, a dead tunnel or origin) needs the token so is checked
+    after (the unshared copy ages out with the file-drop's prune). `--private`
+    alone prints the tailscale/LAN URLs instead.
 
     Prints URLs on stdout (easy to copy); diagnostics go to stderr. The local
     file-drop service must be up (both channels proxy to it) — if it is down, one
@@ -490,9 +496,10 @@ def cmd_share(args):
     if origin_live and status == 302:
         # Access answered at the EDGE: ask the tunnel itself via the token-free
         # /healthz its path-scoped bypass app lets through (#1192). 530/no answer
-        # = dead tunnel; 302 = bypass not applied yet; anything else = it answered.
+        # = dead tunnel; a tunnel-side code = verified; anything else (302 = no
+        # bypass yet, a WAF 403, a 429) = the edge again -> the URL + the note.
         hz = _public_share_status(_vd.public_probe_url(public_host))
-        unverified = hz == 302
+        unverified = hz not in (None, 530) + _TUNNEL_SIDE_CODES
         status = hz if hz in (None, 530) else status
     if not (origin_live and status in (200, 302)):
         why = ("tunnel origin %s down" % bind_ip if not origin_live
