@@ -28,6 +28,7 @@
     "cli_key_rotation.py": 711,
     "cli_lane_liveness.py": 547,
     "cli_lane_overlap.py": 294,
+    "cli_lane_target_reclaim.py": 657,
     "cli_mdreview_audit.py": 827,
     "cli_model_audit.py": 154,
     "cli_odoo_ro.py": 297,
@@ -66,6 +67,10 @@
     "cli_webterm_tunnel.py": 205,
     "cli_webterm_zbynek.py": 154,
     "cli_work_class.py": 638,
+    "cli_worktree_common.py": 321,
+    "cli_worktree_orphans.py": 137,
+    "cli_worktree_reclaim.py": 271,
+    "cli_worktree_stale.py": 727,
     "cli_worktree_sweep.py": 102,
     "close_trigger.py": 477,
     "design_gate.py": 26,
@@ -667,6 +672,7 @@
     "tests/test_working_time_607.py": 137,
     "tests/test_worktree_backup_push.py": 395,
     "tests/test_worktree_scratchpad_namespacing.py": 227,
+    "tests/test_worktree_sweep_facade_1194.py": 194,
     "tests/test_worktree_write_guard.py": 598,
     "tests/test_wrapped_draft.py": 630,
     "watchdog/__init__.py": 6030,
@@ -728,13 +734,7 @@
     "watchdog/usage.py": 316,
     "watchdog/wedge.py": 390,
     "watchdog/wip_ref_sweep.py": 347,
-    "working_time.py": 78,
-    "cli_worktree_common.py": 321,
-    "cli_worktree_stale.py": 724,
-    "cli_worktree_orphans.py": 137,
-    "cli_worktree_reclaim.py": 271,
-    "cli_lane_target_reclaim.py": 654,
-    "tests/test_worktree_sweep_facade_1194.py": 194
+    "working_time.py": 78
   },
   "functions": {
     "airuleset.py::_notify_run_card": 288,
@@ -746,6 +746,7 @@
     "airuleset.py::cmd_tickets_status": 415,
     "airuleset.py::cmd_watchdog": 343,
     "airuleset.py::main": 1188,
+    "cli_lane_target_reclaim.py::purge_merged_lane_targets": 222,
     "cli_quals.py::_slice_mine_and_handed": 244,
     "cli_quals_cmd.py::cmd_core_quals": 305,
     "cli_quals_cmd.py::cmd_slice_quals": 314,
@@ -755,6 +756,7 @@
     "cli_tmux_provisioning.py::apply_tmux_history_limit": 229,
     "cli_vault.py::cmd_secret": 228,
     "cli_webterm_profiles.py::zbynek_inventory": 221,
+    "cli_worktree_stale.py::sweep_stale_worktrees": 206,
     "gates/filing/__main__.py::classify_command": 315,
     "watchdog/__init__.py::run_once": 3466,
     "watchdog/cards.py::card_reconcile": 329,
@@ -771,9 +773,7 @@
     "watchdog/queue_arrival_recheck.py::goal_queue_arrival_recheck": 316,
     "watchdog/release_gap.py::goal_release_gap_recheck": 237,
     "watchdog/stash.py::deliver_with_stash": 299,
-    "watchdog/wedge.py::prompt_wedge_check": 294,
-    "cli_lane_target_reclaim.py::purge_merged_lane_targets": 219,
-    "cli_worktree_stale.py::sweep_stale_worktrees": 203
+    "watchdog/wedge.py::prompt_wedge_check": 294
   },
   "rule_bytes": {
     ".claude/rules/airuleset-internals.md": 8192,
