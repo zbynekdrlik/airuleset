@@ -355,6 +355,40 @@ class TestCheckedEvidence(unittest.TestCase):
         self.assertEqual(ids, set())
         self.assertTrue(err)
 
+    def test_one_unreadable_session_never_sinks_the_others(self):
+        """A session dir that cannot be looked into is an error for the gate,
+        but the other sessions' live ids are still read (the overlap set's
+        pre-#1193 behaviour: one bad session never empties the set)."""
+        import cli_lane_live_gate as g
+        _transcript(self.home, self.root, "agent-a", sid="sid1")
+        _transcript(self.home, self.root, "agent-b", sid="sid2")
+        real = g._is_dir
+
+        def _flaky(path):
+            if os.sep + "sid2" + os.sep in path:
+                raise PermissionError(13, "Permission denied", path)
+            return real(path)
+
+        with mock.patch.object(g, "_is_dir", _flaky):
+            ids, err = g.live_worker_agent_ids_checked(self.root, str(self.proj),
+                                                       time.time())
+        self.assertEqual(ids, {"agent-a"})
+        self.assertIn("sid2", err)
+
+    def test_gate_memoizes_one_read_per_repo_per_pass(self):
+        import cli_lane_live_gate as g
+        calls = []
+
+        def _ev(root, projects_dir, now):
+            calls.append(root)
+            return {"agent-x"}, None
+
+        gate = g.LiveLaneGate(projects_dir=str(self.proj), evidence_fn=_ev)
+        self.assertEqual(gate.keep_reason(self.root, self.root + "/.claude/worktrees/agent-x"),
+                         LIVE_REASON)
+        self.assertIsNone(gate.keep_reason(self.root, self.root + "/.claude/worktrees/agent-y/"))
+        self.assertEqual(calls, [self.root])
+
     def test_legacy_reader_keeps_its_contract(self):
         """Other callers (classify_lanes / the overlap set) still get a bare
         set, empty on failure — unchanged."""

@@ -672,7 +672,7 @@ def discover_orphaned_worktree_branches(home=None, git_run=None, now=None,
     return out
 
 
-def discover_stale_worktrees(home=None, git_run=None, now=None, pid_is_dead=None):
+def discover_stale_worktrees(home=None, git_run=None, now=None, pid_is_dead=None, live_gate=None):
     """Every worktree, across every managed repo under `home`, that is
     SAFE to reclaim -- a list of dicts {"path", "branch", "repo",
     "reason", "base", "kind"}. `reason` is `None` for a genuine candidate,
@@ -703,6 +703,8 @@ def discover_stale_worktrees(home=None, git_run=None, now=None, pid_is_dead=None
     now = _time.time() if now is None else now
     out = []
     import airuleset
+    from cli_lane_live_gate import LiveLaneGate
+    gate = live_gate or LiveLaneGate(home=home, now=now)
     for root in airuleset._checkout_roots(home):
         if not (Path(root) / ".git").is_dir():
             continue          # a worktree/submodule itself -- never a primary repo
@@ -755,8 +757,9 @@ def discover_stale_worktrees(home=None, git_run=None, now=None, pid_is_dead=None
                 row["reason"] = "%s commit(s) ahead of %s -- has real work" % (ahead, base)
                 out.append(row)
                 continue
-            row["base"] = base
-            out.append(row)     # reason stays None -- genuine candidate
+            row["base"] = base  # reason None = genuine candidate; #1193 a live lane is kept
+            row["reason"] = gate.keep_reason(root, row["path"])
+            out.append(row)
     return out
 
 
@@ -948,16 +951,17 @@ def _worktree_head_reachable_from_origin(path, branch, base, head, git_run):
 def _worktree_reclaimable(root, path, branch, base, git_run, now,
                           min_idle_s=STALE_WORKTREE_IDLE_MIN_AGE_S,
                           in_live_use=None, recency_fn=None, precious_fn=None,
-                          locked=False):
+                          locked=False, live_gate=None):
     """Classify ONE worktree directory for disk-guard reclaim. Returns a row
     ``{path, branch, repo, reason, kind, reachable_via}`` — ``reason`` is None
     ONLY when the DIRECTORY is safe to free (the branch ref is always kept). The
     guards, cheapest-first: NOT locked (a locked worktree is a live session's,
-    #348 — review 🔴), not in live use, idle > `min_idle_s`, HEAD readable (else
-    classified `orphan-gitdir` when the gitdir points nowhere), no precious
-    ignored file, clean tree, and HEAD reachable from an origin ref. The precious
-    check runs AFTER the HEAD-read so an orphan (unreadable git) is never falsely
-    kept by a git-error fail-safe (review 🟡)."""
+    #348 — review 🔴), not a live lane (``live_gate``, #1193), not in live use,
+    idle > `min_idle_s`, HEAD readable (else classified `orphan-gitdir` when the
+    gitdir points nowhere), no precious ignored file, clean tree, and HEAD
+    reachable from an origin ref. The precious check runs AFTER the HEAD-read so
+    an orphan (unreadable git) is never falsely kept by a git-error fail-safe
+    (review 🟡)."""
     git_run = git_run or _worktree_git
     in_live_use = in_live_use or _worktree_in_live_use
     recency_fn = recency_fn or _worktree_recency_age_s
@@ -965,8 +969,9 @@ def _worktree_reclaimable(root, path, branch, base, git_run, now,
     row = {"path": path, "branch": branch, "repo": root, "reason": None,
            "kind": "worktree", "reachable_via": None}
 
-    if locked:
-        row["reason"] = "locked worktree (live session, #348) — never removed"
+    kept = live_gate.keep_reason(root, path) if live_gate else None
+    if locked or kept:
+        row["reason"] = kept or "locked worktree (live session, #348) — never removed"
         return row
     if in_live_use(path):
         row["reason"] = "live process cwd/fd inside — never removed"
@@ -1016,7 +1021,7 @@ def _worktree_reclaimable(root, path, branch, base, git_run, now,
 
 
 def discover_reclaimable_worktrees(home=None, git_run=None, now=None,
-                                   min_idle_s=None, in_live_use=None):
+                                   min_idle_s=None, in_live_use=None, live_gate=None):
     """Every worktree DIRECTORY across managed repos under `home` that the
     disk-guard may reclaim (rows with ``reason is None``), plus the skipped ones
     with WHY (a pressure-log needs both). Covers registered worktrees AND #537
@@ -1030,6 +1035,8 @@ def discover_reclaimable_worktrees(home=None, git_run=None, now=None,
                                          STALE_WORKTREE_IDLE_MIN_AGE_S)
     out = []
     import airuleset
+    from cli_lane_live_gate import LiveLaneGate
+    gate = live_gate or LiveLaneGate(home=home, now=now)
     for root in airuleset._checkout_roots(home):
         if not (Path(root) / ".git").is_dir():
             continue
@@ -1052,7 +1059,7 @@ def discover_reclaimable_worktrees(home=None, git_run=None, now=None,
                 continue                   # detached HEAD — no branch ref to keep, never guessed (review 🔵)
             out.append(_worktree_reclaimable(
                 root, path, branch, base, git_run, now, min_idle_s=min_idle_s,
-                in_live_use=in_live_use, locked=bool(e.get("locked"))))
+                in_live_use=in_live_use, locked=bool(e.get("locked")), live_gate=gate))
         # #537 orphan-gitdir dirs git no longer lists: scan the worktrees dir.
         wt_root = Path(root) / ".claude" / "worktrees"
         if wt_root.is_dir():

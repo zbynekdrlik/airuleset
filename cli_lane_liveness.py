@@ -333,47 +333,13 @@ def _live_worker_agent_ids(repo_root, projects_dir=None, now=None,
     subagent transcript stem EQUALS its worktree DIRECTORY basename
     (``.claude/worktrees/agent-<hash>`` <=> ``…/<sid>/subagents/agent-<hash>``),
     so this set matched against ``basename(worktree_path)`` is the
-    transcript-evidence live signal the lane-fill gate already trusts. Reuses
-    ``watchdog.count_live_workers`` per session dir (its wedged/finished/stale
-    semantics — no parser duplicated). Best-effort; {} on any failure."""
-    ids = set()
-    try:
-        import watchdog
-        import watchdog.transcripts as T
-        if freshness_s is None:
-            from watchdog.compact import COMPACT_LIVE_WORKER_FRESHNESS_S
-            freshness_s = COMPACT_LIVE_WORKER_FRESHNESS_S
-        projects_dir = projects_dir or os.path.join(
-            os.path.expanduser("~"), ".claude", "projects")
-        now = time.time() if now is None else now
-        proj = os.path.join(projects_dir, T.encode_project_dir(repo_root))
-        if not os.path.isdir(proj):
-            return ids
-        for name in os.listdir(proj):
-            if not os.path.isdir(os.path.join(proj, name, "subagents")):
-                continue
-            try:
-                _count, evidence = watchdog.count_live_workers(
-                    projects_dir, repo_root, name, now, freshness_s)
-            except Exception:  # noqa: BLE001 — one bad session never sinks the set
-                continue
-            # #1103 review — reuse the #565/#587 worker-liveness partition
-            # (`_LANE_NOT_LIVE_STATES` = stale/finished) rather than a narrower
-            # ``== "live"``: a WEDGED / UNREADABLE fresh lane is a worker still
-            # in-flight (recoverable), so it counts as live evidence — failing
-            # TOWARD keeping a lane live, never dropping a busy-but-not-cleanly-
-            # live worker to `finished`. Falls back to the ``live`` literal only
-            # if the partition constant is unavailable (older transcripts.py).
-            not_live = getattr(T, "_LANE_NOT_LIVE_STATES", frozenset())
-            for lane in evidence or []:
-                st = getattr(lane, "state", None)
-                is_live = (st not in not_live) if not_live else (st == "live")
-                if st is not None and is_live:
-                    ids.add(lane.agent_id)
-    except Exception as e:  # noqa: BLE001
-        print("lane-overlap: worker-transcript evidence unavailable (%s)" % e,
-              file=sys.stderr)
-    return ids
+    transcript-evidence live signal the lane-fill gate already trusts.
+    Best-effort; {} on any failure. #1193: the read lives in
+    ``cli_lane_live_gate.live_worker_agent_ids_checked``, which also says
+    WHETHER it could tell (a worktree reclaimer must fail safe on that)."""
+    import cli_lane_live_gate
+    return cli_lane_live_gate.live_worker_agent_ids_checked(
+        repo_root, projects_dir, now, freshness_s)[0]
 
 
 def _lane_ticket_numbers(repo_root, branch, run):

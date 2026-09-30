@@ -43,11 +43,6 @@ _PROTECTED_BRANCHES = frozenset({"main", "dev", "master", "develop"})
 _NOT_ON_ORIGIN = "HEAD not contained in any origin ref — kept"
 
 
-def _is_agent_worktree_dir(name: str) -> bool:
-    """True for directories named ``agent-*``."""
-    return name.startswith("agent-")
-
-
 def _worktree_gitdir(wt_path: str):
     """Parse the gitdir path from a worktree's ``.git`` file, a relative one
     (``worktree.useRelativePaths``) resolved against the worktree, never the
@@ -169,29 +164,32 @@ def _classify(path, git_run_fn=None, dir_stats_fn=None):
 
 def discover_stale_agent_worktrees(home=None, now=None,
                                     git_run_fn=None, dir_stats_fn=None,
-                                    live_check_fn=None, cache_path=None):
+                                    live_check_fn=None, cache_path=None,
+                                    live_gate=None):
     """Discover ``<repo>/.claude/worktrees/agent-*`` worktrees ready for
     reclaim.  A worktree is reclaimable (``reason is None``) when:
+    (a) unlocked (no ``locked`` file in gitdir), (b) ``git status
+    --porcelain`` clean, (c) HEAD contained in some remote-tracking ref
+    (``git branch -r --contains HEAD`` non-empty), (d) no live process with
+    cwd inside the worktree, (e) #1193 not a LIVE lane: no fresh live
+    subagent transcript named like the worktree, and the repo's transcript
+    evidence was readable (``cli_lane_live_gate``; fail-safe keep otherwise).
 
-    (a) unlocked (no ``locked`` file in gitdir),
-    (b) ``git status --porcelain`` clean,
-    (c) HEAD contained in some remote-tracking ``refs/remotes/*`` ref
-        (``git branch -r --contains HEAD`` non-empty),
-    (d) no live process with cwd inside the worktree.
-
-    NO idle age gate — finished agent worktrees are immediately reclaimable
-    once their work is on origin. #1067 1g: with ``cache_path`` (the guard
-    dir's verdict file; None on a dry-run poll) an unchanged worktree reuses
-    its last non-reclaimable verdict without any git call
-    (``disk_guard_wt_cache``); (a) and (d) always run fresh.
+    NO idle age gate — a FINISHED lane is immediately reclaimable once its
+    work is on origin. #1067 1g: with ``cache_path`` (the guard dir's verdict
+    file; None on a dry-run poll) an unchanged worktree reuses its last
+    non-reclaimable verdict without any git call (``disk_guard_wt_cache``);
+    (a), (d) and (e) always run fresh, before the cache.
 
     Returns ``[{cls:"stale-agent-worktree", path, bytes, kind, reason, ...}]``.
     """
+    from cli_lane_live_gate import LiveLaneGate
     from watchdog import disk_guard_wt_cache as wtc
     now = time.time() if now is None else now
     home = home or os.path.expanduser("~")
     out: list[dict] = []
     cache = wtc.VerdictCache(cache_path, now) if cache_path else None
+    gate = live_gate or LiveLaneGate(home=home, now=now)
     seen: list[str] = []
 
     import airuleset
@@ -204,7 +202,7 @@ def discover_stale_agent_worktrees(home=None, now=None,
         except OSError:
             continue
         for d in children:
-            if not d.is_dir() or not _is_agent_worktree_dir(d.name):
+            if not d.is_dir() or not d.name.startswith("agent-"):
                 continue
             path = str(d)
             seen.append(path)
@@ -214,6 +212,8 @@ def discover_stale_agent_worktrees(home=None, now=None,
                 row.update(_skip("locked worktree — kept"))
             elif _in_live_use(path, live_check_fn):       # (d) — never cached
                 row.update(_skip("live process cwd inside — kept"))
+            elif why := gate.keep_reason(root, path):     # (e) — never cached
+                row.update(_skip(why))
             elif cache is None:
                 row.update(_classify(path, git_run_fn, dir_stats_fn))
             else:
