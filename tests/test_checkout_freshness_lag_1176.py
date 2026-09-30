@@ -460,9 +460,10 @@ class TestCensusReview(_Lag):
         self.job(T0 + 60)
         e = self.entry()
         self.assertEqual(e["state"], "current")
-        self.assertEqual(e["notice"], _cf().reattach_line(None, "develop"))
-        self.assertIn("detached HEAD", e["notice"])
-        self.assertIn("develop", e["notice"])
+        msg = e["reattach_notice"]["text"]
+        self.assertEqual(msg, _cf().reattach_line(None, "develop"))
+        self.assertIn("detached HEAD", msg)
+        self.assertNotIn("notice", e, "a current checkout carries no lag notice")
 
     def test_a_fork_base_gets_no_upstream_tracking_to_the_project(self):
         self.g(self.clone, "remote", "rename", "origin", "upstream")
@@ -487,6 +488,147 @@ class TestCensusReview(_Lag):
         line = _cf().notice_line("develop", 2, "origin", "develop")
         self.assertNotIn("prejdi na develop", line)
         self.assertIn("zmerguj origin/develop", line)
+
+
+class TestCensusReview2(_Lag):
+    """Review 2: liveness counts the session's subagents, an unmeasurable pane
+    never moves, a reattach message survives until delivered, the failure
+    backoff keys on HEAD and survives a later refusal, and a known long-lived
+    branch is never treated as a work branch."""
+
+    def setUp(self):
+        super().setUp()
+        self.pdir = os.path.join(self.root, "projects")
+        os.makedirs(self.pdir)
+        self.tpath = os.path.join(self.pdir, "sid1.jsonl")
+        Path(self.tpath).write_text("{}\n")
+        old = T0 - 5 * 3600
+        os.utime(self.tpath, (old, old))
+
+    def job_with_pane(self, now=T0, transcript="default", **kw):
+        tp = self.tpath if transcript == "default" else transcript
+        ret = (tp, 0) if tp else None
+        with mock.patch("watchdog.find_active_transcript", return_value=ret), \
+                mock.patch.object(_notice(), "run_job", return_value=[]):
+            return self.job(now, state={}, panes=[("%1", self.clone)], run=None,
+                            sleep_fn=None, projects_dir=self.pdir, handled=set(), **kw)
+
+    def launches(self):
+        return [c for c in self.calls if c and c[0] == "systemd-run"]
+
+    def recorder(self, argv, **kw):
+        self.calls.append(list(argv))
+        return _ok()
+
+    def test_an_idle_main_transcript_with_a_live_subagent_is_active(self):
+        self.detach()
+        self.advance_origin()
+        sub = os.path.join(self.pdir, "sid1", "subagents")
+        os.makedirs(sub)
+        Path(sub, "agent-x.jsonl").write_text("{}\n")      # written now
+        self.job_with_pane(unit_run=self.recorder)
+        self.assertEqual(self.launches(), [])
+        self.assertIn("session-active", self.entry()["reason"])
+
+    def test_a_long_idle_session_is_reattached(self):
+        self.detach()
+        self.advance_origin()
+        with mock.patch("time.time", return_value=T0):
+            self.job_with_pane(unit_run=self.recorder)
+        self.assertEqual(len(self.launches()), 1)
+
+    def test_unmeasurable_session_liveness_never_moves(self):
+        self.detach()
+        self.advance_origin()
+        self.job_with_pane(transcript=None, unit_run=self.recorder)
+        self.assertEqual(self.launches(), [])
+        self.assertIn("unmeasurable", self.entry()["reason"])
+
+    def test_no_channel_to_tell_the_session_never_moves(self):
+        self.detach()
+        self.advance_origin()
+        with mock.patch("time.time", return_value=T0), \
+                mock.patch("watchdog.nudges_enabled", return_value=False):
+            self.job_with_pane(unit_run=self.recorder)
+        self.assertEqual(self.launches(), [])
+        self.assertIn("no-channel", self.entry()["reason"])
+
+    def _fail_once(self):
+        job, cf = _job(), _cf()
+        self.job(unit_run=self.recorder)
+        cf.write_json_atomic(job.ff_result_path(self.clone, self.home),
+                             {"ok": False, "reason": "reattach failed", "mode": "reattach",
+                              "base": "develop", "finished": T0 + 5})
+
+    def test_a_new_head_after_a_failed_reattach_is_tried_again(self):
+        self.detach()
+        self.advance_origin(n=2)
+        self._fail_once()
+        self.g(self.clone, "fetch", "-q", "origin")
+        self.g_at(LONG_AGO, self.clone, "checkout", "-q", "--detach",
+                  "refs/remotes/origin/develop~1")
+        self.job(T0 + _job().INTERVAL_S, unit_run=self.recorder)
+        self.assertEqual(len(self.launches()), 2)
+
+    def test_the_failure_backoff_survives_a_later_refusal(self):
+        job = _job()
+        self.detach()
+        self.advance_origin(rel="CLAUDE.md", text="v2\n")
+        self._fail_once()
+        self.write(self.clone, "notes.txt", "a moment of dirt\n")
+        self.job(T0 + job.INTERVAL_S, unit_run=self.recorder)      # refused: dirty
+        self.write(self.clone, "notes.txt", "tracked\n")
+        self.job(T0 + 2 * job.INTERVAL_S, unit_run=self.recorder)
+        self.assertEqual(len(self.launches()), 1, "still inside the 24 h backoff")
+
+    def test_a_transient_recheck_refusal_is_not_a_failed_reattach(self):
+        job, cf = _job(), _cf()
+        self.detach()
+        self.advance_origin()
+        self.job(unit_run=self.recorder)
+        cf.write_json_atomic(job.ff_result_path(self.clone, self.home),
+                             {"ok": False, "reason": "re-check refused: dirty",
+                              "mode": "reattach", "base": "develop", "finished": T0 + 5})
+        self.job(T0 + 60, unit_run=self.recorder)
+        self.assertNotIn("reattach_failed", self.entry())
+
+    def test_the_reattach_message_survives_until_delivered(self):
+        self.detach()
+        self.advance_origin(n=2)
+        self.job()                                 # executing unit: reattached
+        self.job(T0 + 60)                          # collected: message recorded
+        self.job(T0 + _job().INTERVAL_S + 60)      # the next check
+        e = self.entry()
+        self.assertEqual(e["state"], "current")
+        self.assertEqual(e["reattach_notice"]["text"], _cf().reattach_line(None, "develop"))
+
+    def test_a_long_lived_undeclared_branch_is_never_switched(self):
+        self.g_at(LONG_AGO, self.clone, "checkout", "-q", "-b", "staging")
+        self.advance_origin()
+        before = self.head()
+        self.job(unit_run=self.recorder)
+        self.assertEqual(self.launches(), [])
+        self.assertEqual(self.head(), before)
+
+    def test_a_diverged_base_notice_does_not_say_stash(self):
+        line = _cf().notice_line("develop", 1, "origin", "develop", why="diverged")
+        self.assertNotIn("odlož", line)
+        self.assertIn("zmerguj origin/develop", line)
+
+
+class TestNoticeReview2(TestNoticeDelivery):
+
+    def test_the_reattach_message_is_sent_once_and_never_blocks_a_lag_notice(self):
+        e = self.status["checkouts"][self.PATH]
+        e.pop("notice")
+        e["reattach_notice"] = {"text": "moved", "at": T0}
+        self.run_notice(T0)
+        self.run_notice(T0 + 60)
+        self.assertEqual(self.sent, [("%1", "moved")])
+        e.pop("reattach_notice")
+        e.update(branch="develop", notice="lag")
+        self.run_notice(T0 + 120)
+        self.assertEqual(self.sent[-1], ("%1", "lag"))
 
 
 class TestNoticeReview(TestNoticeDelivery):
