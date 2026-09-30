@@ -582,6 +582,69 @@ class TestPreAnswered(unittest.TestCase):
             with self.subTest(q=q):
                 self.assertEqual(self._ask(q).returncode, 2, q)
 
+    def test_review4_false_positives_allowed(self):
+        """Terms anywhere in the payload are not enough: the identity must
+        be LINKED to the commits inside one clause."""
+        for q in (
+            "Which e-mail template should the order confirmation use? The "
+            "last 3 commits changed the layout.",
+            "The last 2 commits broke the build. Which e-mail address should "
+            "the CI notify?",
+            "Which e-mail notifications should GitHub send for commits on the "
+            "public repo: all or failures only?",
+            "Our repo is public. Should I add a SECURITY.md with a contact "
+            "e-mail — which e-mail should I commit there?",
+            "Ktorý e-mail má byť odosielateľ notifikácií? Odteraz commitujem "
+            "šablóny do repa.",
+            "Should I squash these commits? My branch name would stay dev.",
+            "Should I revert the last 3 commits? They changed my profile "
+            "name field.",
+            "Should the CHANGELOG from now on group commits by my scope name "
+            "(feat/fix)?",
+            "Should I commit the generated lock file? It shows my username "
+            "in some paths; the repo is public.",
+            "Our repo is public — should I remove my home address from the "
+            "sample config? The existing commits keep it.",
+            "Odteraz commitovať priamo na dev? Môj adresár s projektom je "
+            "~/devel.",
+            "Should the registration form ask for the student email? These "
+            "commits add the field.",
+            "Should logs mask personal e-mail addresses? These commits add "
+            "a masking filter.",
+            "Should the signup form collect a personal email or allow a work "
+            "email? Previous commits require personal email.",
+            "Má faktúra zobrazovať osobné meno obchodníka? Odteraz commitujem "
+            "zmenu šablóny.",
+            "Should the digest e-mail use a noreply sender? Previous commits "
+            "used support@.",
+            "Git warns that user.name is empty in the CI container. Should CI "
+            "commits from now on use the actions identity?",
+            "Should the dashboard show my name as the deployer for commits "
+            "deployed from now on?",
+            "Should the commit list in the old view show the author email?",
+        ):
+            with self.subTest(q=q):
+                self.assertEqual(self._ask(q).returncode, 0, q)
+        payload = json.dumps({"tool_input": {"questions": [{
+            "question": "What should I do with the old commits?",
+            "options": [{"label": "Old commits keep my name as-is"},
+                        {"label": "Rename the file in a new commit"}]}]}})
+        r = subprocess.run(["bash", str(HOOK)], input=payload,
+                           capture_output=True, text=True,
+                           env=hermetic_hook_env(self))
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_review4_linked_phrasings_blocked(self):
+        for q in (
+            "Old commits carry my personal e-mail — rewrite or keep?",
+            "Which e-mail should I use from now on for commits in this "
+            "public repo?",
+            "Staré commity nesú môj študentský e-mail. Prepísať alebo nechať?",
+            "Akú identitu autora odteraz v commitoch vo verejnom repe?",
+        ):
+            with self.subTest(q=q):
+                self.assertEqual(self._ask(q).returncode, 2, q)
+
     def test_terms_split_across_options_still_judged_as_one(self):
         payload = json.dumps({"tool_input": {"questions": [{
             "question": "Old commits in the public repo carry my personal "
