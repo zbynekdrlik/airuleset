@@ -1962,6 +1962,11 @@ def cmd_push(args):
         # the code's own operability kill-switch. conftest.py's autouse fixture
         # covers a pytest-direct run; `unittest discover` never reads it.
         test_env["AIRULESET_QUALS_NO_SNAPSHOT"] = "1"
+        # #1190: `unittest discover` never sets PYTEST_CURRENT_TEST, so every
+        # "refuse the real default under test" guard keyed on it (the disk-guard
+        # filer, the #1195 reclaim guard, the #1190 timer guard) was OFF for the
+        # whole push gate. Carry the same marker pytest sets for every test.
+        test_env["PYTEST_CURRENT_TEST"] = "airuleset push Pass B (unittest discover)"
         # #972 REOPEN (dual-coverage): a test that performs a REAL install writes
         # `Path.home()/.claude`. `unittest discover` never reads conftest.py, so
         # point the WHOLE gate subprocess at a per-run isolated HOME — the
