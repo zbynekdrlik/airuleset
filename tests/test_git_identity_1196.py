@@ -497,6 +497,26 @@ class TestPreAnswered(unittest.TestCase):
             with self.subTest(q=q):
                 self.assertEqual(self._ask(q).returncode, 0, q)
 
+    def test_action_keyed_probes(self):
+        allowed = (
+            "Should I send personal email alerts for failed commits?",
+            "Should private email notifications list commits?",
+            "Should I amend the last commit message typo?",
+            "Should the commit author field show full name in the new UI?",
+            "Should I force-push the rebased feature branch?",
+        )
+        blocked = (
+            "Which git identity should I use for commits here?",
+            "Mám prepísať históriu commitov s mojím osobným e-mailom?",
+            "Majú staré commity ostať s mojím študentským e-mailom?",
+        )
+        for q in allowed:
+            with self.subTest(allowed=q):
+                self.assertEqual(self._ask(q).returncode, 0, q)
+        for q in blocked:
+            with self.subTest(blocked=q):
+                self.assertEqual(self._ask(q).returncode, 2, q)
+
     def test_terms_split_across_options_still_judged_as_one(self):
         payload = json.dumps({"tool_input": {"questions": [{
             "question": "Old commits in the public repo carry my personal "
