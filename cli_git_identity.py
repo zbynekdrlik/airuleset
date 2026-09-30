@@ -20,14 +20,16 @@ What this does, and nothing more:
     gh calls;
   * every gh failure is LOUD (a stderr WARNING) and never fatal.
 
-Every git/gh call goes through ``cli_onboard_exec._exec``/``_gh``: local for
-``install``, ssh-wrapped for a remote ``onboard-project --host``, and an
+Every git call goes through ``cli_onboard_exec._git`` (local for
+``install``, ssh-wrapped for a remote ``onboard-project --host``); every gh
+call is local and bounded by GH_TIMEOUT_S. Both take an
 injectable runner in tests.
 """
 
 import json
 import os
 import re
+import subprocess
 import sys
 import time
 
@@ -37,6 +39,7 @@ NOREPLY_DOMAIN = "users.noreply.github.com"
 CACHE_FILE = "git-identity.json"
 VISIBILITY_TTL_S = 24 * 3600
 IDENTITY_TTL_S = 7 * 24 * 3600      # a box's gh login can change accounts
+GH_TIMEOUT_S = 20                   # a hung gh must never hang install
 _VISIBILITIES = ("PUBLIC", "PRIVATE", "INTERNAL")
 # https://github.com/o/r(.git), git@github.com:o/r(.git),
 # ssh://git@github.com(:22)/o/r — github.com must start the host (never
@@ -83,9 +86,32 @@ def save_cache(home, data):
         print("  Git identity: WARNING cache not saved (%s)" % e, file=sys.stderr)
 
 
+def _under_test():
+    return bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
 # --------------------------------------------------------------------------- #
 # Lookups.
 # --------------------------------------------------------------------------- #
+def _gh(args, run=None, error=None):
+    """One bounded gh call (always local). A hang or a missing binary becomes
+    ``error`` (an IdentityError class) — loud, never fatal."""
+    error = error or IdentityError
+    try:
+        return _x._run(run)(["gh", *args], capture_output=True, text=True,
+                            timeout=GH_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise error("gh %s failed: %r" % (" ".join(args[:2]), e)) from None
+
+
+def _section(cache, key):
+    """``cache[key]`` as a dict, replacing a corrupt shape."""
+    val = cache.get(key)
+    if not isinstance(val, dict):
+        val = cache[key] = {}
+    return val
+
+
 def identity_from_user(user):
     """(name, email) from a ``gh api user`` object; ValueError when malformed."""
     uid, login = user.get("id"), user.get("login")
@@ -99,11 +125,11 @@ def noreply_identity(cache, run=None, now=None):
     """The cached noreply identity, else ``gh api user`` once (and cache it
     for IDENTITY_TTL_S)."""
     now = time.time() if now is None else now
-    got = cache.get("identity") or {}
+    got = _section(cache, "identity")
     fresh = isinstance(got.get("ts"), (int, float)) and now - got["ts"] < IDENTITY_TTL_S
     if fresh and got.get("name") and got.get("email"):
         return got["name"], got["email"]
-    r = _x._gh(["api", "user"], run=run)
+    r = _gh(["api", "user"], run=run, error=IdentityUnavailable)
     if r.returncode != 0:
         raise IdentityUnavailable("gh api user failed: %s"
                                   % (r.stderr or "").strip()[:200])
@@ -127,12 +153,13 @@ def origin_slug(path, host=None, run=None):
 def visibility(slug, cache, run=None, now=None):
     """PUBLIC / PRIVATE / INTERNAL, cached per repo for VISIBILITY_TTL_S."""
     now = time.time() if now is None else now
-    seen = cache.setdefault("visibility", {})
+    seen = _section(cache, "visibility")
     hit = seen.get(slug)
-    if isinstance(hit, list) and len(hit) == 2 and now - hit[1] < VISIBILITY_TTL_S:
+    if (isinstance(hit, list) and len(hit) == 2
+            and isinstance(hit[1], (int, float)) and now - hit[1] < VISIBILITY_TTL_S):
         return hit[0]
-    r = _x._gh(["repo", "view", slug, "--json", "visibility", "-q",
-                ".visibility"], run=run)
+    r = _gh(["repo", "view", slug, "--json", "visibility", "-q",
+             ".visibility"], run=run)
     vis = (r.stdout or "").strip().upper()
     if r.returncode != 0 or vis not in _VISIBILITIES:
         raise IdentityError("gh repo view %s failed: %s"
@@ -218,7 +245,7 @@ def install_step(home, roots, run=None, app_shim=None):
     (the #1190 ``PYTEST_CURRENT_TEST`` guard shape). On an app-token-shim
     stream box (issue 888) ``gh api user`` can never answer, so the step is a
     quiet one-line skip there instead of a WARNING on every install."""
-    if run is None and os.environ.get("PYTEST_CURRENT_TEST"):
+    if run is None and _under_test():
         print("  Git identity: skipped under test (no real checkout touched)")
         return None
     try:
@@ -241,7 +268,7 @@ def install_step(home, roots, run=None, app_shim=None):
 def onboard_step(path, host=None, run=None, dry_run=False, home=None):
     """``onboard-project`` step dict (``cli_onboard._step`` shape). With no
     explicit ``home`` (the real one) it is inert under a test run."""
-    if home is None and os.environ.get("PYTEST_CURRENT_TEST"):
+    if home is None and _under_test():
         return {"step": "git_identity", "status": "skipped",
                 "detail": "skipped under test (real home not touched)"}
     home = home or os.path.expanduser("~")
@@ -249,7 +276,7 @@ def onboard_step(path, host=None, run=None, dry_run=False, home=None):
     before = json.dumps(cache, sort_keys=True)
     try:
         status, detail = ensure(path, cache, host=host, run=run, dry_run=dry_run)
-    except IdentityError as e:
+    except (IdentityError, OSError) as e:
         print("onboard-project: git identity WARNING %s" % e, file=sys.stderr)
         return {"step": "git_identity", "status": "skipped", "detail": str(e)}
     if not dry_run and json.dumps(cache, sort_keys=True) != before:
