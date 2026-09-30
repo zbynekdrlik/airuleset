@@ -472,10 +472,14 @@ def _apply_result(e, res, unit, now):
         commits = res.get("commits")
         if not isinstance(commits, int) or isinstance(commits, bool):
             commits = e.get("behind")
-        e.update(state="current", behind=0,
-                 reason="fast-forwarded %s commit(s) in unit %s" % (commits, unit))
-        fin = res.get("finished")
-        e["ff"] = {"at": fin if isinstance(fin, (int, float)) else now, "commits": commits}
+        e.update(state="current", behind=0)
+        if commits == 0:   # a no-op run (e.g. a session start merged it first)
+            e["reason"] = "%s (unit %s)" % (res.get("reason") or "already up-to-date", unit)
+        else:
+            e["reason"] = "fast-forwarded %s commit(s) in unit %s" % (commits, unit)
+            fin = res.get("finished")
+            e["ff"] = {"at": fin if isinstance(fin, (int, float)) else now,
+                       "commits": commits}
         e.pop("since", None)
         e.pop("behind_since", None)
     else:
@@ -588,6 +592,6 @@ def run_job(now, *, dry_run=False, budget_left=None, home=None,
         logs.append(decision_line(c["path"], e))
         if not dry_run:
             write_status({"ts": now, "checkouts": cos}, home)
-    if pruned and not collected and not done and not dry_run:
+    if pruned and not (collected or consumed) and not done and not dry_run:
         write_status({"ts": status.get("ts", now), "checkouts": cos}, home)
     return logs

@@ -376,12 +376,17 @@ def fast_forward(cwd, verdict, run_hooks=True):
 
 
 def write_json_atomic(path, data):
-    """Atomic JSON write (temp + os.replace) — a reader never sees half a file."""
+    """Atomic JSON write (temp + os.replace) — a reader never sees half a file;
+    a failed replace removes its temp file and re-raises."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = "%s.tmp.%d" % (path, os.getpid())
     with open(tmp, "w", encoding="utf-8") as fh:
         json.dump(data, fh, indent=1, sort_keys=True)
-    os.replace(tmp, path)
+    try:
+        os.replace(tmp, path)
+    except OSError:
+        os.unlink(tmp)
+        raise
 
 
 def ff_child(path, remote, branch, result_path):
@@ -413,9 +418,13 @@ def ff_child(path, remote, branch, result_path):
         ok, reason = False, "child error: %s" % exc
     _log("%s [%s] detached fast-forward: %s (%s)" % (
         path, branch, "ok" if ok else "FAILED", reason))
-    write_json_atomic(result_path, {"ok": ok, "reason": reason, "commits": commits,
-                                    "branch": branch, "started": started,
-                                    "finished": time.time()})
+    try:
+        write_json_atomic(result_path, {"ok": ok, "reason": reason, "commits": commits,
+                                        "branch": branch, "started": started,
+                                        "finished": time.time()})
+    except OSError as exc:   # the sweep then reports "left no result"
+        _log("could not write the result %s: %s" % (result_path, exc))
+        return 1
     return 0 if ok else 1
 
 
