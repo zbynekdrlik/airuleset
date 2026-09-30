@@ -38,6 +38,9 @@ _PRIVATE_NETS = tuple(ipaddress.ip_network(n) for n in (
     "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",   # RFC1918
     "100.64.0.0/10"))                                   # tailscale CGNAT
 _REASON_RE = re.compile(r"[^\x00-\x1f\x7f]+")           # one line, no controls
+# #1199 follow-up: a GitHub Actions secret name (uppercase here; GitHub itself
+# is case-insensitive and refuses a GITHUB_ prefix)
+SECRET_NAME_RE = re.compile(r"[A-Z_][A-Z0-9_]*")
 
 
 # --------------------------------------------------------------------------- #
@@ -260,11 +263,49 @@ def lan_rules(lan):
              tuple(sorted(e["ports"])), e["reason"].strip()) for e in lan]
 
 
-def validate_github_app(spec):
+def validate_github_app(spec, account=None, declared=()):
     """#1190: ``github_app`` is a bool, and True needs the ``repo`` its
-    controller-minted token is scoped to."""
+    controller-minted token is scoped to. #1199: ``repo_secrets`` too
+    (``declared`` = every declaration, for the one-repo-one-account check)."""
     if "github_app" in spec and not isinstance(spec["github_app"], bool):
         return ["github_app must be True or False"]
     if spec.get("github_app") and "repo" not in spec:
         return ["github_app: True needs the repo the token is scoped to"]
-    return []
+    return validate_repo_secrets(spec, account, declared)
+
+
+def is_secret_name(name):
+    """True iff ``name`` is a settable GitHub Actions secret name."""
+    return (isinstance(name, str) and bool(SECRET_NAME_RE.fullmatch(name))
+            and not name.startswith("GITHUB_"))
+
+
+def validate_repo_secrets(spec, account=None, declared=()):
+    """#1199 follow-up: ``repo_secrets`` is the allow-list of CI secret names
+    the controller may set on the account's declared repo from a
+    ``secret-sync:<NAME>`` request (``cli_project_ci_sync``). It needs
+    ``github_app: True`` (the account's repo is the request queue), and that
+    repo must belong to this account alone: two accounts on one repo would
+    both work its queue, each reading the file from its own home."""
+    if "repo_secrets" not in spec:
+        return []
+    names = spec["repo_secrets"]
+    if not isinstance(names, (list, tuple)):
+        return ["repo_secrets must be a list of secret names"]
+    errs = []
+    if spec.get("github_app") is not True:
+        errs.append("repo_secrets needs github_app: True (the declared repo is "
+                    "where the secret-sync requests are filed)")
+    errs += ["repo_secrets entry %r is not a GitHub secret name "
+             "([A-Z_][A-Z0-9_]*, never GITHUB_*)" % (n,)
+             for n in names if not is_secret_name(n)]
+    named = [n for n in names if isinstance(n, str)]
+    if len(set(named)) != len(named):
+        errs.append("repo_secrets has a duplicate name")
+    repo = str(spec.get("repo") or "").lower()
+    errs += [] if not repo else ["repo %s is also declared by %r; a secret-sync request queue needs "
+             "exactly one account" % (spec.get("repo"), other)
+             for other, raw in sorted(dict(declared).items())
+             if other != account and isinstance(raw, dict)
+             and str(raw.get("repo", "")).lower() == repo]
+    return errs

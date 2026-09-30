@@ -73,7 +73,7 @@ _NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
 _ALLOWED_KEYS = frozenset({
     "host", "sudo", "sudo_reason", "sudo_commands", "reach", "reach_enforced",
     "reach_reason", "secrets", "webterm_sessions", "system_packages", "repo",
-    "project_dir", "tmux_session", "github_app",
+    "project_dir", "tmux_session", "github_app", "repo_secrets",
 })
 
 # The defaults every declaration inherits. They are the SAFE direction: no
@@ -144,6 +144,7 @@ SERVICE_ACCOUNTS = {
         # #1190: a 1-hour token scoped to this repo, minted on the controller
         # by the newlevel-project-accounts App (cli_project_gh_token).
         "github_app": True,
+        "repo_secrets": ["DENYLIST"],   # CI secrets it may sync (#1199)
         "project_dir": "devel/fohmixer",
         "tmux_session": "fohmixer",
         "webterm_sessions": {
@@ -318,7 +319,7 @@ def validate_account(account, raw):
                     % (spec["project_dir"],))
     if "repo" in spec and "project_dir" not in spec:
         errs.append("repo declared without project_dir")
-    errs += policy.validate_github_app(spec)
+    errs += policy.validate_github_app(spec, account, SERVICE_ACCOUNTS)
     if "tmux_session" in spec and not _SESSION_RE.fullmatch(str(spec["tmux_session"])):
         errs.append("tmux_session %r is not a plain name" % (spec["tmux_session"],))
     elif "tmux_session" in spec and isinstance(spec["webterm_sessions"], dict):
