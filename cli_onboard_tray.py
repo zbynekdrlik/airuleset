@@ -5,19 +5,22 @@ The fleet convention (``rules/rust-web-tray.md``): a Rust app that serves a
 web UI on a desktop machine ships a tray icon (status, Open <app>, Copy URL,
 Exit that ends the tray only), autostarted at the desktop user's logon. The
 fohmixer project went live without one because onboarding never checked. This
-leaf module is that check; ``cli_onboard`` calls it from the foundation-gap
-step (files the ticket) and from ``audit_project`` (``missing-tray`` drift).
+leaf module is that check; ``cli_onboard`` calls ``foundation_gap`` from the
+foundation-gap step (files the ticket) and ``audit_drift`` from
+``audit_project`` (``missing-tray`` / ``unverified-tray`` drift).
 
-Detection = an HTTP server dependency + web assets, and no tray dependency,
-no tauri tray feature and no ``*-tray`` crate. Manifests read: every
-``Cargo.toml`` within 4 levels (root, workspace members, ``crates/*``, a
-``src-tauri/`` outside the workspace), build output, vendored trees, hidden
-dirs, examples/benches/tests/docs skipped; web assets are never looked for in
-``src/`` (``src/web`` is a Rust module). Every read goes through the injected runner (``cli_onboard_exec``) in
+Detection = an HTTP server dependency + a web UI (web assets, or a dependency
+that embeds/renders one), and no tray dependency, no tauri tray feature and no
+``*-tray`` crate. Manifests read: every ``Cargo.toml`` within 4 levels (root,
+workspace members, ``crates/*``, a ``src-tauri/`` outside the workspace);
+build output, vendored trees, hidden dirs, examples/benches/tests/docs are
+skipped, and a DIR named like a web dir inside ``src/`` is a Rust module, not
+assets. Every read goes through the injected runner (``cli_onboard_exec``) in
 at most two calls, so ``--host <remote>`` checks the remote tree over ssh,
 never the local disk.
 """
 
+import glob
 import os
 import sys
 import tomllib
@@ -35,22 +38,28 @@ HTTP_SERVER_DEPS = frozenset({"axum", "axum-server", "actix-web", "warp",
 TRAY_DEPS = frozenset({"tray-icon", "tray-item", "ksni", "trayicon", "systray"})
 # tauri ships its tray behind a feature: "tray-icon" (v2), "system-tray" (v1).
 TAURI_TRAY_FEATURES = frozenset({"tray-icon", "system-tray"})
-# A dependency that embeds or renders a web UI counts as web assets on its own.
+# A dependency that embeds, renders or templates a web UI counts on its own.
 WEB_UI_DEPS = frozenset({"rust-embed", "include-dir", "memory-serve",
-                         "leptos", "yew", "dioxus"})
+                         "leptos", "yew", "dioxus",
+                         "askama", "tera", "minijinja", "maud"})
 WEB_ASSET_FILES = ("index.html", "Trunk.toml")
 WEB_ASSET_DIRS = ("web", "static", "frontend", "www", "public", "ui")
+# Inside src/ these names are usually Rust modules (`mod web;`). `static` is
+# a Rust keyword, so a src/static dir can never be a module: it stays assets.
+_MODULE_LIKE_DIRS = tuple(d for d in WEB_ASSET_DIRS if d != "static")
 # Never the shipped app: build output, vendored trees, hidden dirs (.git, a
 # stale .claude/worktrees copy), examples/benches/tests and generated docs.
 _PRUNE_DIRS = ("target", "node_modules", "vendor", ".*", "examples",
                "benches", "tests", "docs")
-# Assets additionally skip Rust source: `src/web`, `src/ui` are modules.
-_ASSET_PRUNE_DIRS = _PRUNE_DIRS + ("src",)
 # Depth 4 covers <root>/Cargo.toml, crates/<x>/Cargo.toml,
 # apps/<x>/src-tauri/Cargo.toml and crates/<x>/assets/index.html.
 _SCAN_DEPTH = "4"
 # ONE runner call prints every manifest as NUL <path> NUL <content>.
 _CAT_WITH_NAMES = 'for f; do printf "\\0%s\\0" "$f"; cat "$f"; done'
+
+
+class TrayCheckUnverified(Exception):
+    """The tray check could not read the target (ssh down, find failed)."""
 
 
 def _norm(name):
@@ -66,25 +75,24 @@ def _or_names(names):
     return expr
 
 
-def _pruned_find(path, prune, match):
-    """find argv over `path` (never the root itself: a checkout named `web`
-    must not match) that skips the `prune` dirs, then applies `match`."""
-    return (["find", str(path), "-mindepth", "1", "-maxdepth", _SCAN_DEPTH,
-             "(", "-type", "d", "(", *_or_names(prune), ")", ")",
+def _pruned_find(root, match):
+    """find argv over `root` (never the root itself: a checkout named `web`
+    must not match) that skips `_PRUNE_DIRS`, then applies `match`."""
+    return (["find", root, "-mindepth", "1", "-maxdepth", _SCAN_DEPTH,
+             "(", "-type", "d", "(", *_or_names(_PRUNE_DIRS), ")", ")",
              "-prune", "-o"] + match)
 
 
-def _find_stdout(argv, path, host=None, run=None):
+def _find_stdout(argv, root, host=None, run=None):
     """stdout of one tray-check find. find's own rc 1 (a missing or
     unreadable subdir) still leaves valid output; any other rc (ssh 255, a
-    dead box) is reported LOUDLY on stderr, never read as "not a Rust app"
-    in silence."""
+    dead box) raises TrayCheckUnverified — never read as "not a Rust app"."""
     r = _exec(argv, host=host, run=run)
     if r.returncode not in (0, 1):
-        print("onboard-project: warning: tray check could not read %s on %s "
-              "(rc %s: %s)" % (path, host or "this box", r.returncode,
-                               (r.stderr or "").strip()[:200]),
-              file=sys.stderr)
+        raise TrayCheckUnverified(
+            "tray check could not read %s on %s (rc %s: %s)"
+            % (root, host or "this box", r.returncode,
+               (r.stderr or "").strip()[:200]))
     return r.stdout or ""
 
 
@@ -116,15 +124,14 @@ def _deps(doc):
     return names, tauri_tray
 
 
-def _read_manifests(path, host=None, run=None):
+def _read_manifests(root, host=None, run=None):
     """[(manifest_path, parsed_doc)] for every Cargo.toml within 4 levels of
     the project root, read in ONE runner call. A manifest that does not parse
     is reported on stderr and skipped (a broken TOML is the project's own
     build error, never a reason to crash onboarding)."""
-    argv = _pruned_find(path, _PRUNE_DIRS,
-                        ["-type", "f", "-name", "Cargo.toml", "-exec", "sh",
-                         "-c", _CAT_WITH_NAMES, "sh", "{}", "+"])
-    parts = _find_stdout(argv, path, host=host, run=run).split("\0")
+    argv = _pruned_find(root, ["-type", "f", "-name", "Cargo.toml", "-exec",
+                               "sh", "-c", _CAT_WITH_NAMES, "sh", "{}", "+"])
+    parts = _find_stdout(argv, root, host=host, run=run).split("\0")
     out = []
     for mp, text in zip(parts[1::2], parts[2::2]):
         try:
@@ -135,32 +142,38 @@ def _read_manifests(path, host=None, run=None):
     return out
 
 
-def _web_asset_path(path, host=None, run=None):
+def _web_asset_path(root, host=None, run=None):
     """First web-asset file/dir within 4 levels of the project root (covers
-    `static/`, `crates/web/index.html`, `crates/x-web/assets/index.html`), or
-    None."""
-    argv = _pruned_find(path, _ASSET_PRUNE_DIRS, [
+    `static/`, `src/index.html`, `crates/x-web/assets/index.html`), or None.
+    A module-like dir (`src/web`, `src/ui`) inside any `src/` is a Rust
+    module, so it does not count; files and `src/static` there do."""
+    esc = glob.escape(root)
+    argv = _pruned_find(root, [
         "(", "(", "-type", "f", "(", *_or_names(WEB_ASSET_FILES), ")", ")",
-        "-o", "(", "-type", "d", "(", *_or_names(WEB_ASSET_DIRS), ")", ")",
+        "-o", "(", "-type", "d", "-name", "static", ")",
+        "-o", "(", "-type", "d", "(", *_or_names(_MODULE_LIKE_DIRS), ")",
+        "!", "-path", esc + "/src/*", "!", "-path", esc + "/*/src/*", ")",
         ")", "-print", "-quit"])
-    first = _find_stdout(argv, path, host=host, run=run).strip()
+    first = _find_stdout(argv, root, host=host, run=run).strip()
     if not first:
         return None
     try:
-        return str(Path(first).relative_to(Path(path)))
+        return str(Path(first).relative_to(Path(root)))
     except ValueError:
         return first
 
 
-def rust_web_tray_gap(path, host=None, run=None):
+def tray_check(path, host=None, run=None):
     """None when the project is not a Rust web app, or already has a tray.
     Otherwise a one-line reason naming the server dependency and the web UI
-    evidence (it goes into the ticket body and the audit drift detail)."""
-    manifests = _read_manifests(path, host=host, run=run)
+    evidence (it goes into the ticket body and the audit drift detail).
+    Raises TrayCheckUnverified when the target cannot be read."""
+    root = os.path.normpath(str(path))
+    manifests = _read_manifests(root, host=host, run=run)
     if not manifests:
         return None
     deps, crate_names, tauri_tray = set(), set(), False
-    root_manifest = os.path.normpath(os.path.join(str(path), "Cargo.toml"))
+    root_manifest = os.path.join(root, "Cargo.toml")
     for mp, doc in manifests:
         names, tray_feature = _deps(doc)
         deps |= names
@@ -178,12 +191,22 @@ def rust_web_tray_gap(path, host=None, run=None):
         return None
     web = sorted(deps & WEB_UI_DEPS)
     evidence = ("dependency " + web[0]) if web else _web_asset_path(
-        path, host=host, run=run)
+        root, host=host, run=run)
     if not evidence:
         return None
     return ("HTTP server %s + web UI (%s), no tray dependency (%s), no tauri "
             "tray feature and no *-tray crate"
             % (servers[0], evidence, ", ".join(sorted(TRAY_DEPS))))
+
+
+def rust_web_tray_gap(path, host=None, run=None):
+    """`tray_check`, but an unreadable target is a LOUD stderr warning and
+    None (onboarding keeps going; the audit row shows it via `audit_drift`)."""
+    try:
+        return tray_check(path, host=host, run=run)
+    except TrayCheckUnverified as e:
+        print("onboard-project: warning: %s" % e, file=sys.stderr)
+        return None
 
 
 def foundation_tray_body(name, reason):
@@ -193,6 +216,26 @@ def foundation_tray_body(name, reason):
         "menu), má **Open <app>** (lokálna URL), **Copy URL** a Exit, ktorý "
         "ukončí len tray (služba beží ďalej). Tray sa spúšťa pri prihlásení "
         "desktop používateľa vedľa služby. Referencia: iemmixer "
-        "`crates/iem-tray`. Onboarding tento ticket LEN zakladá.\n\n"
+        "`crates/iem-tray`. Ak appka beží len na serveri (VPS) bez desktopu, "
+        "tray sa jej netýka — ticket zavri ako n/a s odôvodnením. Onboarding "
+        "tento ticket LEN zakladá.\n\n"
         "Scope-gate: planned-work"
     ) % (name, reason)
+
+
+def foundation_gap(path, name, host=None, run=None):
+    """The ("tray", title, body) gap for `step_foundation_tickets`, or None."""
+    reason = rust_web_tray_gap(path, host=host, run=run)
+    if not reason:
+        return None
+    return ("tray", FOUNDATION_TRAY_TITLE, foundation_tray_body(name, reason))
+
+
+def audit_drift(path, host=None, run=None):
+    """The `--audit` drift row: `missing-tray`, `unverified-tray` when the
+    target could not be read (never shown as clean), or None."""
+    try:
+        reason = tray_check(path, host=host, run=run)
+    except TrayCheckUnverified as e:
+        return {"kind": "unverified-tray", "detail": str(e)}
+    return {"kind": "missing-tray", "detail": reason} if reason else None

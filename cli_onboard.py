@@ -598,13 +598,12 @@ def step_foundation_tickets(path, name, host=None, run=None, dry_run=False,
     gaps = []
     if not _has_ci(path, host=host, run=run):
         gaps.append(("ci", FOUNDATION_CI_TITLE, _foundation_ci_body(name)))
-    stack = stack if stack is not None else detect_stack(path, host=host, run=run)
-    if stack == "node":
+    if (stack if stack is not None else detect_stack(path, host=host, run=run)) \
+            == "node":
         gaps.append(("version-label", FOUNDATION_VERSION_TITLE,
                      _foundation_version_body(name)))
-    tray = _tray.rust_web_tray_gap(path, host=host, run=run)  # same as --audit
-    if tray:
-        gaps.append(("tray", FOUNDATION_TRAY_TITLE, _tray.foundation_tray_body(name, tray)))
+    if tray := _tray.foundation_gap(path, name, host=host, run=run):  # any stack, as --audit
+        gaps.append(tray)
     if not gaps:
         return _step("foundation_tickets", "satisfied", "no foundation gaps")
     filed, already = [], []
@@ -900,8 +899,8 @@ def audit_project(entry, host=None, run=None):
     elif "## Playbook router" not in cm_content:
         drift.append({"kind": "missing-router",
                       "detail": "CLAUDE.md has no Playbook router"})
-    if tray := _tray.rust_web_tray_gap(path, host=host, run=run):
-        drift.append({"kind": "missing-tray", "detail": tray})
+    if tray := _tray.audit_drift(path, host=host, run=run):
+        drift.append(tray)
     return drift
 
 
