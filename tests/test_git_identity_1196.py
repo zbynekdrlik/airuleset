@@ -636,6 +636,33 @@ class TestPreAnswered(unittest.TestCase):
                            env=hermetic_hook_env(self))
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_review5_content_not_author_allowed(self):
+        """Commit CONTENT (a config, a template, a README leak) is not the
+        author identity; an app-domain noreply/user.email plus a bare
+        'change' is not a history question."""
+        for q in (
+            "Should I commit the SMTP config with Gmail as the provider or "
+            "switch to SendGrid?",
+            "Should I commit the invoice template with my address "
+            "prefilled, or leave the field blank?",
+            "Mám commitnúť šablónu faktúry s mojou adresou, alebo ju nechať "
+            "prázdnu?",
+            "Should the seed data commit ship with my Gmail as the admin "
+            "login, or a placeholder?",
+            "The commit keeps my Gmail filter rules in dotfiles; is that "
+            "fine for the public dotfiles repo?",
+            "An earlier commit exposed my personal e-mail and phone number "
+            "in the README. Purge it from history or leave it?",
+            "In this commit, should I change the sender from noreply to "
+            "support@shop for order e-mails?",
+            "Should the commit add a user.email column to the users table, "
+            "or should I change the existing email field?",
+            "In the commit history panel, should I change it to display the "
+            "author e-mail next to the avatar?",
+        ):
+            with self.subTest(q=q):
+                self.assertEqual(self._ask(q).returncode, 0, q)
+
     def test_review4_linked_phrasings_blocked(self):
         for q in (
             "Old commits carry my personal e-mail — rewrite or keep?",
