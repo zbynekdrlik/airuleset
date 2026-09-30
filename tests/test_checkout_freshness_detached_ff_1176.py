@@ -214,6 +214,7 @@ class TestChildEntry(_Repos):
 
     def test_child_fast_forwards_and_writes_an_ok_result(self):
         self.advance_origin(n=2)
+        self.g(self.clone, "fetch", "-q", "origin")   # the job fetched before launching
         result = os.path.join(self.root, "r.json")
         r = self._child(result)
         self.assertEqual(r.returncode, 0, r.stderr)
