@@ -66,26 +66,40 @@ fi
 
 # Commit author identity / email in a public repo's (old) history — pre-answered (#1196).
 # Owner 30.9.2026: keep the old history, noreply from now on, never ask. PRECISION over
-# recall (review rounds 1-3: every noun-keyed shape blocked real UX/workflow questions
-# fleet-wide; a missed phrasing only means the question is asked, and install already
-# sets the identity). Blocks ONLY when ALL four hold:
-#   GI_COMMIT  — a git commit word (never a bare "history": history views are UX);
-#   GI_IDENT   — the OWNER's own identity: a personal/student/university/Gmail e-mail or
-#                name, a first-person "my …/môj … e-mail|name|address", an author e-mail,
-#                "author|committer|git identity", "which e-mail … commit", noreply/user.email;
-#   GI_CONTEXT — a public repo, old/past commits, commits that carry/show/authored it, a
-#                history rewrite, or "from now on/odteraz" next to a commit word;
-#   and NOT GI_EXCLUDE — a secret, customer/client/GDPR/fixture/test data, a bot, or an
-#                external/other developer: the fixed "never rewrite" answer is wrong there.
-# LC_ALL=C.UTF-8 so -i folds Slovak capitals (STARÉ, PREPÍSAŤ) in any caller locale.
-GI_COMMIT='\bcommit'
-GI_IDENT='(personal|student|university|school|osobn[^ ]*|súkromn[^ ]*|študentsk[^ ]*|univerzitn[^ ]*) (author |autora )?(e-?mail|name|meno|address|adres)|\b(my|môj|moj[^ ]*)\b[^.?!]{0,25}(e-?mail|name|meno|address|adres|identit)|\bgmail|\bauthor e-?mail|e-?mail (of the author|autora)|\b(author|committer|git) identit|\bidentit[^ ]* (autora|author)|\b(which|what|aký|akým|ktorý|ktorým) e-?mail|noreply|user\.(email|name)'
-GI_CONTEXT='(public|verejn[^ ]*) (git )?(repo|rep[ae]|repozit|github)|\brepo\b[^.?!]{0,20}\bis public\b|\bpublic commits\b|\b(old|older|past|previous|earlier|existing|some|these|those|[0-9]+) commits\b|\bstar(é|ých|ych|e|ej|ú|ými) (commit|históri)|\bcommits?\b[^.?!]{0,30}\b(carry|carries|show|shows|contain|contains|leaked?|authored|under)\b|\b(rewrite|prepísať|prepisovať|force.?push|filter-repo|filter-branch)\b[^.?!]{0,40}(histor|históri|commit|them|ich)|(from now on|going forward|odteraz)[^.?!]{0,60}commit|commit[^.?!]{0,60}(from now on|going forward|odteraz)'
-GI_EXCLUDE='secret|token|password|passwd|heslo|credential|api.?key|private key|kľúč|kluc|customer|client|zákazn|klient|gdpr|fixture|test data|testovac|\bbots?\b|external|extern|third.?party|contributor|another developer|iný vývojár|\b(his|her|their)\b'
-if LC_ALL=C.UTF-8 grep -qiE "$GI_COMMIT" <<<"$TOOL_INPUT" \
-    && LC_ALL=C.UTF-8 grep -qiE "$GI_IDENT" <<<"$TOOL_INPUT" \
-    && LC_ALL=C.UTF-8 grep -qiE "$GI_CONTEXT" <<<"$TOOL_INPUT" \
-    && ! LC_ALL=C.UTF-8 grep -qiE "$GI_EXCLUDE" <<<"$TOOL_INPUT"; then
+# recall: the hook greps the WHOLE tool_input JSON (question + options), so terms found
+# anywhere proved useless (review rounds 1-4). The owner's identity must be LINKED to
+# the commits INSIDE ONE CLAUSE (no . ? ! between; grep is per line). A missed phrasing
+# only means the question gets asked; install already sets the identity. Blocks when:
+#   GI_LINKED  — commit(s) … carry/authored/under/leaked/nesú … a personal/student/
+#                university e-mail or name; or commit(s) … show/with/keep/majú/s … the
+#                OWNER's own ("my …/môj/mojím …" e-mail/address/Gmail) or an AUTHOR
+#                e-mail ("personal author e-mail", "osobný e-mail autora") — app data
+#                ("previous commits show the student email") never counts;
+#   or GI_AUTHID (author/committer e-mail|identity, e-mail/identita autora, git identity,
+#                noreply, user.email) within one clause of "commit", plus a GI_CONTEXT
+#                (old/past commits, a public repo, a rewrite/change, from now on/odteraz);
+#   or GI_WHICH ("which e-mail/identity should … commit") plus from now on/odteraz;
+#   and never GI_EXCLUDE (secrets, customer/client/GDPR/fixture data, bots, CI, signing,
+#                external developers, his/her/their): "never rewrite" is wrong there.
+# LC_ALL=C.UTF-8 so -i folds Slovak capitals (STARÉ, MÔJ) in any caller locale.
+GI_ADJ='(personal|private|student|university|osobn[^ ]*|súkromn[^ ]*|študentsk[^ ]*|univerzitn[^ ]*)'
+GI_POSS='(my|môj|moj[^ ]*)'
+GI_OWN="$GI_POSS +($GI_ADJ +)?(e-?mail[^ ]*|gmail|address|adres[ua]|adresou|identit[^ ]*)|$GI_POSS +$GI_ADJ +(name|meno|menom)|\\bgmail|$GI_ADJ +(author|autora) +e-?mail|$GI_ADJ +e-?mail[^ ]* +autora"
+GI_IDENT="$GI_OWN|$GI_ADJ +(e-?mail[^ ]*|address|adres[ua]|adresou|name|meno|menom)"
+GI_LINK_AUTH='(carry|carries|carried|nesú|nesie|authored|under|pod|leak|leaks|leaked|expose|exposes|exposed)'
+GI_LINK_SOFT='(show|shows|showing|majú|obsahujú|with|keep|keeps|ostať|ostanú|s)'
+GI_LINKED='\bcommit[^.?!]{0,25} '"$GI_LINK_AUTH"' [^.?!]{0,30}('"$GI_IDENT"')|\bcommit[^.?!]{0,25} '"$GI_LINK_SOFT"' [^.?!]{0,30}('"$GI_OWN"')'
+GI_AUTHID='\b(author|committer) +(e-?mail[^ ]*|identit[^ ]*)|\be-?mail[^ ]* +autora|\bidentit[^ ]* +autora|\bgit +identit[^ ]*|\bnoreply\b|user\.email'
+GI_AUTHNEAR='\bcommit[^.?!]{0,60}('"$GI_AUTHID"')|('"$GI_AUTHID"')[^.?!]{0,60}\bcommit'
+GI_CONTEXT='\b(old|older|past|previous|earlier|existing) +commits?\b|\bstar(é|ých|ych|e|ej|ú|ými) +commit|\bpublic +(git +)?(repo|github)|\bverejn[^ ]* +(repo|rep[ae]|repozit)|\brewrite\b|prepísať|prepisovať|\bchange\b|zmeniť|from now on|going forward|odteraz|force.?push'
+GI_WHICH='\b(which|what|aký|akým|akú|ktorý|ktorým|ktorú) +(e-?mail|identit[^ ]*) +(should|shall|do|mám|by|will|must|to)\b[^.?!]{0,40}\bcommit'
+GI_FUTURE='from now on|going forward|odteraz'
+GI_EXCLUDE='secret|token|password|passwd|heslo|credential|api.?key|private key|kľúč|kluc|customer|client|zákazn|klient|gdpr|fixture|test data|testovac|\bbots?\b|\b(ci|cd)\b|github actions|pipeline|\bsign(ing|ed)?\b|gpg|external|extern|third.?party|contributor|another developer|iný vývojár|\b(his|her|their)\b'
+gi_has() { LC_ALL=C.UTF-8 grep -qiE "$1" <<<"$TOOL_INPUT"; }
+if ! gi_has "$GI_EXCLUDE" \
+    && { gi_has "$GI_LINKED" \
+         || { gi_has "$GI_AUTHNEAR" && gi_has "$GI_CONTEXT"; } \
+         || { gi_has "$GI_WHICH" && gi_has "$GI_FUTURE"; }; }; then
     echo "BLOCKED: Commit author identity / e-mail in a public repo is pre-answered (#1196): keep the OLD history exactly as it is (never rewrite, never force-push) and commit under the owner's GitHub noreply identity from now on. airuleset install / onboard-project sets that local identity on every public checkout automatically. Do not ask. See ask-before-assuming-deep pre-answered table." >&2
     exit 2
 fi
