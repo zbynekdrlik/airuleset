@@ -352,7 +352,7 @@ class TestPruneFinishedWorktrees(_Box):
                                side_effect=RuntimeError("boom")):
             logs = self._prune()
         self.assertTrue(wt.exists(), "unknown liveness must keep it: %s" % logs)
-        self.assertTrue(any("liveness" in ln for ln in logs), logs)
+        self.assertTrue(any("skip:lane-liveness-unknown" in ln for ln in logs), logs)
 
 
 # --------------------------------------------------------------------------- #
