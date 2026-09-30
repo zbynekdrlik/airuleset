@@ -20,7 +20,10 @@ profile), the shared idle-pane gate set (`watchdog.idle_pane`), the
 `nudge_gate` per-kind floor + total cap, and `send_verified` (which turns it
 into the #1157 pointer row). On top of that it is rate-limited per
 (checkout, branch, base): once, then again only after REPEAT_S while the lag
-lasts. A dry-run types and records nothing.
+lasts. A reattach (items 1+2) is never silent either: its one-off "moved your
+checkout" message (`reattach_notice`, offered for 24 h until delivered) rides
+the same channel under its own rate-limit key. A dry-run types and records
+nothing.
 """
 import os
 
@@ -69,7 +72,7 @@ def notice_job(now, state, panes, *, status, ready, deliver, mark_sent,
     from watchdog import idle_pane
     logs = []
     entries = [(p, e) for p, e in sorted(((status or {}).get("checkouts") or {}).items())
-               if isinstance(e, dict) and e.get("notice")]
+               if _messages(e)]
     if not entries:
         return logs
     if not nudges_enabled(NUDGE_KIND):
@@ -82,12 +85,20 @@ def notice_job(now, state, panes, *, status, ready, deliver, mark_sent,
         return logs
     store = state.get(STATE_KEY) if isinstance(state.get(STATE_KEY), dict) else {}
     store = dict(store)
+    live = set()
     for path, e in entries:
-        sig = "%s|%s" % (e.get("branch") or "detached", e.get("base"))
-        hold = _due(store.get(path), sig, now)
-        if hold:
-            logs.append("checkout-notice: %s hold:repeat (%s)" % (path, hold))
+        pick, holds = None, []
+        for key, sig, text in _messages(e):
+            live.add("%s|%s" % (path, key))
+            hold = _due(store.get("%s|%s" % (path, key)), sig, now)
+            if hold:
+                holds.append("%s %s" % (key, hold))
+            elif pick is None:
+                pick = (key, sig, text)
+        if pick is None:
+            logs.append("checkout-notice: %s hold:repeat (%s)" % (path, "; ".join(holds)))
             continue
+        key, sig, text = pick
         own = [(pid, cwd) for pid, cwd in panes if cwd and inside(cwd, path)]
         if len(own) != 1:
             logs.append("checkout-notice: %s skip:%s" % (
@@ -104,7 +115,7 @@ def notice_job(now, state, panes, *, status, ready, deliver, mark_sent,
         if handled is not None:
             handled.add(sid)
         try:
-            outcome = deliver(pid, tpath, e["notice"])
+            outcome = deliver(pid, tpath, text)
         except Exception as exc:  # noqa: BLE001 -- keys may be in: at-most-once
             logs.append("checkout-notice: %s delivery raised %r" % (path, exc))
             outcome = None
@@ -112,14 +123,30 @@ def notice_job(now, state, panes, *, status, ready, deliver, mark_sent,
         if kind in idle_pane.DELIVERED or kind in idle_pane.TYPED_NOT_DELIVERED:
             mark_sent(state, sid, NUDGE_KIND, now)     # keys reached the pane: floor
         if kind in idle_pane.DELIVERED:
-            store[path] = {"sig": sig, "at": now}
+            store["%s|%s" % (path, key)] = {"sig": sig, "at": now}
         logs.append("checkout-notice: %s -> %s %s (%s)" % (path, pid, kind, sig))
     if not dry_run:
-        live = {p for p, _ in entries}
-        state[STATE_KEY] = {p: r for p, r in store.items()
-                            if p in live or (isinstance(r, dict) and _num(r.get("at"))
+        state[STATE_KEY] = {k: r for k, r in store.items()
+                            if k in live or (isinstance(r, dict) and _num(r.get("at"))
                                              is not None and now - r["at"] < KEEP_S)}
     return logs
+
+
+def _messages(e):
+    """`[(key, sig, text)]` for one status entry: the one-off "moved your
+    checkout" message of a reattach (`reattach_notice`, its own key so it
+    never shares a rate-limit slot with a later lag notice) first, then the
+    rule-lag notice (key `lag`, sig = branch + base)."""
+    if not isinstance(e, dict):
+        return []
+    out = []
+    rn = e.get("reattach_notice")
+    if isinstance(rn, dict) and rn.get("text"):
+        out.append(("reattach", "reattach@%s" % rn.get("at"), rn["text"]))
+    if e.get("notice"):
+        out.append(("lag", "lag|%s|%s" % (e.get("branch") or "detached", e.get("base")),
+                    e["notice"]))
+    return out
 
 
 def run_job(now, state, panes, *, status, run, sleep_fn, projects_dir,
@@ -131,7 +158,7 @@ def run_job(now, state, panes, *, status, run, sleep_fn, projects_dir,
     from watchdog import idle_pane
     left = budget_left() if budget_left is not None else None
     if left is not None and left < MIN_BUDGET_S:
-        if any(isinstance(e, dict) and e.get("notice")
+        if any(_messages(e)
                for e in ((status or {}).get("checkouts") or {}).values()):
             return ["checkout-notice: hold:budget (%.0fs left)" % left]
         return []

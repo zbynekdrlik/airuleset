@@ -137,6 +137,10 @@ DEFAULT_BASES = cf.DEFAULT_BASES      # shared with the SessionStart hook
 RULE_PATHS = cf.RULE_PATHS
 REATTACH_IDLE_S = cf.REATTACH_IDLE_S  # #1176 census: HEAD idle before a reattach
 REATTACH_RETRY_S = 24 * 3600   # a failed reattach of the same HEAD is not relaunched sooner
+REATTACH_NOTICE_KEEP_S = 24 * 3600   # the "moved your checkout" message is offered this long
+# a child that refused at its own re-check (the checkout changed in the seconds
+# since the verdict) did not FAIL a reattach: no 24 h backoff for that
+TRANSIENT_REFUSALS = ("re-check refused", "branch changed")
 rule_lag = cf.rule_lag
 
 
@@ -330,7 +334,8 @@ def _run_fix(path, remote, entry, v, mode, ctx):
         done = "reattached to %s, fast-forwarded %d commit(s)" % (v.detail, v.behind)
         if ok:
             entry["branch"] = v.detail
-            entry["notice"] = cf.reattach_line(v.branch, v.detail)
+            entry["reattach_notice"] = {"text": cf.reattach_line(v.branch, v.detail),
+                                        "at": entry["checked"]}
         else:
             entry["reattach_failed"] = {"head": head, "base": v.detail,
                                         "at": entry["checked"]}
@@ -390,15 +395,13 @@ def _work_branch_result(path, branch, remote, base, entry, ctx):
     ref = cf.remote_ref(remote, base)
     rv = cf.reattach_verdict(path, remote, base, now=entry["checked"])
     if rv.action == "reattach":
-        active = ctx["session_active"](path) if ctx["session_active"] else False
+        active = ctx["session_active"](path) if ctx["session_active"] else ""
         if _recent_reattach_failure(ctx["prev"], path, base, entry["checked"]):
             rv = cf.Verdict("refuse", "reattach-failed-recently", detail="retry after %dh"
                             % (REATTACH_RETRY_S // 3600))
             entry["reattach_failed"] = ctx["prev"]["reattach_failed"]
-        elif active is not False:
-            rv = cf.Verdict("refuse", "session-active", detail=(
-                "a live claude session works in this checkout" if active
-                else "session liveness unmeasurable"))
+        elif active:
+            rv = cf.Verdict("refuse", active, detail="a claude session works in this checkout")
         else:
             return _run_fix(path, remote, entry, rv, "reattach", ctx)
     if rv.action == "refuse":
@@ -427,7 +430,8 @@ def _notice(entry, path, branch, remote, base):
     files = rule_lag(path, cf.remote_ref(remote, base))
     if files:
         entry["rule_lag"] = len(files)
-        entry["notice"] = cf.notice_line(branch, len(files), remote, base)
+        entry["notice"] = cf.notice_line(branch, len(files), remote, base,
+                                         entry.get("refusal"))
 
 
 def fetch_timeout_for(prev, budget_left, fetch_timeout=FETCH_TIMEOUT_S):
@@ -520,6 +524,10 @@ def _check(c, now, used, ctx):
             prev.get("checked"), (int, float)) else 0
     if prev.get("ff") and "ff" not in entry:
         entry["ff"] = prev["ff"]
+    rn = prev.get("reattach_notice")
+    if isinstance(rn, dict) and isinstance(rn.get("at"), (int, float)) \
+            and 0 <= now - rn["at"] < REATTACH_NOTICE_KEEP_S:
+        entry["reattach_notice"] = rn    # until delivered (the notice store) or 24 h
     if "reattach_failed" not in entry and _recent_reattach_failure(
             prev, path, base, now):
         entry["reattach_failed"] = prev["reattach_failed"]
@@ -571,7 +579,8 @@ def _apply_result(e, res, unit, now, pending=None):
         e.update(state="current", behind=0)
         if reattach and res.get("base"):
             e.update(branch=res["base"], base=res["base"])
-            e["notice"] = cf.reattach_line(pending.get("from"), res["base"])
+            e["reattach_notice"] = {"text": cf.reattach_line(pending.get("from"),
+                                                             res["base"]), "at": now}
         done = "reattached to %s, fast-forwarded" % res.get("base") \
             if reattach else "fast-forwarded"
         if commits == 0:   # a no-op run (e.g. a session start merged it first)
@@ -587,7 +596,7 @@ def _apply_result(e, res, unit, now, pending=None):
         e.update(state="lagging", reason="%s failed: %s" % (
             "reattach" if reattach else "fast-forward", res.get("reason")))
         e.setdefault("since", now)
-        if reattach:
+        if reattach and not str(res.get("reason")).startswith(TRANSIENT_REFUSALS):
             e["reattach_failed"] = {"head": pending.get("head"), "at": now,
                                     "base": res.get("base") or e.get("base")}
 
@@ -664,29 +673,43 @@ def run_job(now, *, dry_run=False, budget_left=None, home=None,
 
 def _session_active_fn(panes, projects_dir, now):
     """`session_active(path)` from the sweep's claude panes (#1176 census
-    review: git idleness is not session idleness — a session reading code or
-    waiting on an answer on a deliberately detached HEAD must never be moved
-    under its feet): True when a pane whose cwd is inside the checkout has a
-    transcript written within REATTACH_IDLE_S (wall clock), None when such a
-    pane's transcript cannot be resolved (fail safe: never move), else
-    False."""
+    review: git idleness is not session idleness — a session reading code,
+    waiting on an answer or on its own background agents on a deliberately
+    detached HEAD must never be moved under its feet). Returns "" when no live
+    session blocks a reattach, else the refusal: `session-active` (a pane
+    inside the checkout whose main transcript OR any of its subagent
+    transcripts was written within REATTACH_IDLE_S, wall clock),
+    `session-liveness-unmeasurable` (such a pane's transcript cannot be
+    resolved — fail safe: never move), `session-present-no-channel` (a pane
+    is there but the `checkout-lag` kind is off, so it could not be told
+    about the move)."""
     import watchdog
     from watchdog import checkout_notice
 
+    def newest_write(tpath):
+        paths = [tpath]
+        sub = os.path.join(tpath[:-len(".jsonl")] if tpath.endswith(".jsonl") else tpath,
+                           "subagents")
+        if os.path.isdir(sub):
+            paths += [os.path.join(sub, n) for n in os.listdir(sub) if n.endswith(".jsonl")]
+        return max(os.stat(p).st_mtime for p in paths)
+
     def active(path):
         own = [cwd for _pid, cwd in panes if cwd and checkout_notice.inside(cwd, path)]
-        verdict = False
+        verdict = ""
         for cwd in own:
             try:
                 tinfo = watchdog.find_active_transcript(projects_dir, cwd)
                 tpath = tinfo[0] if isinstance(tinfo, (tuple, list)) else tinfo
-                age = max(now, time.time()) - os.stat(tpath).st_mtime if tpath else None
+                age = max(now, time.time()) - newest_write(str(tpath)) if tpath else None
             except (OSError, TypeError, ValueError):
                 age = None
+            if age is not None and age < REATTACH_IDLE_S:
+                return "session-active"
             if age is None:
-                verdict = None
-            elif age < REATTACH_IDLE_S:
-                return True
+                verdict = "session-liveness-unmeasurable"
+        if not verdict and own and not watchdog.nudges_enabled(checkout_notice.NUDGE_KIND):
+            verdict = "session-present-no-channel"
         return verdict
     return active
 

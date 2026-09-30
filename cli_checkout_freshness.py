@@ -27,7 +27,13 @@ target (diverged), and an incoming path that would land on an existing
 untracked or ignored file — the path itself OR any of its parent
 directories, with renames off and NUL-separated names (#314 F1). `--ff-only`
 itself also refuses to overwrite a file edited between the check and the
-merge.
+merge. The ONE move of a detached HEAD / merged work branch onto its base
+(`reattach_verdict` / `reattach`, #1176 census) keeps every one of these
+refusals and adds its own (commits outside the base, a local base ahead, the
+base checked out in another worktree, a long-lived branch, HEAD moved within
+REATTACH_IDLE_S); it is a local fast-forward fetch + a plain checkout, never
+a reset, and the old branch ref is kept. Job 53 alone runs it (with its
+session-liveness gate); the hook only prints the notice.
 
 PROCESS SAFETY: every git child runs in its own process group. Reads run
 with GIT_OPTIONAL_LOCKS=0 (a `git status` never rewrites the index a live
@@ -65,6 +71,9 @@ REATTACH_IDLE_S = 3600        # HEAD unmoved this long before a reattach (#1176 
 # a session mid-operation (merge / rebase / bisect …) or an unreadable git dir
 # is never told to merge the base (#1176 census review)
 NO_NOTICE_REASONS = ("in-progress", "git-dir-unmeasurable")
+# long-lived branches that are never "a work branch" to switch away from, even
+# when a checkout's declared base is another one (gk-infra declares develop)
+LONG_LIVED_BRANCHES = DEFAULT_BASES + ("staging",)
 
 
 # --------------------------------------------------------------------------- #
@@ -401,14 +410,20 @@ def base_on_remote(cwd, remote, branch, bases=DEFAULT_BASES):
     return None
 
 
-def notice_line(branch, n, remote, base):
+def notice_line(branch, n, remote, base, why=None):
     """The ONE rule-lag notice (#1176 census item 3/4): the SessionStart hook
-    prints it and Job 53 types it into the stream's own pane — same words."""
+    prints it and Job 53 types it into the stream's own pane — same words.
+    `why` is the refusal that keeps a BASE branch behind (it cannot switch to
+    itself): a dirty tree is told to commit / stash first, a diverged one or a
+    path collision only to merge."""
     on = "vetve %s" % branch if branch else "detached HEAD (bez vetvy)"
     noun, verb = (("súbor", "je") if n == 1 else ("súbory", "sú") if 2 <= n <= 4
                   else ("súborov", "je"))
-    if branch and branch == base:   # a dirty / diverged base: it cannot switch to itself
+    if branch and branch == base and why in (None, "dirty", "unmeasurable"):
         fix = "commitni alebo odlož lokálne zmeny a zmerguj %s/%s" % (remote, base)
+    elif branch and branch == base:
+        fix = "zmerguj %s/%s (vlastné commity alebo lokálne súbory v ceste)" % (
+            remote, base)
     else:
         fix = "zmerguj %s/%s do vetvy alebo prejdi na %s" % (remote, base, base)
     return ("checkout-freshness: tvoj checkout je na %s, %d %s s pravidlami "
@@ -473,6 +488,9 @@ def reattach_verdict(cwd, remote, base, now=None, idle_s=REATTACH_IDLE_S):
     target, ref = "%s/%s" % (remote, base), remote_ref(remote, base)
     if branch == base:
         return Verdict("noop", "on-base", branch, target, ref)
+    if branch in LONG_LIVED_BRANCHES:
+        return Verdict("refuse", "long-lived-branch", branch, target, ref,
+                       detail="%s is never switched away from" % branch)
     if not ref_exists(cwd, ref):
         return Verdict("noop", "no-target", branch, target, ref)
     behind = count_behind(cwd, ref)
@@ -662,13 +680,13 @@ def hook_main(cwd=None):
     if line:
         print(line)
     if not applied and v.reason not in NO_NOTICE_REASONS:
-        notice = hook_notice(cwd, branch)
+        notice = hook_notice(cwd, branch, v.reason if v.action == "refuse" else None)
         if notice:
             print(notice)
     return 0
 
 
-def hook_notice(cwd, branch):
+def hook_notice(cwd, branch, why=None):
     """The rule-lag notice for this checkout, or "" (no remote / no base /
     no rule file behind / unmeasurable)."""
     bases = ([branch] if branch in DEFAULT_BASES else []) + list(DEFAULT_BASES)
@@ -677,7 +695,7 @@ def hook_notice(cwd, branch):
     if not base or not ref_exists(cwd, remote_ref(remote, base)):
         return ""
     files = rule_lag(cwd, remote_ref(remote, base))
-    return notice_line(branch, len(files), remote, base) if files else ""
+    return notice_line(branch, len(files), remote, base, why) if files else ""
 
 
 # --------------------------------------------------------------------------- #
