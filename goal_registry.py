@@ -189,16 +189,19 @@ CLAUSES = [
 
 
 # --------------------------------------------------------------------------- #
-# #998 — per (authority, role, mode) rendering. The DEFAULT (parallel, no role)
-# is byte-identical to the historical `render(profile)`; a SEQUENTIAL mode
+# #998 — per (authority, role, mode) rendering. The DEFAULT is SEQUENTIAL with
+# no role (#1137, owner ROZHODNUTÉ 2026-09-30: the sequential/natural mode is the
+# default of every target) — `render(profile)` delegates to it; a SEQUENTIAL mode
 # SUBSTITUTES the refill clause (`saturation-core`) with a one-unit-at-a-time
-# clause, and an `infra` ROLE APPENDS an infra-scope clause after the delivery
+# clause (the PARALLEL variant keeps `saturation-core` and is rendered ONLY for
+# an explicit `mode: parallel` declaration), and an `infra` ROLE APPENDS an infra-scope clause after the delivery
 # clause. NO variant ever carries a turn cap ("stop after N turns" is banned in
 # operational goals, owner directive 2026-09-12, #993 comment) — the renderer
 # never inserts one, and `no_turn_cap_ok` locks it.
 # --------------------------------------------------------------------------- #
 
 MODES = ("parallel", "sequential")
+DEFAULT_MODE = "sequential"  # #1137 — mirrors cli_concurrency.DEFAULT_MODE
 ROLES = (None, "review", "infra", "quality")  # #1074 — the gk-quality window
 
 # The sequential clause that REPLACES `saturation-core` (the refill clause).
@@ -258,6 +261,18 @@ _REVIEW_B_BLOCK = ("stop-a-livelane", "stop-b-header", "obligation", "proof",
 # NO turn cap ("stop po"/"stop after" never appear — `no_turn_cap_ok` / the
 # #1000 tests lock it). Inserted at the `stop-b-header` position by
 # render_goal_line when role=="review".
+# Review clause (d) is the ONE lane-saturation sentence in the review block; the
+# SEQUENTIAL review variant (the gk review window's mode since #1137) swaps it
+# for a one-unit form so the rendered line never says both "ONE unit at a time"
+# and "fill lanes whenever workable".
+_REVIEW_D_PARALLEL = (
+    "(d) lanes plním DISPATCHOVATEĽNÝMI jednotkami vždy keď existuje workable "
+    "(review / fix-forward / resync / PROD akcia) — čakanie na CI nikdy nedrží "
+    "slot; ")
+_REVIEW_D_SEQUENTIAL = (
+    "(d) jedna DISPATCHOVATEĽNÁ jednotka naraz (review / fix-forward / resync / "
+    "PROD akcia), sloty nikdy nenasycujem — čakanie na CI nikdy nedrží slot; ")
+
 _REVIEW_ROLE = (
     "(B) BACKLOG EMPTY — gk REVIEW okno, PROVEN IN THIS TURN, NEVER CLAIMED: "
     "HOTOVO iba keď 0 hand-offov starších než 1 h bez akcie A 0 otvorených "
@@ -273,9 +288,7 @@ _REVIEW_ROLE = (
     "(c) každý hand-off (ready-for-review / needs-gatekeeper / prio:bounce / "
     "GATEKEEPER-ACTION; stream:montalu prvé) dostane gk verdikt alebo akčný "
     "komentár do 1 h; "
-    "(d) lanes plním DISPATCHOVATEĽNÝMI jednotkami vždy keď existuje workable "
-    "(review / fix-forward / resync / PROD akcia) — čakanie na CI nikdy nedrží "
-    "slot; "
+    + _REVIEW_D_PARALLEL +
     "(e) každá akceptovaná vetva má merged PR do develop; červený/DIRTY gk PR "
     "dostane fix lane v tom istom cykle; "
     "(f) release train nikdy nestojí (develop pred main ≥ 2 h a nič in-flight → "
@@ -325,12 +338,14 @@ _QUALITY_ROLE = (
 _TURN_CAP_RE = _re.compile(r"stop\s+after\s+(?:\d+|N)\s+turns?", _re.IGNORECASE)
 
 
-def render_goal_line(authority, mode="parallel", role=None):
+def render_goal_line(authority, mode=DEFAULT_MODE, role=None):
     """The exact `/goal ...` line for `(authority, mode, role)` (#998).
 
-    `mode="parallel", role=None` reproduces `render(authority)` byte-for-byte
-    (so the SKILL.md drift lock is unchanged). `mode="sequential"` substitutes
-    the refill clause; `role="infra"` appends the infra-scope clause;
+    `mode=DEFAULT_MODE` (sequential since #1137), `role=None` reproduces
+    `render(authority)` byte-for-byte (the SKILL.md drift lock).
+    `mode="sequential"` substitutes the refill clause (and, for the review
+    role, the review block's lane-fill clause (d)); `mode="parallel"` keeps
+    them — rendered only for an explicit `mode: parallel` declaration; `role="infra"` appends the infra-scope clause;
     `role="review"` REPLACES the generic (B) proof + obligation block with the
     gk review window's own (B) done condition + operating clauses (a)-(g)
     (#1000); `role="quality"` REPLACES the same block with the gk-quality
@@ -360,8 +375,13 @@ def render_goal_line(authority, mode="parallel", role=None):
             # position and drop the rest of the generic block (#1000 / #1074 —
             # SAME (B)-substitution mechanism, a different charter).
             if c.id == "stop-b-header":
-                parts.append(_REVIEW_ROLE if role == "review"
-                             else _QUALITY_ROLE)
+                if role == "quality":
+                    parts.append(_QUALITY_ROLE)
+                elif mode == "sequential":
+                    parts.append(_REVIEW_ROLE.replace(
+                        _REVIEW_D_PARALLEL, _REVIEW_D_SEQUENTIAL, 1))
+                else:
+                    parts.append(_REVIEW_ROLE)
             continue
         text = c.text_for(authority)
         if mode == "sequential" and c.id == "saturation-core":
@@ -388,10 +408,16 @@ def render_goal_line(authority, mode="parallel", role=None):
 
 
 def render(profile):
-    """The exact `/goal ...` line for `profile` — the DEFAULT (parallel, no
-    role) variant. Kept as the SKILL.md-drift-lock anchor; delegates to
-    `render_goal_line` so the two can never diverge."""
-    return render_goal_line(profile, "parallel", None)
+    """The exact `/goal ...` line for `profile` — the DEFAULT (sequential since
+    #1137, no role) variant. Kept as the SKILL.md-drift-lock anchor; delegates
+    to `render_goal_line` so the two can never diverge."""
+    return render_goal_line(profile, DEFAULT_MODE, None)
+
+
+# The gk-full-only review variants (#1000), both modes: the gk review window is
+# declared SEQUENTIAL (#1137); the PARALLEL one stays renderable for an explicit
+# declaration and for recognising a stranded pre-#1137 arm.
+_REVIEW_SPECS = [("full", "sequential", "review"), ("full", "parallel", "review")]
 
 
 def variant_specs():
@@ -414,7 +440,9 @@ def variant_specs():
 def all_goal_line_variants():
     """#1113 recurrence — every rendered `/goal ...` line the janitor may find
     stranded in a box: every (authority, mode, role) variant `variant_specs()`
-    locks, PLUS the gk-full-only `review` variant. Deduped, order-stable.
+    locks, PLUS the gk-full-only `review` variant in BOTH modes (the default
+    sequential one armed since #1137, and the parallel one a box armed before
+    it may still carry). Deduped, order-stable.
 
     The janitor matches a stranded box against these (verbatim template text is
     un-forgeable by a human draft) so it recognises + clears its OWN leftover
@@ -424,8 +452,7 @@ def all_goal_line_variants():
     Pure string renders; a render that raises (a nonsensical combination) is
     skipped, so the caller always gets the valid variants."""
     seen, out = set(), []
-    for authority, mode, role in list(variant_specs()) + [("full", "parallel",
-                                                           "review")]:
+    for authority, mode, role in list(variant_specs()) + _REVIEW_SPECS:
         try:
             line = render_goal_line(authority, mode, role)
         except Exception:  # noqa: BLE001 — a nonsensical combo is simply skipped
@@ -478,17 +505,23 @@ def variant_check():
     # variant_specs (its required-clause leg cannot model the (B) substitution),
     # so lock its BUDGET + no-turn-cap here so `goal-inventory --check` is honest
     # that it guards every ARMABLE variant. (Headroom is locked tighter by the
-    # dedicated #1000 test.)
-    try:
-        rline = render_goal_line("full", "parallel", "review")
-    except Exception as exc:  # noqa: BLE001
-        errs.append("render(full,parallel,review) raised: %r" % (exc,))
-    else:
+    # dedicated #1000 test.) Both modes (#1137): the sequential one is what the
+    # gk review window arms; it must also drop the review lane-fill clause (d).
+    for authority, mode, role in _REVIEW_SPECS:
+        tag = "%s/%s/%s" % (authority, mode, role)
+        try:
+            rline = render_goal_line(authority, mode, role)
+        except Exception as exc:  # noqa: BLE001
+            errs.append("render(%s,%s,%s) raised: %r" % (authority, mode, role, exc))
+            continue
         if len(rline) > GOAL_ARM_CHAR_CAP:
-            errs.append("full/parallel/review over budget: %d > %d"
-                        % (len(rline), GOAL_ARM_CHAR_CAP))
+            errs.append("%s over budget: %d > %d"
+                        % (tag, len(rline), GOAL_ARM_CHAR_CAP))
         if _TURN_CAP_RE.search(rline):
-            errs.append("full/parallel/review carries a TURN CAP (banned)")
+            errs.append("%s carries a TURN CAP (banned)" % tag)
+        if mode == "sequential" and (_REVIEW_D_PARALLEL in rline
+                                     or "ONE unit at a time" not in rline):
+            errs.append("%s sequential still carries the lane-fill clause" % tag)
     return errs
 
 

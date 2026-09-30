@@ -99,12 +99,13 @@ REMOTE_HOSTS = [
         # as a managed checkout
         # (session-start-fetch.sh). The infra window runs SEQUENTIAL (one unit
         # at a time — a sensitive box-maintenance / architecture-rework lane);
-        # the review window keeps today's PARALLEL behaviour. Every OTHER
-        # target declares NO windows and is byte-identical to today (one
-        # default window, parallel).
+        # the review window ALSO runs SEQUENTIAL since #1137 (owner
+        # ROZHODNUTÉ 2026-09-30: the sequential/natural mode is the default of
+        # EVERY target; no window declares parallel). Every OTHER target
+        # declares NO windows and resolves the default (sequential).
         "windows": [
             {"name": "gk", "cwd": "~/devel/odoo/odoo-erp",
-             "role": "review", "mode": "parallel"},
+             "role": "review", "mode": "sequential"},
             # #1108: gk-infra/gk-quality declare their managed checkout so the
             # install PROVISIONS it (clone when absent — `ensure_declared_
             # checkouts`), never touching an existing tree. The FLOW primary
@@ -186,7 +187,8 @@ REMOTE_HOSTS = [
         "repo_path": "~/devel/airuleset",
         # owner 2026-09-28 („prepni montalu4 do sekvencneho modu", issue 1169): the
         # SAME #998/#1031 declared-window mechanism as d1-d4/miva — ONE
-        # autopilot-worker lane at a time, no refill. The other montalu* stay parallel.
+        # autopilot-worker lane at a time, no refill. (Since #1137 every
+        # undeclared box resolves sequential by default too.)
         "windows": [
             {"name": "m4", "cwd": "~/devel/odoo/odoo-erp",
              "role": None, "mode": "sequential"},
@@ -293,8 +295,8 @@ REMOTE_HOSTS = [
         # (_managed_windows_create_body returns "" for < 2 windows → bare
         # `rename-window d3`). NOT a project .claude/lane-resources.json in
         # odoo-erp: a declared window is SOURCE 1 in the resolver and beats the
-        # project file (source 2), so gk's OWN declared review window keeps gk
-        # parallel — the committed odoo-erp file would instead wrongly flip
+        # project file (source 2), so gk's OWN declared review window keeps its
+        # own mode — the committed odoo-erp file would instead wrongly flip
         # every OTHER non-declared stream sharing that checkout (montalu*,
         # david1/2/4, miva*, simap*) to sequential. The per-box fleet
         # declaration scopes the change to the david3 account only.

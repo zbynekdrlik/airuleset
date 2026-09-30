@@ -7192,14 +7192,15 @@ def _dispatchable_for_cache(workable, root):
     #1078 review F3: the dep-resolution below (`_dep_wait_map_for` → per-row
     `Depends-on:` reads) is the expensive part of the quals class, and the
     lane-fill gate reads `dispatchable` ONLY on `parallel` panes (sequential
-    panes — the controller, gk-infra — are EXEMPT and never consult it). Skip it
-    on a sequential pane; a mode-resolve failure defaults to computing (parallel
-    is the fleet default) so a pane that CAN consult it is never starved."""
+    panes — the default of every box since #1137 — are EXEMPT and never consult
+    it). Skip it on a sequential pane; a mode-resolve failure still computes (a
+    read, never a push) so a declared-parallel pane that CAN consult it is never
+    starved."""
     try:
         import cli_concurrency
         _mode = cli_concurrency.resolve_mode(root)
     except Exception:  # noqa: BLE001
-        _mode = None  # unknown → compute (parallel is the fleet default)
+        _mode = None  # unknown → compute (a read; never starve a parallel pane)
     if _mode == "sequential":
         return None
     try:

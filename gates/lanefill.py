@@ -12,8 +12,10 @@ opakovať?"). Prose (the skill + the owner) had failed; the ticket asked for a
 mechanical check AT the turn boundary, which only a Stop hook sees.
 
 THE GATE. Runs ONLY when the session is goal-armed AND the box/pane mode is
-`parallel` (`sequential` boxes — the controller pane, gk-infra — are EXEMPT by
-design, #1031/#1035) AND the turn's last line is `⏳ WORKING` / `✅ DONE`. It
+`parallel` (`sequential` panes are EXEMPT by design, #1031/#1035 — and since
+#1137 sequential is the DEFAULT of every box, so the gate only ever acts on an
+explicit `mode: parallel` declaration; a sequential pane is never blocked for
+unfilled slots and never asked for a `Lane-fill:` line) AND the turn's last line is `⏳ WORKING` / `✅ DONE`. It
 BLOCKS (exit 2) iff there are MORE dispatchable tickets than live lanes AND a
 free lane slot AND the final message carries no justification line
 (`Dependency: #N …` / `Lane-fill: <reason>`). The block names up to five

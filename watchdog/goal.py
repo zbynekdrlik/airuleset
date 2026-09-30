@@ -621,10 +621,10 @@ def goal_template_for(authority, cwd, role=None, mode=None, path=None,
     """#998 — the `/goal` line for `authority` in the pane's resolved
     (mode, role). When `mode`/`role` are None they are resolved from `cwd`
     via `cli_concurrency.resolve_concurrency` (the SINGLE resolver every
-    consumer reads). The DEFAULT (parallel, no role) delegates to
-    `goal_template_for_authority` (fresh SKILL.md read, drift-locked ==
-    the renderer's default); a VARIANT (sequential mode or infra role) is
-    composed via the SAME `goal_registry.render_goal_line` the SKILL.md
+    consumer reads). The DEFAULT (sequential since #1137, no role) delegates
+    to `goal_template_for_authority` (fresh SKILL.md read, drift-locked ==
+    the renderer's default); a VARIANT (an explicit parallel declaration or a
+    role) is composed via the SAME `goal_registry.render_goal_line` the SKILL.md
     lines are generated from. None on any failure OR over the cap (never a
     wrong-authority / oversize arm), logged LOUD like the sibling."""
     authority = str(authority or "").strip()
@@ -642,11 +642,11 @@ def goal_template_for(authority, cwd, role=None, mode=None, path=None,
         except Exception as e:  # noqa: BLE001
             if isinstance(logs, list):
                 logs.append("goal-template concurrency-resolve-error (%r) — "
-                            "falling back to default (parallel)" % e)
-            r_mode, r_role = "parallel", None
+                            "falling back to default (sequential)" % e)
+            r_mode, r_role = "sequential", None
         mode = r_mode if mode is None else mode
         role = r_role if role is None else role
-    if mode == "parallel" and not role:
+    if mode == "sequential" and not role:
         return goal_template_for_authority(authority, path=path, logs=logs)
     try:
         import goal_registry
@@ -5038,16 +5038,17 @@ def goal_lane_occupancy_nudge(now, run, rec, sid, cwd, pid, captured, tpath,
     # #998 -- a SEQUENTIAL-mode pane is ONE unit at a time, NO refill: the
     # lane-occupancy refill nudge NEVER fires for it (subagents/consults are
     # NOT gated -- only the refill push). Resolved by the single resolver; a
-    # resolver error is treated as non-sequential (today's behaviour), logged
-    # (never a silent swallow). Placed after the authority gate, before any
-    # count/keystroke work.
+    # resolver error is treated as SEQUENTIAL (#1137: the default of every box,
+    # parallel only by an explicit declaration an erroring resolver cannot
+    # prove), logged (never a silent swallow). Placed after the authority gate,
+    # before any count/keystroke work.
     try:
         import cli_concurrency
         _seq_mode = cli_concurrency.resolve_mode(cwd)
     except Exception as e:  # noqa: BLE001
-        _seq_mode = None
+        _seq_mode = "sequential"
         _lane_skip(logs, loc, "concurrency-resolve-error (%r) -- treating as "
-                              "non-sequential" % e)
+                              "sequential (the #1137 default)" % e)
     if _seq_mode == "sequential":
         _lane_skip(logs, loc, "skip:sequential-mode (one unit at a time, no "
                               "refill -- the sequential target caps lanes at 1)")

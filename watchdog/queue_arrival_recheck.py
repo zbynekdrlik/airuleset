@@ -745,16 +745,19 @@ def goal_queue_arrival_recheck(now, run, qrecs, sid, cwd, pid, tpath, loc,
     # nudge: ONE unit at a time, no refill (subagents/consults are NOT gated).
     # The INFRA role is EXEMPT (#1029): the gk-infra window is ALWAYS sequential
     # and its arrival nudge is an AWARENESS wake, not a refill. Cheap, before any
-    # fetch. Fail-safe: a resolver error is treated as non-sequential (today's
-    # behaviour), and LOGGED (never a silent swallow).
-    if _skip_sequential:
+    # fetch. Fail-safe: a resolver error is treated as SEQUENTIAL (#1137: the
+    # default of every box; parallel needs an explicit declaration an erroring
+    # resolver cannot prove), and LOGGED (never a silent swallow). An ENDED
+    # supervisor pane (#1178, `deliver_hold` set: proven-empty backlog, idle, no
+    # lane) is EXEMPT too — its nudge is awareness ("next"), never a refill.
+    if _skip_sequential and deliver_hold is None:
         try:
             import cli_concurrency
             _seq_mode = cli_concurrency.resolve_mode(cwd)
         except Exception as e:  # noqa: BLE001
-            _seq_mode = None
+            _seq_mode = "sequential"
             logs.append("queue-arrival %s -> concurrency-resolve-error (%r) — "
-                        "treating as non-sequential" % (loc, e))
+                        "treating as sequential (the #1137 default)" % (loc, e))
         if _seq_mode == "sequential":
             logs.append("queue-arrival %s -> skip:sequential-mode" % loc)
             return logs
