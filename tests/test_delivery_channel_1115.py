@@ -154,38 +154,6 @@ class TestDeliveryChannelStates(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# channel_fallback_line — one voice for every producer
-# ---------------------------------------------------------------------------
-class TestChannelFallbackLine(unittest.TestCase):
-    def test_no_lane(self):
-        line = dl.channel_fallback_line(dl.CHANNEL_NO_LANE, prog="upload")
-        self.assertIn("upload: no public lane on this box (no lane for this account)",
-                      line)
-        self.assertIn("private URLs only, see #1115", line)
-
-    def test_pending_names_slice_b(self):
-        line = dl.channel_fallback_line(dl.CHANNEL_PENDING, prog="share")
-        self.assertIn("lane pending", line)
-        self.assertIn("Access spec", line)
-        self.assertIn("see #1115", line)
-
-    def test_marker_absent(self):
-        line = dl.channel_fallback_line(dl.CHANNEL_MARKER_ABSENT, prog="secret")
-        self.assertIn("secret: no public lane on this box (go-live marker absent)",
-                      line)
-
-    def test_unreachable_with_detail(self):
-        line = dl.channel_fallback_line(dl.CHANNEL_UNREACHABLE, prog="share",
-                                        detail="502")
-        self.assertIn("share: public lane unreachable (502)", line)
-        self.assertIn("see #1115", line)
-
-    def test_unreachable_default_detail(self):
-        line = dl.channel_fallback_line(dl.CHANNEL_UNREACHABLE, prog="share")
-        self.assertIn("public lane unreachable (public host unreachable)", line)
-
-
-# ---------------------------------------------------------------------------
 # public_url_channel_fact — ok / fallback:<reason> / broken:<code>
 # ---------------------------------------------------------------------------
 class TestPublicUrlChannelFact(unittest.TestCase):
@@ -327,8 +295,10 @@ class TestConformancePublicUrlChannel(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
-# Producer wiring: cmd_upload / _secret_show print the labelled fallback line
-# with the right reason. (cmd_share is covered by test_share_public_lane_1114.)
+# Producer wiring: with no public lane cmd_upload / _secret_show / _secret_request
+# print NO URL, name the reason + --private, exit 1 (#1192 owner decision 30.9.:
+# the old private fallback printed tailscale URLs by default). cmd_share is
+# covered by test_share_public_lane_1114.
 # ---------------------------------------------------------------------------
 class TestUploadFallbackLabelled(unittest.TestCase):
     def _run(self, reason):
@@ -342,25 +312,27 @@ class TestUploadFallbackLabelled(unittest.TestCase):
              mock.patch("urllib.request.urlopen") as uo:
             uo.return_value = types.SimpleNamespace(status=200)
             out, err = io.StringIO(), io.StringIO()
-            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                 self.assertRaises(SystemExit) as cm:
                 airuleset.cmd_upload(types.SimpleNamespace(dir=None, ttl=10, port=None))
+            self.assertEqual(cm.exception.code, 1)
             return out.getvalue(), err.getvalue()
 
     def test_no_lane(self):
         out, err = self._run(dl.CHANNEL_NO_LANE)
-        self.assertIn("100.64.0.1", out)                 # the private URL
-        self.assertIn("upload: no public lane on this box (no lane for this account)",
-                      err)
-        self.assertIn("see #1115", err)
+        self.assertNotIn("100.64.0.1", out)              # no private URL by default
+        self.assertIn("upload: !!! ŽIADNA URL", err)
+        self.assertIn("no public lane on this box: no lane for this account", err)
+        self.assertIn("--private", err)
 
     def test_pending(self):
         _out, err = self._run(dl.CHANNEL_PENDING)
-        self.assertIn("upload: no public lane on this box (lane pending", err)
+        self.assertIn("no public lane on this box: lane pending", err)
 
 
 class TestSecretShowFallbackLabelled(unittest.TestCase):
-    """_secret_show: no public lane -> private URL + ONE labelled reason line,
-    and NEVER a token/secret value in the output."""
+    """_secret_show: no public lane -> NO URL, ONE loud reason line naming
+    --private, exit 1 (#1192), and NEVER a token/secret value in the output."""
 
     def _run(self, reason):
         import cli_vault
@@ -396,30 +368,31 @@ class TestSecretShowFallbackLabelled(unittest.TestCase):
                             return_value=types.SimpleNamespace(pid=4321,
                                                                poll=lambda: None)):
                 out, err = io.StringIO(), io.StringIO()
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                     self.assertRaises(SystemExit) as cm:
                     cli_vault._secret_show(types.SimpleNamespace(
                         name="X", file=None, cmd=[], ttl=30, port=None,
                         allow_plain=False, public=False))
+                self.assertEqual(cm.exception.code, 1)
                 return out.getvalue(), err.getvalue()
 
     def test_marker_absent(self):
         out, err = self._run(dl.CHANNEL_MARKER_ABSENT)
-        self.assertIn("http://100.64.0.1:8851/PRIVATE/", out)   # private URL served
-        self.assertIn("secret show: no public lane on this box (go-live marker absent)",
-                      err)
-        self.assertIn("see #1115", err)
+        self.assertNotIn("http://", out)                # no private URL by default
+        self.assertIn("secret show: !!! ŽIADNA URL", err)
+        self.assertIn("no public lane on this box: go-live marker absent", err)
+        self.assertIn("--private", err)
 
     def test_no_secret_value_leaks(self):
         out, err = self._run(dl.CHANNEL_NO_LANE)
         combined = out + err
-        self.assertIn("secret show: no public lane on this box (no lane for this account)",
-                      err)
+        self.assertIn("no public lane on this box: no lane for this account", err)
         self.assertNotIn("AIRULESET_VAULT_TOKEN", combined)
 
 
 class TestSecretRequestFallbackLabelled(unittest.TestCase):
-    """_secret_request: no public lane -> private URL + ONE labelled reason line
-    (prog='secret'), and NEVER a token/secret value in the output."""
+    """_secret_request: no public lane -> NO URL, ONE loud reason line
+    (prog='secret'), exit 1 (#1192), and NEVER a token/secret value in the output."""
 
     def _run(self, reason):
         import cli_vault
@@ -460,24 +433,27 @@ class TestSecretRequestFallbackLabelled(unittest.TestCase):
                  mock.patch("subprocess.Popen",
                             return_value=types.SimpleNamespace(pid=4322)):
                 out, err = io.StringIO(), io.StringIO()
-                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err), \
+                     self.assertRaises(SystemExit) as cm:
                     cli_vault._secret_request(types.SimpleNamespace(
                         name="X", cmd=[], ttl=30, keep=None, port=None,
                         allow_plain=False, public=False, replace=False,
                         persist=None, persist_map=None))
+                self.assertEqual(cm.exception.code, 1)
+                self.st = st
                 return out.getvalue(), err.getvalue()
 
     def test_pending(self):
         out, err = self._run(dl.CHANNEL_PENDING)
-        self.assertIn("http://100.64.0.1:8831/PRIVATE/", out)   # private URL served
-        self.assertIn("secret: no public lane on this box (lane pending", err)
-        self.assertIn("see #1115", err)
+        self.assertNotIn("http://", out)                # no private URL by default
+        self.assertIn("secret: !!! ŽIADNA URL", err)
+        self.assertIn("no public lane on this box: lane pending", err)
+        self.st.register_request.assert_not_called()   # refused before registering
 
     def test_no_secret_value_leaks(self):
         out, err = self._run(dl.CHANNEL_NO_LANE)
         combined = out + err
-        self.assertIn("secret: no public lane on this box (no lane for this account)",
-                      err)
+        self.assertIn("secret: !!! ŽIADNA URL", err)
         self.assertNotIn("AIRULESET_VAULT_TOKEN", combined)
         self.assertNotIn("NONCEVALUE", combined)
 

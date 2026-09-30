@@ -294,8 +294,12 @@ class TestCmdSharePublicFirst(unittest.TestCase):
                                lambda *a, **k: lane_full), \
              mock.patch.object(fw, "_public_share_status", lambda u, timeout=3: status):
             out, err = io.StringIO(), io.StringIO()
+            self.exit_code = None
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
-                fw.cmd_share(types.SimpleNamespace(path="/tmp/rec.wav"))
+                try:
+                    fw.cmd_share(types.SimpleNamespace(path="/tmp/rec.wav"))
+                except SystemExit as e:
+                    self.exit_code = e.code
             return out.getvalue(), err.getvalue()
 
     def test_public_url_first_on_200(self):
@@ -312,37 +316,38 @@ class TestCmdSharePublicFirst(unittest.TestCase):
         self.assertTrue(first.startswith("https://drop-david.newlevel.media/s/"),
                         "first line was: %r" % first)
 
-    def test_502_falls_back_to_labelled_private(self):
+    # #1192 (owner 30.9.): a dead/missing public lane prints NO URL and exits 1
+    # naming --private — the tailscale/LAN URLs are no longer a default fallback.
+    def test_502_prints_no_url(self):
         out, err = self._run(self.LANE, 502)
-        self.assertNotIn("https://drop-david", out)
-        self.assertIn("192.168.1.5", out)             # the private fallback URLs
-        self.assertIn("unreachable", err)
+        self.assertEqual(self.exit_code, 1)
+        self.assertNotIn("://", out)
+        self.assertIn("share: !!! ŽIADNA URL", err)
         self.assertIn("502", err)
-        self.assertIn("see #1115", err)
+        self.assertIn("--private", err)
 
-    def test_timeout_falls_back_to_labelled_private(self):
+    def test_timeout_prints_no_url(self):
         out, err = self._run(self.LANE, None)
-        self.assertNotIn("https://drop-david", out)
-        self.assertIn("timeout", err)
-        self.assertIn("see #1115", err)
+        self.assertEqual(self.exit_code, 1)
+        self.assertNotIn("://", out)
+        self.assertIn("no answer", err)
 
-    def test_no_lane_prints_labelled_private_only(self):
+    def test_no_lane_prints_no_url(self):
         out, err = self._run(None, 200)
-        self.assertNotIn("https://", out)
-        self.assertIn("192.168.1.5", out)
+        self.assertEqual(self.exit_code, 1)
+        self.assertNotIn("://", out)
         self.assertIn("no public lane on this box", err)
-        self.assertIn("see #1115", err)
 
-    def test_dead_origin_falls_back_even_when_edge_302(self):
+    def test_dead_origin_refuses_even_when_edge_302(self):
         # A LOCAL lane whose loopback origin isn't served (dominika): the Access
         # edge answers 302, but the origin liveness probe fails -> must NOT
-        # advertise the public URL, fall back to labelled private (#1114 review MAJOR).
+        # advertise the public URL (#1114 review MAJOR) — and, since #1192, no
+        # private URL either.
         lane = ("drop-subdev-dominika.newlevel.media", 8875, "127.0.0.1")
         out, err = self._run(lane, 302, origin_live=False)
-        self.assertNotIn("https://drop-subdev-dominika", out)
-        self.assertIn("192.168.1.5", out)
-        self.assertIn("origin down", err)
-        self.assertIn("see #1115", err)
+        self.assertEqual(self.exit_code, 1)
+        self.assertNotIn("://", out)
+        self.assertIn("tunnel origin 127.0.0.1 down", err)
 
 
 class TestPublicShareStatusRealHTTP(unittest.TestCase):

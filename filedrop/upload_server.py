@@ -22,6 +22,7 @@ Usage:
                             spaces, parentheses) and replaces only what cannot
                             safely be a filename. The TOKEN segment is never
                             decoded — it is the only auth this endpoint has.
+  GET  /healthz          -> 204, token-free liveness for the CLI's probe (#1192)
 
 <bind_ips_csv> is a comma-separated list of the PRIVATE addresses to listen on
 (tailscale + LAN — filedrop.bind_ips()), so the user reaches the endpoint whether
@@ -222,6 +223,8 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = self._parts()
+        if p == ["healthz"]:                  # #1192: token-free liveness probe
+            return self._txt(204, "")
         if len(p) == 1 and p[0] == TOKEN:
             body = PAGE.encode()
             self.send_response(200)

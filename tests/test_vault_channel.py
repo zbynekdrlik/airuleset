@@ -647,10 +647,10 @@ class TestPlainHttpIsOptIn(_StoreCase):
     def test_a_real_request_advertises_no_cleartext_url_by_default(self):
         env = dict(os.environ)
         env.update(self._env)
-        env["HOME"] = self.tmp.name  # no live drop marker: a private-path test (#1115 slice G)
+        env["HOME"] = self.tmp.name  # private-path test: --private (#1192), no marker (#1115 G)
         out = subprocess.run(
             [sys.executable, str(ROOT / "airuleset.py"), "secret", "request",
-             "PLAIN_CHECK", "--ttl", "30", "--keep", "60"],
+             "PLAIN_CHECK", "--ttl", "30", "--keep", "60", "--private"],
             capture_output=True, text=True, timeout=120, env=env)
         self.addCleanup(TestHealthProbeCarriesNoToken._stop_named, "PLAIN_CHECK")
         self.assertEqual(out.returncode, 0, out.stderr)
@@ -1230,7 +1230,7 @@ class TestTokenIsNotInArgv(_StoreCase):
         env.update(self._env)
         out = subprocess.run(
             [sys.executable, str(ROOT / "airuleset.py"), "secret", "request",
-             name, "--ttl", ttl, "--keep", "60"],
+             name, "--ttl", ttl, "--keep", "60", "--private"],
             capture_output=True, text=True, timeout=120, env=env)
         self.assertEqual(out.returncode, 0, out.stderr)
         url = out.stdout.splitlines()[0].split()[0]
@@ -1356,10 +1356,10 @@ class TestHealthProbeCarriesNoToken(_ServerCase):
         # output the whole command exists to produce.
         env = dict(os.environ)
         env.update(self._env)
-        env["HOME"] = self.tmp.name  # no live drop marker: a private-path test (#1115 slice G)
+        env["HOME"] = self.tmp.name  # private-path test: --private (#1192), no marker (#1115 G)
         out = subprocess.run(
             [sys.executable, str(ROOT / "airuleset.py"), "secret", "request",
-             "URL_PRINT", "--ttl", "30", "--keep", "60"],
+             "URL_PRINT", "--ttl", "30", "--keep", "60", "--private"],
             capture_output=True, text=True, timeout=120, env=env)
         self.addCleanup(self._stop_named, "URL_PRINT")
         self.assertEqual(out.returncode, 0, out.stderr)
