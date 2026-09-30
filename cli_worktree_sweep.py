@@ -724,10 +724,11 @@ def discover_stale_worktrees(home=None, git_run=None, now=None, pid_is_dead=None
                 row["reason"] = "protected branch name (%s)" % branch
                 out.append(row)
                 continue
-            if e.get("locked"):
-                out.append(_classify_locked_worktree(
-                    root, e.get("path"), branch, e.get("lock_reason"),
-                    git_run, now, pid_is_dead=pid_is_dead))
+            if e.get("locked"):     # #1193: a resumed lane can sit behind a dead-pid lock
+                row = _classify_locked_worktree(root, e.get("path"), branch, e.get("lock_reason"),
+                                                git_run, now, pid_is_dead=pid_is_dead)
+                row["reason"] = row["reason"] or gate.keep_reason(root, row["path"])
+                out.append(row)
                 continue
             if branch is None:
                 row["reason"] = "detached HEAD -- never guessed at"

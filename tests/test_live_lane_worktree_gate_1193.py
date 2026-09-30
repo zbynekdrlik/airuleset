@@ -7,10 +7,11 @@ origin-contained ``agent-*`` worktree with no process cwd inside; an in-session
 lane's process cwd is the MAIN checkout, so a lane that had just pushed and sat
 between tool calls matched exactly.
 
-The gate (check (e)): a worktree whose basename matches a fresh LIVE subagent
-transcript (``cli_lane_liveness`` evidence: live / wedged / unreadable) is kept;
-when that evidence cannot be read for a repo, the repo's worktrees are kept for
-the pass. A finished or stale lane stays reclaimable. The same gate covers the
+The gate (check (e)): a worktree whose basename matches a fresh unfinished
+subagent transcript (live / wedged / unreadable / a text tail with no terminal
+stop), or that a live child's meta names, is kept; when the evidence cannot be
+read for a repo, its ``agent-*`` worktrees are kept for the pass. A lane whose
+transcript ends in a terminal stop, or a stale one, stays reclaimable. The same gate covers the
 sibling reclaimers: ``cli_worktree_sweep.discover_stale_worktrees`` (feeds
 ``sweep_stale_worktrees``), ``cli_worktree_sweep.discover_reclaimable_worktrees``
 (the disk-guard ``worktree`` rung) and ``lane_reconcile.prune_finished_worktrees``.

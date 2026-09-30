@@ -171,9 +171,9 @@ def discover_stale_agent_worktrees(home=None, now=None,
     (a) unlocked (no ``locked`` file in gitdir), (b) ``git status
     --porcelain`` clean, (c) HEAD contained in some remote-tracking ref
     (``git branch -r --contains HEAD`` non-empty), (d) no live process with
-    cwd inside the worktree, (e) #1193 not a LIVE lane: no fresh live
-    subagent transcript named like the worktree, and the repo's transcript
-    evidence was readable (``cli_lane_live_gate``; fail-safe keep otherwise).
+    cwd inside the worktree, (e) #1193 not a LIVE lane per ``cli_lane_live_gate``
+    (a fresh unfinished transcript named like it, or a live child whose meta
+    names it; unreadable transcript evidence keeps it, fail-safe).
 
     NO idle age gate — a FINISHED lane is immediately reclaimable once its
     work is on origin. #1067 1g: with ``cache_path`` (the guard dir's verdict
