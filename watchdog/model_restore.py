@@ -24,6 +24,16 @@ job puts the session back:
      the pane's cwd) naming the fallback window and the commits made in it.
      A reply still on the fallback model → back to step 1 (bounded).
 
+The ticket (and the word "fallback") needs PROOF: a Claude Code fallback marker
+in the tail or, once per episode, in a deeper backwards scan
+(`model_fallback.find_marker`, DEEP_BYTES). A session that simply runs an
+older model with no marker in reach is OFF-LINEUP: `/model` restores it (the
+gate blocks it too), the journal says so, and no ticket is filed. The #1060
+implementer window (its session id, or a pane whose claude runs with
+`AIRULESET_ROLE=implementer`) is never typed into. State is written into the
+sweep `state` as it changes, and a filing first searches the repo for the
+episode id, so a killed sweep never files twice.
+
 Bounds (it is an always-on RECOVERY kind, `model-restore` in
 RECOVERY_NUDGE_KINDS, so the per-kind floor and the total cap do not apply):
 MAX_ATTEMPTS `/model` typings per fallback episode, RETRY_S apart; one resume
@@ -47,6 +57,7 @@ FILE_MAX_TRIES = 3
 KEEP_S = 7 * 24 * 3600
 MIN_BUDGET_S = 30
 MAX_COMMITS_LISTED = 30
+EPISODE_TAG = "model-restore episode: "
 RESUME_TEXT = ("Model je späť na {mshort} po fallbacku (airuleset #1203) — "
                "pokračuj v práci.")
 
@@ -68,10 +79,11 @@ def _episode(st, v):
     return "model:%s" % v["model"]
 
 
-def _new_record(st, v, cwd, now):
-    marker = st.get("marker") if isinstance(st.get("marker"), dict) else None
+def _new_record(st, v, cwd, now, marker=None):
+    marker = marker if isinstance(marker, dict) else None
     since = marker.get("timestamp") if marker else None
-    return {"episode": _episode(st, v), "cwd": cwd,
+    return {"episode": ("marker:%s" % marker["uuid"]) if marker and marker.get("uuid")
+            else _episode(st, v), "cwd": cwd, "proven": marker is not None,
             "from": (marker or {}).get("from") or v["managed"],
             "to": (marker or {}).get("to") or v["model"],
             "since": since if isinstance(since, str) and since else _iso(now),
@@ -81,33 +93,49 @@ def _new_record(st, v, cwd, now):
             "gave_up": False, "touched": now}
 
 
+def same_model(a, b):
+    import model_fallback
+    return model_fallback.same_model(a, b)
+
+
 def restore_job(now, state, panes, *, managed, find_transcript, read_state,
                 verdict, short_name, ready, deliver, file_ticket,
                 outcome_kind, delivered, typed_not_delivered,
-                dry_run=False, handled=None):
+                dry_run=False, handled=None, find_marker=None,
+                implementer_sid=None, pane_is_implementer=None):
     """One pass over the sweep's claude panes; returns journal lines.
 
     Injected deps (production wiring in `run_job`):
-      find_transcript(cwd) -> tpath | None
+      find_transcript(cwd, exclude_sid) -> tpath | None (never the implementer's)
       read_state(tpath) -> model_fallback.tail_state dict | None (may raise OSError)
       verdict(st, managed) / short_name(model)   (model_fallback)
       ready(pid, cwd, live_ok) -> (ok, why, sid, tpath)   the idle-pane gates
       deliver(pid, tpath, text) -> SendOutcome
       file_ticket(rec, managed, now) -> (ok, ref, err)
+      find_marker(tpath, managed) -> marker | None   the deeper proof scan
+      implementer_sid() -> str | None           the box's implementer session
+      pane_is_implementer(pid) -> True/False/None (None = cannot tell)
     """
     logs = []
-    store = state.get(STATE_KEY) if isinstance(state.get(STATE_KEY), dict) else {}
-    store = {k: dict(r) for k, r in store.items() if isinstance(r, dict)}
+    old = state.get(STATE_KEY) if isinstance(state.get(STATE_KEY), dict) else {}
+    store = {k: dict(r) for k, r in old.items() if isinstance(r, dict)}
+    if not dry_run:
+        state[STATE_KEY] = store          # written through: a killed sweep keeps it
+    impl_sid = implementer_sid() if implementer_sid is not None else None
     seen = set()
     for pid, cwd in panes:
         if not cwd:
             continue
-        tpath = find_transcript(cwd)
+        tpath = find_transcript(cwd, impl_sid)
         if not tpath:
             continue
         sid = os.path.basename(str(tpath))
         sid = sid[:-len(".jsonl")] if sid.endswith(".jsonl") else sid
         if sid in seen:
+            continue
+        skip = _implementer_skip(sid, pid, impl_sid, pane_is_implementer)
+        if skip:           # never typed into -- and never takes the main pane's slot
+            logs.append("model-restore: %s -> %s %s -- never touched" % (sid, pid, skip))
             continue
         seen.add(sid)
         try:
@@ -130,9 +158,20 @@ def restore_job(now, state, panes, *, managed, find_transcript, read_state,
         if rec is None or rec.get("restored_at"):
             # a fallback after a CONFIRMED restore is a new episode (a new
             # re-review ticket), even when it lands on the same model again
-            rec = store[sid] = _new_record(st, v, cwd, now)
-            logs.append("model-restore: %s FALLBACK %s -> %s (since %s) [%s]" % (
-                sid, rec["from"], rec["to"], rec["since"], cwd))
+            marker = st.get("marker") if isinstance(st, dict) else None
+            if marker is None and find_marker is not None:
+                try:
+                    marker = find_marker(tpath, managed)
+                except OSError as exc:
+                    logs.append("model-restore: %s deep marker scan failed (%r)" % (sid, exc))
+            rec = store[sid] = _new_record(st, v, cwd, now, marker)
+            if rec["proven"]:
+                logs.append("model-restore: %s FALLBACK %s -> %s (since %s) [%s]"
+                            % (sid, rec["from"], rec["to"], rec["since"], cwd))
+            else:
+                logs.append("model-restore: %s OFF-LINEUP runs %s, not %s (no fallback "
+                            "marker in reach, first seen %s) -- restoring, no re-review "
+                            "ticket [%s]" % (sid, rec["to"], managed, rec["since"], cwd))
         rec["touched"] = now
         rec["cmd_at"] = None
         logs += _type_model(now, sid, pid, cwd, rec, managed, ready, deliver,
@@ -143,9 +182,24 @@ def restore_job(now, state, panes, *, managed, find_transcript, read_state,
     return logs
 
 
+def _implementer_skip(sid, pid, impl_sid, pane_is_implementer):
+    """Why this pane must never be typed into as the #1060 implementer, or ""."""
+    if impl_sid is None:
+        return ""                             # not an implementer box
+    if sid == impl_sid:
+        return "implementer session"
+    if pane_is_implementer is None:
+        return ""
+    role = pane_is_implementer(pid)
+    if role is None:
+        return "pane role unknown on an implementer box"
+    return "implementer pane" if role else ""
+
+
 def _done(rec):
     return bool(rec.get("restored_at")) and (
-        bool(rec.get("ticket")) or rec.get("file_tries", 0) >= FILE_MAX_TRIES)
+        not rec.get("proven") or bool(rec.get("ticket"))
+        or rec.get("file_tries", 0) >= FILE_MAX_TRIES)
 
 
 def _keep(sid, rec, seen, now):
@@ -221,15 +275,20 @@ def _healthy(now, sid, pid, cwd, st, rec, managed, short_name, ready, deliver,
             kind = outcome_kind(deliver(pid, tpath, text))
         except Exception as exc:  # noqa: BLE001 -- at-most-once: never retype
             kind = "error %r" % (exc,)
-        rec["resumed_at"] = now
+        if not kind.startswith("not-typed"):
+            rec["resumed_at"] = now          # keys went in: the one resume slot is used
         return ["model-restore: %s -> %s resume line -> %s" % (sid, pid, kind)]
     if not rec.get("restored_at"):
+        if not (st and same_model(st.get("model"), managed)):
+            return logs                     # no reply on the managed model yet
         rec["restored_at"] = now
         logs.append("model-restore: %s RESTORED -- the next reply runs on %s "
-                    "(fallback %s -> %s since %s)"
-                    % (sid, (st or {}).get("model") or managed, rec["from"],
-                       rec["to"], rec["since"]))
-    if rec.get("ticket") or rec.get("file_tries", 0) >= FILE_MAX_TRIES or dry_run:
+                    "(%s %s -> %s since %s)"
+                    % (sid, (st or {}).get("model") or managed,
+                       "fallback" if rec.get("proven") else "off-lineup",
+                       rec["from"], rec["to"], rec["since"]))
+    if (not rec.get("proven") or rec.get("ticket")
+            or rec.get("file_tries", 0) >= FILE_MAX_TRIES or dry_run):
         return logs
     rec["file_tries"] = rec.get("file_tries", 0) + 1
     try:
@@ -246,10 +305,11 @@ def _healthy(now, sid, pid, cwd, st, rec, managed, short_name, ready, deliver,
 
 
 def commit_range(cwd, since, until, sub_run=None):
-    """`[(sha, subject)]` of the commits on this checkout's local branches in the
-    fallback window, oldest first (`git log --branches --since --until`)."""
+    """`[(sha, subject)]` of the commits reachable from the checkout's HEAD in the
+    fallback window, oldest first (`git log HEAD --since --until`; other lanes'
+    branches are not this session's work)."""
     sub_run = sub_run or subprocess.run
-    r = sub_run(["git", "log", "--branches", "--reverse", "--since=%s" % since,
+    r = sub_run(["git", "log", "HEAD", "--reverse", "--since=%s" % since,
                  "--until=%s" % until, "--format=%h\t%s"],
                 cwd=cwd, capture_output=True, text=True, timeout=30)
     if getattr(r, "returncode", 1) != 0:
@@ -278,14 +338,16 @@ def compose_ticket(rec, managed, now, commits):
             "" if rec.get("since_exact") else
             " (start = first seen by the watchdog; the fallback marker was "
             "outside the bounded transcript tail, so it began earlier)"),
-        "- restored to `%s`; checkout: `%s`" % (managed, rec.get("cwd")), ""]
+        "- restored to `%s`; checkout: `%s`" % (managed, rec.get("cwd")),
+        "- %s%s" % (EPISODE_TAG, rec.get("episode")), ""]
     if commits is None:
         lines.append("Commit range: could not be read (`git log` failed in the "
                      "checkout) -- list it by hand for the window above.")
     elif not commits:
-        lines.append("Commits on local branches in the window: none.")
+        lines.append("Commits reachable from the checkout HEAD in the window: none.")
     else:
-        lines.append("Commits on local branches in the window: %d, range `%s^..%s`"
+        lines.append("Commits reachable from the checkout HEAD in the window: %d "
+                     "(oldest `%s`, newest `%s`)"
                      % (len(commits), commits[0][0], commits[-1][0]))
         for sha, subject in commits[:MAX_COMMITS_LISTED]:
             lines.append("- `%s` %s" % (sha, subject))
@@ -306,6 +368,12 @@ def file_ticket(rec, managed, now, sub_run=None):
     commits = commit_range(cwd, rec["since"], _iso(rec.get("restored_at") or now),
                            sub_run=sub_run)
     title, body = compose_ticket(rec, managed, now, commits)
+    s = sub_run(["gh", "issue", "list", "--state", "all", "--limit", "1", "--search",
+                 '"%s" in:body' % rec.get("episode"), "--json", "url", "--jq", ".[0].url"],
+                cwd=cwd, capture_output=True, text=True, timeout=60)
+    found = (getattr(s, "stdout", "") or "").strip()
+    if getattr(s, "returncode", 1) == 0 and found.startswith("http"):
+        return True, found, ""                 # filed by an earlier (killed) sweep
     r = sub_run(["gh", "issue", "create", "--title", title, "--body", body],
                 cwd=cwd, capture_output=True, text=True, timeout=60)
     if getattr(r, "returncode", 1) != 0:
@@ -322,7 +390,6 @@ def run_job(now, state, panes, *, run, sleep_fn, projects_dir, dry_run=False,
     the sweep has less than MIN_BUDGET_S left."""
     import model_fallback
     import model_lineup
-    import watchdog
     from watchdog import idle_pane
     left = budget_left() if budget_left is not None else None
     if left is not None and left < MIN_BUDGET_S:
@@ -339,9 +406,16 @@ def run_job(now, state, panes, *, run, sleep_fn, projects_dir, dry_run=False,
         return idle_pane.pane_ready(pid, cwd, NUDGE_KIND, projects_dir=projects_dir,
                                     handled=handled, state=state, now=now, **deps)
 
-    def find(cwd):
-        tinfo = watchdog.find_active_transcript(projects_dir, cwd)
-        return tinfo[0] if isinstance(tinfo, (tuple, list)) else tinfo
+    def find(cwd, exclude_sid=None):
+        return newest_transcript(projects_dir, cwd, exclude_sid)
+
+    def implementer_sid():
+        try:
+            with open(os.path.expanduser("~/.claude/airuleset-implementer-session"),
+                      encoding="utf-8") as fh:
+                return fh.read().strip() or None
+        except OSError:
+            return None
 
     logs = restore_job(
         now, state, panes, managed=model_lineup.MANAGED_MODEL, find_transcript=find,
@@ -350,5 +424,44 @@ def run_job(now, state, panes, *, run, sleep_fn, projects_dir, dry_run=False,
         file_ticket=lambda rec, managed, t: file_ticket(rec, managed, t, sub_run=sub_run),
         outcome_kind=idle_pane.outcome_kind, delivered=idle_pane.DELIVERED,
         typed_not_delivered=idle_pane.TYPED_NOT_DELIVERED,
-        dry_run=dry_run, handled=handled)
+        dry_run=dry_run, handled=handled, find_marker=model_fallback.find_marker,
+        implementer_sid=implementer_sid,
+        pane_is_implementer=lambda pid: pane_is_implementer(pid, run))
     return logs + jl
+
+
+def newest_transcript(projects_dir, cwd, exclude_sid=None):
+    """The pane's session transcript: the newest `*.jsonl` in its cwd's project
+    dir (`find_active_transcript`), but never the #1060 implementer's own
+    session, which shares the cwd with the main window -- then the next newest."""
+    import watchdog
+    tinfo = watchdog.find_active_transcript(projects_dir, cwd)
+    tpath = tinfo[0] if isinstance(tinfo, (tuple, list)) else tinfo
+    skip = (exclude_sid or "") + ".jsonl"
+    if not tpath or not exclude_sid or os.path.basename(str(tpath)) != skip:
+        return tpath
+    d = os.path.dirname(str(tpath))
+    try:
+        rest = sorted((os.path.join(d, n) for n in os.listdir(d)
+                       if n.endswith(".jsonl") and n != skip),
+                      key=os.path.getmtime, reverse=True)
+    except OSError:
+        return None
+    return rest[0] if rest else None
+
+
+def pane_is_implementer(pid, run=None):
+    """True when the pane's claude process runs with `AIRULESET_ROLE=implementer`
+    (the #1060 `claude-impl` launcher), False when it does not, None when the
+    process or its environment cannot be read."""
+    import watchdog
+    run = run or watchdog._default_run
+    ppid = (run(["tmux", "display-message", "-p", "-t", pid, "#{pane_pid}"]) or "").strip()
+    cpid = watchdog._pane_claude_pid(ppid) if ppid.isdigit() else None
+    if not cpid:
+        return None
+    try:
+        with open("/proc/%s/environ" % cpid, "rb") as fh:
+            return b"AIRULESET_ROLE=implementer" in fh.read().split(b"\0")
+    except OSError:
+        return None

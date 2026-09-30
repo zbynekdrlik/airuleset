@@ -832,9 +832,15 @@ def model_segment(payload, managed_model=None):
     model = payload.get("model")
     if not isinstance(model, dict):
         return ""
-    import model_fallback
     model_id = str(model.get("id") or model.get("display_name") or "")
-    t_model = model_fallback.transcript_model(payload.get("transcript_path"))
+    try:  # the segment opens the shim's shared try block: never blank the footer
+        import model_fallback
+        t_model = model_fallback.transcript_model(payload.get("transcript_path"))
+    except Exception:
+        t_model = None
+        if "model_fallback" not in sys.modules:
+            tier = burn.tier(model_id)
+            return "" if tier == "other" else "\033[38;5;40m%s\033[0m" % tier
     if t_model and not model_fallback.same_model(t_model, model_id):
         model_id = t_model
     label = model_fallback.short_name(model_id) or burn.tier(model_id)

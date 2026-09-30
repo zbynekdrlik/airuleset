@@ -135,8 +135,9 @@ def is_banned_model(value):
 # Bedrock/Vertex provider prefix (`us.anthropic.` / `anthropic.`), so both are
 # tolerated before the ban-list comparison. The DISPATCH hook (block-banned-
 # model.sh) enforces the SAME ban-list on the outgoing dispatch value.
-_SERVED_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
-_PROVIDER_PREFIX_RE = re.compile(r"^(?:us|eu|apac)?\.?anthropic\.")
+from model_fallback import (  # noqa: E402  (#1203: ONE provider/date pair)
+    PROVIDER_PREFIX_RE as _PROVIDER_PREFIX_RE,
+    SERVED_DATE_SUFFIX_RE as _SERVED_DATE_SUFFIX_RE)
 
 
 def _strip_served_date_suffix(value):

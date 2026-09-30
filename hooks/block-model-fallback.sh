@@ -27,4 +27,9 @@ RC=0
 env PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:$PYTHONPATH}" \
     python3 -P -m gates.modelfallback <<<"$PAYLOAD" 1>&2 || RC=$?
 [ "$RC" -eq 2 ] && exit 2
+if [ "$RC" -ne 0 ] && [ -n "${HOME:-}" ]; then   # a MALFUNCTION fails open, never silently
+    { mkdir -p "$HOME/.claude" && printf '%s\tadapter-crash\trc=%s\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$RC" >> "$HOME/.claude/model-fallback-gate.log"; } \
+        2>/dev/null || true
+fi
 exit 0

@@ -18,7 +18,10 @@ Exempt (ALLOW):
   * the #1060 implementer window (`AIRULESET_ROLE=implementer`), which pilots
     a gateway model on purpose;
   * `AIRULESET_MODEL_GUARD=off` in the environment (a deliberate headless run
-    on another model, e.g. scripts/rules_ab_experiment.py) -- logged.
+    on another model, e.g. scripts/rules_ab_experiment.py) -- logged;
+  * a headless run (`CLAUDE_CODE_ENTRYPOINT` other than `cli`, i.e. `claude -p`)
+    whose model merely differs: it chose that model. A PROVEN fallback (a
+    Claude Code marker in the tail) still blocks it -- logged.
 FAIL-OPEN on everything else that is not a proven fallback: no transcript path,
 an unreadable transcript (logged), no main assistant entry in the tail, an
 unresolvable managed model. A hook bug must never wedge every session.
@@ -33,12 +36,15 @@ import time
 from gates import read_payload, emit_block_stderr, allow
 
 LOG_NAME = "model-fallback-gate.log"
+LOG_MAX_BYTES = 64 * 1024          # a /goal loop bouncing off the block logs per call
 
 
 def _log(kind, extra=""):
     try:
         path = os.path.join(os.path.expanduser("~"), ".claude", LOG_NAME)
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        if os.path.exists(path) and os.path.getsize(path) > LOG_MAX_BYTES:
+            os.replace(path, path + ".1")          # one rotated generation
         with open(path, "a", encoding="utf-8") as fh:
             fh.write("%s\t%s\t%s\n" % (
                 time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), kind, extra))
@@ -47,21 +53,29 @@ def _log(kind, extra=""):
 
 
 def message(v):
-    """The block reason (Slovak first, then English) for verdict `v`."""
+    """The block reason (Slovak first, then English) for verdict `v`. Only a
+    PROVEN fallback (a Claude Code marker in the tail) claims that Claude Code
+    switched the model; a plain mismatch says only what is observed."""
+    if v.get("proven"):
+        why_sk = ("Claude Code prepol model sám (safeguard fallback) a práca na "
+                  "náhradnom modeli nesmie pokračovať.")
+        why_en = "Claude Code switched models on its own (a fallback marker is in the transcript)."
+    else:
+        why_sk = ("Session nebeží na spravovanom modeli (starší model alebo fallback, "
+                  "ktorého značka už nie je v konci transkriptu).")
+        why_en = "The session is not on the managed model (an older model, or an earlier fallback)."
     return (
-        "BLOCKED (#1203): model fallback -- táto hlavná session beží na {short} "
-        "(`{model}`), nie na spravovanom {mshort} (`{managed}`). Claude Code prepol "
-        "model sám (safeguard fallback) a práca na náhradnom modeli nesmie "
-        "pokračovať.\n"
+        "BLOCKED (#1203): model -- táto hlavná session beží na {short} (`{model}`), "
+        "nie na spravovanom {mshort} (`{managed}`). {why_sk}\n"
         "  Čo teraz: ukonči tento turn HNEĎ, bez ďalších tool callov. Watchdog "
         "(kind `model-restore`) napíše `/model {managed}` do nečinného panelu a "
         "overí, že ďalšia odpoveď je na {mshort}; ručne: napíš `/model {managed}`.\n"
         "EN: this MAIN session is running on `{model}`, not the managed "
-        "`{managed}` -- Claude Code switched models on its own. Every tool call is "
-        "blocked until the model is restored: end the turn now; the watchdog types "
-        "`/model {managed}` into the idle pane (or type it yourself)."
+        "`{managed}`. {why_en} Every tool call is blocked until the model is "
+        "restored: end the turn now; the watchdog types `/model {managed}` into the "
+        "idle pane (or type it yourself)."
     ).format(short=v["short"], model=v["model"], mshort=v["managed_short"],
-             managed=v["managed"])
+             managed=v["managed"], why_sk=why_sk, why_en=why_en)
 
 
 def decide(payload_text, env=None):
@@ -93,6 +107,10 @@ def decide(payload_text, env=None):
     v = model_fallback.verdict(st, managed)
     if v is None:
         return None, None, ""
+    if not v["proven"] and env.get("CLAUDE_CODE_ENTRYPOINT", "cli") != "cli":
+        # a headless `claude -p --model <x>` run (entrypoint sdk-cli) chose its
+        # model; only a proven Claude Code fallback stops it
+        return None, "headless-allow", "%s %s" % (tpath, v["model"])
     if (env.get("AIRULESET_MODEL_GUARD") or "").strip().lower() == "off":
         return None, "bypass", "%s %s" % (tpath, v["model"])
     return message(v), "block", "%s %s %s" % (v["kind"], v["model"], tpath)

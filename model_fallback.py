@@ -33,12 +33,17 @@ import os
 import re
 
 TAIL_BYTES = 256 * 1024
+DEEP_BYTES = 64 * 1024 * 1024      # find_marker: the watchdog's once-per-episode scan
+_CHUNK = 1024 * 1024
 FAMILIES = ("opus", "sonnet", "haiku", "fable")
 SYNTHETIC_MODEL = "<synthetic>"
+_MARKER_NEEDLE = b'"fallback"'    # a cheap pre-filter; the JSON parse decides
 
 _SUFFIX_RE = re.compile(r"\[[^\]]*\]$")
-_PROVIDER_RE = re.compile(r"^(?:(?:us|eu|apac|global)\.)?anthropic\.")
-_DATE_RE = re.compile(r"-\d{8}$")
+# The ONE provider-prefix / served-date pair: airuleset.py's audit predicates
+# import these (#1203 review: two copies had already drifted).
+PROVIDER_PREFIX_RE = re.compile(r"^(?:(?:us|eu|apac|global)\.)?anthropic\.")
+SERVED_DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
 # claude-opus-5-5, claude-fable-5-1, claude-sonnet-5, claude-haiku-4-5 (after the
 # `claude-` prefix is stripped): family, major, optional 1-2 digit minor.
 _NEW_RE = re.compile(r"^(%s)-(\d{1,2})(?:-(\d{1,2}))?(?:-v\d+(?::\d+)?)?$" % "|".join(FAMILIES))
@@ -58,8 +63,8 @@ def norm_model_id(model):
         return ""
     m = model.strip().lower()
     m = _SUFFIX_RE.sub("", m)
-    m = _PROVIDER_RE.sub("", m)
-    return _DATE_RE.sub("", m)
+    m = PROVIDER_PREFIX_RE.sub("", m)
+    return SERVED_DATE_SUFFIX_RE.sub("", m)
 
 
 def short_name(model):
@@ -112,6 +117,59 @@ def _fallback_block(content):
     return None
 
 
+def _marker_of(line):
+    """The fallback marker dict of one raw transcript line, or None."""
+    try:
+        e = json.loads(line)
+    except ValueError:
+        return None
+    if not isinstance(e, dict) or e.get("type") != "assistant" or e.get("isSidechain"):
+        return None
+    msg = e.get("message") if isinstance(e.get("message"), dict) else {}
+    fb = _fallback_block(msg.get("content"))
+    return None if fb is None else dict(fb, uuid=e.get("uuid"), timestamp=e.get("timestamp"))
+
+
+def find_marker(path, max_bytes=DEEP_BYTES, stop_model=None):
+    """The LAST main-session fallback marker within the last `max_bytes` of the
+    transcript (`{"from","to","uuid","timestamp"}`), or None. Reads backwards
+    in 1 MiB chunks and parses only lines carrying the marker text, so the
+    watchdog can date a fallback whose marker scrolled out of `TAIL_BYTES`.
+    With `stop_model`, a main reply on that model met FIRST (i.e. later in the
+    file) means any older marker was already undone: None. Raises OSError."""
+    stop = norm_model_id(stop_model).encode() if stop_model else b""
+    size = os.path.getsize(path)
+    end, carry = size, b""
+    with open(path, "rb") as fh:
+        while end > 0 and size - end < max_bytes:
+            start = max(0, end - _CHUNK)
+            fh.seek(start)
+            buf = fh.read(end - start) + carry
+            end = start
+            lines = buf.split(b"\n")
+            carry = lines.pop(0) if start > 0 else b""
+            for line in reversed(lines):
+                if _MARKER_NEEDLE in line:
+                    marker = _marker_of(line)
+                    if marker is not None:
+                        return marker
+                if stop and stop in line and _main_reply_model(line, stop_model):
+                    return None
+    return None
+
+
+def _main_reply_model(line, model):
+    """True iff raw `line` is a main-session reply on `model`."""
+    try:
+        e = json.loads(line)
+    except ValueError:
+        return False
+    if not isinstance(e, dict) or e.get("type") != "assistant" or e.get("isSidechain"):
+        return False
+    msg = e.get("message") if isinstance(e.get("message"), dict) else {}
+    return same_model(msg.get("model"), model)
+
+
 def _model_cmd_args(content):
     """The args of a typed `/model <args>` local command, or None."""
     if isinstance(content, list):
@@ -131,8 +189,8 @@ def tail_state(path, max_bytes=TAIL_BYTES):
     Returns a dict:
       model      -- `message.model` of the LAST main assistant entry;
       fallback   -- `{"from","to"}` when that last entry IS a fallback marker;
-      marker     -- the LAST fallback marker anywhere in the tail
-                    (`{"from","to","uuid","timestamp"}`), else None;
+      marker     -- the LAST fallback marker in the tail that is still in
+                    force (no later reply on another model), else None;
       timestamp / uuid -- of the last main assistant entry;
       model_cmd  -- the args of a `/model` command typed AFTER that entry
                     (the model was switched but has not answered yet), else None.
@@ -165,6 +223,8 @@ def tail_state(path, max_bytes=TAIL_BYTES):
         fb = _fallback_block(msg.get("content"))
         if fb is not None:
             marker = dict(fb, uuid=e.get("uuid"), timestamp=e.get("timestamp"))
+        elif marker is not None and not same_model(model, marker["to"]):
+            marker = None          # a later reply left the fallback model: undone
         last = {"model": model, "fallback": fb, "uuid": e.get("uuid"),
                 "timestamp": e.get("timestamp")}
         model_cmd = None
@@ -212,5 +272,8 @@ def verdict(state, managed):
         kind = "model"
     else:
         return None
+    # `proven`: a Claude Code fallback marker is in the tail -- the switch is
+    # Claude Code's own, not a session that simply runs another model.
     return {"kind": kind, "model": model, "short": short_name(model) or model,
-            "managed": managed, "managed_short": short_name(managed) or managed}
+            "managed": managed, "managed_short": short_name(managed) or managed,
+            "proven": state.get("marker") is not None}
