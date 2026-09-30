@@ -371,6 +371,140 @@ class TestItem4SessionStart(_Lag):
         self.assertNotIn("pozadu", r.stdout)
 
 
+class TestCensusReview(_Lag):
+    """Review of the census items: structured suppression (never prose), no
+    endless relaunch, a live session is never moved, and it is told when a
+    reattach happened."""
+
+    def _wip(self, branch="feature/wip"):
+        self.g_at(LONG_AGO, self.clone, "checkout", "-q", "-b", branch)
+        self.write(self.clone, "app.py", "work\n")
+        self.g_at(LONG_AGO, self.clone, "commit", "-qam", "work")
+        self.advance_origin(rel=".claude/rules/a.md", text="a\n")
+
+    def test_a_branch_named_deferred_is_still_told(self):
+        self._wip("fix/deferred-tax")
+        self.job()
+        self.assertIn("notice", self.entry())
+
+    def test_no_notice_mid_rebase_on_a_work_branch(self):
+        self._wip()
+        gd = self.g(self.clone, "rev-parse", "--absolute-git-dir").stdout.strip()
+        os.makedirs(os.path.join(gd, "rebase-merge"))
+        self.job()
+        self.assertNotIn("notice", self.entry())
+
+    def test_no_notice_while_a_reattach_runs(self):
+        self.detach()
+        self.advance_origin(rel="CLAUDE.md", text="rules v2\n")
+        self.job(unit_run=lambda argv, **kw: self.calls.append(list(argv)) or _ok())
+        e = self.entry()
+        self.assertIn("ff_pending", e)
+        self.assertNotIn("notice", e)
+
+    def test_the_hook_says_nothing_mid_rebase(self):
+        self.g(self.clone, "checkout", "-q", "--detach", "HEAD")
+        self.advance_origin(rel="CLAUDE.md", text="rules v2\n")
+        gd = self.g(self.clone, "rev-parse", "--absolute-git-dir").stdout.strip()
+        os.makedirs(os.path.join(gd, "rebase-merge"))
+        r = subprocess.run(["bash", str(FETCH_HOOK)], cwd=self.clone,
+                           capture_output=True, text=True, env=self.env,
+                           timeout=60, input="{}")
+        self.assertNotIn("pozadu", r.stdout)
+
+    def test_a_base_checked_out_in_another_worktree_is_never_reattached(self):
+        other_wt = os.path.join(self.root, "wt-develop")
+        self.detach()
+        self.g(self.clone, "worktree", "add", "-q", other_wt, "develop")
+        self.advance_origin(rel="CLAUDE.md", text="rules v2\n")
+        self.job(unit_run=lambda argv, **kw: self.calls.append(list(argv)) or _ok())
+        self.assertEqual([c for c in self.calls if c[0] == "systemd-run"], [])
+        e = self.entry()
+        self.assertIn("other worktree", e["reason"])
+        self.assertIn("notice", e)
+
+    def test_a_failed_reattach_is_not_relaunched_for_the_same_head(self):
+        job, cf = _job(), _cf()
+        self.detach()
+        self.advance_origin(rel="CLAUDE.md", text="rules v2\n")
+        self.job(unit_run=lambda argv, **kw: self.calls.append(list(argv)) or _ok())
+        cf.write_json_atomic(job.ff_result_path(self.clone, self.home),
+                             {"ok": False, "reason": "reattach failed", "mode": "reattach",
+                              "base": "develop", "finished": T0 + 5})
+        self.job(T0 + job.INTERVAL_S,
+                 unit_run=lambda argv, **kw: self.calls.append(list(argv)) or _ok())
+        self.assertEqual(len([c for c in self.calls if c[0] == "systemd-run"]), 1)
+        e = self.entry()
+        self.assertIn("notice", e, "the session is told instead")
+
+    def test_a_live_session_in_the_checkout_is_never_moved(self):
+        self.detach()
+        self.advance_origin(n=2)
+        before = self.head()
+        pdir = os.path.join(self.root, "projects")
+        live_t = os.path.join(pdir, "live.jsonl")
+        os.makedirs(pdir)
+        Path(live_t).write_text("{}\n")
+        with mock.patch("watchdog.find_active_transcript",
+                        return_value=(live_t, os.path.getmtime(live_t))), \
+                mock.patch.object(_notice(), "run_job", return_value=[]):
+            self.job(state={}, panes=[("%1", self.clone)], run=None, sleep_fn=None,
+                     projects_dir=pdir, handled=set())
+        self.assertEqual(self.head(), before)
+        self.assertIn("session-active", self.entry()["reason"])
+
+    def test_the_session_is_told_after_a_reattach(self):
+        self.detach()
+        self.advance_origin(n=2)
+        self.job()
+        self.job(T0 + 60)
+        e = self.entry()
+        self.assertEqual(e["state"], "current")
+        self.assertEqual(e["notice"], _cf().reattach_line(None, "develop"))
+        self.assertIn("detached HEAD", e["notice"])
+        self.assertIn("develop", e["notice"])
+
+    def test_a_fork_base_gets_no_upstream_tracking_to_the_project(self):
+        self.g(self.clone, "remote", "rename", "origin", "upstream")
+        self.detach()
+        self.g(self.clone, "branch", "-q", "-D", "develop")
+        self.advance_origin(n=1)
+        self.job()
+        self.assertEqual(self.branch(), "develop")
+        r = self.g(self.clone, "config", "--get", "branch.develop.remote")
+        self.assertNotEqual(r.stdout.strip(), "upstream",
+                            "a bare push must never target the project repo")
+
+    def test_no_reflog_is_named_as_such(self):
+        self.detach()
+        self.advance_origin()
+        with mock.patch.object(_cf(), "_head_moved_at", return_value=None):
+            v = _cf().reattach_verdict(self.clone, "origin", "develop", now=T0)
+        self.assertEqual(v.reason, "head-activity-unmeasurable")
+
+    def test_a_base_branch_notice_does_not_say_switch_to_it(self):
+        line = _cf().notice_line("develop", 2, "origin", "develop")
+        self.assertNotIn("prejdi na develop", line)
+        self.assertIn("zmerguj origin/develop", line)
+
+
+class TestNoticeReview(TestNoticeDelivery):
+
+    def test_a_sibling_prefix_path_is_not_inside(self):
+        self.run_notice(T0, panes=[("%2", self.PATH + "2")])
+        self.assertEqual(self.sent, [])
+
+    def test_a_lane_worktree_pane_is_not_the_session(self):
+        self.run_notice(T0, panes=[("%2", self.PATH + "/.claude/worktrees/agent-x")])
+        self.assertEqual(self.sent, [])
+
+    def test_kind_off_is_journaled_at_most_hourly(self):
+        first = self.run_notice(T0, enabled=False)
+        again = self.run_notice(T0 + 60, enabled=False)
+        self.assertTrue(any("kind-off" in ln for ln in first))
+        self.assertFalse(any("kind-off" in ln for ln in again))
+
+
 class TestConstants(unittest.TestCase):
 
     def test_value_lock(self):
