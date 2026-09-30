@@ -285,13 +285,23 @@ class TestCrossUserRungIsReportOnly(unittest.TestCase):
         self.assertIn("own disk-guard", row["reason"])
         self.assertEqual(row["bytes"], 0)
 
-    def test_no_foreign_size_walk_remains(self):
-        """Root reads nothing from foreign accounts: the #906 cross-user size
-        report is gone, and the escalation reports no longer ask for it."""
+    def test_foreign_scan_is_bounded(self):
+        """Review r2: the report rung reads a foreign home with two shallow
+        globs (``devel/*`` and ``devel/*/*`` repos), never an unbounded
+        ``os.walk`` of the other account's tree."""
         import inspect
-        self.assertFalse(hasattr(dg, "discover_home_worktree_consumers"))
-        for fn in (dg._ranked_consumers, dg._collect_top_consumers):
-            self.assertNotIn("home-worktree", inspect.getsource(fn), fn.__name__)
+        with tempfile.TemporaryDirectory() as td:
+            for parts in (("r1",), ("org", "r2"), ("a", "b", "r3")):
+                wt = Path(td, "otheruser", "devel", *parts, ".claude", "worktrees", "agent-x")
+                wt.mkdir(parents=True)
+            with mock.patch.object(dg.os, "walk",
+                                   side_effect=AssertionError("unbounded walk")):
+                rows = dg._find_worktree_dirs(home_glob=str(Path(td) / "*"))
+        repos = sorted(Path(r).relative_to(Path(td, "otheruser", "devel")).as_posix()
+                       for _w, _o, r in rows)
+        self.assertEqual(repos, ["org/r2", "r1"])
+        self.assertNotIn("exclude_own_user",
+                         inspect.signature(dg._find_worktree_dirs).parameters)
 
     def test_planner_never_yields_a_delete(self):
         with tempfile.TemporaryDirectory() as td:

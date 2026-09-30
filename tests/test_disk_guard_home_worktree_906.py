@@ -41,10 +41,19 @@ class TestTopConsumersHomeTreeCoverage(unittest.TestCase):
         ``discover_home_worktree_consumers`` walker had no production caller;
         ``_ranked_consumers``/``_collect_top_consumers`` no longer list the
         report-only rung). Each account's own guard reports its own trees."""
-        import inspect
+        import tempfile
         self.assertFalse(hasattr(dg, "discover_home_worktree_consumers"))
-        for fn in (dg._collect_top_consumers, dg._ranked_consumers):
-            self.assertNotIn("home-worktree", inspect.getsource(fn), fn.__name__)
+        planners = [n for n in dir(dg)
+                    if n.startswith("_plan_") and n != "_plan_home_worktrees"]
+        scans = []
+        with tempfile.TemporaryDirectory() as td:
+            for name in planners:
+                patch.object(dg, name, return_value=[]).start()
+            patch.object(dg, "_find_worktree_dirs",
+                         side_effect=lambda **kw: scans.append(kw) or []).start()
+            dg._collect_top_consumers(td, _NOW)
+            dg._ranked_consumers(td, _NOW)
+        self.assertEqual(scans, [], "a top-consumers report scanned foreign homes")
 
 
 # ============================================================================
