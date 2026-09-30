@@ -628,8 +628,9 @@ class TestReviewRound1(_RefusalBase):
 
     def test_the_budget_defers_the_rest_and_is_loud(self):
         world = FakeWorld(self.home, [_issue(number=7), _issue(number=8)])
-        ticks = iter([0, 0, 500, 500, 500, 500])
-        rc, out, err = self.sync(world, deadline=100, clock=lambda: next(ticks))
+        # time passes once #7 is done (state-driven, never a count of clock calls)
+        rc, out, err = self.sync(world, deadline=100,
+                                 clock=lambda: 500 if world.closed else 0)
         self.assertEqual(rc, 1)
         self.assertIn("deferred", err)
         self.assertEqual(len(world.closed), 1)       # #7 done, #8 left open
@@ -683,8 +684,10 @@ class TestReviewRound2(_RefusalBase):
     def test_the_label_loop_honours_the_deadline(self):
         world = FakeWorld(self.home, [_issue(number=7),
                                       _issue(number=8, label="secret-sync:OTHER")])
-        ticks = iter([0, 0, 500, 500, 500, 500])
-        rc, out, err = self.sync(world, deadline=100, clock=lambda: next(ticks))
+        # time passes once the first label is listed
+        rc, out, err = self.sync(
+            world, deadline=100,
+            clock=lambda: 500 if world.of("gh", "issue", "list") else 0)
         self.assertEqual(rc, 1)
         self.assertIn("deferred", err)
         self.assertEqual(len(world.of("gh", "issue", "list")), 1)
