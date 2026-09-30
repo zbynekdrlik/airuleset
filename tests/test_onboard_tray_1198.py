@@ -477,6 +477,79 @@ class TestTrayReviewRound2(unittest.TestCase):
                                       "path": d, "default_branch": "main"})
             self.assertIn("missing-tray", {x["kind"] for x in drift})
 
+    def test_web_files_inside_src_still_count(self):
+        # only a DIR named web/ui under src/ is a Rust module; an
+        # include_str!("index.html") page in src/ is a real web UI
+        with TemporaryDirectory() as d:
+            _write(d, "Cargo.toml", AXUM_PKG)
+            _write(d, "src/main.rs", "fn main() {}\n")
+            _write(d, "src/index.html", "<html></html>\n")
+            step, _run = _foundation(d)
+            self.assertIn("tray", step["detail"])
+
+    def test_web_dir_named_static_inside_src_still_counts(self):
+        with TemporaryDirectory() as d:
+            _write(d, "Cargo.toml", AXUM_PKG)
+            _write(d, "src/main.rs", "fn main() {}\n")
+            _write(d, "src/static/app.js", "//\n")
+            step, _run = _foundation(d)
+            self.assertIn("tray", step["detail"])
+
+    def test_shallow_hidden_dir_is_never_read(self):
+        with TemporaryDirectory() as d:
+            _write(d, "Cargo.toml", "[package]\nname = \"lib\"\n\n"
+                   "[dependencies]\nserde = \"1\"\n")
+            _write(d, "static/app.css", "\n")
+            _write(d, ".cache/x/Cargo.toml", AXUM_PKG)
+            step, _run = _foundation(d)
+            self.assertNotIn("tray", step["detail"])
+
+    def test_server_rendered_templates_count_as_web_ui(self):
+        for dep in ("askama", "tera", "minijinja", "maud"):
+            with self.subTest(dep=dep), TemporaryDirectory() as d:
+                _write(d, "Cargo.toml", AXUM_PKG + '%s = "0.12"\n' % dep)
+                _write(d, "src/main.rs", "fn main() {}\n")
+                step, _run = _foundation(d)
+                self.assertIn("tray", step["detail"])
+
+    def test_ticket_body_says_server_only_apps_close_as_na(self):
+        body = ob._tray.foundation_tray_body("x", "reason")
+        self.assertIn("VPS", body)
+        self.assertIn("n/a", body)
+
+    def test_find_rc_1_output_is_still_used_and_silent(self):
+        # find exits 1 after an unreadable subdir but its output is valid
+        import contextlib
+        import io
+        manifest = AXUM_PKG + 'rust-embed = "8"\n'
+
+        def partial_find(argv, **kw):
+            return subprocess.CompletedProcess(
+                argv, 1, "\0/p/Cargo.toml\0" + manifest, "Permission denied")
+
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            reason = ob._tray.rust_web_tray_gap("/p", run=partial_find)
+        self.assertTrue(reason)
+        self.assertEqual(err.getvalue(), "")
+
+    def test_audit_reports_an_unverified_tray_check(self):
+        # a failed read must show on the audit row, not read as clean
+        def dead_find(argv, **kw):
+            if argv and argv[0] == "find":
+                return subprocess.CompletedProcess(argv, 2, "", "find: boom")
+            return subprocess.run(argv, **kw)
+
+        with TemporaryDirectory() as d:
+            init_repo(d, remote="https://github.com/zbynekdrlik/fohmixer.git")
+            _write(d, "CLAUDE.md", "## Playbook router\n")
+            drift = ob.audit_project({"name": "fohmixer", "host": "dev1",
+                                      "path": d, "default_branch": "main"},
+                                     run=dead_find)
+            kinds = {x["kind"] for x in drift}
+            self.assertIn("unverified-tray", kinds)
+            self.assertNotIn("missing-tray", kinds)
+
     def test_rule_names_every_accepted_tray_shape(self):
         text = RULE.read_text()
         for name in ("tray-icon", "tray-item", "ksni", "trayicon", "systray",
