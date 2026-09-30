@@ -58,6 +58,7 @@ modules/quality/approval-scope.md
 modules/quality/database-migrations.md
 rules/database-migrations.md
 rules/guide-agent-eval.md
+rules/rust-web-tray.md
 modules/quality/version-on-dashboard.md
 modules/quality/comprehensive-logging.md
 modules/quality/autonomous-batch-issue-development.md
