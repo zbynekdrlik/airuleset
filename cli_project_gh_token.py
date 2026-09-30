@@ -428,6 +428,7 @@ def mint_account(account, *, key_path=None, dry_run=False, now=None, run=None,
 # this shim, because it execs the real binary itself; an odoo-style App shim
 # re-resolves `gh` on PATH and keeps its #1087 Case A path.
 PROJECT_SHIM_MARKER = "airuleset project-account GitHub App token shim (#1190)"
+# (the same literal as cli_gh_rate.PROJECT_APP_SHIM_MARKER, test-locked)
 
 _SHIM = r"""#!/usr/bin/env bash
 # airuleset project-account GitHub App token shim (#1190) — MANAGED by the
@@ -585,8 +586,10 @@ def setup_timer(*, box_class_fn=None, user=None, systemctl=None, unit_dir=None):
 
 def verify_account(account, *, run=None):
     """The go-live acceptance (the #1183 gap): AS the account, in a login
-    shell, `gh` must resolve to the rate-guard chain and `gh api repos/<repo>`
-    must answer with exactly that repo. Returns 0/1."""
+    shell, `gh` must resolve to the rate-guard chain and
+    `gh api installation/repositories` must list exactly the one repo — only a
+    repo-scoped installation token answers that, so it proves the credential
+    is the App token and its scope. Returns 0/1."""
     import cli_account_bootstrap as bootstrap
     import cli_remote
     run = run or subprocess.run
@@ -604,7 +607,8 @@ def verify_account(account, *, run=None):
         print("project-gh-token verify: %s has no pinned ssh identity" % account,
               file=sys.stderr)
         return 1
-    probe = "command -v gh; gh api repos/%s --jq .full_name" % repo
+    probe = ("command -v gh; "
+             "gh api installation/repositories --jq '.repositories[].full_name'")
     try:
         r = run(prefix + ["%s@%s" % (remote["user"], remote["host"]),
                           "bash -lc %s" % shlex.quote(probe)],
@@ -615,15 +619,15 @@ def verify_account(account, *, run=None):
         return 1
     lines = (r.stdout or "").strip().splitlines()
     gh_path = lines[0] if lines else ""
-    got = lines[-1] if len(lines) > 1 else ""
+    got = [ln.strip().lower() for ln in lines[1:]]
     if (r.returncode == 0 and gh_path.endswith("/.local/bin/gh")
-            and got.lower() == repo.lower()):
-        print("project-gh-token verify: %s OK — gh = %s, gh api repos/%s -> %s"
-              % (account, gh_path, repo, got))
+            and got == [repo.lower()]):
+        print("project-gh-token verify: %s OK — gh = %s, the token sees exactly "
+              "%s" % (account, gh_path, repo))
         return 0
-    print("project-gh-token verify: %s FAILED (rc=%d) — gh resolves to %r, "
-          "`gh api repos/%s` answered %r: %s" % (
-              account, r.returncode, gh_path, repo, got,
+    print("project-gh-token verify: %s FAILED (rc=%d) — gh resolves to %r, the "
+          "token sees %r (want exactly [%r]): %s" % (
+              account, r.returncode, gh_path, got, repo,
               (r.stderr or "").strip()[:300]), file=sys.stderr)
     return 1
 

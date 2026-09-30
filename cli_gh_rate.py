@@ -175,13 +175,13 @@ def is_app_shim_box():
             or _is_app_token_shim(shim_path()))
 
 
-def _is_our_wrapper(path):
-    """True iff `path` is our managed shim (carries WRAPPER_SENTINEL), read
-    defensively (a real gh binary is large/binary — read only a small text
-    head, treat any error as "not ours")."""
+def _is_our_wrapper(path, marker=None):
+    """True iff `path` is our managed shim (carries WRAPPER_SENTINEL, or
+    `marker`: the #1190 project App shim), read defensively (a real gh binary
+    is large/binary — read only a small text head, any error = "not ours")."""
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            return WRAPPER_SENTINEL in fh.read(4096)
+            return (marker or WRAPPER_SENTINEL) in fh.read(4096)
     except (OSError, ValueError):
         return False
 
@@ -1114,6 +1114,7 @@ def current_gh_backoff(status=None, now=None, run=None):
 # The gh PATH shim script (installed by cmd_install / ensure_gh_rate_wrapper).
 # --------------------------------------------------------------------------- #
 WRAPPER_SENTINEL = "airuleset gh rate-guard shim (#1040)"
+PROJECT_APP_SHIM_MARKER = "airuleset project-account GitHub App token shim (#1190)"
 
 
 def wrapper_script(real_gh, python_exe, module_path, upstream=None,
@@ -1166,6 +1167,7 @@ _UPSTREAM={upstream}
 # of our own shim (sentinel). Used for the #1087 L1b depth>1 App-shim re-entry
 # and as the fallback when the baked upstream vanished.
 _resolve_real_gh() {{
+  [ -x {upstream_reloc} ] && [ "$(head -c2 {upstream_reloc} 2>/dev/null)" != "#!" ] && {{ printf '%s' {upstream_reloc}; return 0; }}
   _shimdir="$(cd "$(dirname "$0")" && pwd)"
   IFS=':' read -ra _parts <<< "$PATH"
   for _d in "${{_parts[@]}}"; do
@@ -1396,8 +1398,7 @@ def ensure_gh_rate_wrapper(shim=None, upstream=None, python_exe=None,
         # binary — that would bypass the installation token. Checked BEFORE the
         # wrap-in-place cases so a chained box is never mis-repointed by Case 3.
         app_dest = app_shim_path()
-        from cli_project_gh_token import is_project_shim   # #1190
-        chain = app_dest if is_project_shim(app_dest) else None   # Cases 2/4
+        chain = app_dest if _is_our_wrapper(app_dest, PROJECT_APP_SHIM_MARKER) else None  # #1190
         if shim_is_ours and _is_app_token_shim(app_dest):
             desired = wrapper_script(app_dest, python_exe, module,
                                      upstream=app_dest, observe=True)
