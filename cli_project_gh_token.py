@@ -473,13 +473,10 @@ def render_gh_app_shim():
 
 
 def is_project_shim(path):
-    """True iff ``path`` is this module's shim (its marker in a small head);
-    any read error is False."""
-    try:
-        with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            return PROJECT_SHIM_MARKER in fh.read(4096)
-    except (OSError, ValueError):
-        return False
+    """True iff ``path`` is this module's shim — the installer's own check
+    (``cli_gh_rate`` reads the marker; any read error is False)."""
+    import cli_gh_rate
+    return cli_gh_rate._is_our_wrapper(path, cli_gh_rate.PROJECT_APP_SHIM_MARKER)
 
 
 # The #1184 bootstrap's step 11, run AS the account (root never writes through

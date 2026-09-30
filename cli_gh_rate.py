@@ -1136,7 +1136,8 @@ def wrapper_script(real_gh, python_exe, module_path, upstream=None,
     the App shim re-enters us (``AIRULESET_GH_SHIM_DEPTH`` > 1, the token already
     in the env), we SKIP our baked upstream (re-exec'ing the App shim would loop)
     and exec the REAL gh binary directly — re-resolved on PATH, skipping our own
-    sentinel. The App shim now lives at ``gh-app-shim`` (not a ``gh`` on PATH),
+    sentinel, else the relocated ``gh-upstream`` binary (a wrap-in-place box,
+    #1190). The App shim now lives at ``gh-app-shim`` (not a ``gh`` on PATH),
     so this resolves the real binary in one hop: ``gh -> gh-app-shim -> real gh``.
 
     #1087 L1b exhaustion observation: on an ``observe`` box the depth-1 hop runs
@@ -1164,10 +1165,9 @@ fi
 _OBSERVE={observe}
 _UPSTREAM={upstream}
 # Resolve the REAL gh BINARY on PATH, skipping THIS shim's own dir and any copy
-# of our own shim (sentinel). Used for the #1087 L1b depth>1 App-shim re-entry
-# and as the fallback when the baked upstream vanished.
+# of our own shim (sentinel), else the relocated gh-upstream binary (#1190).
+# Used for the #1087 L1b depth>1 App-shim re-entry and the vanished-upstream fallback.
 _resolve_real_gh() {{
-  [ -x {upstream_reloc} ] && [ "$(head -c2 {upstream_reloc} 2>/dev/null)" != "#!" ] && {{ printf '%s' {upstream_reloc}; return 0; }}
   _shimdir="$(cd "$(dirname "$0")" && pwd)"
   IFS=':' read -ra _parts <<< "$PATH"
   for _d in "${{_parts[@]}}"; do
@@ -1177,6 +1177,7 @@ _resolve_real_gh() {{
       printf '%s' "$_d/gh"; return 0
     fi
   done
+  [ -f {upstream_reloc} ] && [ -s {upstream_reloc} ] && [ -x {upstream_reloc} ] && [ "$(head -c2 {upstream_reloc} 2>/dev/null)" != "#!" ] && {{ printf '%s' {upstream_reloc}; return 0; }}
   return 1
 }}
 # #1087 L1b: re-entered by the App shim (depth>1) on an observe box — the token
