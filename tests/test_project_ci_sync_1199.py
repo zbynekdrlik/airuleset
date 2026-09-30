@@ -41,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cli_account_bootstrap as bootstrap  # noqa: E402
 import cli_account_policy as policy  # noqa: E402
+import cli_accounts as accounts  # noqa: E402
 import cli_project_gh_token as pgt  # noqa: E402
 
 REPO = "zbynekdrlik/fohmixer"
@@ -59,12 +60,17 @@ def _sync():
     return cli_project_ci_sync
 
 
+APP_AUTHOR = "app/newlevel-project-accounts"
+
+
 def _issue(number=7, label="secret-sync:DENYLIST", body=None, url=None,
-           extra_labels=()):
+           extra_labels=(), author=APP_AUTHOR):
     labels = [{"name": n} for n in ((label,) if label else ()) + tuple(extra_labels)]
     return {"number": number, "title": "secret-sync %s" % label,
             "body": "Please sync.\nFile: %s\n" % REL if body is None else body,
             "labels": labels,
+            "author": None if author is None else {"login": author,
+                                                   "is_bot": author.startswith("app/")},
             "url": url or "https://github.com/%s/issues/%d" % (REPO, number)}
 
 
@@ -73,8 +79,9 @@ class FakeWorld:
     read (the remote command runs locally under ``home``)."""
 
     def __init__(self, home, issues=(), *, ssh_rc=None, set_rc=0,
-                 set_stderr=b"", list_rc=0):
+                 set_stderr=b"", list_rc=0, noise=b""):
         self.home = Path(home)
+        self.noise = noise
         self.issues = list(issues)
         self.ssh_rc = ssh_rc
         self.set_rc = set_rc
@@ -102,9 +109,18 @@ class FakeWorld:
             env = {"HOME": str(self.home), "PATH": os.environ.get("PATH", "")}
             r = subprocess.run(["bash", "-c", argv[-1]], input=b"", env=env,
                                capture_output=True, timeout=30)
-            return self._out(argv, r.returncode, r.stdout, r.stderr, kw)
+            return self._out(argv, r.returncode, self.noise + r.stdout, r.stderr, kw)
+        if argv[:3] == ["gh", "label", "list"]:
+            if self.list_rc:
+                return self._out(argv, self.list_rc, "", "boom", kw)
+            names = sorted({lb["name"] for i in self.issues for lb in i["labels"]})
+            return self._out(argv, 0, json.dumps([{"name": n} for n in names]),
+                             "", kw)
         if argv[:3] == ["gh", "issue", "list"]:
-            return self._out(argv, self.list_rc, json.dumps(self.issues)
+            want = argv[argv.index("--label") + 1] if "--label" in argv else None
+            found = [i for i in self.issues if want is None
+                     or want in [lb["name"] for lb in i["labels"]]]
+            return self._out(argv, self.list_rc, json.dumps(found)
                              if self.list_rc == 0 else "", "boom" if self.list_rc
                              else "", kw)
         if argv[:3] == ["gh", "secret", "set"]:
@@ -128,11 +144,13 @@ class _Base(unittest.TestCase):
         self.home = Path(self._tmp.name) / "acct-home"
         (self.home / "devel" / "fohmixer").mkdir(parents=True)
         (self.home / REL).write_bytes(VALUE)
+        self.state = Path(self._tmp.name) / "state"
 
-    def sync(self, world, dry_run=False, account="fohmixer"):
+    def sync(self, world, dry_run=False, account="fohmixer", **kw):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = _sync().sync_account(account, run=world, now=NOW, dry_run=dry_run)
+            rc = _sync().sync_account(account, run=world, now=NOW, dry_run=dry_run,
+                                      state_dir=self.state, **kw)
         return rc, out.getvalue(), err.getvalue()
 
     def assertNoLeak(self, world, *texts):
@@ -220,15 +238,29 @@ class TestSync(_Base):
         self.assertIn(NOW_ISO, comment)
         self.assertNoLeak(world, out, err, comment)
 
-    def test_the_issue_list_is_the_declared_repo_open_issues(self):
-        world = FakeWorld(self.home, [])
+    def test_the_listing_is_label_filtered_on_the_declared_repo(self):
+        # review round 1: filter on the server by label, so a repo with many
+        # open issues never hides a request past a --limit
+        world = FakeWorld(self.home, [_issue(), _issue(number=9, label="bug")])
         rc, out, err = self.sync(world)
         self.assertEqual(rc, 0, err)
+        labels = world.of("gh", "label", "list")
+        self.assertEqual(len(labels), 1)
+        self.assertEqual(labels[0]["argv"][labels[0]["argv"].index("-R") + 1], REPO)
         lst = world.of("gh", "issue", "list")
         self.assertEqual(len(lst), 1)
         argv = lst[0]["argv"]
         self.assertEqual(argv[argv.index("-R") + 1], REPO)
         self.assertEqual(argv[argv.index("--state") + 1], "open")
+        self.assertEqual(argv[argv.index("--label") + 1], "secret-sync:DENYLIST")
+        self.assertIn("author", argv[argv.index("--json") + 1].split(","))
+        self.assertEqual(len(world.closed), 1)
+
+    def test_no_request_label_means_no_issue_listing(self):
+        world = FakeWorld(self.home, [])
+        rc, out, err = self.sync(world)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(world.of("gh", "issue", "list"), [])
         self.assertEqual(world.of("ssh"), [])
 
     def test_issues_without_a_secret_sync_label_are_ignored(self):
@@ -260,7 +292,7 @@ class TestSync(_Base):
 # --------------------------------------------------------------------------- #
 # refusals: a comment + close, nothing set
 # --------------------------------------------------------------------------- #
-class TestRefusals(_Base):
+class _RefusalBase(_Base):
 
     def refused(self, issue, needle, *, setup=None, read=False):
         if setup:
@@ -280,6 +312,9 @@ class TestRefusals(_Base):
         self.assertNoLeak(world, out, err, comment)
         return comment
 
+
+class TestRefusals(_RefusalBase):
+
     def test_name_not_allow_listed(self):
         self.refused(_issue(label="secret-sync:OTHER_SECRET"), "OTHER_SECRET")
 
@@ -294,7 +329,8 @@ class TestRefusals(_Base):
                      "zbynekdrlik/other")
 
     def test_path_outside_home(self):
-        self.refused(_issue(body="File: /etc/passwd\n"), "/etc/passwd")
+        comment = self.refused(_issue(body="File: /etc/passwd\n"), "/etc/passwd")
+        self.assertIn("outside the account home", comment)
 
     def test_path_with_dotdot(self):
         self.refused(_issue(body="File: devel/../../other/x\n"), "..")
@@ -492,6 +528,140 @@ class TestHowto(unittest.TestCase):
         r = subprocess.run(["bash", "-n"], input=pgt.render_next_steps(spec),
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+
+# --------------------------------------------------------------------------- #
+# review round 1
+# --------------------------------------------------------------------------- #
+class TestReviewRound1(_RefusalBase):
+
+    def test_a_foreign_author_is_refused(self):
+        comment = self.refused(_issue(author="some-collaborator"), "some-collaborator")
+        self.assertIn("author", comment)
+
+    def test_no_author_is_refused(self):
+        self.refused(_issue(author=None), "author")
+
+    def test_the_app_bot_and_the_owner_are_accepted(self):
+        for author in ("app/newlevel-project-accounts",
+                       "newlevel-project-accounts[bot]", "zbynekdrlik"):
+            world = FakeWorld(self.home, [_issue(author=author)])
+            rc, out, err = self.sync(world)
+            self.assertEqual(rc, 0, (author, err))
+            self.assertEqual(world.secrets.get("DENYLIST"), VALUE, author)
+
+    def test_more_credential_paths_are_protected(self):
+        for path, needle in ((".claude.json", ".claude"),
+                             (".git-credentials", ".git-credentials"),
+                             (".secrets/obs-ws-pass", ".secrets"),
+                             (".netrc", ".netrc"), (".soniox.env", ".soniox.env"),
+                             (".config/gh/hosts.yml", ".config/gh")):
+            self.refused(_issue(body="File: %s\n" % path), needle)
+
+    def test_symlink_to_claude_json_is_refused_account_side(self):
+        def setup():
+            (self.home / ".claude.json").write_bytes(VALUE)
+            os.symlink(self.home / ".claude.json", self.home / "devel" / "cj")
+        self.refused(_issue(body="File: devel/cj\n"), ".claude", setup=setup,
+                     read=True)
+
+    def test_shell_characters_in_the_path_are_refused(self):
+        marker = Path(self._tmp.name) / "PWNED"
+        self.refused(_issue(body="File: devel/$(touch %s)\n" % marker),
+                     "not a plain path")
+        self.assertFalse(marker.exists())
+
+    def test_the_read_command_never_executes_the_path(self):
+        marker = Path(self._tmp.name) / "PWNED"
+        for rel in ("x$(touch %s)" % marker, "x`touch %s`" % marker,
+                    "x; touch %s" % marker, "x' ; touch %s ; '" % marker):
+            env = {"HOME": str(self.home), "PATH": os.environ.get("PATH", "")}
+            r = subprocess.run(["bash", "-c", _sync().render_read_command(rel)],
+                               env=env, capture_output=True, timeout=30)
+            self.assertEqual(r.returncode, 4, (rel, r.stderr))
+            self.assertFalse(marker.exists(), rel)
+
+    def test_crlf_bodies_parse(self):
+        world = FakeWorld(self.home, [_issue(
+            body="Repo: %s\r\nFile: %s\r\n" % (REPO, REL))])
+        rc, out, err = self.sync(world)
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(world.secrets.get("DENYLIST"), VALUE)
+
+    def test_an_oversize_file_is_refused(self):
+        def setup():
+            (self.home / "devel" / "big").write_bytes(b"x" * (_sync().MAX_BYTES + 1))
+        self.refused(_issue(body="File: devel/big\n"), "larger than",
+                     setup=setup, read=True)
+
+    def test_login_noise_on_stdout_is_a_failure_never_a_corrupt_set(self):
+        world = FakeWorld(self.home, [_issue()], noise=b"welcome to dev1\n")
+        rc, out, err = self.sync(world)
+        self.assertEqual(rc, 1)
+        self.assertIn("size", err)
+        self.assertEqual(world.secrets, {})
+        self.assertEqual(world.closed, [])
+
+    def test_a_value_bearing_exception_prints_only_its_class(self):
+        world = FakeWorld(self.home, [_issue()])
+
+        def boom(argv, input=None, **kw):
+            if argv[:3] == ["gh", "secret", "set"]:
+                raise ValueError(VALUE_LINES[0])
+            return world(argv, input=input, **kw)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = _sync().sync_account("fohmixer", run=boom, now=NOW,
+                                      state_dir=self.state)
+        self.assertEqual(rc, 1)
+        self.assertIn("ValueError", err.getvalue())
+        self.assertNoLeak(world, out.getvalue(), err.getvalue())
+        self.assertNotIn(VALUE_LINES[0], (self.state / "fohmixer.ci-sync.json").read_text())
+
+    def test_sync_account_default_run_under_pytest_never_runs_real_gh(self):
+        with mock.patch("subprocess.run") as real:
+            rc = _sync().sync_account("fohmixer", state_dir=self.state)
+        self.assertEqual(rc, 0)
+        real.assert_not_called()
+
+    def test_the_budget_defers_the_rest_and_is_loud(self):
+        world = FakeWorld(self.home, [_issue(number=7), _issue(number=8)])
+        ticks = iter([0, 0, 500, 500, 500, 500])
+        rc, out, err = self.sync(world, deadline=100, clock=lambda: next(ticks))
+        self.assertEqual(rc, 1)
+        self.assertIn("deferred", err)
+        self.assertEqual(len(world.closed), 1)       # #7 done, #8 left open
+
+    def test_sync_all_gives_every_account_one_shared_deadline(self):
+        with mock.patch.object(_sync(), "sync_account", return_value=0) as s:
+            _sync().sync_all(run=lambda *a, **k: None, clock=lambda: 1000)
+        self.assertEqual(s.call_args.kwargs.get("deadline"),
+                         1000 + _sync().SYNC_BUDGET_S)
+
+    def test_the_last_run_is_recorded_and_shown_in_accounts_status(self):
+        rc, out, err = self.sync(FakeWorld(self.home, [_issue()]))
+        self.assertEqual(rc, 0, err)
+        line = _sync().status_line("fohmixer", directory=self.state)
+        self.assertIn("secret-sync: OK", line)
+        self.assertIn("DENYLIST", line)
+        self.assertIn(NOW_ISO, line)
+        self.sync(FakeWorld(self.home, [_issue()], ssh_rc=255))
+        line = _sync().status_line("fohmixer", directory=self.state)
+        self.assertIn("secret-sync: FAILED", line)
+        status = io.StringIO()
+        with mock.patch.object(pgt, "state_dir", return_value=self.state), \
+                redirect_stdout(status):
+            accounts.cmd_accounts(mock.Mock(action="status", json=False,
+                                            registry=None, account=None,
+                                            from_dir=None, render=False,
+                                            apply=False))
+        self.assertIn("secret-sync: FAILED", status.getvalue())
+
+    def test_never_run_and_dry_run_record_nothing(self):
+        self.assertIn("never run", _sync().status_line("fohmixer",
+                                                       directory=self.state))
+        self.sync(FakeWorld(self.home, [_issue()]), dry_run=True)
+        self.assertFalse((self.state / "fohmixer.ci-sync.json").exists())
 
 
 if __name__ == "__main__":
