@@ -57,13 +57,25 @@ def _home_rel(cwd):
     return cwd
 
 
-def declared_window_rels(user):
+def _local_windows(user, hostname=None):
+    """The declared windows of the box THIS process runs on: the host-scoped
+    ``cli_fleet._box_self_entry`` (``newlevel`` is shared by dev1/dev2/spinbike,
+    so a user-only lookup could hand one box another's windows). Used by the
+    launcher guard and the status check, which run ON the box."""
+    entry = cli_fleet._box_self_entry(user, hostname) if user else None
+    return cli_fleet.managed_windows(entry) if entry else []
+
+
+def declared_window_rels(user, local=False, hostname=None):
     """Every declared window cwd of ``user`` as a HOME-relative path, in
     declaration order (``()`` for an account that declares none — every box but
     gk and the sequential subdev streams). gk declares three windows
-    (gk/gk-infra/gk-quality), so the launcher guard accepts ANY of them."""
+    (gk/gk-infra/gk-quality), so the launcher guard accepts ANY of them.
+    ``local=True`` scopes the lookup to this box (``_local_windows``)."""
     rels = []
-    for w in cli_fleet.box_windows(user):
+    wins = (_local_windows(user, hostname) if local
+            else cli_fleet.box_windows(user))
+    for w in wins:
         rel = _home_rel(w.get("cwd"))
         if rel and rel not in rels:
             rels.append(rel)
@@ -172,14 +184,9 @@ def render_stream_cwd_chain_shell(cwd_chain, var="__airuleset_cwd",
     the LOUD last resort is `$HOME/<fallback_rel>` when one is given (only a
     DECLARED window cwd, #1202) and that dir exists, else `$HOME` -- never a
     bare parent -- echoing ONE line to stderr (STREAM_DEV_CWD_NO_REPO_MSG) so a
-    missing checkout is visible at login. Used by the cli_bashrc_appliers ssh attach block.
-
-    The default `fallback_rel`/message are odoo-chain specific (the stream
-    accounts this fix targets). The #985 controller override passes its own
-    single-element `("devel/airuleset",)` chain here but never REACHES the
-    fallback — the controller's airuleset checkout is always a git work tree, so
-    the first candidate always wins and the odoo-worded last-resort line is
-    unreachable there."""
+    missing checkout is visible at login. Used by the cli_bashrc_appliers ssh
+    attach block, incl. the #985 controller override's `("devel/airuleset",)`
+    chain and a declared window's single-entry chain (#1202)."""
     i = indent
     # The loud line is echoed inside DOUBLE quotes so `$<var>` expands; the
     # message has no `"`/backtick/backslash, and `~` stays literal in "" (we want
@@ -209,7 +216,7 @@ def render_webterm_cwd_shell(chain, fallback_rel=None, var="C",
     """The ONE-LINE POSIX-sh resolver the webterm command uses (it is baked into
     ``authorized_keys`` as ``command="…"``, so it may not contain a newline).
 
-    Same predicate as ``cli_bashrc_appliers.render_stream_cwd_chain_shell``:
+    Same predicate as ``render_stream_cwd_chain_shell`` (above):
     the first ``chain`` entry with ``$HOME/<entry>/.git`` (work tree or gitfile)
     wins; else ``$HOME/<fallback_rel>`` when given and a dir; else ``$HOME``."""
     rels = " ".join(shlex.quote(r) for r in chain)
@@ -229,12 +236,13 @@ def render_webterm_cwd_shell(chain, fallback_rel=None, var="C",
     )
 
 
-def launch_guard_cwds(user):
+def launch_guard_cwds(user, hostname=None):
     """The declared cwds baked into the claude launcher's resume guard, as ONE
     shell word list (each shell-quoted), or ``""`` when ``user`` declares none
     (the guard is then a no-op — dev1/dev2/controller stay byte-identical in
     behaviour)."""
-    return " ".join(shlex.quote(r) for r in declared_window_rels(user))
+    return " ".join(shlex.quote(r) for r in
+                    declared_window_rels(user, local=True, hostname=hostname))
 
 
 # The claude launcher's resume guard (#1202), spliced into
@@ -247,8 +255,10 @@ LAUNCH_CWD_GUARD_TEMPLATE = r"""
 # 2026-09-30 subdev reboot montalu1's session came up in ~/devel/odoo and `claude`
 # silently continued a stale copy of the owner's session. An account with no
 # declared window gets no guard at all. `claude-new`
-# (always fresh) and `claude-plain` (vanilla escape hatch) are never guarded;
-# AIRULESET_CWD_GUARD=off bypasses it for one call.
+# (always fresh) and `claude-plain` (vanilla escape hatch) are never guarded,
+# nor are non-session subcommands (--version/update/mcp/doctor/...);
+# AIRULESET_CWD_GUARD=off bypasses it for one call. A SUBDIRECTORY of the
+# checkout is refused on purpose: its project key differs from the checkout's.
 _declared_cwds=({{DECLARED_CWDS}})
 _cwd_guard() {
   [ "${#_declared_cwds[@]}" -gt 0 ] || return 0
@@ -268,7 +278,12 @@ _cwd_guard() {
   echo "  (a fresh session anywhere: claude-new; one-off bypass: AIRULESET_CWD_GUARD=off claude)" >&2
   exit 1
 }
-case "$mode" in plain|new) ;; *) _cwd_guard ;; esac
+case "$mode" in plain|new) ;; *)
+  case "${1:-}" in
+    -v|--version|-h|--help|update|mcp|doctor|config|install|plugin|setup-token|migrate-installer) ;;
+    *) _cwd_guard ;;
+  esac ;;
+esac
 """
 
 
@@ -281,7 +296,21 @@ def render_launch_cwd_guard(declared_cwds=""):
     return LAUNCH_CWD_GUARD_TEMPLATE.replace("{{DECLARED_CWDS}}", declared_cwds)
 
 
-def pane_cwd_status(user, home, pane_cwd, session=None):
+def cwd_within(actual, expected):
+    """True when ``actual`` is ``expected`` or a subdirectory of it, both
+    realpath-resolved (tmux reports ``/proc/<pid>/cwd``; ``$HOME`` may be a
+    symlink) — the #308 review-MAJOR containment rule, shared by the #308
+    install warning and the #1202 status check."""
+    try:
+        exp_real = os.path.realpath(str(expected))
+        act_real = os.path.realpath(str(actual))
+    except (OSError, ValueError):
+        exp_real, act_real = str(expected), str(actual)
+    exp_real = exp_real.rstrip("/") or "/"
+    return act_real == exp_real or act_real.startswith(exp_real + os.sep)
+
+
+def pane_cwd_status(user, home, pane_cwd, session=None, hostname=None):
     """The ``airuleset.py status`` session-cwd check (#1202).
 
     Returns None when ``user`` declares no window (nothing to check), else
@@ -293,17 +322,16 @@ def pane_cwd_status(user, home, pane_cwd, session=None):
     tmux unreachable — inconclusive, never a false alarm). Both sides are
     realpath-resolved (tmux reports ``/proc/<pid>/cwd``; ``$HOME`` may be a
     symlink)."""
-    rel = primary_declared_rel(user)
-    if not rel:
+    rels = declared_window_rels(user, local=True, hostname=hostname)
+    if not rels:
         return None
+    rel = rels[0]
     sess = session or user
     expected = os.path.join(str(home), rel)
     if not pane_cwd:
         return (None, "session cwd: no pane of session '%s' to check "
                       "(inconclusive) — declared ~/%s" % (sess, rel))
-    exp_real = os.path.realpath(expected)
-    act_real = os.path.realpath(pane_cwd)
-    if act_real == exp_real or act_real.startswith(exp_real.rstrip("/") + os.sep):
+    if cwd_within(pane_cwd, expected):
         return (True, "session cwd: OK — session '%s' first pane in ~/%s"
                       % (sess, rel))
     return (False, "session cwd: MISMATCH — session '%s' first pane is in %s, "
@@ -312,13 +340,59 @@ def pane_cwd_status(user, home, pane_cwd, session=None):
                    % (sess, pane_cwd, rel, rel))
 
 
-def print_status(user, home, pane_cwd_reader):
-    """Print the #1202 session-cwd line for ``airuleset.py status``.
+def stale_forced_commands(user, ak_text):
+    """The controller-lane keys in ``ak_text`` (an ``authorized_keys`` body)
+    whose baked forced-command options differ from what the code renders NOW
+    for ``user`` (``cli_webterm_only._controller_lane_key_line``) — as a list of
+    ``"<human> (<key comment>)"``. The #1202 creator was exactly such a line:
+    baked by hand on 2026-09-09, never re-rendered by ``push``. Only the
+    ``WEBTERM_CONTROLLER_LANE_PUBKEYS`` blobs are compared; every other key
+    (owner, fleet push, foreign) is ignored."""
+    from cli_webterm_only import (WEBTERM_CONTROLLER_LANE_PUBKEYS,
+                                  _controller_lane_key_line,
+                                  parse_authorized_key)
+    by_blob = {parse_authorized_key(pub).blob: (human, pub)
+               for human, pub in WEBTERM_CONTROLLER_LANE_PUBKEYS.items()}
+    stale = []
+    for line in ak_text.splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        ak = parse_authorized_key(line)
+        if ak.blob not in by_blob:
+            continue
+        human, pub = by_blob[ak.blob]
+        want = parse_authorized_key(_controller_lane_key_line(user, pub)).options
+        if ak.options != want:
+            stale.append("%s (%s)" % (human, ak.comment or "no comment"))
+    return stale
 
-    ``pane_cwd_reader(session)`` (``airuleset._tmux_session_pane_cwd``) is
-    called ONLY when ``user`` declares a window, so a box with none never
-    touches tmux and prints nothing. Status only — the footer never shows it
-    (owner rule)."""
-    if not primary_declared_rel(user):
+
+def print_status(user, home, pane_cwd_reader, hostname=None):
+    """Print the #1202 lines for ``airuleset.py status`` (never the footer —
+    owner rule), and never raise out of ``cmd_status``:
+
+    * ``session cwd:`` — the first pane vs the declared window cwd;
+      ``pane_cwd_reader(session)`` (``airuleset._tmux_session_pane_cwd``) is
+      called ONLY when this box's account declares a window;
+    * ``forced command: STALE`` — on a stream account, a baked controller-lane
+      line in ``~/.ssh/authorized_keys`` that the current code would render
+      differently (push never re-bakes it)."""
+    try:
+        if declared_window_rels(user, local=True, hostname=hostname):
+            print("\n" + pane_cwd_status(user, home, pane_cwd_reader(user),
+                                         hostname=hostname)[1])
+    except Exception as e:  # status must never die on one probe; say so
+        print("\nsession cwd: check failed — %s: %s" % (type(e).__name__, e))
+    if user not in cli_fleet.AUTHORITY_BY_USER:
         return
-    print("\n" + pane_cwd_status(user, home, pane_cwd_reader(user))[1])
+    ak_path = Path(home) / ".ssh" / "authorized_keys"
+    try:
+        ak_text = ak_path.read_text() if ak_path.is_file() else ""
+        stale = stale_forced_commands(user, ak_text)
+    except Exception as e:
+        print("forced command: check failed — %s: %s" % (type(e).__name__, e))
+        return
+    for item in stale:
+        print("forced command: STALE for %s in %s — re-bake it from the "
+              "controller with cli_webterm_only.append_controller_lane_pubkey_"
+              "command (push never re-renders it, #1202)" % (item, ak_path))

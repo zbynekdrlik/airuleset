@@ -8878,14 +8878,8 @@ def ensure_stream_tmux_session(user=None, run=None, launch_script=None,
             # (tmux reads the pane cwd from /proc/<pid>/cwd, fully
             # resolved; Path.home() is not). Resolve both sides and accept
             # CONTAINMENT, not bare equality.
-            try:
-                exp_real = os.path.realpath(str(expected))
-                act_real = os.path.realpath(actual)
-            except Exception:
-                exp_real, act_real = str(expected), actual
-            contained = (act_real == exp_real
-                         or act_real.startswith(exp_real.rstrip("/") + os.sep))
-            if not contained:
+            import cli_session_cwd
+            if not cli_session_cwd.cwd_within(actual, expected):
                 return ("WARNING: session '%s' already exists with cwd %s "
                          "(expected %s or a subdirectory of it) -- if this "
                          "is a leftover pre-registration session, kill it "

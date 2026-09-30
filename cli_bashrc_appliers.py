@@ -694,8 +694,8 @@ def _stream_marker_block_spans(existing, start=STREAM_SSH_ATTACH_MARK_START,
 def _ssh_attach_block_for_user(user):
     """Return the correct ssh-attach block content for `user`.
 
-    Most users get the default STREAM_SSH_ATTACH_BLOCK (session=$(whoami),
-    cwd=odoo chain). Controller users (#985) get a parameterized variant
+    Users with no declared window and no override get the default
+    STREAM_SSH_ATTACH_BLOCK (session=$(whoami), cwd=odoo chain). Controller users (#985) get a parameterized variant
     with their session-name override and cwd override. #1202: an account that
     DECLARES a managed window (cli_fleet.box_windows) gets that window's cwd as
     its ONE start dir (cli_session_cwd.session_chain_for) -- the declaration
