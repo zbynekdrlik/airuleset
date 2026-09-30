@@ -17,6 +17,7 @@ silently dropped from the facade must fail here, not quietly shrink the
 expectation.
 """
 
+import ast
 import importlib
 import sys
 import unittest
@@ -79,6 +80,87 @@ class TestFacadeSurface(unittest.TestCase):
         for name in shared:
             with self.subTest(name=name):
                 self.assertIs(getattr(airuleset, name), getattr(cli_worktree_sweep, name))
+
+
+LEAVES = ("cli_worktree_common", "cli_worktree_stale", "cli_worktree_orphans",
+          "cli_worktree_reclaim", "cli_lane_target_reclaim")
+REPO = Path(__file__).resolve().parent.parent
+
+
+def _module_level_imports(path):
+    """Top-level (module-body) imported module names of a source file."""
+    tree = ast.parse(path.read_text())
+    out = []
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            out += [a.name.split(".")[0] for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            out.append((node.module or "").split(".")[0])
+    return out
+
+
+class TestLeafStructure(unittest.TestCase):
+
+    def test_every_facade_name_is_the_defining_leafs_object(self):
+        owners = {}
+        for leaf in LEAVES:
+            mod = importlib.import_module(leaf)
+            for node in ast.parse((REPO / f"{leaf}.py").read_text()).body:
+                names = []
+                if isinstance(node, (ast.FunctionDef, ast.ClassDef)):
+                    names = [node.name]
+                elif isinstance(node, ast.Assign):
+                    names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+                for n in names:
+                    self.assertNotIn(n, owners, f"{n} defined in two leaves")
+                    owners[n] = mod
+        self.assertEqual(sorted(owners), sorted(PRE_SPLIT_SURFACE))
+        for name, mod in owners.items():
+            with self.subTest(name=name):
+                self.assertIs(getattr(cli_worktree_sweep, name), getattr(mod, name))
+
+    def test_leaves_are_stdlib_only_at_module_level_and_never_import_the_facade(self):
+        allowed = {"json", "os", "re", "shutil", "sys", "pathlib", *LEAVES}
+        for leaf in LEAVES + ("cli_worktree_sweep",):
+            with self.subTest(leaf=leaf):
+                imports = _module_level_imports(REPO / f"{leaf}.py")
+                self.assertNotIn("cli_worktree_sweep", imports)
+                self.assertEqual(sorted(set(imports) - allowed), [])
+
+    def test_facade_defines_nothing_itself(self):
+        body = ast.parse((REPO / "cli_worktree_sweep.py").read_text()).body
+        kinds = {type(n).__name__ for n in body}
+        self.assertLessEqual(kinds, {"Expr", "ImportFrom"})
+
+
+class TestNoFacadePatchSeams(unittest.TestCase):
+    """The facade owns no code, so a patch on it cannot intercept a call made
+    inside a leaf (#1194 split: seven tests went silent that way, one of them
+    running the REAL sweep). Tests must patch the leaf that makes the call."""
+
+    def test_no_test_patches_an_attribute_of_the_facade(self):
+        offenders = []
+        for path in sorted((REPO / "tests").glob("test_*.py")):
+            tree = ast.parse(path.read_text())
+            aliases = set()
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    aliases |= {a.asname or a.name for a in node.names
+                                if a.name == "cli_worktree_sweep"}
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not node.args:
+                    continue
+                fn = node.func
+                fname = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+                first = node.args[0]
+                if (fname in ("object", "setattr") and isinstance(first, ast.Name)
+                        and first.id in aliases):
+                    offenders.append(f"{path.name}:{node.lineno}")
+                if (fname in ("patch", "setattr") and isinstance(first, ast.Constant)
+                        and isinstance(first.value, str)
+                        and first.value.startswith("cli_worktree_sweep.")):
+                    offenders.append(f"{path.name}:{node.lineno}")
+        self.assertEqual(offenders, [], "patch the defining leaf, not the facade")
 
 
 if __name__ == "__main__":
