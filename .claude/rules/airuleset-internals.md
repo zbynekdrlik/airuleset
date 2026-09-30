@@ -38,7 +38,7 @@ Pôvodný 973 KB monolit bol rozbitý (#482) — dotyk súboru už neinjektuje ~
 - `tests/**` → `.claude/rules/internals-tests.md`
 - `scripts/**` → `.claude/rules/internals-scripts.md`
 - `statusbar.py` → `.claude/rules/internals-statusbar.md`
-- `airuleset.py` (install/push/plugins) → `.claude/rules/internals-cli.md`
+- `airuleset.py` (install/push/plugins), `cli_onboard*.py` → `.claude/rules/internals-cli.md`
 - `skills/** agents/** profiles/** modules/** rules/**` → `.claude/rules/internals-skills-modules.md`
 - `.github/** scripts/ci_*.py tests/test_ci_*.py` → `.claude/rules/internals-ci.md`
 - `gates/**` → `.claude/rules/internals-gates.md`
