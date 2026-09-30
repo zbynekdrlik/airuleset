@@ -50,7 +50,7 @@ def _git(cwd, *args, env=None):
 
 
 def _transcript(home, root, agent_id, *, finished=False, age_s=0.0, sid="sid1",
-                api_error=False, meta=None):
+                api_error=False, meta=None, settling=False):
     """A real subagent transcript at the path Claude Code writes it:
     ``<home>/.claude/projects/<enc(root)>/<sid>/subagents/<agent_id>.jsonl``.
     A last turn with a pending tool call reads LIVE; a final ``end_turn`` text
@@ -67,10 +67,12 @@ def _transcript(home, root, agent_id, *, finished=False, age_s=0.0, sid="sid1",
         last = {"type": "assistant", "isApiErrorMessage": True, "message": {
             "role": "assistant",
             "content": [{"type": "text", "text": "API Error: overloaded_error"}]}}
-    elif finished:
+    elif finished or settling:
+        # settling = a text block streamed ahead of a large tool_use (no
+        # stop_reason yet); finished = a completed end_turn reply
         last = {"type": "assistant", "message": {
             "role": "assistant", "content": [{"type": "text", "text": "done"}],
-            "stop_reason": "end_turn"}}
+            "stop_reason": None if settling else "end_turn"}}
     else:
         last = {"type": "assistant", "message": {
             "role": "assistant", "content": [{"type": "tool_use", "id": "t1",
@@ -152,6 +154,15 @@ class TestStaleAgentWorktreeRung(_Box):
                     meta={"inheritedWorktreePath": str(wt),
                           "parentAgentId": "parent1"})
         self.assertEqual(self._rows()["agent-parent1"]["reason"], LIVE_REASON)
+
+    def test_lane_streaming_a_large_tool_call_is_kept(self):
+        """Claude Code writes the text block of a [text, tool_use] message
+        before the tool_use line; the gap is the whole tool-input stream
+        (review round 2 measured 515 of 27,046 real gaps over 30 s, max 189 s).
+        A text tail with NO stop_reason is not proof the lane returned."""
+        self.lane("agent-stream1")
+        _transcript(self.home, self.repo, "agent-stream1", settling=True, age_s=60)
+        self.assertEqual(self._rows()["agent-stream1"]["reason"], LIVE_REASON)
 
     def test_finished_child_does_not_keep_the_lane(self):
         wt = self.lane("agent-parent2")
@@ -288,6 +299,23 @@ class TestWorktreeSweepDiscovery(_Box):
         _transcript(self.home, self.repo, "agent-sw1")
         self.assertEqual(self._rows()["agent-sw1"]["reason"], LIVE_REASON)
 
+    def test_locked_dead_live_lane_is_not_a_candidate(self):
+        """A lane resumed under a new process can sit behind a days-old lock
+        whose recorded pid is dead; the dead-session chain alone would
+        reclaim it."""
+        import cli_worktree_sweep as ws
+        wt = self.lane("agent-sw3")
+        _git(self.repo, "worktree", "lock", str(wt), "--reason",
+             "claude agent agent-sw3 (pid 424242 start 1)")
+        old = time.time() - 10 * 86400
+        os.utime(ws._worktree_admin_dir(str(self.repo), str(wt)) / "locked", (old, old))
+        _transcript(self.home, self.repo, "agent-sw3")
+        rows = ws.discover_stale_worktrees(home=str(self.home), now=time.time(),
+                                           pid_is_dead=lambda pid, start: True)
+        row = {Path(r["path"]).name: r for r in rows if r.get("path")}["agent-sw3"]
+        self.assertEqual(row["kind"], "locked_dead")
+        self.assertEqual(row["reason"], LIVE_REASON)
+
     def test_finished_lane_stays_a_candidate(self):
         self.lane("agent-sw2")
         _transcript(self.home, self.repo, "agent-sw2", finished=True)
@@ -309,6 +337,13 @@ class TestReclaimableWorktreeDiscovery(_Box):
         self.lane("agent-rc1")
         _transcript(self.home, self.repo, "agent-rc1")
         self.assertEqual(self._rows()["agent-rc1"]["reason"], LIVE_REASON)
+
+    def test_orphan_gitdir_live_lane_is_kept(self):
+        orphan = self.repo / ".claude" / "worktrees" / "agent-rc3"
+        orphan.mkdir(parents=True)
+        (orphan / ".git").write_text("gitdir: %s\n" % (self.home / "gone" / "agent-rc3"))
+        _transcript(self.home, self.repo, "agent-rc3")
+        self.assertEqual(self._rows()["agent-rc3"]["reason"], LIVE_REASON)
 
     def test_finished_lane_stays_reclaimable(self):
         self.lane("agent-rc2")
@@ -430,6 +465,71 @@ class TestCheckedEvidence(unittest.TestCase):
                                                        time.time())
         self.assertIn("agent-a", ids)
         self.assertTrue(err, "an unlistable subagents dir must be 'could not tell'")
+
+    def _read(self, root=None, strict=True):
+        import cli_lane_live_gate as g
+        return g.live_worker_agent_ids_checked(root or self.root, str(self.proj),
+                                               time.time(), strict=strict)
+
+    def test_supervisor_started_in_a_repo_subdir_is_seen(self):
+        """A session started in ``<repo>/sub`` writes its lanes' transcripts
+        under that cwd's project dir, while the lanes' worktrees sit under
+        ``<repo>/.claude/worktrees``."""
+        _transcript(self.home, self.root + "/sub", "agent-d")
+        self.assertEqual(self._read(), ({"agent-d"}, None))
+
+    def test_symlinked_root_is_seen(self):
+        """Claude Code records the RESOLVED cwd; a checkout reached through a
+        symlinked HOME is walked under its unresolved path."""
+        real = self.home / "real"
+        (real / "proj").mkdir(parents=True)
+        (self.home / "link").symlink_to(real)
+        link_root = str(self.home / "link" / "proj")
+        _transcript(self.home, os.path.realpath(link_root), "agent-s")
+        self.assertEqual(self._read(link_root), ({"agent-s"}, None))
+
+    def test_unlookable_project_dir_is_not_a_confident_empty(self):
+        import cli_lane_live_gate as g
+        _transcript(self.home, self.root, "agent-a")
+        real = g._is_dir
+        enc = T.encode_project_dir(self.root)
+
+        def _denied(path):
+            if os.path.basename(path) == enc:
+                raise PermissionError(13, "Permission denied", path)
+            return real(path)
+
+        with mock.patch.object(g, "_is_dir", _denied):
+            ids, err = self._read()
+        self.assertTrue(err)
+
+    def test_legacy_reader_ignores_child_meta(self):
+        """``_live_worker_agent_ids`` (the overlap set, lane-fill gate) keeps
+        its pre-#1193 set: the meta inheritance is reclaimer-only."""
+        import cli_lane_liveness as lo
+        _transcript(self.home, self.root, "agent-kid",
+                    meta={"inheritedWorktreePath": self.root + "/.claude/worktrees/agent-dad"})
+        self.assertEqual(lo._live_worker_agent_ids(self.root, str(self.proj), time.time()),
+                         {"agent-kid"})
+        self.assertIn("agent-dad", self._read()[0])
+
+    def test_half_written_meta_is_reported(self):
+        p = _transcript(self.home, self.root, "agent-h")
+        p.with_name("agent-h.meta.json").write_text('{"worktreePath": "/x/agent-')
+        ids, err = self._read()
+        self.assertIn("agent-h", ids)
+        self.assertTrue(err)
+
+    def test_a_fifo_meta_never_blocks_the_read(self):
+        import threading
+        p = _transcript(self.home, self.root, "agent-f")
+        os.mkfifo(p.with_name("agent-f.meta.json"))
+        out = []
+        t = threading.Thread(target=lambda: out.append(self._read()), daemon=True)
+        t.start()
+        t.join(10)
+        self.assertTrue(out, "the reader blocked opening a FIFO meta")
+        self.assertIn("agent-f", out[0][0])
 
     def test_unknown_evidence_keeps_only_agent_worktrees(self):
         """Transcript evidence can only ever name an ``agent-*`` worktree, so an
