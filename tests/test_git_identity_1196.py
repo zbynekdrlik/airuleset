@@ -327,6 +327,15 @@ class TestPreAnswered(unittest.TestCase):
                       "dashboard: 'Changes' or 'History'?")
         self.assertEqual(r.returncode, 0, r.stderr)
 
+    def test_history_view_ux_question_allowed(self):
+        r = self._ask("Should the history view show the author avatar or "
+                      "initials?")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_commit_list_ux_question_allowed(self):
+        r = self._ask("Should the commit list show the author name or login?")
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_unrelated_email_feature_question_allowed(self):
         r = self._ask("Should the order confirmation email show the "
                       "customer's name or the company name?")
