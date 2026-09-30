@@ -663,6 +663,24 @@ class TestPreAnswered(unittest.TestCase):
             with self.subTest(q=q):
                 self.assertEqual(self._ask(q).returncode, 0, q)
 
+    def test_review6_single_commit_content_allowed(self):
+        """A single commit leaking/carrying a value into a FILE is content,
+        not the author identity of old history; a bare noreply sender is
+        app logic."""
+        for q in (
+            "An earlier commit leaked my personal e-mail into config.py. "
+            "Purge it from history or leave it?",
+            "The last commit leaked my personal e-mail in the .env.example. "
+            "Remove it?",
+            "Commit abc123 leaked my Gmail in settings.yaml; should I scrub "
+            "it?",
+            "A commit leaked my private name in the LICENSE header.",
+            "Commit carries my Gmail as the SMTP sender in config — keep?",
+            "In this commit should I rewrite the noreply sender logic?",
+        ):
+            with self.subTest(q=q):
+                self.assertEqual(self._ask(q).returncode, 0, q)
+
     def test_review4_linked_phrasings_blocked(self):
         for q in (
             "Old commits carry my personal e-mail — rewrite or keep?",
