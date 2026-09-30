@@ -415,9 +415,16 @@ class TestUploadPublicLaneEndToEnd(unittest.TestCase):
         port = _free_port()          # ephemeral so parallel runs never collide
         dest = tempfile.mkdtemp()
         # #931: cmd_upload now calls resolve_public_lane_full (3-tuple).
+        # #1192: the public-lane probe must never hit the real network. Since
+        # the /healthz Access bypass went live (30.9.), the real drop-david
+        # tunnel answers 502 for a test endpoint bound on this box, which the
+        # probe rightly reads as DEAD — fake a live lane instead.
+        import cli_vault_delivery
         with mock.patch.object(dg, "resolve_public_lane_full",
                                return_value=("drop-david.newlevel.media",
-                                             port, "127.0.0.1")):
+                                             port, "127.0.0.1")), \
+                mock.patch.object(cli_vault_delivery, "_probe",
+                                  return_value=204):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
                 airuleset.cmd_upload(types.SimpleNamespace(
