@@ -239,6 +239,16 @@ class TestLookupAndMint(_Base):
                                urlopen=FakeGitHub(token=bad))
 
 
+
+    def test_the_current_github_token_shape_is_accepted(self):
+        # Live 30.9.2026: GitHub now mints installation tokens of 390 chars
+        # that contain '-' and '.', beyond the old [A-Za-z0-9_]{20,255}. The
+        # first live mint for fohmixer was refused as "malformed".
+        live_shape = GHS + "abcDEF123-" * 25 + "x.y_Z" * 20
+        got = pgt.mint_token(INSTALLATION, REPO, "J.W.T",
+                             urlopen=FakeGitHub(token=live_shape))
+        self.assertEqual(got["token"], live_shape)
+
 # --------------------------------------------------------------------------- #
 # delivery: the issue 888 token-file contract, run for real under a temp HOME
 # --------------------------------------------------------------------------- #
@@ -280,6 +290,13 @@ class TestDelivery(_Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         d = self.home / ".config" / "gh-app-tokens"
         self.assertEqual((d / "primary").read_text().strip(), GHS + "second")
+
+    def test_delivery_accepts_the_current_github_token_shape(self):
+        live_shape = GHS + "abcDEF123-" * 25 + "x.y_Z" * 20
+        r = self.deliver(token=live_shape)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.home / ".config" / "gh-app-tokens" / "primary")
+                         .read_text().strip(), live_shape)
 
     def test_empty_or_malformed_stdin_writes_nothing(self):
         for bad in ("", GHS + "x y"):
