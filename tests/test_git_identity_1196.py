@@ -622,6 +622,8 @@ class TestPreAnswered(unittest.TestCase):
             "Should the dashboard show my name as the deployer for commits "
             "deployed from now on?",
             "Should the commit list in the old view show the author email?",
+            "Should the student name appear on the certificate PDF? The "
+            "previous commits only show the student email.",
         ):
             with self.subTest(q=q):
                 self.assertEqual(self._ask(q).returncode, 0, q)
