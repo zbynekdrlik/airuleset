@@ -321,14 +321,6 @@ try:
     dsk = statusbar.disk_segment()
     if dsk:
         segs.append(dsk)
-    try:  # #1176 'stale N' (Job 53): its own try, so a failure never blanks the line
-        import cli_checkout_freshness
-        stl = cli_checkout_freshness.footer_segment()
-    except Exception as _e:  # logged, never silent
-        stl = ""
-        _shim_log("stale-segment %s" % _e)
-    if stl:
-        segs.append(stl)
     # #994/#1174: the nudges profile badge, after disk in the width order.
     noff = statusbar.nudges_off_segment()
     if noff:

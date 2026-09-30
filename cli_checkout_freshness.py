@@ -14,10 +14,9 @@ Two callers, one definition of "provably safe to fast-forward":
     transient `systemd-run --user` unit, outside the watchdog unit's kill
     window (the #1176 reopen: a sweep-budget reserve starved it forever).
 
-The same module also READS the job's status file for the two visibility
-surfaces, so the per-prompt footer never imports the 390 KB `watchdog`
-package: `footer_segment` (`stale <N>`) and `status_lines` (`airuleset.py
-status`).
+The same module also READS the job's status file for its one visibility
+surface, `status_lines` (`airuleset.py status`). The footer shows nothing
+about checkout freshness (owner decision 30.9., #1176 reopen).
 
 SAFETY (never relaxed): fast-forward ONLY (`git merge --ff-only`), never a
 reset / checkout -f / merge commit / rebase. Refused, and only reported:
@@ -55,7 +54,7 @@ IN_PROGRESS_STATES = ("MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD",
 GIT_LOCAL_TIMEOUT_S = 10      # any local git read
 TERM_GRACE_S = 5              # SIGTERM -> SIGKILL grace (git cleans its locks)
 STATUS_REL = os.path.join(".claude", "checkout-freshness", "status.json")
-STALE_AFTER_H_DEFAULT = 6     # footer `stale N` only past this many hours
+STALE_AFTER_H_DEFAULT = 6     # a lag counts as `stale` in status past this many hours
 STATUS_DEAD_S = 2 * 3600      # status older than this = dead watchdog, hide
 UNMEASURABLE = object()
 _DEADLINE = [None]            # monotonic deadline set by `deadline()`, or None
@@ -537,35 +536,6 @@ def stale_entries(status, now, after_s=None):
     rows.sort(key=lambda r: -(_num(r[1].get("behind")) or 0))
     return rows
 
-
-def compact_count(n):
-    """2600 -> '2.6k', 12 -> '12', 0 / None -> '?' (lag not in commits: a
-    failing fetch, a rule-file lag on an up-to-date work branch)."""
-    if not isinstance(n, int) or isinstance(n, bool) or n <= 0:
-        return "?"
-    return "%.1fk" % (n / 1000.0) if n >= 1000 else str(n)
-
-
-def footer_segment(home=None, now=None):
-    """`stale <N>` (N = commits behind of the worst checkout, `+K` more) when
-    a checkout has lagged unfixably past the threshold; "" otherwise, and ""
-    when the status is older than STATUS_DEAD_S (a dead watchdog never paints
-    a frozen count). Local file read only; never raises."""
-    try:
-        now = time.time() if now is None else now
-        status = read_status(home)
-        ts = (status or {}).get("ts")
-        if not isinstance(ts, (int, float)) or now - ts > STATUS_DEAD_S:
-            return ""
-        rows = stale_entries(status, now)
-        if not rows:
-            return ""
-        more = " +%d" % (len(rows) - 1) if len(rows) > 1 else ""
-        return "\033[38;5;208mstale %s%s\033[0m" % (
-            compact_count(rows[0][1].get("behind")), more)
-    except Exception as exc:  # noqa: BLE001 -- a footer never breaks render
-        _log("footer segment failed: %s" % exc)
-        return ""
 
 
 def _age(now, ts):
