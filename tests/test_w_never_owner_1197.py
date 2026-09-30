@@ -41,7 +41,15 @@ class StatuslineVocabularyWNeverOwner(unittest.TestCase):
         w = _w_bullet(_flat("modules/core/statusline-vocabulary.md"))
         self.assertIn("W is NEVER the owner (#1197)", w)
         self.assertIn("THIRD party", w)
-        self.assertIn("`U` (`needs-owner-action`)", w)
+        # review fix: U has several labels -- an answer/decision is
+        # needs-answer/needs-decision, only a physical step or an owner-run
+        # event is needs-owner-action (#601); the sentence must not collapse
+        # every owner wait onto one label.
+        self.assertIn("is `U` with a concrete request", w)
+        self.assertIn("`needs-answer`/`needs-decision`", w)
+        self.assertIn("`needs-owner-action` for a physical/manual step or an "
+                      "owner-run event", w)
+        self.assertIn("a third-party/prod event stays W", w)
         for need in ("an answer", "an approval", "a physical/manual step",
                      "a real event the owner runs"):
             self.assertIn(need, w, need)
