@@ -1721,66 +1721,37 @@ def discover_stale_claude_metadata(home=None, now=None,
 
 
 # --------------------------------------------------------------------------- #
-# #906 — cross-user home worktree discovery (top-consumers + drain rung)
+# #906 — cross-user home worktrees: a REPORT-ONLY rung since #1195
 # --------------------------------------------------------------------------- #
-def _find_worktree_dirs(home_glob=HOME_WORKTREE_GLOB, listdir_fn=None,
-                        exclude_own_user=True):
-    """Enumerate ``/home/*/devel/**/.claude/worktrees/*`` — every worktree
-    directory across all home dirs EXCEPT the calling user's own (R3: the
-    existing ``worktree`` rung handles own-home with STRONGER guards).
-    Returns ``[(wt_path, owner, repo_path)]`` where ``owner`` is the
-    username (the first path segment under the home glob), and
-    ``repo_path`` is the repo root (the parent of ``.claude/``).
-    ``listdir_fn`` is injectable for testing (default: real glob + os.walk).
-    ``exclude_own_user`` (default True) skips homes matching the calling
-    user's username (#906 R3 fix)."""
+_HOME_REPO_GLOBS = ("devel/*/.claude/worktrees/*", "devel/*/*/.claude/worktrees/*")
+
+
+def _find_worktree_dirs(home_glob=HOME_WORKTREE_GLOB, listdir_fn=None):
+    """``[(wt_path, owner, repo_path)]`` for every worktree of ANOTHER account
+    (the calling user's own home is skipped — its own rungs handle it behind
+    the live-lane gate). #1195 review: two shallow globs per home
+    (:data:`_HOME_REPO_GLOBS`, a repo at ``devel/<r>`` or ``devel/<org>/<r>``),
+    never an unbounded walk of another account's tree. ``owner`` is the home
+    dir's basename, ``repo_path`` the parent of ``.claude/``. ``listdir_fn``
+    replaces the home glob in tests."""
     import glob as _glob
     import pwd
-    results = []
-    own_user = None
-    if exclude_own_user:
-        try:
-            own_user = pwd.getpwuid(os.geteuid()).pw_name
-        except (KeyError, OSError) as e:
-            _dbg("could not resolve own username: %r — not excluding" % e)
+    try:
+        own_user = pwd.getpwuid(os.geteuid()).pw_name
+    except (KeyError, OSError) as e:
+        own_user = None
+        _dbg("could not resolve own username: %r — not excluding" % e)
     homes = sorted(_glob.glob(home_glob)) if listdir_fn is None else listdir_fn(home_glob)
+    results = []
     for home_dir in homes:
         owner = os.path.basename(home_dir)
         if own_user and owner == own_user:
             continue  # R3: own-home covered by the stronger per-user worktree rung
-        devel = os.path.join(home_dir, "devel")
-        if not os.path.isdir(devel):
-            continue
-        # Walk devel looking for .claude/worktrees dirs
-        try:
-            for dirpath, dirnames, _files in os.walk(devel, followlinks=False):
-                # Prune: don't descend into .claude/worktrees children (they are
-                # the worktree dirs themselves, not repos containing more worktrees).
-                basename = os.path.basename(dirpath)
-                if basename == "worktrees":
-                    parent = os.path.dirname(dirpath)
-                    if os.path.basename(parent) == ".claude":
-                        # This is a .claude/worktrees dir — each child is a worktree
-                        repo_path = os.path.dirname(parent)
-                        try:
-                            children = sorted(os.listdir(dirpath))
-                        except OSError as e:
-                            _dbg("could not list worktrees dir %s: %r" % (dirpath, e))
-                            continue
-                        for child in children:
-                            wt = os.path.join(dirpath, child)
-                            if os.path.isdir(wt) and not os.path.islink(wt):
-                                results.append((wt, owner, repo_path))
-                        dirnames.clear()
-                        continue
-                # Don't descend into node_modules, __pycache__, etc.
-                dirnames[:] = [d for d in dirnames
-                               if d not in ("node_modules", "__pycache__", ".git",
-                                            "target", "dist", "build", ".tox",
-                                            ".mypy_cache", ".ruff_cache")]
-        except OSError as e:
-            _dbg("walk failed for %s: %r" % (devel, e))
-            continue
+        for pattern in _HOME_REPO_GLOBS:
+            for wt in sorted(_glob.glob(os.path.join(home_dir, pattern))):
+                if os.path.isdir(wt) and not os.path.islink(wt):
+                    results.append((wt, owner, os.path.dirname(os.path.dirname(
+                        os.path.dirname(wt)))))
     return results
 
 
