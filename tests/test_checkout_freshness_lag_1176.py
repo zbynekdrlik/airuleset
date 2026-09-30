@@ -478,6 +478,7 @@ class TestCensusReview(_Lag):
     def test_no_reflog_is_named_as_such(self):
         self.detach()
         self.advance_origin()
+        self.g(self.clone, "fetch", "-q", "origin")   # the job fetches first
         with mock.patch.object(_cf(), "_head_moved_at", return_value=None):
             v = _cf().reattach_verdict(self.clone, "origin", "develop", now=T0)
         self.assertEqual(v.reason, "head-activity-unmeasurable")
