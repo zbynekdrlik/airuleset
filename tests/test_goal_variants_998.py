@@ -206,15 +206,18 @@ class TestReviewRoleVariant1000(TestCase):
         # their (B) done-state and gained the stream-idle clause, so every
         # branch-merge/fork-no-merge variant changed. full/* are UNTOUCHED.
         # Regenerated deliberately.
+        # #1137 re-golden (owner ROZHODNUTÉ 2026-09-30): the sequential clause
+        # no longer forces a worker per unit, so every */sequential/* variant
+        # changed; */parallel/* are UNTOUCHED.
         "full/parallel/None": "2d9a5539f472a22cda96177c",
-        "full/sequential/None": "6920ca09926869d6679eb0cc",
-        "full/sequential/infra": "e3836d97e467eafe428a92ec",
+        "full/sequential/None": "5aa6169676175202824de5f1",
+        "full/sequential/infra": "19aef76411deb3e9b6dda220",
         "branch-merge/parallel/None": "baeaa60a576d206e5e031d3d",
-        "branch-merge/sequential/None": "50ea6ffa33954088695a7978",
-        "branch-merge/sequential/infra": "14ec8214eff9cae5330a9eb3",
+        "branch-merge/sequential/None": "18e1e9ce2e3fef9a952e9f11",
+        "branch-merge/sequential/infra": "9dfce54370b4b9c2800930df",
         "fork-no-merge/parallel/None": "adf7e0904676c259633645cc",
-        "fork-no-merge/sequential/None": "0d82b098f66601de3038235f",
-        "fork-no-merge/sequential/infra": "a34c388830fba45ecc5ab6ab",
+        "fork-no-merge/sequential/None": "680c351e1f87a0be532c5dde",
+        "fork-no-merge/sequential/infra": "92b74d96321574fbc8a7b8dd",
     }
 
     def test_nonreview_variants_byte_identical_snapshot(self):
