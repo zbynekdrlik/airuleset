@@ -3,9 +3,13 @@
 Moved VERBATIM out of `cli_worktree_sweep.py` (#1194), which is now a thin
 facade re-exporting every name below. This leaf holds what more than one
 reclaimer uses:
-- the shared protected-branch set and the #348/#513 age/idle constants;
+- the shared protected-branch set;
+- the #348 age-gate block, kept whole with its one rationale comment: the
+  orphan gate is read by `cli_worktree_orphans`, the locked-dead gate by
+  `cli_worktree_stale`;
+- the #513 idle floor, read by the stale sweep, the salvage report and the
+  disk-guard rung;
 - env-age parsing, the `git -C` runner, porcelain parsing, base-branch;
-- the lock/pid helpers and the locked-dead classification;
 - the admin-dir, clean-tree, recency and live-use probes.
 
 The reclaimers themselves live in `cli_worktree_stale` (#345 sweep + #513
@@ -18,7 +22,6 @@ Stdlib only at module level, same as the pre-split module: no top-level
 """
 
 import os
-import re
 import sys
 from pathlib import Path
 
@@ -220,102 +223,6 @@ def _worktree_sweep_base_branch(repo_root, git_run=None):
     return candidates[0]
 
 
-_WORKTREE_LOCK_PID_RX = re.compile(r"claude agent \S+ \(pid (\d+) start (\d+)\)")
-
-
-def _worktree_lock_pid(reason):
-    """Extract `(pid, start)` from a harness-style lock reason string --
-    STRICTLY the harness's OWN observed shape, in FULL, via
-    `re.fullmatch`: "claude agent <agent-id> (pid <N> start <M>)"
-    (verified live against a real worktree lock on this box), `start`
-    matching `/proc/<pid>/stat` field 22 byte-for-byte. `(None, None)`
-    for ANYTHING else -- including a human-authored reason that merely
-    MENTIONS a "(pid N)"-shaped substring somewhere in its own text.
-
-    #348 adversarial-review MAJOR-1 (TRIGGERED live, no injection): the
-    original `re.search`-anywhere form with an OPTIONAL `start` accepted
-    a human's own `--reason "debugging crash (pid 999999) - DO NOT
-    REMOVE"` (unlocked + swept) and a reason ENDING "... (pid 1 start
-    999999999)" (pid 1 genuinely alive, wrong starttime, still read as
-    "confirmed dead"). Anchoring the WHOLE reason to the harness's own
-    literal "claude agent <id> " prefix -- and requiring `start` (never
-    optional; the harness always records it) -- rejects both: neither
-    trigger starts with "claude agent ", so neither can ever match,
-    regardless of where inside the string a pid-shaped substring sits.
-    """
-    if not reason:
-        return (None, None)
-    match = _WORKTREE_LOCK_PID_RX.fullmatch(reason.strip())
-    if not match:
-        return (None, None)
-    return (int(match.group(1)), int(match.group(2)))
-
-
-def _proc_stat_text(pid, proc_root=None):
-    """Real `/proc/<pid>/stat` reader -- None when the pid does not exist
-    (already exited) or is unreadable for any other reason. `proc_root`
-    (default `/proc`) exists only so a test can point this at a fake
-    directory tree -- production code always uses the real filesystem.
-
-    `errors="replace"` is deliberate, not cosmetic (#348 adversarial-
-    review MINOR-2, TRIGGERED live against a real forked process with a
-    `comm` set to invalid UTF-8 via `prctl(PR_SET_NAME, ...)` -- legal,
-    and NOT rare on a box running arbitrary tooling): a bare
-    `Path.read_text()` raises `UnicodeDecodeError`, uncaught by the
-    `except OSError` here, and that raise propagates all the way out of
-    `sweep_stale_worktrees`'s blanket discovery-error handler -- silently
-    disabling BOTH new #348 leak categories fleet-wide the instant any
-    locked worktree's recorded pid happens to be occupied by such a
-    process. Every field this module ever reads out of a stat line
-    (state..starttime) is plain ASCII and sits AFTER the `comm` field's
-    own closing paren, so replacing invalid bytes inside `comm` with
-    U+FFFD can never corrupt the numeric fields this code actually
-    parses -- it must NOT return `None` on decode failure either: that
-    would read as "no such process" to `_pid_is_dead`, i.e. a manufactured
-    FALSE POSITIVE for a process that is very much alive."""
-    proc_root = proc_root or Path("/proc")
-    try:
-        return (proc_root / str(pid) / "stat").read_text(errors="replace")
-    except OSError:
-        return None
-
-
-def _pid_is_dead(pid, start=None, stat_reader=None):
-    """True ONLY when POSITIVELY confirmed the exact `(pid, start)`
-    session no longer exists -- False when it IS alive, None when this
-    cannot be determined at all. Neither `False` nor `None` may ever be
-    treated as "dead" by a caller -- both mean "do not touch this".
-
-    `start` is `/proc/<pid>/stat` field 22 (starttime, clock ticks since
-    boot) -- cross-checking it closes the PID-REUSE window: if `pid` is
-    now occupied by a DIFFERENT process (a different starttime), the
-    ORIGINAL (pid, start) session is genuinely gone, so this correctly
-    still returns True even though the bare pid number is "in use" again.
-    Without `start` (a lock reason with no recorded starttime) a live pid
-    is reported alive, per the "never guess dead" contract -- there is
-    nothing to disambiguate a reused pid from the original session.
-    """
-    stat_reader = stat_reader or _proc_stat_text
-    if not isinstance(pid, int) or pid <= 0:
-        return None
-    raw = stat_reader(pid)
-    if raw is None:
-        return True   # no such process at all -- positively confirmed gone
-    if start is None:
-        return False  # alive; nothing to cross-check -- never guessed dead
-    try:
-        # comm (field 2) can itself contain spaces/parens -- split on the
-        # LAST ")" to skip past it safely, exactly like every real /proc
-        # parser must. state=idx0, ppid=idx1, ... starttime=idx19 of what
-        # remains (field 22 overall, minus the pid+comm fields already cut).
-        after_comm = raw.rsplit(")", 1)[1]
-        fields = after_comm.split()
-        proc_start = int(fields[19])
-    except (IndexError, ValueError):
-        return None   # malformed/unexpected /proc shape -- never guessed
-    return proc_start != start
-
-
 def _worktree_admin_dir(repo_root, worktree_path):
     """Resolve `<repo_root>/.git/worktrees/<name>` for a REGISTERED
     worktree at `worktree_path`, by matching each admin subdir's own
@@ -338,22 +245,6 @@ def _worktree_admin_dir(repo_root, worktree_path):
         if recorded == target:
             return d
     return None
-
-
-def _worktree_lock_age_s(admin_dir, now):
-    """Seconds since a worktree's OWN lock was created -- the admin dir's
-    `locked` marker-file mtime (the harness writes this file ONCE, at
-    dispatch time, and never touches it again). None when unmeasurable
-    (no admin dir, no `locked` file, unreadable, or a future mtime from
-    clock skew) -- unmeasurable is never "old enough"."""
-    if admin_dir is None:
-        return None
-    try:
-        mtime = (Path(admin_dir) / "locked").stat().st_mtime
-    except OSError:
-        return None
-    age = now - mtime
-    return age if age >= 0 else None
 
 
 def _worktree_is_clean(worktree_path, git_run):
@@ -428,89 +319,3 @@ def _worktree_in_live_use(worktree_path):
         print("  worktree-sweep: live-use check failed for %s: %s"
               % (worktree_path, e), file=sys.stderr)
         return True
-
-
-def _classify_locked_worktree(root, path, branch, lock_reason, git_run, now,
-                              pid_is_dead=None, min_age_s=None):
-    """A LOCKED worktree is normally NEVER a candidate (#345's own
-    NON-NEGOTIABLE #1) -- this is the ONE deliberate, narrowly-scoped
-    exception (#348): promote it to a genuine candidate (`kind:
-    "locked_dead"`) only when EVERY ONE of five independent signals
-    agrees, in order, each refusing (never guessing) on its own failure:
-
-      1. `lock_reason` parses to the harness's own `(pid N start M)`
-         shape -- an unparseable/manual lock refuses outright;
-      2. that EXACT (pid, start) is POSITIVELY confirmed dead
-         (`_pid_is_dead` -- never merely "not currently found");
-      3. the lock itself is at least `min_age_s` old (several days by
-         default) -- a pure time buffer, not a substitute for #2;
-      4. the branch carries ZERO commits ahead of the repo's own base --
-         the identical fully-qualified rev-list check every other
-         candidate gets; real unmerged work is never touched;
-      5. the working tree is provably clean (`git status --porcelain`
-         empty) -- a dead worker's own uncommitted edits are never
-         silently discarded.
-
-    Residual risk (not closed here, stated in the ticket's design
-    comment): the harness's lock always records the MAIN SESSION's pid,
-    never the individual dispatched worker's -- so this can only ever
-    detect a worktree whose entire owning session has exited. A worker
-    whose own task finished or died while its main session stays alive
-    (busy on other tickets) is unreachable by signal 2 and is simply
-    never swept -- a FALSE NEGATIVE only, never a false positive: a
-    still-alive (or undeterminable) pid always refuses.
-
-    A SECOND, narrower residual (#348 adversarial-review MINOR-4,
-    confirmed): a worktree that is BOTH locked (dead session, otherwise
-    reclaimable) AND has had its directory removed by hand is
-    permanently unreachable by EITHER mechanism at once -- signal 5
-    (`git status --porcelain`) cannot run against a missing directory
-    and refuses forever, while `discover_orphaned_worktree_branches`
-    never sees the branch either (it is still "registered" by the
-    surviving locked admin entry). False negative only, never fixed
-    here -- closing it would need a directory-existence-aware variant of
-    signal 5, out of this ticket's own named scope.
-    """
-    pid_is_dead = pid_is_dead or _pid_is_dead
-    min_age_s = (_worktree_env_age_s("AIRULESET_WORKTREE_LOCKED_DEAD_MIN_AGE_S",
-                                     STALE_LOCKED_DEAD_MIN_AGE_S)
-                if min_age_s is None else min_age_s)
-    row = {"path": path, "branch": branch, "repo": root, "reason": None,
-          "kind": "locked_dead", "lock_reason": lock_reason}
-    pid, start = _worktree_lock_pid(lock_reason)
-    if pid is None:
-        row["reason"] = "locked, no parseable session pid -- never guessed at"
-        return row
-    dead = pid_is_dead(pid, start)
-    if dead is not True:
-        row["reason"] = ("locked (active worker)" if dead is False
-                         else "locked, session liveness undeterminable")
-        return row
-    admin_dir = _worktree_admin_dir(root, path)
-    age = _worktree_lock_age_s(admin_dir, now)
-    if age is None or age < min_age_s:
-        row["reason"] = ("locked, dead session but lock is too recent to "
-                         "reclaim (< %d d) or age unmeasurable" %
-                         (min_age_s / 86400))
-        return row
-    if branch is None:
-        row["reason"] = "locked, dead session, detached HEAD -- never guessed at"
-        return row
-    if branch in _STALE_WORKTREE_PROTECTED_BRANCHES:
-        row["reason"] = "protected branch name (%s)" % branch
-        return row
-    base = _worktree_sweep_base_branch(root, git_run=git_run)
-    if not base:
-        row["reason"] = "no dev/main/master to compare against"
-        return row
-    ahead = git_run(["rev-list", "--count",
-                    "refs/heads/%s..refs/heads/%s" % (base, branch)], root)
-    if ahead is None or ahead.strip() != "0":
-        row["reason"] = "locked, dead session, but has unmerged work -- never touched"
-        return row
-    clean = _worktree_is_clean(path, git_run)
-    if clean is not True:
-        row["reason"] = "locked, dead session, but tree not provably clean -- never touched"
-        return row
-    row["base"] = base
-    return row     # reason stays None -- genuine candidate

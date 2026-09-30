@@ -5,10 +5,10 @@ reclaimers. #1194 split it VERBATIM, with no behaviour change, into
 stdlib-only leaves:
 
 - `cli_worktree_common`: shared plumbing (git runner, porcelain parsing,
-  base-branch, lock/pid helpers, locked-dead classification, recency and
-  live-use probes, shared constants);
-- `cli_worktree_stale`: the #345 stale-worktree sweep + #513 salvage report
-  + `cmd_sweep_worktrees`;
+  base-branch, admin-dir, clean-tree, recency and live-use probes, shared
+  constants);
+- `cli_worktree_stale`: the #345 stale-worktree sweep, its #348 locked-dead
+  classification, the #513 salvage report and `cmd_sweep_worktrees`;
 - `cli_worktree_orphans`: the #348 orphaned-branch discovery;
 - `cli_worktree_reclaim`: the #834/#939 disk-guard reclaimable-directory rung;
 - `cli_lane_target_reclaim`: the #545 merged-lane `target/` reclaim +
@@ -42,16 +42,10 @@ from cli_worktree_common import (  # noqa: F401 -- re-export (#1194 facade)
     _worktree_git as _worktree_git,
     _worktree_porcelain_entries as _worktree_porcelain_entries,
     _worktree_sweep_base_branch as _worktree_sweep_base_branch,
-    _WORKTREE_LOCK_PID_RX as _WORKTREE_LOCK_PID_RX,
-    _worktree_lock_pid as _worktree_lock_pid,
-    _proc_stat_text as _proc_stat_text,
-    _pid_is_dead as _pid_is_dead,
     _worktree_admin_dir as _worktree_admin_dir,
-    _worktree_lock_age_s as _worktree_lock_age_s,
     _worktree_is_clean as _worktree_is_clean,
     _worktree_recency_age_s as _worktree_recency_age_s,
     _worktree_in_live_use as _worktree_in_live_use,
-    _classify_locked_worktree as _classify_locked_worktree,
 )
 from cli_worktree_orphans import (  # noqa: F401 -- re-export (#1194 facade)
     _worktree_branch_ref_age_s as _worktree_branch_ref_age_s,
@@ -62,6 +56,12 @@ from cli_worktree_stale import (  # noqa: F401 -- re-export (#1194 facade)
     STALE_WORKTREE_STATE_PATH as STALE_WORKTREE_STATE_PATH,
     STALE_WORKTREE_MIN_INTERVAL_S as STALE_WORKTREE_MIN_INTERVAL_S,
     STALE_WORKTREE_REMOVE_TIMEOUT_S as STALE_WORKTREE_REMOVE_TIMEOUT_S,
+    _WORKTREE_LOCK_PID_RX as _WORKTREE_LOCK_PID_RX,
+    _worktree_lock_pid as _worktree_lock_pid,
+    _proc_stat_text as _proc_stat_text,
+    _pid_is_dead as _pid_is_dead,
+    _worktree_lock_age_s as _worktree_lock_age_s,
+    _classify_locked_worktree as _classify_locked_worktree,
     discover_stale_worktrees as discover_stale_worktrees,
     discover_salvage_worktrees as discover_salvage_worktrees,
     _log_stale_worktree_results as _log_stale_worktree_results,
