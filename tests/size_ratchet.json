@@ -741,7 +741,7 @@
     "airuleset.py::_watchdog_release_state_fetch": 215,
     "airuleset.py::cmd_gk_request": 209,
     "airuleset.py::cmd_handoff": 355,
-    "airuleset.py::cmd_install": 938,
+    "airuleset.py::cmd_install": 939,
     "airuleset.py::cmd_notify": 352,
     "airuleset.py::cmd_tickets_status": 415,
     "airuleset.py::cmd_watchdog": 343,
