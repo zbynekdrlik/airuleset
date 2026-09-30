@@ -2378,3 +2378,26 @@ The #672 REWORK bullet in internals-webterm.md marks these two as the OLD design
 ### Moved from internals-cli.md at the #1198 cap (2026-09-30)
 
 - **#829 — an `authority` CLI subcommand (`cli_quals.cmd_authority`) resolving the project `CLAUDE.md` marker against the bare PROCESS cwd answers DIFFERENTLY from every in-process consumer, which anchors at `_repo_root()`; `--explain` then mis-names the winning source.** `_authority_marker_raw(cwd)` reads `Path(cwd)/CLAUDE.md` with NO walk-up, so `cmd_authority`'s bare `_authority_decision()` missed a repo-root marker from a SUBDIR, while `cli_quals_cmd.py`/run-card/footer all use `resolve_authority(cwd=airuleset._repo_root() or None)` (#181 I-5 / run-card precedent) — and the close-guard hook shells out to plain `authority` from the session cwd, inheriting the bug. FIX = anchor `cmd_authority` at `airuleset._repo_root() or None` too (`""`→None→read cwd, matching consumers outside a repo). FOUR reusable points: (1) **a multi-ARM CLI command consumed by a hook — sweep EVERY arm that resolves authority**: the review found `--stream-label` still bare-cwd (the hook shells out to BOTH `authority` and `authority --stream-label` from the same cwd) → anchor it too, else the own-stream acceptance-close carve-out mis-fires. (2) **`--explain` naming the marker PATH**: ONE `_authority_marker_path(cwd)` helper that `_authority_marker_raw` reads THROUGH and `--explain` names → the diagnostic can never cite a file different from the one read. (3) **an INVALID marker is `[a-z-]+`-but-not-a-profile** (`superuser`); an underscore token (`branch_merge`) fails the `([a-z-]+)` regex entirely → reads as `marker=none`, NOT `invalid(...)` — pick the fixture accordingly. (4) **test-shape**: patch `airuleset._repo_root` (the run-card seam); the outside-a-repo test asserts `"" or None`→`None` deterministically (patch `_authority_marker_raw` to record its cwd), never depending on the ambient cwd's own `CLAUDE.md`. Marker-precedence (`_authority_decision` order; #827/#839 fail-safe) is untouched.
+
+### #672 client sizing lessons (moved from internals-webterm.md, 2026-10-01)
+
+- **A too-small tmux CLIENT is CROPPED, never scaled (#672).** A client attached `-f ignore-size`
+  that is SMALLER than the window gets a cursor-following CROP of the window — everything below
+  the cursor (the CC statusline footer + agent strip) is clipped. `capture-pane` shows the footer
+  IS in the pane; only the client's render clips it. This is the whole #672 bug.
+- **Keep the churned `fitFixedGrid`/`fillFixedGrid` FILL region UNTOUCHED (#672).** Per-tab grid is
+  delivered via a getter over `CFG.term_cols`/`CFG.term_rows` placed right after `const CFG` (an
+  uncontended spot), so the fill algorithm reads them unchanged.
+- **A `current`-keyed getter + the resize-CLAMP is a RACE trap (#672).** `fitFixedGrid`'s clamp
+  (`term.resize = () => real(...)`) captured the grid at INSTALL time, and a preloaded tab's ttyd
+  can connect LATE while `current` has moved to a different-grid tab → a STICKY clamp to the wrong
+  grid that silently re-crops. FIX: the clamp reads `CFG.term_cols`/`CFG.term_rows` LIVE on every
+  resize (activate() shows only the current tab, so a clamped resize of a visible terminal always
+  sees its own grid). Any future per-tab-grid work must keep this live-read property.
+- [Moved to `.claude/rules-reference/internals-archive.md` — #984 cap rotation] Prod owner-dashboard render path `human="zbynek"` gotcha.
+- **Empirical proof method (#672, mirrors #613 ctrlbw harness).** Reproduce a sizing/crop bug on an
+  ISOLATED tmux server: reuse `_IsolatedTmuxServer` (own `-S` socket, `TMUX`/`TMUX_PANE` stripped,
+  `pty.openpty()`+`TIOCSWINSZ` pinned pty clients, wall-clock `_drain`). Attach one normal client +
+  one `-f ignore-size` smaller client; assert the footer marker is absent from the small client's
+  RENDERED screen (crop) and present at the fixed grid. ALWAYS include a no-degradation CONTROL
+  (the window size must be unchanged after the ignore-size attach). NEVER touch a live session.

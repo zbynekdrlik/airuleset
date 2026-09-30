@@ -14,26 +14,7 @@ which auto-load when you read `cli_webterm.py`):
 - **[Moved to `.claude/rules-reference/internals-archive.md` at the #1016 ff cap, 2026-09-23 — grep "#985 —" there]** break-glass SSH password login for the `airuleset` user (controller-only).
 
 - **[Moved to `.claude/rules-reference/internals-archive.md` at the #1159 51200-byte cap, 2026-09-26 — grep "#672 REWORK (owner ruling 2026-08-25) — ONE canonical grid" there]** the one-canonical-grid-for-every-tab lesson.
-- **A too-small tmux CLIENT is CROPPED, never scaled (#672).** A client attached `-f ignore-size`
-  that is SMALLER than the window gets a cursor-following CROP of the window — everything below
-  the cursor (the CC statusline footer + agent strip) is clipped. `capture-pane` shows the footer
-  IS in the pane; only the client's render clips it. This is the whole #672 bug.
-- **Keep the churned `fitFixedGrid`/`fillFixedGrid` FILL region UNTOUCHED (#672).** Per-tab grid is
-  delivered via a getter over `CFG.term_cols`/`CFG.term_rows` placed right after `const CFG` (an
-  uncontended spot), so the fill algorithm reads them unchanged.
-- **A `current`-keyed getter + the resize-CLAMP is a RACE trap (#672).** `fitFixedGrid`'s clamp
-  (`term.resize = () => real(...)`) captured the grid at INSTALL time, and a preloaded tab's ttyd
-  can connect LATE while `current` has moved to a different-grid tab → a STICKY clamp to the wrong
-  grid that silently re-crops. FIX: the clamp reads `CFG.term_cols`/`CFG.term_rows` LIVE on every
-  resize (activate() shows only the current tab, so a clamped resize of a visible terminal always
-  sees its own grid). Any future per-tab-grid work must keep this live-read property.
-- [Moved to `.claude/rules-reference/internals-archive.md` — #984 cap rotation] Prod owner-dashboard render path `human="zbynek"` gotcha.
-- **Empirical proof method (#672, mirrors #613 ctrlbw harness).** Reproduce a sizing/crop bug on an
-  ISOLATED tmux server: reuse `_IsolatedTmuxServer` (own `-S` socket, `TMUX`/`TMUX_PANE` stripped,
-  `pty.openpty()`+`TIOCSWINSZ` pinned pty clients, wall-clock `_drain`). Attach one normal client +
-  one `-f ignore-size` smaller client; assert the footer marker is absent from the small client's
-  RENDERED screen (crop) and present at the fixed grid. ALWAYS include a no-degradation CONTROL
-  (the window size must be unchanged after the ignore-size attach). NEVER touch a live session.
+- **[Moved to `.claude/rules-reference/internals-archive.md` at the 51200-byte cap, 2026-10-01 — grep "#672 client sizing lessons" there]** the four #672 client-sizing lessons (cropped client, fill region, getter/clamp race, empirical proof method).
 
 ## ttyd/gateway bind invariant — loopback or UNIX socket, NEVER 0.0.0.0 (#681)
 
