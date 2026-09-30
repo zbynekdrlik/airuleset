@@ -609,7 +609,7 @@ def render_root_bootstrap(account):
         echo "  1. git clone https://github.com/zbynekdrlik/airuleset.git ~/devel/airuleset"
         echo "  2. python3 ~/devel/airuleset/airuleset.py install"
         echo "  3. Verify: ssh -i ~/.secrets/airuleset_push_ed25519 $ACCOUNT@{address} true"
-    """).format(address=address)
+    """).format(address=address) + cli_project_gh_token.render_next_steps(spec)
     script += readback
     return script
 

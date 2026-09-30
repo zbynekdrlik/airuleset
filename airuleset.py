@@ -2165,6 +2165,7 @@ def cmd_install(args):
     except Exception as e:
         print(f"  watchdog setup error (non-fatal): {e}", file=sys.stderr)
     maybe_setup_project_gh_token_timer()   # #1190: controller-only, never raises
+    maybe_refresh_project_gh_app_shim()    # #1199: project accounts only, never raises
 
     # --- 5b. web terminal gateway (#555/#612): dispatch by (nodename, account) —
     # dev1->owner, subdev+marek->marek, subdev(david1/default)->david; else no-op. ---
@@ -4548,6 +4549,27 @@ def _ensure_origin_label_usable(gh_fn, label, R):
     return True
 
 
+def _refused_on_project_accounts(cmd):
+    """#1199 precondition of `gk-request`: on a project account (a declared
+    #1184 account that is not an Odoo stream) there is no gatekeeper, so the
+    command prints the one-line pointer to the native
+    `gh issue create -R zbynekdrlik/airuleset`, touches no ticket and exits 1
+    before any gh call."""
+    import functools
+
+    @functools.wraps(cmd)
+    def guarded(args):
+        import cli_project_gh_token
+        msg = cli_project_gh_token.gk_request_refusal(_current_user(),
+                                                      AUTHORITY_BY_USER)
+        if msg:
+            print(msg, file=sys.stderr)
+            return 1
+        return cmd(args)
+    return guarded
+
+
+@_refused_on_project_accounts
 def cmd_gk_request(args):
     """Stream→supervisor action request (#30): file (or mark) the ticket that
     asks the gatekeeper/supervisor for an action the stream cannot perform
@@ -9654,6 +9676,7 @@ from cli_accounts import (  # noqa: E402, F401
 from cli_project_gh_token import (  # noqa: E402, F401
     cmd_project_gh_token as cmd_project_gh_token,
     maybe_setup_timer as maybe_setup_project_gh_token_timer,
+    maybe_refresh_shim as maybe_refresh_project_gh_app_shim,
     register_parser as _register_project_gh_token_parser,
 )
 

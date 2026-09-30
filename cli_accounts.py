@@ -300,6 +300,7 @@ def cmd_accounts(args):
         if a["github_app"]:   # #1190: the controller-minted repo-scoped token
             import cli_project_gh_token as gh_token
             print("      %s" % gh_token.status_line(name))
+            print("      %s" % gh_token.airuleset_status_line(name))   # #1199
     print("legacy projects (no declared project account): %d (ceiling %d, "
           "down-only — migrate on touch)" % (data["legacy_count"],
                                              data["legacy_ceiling"]))

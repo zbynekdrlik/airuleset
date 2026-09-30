@@ -134,6 +134,22 @@ def infra_window(windows):
     return None
 
 
+def airuleset_filer_argv(repo, title, body, repo_dir, python_exe):
+    """The argv that files the disk ticket on the airuleset repo. A #1184
+    project account has no gatekeeper (#1199: gk-request refuses there), so
+    it files natively with ``gh issue create -R`` — its gh-app-shim routes
+    the issues-only airuleset token, and no ``needs-gatekeeper`` label is
+    added. Every other box keeps ``gk-request``."""
+    import airuleset
+    import cli_project_gh_token
+    if cli_project_gh_token.is_project_account(airuleset._current_user(),
+                                               airuleset.AUTHORITY_BY_USER):
+        return ["gh", "issue", "create", "-R", repo, "--title", title,
+                "--body", body]
+    return [python_exe, os.path.join(repo_dir, "airuleset.py"), "gk-request",
+            "--title", title, "--body", body, "--repo", repo]
+
+
 def resolve_target(windows):
     """``(repo, label)``: the infra window's repo + ``infra``, or the
     airuleset repo + ``None`` (the unchanged gk-request path)."""

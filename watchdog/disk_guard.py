@@ -3528,7 +3528,12 @@ def file_severe_ticket(status, home, now, top, dry_run=False, run_fn=None,
     repo, label = _esc.resolve_target(windows)
     title, body = _esc.compose(status, hostname, top, _human, TARGET_PCT,
                                window=_esc.infra_window(windows))
-    how = "gk-request" if label is None else "%s [%s]" % (repo, label)
+    import airuleset as _ars
+    argv = None if label is not None else _esc.airuleset_filer_argv(
+        repo, title, body, os.path.dirname(os.path.abspath(_ars.__file__)),
+        sys.executable)   # gk-request, or (#1199) native `gh` on a project account
+    via = "gk-request" if argv is None or "gk-request" in argv else "gh issue create"
+    how = via if label is None else "%s [%s]" % (repo, label)
     logs = []
     line = _log_line(now, "SEVERE-TICKET", hostname, status["worst_pct"],
                      "filing %s: %s" % (how, title))
@@ -3544,24 +3549,15 @@ def file_severe_ticket(status, home, now, top, dry_run=False, run_fn=None,
             if created:   # the issue exists: a re-file would duplicate it
                 _mark_severe_ticket_filed(state_path, now, ref)
             return logs
-        import airuleset as _ars
-        repo_dir = os.path.dirname(os.path.abspath(_ars.__file__))
-        argv = [
-            sys.executable, os.path.join(repo_dir, "airuleset.py"),
-            "gk-request",
-            "--title", title,
-            "--body", body,
-            "--repo", repo,
-        ]
         r = run_fn(argv, capture_output=True, text=True, timeout=60)
         if getattr(r, "returncode", 1) != 0:
-            _dbg("severe ticket gk-request failed rc=%s: %s"
-                 % (getattr(r, "returncode", None),
+            _dbg("severe ticket %s failed rc=%s: %s"
+                 % (via, getattr(r, "returncode", None),
                     (getattr(r, "stderr", "") or "").strip()[:200]))
             logs.append(_log_line(now, "SEVERE-TICKET-FAIL", hostname,
                                  status["worst_pct"],
-                                 "gk-request failed: %s" % (
-                                     getattr(r, "stderr", "") or "")[:200]))
+                                 "%s failed: %s" % (
+                                     via, getattr(r, "stderr", "") or "")[:200]))
         else:
             # #895 F5 / #896-899: mark filed ONLY on success — a transient
             # failure must not suppress the retry. In-memory FIRST (holds
