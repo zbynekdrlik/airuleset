@@ -23,6 +23,7 @@ from tempfile import TemporaryDirectory
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import cli_worktree_sweep                                   # noqa: E402
+import cli_lane_target_reclaim                              # noqa: E402  # #1194: purge seams live here now
 
 # A FIXED reference time -- every backdate is relative to this, so recency is
 # deterministic regardless of when the test actually runs.
@@ -397,7 +398,7 @@ class TestCadenceGate(_Base):
         import unittest.mock as m
         repo = _mkrepo(self.root)
         self._merged_lane(repo)
-        with m.patch.object(cli_worktree_sweep, "_iter_lane_target_dirs",
+        with m.patch.object(cli_lane_target_reclaim, "_iter_lane_target_dirs",
                             side_effect=RuntimeError("boom")):
             results = self._run(force=False, dry_run=False)
         self.assertTrue(any(r.get("target") is None for r in results),
