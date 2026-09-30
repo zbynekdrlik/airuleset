@@ -79,10 +79,13 @@ class FakeWorld:
     read (the remote command runs locally under ``home``)."""
 
     def __init__(self, home, issues=(), *, ssh_rc=None, set_rc=0,
-                 set_stderr=b"", list_rc=0, noise=b"", err_noise=b""):
+                 set_stderr=b"", list_rc=0, noise=b"", err_noise=b"",
+                 err_tail=b"", bad_label=None):
         self.home = Path(home)
         self.noise = noise
         self.err_noise = err_noise
+        self.err_tail = err_tail
+        self.bad_label = bad_label
         self.issues = list(issues)
         self.ssh_rc = ssh_rc
         self.set_rc = set_rc
@@ -111,7 +114,7 @@ class FakeWorld:
             r = subprocess.run(["bash", "-c", argv[-1]], input=b"", env=env,
                                capture_output=True, timeout=30)
             return self._out(argv, r.returncode, self.noise + r.stdout,
-                             self.err_noise + r.stderr, kw)
+                             self.err_noise + r.stderr + self.err_tail, kw)
         if argv[:3] == ["gh", "label", "list"]:
             if self.list_rc:
                 return self._out(argv, self.list_rc, "", "boom", kw)
@@ -120,6 +123,8 @@ class FakeWorld:
                              "", kw)
         if argv[:3] == ["gh", "issue", "list"]:
             want = argv[argv.index("--label") + 1] if "--label" in argv else None
+            if want is not None and want == self.bad_label:
+                return self._out(argv, 1, "", "could not parse the label", kw)
             found = [i for i in self.issues if want is None
                      or want in [lb["name"] for lb in i["labels"]]]
             return self._out(argv, self.list_rc, json.dumps(found)
@@ -755,6 +760,75 @@ class TestReviewRound2(_RefusalBase):
         comment = self.refused(_issue(body="File: %s\n" % ("a/" * 4000)),
                                "not a plain path")
         self.assertLess(len(comment), 1500)
+
+
+# --------------------------------------------------------------------------- #
+# review round 3
+# --------------------------------------------------------------------------- #
+class TestReviewRound3(_RefusalBase):
+
+    def test_a_label_gh_cannot_filter_never_blocks_the_queue(self):
+        world = FakeWorld(self.home, [_issue(number=7),
+                                      _issue(number=8, label='secret-sync:A"')])
+        rc, out, err = self.sync(world)
+        self.assertEqual(rc, 1)                        # loud: delete that label
+        self.assertIn('secret-sync:A"', err)
+        self.assertEqual(world.secrets.get("DENYLIST"), VALUE)
+        wanted = [c["argv"][c["argv"].index("--label") + 1]
+                  for c in world.of("gh", "issue", "list")]
+        self.assertEqual(wanted, ["secret-sync:DENYLIST"])
+
+    def test_one_failing_label_listing_never_blocks_the_others(self):
+        world = FakeWorld(self.home, [_issue(number=7),
+                                      _issue(number=8, label="secret-sync:OTHER")],
+                          bad_label="secret-sync:OTHER")
+        rc, out, err = self.sync(world)
+        self.assertEqual(rc, 1)
+        self.assertIn("secret-sync:OTHER", err)
+        self.assertEqual(world.secrets.get("DENYLIST"), VALUE)
+
+    def test_the_marker_line_wins_over_a_later_warning(self):
+        world = FakeWorld(self.home, [_issue(body="File: devel/nope\n")],
+                          err_tail=b"bash: warning: setlocale: cannot change locale\n")
+        rc, out, err = self.sync(world)
+        self.assertEqual(rc, 0, err)
+        reason, comment = self.closing(world)
+        self.assertIn("no such file", comment)
+        self.assertNotIn("setlocale", comment)
+
+    def test_started_is_read_before_the_mints(self):
+        clock = {"now": 1000.0}
+
+        def mint(*_a, **_k):
+            clock["now"] = 5000.0
+            return 0
+        with mock.patch.object(pgt.time, "monotonic", lambda: clock["now"]), \
+                mock.patch.object(pgt, "mint_account", side_effect=mint), \
+                mock.patch.object(_sync(), "sync_all", return_value=0) as s:
+            pgt.cmd_project_gh_token(mock.Mock(action="mint", account=None,
+                                               all=True, dry_run=False, key=None))
+        self.assertEqual(s.call_args.kwargs.get("started"), 1000.0)
+
+    def test_dot_segments_are_refused_before_any_read(self):
+        self.refused(_issue(body="File: ./.ssh/id_ed25519\n"), "not a plain path")
+        self.refused(_issue(body="File: devel/./x\n"), "not a plain path")
+
+    def test_more_credential_files_are_protected(self):
+        for path, needle in ((".config/git/credentials", ".config/git/credentials"),
+                             (".pgpass", ".pgpass")):
+            self.refused(_issue(body="File: %s\n" % path), needle)
+
+    def test_no_bogus_one_repo_error_without_a_repo(self):
+        errs = policy.validate_repo_secrets({"repo_secrets": ["A"]}, "x",
+                                            bootstrap.SERVICE_ACCOUNTS)
+        self.assertFalse(any("also declared" in e for e in errs), errs)
+
+    def test_status_says_when_nothing_is_declared(self):
+        raw = dict(bootstrap.SERVICE_ACCOUNTS["fohmixer"])
+        raw.pop("repo_secrets")
+        with mock.patch.dict(bootstrap.SERVICE_ACCOUNTS, {"fohmixer": raw}):
+            line = _sync().status_line("fohmixer", directory=self.state)
+        self.assertIn("no repo_secrets declared", line)
 
 
 if __name__ == "__main__":
