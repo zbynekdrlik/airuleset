@@ -429,27 +429,23 @@ _ATTACH_BODY = (
 )
 
 
-def _remote_command(preferred, start_dir_chain=None):
+def _remote_command(preferred, start_dir_chain=None, user=None):
     """The single shell-command string run on the target (or locally for dev1).
     `preferred` is shell-quoted; the rest is a fixed body — no user input reaches
     the shell beyond the allowlisted, inventory-derived `preferred` value.
 
-    #961: `start_dir_chain` is a list (JSON-safe) of HOME-relative dir paths to try in
-    order (first existing wins, else $HOME). Default is
-    `cli_bashrc_appliers.STREAM_DEV_CWD_CHAIN` — ONE source of truth, shared
-    with the ssh auto-attach block (#264/#563). The chain is baked into a shell
-    variable `C` before the attach body runs."""
+    #961: `start_dir_chain` is a list of HOME-relative dirs (default
+    `STREAM_DEV_CWD_CHAIN`, shared with the ssh attach block), baked into `C`.
+    #1202: `user` declaring a managed window makes its cwd the ONE start dir
+    (`cli_session_cwd.session_chain_for`); else the first chain entry with
+    `.git` wins, else `$HOME` — never a bare parent. The string is also baked
+    into `authorized_keys` (`cli_webterm_only`) and outlives its renderer: a
+    2026-09-09 bake of the old `[ -d ]` chain was the #1202 creator."""
     from cli_bashrc_appliers import STREAM_DEV_CWD_CHAIN
+    from cli_session_cwd import render_webterm_cwd_shell, session_chain_for
     chain = start_dir_chain if start_dir_chain is not None else STREAM_DEV_CWD_CHAIN
-    # Build the shell snippet that computes C = first existing dir of the chain,
-    # fallback $HOME. Each dir is relative to $HOME.
-    chain_rels = " ".join(shlex.quote(r) for r in chain)
-    chain_shell = (
-        'C="$HOME"; '
-        'for __r in ' + chain_rels + '; do '
-        'if [ -d "$HOME/$__r" ]; then C="$HOME/$__r"; break; fi; '
-        'done; '
-    )
+    chain, fallback_rel = session_chain_for(user, chain)
+    chain_shell = render_webterm_cwd_shell(chain, fallback_rel)
     return "P=" + shlex.quote(preferred) + "; " + chain_shell + _ATTACH_BODY
 
 
@@ -524,7 +520,8 @@ def build_connect_argv(entry):
     #961: passes the entry's `start_dir_chain` (if any) to `_remote_command`
     so the forced command creates/attaches sessions in the project dir."""
     cmd = _remote_command(entry["preferred"],
-                          start_dir_chain=entry.get("start_dir_chain"))
+                          start_dir_chain=entry.get("start_dir_chain"),
+                          user=entry.get("user"))
     if entry.get("local"):
         return _SYSTEMD_RUN_SCOPE + ["sh", "-c", cmd]
     prefix = _ssh_interactive_prefix(entry)

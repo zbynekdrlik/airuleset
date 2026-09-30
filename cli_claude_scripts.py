@@ -217,7 +217,7 @@ _has_conversation() {
   local ccdir="${PWD//\//-}"; ccdir="${ccdir//./-}"; ccdir="${ccdir//_/-}"
   compgen -G "$HOME/.claude/projects/$ccdir/*.jsonl" >/dev/null 2>&1
 }
-
+{{CWD_GUARD}}
 case "$mode" in
   plain)
     exec claude "$@"
@@ -269,10 +269,10 @@ def _managed_env_unset_line():
     return "unset " + " ".join(MANAGED_ENV_DROP_KEYS)
 
 
-def render_claude_launch_script():
+def render_claude_launch_script(cwd_guard=""):
     """The launch-script content with the managed model substituted in — the
     write site MUST use this, never the raw constant (same discipline as
-    render_caveman_shim()).
+    render_caveman_shim()). #1202: `cwd_guard` = the rendered resume guard.
 
     #1060 L3a: the MAIN launcher `--model` is ALWAYS airuleset.MANAGED_MODEL
     (Opus 5.5 since #1119), even on a model-backend marker box. The #1062 L2 alias
@@ -281,7 +281,7 @@ def render_claude_launch_script():
     launcher (render_claude_impl_launch_script), scoped to the implementer
     window's own process."""
     import airuleset
-    return (CLAUDE_LAUNCH_SCRIPT_CONTENT
+    return (CLAUDE_LAUNCH_SCRIPT_CONTENT.replace("{{CWD_GUARD}}", cwd_guard)
             .replace("{{MANAGED_MODEL}}", airuleset.MANAGED_MODEL)
             .replace("{{MANAGED_ENV_UNSET}}", _managed_env_unset_line()))
 

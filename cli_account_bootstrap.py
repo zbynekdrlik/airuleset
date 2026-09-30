@@ -358,17 +358,17 @@ def _checked_spec(account):
     return spec
 
 
-def _forced_command_key_line(preferred, pubkey, start_dir_chain=None):
+def _forced_command_key_line(preferred, pubkey, start_dir_chain=None, account=None):
     """Build a ``restrict,pty,command="..."`` authorized_keys line that
     attaches the named tmux session.  Delegates to the SINGLE source
     ``_controller_lane_key_line`` in ``cli_webterm_only.py`` — Y1 Fable
     review: two copies of authorized_keys escaping = drift hazard.
 
     #960+#961: ``start_dir_chain`` threads to the forced command so the
-    tab opens in the correct project dir (e.g. ``devel/claudy``)."""
+    tab opens in the project dir (``devel/claudy``); #1202: ``account`` keys windows."""
     from cli_webterm_only import _controller_lane_key_line
     return _controller_lane_key_line(preferred, pubkey,
-                                     start_dir_chain=start_dir_chain)
+                                     start_dir_chain=start_dir_chain, account=account)
 
 
 def desired_keys_for_service_account(account):
@@ -395,7 +395,7 @@ def desired_keys_for_service_account(account):
                 "controller and add it to WEBTERM_CONTROLLER_LANE_PUBKEYS "
                 "before rendering" % (human, account, human))
         keys.append(_forced_command_key_line(
-            sess["preferred"], pubkey, start_dir_chain=sess.get("start_dir_chain")))
+            sess["preferred"], pubkey, start_dir_chain=sess.get("start_dir_chain"), account=account))
 
     return keys
 

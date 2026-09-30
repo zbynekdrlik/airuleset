@@ -3,7 +3,7 @@
 These tests verify the fix for webterm tabs opening tmux sessions in $HOME
 after reboot instead of the project directory. They test:
 1. _remote_command output contains -c for both new-session and attach-session
-2. The chain fallback logic works (first existing dir wins, else $HOME)
+2. The chain fallback logic works (first `.git` checkout wins, else $HOME, #1202)
 3. The ar tab uses devel/airuleset chain
 4. Drift-lock: _ATTACH_BODY chain matches STREAM_DEV_CWD_CHAIN
 5. Behavioral: the shell snippet correctly resolves chain dirs via fake tmux
@@ -133,11 +133,11 @@ class TestChainFallbackBehavior(unittest.TestCase):
                 return line.split("=", 1)[1]
         return None
 
-    def test_first_existing_dir_wins(self):
-        """When only the second chain dir exists, C points to it."""
+    def test_first_checkout_wins(self):
+        """When only the second chain dir is a checkout, C points to it."""
         with tempfile.TemporaryDirectory() as home:
-            # Create only devel/odoo (second in default chain)
-            (Path(home) / "devel" / "odoo").mkdir(parents=True)
+            # Create only devel/odoo as a checkout (second in the chain)
+            (Path(home) / "devel" / "odoo" / ".git").mkdir(parents=True)
             c = self._eval_chain(home, ("devel/odoo/odoo-erp", "devel/odoo"))
             self.assertEqual(c, os.path.join(home, "devel/odoo"))
 
@@ -150,15 +150,15 @@ class TestChainFallbackBehavior(unittest.TestCase):
     def test_ar_chain_resolves_airuleset(self):
         """The ar tab's chain resolves to devel/airuleset when it exists."""
         with tempfile.TemporaryDirectory() as home:
-            (Path(home) / "devel" / "airuleset").mkdir(parents=True)
+            (Path(home) / "devel" / "airuleset" / ".git").mkdir(parents=True)
             c = self._eval_chain(home, ["devel/airuleset"])
             self.assertEqual(c, os.path.join(home, "devel/airuleset"))
 
     def test_primary_chain_entry_takes_precedence(self):
-        """When both chain dirs exist, the first one wins."""
+        """When both chain dirs are checkouts, the first one wins."""
         with tempfile.TemporaryDirectory() as home:
-            (Path(home) / "devel" / "odoo" / "odoo-erp").mkdir(parents=True)
-            (Path(home) / "devel" / "odoo").mkdir(parents=True, exist_ok=True)
+            (Path(home) / "devel" / "odoo" / "odoo-erp" / ".git").mkdir(parents=True)
+            (Path(home) / "devel" / "odoo" / ".git").mkdir(parents=True)
             c = self._eval_chain(home, ("devel/odoo/odoo-erp", "devel/odoo"))
             self.assertEqual(c, os.path.join(home, "devel/odoo/odoo-erp"))
 

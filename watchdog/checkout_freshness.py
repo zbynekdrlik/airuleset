@@ -212,7 +212,7 @@ def discover_checkouts(home=None, user=None, hostname=None, windows=None,
                  "window:%s" % w.get("name"))
     if user in cli_fleet.AUTHORITY_BY_USER:
         from cli_bashrc_appliers import resolve_stream_cwd
-        chosen, no_repo = resolve_stream_cwd(home)
+        chosen, no_repo = resolve_stream_cwd(home, user=user)
         if not no_repo:
             _add(str(chosen), DEFAULT_BASES, "stream:%s" % user)
     for e in _registry_entries(_registry_host_keys(user, hostname), registry_path):
