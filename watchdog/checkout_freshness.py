@@ -65,10 +65,20 @@ deadlines only shorten it):
      raced by the in-unit merge. Refused states (dirty, unmeasurable tree, diverged,
      an in-progress operation or a held `index.lock`, a path collision) are
      NEVER touched — only recorded with their commits behind and reason.
-  3. On a WORK branch (or detached): no fast-forward. The rule-file lag is
-     measured — `CLAUDE.md` / `.claude/` files (root and nested) the base
-     changed since the fork point (`git diff --name-only HEAD...<base>`); a
-     non-empty lag is `lagging`.
+  3. On a WORK branch (or detached): `cf.reattach_verdict` (#1176 census,
+     30.9.: montalu1/3 sat detached for days, david2-4 on work branches) —
+     a clean detached HEAD or a clean work branch with NO commit outside the
+     base, whose local base is not ahead, with no path collision and HEAD
+     idle for REATTACH_IDLE_S, is moved onto the base and fast-forwarded
+     through the SAME detached unit (`--mode reattach`; the old branch ref is
+     kept). Anything else is never moved: the rule-file lag is measured —
+     `CLAUDE.md` / `.claude/` files (root and nested) the base changed since
+     the fork point (`git diff --name-only HEAD...<base>`); a non-empty lag
+     is `lagging` and the refusal is named. Every lagging checkout with
+     rule-file lag that nothing is fixing gets `notice` (the ONE
+     `cf.notice_line` the SessionStart hook also prints), which
+     `watchdog/checkout_notice.py` types into the stream's own pane
+     (`checkout-lag` machine nudge, rate-limited, never the owner).
   4. Anything that cannot be PROVEN current is `lagging` with its reason: a
      failed fetch, no remote-tracking ref for the branch, an unmeasurable
      count.
@@ -77,8 +87,8 @@ VISIBILITY: `~/.claude/checkout-freshness/status.json` (atomic write after
 EVERY checkout, so a sweep killed mid-way keeps what it did) holds, per
 checkout, state (`current` / `lagging` / `absent` / `untracked`), branch,
 base, remote, behind, reason and `since` (the first unfixable observation).
-The footer `stale <N>` and the `airuleset.py status` rows read it through
-`cli_checkout_freshness` (never this package). Every checked checkout emits
+The `airuleset.py status` rows read it through `cli_checkout_freshness`
+(never this package; the footer segment was removed). Every checked checkout emits
 ONE decision line into the journal. MACHINE-CHANNEL only — never a Discord
 ping (#693). Not run on a paused box (the registry gate).
 
@@ -123,9 +133,10 @@ FF_PENDING_MAX_S = FF_UNIT_MAX_S + 120   # a pending unit with no result = faile
 DEFER_PRIORITY_AFTER = 3      # FALLBACK: deferred this many sweeps -> goes first
 # the detached merge runs only local git: no gh auth, no GH_* namespace
 FF_UNIT_ENV_KEYS = ("PATH", "HOME", "XDG_CONFIG_HOME", "LANG", "LC_ALL")
-DEFAULT_BASES = ("develop", "dev", "main", "master")
-RULE_PATHS = ("CLAUDE.md", ".claude", ":(glob)**/CLAUDE.md",
-              ":(glob)**/.claude/**")
+DEFAULT_BASES = cf.DEFAULT_BASES      # shared with the SessionStart hook
+RULE_PATHS = cf.RULE_PATHS
+REATTACH_IDLE_S = cf.REATTACH_IDLE_S  # #1176 census: HEAD idle before a reattach
+rule_lag = cf.rule_lag
 
 
 # --------------------------------------------------------------------------- #
@@ -227,14 +238,6 @@ def _oldest_ct(path, rev_range, paths=()):
     return min(vals) if vals else None
 
 
-def rule_lag(path, ref):
-    """Rule files (`CLAUDE.md`, `.claude/`, nested too) the base changed since
-    HEAD forked from it — `[paths]`, or None when unmeasurable."""
-    rc, out = cf.run_git(path, ["diff", "--name-only", "HEAD..." + ref,
-                                "--"] + list(RULE_PATHS))
-    return [p for p in out.splitlines() if p] if rc == 0 else None
-
-
 def _ff_key(path):
     return hashlib.sha1(os.path.realpath(path).encode("utf-8")).hexdigest()[:16]
 
@@ -260,14 +263,16 @@ def _pending_live(pending, now):
     return isinstance(t, (int, float)) and 0 <= now - t <= FF_PENDING_MAX_S
 
 
-def _launch_ff_unit(path, remote, branch, home, unit_run):
+def _launch_ff_unit(path, remote, branch, home, unit_run, mode="ff", base=None):
     """Start the detached merge (`cli_checkout_freshness.py ff`) as a transient
-    `--user` unit via the ONE shared launcher. `(launched, why)`; `why` is
-    `started`/`exists` or the reason the caller must fall back. The default
-    launcher is never used from a test process (the #1136/#1195 guard). An
-    older result file is left alone: the collector ignores a result that
-    finished before this launch, so a unit still exiting ('exists') keeps its
-    answer."""
+    `--user` unit via the ONE shared launcher. `mode` "ff" fast-forwards the
+    checked-out base; "reattach" (#1176 census) moves a detached HEAD
+    (`branch` None) or a merged work branch onto `base`. `(launched, why)`;
+    `why` is `started`/`exists` or the reason the caller must fall back. The
+    default launcher is never used from a test process (the #1136/#1195
+    guard). An older result file is left alone: the collector ignores a result
+    that finished before this launch, so a unit still exiting ('exists') keeps
+    its answer."""
     if unit_run is None:
         from watchdog.disk_guard_escalation import running_under_pytest
         if running_under_pytest():
@@ -276,52 +281,67 @@ def _launch_ff_unit(path, remote, branch, home, unit_run):
     result = ff_result_path(path, home)
     os.makedirs(os.path.dirname(result), exist_ok=True)
     child = [sys.executable, os.path.join(repo_root, "cli_checkout_freshness.py"),
-             "ff", "--path", path, "--remote", remote, "--branch", branch,
-             "--result", result]
+             "ff", "--path", path, "--remote", remote, "--branch", branch or "",
+             "--result", result, "--mode", mode, "--base", base or branch or ""]
     return user_unit.launch(ff_unit_name(path), repo_root, child, FF_UNIT_MAX_S,
                             run_fn=unit_run, env_keys=FF_UNIT_ENV_KEYS,
                             env_prefixes=())
 
 
+def _run_fix(path, remote, entry, v, mode, dry_run, budget_left, prev, home, unit_run):
+    """Carry out a proven `ff` / `reattach` verdict: DETACHED in a transient
+    unit (collected next sweep), or — without systemd-run — in-unit only when
+    the sweep can afford it. Returns (state, reason, behind, deferred)."""
+    what = "fast-forward" if mode == "ff" else "reattach to %s" % v.detail
+    if dry_run:
+        return "lagging", "would %s (dry-run)" % what, v.behind, False
+    pending = prev.get("ff_pending")
+    if _pending_live(pending, entry["checked"]):
+        entry["ff_pending"] = pending    # never a second launch
+        return ("lagging", "%s running in unit %s" % (what, pending.get("unit")),
+                v.behind, False)
+    launched, why = _launch_ff_unit(path, remote, v.branch, home, unit_run, mode,
+                                    v.detail if mode == "reattach" else None)
+    if launched or why == user_unit.TIMEOUT_WHY:
+        # a client timeout is UNKNOWN (the bus may have started the unit):
+        # never race it with an in-unit merge — wait for its result instead
+        unit = ff_unit_name(path)
+        entry["ff_pending"] = {"unit": unit, "launched": entry["checked"],
+                               "behind": v.behind, "mode": mode}
+        note = {"exists": " (already running)",
+                user_unit.TIMEOUT_WHY: " (launch unconfirmed: systemd-run client "
+                                       "timed out)"}.get(why, "")
+        return ("lagging", "%s running in unit %s%s" % (what, unit, note),
+                v.behind, False)
+    left = budget_left() if budget_left is not None else None
+    if left is not None and left < MERGE_RESERVE_S:
+        entry["deferrals"] = int(prev.get("deferrals") or 0) + 1
+        return ("lagging", "%s deferred (%.0fs of sweep budget left; %s)" % (
+            what, left, why), v.behind, True)
+    if mode == "reattach":
+        ok = cf.reattach(path, v)             # unbounded once started
+        done = "reattached to %s, fast-forwarded %d commit(s)" % (v.detail, v.behind)
+        if ok:
+            entry["branch"] = v.detail
+    else:
+        ok = cf.fast_forward(path, v, run_hooks=False)   # unbounded once started
+        done = "fast-forwarded %d commit(s)" % v.behind
+    if ok:
+        entry["ff"] = {"at": entry["checked"], "commits": v.behind}
+        return "current", "%s in-unit (%s)" % (done, why), 0, False
+    return "lagging", "%s failed in-unit (%s)" % (what, why), v.behind, False
+
+
 def _base_branch_result(path, remote, entry, dry_run, budget_left, prev=None,
                         home=None, unit_run=None):
     """A checkout ON a base branch: the shared predicate decides; a provably
-    safe fast-forward runs DETACHED (a transient unit, collected next sweep),
-    or — without systemd-run — in-unit only when the sweep can afford the
-    merge. Returns (state, reason, behind, deferred)."""
+    safe fast-forward runs through `_run_fix`. Returns (state, reason, behind,
+    deferred)."""
     prev = prev or {}
     v = cf.ff_verdict(path, remote)
     if v.action == "ff":
-        if dry_run:
-            return "lagging", "would fast-forward (dry-run)", v.behind, False
-        pending = prev.get("ff_pending")
-        if _pending_live(pending, entry["checked"]):
-            entry["ff_pending"] = pending    # never a second launch
-            return ("lagging", "fast-forward running in unit %s" % pending.get("unit"),
-                    v.behind, False)
-        launched, why = _launch_ff_unit(path, remote, v.branch, home, unit_run)
-        if launched or why == user_unit.TIMEOUT_WHY:
-            # a client timeout is UNKNOWN (the bus may have started the unit):
-            # never race it with an in-unit merge — wait for its result instead
-            unit = ff_unit_name(path)
-            entry["ff_pending"] = {"unit": unit, "launched": entry["checked"],
-                                   "behind": v.behind}
-            note = {"exists": " (already running)",
-                    user_unit.TIMEOUT_WHY: " (launch unconfirmed: systemd-run client "
-                                           "timed out)"}.get(why, "")
-            return ("lagging", "fast-forward running in unit %s%s" % (unit, note),
-                    v.behind, False)
-        left = budget_left() if budget_left is not None else None
-        if left is not None and left < MERGE_RESERVE_S:
-            entry["deferrals"] = int(prev.get("deferrals") or 0) + 1
-            return ("lagging", "fast-forward deferred (%.0fs of sweep budget "
-                    "left; %s)" % (left, why), v.behind, True)
-        ok = cf.fast_forward(path, v, run_hooks=False)   # unbounded once started
-        if ok:
-            entry["ff"] = {"at": entry["checked"], "commits": v.behind}
-            return ("current", "fast-forwarded %d commit(s) in-unit (%s)" % (v.behind, why),
-                    0, False)
-        return "lagging", "fast-forward failed in-unit (%s)" % why, v.behind, False
+        return _run_fix(path, remote, entry, v, "ff", dry_run, budget_left, prev,
+                        home, unit_run)
     if v.action == "noop" and v.reason == "up-to-date":
         return "current", "up-to-date", 0, False
     if v.action == "noop":
@@ -333,21 +353,45 @@ def _base_branch_result(path, remote, entry, dry_run, budget_left, prev=None,
     return "lagging", v.reason + (" (%s)" % detail if detail else ""), v.behind, False
 
 
-def _work_branch_result(path, branch, remote, base):
-    """A checkout on a WORK branch (or detached): never moved; the rule-file
-    lag against the base is measured. Returns (state, reason, behind)."""
+def _work_branch_result(path, branch, remote, base, entry, dry_run, budget_left,
+                        prev=None, home=None, unit_run=None):
+    """A checkout on a WORK branch (or detached). A clean detached HEAD / fully
+    merged work branch that `cf.reattach_verdict` proves safe is reattached to
+    the base through `_run_fix` (#1176 census items 1+2); anything else is
+    never moved — its rule-file lag against the base is measured, and a
+    refusal is named. Returns (state, reason, behind, deferred)."""
     if not base:
-        return "untracked", "no base branch on %s" % remote, None
+        return "untracked", "no base branch on %s" % remote, None, False
     ref = cf.remote_ref(remote, base)
+    rv = cf.reattach_verdict(path, remote, base, now=entry["checked"])
+    if rv.action == "reattach":
+        return _run_fix(path, remote, entry, rv, "reattach", dry_run, budget_left,
+                        prev or {}, home, unit_run)
     behind = cf.count_behind(path, ref)
     files = rule_lag(path, ref)
     label = "work branch '%s'" % branch if branch else "detached HEAD"
+    why = "" if rv.action != "refuse" else "; not reattached: %s%s" % (
+        rv.reason, " (%s)" % rv.detail if isinstance(rv.detail, str) else "")
     if files is None:
-        return "lagging", label + ": rule-file lag unmeasurable", behind
+        return "lagging", label + ": rule-file lag unmeasurable" + why, behind, False
     if files:
-        return ("lagging", "%s: %d rule file(s) behind %s/%s" % (
-            label, len(files), remote, base), behind)
-    return "current", label + ": rule files current", behind
+        return ("lagging", "%s: %d rule file(s) behind %s/%s%s" % (
+            label, len(files), remote, base, why), behind, False)
+    return "current", label + ": rule files current" + why, behind, False
+
+
+def _notice(entry, path, branch, remote, base):
+    """#1176 census item 3: a lagging checkout that nothing is fixing gets the
+    rule-lag notice (`checkout_notice` types it into the stream's own pane)."""
+    if entry.get("state") != "lagging" or "ff_pending" in entry or not base \
+            or str(entry.get("reason", "")).startswith(
+                ("in-progress", "git-dir-unmeasurable", "would ")) \
+            or "deferred" in str(entry.get("reason", "")):
+        return
+    files = rule_lag(path, cf.remote_ref(remote, base))
+    if files:
+        entry["rule_lag"] = len(files)
+        entry["notice"] = cf.notice_line(branch, len(files), remote, base)
 
 
 def fetch_timeout_for(prev, budget_left, fetch_timeout=FETCH_TIMEOUT_S):
@@ -416,7 +460,8 @@ def _check(c, now, prev, dry_run, used, budget_left, home=None, unit_run=None):
         state, reason, behind, deferred = _base_branch_result(
             path, remote, entry, dry_run, budget_left, prev, home, unit_run)
     else:
-        state, reason, behind = _work_branch_result(path, branch, remote, base)
+        state, reason, behind, deferred = _work_branch_result(
+            path, branch, remote, base, entry, dry_run, budget_left, prev, home, unit_run)
     if frc != 0:
         note = "fetch %s failed (rc %d)" % (remote, frc)
         state, reason = ("lagging", note) if state == "current" else (
@@ -434,6 +479,7 @@ def _check(c, now, prev, dry_run, used, budget_left, home=None, unit_run=None):
             prev.get("checked"), (int, float)) else 0
     if prev.get("ff") and "ff" not in entry:
         entry["ff"] = prev["ff"]
+    _notice(entry, path, entry.get("branch"), remote, base)
     return entry
 
 
@@ -473,17 +519,25 @@ def _apply_result(e, res, unit, now):
         if not isinstance(commits, int) or isinstance(commits, bool):
             commits = e.get("behind")
         e.update(state="current", behind=0)
+        if res.get("mode") == "reattach" and res.get("base"):
+            e.update(branch=res["base"], base=res["base"])
+        done = "reattached to %s, fast-forwarded" % res.get("base") \
+            if res.get("mode") == "reattach" else "fast-forwarded"
+        for k in ("notice", "rule_lag"):
+            e.pop(k, None)
         if commits == 0:   # a no-op run (e.g. a session start merged it first)
             e["reason"] = "%s (unit %s)" % (res.get("reason") or "already up-to-date", unit)
         else:
-            e["reason"] = "fast-forwarded %s commit(s) in unit %s" % (commits, unit)
+            e["reason"] = "%s %s commit(s) in unit %s" % (done, commits, unit)
             fin = res.get("finished")
             e["ff"] = {"at": fin if isinstance(fin, (int, float)) else now,
                        "commits": commits}
         e.pop("since", None)
         e.pop("behind_since", None)
     else:
-        e.update(state="lagging", reason="fast-forward failed: %s" % res.get("reason"))
+        e.update(state="lagging", reason="%s failed: %s" % (
+            "reattach" if res.get("mode") == "reattach" else "fast-forward",
+            res.get("reason")))
         e.setdefault("since", now)
 
 
@@ -537,11 +591,28 @@ def _remove_results(paths):
 
 def run_job(now, *, dry_run=False, budget_left=None, home=None,
             checkouts=None, clock=time.monotonic,
-            fetch_timeout=FETCH_TIMEOUT_S, unit_run=None):
+            fetch_timeout=FETCH_TIMEOUT_S, unit_run=None, state=None, panes=None,
+            run=None, sleep_fn=None, projects_dir=None, handled=None):
     """Collect finished detached merges, then check every DUE checkout
-    (repeatedly-deferred first, then oldest first) within the budget; returns
-    the journal lines. `checkouts` / `home` / `clock` / `unit_run` are test
-    seams."""
+    (repeatedly-deferred first, then oldest first) within the budget, then —
+    when the sweep hands over its `panes` — deliver the rule-lag notices
+    (`checkout_notice`, #1176 census item 3); returns the journal lines.
+    `checkouts` / `home` / `clock` / `unit_run` are test seams."""
+    logs = _run_checks(now, dry_run, budget_left, home, checkouts, clock,
+                       fetch_timeout, unit_run)
+    if panes is not None:
+        from watchdog import checkout_notice
+        logs += checkout_notice.run_job(
+            now, state if isinstance(state, dict) else {}, panes,
+            status=cf.read_status(home) or {}, run=run, sleep_fn=sleep_fn,
+            projects_dir=projects_dir, dry_run=dry_run, handled=handled,
+            budget_left=budget_left)
+    return logs
+
+
+def _run_checks(now, dry_run, budget_left, home, checkouts, clock, fetch_timeout,
+                unit_run):
+    """The checkout pass of `run_job`."""
     logs = []
     if checkouts is None:
         skipped = []
