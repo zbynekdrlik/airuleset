@@ -73,7 +73,7 @@ _NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
 _ALLOWED_KEYS = frozenset({
     "host", "sudo", "sudo_reason", "sudo_commands", "reach", "reach_enforced",
     "reach_reason", "secrets", "webterm_sessions", "system_packages", "repo",
-    "project_dir", "tmux_session", "github_app",
+    "project_dir", "tmux_session", "github_app", "repo_secrets",
 })
 
 # The defaults every declaration inherits. They are the SAFE direction: no
@@ -144,6 +144,7 @@ SERVICE_ACCOUNTS = {
         # #1190: a 1-hour token scoped to this repo, minted on the controller
         # by the newlevel-project-accounts App (cli_project_gh_token).
         "github_app": True,
+        "repo_secrets": ["DENYLIST"],   # CI secrets it may sync (#1199)
         "project_dir": "devel/fohmixer",
         "tmux_session": "fohmixer",
         "webterm_sessions": {

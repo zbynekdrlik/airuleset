@@ -854,14 +854,17 @@ def verify_account(account, *, run=None):
 
 def render_next_steps(spec):
     """The bootstrap's extra printed next step for a ``github_app`` account
-    (``''`` for any other): the #1190/#1199 go-live gate is REQUIRED."""
+    (``''`` for any other): the #1190/#1199 go-live gate is REQUIRED, plus
+    (#1199) how the project session requests a CI secret sync."""
+    import cli_project_ci_sync as ci_sync
     if spec.get("github_app") is not True:
         return ""
     return ('echo "  4. REQUIRED go-live gate (#1190/#1199), on the controller: '
             'python3 ~/devel/airuleset/airuleset.py project-gh-token mint $ACCOUNT '
             '&& python3 ~/devel/airuleset/airuleset.py project-gh-token verify '
             '$ACCOUNT — the account is NOT live until verify prints OK (its repo '
-            'token + airuleset issues write)"\n')
+            'token + airuleset issues write)"\n'
+            + ci_sync.render_next_steps(spec))
 
 
 def is_project_account(user, odoo_streams):
@@ -942,17 +945,24 @@ def maybe_setup_timer():
 # CLI
 # --------------------------------------------------------------------------- #
 def cmd_project_gh_token(args):
-    """``airuleset.py project-gh-token mint <acct>|--all [--dry-run] [--key P]``
-    and ``project-gh-token verify <acct>``."""
+    """``airuleset.py project-gh-token mint <acct>|--all [--dry-run] [--key P]``,
+    ``project-gh-token verify <acct>`` and (#1199) ``project-gh-token
+    sync-secrets <acct>|--all [--dry-run]``. ``mint --all`` (the timer run)
+    also runs the CI secret sync after the mints."""
+    import cli_project_ci_sync as ci_sync
     account = getattr(args, "account", None)
     every = getattr(args, "all", False) is True
     action = getattr(args, "action", None)
+    dry_run = getattr(args, "dry_run", False) is True
     if action == "verify" and account and not every:
         return verify_account(account)
-    if action != "mint" or bool(account) == every:
+    if action not in ("mint", "sync-secrets") or bool(account) == every:
         print("usage: airuleset.py project-gh-token mint <account> | --all "
-              "[--dry-run] [--key PATH] | verify <account>", file=sys.stderr)
+              "[--dry-run] [--key PATH] | verify <account> | sync-secrets "
+              "<account> | --all [--dry-run]", file=sys.stderr)
         return 2
+    if action == "sync-secrets":
+        return ci_sync.cmd_sync(account, every, dry_run)
     targets = github_app_accounts() if every else [account]
     if not targets:
         print("project-gh-token: no project account declares github_app: True")
@@ -960,9 +970,9 @@ def cmd_project_gh_token(args):
     rc = 0
     for acct in targets:
         if mint_account(acct, key_path=getattr(args, "key", None),
-                        dry_run=getattr(args, "dry_run", False) is True) != 0:
+                        dry_run=dry_run) != 0:
             rc = 1
-    return rc
+    return rc | (ci_sync.run_after_mint(dry_run) if every else 0)
 
 
 def register_parser(sub):
@@ -970,7 +980,7 @@ def register_parser(sub):
         "project-gh-token",
         help="#1190: mint a 1-hour GitHub token scoped to a project account's "
              "repo (App newlevel-project-accounts) and deliver it over ssh")
-    p.add_argument("action", choices=["mint", "verify"])
+    p.add_argument("action", choices=["mint", "verify", "sync-secrets"])
     p.add_argument("account", nargs="?", default=None,
                    help="the declared project account (or --all)")
     p.add_argument("--all", action="store_true",
