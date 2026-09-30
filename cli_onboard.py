@@ -602,7 +602,7 @@ def step_foundation_tickets(path, name, host=None, run=None, dry_run=False,
     if stack == "node":
         gaps.append(("version-label", FOUNDATION_VERSION_TITLE,
                      _foundation_version_body(name)))
-    tray = stack == "rust" and _tray.rust_web_tray_gap(path, host=host, run=run)
+    tray = _tray.rust_web_tray_gap(path, host=host, run=run)  # same as --audit
     if tray:
         gaps.append(("tray", FOUNDATION_TRAY_TITLE, _tray.foundation_tray_body(name, tray)))
     if not gaps:

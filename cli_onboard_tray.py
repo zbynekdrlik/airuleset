@@ -10,9 +10,10 @@ step (files the ticket) and from ``audit_project`` (``missing-tray`` drift).
 
 Detection = an HTTP server dependency + web assets, and no tray dependency,
 no tauri tray feature and no ``*-tray`` crate. Manifests read: every
-``Cargo.toml`` within 3 levels (root, workspace members, ``crates/*``, a
-``src-tauri/`` outside the workspace), build output and vendored trees
-skipped. Every read goes through the injected runner (``cli_onboard_exec``) in
+``Cargo.toml`` within 4 levels (root, workspace members, ``crates/*``, a
+``src-tauri/`` outside the workspace), build output, vendored trees, hidden
+dirs, examples/benches/tests/docs skipped; web assets are never looked for in
+``src/`` (``src/web`` is a Rust module). Every read goes through the injected runner (``cli_onboard_exec``) in
 at most two calls, so ``--host <remote>`` checks the remote tree over ssh,
 never the local disk.
 """
@@ -39,13 +40,15 @@ WEB_UI_DEPS = frozenset({"rust-embed", "include-dir", "memory-serve",
                          "leptos", "yew", "dioxus"})
 WEB_ASSET_FILES = ("index.html", "Trunk.toml")
 WEB_ASSET_DIRS = ("web", "static", "frontend", "www", "public", "ui")
-# Build output and vendored trees are never the project's own manifests or
-# web assets.
-_PRUNE_DIRS = ("target", "node_modules", ".git", "vendor")
-# Manifest depth 3 covers <root>/Cargo.toml, <member>/Cargo.toml and
-# crates/<x>/Cargo.toml; asset depth 4 covers crates/<x>/assets/index.html.
-_MANIFEST_DEPTH = "3"
-_ASSET_DEPTH = "4"
+# Never the shipped app: build output, vendored trees, hidden dirs (.git, a
+# stale .claude/worktrees copy), examples/benches/tests and generated docs.
+_PRUNE_DIRS = ("target", "node_modules", "vendor", ".*", "examples",
+               "benches", "tests", "docs")
+# Assets additionally skip Rust source: `src/web`, `src/ui` are modules.
+_ASSET_PRUNE_DIRS = _PRUNE_DIRS + ("src",)
+# Depth 4 covers <root>/Cargo.toml, crates/<x>/Cargo.toml,
+# apps/<x>/src-tauri/Cargo.toml and crates/<x>/assets/index.html.
+_SCAN_DEPTH = "4"
 # ONE runner call prints every manifest as NUL <path> NUL <content>.
 _CAT_WITH_NAMES = 'for f; do printf "\\0%s\\0" "$f"; cat "$f"; done'
 
@@ -63,13 +66,26 @@ def _or_names(names):
     return expr
 
 
-def _pruned_find(path, depth, match):
+def _pruned_find(path, prune, match):
     """find argv over `path` (never the root itself: a checkout named `web`
-    must not match) that skips build output and vendored trees, then applies
-    `match`."""
-    return (["find", str(path), "-mindepth", "1", "-maxdepth", depth,
-             "(", "-type", "d", "(", *_or_names(_PRUNE_DIRS), ")", ")",
+    must not match) that skips the `prune` dirs, then applies `match`."""
+    return (["find", str(path), "-mindepth", "1", "-maxdepth", _SCAN_DEPTH,
+             "(", "-type", "d", "(", *_or_names(prune), ")", ")",
              "-prune", "-o"] + match)
+
+
+def _find_stdout(argv, path, host=None, run=None):
+    """stdout of one tray-check find. find's own rc 1 (a missing or
+    unreadable subdir) still leaves valid output; any other rc (ssh 255, a
+    dead box) is reported LOUDLY on stderr, never read as "not a Rust app"
+    in silence."""
+    r = _exec(argv, host=host, run=run)
+    if r.returncode not in (0, 1):
+        print("onboard-project: warning: tray check could not read %s on %s "
+              "(rc %s: %s)" % (path, host or "this box", r.returncode,
+                               (r.stderr or "").strip()[:200]),
+              file=sys.stderr)
+    return r.stdout or ""
 
 
 def _dep_tables(doc):
@@ -101,14 +117,14 @@ def _deps(doc):
 
 
 def _read_manifests(path, host=None, run=None):
-    """[(manifest_path, parsed_doc)] for every Cargo.toml within 3 levels of
+    """[(manifest_path, parsed_doc)] for every Cargo.toml within 4 levels of
     the project root, read in ONE runner call. A manifest that does not parse
     is reported on stderr and skipped (a broken TOML is the project's own
     build error, never a reason to crash onboarding)."""
-    argv = _pruned_find(path, _MANIFEST_DEPTH,
+    argv = _pruned_find(path, _PRUNE_DIRS,
                         ["-type", "f", "-name", "Cargo.toml", "-exec", "sh",
                          "-c", _CAT_WITH_NAMES, "sh", "{}", "+"])
-    parts = (_exec(argv, host=host, run=run).stdout or "").split("\0")
+    parts = _find_stdout(argv, path, host=host, run=run).split("\0")
     out = []
     for mp, text in zip(parts[1::2], parts[2::2]):
         try:
@@ -123,11 +139,11 @@ def _web_asset_path(path, host=None, run=None):
     """First web-asset file/dir within 4 levels of the project root (covers
     `static/`, `crates/web/index.html`, `crates/x-web/assets/index.html`), or
     None."""
-    argv = _pruned_find(path, _ASSET_DEPTH, [
+    argv = _pruned_find(path, _ASSET_PRUNE_DIRS, [
         "(", "(", "-type", "f", "(", *_or_names(WEB_ASSET_FILES), ")", ")",
         "-o", "(", "-type", "d", "(", *_or_names(WEB_ASSET_DIRS), ")", ")",
         ")", "-print", "-quit"])
-    first = (_exec(argv, host=host, run=run).stdout or "").strip()
+    first = _find_stdout(argv, path, host=host, run=run).strip()
     if not first:
         return None
     try:
