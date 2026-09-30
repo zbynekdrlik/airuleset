@@ -128,19 +128,20 @@ class TestReclaimersHonourTheGrace(_Box):
         self.assertEqual(kept["agent-dg1"]["kind"], "skip")
         self.assertIsNone(waived["agent-dg1"]["reason"], waived)
 
-    def test_worktree_rung_builds_its_gate_with_the_level(self):
-        import cli_worktree_sweep as ws
-        seen = []
-
-        def _rec(**kw):
-            seen.append(kw.get("live_gate"))
-            return []
-
-        with mock.patch.object(ws, "discover_reclaimable_worktrees", side_effect=_rec):
-            dg._plan_worktrees(str(self.home), time.time(), level="critical")
-            dg._plan_worktrees(str(self.home), time.time())
-        self.assertEqual([getattr(x, "disk_level", "MISSING") for x in seen],
-                         ["critical", None])
+    def test_worktree_rung_keeps_then_waives_at_critical(self):
+        """The own-home ``worktree`` rung (fork-no-merge lanes) builds its gate
+        with the drain's level (idle floor lowered so only the gate decides)."""
+        self.lane("agent-wr1")
+        _transcript(self.home, self.repo, "agent-wr1", finished=True, age_s=H)
+        with mock.patch.dict(os.environ, {"AIRULESET_WORKTREE_IDLE_MIN_AGE_S": "0"}):
+            kept = {Path(r["path"]).name: r for r in
+                    dg._plan_worktrees(str(self.home), time.time())}
+            waived = {Path(r["path"]).name: r for r in
+                      dg._plan_worktrees(str(self.home), time.time(), level="critical")}
+        self.assertEqual(kept["agent-wr1"]["reason"], GRACE_REASON)
+        self.assertEqual(kept["agent-wr1"]["kind"], "skip")
+        self.assertIsNone(waived["agent-wr1"]["reason"], waived)
+        self.assertEqual(waived["agent-wr1"]["kind"], "worktree-remove")
 
     def test_install_sweep_discovery_keeps_a_just_finished_lane(self):
         import cli_worktree_sweep as ws
