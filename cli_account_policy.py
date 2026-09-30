@@ -263,14 +263,15 @@ def lan_rules(lan):
              tuple(sorted(e["ports"])), e["reason"].strip()) for e in lan]
 
 
-def validate_github_app(spec):
+def validate_github_app(spec, account=None, declared=()):
     """#1190: ``github_app`` is a bool, and True needs the ``repo`` its
-    controller-minted token is scoped to. #1199: ``repo_secrets`` too."""
+    controller-minted token is scoped to. #1199: ``repo_secrets`` too
+    (``declared`` = every declaration, for the one-repo-one-account check)."""
     if "github_app" in spec and not isinstance(spec["github_app"], bool):
         return ["github_app must be True or False"]
     if spec.get("github_app") and "repo" not in spec:
         return ["github_app: True needs the repo the token is scoped to"]
-    return validate_repo_secrets(spec)
+    return validate_repo_secrets(spec, account, declared)
 
 
 def is_secret_name(name):
@@ -279,11 +280,13 @@ def is_secret_name(name):
             and not name.startswith("GITHUB_"))
 
 
-def validate_repo_secrets(spec):
+def validate_repo_secrets(spec, account=None, declared=()):
     """#1199 follow-up: ``repo_secrets`` is the allow-list of CI secret names
     the controller may set on the account's declared repo from a
     ``secret-sync:<NAME>`` request (``cli_project_ci_sync``). It needs
-    ``github_app: True`` (the account's repo is the request queue)."""
+    ``github_app: True`` (the account's repo is the request queue), and that
+    repo must belong to this account alone: two accounts on one repo would
+    both work its queue, each reading the file from its own home."""
     if "repo_secrets" not in spec:
         return []
     names = spec["repo_secrets"]
@@ -299,4 +302,10 @@ def validate_repo_secrets(spec):
     named = [n for n in names if isinstance(n, str)]
     if len(set(named)) != len(named):
         errs.append("repo_secrets has a duplicate name")
+    repo = str(spec.get("repo", "")).lower()
+    errs += ["repo %s is also declared by %r; a secret-sync request queue needs "
+             "exactly one account" % (spec.get("repo"), other)
+             for other, raw in sorted(dict(declared).items())
+             if other != account and isinstance(raw, dict)
+             and str(raw.get("repo", "")).lower() == repo]
     return errs

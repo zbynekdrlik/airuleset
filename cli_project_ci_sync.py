@@ -29,9 +29,11 @@ This leaf is the controller-side relay, run by the existing
     or gh unreachable, a read whose size does not match the file) is loud,
     rc 1, recorded for ``accounts status``, and leaves the issue OPEN for the
     next run;
-  * the whole sync of one timer run shares ONE deadline (``SYNC_BUDGET_S``),
-    so it cannot push the oneshot unit past its ``TimeoutStartSec``; requests
-    past it are deferred, loudly, to the next run.
+  * the whole sync of one timer run shares ONE deadline (``SYNC_BUDGET_S``
+    after the process start, checked before every label and every request),
+    so it cannot push the oneshot unit past its ``TimeoutStartSec``; the rest
+    is deferred, loudly, to the next run;
+  * an account that declares no ``repo_secrets`` is never polled.
 
 The value never reaches argv, stdout/stderr, a comment, the state file or an
 exception text: it travels only in memory from the ssh stdout to the gh stdin,
@@ -50,22 +52,25 @@ from pathlib import Path
 
 LABEL_PREFIX = "secret-sync:"
 MAX_BYTES = 48 * 1024              # GitHub's limit on one secret value
-LABEL_LIMIT = 100
+LABEL_LIMIT = 1000                 # every label: a repo has few, no fuzzy search
 LIST_LIMIT = 100
 SSH_TIMEOUT_S = 30
 GH_TIMEOUT_S = 30
-# One timer run's whole sync (every account). project-gh-token.service allows
-# 300 s (TimeoutStartSec); the mints take seconds, and one request in flight at
-# the deadline can still take 4 calls x 30 s, so 120 s keeps the unit inside.
-SYNC_BUDGET_S = 120
+# project-gh-token.service allows 300 s (TimeoutStartSec) for the mints AND the
+# sync. The deadline is counted from the process start, and one request in
+# flight when it passes can still take 4 calls x 30 s: 170 + 120 < 300.
+SYNC_BUDGET_S = 170
 # Never a CI secret: ssh/gpg keys, the credential store, Claude's credentials
 # and config (``.claude*`` also covers ``~/.claude.json``), gh and App tokens,
-# git/netrc/cloud credentials. Checked on the requested path AND on the
-# account side after ``realpath``, so a symlink cannot reach them either. An
-# entry ending in ``*`` matches every name with that prefix.
+# git/netrc/cloud/tunnel credentials. Checked on the requested path AND on
+# the account side after ``realpath``, so a symlink cannot reach them either.
+# An entry ending in ``*`` matches every name with that prefix. This is
+# defence in depth against a mistaken request, not a boundary: the account can
+# copy any file it reads, and only its own session or the owner may request.
 PROTECTED = (".ssh", ".gnupg", ".secrets", ".claude*", ".config/gh",
              ".config/gh-app-tokens", ".git-credentials", ".netrc",
-             ".soniox.env", ".aws", ".docker", ".kube")
+             ".soniox.env", ".aws", ".docker", ".kube", ".cloudflared")
+MARKER = "secret-sync: "          # prefixes every account-side message
 
 _FILE_LINE_RE = re.compile(r"^[ \t]*File:[ \t]*(.*?)[ \t]*$", re.M)
 _REPO_LINE_RE = re.compile(r"^[ \t]*Repo:[ \t]*(.*?)[ \t]*$", re.M)
@@ -81,15 +86,15 @@ _READ_TEMPLATE = """\
 set -eu
 n=%(rel)s
 h=$(realpath -e -- "$HOME")
-r=$(realpath -e -- "$h/$n" 2>/dev/null) || { echo "no such file: ~/$n" >&2; exit 4; }
-case "$r" in "$h"/*) ;; *) echo "~/$n resolves outside the account home" >&2; exit 4;; esac
+r=$(realpath -e -- "$h/$n" 2>/dev/null) || { echo "secret-sync: no such file: ~/$n" >&2; exit 4; }
+case "$r" in "$h"/*) ;; *) echo "secret-sync: ~/$n resolves outside the account home" >&2; exit 4;; esac
 case "$r" in
 %(protected)s
 esac
-[ -f "$r" ] || { echo "~/$n is not a regular file" >&2; exit 4; }
+[ -f "$r" ] || { echo "secret-sync: ~/$n is not a regular file" >&2; exit 4; }
 s=$(stat -c %%s -- "$r")
-[ "$s" -gt 0 ] || { echo "~/$n is empty" >&2; exit 5; }
-[ "$s" -le %(max)d ] || { echo "~/$n is larger than %(max)d bytes" >&2; exit 7; }
+[ "$s" -gt 0 ] || { echo "secret-sync: ~/$n is empty" >&2; exit 5; }
+[ "$s" -le %(max)d ] || { echo "secret-sync: ~/$n is larger than %(max)d bytes" >&2; exit 7; }
 printf 'size=%%s\\n' "$s" >&2
 exec cat -- "$r"
 """
@@ -118,10 +123,16 @@ def is_protected(rel):
     return None
 
 
+def _short(text, limit=120):
+    """``text`` bounded for a comment (GitHub rejects a comment over 65 kB)."""
+    text = str(text)
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
 def _normalize_path(raw, account):
     """The HOME-relative path of a ``File:`` value, or Refusal. ``~/x`` and
     ``/home/<account>/x`` are accepted; anything else absolute is not."""
-    path = raw
+    path, raw = raw, _short(raw)
     for prefix in ("~/", "/home/%s/" % account):
         if path.startswith(prefix):
             path = path[len(prefix):]
@@ -145,10 +156,9 @@ def _author_ok(issue, repo):
     spells it) or the repo owner may request a sync."""
     import cli_project_gh_token as pgt
     login = str((issue.get("author") or {}).get("login") or "")
-    bare = login[len("app/"):] if login.startswith("app/") else login
-    bare = bare[:-len("[bot]")] if bare.endswith("[bot]") else bare
+    bots = {"app/%s" % pgt.APP_SLUG, "%s[bot]" % pgt.APP_SLUG}
     owner = repo.split("/", 1)[0]
-    return (bare == pgt.APP_SLUG or login.lower() == owner.lower()), login
+    return login.lower() in bots or login.lower() == owner.lower(), _short(login)
 
 
 def parse_request(issue, account, repo, allowed):
@@ -159,9 +169,9 @@ def parse_request(issue, account, repo, allowed):
         raise Refusal("the request was filed by %r; only the project session "
                       "(the newlevel-project-accounts App) or the repo owner may "
                       "request a sync (author check)" % (login or "unknown",))
-    names = [lb["name"][len(LABEL_PREFIX):] for lb in issue.get("labels") or []
-             if isinstance(lb, dict)
-             and str(lb.get("name", "")).startswith(LABEL_PREFIX)]
+    names = [str(lb["name"])[len(LABEL_PREFIX):]
+             for lb in issue.get("labels") or [] if isinstance(lb, dict)
+             and str(lb.get("name", "")).lower().startswith(LABEL_PREFIX)]
     if len(names) != 1:
         raise Refusal("the issue carries %d secret-sync labels; exactly one "
                       "secret-sync:<NAME> per request" % len(names))
@@ -177,7 +187,8 @@ def parse_request(issue, account, repo, allowed):
     for other in _REPO_LINE_RE.findall(body):
         if other.lower() != repo.lower():
             raise Refusal("the request names the repo %s, but %s may set "
-                          "secrets only on its declared %s" % (other, account, repo))
+                          "secrets only on its declared %s"
+                          % (_short(other), account, repo))
     files = _FILE_LINE_RE.findall(body)
     if len(files) != 1:
         raise Refusal("the body has %d File: lines; it needs exactly one "
@@ -189,14 +200,17 @@ def parse_request(issue, account, repo, allowed):
 # the relay (owner gh + the account's ssh identity)
 # --------------------------------------------------------------------------- #
 def _scrub(text, value):
-    """``text`` with every line of ``value`` replaced, first line, bounded."""
+    """One line of ``text`` (stderr) with every line of ``value`` redacted,
+    bounded: the last account-side ``secret-sync:`` line, else the last line,
+    so login-script or ssh warnings never stand in for the real reason."""
     text = text.decode("utf-8", "replace") if isinstance(text, bytes) else (text or "")
     secret = value.decode("utf-8", "replace") if isinstance(value, bytes) else value
     for ln in sorted((secret or "").splitlines(), key=len, reverse=True):
         if len(ln.strip()) >= 3:
             text = text.replace(ln, "<redacted>")
-    first = text.strip().splitlines()
-    return first[0][:200] if first else ""
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    marked = [ln[len(MARKER):] for ln in lines if ln.startswith(MARKER)]
+    return (marked or lines or [""])[-1][:200]
 
 
 def _gh_json(argv, run, what):
@@ -214,16 +228,20 @@ def _gh_json(argv, run, what):
     return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
 
 
-def list_requests(repo, run):
-    """The open issues of ``repo`` that carry a ``secret-sync:`` label, found
-    label by label on the server (no --limit over all open issues can hide
-    one), each issue once."""
-    labels = _gh_json(["gh", "label", "list", "-R", repo, "--search",
-                       LABEL_PREFIX, "--limit", str(LABEL_LIMIT), "--json", "name"],
+def list_requests(repo, run, over_budget=None):
+    """The open issues of ``repo`` that carry a ``secret-sync:`` label
+    (any case), found label by label on the server (no --limit over all open
+    issues can hide one), each issue once. Every label is listed and matched
+    here: ``gh label list --search`` is a fuzzy best-match search.
+    ``over_budget(what)`` is asked before each label's listing."""
+    labels = _gh_json(["gh", "label", "list", "-R", repo, "--limit",
+                       str(LABEL_LIMIT), "--json", "name"],
                       run, "gh label list -R %s" % repo)
     found, seen = [], set()
     for label in sorted({str(lb.get("name", "")) for lb in labels}):
-        if not label.startswith(LABEL_PREFIX):
+        if not label.lower().startswith(LABEL_PREFIX):
+            continue
+        if over_budget and over_budget("the label %s" % label):
             continue
         for issue in _gh_json(["gh", "issue", "list", "-R", repo, "--state", "open",
                                "--label", label, "--limit", str(LIST_LIMIT),
@@ -242,8 +260,8 @@ def render_read_command(rel):
     arms = []
     for p in PROTECTED:
         pat = ('"$h"/%s' % p) if p.endswith("*") else ('"$h/%s"|"$h/%s"/*' % (p, p))
-        arms.append('  %s) echo "~/$n resolves into the protected ~/%s" >&2; '
-                    'exit 6;;' % (pat, p))
+        arms.append('  %s) echo "secret-sync: ~/$n resolves into the protected '
+                    '~/%s" >&2; exit 6;;' % (pat, p))
     return _READ_TEMPLATE % {"rel": shlex.quote(rel), "protected": "\n".join(arms),
                              "max": MAX_BYTES}
 
@@ -274,11 +292,7 @@ def read_account_file(remote, rel, run):
         raise SyncError("the ssh read of ~/%s returned %d bytes, but the file "
                         "size is %s (a login script printing to stdout?)"
                         % (rel, len(value), sizes[-1].decode() if sizes else "?"))
-    if not value:
-        raise Refusal("~/%s is empty" % rel)
-    if len(value) > MAX_BYTES:
-        raise Refusal("~/%s is larger than %d bytes" % (rel, MAX_BYTES))
-    return value
+    return value                  # 0 < size <= MAX_BYTES, proven account-side
 
 
 def set_secret(repo, name, value, run):
@@ -382,13 +396,22 @@ def _record(account, record, directory):
               % (account, type(e).__name__), file=sys.stderr)
 
 
-def status_line(account, directory=None):
-    """``secret-sync: never run | OK <at> — … | FAILED <at> — <error>``."""
+def _read_record(account, directory):
     try:
         st = json.loads(_state_path(account, directory).read_text())
     except (OSError, ValueError):
+        return None
+    return st if isinstance(st, dict) else None
+
+
+def status_line(account, directory=None):
+    """``secret-sync: never run | OK <at> — … | FAILED <at> — <error>``."""
+    st = _read_record(account, directory)
+    if st is None:
         return "secret-sync: never run (controller state)"
-    done = "set %s" % (", ".join(st.get("set") or ()) or "nothing")
+    last = st.get("last_set") if isinstance(st.get("last_set"), dict) else {}
+    done = ("last set %s" % ", ".join("%s at %s" % kv for kv in sorted(last.items()))
+            if last else "nothing set yet")
     extra = "; %d refused" % st["refused"] if st.get("refused") else ""
     if st.get("ok"):
         return "secret-sync: OK %s — %s%s" % (st.get("at", "?"), done, extra)
@@ -421,6 +444,10 @@ def sync_account(account, *, run=None, now=None, dry_run=False, state_dir=None,
               % account, file=sys.stderr)
         return 1
     repo, allowed = spec["repo"], list(spec.get("repo_secrets") or ())
+    if not allowed:
+        print("project-gh-token secret-sync: %s declares no repo_secrets; "
+              "nothing to sync" % account)
+        return 0
     outcomes, errors = [], []
 
     def over_budget(what):
@@ -435,7 +462,7 @@ def sync_account(account, *, run=None, now=None, dry_run=False, state_dir=None,
 
     if not over_budget("the whole account"):
         try:
-            requests = list_requests(repo, run)
+            requests = list_requests(repo, run, over_budget)
         except SyncError as e:
             print("project-gh-token secret-sync: %s: FAILED — %s" % (account, e),
                   file=sys.stderr)
@@ -448,23 +475,23 @@ def sync_account(account, *, run=None, now=None, dry_run=False, state_dir=None,
             if rc:
                 errors.append(outcome[len("failed:"):])
     if not dry_run:
+        prev = _read_record(account, state_dir) or {}
+        last = dict(prev["last_set"]) if isinstance(prev.get("last_set"), dict) else {}
+        last.update({o[4:]: _iso(now) for o in outcomes if o.startswith("set:")})
         _record(account, {
-            "ok": not errors, "at": _iso(now), "repo": repo,
-            "set": [o[4:] for o in outcomes if o.startswith("set:")],
+            "ok": not errors, "at": _iso(now), "repo": repo, "last_set": last,
             "refused": outcomes.count("refused"),
             "error": errors[0] if errors else ""}, state_dir)
     return 1 if errors else 0
 
 
-def sync_all(*, run=None, now=None, dry_run=False, clock=time.monotonic):
+def sync_all(*, run=None, now=None, dry_run=False, clock=time.monotonic,
+             started=None):
     """``sync_account`` for every ``github_app`` account under ONE shared
-    deadline (one failure never skips the rest)."""
+    deadline, ``SYNC_BUDGET_S`` after ``started`` (the process start; default
+    now). One failure never skips the rest."""
     import cli_project_gh_token as pgt
-    if run is None:
-        from watchdog.disk_guard_escalation import running_under_pytest
-        if running_under_pytest():
-            return 0
-    deadline = clock() + SYNC_BUDGET_S
+    deadline = (clock() if started is None else started) + SYNC_BUDGET_S
     rc = 0
     for account in pgt.github_app_accounts():
         rc |= sync_account(account, run=run, now=now, dry_run=dry_run,
@@ -478,11 +505,11 @@ def cmd_sync(account, every, dry_run):
             else sync_account(account, dry_run=dry_run))
 
 
-def run_after_mint(dry_run):
+def run_after_mint(dry_run, started=None):
     """The sync of the ``mint --all`` timer run, after the mints: loud on any
     failure (rc 1), and it never raises, so the mints are never affected."""
     try:
-        return sync_all(dry_run=dry_run)
+        return sync_all(dry_run=dry_run, started=started)
     except Exception as e:  # noqa: BLE001 — the mints already landed
         print("project-gh-token: secret-sync FAILED — unexpected %s (the mints "
               "are unaffected)" % type(e).__name__, file=sys.stderr)

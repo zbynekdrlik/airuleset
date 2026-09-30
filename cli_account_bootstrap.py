@@ -319,7 +319,7 @@ def validate_account(account, raw):
                     % (spec["project_dir"],))
     if "repo" in spec and "project_dir" not in spec:
         errs.append("repo declared without project_dir")
-    errs += policy.validate_github_app(spec)
+    errs += policy.validate_github_app(spec, account, SERVICE_ACCOUNTS)
     if "tmux_session" in spec and not _SESSION_RE.fullmatch(str(spec["tmux_session"])):
         errs.append("tmux_session %r is not a plain name" % (spec["tmux_session"],))
     elif "tmux_session" in spec and isinstance(spec["webterm_sessions"], dict):

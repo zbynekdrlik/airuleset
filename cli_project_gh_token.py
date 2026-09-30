@@ -950,6 +950,7 @@ def cmd_project_gh_token(args):
     sync-secrets <acct>|--all [--dry-run]``. ``mint --all`` (the timer run)
     also runs the CI secret sync after the mints."""
     import cli_project_ci_sync as ci_sync
+    started = time.monotonic()      # the secret sync's deadline is anchored here
     account = getattr(args, "account", None)
     every = getattr(args, "all", False) is True
     action = getattr(args, "action", None)
@@ -972,7 +973,7 @@ def cmd_project_gh_token(args):
         if mint_account(acct, key_path=getattr(args, "key", None),
                         dry_run=dry_run) != 0:
             rc = 1
-    return rc | (ci_sync.run_after_mint(dry_run) if every else 0)
+    return rc | (ci_sync.run_after_mint(dry_run, started) if every else 0)
 
 
 def register_parser(sub):
