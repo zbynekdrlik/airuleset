@@ -11,7 +11,8 @@ The gate (check (e)): a worktree whose basename matches a fresh unfinished
 subagent transcript (live / wedged / unreadable / a text tail with no terminal
 stop), or that a live child's meta names, is kept; when the evidence cannot be
 read for a repo, its ``agent-*`` worktrees are kept for the pass. A lane whose
-transcript ends in a terminal stop, or a stale one, stays reclaimable. The same gate covers the
+transcript ends in a terminal stop more than 6 h ago (#1195 resume grace), or a
+stale unfinished one, stays reclaimable. The same gate covers the
 sibling reclaimers: ``cli_worktree_sweep.discover_stale_worktrees`` (feeds
 ``sweep_stale_worktrees``), ``cli_worktree_sweep.discover_reclaimable_worktrees``
 (the disk-guard ``worktree`` rung) and ``lane_reconcile.prune_finished_worktrees``.
@@ -36,6 +37,9 @@ sys.path.insert(0, str(REPO))
 import watchdog.transcripts as T  # noqa: E402
 
 LIVE_REASON = "live lane (fresh subagent transcript) — kept"
+# #1195: a finished lane is kept 6 h for a SendMessage resume; past that it is
+# reclaimable (the grace itself is covered by test_lane_resume_grace_1195.py)
+_PAST_GRACE = 6 * 3600 + 60
 
 _ENV = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
         "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t",
@@ -174,7 +178,7 @@ class TestStaleAgentWorktreeRung(_Box):
 
     def test_finished_lane_is_reclaimed(self):
         self.lane("agent-done1")
-        _transcript(self.home, self.repo, "agent-done1", finished=True)
+        _transcript(self.home, self.repo, "agent-done1", finished=True, age_s=_PAST_GRACE)
         row = self._rows()["agent-done1"]
         self.assertIsNone(row["reason"], row)
         self.assertEqual(row["kind"], "worktree-remove")
@@ -195,7 +199,7 @@ class TestStaleAgentWorktreeRung(_Box):
         self.lane("agent-live2")
         self.lane("agent-done2")
         _transcript(self.home, self.repo, "agent-live2")
-        _transcript(self.home, self.repo, "agent-done2", finished=True)
+        _transcript(self.home, self.repo, "agent-done2", finished=True, age_s=_PAST_GRACE)
         rows = self._rows()
         self.assertEqual(rows["agent-live2"]["reason"], LIVE_REASON)
         self.assertIsNone(rows["agent-done2"]["reason"])
@@ -276,7 +280,7 @@ class TestStaleAgentWorktreeRung(_Box):
         _transcript(self.home, self.repo, "agent-cache3")
         self.assertEqual(self._rows(cache_path=cache)["agent-cache3"]["reason"],
                          LIVE_REASON)
-        _transcript(self.home, self.repo, "agent-cache3", finished=True)
+        _transcript(self.home, self.repo, "agent-cache3", finished=True, age_s=_PAST_GRACE)
         row = self._rows(cache_path=cache)["agent-cache3"]
         self.assertIsNone(row["reason"], row)
         self.assertEqual(row["kind"], "worktree-remove")
@@ -319,7 +323,7 @@ class TestWorktreeSweepDiscovery(_Box):
 
     def test_finished_lane_stays_a_candidate(self):
         self.lane("agent-sw2")
-        _transcript(self.home, self.repo, "agent-sw2", finished=True)
+        _transcript(self.home, self.repo, "agent-sw2", finished=True, age_s=_PAST_GRACE)
         self.assertIsNone(self._rows()["agent-sw2"]["reason"])
 
 
@@ -348,7 +352,7 @@ class TestReclaimableWorktreeDiscovery(_Box):
 
     def test_finished_lane_stays_reclaimable(self):
         self.lane("agent-rc2")
-        _transcript(self.home, self.repo, "agent-rc2", finished=True)
+        _transcript(self.home, self.repo, "agent-rc2", finished=True, age_s=_PAST_GRACE)
         row = self._rows()["agent-rc2"]
         self.assertIsNone(row["reason"], row)
 
@@ -378,7 +382,7 @@ class TestPruneFinishedWorktrees(_Box):
 
     def test_finished_merged_lane_is_pruned(self):
         wt = self.lane("agent-pr2")
-        _transcript(self.home, self.repo, "agent-pr2", finished=True)
+        _transcript(self.home, self.repo, "agent-pr2", finished=True, age_s=_PAST_GRACE)
         logs = self._prune()
         self.assertFalse(wt.exists(), "a finished merged lane is pruned: %s" % logs)
 

@@ -399,7 +399,7 @@ def test_planner_passes_the_guard_dir_cache_only_when_asked(tmp_path, monkeypatc
 def test_default_planners_wire_the_cache_into_the_rung(tmp_path, monkeypatch):
     seen = []
     monkeypatch.setattr(dg, "_plan_stale_agent_worktrees",
-                        lambda h, n, wt_cache=False: seen.append(wt_cache) or [])
+                        lambda h, n, wt_cache=False, **_kw: seen.append(wt_cache) or [])
     for flag in (False, True):
         planners = dict(dg._default_planners(str(tmp_path), NOW, wt_cache=flag))
         planners["stale-agent-worktree"]()

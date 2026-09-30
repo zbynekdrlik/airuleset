@@ -128,9 +128,6 @@ SUDO_CLASSES = frozenset({"apt-cache", "rotated-log", "runner-update", "runner-c
                           # #862 — gh-runner home is a FOREIGN user; the delete of a
                           # superseded version dir goes through `sudo -n rm`.
                           "runner-superseded",
-                          # #906 — cross-user worktrees need `sudo -u <owner>` for
-                          # git operations and removal.
-                          "home-worktree",
                           # #920 — runner _diag logs are under gh-runner's home
                           "runner-diag"})
 
@@ -207,7 +204,6 @@ CLAUDE_METADATA_MIN_AGE_DAYS = 7
 
 # #906 — cross-user stale worktrees under /home/*/devel/**/.claude/worktrees/
 HOME_WORKTREE_GLOB = "/home/*"
-HOME_WORKTREE_MIN_AGE_S = 24 * 3600       # mtime > 24h (protects fresh lanes)
 
 # #920 — test runner /tmp leftovers (jest, pytest, generic tmp* dirs)
 # #925 — extended with npmcache-* and tmp* (observed litter shapes on subdev)
@@ -302,6 +298,21 @@ def _pct(used, denom):
     if denom <= 0:
         return 0
     return int(math.ceil(100.0 * used / denom))
+
+
+def _lane_grace_level(status, q, statvfs_fn=None):
+    """#1195: the disk level the worktree rungs hand to the live-lane gate
+    (``critical`` waives the finished-lane resume grace). Critical when the
+    worst mount is at the #968 effective critical threshold (85 % on a small
+    root fs), or when this account's quota is at ``CRITICAL_PCT`` — the quota
+    drain threshold, so any quota drain waives the grace (a nearly full hard
+    limit is low disk for this account). Else the fs level."""
+    from watchdog.disk_guard_worktrees import effective_critical_pct
+    if q.pressure and isinstance(q.pct, (int, float)) and q.pct >= CRITICAL_PCT:
+        return "critical"
+    if (status.get("worst_pct") or 0) >= effective_critical_pct(statvfs_fn):
+        return "critical"
+    return status.get("level")
 
 
 def level_for(pct):
@@ -1710,253 +1721,64 @@ def discover_stale_claude_metadata(home=None, now=None,
 
 
 # --------------------------------------------------------------------------- #
-# #906 — cross-user home worktree discovery (top-consumers + drain rung)
+# #906 — cross-user home worktrees: a REPORT-ONLY rung since #1195
 # --------------------------------------------------------------------------- #
-def _default_proc_cwds():
-    """Scan ``/proc/*/cwd`` for ALL processes on the box (#906).
-
-    Returns ``(cwds, opaque_uids)`` where ``cwds`` is the set of resolved
-    cwd paths (same-uid only — /proc/<pid>/cwd is owner-readable), and
-    ``opaque_uids`` is the set of UIDs whose cwd readlink returned EACCES
-    (foreign user, kernel thread). The CALLER uses opaque_uids to fail-safe
-    KEEP a worktree whose owner has ANY opaque process (#906 R2 fix).
-
-    Best-effort: a /proc scan error returns ``(set(), set())`` — the caller
-    treats an empty opaque set as "no evidence of liveness" (fail-safe KEEP
-    would require opaque_uids to be non-empty for a given owner)."""
-    cwds = set()
-    opaque_uids = set()
-    proc = Path("/proc")
-    try:
-        for entry in proc.iterdir():
-            if not entry.name.isdigit():
-                continue
-            try:
-                cwd = os.readlink(str(entry / "cwd"))
-                cwds.add(cwd)
-            except PermissionError:
-                # Foreign-user proc: we know a process EXISTS but can't read
-                # its cwd. Record the proc's owner UID so the caller can
-                # fail-safe KEEP worktrees owned by that user.
-                try:
-                    uid = os.stat(str(entry)).st_uid
-                    opaque_uids.add(uid)
-                except OSError:
-                    pass  # airuleset:script-ok zombie/gone proc between readlink and stat
-            except (OSError, ValueError):
-                # Kernel thread, zombie, gone-between-readdir-and-readlink —
-                # not a foreign-user proc, no UID to record.
-                continue
-    except OSError as e:
-        _dbg("proc cwd scan failed: %r" % e)
-    return cwds, opaque_uids
+_HOME_REPO_GLOBS = ("devel/*/.claude/worktrees/*", "devel/*/*/.claude/worktrees/*")
 
 
-def _find_worktree_dirs(home_glob=HOME_WORKTREE_GLOB, listdir_fn=None,
-                        exclude_own_user=True):
-    """Enumerate ``/home/*/devel/**/.claude/worktrees/*`` — every worktree
-    directory across all home dirs EXCEPT the calling user's own (R3: the
-    existing ``worktree`` rung handles own-home with STRONGER guards).
-    Returns ``[(wt_path, owner, repo_path)]`` where ``owner`` is the
-    username (the first path segment under the home glob), and
-    ``repo_path`` is the repo root (the parent of ``.claude/``).
-    ``listdir_fn`` is injectable for testing (default: real glob + os.walk).
-    ``exclude_own_user`` (default True) skips homes matching the calling
-    user's username (#906 R3 fix)."""
+def _find_worktree_dirs(home_glob=HOME_WORKTREE_GLOB, listdir_fn=None):
+    """``[(wt_path, owner, repo_path)]`` for every worktree of ANOTHER account
+    (the calling user's own home is skipped — its own rungs handle it behind
+    the live-lane gate). #1195 review: two shallow globs per home
+    (:data:`_HOME_REPO_GLOBS`, a repo at ``devel/<r>`` or ``devel/<org>/<r>``),
+    never an unbounded walk of another account's tree. ``owner`` is the home
+    dir's basename, ``repo_path`` the parent of ``.claude/``. ``listdir_fn``
+    replaces the home glob in tests."""
     import glob as _glob
     import pwd
-    results = []
-    own_user = None
-    if exclude_own_user:
-        try:
-            own_user = pwd.getpwuid(os.geteuid()).pw_name
-        except (KeyError, OSError) as e:
-            _dbg("could not resolve own username: %r — not excluding" % e)
+    try:
+        own_user = pwd.getpwuid(os.geteuid()).pw_name
+    except (KeyError, OSError) as e:
+        own_user = None
+        _dbg("could not resolve own username: %r — not excluding" % e)
     homes = sorted(_glob.glob(home_glob)) if listdir_fn is None else listdir_fn(home_glob)
+    results = []
     for home_dir in homes:
         owner = os.path.basename(home_dir)
         if own_user and owner == own_user:
             continue  # R3: own-home covered by the stronger per-user worktree rung
-        devel = os.path.join(home_dir, "devel")
-        if not os.path.isdir(devel):
-            continue
-        # Walk devel looking for .claude/worktrees dirs
-        try:
-            for dirpath, dirnames, _files in os.walk(devel, followlinks=False):
-                # Prune: don't descend into .claude/worktrees children (they are
-                # the worktree dirs themselves, not repos containing more worktrees).
-                basename = os.path.basename(dirpath)
-                if basename == "worktrees":
-                    parent = os.path.dirname(dirpath)
-                    if os.path.basename(parent) == ".claude":
-                        # This is a .claude/worktrees dir — each child is a worktree
-                        repo_path = os.path.dirname(parent)
-                        try:
-                            children = sorted(os.listdir(dirpath))
-                        except OSError as e:
-                            _dbg("could not list worktrees dir %s: %r" % (dirpath, e))
-                            continue
-                        for child in children:
-                            wt = os.path.join(dirpath, child)
-                            if os.path.isdir(wt) and not os.path.islink(wt):
-                                results.append((wt, owner, repo_path))
-                        dirnames.clear()
-                        continue
-                # Don't descend into node_modules, __pycache__, etc.
-                dirnames[:] = [d for d in dirnames
-                               if d not in ("node_modules", "__pycache__", ".git",
-                                            "target", "dist", "build", ".tox",
-                                            ".mypy_cache", ".ruff_cache")]
-        except OSError as e:
-            _dbg("walk failed for %s: %r" % (devel, e))
-            continue
+        for pattern in _HOME_REPO_GLOBS:
+            for wt in sorted(_glob.glob(os.path.join(home_dir, pattern))):
+                if os.path.isdir(wt) and not os.path.islink(wt):
+                    results.append((wt, owner, os.path.dirname(os.path.dirname(
+                        os.path.dirname(wt)))))
     return results
 
 
-def discover_stale_home_worktrees(now=None, home_glob=HOME_WORKTREE_GLOB,
-                                  proc_cwd_fn=None, git_run_fn=None,
-                                  dir_size_fn=None, listdir_fn=None,
-                                  min_age_s=HOME_WORKTREE_MIN_AGE_S):
-    """Cross-user stale worktree discovery for the drain rung (#906).
-
-    Enumerates ``/home/*/devel/**/.claude/worktrees/*`` with the EXACT verified
-    #905 mechanics:
-    - SKIP if any process cwd is inside the worktree (via /proc/*/cwd)
-    - SKIP if ``git status --porcelain`` non-empty (dirty = potential work),
-      run as the OWNING user via ``sudo -u <owner>``
-    - Age guard: worktree dir mtime > ``min_age_s`` (default 24h)
-    - Returns rows ``{cls, path, bytes, kind, reason, owner, repo}``
-
-    All seams injectable for hermetic testing. NEVER runs real sudo/git in tests.
-    """
-    now = time.time() if now is None else now
-    proc_result = (proc_cwd_fn or _default_proc_cwds)()
-    # Support both old (set) and new (set, set) return shapes for the seam
-    if isinstance(proc_result, tuple) and len(proc_result) == 2:
-        proc_cwds, opaque_uids = proc_result
-    else:
-        proc_cwds = proc_result if isinstance(proc_result, set) else set()
-        opaque_uids = set()
-    wt_dirs = _find_worktree_dirs(home_glob=home_glob, listdir_fn=listdir_fn)
-    out = []
-    for wt_path, owner, repo_path in wt_dirs:
-        row = {"cls": "home-worktree", "path": wt_path, "owner": owner,
-               "repo": repo_path}
-        # 1. Check if it looks like a worktree (has .git file/dir)
-        git_marker = os.path.join(wt_path, ".git")
-        if not os.path.exists(git_marker):
-            row["bytes"] = 0
-            row["kind"] = "skip"
-            row["reason"] = "no .git marker — not a valid worktree"
-            out.append(row)
-            continue
-        # R2 fix: check if the owner has ANY opaque (unreadable) process.
-        # If so, we cannot prove the worktree is not in use → fail-safe KEEP.
-        try:
-            import pwd as _pwd
-            owner_uid = _pwd.getpwnam(owner).pw_uid
-        except (KeyError, OSError):
-            owner_uid = None
-        if owner_uid is not None and owner_uid in opaque_uids:
-            row["bytes"] = 0
-            row["kind"] = "skip"
-            row["reason"] = ("owner %s has opaque /proc entries — "
-                             "liveness undeterminable, kept (fail-safe)" % owner)
-            out.append(row)
-            continue
-        # 2. Check active process cwd (same-uid visible cwds)
-        is_active = any(
-            cwd == wt_path or cwd.startswith(wt_path + "/")
-            for cwd in proc_cwds
-        )
-        if is_active:
-            row["bytes"] = 0
-            row["kind"] = "skip"
-            row["reason"] = "active process cwd inside worktree — kept"
-            out.append(row)
-            continue
-        # 3. Age guard
-        try:
-            mtime = os.stat(wt_path).st_mtime
-        except OSError as e:
-            row["bytes"] = 0
-            row["kind"] = "skip"
-            row["reason"] = "could not stat: %s" % e
-            out.append(row)
-            continue
-        age = now - mtime
-        if age < min_age_s:
-            row["bytes"] = 0
-            row["kind"] = "skip"
-            row["reason"] = "too recent (%.1fh < %.0fh)" % (age / 3600, min_age_s / 3600)
-            out.append(row)
-            continue
-        # 4. Check dirty (git status --porcelain, as owning user)
-        if git_run_fn is not None:
-            porcelain = git_run_fn(
-                ["sudo", "-u", owner, "git", "-C", wt_path, "status", "--porcelain"],
-                timeout=30)
-        else:
-            try:
-                r = subprocess.run(
-                    ["sudo", "-n", "-u", owner, "git", "-C", wt_path,
-                     "status", "--porcelain"],
-                    capture_output=True, text=True, timeout=30)
-                porcelain = r.stdout if r.returncode == 0 else None
-            except Exception as e:
-                _dbg("home-worktree porcelain failed for %s: %r" % (wt_path, e))
-                porcelain = None
-        if porcelain is None:
-            row["bytes"] = 0
-            row["kind"] = "skip"
-            row["reason"] = "could not read git status — kept (fail-safe)"
-            out.append(row)
-            continue
-        if porcelain.strip():
-            row["bytes"] = 0
-            row["kind"] = "skip"
-            row["reason"] = "dirty worktree — kept"
-            out.append(row)
-            continue
-        # 5. Reclaimable — compute size
-        if dir_size_fn is not None:
-            size = dir_size_fn(wt_path)
-        else:
-            size = _safe_dir_size(wt_path)
-        row["bytes"] = size
-        row["kind"] = "home-worktree-remove"
-        row["reason"] = None
-        out.append(row)
-    return out
+FOREIGN_WORKTREE_REPORT = ("%d worktree(s) of another account — report only; that "
+                           "account's own disk-guard reclaims them behind the live-lane "
+                           "gate (#1195)")
 
 
-def discover_home_worktree_consumers(home_glob=HOME_WORKTREE_GLOB,
-                                     listdir_fn=None, dir_size_fn=None):
-    """Top-consumers report: sizes of worktree dirs under ``/home/*/devel/``
-    (#906 fix 1). Returns action-shaped rows ``{cls, path, bytes, kind, reason}``
-    for ``_top_consumers_by_path``. No sudo needed — worktree dirs are typically
-    world-readable (only git status needs sudo). No liveness/age check here —
-    just sizes, so the report shows WHERE disk is consumed regardless of
-    reclaimability.
-
-    ``kind`` is ``home-worktree-remove`` (not ``report``) so that
-    ``_top_consumers_by_path`` includes these rows (it filters out ``skip``
-    and ``report`` kinds — Y1 fix). The rows are never EXECUTED by the report
-    path, only by the drain ladder's executor.
-    """
-    wt_dirs = _find_worktree_dirs(home_glob=home_glob, listdir_fn=listdir_fn,
-                                  exclude_own_user=False)  # report ALL users' sizes
-    out = []
-    for wt_path, _owner, _repo in wt_dirs:
-        if dir_size_fn is not None:
-            size = dir_size_fn(wt_path)
-        else:
-            size = _safe_dir_size(wt_path)
-        # Only report non-trivial dirs (> 1 MB)
-        if size > 1_000_000:
-            out.append({"cls": "home-worktree", "path": wt_path, "bytes": size,
-                        "kind": "home-worktree-remove", "reason": None})
-    return out
+def discover_stale_home_worktrees(now=None, home_glob=None, listdir_fn=None):
+    """Cross-user worktree rung (#906), REPORT-ONLY since #1195 item 2 (owner
+    30.9.): ONE ``kind: "report"`` row per foreign OWNER that has
+    ``/home/<owner>/devel/**/.claude/worktrees/*`` (the count in its reason),
+    never a delete. The #906 removal ran with no live-lane evidence (its only
+    guard, an unreadable foreign ``/proc``, is gone under ``hidepid=2``), and
+    each account's own disk-guard reclaims its own worktrees behind
+    ``cli_lane_live_gate``. No sudo, no VCS call, no size walk and no
+    ``/proc`` probe on a foreign home. ``now`` is kept for the planner
+    signature; ``home_glob`` defaults to :data:`HOME_WORKTREE_GLOB` at call time."""
+    per_owner: dict = {}
+    for wt, owner, repo in _find_worktree_dirs(home_glob=home_glob or HOME_WORKTREE_GLOB,
+                                               listdir_fn=listdir_fn):
+        per_owner.setdefault(owner, []).append((wt, repo))
+    return [{"cls": "home-worktree", "owner": owner, "bytes": 0, "kind": "report",
+             "path": os.path.commonpath([wt for wt, _r in wts]),
+             "repo": os.path.commonpath([r for _w, r in wts]),
+             "reason": FOREIGN_WORKTREE_REPORT % len(wts)}
+            for owner, wts in sorted(per_owner.items())]
 
 
 # --------------------------------------------------------------------------- #
@@ -2445,11 +2267,15 @@ def _plan_scratch(home, now, scratch_rows=None, box_class_fn=None):
     return actions
 
 
-def _plan_worktrees(home, now):
+def _plan_worktrees(home, now, level=None):
+    """#834/#939 own-home worktree rung. #1195: ``level`` (the drain's disk
+    level) reaches the live-lane gate — ``critical`` waives the resume grace."""
+    from cli_lane_live_gate import LiveLaneGate
     from cli_worktree_sweep import discover_reclaimable_worktrees
     actions = []
     try:
-        rows = discover_reclaimable_worktrees(home=home, now=now) or []
+        gate = LiveLaneGate(home=home, now=now, disk_level=level)
+        rows = discover_reclaimable_worktrees(home=home, now=now, live_gate=gate) or []
     except Exception as e:
         return [{"cls": "worktree", "path": "-", "bytes": 0, "kind": "skip",
                  "reason": "worktree discovery error: %r" % e}]
@@ -2605,9 +2431,9 @@ def _plan_oneoff_venvs(home, now):
 
 
 def _plan_home_worktrees(home, now):
-    """#906 — cross-user stale worktrees under /home/*/devel/. The rows already
-    carry the right shape (cls/path/bytes/kind/reason/owner/repo) so no
-    _norm_action needed — just pass them through."""
+    """#906 — cross-user worktrees under /home/*/devel/, REPORT-ONLY since
+    #1195 (never a delete). The rows already carry the right shape
+    (cls/path/bytes/kind/reason/owner/repo) so no _norm_action needed."""
     try:
         return discover_stale_home_worktrees(now=now)
     except Exception as e:
@@ -2659,16 +2485,17 @@ def _plan_scratch_worktrees(home, now):
             for r in rows]
 
 
-def _plan_stale_agent_worktrees(home, now, wt_cache=False):
+def _plan_stale_agent_worktrees(home, now, wt_cache=False, level=None):
     """#968 — stale agent worktrees (every box class, before journal).
     #1067 1g: ``wt_cache`` (``not dry_run``) = the guard dir's verdict cache;
-    #1195: a real pass also records the per-repo unreadable-liveness streak."""
+    #1195: a real pass also records the per-repo unreadable-liveness streak,
+    and ``level`` (``critical``) waives the finished-lane resume grace."""
     gate = None
     try:
         from cli_lane_live_gate import LiveLaneGate
         from watchdog import disk_guard_worktrees as dgw, disk_guard_wt_cache as wtc
         cache = _guard_dir(home) / wtc.VERDICTS_NAME if wt_cache else None
-        gate = LiveLaneGate(home=home, now=now)
+        gate = LiveLaneGate(home=home, now=now, disk_level=level)
         return dgw.discover_stale_agent_worktrees(home=home, now=now, cache_path=cache,
                                                   live_gate=gate)
     except Exception as e:
@@ -2708,13 +2535,14 @@ def _plan_session_scratch(home, now):
     from watchdog.disk_guard_runner import discover_session_scratch
     return [_norm_action("session-scratch", r, "delete")
             for r in discover_session_scratch(now=now, home=home)]
-def _default_planners(home, now, scratch_rows=None, wt_cache=False):
+def _default_planners(home, now, scratch_rows=None, wt_cache=False, level=None):
     """The auto-drain LADDER, cheapest/safest first, ladder STOPS the moment the
     worst mount is back under target. #854 added the cache-class box-level rungs
     (apt / rotated logs / runner cache / docker / user-cache / stale Claude
     binaries / one-off venvs); the existing own-home rungs stay, and
     transcripts-gzip stays LAST (the most conservative reclaim). Docker + stale
-    runner checkouts are Runner.Worker-gated inside their planners."""
+    runner checkouts are Runner.Worker-gated inside their planners. ``level``
+    (#1195) reaches the two worktree rungs' live-lane gate."""
     return [
         # #920 — cheapest/safest first: test-runner /tmp + runner diag + npm/uv cache
         ("tmp-test", lambda: _plan_tmp_test(home, now)),
@@ -2736,13 +2564,14 @@ def _default_planners(home, now, scratch_rows=None, wt_cache=False):
         ("cli-version", lambda: _plan_cli_versions(home, now)),
         ("user-cache", lambda: _plan_user_cache(home, now)),
         # #968: stale agent worktrees + scratch worktrees BEFORE journal
-        ("stale-agent-worktree", lambda: _plan_stale_agent_worktrees(home, now, wt_cache)),
+        ("stale-agent-worktree",
+         lambda: _plan_stale_agent_worktrees(home, now, wt_cache, level=level)),
         ("scratch-worktree", lambda: _plan_scratch_worktrees(home, now)),
         ("journal", lambda: _plan_journal(home, now)),
         ("docker-image", lambda: _plan_docker(home, now)),
         ("runner-checkout", lambda: _plan_runner_checkouts(home, now)),
         ("home-worktree", lambda: _plan_home_worktrees(home, now)),
-        ("worktree", lambda: _plan_worktrees(home, now)),
+        ("worktree", lambda: _plan_worktrees(home, now, level=level)),
         ("toolchain", lambda: _plan_toolchain(home, now)),
         ("transcript", lambda: _plan_transcripts(home, now)),
     ]
@@ -2812,66 +2641,6 @@ def _remove_worktree_dir(a):
         raise OSError("git worktree remove refused %s: %s" % (path, (r.stderr or "").strip()))
 
 
-def _remove_home_worktree_dir(a, run_fn=None):
-    """#906: cross-user worktree removal via ``sudo -u <owner>``.
-
-    1. TOCTOU re-verify: re-check ``git status --porcelain`` as the owning user
-    2. ``sudo -u <owner> git -C <repo> worktree remove <wt>``
-    3. On failure (e.g. dirty tree raced): re-verify porcelain, then retry with
-       ``--force`` if still clean (loses only ignored/build files; branch commits
-       stay in .git)
-    4. ``sudo -u <owner> git -C <repo> worktree prune`` afterwards
-
-    Raises OSError on failure (the executor logs it as FAIL)."""
-    run_fn = run_fn or subprocess.run
-    repo, path, owner = a.get("repo"), a.get("path"), a.get("owner")
-    if not repo or not owner:
-        raise OSError("home-worktree-remove missing repo/owner for %s" % path)
-    # TOCTOU re-verify: is it still clean?
-    try:
-        r = run_fn(["sudo", "-n", "-u", owner, "git", "-C", path,
-                     "status", "--porcelain"],
-                    capture_output=True, text=True, timeout=30)
-        if r.returncode != 0 or r.stdout is None:
-            raise OSError("home-worktree %s status unreachable at remove time — SKIP" % path)
-        if r.stdout.strip():
-            raise OSError("home-worktree %s no longer clean at remove time — SKIP" % path)
-    except OSError:
-        raise
-    except Exception as e:
-        raise OSError("home-worktree %s status check failed: %r — SKIP" % (path, e))
-    # Remove
-    r = run_fn(["sudo", "-n", "-u", owner, "git", "-C", repo,
-                 "worktree", "remove", "--", path],
-                capture_output=True, text=True, timeout=120)
-    if r.returncode != 0:
-        # Re-verify porcelain before --force
-        try:
-            r2 = run_fn(["sudo", "-n", "-u", owner, "git", "-C", path,
-                          "status", "--porcelain"],
-                         capture_output=True, text=True, timeout=30)
-            if r2.returncode != 0 or (r2.stdout or "").strip():
-                raise OSError("home-worktree remove refused %s and re-verify dirty — SKIP"
-                              % path)
-        except OSError:
-            raise
-        except Exception as e:
-            raise OSError("home-worktree %s re-verify failed: %r — SKIP" % (path, e))
-        # Force remove (only ignored/build files lost; branch commits in .git)
-        r3 = run_fn(["sudo", "-n", "-u", owner, "git", "-C", repo,
-                      "worktree", "remove", "--force", "--", path],
-                     capture_output=True, text=True, timeout=120)
-        if r3.returncode != 0:
-            raise OSError("home-worktree --force remove refused %s: %s"
-                          % (path, (r3.stderr or "").strip()))
-    # Prune dangling entries
-    try:
-        run_fn(["sudo", "-n", "-u", owner, "git", "-C", repo, "worktree", "prune"],
-               capture_output=True, text=True, timeout=60)
-    except Exception as e:
-        _dbg("home-worktree prune failed for %s: %r" % (repo, e))
-
-
 def _sudo_available(probe_fn=None):
     """True iff ``sudo -n true`` succeeds (NOPASSWD sudo present — gk `gatekeeper`,
     dev1/dev2 `newlevel`). Probed ONCE per drain and cached by the caller. Any
@@ -2916,9 +2685,10 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
         _remove_worktree_dir(a)
         return nbytes
     if kind == "home-worktree-remove":
-        # #906: cross-user worktree removal via `sudo -u <owner>`.
-        _remove_home_worktree_dir(a, run_fn=run_fn)
-        return nbytes
+        # #1195 item 2: never remove another account's worktree — its own
+        # disk-guard does, behind the live-lane gate. The rung only reports.
+        raise OSError("home-worktree-remove refused for %s — cross-user worktree "
+                      "removal is disabled (#1195)" % path)
     if kind == "scratch-worktree-remove":
         # #965: scratch worktree under /tmp — parse repo from .git file, remove
         # R4 fix: no --force, no rm fallback (git refusal = SKIP, #834 invariant)
@@ -3307,13 +3077,11 @@ def discover_whole_disk_survey(report_read_fn=None, glob_fn=None,
 # escalation (#834 req 1 ≥90 %, machine-channel; box-wide daily dedup)
 # --------------------------------------------------------------------------- #
 def _ranked_consumers(home, now):
-    """Ranked (class, reclaimable-bytes) for this user's own home PLUS
-    cross-user ``home-worktree`` trees (#906: world-readable worktree dirs
-    under ``/home/*/devel/``). Best-effort; a failing planner contributes 0,
-    never kills the list."""
+    """Ranked (class, reclaimable-bytes) for this user's own home (#1195: no
+    foreign account's trees — root reads nothing from other accounts).
+    Best-effort; a failing planner contributes 0, never kills the list."""
     ranked = []
     for label, plan in (("worktree", lambda: _plan_worktrees(home, now)),
-                        ("home-worktree", lambda: _plan_home_worktrees(home, now)),
                         ("transcript", lambda: _plan_transcripts(home, now)),
                         ("toolchain", lambda: _plan_toolchain(home, now)),
                         ("uploads", lambda: _plan_uploads(home, now)),
@@ -3339,7 +3107,6 @@ def _collect_top_consumers(home, now, limit=5, scratch_rows=None):
     #892: accepts pre-computed `scratch_rows` to avoid a doubled du-heavy walk."""
     all_actions = []
     for label, plan in (("worktree", lambda: _plan_worktrees(home, now)),
-                        ("home-worktree", lambda: _plan_home_worktrees(home, now)),
                         ("uploads", lambda: _plan_uploads(home, now)),
                         ("cli-version", lambda: _plan_cli_versions(home, now)),
                         ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
@@ -4056,7 +3823,8 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             planners = planners_fn(home, now)
         else:
             planners = _default_planners(home, now, scratch_rows=scratch_rows,
-                                         wt_cache=not dry_run)
+                                         wt_cache=not dry_run,
+                                         level=_lane_grace_level(status, q, statvfs_fn))
 
         with timer.step("drain", logs):
             logs += _dgq.run_drain_passes(status, home, now, dry_run, planners, planners_fn,

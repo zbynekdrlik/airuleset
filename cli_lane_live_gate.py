@@ -18,6 +18,12 @@ unavailable" as "no live lane".
 :class:`LiveLaneGate` is the per-pass answer a reclaimer asks per worktree.
 It memoizes per repo for ONE pass only and is never persisted, so the answer
 is always fresh (never served from ``disk_guard_wt_cache``).
+
+#1195 item 1 (owner 30.9.): a supervisor resumes a FINISHED lane via
+SendMessage (seen after 34 and after 331 min), so a lane whose transcript ends
+in a terminal stop keeps its worktree for :data:`FINISHED_GRACE_S` after its
+last turn. The caller passes the disk level: ``critical`` waives the grace; a
+caller that does not know it passes nothing and keeps the lane.
 """
 # airuleset:script-ok helper module, errors are returned as data and logged
 from __future__ import annotations
@@ -30,6 +36,21 @@ import time
 
 LIVE_LANE_KEPT = "live lane (fresh subagent transcript) — kept"
 LIVENESS_UNKNOWN_KEPT = "lane liveness unknown (transcript evidence unreadable) — kept"
+FINISHED_GRACE_S = 6 * 3600
+FINISHED_GRACE_KEPT = "finished lane in 6 h resume grace — kept"
+GRACE_WAIVED_LEVEL = "critical"
+
+
+class LaneEvidence(tuple):
+    """``(ids, err)`` — unpacks exactly like the pre-#1195 pair, so every
+    caller and injected reader keeps its contract — plus ``recent``: agent-id
+    → transcript path of each NOT-live lane whose last write is inside the
+    resume grace. Only a candidate list: no content was read for it."""
+
+    def __new__(cls, ids, err, recent=None):
+        self = super().__new__(cls, (ids, err))
+        self.recent = dict(recent or {})
+        return self
 
 
 def _is_dir(path):
@@ -122,7 +143,8 @@ def _project_dirs(projects_dir, repo_root, T, strict):
 
 
 def live_worker_agent_ids_checked(repo_root, projects_dir=None, now=None,
-                                  freshness_s=None, strict=True):
+                                  freshness_s=None, strict=True,
+                                  grace_s=FINISHED_GRACE_S):
     """``(ids, err)``: the agent-ids (``agent-<hash>``) with a FRESH LIVE
     subagent transcript under the repo's project dir, and ``err`` — None when
     the read was complete, else why it was not (``ids`` is then a lower bound).
@@ -136,8 +158,10 @@ def live_worker_agent_ids_checked(repo_root, projects_dir=None, now=None,
     (an unlistable one sets ``err``), keeps a "finished" lane unless its
     transcript ends in a terminal stop, and adds the worktree basenames a live
     agent's meta names (its parent lane's too). ``strict=False`` is the
-    pre-#1193 set ``_live_worker_agent_ids`` returns. Never raises."""
-    ids, errs = set(), []
+    pre-#1193 set ``_live_worker_agent_ids`` returns. The result is a
+    :class:`LaneEvidence`; in ``strict`` mode its ``recent`` names every
+    not-live lane last written under ``grace_s`` ago (#1195). Never raises."""
+    ids, errs, recent = set(), [], {}
     try:
         import watchdog
         import watchdog.transcripts as T
@@ -185,11 +209,20 @@ def live_worker_agent_ids_checked(repo_root, projects_dir=None, now=None,
                         if strict:
                             meta = (files.get(lane.agent_id) or {}).get("meta")
                             ids |= _meta_worktrees(meta, note)
+                    elif strict and st in not_live and _age_under(lane, grace_s):
+                        path = (files.get(lane.agent_id) or {}).get("jsonl")
+                        if path:
+                            recent[lane.agent_id] = path
     except Exception as e:  # noqa: BLE001
         errs.append(repr(e))
         print("lane-overlap: worker-transcript evidence unavailable (%s)" % e,
               file=sys.stderr)
-    return ids, ("; ".join(errs)[:300] if errs else None)
+    return LaneEvidence(ids, "; ".join(errs)[:300] if errs else None, recent)
+
+
+def _age_under(lane, limit_s):
+    age = getattr(lane, "age_s", None)
+    return isinstance(age, (int, float)) and age < limit_s
 
 
 class LiveLaneGate:
@@ -197,10 +230,13 @@ class LiveLaneGate:
 
     ``home`` (or ``projects_dir``) locates the transcripts; ``ids`` injects a
     known live set (the evidence is then complete); ``evidence_fn`` replaces
-    the reader (``(repo_root, projects_dir, now) -> (ids, err)``)."""
+    the reader (``(repo_root, projects_dir, now) -> (ids, err)``; only a
+    :class:`LaneEvidence` result carries resume-grace candidates).
+    ``disk_level`` is the caller's disk-pressure level: ``critical`` waives
+    the #1195 finished-lane grace, anything else (or None) keeps it."""
 
     def __init__(self, home=None, now=None, projects_dir=None, ids=None,
-                 evidence_fn=None):
+                 evidence_fn=None, disk_level=None):
         if projects_dir is None:
             home = home or os.environ.get("HOME") or os.path.expanduser("~")
             projects_dir = os.path.join(str(home), ".claude", "projects")
@@ -209,7 +245,10 @@ class LiveLaneGate:
         if ids is not None:
             evidence_fn = lambda *_a: (set(ids), None)  # noqa: E731
         self._evidence_fn = evidence_fn or live_worker_agent_ids_checked
+        self.disk_level = disk_level
         self._memo = {}
+        self._recent = {}
+        self._finished = {}
 
     def evidence(self, repo_root):
         """``(ids, err)`` for ``repo_root``, read once per pass. An error is
@@ -220,6 +259,8 @@ class LiveLaneGate:
                 got = self._evidence_fn(key, self.projects_dir, self.now)
             except Exception as e:  # noqa: BLE001 — a reader crash is "could not tell"
                 got = (set(), repr(e))
+            self._recent[key] = dict(getattr(got, "recent", None) or {})
+            got = (got[0], got[1])
             self._memo[key] = got
             if got[1]:
                 print("lane-live-gate: %s — agent worktrees kept this pass (%s)"
@@ -234,11 +275,35 @@ class LiveLaneGate:
 
     def keep_reason(self, repo_root, wt_path):
         """Why ``wt_path`` must be kept (a skip reason), or None when the gate
-        does not object: a live lane, or an ``agent-*`` worktree of a repo
-        whose evidence was unreadable (``agent-*`` is the isolation-lane
-        naming; an unreadable repo never pins any other worktree for good)."""
+        does not object: a live lane, an ``agent-*`` worktree of a repo whose
+        evidence was unreadable (``agent-*`` is the isolation-lane naming; an
+        unreadable repo never pins any other worktree for good), or a lane that
+        finished less than :data:`FINISHED_GRACE_S` ago (#1195)."""
         ids, err = self.evidence(repo_root)
         base = os.path.basename(str(wt_path).rstrip(os.sep))
         if base in ids:
             return LIVE_LANE_KEPT
-        return LIVENESS_UNKNOWN_KEPT if err and base.startswith("agent-") else None
+        if err and base.startswith("agent-"):
+            return LIVENESS_UNKNOWN_KEPT
+        return FINISHED_GRACE_KEPT if self._in_grace(str(repo_root), base) else None
+
+    def _in_grace(self, repo_key, base):
+        """True when ``base`` is a lane last written inside the grace whose
+        final turn is a completed text reply (read lazily, once per pass). A
+        ``settling`` tail (no stop_reason, ~18 % of real finishes) counts too:
+        every candidate here is either terminal-finished or stale (15 min idle,
+        far past ``FINISH_SETTLE_S``), and the grace decides a KEEP, never a
+        delete. A pending tool-call / api-error tail is not a finished lane. At
+        ``critical`` disk the grace is waived before any content read, logged."""
+        path = self._recent.get(repo_key, {}).get(base)
+        if not path:
+            return False
+        if self.disk_level == GRACE_WAIVED_LEVEL:
+            print("lane-live-gate: %s last written inside the resume grace, disk %s"
+                  " — grace waived" % (base, self.disk_level), file=sys.stderr)
+            return False
+        if path not in self._finished:
+            import watchdog.transcripts as T   # its finish reader never raises
+            self._finished[path] = T.transcript_worker_finished(path) in (
+                "terminal", "settling")
+        return self._finished[path]
