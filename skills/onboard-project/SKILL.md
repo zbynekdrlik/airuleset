@@ -39,7 +39,7 @@ python3 ~/devel/airuleset/airuleset.py onboard-project --audit          # whole 
 python3 ~/devel/airuleset/airuleset.py onboard-project <path> --audit   # one project
 ```
 
-`--audit` (alias `--check`) reports drift from the checklist — missing remote, tracked build artifacts, missing Playbook router, branch-model mismatch, missing registry entry, a Rust web app without a tray (`missing-tray`) — and changes NOTHING. A cross-host entry on a known `REMOTE_HOSTS` box is audited OVER SSH (a healthy remote project reads clean); a host that is neither this box nor a known remote target reads `unreachable`, never a false drift (#583). The fix for drift is an explicit re-run of `onboard-project` on that project, never an auto-fix.
+`--audit` (alias `--check`) reports drift from the checklist — missing remote, tracked build artifacts, missing Playbook router, branch-model mismatch, missing registry entry, a Rust web app without a tray (`missing-tray`; a server-only app opts out with `<!-- airuleset:tray=n/a <reason> -->` in its CLAUDE.md) — and changes NOTHING. A cross-host entry on a known `REMOTE_HOSTS` box is audited OVER SSH (a healthy remote project reads clean); a host that is neither this box nor a known remote target reads `unreachable`, never a false drift (#583). The fix for drift is an explicit re-run of `onboard-project` on that project, never an auto-fix.
 
 ## Rules
 

@@ -16,7 +16,8 @@ workspace members, ``crates/*``, a ``src-tauri/`` outside the workspace);
 build output, vendored trees, hidden dirs, examples/benches/tests/docs are
 skipped, and a DIR named like a web dir inside ``src/`` is a Rust module, not
 assets. Every read goes through the injected runner (``cli_onboard_exec``) in
-at most two calls, so ``--host <remote>`` checks the remote tree over ssh,
+at most two calls (plus one CLAUDE.md read for the opt-out, only when a
+gap would be filed), so ``--host <remote>`` checks the remote tree over ssh,
 never the local disk.
 """
 
@@ -58,7 +59,10 @@ _SCAN_DEPTH = "4"
 # ONE runner call prints every manifest as NUL <path> NUL <content>.
 # A server-only (VPS) app opts out in its CLAUDE.md with a stated reason:
 # `<!-- airuleset:tray=n/a <reason> -->`. A bare marker is no opt-out.
-_NA_MARKER_RE = re.compile(r"<!--\s*airuleset:tray=n/a\s+[^\s>-][^>]*-->")
+# The reason stays on one line, is capped and cannot run into another
+# comment, so the match is linear even on a file of unclosed markers.
+_NA_MARKER_RE = re.compile(
+    r"<!--\s*airuleset:tray=n/a[ \t]+[^\s<>-][^<>\n]{0,300}-->")
 _CAT_WITH_NAMES = 'for f; do printf "\\0%s\\0" "$f"; cat "$f"; done'
 
 
@@ -259,4 +263,6 @@ def audit_drift(path, host=None, run=None, claude_md=None):
         reason = tray_check(path, host=host, run=run)
     except TrayCheckUnverified as e:
         return {"kind": "unverified-tray", "detail": str(e)}
-    return {"kind": "missing-tray", "detail": reason} if reason else None
+    if not reason:
+        return None
+    return {"kind": "missing-tray", "detail": reason + " (server-only app: opt out with `<!-- airuleset:tray=n/a <reason> -->` in CLAUDE.md)"}
