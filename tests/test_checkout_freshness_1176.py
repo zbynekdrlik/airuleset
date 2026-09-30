@@ -330,39 +330,6 @@ class TestFooterAndStatus(unittest.TestCase):
                 "behind_since": behind_since, "reason": reason,
                 "branch": "develop", "base": "develop"}
 
-    def test_stale_shown_only_past_n_hours(self):
-        cf = _cf()
-        self._write({"/c": self._lag(since=T0 - 3600)})
-        self.assertEqual(cf.footer_segment(self.home, now=T0), "",
-                         "1 h of lag < the 6 h default: hidden")
-        self._write({"/c": self._lag(since=T0 - 7 * 3600)})
-        seg = cf.footer_segment(self.home, now=T0)
-        self.assertIn("stale 2.6k", seg)
-
-    def test_stale_is_measured_from_first_observed_lag_only(self):
-        # review 1 finding 8: an old COMMIT date says nothing about when the
-        # checkout fell behind — a week-old commit pushed now must not turn a
-        # 15-min dirty snapshot into `stale`.
-        cf = _cf()
-        week = T0 - 7 * 86400
-        self._write({"/c": self._lag(since=T0 - 1000, behind_since=week)})
-        self.assertEqual(cf.footer_segment(self.home, now=T0), "")
-
-    def test_hidden_when_current_or_watchdog_dead(self):
-        cf = _cf()
-        self._write({"/c": {"state": "current", "since": T0 - 86400}})
-        self.assertEqual(cf.footer_segment(self.home, now=T0), "")
-        self._write({"/c": self._lag(since=T0 - 86400)}, ts=T0 - 3 * 3600)
-        self.assertEqual(cf.footer_segment(self.home, now=T0), "")
-
-    def test_threshold_env_override_and_more_counter(self):
-        cf = _cf()
-        self._write({"/a": self._lag(since=T0 - 2 * 3600, behind=12),
-                     "/b": self._lag(since=T0 - 2 * 3600, behind=5)})
-        with mock.patch.dict(os.environ, {"AIRULESET_STALE_CHECKOUT_H": "1"}):
-            seg = cf.footer_segment(self.home, now=T0)
-        self.assertIn("stale 12 +1", seg)
-
     def test_status_lines_name_path_and_reason(self):
         cf = _cf()
         self._write({"/c": self._lag(since=T0 - 7 * 3600, reason="diverged"),
@@ -371,9 +338,13 @@ class TestFooterAndStatus(unittest.TestCase):
         self.assertIn("2 checkout(s), 1 lagging, 1 stale", lines[0])
         self.assertTrue(any("STALE /c" in ln and "diverged" in ln for ln in lines))
 
-    def test_statusline_shim_renders_the_segment(self):
+    def test_statusline_shows_no_stale_segment(self):
+        # owner ROZHODNUTIE 30.9. (#1176 reopen): checkout freshness is a machine
+        # concern, never owner-actionable, so the footer shows nothing about it;
+        # `airuleset.py status` keeps the rows.
         src = (REPO / "cli_deployer_glue.py").read_text()
-        self.assertIn("cli_checkout_freshness.footer_segment()", src)
+        self.assertNotIn("cli_checkout_freshness", src)
+        self.assertFalse(hasattr(_cf(), "footer_segment"))
 
 
 class TestDiscoveryAndWiring(unittest.TestCase):
@@ -680,7 +651,9 @@ class TestReviewOneSurfaces(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("t1176@example.test", r.stdout)
         log = Path(self.home, ".claude", "tickets-status", "shim-errors.log")
-        self.assertIn("stale-segment", log.read_text())
+        # the footer no longer touches the freshness module at all
+        self.assertNotIn("stale-segment",
+                         log.read_text() if log.exists() else "")
 
     def test_resume_start_writes_no_heartbeat(self):
         from _hook_state_cleanup import hermetic_hook_env as _env
