@@ -10,6 +10,7 @@ import shutil
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -234,7 +235,7 @@ class ResumeConfirmAndTicket(unittest.TestCase):
 class TicketComposition(unittest.TestCase):
     REC = {"from": "claude-opus-5-5", "to": "claude-opus-4-8",
            "since": "2026-09-28T14:51:50Z", "since_exact": True,
-           "restored_at": NOW, "cwd": "/repo"}
+           "restored_at": NOW, "cwd": "/repo", "episode": "marker:m1", "proven": True}
 
     def test_body_names_window_models_and_commit_range(self):
         title, body = mr.compose_ticket(self.REC, MANAGED, NOW,
@@ -242,7 +243,8 @@ class TicketComposition(unittest.TestCase):
         self.assertIn("claude-opus-4-8", title)
         self.assertIn("2026-09-28T14:51:50Z", title)
         self.assertIn("from `claude-opus-5-5` to `claude-opus-4-8`", body)
-        self.assertIn("range `aaa111^..bbb222`", body)
+        self.assertIn("oldest `aaa111`, newest `bbb222`", body)
+        self.assertNotIn("^..", body)                  # never a cross-branch range claim
         self.assertIn("- `bbb222` second", body)
         self.assertIn("airuleset#1203", body)
 
@@ -265,18 +267,22 @@ class TicketComposition(unittest.TestCase):
             calls.append((argv, kw.get("cwd")))
             if argv[0] == "git":
                 return R(0, "aaa111\tfirst\nbbb222\tsecond\n")
+            if argv[:3] == ["gh", "issue", "list"]:
+                return R(0, "")                    # no earlier filing of this episode
             return R(0, "https://github.com/o/r/issues/9\n")
 
         ok, ref, err = mr.file_ticket(dict(self.REC, cwd=d), MANAGED, NOW, sub_run=fake)
         self.assertTrue(ok, err)
         self.assertEqual(ref, "https://github.com/o/r/issues/9")
-        self.assertEqual(calls[0][0][:3], ["git", "log", "--branches"])
+        self.assertEqual(calls[0][0][:3], ["git", "log", "HEAD"])
         self.assertIn("--since=2026-09-28T14:51:50Z", calls[0][0])
-        self.assertEqual(calls[1][0][:3], ["gh", "issue", "create"])
-        self.assertNotIn("-R", calls[1][0])            # the pane repo's native gh
+        self.assertEqual(calls[1][0][:3], ["gh", "issue", "list"])   # dedup search first
+        self.assertIn('"marker:m1" in:body', calls[1][0])
+        self.assertEqual(calls[2][0][:3], ["gh", "issue", "create"])
+        self.assertNotIn("-R", calls[2][0])            # the pane repo's native gh
         self.assertEqual({c[1] for c in calls}, {d})
-        body = calls[1][0][calls[1][0].index("--body") + 1]
-        self.assertIn("range `aaa111^..bbb222`", body)
+        body = calls[2][0][calls[2][0].index("--body") + 1]
+        self.assertIn("oldest `aaa111`, newest `bbb222`", body)
 
     def test_file_ticket_reports_gh_failure(self):
         d = tempfile.mkdtemp(prefix="mr1203-cwd-")

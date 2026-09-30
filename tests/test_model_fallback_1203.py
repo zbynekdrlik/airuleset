@@ -136,7 +136,8 @@ class TailState(unittest.TestCase):
     def test_read_is_bounded_to_the_tail(self):
         # a marker far before the tail window is not seen; the tail's own entry is
         prefix = json.dumps(_marker()) + "\n" + (("x" * 400) + "\n") * 2000
-        p = _write(self, [_assistant("claude-opus-5-5", uuid="late")], prefix=prefix)
+        # (the late reply stays on the fallback model, so the marker is in force)
+        p = _write(self, [_assistant("claude-opus-4-8", uuid="late")], prefix=prefix)
         self.assertIsNotNone(mf.tail_state(p, max_bytes=10 ** 7)["marker"])
         st = mf.tail_state(p, max_bytes=64 * 1024)
         self.assertEqual(st["uuid"], "late")
