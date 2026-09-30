@@ -59,12 +59,19 @@ def should_file(status, severe_pct, critical_pct, box_class=None):
             and box_class != "shared-stream")
 
 
-def default_filer_refused():
+def running_under_pytest():
     """True under pytest (``PYTEST_CURRENT_TEST``, set by pytest for every
-    test and never in production): a test that forgot to inject ``run_fn``
-    must never reach the real filer (#896-899, and #1144-#1151, where a
-    raise-based guard was swallowed by the filer's own ``except``)."""
+    test and never in production). The one detection every "refuse the real
+    default under pytest" guard reuses: the filer below, and the worktree
+    reclaimers' real-home refusal (#1195, ``cli_reclaim_guard``)."""
     return bool(os.environ.get("PYTEST_CURRENT_TEST"))
+
+
+def default_filer_refused():
+    """True under pytest: a test that forgot to inject ``run_fn`` must never
+    reach the real filer (#896-899, and #1144-#1151, where a raise-based guard
+    was swallowed by the filer's own ``except``)."""
+    return running_under_pytest()
 
 
 def stored_issue(state_path):

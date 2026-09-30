@@ -451,6 +451,9 @@ def purge_merged_lane_targets(home=None, dry_run: bool = False, now=None,
     issue_filer = issue_filer or _default_tier0_bypass_filer
     bypass_state_path = (Path(bypass_state_path) if bypass_state_path
                          else LANE_TARGET_TIER0_BYPASS_STATE_PATH)
+    from cli_reclaim_guard import refuse_real_paths_under_pytest as _refuse  # #1195
+    _refuse("purge_merged_lane_targets", dry_run, home=home, log_path=log_path,
+            state_path=state_path, bypass_state_path=bypass_state_path)
 
     if not force and not dry_run:
         try:
