@@ -236,6 +236,12 @@ class TestAirShim(base._ShimBase):
         self.assertEqual(self.token_for(
             "issue", "view", "https://github.com/zbynekdrlik/airuleset-x/issues/5"),
             TOKEN)
+        # review round 2: a URL that is a flag's VALUE never routes
+        url = "https://github.com/zbynekdrlik/airuleset/issues/1199"
+        for argv in (("issue", "comment", "12", "-R", base.REPO, "--body", url),
+                     ("issue", "create", "--title", "x", "--body", url),
+                     ("issue", "create", "--title", url)):
+            self.assertEqual(self.token_for(*argv), TOKEN, argv)
 
     def test_the_bootstrap_renders_this_shim(self):
         self.assertIn(AIR_FILE, pgt.render_gh_app_shim())
@@ -541,12 +547,15 @@ class TestRound1DiskGuard(unittest.TestCase):
                 mock.patch.object(dg, "_default_box_class", lambda: None), \
                 mock.patch.object(airuleset, "_current_user",
                                   return_value="fohmixer"):
-            dg.file_severe_ticket(
+            logs = dg.file_severe_ticket(
                 {"worst_pct": 97, "dim": "bytes", "drain_exhausted": True,
                  "drain_skipped_rungs": []}, home, 5000.0, [], dry_run=False,
                 run_fn=run, windows=[])
         self.assertEqual(calls[-1][:5], ["gh", "issue", "create", "-R", AIR])
         self.assertFalse(any("gk-request" in c for c in calls))
+        # review round 2: the durable log names what really ran
+        self.assertIn("filing gh issue create:", logs[0])
+        self.assertNotIn("gk-request", "\n".join(logs))
 
 
 class TestRound1ShimRefresh(unittest.TestCase):
@@ -578,6 +587,30 @@ class TestRound1ShimRefresh(unittest.TestCase):
         import inspect
         self.assertIn("\n    maybe_refresh_project_gh_app_shim()",
                       inspect.getsource(airuleset.cmd_install))
+
+    def old_shim(self, path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("#!/usr/bin/env bash\n# " + pgt.PROJECT_SHIM_MARKER + "\n")
+        return path.read_text()
+
+    def test_under_pytest_the_default_home_is_never_rewritten(self):
+        # review round 2: the shared running_under_pytest guard, exercised
+        home = self.path.parent
+        before = self.old_shim(home / ".local" / "bin" / "gh-app-shim")
+        with mock.patch.dict(os.environ, {"HOME": str(home),
+                                          "PYTEST_CURRENT_TEST": "x"}):
+            self.assertFalse(pgt.refresh_shim())
+        self.assertEqual((home / ".local/bin/gh-app-shim").read_text(), before)
+
+    def test_a_failed_rewrite_leaves_no_temp_file(self):
+        # review round 2: ENOSPC etc. must not litter ~/.local/bin
+        before = self.old_shim(self.path)
+        with mock.patch.object(pgt.os, "replace", side_effect=OSError("full")):
+            with self.assertRaises(OSError):
+                pgt.refresh_shim(str(self.path))
+        self.assertEqual(sorted(p.name for p in self.path.parent.iterdir()),
+                         ["gh-app-shim"])
+        self.assertEqual(self.path.read_text(), before)
 
 
 if __name__ == "__main__":
