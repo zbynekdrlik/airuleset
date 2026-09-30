@@ -8,36 +8,68 @@ fohmixer project went live without one because onboarding never checked. This
 leaf module is that check; ``cli_onboard`` calls it from the foundation-gap
 step (files the ticket) and from ``audit_project`` (``missing-tray`` drift).
 
-Detection = an HTTP server dependency + web assets, and no tray dependency or
-``*-tray`` crate. Manifests read: the root ``Cargo.toml`` and every
-``crates/*/Cargo.toml`` (workspace layout). Every read goes through the
-injected runner (``cli_onboard_exec``), so ``--host <remote>`` checks the
-remote tree over ssh, never the local disk.
+Detection = an HTTP server dependency + web assets, and no tray dependency,
+no tauri tray feature and no ``*-tray`` crate. Manifests read: every
+``Cargo.toml`` within 3 levels (root, workspace members, ``crates/*``, a
+``src-tauri/`` outside the workspace), build output and vendored trees
+skipped. Every read goes through the injected runner (``cli_onboard_exec``) in
+at most two calls, so ``--host <remote>`` checks the remote tree over ssh,
+never the local disk.
 """
 
+import os
 import sys
 import tomllib
 from pathlib import Path
 
-from cli_onboard_exec import _exec, _read_file
+from cli_onboard_exec import _exec
 
 FOUNDATION_TRAY_TITLE = "foundation: tray ikona pre webovú Rust appku"
 
-HTTP_SERVER_DEPS = frozenset({"axum", "actix-web", "warp", "tiny-http",
-                              "rocket", "poem"})
-TRAY_DEPS = frozenset({"tray-icon", "tray-item", "ksni"})
+# hyper is left out on purpose: as a direct dependency it is as often an HTTP
+# client as a server, so it alone would flag non-web apps.
+HTTP_SERVER_DEPS = frozenset({"axum", "axum-server", "actix-web", "warp",
+                              "tiny-http", "rocket", "poem", "salvo", "tide",
+                              "ntex"})
+TRAY_DEPS = frozenset({"tray-icon", "tray-item", "ksni", "trayicon", "systray"})
+# tauri ships its tray behind a feature: "tray-icon" (v2), "system-tray" (v1).
+TAURI_TRAY_FEATURES = frozenset({"tray-icon", "system-tray"})
 # A dependency that embeds or renders a web UI counts as web assets on its own.
 WEB_UI_DEPS = frozenset({"rust-embed", "include-dir", "memory-serve",
                          "leptos", "yew", "dioxus"})
 WEB_ASSET_FILES = ("index.html", "Trunk.toml")
 WEB_ASSET_DIRS = ("web", "static", "frontend", "www", "public", "ui")
-# Build output / vendored trees never count as the project's own web assets.
-_PRUNE_DIRS = ("target", "node_modules", ".git")
+# Build output and vendored trees are never the project's own manifests or
+# web assets.
+_PRUNE_DIRS = ("target", "node_modules", ".git", "vendor")
+# Manifest depth 3 covers <root>/Cargo.toml, <member>/Cargo.toml and
+# crates/<x>/Cargo.toml; asset depth 4 covers crates/<x>/assets/index.html.
+_MANIFEST_DEPTH = "3"
+_ASSET_DEPTH = "4"
+# ONE runner call prints every manifest as NUL <path> NUL <content>.
+_CAT_WITH_NAMES = 'for f; do printf "\\0%s\\0" "$f"; cat "$f"; done'
 
 
 def _norm(name):
     """Cargo dependency names compare with `-` and `_` as equal."""
     return str(name).strip().lower().replace("_", "-")
+
+
+def _or_names(names):
+    """`-name a -o -name b …` for a find expression."""
+    expr = []
+    for name in names:
+        expr += (["-o"] if expr else []) + ["-name", name]
+    return expr
+
+
+def _pruned_find(path, depth, match):
+    """find argv over `path` (never the root itself: a checkout named `web`
+    must not match) that skips build output and vendored trees, then applies
+    `match`."""
+    return (["find", str(path), "-mindepth", "1", "-maxdepth", depth,
+             "(", "-type", "d", "(", *_or_names(_PRUNE_DIRS), ")", ")",
+             "-prune", "-o"] + match)
 
 
 def _dep_tables(doc):
@@ -52,38 +84,35 @@ def _dep_tables(doc):
     return [t for t in tables if isinstance(t, dict)]
 
 
-def _dep_names(doc):
-    """Normalized crate names this manifest depends on; a renamed dependency
-    (`web = { package = "axum" }`) counts under its real package name."""
-    names = set()
+def _deps(doc):
+    """(normalized dependency names, has a tauri tray feature) of one
+    manifest. A renamed dependency (`web = { package = "axum" }`) counts
+    under its real package name."""
+    names, tauri_tray = set(), False
     for table in _dep_tables(doc):
         for key, spec in table.items():
-            real = spec.get("package") if isinstance(spec, dict) else None
-            names.add(_norm(real or key))
-    return names
-
-
-def _manifest_paths(path, host=None, run=None):
-    """Root Cargo.toml plus every crates/*/Cargo.toml, as found on the target."""
-    root = Path(path)
-    found = [root / "Cargo.toml"]
-    r = _exec(["find", str(root / "crates"), "-mindepth", "2", "-maxdepth", "2",
-               "-name", "Cargo.toml"], host=host, run=run)
-    found.extend(Path(p) for p in sorted((r.stdout or "").split("\n")) if p)
-    return found
+            real = _norm((spec.get("package") if isinstance(spec, dict)
+                          else None) or key)
+            names.add(real)
+            if real == "tauri" and isinstance(spec, dict):
+                feats = {str(f) for f in spec.get("features") or ()}
+                tauri_tray = tauri_tray or bool(feats & TAURI_TRAY_FEATURES)
+    return names, tauri_tray
 
 
 def _read_manifests(path, host=None, run=None):
-    """[(manifest_path, parsed_doc)] for every readable manifest. A manifest
-    that does not parse is reported on stderr and skipped (a broken TOML is
-    the project's own build error, never a reason to crash onboarding)."""
+    """[(manifest_path, parsed_doc)] for every Cargo.toml within 3 levels of
+    the project root, read in ONE runner call. A manifest that does not parse
+    is reported on stderr and skipped (a broken TOML is the project's own
+    build error, never a reason to crash onboarding)."""
+    argv = _pruned_find(path, _MANIFEST_DEPTH,
+                        ["-type", "f", "-name", "Cargo.toml", "-exec", "sh",
+                         "-c", _CAT_WITH_NAMES, "sh", "{}", "+"])
+    parts = (_exec(argv, host=host, run=run).stdout or "").split("\0")
     out = []
-    for mp in _manifest_paths(path, host=host, run=run):
-        text = _read_file(mp, host=host, run=run)
-        if text is None:
-            continue
+    for mp, text in zip(parts[1::2], parts[2::2]):
         try:
-            out.append((mp, tomllib.loads(text)))
+            out.append((Path(mp), tomllib.loads(text)))
         except tomllib.TOMLDecodeError as e:
             print("onboard-project: warning: %s does not parse (%s); skipped "
                   "for the tray check" % (mp, e), file=sys.stderr)
@@ -91,22 +120,13 @@ def _read_manifests(path, host=None, run=None):
 
 
 def _web_asset_path(path, host=None, run=None):
-    """First web-asset file/dir within 3 levels of the project root (covers
-    `static/`, `crates/web/index.html`, `crates/web/static/`), or None."""
-    prune = []
-    for name in _PRUNE_DIRS:
-        prune += (["-o"] if prune else []) + ["-name", name]
-    files = []
-    for name in WEB_ASSET_FILES:
-        files += (["-o"] if files else []) + ["-name", name]
-    dirs = []
-    for name in WEB_ASSET_DIRS:
-        dirs += (["-o"] if dirs else []) + ["-name", name]
-    argv = (["find", str(path), "-mindepth", "1", "-maxdepth", "3",
-             "(", "-type", "d", "(", *prune, ")", ")", "-prune", "-o",
-             "(", "(", "-type", "f", "(", *files, ")", ")", "-o",
-             "(", "-type", "d", "(", *dirs, ")", ")", ")",
-             "-print", "-quit"])
+    """First web-asset file/dir within 4 levels of the project root (covers
+    `static/`, `crates/web/index.html`, `crates/x-web/assets/index.html`), or
+    None."""
+    argv = _pruned_find(path, _ASSET_DEPTH, [
+        "(", "(", "-type", "f", "(", *_or_names(WEB_ASSET_FILES), ")", ")",
+        "-o", "(", "-type", "d", "(", *_or_names(WEB_ASSET_DIRS), ")", ")",
+        ")", "-print", "-quit"])
     first = (_exec(argv, host=host, run=run).stdout or "").strip()
     if not first:
         return None
@@ -123,28 +143,31 @@ def rust_web_tray_gap(path, host=None, run=None):
     manifests = _read_manifests(path, host=host, run=run)
     if not manifests:
         return None
-    deps, crate_names = set(), set()
-    root_manifest = Path(path) / "Cargo.toml"
+    deps, crate_names, tauri_tray = set(), set(), False
+    root_manifest = os.path.normpath(os.path.join(str(path), "Cargo.toml"))
     for mp, doc in manifests:
-        deps |= _dep_names(doc)
+        names, tray_feature = _deps(doc)
+        deps |= names
+        tauri_tray = tauri_tray or tray_feature
         pkg = (doc.get("package") or {}).get("name")
         if pkg:
             crate_names.add(_norm(pkg))
-        if mp != root_manifest:          # crates/<dir>/Cargo.toml
+        if os.path.normpath(str(mp)) != root_manifest:   # a member crate dir
             crate_names.add(_norm(mp.parent.name))
     servers = sorted(deps & HTTP_SERVER_DEPS)
     if not servers:
         return None
-    if deps & TRAY_DEPS or any(n.endswith("-tray") for n in deps | crate_names):
+    if (tauri_tray or deps & TRAY_DEPS
+            or any(n.endswith("-tray") for n in deps | crate_names)):
         return None
     web = sorted(deps & WEB_UI_DEPS)
     evidence = ("dependency " + web[0]) if web else _web_asset_path(
         path, host=host, run=run)
     if not evidence:
         return None
-    return ("HTTP server %s + web UI (%s), no tray dependency (%s) and no "
-            "*-tray crate" % (servers[0], evidence,
-                              ", ".join(sorted(TRAY_DEPS))))
+    return ("HTTP server %s + web UI (%s), no tray dependency (%s), no tauri "
+            "tray feature and no *-tray crate"
+            % (servers[0], evidence, ", ".join(sorted(TRAY_DEPS))))
 
 
 def foundation_tray_body(name, reason):
