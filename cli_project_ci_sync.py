@@ -69,7 +69,8 @@ SYNC_BUDGET_S = 170
 # copy any file it reads, and only its own session or the owner may request.
 PROTECTED = (".ssh", ".gnupg", ".secrets", ".claude*", ".config/gh",
              ".config/gh-app-tokens", ".git-credentials", ".netrc",
-             ".soniox.env", ".aws", ".docker", ".kube", ".cloudflared")
+             ".soniox.env", ".aws", ".docker", ".kube", ".cloudflared",
+             ".config/git/credentials", ".pgpass")
 MARKER = "secret-sync: "          # prefixes every account-side message
 
 _FILE_LINE_RE = re.compile(r"^[ \t]*File:[ \t]*(.*?)[ \t]*$", re.M)
@@ -142,7 +143,7 @@ def _normalize_path(raw, account):
     if path.startswith("/") or path.startswith("~"):
         raise Refusal("the path %r is outside the account home "
                       "(give a path under ~/)" % raw)
-    if not _PATH_RE.fullmatch(path):
+    if not _PATH_RE.fullmatch(path) or "." in path.split("/"):
         raise Refusal("the path %r is not a plain path under the account home "
                       "(letters, digits, `_.+@-` and `/` only)" % raw)
     hit = is_protected(path)
@@ -228,25 +229,40 @@ def _gh_json(argv, run, what):
     return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
 
 
-def list_requests(repo, run, over_budget=None):
+def list_requests(repo, run, over_budget=None, errors=None):
     """The open issues of ``repo`` that carry a ``secret-sync:`` label
     (any case), found label by label on the server (no --limit over all open
     issues can hide one), each issue once. Every label is listed and matched
     here: ``gh label list --search`` is a fuzzy best-match search.
-    ``over_budget(what)`` is asked before each label's listing."""
+    ``over_budget(what)`` is asked before each label's listing. One label
+    never blocks the others: a label gh cannot filter by (``--label`` is a
+    comma-separated, quote-parsed flag) or a failed listing is appended to
+    ``errors`` (loud) and the next label is listed."""
     labels = _gh_json(["gh", "label", "list", "-R", repo, "--limit",
                        str(LABEL_LIMIT), "--json", "name"],
                       run, "gh label list -R %s" % repo)
+    errors = [] if errors is None else errors
     found, seen = [], set()
     for label in sorted({str(lb.get("name", "")) for lb in labels}):
         if not label.lower().startswith(LABEL_PREFIX):
             continue
         if over_budget and over_budget("the label %s" % label):
             continue
-        for issue in _gh_json(["gh", "issue", "list", "-R", repo, "--state", "open",
+        try:
+            if "," in label or '"' in label:
+                raise SyncError("the label %r cannot be filtered by gh (a comma or "
+                                "quote) — delete it on %s" % (_short(label), repo))
+            issues = _gh_json(["gh", "issue", "list", "-R", repo, "--state", "open",
                                "--label", label, "--limit", str(LIST_LIMIT),
                                "--json", "number,title,body,labels,url,author"],
-                              run, "gh issue list -R %s --label %s" % (repo, label)):
+                              run, "gh issue list -R %s --label %s"
+                              % (repo, _short(label)))
+        except SyncError as e:
+            print("project-gh-token secret-sync: %s: FAILED — %s" % (repo, e),
+                  file=sys.stderr)
+            errors.append(str(e))
+            continue
+        for issue in issues:
             if issue.get("number") not in seen:
                 seen.add(issue.get("number"))
                 found.append(issue)
@@ -405,7 +421,11 @@ def _read_record(account, directory):
 
 
 def status_line(account, directory=None):
-    """``secret-sync: never run | OK <at> — … | FAILED <at> — <error>``."""
+    """``secret-sync: no repo_secrets declared | never run | OK <at> — … |
+    FAILED <at> — <error>``."""
+    import cli_account_bootstrap as bootstrap
+    if not (bootstrap.SERVICE_ACCOUNTS.get(account) or {}).get("repo_secrets"):
+        return "secret-sync: no repo_secrets declared (nothing is synced)"
     st = _read_record(account, directory)
     if st is None:
         return "secret-sync: never run (controller state)"
@@ -462,7 +482,7 @@ def sync_account(account, *, run=None, now=None, dry_run=False, state_dir=None,
 
     if not over_budget("the whole account"):
         try:
-            requests = list_requests(repo, run, over_budget)
+            requests = list_requests(repo, run, over_budget, errors)
         except SyncError as e:
             print("project-gh-token secret-sync: %s: FAILED — %s" % (account, e),
                   file=sys.stderr)

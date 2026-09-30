@@ -302,8 +302,8 @@ def validate_repo_secrets(spec, account=None, declared=()):
     named = [n for n in names if isinstance(n, str)]
     if len(set(named)) != len(named):
         errs.append("repo_secrets has a duplicate name")
-    repo = str(spec.get("repo", "")).lower()
-    errs += ["repo %s is also declared by %r; a secret-sync request queue needs "
+    repo = str(spec.get("repo") or "").lower()
+    errs += [] if not repo else ["repo %s is also declared by %r; a secret-sync request queue needs "
              "exactly one account" % (spec.get("repo"), other)
              for other, raw in sorted(dict(declared).items())
              if other != account and isinstance(raw, dict)
