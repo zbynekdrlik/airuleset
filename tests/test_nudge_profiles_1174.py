@@ -320,7 +320,7 @@ class TestStatus(unittest.TestCase):
             _write_state(home, {"on": sorted(LIVE_STREAM)})
             np.apply_profile(home=home, user="montalu1")
             out = self._status(home, "montalu1")
-            self.assertIn("profile: stream (9 kinds)", out)
+            self.assertIn("profile: stream (10 kinds)", out)
             self.assertIn("deviation: none", out)
             self.assertIn("nudges: ON", out)     # fleet parser shape kept
 
