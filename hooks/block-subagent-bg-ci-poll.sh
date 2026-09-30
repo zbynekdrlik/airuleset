@@ -34,7 +34,7 @@ fires to your PARENT, never to you, and the work silently dies mid-CI
 instead:
 
   • repeat plain foreground Bash calls until the run is terminal:
-      sleep 300 && gh run view <run-id> --json status,conclusion,jobs
+      sleep 300 && gh run view <run-id> --json status,conclusion
     (each call well under the 10-min tool cap; keep the turn alive)
   • for a long / multi-stage pipeline wait your dispatch contract hands to
     the supervisor: do NOT launch any background poll — report the run-id +

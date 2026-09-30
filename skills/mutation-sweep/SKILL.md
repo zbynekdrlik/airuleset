@@ -36,7 +36,7 @@ one yet, that's tracked in its mutation-alignment issue.)
    hardware-bound repo (GPU/devices), make sure the hardware is idle (it's your call).
 4. **Dispatch:** `gh workflow run <mutation-full.yml>` (pass inputs if the workflow defines any).
    Grab the run id (`gh run list --workflow <file> -L1`).
-5. **Monitor to terminal** (`ci-monitoring.md`): `sleep N && gh run view <id> --json status,conclusion,jobs`
+5. **Monitor to terminal** (`ci-monitoring.md`): `sleep N && gh run view <id> --json status,conclusion`
    in the background; wait for ALL shards. Don't claim done while shards run.
 6. **Survivors → issues:** the workflow files surviving mutants as `test-quality` issues. Verify:
    `gh issue list --label test-quality --state open`. If the workflow didn't auto-file, collect

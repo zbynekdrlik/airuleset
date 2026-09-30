@@ -356,7 +356,7 @@ MONITOR_LIST=$(printf '%s' "$HEAD_RUNS" | grep -v '^$' | paste -sd' ' - 2>/dev/n
 cat <<MONITOR
 
 ⚠️ MANDATORY (ci-monitoring.md): you just pushed to ${BRANCH}. Now:
-1. Monitor in the background until terminal: sleep 300 && gh run view ${LATEST} --json status,conclusion,jobs
+1. Monitor in the background until terminal: sleep 300 && gh run view ${LATEST} --json status,conclusion
 2. If a push+pull_request pair fired, monitor BOTH runs: ${MONITOR_LIST}
 3. Do NOT start any new task / brainstorm / issue selection until CI is terminal.
 4. Do NOT send a completion report until CI is green.
