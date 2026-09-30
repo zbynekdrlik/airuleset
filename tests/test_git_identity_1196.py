@@ -420,6 +420,28 @@ class TestWiring(_Base):
         self.assertIn("cli_git_identity.onboard_step", src)
 
 
+PRE_ANSWER = "Pre-answered (#1196)"
+
+
+def _context(r):
+    """The additionalContext a PreToolUse hook injected, or ""."""
+    try:
+        out = json.loads(r.stdout or "{}")
+    except ValueError:
+        return ""
+    return ((out.get("hookSpecificOutput") or {}).get("additionalContext")
+            or "")
+
+
+def _verdict(r):
+    """blocked (exit 2) / advised (exit 0 + the #1196 answer) / none."""
+    if r.returncode == 2:
+        return "blocked"
+    if r.returncode == 0 and PRE_ANSWER in _context(r):
+        return "advised"
+    return "none" if r.returncode == 0 else "error:%d" % r.returncode
+
+
 class TestPreAnswered(unittest.TestCase):
     def _ask(self, text):
         payload = json.dumps({"tool_input": {"questions": [{"question": text}]}})
@@ -427,40 +449,66 @@ class TestPreAnswered(unittest.TestCase):
                               capture_output=True, text=True,
                               env=hermetic_hook_env(self))
 
-    def test_english_old_commit_email_question_blocked(self):
+    def test_match_is_advisory_never_a_block(self):
+        """Area-review verdict: a matching question is ALLOWED (exit 0,
+        never 2) and carries the fixed answer as PreToolUse context."""
+        r = self._ask("Old commits carry my personal e-mail — rewrite or keep?")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stderr, "")
+        out = json.loads(r.stdout)
+        self.assertEqual(out["hookSpecificOutput"]["hookEventName"],
+                         "PreToolUse")
+        ctx = _context(r)
+        self.assertIn(PRE_ANSWER, ctx)
+        self.assertIn("keep old history as is", ctx)
+        self.assertIn("noreply from now on", ctx)
+        self.assertIn("do not ask the owner", ctx)
+
+    def test_non_match_is_untouched(self):
+        r = self._ask("Which colour should the dashboard header use?")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(r.stdout.strip(), "")
+        self.assertEqual(r.stderr, "")
+
+    def test_other_rules_still_block(self):
+        """Only the #1196 row turned advisory; a sibling rule still exits 2."""
+        r = self._ask("All gates green. Want me to merge the PR?")
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_english_old_commit_email_question_pre_answered(self):
         r = self._ask("22 old commits in the public repo carry a personal "
                       "author email. Should I rewrite history or keep it?")
-        self.assertEqual(r.returncode, 2, r.stderr)
-        self.assertIn("noreply", r.stderr)
-        self.assertIn("keep", r.stderr.lower())
+        self.assertEqual(_verdict(r), "advised", r.stderr)
+        self.assertIn("noreply", _context(r))
+        self.assertIn("keep", _context(r).lower())
 
-    def test_english_author_identity_question_blocked(self):
+    def test_english_author_identity_question_pre_answered(self):
         r = self._ask("Which author identity should commits in this public "
                       "repo use from now on?")
-        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(_verdict(r), "advised", r.stderr)
 
-    def test_slovak_question_blocked(self):
+    def test_slovak_question_pre_answered(self):
         r = self._ask("Staré commity vo verejnom repe majú osobný e-mail "
                       "autora. Prepísať históriu, alebo nechať?")
-        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(_verdict(r), "advised", r.stderr)
 
-    def test_slovak_identity_question_blocked(self):
+    def test_slovak_identity_question_pre_answered(self):
         r = self._ask("Pod akou identitou autora commitovať vo verejnom repe?")
-        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(_verdict(r), "advised", r.stderr)
 
     def test_unrelated_commit_question_allowed(self):
         r = self._ask("Which wording for the commit summary shown on the "
                       "dashboard: 'Changes' or 'History'?")
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(_verdict(r), "none", r.stderr)
 
     def test_history_view_ux_question_allowed(self):
         r = self._ask("Should the history view show the author avatar or "
                       "initials?")
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(_verdict(r), "none", r.stderr)
 
     def test_commit_list_ux_question_allowed(self):
         r = self._ask("Should the commit list show the author name or login?")
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(_verdict(r), "none", r.stderr)
 
     def test_review_false_positives_allowed(self):
         for q in (
@@ -475,9 +523,9 @@ class TestPreAnswered(unittest.TestCase):
             "author's config file — rewrite history to purge it?",
         ):
             with self.subTest(q=q):
-                self.assertEqual(self._ask(q).returncode, 0, q)
+                self.assertEqual(_verdict(self._ask(q)), "none", q)
 
-    def test_review_incident_phrasings_blocked(self):
+    def test_review_incident_phrasings_pre_answered(self):
         for q in (
             "Old commits show my personal e-mail. Should I force-push to "
             "fix them?",
@@ -487,7 +535,7 @@ class TestPreAnswered(unittest.TestCase):
             "Old commits leaked my personal name. Rewrite or leave?",
         ):
             with self.subTest(q=q):
-                self.assertEqual(self._ask(q).returncode, 2, q)
+                self.assertEqual(_verdict(self._ask(q)), "advised", q)
 
     def test_review2_false_positives_allowed(self):
         for q in (
@@ -506,7 +554,7 @@ class TestPreAnswered(unittest.TestCase):
             "Should the e-mail digest list old commits in the public repo?",
         ):
             with self.subTest(q=q):
-                self.assertEqual(self._ask(q).returncode, 0, q)
+                self.assertEqual(_verdict(self._ask(q)), "none", q)
 
     def test_action_keyed_probes(self):
         allowed = (
@@ -525,10 +573,10 @@ class TestPreAnswered(unittest.TestCase):
         )
         for q in allowed:
             with self.subTest(allowed=q):
-                self.assertEqual(self._ask(q).returncode, 0, q)
+                self.assertEqual(_verdict(self._ask(q)), "none", q)
         for q in blocked:
             with self.subTest(blocked=q):
-                self.assertEqual(self._ask(q).returncode, 2, q)
+                self.assertEqual(_verdict(self._ask(q)), "advised", q)
 
     def test_review3_false_positives_allowed(self):
         for q in (
@@ -563,9 +611,9 @@ class TestPreAnswered(unittest.TestCase):
             "author is me.",
         ):
             with self.subTest(q=q):
-                self.assertEqual(self._ask(q).returncode, 0, q)
+                self.assertEqual(_verdict(self._ask(q)), "none", q)
 
-    def test_review3_natural_phrasings_blocked(self):
+    def test_review3_natural_phrasings_pre_answered(self):
         for q in (
             "Some commits in fohmixer were authored with a personal e-mail. "
             "Rewrite or keep?",
@@ -580,7 +628,7 @@ class TestPreAnswered(unittest.TestCase):
             "22 public commits carry my Gmail address. Rewrite them?",
         ):
             with self.subTest(q=q):
-                self.assertEqual(self._ask(q).returncode, 2, q)
+                self.assertEqual(_verdict(self._ask(q)), "advised", q)
 
     def test_review4_false_positives_allowed(self):
         """Terms anywhere in the payload are not enough: the identity must
@@ -626,7 +674,7 @@ class TestPreAnswered(unittest.TestCase):
             "previous commits only show the student email.",
         ):
             with self.subTest(q=q):
-                self.assertEqual(self._ask(q).returncode, 0, q)
+                self.assertEqual(_verdict(self._ask(q)), "none", q)
         payload = json.dumps({"tool_input": {"questions": [{
             "question": "What should I do with the old commits?",
             "options": [{"label": "Old commits keep my name as-is"},
@@ -634,7 +682,7 @@ class TestPreAnswered(unittest.TestCase):
         r = subprocess.run(["bash", str(HOOK)], input=payload,
                            capture_output=True, text=True,
                            env=hermetic_hook_env(self))
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(_verdict(r), "none", r.stderr)
 
     def test_review5_content_not_author_allowed(self):
         """Commit CONTENT (a config, a template, a README leak) is not the
@@ -661,7 +709,7 @@ class TestPreAnswered(unittest.TestCase):
             "author e-mail next to the avatar?",
         ):
             with self.subTest(q=q):
-                self.assertEqual(self._ask(q).returncode, 0, q)
+                self.assertEqual(_verdict(self._ask(q)), "none", q)
 
     def test_review6_single_commit_content_allowed(self):
         """A single commit leaking/carrying a value into a FILE is content,
@@ -679,9 +727,9 @@ class TestPreAnswered(unittest.TestCase):
             "In this commit should I rewrite the noreply sender logic?",
         ):
             with self.subTest(q=q):
-                self.assertEqual(self._ask(q).returncode, 0, q)
+                self.assertEqual(_verdict(self._ask(q)), "none", q)
 
-    def test_review4_linked_phrasings_blocked(self):
+    def test_review4_linked_phrasings_pre_answered(self):
         for q in (
             "Old commits carry my personal e-mail — rewrite or keep?",
             "Which e-mail should I use from now on for commits in this "
@@ -690,7 +738,7 @@ class TestPreAnswered(unittest.TestCase):
             "Akú identitu autora odteraz v commitoch vo verejnom repe?",
         ):
             with self.subTest(q=q):
-                self.assertEqual(self._ask(q).returncode, 2, q)
+                self.assertEqual(_verdict(self._ask(q)), "advised", q)
 
     def test_terms_split_across_options_still_judged_as_one(self):
         payload = json.dumps({"tool_input": {"questions": [{
@@ -701,21 +749,21 @@ class TestPreAnswered(unittest.TestCase):
         r = subprocess.run(["bash", str(HOOK)], input=payload,
                            capture_output=True, text=True,
                            env=hermetic_hook_env(self))
-        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(_verdict(r), "advised", r.stderr)
 
-    def test_uppercase_slovak_blocks_in_the_c_locale(self):
+    def test_uppercase_slovak_pre_answered_in_the_c_locale(self):
         payload = json.dumps({"tool_input": {"questions": [{
             "question": "STARÉ COMMITY MAJÚ MÔJ SÚKROMNÝ E-MAIL, PREPÍSAŤ "
                         "ICH?"}]}}, ensure_ascii=False)
         r = subprocess.run(["bash", str(HOOK)], input=payload,
                            capture_output=True, text=True,
                            env=hermetic_hook_env(self, LC_ALL="C", LANG="C"))
-        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertEqual(_verdict(r), "advised", r.stderr)
 
     def test_unrelated_email_feature_question_allowed(self):
         r = self._ask("Should the order confirmation email show the "
                       "customer's name or the company name?")
-        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(_verdict(r), "none", r.stderr)
 
 
 class TestDeepRow(unittest.TestCase):
