@@ -20,6 +20,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
@@ -42,18 +43,24 @@ NOREPLY = "26905282+zbynekdrlik@users.noreply.github.com"
 class FakeGh:
     """`gh` answered from a fixture; git and everything else run for real."""
 
-    def __init__(self, visibility=None, user=USER, user_rc=0, repo_rc=0):
+    def __init__(self, visibility=None, user=USER, user_rc=0, repo_rc=0,
+                 gh_raises=None):
         self.visibility = visibility or {}
         self.user = user
         self.user_rc = user_rc
         self.repo_rc = repo_rc
+        self.gh_raises = gh_raises
         self.calls = []
         self.gh_calls = []
+        self.gh_kwargs = []
 
     def __call__(self, argv, **kw):
         self.calls.append(list(argv))
         if argv and argv[0] == "gh":
             self.gh_calls.append(list(argv))
+            self.gh_kwargs.append(kw)
+            if self.gh_raises is not None:
+                raise self.gh_raises
             if argv[1:3] == ["api", "user"]:
                 if self.user_rc:
                     return subprocess.CompletedProcess(
@@ -299,6 +306,54 @@ class TestReviewFixes(_Base):
         self.assertEqual(local(pub, "user.email"), NOREPLY)
 
 
+class TestReviewRound2(_Base):
+    """Round-2 review findings on #1196 (gh timeout, crash paths, TTL)."""
+
+    def test_every_gh_call_is_bounded_by_a_timeout(self):
+        pub = make_repo(self.tmp, "pub", "https://github.com/zbynekdrlik/pub")
+        run = FakeGh({"zbynekdrlik/pub": "PUBLIC"})
+        self.install([pub], run)
+        self.assertTrue(run.gh_kwargs)
+        for kw in run.gh_kwargs:
+            self.assertIsInstance(kw.get("timeout"), (int, float), kw)
+
+    def test_hung_gh_is_loud_and_not_fatal(self):
+        pub = make_repo(self.tmp, "pub", "https://github.com/zbynekdrlik/pub")
+        hung = subprocess.TimeoutExpired(["gh", "api", "user"], 10)
+        _, _, err = self.install([pub], FakeGh(gh_raises=hung))
+        self.assertIn("WARNING", err)
+        self.assertNotIn("FAILED", err)
+        self.assertEqual(local(pub, "user.email"), "")
+
+    def test_onboard_survives_a_missing_gh_binary(self):
+        pub = make_repo(self.tmp, "proj", "https://github.com/zbynekdrlik/proj")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            step = self.gi.onboard_step(
+                pub, run=FakeGh(gh_raises=FileNotFoundError("gh")),
+                home=self.home)
+        self.assertEqual(step["status"], "skipped")
+        self.assertIn("WARNING", err.getvalue())
+
+    def test_corrupt_cache_shapes_do_not_crash(self):
+        pub = make_repo(self.tmp, "pub", "https://github.com/zbynekdrlik/pub")
+        self.gi.save_cache(self.home, {"identity": "junk", "visibility": []})
+        step = self.gi.onboard_step(pub, run=FakeGh({"zbynekdrlik/pub": "PUBLIC"}),
+                                    home=self.home)
+        self.assertEqual(step["status"], "applied")
+        self.assertEqual(local(pub, "user.email"), NOREPLY)
+
+    def test_stale_private_visibility_is_requeried(self):
+        priv = make_repo(self.tmp, "priv", "https://github.com/zbynekdrlik/priv")
+        self.gi.save_cache(self.home, {
+            "identity": {"name": "zbynekdrlik", "email": NOREPLY,
+                         "ts": time.time()},
+            "visibility": {"zbynekdrlik/priv": ["PRIVATE", 0]}})
+        run = FakeGh({"zbynekdrlik/priv": "PUBLIC"})    # it went public
+        self.install([priv], run)
+        self.assertEqual(local(priv, "user.email"), NOREPLY)
+
+
 class TestWiring(_Base):
     def test_cmd_install_calls_the_step_helper(self):
         src = inspect.getsource(airuleset.cmd_install)
@@ -422,6 +477,45 @@ class TestPreAnswered(unittest.TestCase):
         ):
             with self.subTest(q=q):
                 self.assertEqual(self._ask(q).returncode, 2, q)
+
+    def test_review2_false_positives_allowed(self):
+        for q in (
+            "Odteraz má história faktúr zobrazovať meno účtovníka?",
+            "Should the release notes for the public repo credit each "
+            "commit author by name?",
+            "Which name should the public GitHub repo have after the "
+            "rename? The last commit already uses the new one.",
+            "Which file name should the public repo's changelog use? I "
+            "will commit it next.",
+            "From now on, should commit messages include the ticket name?",
+            "Should the committers page on our public repo site list "
+            "names alphabetically?",
+            "Rewrite the history section of the README to mention the "
+            "original author name?",
+            "Should the e-mail digest list old commits in the public repo?",
+        ):
+            with self.subTest(q=q):
+                self.assertEqual(self._ask(q).returncode, 0, q)
+
+    def test_terms_split_across_options_still_judged_as_one(self):
+        payload = json.dumps({"tool_input": {"questions": [{
+            "question": "Old commits in the public repo carry my personal "
+                        "e-mail — what now?",
+            "options": [{"label": "Rewrite history"},
+                        {"label": "Keep it"}]}]}})
+        r = subprocess.run(["bash", str(HOOK)], input=payload,
+                           capture_output=True, text=True,
+                           env=hermetic_hook_env(self))
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_uppercase_slovak_blocks_in_the_c_locale(self):
+        payload = json.dumps({"tool_input": {"questions": [{
+            "question": "STARÉ COMMITY MAJÚ MÔJ SÚKROMNÝ E-MAIL, PREPÍSAŤ "
+                        "ICH?"}]}}, ensure_ascii=False)
+        r = subprocess.run(["bash", str(HOOK)], input=payload,
+                           capture_output=True, text=True,
+                           env=hermetic_hook_env(self, LC_ALL="C", LANG="C"))
+        self.assertEqual(r.returncode, 2, r.stderr)
 
     def test_unrelated_email_feature_question_allowed(self):
         r = self._ask("Should the order confirmation email show the "
