@@ -255,3 +255,11 @@ until the ratchet cap, then the oldest move to `.claude/rules-reference/internal
   when typing `/model` (the blocked session's /goal loop never goes quiet; `/model` is idempotent,
   so the #855 type-ahead double-drain harm does not apply), never touches a non-Claude model, and
   files its re-review ticket with the pane's native `gh` in the pane cwd (fakes in tests).
+  **Two review rounds, reusable:** (1) a plain model MISMATCH is not a fallback — an old-lineup
+  session looks identical — so the word "fallback" and any ticket need a marker STILL IN FORCE (no
+  later reply on another model; `find_marker(stop_model=managed)` stops at a later managed reply),
+  else it is OFF-LINEUP: restore, journal, no ticket. (2) the #1060 implementer window shares the
+  main's cwd, so a cwd→newest-transcript mapping can hand both panes the same sid: skip the
+  implementer BEFORE `seen.add(sid)` and exclude its session id from the lookup, or the main pane is
+  silently dropped. (3) watchdog state that gates a gh WRITE is written through into `state` as it
+  changes, and the write first searches for its own episode id: a killed sweep must not file twice.
