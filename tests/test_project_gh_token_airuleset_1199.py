@@ -228,6 +228,15 @@ class TestAirShim(base._ShimBase):
         r = self.run_gh(gh, "issue", "list")
         self.assertEqual(r.stdout.split(), ["seen", TOKEN, "1"], r.stderr)
 
+    def test_airuleset_issue_and_pr_urls_route(self):
+        # review round 1: a whole-argument URL (`gh issue comment <url>`)
+        for url in ("https://github.com/zbynekdrlik/airuleset/issues/5",
+                    "https://github.com/ZbynekDrlik/Airuleset/pull/7"):
+            self.assertEqual(self.token_for("issue", "comment", url), AIR_TOKEN)
+        self.assertEqual(self.token_for(
+            "issue", "view", "https://github.com/zbynekdrlik/airuleset-x/issues/5"),
+            TOKEN)
+
     def test_the_bootstrap_renders_this_shim(self):
         self.assertIn(AIR_FILE, pgt.render_gh_app_shim())
         self.assertIn(pgt.render_gh_app_shim(),
@@ -391,6 +400,184 @@ class TestGoLiveStep(unittest.TestCase):
     def test_other_accounts_have_no_verify_step(self):
         self.assertNotIn("project-gh-token verify",
                          base.TestBootstrapRender._render(None, "claudy"))
+
+
+# --------------------------------------------------------------------------- #
+# review round 1 (all fixed on the branch)
+# --------------------------------------------------------------------------- #
+_NOT_GRANTED = (b'{"message":"The permissions requested are not granted to this '
+                b'installation."}')
+
+# A fake gh for the REAL verify probe: GitHub's answers, gh's error format
+# ("gh: <message> (HTTP NNN)" on stderr, the JSON body on stdout, rc 1).
+_FAKE_GH = r'''#!/usr/bin/env bash
+case "$*" in
+  "api installation/repositories"*) echo zbynekdrlik/fohmixer ;;
+  *repos/zbynekdrlik/airuleset/issues*)
+    echo '{"message":"Validation Failed"}'
+    echo 'gh: Invalid request. "title" was not supplied. (HTTP 422)' >&2; exit 1 ;;
+  *repos/zbynekdrlik/airuleset/pulls*)
+    echo '{"message":"Resource not accessible by integration"}'
+    echo 'gh: Resource not accessible by integration (HTTP 403)' >&2; exit 1 ;;
+  *) echo "unexpected: $*" >&2; exit 9 ;;
+esac
+'''
+
+
+class TestRound1Skip(base._Base):
+
+    def test_the_skip_keeps_githubs_message_and_names_both_owner_actions(self):
+        class NotGranted(base.FakeGitHub):
+            def _air(self, url):
+                raise base.urllib.error.HTTPError(url, 422, "err", {},
+                                                  io.BytesIO(_NOT_GRANTED))
+        rc, out, err, gh, ssh = self.mint(gh=NotGranted())
+        self.assertEqual(rc, 0, err)
+        (line,) = [ln for ln in err.splitlines() if AIR in ln]
+        self.assertIn("permissions requested are not granted", line)
+        self.assertIn("Repository access", line)
+        self.assertIn("Issues: Read & write", line)
+        state = (self.state / "fohmixer.json").read_text()
+        self.assertIn("not granted", state)
+
+
+class TestRound1RealProbe(unittest.TestCase):
+    """The REAL `_VERIFY_PROBE` bash runs against a fake gh on PATH, so a
+    redirect-order or quoting slip in the probe goes RED (review mutation m5
+    survived the canned-stdout tests)."""
+
+    def setUp(self):
+        tmp = base.tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.home = Path(tmp.name)
+        bin_ = self.home / ".local" / "bin"
+        bin_.mkdir(parents=True)
+        (bin_ / "gh").write_text(_FAKE_GH)
+        (bin_ / "gh").chmod(0o755)
+        (bin_ / "gh-app-shim").write_text(pgt.render_gh_app_shim())
+        (self.home / ".profile").write_text('PATH="$HOME/.local/bin:$PATH"\n')
+        self.env = {"HOME": str(self.home),
+                    "PATH": "%s:/usr/bin:/bin" % bin_}
+
+    def run_probe(self, argv_last):
+        return subprocess.run(["bash", "-c", argv_last], input="", env=self.env,
+                              capture_output=True, text=True, timeout=60)
+
+    def test_the_probe_output_parses_to_write_proven(self):
+        r = self.run_probe(pgt._VERIFY_PROBE)
+        gh_path, sections = pgt._probe_sections(r.stdout)
+        self.assertTrue(gh_path.endswith("/.local/bin/gh"), r.stdout)
+        self.assertEqual(sections["primary"], (["zbynekdrlik/fohmixer"], "0"))
+        ok, why = pgt.airuleset_write_verdict(sections)
+        self.assertTrue(ok, why + "\n" + r.stdout + r.stderr)
+        self.assertNotIn("Validation Failed", r.stdout)     # bodies discarded
+
+    def test_verify_account_end_to_end_through_a_login_shell(self):
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(argv)
+            return self.run_probe(argv[-1])          # "bash -lc '<probe>'"
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = pgt.verify_account("fohmixer", run=run)
+        self.assertEqual(rc, 0, out.getvalue() + err.getvalue())
+        self.assertIn("write proven", out.getvalue())
+
+    def test_a_stale_shim_is_named(self):
+        (self.home / ".local/bin/gh-app-shim").write_text(
+            "#!/usr/bin/env bash\n# " + pgt.PROJECT_SHIM_MARKER + "\n")
+        sections = pgt._probe_sections(base.verify_out(issues=404)
+                                       + "@@shim\n0\n@@rc 1\n")[1]
+        ok, why = pgt.airuleset_write_verdict(sections)
+        self.assertFalse(ok)
+        self.assertIn("stale", why)
+        r = self.run_probe(pgt._VERIFY_PROBE)
+        self.assertEqual(pgt._probe_sections(r.stdout)[1]["shim"][0], ["0"])
+
+
+class TestRound1Refusal(unittest.TestCase):
+
+    run_gk = TestGkRequestRefusal.run_gk
+
+    def test_an_account_without_the_issues_token_is_told_how_to_get_it(self):
+        text = "".join(self.run_gk("claudy")[2:])
+        self.assertIn("github_app: True", text)
+        self.assertIn("gh issue create -R zbynekdrlik/airuleset", text)
+
+    def test_a_github_app_account_is_also_told_how_to_comment(self):
+        text = "".join(self.run_gk("fohmixer")[2:])
+        self.assertIn("gh issue comment <N> -R zbynekdrlik/airuleset", text)
+        self.assertNotIn("github_app: True", text)
+
+
+class TestRound1DiskGuard(unittest.TestCase):
+    """Job 40's severe-ticket filer: a project account files natively (no
+    gk-request, which now refuses there, and no needs-gatekeeper label)."""
+
+    def argv(self, user):
+        import watchdog.disk_guard_escalation as esc
+        with mock.patch.object(airuleset, "_current_user", return_value=user):
+            return esc.airuleset_filer_argv(AIR, "t", "b", "/repo", "/py")
+
+    def test_project_account_files_natively(self):
+        self.assertEqual(self.argv("fohmixer"),
+                         ["gh", "issue", "create", "-R", AIR, "--title", "t",
+                          "--body", "b"])
+
+    def test_every_other_box_keeps_gk_request(self):
+        for user in ("newlevel", "gatekeeper", "montalu1"):
+            self.assertEqual(self.argv(user)[:3],
+                             ["/py", "/repo/airuleset.py", "gk-request"], user)
+
+    def test_the_filer_uses_it(self):
+        import watchdog.disk_guard as dg
+        calls = []
+
+        def run(argv, **kw):
+            calls.append(list(argv))
+            return subprocess.CompletedProcess(argv, 0, "https://x/issues/1", "")
+        with base.tempfile.TemporaryDirectory() as home, \
+                mock.patch.object(dg, "_default_box_class", lambda: None), \
+                mock.patch.object(airuleset, "_current_user",
+                                  return_value="fohmixer"):
+            dg.file_severe_ticket(
+                {"worst_pct": 97, "dim": "bytes", "drain_exhausted": True,
+                 "drain_skipped_rungs": []}, home, 5000.0, [], dry_run=False,
+                run_fn=run, windows=[])
+        self.assertEqual(calls[-1][:5], ["gh", "issue", "create", "-R", AIR])
+        self.assertFalse(any("gk-request" in c for c in calls))
+
+
+class TestRound1ShimRefresh(unittest.TestCase):
+    """`airuleset.py install` refreshes an already-live account's project
+    shim (else it keeps routing everything to `primary`)."""
+
+    def setUp(self):
+        tmp = base.tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "gh-app-shim"
+
+    def test_an_old_project_shim_is_rewritten(self):
+        self.path.write_text("#!/usr/bin/env bash\n# " + pgt.PROJECT_SHIM_MARKER
+                             + "\nexec gh \"$@\"\n")
+        self.path.chmod(0o700)
+        with redirect_stdout(io.StringIO()):
+            self.assertTrue(pgt.refresh_shim(str(self.path)))
+        self.assertEqual(self.path.read_text(), pgt.render_gh_app_shim())
+        self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o755)
+        self.assertFalse(pgt.refresh_shim(str(self.path)))    # idempotent
+
+    def test_a_foreign_shim_or_none_is_left_alone(self):
+        self.assertFalse(pgt.refresh_shim(str(self.path)))    # absent
+        self.path.write_text(base.ODOO_STYLE_SHIM)
+        self.assertFalse(pgt.refresh_shim(str(self.path)))
+        self.assertEqual(self.path.read_text(), base.ODOO_STYLE_SHIM)
+
+    def test_install_calls_it(self):
+        import inspect
+        self.assertIn("\n    maybe_refresh_project_gh_app_shim()",
+                      inspect.getsource(airuleset.cmd_install))
 
 
 if __name__ == "__main__":
