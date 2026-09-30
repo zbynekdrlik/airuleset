@@ -84,7 +84,7 @@ class TestGateResumeGrace(unittest.TestCase):
 
     def test_unfinished_stale_lane_gets_no_grace(self):
         """A lane whose last turn is a pending tool call and that went quiet
-        is not a FINISHED lane — the grace is only for a terminal end_turn."""
+        is not a FINISHED lane — the grace is only for a completed final reply."""
         _transcript(self.home, self.root, "agent-s1", age_s=2 * H)
         self.assertIsNone(self._reason("agent-s1"))
 
@@ -209,7 +209,7 @@ class TestDiskGuardPassesTheLevel(unittest.TestCase):
         self.assertEqual(self._run(96).get("level"), "critical")
 
     def test_drain_pressure_keeps_the_grace(self):
-        self.assertEqual(self._run(85).get("level"), "drain")
+        self.assertEqual(self._run(82).get("level"), "drain")   # below the 85 % small-disk critical
 
     def test_grace_level(self):
         """A quota drain (the account's own hard limit at >= CRITICAL_PCT)
