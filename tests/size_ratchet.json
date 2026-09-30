@@ -80,7 +80,7 @@
     "filedrop/server.py": 225,
     "filedrop/share.py": 103,
     "filedrop/show_server.py": 511,
-    "filedrop/upload_server.py": 309,
+    "filedrop/upload_server.py": 312,
     "filedrop/vault.py": 1071,
     "filedrop/vault_server.py": 580,
     "gates/__init__.py": 107,
