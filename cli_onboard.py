@@ -81,6 +81,8 @@ from cli_onboard_exec import (  # noqa: E402
     _read_file as _read_file,
     _write_file as _write_file,
 )
+import cli_onboard_tray as _tray  # noqa: E402  (#1198 Rust web app tray gap)
+FOUNDATION_TRAY_TITLE = _tray.FOUNDATION_TRAY_TITLE
 import cli_accounts  # noqa: E402  (#1184 per-project account gate)
 import cli_git_identity  # noqa: E402  (#1196 public repo → noreply identity)
 
@@ -596,10 +598,13 @@ def step_foundation_tickets(path, name, host=None, run=None, dry_run=False,
     gaps = []
     if not _has_ci(path, host=host, run=run):
         gaps.append(("ci", FOUNDATION_CI_TITLE, _foundation_ci_body(name)))
-    if (stack if stack is not None else detect_stack(path, host=host, run=run)) \
-            == "node":
+    stack = stack if stack is not None else detect_stack(path, host=host, run=run)
+    if stack == "node":
         gaps.append(("version-label", FOUNDATION_VERSION_TITLE,
                      _foundation_version_body(name)))
+    tray = stack == "rust" and _tray.rust_web_tray_gap(path, host=host, run=run)
+    if tray:
+        gaps.append(("tray", FOUNDATION_TRAY_TITLE, _tray.foundation_tray_body(name, tray)))
     if not gaps:
         return _step("foundation_tickets", "satisfied", "no foundation gaps")
     filed, already = [], []
@@ -895,6 +900,8 @@ def audit_project(entry, host=None, run=None):
     elif "## Playbook router" not in cm_content:
         drift.append({"kind": "missing-router",
                       "detail": "CLAUDE.md has no Playbook router"})
+    if tray := _tray.rust_web_tray_gap(path, host=host, run=run):
+        drift.append({"kind": "missing-tray", "detail": tray})
     return drift
 
 

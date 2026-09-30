@@ -26,7 +26,7 @@ What it ensures (each step: detect → act only if absent → report `satisfied`
 3. `CLAUDE.md` skeleton + `## Playbook router` — ONLY if missing (existing file never overwritten)
 4. GitHub remote (`gh repo create zbynekdrlik/<name> --private --source . --push` if none)
 5. two/three-branch work branch per existing convention — NEVER changes the existing default branch
-6. foundation-gap tickets — no CI, or web-without-version-label → files a tracked ticket (Scope-gate line; never auto-generates CI)
+6. foundation-gap tickets — no CI, web-without-version-label, or a Rust web app without a tray icon (`rules/rust-web-tray.md`, #1198) → files a tracked ticket (Scope-gate line; never auto-generates CI)
 7. onboarding notification ticket in the project repo (`onboarding: projekt pod správou airuleset`)
 8. registry entry in `projects-registry.json`
 
@@ -39,7 +39,7 @@ python3 ~/devel/airuleset/airuleset.py onboard-project --audit          # whole 
 python3 ~/devel/airuleset/airuleset.py onboard-project <path> --audit   # one project
 ```
 
-`--audit` (alias `--check`) reports drift from the checklist — missing remote, tracked build artifacts, missing Playbook router, branch-model mismatch, missing registry entry — and changes NOTHING. A cross-host entry on a known `REMOTE_HOSTS` box is audited OVER SSH (a healthy remote project reads clean); a host that is neither this box nor a known remote target reads `unreachable`, never a false drift (#583). The fix for drift is an explicit re-run of `onboard-project` on that project, never an auto-fix.
+`--audit` (alias `--check`) reports drift from the checklist — missing remote, tracked build artifacts, missing Playbook router, branch-model mismatch, missing registry entry, a Rust web app without a tray (`missing-tray`) — and changes NOTHING. A cross-host entry on a known `REMOTE_HOSTS` box is audited OVER SSH (a healthy remote project reads clean); a host that is neither this box nor a known remote target reads `unreachable`, never a false drift (#583). The fix for drift is an explicit re-run of `onboard-project` on that project, never an auto-fix.
 
 ## Rules
 
