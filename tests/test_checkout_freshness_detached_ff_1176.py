@@ -428,6 +428,69 @@ class TestReviewOne(_Detached):
         self.assertIn("half-applied", self.entry()["reason"])
 
 
+class TestReviewTwo(_Detached):
+    """Review 2: absorb-then-remove ordering is pinned, `ts` never goes
+    backwards, a stale file is removed, the collect fallbacks hold, the child
+    never raises on its own result write, and a no-op run says so."""
+
+    def _pending_with_result(self, result):
+        job, cf = _job(), _cf()
+        self.advance_origin()
+        self.run_job(T0, unit_run=self.recording_unit)
+        path = job.ff_result_path(self.clone, self.home)
+        cf.write_json_atomic(path, result)
+        return path
+
+    def test_status_is_written_before_a_result_is_removed(self):
+        path = self._pending_with_result({"ok": True, "commits": 1, "finished": T0 + 5})
+        with mock.patch.object(_job(), "write_status", side_effect=OSError("disk")):
+            with self.assertRaises(OSError):
+                self.run_job(T0 + 60, unit_run=self.recording_unit)
+        self.assertTrue(os.path.exists(path), "never removed before it is absorbed")
+        self.run_job(T0 + 60, unit_run=self.recording_unit)
+        self.assertEqual(self.entry()["state"], "current")
+        self.assertFalse(os.path.exists(path))
+
+    def test_ts_never_goes_backwards_on_a_stale_only_sweep(self):
+        job = _job()
+        path = self._pending_with_result({"ok": True, "commits": 1, "finished": T0 - 5})
+        status = _cf().read_status(self.home)
+        status["checkouts"]["/gone"] = {"state": "current", "checked": T0}
+        job.write_status(status, self.home)
+        self.run_job(T0 + 60, unit_run=self.recording_unit)
+        self.assertEqual(_cf().read_status(self.home)["ts"], T0 + 60)
+        self.assertFalse(os.path.exists(path), "a stale result is removed")
+
+    def test_collect_fallbacks_for_commits_and_finish_time(self):
+        self._pending_with_result({"ok": True, "commits": None, "finished": T0 + 7})
+        self.run_job(T0 + 60, unit_run=self.recording_unit)
+        e = self.entry()
+        self.assertEqual(e["ff"], {"at": T0 + 7, "commits": 1})
+
+    def test_a_no_op_unit_says_so(self):
+        self._pending_with_result({"ok": True, "commits": 0, "finished": T0 + 5,
+                                   "reason": "already up-to-date"})
+        self.run_job(T0 + 60, unit_run=self.recording_unit)
+        e = self.entry()
+        self.assertEqual(e["state"], "current")
+        self.assertIn("already up-to-date", e["reason"])
+        self.assertNotIn("0 commit", e["reason"])
+
+    def test_the_child_never_raises_on_its_result_write(self):
+        self.advance_origin()
+        self.g(self.clone, "fetch", "-q", "origin")
+        result = os.path.join(self.root, "r.json")
+        os.makedirs(os.path.join(result, "blocker"))
+        r = subprocess.run(
+            [sys.executable, str(REPO / "cli_checkout_freshness.py"), "ff",
+             "--path", self.clone, "--remote", "origin", "--branch", "develop",
+             "--result", result],
+            cwd=str(REPO), env=self.env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 1)
+        self.assertNotIn("Traceback", r.stderr)
+        self.assertIn("result", r.stderr)
+
+
 class TestOneSharedLauncher(unittest.TestCase):
 
     def test_one_systemd_run_argv_builder_in_the_watchdog(self):
