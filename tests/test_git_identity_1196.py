@@ -114,7 +114,8 @@ class _Base(unittest.TestCase):
     def install(self, roots, run):
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            result = self.gi.install_step(home=self.home, roots=roots, run=run)
+            result = self.gi.install_step(home=self.home, roots=roots, run=run,
+                                          app_shim=lambda: False)
         return result, out.getvalue(), err.getvalue()
 
 
@@ -239,6 +240,65 @@ class TestInstallStep(_Base):
         self.assertIn("skipped under test", out.getvalue())
 
 
+class TestReviewFixes(_Base):
+    """Round-1 review findings on #1196 (F3–F7)."""
+
+    def test_app_token_shim_box_is_skipped_quietly(self):
+        pub = make_repo(self.tmp, "pub", "https://github.com/zbynekdrlik/pub")
+        run = FakeGh({"zbynekdrlik/pub": "PUBLIC"})
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            self.gi.install_step(home=self.home, roots=[pub], run=run,
+                                 app_shim=lambda: True)
+        self.assertEqual(run.gh_calls, [])
+        self.assertEqual(local(pub, "user.email"), "")
+        self.assertIn("app-token", out.getvalue())
+        self.assertNotIn("WARNING", err.getvalue())
+
+    def test_onboard_step_with_real_home_is_inert_under_test(self):
+        pub = make_repo(self.tmp, "proj", "https://github.com/zbynekdrlik/proj")
+        run = FakeGh({"zbynekdrlik/proj": "PUBLIC"})
+        with m.patch.dict(os.environ, {"PYTEST_CURRENT_TEST": "x"}):
+            step = self.gi.onboard_step(pub, run=run)       # no home given
+        self.assertEqual(run.gh_calls, [])
+        self.assertEqual(step["status"], "skipped")
+        self.assertIn("under test", step["detail"])
+        self.assertEqual(local(pub, "user.email"), "")
+
+    def test_claude_code_plugin_clones_are_never_touched(self):
+        plug = make_repo(os.path.join(self.home, ".claude", "plugins",
+                                      "marketplaces"), "caveman",
+                         "https://github.com/JuliusBrussee/caveman.git")
+        run = FakeGh({"JuliusBrussee/caveman": "PUBLIC"})
+        self.install([plug], run)
+        self.assertEqual(run.gh_calls, [])
+        self.assertEqual(local(plug, "user.email"), "")
+
+    def test_origin_regex_edge_cases(self):
+        cases = {
+            "ssh://git@github.com:22/o/r.git": "o/r",
+            "ssh://git@github.com/o/r": "o/r",
+            "git@github.com:o/r.git": "o/r",
+            "https://github.com/o/r/": "o/r",
+            "https://token@github.com/o/r.git": "o/r",
+            "https://notgithub.com/o/r": None,
+            "https://github.company.example/o/r": None,
+        }
+        for i, (url, want) in enumerate(cases.items()):
+            path = make_repo(self.tmp, "edge%d" % i, url)
+            self.assertEqual(self.gi.origin_slug(path), want, url)
+
+    def test_identity_cache_expires(self):
+        pub = make_repo(self.tmp, "pub", "https://github.com/zbynekdrlik/pub")
+        old = {"identity": {"name": "stale", "email": "1+stale@x", "ts": 0}}
+        self.gi.save_cache(self.home, old)
+        run = FakeGh({"zbynekdrlik/pub": "PUBLIC"})
+        self.install([pub], run)
+        self.assertEqual(len([c for c in run.gh_calls
+                              if c[1:3] == ["api", "user"]]), 1)
+        self.assertEqual(local(pub, "user.email"), NOREPLY)
+
+
 class TestWiring(_Base):
     def test_cmd_install_calls_the_step_helper(self):
         src = inspect.getsource(airuleset.cmd_install)
@@ -335,6 +395,33 @@ class TestPreAnswered(unittest.TestCase):
     def test_commit_list_ux_question_allowed(self):
         r = self._ask("Should the commit list show the author name or login?")
         self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_review_false_positives_allowed(self):
+        for q in (
+            "Should the public changelog list each commit's author?",
+            "Chceš verejnú stránku s históriou objednávok aj s menom autora?",
+            "Should the public API require authorization before committing "
+            "the transaction?",
+            "Mám prepísať autorizáciu v commite, ktorý rozbil verejné API?",
+            "Should I rewrite the identity provider integration? The last "
+            "commit broke login.",
+            "The public repo history contains a leaked API token in the "
+            "author's config file — rewrite history to purge it?",
+        ):
+            with self.subTest(q=q):
+                self.assertEqual(self._ask(q).returncode, 0, q)
+
+    def test_review_incident_phrasings_blocked(self):
+        for q in (
+            "Old commits show my personal e-mail. Should I force-push to "
+            "fix them?",
+            "Staré commity majú môj súkromný e-mail, prepísať ich?",
+            "The fohmixer repo is public and 22 commits carry a student "
+            "email — what should I do?",
+            "Old commits leaked my personal name. Rewrite or leave?",
+        ):
+            with self.subTest(q=q):
+                self.assertEqual(self._ask(q).returncode, 2, q)
 
     def test_unrelated_email_feature_question_allowed(self):
         r = self._ask("Should the order confirmation email show the "
