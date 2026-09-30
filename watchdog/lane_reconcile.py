@@ -410,7 +410,9 @@ def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
                              clean_fn=None, live_use_fn=None, age_fn=None):
     """Remove FINISHED/MERGED lane worktrees under ``repo_root`` that are clean,
     process-free and idle longer than ``age_min_s``; keep (and journal) any that
-    are dirty, in live use or too young. The branch ref is ALWAYS kept
+    are a live lane (#1193 ``cli_lane_live_gate`` — MERGED is read before
+    liveness, so a lane before its first commit needs it), dirty, in live use or
+    too young. The branch ref is ALWAYS kept
     (``git worktree remove`` never ``--force``). Returns one decision-log line
     per removed/kept candidate; [] when nothing qualifies or the cadence gate
     holds. Never raises — a hygiene sweep must never crash the watchdog sweep.
@@ -430,6 +432,7 @@ def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
     import time as _time
     import cli_lane_liveness as lo
     import cli_worktree_sweep as ws
+    from cli_lane_live_gate import LiveLaneGate
     run = run or _prune_run_default
     now = _time.time() if now is None else now
     logs = []
@@ -456,6 +459,10 @@ def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
 
     if proc_cwds is None:
         proc_cwds = lo._worktree_process_cwds()
+    gate = LiveLaneGate(projects_dir=projects_dir, now=now, ids=live_worker_ids)
+    live_worker_ids, err = gate.evidence(repo_root)
+    if err:                                  # #1193 unreadable liveness => prune nothing
+        return logs + ["worktree-prune %s -> skip:lane-liveness-unknown (%s)" % (repo_root, err)]
     try:
         lanes = lo.classify_lanes(repo_root, run=run, now=now,
                                   live_worker_ids=live_worker_ids,
@@ -474,9 +481,12 @@ def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
         if not path or not os.path.isdir(path):
             continue
         ref = lane.get("ref")
-        # removal-safety guards, in ascending cost: live-use (cwd/fd/exe), then
-        # clean tree, then idle-age. A True from live_use, a not-True from clean
+        # removal-safety guards, in ascending cost: live lane (#1193), live-use
+        # (cwd/fd/exe), clean tree, idle-age. A True from live_use, a not-True from clean
         # (dirty OR unmeasurable), or an age below the floor => KEEP + journal.
+        if why := gate.keep_reason(repo_root, path):
+            logs.append("worktree-prune kept (%s): %s" % (why, path))
+            continue
         if live_use_fn(path):
             logs.append("worktree-prune kept (in live use): %s" % path)
             continue

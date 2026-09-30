@@ -1156,10 +1156,11 @@ def _warn_stderr(msg):
 
 def _worker_agent_type(jsonl_path):
     """`agentType` from the `<stem>.meta.json` sidecar CC writes at spawn, or None.
-    Best-effort enrichment for the decision log only (agentType/description let the
-    journal name the lane) — never raises, never affects the count."""
+    Log enrichment only — never raises, never affects the count, and never opens
+    a non-regular sidecar: a FIFO would block the whole sweep (#1193 review)."""
     try:
-        with open(jsonl_path.with_suffix(".meta.json"), "r",
+        meta = jsonl_path.with_suffix(".meta.json")
+        with open(meta if meta.is_file() else "", "r",
                   encoding="utf-8", errors="replace") as f:
             d = json.load(f)
         t = d.get("agentType") if isinstance(d, dict) else None
