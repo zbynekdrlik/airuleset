@@ -298,6 +298,24 @@ class TestActTimeRecheckAndPlan:
         child = next(a for a in actions if a["path"].endswith("merge-one.sh"))
         assert child["kind"] == "skip" and "atime" in child["reason"], child
 
+    def test_refused_child_is_logged_with_a_child_reason(self, tmp_path):
+        """Review round 2: a REFUSE of a scratchpad child must not be logged as
+        'session live/undeterminable' -- the audit log names the child case."""
+        import watchdog.disk_guard as dg
+        child = "/tmp/claude-1/-k/%s/scratchpad/merge-one.sh" % _LIVE_UUID
+        logs = dg.execute_drain(
+            status={"worst_pct": 92, "dim": "bytes", "level": "critical",
+                    "mounts": [{"mount": "/", "worst_pct": 92}]},
+            home=str(tmp_path),
+            planners=[("scratch", lambda: [{"cls": "scratch", "path": child,
+                                            "bytes": 10, "kind": "delete",
+                                            "reason": None}])],
+            recheck_fn=lambda: 92, do_action_fn=lambda a: -1,
+            geteuid_fn=lambda: 1000, log_path=str(tmp_path / "dg.log"),
+            now=time.time())
+        refuse = [ln for ln in logs if " REFUSE " in ln and child in ln]
+        assert len(refuse) == 1 and "scratchpad child" in refuse[0], logs
+
     def test_child_floor_covers_the_relatime_lag(self):
         """relatime trails a read by < 24 h, so a child read at least once every
         24 h has atime < 48 h old; the child floor must stay >= 2 days."""
