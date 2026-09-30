@@ -795,13 +795,23 @@ class TestReviewTimerWiring(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 class TestRound2Chain(_ShimBase):
 
+    def tools_path(self, *first):
+        """A PATH of `first` + ONLY the tools the wrapper and an odoo-style
+        shim run (never a gh: a CI runner has /usr/bin/gh)."""
+        tools = self.base / "tools"
+        tools.mkdir(exist_ok=True)
+        for name in ("bash", "dirname", "grep", "head"):
+            if not (tools / name).exists():
+                (tools / name).symlink_to(shutil.which(name))
+        return ":".join([*(str(d) for d in first), str(tools)])
+
     def test_odoo_shim_on_wrap_in_place_survives_repeated_installs(self):
         """Case A re-chains ANY App shim on the next install; at depth 2 the
         wrapper must then find the relocated real gh (gh-upstream), not exit
         127 (round 2 repro: no other gh on PATH)."""
         self.shim.write_text(ODOO_STYLE_SHIM)
         shutil.copy2(self.realbin / "gh", self.bin / "gh")   # a real gh binary
-        path = "%s:/usr/bin:/bin" % self.bin                 # realbin OFF PATH
+        path = self.tools_path(self.bin)                     # realbin OFF PATH
         self.env["PATH"] = path
         with mock.patch.dict(os.environ, {"PATH": path}):
             for _ in range(3):
@@ -836,6 +846,75 @@ class TestRound2Verify(unittest.TestCase):
         self.assertEqual(self.run_verify(
             "/home/fohmixer/.local/bin/gh\nzbynekdrlik/fohmixer\n"
             "zbynekdrlik/other\n")[0], 1)
+
+
+
+# --------------------------------------------------------------------------- #
+# review round 3 (all fixed on the branch)
+# --------------------------------------------------------------------------- #
+class TestRound3Resolve(_ShimBase):
+    """The depth-2 resolver of a CHAINED box (odoo-style App shim at
+    gh-app-shim, the token in the env): a real gh on PATH keeps winning (no
+    fleet-wide switch to a possibly stale gh-upstream), and gh-upstream is only
+    the fallback, only as a non-empty regular non-#! executable."""
+
+    tools_path = TestRound2Chain.tools_path
+
+    def chained(self, upstream=None):
+        self.shim.write_text(ODOO_STYLE_SHIM)
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            cli_gh_rate._write_wrapper_file(
+                str(self.bin / "gh"), str(self.shim), sys.executable,
+                str(ROOT / "cli_gh_rate.py"), upstream=str(self.shim),
+                observe=True)
+        up = self.bin / "gh-upstream"
+        if upstream == "stale-binary":
+            shutil.copy2(shutil.which("echo"), up)
+        elif upstream == "foreign-script":
+            up.write_text("#!/usr/bin/env bash\necho WRONG; exit 89\n")
+            up.chmod(0o755)
+        elif upstream == "dir":
+            up.mkdir()
+            up.chmod(0o755)
+        elif upstream == "empty":
+            up.write_text("")
+            up.chmod(0o755)
+
+    def test_a_path_gh_wins_over_a_stale_gh_upstream(self):
+        self.chained("stale-binary")
+        self.env["PATH"] = self.tools_path(self.bin, self.realbin)
+        r = self.run_gh(self.bin / "gh", "HOME")
+        self.assertEqual(r.stdout.strip(), str(self.home), r.stderr)
+
+    def test_a_foreign_script_at_gh_upstream_is_never_exec_d(self):
+        self.chained("foreign-script")
+        self.env["PATH"] = self.tools_path(self.bin, self.realbin)
+        r = self.run_gh(self.bin / "gh", "HOME")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(r.stdout.strip(), str(self.home))
+        self.env["PATH"] = self.tools_path(self.bin)     # no gh anywhere else
+        r = self.run_gh(self.bin / "gh", "HOME")
+        self.assertEqual(r.returncode, 127, r.stdout + r.stderr)
+        self.assertNotIn("WRONG", r.stdout)
+
+    def test_a_directory_or_an_empty_file_is_not_a_real_gh(self):
+        for kind in ("dir", "empty"):
+            with self.subTest(kind):
+                up = self.bin / "gh-upstream"
+                if up.is_dir():
+                    up.rmdir()
+                elif up.exists():
+                    up.unlink()
+                self.chained(kind)
+                self.env["PATH"] = self.tools_path(self.bin)
+                r = self.run_gh(self.bin / "gh", "HOME")
+                self.assertEqual(r.returncode, 127, r.stdout + r.stderr)
+
+    def test_the_minter_reads_the_marker_through_the_installer(self):
+        with mock.patch.object(cli_gh_rate, "_is_our_wrapper",
+                               return_value=True) as check:
+            self.assertTrue(pgt.is_project_shim("/x"))
+        check.assert_called_once_with("/x", cli_gh_rate.PROJECT_APP_SHIM_MARKER)
 
 
 if __name__ == "__main__":
