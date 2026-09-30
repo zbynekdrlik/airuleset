@@ -8,19 +8,23 @@ of rustup, Playwright browsers and pipx venvs onto a disk at 90 % (owner,
 blocks them only when the invoking user is a declared project account.
 
 Blocked (per command, after the sibling hooks' prefix strip + ``bash -c``
-recursion + heredoc-body strip):
+recursion; a heredoc body is documentation, EXCEPT one fed to a shell, which
+is classified as the script it is):
 
   * ``rustup`` install / update / default <x> / toolchain|component|target
-    changes / self / set / override, ``rustup-init``, and a curl/wget of
-    ``sh.rustup.rs``;
-  * ``pipx install|inject|install-all`` without ``--global``, ``uv tool install``;
-  * ``pip install --user`` or ``--break-system-packages`` (``pip``, ``pip3``,
-    ``python -m pip``) — the two ways a pip install lands in ``~/.local``;
-  * ``playwright install`` via ``npx``/``bunx``/``npm exec``/``pnpm dlx``/
-    ``yarn dlx``, bare ``playwright`` or ``python -m playwright``;
+    changes / self / set / override (also after ``+<toolchain>``),
+    ``rustup-init``, and a curl/wget of ``sh.rustup.rs``;
+  * ``pipx install|inject|install-all|run`` without ``--global``, ``uvx``,
+    ``uv tool install|run`` (each caches a venv under the home);
+  * ``pip install --user``, ``--break-system-packages`` or under ``PIP_USER=1``
+    (``pip``, ``pip3``, ``python -m pip``) — the ways a pip install lands in
+    ``~/.local``;
+  * ``playwright install`` (and ``@playwright/mcp install-browser``) via
+    ``npx``/``bunx``/``npm exec``/``pnpm dlx``/``yarn dlx``, bare
+    ``playwright`` or ``python -m playwright``;
   * ``npm i -g`` (``--global``, ``--location=global``), ``yarn global add``,
     ``pnpm add -g``;
-  * ``cargo install`` / ``cargo binstall``.
+  * ``cargo install`` / ``cargo binstall`` (``cargo install --list`` reads only).
 
 Allowed: a project venv inside the repo (``.venv/bin/pip install -r …``,
 ``python3 -m venv .venv``), a local ``npm install``, ``npx playwright test``,
@@ -43,11 +47,15 @@ from vault_guard_shell import ASSIGN_RE, split_segments  # noqa: E402
 WRAP_NOARG = {"sudo", "env", "nohup", "command", "builtin", "time", "exec"}
 WRAP_OPTS = {"timeout", "nice", "ionice", "stdbuf"}
 SHELLS = {"bash", "sh", "zsh", "dash"}
-KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "!"}
+KEYWORDS = {"do", "then", "else", "elif", "if", "while", "until", "!", "{", "}"}
+# The flags of a prefix wrapper that take a VALUE (`sudo -u x`, `env -u VAR`).
+WRAP_VALUE_FLAGS = {"-u", "-g", "-U", "-C", "-D", "-h", "-p", "-r", "-t",
+                    "--unset", "--chdir", "--user", "--group"}
 _DASH_C = re.compile(r"^-[A-Za-z]*c$")
 _PIP_RE = re.compile(r"^pip(3(\.\d+)?)?$")
 _PY_RE = re.compile(r"^python(3(\.\d+)?)?$")
-_PW_PKG = re.compile(r"^(@playwright/test|playwright(-core)?)(@.*)?$")
+_PW_PKG = re.compile(r"^(@playwright/(test|mcp)|playwright(-core)?)(@.*)?$")
+_PW_INSTALL = {"install", "install-browser"}
 _NPM_INSTALL = {"i", "in", "ins", "inst", "insta", "instal", "install", "isnt",
                 "isnta", "isntal", "isntall", "add"}
 _RUSTUP_ALWAYS = {"install", "update", "self", "set", "uninstall"}
@@ -66,26 +74,31 @@ def _tokens(segment):
 
 
 def _strip_prefix(tk):
-    i = 0
+    """Drop assignments, keywords and wrappers (with their own flags) in front
+    of the real command."""
+    i, in_wrap = 0, False
     while i < len(tk):
         t = tk[i]
-        if ASSIGN_RE.match(t) or t in WRAP_NOARG or t in KEYWORDS:
+        if ASSIGN_RE.match(t) or t in KEYWORDS:
             i += 1
+        elif t in WRAP_NOARG:
+            i, in_wrap = i + 1, True
+        elif in_wrap and t.startswith("-"):
+            # `sudo -E`; `sudo -u x` / `env -u VAR` also skip the flag's value
+            i += 2 if t in WRAP_VALUE_FLAGS else 1
         elif t in WRAP_OPTS:
             i += 1
             while i < len(tk) and tk[i].startswith("-"):
                 i += 1
             if t in ("timeout", "nice") and i < len(tk) and re.match(r"^\d", tk[i]):
                 i += 1
-        elif t.startswith("-") and i and tk[i - 1] in WRAP_NOARG:
-            i += 1          # `env -i`, `sudo -u x` (the user is then a positional)
         else:
             break
     return tk[i:]
 
 
 def _positionals(args):
-    return [a for a in args if not a.startswith("-")]
+    return [a for a in args if not a.startswith(("-", "+"))]   # `+nightly` too
 
 
 def _rustup(args):
@@ -100,9 +113,10 @@ def _rustup(args):
     return ""
 
 
-def _pip(args):
+def _pip(args, env_user=False):
     pos = _positionals(args)
-    if pos[:1] == ["install"] and ({"--user", "--break-system-packages"} & set(args)):
+    if pos[:1] == ["install"] and (env_user or {"--user", "--break-system-packages"}
+                                   & set(args)):
         return "pip install --user"
     return ""
 
@@ -118,7 +132,7 @@ def _playwright_install(args):
         rest.append(args[i])
         i += 1
     pos = _positionals(rest)
-    if len(pos) >= 2 and _PW_PKG.match(pos[0]) and pos[1] == "install":
+    if len(pos) >= 2 and _PW_PKG.match(pos[0]) and pos[1] in _PW_INSTALL:
         return "playwright install"
     return ""
 
@@ -134,8 +148,9 @@ def _npm(args):
     return "npm install -g" if pos[0] in _NPM_INSTALL and glob else ""
 
 
-def command_reason(tk):
-    """The block label of ONE command's tokens ('' = allowed)."""
+def command_reason(tk, env_user=False):
+    """The block label of ONE command's tokens ('' = allowed); ``env_user`` =
+    a ``PIP_USER=1``-style assignment prefixed the command."""
     if not tk:
         return ""
     base, args = os.path.basename(tk[0]), tk[1:]
@@ -146,19 +161,21 @@ def command_reason(tk):
         return "rustup-init"
     if base in ("curl", "wget") and any(u in a for a in args for u in _RUSTUP_URLS):
         return "curl sh.rustup.rs"
-    if base == "pipx":
+    if base == "pipx":   # `run` caches a venv under the home too
         return ("pipx " + pos[0] if pos[:1] and pos[0] in (
-            "install", "inject", "install-all") and "--global" not in args else "")
-    if base == "uv":
-        return "uv tool install" if pos[:2] == ["tool", "install"] else ""
+            "install", "inject", "install-all", "run") and "--global" not in args
+            else "")
+    if base == "uvx" or (base == "uv" and pos[:1] == ["tool"] and pos[1:2] in (
+            ["install"], ["run"])):
+        return "uv tool install"
     if _PIP_RE.match(base):
-        return _pip(args)
+        return _pip(args, env_user)
     if _PY_RE.match(base) and args[:2] == ["-m", "pip"]:
-        return _pip(args[2:])
+        return _pip(args[2:], env_user)
     if _PY_RE.match(base) and args[:2] == ["-m", "playwright"]:
         return "playwright install" if args[2:3] == ["install"] else ""
     if base == "playwright":
-        return "playwright install" if pos[:1] == ["install"] else ""
+        return "playwright install" if pos[:1] and pos[0] in _PW_INSTALL else ""
     if base in ("npx", "bunx"):
         return _playwright_install(args)
     if base in ("pnpm", "yarn") and pos[:1] == ["dlx"]:
@@ -171,8 +188,9 @@ def command_reason(tk):
             "-g" in args or "--global" in args):
         return "pnpm add -g"
     if base == "cargo":
-        sub = [a for a in pos if not a.startswith("+")]
-        return "cargo " + sub[0] if sub[:1] and sub[0] in ("install", "binstall") else ""
+        listing = "--list" in args    # `cargo install --list` only reads
+        return ("cargo " + pos[0] if pos[:1] and pos[0] in ("install", "binstall")
+                and not listing else "")
     return ""
 
 
@@ -185,10 +203,11 @@ def _shell_script(tk):
     return None
 
 
-def strip_heredoc_bodies(text):
-    """Drop heredoc BODIES (a ticket comment or commit message quoting a
-    banned shape is documentation, not a command) — the siblings' shape."""
-    lines, out, i = text.split("\n"), [], 0
+def split_heredocs(text):
+    """``(text without heredoc bodies, [(opener line, body)])``. A body is
+    documentation (a ticket comment or commit message quoting a banned shape)
+    — unless the opener feeds it to a SHELL, which runs it (``classify``)."""
+    lines, out, docs, i = text.split("\n"), [], [], 0
     rx = re.compile(r"<<-?\s*(['\"]?)(\w+)\1")
     while i < len(lines):
         line = lines[i]
@@ -197,23 +216,41 @@ def strip_heredoc_bodies(text):
         m = rx.search(line)
         if not m:
             continue
+        body = []
         while i < len(lines):
-            body = lines[i].lstrip("\t") if "<<-" in line else lines[i]
+            cur = lines[i].lstrip("\t") if "<<-" in line else lines[i]
             i += 1
-            if body == m.group(2):
+            if cur == m.group(2):
                 break
-    return "\n".join(out)
+            body.append(cur)
+        docs.append((line[:m.start()], "\n".join(body)))
+    return "\n".join(out), docs
+
+
+def _env_user(tk):
+    """True when a ``PIP_USER=<true>`` assignment prefixes the command."""
+    return any(t.split("=", 1)[0] == "PIP_USER" and t.split("=", 1)[1].lower()
+               in ("1", "true", "yes", "on") for t in tk if ASSIGN_RE.match(t))
 
 
 def classify(script, _depth=0):
     """The label of the FIRST blocked command in ``script`` ('' = allowed)."""
-    for seg, _term in split_segments(strip_heredoc_bodies(script)):
-        tk = _strip_prefix(_tokens(seg))
+    if _depth > 4:
+        return ""
+    text, docs = split_heredocs(script)
+    for opener, body in docs:
+        head = split_segments(opener)[-1][0] if opener.strip() else ""
+        tk = _strip_prefix(_tokens(head))
+        if tk and os.path.basename(tk[0]) in SHELLS and _shell_script(tk) is None:
+            label = classify(body, _depth + 1)
+            if label:
+                return label
+    for seg, _term in split_segments(text):
+        raw = _tokens(seg)
+        tk = _strip_prefix(raw)
         inner = _shell_script(tk)
-        if inner is not None:
-            label = classify(inner, _depth + 1) if _depth < 4 else ""
-        else:
-            label = command_reason(tk)
+        label = (classify(inner, _depth + 1) if inner is not None
+                 else command_reason(tk, _env_user(raw)))
         if label:
             return label
     return ""

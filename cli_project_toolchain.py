@@ -79,6 +79,18 @@ _KIND_RE = {
 }
 
 
+def runs_as_project_account():
+    """True when this process runs as a #1184 project account (a
+    ``SERVICE_ACCOUNTS`` member); an unreadable identity is False."""
+    try:
+        import os
+        import pwd
+        import cli_account_bootstrap
+        return pwd.getpwuid(os.getuid()).pw_name in cli_account_bootstrap.SERVICE_ACCOUNTS
+    except Exception:   # noqa: BLE001 — never raise from an identity probe
+        return False
+
+
 def parse_tool(entry):
     """``(kind, match)`` of one tool entry; ValueError on anything else."""
     kind, sep, value = entry.partition(":") if isinstance(entry, str) else ("", "", "")
@@ -179,13 +191,18 @@ def plan(spec):
 
 
 # --------------------------------------------------------------------------- #
-# the root render (system-wide installs + the root-owned env file)
+# the root render. Two steps, so a box that lacks a prerequisite (pipx, npx)
+# still gets its checkout, tmux session and gh shim: step 8b (the env file +
+# the account's rc wiring — no download, cannot fail on a missing tool) runs
+# BEFORE the checkout and the tmux session; step 12 (the system-wide installs)
+# runs LAST and fails the script loudly. Every root subshell `cd /`s first
+# (#1190: never run code from the invoker's cwd) and python runs isolated (-I).
 # --------------------------------------------------------------------------- #
 _PIPX_HEAD = """\
 command -v pipx >/dev/null 2>&1 || {{ echo "ERROR: pipx is missing on this box — install the distro pipx package as root, then re-run (#1201)" >&2; exit 1; }}
 export PIPX_HOME={pipx_home} PIPX_BIN_DIR={pipx_bin} PIPX_MAN_DIR=/usr/local/share/man
 _tc_pipx_version() {{   # the installed version of pipx venv $1, '' when absent
-    {{ pipx list --json 2>/dev/null || echo '{{}}'; }} | python3 -c 'import json, sys
+    {{ pipx list --json 2>/dev/null || echo '{{}}'; }} | python3 -I -c 'import json, sys
 v = json.load(sys.stdin).get("venvs", {{}}).get(sys.argv[1], {{}})
 print(v.get("metadata", {{}}).get("main_package", {{}}).get("package_version", ""))' "$1"
 }}
@@ -222,6 +239,12 @@ def render_env_file(*, rust_bin=RUST_BIN, rustup_home=RUSTUP_HOME,
     ``~/.profile`` is also read by ``sh``)."""
     return _ENV_BODY.format(rust_bin=rust_bin, rustup_home=rustup_home,
                             pw_dir=pw_dir)
+
+
+def _subshell(label, body):
+    """One root part: a ``umask 022`` subshell run from ``/`` (a failure still
+    aborts the ``set -e`` script)."""
+    return "# %s\n(\numask 022\ncd /\n%s)\n" % (label, body)
 
 
 def _pipx_lines(pipx):
@@ -262,65 +285,55 @@ def _rust_lines(rust, rust_bin):
 
 
 def _playwright_lines(browsers, pw_dir):
-    from cli_playwright_mcp import PLAYWRIGHT_CHROMIUM_BUILD
+    """Every declared version into ONE browsers dir. PLAYWRIGHT_SKIP_BROWSER_GC
+    keeps one version's install from collecting another's builds once root's
+    npx cache for it is gone. The completeness check is the resolver's own
+    marker list, so the render and ``_has_pinned_chromium_build`` agree."""
+    from cli_playwright_mcp import PLAYWRIGHT_CHROMIUM_BUILD, pinned_build_markers
     d = shlex.quote(pw_dir)
     out = ['command -v npx >/dev/null 2>&1 || { echo "ERROR: npx is missing — the '
-           'shared Playwright browsers need node/npx on this box (#1201)" >&2; '
+           'shared Playwright browsers need node/npx on root\'s PATH (#1201)" >&2; '
            'exit 1; }\n', "install -d -m 0755 %s\n" % d]
     for ver, names in browsers:
-        out.append("PLAYWRIGHT_BROWSERS_PATH=%s npx -y %s install --with-deps %s\n"
+        out.append("PLAYWRIGHT_BROWSERS_PATH=%s PLAYWRIGHT_SKIP_BROWSER_GC=1 npx -y "
+                   "%s install --with-deps %s\n"
                    % (d, shlex.quote("playwright@" + ver),
                       " ".join(shlex.quote(b) for b in names)))
     out.append("chmod -R a+rX,go-w %s\n" % d)
-    pinned = "%s/chromium_headless_shell-%s/INSTALLATION_COMPLETE" % (
-        pw_dir, PLAYWRIGHT_CHROMIUM_BUILD)
-    out.append('[ -f %s ] || { echo "ERROR: %s has no complete pinned chromium '
-               'build %s (#1201)" >&2; exit 1; }\n'
-               % (shlex.quote(pinned), pw_dir, PLAYWRIGHT_CHROMIUM_BUILD))
+    for rel in pinned_build_markers():
+        marker = shlex.quote("%s/%s" % (pw_dir, rel))
+        out.append('[ -f %s ] || { echo "ERROR: %s has no complete pinned chromium '
+                   'build %s (#1201)" >&2; exit 1; }\n'
+                   % (marker, pw_dir, PLAYWRIGHT_CHROMIUM_BUILD))
     return "".join(out)
 
 
 def render_system_step(spec, *, rust_root=RUST_ROOT, pipx_home=PIPX_HOME,
-                       pipx_bin=PIPX_BIN_DIR, pw_dir=PLAYWRIGHT_DIR,
-                       env_file=ENV_FILE):
-    """Root bootstrap step 8b: install the baseline + the account's tools
-    system-wide (idempotent), make them read-only for everyone, and write the
-    root-owned env file. Each part runs in a ``umask 022`` subshell, so a
-    failure still aborts the ``set -e`` script. The keyword arguments exist for
-    the tests (a fake root); the bootstrap always renders the defaults."""
+                       pipx_bin=PIPX_BIN_DIR, pw_dir=PLAYWRIGHT_DIR):
+    """Root bootstrap step 12 (the LAST step): install the baseline + the
+    account's tools system-wide (idempotent) and make them read-only for
+    everyone. The keyword arguments exist for the tests (a fake root); the
+    bootstrap always renders the defaults."""
     p = plan(spec)
-    rustup_home, cargo_home = rust_root + "/rustup", rust_root + "/cargo"
-    rust_bin = cargo_home + "/bin"
-    env_dir = env_file.rsplit("/", 1)[0]
+    cargo_home = rust_root + "/cargo"
     pipx = (_PIPX_HEAD.format(pipx_home=shlex.quote(pipx_home),
                               pipx_bin=shlex.quote(pipx_bin))
             + _pipx_lines(p["pipx"]))
-    rust = (_RUST_HEAD.format(rustup_home=shlex.quote(rustup_home),
+    rust = (_RUST_HEAD.format(rustup_home=shlex.quote(rust_root + "/rustup"),
                               cargo_home=shlex.quote(cargo_home),
-                              rust_bin=shlex.quote(rust_bin),
+                              rust_bin=shlex.quote(cargo_home + "/bin"),
                               rust_root=shlex.quote(rust_root))
-            + _rust_lines(p["rust"], rust_bin)
+            + _rust_lines(p["rust"], cargo_home + "/bin")
             + "chmod -R a+rX,go-w %s\n" % shlex.quote(rust_root))
-    env = ("install -d -m 0755 %s\n"
-           "t=$(mktemp %s)\n"
-           "cat > \"$t\" << 'PROJECT_TOOLCHAIN_ENV_EOF'\n%sPROJECT_TOOLCHAIN_ENV_EOF\n"
-           "chmod 0644 \"$t\"\nmv -f \"$t\" %s\n"
-           "echo \"  toolchain env: $(ls -l %s)\"\n"
-           % (shlex.quote(env_dir), shlex.quote(env_dir + "/.project-toolchain.XXXXXX"),
-              render_env_file(rust_bin=rust_bin, rustup_home=rustup_home,
-                              pw_dir=pw_dir),
-              shlex.quote(env_file), shlex.quote(env_file)))
-    parts = (("pipx venvs (ruff, …)", pipx), ("shared rustup", rust),
-             ("shared Playwright browsers", _playwright_lines(p["playwright"], pw_dir)),
-             ("the env file every project account sources", env))
-    out = "\n# 8b. Shared project toolchain, system-wide + read-only (#1201)\n"
-    for label, body in parts:
-        out += "# %s\n(\numask 022\n%s)\n" % (label, body)
-    return out
+    return ("\n# 12. Shared project toolchain, system-wide + read-only (#1201)\n"
+            + _subshell("pipx venvs (ruff, …)", pipx)
+            + _subshell("shared rustup", rust)
+            + _subshell("shared Playwright browsers",
+                        _playwright_lines(p["playwright"], pw_dir)))
 
 
 # --------------------------------------------------------------------------- #
-# the account side (run AS the account, like the gh shim step)
+# step 8b: the env file (root) + the account's rc wiring (AS the account)
 # --------------------------------------------------------------------------- #
 _ACCOUNT_BODY = """set -euo pipefail
 umask 022
@@ -348,19 +361,28 @@ def render_account_body(env_file=ENV_FILE):
                                 end=shlex.quote(RC_MARK_END))
 
 
-def render_account_env_step(spec):
-    """Root bootstrap step 8c: wire the account's shells to the shared
-    toolchain, as the account (root never writes through a path the account
-    controls). Runs BEFORE step 10 creates the tmux session, so its server and
-    first pane already start from this environment."""
+def render_account_env_step(spec, *, env_file=ENV_FILE, rust_root=RUST_ROOT,
+                            pw_dir=PLAYWRIGHT_DIR):
+    """Root bootstrap step 8b: write the root-owned env file (atomic, 0644),
+    then wire the account's shells to it AS the account (root never writes
+    through a path the account controls). Runs BEFORE step 10 creates the tmux
+    session, so its first pane already starts from this environment."""
     del spec    # every project account gets the same wiring
-    return ("\n# 8c. Shell env of the shared toolchain (as the account) — #1201\n"
-            "runuser -l \"$ACCOUNT\" -c %s\n" % shlex.quote(render_account_body()))
-
-
-def render_bootstrap_step(spec):
-    """Steps 8b + 8c for the #1184 root bootstrap."""
-    return render_system_step(spec) + render_account_env_step(spec)
+    env_dir = env_file.rsplit("/", 1)[0]
+    env = ("install -d -m 0755 %s\n"
+           "t=$(mktemp %s)\n"
+           "cat > \"$t\" << 'PROJECT_TOOLCHAIN_ENV_EOF'\n%sPROJECT_TOOLCHAIN_ENV_EOF\n"
+           "chmod 0644 \"$t\"\nmv -f \"$t\" %s\n"
+           "echo \"  toolchain env: $(ls -l %s)\"\n"
+           % (shlex.quote(env_dir), shlex.quote(env_dir + "/.project-toolchain.XXXXXX"),
+              render_env_file(rust_bin=rust_root + "/cargo/bin",
+                              rustup_home=rust_root + "/rustup", pw_dir=pw_dir),
+              shlex.quote(env_file), shlex.quote(env_file)))
+    return ("\n# 8b. Shell env of the shared toolchain — #1201\n"
+            + _subshell("the root-owned env file every project account sources", env)
+            + "# the account's rc files source it (as the account)\n"
+            "runuser -l \"$ACCOUNT\" -c %s\n"
+            % shlex.quote(render_account_body(env_file)))
 
 
 def render_next_steps(spec):

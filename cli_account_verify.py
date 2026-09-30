@@ -50,6 +50,7 @@ PROBE_TIMEOUT_S = 180
 HOME_DUPLICATES = (".rustup", ".cargo/bin", ".cache/ms-playwright",
                    ".local/pipx/venvs", ".local/share/pipx/venvs")
 _LOGIN_FLAG = re.compile(r"-[A-Za-z]*l[A-Za-z]*")
+_SHELLS = ("bash", "sh", "zsh", "dash")
 
 _PROBE = r"""cd "$HOME" || exit 3
 echo @@env
@@ -60,8 +61,9 @@ if [ -n __SESS__ ] && tmux has-session -t =__SESS__ 2>/dev/null; then
   echo session=yes
   echo "default_command=$(tmux show-options -gv default-command 2>/dev/null)"
   for p in $(tmux list-panes -s -t =__SESS__ -F '#{pane_pid}' 2>/dev/null); do
-    echo "pane=$p $(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null)"
+    echo "pane=$p $(ps -o etimes= -p "$p" | tr -d ' ') $(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null)"
   done
+  echo "profile_age=$(( $(date +%s) - $(stat -c %Y "$HOME/.profile" 2>/dev/null || date +%s) ))"
 else
   echo session=no
 fi
@@ -70,7 +72,7 @@ echo "which=$(command -v claude)"
 claude --version >/dev/null 2>&1; echo "rc=$?"
 echo @@ruff
 echo "which=$(command -v ruff)"
-ruff --version >/dev/null 2>&1; echo "rc=$?"
+v=$(ruff --version 2>/dev/null); echo "rc=$?"; echo "version=$v"
 echo @@rust
 for t in cargo rustfmt cargo-clippy; do echo "which_$t=$(command -v $t)"; done
 echo "rustup_home=$(rustup show home 2>/dev/null)"
@@ -88,6 +90,14 @@ echo "marker=$(cat "$HOME/.claude/airuleset-playwright-browsers-path" 2>/dev/nul
 b=$(ls -d "${PLAYWRIGHT_BROWSERS_PATH:-/nonexistent}"/chromium_headless_shell-__BUILD__/chrome-headless-shell-*/chrome-headless-shell 2>/dev/null | head -1)
 echo "bin=$b"
 if [ -n "$b" ]; then "$b" --version >/dev/null 2>&1; echo "rc=$?"; else echo rc=none; fi
+echo @@pwpins
+for pin in __PWPINS__; do
+  ver=${pin%%/*}; names=$(printf '%s' "${pin#*/}" | tr ',' ' ')
+  out=$(npx -y "playwright@$ver" install --dry-run $names 2>&1); echo "rc=$ver $?"
+  printf '%s\n' "$out" | sed -n 's/^ *Install location: *//p' | while read -r d; do
+    if [ -f "$d/INSTALLATION_COMPLETE" ]; then echo "ok=$ver $d"; else echo "missing=$ver $d"; fi
+  done
+done
 echo @@dups
 for d in __DUPS__; do if [ -e "$HOME/$d" ]; then echo "dup=$d"; fi; done
 echo @@git
@@ -103,12 +113,26 @@ echo @@end
 """
 
 
+def declared_pins(spec):
+    """``(ruff pin or None, {playwright version: [browsers]})`` the account
+    declares on top of the baseline (the MCP-pinned chromium is checked by
+    the headless-shell launch instead)."""
+    import cli_project_toolchain as toolchain
+    from cli_playwright_mcp import PLAYWRIGHT_PW_VERSION
+    plan = toolchain.plan(spec)
+    return (dict(plan["pipx"]).get("ruff"),
+            {v: b for v, b in plan["playwright"] if v != PLAYWRIGHT_PW_VERSION})
+
+
 def render_probe(account, spec):
     """The bash probe run AS the account (in a login shell)."""
     from cli_account_session import project_key
     from cli_playwright_mcp import PLAYWRIGHT_CHROMIUM_BUILD
     project = spec.get("project_dir") or "."
+    pins = declared_pins(spec)[1]
     subs = {
+        "__PWPINS__": " ".join(shlex.quote("%s/%s" % (v, ",".join(b)))
+                               for v, b in sorted(pins.items())),
         "__SESS__": shlex.quote(spec.get("tmux_session") or ""),
         "__PROJECT__": shlex.quote(project),
         "__BUILD__": shlex.quote(PLAYWRIGHT_CHROMIUM_BUILD),
@@ -139,9 +163,40 @@ def _one(sections, section, key):
 
 
 def _is_login(cmdline):
+    """A login SHELL: argv[0] ``-bash`` (how tmux starts one), or a shell with
+    ``-l``/``--login`` among its OPTIONS (before the first operand)."""
     tokens = cmdline.split()
-    return bool(tokens) and (tokens[0].startswith("-") or any(
-        t == "--login" or _LOGIN_FLAG.fullmatch(t) for t in tokens[1:]))
+    if not tokens:
+        return False
+    if tokens[0].startswith("-"):
+        return tokens[0].lstrip("-").rsplit("/", 1)[-1] in _SHELLS
+    if tokens[0].rsplit("/", 1)[-1] not in _SHELLS:
+        return False
+    for t in tokens[1:]:
+        if not t.startswith("-"):
+            return False            # an operand: the options are over
+        if t == "--login" or _LOGIN_FLAG.fullmatch(t):
+            return True
+    return False
+
+
+def _pane_problems(s):
+    """Every pane that is not a login shell, or started BEFORE ``~/.profile``
+    last changed (the #1201 block): such a pane still runs its old PATH."""
+    out = []
+    try:
+        profile_age = int(_one(s, "tmux", "profile_age"))
+    except ValueError:
+        profile_age = None
+    for line in s.get("tmux", {}).get("pane") or []:
+        pid, age, cmd = (line.split(" ", 2) + ["", ""])[:3]
+        if not _is_login(cmd):
+            out.append("pane %s is not a login shell (%s)" % (pid, cmd.strip()))
+        elif profile_age is None or not age.isdigit() or int(age) > profile_age:
+            out.append("pane %s started before ~/.profile got the toolchain block "
+                       "— respawn it (`tmux respawn-pane -k -t <pane>` or "
+                       "`exec bash -l` inside)" % pid)
+    return out
 
 
 class _Home:
@@ -164,9 +219,7 @@ def _check_tmux(spec, s, home):
     if dc and not _is_login(dc.replace("exec ", "")):
         bad.append("default-command %r is not a login shell" % dc)
     panes = s.get("tmux", {}).get("pane") or []
-    bad += ["pane %s is not a login shell (%s)" % tuple(
-        (p.split(" ", 1) + [""])[:2]) for p in panes
-        if not _is_login((p.split(" ", 1) + [""])[1])]
+    bad += _pane_problems(s)
     if not panes:
         bad.append("no pane")
     local_bin = home.home + "/.local/bin"
@@ -180,11 +233,14 @@ def _check_tmux(spec, s, home):
 
 
 def _check_secret_sync(spec):
-    names = list(spec.get("repo_secrets") or ())
-    if spec.get("github_app") is not True or not names:
+    """The request path needs the App token AND a DECLARED allow-list — an
+    explicit empty ``repo_secrets: []`` is a declared "no CI secrets"."""
+    if spec.get("github_app") is not True or "repo_secrets" not in spec:
         return False, ("no CI secret allow-list — declare github_app: True and "
-                       "repo_secrets in SERVICE_ACCOUNTS (#1199)")
-    return True, "request path open for %s on %s" % (", ".join(names), spec["repo"])
+                       "repo_secrets (the names, or [] for none) in "
+                       "SERVICE_ACCOUNTS (#1199)")
+    names = ", ".join(spec["repo_secrets"]) or "none (declared empty)"
+    return True, "request path open on %s, allow-list: %s" % (spec["repo"], names)
 
 
 def _outside_all(home, pairs):
@@ -192,11 +248,15 @@ def _outside_all(home, pairs):
     return ["%s=%r" % (what, path) for what, path in pairs if not home.outside(path)]
 
 
-def _check_ruff(s, home):
+def _check_ruff(s, home, pin=None):
     bad = _outside_all(home, [("ruff", _one(s, "ruff", "which"))])
+    version = _one(s, "ruff", "version")
     if _one(s, "ruff", "rc") != "0":
         bad.append("`ruff --version` fails")
-    return (not bad), "; ".join(bad) or "ruff = %s" % _one(s, "ruff", "which")
+    elif pin and version.split()[-1:] != [pin]:
+        bad.append("ruff is %r, the declared pin is %s (re-run the root "
+                   "bootstrap)" % (version, pin))
+    return (not bad), "; ".join(bad) or "%s = %s" % (version, _one(s, "ruff", "which"))
 
 
 def _check_rust(s, home):
@@ -216,7 +276,7 @@ def _check_rust(s, home):
         _one(s, "rust", "rustup_home"))
 
 
-def _check_playwright(s, home):
+def _check_playwright(s, home, pins=()):
     bad = _outside_all(home, [
         ("PLAYWRIGHT_BROWSERS_PATH", _one(s, "playwright", "env")),
         ("the MCP browsers marker (airuleset.py install as the account)",
@@ -224,7 +284,28 @@ def _check_playwright(s, home):
     if _one(s, "playwright", "rc") != "0":
         bad.append("the pinned headless shell does not launch (bin=%r rc=%s)"
                    % (_one(s, "playwright", "bin"), _one(s, "playwright", "rc")))
-    return (not bad), "; ".join(bad) or "launched %s" % _one(s, "playwright", "bin")
+    bad += _pin_problems(s, home, pins)
+    return (not bad), "; ".join(bad) or "launched %s%s" % (
+        _one(s, "playwright", "bin"),
+        "; declared %s installed" % ", ".join(pins) if pins else "")
+
+
+def _pin_problems(s, home, pins):
+    """Each declared Playwright version: its dry run answered, named at least
+    one browser dir, and every dir is complete and outside the home."""
+    sec = s.get("pwpins", {})
+    out = []
+    for ver in pins:
+        rcs = [v.split(" ", 1)[1] for v in sec.get("rc", []) if v.split(" ", 1)[0] == ver]
+        dirs = {k: [v.split(" ", 1)[1] for v in sec.get(k, []) if v.split(" ", 1)[0] == ver]
+                for k in ("ok", "missing")}
+        if rcs != ["0"] or not (dirs["ok"] or dirs["missing"]):
+            out.append("playwright %s: its install dry run failed (rc=%s)"
+                       % (ver, ",".join(rcs) or "none"))
+        out += ["playwright %s: %s is incomplete" % (ver, d) for d in dirs["missing"]]
+        out += ["playwright %s: %s is in the home" % (ver, d)
+                for d in dirs["ok"] if not home.outside(d)]
+    return out
 
 
 def _check_dups(s):
@@ -300,14 +381,20 @@ def evaluate(account, spec, sections, *, gh_rc, no_transfer=False):
     """``[(check, ok, detail)]`` in ``CHECKS`` order."""
     home = _Home(_one(sections, "env", "home") or "/home/" + account)
     s = sections
+    ruff_pin, pw_pins = declared_pins(spec)
+    if spec.get("github_app") is not True:
+        gh = (False, "no github_app declared — the account has no repo token "
+                     "and cannot file airuleset tickets (#1190/#1199)")
+    else:
+        gh = ((gh_rc == 0), "project-gh-token verify %s" % (
+            "OK" if gh_rc == 0 else "FAILED (rc=%s, its own lines above)" % gh_rc))
     results = {
         "tmux": _check_tmux(spec, s, home),
-        "gh-token": ((gh_rc == 0), "project-gh-token verify %s" % (
-            "OK" if gh_rc == 0 else "FAILED (rc=%s, its own lines above)" % gh_rc)),
+        "gh-token": gh,
         "secret-sync": _check_secret_sync(spec),
-        "ruff": _check_ruff(s, home),
+        "ruff": _check_ruff(s, home, ruff_pin),
         "rust": _check_rust(s, home),
-        "playwright": _check_playwright(s, home),
+        "playwright": _check_playwright(s, home, sorted(pw_pins)),
         "home-duplicates": _check_dups(s),
         "git-identity": _check_git(spec, s),
         "webterm": _check_webterm(account, spec, s),
@@ -354,7 +441,7 @@ def verify_account(account, *, run=None, gh_verify=None, no_transfer=False):
 
         def gh_verify(acct):
             return gh_token.verify_account(acct, run=run)
-    gh_rc = gh_verify(account) if spec.get("github_app") is True else "no github_app"
+    gh_rc = gh_verify(account) if spec.get("github_app") is True else None
     sections, err = _ssh_probe(account, spec, run)
     results = evaluate(account, spec, sections, gh_rc=gh_rc, no_transfer=no_transfer)
     remote = {"tmux", "ruff", "rust", "playwright", "home-duplicates",

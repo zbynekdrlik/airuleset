@@ -591,11 +591,12 @@ def render_root_bootstrap(account):
     script += "\n" + textwrap.dedent(_KEYS_TEMPLATE).format(ak_content=ak_content)
     # 8. System packages — only when the account declares them (#973)
     script += _render_system_packages_step(packages)
-    script += toolchain.render_bootstrap_step(spec)   # 8b-8c: #1201
+    script += toolchain.render_account_env_step(spec)   # 8b: #1201
     # 9-10: the project checkout + its tmux session (#1184)
     script += _render_project_step(spec)
     import cli_project_gh_token   # 11: the gh token shim (#1190)
     script += cli_project_gh_token.render_bootstrap_step(spec)
+    script += toolchain.render_system_step(spec)   # 12 (LAST): #1201
 
     # Read-back section
     readback = textwrap.dedent("""\

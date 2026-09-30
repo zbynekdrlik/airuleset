@@ -32,6 +32,8 @@ from cli_binary_installers import _claude_cli_env
 # leaf (no `import airuleset`), so a module-level import keeps THIS leaf
 # airuleset-free (the split test asserts that).
 from cli_target_purge import _target_in_live_use
+# #1201: a project account never gets a per-user chromium (stdlib-only leaf)
+from cli_project_toolchain import runs_as_project_account as _is_project_account
 
 
 # Retained ONLY for the export contract + as the disabled-list reference value
@@ -122,11 +124,15 @@ def _has_pinned_chromium_build(browsers_dir: Path) -> bool:
     binary under `chromium_headless_shell-<b>`). The `INSTALLATION_COMPLETE`
     marker is playwright's own completion sentinel — a bare directory from an
     interrupted extraction does not carry it."""
+    return all((browsers_dir / rel).is_file() for rel in pinned_build_markers())
+
+
+def pinned_build_markers():
+    """The pinned build's ``INSTALLATION_COMPLETE`` markers (browsers-dir
+    relative) — shared with the #1201 root render's check."""
     b = PLAYWRIGHT_CHROMIUM_BUILD
-    for name in ("chromium-" + b, "chromium_headless_shell-" + b):
-        if not (browsers_dir / name / "INSTALLATION_COMPLETE").is_file():
-            return False
-    return True
+    return ["chromium-%s/INSTALLATION_COMPLETE" % b,
+            "chromium_headless_shell-%s/INSTALLATION_COMPLETE" % b]
 
 
 def _opt_has_pinned_build(opt_dir: Path = None) -> bool:
@@ -640,7 +646,8 @@ def _heal_system_libs(browsers_path, env, *, sudo_ok, probe_rc):
 
 
 def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None, *,
-                               sleep=None, sudo_ok=None, probe_rc=None):
+                               sleep=None, sudo_ok=None, probe_rc=None,
+                               project_account=None):
     """Best-effort, time-boxed, non-fatal install of the PINNED chromium
     (#158/#1048): enabling a browser MCP alone does NOT pull the browser
     binaries — measured live, fleet accounts had node + the server but an EMPTY
@@ -664,7 +671,8 @@ def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None, *,
     `install-deps` when the launched headless shell exits 127. `sleep`/`sudo_ok`/
     `probe_rc` are injectable seams (default to the real time.sleep / sudo probe /
     launch probe) so the whole path is unit-testable with no network, sudo, or
-    real browser."""
+    real browser. #1201: a project account (``project_account``, default: its
+    declaration) REFUSES a per-user install — its browsers are the root /opt copy."""
     import subprocess
     import time
     if not PLAYWRIGHT_MANAGED:
@@ -676,6 +684,12 @@ def ensure_playwright_browsers(cache_dir: Path = None, box_class: str = None, *,
     if probe_rc is None:
         probe_rc = _probe_headless_shell_rc
     browsers_path = cache_dir or resolved_browsers_path(box_class)
+    if _is_per_user_cache(browsers_path) and (
+            _is_project_account() if project_account is None else project_account):
+        print("    ⚠ project account: %s lacks the pinned chromium build %s — re-run "
+              "the root account bootstrap (#1201); no per-account copy is installed"
+              % (OPT_MS_PLAYWRIGHT, PLAYWRIGHT_CHROMIUM_BUILD), file=sys.stderr)
+        return
     # #1048 review-2 finding 1 + fix-forward (a): gate on the COMPLETE pinned
     # build (BOTH halves + markers), not mere cache non-emptiness — a #542-era
     # OLD build, or a half download (chromium-<b> only), must re-install.
