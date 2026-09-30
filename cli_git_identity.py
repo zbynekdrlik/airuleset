@@ -36,9 +36,15 @@ import cli_onboard_exec as _x
 NOREPLY_DOMAIN = "users.noreply.github.com"
 CACHE_FILE = "git-identity.json"
 VISIBILITY_TTL_S = 24 * 3600
+IDENTITY_TTL_S = 7 * 24 * 3600      # a box's gh login can change accounts
 _VISIBILITIES = ("PUBLIC", "PRIVATE", "INTERNAL")
-# https://github.com/o/r(.git), git@github.com:o/r(.git), ssh://git@github.com/o/r
-_GITHUB_ORIGIN = re.compile(r"github\.com[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?/?$")
+# https://github.com/o/r(.git), git@github.com:o/r(.git),
+# ssh://git@github.com(:22)/o/r — github.com must start the host (never
+# notgithub.com) and end it (never github.company.example).
+_GITHUB_ORIGIN = re.compile(
+    r"(?:^|[@/])github\.com(?::\d+)?[:/]+([^/\s]+)/([^/\s]+?)(?:\.git)?/?$")
+# Claude Code's own plugin/marketplace clones — not ours to configure.
+_SKIP_MARKER = os.sep + os.path.join(".claude", "plugins") + os.sep
 
 
 class IdentityError(RuntimeError):
@@ -89,10 +95,13 @@ def identity_from_user(user):
             "%d+%s@%s" % (uid, login, NOREPLY_DOMAIN))
 
 
-def noreply_identity(cache, run=None):
-    """The cached noreply identity, else ``gh api user`` once (and cache it)."""
+def noreply_identity(cache, run=None, now=None):
+    """The cached noreply identity, else ``gh api user`` once (and cache it
+    for IDENTITY_TTL_S)."""
+    now = time.time() if now is None else now
     got = cache.get("identity") or {}
-    if got.get("name") and got.get("email"):
+    fresh = isinstance(got.get("ts"), (int, float)) and now - got["ts"] < IDENTITY_TTL_S
+    if fresh and got.get("name") and got.get("email"):
         return got["name"], got["email"]
     r = _x._gh(["api", "user"], run=run)
     if r.returncode != 0:
@@ -102,7 +111,7 @@ def noreply_identity(cache, run=None):
         name, email = identity_from_user(json.loads(r.stdout))
     except (ValueError, AttributeError, TypeError):
         raise IdentityUnavailable("gh api user: unexpected answer") from None
-    cache["identity"] = {"name": name, "email": email}
+    cache["identity"] = {"name": name, "email": email, "ts": now}
     return name, email
 
 
@@ -143,12 +152,14 @@ def _local(path, key, host, run):
 def ensure(path, cache, host=None, run=None, dry_run=False, now=None):
     """Bring ONE checkout to the noreply identity if it is a public GitHub repo.
 
-    Returns (status, detail); status is ``not-github`` / ``ok`` / ``private`` /
-    ``would-set`` / ``set``. Raises IdentityError on a gh/git failure."""
+    Returns (status, detail); status is ``not-ours`` / ``not-github`` / ``ok``
+    / ``private`` / ``would-set`` / ``set``. Raises IdentityError on a gh/git failure."""
+    if _SKIP_MARKER in os.path.join(str(path), ""):
+        return "not-ours", "Claude Code plugin clone — not ours"
     slug = origin_slug(path, host=host, run=run)
     if not slug:
         return "not-github", "no GitHub origin"
-    name, email = noreply_identity(cache, run=run)
+    name, email = noreply_identity(cache, run=run, now=now)
     if (_local(path, "user.email", host, run) == email
             and _local(path, "user.name", host, run) == name):
         return "ok", "%s already %s" % (slug, email)
@@ -196,14 +207,24 @@ def summary(result):
                c.get("not-github", 0), len(result["errors"])))
 
 
-def install_step(home, roots, run=None):
+def _app_shim_box():
+    import cli_gh_rate
+    return cli_gh_rate.is_app_shim_box()
+
+
+def install_step(home, roots, run=None, app_shim=None):
     """``cmd_install`` hook: ONE summary line, a stderr WARNING per failure.
     Never raises. With the real runner under a test run it touches nothing
-    (the #1190 ``PYTEST_CURRENT_TEST`` guard shape)."""
+    (the #1190 ``PYTEST_CURRENT_TEST`` guard shape). On an app-token-shim
+    stream box (issue 888) ``gh api user`` can never answer, so the step is a
+    quiet one-line skip there instead of a WARNING on every install."""
     if run is None and os.environ.get("PYTEST_CURRENT_TEST"):
         print("  Git identity: skipped under test (no real checkout touched)")
         return None
     try:
+        if (app_shim or _app_shim_box)():
+            print("  Git identity: skipped — app-token gh box has no user identity")
+            return None
         result = apply(roots() if callable(roots) else roots, home, run=run)
     except Exception as e:  # noqa: BLE001 — install must never break on this
         print("  Git identity: FAILED (%r) — install continues" % (e,),
@@ -218,7 +239,11 @@ def install_step(home, roots, run=None):
 
 
 def onboard_step(path, host=None, run=None, dry_run=False, home=None):
-    """``onboard-project`` step dict (``cli_onboard._step`` shape)."""
+    """``onboard-project`` step dict (``cli_onboard._step`` shape). With no
+    explicit ``home`` (the real one) it is inert under a test run."""
+    if home is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        return {"step": "git_identity", "status": "skipped",
+                "detail": "skipped under test (real home not touched)"}
     home = home or os.path.expanduser("~")
     cache = load_cache(home)
     before = json.dumps(cache, sort_keys=True)

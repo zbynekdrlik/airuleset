@@ -65,12 +65,15 @@ if echo "$TOOL_INPUT" | grep -qiE "(should|shall|can|may) (i|we) merge (it\b|thi
 fi
 
 # Commit author identity / email in a public repo's (old) history — pre-answered (#1196).
-# Owner 30.9.2026: keep the old history, noreply from now on, never ask. Three anchors
-# (commit/history + an identity term + public/old/rewrite context) keep it narrow, so a
-# UX question about a commit list or an e-mail feature is never caught.
-if echo "$TOOL_INPUT" | grep -qiE "commit|histor|históri" \
-    && echo "$TOOL_INPUT" | grep -qiE "author|autor|committer|identit|noreply|user\.(email|name)" \
-    && echo "$TOOL_INPUT" | grep -qiE "public|verejn|old (commit|history)|past commit|star(é|ých|ych|e|ej|ú) (commit|históri)|from now on|odteraz|rewrite|prepís|prepis"; then
+# Owner 30.9.2026: keep the old history, noreply from now on, never ask. Narrow on
+# purpose (review round 1): a commit term + a WORD-BOUNDED identity term (never
+# "authorization"/"autorizácia") + a repo-identity context (a public
+# REPO, old/past commits, rewrite history, force-push, a personal/student e-mail) — never
+# a bare "public". A leaked SECRET is excluded: purging it from history is required.
+if echo "$TOOL_INPUT" | grep -qiE "\bcommit|\bhistor|\bhistóri" \
+    && echo "$TOOL_INPUT" | grep -qiE "\b(author|authors|autor|autora|autorov|autorom|committers?)\b|\bidentit(y|ies|a|u|ou)\b|noreply|user\.(email|name)|\be-?mail|\b(name|meno|menom)\b" \
+    && echo "$TOOL_INPUT" | grep -qiE "(public|verejn[^ ]*) (git )?(repo|rep[ae]|repozit|github)|\bold (commits?|history)\b|\b(older|past|previous|earlier|existing) commits?\b|\bstar(é|ých|ych|e|ej|ú|ými) (commit|históri)|\bcommits? carry|force.?push|rewrite (the )?(git |repo )?history|\brewrite (them|those|these|it)\b|prepísať (históriu|commity|ich)|\bodteraz\b|from now on|\bmy (personal|private|student)\b|môj (osobný|súkromný|študentský)|(personal|student|private|osobn[^ ]*|súkromn[^ ]*|študentsk[^ ]*) e-?mail|\brepo\b[^.?!]*\bis public\b" \
+    && ! echo "$TOOL_INPUT" | grep -qiE "secret|token|password|passwd|heslo|credential|api.?key|private key|kľúč|kluc"; then
     echo "BLOCKED: Commit author identity / e-mail in a public repo is pre-answered (#1196): keep the OLD history exactly as it is (never rewrite, never force-push) and commit under the owner's GitHub noreply identity from now on. airuleset install / onboard-project sets that local identity on every public checkout automatically. Do not ask. See ask-before-assuming-deep pre-answered table." >&2
     exit 2
 fi
