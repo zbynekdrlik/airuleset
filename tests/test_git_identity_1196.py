@@ -343,6 +343,17 @@ class TestReviewRound2(_Base):
         self.assertEqual(step["status"], "applied")
         self.assertEqual(local(pub, "user.email"), NOREPLY)
 
+    def test_corrupt_visibility_entry_is_requeried(self):
+        pub = make_repo(self.tmp, "pub", "https://github.com/zbynekdrlik/pub")
+        self.gi.save_cache(self.home, {
+            "identity": {"name": "zbynekdrlik", "email": NOREPLY,
+                         "ts": time.time()},
+            "visibility": {"zbynekdrlik/pub": [5, time.time()]}})
+        step = self.gi.onboard_step(pub, run=FakeGh({"zbynekdrlik/pub": "PUBLIC"}),
+                                    home=self.home)
+        self.assertEqual(step["status"], "applied")
+        self.assertEqual(local(pub, "user.email"), NOREPLY)
+
     def test_stale_private_visibility_is_requeried(self):
         priv = make_repo(self.tmp, "priv", "https://github.com/zbynekdrlik/priv")
         self.gi.save_cache(self.home, {
@@ -504,9 +515,11 @@ class TestPreAnswered(unittest.TestCase):
             "Should I amend the last commit message typo?",
             "Should the commit author field show full name in the new UI?",
             "Should I force-push the rebased feature branch?",
+            # round 3: no public-repo / old-commit context — may be a
+            # private repo, where the pre-answer does not apply
+            "Which git identity should I use for commits here?",
         )
         blocked = (
-            "Which git identity should I use for commits here?",
             "Mám prepísať históriu commitov s mojím osobným e-mailom?",
             "Majú staré commity ostať s mojím študentským e-mailom?",
         )
@@ -515,6 +528,58 @@ class TestPreAnswered(unittest.TestCase):
                 self.assertEqual(self._ask(q).returncode, 0, q)
         for q in blocked:
             with self.subTest(blocked=q):
+                self.assertEqual(self._ask(q).returncode, 2, q)
+
+    def test_review3_false_positives_allowed(self):
+        for q in (
+            "Should the history tab show the author's personal name or "
+            "username?",
+            "Mám v histórii zmien zobraziť osobné meno autora úpravy?",
+            "Chceš, aby autor v histórii dokumentu bol zobrazený osobným "
+            "menom?",
+            "Should the CHANGELOG credit the author by personal name or "
+            "GitHub handle? I'll commit it next.",
+            "Old commits contain customer personal e-mails from a fixture "
+            "file. Rewrite history to remove them (GDPR)?",
+            "Staré commity obsahujú osobné e-maily zákazníkov z testovacích "
+            "dát. Prepísať históriu kvôli GDPR?",
+            "Commits contain student names in the test fixtures. Rewrite "
+            "history before publishing?",
+            "Which user.email should the CI bot use for its version-bump "
+            "commits?",
+            "Should the release bot commit under the noreply identity or a "
+            "dedicated bot account?",
+            "Should the Discord notification show the commit author's "
+            "personal name or the noreply login?",
+            "Commits by the external author David carry his personal "
+            "e-mail. Should his future commits use his work e-mail?",
+            "Should I use git filter-repo to split the monorepo history "
+            "into two repos? The author metadata stays.",
+            "Mám prepísať históriu commitov, aby sme odstránili veľký "
+            "binárny súbor? Autor je bot.",
+            "Should I amend the commit to add the missing Co-Authored-By "
+            "trailer for the author?",
+            "Should I rebase and force-push to drop the WIP commits? The "
+            "author is me.",
+        ):
+            with self.subTest(q=q):
+                self.assertEqual(self._ask(q).returncode, 0, q)
+
+    def test_review3_natural_phrasings_blocked(self):
+        for q in (
+            "Some commits in fohmixer were authored with a personal e-mail. "
+            "Rewrite or keep?",
+            "Should I change the author e-mail on the old commits?",
+            "Mám zmeniť e-mail autora v starých commitoch?",
+            "Which e-mail should I commit with from now on in this public "
+            "repo?",
+            "Aký e-mail mám odteraz používať pri commitoch vo verejnom repe?",
+            "The public repo's history has 22 commits under the student "
+            "e-mail. What now?",
+            "Old commits show my university e-mail. Keep them?",
+            "22 public commits carry my Gmail address. Rewrite them?",
+        ):
+            with self.subTest(q=q):
                 self.assertEqual(self._ask(q).returncode, 2, q)
 
     def test_terms_split_across_options_still_judged_as_one(self):
