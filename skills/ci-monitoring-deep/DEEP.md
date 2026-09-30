@@ -22,13 +22,19 @@
   ```bash
   DEADLINE=$((SECONDS + ${AIRULESET_POLL_BUDGET_S:-100}))
   for i in $(seq 1 18); do
-    s=$(gh run view <id> --json status,conclusion,jobs --jq 'if .status=="completed" then "TERMINAL "+.status+" "+(.conclusion//"") elif ([.jobs[]?|select(.conclusion=="failure" or .conclusion=="timed_out")]|length)>0 then "JOBFAIL "+([.jobs[]?|select(.conclusion=="failure" or .conclusion=="timed_out")]|map(.name)|join(", ")) else "PENDING "+.status end')
+    s=$(gh run view <id> --json status,conclusion --jq '.status+" "+(.conclusion//"")') || s="ERROR"
+    j=""
+    if [ "${s%% *}" = "completed" ] || [ $((i % 3)) -eq 0 ]; then
+      j=$(gh run view <id> --json jobs --jq '[.jobs[]?|select(.conclusion=="failure" or .conclusion=="timed_out")|.name]|if length>0 then "JOBFAIL "+join(", ") else "" end') || j=""
+    fi
     case "$s" in
-      "TERMINAL "*) echo "TERMINAL: ${s#TERMINAL }"; break;;
-      "JOBFAIL "*) echo "JOB FAILED (run still in progress): ${s#JOBFAIL }"; break;;
+      completed*) echo "TERMINAL: $s${j:+ ($j)}"; break;;
+    esac
+    case "$j" in
+      "JOBFAIL "*) echo "JOB FAILED (run still in progress): ${j#JOBFAIL }"; break;;
     esac
     if [ "$SECONDS" -ge "$DEADLINE" ]; then
-      echo "POLL BUDGET REACHED (not yet terminal): ${s#PENDING }"; break
+      echo "POLL BUDGET REACHED (not yet terminal): $s"; break
     fi
     sleep 30
   done
@@ -39,11 +45,18 @@
 - **Long wait — ONE background waiter (`run_in_background: true`), then RECOVER.** It must BLOCK to a terminal state (never a trailing `&` or `nohup`, which returns immediately and fires the notification at once), self-bound on its own budget the way the foreground loop does, and print nothing along the way — so the harness wakes you with exactly ONE task-notification for the whole wait instead of once per ~9-minute chunk:
 
   ```
-  timeout "${AIRULESET_LONG_POLL_BUDGET_S:-10800}" bash -c 'while :; do
-    s=$(gh run view <id> --json status,conclusion,jobs --jq "if .status==\"completed\" then \"TERMINAL \"+.status+\" \"+(.conclusion//\"\") elif ([.jobs[]?|select(.conclusion==\"failure\" or .conclusion==\"timed_out\")]|length)>0 then \"JOBFAIL \"+([.jobs[]?|select(.conclusion==\"failure\" or .conclusion==\"timed_out\")]|map(.name)|join(\", \")) else \"PENDING \"+.status end" 2>/dev/null) || s="ERROR"
+  timeout "${AIRULESET_LONG_POLL_BUDGET_S:-10800}" bash -c 'i=0; while :; do
+    i=$((i + 1))
+    s=$(gh run view <id> --json status,conclusion --jq ".status+\" \"+(.conclusion//\"\")" 2>/dev/null) || s="ERROR"
+    j=""
+    if [ "${s%% *}" = "completed" ] || [ $((i % 3)) -eq 0 ]; then
+      j=$(gh run view <id> --json jobs --jq "[.jobs[]?|select(.conclusion==\"failure\" or .conclusion==\"timed_out\")|.name]|if length>0 then \"JOBFAIL \"+join(\", \") else \"\" end" 2>/dev/null) || j=""
+    fi
     case "$s" in
-      "TERMINAL "*) echo "TERMINAL: ${s#TERMINAL }"; exit 0 ;;
-      "JOBFAIL "*) echo "JOB FAILED (run still in progress): ${s#JOBFAIL }"; exit 0 ;;
+      completed*) echo "TERMINAL: $s${j:+ ($j)}"; exit 0 ;;
+    esac
+    case "$j" in
+      "JOBFAIL "*) echo "JOB FAILED (run still in progress): ${j#JOBFAIL }"; exit 0 ;;
     esac
     sleep 60
   done'
@@ -55,19 +68,26 @@
 
   **A memory-pressure REAP also kills a MAIN-session `run_in_background` waiter** — Claude Code SIGKILLs it on a `memoryPressure` event, in MINUTES, on a memory-tight box (a subagent's bg shell is EXEMPT), so relaunch re-CREATES a dead process, not re-links a handle. Same recovery. `CLAUDE_CODE_DISABLE_BG_SHELL_PRESSURE_REAP=1` on the CLI env disables it; fuller mechanism + subagent mitigation: `verify-launched-work-liveness`.
 
-  **Fail-fast on job-level failure, inside the SAME poll.** Both shapes above wake the moment ANY job in a still-running multi-job run reports `conclusion=="failure"` or `conclusion=="timed_out"` (a job hitting its own `timeout-minutes` is arguably the likeliest way this scenario happens; a `cancelled` job is deliberately excluded — either a cascade from a sibling failure, already reported via that sibling, or a genuine `gh run cancel` where waking would be misleading) — not just when the whole run reaches `completed` — via the SAME single `gh run view` call (`,jobs` added to `--json`, no second call), branching in `--jq` before bash ever sees the JSON. `gh run view --json jobs` returns only the LATEST attempt, so a superseded pre-rerun failure never re-fires the wake. (The measured `GH_DEBUG=api` cost of adding `,jobs` is in the playbook.)
+  **Cheap status every poll, jobs every 3rd poll (#1200).** Every poll reads only `--json status,conclusion`. The heavy `--json jobs` payload (every step of every job; GitHub intermittently answers it with HTTP 502 on a big matrix — seen live on a 33-job run) is read only when `i % 3 == 0` (~90 s in the foreground loop, ~3 min in the background waiter) and once when the run reports `completed`, where it names the failed jobs in the TERMINAL line. **A gh failure (502/504/timeout, any non-zero exit) is ALWAYS "retry next poll", never a result**: a failed status read becomes `ERROR`, which is neither terminal nor a job failure, and a failed jobs read reads as "no failed job yet".
 
-**DEPLOY / VERSION-LIVE watch — unblock on DEPLOYED-STATE, not run-terminal (#588).** For a release/deploy wait, the run-level `completed` OVERSHOOTS the deployed state by the whole post-deploy E2E tail (tens of minutes) — a worker "watching the deploy" long after the version is live on PROD is a trust-damaging failure. Drop this DEPLOY-DONE classifier into EITHER loop above (SAME single `gh run view` call — one API call, the `| jq` is local), with `DEPLOY_JOB_RE` = the deploy-completing job set (NEVER the E2E tail): it unblocks the moment that set is all-green even while the tail keeps the run `in_progress`; a deploy-set failure fails fast; a scoped-out E2E failure never masks DEPLOYED.
+  **Fail-fast on job-level failure.** Both shapes wake when ANY job in a still-running multi-job run reports `conclusion=="failure"` or `conclusion=="timed_out"` (a job hitting its own `timeout-minutes` is arguably the likeliest way this scenario happens; a `cancelled` job is deliberately excluded — either a cascade from a sibling failure, already reported via that sibling, or a genuine `gh run cancel` where waking would be misleading) — not just when the whole run reaches `completed` — within one jobs-read interval of the failure, branching in `--jq` before bash ever sees the JSON. `gh run view --json jobs` returns only the LATEST attempt, so a superseded pre-rerun failure never re-fires the wake. (The measured `GH_DEBUG=api` cost of `jobs` is in the playbook.)
+
+**DEPLOY / VERSION-LIVE watch — unblock on DEPLOYED-STATE, not run-terminal (#588).** For a release/deploy wait, the run-level `completed` OVERSHOOTS the deployed state by the whole post-deploy E2E tail (tens of minutes) — a worker "watching the deploy" long after the version is live on PROD is a trust-damaging failure. Drop this DEPLOY-DONE classifier into the foreground loop above in place of its jobs read (its `jq` filter is single-quoted, so it cannot go inside the background waiter's `bash -c '…'` body) — the same gate (every 3rd poll and once the run is completed, #1200) and the same retry rule (a gh failure leaves `d` empty = poll again, never a verdict; the `| jq` is local) — with `DEPLOY_JOB_RE` = the deploy-completing job set (NEVER the E2E tail): it unblocks the moment that set is all-green even while the tail keeps the run `in_progress`; a deploy-set failure fails fast; a scoped-out E2E failure never masks DEPLOYED.
 
 ```bash
 DEPLOY_JOB_RE='Deploy to PROD|Disable Maintenance|Smoke'   # deploy-completing set — NEVER the E2E tail; tokens are UNANCHORED regex, so anchor ('^Deploy to PROD$') or pick tail-disjoint tokens
-s=$(gh run view <id> --json status,conclusion,jobs | jq -r --arg re "$DEPLOY_JOB_RE" '
+d=""
+if [ "${s%% *}" = "completed" ] || [ $((i % 3)) -eq 0 ]; then
+  if r=$(gh run view <id> --json status,conclusion,jobs); then
+    d=$(printf '%s' "$r" | jq -r --arg re "$DEPLOY_JOB_RE" '
   ([.jobs[]?|select((.name // "")|test($re))]) as $dep
   | if   ($dep|length)>0 and any($dep[]; .conclusion=="failure" or .conclusion=="timed_out")                         then "DEPLOYFAIL "+([$dep[]|select(.conclusion=="failure" or .conclusion=="timed_out")|.name]|join(", "))
     elif ($dep|length)>0 and any($dep[]; .conclusion=="success") and all($dep[]; .conclusion=="success" or .conclusion=="skipped") then "DEPLOYED "+([$dep[]|.name]|join(", "))
     elif .status=="completed"                                                                                        then "TERMINAL "+.status+" "+(.conclusion//"")
-    else "PENDING "+.status end')
-# DEPLOYED -> break (version is live). DEPLOYFAIL -> break (deploy broke). TERMINAL -> break (run ended before a deploy-set match; check DEPLOY_JOB_RE).
+    else "PENDING "+.status end') || d=""
+  fi
+fi
+# Check $d BEFORE the loop's own case. DEPLOYED -> break (version is live). DEPLOYFAIL -> break (deploy broke). TERMINAL -> break (run ended before a deploy-set match; check DEPLOY_JOB_RE). Empty -> not read this poll, or gh failed: poll again.
 ```
 
 Prefer/COMBINE the ground truth the owner looks at — a DIRECT version read from the live target (DOM version label / health endpoint / XML-RPC module version): the deploy-set green is the CI signal, the live version read the confirmation. The run's final conclusion (E2E tail) is an OPTIONAL confirmation, **never the re-entry gate** for a parked ticket.
