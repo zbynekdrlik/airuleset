@@ -133,6 +133,12 @@ class TestShareAccessLane(_ShareHarness):
         self.assertIn("NOT verified", err)
         self.assertIn("--private", err)
 
+    def test_edge_only_403_on_healthz_is_not_a_verified_tunnel(self):
+        # a WAF / browser-integrity 403 is the EDGE, not the tunnel: note it
+        out, err = self.run_share(LANE, {"/s/": 302, "/healthz": 403})
+        self.assertEqual(len(url_lines(out)), 1, out)
+        self.assertIn("NOT verified", err)
+
     def test_token_only_200_needs_no_healthz_probe(self):
         out, _err = self.run_share(LANE, {"/s/": 200, "/healthz": 530})
         self.assertEqual(len(url_lines(out)), 1, out)
@@ -185,7 +191,7 @@ class TestBypassRobustness(unittest.TestCase):
 
     def test_bypass_host_must_be_a_strict_hostname(self):
         for bad in ("*.newlevel.media", "*", HOST + ":8443", "Drop_x.newlevel.media",
-                    "-bad.newlevel.media"):
+                    "-bad.newlevel.media", "DROP.newlevel.media", HOST + "/x"):
             with self.assertRaises(ValueError, msg=bad):
                 gl.healthz_bypass_payload(bad)
         self.assertEqual(gl.healthz_bypass_payload(HOST)["domain"], HOST + "/healthz")
