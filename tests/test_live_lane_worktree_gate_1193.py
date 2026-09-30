@@ -49,16 +49,25 @@ def _git(cwd, *args, env=None):
     return r.stdout
 
 
-def _transcript(home, root, agent_id, *, finished=False, age_s=0.0, sid="sid1"):
+def _transcript(home, root, agent_id, *, finished=False, age_s=0.0, sid="sid1",
+                api_error=False, meta=None):
     """A real subagent transcript at the path Claude Code writes it:
     ``<home>/.claude/projects/<enc(root)>/<sid>/subagents/<agent_id>.jsonl``.
     A last turn with a pending tool call reads LIVE; a final ``end_turn`` text
-    reply reads FINISHED; an mtime older than the window reads STALE."""
+    reply reads FINISHED; an unrecovered api-error reads WEDGED; an mtime older
+    than the window reads STALE. ``meta`` writes the sibling
+    ``<agent_id>.meta.json`` Claude Code keeps next to it."""
     p = (Path(home) / ".claude" / "projects" / T.encode_project_dir(str(root))
          / sid / "subagents" / (agent_id + ".jsonl"))
     p.parent.mkdir(parents=True, exist_ok=True)
+    if meta is not None:
+        p.with_name(agent_id + ".meta.json").write_text(json.dumps(meta))
     user = {"type": "user", "message": {"role": "user", "content": "Work issue"}}
-    if finished:
+    if api_error:
+        last = {"type": "assistant", "isApiErrorMessage": True, "message": {
+            "role": "assistant",
+            "content": [{"type": "text", "text": "API Error: overloaded_error"}]}}
+    elif finished:
         last = {"type": "assistant", "message": {
             "role": "assistant", "content": [{"type": "text", "text": "done"}],
             "stop_reason": "end_turn"}}
@@ -124,6 +133,32 @@ class TestStaleAgentWorktreeRung(_Box):
         row = self._rows()["agent-live1"]
         self.assertEqual(row["kind"], "skip", row)
         self.assertEqual(row["reason"], LIVE_REASON)
+
+    def test_wedged_lane_is_kept(self):
+        """A fresh transcript ending in an unrecovered api-error is a WEDGED
+        worker — still in flight and recoverable, so its worktree stays."""
+        self.lane("agent-wedge1")
+        _transcript(self.home, self.repo, "agent-wedge1", api_error=True)
+        self.assertEqual(self._rows()["agent-wedge1"]["reason"], LIVE_REASON)
+
+    def test_lane_waiting_on_its_own_child_agent_is_kept(self):
+        """A lane blocked on a long foreground child (its review subagent)
+        writes nothing to its OWN transcript; the live child's meta names the
+        lane's worktree (``inheritedWorktreePath``), which keeps it."""
+        wt = self.lane("agent-parent1")
+        _transcript(self.home, self.repo, "agent-parent1", age_s=20 * 60,
+                    meta={"worktreePath": str(wt)})
+        _transcript(self.home, self.repo, "agent-child1",
+                    meta={"inheritedWorktreePath": str(wt),
+                          "parentAgentId": "parent1"})
+        self.assertEqual(self._rows()["agent-parent1"]["reason"], LIVE_REASON)
+
+    def test_finished_child_does_not_keep_the_lane(self):
+        wt = self.lane("agent-parent2")
+        _transcript(self.home, self.repo, "agent-parent2", age_s=20 * 60)
+        _transcript(self.home, self.repo, "agent-child2", finished=True,
+                    meta={"inheritedWorktreePath": str(wt)})
+        self.assertIsNone(self._rows()["agent-parent2"]["reason"])
 
     def test_finished_lane_is_reclaimed(self):
         self.lane("agent-done1")
@@ -374,6 +409,38 @@ class TestCheckedEvidence(unittest.TestCase):
                                                        time.time())
         self.assertEqual(ids, {"agent-a"})
         self.assertIn("sid2", err)
+
+    def test_unlistable_subagents_dir_is_not_a_confident_empty(self):
+        """``count_live_workers`` walks ``subagents/`` with ``rglob``, which
+        SWALLOWS a listing error: an unreadable dir would read as "no live
+        lane". The gate reader must report it. Injected at ``os.scandir`` (what
+        every directory walk calls) so it also holds as root."""
+        import cli_lane_live_gate as g
+        _transcript(self.home, self.root, "agent-a", sid="sid1")
+        _transcript(self.home, self.root, "agent-b", sid="sid2")
+        real = os.scandir
+
+        def _denied(path="."):
+            if os.sep + "sid2" + os.sep + "subagents" in os.fsdecode(path):
+                raise PermissionError(13, "Permission denied", path)
+            return real(path)
+
+        with mock.patch("os.scandir", _denied):
+            ids, err = g.live_worker_agent_ids_checked(self.root, str(self.proj),
+                                                       time.time())
+        self.assertIn("agent-a", ids)
+        self.assertTrue(err, "an unlistable subagents dir must be 'could not tell'")
+
+    def test_unknown_evidence_keeps_only_agent_worktrees(self):
+        """Transcript evidence can only ever name an ``agent-*`` worktree, so an
+        evidence error keeps those and leaves any other worktree to its own
+        reclaim rules (never a permanent keep of unrelated trees)."""
+        import cli_lane_live_gate as g
+        gate = g.LiveLaneGate(projects_dir=str(self.proj),
+                              evidence_fn=lambda *_a: (set(), "boom"))
+        wts = self.root + "/.claude/worktrees/"
+        self.assertIn("liveness unknown", gate.keep_reason(self.root, wts + "agent-q"))
+        self.assertIsNone(gate.keep_reason(self.root, wts + "issue-12"))
 
     def test_gate_memoizes_one_read_per_repo_per_pass(self):
         import cli_lane_live_gate as g
