@@ -288,25 +288,22 @@ class LiveLaneGate:
         return FINISHED_GRACE_KEPT if self._in_grace(str(repo_root), base) else None
 
     def _in_grace(self, repo_key, base):
-        """True when ``base`` is a lane whose transcript, last written inside
-        the grace, ends in a TERMINAL stop (read lazily, once per pass). A
-        stale lane whose tail is a pending tool call is not a finished lane.
-        At ``critical`` disk the grace is waived and the waiver is logged."""
+        """True when ``base`` is a lane last written inside the grace whose
+        final turn is a completed text reply (read lazily, once per pass). A
+        ``settling`` tail (no stop_reason, ~18 % of real finishes) counts too:
+        every candidate here is either terminal-finished or stale (15 min idle,
+        far past ``FINISH_SETTLE_S``), and the grace decides a KEEP, never a
+        delete. A pending tool-call / api-error tail is not a finished lane. At
+        ``critical`` disk the grace is waived before any content read, logged."""
         path = self._recent.get(repo_key, {}).get(base)
         if not path:
             return False
-        if path not in self._finished:
-            try:
-                import watchdog.transcripts as T
-                self._finished[path] = T.transcript_worker_finished(path) == "terminal"
-            except Exception as e:  # noqa: BLE001 — an unreadable finish is not a proof
-                print("lane-live-gate: finish unreadable for %s (%r) — no grace"
-                      % (path, e), file=sys.stderr)
-                self._finished[path] = False
-        if not self._finished[path]:
-            return False
         if self.disk_level == GRACE_WAIVED_LEVEL:
-            print("lane-live-gate: %s finished inside the resume grace, disk %s — "
-                  "grace waived" % (base, self.disk_level), file=sys.stderr)
+            print("lane-live-gate: %s last written inside the resume grace, disk %s"
+                  " — grace waived" % (base, self.disk_level), file=sys.stderr)
             return False
-        return True
+        if path not in self._finished:
+            import watchdog.transcripts as T   # its finish reader never raises
+            self._finished[path] = T.transcript_worker_finished(path) in (
+                "terminal", "settling")
+        return self._finished[path]

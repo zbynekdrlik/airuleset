@@ -300,11 +300,17 @@ def _pct(used, denom):
     return int(math.ceil(100.0 * used / denom))
 
 
-def _lane_grace_level(status, q):
-    """#1195: the disk level the worktree rungs hand to the live-lane gate —
-    the fs level, raised to ``critical`` when this account's quota is at or
-    past ``CRITICAL_PCT`` (a full quota is low disk for this account)."""
+def _lane_grace_level(status, q, statvfs_fn=None):
+    """#1195: the disk level the worktree rungs hand to the live-lane gate
+    (``critical`` waives the finished-lane resume grace). Critical when the
+    worst mount is at the #968 effective critical threshold (85 % on a small
+    root fs), or when this account's quota is at ``CRITICAL_PCT`` — the quota
+    drain threshold, so any quota drain waives the grace (a nearly full hard
+    limit is low disk for this account). Else the fs level."""
+    from watchdog.disk_guard_worktrees import effective_critical_pct
     if q.pressure and isinstance(q.pct, (int, float)) and q.pct >= CRITICAL_PCT:
+        return "critical"
+    if (status.get("worst_pct") or 0) >= effective_critical_pct(statvfs_fn):
         return "critical"
     return status.get("level")
 
@@ -1778,53 +1784,30 @@ def _find_worktree_dirs(home_glob=HOME_WORKTREE_GLOB, listdir_fn=None,
     return results
 
 
-FOREIGN_WORKTREE_REPORT = ("another account's worktree — report only; that account's "
-                           "own disk-guard reclaims it behind the live-lane gate (#1195)")
+FOREIGN_WORKTREE_REPORT = ("%d worktree(s) of another account — report only; that "
+                           "account's own disk-guard reclaims them behind the live-lane "
+                           "gate (#1195)")
 
 
 def discover_stale_home_worktrees(now=None, home_glob=None, listdir_fn=None):
     """Cross-user worktree rung (#906), REPORT-ONLY since #1195 item 2 (owner
-    30.9.): one ``kind: "report"`` row per ``/home/*/devel/**/.claude/worktrees/*``
-    of ANOTHER account. It never yields a delete: the #906 removal ran with no
-    live-lane evidence (its only guard, an unreadable foreign ``/proc``, is gone
-    under ``hidepid=2``), and each account's own disk-guard reclaims its own
-    worktrees behind ``cli_lane_live_gate``. No sudo, no VCS call, no size walk
-    and no ``/proc`` probe on a foreign home — sizes stay visible through
-    :func:`discover_home_worktree_consumers`. ``now`` is kept for the planner
+    30.9.): ONE ``kind: "report"`` row per foreign OWNER that has
+    ``/home/<owner>/devel/**/.claude/worktrees/*`` (the count in its reason),
+    never a delete. The #906 removal ran with no live-lane evidence (its only
+    guard, an unreadable foreign ``/proc``, is gone under ``hidepid=2``), and
+    each account's own disk-guard reclaims its own worktrees behind
+    ``cli_lane_live_gate``. No sudo, no VCS call, no size walk and no
+    ``/proc`` probe on a foreign home. ``now`` is kept for the planner
     signature; ``home_glob`` defaults to :data:`HOME_WORKTREE_GLOB` at call time."""
-    wt_dirs = _find_worktree_dirs(home_glob=home_glob or HOME_WORKTREE_GLOB,
-                                  listdir_fn=listdir_fn)
-    return [{"cls": "home-worktree", "path": wt, "owner": owner, "repo": repo,
-             "bytes": 0, "kind": "report", "reason": FOREIGN_WORKTREE_REPORT}
-            for wt, owner, repo in wt_dirs]
-
-
-def discover_home_worktree_consumers(home_glob=HOME_WORKTREE_GLOB,
-                                     listdir_fn=None, dir_size_fn=None):
-    """Top-consumers report: sizes of worktree dirs under ``/home/*/devel/``
-    (#906 fix 1). Returns action-shaped rows ``{cls, path, bytes, kind, reason}``
-    for ``_top_consumers_by_path``. No sudo needed — worktree dirs are typically
-    world-readable. No liveness/age check here — just sizes, so the report
-    shows WHERE disk is consumed regardless of reclaimability.
-
-    ``kind`` is ``home-worktree-remove`` (not ``report``) so that
-    ``_top_consumers_by_path`` includes these rows (it filters out ``skip``
-    and ``report`` kinds — Y1 fix). The rows are never executed: they feed the
-    report only, and the executor refuses ``home-worktree-remove`` (#1195).
-    """
-    wt_dirs = _find_worktree_dirs(home_glob=home_glob, listdir_fn=listdir_fn,
-                                  exclude_own_user=False)  # report ALL users' sizes
-    out = []
-    for wt_path, _owner, _repo in wt_dirs:
-        if dir_size_fn is not None:
-            size = dir_size_fn(wt_path)
-        else:
-            size = _safe_dir_size(wt_path)
-        # Only report non-trivial dirs (> 1 MB)
-        if size > 1_000_000:
-            out.append({"cls": "home-worktree", "path": wt_path, "bytes": size,
-                        "kind": "home-worktree-remove", "reason": None})
-    return out
+    per_owner: dict = {}
+    for wt, owner, repo in _find_worktree_dirs(home_glob=home_glob or HOME_WORKTREE_GLOB,
+                                               listdir_fn=listdir_fn):
+        per_owner.setdefault(owner, []).append((wt, repo))
+    return [{"cls": "home-worktree", "owner": owner, "bytes": 0, "kind": "report",
+             "path": os.path.commonpath([wt for wt, _r in wts]),
+             "repo": os.path.commonpath([r for _w, r in wts]),
+             "reason": FOREIGN_WORKTREE_REPORT % len(wts)}
+            for owner, wts in sorted(per_owner.items())]
 
 
 # --------------------------------------------------------------------------- #
@@ -3123,13 +3106,11 @@ def discover_whole_disk_survey(report_read_fn=None, glob_fn=None,
 # escalation (#834 req 1 ≥90 %, machine-channel; box-wide daily dedup)
 # --------------------------------------------------------------------------- #
 def _ranked_consumers(home, now):
-    """Ranked (class, reclaimable-bytes) for this user's own home PLUS
-    cross-user ``home-worktree`` trees (#906: world-readable worktree dirs
-    under ``/home/*/devel/``). Best-effort; a failing planner contributes 0,
-    never kills the list."""
+    """Ranked (class, reclaimable-bytes) for this user's own home (#1195: no
+    foreign account's trees — root reads nothing from other accounts).
+    Best-effort; a failing planner contributes 0, never kills the list."""
     ranked = []
     for label, plan in (("worktree", lambda: _plan_worktrees(home, now)),
-                        ("home-worktree", lambda: _plan_home_worktrees(home, now)),
                         ("transcript", lambda: _plan_transcripts(home, now)),
                         ("toolchain", lambda: _plan_toolchain(home, now)),
                         ("uploads", lambda: _plan_uploads(home, now)),
@@ -3155,7 +3136,6 @@ def _collect_top_consumers(home, now, limit=5, scratch_rows=None):
     #892: accepts pre-computed `scratch_rows` to avoid a doubled du-heavy walk."""
     all_actions = []
     for label, plan in (("worktree", lambda: _plan_worktrees(home, now)),
-                        ("home-worktree", lambda: _plan_home_worktrees(home, now)),
                         ("uploads", lambda: _plan_uploads(home, now)),
                         ("cli-version", lambda: _plan_cli_versions(home, now)),
                         ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
@@ -3876,7 +3856,8 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
             planners = planners_fn(home, now)
         else:
             planners = _default_planners(home, now, scratch_rows=scratch_rows,
-                                         wt_cache=not dry_run, level=_lane_grace_level(status, q))
+                                         wt_cache=not dry_run,
+                                         level=_lane_grace_level(status, q, statvfs_fn))
 
         with timer.step("drain", logs):
             logs += _dgq.run_drain_passes(status, home, now, dry_run, planners, planners_fn,
