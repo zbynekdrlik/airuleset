@@ -38,7 +38,7 @@ _PREMOVE_SHA = "3997def38982a90f1ef4bd070854bbafeb46b77f"
 _MOVED_FUNCS = [
     "_lane_is_merged", "_parse_worktree_records", "_pick_most_advanced_ref",
     "_resolve_base_branch", "_is_lane_worktree", "_ref_exists", "_lane_target",
-    "_worktree_process_cwds", "_path_has_proc", "_live_worker_agent_ids",
+    "_worktree_process_cwds", "_path_has_proc",  # _live_worker_agent_ids: changed, #1193
     "_handoff_numbers", "classify_lanes",  # _lane_ticket_numbers: changed, #1165
     "state_summary", "gather_live_lanes",
 ]
