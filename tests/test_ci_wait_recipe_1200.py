@@ -60,6 +60,8 @@ DEPLOY_MARKER = "DEPLOY_JOB_RE="
 # prints a 502 on stderr and exits 1 (the live failure). EMPTY prints an
 # empty line. The last item repeats.
 _GH_STUB = r"""#!/usr/bin/env bash
+if [ "${1-}" = "run" ] && [ "${2-}" = "list" ]; then echo "${RUN_LIST_ID-}"; exit 0; fi
+printf '%s\n' "$*" >> "$GH_LOG.args"
 json=""; jq=""; prev=""
 for a in "$@"; do
   [ "$prev" = "--json" ] && json="$a"
@@ -136,7 +138,7 @@ class StubGh:
         self.env["GH_LOG"] = self.gh_log
         self.env["JQ_LOG"] = self.jq_log
 
-    def run(self, script, timeout=20, **seqs):
+    def run(self, script, timeout=20, strict=False, **seqs):
         """Run `script` in its own SESSION with output to files; on the outer
         timeout kill every process of that session and return OUTER_KILLED.
         (GNU `timeout` moves its child into a new process GROUP, so a group
@@ -148,7 +150,8 @@ class StubGh:
         err_path = os.path.join(self.root, "stderr")
         with open(out_path, "w") as out_fh, open(err_path, "w") as err_fh:
             proc = subprocess.Popen(
-                ["bash", "-c", "set -uo pipefail\n" + script],
+                ["bash", "-c", ("set -euo pipefail\n" if strict
+                                else "set -uo pipefail\n") + script],
                 stdout=out_fh, stderr=err_fh, env=env, cwd=self.root,
                 start_new_session=True)
             try:
@@ -161,6 +164,14 @@ class StubGh:
         with open(out_path) as fh_out, open(err_path) as fh_err:
             return subprocess.CompletedProcess(proc.args, rc, fh_out.read(),
                                                fh_err.read())
+
+    def argv(self):
+        """Every `gh run view` argv line, as the stub saw it."""
+        path = self.gh_log + ".args"
+        if not os.path.isfile(path):
+            return []
+        with open(path) as fh:
+            return [line.rstrip("\n") for line in fh]
 
     def calls(self):
         if not os.path.isfile(self.gh_log):
@@ -272,6 +283,15 @@ class TestForegroundLoop(unittest.TestCase):
         self.assertIn("TERMINAL: completed success", r.stdout)
         self.assertNotIn("JOB FAILED", r.stdout)
         self.assertEqual(self.gh.calls().count("jobs"), 2)
+
+    def test_gh_failures_are_retries_under_set_e(self):
+        # A session may paste the loop into a `set -e` shell: a gh failure
+        # must still be a retry there, never an abort (#1200 review).
+        r = self.gh.run(foreground(), strict=True,
+                        STATUS_SEQ="FAIL|in_progress |in_progress |completed success",
+                        JOBS_SEQ="FAIL|EMPTY", AIRULESET_POLL_BUDGET_S="100")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("TERMINAL: completed success", r.stdout)
 
     def test_gh_down_the_whole_time_ends_on_the_budget(self):
         r = self.gh.run(foreground(sleep="0.2"), STATUS_SEQ="FAIL",
@@ -426,6 +446,14 @@ class TestDeployWatchCadence(unittest.TestCase):
         self.assertEqual(len(calls), 1, calls)
         self.assertIn("D=DEPLOYED", out)
 
+    def test_non_json_body_is_no_verdict_under_set_e(self):
+        gh = StubGh(self)
+        script = ('i=3; s="in_progress "; d=""\n%s\nprintf "D=%%s\\n" "$d"\n'
+                  % deep_block(DEPLOY_MARKER).replace("<id>", RUN_ID))
+        r = gh.run(script, strict=True, OTHER_SEQ="<html>502 Bad Gateway</html>")
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("D=\n", r.stdout)
+
     def test_gh_failure_is_no_verdict(self):
         out, calls = self._run(3, "in_progress ", "FAIL")
         self.assertEqual(len(calls), 1, calls)
@@ -483,6 +511,33 @@ class TestHookHandsOutTheSameRecipe(unittest.TestCase):
         short_wait, _, long_wait = out.stderr.partition("LONG wait")
         self._assert_lines_in(deep_block(FOREGROUND_MARKER), short_wait)
         self._assert_lines_in(deep_block(BACKGROUND_MARKER), long_wait)
+
+    def test_generic_bucket_copies_resolve_the_run_id(self):
+        # No run id in the polled command: the printed copies resolve it
+        # with `gh run list` and must hand it to the gh calls, including the
+        # background waiter's child `bash -c` shell (#1200 review).
+        cmd = "gh run view --json status,conclusion"
+        for _ in range(2):
+            self._hook(cmd)
+        out = self._hook(cmd)
+        self.assertEqual(out.returncode, 2, out.stderr)
+        short_wait, _, long_wait = out.stderr.partition("LONG wait")
+        fg = short_wait[short_wait.index("export RID="):]
+        fg = fg[:fg.index("  done") + len("  done")]
+        bg = long_wait[long_wait.index("export RID="):]
+        bg = bg[:bg.index("  done'") + len("  done'")]
+        for label, script in (("foreground", fg.replace("sleep 30", "sleep 0.01")),
+                              ("background", bg.replace("sleep 60", "sleep 0.01"))):
+            gh = StubGh(self)
+            r = gh.run(script, STATUS_SEQ="in_progress |completed success",
+                       JOBS_SEQ="EMPTY", RUN_LIST_ID="424242424242",
+                       AIRULESET_LONG_POLL_BUDGET_S="10")
+            self.assertIn("TERMINAL: completed success", r.stdout,
+                          label + ": " + r.stdout + r.stderr)
+            argv = gh.argv()
+            self.assertTrue(argv, label)
+            for line in argv:
+                self.assertIn("run view 424242424242 ", line, label)
 
     def test_background_waiter_is_never_blocked(self):
         waiter = deep_block(BACKGROUND_MARKER).replace("<id>", RUN_ID)
