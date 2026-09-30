@@ -3546,22 +3546,19 @@ def file_severe_ticket(status, home, now, top, dry_run=False, run_fn=None,
             return logs
         import airuleset as _ars
         repo_dir = os.path.dirname(os.path.abspath(_ars.__file__))
-        argv = [
-            sys.executable, os.path.join(repo_dir, "airuleset.py"),
-            "gk-request",
-            "--title", title,
-            "--body", body,
-            "--repo", repo,
-        ]
+        # gk-request, or (#1199) a native `gh issue create` on a project account
+        argv = _esc.airuleset_filer_argv(repo, title, body, repo_dir,
+                                         sys.executable)
+        via = "gk-request" if "gk-request" in argv else "gh issue create"
         r = run_fn(argv, capture_output=True, text=True, timeout=60)
         if getattr(r, "returncode", 1) != 0:
-            _dbg("severe ticket gk-request failed rc=%s: %s"
-                 % (getattr(r, "returncode", None),
+            _dbg("severe ticket %s failed rc=%s: %s"
+                 % (via, getattr(r, "returncode", None),
                     (getattr(r, "stderr", "") or "").strip()[:200]))
             logs.append(_log_line(now, "SEVERE-TICKET-FAIL", hostname,
                                  status["worst_pct"],
-                                 "gk-request failed: %s" % (
-                                     getattr(r, "stderr", "") or "")[:200]))
+                                 "%s failed: %s" % (
+                                     via, getattr(r, "stderr", "") or "")[:200]))
         else:
             # #895 F5 / #896-899: mark filed ONLY on success — a transient
             # failure must not suppress the retry. In-memory FIRST (holds

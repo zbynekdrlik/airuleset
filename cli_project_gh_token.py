@@ -451,14 +451,15 @@ def mint_airuleset(account, repo, installation, jwt, remote, now, *,
                       % (account, e), file=sys.stderr)
                 return 1, {"ok": False, "at": _iso(now), "error": str(e)}
             status = e.status
-            why = "%s is not in the App installation (HTTP %d)" % (
-                AIRULESET_REPO, status)
+            why = ("%s is not in the App installation, or the App lacks Issues: "
+                   "Read & write (%s)" % (AIRULESET_REPO, e))
         else:
             print("project-gh-token: %s: airuleset issues token delivered to %s, "
                   "expires %s" % (account, remote["name"], minted["expires_at"]))
             return 0, {"ok": True, "expires_at": minted["expires_at"],
                        "minted_at": _iso(now)}
-    why += " — OWNER ACTION: add airuleset under Repository access at %s" % settings
+    why += (" — OWNER ACTION at %s: add airuleset under Repository access, and "
+            "grant the App Issues: Read & write if it asks" % settings)
     print("project-gh-token: %s: SKIPPED the airuleset issues token — %s (#1199)"
           % (account, why), file=sys.stderr)
     return 0, {"ok": False, "skipped": True, "at": _iso(now), "error": why,
@@ -545,9 +546,10 @@ _SHIM = r"""#!/usr/bin/env bash
 set -u
 _dir="$HOME/.config/gh-app-tokens"
 # #1199: a call that targets zbynekdrlik/airuleset (a -R/--repo value, or a
-# `gh api` path under repos/zbynekdrlik/airuleset) uses the issues-only
-# airuleset token; everything else uses primary. Only a flag's VALUE or an
-# api path decides, so title/body text never routes.
+# `gh api` path under repos/zbynekdrlik/airuleset, or a whole-argument
+# airuleset issue/PR URL) uses the issues-only airuleset token; everything
+# else uses primary. Only a flag's VALUE, an api path or a whole URL argument
+# decides, so ordinary title/body prose never routes.
 _is_air() {
   local v="${1,,}"
   v="${v#https://}"; v="${v#http://}"; v="${v#www.}"; v="${v#github.com/}"
@@ -562,6 +564,10 @@ for _a in "$@"; do
   case "$_a" in
     --repo=*) _is_air "${_a#--repo=}" && _tok="zbynekdrlik__airuleset" ;;
     -R?*) _is_air "${_a#-R}" && _tok="zbynekdrlik__airuleset" ;;
+  esac
+  case "${_a,,}" in
+    https://github.com/zbynekdrlik/airuleset/issues/*|https://github.com/zbynekdrlik/airuleset/pull/*)
+      _tok="zbynekdrlik__airuleset" ;;
   esac
   if [ "$_sub" = api ]; then
     _p="${_a,,}"; _p="${_p#https://api.github.com}"; _p="${_p#/}"
@@ -741,7 +747,9 @@ _VERIFY_PROBE = (
     "2>&1 >/dev/null; echo \"@@rc $?\"; "
     "echo @@pulls; "
     "gh api -X POST repos/%(air)s/pulls -f body=airuleset-verify-probe "
-    "2>&1 >/dev/null; echo \"@@rc $?\"" % {"air": AIRULESET_REPO})
+    "2>&1 >/dev/null; echo \"@@rc $?\"; "
+    "echo @@shim; grep -c %(file)s ~/.local/bin/gh-app-shim; echo \"@@rc $?\""
+    % {"air": AIRULESET_REPO, "file": "zbynekdrlik__airuleset"})
 _HTTP_RE = re.compile(r"\(HTTP (\d{3})\)|^HTTP/[\d.]+ (\d{3})", re.M)
 
 
@@ -770,9 +778,14 @@ def airuleset_write_verdict(sections):
     """``(ok, why)`` of the #1199 write probe (see ``_VERIFY_PROBE``)."""
     issues = _http_status(sections.get("issues"))
     pulls = _http_status(sections.get("pulls"))
+    shim = sections.get("shim")
+    stale = bool(shim) and [ln.strip() for ln in shim[0]] == ["0"]
+    if stale and issues != 422:
+        return False, ("the account's gh-app-shim is stale (it does not route to "
+                       "the airuleset token) — re-render it: airuleset.py install "
+                       "as the account, or the #1184 bootstrap")
     if issues is None:
-        return False, ("no HTTP status from the issues write probe (a stale "
-                       "gh-app-shim that does not route to the airuleset token?)")
+        return False, "no HTTP status from the issues write probe"
     if issues != 422:
         return False, ("the airuleset token cannot write issues on %s (HTTP %d) — "
                        "check `accounts status` on the controller"
@@ -848,19 +861,63 @@ def render_next_steps(spec):
             'token + airuleset issues write)"\n')
 
 
-def gk_request_refusal(user):
-    """#1199: the one-line refusal of `gk-request` on a project account (a
-    ``SERVICE_ACCOUNTS`` member that is not an Odoo stream), else None.
-    gk-request is the Odoo-stream relay to the gatekeeper; a project account
-    files airuleset tickets natively with its issues-only token."""
-    import airuleset
+def is_project_account(user, odoo_streams):
+    """#1199: a declared #1184 project account (a ``SERVICE_ACCOUNTS`` member)
+    that is not an Odoo stream (``odoo_streams`` = ``AUTHORITY_BY_USER``)."""
     import cli_account_bootstrap as bootstrap
-    if user not in bootstrap.SERVICE_ACCOUNTS or user in airuleset.AUTHORITY_BY_USER:
+    return user in bootstrap.SERVICE_ACCOUNTS and user not in odoo_streams
+
+
+def gk_request_refusal(user, odoo_streams):
+    """#1199: the one-line refusal of `gk-request` on a project account, else
+    None. gk-request is the Odoo-stream relay to the gatekeeper; a project
+    account files airuleset tickets natively with its issues-only token, and
+    one without that token is told how to get it."""
+    import cli_account_bootstrap as bootstrap
+    if not is_project_account(user, odoo_streams):
         return None
+    native = ("gh issue create -R %s --title '…' --body-file <file> (a comment: "
+              "gh issue comment <N> -R %s)" % (AIRULESET_REPO, AIRULESET_REPO))
+    if bootstrap.SERVICE_ACCOUNTS[user].get("github_app") is not True:
+        native = ("declare github_app: True for it in cli_account_bootstrap."
+                  "SERVICE_ACCOUNTS so the controller mints its airuleset issues "
+                  "token, then: " + native)
     return ("gk-request: %s is a project account (#1184) and has no gatekeeper — "
-            "file the airuleset ticket natively: gh issue create -R %s --title "
-            "'…' --body-file <file> (#1199); nothing was labelled"
-            % (user, AIRULESET_REPO))
+            "file the airuleset ticket natively: %s (#1199); nothing was labelled"
+            % (user, native))
+
+
+def refresh_shim(path=None):
+    """#1199: rewrite an already-installed project ``gh-app-shim`` (its
+    marker) whose bytes differ from ``render_gh_app_shim()``, atomically,
+    0755. An already-live account otherwise keeps the old shim, which routes
+    every call to ``primary``, until a root re-bootstrap. Returns True when it
+    rewrote. Any other file (an odoo-style App shim, no shim) is left alone."""
+    if path is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        return False    # a test driving cmd_install never rewrites a real home
+    path = path or os.path.expanduser("~/.local/bin/gh-app-shim")
+    if not is_project_shim(path):
+        return False
+    with open(path, encoding="utf-8") as fh:
+        if fh.read() == _SHIM:
+            return False
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(_SHIM)
+    os.chmod(tmp, 0o755)
+    os.replace(tmp, path)
+    print("  gh-app-shim refreshed (#1199: routes zbynekdrlik/airuleset to its "
+          "issues token)")
+    return True
+
+
+def maybe_refresh_shim():
+    """``refresh_shim`` for ``airuleset.py install``: never raises."""
+    try:
+        return refresh_shim()
+    except Exception as e:  # noqa: BLE001 — install must go on, but loudly
+        print("  gh-app-shim refresh error (non-fatal): %s" % e, file=sys.stderr)
+        return False
 
 
 def maybe_setup_timer():
