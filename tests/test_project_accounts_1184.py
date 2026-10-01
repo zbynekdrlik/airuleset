@@ -230,7 +230,10 @@ class TestDeclarationValidator(unittest.TestCase):
         self.assertEqual(spec["host"], "dev1")
         self.assertIs(spec["sudo"], False)
         self.assertEqual(list(spec["reach"]), [])
-        self.assertEqual(list(spec["secrets"]), [])
+        self.assertEqual(list(spec["secrets"]), [   # #1206: the vault files it holds
+            "fohmixer-engineer-pin", "cloudflare-fohmixer-analytics",
+            "cloudflare-fohmixer-access-audit", "cloudflared-fohmixer-token",
+            "cloudflare-fohmixer-acme-dns", "cloudflare-fohmixer-setup"])
         self.assertEqual(set(spec["webterm_sessions"]),
                          {"zbynek", "marek", "timo"})
         for human, sess in spec["webterm_sessions"].items():
