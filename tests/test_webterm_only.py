@@ -867,7 +867,7 @@ class TestOptionsAwareParser870(unittest.TestCase):
 class TestControllerLanePubkeys(unittest.TestCase):
     """#870 F4b: the WEBTERM_CONTROLLER_LANE_PUBKEYS table is filled."""
 
-    EXPECTED_HUMANS = {"zbynek", "david", "marek", "dominika", "timo"}
+    EXPECTED_HUMANS = {"zbynek", "david", "marek", "dominika", "timo", "palo"}
 
     def test_all_four_humans_present(self):
         self.assertEqual(
@@ -913,6 +913,18 @@ class TestControllerLanePubkeys(unittest.TestCase):
         key = cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["dominika"]
         expected_fp = "SHA256:elzSSqiSK4GOpeI0ifLkYLRL6Ou56F8TCHe/sA4yWdU"
         self._check_fingerprint(key, expected_fp, "dominika")
+
+    def test_timo_fingerprint(self):
+        """Drift-lock: the timo key blob fingerprint (#1183)."""
+        key = cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["timo"]
+        expected_fp = "SHA256:FRyNQAyHQGJXCCVtBftSfpGX89gxgjE9pFKLmxeRvCg"
+        self._check_fingerprint(key, expected_fp, "timo")
+
+    def test_palo_fingerprint(self):
+        """Drift-lock: the palo key blob fingerprint (#1205, minted 1.10.)."""
+        key = cli_webterm_only.WEBTERM_CONTROLLER_LANE_PUBKEYS["palo"]
+        expected_fp = "SHA256:4r96A8dQI6NQ+KoYeUggCopmjufqJbAnWerEbyZzfns"
+        self._check_fingerprint(key, expected_fp, "palo")
 
     def _check_fingerprint(self, key, expected_fp, human):
         try:
