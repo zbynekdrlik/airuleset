@@ -171,7 +171,7 @@ class TestStaleAgentWorktreeRung(_Box):
 
     def test_finished_child_does_not_keep_the_lane(self):
         wt = self.lane("agent-parent2")
-        _transcript(self.home, self.repo, "agent-parent2", age_s=20 * 60)
+        _transcript(self.home, self.repo, "agent-parent2", age_s=_PAST_GRACE)
         _transcript(self.home, self.repo, "agent-child2", finished=True,
                     meta={"inheritedWorktreePath": str(wt)})
         self.assertIsNone(self._rows()["agent-parent2"]["reason"])
@@ -185,7 +185,7 @@ class TestStaleAgentWorktreeRung(_Box):
 
     def test_stale_lane_is_reclaimed(self):
         self.lane("agent-old1")
-        _transcript(self.home, self.repo, "agent-old1", age_s=3 * 3600)
+        _transcript(self.home, self.repo, "agent-old1", age_s=_PAST_GRACE)
         row = self._rows()["agent-old1"]
         self.assertIsNone(row["reason"], row)
         self.assertEqual(row["kind"], "worktree-remove")
