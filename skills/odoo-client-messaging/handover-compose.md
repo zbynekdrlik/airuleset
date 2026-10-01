@@ -41,8 +41,7 @@ owner-approved BEFORE posting.
   the STREAM'S NUMBER: for a NUMBERED stream it is the trailing digits of the
   stream name (montalu2..8 → 2..8, david2..4 → 2..4, miva1 → 1). For an
   UNNUMBERED base stream (montalu, marek, david, simap) the suffix is "1" — the
-  first stream of its client family — CONFIRMED by the owner on airuleset #532
-  (2026-08-18; base streams renamed <name>1 per airuleset #537), so every active
+  first stream of its client family — CONFIRMED by the owner on airuleset #532 (renames #537), so every active
   handover stream ends with its number. **The name is at most ~30 CHARACTERS including that trailing number**
   (airuleset #597). The proposal you present must ALREADY carry a name satisfying
   both conditions. Both are HOOK-ENFORCED at create time
@@ -117,19 +116,19 @@ owner-approved BEFORE posting.
   — wait until there is something real to report. The one legitimate exception
   is a genuine REQUEST for something FROM the client — a normal ask phrased as a concrete request,
   never as a complaint about what is missing: "Potrebovali by sme od vás X…" —
-  never "Nemáme od vás X". A JUDGMENT call on message CONTENT (a hook cannot gate it without false-positive
-  risk), so it rides the per-message owner-approval gate.
+  never "Nemáme od vás X". A JUDGMENT call on message CONTENT (no hook: false-positive risk), so it rides the per-message owner-approval gate.
 - **Každý adresát je REÁLNE označený — mention anchor v tele je POVINNÝ popri
   `partner_ids`, na KAŽDEJ správe (airuleset #702, owner ruling 2026-08-25).**
   `partner_ids` správu DORUČÍ (inbox/e-mail + owner control ping); MENTION
-  notifikáciu (klient s „len zmienky") spúšťa až mention ANCHOR v HTML tele
-  (incident: msg 1742837/1742838 odišli bez pingu → repost). Anchor pre KAŽDÉHO adresáta
-  (atribúty podľa `SKILL.md`, 19.0 composer):
+  notifikáciu spúšťa až mention ANCHOR v HTML tele
+  (msg 1742837 bez pingu). Anchor pre KAŽDÉHO adresáta (19.0 composer):
   `<a href="/odoo/res.partner/<id>" class="o_mail_redirect" data-oe-id="<id>" data-oe-model="res.partner">@Meno</a>`.
+  Owner je TICHÝ delivery-control príjemca (#1208): je v `partner_ids`, ale
+  NIKDY nedostane mention anchor a nikdy nie je prvé meno — anchor patrí len
+  klientskym adresátom (odoo-erp#8840).
   HOOK-ENFORCED (`hooks/block-discuss-thread-name.sh`, airuleset #702): stream
   `message_post` na `discuss.channel`, ktorého content menuje `partner_ids`, ale
-  nenesie žiadny mention anchor, je BLOKOVANÝ — platí bez ohľadu na načítaný
-  skill. Bypass (interný
+  nenesie žiadny mention anchor, je BLOKOVANÝ. Bypass (interný
   post bez adresátov): `airuleset:discuss-mention-ok` v contente (logged).
 - **The greeting (oslovenie — „Dobrý deň…" / „Ahoj…") belongs ONLY in the FIRST
   (opening) message of a thread.** A follow-up reply in an existing thread
