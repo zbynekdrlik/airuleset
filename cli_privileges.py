@@ -216,6 +216,19 @@ PRIVILEGES: List[Privilege] = [
         used_by=("cli_webterm_profiles.py (WEBTERM_TIMO_IDENTITY)",),
     ),
     Privilege(
+        name="webterm_palo_ed25519",
+        kind=KIND_SSH_KEY,
+        local_path="~/.secrets/webterm_palo_ed25519",
+        reach="dedicated webterm LANE key for the palo lane's single tab — a "
+              "forced-command line on montalu6@subdev ONLY (#1205; Palo "
+              "himself holds no key)",
+        rotation="#1205 go-live: minted on the controller, pubkey into "
+                 "WEBTERM_CONTROLLER_LANE_PUBKEYS, forced-command line "
+                 "installed via cli_webterm_palo forced-command-install.",
+        must_move=True,
+        used_by=("cli_webterm_profiles.py (WEBTERM_PALO_IDENTITY)",),
+    ),
+    Privilege(
         name="controller_tunnel_creds",
         kind=KIND_STORE,
         local_path="~/.cloudflared/controller-webterm.json",

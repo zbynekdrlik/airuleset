@@ -159,6 +159,56 @@ class LaneSpec:
     shared_tunnel: bool = False
 
 
+# #1205: the ONE shape of a lane BORN on the controller for a single external
+# human (timo #1183, palo #1205). The shared controller tunnel fronts it
+# (dummy per-lane tunnel fields), no key gates it, its tab list is the
+# human's own policy entry, and every path/unit name derives from the lane
+# name. The roots are fixed at import, like the thin modules' constants were.
+_USER_UNIT_DIR = Path.home() / ".config" / "systemd" / "user"
+_CLOUDFLARED_DIR = Path.home() / ".cloudflared"
+_USER_CLOUDFLARED_BIN = str(Path.home() / ".local" / "bin" / "cloudflared")
+_DUMMY_TUNNEL_UUID = "00000000-0000-0000-0000-000000000000"
+
+
+def controller_lane_spec(name, *, profile, gateway_user, ttyd_port, gateway_port,
+                         scoped_inventory, go_live):
+    """The LaneSpec of a controller-born single-human lane. Only the ports, the
+    scoped-inventory unit-note text and the go-live checklist differ per lane;
+    the hostname is ``<name>.newlevel.media`` (its Access app + CNAME carry the
+    same name, drift-locked by each lane's tests)."""
+    hostname = "%s.newlevel.media" % name
+    dash_dir = w.CLAUDE_DIR / ("webterm-%s-dash" % name)
+    return LaneSpec(
+        name=name, gateway_user=gateway_user, profile=profile, bind="127.0.0.1",
+        ttyd_port=ttyd_port, gateway_port=gateway_port,
+        gateway_sock_basename="webterm-%s-gateway.sock" % name,
+        ttyd_sock_basename="webterm-%s-ttyd.sock" % name,
+        inventory_path=w.CLAUDE_DIR / ("webterm-%s-inventory.json" % name),
+        dash_dir=dash_dir, dash_index=dash_dir / "index.html",
+        launch_path=w.CLAUDE_DIR / ("airuleset-webterm-%s-ttyd.sh" % name),
+        ttyd_service_dest=_USER_UNIT_DIR / ("webterm-%s-ttyd.service" % name),
+        gateway_service_dest=_USER_UNIT_DIR / ("webterm-%s-gateway.service" % name),
+        ttyd_service_name="webterm-%s-ttyd.service" % name,
+        gateway_service_name="webterm-%s-gateway.service" % name,
+        # DUMMY: shared_tunnel=True, so setup_service never provisions these.
+        tunnel_uuid=_DUMMY_TUNNEL_UUID,
+        tunnel_creds=_CLOUDFLARED_DIR / ("dummy-%s.json" % name),
+        tunnel_config=_CLOUDFLARED_DIR / ("dummy-%s.yml" % name),
+        tunnel_service_dest=_USER_UNIT_DIR / ("dummy-%s-tunnel.service" % name),
+        tunnel_service_name="dummy-%s-tunnel.service" % name,
+        tunnel_hostname=hostname, cloudflared_bin=_USER_CLOUDFLARED_BIN,
+        creds_absent_hint="",
+        unit_note=render_lane_unit_note(
+            name_upper=name.upper(), name_lower=name,
+            account_suffix=" (airuleset account, controller)",
+            runtime_owner="airuleset's", tunnel_adjective="the SHARED controller",
+            hostname=hostname, scoped_inventory=scoped_inventory),
+        go_live=go_live, label="(controller %s)" % name,
+        log_prefix="webterm(%s)" % name,
+        identity_key=None, retire_credential_path=None,
+        dashboard_human=gateway_user, shared_tunnel=True)
+
+
 def render_ttyd_unit(spec):
     tmpl = w.WEBTERM_SERVICE_TEMPLATE.read_text(encoding="utf-8")
     return spec.unit_note + (

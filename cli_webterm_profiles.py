@@ -50,6 +50,7 @@ DAVID = "david"
 MAREK = "marek"
 DOMINIKA = "dominika"
 TIMO = "timo"
+PALO = "palo"
 
 # --------------------------------------------------------------------------- #
 # Box -> profile mapping (provisioning selects the profile by hostname + the
@@ -68,6 +69,7 @@ LANE_HOST = {
     "marek": "controller",      # F4c step 2: flipped from "subdev"
     "dominika": "controller",   # F4c step 1: flipped from "subdev"
     "timo": "controller",       # #1183: born on the controller (never subdev)
+    "palo": "controller",       # #1205: born on the controller (never subdev)
 }
 
 
@@ -126,7 +128,7 @@ def profile_for_host_set(box_class, account=None):
     lane on the old host."""
     _HUMAN_TO_PROFILE = {
         "zbynek": OWNER, "david": DAVID, "marek": MAREK, "dominika": DOMINIKA,
-        "timo": TIMO,
+        "timo": TIMO, "palo": PALO,
     }
     if box_class == "controller":
         return frozenset(_HUMAN_TO_PROFILE.values())
@@ -617,6 +619,28 @@ def timo_inventory():
     return [fohmixer_entry(WEBTERM_TIMO_IDENTITY)]
 
 
+# #1205 the palo lane (the timo shape): ONE tab, the montalu6@subdev stream
+# session. Palo has NO unix account, key or password (webterm-only, #869);
+# PALO_GATEWAY_USER is the lane/policy key only, and the LANE key on the
+# controller is authorized ONLY as the forced-command line on montalu6
+# (cli_webterm_palo, go-live step 2).
+PALO_GATEWAY_USER = "palo"
+WEBTERM_PALO_IDENTITY = "~/.secrets/webterm_palo_ed25519"
+
+
+def palo_inventory():
+    """Palo's SCOPED session set (#1205, owner 2026-09-30: "bude tam len
+    montalu6") — ONE entry, the owner dashboard's montalu6 tab (same id, host,
+    user and session; the start dir comes from the one #1202 resolver) via the
+    palo key. NO u_tenant (#703: montalu6 is not Palo's tenant) and NEVER the
+    owner's collect_identity push key — drift-locked in
+    tests/test_webterm_palo_1205.py."""
+    return [{"id": "montalu6-subdev", "label": "montalu6@subdev", "kind": "stream",
+             "local": False, "host": _subdev_target_host("palo"),
+             "user": "montalu6", "identity": WEBTERM_PALO_IDENTITY,
+             "preferred": "montalu6"}]
+
+
 # --------------------------------------------------------------------------- #
 # zbynek (owner) profile — DECLARATIVE session set (#870 F4a D4).
 # --------------------------------------------------------------------------- #
@@ -887,6 +911,8 @@ def profile_inventory(profile, fleet_inventory):
         return dominika_inventory()
     if profile == TIMO:
         return timo_inventory()
+    if profile == PALO:
+        return palo_inventory()
     if profile == OWNER:
         return zbynek_inventory()
     return list(fleet_inventory)

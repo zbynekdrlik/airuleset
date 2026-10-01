@@ -36,38 +36,17 @@ The gateway runs under the controller's `airuleset` account (the accepted #870 F
 B1 residue shared by every lane); its 0700 runtime-dir UNIX sockets are the
 local boundary (#663).
 """
-from pathlib import Path
-
-import cli_webterm as w
 import cli_webterm_profiles as profiles
 import cli_webterm_lane as lane
 
 TIMO_GATEWAY_USER = profiles.TIMO_GATEWAY_USER
 
 # Port pair — next after zbynek (7686/8084). #663 the gateway + ttyd bind
-# UNIX sockets in the account runtime dir (NOT these TCP ports).
+# UNIX sockets in the account runtime dir (NOT these TCP ports). Every path,
+# socket, unit name and the DUMMY shared-tunnel fields derive from the lane
+# name in lane.controller_lane_spec (#1205).
 WEBTERM_TIMO_TTYD_PORT = 7687
 WEBTERM_TIMO_GATEWAY_PORT = 8085
-WEBTERM_TIMO_GATEWAY_SOCK_BASENAME = "webterm-timo-gateway.sock"
-WEBTERM_TIMO_TTYD_SOCK_BASENAME = "webterm-timo-ttyd.sock"
-WEBTERM_TIMO_INVENTORY_PATH = w.CLAUDE_DIR / "webterm-timo-inventory.json"
-WEBTERM_TIMO_DASH_DIR = w.CLAUDE_DIR / "webterm-timo-dash"
-WEBTERM_TIMO_DASH_INDEX = WEBTERM_TIMO_DASH_DIR / "index.html"
-WEBTERM_TIMO_LAUNCH_PATH = w.CLAUDE_DIR / "airuleset-webterm-timo-ttyd.sh"
-WEBTERM_TIMO_SERVICE_DEST = (
-    Path.home() / ".config" / "systemd" / "user" / "webterm-timo-ttyd.service")
-WEBTERM_TIMO_GATEWAY_SERVICE_DEST = (
-    Path.home() / ".config" / "systemd" / "user" / "webterm-timo-gateway.service")
-
-# Tunnel fields are DUMMY (shared_tunnel=True: setup_service never calls the
-# per-lane tunnel provisioner — the zbynek lane precedent).
-WEBTERM_TIMO_TUNNEL_UUID = "00000000-0000-0000-0000-000000000000"
-WEBTERM_TIMO_TUNNEL_CREDS = Path.home() / ".cloudflared" / "dummy-timo.json"
-WEBTERM_TIMO_TUNNEL_CONFIG = Path.home() / ".cloudflared" / "dummy-timo.yml"
-WEBTERM_TIMO_TUNNEL_SERVICE_DEST = (
-    Path.home() / ".config" / "systemd" / "user" / "dummy-timo-tunnel.service")
-WEBTERM_TIMO_TUNNEL_HOSTNAME = "timo.newlevel.media"
-WEBTERM_TIMO_CLOUDFLARED_BIN = str(Path.home() / ".local" / "bin" / "cloudflared")
 
 _TIMO_GO_LIVE = (
     "  webterm(timo): needs setup to go live (#1183, supervisor) —\n"
@@ -98,51 +77,17 @@ _TIMO_GO_LIVE = (
 
 
 def _spec():
-    """Build timo's LaneSpec from this module's constants, read FRESH each call so
-    tests that patch a ``WEBTERM_TIMO_*`` constant see it."""
-    return lane.LaneSpec(
-        name="timo",
-        gateway_user=TIMO_GATEWAY_USER,
-        profile=profiles.TIMO,
-        bind="127.0.0.1",
-        ttyd_port=WEBTERM_TIMO_TTYD_PORT,
-        gateway_port=WEBTERM_TIMO_GATEWAY_PORT,
-        gateway_sock_basename=WEBTERM_TIMO_GATEWAY_SOCK_BASENAME,
-        ttyd_sock_basename=WEBTERM_TIMO_TTYD_SOCK_BASENAME,
-        inventory_path=WEBTERM_TIMO_INVENTORY_PATH,
-        dash_dir=WEBTERM_TIMO_DASH_DIR,
-        dash_index=WEBTERM_TIMO_DASH_INDEX,
-        launch_path=WEBTERM_TIMO_LAUNCH_PATH,
-        ttyd_service_dest=WEBTERM_TIMO_SERVICE_DEST,
-        gateway_service_dest=WEBTERM_TIMO_GATEWAY_SERVICE_DEST,
-        ttyd_service_name="webterm-timo-ttyd.service",
-        gateway_service_name="webterm-timo-gateway.service",
-        tunnel_uuid=WEBTERM_TIMO_TUNNEL_UUID,
-        tunnel_creds=WEBTERM_TIMO_TUNNEL_CREDS,
-        tunnel_config=WEBTERM_TIMO_TUNNEL_CONFIG,
-        tunnel_service_dest=WEBTERM_TIMO_TUNNEL_SERVICE_DEST,
-        tunnel_service_name="dummy-timo-tunnel.service",
-        tunnel_hostname=WEBTERM_TIMO_TUNNEL_HOSTNAME,
-        cloudflared_bin=WEBTERM_TIMO_CLOUDFLARED_BIN,
-        creds_absent_hint="",
-        unit_note=lane.render_lane_unit_note(
-            name_upper="TIMO", name_lower="timo",
-            account_suffix=" (airuleset account, controller)",
-            runtime_owner="airuleset's", tunnel_adjective="the SHARED controller",
-            hostname=WEBTERM_TIMO_TUNNEL_HOSTNAME,
-            scoped_inventory="Scoped inventory (#1183, owner request 2026-09-29):\n"
-                             "# ONE tab — the fohmixer@dev1 project account, via\n"
-                             "# the dedicated webterm_timo lane key (a forced-\n"
-                             "# command line on fohmixer only). Timo has no\n"
-                             "# account, key or password anywhere."),
-        go_live=_TIMO_GO_LIVE,
-        label="(controller timo)",
-        log_prefix="webterm(timo)",
-        identity_key=None,
-        retire_credential_path=None,
-        dashboard_human=TIMO_GATEWAY_USER,
-        shared_tunnel=True,
-    )
+    """Build timo's LaneSpec through the shared controller-lane helper, read
+    FRESH each call so a test that patches a ``WEBTERM_TIMO_*`` port sees it."""
+    return lane.controller_lane_spec(
+        "timo", profile=profiles.TIMO, gateway_user=TIMO_GATEWAY_USER,
+        ttyd_port=WEBTERM_TIMO_TTYD_PORT, gateway_port=WEBTERM_TIMO_GATEWAY_PORT,
+        scoped_inventory="Scoped inventory (#1183, owner request 2026-09-29):\n"
+                         "# ONE tab — the fohmixer@dev1 project account, via\n"
+                         "# the dedicated webterm_timo lane key (a forced-\n"
+                         "# command line on fohmixer only). Timo has no\n"
+                         "# account, key or password anywhere.",
+        go_live=_TIMO_GO_LIVE)
 
 
 def render_timo_ttyd_unit():

@@ -128,6 +128,15 @@ WEBTERM_ACCESS_APPS = {
         "allowed_emails": ["timotej.kam@gmail.com"],   # owner-provided, #1183
         "session_duration": "720h",
     },
+    # palo.newlevel.media — the SIXTH webterm gateway (#1205, owner request
+    # 2026-09-30, e-mail owner-provided verbatim). Webterm-only, like timo:
+    # this allow-list IS his whole authorization (one tab: montalu6@subdev).
+    "palo": {
+        "hostname": "palo.newlevel.media",
+        "name": "webterm — palo",
+        "allowed_emails": ["palo@montalu.sk"],   # owner-provided, #1205
+        "session_duration": "720h",
+    },
     # claudy.newlevel.media — the claudy dashboard public hostname (#983,
     # owner request 2026-09-10: "pristup na web claudy ... chraneny cloudflare
     # prihlasenim cez email ... marek a zbynek"). Origin is the controller's

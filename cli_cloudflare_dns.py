@@ -49,6 +49,17 @@ MANAGED_RECORDS = [
         "requires_access_hostname": "timo.newlevel.media",
     },
     {
+        # #1205: the palo webterm lane — the timo shape (shared controller
+        # tunnel, gated on its Access app).
+        "zone": "newlevel.media",
+        "name": "palo.newlevel.media",
+        "type": "CNAME",
+        "content": "f85ea304-920b-4ba4-96bc-a68001ce6fb4.cfargotunnel.com",
+        "proxied": True,
+        "comment": "airuleset-managed (#1205) — palo webterm lane",
+        "requires_access_hostname": "palo.newlevel.media",
+    },
+    {
         "zone": "newlevel.media",
         "name": "ar.newlevel.media",
         "type": "A",

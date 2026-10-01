@@ -95,6 +95,9 @@ WEBTERM_CONTROLLER_LANE_PUBKEYS = {
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGkDFpFljP1a7eMt9mZa/iWXxKNq"
         "3b8ZBAeR8DlYjoEz webterm-timo-controller"
     ),
+    # "palo": #1205 SLOT — filled at go-live (cli_webterm_palo._PALO_GO_LIVE
+    # step 1), ABSENT until then like timo's was: never an empty/placeholder
+    # value (a blob-less entry would match malformed lines in the #1202 check).
 }
 
 # #870 incident 2 fix: which webterm-only user accounts each human's

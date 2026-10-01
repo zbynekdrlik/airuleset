@@ -234,6 +234,8 @@ def webterm_inventory(profile=profiles.OWNER):
         return profiles.dominika_inventory()
     if profile == profiles.TIMO:
         return profiles.timo_inventory()
+    if profile == profiles.PALO:
+        return profiles.palo_inventory()
     if profile == profiles.OWNER:
         return profiles.zbynek_inventory()
     raise ValueError(
@@ -716,6 +718,9 @@ WEBTERM_DASHBOARD_TABS = {
     # timo.newlevel.media -- #1183 (owner 2026-09-29): ONE tab, the fohmixer@dev1
     # project account; fohmixer is also on the owner's and marek's lists (#1184).
     "timo": ["fohmixer"],
+    # palo.newlevel.media -- #1205 (owner 2026-09-30): ONE tab, the montalu6
+    # stream session (the same tab the owner list has).
+    "palo": ["montalu6-subdev"],
 }
 
 
@@ -1729,6 +1734,7 @@ _HUMAN_TO_MODULE = {
     "marek": "cli_webterm_marek",
     "dominika": "cli_webterm_dominika",
     "timo": "cli_webterm_timo",
+    "palo": "cli_webterm_palo",
 }
 
 
