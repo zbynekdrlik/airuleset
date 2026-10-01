@@ -465,8 +465,14 @@ class TestTimoSpecStable(unittest.TestCase):
     def test_every_field(self):
         import cli_webterm_timo as t
         s = t._spec()
-        home = Path.home()   # no test module mutates HOME at import time
-        units = home / ".config" / "systemd" / "user"
+        # The spec derives its paths from cli_webterm_lane's IMPORT-time home
+        # constants. Under `unittest discover` (push Pass B) another test can
+        # leave a different HOME in the environment by the time this runs, so
+        # Path.home() here is not the home the spec saw: compare against the
+        # same module constants instead.
+        import cli_webterm_lane as lane
+        units = lane._USER_UNIT_DIR
+        cf_dir = lane._CLOUDFLARED_DIR
         self.assertEqual(s.name, "timo")
         self.assertEqual(s.gateway_user, "timo")
         self.assertEqual(s.profile, p.TIMO)
@@ -483,13 +489,12 @@ class TestTimoSpecStable(unittest.TestCase):
         self.assertEqual(s.ttyd_service_name, "webterm-timo-ttyd.service")
         self.assertEqual(s.gateway_service_name, "webterm-timo-gateway.service")
         self.assertEqual(s.tunnel_uuid, "00000000-0000-0000-0000-000000000000")
-        self.assertEqual(s.tunnel_creds, home / ".cloudflared" / "dummy-timo.json")
-        self.assertEqual(s.tunnel_config, home / ".cloudflared" / "dummy-timo.yml")
+        self.assertEqual(s.tunnel_creds, cf_dir / "dummy-timo.json")
+        self.assertEqual(s.tunnel_config, cf_dir / "dummy-timo.yml")
         self.assertEqual(s.tunnel_service_dest, units / "dummy-timo-tunnel.service")
         self.assertEqual(s.tunnel_service_name, "dummy-timo-tunnel.service")
         self.assertEqual(s.tunnel_hostname, "timo.newlevel.media")
-        self.assertEqual(s.cloudflared_bin,
-                         str(home / ".local" / "bin" / "cloudflared"))
+        self.assertEqual(s.cloudflared_bin, lane._USER_CLOUDFLARED_BIN)
         self.assertEqual(s.creds_absent_hint, "")
         self.assertEqual(s.go_live, t._TIMO_GO_LIVE)
         self.assertEqual(s.label, "(controller timo)")
