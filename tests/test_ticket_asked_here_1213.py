@@ -38,9 +38,42 @@ class TestClassify(unittest.TestCase):
         self.assertIn(N, out["U"])
         self.assertNotIn(N, out[ts.HIDDEN])
 
-    def test_a_slice_box_keeps_its_own_route(self):
-        box = ts.Box(own_stream="montalu2", asked=frozenset({N}))
+    def test_a_slice_box_without_an_asked_ref_keeps_its_own_route(self):
+        box = ts.Box(own_stream="montalu2")
         self.assertEqual(ts.classify(ROW, None, box, number=N)[0], "I")
+
+
+class TestAskedBeatsEveryBucket(unittest.TestCase):
+    """Live gk finding (odoo-erp 8715): the asked ticket carried no owner label,
+    so it was I, not HIDDEN, and the question was still counted nowhere."""
+
+    HANDOFF = {"labels": [{"name": "stream:montalu1"}, {"name": "needs-gatekeeper"},
+                          {"name": "gk-processing"}], "title": "t"}
+    OPS_WAIT = {"labels": [{"name": "ops-wait"}], "title": "t"}
+
+    def test_an_asked_hand_off_row_is_u_not_i(self):
+        self.assertEqual(ts.classify(self.HANDOFF, None, ts.Box(), number=N)[0], "I")
+        bucket, reason = ts.classify(self.HANDOFF, ts.TicketFacts().of(N),
+                                     ts.Box(asked=frozenset({N})), number=N)
+        self.assertEqual(bucket, "U")
+        self.assertIn("#1213", reason)
+
+    def test_an_asked_ops_wait_row_is_u_not_w(self):
+        self.assertEqual(ts.classify(self.OPS_WAIT, None, ts.Box(asked=frozenset({N})),
+                                     number=N)[0], "U")
+
+    def test_a_stream_box_counts_its_own_asked_ticket(self):
+        own = {"labels": [{"name": "stream:montalu2"}], "title": "t"}
+        box = ts.Box(own_stream="montalu2", asked=frozenset({N}))
+        self.assertEqual(ts.classify(own, ts.TicketFacts().of(N), box, number=N)[0], "U")
+
+    def test_footer_fills_asked_on_a_stream_box_too(self):
+        with mock.patch.object(route, "asked_refs", return_value=frozenset({N})), \
+                mock.patch.object(route.cli_ticket_facts, "refresh",
+                                  return_value=ts.TicketFacts()):
+            buckets, _f = route.footer({N: self.HANDOFF}, "/r", "o/r", merged=[],
+                                       own_stream="montalu2")
+        self.assertIn(N, buckets["U"])
 
 
 class TestAskedRefs(unittest.TestCase):
@@ -64,13 +97,6 @@ class TestRoutesFillTheBox(unittest.TestCase):
                                   return_value=ts.TicketFacts()):
             buckets, _f = route.footer({N: ROW}, "/r", "o/r", merged=[])
         self.assertIn(N, buckets["U"])
-
-    def test_footer_on_a_slice_box_ignores_it(self):
-        with mock.patch.object(route, "asked_refs", return_value=frozenset({N})) as ar, \
-                mock.patch.object(route.cli_ticket_facts, "refresh",
-                                  return_value=ts.TicketFacts()):
-            route.footer({N: ROW}, "/r", "o/r", merged=[], own_stream="montalu2")
-        ar.assert_not_called()
 
     def test_quals_counts_it_in_u_on_a_core_box(self):
         import cli_quals_cmd
