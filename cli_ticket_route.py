@@ -44,7 +44,22 @@ def footer(rows, root, slug, merged, own_stream=None, *, handed=None,
                                handed=dict(handed or {}))
     if role_filter is not None:
         rows = role_filter(rows)
-    return ts.bucketize(rows, facts, ts.Box(own_stream=own_stream)), facts
+    box = ts.Box(own_stream=own_stream,
+                 asked=frozenset() if own_stream else asked_refs(root))
+    return ts.bucketize(rows, facts, box), facts
+
+
+def asked_refs(root):
+    """#1213: the ticket numbers this box's own unanswered ❓ pings name,
+    scoped to `root`'s project (`statusbar.question_map_ticket_refs`, the
+    #539/#948 reader). Any read problem is an empty set: today's routing."""
+    try:
+        import statusbar
+        refs = statusbar.question_map_ticket_refs(root)
+    except Exception as e:  # noqa: BLE001 — never break a count
+        sys.stderr.write("tickets-status: question map unreadable (%s)\n" % e)
+        return frozenset()
+    return frozenset(refs or ())
 
 
 def quals(rows, root, box, *, extra=None, role=None, slug=None, handed=None):
@@ -70,6 +85,8 @@ def quals(rows, root, box, *, extra=None, role=None, slug=None, handed=None):
     except Exception as e:  # noqa: BLE001 — a display note, never a count
         note = "unknown (%s)" % type(e).__name__
     facts = dataclasses.replace(facts, m_note=note)
+    if box.kind == "core" and not box.asked:   # #1213
+        box = dataclasses.replace(box, asked=asked_refs(root))
     return ts.bucketize(rows, facts, box), facts
 
 

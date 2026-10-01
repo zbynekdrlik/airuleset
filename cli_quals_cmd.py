@@ -1545,7 +1545,8 @@ def cmd_core_quals(args):
                 file=sys.stderr)
             sys.exit(1)
     if want_explain:   # #1141: the SAME buckets --count uses (__import__: size budget)
-        return __import__("cli_ticket_explain").explain_core(extra, _b, _facts, want_conflicts)
+        return __import__("cli_ticket_explain").explain_core(extra, _b, _facts, want_conflicts,
+                                                             root=root)
     if want_snapshot:
         # #1067 slice 1d: ALL watchdog quals facts from THIS one partition
         # (own_stream=None: a full-authority box owns no stream).

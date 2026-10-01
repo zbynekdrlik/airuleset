@@ -90,8 +90,11 @@ _M_PENDING = ("the fix is on main but a PROD instance does not run it yet: "
 class Box:
     """Which box is counting. `own_stream` is the box's OWN reduced-authority
     stream (its canonical AUTHORITY_BY_USER key), or None for a full-authority
-    (core / gatekeeper) box — the same value `_partition_workable` takes."""
+    (core / gatekeeper) box — the same value `_partition_workable` takes.
+    `asked` (#1213): the ticket numbers THIS box's own unanswered ❓ pings name
+    (its question map); a foreign owner question it asked is counted here."""
     own_stream: Optional[str] = None
+    asked: frozenset = frozenset()
 
     @property
     def kind(self):
@@ -409,7 +412,7 @@ def _c_veto(labels, names, facts):
     return ""
 
 
-def classify(row, facts=None, box=None):
+def classify(row, facts=None, box=None, number=None):
     """Return `(bucket, reason)` for ONE ticket row (a gh `--json` dict with a
     `labels` list; any other shape is handled on the safe side). Total: every
     input gets exactly one verdict — a bucket from BUCKETS, or `HIDDEN` (a
@@ -430,10 +433,15 @@ def classify(row, facts=None, box=None):
     5. on a reduced-authority box `facts.handed` moves a remaining I row to gk
        (#391; a handed row parked in W stays there, as the footer counts it).
     `facts=None` stops after the label partition — the `_partition_workable`
-    contract. `Facts()` (all unknown) reproduces the label buckets + gk."""
+    contract. `Facts()` (all unknown) reproduces the label buckets + gk.
+    #1213: a HIDDEN row whose `number` is in `box.asked` is U — this box
+    asked the owner about it, so this box is the one waiting."""
     box = box or Box()
     labels = _labels_of(row)
     bucket, reason = _partition(labels, box)
+    if bucket == HIDDEN and _asked_here(number, box):
+        return "U", ("this box asked the owner about it (a ❓ ping on #%s): the "
+                     "waiting party is here, not the stream (#1213)" % number)
     if facts is None or bucket in ("U", HIDDEN):
         return bucket, reason
     names = _names(labels)
@@ -468,8 +476,16 @@ def bucketize(rows, facts=None, box=None):
     out = {b: {} for b in BUCKETS + (HIDDEN,)}
     for number, row in rows.items():
         one = None if facts is None else facts.of(number)
-        out[classify(row, one, box)[0]][number] = row
+        out[classify(row, one, box, number=number)[0]][number] = row
     return out
+
+
+def _asked_here(number, box):
+    """True when ticket `number` is in `box.asked` (ints; a str key too)."""
+    try:
+        return number is not None and int(number) in box.asked
+    except (TypeError, ValueError):
+        return False
 
 
 @dataclass(frozen=True)
@@ -651,7 +667,7 @@ def explain_lines(buckets, box, facts=None, supplement=(), extras=()):
             if number in supplement:
                 got, reason = bucket, _SUPPLEMENT_REASON
             else:
-                got, reason = classify(row, facts.of(number), box)
+                got, reason = classify(row, facts.of(number), box, number=number)
             out.append("%s\t%s\t%s\t%s" % (number, bucket, reason,
                                            _cell(title)))
             if got != bucket:

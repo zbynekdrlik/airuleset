@@ -86,14 +86,17 @@ def _flag(only_conflicts):
     return "--conflicts" if only_conflicts else "--explain"
 
 
-def explain_core(extra, buckets, facts, only_conflicts=False):
+def explain_core(extra, buckets, facts, only_conflicts=False, root=None):
     """`core-quals --explain`: the full-authority box (no gk bucket: it
     actions its own hand-offs). `buckets`/`facts` are the ONE route's result
     (`cli_ticket_route.quals`), the SAME `--count` uses — including the HIDDEN
     rows (a foreign stream's owner question, #1141 slice 2), listed with their
-    reason and counted in no bucket. `only_conflicts`: `--conflicts`."""
+    reason and counted in no bucket. `only_conflicts`: `--conflicts`.
+    `root` fills the box's #1213 asked refs, as `quals` did for the count."""
     _refuse_extra(extra, _flag(only_conflicts))
-    _emit(buckets, ts.Box(), facts, only_conflicts=only_conflicts)
+    import cli_ticket_route
+    box = ts.Box(asked=cli_ticket_route.asked_refs(root) if root else frozenset())
+    _emit(buckets, box, facts, only_conflicts=only_conflicts)
 
 
 def explain_slice(extra, root, rows, buckets, facts, box=None,
