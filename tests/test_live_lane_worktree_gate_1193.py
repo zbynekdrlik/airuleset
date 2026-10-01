@@ -10,9 +10,9 @@ between tool calls matched exactly.
 The gate (check (e)): a worktree whose basename matches a fresh unfinished
 subagent transcript (live / wedged / unreadable / a text tail with no terminal
 stop), or that a live child's meta names, is kept; when the evidence cannot be
-read for a repo, its ``agent-*`` worktrees are kept for the pass. A lane whose
-transcript ends in a terminal stop more than 6 h ago (#1195 resume grace), or a
-stale unfinished one, stays reclaimable. The same gate covers the
+read for a repo, its ``agent-*`` worktrees are kept for the pass. A not-live
+lane last written more than 6 h ago, however it ended (#1195 resume grace,
+items 1 + 6), stays reclaimable. The same gate covers the
 sibling reclaimers: ``cli_worktree_sweep.discover_stale_worktrees`` (feeds
 ``sweep_stale_worktrees``), ``cli_worktree_sweep.discover_reclaimable_worktrees``
 (the disk-guard ``worktree`` rung) and ``lane_reconcile.prune_finished_worktrees``.
