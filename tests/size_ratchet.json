@@ -445,7 +445,7 @@
     "tests/test_per_ticket_completion_marker.py": 158,
     "tests/test_playbook.py": 105,
     "tests/test_playbook_write_surface.py": 95,
-    "tests/test_playwright_mcp_1048.py": 609,
+    "tests/test_playwright_mcp_1048.py": 616,
     "tests/test_plugin_marketplace_payload_defer_419.py": 194,
     "tests/test_poll_payload_not_control_flow.py": 553,
     "tests/test_post_record_design_comment.py": 1572,
