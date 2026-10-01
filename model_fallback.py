@@ -181,7 +181,7 @@ def _model_cmd_args(content):
     return hit.group(1).strip() if hit else None
 
 
-def tail_state(path, max_bytes=TAIL_BYTES):
+def tail_state(path, max_bytes=TAIL_BYTES, sidechain=False):
     """What the transcript tail says about the MAIN session's model, or None
     when the tail holds no main assistant entry. Raises OSError on a read
     failure (so the gate can log it and fail open).
@@ -195,7 +195,9 @@ def tail_state(path, max_bytes=TAIL_BYTES):
       model_cmd  -- the args of a `/model` command typed AFTER that entry
                     (the model was switched but has not answered yet), else None.
     Sidechain entries (an old-style subagent inside the main transcript) and
-    `<synthetic>` entries are skipped."""
+    `<synthetic>` entries are skipped. `sidechain=True` reads them instead: it
+    is for a subagent's OWN transcript, where every entry is a sidechain entry
+    (#1203 subagent slice)."""
     text = _read_tail(path, max_bytes)
     last = None
     marker = None
@@ -207,7 +209,7 @@ def tail_state(path, max_bytes=TAIL_BYTES):
             e = json.loads(line)
         except ValueError:
             continue
-        if not isinstance(e, dict) or e.get("isSidechain"):
+        if not isinstance(e, dict) or bool(e.get("isSidechain")) != sidechain:
             continue
         msg = e.get("message") if isinstance(e.get("message"), dict) else {}
         if e.get("type") == "user":

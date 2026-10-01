@@ -12,9 +12,13 @@ blocked with a Slovak + English reason naming both models. The watchdog kind
 `model-restore` types `/model <managed>` into the idle pane; a `/model
 <managed>` typed after the last reply already reads as restored.
 
+A SUBAGENT (the payload carries `agent_id`) legitimately runs a per-dispatch
+model, so a model that merely differs never blocks it. Only a PROVEN fallback
+in its OWN transcript (`agent_transcript_path`, else
+`<session>/subagents/agent-<agent_id>.jsonl`, sidechain entries) blocks it,
+with a message telling it to end and return (decision 30.9., 12 live cases).
+
 Exempt (ALLOW):
-  * a subagent (the payload carries `agent_id`) -- it legitimately runs a
-    per-dispatch model, or inherits the main;
   * the #1060 implementer window (`AIRULESET_ROLE=implementer`), which pilots
     a gateway model on purpose;
   * `AIRULESET_MODEL_GUARD=off` in the environment (a deliberate headless run
@@ -31,6 +35,7 @@ airuleset.
 """
 import json
 import os
+import string
 import time
 
 from gates import read_payload, emit_block_stderr, allow
@@ -78,6 +83,61 @@ def message(v):
              managed=v["managed"], why_sk=why_sk, why_en=why_en)
 
 
+_AGENT_ID_CHARS = frozenset(string.ascii_letters + string.digits)
+
+
+def subagent_transcript(obj):
+    """The subagent's OWN transcript path, or None: the payload's
+    `agent_transcript_path`, else derived from the session transcript. The
+    agent id must be 1-64 alphanumerics, so the derived path cannot escape."""
+    given = obj.get("agent_transcript_path")
+    if isinstance(given, str) and given.endswith(".jsonl"):
+        return given
+    aid, tpath = obj.get("agent_id"), obj.get("transcript_path")
+    if not (isinstance(aid, str) and 0 < len(aid) <= 64 and set(aid) <= _AGENT_ID_CHARS):
+        return None
+    if not (isinstance(tpath, str) and tpath.endswith(".jsonl")):
+        return None
+    return os.path.join(tpath[:-len(".jsonl")], "subagents", "agent-%s.jsonl" % aid)
+
+
+def subagent_message(v):
+    """The block reason for a subagent on a proven fallback (Slovak, then EN)."""
+    return (
+        "BLOCKED (#1203): model -- tento subagent beží na {short} (`{model}`) po "
+        "tom, čo ho Claude Code sám prepol (fallback). Práca na náhradnom modeli "
+        "nesmie pokračovať.\n"
+        "  Čo teraz: ukonči tento beh HNEĎ, bez ďalších tool callov, a vráť sa "
+        "s tým, čo máš; supervisor ťa spustí znova na `{managed}`.\n"
+        "EN: this subagent was switched to `{model}` by a Claude Code fallback. "
+        "End the run now without further tool calls and return; the supervisor "
+        "re-dispatches it on `{managed}`."
+    ).format(short=v["short"], model=v["model"], managed=v["managed"])
+
+
+def _decide_subagent(obj, env):
+    """A subagent payload: block only a PROVEN fallback in its own transcript."""
+    path = subagent_transcript(obj)
+    if not path or not os.path.isfile(path):
+        return None, None, ""
+    import model_fallback
+    try:
+        st = model_fallback.tail_state(path, sidechain=True)
+    except OSError as exc:
+        return None, "read-error", "%s %r" % (path, exc)
+    try:
+        import model_lineup
+        managed = model_lineup.MANAGED_MODEL
+    except Exception as exc:  # noqa: BLE001 -- an unresolvable lineup fails open
+        return None, "lineup-error", repr(exc)
+    v = model_fallback.verdict(st, managed)
+    if v is None or not v["proven"]:
+        return None, None, ""
+    if (env.get("AIRULESET_MODEL_GUARD") or "").strip().lower() == "off":
+        return None, "bypass", "%s %s" % (path, v["model"])
+    return subagent_message(v), "block-subagent", "%s %s %s" % (v["kind"], v["model"], path)
+
+
 def decide(payload_text, env=None):
     """`(block_message | None, log_kind | None, log_extra)` for one payload."""
     env = os.environ if env is None else env
@@ -87,10 +147,10 @@ def decide(payload_text, env=None):
         return None, None, ""
     if not isinstance(obj, dict):
         return None, None, ""
-    if obj.get("agent_id"):
-        return None, None, ""                      # a subagent: exempt
     if env.get("AIRULESET_ROLE") == "implementer":
         return None, None, ""                      # the #1060 implementer window
+    if obj.get("agent_id"):
+        return _decide_subagent(obj, env)          # only a proven fallback blocks
     tpath = obj.get("transcript_path")
     if not tpath or not isinstance(tpath, str):
         return None, None, ""
