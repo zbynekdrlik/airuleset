@@ -33,7 +33,7 @@ import cli_lane_live_gate as g  # noqa: E402
 from test_live_lane_worktree_gate_1193 import LIVE_REASON, _Box, _transcript  # noqa: E402
 from watchdog import disk_guard as dg  # noqa: E402
 
-GRACE_REASON = "finished lane in 6 h resume grace — kept"
+GRACE_REASON = "lane in 6 h resume grace — kept"   # item 6: not only finished lanes
 H = 3600
 
 
@@ -82,11 +82,23 @@ class TestGateResumeGrace(unittest.TestCase):
         _transcript(self.home, self.root, "agent-l1")
         self.assertEqual(self._reason("agent-l1", level="critical"), LIVE_REASON)
 
-    def test_unfinished_stale_lane_gets_no_grace(self):
-        """A lane whose last turn is a pending tool call and that went quiet
-        is not a FINISHED lane — the grace is only for a completed final reply."""
+    def test_lane_killed_mid_tool_call_is_kept_in_grace(self):
+        """Item 6 (decision 30.9.): a lane whose last turn is a pending tool
+        call and that went quiet was killed (an API error, a 429) and is
+        exactly the lane the supervisor resumes; it gets the same grace.
+        (Item 1 kept only a completed final reply; this assertion flips.)"""
         _transcript(self.home, self.root, "agent-s1", age_s=2 * H)
-        self.assertIsNone(self._reason("agent-s1"))
+        self.assertEqual(self._reason("agent-s1"), GRACE_REASON)
+
+    def test_lane_ending_in_an_api_error_is_kept_in_grace(self):
+        _transcript(self.home, self.root, "agent-e1", api_error=True, age_s=2 * H)
+        self.assertEqual(self._reason("agent-e1"), GRACE_REASON)
+
+    def test_killed_lane_past_grace_or_at_critical_is_reclaimable(self):
+        _transcript(self.home, self.root, "agent-e2", api_error=True, age_s=6 * H + 60)
+        self.assertIsNone(self._reason("agent-e2"))
+        _transcript(self.home, self.root, "agent-e3", api_error=True, age_s=2 * H)
+        self.assertIsNone(self._reason("agent-e3", level="critical"))
 
     def test_settled_text_tail_without_stop_reason_is_kept(self):
         """~18 % of real finished transcripts end with ``stop_reason: None``.
