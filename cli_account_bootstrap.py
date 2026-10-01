@@ -140,7 +140,9 @@ SERVICE_ACCOUNTS = {
         "host": "dev1",
         "sudo": False,
         "reach": [],
-        "secrets": [],
+        "secrets": ["fohmixer-engineer-pin", "cloudflare-fohmixer-analytics",   # #1206
+                    "cloudflare-fohmixer-access-audit", "cloudflared-fohmixer-token",
+                    "cloudflare-fohmixer-acme-dns", "cloudflare-fohmixer-setup"],
         "repo": "zbynekdrlik/fohmixer",
         # #1190: a 1-hour token scoped to this repo, minted on the controller
         # by the newlevel-project-accounts App (cli_project_gh_token).
