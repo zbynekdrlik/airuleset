@@ -224,6 +224,9 @@ class TestDeclarationValidator(unittest.TestCase):
         script = bootstrap.render_root_bootstrap("claudy")
         self.assertNotIn("meta skuid", script)
         self.assertIn("reach: NOT enforced", script)
+        # #1207: its repo venv pins Python playwright 1.62.0 (chromium 1234),
+        # installed once in /opt/ms-playwright, never per account
+        self.assertIn("playwright:1.62.0/chromium", spec.get("tools", ()))
 
     def test_fohmixer_declaration(self):
         spec = bootstrap.account_spec("fohmixer")
