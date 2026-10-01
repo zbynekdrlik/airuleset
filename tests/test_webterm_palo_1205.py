@@ -76,7 +76,7 @@ class TestPaloInventory(unittest.TestCase):
         # u_tenant = a within-tenant U read (#703); collect_identity = the
         # OWNER's push key. Neither may ever sit in palo's inventory.
         (e,) = p.palo_inventory()
-        self.assertIsNot(e.get("u_tenant"), True)
+        self.assertNotIn("u_tenant", e)
         self.assertNotIn("collect_identity", e)
         self.assertNotIn("host_keys", e)
 
@@ -319,10 +319,11 @@ class TestPaloForcedCommand(unittest.TestCase):
                                  bootstrap.account_spec(account)["webterm_sessions"],
                                  account)
 
-    def test_slot_is_absent_until_go_live(self):
+    def test_slot_if_present_is_well_formed(self):
         # The timo precedent (#1183): the pubkey enters the table at go-live,
         # never as an empty/placeholder value (a blob=None entry would make the
-        # #1202 stale check match malformed lines).
+        # #1202 stale check match malformed lines). Absence itself is locked by
+        # test_webterm_only's exact EXPECTED_HUMANS set.
         pub = wo.WEBTERM_CONTROLLER_LANE_PUBKEYS.get("palo")
         if pub is not None:
             self.assertTrue(pub.startswith("ssh-ed25519 "))
@@ -394,18 +395,45 @@ class TestPaloAccessDns(unittest.TestCase):
             if name != "palo":
                 self.assertNotIn(PALO_EMAIL, app["allowed_emails"], name)
 
-    def test_palo_is_a_drop_reader_of_exactly_montalu6(self):
-        # #1115: whoever the webterm lets open an account passes its drop lane.
-        import cli_drop_gateway as dg
-        rows = [(emails, [e["id"] for e in inv]) for emails, inv
+    M6_DROP = "drop-subdev-montalu6.newlevel.media"
+
+    def _palo_rows(self, dg):
+        return [(emails, [e["id"] for e in inv]) for emails, inv
                 in dg._webterm_readers() if PALO_EMAIL in emails]
-        self.assertEqual(rows, [([PALO_EMAIL], ["montalu6-subdev"])])
-        m6 = "drop-subdev-montalu6.newlevel.media"
-        self.assertEqual(dg.DROP_ACCESS_APPS[m6]["allowed_emails"],
-                         ["drlik.zbynek@gmail.com", PALO_EMAIL])
-        for host, spec in dg.DROP_ACCESS_APPS.items():
-            if host != m6:
+
+    def test_no_drop_grant_before_the_lane_key_exists(self):
+        # #1115 says whoever the webterm LETS OPEN an account passes its drop
+        # lane; before go-live step 1 the webterm cannot open montalu6, so a
+        # merge alone must not reach the drop Access app (review finding).
+        import cli_drop_gateway as dg
+        with mock.patch.dict(wo.WEBTERM_CONTROLLER_LANE_PUBKEYS, {}):
+            wo.WEBTERM_CONTROLLER_LANE_PUBKEYS.pop("palo", None)
+            self.assertEqual(self._palo_rows(dg), [])
+        if "palo" not in wo.WEBTERM_CONTROLLER_LANE_PUBKEYS:
+            self.assertEqual(dg.DROP_ACCESS_APPS[self.M6_DROP]["allowed_emails"],
+                             ["drlik.zbynek@gmail.com"])
+
+    def test_drop_reader_of_exactly_montalu6_once_the_key_exists(self):
+        import copy
+        import cli_drop_gateway as dg
+        import cli_drop_lanes as dl
+        with _with_palo_key():
+            self.assertEqual(self._palo_rows(dg),
+                             [([PALO_EMAIL], ["montalu6-subdev"])])
+            specs = copy.deepcopy(dg.DROP_ACCESS_APPS)
+            dl.add_webterm_readers(specs, dg.DROP_LANES, cli_fleet.REMOTE_HOSTS,
+                                   dg._webterm_readers())
+        self.assertEqual(specs[self.M6_DROP]["allowed_emails"][-1], PALO_EMAIL)
+        for host, spec in specs.items():
+            if host != self.M6_DROP:
                 self.assertNotIn(PALO_EMAIL, spec["allowed_emails"], host)
+
+    def test_the_key_gate_keeps_every_live_lane_a_reader(self):
+        import cli_drop_gateway as dg
+        emails = [e for e, _inv in dg._webterm_readers()]
+        for name in ("david", "marek", "dominika", "timo"):
+            self.assertIn(access.WEBTERM_ACCESS_APPS[name]["allowed_emails"],
+                          emails, name)
 
     def test_managed_cname_to_the_controller_tunnel_gated_on_access(self):
         (r,) = [r for r in dns.MANAGED_RECORDS
@@ -437,7 +465,7 @@ class TestTimoSpecStable(unittest.TestCase):
     def test_every_field(self):
         import cli_webterm_timo as t
         s = t._spec()
-        home = s.tunnel_creds.parent.parent
+        home = Path.home()   # no test module mutates HOME at import time
         units = home / ".config" / "systemd" / "user"
         self.assertEqual(s.name, "timo")
         self.assertEqual(s.gateway_user, "timo")
