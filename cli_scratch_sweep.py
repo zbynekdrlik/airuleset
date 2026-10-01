@@ -81,7 +81,8 @@ def _claude_scratch_root(tmp_dir=None, uid=None) -> Path:
 
 
 def discover_claude_scratch_candidates(tmp_dir=None, uid=None, now=None,
-                                       min_age_days=None, proc_dir=None, home=None):
+                                       min_age_days=None, proc_dir=None, home=None,
+                                       child_min_age_days=None):
     """Every direct child (file OR directory) of THIS account's OWN
     `/tmp/claude-<uid>/` scratch root that is safe to reclaim -- #355. A
     list of dicts `{"path", "reason", "size"?, "age_days"?}` -- `reason` is
@@ -157,6 +158,10 @@ def discover_claude_scratch_candidates(tmp_dir=None, uid=None, now=None,
         stale fallback. Live-executed and confirmed reachable, but needs
         a self-inflicted unreadable subdir to trigger; not present in any
         real fleet scratch tree observed so far.
+
+    ``child_min_age_days`` (#1195 item 7) is the floor for a live session's
+    scratchpad CHILDREN; None keeps the 2-day default, and the disk-guard
+    passes 1 day at critical.
     """
     import time as _time
     now = _time.time() if now is None else now
@@ -202,7 +207,8 @@ def discover_claude_scratch_candidates(tmp_dir=None, uid=None, now=None,
             if _SESSION_UUID_RE.match(c):
                 out.append(_classify_scratch_session(
                     cp, cwd_key=name, uuid=c, now=now,
-                    min_age_days=min_age_days, proc_dir=proc_dir, home=home))
+                    min_age_days=min_age_days, proc_dir=proc_dir, home=home,
+                    child_min_age_days=child_min_age_days))
             else:
                 # a non-uuid entry directly under a cwd-key -> whole-entry
                 out.append(_classify_scratch_entry(cp, now, min_age_days, proc_dir))
@@ -339,6 +345,9 @@ def _scratch_stat(p):
 
 
 SCRATCHPAD_CHILD_MIN_AGE_DAYS = 2
+# #1195 item 7: at CRITICAL disk a live session's child is kept only 24 h after
+# its last use (dev1 1.10.: 8 GB in one live scratchpad, all used within 48 h).
+SCRATCHPAD_CHILD_CRITICAL_AGE_DAYS = 1
 
 
 def discover_stale_scratchpad_children(session_path, now, min_age_days=None,
@@ -349,8 +358,10 @@ def discover_stale_scratchpad_children(session_path, now, min_age_days=None,
     ``cli_scratch_use``): a script read daily but never rewritten is in use.
     Past ``min_age_days`` with ``_target_in_live_use`` False it is a genuine
     candidate (reason=None); old by mtime but recently read -> a kept row.
-    Returns ``[{path, size, reason, cls}]``. Symlinks never followed. A missing
-    or unreadable ``scratchpad/`` is simply nothing to do."""
+    Returns ``[{path, size, reason, cls, floor_days}]``; ``floor_days`` is the
+    floor the row was planned under, which the act-time re-check reuses (#1195
+    item 7). Symlinks never followed. A missing or unreadable ``scratchpad/`` is
+    simply nothing to do."""
     min_age_days = min_age_days if min_age_days is not None else SCRATCHPAD_CHILD_MIN_AGE_DAYS
     sp = Path(session_path) / "scratchpad"
     if not sp.is_dir() or sp.is_symlink():
@@ -383,11 +394,12 @@ def discover_stale_scratchpad_children(session_path, now, min_age_days=None,
                         "reason": "in live use (open fd / cwd) -- kept"})
             continue
         out.append({"path": str(child), "size": size_bytes, "cls": "scratch",
-                    "reason": None})
+                    "reason": None, "floor_days": min_age_days})
     return out
 
 
-def _classify_scratch_session(cp, cwd_key, uuid, now, min_age_days, proc_dir, home):
+def _classify_scratch_session(cp, cwd_key, uuid, now, min_age_days, proc_dir, home,
+                              child_min_age_days=None):
     """Per-session (#863) classification of a `<cwd-key>/<session-uuid>` subdir.
     LIVENESS FIRST (tri-state `_session_liveness`): a genuinely LIVE session (a
     live process fd on the subtree, the AUTHORITATIVE sessions registry mapping
@@ -399,7 +411,9 @@ def _classify_scratch_session(cp, cwd_key, uuid, now, min_age_days, proc_dir, ho
     age floor applies. Fail-safe: unresolvable liveness never sweeps.
 
     #849 ask 2: a LIVE or UNDETERMINABLE session ALSO reports ``stale_children``
-    -- the individually-reclaimable old children inside its ``scratchpad/``."""
+    -- the individually-reclaimable old children inside its ``scratchpad/``,
+    aged against ``child_min_age_days`` (None = the 2-day default; the
+    disk-guard passes 1 day at critical, #1195 item 7)."""
     entry = {"path": str(cp), "reason": None, "uuid": uuid,
              "cwd_key": cwd_key, "live": False}
     if cp.is_symlink():
@@ -419,12 +433,12 @@ def _classify_scratch_session(cp, cwd_key, uuid, now, min_age_days, proc_dir, ho
         entry["reason"] = ("live session %s -- kept unconditionally "
                            "(visibility only)" % uuid)
         entry["stale_children"] = discover_stale_scratchpad_children(
-            cp, now, proc_dir=proc_dir)
+            cp, now, min_age_days=child_min_age_days, proc_dir=proc_dir)
         return entry
     if liveness == _SESS_UNDET:
         entry["reason"] = "liveness undeterminable -- kept"
         entry["stale_children"] = discover_stale_scratchpad_children(
-            cp, now, proc_dir=proc_dir)
+            cp, now, min_age_days=child_min_age_days, proc_dir=proc_dir)
         return entry
     if entry["age_days"] < min_age_days:
         entry["reason"] = "too recent (%.1fd < %sd)" % (entry["age_days"], min_age_days)
@@ -432,7 +446,8 @@ def _classify_scratch_session(cp, cwd_key, uuid, now, min_age_days, proc_dir, ho
     return entry   # reason stays None -- dead + old -> genuine candidate
 
 
-def scratch_session_live_recheck(path, home=None, now=None, proc_dir=None) -> bool:
+def scratch_session_live_recheck(path, home=None, now=None, proc_dir=None,
+                                 child_min_age_days=None) -> bool:
     """TOCTOU pre-delete liveness re-check for the disk-guard scratch drain
     executor (#863 review 4). Returns True (REFUSE the delete) iff `path` is a
     `<cwd_key>/<session-uuid>` per-session scratch dir that is now LIVE or
@@ -442,13 +457,17 @@ def scratch_session_live_recheck(path, home=None, now=None, proc_dir=None) -> bo
     tmp-stray delete is out of scope here and proceeds). Fail-safe: for a uuid
     path, any error -> True (KEEP). #1195 item 5: a `<uuid>/scratchpad/<child>`
     is refused when it was read/written within the child floor or is held open
-    since the plan (`cli_scratch_use.child_in_use`)."""
+    since the plan (`cli_scratch_use.child_in_use`). #1195 item 7: the floor is
+    `child_min_age_days` when given (the floor the plan used), else the 2-day
+    default."""
     import time as _time
     now = _time.time() if now is None else now
     try:
         p = Path(path)
         if p.parent.name == "scratchpad" and _SESSION_UUID_RE.match(p.parent.parent.name):
-            return child_in_use(p, now, SCRATCHPAD_CHILD_MIN_AGE_DAYS * 86400,
+            floor = (child_min_age_days if child_min_age_days is not None
+                     else SCRATCHPAD_CHILD_MIN_AGE_DAYS)
+            return child_in_use(p, now, floor * 86400,
                                 lambda c: _target_in_live_use(c, proc_dir=proc_dir))
         if not _SESSION_UUID_RE.match(p.name):
             return False

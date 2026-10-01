@@ -2225,7 +2225,11 @@ def _row_to_action(cls, row, kind):
     reason = row.get("reason")
     if reason is not None:
         return {"cls": cls, "path": path, "bytes": size, "kind": "skip", "reason": reason}
-    return {"cls": cls, "path": path, "bytes": size, "kind": kind, "reason": None}
+    action = {"cls": cls, "path": path, "bytes": size, "kind": kind, "reason": None}
+    if row.get("floor_days") is not None:
+        # #1195 item 7: the act-time re-check reuses the floor the plan used
+        action["floor_days"] = row["floor_days"]
+    return action
 
 
 def _effective_scratch_age_days(box_class_fn=None):
@@ -2238,7 +2242,7 @@ def _effective_scratch_age_days(box_class_fn=None):
         box_class_fn=box_class_fn)
 
 
-def _plan_scratch(home, now, scratch_rows=None, box_class_fn=None):
+def _plan_scratch(home, now, scratch_rows=None, box_class_fn=None, level=None):
     from cli_scratch_sweep import (discover_claude_scratch_candidates,
                                    discover_stray_tmp_candidates)
     actions = []
@@ -2248,7 +2252,8 @@ def _plan_scratch(home, now, scratch_rows=None, box_class_fn=None):
         # largest_live_scratch (no 2nd du-walk); else discover here.
         rows = (scratch_rows if scratch_rows is not None
                 else (discover_claude_scratch_candidates(
-                    now=now, home=home, min_age_days=scratch_age) or []))
+                    now=now, home=home, min_age_days=scratch_age,
+                    child_min_age_days=_scratch_child_floor(level)) or []))
         for r in rows:
             actions.append(_row_to_action("scratch", r, "delete"))
             # #849 ask 2: stale scratchpad children inside a LIVE/UNDET session
@@ -2556,7 +2561,8 @@ def _default_planners(home, now, scratch_rows=None, wt_cache=False, level=None):
         ("claude-version", lambda: _plan_claude_versions(home, now)),
         ("playwright-browser", lambda: _plan_playwright_browsers(home, now)),
         ("oneoff-venv", lambda: _plan_oneoff_venvs(home, now)),
-        ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows)),
+        ("scratch", lambda: _plan_scratch(home, now, scratch_rows=scratch_rows,
+                                          level=level)),
         ("uploads", lambda: _plan_uploads(home, now)),
         ("work-products-snapshot", lambda: _plan_work_products_snapshot(home, now)),
         ("home-snapshot", lambda: _plan_home_snapshot(home, now)),
@@ -2657,11 +2663,12 @@ def _sudo_available(probe_fn=None):
         return False
 
 
-def _default_scratch_live(path, now):
+def _default_scratch_live(path, now, floor_days=None):
     """The real #863 per-session TOCTOU liveness re-check for the drain executor
-    (real ~/.claude sessions registry + real /proc), and #1195 per-child use."""
+    (real ~/.claude sessions registry + real /proc), and #1195 per-child use,
+    against the child floor the plan used (``floor_days``, item 7)."""
     from cli_scratch_sweep import scratch_session_live_recheck
-    return scratch_session_live_recheck(path, now=now)
+    return scratch_session_live_recheck(path, now=now, child_min_age_days=floor_days)
 
 
 def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=None):
@@ -2739,7 +2746,9 @@ def _perform_action(a, sudo_ok=False, run_fn=None, scratch_live_fn=None, now=Non
         # it as a safety REFUSE, not a FAIL (Fable review round 2, blue 2).
         if a.get("cls") == "scratch":
             live_fn = scratch_live_fn or _default_scratch_live
-            if live_fn(path, now):
+            floor = a.get("floor_days")
+            if (live_fn(path, now) if floor is None
+                    else live_fn(path, now, floor_days=floor)):
                 return -1
         _rm_path(path, sudo=use_sudo, run_fn=run_fn)
         return nbytes
@@ -3445,17 +3454,28 @@ def _release_lock(fd):
 # --------------------------------------------------------------------------- #
 # Job 40 entry
 # --------------------------------------------------------------------------- #
-def _default_scratch_discover(now, home, box_class_fn=None):
+def _scratch_child_floor(level):
+    """#1195 item 7: the scratchpad-child floor for a drain ``level`` — 1 day
+    at ``critical``, else None (the 2-day default)."""
+    if level == "critical":
+        from cli_scratch_sweep import SCRATCHPAD_CHILD_CRITICAL_AGE_DAYS
+        return SCRATCHPAD_CHILD_CRITICAL_AGE_DAYS
+    return None
+
+
+def _default_scratch_discover(now, home, box_class_fn=None, level=None):
     """The real #355/#863 scratch discovery, used by `run_disk_guard` to find
     the largest LIVE session scratchpad (visibility only). #925: passes the
     box-class-aware age floor so the pre-seeded rows carry the 3h shared-stream
     floor (F1 fix — without this, the seeded rows use 7d and `_plan_scratch`'s
-    own `scratch_age` is never applied to them). Best-effort — a discovery error
-    surfaces as an empty list, never an exception."""
+    own `scratch_age` is never applied to them). ``level`` (#1195 item 7) sets
+    the live-session child floor. Best-effort — a discovery error surfaces as
+    an empty list, never an exception."""
     from cli_scratch_sweep import discover_claude_scratch_candidates
     scratch_age = _effective_scratch_age_days(box_class_fn)
     return discover_claude_scratch_candidates(
-        now=now, home=home, min_age_days=scratch_age) or []
+        now=now, home=home, min_age_days=scratch_age,
+        child_min_age_days=_scratch_child_floor(level)) or []
 
 
 def _largest_live_scratch(rows):
@@ -3691,13 +3711,16 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
                       max(status["worst_pct"], q.pct if q.pressure and not q.exhausted else 0),
                       cadence_due or growth_boost or q.growth, dry_run=dry_run))
     scratch_rows = None
+    # #1195: one drain level for the worktree grace AND the scratch child floor
+    drain_level = _lane_grace_level(status, q, statvfs_fn)
     if will_drain:
         # visibility only, NEVER deleted, no ping (the session cleans its own
         # scratch). Computed BEFORE write_status_cache so the footer cache
         # carries it.
         try:
             with timer.step("scratch-discovery", logs):
-                scratch_rows = (scratch_discover_fn or _default_scratch_discover)(now, home)
+                scratch_rows = (scratch_discover_fn(now, home) if scratch_discover_fn
+                                else _default_scratch_discover(now, home, level=drain_level))
             lls = _largest_live_scratch(scratch_rows)
             if lls:
                 status["largest_live_scratch"] = lls
@@ -3824,7 +3847,7 @@ def run_disk_guard(now=None, home=None, dry_run=False, statvfs_fn=None, dev_fn=N
         else:
             planners = _default_planners(home, now, scratch_rows=scratch_rows,
                                          wt_cache=not dry_run,
-                                         level=_lane_grace_level(status, q, statvfs_fn))
+                                         level=drain_level)
 
         with timer.step("drain", logs):
             logs += _dgq.run_drain_passes(status, home, now, dry_run, planners, planners_fn,
