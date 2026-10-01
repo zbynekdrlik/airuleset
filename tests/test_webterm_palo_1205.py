@@ -329,6 +329,37 @@ class TestPaloForcedCommand(unittest.TestCase):
             self.assertIn("webterm-palo-controller", pub)
 
 
+class TestPaloInstallCli(unittest.TestCase):
+    """`python3 cli_webterm_palo.py forced-command-install` = go-live step 2."""
+
+    def _main(self, argv):
+        import io
+        import cli_webterm_palo as m
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(sys, "stdout", out), \
+                mock.patch.object(sys, "stderr", err):
+            rc = m.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_prints_the_install_script(self):
+        import cli_webterm_palo as m
+        with _with_palo_key():
+            rc, out, _err = self._main(["forced-command-install"])
+            self.assertEqual(out, m.render_forced_command_install())
+        self.assertEqual(rc, 0)
+
+    def test_fails_loud_without_the_key(self):
+        with mock.patch.dict(wo.WEBTERM_CONTROLLER_LANE_PUBKEYS, {}):
+            wo.WEBTERM_CONTROLLER_LANE_PUBKEYS.pop("palo", None)
+            rc, out, err = self._main(["forced-command-install"])
+        self.assertEqual((rc, out), (1, ""))
+        self.assertIn("webterm_palo_ed25519", err)
+
+    def test_usage(self):
+        for argv in ([], ["install"], ["forced-command-install", "x"]):
+            self.assertEqual(self._main(argv)[0], 2, argv)
+
+
 class TestPaloNoIdentity(unittest.TestCase):
     """Webterm-only (#869): Palo gets no account, no key, no password."""
 
