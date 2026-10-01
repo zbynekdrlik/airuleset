@@ -117,7 +117,7 @@ def profile_for_host_set(box_class, account=None):
     """#870 F4a D2: which lane SET a box provisions. Returns a frozenset of
     profile constants.
 
-    Controller (box-class 'controller', user 'airuleset'): ALL 4 lanes.
+    Controller (box-class 'controller', user 'airuleset'): EVERY lane.
     dev1: owner only (via LANE_HOST — only lanes hosted on dev1).
     subdev: the lane for the current account (via LANE_HOST — only lanes
     hosted on subdev).

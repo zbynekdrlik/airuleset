@@ -8,7 +8,10 @@ controller's ONE multi-ingress cloudflared tunnel fronts palo.newlevel.media
 (the ingress rule derives from this spec in
 ``cli_webterm._setup_controller_webterm``), DNS is the #983 managed CNAME gated
 on the Access app, and ``identity_key=None`` brings the gateway/dashboard up at
-once while the single ssh tab fails VISIBLY until the lane key lands.
+once while the single ssh tab cannot attach until the lane key lands (as long
+as no OTHER controller identity is authorized on montalu6:
+``_ssh_interactive_prefix`` sets no ``IdentitiesOnly``). Nothing is reachable
+before go-live step 3 anyway: no Access app means no CNAME.
 
 Session set: exactly ONE tab — the ``montalu6@subdev`` STREAM account, the same
 tab (session + start dir) the owner dashboard has, through the dedicated
@@ -25,10 +28,16 @@ resolve an owner-realm box, another stream or another person's account. Palo
 has NO unix account, NO ssh key and NO password anywhere (webterm-only, #869):
 his whole authorization is the Access allow-list. The lane key's line is the
 owner's montalu6 forced command byte-for-byte (``restrict,pty,command=``: no
-port/agent/X11 forwarding, no other command). What the attach itself gives is
-the montalu6 tmux session — a working shell AS montalu6 — which is exactly the
-access the owner asked to grant. The gateway runs under the controller's
-`airuleset` account (the accepted #870 F4c B1 residue shared by every lane).
+port/agent/X11 forwarding, no other command). BUT the attach itself is the
+montalu6 tmux session, i.e. a working shell (and a Claude session) AS montalu6,
+so Palo's TRANSITIVE reach is montalu6's whole reach. Unlike timo's fohmixer
+(no secrets, outbound ssh blocked), montalu6 is an unhardened branch-merge
+stream: it holds the odoo-erp stream App token (contents:write on the
+MULTI-CLIENT odoo-erp repo, with other clients' code such as MIVA), its Claude
+login and whatever else the montalu streams hold. Go-live step 0 is therefore
+an explicit owner confirmation of that reach. The gateway runs under the
+controller's `airuleset` account (the accepted #870 F4c B1 residue shared by
+every lane).
 """
 import sys
 
@@ -45,11 +54,16 @@ WEBTERM_PALO_GATEWAY_PORT = 8086
 
 _PALO_GO_LIVE = (
     "  webterm(palo): needs setup to go live (#1205, supervisor) —\n"
+    "    0. Owner gate: the tab is a shell AS montalu6, so Palo reaches what\n"
+    "       montalu6 holds (the odoo-erp App token on the multi-client repo,\n"
+    "       the Claude login; module SECURITY NOTE). Owner confirms first.\n"
     "    1. Mint the LANE key on the controller: ssh-keygen -t ed25519 -N ''\n"
     "       -C webterm-palo-controller -f %s (0600).\n"
     "       Paste its PUBLIC key into cli_webterm_only.\n"
     "       WEBTERM_CONTROLLER_LANE_PUBKEYS['palo'] (+ the #870 F4b lock test:\n"
-    "       EXPECTED_HUMANS and a fingerprint pin).\n"
+    "       EXPECTED_HUMANS and a fingerprint pin). The push carrying it also\n"
+    "       adds palo@montalu.sk to the drop-subdev-montalu6 Access app (#1115\n"
+    "       reader rule, gated on this key).\n"
     "    2. Install the forced-command line on montalu6@subdev (append-or-\n"
     "       refresh on the palo blob, every other line untouched):\n"
     "       python3 cli_webterm_palo.py forced-command-install | ssh <push path\n"
@@ -58,10 +72,9 @@ _PALO_GO_LIVE = (
     "    3. AUTH: NO password, NO account.\n"
     "       `airuleset.py webterm-access --apply --profile palo` creates the\n"
     "       Access app for palo.newlevel.media (allow-list palo@montalu.sk).\n"
-    "       The next controller install then\n"
-    "       upserts the managed DNS CNAME (gated on that app), adds the shared\n"
-    "       tunnel ingress, provisions this gateway, and adds palo@montalu.sk to\n"
-    "       the drop-subdev-montalu6 Access app (#1115 reader rule).\n"
+    "       The gateway and the shared-tunnel ingress already came up with the\n"
+    "       merge's push (unreachable without DNS); the next controller install\n"
+    "       upserts the managed DNS CNAME, which is gated on that app.\n"
     "    4. Verify: https://palo.newlevel.media/ answers 302 to Cloudflare\n"
     "       Access; a Playwright login through the gateway shows exactly ONE\n"
     "       tab, montalu6, attached to the montalu6 session.\n"

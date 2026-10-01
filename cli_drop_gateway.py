@@ -331,16 +331,20 @@ DROP_ACCESS_APPS.update(cli_drop_lanes.generated_access_specs(
 
 def _webterm_readers():
     """[(login emails, dashboard inventory)] per non-owner webterm human — the
-    ONE source for who may open which account (#1115 reopen). Both modules are
-    stdlib-only leaves."""
+    ONE source for who may open which account (#1115 reopen). A lane counts
+    only once its controller lane key is minted (#1205): before that the
+    webterm cannot open the account, so neither may its drop lane. All three
+    modules are stdlib-only leaves."""
     import cli_webterm_access as _wa
+    import cli_webterm_only as _wo
     import cli_webterm_profiles as _wp
     return [(_wa.WEBTERM_ACCESS_APPS[name]["allowed_emails"], inv())
             for name, inv in (("david", _wp.david_inventory),
                               ("marek", _wp.marek_inventory),
                               ("dominika", _wp.dominika_inventory),
                               ("timo", _wp.timo_inventory),
-                              ("palo", _wp.palo_inventory))]
+                              ("palo", _wp.palo_inventory))
+            if name in _wo.WEBTERM_CONTROLLER_LANE_PUBKEYS]
 
 
 cli_drop_lanes.add_webterm_readers(DROP_ACCESS_APPS, DROP_LANES,
