@@ -69,7 +69,9 @@ class TestPlanFloor:
             child_min_age_days=cs.SCRATCHPAD_CHILD_CRITICAL_AGE_DAYS))
         assert kids["lane-copy"]["reason"] is None, kids
         assert kids["lane-copy"]["floor_days"] == 1
-        assert kids["tool.sh"]["reason"] is not None or "tool.sh" not in kids
+        # a child used 10 h ago is never a candidate (a fresh child is not
+        # even listed; an old-mtime one would be a kept row)
+        assert "tool.sh" not in kids or kids["tool.sh"]["reason"] is not None
 
     def test_default_floor_keeps_the_30h_child(self, tmp_path):
         now = time.time()
