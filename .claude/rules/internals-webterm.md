@@ -51,22 +51,7 @@ which auto-load when you read `cli_webterm.py`):
   reach the host 127.0.0.1 → bind 0.0.0.0"), which a review agent literally executed
   → an unauthenticated writable terminal on the tailnet, killed by hand (#671). The
   `internals-tests.md` #661/#678 harness bullets now agree on loopback-only.
-- **#681 review lessons (reusable for any bind/security guard).** (1) A wildcard-bind
-  GUARD must be PARSE-based — `ipaddress.ip_address(b).is_unspecified` + `inet_aton(b)
-  == 0` — NOT a frozenset of literals: `::0` / `0` / `0.0` / `0.0.0` / `0:0:0:0:0:0:0:0`
-  all resolve to INADDR_ANY/in6addr_any but escape a literal set (only `""` / `*` need
-  the explicit sentinel branch). (2) Guard the RUNTIME chokepoint, not only the render
-  path — the #671 class is an agent HAND-RUNNING `--bind 0.0.0.0`; the gateway
-  `main()` argparse rejects it now, mirroring the render guard (module stays
-  standalone → a LOCAL `_bind_is_wildcard`, no cli_webterm import). (3) A regex SCAN
-  for a wildcard literal must NOT carry an empty-value arm — `(?:-i|--bind)…['\"]?(?:\s|…)`
-  matches EVERY `-i ` (the trailing space satisfies the empty arm); drop it (the parse
-  guard covers `""`) and verify the regex against the REAL rendered artifacts for
-  false-positives, never just seeds. (4) VERIFY a ticket's cited `#N` before repeating
-  it — the #661/#678 harness bullet was cited "#657" (an unrelated ticket); one
-  `grep -c 657 internals-tests.md` (0 hits) + `git log -S "<phrase>"` settled it. A
-  citation inherited from ticket text is itself the "unverified doc claim" class this
-  ticket fixes.
+- **[Moved to `.claude/rules-reference/internals-archive.md` at the 51200-byte cap, 2026-10-01 (#1205) — grep "#681 review lessons" there]** parse-based wildcard-bind guards, runtime chokepoint, regex empty-arm trap, verify cited `#N`.
 
 ### #661 rework — extending a per-human LANE SET (Marek: montalu2/miva1/montalu4 + dev1/dev2 + gatekeeper + forestshop)
 
@@ -419,3 +404,4 @@ The david/marek lanes now have their own U-dot (owner ruling 2026-08-25) without
 - **#1189 — never plain-restart a managed cloudflared tunnel; `cli_tunnel_apply` owns the provisioner's restart** (local drop lanes too since #1191: `cli_drop_tunnel_restart`). A SIGTERMed cloudflared waits up to `--grace-period` (30 s; webterm websockets keep it the full 30 s), so stop-then-start = 30 s of 1033 on EVERY hostname of the shared controller tunnel. Restart only on a changed sha256 stamp (`<config>.applied`: config+unit+creds) or on-disk drift, and then via the `<unit>-overlap.service` replica: wait for its `TUNNEL_PIDFILE` (written only after the first registered connection), `restart --no-block` main, wait until main's pidfile == its MainPID, stop the overlap. `/ready` needs a fixed metrics port (collides across subdev accounts) — use the pidfile. Vault URLs (`cli_vault_delivery`): an Access lane answers 302 at the EDGE even with the tunnel dead, so there the probe cannot see a dead tunnel until the `<host>/healthz` Access bypass app exists (#1192: that bypass is the rescue; the tailscale fallback line was REMOVED by owner decision — see internals-filedrop.md #1192).
 
 - **#1202 — a forced command baked into `authorized_keys` OUTLIVES the code that rendered it; `push` never re-bakes it.** montalu1's controller-lane line was baked by hand on 2026-09-09 with the `[ -d ]` chain of that day, so after a reboot the reconnecting webterm tab created the session in the bare parent `~/devel/odoo` and `claude -c` resumed a stale transcript. The start dir now comes from ONE source, `cli_session_cwd.session_chain_for` (declared window first, else a `.git`-only chain, else `$HOME`). After changing it, re-bake each affected line with `append_controller_lane_pubkey_command` (no production caller), then read `airuleset.py status` (`session cwd:` line) on the box.
+- **#1205 — a second controller-born single-human lane goes through `lane.controller_lane_spec`; a tab to a STREAM account needs its own key install.** timo and palo share one LaneSpec factory: every path, unit and socket comes from the lane name, plus dummy shared-tunnel fields. Prove a refactor of a live lane with a field-by-field test that passes before AND after. A stream account (montalu6) is neither a #1184 project account (no bootstrap render) nor webterm-only (no desired-set rewrite), so the lane renders the `append_controller_lane_pubkey_command` script for its one entry (`cli_webterm_palo.py forced-command-install`). Copy the owner's tab but DROP `u_tenant` and `collect_identity` (the owner's push key). Keep the pubkey slot ABSENT until go-live: an empty value has blob=None and matches malformed lines in `stale_forced_commands`. Lane-set pins: 6 locks in 5 test files. A drop reader (`_webterm_readers`) counts only once the lane key is minted, else a merge grants the drop lane before the webterm can open the account. The tab is a shell AS the target: on an unhardened stream, write its reach into the SECURITY NOTE + an owner go-live gate.
