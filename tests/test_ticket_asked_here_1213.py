@@ -84,5 +84,22 @@ class TestRoutesFillTheBox(unittest.TestCase):
         self.assertIn(N, buckets["U"])
 
 
+class TestExplainCore(unittest.TestCase):
+
+    def test_explain_names_the_reason_without_a_parity_break(self):
+        import io
+        from contextlib import redirect_stdout
+        import cli_ticket_explain as explain
+        facts = ts.TicketFacts()
+        buckets = ts.bucketize({N: ROW}, facts, ts.Box(asked=frozenset({N})))
+        out = io.StringIO()
+        with mock.patch.object(route, "asked_refs", return_value=frozenset({N})), \
+                redirect_stdout(out):
+            explain.explain_core(None, buckets, facts, root="/r")
+        text = out.getvalue()
+        self.assertIn("#1213", text)
+        self.assertNotIn("mismatch", text)
+
+
 if __name__ == "__main__":
     unittest.main()
