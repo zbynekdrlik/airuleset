@@ -112,6 +112,8 @@ SERVICE_ACCOUNTS = {
         "reach_reason": "fleet credential manager: ssh to every fleet account "
                         "is its job (#960)",
         "secrets": ["claudy-vault"],   # the credential vault it manages (vault.py)
+        # #1207: the repo venv's playwright 1.62.0 (chromium 1234), in /opt
+        "tools": ["playwright:1.62.0/chromium"],
         "project_dir": "devel/claudy",
         "webterm_sessions": {
             # human → {preferred, start_dir_chain} — the forced command
