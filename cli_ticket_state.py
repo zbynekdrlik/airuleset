@@ -434,14 +434,16 @@ def classify(row, facts=None, box=None, number=None):
        (#391; a handed row parked in W stays there, as the footer counts it).
     `facts=None` stops after the label partition — the `_partition_workable`
     contract. `Facts()` (all unknown) reproduces the label buckets + gk.
-    #1213: a HIDDEN row whose `number` is in `box.asked` is U — this box
-    asked the owner about it, so this box is the one waiting."""
+    #1213: a row whose `number` is in `box.asked` is U, whatever its labels
+    say (HIDDEN, I, W): this box asked the owner about it and is waiting, and
+    an owner question beats a hand-off (#1141)."""
     box = box or Box()
     labels = _labels_of(row)
     bucket, reason = _partition(labels, box)
-    if bucket == HIDDEN and _asked_here(number, box):
-        return "U", ("this box asked the owner about it (a ❓ ping on #%s): the "
-                     "waiting party is here, not the stream (#1213)" % number)
+    if bucket != "U" and _asked_here(number, box):
+        return "U", ("this box asked the owner about it (a ❓ ping on #%s), so "
+                     "it is waiting here (#1213; the labels said %s)"
+                     % (number, bucket))
     if facts is None or bucket in ("U", HIDDEN):
         return bucket, reason
     names = _names(labels)

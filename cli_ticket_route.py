@@ -44,8 +44,7 @@ def footer(rows, root, slug, merged, own_stream=None, *, handed=None,
                                handed=dict(handed or {}))
     if role_filter is not None:
         rows = role_filter(rows)
-    box = ts.Box(own_stream=own_stream,
-                 asked=frozenset() if own_stream else asked_refs(root))
+    box = ts.Box(own_stream=own_stream, asked=asked_refs(root))
     return ts.bucketize(rows, facts, box), facts
 
 
@@ -85,7 +84,7 @@ def quals(rows, root, box, *, extra=None, role=None, slug=None, handed=None):
     except Exception as e:  # noqa: BLE001 — a display note, never a count
         note = "unknown (%s)" % type(e).__name__
     facts = dataclasses.replace(facts, m_note=note)
-    if box.kind == "core" and not box.asked:   # #1213
+    if not box.asked:   # #1213
         box = dataclasses.replace(box, asked=asked_refs(root))
     return ts.bucketize(rows, facts, box), facts
 

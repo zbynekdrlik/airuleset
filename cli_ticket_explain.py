@@ -111,6 +111,9 @@ def explain_slice(extra, root, rows, buckets, facts, box=None,
     import airuleset
     import cli_quals_cmd
     box = box or ts.Box(own_stream=airuleset._current_user())
+    if not box.asked:   # #1213: the same asked refs the count used
+        import cli_ticket_route
+        box = ts.Box(own_stream=box.own_stream, asked=cli_ticket_route.asked_refs(root))
     extra_u = cli_quals._question_map_u_supplement(
         rows, root, cli_quals_cmd._slice_quals_runner(root))
     _emit({**buckets, "U": {**buckets["U"], **extra_u}}, box, facts,
