@@ -22,8 +22,10 @@ is always fresh (never served from ``disk_guard_wt_cache``).
 #1195 item 1 (owner 30.9.): a supervisor resumes a FINISHED lane via
 SendMessage (seen after 34 and after 331 min), so a lane whose transcript ends
 in a terminal stop keeps its worktree for :data:`FINISHED_GRACE_S` after its
-last turn. The caller passes the disk level: ``critical`` waives the grace; a
-caller that does not know it passes nothing and keeps the lane.
+last turn. #1195 item 6: a lane killed by an API error or a 429 gets the same
+grace (any not-live lane last written under 6 h). The caller passes the disk
+level: ``critical`` waives the grace; a caller that does not know it passes
+nothing and keeps the lane.
 """
 # airuleset:script-ok helper module, errors are returned as data and logged
 from __future__ import annotations
@@ -37,7 +39,7 @@ import time
 LIVE_LANE_KEPT = "live lane (fresh subagent transcript) — kept"
 LIVENESS_UNKNOWN_KEPT = "lane liveness unknown (transcript evidence unreadable) — kept"
 FINISHED_GRACE_S = 6 * 3600
-FINISHED_GRACE_KEPT = "finished lane in 6 h resume grace — kept"
+FINISHED_GRACE_KEPT = "lane in 6 h resume grace — kept"
 GRACE_WAIVED_LEVEL = "critical"
 
 
@@ -248,7 +250,6 @@ class LiveLaneGate:
         self.disk_level = disk_level
         self._memo = {}
         self._recent = {}
-        self._finished = {}
 
     def evidence(self, repo_root):
         """``(ids, err)`` for ``repo_root``, read once per pass. An error is
@@ -288,13 +289,11 @@ class LiveLaneGate:
         return FINISHED_GRACE_KEPT if self._in_grace(str(repo_root), base) else None
 
     def _in_grace(self, repo_key, base):
-        """True when ``base`` is a lane last written inside the grace whose
-        final turn is a completed text reply (read lazily, once per pass). A
-        ``settling`` tail (no stop_reason, ~18 % of real finishes) counts too:
-        every candidate here is either terminal-finished or stale (15 min idle,
-        far past ``FINISH_SETTLE_S``), and the grace decides a KEEP, never a
-        delete. A pending tool-call / api-error tail is not a finished lane. At
-        ``critical`` disk the grace is waived before any content read, logged."""
+        """True when ``base`` is a NOT-live lane last written inside the grace,
+        however its transcript ended (#1195 item 6): a terminal reply, a
+        settling tail, a pending tool call or an api-error. A quiet lane whose
+        process is gone (an API error, a 429) is the lane a supervisor resumes.
+        At ``critical`` disk the grace is waived, logged; no content is read."""
         path = self._recent.get(repo_key, {}).get(base)
         if not path:
             return False
@@ -302,8 +301,4 @@ class LiveLaneGate:
             print("lane-live-gate: %s last written inside the resume grace, disk %s"
                   " — grace waived" % (base, self.disk_level), file=sys.stderr)
             return False
-        if path not in self._finished:
-            import watchdog.transcripts as T   # its finish reader never raises
-            self._finished[path] = T.transcript_worker_finished(path) in (
-                "terminal", "settling")
-        return self._finished[path]
+        return True
