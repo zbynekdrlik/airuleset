@@ -211,6 +211,47 @@ SERVICE_ACCOUNTS = {
                        "start_dir_chain": ["devel/camera-box"]},
         },
     },
+    # #1211 (migrate-on-touch): the MikroTik/VPN tooling. Its runtime timer runs on
+    # companion-snv, outside the fleet. github_app comes with the live migration.
+    "nlvpn": {
+        "host": "dev1",
+        "sudo": False,
+        "reach": [
+            {"cidr": "10.77.8.1/32", "ports": [22],
+             "reason": "MikroTik router_snv (tailscale subnet route)"},
+            {"cidr": "100.122.204.47/32", "ports": [22],
+             "reason": "companion-snv, the nlvpn runtime host (git pull deploy)"},
+        ],
+        "secrets": ["nlvpn-state"],   # gitignored state/: HCLOUD_TOKEN, MikroTik, WG, VPS key
+        "repo": "zbynekdrlik/nlvpn",
+        "project_dir": "devel/nlvpn",
+        "tmux_session": "nlvpn",
+        "webterm_sessions": {
+            "zbynek": {"preferred": "nlvpn", "start_dir_chain": ["devel/nlvpn"]},
+        },
+    },
+    # #1212 (migrate-on-touch): NLMEDIA Resolume Arena box tooling on dev2. HTTP to
+    # remoteos-mcp :8092 only (tcp/22 is what the uid reject enforces).
+    "resolume": {
+        "host": "dev2",
+        "sudo": False,
+        "reach": [
+            {"cidr": "10.77.9.201/32", "ports": [8092],
+             "reason": "resolume-snv remoteos-mcp (via companion-snv)"},
+            {"cidr": "10.77.9.212/32", "ports": [8092],
+             "reason": "songs-snv remoteos-mcp (via companion-snv)"},
+            {"cidr": "10.76.8.201/32", "ports": [8092],
+             "reason": "resolume-pp remoteos-mcp (via companion-pp)"},
+        ],
+        "secrets": ["resolume-mcp-json", "winremote-songs-snv", "WIN_RESOLUME_PP_KEY"],
+        "repo": "zbynekdrlik/resolume",
+        "project_dir": "devel/newlevelmedia/resolume",
+        "tmux_session": "resolume",
+        "webterm_sessions": {
+            "zbynek": {"preferred": "resolume",
+                       "start_dir_chain": ["devel/newlevelmedia/resolume"]},
+        },
+    },
 }
 
 
