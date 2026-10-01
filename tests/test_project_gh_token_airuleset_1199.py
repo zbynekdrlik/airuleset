@@ -49,6 +49,7 @@ import cli_accounts as accounts  # noqa: E402
 import cli_app_token  # noqa: E402
 import cli_project_gh_token as pgt  # noqa: E402
 import test_project_gh_token_1190 as base  # noqa: E402
+import _project_markers as markers  # noqa: E402
 
 AIR = base.AIR_REPO
 AIR_FILE = "zbynekdrlik__airuleset"
@@ -253,6 +254,9 @@ class TestAirShim(base._ShimBase):
 # gk-request refuses on a project account
 # --------------------------------------------------------------------------- #
 class TestGkRequestRefusal(unittest.TestCase):
+
+    def setUp(self):
+        markers.seed(self)   # every declared account is bootstrapped
 
     def run_gk(self, user, **kw):
         args = mock.Mock(**dict(dict(repo=AIR, issue=None, title="x", body=None,
@@ -506,6 +510,9 @@ class TestRound1Refusal(unittest.TestCase):
 
     run_gk = TestGkRequestRefusal.run_gk
 
+    def setUp(self):
+        markers.seed(self)   # every declared account is bootstrapped
+
     def test_an_account_without_the_issues_token_is_told_how_to_get_it(self):
         text = "".join(self.run_gk("claudy")[2:])
         self.assertIn("github_app: True", text)
@@ -520,6 +527,9 @@ class TestRound1Refusal(unittest.TestCase):
 class TestRound1DiskGuard(unittest.TestCase):
     """Job 40's severe-ticket filer: a project account files natively (no
     gk-request, which now refuses there, and no needs-gatekeeper label)."""
+
+    def setUp(self):
+        markers.seed(self)   # every declared account is bootstrapped
 
     def argv(self, user):
         import watchdog.disk_guard_escalation as esc

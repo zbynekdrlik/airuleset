@@ -15,6 +15,9 @@ ROOT = Path(__file__).resolve().parent.parent
 HOOK = ROOT / "hooks" / "block-project-account-local-installs.sh"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "hooks"))
+sys.path.insert(0, str(ROOT / "tests"))
+
+import _project_markers as markers  # noqa: E402
 
 BLOCKED = [
     "rustup toolchain install 1.98.1",
@@ -102,12 +105,16 @@ def run_hook(cmd, user="fohmixer", payload=None):
         stub = Path(tmp) / "id"
         stub.write_text("#!/usr/bin/env bash\necho %s\n" % user)
         stub.chmod(0o755)
+        mdir = Path(tmp) / "markers"   # every declared account is bootstrapped
+        mdir.mkdir()
+        markers.write_markers(str(mdir))
         body = payload if payload is not None else json.dumps(
             {"tool_input": {"command": cmd}})
         return subprocess.run(["bash", str(HOOK)], input=body, text=True,
                               capture_output=True,
                               env={"PATH": "%s:/usr/bin:/bin" % tmp,
-                                   "HOME": tmp})
+                                   "HOME": tmp, "PYTEST_CURRENT_TEST": "1201",
+                                   markers.ENV: str(mdir)})
 
 
 class TestProjectAccountBlocks(unittest.TestCase):

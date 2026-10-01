@@ -24,8 +24,10 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import cli_account_bootstrap as bootstrap  # noqa: E402
+import _project_markers as markers  # noqa: E402
 import cli_playwright_mcp as pw  # noqa: E402
 import cli_project_toolchain as tc  # noqa: E402
 import cli_webterm_only as wo  # noqa: E402
@@ -461,6 +463,7 @@ class TestNoPerAccountBrowsers(unittest.TestCase):
     def test_the_default_reads_the_declaration(self):
         import pwd
         user = pwd.getpwuid(os.getuid()).pw_name
+        markers.seed(self, [user])   # bootstrapped as well as declared
         with mock.patch.dict(bootstrap.SERVICE_ACCOUNTS, {user: {}}):
             self.assertTrue(pw._is_project_account())
         self.assertEqual(pw._is_project_account(), user in bootstrap.SERVICE_ACCOUNTS)
