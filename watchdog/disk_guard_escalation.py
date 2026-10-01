@@ -187,8 +187,13 @@ def compose(status, hostname, top, human, target_pct, window=None):
         if len(skipped) > MAX_SKIPPED_ROWS:
             lines.append("- ... %d more" % (len(skipped) - MAX_SKIPPED_ROWS))
     lines.append("")
-    lines.append("Top consumers still on disk:")
+    lines.append("Reclaimable candidates still on disk:")
     lines += ["- `%s` = %s" % (_md(p), human(b)) for p, b in (top or [])] or ["- (none)"]
+    lls = status.get("largest_live_scratch")
+    if isinstance(lls, dict) and lls.get("path"):
+        # #1209: protected space is invisible in the reclaimable list above
+        lines.append("Largest live session scratchpad (kept while the session "
+                     "lives): `%s` = %s" % (_md(lls["path"]), human(lls.get("bytes") or 0)))
     lines.append("")
     if owner:
         lines.append("## Owner: the `%s` window (role infra)" % owner)
