@@ -232,6 +232,13 @@ class TestReconcileMcpFile1048(unittest.TestCase):
         self._mp = mock.patch.object(p, "PLAYWRIGHT_BROWSERS_PATH_MARKER", self.marker)
         self._mp.start()
         self.addCleanup(self._mp.stop)
+        # Path-isolated from the box: a real /opt/ms-playwright holding the
+        # pinned build (the controller has one since 1.10., #1201) would make
+        # the resolver pick the shared copy and the per-user expectation below
+        # would depend on the box, not the code.
+        self._opt = mock.patch.object(p, "OPT_MS_PLAYWRIGHT", self.d / "no-opt")
+        self._opt.start()
+        self.addCleanup(self._opt.stop)
 
     def _run(self, box_class="shared-stream"):
         return p.reconcile_playwright_mcp_file(self.claude_json, box_class=box_class)
