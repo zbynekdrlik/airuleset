@@ -79,14 +79,28 @@ _KIND_RE = {
 }
 
 
+def is_project_account(user, marker_dir=None):
+    """True when ``user`` is a LIVE #1184 project account on this box: declared
+    in ``SERVICE_ACCOUNTS`` AND adopted by its root render, which writes
+    ``/etc/airuleset/project-accounts/<user>``. A declared account the render
+    has not adopted (claudy@controller, which manages fleet OAuth) keeps the
+    legacy behaviour (#1201, push 0.1.517)."""
+    import os
+    import cli_account_bootstrap
+    import cli_account_hardening
+    if user not in cli_account_bootstrap.SERVICE_ACCOUNTS:
+        return False
+    return os.path.isfile(os.path.join(
+        marker_dir or cli_account_hardening.MARKER_DIR, user))
+
+
 def runs_as_project_account():
-    """True when this process runs as a #1184 project account (a
-    ``SERVICE_ACCOUNTS`` member); an unreadable identity is False."""
+    """True when this process runs as a live project account
+    (``is_project_account``); an unreadable identity is False."""
     try:
         import os
         import pwd
-        import cli_account_bootstrap
-        return pwd.getpwuid(os.getuid()).pw_name in cli_account_bootstrap.SERVICE_ACCOUNTS
+        return is_project_account(pwd.getpwuid(os.getuid()).pw_name)
     except Exception:   # noqa: BLE001 — never raise from an identity probe
         return False
 

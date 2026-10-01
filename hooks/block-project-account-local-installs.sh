@@ -2,8 +2,9 @@
 set -euo pipefail
 
 # Hook: PreToolUse(Bash) — BLOCK a per-account developer-tool install, but ONLY
-# when the invoking unix user is a declared PROJECT account (#1184, a
-# cli_account_bootstrap.SERVICE_ACCOUNTS member). #1201, owner 30.9.2026: the
+# when the invoking unix user is a live PROJECT account (#1184: a declared
+# cli_account_bootstrap.SERVICE_ACCOUNTS member with its root-render marker
+# /etc/airuleset/project-accounts/<user>). #1201, owner 30.9.2026: the
 # fohmixer project account installed its own rustup (895 MB), Playwright
 # browsers and pipx ruff into its home on a disk at 90 %. Project accounts
 # share ONE system toolchain that the root bootstrap installs per box

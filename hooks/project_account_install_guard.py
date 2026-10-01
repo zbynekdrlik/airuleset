@@ -1,11 +1,12 @@
 """Classifier of hooks/block-project-account-local-installs.sh (#1201).
 
-A project account (#1184, a ``cli_account_bootstrap.SERVICE_ACCOUNTS`` member)
+A project account (#1184: declared in ``cli_account_bootstrap.SERVICE_ACCOUNTS``
+and bootstrapped, its ``/etc/airuleset/project-accounts/<user>`` marker present)
 uses the toolchain airuleset installs ONCE per box (``cli_project_toolchain``).
 It never installs its own copy into its home: that is how fohmixer pulled ~2 GB
 of rustup, Playwright browsers and pipx venvs onto a disk at 90 % (owner,
 30.9.2026). This module names the per-account install shapes; the bash wrapper
-blocks them only when the invoking user is a declared project account.
+blocks them only when the invoking user is a live project account.
 
 Blocked (per command, after the sibling hooks' prefix strip + ``bash -c``
 recursion; a heredoc body is documentation, EXCEPT one fed to a shell, which
@@ -257,10 +258,14 @@ def classify(script, _depth=0):
 
 
 def is_project_account(user, repo_dir):
-    """True iff ``user`` is a declared project account (``SERVICE_ACCOUNTS``)."""
+    """True iff ``user`` is a live project account: declared AND bootstrapped
+    (``cli_project_toolchain.is_project_account``). The marker-dir override is
+    a test seam, honoured only under ``PYTEST_CURRENT_TEST``."""
     sys.path.insert(0, repo_dir)
-    import cli_account_bootstrap as bootstrap
-    return user in bootstrap.SERVICE_ACCOUNTS
+    import cli_project_toolchain
+    marker_dir = (os.environ.get("AIRULESET_TEST_PROJECT_MARKER_DIR")
+                  if os.environ.get("PYTEST_CURRENT_TEST") else None)
+    return cli_project_toolchain.is_project_account(user, marker_dir)
 
 
 MESSAGE = """\

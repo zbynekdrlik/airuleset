@@ -868,10 +868,10 @@ def render_next_steps(spec):
 
 
 def is_project_account(user, odoo_streams):
-    """#1199: a declared #1184 project account (a ``SERVICE_ACCOUNTS`` member)
+    """#1199: a live #1184 project account (declared AND bootstrapped, #1201)
     that is not an Odoo stream (``odoo_streams`` = ``AUTHORITY_BY_USER``)."""
-    import cli_account_bootstrap as bootstrap
-    return user in bootstrap.SERVICE_ACCOUNTS and user not in odoo_streams
+    import cli_project_toolchain
+    return cli_project_toolchain.is_project_account(user) and user not in odoo_streams
 
 
 def gk_request_refusal(user, odoo_streams):
