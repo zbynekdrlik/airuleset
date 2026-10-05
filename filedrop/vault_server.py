@@ -200,7 +200,7 @@ PAGE = """<!doctype html><html lang=sk><meta charset=utf-8>
  <p>Vloz heslo / kluc / token. Hodnota sa ulozi len na server (prava 0600) —
     <b>nikdy sa nezobrazi v chate</b> a Claude ju nevidi. Odoslat sa da raz;
     potom sa tato adresa zavrie.</p>
- <input id=v type=password autocomplete=off spellcheck=false placeholder="hodnota">
+ <input id=v type=password autocomplete="new-password" data-lpignore="true" data-1p-ignore data-bwignore spellcheck=false placeholder="hodnota">
  <textarea id=t autocomplete=off spellcheck=false placeholder="viacriadkova hodnota"></textarea>
  <label class=multi><input id=m type=checkbox> viacriadkove (napr. SSH kluc)</label>
  <button id=b>Odoslat</button>
@@ -276,7 +276,9 @@ NAMES.forEach((nm,i)=>{
  const wrap=document.createElement('label');wrap.className='fld';
  const lab=document.createElement('span');lab.className='nm';lab.textContent=nm;
  const inp=document.createElement('input');inp.type='password';
- inp.autocomplete='off';inp.spellcheck=false;inp.placeholder='hodnota pre '+nm;
+ inp.autocomplete='new-password';inp.spellcheck=false;
+ inp.setAttribute('data-lpignore','true');inp.setAttribute('data-1p-ignore','');
+ inp.setAttribute('data-bwignore','');inp.placeholder='hodnota pre '+nm;
  wrap.appendChild(lab);wrap.appendChild(inp);fields.appendChild(wrap);
  inputs[nm]=inp;if(i===0)setTimeout(()=>inp.focus(),0);
 });
