@@ -114,6 +114,14 @@ class TestStampLine(unittest.TestCase):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, True)
         self.pd = Path(self.tmp) / "projects"
+        # hermetic: never read the LIVE tmux pane's `claude --model` for this
+        # real cwd; the scenario is a main launched on Fable (#1215 push fix)
+        _pane = mock.patch(
+            "cli_authorship._pane_configured_model",
+            side_effect=lambda cwd, *a, **k: (
+                "claude-fable-5-1" if cwd == "/home/airuleset/devel/airuleset" else None))
+        _pane.start()
+        self.addCleanup(_pane.stop)
 
     def test_design_by_main_fable(self):
         cwd = "/home/airuleset/devel/airuleset"

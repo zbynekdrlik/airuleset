@@ -46,6 +46,14 @@ class TestComposeBody(unittest.TestCase):
         self.pd = Path(self.tmp) / "projects"
         self.cwd = "/home/airuleset/devel/airuleset"
         _write_transcript(self.pd, self.cwd, "claude-fable-5-1")
+        # hermetic: never read the LIVE tmux pane's `claude --model` for this
+        # real cwd; the scenario is a main launched on Fable (#1215 push fix)
+        _pane = mock.patch(
+            "cli_authorship._pane_configured_model",
+            side_effect=lambda cwd, *a, **k: (
+                "claude-fable-5-1" if cwd == "/home/airuleset/devel/airuleset" else None))
+        _pane.start()
+        self.addCleanup(_pane.stop)
 
     def test_appends_design_by_main(self):
         out = dr.compose_body("some design body", self.cwd,
@@ -90,6 +98,14 @@ class TestPostAndRecord(unittest.TestCase):
         self.pd = Path(self.tmp) / "projects"
         self.cwd = "/home/airuleset/devel/airuleset"
         _write_transcript(self.pd, self.cwd, "claude-fable-5-1")
+        # hermetic: never read the LIVE tmux pane's `claude --model` for this
+        # real cwd; the scenario is a main launched on Fable (#1215 push fix)
+        _pane = mock.patch(
+            "cli_authorship._pane_configured_model",
+            side_effect=lambda cwd, *a, **k: (
+                "claude-fable-5-1" if cwd == "/home/airuleset/devel/airuleset" else None))
+        _pane.start()
+        self.addCleanup(_pane.stop)
         self._orig_home = os.environ.get("HOME")
         os.environ["HOME"] = self.home
         self.addCleanup(self._restore_home)
