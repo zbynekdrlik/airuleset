@@ -82,7 +82,7 @@
     "filedrop/show_server.py": 511,
     "filedrop/upload_server.py": 312,
     "filedrop/vault.py": 1071,
-    "filedrop/vault_server.py": 582,
+    "filedrop/vault_server.py": 585,
     "gates/__init__.py": 107,
     "gates/audit.py": 342,
     "gates/commandshadow.py": 152,
