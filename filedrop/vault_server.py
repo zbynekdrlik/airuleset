@@ -175,6 +175,9 @@ _ttl_timer.start()
 # a credential endpoint is not an option, and a console error on the one page
 # the user personally opens is a bug (#117). Percent-encoded and ASCII-only: a
 # data: URI defaults to US-ASCII and a raw `#` would truncate it at a fragment.
+# #1215: every credential input says autocomplete="new-password" plus the
+# password-manager opt-outs. Chrome ignores autocomplete=off on a password
+# field and fills a value it saved for this origin the moment the page opens.
 PAGE = """<!doctype html><html lang=sk><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
 <meta name=referrer content=no-referrer>
