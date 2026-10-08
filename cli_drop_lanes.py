@@ -85,6 +85,7 @@ _GENERATED_DROP_PORTS = {
     # #1115 slice G: the LOCAL controller account (not a REMOTE_HOSTS target, so
     # never reached by the fleet loop — read by _add_controller_local_lane).
     ("airuleset", "airuleset"): 8891,
+    ("dev2", "varos"): 8892,              # #1220 project account
 }
 
 
@@ -207,6 +208,12 @@ def build_drop_lanes(remote_hosts, *, seed, drop_lane_cls,
     _ctrl_port = _GENERATED_DROP_PORTS.get((CONTROLLER_NODENAME, CONTROLLER_NODENAME))
     if _ctrl_port is not None:
         used_ports.add(_ctrl_port)
+    # #1220: every FIXED port (the table + any entry's own `drop.port`) is held
+    # back from next-free, so an account that sorts first never takes a port a
+    # later account owns (varos@dev2 took forestshop admin's 8880).
+    fixed_ports = set(_GENERATED_DROP_PORTS.values()) | {
+        (e.get("drop") or {}).get("port") for e in remote_hosts
+        if isinstance((e.get("drop") or {}).get("port"), int)}
 
     # Deterministic order: sort the not-yet-covered accounts by their key so the
     # next-free-port fallback is stable regardless of REMOTE_HOSTS ordering.
@@ -230,7 +237,7 @@ def build_drop_lanes(remote_hosts, *, seed, drop_lane_cls,
 
     def _next_free_port():
         for cand in range(port_base, port_max + 1):
-            if cand not in used_ports:
+            if cand not in used_ports and cand not in fixed_ports:
                 return cand
         return None                     # exhausted — caller logs + skips
 
@@ -249,8 +256,11 @@ def build_drop_lanes(remote_hosts, *, seed, drop_lane_cls,
                   % (port, username, nodename), file=sys.stderr)
             continue
         used_ports.add(port)
-        host = drop.get("host") or _generated_drop_host(
-            nodename, username, node_counts.get(nodename, 0) > 1)
+        # #1220: the box's OWN account (a bare `<box>` entry) keeps the bare
+        # host even when project accounts join the box, so its live hostname
+        # never changes; only a `<user>@<box>` account takes the shared form.
+        shared = node_counts.get(nodename, 0) > 1 and "@" in entry.get("name", "")
+        host = drop.get("host") or _generated_drop_host(nodename, username, shared)
         access = drop.get("access")
         access = True if access is None else bool(access)
         # Tailscale box → controller-tunnel origin; public-only box → a
