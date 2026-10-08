@@ -543,9 +543,15 @@ def _render_project_step(spec):
     if spec.get("repo"):
         url = "https://github.com/%s.git" % spec["repo"]
         dest = "$HOME/" + spec["project_dir"]
+        # #1220: a private repo cannot be cloned before the controller delivered
+        # the App token, so a failed clone DEFERS (dir created, loud) instead
+        # of aborting the whole render; the re-run after the mint clones.
         clone = ("if [ -d %s/.git ]; then echo \"  checkout exists — skipping "
-                 "clone\"; else GIT_TERMINAL_PROMPT=0 git clone %s %s; fi"
-                 % (dest, shlex.quote(url), dest))
+                 "clone\"; elif GIT_TERMINAL_PROMPT=0 git clone %s %s; then :; "
+                 "else mkdir -p %s; echo \"  clone deferred: %s needs the "
+                 "account's App token; re-run this render after: airuleset.py "
+                 "project-gh-token mint $(id -un)\"; fi"
+                 % (dest, shlex.quote(url), dest, dest, spec["repo"]))
         out += ("\n# 9. Project checkout (idempotent, as the account) — #1184\n"
                 "runuser -l \"$ACCOUNT\" -c %s\n" % shlex.quote(clone))
     if spec.get("tmux_session"):
@@ -654,10 +660,12 @@ def render_root_bootstrap(account):
     # 8. System packages — only when the account declares them (#973)
     script += _render_system_packages_step(packages)
     script += toolchain.render_account_env_step(spec)   # 8b: #1201
+    # 11 BEFORE 9-10 (#1220): the gh token shim is the git credential helper
+    # the checkout of a private repo needs (#1190)
+    import cli_project_gh_token
+    script += cli_project_gh_token.render_bootstrap_step(spec)
     # 9-10: the project checkout + its tmux session (#1184)
     script += _render_project_step(spec)
-    import cli_project_gh_token   # 11: the gh token shim (#1190)
-    script += cli_project_gh_token.render_bootstrap_step(spec)
     script += toolchain.render_system_step(spec)   # 12 (LAST): #1201
 
     # Read-back section

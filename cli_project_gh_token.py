@@ -645,10 +645,15 @@ def render_bootstrap_step(spec):
     next ``airuleset.py install`` chains the rate-guard ``gh`` over it."""
     if spec.get("github_app") is not True:
         return ""
+    helper = ('git config --global credential.https://github.com.helper '
+              '"!$HOME/.local/bin/gh-app-shim auth git-credential"')
     return ("\n# 11. Project-account GitHub App token shim (as the account) — #1190\n"
             "runuser -l \"$ACCOUNT\" -c %s "
             "<< 'GH_APP_SHIM_EOF'\n%sGH_APP_SHIM_EOF\n"
-            % (shlex.quote(_BOOTSTRAP_BODY), _SHIM))
+            "# 11b. the shim is git's github.com credential helper, so a private\n"
+            "# repo clones with the App token (#1220)\n"
+            "runuser -l \"$ACCOUNT\" -c %s\n"
+            % (shlex.quote(_BOOTSTRAP_BODY), _SHIM, shlex.quote(helper)))
 
 
 # --------------------------------------------------------------------------- #
