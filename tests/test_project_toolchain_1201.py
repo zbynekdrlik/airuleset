@@ -193,8 +193,9 @@ class TestBootstrapRender(unittest.TestCase):
         self.assertIn("rustup toolchain install stable", s)
 
     def test_tmux_session_starts_a_login_shell(self):
-        step = self.script[self.script.index("# 10. Project tmux"):
-                           self.script.index("# 11.")]
+        start = self.script.index("# 10. Project tmux")
+        end = self.script.find("\n# ", start + 1)   # the next rendered step
+        step = self.script[start:end if end != -1 else len(self.script)]
         self.assertIn("tmux new-session -d -s fohmixer", step)
         self.assertIn("exec bash -l", step)
 
