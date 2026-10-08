@@ -42,10 +42,11 @@ class TestFleetAndDropLane(unittest.TestCase):
         (h,) = [h for h in cli_fleet.REMOTE_HOSTS if h["name"] == "varos@dev2"]
         return h
 
-    def test_a_pending_dev2_deploy_target(self):
+    def test_a_live_dev2_deploy_target(self):
+        # bootstrapped on dev2 8.10. (BOOTSTRAP_RC=0, install as varos rc 0)
         h = self.entry()
         self.assertEqual((h["host"], h["user"]), ("100.82.64.27", "varos"))
-        self.assertIs(h["pending"], True)
+        self.assertIs(h["pending"], False)
         self.assertNotIn("drop", h)          # a drop lane IS wanted
 
     def test_its_drop_lane_rides_the_controller_tunnel_behind_access(self):
