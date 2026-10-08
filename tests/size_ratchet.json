@@ -3,7 +3,7 @@
     "airuleset.py": 11576,
     "backlog_marker_gate.py": 90,
     "burn/__init__.py": 2413,
-    "cli_account_bootstrap.py": 718,
+    "cli_account_bootstrap.py": 726,
     "cli_aliases.py": 177,
     "cli_authorship.py": 356,
     "cli_autopilot_lock.py": 793,
