@@ -9,7 +9,6 @@ the account exists, so the first render cannot have it. Now, for a
 git's github.com credential helper, and a failed clone DEFERS loudly (dir
 created, "re-run after mint") instead of aborting."""
 import copy
-import os
 import subprocess
 import sys
 import tempfile
