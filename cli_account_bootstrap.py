@@ -252,6 +252,23 @@ SERVICE_ACCOUNTS = {
                        "start_dir_chain": ["devel/newlevelmedia/resolume"]},
         },
     },
+    # #1220 (owner 8.10.: its own account, `z1`): Varos East accounting. Bank
+    # data never in `newlevel`; outbound HTTPS only (Fio API, mail). The repo is
+    # PRIVATE and CODE ONLY; documents are gitignored. github_app comes after
+    # the owner adds the repo to the App installation.
+    "varos": {
+        "host": "dev2",
+        "sudo": False,
+        "reach": [],
+        "secrets": ["fio-token-varos"],   # Fio API token, read-only account mode
+        "repo": "zbynekdrlik/varos",
+        "project_dir": "devel/varos/uctovnictvo",
+        "tmux_session": "varos",
+        "webterm_sessions": {
+            "zbynek": {"preferred": "varos",
+                       "start_dir_chain": ["devel/varos/uctovnictvo"]},
+        },
+    },
 }
 
 

@@ -609,6 +609,19 @@ REMOTE_HOSTS.append({
     "drop": {"disabled": "project account (#1184): no file-drop lane declared"},
 })
 
+# #1220 (2026-10-08): the varos PROJECT account on dev2 (Varos East accounting).
+# `pending` until its root bootstrap ran (no push contacts a missing account).
+# NO `drop.disabled`: its generated controller-tunnel drop lane carries the Fio
+# token `secret request` and receipt-scan `upload`.
+REMOTE_HOSTS.append({
+    "name": "varos@dev2",
+    "host": "100.82.64.27",
+    "user": "varos",
+    "repo_path": "~/devel/airuleset",
+    "identity": "~/.secrets/airuleset_push_ed25519",
+    "pending": True,
+})
+
 
 def is_paused(remote):
     """True if a REMOTE_HOSTS entry carries a `"paused": "<why + date>"`
@@ -1061,7 +1074,7 @@ AUTHORITY_BY_USER = {
 # would misclassify the controller as a sub-dev stream downstream).
 FULL_AUTHORITY_USERS = frozenset(
     {"newlevel", "gatekeeper", "admin", "stepan", "airuleset", "claudy",
-     "fohmixer"})
+     "fohmixer", "varos"})
 
 
 # Webterm OBSERVER accounts (airuleset#867). An account that exists ONLY to run a
