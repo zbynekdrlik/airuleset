@@ -313,6 +313,7 @@ class TestNoResurrection(_StoreCase):
                                  "import time;time.sleep(120)"])
         self.addCleanup(self._reap_proc, proc)
         st.register_request("DB_PASS", endpoint_ttl_s=60, keep_s=60)
+        self._wait_exec(proc, "time.sleep(120)")
         st.record_endpoint("DB_PASS", proc.pid, marker="time.sleep(120)")
         st.forget("DB_PASS")
         proc.wait(timeout=15)                 # SIGTERM'd, not left running
@@ -323,9 +324,27 @@ class TestNoResurrection(_StoreCase):
         self.addCleanup(self._reap_proc, proc)
         now = 1_000_000.0
         st.register_request("PEND", endpoint_ttl_s=10, keep_s=60, now=now)
+        self._wait_exec(proc, "time.sleep(120)")
         st.record_endpoint("PEND", proc.pid, marker="time.sleep(120)")
         self.assertEqual(st.purge(now=now + 60), ["PEND"])
         proc.wait(timeout=15)
+
+    @staticmethod
+    def _wait_exec(proc, marker, limit_s=30):
+        """Wait until the child has exec'd: right after Popen its
+        /proc/<pid>/cmdline is still the PARENT's, so stop_endpoint's marker
+        check (correctly) refuses it. Under the full push suite's load the
+        exec can lag, which made this test flake (0.1.529 Pass B)."""
+        deadline = time.monotonic() + limit_s
+        path = Path("/proc", str(proc.pid), "cmdline")
+        while time.monotonic() < deadline:
+            try:
+                if marker.encode() in path.read_bytes():
+                    return
+            except OSError:
+                pass
+            time.sleep(0.02)
+        raise AssertionError("child never exec'd %r" % marker)
 
     @staticmethod
     def _reap_proc(proc):
