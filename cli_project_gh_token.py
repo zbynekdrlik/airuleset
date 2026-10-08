@@ -650,8 +650,7 @@ def render_bootstrap_step(spec):
     return ("\n# 11. Project-account GitHub App token shim (as the account) — #1190\n"
             "runuser -l \"$ACCOUNT\" -c %s "
             "<< 'GH_APP_SHIM_EOF'\n%sGH_APP_SHIM_EOF\n"
-            "# 11b. the shim is git's github.com credential helper, so a private\n"
-            "# repo clones with the App token (#1220)\n"
+            "# 11b. the shim is git's github.com credential helper (#1220)\n"
             "runuser -l \"$ACCOUNT\" -c %s\n"
             % (shlex.quote(_BOOTSTRAP_BODY), _SHIM, shlex.quote(helper)))
 
@@ -957,9 +956,7 @@ def cmd_project_gh_token(args):
     import airuleset
     import cli_project_ci_sync as ci_sync
     started = time.monotonic()      # the secret sync's deadline is anchored here
-    # #1201: the controller timer runs under the systemd user-manager PATH (no
-    # ~/.local/bin, the only gh there); the #1178 (c) entry-point fix.
-    airuleset._watchdog_path_fix()
+    airuleset._watchdog_path_fix()   # #1201: a systemd PATH lacks ~/.local/bin (#1178 c)
     account = getattr(args, "account", None)
     every = getattr(args, "all", False) is True
     action = getattr(args, "action", None)
