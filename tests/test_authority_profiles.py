@@ -133,7 +133,7 @@ class TestAuthorityResolution(TestCase):
         self.assertEqual(
             set(airuleset.FULL_AUTHORITY_USERS),
             {"newlevel", "gatekeeper", "admin", "stepan", "airuleset", "claudy",
-             "fohmixer"})
+             "fohmixer", "varos"})
 
     def test_full_authority_users_disjoint_from_stream_table(self):
         # airuleset#827: the two registries must be DISJOINT — a full account is
