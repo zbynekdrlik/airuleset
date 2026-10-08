@@ -609,17 +609,17 @@ REMOTE_HOSTS.append({
     "drop": {"disabled": "project account (#1184): no file-drop lane declared"},
 })
 
-# #1220 (2026-10-08): the varos PROJECT account on dev2 (Varos East accounting).
-# `pending` until its root bootstrap ran (no push contacts a missing account).
-# NO `drop.disabled`: its generated controller-tunnel drop lane carries the Fio
-# token `secret request` and receipt-scan `upload`.
+# #1220 (2026-10-08): the varos PROJECT account on dev2 (Varos East accounting),
+# bootstrapped 8.10. (root render rc 0, install as varos rc 0), so push manages
+# it. NO `drop.disabled`: its generated controller-tunnel drop lane carries the
+# Fio token `secret request` and receipt-scan `upload`.
 REMOTE_HOSTS.append({
     "name": "varos@dev2",
     "host": "100.82.64.27",
     "user": "varos",
     "repo_path": "~/devel/airuleset",
     "identity": "~/.secrets/airuleset_push_ed25519",
-    "pending": True,
+    "pending": False,
 })
 
 
