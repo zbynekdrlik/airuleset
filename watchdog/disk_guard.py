@@ -2779,7 +2779,8 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
     in the STOP/summary lines and the deletions journal; a recheck returning
     None (unmeasurable) STOPS the ladder — never delete on uncertainty.
     #1067: ``timer`` (a ``disk_guard_timing.PollTimer``) times each rung and
-    defers the rest of ``ladder`` (prevention/quota/fs) past the poll budget.
+    defers the rest of ``ladder`` (prevention/quota/fs) past the poll budget;
+    #1216: it is also checked between a rung's acted actions.
     Returns the log lines (also appended to `log_path`)."""
     target_pct = TARGET_PCT if target_pct is None else target_pct
     timer = timer or _dgt.NULL_TIMER
@@ -2813,7 +2814,10 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
 
     planners = list(planners)               # #1067: resume at the deferred rung
     planners = planners[timer.resume_start(ladder, [lab for lab, _p in planners], logs):]
+    cut_in_rung = False                     # #1216: a rung stopped at the budget
     for i, (_label, planner) in enumerate(planners):
+        if cut_in_rung:
+            break
         worst = recheck_fn()
         if worst is None:                   # unmeasurable → stop, never guess
             line = _log_line(now, "STOP", "-", 0, "%s unreadable — ladder stopped, "
@@ -2854,7 +2858,8 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             rung_lines = []
             rung_freed = 0
             rung_acted = 0
-            for a in actions:
+            actions = list(actions)
+            for j, a in enumerate(actions):
                 acls = a.get("cls", _label)
                 path = a.get("path", "-")
                 planned = a.get("bytes", 0) or 0
@@ -2902,6 +2907,10 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                         level=pressure or status.get("level", "drain"))
                 rung_freed += (freed or 0)
                 rung_acted += 1
+                if timer.over_budget_in_rung(rung_lines, _label, ladder,   # #1216
+                                             len(actions) - j - 1):
+                    cut_in_rung = True
+                    break
             logs.extend(rung_lines)
             _append_log(log_path, rung_lines)
         if rung_acted > 0:                  # a rung that only skipped gets no summary

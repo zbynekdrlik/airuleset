@@ -35,6 +35,9 @@ One :class:`PollTimer` per ``run_disk_guard`` call:
   LADDER's resume point (``drain-resume`` holds one entry per ladder:
   ``prevention`` / ``quota`` / ``fs`` — the ladders share rung labels, so a
   point never crosses ladders).
+* ``over_budget_in_rung(sink, label, ladder, deferred)`` (#1216) is the same
+  check AFTER each acted action inside a rung; past the budget the rung stops
+  and is itself the resume point (one action per rung always runs).
 * ``resume_start(ladder, labels, sink)`` — the next run of that ladder starts
   at its resume point (when it is in the ladder and 0 <= age <
   :data:`RESUME_TTL_S`), so tail rungs are never starved by slow head rungs.
@@ -232,6 +235,25 @@ class PollTimer:
         self._put(RESUME_NAME, points)
         return True
 
+    def over_budget_in_rung(self, sink, label, ladder, deferred):
+        """#1216: checked by ``execute_drain`` after each ACTED action, so a
+        rung with thousands of actions (6441 transcript gzips on dev1) cannot
+        run past the unit's start timeout on its own. True past the budget:
+        logs one line, sets ``cut_short`` and records THIS rung as the
+        ladder's resume point, so the next poll re-plans it and goes on."""
+        elapsed = self.elapsed()
+        if deferred <= 0 or elapsed <= self.budget_s:   # last action: the
+            return False                                # between-rung check decides
+        if not self.cut_short:
+            self.cut_short = True
+            sink.append("disk-guard: budget exceeded inside rung %s (%ds) — %d "
+                        "action(s) deferred to next poll"
+                        % (label, math.ceil(elapsed), deferred))
+        points = self._load(RESUME_NAME) or {}
+        points[ladder] = {"label": label, "ts": self.now}
+        self._put(RESUME_NAME, points)
+        return True
+
 
 class _NullTimer:
     """Stand-in when ``execute_drain`` is called without a poll timer (a direct
@@ -250,6 +272,9 @@ class _NullTimer:
         return 0
 
     def over_budget(self, _sink, _remaining, _next_label, _ladder):
+        return False
+
+    def over_budget_in_rung(self, _sink, _label, _ladder, _deferred):
         return False
 
 

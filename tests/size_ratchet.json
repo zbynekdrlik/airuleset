@@ -44,7 +44,7 @@
     "cli_release_state.py": 673,
     "cli_remote.py": 2127,
     "cli_resource_guards.py": 881,
-    "cli_scratch_sweep.py": 1974,
+    "cli_scratch_sweep.py": 1976,
     "cli_skill_usage.py": 337,
     "cli_target_governance.py": 510,
     "cli_target_purge.py": 892,

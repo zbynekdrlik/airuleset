@@ -1426,7 +1426,7 @@ def _min_size_bytes_env(explicit, env_key, default):
 
 
 def _classify_transcript_entry(p, is_link, mtime, size, now, min_age_days,
-                               min_size_bytes, proc_dir):
+                               min_size_bytes, live_fn):
     """The SINGLE gzip-eligibility classifier for one already-`lstat`'d
     transcript file, shared by BOTH legs of
     `discover_old_transcript_candidates` -- the MAIN leg and the #1117
@@ -1450,7 +1450,7 @@ def _classify_transcript_entry(p, is_link, mtime, size, now, min_age_days,
     if size < min_size_bytes:
         entry["reason"] = "below size floor (%d B < %d B)" % (size, min_size_bytes)
         return entry
-    if _target_in_live_use(p, proc_dir=proc_dir):
+    if live_fn(p):   # #1216: one /proc snapshot per discovery, not per file
         entry["reason"] = "in live use (or undeterminable) -- skipped"
         return entry
     return entry   # reason stays None -- genuine candidate
@@ -1479,9 +1479,9 @@ def discover_old_transcript_candidates(home=None, projects_dir=None, now=None,
         AIRULESET_TRANSCRIPT_MIN_AGE_DAYS);
       - `size` >= `min_size_bytes` (default 100KB, env
         AIRULESET_TRANSCRIPT_MIN_SIZE_BYTES);
-      - a surviving candidate still needs a live-process check
-        (`_target_in_live_use`, #315's own /proc exe/cwd/fd scan, REUSED
-        VERBATIM -- never a new mechanism) before being genuine.
+      - a surviving candidate still needs a live-process check (#315's
+        exe/cwd/fd verdict, read from ONE /proc snapshot per call via
+        `cli_live_snapshot.batch_checker`, #1216) before being genuine.
 
     `include_subagents` (default False, the v1/main-only behaviour -- #1117):
     when True, the result ALSO carries every `<project>/<session>/
@@ -1511,6 +1511,8 @@ def discover_old_transcript_candidates(home=None, projects_dir=None, now=None,
     except OSError as e:
         return [{"path": None, "reason": "could not list %s: %s" % (pdir, e)}]
 
+    from cli_live_snapshot import batch_checker
+    live_fn = batch_checker(proc_dir)   # #1216: ONE /proc pass for both legs
     out = []
     for name in names:
         d = pdir / name
@@ -1545,17 +1547,17 @@ def discover_old_transcript_candidates(home=None, projects_dir=None, now=None,
             if mtime == newest_mtime:
                 continue   # newest (or tied-for-newest) in its own dir -- never a candidate
             out.append(_classify_transcript_entry(
-                p, is_link, mtime, size, now, min_age_days, min_size_bytes, proc_dir))
+                p, is_link, mtime, size, now, min_age_days, min_size_bytes, live_fn))
 
     if include_subagents:
         out.extend(_discover_subagent_transcript_candidates(
-            pdir, names, now, min_age_days, min_size_bytes, proc_dir))
+            pdir, names, now, min_age_days, min_size_bytes, live_fn))
 
     return out
 
 
 def _discover_subagent_transcript_candidates(pdir, names, now, min_age_days,
-                                             min_size_bytes, proc_dir):
+                                             min_size_bytes, live_fn):
     """The subagent leg of `discover_old_transcript_candidates` (#1117) --
     every `<project>/<session>/subagents/**/*.jsonl` transcript, each row
     the IDENTICAL `{"path", "reason", "age_days"?, "size"?}` shape as the
@@ -1564,7 +1566,7 @@ def _discover_subagent_transcript_candidates(pdir, names, now, min_age_days,
     each subagent file is its own never-`/resume`d agent. Every other
     safety rule of the main leg is reused unchanged (symlink refusal via
     `os.lstat` + `is_symlink`, the age floor, the size floor, and the
-    `_target_in_live_use` open-fd/cwd/exe check). `os.walk(followlinks=
+    shared-snapshot open-fd/cwd/exe check). `os.walk(followlinks=
     False)` (with the default `onerror=None`, which silently skips an
     unreadable subdir rather than raising) means a symlinked `subagents/`
     directory (or any symlinked dir under it) is never descended; an
@@ -1594,7 +1596,7 @@ def _discover_subagent_transcript_candidates(pdir, names, now, min_age_days,
                     continue
                 out.append(_classify_transcript_entry(
                     p, is_link, st.st_mtime, st.st_size, now,
-                    min_age_days, min_size_bytes, proc_dir))
+                    min_age_days, min_size_bytes, live_fn))
     return out
 
 
