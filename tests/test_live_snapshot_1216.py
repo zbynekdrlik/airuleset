@@ -43,8 +43,11 @@ def _fakeproc(root, entries):
     return proc
 
 
-def _links_in(proc):
-    return sum(1 for p in proc.rglob("*") if p.is_symlink())
+def _one_pass_reads(proc):
+    """readlink attempts of ONE /proc pass: exe + cwd per pid (present or
+    not) plus every fd link."""
+    pids = [d for d in proc.iterdir() if d.name.isdigit()]
+    return 2 * len(pids) + sum(len(list((d / "fd").iterdir())) for d in pids)
 
 
 class TestOneProcPass(unittest.TestCase):
@@ -78,9 +81,9 @@ class TestOneProcPass(unittest.TestCase):
                 rows = sweep.discover_old_transcript_candidates(
                     projects_dir=root / "projects", now=NOW, min_age_days=7,
                     min_size_bytes=100, include_subagents=True, proc_dir=proc)
-            nlinks = _links_in(proc)
-        self.assertEqual(nlinks, 9)
-        self.assertLessEqual(len(calls), nlinks,
+            one_pass = _one_pass_reads(proc)
+        self.assertEqual(one_pass, 12)
+        self.assertLessEqual(len(calls), one_pass,
                              "one /proc pass per discovery, not one per candidate")
         by = {Path(r["path"]).name: r["reason"] for r in rows}
         self.assertIn("in live use", by["agent-00.jsonl"])
