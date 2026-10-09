@@ -235,11 +235,21 @@ class TestRungStopsAtTheBudget(unittest.TestCase):
             planners = [("transcript", lambda: [self._gz(td, "big.jsonl", need),
                                                 self._gz(td, "small.jsonl", 1000)])]
             timer, logs = self._poll(td, FakeClock(), planners, NOW, act, pre=10.0)
-            self.assertEqual(done, ["small.jsonl"])
+            self.assertEqual(done, [], "the time left only shrinks: the rung stops there")
             self.assertTrue(any("big.jsonl" in ln and "next poll" in ln for ln in logs), logs)
             self.assertTrue(timer.cut_short)
             t2 = dgt.PollTimer(clock_fn=FakeClock(), state_dir=Path(td) / "guard", now=NOW + 60)
             self.assertEqual(t2.resume_start("fs", ["x", "transcript"], []), 1)
+
+    def test_running_out_of_time_logs_one_skip_not_one_per_file(self):
+        """Live dev1 19:06:09: with ~0 s left one poll logged 330 SKIP lines,
+        one per remaining 2 MB transcript, instead of stopping the rung."""
+        with TemporaryDirectory() as td:
+            acts = [self._gz(td, "a%02d.jsonl" % i, 2_000_000) for i in range(50)]
+            timer, logs = self._poll(td, FakeClock(), [("transcript", lambda: acts)],
+                                     NOW, lambda a: 1, pre=44.95)
+            self.assertEqual(sum("next poll (#1216)" in ln for ln in logs), 1, logs)
+            self.assertTrue(timer.cut_short)
 
     def test_a_gzip_larger_than_any_poll_is_skipped_without_a_cut(self):
         with TemporaryDirectory() as td:
