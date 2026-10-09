@@ -105,7 +105,7 @@ class TestMarekInventory(unittest.TestCase):
         inv = p.marek_inventory()
         self.assertEqual([e["id"] for e in inv],
                          ["montalu1-subdev", "montalu2-subdev", "miva1-subdev",
-                          "montalu4-subdev", "ar", "claudy", "fohmixer", "dev1", "dev2",
+                          "montalu4-subdev", "ar", "claudy", "fohmixer", "varos", "dev1", "dev2",
                           "gatekeeper", "forestshop"])
 
     def test_montalu2_entry_is_ssh_with_dedicated_key(self):
@@ -368,7 +368,7 @@ class TestMarekConnectAllowlistScoped(unittest.TestCase):
         # #960: claudy tab added.
         self.assertEqual(marek_ids, {"montalu1-subdev", "montalu2-subdev",
                                      "miva1-subdev", "montalu4-subdev",
-                                     "ar", "claudy", "fohmixer", "dev1",
+                                     "ar", "claudy", "fohmixer", "varos", "dev1",
                                      "dev2", "gatekeeper", "forestshop"})
         for foreign in ("gk", "montalu-subdev", "david1",
                         "codex-bridge", "stepan-forestshop-dev",
@@ -528,7 +528,7 @@ class TestMarekArtifactsWrite(unittest.TestCase):
             # #960: claudy tab added before dev1.
             self.assertEqual([e["id"] for e in inv],
                              ["montalu1-subdev", "montalu2-subdev", "miva1-subdev",
-                              "montalu4-subdev", "ar", "claudy", "fohmixer", "dev1", "dev2",
+                              "montalu4-subdev", "ar", "claudy", "fohmixer", "varos", "dev1", "dev2",
                               "gatekeeper", "forestshop"])
             launcher = (claude / "airuleset-webterm-marek-ttyd.sh").read_text(
                 encoding="utf-8")

@@ -1,7 +1,7 @@
 """#1220: the `varos` project account on dev2 (Varos East accounting: Fio
 bank token, receipts). Owner ruling 8.10.2026 (`z1`): its own account, never
 `newlevel` (#1184). Code-only private repo (documents never enter git), no
-sudo, no LAN reach, owner-only webterm, its own Access-gated drop lane for
+sudo, no LAN reach, webterm for the owner and marek (2026-10-09), its own Access-gated drop lane for
 `secret request` + `upload`. `pending` until the root bootstrap ran, and no
 `github_app` until the owner adds the repo to the App installation."""
 import sys
@@ -26,7 +26,7 @@ class TestDeclaration(unittest.TestCase):
         self.assertEqual(spec["repo"], "zbynekdrlik/varos")
         self.assertEqual(spec["project_dir"], "devel/varos/uctovnictvo")
         self.assertEqual(spec["tmux_session"], "varos")
-        self.assertEqual(set(spec["webterm_sessions"]), {"zbynek"})
+        self.assertEqual(set(spec["webterm_sessions"]), {"zbynek", "marek"})
         self.assertNotIn("github_app", spec)
 
     def test_the_table_stays_clean_and_renders(self):
