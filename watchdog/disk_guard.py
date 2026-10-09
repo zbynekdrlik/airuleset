@@ -2864,7 +2864,7 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             # starts only when it can finish in the time left.
             left = sum(1 for x in actions if x.get("cls", _label) in RECLAIMABLE_CLASSES
                        and x.get("kind", "delete") not in ("skip", "report"))
-            tried = waiting = False
+            tried = False
             for a in actions:
                 acls = a.get("cls", _label)
                 path = a.get("path", "-")
@@ -2891,7 +2891,11 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                 fit = timer.gzip_fit(planned) if kind == "gzip" else None
                 if fit is not None:
                     rung_lines.append(_log_line(now, "SKIP", path, planned, fit[1]))
-                    waiting = waiting or fit[0] == "later"
+                    if fit[0] == "later":       # the time left only shrinks: stop here
+                        timer.defer_rung(rung_lines, _label, ladder, "rung %s deferred to "
+                                         "next poll — a gzip needs a fresh budget" % _label)
+                        cut_in_rung = True
+                        break
                     continue
                 tried = True
                 try:
@@ -2923,10 +2927,6 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                         level=pressure or status.get("level", "drain"))
                 rung_freed += (freed or 0)
                 rung_acted += 1
-            if waiting and not cut_in_rung:     # a gzip waits for a fresh poll
-                timer.defer_rung(rung_lines, _label, ladder, "rung %s deferred to next "
-                                 "poll — a gzip needs a fresh budget" % _label)
-                cut_in_rung = True
             logs.extend(rung_lines)
             _append_log(log_path, rung_lines)
         if rung_acted > 0:                  # a rung that only skipped gets no summary
