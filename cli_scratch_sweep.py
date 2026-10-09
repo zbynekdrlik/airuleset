@@ -39,7 +39,7 @@ from pathlib import Path
 # shared helper while driving a File-B function must target
 # `cli_scratch_sweep.<helper>` (e.g. gzip.open, _target_in_live_use), NOT
 # `cli_target_purge.<helper>`/`airuleset.<helper>` — both halves call
-# `_target_in_live_use`, so the correct patch target differs per sweep.
+# `_target_in_live_use` (transcript DISCOVERY uses `cli_live_snapshot`, #1216).
 from cli_target_purge import (
     _human_size,
     _target_in_live_use,
@@ -1347,7 +1347,7 @@ def sweep_airuleset_state(tmp_dir=None, uid=None, dry_run: bool = False, now=Non
 # subagent transcripts (3.05 GB > 7d) that no drain rung could reclaim.
 # Each subagent file is its own never-`/resume`d agent, so the subagent
 # leg drops ONLY the newest-per-dir protection; every other safety rule
-# (symlink refusal, age floor, size floor, `_target_in_live_use`,
+# (symlink refusal, age floor, size floor, the /proc live-use check,
 # never-follow-a-symlinked-dir) is reused unchanged. The v1 concern about
 # ad-hoc `**/*.jsonl` corpus scanners was addressed by AUDITING every
 # in-repo `subagents` reader (#1117):

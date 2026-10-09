@@ -2329,7 +2329,7 @@ def _plan_claude_metadata(home, now):
 
 def _effective_transcript_age_days(box_class_fn=None):
     """#925: 2d on shared-stream, 7d on workstation. The
-    ``_target_in_live_use`` open-fd exclusion inside
+    one-snapshot open-fd exclusion inside (#1216)
     ``discover_old_transcript_candidates`` stays unchanged — a live transcript
     is never gzipped regardless of the age floor."""
     return _shared_stream_age_days(
@@ -2859,7 +2859,13 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
             rung_freed = 0
             rung_acted = 0
             actions = list(actions)
-            for j, a in enumerate(actions):
+            # #1216: the budget is checked before every RUNNABLE action after
+            # the first one this rung tried (a failed one counts), and a gzip
+            # starts only when it can finish in the time left.
+            left = sum(1 for x in actions if x.get("cls", _label) in RECLAIMABLE_CLASSES
+                       and x.get("kind", "delete") not in ("skip", "report"))
+            tried = waiting = False
+            for a in actions:
                 acls = a.get("cls", _label)
                 path = a.get("path", "-")
                 planned = a.get("bytes", 0) or 0
@@ -2878,6 +2884,16 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                     rung_lines.append(_log_line(now, "REPORT", path, planned,
                                                 reason or "report-only"))
                     continue
+                if tried and timer.over_budget_in_rung(rung_lines, _label, ladder, left):
+                    cut_in_rung = True
+                    break
+                left -= 1
+                fit = timer.gzip_fit(planned) if kind == "gzip" else None
+                if fit is not None:
+                    rung_lines.append(_log_line(now, "SKIP", path, planned, fit[1]))
+                    waiting = waiting or fit[0] == "later"
+                    continue
+                tried = True
                 try:
                     freed = do_action_fn(a)
                 except Exception as e:
@@ -2907,16 +2923,17 @@ def execute_drain(status, home, planners, recheck_fn, do_action_fn,
                         level=pressure or status.get("level", "drain"))
                 rung_freed += (freed or 0)
                 rung_acted += 1
-                if timer.over_budget_in_rung(rung_lines, _label, ladder,   # #1216
-                                             len(actions) - j - 1):
-                    cut_in_rung = True
-                    break
+            if waiting and not cut_in_rung:     # a gzip waits for a fresh poll
+                timer.defer_rung(rung_lines, _label, ladder, "rung %s deferred to next "
+                                 "poll — a gzip needs a fresh budget" % _label)
+                cut_in_rung = True
             logs.extend(rung_lines)
             _append_log(log_path, rung_lines)
         if rung_acted > 0:                  # a rung that only skipped gets no summary
             pending = (_label, worst, rung_freed)
-            # #965 R3 fix: record the rung's yield for low-yield tracking
-            if not dry_run:
+            # #965 R3 fix: record the rung's yield for low-yield tracking;
+            # #1216: a rung the budget cut is deferred, not low-yield
+            if not dry_run and not cut_in_rung:
                 _record_rung_yield(home, _label, freed=rung_freed, now=now)
     if pending is not None:
         after = recheck_fn()

@@ -36,8 +36,10 @@ One :class:`PollTimer` per ``run_disk_guard`` call:
   ``prevention`` / ``quota`` / ``fs`` — the ladders share rung labels, so a
   point never crosses ladders).
 * ``over_budget_in_rung(sink, label, ladder, deferred)`` (#1216) is the same
-  check AFTER each acted action inside a rung; past the budget the rung stops
-  and is itself the resume point (one action per rung always runs).
+  check before each runnable action after the first one a rung tried; past the
+  budget the rung stops and is itself the resume point. ``gzip_fit`` keeps a
+  gzip from starting when it cannot finish in the time left (a gzip killed
+  mid-way leaves a temp file and is retried on every poll).
 * ``resume_start(ladder, labels, sink)`` — the next run of that ladder starts
   at its resume point (when it is in the ladder and 0 <= age <
   :data:`RESUME_TTL_S`), so tail rungs are never starved by slow head rungs.
@@ -63,6 +65,7 @@ from pathlib import Path
 
 STEP_LOG_MIN_S = 5            # a step at/above this logs its label + duration
 DISK_GUARD_BUDGET_S = 45      # poll wall budget, before the sweep's own cap
+GZIP_BYTES_PER_S = 15_000_000  # #1216: conservative compress + verify rate (loaded box)
 RESUME_TTL_S = 3600           # an older resume point is ignored
 INFLIGHT_NAME = "step-inflight"
 RESUME_NAME = "drain-resume"
@@ -244,15 +247,34 @@ class PollTimer:
         elapsed = self.elapsed()
         if deferred <= 0 or elapsed <= self.budget_s:   # last action: the
             return False                                # between-rung check decides
+        self.defer_rung(sink, label, ladder,
+                        "budget exceeded inside rung %s (%ds) — %d action(s) deferred "
+                        "to next poll" % (label, math.ceil(elapsed), deferred))
+        return True
+
+    def defer_rung(self, sink, label, ladder, why):
+        """Stop ``ladder`` at rung ``label``: it becomes the ladder's resume
+        point and the poll is cut short; ``why`` is logged once per poll."""
         if not self.cut_short:
             self.cut_short = True
-            sink.append("disk-guard: budget exceeded inside rung %s (%ds) — %d "
-                        "action(s) deferred to next poll"
-                        % (label, math.ceil(elapsed), deferred))
+            sink.append("disk-guard: " + why)
         points = self._load(RESUME_NAME) or {}
         points[ladder] = {"label": label, "ts": self.now}
         self._put(RESUME_NAME, points)
-        return True
+
+    def gzip_fit(self, nbytes):
+        """None when a gzip of ``nbytes`` can finish in this poll, else
+        ``("later", reason)`` (a fresh poll's budget fits it) or
+        ``("never", reason)`` (no poll's budget does)."""
+        need = nbytes / GZIP_BYTES_PER_S
+        if need > DISK_GUARD_BUDGET_S:
+            return "never", ("gzip needs ~%ds, more than the whole %ds poll budget "
+                             "— left as is (#1216)" % (math.ceil(need), DISK_GUARD_BUDGET_S))
+        left = self.budget_s - self.elapsed()
+        if need > left:
+            return "later", "gzip needs ~%ds, %ds left — next poll (#1216)" % (
+                math.ceil(need), max(0, int(left)))
+        return None
 
 
 class _NullTimer:
@@ -276,6 +298,12 @@ class _NullTimer:
 
     def over_budget_in_rung(self, _sink, _label, _ladder, _deferred):
         return False
+
+    def defer_rung(self, _sink, _label, _ladder, _why):
+        return None
+
+    def gzip_fit(self, _nbytes):
+        return None
 
 
 NULL_TIMER = _NullTimer()
