@@ -681,7 +681,7 @@ WEBTERM_DASHBOARD_TABS = {
     # EXCLUDES montalu7/8, simap1, marek@subdev, stepan@forestshop-dev,
     # admin@forestshop-dev.
     "zbynek": [
-        "ar", "claudy", "fohmixer",
+        "ar", "claudy", "fohmixer", "varos",   # #1220 varos@dev2 project account
         "dev1", "dev2", "gatekeeper",
         "montalu1-subdev", "montalu2-subdev", "montalu3-subdev",
         "montalu4-subdev", "montalu5-subdev", "montalu6-subdev",
@@ -696,10 +696,13 @@ WEBTERM_DASHBOARD_TABS = {
     # gatekeeper, forestshop.
     # #960: claudy tab added before dev1 (his claudy work is reached today via
     # dev1; the controller claudy tab replaces that path after migration).
+    # #1220 (owner 2026-10-09): the varos@dev2 project account after fohmixer
+    # (its Claude ran in newlevel@dev2's marek group before the migration).
     "marek": [
         "montalu1-subdev", "montalu2-subdev",
         "miva1-subdev", "montalu4-subdev",
-        "ar", "claudy", "fohmixer", "dev1", "dev2", "gatekeeper", "forestshop",
+        "ar", "claudy", "fohmixer", "varos", "dev1", "dev2", "gatekeeper",
+        "forestshop",
     ],
     # david.newlevel.media -- David's working accounts. The david GATEWAY renders
     # its own physically-scoped inventory (cli_webterm_profiles.david_inventory,

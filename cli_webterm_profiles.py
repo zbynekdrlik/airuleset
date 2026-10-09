@@ -436,6 +436,7 @@ def marek_inventory():
             "start_dir_chain": ["devel/claudy"],
         },
         fohmixer_entry(WEBTERM_MAREK_IDENTITY),   # #1183 project account
+        varos_entry(WEBTERM_MAREK_IDENTITY),      # #1220 project account
         {
             "id": "dev1",
             "label": "dev1 (marek sessions)",
@@ -577,25 +578,43 @@ def dominika_inventory():
 FOHMIXER_HOST = "100.104.8.125"
 
 
-def fohmixer_entry(identity, kind="stream"):
-    """#1183: the tab to the `fohmixer@dev1` PROJECT account — the SAME entry
-    for every human that the ONE declaration (cli_account_bootstrap
-    SERVICE_ACCOUNTS["fohmixer"]) grants, differing only in the human's own
-    dedicated lane key. Everyone attaches the ONE shared project session
-    `fohmixer` (owner: people share the project's session). NO u_tenant: the
-    project account is not any lane's own tenant (#703), and its forced-command
-    key could not run the U reader anyway."""
+def project_account_entry(account, host, box, project_dir, identity, kind="stream"):
+    """#1183/#1220: the tab to a PROJECT account — the SAME entry for every
+    human that the ONE declaration (cli_account_bootstrap
+    SERVICE_ACCOUNTS[account]) grants, differing only in the human's own
+    dedicated lane key. Everyone attaches the ONE shared project session named
+    after the account (owner: people share the project's session). NO
+    u_tenant: the project account is not any lane's own tenant (#703), and its
+    forced-command key could not run the U reader anyway."""
     return {
-        "id": "fohmixer",
-        "label": "fohmixer (dev1)",
+        "id": account,
+        "label": "%s (%s)" % (account, box),
         "kind": kind,
         "local": False,
-        "host": FOHMIXER_HOST,
-        "user": "fohmixer",
+        "host": host,
+        "user": account,
         "identity": identity,
-        "preferred": "fohmixer",
-        "start_dir_chain": ["devel/fohmixer"],
+        "preferred": account,
+        "start_dir_chain": [project_dir],
     }
+
+
+def fohmixer_entry(identity, kind="stream"):
+    """#1183: the fohmixer@dev1 project account tab."""
+    return project_account_entry("fohmixer", FOHMIXER_HOST, "dev1",
+                                 "devel/fohmixer", identity, kind)
+
+
+# dev2's tailscale IP, DUPLICATED from cli_fleet's `varos@dev2` REMOTE_HOSTS
+# entry (zero-import leaf); drift-locked by tests/test_webterm_varos_1220.py.
+VAROS_HOST = "100.82.64.27"
+
+
+def varos_entry(identity, kind="stream"):
+    """#1220 (owner 2026-10-09): the varos@dev2 project account tab (Varos
+    East accounting), on the owner's and marek's dashboards."""
+    return project_account_entry("varos", VAROS_HOST, "dev2",
+                                 "devel/varos/uctovnictvo", identity, kind)
 
 
 # The timo lane runs on the CONTROLLER under the `airuleset` account (the #870
@@ -722,6 +741,7 @@ def zbynek_inventory():
             "start_dir_chain": ["devel/claudy"],
         },
         fohmixer_entry(WEBTERM_ZBYNEK_IDENTITY, kind="owner"),   # #1183
+        varos_entry(WEBTERM_ZBYNEK_IDENTITY, kind="owner"),      # #1220
         {
             "id": "dev1",
             "label": "dev1",

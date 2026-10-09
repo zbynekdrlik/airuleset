@@ -264,9 +264,12 @@ SERVICE_ACCOUNTS = {
         "repo": "zbynekdrlik/varos",
         "project_dir": "devel/varos/uctovnictvo",
         "tmux_session": "varos",
+        # owner 2026-10-09: a tab on his dashboard AND on marek's (the varos
+        # Claude ran in newlevel@dev2's marek group before the migration)
         "webterm_sessions": {
-            "zbynek": {"preferred": "varos",
-                       "start_dir_chain": ["devel/varos/uctovnictvo"]},
+            human: {"preferred": "varos",
+                    "start_dir_chain": ["devel/varos/uctovnictvo"]}
+            for human in ("zbynek", "marek")
         },
     },
 }
