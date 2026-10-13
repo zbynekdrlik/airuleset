@@ -105,10 +105,8 @@ class TestDeclaration(unittest.TestCase):
 
     def test_code_only_must_be_a_bool(self):
         spec = dict(bootstrap.SERVICE_ACCOUNTS["varos"], code_only="yes")
-        with mock.patch.dict(bootstrap.SERVICE_ACCOUNTS, {"varos": spec}):
-            with self.assertRaises(ValueError) as cm:
-                bootstrap.account_spec("varos")
-        self.assertIn("code_only", str(cm.exception))
+        self.assertIn("code_only must be True or False",
+                      "; ".join(bootstrap.validate_account("varos", spec)))
 
     def test_the_real_varos_bootstrap_installs_the_shim_before_the_checkout(self):
         script = bootstrap.render_root_bootstrap("varos")
