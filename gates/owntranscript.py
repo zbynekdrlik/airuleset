@@ -14,8 +14,12 @@ and tool-results paths, which are ordinary files.
 
 Per command segment (``&&``/``||``/``;``/``|``/``&`` and every ``$(…)`` or
 backtick body):
-* a reader that names the transcript, a ``*.jsonl`` under ``.claude/projects``,
-  or reads ``.claude/projects`` recursively (``-r``, ``rg``) is refused;
+* a content READER (``READERS``) that names the transcript, a ``*.jsonl``
+  under ``.claude/projects``, or reads ``.claude/projects`` recursively
+  (``-r``, ``rg``) is refused; a command that only NAMES such a path
+  (``gh --body``, ``git commit -m``, ``echo``) is text;
+* a heredoc body is data, unless an interpreter consumes it
+  (``python3 - <<EOF``) and its program names a transcript;
 * metadata (``ALLOWED_HEADS``) passes, and ``head``/``tail`` pass with ONE
   numeric ``-n`` ≤ ``MAX_LINES`` or ``-c`` ≤ ``MAX_BYTES`` (never ``+N``/follow).
 An inline ``# airuleset:own-transcript-ok <reason>`` marker passes a deliberate
@@ -31,6 +35,16 @@ from gates import allow, command_of, emit_block, read_payload
 ALLOWED_HEADS = frozenset({"ls", "stat", "wc", "du", "test", "[", "file",
                            "readlink", "realpath"})
 BOUNDED_HEADS = frozenset({"head", "tail"})    # only with a small numeric -n/-c
+# Only these READ a file's content. Anything else that merely NAMES a path
+# (gh --body, git commit -m, echo, printf) is text, never a read (live false
+# positive on this ticket's own evidence comment, 2026-10-13).
+READERS = frozenset({"cat", "tac", "nl", "grep", "egrep", "fgrep", "zgrep", "rg",
+                     "ag", "ack", "jq", "sed", "awk", "gawk", "mawk", "perl",
+                     "python", "python3", "node", "ruby", "less", "more", "cut",
+                     "sort", "uniq", "strings", "xxd", "od", "base64", "zcat",
+                     "gzip", "gunzip", "cp", "dd"}) | BOUNDED_HEADS
+# A heredoc body is data, except when one of these consumes it as a program.
+INTERPRETERS = frozenset({"python", "python3", "bash", "sh", "node", "perl", "ruby"})
 MAX_LINES = 50
 MAX_BYTES = 65536
 _WRAPPERS = frozenset({"env", "sudo", "command", "nice", "ionice", "timeout",
@@ -104,26 +118,55 @@ def _touches(words, sid, under_projects):
     return False
 
 
+def _names_transcript(text, sid):
+    return bool((sid and sid + ".jsonl" in text)
+                or (".claude/projects" in text and ".jsonl" in text))
+
+
+def _interpreter_heredoc(cmd, sid):
+    """A heredoc an interpreter runs (``python3 - <<EOF``) whose program names
+    a transcript: the songplayer shape."""
+    from gates.selfservice import _HEREDOC_RE, _capture_heredocs
+    _, direct, _ = _capture_heredocs(cmd)
+    for line in cmd.split("\n"):
+        mm = _HEREDOC_RE.search(line.rstrip())
+        if not mm:
+            continue
+        head, _ = _command(_words(line[:mm.start()]))
+        if head in INTERPRETERS and _names_transcript(direct.get(mm.group(2), ""), sid):
+            return True
+    return False
+
+
 def violation(cmd, transcript_path):
     """The block message for ``cmd`` (``""`` when it may run)."""
     sid = _session_id(transcript_path)
     if not cmd or _BYPASS_RE.search(cmd):
         return ""
-    projects = ".claude/projects" in cmd
-    if not ((sid and sid + ".jsonl" in cmd) or projects):
+    if not ((sid and sid + ".jsonl" in cmd) or ".claude/projects" in cmd):
         return ""
-    bodies = [a or b for a, b in _SUBST_RE.findall(cmd)]
-    for segment in _SEGMENT_SPLIT.split(cmd) + [x for b in bodies
-                                                 for x in _SEGMENT_SPLIT.split(b)]:
+    if _interpreter_heredoc(cmd, sid):
+        return _message(transcript_path)
+    from gates.selfservice import _capture_heredocs
+    skeleton = _capture_heredocs(cmd)[2]          # heredoc bodies are data
+    projects = ".claude/projects" in skeleton
+    bodies = [a or b for a, b in _SUBST_RE.findall(skeleton)]
+    for segment in _SEGMENT_SPLIT.split(skeleton) + [x for b in bodies
+                                                      for x in _SEGMENT_SPLIT.split(b)]:
         head, args = _command(_words(segment))
-        if not head or head in ALLOWED_HEADS or head == "cd":
+        if head not in READERS:
             continue
         recursive = projects and (head == "rg" or any(a in _RECURSIVE for a in args))
         if not (recursive or _touches(args, sid, projects)):
             continue
         if head in BOUNDED_HEADS and not recursive and _bounded(head, args):
             continue
-        return ("BLOCKED (#1224): this reads a Claude session TRANSCRIPT (%s), a "
+        return _message(transcript_path)
+    return ""
+
+
+def _message(transcript_path):
+    return ("BLOCKED (#1224): this reads a Claude session TRANSCRIPT (%s), a "
                 "single-line-per-record jsonl that grows to hundreds of MB. Loading "
                 "one froze dev1 for 19 min. Your last ❓ block is printed by "
                 "`python3 ~/devel/airuleset/airuleset.py question-block`; decisions "
@@ -131,7 +174,6 @@ def violation(cmd, transcript_path):
                 "-c <= %d stay allowed. A deliberate repair: append "
                 "`# airuleset:own-transcript-ok <reason>`."
                 % (os.path.basename(transcript_path) or "*.jsonl", MAX_LINES, MAX_BYTES))
-    return ""
 
 
 def main():
