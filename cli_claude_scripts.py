@@ -281,9 +281,10 @@ def render_claude_launch_script(cwd_guard=""):
     launcher (render_claude_impl_launch_script), scoped to the implementer
     window's own process."""
     import airuleset
-    return (CLAUDE_LAUNCH_SCRIPT_CONTENT.replace("{{CWD_GUARD}}", cwd_guard)
-            .replace("{{MANAGED_MODEL}}", airuleset.MANAGED_MODEL)
-            .replace("{{MANAGED_ENV_UNSET}}", _managed_env_unset_line()))
+    import cli_session_scope                # #1224: per-session memory scope
+    return cli_session_scope.wrap(CLAUDE_LAUNCH_SCRIPT_CONTENT.replace("{{CWD_GUARD}}", cwd_guard)
+                                  .replace("{{MANAGED_MODEL}}", airuleset.MANAGED_MODEL)
+                                  .replace("{{MANAGED_ENV_UNSET}}", _managed_env_unset_line()))
 
 
 # --------------------------------------------------------------------------- #
@@ -426,8 +427,9 @@ def render_claude_impl_launch_script():
     tuple); every backend value is still read from the per-box marker at shell
     time, so ONE rendered script serves every box (it refuses LOUDLY off a marker
     box)."""
-    return CLAUDE_IMPL_LAUNCH_SCRIPT_CONTENT.replace(
-        "{{MANAGED_ENV_UNSET}}", _managed_env_unset_line())
+    import cli_session_scope                # #1224: per-session memory scope
+    return cli_session_scope.wrap(CLAUDE_IMPL_LAUNCH_SCRIPT_CONTENT.replace(
+        "{{MANAGED_ENV_UNSET}}", _managed_env_unset_line()))
 
 
 def render_claude_implementer_prompt():

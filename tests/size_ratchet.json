@@ -11,7 +11,7 @@
     "cli_binary_installers.py": 467,
     "cli_burn.py": 554,
     "cli_caveman_plugins.py": 763,
-    "cli_claude_scripts.py": 1195,
+    "cli_claude_scripts.py": 1197,
     "cli_claude_version.py": 250,
     "cli_cloudflare_dns.py": 305,
     "cli_concurrency.py": 275,
