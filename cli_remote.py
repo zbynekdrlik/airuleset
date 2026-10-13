@@ -465,6 +465,10 @@ def _ssh_prefix(remote, require_identity):
              "-o", "NumberOfPasswordPrompts=1"], None)
 
 
+# #1224: a scoped session's argv[0] is the resolved path (systemd-run --scope)
+LIVE_CLAUDE_PGREP = "pgrep -u $(id -u) -af '(^|/)claude '"
+
+
 def report_live_claude_processes(targets, run=None, control_opts=None,
                                  require_identity=True):
     """#1060 L3a (supervisor addendum): after a `model-backend set`/`clear`
@@ -487,7 +491,7 @@ def report_live_claude_processes(targets, run=None, control_opts=None,
             continue
         argv = ssh_prefix + control_opts + [
             f"{remote['user']}@{remote['host']}",
-            "pgrep -u $(id -u) -af '^claude '"]
+            LIVE_CLAUDE_PGREP]
         try:
             r = run(argv, input="", capture_output=True, text=True, timeout=20)
         except Exception:
