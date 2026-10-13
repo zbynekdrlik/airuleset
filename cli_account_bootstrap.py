@@ -663,10 +663,10 @@ def render_root_bootstrap(account):
     # 8. System packages — only when the account declares them (#973)
     script += _render_system_packages_step(packages)
     script += toolchain.render_account_env_step(spec)   # 8b: #1201
-    # 11 BEFORE 9-10 (#1220): the gh token shim is the git credential helper
-    # the checkout of a private repo needs (#1190)
+    # 11 + 11c BEFORE 9-10 (#1220): credential helper + code-only hooks first
+    import cli_account_codeonly
     import cli_project_gh_token
-    script += cli_project_gh_token.render_bootstrap_step(spec)
+    script += cli_project_gh_token.render_bootstrap_step(spec) + cli_account_codeonly.render_step(spec)
     # 9-10: the project checkout + its tmux session (#1184)
     script += _render_project_step(spec)
     script += toolchain.render_system_step(spec)   # 12 (LAST): #1201
