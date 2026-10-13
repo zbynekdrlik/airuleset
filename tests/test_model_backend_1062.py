@@ -353,8 +353,8 @@ class TestImplLauncher(unittest.TestCase):
         # `-c`/--continue (which resumes the MAIN window's transcript); it uses
         # `-r <id>` or `--session-id <id>`. Scope the -c/--continue ban to the
         # actual exec lines (the explanatory comment legitimately names them).
-        exec_lines = [ln for ln in s.splitlines()     # #1224: the launch sites
-                      if ln.strip().startswith("_airuleset_exec_claude ")]
+        exec_lines = [ln for ln in s.replace("\\\n", " ").splitlines()  # #1224 sites
+                      if "_airuleset_exec_claude " in ln or "exec claude " in ln]
         self.assertTrue(exec_lines)
         for ln in exec_lines:
             self.assertNotIn(" -c ", ln)
