@@ -81,6 +81,22 @@ class TestGate(unittest.TestCase):
                     "tail -n 20 %s" % TP):
             self.assertEqual(_gate().violation(cmd, TP), "", cmd)
 
+    def test_text_that_merely_names_a_transcript_passes(self):
+        # live 2026-10-13: the shipped guard blocked this very ticket's evidence
+        # comment (a heredoc .md quoting `grep … .jsonl` in backticks)
+        for cmd in ("cat > /tmp/c.md <<'EOF'\n| `grep NEEDS %s` | 2 |\nEOF\n"
+                    "gh issue comment 1 -F /tmp/c.md" % TP,
+                    "gh issue comment 1 --body 'see %s'" % TP,
+                    "git commit -m 'path ~/.claude/projects/x/a.jsonl'",
+                    "echo %s" % TP, "printf '%%s\\n' ~/.claude/projects/*/*.jsonl",
+                    "python3 - <<'EOF'\nprint('docs mention ~/.claude/projects')\nEOF"):
+            self.assertEqual(_gate().violation(cmd, TP), "", cmd)
+
+    def test_an_interpreter_heredoc_that_opens_a_transcript_is_refused(self):
+        for cmd in ("python3 - <<'EOF'\nprint(len(open('%s').read()))\nEOF" % TP,
+                    "bash <<EOF\ngrep a %s\nEOF" % TP):
+            self.assertIn("question-block", _gate().violation(cmd, TP), cmd)
+
     def test_a_marked_command_passes(self):
         cmd = "python3 repair.py %s  # airuleset:own-transcript-ok repairing a torn line" % TP
         self.assertEqual(_gate().violation(cmd, TP), "")
