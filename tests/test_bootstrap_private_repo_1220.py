@@ -67,7 +67,10 @@ class TestShimBeforeCheckout(unittest.TestCase):
         self.assertIn("credential.https://github.com.helper", script)
 
     def test_an_account_without_github_app_has_no_credential_helper(self):
-        script = bootstrap.render_root_bootstrap("varos")
+        spec = _spec(github_app=False)
+        spec.pop("repo_secrets", None)   # needs github_app (#1199)
+        with mock.patch.dict(bootstrap.SERVICE_ACCOUNTS, {"varos": spec}):
+            script = bootstrap.render_root_bootstrap("varos")
         self.assertNotIn("credential.https://github.com.helper", script)
 
 
