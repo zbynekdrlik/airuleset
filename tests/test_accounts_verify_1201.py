@@ -62,6 +62,8 @@ class _World:
         self.email = _NOREPLY
         self.browsers_path = str(self.pw)
         self.drop_local_bin = False
+        # #1220: a pane carries the #1201 env it was started with
+        self.pane_env = {"RUSTUP_HOME": "/opt/rust/rustup"}
         self.home_path_first = []     # dirs put BEFORE the system bin
         self.probe_rc = None
         self.calls = []
@@ -123,7 +125,8 @@ class _World:
         if self.project.is_dir():
             subprocess.run(["git", "-C", str(self.project), "config", "user.email",
                             self.email], check=True)
-        pane = subprocess.Popen(self.pane_cmd)
+        pane_env = {k: v for k, v in os.environ.items() if k != "RUSTUP_HOME"}
+        pane = subprocess.Popen(self.pane_cmd, env=dict(pane_env, **self.pane_env))
         try:
             panes = self.tmp / "panes"
             panes.write_text("%d\n" % pane.pid)
@@ -173,6 +176,21 @@ class TestGreen(_Base):
         self.assertIn("declared 1.58.2 installed", self.line("playwright"))
         self.assertIn("ruff 0.16.2", self.line("ruff"))
 
+    def test_a_profile_rewritten_after_a_live_pane_keeps_it_fresh(self):
+        # #1220 live: a root re-render rewrote ~/.profile under a 4-day-old
+        # session that already ran with the toolchain env.
+        future = time.time() + 3600
+        os.utime(self.w.home / ".profile", (future, future))
+        self.verify()
+        self.assertIn(" OK — ", self.line("tmux"), self.out)
+
+    def test_a_playwright_registry_marker_is_not_a_duplicate(self):
+        b = self.w.home / ".cache" / "ms-playwright" / "b"
+        b.mkdir(parents=True)
+        (b / "browser@44fedd07").write_text("{}")
+        self.verify()
+        self.assertIn(" OK — ", self.line("home-duplicates"), self.out)
+
     def test_the_probe_runs_as_the_account_over_its_identity(self):
         self.verify()
         (argv,) = self.w.calls
@@ -196,9 +214,8 @@ class TestFailures(_Base):
         self.w.pane_cmd = ["sleep", "60"]
         self.assertFails("tmux", "is not a login shell")
 
-    def test_a_pane_older_than_the_profile_block_fails(self):
-        future = time.time() + 3600
-        os.utime(self.w.home / ".profile", (future, future))
+    def test_a_pane_without_the_toolchain_env_fails(self):
+        self.w.pane_env = {}
         self.assertFails("tmux", "respawn")
 
     def test_a_non_login_default_command_fails(self):
@@ -274,8 +291,8 @@ class TestFailures(_Base):
     # the rest
     def test_leftover_toolchain_copies_fail(self):
         (self.w.home / ".rustup").mkdir()
-        (self.w.home / ".cache" / "ms-playwright").mkdir(parents=True)
-        self.assertFails("home-duplicates", "~/.rustup, ~/.cache/ms-playwright")
+        (self.w.home / ".cache" / "ms-playwright" / "chromium-1244").mkdir(parents=True)
+        self.assertFails("home-duplicates", "~/.rustup, ~/.cache/ms-playwright/chromium*")
 
     def test_cargo_registry_cache_is_not_a_duplicate(self):
         (self.w.home / ".cargo" / "registry").mkdir(parents=True)
