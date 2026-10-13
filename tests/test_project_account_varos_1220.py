@@ -23,7 +23,10 @@ class TestDeclaration(unittest.TestCase):
         self.assertEqual(spec["host"], "dev2")
         self.assertIs(spec["sudo"], False)
         self.assertEqual(list(spec["reach"]), [])
-        self.assertEqual(list(spec["secrets"]), ["fio-token-varos"])
+        # owner 9.10.: invoices over read-only IMAP, the Gmail app password
+        # lives in this account only (never the claude.ai Gmail connector)
+        self.assertEqual(list(spec["secrets"]),
+                         ["fio-token-varos", "gmail-app-password-varos"])
         self.assertEqual(spec["repo"], "zbynekdrlik/varos")
         self.assertEqual(spec["project_dir"], "devel/varos/uctovnictvo")
         self.assertEqual(spec["tmux_session"], "varos")
