@@ -397,23 +397,24 @@ class TestMintAccount(_Base):
         self.assertEqual(gh.requests, [])
 
     def test_mint_all_covers_exactly_the_github_app_accounts(self):
-        self.assertEqual(pgt.github_app_accounts(), ["fohmixer"])
+        self.assertEqual(pgt.github_app_accounts(), ["fohmixer", "varos"])
         with mock.patch.object(pgt, "mint_account", return_value=0) as m:
             rc = pgt.cmd_project_gh_token(mock.Mock(action="mint", account=None,
                                                     all=True, dry_run=False,
                                                     key=None))
         self.assertEqual(rc, 0)
-        self.assertEqual([c.args[0] for c in m.call_args_list], ["fohmixer"])
+        self.assertEqual([c.args[0] for c in m.call_args_list],
+                         ["fohmixer", "varos"])
 
     def test_mint_all_fails_when_any_account_fails(self):
         with mock.patch.dict(bootstrap.SERVICE_ACCOUNTS["camera-box"],
                              {"github_app": True}), \
-                mock.patch.object(pgt, "mint_account", side_effect=[1, 0]) as m:
+                mock.patch.object(pgt, "mint_account", side_effect=[1, 0, 0]) as m:
             rc = pgt.cmd_project_gh_token(mock.Mock(action="mint", account=None,
                                                     all=True, dry_run=False,
                                                     key=None))
         self.assertEqual(rc, 1)
-        self.assertEqual(m.call_count, 2)   # one failure never skips the rest
+        self.assertEqual(m.call_count, 3)   # one failure never skips the rest
 
     def test_cli_usage(self):
         for ns in (mock.Mock(action="mint", account=None, all=False),
