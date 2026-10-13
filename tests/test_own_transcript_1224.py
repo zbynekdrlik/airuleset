@@ -81,8 +81,9 @@ class TestGate(unittest.TestCase):
         cmd = "python3 repair.py %s  # airuleset:own-transcript-ok repairing a torn line" % TP
         self.assertEqual(_gate().violation(cmd, TP), "")
 
-    def test_no_transcript_path_means_no_check(self):
-        self.assertEqual(_gate().violation("grep x %s" % TP, ""), "")
+    def test_no_transcript_path_checks_only_the_projects_tree(self):
+        self.assertEqual(_gate().violation("grep x /tmp/a.jsonl", ""), "")
+        self.assertIn("question-block", _gate().violation("grep x %s" % TP, ""))
 
 
 class TestHook(unittest.TestCase):
@@ -103,7 +104,7 @@ class TestHook(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             b = Path(d, "bin")
             b.mkdir()
-            (b / "python3").write_text("#!/bin/sh\ntouch %s/called\nexit 0\n" % d)
+            (b / "python3").write_text("#!/bin/sh\n: > %s/called\nexit 0\n" % d)
             (b / "python3").chmod(0o755)
             tools = ["bash", "cat", "dirname", "env"] + (["jq"] if with_jq else [])
             for t in tools:
