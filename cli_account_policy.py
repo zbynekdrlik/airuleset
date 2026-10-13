@@ -271,6 +271,8 @@ def validate_github_app(spec, account=None, declared=()):
         return ["github_app must be True or False"]
     if spec.get("github_app") and "repo" not in spec:
         return ["github_app: True needs the repo the token is scoped to"]
+    if "code_only" in spec and not isinstance(spec["code_only"], bool):
+        return ["code_only must be True or False (#1220, gates.codeonly)"]
     return validate_repo_secrets(spec, account, declared)
 
 

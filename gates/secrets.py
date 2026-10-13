@@ -17,7 +17,7 @@ import re
 import subprocess
 import sys
 
-from gates import allow, command_of, emit_block, read_payload
+from gates import allow, codeonly, command_of, emit_block, read_payload
 from gates import audit
 from gates.shellcmd import strip_quoted
 
@@ -316,6 +316,8 @@ def _gate2_msg(violations):
 def main():
     payload = read_payload()
     cmd = command_of(payload)
+    if block := codeonly.violation(cmd):   # #1220: before, and immune to, any bypass
+        emit_block(block)
 
     is_add = bool(re.search(r"git\s+add", cmd))
     is_commit = bool(re.search(r"git\s+commit", cmd))

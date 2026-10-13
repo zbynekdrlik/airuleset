@@ -74,7 +74,7 @@ _NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
 _ALLOWED_KEYS = frozenset({
     "host", "sudo", "sudo_reason", "sudo_commands", "reach", "reach_enforced",
     "reach_reason", "secrets", "webterm_sessions", "system_packages", "repo",
-    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools",
+    "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only",
 })
 
 # The defaults every declaration inherits. They are the SAFE direction: no
@@ -261,7 +261,7 @@ SERVICE_ACCOUNTS = {
         "reach": [],
         "secrets": ["fio-token-varos", "gmail-app-password-varos"],  # Fio, Gmail IMAP
         "repo": "zbynekdrlik/varos",
-        "github_app": True, "repo_secrets": [],   # repo added 13.10., no CI secrets
+        "github_app": True, "repo_secrets": [], "code_only": True,   # gates.codeonly
         "project_dir": "devel/varos/uctovnictvo",
         "tmux_session": "varos",
         # owner 2026-10-09: a tab on his dashboard AND on marek's (the varos

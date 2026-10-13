@@ -229,8 +229,7 @@ def mint_token(installation_id, repo, jwt, *, permissions=None, urlopen=None):
     if status != 201:
         raise MintError("mint for %s failed (HTTP %d: %s)"
                         % (repo, status, _message(data)), status=status)
-    token = data.get("token")
-    expires = data.get("expires_at")
+    token, expires = data.get("token"), data.get("expires_at")
     if not isinstance(token, str) or not _TOKEN_RE.fullmatch(token):
         raise MintError("mint for %s returned a malformed token" % repo)
     if not isinstance(expires, str) or not _EXPIRES_RE.fullmatch(expires):
@@ -241,6 +240,8 @@ def mint_token(installation_id, repo, jwt, *, permissions=None, urlopen=None):
         raise MintError("mint for %s returned a token scoped to %s, not to "
                         "exactly %s — refusing to deliver it"
                         % (repo, scope or "all repositories", repo))
+    if "administration" in (data.get("permissions") or {}):   # #1220: visibility
+        raise MintError("mint for %s returned an administration token — refused" % repo)
     if permissions is not None and data.get("permissions") != dict(permissions):
         raise MintError("mint for %s returned permissions %s, not exactly %s — "
                         "refusing to deliver it"
