@@ -53,6 +53,8 @@ class _Launch:
              + "while [ $# -gt 0 ] && [ \"$1\" != -- ]; do shift; done; shift\n"
              "exec \"$@\"\n")
         (self.home / "meminfo").write_text("MemTotal:       %d kB\n" % mem_kb)
+        (self.home / ".claude").mkdir()      # as `airuleset.py install` leaves it
+        _scope().write_tool_oom_env(self.home / ".claude")
         self.script = self.home / "launch.sh"
         _exe(self.script, script or cli_claude_scripts.render_claude_launch_script())
 
