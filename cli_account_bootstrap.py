@@ -259,7 +259,7 @@ SERVICE_ACCOUNTS = {
         "host": "dev2",
         "sudo": False,
         "reach": [],
-        "secrets": ["fio-token-varos"],   # Fio API token, read-only account mode
+        "secrets": ["fio-token-varos", "gmail-app-password-varos"],  # Fio, Gmail IMAP
         "repo": "zbynekdrlik/varos",
         "github_app": True, "repo_secrets": [],   # repo added 13.10., no CI secrets
         "project_dir": "devel/varos/uctovnictvo",
