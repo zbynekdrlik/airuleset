@@ -18,6 +18,8 @@ Both launchers (`cli_claude_scripts`) are the ONE path every launch takes.
     for tmux and the watchdog.
   - A runaway meets its own session's ceiling and the kernel memcg OOM; the
     rest of the box never reclaims for it.
+  - ``OOMPolicy=continue``: systemd's default ``stop`` ends the WHOLE scope,
+    claude included, when the kernel kills one tool (live on dev1).
 * A probe (``systemd-run … -- true``) runs first. When the user manager is
   unreachable, or on any other box, the launch is a plain ``exec claude``,
   so a launch is never blocked (fail-open, one stderr line).
@@ -63,7 +65,7 @@ _airuleset_exec_claude() {
         _swap=$(( _kb * __SWAP__ / 100 ))
         if systemd-run --user --scope --quiet -- true >/dev/null 2>&1; then
           exec systemd-run --user --scope --quiet -p "MemoryMax=${_max}K" \
-            -p "MemorySwapMax=${_swap}K" -- claude "$@"
+            -p "MemorySwapMax=${_swap}K" -p OOMPolicy=continue -- claude "$@"
         fi
       fi
       echo "airuleset: no systemd user scope here, starting Claude uncapped (#1224)" >&2
