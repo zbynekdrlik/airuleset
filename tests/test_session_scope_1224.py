@@ -97,6 +97,9 @@ class TestLaunch(unittest.TestCase):
             self.assertIn("MemoryMax=%dK" % (DEV1_KB * 40 // 100), calls[1])
             self.assertIn("MemorySwapMax=%dK" % (DEV1_KB * 10 // 100), calls[1])
             self.assertIn("-- claude", calls[1])
+            # live on dev1 2026-10-13: without it systemd STOPS the whole scope
+            # (claude too) when the kernel OOM-kills one tool (OOMPolicy=stop)
+            self.assertIn("OOMPolicy=continue", calls[1])
             self.assertIn("CLAUDE BASH_ENV=%s/.claude/airuleset-tool-oom.sh" % d,
                           r.stdout)
 
