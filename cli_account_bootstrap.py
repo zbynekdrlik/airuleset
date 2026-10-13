@@ -254,14 +254,14 @@ SERVICE_ACCOUNTS = {
     },
     # #1220 (owner 8.10.: its own account, `z1`): Varos East accounting. Bank
     # data never in `newlevel`; outbound HTTPS only (Fio API, mail). The repo is
-    # PRIVATE and CODE ONLY; documents are gitignored. github_app comes after
-    # the owner adds the repo to the App installation.
+    # PRIVATE, CODE ONLY (documents gitignored); the App lacks administration.
     "varos": {
         "host": "dev2",
         "sudo": False,
         "reach": [],
         "secrets": ["fio-token-varos"],   # Fio API token, read-only account mode
         "repo": "zbynekdrlik/varos",
+        "github_app": True, "repo_secrets": [],   # repo added 13.10., no CI secrets
         "project_dir": "devel/varos/uctovnictvo",
         "tmux_session": "varos",
         # owner 2026-10-09: a tab on his dashboard AND on marek's (the varos
