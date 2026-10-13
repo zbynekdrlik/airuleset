@@ -10,6 +10,8 @@ Every Claude launch now goes through `_airuleset_exec_claude`:
 - Every session exports `BASH_ENV` = the tool-OOM file. Each non-interactive
   bash Claude Code starts (its Bash tool calls) raises its own
   `oom_score_adj` to 800, so the kernel kills the runaway tool before Claude.
+  (A process may lower its value only down to oom_score_adj_min, 0 for a
+  session, so Claude cannot shield itself; raising the tools is the lever.)
 """
 import stat
 import subprocess
@@ -195,19 +197,18 @@ class TestToolOom(unittest.TestCase):
                                  env=self._env_file(d), capture_output=True, text=True)
             self.assertGreaterEqual(int(out.stdout.strip()), 800, out.stderr)
 
-    def test_a_refused_write_prints_nothing(self):
-        # adj 1000 first: writing 800 is then a lowering, which is refused.
-        # A tool call (and every hook) must not get an error line on stderr.
+    def test_a_failed_write_prints_nothing(self):
+        # A sandboxed or read-only /proc refuses the write: a tool call (and
+        # every hook, whose stderr carries block reasons) must stay silent.
         with tempfile.TemporaryDirectory() as d:
-            env = self._env_file(d)
-            out = subprocess.run(
-                ["/bin/bash", "--norc", "-c",
-                 "echo 1000 > /proc/self/oom_score_adj; "
-                 "BASH_ENV=%s exec /bin/bash -c 'true; cat /proc/self/oom_score_adj'"
-                 % env["BASH_ENV"]],
-                env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
-            self.assertEqual(out.stdout.strip(), "1000")
+            f = Path(d, "oom.sh")
+            f.write_text(_scope().render_tool_oom_env().replace(
+                "/proc/self/oom_score_adj", "%s/no/such/dir/x" % d))
+            out = subprocess.run(["/bin/bash", "-c", "true"], capture_output=True,
+                                 text=True, env={"PATH": "/usr/bin:/bin",
+                                                 "BASH_ENV": str(f)})
             self.assertEqual(out.stderr, "")
+            self.assertEqual(out.returncode, 0)
 
     def test_an_earlier_bash_env_still_runs(self):
         with tempfile.TemporaryDirectory() as d:
