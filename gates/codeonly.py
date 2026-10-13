@@ -5,8 +5,11 @@ The varos account (Varos East accounting) keeps documents next to its code.
 hooks on its global ``core.hooksPath``; git runs them on the real index, so
 they hold however a file was staged. What a command CAN do is switch them off,
 and that is what this gate refuses for an account declaring ``code_only:
-True``: ``--no-verify``, ``commit -n``, any ``hooksPath`` change and the
-``GIT_CONFIG_*`` environment that can replace the config. Plain substring
+True``: ``--no-verify`` (and its ``--no-v`` prefixes), ``commit -n``, any
+``hooksPath`` change, the ``GIT_CONFIG_*`` environment, and touching or
+relocating ``~/.gitconfig`` (``HOME=``, ``XDG_CONFIG_HOME=``) where the hooks
+path lives. A ``commit`` line with ``-n`` anywhere after it (even inside the
+message) is refused: the safe direction. Plain substring
 checks over the whole command, so no wrapper (``env``, ``sudo``, ``sh -c``, a
 full path) hides them. It runs before, and ignores, the staging gate's
 bypass marker: the owner's rule is absolute.
@@ -16,8 +19,9 @@ import pwd
 import re
 
 _HOOKS_OFF = re.compile(
-    r"--no-verify|hookspath|\bGIT_CONFIG_[A-Z_]+"
-    r"|\bcommit\b[^\n;&|]*\s-[A-Za-z]*n", re.IGNORECASE)
+    r"--no-v|hookspath|\bGIT_CONFIG_[A-Z_]+|\.gitconfig"
+    r"|\b(?:HOME|XDG_CONFIG_HOME)="
+    r"|\bcommit\b[^\n]*\s-[A-Za-z]*n", re.IGNORECASE)
 
 
 def _current_user():
