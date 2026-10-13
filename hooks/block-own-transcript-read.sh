@@ -5,8 +5,8 @@
 # `airuleset.py question-block`. All logic lives in gates/owntranscript.py.
 #
 # Cheap by construction: python starts only when the command names this
-# session's id at all (a bash substring pre-filter), so the other Bash calls
-# pay a jq read and nothing else. Fail-OPEN on an unreadable payload: this is a
+# session's `<id>.jsonl` or `.claude/projects` at all (a bash substring
+# pre-filter), so the other Bash calls pay a jq read and nothing else. Fail-OPEN on an unreadable payload: this is a
 # resource guard, not a security boundary.
 # Dry-run: echo '{"transcript_path":"/x/<sid>.jsonl","tool_input":{"command":"grep a /x/<sid>.jsonl"}}' | bash <this hook>
 set -euo pipefail
@@ -16,9 +16,10 @@ TP=$(printf '%s' "$INPUT" | jq -r '.transcript_path // empty' 2>/dev/null || tru
 CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || true)
 SID=${TP##*/}
 SID=${SID%.jsonl}
-if [ -z "$SID" ] || [ -z "$CMD" ]; then exit 0; fi
+if [ -z "$CMD" ]; then exit 0; fi
+# never the bare id: it is also in the scratchpad / task / tool-results paths
 case "$CMD" in
-    *"$SID"*) ;;
+    *"$SID.jsonl"*|*.claude/projects*) ;;
     *) exit 0 ;;
 esac
 
