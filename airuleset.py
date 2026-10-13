@@ -9650,13 +9650,19 @@ from cli_project_gh_token import (  # noqa: E402, F401
     maybe_refresh_shim as maybe_refresh_project_gh_app_shim,
     register_parser as _register_project_gh_token_parser,
 )
+# --- #1224: print the last delivered ❓ block (never read the own transcript) ---
+from cli_question_block import (  # noqa: E402, F401
+    cmd_question_block as cmd_question_block,
+    register_parser as _register_question_block_parser,
+)
 
 
 def _register_leaf_parsers(sub):
     """Leaf modules that own their argparse subparser (#1138, #1171, #1184) —
     one call from main() keeps main() from growing per leaf."""
     for register in (_register_stream_priority_parser, _register_box_queue_parser,
-                     _register_accounts_parser, _register_project_gh_token_parser):
+                     _register_accounts_parser, _register_project_gh_token_parser,
+                     _register_question_block_parser):
         register(sub)
 
 # --- #1062 L1: managed LiteLLM model gateway CLI leaf ---
@@ -11536,6 +11542,7 @@ SUBCOMMANDS = {
     "stream-priority": cmd_stream_priority,
     "accounts": cmd_accounts,
     "project-gh-token": cmd_project_gh_token,
+    "question-block": cmd_question_block,
 }
 # Backwards-compatible alias used by main() before SUBCOMMANDS existed.
 commands = SUBCOMMANDS
