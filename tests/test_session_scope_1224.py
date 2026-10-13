@@ -41,18 +41,20 @@ class _Launch:
     launcher's own `$HOME/.local/bin` PATH seam."""
 
     def __init__(self, base, *, host="dev1", mem_kb=DEV1_KB, sr_fail=False,
-                 script=None):
+                 script=None, meminfo=True):
         self.home = Path(base)
         b = self.home / ".local" / "bin"
         b.mkdir(parents=True)
-        _exe(b / "claude", "#!/bin/sh\necho \"CLAUDE BASH_ENV=$BASH_ENV\"\n")
+        _exe(b / "claude", "#!/bin/sh\necho \"CLAUDE BASH_ENV=$BASH_ENV\"\n"
+             "echo \"MEMINFO=${AIRULESET_MEMINFO:-}\"\n")
         _exe(b / "hostname", "#!/bin/sh\necho %s\n" % host)
         _exe(b / "systemd-run", "#!/bin/bash\n"
              "echo \"$*\" >> \"$HOME/sr.log\"\n"
              + ("exit 1\n" if sr_fail else "")
              + "while [ $# -gt 0 ] && [ \"$1\" != -- ]; do shift; done; shift\n"
              "exec \"$@\"\n")
-        (self.home / "meminfo").write_text("MemTotal:       %d kB\n" % mem_kb)
+        if meminfo:
+            (self.home / "meminfo").write_text("MemTotal:       %d kB\n" % mem_kb)
         (self.home / ".claude").mkdir()      # as `airuleset.py install` leaves it
         _scope().write_tool_oom_env(self.home / ".claude")
         self.script = self.home / "launch.sh"
@@ -80,6 +82,14 @@ class TestRender(unittest.TestCase):
             self.assertNotIn("exec claude", text[helper_end:], name)
             self.assertIn("_airuleset_exec_claude ", text[helper_end:], name)
 
+    def test_the_rendered_scripts_are_valid_bash(self):
+        for text in (cli_claude_scripts.render_claude_launch_script(),
+                     cli_claude_scripts.render_claude_impl_launch_script(),
+                     _scope().render_tool_oom_env()):
+            r = subprocess.run(["bash", "-n"], input=text, text=True,
+                               capture_output=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_the_declared_hosts_are_dev1_and_dev2(self):
         self.assertEqual(tuple(_scope().SCOPE_HOSTS), ("dev1", "dev2"))
 
@@ -94,8 +104,12 @@ class TestLaunch(unittest.TestCase):
             calls = ln.sr_calls()
             self.assertEqual(len(calls), 2, calls)          # the probe, then the exec
             self.assertIn("--user --scope", calls[1])
-            self.assertIn("MemoryMax=%dK" % (DEV1_KB * 40 // 100), calls[1])
-            self.assertIn("MemorySwapMax=%dK" % (DEV1_KB * 10 // 100), calls[1])
+            cap = DEV1_KB * 40 // 100
+            for call in calls:                # the probe proves the same flags
+                self.assertIn("MemoryMax=%dK" % cap, call)
+                self.assertIn("MemoryHigh=%dK" % (cap * 85 // 100), call)
+                self.assertIn("MemorySwapMax=%dK" % (DEV1_KB * 20 // 100), call)
+            self.assertIn("MEMINFO=\n", r.stdout)       # the test seam never leaks
             self.assertIn("-- claude", calls[1])
             # live on dev1 2026-10-13: without it systemd STOPS the whole scope
             # (claude too) when the kernel OOM-kills one tool (OOMPolicy=stop)
@@ -114,7 +128,41 @@ class TestLaunch(unittest.TestCase):
             ln = _Launch(d, host="laptop")
             r = ln.run()
             self.assertEqual(ln.sr_calls(), [])
+            self.assertIn("CLAUDE BASH_ENV=%s/.claude/airuleset-tool-oom.sh" % d,
+                          r.stdout)
+            self.assertNotIn("uncapped", r.stderr)
+
+    def test_dev2_and_the_floor_boundary(self):
+        for host, kb, cap in (("dev2", 16244848, 16244848 * 40 // 100),
+                              ("dev1", 5242880, 2097152)):
+            with tempfile.TemporaryDirectory() as d:
+                ln = _Launch(d, host=host, mem_kb=kb)
+                ln.run()
+                self.assertIn("MemoryMax=%dK" % cap, ln.sr_calls()[1], host)
+
+    def test_every_mode_launches_through_the_scope(self):
+        for mode in ("plain", "default", "new", "fullscreen"):
+            with tempfile.TemporaryDirectory() as d:
+                ln = _Launch(d)
+                r = ln.run(mode)
+                self.assertEqual(r.returncode, 0, (mode, r.stderr))
+                self.assertEqual(len(ln.sr_calls()), 2, mode)
+
+    def test_an_unreadable_meminfo_never_blocks_the_launch(self):
+        with tempfile.TemporaryDirectory() as d:
+            ln = _Launch(d, meminfo=False)
+            r = ln.run()
+            self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("CLAUDE BASH_ENV=", r.stdout)
+            self.assertIn("MemTotal", r.stderr)
+            self.assertEqual(ln.sr_calls(), [])
+
+    def test_an_uncapped_fallback_leaves_a_durable_line(self):
+        with tempfile.TemporaryDirectory() as d:
+            ln = _Launch(d, sr_fail=True)
+            ln.run()
+            log = Path(d, ".claude", "airuleset-session-scope.log").read_text()
+            self.assertIn("uncapped", log)
 
     def test_an_unreachable_user_manager_never_blocks_the_launch(self):
         with tempfile.TemporaryDirectory() as d:
@@ -143,9 +191,23 @@ class TestToolOom(unittest.TestCase):
 
     def test_a_tool_call_raises_its_own_oom_score(self):
         with tempfile.TemporaryDirectory() as d:
-            out = subprocess.run(["/bin/bash", "-c", "cat /proc/self/oom_score_adj"],
+            out = subprocess.run(["/bin/bash", "-c", "true; cat /proc/self/oom_score_adj"],
                                  env=self._env_file(d), capture_output=True, text=True)
-            self.assertEqual(out.stdout.strip(), "800", out.stderr)
+            self.assertGreaterEqual(int(out.stdout.strip()), 800, out.stderr)
+
+    def test_a_refused_write_prints_nothing(self):
+        # adj 1000 first: writing 800 is then a lowering, which is refused.
+        # A tool call (and every hook) must not get an error line on stderr.
+        with tempfile.TemporaryDirectory() as d:
+            env = self._env_file(d)
+            out = subprocess.run(
+                ["/bin/bash", "--norc", "-c",
+                 "echo 1000 > /proc/self/oom_score_adj; "
+                 "BASH_ENV=%s exec /bin/bash -c 'true; cat /proc/self/oom_score_adj'"
+                 % env["BASH_ENV"]],
+                env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
+            self.assertEqual(out.stdout.strip(), "1000")
+            self.assertEqual(out.stderr, "")
 
     def test_an_earlier_bash_env_still_runs(self):
         with tempfile.TemporaryDirectory() as d:
@@ -170,3 +232,22 @@ class TestToolOom(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLiveSessionCount(unittest.TestCase):
+    """`systemd-run --scope` execs claude with a RESOLVED argv[0]
+    (`/home/<u>/.local/bin/claude …`): the push's live-session report must
+    still see it."""
+
+    def test_the_push_report_matches_a_full_path_argv0(self):
+        import cli_remote
+        argv = ["bash", "-c", cli_remote.LIVE_CLAUDE_PGREP]   # the remote command
+        with tempfile.TemporaryDirectory() as d:
+            proc = subprocess.Popen(["bash", "-c", "exec -a %s/.local/bin/claude sleep 30 x"
+                                     % d])
+            try:
+                out = subprocess.run(argv, capture_output=True, text=True)
+                self.assertIn(str(proc.pid), out.stdout.split())
+            finally:
+                proc.kill()
+                proc.wait()
