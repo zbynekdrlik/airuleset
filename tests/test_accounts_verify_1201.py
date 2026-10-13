@@ -65,6 +65,7 @@ class _World:
         # #1220: the env the pane's shell hands its children (the #1201 block)
         self.pane_env = {"RUSTUP_HOME": "/opt/rust/rustup",
                          "PATH": "%s/.local/bin:/usr/bin:/bin" % self.home}
+        self.pane_has_child = True    # idle_pane_cmd() clears it
         self.home_path_first = []     # dirs put BEFORE the system bin
         self.probe_rc = None
         self.calls = []
@@ -121,6 +122,7 @@ class _World:
         fifo = self.tmp / "idle.fifo"
         if not fifo.exists():
             os.mkfifo(fifo)
+        self.pane_has_child = False
         return ["bash", "-l", "-c", "read -r -t 60 x <> %s; :" % fifo]
 
     def run(self, argv, **kw):
@@ -134,7 +136,14 @@ class _World:
             subprocess.run(["git", "-C", str(self.project), "config", "user.email",
                             self.email], check=True)
         pane_env = {k: v for k, v in os.environ.items() if k != "RUSTUP_HOME"}
-        pane = subprocess.Popen(self.pane_cmd, env=dict(pane_env, **self.pane_env))
+        pane_env["HOME"] = str(self.home)        # never the runner's real ~/.profile
+        pane = subprocess.Popen(self.pane_cmd, env=dict(pane_env, **self.pane_env),
+                                start_new_session=True)
+        deadline = time.monotonic() + 10         # the probe reads the pane's child
+        while (self.pane_has_child and time.monotonic() < deadline
+               and not Path("/proc/%d/task/%d/children" % (pane.pid, pane.pid))
+               .read_text().strip()):
+            time.sleep(0.02)
         try:
             panes = self.tmp / "panes"
             panes.write_text("%d\n" % pane.pid)
@@ -146,7 +155,7 @@ class _World:
             return subprocess.run(["bash", "-c", cmd[2]], env=env, text=True,
                                   capture_output=True, timeout=60)
         finally:
-            pane.kill()
+            os.killpg(pane.pid, 9)            # the pane AND its child
             pane.wait()
 
 
@@ -241,6 +250,7 @@ class TestFailures(_Base):
     # tmux
     def test_a_non_login_pane_fails(self):
         self.w.pane_cmd = ["sleep", "60"]
+        self.w.pane_has_child = False
         self.assertFails("tmux", "is not a login shell")
 
     def test_a_pane_whose_child_lacks_the_toolchain_env_fails(self):
