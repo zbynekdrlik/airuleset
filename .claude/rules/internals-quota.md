@@ -4,6 +4,9 @@ paths:
   - "tests/test_quota*.py"
   - "cli_session_scope.py"
   - "tests/test_session_scope*.py"
+  - "gates/owntranscript.py"
+  - "hooks/block-own-transcript-read.sh"
+  - "cli_question_block.py"
 ---
 
 ### airuleset internals — per-user quota on shared-stream boxes (#950 / #1140)
@@ -22,3 +25,6 @@ paths:
   - **`--scope` keeps the pid but RESOLVES argv[0]** (`/home/<u>/.local/bin/claude …`). A cmdline matcher needs `(^|/)claude`; `comm` and `pane_current_command` stay `claude`.
   - **Under `set -euo pipefail`, `_kb=$(awk …)` on a missing file aborts the launch.** Every fail-open read needs `|| _kb=""`.
   - Everything a session starts, `setsid nohup` jobs included, shares its cap.
+- **A guard keyed on a session id must key on the FILE, never the bare id (#1224 slice 2).** The id is also in the session's scratchpad (`/tmp/claude-<uid>/<proj>/<id>/scratchpad`), task-output and `tool-results` paths. A bare-id match would have blocked every ordinary scratch read, including the session that shipped it. `gates/owntranscript.py` triggers on `<id>.jsonl` or `.claude/projects`. It refuses any reader of a `*.jsonl` there, by path or glob, and any recursive read (`-r`, `rg`). It scans every `$(…)`/backtick body as its own command, but never splits on a bare paren, so `python -c 'open("x.jsonl")'` stays one command. Two more rules:
+  - **"Bounded" head/tail means one numeric `-n <= 50` or `-c <= 64 KiB`.** `tail -n +1` and `tail -f` read everything.
+  - **A hook test's PATH shim must use builtins only.** A `touch` missing from the isolated PATH silently recorded nothing. The root cause is fixed by `airuleset.py question-block`, which prints the last ❓ block from `discord-questions.json`. Declare a leaf subcommand's options on its subparser: `argparse.REMAINDER` drops a leading `--opt`.
