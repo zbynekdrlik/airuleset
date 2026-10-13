@@ -47,7 +47,9 @@ NOREPLY_SUFFIX = "@users.noreply.github.com"
 PROBE_TIMEOUT_S = 180
 # A per-account toolchain copy the shared one replaces (#1201 cleanup).
 # `~/.cargo` itself stays: it is cargo's registry cache (`cargo update`).
-HOME_DUPLICATES = (".rustup", ".cargo/bin", ".cache/ms-playwright",
+# A browser BUILD, never Playwright's own registry marker (`b/browser@…`).
+HOME_DUPLICATES = (".rustup", ".cargo/bin", ".cache/ms-playwright/chromium*",
+                   ".cache/ms-playwright/firefox*", ".cache/ms-playwright/webkit*",
                    ".local/pipx/venvs", ".local/share/pipx/venvs")
 _LOGIN_FLAG = re.compile(r"-[A-Za-z]*l[A-Za-z]*")
 _SHELLS = ("bash", "sh", "zsh", "dash")
@@ -62,8 +64,8 @@ if [ -n __SESS__ ] && tmux has-session -t =__SESS__ 2>/dev/null; then
   echo "default_command=$(tmux show-options -gv default-command 2>/dev/null)"
   for p in $(tmux list-panes -s -t =__SESS__ -F '#{pane_pid}' 2>/dev/null); do
     echo "pane=$p $(ps -o etimes= -p "$p" | tr -d ' ') $(tr '\0' ' ' < /proc/$p/cmdline 2>/dev/null)"
+    echo "paneenv=$p $(tr '\0' '\n' < /proc/$p/environ 2>/dev/null | sed -n 's/^RUSTUP_HOME=//p')"
   done
-  echo "profile_age=$(( $(date +%s) - $(stat -c %Y "$HOME/.profile" 2>/dev/null || date +%s) ))"
 else
   echo session=no
 fi
@@ -99,7 +101,7 @@ for pin in __PWPINS__; do
   done
 done
 echo @@dups
-for d in __DUPS__; do if [ -e "$HOME/$d" ]; then echo "dup=$d"; fi; done
+for d in __DUPS__; do if compgen -G "$HOME/$d" >/dev/null; then echo "dup=$d"; fi; done
 echo @@git
 if [ -d "$HOME"/__PROJECT__/.git ]; then
   echo "email=$(git -C "$HOME"/__PROJECT__ config --local user.email)"
@@ -181,19 +183,20 @@ def _is_login(cmdline):
 
 
 def _pane_problems(s):
-    """Every pane that is not a login shell, or started BEFORE ``~/.profile``
-    last changed (the #1201 block): such a pane still runs its old PATH."""
+    """Every pane that is not a login shell, or whose OWN environment (its
+    ``/proc/<pid>/environ``) lacks the #1201 toolchain env: such a pane still
+    runs its old PATH. Never file ages: a root re-render rewrites
+    ``~/.profile`` under live panes that are fine (#1220)."""
+    import cli_project_toolchain as toolchain
     out = []
-    try:
-        profile_age = int(_one(s, "tmux", "profile_age"))
-    except ValueError:
-        profile_age = None
+    env = dict((ln.split(" ", 1) + [""])[:2]
+               for ln in s.get("tmux", {}).get("paneenv") or [])
     for line in s.get("tmux", {}).get("pane") or []:
-        pid, age, cmd = (line.split(" ", 2) + ["", ""])[:3]
+        pid, _age, cmd = (line.split(" ", 2) + ["", ""])[:3]
         if not _is_login(cmd):
             out.append("pane %s is not a login shell (%s)" % (pid, cmd.strip()))
-        elif profile_age is None or not age.isdigit() or int(age) > profile_age:
-            out.append("pane %s started before ~/.profile got the toolchain block "
+        elif env.get(pid, "").strip() != toolchain.RUSTUP_HOME:
+            out.append("pane %s runs without the toolchain env (#1201 block) "
                        "— respawn it (`tmux respawn-pane -k -t <pane>` or "
                        "`exec bash -l` inside)" % pid)
     return out
