@@ -17,6 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -244,8 +245,9 @@ class TestLiveSessionCount(unittest.TestCase):
         import cli_remote
         argv = ["bash", "-c", cli_remote.LIVE_CLAUDE_PGREP]   # the remote command
         with tempfile.TemporaryDirectory() as d:
-            proc = subprocess.Popen(["bash", "-c", "exec -a %s/.local/bin/claude sleep 30 x"
+            proc = subprocess.Popen(["bash", "-c", "exec -a %s/.local/bin/claude sleep 30"
                                      % d])
+            time.sleep(0.2)              # let the exec land before pgrep reads argv
             try:
                 out = subprocess.run(argv, capture_output=True, text=True)
                 self.assertIn(str(proc.pid), out.stdout.split())
