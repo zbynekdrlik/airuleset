@@ -74,9 +74,11 @@ class TestLauncherUnsetsMouseEnv(unittest.TestCase):
         # a single pre-case line it precedes all the others too.
         lines = self._render().splitlines()
         unset_line = next(i for i, ln in enumerate(lines) if _UNSET in ln)
+        # #1224: a launch site is a call of the scope helper, whose own
+        # `exec claude` only runs when one of these calls it
         exec_lines = [i for i, ln in enumerate(lines)
-                      if ln.strip().startswith("exec claude")]
-        self.assertTrue(exec_lines, "no `exec claude` line found in the launcher")
+                      if ln.strip().startswith("_airuleset_exec_claude ")]
+        self.assertTrue(exec_lines, "no launch site found in the launcher")
         for ei in exec_lines:
             self.assertLess(
                 unset_line, ei,
@@ -104,9 +106,9 @@ class TestLauncherUnsetsMouseEnv(unittest.TestCase):
         self.assertIn(_UNSET, content)
         lines = content.splitlines()
         unset_line = next(i for i, ln in enumerate(lines) if _UNSET in ln)
-        exec_lines = [i for i, ln in enumerate(lines)
-                      if ln.strip().startswith("exec claude")]
-        self.assertTrue(exec_lines, "no `exec claude` in the impl launcher")
+        exec_lines = [i for i, ln in enumerate(lines)     # #1224 launch sites
+                      if ln.strip().startswith("_airuleset_exec_claude ")]
+        self.assertTrue(exec_lines, "no launch site in the impl launcher")
         for ei in exec_lines:
             self.assertLess(unset_line, ei,
                             "the impl launcher must unset before every exec")
