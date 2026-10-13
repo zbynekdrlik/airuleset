@@ -112,6 +112,63 @@ class TestHooks(unittest.TestCase):
             self.assertNotEqual(r.git("push", "-q", "origin", "main",
                                       check=False).returncode, 0)
 
+    def test_a_merge_that_brings_an_ignored_path_is_refused(self):
+        with tempfile.TemporaryDirectory() as base:
+            r = _Repo(base)
+            r.git("add", ".gitignore", "tool.py")
+            r.git("commit", "-q", "-m", "code")
+            r.git("checkout", "-q", "-b", "side")
+            (r.dir / "a.pdf").write_bytes(b"%PDF\n")
+            r.git("add", "-f", "a.pdf")
+            r.git("commit", "-q", "--no-verify", "-m", "side")
+            r.git("checkout", "-q", "main")
+            (r.dir / "b.py").write_text("x = 1\n")
+            r.git("add", "b.py")
+            r.git("commit", "-q", "-m", "main moves on")
+            merged = r.git("merge", "-q", "--no-edit", "side", check=False)
+            self.assertNotEqual(merged.returncode, 0)
+            self.assertIn("a.pdf", merged.stderr)
+
+    def test_an_evil_merge_is_refused_at_push(self):
+        with tempfile.TemporaryDirectory() as base:
+            r = _Repo(base)
+            r.git("add", ".gitignore", "tool.py")
+            r.git("commit", "-q", "-m", "code")
+            r.git("push", "-q", "origin", "main")
+            r.git("checkout", "-q", "-b", "side")
+            (r.dir / "b.py").write_text("x = 1\n")
+            r.git("add", "b.py")
+            r.git("commit", "-q", "-m", "side")
+            r.git("checkout", "-q", "main")
+            r.git("merge", "-q", "--no-ff", "--no-commit", "side")
+            (r.dir / "z.pdf").write_bytes(b"%PDF\n")
+            r.git("add", "-f", "z.pdf")
+            r.git("commit", "-q", "--no-verify", "-m", "evil merge")
+            self.assertEqual(r.git("diff-tree", "--no-commit-id", "--name-only", "-r",
+                                   "HEAD").stdout, "")     # the merge itself names nothing
+            pushed = r.git("push", "-q", "origin", "main", check=False)
+            self.assertNotEqual(pushed.returncode, 0)
+            self.assertIn("z.pdf", pushed.stderr)
+
+    def test_a_force_push_over_an_unknown_remote_commit_is_judged_on_content(self):
+        with tempfile.TemporaryDirectory() as base:
+            r = _Repo(base)
+            r.git("add", ".gitignore", "tool.py")
+            r.git("commit", "-q", "-m", "code")
+            r.git("push", "-q", "origin", "main")
+            other = Path(base, "other")
+            subprocess.run(["git", "clone", "-q", str(r.remote), str(other)],
+                           check=True, env=_GIT_ENV)
+            (other / "c.py").write_text("c = 1\n")
+            for args in (["add", "c.py"], ["commit", "-q", "-m", "elsewhere"],
+                         ["push", "-q", "origin", "main"]):
+                subprocess.run(["git", "-C", str(other), *args], check=True, env=_GIT_ENV)
+            (r.dir / "d.py").write_text("d = 1\n")
+            r.git("add", "d.py")
+            r.git("commit", "-q", "-m", "here")
+            forced = r.git("push", "-q", "origin", "+main", check=False)
+            self.assertEqual(forced.returncode, 0, forced.stderr)
+
     def test_clean_code_commits_and_pushes(self):
         with tempfile.TemporaryDirectory() as base:
             r = _Repo(base)
@@ -139,6 +196,9 @@ class TestRender(unittest.TestCase):
         self.assertLess(hooks, checkout)
         self.assertIn("core.hooksPath /etc/airuleset/git-hooks/code-only", script)
         self.assertIn(_hooks().HOOK, script)
+        self.assertIn("ln -sfn pre-commit /etc/airuleset/git-hooks/code-only/pre-merge-commit",
+                      script)
+        self.assertIn("config --local --get core.hooksPath", script)
 
     def test_the_rendered_step_is_valid_bash(self):
         step = _hooks().render_step({"code_only": True})
@@ -154,7 +214,10 @@ class TestGate(unittest.TestCase):
                     "git commit -nm x", "git -c core.hooksPath=/dev/null commit -m x",
                     "git config core.hookspath /tmp/h",
                     "GIT_CONFIG_GLOBAL=/dev/null git commit -m x",
-                    "env GIT_CONFIG_PARAMETERS=x git push"):
+                    "env GIT_CONFIG_PARAMETERS=x git push",
+                    'git commit -m "fix; x" -n', 'git commit -m "a & b" -n',
+                    "git commit --no-ver -m x", "rm ~/.gitconfig",
+                    "HOME=/tmp git commit -m x", "XDG_CONFIG_HOME=/tmp git push"):
             self.assertIn("1220", gate.violation(cmd, user="acct", accounts=CODE_ONLY),
                           cmd)
             self.assertEqual(gate.violation(cmd, user="other", accounts=CODE_ONLY), "",
