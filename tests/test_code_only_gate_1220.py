@@ -53,7 +53,8 @@ class _Repo:
         pre = self.hooks / "pre-commit"
         pre.write_text(_hooks().HOOK)
         pre.chmod(0o755)
-        (self.hooks / "pre-push").symlink_to("pre-commit")
+        for name in ("pre-push", "pre-merge-commit"):     # as render_step links them
+            (self.hooks / name).symlink_to("pre-commit")
         self.remote = Path(base, "remote.git")
         subprocess.run(["git", "init", "-q", "--bare", str(self.remote)],
                        check=True, env=_GIT_ENV)
@@ -157,7 +158,7 @@ class TestHooks(unittest.TestCase):
             r.git("commit", "-q", "-m", "code")
             r.git("push", "-q", "origin", "main")
             other = Path(base, "other")
-            subprocess.run(["git", "clone", "-q", str(r.remote), str(other)],
+            subprocess.run(["git", "clone", "-q", "-b", "main", str(r.remote), str(other)],
                            check=True, env=_GIT_ENV)
             (other / "c.py").write_text("c = 1\n")
             for args in (["add", "c.py"], ["commit", "-q", "-m", "elsewhere"],
