@@ -2,8 +2,9 @@
 bank token, receipts). Owner ruling 8.10.2026 (`z1`): its own account, never
 `newlevel` (#1184). Code-only private repo (documents never enter git), no
 sudo, no LAN reach, webterm for the owner and marek (2026-10-09), its own Access-gated drop lane for
-`secret request` + `upload`. `pending` until the root bootstrap ran, and no
-`github_app` until the owner adds the repo to the App installation."""
+`secret request` + `upload`. `pending` until the root bootstrap ran. `github_app` since the owner
+added the repo to the App installation (2026-10-13); the repo stays
+private and declares no CI secrets."""
 import sys
 import unittest
 from pathlib import Path
@@ -27,7 +28,8 @@ class TestDeclaration(unittest.TestCase):
         self.assertEqual(spec["project_dir"], "devel/varos/uctovnictvo")
         self.assertEqual(spec["tmux_session"], "varos")
         self.assertEqual(set(spec["webterm_sessions"]), {"zbynek", "marek"})
-        self.assertNotIn("github_app", spec)
+        self.assertIs(spec["github_app"], True)
+        self.assertEqual(list(spec["repo_secrets"]), [])
 
     def test_the_table_stays_clean_and_renders(self):
         self.assertEqual(bootstrap.validate_all(), {})
