@@ -24,6 +24,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "tests"))
+
+from _hook_state_cleanup import hermetic_hook_env  # noqa: E402
 
 SID = "4d877a2a-0b1c-4e2f-9a3b-5c6d7e8f9a0b"
 TP = "/home/newlevel/.claude/projects/-home-newlevel-devel-songplayer/%s.jsonl" % SID
@@ -35,11 +38,12 @@ def _gate():
     return owntranscript
 
 
-def _hook(cmd, tp=TP):
+def _hook(testcase, cmd, tp=TP):
     payload = json.dumps({"tool_name": "Bash", "transcript_path": tp,
                           "tool_input": {"command": cmd}})
     return subprocess.run(["bash", str(HOOK)], input=payload, text=True,
-                          capture_output=True, timeout=30)
+                          capture_output=True, timeout=30,
+                          env=hermetic_hook_env(testcase))
 
 
 class TestGate(unittest.TestCase):
@@ -89,14 +93,14 @@ class TestGate(unittest.TestCase):
 class TestHook(unittest.TestCase):
 
     def test_the_hook_blocks_and_names_the_way_out(self):
-        r = _hook("grep -c NEEDS %s" % TP)
+        r = _hook(self, "grep -c NEEDS %s" % TP)
         self.assertEqual(r.returncode, 2, r.stderr)
         self.assertIn("airuleset.py question-block", r.stderr)
 
     def test_the_hook_passes_everything_else(self):
         for cmd in ("ls %s" % TP, "pytest -q tests/", "echo hi",
                     "cat %s  # airuleset:own-transcript-ok repair" % TP):
-            r = _hook(cmd)
+            r = _hook(self, cmd)
             self.assertEqual((r.returncode, r.stderr), (0, ""), cmd)
 
     def _shimmed(self, payload, with_jq=True):
@@ -112,7 +116,8 @@ class TestHook(unittest.TestCase):
                                      capture_output=True, text=True).stdout.strip()
                 (b / t).symlink_to(src)
             r = subprocess.run([str(b / "bash"), str(HOOK)], input=payload, text=True,
-                               capture_output=True, env={"PATH": str(b)}, timeout=30)
+                               capture_output=True, timeout=30,
+                               env={"PATH": str(b), "HOME": d})       # own HOME (#1046)
             return r, Path(d, "called").exists()
 
     def test_python_starts_only_when_the_command_can_touch_a_transcript(self):
@@ -180,7 +185,8 @@ class TestQuestionBlock(unittest.TestCase):
             path.write_text(json.dumps(self.E))
             r = subprocess.run([sys.executable, str(ROOT / "airuleset.py"), "question-block",
                                 "--cwd", "/w/a/", "--session", "s2", "--path", str(path)],
-                               capture_output=True, text=True, timeout=60)
+                               capture_output=True, text=True, timeout=60,
+                               env=hermetic_hook_env(self))
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("A new", r.stdout)
 
