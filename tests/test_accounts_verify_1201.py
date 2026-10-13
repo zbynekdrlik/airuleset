@@ -62,8 +62,9 @@ class _World:
         self.email = _NOREPLY
         self.browsers_path = str(self.pw)
         self.drop_local_bin = False
-        # #1220: a pane carries the #1201 env it was started with
-        self.pane_env = {"RUSTUP_HOME": "/opt/rust/rustup"}
+        # #1220: the env the pane's shell hands its children (the #1201 block)
+        self.pane_env = {"RUSTUP_HOME": "/opt/rust/rustup",
+                         "PATH": "%s/.local/bin:/usr/bin:/bin" % self.home}
         self.home_path_first = []     # dirs put BEFORE the system bin
         self.probe_rc = None
         self.calls = []
@@ -114,6 +115,13 @@ class _World:
         with mock.patch.dict(wo.WEBTERM_CONTROLLER_LANE_PUBKEYS, {"timo": _FAKE_TIMO}):
             lines = bootstrap.desired_keys_for_service_account("fohmixer")
         (ssh / "authorized_keys").write_text("".join(ln + "\n" for ln in lines))
+
+    def idle_pane_cmd(self):
+        """A login shell with NO child: it blocks in a builtin read."""
+        fifo = self.tmp / "idle.fifo"
+        if not fifo.exists():
+            os.mkfifo(fifo)
+        return ["bash", "-l", "-c", "read -r -t 60 x <> %s; :" % fifo]
 
     def run(self, argv, **kw):
         """The fake ssh: execute the probe command (``bash -lc <probe>``)."""
@@ -184,6 +192,27 @@ class TestGreen(_Base):
         self.verify()
         self.assertIn(" OK — ", self.line("tmux"), self.out)
 
+    def test_a_login_pane_that_exported_the_block_itself_is_fresh(self):
+        # the live fohmixer pane: bash -l exec'd without the env, sourced the
+        # block from ~/.profile, and its claude child carries it. A re-render
+        # that rewrote ~/.profile since does not make it stale.
+        prof = self.w.home / ".profile"
+        prof.write_text('export RUSTUP_HOME=/opt/rust/rustup\n'
+                        'export PATH="$HOME/.local/bin:$PATH"\n')
+        self.w.pane_env = {"HOME": str(self.w.home), "PATH": "/usr/bin:/bin"}
+        future = time.time() + 3600
+        os.utime(prof, (future, future))
+        self.verify()
+        self.assertIn(" OK — ", self.line("tmux"), self.out)
+
+    def test_an_idle_login_pane_started_after_the_block_is_fresh(self):
+        # /proc/<pid>/environ is the env at exec: a bash -l never shows what
+        # it sourced itself, so with no child to read, the pane age decides.
+        self.w.pane_env = {"PATH": "/usr/bin:/bin"}
+        self.w.pane_cmd = self.w.idle_pane_cmd()
+        self.verify()
+        self.assertIn(" OK — ", self.line("tmux"), self.out)
+
     def test_a_playwright_registry_marker_is_not_a_duplicate(self):
         b = self.w.home / ".cache" / "ms-playwright" / "b"
         b.mkdir(parents=True)
@@ -214,8 +243,15 @@ class TestFailures(_Base):
         self.w.pane_cmd = ["sleep", "60"]
         self.assertFails("tmux", "is not a login shell")
 
-    def test_a_pane_without_the_toolchain_env_fails(self):
-        self.w.pane_env = {}
+    def test_a_pane_whose_child_lacks_the_toolchain_env_fails(self):
+        self.w.pane_env = {"PATH": "/usr/bin:/bin"}     # however young the pane is
+        self.assertFails("tmux", "respawn")
+
+    def test_an_idle_pane_older_than_the_profile_block_fails(self):
+        self.w.pane_env = {"PATH": "/usr/bin:/bin"}
+        self.w.pane_cmd = self.w.idle_pane_cmd()
+        future = time.time() + 3600
+        os.utime(self.w.home / ".profile", (future, future))
         self.assertFails("tmux", "respawn")
 
     def test_a_non_login_default_command_fails(self):
