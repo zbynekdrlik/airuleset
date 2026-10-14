@@ -359,9 +359,9 @@ class TestReclaimableWorktreeDiscovery(_Box):
 
 class TestPruneFinishedWorktrees(_Box):
     """lane_reconcile.prune_finished_worktrees — a lane whose tip is still an
-    ancestor of main (a fresh lane before its first commit) classifies MERGED
-    before any liveness check; it must still be kept while its transcript is
-    live."""
+    ancestor of main (a fresh lane before its first commit) must be kept while
+    its transcript is live. Since #1229 classify_lanes reads liveness BEFORE
+    the merged check, so such a lane is `live` and never even a candidate."""
 
     _OLD = staticmethod(lambda ref: 3 * 3600)
     _FREE = staticmethod(lambda p: False)
@@ -378,7 +378,7 @@ class TestPruneFinishedWorktrees(_Box):
         _transcript(self.home, self.repo, "agent-pr1")
         logs = self._prune()
         self.assertTrue(wt.exists(), "a live lane must never be pruned: %s" % logs)
-        self.assertTrue(any("live lane" in ln for ln in logs), logs)
+        self.assertFalse(any(str(wt) in ln for ln in logs), logs)
 
     def test_finished_merged_lane_is_pruned(self):
         wt = self.lane("agent-pr2")
