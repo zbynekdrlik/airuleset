@@ -320,7 +320,7 @@ class TestGuardHostsDriftLock(unittest.TestCase):
 
     def test_every_host_is_a_root_ssh_target_with_a_pinned_identity(self):
         for h in cli_fleet.DISK_GUARD_ROOT_HOSTS:
-            self.assertEqual(h.get("admin_user"), "newlevel" if h.get("sudo") else "root")
+            self.assertEqual(h.get("admin_user"), "root")
             self.assertTrue(h.get("host"))
             self.assertTrue(h.get("identity"),
                             "a root apply must ride a pinned key, never a password")
