@@ -495,7 +495,7 @@ class TestMainLauncherAlwaysManagedModel(unittest.TestCase):
         import cli_claude_scripts as cs
         with m.patch("cli_model_backend.load_marker", return_value=MARKER):
             s = cs.render_claude_launch_script()
-        self.assertIn("--model '%s'" % airuleset.MANAGED_MODEL, s)
+        self.assertIn("_model='%s'" % airuleset.MANAGED_MODEL, s)   # #1246 `--model "$_model"`
         self.assertNotIn("impl-main", s)
         self.assertNotIn("{{MANAGED_MODEL}}", s)
 

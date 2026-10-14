@@ -4061,7 +4061,8 @@ class TestUltracodeLauncher(TestCase):
         # bake `--model <MANAGED_MODEL>` into every mode except the
         # deliberate vanilla `plain` escape hatch.
         content = airuleset.render_claude_launch_script()
-        expected = "--model '%s'" % airuleset.MANAGED_MODEL
+        expected = '--model "$_model"'      # #1246: `_model` defaults to MANAGED_MODEL
+        self.assertIn("_model='%s'" % airuleset.MANAGED_MODEL, content)
         # new(x1) + ultracode(if/else x2) + default(if/else x2)
         # + fullscreen(if/else x2) = 7
         self.assertEqual(content.count(expected), 7, content)

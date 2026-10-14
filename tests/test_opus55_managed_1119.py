@@ -70,7 +70,7 @@ class TestLauncherModel(TestCase):
     def test_launcher_bakes_opus_5_5(self):
         import cli_claude_scripts
         rendered = cli_claude_scripts.render_claude_launch_script()
-        self.assertIn("--model 'claude-opus-5-5[1m]'", rendered)
+        self.assertIn("_model='claude-opus-5-5[1m]'", rendered)   # #1246 `--model "$_model"`
         self.assertNotIn("{{MANAGED_MODEL}}", rendered)
 
 

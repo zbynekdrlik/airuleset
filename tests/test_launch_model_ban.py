@@ -110,15 +110,15 @@ class TestRuntimeLaunchArgNeverBanned(TestCase):
 
     def _model_args(self):
         script = airuleset.render_claude_launch_script()
-        vals = re.findall(r"--model '([^']*)'", script)
+        vals = re.findall(r"_model='([^']*)'", script)   # #1246: `--model "$_model"`
         self.assertTrue(vals, "no --model arg found in the rendered launcher")
         return vals
 
     def test_every_launcher_model_arg_is_ban_safe(self):
+        declared = set(airuleset.PROJECT_MAIN_MODELS.values())   # #1246 owner-declared mains
         for v in self._model_args():
-            self.assertFalse(
-                _is_banned_opus5(v),
-                "launcher --model '%s' is a BANNED Opus 5 value" % v)
+            self.assertFalse(airuleset.is_banned_model_for_audit(v) or (
+                _is_banned_opus5(v) and v not in declared), "launcher --model '%s' is BANNED" % v)
 
     def test_no_opus5_id_substring_anywhere_in_launcher(self):
         # Defense in depth: not even a stray/commented BANNED opus-5 id
