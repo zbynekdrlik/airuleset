@@ -892,7 +892,7 @@ def swap_status(meminfo_text=None):
     """`swap: <total>/<used>` line for `airuleset.py status` (0 when none)."""
     _mem, swap_total, swap_free = _read_meminfo(meminfo_text)
     if swap_total <= 0:
-        return "swap: 0 (none)"
+        return "swap: 0 (none) — DEFECT (#1235): every Linux box needs active swap"
     used = max(0, swap_total - swap_free)
     return "swap: %s/%s" % (_fmt_mb(swap_total), _fmt_mb(used))
 
@@ -912,8 +912,8 @@ def provision_swap(run=None, meminfo_text=None):
     except Exception as e:  # noqa: BLE001
         return "swap: skipped — sudo probe error (%r)" % e
     if getattr(probe, "returncode", 1) != 0:
-        return ("swap: skipped — sudo -n unavailable (create %s manually: "
-                "fallocate/mkswap/swapon + /etc/fstab)" % SWAPFILE_PATH)
+        return ("⚠ swap: MISSING, create skipped (no sudo -n) — DEFECT (#1235): "
+                "create %s as root (fallocate/mkswap/swapon + /etc/fstab)" % SWAPFILE_PATH)
     size = swap_size_gb(mem_total)
     script = render_swap_setup_script(size)
     try:
