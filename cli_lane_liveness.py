@@ -138,8 +138,7 @@ def _resolve_base_branch(repo_root, records, run):
     Two steps (#1031 fork follow-up):
 
     1. NAME — ``develop`` when ANY remote or the local repo carries a
-       ``develop`` ref (the 3-branch odoo projects), else ``dev`` the same way
-       (the 2-branch projects, #1229), detected with ``git
+       ``develop`` ref (the 3-branch odoo projects), detected with ``git
        for-each-ref`` (deliberately NOT ``rev-parse`` — a shape the sibling test
        fakes leave inert, so it can never false-positive off an over-permissive
        ``rev-parse origin/*`` stub); else the name from ``git symbolic-ref
@@ -167,27 +166,17 @@ def _resolve_base_branch(repo_root, records, run):
             return False
         return getattr(r, "returncode", 1) == 0 and bool((r.stdout or "").strip())
 
-    def _ref_name_exists(branch):
-        # for-each-ref (NOT rev-parse) over local heads + every remote-tracking
-        # dir, so a fork whose origin/HEAD is unset still resolves the NAME,
-        # and a fake that over-approves `rev-parse origin/*` cannot
-        # false-positive it.
-        try:
-            r = run(["git", "-C", repo_root, "for-each-ref", "--format=%(refname)",
-                     "refs/heads/" + branch, "refs/remotes/*/" + branch])
-        except Exception:  # noqa: BLE001
-            return False
-        return getattr(r, "returncode", 1) == 0 and bool((r.stdout or "").strip())
+    def _develop_ref_exists():
+        return _branch_ref_exists(repo_root, "develop", run)
 
-    # 1) NAME. The integration branch, which deliberately overrides origin/HEAD:
-    # `develop` (the 3-branch odoo model), else `dev` (the 2-branch model,
-    # #1229: presenter's lanes merged into dev read idle-unmerged against main,
-    # which refused every next lane until a release), else the default branch.
+    # 1) NAME. A `develop` ref present anywhere ⇒ develop IS the integration
+    # base (the 3-branch odoo model); this deliberately overrides origin/HEAD.
+    # 2-branch projects integrate on `dev` (not `develop`), which the
+    # `refs/remotes/*/develop` pattern does not match, so they fall through;
+    # classify_lanes ALSO counts a lane merged into `dev` (#1229).
     name = None
-    for cand in ("develop", "dev"):
-        if _ref_name_exists(cand):
-            name = cand
-            break
+    if _develop_ref_exists():
+        name = "develop"
     if name is None:
         try:
             r = run(["git", "-C", repo_root, "symbolic-ref", "--quiet",
@@ -227,6 +216,33 @@ def _resolve_base_branch(repo_root, records, run):
     if picked:
         return picked
     return "origin/" + name  # name known but no candidate verified — conventional base
+
+
+def _branch_ref_exists(repo_root, branch, run):
+    """True when a local head or ANY remote-tracking ref named ``branch``
+    exists. for-each-ref (NOT rev-parse), so a fork whose origin/HEAD is unset
+    still resolves the name, and a fake that over-approves ``rev-parse
+    origin/*`` cannot false-positive it. Never raises."""
+    try:
+        r = run(["git", "-C", repo_root, "for-each-ref", "--format=%(refname)",
+                 "refs/heads/" + branch, "refs/remotes/*/" + branch])
+    except Exception:  # noqa: BLE001
+        return False
+    return getattr(r, "returncode", 1) == 0 and bool((r.stdout or "").strip())
+
+
+def _dev_integration_ref(repo_root, base_branch, run):
+    """#1229 — the 2-branch integration ref (``dev``: the most advanced of
+    upstream/origin/local), or None. A lane merged into it is integrated, while
+    the base stays the default branch: a main-only repo with a STALE ``dev``
+    (the controller's own) must still read a lane merged into main as merged.
+    None on a ``develop`` repo (develop is the base). Never raises."""
+    if "develop" in (base_branch or "") or not _branch_ref_exists(repo_root, "dev", run):
+        return None
+    cands = [c for c in ("upstream/dev", "origin/dev", "dev")
+             if _ref_exists(repo_root, c, run)]
+    picked = _pick_most_advanced_ref(repo_root, cands, run) if cands else None
+    return picked if picked and picked != base_branch else None
 
 
 def _is_lane_worktree(record):
@@ -433,6 +449,7 @@ def classify_lanes(repo_root, run=None, *, now=None, live_worker_ids=None,
         return out
     records = _parse_worktree_records(wt.stdout)
     base_branch = _resolve_base_branch(repo_root, records, run)
+    dev_ref = _dev_integration_ref(repo_root, base_branch, run)
 
     lane_records = [r for r in records[1:] if _is_lane_worktree(r)]
     if not lane_records:
@@ -463,7 +480,9 @@ def classify_lanes(repo_root, run=None, *, now=None, live_worker_ids=None,
         # while its agent was working in it.
         wt_base = os.path.basename(path.rstrip(os.sep))
         alive = (wt_base in live_worker_ids) or _path_has_proc(path, proc_cwds)
-        if not alive and _lane_is_merged(repo_root, branch, target, run):
+        if not alive and (_lane_is_merged(repo_root, branch, target, run) or (
+                dev_ref and target == base_branch
+                and _lane_is_merged(repo_root, branch, dev_ref, run))):
             out.append({"ref": branch, "path": path, "files": [],
                         "topic": branch, "state": "merged"})
             continue
