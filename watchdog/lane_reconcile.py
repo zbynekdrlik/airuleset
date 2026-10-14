@@ -410,9 +410,8 @@ def prune_finished_worktrees(repo_root, run=None, *, now=None, dry_run=False,
                              clean_fn=None, live_use_fn=None, age_fn=None):
     """Remove FINISHED/MERGED lane worktrees under ``repo_root`` that are clean,
     process-free and idle longer than ``age_min_s``; keep (and journal) any that
-    are a live lane (#1193 ``cli_lane_live_gate``; since #1229 a live
-    transcript already keeps a commit-less lane out of MERGED, and the gate
-    still covers the grace window), dirty, in live use or
+    are a live lane (#1193 ``cli_lane_live_gate``, now chiefly the grace
+    window: #1229 keeps a live commit-less lane out of MERGED), dirty, in live use or
     too young. The branch ref is ALWAYS kept
     (``git worktree remove`` never ``--force``). Returns one decision-log line
     per removed/kept candidate; [] when nothing qualifies or the cadence gate
