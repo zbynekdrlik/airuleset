@@ -88,6 +88,53 @@ class TestWorkstationScript(unittest.TestCase):
         self.assertIn(DRAIN_UNIT, g.build_apply_script())
 
 
+class TestReviewFixes(unittest.TestCase):
+    """Reviews of 1223 + the owner's 2G answer (ROZHODNUTÉ 14.10.2026)."""
+
+    def test_workstations_keep_a_2g_journal(self):
+        by_name = {h["name"]: h for h in cli_fleet.DISK_GUARD_ROOT_HOSTS}
+        for name in WORKSTATIONS:
+            self.assertEqual(by_name[name]["journal_max"], "2G")
+        s = g.build_apply_script(drain=False, journal_max="2G")
+        self.assertIn("SystemMaxUse=2G", s)
+        self.assertNotIn("SystemMaxUse=%s" % g.JOURNAL_MAX_USE, s)
+        self.assertIn("SystemMaxUse=%s" % g.JOURNAL_MAX_USE, g.build_apply_script())
+
+    def test_provision_passes_the_host_journal_cap(self):
+        calls = []
+        hosts = [{"name": "dev2", "host": "100.82.64.27", "admin_user": "newlevel",
+                  "sudo": True, "journal_max": "2G", "identity": PUSH_KEY}]
+        g.provision_disk_guard_root(hosts=hosts, run=_recorder(calls))
+        self.assertIn("SystemMaxUse=2G", calls[0][-1])
+
+    def test_a_sudo_host_never_gets_the_drain_by_omission(self):
+        calls = []
+        hosts = [{"name": "ws", "host": "1.2.3.4", "admin_user": "u", "sudo": True,
+                  "identity": PUSH_KEY}]
+        g.provision_disk_guard_root(hosts=hosts, run=_recorder(calls))
+        self.assertNotIn(DRAIN_UNIT, calls[0][-1])
+
+    def test_the_seed_runs_only_on_a_missing_or_stale_report_and_niced(self):
+        s = g.build_apply_script()
+        seed = [ln for ln in s.splitlines() if g.REPORTER_SCRIPT_PATH in ln
+                and "timeout" in ln]
+        self.assertEqual(len(seed), 1, seed)
+        self.assertIn("ionice -c3 nice", seed[0])
+        self.assertIn("-mmin -1200", s)
+
+    def test_journald_restarts_only_when_the_cap_changed(self):
+        s = g.build_apply_script()
+        restart = s.index("try-restart systemd-journald")
+        guard = s.rfind("if [ -n \"$JOURNALD_CHANGED\" ]", 0, restart)
+        self.assertNotEqual(guard, -1)
+        self.assertIn("cmp -s", s)
+
+    def test_the_duplicate_entry_check_reads_all_of_logrotate(self):
+        s = g.build_apply_script()
+        self.assertNotIn('grep -qi "duplicate log entry"', s)
+        self.assertIn('grep -i "duplicate log entry" >/dev/null', s)
+
+
 class TestWorkstationProvision(unittest.TestCase):
 
     def test_sudo_host_runs_the_drainless_script_under_sudo_n(self):
