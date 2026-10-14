@@ -7,7 +7,9 @@ stops reading a missing swap as normal.
 """
 import re
 import sys
+import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -15,6 +17,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 import cli_disk_guard_root as g   # noqa: E402
+
+sys.path.insert(0, str(ROOT / "tests"))
+from test_situational_injection import injected, run as run_hook   # noqa: E402
 
 RULE = ROOT / "rules" / "linux-box-swap.md"
 NO_SWAP = "MemTotal: 14000000 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n"
@@ -61,7 +66,7 @@ class TestSwapRule(unittest.TestCase):
     def test_rule_says_what_the_owner_ruled(self):
         body = " ".join(RULE.read_text().split())
         for phrase in ("MUST have active swap", "/etc/fstab", "swapon --show",
-                       "FAILS", "defect", "never", "#1235"):
+                       "FAILS", "defect", "never", "#1235", "2-8 GB", "container"):
             self.assertIn(phrase, body)
 
 
@@ -82,9 +87,57 @@ class TestFleetSwapIsLoud(unittest.TestCase):
         def run(argv, **kw):
             return mock.Mock(returncode=1, stdout="", stderr="a password is required")
         line = g.provision_swap(run=run, meminfo_text=NO_SWAP)
-        self.assertIn("⚠", line)
+        self.assertIn("WARN", line)
         self.assertIn("MISSING", line)
         self.assertIn("#1235", line)
+
+    def test_a_skipped_create_is_never_reported_as_applied(self):
+        # review A of 1235: the script skipped on low disk with rc 0, and
+        # install printed "swap: applied" on a box with no swap
+        def run(argv, **kw):
+            return mock.Mock(returncode=0, stdout="", stderr="")
+        line = g.provision_swap(run=run, meminfo_text=NO_SWAP,
+                                meminfo_after_text=NO_SWAP)
+        self.assertNotIn("applied", line)
+        self.assertIn("MISSING", line)
+        self.assertIn("DEFECT", line)
+
+    def test_the_low_disk_skip_exits_non_zero(self):
+        script = g.render_swap_setup_script(8)
+        skip = script.split("insufficient free space", 1)[1].split("\n", 1)[0]
+        self.assertIn("exit 1", skip)
+
+
+class TestSwapTriggers(unittest.TestCase):
+    """review B of 1235: a path rule loads only on a Read in the main session;
+    the trigger rows reach Write/Edit and Bash, workers included."""
+
+    BODY = "Every Linux box MUST have active swap"
+
+    def _fires(self, tool, tool_input):
+        with tempfile.TemporaryDirectory() as tmp:
+            ctx = injected(run_hook(tool_input, tool_name=tool,
+                                    session_id="swap-" + uuid.uuid4().hex, tmpdir=tmp))
+        return bool(ctx) and self.BODY in ctx
+
+    def test_bash_shapes_that_find_or_build_swap(self):
+        for cmd in ("swapon --show", "sudo mkswap /swapfile",
+                    "ssh root@box 'free -h'", "dmesg | grep -i oom-kill",
+                    "journalctl -k | grep 'Out of memory'",
+                    "hcloud server create --name box --type cx33"):
+            self.assertTrue(self._fires("Bash", {"command": cmd}), cmd)
+
+    def test_writing_a_provisioning_file(self):
+        for path in ("/home/u/devel/p/scripts/provision-box.sh",
+                     "/home/u/devel/p/deploy/user-data",
+                     "/home/u/devel/p/cloud-config.yaml"):
+            self.assertTrue(self._fires("Write", {"file_path": path, "content": "x"}),
+                            path)
+
+    def test_unrelated_actions_stay_quiet(self):
+        self.assertFalse(self._fires("Bash", {"command": "ls -la"}))
+        self.assertFalse(self._fires("Write", {"file_path": "/h/p/src/main.rs",
+                                               "content": "fn main() {}"}))
 
 
 if __name__ == "__main__":
