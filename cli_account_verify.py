@@ -123,7 +123,7 @@ echo @@drop
 if [ -r "$HOME/.cloudflared/airuleset-drop.conf" ]; then
   sed -n 's/^\(host\|port\)=/marker_\1=/p' "$HOME/.cloudflared/airuleset-drop.conf"
 fi
-echo "filedrop=$(systemctl --user is-active filedrop.service 2>&1 | head -1)"
+echo "filedrop=$(XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" systemctl --user is-active filedrop.service 2>&1 | head -1)"
 echo @@end
 """
 
