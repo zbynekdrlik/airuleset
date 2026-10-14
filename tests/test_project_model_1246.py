@@ -93,6 +93,11 @@ class Resolver(unittest.TestCase):
         self.assertEqual(model_lineup.dir_key("/home/u/devel/web_app.ai"),
                          "-home-u-devel-web-app-ai")
 
+    def test_a_path_object_resolves_like_its_string(self):
+        # review A: watchdog.newest_transcript returns a pathlib.Path
+        t = Path("/home/newlevel/.claude/projects/%s/3b6d.jsonl" % PZ_KEY)
+        self.assertEqual(model_lineup.main_models_for_transcript(t), (PZ, (PZ, MANAGED)))
+
     def test_garbage_never_raises(self):
         for v in (None, 3, [], "x"):
             self.assertEqual(model_lineup.main_models_for_transcript(v), (MANAGED, (MANAGED,)))
