@@ -183,7 +183,7 @@ class TestDeclarationValidator(unittest.TestCase):
         spec["webterm_sessions"]["mallory"] = {}
         spec["reach"].append("dev2")
         self.assertNotIn("mallory", bootstrap.account_spec("fohmixer")["webterm_sessions"])
-        self.assertEqual(list(bootstrap.account_spec("fohmixer")["reach"]), [])
+        self.assertNotIn("dev2", bootstrap.account_spec("fohmixer")["reach"])
 
     def test_bad_secret_name_fails(self):
         errs = bootstrap.validate_account(
@@ -232,7 +232,7 @@ class TestDeclarationValidator(unittest.TestCase):
         spec = bootstrap.account_spec("fohmixer")
         self.assertEqual(spec["host"], "dev1")
         self.assertIs(spec["sudo"], False)
-        self.assertEqual(list(spec["reach"]), [])
+        self.assertEqual([e["cidr"] for e in spec["reach"]], ["10.77.7.1/32"])  # 1230
         self.assertEqual(list(spec["secrets"]), [   # #1206: the vault files it holds
             "fohmixer-engineer-pin", "cloudflare-fohmixer-analytics",
             "cloudflare-fohmixer-access-audit", "cloudflared-fohmixer-token",
@@ -291,10 +291,10 @@ class TestFohmixerRender(unittest.TestCase):
         self.assertLess(self.script.index("# 1b. Ownership marker"),
                         self.script.index("# 5. authorized_keys"))
 
-    def test_reach_none_rejects_every_new_outbound_ssh_for_the_uid(self):
+    def test_reach_rejects_every_new_outbound_ssh_but_the_router(self):
         self.assertIn('meta skuid "fohmixer" tcp dport 22 ct state new reject',
                       self.script)
-        self.assertNotIn("accept\n", self.script.split("REACH_EOF")[1])
+        self.assertEqual(self.script.split("REACH_EOF")[1].count("accept\n"), 1)
         self.assertIn('"$NFT" -c -f "$REACH_NFT"', self.script)
         self.assertIn("airuleset-reach-$ACCOUNT.service", self.script)
 

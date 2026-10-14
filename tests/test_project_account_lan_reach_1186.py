@@ -510,7 +510,7 @@ class TestAccountsStatusShowsReachAndSudo(unittest.TestCase):
         for path in CAMERA_BOX_SUDO:
             self.assertIn("sudo " + path, out)
         # the fohmixer/claudy lines keep their shape
-        self.assertRegex(out, r"fohmixer\s+host=dev1\s+sudo=no\s+reach=none")
+        self.assertRegex(out, r"fohmixer\s+host=dev1\s+sudo=no\s+reach=1 LAN hosts")
 
     def test_json(self):
         data = json.loads(self._run(True))
