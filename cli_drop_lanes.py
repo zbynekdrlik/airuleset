@@ -130,10 +130,9 @@ def public_drop_hosts(remote_hosts, nodename=None, username=None):
 
 
 def _drop_disabled(entry):
-    """True iff the entry's `drop` block carries a non-empty `disabled` reason
-    (#1183): a PROJECT account gets no file-drop lane until one is declared, and
-    it must not turn its box into a SHARED drop box (which would rename the
-    existing account's `drop-<box>` host)."""
+    """True iff the entry's `drop` block carries a non-empty `disabled` reason.
+    A PROJECT account never uses it: it keeps the base channels of the account
+    it replaces (#1237, locked by test_project_account_drop_1237)."""
     drop = entry.get("drop") if isinstance(entry, dict) else None
     return isinstance(drop, dict) and bool(drop.get("disabled"))
 
