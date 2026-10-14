@@ -44,3 +44,67 @@ MODEL_TIERS = {
 # block-banned-model.sh in airuleset.py). Full policy history:
 # .claude/rules-reference/model-awareness-history.md.
 MANAGED_MODEL = MODEL_TIERS["opus5"] + "[1m]"
+
+# Per-PROJECT main model (#1246, owner 14.10.2026: "potrebujem aby pz-server
+# projekt na dev1 mohol mat prepnuty model na opus-4.6 a pracovat"). A project
+# listed here LAUNCHES on its own model, is restored to it (watchdog Job 54) and
+# may also run MANAGED_MODEL; every other model is still blocked by the #1203
+# gate. Keyed by the project dir NAME under `devel/`. The exact ids are outside
+# MODEL_TIERS on purpose: they are one project's main, never a fleet-wide
+# dispatch choice. An entry is added only by an owner-approved edit.
+PROJECT_MAIN_MODELS = {
+    "pz-server": "claude-opus-4-6",
+}
+
+
+def dir_key(path):
+    """Claude Code's project key for a launch dir: `/`, `.`, `_` become `-`
+    (the name of the dir under ~/.claude/projects/ that holds its transcripts)."""
+    return path.replace("/", "-").replace(".", "-").replace("_", "-")
+
+
+def project_of_key(key):
+    """The PROJECT_MAIN_MODELS name a Claude Code project key belongs to, or
+    None. The key must END with `-devel-<name>` (the ~/devel/<name> layout), so
+    `foo-pz-server`, `notdevel/pz-server` and a subdir launch never match."""
+    if not isinstance(key, str):
+        return None
+    for name in PROJECT_MAIN_MODELS:
+        if key.endswith("-devel-" + dir_key(name)):
+            return name
+    return None
+
+
+def main_models(name=None):
+    """`(target, allowed)` for project `name` (None = no declared project):
+    the model a session launches on and is restored to, and every model it may
+    run on without being blocked (the target plus MANAGED_MODEL)."""
+    target = PROJECT_MAIN_MODELS.get(name) if isinstance(name, str) else None
+    if not target:
+        return MANAGED_MODEL, (MANAGED_MODEL,)
+    return target, (target, MANAGED_MODEL)
+
+
+def launcher_model_lines():
+    """The managed launcher's lines that set `_model` (#1246): the
+    `{{MANAGED_MODEL}}` placeholder (filled by the launcher render), switched by
+    a `case` to a declared project's main. The `$PWD` encoding is the
+    launcher's `_has_conversation`, the pattern `project_of_key`'s suffix."""
+    lines = ["# #1246: `_model` = MANAGED_MODEL or this project's declared main (model_lineup)",
+             "_model='{{MANAGED_MODEL}}'"]
+    if PROJECT_MAIN_MODELS:
+        lines += ['_ccdir="${PWD//\\//-}"; _ccdir="${_ccdir//./-}"; _ccdir="${_ccdir//_/-}"',
+                  'case "$_ccdir" in']
+        lines += ["  *-devel-%s) _model='%s' ;;" % (dir_key(name), model)
+                  for name, model in sorted(PROJECT_MAIN_MODELS.items())]
+        lines.append("esac")
+    return "\n".join(lines)
+
+
+def main_models_for_transcript(tpath):
+    """`main_models` for a session transcript path: its project key is the
+    name of the transcript's parent dir."""
+    if not isinstance(tpath, str):
+        return main_models(None)
+    parts = tpath.replace("\\", "/").split("/")
+    return main_models(project_of_key(parts[-2] if len(parts) >= 2 else ""))

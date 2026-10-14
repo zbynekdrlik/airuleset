@@ -97,12 +97,10 @@ CLAUDE_IMPLEMENTER_PROMPT_DEST = CLAUDE_DIR / "airuleset-implementer.md"
 # no-managed-flags escape hatch.
 #   --dangerously-skip-permissions  : auto-approve (the user opted in for their dev boxes).
 #   -c                              : continue the most recent conversation in the cwd.
-#   --model '{{MANAGED_MODEL}}'     : baked in at RENDER time so EVERY mode except
-#       `plain` — including a RESUMED (-c) session — explicitly requests the managed
-#       model. Proven live on gatekeeper: settings.json requested the then-managed
-#       Opus id, but a resumed session's transcript kept showing an older model — `-c`
-#       alone just continues whatever model the prior transcript was started with; only
-#       an explicit --model on the launch command line forces it.
+#   --model "$_model"               : baked in at RENDER time so EVERY mode except `plain` —
+#       a RESUMED (-c) session too — requests the managed model (#1246: or the project's
+#       declared main). Proven live on gatekeeper: a resumed session kept its transcript's older
+#       model although settings.json named the managed one; only an explicit --model forces it.
 #   --allowedTools Grep,Glob        : #779 (owner ROZHODNUTÉ, comment 5479254695,
 #       2026-08-31) — baked into every mode except `plain`, the SAME placement as
 #       --model above. An Anthropic-collaborator-confirmed side effect of passing
@@ -218,40 +216,41 @@ _has_conversation() {
   compgen -G "$HOME/.claude/projects/$ccdir/*.jsonl" >/dev/null 2>&1
 }
 {{CWD_GUARD}}
+{{PROJECT_MODEL}}
 case "$mode" in
   plain)
     exec claude "$@"
     ;;
   new)
     exec claude --dangerously-skip-permissions \
-      --model '{{MANAGED_MODEL}}' --allowedTools Grep,Glob "$@"
+      --model "$_model" --allowedTools Grep,Glob "$@"
     ;;
   ultracode)
     if _has_conversation; then
       exec claude --dangerously-skip-permissions -c \
-        --model '{{MANAGED_MODEL}}' --allowedTools Grep,Glob "$@"
+        --model "$_model" --allowedTools Grep,Glob "$@"
     else
       exec claude --dangerously-skip-permissions \
-        --model '{{MANAGED_MODEL}}' --allowedTools Grep,Glob "$@"
+        --model "$_model" --allowedTools Grep,Glob "$@"
     fi
     ;;
   fullscreen)
     export CLAUDE_CODE_NO_FLICKER=1
     if _has_conversation; then
       exec claude --dangerously-skip-permissions -c \
-        --model '{{MANAGED_MODEL}}' --allowedTools Grep,Glob "$@"
+        --model "$_model" --allowedTools Grep,Glob "$@"
     else
       exec claude --dangerously-skip-permissions \
-        --model '{{MANAGED_MODEL}}' --allowedTools Grep,Glob "$@"
+        --model "$_model" --allowedTools Grep,Glob "$@"
     fi
     ;;
   *)
     if _has_conversation; then
       exec claude --dangerously-skip-permissions -c \
-        --model '{{MANAGED_MODEL}}' --allowedTools Grep,Glob "$@"
+        --model "$_model" --allowedTools Grep,Glob "$@"
     else
       exec claude --dangerously-skip-permissions \
-        --model '{{MANAGED_MODEL}}' --allowedTools Grep,Glob "$@"
+        --model "$_model" --allowedTools Grep,Glob "$@"
     fi
     ;;
 esac
@@ -274,15 +273,16 @@ def render_claude_launch_script(cwd_guard=""):
     write site MUST use this, never the raw constant (same discipline as
     render_caveman_shim()). #1202: `cwd_guard` = the rendered resume guard.
 
-    #1060 L3a: the MAIN launcher `--model` is ALWAYS airuleset.MANAGED_MODEL
-    (Opus 5.5 since #1119), even on a model-backend marker box. The #1062 L2 alias
-    flip (the marker's `main`) is REMOVED — settings.json is shared, so the main
-    window must stay on the managed model + OAuth; the gateway backend lives ONLY in the separate `claude-impl`
-    launcher (render_claude_impl_launch_script), scoped to the implementer
-    window's own process."""
+    #1060 L3a: the MAIN launcher `--model` is ALWAYS airuleset.MANAGED_MODEL (Opus 5.5 since
+    #1119; #1246: or a project's declared main model), even on a model-backend marker box. The
+    #1062 L2 alias flip (the marker's `main`) is REMOVED — settings.json is shared, so the main
+    window must stay on the managed model + OAuth; the gateway backend lives ONLY in the separate
+    `claude-impl` launcher (render_claude_impl_launch_script), scoped to the implementer window."""
     import airuleset
     import cli_session_scope                # #1224: per-session memory scope
+    import model_lineup                     # #1246: a project's declared main model
     return cli_session_scope.wrap(CLAUDE_LAUNCH_SCRIPT_CONTENT.replace("{{CWD_GUARD}}", cwd_guard)
+                                  .replace("{{PROJECT_MODEL}}", model_lineup.launcher_model_lines())
                                   .replace("{{MANAGED_MODEL}}", airuleset.MANAGED_MODEL)
                                   .replace("{{MANAGED_ENV_UNSET}}", _managed_env_unset_line()))
 

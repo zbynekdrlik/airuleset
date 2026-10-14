@@ -59,7 +59,7 @@ MANAGED_EFFORT_LEVEL = "high"
 # Model lineup (MODEL_TIERS) + the managed main-session model (MANAGED_MODEL)
 # live in model_lineup.py (#1203: a per-tool-call hook reads them without
 # importing this module); re-exported here unchanged.
-from model_lineup import MODEL_TIERS, MANAGED_MODEL  # noqa: E402,F401
+from model_lineup import MODEL_TIERS, MANAGED_MODEL, PROJECT_MAIN_MODELS  # noqa: E402,F401
 
 # Models BANNED as a DISPATCH value fleet-wide (owner directive 2026-08-13,
 # reaffirmed #991 2026-09-11): Opus 5 (the exact id `claude-opus-5`) is

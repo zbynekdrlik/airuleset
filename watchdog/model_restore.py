@@ -10,7 +10,9 @@ job puts the session back:
 
   1. FALLBACK seen (`model_fallback.tail_state` + `verdict`, a bounded tail read
      of the pane's transcript) on a recognised Claude model → type
-     `/model <MANAGED_MODEL>` into the pane through verified delivery
+     `/model <MANAGED_MODEL>` (#1246: or the main model the pane's project
+     declares, `model_lineup.main_models_for_transcript`; that project may also
+     run MANAGED_MODEL) into the pane through verified delivery
      (`send_verified`, which confirms the `<command-name>/model` composite in the
      transcript). The pane must show a bare idle prompt and pass the recent-human
      veto, but NOT the #1110 transcript-liveness gate: the gate blocks every tool
@@ -102,7 +104,7 @@ def restore_job(now, state, panes, *, managed, find_transcript, read_state,
                 verdict, short_name, ready, deliver, file_ticket,
                 outcome_kind, delivered, typed_not_delivered,
                 dry_run=False, handled=None, find_marker=None,
-                implementer_sid=None, pane_is_implementer=None):
+                implementer_sid=None, pane_is_implementer=None, models_for=None):
     """One pass over the sweep's claude panes; returns journal lines.
 
     Injected deps (production wiring in `run_job`):
@@ -115,6 +117,8 @@ def restore_job(now, state, panes, *, managed, find_transcript, read_state,
       find_marker(tpath, managed) -> marker | None   the deeper proof scan
       implementer_sid() -> str | None           the box's implementer session
       pane_is_implementer(pid) -> True/False/None (None = cannot tell)
+      models_for(tpath) -> (target, allowed)    #1246 the pane project's main
+          model (restore target) and every model it may run; default: `managed`
     """
     logs = []
     old = state.get(STATE_KEY) if isinstance(state.get(STATE_KEY), dict) else {}
@@ -122,6 +126,9 @@ def restore_job(now, state, panes, *, managed, find_transcript, read_state,
     if not dry_run:
         state[STATE_KEY] = store          # written through: a killed sweep keeps it
     impl_sid = implementer_sid() if implementer_sid is not None else None
+    if models_for is None:
+        def models_for(_tpath):
+            return managed, (managed,)
     seen = set()
     for pid, cwd in panes:
         if not cwd:
@@ -143,13 +150,14 @@ def restore_job(now, state, panes, *, managed, find_transcript, read_state,
         except OSError as exc:
             logs.append("model-restore: %s transcript unreadable (%r) -- skip" % (sid, exc))
             continue
-        v = verdict(st, managed)
+        target, allowed = models_for(tpath)
+        v = verdict(st, target, allowed=allowed)
         rec = store.get(sid)
         if v is None:
             if rec is not None:
-                logs += _healthy(now, sid, pid, cwd, st, rec, managed, short_name,
+                logs += _healthy(now, sid, pid, cwd, st, rec, target, short_name,
                                  ready, deliver, file_ticket, outcome_kind,
-                                 delivered, dry_run, handled)
+                                 delivered, dry_run, handled, allowed=allowed)
             continue
         if not short_name(v["model"]):
             logs.append("model-restore: %s runs %r (not a recognised Claude model) "
@@ -161,7 +169,7 @@ def restore_job(now, state, panes, *, managed, find_transcript, read_state,
             marker = st.get("marker") if isinstance(st, dict) else None
             if marker is None and find_marker is not None:
                 try:
-                    marker = find_marker(tpath, managed)
+                    marker = find_marker(tpath, target)
                 except OSError as exc:
                     logs.append("model-restore: %s deep marker scan failed (%r)" % (sid, exc))
             rec = store[sid] = _new_record(st, v, cwd, now, marker)
@@ -171,10 +179,10 @@ def restore_job(now, state, panes, *, managed, find_transcript, read_state,
             else:
                 logs.append("model-restore: %s OFF-LINEUP runs %s, not %s (no fallback "
                             "marker in reach, first seen %s) -- restoring, no re-review "
-                            "ticket [%s]" % (sid, rec["to"], managed, rec["since"], cwd))
+                            "ticket [%s]" % (sid, rec["to"], target, rec["since"], cwd))
         rec["touched"] = now
         rec["cmd_at"] = None
-        logs += _type_model(now, sid, pid, cwd, rec, managed, ready, deliver,
+        logs += _type_model(now, sid, pid, cwd, rec, target, ready, deliver,
                             outcome_kind, delivered, typed_not_delivered,
                             dry_run, handled)
     if not dry_run:
@@ -248,10 +256,10 @@ def _type_model(now, sid, pid, cwd, rec, managed, ready, deliver, outcome_kind,
 
 
 def _healthy(now, sid, pid, cwd, st, rec, managed, short_name, ready, deliver,
-             file_ticket, outcome_kind, delivered, dry_run, handled):
+             file_ticket, outcome_kind, delivered, dry_run, handled, allowed=()):
     """The pane's verdict is no longer a fallback: either a `/model <managed>`
-    waits for its first reply (resume it), or a reply on the managed model
-    exists (confirmed → re-review ticket)."""
+    waits for its first reply (resume it), or a reply on the managed model (or
+    another `allowed` one, #1246) exists (confirmed → re-review ticket)."""
     logs = []
     if _done(rec):
         return logs
@@ -279,7 +287,8 @@ def _healthy(now, sid, pid, cwd, st, rec, managed, short_name, ready, deliver,
             rec["resumed_at"] = now          # keys went in: the one resume slot is used
         return ["model-restore: %s -> %s resume line -> %s" % (sid, pid, kind)]
     if not rec.get("restored_at"):
-        if not (st and same_model(st.get("model"), managed)):
+        if not (st and any(same_model(st.get("model"), m)
+                           for m in (managed,) + tuple(allowed))):
             return logs                     # no reply on the managed model yet
         rec["restored_at"] = now
         logs.append("model-restore: %s RESTORED -- the next reply runs on %s "
@@ -419,15 +428,25 @@ def run_job(now, state, panes, *, run, sleep_fn, projects_dir, dry_run=False,
 
     logs = restore_job(
         now, state, panes, managed=model_lineup.MANAGED_MODEL, find_transcript=find,
+        models_for=model_lineup.main_models_for_transcript,
         read_state=model_fallback.tail_state, verdict=model_fallback.verdict,
         short_name=model_fallback.short_name, ready=ready, deliver=deliver,
         file_ticket=lambda rec, managed, t: file_ticket(rec, managed, t, sub_run=sub_run),
         outcome_kind=idle_pane.outcome_kind, delivered=idle_pane.DELIVERED,
         typed_not_delivered=idle_pane.TYPED_NOT_DELIVERED,
-        dry_run=dry_run, handled=handled, find_marker=model_fallback.find_marker,
+        dry_run=dry_run, handled=handled, find_marker=deep_marker,
         implementer_sid=implementer_sid,
         pane_is_implementer=lambda pid: pane_is_implementer(pid, run))
     return logs + jl
+
+
+def deep_marker(tpath, managed):
+    """The production `find_marker(tpath, managed)` seam: the deep scan stops
+    at a later reply on `managed` (#1246: the model is `stop_model`, never the
+    positional `max_bytes` -- passing it there raised TypeError on every sweep
+    since #1203)."""
+    import model_fallback
+    return model_fallback.find_marker(tpath, stop_model=managed)
 
 
 def newest_transcript(projects_dir, cwd, exclude_sid=None):

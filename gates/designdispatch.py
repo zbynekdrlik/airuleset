@@ -122,6 +122,19 @@ def _accepted_main_ids():
         return {_norm_model("claude-opus-5-5"), _norm_model("claude-fable-5-1")}
 
 
+def _project_main_id(slug):
+    """#1246: the main model the dispatch repo's project declares
+    (`model_lineup.PROJECT_MAIN_MODELS`, keyed by the repo NAME of `owner/name`,
+    e.g. pz-server = Opus 4.6), or None. Keyed on the slug, not the cwd: a
+    dispatch may run from a worktree. model_lineup is a stdlib leaf."""
+    try:
+        import model_lineup
+        name = (slug or "").rsplit("/", 1)[-1]
+        return model_lineup.PROJECT_MAIN_MODELS.get(name)
+    except Exception:  # noqa: BLE001 -- an unreadable lineup accepts nothing extra
+        return None
+
+
 def _gh_env():
     try:
         import airuleset
@@ -188,6 +201,9 @@ def check_issue(number, slug, cwd, fetch=None, fable_id=None):
     accepted = _accepted_main_ids()
     if fable_id:
         accepted.add(_norm_model(fable_id))
+    project_main = _project_main_id(slug)
+    if project_main:                       # #1246: the repo's own declared main
+        accepted.add(_norm_model(project_main))
     res = fetch(slug, number, cwd)
     # #1070 item 1 -- the fetch may return the new `(bodies, err)` tuple (a
     # ghread read: `err` a `gate-unavailable:<reason>` when BOTH REST and

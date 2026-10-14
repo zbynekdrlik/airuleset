@@ -824,9 +824,9 @@ def model_segment(payload, managed_model=None):
     another model -- a Claude Code fallback is written only there.
 
     GREEN on the managed model (short-name compare, so the `[1m]` tag never
-    false-alarms) or an unresolvable comparison; RED + `FALLBACK` otherwise, so
-    the owner SEES a silent switch. The #1060 implementer window pilots a
-    gateway model on purpose and never shows FALLBACK."""
+    false-alarms), on its project's declared main (#1246), on an unresolvable
+    comparison and always in the #1060 implementer window (a gateway model on
+    purpose); RED + `FALLBACK` otherwise, so the owner SEES a silent switch."""
     if not isinstance(payload, dict):
         return ""
     model = payload.get("model")
@@ -850,7 +850,7 @@ def model_segment(payload, managed_model=None):
         managed_model = _managed_model()
     if (not model_fallback.short_name(managed_model)
             or os.environ.get("AIRULESET_ROLE") == "implementer"
-            or model_fallback.same_model(model_id, managed_model)):
+            or model_fallback.on_lineup(model_id, managed_model, payload)):
         return "\033[38;5;40m%s\033[0m" % label
     return "\033[38;5;196m%s FALLBACK\033[0m" % label
 

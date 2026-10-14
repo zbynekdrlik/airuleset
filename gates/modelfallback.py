@@ -7,8 +7,9 @@ The incident: an Opus 5.5 safeguard stop switched an iemmixer session onto
 nobody noticing. The owner's ruling: work must NOT continue on a fallback
 model. So when the transcript tail (`model_fallback.tail_state`, a bounded
 read) shows that the MAIN session's last assistant entry is a fallback marker,
-or that its model is not `model_lineup.MANAGED_MODEL`, every tool call is
-blocked with a Slovak + English reason naming both models. The watchdog kind
+or that its model is not `model_lineup.MANAGED_MODEL` (nor, #1246, the main
+model its project declares in `model_lineup.PROJECT_MAIN_MODELS`), every tool
+call is blocked with a Slovak + English reason naming both models. The watchdog kind
 `model-restore` types `/model <managed>` into the idle pane; a `/model
 <managed>` typed after the last reply already reads as restored.
 
@@ -127,10 +128,10 @@ def _decide_subagent(obj, env):
         return None, "read-error", "%s %r" % (path, exc)
     try:
         import model_lineup
-        managed = model_lineup.MANAGED_MODEL
+        managed, allowed = model_lineup.main_models_for_transcript(obj.get("transcript_path"))
     except Exception as exc:  # noqa: BLE001 -- an unresolvable lineup fails open
         return None, "lineup-error", repr(exc)
-    v = model_fallback.verdict(st, managed)
+    v = model_fallback.verdict(st, managed, allowed=allowed)
     if v is None or not v["proven"]:
         return None, None, ""
     if (env.get("AIRULESET_MODEL_GUARD") or "").strip().lower() == "off":
@@ -161,10 +162,12 @@ def decide(payload_text, env=None):
         return None, "read-error", "%s %r" % (tpath, exc)
     try:
         import model_lineup
-        managed = model_lineup.MANAGED_MODEL
+        # #1246: a project with a declared main model (pz-server) runs it or
+        # MANAGED_MODEL; the verdict names the project's model
+        managed, allowed = model_lineup.main_models_for_transcript(tpath)
     except Exception as exc:  # noqa: BLE001 -- an unresolvable lineup fails open
         return None, "lineup-error", repr(exc)
-    v = model_fallback.verdict(st, managed)
+    v = model_fallback.verdict(st, managed, allowed=allowed)
     if v is None:
         return None, None, ""
     if not v["proven"] and env.get("CLAUDE_CODE_ENTRYPOINT", "cli") != "cli":

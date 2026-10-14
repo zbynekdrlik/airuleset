@@ -252,11 +252,36 @@ def transcript_model(path, max_bytes=TAIL_BYTES):
     return st.get("model_cmd") or (st.get("fallback") or {}).get("to") or st.get("model")
 
 
-def verdict(state, managed):
+def on_lineup(model, managed, payload=None):
+    """True when `model` is `managed` or the main model the session's project
+    declares (#1246, `model_lineup.main_models`). The project comes from the
+    statusline payload's `transcript_path` dir, else its cwd
+    (`workspace.current_dir` / `cwd`). A malformed payload is never on a
+    project: only `managed` counts then."""
+    if same_model(model, managed):
+        return True
+    import model_lineup
+    p = payload if isinstance(payload, dict) else {}
+    tpath = p.get("transcript_path")
+    if isinstance(tpath, str) and tpath:
+        target = model_lineup.main_models_for_transcript(tpath)[0]
+    else:
+        ws = p.get("workspace")
+        cwd = (ws.get("current_dir") if isinstance(ws, dict) else None) or p.get("cwd")
+        key = model_lineup.dir_key(cwd) if isinstance(cwd, str) else None
+        target = model_lineup.main_models(model_lineup.project_of_key(key))[0]
+    return same_model(model, target)
+
+
+def verdict(state, managed, allowed=()):
     """None when the session runs the managed model (or the comparison cannot
     be made), else a dict `{kind, model, short, managed, managed_short}` where
     `kind` is `marker` (the last entry IS the fallback marker) or `model` (the
     last entry's model is not the managed one).
+
+    `allowed` (#1246) names further models that count as on-lineup, e.g. a
+    project's own main (`model_lineup.main_models`); `managed` stays the model
+    the verdict names and Job 54 restores to.
 
     A `/model <managed>` typed after the last assistant entry reads as
     restored (None): the switch is done and the next reply will carry it."""
@@ -264,13 +289,14 @@ def verdict(state, managed):
         return None
     if not (short_name(managed) or norm_model_id(managed)):
         return None
+    ok = (managed,) + tuple(m for m in (allowed or ()) if m)
     cmd = state.get("model_cmd")
-    if cmd and same_model(cmd, managed):
+    if cmd and any(same_model(cmd, m) for m in ok):
         return None
     model = state.get("model") or ""
     if state.get("fallback"):
         kind = "marker"
-    elif not same_model(model, managed):
+    elif not any(same_model(model, m) for m in ok):
         kind = "model"
     else:
         return None
