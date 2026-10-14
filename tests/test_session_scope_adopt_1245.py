@@ -266,6 +266,26 @@ class AdoptUncapped(unittest.TestCase):
                     [a if a != "au" else "ai" for a in argv]):
             self.assertIsNone(self.box._parse(bad), bad)
 
+    def test_a_nested_claude_with_a_lower_pid_still_moves_with_its_parent(self):
+        b = self.box
+        b.proc_add(90, "claude", 101, ANCHOR)         # a recycled, lower pid
+        lines = b.adopt()
+        self.assertEqual(len(b.calls), 1, lines)
+        self.assertEqual(_pids(b.calls[0][0]), ["90", "100", "101", "102"])
+        self.assertIn("session-scope: 1 adopted, 0 already capped", lines)
+
+    def test_the_real_busctl_is_refused_under_a_test_run(self):
+        calls = []
+        with mock.patch.object(ss, "_run", lambda argv, env: calls.append(argv) or (0, "", "")), \
+                mock.patch.dict(os.environ, {"PYTEST_CURRENT_TEST": "t"}):
+            lines = ss.adopt_unscoped_sessions(
+                hostname="dev1", uid=UID, proc_root=str(self.box.proc),
+                cgroup_root=str(self.box.cg), meminfo_text="MemTotal: %d kB\n" % DEV1_KB,
+                env={}, sleep=self.box.sleep)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.box.cgroup_of(100), ANCHOR)
+        self.assertTrue(any("test run" in ln for ln in lines), lines)
+
     def test_capped_session_is_left_alone(self):
         b = self.box
         b.proc_add(300, "claude", 50, CAPPED)
