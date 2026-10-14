@@ -3566,8 +3566,8 @@ def _run_prevention_pass(status, home, now, dry_run, scratch_rows,
 # #1047 — root-guard PROVISIONED discriminator: tell "never provisioned on this
 # box" from "root timer dead". The `ROOT-REPORT-STALE … the root timer may be
 # dead` alarm (`disk_guard_root._warn_once_per_day`) is honest ONLY on a box that
-# WAS provisioned; on the owner workstations (root units are the owner's call,
-# #841) it is a false dead-timer cry. The provisioned signal is the systemd timer
+# WAS provisioned; on a never-provisioned box (dev1/dev2 were, until the owner
+# chose the root leg for them, #1223) it is a false cry. The provisioned signal is the systemd timer
 # unit's presence — the single artefact `airuleset.py disk-guard-root` installs.
 # --------------------------------------------------------------------------- #
 ROOT_NOT_PROVISIONED_WARN_NAME = "root-not-provisioned-warn"

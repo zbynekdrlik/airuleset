@@ -1254,13 +1254,16 @@ SHARED_STREAM_GUARD_HOSTS = [
 # the #775 cgroup drop-ins to gk). `admin_user:root` = root-ssh apply (stream
 # accounts are sudo-less). #1223: the workstations are reached as `newlevel`
 # with `sudo -n` (`sudo`) and get the rotate + report legs only (`drain`
-# False: the #895 drain's rung (d) deletes a *.tgz anywhere under /home).
+# False: the #895 drain's rung (d) deletes a *.tgz anywhere under /home),
+# journal cap 2G (owner ROZHODNUTÉ 14.10.2026 on #1223).
 # `host` is each box's TAILSCALE IP (stable across LAN switches, #1).
 DISK_GUARD_ROOT_HOSTS = [
     {"name": "dev1", "host": "100.104.8.125", "admin_user": "newlevel",
-     "sudo": True, "drain": False, "identity": "~/.secrets/airuleset_push_ed25519"},
+     "sudo": True, "drain": False, "journal_max": "2G",
+     "identity": "~/.secrets/airuleset_push_ed25519"},
     {"name": "dev2", "host": "100.82.64.27", "admin_user": "newlevel",
-     "sudo": True, "drain": False, "identity": "~/.secrets/airuleset_push_ed25519"},
+     "sudo": True, "drain": False, "journal_max": "2G",
+     "identity": "~/.secrets/airuleset_push_ed25519"},
     {"name": "subdev", "host": "100.118.174.27", "admin_user": "root",
      "identity": "~/.secrets/gatekeeper_access_ed25519"},
     {"name": "gatekeeper", "host": "100.90.94.41", "admin_user": "root",

@@ -13,9 +13,8 @@ per-user watchdog can neither rotate nor even READ these.
 DOCTRINE (owner HARD RULE 2026-09-02, a SECURITY BOUNDARY): the root legs
 SURFACE and ROTATE — they NEVER delete bytes outside the caller's own home,
 EXCEPT standard log ROTATION (config-driven). So this module installs, at
-push/install time over ``ssh root@<host>`` (mirroring the shipped
-`cli_resource_guards.py` #775 EXACTLY — never a live root action from the
-implementing lane):
+push time over ``ssh root@<host>`` (a #1223 sudo workstation: ``sudo -n``
+as its account, rotate + report only, no drain), mirroring #775:
 
   * ROTATE: btmp/wtmp logrotate config OVERWRITING the distro
     ``/etc/logrotate.d/btmp|wtmp`` in place (weekly + compress + rotate 4, the
@@ -174,19 +173,17 @@ def render_logrotate_wtmp():
     )
 
 
-def render_journald_cap():
-    """journald ``SystemMaxUse`` cap drop-in — journald's OWN rotation (config
-    cap, not a runtime delete). May drop older journal history on FIRST apply
-    (intentional, ROTATION by owner rule — disclosed in the PR)."""
+def render_journald_cap(max_use=None):
+    """journald ``SystemMaxUse`` cap drop-in — journald's OWN rotation, not a
+    runtime delete; the first apply may drop older history (owner rule).
+    `max_use` = a host's own cap (#1223: workstations 2G), else the fleet's."""
     return (
-        "# Managed by airuleset (#841) — cap the system journal. journald's OWN\n"
-        "# rotation (config-driven); journald re-reads this ONLY at (re)start, so\n"
-        "# the apply script restarts systemd-journald before rotating (a bare\n"
-        "# daemon-reload would leave the cap inert until a reboot). NOTE: first\n"
-        "# application may drop older journal history (intentional, ROTATION by\n"
-        "# owner rule).\n"
+        "# Managed by airuleset (#841) — cap the system journal (journald's OWN\n"
+        "# rotation). journald re-reads this only at (re)start, so the apply\n"
+        "# script restarts it when this file changes. The first application may\n"
+        "# drop older journal history (ROTATION by owner rule).\n"
         "[Journal]\n"
-        "SystemMaxUse=%s\n" % JOURNAL_MAX_USE
+        "SystemMaxUse=%s\n" % (max_use or JOURNAL_MAX_USE)
     )
 
 
@@ -545,7 +542,7 @@ def render_drain_timer():
     )
 
 
-def guard_files(drain=True):
+def guard_files(drain=True, journal_max=None):
     """The (path, content, mode) triples the apply script installs, in write
     order (reporter + drain script 0755, the rest 0644). fail2ban is installed
     CONDITIONALLY by the apply script, so it is NOT in this list. `drain=False`
@@ -553,7 +550,7 @@ def guard_files(drain=True):
     files = [
         (LOGROTATE_BTMP_PATH, render_logrotate_btmp(), "0644"),
         (LOGROTATE_WTMP_PATH, render_logrotate_wtmp(), "0644"),
-        (JOURNALD_CAP_PATH, render_journald_cap(), "0644"),
+        (JOURNALD_CAP_PATH, render_journald_cap(journal_max), "0644"),
         (TMPFILES_PATH, render_tmpfiles(), "0644"),
         (REPORTER_SCRIPT_PATH, render_reporter_script(), "0755"),
         (ROOT_SERVICE_PATH, render_root_service(), "0644"),
@@ -574,18 +571,14 @@ def guard_files(drain=True):
 _HEREDOC_MARK = "AIRULESET_DGROOT_EOF"
 
 
-def build_apply_script(drain=True):
-    """A ``bash`` script (run as ``bash -c <script>`` over ``ssh root@<host>``,
-    so its stdin stays free for the heredocs) that idempotently installs every
-    drop-in atomically, installs the fail2ban hardening ONLY where fail2ban
-    exists, reloads systemd, enables + starts the daily report timer, runs the
-    reporter ONCE (bounded ``timeout`` so a slow ``du`` can never stall the
-    push), and READS BACK the result (journald cap present, logrotate free of
-    the duplicate-entry fail-open, timer enabled, report JSON parseable) →
-    mismatch exits 4, turning the push step LOUD. Pure string builder."""
-    parts = []
-    parts.append("set -uo pipefail")
-    parts.append("")
+def build_apply_script(drain=True, journal_max=None):
+    """The ``bash -c`` apply script (root, or ``sudo -n`` on a #1223 host):
+    installs every drop-in atomically (identical content is left alone),
+    fail2ban hardening only where fail2ban exists, restarts journald only when
+    its cap changed, enables the timers, seeds a missing/stale report (niced,
+    bounded), then READS BACK (cap, logrotate, timers) → exit 4 on mismatch."""
+    cap = journal_max or JOURNAL_MAX_USE
+    parts = ["set -uo pipefail", 'JOURNALD_CHANGED=""', ""]
     # Atomic idempotent installer: content on stdin (a quoted heredoc), written
     # to a dotted mktemp in the destination dir and mv'd into place only once
     # fully written + chmod'd — the same never-a-truncating-write discipline as
@@ -597,14 +590,17 @@ def build_apply_script(drain=True):
         '    tmp=$(mktemp "$dir/.airuleset-dgroot-XXXXXX")\n'
         "    trap 'rm -f \"$tmp\"' EXIT\n"
         '    cat > "$tmp"\n'
+        '    if [ -f "$dest" ] && cmp -s "$tmp" "$dest"; then rm -f "$tmp"; trap - EXIT;'
+        ' echo "  disk-guard-root: unchanged $dest"; return 0; fi\n'
+        '    [ "$dest" = %s ] && JOURNALD_CHANGED=1\n'
         '    chmod "$mode" "$tmp"\n'
         '    mv -f "$tmp" "$dest"\n'
         '    trap - EXIT\n'
         '    echo "  disk-guard-root: wrote $dest"\n'
-        '}'
+        '}' % shlex.quote(JOURNALD_CAP_PATH)
     )
     parts.append("")
-    for path, content, mode in guard_files(drain):
+    for path, content, mode in guard_files(drain, journal_max):
         parts.append(
             "_install %s %s <<'%s'\n%s%s"
             % (shlex.quote(path), shlex.quote(mode), _HEREDOC_MARK,
@@ -641,12 +637,12 @@ def build_apply_script(drain=True):
     # cap), THEN rotate (journald now vacuums to the new SystemMaxUse). Both are
     # rotation, not deletion of user data; both non-fatal.
     parts.append(
-        'systemctl try-restart systemd-journald.service >/dev/null 2>&1 '
-        '|| echo "  ⚠ disk-guard-root: systemd-journald restart failed (non-fatal)"'
-    )
-    parts.append(
-        'journalctl --rotate >/dev/null 2>&1 '
-        '|| echo "  ⚠ disk-guard-root: journalctl --rotate failed (non-fatal)"'
+        'if [ -n "$JOURNALD_CHANGED" ]; then\n'
+        '    systemctl try-restart systemd-journald.service >/dev/null 2>&1 '
+        '|| echo "  ⚠ disk-guard-root: systemd-journald restart failed (non-fatal)"\n'
+        '    journalctl --rotate >/dev/null 2>&1 '
+        '|| echo "  ⚠ disk-guard-root: journalctl --rotate failed (non-fatal)"\n'
+        'fi'
     )
     # Enable + start the daily report timer.
     parts.append(
@@ -660,10 +656,13 @@ def build_apply_script(drain=True):
             '|| echo "  ⚠ disk-guard-root: drain timer enable failed (non-fatal)"'
         )
     # Seed the report on day 0 — bounded so a slow `du` can NEVER stall the push.
+    # #1223: only a missing or stale (> 20 h) report is re-seeded, niced.
     parts.append(
-        'timeout %d /bin/bash %s '
+        'if [ -z "$(find %s -mmin -1200 2>/dev/null)" ]; then\n'
+        '    timeout %d ionice -c3 nice /bin/bash %s '
         '|| echo "  ⚠ disk-guard-root: initial report run failed/timed out '
-        '(non-fatal)"' % (REPORTER_TIMEOUT_S, shlex.quote(REPORTER_SCRIPT_PATH))
+        '(non-fatal)"\nfi' % (shlex.quote(ROOT_REPORT_PATH), REPORTER_TIMEOUT_S,
+                                shlex.quote(REPORTER_SCRIPT_PATH))
     )
     parts.append("")
     # --- READ-BACK VERIFY (fail-loud) -------------------------------------- #
@@ -673,7 +672,7 @@ def build_apply_script(drain=True):
         'if ! grep -q "SystemMaxUse=%s" %s 2>/dev/null; then\n'
         '    echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: journald cap not written" >&2; '
         'fail=1\n'
-        'fi' % (JOURNAL_MAX_USE, shlex.quote(JOURNALD_CAP_PATH))
+        'fi' % (cap, shlex.quote(JOURNALD_CAP_PATH))
     )
     # 2. logrotate config parses WITHOUT the duplicate-entry fail-open (the
     #    Fable-flagged silent no-rotation). `logrotate --debug` never rotates.
@@ -682,8 +681,8 @@ def build_apply_script(drain=True):
     #    duplicate log entry" rather than over-attributing to btmp/wtmp.
     parts.append(
         'if command -v logrotate >/dev/null 2>&1; then\n'
-        '    if logrotate --debug /etc/logrotate.conf 2>&1 | grep -qi '
-        '"duplicate log entry"; then\n'
+        '    if logrotate --debug /etc/logrotate.conf 2>&1 | grep -i '
+        '"duplicate log entry" >/dev/null; then\n'
         '        echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: a logrotate duplicate log '
         'entry — a log (likely btmp/wtmp) would silently NOT rotate; check '
         '/etc/logrotate.d for a second stanza" >&2; fail=1\n'
@@ -729,7 +728,7 @@ def build_apply_script(drain=True):
         'fi\n'
         'echo "  disk-guard-root: applied + verified (journald cap %s, btmp/wtmp '
         'rotation, report %s, drain %s)"'
-        % (JOURNAL_MAX_USE, ROOT_REPORT_PATH, DRAIN_SCRIPT_PATH if drain else "off")
+        % (cap, ROOT_REPORT_PATH, DRAIN_SCRIPT_PATH if drain else "off")
     )
     return "\n".join(parts) + "\n"
 
@@ -774,7 +773,8 @@ def provision_disk_guard_root(hosts=None, run=None, control_opts=None):
         ]
         # #1223: a workstation is reached as its sudo account, never root ssh.
         remote_cmd = (("sudo -n " if h.get("sudo") else "") + "bash -c "
-                      + shlex.quote(build_apply_script(h.get("drain", True))))
+                      + shlex.quote(build_apply_script(h.get("drain", not h.get("sudo")),
+                                                       h.get("journal_max"))))
         argv = ssh_prefix + list(control_opts or []) + [
             "%s@%s" % (h.get("admin_user", "root"), host), remote_cmd]
         try:

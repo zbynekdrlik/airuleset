@@ -2107,8 +2107,8 @@ def cmd_push(args):
 
     # 5. Disk-guard ROOT/system-level legs (#841) — install the standard log
     # ROTATION config (btmp/wtmp logrotate, journald cap, fail2ban hardening) +
-    # the report-only root reporter timer on the public multi-user boxes
-    # (subdev + gk) over `ssh root@<host>`, so the root-owned classes no
+    # the report-only root reporter timer on subdev + gk over `ssh root@<host>`
+    # and on dev1/dev2 via `sudo -n` (#1223, no drain), so the root-owned classes no
     # per-USER watchdog can reach are ROTATED + SURFACED (never deleted). SAME
     # non-fatal + LOUD discipline as the resource-guards step above: a
     # not-yet-authorized root key / read-back mismatch prints
