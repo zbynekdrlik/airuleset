@@ -545,13 +545,12 @@ def render_drain_timer():
     )
 
 
-def guard_files():
+def guard_files(drain=True):
     """The (path, content, mode) triples the apply script installs, in write
-    order. The reporter script is 0755 (executable); everything else 0644.
-    fail2ban is installed CONDITIONALLY by the apply script (only where
-    ``fail2ban-client`` exists) — a workstation box with no fail2ban is left
-    clean — so it is NOT in this always-install list."""
-    return [
+    order (reporter + drain script 0755, the rest 0644). fail2ban is installed
+    CONDITIONALLY by the apply script, so it is NOT in this list. `drain=False`
+    (#1223, a sudo workstation) leaves out the #895 cross-user drain trio."""
+    files = [
         (LOGROTATE_BTMP_PATH, render_logrotate_btmp(), "0644"),
         (LOGROTATE_WTMP_PATH, render_logrotate_wtmp(), "0644"),
         (JOURNALD_CAP_PATH, render_journald_cap(), "0644"),
@@ -564,6 +563,8 @@ def guard_files():
         (DRAIN_SERVICE_PATH, render_drain_service(), "0644"),
         (DRAIN_TIMER_PATH, render_drain_timer(), "0644"),
     ]
+    drain_paths = (DRAIN_SCRIPT_PATH, DRAIN_SERVICE_PATH, DRAIN_TIMER_PATH)
+    return [f for f in files if drain or f[0] not in drain_paths]
 
 
 # The heredoc terminator for embedding a drop-in body inside the apply script.
@@ -573,7 +574,7 @@ def guard_files():
 _HEREDOC_MARK = "AIRULESET_DGROOT_EOF"
 
 
-def build_apply_script():
+def build_apply_script(drain=True):
     """A ``bash`` script (run as ``bash -c <script>`` over ``ssh root@<host>``,
     so its stdin stays free for the heredocs) that idempotently installs every
     drop-in atomically, installs the fail2ban hardening ONLY where fail2ban
@@ -603,7 +604,7 @@ def build_apply_script():
         '}'
     )
     parts.append("")
-    for path, content, mode in guard_files():
+    for path, content, mode in guard_files(drain):
         parts.append(
             "_install %s %s <<'%s'\n%s%s"
             % (shlex.quote(path), shlex.quote(mode), _HEREDOC_MARK,
@@ -652,11 +653,12 @@ def build_apply_script():
         'systemctl enable --now airuleset-disk-guard-root.timer '
         '|| echo "  ⚠ disk-guard-root: report timer enable failed (non-fatal)"'
     )
-    # #895: Enable + start the 4-hourly drain timer.
-    parts.append(
-        'systemctl enable --now airuleset-disk-guard-root-drain.timer '
-        '|| echo "  ⚠ disk-guard-root: drain timer enable failed (non-fatal)"'
-    )
+    # #895: Enable + start the 4-hourly drain timer (never on a workstation).
+    if drain:
+        parts.append(
+            'systemctl enable --now airuleset-disk-guard-root-drain.timer '
+            '|| echo "  ⚠ disk-guard-root: drain timer enable failed (non-fatal)"'
+        )
     # Seed the report on day 0 — bounded so a slow `du` can NEVER stall the push.
     parts.append(
         'timeout %d /bin/bash %s '
@@ -697,13 +699,14 @@ def build_apply_script():
         'fi'
     )
     # 4. (#895) the drain timer is enabled.
-    parts.append(
-        'if ! systemctl is-enabled airuleset-disk-guard-root-drain.timer '
-        '>/dev/null 2>&1; then\n'
-        '    echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: drain timer not enabled" '
-        '>&2; fail=1\n'
-        'fi'
-    )
+    if drain:
+        parts.append(
+            'if ! systemctl is-enabled airuleset-disk-guard-root-drain.timer '
+            '>/dev/null 2>&1; then\n'
+            '    echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: drain timer not enabled" '
+            '>&2; fail=1\n'
+            'fi'
+        )
     # NON-FATAL: the report JSON existing on day 0 depends on the bounded seed
     # run finishing; on a huge box (gk: tens of GB of du) that seed can time out
     # legitimately, and the DAILY timer produces the report within a day anyway.
@@ -726,22 +729,18 @@ def build_apply_script():
         'fi\n'
         'echo "  disk-guard-root: applied + verified (journald cap %s, btmp/wtmp '
         'rotation, report %s, drain %s)"'
-        % (JOURNAL_MAX_USE, ROOT_REPORT_PATH, DRAIN_SCRIPT_PATH)
+        % (JOURNAL_MAX_USE, ROOT_REPORT_PATH, DRAIN_SCRIPT_PATH if drain else "off")
     )
     return "\n".join(parts) + "\n"
 
 
 def provision_disk_guard_root(hosts=None, run=None, control_opts=None):
     """Apply the root/system-level disk-guard legs on every
-    ``DISK_GUARD_ROOT_HOSTS`` target over ``ssh root@<host>``. Called by
-    ``cmd_push`` AFTER the shared-stream resource-guard step.
-
-    NON-FATAL + LOUD, exactly like `provision_shared_stream_guards` (#775): any
-    failure (unreachable root, a not-yet-authorized operator key, a read-back
-    mismatch) prints ``⚠ DISK-GUARD-ROOT FAILED (<name>)`` and is returned in
-    the failure list — it never raises, so the rest of the push is unaffected.
-    Until the dev1→root@<host> operator key is authorized this is a fail-loud
-    no-op (the same shape #775 shipped with).
+    ``DISK_GUARD_ROOT_HOSTS`` target over ``ssh root@<host>`` (a #1223 `sudo`
+    workstation: ``sudo -n`` as its account). Called by ``cmd_push`` AFTER the
+    shared-stream resource-guard step. NON-FATAL + LOUD like #775: any failure
+    (unreachable host, unauthorized key, read-back mismatch) prints
+    ``⚠ DISK-GUARD-ROOT FAILED (<name>)`` and is returned, never raised.
 
     ``hosts`` defaults (lazily, via the airuleset facade — the L-E convention)
     to ``airuleset.DISK_GUARD_ROOT_HOSTS``; ``run`` defaults to
@@ -751,8 +750,6 @@ def provision_disk_guard_root(hosts=None, run=None, control_opts=None):
     if hosts is None:
         import airuleset  # L-E: DISK_GUARD_ROOT_HOSTS lives in cli_fleet, via facade
         hosts = airuleset.DISK_GUARD_ROOT_HOSTS
-    script = build_apply_script()
-    remote_cmd = "bash -c " + shlex.quote(script)
     failed = []
     for h in hosts:
         name = h.get("name", h.get("host", "?"))
@@ -775,6 +772,9 @@ def provision_disk_guard_root(hosts=None, run=None, control_opts=None):
             "-o", "StrictHostKeyChecking=accept-new",
             "-o", "ConnectTimeout=15",
         ]
+        # #1223: a workstation is reached as its sudo account, never root ssh.
+        remote_cmd = (("sudo -n " if h.get("sudo") else "") + "bash -c "
+                      + shlex.quote(build_apply_script(h.get("drain", True))))
         argv = ssh_prefix + list(control_opts or []) + [
             "%s@%s" % (h.get("admin_user", "root"), host), remote_cmd]
         try:
