@@ -266,10 +266,10 @@ def adopt_unscoped_sessions(*, hostname=None, uid=None, proc_root="/proc",
     def mem_max(path):
         return (_read(cgroup_root + path + "/memory.max") or "max").strip()
 
-    lines, adopted, capped = [], 0, 0
+    lines, adopted, capped, moved = [], 0, 0, set()
     procs = _procs(proc_root)
     for pid in sorted(procs):
-        if pid not in procs:                # gone since a retry re-read the list
+        if pid not in procs or pid in moved:   # gone, or moved with its parent
             continue
         comm, _pp, puid, path = procs[pid]
         if comm != "claude" or puid != uid or not path:
@@ -311,6 +311,7 @@ def adopt_unscoped_sessions(*, hostname=None, uid=None, proc_root="/proc",
             except OSError:
                 pass                        # it exited; nothing left to rank
         adopted += 1
+        moved.update(members)
         lines.append("session-scope: adopted pid %d (%s) + %d child process(es) into "
                      "%s (MemoryMax=%dK, OOMPolicy=continue)"
                      % (pid, label, len(members) - 1, unit, caps[0]))
