@@ -234,11 +234,13 @@ def _busctl_argv(unit, pids, caps_kb):
     mx, hi, sw = (k * 1024 for k in caps_kb)
     return (["busctl", "--user", "call", "org.freedesktop.systemd1",
              "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
-             "StartTransientUnit", "ssa(sv)a(sa(sv))", unit, "fail", "6",
+             "StartTransientUnit", "ssa(sv)a(sa(sv))", unit, "fail", "7",
              "Description", "s", "airuleset #1245: adopted Claude session %d" % pids[0],
              "PIDs", "au", str(len(pids))] + [str(p) for p in pids]
             + ["MemoryMax", "t", str(mx), "MemoryHigh", "t", str(hi),
-               "MemorySwapMax", "t", str(sw), "OOMPolicy", "s", "continue", "0"])
+               "MemorySwapMax", "t", str(sw), "OOMPolicy", "s", "continue",
+               # a failed job's scope is unloaded, so the next push can retry
+               "CollectMode", "s", "inactive-or-failed", "0"])
 
 
 def _run(argv, env):
@@ -275,7 +277,8 @@ def adopt_unscoped_sessions(*, hostname=None, uid=None, user=None, proc_root="/p
       adopted session keep claude's own value (its env predates ``BASH_ENV``),
       so the kernel picks the biggest process in the scope.
     * Every failure is a ``WARN … DEFECT (#1245)`` line, never an exception. A
-      bus-level failure (busctl missing, bus down) stops the loop at once."""
+      transport failure (busctl missing or hung: no ``Call failed:`` answer)
+      stops the loop at once; a refused call costs only its own session."""
     import socket
     import time
     host = hostname if hostname is not None else socket.gethostname().split(".")[0]
@@ -324,8 +327,12 @@ def adopt_unscoped_sessions(*, hostname=None, uid=None, user=None, proc_root="/p
             capped += 1
         else:
             cands.append(pid)
+    def exited(pid, label):
+        lines.append("session-scope: pid %d (%s) exited before the move" % (pid, label))
+
     for i, pid in enumerate(cands):
-        if pid not in procs:
+        if pid not in procs:                # gone in a retry's re-scan
+            exited(pid, "?")
             continue
         path, rss = procs[pid][3], procs[pid][5]
         try:
@@ -352,10 +359,10 @@ def adopt_unscoped_sessions(*, hostname=None, uid=None, user=None, proc_root="/p
             procs = _procs(proc_root)       # a child exited between scan and call
             if pid not in procs:
                 break
-        if pid not in procs:
-            lines.append("session-scope: pid %d (%s) exited before the move" % (pid, label))
+        if pid not in procs or not os.path.exists("%s/%d" % (proc_root, pid)):
+            exited(pid, label)
             continue
-        if rc != 0 and "No such process" not in err:
+        if rc != 0 and not err.lstrip().startswith("Call failed:"):
             lines.append("session-scope: WARN pid %d (%s) still uncapped in %s: %s "
                          "— DEFECT (#1245)" % (pid, label, where, err.strip()[:160]))
             if cands[i + 1:]:
@@ -370,6 +377,9 @@ def adopt_unscoped_sessions(*, hostname=None, uid=None, user=None, proc_root="/p
                 sleep(0.2)
             else:
                 rc, err = 1, "the call returned but the pid is still in %s" % where
+        if not os.path.exists("%s/%d" % (proc_root, pid)):
+            exited(pid, label)
+            continue
         if rc != 0:
             lines.append("session-scope: WARN pid %d (%s) still uncapped in %s: %s "
                          "— DEFECT (#1245)" % (pid, label, where, err.strip()[:160]))
@@ -381,10 +391,14 @@ def adopt_unscoped_sessions(*, hostname=None, uid=None, user=None, proc_root="/p
             except OSError:
                 pass                        # it exited; nothing left to rank
         adopted += 1
-        kids = list(dict.fromkeys(procs[k][0] for k in members[1:] if k in procs))
+        def names(pids):
+            return list(dict.fromkeys(procs[k][0] for k in pids if k in procs))[:6]
+        young = [k for k in _members(procs, pid, None) if k not in members]
         lines.append("session-scope: adopted pid %d (%s, claude RSS %s) + %d child "
-                     "process(es) %s into %s (MemoryMax=%dK, OOMPolicy=continue)"
+                     "process(es) %s into %s (MemoryMax=%dK, OOMPolicy=continue)%s"
                      % (pid, label, "%dM" % (rss // 1024) if rss is not None else "?",
-                        len(members) - 1, kids[:6], unit, caps[0]))
+                        len(members) - 1, names(members[1:]), unit, caps[0],
+                        "; %d under %d s left behind %s" % (len(young), YOUNG_S, names(young))
+                        if young else ""))
     lines.append("session-scope: %d adopted, %d already capped" % (adopted, capped))
     return lines
