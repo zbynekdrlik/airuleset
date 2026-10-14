@@ -181,7 +181,7 @@ def dispatch_gate_line(cwd, repo_root=None, run=None, live_count=None):
 
     ``block`` ONLY when the pane's mode is ``sequential`` AND at least one live
     worktree lane already exists for the repo containing ``cwd`` (the total cap
-    is 1, so the 2nd concurrent ``autopilot-worker`` is refused). ``parallel``
+    is 1, so a 2nd concurrent worktree lane is refused). ``parallel``
     (and any resolver error) always allows — this PreToolUse gate fails OPEN,
     never a false block. ``live_count``/``run`` are test seams."""
     try:

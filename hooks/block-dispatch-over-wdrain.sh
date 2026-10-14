@@ -10,10 +10,11 @@ set -euo pipefail
 # dispatch action the montalu3 W=34 incident abused — dispatching new I-lanes
 # for days while finished W tickets rotted.
 #
-# Gate ONLY for `subagent_type` == autopilot-worker — never ticket-validator /
-# Explore / general-purpose / an ad-hoc review consult (those are read-only /
-# judgment, not I-lane dispatches). (#991: the pinned tier-agent types are gone;
-# the single I-lane worker type is autopilot-worker.)
+# The W-drain and #992 receipt gates run ONLY for `subagent_type` ==
+# autopilot-worker (#991: the single I-lane worker type). The #998 sequential
+# gate also runs for ANY type dispatched with `isolation: "worktree"` (#1229).
+# A subagent without isolation (ticket-validator, Explore, a review seat, a
+# consult) is never gated here.
 #
 # Fail-OPEN on missing jq, missing/unparseable cache, stale cache (>30 min),
 # non-int ops_wait (#539/#570 "never a false accusation").
@@ -153,33 +154,75 @@ fi
 # #998 — SEQUENTIAL-MODE dispatch gate. When the pane's resolved concurrency
 # mode is `sequential` (the DEFAULT of every box since #1137; also a declared
 # window like gk-infra or a project `.claude/lane-resources.json` mode), the
-# lane cap is total=1 — so a 2nd LIVE autopilot-worker dispatch is REFUSED,
-# with a message naming the mode. `parallel` (an explicit declaration) and any
-# resolver error ALLOW: this gate fails OPEN, never a false block. The verdict is computed in
-# python (cli_concurrency.dispatch_gate_line) — the single resolver + the
-# post-#998 live-lane count (merged lanes excluded).
+# lane cap is total=1 — so a 2nd worktree lane (an autopilot-worker, or any
+# type with isolation: worktree, #1229) is REFUSED while one still counts.
+# `parallel` (an explicit declaration) and any resolver error ALLOW: this gate
+# fails OPEN, never a false block. The verdict is computed in python
+# (cli_dispatch_gate.dispatch_gate_report) — the single resolver + the live-lane
+# count (merged and handed-off lanes excluded, the session's own worktree too).
+#
+# #1229 — several lanes dispatched in ONE message run their hooks before any
+# worktree exists, so each sees 0 lanes. An allowed sequential dispatch claims
+# the repo's pending slot (atomic, 90 s) on this hook's SUCCESSFUL exit only,
+# so a dispatch the W-drain gate below refuses never holds it.
+SEQ_REPO=""
+_claim_lane_slot() {
+    local rc=$?
+    trap - EXIT
+    [ "$rc" -eq 0 ] || exit "$rc"
+    local prc=0
+    # shellcheck disable=SC2016  # the python source is single-quoted on purpose
+    PYTHONPATH="$REPO_DIR" python3 -P -c 'import sys, cli_dispatch_gate
+sys.exit(0 if cli_dispatch_gate.claim_pending_lane(sys.argv[1]) else 3)' \
+        "$SEQ_REPO" 2>/dev/null || prc=$?
+    if [ "$prc" -eq 3 ]; then
+        {
+            echo "BLOCKED: sequential-mode gate — this target runs in 'sequential' mode (lane cap = 1)."
+            echo ""
+            echo "  Another worktree lane was dispatched from this repo less than 90 s ago"
+            echo "  (several lanes in one message, or a quick retry). Its worktree may not"
+            echo "  exist yet, so the live count cannot see it. Dispatch ONE lane, let it"
+            echo "  return and integrate it, then the next. If that earlier dispatch was"
+            echo "  refused by another gate, retry after 90 s."
+        } >&2
+        exit 2
+    fi
+    exit 0
+}
 if [ -n "$REPO_DIR" ]; then
-    SEQ_LINE=$(AIRULESET_GATE_CWD="$CWD" PYTHONPATH="$REPO_DIR" python3 -P -c \
-'import os, cli_concurrency; print(cli_concurrency.dispatch_gate_line(os.environ.get("AIRULESET_GATE_CWD","")))' \
-        2>/dev/null || echo "allow|error|0")
+    SEQ_REPORT=$(AIRULESET_GATE_CWD="$CWD" PYTHONPATH="$REPO_DIR" python3 -P -c \
+'import os, cli_dispatch_gate; print(cli_dispatch_gate.dispatch_gate_report(os.environ.get("AIRULESET_GATE_CWD","")))' \
+        2>/dev/null || echo "allow|error|0|open|")
+    SEQ_LINE=${SEQ_REPORT%%$'\n'*}
     SEQ_VERDICT=${SEQ_LINE%%|*}
     SEQ_MODE=$(printf '%s' "$SEQ_LINE" | cut -d'|' -f2)
+    SEQ_WHY=$(printf '%s' "$SEQ_LINE" | cut -d'|' -f4)
     if [ "$SEQ_VERDICT" = "block" ]; then
         {
             echo "BLOCKED: sequential-mode gate — this target runs in '$SEQ_MODE' mode (lane cap = 1)."
             echo ""
-            echo "  A live worktree lane is already running for this box, and"
+            echo "  A live worktree lane already counts for this repo (state, branch, path):"
+            printf '%s\n' "$SEQ_REPORT" | tail -n +2 | sed 's/^/    /'
+            echo ""
             echo "  '$SEQ_MODE' mode means ONE unit at a time: implement it (yourself or with"
             echo "  one worker) -> main review -> integrate -> verify -> next, with NO refill."
-            echo "  Wait for the live lane to return and integrate before the next unit."
+            echo "  A lane counts until its branch is merged into the integration base"
+            echo "  (develop, else dev, else the default branch) or its ticket is handed off."
+            echo "  - live: its agent still works it. Wait for it, then integrate it."
+            echo "  - idle-unmerged: its agent stopped, the branch is not integrated. Merge it."
+            echo "    If it was abandoned, salvage what it produced, then remove the worktree."
+            echo "  Do NOT drop isolation to get around the cap: a 2nd implementation lane in"
+            echo "  the shared checkout is the overlap this gate prevents. Review seats,"
+            echo "  consults and research subagents (no isolation) are never gated."
             echo ""
             echo "  (Mode: the declared window / project .claude/lane-resources.json, else the"
-            echo "  default sequential (#1137); see cli_concurrency.resolve_concurrency."
-            echo "  Subagents/consults are NOT gated —"
-            echo "  only a 2nd concurrent worktree lane: an autopilot-worker or any"
-            echo "  subagent dispatched with isolation: worktree, #1229.)"
+            echo "  default sequential (#1137); see cli_concurrency.resolve_concurrency.)"
         } >&2
         exit 2
+    fi
+    if [ "$SEQ_WHY" = "claim" ]; then
+        SEQ_REPO=$(printf '%s' "$SEQ_LINE" | cut -d'|' -f5-)
+        trap _claim_lane_slot EXIT
     fi
 fi
 [ -z "$LANE_ONLY" ] || exit 0   # #1229: a plain worktree lane stops here

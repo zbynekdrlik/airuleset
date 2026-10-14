@@ -138,7 +138,8 @@ def _resolve_base_branch(repo_root, records, run):
     Two steps (#1031 fork follow-up):
 
     1. NAME — ``develop`` when ANY remote or the local repo carries a
-       ``develop`` ref (the 3-branch odoo projects), detected with ``git
+       ``develop`` ref (the 3-branch odoo projects), else ``dev`` the same way
+       (the 2-branch projects, #1229), detected with ``git
        for-each-ref`` (deliberately NOT ``rev-parse`` — a shape the sibling test
        fakes leave inert, so it can never false-positive off an over-permissive
        ``rev-parse origin/*`` stub); else the name from ``git symbolic-ref
@@ -166,25 +167,27 @@ def _resolve_base_branch(repo_root, records, run):
             return False
         return getattr(r, "returncode", 1) == 0 and bool((r.stdout or "").strip())
 
-    def _develop_ref_exists():
+    def _ref_name_exists(branch):
         # for-each-ref (NOT rev-parse) over local heads + every remote-tracking
-        # dir, so a fork whose origin/HEAD is unset still resolves the NAME to
-        # develop, and a fake that over-approves `rev-parse origin/*` cannot
+        # dir, so a fork whose origin/HEAD is unset still resolves the NAME,
+        # and a fake that over-approves `rev-parse origin/*` cannot
         # false-positive it.
         try:
             r = run(["git", "-C", repo_root, "for-each-ref", "--format=%(refname)",
-                     "refs/heads/develop", "refs/remotes/*/develop"])
+                     "refs/heads/" + branch, "refs/remotes/*/" + branch])
         except Exception:  # noqa: BLE001
             return False
         return getattr(r, "returncode", 1) == 0 and bool((r.stdout or "").strip())
 
-    # 1) NAME. A `develop` ref present anywhere ⇒ develop IS the integration
-    # base (the 3-branch odoo model); this deliberately overrides origin/HEAD.
-    # 2-branch projects integrate on `dev` (not `develop`), which the
-    # `refs/remotes/*/develop` pattern does not match, so they fall through.
+    # 1) NAME. The integration branch, which deliberately overrides origin/HEAD:
+    # `develop` (the 3-branch odoo model), else `dev` (the 2-branch model,
+    # #1229: presenter's lanes merged into dev read idle-unmerged against main,
+    # which refused every next lane until a release), else the default branch.
     name = None
-    if _develop_ref_exists():
-        name = "develop"
+    for cand in ("develop", "dev"):
+        if _ref_name_exists(cand):
+            name = cand
+            break
     if name is None:
         try:
             r = run(["git", "-C", repo_root, "symbolic-ref", "--quiet",
@@ -455,12 +458,15 @@ def classify_lanes(repo_root, run=None, *, now=None, live_worker_ids=None,
         if not branch:
             continue
         target = _lane_target(repo_root, branch, base_branch, run)
-        if _lane_is_merged(repo_root, branch, target, run):
+        # Evidence BEFORE the merged check (#1229): a lane with no commit yet
+        # sits on its fork point, an ancestor of the target, and read `merged`
+        # while its agent was working in it.
+        wt_base = os.path.basename(path.rstrip(os.sep))
+        alive = (wt_base in live_worker_ids) or _path_has_proc(path, proc_cwds)
+        if not alive and _lane_is_merged(repo_root, branch, target, run):
             out.append({"ref": branch, "path": path, "files": [],
                         "topic": branch, "state": "merged"})
             continue
-        wt_base = os.path.basename(path.rstrip(os.sep))
-        alive = (wt_base in live_worker_ids) or _path_has_proc(path, proc_cwds)
         if alive:
             state = "live"
         elif _lane_ticket_numbers(repo_root, branch, run) & handoff_numbers:
