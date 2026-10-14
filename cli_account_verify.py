@@ -31,7 +31,10 @@ Checks (``CHECKS``):
                    real transfer-session dry run REFUSES once the target holds
                    the sessions, and the account cannot read the old home, so
                    the check is the state a clean transfer leaves);
-                   ``--no-transfer`` for a project born in its account.
+                   ``--no-transfer`` for a project born in its account;
+  drop             (#1237) a declared drop lane, the box's go-live marker
+                   equal to it, live in the controller's go-live cache, and an
+                   active filedrop.service: secret request / upload / share.
 
 Stdlib only; every airuleset module is imported lazily. ``run`` (the ssh
 call) and ``gh_verify`` are injectable for the tests.
@@ -42,7 +45,7 @@ import subprocess
 import sys
 
 CHECKS = ("tmux", "gh-token", "secret-sync", "ruff", "rust", "playwright",
-          "home-duplicates", "git-identity", "webterm", "session")
+          "home-duplicates", "git-identity", "webterm", "session", "drop")
 NOREPLY_SUFFIX = "@users.noreply.github.com"
 PROBE_TIMEOUT_S = 180
 # A per-account toolchain copy the shared one replaces (#1201 cleanup).
@@ -116,6 +119,11 @@ echo @@session
 echo "count=$(ls "$HOME/.claude/projects/"__KEY__/*.jsonl 2>/dev/null | wc -l)"
 echo @@keys
 if [ -r "$HOME/.ssh/authorized_keys" ]; then sed 's/^/key=/' "$HOME/.ssh/authorized_keys"; fi
+echo @@drop
+if [ -r "$HOME/.cloudflared/airuleset-drop.conf" ]; then
+  sed -n 's/^\(host\|port\)=/marker_\1=/p' "$HOME/.cloudflared/airuleset-drop.conf"
+fi
+echo "filedrop=$(systemctl --user is-active filedrop.service 2>/dev/null)"
 echo @@end
 """
 
@@ -403,6 +411,34 @@ def _check_session(account, spec, s, no_transfer):
                    % (account, spec["host"]))
 
 
+def _check_drop(account, s):
+    """#1237: the base channels. A declared lane, the box's go-live marker
+    equal to it, the lane live in the controller's go-live cache, and the
+    account's filedrop server (`share`) active."""
+    import cli_drop_gateway as gateway
+    import cli_drop_golive as golive
+    import cli_drop_lanes as lanes
+    import cli_project_gh_token as gh_token
+    try:
+        remote = gh_token.account_target(account)
+    except gh_token.MintError as e:
+        return False, str(e)
+    lane = gateway.DROP_LANES.get((lanes._nodename_for_entry(remote), account))
+    if lane is None:
+        return False, ("no drop lane declared — secret request / upload / share "
+                       "refuse on the box (#1237)")
+    bad = []
+    marker = (_one(s, "drop", "marker_host"), _one(s, "drop", "marker_port"))
+    if marker != (lane.host, str(lane.port)):
+        bad.append("go-live marker missing or stale (%s:%s) — run push" % marker)
+    if lane.host not in golive.read_golive_live_hosts():
+        bad.append("%s not live in the controller's go-live cache (DNS/Access) "
+                   "— run push on the controller" % lane.host)
+    if _one(s, "drop", "filedrop") != "active":
+        bad.append("filedrop.service not active — share has no server")
+    return (not bad), "; ".join(bad) or "%s live (secret / upload / share)" % lane.host
+
+
 def evaluate(account, spec, sections, *, gh_rc, no_transfer=False):
     """``[(check, ok, detail)]`` in ``CHECKS`` order."""
     home = _Home(_one(sections, "env", "home") or "/home/" + account)
@@ -425,6 +461,7 @@ def evaluate(account, spec, sections, *, gh_rc, no_transfer=False):
         "git-identity": _check_git(spec, s),
         "webterm": _check_webterm(account, spec, s),
         "session": _check_session(account, spec, s, no_transfer),
+        "drop": _check_drop(account, s),
     }
     return [(name,) + tuple(results[name]) for name in CHECKS]
 
@@ -471,7 +508,7 @@ def verify_account(account, *, run=None, gh_verify=None, no_transfer=False):
     sections, err = _ssh_probe(account, spec, run)
     results = evaluate(account, spec, sections, gh_rc=gh_rc, no_transfer=no_transfer)
     remote = {"tmux", "ruff", "rust", "playwright", "home-duplicates",
-              "git-identity", "webterm", "session"}
+              "git-identity", "webterm", "session", "drop"}
     failed = 0
     for name, ok, detail in results:
         if err and name in remote:
