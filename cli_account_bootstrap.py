@@ -141,7 +141,7 @@ SERVICE_ACCOUNTS = {
     "fohmixer": {
         "host": "dev1",
         "sudo": False,
-        "reach": [],
+        "reach": [{"cidr": "10.77.7.1/32", "ports": [22], "reason": "MikroTik router (#1230)"}],
         "secrets": ["fohmixer-engineer-pin", "cloudflare-fohmixer-analytics",   # #1206
                     "cloudflare-fohmixer-access-audit", "cloudflared-fohmixer-token",
                     "cloudflare-fohmixer-acme-dns", "cloudflare-fohmixer-setup"],
