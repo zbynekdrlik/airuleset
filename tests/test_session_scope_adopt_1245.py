@@ -181,15 +181,17 @@ class AdoptUncapped(unittest.TestCase):
             b.adopt()
         self.assertEqual(b.calls, [])
 
-    def test_logind_session_scope_is_reported_loud_not_moved(self):
+    def test_logind_session_scope_claude_is_adopted_too(self):
+        # Live on dev1 (systemd 255): the user manager moved a sleep out of the
+        # ssh login's session-85087.scope into its own scope.
         with tempfile.TemporaryDirectory() as t:
             b = _Box(t)
             b.proc_add(500, "claude", 1, LOGIND, cwd="/home/fohmixer/devel/fohmixer")
             lines = b.adopt()
-        self.assertEqual(b.calls, [])
-        warn = [ln for ln in lines if "WARN" in ln]
-        self.assertTrue(warn and "500" in warn[0] and "session-5.scope" in warn[0]
-                        and "#1245" in warn[0], lines)
+            moved = b.cgroup_of(500)
+        self.assertEqual(len(b.calls), 1, lines)
+        self.assertTrue(moved.endswith("airuleset-session-500.scope"), moved)
+        self.assertTrue(any("adopted pid 500" in ln and "fohmixer" in ln for ln in lines), lines)
 
     def test_busctl_failure_is_a_loud_defect_line(self):
         self.box.fail = [(1, "Access denied")]
