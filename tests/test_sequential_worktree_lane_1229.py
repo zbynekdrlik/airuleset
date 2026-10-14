@@ -342,5 +342,44 @@ class TestOwnWorktreeAndMessage(unittest.TestCase):
         self.assertNotIn("Subagents/consults are NOT gated", r.stderr)
 
 
+class TestStaleDevBranch(unittest.TestCase):
+    """The controller's own repo works on main but still carries a stale
+    `origin/dev`. A lane merged into main must read merged; judging only
+    against the stale dev would count it live forever."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.addCleanup(shutil.rmtree, self.home, True)
+        self.repo = Path(self.tmp) / "repo"
+        self.repo.mkdir()
+        _git(self.repo, "init", "-q", "-b", "main")
+        (self.repo / "f.txt").write_text("x")
+        _git(self.repo, "add", "f.txt")
+        _git(self.repo, "commit", "-qm", "base")
+        _git(self.repo, "branch", "dev")
+        (self.repo / "h.txt").write_text("z")
+        _git(self.repo, "add", "h.txt")
+        _git(self.repo, "commit", "-qm", "main moves on")
+        wt = self.repo / ".claude" / "worktrees" / "agent-done"
+        _git(self.repo, "worktree", "add", "-q", "-b", "worktree-agent-done", str(wt))
+        (wt / "g.txt").write_text("y")
+        _git(wt, "add", "g.txt")
+        _git(wt, "commit", "-qm", "lane work")
+        _git(self.repo, "merge", "--no-ff", "-q", "-m", "integrate lane",
+             "worktree-agent-done")
+
+    def test_lane_merged_into_main_reads_merged_despite_stale_dev(self):
+        lanes = lanes_mod.classify_lanes(
+            str(self.repo), live_worker_ids=set(), proc_cwds=set(),
+            handoff_numbers=set(), projects_dir=self.tmp)
+        self.assertEqual([lane["state"] for lane in lanes], ["merged"])
+
+    def test_next_lane_allowed(self):
+        r = _run_hook(self.repo, self.home)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
