@@ -22,6 +22,7 @@ from unittest import mock
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 import cli_account_bootstrap as bootstrap  # noqa: E402
+import cli_account_hardening as hardening  # noqa: E402
 import cli_accounts as accounts  # noqa: E402
 import cli_webterm_only as wo  # noqa: E402
 
@@ -49,7 +50,7 @@ class TestNoReachRule(unittest.TestCase):
     def test_every_account_renders_the_teardown(self):
         for account in bootstrap.SERVICE_ACCOUNTS:
             step = _step_3b(_render(account))
-            self.assertIn("airuleset_reach_$ACCOUNT", step, account)
+            self.assertIn("'%s'" % hardening.nft_table_name(account), step, account)
             self.assertIn("airuleset-reach-$ACCOUNT.service", step, account)
             self.assertIn("/etc/airuleset/reach-$ACCOUNT.nft", step, account)
 
