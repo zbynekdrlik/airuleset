@@ -16,6 +16,7 @@ Two guards (Approach 1 of the design comment 5787954399):
 """
 import io
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -50,6 +51,12 @@ def _acc(apps=None):
 
 class TestWorktreeLiveWriteRefusal(unittest.TestCase):
     def setUp(self):
+        # a live reconcile writes the go-live cache: never the box's real one
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        patcher = mock.patch.object(gl, "GOLIVE_CACHE", Path(tmp.name) / "golive.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.lane = _lane("drop-a.newlevel.media", 8902, access=True)
         self.specs = {self.lane.host: _access_spec(self.lane.host, ["a@x.sk"])}
         self.lanes = {("boxa", "u1"): self.lane}

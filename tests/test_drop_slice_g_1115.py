@@ -272,6 +272,14 @@ class TestLocalMarkerWrite(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 
 class TestReconcileMakesControllerLocalLive(unittest.TestCase):
+    def setUp(self):
+        # a live reconcile writes the go-live cache: never the box's real one
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        patcher = mock.patch.object(gl, "GOLIVE_CACHE", Path(tmp.name) / "golive.json")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def _drop_lanes(self):
         return {CONTROLLER_KEY: dg.DROP_LANES[CONTROLLER_KEY]}
 
