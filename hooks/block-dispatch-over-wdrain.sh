@@ -37,11 +37,19 @@ case "$TOOL_NAME" in
     *) exit 0 ;;
 esac
 
-# Only gate implementation-worker types
+# Only gate implementation lanes: an autopilot-worker, or (#1229) ANY type
+# dispatched with `isolation: "worktree"`. A plain session on presenter@dev2
+# opened three general-purpose worktree lanes in a sequential pane, unseen.
+# Such a plain lane gets ONLY the #998 sequential gate below (LANE_ONLY=1): the
+# #992 receipt and the W-drain gate are autopilot-loop contracts. A subagent
+# without isolation (review seat, research, design draft) is never gated.
 SUBAGENT_TYPE=$(printf '%s' "$INPUT" | jq -r '.tool_input.subagent_type // empty' 2>/dev/null || echo "")
+ISOLATION=$(printf '%s' "$INPUT" | jq -r '.tool_input.isolation // empty' 2>/dev/null || echo "")
+LANE_ONLY=""
 case "$SUBAGENT_TYPE" in
     autopilot-worker) ;;
-    *) exit 0 ;;
+    *) [ "$ISOLATION" = "worktree" ] || exit 0
+       LANE_ONLY=1 ;;
 esac
 
 # Read cwd from the hook payload
@@ -73,7 +81,7 @@ REPO_DIR=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd || echo "")
 # PR numbers. A parser MALFUNCTION fails open like the rest of this hook
 # (#539/#570), logged to ~/.claude/lane-overlap/parse-error.log.
 ISSUES=""
-if [ -n "$PROMPT" ]; then
+if [ -n "$PROMPT" ] && [ -z "$LANE_ONLY" ]; then
     # shellcheck disable=SC2016  # the python source is single-quoted on purpose
     if ! ISSUES=$(printf '%s' "$PROMPT" | PYTHONPATH="$REPO_DIR" python3 -P -c \
 'import sys
@@ -160,7 +168,7 @@ if [ -n "$REPO_DIR" ]; then
         {
             echo "BLOCKED: sequential-mode gate — this target runs in '$SEQ_MODE' mode (lane cap = 1)."
             echo ""
-            echo "  A live autopilot-worker lane is already running for this box, and"
+            echo "  A live worktree lane is already running for this box, and"
             echo "  '$SEQ_MODE' mode means ONE unit at a time: implement it (yourself or with"
             echo "  one worker) -> main review -> integrate -> verify -> next, with NO refill."
             echo "  Wait for the live lane to return and integrate before the next unit."
@@ -168,11 +176,13 @@ if [ -n "$REPO_DIR" ]; then
             echo "  (Mode: the declared window / project .claude/lane-resources.json, else the"
             echo "  default sequential (#1137); see cli_concurrency.resolve_concurrency."
             echo "  Subagents/consults are NOT gated —"
-            echo "  only a 2nd concurrent autopilot-worker.)"
+            echo "  only a 2nd concurrent worktree lane: an autopilot-worker or any"
+            echo "  subagent dispatched with isolation: worktree, #1229.)"
         } >&2
         exit 2
     fi
 fi
+[ -z "$LANE_ONLY" ] || exit 0   # #1229: a plain worktree lane stops here
 # ---------------------------------------------------------------------------
 
 # Read ops_wait from tickets-status cache
