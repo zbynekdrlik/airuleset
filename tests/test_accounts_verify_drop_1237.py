@@ -51,6 +51,25 @@ class TestDropCheck(_Base):
         self.assertEqual(self.verify(), 1)
         self.assertIn("go-live marker", self.line("drop"))
 
+    def test_a_marker_for_another_host_fails(self):
+        (self.w.home / ".cloudflared" / "airuleset-drop.conf").write_text(
+            "host=drop-dev1.newlevel.media\nport=8893\n")
+        self.assertEqual(self.verify(), 1)
+        self.assertIn("go-live marker", self.line("drop"))
+
+    def test_no_share_route_yet_fails(self):
+        # review 1237: the /s/ rule needs the harvested filedrop port (#1238)
+        self.fd_ports = {}
+        self.assertEqual(self.verify(), 1)
+        self.assertIn("share route", self.line("drop"))
+
+    def test_authorized_keys_without_a_final_newline_keeps_drop_ok(self):
+        keys = self.w.home / ".ssh" / "authorized_keys"
+        keys.write_text(keys.read_text().rstrip("\n"))
+        self.verify()
+        self.assertIn(" OK — ", self.line("drop"), self.out)
+        self.assertIn(" OK — ", self.line("webterm"), self.out)
+
     def test_a_lane_not_live_on_the_controller_fails(self):
         self.golive = {}
         self.assertEqual(self.verify(), 1)

@@ -172,12 +172,15 @@ class _Base(unittest.TestCase):
         self.w = _World(tmp)
         self.gh_rc = 0
         self.golive = {"drop-dev1-fohmixer.newlevel.media": 8893}   # 1237
+        self.fd_ports = {"dev1/fohmixer": 8791}       # 1237: the /s/ share route
 
     def verify(self, **kw):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict(wo.WEBTERM_CONTROLLER_LANE_PUBKEYS, {"timo": _FAKE_TIMO}), \
                 mock.patch("cli_drop_golive.read_golive_live_hosts",
                            lambda path=None: dict(self.golive)), \
+                mock.patch("cli_drop_lanes.read_drop_lanes_cache",
+                           lambda path=None: dict(self.fd_ports)), \
                 redirect_stdout(out), redirect_stderr(err):
             rc = verify.verify_account("fohmixer", run=self.w.run,
                                        gh_verify=lambda a: self.gh_rc, **kw)
