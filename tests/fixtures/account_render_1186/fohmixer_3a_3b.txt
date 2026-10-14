@@ -24,6 +24,7 @@ REACH_NFT="/etc/airuleset/reach-$ACCOUNT.nft"
 if [ -f "/etc/systemd/system/$REACH_UNIT" ]; then
     systemctl disable --now "$REACH_UNIT"
     rm -f "/etc/systemd/system/$REACH_UNIT"
+    systemctl reset-failed "$REACH_UNIT" 2>/dev/null || true
     systemctl daemon-reload
 fi
 NFT=$(command -v nft || true)

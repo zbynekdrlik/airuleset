@@ -31,9 +31,9 @@ What this does NOT close (honest residual): network egress. #1232 (owner
 ruling 14.10.2026) removed the per-uid ssh egress rule: it was routed around
 through any reachable host and pushed sessions to riskier detours. A project
 account can therefore open ssh to any host; reaching another account still
-needs that account's credential. The remaining exposure is a host whose
-shared ``newlevel`` still accepts PASSWORD ssh: refusing password auth there
-closes it without a network rule.
+needs that account's credential. The shared ``newlevel`` password stays an
+accepted internal access (owner 14.10.2026) until the per-project migration
+(#1184) retires ``newlevel``.
 
 Pure string renderers (stdlib only). ``cli_account_bootstrap`` validates every
 interpolated value before calling them.
@@ -266,6 +266,7 @@ def render_reach_teardown_step(account):
         'if [ -f "/etc/systemd/system/$REACH_UNIT" ]; then\n'
         '    systemctl disable --now "$REACH_UNIT"\n'
         '    rm -f "/etc/systemd/system/$REACH_UNIT"\n'
+        '    systemctl reset-failed "$REACH_UNIT" 2>/dev/null || true\n'
         "    systemctl daemon-reload\n"
         "fi\n"
         "NFT=$(command -v nft || true)\n"

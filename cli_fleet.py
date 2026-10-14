@@ -597,7 +597,7 @@ REMOTE_HOSTS.append({
 })
 
 # #1183/#1184 (2026-09-29): the first PROJECT account — fohmixer@dev1, declared in
-# cli_account_bootstrap.SERVICE_ACCOUNTS (no sudo, no reach, no secrets). Push
+# cli_account_bootstrap.SERVICE_ACCOUNTS (no sudo, no secrets). Push
 # manages its airuleset through the push key the bootstrap installed.
 REMOTE_HOSTS.append({
     "name": "fohmixer@dev1",

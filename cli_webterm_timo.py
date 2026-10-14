@@ -26,12 +26,11 @@ the one-member set {fohmixer} — timo's connect allowlist can never resolve an
 owner-realm box, a stream, or another person's account. Timo has NO unix
 account, NO ssh key and NO password anywhere (webterm-only, #869): his whole
 authorization is the Access allow-list. The fohmixer account is a separate uid
-with NO sudo and NO secrets (its declaration). Its bootstrap also closes the
-routes by which that uid could become the owner's `newlevel` account through
-its weak shared password: a uid-keyed nftables rule rejects every new outbound
-ssh (loopback included), and pam_wheel/polkit bar su/pkexec. These are
-enforced by the bootstrap and verified at go-live step 5 — not assumed. It
-does NOT stop other outbound traffic (https for the repo and the Claude API).
+with NO sudo and NO secrets (its declaration). Its bootstrap bars su/pkexec
+(pam_wheel/polkit), verified at go-live step 5. Since #1232 (owner ruling
+14.10.2026) there is NO outbound network rule: ssh to `newlevel` with its
+shared password stays an accepted internal access until the per-project
+migration retires `newlevel`.
 The gateway runs under the controller's `airuleset` account (the accepted #870 F4c
 B1 residue shared by every lane); its 0700 runtime-dir UNIX sockets are the
 local boundary (#663).
@@ -71,8 +70,7 @@ _TIMO_GO_LIVE = (
     "       (it is gated on that Access app) onto the shared controller tunnel.\n"
     "    5. Verify: all three dashboards (zbynek/marek/timo) open the fohmixer\n"
     "       tab (Playwright), and AS fohmixer each of these FAILS: `sudo -n true`,\n"
-    "       `su - newlevel`, `pkexec true`, `ssh -o BatchMode=yes\n"
-    "       newlevel@127.0.0.1 true` (connection reset).\n"
+    "       `su - newlevel`, `pkexec true`.\n"
     % profiles.WEBTERM_TIMO_IDENTITY)
 
 

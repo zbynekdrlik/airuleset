@@ -31,7 +31,7 @@ owner's montalu6 forced command byte-for-byte (``restrict,pty,command=``: no
 port/agent/X11 forwarding, no other command). BUT the attach itself is the
 montalu6 tmux session, i.e. a working shell (and a Claude session) AS montalu6,
 so Palo's TRANSITIVE reach is montalu6's whole reach. Unlike timo's fohmixer
-(no secrets, outbound ssh blocked), montalu6 is an unhardened branch-merge
+(no secrets, no sudo), montalu6 is an unhardened branch-merge
 stream: it holds the odoo-erp stream App token (contents:write on the
 MULTI-CLIENT odoo-erp repo, with other clients' code such as MIVA), its Claude
 login and whatever else the montalu streams hold. Go-live step 0 is therefore
