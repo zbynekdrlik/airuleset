@@ -118,12 +118,12 @@ fi
 echo @@session
 echo "count=$(ls "$HOME/.claude/projects/"__KEY__/*.jsonl 2>/dev/null | wc -l)"
 echo @@keys
-if [ -r "$HOME/.ssh/authorized_keys" ]; then sed 's/^/key=/' "$HOME/.ssh/authorized_keys"; fi
+if [ -r "$HOME/.ssh/authorized_keys" ]; then sed 's/^/key=/' "$HOME/.ssh/authorized_keys"; echo; fi
 echo @@drop
 if [ -r "$HOME/.cloudflared/airuleset-drop.conf" ]; then
   sed -n 's/^\(host\|port\)=/marker_\1=/p' "$HOME/.cloudflared/airuleset-drop.conf"
 fi
-echo "filedrop=$(systemctl --user is-active filedrop.service 2>/dev/null)"
+echo "filedrop=$(systemctl --user is-active filedrop.service 2>&1 | head -1)"
 echo @@end
 """
 
@@ -432,10 +432,15 @@ def _check_drop(account, s):
     if marker != (lane.host, str(lane.port)):
         bad.append("go-live marker missing or stale (%s:%s) — run push" % marker)
     if lane.host not in golive.read_golive_live_hosts():
-        bad.append("%s not live in the controller's go-live cache (DNS/Access) "
-                   "— run push on the controller" % lane.host)
-    if _one(s, "drop", "filedrop") != "active":
-        bad.append("filedrop.service not active — share has no server")
+        bad.append("%s not live in the controller's go-live cache (DNS/Access; "
+                   "read on the controller) — run push there" % lane.host)
+    key = "%s/%s" % (lanes._nodename_for_entry(remote), account)
+    if lane.topology == "controller" and key not in lanes.read_drop_lanes_cache():
+        bad.append("no share route yet (filedrop port not harvested) — run push "
+                   "again (#1238)")
+    state = _one(s, "drop", "filedrop")
+    if state != "active":
+        bad.append("filedrop.service %r, not active — share has no server" % state)
     return (not bad), "; ".join(bad) or "%s live (secret / upload / share)" % lane.host
 
 
