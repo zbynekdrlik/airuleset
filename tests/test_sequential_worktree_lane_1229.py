@@ -27,7 +27,10 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 HOOK = REPO / "hooks" / "block-dispatch-over-wdrain.sh"
 sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(REPO / "tests"))
+import cli_dispatch_gate as gate_mod  # noqa: E402
 import cli_lane_liveness as lanes_mod  # noqa: E402
+from test_live_lane_worktree_gate_1193 import _transcript  # noqa: E402
 
 
 def _git(cwd, *args):
@@ -40,16 +43,19 @@ def _git(cwd, *args):
 
 def _run_hook(cwd, home, subagent_type="general-purpose", isolation="worktree",
               prompt="Implement presenter 855 stream output delete",
-              tool="Agent"):
+              tool="Agent", project=None):
     tool_input = {"subagent_type": subagent_type, "prompt": prompt,
                   "run_in_background": True}
     if isolation:
         tool_input["isolation"] = isolation
     payload = {"tool_name": tool, "cwd": str(cwd), "tool_input": tool_input}
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDE_PROJECT_DIR"}
+    env["HOME"] = home
+    if project is not None:      # the session's own root, as Claude Code sets it
+        env["CLAUDE_PROJECT_DIR"] = str(project)
     return subprocess.run(
         ["bash", str(HOOK)], input=json.dumps(payload),
-        capture_output=True, text=True,
-        env={**os.environ, "HOME": home})
+        capture_output=True, text=True, env=env)
 
 
 class TestSequentialWorktreeLane(unittest.TestCase):
@@ -329,7 +335,7 @@ class TestOwnWorktreeAndMessage(unittest.TestCase):
 
     def test_session_in_its_own_worktree_is_not_a_lane(self):
         own = self._lane("main-own")
-        r = _run_hook(own, self.home)
+        r = _run_hook(own, self.home, project=own)
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_block_lists_the_lane_and_forbids_dropping_isolation(self):
@@ -379,6 +385,94 @@ class TestStaleDevBranch(unittest.TestCase):
     def test_next_lane_allowed(self):
         r = _run_hook(self.repo, self.home)
         self.assertEqual(r.returncode, 0, r.stderr)
+
+
+class TestRoundThree(unittest.TestCase):
+    """Re-review round 3: a process left in a MERGED worktree kept it live;
+    a subdir cwd missed a live commit-less lane; a cd into a worker's lane
+    hid it as "own"; an old claim slot could be won twice; a sibling hook's
+    refusal held the retry for 90 s; the pending message must forbid dropping
+    isolation too."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.addCleanup(shutil.rmtree, self.home, True)
+        self.repo = Path(self.tmp) / "repo"
+        (self.repo / "src").mkdir(parents=True)
+        _git(self.repo, "init", "-q", "-b", "main")
+        (self.repo / "src" / "f.txt").write_text("x")
+        _git(self.repo, "add", ".")
+        _git(self.repo, "commit", "-qm", "base")
+
+    def _lane(self, name, commit=True):
+        wt = self.repo / ".claude" / "worktrees" / name
+        _git(self.repo, "worktree", "add", "-q", "-b", "worktree-" + name, str(wt))
+        if commit:
+            (wt / (name + ".txt")).write_text("y")
+            _git(wt, "add", name + ".txt")
+            _git(wt, "commit", "-qm", "work " + name)
+        return wt
+
+    def test_process_left_in_a_merged_worktree_keeps_it_merged(self):
+        wt = self._lane("agent-old")
+        _git(self.repo, "merge", "--no-ff", "-q", "-m", "integrate", "worktree-agent-old")
+        lanes = lanes_mod.classify_lanes(
+            str(self.repo), live_worker_ids=set(), proc_cwds={str(wt)},
+            handoff_numbers=set(), projects_dir=self.tmp)
+        self.assertEqual([lane["state"] for lane in lanes], ["merged"])
+
+    def test_subdir_cwd_sees_a_live_commit_less_lane(self):
+        self._lane("agent-fresh", commit=False)
+        _transcript(self.home, self.repo, "agent-fresh")
+        r = _run_hook(self.repo / "src", self.home, project=self.repo)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def test_cd_into_a_workers_lane_does_not_hide_it(self):
+        wt = self._lane("agent-a")
+        _transcript(self.home, self.repo, "agent-a")
+        r = _run_hook(wt, self.home, project=self.repo)
+        self.assertEqual(r.returncode, 2, r.stderr)
+
+    def _age_claims(self, seconds):
+        root = Path(self.home) / ".claude" / "lane-pending"
+        old = time.time() - seconds
+        for p in root.iterdir():
+            os.utime(p, (old, old))
+
+    def test_a_claim_expires_after_twenty_seconds(self):
+        self.assertEqual(_run_hook(self.repo, self.home).returncode, 0)
+        self._age_claims(30)
+        r = _run_hook(self.repo, self.home)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_pending_block_forbids_dropping_isolation(self):
+        self.assertEqual(_run_hook(self.repo, self.home).returncode, 0)
+        r = _run_hook(self.repo, self.home)
+        self.assertEqual(r.returncode, 2, r.stderr)
+        self.assertIn("Do NOT drop isolation", r.stderr)
+
+    def test_an_old_slot_is_won_by_exactly_one_of_two(self):
+        import threading
+        repo = str(self.repo)
+        doubles = 0
+        for _ in range(300):
+            gate_mod.claim_pending_lane(repo, home=self.home)
+            self._age_claims(600)
+            barrier = threading.Barrier(2)
+            wins = []
+
+            def claim():
+                barrier.wait()
+                wins.append(gate_mod.claim_pending_lane(repo, home=self.home))
+            threads = [threading.Thread(target=claim) for _ in range(2)]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+            doubles += wins.count(True) == 2
+        self.assertEqual(doubles, 0)
 
 
 if __name__ == "__main__":
