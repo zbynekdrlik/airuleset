@@ -103,7 +103,10 @@ def launcher_model_lines():
 
 def main_models_for_transcript(tpath):
     """`main_models` for a session transcript path: its project key is the
-    name of the transcript's parent dir."""
+    name of the transcript's parent dir. A path object (watchdog's
+    `newest_transcript` returns a pathlib.Path) resolves like its string."""
+    if hasattr(tpath, "__fspath__"):
+        tpath = tpath.__fspath__()
     if not isinstance(tpath, str):
         return main_models(None)
     parts = tpath.replace("\\", "/").split("/")
