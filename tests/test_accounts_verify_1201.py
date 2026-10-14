@@ -58,7 +58,7 @@ class _World:
         self.knobs = {"VISIBILITY": "PUBLIC", "DEFAULT_COMMAND": "", "RUFF_RC": "0",
                       "RUFF_VER": "0.16.2", "FMT_RC": "0", "CLIPPY_RC": "0",
                       "SHELL_RC": "0", "RUSTUP_HOME_OUT": "/opt/rust/rustup",
-                      "NPX_MODE": "ok"}
+                      "NPX_MODE": "ok", "FILEDROP": "active"}
         self.email = _NOREPLY
         self.browsers_path = str(self.pw)
         self.drop_local_bin = False
@@ -88,6 +88,11 @@ class _World:
               '  which) echo /opt/rust/rustup/toolchains/1.98.1/bin/rustfmt ;;\n'
               'esac\n')
         _stub(s / "gh", 'echo "$VISIBILITY"\n')
+        _stub(s / "systemctl", 'echo "$FILEDROP"; [ "$FILEDROP" = active ]\n')  # 1237
+        drop = self.home / ".cloudflared"                   # 1237 go-live marker
+        drop.mkdir(parents=True)
+        (drop / "airuleset-drop.conf").write_text(
+            "host=drop-dev1-fohmixer.newlevel.media\nport=8893\n")
         # `npx -y playwright@1.58.2 install --dry-run chromium webkit`
         _stub(s / "npx", '[ "$NPX_MODE" = fail ] && exit 1\n'
               'echo "browser: chromium version 1"\n'
@@ -166,10 +171,13 @@ class _Base(unittest.TestCase):
         self.addCleanup(subprocess.run, ["rm", "-rf", tmp])
         self.w = _World(tmp)
         self.gh_rc = 0
+        self.golive = {"drop-dev1-fohmixer.newlevel.media": 8893}   # 1237
 
     def verify(self, **kw):
         out, err = io.StringIO(), io.StringIO()
         with mock.patch.dict(wo.WEBTERM_CONTROLLER_LANE_PUBKEYS, {"timo": _FAKE_TIMO}), \
+                mock.patch("cli_drop_golive.read_golive_live_hosts",
+                           lambda path=None: dict(self.golive)), \
                 redirect_stdout(out), redirect_stderr(err):
             rc = verify.verify_account("fohmixer", run=self.w.run,
                                        gh_verify=lambda a: self.gh_rc, **kw)
