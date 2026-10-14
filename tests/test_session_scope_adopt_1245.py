@@ -91,7 +91,7 @@ class _Box:
         return (self.proc / str(pid) / "cgroup").read_text().strip()[3:]
 
     _TYPES = {"Description": "s", "PIDs": "au", "MemoryMax": "t", "MemoryHigh": "t",
-              "MemorySwapMax": "t", "OOMPolicy": "s"}
+              "MemorySwapMax": "t", "OOMPolicy": "s", "CollectMode": "s"}
 
     def _parse(self, argv):
         """Parse like busctl does for ``ssa(sv)a(sa(sv))``; None on any mismatch."""
@@ -297,6 +297,88 @@ class AdoptUncapped(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(self.box.cgroup_of(100), ANCHOR)
         self.assertTrue(any("test run" in ln for ln in lines), lines)
+
+    def test_a_failed_scope_is_collected(self):
+        self.box.adopt()
+        argv = self.box.calls[0][0]
+        i = argv.index("CollectMode")
+        self.assertEqual(argv[i + 1:i + 3], ["s", "inactive-or-failed"])
+
+    def test_a_per_unit_call_failure_does_not_stop_the_other_sessions(self):
+        with tempfile.TemporaryDirectory() as t:
+            b = _Box(t)
+            b.proc_add(900, "claude", 1, ANCHOR)
+            b.proc_add(910, "claude", 1, ANCHOR)
+            b.fail = [(1, "Call failed: Unit airuleset-session-900.scope was already "
+                          "loaded or has a fragment file.")]
+            lines = b.adopt()
+        self.assertEqual(len(b.calls), 2, lines)
+        self.assertTrue(any("adopted pid 910" in ln for ln in lines), lines)
+        self.assertFalse(any("not tried" in ln for ln in lines), lines)
+
+    def test_a_claude_that_exits_during_the_verify_is_no_defect(self):
+        b = self.box
+        b.move = False
+
+        def vanish(n):
+            for f in list((b.proc / "100").iterdir()):
+                f.unlink()
+            (b.proc / "100").rmdir()
+        b.on_call = vanish
+        lines = b.adopt()
+        self.assertFalse(any("DEFECT" in ln for ln in lines), lines)
+        self.assertTrue(any("100" in ln and "exited" in ln for ln in lines), lines)
+
+    def test_a_later_claude_gone_after_a_rescan_gets_a_line(self):
+        with tempfile.TemporaryDirectory() as t:
+            b = _Box(t)
+            b.proc_add(900, "claude", 1, ANCHOR)
+            b.proc_add(910, "claude", 1, ANCHOR)
+            b.fail = [(1, "Call failed: Failed to set unit properties: No such process")]
+
+            def vanish(n):
+                if n == 1:
+                    for f in list((b.proc / "910").iterdir()):
+                        f.unlink()
+                    (b.proc / "910").rmdir()
+            b.on_call = vanish
+            lines = b.adopt()
+        self.assertTrue(any("910" in ln and "exited" in ln for ln in lines), lines)
+
+    def test_children_left_behind_are_named(self):
+        with tempfile.TemporaryDirectory() as t:
+            b = _Box(t)
+            b.proc_add(800, "claude", 1, ANCHOR, age=3600)
+            b.proc_add(802, "shellcheck", 800, ANCHOR, age=0.5)
+            lines = b.adopt()
+        line = next(ln for ln in lines if "adopted pid 800" in ln)
+        self.assertIn("left behind", line)
+        self.assertIn("shellcheck", line)
+
+    def test_no_such_process_is_retried_three_times_at_most(self):
+        self.box.fail = [(1, "Call failed: Failed to set unit properties: No such process")] * 5
+        lines = self.box.adopt()
+        self.assertEqual(len(self.box.calls), 3, lines)
+        self.assertTrue(any("WARN" in ln and "DEFECT (#1245)" in ln for ln in lines), lines)
+
+    def test_the_default_user_comes_from_the_password_database(self):
+        with tempfile.TemporaryDirectory() as t:
+            b = _Box(t)
+            b.proc_add(500, "claude", 1, LOGIND)
+            with mock.patch("pwd.getpwuid", return_value=mock.Mock(pw_name="newlevel")):
+                lines = ss.adopt_unscoped_sessions(
+                    hostname="dev1", uid=UID, proc_root=str(b.proc), cgroup_root=str(b.cg),
+                    linger_dir=str(b.linger), meminfo_text="MemTotal: %d kB\n" % DEV1_KB,
+                    run=b.run, env={}, sleep=b.sleep)
+        self.assertTrue(any("adopted pid 500" in ln for ln in lines), lines)
+
+    def test_rss_exactly_half_the_high_mark_is_still_adopted(self):
+        half = ss._caps_kb(DEV1_KB)[1] // 2
+        with tempfile.TemporaryDirectory() as t:
+            b = _Box(t)
+            b.proc_add(600, "claude", 1, ANCHOR, rss_kb=half)
+            lines = b.adopt()
+        self.assertTrue(any("adopted pid 600" in ln for ln in lines), lines)
 
     def test_capped_session_is_left_alone(self):
         b = self.box
