@@ -56,7 +56,7 @@ REPO_DIR = Path(__file__).resolve().parent
 
 # Per-account loopback/drop port range for the public drop lane (#889). Each
 # account on a shared box gets its own port, so concurrent ephemeral servers
-# (upload, secret show, secret request) never collide. Range 8870-8899 sits
+# (upload, secret show, secret request) never collide. Range 8870-8909 sits
 # above show's 8850-8869 and below no other airuleset range. Distinct from
 # filedrop 8788, upload 8799-8819, secret 8830-8849, show 8850-8869.
 # Grandfathered: spinbike's 8828 predates the per-account range. #1115: MAX

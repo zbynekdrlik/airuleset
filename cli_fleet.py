@@ -599,7 +599,7 @@ REMOTE_HOSTS.append({
 # #1183/#1184 (2026-09-29): the first PROJECT account — fohmixer@dev1, declared in
 # cli_account_bootstrap.SERVICE_ACCOUNTS (no sudo, no secrets). Push
 # manages its airuleset through the push key the bootstrap installed. #1237:
-# its drop lane carries secret request / upload / share like newlevel had.
+# its drop lane carries secret request / upload / share (share from push 2, #1238).
 REMOTE_HOSTS.append({
     "name": "fohmixer@dev1",
     "host": "100.104.8.125",
