@@ -21,6 +21,7 @@ import cli_session_scope as ss  # noqa: E402
 
 DEV1_KB = 7865772
 SMALL_KB = 3911564          # the controller's: the 2 GiB floor applies
+UPTIME = 100000.0
 UID = 1000
 USER_SVC = "/user.slice/user-1000.slice/user@1000.service"
 ANCHOR = USER_SVC + "/app.slice/tmux-detach-anchor.service"
@@ -44,6 +45,10 @@ class _Box:
         self.cg = Path(base) / "cgroup"
         self.proc.mkdir()
         self.cg.mkdir()
+        (self.proc / "uptime").write_text("%.2f 1.00\n" % UPTIME)
+        self.linger = Path(base) / "linger"
+        self.linger.mkdir()
+        (self.linger / "newlevel").write_text("")
         self.calls = []
         self.fail = []          # queued (rc, err) answers for the next calls
         self.move = True        # the fake systemd really moves the pids
@@ -62,12 +67,18 @@ class _Box:
         if mem_max is not None:
             (d / "memory.max").write_text(mem_max + "\n")
 
-    def proc_add(self, pid, comm, ppid, cgroup, uid=UID, cwd=None):
+    def proc_add(self, pid, comm, ppid, cgroup, uid=UID, cwd=None, age=None, rss_kb=None):
         d = self.proc / str(pid)
         d.mkdir()
         (d / "comm").write_text(comm + "\n")
-        (d / "stat").write_text("%d (%s) S %d 1 1 0 -1\n" % (pid, comm, ppid))
-        (d / "status").write_text("Name:\t%s\nUid:\t%d\t%d\t%d\t%d\n" % (comm, uid, uid, uid, uid))
+        if age is None:                    # no start time: the age is unknown
+            (d / "stat").write_text("%d (%s) S %d 1 1 0 -1\n" % (pid, comm, ppid))
+        else:                              # field 22 = start time in clock ticks
+            ticks = int((UPTIME - age) * os.sysconf("SC_CLK_TCK"))
+            (d / "stat").write_text("%d (%s) S %d %s %d 0\n"
+                                    % (pid, comm, ppid, " ".join(["1"] * 17), ticks))
+        (d / "status").write_text("Name:\t%s\nUid:\t%d\t%d\t%d\t%d\n" % (comm, uid, uid, uid, uid)
+                                  + ("VmRSS:\t%d kB\n" % rss_kb if rss_kb is not None else ""))
         (d / "cgroup").write_text("0::%s\n" % cgroup)
         (d / "oom_score_adj").write_text("200\n")
         if cwd:
@@ -142,7 +153,8 @@ class _Box:
             hostname=host, uid=UID, proc_root=str(self.proc),
             cgroup_root=str(self.cg),
             meminfo_text=meminfo if meminfo is not None else "MemTotal:       %d kB\n" % mem_kb,
-            run=self.run, env={} if env is None else env, sleep=self.sleep)
+            run=self.run, env={} if env is None else env, sleep=self.sleep,
+            user="newlevel", linger_dir=str(self.linger))
 
 
 def _pids(argv):
@@ -324,6 +336,75 @@ class AdoptUncapped(unittest.TestCase):
         self.assertEqual(len(b.calls), 1, lines)
         self.assertTrue(moved.endswith("airuleset-session-500.scope"), moved)
         self.assertTrue(any("adopted pid 500" in ln and "fohmixer" in ln for ln in lines), lines)
+
+    def test_logind_claude_without_linger_stays_put_loud(self):
+        # Moved under user@<uid>.service with no linger, it would die when the
+        # user manager stops after the last login (review, 14.10.).
+        with tempfile.TemporaryDirectory() as t:
+            b = _Box(t)
+            (b.linger / "newlevel").unlink()
+            b.proc_add(500, "claude", 1, LOGIND)
+            lines = b.adopt()
+            where = b.cgroup_of(500)
+        self.assertEqual(b.calls, [])
+        self.assertEqual(where, LOGIND)
+        self.assertTrue(any("WARN" in ln and "linger" in ln and "500" in ln for ln in lines), lines)
+
+    def test_anchor_claude_needs_no_linger(self):
+        (self.box.linger / "newlevel").unlink()
+        lines = self.box.adopt()
+        self.assertTrue(any("adopted pid 100" in ln for ln in lines), lines)
+
+    def test_a_claude_already_past_half_the_high_mark_is_skipped_loud(self):
+        with tempfile.TemporaryDirectory() as t:
+            b = _Box(t)
+            b.proc_add(600, "claude", 1, ANCHOR, rss_kb=1400 * 1024)
+            lines = b.adopt()
+        self.assertEqual(b.calls, [])
+        self.assertTrue(any("WARN" in ln and "600" in ln and "1400M" in ln for ln in lines), lines)
+
+    def test_the_adopted_line_names_the_rss_and_the_children(self):
+        with tempfile.TemporaryDirectory() as t:
+            b = _Box(t)
+            b.proc_add(700, "claude", 1, ANCHOR, rss_kb=668 * 1024)
+            b.proc_add(701, "node", 700, ANCHOR)
+            lines = b.adopt()
+        line = next(ln for ln in lines if "adopted pid 700" in ln)
+        self.assertIn("668M", line)
+        self.assertIn("node", line)
+
+    def test_a_child_younger_than_two_seconds_is_left_behind(self):
+        with tempfile.TemporaryDirectory() as t:
+            b = _Box(t)
+            b.proc_add(800, "claude", 1, ANCHOR, age=3600)
+            b.proc_add(801, "node", 800, ANCHOR, age=3000)     # an MCP server
+            b.proc_add(802, "bash", 800, ANCHOR, age=0.5)      # a hook, about to exit
+            b.adopt()
+        self.assertEqual(_pids(b.calls[0][0]), ["800", "801"])
+
+    def test_a_claude_that_exits_mid_move_is_no_defect(self):
+        b = self.box
+        b.fail = [(1, "No such process")] * 3
+
+        def vanish(n):
+            if n == 1:
+                for f in list((b.proc / "100").iterdir()):
+                    f.unlink()
+                (b.proc / "100").rmdir()
+        b.on_call = vanish
+        lines = b.adopt()
+        self.assertFalse(any("DEFECT" in ln for ln in lines), lines)
+        self.assertTrue(any("100" in ln and "exited" in ln for ln in lines), lines)
+
+    def test_a_bus_level_failure_stops_after_the_first_session(self):
+        with tempfile.TemporaryDirectory() as t:
+            b = _Box(t)
+            b.proc_add(900, "claude", 1, ANCHOR)
+            b.proc_add(910, "claude", 1, ANCHOR)
+            b.fail = [(1, "[Errno 2] No such file or directory: 'busctl'")] * 2
+            lines = b.adopt()
+        self.assertEqual(len(b.calls), 1, lines)
+        self.assertTrue(any("910" in ln and "not tried" in ln for ln in lines), lines)
 
     def test_busctl_failure_is_a_loud_defect_line(self):
         self.box.fail = [(1, "Access denied")]
