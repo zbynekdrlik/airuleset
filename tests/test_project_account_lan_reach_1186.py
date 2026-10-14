@@ -1,24 +1,10 @@
-"""#1186: camera-box project account — LAN reach entries + command-scoped sudo.
+"""#1186: camera-box project account — command-scoped sudo.
 
-The #1184 declaration could only express reach to FLEET boxes and a boolean
-sudo. camera-box (the first project with LAN hardware) needs ssh to non-fleet
-LAN hosts and two root-owned project scripts. Main's design
-(issuecomment-5894645187, Approach 1) extends the ONE declaration:
-
-  (a) a reach entry may be a fleet box name OR
-      ``{"cidr": "<ip>/32", "ports": [..], "reason": "<why>"}`` — private
-      (RFC1918 / tailscale 100.64/10) single hosts only, each with a reason;
-      the nft render accepts exactly those destinations + ports BEFORE the uid
-      reject;
-  (b) ``sudo: "commands"`` + ``sudo_commands`` renders NOPASSWD for exactly
-      the listed ``/usr/local/sbin/<account>-*`` paths, and the bootstrap
-      refuses a path that is missing, not root-owned, or account-writable;
-      ``sudo: True`` is unchanged;
-  (c) the camera-box declaration validates and renders nothing broader;
-  (d) ``accounts status`` shows the reach entries and the sudo commands.
-
-The existing fohmixer/claudy renders stay byte-identical in their sudo+reach
-section (golden fixtures captured from main before this change).
+camera-box (the first project with LAN hardware) needs two root-owned project
+scripts under sudo. The #1186 LAN reach entries were retired by #1232 (owner
+ruling 14.10.2026: no network reach rule); what stays here is the
+command-scoped sudo, the camera-box declaration, the status lines and the
+byte-identical fohmixer/claudy sudo + 3b goldens.
 """
 import io
 import json
@@ -67,10 +53,7 @@ def _section(script):
 
 
 # --------------------------------------------------------------------------- #
-# (a) LAN reach entries — validator
-# --------------------------------------------------------------------------- #
-# --------------------------------------------------------------------------- #
-# (a) LAN reach entries — nft render
+# (a) the fohmixer/claudy goldens
 # --------------------------------------------------------------------------- #
 class TestGoldenRenders(unittest.TestCase):
     """The fohmixer/claudy sudo + 3b sections stay byte-identical to the
@@ -291,6 +274,19 @@ class TestCameraBoxDeclaration(unittest.TestCase):
         self.assertEqual(spec["project_dir"], "devel/camera-box")
         self.assertEqual(spec["tmux_session"], "camera-box")
 
+    def test_render_grants_exactly_its_two_scripts(self):
+        # the sudo half of the pre-#1232 render test (its reach half retired)
+        script = bootstrap.render_root_bootstrap("camera-box")
+        body = _sudoers_body(script).splitlines()
+        self.assertEqual(body[1], "camera-box ALL=(root) NOPASSWD: "
+                         + ", ".join('%s ""' % p for p in CAMERA_BOX_SUDO))
+        self.assertEqual(len(body), 2)
+        for broad in ("NOPASSWD: ALL", "(ALL)", "ALL, ", "*"):
+            self.assertNotIn(broad, "\n".join(body))
+        r = subprocess.run(["bash", "-n"], input=script, capture_output=True,
+                           text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
     def test_the_registry_row_is_not_flipped_before_the_live_migration(self):
         rows = json.loads((Path(__file__).resolve().parent.parent
                            / "projects-registry.json").read_text())
@@ -299,9 +295,9 @@ class TestCameraBoxDeclaration(unittest.TestCase):
 
 
 # --------------------------------------------------------------------------- #
-# (d) accounts status shows reach entries and sudo commands
+# (d) accounts status shows the sudo commands
 # --------------------------------------------------------------------------- #
-class TestAccountsStatusShowsReachAndSudo(unittest.TestCase):
+class TestAccountsStatusShowsSudo(unittest.TestCase):
 
     def _run(self, as_json):
         buf = io.StringIO()

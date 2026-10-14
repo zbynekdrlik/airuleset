@@ -53,6 +53,10 @@ class TestNoReachRule(unittest.TestCase):
             self.assertIn("'%s'" % hardening.nft_table_name(account), step, account)
             self.assertIn("airuleset-reach-$ACCOUNT.service", step, account)
             self.assertIn("/etc/airuleset/reach-$ACCOUNT.nft", step, account)
+        # the table name maps a dash to an underscore; pin the literal, or a
+        # broken mapping would leave camera-box's real table in place
+        self.assertIn("REACH_TABLE='airuleset_reach_camera_box'",
+                      _step_3b(_render("camera-box")))
 
     def test_reach_is_an_unknown_key(self):
         spec = dict(bootstrap.SERVICE_ACCOUNTS["fohmixer"])
