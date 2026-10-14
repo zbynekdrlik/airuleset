@@ -165,7 +165,9 @@ MAX_TOTAL = 14000
 # the skill (a script actually touching the API) -- matches the raw command.
 # #1179: odoo-client-board-stages joins -- an `Acceptance-thread:` line lives in
 # the QUOTED/heredoc `gh issue comment` body, which the stripped haystack drops.
-RAW_BASH_MATCH_TOPICS = {"cloudflare-api-tokens", "odoo-client-board-stages"}
+# #1235: linux-box-swap — remote probes quote the command (ssh box 'free -h').
+RAW_BASH_MATCH_TOPICS = {"cloudflare-api-tokens", "odoo-client-board-stages",
+                         "linux-box-swap"}
 
 
 def strip_frontmatter(text):

@@ -818,15 +818,10 @@ def swap_size_gb(mem_total_kb):
 
 
 def render_swap_setup_script(size_gb):
-    """Idempotent bash creating a size_gb /swapfile: re-checks swap + the fstab
-    line so a second run is a no-op. Uses fallocate, falling back to dd.
-
-    #993-review hardening: (a) a FREE-SPACE check (need size + 2 GB headroom)
-    before allocating — these boxes are drained at >=80% (#834); (b) a
-    trailing-newline guard before the fstab append (an fstab whose last line
-    lacks \\n would otherwise get the entry glued onto that mount line); (c) a
-    blkid guard so mkswap never runs over a pre-existing NON-swap file at the
-    path."""
+    """Idempotent bash creating a size_gb /swapfile (fallocate, else dd). #993:
+    a free-space check (size + 2 GB), a trailing-newline guard before the fstab
+    append, a blkid guard against a non-swap file. #1235: a skip or a create
+    that leaves no active swap exits 1 (the verify step)."""
     p = SWAPFILE_PATH
     need_kb = (size_gb + 2) * 1024 * 1024   # size + 2 GB headroom, in KB
     return (
@@ -836,7 +831,7 @@ def render_swap_setup_script(size_gb):
         "fi\n"
         "avail=$(df --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')\n"
         "if [ -n \"$avail\" ] && [ \"$avail\" -lt %(need)d ]; then\n"
-        "  echo 'swap: skipped — insufficient free space on / (need %(needg)dG incl. headroom)'; exit 0\n"
+        "  echo 'swap: skipped — insufficient free space on / (need %(needg)dG incl. headroom)'; exit 1\n"
         "fi\n"
         "if [ ! -f %(p)s ]; then\n"
         "  fallocate -l %(n)dG %(p)s || dd if=/dev/zero of=%(p)s bs=1M count=%(mb)d\n"
@@ -854,6 +849,7 @@ def render_swap_setup_script(size_gb):
         "  [ -z \"$(tail -c1 /etc/fstab 2>/dev/null)\" ] || printf '\\n' >> /etc/fstab\n"
         "  echo '%(p)s none swap sw 0 0' >> /etc/fstab\n"
         "fi\n"
+        "swapon --show=NAME --noheadings | grep -q . || { echo 'swap: none after create'; exit 1; }\n"
         "echo 'swap: created %(n)dG at %(p)s'\n"
         % {"p": p, "n": size_gb, "mb": size_gb * 1024,
            "need": need_kb, "needg": size_gb + 2}
@@ -897,10 +893,10 @@ def swap_status(meminfo_text=None):
     return "swap: %s/%s" % (_fmt_mb(swap_total), _fmt_mb(used))
 
 
-def provision_swap(run=None, meminfo_text=None):
-    """Create a managed /swapfile on a box with no swap. Idempotent (present
-    swap → no-op), sudo-`-n`-gated (clear skip line otherwise), non-fatal.
-    Returns a status string for logging."""
+def provision_swap(run=None, meminfo_text=None, meminfo_after_text=None):
+    """Create /swapfile on a box with no swap: idempotent, `sudo -n`-gated,
+    non-fatal, returns a status line. #1235: "applied" only once a re-read of
+    meminfo shows swap (a hermetic caller passes both meminfo texts)."""
     run = run or subprocess.run
     mem_total, swap_total, _free = _read_meminfo(meminfo_text)
     if swap_total > 0:
@@ -910,9 +906,9 @@ def provision_swap(run=None, meminfo_text=None):
         probe = run(["sudo", "-n", "true"], capture_output=True, text=True,
                     timeout=10)
     except Exception as e:  # noqa: BLE001
-        return "swap: skipped — sudo probe error (%r)" % e
+        return "WARN swap: MISSING, sudo probe error (%r) — DEFECT (#1235)" % e
     if getattr(probe, "returncode", 1) != 0:
-        return ("⚠ swap: MISSING, create skipped (no sudo -n) — DEFECT (#1235): "
+        return ("WARN swap: MISSING, create skipped (no sudo -n) — DEFECT (#1235): "
                 "create %s as root (fallocate/mkswap/swapon + /etc/fstab)" % SWAPFILE_PATH)
     size = swap_size_gb(mem_total)
     script = render_swap_setup_script(size)
@@ -920,10 +916,14 @@ def provision_swap(run=None, meminfo_text=None):
         r = run(["sudo", "-n", "bash", "-c", script],
                 capture_output=True, text=True, timeout=120)
     except Exception as e:  # noqa: BLE001
-        return "swap: FAILED (error: %r)" % e
+        return "WARN swap: MISSING, create failed (%r) — DEFECT (#1235)" % e
     if getattr(r, "returncode", 1) != 0:
-        return "swap: FAILED (rc=%s: %s)" % (
-            r.returncode, (getattr(r, "stderr", "") or "").strip()[:200])
+        why = (getattr(r, "stderr", "") or getattr(r, "stdout", "") or "").strip()
+        return "WARN swap: MISSING, create failed (rc=%s: %s) — DEFECT (#1235)" % (
+            r.returncode, why[:200])
+    if meminfo_text is None or meminfo_after_text is not None:
+        if _read_meminfo(meminfo_after_text)[1] <= 0:
+            return "WARN swap: MISSING after the create step — DEFECT (#1235)"
     return "swap: applied (%dG %s)" % (size, SWAPFILE_PATH)
 
 
