@@ -204,6 +204,19 @@ def _members(procs, root):
     return out
 
 
+def _under_claude(procs, pid):
+    """True when an ancestor is a claude of the same uid in the same cgroup:
+    ``pid`` then moves with that session (pids recycle, so order proves nothing)."""
+    me, seen, p = procs[pid], set(), procs[pid][1]
+    while p in procs and p not in seen:
+        seen.add(p)
+        comm, ppid, uid, path = procs[p]
+        if comm == "claude" and uid == me[2] and path == me[3]:
+            return True
+        p = ppid
+    return False
+
+
 def _busctl_argv(unit, pids, caps_kb):
     """StartTransientUnit with PIDs: the call ``systemd-run --scope`` makes,
     for processes that already run."""
@@ -249,6 +262,8 @@ def adopt_unscoped_sessions(*, hostname=None, uid=None, proc_root="/proc",
     host = hostname if hostname is not None else socket.gethostname().split(".")[0]
     if host not in SCOPE_HOSTS:
         return []
+    if run is None and os.environ.get("PYTEST_CURRENT_TEST"):
+        return ["session-scope: skipped, the real busctl is refused under a test run (#1245)"]
     uid = os.getuid() if uid is None else uid
     m = re.search(r"^MemTotal:\s+(\d+)", meminfo_text if meminfo_text is not None
                   else (_read("/proc/meminfo") or ""), re.M)
@@ -272,7 +287,7 @@ def adopt_unscoped_sessions(*, hostname=None, uid=None, proc_root="/proc",
         if pid not in procs or pid in moved:   # gone, or moved with its parent
             continue
         comm, _pp, puid, path = procs[pid]
-        if comm != "claude" or puid != uid or not path:
+        if comm != "claude" or puid != uid or not path or _under_claude(procs, pid):
             continue
         if mem_max(path) != "max":
             capped += 1
