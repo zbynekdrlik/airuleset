@@ -154,6 +154,15 @@ class AdoptUncapped(unittest.TestCase):
         self.assertEqual(env.get("XDG_RUNTIME_DIR"), "/run/user/1000")
         self.assertEqual(env.get("DBUS_SESSION_BUS_ADDRESS"), "unix:path=/run/user/1000/bus")
 
+    def test_a_nested_claude_moves_with_its_parent_not_into_its_own_scope(self):
+        b = self.box
+        b.proc_add(103, "claude", 102, ANCHOR)        # a `claude -p` a tool started
+        lines = b.adopt()
+        self.assertEqual(len(b.calls), 1, lines)
+        self.assertEqual(_pids(b.calls[0][0]), ["100", "101", "102", "103"])
+        self.assertTrue(b.cgroup_of(103).endswith("airuleset-session-100.scope"))
+        self.assertIn("session-scope: 1 adopted, 0 already capped", lines)
+
     def test_capped_session_is_left_alone(self):
         b = self.box
         b.proc_add(300, "claude", 50, CAPPED)
