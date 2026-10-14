@@ -6,19 +6,21 @@ Install now ADOPTS every running uncapped `claude` of this account, with its
 descendants, into its own transient scope. The scope has the launcher's caps
 and OOMPolicy=continue, and it is created through systemd's StartTransientUnit
 with PIDs (busctl). The session is not restarted. A claude in a logind session
-scope cannot be moved by the user manager, so it is reported LOUD.
+scope moves too (the user manager moved one out on dev1, live probe).
 """
 import os
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import cli_session_scope as ss  # noqa: E402
 
 DEV1_KB = 7865772
+SMALL_KB = 3911564          # the controller's: the 2 GiB floor applies
 UID = 1000
 USER_SVC = "/user.slice/user-1000.slice/user@1000.service"
 ANCHOR = USER_SVC + "/app.slice/tmux-detach-anchor.service"
@@ -46,6 +48,10 @@ class _Box:
         self.fail = []          # queued (rc, err) answers for the next calls
         self.move = True        # the fake systemd really moves the pids
         self.on_call = None
+        self.lazy = False       # real systemd: the move lands after the call returns
+        self.memmax = True      # False: the new scope has no memory controller
+        self.pending = None
+        self.sleeps = 0
         self.cgroup(ANCHOR, "max")
         self.cgroup(CAPPED, "3221819392")
         self.cgroup(LOGIND, "max")
@@ -53,7 +59,8 @@ class _Box:
     def cgroup(self, path, mem_max):
         d = self.cg / path.lstrip("/")
         d.mkdir(parents=True, exist_ok=True)
-        (d / "memory.max").write_text(mem_max + "\n")
+        if mem_max is not None:
+            (d / "memory.max").write_text(mem_max + "\n")
 
     def proc_add(self, pid, comm, ppid, cgroup, uid=UID, cwd=None):
         d = self.proc / str(pid)
@@ -72,6 +79,34 @@ class _Box:
     def cgroup_of(self, pid):
         return (self.proc / str(pid) / "cgroup").read_text().strip()[3:]
 
+    _TYPES = {"Description": "s", "PIDs": "au", "MemoryMax": "t", "MemoryHigh": "t",
+              "MemorySwapMax": "t", "OOMPolicy": "s"}
+
+    def _parse(self, argv):
+        """Parse like busctl does for ``ssa(sv)a(sa(sv))``; None on any mismatch."""
+        head = ["busctl", "--user", "call", "org.freedesktop.systemd1",
+                "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+                "StartTransientUnit", "ssa(sv)a(sa(sv))"]
+        if argv[:8] != head or len(argv) < 11 or argv[9] != "fail":
+            return None
+        rest, props = argv[11:], {}
+        try:
+            for _ in range(int(argv[10])):
+                key, typ, rest = rest[0], rest[1], rest[2:]
+                if self._TYPES.get(key) != typ:
+                    return None
+                if typ == "au":
+                    n = int(rest[0])
+                    props[key], rest = [int(x) for x in rest[1:1 + n]], rest[1 + n:]
+                    if len(props[key]) != n:
+                        return None
+                else:
+                    props[key] = int(rest[0]) if typ == "t" else rest[0]
+                    rest = rest[1:]
+        except (IndexError, ValueError):
+            return None
+        return (argv[8], props) if rest == ["0"] else None
+
     def run(self, argv, env):
         self.calls.append((list(argv), dict(env)))
         if self.on_call:
@@ -79,24 +114,35 @@ class _Box:
         if self.fail:
             rc, err = self.fail.pop(0)
             return rc, "", err
-        unit = argv[argv.index("StartTransientUnit") + 2]
-        i = argv.index("PIDs")
-        n = int(argv[i + 2])
-        pids = argv[i + 3:i + 3 + n]
-        mx = argv[argv.index("MemoryMax") + 2]
+        parsed = self._parse(argv)
+        if parsed is None:
+            return 1, "", "Failed to parse message"
+        unit, props = parsed
         path = USER_SVC + "/app.slice/" + unit
-        self.cgroup(path, mx)
-        if self.move:
-            for p in pids:
-                (self.proc / p / "cgroup").write_text("0::%s\n" % path)
+        self.cgroup(path, str(props["MemoryMax"]) if self.memmax else None)
+        self.pending = (props["PIDs"], path)
+        if not self.lazy:
+            self._land()
         return 0, "o \"/org/freedesktop/systemd1/job/1\"\n", ""
 
-    def adopt(self, host="dev1", env=None):
+    def _land(self):
+        if self.pending and self.move:
+            pids, path = self.pending
+            for p in pids:
+                (self.proc / str(p) / "cgroup").write_text("0::%s\n" % path)
+        self.pending = None
+
+    def sleep(self, _s):
+        self.sleeps += 1
+        if self.lazy and self.sleeps == 2:
+            self._land()
+
+    def adopt(self, host="dev1", env=None, mem_kb=DEV1_KB, meminfo=None):
         return ss.adopt_unscoped_sessions(
             hostname=host, uid=UID, proc_root=str(self.proc),
             cgroup_root=str(self.cg),
-            meminfo_text="MemTotal:       %d kB\n" % DEV1_KB,
-            run=self.run, env={} if env is None else env, sleep=lambda s: None)
+            meminfo_text=meminfo if meminfo is not None else "MemTotal:       %d kB\n" % mem_kb,
+            run=self.run, env={} if env is None else env, sleep=self.sleep)
 
 
 def _pids(argv):
@@ -162,6 +208,63 @@ class AdoptUncapped(unittest.TestCase):
         self.assertEqual(_pids(b.calls[0][0]), ["100", "101", "102", "103"])
         self.assertTrue(b.cgroup_of(103).endswith("airuleset-session-100.scope"))
         self.assertIn("session-scope: 1 adopted, 0 already capped", lines)
+
+    def test_a_child_in_its_own_scope_or_of_another_uid_stays_put(self):
+        b = self.box
+        b.proc_add(104, "python", 101, CAPPED)        # a systemd-run --scope job
+        b.proc_add(105, "sudo", 101, ANCHOR, uid=0)   # setuid: not ours to move
+        b.adopt()
+        self.assertEqual(_pids(b.calls[0][0]), ["100", "101", "102"])
+        self.assertEqual(b.cgroup_of(104), CAPPED)
+        self.assertEqual(b.cgroup_of(105), ANCHOR)
+        self.assertEqual(b.adj(104), "200")
+
+    def test_the_move_may_land_after_the_call_returns(self):
+        self.box.lazy = True
+        lines = self.box.adopt()
+        self.assertTrue(any("adopted pid 100" in ln for ln in lines), lines)
+        self.assertFalse(any("WARN" in ln for ln in lines), lines)
+
+    def test_a_scope_without_a_memory_limit_is_a_defect(self):
+        self.box.memmax = False
+        lines = self.box.adopt()
+        self.assertTrue(any("WARN" in ln and "DEFECT (#1245)" in ln for ln in lines), lines)
+        self.assertFalse(any("adopted pid 100" in ln for ln in lines), lines)
+
+    def test_small_box_gets_the_2_gib_floor(self):
+        self.box.adopt(mem_kb=SMALL_KB)
+        argv = self.box.calls[0][0]
+        mx, hi, sw = _launcher_caps_bytes(SMALL_KB)
+        self.assertEqual(mx, 2 * 1024 * 1024 * 1024)
+        self.assertEqual(argv[argv.index("MemoryMax") + 2], str(mx))
+        self.assertEqual(argv[argv.index("MemoryHigh") + 2], str(hi))
+        self.assertEqual(argv[argv.index("MemorySwapMax") + 2], str(sw))
+
+    def test_a_present_bus_env_passes_through_unchanged(self):
+        given = {"XDG_RUNTIME_DIR": "/run/user/77", "PATH": "/p",
+                 "DBUS_SESSION_BUS_ADDRESS": "unix:path=/x/bus"}
+        self.box.adopt(env=given)
+        self.assertEqual(self.box.calls[0][1], given)
+
+    def test_no_env_given_inherits_the_process_environment(self):
+        with mock.patch.dict(os.environ, {"AIRULESET_T1245": "kept"}):
+            ss.adopt_unscoped_sessions(
+                hostname="dev1", uid=UID, proc_root=str(self.box.proc),
+                cgroup_root=str(self.box.cg), meminfo_text="MemTotal: %d kB\n" % DEV1_KB,
+                run=self.box.run, sleep=self.box.sleep)
+        self.assertEqual(self.box.calls[0][1].get("AIRULESET_T1245"), "kept")
+
+    def test_unreadable_memtotal_is_a_loud_line_and_no_call(self):
+        lines = self.box.adopt(meminfo="")
+        self.assertEqual(self.box.calls, [])
+        self.assertTrue(lines and "WARN" in lines[0] and "DEFECT (#1245)" in lines[0], lines)
+
+    def test_the_fake_rejects_a_malformed_call(self):
+        argv = ss._busctl_argv("x.scope", [1], (1, 1, 1))
+        self.assertIsNotNone(self.box._parse(argv))
+        for bad in (argv[:10] + ["5"] + argv[11:], argv[:-1],
+                    [a if a != "au" else "ai" for a in argv]):
+            self.assertIsNone(self.box._parse(bad), bad)
 
     def test_capped_session_is_left_alone(self):
         b = self.box
@@ -236,7 +339,9 @@ class InstallRunsTheAdoption(unittest.TestCase):
         src = (Path(__file__).resolve().parents[1] / "airuleset.py").read_text()
         body = src[src.index("def cmd_install("):]
         body = body[:body.index("\ndef ")]
-        self.assertIn("cli_session_scope.adopt_unscoped_sessions()", body)
+        call = body.index("cli_session_scope.adopt_unscoped_sessions()")
+        self.assertLess(body.index("provision_swap()"), call)
+        self.assertIn('print(f"  {line}")', body[call:call + 120])
 
 
 if __name__ == "__main__":
