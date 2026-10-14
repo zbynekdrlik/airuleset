@@ -338,7 +338,7 @@ def render_root_service():
         "Description=airuleset disk-guard root report (report-only, #841)\n"
         "\n"
         "[Service]\n"
-        "Type=oneshot\n"
+        "Type=oneshot\nNice=19\nIOSchedulingClass=idle\n"
         "ExecStart=/bin/bash %s\n" % REPORTER_SCRIPT_PATH
     )
 
@@ -681,7 +681,7 @@ def build_apply_script(drain=True, journal_max=None):
     #    duplicate log entry" rather than over-attributing to btmp/wtmp.
     parts.append(
         'if command -v logrotate >/dev/null 2>&1; then\n'
-        '    if logrotate --debug /etc/logrotate.conf 2>&1 | grep -i '
+        '    if { logrotate --debug /etc/logrotate.conf 2>&1 || true; } | grep -i '
         '"duplicate log entry" >/dev/null; then\n'
         '        echo "  ⚠ DISK-GUARD-ROOT VERIFY FAIL: a logrotate duplicate log '
         'entry — a log (likely btmp/wtmp) would silently NOT rotate; check '
@@ -829,11 +829,11 @@ def render_swap_setup_script(size_gb):
         "if [ \"$(swapon --show=NAME --noheadings 2>/dev/null | wc -l)\" -gt 0 ]; then\n"
         "  echo 'swap already active — skip'; exit 0\n"
         "fi\n"
-        "avail=$(df --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')\n"
-        "if [ -n \"$avail\" ] && [ \"$avail\" -lt %(need)d ]; then\n"
-        "  echo 'swap: skipped — insufficient free space on / (need %(needg)dG incl. headroom)'; exit 1\n"
-        "fi\n"
         "if [ ! -f %(p)s ]; then\n"
+        "  avail=$(df --output=avail / 2>/dev/null | tail -1 | tr -dc '0-9')\n"
+        "  if [ -n \"$avail\" ] && [ \"$avail\" -lt %(need)d ]; then\n"
+        "    echo 'swap: skipped — insufficient free space on / (need %(needg)dG incl. headroom)'; exit 1\n"
+        "  fi\n"
         "  fallocate -l %(n)dG %(p)s || dd if=/dev/zero of=%(p)s bs=1M count=%(mb)d\n"
         "fi\n"
         "chmod 600 %(p)s\n"
