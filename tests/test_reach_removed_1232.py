@@ -120,6 +120,8 @@ class TestTeardownRuns(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertRegex(calls, r"nft delete table inet airuleset_reach_fohmixer")
         self.assertIn("systemctl disable --now airuleset-reach-fohmixer.service", calls)
+        # a failed oneshot stays `not-found failed` after rm + daemon-reload
+        self.assertIn("systemctl reset-failed airuleset-reach-fohmixer.service", calls)
         self.assertFalse((etc / "airuleset" / "reach-fohmixer.nft").exists())
         self.assertFalse(
             (etc / "systemd" / "system" / "airuleset-reach-fohmixer.service").exists())
