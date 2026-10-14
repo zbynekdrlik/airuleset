@@ -3,6 +3,8 @@ paths:
   - "gates/**"
   - "cli_concurrency.py"
   - "goal_registry.py"
+  - "cli_dispatch_gate.py"
+  - "cli_lane_liveness.py"
 ---
 
 ### airuleset internals — gates/
