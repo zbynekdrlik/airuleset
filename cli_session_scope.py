@@ -168,8 +168,12 @@ def _read(path):
         return None
 
 
+YOUNG_S = 2                 # a younger child (a hook, a statusline) may exit mid-call
+LINGER_DIR = "/var/lib/systemd/linger"
+
+
 def _procs(proc_root):
-    """{pid: (comm, ppid, uid, cgroup v2 path)} for every readable process."""
+    """{pid: (comm, ppid, uid, cgroup v2 path, start ticks, VmRSS kB)}."""
     out = {}
     for name in os.listdir(proc_root):
         if not name.isdigit():
@@ -179,26 +183,33 @@ def _procs(proc_root):
         if not (stat and status and cg):
             continue
         try:
-            ppid = int(stat[stat.rindex(")") + 2:].split()[1])
+            fields = stat[stat.rindex(")") + 2:].split()
+            ppid = int(fields[1])
         except (ValueError, IndexError):
             continue
-        uid = next((int(ln.split()[1]) for ln in status.splitlines()
-                    if ln.startswith("Uid:")), None)
+        start = int(fields[19]) if len(fields) > 19 and fields[19].isdigit() else None
+        tag = {ln.split(":")[0]: ln.split()[1:] for ln in status.splitlines() if ":" in ln}
+        uid = int(tag["Uid"][0]) if tag.get("Uid") else None
+        rss = int(tag["VmRSS"][0]) if tag.get("VmRSS") else None
         path = next((ln[3:] for ln in cg.splitlines() if ln.startswith("0::")), None)
-        out[int(name)] = ((_read(d + "/comm") or "").strip(), ppid, uid, path)
+        out[int(name)] = ((_read(d + "/comm") or "").strip(), ppid, uid, path, start, rss)
     return out
 
 
-def _members(procs, root):
-    """``root`` + every descendant in ROOT'S cgroup with ROOT'S uid. A child
-    already in its own scope (or a setuid one) stays where it is."""
-    kids = {}
-    for pid, (_c, ppid, _u, _p) in procs.items():
-        kids.setdefault(ppid, []).append(pid)
+def _members(procs, root, uptime):
+    """``root`` + every descendant in ROOT'S cgroup with ROOT'S uid that is at
+    least ``YOUNG_S`` old (unknown age counts as old). A child already in its
+    own scope, a setuid one, or a short-lived one stays where it is."""
+    kids, clk = {}, os.sysconf("SC_CLK_TCK")
+    for pid, rec in procs.items():
+        kids.setdefault(rec[1], []).append(pid)
     out, todo = [root], [root]
     while todo:
         for k in kids.get(todo.pop(), ()):
-            if procs[k][2] == procs[root][2] and procs[k][3] == procs[root][3]:
+            rec, top = procs[k], procs[root]
+            young = (uptime is not None and rec[4] is not None
+                     and uptime - rec[4] / clk < YOUNG_S)
+            if rec[2] == top[2] and rec[3] == top[3] and not young:
                 out.append(k)
             todo.append(k)
     return out
@@ -210,10 +221,10 @@ def _under_claude(procs, pid):
     me, seen, p = procs[pid], set(), procs[pid][1]
     while p in procs and p not in seen:
         seen.add(p)
-        comm, ppid, uid, path = procs[p]
-        if comm == "claude" and uid == me[2] and path == me[3]:
+        rec = procs[p]
+        if rec[0] == "claude" and rec[2] == me[2] and rec[3] == me[3]:
             return True
-        p = ppid
+        p = rec[1]
     return False
 
 
@@ -239,24 +250,32 @@ def _run(argv, env):
     return r.returncode, r.stdout, r.stderr
 
 
-def adopt_unscoped_sessions(*, hostname=None, uid=None, proc_root="/proc",
-                            cgroup_root="/sys/fs/cgroup", meminfo_text=None,
-                            run=None, env=None, sleep=None):
+def adopt_unscoped_sessions(*, hostname=None, uid=None, user=None, proc_root="/proc",
+                            cgroup_root="/sys/fs/cgroup", linger_dir=LINGER_DIR,
+                            meminfo_text=None, run=None, env=None, sleep=None):
     """Move every running claude of this uid whose cgroup is uncapped
     (``memory.max`` = max), with its descendants, into its own
     ``airuleset-session-<pid>.scope`` with the launcher's caps. The session is
     not restarted; the pid and the pane stay. Returns the install lines.
 
-    * Off ``SCOPE_HOSTS``: nothing, no line.
+    * Off ``SCOPE_HOSTS``: nothing, no line. Under pytest the real busctl is
+      refused, so a full ``cmd_install`` test never moves live sessions.
     * Charges already made stay with the old cgroup (cgroup v2 moves none), so
-      the cap applies to what the session allocates from now on, its tools'
-      included; no immediate OOM.
-    * A claude in a logind ``session-N.scope`` (an ssh login) moves too: the
-      user manager moved one out on dev1 (systemd 255, live probe).
+      nothing is OOM-killed at the move; pages claude frees and touches again
+      are charged to the scope over time, as for a launcher session.
+    * A claude whose RSS is already past half of MemoryHigh is skipped (WARN):
+      capping it now could throttle the owner's pane. Its next launch caps it.
+    * A claude in a logind ``session-N.scope`` (an ssh login) moves only when
+      the account lingers. The scope lives under ``user@<uid>.service``, which
+      without linger stops after the last login and would kill the session.
+    * Children younger than ``YOUNG_S`` stay behind: a hook that exits between
+      the scan and the call fails the whole call with ``No such process``.
+      Such a call is retried with a fresh scan, up to 3 attempts.
     * The descendants get the tool ``oom_score_adj``. FUTURE tool calls of an
       adopted session keep claude's own value (its env predates ``BASH_ENV``),
       so the kernel picks the biggest process in the scope.
-    * Every failure is a ``WARN … DEFECT (#1245)`` line, never an exception."""
+    * Every failure is a ``WARN … DEFECT (#1245)`` line, never an exception. A
+      bus-level failure (busctl missing, bus down) stops the loop at once."""
     import socket
     import time
     host = hostname if hostname is not None else socket.gethostname().split(".")[0]
@@ -265,6 +284,12 @@ def adopt_unscoped_sessions(*, hostname=None, uid=None, proc_root="/proc",
     if run is None and os.environ.get("PYTEST_CURRENT_TEST"):
         return ["session-scope: skipped, the real busctl is refused under a test run (#1245)"]
     uid = os.getuid() if uid is None else uid
+    if user is None:
+        import pwd
+        try:
+            user = pwd.getpwuid(uid).pw_name
+        except KeyError:
+            user = str(uid)
     m = re.search(r"^MemTotal:\s+(\d+)", meminfo_text if meminfo_text is not None
                   else (_read("/proc/meminfo") or ""), re.M)
     if not m:
@@ -277,36 +302,66 @@ def adopt_unscoped_sessions(*, hostname=None, uid=None, proc_root="/proc",
         env["XDG_RUNTIME_DIR"] = "/run/user/%d" % uid
     if not env.get("DBUS_SESSION_BUS_ADDRESS"):
         env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=%s/bus" % env["XDG_RUNTIME_DIR"]
+    user_mgr = "/user.slice/user-%d.slice/user@%d.service/" % (uid, uid)
+    lingers = os.path.exists(os.path.join(linger_dir, user))
 
     def mem_max(path):
         return (_read(cgroup_root + path + "/memory.max") or "max").strip()
 
-    lines, adopted, capped, moved = [], 0, 0, set()
+    def uptime():
+        try:
+            return float((_read(proc_root + "/uptime") or "").split()[0])
+        except (IndexError, ValueError):
+            return None
+
+    lines, adopted, capped, cands = [], 0, 0, []
     procs = _procs(proc_root)
     for pid in sorted(procs):
-        if pid not in procs or pid in moved:   # gone, or moved with its parent
-            continue
-        comm, _pp, puid, path = procs[pid]
+        comm, _pp, puid, path = procs[pid][:4]
         if comm != "claude" or puid != uid or not path or _under_claude(procs, pid):
             continue
         if mem_max(path) != "max":
             capped += 1
+        else:
+            cands.append(pid)
+    for i, pid in enumerate(cands):
+        if pid not in procs:
             continue
+        path, rss = procs[pid][3], procs[pid][5]
         try:
             label = os.path.basename(os.readlink("%s/%d/cwd" % (proc_root, pid)))
         except OSError:
             label = "?"
         where = path.rsplit("/", 1)[-1]
+        if not path.startswith(user_mgr) and not lingers:
+            lines.append("session-scope: WARN pid %d (%s) uncapped in %s: %s does not "
+                         "linger, so a scope under the user manager could die with it; "
+                         "capped at its next launch (#1245)" % (pid, label, where, user))
+            continue
+        if rss is not None and rss > caps[1] // 2:
+            lines.append("session-scope: WARN pid %d (%s) uncapped: claude RSS %dM is "
+                         "past half of MemoryHigh (%dM); capped at its next launch (#1245)"
+                         % (pid, label, rss // 1024, caps[1] // 2048))
+            continue
         unit = "airuleset-session-%d.scope" % pid
-        err = ""
-        for attempt in (1, 2):
-            members = _members(procs, pid)
+        for _attempt in range(3):
+            members = _members(procs, pid, uptime())
             rc, _out, err = run(_busctl_argv(unit, members, caps), env)
-            if rc == 0 or attempt == 2 or "No such process" not in err:
+            if rc == 0 or "No such process" not in err:
                 break
-            procs = _procs(proc_root)       # a child exited between list and call
+            procs = _procs(proc_root)       # a child exited between scan and call
             if pid not in procs:
                 break
+        if pid not in procs:
+            lines.append("session-scope: pid %d (%s) exited before the move" % (pid, label))
+            continue
+        if rc != 0 and "No such process" not in err:
+            lines.append("session-scope: WARN pid %d (%s) still uncapped in %s: %s "
+                         "— DEFECT (#1245)" % (pid, label, where, err.strip()[:160]))
+            if cands[i + 1:]:
+                lines.append("session-scope: WARN pid(s) %s not tried after the failure "
+                             "above (#1245)" % ", ".join(map(str, cands[i + 1:])))
+            break
         if rc == 0:
             for _ in range(10):
                 now = (_read("%s/%d/cgroup" % (proc_root, pid)) or "").strip()[3:]
@@ -326,9 +381,10 @@ def adopt_unscoped_sessions(*, hostname=None, uid=None, proc_root="/proc",
             except OSError:
                 pass                        # it exited; nothing left to rank
         adopted += 1
-        moved.update(members)
-        lines.append("session-scope: adopted pid %d (%s) + %d child process(es) into "
-                     "%s (MemoryMax=%dK, OOMPolicy=continue)"
-                     % (pid, label, len(members) - 1, unit, caps[0]))
+        kids = list(dict.fromkeys(procs[k][0] for k in members[1:] if k in procs))
+        lines.append("session-scope: adopted pid %d (%s, claude RSS %s) + %d child "
+                     "process(es) %s into %s (MemoryMax=%dK, OOMPolicy=continue)"
+                     % (pid, label, "%dM" % (rss // 1024) if rss is not None else "?",
+                        len(members) - 1, kids[:6], unit, caps[0]))
     lines.append("session-scope: %d adopted, %d already capped" % (adopted, capped))
     return lines
