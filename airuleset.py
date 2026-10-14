@@ -1803,19 +1803,19 @@ def cmd_install(args):
     except Exception as e:
         print(f"  model-gateway install error (non-fatal): {e}", file=sys.stderr)
 
-    # --- 3b-quinque-quater. Managed swap (#992/#993): every managed box with
-    # NO swap gets a /swapfile sized = RAM (clamped [2,8] GB). Idempotent,
-    # sudo-`-n`-gated, LOCAL, non-fatal — the #992 controller-OOM fix as a
-    # provisioning step rather than a manual intervention. Runs AFTER the
-    # volume STATUS line (#999); the actual relocation that frees space is the
-    # explicit `volume --apply` operator step, so once that has been run swap's
-    # free-space guard sees the freed space when it computes its target. The
-    # swap step stops NO service, so it stays in install. ---
+    # --- 3b-quinque-quater. Managed swap (#992/#993): a swapless box gets a /swapfile
+    # (RAM, [2,8] GB; sudo -n, non-fatal). Then #1245: an uncapped claude gets a scope. ---
     try:
         from cli_disk_guard_root import provision_swap
         print(f"  {provision_swap()}")
     except Exception as e:
         print(f"  swap provisioning error (non-fatal): {e}", file=sys.stderr)
+    try:
+        import cli_session_scope
+        for line in cli_session_scope.adopt_unscoped_sessions():
+            print(f"  {line}")
+    except Exception as e:
+        print(f"  session-scope adoption error (non-fatal): {e}", file=sys.stderr)
 
     # --- 3b-quinque-ter. Managed DNS records (#983): controller-only,
     # idempotent upsert of the proxied CNAME for claudy.newlevel.media and

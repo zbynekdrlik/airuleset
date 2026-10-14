@@ -50,7 +50,13 @@ Known consequences (review, 2026-10-13):
 The framework is systemd's cgroup v2 resource control and the kernel memcg OOM
 killer, the same mechanism ``cli_resource_guards`` applies per user on
 shared-stream boxes. Nothing here polls or kills.
+
+#1245: a cap placed at launch never reached a session that was already running
+(dev1's 5th freeze: a 5.6 GB tool in a session from 11.10.). Install therefore
+ADOPTS every running uncapped claude of this account, with its descendants, into
+its own scope with the same caps (``adopt_unscoped_sessions``).
 """
+import os
 import re
 
 # The workstations a runaway froze (#1224); data, so another box is one entry.
@@ -146,3 +152,167 @@ def write_tool_oom_env(directory):
     tmp.write_text(render_tool_oom_env())
     os.replace(tmp, path)       # a live tool call never sources a half-written file
     return path
+
+
+def _caps_kb(mem_kb):
+    """(MemoryMax, MemoryHigh, MemorySwapMax) in KiB: the launcher's bash math."""
+    mx = max(mem_kb * MAX_PERCENT // 100, FLOOR_KB)
+    return mx, mx * HIGH_PERCENT // 100, mem_kb * SWAP_PERCENT // 100
+
+
+def _read(path):
+    try:
+        with open(path) as fh:
+            return fh.read()
+    except OSError:
+        return None
+
+
+def _procs(proc_root):
+    """{pid: (comm, ppid, uid, cgroup v2 path)} for every readable process."""
+    out = {}
+    for name in os.listdir(proc_root):
+        if not name.isdigit():
+            continue
+        d = os.path.join(proc_root, name)
+        stat, status, cg = _read(d + "/stat"), _read(d + "/status"), _read(d + "/cgroup")
+        if not (stat and status and cg):
+            continue
+        try:
+            ppid = int(stat[stat.rindex(")") + 2:].split()[1])
+        except (ValueError, IndexError):
+            continue
+        uid = next((int(ln.split()[1]) for ln in status.splitlines()
+                    if ln.startswith("Uid:")), None)
+        path = next((ln[3:] for ln in cg.splitlines() if ln.startswith("0::")), None)
+        out[int(name)] = ((_read(d + "/comm") or "").strip(), ppid, uid, path)
+    return out
+
+
+def _members(procs, root):
+    """``root`` + every descendant in ROOT'S cgroup with ROOT'S uid. A child
+    already in its own scope (or a setuid one) stays where it is."""
+    kids = {}
+    for pid, (_c, ppid, _u, _p) in procs.items():
+        kids.setdefault(ppid, []).append(pid)
+    out, todo = [root], [root]
+    while todo:
+        for k in kids.get(todo.pop(), ()):
+            if procs[k][2] == procs[root][2] and procs[k][3] == procs[root][3]:
+                out.append(k)
+            todo.append(k)
+    return out
+
+
+def _busctl_argv(unit, pids, caps_kb):
+    """StartTransientUnit with PIDs: the call ``systemd-run --scope`` makes,
+    for processes that already run."""
+    mx, hi, sw = (k * 1024 for k in caps_kb)
+    return (["busctl", "--user", "call", "org.freedesktop.systemd1",
+             "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager",
+             "StartTransientUnit", "ssa(sv)a(sa(sv))", unit, "fail", "6",
+             "Description", "s", "airuleset #1245: adopted Claude session %d" % pids[0],
+             "PIDs", "au", str(len(pids))] + [str(p) for p in pids]
+            + ["MemoryMax", "t", str(mx), "MemoryHigh", "t", str(hi),
+               "MemorySwapMax", "t", str(sw), "OOMPolicy", "s", "continue", "0"])
+
+
+def _run(argv, env):
+    import subprocess
+    try:
+        r = subprocess.run(argv, env=env, capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return 1, "", str(e)
+    return r.returncode, r.stdout, r.stderr
+
+
+def adopt_unscoped_sessions(*, hostname=None, uid=None, proc_root="/proc",
+                            cgroup_root="/sys/fs/cgroup", meminfo_text=None,
+                            run=None, env=None, sleep=None):
+    """Move every running claude of this uid whose cgroup is uncapped
+    (``memory.max`` = max), with its descendants, into its own
+    ``airuleset-session-<pid>.scope`` with the launcher's caps. The session is
+    not restarted; the pid and the pane stay. Returns the install lines.
+
+    * Off ``SCOPE_HOSTS``: nothing, no line.
+    * Charges already made stay with the old cgroup (cgroup v2 moves none), so
+      the cap applies to what the session allocates from now on, its tools'
+      included; no immediate OOM.
+    * A claude in a logind ``session-N.scope`` (an ssh login) moves too: the
+      user manager moved one out on dev1 (systemd 255, live probe).
+    * The descendants get the tool ``oom_score_adj``. FUTURE tool calls of an
+      adopted session keep claude's own value (its env predates ``BASH_ENV``),
+      so the kernel picks the biggest process in the scope.
+    * Every failure is a ``WARN … DEFECT (#1245)`` line, never an exception."""
+    import socket
+    import time
+    host = hostname if hostname is not None else socket.gethostname().split(".")[0]
+    if host not in SCOPE_HOSTS:
+        return []
+    uid = os.getuid() if uid is None else uid
+    m = re.search(r"^MemTotal:\s+(\d+)", meminfo_text if meminfo_text is not None
+                  else (_read("/proc/meminfo") or ""), re.M)
+    if not m:
+        return ["session-scope: WARN cannot read MemTotal, running sessions "
+                "not adopted — DEFECT (#1245)"]
+    caps = _caps_kb(int(m.group(1)))
+    run, sleep = run or _run, sleep or time.sleep
+    env = dict(os.environ if env is None else env)
+    if not env.get("XDG_RUNTIME_DIR"):          # an ssh push may carry none
+        env["XDG_RUNTIME_DIR"] = "/run/user/%d" % uid
+    if not env.get("DBUS_SESSION_BUS_ADDRESS"):
+        env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=%s/bus" % env["XDG_RUNTIME_DIR"]
+
+    def mem_max(path):
+        return (_read(cgroup_root + path + "/memory.max") or "max").strip()
+
+    lines, adopted, capped = [], 0, 0
+    procs = _procs(proc_root)
+    for pid in sorted(procs):
+        if pid not in procs:                # gone since a retry re-read the list
+            continue
+        comm, _pp, puid, path = procs[pid]
+        if comm != "claude" or puid != uid or not path:
+            continue
+        if mem_max(path) != "max":
+            capped += 1
+            continue
+        try:
+            label = os.path.basename(os.readlink("%s/%d/cwd" % (proc_root, pid)))
+        except OSError:
+            label = "?"
+        where = path.rsplit("/", 1)[-1]
+        unit = "airuleset-session-%d.scope" % pid
+        err = ""
+        for attempt in (1, 2):
+            members = _members(procs, pid)
+            rc, _out, err = run(_busctl_argv(unit, members, caps), env)
+            if rc == 0 or attempt == 2 or "No such process" not in err:
+                break
+            procs = _procs(proc_root)       # a child exited between list and call
+            if pid not in procs:
+                break
+        if rc == 0:
+            for _ in range(10):
+                now = (_read("%s/%d/cgroup" % (proc_root, pid)) or "").strip()[3:]
+                if now.endswith("/" + unit) and mem_max(now) != "max":
+                    break
+                sleep(0.2)
+            else:
+                rc, err = 1, "the call returned but the pid is still in %s" % where
+        if rc != 0:
+            lines.append("session-scope: WARN pid %d (%s) still uncapped in %s: %s "
+                         "— DEFECT (#1245)" % (pid, label, where, err.strip()[:160]))
+            continue
+        for k in members[1:]:
+            try:
+                with open("%s/%d/oom_score_adj" % (proc_root, k), "w") as fh:
+                    fh.write("%d\n" % TOOL_OOM_SCORE_ADJ)
+            except OSError:
+                pass                        # it exited; nothing left to rank
+        adopted += 1
+        lines.append("session-scope: adopted pid %d (%s) + %d child process(es) into "
+                     "%s (MemoryMax=%dK, OOMPolicy=continue)"
+                     % (pid, label, len(members) - 1, unit, caps[0]))
+    lines.append("session-scope: %d adopted, %d already capped" % (adopted, capped))
+    return lines
