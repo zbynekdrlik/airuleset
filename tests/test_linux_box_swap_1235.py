@@ -102,6 +102,12 @@ class TestFleetSwapIsLoud(unittest.TestCase):
         self.assertIn("MISSING", line)
         self.assertIn("DEFECT", line)
 
+    def test_free_space_is_checked_only_when_a_file_must_be_created(self):
+        # review B: an inactive full-size /swapfile needs only swapon
+        script = g.render_swap_setup_script(8)
+        self.assertGreater(script.index("insufficient free space"),
+                           script.index("if [ ! -f %s ]" % g.SWAPFILE_PATH))
+
     def test_the_low_disk_skip_exits_non_zero(self):
         script = g.render_swap_setup_script(8)
         skip = script.split("insufficient free space", 1)[1].split("\n", 1)[0]
@@ -124,13 +130,19 @@ class TestSwapTriggers(unittest.TestCase):
         for cmd in ("swapon --show", "sudo mkswap /swapfile",
                     "ssh root@box 'free -h'", "dmesg | grep -i oom-kill",
                     "journalctl -k | grep 'Out of memory'",
-                    "hcloud server create --name box --type cx33"):
+                    "hcloud server create --name box --type cx33",
+                    # review B of the fixes: case and recall
+                    "dmesg -T | grep -i oom", "cat /proc/swaps", "swapoff -a",
+                    'journalctl -k | grep -i "out of memory"',
+                    "sudo fallocate -l 4G /swapfile", "ssh box free"):
             self.assertTrue(self._fires("Bash", {"command": cmd}), cmd)
 
     def test_writing_a_provisioning_file(self):
         for path in ("/home/u/devel/p/scripts/provision-box.sh",
                      "/home/u/devel/p/deploy/user-data",
-                     "/home/u/devel/p/cloud-config.yaml"):
+                     "/home/u/devel/p/cloud-config.yaml",
+                     "/home/u/devel/p/ansible/roles/base/tasks/main.yml",
+                     "/home/u/devel/p/scripts/avsync-dev2-install.sh"):
             self.assertTrue(self._fires("Write", {"file_path": path, "content": "x"}),
                             path)
 
