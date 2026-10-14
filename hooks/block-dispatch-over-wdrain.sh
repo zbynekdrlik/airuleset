@@ -163,7 +163,7 @@ fi
 #
 # #1229 — several lanes dispatched in ONE message run their hooks before any
 # worktree exists, so each sees 0 lanes. An allowed sequential dispatch claims
-# the repo's pending slot (atomic, 90 s) on this hook's SUCCESSFUL exit only,
+# the repo's pending slot (flock, 20 s) on this hook's SUCCESSFUL exit only,
 # so a dispatch the W-drain gate below refuses never holds it.
 SEQ_REPO=""
 _claim_lane_slot() {
@@ -179,19 +179,22 @@ sys.exit(0 if cli_dispatch_gate.claim_pending_lane(sys.argv[1]) else 3)' \
         {
             echo "BLOCKED: sequential-mode gate — this target runs in 'sequential' mode (lane cap = 1)."
             echo ""
-            echo "  Another worktree lane was dispatched from this repo less than 90 s ago"
+            echo "  Another worktree lane was dispatched from this repo less than 20 s ago"
             echo "  (several lanes in one message, or a quick retry). Its worktree may not"
             echo "  exist yet, so the live count cannot see it. Dispatch ONE lane, let it"
             echo "  return and integrate it, then the next. If that earlier dispatch was"
-            echo "  refused by another gate, retry after 90 s."
+            echo "  refused by another gate, retry after 20 s. Do NOT drop isolation to"
+            echo "  get around the cap: a 2nd implementation lane in the shared checkout is"
+            echo "  the overlap this gate prevents."
         } >&2
         exit 2
     fi
     exit 0
 }
 if [ -n "$REPO_DIR" ]; then
-    SEQ_REPORT=$(AIRULESET_GATE_CWD="$CWD" PYTHONPATH="$REPO_DIR" python3 -P -c \
-'import os, cli_dispatch_gate; print(cli_dispatch_gate.dispatch_gate_report(os.environ.get("AIRULESET_GATE_CWD","")))' \
+    SEQ_REPORT=$(AIRULESET_GATE_CWD="$CWD" AIRULESET_GATE_PROJECT="${CLAUDE_PROJECT_DIR:-}" \
+        PYTHONPATH="$REPO_DIR" python3 -P -c \
+'import os, cli_dispatch_gate; print(cli_dispatch_gate.dispatch_gate_report(os.environ.get("AIRULESET_GATE_CWD",""), project=os.environ.get("AIRULESET_GATE_PROJECT") or None))' \
         2>/dev/null || echo "allow|error|0|open|")
     SEQ_LINE=${SEQ_REPORT%%$'\n'*}
     SEQ_VERDICT=${SEQ_LINE%%|*}

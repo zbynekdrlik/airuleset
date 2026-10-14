@@ -11,6 +11,7 @@ Dependency-light like ``cli_concurrency``: stdlib + ``cli_concurrency``;
 ``cli_lane_liveness`` is imported lazily inside the report (the gate hot path
 of a non-sequential pane never loads it).
 """
+import fcntl
 import hashlib
 import os
 import time
@@ -19,9 +20,10 @@ import cli_concurrency
 
 
 # #1229 — how long a just-allowed worktree dispatch holds the repo's pending
-# slot: long enough for Claude Code to create its worktree, after which the
-# live-lane count sees it.
-PENDING_LANE_TTL_S = 90
+# slot. Hooks of one message start together, so a short window covers the
+# same-message race; it also bounds how long a dispatch another gate refused
+# keeps a corrected retry waiting (re-review round 3).
+PENDING_LANE_TTL_S = 20
 
 
 def _inside(child, parent):
@@ -29,7 +31,7 @@ def _inside(child, parent):
                              or child.startswith(parent.rstrip(os.sep) + os.sep))
 
 
-def dispatch_gate_report(cwd, run=None):
+def dispatch_gate_report(cwd, run=None, project=None):
     """#1229 — the hook's sequential verdict, for ANY worktree lane (an
     autopilot-worker or any subagent dispatched with ``isolation: worktree``).
 
@@ -42,9 +44,13 @@ def dispatch_gate_report(cwd, run=None):
     * ``why=claim`` — allow: the hook claims ``<repo>``'s pending slot
       (``claim_pending_lane``) once every gate of the hook has allowed.
 
-    The session's OWN worktree (a main working inside ``EnterWorktree`` /
-    ``claude -w``) is never one of its lanes. ``<repo>`` is the shared git
-    common dir, so every worktree of one repository claims the same slot."""
+    Lanes are classified from the MAIN worktree, whatever subdir or lane the
+    session's shell sits in, so transcript liveness is read where Claude Code
+    writes it. ``project`` (the hook's ``CLAUDE_PROJECT_DIR``) is the session's
+    own root: a main started inside a worktree (``claude -w``) does not count
+    its own checkout, while a ``cd`` into a worker's lane hides nothing.
+    ``<repo>`` is the shared git common dir, so every worktree of one
+    repository claims the same slot."""
     try:
         mode = cli_concurrency.resolve_mode(cwd)
     except Exception:  # noqa: BLE001 — cannot resolve => fail open
@@ -59,9 +65,10 @@ def dispatch_gate_report(cwd, run=None):
         repo = (r.stdout or "").strip() if getattr(r, "returncode", 1) == 0 else ""
         if not repo:
             return "allow|sequential|0|open|"
-        here = os.path.realpath(cwd)
-        lanes = [lane for lane in cli_lane_liveness.gather_live_lanes(cwd, run=run)
-                 if not _inside(here, os.path.realpath(lane.get("path") or ""))]
+        main = os.path.dirname(repo) if os.path.basename(repo) == ".git" else cwd
+        own = os.path.realpath(project) if project else ""
+        lanes = [lane for lane in cli_lane_liveness.gather_live_lanes(main, run=run)
+                 if not (own and _inside(own, os.path.realpath(lane.get("path") or "")))]
     except Exception:  # noqa: BLE001 — cannot count => fail open
         return "allow|sequential|0|open|"
     if lanes:
@@ -76,34 +83,30 @@ def claim_pending_lane(repo, home=None, now=None):
     """#1229 — claim ``repo``'s pending-lane slot for ``PENDING_LANE_TTL_S``.
 
     Two worktree dispatches in ONE assistant message run their PreToolUse hooks
-    before either worktree exists, so the live count is 0 for both. The first
-    allowed dispatch's claim (an atomic ``mkdir``) makes the second fail.
+    before either worktree exists, so the live count is 0 for both. The check
+    and the write of the slot file's mtime happen under ``flock``, so of two
+    concurrent dispatches exactly one claims it, even over an expired slot.
     Returns True when claimed (the dispatch may go) and False when a fresh claim
     already exists (refuse). A filesystem error returns True: fail OPEN."""
     base = os.path.join(home or os.path.expanduser("~"), ".claude", "lane-pending")
     slot = os.path.join(base, hashlib.sha1(
-        os.path.realpath(repo).encode()).hexdigest()[:12])
-    now = time.time() if now is None else now
+        os.path.realpath(repo).encode()).hexdigest()[:12] + ".claim")
     try:
         os.makedirs(base, exist_ok=True)
-        os.mkdir(slot)
-        return True
-    except FileExistsError:
-        pass
+        fd = os.open(slot, os.O_RDWR | os.O_CREAT, 0o600)
     except OSError:
         return True
     try:
-        if now - os.stat(slot).st_mtime < PENDING_LANE_TTL_S:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        now = time.time() if now is None else now   # read AFTER the lock
+        st = os.fstat(fd)
+        if st.st_size and abs(now - st.st_mtime) < PENDING_LANE_TTL_S:
             return False
-        os.rmdir(slot)
-    except FileNotFoundError:
-        pass
+        os.ftruncate(fd, 0)
+        os.write(fd, b"%d\n" % int(now))
+        os.utime(slot, (now, now))
+        return True
     except OSError:
         return True
-    try:
-        os.mkdir(slot)
-        return True
-    except FileExistsError:
-        return False
-    except OSError:
-        return True
+    finally:
+        os.close(fd)

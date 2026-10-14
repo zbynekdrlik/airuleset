@@ -475,12 +475,14 @@ def classify_lanes(repo_root, run=None, *, now=None, live_worker_ids=None,
         if not branch:
             continue
         target = _lane_target(repo_root, branch, base_branch, run)
-        # Evidence BEFORE the merged check (#1229): a lane with no commit yet
-        # sits on its fork point, an ancestor of the target, and read `merged`
-        # while its agent was working in it.
+        # A live worker TRANSCRIPT beats the merged check (#1229): a lane with
+        # no commit yet sits on its fork point, an ancestor of the target, and
+        # read `merged` while its agent worked in it. A process cwd does not:
+        # leaked processes sit in merged worktrees for weeks (re-review 3).
         wt_base = os.path.basename(path.rstrip(os.sep))
-        alive = (wt_base in live_worker_ids) or _path_has_proc(path, proc_cwds)
-        if not alive and (_lane_is_merged(repo_root, branch, target, run) or (
+        alive_tx = wt_base in live_worker_ids
+        alive = alive_tx or _path_has_proc(path, proc_cwds)
+        if not alive_tx and (_lane_is_merged(repo_root, branch, target, run) or (
                 dev_ref and target == base_branch
                 and _lane_is_merged(repo_root, branch, dev_ref, run))):
             out.append({"ref": branch, "path": path, "files": [],
