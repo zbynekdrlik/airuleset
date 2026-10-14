@@ -44,7 +44,7 @@ python3 ~/devel/airuleset/airuleset.py onboard-project <path> --audit   # one pr
 ## Rules
 
 - **Own account per project (#1184, owner 2026-09-29).** The CLI onboards ONLY into a DECLARED project account on its declared host, and only AS that account. It refuses `newlevel`, the control accounts and any undeclared account. `--legacy-ok <ticket>` is accepted only as bookkeeping for a project that is already registered. To add a project:
-  1. Declare the account in `cli_account_bootstrap.SERVICE_ACCOUNTS`: host; sudo (default NO); reach and secrets (default none); webterm humans.
+  1. Declare the account in `cli_account_bootstrap.SERVICE_ACCOUNTS`: host; sudo (default NO); secrets (default none); webterm humans (no network reach rule, #1232).
   2. Have root run `airuleset.py account-bootstrap --render <acct>` on that host.
   3. Add its `<acct>@<box>` `REMOTE_HOSTS` entry (the claudy precedent).
   4. Run `onboard-project <path> --host <acct>@<box>`.

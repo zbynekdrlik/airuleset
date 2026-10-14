@@ -1,11 +1,10 @@
 """Privilege-boundary steps of the project-account root bootstrap (#1184).
 
-A separate uid is only a boundary when nothing lets it BECOME another uid or
-reach another box with a credential it was never declared. On a host that
+A separate uid is only a boundary when nothing lets it BECOME another uid. On a host that
 still runs the legacy shared ``newlevel`` account (weak shared password,
 NOPASSWD sudo, every fleet key), a shell in a project account could otherwise
-``su - newlevel`` + ``sudo -i``, ``pkexec`` with newlevel's password, or
-``ssh newlevel@<any box>`` with the shared password (#1184 review 1 🔴). These
+``su - newlevel`` + ``sudo -i`` or ``pkexec`` with newlevel's password
+(#1184 review 1 🔴). These
 renderers close THOSE paths for the declared account ONLY — nothing they write
 changes what any OTHER account may do — and they all run BEFORE the account's
 authorized_keys land, so a failed step never leaves a loginable, unbounded
@@ -20,31 +19,21 @@ account (#1184 review 2):
     the declared ``/usr/local/sbin/<acct>-*`` project scripts with no
     arguments, each proven root-owned and not writable by the account
     (``render_sudo_path_checks``);
-  * ``render_reach_step`` — the declared ``reach`` as an nftables egress rule
-    keyed on the account's uid: new outbound ssh (tcp/22, loopback included)
-    is rejected except to the declared boxes and (#1186) the declared private
-    LAN hosts, each accepted on exactly its declared ports BEFORE the reject;
-    a LAN host that is an address of the bootstrap host itself is refused
-    (``render_reach_self_address_check``); applied now, enabled, and
-    re-applied whenever nftables.service restarts or reloads;
+  * ``render_reach_teardown_step`` — (#1232) removes a pre-#1232 per-uid ssh
+    egress table, its unit and nft file; no account gets one any more;
   * ``render_lockout_step`` — the account joins ``airuleset-project``, which
     ``pam_wheel`` (deny) and a polkit rule bar from ``su`` and polkit admin;
   * ``render_isolation_check_step`` — other accounts' homes must not be
     world-readable/traversable (fail LOUD); a ``/proc`` without ``hidepid``
     is reported.
 
-What this does NOT close (honest residual, a follow-up in the lane return):
-non-ssh traffic from the uid (https for the repo and the Claude API) and any
-password-authenticated NON-22 service on loopback or the tailnet. #1186 adds
-two: a declared LAN host's non-22 ports are declared, not restricted (the
-reject is tcp/22 only); and a declared LAN host the account can log into is a
-possible HOP (``ssh -J``/``-L`` through it) — the next connection leaves from
-THAT host, outside this uid's rule, so it can reach any password-shared box's
-LAN address, the bootstrap host's own ``newlevel`` included (NOPASSWD sudo).
-Neither the own-address check nor the ``fib`` rule sees it. So an account with
-a LAN login is a GO-LIVE GATE of its migration, never of this render: the
-host's shared ``newlevel`` must refuse password ssh from the LAN, or its
-password must be proven different from every credential the account holds.
+What this does NOT close (honest residual): network egress. #1232 (owner
+ruling 14.10.2026) removed the per-uid ssh egress rule: it was routed around
+through any reachable host and pushed sessions to riskier detours. A project
+account can therefore open ssh to any host; reaching another account still
+needs that account's credential. The remaining exposure is a host whose
+shared ``newlevel`` still accepts PASSWORD ssh: refusing password auth there
+closes it without a network rule.
 
 Pure string renderers (stdlib only). ``cli_account_bootstrap`` validates every
 interpolated value before calling them.
@@ -181,7 +170,7 @@ def render_account_marker_step():
             printf '%s\\n' "created by airuleset account-bootstrap (#1184)" > "$MARKER"
         elif [ ! -f "$MARKER" ]; then
             echo "ERROR: $ACCOUNT existed before and has no $MARKER — refusing to rewrite a foreign account." >&2
-            echo "       Adopt it ONLY if it IS this declared project account and its declared reach/sudo match" >&2
+            echo "       Adopt it ONLY if it IS this declared project account and its declared sudo matches" >&2
             echo "       what it really needs (a wrong declaration cuts its access): touch $MARKER as root, re-run." >&2
             exit 1
         fi
@@ -258,134 +247,34 @@ def nft_table_name(account):
     return "airuleset_reach_" + account.replace("-", "_")
 
 
-def render_reach_self_address_check(lan_ips):
-    """#1186: a declared LAN host must never be an address of the bootstrap
-    host ITSELF. Its shared legacy account (``newlevel``, weak shared
-    password) is reachable over ssh on every one of its own addresses, and the
-    fleet table knows it only by its tailscale IP, so the validator cannot
-    catch its LAN address; this render-time check can."""
+def render_reach_teardown_step(account):
+    """Step 3b (#1232): remove the ssh reach rule an earlier render installed.
+
+    The owner ruled on 14.10.2026 that a network egress rule is routed around
+    through any reachable host and pushes a session to riskier detours, so no
+    account gets one. A box bootstrapped before #1232 still carries the per-uid
+    ``inet airuleset_reach_<acct>`` table, its ``airuleset-reach-<acct>.service``
+    unit and ``/etc/airuleset/reach-<acct>.nft``; this idempotent step removes
+    each one that exists and is a quiet no-op otherwise. Fails loud (``set -e``)
+    when a present unit or table cannot be removed."""
     return (
-        "# the declared LAN hosts must never be an address of THIS host (#1186)\n"
-        "if ! command -v ip >/dev/null; then\n"
-        '    echo "ERROR: ip not found — cannot check the declared LAN reach of '
-        '$ACCOUNT against this host\'s own addresses" >&2\n'
-        "    exit 1\n"
-        "fi\n"
-        "LOCAL_IPS=\" $(ip -4 -o addr show | awk '{split($4, a, \"/\"); "
-        "printf \"%%s \", a[1]}') \"\n"
-        "for IP in %s; do\n"
-        '    case "$LOCAL_IPS" in\n'
-        '        *" $IP "*)\n'
-        '            echo "ERROR: declared reach $IP is an address of this host '
-        '— an ssh route to it reopens the shared-account escape" >&2\n'
-        "            exit 1 ;;\n"
-        "    esac\n"
-        "done\n" % " ".join(lan_ips))
-
-
-def _lan_accept_rules(account, lan_rules):
-    """One commented nft accept per declared LAN host: exactly that address
-    (a /32 — the validator allows nothing wider) on exactly its ports. They
-    are preceded by a kernel-side reject of ssh to ANY address of this host
-    (``fib daddr type local``): the render-time own-address check sees the
-    addresses of the bootstrap moment only, while this rule holds on every
-    re-apply even after a LAN address drifts onto a declared /32."""
-    if not lan_rules:
-        return ""
-    out = ('\t\tmeta skuid "%s" fib daddr type local tcp dport 22 reject with '
-           "tcp reset\n" % account)
-    for ip, ports, why in lan_rules:
-        out += ("\t\t# %s\n\t\tmeta skuid \"%s\" ip daddr %s tcp dport { %s } "
-                "accept\n" % (why, account, ip, ", ".join(str(p) for p in ports)))
-    return out
-
-
-def render_reach_step(account, reach_ips, enforced=True, reason="",
-                      lan_rules=()):
-    """Step 3b: the DECLARED reach, enforced for the account's uid by nftables:
-    a NEW outbound tcp/22 connection (loopback included) is rejected unless it
-    goes to a declared box (``reach_ips``); INBOUND sessions (the webterm tabs)
-    are untouched — their reply packets never carry dport 22. The network layer
-    enforces BOXES — a ``user@box`` entry cannot be narrowed to the user here.
-    Idempotent (declare, delete, recreate the table), applied NOW, and
-    persisted by a oneshot unit ordered like nftables.service and re-applied
-    whenever nftables.service restarts (PartOf) or reloads
-    (ReloadPropagatedFrom) — both flush the ruleset. An account whose reach is
-    declared ``reach_enforced: False`` (a pre-#1184 service account whose
-    fleet-wide ssh is its job) gets NO rule and the stated reason instead.
-
-    #1186 ``lan_rules`` — ``(ip, ports, reason)`` per declared private LAN
-    host — each become ONE commented accept for exactly that address on
-    exactly its ports, rendered after the fleet accepts and BEFORE the reject
-    (which stays tcp/22 only: a non-22 port is declared, not restricted — the
-    honest residual in the module docstring), and the render refuses a LAN
-    host that is one of this host's own addresses."""
-    if not enforced:
-        return ("\n# 3b. Declared reach (#1184) — NOT enforced for this account: "
-                "%s\necho \"  reach: NOT enforced (declared reach_enforced: False)\"\n"
-                % reason)
-    table = nft_table_name(account)
-    allow = ""
-    v4 = [ip for ip in reach_ips if ":" not in ip]
-    v6 = [ip for ip in reach_ips if ":" in ip]
-    if v4:
-        allow += ('\t\tmeta skuid "%s" tcp dport 22 ip daddr { %s } accept\n'
-                  % (account, ", ".join(v4)))
-    if v6:
-        allow += ('\t\tmeta skuid "%s" tcp dport 22 ip6 daddr { %s } accept\n'
-                  % (account, ", ".join(v6)))
-    allow += _lan_accept_rules(account, lan_rules)
-    lan_ips = [ip for ip, _ports, _why in lan_rules]
-    self_check = render_reach_self_address_check(lan_ips) if lan_ips else ""
-    ruleset = (
-        "table inet {t}\n"
-        "delete table inet {t}\n"
-        "table inet {t} {{\n"
-        "\tchain output {{\n"
-        "\t\ttype filter hook output priority 0; policy accept;\n"
-        "{allow}"
-        '\t\tmeta skuid "{a}" tcp dport 22 ct state new reject with tcp reset\n'
-        "\t}}\n"
-        "}}\n").format(t=table, a=account, allow=allow)
-    return (
-        "\n# 3b. Declared reach (#1184) — ssh egress for this uid only to the "
-        "declared boxes\n"
-        'NFT=$(command -v nft || true)\n'
-        'if [ -z "$NFT" ]; then\n'
-        '    echo "ERROR: nft not found — cannot enforce the declared reach of '
-        '$ACCOUNT (install the nftables package)" >&2\n'
-        '    exit 1\n'
-        'fi\n'
-        '%s'
+        "\n# 3b. ssh reach rule removed (#1232) — tear down what an earlier render "
+        "installed\n"
+        "REACH_TABLE='%s'\n"
+        'REACH_UNIT="airuleset-reach-$ACCOUNT.service"\n'
         'REACH_NFT="/etc/airuleset/reach-$ACCOUNT.nft"\n'
-        "cat > \"$REACH_NFT\" << 'REACH_EOF'\n"
-        "%sREACH_EOF\n"
-        '"$NFT" -c -f "$REACH_NFT"\n'
-        'cat > "/etc/systemd/system/airuleset-reach-$ACCOUNT.service" << UNIT_EOF\n'
-        "[Unit]\n"
-        "Description=airuleset #1184 declared ssh reach for $ACCOUNT\n"
-        "DefaultDependencies=no\n"
-        "After=nftables.service\n"
-        "Before=network-pre.target shutdown.target\n"
-        "Wants=network-pre.target\n"
-        "Conflicts=shutdown.target\n"
-        "PartOf=nftables.service\n"
-        "ReloadPropagatedFrom=nftables.service\n"
-        "[Service]\n"
-        "Type=oneshot\n"
-        "RemainAfterExit=yes\n"
-        "ExecStart=$NFT -f $REACH_NFT\n"
-        "ExecReload=$NFT -f $REACH_NFT\n"
-        "[Install]\n"
-        "WantedBy=sysinit.target\n"
-        "UNIT_EOF\n"
-        "systemctl daemon-reload\n"
-        'systemctl enable "airuleset-reach-$ACCOUNT.service"\n'
-        'systemctl restart "airuleset-reach-$ACCOUNT.service"\n'
-        '"$NFT" list table inet %s >/dev/null\n'
-        'echo "  reach: ssh egress limited to %s"\n'
-        % (self_check, ruleset, table,
-           ", ".join(list(reach_ips) + lan_ips) or "none"))
+        'if [ -f "/etc/systemd/system/$REACH_UNIT" ]; then\n'
+        '    systemctl disable --now "$REACH_UNIT"\n'
+        '    rm -f "/etc/systemd/system/$REACH_UNIT"\n'
+        "    systemctl daemon-reload\n"
+        "fi\n"
+        "NFT=$(command -v nft || true)\n"
+        'if [ -n "$NFT" ] && "$NFT" list table inet "$REACH_TABLE" >/dev/null 2>&1; then\n'
+        '    "$NFT" delete table inet "$REACH_TABLE"\n'
+        "fi\n"
+        'rm -f "$REACH_NFT"\n'
+        'echo "  reach: no ssh egress rule (#1232)"\n'
+        % nft_table_name(account))
 
 
 def render_lockout_step():

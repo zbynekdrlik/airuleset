@@ -41,7 +41,7 @@ def _render(account):
 
 
 def _spec(**over):
-    spec = {"host": "dev1", "sudo": False, "reach": [], "secrets": [],
+    spec = {"host": "dev1", "sudo": False, "secrets": [],
             "webterm_sessions": {}}
     spec.update(over)
     return spec

@@ -45,32 +45,15 @@ _FAKE_TIMO_PUBKEY = "ssh-ed25519 " + "AAAA" + "X" * 64 + " webterm-timo-controll
 
 
 def _valid_spec(**over):
-    spec = {"host": "dev1", "sudo": False, "reach": [], "secrets": [],
+    spec = {"host": "dev1", "sudo": False, "secrets": [],
             "webterm_sessions": {}}
     spec.update(over)
     return spec
 
 
-def _lan(cidr="10.77.9.61/32", ports=(22,), reason="cam1"):
-    return {"cidr": cidr, "ports": list(ports), "reason": reason}
-
-
-def _entry_err(errs, field):
-    """A structured LAN reach-entry error naming ``field`` (never the generic
-    fleet-name error, which merely echoes the entry's repr)."""
-    return any(e.startswith("reach entry") and field in e for e in errs)
-
-
 def _render(spec, account="projx"):
     with mock.patch.dict(bootstrap.SERVICE_ACCOUNTS, {account: spec}):
         return bootstrap.render_root_bootstrap(account)
-
-
-def _ruleset(script):
-    """The nft ruleset heredoc of a rendered bootstrap."""
-    m = re.search(r"<< 'REACH_EOF'\n(.*?)REACH_EOF\n", script, re.S)
-    assert m, "no nft ruleset heredoc in the render"
-    return m.group(1)
 
 
 def _sudoers_body(script):
@@ -86,144 +69,12 @@ def _section(script):
 # --------------------------------------------------------------------------- #
 # (a) LAN reach entries — validator
 # --------------------------------------------------------------------------- #
-class TestLanReachValidator(unittest.TestCase):
-
-    def _errs(self, *entries, **over):
-        return bootstrap.validate_account(
-            "proj", _valid_spec(reach=list(entries), **over))
-
-    def test_private_host_with_a_reason_passes(self):
-        for entry in (_lan(), _lan("192.168.1.10/32"), _lan("172.31.255.1/32"),
-                      _lan("100.64.1.2/32", reason="tailscale non-fleet node"),
-                      _lan("10.77.9.204/32", (22, 4455, 8898), "stream OBS")):
-            self.assertEqual(self._errs(entry), [], entry)
-
-    def test_fleet_name_and_lan_entries_mix(self):
-        self.assertEqual(self._errs("gatekeeper", _lan()), [])
-
-    def test_public_or_special_addresses_are_refused(self):
-        for cidr in ("8.8.8.8/32", "0.0.0.0/32", "127.0.0.1/32",
-                     "169.254.1.1/32", "224.0.0.1/32", "255.255.255.255/32",
-                     "172.32.0.1/32", "100.128.0.1/32", "100.63.255.255/32",
-                     "192.169.0.1/32", "11.0.0.1/32"):
-            errs = self._errs(_lan(cidr))
-            self.assertTrue(_entry_err(errs, "private"), (cidr, errs))
-
-    def test_only_single_canonical_ipv4_hosts(self):
-        # a range could silently include a password-shared box's LAN address
-        for cidr in ("10.77.9.0/24", "10.0.0.0/8", "0.0.0.0/0", "10.77.9.60/30",
-                     "10.77.9.60/31", "10.77.9.61/31",
-                     "10.77.9.61", "10.77.9.61/32 ", " 10.77.9.61/32",
-                     "10.77.9.61/032", "fd7a:115c:a1e0::1/128", "::/0",
-                     "10.77.9.61/32\n", "cam1.lan/32", "", None, 42):
-            errs = self._errs(_lan(cidr))
-            self.assertTrue(_entry_err(errs, "cidr"), (cidr, errs))
-
-    def test_a_reason_is_mandatory(self):
-        for reason in ("", "   ", None, 7, "cam1\nsecond line", "cam\x001"):
-            errs = self._errs(_lan(reason=reason))
-            self.assertTrue(_entry_err(errs, "reason"), (reason, errs))
-        entry = {"cidr": "10.77.9.61/32", "ports": [22]}
-        self.assertTrue(_entry_err(self._errs(entry), "reason"))
-
-    def test_ports_are_explicit_distinct_ints(self):
-        for ports in ([], ["22"], [0], [65536], [-1], [True], [22, 22], "22",
-                      ["*"], [None], [22.0], None):
-            entry = {"cidr": "10.77.9.61/32", "ports": ports, "reason": "cam1"}
-            errs = self._errs(entry)
-            self.assertTrue(_entry_err(errs, "ports"), (ports, errs))
-
-    def test_entry_keys_are_exact(self):
-        for entry in ({"cidr": "10.77.9.61/32", "ports": [22], "reason": "x",
-                       "user": "root"},
-                      {"cidr": "10.77.9.61/32", "reason": "x"},
-                      {"ports": [22], "reason": "x"}):
-            self.assertTrue(_entry_err(self._errs(entry), "keys"), entry)
-
-    def test_a_fleet_box_address_is_declared_by_name_only(self):
-        # a cidr would bypass the password-shared / shared-account checks
-        for addr in set(bootstrap.fleet_boxes().values()):
-            if bootstrap._is_ip(addr):
-                errs = self._errs(_lan(addr + "/32", reason="x"))
-                self.assertTrue(_entry_err(errs, "fleet"), (addr, errs))
-
-    def test_duplicate_destinations_are_refused(self):
-        errs = self._errs(_lan(), _lan(ports=(8898,)))
-        self.assertTrue(_entry_err(errs, "duplicate"), errs)
-
-    def test_an_unenforced_account_still_validates_its_lan_entries(self):
-        errs = self._errs(_lan("8.8.8.8/32"), reach_enforced=False,
-                          reach_reason="x")
-        self.assertTrue(_entry_err(errs, "private"), errs)
-
-
 # --------------------------------------------------------------------------- #
 # (a) LAN reach entries — nft render
 # --------------------------------------------------------------------------- #
-class TestLanReachRender(unittest.TestCase):
-
-    def test_accepts_exactly_the_declared_destination_and_ports_before_reject(self):
-        script = _render(_valid_spec(reach=[
-            _lan("10.77.9.61/32", (22, 8898), "cam1"),
-            _lan("10.77.7.30/32", (22,), "fohabl")]))
-        rules = _ruleset(script)
-        cam = 'meta skuid "projx" ip daddr 10.77.9.61 tcp dport { 22, 8898 } accept'
-        foh = 'meta skuid "projx" ip daddr 10.77.7.30 tcp dport { 22 } accept'
-        rej = 'meta skuid "projx" tcp dport 22 ct state new reject with tcp reset'
-        # review 1: ssh to ANY address of this host is refused in the kernel on
-        # every re-apply, even after a LAN address drifts onto a declared /32
-        loc = ('meta skuid "projx" fib daddr type local tcp dport 22 reject '
-               'with tcp reset')
-        for line in (loc, cam, foh, rej):
-            self.assertIn(line, rules)
-        self.assertLess(rules.index(cam), rules.index(rej))
-        self.assertLess(rules.index(foh), rules.index(rej))
-        # the reject is the LAST rule; nothing but the declared hosts accepted
-        body = [ln.strip() for ln in rules.splitlines()
-                if ln.strip().startswith("meta skuid")]
-        self.assertEqual(body, [loc, cam, foh, rej])
-        self.assertEqual(set(re.findall(r"ip daddr (\S+)", rules)),
-                         {"10.77.9.61", "10.77.7.30"})
-        # every reason is carried as a comment, never inside a rule
-        self.assertIn("# cam1", rules)
-        self.assertIn("# fohabl", rules)
-        r = subprocess.run(["bash", "-n"], input=script, capture_output=True,
-                           text=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
-
-    def test_fleet_names_and_lan_entries_render_together(self):
-        rules = _ruleset(_render(_valid_spec(reach=["gatekeeper", _lan()])))
-        self.assertIn('meta skuid "projx" tcp dport 22 ip daddr { 100.90.94.41 } '
-                      'accept', rules)
-        self.assertIn('meta skuid "projx" ip daddr 10.77.9.61 tcp dport { 22 } '
-                      'accept', rules)
-
-    def test_a_declared_host_that_is_this_hosts_own_address_is_refused(self):
-        script = _render(_valid_spec(reach=[_lan()]))
-        self.assertIn("ip -4 -o addr show", script)
-        self.assertIn("is an address of this host", script)
-        self.assertLess(script.index("is an address of this host"),
-                        script.index("<< 'REACH_EOF'"))
-
-    def test_the_own_address_check_fires(self):
-        snippet = hardening.render_reach_self_address_check(["10.77.9.61"])
-        fake_ip = ("ip() { printf '%s\\n' "
-                   "'1: lo    inet 127.0.0.1/8 scope host lo' "
-                   "'2: eth0    inet 10.77.9.61/24 brd 10.77.9.255 scope global eth0'; }\n")
-        r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + fake_ip + snippet],
-                           capture_output=True, text=True)
-        self.assertEqual(r.returncode, 1, r.stdout + r.stderr)
-        self.assertIn("10.77.9.61 is an address of this host", r.stderr)
-        fake_ip = fake_ip.replace("10.77.9.61/24", "10.77.9.21/24")
-        r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + fake_ip + snippet],
-                           capture_output=True, text=True)
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-
-    def test_unenforced_account_renders_no_lan_rule(self):
-        script = _render(_valid_spec(reach=[_lan()], reach_enforced=False,
-                                     reach_reason="x"))
-        self.assertNotIn("meta skuid", script)
-        self.assertIn("reach: NOT enforced", script)
+class TestGoldenRenders(unittest.TestCase):
+    """The fohmixer/claudy sudo + 3b sections stay byte-identical to the
+    captured goldens (#1186 lock; #1232 re-captured them with the teardown)."""
 
     def test_existing_fohmixer_and_claudy_renders_are_byte_identical(self):
         with mock.patch.dict(wo.WEBTERM_CONTROLLER_LANE_PUBKEYS,
@@ -414,16 +265,6 @@ class TestCommandScopedSudo(unittest.TestCase):
 # --------------------------------------------------------------------------- #
 # (c) the camera-box declaration
 # --------------------------------------------------------------------------- #
-CAMERA_BOX_HOSTS = {
-    # cam1-7 (ticket), dantesync on every camera
-    **{"10.77.9.%d" % (60 + n): {22, 8898} for n in range(1, 8)},
-    "10.77.9.202": {22, 4455, 8898, 8899},   # strih-lx (obs-fleet.sh)
-    "10.77.9.204": {22, 4455, 8898, 8899},   # stream OBS (obs-fleet.sh)
-    "10.77.7.232": {22, 8898},         # mbc (dantesync-fleet.sh)
-    "10.77.7.30": {22, 8898},          # fohabl (dantesync-fleet.sh)
-    "10.77.8.1": {22},                 # MikroTik RB4011 (netcfg facet)
-    **{"10.77.9.%d" % n: {22} for n in range(2, 6)},   # 4x CRS310
-}
 CAMERA_BOX_SUDO = ["/usr/local/sbin/camera-box-dev1-dantesync-upgrade",
                    "/usr/local/sbin/camera-box-dev1-remote-log-install"]
 
@@ -439,11 +280,6 @@ class TestCameraBoxDeclaration(unittest.TestCase):
         self.assertEqual(spec["sudo"], "commands")
         self.assertEqual(list(spec["sudo_commands"]), CAMERA_BOX_SUDO)
         self.assertTrue(spec["sudo_reason"].strip())
-        self.assertIs(spec["reach_enforced"], True)
-        got = {e["cidr"].split("/")[0]: set(e["ports"]) for e in spec["reach"]}
-        self.assertEqual(got, CAMERA_BOX_HOSTS)
-        self.assertTrue(all(isinstance(e, dict) and e["reason"].strip()
-                            for e in spec["reach"]))
         self.assertEqual(set(spec["secrets"]), {
             "av-soak.env", "dantesync-fleet.env", "netcfg-drift.env",
             "obs-ws-pass", "obs-burn-reconcile-watchdog.conf",
@@ -454,31 +290,6 @@ class TestCameraBoxDeclaration(unittest.TestCase):
         self.assertEqual(spec["repo"], "zbynekdrlik/camera-box")
         self.assertEqual(spec["project_dir"], "devel/camera-box")
         self.assertEqual(spec["tmux_session"], "camera-box")
-
-    def test_render_contains_its_rules_and_nothing_broader(self):
-        script = bootstrap.render_root_bootstrap("camera-box")
-        rules = _ruleset(script)
-        self.assertIn("table inet airuleset_reach_camera_box", rules)
-        for ip, ports in CAMERA_BOX_HOSTS.items():
-            want = 'meta skuid "camera-box" ip daddr %s tcp dport { %s } accept' % (
-                ip, ", ".join(str(p) for p in sorted(ports)))
-            self.assertIn(want, rules)
-        self.assertEqual(set(re.findall(r"ip daddr (\S+)", rules)),
-                         set(CAMERA_BOX_HOSTS))
-        self.assertNotIn("/", "".join(re.findall(r"ip daddr (\S+)", rules)))
-        last = [ln.strip() for ln in rules.splitlines()
-                if ln.strip().startswith("meta skuid")][-1]
-        self.assertEqual(last, 'meta skuid "camera-box" tcp dport 22 ct state '
-                               'new reject with tcp reset')
-        body = _sudoers_body(script).splitlines()
-        self.assertEqual(body[1], "camera-box ALL=(root) NOPASSWD: "
-                         + ", ".join('%s ""' % p for p in CAMERA_BOX_SUDO))
-        self.assertEqual(len(body), 2)
-        for broad in ("NOPASSWD: ALL", "(ALL)", "ALL, ", "*"):
-            self.assertNotIn(broad, "\n".join(body))
-        r = subprocess.run(["bash", "-n"], input=script, capture_output=True,
-                           text=True)
-        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_the_registry_row_is_not_flipped_before_the_live_migration(self):
         rows = json.loads((Path(__file__).resolve().parent.parent
@@ -503,22 +314,17 @@ class TestAccountsStatusShowsReachAndSudo(unittest.TestCase):
     def test_text(self):
         out = self._run(False)
         self.assertRegex(out, r"camera-box\s+host=dev1\s+sudo=commands")
-        self.assertIn("10.77.9.61/32 tcp 22,8898", out)
-        self.assertIn("10.77.9.202/32 tcp 22,4455,8898,8899 (only 22 enforced)",
-                      out)
-        self.assertIn("10.77.8.1/32 tcp 22 — ", out)   # nothing to qualify
         for path in CAMERA_BOX_SUDO:
             self.assertIn("sudo " + path, out)
         # the fohmixer/claudy lines keep their shape
-        self.assertRegex(out, r"fohmixer\s+host=dev1\s+sudo=no\s+reach=1 LAN hosts")
+        self.assertRegex(out, r"fohmixer\s+host=dev1\s+sudo=no\s+secrets=")
 
     def test_json(self):
         data = json.loads(self._run(True))
         cb = data["project_accounts"]["camera-box"]
         self.assertEqual(cb["sudo"], "commands")
         self.assertEqual(cb["sudo_commands"], CAMERA_BOX_SUDO)
-        self.assertIn({"cidr": "10.77.9.61/32", "ports": [22, 8898],
-                       "reason": "cam1 (camera box)"}, cb["reach"])
+        self.assertNotIn("reach", cb)
         self.assertIs(data["project_accounts"]["fohmixer"]["sudo"], False)
         self.assertEqual(data["project_accounts"]["fohmixer"]["sudo_commands"], [])
 

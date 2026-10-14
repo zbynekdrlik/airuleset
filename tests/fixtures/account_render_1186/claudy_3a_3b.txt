@@ -17,6 +17,19 @@ case "$SUDO_L" in
 esac
 echo "  sudo: none (declared sudo: NO)"
 
-# 3b. Declared reach (#1184) — NOT enforced for this account: fleet credential manager: ssh to every fleet account is its job (#960)
-echo "  reach: NOT enforced (declared reach_enforced: False)"
+# 3b. ssh reach rule removed (#1232) — tear down what an earlier render installed
+REACH_TABLE='airuleset_reach_claudy'
+REACH_UNIT="airuleset-reach-$ACCOUNT.service"
+REACH_NFT="/etc/airuleset/reach-$ACCOUNT.nft"
+if [ -f "/etc/systemd/system/$REACH_UNIT" ]; then
+    systemctl disable --now "$REACH_UNIT"
+    rm -f "/etc/systemd/system/$REACH_UNIT"
+    systemctl daemon-reload
+fi
+NFT=$(command -v nft || true)
+if [ -n "$NFT" ] && "$NFT" list table inet "$REACH_TABLE" >/dev/null 2>&1; then
+    "$NFT" delete table inet "$REACH_TABLE"
+fi
+rm -f "$REACH_NFT"
+echo "  reach: no ssh egress rule (#1232)"
 

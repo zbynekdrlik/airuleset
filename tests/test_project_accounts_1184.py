@@ -51,7 +51,7 @@ def _with_timo_key():
 
 def _valid_spec(**over):
     spec = {
-        "host": "dev1", "sudo": False, "reach": [], "secrets": [],
+        "host": "dev1", "sudo": False, "secrets": [],
         "webterm_sessions": {},
     }
     spec.update(over)
@@ -101,45 +101,6 @@ class TestDeclarationValidator(unittest.TestCase):
         errs = bootstrap.validate_account("proj", _valid_spec(sudo="no"))
         self.assertTrue(any("sudo" in e for e in errs), errs)
 
-    def test_reach_outside_the_fleet_fails(self):
-        errs = bootstrap.validate_account(
-            "proj", _valid_spec(reach=["root@evil.example.com"]))
-        self.assertTrue(any("reach" in e for e in errs), errs)
-
-    def test_reach_inside_the_fleet_passes(self):
-        self.assertEqual(bootstrap.validate_account(
-            "proj", _valid_spec(reach=["gatekeeper", "david1@subdev"])), [])
-
-    def test_enforced_reach_never_to_a_password_shared_box(self):
-        # review 2: newlevel's shared password still logs in on dev1/dev2/
-        # spinbike, airuleset's break-glass password on the controller
-        for box in ("dev1", "dev2", "spinbike-vps", "controller", "x@dev2"):
-            errs = bootstrap.validate_account("proj", _valid_spec(reach=[box]))
-            self.assertTrue(any("password" in e for e in errs), (box, errs))
-
-    def test_unenforced_reach_needs_a_reason(self):
-        errs = bootstrap.validate_account("proj", _valid_spec(
-            reach=["dev2"], reach_enforced=False))
-        self.assertTrue(any("reach_reason" in e for e in errs), errs)
-        self.assertEqual(bootstrap.validate_account("proj", _valid_spec(
-            reach=["dev2"], reach_enforced=False, reach_reason="x")), [])
-
-    def test_ip_check_is_a_real_ip_parse(self):
-        self.assertFalse(bootstrap._is_ip("cafe"))
-        self.assertFalse(bootstrap._is_ip("..."))
-        self.assertTrue(bootstrap._is_ip("100.118.174.27"))
-
-    def test_reach_into_a_shared_account_fails(self):
-        # review 1: `reach` never points INTO newlevel/root/control accounts
-        for bad in ("newlevel@dev2", "root@dev1", "airuleset@controller"):
-            errs = bootstrap.validate_account("proj", _valid_spec(reach=[bad]))
-            self.assertTrue(any("shared/control" in e for e in errs), (bad, errs))
-
-    def test_reach_to_a_dns_named_box_cannot_be_enforced(self):
-        errs = bootstrap.validate_account(
-            "proj", _valid_spec(reach=["forestshop-dev"]))
-        self.assertTrue(any("not an IP" in e for e in errs), errs)
-
     def test_a_trailing_newline_is_never_accepted(self):
         # review 1: `$` matches before a final \n — every value uses fullmatch
         for over in ({"tmux_session": "proj\n", "project_dir": "devel/proj"},
@@ -181,9 +142,9 @@ class TestDeclarationValidator(unittest.TestCase):
     def test_account_spec_never_shares_mutable_defaults(self):
         spec = bootstrap.account_spec("fohmixer")
         spec["webterm_sessions"]["mallory"] = {}
-        spec["reach"].append("dev2")
+        spec["secrets"].append("mallory-key")
         self.assertNotIn("mallory", bootstrap.account_spec("fohmixer")["webterm_sessions"])
-        self.assertNotIn("dev2", bootstrap.account_spec("fohmixer")["reach"])
+        self.assertNotIn("mallory-key", bootstrap.account_spec("fohmixer")["secrets"])
 
     def test_bad_secret_name_fails(self):
         errs = bootstrap.validate_account(
@@ -212,18 +173,14 @@ class TestDeclarationValidator(unittest.TestCase):
                 bootstrap.render_root_bootstrap("_bad")
 
     def test_claudy_declaration_is_explicit(self):
-        # review 2 🔴: claudy's live service ssh-probes every fleet account, so
-        # its reach is DECLARED fleet-wide and explicitly NOT enforced (an
-        # egress rule would cut the fleet token refresh)
+        # claudy's live service ssh-probes every fleet account; since #1232 no
+        # account carries an egress rule at all
         spec = bootstrap.account_spec("claudy")
         self.assertEqual(spec["host"], "controller")
         self.assertIs(spec["sudo"], False)
-        self.assertIs(spec["reach_enforced"], False)
-        self.assertTrue(spec["reach_reason"])
-        self.assertEqual(set(spec["reach"]), set(bootstrap.fleet_boxes()))
         script = bootstrap.render_root_bootstrap("claudy")
         self.assertNotIn("meta skuid", script)
-        self.assertIn("reach: NOT enforced", script)
+        self.assertIn("reach: no ssh egress rule (#1232)", script)
         # #1207: its repo venv pins Python playwright 1.62.0 (chromium 1234),
         # installed once in /opt/ms-playwright, never per account
         self.assertIn("playwright:1.62.0/chromium", spec.get("tools", ()))
@@ -232,7 +189,6 @@ class TestDeclarationValidator(unittest.TestCase):
         spec = bootstrap.account_spec("fohmixer")
         self.assertEqual(spec["host"], "dev1")
         self.assertIs(spec["sudo"], False)
-        self.assertEqual([e["cidr"] for e in spec["reach"]], ["10.77.7.1/32"])  # 1230
         self.assertEqual(list(spec["secrets"]), [   # #1206: the vault files it holds
             "fohmixer-engineer-pin", "cloudflare-fohmixer-analytics",
             "cloudflare-fohmixer-access-audit", "cloudflared-fohmixer-token",
@@ -291,13 +247,6 @@ class TestFohmixerRender(unittest.TestCase):
         self.assertLess(self.script.index("# 1b. Ownership marker"),
                         self.script.index("# 5. authorized_keys"))
 
-    def test_reach_rejects_every_new_outbound_ssh_but_the_router(self):
-        self.assertIn('meta skuid "fohmixer" tcp dport 22 ct state new reject',
-                      self.script)
-        self.assertEqual(self.script.split("REACH_EOF")[1].count("accept\n"), 1)
-        self.assertIn('"$NFT" -c -f "$REACH_NFT"', self.script)
-        self.assertIn("airuleset-reach-$ACCOUNT.service", self.script)
-
     def test_su_and_polkit_are_locked_for_the_account(self):
         self.assertIn("pam_wheel.so deny use_uid group=airuleset-project",
                       self.script)
@@ -306,20 +255,12 @@ class TestFohmixerRender(unittest.TestCase):
 
     def test_boundary_lands_before_any_key_or_shell(self):
         # review 2: a failed boundary step must never leave a loginable account
-        for step in ("# 3a. Sudo policy", "# 3b. Declared reach",
+        for step in ("# 3a. Sudo policy", "# 3b. ssh reach rule removed",
                      "# 3c. su / polkit lockout", "# 3d. Isolation checks"):
             for later in ("# 4. SSH directory", "# 5. authorized_keys",
                           "# 9. Project checkout", "# 10. Project tmux session"):
                 self.assertLess(self.script.index(step), self.script.index(later),
                                 (step, later))
-
-    def test_reach_rule_is_applied_now_and_survives_nftables_reloads(self):
-        for needle in ('systemctl restart "airuleset-reach-$ACCOUNT.service"',
-                       "PartOf=nftables.service",
-                       "ReloadPropagatedFrom=nftables.service",
-                       "ExecReload=$NFT -f $REACH_NFT",
-                       '"$NFT" list table inet airuleset_reach_fohmixer'):
-            self.assertIn(needle, self.script)
 
     def test_other_homes_must_be_closed(self):
         self.assertIn('*r??|*??[xt])', self.script)
@@ -399,15 +340,6 @@ class TestSudoRender(unittest.TestCase):
         script = bootstrap.render_root_bootstrap("claudy")
         self.assertNotIn("NOPASSWD", script)
         self.assertIn("declared sudo: NO", script)
-
-    def test_declared_reach_is_the_only_ssh_egress(self):
-        spec = _valid_spec(reach=["gatekeeper", "david1@subdev"])
-        with mock.patch.dict(bootstrap.SERVICE_ACCOUNTS, {"projx": spec}):
-            script = bootstrap.render_root_bootstrap("projx")
-        self.assertIn('meta skuid "projx" tcp dport 22 ip daddr '
-                      '{ 100.118.174.27, 100.90.94.41 } accept', script)
-        self.assertIn('meta skuid "projx" tcp dport 22 ct state new reject', script)
-
 
 # --------------------------------------------------------------------------- #
 # (c) the onboarding gate

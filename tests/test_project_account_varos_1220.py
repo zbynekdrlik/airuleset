@@ -22,7 +22,7 @@ class TestDeclaration(unittest.TestCase):
         spec = bootstrap.account_spec("varos")
         self.assertEqual(spec["host"], "dev2")
         self.assertIs(spec["sudo"], False)
-        self.assertEqual(list(spec["reach"]), [])
+        self.assertNotIn("reach", spec)   # #1232: no ssh reach rule
         # owner 9.10.: invoices over read-only IMAP, the Gmail app password
         # lives in this account only (never the claude.ai Gmail connector)
         self.assertEqual(list(spec["secrets"]),

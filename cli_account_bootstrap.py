@@ -4,21 +4,21 @@
 a DEDICATED unix account named after the project, never under the shared
 ``newlevel`` account (weak shared password, NOPASSWD sudo, every fleet key in
 its home). ``SERVICE_ACCOUNTS`` below is THE declaration of those project
-accounts: for each one, its host, whether it has sudo (default NO), exactly
-where it may reach (default nowhere), which named credentials it receives
-(default none) and which humans get a webterm tab to it. ``validate_account``
-refuses anything the declaration does not state explicitly. sudo and reach
-are ENFORCED by the bootstrap (``cli_account_hardening``); ``secrets`` is a
-declarative inventory (nothing here provisions a credential, so none arrives
-undeclared through this path).
+accounts: for each one, its host, whether it has sudo (default NO), which
+named credentials it receives (default none) and which humans get a webterm tab
+to it. ``validate_account`` refuses anything the declaration does not state
+explicitly. sudo is ENFORCED by the bootstrap (``cli_account_hardening``);
+``secrets`` is a declarative inventory (nothing here provisions a credential,
+so none arrives undeclared through this path).
 
-#1186 widens the declaration for a project with LAN hardware (camera-box)
-without widening what it may do implicitly. A ``reach`` entry is a fleet box
-name OR ``{"cidr": "<ipv4>/32", "ports": [..], "reason": ".."}``: one private
-(RFC1918 / tailscale 100.64.0.0/10) host that is not a fleet box, with its
-reason. ``sudo`` may also be ``"commands"``: ``sudo_commands`` then lists
-exact ``/usr/local/sbin/<account>-<name>`` scripts, and the bootstrap proves
-each one root-owned and account-unwritable before the rule lands.
+#1232 (owner ruling 14.10.2026): there is NO network reach rule. The #1184/#1186
+per-uid ssh egress table was routed around through any reachable host and
+pushed a session to a riskier detour (a router changed through its web admin);
+the bootstrap now only TEARS DOWN a table an earlier render installed. The
+isolation that holds is the account itself: own home, secrets, sudo scope,
+su/polkit lockout. ``sudo`` may be ``"commands"`` (#1186): ``sudo_commands``
+then lists exact ``/usr/local/sbin/<account>-<name>`` scripts, and the bootstrap
+proves each one root-owned and account-unwritable before the rule lands.
 
 ``render_root_bootstrap`` renders an IDEMPOTENT bash script that root runs ONCE
 on the declared host. It creates the unix user, sets permissions, and installs
@@ -27,8 +27,7 @@ line per declared webterm human (``restrict,pty,command=`` attaching the
 project's tmux session, nothing else). It enables loginctl linger. It installs
 the privilege boundary (``cli_account_hardening``): the declared sudo policy
 (none, failing LOUD on any route, or ONE scoped visudo-checked rule), the
-declared reach as a uid-keyed nftables ssh egress rule, and a su/polkit
-lockout — so the uid cannot become ``newlevel`` via its shared password.
+teardown of a pre-#1232 ssh reach rule, and a su/polkit lockout — so the uid cannot become ``newlevel`` via its shared password.
 Only then does it clone the project repo and create the project tmux session.
 
 Module-level imports are stdlib plus the pure-render sibling
@@ -63,8 +62,7 @@ _REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _REL_DIR_RE = re.compile(r"(?!/)(?!.*(^|/)\.\.(/|$))[A-Za-z0-9_./-]+")
 # (a scoped sudo command is checked by cli_account_hardening.sudo_command_problem)
 _ONE_LINE_RE = policy.ONE_LINE_RE
-# (sudo + reach entries — incl. the #1186 LAN hosts — are cli_account_policy's)
-_is_ip = policy.is_ip
+# (sudo is cli_account_policy's)
 
 # Accounts that are NEVER a project account: the shared legacy account, root,
 # and the control/maintainer accounts.
@@ -72,19 +70,17 @@ _NEVER_PROJECT_ACCOUNTS = frozenset({"newlevel", "root", "airuleset",
                                      "gatekeeper"})
 
 _ALLOWED_KEYS = frozenset({
-    "host", "sudo", "sudo_reason", "sudo_commands", "reach", "reach_enforced",
-    "reach_reason", "secrets", "webterm_sessions", "system_packages", "repo",
+    "host", "sudo", "sudo_reason", "sudo_commands",
+    "secrets", "webterm_sessions", "system_packages", "repo",
     "project_dir", "tmux_session", "github_app", "repo_secrets", "tools", "code_only",
 })
 
 # The defaults every declaration inherits. They are the SAFE direction: no
-# sudo, no reach, no secrets. `host` defaults to the controller, where the
+# sudo, no secrets. `host` defaults to the controller, where the
 # pre-#1184 renderer ran.
 _DEFAULTS = {
     "host": "controller",
     "sudo": False,
-    "reach": (),
-    "reach_enforced": True,
     "secrets": (),
     "webterm_sessions": {},
 }
@@ -101,16 +97,6 @@ SERVICE_ACCOUNTS = {
     "claudy": {
         "host": "controller",
         "sudo": False,
-        # claudy is the fleet Claude-credential manager (#960): its service
-        # ssh-probes / refreshes / switches EVERY fleet account (claudy repo
-        # ssh_serialize.py, resync.py, vault.py). An egress rule would cut the
-        # fleet token refresh, so its reach is DECLARED but not enforced —
-        # narrowing it is a follow-up, never a silent cut.
-        "reach": ["controller", "dev1", "dev2", "gatekeeper", "subdev",
-                  "spinbike-vps", "forestshop-dev"],
-        "reach_enforced": False,
-        "reach_reason": "fleet credential manager: ssh to every fleet account "
-                        "is its job (#960)",
         "secrets": ["claudy-vault"],   # the credential vault it manages (vault.py)
         # #1207: the repo venv's playwright 1.62.0 (chromium 1234), in /opt
         "tools": ["playwright:1.62.0/chromium"],
@@ -141,7 +127,6 @@ SERVICE_ACCOUNTS = {
     "fohmixer": {
         "host": "dev1",
         "sudo": False,
-        "reach": [{"cidr": "10.77.7.1/32", "ports": [22], "reason": "MikroTik router (#1230)"}],
         "secrets": ["fohmixer-engineer-pin", "cloudflare-fohmixer-analytics",   # #1206
                     "cloudflare-fohmixer-access-audit", "cloudflared-fohmixer-token",
                     "cloudflare-fohmixer-acme-dns", "cloudflare-fohmixer-setup"],
@@ -161,18 +146,10 @@ SERVICE_ACCOUNTS = {
             for human in ("zbynek", "marek", "timo")
         },
     },
-    # #1186: the first project with LAN hardware (the stream rig). Its reach is
-    # the rig inventory read from the camera-box repo itself (obs-fleet.sh,
-    # dantesync-fleet.sh, the netcfg facet) — every host ONE private /32 with
-    # its reason; ssh (22) is what the reject enforces, OBS WebSocket (4455),
-    # dantesync (8898) and the bundle-state JSON (8899) are declared with it.
-    # resolume is NOT declared: its only address is a drifting DHCP lease
-    # (resolume.lan, today 10.77.9.201, which obs-fleet.sh records colliding
-    # with `bridge`) — an allowlist entry needs a stable address (a DHCP
-    # reservation) first. Its sudo is exactly two root-owned dev1 installer
-    # scripts the live migration installs (main's design, #1186
-    # issuecomment-5894645187: a narrow rule, never an admin account); webterm
-    # is the owner.
+    # #1186: the first project with LAN hardware (the stream rig). Its sudo is
+    # exactly two root-owned dev1 installer scripts the live migration installs
+    # (main's design, #1186 issuecomment-5894645187: a narrow rule, never an
+    # admin account); webterm is the owner. (#1232: no network reach rule.)
     "camera-box": {
         "host": "dev1",
         "sudo": "commands",
@@ -182,23 +159,6 @@ SERVICE_ACCOUNTS = {
         "sudo_commands": [
             "/usr/local/sbin/camera-box-dev1-dantesync-upgrade",
             "/usr/local/sbin/camera-box-dev1-remote-log-install",
-        ],
-        "reach": [
-            *({"cidr": "10.77.9.%d/32" % (60 + n), "ports": [22, 8898],
-               "reason": "cam%d (camera box)" % n} for n in range(1, 8)),
-            {"cidr": "10.77.9.202/32", "ports": [22, 4455, 8898, 8899],
-             "reason": "strih-lx, production strih + fleet NTP master (obs-fleet.sh)"},
-            {"cidr": "10.77.9.204/32", "ports": [22, 4455, 8898, 8899],
-             "reason": "stream OBS box, Windows (obs-fleet.sh)"},
-            {"cidr": "10.77.7.232/32", "ports": [22, 8898],
-             "reason": "mbc, Master Broadcast Console, audio VLAN (dantesync-fleet.sh)"},
-            {"cidr": "10.77.7.30/32", "ports": [22, 8898],
-             "reason": "fohabl, FOH Ableton PC, audio VLAN (dantesync-fleet.sh)"},
-            {"cidr": "10.77.8.1/32", "ports": [22],
-             "reason": "MikroTik RB4011 router_snv, read-only admin@ netcfg audit"},
-            *({"cidr": "10.77.9.%d/32" % n, "ports": [22],
-               "reason": "MikroTik CRS310 switch, read-only admin@ netcfg audit"}
-              for n in range(2, 6)),
         ],
         "secrets": ["av-soak.env", "dantesync-fleet.env", "netcfg-drift.env",
                     "obs-ws-pass", "obs-burn-reconcile-watchdog.conf",
@@ -216,12 +176,6 @@ SERVICE_ACCOUNTS = {
     "nlvpn": {
         "host": "dev1",
         "sudo": False,
-        "reach": [
-            {"cidr": "10.77.8.1/32", "ports": [22],
-             "reason": "MikroTik router_snv (tailscale subnet route)"},
-            {"cidr": "100.122.204.47/32", "ports": [22],
-             "reason": "companion-snv, the nlvpn runtime host (git pull deploy)"},
-        ],
         "secrets": ["nlvpn-state"],   # gitignored state/: HCLOUD_TOKEN, MikroTik, WG, VPS key
         "repo": "zbynekdrlik/nlvpn",
         "project_dir": "devel/nlvpn",
@@ -230,19 +184,11 @@ SERVICE_ACCOUNTS = {
             "zbynek": {"preferred": "nlvpn", "start_dir_chain": ["devel/nlvpn"]},
         },
     },
-    # #1212 (migrate-on-touch): NLMEDIA Resolume Arena box tooling on dev2. HTTP to
-    # remoteos-mcp :8092 only (tcp/22 is what the uid reject enforces).
+    # #1212 (migrate-on-touch): NLMEDIA Resolume Arena box tooling on dev2 (HTTP
+    # to remoteos-mcp :8092).
     "resolume": {
         "host": "dev2",
         "sudo": False,
-        "reach": [
-            {"cidr": "10.77.9.201/32", "ports": [8092],
-             "reason": "resolume-snv remoteos-mcp (via companion-snv)"},
-            {"cidr": "10.77.9.212/32", "ports": [8092],
-             "reason": "songs-snv remoteos-mcp (via companion-snv)"},
-            {"cidr": "10.76.8.201/32", "ports": [8092],
-             "reason": "resolume-pp remoteos-mcp (via companion-pp)"},
-        ],
         "secrets": ["resolume-mcp-json", "winremote-songs-snv", "WIN_RESOLUME_PP_KEY"],
         "repo": "zbynekdrlik/resolume",
         "project_dir": "devel/newlevelmedia/resolume",
@@ -258,7 +204,6 @@ SERVICE_ACCOUNTS = {
     "varos": {
         "host": "dev2",
         "sudo": False,
-        "reach": [],
         "secrets": ["fio-token-varos", "gmail-app-password-varos"],  # Fio, Gmail IMAP
         "repo": "zbynekdrlik/varos",
         "github_app": True, "repo_secrets": [], "code_only": True,   # gates.codeonly
@@ -302,7 +247,7 @@ def account_spec(account):
 
 def fleet_boxes():
     """{box: address} for every box the fleet knows — the namespace a
-    declaration's ``host`` and ``reach`` must live in. Derived from the ONE
+    declaration's ``host`` must live in. Derived from the ONE
     fleet source (``cli_fleet.REMOTE_HOSTS``): a ``<user>@<box>`` entry names
     ``<box>``, a bare entry name IS the box (dev1, dev2, gatekeeper, ...)."""
     import cli_fleet
@@ -343,7 +288,7 @@ def _validate_webterm(sessions):
 def validate_account(account, raw):
     """Every problem with one declaration, as a list of strings ([] = valid).
     Fail-closed on every axis: an unknown host, sudo without a reason or
-    without scoped commands, a reach target outside the fleet, a malformed
+    without scoped commands, a malformed
     secret name, an unknown webterm human or an unknown key is an ERROR —
     nothing the declaration does not state explicitly is ever rendered."""
     errs = []
@@ -364,16 +309,6 @@ def validate_account(account, raw):
         errs.append("host %r is not a fleet box (known: %s)"
                     % (spec["host"], ", ".join(sorted(boxes))))
     errs += policy.validate_sudo(spec, account, declared=SERVICE_ACCOUNTS)
-    enforced = spec.get("reach_enforced")
-    if not isinstance(enforced, bool):
-        errs.append("reach_enforced must be True or False")
-        enforced = True
-    elif not enforced and not _ONE_LINE_RE.fullmatch(str(spec.get("reach_reason") or "")):
-        errs.append("reach_enforced: False needs a one-line reach_reason")
-    elif enforced and "reach_reason" in spec:
-        errs.append("reach_reason declared on an enforced reach")
-    errs += policy.validate_reach(spec["reach"], boxes, enforced,
-                                  _NEVER_PROJECT_ACCOUNTS)
     secrets = spec["secrets"]
     if not isinstance(secrets, (list, tuple)):
         errs.append("secrets must be a list")
@@ -596,7 +531,6 @@ def render_root_bootstrap(account):
     spec = _checked_spec(account)
     host = spec["host"]
     address = fleet_boxes()[host]
-    names, lan = policy.reach_parts(spec)
 
     ak_content = render_authorized_keys(account)
     packages = spec.get("system_packages", [])
@@ -610,7 +544,7 @@ def render_root_bootstrap(account):
         # airuleset root bootstrap for project account '{account}' (#960/#1184)
         # Generated by: python3 airuleset.py account-bootstrap --render {account}
         # Run as root on {host}. Idempotent.
-        # Declared: sudo={sudo} reach={reach} secrets={secrets}
+        # Declared: sudo={sudo} secrets={secrets}
 
         ACCOUNT='{account}'
 
@@ -643,19 +577,13 @@ def render_root_bootstrap(account):
     """).format(account=account, host=host,
                 marker=hardening.render_account_marker_step().strip("\n"),
                 sudo=policy.sudo_label(spec["sudo"]),
-                reach=policy.reach_summary(spec),
                 secrets=",".join(spec["secrets"]) or "none")
 
     # 3a-3d: the privilege boundary (#1184, cli_account_hardening) lands
     # BEFORE step 5 installs any key, so a failed step never leaves a
     # loginable, unbounded account.
     script += hardening.render_sudo_step(account, spec)
-    boxes = fleet_boxes()
-    reach_ips = sorted({boxes[t.rpartition("@")[2]] for t in names})
-    script += hardening.render_reach_step(account, reach_ips,
-                                          enforced=spec["reach_enforced"],
-                                          reason=spec.get("reach_reason", ""),
-                                          lan_rules=policy.lan_rules(lan))
+    script += hardening.render_reach_teardown_step(account)
     script += hardening.render_lockout_step()
     script += hardening.render_isolation_check_step()
     # 4-7: keys + dirs (4 space-indented template → dedent)

@@ -173,16 +173,14 @@ def legacy_inventory(entries):
 
 
 def _project_accounts():
-    """{account: {host, sudo, sudo_commands, reach, secrets, webterm}} from THE
-    declaration. ``reach`` keeps each entry as declared: a fleet box name, or
-    a #1186 LAN host ``{cidr, ports, reason}``."""
+    """{account: {host, sudo, sudo_commands, secrets, webterm}} from THE
+    declaration (#1232: no reach)."""
     import cli_account_bootstrap as bootstrap
     out = {}
     for name in sorted(bootstrap.SERVICE_ACCOUNTS):
         spec = bootstrap.account_spec(name)
         out[name] = {"host": spec["host"], "sudo": spec["sudo"],
                      "sudo_commands": list(spec.get("sudo_commands") or []),
-                     "reach": list(spec["reach"]),
                      "secrets": list(spec["secrets"]),
                      "webterm": sorted(spec["webterm_sessions"]),
                      "github_app": spec.get("github_app") is True}
@@ -296,15 +294,10 @@ def cmd_accounts(args):
     import cli_account_policy as policy
     print("project accounts (#1184 declaration):")
     for name, a in data["project_accounts"].items():
-        lan = policy.reach_parts(a)[1]
-        print("  %-12s host=%-10s sudo=%-3s reach=%s secrets=%s webterm=%s"
+        print("  %-12s host=%-10s sudo=%-3s secrets=%s webterm=%s"
               % (name, a["host"], policy.sudo_label(a["sudo"]),
-                 policy.reach_summary(a),
                  ",".join(a["secrets"]) or "none",
                  ",".join(a["webterm"]) or "none"))
-        for entry in lan:   # #1186: every LAN host + its ports + its reason
-            print("      reach %s — %s" % (policy.lan_label(entry),
-                                          entry["reason"]))
         for path in a["sudo_commands"] if a["sudo"] == "commands" else ():
             print("      sudo %s" % path)
         if a["github_app"]:   # #1190: the controller-minted repo-scoped token

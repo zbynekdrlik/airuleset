@@ -17,61 +17,19 @@ case "$SUDO_L" in
 esac
 echo "  sudo: none (declared sudo: NO)"
 
-# 3b. Declared reach (#1184) — ssh egress for this uid only to the declared boxes
-NFT=$(command -v nft || true)
-if [ -z "$NFT" ]; then
-    echo "ERROR: nft not found — cannot enforce the declared reach of $ACCOUNT (install the nftables package)" >&2
-    exit 1
-fi
-# the declared LAN hosts must never be an address of THIS host (#1186)
-if ! command -v ip >/dev/null; then
-    echo "ERROR: ip not found — cannot check the declared LAN reach of $ACCOUNT against this host's own addresses" >&2
-    exit 1
-fi
-LOCAL_IPS=" $(ip -4 -o addr show | awk '{split($4, a, "/"); printf "%s ", a[1]}') "
-for IP in 10.77.7.1; do
-    case "$LOCAL_IPS" in
-        *" $IP "*)
-            echo "ERROR: declared reach $IP is an address of this host — an ssh route to it reopens the shared-account escape" >&2
-            exit 1 ;;
-    esac
-done
+# 3b. ssh reach rule removed (#1232) — tear down what an earlier render installed
+REACH_TABLE='airuleset_reach_fohmixer'
+REACH_UNIT="airuleset-reach-$ACCOUNT.service"
 REACH_NFT="/etc/airuleset/reach-$ACCOUNT.nft"
-cat > "$REACH_NFT" << 'REACH_EOF'
-table inet airuleset_reach_fohmixer
-delete table inet airuleset_reach_fohmixer
-table inet airuleset_reach_fohmixer {
-	chain output {
-		type filter hook output priority 0; policy accept;
-		meta skuid "fohmixer" fib daddr type local tcp dport 22 reject with tcp reset
-		# MikroTik router (#1230)
-		meta skuid "fohmixer" ip daddr 10.77.7.1 tcp dport { 22 } accept
-		meta skuid "fohmixer" tcp dport 22 ct state new reject with tcp reset
-	}
-}
-REACH_EOF
-"$NFT" -c -f "$REACH_NFT"
-cat > "/etc/systemd/system/airuleset-reach-$ACCOUNT.service" << UNIT_EOF
-[Unit]
-Description=airuleset #1184 declared ssh reach for $ACCOUNT
-DefaultDependencies=no
-After=nftables.service
-Before=network-pre.target shutdown.target
-Wants=network-pre.target
-Conflicts=shutdown.target
-PartOf=nftables.service
-ReloadPropagatedFrom=nftables.service
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=$NFT -f $REACH_NFT
-ExecReload=$NFT -f $REACH_NFT
-[Install]
-WantedBy=sysinit.target
-UNIT_EOF
-systemctl daemon-reload
-systemctl enable "airuleset-reach-$ACCOUNT.service"
-systemctl restart "airuleset-reach-$ACCOUNT.service"
-"$NFT" list table inet airuleset_reach_fohmixer >/dev/null
-echo "  reach: ssh egress limited to 10.77.7.1"
+if [ -f "/etc/systemd/system/$REACH_UNIT" ]; then
+    systemctl disable --now "$REACH_UNIT"
+    rm -f "/etc/systemd/system/$REACH_UNIT"
+    systemctl daemon-reload
+fi
+NFT=$(command -v nft || true)
+if [ -n "$NFT" ] && "$NFT" list table inet "$REACH_TABLE" >/dev/null 2>&1; then
+    "$NFT" delete table inet "$REACH_TABLE"
+fi
+rm -f "$REACH_NFT"
+echo "  reach: no ssh egress rule (#1232)"
 
