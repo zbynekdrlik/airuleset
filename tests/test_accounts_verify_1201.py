@@ -88,7 +88,8 @@ class _World:
               '  which) echo /opt/rust/rustup/toolchains/1.98.1/bin/rustfmt ;;\n'
               'esac\n')
         _stub(s / "gh", 'echo "$VISIBILITY"\n')
-        _stub(s / "systemctl", 'echo "$FILEDROP"; [ "$FILEDROP" = active ]\n')  # 1237
+        _stub(s / "systemctl", '[ -n "$XDG_RUNTIME_DIR" ] || { echo "Failed to connect to bus"; exit 1; }\n'
+              'echo "$FILEDROP"; [ "$FILEDROP" = active ]\n')  # 1237: #826 bus env
         drop = self.home / ".cloudflared"                   # 1237 go-live marker
         drop.mkdir(parents=True)
         (drop / "airuleset-drop.conf").write_text(
