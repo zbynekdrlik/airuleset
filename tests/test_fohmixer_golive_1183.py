@@ -41,16 +41,16 @@ class FohmixerGoLive(unittest.TestCase):
         self.assertIn("fohmixer", cli_fleet.FULL_AUTHORITY_USERS)
 
 
-class FohmixerHasNoDropLaneYet(unittest.TestCase):
-    """A project account gets no file-drop lane until one is declared, and adding
-    it to dev1 must not turn dev1 into a SHARED drop box: the owner's
+class FohmixerDropLane(unittest.TestCase):
+    """#1237 retired "no lane yet" (it locked the regression): fohmixer has its
+    own lane, and dev1 is not a SHARED drop box: the owner's
     `drop-dev1.newlevel.media` host stays byte-identical."""
 
-    def test_newlevel_dev1_keeps_its_host_and_fohmixer_has_no_lane(self):
+    def test_newlevel_dev1_keeps_its_host_and_fohmixer_has_a_lane(self):
         import cli_drop_gateway as g
         self.assertEqual(g.DROP_LANES[("dev1", "newlevel")].host,
                          "drop-dev1.newlevel.media")
-        self.assertNotIn(("dev1", "fohmixer"), g.DROP_LANES)
+        self.assertIn(("dev1", "fohmixer"), g.DROP_LANES)
 
 
 if __name__ == "__main__":

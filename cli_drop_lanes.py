@@ -86,6 +86,7 @@ _GENERATED_DROP_PORTS = {
     # never reached by the fleet loop — read by _add_controller_local_lane).
     ("airuleset", "airuleset"): 8891,
     ("dev2", "varos"): 8892,              # #1220 project account
+    ("dev1", "fohmixer"): 8893,           # #1237 project account
 }
 
 
