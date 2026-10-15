@@ -37,12 +37,12 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class TestModelTiers(TestCase):
-    def test_six_exact_tiers(self):
-        # #1119: opus5 (claude-opus-5-5) added as the MAIN tier; fable + opus
-        # (4-8) stay as ALLOWED non-default dispatch ids. #1173: sonnet is now
-        # claude-sonnet-5-5 and claude-sonnet-5 stays allowed as sonnet5.
+    def test_five_exact_tiers(self):
+        # #1119: opus5 (claude-opus-5-5) added as the MAIN tier; opus (4-8) stays
+        # an ALLOWED non-default dispatch id; #1248 removed fable (BANNED). #1173:
+        # sonnet is claude-sonnet-5-5 and claude-sonnet-5 stays allowed as sonnet5.
         self.assertEqual(set(airuleset.MODEL_TIERS),
-                         {"opus5", "fable", "opus", "sonnet", "sonnet5", "haiku"})
+                         {"opus5", "opus", "sonnet", "sonnet5", "haiku"})
 
     def test_opus_tier_is_4_8(self):
         # #1119: opus (4-8) is no longer the subagent default but stays an
@@ -64,7 +64,7 @@ class TestBannedModels(TestCase):
 
     def test_allowed_tiers_not_in_banlist(self):
         for m in ("claude-opus-5-5", "claude-opus-4-8", "claude-sonnet-5",
-                  "claude-haiku-4-5", "claude-fable-5-1", "sonnet", "haiku"):
+                  "claude-haiku-4-5", "claude-sonnet-5-5", "sonnet", "haiku"):
             self.assertNotIn(m, airuleset.BANNED_MODELS)
 
 

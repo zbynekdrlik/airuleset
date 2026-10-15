@@ -158,11 +158,11 @@ class TestAuditModelFloats(TestCase):
         sub_recs = [r for r in recs if r["kind"] == "sub"]
         self.assertEqual(len(sub_recs), 1, sub_recs)
 
-    def test_fable_5_1_allowed_on_the_allowlist(self):
-        # #894: claude-fable-5-1 is now the allowed Fable tier (revises #871).
+    def test_allowlisted_tier_not_flagged(self):
+        # #1248: Fable left the allowlist (banned); an allowlisted tier stays silent.
         panes = [("%p", "/e")]
-        find = self._fake_find({"/e": "claude-fable-5-1"})
-        read = lambda p: "claude-fable-5-1"  # noqa: E731
+        find = self._fake_find({"/e": "claude-sonnet-5-5"})
+        read = lambda p: "claude-sonnet-5-5"  # noqa: E731
         recs = cli_model_audit.audit_model_floats(panes, "/proj", find, read,
                                                   subagent_iter=lambda m: [])
         self.assertEqual(len(recs), 1)
@@ -264,10 +264,10 @@ class TestAuditBanListPredicate(TestCase):
         self.assertFalse(
             airuleset.is_banned_model_for_audit("claude-haiku-4-5-20251001"))
 
-    def test_fable_5_0_not_banned_by_audit_predicate(self):
-        # #991: only Opus 5 is banned; a retired-but-not-banned tier (fable 5.0)
-        # is NOT flagged by the audit.
-        self.assertFalse(airuleset.is_banned_model_for_audit("claude-fable-5"))
+    def test_retired_opus_4_6_not_banned_by_audit_predicate(self):
+        # #991: a retired-but-not-banned tier (opus 4.6) is NOT flagged by the
+        # audit (#1248 moved Fable 5.0 onto the ban-list, so it is no example).
+        self.assertFalse(airuleset.is_banned_model_for_audit("claude-opus-4-6"))
 
     def test_sonnet_not_banned_by_audit_predicate(self):
         self.assertFalse(airuleset.is_banned_model_for_audit("claude-sonnet-5"))

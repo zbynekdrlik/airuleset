@@ -33,12 +33,12 @@ class TestManagedMainIsOpus55(TestCase):
     def test_main_tier_id_present(self):
         self.assertIn("claude-opus-5-5", set(airuleset.MODEL_TIERS.values()))
 
-    def test_fable_and_opus48_stay_allowed_ids(self):
-        # No longer the defaults, but still legitimate explicit-dispatch ids.
+    def test_opus48_stays_allowed_fable_banned(self):
+        # Opus 4.8 stays a legitimate explicit-dispatch id; #1248 banned Fable.
         vals = set(airuleset.MODEL_TIERS.values())
-        self.assertIn("claude-fable-5-1", vals)
+        self.assertNotIn("claude-fable-5-1", vals)
         self.assertIn("claude-opus-4-8", vals)
-        self.assertTrue(airuleset.is_allowed_model("claude-fable-5-1"))
+        self.assertFalse(airuleset.is_allowed_model("claude-fable-5-1"))
         self.assertTrue(airuleset.is_allowed_model("claude-opus-4-8"))
 
 

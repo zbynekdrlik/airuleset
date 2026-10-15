@@ -1021,8 +1021,8 @@ class TestReviewFixes1062(unittest.TestCase):
         self.assertFalse(hasattr(airuleset, "_pilot_alias_self_review_model"))
         self.assertIsNone(airuleset._canonical_self_review_model("impl-main"))
         self.assertEqual(
-            airuleset._canonical_self_review_model("claude-fable-5-1"),
-            "claude-fable-5-1")
+            airuleset._canonical_self_review_model("claude-opus-5-5"),
+            "claude-opus-5-5")  # #1248: Fable left the lineup
 
     def test_install_flip_failure_is_warn_not_delivery_failure(self):
         from cli_remote import provision_model_backend_markers as prov

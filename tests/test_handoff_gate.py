@@ -698,8 +698,8 @@ class TestCanonicalSelfReviewModel991(unittest.TestCase):
 
     def test_canonicalizes_tag_and_case(self):
         self.assertEqual(
-            airuleset._canonical_self_review_model("claude-fable-5-1[1m]"),
-            "claude-fable-5-1")
+            airuleset._canonical_self_review_model("claude-sonnet-5-5[1m]"),
+            "claude-sonnet-5-5")
         self.assertEqual(
             airuleset._canonical_self_review_model("Claude-Opus-4-8"),
             "claude-opus-4-8")

@@ -79,8 +79,9 @@ class TestMainPinAndBanUnchanged(TestCase):
         self.assertEqual(airuleset.MANAGED_MODEL, "claude-opus-5-5[1m]")
 
     def test_ban_list_unchanged(self):
-        self.assertEqual(airuleset.BANNED_MODELS,
-                         frozenset({"claude-opus-5", "opus", "opusplan"}))
+        self.assertEqual(airuleset.BANNED_MODELS,  # + Fable since #1248
+                         frozenset({"claude-opus-5", "opus", "opusplan", "fable",
+                                    "claude-fable-5", "claude-fable-5-1"}))
 
 
 class TestNoForcedSubagentEnv(TestCase):
