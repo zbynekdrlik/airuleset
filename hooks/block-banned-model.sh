@@ -5,8 +5,8 @@ set -euo pipefail
 #
 # The working model chooses a subagent's model natively; airuleset bans exactly
 # ONE thing on the dispatch surface: a BANNED model. Ban-list source of truth =
-# airuleset.BANNED_MODELS: claude-opus-5, and the bare opus / opusplan alias
-# that resolves onto Opus 5. Everything else passes. tests/test_block_banned_
+# airuleset.BANNED_MODELS: claude-opus-5 + the bare opus / opusplan alias, and
+# (#1248) every Fable id + the bare fable alias. Everything else passes. tests/test_block_banned_
 # model.py asserts every BANNED_MODELS id is named here.
 #
 # Exit 2 = block (STDERR = reason). Stdin: the JSON payload. Fail-open on no jq.
@@ -36,15 +36,15 @@ _is_banned() {
     v="${v// /}"
     v=$(printf '%s' "$v" | sed -E 's/\[[0-9]+m\]$//; s/^(us|eu|apac)?\.?anthropic\.//')
     core=$(printf '%s' "$v" | sed -E 's/-[0-9]{8}$//')
-    case "$v" in opus|opusplan|claude-opus-5) return 0 ;; esac
-    case "$core" in claude-opus-5) return 0 ;; esac
+    case "$v" in opus|opusplan|claude-opus-5|fable|claude-fable-5|claude-fable-5-1) return 0 ;; esac
+    case "$core" in claude-opus-5|claude-fable|claude-fable-*) return 0 ;; esac
     return 1
 }
 
 _block() {
-    echo "BLOCKED: dispatch model \"$1\" is a BANNED model (Opus 5 off-lineup, #991;" >&2
-    echo "  the bare opus/opusplan alias floats onto it). Pick sonnet/haiku/" >&2
-    echo "  claude-opus-5-5, or omit the param (native default = claude-opus-5-5, #1119)." >&2
+    echo "BLOCKED: dispatch model \"$1\" is a BANNED model (Opus 5 off-lineup, #991, + its" >&2
+    echo "  opus/opusplan alias; Fable, #1248: owner 2026-10-15, worse than Opus 5.5). Pick" >&2
+    echo "  sonnet/haiku/claude-opus-5-5, or omit the param (native default = claude-opus-5-5)." >&2
     exit 2
 }
 

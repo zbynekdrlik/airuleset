@@ -98,8 +98,8 @@ def newest_design_by(comment_bodies):
 
 def _fable_id():
     try:
-        import airuleset
-        return airuleset.MODEL_TIERS["fable"]
+        import model_lineup
+        return model_lineup.FORMER_MAIN_MODEL
     except Exception:
         return "claude-fable-5-1"
 
@@ -110,14 +110,13 @@ def _accepted_main_ids():
     5.5 since #1119) AND the immediately-prior main (Fable 5.1). Fable stays
     accepted through the transition so a design stamped by a still-running Fable
     main dispatches until that session is relaunched onto Opus 5.5 (running
-    sessions keep the model they launched with). Both ids come from the
-    single-source MODEL_TIERS lineup, never a bare hard-coded string. Degrades to
+    sessions keep the model they launched with). Both ids come from model_lineup
+    (MANAGED_MODEL + FORMER_MAIN_MODEL; Fable is BANNED to dispatch, #1248). Degrades to
     the two known ids when airuleset is unimportable (the dependency-light gate
     path)."""
     try:
         import airuleset
-        return {_norm_model(airuleset.MANAGED_MODEL),
-                _norm_model(airuleset.MODEL_TIERS["fable"])}
+        return {_norm_model(airuleset.MANAGED_MODEL), _norm_model(_fable_id())}
     except Exception:
         return {_norm_model("claude-opus-5-5"), _norm_model("claude-fable-5-1")}
 
@@ -191,11 +190,11 @@ def check_issue(number, slug, cwd, fetch=None, fable_id=None):
     the design is ALWAYS authored by the managed main (the implementer never
     designs). #1119: the accepted design model is any managed MAIN-tier id --
     Opus 5.5 (the new main) plus Fable 5.1 (the prior main, accepted through the
-    transition) -- derived from MODEL_TIERS via `_accepted_main_ids`, so the
+    transition) -- derived from model_lineup via `_accepted_main_ids`, so the
     lineup has ONE source and a relaunched main is accepted the day it ships."""
     fetch = fetch or _fetch_comment_bodies
     # #1119: accept any MANAGED MAIN-tier id (Opus 5.5 now, plus Fable 5.1 through
-    # the transition), derived from the single-source MODEL_TIERS lineup. An
+    # the transition), derived from the single-source model_lineup. An
     # injected `fable_id` (tests / an explicit override) is added to the set, so
     # existing injected-id tests keep passing.
     accepted = _accepted_main_ids()

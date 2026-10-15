@@ -73,11 +73,13 @@ from model_lineup import MODEL_TIERS, MANAGED_MODEL, PROJECT_MAIN_MODELS  # noqa
 # on a subagent's model now that Claude Code resolves its subagents' models
 # natively (per-dispatch model -> agent frontmatter -> main; #1173 removed the
 # forced CLAUDE_CODE_SUBAGENT_MODEL default). Every
-# other family alias (sonnet/haiku/fable) and every allowlisted tier id is a
+# other family alias (sonnet/haiku) and every allowlisted tier id is a
 # LEGITIMATE dispatch value. NB: the MAIN-session model is a SEPARATE, stricter
 # surface — it is pinned to MANAGED_MODEL and self-heals against the exact-id
 # allowlist via is_banned_model() below, not this ban-list.
-BANNED_MODELS = frozenset({"claude-opus-5", "opus", "opusplan"})
+# #1248 (owner 2026-10-15): Fable too — every id + the bare `fable` alias.
+BANNED_MODELS = frozenset({"claude-opus-5", "opus", "opusplan",
+                           "fable", "claude-fable-5", "claude-fable-5-1"})
 
 
 def _normalize_model(value):
@@ -89,8 +91,8 @@ def _normalize_model(value):
 
 def is_allowed_model(value):
     """True iff `value` is one of the EXACT allowlisted tier ids
-    (MODEL_TIERS.values()), tolerating the `[1m]` context tag (so the Fable
-    main form `claude-fable-5-1[1m]` is allowed). EXACT membership, never a
+    (MODEL_TIERS.values()), tolerating the `[1m]` context tag (so the main
+    form `claude-opus-5-5[1m]` is allowed). EXACT membership, never a
     substring — a superseded/floating id (`claude-opus-4-6`,
     retired `claude-fable-5`, a bare alias) is never allowed."""
     v = _normalize_model(value)
@@ -150,7 +152,7 @@ def _strip_served_date_suffix(value):
 
 def is_banned_model_for_audit(value):
     """True iff a served model id corresponds to a BANNED model (Opus 5 /
-    the `opus`/`opusplan` alias, `BANNED_MODELS`). AUDIT surface only —
+    the `opus`/`opusplan` alias / any Fable, `BANNED_MODELS`). AUDIT only —
     tolerates the `[Nm]` tag (dropped by `_normalize_model`), a served
     `-YYYYMMDD` date-stamp, and a Bedrock/Vertex provider prefix. An empty
     value is never banned."""
@@ -160,7 +162,7 @@ def is_banned_model_for_audit(value):
     if v in BANNED_MODELS:
         return True
     core = _strip_served_date_suffix(_PROVIDER_PREFIX_RE.sub("", v))
-    return core in BANNED_MODELS
+    return core in BANNED_MODELS or core.startswith("claude-fable")  # #1248 family
 
 # Managed default subagent-spawn ceiling (#288, 2026-08-07): Claude Code's
 # own default `CLAUDE_CODE_MAX_SUBAGENTS_PER_SESSION` is 200, and on CC

@@ -18,7 +18,6 @@ STDLIB ONLY, no imports at all: this module must stay import-cheap.
 # ONLY by an owner-approved edit of this table, never by an alias float.
 MODEL_TIERS = {
     "opus5": "claude-opus-5-5",       # main session model (MANAGED_MODEL) — owner directive 2026-09-23, #1119
-    "fable": "claude-fable-5-1",      # allowed dispatch choice (former main, pre-#1119)
     "opus": "claude-opus-4-8",        # allowed dispatch choice
     "sonnet": "claude-sonnet-5-5",    # allowed dispatch choice — Sonnet 5.5 (owner 2026-09-28, #1173)
     "sonnet5": "claude-sonnet-5",     # allowed dispatch choice (older pinned dispatches, pre-#1173)
@@ -44,6 +43,12 @@ MODEL_TIERS = {
 # block-banned-model.sh in airuleset.py). Full policy history:
 # .claude/rules-reference/model-awareness-history.md.
 MANAGED_MODEL = MODEL_TIERS["opus5"] + "[1m]"
+
+# The former main (pre-#1119), BANNED as a dispatch value since #1248 (owner
+# 2026-10-15: "nechcem aby sa aktualne fable puzival je horsi ako opus 5.5").
+# Kept by name ONLY so gates/designdispatch.py still accepts a design comment
+# the old Fable main stamped; it is NOT a MODEL_TIERS member.
+FORMER_MAIN_MODEL = "claude-fable-5-1"
 
 # Per-PROJECT main model (#1246, owner 14.10.2026: "potrebujem aby pz-server
 # projekt na dev1 mohol mat prepnuty model na opus-4.6 a pracovat"). A project
